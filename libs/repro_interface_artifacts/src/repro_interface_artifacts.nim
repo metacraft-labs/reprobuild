@@ -96,6 +96,8 @@ import repro_core/nix_store_roots
 import repro_domain_types
 import repro_hash
 import repro_project_dsl
+import repro_interface_artifacts/nim_search_path_script
+export nim_search_path_script
 
 # There is deliberately no build-time Nim compiler constant. The Nim that
 # compiles a recipe is the one the bootstrap provisions
@@ -7562,6 +7564,16 @@ proc interfaceNimcacheKeyedCompileFlags*(command: openArray[string];
     if arg notin recipeFlags:
       result.add(arg)
 
+proc isNimPrefixPath*(path, prefix: string): bool =
+  ## Whether `path` is `prefix` or lies under it, as `nim dump` spells both:
+  ## in the host's own separator, so `\` on Windows. Comparing against
+  ## `prefix & "/"` alone matched nothing there, and the standard library's
+  ## directories reached the extraction's command line as recipe search
+  ## paths, in the reverse of the order Nim's own configuration gives them.
+  let root = prefix.strip(leading = false, chars = {DirSep, AltSep})
+  root.len > 0 and path.startsWith(root) and
+    (path.len == root.len or path[root.len] in {DirSep, AltSep})
+
 proc recipeConfigSearchPathFlags*(modulePath: string; cwd = ""): seq[string] =
   ## `--path:` flags for the search paths the recipe's OWN configuration
   ## files add: the `config.nims` / `nim.cfg` of the recipe's directory and
@@ -7613,8 +7625,7 @@ proc recipeConfigSearchPathFlags*(modulePath: string; cwd = ""): seq[string] =
   let prefix = dumped{"prefixdir"}.getStr()
   for node in dumped{"lib_paths"}.getElems():
     let path = node.getStr()
-    if path.len == 0 or
-        (prefix.len > 0 and (path == prefix or path.startsWith(prefix & "/"))):
+    if path.len == 0 or isNimPrefixPath(path, prefix):
       continue
     let flag = "--path:" & path
     if flag notin result:
@@ -7884,8 +7895,6 @@ proc extractInterfaceFromModule*(modulePath, artifactPath, stubPath: string;
      else:
        "writeInterfaceArtifact(paramStr(1), artifact)\n") &
     "writeNimInterfaceStub(paramStr(2), artifact)\n"
-  let runnerName =
-    "extract_runner_" & fnvHex64([runnerSource]) & ".nim"
   # A placeholder until the runner's directory is chosen below; it is the
   # module argument, so the nimcache key leaves it out either way.
   const runnerPlaceholder = "\x00extract-runner\x00"
@@ -7972,6 +7981,32 @@ proc extractInterfaceFromModule*(modulePath, artifactPath, stubPath: string;
     let runnerAt = command.find(runnerPlaceholder)
     command.insert(recipeConfigFlags, runnerAt)
   protectSdkCompilePaths(command, workDir, runnerPlaceholder, packageFlags)
+  # WHAT IS LAUNCHED. `command` stays the compile's identity: the nimcache
+  # key below is computed from it. What runs is `launch.argv`, which leaves
+  # the SDK roots' reassertion pairs to a NimScript beside the runner
+  # (`splitSearchPathReassertion`, which argues the search path comes out the
+  # same). Spelled on the command line they took about 35,000 characters for
+  # an installed SDK, over Windows' 32,767-character process command line
+  # (`CreateProcessW` error 206), and they grow with every library the SDK
+  # adds. The same launch form is used on every platform.
+  #
+  # The compile runner's argument-file transport (`--compilerArgsFile`, see
+  # `runNimcacheCompilerCommandHeld`) would also carry the long form, but
+  # only to a compiler that understands that switch. This compile is often
+  # run by the Nim found on PATH -- a catalog projection on a host whose Nim
+  # is a stock release does exactly that -- so its launch command stays
+  # short enough not to need the transport at all.
+  #
+  # The runner's name is a digest of its source AND of that script. The
+  # runner directory is shared (a slot, or `tempParent`), and Nim pairs a
+  # main module with the `.nims` of the same name, so two configurations
+  # whose scripts differ must not share a runner name; this also means a
+  # runner and its script are published once and never rewritten.
+  let launch = splitSearchPathReassertion(command, runnerPlaceholder)
+  let runnerName =
+    "extract_runner_" &
+      (if launch.script.len > 0: fnvHex64([runnerSource, launch.script])
+       else: fnvHex64([runnerSource])) & ".nim"
   # WHERE THE NIMCACHE AND THE RUNNER LIVE. By default: a slot of the
   # configuration-keyed pool under `interfaceExtractionNimcacheRoot()` (see
   # the block comment above `InterfaceNimcacheSlotCount` for why the key
@@ -8016,19 +8051,22 @@ proc extractInterfaceFromModule*(modulePath, artifactPath, stubPath: string;
   var compileExecution: ProviderCompileExecutionResult
   try:
     let runnerPath = runnerDir / runnerName
-    if not fileExists(extendedPath(runnerPath)):
+    proc publishOnce(path, content: string) =
+      if fileExists(extendedPath(path)):
+        return
       # Publish by rename, so a concurrent extraction that derived the same
       # name (possible in `tempParent`, which no lock covers) never observes
       # a partially written file: the path either does not exist yet or
-      # already holds the whole source.
+      # already holds the whole content. The name is a digest of the
+      # content, so whoever published it published these bytes.
       let (stageFile, stagePath) =
         createTempFile("extract_runner_stage_", ".tmp", runnerDir)
       try:
-        stageFile.write(runnerSource)
+        stageFile.write(content)
       finally:
         close(stageFile)
       try:
-        moveFile(extendedPath(stagePath), extendedPath(runnerPath))
+        moveFile(extendedPath(stagePath), extendedPath(path))
       except OSError:
         # Windows refuses to replace a file another process holds open. That
         # process published byte-identical content, so its copy is ours too.
@@ -8036,15 +8074,22 @@ proc extractInterfaceFromModule*(modulePath, artifactPath, stubPath: string;
           removeFile(extendedPath(stagePath))
         except OSError:
           discard
-        if not fileExists(extendedPath(runnerPath)):
+        if not fileExists(extendedPath(path)):
           raise
+    # The script first: a runner is never compiled without it, whichever
+    # extraction published either file.
+    let searchPathScript = nimSearchPathScriptPath(runnerPath)
+    if launch.script.len > 0:
+      publishOnce(searchPathScript, launch.script)
+    publishOnce(runnerPath, runnerSource)
     let nimcache =
       if perBinary: tempRoot / "nimcache" else: slot.dir / "nimcache"
-    for i in 0 ..< command.len:
-      if command[i] == "--nimcache:":
-        command[i] = "--nimcache:" & nimcache
-      elif command[i] == runnerPlaceholder:
-        command[i] = runnerPath
+    var launchCommand = launch.argv
+    for i in 0 ..< launchCommand.len:
+      if launchCommand[i] == "--nimcache:":
+        launchCommand[i] = "--nimcache:" & nimcache
+      elif launchCommand[i] == runnerPlaceholder:
+        launchCommand[i] = runnerPath
     # `workDir` is the reprobuild library lookup/fingerprint root. Installed
     # Nix packages deliberately point it at their immutable source closure, so
     # it is not a valid compiler working directory: Nim writes relative linker
@@ -8061,9 +8106,18 @@ proc extractInterfaceFromModule*(modulePath, artifactPath, stubPath: string;
     # missed on the second build. The compiler's private cwd is under the
     # edge's scratch, so its reads stay absolute and the edge's record names
     # them relative to the recipe.
-    compileExecution =
-      if perBinary: runInterfaceCompilerCommand(command, cwd = tempRoot)
-      else: runNimcacheCompilerCommandHeld(command, cwd = tempRoot)
+    try:
+      compileExecution =
+        if perBinary: runInterfaceCompilerCommand(launchCommand, cwd = tempRoot)
+        else: runNimcacheCompilerCommandHeld(launchCommand, cwd = tempRoot)
+    except OSError as err:
+      # The reported command lacks the roots the script reasserts; name it,
+      # or a failure that depends on them cannot be reproduced from the
+      # message.
+      if launch.script.len > 0:
+        err.msg.add("\n(the compile's SDK search-path reassertion is in " &
+          searchPathScript & ")")
+      raise
   finally:
     if not perBinary:
       releaseInterfaceNimcacheSlot(slot)

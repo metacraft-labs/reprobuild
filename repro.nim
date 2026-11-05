@@ -421,6 +421,7 @@ const
         ("libs/repro_binary_cache_client/tests/t_a3_p2_cli_substitute.nim", @[Base, Cli]),
         ("libs/repro_binary_cache_client/tests/t_a3_p6_closure_walk_r4.nim", @[Base]),
         ("libs/repro_binary_cache_client/tests/t_a4_p2_sentinel_wait.nim", @[Base]),
+        ("libs/repro_binary_cache_client/tests/t_cache_connect_is_bounded.nim", @[Base]),
         ("libs/repro_binary_cache_client/tests/t_client_cli_prefix_substitute.nim", @[Base, Cli]),
         ("libs/repro_binary_cache_client/tests/t_portable_memo_cache.nim", @[Base]),
         ("libs/repro_binary_cache_client/tests/t_portable_memo_refuses_timestamp_records.nim", @[Base]),
@@ -4212,7 +4213,8 @@ package reprobuild:
             " bash scripts/release/stage_release_sources.sh " &
             quoteShell(sourcesStage)], projectRoot),
           inputs = @["scripts/release/stage_release_sources.sh",
-            "scripts/release/stage_release_catalog.sh", "config.nims",
+            "scripts/release/stage_release_catalog.sh",
+            "scripts/lib/stage_source_root.sh", "config.nims",
             ".github/sibling-repos"],
           outputs = @[sourcesStage, sourcesManifest],
           cacheable = false,

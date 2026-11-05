@@ -176,12 +176,19 @@ proc runEvidenceCheck*(inp: CheckInputs): CheckReport =
     var gen0 = ""
     var bootstrapDpkg = ""
       ## dpkg's last run before the hook existed: not the hook's to follow.
+    var exemptBoots = initHashSet[string]()
+      ## Boots in which the host was bootstrapped or enrolled: its re-assert
+      ## ran before the evidence configuration existed, so its record of
+      ## that boot never had an outbox to go to.
+    var first = true
     for e in mine:
       if e.kind == ekRecord and e.record.detector == "addon-bootstrap":
-        if key.len == 0: key = e.record.field("attestationKey").toLowerAscii()
-        gen0 = e.record.field("generation")
-        bootstrapDpkg = e.record.field("dpkgLastRun")
-        break
+        exemptBoots.incl(e.record.field("bootId"))
+        if first:
+          if key.len == 0: key = e.record.field("attestationKey").toLowerAscii()
+          gen0 = e.record.field("generation")
+          bootstrapDpkg = e.record.field("dpkgLastRun")
+          first = false
     var detections = initCountTable[string]()
     var lastBeat = initTable[string, tuple[ms, interval: int64]]()
     var boots: seq[tuple[id: string; firstMs: int64]]
@@ -195,6 +202,7 @@ proc runEvidenceCheck*(inp: CheckInputs): CheckReport =
     var genDigests = initTable[string, tuple[ledger, profile: string]]()
     var reported = initHashSet[string]()
     var applied = -1'i64
+    var attestedSeen = false
     var appliedMs = 0'i64
     for e in mine:
       if e.kind == ekRefusedVerb:
@@ -227,7 +235,10 @@ proc runEvidenceCheck*(inp: CheckInputs): CheckReport =
       # DET-AO-9: the attestation.
       let stmt = r.field("attestation")
       if stmt.len == 0:
-        if key.len > 0 and det in AttestedDetectors:
+        # Before the host's first attested record (a tick while bootstrap's
+        # generation 0 was still being committed) a record cannot attest;
+        # after it, a record that should and does not is an alert.
+        if key.len > 0 and det in AttestedDetectors and attestedSeen:
           let k = "unattested/" & det
           if k notin reported:
             reported.incl(k)
@@ -244,6 +255,7 @@ proc runEvidenceCheck*(inp: CheckInputs): CheckReport =
       if why.len > 0:
         alert("DET-AO-9", "attestation-invalid", e.seq, why)
         continue
+      attestedSeen = true
       let a = parseStatement(stmt)
       if det == "addon-agent-tick":
         applied = int64(a.sequence)
@@ -332,7 +344,8 @@ proc runEvidenceCheck*(inp: CheckInputs): CheckReport =
                          lastBeat["addon-evidence-ship"].interval
                        else: 0'i64
     for (boot, firstMs) in boots:
-      if boot notin reassertBoots and shipInterval > 0 and
+      if boot notin reassertBoots and boot notin exemptBoots and
+          shipInterval > 0 and
           inp.nowMs - firstMs > shipInterval * int64(factor):
         alert("DET-AO-8", "reassert-silent", 0, "boot " & boot &
           " has no re-assert record")

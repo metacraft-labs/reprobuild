@@ -1235,6 +1235,13 @@ jobs:
           # bundle edge (scripts/build_hcr_ct_mcr_fixture.sh forwards exactly
           # these variables into the recorder's otherwise cleared shell).
           CARGO_NET_GIT_FETCH_WITH_CLI: 'true'
+          # ...and those credentials are the `ci_token_test` installation
+          # token, which expires one hour after the step above minted it. The
+          # build phase reaches `.#test-cross-repo-fixtures` later than that
+          # (66 minutes on run 41363427228, whose bundle fetch was refused as
+          # "Invalid username or token"), so run_tests.sh builds the bundle
+          # first and the collection stages it (see "Step 0" there).
+          REPROBUILD_PREBUILD_CROSS_REPO_FIXTURES: '1'
           GIT_CONFIG_COUNT: '2'
           GIT_CONFIG_KEY_0: url.https://x-access-token:${{ steps.ci_token_test.outputs.token }}@github.com/metacraft-labs/codetracer-native-recorder.insteadOf
           GIT_CONFIG_VALUE_0: https://github.com/metacraft-labs/codetracer-native-recorder

@@ -134,15 +134,12 @@ stage_loader_libs "$GCC_BIN" $LOADER_LIBS_FROM_GCC
 # shellcheck disable=SC2086 -- the lists are deliberately word-split.
 stage_loader_libs "$VC_REDIST_BIN" $LOADER_LIBS_FROM_VC_REDIST
 
-# ---- 3. tree/share/repro/source: reprobuild's own libs -------------
-SOURCE="$PRE/tree/share/repro/source"
-mkdir -p "$SOURCE/libs"
-(cd "$RB/libs" && find . -type f \
-   -not -path './*/tests/*' -not -path './*/*/tests/*' -print) |
-while IFS= read -r f; do
-  mkdir -p "$SOURCE/libs/$(dirname "$f")"
-  cp "$RB/libs/$f" "$SOURCE/libs/$f"
-done
+# ---- 3. tree/share/repro/source: the $REPROBUILD_SOURCE_ROOT tree -
+# The list is shared with the Linux payload and the release archives
+# (scripts/lib/stage_source_root.sh).
+# shellcheck source=scripts/lib/stage_source_root.sh
+. "$(dirname "$0")/lib/stage_source_root.sh"
+stage_source_root "$RB" "$PRE/tree/share/repro/source"
 
 # ---- 4. tree/share/repro/src/<input> -------------------------------
 # shellcheck source=scripts/lib/stage_package_nimble.sh

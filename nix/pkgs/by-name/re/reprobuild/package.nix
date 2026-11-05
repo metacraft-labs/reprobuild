@@ -230,7 +230,7 @@ stdenv.mkDerivation (finalAttrs: {
   # forbids. reprobuild's flake overrides it with the value it parses from the
   # nimble manifest, and `checks.nixpkgs-package-version-sync` fails the build
   # if this literal and the manifest disagree, so the two cannot drift silently.
-  version = "0.2.19";
+  version = "0.2.20";
 
   # The default source: a published commit whose `reprobuild.nimble` carries
   # `version` above and whose `flake.lock` pins the `*Src` defaults above
@@ -241,8 +241,8 @@ stdenv.mkDerivation (finalAttrs: {
   src = fetchFromGitHub {
     owner = "metacraft-labs";
     repo = "reprobuild";
-    rev = "9a08d05e6495fc36e5a31ce4b03795284b5ca366";
-    hash = "sha256-ap/t2Snfi4r861DM3m6PHs/s8RImTrfrOOzpy8CUE8g=";
+    rev = "a650b2034947eba87c809b1a7c9169f489aebd24";
+    hash = "sha256-zHTZG97beP+AU5VSDYEroPZWBRackTvHMZHVCMnO0p4=";
   };
 
   strictDeps = true;

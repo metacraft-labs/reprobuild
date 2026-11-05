@@ -5,6 +5,8 @@ import repro_core
 import repro_hash
 import repro_runquota
 
+import ./m23_gate_refusal
+
 when defined(macosx):
   # Incremental-Test-Runner M7: monitor depfile API now comes from io-mon.
   import io_mon
@@ -190,13 +192,6 @@ proc launched(run: BuildRunResult): int =
     if item.launched:
       inc result
 
-proc requireAll(run: BuildRunResult; statuses: set[ActionStatus]) =
-  for item in run.results:
-    if item.status notin statuses:
-      raise newException(ValueError,
-        item.id & " status=" & $item.status & " exit=" & $item.exitCode &
-        " stderr=" & item.stderr)
-
 proc benchActionPolicy(): DependencyGatheringPolicy =
   # Automatic monitoring is the spec baseline for opaque tools
   # (Reprobuild-Development M17). The removed declared-only /
@@ -237,7 +232,7 @@ proc runBuildWorkload(app, workRoot, cacheRoot: string; count: int):
   let start = epochTime()
   result.result = runBuild(graph(actions), benchmarkEngineConfig(cacheRoot, app))
   result.millis = elapsedMillis(start)
-  requireAll(result.result, {asSucceeded})
+  requireAll("wide", result.result, {asSucceeded})
 
 proc runNoopWorkload(app, workRoot, cacheRoot: string; count: int):
     tuple[result: BuildRunResult; millis: float] =
@@ -253,13 +248,13 @@ proc runNoopWorkload(app, workRoot, cacheRoot: string; count: int):
       weakFingerprint = weak("noop-" & $i),
       dependencyPolicy = benchActionPolicy(),
       governingLockIdentity = lockIdentityOutsideSolvedGraph())
-  discard runBuild(graph(actions), benchmarkEngineConfig(cacheRoot, app))
+  let warmup = runBuild(graph(actions), benchmarkEngineConfig(cacheRoot, app))
   let start = epochTime()
   result.result = runBuild(graph(actions), benchmarkEngineConfig(cacheRoot, app))
   result.millis = elapsedMillis(start)
   # A warm action may be reported as up-to-date or as a cache hit depending on
   # whether the engine verifies the existing output or rematerializes it.
-  requireAll(result.result, {asUpToDate, asCacheHit})
+  requireAll("noop", result.result, {asUpToDate, asCacheHit}, warmup)
 
 proc runCacheRestoreWorkload(app, workRoot, cacheRoot: string; count: int):
     tuple[result: BuildRunResult; millis: float] =
@@ -279,7 +274,7 @@ proc runCacheRestoreWorkload(app, workRoot, cacheRoot: string; count: int):
       commandStatsId = "m23-cache-" & $i,
       dependencyPolicy = benchActionPolicy(),
       governingLockIdentity = lockIdentityOutsideSolvedGraph())
-  discard runBuild(graph(actions), benchmarkEngineConfig(cacheRoot, app))
+  let warmup = runBuild(graph(actions), benchmarkEngineConfig(cacheRoot, app))
   for i in 0 ..< count:
     let outputPath = workRoot / "cache" / ($i & ".txt")
     if fileExists(outputPath):
@@ -288,7 +283,7 @@ proc runCacheRestoreWorkload(app, workRoot, cacheRoot: string; count: int):
   result.result = runBuild(graph(actions), benchmarkEngineConfig(cacheRoot,
     app, rebuildMissingOutputsOnCacheHit = false))
   result.millis = elapsedMillis(start)
-  requireAll(result.result, {asCacheHit})
+  requireAll("cache-restore", result.result, {asCacheHit}, warmup)
 
 proc runMonitorWorkload(repoRoot, app, workRoot: string): MonitorBenchResult =
   when not defined(macosx):

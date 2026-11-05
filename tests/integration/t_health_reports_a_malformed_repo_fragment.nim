@@ -21,11 +21,22 @@
 ##   3. `repro workspace list` exits non-zero naming the FRAGMENT and
 ##      `repo.zork`, and does not frame it as the state file's failure.
 ##
+##   4. In that same report, the rows that sweep the participating repos —
+##      `vcs-hooks`, `push-gateway`, `certificate-policy` and
+##      `sibling-exact-pins` — swept none, so each is a `warn` reading
+##      `skipped: manifest unresolved` with the `manifest` row's remedy, and
+##      never `ok`. CLI/health.md: a row whose swept population is empty
+##      because an upstream row failed reports that reason; "could not
+##      check" is not "checked, nothing wrong". A control run over the
+##      still-valid fragment first shows the same rows are NOT skipped there.
+##
 ## What each assertion guards: legs 1–2 fail when the fragment's error escapes
 ## the enumeration inside health (measured: no stdout at all); leg 3 fails when
 ## the composer re-raises a layer's failure as one of the state file at
 ## `manifest[N]` (measured: the state-file path and `manifest[0]`, no
-## fragment key).
+## fragment key); leg 4 fails when a sweeping row reports `ok` over the zero
+## repos it could enumerate (measured: all four `ok`, `certificate-policy`
+## claiming its answer was "read from each repo's repro.lock").
 ##
 ## No mocks. Skip rule: skip only when `git` is missing from PATH.
 
@@ -79,6 +90,22 @@ proc fragmentToml(name: string): string =
   "schema = \"reprobuild.workspace.repo.v2\"\n\n[repo]\nname = \"" & name &
     "\"\npath = \"" & name & "\"\nremote = \"acme\"\nmainline = \"main\"\n"
 
+const
+  SweepingRows = ["vcs-hooks", "push-gateway", "certificate-policy",
+    "sibling-exact-pins"]
+    ## The rows whose population is the workspace's participating repos.
+  SkippedDetail = "skipped: manifest unresolved"
+    ## The detail every row downstream of an unresolved manifest carries.
+
+proc rowNamed(doc: JsonNode; name: string): JsonNode =
+  ## The single `checks` row called `name`, or nil when there is not exactly
+  ## one.
+  var found: seq[JsonNode]
+  for row in doc["checks"]:
+    if row["name"].getStr() == name:
+      found.add(row)
+  if found.len == 1: found[0] else: nil
+
 suite "repro health reports a malformed repo fragment":
 
   test "t_health_reports_a_malformed_repo_fragment":
@@ -112,6 +139,27 @@ suite "repro health reports a malformed repo fragment":
       require enabled.code == 0
       let fragment = root / "repos" / "core.toml"
       let state = root / ".repro" / "workspace-state.toml"
+
+      # Control for leg 4: over a manifest that resolves, the sweeping rows
+      # swept real repos and are not reported as skipped. Without this, a
+      # build that printed `skipped` unconditionally would pass leg 4.
+      let healthy = runRepro(["health", "--json", "--workspace-root=" & root])
+      checkpoint("control health --json exit=" & $healthy.code &
+        "\nstdout: " & healthy.stdout & "\nstderr: " & healthy.stderr)
+      var healthyDoc: JsonNode
+      try:
+        healthyDoc = parseJson(healthy.stdout)
+      except CatchableError:
+        checkpoint("control health --json printed no JSON document")
+        check false
+      if not healthyDoc.isNil:
+        for name in SweepingRows:
+          let row = rowNamed(healthyDoc, name)
+          check not row.isNil
+          if not row.isNil:
+            checkpoint("control " & name & ": " & $row)
+            check row["detail"].getStr() != SkippedDetail
+
       writeFile(fragment, fragmentToml("core") & "zork = 1\n")
 
       # Leg 1 — `health --json`: a whole report with a failing manifest row.
@@ -137,6 +185,19 @@ suite "repro health reports a malformed repo fragment":
           let detail = manifestRows[0]["detail"].getStr()
           check fragment in detail
           check "repo.zork" in detail
+
+          # Leg 4 — the rows that sweep the participating repos swept none,
+          # and say so instead of reporting a clean result over nothing.
+          let manifestRemedy = manifestRows[0]["remedy"].getStr()
+          check manifestRemedy.len > 0
+          for name in SweepingRows:
+            let row = rowNamed(doc, name)
+            check not row.isNil
+            if not row.isNil:
+              checkpoint(name & ": " & $row)
+              check row["status"].getStr() == "warn"
+              check row["detail"].getStr() == SkippedDetail
+              check row["remedy"].getStr() == manifestRemedy
 
       # Leg 2 — the text report carries the same row.
       let text = runRepro(["health", "--workspace-root=" & root])

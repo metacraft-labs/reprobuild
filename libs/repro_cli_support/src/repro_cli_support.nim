@@ -12587,6 +12587,10 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
     observeRunResult = proc(r: BuildRunResult) =
       warnRunQuotaBypassIfUsed(r, enabled = interfaceEdgeRunQuotaBypass,
         scope = "the project-interface extraction edge"))
+  # N3 (Distribution-And-Packaging §5.3): the recipe's own `uses: nim`
+  # range must admit the installed prefix's compiler, before the provider
+  # compile.
+  requireProjectNimAdmitsInstalledPrefixNim(artifact.projectInterface.toolUses)
   finishStat(buildStats, statsEnabled, "repro interface extract",
     interfaceStart)
   recordInterfaceArtifactWarmStats(buildStats, statsEnabled)
@@ -31055,6 +31059,10 @@ proc prepareBuildGraphInspection(target: string; mode: ToolProvisioningMode;
       effectiveProviderCompileRunQuotaBypass(bypassRunQuotaExplicit),
     fallbackToRunQuotaBypass =
       mode in {tpmPathOnly, tpmScoop, tpmUnspecified})
+  # N3 (Distribution-And-Packaging §5.3): the recipe's own `uses: nim`
+  # range must admit the installed prefix's compiler, before the provider
+  # compile.
+  requireProjectNimAdmitsInstalledPrefixNim(artifact.projectInterface.toolUses)
   result.interfacePath = interfacePath
 
   var effectiveMode = mode
@@ -31345,6 +31353,13 @@ proc refreshRecipeProviderSnapshot(target: string;
     fallbackToRunQuotaBypass =
       mode in {tpmPathOnly, tpmScoop, tpmUnspecified})
 
+  # N3 (Distribution-And-Packaging §5.3): the recipe's own `uses: nim`
+
+  # range must admit the installed prefix's compiler, before the provider
+
+  # compile.
+
+  requireProjectNimAdmitsInstalledPrefixNim(artifact.projectInterface.toolUses)
   var effectiveMode = mode
   if effectiveMode == tpmUnspecified and
       artifact.projectInterface.defaultToolProvisioning.len > 0:
@@ -38807,6 +38822,13 @@ proc runDevelopCommand*(args: openArray[string]): int =
     compileWorkDir, compileScratchDir, projectRootForModule(modulePath),
     stablePublicCliPath(), outDir / "build-engine-cache", developStats)
 
+  # N3 (Distribution-And-Packaging §5.3): the recipe's own `uses: nim`
+
+  # range must admit the installed prefix's compiler, before the provider
+
+  # compile.
+
+  requireProjectNimAdmitsInstalledPrefixNim(artifact.projectInterface.toolUses)
   var effectiveMode = mode
   if effectiveMode == tpmUnspecified and
       artifact.projectInterface.defaultToolProvisioning.len > 0:
@@ -75096,6 +75118,9 @@ type
     initialized: bool
     resolved: ResolvedProject
     resolvedOk: bool
+    manifestRemedy: string
+      ## The ``manifest`` row's remedy when it failed; the rows that sweep the
+      ## participating repos repeat it when they are skipped for that reason.
     setAsideFiles: int
       ## Malformed workspace files ``gatherHealthChecks`` set aside; the rows
       ## then describe the workspace without them, so ``--fix`` must not act.
@@ -75817,6 +75842,18 @@ proc certificatePropagationCheck(workspaceRoot: string;
     remedy: remedies.join("; "),
     fixKind: hfNone, data: data)
 
+proc skippedForUnresolvedManifest(name, manifestRemedy: string):
+    HealthCheck =
+  ## The row a check that sweeps the workspace's participating repos reports
+  ## when the ``manifest`` row failed and the sweep therefore enumerated no
+  ## repository. CLI/health.md: an empty population caused outside the row is
+  ## not ``ok`` — "could not check" must not read as "checked, nothing
+  ## wrong" — so it is a ``warn`` with the same detail as every other row
+  ## downstream of the manifest, and the ``manifest`` row's own remedy.
+  HealthCheck(name: name, status: hsWarn,
+    detail: "skipped: manifest unresolved", remedy: manifestRemedy,
+    fixKind: hfNone)
+
 proc gatherHealthChecksOverSettings(parsed: HealthArgs):
     tuple[checks: seq[HealthCheck]; ctx: HealthContext] =
   ## Diagnose every layer once and return the ordered check list plus the
@@ -76203,34 +76240,37 @@ proc gatherHealthChecksOverSettings(parsed: HealthArgs):
       # remedy the error's own message carries, which the ``remedy:`` row
       # states instead.
       ctx.resolvedOk = false
+      ctx.manifestRemedy = self & " workspace enable <project>   (records " &
+        "the active project set; `" & self & " workspace projects list` " &
+        "names them)"
       checks.add(HealthCheck(
         name: "manifest",
         status: hsFail,
         detail: "manifest unresolved: " & err.diagnosis,
-        remedy: self & " workspace enable <project>   (records the active " &
-          "project set; `" & self & " workspace projects list` names them)",
+        remedy: ctx.manifestRemedy,
         fixKind: hfNone))
     except WorkspaceManifestParseError as err:
       ctx.resolvedOk = false
       # TC-9d: a manifest refused for the retired `[certificates]` table has
       # its own remedy; `workspace sync` would meet the same refusal.
       let legacyTable = err.keyPath == LegacyCertificatesKeyPath
+      ctx.manifestRemedy =
+        if legacyTable: LegacyCertificatesRemedy
+        else: self & " workspace sync"
       checks.add(HealthCheck(
         name: "manifest",
         status: hsFail,
         detail: "manifest unresolved: " & err.msg,
-        remedy:
-          if legacyTable:
-            LegacyCertificatesRemedy
-          else: self & " workspace sync",
+        remedy: ctx.manifestRemedy,
         fixKind: hfNone))
     except CatchableError as err:
       ctx.resolvedOk = false
+      ctx.manifestRemedy = self & " workspace sync"
       checks.add(HealthCheck(
         name: "manifest",
         status: hsFail,
         detail: "manifest unresolved: " & err.msg,
-        remedy: self & " workspace sync",
+        remedy: ctx.manifestRemedy,
         fixKind: hfNone))
 
   # 7. Dependencies / develop-mode siblings — every declared repo must
@@ -76411,6 +76451,14 @@ proc gatherHealthChecksOverSettings(parsed: HealthArgs):
     var okCount = 0
     var reposInspected = 0
     let enumerated = enumerateParticipatingRepos(parsed.workspaceRoot)
+    if enumerated.mode == "workspace" and enumerated.repos.len == 0 and
+        not ctx.resolvedOk:
+      # Nothing to sweep because the manifest did not resolve. "0 wired across
+      # 0 repos" would be an ``ok`` over a population nobody looked at, on the
+      # one row an operator consults to learn whether the hooks are there.
+      checks.add(skippedForUnresolvedManifest("vcs-hooks",
+        ctx.manifestRemedy))
+      break hooksCheck
     # Rendered ONCE for the whole sweep (see
     # ``managedHookContractsOfThisBuild``): five bodies, not five per repo.
     let expectedContracts = managedHookContractsOfThisBuild()
@@ -76722,6 +76770,12 @@ proc gatherHealthChecksOverSettings(parsed: HealthArgs):
   #    CAPABLE of failing, and this is the state it fails on.
   block pushGatewayCheck:
     let obs = observeWorkspaceGateways(parsed.workspaceRoot)
+    if obs.repos.len == 0 and not ctx.resolvedOk:
+      # Zero of every verdict over zero repos, because none was enumerated:
+      # not the pre-rollout state the ``ok`` arm would describe.
+      checks.add(skippedForUnresolvedManifest("push-gateway",
+        ctx.manifestRemedy))
+      break pushGatewayCheck
     # TC-9d: there is no project-wide gate_mode any more. Each repository's
     # push is judged by the policy its own content records, so the mode that
     # would apply to a push NOW is read per repository, from the checked-out
@@ -76861,20 +76915,18 @@ proc gatherHealthChecksOverSettings(parsed: HealthArgs):
         fixKind: hfNone))
 
   # 9b. Exact recipe pins of workspace siblings (Unified-Locking-And-Hooks.md
-  #     §16.6) — INFORMATIONAL. An exact pin is legitimate, so the row is
-  #     never `warn` or `fail` and never moves the exit status; it lists each
-  #     pin with the reason written beside it, or `no reason stated`, so a pin
-  #     added by mistake is visible without blocking anyone. Every
-  #     participating checkout's recipes are read, plus the workspace root's.
+  #     §16.6) — INFORMATIONAL. An exact pin is legitimate, so a pin is never
+  #     a `warn` or `fail` finding and the row never moves the exit status; it
+  #     lists each pin with the reason written beside it, or `no reason
+  #     stated`, so a pin added by mistake is visible without blocking anyone.
+  #     Every participating checkout's recipes are read, plus the workspace
+  #     root's. Without a resolved manifest which repositories are siblings is
+  #     unknown, so the row is the skipped `warn` (which does not move the exit
+  #     status either) rather than an `ok` over a list nobody read.
   block siblingExactPinsCheck:
     if not ctx.resolvedOk:
-      checks.add(HealthCheck(
-        name: "sibling-exact-pins",
-        status: hsOk,
-        detail: "not listed: the workspace manifest did not resolve, so " &
-          "which repositories are siblings is unknown (the manifest row " &
-          "above carries the reason)",
-        remedy: "", fixKind: hfNone))
+      checks.add(skippedForUnresolvedManifest("sibling-exact-pins",
+        ctx.manifestRemedy))
       break siblingExactPinsCheck
     let ws = os.normalizedPath(absolutePath(parsed.workspaceRoot))
     var consumers = @[ws]
@@ -76962,8 +77014,10 @@ proc gatherHealthChecksOverSettings(parsed: HealthArgs):
     if not ctx.initialized:
       break certificatePolicyCheck
     var participating: seq[tuple[name, repoPath: string]]
+    var enumeratedCount = 0
     try:
       for repo in enumerateParticipatingRepos(parsed.workspaceRoot).repos:
+        inc enumeratedCount
         if gitTopLevel(repo.repoPath).len > 0:
           participating.add((name: repo.name, repoPath: repo.repoPath))
     except CatchableError as err:
@@ -76975,6 +77029,12 @@ proc gatherHealthChecksOverSettings(parsed: HealthArgs):
           "would be judged against could not be read",
         remedy: self & " sync --workspace-root=" & parsed.workspaceRoot,
         fixKind: hfNone))
+      break certificatePolicyCheck
+    if enumeratedCount == 0 and not ctx.resolvedOk:
+      # No repro.lock was read, so "read from each repo's repro.lock rather
+      # than assumed" — the ``ok`` arm's provenance claim — would be false.
+      checks.add(skippedForUnresolvedManifest("certificate-policy",
+        ctx.manifestRemedy))
       break certificatePolicyCheck
     # Every repository whose checked-out content records a policy is named
     # with what that policy says for its checked-out branch: the rule (or
@@ -88964,16 +89024,6 @@ proc renderExplainChainJson(chain: ExplainChain): JsonNode =
     parents.add(pj)
   result["parentInfluences"] = parents
 
-proc renderUnsatCoreText(entries: seq[UnsatCoreEntry];
-                         programText: string): string =
-  result = "UNSAT — minimal core:\n"
-  if entries.len == 0:
-    result.add("  (no minimal core produced; falling back to " &
-               "best-effort participants)\n")
-  else:
-    for e in entries:
-      result.add("  - [" & e.kind & "] " & e.source & "\n")
-
 proc renderUnsatCoreJson(entries: seq[UnsatCoreEntry];
                         programText: string): JsonNode =
   result = newJObject()
@@ -89519,6 +89569,10 @@ proc solverInputsFromCompiledProvider(projectDir: string;
           compileWorkDir, scratchDir, projectRootForModule(modulePath),
           publicCliPath, cacheRoot, compileStats, requireStub = false,
           bypassRunQuota = runQuotaBypassedByEnv())
+    # N3 (Distribution-And-Packaging §5.3): the recipe's own `uses: nim`
+    # range must admit the installed prefix's compiler, before the provider
+    # compile.
+    requireProjectNimAdmitsInstalledPrefixNim(artifact.projectInterface.toolUses)
     # Only recipes with solver-bound ``uses:`` produce a non-trivial solve;
     # skip the (more expensive) provider compile otherwise so a plain recipe
     # falls straight back to the sidecar without paying for it.
@@ -91866,7 +91920,7 @@ proc runReproLockCommand*(args: openArray[string]): int =
       if asJson:
         echo $renderUnsatCoreJson(entries, unsatErr.programText)
       else:
-        stdout.write(renderUnsatCoreText(entries, unsatErr.programText))
+        stdout.write(renderUnsatCore(entries, unsatErr.unsatCore))
       return 3  # exit code 3 reserved for "unsat"
     try:
       let chain = explainChosen(sol, variantName, parsed.variants,

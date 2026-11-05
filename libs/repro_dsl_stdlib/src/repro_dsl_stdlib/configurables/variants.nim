@@ -1197,10 +1197,9 @@ proc runUnifiedSolve(applyTo: ConfigContext) =
     if not applyTo.isNil:
       applySolverAssignments(applyTo, sol.variants)
   except EUnsatisfiable:
-    # Bubble the structured unsat error up so callers can render the
-    # diagnostic. M2e will replace this with a richer explanation
-    # path; for M2d we surface the encoder's best-effort
-    # ``unsatCore`` annotation verbatim.
+    # Re-raise the structured unsat error unchanged: its message already
+    # names the minimal core (``solve`` renders it in), and that message is
+    # what reaches the operator when this raise ends a recipe's module init.
     hasUnifiedSolution = false
     raise
 

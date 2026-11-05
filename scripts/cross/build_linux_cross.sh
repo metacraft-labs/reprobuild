@@ -373,6 +373,8 @@ fi
 # One cross build at a time per root (scripts/cross/build_root_lock.sh): the
 # export below and every compile after it read this tree.
 source "$(dirname "${BASH_SOURCE[0]}")/build_root_lock.sh"
+# shellcheck source=scripts/cross/nim_fork_record.sh
+source "$(dirname "${BASH_SOURCE[0]}")/nim_fork_record.sh"
 acquire_build_root_lock "${build_root}" || exit 1
 src_root="${build_root}/source"
 echo "build_linux_cross: exporting the tree to ${src_root}"
@@ -741,7 +743,9 @@ pkg_name="reprobuild-${version}-linux-${archive_arch}"
   echo "arch_flags=${arch_flags}"
   echo "build_mode=${build_mode}"
   echo "c_compiler=${clang_version} (${clang_bin})"
-  echo "nim_fork=flake:nim-fork-src@$(locked_rev_of nim-fork-src)"
+  # The bare revision, and nim/.nim-fork-revision beside the compiler: what
+  # an installed engine checks before it compiles with nim/ (N3).
+  nim_fork_record "${stage}" "$(locked_rev_of nim-fork-src)"
   echo "catalog=reprobuild-packages@${catalog_revision:-unknown} (repro.lock)"
   for rec in "${source_records[@]}"; do echo "source ${rec}"; done
   grep -v '^#' "${sysroot}/.sysroot-info"
