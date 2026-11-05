@@ -2691,15 +2691,32 @@ proc contentHashForActionBlob(blob: CasBlobRef): ContentHash =
 
 proc materializeActionCacheOutputs*(cas: CasStore;
                                     record: ActionResultRecord;
-                                    outputRoot = "") =
+                                    outputRoot = "";
+                                    containerOutputs: openArray[string] = []) =
   ## R11 action-cache restore helper shared by normal hits and hybrid-cutoff
   ## hits. It translates stable RBAR output records into Layer-1
   ## ``CasMaterialization`` requests; ``casMaterialize`` verifies every blob
   ## before touching destinations, so missing/corrupt later blobs cannot leave
   ## earlier outputs partially restored.
+  ##
+  ## A CONTAINER directory output (``containerOutputs``, the action's
+  ## ``containerDirectoryOutputs``) is restored by creating the directory
+  ## when it is absent, NEVER from its stored tree snapshot. The action's
+  ## claim about a container is only that it exists (Incremental-
+  ## Invalidation.md §"Non-regular outputs", "Container directory outputs");
+  ## its other entries are other writers' outputs or files nobody declared,
+  ## and the snapshot holds whatever was in it when the action last ran. A
+  ## snapshot restore replaces the whole directory: it deleted every other
+  ## writer's entry and every user file in a ``preserveTree`` root whose own
+  ## entry was being restored, and filled an ``ensureDir`` directory with
+  ## stale files from an earlier build.
   if record.outputPayloadKind != opkCasBlobs:
     raise newException(CacheIntegrityError,
       "cache record does not contain output payloads")
+  for output in record.outputs:
+    if output.metadata.kind == ffkDirectory and
+        isContainerOutput(outputRoot, output.path, containerOutputs):
+      createDir(extendedPath(actionOutputPath(outputRoot, output.path)))
   # Local-CAS-Hardlink-Materialization M2. Only a DIRECTORY output's payload
   # is needed in memory — ``materializeDirectorySnapshotPayload`` parses a
   # snapshot envelope rather than writing bytes to a path. Every other
@@ -2717,7 +2734,8 @@ proc materializeActionCacheOutputs*(cas: CasStore;
   # and hash-verifies each staged result before committing any rename.
   var payloads = newSeq[seq[byte]](record.outputs.len)
   for i, output in record.outputs:
-    if output.metadata.kind == ffkDirectory:
+    if output.metadata.kind == ffkDirectory and
+        not isContainerOutput(outputRoot, output.path, containerOutputs):
       payloads[i] = cas.casGet(contentHashForActionBlob(output.blob))
   var entries: seq[CasMaterialization] = @[]
   for output in record.outputs:
@@ -2730,7 +2748,8 @@ proc materializeActionCacheOutputs*(cas: CasStore;
       permissions: output.permissions))
   cas.casMaterialize(entries)
   for i, output in record.outputs:
-    if output.metadata.kind != ffkDirectory:
+    if output.metadata.kind != ffkDirectory or
+        isContainerOutput(outputRoot, output.path, containerOutputs):
       continue
     materializeDirectorySnapshotPayload(payloads[i],
       actionOutputPath(outputRoot, output.path), output.permissions)
@@ -20409,7 +20428,8 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     let idx = idToIndex.resultIndex(id)
     if restoreWouldOverwriteMatchingOutputs(action, record):
       return RestoreOutcome(ok: true, detail: "outputs-present")
-    let overwrites = cas.inner.outputOverwrites(record, action.cwd)
+    let containers = action.containerDirectoryOutputs()
+    let overwrites = cas.inner.outputOverwrites(record, action.cwd, containers)
     proc decline(reason: string; inputChanged = ""): RestoreOutcome =
       runResult.results[idx].cacheDecision =
         if inputChanged.len > 0: cdMiss else: cdRejected
@@ -20454,7 +20474,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
       return RestoreOutcome(ok: true, detail: "would-restore")
     let restoreStart = statStart()
     try:
-      cas.materializeActionCacheOutputs(record, action.cwd)
+      cas.materializeActionCacheOutputs(record, action.cwd, containers)
     except CatchableError as err:
       fileMetadataCache.clear()
       finishStat("repro cache restore", restoreStart)

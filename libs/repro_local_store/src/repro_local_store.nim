@@ -3273,6 +3273,20 @@ proc ownedOutputKey(outputRoot, path: string): string =
   when defined(windows):
     result = result.toLowerAscii()
 
+proc isContainerOutput*(outputRoot, path: string;
+                        containerOutputs: openArray[string]): bool =
+  ## Whether the record output `path` is one of the action's CONTAINER
+  ## directory outputs (Incremental-Invalidation.md §"Non-regular outputs",
+  ## "Container directory outputs"), both sides resolved against
+  ## `outputRoot` as `outputStateMismatch` resolves them (`ownedOutputKey`).
+  if containerOutputs.len == 0:
+    return false
+  let key = ownedOutputKey(outputRoot, path)
+  for container in containerOutputs:
+    if ownedOutputKey(outputRoot, container) == key:
+      return true
+  false
+
 proc recordOutputsNotOwnedBy*(record: ActionResultRecord; outputRoot: string;
                               ownedOutputs: openArray[string]): string =
   ## Why `record` does not describe an action whose declared outputs are
@@ -3461,7 +3475,8 @@ type
       ## What the restore puts there, from the RECORD, in the same terms.
 
 proc outputOverwritesImpl(record: ActionResultRecord; outputRoot: string;
-                          fileIdentity: proc (path: string): ContentDigest):
+                          fileIdentity: proc (path: string): ContentDigest;
+                          containerOutputs: openArray[string]):
                           seq[OutputOverwrite] =
   for output in record.outputs:
     if output.metadata.kind == ffkMissing:
@@ -3470,6 +3485,14 @@ proc outputOverwritesImpl(record: ActionResultRecord; outputRoot: string;
     let live = fingerprintMetadata(path)
     if live.kind == ffkMissing:
       continue  # nothing there to overwrite: a plain restore
+    if isContainerOutput(outputRoot, output.path, containerOutputs):
+      # A CONTAINER is restored by making sure the directory exists, never
+      # from its tree (`materializeActionCacheOutputs`): its other entries
+      # are other writers', and nothing of them is written over.
+      if live.kind != ffkDirectory:
+        result.add(OutputOverwrite(path: path, onDisk: $live.kind,
+          restored: "directory"))
+      continue
     if output.linkTarget.len > 0:
       let target = symlinkTargetOf(path)
       if target != output.linkTarget:
@@ -3514,7 +3537,9 @@ proc outputOverwritesImpl(record: ActionResultRecord; outputRoot: string;
         onDisk: "blake3:" & digestHex(current), restored: restored))
 
 proc outputOverwrites*(cas: Store; record: ActionResultRecord;
-                       outputRoot: string): seq[OutputOverwrite] =
+                       outputRoot: string;
+                       containerOutputs: openArray[string] = []):
+                       seq[OutputOverwrite] =
   ## The declared outputs a restore of payload-backed `record` would write
   ## over (`OutputOverwrite`): present at their path, and not what the
   ## record describes. A missing output is not an overwrite, and an output
@@ -3525,16 +3550,18 @@ proc outputOverwrites*(cas: Store; record: ActionResultRecord;
   ## asks it only on the path that is about to restore.
   outputOverwritesImpl(record, outputRoot,
     proc (path: string): ContentDigest =
-      r11CasDigest(casFileHash(path)))
+      r11CasDigest(casFileHash(path)), containerOutputs)
 
 proc outputOverwrites*(cas: LocalCas; record: ActionResultRecord;
-                       outputRoot: string): seq[OutputOverwrite] =
+                       outputRoot: string;
+                       containerOutputs: openArray[string] = []):
+                       seq[OutputOverwrite] =
   ## `outputOverwrites` for the legacy store, which names a blob by its
   ## framed digest (`casFileDigest`).
   outputOverwritesImpl(record, outputRoot,
     proc (path: string): ContentDigest =
       let size = getFileInfo(extendedPath(path), followSymlink = false).size
-      casFileDigest(extendedPath(path), uint64(size)))
+      casFileDigest(extendedPath(path), uint64(size)), containerOutputs)
 
 proc payloadlessOutputsInPlace(record: ActionResultRecord;
                                outputRoot: string;

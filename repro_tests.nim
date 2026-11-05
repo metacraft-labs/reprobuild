@@ -1257,6 +1257,17 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "t_group_libs_repro_build_engine_tests_g01",
     singleReason: ""),
   TestSpec(
+    source: "libs/repro_build_engine/tests/t_container_output_is_not_restored_from_a_snapshot.nim",
+    binary: "build/test-bin/t_container_output_is_not_restored_from_a_snapshot",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "",
+    singleReason: "suite-scope statement runs at every start-up: for mode in [\"in-place, payload-backed\", \"restore mode\"]:"),
+  TestSpec(
     source: "libs/repro_build_engine/tests/t_da1i_evidence_scope.nim",
     binary: "build/test-bin/t_da1i_evidence_scope",
     defines: @[],
