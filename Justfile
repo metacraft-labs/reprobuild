@@ -828,6 +828,14 @@ lint:
     # ignore a real defect, so each shape is probed with an instance that
     # must be caught and each allowance with one that must not be.
     python3 ./scripts/check_version_literals.py --self-test 2>&1 | tee -a test-logs/lint.log
+    # A gitRunPlain result's `.output` is git's stdout and stderr merged, so a
+    # caller that parses it reads a stderr warning (`unable to find all
+    # commit-graph files`, printed while git still exits 0 with the right
+    # answer) as part of the answer. Parse sites read through
+    # gitRunPlainQuery instead; this refuses a new parse of the merged
+    # stream, and its self-test proves each refused shape is still caught.
+    python3 ./scripts/check_git_run_plain_parses.py 2>&1 | tee -a test-logs/lint.log
+    python3 ./scripts/check_git_run_plain_parses.py --self-test 2>&1 | tee -a test-logs/lint.log
     # package.nix's version literal against reprobuild.nimble. The flake check
     # nixpkgs-package-version-sync runs the same script, but `agents` has no CI
     # and nobody runs the whole flake check per commit: twice a version moved
