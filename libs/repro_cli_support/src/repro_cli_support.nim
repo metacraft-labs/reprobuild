@@ -68611,6 +68611,18 @@ proc fragmentDeclaredName(text: string): string =
       if unquoted.len > 0:
         return unquoted
 
+proc canonicalManifestPath(path: string): string =
+  ## ``path`` made absolute and normalised, without a trailing separator, so
+  ## that ``team/`` and ``team`` (or a ``--workspace-root`` spelled with a
+  ## trailing ``/``) compare and prefix-match as the same directory.
+  result = os.normalizedPath(absolutePath(path))
+  while result.len > 1 and result.endsWith(DirSep):
+    result.setLen(result.len - 1)
+
+proc isWithin(path, root: string): bool =
+  ## Whether canonical ``path`` lies strictly inside canonical ``root``.
+  path.startsWith(root & DirSep)
+
 proc declaredFragments(manifestRoots: openArray[string]): DeclaredFragments =
   ## Every repo name a ``repos/*.toml`` fragment under any of
   ## ``manifestRoots`` declares, mapped to the fragments that declare it and
@@ -68620,7 +68632,7 @@ proc declaredFragments(manifestRoots: openArray[string]): DeclaredFragments =
   ## is listed in ``unreadable`` rather than guessed at.
   var seenDirs = initHashSet[string]()
   for root in manifestRoots:
-    let dir = absolutePath(root / reposDirName)
+    let dir = canonicalManifestPath(root / reposDirName)
     if dir in seenDirs or not dirExists(dir):
       continue
     seenDirs.incl(dir)
@@ -68685,27 +68697,27 @@ proc workspaceRelativeDir(dir, workspaceRoot: string): string =
   ## slashes and a trailing ``/``: empty for the workspace root itself,
   ## relative below it, absolute elsewhere. Every path a remediation names
   ## starts from here, so the operator never has to guess the base.
-  let absDir = absolutePath(dir)
-  let absWorkspace = absolutePath(workspaceRoot)
+  let absDir = canonicalManifestPath(dir)
+  let absWorkspace = canonicalManifestPath(workspaceRoot)
   if sameFilesystemPath(absDir, absWorkspace):
     return ""
-  if absDir.startsWith(absWorkspace & DirSep):
+  if absDir.isWithin(absWorkspace):
     return relativePath(absDir, absWorkspace).replace(DirSep, '/') & "/"
   absDir.replace(DirSep, '/') & "/"
 
 proc manifestLayerOf(path: string; manifestRoots: openArray[string]):
     tuple[root, rel: string] =
   ## The most specific of ``manifestRoots`` holding ``path``, and ``path``
-  ## relative to it with forward slashes; ``("", path)`` when none does. A
-  ## layer may sit inside another root (a ``url`` layer is fetched under the
-  ## workspace's ``.repro/``), so the longest matching root is the layer that
-  ## owns the file.
-  let absFile = absolutePath(path)
-  result = ("", path)
+  ## relative to it with forward slashes; ``("", <canonical path>)`` when
+  ## none does. A layer may sit inside another root (a ``url`` layer is
+  ## fetched under the workspace's ``.repro/``), so the longest matching root
+  ## is the layer that owns the file.
+  let absFile = canonicalManifestPath(path)
+  result = ("", absFile)
   var bestLen = -1
   for root in manifestRoots:
-    let absRoot = absolutePath(root)
-    if absFile.startsWith(absRoot & DirSep) and absRoot.len > bestLen:
+    let absRoot = canonicalManifestPath(root)
+    if absFile.isWithin(absRoot) and absRoot.len > bestLen:
       bestLen = absRoot.len
       result = (root, relativePath(absFile, absRoot).replace(DirSep, '/'))
 
@@ -68738,14 +68750,21 @@ proc layerMembershipTarget(site: FragmentSite; manifestRel: string;
   ## Where ``site``'s ``member_repos`` entry goes, as a path from
   ## ``workspaceRoot``: ``manifestRel`` inside the manifest layer holding the
   ## fragment, since a layer resolves members against its own ``repos/``
-  ## only. A file that does not exist there yet is flagged for creation.
-  result = workspaceRelativeDir(site.layerRoot, workspaceRoot) & manifestRel
-  if not fileExists(site.layerRoot / manifestRel):
+  ## only. A file that does not exist there yet is flagged for creation. An
+  ## absolute ``manifestRel`` (a project file no known layer holds) is named
+  ## as it is, never re-rooted under a layer.
+  let targetFile =
+    if isAbsolute(manifestRel): manifestRel
+    else: canonicalManifestPath(site.layerRoot) / manifestRel
+  result =
+    if isAbsolute(manifestRel): manifestRel.replace(DirSep, '/')
+    else: workspaceRelativeDir(site.layerRoot, workspaceRoot) & manifestRel
+  if not fileExists(targetFile):
     result.add(" (create it, with any [[remote]] the fragment uses: the " &
       "manifest layer holding the fragment resolves members against its " &
       "own repos/ only)")
-  elif not sameFilesystemPath(absolutePath(site.layerRoot),
-      absolutePath(membershipRoot)):
+  elif not sameFilesystemPath(canonicalManifestPath(site.layerRoot),
+      canonicalManifestPath(membershipRoot)):
     result.add(" (in the manifest layer holding the fragment)")
 
 proc membershipPushScope(identity: GitToolIdentity; resolved: ResolvedProject;

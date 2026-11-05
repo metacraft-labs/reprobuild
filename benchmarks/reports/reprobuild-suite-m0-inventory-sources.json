@@ -45518,8 +45518,8 @@
       "owner": "tests/integration",
       "requiresReproBinary": true,
       "source": "tests/integration/t_pre_push_refuses_an_undeclared_depends_edge.nim",
-      "sourceSuiteCount": 3,
-      "staticCaseCount": 9,
+      "sourceSuiteCount": 4,
+      "staticCaseCount": 11,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

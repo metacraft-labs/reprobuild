@@ -174,13 +174,15 @@ proc setDepends(fx: Fixture; entries: string) =
   writeFile(fx.workspaceRoot / "repos" / "lib-a.toml",
     libAFragmentTemplate % [entries])
 
-proc runGate(fx: Fixture): tuple[code: int; report: JsonNode] =
+proc runGate(fx: Fixture; workspaceRootArg = ""):
+    tuple[code: int; report: JsonNode] =
   let refsFile = fx.scratch / "pushed-refs.txt"
   writeFile(refsFile, "refs/heads/main " & fx.headSha &
     " refs/heads/main 0000000000000000000000000000000000000000\n")
   let res = runShell(shellCommand(@[
     fx.reproBin, "check", "--mode=pre-push",
-    "--workspace-root=" & fx.workspaceRoot,
+    "--workspace-root=" &
+      (if workspaceRootArg.len > 0: workspaceRootArg else: fx.workspaceRoot),
     "--current-repo=" & fx.workspaceRoot / "lib-a",
     "--pushed-refs=" & refsFile,
     "--json",
@@ -277,10 +279,10 @@ suite "pre-push refuses a `depends` edge naming no declared repo":
       check remediations.join("\n").contains("lib-a -> lib-bee")
       check remediations.join("\n").contains("lib-c-fork")
 
-proc gapRemediation(fx: Fixture): string =
+proc gapRemediation(fx: Fixture; workspaceRootArg = ""): string =
   ## The single `dependency-not-declared` refusal's remediation, or "" (with
   ## a failed check) when the gate did not refuse exactly once.
-  let res = runGate(fx)
+  let res = runGate(fx, workspaceRootArg)
   check res.code == 2
   check res.report["failures"].len == 1
   if res.report["failures"].len != 1:
@@ -423,7 +425,7 @@ suite "a depends edge outside the project names the right membership fix":
       for f in followed.report["failures"]:
         check f["property"].getStr() != "dependency-not-declared"
 
-proc moveManifestsToNestedLayer(fx: Fixture): string =
+proc moveManifestsToNestedLayer(fx: Fixture; layerSpelling = ""): string =
   ## Move the workspace's `projects/` and `repos/` into a `local_path`
   ## manifest layer INSIDE the workspace root (`<ws>/team`), leaving empty
   ## root directories, and return the layer directory.
@@ -435,7 +437,8 @@ proc moveManifestsToNestedLayer(fx: Fixture): string =
   createDir(fx.workspaceRoot / "repos")
   writeFile(fx.workspaceRoot / "repro-workspace.local.toml",
     "schema = \"reprobuild.workspace.settings-local.v1\"\n\n" &
-    "[[manifest]]\nlocal_path = \"" & result & "\"\n" &
+    "[[manifest]]\nlocal_path = \"" &
+      (if layerSpelling.len > 0: layerSpelling else: result) & "\"\n" &
     "visibility = \"public\"\n")
 
 proc addMemberRepo(projectFile, basename: string) =
@@ -445,8 +448,8 @@ proc addMemberRepo(projectFile, basename: string) =
     "schema = \"reprobuild.workspace.project.v1\"\n" &
       "member_repos = [\"" & basename & "\"]\n"))
 
-proc checkNoDanglingRefusal(fx: Fixture) =
-  let followed = runGate(fx)
+proc checkNoDanglingRefusal(fx: Fixture; workspaceRootArg = "") =
+  let followed = runGate(fx, workspaceRootArg)
   for f in followed.report["failures"]:
     check f["property"].getStr() != "dependency-not-declared"
 
@@ -493,3 +496,39 @@ suite "a depends edge into a nested manifest layer names the layer's file":
         "[[remote]]\nname = \"lib-b-origin\"\n" &
         "fetch = \"" & fileUrl(fx.scratch / "origin-lib-b.git") & "\"\n")
       fx.checkNoDanglingRefusal()
+
+suite "a trailing separator does not change the membership target":
+
+  test "t_pre_push_names_a_trailing_slash_layer_once":
+    let gitBin = findExe("git")
+    if gitBin.len == 0:
+      skip("git not on PATH; this case needs a repository")
+    else:
+      let fx = buildFixture(gitBin)
+      defer: removeDir(fx.scratch)
+      fx.setDepends("\"lib-b\", \"lib-c\"")
+      # `local_path = "<ws>/team/"`: the same layer as `<ws>/team`.
+      let layer = moveManifestsToNestedLayer(fx,
+        fx.workspaceRoot / "team" & "/")
+      let remediation = gapRemediation(fx)
+      check remediation.contains("`member_repos` in team/projects/lib-a.toml")
+      check not remediation.contains("team/team/")
+      check not remediation.contains("create it")
+      addMemberRepo(layer / "projects" / "lib-a.toml", "lib-c-fork")
+      fx.checkNoDanglingRefusal()
+
+  test "t_pre_push_reads_a_trailing_slash_workspace_root":
+    let gitBin = findExe("git")
+    if gitBin.len == 0:
+      skip("git not on PATH; this case needs a repository")
+    else:
+      let fx = buildFixture(gitBin)
+      defer: removeDir(fx.scratch)
+      fx.setDepends("\"lib-b\", \"lib-c\"")
+      let spelled = fx.workspaceRoot & "/"
+      let remediation = gapRemediation(fx, spelled)
+      # `projects/lib-a.toml` exists, so there is nothing to create.
+      check remediation.contains("`member_repos` in projects/lib-a.toml")
+      check not remediation.contains("create it")
+      addMemberRepo(fx.workspaceRoot / "projects" / "lib-a.toml", "lib-c-fork")
+      fx.checkNoDanglingRefusal(spelled)
