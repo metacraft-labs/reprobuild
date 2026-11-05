@@ -68434,24 +68434,19 @@ proc undeclaredDependEdges(repos: seq[ResolvedRepo];
       if dep notin seen:
         pending.add(dep)
 
-proc undeclaredDependsInClosure(repos: seq[ResolvedRepo];
-    pushedRepoName: string): seq[string] =
-  ## Every ``depends`` entry reachable from ``pushedRepoName`` that names no
-  ## repo the workspace declares, in first-seen order and de-duplicated.
-  ##
-  ## Such an edge used to be dropped in silence. The effect was that the gate
-  ## verified a SMALLER set than the manifests declare while still reporting
-  ## success: one typo in a ``depends`` list removed a real dependency from the
-  ## cleanliness / publication / lock stages, and nothing said so. That is the
-  ## same shape as a check that passes having verified nothing, just at the
-  ## granularity of one edge — so the gate refuses on it and names the edge.
-  ##
-  ## The resolver already refuses a fragment that references an undeclared
-  ## remote for exactly this reason ("turning a typo into a silent success is a
-  ## worse failure mode than the transitional convenience is worth"); this is
-  ## the same rule applied to the other cross-reference a fragment can make.
-  for edge in undeclaredDependEdges(repos, pushedRepoName):
-    result.add(edge.owner & " -> " & edge.dep)
+type
+  DanglingDependEdges = object
+    ## The closure's dangling ``depends`` edges, split by cause, each as an
+    ## ``owner -> dep`` label in first-seen order.
+    undeclared: seq[string]
+      ## No ``repos/*.toml`` fragment in the workspace declares the name:
+      ## a typo, or a fragment nobody has written yet.
+    outsideProject: seq[string]
+      ## A fragment declares the name, but the project being checked does
+      ## not include it.
+    outsideFragments: seq[string]
+      ## The basenames of the fragments behind ``outsideProject``, which is
+      ## what a ``member_repos`` entry names.
 
 proc fragmentDeclaredName(text: string): string =
   ## The repo NAME a ``repos/<file>.toml`` fragment declares (its
@@ -68465,6 +68460,62 @@ proc fragmentDeclaredName(text: string): string =
       let unquoted = value.strip(chars = {'"', '\''})
       if unquoted.len > 0:
         return unquoted
+
+proc declaredFragmentBasenames(membershipRoot: string):
+    Table[string, seq[string]] =
+  ## Every repo name a ``repos/*.toml`` fragment under ``membershipRoot``
+  ## declares, mapped to the basenames of the fragments that declare it
+  ## (sorted). Two fragments may share one name, and a basename need not
+  ## equal the name it declares.
+  let dir = membershipRoot / reposDirName
+  if not dirExists(dir):
+    return
+  var paths: seq[string]
+  for kind, path in walkDir(dir):
+    if kind in {pcFile, pcLinkToFile} and path.endsWith(".toml") and
+        fileExists(path):
+      paths.add(path)
+  paths.sort()
+  for path in paths:
+    let name = fragmentDeclaredName(readFile(path))
+    if name.len > 0:
+      result.mgetOrPut(name, @[]).add(path.extractFilename.changeFileExt(""))
+
+proc danglingDependsInClosure(repos: seq[ResolvedRepo];
+    pushedRepoName, membershipRoot: string): DanglingDependEdges =
+  ## Every ``depends`` entry reachable from ``pushedRepoName`` that names no
+  ## repo in the resolved project, classified by whether the workspace
+  ## declares that name at all.
+  ##
+  ## Such an edge used to be dropped in silence. The effect was that the gate
+  ## verified a SMALLER set than the manifests declare while still reporting
+  ## success: one typo in a ``depends`` list removed a real dependency from the
+  ## cleanliness / publication / lock stages, and nothing said so. That is the
+  ## same shape as a check that passes having verified nothing, just at the
+  ## granularity of one edge — so the gate refuses on it and names the edge.
+  ##
+  ## The resolver already refuses a fragment that references an undeclared
+  ## remote for exactly this reason ("turning a typo into a silent success is a
+  ## worse failure mode than the transitional convenience is worth"); this is
+  ## the same rule applied to the other cross-reference a fragment can make.
+  ##
+  ## The two causes need different fixes. A name no fragment declares is fixed
+  ## in the ``depends`` list or by writing the fragment. A name a fragment
+  ## does declare is fixed in the project's membership, and telling the
+  ## operator to "declare" it would name a step that is already done.
+  let edges = undeclaredDependEdges(repos, pushedRepoName)
+  if edges.len == 0:
+    return
+  let declared = declaredFragmentBasenames(membershipRoot)
+  for edge in edges:
+    let label = edge.owner & " -> " & edge.dep
+    if edge.dep in declared:
+      result.outsideProject.add(label)
+      for basename in declared[edge.dep]:
+        if basename notin result.outsideFragments:
+          result.outsideFragments.add(basename)
+    else:
+      result.undeclared.add(label)
 
 proc membershipPushScope(identity: GitToolIdentity; resolved: ResolvedProject;
     membershipRoot: string; ranges: openArray[PushedCommitRange]):
@@ -69434,22 +69485,48 @@ proc executeCheckPrePush(parsed: CheckArgs;
     membershipScope = some(membership.names)
   let scope = prePushScope(resolved, currentRepoName, currentManifestLayer,
     membershipScope)
-  # A `depends` edge that names no declared repo silently SHRANK the scope the
-  # stages below walk. Refuse instead: the gate must not report success over a
-  # dependency it could not resolve, and the offending edge is named so the
-  # manifest can be fixed rather than guessed at.
-  let danglingDepends = undeclaredDependsInClosure(resolved.repos,
-    currentRepoName)
-  if danglingDepends.len > 0:
+  # A `depends` edge that names no repo in the project silently SHRANK the
+  # scope the stages below walk. Refuse instead: the gate must not report
+  # success over a dependency it could not resolve. The offending edge is
+  # named, with the fix for its cause, so the manifest can be fixed rather
+  # than guessed at.
+  let dangling = danglingDependsInClosure(resolved.repos, currentRepoName,
+    manifestsRoot(parsed.workspaceRoot))
+  if dangling.undeclared.len > 0:
     result.failures.add(CheckFailure(
       repo: currentRepoPath,
       property: "dependency-not-declared",
-      remediation: "declare the missing repo in this workspace's manifests " &
-        "(or fix the name) — the gate cannot verify a dependency the " &
-        "workspace does not declare; edges: " & danglingDepends.join(", "),
-      evidence: $danglingDepends.len &
-        " `depends` edge(s) in the pushed repo's closure name a repo this " &
-        "workspace does not declare: " & danglingDepends.join(", ")))
+      remediation: "fix the name in the `depends` list, or add a " &
+        "`repos/<name>.toml` fragment that declares it — the gate cannot " &
+        "verify a dependency the workspace does not declare; edges: " &
+        dangling.undeclared.join(", "),
+      evidence: $dangling.undeclared.len &
+        " `depends` edge(s) in the pushed repo's closure name a repo no " &
+        "fragment in this workspace declares: " &
+        dangling.undeclared.join(", ")))
+  if dangling.outsideProject.len > 0:
+    let projectManifest =
+      if resolved.projectFile.len > 0:
+        "projects/" & resolved.projectFile.extractFilename
+      else:
+        "the project manifest"
+    var entries: seq[string]
+    for basename in dangling.outsideFragments:
+      entries.add("\"" & basename & "\"")
+    result.failures.add(CheckFailure(
+      repo: currentRepoPath,
+      property: "dependency-not-declared",
+      remediation: "add " & entries.join(", ") & " to `member_repos` in " &
+        projectManifest & ", or activate a project that includes it — " &
+        "the workspace declares the repo but the project being pushed " &
+        "does not include it, so the gate cannot check it; edges: " &
+        dangling.outsideProject.join(", "),
+      evidence: $dangling.outsideProject.len &
+        " `depends` edge(s) in the pushed repo's closure name a repo the " &
+        "workspace declares (" & dangling.outsideFragments.join(", ") &
+        ") but project '" & resolved.projectName &
+        "' does not include: " & dangling.outsideProject.join(", ")))
+  if dangling.undeclared.len > 0 or dangling.outsideProject.len > 0:
     result.exitCode = 2
     return
   let scopeClosure = scope.names
