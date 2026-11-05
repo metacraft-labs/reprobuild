@@ -46,6 +46,10 @@ suite "TC-8d — issuance leaves the user's index untouched":
       skip("git or ssh-keygen not on PATH; this test signs a certificate " &
         "in real repositories")
     else:
+      # Inherited as 0 (some agent harnesses export it), this would keep the
+      # positive control's plain `git status` from rewriting the index, and
+      # the case's main assertions would pass whatever issuance did.
+      delEnv("GIT_OPTIONAL_LOCKS")
       var fx = setupCertifyFixture("tc8d-index")
       defer: removeDir(fx.sib.scratch)
       let app = fx.sib.app
