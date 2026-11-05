@@ -161,6 +161,14 @@ proc resolveServiceAccount*(user, group, supplementaryGroups: string;
   ## The account ``unitName`` runs as with these settings (their values
   ## after systemd's last-assignment-wins, unexpanded). See the module
   ## header for the rules.
+  when AccountMutation == "account-as-written":
+    # FALSIFYING MUTATION: round 3's reading. Under DynamicUser=yes the
+    # account is not looked at at all -- a dynamic user and a dynamic group,
+    # whatever User= and Group= say -- and otherwise only "", "root" and "0"
+    # are root (below).
+    if dynamicUser:
+      return ResolvedAccount(user: user, uid: DynamicId, dynamicUser: true,
+        group: group, primaryGid: DynamicId, dynamicGroup: true)
   var ok: bool
   var u = expandSpecifiers(user.strip(), unitName, ok)
   if not ok:
