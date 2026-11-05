@@ -113,10 +113,20 @@ proc evidenceFlags*(s: GateSink): string =
   " --heartbeat-interval " & $GateHeartbeatSec &
   " --poll-interval " & $GatePollSec
 
+proc ensureNftables*(g: Guest) =
+  ## The egress observer needs the base's ``nft``; Debian's genericcloud
+  ## images do not ship it (Ubuntu's do), and bootstrap never installs a
+  ## package. As an operator would before bootstrapping an agent host with
+  ## a sink, the fixture installs the distribution's ``nftables`` first.
+  discard g.exec("command -v nft >/dev/null || DEBIAN_FRONTEND=noninteractive " &
+    "apt-get install -y -q nftables >/dev/null", timeoutSec = 1800)
+
 proc provideSinkCa*(g: Guest; s: GateSink) =
-  ## Before the preflight: the sink's CA where the flags name it.
+  ## Before the preflight: the sink's CA where the flags name it, and the
+  ## base's nftables for the egress observer.
   discard g.run("mkdir -p /root/addon")
   g.copyTo(s.caPath, GuestSinkCa)
+  g.ensureNftables()
 
 proc enrol*(g: Guest; s: GateSink): string =
   ## The operator's step after bootstrap: the guest's credential certificate

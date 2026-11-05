@@ -461,6 +461,13 @@ proc expectedRecords*(l: Ledger): seq[ExpectedRecord] =
     of lcUnit:
       result.add(ExpectedRecord(component: fcEtc, key: e.path,
         value: fileValue(e), baseValue: e.replaced))
+      # A slice (the egress observer's) is a runtime unit type the
+      # fingerprint does not record (``VolatileUnitSuffixes``): its file is
+      # the whole of what it accounts for.
+      var volatile = false
+      for suffix in VolatileUnitSuffixes:
+        if e.unit.endsWith(suffix): volatile = true
+      if volatile: continue
       # Unit states are what systemd reported after the apply, when the
       # apply recorded them; a ledger written without that observation
       # (generation 0 of an older binary) derives them from the flags.
@@ -534,6 +541,12 @@ proc expectedRecords*(l: Ledger): seq[ExpectedRecord] =
     of lcNftTable:
       result.add(ExpectedRecord(component: fcNftables, key: e.path,
         value: "table"))
+      # The table's ``log`` statement binds the kernel's packet loggers
+      # (``nf_log_syslog``) to their families: ``net.netfilter.nf_log.<n>``
+      # change from NONE when the table is loaded, and the binding (a module
+      # load) is not undone when it is deleted.
+      result.add(ExpectedRecord(component: fcSysctl,
+        key: "net.netfilter.nf_log.*", value: "*", coupled: true))
     of lcKey, lcStorePrefix, lcKept:
       discard  # under /var/lib/repro and /repro: not fingerprinted
 
