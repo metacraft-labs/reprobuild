@@ -310,21 +310,18 @@ proc reprobuildWindowsOmittedVariables*(): seq[string] =
   ##   same reason the cache package's whole list was (see
   ##   ``reprobuildCacheWrapperValues``).
   ##
-  ## WHAT THIS DOES **NOT** SETTLE is where a packaged Windows compile
-  ## would find the VENDORED headers instead. ``config.nims``'s
-  ## vendored branch resolves them against ``reproRepoRoot``, which is
-  ## the directory of the ``config.nims`` being evaluated. The RELEASE
-  ## ARCHIVES ship one at ``share/repro/source/config.nims`` since
-  ## ``38a21947`` (``scripts/release/stage_release_sources.sh``), and so
-  ## do the ``.deb``/``.rpm`` that ``scripts/release/repro-build-packages.sh``
-  ## builds from them. The packages THIS layer describes do not: their
-  ## ``share/repro/source`` is staged by ``scripts/stage_payload_linux.sh``
-  ## and ``scripts/stage_payload_windows.sh``, which copy ``libs/`` and
-  ## nothing beside it. So M1's gate item 4 — a packaged ``repro build``
-  ## — is NOT discharged on Windows by this change and is recorded as a
-  ## residual; the same missing file also makes a profile compile from
-  ## these packages refuse, on every target, in
-  ## ``repro_profile_compile.requireReprobuildSources``. What the change
+  ## A packaged Windows compile therefore takes ``config.nims``'s
+  ## VENDORED branch, which resolves the headers against
+  ## ``reproRepoRoot``, the directory of the ``config.nims`` being
+  ## evaluated. Every package ships one at
+  ## ``share/repro/source/config.nims``: the packages this layer
+  ## describes stage their source root through
+  ## ``scripts/lib/stage_source_root.sh``, the list the release archives'
+  ## stager reads too, so the branch finds
+  ## ``libs/blake3/src/blake3/vendor`` and ``libs/xxh3/src/xxh3/vendor``
+  ## inside that same root. WHAT THIS DOES **NOT** SETTLE is that a
+  ## packaged Windows ``repro build`` then gets through its compile: no
+  ## packaged Windows build has been measured doing so. What this list
   ## does is stop the package from shipping six values that name
   ## nothing, which is the defect the payload work closed for Linux.
   @["BLAKE3_PREFIX", "REPROBUILD_USE_SYSTEM_HASH_LIBS",

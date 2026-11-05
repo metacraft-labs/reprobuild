@@ -416,6 +416,7 @@ libs/repro_dsl_stdlib/tests/t_packaging_runtime_contract_once.nim	nim	11
 libs/repro_dsl_stdlib/tests/t_packaging_scoop_manifest.nim	nim	9
 libs/repro_dsl_stdlib/tests/t_packaging_service_exec_args.nim	nim	4
 libs/repro_dsl_stdlib/tests/t_packaging_shipped_payload.nim	nim	21
+libs/repro_dsl_stdlib/tests/t_packaging_source_root_stagers.nim	nim	3
 libs/repro_dsl_stdlib/tests/t_packaging_third_party_producer.nim	nim	6
 libs/repro_dsl_stdlib/tests/t_packaging_windows_loader_closure.nim	nim	8
 libs/repro_dsl_stdlib/tests/t_pinned_fetch.nim	nim	5

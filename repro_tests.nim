@@ -4334,7 +4334,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_libs_repro_dsl_stdlib_tests_g02",
+    group: "t_group_libs_repro_dsl_stdlib_tests_g01",
     singleReason: ""),
   TestSpec(
     source: "libs/repro_dsl_stdlib/tests/t_packaging_arch_authoring.nim",
@@ -4493,6 +4493,17 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "libs/repro_dsl_stdlib/tests/t_packaging_shipped_payload.nim",
     binary: "build/test-bin/t_packaging_shipped_payload",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "t_group_libs_repro_dsl_stdlib_tests_g02",
+    singleReason: ""),
+  TestSpec(
+    source: "libs/repro_dsl_stdlib/tests/t_packaging_source_root_stagers.nim",
+    binary: "build/test-bin/t_packaging_source_root_stagers",
     defines: @[],
     requiresReproBinary: false,
     extraPassC: @[],

@@ -4212,7 +4212,8 @@ package reprobuild:
             " bash scripts/release/stage_release_sources.sh " &
             quoteShell(sourcesStage)], projectRoot),
           inputs = @["scripts/release/stage_release_sources.sh",
-            "scripts/release/stage_release_catalog.sh", "config.nims",
+            "scripts/release/stage_release_catalog.sh",
+            "scripts/lib/stage_source_root.sh", "config.nims",
             ".github/sibling-repos"],
           outputs = @[sourcesStage, sourcesManifest],
           cacheable = false,
