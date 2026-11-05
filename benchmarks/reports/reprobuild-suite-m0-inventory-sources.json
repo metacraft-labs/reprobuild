@@ -46778,6 +46778,7 @@
       "defines": [],
       "language": "nim",
       "localDependencyShape": [
+        "repro_core",
         "repro_lock"
       ],
       "owner": "tests/integration",
