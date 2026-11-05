@@ -1048,6 +1048,17 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "t_group_libs_repro_binary_cache_client_tests_g01",
     singleReason: ""),
   TestSpec(
+    source: "libs/repro_binary_cache_client/tests/t_cache_reads_are_bounded.nim",
+    binary: "build/test-bin/t_cache_reads_are_bounded",
+    defines: @["ssl"],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "",
+    singleReason: "no other source shares its compile options"),
+  TestSpec(
     source: "libs/repro_binary_cache_client/tests/t_client_cli_prefix_substitute.nim",
     binary: "build/test-bin/t_client_cli_prefix_substitute",
     defines: @[],
