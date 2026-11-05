@@ -471,9 +471,16 @@ proc runEvidenceCheck*(inp: CheckInputs): CheckReport =
             since = l
             found = true
         else:
+          # Any sequence above the host's that it has been behind for longer
+          # than that sequence's own maximum age (the one most overdue).
+          var worst = 0'i64
           for sq, m in earliest.getOrDefault(h.target):
-            if int64(sq) > applied and (not found or m.issuedAt < since.issuedAt):
+            if int64(sq) <= applied: continue
+            let over = inp.nowMs - int64(m.issuedAt) * 1000 -
+                       int64(m.maxAgeSeconds) * 1000
+            if over > 0 and (not found or over > worst):
               since = m
+              worst = over
               found = true
         if found:
           let ageMs = inp.nowMs - int64(since.issuedAt) * 1000
