@@ -315,9 +315,33 @@ suite "envelope lanes -- the imported-contribution flag begins at v29":
       "zed"
     check back.publicServices[0].contributionPoints ==
       @[PointRelyingParties, PointUsers]
-    # v29 is the default.
-    # version-literal-ok: a pin that must fail when the envelope moves past v29, so this matrix is extended
-    check interfaceEnvelopeVersion() == 29'u16
+    # v30 adds the environment-prefix arm to a tool use, after
+    # `scoopProvisioning`. v29 cannot carry it; the blocks around it survive
+    # either way.
+    pi.toolUses = @[InterfaceToolUse(
+      rawConstraint: "sqlite",
+      packageSelector: "sqlite",
+      executableName: "sqlite3",
+      environmentPrefixProvisioning: @[InterfaceEnvironmentPrefixProvisioning(
+        packageName: "sqlite",
+        variable: "REPRO_PREFIX_SQLITE",
+        libraries: @["lib/libsqlite3.so"],
+        headers: @["include/sqlite3.h"],
+        location: SourceLocation(file: "repro.nim", line: 31))],
+      location: SourceLocation(file: "repro.nim", line: 30))]
+    let beforeArm = atVersion(pi, 29'u16)
+    check beforeArm.toolUses[0].environmentPrefixProvisioning.len == 0
+    check beforeArm.toolUses[0].location.line == 30
+    check beforeArm.provisioningContributions[0].imported
+    let withArm = atVersion(pi, 30'u16)
+    check withArm.toolUses[0].environmentPrefixProvisioning ==
+      pi.toolUses[0].environmentPrefixProvisioning
+    check withArm.toolUses[0].location.line == 30
+    check withArm.provisioningContributions[0].imported
+    check tarballOf(withArm).location.line == 22
+    # v30 is the default.
+    # version-literal-ok: a pin that must fail when the envelope moves past v30, so this matrix is extended
+    check interfaceEnvelopeVersion() == 30'u16
 
 suite "envelope lanes -- the version is the ONLY thing that varies":
 
