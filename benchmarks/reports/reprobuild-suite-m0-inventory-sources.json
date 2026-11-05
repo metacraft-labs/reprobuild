@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 34,
-    "nimTestBinaries": 2673,
+    "nimTestBinaries": 2675,
     "pureUnitConsolidationGroups": 80,
     "pureUnitTests": 739,
     "staticallyDetectedRuntimeCompilerFlowTests": 137,
-    "testEntries": 2713
+    "testEntries": 2715
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1572,8 +1572,8 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 19,
-      "integration": 1481,
-      "platform/destructive": 169,
+      "integration": 1482,
+      "platform/destructive": 170,
       "pure unit": 739,
       "unclassified": 305
     },
@@ -1783,9 +1783,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2673,
+    "nimTestBinaryCount": 2675,
     "pythonTestFileCount": 40,
-    "testEntryCount": 2713
+    "testEntryCount": 2715
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -9185,6 +9185,25 @@
       "source": "libs/repro_addon/tests/t_addon_state_sets.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 17,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_addon_store_custody",
+      "class": "platform/destructive",
+      "classificationReason": "platform path, target OS, VM, privileged, or host mutation signal",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_addon",
+        "repro_infra",
+        "repro_local_store"
+      ],
+      "owner": "libs/repro_addon",
+      "requiresReproBinary": false,
+      "source": "libs/repro_addon/tests/t_addon_store_custody.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 7,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -30221,6 +30240,24 @@
       "owner": "tests/e2e",
       "requiresReproBinary": false,
       "source": "tests/e2e/addon/t_e2e_addon_stale_manifest_is_reported.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_e2e_addon_store_custody",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_dsl_stdlib",
+        "repro_test_support"
+      ],
+      "owner": "tests/e2e",
+      "requiresReproBinary": false,
+      "source": "tests/e2e/addon/t_e2e_addon_store_custody.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 1,
       "staticallyDetectedRuntimeCompilerFlow": false,

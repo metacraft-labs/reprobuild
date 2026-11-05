@@ -9,7 +9,10 @@
 ##       and compared with the digest it had when it was realised. That
 ##       digest is taken from OUTSIDE the store: the ledger entry the
 ##       realising process wrote (``value`` of a ``storePrefix`` entry,
-##       computed from the bytes it staged), or one an operator adopted.
+##       computed from the bytes it staged), the realisation index
+##       (``store_custody``, spec §13 decision 48), or one an operator
+##       adopted. Since decision 48 the ledger names every store object
+##       the generation references, so every one of them is verified.
 ##       Never from the path's own receipt: whoever can alter the path can
 ##       alter or delete its receipt too (audit session 2, G2).
 ##
@@ -43,6 +46,7 @@ import ./evidence
 import ./generation0
 import ./ledger
 import ./mutations
+import ./store_custody
 import ./store_root
 
 type
@@ -74,42 +78,20 @@ proc withEvidence*(site: StoreVerifySite; e: EvidenceSite): StoreVerifySite =
   result = site
   result.evidence = e
 
-proc readAdopted(path: string): Table[string, string] =
-  result = initTable[string, string]()
-  try:
-    for l in readFile(path).splitLines():
-      let p = l.splitWhitespace()
-      if p.len == 2: result[p[0]] = p[1]
-  except IOError, OSError:
-    discard
+proc custodyOf*(site: StoreVerifySite): CustodySite =
+  ## The custody state this verification reads: the realisation index and
+  ## the evidence directory of its state directory, its own quarantine and
+  ## adoption files.
+  result = custodySite(site.stateDir)
+  result.quarantinePath = site.quarantinePath
+  result.adoptedPath = site.adoptedPath
+  result.evidence = site.evidence
 
 proc currentStorePaths*(stateDir: string): seq[string] =
   ## The store paths the current generation's ledger names.
   let l = readLedger(ledgerCopyPath(stateDir))
   for e in l.entries:
     if e.class == lcStorePrefix and e.path notin result: result.add(e.path)
-
-proc recordedDigests*(stateDir: string): Table[string, string] =
-  ## The realisation digest of every store path a ledger in ``stateDir``
-  ## records one for -- the current copy first, then each retained
-  ## generation's -- keyed by path. These are the only expected digests
-  ## besides an operator's adopted ones (spec §10.2).
-  result = initTable[string, string]()
-  var ledgers: seq[string]
-  if fileExists(ledgerCopyPath(stateDir)): ledgers.add(ledgerCopyPath(stateDir))
-  let gens = stateDir / "generations"
-  if dirExists(gens):
-    for kind, d in walkDir(gens):
-      if kind == pcDir and fileExists(d / "addon-ledger"):
-        ledgers.add(d / "addon-ledger")
-  for lp in ledgers:
-    try:
-      for e in readLedger(lp).entries:
-        if e.class == lcStorePrefix and e.value.len > 0 and
-            e.path notin result:
-          result[e.path] = e.value
-    except CatchableError:
-      discard   # an unreadable ledger records nothing
 
 proc receiptDigestOf(path: string): string =
   ## The ``contentDigest`` the path's own receipt claims, "" when it has
@@ -130,12 +112,16 @@ proc expectedDigest*(path: string; recorded, adopted: Table[string, string]):
   result = recorded.getOrDefault(path, "")
   if result.len == 0: result = adopted.getOrDefault(path, "")
 
+
 proc verifyStore*(site: StoreVerifySite; paths: seq[string];
                   budgetSec = StoreVerifyBudgetSec): StoreVerifyReport =
   ## Verify ``paths``, starting at the cursor and wrapping, until the budget
   ## is spent. Quarantines each mismatch.
   let adopted = readAdopted(site.adoptedPath)
-  let recorded = recordedDigests(site.stateDir)
+  # Every expectation from outside the store: the ledgers, the realisation
+  # index (§13 decision 48), then the adoptions.
+  let recorded = expectedDigests(custodyOf(site))
+  pruneEvidence(custodyOf(site))
   var start = 0
   try: start = parseInt(readFile(site.cursorPath).strip()) mod max(1, paths.len)
   except CatchableError: discard
@@ -217,7 +203,7 @@ proc adoptUnverified*(site: StoreVerifySite; paths: seq[string]):
   ## another digest than it has now is refused (altered since it was
   ## realised, or its receipt was), and named. Returns both lists.
   var adopted = readAdopted(site.adoptedPath)
-  let recorded = recordedDigests(site.stateDir)
+  let recorded = expectedDigests(custodyOf(site))
   for p in paths:
     if not dirExists(p) or expectedDigest(p, recorded, adopted).len > 0:
       continue
@@ -235,6 +221,13 @@ proc adoptUnverified*(site: StoreVerifySite; paths: seq[string]):
   writeFile(site.adoptedPath & ".tmp", text)
   setFilePermissions(site.adoptedPath & ".tmp", {fpUserRead, fpUserWrite})
   moveFile(site.adoptedPath & ".tmp", site.adoptedPath)
+  # Every object the generation references now has a digest: the host is
+  # under custody from here on (§13 decision 48).
+  var left = 0
+  for p in paths:
+    if dirExists(p) and expectedDigest(p, recorded, adopted).len == 0: inc left
+  if left == 0 and result.refused.len == 0:
+    markCustody(custodyOf(site))
   if result.adopted.len > 0:
     discard recordEvidence(EvidenceEvent(detector: edStore,
       category: ecAudit, trigger: "store-digest-adopted",

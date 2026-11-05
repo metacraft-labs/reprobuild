@@ -70,6 +70,7 @@ libs/repro_addon/tests/t_addon_secret_files_created_private_and_never_through_sy
 libs/repro_addon/tests/t_addon_secrets_envelopes_and_rotation.nim	nim	13
 libs/repro_addon/tests/t_addon_service_floor.nim	nim	32
 libs/repro_addon/tests/t_addon_state_sets.nim	nim	17
+libs/repro_addon/tests/t_addon_store_custody.nim	nim	7
 libs/repro_addon/tests/t_addon_store_verify.nim	nim	9
 libs/repro_addon/tests/t_addon_switch_exclusive_retention.nim	nim	35
 libs/repro_addon/tests/t_addon_switch_planning.nim	nim	28
@@ -1217,6 +1218,7 @@ tests/e2e/addon/t_e2e_addon_service_cannot_exec_outside_closure.nim	nim	1
 tests/e2e/addon/t_e2e_addon_service_reads_only_its_credentials.nim	nim	1
 tests/e2e/addon/t_e2e_addon_staging_swap_after_verify_is_refused.nim	nim	1
 tests/e2e/addon/t_e2e_addon_stale_manifest_is_reported.nim	nim	1
+tests/e2e/addon/t_e2e_addon_store_custody.nim	nim	1
 tests/e2e/addon/t_e2e_addon_store_is_read_only_to_everything_else.nim	nim	1
 tests/e2e/addon/t_e2e_addon_store_roots_and_btrfs.nim	nim	1
 tests/e2e/addon/t_e2e_addon_survives_point_upgrades.nim	nim	1

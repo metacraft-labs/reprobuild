@@ -94,6 +94,7 @@ import ./mutations
 import ./pending_plan
 import ./seams
 import ./static_tree
+import ./store_custody
 import ./store_root
 import ./switch
 import ./evidence
@@ -421,36 +422,12 @@ proc readHostname*(): string =
   try: readFile("/proc/sys/kernel/hostname").strip()
   except IOError, OSError: "localhost"
 
-proc storeSignature*(dir: string): string =
-  ## A cheap signature of the store object at ``dir``: every entry below it
-  ## (links not followed) with its type, permissions, size, inode,
-  ## modification time and change time, in path order, hashed. No file
-  ## content is read. Any write, truncation, rename, mode or owner change
-  ## moves the change time (stat(2) ``st_ctime``), which no unprivileged
-  ## call sets and root sets only by moving the system clock; an object
-  ## replaced by another gets a new inode. Used between the switch's
-  ## realise step, which verified the object's content, and its start.
-  var lines: seq[string]
-  proc one(rel, path: string) =
-    let i = getFileInfo(path, followSymlink = false)
-    lines.add(rel & "\t" & $i.kind & "\t" & $i.permissions & "\t" & $i.size &
-      "\t" & $i.id.device & ":" & $i.id.file & "\t" &
-      $i.lastWriteTime.toUnix & "." & $i.lastWriteTime.nanosecond & "\t" &
-      $i.creationTime.toUnix & "." & $i.creationTime.nanosecond)
-  one(".", dir)
-  for rel in walkDirRec(dir, yieldFilter = {pcFile, pcDir, pcLinkToFile,
-                                             pcLinkToDir},
-                        followFilter = {pcDir}, relative = true):
-    one(rel, dir / rel)
-  lines.sort()
-  sha256Hex(lines.join("\n"))
-
-proc storeChangedSince*(realised: openArray[tuple[path, signature: string]]):
-    seq[string] =
+proc storeChangedSince*(realised: openArray[tuple[path, signature: string]];
+                        quarantinePath = StoreQuarantinePath): seq[string] =
   ## The store objects whose ``storeSignature`` differs from the one
   ## recorded, or that are gone -- or that store verification quarantined
   ## (spec §13 decision 46: no switch uses an altered path again).
-  let quarantined = readStoreQuarantine()
+  let quarantined = readStoreQuarantine(quarantinePath)
   for (path, sig) in realised:
     let now = if dirExists(path): storeSignature(path) else: "(gone)"
     if now != sig: result.add(path)
@@ -2879,6 +2856,138 @@ proc hostLockWithCarriedRecheck*(opts: AddonApplyOptions;
       result.release()
       raise newException(AddonApplyError, why)
 
+# ---------------------------------------------------------------------------
+# Store custody inside the switch (spec §13 decisions 47 and 48).
+# ---------------------------------------------------------------------------
+
+proc fileSourceObject*(r: SystemResource): StoreObjectRef =
+  ## The store object an ``fs.systemFile`` copies its bytes from; ``path``
+  ## "" when its source is not in the store.
+  if r.kind == srkFsSystemFile and r.sfSourceLocal.startsWith(StoreRoot & "/"):
+    let o = storeObjectFor(r.sfSourceLocal)
+    if o.len > 0:
+      return StoreObjectRef(path: o, kind: classifyStoreObject(o),
+                            referrer: r.address)
+
+proc isSha256Name(s: string): bool =
+  s.len == 64 and s.allCharsInSet(HexDigits)
+
+proc filesRecovery*(prefix: string; resources: openArray[SystemResource];
+                    stateDir: string; storeRoot = StoreRoot): Recovery =
+  ## Generation 0's files prefix (and ``evidence-enrol``'s) holds one file
+  ## per body, named by the SHA-256 of its bytes; the names are in the
+  ## generation's own profile text (state directory, outside the store).
+  ## The trusted bytes are any copy outside the store whose SHA-256 is its
+  ## name: the installed ``/etc`` copy, or the preserved bytes. Every name
+  ## must have one, and together they must name exactly this prefix (its
+  ## path is a function of the names and its version); otherwise there is
+  ## no trusted source and the switch refuses.
+  var names: seq[string]
+  var targets = initTable[string, seq[string]]()
+  for r in resources:
+    if r.kind == srkFsSystemFile and parentDir(r.sfSourceLocal) == prefix:
+      let n = extractFilename(r.sfSourceLocal)
+      if not isSha256Name(n):
+        return Recovery(why: r.sfSourceLocal & " is not named by its digest")
+      if n notin names: names.add(n)
+      targets.mgetOrPut(n, @[]).add(r.sfPath)
+  if names.len == 0:
+    return Recovery(why: "no resource of this generation copies from it")
+  let version = prefixVersionOf(prefix)
+  if version.len == 0 or filesPrefixPath(names, version, storeRoot) != prefix:
+    return Recovery(why: "the generation's own files do not name this " &
+      "prefix's whole content")
+  var files: seq[tuple[name, content: string]]
+  for n in names:
+    var found = false
+    var candidates = targets.getOrDefault(n, @[])
+    candidates.add(preservedDir(stateDir) / n)
+    when mutated("recovery-trusts-store-bytes"):
+      # FALSIFYING BUILD: the altered prefix's own copy is a source too.
+      candidates.insert(prefix / n, 0)
+    for c in candidates:
+      if fileExists(c) and not symlinkExists(c):
+        let bytes = try: readFile(c) except IOError, OSError: ""
+        when mutated("recovery-trusts-store-bytes"):
+          let good = true
+        else:
+          let good = sha256Hex(bytes) == n
+        if good:
+          files.add((n, bytes))
+          found = true
+          break
+    if not found:
+      return Recovery(why: "no copy of " & n & " outside the store holds " &
+        "the bytes its name is the digest of")
+  Recovery(ok: true, source: "generation 0's bodies (installed copies " &
+    "whose SHA-256 is their name)",
+    realise: proc (): string =
+      realiseFilesPrefix(files, version).digest)
+
+proc closureRecovery*(o: StoreObjectRef; locks: openArray[AptClosureLock];
+                      site: CustodySite; fetch: AptDebFetcher): Recovery =
+  ## An apt closure's union or member is realised again from the lock's
+  ## ``.deb`` archives (SHA-256 pinned by the lock in the signed manifest),
+  ## which the apply reads from what the fetch unit staged. Every altered
+  ## prefix of that closure -- the union shares its members' files by hard
+  ## link -- is moved into the evidence directory first; a member whose
+  ## archive the apply has no copy of is not realised, the switch refuses,
+  ## and the next fetch, finding the member gone, stages its archive.
+  for lock in locks:
+    var paths = @[aptClosurePrefixPath(AddOnSystemStoreRoot, lock)]
+    for d in lock.debs: paths.add(aptDebPrefixPath(AddOnSystemStoreRoot, d))
+    if o.path notin paths: continue
+    let l = lock
+    let union = paths[0]
+    return Recovery(ok: true, source: "the lock's .deb archives (pinned " &
+      "by SHA-256 in the signed manifest)",
+      realise: proc (): string =
+        # The union carries its members' bytes; it goes too when altered.
+        if dirExists(union) and union != o.path:
+          let exp = expectedDigests(site).getOrDefault(union, "")
+          let now = storeTreeDigest(union)
+          if exp.len > 0 and now != exp:
+            let entry = preserveEvidence(site, union, exp, now,
+              "built from the altered member " & o.path)
+            forgetRealised(site, union)
+            recordRecovered(site, StoreObjectRef(path: union,
+              kind: sokAptClosure, referrer: o.referrer), exp, now, entry,
+              "rebuilt with the recovered member")
+        let log = AptRealisationLog(verifyReuse: proc (p: string): string =
+          let exp = expectedDigests(site).getOrDefault(p, "")
+          if exp.len == 0:
+            return (if custodyHost(site): "it has no recorded digest" else: "")
+          let c = verifiedDigest(site, p, exp)
+          if c.verdict == cvVerified: "" else: "its bytes are altered")
+        discard realiseAptClosure(l, AddOnSystemStoreRoot,
+          AddOnAptDebCacheDir, fetch, log = log)
+        result = ""
+        for (p, d) in log.published:
+          recordRealised(site, p, d)
+          if p == o.path: result = d)
+  Recovery(why: "no closure of this generation consists of it")
+
+proc storeRecovery*(o: StoreObjectRef; resources: openArray[SystemResource];
+                    locks: openArray[AptClosureLock]; site: CustodySite;
+                    stateDir: string; fetch: AptDebFetcher): Recovery =
+  ## Where an altered object's trusted bytes come from, by kind (§13
+  ## decision 47). No trusted source: no recovery.
+  case o.kind
+  of sokFiles: filesRecovery(o.path, resources, stateDir)
+  of sokAptClosure: closureRecovery(o, locks, site, fetch)
+  of sokStaticTree:
+    Recovery(why: "the static tree is realised again by the switch that " &
+      "plans it, from the plan's bytes")
+  of sokBinary:
+    Recovery(why: "it is the add-on's own binary, which is running this " &
+      "switch; only a new bootstrap of a verified binary replaces it")
+  of sokPrefix:
+    Recovery(why: "a prefix the agent installs from the signed manifest's " &
+      "pinned build outputs is re-installed by the agent's next tick, not " &
+      "by a switch")
+  of sokOther:
+    Recovery(why: "nothing realises it")
+
 proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult
   ## Defined below, after the switch it wraps with its evidence record.
 
@@ -3178,6 +3287,40 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
       prevOwned.incl(e.path)
     elif e.class == lcDiversion:
       prevOwned.incl("diversion:" & e.path)
+
+  # --- Store custody of the bytes the plan reads (§13 decisions 47, 48). ---
+  # An ``fs.systemFile`` copies its bytes from the store, and the plan below
+  # reads them (its content, the static tree's link-form files): every such
+  # source object is checked against its recorded digest FIRST, and one
+  # altered is recovered from its trusted bytes before anything reads it
+  # (audit session 2, G1: generation 0's altered files were installed into
+  # /etc and owned). A plan only reports what the switch would recover.
+  var custody = custodySite(stateDir)
+  custody.noWrites = opts.planOnly
+  let custodyFetch = if opts.aptFetch != nil: opts.aptFetch
+                     else: httpDebFetcher()
+  var allResources = own.resources
+  allResources.add(user.resources)
+  # A files prefix is recovered from ALL of generation 0's bodies, those a
+  # profile superseded too: the prefix's path is a function of every name.
+  var recoveryResources = parseSystemProfile(ownText).resources
+  recoveryResources.add(user.resources)
+  var sourceObjects: seq[StoreObjectRef]
+  when not mutated("custody-skips-file-sources"):
+    for r in allResources:
+      let o = fileSourceObject(r)
+      if o.path.len > 0: sourceObjects.add(o)
+  block:
+    if sourceObjects.len > 0 and not opts.planOnly: enterWritableStoreView()
+    let c = custodyPass(custody, sourceObjects,
+      proc (o: StoreObjectRef): Recovery =
+        storeRecovery(o, recoveryResources, [], custody, stateDir,
+                      custodyFetch),
+      mayRecover = not opts.planOnly)
+    if c.refusals.len > 0:
+      raise newAddOnError(adStoreChanged, "the generation copies files " &
+        "from store objects that do not hold their realisation bytes: " &
+        c.refusals.join("; ") & "; nothing was switched")
 
   # --- The collision pass (plan time). ---
   # Preserved bytes are only named here: nothing is written under the
@@ -4337,8 +4480,20 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
   let previousStatic =
     if replaying and priorMarker.previousStatic.len > 0: priorMarker.previousStatic
     else: readStaticTarget()
-  let (treePath, treePrefixId, treeDigest) = realiseStaticTree(treeFiles)
+  let (treePath, treePrefixId, treeDigest) =
+    realiseStaticTree(treeFiles, custody)
   var closureLocks: seq[AptClosureLock]
+  # The realiser reports what it publishes (each prefix's digest from the
+  # bytes it staged, into the realisation index) and reuses an existing
+  # member only when its bytes are the recorded ones (§13 decision 48): an
+  # altered member is not linked into a new union, it is left for the
+  # custody pass below to recover.
+  let closureLog = AptRealisationLog(verifyReuse: proc (p: string): string =
+    let exp = expectedDigests(custody).getOrDefault(p, "")
+    if exp.len == 0:
+      return (if custodyHost(custody): "it has no recorded digest" else: "")
+    if verifiedDigest(custody, p, exp).verdict == cvVerified: ""
+    else: "its bytes are altered")
   for p in plans:
     # A unit's closure, and a tool's (its driver would otherwise realise it
     # itself, from the network, which the apply unit does not have).
@@ -4348,10 +4503,14 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
       else: ""
     if lockText.len > 0:
       let lock = parseAptClosureLock(lockText)
-      discard realiseAptClosure(lock, AddOnSystemStoreRoot,
-        AddOnAptDebCacheDir,
-        (if opts.aptFetch != nil: opts.aptFetch else: httpDebFetcher()))
+      try:
+        discard realiseAptClosure(lock, AddOnSystemStoreRoot,
+          AddOnAptDebCacheDir, custodyFetch, log = closureLog)
+      except IOError as e:
+        if "is not reused" notin e.msg: raise
       closureLocks.add(lock)
+  for (path, digest) in closureLog.published:
+    recordRealised(custody, path, digest)
   # The whole closure is rooted from here on, not only the tree: a
   # `repro store gc` between this step and the commit -- or after a crash,
   # before recovery -- must not collect what the switch is about to run.
@@ -4388,29 +4547,76 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
   # changed in between, by anything that got write access to the store,
   # is never flipped to or started. A store object that is missing is a
   # refusal, not a skip.
+  #
+  # Since §13 decision 48 that set is EVERY store object the generation
+  # references, of any kind: the static tree; each closure's union and
+  # members; every object a unit or drop-in names; every object any
+  # resource names in its declaration or in the bytes it installs (a file's
+  # content, a tmpfiles rule, an account's shell); every ``fs.systemFile``
+  # source; each ``exec:`` health check's program; and the prefixes
+  # bootstrap realised. Before its signature is taken, each is checked
+  # against its recorded digest (``custodyPass``): altered ones are
+  # recovered from trusted bytes or the switch refuses; one with no digest
+  # refuses on a host under custody; one that is not a store prefix
+  # refuses (default deny).
   var realisedStore: seq[tuple[path, signature: string]]
+  var custodyObjects: seq[StoreObjectRef]
   block:
-    var objs = @[treePath]
+    proc add(path, referrer: string) =
+      if path.len == 0: return
+      # Falsifying builds: a kind of object left out of custody.
+      when mutated("custody-skips-file-sources"):
+        if classifyStoreObject(path) == sokFiles: return
+      when mutated("custody-skips-closures"):
+        if classifyStoreObject(path) == sokAptClosure: return
+      for o in custodyObjects:
+        if o.path == path: return
+      custodyObjects.add(StoreObjectRef(path: path,
+        kind: classifyStoreObject(path), referrer: referrer))
+    add(treePath, "static-tree")
     for lock in closureLocks:
-      let p = aptClosurePrefixPath(AddOnSystemStoreRoot, lock)
-      if p notin objs: objs.add(p)
+      add(aptClosurePrefixPath(AddOnSystemStoreRoot, lock), "apt-closure")
+      for d in lock.debs:
+        add(aptDebPrefixPath(AddOnSystemStoreRoot, d), "apt-closure")
     for p in plans:
       for o in switchStoreObjects(p.r):
-        if o notin objs: objs.add(o)
+        add(o, p.r.address)
+      when not mutated("recheck-skips-dropin-prefixes"):
+        # Any kind's declaration and installed bytes (default deny: a kind
+        # whose store references nothing collects is still covered).
+        for o in referencedStoreObjects(renderStanza(p.r).join("\n") &
+                                        "\n" & p.content):
+          add(o, p.r.address)
+      add(fileSourceObject(p.r).path, p.r.address)
       if p.r.kind == srkSystemdSystemUnit:
         if p.r.suHealthCheck.len > 0:
           let hc = parseHealthCheck(p.r.suHealthCheck)
           if hc.kind == hcExec:
-            let o = storeObjectFor(hc.argv[0])
-            if o.len > 0 and o notin objs: objs.add(o)
+            add(storeObjectFor(hc.argv[0]), p.r.address)
+    for e in previous.entries:
+      if e.class == lcStorePrefix and e.resource.len == 0:
+        add(e.path, "generation-0")
     var missing: seq[string]
-    for o in objs:
-      if not dirExists(o): missing.add(o)
-      else: realisedStore.add((path: o, signature: storeSignature(o)))
+    for o in custodyObjects:
+      # A missing closure member is recovered like an altered one (its
+      # archive staged by the fetch unit); any other missing object is a
+      # refusal, as before.
+      if not dirExists(o.path) and o.kind != sokAptClosure: missing.add(o.path)
     if missing.len > 0:
       raise newAddOnError(adStoreChanged, "the generation runs from store " &
         "paths that do not exist after its realise step: " &
         missing.join(", ") & "; nothing was switched")
+    let c = custodyPass(custody, custodyObjects,
+      proc (o: StoreObjectRef): Recovery =
+        storeRecovery(o, recoveryResources, closureLocks, custody, stateDir,
+                      custodyFetch),
+      mayRecover = true)
+    if c.refusals.len > 0:
+      raise newAddOnError(adStoreChanged, "the generation runs from store " &
+        "objects that do not hold their realisation bytes: " &
+        c.refusals.join("; ") & "; nothing was switched")
+    for o in custodyObjects:
+      realisedStore.add((path: o.path, signature: storeSignature(o.path)))
 
   # The confirm step's checks (§7.5): every unit's declared healthCheck.
   var healthChecks: seq[UnitHealthCheck]
@@ -4938,6 +5144,16 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
       put(LedgerEntry(class: lcStorePrefix, path: treePath,
         sha256: prefixIdHex(treePrefixId), value: treeDigest,
         resource: "static-tree"))
+      # Every other store object the generation references, with the
+      # digest it is expected to hold (§13 decision 48): the record store
+      # verification and the next switch check it against, attested with
+      # the ledger. Rebuilt every generation, never carried forward.
+      block:
+        let expected = expectedDigests(custody)
+        for o in custodyObjects:
+          put(LedgerEntry(class: lcStorePrefix, path: o.path,
+            value: expected.getOrDefault(o.path, ""),
+            resource: "store-object"))
       for p in plans:
         if p.r.address in hookRefused:
           # The write-time re-check refused this resource's operation: what
@@ -5254,7 +5470,9 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
   # the marker goes. ---
   var prefixIds: seq[PrefixIdBytes]
   for e in newLedger.entries:
-    if e.class == lcStorePrefix:
+    if e.class == lcStorePrefix and e.sha256.len > 0:
+      # (A referenced object's entry names no prefix id: its root is the
+      # closure's or the bootstrap prefix's, held already.)
       prefixIds.add(parsePrefixIdHex(e.sha256))
   promotePendingRoot(result.generationId, prefixIds)
   # The current generation is this one; the previous is what `current`

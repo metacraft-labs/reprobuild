@@ -19,11 +19,14 @@ import repro_profile_compile/binary_cache_build_actions
 import repro_deploy_agent/manifest
 
 import repro_addon/agent_split
+import repro_addon/store_custody
 
 let root = getTempDir() / ("addon-install-staged-" & $getCurrentProcessId())
 removeDir(root)
 createDir(root)
 let store = root / "store"
+let testCustody = custodySite(root / "state", root / "store")
+  ## The realisation index and evidence of this test, not the host's.
 createDir(store / "prefixes")
 
 proc staged(copy: string): string =
@@ -47,7 +50,7 @@ suite "the apply unit installs only declared outputs, only in the store":
     let cwd = store / "prefixes" / "app" / "1"
     installStagedOutputs(manifestPinning(pin),
       @[ProfileBuildAction(id: "act1", cwd: cwd, outputs: @["bin/app"])],
-      copy, storeRoot = store)
+      copy, storeRoot = store, custody = testCustody)
     check readFile(cwd / "bin" / "app") == "legit"
     check not fileExists(cwd / "bin" / "evil.so")
     check not fileExists(cwd / "extra")
@@ -64,7 +67,7 @@ suite "the apply unit installs only declared outputs, only in the store":
       expect CatchableError:
         installStagedOutputs(manifestPinning(pin),
           @[ProfileBuildAction(id: "act1", cwd: cwd, outputs: @["bin/app"])],
-          copy, storeRoot = store)
+          copy, storeRoot = store, custody = testCustody)
     check not fileExists(outside / "bin" / "app")
 
   test "a symbolic link on the prefix path is refused":
@@ -76,7 +79,7 @@ suite "the apply unit installs only declared outputs, only in the store":
     expect CatchableError:
       installStagedOutputs(manifestPinning(pin),
         @[ProfileBuildAction(id: "act1", cwd: store / "prefixes" / "linked" / "1",
-                             outputs: @["bin/app"])], copy, storeRoot = store)
+                             outputs: @["bin/app"])], copy, storeRoot = store, custody = testCustody)
     check not fileExists(outside / "1" / "bin" / "app")
 
   test "a prefix already holding other bytes is not overwritten":
@@ -88,7 +91,7 @@ suite "the apply unit installs only declared outputs, only in the store":
     expect CatchableError:
       installStagedOutputs(manifestPinning(pin),
         @[ProfileBuildAction(id: "act1", cwd: cwd, outputs: @["bin/app"])],
-        copy, storeRoot = store)
+        copy, storeRoot = store, custody = testCustody)
     check readFile(cwd / "bin" / "app") == "someone else's"
 
 removeDir(root)

@@ -557,6 +557,19 @@
 ## ``reassert-store-trigger-missing``         a quarantined store object
 ##                                            in use is reported as
 ##                                            ``store-object-missing``
+## ``custody-skips-file-sources``            the switch's store custody
+##                                            leaves out the store files
+##                                            an ``fs.systemFile`` copies
+## ``custody-skips-closures``                 ... and the apt closures
+## ``custody-admits-undigested``              an object with no recorded
+##                                            digest is admitted on a host
+##                                            under custody
+## ``custody-cache-ignores-signature``        the digest cache answers for
+##                                            a path whatever changed in it
+## ``recovery-discards-evidence``             a recovered object's altered
+##                                            bytes are deleted, not kept
+## ``recovery-trusts-store-bytes``            a files prefix is recovered
+##                                            from its own altered copy
 ## =========================================  ==============================
 
 # The deploy agent's own mutations (``repro_deploy_agent/agent_mutations``)
@@ -889,7 +902,15 @@ const
                           "reassert-nft-in-own-netns",
                           # Session 2, low: one trigger for a missing and a
                           # quarantined store object.
-                          "reassert-store-trigger-missing"]
+                          "reassert-store-trigger-missing",
+                          # Owner decisions 2026-11-05 (G1 / G42): store
+                          # custody and recovery.
+                          "custody-skips-file-sources",
+                          "custody-skips-closures",
+                          "custody-admits-undigested",
+                          "custody-cache-ignores-signature",
+                          "recovery-discards-evidence",
+                          "recovery-trusts-store-bytes"]
 
 when AddonMutation.len > 0 and AddonMutation notin KnownAddonMutations and
     AddonMutation notin KnownAgentMutations:
