@@ -24,8 +24,7 @@
 #     with a WSL "no installed distributions" message.
 #   * clingo.dll (the ASP solver repro_solver dlopens at module init)
 #                                                             -- via
-#     windows/ensure-clingo.ps1. reprobuild-specific, so it lives here
-#     rather than in the shared framework. On Linux/macOS the flake
+#     windows/ensure-clingo.ps1. On Linux/macOS the flake
 #     devShell supplies it (`pkgs.clingo`); this is the Windows
 #     counterpart, and `scripts/build_apps.sh` stages the DLL it
 #     installs next to the built `repro.exe`.
@@ -54,7 +53,7 @@
 #   Once the sibling layout is satisfied, `config.nims` resolves every
 #   third-party package without touching `nimble install`.
 #
-# Knobs (unchanged from the framework these scripts came from):
+# Knobs:
 #   $env:WINDOWS_DIY_SYNC = "0"            skip all toolchain downloads
 #   $env:WINDOWS_DIY_SKIP_NIM = "1"        skip the nim step
 #   $env:WINDOWS_DIY_SKIP_GCC = "1"        skip the gcc step. `nim c` then
@@ -63,8 +62,6 @@
 #       caveat as the clingo/bearssl skips below: it is for hosts that
 #       provision a C toolchain independently, not a way to opt out of one.
 #   $env:WINDOWS_DIY_INSTALL_ROOT = <dir>  where toolchains land
-#   (the JUST / GH / PYTHON / REPO / GPG skips are gone with the steps
-#   themselves -- see the nim/gcc note above)
 #
 # Knobs specific to reprobuild:
 #   $env:WINDOWS_DIY_HCR_TESTS = "1" also provision pinned Python and LLVM for
@@ -97,12 +94,10 @@ $ErrorActionPreference = "Stop"
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Definition
 
 # --- 1. Cold-start toolchain bootstrap (nim + gcc) ---------------------------
-# Self-contained: this repo now carries its own copies of the provisioning
-# scripts under windows/ (toolchain-utils.ps1, ensure-nim.ps1, ensure-gcc.ps1
-# plus the bootstrap-toolchain.ps1 driver), moved here from the archived
-# repo-workspaces framework this script used to require as a sibling
-# checkout. A reprobuild checkout on a bare Windows box now bootstraps with
-# no other repo present.
+# Self-contained: the provisioning scripts live under windows/
+# (toolchain-utils.ps1, ensure-nim.ps1, ensure-gcc.ps1 plus the
+# bootstrap-toolchain.ps1 driver), so a reprobuild checkout on a bare Windows
+# box bootstraps with no other repo present.
 #
 # Scope note: this is the ONLY provisioning that cannot go through
 # reprobuild's own builtin catalog, because running the catalog needs a
@@ -119,7 +114,7 @@ $installRoot = Invoke-ReproToolchainBootstrap
 # this scope. Its $toolchain covers only the cold-start nim/gcc pins, so read
 # THIS repo's pin file again here for the clingo entries.
 #
-# Unlike the framework steps, a failure here is fatal rather than a warning:
+# Unlike the nim/gcc steps, a failure here is fatal rather than a warning:
 # every `repro` binary built without clingo aborts at module init, so a build
 # that proceeds past a failed clingo bootstrap only produces a broken binary
 # and defers the error to a much more confusing place.
@@ -295,9 +290,9 @@ if ($ioMonDir) {
 # missing" — it prints a WSL advertisement, exits non-zero, and the build dies
 # with a message about distributions that has nothing to do with reprobuild.
 #
-# git ships the bash we want and `Ensure-Git` (framework, above) has already
-# put git on PATH, so the fix is to resolve bash from git's own installation
-# and put it AHEAD of the WSL stub rather than to provision anything new.
+# Git for Windows ships the bash we want, so the fix is to resolve bash from
+# git's own installation and put it AHEAD of the WSL stub rather than to
+# provision anything new; without Git for Windows the warning below names it.
 # `Get-CommandSourceOrEmpty`, `Test-UsableBash` and `Resolve-GitBashDir` live
 # in windows/toolchain-utils.ps1 (dot-sourced through bootstrap-toolchain.ps1
 # above), shared with scripts/release/package_windows_release.ps1.
@@ -314,9 +309,9 @@ $bashPath = Get-CommandSourceOrEmpty 'bash'
 
 # --- 3. Status summary -------------------------------------------------------
 function Get-CommandSource {
-    # `repo-workspaces/env.ps1` exposes nim / just / python / gh / repo as
-    # PowerShell *aliases* (CommandType -ne Application), so the canonical
-    # `.Source` property is empty. Resolve through the alias' `Definition`
+    # A host shell may expose nim / just / python / gh as PowerShell
+    # *aliases* (CommandType -ne Application), whose canonical `.Source`
+    # property is empty. Resolve through the alias' `Definition`
     # when present and fall back to the application source otherwise.
     param([string]$Name)
     $cmd = Get-Command $Name -ErrorAction SilentlyContinue

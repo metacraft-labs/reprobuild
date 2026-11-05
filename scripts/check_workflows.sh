@@ -427,8 +427,8 @@ sibling_repo_branch_pins() {
 #   single-header  -- every config source neutralised, then exactly ONE
 #                     discovered Authorization header re-added. This is the arm
 #                     that works in CI, and the only one that can read the
-#                     PRIVATE siblings (`codetracer-native-recorder`,
-#                     `repo-workspaces`), which no anonymous request can see.
+#                     PRIVATE siblings (such as `codetracer-native-recorder`),
+#                     which no anonymous request can see.
 #   anonymous      -- no header, no helper, no repo-local config. Required in CI
 #                     for every PUBLIC repo outside the token's closure,
 #                     including both of this gate's own probe anchors.

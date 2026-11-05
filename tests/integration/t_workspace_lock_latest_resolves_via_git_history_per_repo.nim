@@ -1,7 +1,7 @@
 ## RA-1 — latest workspace lock resolves via Git history over the
 ## per-repo lock subtree, with NO shared index.
 ##
-## The Workspace-Manifests RA-1 design (pilot ``418f109``) stores locks
+## The Workspace-Manifests RA-1 design stores locks
 ## under a per-repo directory ``locks/<project>/<repo>/<sha>.toml`` and
 ## drops the committed ``index.toml``. The "latest published lock for
 ## repo X" lookup is therefore a Git-history query

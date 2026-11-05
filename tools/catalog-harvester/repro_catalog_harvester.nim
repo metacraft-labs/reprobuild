@@ -151,7 +151,7 @@ RUNTIME REQUIREMENTS (gh-releases / msys2)
   The harvester opens HTTPS connections to api.github.com and to MSYS2
   mirrors. Nim's std/httpclient dynamically loads ``libcrypto-1_1-x64.dll``
   + ``libssl-1_1-x64.dll`` on Windows x64; the reprobuild dev shell
-  (``repo-workspaces/env.ps1``) puts Nim's bin dir on PATH, which ships
+  (``env.ps1``) puts Nim's bin dir on PATH, which ships
   both. If you invoke the harvester from a stripped-down shell you'll
   see ``SSL support is not available`` — re-enter the dev shell.
 

@@ -103,7 +103,6 @@ jobs:
             nim-stackable-hooks
             nim-termctl
             devops-modules
-            repo-workspaces
             reprobuild-ct-test-runner
             reprobuild-packages
             reprobuild-test-adapters
@@ -475,7 +474,6 @@ jobs:
             nim-stackable-hooks
             nim-termctl
             devops-modules
-            repo-workspaces
             reprobuild-ct-test-runner
             reprobuild-packages
             reprobuild-test-adapters
@@ -1345,7 +1343,6 @@ jobs:
             nim-stackable-hooks
             nim-termctl
             devops-modules
-            repo-workspaces
             reprobuild-ct-test-runner
             reprobuild-packages
             reprobuild-test-adapters

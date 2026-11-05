@@ -1,8 +1,8 @@
 ## RA-4 — post-commit refreshes the lock locally AND pushes the branch to
 ## the namespaced cache ref, without blocking the commit.
 ##
-## Models repo-workspaces `d358ecb` (async post-commit cache push) layered
-## on the M19 best-effort lock refresh. Scenario:
+## The async post-commit cache push, layered on the M19 best-effort lock
+## refresh. Scenario:
 ##
 ##   * One repo (`lib-a`) in a metadata-only workspace, cloned from a local
 ##     upstream and wired to a per-upstream shared bare (RA-5) via
