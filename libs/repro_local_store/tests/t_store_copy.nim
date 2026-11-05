@@ -30,7 +30,10 @@
 ##     source's is refused;
 ##   * links are resolved as the kernel resolves them: a link through a
 ##     directory symlink and `..` brings the prefix it really reaches, and a
-##     destination whose package directory links into the source is refused.
+##     destination whose package directory links into the source is refused;
+##   * every directory a link's resolution walks through counts: a prefix it
+##     enters and leaves with `..` is brought along, and a package directory
+##     it only passes through is refused.
 
 import std/[os, sequtils, strutils, tempfiles, unittest]
 
@@ -516,3 +519,40 @@ suite "repro store copy: links resolved as the kernel resolves them":
       expect StoreCopyError:
         discard copyClosure(StoreCopyRequest(sourceRoot: f.src,
           destinationRoot: fresh, prefixes: @[other.realizedPath]))
+
+  test "a link through a real directory it leaves with `..` brings that prefix":
+    when defined(windows):
+      skip("store copy is POSIX-only")
+    else:
+      let f = makeFixture()
+      defer: removeDir(f.top)
+      var s = openStore(f.src)
+      let other = s.listPrefixes().filterIt(it.packageName == "other")[0]
+      s.close()
+      let otherDir = other.realizedPath.split('/')[2]
+      let toolDir = f.tool.relativePath.split('/')[2]
+      # ../../other/<dir>/../../tool/<dir>/bin/tool: the kernel needs
+      # prefixes/other/<dir> to exist to walk through it.
+      let a1 = f.realizeLinking("a1", "x", "../../other/" & otherDir &
+        "/../../tool/" & toolDir & "/bin/tool")
+      check fileExists(f.src / a1.relativePath / "x")
+      let report = f.copyOf(@[a1.relativePath])
+      check other.realizedPath in report.closure
+      check f.tool.relativePath in report.closure
+      check fileExists(f.dst / a1.relativePath / "x")
+
+  test "a link that only passes through a package directory is refused":
+    when defined(windows):
+      skip("store copy is POSIX-only")
+    else:
+      let f = makeFixture()
+      defer: removeDir(f.top)
+      let toolDir = f.tool.relativePath.split('/')[2]
+      # ../../other/../tool/<dir>/bin/tool needs prefixes/other, which a
+      # destination has only with a prefix of `other`.
+      let a1b = f.realizeLinking("a1b", "x",
+        "../../other/../tool/" & toolDir & "/bin/tool")
+      check fileExists(f.src / a1b.relativePath / "x")
+      expect StoreCopyError:
+        discard f.copyOf(@[a1b.relativePath])
+      check indexedPaths(f.dst).len == 0

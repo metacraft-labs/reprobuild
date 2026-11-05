@@ -89,14 +89,17 @@ else:
       stderr.writeLine("repro store copy: name at least one PREFIX or " &
         "--root-id\n" & StoreCopyUsage)
       return 2
-    req.sourceRoot = resolveStoreRoot(storeRootFlag)
-    req.destinationRoot = absolutePath(req.destinationRoot)
-    hooks.withDestinationLock(req.destinationRoot, proc (): int =
-      try:
+    # Resolving the roots and taking the destination's lock can fail too;
+    # every failure is reported as one `error:` line and exit 1, never a
+    # traceback.
+    try:
+      req.sourceRoot = resolveStoreRoot(storeRootFlag)
+      req.destinationRoot = absolutePath(req.destinationRoot)
+      hooks.withDestinationLock(req.destinationRoot, proc (): int =
         let report = copyClosure(req)
         if emitJson: echo pretty(reportJson(report))
         else: printReport(report)
-        0
-      except CatchableError:
-        stderr.writeLine("repro store copy: error: " & getCurrentExceptionMsg())
-        1)
+        0)
+    except CatchableError:
+      stderr.writeLine("repro store copy: error: " & getCurrentExceptionMsg())
+      1

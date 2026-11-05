@@ -30,8 +30,9 @@ A prefix produced as one output of a multi-output package brings its sibling
 outputs along, because its receipt names them. A prefix with a symbolic link
 into another prefix of the store brings that prefix along too, so no copied
 link dangles. Links are followed the way the system follows them, one path
-component at a time, so a link that passes through another directory link
-brings every prefix it passes through. A link that leads into the store
+component at a time, and every prefix the path walks through is brought
+along, even one it enters and leaves again with `..`, because the system
+needs those directories to exist for the link to resolve. A link that leads into the store
 outside any known prefix cannot be carried, and the copy is refused.
 
 ## What is checked
