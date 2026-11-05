@@ -90,7 +90,21 @@ jobs:
     # 90, up from 60: the lane now also builds the `ct-mcr` recorder bundle
     # (its dev shell, nimble and cargo) before the replay gate, on a runner
     # that starts cold.
-    timeout-minutes: 90
+    #
+    # 150, up from 90, on measurement. 90 was set before the bundle had ever
+    # built here (until 2026-11-05 the recorder sibling did not compile), and
+    # no run of this job has finished green inside it since. On ephemeral
+    # runners, with a cold store, the steps before the lane took 33-44 min:
+    # dev-shell realisation in the first `dev-exec` (manifest check, 4-14
+    # min) plus `Build repro` (23-29 min); jobs 125018472940, 127073386863
+    # and 127107318850. The lane itself ran 31 min across every gate but the
+    # replay gate (job 125018472940, whose bundle build failed early), and
+    # building the bundle measured 17.5 min on a warm workstation. That sums
+    # to roughly 85-100 min before the replay gate runs at all, and both
+    # attempts at 90 were cancelled with the lane still running (46 and 57
+    # min in). The fix for the setup time is a warm store on this runner
+    # class, which is a fleet change, not a workflow edit.
+    timeout-minutes: 150
     steps:
       - uses: actions/checkout@v4
       - name: Mint installation token for cross-repo sibling access
