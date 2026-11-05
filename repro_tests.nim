@@ -27426,6 +27426,17 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "t_group_tests_unit_g02",
     singleReason: ""),
   TestSpec(
+    source: "tests/unit/t_m23_gate_refusal_names_cache_decision.nim",
+    binary: "build/test-bin/t_m23_gate_refusal_names_cache_decision",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "t_group_tests_unit_g02",
+    singleReason: ""),
+  TestSpec(
     source: "tests/unit/t_m9q_from_source_provisioning.nim",
     binary: "build/test-bin/t_m9q_from_source_provisioning",
     defines: @[],

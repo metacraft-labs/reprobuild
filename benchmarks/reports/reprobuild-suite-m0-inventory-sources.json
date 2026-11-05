@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 34,
-    "nimTestBinaries": 2647,
+    "nimTestBinaries": 2648,
     "pureUnitConsolidationGroups": 79,
-    "pureUnitTests": 733,
+    "pureUnitTests": 734,
     "staticallyDetectedRuntimeCompilerFlowTests": 136,
-    "testEntries": 2687
+    "testEntries": 2688
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1435,6 +1435,20 @@
       "targetOs": "soAny"
     },
     {
+      "count": 3,
+      "defines": [],
+      "dependencyShape": [
+        "repro_build_engine"
+      ],
+      "owner": "tests/unit",
+      "sources": [
+        "tests/unit/t_m23_gate_refusal_names_cache_decision.nim",
+        "tests/unit/t_m9r14e_3_action_env_threading.nim",
+        "tests/unit/t_rx_runquotad_forwards_custom_pools.nim"
+      ],
+      "targetOs": "soAny"
+    },
+    {
       "count": 2,
       "defines": [],
       "dependencyShape": [
@@ -1444,19 +1458,6 @@
       "sources": [
         "tests/unit/t_m9r10a_exec_name_audit.nim",
         "tests/unit/t_reasoned_skip_compiles_on_any_unittest.nim"
-      ],
-      "targetOs": "soAny"
-    },
-    {
-      "count": 2,
-      "defines": [],
-      "dependencyShape": [
-        "repro_build_engine"
-      ],
-      "owner": "tests/unit",
-      "sources": [
-        "tests/unit/t_m9r14e_3_action_env_threading.nim",
-        "tests/unit/t_rx_runquotad_forwards_custom_pools.nim"
       ],
       "targetOs": "soAny"
     },
@@ -1557,7 +1558,7 @@
       "graph-fixture": 19,
       "integration": 1466,
       "platform/destructive": 168,
-      "pure unit": 733,
+      "pure unit": 734,
       "unclassified": 301
     },
     "graphOwnedTestArtifacts": [
@@ -1766,9 +1767,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2647,
+    "nimTestBinaryCount": 2648,
     "pythonTestFileCount": 40,
-    "testEntryCount": 2687
+    "testEntryCount": 2688
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -53112,6 +53113,23 @@
       "source": "tests/unit/t_m21_history_fed_scheduling.nim",
       "sourceSuiteCount": 4,
       "staticCaseCount": 22,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_m23_gate_refusal_names_cache_decision",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_build_engine"
+      ],
+      "owner": "tests/unit",
+      "requiresReproBinary": false,
+      "source": "tests/unit/t_m23_gate_refusal_names_cache_decision.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 7,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
