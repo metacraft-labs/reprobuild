@@ -69,6 +69,14 @@ jobs:
       version: ${{ steps.plan.outputs.version }}
       expected-assets: ${{ steps.plan.outputs.expected-assets }}
       packages: ${{ steps.plan.outputs.packages }}
+      # The `build-addon-static` job's runner (JSON: a label or a label array;
+      # `addon_static.runner`) and dev-env flavour (the `addon_static.from`
+      # platform's). Empty when .github/release-platforms.json declares no add-on.
+      addon-runner: ${{ steps.plan.outputs.addon-runner }}
+      addon-env-flavor: ${{ steps.plan.outputs.addon-env-flavor }}
+      # `addon_static.arches`, space-separated: what the job builds, and what
+      # the expected asset set above already names.
+      addon-arches: ${{ steps.plan.outputs.addon-arches }}
     steps:
       - uses: actions/checkout@v4
 
@@ -131,15 +139,22 @@ jobs:
             });
             assets.push(...packages.map(p => p.asset));
 
-            // The static add-on binaries, built on one leg.
+            // The static add-on binaries, built by their own job
+            // (`build-addon-static`) in the dev environment of the `from`
+            // platform, on `addon_static.runner` (that platform's runner when
+            // absent).
             const addon = spec.addon_static;
             if (addon) {
-              if (!archiveOf[addon.from]) {
+              const host = platforms.find(p => `${p.platform}-${p.arch}` === addon.from);
+              if (!host) {
                 throw new Error(`addon_static is built on '${addon.from}', which is not a platform in this release`);
               }
               for (const a of addon.arches) {
                 assets.push(addon.asset.replaceAll('{version}', version).replaceAll('{arch}', a));
               }
+              core.setOutput('addon-runner', JSON.stringify(addon.runner ?? host.runner));
+              core.setOutput('addon-env-flavor', host['env-flavor']);
+              core.setOutput('addon-arches', addon.arches.join(' '));
             }
 
             const dupes = assets.filter((a, i) => assets.indexOf(a) !== i);
@@ -775,25 +790,8 @@ jobs:
           fi
           cat "${asset}.sha256"
 
-      # The musl-static add-on binaries (.github/release-platforms.json
-      # `addon_static`). Built and statically verified by the same script a
-      # developer runs; each gets a `.sha256`, so it joins SHA256SUMS, the
-      # publish job's asset assertion and the signature like every asset.
-      - name: Build the static add-on binaries
-        if: matrix.platform == 'linux' && matrix.arch == 'x86_64'
-        shell: bash
-        run: |
-          dev-exec bash -c '
-            set -euo pipefail
-            version=$(grep "^version\s*=" reprobuild.nimble | sed -E "s/version\s*=\s*\"([^\"]+)\"/\1/")
-            bash scripts/build_addon_static.sh amd64 arm64 armhf
-            for a in amd64 arm64 armhf; do
-              name="repro-addon-${version}-linux-${a}"
-              cp "build/addon/${a}/repro" "${name}"
-              sha256sum "${name}" > "${name}.sha256"
-              cat "${name}.sha256"
-            done
-          '
+      # The musl-static add-on binaries are NOT built here: the
+      # `build-addon-static` job below builds them in parallel with this leg.
 
       # Native packages (.deb, .rpm) are carriers for the same bytes as this
       # leg's archive, so they are built right here, from the archive just
@@ -894,13 +892,103 @@ jobs:
             reprobuild_*.deb.sha256
             reprobuild-*.rpm
             reprobuild-*.rpm.sha256
-            repro-addon-*
+          if-no-files-found: error
+          retention-days: 7
+
+  # ── The musl-static add-on binaries, in a job of their own ────────────────
+  #
+  # .github/release-platforms.json `addon_static`: one musl-static `repro` per
+  # Debian architecture, built and statically verified by
+  # scripts/build_addon_static.sh, the same script a developer runs. Each gets
+  # a `.sha256`, so it joins SHA256SUMS, the publish job's asset assertion and
+  # the signature like every other asset.
+  #
+  # WHY A JOB OF ITS OWN. This was a step of the Linux leg, after that leg's
+  # build and archive verification, and on both runs that reached it the leg
+  # then ran out of its 540-minute cap:
+  #   - agents run 41847213559: the step took 5 h 37 m (17:39-23:16Z), and the
+  #     leg was cancelled at 9 h 5 m, in the native-package verification after it;
+  #   - v0.2.20 run 41962654843: the leg reached the step after 7 h 6 m. amd64
+  #     and arm64 took 20 minutes from substituted toolchains; the armhf cross
+  #     gcc (armv7l-unknown-linux-musleabihf-gcc-15.2.0) then built from source
+  #     for 82 minutes, and the cap fell 7 s into the armhf compile.
+  # The build needs nothing that leg builds -- only the dev shell (nim and the
+  # sibling sources) and three nixpkgs toolchains -- and its cost is mostly
+  # those toolchains: cache.nixos.org carries no stage of the armhf one, so a
+  # runner the private cache cannot serve builds a two-stage cross gcc. Here it
+  # runs beside the Linux leg instead of after it, and neither job's duration
+  # adds to the other's. It runs on general Linux capacity, not the release
+  # lane, which has a single runner (see `addon_static.runner`); time spent
+  # queued there does not count against `timeout-minutes`.
+  build-addon-static:
+    name: Static add-on binaries
+    needs: plan
+    if: needs.plan.outputs.addon-runner != ''
+    runs-on: ${{ fromJSON(needs.plan.outputs.addon-runner) }}
+    # Sized from the one run in which the build completed (5 h 37 m, toolchains
+    # built from source) plus about 10 minutes of checkout and dev-env setup,
+    # and kept below build-release's 540 so this job never makes a release
+    # wait longer than its Linux leg does.
+    timeout-minutes: 480
+    steps:
+      - uses: actions/checkout@v4
+
+      # As in build-release: the dev environment clones private siblings.
+      - name: Mint installation token for cross-repo sibling clones
+        id: ci_token
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.CI_TOKEN_PROVIDER_APP_ID }}
+          private-key: ${{ secrets.CI_TOKEN_PROVIDER_PRIVATE_KEY }}
+          owner: metacraft-labs
+
+      - name: Setup dev environment
+        uses: metacraft-labs/metacraft-github-actions/setup-dev-env@dev
+        with:
+          env-flavor: ${{ needs.plan.outputs.addon-env-flavor }}
+          gh-token: ${{ steps.ci_token.outputs.token }}
+          substituters: ${{ vars.SUBSTITUTERS }}
+          trusted-public-keys: ${{ vars.TRUSTED_PUBLIC_KEYS }}
+          attic-token: ${{ secrets.ATTIC_TOKEN }}
+          attic-cache: ${{ vars.ATTIC_CACHE }}
+          attic-endpoint: ${{ vars.ATTIC_ENDPOINT }}
+          flake-override-inputs: |
+            runquota-src=../runquota
+            io-mon-src=../io-mon
+            nim-shm-queue-src=../nim-shm-queue
+            nim-stackable-hooks-src=../nim-stackable-hooks
+            reprobuild-test-adapters-src=../reprobuild-test-adapters
+            test-certificates-tools-src=../test-certificates-tools
+
+      - name: Build the static add-on binaries
+        shell: bash
+        env:
+          VERSION: ${{ needs.plan.outputs.version }}
+          ARCHES: ${{ needs.plan.outputs.addon-arches }}
+        run: |
+          set -euo pipefail
+          # ARCHES is the space-separated `addon_static.arches` list.
+          # shellcheck disable=SC2086
+          dev-exec bash scripts/build_addon_static.sh ${ARCHES} < /dev/null
+          for a in ${ARCHES}; do
+            name="repro-addon-${VERSION}-linux-${a}"
+            cp "build/addon/${a}/repro" "${name}"
+            sha256sum "${name}" > "${name}.sha256"
+            cat "${name}.sha256"
+          done
+
+      # `release-*`, so the publish job's download collects it with the legs.
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-addon-static
+          path: repro-addon-*
           if-no-files-found: error
           retention-days: 7
 
   publish-release:
     name: Publish release (all-or-nothing)
-    needs: [plan, build-release]
+    needs: [plan, build-release, build-addon-static]
     # A job-level `permissions:` block REPLACES the workflow-level one rather
     # than merging with it, so `contents: write` is restated here -- without it
     # this job could not create or update the release at all.
@@ -933,9 +1021,12 @@ jobs:
     if: always() && startsWith(github.ref, 'refs/tags/')
     steps:
       - name: Assert every platform built
-        if: needs.build-release.result != 'success' || needs.plan.result != 'success'
+        # The add-on job is skipped, not failed, when no add-on is declared.
+        if: >-
+          needs.build-release.result != 'success' || needs.plan.result != 'success' ||
+          (needs.plan.outputs.addon-runner != '' && needs.build-addon-static.result != 'success')
         run: |
-          echo "::error::Refusing to publish. plan=${{ needs.plan.result }} build=${{ needs.build-release.result }}"
+          echo "::error::Refusing to publish. plan=${{ needs.plan.result }} build=${{ needs.build-release.result }} addon=${{ needs.build-addon-static.result }}"
           echo "::error::A release publishes every platform in .github/release-platforms.json or it publishes nothing."
           echo "::error::Fix the failing leg and re-run, or -- as a reviewed, deliberate decision -- remove that"
           echo "::error::platform from .github/release-platforms.json to narrow what this release promises."
