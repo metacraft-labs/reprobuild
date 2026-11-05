@@ -27,11 +27,26 @@ name: Agent protocol (Windows)
 # identity in Administrators. The job prints `whoami /groups` first so a
 # failure there names the identity it ran as.
 
+# Path-filtered on every branch but `agents` (which has no CI by policy), so
+# a branch that changes the transport gets its Windows verdict without a
+# pull request and without the Linux suite.
 on:
   push:
-    branches: [main, dev]
+    branches-ignore: [agents]
+    paths:
+      - libs/repro_agent_protocol/**
+      - apps/repro-agent-conformance/**
+      - tests/windows/windows_agent_protocol_peer_identity.nim
+      - tests/integration/t_agent_conformance_cli_portability.nim
+      - .github/workflows/agent-protocol-windows.yml
   pull_request:
     branches-ignore: [agents]
+    paths:
+      - libs/repro_agent_protocol/**
+      - apps/repro-agent-conformance/**
+      - tests/windows/windows_agent_protocol_peer_identity.nim
+      - tests/integration/t_agent_conformance_cli_portability.nim
+      - .github/workflows/agent-protocol-windows.yml
   workflow_dispatch:
 
 concurrency:
