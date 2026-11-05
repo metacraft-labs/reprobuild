@@ -262,6 +262,63 @@ suite "M9.R.83 install mirror emitted action shape":
     else:
       check true
 
+  test "the mirror action clears the previous mirror in every read-only mode":
+    # Every mode but legacy leaves the recipe's mirror read-only, so the next
+    # build's action must unlock and remove it before the clobber of `usr/`;
+    # without that step such a recipe cannot be rebuilt. Legacy mode never
+    # makes the mirror read-only and its action must stay as it was.
+    when defined(reproProviderMode):
+      let scratch = createTempDir("m9r83-mirror-clear-", "")
+      defer: removeDir(scratch)
+      let priorModeSet = existsEnv(InstallMirrorModeEnvVar)
+      let priorMode = getEnv(InstallMirrorModeEnvVar)
+      defer:
+        if priorModeSet: putEnv(InstallMirrorModeEnvVar, priorMode)
+        else: delEnv(InstallMirrorModeEnvVar)
+
+      for mode in InstallMirrorMode:
+        checkpoint $mode
+        putEnv(InstallMirrorModeEnvVar, $mode)
+        # One package per mode: the mirror gate emits once per package.
+        let packageName = "m9r83ClearPkg" & ($mode).replace("-", "")
+        let projectRoot = scratch / packageName
+        createRecipeRoot(projectRoot)
+        let pkg = PackageDef(
+          packageName: packageName,
+          sourceFile: projectRoot / "repro.nim",
+          hasDevEnv: false,
+          devEnvBodyHash: "",
+          toolUses: @[])
+        let fragment = buildPackageFragment(pkg, dummyRequest(projectRoot),
+          proc() =
+            registerVersion(packageName, DslVersionInfo(version: "1.0.0"))
+            let installEdge = buildAction(
+              id = "m9r83-clear-install-" & packageName,
+              call = inlineExecCall(@["sh", "-c", "true"], projectRoot),
+              outputs = @[projectRoot / "build" / "dest" /
+                ".install.stamp"],
+              pool = "compile",
+              toolIdentityRefs = @["sh"])
+            emitInstallTreeMirror(installEdge, "build", "dest", packageName,
+              "autotools"),
+          includeDefault = false)
+
+        let mirrorRoot = projectRoot / installMirrorSubpath()
+        let script = inlineScriptOf(findById(extractActions(fragment),
+          "install-mirror-" & packageName))
+        let clobber = "rm -rf \"" &
+          (mirrorRoot / "usr").replace("\\", "/") & "\""
+        check clobber in script
+        if mode == immLegacy:
+          check "_repro_unlock_dirs" notin script
+        else:
+          let clear = emitInstallMirrorClearPrevious(mirrorRoot, mode)
+          check clear.len > 0
+          check clear in script
+          check script.find(clear) < script.find(clobber)
+    else:
+      check true
+
   test "custom-shell synthesizer emits mirror publish action":
     when defined(reproProviderMode):
       let scratch = getTempDir() / "m9r83-custom-shell-action-shape"
