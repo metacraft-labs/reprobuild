@@ -12587,6 +12587,10 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
     observeRunResult = proc(r: BuildRunResult) =
       warnRunQuotaBypassIfUsed(r, enabled = interfaceEdgeRunQuotaBypass,
         scope = "the project-interface extraction edge"))
+  # N3 (Distribution-And-Packaging §5.3): the recipe's own `uses: nim`
+  # range must admit the installed prefix's compiler, before the provider
+  # compile.
+  requireProjectNimAdmitsInstalledPrefixNim(artifact.projectInterface.toolUses)
   finishStat(buildStats, statsEnabled, "repro interface extract",
     interfaceStart)
   recordInterfaceArtifactWarmStats(buildStats, statsEnabled)
@@ -31055,6 +31059,10 @@ proc prepareBuildGraphInspection(target: string; mode: ToolProvisioningMode;
       effectiveProviderCompileRunQuotaBypass(bypassRunQuotaExplicit),
     fallbackToRunQuotaBypass =
       mode in {tpmPathOnly, tpmScoop, tpmUnspecified})
+  # N3 (Distribution-And-Packaging §5.3): the recipe's own `uses: nim`
+  # range must admit the installed prefix's compiler, before the provider
+  # compile.
+  requireProjectNimAdmitsInstalledPrefixNim(artifact.projectInterface.toolUses)
   result.interfacePath = interfacePath
 
   var effectiveMode = mode
@@ -31345,6 +31353,13 @@ proc refreshRecipeProviderSnapshot(target: string;
     fallbackToRunQuotaBypass =
       mode in {tpmPathOnly, tpmScoop, tpmUnspecified})
 
+  # N3 (Distribution-And-Packaging §5.3): the recipe's own `uses: nim`
+
+  # range must admit the installed prefix's compiler, before the provider
+
+  # compile.
+
+  requireProjectNimAdmitsInstalledPrefixNim(artifact.projectInterface.toolUses)
   var effectiveMode = mode
   if effectiveMode == tpmUnspecified and
       artifact.projectInterface.defaultToolProvisioning.len > 0:
@@ -38807,6 +38822,13 @@ proc runDevelopCommand*(args: openArray[string]): int =
     compileWorkDir, compileScratchDir, projectRootForModule(modulePath),
     stablePublicCliPath(), outDir / "build-engine-cache", developStats)
 
+  # N3 (Distribution-And-Packaging §5.3): the recipe's own `uses: nim`
+
+  # range must admit the installed prefix's compiler, before the provider
+
+  # compile.
+
+  requireProjectNimAdmitsInstalledPrefixNim(artifact.projectInterface.toolUses)
   var effectiveMode = mode
   if effectiveMode == tpmUnspecified and
       artifact.projectInterface.defaultToolProvisioning.len > 0:
@@ -89547,6 +89569,10 @@ proc solverInputsFromCompiledProvider(projectDir: string;
           compileWorkDir, scratchDir, projectRootForModule(modulePath),
           publicCliPath, cacheRoot, compileStats, requireStub = false,
           bypassRunQuota = runQuotaBypassedByEnv())
+    # N3 (Distribution-And-Packaging §5.3): the recipe's own `uses: nim`
+    # range must admit the installed prefix's compiler, before the provider
+    # compile.
+    requireProjectNimAdmitsInstalledPrefixNim(artifact.projectInterface.toolUses)
     # Only recipes with solver-bound ``uses:`` produce a non-trivial solve;
     # skip the (more expensive) provider compile otherwise so a plain recipe
     # falls straight back to the sidecar without paying for it.

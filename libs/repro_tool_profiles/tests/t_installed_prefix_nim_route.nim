@@ -3,41 +3,48 @@
 ## by Zahary Karadjov, 2026-11-04; the provider-toolchain rule 2 in the
 ## Distribution-And-Packaging milestone names this route first).
 ##
-## ## The defect this pins
+## ## The defects this pins
 ##
-## The armv7 installed prefix ships the Nim fork under `nim/`, because the
-## appliance compiles providers and profiles itself. Substituted on rpi2,
-## its `repro exec -- true` in an empty project ignored that compiler and
-## provisioned `nim-source@2.2.10` (a source build of stock Nim on a Pi 2,
-## 2.2 GB of tool store, not done after 1500 s; 2026-11-04). The bootstrap
-## routes knew of no compiler beside the running image.
+## * The armv7 installed prefix ships the Nim fork under `nim/`, because the
+##   appliance compiles providers and profiles itself. Substituted on rpi2,
+##   its `repro exec -- true` ignored that compiler and provisioned
+##   `nim-source@2.2.10`, a source build of stock Nim (2026-11-04).
+## * A prefix from `scripts/cross/build_linux_cross.sh` shipped `nim/bin/nim`
+##   with no `nim/.nim-fork-revision` and recorded
+##   `nim_fork=flake:nim-fork-src@<sha>`, so the route refused it and every
+##   provider compile failed (A15 re-review, 2026-11-05). The script now
+##   writes the record through `scripts/cross/nim_fork_record.sh`; the
+##   script-shaped cases below run that very function.
 ##
-## ## What is pinned
+## ## What is pinned, each case falsified by removing its guard
 ##
-## * an image whose prefix ships `nim/bin/nim` compiles with it, and no
-##   bootstrap route runs (no tool-store prefix appears);
-## * the shipped compiler must be the fork the prefix records:
-##   `nim/.nim-fork-revision` against `nim_fork=` in
-##   `share/repro/cross-build-info`, refused by name otherwise, and refused
-##   when the record is missing;
-## * a compiler outside the bootstrap's `nim >=2.2 <3.0` is refused, not
-##   replaced;
+## * a prefix shipping the recorded fork resolves to it, and the bootstrap
+##   uses it and provisions no Nim (no tool-store prefix appears);
+## * the shipped compiler must be the recorded fork: a revision mismatch, a
+##   missing revision file, a missing build record are each refused with
+##   their own sentence;
+## * a release outside the required range is refused, not replaced;
 ## * an image with no `nim/` keeps the per-host routes;
-## * a compiler already chosen (a project pin, which publishes
-##   `REPRO_NIM_COMPILER` at entry, or the caller's explicit value) wins.
+## * a prefix written by the script's record function passes, and one in the
+##   script's old shape is refused.
+##
+## That a compiler already chosen (a project pin) wins is pinned through the
+## pin's own publisher in `repro_cli_support/tests/t_installed_prefix_nim_pin_wins.nim`.
 ##
 ## NO MOCKS of the route: real directories in the installed layout. The
 ## shipped `bin/nim` is a stand-in file: the route reads the compiler's
-## version from its `lib/system/compilation.nim`, as the installation
-## records it, and never runs it.
+## release from its `lib/system/compilation.nim`, as the installation records
+## it, and never runs it.
 
 import std/[os, osproc, strutils, tempfiles, unittest]
 
+import repro_core/installed_prefix_nim
+import repro_interface_artifacts
 import repro_tool_profiles
-import repro_test_support/reasoned_skip
 
 const
   ForkRev = "197089cda27f656f8010e2b31b40e0e12f3f209b"
+  RepoRoot = currentSourcePath().parentDir.parentDir.parentDir.parentDir
 
 template withEnv(names: openArray[string]; body: untyped) =
   var saved: seq[tuple[name: string; present: bool; value: string]]
@@ -50,9 +57,19 @@ template withEnv(names: openArray[string]; body: untyped) =
       if entry.present: putEnv(entry.name, entry.value)
       else: delEnv(entry.name)
 
+template requireGcc(gcc: untyped; body: untyped) =
+  ## The bootstrap probes the C compiler it is given; a gate run must have
+  ## one, so a missing gcc fails the case there rather than skipping it.
+  let gcc = findExe("gcc")
+  if gcc.len == 0:
+    checkpoint("gcc is not on PATH; the bootstrap probes its C compiler")
+    check getEnv("REPROBUILD_GATE_RUN") != "1"
+  else:
+    body
+
 proc installedPrefix(root: string; rev = ForkRev; recorded = ForkRev;
                      major = 2, minor = 3, patch = 1;
-                     record = true): string =
+                     record = true; revisionFile = true): string =
   ## An installed prefix at `root/prefix`: the engine image, the shipped
   ## Nim and the build record.
   result = root / "prefix"
@@ -62,7 +79,8 @@ proc installedPrefix(root: string; rev = ForkRev; recorded = ForkRev;
   createDir(result / "nim" / "lib" / "system")
   writeFile(result / "nim" / "bin" / addFileExt("nim", ExeExt),
     "#!/bin/sh\nexit 0\n")
-  writeFile(result / "nim" / ".nim-fork-revision", rev & "\n")
+  if revisionFile:
+    writeFile(result / "nim" / ".nim-fork-revision", rev & "\n")
   writeFile(result / "nim" / "lib" / "system" / "compilation.nim",
     "const\n" &
     "  NimMajor* {.intdefine.}: int = " & $major & "\n" &
@@ -101,37 +119,65 @@ suite "an installed prefix compiles providers with the Nim it ships":
     let other = repeat('b', 40)
     let msg = refusal(installedPrefix(root, rev = other))
     checkpoint(msg)
+    check "not the fork it records" in msg
     check other in msg
     check ForkRev in msg
-    check "nim/.nim-fork-revision" in msg
+
+  test "a shipped Nim without its revision file is refused":
+    let root = createTempDir("prefix-nim-norev-", "")
+    defer: removeDir(root)
+    let msg = refusal(installedPrefix(root, revisionFile = false))
+    checkpoint(msg)
+    check "not the fork it records" in msg
+    check "(missing)" in msg
 
   test "a shipped Nim without the build record is refused":
     let root = createTempDir("prefix-nim-norec-", "")
     defer: removeDir(root)
     let msg = refusal(installedPrefix(root, record = false))
     checkpoint(msg)
-    check "cross-build-info" in msg
+    check "no build record" in msg
 
   test "a shipped Nim outside the bootstrap's range is refused, not replaced":
     let root = createTempDir("prefix-nim-range-", "")
     defer: removeDir(root)
     let msg = refusal(installedPrefix(root, major = 3, minor = 0, patch = 0))
     checkpoint(msg)
-    check "3.0.0" in msg
+    check "ships Nim 3.0.0, outside the range" in msg
     check ">=2.2" in msg
 
+  test "a project's own uses: range is checked against the prefix's release":
+    check nimReleaseAdmitted("2.3.1", "nim >=2.2 <3.0")
+    check not nimReleaseAdmitted("2.3.1", "nim >=2.0 <2.3")
+    check not nimReleaseAdmitted("2.3.1", "nim ==2.2.10")
+    check nimReleaseAdmitted("2.3.1", "nim")
+    withEnv([InstalledPrefixNimEnvVar]):
+      putEnv(InstalledPrefixNimEnvVar, "2.3.1")
+      let uses = @[InterfaceToolUse(rawConstraint: "nim >=2.0 <2.3",
+        packageSelector: "nim", executableName: "nim")]
+      expect BootstrapNimError:
+        requireProjectNimAdmitsInstalledPrefixNim(uses)
+      requireProjectNimAdmitsInstalledPrefixNim(@[InterfaceToolUse(
+        rawConstraint: "nim >=2.2 <3.0", packageSelector: "nim",
+        executableName: "nim")])
+      # A tool that is not the compiler is not its business.
+      requireProjectNimAdmitsInstalledPrefixNim(@[InterfaceToolUse(
+        rawConstraint: "nimble >=0.1 <0.2", packageSelector: "nimble",
+        executableName: "nimble")])
+      delEnv(InstalledPrefixNimEnvVar)
+      # Without the prefix route there is nothing to check.
+      requireProjectNimAdmitsInstalledPrefixNim(uses)
+
   test "the bootstrap uses the prefix's Nim and provisions none":
-    let gcc = findExe("gcc")
-    if gcc.len == 0:
-      skip("gcc not on PATH; the bootstrap probes the C compiler it is given")
-    else:
+    requireGcc(gcc):
       let root = createTempDir("prefix-nim-env-", "")
       defer: removeDir(root)
       let prefix = installedPrefix(root)
       let store = root / "tool-store"
       withEnv(["REPRO_NIM_COMPILER", "REPRO_BOOTSTRAP_CC",
-               "REPRO_PUBLIC_CLI_PATH", "CC"]):
+               "REPRO_PUBLIC_CLI_PATH", "CC", InstalledPrefixNimEnvVar]):
         delEnv("REPRO_NIM_COMPILER")
+        delEnv(InstalledPrefixNimEnvVar)
         putEnv("REPRO_BOOTSTRAP_CC", gcc)
         # The image the portable launcher names (the second anchor of
         # `runningImagePrefixCandidates`); this test binary's own image
@@ -140,20 +186,32 @@ suite "an installed prefix compiles providers with the Nim it ships":
         ensureBootstrapToolchainEnv(tpmPathOnly, store)
         check getEnv("REPRO_NIM_COMPILER") ==
           prefix / "nim" / "bin" / addFileExt("nim", ExeExt)
+        check getEnv(InstalledPrefixNimEnvVar) == "2.3.1"
         check not dirExists(store / "prefixes")
 
-  test "a compiler already chosen (a project pin) wins over the prefix's":
-    let gcc = findExe("gcc")
-    if gcc.len == 0:
-      skip("gcc not on PATH; the bootstrap probes the C compiler it is given")
-    else:
-      let root = createTempDir("prefix-nim-pin-", "")
-      defer: removeDir(root)
-      let prefix = installedPrefix(root)
-      withEnv(["REPRO_NIM_COMPILER", "REPRO_BOOTSTRAP_CC",
-               "REPRO_PUBLIC_CLI_PATH", "CC"]):
-        putEnv("REPRO_NIM_COMPILER", root / "pinned" / "bin" / "nim")
-        putEnv("REPRO_BOOTSTRAP_CC", gcc)
-        putEnv("REPRO_PUBLIC_CLI_PATH", prefix / "bin" / "reprobuild")
-        ensureBootstrapToolchainEnv(tpmPathOnly, root / "tool-store")
-        check getEnv("REPRO_NIM_COMPILER") == root / "pinned" / "bin" / "nim"
+suite "both producers write the record the route checks":
+
+  test "a prefix written by the script's record function passes":
+    let root = createTempDir("prefix-nim-script-", "")
+    defer: removeDir(root)
+    let prefix = installedPrefix(root, record = false, revisionFile = false)
+    createDir(prefix / "share" / "repro")
+    let script = RepoRoot / "scripts" / "cross" / "nim_fork_record.sh"
+    require fileExists(script)
+    let r = execCmdEx("bash -c " & quoteShell(". " & quoteShell(script) &
+      " && nim_fork_record " & quoteShell(prefix) & " " & ForkRev &
+      " >> " & quoteShell(prefix / "share" / "repro" / "cross-build-info")))
+    checkpoint(r.output)
+    require r.exitCode == 0
+    check readFile(prefix / "share" / "repro" / "cross-build-info").
+      strip() == "nim_fork=" & ForkRev
+    check installedPrefixNim(@[prefix]) ==
+      prefix / "nim" / "bin" / addFileExt("nim", ExeExt)
+
+  test "a prefix in the script's old shape is refused, not used":
+    let root = createTempDir("prefix-nim-oldscript-", "")
+    defer: removeDir(root)
+    let msg = refusal(installedPrefix(root, revisionFile = false,
+      recorded = "flake:nim-fork-src@" & ForkRev))
+    checkpoint(msg)
+    check "not the fork it records" in msg

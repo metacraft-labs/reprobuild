@@ -922,6 +922,11 @@ proc computeDevEnvEdge*(config: DevEnvEdgeConfig): DevEnvEdgeResult =
   # it against that closure (or after re-extracting it), so the closure
   # recorded here is the one those bytes were extracted from.
   writeInterfaceArtifactProvenance(interfacePath, active.modulePath)
+  # N3: the recipe's own `uses: nim` range must admit the installed
+  # prefix's compiler, now that the recipe's `uses:` can be read, and
+  # before the provider compile below.
+  requireProjectNimAdmitsInstalledPrefixNim(
+    interfaceArtifact.projectInterface.toolUses)
   result.interfaceArtifact = interfaceArtifact
   result.interfaceProvenance = readInterfaceArtifactProvenance(interfacePath)
   result.interfaceDecoded = true

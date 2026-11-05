@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 34,
-    "nimTestBinaries": 2651,
+    "nimTestBinaries": 2653,
     "pureUnitConsolidationGroups": 79,
     "pureUnitTests": 734,
     "staticallyDetectedRuntimeCompilerFlowTests": 136,
-    "testEntries": 2691
+    "testEntries": 2693
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1556,7 +1556,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 19,
-      "integration": 1468,
+      "integration": 1470,
       "platform/destructive": 168,
       "pure unit": 734,
       "unclassified": 302
@@ -1767,9 +1767,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2651,
+    "nimTestBinaryCount": 2653,
     "pythonTestFileCount": 40,
-    "testEntryCount": 2691
+    "testEntryCount": 2693
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -12589,6 +12589,25 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_installed_prefix_nim_pin_wins",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_cli_support",
+        "repro_core",
+        "repro_tool_profiles"
+      ],
+      "owner": "libs/repro_cli_support",
+      "requiresReproBinary": true,
+      "source": "libs/repro_cli_support/tests/t_installed_prefix_nim_pin_wins.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_l5_environment_is_in_the_graph_cache_key",
       "class": "unclassified",
       "classificationReason": "mutates the process environment",
@@ -20402,7 +20421,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_profile_compile/tests/t_profile_compile_uses_the_installed_nim.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 1,
+      "staticCaseCount": 4,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -25000,14 +25019,15 @@
       "defines": [],
       "language": "nim",
       "localDependencyShape": [
-        "repro_test_support",
+        "repro_core",
+        "repro_interface_artifacts",
         "repro_tool_profiles"
       ],
       "owner": "libs/repro_tool_profiles",
       "requiresReproBinary": true,
       "source": "libs/repro_tool_profiles/tests/t_installed_prefix_nim_route.nim",
-      "sourceSuiteCount": 1,
-      "staticCaseCount": 7,
+      "sourceSuiteCount": 2,
+      "staticCaseCount": 10,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -30775,6 +30795,24 @@
       "owner": "tests/e2e",
       "requiresReproBinary": true,
       "source": "tests/e2e/dev-env/t_e2e_repro_exec_does_not_leak_engine_source_root.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 3,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_e2e_repro_exec_installed_prefix_nim",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_project_dsl",
+        "repro_test_support"
+      ],
+      "owner": "tests/e2e",
+      "requiresReproBinary": true,
+      "source": "tests/e2e/dev-env/t_e2e_repro_exec_installed_prefix_nim.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 3,
       "staticallyDetectedRuntimeCompilerFlow": false,
