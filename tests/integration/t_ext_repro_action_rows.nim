@@ -141,8 +141,8 @@ proc runBuild(projectRoot, tempRoot, workName, socketPath: string): string =
   ## AND THAT IS CHECKED, NOT ASSUMED, because two silent fallbacks end in
   ## the same "no rows" as a lost row. When the daemon named by
   ## ``RUNQUOTA_SOCKET`` does not answer the handshake, the engine either
-  ## auto-spawns a private ``runquotad`` at ``$TMPDIR/reprobuild-runquota-
-  ## <pid>/`` and leases from THAT one (its rows land in a store this test
+  ## auto-spawns a private ``runquotad`` in a fresh
+  ## ``$TMPDIR/reprobuild-runquota-<pid>-<random>/`` and leases from THAT one (its rows land in a store this test
   ## never queries), or, under ``--tool-provisioning=path``, bypasses
   ## RunQuota altogether. Both are silent under ``--log=quiet``. Run 33
   ## failed with ``no ext_repro_action row for m17-copy-0`` after a

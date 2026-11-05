@@ -25706,6 +25706,41 @@ when not defined(windows):
       restoreRunQuotaEnvironment(ownedRunQuotaEnvironments[pid])
       ownedRunQuotaEnvironments.del(pid)
 
+  var ownedRunQuotaEndpointDirs {.threadvar.}: Table[int, string]
+    ## The rendezvous directory `createPrivateRunQuotaEndpoint` made for each
+    ## owned daemon, keyed by the daemon's pid. This invocation created it, so
+    ## this invocation removes it -- once the daemon has been reaped, never
+    ## while it may still be listening there.
+
+  proc removeRunQuotaEndpointDir(directory: string) =
+    ## Remove a rendezvous directory this invocation created. The daemon
+    ## unlinks its socket on an orderly shutdown and leaves its published
+    ## stats table beside it, so the removal is recursive. A failure is
+    ## reported and does not fail the build: the directory's name is unique,
+    ## so a leftover one can never be chosen by a later invocation.
+    try:
+      # A real directory, or nothing. `removeDir` follows a symlink at the top,
+      # so a path that has become one is reported and left alone rather than
+      # emptying whatever it points at.
+      let info = getFileInfo(directory, followSymlink = false)
+      if info.kind != pcDir:
+        stderr.writeLine("repro: warning: RunQuota endpoint directory " &
+          directory & " is no longer a directory; not removing it")
+        return
+      removeDir(directory)
+    except OSError as error:
+      if not (symlinkExists(directory) or dirExists(directory) or
+          fileExists(directory)):
+        return # already gone: nothing of ours is left there
+      stderr.writeLine("repro: warning: could not remove RunQuota endpoint " &
+        "directory " & directory & ": " & error.msg)
+
+  proc removeOwnedRunQuotaEndpointDir(pid: int) =
+    ## Called only after the daemon `pid` names has been reaped.
+    if ownedRunQuotaEndpointDirs.hasKey(pid):
+      removeRunQuotaEndpointDir(ownedRunQuotaEndpointDirs[pid])
+      ownedRunQuotaEndpointDirs.del(pid)
+
   const runQuotaExitWithParentEnvVar = "RUNQUOTA_EXIT_WITH_PARENT"
     ## Read by `runquotad` (runquota `runquota_daemon/parent_watch`): `1`
     ## makes the daemon stop, through its orderly SIGTERM shutdown, when its
@@ -26073,14 +26108,23 @@ proc startAutoRunQuotaIfNeeded*(bypassRunQuota: bool): owned(Process) =
   # unset on Windows so child actions (which inherit the daemon's
   # env) likewise hit the default endpoint.
   #
-  # POSIX: a per-PID Unix socket, but inside a DIRECTORY OF ITS OWN
-  # rather than loose in ``$TMPDIR``. The socket's parent directory is
-  # the rendezvous point that ``runquotad`` verifies before binding and
-  # every client verifies before connecting, and a shared ``/tmp`` is
-  # root-owned ``1777``, which fails both halves — the daemon exits
-  # before it listens and the build dies with the refusal in its log.
-  # ``runquotaEndpointPath`` owns that rule; see its docs for why the
-  # answer is a private directory and not a laxer check.
+  # POSIX: a Unix socket inside a DIRECTORY OF ITS OWN rather than loose
+  # in ``$TMPDIR``. The socket's parent directory is the rendezvous point
+  # that ``runquotad`` verifies before binding and every client verifies
+  # before connecting, and a shared ``/tmp`` is root-owned ``1777``, which
+  # fails both halves — the daemon exits before it listens and the build
+  # dies with the refusal in its log. ``runquotaEndpointPath`` owns that
+  # rule; see its docs for why the answer is a private directory and not a
+  # laxer check.
+  #
+  # The directory is CREATED FRESH for this invocation
+  # (``createPrivateRunQuotaEndpoint``), never derived from our pid: a
+  # daemon that was killed leaves its socket behind, a later invocation
+  # that is handed the same pid would be led to it, and the private bind
+  # refuses an endpoint that already exists. The pid stays in the name only
+  # so an operator can tell which invocation a directory belonged to. It is
+  # removed once the daemon has been reaped (``releaseAutoRunQuotaProcess``
+  # and the failed-startup path below).
   # THE BUDGET IS THE HOST'S, NOT THIS COMMAND'S. No CPU, memory or pool
   # flag is passed (``autoRunQuotaBudgetArgs``): the daemon reads the host
   # file and its own defaults exactly as the installed service does, and a
@@ -26099,8 +26143,9 @@ proc startAutoRunQuotaIfNeeded*(bypassRunQuota: bool): owned(Process) =
     let socket = ""
   else:
     let previousRunQuotaEnvironment = saveRunQuotaEnvironment()
-    let socket = runquotaEndpointPath(
-      "reprobuild-runquota-" & $getCurrentProcessId())
+    let socket = createPrivateRunQuotaEndpoint(
+      "reprobuild-runquota-" & $getCurrentProcessId() & "-")
+    let endpointDir = socket.parentDir
     var args = @["--socket", socket]
     args.add(budget.args)
     putEnv("RUNQUOTA_SOCKET", socket)
@@ -26124,12 +26169,16 @@ proc startAutoRunQuotaIfNeeded*(bypassRunQuota: bool): owned(Process) =
     try:
       result = spawnOwnedRunQuotaDaemon(runquotad, args)
       ownedRunQuotaEnvironments[processID(result)] = previousRunQuotaEnvironment
+      ownedRunQuotaEndpointDirs[processID(result)] = endpointDir
       prepareStartupOutput(cint(result.outputHandle))
       prepareStartupOutput(cint(result.errorHandle))
     except CatchableError:
       if result != nil:
         releaseAutoRunQuotaProcess(result)
       restoreRunQuotaEnvironment(previousRunQuotaEnvironment)
+      # No daemon of ours is left that could be listening there: either none
+      # was spawned, or the release above reaped it.
+      removeRunQuotaEndpointDir(endpointDir)
       raise
     var startupStdout, startupStderr: StartupOutput
   var readinessError = ""
@@ -26180,8 +26229,9 @@ proc startAutoRunQuotaIfNeeded*(bypassRunQuota: bool): owned(Process) =
       # on a given host is exactly the set of builds that take THIS branch:
       #
       #   * LINUX, unprovisioned host: every top-level `repro build` spawns,
-      #     because the socket is per-PID (`reprobuild-runquota-<pid>`) and the
-      #     daemon ends with the invocation that started it, however that
+      #     because the socket is per-invocation (a fresh
+      #     `reprobuild-runquota-<pid>-<random>` directory) and the daemon
+      #     ends with the invocation that started it, however that
       #     invocation ends (`releaseAutoRunQuotaProcess` on a return or a
       #     raise, signal forwarding and the daemon's own parent watch
       #     otherwise; see `spawnOwnedRunQuotaDaemon`), so no daemon survives
@@ -26245,6 +26295,7 @@ proc startAutoRunQuotaIfNeeded*(bypassRunQuota: bool): owned(Process) =
     drainStartupOutput(startupStdout, cint(result.outputHandle))
     drainStartupOutput(startupStderr, cint(result.errorHandle))
     restoreOwnedRunQuotaEnvironment(processID(result))
+    removeOwnedRunQuotaEndpointDir(processID(result))
   try:
     result.close()
   except CatchableError:
@@ -26281,8 +26332,9 @@ proc releaseAutoRunQuotaProcess*(process: var owned(Process)) =
   if process == nil:
     return
   when not defined(windows):
-    unregisterOwnedDaemon(processID(process))
-    restoreOwnedRunQuotaEnvironment(processID(process))
+    let pid = processID(process)
+    unregisterOwnedDaemon(pid)
+    restoreOwnedRunQuotaEnvironment(pid)
   try:
     when not defined(windows):
       process.terminate()
@@ -26290,6 +26342,10 @@ proc releaseAutoRunQuotaProcess*(process: var owned(Process)) =
     process.close()
   except CatchableError:
     discard
+  when not defined(windows):
+    # After the reap, so the daemon is never left listening in a directory
+    # that has been removed from under it.
+    removeOwnedRunQuotaEndpointDir(pid)
   process = nil
 
 proc runDepsRefreshCommand(args: openArray[string]): int =

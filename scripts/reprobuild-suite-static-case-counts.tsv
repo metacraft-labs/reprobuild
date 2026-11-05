@@ -1550,7 +1550,7 @@ tests/integration/t_attestation_report.nim	nim	3
 tests/integration/t_attested_image_manifest.nim	nim	4
 tests/integration/t_authenticated_inference_binding_mutations.nim	nim	26
 tests/integration/t_auto_runquota_daemon_ends_with_its_invocation.nim	nim	12
-tests/integration/t_auto_runquota_uses_private_endpoint_policy.nim	nim	10
+tests/integration/t_auto_runquota_uses_private_endpoint_policy.nim	nim	12
 tests/integration/t_autotools_configure_cache.nim	nim	1
 tests/integration/t_autotools_configure_tools.nim	nim	1
 tests/integration/t_b0_develop_mode_uses_local_source.nim	nim	1
@@ -2624,7 +2624,7 @@ tests/unit/t_role_validation_refused_at_manifest_load.nim	nim	7
 tests/unit/t_root_repo_resolves_from_workspace_settings.nim	nim	1
 tests/unit/t_run_consumes.nim	nim	10
 tests/unit/t_runner_closes_merged_pipes_once.nim	nim	4
-tests/unit/t_runquota_endpoint_paths.nim	nim	6
+tests/unit/t_runquota_endpoint_paths.nim	nim	11
 tests/unit/t_runquota_grant_wait_unresponsive.nim	nim	11
 tests/unit/t_runquota_grant_wait_wedged_connected.nim	nim	2
 tests/unit/t_runquota_queue_wait_is_loud_and_bounded.nim	nim	15

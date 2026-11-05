@@ -36176,7 +36176,7 @@
       "requiresReproBinary": false,
       "source": "tests/integration/t_auto_runquota_uses_private_endpoint_policy.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 10,
+      "staticCaseCount": 12,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -55307,8 +55307,8 @@
       "owner": "tests/unit",
       "requiresReproBinary": false,
       "source": "tests/unit/t_runquota_endpoint_paths.nim",
-      "sourceSuiteCount": 1,
-      "staticCaseCount": 6,
+      "sourceSuiteCount": 2,
+      "staticCaseCount": 11,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
