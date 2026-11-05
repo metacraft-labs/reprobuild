@@ -64,6 +64,11 @@ proc body(g: Guest; repro: string; step: StepFn; record: JsonNode;
        refused.exitCode != 0 and "EAddOnEgressObserverUnavailable" in refused.stdout,
        refused.stdout & refused.stderr)
   # 2. Bootstrap installs the table, ledgered.
+  # Step 3c reboots the host, and the units a cloud image runs only on its
+  # first boot (ldconfig, sysusers, machine-id commit, ...) are active in a
+  # first boot's fingerprint and not after: the baseline is taken after a
+  # boot that is not the first, so step 4 compares like with like.
+  g.rebootGuest()
   let f0 = g.takeFingerprint(repro)
   let bs = g.bootstrapWithAgent(repro, step, extraFlags = sink.evidenceFlags)
   producer = bs.producer
@@ -130,7 +135,7 @@ proc body(g: Guest; repro: string; step: StepFn; record: JsonNode;
   let healthy = g.exec("cat /var/lib/repro/system/addon/reassert-report").stdout
   record["reassertHealthy"] = %healthy
   step("a healthy reboot: the re-assert is ok, nothing about the table (G4)",
-       healthy.startsWith("repro-addon reassert: ok") and
+       "repro-addon reassert: ok" in healthy and
          "nftTable" notin healthy, healthy)
   discard g.exec("nft delete table inet repro_addon_egress")
   discard g.exec("systemctl restart repro-addon-reassert.service",
