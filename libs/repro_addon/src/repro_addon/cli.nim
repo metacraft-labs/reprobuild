@@ -62,6 +62,7 @@ import ./apt_hook
 import ./base_identity
 import ./bootstrap
 import ./collision
+import ./containment
 import ./evidence_ship
 import ./evidence_enrol
 import ./egress_observer
@@ -106,6 +107,12 @@ commands:
       the attestation key and the sink write credential (never adopting or
       replacing a key), and apply generation 0's evidence objects -- and,
       with the deploy agent, its egress observer -- as one switch.
+  evidence-enrol --rekey [--no-handover]
+      Replace an enrolled host's attestation key and sink credential (spec
+      §13 decision 50): the old key signs a hand-over to the new ones, which
+      is shipped with the old credential before anything is replaced; then
+      one switch names the new keys. --no-handover, when the old key may be
+      compromised: no hand-over; enrol the new key at the sink by hand.
   store-verify [--background] [--adopt-unverified]
       Hash every store path the current generation uses and compare it with
       the digest it was realised with; quarantine an altered one (DET-AO-5).
@@ -118,7 +125,8 @@ commands:
   evidence-credential-check
       Test this host's sink write credential: an append must succeed and a
       list, a read, an overwrite and a delete must each be refused. Exit 0
-      only then.
+      only then. It announces itself first, so the sink's check reads it as
+      a self-test, not as a probe (G34).
   uninstall [--keep-store]
       Reverse everything the ownership ledger records.
   verify [--boot | --after-dpkg]
@@ -176,6 +184,14 @@ commands:
       Let the deploy agent converge again after a local rollback paused it
       (spec §9.3): removes the pause marker of every agent the rollback
       paused. Exits 0 whether or not one was there.
+  contain --operator NAME --reason TEXT
+      Contain the host (spec §13 decision 49): record and ship a signed
+      operator-contained record, then stop and mask the deploy agent's
+      fetch and apply units (re-masked at every boot until release). The
+      off-host check then reports the agent "contained", not silent.
+  release --operator NAME --reason TEXT
+      Record and ship operator-released, unmask the agent's units and start
+      its fetch timer again.
   fingerprint [--root R] [--no-live] [--out F]
   fingerprint diff <before> <after> [--except C:GLOB]... [--expect F]
       Record the base fingerprint, or compare two.
@@ -486,6 +502,10 @@ proc runAddonCli*(args: seq[string]): int =
         if a == "--boot" and cmd == "reassert": atBoot = true
         else: raise newException(ValueError, "unknown option " & a)
       if atBoot:
+        # A contained host stays contained across the reboot (decision 49):
+        # the runtime masks are gone, so they are put back first.
+        try: discard reapplyContainment()
+        except CatchableError: discard
         # The boot unit: never fails the boot transaction, whatever it finds.
         try:
           stdout.write(renderReassert(runAddonReassert(DefaultStateDir,
@@ -528,6 +548,10 @@ proc runAddonCli*(args: seq[string]): int =
       return runAgentApplyCli(rest)
     of "resume":
       return runResumeCli(rest)
+    of "contain":
+      return runContainCli(rest)
+    of "release":
+      return runContainCli(rest, release = true)
     of "agent-repin":
       return runAgentRepinCli(rest)
     of "migration-plan":

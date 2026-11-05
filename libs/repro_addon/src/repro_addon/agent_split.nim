@@ -52,6 +52,7 @@ import ./addon_secrets
 import ./agent_checks
 import ./agent_record
 import ./agent_switch
+import ./containment
 import repro_local_store/store
 import ./store_custody
 import ./apt_hook
@@ -707,6 +708,11 @@ type AgentApplyContext* = object
   refusalPayload*: string
   refusalRecorded*: bool
     ## The refusal already left its own record (the compiled-profile pin).
+  stagingCopy*: string
+    ## Where a refused staging copy will be preserved, chosen before the
+    ## tick so its record can name it (A11 drill D6).
+  compiler*: string
+  compilerSha256*: string
 
 proc refuse(ctx: ptr AgentApplyContext; why: string; payload = "";
             recorded = false): tuple[ok: bool; message: string] =
@@ -829,17 +835,22 @@ const RefusedStagingKeep* = 4
 
 proc refusedStagingRoot*(): string = AgentDir / "refused"
 
-proc preserveRefusedStaging*(copyDir: string): string =
+proc plannedRefusedStaging*(): string =
+  ## The name the next refused staging copy will be kept under.
+  refusedStagingRoot() / (format(getTime(), "yyyyMMdd'T'HHmmss") & "-" &
+                          $getTime().nanosecond)
+
+proc preserveRefusedStaging*(copyDir: string; dest = ""): string =
   ## Move the apply unit's copy of a refused staging area under
-  ## ``refusedStagingRoot`` and return where it went ("" when it could not
-  ## be kept).
+  ## ``refusedStagingRoot`` (at ``dest`` when given: the name its record
+  ## already carries) and return where it went ("" when it could not be
+  ## kept).
   if copyDir.len == 0 or not dirExists(copyDir): return ""
   try:
     let root = refusedStagingRoot()
     createDir(root)
     setFilePermissions(root, {fpUserRead, fpUserWrite, fpUserExec})
-    result = root / (format(getTime(), "yyyyMMdd'T'HHmmss") & "-" &
-                     $getTime().nanosecond)
+    result = if dest.len > 0: dest else: plannedRefusedStaging()
     moveDir(copyDir, result)
     var kept: seq[string]
     for kind, p in walkDir(root):
@@ -854,7 +865,9 @@ proc preserveRefusedStaging*(copyDir: string): string =
 proc refusalOf(ctx: AgentApplyContext): TickRefusal =
   TickRefusal(refusal: ctx.refusal, payload: ctx.refusalPayload,
     recorded: ctx.refusalRecorded,
-    manifestPayload: stagedText(ctx.copyDir, StagedManifestName))
+    manifestPayload: stagedText(ctx.copyDir, StagedManifestName),
+    stagingCopy: ctx.stagingCopy, compiler: ctx.compiler,
+    compilerSha256: ctx.compilerSha256)
 
 proc tickDetection*(t: RecordedTick; ctx: AgentApplyContext):
     tuple[found: bool; detector: AddonDetector; trigger: string;
@@ -968,12 +981,24 @@ proc runAgentApplyCli*(args: seq[string]): int =
   if args.len != 0:
     stderr.write("usage: repro system addon agent-apply\n")
     return 2
+  if isContained():
+    # An operator contained the host (decision 49): the apply unit is masked;
+    # should anything start it regardless, it applies nothing.
+    stderr.write("repro system addon agent-apply: the host is contained by " &
+      "an operator (" & containedMarkerPath() & "); nothing was applied\n")
+    return 0
   var conf: AgentConf
   try: conf = loadAgentConf()
   except CatchableError as e:
     stderr.write("repro system addon agent-apply: " & e.msg & "\n")
     return 2
-  var ctx = AgentApplyContext(copyDir: applyCopyDir() / "current")
+  var ctx = AgentApplyContext(copyDir: applyCopyDir() / "current",
+    stagingCopy: plannedRefusedStaging())
+  # The compiler the fetch unit runs, as this unit reads it (RESP-1, D6).
+  if conf.profileCompiler.len > 0:
+    ctx.compiler = conf.profileCompiler
+    ctx.compilerSha256 = try: sha256OfFile(conf.profileCompiler)
+                         except CatchableError: "(unreadable)"
   try:
     discard copyLatestStaging(applyStagingRoot(), ctx.copyDir)
   except CatchableError as e:
@@ -1000,7 +1025,8 @@ proc runAgentApplyCli*(args: seq[string]): int =
   # keeping it would hold a second copy of every staged archive until the
   # next tick -- unless the apply refused it, when it is what an
   # investigation needs (EVID-5) and is kept, bounded.
-  if ctx.refusal.len > 0: discard preserveRefusedStaging(ctx.copyDir)
+  if ctx.refusal.len > 0:
+    discard preserveRefusedStaging(ctx.copyDir, ctx.stagingCopy)
   try: removeDir(ctx.copyDir) except CatchableError: discard
   when mutated("agent-floor-in-fetch-state"):
     # The floor belongs to the fetch unit there, as anything in its state

@@ -25,13 +25,22 @@
 ##    Without the hold, the drill's own scripted investigation runs: it
 ##    finds the refusal by its sink sequence, the payload in it, and the
 ##    preserved staged copy on the guest.
-## 5. ``containment``: the fetch timer is stopped (no more network-fed
-##    input), the preserved staging copy is taken off the host (EVID-5),
-##    and the host is shown on its last good generation with the payload
-##    absent.
-## 6. ``recovery``: the honest compiler is restored, the producer publishes
-##    sequence 3, it applies; the off-host check finds the new generation's
-##    attestation matching the producer's publication and the host live.
+## 5. ``containment``: ``repro system addon contain`` -- its signed record
+##    reaches the sink before the agent stops; the fetch timer and units are
+##    masked; the off-host check reports the agent ``contained``, not
+##    silent, even after its silence window; the preserved staging copy the
+##    refusal record names is taken off the host (EVID-5); the host is shown
+##    on its last good generation with the payload absent. The investigator
+##    acknowledges the refusal at the sink (``repro-evidence-sink ack``).
+## 6. ``recovery``: the honest compiler is restored, ``repro system addon
+##    release`` resumes the agent, the producer publishes sequence 3 and the
+##    natural tick applies it; the documented off-host check, run as the
+##    user guide prints it, exits 0 with the refusal listed as handled.
+##
+## The drill runs the host as a host runs: the fetch timer and the
+## shipping path unit do the work; the gate never starts the shipping unit,
+## never stops the fetch timer and never resets a unit (A11 drill finding
+## D8). Its waits are for records at the sink.
 ##
 ## The record (``build/addon-gates/records/``) is the drill report's
 ## evidence: ``reprobuild-pm/spec/Test-Designs`` holds the report
@@ -47,6 +56,7 @@ import std/[json, os, sequtils, strutils, times, unittest]
 import repro_test_support/reasoned_skip
 import repro_deploy_agent/manifest
 import repro_peer_cache/evidence
+import repro_peer_cache/types
 
 import repro_addon/evidence_check
 
@@ -100,19 +110,28 @@ proc body(g: Guest; repro: string; step: StepFn; record: JsonNode;
   let prod = producer
   let host = g.enrol(sink)
   let signers = g.runDir / "deploy-signers.anchors"
+  let drill = g.runDir / "drill"
+  createDir(drill)
+  writeFile(drill / "hosts", host & " " & AgentTarget & "\n")
   proc publish(sequence: uint64) =
     let bytes = prod.publish(PublishSpec(sequence: sequence,
       profileText: "import repro_profile\n# drill source (" & $sequence & ")\n",
       compiledProfile: pinOf(Honest)))
     sink.archive(bytes, sequence)
-  proc ship() = discard g.exec("systemctl start repro-addon-evidence.service")
+  # The user guide's check, spelled as the guide spells it (space-separated
+  # options, D2).
+  let checkCmd = "addon-check --dir " & quoteShell(sink.storeDir) &
+    " --hosts " & quoteShell(drill / "hosts") & " --manifests " &
+    quoteShell(sink.published) & " --deploy-signers " & quoteShell(signers)
+  # The host runs on its own from here: its fetch timer, its path unit.
+  discard g.exec("systemctl start repro-agent-fetch.timer")
+  let waitSec = 6 * GatePollSec + 60
 
   # 1. setup
+  let s0 = sink.headSeq()
   publish(1)
-  let t1 = g.tickUnits()
-  step("setup: sequence 1 applies through the honest compile",
-       t1.outcome == "aoApplied", $t1)
-  ship()
+  step("setup: sequence 1 applies through the honest compile, by the timer",
+       sink.waitFor(host, "addon-apply", "applied", waitSec, since = s0), "")
   let fp0 = g.takeFingerprint(repro)
   phase("setup", %*{"sinkHost": sink.hostId, "guestHost": host,
                     "sinkStore": sink.storeDir})
@@ -120,51 +139,54 @@ proc body(g: Guest; repro: string; step: StepFn; record: JsonNode;
   # 2. compromise: the planted payload.
   let before = sink.headSeq()
   g.installCompiler(Planted)
+  let compilerSha = g.exec("sha256sum " & Compiler & " | cut -d' ' -f1").stdout.strip()
   publish(2)
   phase("compromise", %*{"payload": Planted, "payloadPath": "/etc/cron.d/a11-drill"})
 
-  # 3. detection
-  let t2 = g.tickUnits()
-  discard g.exec("systemctl reset-failed repro-agent-apply.service")
-  step("detection: the apply unit refuses the planted set",
-       t2.outcome == "aoApplyFailed" and "EAddOnCompiledProfile" in t2.message, $t2)
-  ship()
-  step("detection: the refusal left the host", sink.waitFor(host,
-       "addon-apply-refusal", "addon-staging-refused", 180, since = before), "")
+  # 3. detection: shipped by the path unit alone (D1).
+  step("detection: the refusal left the host by itself", sink.waitFor(host,
+       "addon-apply-refusal", "addon-staging-refused", waitSec, since = before), "")
   var evidenceIds: seq[uint64]
   var payloadSeen = false
+  var stagingCopy, recCompiler, recCompilerSha = ""
   for e in sink.entries():
     if e.seq > before and e.kind == ekRecord and
         e.record.trigger == "addon-staging-refused":
       evidenceIds.add(e.seq)
       payloadSeen = payloadSeen or cast[string](e.record.payload) == Planted
+      stagingCopy = e.record.field("stagingCopy")
+      recCompiler = e.record.field("compiler")
+      recCompilerSha = e.record.field("compilerSha256")
   step("detection: the record carries the planted bytes (EVID-1)", payloadSeen, "")
-  let alerts = sink.check(host, signers).alerts.filterIt(
-    it.detector == "DET-AO-2" and it.sinkSeq > before)
-  step("detection: the off-host check raises DET-AO-2", alerts.len > 0,
-       render(sink.check(host, signers)))
-  phase("detection", %*{"evidenceIds": evidenceIds,
-                        "alerts": alerts.mapIt(it.trigger)})
+  step("detection: the record names its staging copy and the compiler (D6)",
+       stagingCopy.startsWith("/var/lib/repro/agent/refused/") and
+         recCompiler == Compiler and recCompilerSha == compilerSha,
+       stagingCopy & " " & recCompiler & " " & recCompilerSha)
+  let c1 = sink.sinkCli(checkCmd)
+  step("detection: the documented off-host check raises DET-AO-2 (exit 1)",
+       c1.code == 1 and "DET-AO-2" in c1.output, c1.output)
+  phase("detection", %*{"evidenceIds": evidenceIds})
 
   # 4. investigation
-  let drill = g.runDir / "drill"
-  createDir(drill)
   if getEnv("REPRO_ADDON_DRILL_HOLD") == "1":
     writeFile(drill / "README",
       "Add-on drill: investigation hold.\n\n" &
+      "Follow docs/user-guide/addon-evidence.md, \"Responding to a detection\".\n" &
       "Sink store (read it locally): " & sink.storeDir & "\n" &
-      "Sink tool: " & sinkBinary() & " read --dir=" & sink.storeDir & "\n" &
-      "Off-host check: " & sinkBinary() & " addon-check --dir=" &
-        sink.storeDir & " --hosts=" & drill / "hosts" & " --manifests=" &
-        sink.published & " --deploy-signers=" & signers & " --update-hosts\n" &
+      "Sink tool: " & sinkBinary() & " read --dir " & sink.storeDir & "\n" &
+      "A record's payload: " & sinkBinary() & " payload --dir " & sink.storeDir &
+        " --seq <n>\n" &
+      "Off-host check: " & sinkBinary() & " " & checkCmd & " --update-hosts\n" &
+      "Acknowledge a handled detection: " & sinkBinary() & " ack --dir " &
+        sink.storeDir & " --seq <n> --operator <you> --reason <text>\n" &
       "Evidence ids of the detection: " & evidenceIds.mapIt($it).join(" ") & "\n" &
       "Run a command in the guest: write " & drill / "requests/<n>.sh" &
         " and read <n>.out\n" &
       "Copy a guest path out: write the path to " & drill / "requests/<n>.copy" & "\n" &
-      "Preserved staging on the guest: /var/lib/repro/agent/refused/\n" &
-      "Containment and recovery run after you create " & drill / "continue" &
-        " (or do them yourself first; the drill checks the result).\n")
-    writeFile(drill / "hosts", host & " " & AgentTarget & "\n")
+      "Contain: repro system addon contain --operator <you> --reason <text>\n" &
+      "The drill's own containment and recovery run after you create " &
+        drill / "continue" & " (or do them yourself first; the drill " &
+        "checks the result).\n")
     let holdSec = try: parseInt(getEnv("REPRO_ADDON_DRILL_HOLD_SEC", "14400"))
                   except ValueError: 14400
     echo "drill: holding for the investigator; see ", drill / "README"
@@ -173,46 +195,113 @@ proc body(g: Guest; repro: string; step: StepFn; record: JsonNode;
          fileExists(drill / "continue"), "hold timed out")
     if fileExists(drill / "findings.json"):
       record["investigatorFindings"] = parseJson(readFile(drill / "findings.json"))
-  else:
-    let refused = g.exec("ls -1 /var/lib/repro/agent/refused/").stdout.strip()
-    step("investigation: the refused staging copy is preserved on the host",
-         refused.len > 0, refused)
+  let shown = sink.sinkCli("payload --dir " & quoteShell(sink.storeDir) &
+    " --seq " & $evidenceIds[0])
+  step("investigation: the sink shows the captured payload, marked untrusted (D3)",
+       shown.code == 0 and "BEGIN UNTRUSTED PAYLOAD" in shown.output and
+         "/run/a11-drill-owned" in shown.output, shown.output)
+  step("investigation: the refused staging copy the record names is preserved",
+       g.exec("test -d " & quoteShell(stagingCopy)).exitCode == 0, stagingCopy)
   phase("investigation")
 
   # 5. containment
-  discard g.exec("systemctl stop repro-agent-fetch.timer")
+  let beforeContain = sink.headSeq()
+  let ct = g.exec(repro & " system addon contain --operator drill " &
+    "--reason " & quoteShell("compromised profile compiler"), timeoutSec = 600)
+  step("containment: contain succeeds and its record reached the sink first",
+       ct.exitCode == 0 and "reached the sink" in ct.stdout and
+         sink.waitFor(host, "addon-containment", "operator-contained", 60,
+                      since = beforeContain), ct.stdout & ct.stderr)
+  step("containment: the fetch timer and the agent units are masked",
+       g.exec("systemctl is-enabled repro-agent-fetch.timer").stdout.strip() ==
+         "masked-runtime" and
+       g.exec("systemctl is-active repro-agent-fetch.timer").stdout.strip() !=
+         "active", g.exec("systemctl status repro-agent-fetch.timer " &
+           "--no-pager | head -5").stdout)
   let snap = drill / "snapshot"
   createDir(snap)
   try:
-    g.copyFrom("/var/lib/repro/agent/refused", snap)
+    g.copyFrom(stagingCopy, snap)
     step("containment: the preserved staging copy is off the host",
          walkDirRec(snap).toSeq.len > 0, snap)
   except CatchableError as e:
     step("containment: the preserved staging copy is off the host", false, e.msg)
   step("containment: the payload never landed",
        g.exec("test ! -e /etc/cron.d/a11-drill && test ! -e /run/a11-drill-owned").exitCode == 0, "")
-  let id = identityReport(fp0, g.takeFingerprint(repro))
-  step("containment: the host is on its last good generation (fingerprint unchanged)",
-       id.ok, id.text)
+  # The agent's units are the only difference containment makes: masked,
+  # stopped and with no failed state (``contain`` clears it, D8).
+  let id = identityReport(fp0, g.takeFingerprint(repro), [
+    "unit-files:repro-agent-fetch.timer", "unit-files:repro-agent-fetch.service",
+    "unit-files:repro-agent-apply.service", "active-units:repro-agent-fetch.timer",
+    "active-units:repro-agent-fetch.service",
+    "active-units:repro-agent-apply.service"])
+  step("containment: the host is on its last good generation (fingerprint " &
+       "unchanged but for the contained agent units)", id.ok, id.text)
+  # Silence past the tick's window: contained, not silent.
+  sleep((3 * GatePollSec + 60) * 1000)
+  let c2 = sink.sinkCli(checkCmd)
+  step("containment: the check reports the agent contained, not silent (D5)",
+       "addon-agent-tick contained" in c2.output and
+         "DET-AO-8 silent addon-agent-tick" notin c2.output, c2.output)
+  # Every refused tick before the containment raised its own DET-AO-2 (the
+  # timer kept fetching the compromised compile): the investigator
+  # acknowledges each, by the sequences the check printed.
+  var refusals: seq[uint64]
+  for e in sink.entries():
+    if e.seq > before and e.kind == ekRecord and $e.senderHostId == host and
+        e.record.category == ecDetection:
+      refusals.add(e.seq)
+  record["acknowledged"] = %refusals
+  for sq in refusals:
+    let ack = sink.sinkCli("ack --dir " & quoteShell(sink.storeDir) & " --seq " &
+      $sq & " --operator drill --reason " &
+      quoteShell("investigated: compromised compiler, contained"))
+    step("containment: the investigator acknowledges sequence " & $sq,
+         ack.code == 0, ack.output)
   phase("containment", %*{"snapshot": snap})
 
   # 6. recovery
   let beforeRecovery = sink.headSeq()
   g.installCompiler(Honest)
+  # The host's own credential self-test, as the user guide prints it, is
+  # part of the recovery check; it must not raise G34 alerts (D9).
+  let cc = g.exec(repro & " system addon evidence-credential-check")
+  step("recovery: the credential self-test passes", cc.exitCode == 0, cc.stdout)
+  let rl = g.exec(repro & " system addon release --operator drill " &
+    "--reason " & quoteShell("honest compiler restored"), timeoutSec = 600)
+  step("recovery: release succeeds and its record reached the sink",
+       rl.exitCode == 0 and sink.waitFor(host, "addon-containment",
+         "operator-released", 60, since = beforeRecovery), rl.stdout & rl.stderr)
   publish(3)
-  let t3 = g.tickUnits()
-  step("recovery: sequence 3 applies through the honest compile",
-       t3.outcome == "aoApplied", $t3)
-  discard g.exec("systemctl start repro-agent-fetch.timer")
-  ship()
-  discard sink.waitFor(host, "addon-apply", "applied", 180, since = beforeRecovery)
-  let r = sink.check(host, signers)
-  step("recovery: no attestation alert for the recovered generation",
-       not r.alerts.anyIt(it.detector == "DET-AO-9" and it.sinkSeq > beforeRecovery),
-       render(r))
-  step("recovery: the host's tick is live", r.statuses.anyIt(
-       it.detector == "addon-agent-tick" and it.status.startsWith("live")), render(r))
-  phase("recovery", %*{"alerts": r.alerts.mapIt(it.detector & "/" & it.trigger)})
+  step("recovery: sequence 3 applies through the honest compile, by the timer",
+       sink.waitFor(host, "addon-apply", "applied", waitSec,
+                    since = beforeRecovery), "")
+  # A tick heartbeat after the apply, so the tick reads live.
+  let afterApply = sink.headSeq()
+  discard sink.waitFor(host, "addon-agent-tick", "", waitSec, since = afterApply)
+  let c3 = sink.sinkCli(checkCmd)
+  record["recoveryCheck"] = %c3.output
+  step("recovery: the documented check exits 0, the refusal handled (D4)",
+       c3.code == 0 and "HANDLED" in c3.output and "ALERT" notin c3.output,
+       c3.output)
+  step("recovery: the credential self-test reads as one (D9)",
+       "sink-credential self-test" in c3.output, c3.output)
+  step("recovery: the host's tick is live",
+       "addon-agent-tick live" in c3.output, c3.output)
+  # Every record left the host as it landed (D1): none waited for the
+  # heartbeat timer (30 s here). The worst wait, from the record's writing
+  # on the host to its receipt at the sink.
+  var worst = (ms: 0'i64, seq: 0'u64, what: "")
+  for e in sink.entries():
+    if e.kind == ekRecord and $e.senderHostId == host and e.seq > s0 and
+        e.record.senderTimeMs > 0:
+      let d = e.receivedAtMs - e.record.senderTimeMs
+      if d > worst.ms:
+        worst = (d, e.seq, e.record.detector & "/" & e.record.trigger)
+  record["worstShipDelayMs"] = %worst.ms
+  step("every record left the host within 15 s of being written (D1)",
+       worst.ms < 15_000, $worst)
+  phase("recovery", %*{"check": c3.output})
 
 suite Gate:
   test "the drill: a compromised fetch unit, from detection to recovery":

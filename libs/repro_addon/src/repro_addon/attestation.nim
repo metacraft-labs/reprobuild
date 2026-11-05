@@ -265,3 +265,81 @@ proc currentAttestation*(stateDir, host: string;
   result.manifestProfileDigest = rec.profileDigest
   result.closuresDigest = rec.closuresDigest
   result.bootstrapDigest = readBootstrapDigest(stateDir)
+
+# ---------------------------------------------------------------------------
+# The hand-over of a host's evidence keys to new ones (spec §13 decision 50;
+# A11 drill finding D7).
+# ---------------------------------------------------------------------------
+
+const HandoverScope* = "reprobuild.addon.evidence-key-handover.v1"
+
+type
+  KeyHandover* = object
+    host*: string
+    oldKey*: string                ## the attestation key that signs it, hex
+    newKey*: string                ## the next attestation key, hex
+    newCredentialHost*: string     ## the next sink credential's host id
+    atMs*: int64
+
+proc handoverStatement*(h: KeyHandover): string =
+  "scope=" & HandoverScope & "\nhost=" & h.host & "\noldKey=" & h.oldKey &
+    "\nnewKey=" & h.newKey & "\nnewCredentialHost=" & h.newCredentialHost &
+    "\nat=" & $h.atMs & "\n"
+
+proc parseHandover*(text: string): KeyHandover =
+  var scope = ""
+  for line in text.splitLines():
+    let eq = line.find('=')
+    if eq <= 0: continue
+    let (k, v) = (line[0 ..< eq], line[eq + 1 .. ^1])
+    case k
+    of "scope": scope = v
+    of "host": result.host = v
+    of "oldKey": result.oldKey = v.toLowerAscii()
+    of "newKey": result.newKey = v.toLowerAscii()
+    of "newCredentialHost": result.newCredentialHost = v.toLowerAscii()
+    of "at":
+      try: result.atMs = parseBiggestInt(v) except ValueError: discard
+    else: discard
+  if scope != HandoverScope:
+    raise newException(AttestationError, "not a key hand-over statement")
+  if result.newKey.len == 0 or result.newCredentialHost.len != 64:
+    raise newException(AttestationError, "hand-over names no new key or " &
+      "credential")
+
+proc signHandover*(h: KeyHandover; keyPath = AttestationKeyPath):
+    tuple[statement, signature: string] =
+  ## Sign the hand-over with the CURRENT attestation key at ``keyPath``.
+  var kp: PeerKeypair
+  kp.privateKey = peerAuth.loadPrivateKeyFile(keyPath)
+  try:
+    kp.publicKey = peerAuth.derivePublicKey(kp.privateKey)
+    result.statement = handoverStatement(h)
+    result.signature = toHex(peerAuth.signMessage(kp,
+      cast[seq[byte]](result.statement)))
+  finally:
+    for i in 0 ..< kp.privateKey.len: kp.privateKey[i] = 0
+
+proc verifyHandover*(statement, signature, expectedKeyHex: string):
+    tuple[ok: bool; why: string; h: KeyHandover] =
+  ## The hand-over verifies when it is well-formed, names ``expectedKeyHex``
+  ## (the enrolled key) as its old key, and that key signed it.
+  try: result.h = parseHandover(statement)
+  except AttestationError as e: return (false, e.msg, result.h)
+  if expectedKeyHex.len == 0:
+    return (false, "no attestation key is enrolled for the host", result.h)
+  if result.h.oldKey != expectedKeyHex.toLowerAscii():
+    return (false, "the hand-over names another old key", result.h)
+  var sig: SignatureBytes
+  try:
+    let raw = fromHex(signature, sig.len, "hand-over signature")
+    for i in 0 ..< sig.len: sig[i] = raw[i]
+  except AttestationError as e: return (false, e.msg, result.h)
+  let key = try: publicKeyOf(expectedKeyHex)
+            except AttestationError as e: return (false, e.msg, result.h)
+  when mutated("handover-unverified"):
+    # FALSIFYING BUILD: any well-formed hand-over is followed.
+    return (true, "", result.h)
+  if not peerAuth.verifySignature(key, cast[seq[byte]](statement), sig):
+    return (false, "the hand-over signature does not verify", result.h)
+  (true, "", result.h)

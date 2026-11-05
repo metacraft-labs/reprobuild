@@ -579,6 +579,25 @@
 ##                                            bytes are deleted, not kept
 ## ``recovery-trusts-store-bytes``            a files prefix is recovered
 ##                                            from its own altered copy
+## ``evidence-path-changed-only``            the shipping path unit uses
+##                                            ``PathChanged=`` and a run
+##                                            lists the outbox once (D1)
+## ``sink-cli-equals-only``                   the sink's options parse
+##                                            only as ``--name=value`` (D2)
+## ``check-ignores-acks``                     an acknowledged detection
+##                                            still alerts (D4)
+## ``check-ignores-containment``              a contained host's agent
+##                                            reads as silent (D5)
+## ``contain-unsigned``                       the containment record is
+##                                            not attested (D5)
+## ``refusal-names-no-copy``                  the refusal record names no
+##                                            staging copy or compiler (D6)
+## ``handover-unverified``                    a key hand-over is followed
+##                                            unverified (D7)
+## ``check-ignores-probe-announcement``       the announced credential
+##                                            self-test alerts (D9)
+## ``sink-payload-unescaped``                 the sink prints a payload's
+##                                            bytes raw (D3)
 ## =========================================  ==============================
 
 # The deploy agent's own mutations (``repro_deploy_agent/agent_mutations``)
@@ -934,7 +953,14 @@ const
                           "custody-admits-undigested",
                           "custody-cache-ignores-signature",
                           "recovery-discards-evidence",
-                          "recovery-trusts-store-bytes"]
+                          "recovery-trusts-store-bytes",
+                          # The A11 drill's findings D1-D9.
+                          "evidence-path-changed-only",
+                          "sink-cli-equals-only", "check-ignores-acks",
+                          "check-ignores-containment", "contain-unsigned",
+                          "refusal-names-no-copy", "handover-unverified",
+                          "check-ignores-probe-announcement",
+                          "sink-payload-unescaped"]
 
 when AddonMutation.len > 0 and AddonMutation notin KnownAddonMutations and
     AddonMutation notin KnownAgentMutations:

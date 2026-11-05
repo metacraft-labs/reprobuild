@@ -5224,8 +5224,14 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
       for p in plans:
         if p.accountKey.len > 0 and p.r.kind in {srkPasswdUser, srkPasswdGroup}:
           declaredAccounts.incl(p.accountKey)
+      # An object a bootstrap entry of this switch names again (the keys an
+      # ``evidence-enrol --rekey`` replaced, decision 50) takes the new
+      # entry; the previous one is not carried.
+      var restated = initHashSet[string]()
+      for e in opts.bootstrapEntries: restated.incl($e.class & " " & e.path)
       for e in previous.entries:
         if e.resource.len > 0 or e.class == lcStaticLink: continue
+        if ($e.class & " " & e.path) in restated: continue
         if e.class == lcAccount and e.path in declaredAccounts:
           continue      # a passwd resource holds it now (its entry below)
         if e.class == lcUnitState and e.unitState.len == 0 and

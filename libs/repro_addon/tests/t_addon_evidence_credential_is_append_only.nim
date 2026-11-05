@@ -17,7 +17,7 @@
 ## Mocks: none (see ``addon_evidence_fixture``: the sink runs in this
 ## process so that the falsifying build of it is the one tested).
 
-import std/[os, strutils, unittest]
+import std/[sequtils, os, strutils, unittest]
 
 import repro_peer_cache/evidence
 import repro_peer_cache/types
@@ -66,13 +66,19 @@ suite "the Evidence sink write credential is append-only":
     for op in ForbiddenOperation:
       check verbOf(op) in verbs
 
-  test "the off-host check reports each probe of the sink (G34)":
+  test "the off-host check reads the announced probe as a self-test (G34)":
+    # The host announced its probe (``credential-probe``) before it: the
+    # four refusals are that test's answer, not four alerts (A11 drill D9).
+    # An unannounced probe still alerts (``t_addon_drill_findings``, D9).
     let r = runEvidenceCheck(CheckInputs(storeDir: sink.storeDir,
       hosts: @[EnrolledHost(hostId: a.credentialHost)], nowMs: 1))
     var probes = 0
     for al in r.alerts:
       if al.detector == "G34" and al.trigger == "sink-probe": inc probes
-    check probes == 4
+    checkpoint render(r)
+    check probes == 0
+    check r.statuses.anyIt(it.detector == "sink-credential" and
+                           it.status == "self-test")
 
   test "the credential is per host: another host's records carry its own id":
     sink.enrol(b)

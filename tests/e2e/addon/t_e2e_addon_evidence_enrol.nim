@@ -75,6 +75,33 @@ proc body(g: Guest; repro: string; step: StepFn; record: JsonNode;
   step("with the configuration aside, the existing keys alone refuse it",
        keys.exitCode != 0 and "existing evidence keys" in keys.stderr,
        keys.stdout & keys.stderr)
+  # Re-keying (spec §13 decision 50; A11 drill D7): the old key signs a
+  # hand-over, the sink follows it once the operator anchors the new
+  # credential, and the old id is retired.
+  let hostsFile = g.runDir / "hosts"
+  writeFile(hostsFile, host & " " & AgentTarget & "\n")
+  discard sink.sinkCli("addon-check --dir " & quoteShell(sink.storeDir) &
+    " --hosts " & quoteShell(hostsFile) & " --update-hosts")
+  let oldCert = g.exec("sha256sum " & GuestCredentialCert).stdout
+  let rk = g.exec(repro & " system addon evidence-enrol --rekey", timeoutSec = 1800)
+  step("evidence-enrol --rekey hands over and applies the new keys",
+       rk.exitCode == 0 and "on the sink" in rk.stdout and
+         g.exec("sha256sum " & GuestCredentialCert).stdout != oldCert,
+       rk.stdout & rk.stderr)
+  step("the hand-over, signed by the old key, reached the sink",
+       sink.waitFor(host, "addon-evidence-keys", "rekey-handover", 60), "")
+  let newHost = g.enrol(sink)
+  step("the new credential is another host id", newHost != host, newHost)
+  discard g.exec("systemctl start repro-addon-evidence.service")
+  step("records now arrive under the new id",
+       sink.waitFor(newHost, "addon-evidence-keys", "rekeyed", 180), "")
+  let up = sink.sinkCli("addon-check --dir " & quoteShell(sink.storeDir) &
+    " --hosts " & quoteShell(hostsFile) & " --update-hosts")
+  let hostsNow = readFile(hostsFile)
+  record["hostsAfterRekey"] = %hostsNow
+  step("--update-hosts follows the hand-over: new id enrolled, old retired",
+       newHost in hostsNow and (host & " ") in hostsNow and "retired@" in hostsNow,
+       hostsNow & up.output)
 
 suite Gate:
   test "evidence-enrol gives a pre-A11 host its sink":
