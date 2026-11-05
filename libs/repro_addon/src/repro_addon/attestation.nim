@@ -267,7 +267,7 @@ proc currentAttestation*(stateDir, host: string;
   result.bootstrapDigest = readBootstrapDigest(stateDir)
 
 # ---------------------------------------------------------------------------
-# The hand-over of a host's evidence keys to new ones (spec §13 decision 50;
+# The hand-over of a host's evidence keys to new ones (spec §13 decision 52;
 # A11 drill finding D7).
 # ---------------------------------------------------------------------------
 

@@ -5225,7 +5225,7 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
         if p.accountKey.len > 0 and p.r.kind in {srkPasswdUser, srkPasswdGroup}:
           declaredAccounts.incl(p.accountKey)
       # An object a bootstrap entry of this switch names again (the keys an
-      # ``evidence-enrol --rekey`` replaced, decision 50) takes the new
+      # ``evidence-enrol --rekey`` replaced, decision 52) takes the new
       # entry; the previous one is not carried.
       var restated = initHashSet[string]()
       for e in opts.bootstrapEntries: restated.incl($e.class & " " & e.path)

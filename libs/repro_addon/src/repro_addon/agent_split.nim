@@ -982,7 +982,7 @@ proc runAgentApplyCli*(args: seq[string]): int =
     stderr.write("usage: repro system addon agent-apply\n")
     return 2
   if isContained():
-    # An operator contained the host (decision 49): the apply unit is masked;
+    # An operator contained the host (decision 51): its units do not start;
     # should anything start it regardless, it applies nothing.
     stderr.write("repro system addon agent-apply: the host is contained by " &
       "an operator (" & containedMarkerPath() & "); nothing was applied\n")

@@ -62,7 +62,7 @@ type
       ## first time it sees them.
     retiredAt*: uint64
       ## 0, or the sink sequence after which this host id and its key are
-      ## retired (spec §13 decision 50): its keys were handed over to new
+      ## retired (spec §13 decision 52): its keys were handed over to new
       ## ones (``--update-hosts`` sets it to the hand-over's sequence), or an
       ## operator retired them as compromised. A record of it after that
       ## point, a hand-over among them, is an alert.
@@ -79,7 +79,7 @@ type
     detector*: string
     status*: string
       ## live-idle | live-detecting | silent | never-reported | stalled |
-      ## contained (by an operator, decision 49) | retired | self-test
+      ## contained (by an operator, decision 51) | retired | self-test
     detections*: int
     detail*: string
 
@@ -196,7 +196,7 @@ proc enrolFromStore*(hosts: seq[EnrolledHost]; storeDir: string):
           h.generation0 = e.record.field("generation")
           result.changed = true
         break
-  # Follow each verified hand-over of a host's keys (decision 50): the new
+  # Follow each verified hand-over of a host's keys (decision 52): the new
   # credential's host id is enrolled with the new key and the same target
   # and generation 0, and the old id is retired at the hand-over. A host
   # already retired follows none after that point.
@@ -497,7 +497,7 @@ proc runEvidenceCheck*(inp: CheckInputs): CheckReport =
                 a.generation & " (sequence " & $a.sequence & "): " &
                 diffs.join("; "))
 
-    # Containment (decision 49): the latest signed containment record. It
+    # Containment (decision 51): the latest signed containment record. It
     # holds only when the tick was live when it was recorded -- the last tick
     # heartbeat before it is within the silence window -- so a stop that came
     # first (an attacker who silenced the agent, then announced a

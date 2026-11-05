@@ -59,9 +59,9 @@ type
     edApply = "addon-apply"                  ## what a switch activated (audit)
     edBootstrap = "addon-bootstrap"          ## the first record (spec §6.2)
     edContainment = "addon-containment"      ## an operator's containment and
-                                             ## release (decision 49)
+                                             ## release (decision 51)
     edKeys = "addon-evidence-keys"           ## a hand-over of the evidence
-                                             ## keys (decision 50)
+                                             ## keys (decision 52)
     edShip = "addon-evidence-ship"           ## the shipping unit's heartbeat
 
   EvidenceSite* = object

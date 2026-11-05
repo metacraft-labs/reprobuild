@@ -1,7 +1,7 @@
 ## The A11 drill's findings (reprobuild-pm
 ## ``Measurements/2026-11-05-addon-a11-drill.md``), each held at unit level
 ## through the real Evidence sink, its real store and the real off-host
-## check (spec §13 decisions 49 and 50, §10.4):
+## check (spec §13 decisions 51 and 52, §10.4):
 ##
 ## * D1: a record that lands while a shipping run ships leaves with that
 ##   run, and the path unit starts the shipping unit on a non-empty outbox

@@ -1,5 +1,5 @@
 ## An operator's containment of an add-on host, and its release (spec §13
-## decision 49; A11 drill finding D5; RESP-4).
+## decision 51; A11 drill finding D5; RESP-4).
 ##
 ##   repro system addon contain --operator NAME --reason TEXT
 ##       1. records ``addon-containment`` / ``operator-contained`` (attested
@@ -91,7 +91,7 @@ const ContainDropInName* = "50-repro-contained.conf"
 proc containDropIn*(markerPath: string): string =
   "[Unit]\n" &
   "# Contained by an operator (repro system addon contain, spec §13\n" &
-  "# decision 49): nothing starts while the marker exists.\n" &
+  "# decision 51): nothing starts while the marker exists.\n" &
   "ConditionPathExists=!" & markerPath & "\n"
 
 proc writeContainDropIns(markerPath: string; runDir = "/run/systemd/system"):

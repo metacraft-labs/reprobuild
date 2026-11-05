@@ -109,7 +109,7 @@ commands:
       with the deploy agent, its egress observer -- as one switch.
   evidence-enrol --rekey [--no-handover]
       Replace an enrolled host's attestation key and sink credential (spec
-      §13 decision 50): the old key signs a hand-over to the new ones, which
+      §13 decision 52): the old key signs a hand-over to the new ones, which
       is shipped with the old credential before anything is replaced; then
       one switch names the new keys. --no-handover, when the old key may be
       compromised: no hand-over; enrol the new key at the sink by hand.
@@ -185,7 +185,7 @@ commands:
       (spec §9.3): removes the pause marker of every agent the rollback
       paused. Exits 0 whether or not one was there.
   contain --operator NAME --reason TEXT
-      Contain the host (spec §13 decision 49): record and ship a signed
+      Contain the host (spec §13 decision 51): record and ship a signed
       operator-contained record, then stop and mask the deploy agent's
       fetch and apply units (re-masked at every boot until release). The
       off-host check then reports the agent "contained", not silent.
@@ -502,7 +502,7 @@ proc runAddonCli*(args: seq[string]): int =
         if a == "--boot" and cmd == "reassert": atBoot = true
         else: raise newException(ValueError, "unknown option " & a)
       if atBoot:
-        # A contained host stays contained across the reboot (decision 49):
+        # A contained host stays contained across the reboot (decision 51):
         # the runtime masks are gone, so they are put back first.
         try: discard reapplyContainment()
         except CatchableError: discard

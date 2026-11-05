@@ -75,7 +75,7 @@ proc body(g: Guest; repro: string; step: StepFn; record: JsonNode;
   step("with the configuration aside, the existing keys alone refuse it",
        keys.exitCode != 0 and "existing evidence keys" in keys.stderr,
        keys.stdout & keys.stderr)
-  # Re-keying (spec §13 decision 50; A11 drill D7): the old key signs a
+  # Re-keying (spec §13 decision 52; A11 drill D7): the old key signs a
   # hand-over, the sink follows it once the operator anchors the new
   # credential, and the old id is retired.
   let hostsFile = g.runDir / "hosts"

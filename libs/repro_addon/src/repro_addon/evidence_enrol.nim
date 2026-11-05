@@ -179,7 +179,7 @@ proc runEvidenceEnrol*(opts: EnrolOptions): EnrolResult =
     attest: true), defaultSite(stateDir))
 
 # ---------------------------------------------------------------------------
-# Re-keying an enrolled host (spec §13 decision 50; A11 drill D7).
+# Re-keying an enrolled host (spec §13 decision 52; A11 drill D7).
 # ---------------------------------------------------------------------------
 
 type
