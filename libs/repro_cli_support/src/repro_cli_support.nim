@@ -430,10 +430,55 @@ proc wantsHelp*(args: openArray[string]): bool =
 proc renderVersion*(programName: string): string =
   programName & " " & versionString()
 
+proc versionJson*(programName: string): JsonNode =
+  ## The machine-readable form of ``repro version``: the client version and
+  ## the wire-protocol versions this image speaks. Every value is read from
+  ## the constant the protocol module itself declares, so a protocol bump
+  ## shows up here without a second edit. Nothing is probed: no daemon is
+  ## contacted and no project is read, so the answer is the same from any
+  ## directory and in any daemon state.
+  result = %*{
+    "schemaId": "reprobuild.version.v1",
+    "program": programName,
+    "version": versionString(),
+    "protocols": {
+      "userDaemon": {
+        "major": int(UserDaemonProtocolMajor),
+        "minor": int(UserDaemonProtocolMinor)
+      },
+      "storeDaemon": int(StoreDaemonProtocolVersion),
+      "provider": int(ProviderProtocolVersion)
+    }
+  }
+
+proc runVersionCommand*(programName: string;
+                        args: openArray[string]): int =
+  ## ``repro version [--json]``. Without ``--json`` it prints exactly the
+  ## line ``repro --version`` prints. An unknown argument is a usage error
+  ## (exit 2), reported on stderr so stdout stays parseable.
+  var asJson = false
+  for arg in args:
+    case arg
+    of "--json":
+      asJson = true
+    of "--help", "-h":
+      echo "usage: " & programName & " version [--json]"
+      return 0
+    else:
+      stderr.writeLine(programName & " version: unsupported argument: " &
+        arg & " (usage: " & programName & " version [--json])")
+      return 2
+  if asJson:
+    echo versionJson(programName).pretty()
+  else:
+    echo renderVersion(programName)
+  0
+
 proc renderUsage*(programName: string): string =
   if programName == "repro":
     programName & " " & versionString() & "\nusage: " & programName &
       " --version\n       " & programName &
+      " version [--json]\n       " & programName &
       " capabilities [--format=json|text]\n       " & programName &
       " build [target[#name] [target...]] --daemon=auto|require|off --tool-provisioning=path|nix|tarball|scoop|from-source [--target=TRIPLE] [--work-root=PATH] [--action-cache-root=PATH] [--progress=quiet|line|bar-line|lines|lines-bar|dots] [--progress-bars=overlay|split] [--measure=trace,cache-evidence,timing|all|none] [--show=...] [--write-report[=PATH]] [--no-write-report] [--write-diagnostics=PATH] [--write-benchmark=PATH] [--write-stats[=PATH]] [--stats-groups=timing,cache,runquota,deps,sessions|all] [--log=actions|summary|quiet] [--action-output=failed|all] [-v|-vv] [--prepare-only] [--dry-run] [--force-rebuild] [--soft-rebuild|--rebuild-host-bound|--hard-rebuild] [--only=PATTERN] [--unsafe-preserve-outputs=PATTERN] [--publish-cache-hits] [--publish-materialized] [--restore-cached-outputs] [--no-runquota|--runquota] [--monitor-hosting=never|where-supported|required] [--evidence=full|reads-only] [--peer-cache=none|lan://CIDR[:port][?seeds=HOST:PORT,...&listen=PORT&multicast=0&tls=1&profile=trusted|hardened]] [--trust-profile=trusted|hardened] [--list-targets [--json] [--package=NAME]]\n       " &
           programName &
@@ -101891,6 +101936,8 @@ proc runThinAppDispatch(programName: string): int =
   if wantsVersion(args):
     echo renderVersion(programName)
     return 0
+  if programName == "repro" and args.len > 0 and args[0] == "version":
+    return runVersionCommand(programName, args[1 .. ^1])
   if wantsHelp(args):
     # Explicit help request — print usage to stdout, exit 0 so the
     # output is pipeable / scriptable. Bare / unknown commands still
