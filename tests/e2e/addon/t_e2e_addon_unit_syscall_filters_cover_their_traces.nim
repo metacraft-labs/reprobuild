@@ -438,11 +438,13 @@ proc body(g: Guest; repro: string; step: StepFn; record: JsonNode;
   # control group (the sampler) and, where the sampler missed the
   # process, by that name -- not by `comm == "sleep"` alone (A9 review
   # round 4, finding 9).
-  discard g.run("mkdir -p /run/a9-foreign && cp /bin/sleep /run/a9-foreign/" &
-    ForeignComm)
+  # (/usr/local/libexec, not /run: /run is mounted noexec on the bases.)
+  discard g.run("mkdir -p /usr/local/libexec && cp /bin/sleep " &
+    "/usr/local/libexec/" & ForeignComm)
   discard g.run("systemd-run --quiet --unit=" & ForeignUnit &
     " -p SystemCallLog=clock_nanosleep -p SystemCallLog=nanosleep " &
-    "/bin/sh -c 'while :; do /run/a9-foreign/" & ForeignComm & " 0.05; done'")
+    "/bin/sh -c 'while :; do /usr/local/libexec/" & ForeignComm &
+    " 0.05; done'")
   tick(1, gen(1))
   # Generations past the retention policy's five: the apply releases the
   # store roots of those it drops (§5.2).
