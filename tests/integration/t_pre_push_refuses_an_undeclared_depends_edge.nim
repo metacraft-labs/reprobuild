@@ -33,6 +33,7 @@
 import std/[json, os, strutils, tempfiles, unittest]
 
 import repro_test_support
+import repro_test_support/reasoned_skip
 
 proc repoRoot(): string =
   result = currentSourcePath().parentDir.parentDir.parentDir
@@ -232,7 +233,7 @@ suite "pre-push refuses a `depends` edge naming no declared repo":
   test "t_pre_push_names_member_repos_for_a_depends_edge_outside_the_project":
     let gitBin = findExe("git")
     if gitBin.len == 0:
-      skip()
+      skip("git not on PATH; this case needs a repository")
     else:
       let fx = buildFixture(gitBin)
       defer: removeDir(fx.scratch)
