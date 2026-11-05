@@ -73,18 +73,31 @@ proc readState(path: string; table: string): Table[string, int64] =
   except CatchableError:
     discard
 
-proc tableInstance*(nft: string): string =
-  ## The table's kernel handle: new on every load (the table is deleted and
-  ## defined again), so it names the instance its counters belong to.
-  let r = runHostTool([nft, "-j", "list", "table", EgressTableFamily,
-                       EgressTableName], mergeStderr = false, timeoutSec = 30)
-  if r.exitCode != 0: return ""
+proc instanceKey*(listTable, bootId: string): string =
+  ## The instance a ``nft -j list table`` answer names: this boot's id and
+  ## the table's kernel handle. The handle is new on every load (the table is
+  ## deleted and defined again), but the kernel's handle counter starts again
+  ## at every boot, so a table loaded in the same order at the next boot gets
+  ## the same handle; the boot id tells the two apart. The bare handle when
+  ## the boot id is unknown; "" when the answer names no table.
   try:
-    for item in parseJson(r.output){"nftables"}.getElems():
-      if item{"table"} != nil: return $item["table"]{"handle"}.getBiggestInt()
+    for item in parseJson(listTable){"nftables"}.getElems():
+      if item{"table"} != nil:
+        let handle = $item["table"]{"handle"}.getBiggestInt()
+        when mutated("egress-instance-ignores-boot"):
+          return handle
+        else:
+          return if bootId.len > 0: bootId & "/" & handle else: handle
   except CatchableError:
     discard
   ""
+
+proc tableInstance*(nft: string): string =
+  ## The instance the table's counters belong to (``instanceKey``).
+  let r = runHostTool([nft, "-j", "list", "table", EgressTableFamily,
+                       EgressTableName], mergeStderr = false, timeoutSec = 30)
+  if r.exitCode != 0: return ""
+  instanceKey(r.output, bootIdNow())
 
 proc freshSince*(refused: seq[RefusedDestination]; statePath: string;
                  table = "-"): seq[RefusedDestination] =

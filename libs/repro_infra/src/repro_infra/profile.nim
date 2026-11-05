@@ -26,7 +26,7 @@
 ## `macos.systemDefault` are deferred — the parser rejects them with a
 ## clear "deferred to a later phase" diagnostic.
 
-import std/[strutils, tables]
+import std/[sets, strutils, tables]
 
 import repro_elevation
 import repro_dsl_stdlib/packages/apt_closure
@@ -1137,6 +1137,111 @@ proc checkFloorDropIns*(p: SystemProfile) =
       except EServiceFloor as e:
         raiseSystemProfileInvalid(e.msg)
 
+proc activatedService(name, content: string): string =
+  ## The service a socket, timer or path unit starts: its ``Service=`` /
+  ## ``Unit=``, else the unit of the same name (``foo@.service`` for a
+  ## socket with ``Accept=yes``).
+  let dot = name.rfind('.')
+  if dot <= 0: return ""
+  let stem = name[0 ..< dot]
+  var explicit, accept = ""
+  for d in sectionDirectives(content):
+    if d.key in ["Service", "Unit"] and d.section in ["Socket", "Timer", "Path"]:
+      explicit = d.value.strip()
+    if d.key == "Accept" and d.section == "Socket": accept = d.value.strip()
+  if explicit.len > 0: return explicit
+  if accept.toLowerAscii() in ["yes", "true", "1", "on"]: return stem & "@.service"
+  stem & ".service"
+
+proc checkFloorActivators*(p: SystemProfile) =
+  ## The units that activate a floored service, and the drop-ins onto them,
+  ## under the floor's rules for activators (A9 review round 5, finding 2;
+  ## `service_floor.activatorRefusal`); a service's `Sockets=` names only the
+  ## profile's own sockets; no drop-in onto any socket, timer or path unit
+  ## carries a command line; and no floored unit's `EnvironmentFile=` lies
+  ## in another floored unit's writable place (finding 1).
+  when InfraAddonMutation in ["floor-round5-static-off",
+      "floor-static-r3-disabled", "floor-unchecked"]:
+    return
+  var floored = initHashSet[string]()
+  var sockets = initHashSet[string]()
+  for r in p.resources:
+    if r.kind != srkSystemdSystemUnit or r.suCollision == "dropIn": continue
+    if r.suHardening == ServiceFloorHardening: floored.incl(r.suName)
+    if r.suName.endsWith(".socket"): sockets.incl(r.suName)
+  proc isFloored(target: string): bool =
+    if target in floored: return true
+    let at = target.find('@')
+    let dot = target.rfind('.')
+    at > 0 and dot > at and (target[0 .. at] & target[dot .. ^1]) in floored
+  var activators = initHashSet[string]()
+  for r in p.resources:
+    if r.kind != srkSystemdSystemUnit or r.suCollision == "dropIn": continue
+    if r.suHardening == ServiceFloorHardening:
+      for d in sectionDirectives(r.suContent, ["Service"]):
+        if d.key == "Sockets":
+          for t in d.value.splitWhitespace():
+            if t notin sockets:
+              raiseSystemProfileInvalid("systemd.systemUnit '" & r.suName &
+                "': Sockets=" & t & " is not a socket unit of this profile; " &
+                "a socket the base defines hands the service what it opens " &
+                "as root")
+            activators.incl(t)
+    if r.suName.endsWith(".socket") or r.suName.endsWith(".timer") or
+        r.suName.endsWith(".path"):
+      if isFloored(activatedService(r.suName, r.suContent)):
+        activators.incl(r.suName)
+  for r in p.resources:
+    if r.kind == srkSystemdSystemUnit and r.suCollision != "dropIn" and
+        r.suName in activators:
+      let why = activatorRefusal(r.suName, r.suContent, dropIn = false)
+      if why.len > 0:
+        raiseSystemProfileInvalid("systemd.systemUnit '" & r.suName &
+          "' activates a floored service: " & why)
+  for d in p.resources:
+    var target, content = ""
+    if d.kind == srkSystemdSystemDropIn:
+      target = d.diUnit
+      content = d.diContent
+    elif d.kind == srkSystemdSystemUnit and d.suCollision == "dropIn":
+      target = d.suName
+      content = d.suContent
+    else:
+      continue
+    if not (target.endsWith(".socket") or target.endsWith(".timer") or
+            target.endsWith(".path")):
+      continue
+    if hasExecLines(content):
+      raiseSystemProfileInvalid("the drop-in '" & d.address & "' onto " &
+        target & " carries a command line, which the manager runs as root " &
+        "outside every floor")
+    var applies = false
+    for a in activators:
+      if dropInApplies(target, a): applies = true
+    if applies:
+      let why = activatorRefusal(target, content, dropIn = true)
+      if why.len > 0:
+        raiseSystemProfileInvalid("the drop-in '" & d.address & "' onto " &
+          target & ", which activates a floored service: " & why)
+  # EnvironmentFile= against every other floored unit's writable places.
+  for r in p.resources:
+    if r.kind != srkSystemdSystemUnit or r.suHardening != ServiceFloorHardening:
+      continue
+    for d in sectionDirectives(r.suContent, ["Service"]):
+      if d.key != "EnvironmentFile": continue
+      for t in d.value.splitWhitespace():
+        let np = normalisedPath(t.strip(leading = true, trailing = false,
+                                        chars = {'-'}))
+        for o in p.resources:
+          if o.kind != srkSystemdSystemUnit or
+              o.suHardening != ServiceFloorHardening or o.suName == r.suName:
+            continue
+          for w in floorWritablePlaces(serviceDirectives(o.suContent)):
+            if np == w or np.startsWith(w & "/"):
+              raiseSystemProfileInvalid("systemd.systemUnit '" & r.suName &
+                "': EnvironmentFile=" & np & " lies in " & o.suName &
+                "'s writable place " & w & "; the manager reads it as root")
+
 proc applyAddOnServiceFloor*(p: var SystemProfile) =
   ## The add-on realisation's default (ReproOS-Add-On-Mode §10.1): every
   ## unit `floorAppliesByDefault` selects gets `hardening = "serviceFloor"`.
@@ -1146,6 +1251,7 @@ proc applyAddOnServiceFloor*(p: var SystemProfile) =
       r.suHardening = ServiceFloorHardening
       discard renderedSystemUnitContent(r)
   checkFloorDropIns(p)
+  checkFloorActivators(p)
 
 proc floorExceptionPlanLines*(p: SystemProfile): seq[string] =
   ## Every floor exception of the profile's units under the floor, one
@@ -2652,6 +2758,7 @@ proc parseSystemProfile*(text: string; addOnDefaults = false;
   checkSecretDeclarations(result)
   if not stored:
     checkFloorDropIns(result)
+    checkFloorActivators(result)
   checkStateDirectories(result)
 
 # ---------------------------------------------------------------------------

@@ -62,7 +62,7 @@
 
 import std/[algorithm, json, monotimes, options, os, sets, strutils, tables,
             times]
-from std/posix import Statvfs, statvfs, Stat, lstat
+from std/posix import Statvfs, statvfs, Stat, lstat, rmdir
 import std/uri
 import repro_binary_cache_client/http_pool
 
@@ -73,6 +73,7 @@ import repro_elevation/posix_system_driver
 import repro_infra
 import repro_infra/addon_diagnostics
 import repro_infra/planner
+from repro_infra/service_floor import floorWritablePlaces, serviceDirectives
 from repro_profile import ProfileBuildAction
 import repro_local_store/store
 
@@ -1281,10 +1282,31 @@ proc writeStartHolds*(resources: openArray[SystemResource]): seq[string] =
     result.add(p)
 
 proc removeStartHolds*(holds: openArray[string]) =
+  ## Remove each hold file, and its directory only when the hold was the
+  ## last thing in it (``rmdir`` refuses a non-empty directory). Round 4
+  ## called ``os.removeDir``, which deletes recursively: every other
+  ## drop-in in the directory went with it (A9 review round 5, finding 5).
   for p in holds:
     if fileExists(p): removeFile(p)
-    try: removeDir(parentDir(p), checkDir = false)
-    except OSError: discard   # another drop-in is there: kept
+    when mutated("start-hold-removes-directory"):
+      try: removeDir(parentDir(p), checkDir = false)
+      except OSError: discard
+    else:
+      discard rmdir(parentDir(p).cstring)   # fails, harmlessly, when not empty
+
+proc clearStaleStartHolds*(root = "/run/systemd/system"): seq[string] =
+  ## Every start hold under ``root`` that an earlier switch left behind --
+  ## one whose check refused, before a revert to a generation with no
+  ## floored unit, or a switch that died -- removed (A9 review round 5,
+  ## finding 5). Returns the holds removed.
+  when mutated("stale-start-holds-kept"):
+    return
+  if not dirExists(root): return
+  for kind, d in walkDir(root):
+    if kind != pcDir or not d.endsWith(".d"): continue
+    let p = d / StartHoldName
+    if fileExists(p): result.add(p)
+  removeStartHolds(result)
 
 proc unitSearchPaths*(): seq[string] =
   ## systemd's unit search path (``systemd-analyze unit-paths``): every
@@ -1340,10 +1362,6 @@ proc foreignDropInsFor*(units: openArray[string]; own: HashSet[string];
         if f.endsWith(".conf") and f notin own:
           result.add(f)
 
-proc readableByAll(path: string): bool =
-  try: fpOthersRead in getFilePermissions(path)
-  except OSError: true    # missing: systemd reads nothing (or fails the unit)
-
 proc effectiveFloorCheck*(resources: openArray[SystemResource]): seq[string] =
   ## Every floored unit of the generation as systemd now reads it, against
   ## the floor it is rendered under (``effective_floor``; spec §10.1, A9
@@ -1359,6 +1377,14 @@ proc effectiveFloorCheck*(resources: openArray[SystemResource]): seq[string] =
   for d in resources:
     if d.kind == srkSystemdSystemDropIn: own.incl(targetPathOf(d))
   for u in flooredUnitNames(resources): own.incl(startHoldPath(u))
+  var ownUnits = initHashSet[string]()
+  for d in resources:
+    if d.kind == srkSystemdSystemUnit: ownUnits.incl(d.suName)
+  var limits = initTable[string, string]()
+  if flooredUnitNames(resources).len > 0:
+    try: limits = managerLimits()
+    except CatchableError as ex:
+      result.add("the service manager's limits: " & ex.msg)
   when not mutated("unnamed-instances-unchecked"):
     try:
       for f in foreignDropInsFor(flooredUnitNames(resources), own,
@@ -1385,7 +1411,13 @@ proc effectiveFloorCheck*(resources: openArray[SystemResource]): seq[string] =
       var e = EffectiveInput(unit: name, rendered: rendered,
         version: r.suFloorVersion, exceptions: r.suFloorExceptions,
         fragment: unitPath(r.suName), denied: denied, uidOf: systemUid,
-        groupsOf: systemGroups, readableByAll: readableByAll)
+        groupsOf: systemGroups, gidOf: systemGid, ownUnits: ownUnits,
+        limitCeilings: limits)
+      for o in resources:
+        if o.kind == srkSystemdSystemUnit and o.suName != r.suName and
+            effectiveFloor(o).len > 0 and o.suCollision != "dropIn":
+          e.otherWritable.add(floorWritablePlaces(serviceDirectives(
+            renderedSystemUnitContent(o))))
       for d in resources:
         if d.kind == srkSystemdSystemDropIn and dropInApplies(d.diUnit, name):
           e.ownDropIns.add((path: targetPathOf(d), content: d.diContent))
@@ -1404,6 +1436,20 @@ proc effectiveFloorCheck*(resources: openArray[SystemResource]): seq[string] =
         except IOError, OSError:
           result.add(name & ": cannot read " & f & ", which systemd loaded")
       result.add(effectiveFloorProblems(e))
+      # The units that trigger it: sockets, timers, path units (A9 review
+      # round 5, finding 2), whoever defines them.
+      when not mutated("activators-unchecked"):
+        for a in e.show.getOrDefault("TriggeredBy").splitWhitespace():
+          var aown: seq[string]
+          for d in resources:
+            if d.kind == srkSystemdSystemDropIn and dropInApplies(d.diUnit, a):
+              aown.add(targetPathOf(d))
+          try:
+            let at = showUnitText(a)
+            result.add(activatorProblems(a, parseShow(at), parseShowLines(at),
+                                         unitPath(a), aown))
+          except CatchableError as ex:
+            result.add(a & ": " & ex.msg)
 
 proc retargetedAddresses*(previous, wanted: openArray[SystemResource]):
     seq[tuple[address, was, now: string]] =
@@ -4806,12 +4852,17 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
           if notHeld.len > 0:
             problems.add($adFloorNotEffective & ": " & notHeld.join("; ") &
               "; nothing was started")
-          elif startHolds.len > 0:
-            # Checked: the holds go, and step 7 starts on these definitions.
+          else:
+            # Checked: the holds go -- this switch's, and any an earlier
+            # switch left (a refused check before a revert to a generation
+            # with no floored unit) -- and step 7 starts on these
+            # definitions.
+            let stale = clearStaleStartHolds()
             removeStartHolds(startHolds)
+            if startHolds.len > 0 or stale.len > 0:
+              try: daemonReload()
+              except CatchableError as ex: problems.add(ex.msg)
             startHolds.setLen(0)
-            try: daemonReload()
-            except CatchableError as ex: problems.add(ex.msg)
       if startHolds.len > 0 and clean and problems.len == 0:
         # The check did not run (a record-only replay, a falsifying build):
         # the holds must not outlive the switch that wrote them.

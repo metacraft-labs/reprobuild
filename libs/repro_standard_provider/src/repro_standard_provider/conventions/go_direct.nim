@@ -176,10 +176,9 @@ import repro_standard_provider/convention
 const
   ScratchDirName* = ".repro/build"
     ## Identical to the Mode 2 Go convention's scratch dir so the two
-    ## conventions produce co-located outputs and ``repro clean`` finds
-    ## both. The Mode 3 convention is registered AFTER ``go``, so the
-    ## scratch path stays stable when a project flips between go.mod
-    ## and Mode 3.
+    ## conventions produce co-located outputs. The Mode 3 convention is
+    ## registered AFTER ``go``, so the scratch path stays stable when a
+    ## project flips between go.mod and Mode 3.
 
   GoLangFlag* = "1.21"
     ## Edition-ish flag fed to ``go tool compile`` via ``-lang=go1.21``.

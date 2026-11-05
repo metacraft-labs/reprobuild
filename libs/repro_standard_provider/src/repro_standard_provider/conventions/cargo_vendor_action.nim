@@ -75,7 +75,9 @@ const
 
   CargoVendorSubdir* = ".repro/cargo-vendor"
     ## Scratch root: the unpacked vendor tree and the crate download cache.
-    ## Under ``.repro/`` so ``repro clean`` takes it with everything else.
+    ## Under the gitignored ``.repro/`` tree. Only the vendor stamp is a
+    ## declared output, so ``repro clean`` removes the stamp and keeps the
+    ## download.
 
 proc cargoVendorManifestPath*(projectRoot: string): string =
   projectRoot / CargoVendorManifestName

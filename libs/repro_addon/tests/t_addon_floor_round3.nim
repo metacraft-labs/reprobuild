@@ -216,7 +216,8 @@ suite "round 3: the effective-unit check":
   proc problems(show: ShowProps; version = FloorVersion;
                 own: seq[string] = @[]): seq[string] =
     var e = EffectiveInput(unit: "a.service", rendered: ru, version: version,
-      show: show, denied: denied, uidOf: uid, groupsOf: noGroups)
+      show: show, denied: denied, uidOf: uid, groupsOf: noGroups,
+      gidOf: proc (g: string): int = (if g == "root": 0 else: 1000))
     e.lines["ExecStartEx"] = @["{ path=" & Prefix & "/bin/svc ; argv[]=" &
       Prefix & "/bin/svc ; flags= ; start_time=[n/a] }"]
     for o in own: e.ownDropIns.add((path: o, content: ""))

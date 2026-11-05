@@ -4331,7 +4331,7 @@ package reprobuild:
           # directories. LLVM's objcopy reads every target; the host's GNU
           # objcopy and zig 0.13's do not read an armv7 library
           # (packages/llvm_objcopy).
-          debugStripCommand: "llvm-objcopy --strip-debug",
+          debugStripCommand: LlvmObjcopyDebugStrip,
           preChecks: @[
             # The catalog builds the prefix takes, built for this target.
             "for r in nim-fork pcre clingo; do [ -d " &

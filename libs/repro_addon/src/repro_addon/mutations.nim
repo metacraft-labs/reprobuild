@@ -529,6 +529,9 @@
 ##                                            shipping unit as live
 ## ``egress-state-survives-reload``           egress counts are compared
 ##                                            across a table reload
+## ``egress-instance-ignores-boot``           a table loaded at another
+##                                            boot, with the same handle,
+##                                            is the same instance
 ## ``check-status-ignores-silence``           a detector's status is
 ##                                            live-idle beside its silence
 ##                                            alert
@@ -742,6 +745,14 @@ const
                           "properties-not-default-denied",
                           "unnamed-instances-unchecked",
                           "floor-start-unheld",
+                          # A9 review round 5.
+                          "floor-round5-static-off",
+                          "inert-families-by-pattern",
+                          "privileged-groups-by-name",
+                          "environment-files-trusted",
+                          "activators-unchecked",
+                          "start-hold-removes-directory",
+                          "stale-start-holds-kept",
                           # A13: a state backup or restore runs while a
                           # unit of the set may run.
                           "state-units-not-checked",
@@ -834,6 +845,8 @@ const
                           "check-ignores-ship-delay",
                           # A11 audit F3: egress counts kept across a reload.
                           "egress-state-survives-reload",
+                          # The handle repeats at the next boot.
+                          "egress-instance-ignores-boot",
                           # A11 audit F4: statuses beside their own alert.
                           "check-status-ignores-silence",
                           # A11 audit F6: the hosts file's enrolled key and

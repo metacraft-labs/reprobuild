@@ -113,8 +113,10 @@ import repro_standard_provider/convention
 
 const
   ScratchDirName* = ".repro/build"
-    ## Mirror of every other Mode 3 convention's scratch dir so
-    ## ``repro clean`` (a single ``rm -rf .repro/``) sweeps all outputs.
+    ## Mirror of every other Mode 3 convention's scratch dir. The
+    ## convention declares its outputs there, and ``repro clean`` removes
+    ## declared outputs by their ownership records, not by deleting
+    ## ``.repro/``.
 
   ZigSourceExtension = ".zig"
 
