@@ -1,8 +1,14 @@
-import std/[algorithm, options, os, tempfiles, unittest]
+import std/[algorithm, options, os, strutils, tempfiles, unittest]
 
 import repro_core
 import repro_hash
 import repro_interface_artifacts
+
+proc stampForm(path: string): string =
+  ## The spelling ``discoverNimSources`` returns: normalised, with ``/``
+  ## separators on every platform. Expectations built with ``/`` from
+  ## ``std/os`` use ``\`` on Windows and must be compared in this form.
+  os.normalizedPath(path).replace('\\', '/')
 
 suite "provider source discovery":
   test "unimported siblings and build directories do not enter the closure":
@@ -16,7 +22,7 @@ suite "provider source discovery":
     createDir(root / "build")
     createDir(root / "src")
     writeFile(root / "src" / "generated.nim", "discard\n")
-    check before == @[recipe]
+    check before == @[stampForm(recipe)]
     check discoverNimSources(recipe) == before
 
   test "a recipe edit adds its newly imported transitive sources":
@@ -29,9 +35,9 @@ suite "provider source discovery":
     writeFile(recipe, "discard\n")
     writeFile(helper, "import private/detail\n")
     writeFile(nested, "const value = true\n")
-    check discoverNimSources(recipe) == @[recipe]
+    check discoverNimSources(recipe) == @[stampForm(recipe)]
     writeFile(recipe, "import helper\n")
-    var expected = @[recipe, helper, nested]
+    var expected = @[stampForm(recipe), stampForm(helper), stampForm(nested)]
     expected.sort()
     check discoverNimSources(recipe) == expected
 
@@ -44,7 +50,9 @@ suite "provider source discovery":
     createDir(work)
     let recipe = project / "repro.nim"
     let payload = project / "payload.nim"
-    let binary = root / "provider"
+    # The production path appends ``ExeExt`` to the output binary on Windows
+    # (``normalizedProviderOutputPath``), so the fake binary carries it too.
+    let binary = root / addFileExt("provider", ExeExt)
     let artifact = root / "provider.rbsz"
     writeFile(recipe, "const value = staticRead(\"payload.nim\")\n")
     writeFile(payload, "alpha\n")
@@ -52,7 +60,7 @@ suite "provider source discovery":
     let fingerprint = casDigest(toBytes("legacy-source-interface"))
     let plan = providerCompilePlan(recipe, binary, fingerprint, work,
       includeSiblingSources = true)
-    check payload in plan.inputSources
+    check stampForm(payload) in plan.inputSources
     writeProviderCompileArtifact(artifact, ProviderCompileArtifact(
       inputSources: plan.inputSources, outputBinaryPath: plan.outputBinaryPath,
       compilerCommand: plan.compilerCommand, compileEdge: plan.compileEdge,
