@@ -92,9 +92,8 @@ const
 
   CargoScratchSubdir* = ".repro/build/cargo"
     ## Scratch root for the compile. `--target-dir` points here rather
-    ## than at the extracted source, so the source tree stays read-only
-    ## and a `repro clean` takes the build products with everything else
-    ## under `.repro/`.
+    ## than at the extracted source, so the source tree stays read-only.
+    ## `repro clean` removes the declared build products under it.
 
 proc cargoTargetDir*(projectRoot: string): string =
   projectRoot / CargoScratchSubdir / "target"

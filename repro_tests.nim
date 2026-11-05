@@ -23433,6 +23433,17 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "t_group_tests_integration_g11",
     singleReason: ""),
   TestSpec(
+    source: "tests/integration/t_repro_clean_removes_owned_outputs_and_keeps_caches.nim",
+    binary: "build/test-bin/t_repro_clean_removes_owned_outputs_and_keeps_caches",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "t_group_tests_integration_g11",
+    singleReason: ""),
+  TestSpec(
     source: "tests/integration/t_repro_cli_input_matches_declared_output.nim",
     binary: "build/test-bin/t_repro_cli_input_matches_declared_output",
     defines: @[],
@@ -23914,7 +23925,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g11",
+    group: "t_group_tests_integration_g12",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_run_consumes_session_store_out_of_tree.nim",
@@ -24772,7 +24783,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g12",
+    group: "t_group_tests_integration_g13",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_sync_clones_commit_pinned_repo.nim",
@@ -25487,7 +25498,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g13",
+    group: "t_group_tests_integration_g14",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_undeclared_role_is_a_usage_error_before_any_fetch.nim",
@@ -26125,7 +26136,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g14",
+    group: "t_group_tests_integration_g15",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_workspace_manifests_resolve_variant_overrides_revision.nim",

@@ -115,11 +115,10 @@ import repro_standard_provider/convention
 
 const
   ScratchDirName* = ".repro/build"
-    ## Identical to the Mode 2 Python convention's scratch dir so the
-    ## two conventions produce co-located outputs and ``repro clean``
-    ## finds both. The Mode 3 convention is registered AFTER
-    ## ``python``, so the scratch path stays stable when a project
-    ## flips between pyproject.toml and Mode 3.
+    ## Identical to the Mode 2 Python convention's scratch dir so the two
+    ## conventions produce co-located outputs. The Mode 3 convention is
+    ## registered AFTER ``python``, so the scratch path stays stable when a
+    ## project flips between pyproject.toml and Mode 3.
 
   EntryModuleFile* = "__main__.py"
     ## Filename Mode 3 expects in an executable member's package dir

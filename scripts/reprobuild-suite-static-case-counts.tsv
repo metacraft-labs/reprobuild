@@ -2022,7 +2022,7 @@ tests/integration/t_old_names_read_until_retired.nim	nim	6
 tests/integration/t_only_overridden_nodes_are_rewritten.nim	nim	1
 tests/integration/t_optin_layer_runs_under_the_engine.nim	nim	1
 tests/integration/t_orphaned_lock_draft_is_swept_never_published.nim	nim	4
-tests/integration/t_output_cleanup_executor.nim	nim	10
+tests/integration/t_output_cleanup_executor.nim	nim	16
 tests/integration/t_own_flake_ref_survives_an_uninitialised_submodule.nim	nim	2
 tests/integration/t_path_tool_rewrite_detected.nim	nim	11
 tests/integration/t_pcr_composite_matches_tpm.nim	nim	2
@@ -2137,6 +2137,7 @@ tests/integration/t_repos_add_records_project_membership_by_key.nim	nim	1
 tests/integration/t_repos_add_reuses_remotes_and_inherits_revision.nim	nim	6
 tests/integration/t_repro_build_test_aggregate_builds_every_test.nim	nim	2
 tests/integration/t_repro_certify_runs_the_required_set_in_workspace_mode.nim	nim	1
+tests/integration/t_repro_clean_removes_owned_outputs_and_keeps_caches.nim	nim	2
 tests/integration/t_repro_cli_input_matches_declared_output.nim	nim	3
 tests/integration/t_repro_core_binary_roundtrip.nim	nim	3
 tests/integration/t_repro_exec_delivers_posix_signals.nim	nim	1
