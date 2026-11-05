@@ -415,5 +415,6 @@ proc runAddonBootstrap*(opts: BootstrapOptions): BootstrapResult =
               ("path", prefixes.reproExe),
               # dpkg runs up to here had no hook to follow them: the
               # off-host check counts only later ones (DET-AO-8).
-              ("dpkgLastRun", dpkgLastRun("/var/log/dpkg.log"))],
+              ("dpkgLastRun", dpkgLastRun("/var/log/dpkg.log")),
+              ("bootId", bootIdNow())],
     attest: true), defaultSite(stateDir))

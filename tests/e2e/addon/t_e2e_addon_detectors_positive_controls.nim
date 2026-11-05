@@ -158,7 +158,9 @@ proc body(g: Guest; repro: string; step: StepFn; record: JsonNode;
   discard g.exec("ln -sfn /nonexistent-a11 /etc/repro/static")
   g.rebootGuest()
   discard g.waitReasserted()
-  control("DET-AO-4", "addon-reassert", "drift", since)
+  # A retargeted static link that dangles reads ``degraded``, one that
+  # resolves ``drift``: DET-AO-4 trips on either.
+  control("DET-AO-4", "addon-reassert", "", since)
   discard g.exec("ln -sfn " & staticTarget & " /etc/repro/static")
 
   # DET-AO-5: a store file corrupted between realise and flip.

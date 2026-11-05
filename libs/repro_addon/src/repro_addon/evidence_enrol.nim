@@ -21,12 +21,13 @@
 ##    off-host check enrols, and prints the credential's host id to enrol
 ##    at the sink.
 
-import std/[os, strutils]
+import std/[json, os, strutils]
 
 import repro_core/host_apply_lock
 
 import ./addon_apply
 import ./agent_repin
+import ./attestation
 import ./evidence
 import ./evidence_keys
 import ./fingerprint
@@ -88,10 +89,17 @@ proc runEvidenceEnrol*(opts: EnrolOptions): EnrolResult =
            except ValueError as e:
              raise newException(EvidenceEnrolError, e.msg)
   let own = readFile(ownProfilePath(stateDir))
-  let reproExe = execStartExe(unitContentOf(own, ReassertUnit))
-  if not reproExe.startsWith(StoreRoot & "/"):
-    raise newException(EvidenceEnrolError, "generation 0's re-assert unit " &
-      "names no add-on binary in the store")
+  # The add-on's binary in the store, as bootstrap recorded it.
+  var reproExe = ""
+  try:
+    reproExe = parseJson(readFile(addonDir(stateDir) / BootstrapEvidenceName)){
+      "reproExe"}.getStr()
+  except CatchableError:
+    discard
+  if not reproExe.startsWith(StoreRoot & "/") or not fileExists(reproExe):
+    raise newException(EvidenceEnrolError, "bootstrap's record (" &
+      addonDir(stateDir) / BootstrapEvidenceName & ") names no add-on " &
+      "binary in the store")
   let fetch = unitContentOf(own, AgentFetchUnit)
   var inp = Gen0Inputs(reproExe: reproExe, evidence: ev)
   if fetch.len > 0:
@@ -159,7 +167,8 @@ proc runEvidenceEnrol*(opts: EnrolOptions): EnrolResult =
     fields: @[("outcome", "aoOperatorAction"),
               ("credentialHost", keys.credentialHost),
               ("purpose", "evidence-enrol"),
-              ("dpkgLastRun", dpkgLastRun("/var/log/dpkg.log"))],
+              ("dpkgLastRun", dpkgLastRun("/var/log/dpkg.log")),
+              ("bootId", bootIdNow())],
     attest: true), defaultSite(stateDir))
 
 proc runEvidenceEnrolCli*(args: seq[string]): int =

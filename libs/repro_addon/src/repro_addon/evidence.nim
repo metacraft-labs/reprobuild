@@ -90,6 +90,9 @@ proc readHostName(): string =
   try: readFile("/proc/sys/kernel/hostname").strip()
   except IOError, OSError: "localhost"
 
+proc bootIdNow*(path = "/proc/sys/kernel/random/boot_id"): string =
+  try: readFile(path).strip() except IOError, OSError: ""
+
 proc defaultSite*(stateDir = "/var/lib/repro/system"): EvidenceSite =
   EvidenceSite(stateDir: stateDir, dir: EvidenceDirPath,
     outbox: EvidenceOutboxPath, confPath: EvidenceConfPath,
@@ -142,6 +145,10 @@ proc recordEvidence*(e: EvidenceEvent; site = defaultSite()): string =
     extra = a.fields
     attestError = a.error
   extra.add(("host", site.host))
+  if attestError.len > 0:
+    # Why this record carries no attestation, for the off-host check (a
+    # record written before the first generation committed has none).
+    extra.add(("reason", "attestation: " & attestError))
   let t = getTime()
   var doc = %*{"schema": EvidenceSchema, "kind": e.kind,
                "detector": $e.detector, "category": $e.category,
