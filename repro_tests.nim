@@ -3127,6 +3127,17 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "t_group_libs_repro_cli_support_tests_g02",
     singleReason: ""),
   TestSpec(
+    source: "libs/repro_cli_support/tests/t_version_verb_realizes_no_pinned_toolchain.nim",
+    binary: "build/test-bin/t_version_verb_realizes_no_pinned_toolchain",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "t_group_libs_repro_cli_support_tests_g02",
+    singleReason: ""),
+  TestSpec(
     source: "libs/repro_cli_support/tests/t_w2_activation_surfaces_declare_producer_ops.nim",
     binary: "build/test-bin/t_w2_activation_surfaces_declare_producer_ops",
     defines: @[],

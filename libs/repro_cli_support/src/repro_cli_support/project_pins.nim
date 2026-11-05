@@ -238,10 +238,11 @@ proc exemptFromPins(args: openArray[string]): bool =
 
 proc needsProviderToolchain(args: openArray[string]): bool =
   ## Whether the invocation may compile a provider, so a non-resident pinned
-  ## compiler is worth realizing now. ``--version`` and help never do.
+  ## compiler is worth realizing now. ``--version``, the ``version`` verb and
+  ## help never do.
   if args.len == 0:
     return false
-  args[0] notin ["--version", "-V", "help", "--help", "-h"]
+  args[0] notin ["--version", "-V", "version", "help", "--help", "-h"]
 
 proc execHandOver(entryPoint: string; args: seq[string]): int =
   ## Replace this process with the pinned entry point (POSIX ``execv``), or

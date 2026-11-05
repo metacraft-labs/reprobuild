@@ -291,6 +291,7 @@ libs/repro_cli_support/tests/t_runquota_auto_spawn_defers_to_host_config.nim	nim
 libs/repro_cli_support/tests/t_s7_build_paths_reach_the_restore_config.nim	nim	6
 libs/repro_cli_support/tests/t_strategy_unknown_name_refused.nim	nim	8
 libs/repro_cli_support/tests/t_trust_profiles_and_pinned_host_keys.nim	nim	3
+libs/repro_cli_support/tests/t_version_verb_realizes_no_pinned_toolchain.nim	nim	2
 libs/repro_cli_support/tests/t_w2_activation_surfaces_declare_producer_ops.nim	nim	5
 libs/repro_cli_support/tests/t_w2_dev_env_producer_pin_binding.nim	nim	9
 libs/repro_cli_support/tests/t_watch_ct_incremental_flags.nim	nim	3
