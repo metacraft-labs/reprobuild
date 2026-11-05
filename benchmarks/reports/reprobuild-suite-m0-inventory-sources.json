@@ -51482,7 +51482,7 @@
       "requiresReproBinary": true,
       "source": "tests/integration/t_shared_clones_sweep_repairs_every_bare_in_the_cache.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 4,
+      "staticCaseCount": 5,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
