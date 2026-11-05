@@ -169,9 +169,10 @@ proc producerRecord(ws, cacheRoot: string;
 
 proc sourceFor(level: EvidenceLevel): EvidenceSource =
   ## The evidence source an entry for this file's builtin action states: a
-  ## builtin's (M17 chunk 2). A legacy entry, which states no level, states
+  ## builtin's (M17 chunk 2), naming its kind (owner decision 2026-10-31).
+  ## A legacy entry, which states no level, states
   ## no source either.
-  if level == elUnstated: UnstatedEvidence else: BuiltinEvidence
+  if level == elUnstated: UnstatedEvidence else: builtinEvidence("write-text")
 
 proc contextFor(ws: string): TwoPhaseContext =
   TwoPhaseContext(peerKey: blobDigestFromBytes(Weak.bytes), cwd: ws,
@@ -290,7 +291,7 @@ suite "M17: the peer-cache PRODUCER publishes only checksum/hybrid Level-0 recor
       # M17 chunk 2: the entry is the published-trace record (v4), and states
       # where its evidence came from: this builtin's declared inputs.
       check entry.formatVersion == MemoEntryVersion
-      check entry.evidenceSource == BuiltinEvidence
+      check entry.evidenceSource == builtinEvidence("write-text")
       check decodeActionResultRecord(entry.recordBytes).policy == policy
       # The level is part of what the issuer signed.
       let anchors = loadTrustAnchorFile(producerCaPath)
@@ -353,10 +354,10 @@ suite "M17: the peer-cache PRODUCER publishes only checksum/hybrid Level-0 recor
       let outcome =
         if record.policy == ffpTimestamp:
           publishTwoPhase(store, tsStore, record, ctx, attestor(), level,
-            BuiltinEvidence)
+            builtinEvidence("write-text"))
         else:
           publishTwoPhase(store, cas, record, ctx, attestor(), level,
-            BuiltinEvidence)
+            builtinEvidence("write-text"))
       checkpoint(label & ": " & outcome.reason)
       check not outcome.published
       check named in outcome.reason
@@ -368,7 +369,7 @@ suite "M17: the peer-cache PRODUCER publishes only checksum/hybrid Level-0 recor
     check not tsStore.casExists(toContentHash(bytes(pathSetBlob)))
     # Control: the checksum record at Level 0 is published.
     let published = publishTwoPhase(store, cas, csRecord, ctx, attestor(),
-      elComplete, BuiltinEvidence)
+      elComplete, builtinEvidence("write-text"))
     checkpoint(published.reason)
     check published.published
     check published.entry.evidenceLevel == elComplete
@@ -396,13 +397,13 @@ suite "M17: the peer-cache PRODUCER publishes only checksum/hybrid Level-0 recor
     # As recorded, the rule has nothing against it: the refusal below can
     # only come from the check on the normalized record.
     check publicationRefusalOf(ancestorsOnly, elComplete,
-      BuiltinEvidence) == ""
+      builtinEvidence("write-text")) == ""
     check normalizeRecord(ancestorsOnly, portableCtx).inputs.len == 0
     let store = openPeerMemoStore(TmpDir / "normalized" / "memo")
     var cas = openCasStore(cacheRoot)
     defer: cas.close()
     let outcome = publishTwoPhase(store, cas, ancestorsOnly, portableCtx,
-      attestor(), elComplete, BuiltinEvidence)
+      attestor(), elComplete, builtinEvidence("write-text"))
     checkpoint(outcome.reason)
     check not outcome.published
     check "names no observed input" in outcome.reason
@@ -410,7 +411,7 @@ suite "M17: the peer-cache PRODUCER publishes only checksum/hybrid Level-0 recor
     # Control: the record with its real input publishes through the same
     # portable context.
     let control = publishTwoPhase(store, cas, csRecord, portableCtx,
-      attestor(), elComplete, BuiltinEvidence)
+      attestor(), elComplete, builtinEvidence("write-text"))
     checkpoint(control.reason)
     check control.published
 
@@ -458,6 +459,11 @@ suite "M17: the peer-cache PRODUCER publishes only checksum/hybrid Level-0 recor
       for ch in text:
         result.add(byte(ord(ch)))
       result.add(encoded[levelAt + 3 + sourceLen .. ^1])
+    check decodeMemoEntry(withSource("builtin:write-text")).evidenceSource ==
+      builtinEvidence("write-text")
+    # The bare `builtin` an older producer signed still decodes (as a
+    # builtin of unstated kind), and the publication rule refuses it
+    # (owner decision 2026-10-31).
     check decodeMemoEntry(withSource("builtin")).evidenceSource ==
       BuiltinEvidence
     for text in [$UnstatedEvidence, "guessed", "format:"]:
@@ -493,10 +499,10 @@ suite "M17: the peer-cache PRODUCER publishes only checksum/hybrid Level-0 recor
     check refusedStore.weakFingerprints().len == 0
     let store = openPeerMemoStore(TmpDir / "sources" / "memo")
     let builtin = publishTwoPhase(store, cas, record, ctx, attestor(),
-      elComplete, BuiltinEvidence)
+      elComplete, builtinEvidence("write-text"))
     checkpoint(builtin.reason)
     check builtin.published
-    check builtin.entry.evidenceSource == BuiltinEvidence
+    check builtin.entry.evidenceSource == builtinEvidence("write-text")
 
   test "the producer does not serve a non-conforming entry already in its memo store":
     # Found by the independent verification of M17 chunk 1. A memo store
@@ -588,9 +594,9 @@ suite "M17: the peer-cache CONSUMER refuses records that may not cross hosts":
     let ctx = contextFor(ws)
     let cases = [
       ("timestamp record claiming Level 0", tsRecord, tsCache, elComplete,
-       BuiltinEvidence, "ffpTimestamp input-check policy"),
+       builtinEvidence("write-text"), "ffpTimestamp input-check policy"),
       ("Level-1 record", csRecord, csCache, elKnownScopeLoss,
-       BuiltinEvidence, "Level 1"),
+       builtinEvidence("write-text"), "Level 1"),
       ("legacy entry stating no level", csRecord, csCache, elUnstated,
        UnstatedEvidence, "version 2"),
       # Owner decision 2026-10-29: a record evidenced by a depfile stays on

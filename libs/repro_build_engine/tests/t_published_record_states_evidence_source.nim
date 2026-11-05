@@ -12,9 +12,10 @@
 ##
 ##   * the source of each kind of action (unit cases, every policy kind);
 ##   * a builtin's execution reaches the portable publisher as an `rbpm-v2`
-##     record stating `builtin`, and the peer-cache publisher with a query
-##     stating `builtin`; a local hit on the record derives the same source
-##     from the access sidecar.
+##     record stating `builtin:write-text` (its KIND, since owner decision
+##     2026-10-31 decides publication by kind), and the peer-cache publisher
+##     with a query stating the same; a local hit on the record derives the
+##     same source from the access sidecar.
 ##
 ## And the owner's decision of 2026-10-29 (Edge-Derived-Identities.md §3.4
 ## item 1 rider, §10 decision 23), "builtins yes, depfiles no", at the
@@ -87,10 +88,11 @@ suite "M17 chunk 2: evidenceSourceOf":
           outputKind: dcoRecognizedFormat,
           outputFormatName: DependencyFormatName("msvc-includes"))]),
       governingLockIdentity = lock)) == convertedEvidence("msvc-includes")
-    # A builtin runs in-process: no child to monitor.
+    # A builtin runs in-process: no child to monitor. Its source names its
+    # kind (owner decision 2026-10-31).
     let builtin = builtinAction(bakWriteText, "b", outputs = ["x"],
       text = "x", governingLockIdentity = lock)
-    check evidenceSourceOf(builtin) == BuiltinEvidence
+    check evidenceSourceOf(builtin) == builtinEvidence("write-text")
     # ...unless its caller prewired an io-mon capture, which the engine folds
     # exactly as its own monitor's.
     var captured = builtin
@@ -104,7 +106,7 @@ suite "M17 chunk 2: both publishers are told the evidence source":
       removeDir(extendedPath(TmpDir))
     createDir(TmpDir)
 
-  test "a builtin's record states `builtin` to both publishers, live and from a hit":
+  test "a builtin's record states `builtin:<kind>` to both publishers, live and from a hit":
     let project = TmpDir / "proj"
     createDir(project / "src")
     createDir(project / "out")
@@ -134,10 +136,10 @@ suite "M17 chunk 2: both publishers are told the evidence source":
     let live = runBuild(graph(@[act], newSeq[BuildPool]()), config)
     require live.results.len == 1
     require live.results[0].launched
-    check peer[] == @[BuiltinEvidence]
+    check peer[] == @[builtinEvidence("write-text")]
     require portable[].len == 1
     let record = portable[][0]
-    check record.evidenceSource == BuiltinEvidence
+    check record.evidenceSource == builtinEvidence("write-text")
     check record.evidenceLevel == elComplete
     check record.policy == ffpChecksum
     # The declared input is DECLARED in the published record.
@@ -155,7 +157,7 @@ suite "M17 chunk 2: both publishers are told the evidence source":
     let accesses = decodeInputAccesses(raw.toOpenArrayByte(0, raw.high),
       extractFilename(sidecar).changeFileExt(""))
     require accesses.isSome
-    check accesses.get().evidenceSource == BuiltinEvidence
+    check accesses.get().evidenceSource == builtinEvidence("write-text")
     let warm = runBuild(graph(@[act], newSeq[BuildPool]()), config)
     require warm.results.len == 1
     check not warm.results[0].launched
@@ -209,10 +211,10 @@ suite "M17 chunk 2: both publishers are told the evidence source":
       checkpoint(item.id & ": " & $item.status & " " & item.reason)
       require item.status == asSucceeded
     # Only the builtin reached either publisher.
-    check peer[] == @[BuiltinEvidence]
+    check peer[] == @[builtinEvidence("write-text")]
     check portable[].len == 1
     check portable[].len == 1 and
-      portable[][0].evidenceSource == BuiltinEvidence
+      portable[][0].evidenceSource == builtinEvidence("write-text")
     var portableRefusals, peerRefusals = 0
     for event in run.trace:
       if event.actionId == "t-evidence-source-depfile" and

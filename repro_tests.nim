@@ -1202,6 +1202,17 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "t_group_libs_repro_build_engine_tests_g01",
     singleReason: ""),
   TestSpec(
+    source: "libs/repro_build_engine/tests/t_builtin_kinds_with_undeclared_reads_do_not_publish.nim",
+    binary: "build/test-bin/t_builtin_kinds_with_undeclared_reads_do_not_publish",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "",
+    singleReason: "module-level statement runs at every start-up: let TmpDir = absolutePath("),
+  TestSpec(
     source: "libs/repro_build_engine/tests/t_cache_hit_evidence_paths_are_built_on_demand.nim",
     binary: "build/test-bin/t_cache_hit_evidence_paths_are_built_on_demand",
     defines: @[],

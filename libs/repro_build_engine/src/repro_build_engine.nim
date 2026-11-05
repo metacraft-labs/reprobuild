@@ -7320,6 +7320,29 @@ proc worseMonitorStatus(a, b: MonitorEvidenceStatus): MonitorEvidenceStatus =
   ## mesMonitorUnavailable. Return whichever is more severe.
   if ord(a) >= ord(b): a else: b
 
+func builtinKindName*(kind: BuildActionKind): string =
+  ## The stable name a record states for a builtin's kind
+  ## (`EvidenceSource.builtinKind`, `builtin:<name>`), and the name the
+  ## publication rule's allowlist uses (`PublishableBuiltinKinds`). The case
+  ## is exhaustive on purpose: a new kind does not compile until it is named
+  ## here, and a name the allowlist does not carry is refused across hosts
+  ## by default (owner decision 2026-10-31).
+  case kind
+  of bakProcess: "process"
+  of bakCopyFile: "copy-file"
+  of bakEnsureDir: "ensure-dir"
+  of bakWriteText: "write-text"
+  of bakStamp: "stamp"
+  of bakPreserveTree: "preserve-tree"
+  of bakEnsureLine: "ensure-line"
+  of bakEnsureSnippet: "ensure-snippet"
+  of bakWorkspaceVcs: "workspace-vcs"
+  of bakBinaryCacheSubstitute: "binary-cache-substitute"
+  of bakForeignProvision: "foreign-provision"
+  of bakMetadataFetch: "metadata-fetch"
+  of bakSolveLock: "solve-lock"
+  of bakLockUpdate: "lock-update"
+
 func evidenceSourceOf*(action: BuildAction): EvidenceSource =
   ## Where an execution of `action` gets its dependency evidence, as a
   ## published record states it (Edge-Derived-Identities.md §3.1; campaign M17
@@ -7333,7 +7356,10 @@ func evidenceSourceOf*(action: BuildAction): EvidenceSource =
   ##   kind whose caller prewired one (`monitorDepfile`; the condition
   ##   `monitorEvidenceRequired` folds under);
   ## * any other built-in (`kind != bakProcess`) runs in-process: there is no
-  ##   child to monitor, and its evidence is its declared inputs and outputs;
+  ##   child to monitor, and its evidence is its declared inputs and outputs,
+  ##   stated with its KIND (`builtin:<kind>`, `builtinKindName`), because
+  ##   only some kinds read exactly their declared inputs and the
+  ##   publication rule decides by kind (owner decision 2026-10-31);
   ## * a process under a recognized-format policy is evidenced by the
   ##   report(s) it produces, named by registry name (`make-depfile`, `iomon`
   ##   for an edge that produces its own io-mon capture);
@@ -7344,7 +7370,7 @@ func evidenceSourceOf*(action: BuildAction): EvidenceSource =
       (action.kind == bakProcess or action.monitorDepfile.len > 0):
     return MonitoredEvidence
   if action.kind != bakProcess:
-    return BuiltinEvidence
+    return builtinEvidence(builtinKindName(action.kind))
   var names: seq[string] = @[]
   if policy.kind in RecognizedPolicyKinds:
     for report in policy.recognizedReports:

@@ -601,16 +601,21 @@ suite "Cache-Scope P3.4 — lookup without materialization":
     proc fetchGraph(p: string; fixed: bool): seq[BuildAction] =
       createDir(p / "upstream" / "pkg")
       writeFile(p / "upstream" / "pkg" / "index.js", "module.exports=1\n")
+      # The fetch's stand-in is a `write-text` builtin, a kind whose record
+      # may cross hosts. It was a `preserve-tree` until owner decision
+      # 2026-10-31 refused that kind (it copies its sources' mode bits and
+      # reads its previous manifest; Edge-Derived-Identities.md §10 decision
+      # 23 rider), which would keep this record local whatever its
+      # fixed-output status.
       let fetch = BuildAction(
         governingLockIdentity: lockIdentityOutsideSolvedGraph(),
-        kind: bakPreserveTree, id: "t-pmc-fetch", deps: @[],
+        kind: bakWriteText, id: "t-pmc-fetch", deps: @[],
         inputs: @[p / "upstream" / "pkg" / "index.js"],
-        outputs: @[p / ".repro" / "preserve-tree" / "t-pmc-fetch.manifest"],
-        declaredOutputs: @[p / "fetched"],
+        outputs: @[p / "fetched" / "pkg" / "index.js"],
         cwd: p, cacheable: false, fixedOutput: fixed,
         publishToBinaryCache: false, actionCachePolicy: ffpChecksum,
         weakFingerprint: fingerprintForPayload("t-pmc-fetch"),
-        builtinText: "upstream\nfetched", builtinEntries: @["pkg/index.js"])
+        builtinText: "module.exports=1\n")
       let build = BuildAction(
         governingLockIdentity: lockIdentityOutsideSolvedGraph(),
         kind: bakWriteText, id: "t-pmc-bundle", deps: @["t-pmc-fetch"],
@@ -680,7 +685,16 @@ suite "Cache-Scope P3.4 — lookup without materialization":
     check "portable-memo-host-bound" in trace
     check "portable-memo-published" notin trace
 
-  test "reads inside a produced directory resolve from its manifest":
+  test "a preserve-tree producer is not published, so a consumer runs it and its reader":
+    # Owner decision 2026-10-31 (Edge-Derived-Identities.md §10 decision 23
+    # rider): a builtin publishes only when its kind reads exactly its
+    # declared inputs. `preserve-tree` copies its sources' mode bits and
+    # reads its previous manifest, so its record stays on its host. This
+    # case used to assert that the reader of the produced tree was served on
+    # another checkout through the producer's published manifest; with the
+    # producer refused, the reader's input under `tree/` has no published
+    # identity, and both run. (The manifest-resolution path itself needs a
+    # publishable directory producer, which no allowed builtin kind is.)
     proc treeGraph(p: string): seq[BuildAction] =
       # The source tree the builtin copies from, identical on both hosts.
       createDir(p / "tree-src" / "sub")
@@ -732,17 +746,17 @@ suite "Cache-Scope P3.4 — lookup without materialization":
     checkpoint(first.trace)
     for r in first.results:
       require r.status == asSucceeded
-      require r.portable
+    # (`$event` quotes the detail, so the kind is matched without its quotes.)
+    check "portable-memo-publish-refused" in first.trace
+    check "preserve-tree" in first.trace and "builtin" in first.trace
     let b = project("tree-b/elsewhere", "int main;\n")
     let served = run(b, lookup = lookupFor(remote("tree-b")),
       restorer = restorerFor(remote("tree-b")))
     checkpoint(served.trace)
     for r in served.results:
-      check not r.launched
-      check r.status == asCacheHit
-    # The directory was never fetched; the file read inside it, one level
-    # down, was identified from the tree action's record.
-    check not dirExists(b / "tree")
+      check r.launched
+      check r.status == asSucceeded
+    check dirExists(b / "tree")
     check readFile(b / "bin" / "use") == "used the tree\n"
 
   test "an output that cannot be restored falls back to executing":
