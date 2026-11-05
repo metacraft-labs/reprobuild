@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 34,
-    "nimTestBinaries": 2650,
+    "nimTestBinaries": 2651,
     "pureUnitConsolidationGroups": 79,
     "pureUnitTests": 734,
     "staticallyDetectedRuntimeCompilerFlowTests": 136,
-    "testEntries": 2690
+    "testEntries": 2691
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1556,7 +1556,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 19,
-      "integration": 1467,
+      "integration": 1468,
       "platform/destructive": 168,
       "pure unit": 734,
       "unclassified": 302
@@ -1767,9 +1767,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2650,
+    "nimTestBinaryCount": 2651,
     "pythonTestFileCount": 40,
-    "testEntryCount": 2690
+    "testEntryCount": 2691
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -41825,6 +41825,23 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_interface_extraction_sibling_shims_are_location_free",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_project_dsl"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_interface_extraction_sibling_shims_are_location_free.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_interface_extraction_variants_keep_their_own_outputs",
       "class": "integration",
       "classificationReason": "e2e/integration path or requires the repro binary",
@@ -47367,6 +47384,7 @@
       "defines": [],
       "language": "nim",
       "localDependencyShape": [
+        "repro_core",
         "repro_lock"
       ],
       "owner": "tests/integration",
