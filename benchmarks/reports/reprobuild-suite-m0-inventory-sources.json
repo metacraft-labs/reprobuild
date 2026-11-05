@@ -52311,14 +52311,15 @@
       "language": "nim",
       "localDependencyShape": [
         "repro_attest",
+        "repro_hash",
         "repro_interface_artifacts",
         "repro_tool_profiles"
       ],
       "owner": "tests/unit",
       "requiresReproBinary": true,
       "source": "tests/unit/t_closure_manifest.nim",
-      "sourceSuiteCount": 1,
-      "staticCaseCount": 4,
+      "sourceSuiteCount": 2,
+      "staticCaseCount": 8,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
