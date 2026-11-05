@@ -25,11 +25,16 @@
 ##     mode, printing the `RUNQUOTA_SOCKET` it inherited. On POSIX the case
 ##     points `RUNQUOTA_SOCKET` at a path that does not exist, so both of
 ##     `startAutoRunQuotaIfNeeded`'s reachability early returns fall through,
-##     and the probe must report a DIFFERENT socket: the per-invocation one the
-##     spawned daemon bound. On Windows the case gives the invocation a private
-##     `USERNAME`, so the per-user pipe name (`\\.\pipe\runquota-<USERNAME>`)
-##     is one nothing else serves, and a daemon this case did not start cannot
-##     be adopted instead.
+##     and names `runquotad` through `RUNQUOTAD_BIN` as a wrapper that records
+##     each start and then `exec`s the real daemon, so the record is the
+##     spawn itself. The daemon serves the environment computation and stops
+##     with it, before the command replaces `repro`, and the invocation
+##     restores the caller's endpoint variables when it releases the daemon.
+##     So the probe must report exactly the caller's `RUNQUOTA_SOCKET`: an
+##     endpoint whose daemon is already gone is never handed on. On Windows
+##     the case gives the invocation a private `USERNAME`, so the per-user
+##     pipe name (`\\.\pipe\runquota-<USERNAME>`) is one nothing else serves,
+##     and a daemon this case did not start cannot be adopted instead.
 ##   * WINDOWS: the daemon is still running when EOF is seen. EOF because the
 ##     daemon had died would prove nothing. The case finds the daemon as the
 ##     server of that private pipe (`GetNamedPipeServerProcessId`), requires it
@@ -45,7 +50,9 @@
 ## MOCK POLICY -- NO MOCKS. The real `repro` CLI, a real recipe compiled by
 ## the real provider compile, the real `runquotad`, real OS pipes and the
 ## kernel's own pipe-server identity. Arranged rather than produced: the
-## endpoint that forces the spawn arm, as described above.
+## endpoint that forces the spawn arm, as described above, and on POSIX the
+## recording wrapper, which only appends its pid to a file before `exec`ing
+## the real daemon with the same argv, environment and pid.
 
 import std/[monotimes, os, osproc, strtabs, strutils, tempfiles, times,
   unittest]
@@ -235,6 +242,18 @@ suite "repro exec stdio and the auto-started runquotad":
         require pipeServerPid(privatePipe) == 0
       else:
         env["RUNQUOTA_SOCKET"] = bogusSocket
+        let realDaemon =
+          if env.hasKey("RUNQUOTAD_BIN") and fileExists(env["RUNQUOTAD_BIN"]):
+            env["RUNQUOTAD_BIN"]
+          else: findExe("runquotad")
+        let daemonStarts = scratch / "runquotad-starts"
+        let recordingDaemon = scratch / "runquotad-recording"
+        writeFile(recordingDaemon, "#!/bin/sh\necho \"$$\" >> " &
+          quoteShell(daemonStarts) & "\nexec " & quoteShell(realDaemon) &
+          " \"$@\"\n")
+        setFilePermissions(recordingDaemon,
+          {fpUserRead, fpUserWrite, fpUserExec})
+        env["RUNQUOTAD_BIN"] = recordingDaemon
 
       # The `$(...)` role: stdout and stderr on ONE pipe this case reads.
       let invocation = startProcess(cli, workingDir = project,
@@ -277,10 +296,15 @@ suite "repro exec stdio and the auto-started runquotad":
           check daemonPid > 0 and processAlive(daemonPid)
           check probeValue(output, "probe-username") == privateUser
         else:
-          # Control: the spawn arm ran and published the socket it bound.
-          let published = probeValue(output, "probe-runquota-socket")
-          check published.len > 0
-          check published != bogusSocket
+          # Control: the spawn arm ran ...
+          let starts =
+            if fileExists(daemonStarts): readFile(daemonStarts).strip()
+            else: ""
+          checkpoint("runquotad starts recorded: " & starts)
+          check starts.len > 0
+          # ... and the command was handed the caller's endpoint, not the
+          # one of the daemon that stopped before it ran.
+          check probeValue(output, "probe-runquota-socket") == bogusSocket
         check "probe-runquota-socket=" in output
         check state == psEof
       finally:

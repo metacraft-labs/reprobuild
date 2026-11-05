@@ -155,8 +155,19 @@ suite "SPI-4: migration of existing pools and leaves":
     else:
       let reproBin = requireBinary(repoRoot() / "build" / "bin" /
         addFileExt("repro", ExeExt), "reprobuild.apps.repro")
+      # The leaves' transport re-enters the engine that configured them:
+      # the engine image the client hands the verb to, not whichever
+      # ``repro`` PATH names. Neither selector may leak in from the caller.
+      let engineBin = reproBinaryPath(stem = "reprobuild")
+      let poolSelectors = ["REPROBUILD_REPRO", "REPRO_SHARED_POOL_CLI"]
+      var savedSelectors: seq[(string, bool, string)]
+      for name in poolSelectors:
+        savedSelectors.add((name, existsEnv(name), getEnv(name)))
+        delEnv(name)
       let root = createTempDir("repro-spi4-", "")
       defer:
+        for (name, had, value) in savedSelectors:
+          if had: putEnv(name, value) else: delEnv(name)
         delEnv("GIT_CONFIG_GLOBAL")
         delEnv("GIT_CONFIG_NOSYSTEM")
         removeDir(root)
@@ -234,7 +245,10 @@ suite "SPI-4: migration of existing pools and leaves":
       for leaf in leaves:
         check cfg(leaf, "remote.repro-pool.url") == poolFileUrl(pool)
         check cfg(leaf, "remote.repro-pool.promisor") == "true"
-        check cfg(leaf, "remote.repro-pool.uploadpack") == leafPoolUploadPackCommand()
+        let transport = when defined(windows): engineBin.replace('\\', '/')
+                        else: engineBin
+        check cfg(leaf, "remote.repro-pool.uploadpack") ==
+          quoteShellPosix(transport) & " " & LeafPoolUploadPack
         check cfg(leaf, "fetch.hideRefs") == LeafHiddenFetchRefs
         check cfg(leaf, "extensions.partialClone") == ""
         check gitIn(leaf, "rev-parse", "-q", "--verify",
