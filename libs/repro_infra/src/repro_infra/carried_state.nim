@@ -330,7 +330,25 @@ proc readReceipt*(dir: string): Table[string, ReceiptEntry] =
     result[k] = ReceiptEntry(digest: v{"digest"}.getStr(),
       root: v{"root"}.getStr(), id: id)
 
-proc writeReceipt*(dir: string; r: Table[string, ReceiptEntry]) =
+type ReceiptPause* = proc (point: string) {.closure.}
+  ## Called at the two points of ``writeReceipt`` a crash-consistency gate
+  ## resets the host at; the add-on passes its test seam
+  ## (``repro_addon/seams``), which is empty outside the seam build.
+
+proc writeReceipt*(dir: string; r: Table[string, ReceiptEntry];
+                   pause: ReceiptPause = nil) =
+  ## Replace the receipt in ``dir`` so that a crash at any moment leaves
+  ## either the old receipt or the new one, each whole: the new bytes are
+  ## written to a temporary file and fsync'd, renamed over the old receipt,
+  ## and the directory fsync'd (https://man7.org/linux/man-pages/man2/fsync.2.html:
+  ## the rename is durable once the directory is). Without the first fsync
+  ## ext4 with delayed allocation can commit the rename before the data,
+  ## leaving an empty receipt (https://docs.kernel.org/admin-guide/ext4.html,
+  ## ``auto_da_alloc``, which papers over this only for some renames).
+  ##
+  ## ``pause`` points: ``receipt-before-rename`` (the temporary file
+  ## written and fsync'd) and ``receipt-before-dir-fsync`` (renamed into
+  ## place, the directory not yet fsync'd).
   var o = newJObject()
   var keys: seq[string]
   for k in r.keys: keys.add(k)
@@ -342,9 +360,7 @@ proc writeReceipt*(dir: string; r: Table[string, ReceiptEntry]) =
     if id.haveBtime: e["btime"] = %*[id.btimeSec, id.btimeNsec]
     if id.haveGen: e["generation"] = %id.gen
     o[k] = e
-  # Durable before it is relied on: the file's bytes, then the rename in
-  # its directory (https://man7.org/linux/man-pages/man2/fsync.2.html: a
-  # rename is durable once the directory is fsync'd).
+  const NoFsync = CarriedMutation == "receipt-no-fsync"
   let tmp = receiptPath(dir) & ".tmp"
   let data = $(%*{"restored": o}) & "\n"
   let fd = posix.open(tmp.cstring, O_WRONLY or O_CREAT or O_TRUNC, 0o600)
@@ -359,15 +375,26 @@ proc writeReceipt*(dir: string; r: Table[string, ReceiptEntry]) =
         raise newException(StateSetError, "cannot write " & tmp & ": " &
           $strerror(errno))
       off += n
-    if fsync(fd) != 0:
-      raise newException(StateSetError, "fsync " & tmp & ": " & $strerror(errno))
+    when not NoFsync:
+      if fsync(fd) != 0:
+        raise newException(StateSetError, "fsync " & tmp & ": " &
+          $strerror(errno))
   finally:
     discard posix.close(fd)
+  if pause != nil: pause("receipt-before-rename")
   moveFile(tmp, receiptPath(dir))
-  let dfd = posix.open(dir.cstring, O_RDONLY)
-  if dfd >= 0:
-    discard fsync(dfd)
-    discard posix.close(dfd)
+  if pause != nil: pause("receipt-before-dir-fsync")
+  when not NoFsync:
+    let dfd = posix.open(dir.cstring, O_RDONLY)
+    if dfd < 0:
+      raise newException(StateSetError, "cannot open " & dir & ": " &
+        $strerror(errno))
+    try:
+      if fsync(dfd) != 0:
+        raise newException(StateSetError, "fsync " & dir & ": " &
+          $strerror(errno))
+    finally:
+      discard posix.close(dfd)
 
 proc installedMarkerPath*(dir: string): string =
   ## Beside the carried directory (so removing the directory leaves it):

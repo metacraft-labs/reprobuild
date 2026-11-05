@@ -51,6 +51,14 @@
 ## plain A and reset after the restore; recovery leaves one generation
 ## whose ledger ``repro system addon verify`` finds on the host.
 ##
+## A reset inside the receipt of the carried-state restore (A13 review
+## round 3, item 11): a second restore of two carried directories is reset
+## at ``receipt-before-rename`` and ``receipt-before-dir-fsync`` after the
+## journal is committed (``commitJournalOnly``: one fsync of the gate's own
+## file, what a host does on its own every few seconds). The receipt on the
+## disk must be the old one or the new one, whole, and a restore after the
+## boot must finish.
+##
 ## Then the write-time refusal (A4 review F7): a foreign symlink planted on
 ## one of B's target paths before the first write makes the switch roll
 ## itself back to A, with A's services active.
@@ -68,6 +76,8 @@
 ##   empty there. Without the mutation the same conditions must leave A
 ##   or B, which is what makes every point a test of the switch's own
 ##   fsyncs rather than of the kernel's timing;
+## - ``receipt-no-fsync`` at ``receipt-before-dir-fsync``: red -- the
+##   rename is committed without the data, and the receipt is empty;
 ## - ``current-remove-then-create`` at ``commit-current-removed``: red --
 ##   a commit that is not one rename loses `current`, and the recovered
 ##   history no longer names A.
@@ -112,6 +122,13 @@ const
   RestorePoint* = "step-6-restore"
     ## The switch's restore of preserved objects, before step 7 (A13
     ## review): reset with an object to restore, in its own section.
+  ReceiptPoints* = ["receipt-before-rename", "receipt-before-dir-fsync"]
+    ## Inside the carried-state restore's replacement of its receipt (A13
+    ## review round 3, item 11): the new receipt written and fsync'd but
+    ## not renamed; renamed over the old one, the directory not fsync'd.
+  ReceiptUnit = "repro-receipt-fixture.service"
+  ReceiptDirs = ["/var/lib/repro-receipt-a", "/var/lib/repro-receipt-b"]
+  ReceiptCarry = "/root/receipt-carry"
   Reconciled = "/etc/repro-fixture/reconciled.conf"
   Diverted = "/etc/repro-fixture/fixture.conf"
   StateCurrent = "/var/lib/repro/system/current"
@@ -515,6 +532,84 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
       let back = g.applyProfile(repro, "a", profileA())
       step("restore-step: plain A", back.exitCode == 0, back.stdout & back.stderr)
       discard g.run("rm -f " & Reconciled)
+
+    # --- A reset inside the replacement of the carried-state restore's
+    # receipt (A13 review round 3, item 11). Two carried directories are
+    # backed up and restored (receipt R1); one of them is made again by a
+    # second restore (receipt R2: a new identity for it), which is reset at
+    # each receipt point after the journal is committed. Whatever the
+    # point, the receipt on the disk must be R1 or R2, whole -- never empty
+    # or torn -- and a restore after the boot must finish with nothing
+    # pending. ``receipt-no-fsync`` (both fsyncs dropped) leaves an empty
+    # receipt at ``receipt-before-dir-fsync``: the rename is committed, the
+    # data never was.
+    var receiptPoints: seq[string]
+    for p in ReceiptPoints:
+      if envPoints.len == 0 or p in envPoints.split(','): receiptPoints.add(p)
+    if receiptPoints.len > 0:
+      let receipt = ReceiptCarry & "/restored.json"
+      let profile = "systemd.systemUnit {\n" & FixtureFloorWaiver &
+        "  name = \"" & ReceiptUnit & "\"\n  content = \"[Service]\n" &
+        "ExecStart=/bin/true\n\"\n  stateDirectories = [\"carry:" &
+        ReceiptDirs[0] & "\", \"carry:" & ReceiptDirs[1] & "\"]\n}\n"
+      let pf = g.putProfile("receipt", profile)
+      let setup = g.exec("printf '[Service]\\nExecStart=/bin/true\\n' > " &
+        "/etc/systemd/system/" & ReceiptUnit & " && systemctl daemon-reload" &
+        " && for d in " & ReceiptDirs.join(" ") & "; do mkdir -p $d/sub && " &
+        "printf 'carried %s\\n' $d > $d/sub/data; done && rm -rf " &
+        ReceiptCarry & " && " & repro & " system addon state backup " &
+        "--profile " & pf & " --out " & ReceiptCarry & " && " & repro &
+        " system addon state release --profile " & pf & " && rm -rf " &
+        ReceiptDirs.join(" ") & " && " & repro & " system addon state " &
+        "restore --from " & ReceiptCarry & " && sync")
+      let r1 = g.exec("cat " & receipt).stdout
+      step("receipt: two carried directories backed up and restored " &
+           "(receipt R1 names both)", setup.exitCode == 0 and
+           ReceiptDirs[0] in r1 and ReceiptDirs[1] in r1,
+           setup.stdout & setup.stderr & "\nR1: " & r1)
+      if setup.exitCode == 0:
+        for point in receiptPoints:
+          # The second directory made again: the next restore restores it
+          # anew and so writes a receipt with its new identity.
+          discard g.run("rm -rf " & ReceiptDirs[1] & " && cp " & receipt &
+                        " /root/receipt-r1 && sync")
+          let before = g.exec("cat " & receipt).stdout
+          g.holdWriteback()
+          let paused = g.startPausedAt(repro & " system addon state restore " &
+            "--from " & ReceiptCarry, point)
+          step("receipt " & point & ": the restore paused there",
+               paused.exitCode == 0, paused.stdout & paused.stderr)
+          if paused.exitCode != 0: continue
+          # R2 as the restore wrote it, read from the running guest.
+          let r2 = g.exec("cat " & receipt & (if point == ReceiptPoints[0]:
+            ".tmp" else: "")).stdout
+          g.commitJournalOnly()
+          g.hardReset()
+          g.boot()
+          discard g.waitReasserted()
+          let size = g.exec("stat -c %s " & receipt).stdout.strip()
+          let now = g.exec("cat " & receipt).stdout
+          let whole = now.len > 0 and (now == before or now == r2)
+          var parses = false
+          try:
+            parses = parseJson(now).hasKey("restored")
+          except CatchableError: discard
+          step("receipt " & point & ": after the reset the receipt is the " &
+               "old one or the new one, whole (never empty or torn)",
+               whole and parses and r2.len > 0 and r2 != before,
+               "on disk (" & size & " bytes): " & now & "\nold: " & before &
+               "\nnew: " & r2)
+          let again = g.exec(repro & " system addon state restore --from " &
+                             ReceiptCarry)
+          step("receipt " & point & ": a restore after the boot finishes " &
+               "with nothing pending", again.exitCode == 0,
+               again.stdout & again.stderr)
+          outcomes["receipt:" & point] = %(if now == r2: "new"
+            elif now == before: "old" else: "other")
+      record["outcomes"] = outcomes
+      discard g.run("rm -rf " & ReceiptDirs.join(" ") & " " & ReceiptCarry &
+        " /etc/systemd/system/" & ReceiptUnit & " /etc/systemd/system/" &
+        ReceiptUnit & ".d && systemctl daemon-reload")
 
     let un = g.exec(repro & " system addon uninstall")
     step("uninstall", un.exitCode == 0, un.stdout & un.stderr)
