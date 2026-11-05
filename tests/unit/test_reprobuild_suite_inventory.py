@@ -8153,6 +8153,8 @@ compileProfileBinary()
             },
             "tests/integration/t_source_hash_runtime_paths.nim": {
                 "linux": {
+                    "Source bootstrap hash-library runtime paths::portable "
+                    "hash sources compile outside the SDK configuration",
                     "Source bootstrap hash-library runtime paths::real hash "
                     "libraries load without ambient paths; missing RPATH fails",
                 },
@@ -8413,6 +8415,26 @@ compileProfileBinary()
                 "darwin": {
                     "HLX-M4 fixture: a §6.3 quiescence timeout is retried, counted and writes nothing::the HLX-M4 fixture is linux-x86_64-only",
                 },
+            },
+            # The `passwd.user` driver drives `getent`/`id`/`useradd`, so
+            # both of its suites are declared only on Linux.
+            "libs/repro_elevation/tests/t_passwd_user_driver_group_collision.nim": {
+                "linux": {
+                    "passwd.group: the plan compares what the resource declares::a pinned gid still counts; an unpinned one does not",
+                    "passwd.group: the plan compares what the resource declares::an undeclared live member is a no-op; a missing declared one is not",
+                    "passwd.user driver: an existing same-named group::declared: the group becomes the primary and the account converges",
+                    "passwd.user driver: an existing same-named group::no such group (USERGROUPS_ENAB no, or none yet): plain useradd",
+                    "passwd.user driver: an existing same-named group::undeclared: refused, and useradd never runs",
+                },
+                "darwin": set(),
+            },
+            # MAX_ARG_STRLEN is a Linux exec limit; the Windows-only case is
+            # outside this Linux/Darwin ledger.
+            "tests/integration/t_compiler_args_transport.nim": {
+                "linux": {
+                    "compiler argument transport::a single argument over MAX_ARG_STRLEN exceeds the exec limit",
+                },
+                "darwin": set(),
             },
         })
 
@@ -8768,7 +8790,7 @@ compileProfileBinary()
     def assert_platform_catalog_ledger_census(self, data):
         exclusive, identical = self.linux_darwin_catalog_ledger()
         self.assertEqual(self.platform_gated_test_sources(data), set(exclusive) | identical)
-        self.assertEqual(len(exclusive), 74)
+        self.assertEqual(len(exclusive), 76)
         self.assertEqual(len(identical), 21)
         # The per-host totals are pure ledger arithmetic, so they are checked
         # here, where no built binary is needed: a ledger entry added without
@@ -8777,8 +8799,8 @@ compileProfileBinary()
         # never used as a substitute for their exact per-source assertions.
         linux_only = sum(len(item["linux"]) for item in exclusive.values())
         darwin_only = sum(len(item["darwin"]) for item in exclusive.values())
-        self.assertEqual((linux_only, darwin_only), (129, 156))
-        self.assertEqual(linux_only - darwin_only, -27)
+        self.assertEqual((linux_only, darwin_only), (136, 156))
+        self.assertEqual(linux_only - darwin_only, -20)
         specs, _ = inventory.parse_repro_tests(REPO_ROOT)
         defines_by_source = {spec.source: spec.defines for spec in specs}
         for source in sorted(set(exclusive) | identical):
@@ -8861,9 +8883,9 @@ compileProfileBinary()
     def assert_linux_darwin_catalog_delta_is_exact(self, data):
         """Validate the ledger against this host's real catalog and source census.
 
-        The ledger currently covers 73 asymmetric sources and 20 sources
-        whose platform gates select identical names. Its 128 Linux-only and
-        156 Darwin-only identities yield a net 28 extra Darwin cases. Newly
+        The ledger currently covers 76 asymmetric sources and 21 sources
+        whose platform gates select identical names. Its 136 Linux-only and
+        156 Darwin-only identities yield a net 20 extra Darwin cases. Newly
         reconciled Darwin names are measured at 4f7d8624d7; their explicit
         Linux branches supply expectations checked by a Linux run, rather
         than a claim that Linux was measured on m1.

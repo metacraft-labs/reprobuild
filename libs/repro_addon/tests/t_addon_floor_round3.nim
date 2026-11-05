@@ -212,17 +212,23 @@ suite "round 3: the effective-unit check":
   let denied = toHashSet(["memfd_create", "shmat", "mount", "reboot"])
   proc uid(n: string): int = (if n == "root": 0 else: 1000)
 
-  proc noGroups(n: string): seq[string] = @[]
+  # Its primary group only (``systemGroups`` names the primary group
+  # first; an account with none does not resolve, which is refused).
+  proc noGroups(n: string): seq[string] = @[n]
   proc problems(show: ShowProps; version = FloorVersion;
                 own: seq[string] = @[]): seq[string] =
     var e = EffectiveInput(unit: "a.service", rendered: ru, version: version,
-      show: show, denied: denied, uidOf: uid, groupsOf: noGroups)
+      show: show, denied: denied, uidOf: uid, groupsOf: noGroups,
+      partialShow: true,
+      gidOf: proc (g: string): int =
+        (if g == "root": 0 elif g == "a": 1000 else: -1))
     e.lines["ExecStartEx"] = @["{ path=" & Prefix & "/bin/svc ; argv[]=" &
       Prefix & "/bin/svc ; flags= ; start_time=[n/a] }"]
     for o in own: e.ownDropIns.add((path: o, content: ""))
     effectiveFloorProblems(e)
 
   test "a unit that holds its floor has no problem":
+    checkpoint problems(goodShow()).join("\n")
     check problems(goodShow()).len == 0
 
   test "it catches what the parse-time half missed (findings 1-5)":

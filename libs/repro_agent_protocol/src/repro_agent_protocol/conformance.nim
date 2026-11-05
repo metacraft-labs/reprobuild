@@ -1,7 +1,7 @@
 ## The provider conformance harness (ReproOS-Agent-Harbor-Integration M7;
 ## spec `ReproOS-Agent-Integration-Protocol.md` §"Provider conformance").
 ##
-## It runs a real host on its real sockets with a fixture backend, starts
+## It runs a real host on its real sockets (named pipes on Windows) with a fixture backend, starts
 ## the provider under test as a SEPARATE PROCESS that knows only what the
 ## protocol hands a provider (the provider socket, a session id and secret,
 ## an intent), and judges the provider by what the host recorded: the audit
@@ -115,8 +115,9 @@ proc runConformance*(providerCmd: seq[string]; workRoot: string;
                      timeoutSeconds = ConformanceTimeoutSeconds):
     ConformanceReport =
   ## Run scenario `agent-v1` against the provider started by
-  ## `providerCmd` (argv; no shell). `workRoot` must be empty or absent and
-  ## short enough for Unix socket paths.
+  ## `providerCmd` (argv; no shell). `workRoot` must be empty or absent and,
+  ## on POSIX, short enough for Unix socket paths; on Windows the channels
+  ## are named pipes (spec §"The Windows transport").
   let backend = ConformanceBackend(active: FixtureBase)
   let h = newHost(backend, workRoot / "workspaces",
                   auditPath = workRoot / "audit.log")
@@ -148,7 +149,7 @@ proc runConformance*(providerCmd: seq[string]; workRoot: string;
     env[k] = v
   for (k, v) in extraEnv:
     env[k] = v
-  env["REPROOS_AGENT_SOCKET"] = providerSocketPath(workRoot / "run")
+  env["REPROOS_AGENT_SOCKET"] = server.providerPath
   env["REPROOS_AGENT_SESSION"] = sid
   env["REPROOS_AGENT_SECRET"] = secret
   env["REPROOS_AGENT_INTENT"] = intentId(intent).hex

@@ -22,10 +22,13 @@ import repro_deploy_agent/manifest
 import repro_peer_cache/auth as peerAuth
 
 import repro_addon/agent_split
+import repro_addon/store_custody
 
 let root = getTempDir() / ("rdmf-v3-digests-" & $getCurrentProcessId())
 removeDir(root)
 let store = root / "store"
+let testCustody = custodySite(root / "state", root / "store")
+  ## The realisation index and evidence of this test, not the host's.
 let copyDir = root / "copy"
 
 proc stageOutput(i: int; content: string) =
@@ -56,7 +59,7 @@ suite "RDMF v3 closure digests are enforced on an add-on host":
     stageOutput(0, "the bytes the cache served")
     let m = manifestPinning(digestOf("the bytes the producer pinned"))
     expect CatchableError:
-      installStagedOutputs(m, @[action()], copyDir, storeRoot = store)
+      installStagedOutputs(m, @[action()], copyDir, storeRoot = store, custody = testCustody)
     check not fileExists(action().cwd / "bin" / "tool")
 
   test "a v2 manifest is refused by an add-on agent":
@@ -74,7 +77,7 @@ suite "RDMF v3 closure digests are enforced on an add-on host":
     removeDir(root)
     stageOutput(0, "pinned bytes")
     let m = manifestPinning(digestOf("pinned bytes"))
-    installStagedOutputs(m, @[action()], copyDir, storeRoot = store)
+    installStagedOutputs(m, @[action()], copyDir, storeRoot = store, custody = testCustody)
     check readFile(action().cwd / "bin" / "tool") == "pinned bytes"
 
   test "an action the manifest pins nothing for is refused":
@@ -84,6 +87,6 @@ suite "RDMF v3 closure digests are enforced on an add-on host":
     a.id = "unpinned"
     expect CatchableError:
       installStagedOutputs(manifestPinning(digestOf("x")), @[a], copyDir,
-                           storeRoot = store)
+                           storeRoot = store, custody = testCustody)
 
 removeDir(root)

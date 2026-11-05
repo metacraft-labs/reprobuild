@@ -35,6 +35,7 @@ import ./generation0
 import ./ledger
 import ./nft_tables
 import ./preflight
+import ./store_custody
 import ./store_root
 
 type
@@ -134,7 +135,8 @@ proc runEvidenceEnrol*(opts: EnrolOptions): EnrolResult =
     if o.kind == ookEtcFile: files.add((contentFileName(o), o.content))
   let fp = realiseFilesPrefix(files)
   entries.add(LedgerEntry(class: lcStorePrefix, path: fp.path,
-                          sha256: prefixIdHex(fp.id)))
+                          sha256: prefixIdHex(fp.id), value: fp.digest))
+  recordRealised(custodySite(stateDir), fp.path, fp.digest)
   var newOwn = own
   if result.observed:
     let (a, b) = blockBounds(own, UnitBlockHead & AgentFetchUnit & "\"\n")

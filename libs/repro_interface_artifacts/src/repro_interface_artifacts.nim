@@ -1205,15 +1205,22 @@ static:
 
 const
   EnvelopeMagic = [byte(ord('R')), byte(ord('B')), byte(ord('S')), byte(ord('Z'))]
-  EnvelopeVersion = 30'u16
-    ## v30 (current): ``InterfaceToolUse`` retains
-    ##                ``environmentPrefixProvisioning`` (Package-Model.md
-    ##                §"Environment-provided library prefixes"), a count and
-    ##                its records after ``scoopProvisioning``. Like every
-    ##                realization it is left out of the fingerprint
-    ##                projection, and the realization digest appends it only
-    ##                when non-empty, so an artifact without one keeps its
-    ##                v29 fingerprints to the byte.
+  EnvelopeVersion = 31'u16
+    ## v31 (current): the wire payload is v30's. The fingerprint projection
+    ##                of a tool use carries no environment-prefix block at
+    ##                all, so every interface fingerprint -- and every key
+    ##                hashed from one, the tool-identity cache key among
+    ##                them -- is the one v29 computed. The realization digest
+    ##                appends the block only when non-empty, so a use without
+    ##                an arm keeps that digest too.
+    ## v30: ``InterfaceToolUse`` retains ``environmentPrefixProvisioning``
+    ##                (Package-Model.md §"Environment-provided library
+    ##                prefixes"), a count and its records after
+    ##                ``scoopProvisioning``. Its fingerprint projection writes
+    ##                a zero count for that block in every tool use, so a v30
+    ##                fingerprint differs from v29's for any interface with a
+    ##                tool use; a v30 envelope is verified against that
+    ##                projection.
     ## v29: retains ``InterfaceProvisioningContribution.imported``
     ##                (one byte after ``developInterface``; ReproOS M7
     ##                deliverable 4). Introduced as "v18" on the campaign
@@ -2174,13 +2181,21 @@ proc writeToolUse(outp: var seq[byte]; useDef: InterfaceToolUse;
   if not omitRealizations:
     for provisioning in useDef.scoopProvisioning:
       outp.writeScoopProvisioning(provisioning, version, forFingerprint)
-  # Not written into the fingerprint projection at all, not even as a zero
-  # count: a v30 interface fingerprints exactly as v29 did, which is what keeps
-  # every existing interface fingerprint and tool-identity key unchanged.
-  if version >= 30'u16 and not omitRealizations:
-    outp.writeU32Le(uint32(useDef.environmentPrefixProvisioning.len))
-    for provisioning in useDef.environmentPrefixProvisioning:
-      outp.writeEnvironmentPrefixProvisioning(provisioning, forFingerprint)
+  # The environment-prefix block (v30). From v31 the fingerprint projection
+  # leaves it out entirely -- not even a zero count -- so the projection of
+  # every tool use is the v29 one and no fingerprint (nor any key hashed
+  # from one) moves with the arm's arrival. v30's projection carried the
+  # zero count and still does here: the fingerprint stored in a v30 envelope
+  # was computed over it, and the decoder recomputes it at the envelope's
+  # own version.
+  let envPrefixBlock = version >= 30'u16 and
+    (not forFingerprint or version == 30'u16)
+  if envPrefixBlock:
+    outp.writeU32Le(uint32(if omitRealizations: 0 else:
+      useDef.environmentPrefixProvisioning.len))
+    if not omitRealizations:
+      for provisioning in useDef.environmentPrefixProvisioning:
+        outp.writeEnvironmentPrefixProvisioning(provisioning, forFingerprint)
   outp.writeLocation(useDef.location, forFingerprint)
 
 proc readToolUse(bytes: openArray[byte]; pos: var int;
@@ -8049,33 +8064,6 @@ proc extractInterfaceFromModule*(modulePath, artifactPath, stubPath: string;
       slot = acquireInterfaceNimcacheSlot(
         interfaceExtractionNimcacheRoot() / key)
       slot.dir
-  # The recipe's sibling-import shims (`usesImportCode`) go to a directory
-  # this computation owns, named by selector alone: Hermetic-Builds-And-Path-
-  # Independence.md §"Per-computation output directories". Under the
-  # recipe-relative edge that is the scratch tree of the identity's staging
-  # directory -- the same path for every copy of the recipe, emptied under the
-  # identity lock before each run, and an ignored input prefix of the edge.
-  # The shims' only content is the absolute path of a sibling the compile
-  # then reads, and that read is recorded relative to the recipe. Left in the
-  # shared temporary directory, keyed by the consumer's absolute path, they
-  # were recorded inputs that named the consumer's location, so another copy
-  # of the recipe, or the same one after the temporary directory was wiped,
-  # could never hit. Only the recipe-relative child sets it: it is the only
-  # caller that runs alone in its process and owns its scratch exclusively.
-  let shimDirOverride = recipeRelative
-  let priorShimDir = getEnv(SiblingShimDirEnv)
-  let hadPriorShimDir = existsEnv(SiblingShimDirEnv)
-  if shimDirOverride:
-    let shimDir = absolutePath(buildScratchRoot(workDir, scratchDir)) /
-      "sibling-shims"
-    if dirExists(extendedPath(shimDir)):
-      removeDir(extendedPath(shimDir))
-    createDir(extendedPath(shimDir))
-    putEnv(SiblingShimDirEnv, shimDir)
-  defer:
-    if shimDirOverride:
-      if hadPriorShimDir: putEnv(SiblingShimDirEnv, priorShimDir)
-      else: delEnv(SiblingShimDirEnv)
   var compileExecution: ProviderCompileExecutionResult
   try:
     let runnerPath = runnerDir / runnerName

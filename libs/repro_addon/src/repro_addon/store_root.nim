@@ -22,7 +22,7 @@
 ## (``enterWritableStoreView``); no other process on the host ever sees a
 ## writable store.
 
-import std/[algorithm, os, posix, strutils]
+import std/[algorithm, os, posix, sequtils, strutils]
 
 import repro_core
 import repro_local_store/store
@@ -43,11 +43,18 @@ type
     reproExe*: string             ## binaryPrefixPath / bin/repro
     filesPrefixId*: PrefixIdBytes
     filesPrefixPath*: string      ## absolute
+    binaryDigest*: string         ## realisation digest (``storeTreeDigest``)
+    filesDigest*: string          ## of each, computed from the bytes this
+                                  ## process staged, never read back from
+                                  ## the store (spec §10.2, "The digest at
+                                  ## realisation")
 
 const
   ReproRoot* = "/repro"
   BinaryPackage* = "repro-addon"
   FilesPackage* = "repro-addon-files"
+  StaticTreePackageName* = "repro-addon-etc"
+    ## The static tree's package (``static_tree.StaticTreePackage``).
   RootIdPrefix* = "addon-generation:"
 
 # ---------------------------------------------------------------------------
@@ -71,15 +78,26 @@ proc filesManifest(names: openArray[string]): string =
   sorted.sort(system.cmp)
   sorted.join("\n")
 
-proc filesPrefixId*(names: openArray[string]): PrefixIdBytes =
+proc filesPrefixId*(names: openArray[string];
+                    version = ReprobuildVersion): PrefixIdBytes =
   ## The files prefix is content-addressed by the names of the files in it,
-  ## which are their SHA-256 digests.
-  computeRealizationHash(FilesPackage, ReprobuildVersion, "addon-bootstrap",
+  ## which are their SHA-256 digests, and the version of the add-on that
+  ## realised it.
+  computeRealizationHash(FilesPackage, version, "addon-bootstrap",
     "", "", provenanceChecksum = "manifest:" & filesManifest(names))
 
-proc filesPrefixPath*(names: openArray[string]): string =
-  StoreRoot / prefixRelativePath(FilesPackage, ReprobuildVersion,
-                                 filesPrefixId(names))
+proc filesPrefixPath*(names: openArray[string];
+                      version = ReprobuildVersion;
+                      storeRoot = StoreRoot): string =
+  storeRoot / prefixRelativePath(FilesPackage, version,
+                                 filesPrefixId(names, version))
+
+proc prefixVersionOf*(path: string): string =
+  ## The version a prefix path ``<store>/prefixes/<pkg>/<version>-<hash16>``
+  ## was realised under (the add-on's own prefixes use plain versions).
+  let leaf = extractFilename(path)
+  let dash = leaf.rfind('-')
+  if dash > 0: leaf[0 ..< dash] else: ""
 
 # ---------------------------------------------------------------------------
 # Roots.
@@ -186,10 +204,27 @@ proc enterWritableStoreView*() =
 # Realising the add-on's prefixes and registering generation roots.
 # ---------------------------------------------------------------------------
 
-proc realiseFilesInto(s: var Store; files: openArray[tuple[name, content: string]]):
-    tuple[id: PrefixIdBytes; path: string] =
+proc realisationDigest*(staged, realised: string): string =
+  ## The realisation digest of the store path ``realised``, materialised
+  ## from the directory ``staged`` this process wrote: the canonical tree
+  ## digest of the STAGED bytes, which the store path cannot change (spec
+  ## §10.2, "The digest at realisation"; it is recorded outside the store,
+  ## in the generation's ledger). A store path that already existed and
+  ## holds other entries than were staged -- an altered path the store
+  ## reused -- is refused here rather than recorded as owned.
+  result = storeTreeDigest(staged)
+  let now = storeTreeDigest(realised)
+  if now != result:
+    raise newException(StoreRootError, "the store path " & realised &
+      " does not hold the bytes realised into it (" & now & ", staged " &
+      result & "): it existed with other content; it is left in place " &
+      "and not used")
+
+proc realiseFilesInto(s: var Store; files: openArray[tuple[name, content: string]];
+                      version = ReprobuildVersion):
+    tuple[id: PrefixIdBytes; path, digest: string] =
   ## One files prefix holding ``files`` (named by their content digest), at
-  ## the path its manifest names.
+  ## the path its manifest names, with its realisation digest.
   let ftmp = StoreRoot / "tmp" / ("addon-files-" & $getCurrentProcessId())
   removeDir(ftmp)
   createDir(ftmp)
@@ -201,18 +236,21 @@ proc realiseFilesInto(s: var Store; files: openArray[tuple[name, content: string
       names.add(f.name)
   let filesRes = s.realizeDirectoryAsPrefix(ftmp,
     StoreReceiptHint(adapter: "addon-bootstrap", packageName: FilesPackage,
-      version: ReprobuildVersion,
+      version: version,
       provenanceChecksum: "manifest:" & filesManifest(names)))
-  (filesRes.prefixId, filesRes.absolutePath)
+  (filesRes.prefixId, filesRes.absolutePath,
+   realisationDigest(ftmp, filesRes.absolutePath))
 
-proc realiseFilesPrefix*(files: openArray[tuple[name, content: string]]):
-    tuple[id: PrefixIdBytes; path: string] =
+proc realiseFilesPrefix*(files: openArray[tuple[name, content: string]];
+                         version = ReprobuildVersion):
+    tuple[id: PrefixIdBytes; path, digest: string] =
   ## A files prefix of generation-0 bodies on its own (an operator verb that
-  ## adds objects to generation 0 after bootstrap: ``evidence-enrol``).
+  ## adds objects to generation 0 after bootstrap: ``evidence-enrol``; the
+  ## recovery of an altered one, under the version it was realised with).
   enterWritableStoreView()
   var s = openStore(StoreRoot)
   defer: s.close()
-  realiseFilesInto(s, files)
+  realiseFilesInto(s, files, version)
 
 proc realiseAddonPrefixes*(binaryPath, binarySha256: string;
                            files: seq[tuple[name, content: string]]):
@@ -240,6 +278,7 @@ proc realiseAddonPrefixes*(binaryPath, binarySha256: string;
   result.binaryPrefixId = binRes.prefixId
   result.binaryPrefixPath = binRes.absolutePath
   result.reproExe = binRes.absolutePath / "bin" / "repro"
+  result.binaryDigest = realisationDigest(tmp, binRes.absolutePath)
   if result.binaryPrefixPath != binaryPrefixPath(binarySha256):
     raise newException(StoreRootError, "store placed the add-on binary at " &
       result.binaryPrefixPath & ", not at the planned " &
@@ -247,6 +286,7 @@ proc realiseAddonPrefixes*(binaryPath, binarySha256: string;
   let f = realiseFilesInto(s, files)
   result.filesPrefixId = f.id
   result.filesPrefixPath = f.path
+  result.filesDigest = f.digest
 
 proc registerGenerationRoot*(generationId: string;
                              prefixIds: openArray[PrefixIdBytes]) =
@@ -271,3 +311,39 @@ proc generationRoots*(): seq[string] =
   for r in s.listRoots():
     if r.rootId.startsWith(RootIdPrefix) and r.kind == $rkProfile:
       result.add(r.rootId[RootIdPrefix.len .. ^1])
+
+# ---------------------------------------------------------------------------
+# The store quarantine (spec §13 decision 46, DET-AO-5).
+# ---------------------------------------------------------------------------
+
+proc readStoreQuarantine*(path = StoreQuarantinePath): seq[string] =
+  ## Store paths verification found altered; none is used by a switch again.
+  try:
+    for l in readFile(path).splitLines():
+      let p = l.strip()
+      if p.len > 0 and p notin result: result.add(p)
+  except IOError, OSError:
+    discard
+
+proc releaseStoreQuarantine*(storePath: string; path = StoreQuarantinePath) =
+  ## Take ``storePath`` out of the quarantine: the altered directory was
+  ## moved into the evidence directory and the path re-realised from a
+  ## trusted source (spec §13 decision 47). No-op when it is not there.
+  var q = readStoreQuarantine(path)
+  if storePath notin q: return
+  q.keepItIf(it != storePath)
+  createDir(parentDir(path))
+  writeFile(path & ".tmp", (if q.len > 0: q.join("\n") & "\n" else: ""))
+  setFilePermissions(path & ".tmp", {fpUserRead, fpUserWrite})
+  moveFile(path & ".tmp", path)
+
+proc quarantineStorePath*(storePath: string; path = StoreQuarantinePath) =
+  ## Add ``storePath`` (no-op when it is there already); the file is
+  ## rewritten whole, by rename.
+  var q = readStoreQuarantine(path)
+  if storePath in q: return
+  q.add(storePath)
+  createDir(parentDir(path))
+  writeFile(path & ".tmp", q.join("\n") & "\n")
+  setFilePermissions(path & ".tmp", {fpUserRead, fpUserWrite})
+  moveFile(path & ".tmp", path)

@@ -445,8 +445,12 @@ proc needsSslDefine(path: string): bool =
   ##     deploy-agent's ssl ``defaultHttpGet`` (M5 over TLS), so it too must
   ##     compile with ``-d:ssl`` (the same mechanism the packaged ``repro``
   ##     binary now uses via ``apps/entrypoints.txt``).
+  ##   * The binary-cache client's post-connect deadlines: it bounds a TLS
+  ##     handshake against a peer that accepts and never answers, which
+  ##     only an ssl-enabled http_pool performs.
   path.endsWith("/t_repro_binary_cache_https_publish_authz.nim") or
-    path.endsWith("/t_repro_https_cache_end_to_end.nim")
+    path.endsWith("/t_repro_https_cache_end_to_end.nim") or
+    path.endsWith("/t_cache_reads_are_bounded.nim")
 
 proc needsSoftwareRootTestTrustDefine(path: string): bool =
   ## Five attestation gates are compiled with

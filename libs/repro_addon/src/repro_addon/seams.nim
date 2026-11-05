@@ -39,7 +39,12 @@
 ## the secret it read, before sealing it), and
 ## ``rotation-after-rename`` (``addon_secrets.retireCurrentKey``: the next
 ## key is renamed over the old one, ``recipient.pub`` and the ledger not yet
-## brought up to date).
+## brought up to date), and ``restore-before-archive`` (``state_sets``:
+## the carried-state restore, before it reads an archive; its control files
+## are under ``/var/lib/repro/system/addon/``), ``receipt-before-rename``
+## and ``receipt-before-dir-fsync`` (``carried_state.writeReceipt``,
+## through the restore: the new receipt written and fsync'd but not
+## renamed; renamed, its directory not fsync'd).
 ## A switch that is a revert prefixes its points with ``revert:``, and a
 ## replay (a recovery) with ``replay:``.
 

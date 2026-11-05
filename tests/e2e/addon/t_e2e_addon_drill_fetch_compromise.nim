@@ -153,10 +153,10 @@ proc body(g: Guest; repro: string; step: StepFn; record: JsonNode;
     writeFile(drill / "README",
       "Add-on drill: investigation hold.\n\n" &
       "Sink store (read it locally): " & sink.storeDir & "\n" &
-      "Sink tool: " & sinkBinary() & " read --dir " & sink.storeDir & "\n" &
-      "Off-host check: " & sinkBinary() & " addon-check --dir " &
-        sink.storeDir & " --hosts " & drill / "hosts" & " --manifests " &
-        sink.published & " --deploy-signers " & signers & "\n" &
+      "Sink tool: " & sinkBinary() & " read --dir=" & sink.storeDir & "\n" &
+      "Off-host check: " & sinkBinary() & " addon-check --dir=" &
+        sink.storeDir & " --hosts=" & drill / "hosts" & " --manifests=" &
+        sink.published & " --deploy-signers=" & signers & " --update-hosts\n" &
       "Evidence ids of the detection: " & evidenceIds.mapIt($it).join(" ") & "\n" &
       "Run a command in the guest: write " & drill / "requests/<n>.sh" &
         " and read <n>.out\n" &

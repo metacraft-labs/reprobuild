@@ -346,13 +346,17 @@ suite "M4 the publisher-configured path stores output blobs":
     check fx.recordFor.outputPayloadKind == opkCasBlobs
     check casBlobCount(fx.cacheRoot) > 0
 
-  test "a publisher alone stores the blob and still RE-RUNS a deletion":
-    ## The limitation, asserted rather than described. This is the exact
-    ## configuration ``repro build --peer-cache=…`` produces today: blobs
-    ## in ``cas/``, and ``rebuildMissingOutputsOnCacheHit`` still true, so
-    ## the payload that could have been restored is paid for and not used.
-    ## M4's sentence assumed configuring a publisher would deliver the
-    ## restore; it delivers half of it.
+  test "a publisher alone stores the blob, and a deletion is RESTORED from it":
+    ## The exact configuration ``repro build --peer-cache=…`` produces: blobs
+    ## in ``cas/``, and ``rebuildMissingOutputsOnCacheHit`` true. Until the
+    ## owner's decision of 2026-11-03 this case asserted the limitation --
+    ## the payload that could have been restored was paid for and not used,
+    ## and a deleted output re-ran the action. The decision
+    ## (Incremental-Invalidation.md §"Minimum check set" Step 3.3; it closed
+    ## the issue 2026-10-30-in-place-build-rebuilds-a-payload-backed-record-
+    ## whose-output-is-missing in favour of restoring) makes the in-place
+    ## mode restore a payload-backed record's missing output, so M4's
+    ## sentence now holds on this route too.
     let root = newCaseRoot("publisher-only")
     defer: dropTree(root)
     let fx = makeFixture(root, "publisher-only")
@@ -366,10 +370,9 @@ suite "M4 the publisher-configured path stores output blobs":
     check not fileExists(fx.outputPath)
 
     let second = runBuild(fx.graph, cfg)
-    check second.results[0].launched
-    check second.results[0].reason != "restored"
+    check not second.results[0].launched
+    check second.results[0].reason == "restored"
     check fileExists(fx.outputPath)
-    # The blob was there the whole time and the engine declined to use it.
     check casBlobCount(fx.cacheRoot) > 0
 
   test "publisher plus the restore opt-in: the deleted output IS restored":

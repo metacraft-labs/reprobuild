@@ -131,7 +131,7 @@ const
 
   ZigCrossScratchSubdir* = ".repro/build/cross"
     ## The per-target scratch root: `<projectRoot>/.repro/build/cross/<triple>/`,
-    ## beside cargo's own scratch so `repro clean` takes it too. The wrappers
+    ## beside cargo's own scratch. The wrappers
     ## land in its `zig/` subdirectory (`zigCrossWrapperDir`): the rust-std
     ## fetch and the sysroot merge (`adapters/rust_target_sysroot`) write
     ## their own subdirectories beside it, and an edge may only remove what

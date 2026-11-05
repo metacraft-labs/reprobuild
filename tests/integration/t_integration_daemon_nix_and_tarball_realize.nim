@@ -170,9 +170,18 @@ proc buildTarballFixture(tempRoot: string): tuple[url: string; sha256: string] =
   (url: "file://" & archivePath.replace('\\', '/'),
    sha256: fileSha256Hex(archivePath))
 
-proc tarballUse(url, sha256: string): InterfaceToolUse =
+const
+  ## The ranged ``uses:`` constraint and the version the fixture record
+  ## declares for it. The client judges the range against the record it
+  ## selects; the daemon rebuilds that record from the request and judges it
+  ## again, so the version has to cross the socket for the two to agree.
+  RangedTarballConstraint = "m67-tarball >=1.0"
+  FixtureTarballVersion = "1.0.0"
+
+proc tarballUse(url, sha256: string; constraint = "m67-tarball";
+                version = ""): InterfaceToolUse =
   result = InterfaceToolUse(
-    rawConstraint: "m67-tarball",
+    rawConstraint: constraint,
     packageSelector: "m67-tarball@1.0.0",
     executableName: "m67tarball",
     location: SourceLocation(file: "fixture", line: 1))
@@ -187,6 +196,7 @@ proc tarballUse(url, sha256: string): InterfaceToolUse =
     packageId: "m67-tarball@1.0.0",
     lockIdentity: "sha256:" & sha256,
     location: SourceLocation(file: "fixture", line: 2))]
+  result.tarballProvisioning[0].detail.version = version
 
 proc nixUse(): InterfaceToolUse =
   result = InterfaceToolUse(
@@ -203,8 +213,8 @@ proc nixUse(): InterfaceToolUse =
     location: SourceLocation(file: "fixture", line: 2))]
 
 proc runClientWorker(args: seq[string]): int =
-  ## --client <tarball|nix> <endpoint> <storeRoot> <holder> <rootId>
-  ##          <statusFile> <barrier> [tarballUrl tarballSha256]
+  ## --client <tarball|tarball-ranged|nix> <endpoint> <storeRoot> <holder>
+  ##          <rootId> <statusFile> <barrier> [tarballUrl tarballSha256]
   doAssert args.len >= 8
   let mode = args[1]
   let endpoint = args[2]
@@ -218,6 +228,12 @@ proc runClientWorker(args: seq[string]): int =
     if mode == "tarball":
       doAssert args.len >= 10
       let req = requestFromTarballUse(tarballUse(args[8], args[9]),
+        storeRoot, holder, rootId)
+      realizeTarballViaDaemon(req, endpoint)
+    elif mode == "tarball-ranged":
+      doAssert args.len >= 10
+      let req = requestFromTarballUse(tarballUse(args[8], args[9],
+        RangedTarballConstraint, FixtureTarballVersion),
         storeRoot, holder, rootId)
       realizeTarballViaDaemon(req, endpoint)
     elif mode == "nix":
@@ -286,6 +302,28 @@ proc verifyPairResult(pair: tuple[a, b: JsonNode]; adapter, storeRoot: string) =
     else:
       check identity.profiles[0].selectedStorePath == item["path"].getStr()
 
+proc startDaemon(endpoint, storeRoot, runtimeRoot: string): Process =
+  ## Spawn ``repro store serve --dev`` and wait until it answers for
+  ## ``storeRoot``. A daemon that exits during start-up is reported with its
+  ## output, so the failure names the cause rather than a status timeout.
+  result = startProcess(publicReproBin(),
+    args = @["store", "serve", "--dev", "--store-root", storeRoot,
+      "--endpoint", endpoint],
+    env = makeEnv(endpoint, runtimeRoot),
+    options = {poStdErrToStdOut})
+  let status =
+    try:
+      waitForStatus(endpoint, storeRoot, timeoutMs = 60000)
+    except CatchableError as err:
+      var detail = err.msg
+      if not result.running():
+        let rc = result.waitForExit()
+        detail.add("; repro store serve exited " & $rc & ": " &
+          result.outputStream.readAll())
+      result.close()
+      raise newException(OSError, detail)
+  check status.daemonProfile == StoreDaemonProfileDev
+
 suite "M67 daemon-mediated Nix and tarball realization":
   test "integration_daemon_nix_and_tarball_realize":
     when not defined(posix):
@@ -300,23 +338,8 @@ suite "M67 daemon-mediated Nix and tarball realization":
       let storeRoot = root / "store"
       defer: stopIfRunning(endpoint)
 
-      let daemon = startProcess(publicReproBin(),
-        args = @["store", "serve", "--dev", "--store-root", storeRoot,
-          "--endpoint", endpoint],
-        env = makeEnv(endpoint, runtimeRoot),
-        options = {poStdErrToStdOut})
+      let daemon = startDaemon(endpoint, storeRoot, runtimeRoot)
       defer: daemon.close()
-      let status =
-        try:
-          waitForStatus(endpoint, storeRoot, timeoutMs = 60000)
-        except CatchableError as err:
-          var detail = err.msg
-          if not daemon.running():
-            let rc = daemon.waitForExit()
-            detail.add("; repro store serve exited " & $rc & ": " &
-              daemon.outputStream.readAll())
-          raise newException(OSError, detail)
-      check status.daemonProfile == StoreDaemonProfileDev
 
       let fixture = buildTarballFixture(root)
       let tarPair = runPair("tarball", endpoint, storeRoot, root,
@@ -358,3 +381,28 @@ suite "M67 daemon-mediated Nix and tarball realization":
         check receipt.writerMode == "daemon"
 
       check scoopRealizationIsPerUserFallthrough()
+
+  test "integration_daemon_tarball_realize_ranged_uses":
+    # A ``uses:`` with a version range, served by a record that declares a
+    # version inside it. The client selects that record; the daemon must
+    # realize it rather than refuse it as unversioned.
+    when not defined(posix):
+      echo "[platform N/A] dev store-daemon IPC is POSIX-only in M66/M67."
+    else:
+      let root = createTempDir("repro-m67-daemon-ranged-", "")
+      defer:
+        try: removeDir(root) except OSError: discard
+      let runtimeRoot = root / "run"
+      createDir(runtimeRoot)
+      let endpoint = shortEndpoint("ranged")
+      let storeRoot = root / "store"
+      defer: stopIfRunning(endpoint)
+
+      let daemon = startDaemon(endpoint, storeRoot, runtimeRoot)
+      defer: daemon.close()
+
+      let fixture = buildTarballFixture(root)
+      let pair = runPair("tarball-ranged", endpoint, storeRoot, root,
+        @[fixture.url, fixture.sha256])
+      verifyPairResult(pair, "tarball", storeRoot)
+      assertSpecLayoutAfterRealize(storeRoot, pair.a["path"].getStr())

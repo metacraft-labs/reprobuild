@@ -18,6 +18,7 @@
 
 import std/[os, osproc, streams, strtabs, strutils]
 from repro_core/paths import extendedPath
+import repro_core/installed_prefix_nim
 from repro_core/process_streams import drainStream, drainStdoutAndStderr
 from repro_core/source_root import installedLayoutPrefixOfSourceRoot,
   installedLayoutPackageTrees, runningImagePrefixCandidates
@@ -53,19 +54,25 @@ const ProfileNimCompilerEnvVar* = "REPRO_NIM_COMPILER"
   ## already honours it (`repro_interface_artifacts.nimCompilerPath`).
 
 proc installedNimCompiler*(prefixes: openArray[string]): string =
-  ## The `nim` an installed reprobuild prefix ships beside its engine, or "".
-  ## A prefix counts only when it is a reprobuild install (it carries
-  ## `share/repro`), so an engine that happens to live in `/usr/bin` never
-  ## picks the distribution's `/usr/bin/nim` this way. The cross-built and
-  ## release prefixes keep the compiler at `nim/bin/nim` with a `bin/nim`
-  ## link to it.
+  ## The `nim` an installed reprobuild prefix ships beside its engine, or ""
+  ## when none of `prefixes` ships `nim/bin/nim`. Checked exactly as the
+  ## provider compile checks it (reprobuild-pm Distribution-And-Packaging.md
+  ## §5.3, amendment N3: `repro_core/installed_prefix_nim`): the shipped
+  ## compiler must be the fork `share/repro/cross-build-info` records, within
+  ## the bootstrap's range, or this raises `CompileFailure` naming what it
+  ## found. A prefix's `bin/nim` alone is not taken: it is a link to
+  ## `nim/bin/nim` in every prefix that ships one, and a bin/nim without
+  ## `nim/` is not a prefix this engine knows how to check. Only a
+  ## reprobuild install counts (`share/repro`), so an engine that lives in
+  ## `/usr/bin` never picks the distribution's `/usr/bin/nim` this way.
+  var candidates: seq[string]
   for prefix in prefixes:
-    if prefix.len == 0 or not dirExists(extendedPath(prefix / "share" / "repro")):
-      continue
-    for candidate in [prefix / "nim" / "bin" / "nim", prefix / "bin" / "nim"]:
-      if fileExists(extendedPath(candidate)):
-        return candidate
-  ""
+    if prefix.len > 0 and dirExists(extendedPath(prefix / "share" / "repro")):
+      candidates.add(prefix)
+  try:
+    findInstalledPrefixNim(candidates).exe
+  except InstalledPrefixNimError as err:
+    raise newException(CompileFailure, "repro profile compile: " & err.msg)
 
 proc resolveProfileNimCompiler*(): string =
   ## The `nim` that compiles a profile: `$REPRO_NIM_COMPILER` when set; else

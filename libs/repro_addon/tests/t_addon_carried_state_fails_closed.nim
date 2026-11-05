@@ -28,7 +28,11 @@
 ## ``receipt-trusts-inode``, ``reach-ignores-privileged-commands``,
 ## ``reach-dropin-judged-alone``, ``reach-trigger-units-reach-nothing``,
 ## ``restore-not-required-by-units``, ``backup-without-host-lock``,
-## ``apply-ignores-hold`` (the floored unit under a hold).
+## ``apply-ignores-hold`` (the floored unit under a hold); round 4:
+## ``account-as-written`` (F1-F2b), ``reach-timer-dropins-unread`` (F3,
+## F3b), ``reach-host-dropins-ignored`` (each host source),
+## ``reach-path-unit-paths-ignored`` (F4) and
+## ``restore-requirement-by-manifest-only`` (F6).
 ##
 ## *Mocking.* The unit liveness (``AlivenessFn``), as in
 ## ``t_addon_state_sets``: a unit test has no systemd unit whose cgroup the
@@ -38,6 +42,8 @@
 ## held by a real second process (``flock``).
 
 import std/[json, os, osproc, strutils, tables, unittest]
+
+import repro_core/host_apply_lock
 
 import repro_infra
 from repro_test_support import testCaseScratchSlug
@@ -62,9 +68,16 @@ var scratch = getTempDir() / ("t_addon_carried_state_fails_closed" &
                               testCaseScratchSlug())
 
 proc fresh(name: string): string =
+  ## A scratch root with the accounts the fixtures' units name: since the
+  ## reach analysis resolves a unit's account (``service_account``), an
+  ## account the host does not have reaches everything.
   result = scratch / name
   removeDir(result)
-  createDir(result)
+  createDir(result / "etc")
+  writeFile(result / "etc/passwd", "root:x:0:0::/root:/bin/sh\n" &
+    "app:x:1001:1001::/:/usr/sbin/nologin\n" &
+    "validator:x:1002:1002::/:/usr/sbin/nologin\n")
+  writeFile(result / "etc/group", "root:x:0:\napp:x:1001:\nvalidator:x:1002:\n")
 
 proc unit(name, body: string; extra = ""): string =
   "systemd.systemUnit {\n  name = \"" & name & "\"\n  content = \"" & body &
@@ -145,6 +158,35 @@ suite "carried state fails closed":
     check not sameDirectory(a, b)
     check not sameDirectory(DirIdentity(dev: -1, ino: -1), a)
 
+  test "a directory removed and made again is never the same directory":
+    # On the file system the test runs on, whatever it is: a new directory
+    # that got a freed inode (ext4 hands them out again) must still be told
+    # apart, and on a file system with no creation time and no generation
+    # nothing is ever "the same" (fail closed). Ported from the A13 review's
+    # round-3 probe.
+    let base = fresh("identity")
+    var before: seq[DirIdentity]
+    for i in 0 ..< 200:
+      createDir(base / $i)
+      before.add(dirIdentity(base / $i))
+    let d = base / "one"
+    createDir(d)
+    let a = dirIdentity(d)
+    removeDir(d)
+    createDir(d)
+    check not sameDirectory(a, dirIdentity(d))
+    for i in 0 ..< 200: removeDir(base / $i)
+    var reused, judgedSame = 0
+    for i in 0 ..< 200:
+      createDir(base / ("n" & $i))
+      let b = dirIdentity(base / ("n" & $i))
+      for x in before:
+        if x.dev == b.dev and x.ino == b.ino:
+          inc reused
+          if sameDirectory(x, b): inc judgedSame
+    checkpoint "inodes reused: " & $reused
+    check judgedSame == 0
+
   test "a later restore leaves a directory its receipt still identifies":
     let dst = fresh("dst-reboot")
     discard restoreStateSet(carriedDir(), stopped(), root = dst)
@@ -164,27 +206,27 @@ suite "carried state fails closed":
   test "a command outside the sandbox reaches everything":
     let dst = fresh("dst-reach")
     for body in [
-        "[Service]\nProtectSystem=strict\nReadWritePaths=/var/lib/other\n" &
+        "[Service]\nProtectSystem=strict\nUser=app\nReadWritePaths=/var/lib/other\n" &
           "ExecStartPre=+/bin/sh -c 'touch /var/lib/ethereum/validator/x'\n" &
           "ExecStart=/bin/true\n",
-        "[Service]\nProtectSystem=strict\n" &
+        "[Service]\nProtectSystem=strict\nUser=app\n" &
           "ExecStartPost=+/usr/bin/rm -rf /var/lib/ethereum/validator\n" &
           "ExecStart=/bin/true\n",
-        "[Service]\nProtectSystem=strict\nExecStart=!/bin/true\n",
-        "[Service]\nProtectSystem=strict\nExecStart=-+/bin/true\n",
-        "[Service]\nProtectSystem=strict\nPermissionsStartOnly=yes\n" &
+        "[Service]\nProtectSystem=strict\nUser=app\nExecStart=!/bin/true\n",
+        "[Service]\nProtectSystem=strict\nUser=app\nExecStart=-+/bin/true\n",
+        "[Service]\nProtectSystem=strict\nUser=app\nPermissionsStartOnly=yes\n" &
           "ExecStart=/bin/true\n"]:
       checkpoint body
       check refusal(unit("other.service", body), dst).
         startsWith("ECarriedStatePending")
     # The same unit without the privileged command stays out of it.
-    check refusal(unit("other.service", "[Service]\nProtectSystem=strict\n" &
+    check refusal(unit("other.service", "[Service]\nProtectSystem=strict\nUser=app\n" &
       "ReadWritePaths=/var/lib/other\nExecStartPre=-/bin/true\n" &
       "ExecStart=/bin/true\n"), dst) == ""
 
   test "a drop-in over a distribution unit reaches everything":
     check refusal(unit("pkg-validator.service", "[Service]\n" &
-      "ProtectSystem=strict\nExecStart=\nExecStart=/bin/true\n",
+      "ProtectSystem=strict\nUser=app\nExecStart=\nExecStart=/bin/true\n",
       "  collision = \"dropIn\"\n"), fresh("dst-dropin")).
       startsWith("ECarriedStatePending")
 
@@ -197,14 +239,14 @@ suite "carried state fails closed":
         ("x.target", "[Unit]\nWants=lighthouse-vc.service\n"),
         ("y.target", "[Unit]\nRequires=lighthouse-vc.service\n"),
         ("z.service", "[Unit]\nOnFailure=lighthouse-vc.service\n" &
-          "[Service]\nProtectSystem=strict\nExecStart=/bin/true\n"),
+          "[Service]\nProtectSystem=strict\nUser=app\nExecStart=/bin/true\n"),
         ("w.service", "[Unit]\nWants=lighthouse-vc.service\n[Service]\n" &
-          "ProtectSystem=strict\nExecStart=/bin/true\n")]:
+          "ProtectSystem=strict\nUser=app\nExecStart=/bin/true\n")]:
       checkpoint name
       check refusal(unit(name, body), dst).startsWith("ECarriedStatePending")
     # A timer of a service the profile defines (and confines elsewhere) is
     # judged by that service, and ordering alone starts nothing.
-    let svc = unit("other.service", "[Service]\nProtectSystem=strict\n" &
+    let svc = unit("other.service", "[Service]\nProtectSystem=strict\nUser=app\n" &
       "ReadWritePaths=/var/lib/other\nExecStart=/bin/true\n")
     check refusal(svc & unit("other.timer", "[Timer]\nOnBootSec=1\n"), dst) == ""
     check refusal(svc & unit("t.target", "[Unit]\nWants=other.service\n" &
@@ -218,14 +260,43 @@ suite "carried state fails closed":
     check fileExists(d / RestoreUnitName)
     check expandSymlink(d / "sysinit.target.wants" / RestoreUnitName) ==
       "/etc/systemd/system/" & RestoreUnitName
-    check expandSymlink(d / "eth-validator.service.requires" /
-      RestoreUnitName) == "/etc/systemd/system/" & RestoreUnitName
-    # Nothing in the unit's drop-in directory: its drop-ins are the
-    # generation's own (the add-on's effective-unit check, spec §10.1).
-    check not dirExists(d / "eth-validator.service.d")
-    # Ordered by the restore unit itself: before sysinit.target, which a
-    # service with default dependencies starts after.
-    check "Before=sysinit.target" in readFile(d / RestoreUnitName)
+    # Owned by the carried unit (a drop-in, not a link a disable or a
+    # preset of the restore unit removes), with the ordering in it.
+    let dropIn = d / "eth-validator.service.d" / RestoreRequiredDropIn
+    check fileExists(dropIn)
+    check ("Requires=" & RestoreUnitName) in readFile(dropIn)
+    check ("After=" & RestoreUnitName) in readFile(dropIn)
+    check not dirExists(d / "eth-validator.service.requires")
+    # ... and the restore unit orders itself before each carried unit by
+    # name, for one without default dependencies.
+    let unitText = readFile(d / RestoreUnitName)
+    check "Before=sysinit.target shutdown.target eth-validator.service" in unitText
+    check "ConditionPathExists" notin unitText
+    # The installation is recorded beside the carried directory.
+    check fileExists(root / installedMarkerPath(carriedDir()))
+
+  test "a manifest missing where carried state was installed refuses":
+    let src = fresh("src-missing")
+    createDir(src / "var/lib/ethereum/validator")
+    writeFile(src / "var/lib/ethereum/validator/validator.db", "history\n")
+    let p = parseSystemProfile(Validator)
+    discard backupStateSet(p, src / "carried", "h", stopped(), hold = false,
+                           root = src)
+    let dir = src / "carried"
+    # Not installed: no manifest means no carried state.
+    removeFile(dir / ManifestFileName)
+    check carriedStateRefusal(p, dir, fresh("dst-missing")) == ""
+    # Installed, then the manifest (or the whole directory) went: refused.
+    writeFile(installedMarkerPath(dir), dir & "\n")
+    check carriedStateRefusal(p, dir, fresh("dst-missing2")).
+      startsWith("ECarriedStatePending")
+    removeDir(dir)
+    check carriedStateRefusal(p, dir, fresh("dst-missing3")).
+      startsWith("ECarriedStatePending")
+
+  test "install-unit refuses a carried directory other than the default":
+    check runStateCli(@["install-unit", "--from", "/srv/elsewhere",
+                        "--root", fresh("root-from")]) == 2
 
   test "under a hold a floored unit is refused for the carried state first":
     # A floored unit (one named exception, not a waiver: the rest of the
@@ -254,7 +325,9 @@ suite "carried state fails closed":
     check why.startsWith("ECarriedStatePending")
     check "EAddOnFloorNotEffective" notin why
     var written = 0
-    for _ in walkDirRec(state): inc written
+    for f in walkDirRec(state):
+      # The scratch root's account files (``fresh``) are the fixture's.
+      if f notin [state / "etc/passwd", state / "etc/group"]: inc written
     check written == 0
 
   test "a backup takes the host apply lock and checks the units again":
@@ -296,5 +369,297 @@ suite "carried state fails closed":
       discard backupStateSet(p, src / "out2", "h", startsLater, hold = false,
                              root = src)
     check not dirExists(src / "out2")
+
+suite "reach is default-deny":
+  proc refused(text: string): bool =
+    var why = ""
+    try: why = refusal(text, fresh("dst-dd"))
+    except CatchableError as e: why = "PARSE: " & e.msg
+    checkpoint "refusal: " & why
+    why.startsWith("ECarriedStatePending")
+
+  proc confinedWith(name, extra: string): string =
+    unit(name, "[Service]\nProtectSystem=strict\nUser=app\n" & extra &
+      "ExecStart=/bin/true\n")
+
+  test "a path is compared as systemd resolves it":
+    for extra in ["ReadWritePaths=/var/lib//ethereum/validator\n",
+                  "ReadWritePaths=/var/lib/./ethereum/validator\n",
+                  "ReadWritePaths=/var/lib/ethereum/validator/\n",
+                  "ReadWritePaths=-/var/lib/ethereum/validator\n",
+                  "ReadWritePaths=\"/var/lib/ethereum/validator\"\n",
+                  "ReadWritePaths=/srv/a '/var/lib/ethereum//validator'\n",
+                  "ReadWriteDirectories=/var/lib/ethereum/validator\n",
+                  "BindPaths=-/var/lib/ethereum/validator:/data\n",
+                  "BindPaths=/srv/x:/var/lib//ethereum/validator\n",
+                  "TemporaryFileSystem=/var/lib/ethereum/validator:ro\n",
+                  "StateDirectory=ethereum//validator\n",
+                  "StandardOutput=append:/var/lib//ethereum/validator/log\n"]:
+      checkpoint extra
+      check refused(confinedWith("p.service", extra))
+    # A form not resolved here reaches everything.
+    for extra in ["ReadWritePaths=/var/lib/../lib/ethereum/validator\n",
+                  "ReadWritePaths=%S/ethereum\n",
+                  "ReadWritePaths=/srv/a\\x20b\n",
+                  "ReadWritePaths='/srv/unterminated\n"]:
+      checkpoint extra
+      check refused(confinedWith("p2.service", extra))
+    # A confined unit elsewhere stays out of it.
+    check not refused(confinedWith("p3.service",
+      "ReadWritePaths=/var/lib//other/./x\nReadOnlyPaths=/var/lib/ethereum\n"))
+
+  test "a key, section or command prefix not understood reaches everything":
+    for extra in ["ExecStartPre=|+rm -rf /var/lib/ethereum/validator\n",
+                  "ExecStartPre=+|/bin/true\n",
+                  "ExecStartPre=@-!/bin/true\n",
+                  "ExecStartPre=*/bin/true\n",
+                  "SomeFutureSetting=yes\n",
+                  "Sockets=ssh.socket\n",
+                  "SupplementaryGroups=disk\n",
+                  "RootDirectory=/srv/root\n",
+                  "Group=root\n",
+                  "User=\n"]:
+      checkpoint extra
+      check refused(confinedWith("k.service", extra))
+    check refused(unit("k2.service", "[Service]\nProtectSystem=strict\n" &
+      "User=app\nExecStart=/bin/true\n[X-Vendor]\nFoo=bar\n"))
+
+  test "a root service under ProtectSystem=strict reaches everything":
+    check refused(unit("r.service", "[Service]\nProtectSystem=strict\n" &
+      "ExecStart=/bin/sh -c 'echo x > /proc/1/root/var/lib/ethereum/validator/x'\n"))
+    check refused(unit("r2.service", "[Service]\nProtectSystem=strict\n" &
+      "User=root\nExecStart=/bin/true\n"))
+
+  test "drop-ins apply in file-name order, not profile order":
+    check refused(unit("o5.service", "[Service]\nUser=app\n" &
+        "ExecStart=/bin/sh -c 'rm -rf /var/lib/ethereum/validator'\n") &
+      "systemd.systemDropIn {\n  unit = \"o5.service\"\n  name = \"90-unconfine\"\n" &
+        "  content = \"[Service]\nProtectSystem=no\n\"\n}\n" &
+      "systemd.systemDropIn {\n  unit = \"o5.service\"\n  name = \"10-confine\"\n" &
+        "  content = \"[Service]\nProtectSystem=strict\n\"\n}\n")
+
+  test "every resource kind is judged":
+    for text in [
+        "linux.tmpfilesRule {\n  name = \"zap.conf\"\n  content = \"R /var/lib/ethereum/validator\"\n}\n",
+        "linux.tmpfilesRule {\n  name = \"zap2.conf\"\n  content = \"D /var/lib//ethereum - - - -\"\n}\n",
+        "linux.tmpfilesRule {\n  name = \"zap3.conf\"\n  content = \"e /var/lib/%n - - - 1d\"\n}\n",
+        "fs.systemFile {\n  path = \"/var/lib/ethereum/validator/slashing.db\"\n  content = \"x\"\n}\n",
+        "fs.systemDirectory {\n  path = \"/var/lib/ethereum/validator\"\n}\n",
+        "systemd.systemTimer {\n  name = \"apt-daily.timer\"\n  content = \"[Timer]\nOnActiveSec=1\n\"\n}\n",
+        "passwd.user {\n  name = \"x\"\n  home = \"/var/lib/ethereum/validator\"\n}\n",
+        "systemd.unitState {\n  name = \"lighthouse-vc.service\"\n  running = false\n}\n",
+        "linux.udevRule {\n  name = \"99-x.rules\"\n  content = \"x\"\n}\n"]:
+      checkpoint text
+      check refused(text)
+    # A tmpfiles rule and a file elsewhere stay out of it.
+    check not refused("linux.tmpfilesRule {\n  name = \"ok.conf\"\n" &
+      "  content = \"d /var/lib/other 0700 root root -\"\n}\n")
+    check not refused("fs.systemFile {\n  path = \"/etc/other.conf\"\n" &
+      "  content = \"x\"\n}\n")
+
+  test "an apply decides carried state again under the host lock":
+    # The lock is held by another process (a backup, say) which writes its
+    # hold before it lets go: the apply, waiting for the lock, must see the
+    # hold once it has it.
+    let r = fresh("lock-root")
+    let lock = scratch / "host-apply-2.lock"
+    putEnv("REPRO_HOST_APPLY_LOCK", lock)
+    putEnv("REPRO_HOST_APPLY_LOCK_WAIT_SECONDS", "60")
+    defer:
+      delEnv("REPRO_HOST_APPLY_LOCK")
+      delEnv("REPRO_HOST_APPLY_LOCK_WAIT_SECONDS")
+    let holdDir = r / "etc/systemd/system/eth-validator.service.d"
+    let holder = startProcess("flock", args = [lock, "sh", "-c",
+      "sleep 2; mkdir -p " & quoteShell(holdDir) & " && echo x > " &
+      quoteShell(holdDir / HoldDropInName)], options = {poUsePath})
+    sleep(500)
+    var why = ""
+    try:
+      var l = hostLockWithCarriedRecheck(AddonApplyOptions(stateDir:
+        fresh("lock-state"), hostIdentity: "h", userProfileText: "",
+        carriedStateDir: fresh("lock-none"), carriedStateRoot: r),
+        fresh("lock-state2"))
+      l.release()
+    except AddonApplyError as e:
+      why = e.msg
+    discard holder.waitForExit()
+    holder.close()
+    check why.startsWith("ECarriedStatePending")
+
+
+# ---------------------------------------------------------------------------
+# A13 review round 4: the account systemd will use, every drop-in systemd
+# reads, a path unit's paths, and the restore requirement derived from
+# reach at every apply. Ported from the reviewer's probe
+# (t_rev_a13r5_probe.nim, F1-F6), plus each host drop-in source.
+# ---------------------------------------------------------------------------
+
+proc pendingRefused(text: string; prepare: proc (root: string) = nil): bool =
+  ## Whether an apply of ``text`` is refused while the validator's carried
+  ## directory is pending, on a scratch host ``prepare`` may add files to.
+  let root = fresh("dst-r4")
+  if prepare != nil: prepare(root)
+  var why = ""
+  try: why = refusal(text, root)
+  except CatchableError as e: why = "PARSE: " & e.msg
+  checkpoint "refusal: " & why
+  why.startsWith("ECarriedStatePending") or why.startsWith("PARSE")
+
+proc confinedR(name, extra: string): string =
+  unit(name, "[Service]\nProtectSystem=strict\nUser=app\n" & extra &
+    "ExecStart=/bin/true\n")
+
+proc hostFile(root, path, content: string) =
+  createDir((root & path).parentDir)
+  writeFile(root & path, content)
+
+suite "reach judges the account systemd will use (round 4)":
+  test "control: a confined unit of a non-root account elsewhere is let in":
+    check not pendingRefused(confinedR("c0.service",
+      "ReadWritePaths=/var/lib/other\n"))
+
+  test "F1: DynamicUser=yes with User=root runs as root":
+    check pendingRefused(unit("f1.service",
+      "[Service]\nDynamicUser=yes\nUser=root\nExecStart=/bin/true\n"))
+
+  test "F1b: DynamicUser=yes with Group=root holds gid 0":
+    check pendingRefused(unit("f1b.service",
+      "[Service]\nDynamicUser=yes\nUser=app\nGroup=root\nExecStart=/bin/true\n"))
+
+  test "F2: User=%U is the system manager's uid, 0":
+    check pendingRefused(unit("f2.service",
+      "[Service]\nProtectSystem=strict\nUser=%U\nExecStart=/bin/true\n"))
+
+  test "F2b: a template's User=%i names no account (DefaultInstance=root)":
+    check pendingRefused(unit("f2b@.service",
+      "[Service]\nProtectSystem=strict\nUser=%i\nExecStart=/bin/true\n" &
+      "[Install]\nWantedBy=multi-user.target\nDefaultInstance=root\n"))
+
+  test "a uid alias of root, and an account the host does not have, reach everything":
+    check pendingRefused(confinedR("al.service", "ReadWritePaths=/var/lib/other\n"),
+      proc (root: string) =
+        writeFile(root / "etc/passwd", "root:x:0:0::/root:/bin/sh\n" &
+          "app:x:0:0::/:/bin/sh\n"))
+    check pendingRefused(unit("gh.service", "[Service]\nProtectSystem=strict\n" &
+      "User=ghost\nExecStart=/bin/true\n"))
+
+  test "a dynamic user is confined without ProtectSystem=":
+    check not pendingRefused(unit("dyn.service",
+      "[Service]\nDynamicUser=yes\nUser=nosuchdyn\nExecStart=/bin/true\n"))
+
+suite "reach reads every drop-in systemd applies (round 4)":
+  test "F3: a profile drop-in retargets a profile timer at a distribution unit":
+    check pendingRefused("systemd.systemTimer {\n  name = \"t3.timer\"\n" &
+      "  content = \"[Timer]\nOnActiveSec=1\nUnit=c0.service\n\"\n}\n" &
+      confinedR("c0.service", "") &
+      "systemd.systemDropIn {\n  unit = \"t3.timer\"\n  name = \"20-retarget\"\n" &
+      "  content = \"[Timer]\nUnit=apt-daily.service\n\"\n}\n")
+
+  test "F3b: a profile timer's drop-in with a section not understood":
+    check pendingRefused("systemd.systemTimer {\n  name = \"t4.timer\"\n" &
+      "  content = \"[Timer]\nOnActiveSec=1\nUnit=c0.service\n\"\n}\n" &
+      confinedR("c0.service", "") &
+      "systemd.systemDropIn {\n  unit = \"t4.timer\"\n  name = \"20-x\"\n" &
+      "  content = \"[X-Unknown]\nFoo=bar\n\"\n}\n")
+
+  test "control: a profile timer on a confined profile service is let in":
+    check not pendingRefused("systemd.systemTimer {\n  name = \"t5.timer\"\n" &
+      "  content = \"[Timer]\nOnActiveSec=1\nUnit=c0.service\n\"\n}\n" &
+      confinedR("c0.service", ""))
+
+  const C0 = "[Service]\nProtectSystem=strict\nUser=app\nExecStart=/bin/true\n"
+  for (label, path, content) in [
+      ("a type-wide service.d drop-in in /usr/lib",
+       "/usr/lib/systemd/system/service.d/50-x.conf", "[Service]\nProtectSystem=no\n"),
+      ("a dashed-prefix drop-in in /run",
+       "/run/systemd/system/c0-.service.d/10-x.conf", "[Service]\nUser=root\n"),
+      ("a host drop-in of the unit's own in /etc",
+       "/etc/systemd/system/c0-x.service.d/10-foreign.conf",
+       "[Service]\nExecStartPre=+/bin/true\n"),
+      ("a generator's drop-in",
+       "/run/systemd/generator/c0-x.service.d/x.conf", "[Service]\nProtectSystem=no\n"),
+      ("a unit file in /run/systemd/transient, read before the generation's",
+       "/run/systemd/transient/c0-x.service", C0)]:
+    test "a host source is read: " & label:
+      check not pendingRefused(confinedR("c0-x.service", ""))
+      check pendingRefused(confinedR("c0-x.service", ""),
+        proc (root: string) = hostFile(root, path, content))
+
+  test "a host drop-in that keeps the unit confined is read and let in":
+    check not pendingRefused(confinedR("c0-x.service", ""),
+      proc (root: string) = hostFile(root,
+        "/usr/lib/systemd/system/service.d/10-timeout-abort.conf",
+        "[Service]\nTimeoutStopFailureMode=abort\n"))
+
+  test "drop-ins of all sources apply in one file-name order":
+    # The host's 90- unconfines; the profile's 50- confines: systemd reads
+    # 50 then 90, so the unit is not confined.
+    check pendingRefused(unit("o.service", "[Service]\nUser=app\nExecStart=/bin/true\n") &
+      "systemd.systemDropIn {\n  unit = \"o.service\"\n  name = \"confine\"\n" &
+      "  content = \"[Service]\nProtectSystem=strict\n\"\n}\n",
+      proc (root: string) = hostFile(root,
+        "/etc/systemd/system/o.service.d/90-unconfine.conf",
+        "[Service]\nProtectSystem=no\n"))
+
+  test "the generation's own drop-ins on the host are the profile's to decide":
+    check not pendingRefused(confinedR("c0-x.service", ""),
+      proc (root: string) = hostFile(root,
+        "/etc/systemd/system/c0-x.service.d/50-repro-old.conf",
+        "[Service]\nProtectSystem=no\n"))
+
+suite "a path unit reaches the paths it watches (round 4)":
+  test "F4: MakeDirectory= creates inside the carried directory":
+    check pendingRefused(unit("f4.path",
+      "[Path]\nDirectoryNotEmpty=/var/lib/ethereum/validator/spool\n" &
+      "MakeDirectory=yes\nUnit=c0.service\n") & confinedR("c0.service", ""))
+
+  test "a glob reaches the directory it is anchored in":
+    check pendingRefused(unit("g.path",
+      "[Path]\nPathExistsGlob=/var/lib/ethereum/validator/*.lock\n" &
+      "Unit=c0.service\n") & confinedR("c0.service", ""))
+
+  test "control: a path unit watching elsewhere is let in":
+    check not pendingRefused(unit("e.path",
+      "[Path]\nPathChanged=/var/lib/other/x\nUnit=c0.service\n") &
+      confinedR("c0.service", ""))
+
+suite "the restore requirement follows reach at every apply (round 4)":
+  test "F6: a renamed unit reaching the restored directory requires the restore":
+    let root = fresh("boot-r4")
+    let d2 = scratch / "carried-r4"
+    removeDir(d2)
+    copyDir(carriedDir(), d2)
+    discard restoreStateSet(d2, stopped(), root = root)
+    let renamed = confinedR("validator2.service",
+      "ReadWritePaths=/var/lib/ethereum/validator\n")
+    let elsewhere = confinedR("other.service", "ReadWritePaths=/var/lib/other\n")
+    # Restored: the apply lets it in.
+    check refusal(renamed & elsewhere, root) == ""
+    # Not installed (no install-unit marker): no requirement is added.
+    check carriedRequirementUnits(parseSystemProfile(renamed), d2, root).len == 0
+    writeFile(installedMarkerPath(d2), d2 & "\n")
+    let units = carriedRequirementUnits(parseSystemProfile(renamed & elsewhere),
+                                        d2, root)
+    check units == @["validator2.service"]
+    let text = withCarriedRequirements(renamed & elsewhere, d2, root)
+    let p = parseSystemProfile(text)
+    var found = false
+    for r in p.resources:
+      if r.kind == srkSystemdSystemDropIn and r.diUnit == "validator2.service":
+        found = r.diName == RequirementDropInName and
+          r.diContent == restoreRequirementText()
+      check not (r.kind == srkSystemdSystemDropIn and r.diUnit == "other.service")
+    check found
+    check "Requires=repro-state-restore.service" in restoreRequirementText()
+    check "After=repro-state-restore.service" in restoreRequirementText()
+    # A unit reaching everything requires it too.
+    check carriedRequirementUnits(parseSystemProfile(unit("r.service",
+      "[Service]\nExecStart=/bin/true\n")), d2, root) == @["r.service"]
+    # The generation's drop-in, once written, does not make the unit reach
+    # everything at the next apply (it is the generation's own).
+    hostFile(root, "/etc/systemd/system/validator2.service.d/50-repro-" &
+      RequirementDropInName & ".conf", restoreRequirementText())
+    check carriedRequirementUnits(parseSystemProfile(renamed & elsewhere),
+                                  d2, root) == @["validator2.service"]
 
 removeDir(scratch)

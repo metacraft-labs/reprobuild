@@ -89,6 +89,16 @@
 ## - engine build ``restore-not-required-by-units``: at the boot after the
 ##   restored validator directory is replaced and the archives damaged, the
 ##   validator starts although the restore failed; red.
+## - engine build ``restore-unordered`` with seams (no ordering on the
+##   restore): the execution client, without default dependencies, starts
+##   while the restore is held at its seam, not waiting on its start job;
+##   red at the ordering step;
+## - engine build ``restore-required-by-link`` (round 2's ``.requires/``
+##   link): the disable and preset of the restore unit remove it, and the
+##   validator starts; red at the same step;
+## - engine build ``carried-reach-by-unit-name``: the renamed unit that
+##   reaches the carried directory only by its path is applied before the
+##   restore; red at the path-reach step.
 ##
 ## The last check (after the kept disk's): the boot path is governed by the
 ## restore. The restore unit is installed with ``repro system state
@@ -131,6 +141,30 @@ const
   SetUnits = ["vaultwarden.service", "eth-execution.service",
               "eth-beacon.service", DefaultValidatorUnit]
   RestoreUnit = "repro-state-restore.service"
+  PathReachProfile = """import repro_profile
+
+profile "pathReach":
+  activity vaultwarden:
+    resources:
+      fsSystemFile(path = "/etc/a13-path-reach/marker", content = "x\n",
+        address = "pathReachMarker")
+  activity ethereum_validator:
+    resources:
+      systemdSystemUnit(name = "eth-validator-renamed.service",
+        content = "[Unit]\nDescription=A13 path-reach probe\n\n[Service]\n" &
+          "User=eth-validator\nGroup=eth-validator\n" &
+          "ReadWritePaths=/var/lib/ethereum/validator\n" &
+          "ExecStart=/bin/true\n",
+        hardening = "serviceFloor",
+        floorExceptions = @["NoExecPaths: the conversion gate's path-reach " &
+          "probe runs /bin/true"],
+        address = "pathReachRenamed")
+      linuxSysusersEntry(name = "eth-validator", kind = "user", id = "924",
+        address = "pathReachUser")
+"""
+    ## The profile of the path-reach step: the host's two activities, and in
+    ## the validator's one unit that touches the carried directory by path
+    ## only.
   # The chain clients' lines that say where each resumed and whether they
   # agree on the head: geth's loaded and repaired heads and its fork-choice
   # refusals, prysm's start head and its errors.
@@ -143,6 +177,81 @@ type MutationStop = object of CatchableError
   ## Raised by a gate's step under a mutation once a step is red.
 
 proc gateMutation(): string = getEnv("REPRO_A13_MUTATION")
+
+proc stopAtRed(): bool =
+  ## A falsifier cell of an engine build (its mutation is in the engine,
+  ## not in ``REPRO_ADDON_MUTATION``): its first red step is the verdict.
+  getEnv("REPRO_A13_STOP_AT_RED") == "1"
+
+proc probeProfile(name, resources: string): string =
+  ## A profile of the host's two activities whose validator activity is
+  ## ``resources`` (lines indented for it): one reach case of A13's
+  ## review round 4, applied while the carried directory is pending.
+  "import repro_profile\n\nprofile \"" & name & "\":\n" &
+    "  activity vaultwarden:\n    resources:\n" &
+    "      fsSystemFile(path = \"/etc/a13-path-reach/marker\", content = \"x\\n\",\n" &
+    "        address = \"" & name & "Marker\")\n" &
+    "  activity ethereum_validator:\n    resources:\n" &
+    "      linuxSysusersEntry(name = \"eth-validator\", kind = \"user\", id = \"924\",\n" &
+    "        address = \"" & name & "User\")\n" & resources
+
+const
+  R4Confined = "[Unit]\\nDescription=A13 round-4 probe\\n\\n[Service]\\n" &
+    "User=eth-validator\\nGroup=eth-validator\\n" &
+    "ReadWritePaths=/var/lib/a13-r4\\nExecStart=/bin/true\\n"
+    ## A confined, non-root service elsewhere (with the floor's
+    ## ProtectSystem=strict): let in while the directory is pending.
+  R4Floor = "        hardening = \"serviceFloor\",\n" &
+    "        floorExceptions = @[\"NoExecPaths: the conversion gate's " &
+    "round-4 probe runs /bin/true\"],\n"
+  R4Probes = [
+    ("account", "r4Account",
+     "      systemdSystemUnit(name = \"eth-r4-account.service\",\n" &
+     "        content = \"[Unit]\\nDescription=A13 round-4 account probe\\n\\n" &
+     "[Service]\\nDynamicUser=yes\\nUser=root\\nReadWritePaths=/var/lib/a13-r4\\n" &
+     "ExecStart=/bin/true\\n\",\n        address = \"r4Account\")\n",
+     "runs as root"),
+    ("timer", "r4Timer",
+     "      systemdSystemUnit(name = \"eth-r4-timed.service\",\n" &
+     "        content = \"" & R4Confined & "\",\n" & R4Floor &
+     "        address = \"r4Timed\")\n" &
+     "      systemdSystemTimer(name = \"eth-r4.timer\",\n" &
+     "        content = \"[Timer]\\nOnActiveSec=1d\\nUnit=eth-r4-timed.service\\n\",\n" &
+     "        address = \"r4Timer\")\n" &
+     "      systemdSystemDropIn(unit = \"eth-r4.timer\", name = \"retarget\",\n" &
+     "        content = \"[Timer]\\nUnit=apt-daily.service\\n\",\n" &
+     "        address = \"r4TimerDropIn\")\n",
+     "apt-daily.service"),
+    ("path", "r4Path",
+     "      systemdSystemUnit(name = \"eth-r4-timed.service\",\n" &
+     "        content = \"" & R4Confined & "\",\n" & R4Floor &
+     "        address = \"r4Timed\")\n" &
+     "      systemdSystemUnit(name = \"eth-r4-watch.path\",\n" &
+     "        content = \"[Path]\\nDirectoryNotEmpty=/var/lib/ethereum/validator/spool\\n" &
+     "MakeDirectory=yes\\nUnit=eth-r4-timed.service\\n\",\n" &
+     "        address = \"r4Path\")\n",
+     "/var/lib/ethereum/validator (r4Path)")]
+    ## (case, the resource the refusal must name, its lines, a fragment of
+    ## the reason). Each is let in by the engine build of its finding:
+    ## ``account-as-written``, ``reach-timer-dropins-unread``,
+    ## ``reach-path-unit-paths-ignored``.
+  R4Host = "      systemdSystemUnit(name = \"eth-r4-host.service\",\n" &
+    "        content = \"" & R4Confined & "\",\n" & R4Floor &
+    "        address = \"r4Host\")\n"
+  R4HostDropIn = "/run/systemd/system/eth-r4-host.service.d/10-foreign.conf"
+  ShadowUnit = "eth-validator-shadow.service"
+  ShadowResource = """
+      # A13 review round 4, finding 4: on the converted host only, a unit
+      # the manifest does not name that reaches the carried directory.
+      systemdSystemUnit(name = "eth-validator-shadow.service",
+        content = unitText("A13 round-4 probe: a unit the manifest does not name",
+          "User=eth-validator\nGroup=eth-validator\n" &
+          "ReadWritePaths=/var/lib/ethereum/validator\n" &
+          "ExecStart=/bin/sleep infinity\n"),
+        hardening = "serviceFloor",
+        floorExceptions = @["NoExecPaths: the conversion gate's round-4 " &
+          "probe runs /bin/sleep"],
+        address = "validatorShadow")"""
 
 proc hexKey(k: openArray[byte]): string =
   for b in k: result.add(toHex(int(b), 2).toLowerAscii())
@@ -173,7 +282,7 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
       fails.add(b.name & ": " & name & ": " & detail)
       # Under a falsifying mutation the first red step is the verdict;
       # the rest of the run would only spend a VM slot.
-      if mutation().len > 0 or gateMutation().len > 0:
+      if mutation().len > 0 or gateMutation().len > 0 or stopAtRed():
         raise newException(MutationStop, name)
   try:
     let engine = engineFromEnv()
@@ -331,7 +440,12 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
     for f in walkDir(work / "carry"):
       nw.copyTo(f.path, CarriedDir / f.path.extractFilename)
     discard nw.run("chmod -R go-rwx " & CarriedDir)
-    writeFile(work / "system.nim", readFile(ProfileSource))
+    let anchor = "address = \"ethValidatorUser\")"
+    let src0 = readFile(ProfileSource)
+    if src0.count(anchor) != 1:
+      raise newException(CatchableError, "the reference profile's " &
+        "validator account is not where the gate adds the shadow unit")
+    writeFile(work / "system.nim", src0.replace(anchor, anchor & ShadowResource))
     writeFile(work / PinsModule, pinsSource(pins))
     writeFile(work / "home.nim", readFile(FixtureDir / "home.nim"))
     for f in ["system.nim", PinsModule, "home.nim"]:
@@ -358,6 +472,98 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
            sync.stdout & sync.stderr and
          nw.exec("test -e /etc/systemd/system/" & DefaultValidatorUnit).exitCode != 0,
          sync.stdout & sync.stderr)
+
+    # Reach by path, end to end: a profile whose only link to the carried
+    # validator directory is a path -- a renamed, confined, non-root unit
+    # with ReadWritePaths= on it, no credentials, nothing it starts -- is
+    # refused while the directory is pending, and the refusal names the path
+    # (``<dir> (<address>)``, no "reaches everything" reason). Red when the
+    # reach is decided by unit name (engine build
+    # ``carried-reach-by-unit-name``).
+    writeFile(work / "pathreach.nim", PathReachProfile)
+    nw.copyTo(work / "pathreach.nim", RefDir / "pathreach.nim")
+    let pr = nw.exec(env & eng & " infra apply --profile " & RefDir &
+      "/pathreach.nim --host " & AgentTarget & " --no-preview", timeoutSec = 3600)
+    let prOut = pr.stdout & pr.stderr
+    step("a unit that reaches the carried directory only by its path is " &
+         "refused for it (path-based reach)",
+         pr.exitCode != 0 and "ECarriedStatePending" in prOut and
+           "/var/lib/ethereum/validator (pathReachRenamed)" in prOut and
+         nw.exec("test -e /etc/systemd/system/eth-validator-renamed.service").exitCode != 0,
+         prOut)
+
+    # --- Review round 4, while the directory is pending. First the
+    # premises, measured on this systemd: the accounts the resolver says
+    # are root are root here (systemd.exec(5) DynamicUser=, systemd.unit(5)
+    # specifiers).
+    let idOf = proc (unit, body: string): string =
+      discard nw.run("printf '" & body & "' > /etc/systemd/system/" & unit &
+        " && systemctl daemon-reload")
+      let u = if unit.endsWith("@.service"): unit.replace("@.service", "@root.service")
+              else: unit
+      discard nw.exec("systemctl start " & u)
+      result = nw.exec("journalctl -b -u " & u & " -o cat --no-pager | " &
+        "grep -E '^[0-9]+$' | tail -1").stdout.strip()
+      discard nw.run("rm -f /etc/systemd/system/" & unit &
+        " && systemctl daemon-reload")
+    let premises = %*{
+      "DynamicUser=yes User=root": nw.exec("systemd-run --wait --pipe " &
+        "--quiet -p DynamicUser=yes -p User=root /usr/bin/id -u").stdout.strip(),
+      "DynamicUser=yes User=nosuchr4": nw.exec("systemd-run --wait --pipe " &
+        "--quiet -p DynamicUser=yes -p User=nosuchr4 /usr/bin/id -u").stdout.strip(),
+      "User=%i on a13r4id@root": idOf("a13r4id@.service",
+        "[Service]\\nType=oneshot\\nUser=%%i\\nExecStart=/usr/bin/id -u\\n"),
+      "User=%U": idOf("a13r4idu.service",
+        "[Service]\\nType=oneshot\\nUser=%%U\\nExecStart=/usr/bin/id -u\\n")}
+    record["accountPremises"] = premises
+    var dynId = -1
+    try: dynId = parseInt(premises["DynamicUser=yes User=nosuchr4"].getStr())
+    except ValueError: discard
+    step("systemd runs DynamicUser=yes with User=root, User=%i of the " &
+         "instance root and User=%U as uid 0, and a missing name as a " &
+         "dynamic user (the resolver's premises)",
+         premises["DynamicUser=yes User=root"].getStr() == "0" and
+         premises["User=%i on a13r4id@root"].getStr() == "0" and
+         premises["User=%U"].getStr() == "0" and dynId >= 61184,
+         $premises)
+    # Each reach case of the review's round 4, refused while the directory
+    # is pending, naming the resource: a unit that runs as root under
+    # DynamicUser=yes; a profile drop-in that retargets a profile timer at
+    # a distribution unit; a path unit that creates a directory inside the
+    # carried one.
+    for (label, address, resources, reason) in R4Probes:
+      writeFile(work / ("r4-" & label & ".nim"), probeProfile("r4" & label, resources))
+      nw.copyTo(work / ("r4-" & label & ".nim"), RefDir / ("r4-" & label & ".nim"))
+      let r = nw.exec(env & eng & " infra apply --profile " & RefDir & "/r4-" &
+        label & ".nim --host " & AgentTarget & " --no-preview", timeoutSec = 3600)
+      let o = r.stdout & r.stderr
+      step("round 4, " & label & ": refused while the directory is pending, " &
+           "naming " & address,
+           r.exitCode != 0 and "ECarriedStatePending" in o and
+             ("(" & address) in o and reason in o, o)
+    # A host drop-in the profile does not have (here in /run): read as
+    # systemd reads it. Without it the confined unit is let in (control);
+    # with it, ProtectSystem=no from the host unconfines the unit and the
+    # apply is refused.
+    writeFile(work / "r4-host.nim", probeProfile("r4host", R4Host))
+    nw.copyTo(work / "r4-host.nim", RefDir / "r4-host.nim")
+    let hostApply = env & eng & " infra apply --profile " & RefDir &
+      "/r4-host.nim --host " & AgentTarget & " --no-preview"
+    let ctl = nw.exec(hostApply, timeoutSec = 3600)
+    step("round 4, host drop-in (control): without it the confined unit is " &
+         "let in while the directory is pending",
+         ctl.exitCode == 0, ctl.stdout & ctl.stderr)
+    discard nw.run("mkdir -p " & R4HostDropIn.parentDir & " && printf " &
+      "'[Service]\\nProtectSystem=no\\n' > " & R4HostDropIn &
+      " && systemctl daemon-reload")
+    let hr = nw.exec(hostApply, timeoutSec = 3600)
+    let ho = hr.stdout & hr.stderr
+    step("round 4, host drop-in: a drop-in in /run the profile does not " &
+         "have makes the unit reach everything, and the apply is refused",
+         hr.exitCode != 0 and "ECarriedStatePending" in ho and "(r4Host" in ho,
+         ho)
+    discard nw.run("rm -rf " & R4HostDropIn.parentDir &
+      " && systemctl daemon-reload")
 
     # --- 3. The first-boot unit restores before anything starts.
     # Installed as a conversion installs it: the unit, enabled, and the
@@ -416,6 +622,18 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
     step("the reinstalled host realises the activities in full",
          applied.exitCode == 0, applied.stdout & applied.stderr & "\n" &
          nw.serviceJournal(SetUnits))
+    # Review round 4, finding 4: the requirement follows reach, at every
+    # apply, written by the generation -- here for a unit the manifest does
+    # not name. Red under the engine build
+    # ``restore-requirement-by-manifest-only``.
+    let shadowDropIn = "/etc/systemd/system/" & ShadowUnit &
+      ".d/50-repro-state-restore.conf"
+    let shadowDeps = nw.run("systemctl show -p Requires -p After " & ShadowUnit)
+    step("a unit the manifest does not name that reaches the carried " &
+         "directory requires the restore, through the generation's drop-in",
+         nw.exec("test -f " & shadowDropIn).exitCode == 0 and
+         shadowDeps.count(RestoreUnit) >= 2,
+         shadowDeps & "\n" & nw.exec("cat " & shadowDropIn).stdout)
     for (u, check) in [("vaultwarden.service", "http://127.0.0.1:8000/alive"),
                        ("eth-execution.service", "tcp:127.0.0.1:8545"),
                        ("eth-beacon.service",
@@ -540,20 +758,97 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
     # validator directory replaced and its archive damaged, the restore unit
     # fails at the next boot, and the validator, which requires it, is not
     # started (review round 2, finding 4).
+    # Durability: the restore unit is disabled and preset, which removes
+    # every link to it; the requirement is the carried units' own drop-in,
+    # so the next boot's restore still runs, fails on the replaced validator
+    # directory's damaged archive, and the carried units stay down. Red under
+    # the engine build ``restore-required-by-link``.
+    const Exe = "eth-execution.service"
+    var validatorArchive, executionArchive = ""
+    for e in manifest["entries"]:
+      if e["path"].getStr() == "/var/lib/ethereum/validator":
+        validatorArchive = e["archive"].getStr()
+      if e["path"].getStr() == "/var/lib/ethereum/execution":
+        executionArchive = e["archive"].getStr()
+    proc replaceDir(v: string): string =
+      "own=$(stat -c %u:%g " & v & "); mode=$(stat -c %a " & v & "); rm -rf " &
+        v & " && mkdir " & v & " && chown $own " & v & " && chmod $mode " & v
     discard nw.run("systemctl stop " & DefaultValidatorUnit & "; " &
-      "v=/var/lib/ethereum/validator; own=$(stat -c %u:%g $v); " &
-      "mode=$(stat -c %a $v); rm -rf $v && mkdir $v && chown $own $v && " &
-      "chmod $mode $v; for a in " & CarriedDir & "/carry-*.rsa; do " &
-      "printf x | dd of=$a bs=1 seek=4096 conv=notrunc 2>/dev/null; done")
+      replaceDir("/var/lib/ethereum/validator") & "; printf x | dd of=" &
+      CarriedDir & "/" & validatorArchive & " bs=1 seek=4096 conv=notrunc " &
+      "2>/dev/null; systemctl disable " & RestoreUnit & "; systemctl preset " &
+      RestoreUnit & " || true")
+    record["bootPathSetup"] = %(nw.exec("systemctl is-enabled " & RestoreUnit &
+      " || true").stdout & "damaged " & validatorArchive)
     nw.rebootGuest()
     let rres = nw.run("systemctl show -p Result -p ActiveState " & RestoreUnit)
-    let vState = nw.exec("systemctl is-active " & DefaultValidatorUnit).stdout.strip()
-    let vStarts = nw.exec("journalctl -b -u " & DefaultValidatorUnit &
-      " --no-pager | grep -c 'Started' || true").stdout.strip()
+    var bad: seq[string]
+    for u in [DefaultValidatorUnit, Exe, ShadowUnit]:
+      let st = nw.exec("systemctl is-active " & u).stdout.strip()
+      let n = nw.exec("journalctl -b -u " & u &
+        " --no-pager | grep -c 'Started' || true").stdout.strip()
+      if st == "active" or n != "0": bad.add(u & " " & st & ", starts " & n)
     step("a carried unit does not start at boot while its restore fails",
-         "Result=success" notin rres and vState != "active" and vStarts == "0",
-         rres & "\nvalidator " & vState & ", starts this boot " & vStarts &
-         "\n" & nw.serviceJournal([RestoreUnit, DefaultValidatorUnit]))
+         "Result=success" notin rres and bad.len == 0,
+         rres & "\nstarted: " & bad.join("; ") & "\n" &
+         nw.serviceJournal([RestoreUnit, Exe, DefaultValidatorUnit]))
+
+    # Ordering, observed while the restore is provably still running. The
+    # execution client is given no default dependencies (it has no ordering
+    # of its own), and its directory is emptied, so the restore must write it
+    # back. The engine's seam build (``REPRO_A13_ENGINE_SEAMS=1``: the engine
+    # built with ``REPRO_ADDON_TEST_SEAMS``; the product engine carries no
+    # seam) holds the restore at ``restore-before-archive``. A start of the
+    # client queues the restore; while the restore is shown paused at the
+    # seam, the client must still be waiting on its start job. Resumed, the
+    # restore writes the execution directory back and then fails on the
+    # validator's damaged archive, and the client must never have started.
+    # Red under the engine build ``restore-unordered`` (with seams). Nothing
+    # here depends on timing.
+    if getEnv("REPRO_A13_ENGINE_SEAMS") != "1":
+      # The product engine has no seam: the check runs in the cell that
+      # uses the engine's seam build, and this record says it did not run.
+      record["orderingCheck"] = %("not run: the product engine carries no " &
+        "seam (the seam-build cell runs it)")
+    else:
+      record["orderingCheck"] = %"run (engine seam build)"
+      const SeamDir = "/var/lib/repro/system/addon"
+      discard nw.run(replaceDir("/var/lib/ethereum/execution") & "; mkdir -p " &
+        "/etc/systemd/system/" & Exe & ".d && printf '[Unit]\\n" &
+        "DefaultDependencies=no\\n' > /etc/systemd/system/" & Exe &
+        ".d/95-a13-no-default-deps.conf && systemctl daemon-reload && " &
+        "systemctl reset-failed " & RestoreUnit & " " & Exe & " " &
+        DefaultValidatorUnit & " || true; mkdir -p " & SeamDir & " && rm -f " &
+        SeamDir & "/test-paused-at " & SeamDir & "/test-resume && echo " &
+        "restore-before-archive > " & SeamDir & "/test-pause-at")
+      discard nw.run("systemctl start --no-block " & Exe)
+      let paused = nw.exec("for i in $(seq 1 120); do grep -qx " &
+        "restore-before-archive " & SeamDir & "/test-paused-at 2>/dev/null && " &
+        "[ \"$(systemctl show -p ActiveState --value " & RestoreUnit &
+        ")\" = activating ] && exit 0; sleep 1; done; exit 1")
+      let held = nw.exec("systemctl show -p ActiveState -p SubState " & Exe &
+        "; systemctl list-jobs --no-legend 2>/dev/null | grep -F " & Exe &
+        " || true").stdout
+      let waiting = paused.exitCode == 0 and "ActiveState=inactive" in held and
+        "waiting" in held
+      discard nw.run("touch " & SeamDir & "/test-resume")
+      discard nw.exec("for i in $(seq 1 300); do s=$(systemctl show -p " &
+        "ActiveState --value " & RestoreUnit & "); [ \"$s\" = activating ] || " &
+        "break; sleep 1; done")
+      discard nw.exec("for i in $(seq 1 30); do systemctl list-jobs " &
+        "--no-legend 2>/dev/null | grep -qF " & Exe & " || break; sleep 1; done")
+      let after = nw.exec("systemctl show -p Result -p ActiveState " &
+        RestoreUnit & "; systemctl is-active " & Exe & "; journalctl -b -u " &
+        Exe & " --no-pager | grep -c 'Started' || true").stdout
+      let lines = after.strip().splitLines()
+      let neverStarted = "Result=success" notin after and lines.len >= 4 and
+        lines[^2].strip() != "active" and lines[^1].strip() == "0"
+      step("a carried unit without default dependencies waits for the " &
+           "restore (held at its seam) and does not start when it fails",
+           waiting and neverStarted,
+           "restore paused at the seam: " & $(paused.exitCode == 0) &
+           "; while held:\n" & held & "after the release:\n" & after & "\n" &
+           nw.serviceJournal([RestoreUnit, Exe]))
     record["history"] = %*{"keys": earliest.len, "latestTarget": latest,
                            "addOnEpoch": oldEpoch, "restoreEpoch": restoreEpoch,
                            "conflicts": cs.len}

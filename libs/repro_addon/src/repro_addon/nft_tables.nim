@@ -30,13 +30,24 @@ proc nftBinary*(): string =
   ## The base's ``nft``, "" when it has none.
   resolveHostTool(NftCandidates)
 
-proc listTableNames*(nft = nftBinary()): tuple[ok: bool; tables: seq[string];
-                                                why: string] =
+proc listTableNames*(nft = nftBinary(); hostNamespaces = false):
+    tuple[ok: bool; tables: seq[string]; why: string] =
   ## ``<family> <name>`` of every table in the host's ruleset (names only:
   ## no rule of another table is read). ``ok`` false, with the reason, when
   ## ``nft`` is missing or cannot list.
+  ##
+  ## nftables tables belong to a network namespace. ``hostNamespaces`` runs
+  ## ``nft`` as a transient unit of PID 1 (``runInHostNamespaces``), so a
+  ## caller confined with ``PrivateNetwork=yes`` -- the re-assert and apply
+  ## units -- reads the host's ruleset and not its own empty one (A11 audit
+  ## session 2, G4: in its own namespace the listing fails on every boot,
+  ## a healthy table and a removed one alike).
   if nft.len == 0: return (false, @[], "no nft on this host")
-  let r = runHostTool([nft, "list", "tables"], timeoutSec = 30)
+  let r = if hostNamespaces:
+            try: runInHostNamespaces([nft, "list", "tables"], timeoutSec = 30)
+            except HostToolMissing as e:
+              return (false, @[], e.msg)
+          else: runHostTool([nft, "list", "tables"], timeoutSec = 30)
   if r.exitCode != 0:
     return (false, @[], "nft list tables exited " & $r.exitCode & ": " &
       r.output.strip())

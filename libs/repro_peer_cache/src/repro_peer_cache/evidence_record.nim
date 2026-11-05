@@ -68,7 +68,7 @@ const
     "finding", "status", "errorCode", "message", "bootId", "purpose",
     "attestation", "attestationSignature", "attestationKey",
     "appliedSequence", "dpkgLastRun", "pending", "planDigest",
-    "recipientKey", "credentialHost", "previousGeneration"]
+    "recipientKey", "credentialHost", "previousGeneration", "shipDelayMs"]
     ## The only field names a record may carry (EVID-6). Deliberately no
     ## free-form "data"/"body"/"env" field: an environment can hold
     ## credentials, a body can hold source.

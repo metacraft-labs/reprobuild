@@ -58,6 +58,27 @@ proc git(repo: string; args: varargs[string]): string =
   doAssert execution.exitCode == 0, command & "\n" & execution.output
   execution.output.strip()
 
+proc initCatalogRemote(remote, hooks: string) =
+  ## A catalog repository whose default branch is ``main`` and whose
+  ## ``agents`` branch carries two further commits, so ``agents~1`` is a
+  ## revision no default-branch fetch delivers and no ref tip advertises.
+  createDir(remote)
+  createDir(hooks)
+  discard git(remote, "init", "--quiet", "--initial-branch=main", "--object-format=sha1", "--template=")
+  discard git(remote, "config", "core.hooksPath", hooks)
+  discard git(remote, "config", "commit.gpgsign", "false")
+  discard git(remote, "config", "user.name", "Catalog Fixture")
+  discard git(remote, "config", "user.email", "fixture@example.invalid")
+  writeFile(remote / "repro.nim", "discard\n")
+  discard git(remote, "add", "repro.nim")
+  discard git(remote, "commit", "--quiet", "-m", "catalog fixture")
+  discard git(remote, "checkout", "--quiet", "-b", "agents")
+  writeFile(remote / "repro.nim", "agents\n")
+  discard git(remote, "commit", "--quiet", "-am", "agents-only pin")
+  writeFile(remote / "repro.nim", "agents tip\n")
+  discard git(remote, "commit", "--quiet", "-am", "agents tip")
+  discard git(remote, "checkout", "--quiet", "main")
+
 suite "catalog preparation anchors":
   test "bare relative nested relative and absolute modules find the ancestor sibling":
     withFixture:
@@ -115,6 +136,78 @@ suite "catalog preparation anchors":
       except OSError as error: diagnostic = error.msg
       check "integrity check FAILED" in diagnostic
       check revision in diagnostic
+
+  test "a half-materialized catalog checkout is rebuilt rather than refused":
+    withFixture:
+      require findExe("git").len > 0
+      let remote = root / "catalog-remote"
+      initCatalogRemote(remote, root / "empty-hooks")
+      let revision = git(remote, "rev-parse", "main")
+      let consumer = root / "consumer"
+      writeLock(consumer, fileUrl(remote), revision)
+      setCurrentDir(consumer)
+      let expected = consumer / ".repro" / "cross-repo-producers" /
+        "reprobuild-packages" / revision
+      # The state an interrupted materialization leaves: a repository with
+      # objects fetched but nothing checked out (HEAD on an unborn branch, no
+      # worktree files), and the empty lock file kept beside it.
+      createDir(expected)
+      discard git(expected, "init", "--quiet", "--initial-branch=main")
+      discard git(expected, "fetch", "--quiet", fileUrl(remote))
+      writeFile(expected & ".materialize.lock", "")
+      check ensureLockPinnedCatalog("repro.nim", consumer) == expected
+      check git(expected, "rev-parse", "HEAD") == revision
+      check readFile(expected / "repro.nim") == "discard\n"
+      # A completed checkout whose HEAD was moved is still refused: only a
+      # checkout that never reached any commit counts as unfinished.
+      discard git(expected, "-c", "user.name=Moved", "-c",
+        "user.email=moved@example.invalid", "commit", "--quiet",
+        "--allow-empty", "-m", "move the cached HEAD")
+      var diagnostic = ""
+      try: discard ensureLockPinnedCatalog("repro.nim", consumer)
+      except OSError as error: diagnostic = error.msg
+      check "source revision mismatch" in diagnostic
+      check dirExists(expected / ".git")
+
+  test "a pin reachable only from a non-default branch is materialized":
+    withFixture:
+      require findExe("git").len > 0
+      # Protocol v0 refuses a want for a commit no ref tip advertises, as a
+      # server without uploadpack.allowReachableSHA1InWant does, so the
+      # single-revision fetch fails and the whole-remote fallback must run.
+      writeFile(root / "empty.gitconfig", "[protocol]\n\tversion = 0\n")
+      let remote = root / "catalog-remote"
+      initCatalogRemote(remote, root / "empty-hooks")
+      let revision = git(remote, "rev-parse", "agents~1")
+      let consumer = root / "consumer"
+      writeLock(consumer, fileUrl(remote), revision)
+      setCurrentDir(consumer)
+      let expected = consumer / ".repro" / "cross-repo-producers" /
+        "reprobuild-packages" / revision
+      check ensureLockPinnedCatalog("repro.nim", consumer) == expected
+      check git(expected, "rev-parse", "HEAD") == revision
+      check readFile(expected / "repro.nim") == "agents\n"
+
+  test "a fetch that does not deliver the pin fails and leaves no checkout":
+    withFixture:
+      require findExe("git").len > 0
+      let remote = root / "catalog-remote"
+      initCatalogRemote(remote, root / "empty-hooks")
+      let revision = repeat('4', 40)
+      let consumer = root / "consumer"
+      writeLock(consumer, fileUrl(remote), revision)
+      setCurrentDir(consumer)
+      let expected = consumer / ".repro" / "cross-repo-producers" /
+        "reprobuild-packages" / revision
+      for attempt in 1 .. 2:
+        checkpoint("attempt " & $attempt)
+        var diagnostic = ""
+        try: discard ensureLockPinnedCatalog("repro.nim", consumer)
+        except OSError as error: diagnostic = error.msg
+        check ("did not deliver the pinned revision " & revision) in diagnostic
+        check fileUrl(remote) in diagnostic
+        check "source revision mismatch" notin diagnostic
+        check not dirExists(expected)
 
   test "an explicit catalog remains exclusive before relative lookup":
     withFixture:

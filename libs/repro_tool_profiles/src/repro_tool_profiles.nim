@@ -23,6 +23,8 @@ import repro_core/nix_evaluation_policy
 from repro_core/process_exec import execCmdExCloseOnce
 import repro_core/paths as corepaths
 import repro_core/source_root
+import repro_core/installed_prefix_nim
+export installed_prefix_nim
 from repro_core/c_compiler import BuiltCCompilerPath
 import repro_domain_types
 import repro_dsl_stdlib/nixpkgs_pin
@@ -3802,6 +3804,18 @@ type ClosureEntry = object
   path: string    ## prefix-relative destination directory
   sha256: string
   url: string
+  archiveType: string   ## ``zip``, ``tar.gz`` or ``tar.xz``
+  stripComponents: int
+
+const
+  ## The entry a three-field line describes: npm publishes every package as
+  ## a ``package/``-rooted gzip tarball.
+  NpmClosureArchiveType = "tar.gz"
+  NpmClosureStripComponents = 1
+  ## The kinds a five-field line may name. Each is an archive the existing
+  ## extractor unpacks with no provisioned extractor edge; an installer or an
+  ## executable bootstrap is deliberately not one of them.
+  ClosureArchiveTypes = ["zip", "tar.gz", "tar.xz"]
 
 proc closureManifestPath(plan: TarballAcquisitionPlan): string =
   if plan.declaredClosureManifest.len == 0:
@@ -3812,9 +3826,42 @@ proc closureManifestPath(plan: TarballAcquisitionPlan): string =
     return plan.declaredClosureManifest
   plan.closureManifestRoot / plan.declaredClosureManifest
 
+proc normalizedClosureDestination(path: string): string =
+  ## The destination with ``\`` read as ``/`` and empty and ``.`` components
+  ## dropped -- what two lines must not share, because the second would
+  ## replace the first's tree. "" when the path is unsafe or names the prefix
+  ## root itself: absolute, a drive or UNC path, or reaching a ``..``.
+  let slashed = path.replace('\\', '/')
+  if slashed.len == 0 or slashed.isAbsolute or slashed.startsWith("/") or
+      (slashed.len >= 2 and slashed[0] in {'a' .. 'z', 'A' .. 'Z'} and
+       slashed[1] == ':'):
+    return ""
+  var parts: seq[string] = @[]
+  for part in slashed.split('/'):
+    if part.len == 0 or part == ".":
+      continue
+    if part == "..":
+      return ""
+    parts.add(part)
+  parts.join("/")
+
+proc parseClosureStrip(text: string): int =
+  ## A nonnegative decimal integer that fits the extractor's ``int``; -1
+  ## otherwise. No sign, no radix prefix, no whitespace.
+  if text.len == 0 or text.anyIt(it notin {'0' .. '9'}):
+    return -1
+  try:
+    result = parseInt(text)
+  except ValueError:
+    return -1
+
 proc parseClosureManifest(path: string): seq[ClosureEntry] =
-  ## ``<prefix-relative-path> <sha256> <url>`` per line; ``#`` comments and
-  ## blank lines ignored.
+  ## ``<destination> <sha256> <url>`` (an npm archive: ``tar.gz``, one
+  ## stripped component) or ``<destination> <sha256> <url> <archiveType>
+  ## <stripComponents>`` per line; ``#`` comments and blank lines ignored.
+  ##
+  ## The WHOLE manifest is validated here, and every caller parses it before
+  ## anything is fetched, so a malformed line costs no download.
   ##
   ## Deliberately a flat text format rather than JSON: it is GENERATED from
   ## a lock file and read by a human reviewing a dependency change, and a
@@ -3822,24 +3869,66 @@ proc parseClosureManifest(path: string): seq[ClosureEntry] =
   if not fileExists(extendedPath(path)):
     raise newException(OSError,
       "tool-resolution failed: closure manifest not found: " & path)
+  var destinations: seq[string] = @[]
   for rawLine in readFile(extendedPath(path)).splitLines():
     let line = rawLine.strip()
     if line.len == 0 or line.startsWith("#"):
       continue
     let parts = line.splitWhitespace()
-    if parts.len != 3:
+    if parts.len != 3 and parts.len != 5:
       raise newException(ValueError,
         "tool-resolution failed: closure manifest line must be " &
-        "\"<path> <sha256> <url>\": " & path & ": " & line)
+        "\"<path> <sha256> <url>\" or \"<path> <sha256> <url> " &
+        "<archiveType> <stripComponents>\": " & path & ": " & line)
     let entryPath = parts[0].replace('\\', '/')
-    if entryPath.len == 0 or entryPath.isAbsolute or
-        entryPath == ".." or entryPath.startsWith("../") or
-        entryPath.contains("/../"):
+    let destination = normalizedClosureDestination(entryPath)
+    if destination.len == 0:
       raise newException(ValueError,
         "tool-resolution failed: closure entry path must be relative and " &
-        "inside the prefix: " & entryPath)
-    result.add(ClosureEntry(path: entryPath,
-      sha256: normalizedSha256(parts[1]), url: parts[2]))
+        "inside the prefix: " & entryPath & " (" & path & ": " & line & ")")
+    if destination in destinations:
+      raise newException(ValueError,
+        "tool-resolution failed: two closure entries unpack to " &
+        destination & ": " & path & ": " & line)
+    destinations.add(destination)
+    var sha = ""
+    try:
+      sha = normalizedSha256(parts[1])
+    except ValueError:
+      raise newException(ValueError,
+        "tool-resolution failed: closure entry sha256 is not a SHA-256 " &
+        "digest: " & path & ": " & line)
+    var entry = ClosureEntry(path: entryPath, sha256: sha, url: parts[2],
+      archiveType: NpmClosureArchiveType,
+      stripComponents: NpmClosureStripComponents)
+    if parts.len == 5:
+      if parts[3] notin ClosureArchiveTypes:
+        raise newException(ValueError,
+          "tool-resolution failed: closure entry archiveType must be one of " &
+          ClosureArchiveTypes.join(", ") & ": " & path & ": " & line)
+      let strip = parseClosureStrip(parts[4])
+      if strip < 0:
+        raise newException(ValueError,
+          "tool-resolution failed: closure entry stripComponents must be a " &
+          "nonnegative decimal integer: " & path & ": " & line)
+      # The zip arm strips by moving a single top-level directory up and
+      # performs no deeper strip; refused here rather than after a download.
+      if parts[3] == "zip" and strip > 1:
+        raise newException(ValueError,
+          "tool-resolution failed: closure entry stripComponents must be " &
+          "0 or 1 for a zip archive: " & path & ": " & line)
+      entry.archiveType = parts[3]
+      entry.stripComponents = strip
+    result.add(entry)
+
+proc canonicalClosureLine(entry: ClosureEntry): string =
+  ## An entry with the npm defaults is written as the three-field line, so an
+  ## explicit ``tar.gz 1`` and the legacy line share one identity; any other
+  ## kind or strip count is part of it.
+  result = entry.path & " " & entry.sha256 & " " & entry.url
+  if entry.archiveType != NpmClosureArchiveType or
+      entry.stripComponents != NpmClosureStripComponents:
+    result.add(" " & entry.archiveType & " " & $entry.stripComponents)
 
 proc closureManifestDigest(plan: TarballAcquisitionPlan): string =
   ## The manifest's CONTENT, canonicalised, as the cache-key contribution.
@@ -3851,7 +3940,7 @@ proc closureManifestDigest(plan: TarballAcquisitionPlan): string =
   ## move the key either, which is what lets the generator reformat.
   var canonical: seq[string] = @[]
   for entry in parseClosureManifest(closureManifestPath(plan)):
-    canonical.add(entry.path & " " & entry.sha256 & " " & entry.url)
+    canonical.add(canonicalClosureLine(entry))
   canonical.sort()
   $blake3.digest(canonical.join("\n"))
 
@@ -3880,9 +3969,8 @@ proc unpackClosure(plan: TarballAcquisitionPlan;
     entryPlan.sha256 = entry.sha256
     entryPlan.digestAlgorithm = "sha256"
     entryPlan.digestValue = entry.sha256
-    # npm publishes every package as a `package/`-rooted gzip tarball.
-    entryPlan.archiveType = "tar.gz"
-    entryPlan.stripComponents = 1
+    entryPlan.archiveType = entry.archiveType
+    entryPlan.stripComponents = entry.stripComponents
     entryPlan.declaredClosureManifest = ""
     let downloaded = verifiedDownload(entryPlan, storeRoot)
     let target = destination / entry.path
@@ -4247,6 +4335,11 @@ proc materializeTarballPrefix(plan: TarballAcquisitionPlan; storeRoot: string;
     tuple[prefix: string; archivePath: string; selectedUrl: string; cacheHit: bool] =
   ## Materializes a tarball realization into the unified M56 layout
   ## (`<store-root>/prefixes/<package>/<version>-<hash>/`).
+  # The whole closure is validated before anything is reused, substituted or
+  # fetched: a malformed manifest must cost neither the primary archive's
+  # download nor any entry's, and must not be served an existing prefix.
+  if plan.declaredClosureManifest.len > 0:
+    discard parseClosureManifest(closureManifestPath(plan))
   let tmpRoot = storeRoot / "tmp"
   createDir(extendedPath(tmpRoot))
   let packageName = safeStoreSegment(plan.packageSelector, "package")
@@ -5767,7 +5860,10 @@ type
     entries: seq[tuple[name: string; present: bool; value: string]]
 
 const bootstrapToolchainEnvNames = ["CC", "REPRO_BOOTSTRAP_CC",
-  "REPRO_NIM_COMPILER", "REPRO_BOOTSTRAP_SDKROOT"]
+  "REPRO_NIM_COMPILER", "REPRO_BOOTSTRAP_SDKROOT",
+  # Which release the installed-prefix route chose (N3), read by the
+  # recipe's `uses: nim` check; reprobuild's own, like the compiler.
+  "REPRO_INSTALLED_PREFIX_NIM"]
 
 proc snapshotBootstrapToolchainEnv*(): BootstrapToolchainEnvSnapshot =
   ## Capture ``CC``, ``REPRO_BOOTSTRAP_CC``, ``REPRO_NIM_COMPILER`` and (macOS)
@@ -6298,84 +6394,44 @@ proc buildNimFromSourceThroughEdges*(version, url, sha256, storeRoot, cc,
   raise newException(OSError, "the Nim " & version & " source build " &
     "edge's receipt " & edges.rootReceipt & " names no existing bin/nim")
 
-proc versionSatisfiesRange(version, constraint: string): bool
-
-const
-  InstalledPrefixRecordPath = "share" / "repro" / "cross-build-info"
-    ## `packaging/producers/installed_prefix.PrefixRecordPath`, spelled here
-    ## so the engine does not import the DSL's packaging layer.
-  InstalledPrefixNimRevisionPath = "nim" / ".nim-fork-revision"
-    ## What the catalog's `nim-fork` recipe records beside the compiler.
-
-proc installedPrefixNimVersion(nimTree: string): string =
-  ## The Nim release `nimTree` is, from its `lib/system/compilation.nim`
-  ## (`NimMajor` / `NimMinor` / `NimPatch`), or "" when it says none. Read,
-  ## not run: a compiler built for another machine cannot answer
-  ## `--version` on the build host, and on its own host this costs no spawn.
-  let file = nimTree / "lib" / "system" / "compilation.nim"
-  if not fileExists(file):
-    return ""
-  var parts = ["", "", ""]
-  for line in readFile(file).splitLines:
-    for i, name in ["NimMajor", "NimMinor", "NimPatch"]:
-      let at = line.find(name & "*")
-      if at >= 0 and "=" in line:
-        parts[i] = line.rsplit('=', maxsplit = 1)[1].strip()
-  if parts.anyIt(it.len == 0 or not it.allCharsInSet(Digits)):
-    return ""
-  parts.join(".")
-
 proc installedPrefixNim*(prefixes: openArray[string];
                          rawConstraint = "nim >=2.2 <3.0"): string =
   ## The provider compiler an installed prefix ships, or "" when none of
   ## `prefixes` (the running image's, `runningImagePrefixCandidates`) ships
   ## `nim/bin/nim` (reprobuild-pm Distribution-And-Packaging.md §5.3,
   ## amendment N3, approved by Zahary Karadjov, 2026-11-04: this route runs
-  ## before the per-host routes of the provider-toolchain rule 2).
-  ##
-  ## The prefix exists because the appliance compiles providers and profiles
-  ## itself, with the fork the images were built by. Without this route the
-  ## armv7 prefix on rpi2 built stock Nim 2.2.10 from source instead
-  ## (2026-11-04). The compiler is found by the image's own prefix, not by
-  ## `PATH` and not by a build-time path, and is used only when it is the
-  ## fork the prefix records: `nim/.nim-fork-revision` must equal the
-  ## `nim_fork=` line of `share/repro/cross-build-info`. A mismatch, a
-  ## missing record, or a release outside `rawConstraint` (the bootstrap's
-  ## own range) raises `BootstrapNimError`, naming what it found.
-  let range = rawConstraint.splitWhitespace()[1 .. ^1].join(",")
-  for prefix in prefixes:
-    let exe = prefix / "nim" / "bin" / addFileExt("nim", ExeExt)
-    if not fileExists(exe):
+  ## before the per-host routes of the provider-toolchain rule 2). The check
+  ## is `repro_core/installed_prefix_nim.findInstalledPrefixNim`, shared with
+  ## the profile compile; a refusal is a `BootstrapNimError`.
+  try:
+    findInstalledPrefixNim(prefixes, rawConstraint).exe
+  except InstalledPrefixNimError as err:
+    raise newException(BootstrapNimError, err.msg)
+
+proc requireProjectNimAdmitsInstalledPrefixNim*(
+    toolUses: openArray[InterfaceToolUse]) =
+  ## N3: when the provider compiler is the installed prefix's Nim (the
+  ## bootstrap recorded its release in `$REPRO_INSTALLED_PREFIX_NIM`), a
+  ## project whose own `uses:` names `nim` with a range that excludes that
+  ## release is refused, naming both, rather than compiled with a compiler
+  ## the recipe says it does not accept. Called once the interface is
+  ## extracted -- the first moment the recipe's `uses:` can be read -- and
+  ## before the provider compile. A pinned compiler (rule 1) never sets the
+  ## variable, so it is never second-guessed here.
+  let version = getEnv(InstalledPrefixNimEnvVar)
+  if version.len == 0:
+    return
+  for use in toolUses:
+    let name = use.rawConstraint.splitWhitespace()
+    if name.len == 0 or name[0] != "nim":
       continue
-    let record = prefix / InstalledPrefixRecordPath
-    if not fileExists(record):
-      raise newException(BootstrapNimError, "the installed prefix " &
-        prefix & " ships " & exe & " but no build record " & record &
-        " to check it against; reinstall the prefix")
-    var recorded = ""
-    for line in readFile(record).splitLines:
-      if line.startsWith("nim_fork="):
-        recorded = line["nim_fork=".len .. ^1].strip()
-    let revisionFile = prefix / InstalledPrefixNimRevisionPath
-    let shipped =
-      if fileExists(revisionFile): readFile(revisionFile).strip() else: ""
-    if recorded.len == 0 or shipped != recorded:
-      raise newException(BootstrapNimError, "the installed prefix " &
-        prefix & " ships a Nim that is not the fork it was built with" &
-        "\n  " & InstalledPrefixNimRevisionPath & ": " &
-        (if shipped.len > 0: shipped else: "(missing)") &
-        "\n  " & InstalledPrefixRecordPath & " nim_fork: " &
-        (if recorded.len > 0: recorded else: "(missing)") &
-        "\n  remedy: reinstall the prefix; its nim/ was replaced or damaged")
-    let version = installedPrefixNimVersion(prefix / "nim")
-    if version.len == 0 or not versionSatisfiesRange(version, range):
-      raise newException(BootstrapNimError, "the installed prefix " &
-        prefix & " ships Nim " &
-        (if version.len > 0: version else: "(unknown version)") &
-        ", outside the provider compiler's range " & rawConstraint &
-        "; pin the provider compiler in the project's lock")
-    return exe
-  ""
+    if not nimReleaseAdmitted(version, use.rawConstraint):
+      raise newException(BootstrapNimError, "the recipe's `uses: \"" &
+        use.rawConstraint & "\"` excludes Nim " & version &
+        ", the compiler this installed prefix ships and compiles recipes " &
+        "with (" & getEnv(bootstrapNimCompilerEnv) & ")" &
+        "\n  remedy: widen the range to admit " & version &
+        ", or pin the provider compiler in the project's lock")
 
 proc provisionBootstrapNim*(storeRoot: string; route = bootstrapNimRoute();
                             cc = ""): string =
@@ -6487,10 +6543,18 @@ proc ensureBootstrapToolchainEnv*(mode: ToolProvisioningMode;
   if getEnv(bootstrapNimCompilerEnv).len == 0:
     # The installed-prefix route first (§5.3 amendment N3): the Nim the
     # running image's prefix ships, then the per-host routes.
-    let shipped = installedPrefixNim(runningImagePrefixCandidates(),
-      bootstrapNimToolUse().rawConstraint)
+    let shipped =
+      try:
+        findInstalledPrefixNim(runningImagePrefixCandidates(),
+          bootstrapNimToolUse().rawConstraint)
+      except InstalledPrefixNimError as err:
+        raise newException(BootstrapNimError, err.msg)
+    if shipped.exe.len > 0:
+      putEnv(InstalledPrefixNimEnvVar, shipped.version)
+    else:
+      delEnv(InstalledPrefixNimEnvVar)
     let nim =
-      if shipped.len > 0: shipped
+      if shipped.exe.len > 0: shipped.exe
       else: provisionBootstrapNim(effectiveStoreRoot, cc = cc)
     bumpWindowsNimStack(nim)
     putEnv(bootstrapNimCompilerEnv, nim)

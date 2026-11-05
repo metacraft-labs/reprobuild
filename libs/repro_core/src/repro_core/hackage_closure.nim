@@ -66,7 +66,9 @@ const
     ## The committed manifest, beside the recipe's `repro.nim`.
   HackageVendorSubdir* = ".repro/hackage-vendor"
     ## Scratch root for the repository, the download cache and the private
-    ## cabal directory. Under `.repro/` so `repro clean` takes it.
+    ## cabal directory. Under the gitignored `.repro/` tree, so nothing
+    ## lands in the recipe directory. `repro clean` removes only declared
+    ## action outputs, so the downloaded tree here survives it.
   HackageDownloadBase* = "https://hackage.haskell.org/package/"
 
 proc isSdist*(entry: HackageVendorEntry): bool =

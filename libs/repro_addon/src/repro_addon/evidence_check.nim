@@ -54,6 +54,12 @@ type
     hostId*: string            ## 64 hex: the sink-stamped sender id
     target*: string            ## the deploy agent's target; "" if none
     attestationKey*: string    ## hex; "" = the key of its bootstrap record
+    generation0*: string
+      ## bootstrap's generation, as enrolled; "" = its bootstrap record's.
+      ## The key and generation 0 are ENROLMENT facts: the sink's retention
+      ## deletes old records, the bootstrap record among them (A11 audit
+      ## F6), so ``--update-hosts`` writes both into the hosts file the
+      ## first time it sees them.
 
   Alert* = object
     host*: string
@@ -93,11 +99,20 @@ const
                   "addon-rollback": "DET-AO-7",
                   "addon-freshness": "DET-AO-10",
                   "addon-evidence-ship": "DET-AO-8"}
-  TickRiders* = ["addon-manifest", "addon-apply-refusal", "addon-store",
+  TickRiders* = ["addon-manifest", "addon-apply-refusal",
                  "addon-rollback", "addon-freshness"]
     ## Detectors whose records come out of the deploy agent's tick: alive
     ## exactly when the tick is.
   AttestedDetectors* = ["addon-agent-tick", "addon-apply", "addon-reassert"]
+  RecordGraceIntervals* = 2'i64
+    ## How long, in shipping heartbeats, a boot may go without its re-assert
+    ## record and a dpkg run without its hook record: both ship the moment
+    ## they are written, so two heartbeats is ample -- and shorter than the
+    ## heartbeat's own silence (``silenceFactor``, 3), so a host whose
+    ## shipping is alive still shows the detector silent.
+  ShipStallMs* = 60_000'i64
+    ## A shipping heartbeat reporting a longer wait is a stall
+    ## (``evidence_ship.ShipDelayAlertMs``).
     ## Detectors every record of which carries an attestation on a host
     ## that has an attestation key.
 
@@ -117,8 +132,36 @@ proc parseHosts*(text: string): seq[EnrolledHost] =
       raise newException(EvidenceCheckError, "not a 64-hex host id: " & p[0])
     var h = EnrolledHost(hostId: p[0].toLowerAscii())
     if p.len > 1 and p[1] != "-": h.target = p[1]
-    if p.len > 2: h.attestationKey = p[2].toLowerAscii()
+    if p.len > 2 and p[2] != "-": h.attestationKey = p[2].toLowerAscii()
+    if p.len > 3 and p[3] != "-": h.generation0 = p[3]
     result.add(h)
+
+proc renderHosts*(hosts: openArray[EnrolledHost]): string =
+  result = "# <host id> <target|-> <attestation key|-> <generation 0|->\n"
+  for h in hosts:
+    result.add(h.hostId & " " & (if h.target.len > 0: h.target else: "-") &
+      " " & (if h.attestationKey.len > 0: h.attestationKey else: "-") &
+      " " & (if h.generation0.len > 0: h.generation0 else: "-") & "\n")
+
+proc enrolFromStore*(hosts: seq[EnrolledHost]; storeDir: string):
+    tuple[hosts: seq[EnrolledHost]; changed: bool] =
+  ## Each host's attestation key and generation 0 taken from its first
+  ## bootstrap record where the hosts file has none yet; never replaces an
+  ## enrolled value.
+  result.hosts = hosts
+  let entries = readEvidenceStore(storeDir)
+  for h in result.hosts.mitems:
+    if h.attestationKey.len > 0 and h.generation0.len > 0: continue
+    for e in entries:
+      if e.kind == ekRecord and $e.senderHostId == h.hostId and
+          e.record.detector == "addon-bootstrap":
+        if h.attestationKey.len == 0 and e.record.field("attestationKey").len > 0:
+          h.attestationKey = e.record.field("attestationKey").toLowerAscii()
+          result.changed = true
+        if h.generation0.len == 0 and e.record.field("generation").len > 0:
+          h.generation0 = e.record.field("generation")
+          result.changed = true
+        break
 
 proc loadPublishedManifests*(dir: string;
                              anchors: peerAuth.TrustAnchors):
@@ -157,10 +200,21 @@ proc runEvidenceCheck*(inp: CheckInputs): CheckReport =
   # The producer's publications, by target and sequence.
   var published = initTable[string, Table[uint64, DeployManifest]]()
   var latest = initTable[string, DeployManifest]()
+  var earliest = initTable[string, Table[uint64, DeployManifest]]()
   for m in inp.manifests:
     published.mgetOrPut(m.target, initTable[uint64, DeployManifest]())[m.sequence] = m
-    if m.target notin latest or latest[m.target].sequence < m.sequence:
+    if m.target notin latest or latest[m.target].sequence < m.sequence or
+        (latest[m.target].sequence == m.sequence and
+         latest[m.target].issuedAt < m.issuedAt):
       latest[m.target] = m
+    # The FIRST copy of each sequence: when the producer first published it.
+    # A re-signed copy (spec §9.2 expects a producer to re-sign) must not
+    # restart the time a host has been behind (audit finding F1).
+    let byTarget = addr earliest.mgetOrPut(m.target,
+                                           initTable[uint64, DeployManifest]())
+    if m.issuedAt > 0'u64 and (m.sequence notin byTarget[] or
+        byTarget[][m.sequence].issuedAt > m.issuedAt):
+      byTarget[][m.sequence] = m
   let artefacts = toHashSet(inp.publishedArtefacts)
 
   for h in inp.hosts:
@@ -172,8 +226,8 @@ proc runEvidenceCheck*(inp: CheckInputs): CheckReport =
     # named (the first record a host ships).
     # Generation 0 is bootstrap's own, applied from no manifest: the
     # bootstrap record names it.
-    var key = h.attestationKey
-    var gen0 = ""
+    var key = when mutated("check-forgets-enrolled-key"): "" else: h.attestationKey
+    var gen0 = when mutated("check-forgets-enrolled-key"): "" else: h.generation0
     var bootstrapDpkg = ""
       ## dpkg's last run before the hook existed: not the hook's to follow.
     var exemptBoots = initHashSet[string]()
@@ -186,7 +240,7 @@ proc runEvidenceCheck*(inp: CheckInputs): CheckReport =
         exemptBoots.incl(e.record.field("bootId"))
         if first:
           if key.len == 0: key = e.record.field("attestationKey").toLowerAscii()
-          gen0 = e.record.field("generation")
+          if gen0.len == 0: gen0 = e.record.field("generation")
           bootstrapDpkg = e.record.field("dpkgLastRun")
           first = false
     var detections = initCountTable[string]()
@@ -203,6 +257,8 @@ proc runEvidenceCheck*(inp: CheckInputs): CheckReport =
     var reported = initHashSet[string]()
     var applied = -1'i64
     var attestedSeen = false
+    var shipStalled = false
+    var lastShipDelay = (0'i64, 0'u64)
     var appliedMs = 0'i64
     for e in mine:
       if e.kind == ekRefusedVerb:
@@ -221,6 +277,11 @@ proc runEvidenceCheck*(inp: CheckInputs): CheckReport =
       of ecHeartbeat:
         lastBeat[det] = (e.receivedAtMs, parseSigned(r.field("intervalMs")))
       of ecAudit: discard
+      if det == "addon-evidence-ship" and r.category == ecHeartbeat and
+          not mutated("check-ignores-ship-delay"):
+        # The latest heartbeat decides: a stall that has since recovered
+        # (records leave at once again) no longer alerts.
+        lastShipDelay = (parseSigned(r.field("shipDelayMs")), e.seq)
       if det == "addon-evidence-ship" and r.category == ecHeartbeat:
         let b = r.field("bootId")
         if b.len > 0 and b notin boots.mapIt(it.id):
@@ -248,6 +309,15 @@ proc runEvidenceCheck*(inp: CheckInputs): CheckReport =
         continue
       when mutated("check-skips-attestation"):
         # FALSIFYING BUILD: no attestation is compared.
+        continue
+      if key.len == 0:
+        # No key enrolled and no bootstrap record left to take it from: one
+        # alert for the host, not one per record (A11 audit F6).
+        if "unenrolled" notin reported:
+          reported.incl("unenrolled")
+          alert("DET-AO-9", "attestation-key-unenrolled", e.seq, "no " &
+            "attestation key is enrolled for the host, and its bootstrap " &
+            "record is no longer in the store; enrol it in the hosts file")
         continue
       let why = verifyAttestation(SignedAttestation(statement: stmt,
         signature: r.field("attestationSignature"),
@@ -313,7 +383,8 @@ proc runEvidenceCheck*(inp: CheckInputs): CheckReport =
                 diffs.join("; "))
 
     # DET-AO-8: heartbeats, then the per-boot and per-dpkg-run rules.
-    var beating = @["addon-evidence-ship"]
+    # The store verification heartbeats on its own timer (decision 46).
+    var beating = @["addon-evidence-ship", "addon-store"]
     if h.target.len > 0:
       # An agent host with a sink carries the egress observer, which
       # heartbeats on its own timer (DET-AO-3's DET-5).
@@ -343,24 +414,40 @@ proc runEvidenceCheck*(inp: CheckInputs): CheckReport =
     let shipInterval = if "addon-evidence-ship" in lastBeat:
                          lastBeat["addon-evidence-ship"].interval
                        else: 0'i64
+    if lastShipDelay[0] > ShipStallMs:
+      shipStalled = true
+      alert("DET-AO-8", "shipping-stalled", lastShipDelay[1], "a record " &
+        "waited " & $(lastShipDelay[0] div 1000) & " s to leave the host " &
+        "(the shipping unit is not started as records land)")
+    var silentDetail = initTable[string, string]()
     for (boot, firstMs) in boots:
       if boot notin reassertBoots and boot notin exemptBoots and
           shipInterval > 0 and
-          inp.nowMs - firstMs > shipInterval * int64(factor):
+          inp.nowMs - firstMs > shipInterval * RecordGraceIntervals:
         alert("DET-AO-8", "reassert-silent", 0, "boot " & boot &
           " has no re-assert record")
+        silentDetail["addon-reassert"] = "boot " & boot & " has no record"
     for (run, firstMs) in dpkgRuns:
       if not hookRuns.anyIt(it >= run) and shipInterval > 0 and
-          inp.nowMs - firstMs > shipInterval * int64(factor):
+          inp.nowMs - firstMs > shipInterval * RecordGraceIntervals:
         alert("DET-AO-8", "apt-hook-silent", 0, "dpkg ran at " & run &
           " and no apt hook record names that run")
+        silentDetail["addon-apt-hook"] = "dpkg run " & run & " has no record"
+    if shipStalled:
+      for st in result.statuses.mitems:
+        if st.host == h.hostId and st.detector == "addon-evidence-ship":
+          st.status = "stalled"
+          st.detail = "records wait for the timer"
     for det in ["addon-reassert", "addon-apt-hook"]:
+      # A status never contradicts the check's own alert (A11 audit F4).
+      let own = det in silentDetail and not mutated("check-status-ignores-silence")
       result.statuses.add(DetectorStatus(host: h.hostId, detector: det,
         detections: detections.getOrDefault(det),
-        status: (if not alive.getOrDefault("addon-evidence-ship"): "silent"
+        status: (if not alive.getOrDefault("addon-evidence-ship") or own: "silent"
                  elif detections.getOrDefault(det) > 0: "live-detecting"
                  else: "live-idle"),
-        detail: "checked per boot / per dpkg run"))
+        detail: (if own: silentDetail[det]
+                 else: "checked per boot / per dpkg run")))
     if h.target.len > 0:
       for det in TickRiders:
         result.statuses.add(DetectorStatus(host: h.hostId, detector: det,
@@ -369,18 +456,41 @@ proc runEvidenceCheck*(inp: CheckInputs): CheckReport =
                    elif detections.getOrDefault(det) > 0: "live-detecting"
                    else: "live-idle"),
           detail: "rides on addon-agent-tick"))
-      # DET-AO-10: lag against the producer's latest.
-      if h.target in latest:
+      # DET-AO-10: lag. The host has been behind since the producer FIRST
+      # published the oldest sequence above the one it applied; it lags once
+      # that is longer ago than that copy's maximum age, however often the
+      # producer re-signed since.
+      if h.target in latest and not mutated("lag-detector-disabled"):
         let l = latest[h.target]
-        if l.issuedAt > 0'u64 and applied < int64(l.sequence) and
-            not mutated("lag-detector-disabled"):
-          let ageMs = inp.nowMs - int64(l.issuedAt) * 1000
-          if ageMs > int64(l.maxAgeSeconds) * 1000:
+        var since: DeployManifest
+        var found = false
+        when mutated("lag-from-newest-copy"):
+          # FALSIFYING BUILD: the age of the newest copy of the latest
+          # sequence, which every re-signature resets.
+          if l.issuedAt > 0'u64 and applied < int64(l.sequence):
+            since = l
+            found = true
+        else:
+          # Any sequence above the host's that it has been behind for longer
+          # than that sequence's own maximum age (the one most overdue).
+          var worst = 0'i64
+          for sq, m in earliest.getOrDefault(h.target):
+            if int64(sq) <= applied: continue
+            let over = inp.nowMs - int64(m.issuedAt) * 1000 -
+                       int64(m.maxAgeSeconds) * 1000
+            if over > 0 and (not found or over > worst):
+              since = m
+              worst = over
+              found = true
+        if found:
+          let ageMs = inp.nowMs - int64(since.issuedAt) * 1000
+          if ageMs > int64(since.maxAgeSeconds) * 1000:
             alert("DET-AO-10", "lag", 0, "applied sequence " &
               (if applied < 0: "none" else: $applied) & " is behind the " &
-              "producer's " & $l.sequence & " for " & h.target & ", published " &
-              $(ageMs div 1000) & " s ago (maximum age " & $l.maxAgeSeconds &
-              " s)")
+              "producer's " & $l.sequence & " for " & h.target &
+              "; sequence " & $since.sequence & " was first published " &
+              $(ageMs div 1000) & " s ago (maximum age " &
+              $since.maxAgeSeconds & " s)")
   result.alerts.sort(proc(a, b: Alert): int = cmp(a.host & a.detector & $a.sinkSeq,
                                                    b.host & b.detector & $b.sinkSeq))
 

@@ -52,6 +52,8 @@
 
 import std/[options, strutils, unittest]
 
+import repro_core
+import repro_hash
 import repro_interface_artifacts
 import repro_project_dsl
 
@@ -315,33 +317,126 @@ suite "envelope lanes -- the imported-contribution flag begins at v29":
       "zed"
     check back.publicServices[0].contributionPoints ==
       @[PointRelyingParties, PointUsers]
-    # v30 adds the environment-prefix arm to a tool use, after
-    # `scoopProvisioning`. v29 cannot carry it; the blocks around it survive
-    # either way.
-    pi.toolUses = @[InterfaceToolUse(
-      rawConstraint: "sqlite",
-      packageSelector: "sqlite",
-      executableName: "sqlite3",
-      environmentPrefixProvisioning: @[InterfaceEnvironmentPrefixProvisioning(
+
+proc withToolUses(pi: ProjectInterface;
+                  envPrefixArm: bool): ProjectInterface =
+  ## `pi` plus one build-time and one runtime tool use, each with a tarball
+  ## realization, and an environment-prefix arm on both when `envPrefixArm`.
+  ## The tool-use blocks are the only part of the stream the v30/v31 gates
+  ## touch, so a fixture without them could not see either gate.
+  result = pi
+  var useDef = InterfaceToolUse(
+    rawConstraint: "sqlite >=3.40",
+    packageSelector: "sqlite",
+    executableName: "sqlite3",
+    policyPath: @["uses"],
+    depKind: "target",
+    tarballProvisioning: @[InterfaceTarballProvisioning(
+      packageName: "sqlite",
+      url: "https://example.invalid/sqlite.tar.gz",
+      sha256: "1" & repeat('b', 63),
+      archiveType: "tar.gz",
+      executablePath: "bin/sqlite3",
+      location: SourceLocation(file: "repro.nim", line: 31))],
+    location: SourceLocation(file: "repro.nim", line: 30))
+  if envPrefixArm:
+    useDef.environmentPrefixProvisioning = @[
+      InterfaceEnvironmentPrefixProvisioning(
         packageName: "sqlite",
-        variable: "REPRO_PREFIX_SQLITE",
-        libraries: @["lib/libsqlite3.so"],
-        headers: @["include/sqlite3.h"],
-        location: SourceLocation(file: "repro.nim", line: 31))],
-      location: SourceLocation(file: "repro.nim", line: 30))]
-    let beforeArm = atVersion(pi, 29'u16)
-    check beforeArm.toolUses[0].environmentPrefixProvisioning.len == 0
-    check beforeArm.toolUses[0].location.line == 30
-    check beforeArm.provisioningContributions[0].imported
-    let withArm = atVersion(pi, 30'u16)
-    check withArm.toolUses[0].environmentPrefixProvisioning ==
+        variable: "SQLITE_PREFIX",
+        libraries: @["libsqlite3"],
+        headers: @["sqlite3.h"],
+        location: SourceLocation(file: "repro.nim", line: 32))]
+  result.toolUses = @[useDef]
+  result.runtimeToolUses = @[useDef]
+
+proc fingerprintBytes(pi: ProjectInterface; version: uint16): seq[byte] =
+  encodeInterfacePayload(pi, version, forFingerprint = true)
+
+suite "envelope lanes -- the environment-prefix block begins at v30":
+
+  test "v30 adds the environment-prefix records; v21..v29 decode without " &
+      "them and with every other block intact":
+    let pi = withToolUses(bothLanesInterface(), envPrefixArm = true)
+    for v in 21'u16 .. 29'u16:
+      checkpoint "v" & $v
+      let back = atVersion(pi, v)
+      check back.toolUses.len == 1
+      check back.toolUses[0].environmentPrefixProvisioning.len == 0
+      check back.toolUses[0].tarballProvisioning.len == 1
+      check back.toolUses[0].location.line == 30
+      check tarballOf(back).closureManifest == ClosureManifest
+    for v in [30'u16, interfaceEnvelopeVersion()]:
+      checkpoint "v" & $v
+      let back = atVersion(pi, v)
+      for uses in [back.toolUses, back.runtimeToolUses]:
+        check uses.len == 1
+        check uses[0].environmentPrefixProvisioning ==
+          pi.toolUses[0].environmentPrefixProvisioning
+        check uses[0].location.line == 30
+      check back.provisioningContributions[0].imported ==
+        pi.provisioningContributions[0].imported
+      check tarballOf(back).location.line == 22
+
+  test "an interface whose tool uses carry no environment-prefix arm keeps " &
+      "its v29 fingerprint":
+    # The arm is a realization, and the fingerprint projection leaves
+    # realizations out, so an interface that declares none must fingerprint
+    # exactly as it did before the block existed. Anything hashed from the
+    # fingerprint -- the tool-identity cache key, the lowered-graph key --
+    # would otherwise move for every project with a tool use.
+    let pi = withToolUses(bothLanesInterface(), envPrefixArm = false)
+    check fingerprintBytes(pi, interfaceEnvelopeVersion()) ==
+      fingerprintBytes(pi, 29'u16)
+    check interfaceFingerprint(pi) ==
+      blake3DomainDigest(fingerprintBytes(pi, 29'u16), hdMetadataEnvelope)
+    # And declaring the arm moves nothing either: it is a realization.
+    let armed = withToolUses(bothLanesInterface(), envPrefixArm = true)
+    check interfaceFingerprint(armed) == interfaceFingerprint(pi)
+    # The control: the fixture's tool uses do reach the projection, so the
+    # equalities above are not an artefact of a fixture the gate never sees.
+    check fingerprintBytes(pi, interfaceEnvelopeVersion()) !=
+      fingerprintBytes(bothLanesInterface(), interfaceEnvelopeVersion())
+
+  test "a v30 envelope still decodes against the v30 projection it was " &
+      "fingerprinted over":
+    # v30's projection carried a zero environment-prefix count per tool use;
+    # the fingerprint stored in a v30 artifact was computed over it. Reading
+    # one must recompute that projection, not the current one, or every v30
+    # artifact with a tool use would fail its fingerprint check.
+    let pi = withToolUses(bothLanesInterface(), envPrefixArm = true)
+    check fingerprintBytes(pi, 30'u16) !=
+      fingerprintBytes(pi, interfaceEnvelopeVersion())
+    let v30Fingerprint =
+      blake3DomainDigest(fingerprintBytes(pi, 30'u16), hdMetadataEnvelope)
+    var payload = encodeInterfacePayload(pi, 30'u16)
+    payload.add(byte(ord(v30Fingerprint.algorithm)))
+    payload.add(byte(ord(v30Fingerprint.domain)))
+    payload.add(v30Fingerprint.bytes)
+    payload.add(0'u8)
+    var envelope = @[byte(ord('R')), byte(ord('B')), byte(ord('S')),
+                     byte(ord('Z'))]
+    # version-literal-ok: v30 is the frozen historical version under test, not the current one
+    envelope.add([30'u8, 0'u8, 101'u8, 0'u8])
+    let size = uint32(payload.len)
+    for shift in [0, 8, 16, 24]:
+      envelope.add(byte((size shr shift) and 0xff'u32))
+    envelope.add(payload)
+    let decoded = decodeProjectInterfaceArtifact(envelope)
+    check decoded.interfaceFingerprint == v30Fingerprint
+    check decoded.projectInterface.toolUses[0]
+      .environmentPrefixProvisioning ==
       pi.toolUses[0].environmentPrefixProvisioning
-    check withArm.toolUses[0].location.line == 30
-    check withArm.provisioningContributions[0].imported
-    check tarballOf(withArm).location.line == 22
-    # v30 is the default.
-    # version-literal-ok: a pin that must fail when the envelope moves past v30, so this matrix is extended
-    check interfaceEnvelopeVersion() == 30'u16
+    # The same payload under the current header is held to the current
+    # projection, which carries no count, so the v30 fingerprint fails it.
+    envelope[4] = byte(interfaceEnvelopeVersion() and 0xff'u16)
+    envelope[5] = byte((interfaceEnvelopeVersion() shr 8) and 0xff'u16)
+    expect EnvelopeError:
+      discard decodeProjectInterfaceArtifact(envelope)
+
+  test "v31 is the default":
+    # version-literal-ok: a pin that must fail when the envelope moves past v31, so this matrix is extended
+    check interfaceEnvelopeVersion() == 31'u16
 
 suite "envelope lanes -- the version is the ONLY thing that varies":
 

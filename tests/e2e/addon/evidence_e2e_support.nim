@@ -163,7 +163,11 @@ proc archive*(s: GateSink; m: seq[byte]; sequence: uint64) =
   ## with the producer's whole history, not only its latest).
   var bytes = newString(m.len)
   for i, b in m: bytes[i] = char(b)
-  writeFile(s.published / ($sequence & ".rdm"), bytes)
+  # One file per copy: a re-signed copy of a sequence must not replace the
+  # first (the lag check counts from the first publication).
+  let t = getTime()
+  writeFile(s.published / ($sequence & "-" & $t.toUnix() & "-" &
+    $t.nanosecond & ".rdm"), bytes)
 
 proc check*(s: GateSink; host: string; signersPath: string;
             nowMs = 0'i64): CheckReport =
@@ -205,7 +209,13 @@ proc bootstrapShipping*(g: Guest; repro: string; step: StepFn;
   step("the bootstrap record reached the gate's sink", result.ok,
        g.exec("journalctl -q -o cat -u repro-addon-evidence.service | tail -20").stdout)
 
-proc serveRequests*(g: Guest; dir: string; until: string; holdSec: int) =
+type RequestHandler* = proc(name, ext, content: string): tuple[handled: bool;
+                                                             output: string]
+  ## A bed's own request kinds beside ``.sh`` and ``.copy`` (the audit bed's
+  ## ``.publish`` and ``.reboot``): handled when ``handled``.
+
+proc serveRequests*(g: Guest; dir: string; until: string; holdSec: int;
+                    extra: RequestHandler = nil) =
   ## The investigator's access to the guest while the drill holds: each
   ## ``requests/<n>.sh`` is run in the guest as root and answered with
   ## ``requests/<n>.out`` (exit code, stdout, stderr); each
@@ -223,6 +233,10 @@ proc serveRequests*(g: Guest; dir: string; until: string; holdSec: int) =
         let r = g.exec(readFile(p), timeoutSec = 1800)
         writeFile(req / (name & ".out"), "exit " & $r.exitCode & "\n--- stdout\n" &
           r.stdout & "\n--- stderr\n" & r.stderr)
+      elif not extra.isNil and ext notin [".sh", ".copy", ".out"]:
+        let r = try: extra(name, ext, readFile(p))
+                except CatchableError as e: (true, "failed: " & e.msg & "\n")
+        if r.handled: writeFile(req / (name & ".out"), r.output)
       elif ext == ".copy":
         let dest = dir / "copies" / name
         createDir(dest)

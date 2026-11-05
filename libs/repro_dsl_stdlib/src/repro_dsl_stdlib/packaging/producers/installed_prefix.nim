@@ -91,12 +91,22 @@ type
       ## them, as it refuses the project root; `prefixBuildRoots` adds the
       ## recipe directory of every entry and library source.
     debugStripCommand*: string
-      ## `<command> <in> <out>` that copies an object without its debug
-      ## info (`llvm-objcopy --strip-debug` for a zig target: it reads
-      ## every architecture). Applied to a bundled library
-      ## that carries debug sections -- a source build's, whose debug info
-      ## names build-host directories -- and to none that carries none, so
-      ## a distribution's stripped library keeps its signed bytes. "" = keep.
+      ## A filter that reads an object on its standard input and writes it,
+      ## without its debug info, to its standard output
+      ## (`LlvmObjcopyDebugStrip` for a zig target: it reads every
+      ## architecture). Applied to a bundled library that carries debug
+      ## sections -- a source build's, whose debug info names build-host
+      ## directories -- and to none that carries none, so a distribution's
+      ## stripped library keeps its signed bytes. "" = keep.
+      ##
+      ## A filter, not `<command> <in> <out>`: given an output path,
+      ## llvm-objcopy writes a temporary with a random name beside it and
+      ## renames it into place, and that draw (`arc4random`) is entropy from
+      ## a tool nobody has blessed. The engine then withholds the assembly's
+      ## cache entry, so the edge re-runs on every build, the publishing one
+      ## included, and what is published is not the tree that was measured.
+      ## Streamed through standard output it draws none (measured with LLVM
+      ## 18's llvm-objcopy, 2026-11-05).
 
   InstalledPrefix* = object
     dir*: string
@@ -111,6 +121,10 @@ const
     "ld-linux-aarch64.so.1", "ld-linux-x86-64.so.2", "ld-linux.so.3"]
     ## The C library, which an installed prefix never bundles: it is the ABI
     ## of the target's kernel and loader (§5.3 decision C).
+  LlvmObjcopyDebugStrip* = "llvm-objcopy --strip-debug - -"
+    ## `debugStripCommand` for a prefix whose libraries may be built for
+    ## another machine: LLVM's objcopy reads every target, and `- -` makes it
+    ## the filter that field requires, so it names no temporary.
   BuilderPathPatterns* = ["/nix/store/[0-9a-df-np-sv-z]{32}-",
                           "/home/[A-Za-z0-9._-]+/"]
     ## A concrete store path (its 32-character hash) and a concrete home
@@ -179,7 +193,7 @@ bundle() {  # bundle <soname> <wanted-by>
   if [ -n "$STRIP" ] && readelf -S "$O/lib/$1" | grep -q '\.debug'; then
     # A strip that fails can leave a truncated output: never ship it, and
     # never ship the unstripped library in its place.
-    if ! $STRIP "$O/lib/$1" "$O/lib/$1.stripped"; then
+    if ! $STRIP < "$O/lib/$1" > "$O/lib/$1.stripped"; then
       rm -f "$O/lib/$1.stripped"
       echo "installed prefix: stripping the debug info of lib/$1 failed ($STRIP)" >&2
       exit 1

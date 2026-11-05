@@ -30,7 +30,7 @@
 ## unit: the fetch unit is the network-facing half, and a compromise of it
 ## must yield at most what the signed manifest already allows.
 
-import std/[algorithm, json, os, posix, strutils, times]
+import std/[algorithm, json, os, posix, strutils, tables, times]
 
 import repro_core/host_apply_lock
 import repro_infra
@@ -52,6 +52,8 @@ import ./addon_secrets
 import ./agent_checks
 import ./agent_record
 import ./agent_switch
+import repro_local_store/store
+import ./store_custody
 import ./apt_hook
 import ./evidence
 import ./evidence_ship
@@ -589,8 +591,31 @@ proc stagedAptFetcher(copyDir: string): AptDebFetcher =
         "the lock's size")
     copyFile(src, dest)
 
+proc stagedOutputsTree(copyDir: string;
+                       group: openArray[tuple[i: int; a: ProfileBuildAction]];
+                       dst: string) =
+  ## ``dst`` holding exactly the declared outputs of the actions in
+  ## ``group`` (one ``cwd``), copied from the staged copy: what the store
+  ## object at that ``cwd`` must hold, and nothing else.
+  removeDir(dst)
+  createDir(dst)
+  for (i, a) in group:
+    let src = copyDir / StagedOutputsDir / $i
+    when mutated("agent-install-copies-undeclared"):
+      var rels: seq[string]
+      for kind, p in walkDir(src, relative = true): rels.add(p)
+    else:
+      let rels = outputRelPaths(a)
+    for rel in rels:
+      let p = src / rel
+      let d = dst / rel
+      createDir(parentDir(d))
+      if dirExists(p): copyDirWithPermissions(p, d)
+      elif fileExists(p): copyFileWithPermissions(p, d)
+
 proc installStagedOutputs*(m: DeployManifest; actions: seq[ProfileBuildAction];
-                           copyDir: string; storeRoot = StoreRoot) =
+                           copyDir: string; storeRoot = StoreRoot;
+                           custody = custodySite(DefaultStateDir)) =
   ## Verify each action's staged outputs against the digest the signed
   ## manifest pins, BEFORE anything is moved into the store, linked or
   ## named in a unit; then copy exactly those declared outputs -- nothing
@@ -598,6 +623,15 @@ proc installStagedOutputs*(m: DeployManifest; actions: seq[ProfileBuildAction];
   ## store, through the private writable view. Raises on the first
   ## refusal, mismatch or missing output; nothing is written before every
   ## action has passed.
+  ##
+  ## Custody (spec §13 decisions 47, 48): the store object at a ``cwd``
+  ## must hold exactly its declared outputs, and its digest -- computed
+  ## from the staged, pin-verified bytes -- goes into the realisation
+  ## index. One that holds other bytes is another's and is refused, as
+  ## before, UNLESS the index (or a ledger) records that this path was
+  ## realised with exactly these outputs: then it is an altered copy of
+  ## them, moved into the evidence directory and installed again from the
+  ## pinned outputs, with a DET-AO-5 record.
   let pinned = pinActionsToClosureDigests(m, actions)
   if pinned.refusal.len > 0:
     raise newException(AddonApplyError, "closure digests: " & pinned.refusal)
@@ -612,34 +646,53 @@ proc installStagedOutputs*(m: DeployManifest; actions: seq[ProfileBuildAction];
     if refusal.len > 0:
       raise newException(AddonApplyError, refusal & "; nothing of it was " &
         "moved into the store")
-    # A prefix path already holding other bytes is another closure's: it
-    # is never overwritten in place (a new version is a new path).
-    for rel in outputRelPaths(a):
-      let dst = a.cwd / rel
-      if (fileExists(dst) or dirExists(dst) or symlinkExists(dst)) and
-          localOutputsDigest(a) != a.expectedOutputDigest:
-        raise newException(AddonApplyError, a.cwd & " already holds outputs " &
-          "that do not hash to " & a.id & "'s pin; refusing to overwrite them")
+  # One store object per cwd, holding the outputs of every action there.
+  var groups = initOrderedTable[string, seq[tuple[i: int; a: ProfileBuildAction]]]()
   for i, a in pinned.actions:
-    # Present already, with the pinned bytes: nothing to do.
-    if localOutputsDigest(a) == a.expectedOutputDigest: continue
+    groups.mgetOrPut(a.cwd, @[]).add((i, a))
+  let expectedAll = expectedDigests(custody)
+  let scratch = copyDir / ".custody"
+  var plan: seq[tuple[cwd, digest, tree: string; recover: bool;
+                     observed: string]]
+  var n = 0
+  for cwd, group in groups:
+    let tree = scratch / $n
+    inc n
+    stagedOutputsTree(copyDir, group, tree)
+    let digest = storeTreeDigest(tree)
+    if dirExists(cwd) or fileExists(cwd) or symlinkExists(cwd):
+      let observed = if dirExists(cwd): storeTreeDigest(cwd) else: "(not a directory)"
+      if observed == digest:
+        plan.add((cwd, digest, tree, false, observed))
+        continue
+      # Other bytes than these outputs. Recovered only when this very path
+      # was realised with them before; otherwise it is not ours to replace.
+      if expectedAll.getOrDefault(cwd, "") == digest and dirExists(cwd):
+        plan.add((cwd, digest, tree, true, observed))
+        continue
+      raise newException(AddonApplyError, cwd & " already holds outputs " &
+        "that do not hash to " & group[0].a.id & "'s pin; refusing to " &
+        "overwrite them")
+    plan.add((cwd, digest, tree, false, ""))
+  defer: removeDir(scratch)
+  for (cwd, digest, tree, recover, observed) in plan:
     if storeRoot == StoreRoot: enterWritableStoreView()
-    createDir(a.cwd)
-    let src = copyDir / StagedOutputsDir / $i
-    when mutated("agent-install-copies-undeclared"):
-      var rels: seq[string]
-      for kind, p in walkDir(src, relative = true): rels.add(p)
-    else:
-      let rels = outputRelPaths(a)
-    for rel in rels:
-      let p = src / rel
-      let dst = a.cwd / rel
-      createDir(parentDir(dst))
-      if dirExists(p): copyDirWithPermissions(p, dst)
-      elif fileExists(p): copyFileWithPermissions(p, dst)
-    if localOutputsDigest(a) != a.expectedOutputDigest:
-      raise newException(AddonApplyError, "the outputs of " & a.id &
-        " do not hash to their pin after the copy into the store")
+    var entry = ""
+    if recover:
+      entry = preserveEvidence(custody, cwd, digest, observed,
+        "altered; re-installed from the signed manifest's pinned outputs")
+      forgetRealised(custody, cwd)
+    if not dirExists(cwd):
+      createDir(parentDir(cwd))
+      copyDirWithPermissions(tree, cwd)
+    if storeTreeDigest(cwd) != digest:
+      raise newException(AddonApplyError, "the store object " & cwd &
+        " does not hold exactly its declared outputs after the copy")
+    recordRealised(custody, cwd, digest)
+    if recover:
+      recordRecovered(custody, StoreObjectRef(path: cwd, kind: sokPrefix,
+        referrer: "build-action"), digest, observed, entry,
+        "the signed manifest's pinned outputs")
 
 type AgentApplyContext* = object
   ## What one agent apply works from: the copy of the staging area (""

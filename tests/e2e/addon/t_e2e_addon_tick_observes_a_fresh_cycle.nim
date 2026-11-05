@@ -17,6 +17,11 @@
 ## published; a guest-side timer releases the held fetch after 20 s; then
 ## ``tickUnits`` runs. It must observe a fresh cycle that applies 3.
 ##
+## Then (A9 review round 5, finding 6) the race the trace gate hit: the
+## fetch timer's own cycle applies a published sequence between two ticks,
+## and the next tick must report ``timer-cycle-intervened``, not pass on
+## "already converged". Variant ``tick-trusts-the-timer`` (no check): red.
+##
 ## Variants (gate-level ``REPRO_A13_MUTATION``):
 ##
 ## - ``tick-joins-in-flight`` (the old helper: no wait, no proof): the tick
@@ -72,6 +77,28 @@ proc body(g: Guest; repro: string; step: StepFn; record: JsonNode;
        $t & "\n" & t.fetchLog & t.applyLog)
   step("the file holds sequence 3's content",
        g.exec("cat " & Path).stdout == "three\n", g.exec("cat " & Path).stdout)
+  # A cycle the fetch timer runs between two ticks applies what the gate
+  # published, and the gate's tick then sees "already converged" (A9 review
+  # round 5, finding 6: a re-run once hid this as green). Stage it: publish
+  # 4, let the timer itself fire once (a runtime OnActiveSec=1s), wait for
+  # its cycle to finish; the tick must name the intervening cycle.
+  discard producer.publish(PublishSpec(sequence: 4,
+    profileText: canonicalFile(Path, "four\n")))
+  discard g.exec("mkdir -p /run/systemd/system/repro-agent-fetch.timer.d && " &
+    "printf '[Timer]\\nOnActiveSec=1s\\n' > " &
+    "/run/systemd/system/repro-agent-fetch.timer.d/zz-a9-once.conf && " &
+    "systemctl daemon-reload && systemctl start repro-agent-fetch.timer; " &
+    "for i in $(seq 1 600); do [ \"$(cat " & Path & " 2>/dev/null)\" = four ] && " &
+    "[ \"$(systemctl show -p ActiveState --value repro-agent-apply.service)\" " &
+    "!= activating ] && break; sleep 1; done; " &
+    "systemctl stop repro-agent-fetch.timer; rm -rf " &
+    "/run/systemd/system/repro-agent-fetch.timer.d; systemctl daemon-reload")
+  step("the timer's own cycle applied sequence 4 (the staged race)",
+       g.exec("cat " & Path).stdout == "four\n", g.exec("cat " & Path).stdout)
+  let ti = g.tickUnits()
+  record["intervenedTick"] = %($ti)
+  step("the next tick names the cycle the timer ran, never a pass",
+       ti.outcome == "timer-cycle-intervened", $ti)
 
 suite Gate:
   test "a tick observes a cycle it started, after the publish":

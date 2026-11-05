@@ -105,6 +105,11 @@ const FloorMutation {.strdefine: "reproAddonMutation".} = ""
   ## The falsifying builds of the A9 gates (``repro_addon/mutations``):
   ## never set in a product build.
 
+const Round5Off = FloorMutation in ["floor-round5-static-off",
+  "floor-static-r3-disabled", "floor-unchecked"]
+  ## Falsifying build (A9 review round 5): the parse-time rules round 5
+  ## added -- environment files, activators, realtime scheduling -- off.
+
 const ExceptionsLiftRoot = FloorMutation == "exception-lifts-root"
   ## Falsifying build (A9 review round 4, finding 4): round 3's rule, under
   ## which a ``User``, ``DynamicUser`` or ``SupplementaryGroups`` exception
@@ -219,13 +224,18 @@ const
 
   PrivilegedGroups* = ["root", "0", "sudo", "wheel", "adm", "admin", "disk",
     "shadow", "kmem", "docker", "lxd", "incus", "incus-admin", "libvirt",
-    "kvm", "systemd-journal", "systemd-network", "plugdev", "staff"]
+    "kvm", "systemd-journal", "systemd-network", "plugdev", "staff",
+    "ssl-cert", "netdev", "lpadmin", "tty"]
     ## Supplementary groups that grant administrative reach on a Debian or
     ## Ubuntu base: root's own, sudo/wheel/admin (privilege), adm and
     ## systemd-journal (every log), disk and kmem (raw devices), shadow
     ## (password hashes), docker/lxd/incus/libvirt/kvm (root-equivalent
     ## container and VM control), systemd-network, plugdev and staff
-    ## (device and /usr/local write access).
+    ## (device and /usr/local write access); ssl-cert (private TLS keys),
+    ## netdev (network configuration through the desktop daemons), lpadmin
+    ## (printer administration, which runs filters as root) and tty (write
+    ## to every terminal) (A9 review round 5, finding 4). Matched by gid at
+    ## run time: a second name for one of these gids is the same group.
 
   ProtectedRoots* = ["/usr", "/etc", "/boot", "/repro", "/bin", "/sbin",
                      "/lib", "/lib64", "/var/lib/repro", "/run/repro"]
@@ -833,6 +843,23 @@ proc formRefusal(key, value: string; f: ValueForm): string =
       return "'" & value & "' is not a number, size or duration"
     ""
 
+const
+  SystemStateTargets* = ["reboot.target", "poweroff.target",
+  "halt.target", "kexec.target", "emergency.target", "rescue.target",
+  "exit.target", "soft-reboot.target", "ctrl-alt-del.target",
+  "systemd-reboot.service", "systemd-poweroff.service",
+  "systemd-halt.service", "systemd-kexec.service", "systemd-exit.service",
+  "systemd-soft-reboot.service", "emergency.service", "rescue.service"]
+  ## Units that change the whole system's state. Round 3 left
+  ## ``FailureAction=``, ``SuccessAction=`` and ``StartLimitAction=`` off
+  ## the allowlist for that reason; a dependency that starts one of these
+  ## is the same action (A9 review round 6, finding 5). The ``-force``
+  ## forms are actions, not units, and are covered by the ``*Action=``
+  ## keys.
+  StartingDependencyKeys* = ["OnFailure", "OnSuccess", "Wants", "Requires",
+    "Requisite", "BindsTo", "Upholds"]
+    ## The ``[Unit]`` keys whose units start with, or because of, this one.
+
 proc allowlistRefusal*(unitName, content: string;
                        ex: openArray[FloorException]; dropIn: bool): string =
   ## The first line of ``content`` (a floored unit, or a drop-in of one)
@@ -850,6 +877,13 @@ proc allowlistRefusal*(unitName, content: string;
     if d.key == "PAMName":
       return what & " opens a login session outside the floor; it is " &
         "refused under the floor, with or without an exception"
+    when FloorMutation != "state-targets-allowed":
+      if d.section == "Unit" and d.key in StartingDependencyKeys:
+        for t in d.value.splitWhitespace():
+          if t in SystemStateTargets:
+            return what & " starts " & t & ", which changes the whole " &
+              "system's state (the floor refuses it as it refuses " &
+              "FailureAction=)"
     if d.section notin ["Unit", "Service", "Install"]:
       if ExceptionsLiftRoot and waived(ex, d.key): continue
       return what & ": the section is not one a floored unit may carry " &
@@ -910,6 +944,114 @@ proc floorNoExecMounts*(directives: openArray[tuple[key, value: string]]):
         if name.len == 0 or hasDotDot(name): continue
         let p = "-" & root & "/" & name
         if p notin result: result.add(p)
+
+const EnvironmentFileForbiddenRoots* = ["/tmp", "/var/tmp", "/dev/shm",
+  "/run/user", "/var/lib/private", "/var/cache/private", "/var/log/private",
+  "/home", "/root", "/srv", "/var/mail", "/var/spool", "/var/crash"]
+  ## Where an ``EnvironmentFile=`` may not lie: places a service or an
+  ## unprivileged user can write (A9 review round 5, finding 1). The
+  ## effective-unit check also requires the file and its parents to be
+  ## root-owned and not writable by group or others.
+
+proc floorWritablePlaces*(directives: openArray[tuple[key, value: string]]):
+    seq[string] =
+  ## Every place the unit's ``[Service]`` lines make writable for it, as
+  ## normalised paths: ``ReadWritePaths=``, each writable bind's
+  ## destination, each tmpfs, each ``*Directory=`` under its root.
+  const roots = [("StateDirectory", "/var/lib"), ("RuntimeDirectory", "/run"),
+                 ("CacheDirectory", "/var/cache"), ("LogsDirectory", "/var/log"),
+                 ("ConfigurationDirectory", "/etc")]
+  for (k, v) in directives:
+    case k
+    of "ReadWritePaths":
+      for t in v.splitWhitespace():
+        let q = t.strip(leading = true, trailing = false, chars = {'-', '+'})
+        if q.startsWith("/"): result.add(normalisedPath(q))
+    of "BindPaths":
+      for t in v.splitWhitespace():
+        let parts = t.strip(leading = true, trailing = false,
+                            chars = {'-', '+'}).split(':')
+        let d = if parts.len >= 2: parts[1] else: parts[0]
+        if d.startsWith("/"): result.add(normalisedPath(d))
+    of "TemporaryFileSystem":
+      for t in v.splitWhitespace():
+        let d = t.split(':')[0]
+        if d.startsWith("/"): result.add(normalisedPath(d))
+    else:
+      for (dk, root) in roots:
+        if k == dk:
+          for t in v.splitWhitespace():
+            result.add(normalisedPath(root & "/" & t.split(':')[0]))
+
+const
+  SocketKeys = ["ListenStream", "ListenDatagram", "ListenSequentialPacket",
+    "Accept", "Service", "BindIPv6Only", "Backlog", "BindToDevice",
+    "SocketUser", "SocketGroup", "SocketMode", "DirectoryMode",
+    "MaxConnections", "MaxConnectionsPerSource", "KeepAlive", "KeepAliveTimeSec",
+    "KeepAliveIntervalSec", "KeepAliveProbes", "NoDelay", "Priority",
+    "DeferAcceptSec", "ReceiveBuffer", "SendBuffer", "IPTOS", "IPTTL", "Mark",
+    "ReusePort", "FreeBind", "Transparent", "Broadcast", "PassCredentials",
+    "PassSecurity", "PassPacketInfo", "Timestamping", "TCPCongestion",
+    "RemoveOnStop", "FileDescriptorName", "TriggerLimitIntervalSec",
+    "TriggerLimitBurst", "PollLimitIntervalSec", "PollLimitBurst",
+    "SocketProtocol", "FlushPending", "Writable"]
+    ## A floored service's socket may carry these. ``Writable=`` only
+    ## affects ListenSpecial=/ListenFIFO=, which are refused.
+  TimerKeys = ["OnActiveSec", "OnBootSec", "OnStartupSec", "OnUnitActiveSec",
+    "OnUnitInactiveSec", "OnCalendar", "AccuracySec", "RandomizedDelaySec",
+    "RandomizedOffsetSec", "FixedRandomDelay", "OnClockChange",
+    "OnTimezoneChange", "Unit", "Persistent", "RemainAfterElapse"]
+  PathKeys = ["PathExists", "PathExistsGlob", "PathChanged", "PathModified",
+    "DirectoryNotEmpty", "Unit", "TriggerLimitIntervalSec",
+    "TriggerLimitBurst"]
+    ## Path units watch; ``MakeDirectory=`` (creating as root) is refused.
+
+proc activatorRefusal*(unitName, content: string; dropIn: bool): string =
+  ## A socket, timer or path unit that activates a floored service, or a
+  ## drop-in onto one (A9 review round 5, finding 2): the manager opens a
+  ## socket's listeners as root and hands them to the service, and runs
+  ## its commands as root. Only network and unix-socket listeners, no
+  ## command line, and only the keys above in its own section; ``[Unit]``
+  ## and ``[Install]`` as for a floored service.
+  when Round5Off or FloorMutation == "activator-options-unchecked":
+    return ""
+  let dot = unitName.rfind('.')
+  let typ = if dot >= 0: unitName[dot + 1 .. ^1] else: ""
+  let (section, keys) = case typ
+    of "socket": ("Socket", @SocketKeys)
+    of "timer": ("Timer", @TimerKeys)
+    of "path": ("Path", @PathKeys)
+    else: ("", newSeq[string]())
+  if section.len == 0: return ""
+  for d in sectionDirectives(content):
+    let what = (if dropIn: "a drop-in's " else: "") & "[" & d.section & "] " &
+               d.key & "=" & d.value
+    if d.key.startsWith("Exec"):
+      return what & ": a command line on a unit that activates a floored " &
+        "service runs as root, outside the floor"
+    if d.section == section:
+      if d.key notin keys:
+        return what & " is not a setting the floor allows on a unit that " &
+          "activates a floored service (a ListenSpecial=, ListenFIFO=, " &
+          "ListenNetlink=, ListenMessageQueue= or ListenUSBFunction= " &
+          "listener is opened as root and handed to the service)"
+      if d.key in ["ListenStream", "ListenDatagram", "ListenSequentialPacket"]:
+        let v = d.value.strip()
+        if v.startsWith("/"):
+          let np = normalisedPath(v)
+          if not np.startsWith("/run/") or v.anyIt(it in QuoteOrSpecifier):
+            return what & ": a unix socket of a floored service lives " &
+              "under /run (the manager creates it, as root)"
+        elif v.startsWith("@") or v.len == 0:
+          discard   # an abstract socket, or a reset
+        elif not v.allCharsInSet({'0'..'9', '.', ':', '[', ']', 'a'..'f', 'A'..'F', '%', 'v', 's', 'o', 'c', 'k', '-'}):
+          return what & ": not a network address or a unix socket path"
+    elif d.section in ["Unit", "Install"]:
+      if not allowedForm(d.section, d.key, dropIn)[0]:
+        return what & " is not on the floor's allowlist"
+    else:
+      return what & ": the section is not one such a unit may carry"
+  ""
 
 proc floorRefusal*(unitName: string;
                    directives: openArray[tuple[key, value: string]];
@@ -986,6 +1128,35 @@ proc floorRefusal*(unitName: string;
           return what & " without a literal User= runs the service as " &
             "root, which a DynamicUser exception does not allow (only " &
             "\"serviceFloor: <why>\" does)"
+    of "EnvironmentFile":
+      # The manager reads it as root (A9 review round 5, finding 1): no
+      # glob, and nowhere a service or an unprivileged user can write.
+      when not Round5Off:
+        for t in v.splitWhitespace():
+          let q = t.strip(leading = true, trailing = false, chars = {'-'})
+          if q.anyIt(it in {'*', '?', '['}):
+            return what & ": a wildcard is expanded by the manager, as " &
+              "root, after any check; name the file"
+          let np = normalisedPath(q)
+          for w in EnvironmentFileForbiddenRoots:
+            if np == w or np.startsWith(w & "/"):
+              return what & ": " & np & " lies under " & w & ", where a " &
+                "service or an unprivileged user can write what the " &
+                "manager then reads as root"
+          for w in floorWritablePlaces(directives):
+            if np == w or np.startsWith(w & "/"):
+              return what & ": " & np & " lies in the unit's own writable " &
+                "place " & w
+    of "CPUSchedulingPolicy", "IOSchedulingClass":
+      # A realtime policy is what RestrictRealtime= forbids (A9 review
+      # round 5, finding 3); the manager sets it before the sandbox.
+      when not Round5Off:
+        if v.toLowerAscii() in ["fifo", "rr", "realtime", "1", "2"] and
+            (k == "CPUSchedulingPolicy" or v.toLowerAscii() in ["realtime", "1"]) and
+            not waived(ex, "RestrictRealtime"):
+          return what & " is realtime scheduling, which the floor's " &
+            "RestrictRealtime=yes forbids (name the exception " &
+            "\"RestrictRealtime: <why>\")"
     of "SupplementaryGroups":
       for gname in v.splitWhitespace():
         if gname in PrivilegedGroups and

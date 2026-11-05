@@ -65,6 +65,7 @@ import ./collision
 import ./evidence_ship
 import ./evidence_enrol
 import ./egress_observer
+import ./store_verify
 import ./fingerprint
 import ./generation0
 import ./ledger
@@ -105,6 +106,11 @@ commands:
       the attestation key and the sink write credential (never adopting or
       replacing a key), and apply generation 0's evidence objects -- and,
       with the deploy agent, its egress observer -- as one switch.
+  store-verify [--background] [--adopt-unverified]
+      Hash every store path the current generation uses and compare it with
+      the digest it was realised with; quarantine an altered one (DET-AO-5).
+      --adopt-unverified: record the current digest of paths realised
+      before receipts carried one (an operator action).
   egress-check
       The egress observer's check (repro-addon-egress-check.service): record
       every destination the deploy agent's fetch unit was refused, and
@@ -512,6 +518,8 @@ proc runAddonCli*(args: seq[string]): int =
       return runEvidenceEnrolCli(rest)
     of "egress-check":
       return runEgressCheckCli(rest)
+    of "store-verify":
+      return runStoreVerifyCli(rest)
     of "agent-tick":
       return agent_split.runAgentTickCli(rest)
     of "agent-fetch":

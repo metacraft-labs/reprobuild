@@ -64,6 +64,7 @@ import nimcrypto/[hash, sha2]
 
 import ./errors
 import ./profile
+import ./service_account
 
 const CarriedMutation {.strdefine: "reproAddonMutation".} = ""
   ## A falsifying build (``repro_addon/mutations``); never a product build.
@@ -127,6 +128,30 @@ const
     ## The drop-in that holds a unit of a backed-up state set, in
     ## ``/etc/systemd/system/<unit>.d/`` (persistent across reboots).
   HoldUnitDir* = "/etc/systemd/system"
+  CarriedRestoreUnit* = "repro-state-restore.service"
+    ## The first-boot unit that restores carried state (``repro_addon/
+    ## adoption_cli.installRestoreUnit`` installs it).
+  RestoreRequiredDropIn* = "80-repro-state-restore.conf"
+    ## The drop-in ``install-unit`` writes for each unit its manifest names.
+  RequirementDropInName* = "state-restore"
+    ## The generation's drop-in (``50-repro-<name>.conf``) that makes a
+    ## unit reaching carried state require the restore
+    ## (``withCarriedRequirements``).
+
+proc restoreRequirementText*(): string =
+  ## The ``[Unit]`` drop-in that makes a unit require the restore and start
+  ## after it. Owned by the unit, not by the restore unit's ``[Install]``: a
+  ## ``systemctl disable`` or ``preset`` of the restore unit removes links,
+  ## and this drop-in is not a link, so the requirement stays and pulls the
+  ## restore in at boot (systemd.unit(5)). ``Requires=`` fails the unit's
+  ## start job when the restore failed; ``After=`` orders it behind the
+  ## restore whatever its own default dependencies are.
+  "[Unit]\n" &
+    "# Carried state (ReproOS Add-On Mode §11.1): starts only after the\n" &
+    "# first-boot restore of it succeeded.\n" &
+    "Requires=" & CarriedRestoreUnit & "\n" &
+    (when CarriedMutation == "restore-unordered": ""
+     else: "After=" & CarriedRestoreUnit & "\n")
 
 proc under*(root, path: string): string =
   ## ``path`` (absolute) as seen below ``root``.
@@ -330,7 +355,25 @@ proc readReceipt*(dir: string): Table[string, ReceiptEntry] =
     result[k] = ReceiptEntry(digest: v{"digest"}.getStr(),
       root: v{"root"}.getStr(), id: id)
 
-proc writeReceipt*(dir: string; r: Table[string, ReceiptEntry]) =
+type ReceiptPause* = proc (point: string) {.closure.}
+  ## Called at the two points of ``writeReceipt`` a crash-consistency gate
+  ## resets the host at; the add-on passes its test seam
+  ## (``repro_addon/seams``), which is empty outside the seam build.
+
+proc writeReceipt*(dir: string; r: Table[string, ReceiptEntry];
+                   pause: ReceiptPause = nil) =
+  ## Replace the receipt in ``dir`` so that a crash at any moment leaves
+  ## either the old receipt or the new one, each whole: the new bytes are
+  ## written to a temporary file and fsync'd, renamed over the old receipt,
+  ## and the directory fsync'd (https://man7.org/linux/man-pages/man2/fsync.2.html:
+  ## the rename is durable once the directory is). Without the first fsync
+  ## ext4 with delayed allocation can commit the rename before the data,
+  ## leaving an empty receipt (https://docs.kernel.org/admin-guide/ext4.html,
+  ## ``auto_da_alloc``, which papers over this only for some renames).
+  ##
+  ## ``pause`` points: ``receipt-before-rename`` (the temporary file
+  ## written and fsync'd) and ``receipt-before-dir-fsync`` (renamed into
+  ## place, the directory not yet fsync'd).
   var o = newJObject()
   var keys: seq[string]
   for k in r.keys: keys.add(k)
@@ -342,9 +385,49 @@ proc writeReceipt*(dir: string; r: Table[string, ReceiptEntry]) =
     if id.haveBtime: e["btime"] = %*[id.btimeSec, id.btimeNsec]
     if id.haveGen: e["generation"] = %id.gen
     o[k] = e
+  const NoFsync = CarriedMutation == "receipt-no-fsync"
   let tmp = receiptPath(dir) & ".tmp"
-  writeFile(tmp, $(%*{"restored": o}) & "\n")
+  let data = $(%*{"restored": o}) & "\n"
+  let fd = posix.open(tmp.cstring, O_WRONLY or O_CREAT or O_TRUNC, 0o600)
+  if fd < 0:
+    raise newException(StateSetError, "cannot write " & tmp & ": " &
+      $strerror(errno))
+  try:
+    var off = 0
+    while off < data.len:
+      let n = posix.write(fd, unsafeAddr data[off], data.len - off)
+      if n <= 0:
+        raise newException(StateSetError, "cannot write " & tmp & ": " &
+          $strerror(errno))
+      off += n
+    when not NoFsync:
+      if fsync(fd) != 0:
+        raise newException(StateSetError, "fsync " & tmp & ": " &
+          $strerror(errno))
+  finally:
+    discard posix.close(fd)
+  if pause != nil: pause("receipt-before-rename")
   moveFile(tmp, receiptPath(dir))
+  if pause != nil: pause("receipt-before-dir-fsync")
+  when not NoFsync:
+    let dfd = posix.open(dir.cstring, O_RDONLY)
+    if dfd < 0:
+      raise newException(StateSetError, "cannot open " & dir & ": " &
+        $strerror(errno))
+    try:
+      if fsync(dfd) != 0:
+        raise newException(StateSetError, "fsync " & dir & ": " &
+          $strerror(errno))
+    finally:
+      discard posix.close(dfd)
+
+proc installedMarkerPath*(dir: string): string =
+  ## Beside the carried directory (so removing the directory leaves it):
+  ## written by ``install-unit``, it says carried state was installed here,
+  ## so a manifest missing from ``dir`` later is an error, never "nothing to
+  ## restore".
+  let d = dir.strip(leading = false, chars = {'/'})
+  d.parentDir / (d.extractFilename & ".installed")
 
 # statx(2) by number: neither libc this links against (glibc, the add-on's
 # static musl) is required to wrap it, and only the creation time is
@@ -456,15 +539,22 @@ proc pendingCarriedState*(dir = CarriedStateDir; root = "/"): seq[ManifestEntry]
     if not restored: result.add(e)
 
 # ---------------------------------------------------------------------------
-# Reach.
+# Reach: default-deny. What a resource is shown to stay away from is the
+# only thing that does not reach a carried directory; every resource kind,
+# section, key, value form and command prefix this analysis does not
+# positively understand counts as reaching everything.
 # ---------------------------------------------------------------------------
 
 type UnitReach* = object
-  all*: bool                    ## the unit can reach any path
+  all*: bool                    ## the resource can reach any path
   why*: string                  ## why ``all``
-  paths*: seq[string]
+  paths*: seq[string]           ## normalised absolute paths it can touch
+
+proc allReach(why: string): UnitReach = UnitReach(all: true, why: why)
 
 proc unitDirectivesOf(text: string): seq[(string, string, string)] =
+  ## ``(section, key, value)`` in file order, as systemd reads a unit file
+  ## (systemd.syntax(7): ``#``/``;`` comments, ``\`` continuation lines).
   var section = ""
   var pending = ""
   for raw in text.splitLines():
@@ -481,84 +571,373 @@ proc unitDirectivesOf(text: string): seq[(string, string, string)] =
       section = t[1 ..< t.len - 1]
       continue
     let eq = t.find('=')
-    if eq <= 0: continue
+    if eq <= 0:
+      result.add((section, t, "\0"))          # not a key=value line
+      continue
     result.add((section, t[0 ..< eq].strip(), t[eq + 1 .. ^1].strip()))
 
 proc truthy(v: string): bool =
   v.toLowerAscii() in ["yes", "true", "1", "on"]
 
-proc serviceReach*(name: string; texts: seq[string]): UnitReach =
-  ## The paths a service unit can use, from its file and drop-ins.
+proc unitWords*(value: string; ok: var bool): seq[string] =
+  ## A unit value split into words the way systemd splits a list setting
+  ## (``extract_first_word`` with quotes: systemd.syntax(7), "Quoting"):
+  ## ``"…"`` and ``'…'`` group, whitespace separates. A backslash escape or
+  ## an unterminated quote is not decoded here, so ``ok`` turns false and
+  ## the caller fails closed.
+  ok = true
+  var cur = ""
+  var inWord = false
+  var q = '\0'
+  for c in value:
+    if q != '\0':
+      if c == q: q = '\0'
+      else: cur.add(c)
+    elif c in {'"', '\''}:
+      q = c
+      inWord = true
+    elif c == '\\':
+      ok = false
+      return
+    elif c in Whitespace:
+      if inWord:
+        result.add(cur)
+        cur = ""
+        inWord = false
+    else:
+      cur.add(c)
+      inWord = true
+  if q != '\0':
+    ok = false
+    return
+  if inWord: result.add(cur)
+
+proc normalizeUnitPath*(raw: string; ok: var bool): string =
+  ## ``raw`` as the absolute path systemd resolves it to: repeated ``/``
+  ## and ``.`` segments dropped and a trailing ``/`` removed, as systemd's
+  ## ``path_simplify`` does before it uses a sandboxing path
+  ## (https://www.freedesktop.org/software/systemd/man/latest/systemd.exec.html,
+  ## "Sandboxing": paths must be absolute). A relative path, a ``..``
+  ## segment, a specifier (``%``), a variable (``$``) or a home (``~``)
+  ## is not resolved here: ``ok`` turns false and the caller fails closed.
+  ok = false
+  if raw.len == 0 or raw[0] != '/': return
+  when CarriedMutation == "reach-paths-as-text":
+    ok = true
+    return raw
+  for c in raw:
+    if c in {'%', '$', '~', '\0'}: return
+  var parts: seq[string]
+  for seg in raw.split('/'):
+    if seg.len == 0 or seg == ".": continue
+    if seg == "..": return
+    parts.add(seg)
+  ok = true
+  "/" & parts.join("/")
+
+proc reaches(p, d: string): bool =
+  ## Whether a path a resource can touch, ``p``, is at, above or below the
+  ## carried directory ``d`` (both normalised).
+  var okA, okB: bool
+  let a = normalizeUnitPath(p, okA)
+  let b = normalizeUnitPath(d, okB)
+  if not (okA and okB): return true
+  a == b or a == "/" or (b & "/").startsWith(a & "/") or
+    (a & "/").startsWith(b & "/")
+
+const
+  ListPathPrefixes = {'-', '+'}
+    ## A sandboxing path list's per-entry prefixes: ``-`` (ignore if
+    ## missing), ``+`` (relative to ``RootDirectory=``).
+  WritePathKeys = (when CarriedMutation == "reach-paths-as-text":
+                     @["ReadWritePaths"]
+                   else: @["ReadWritePaths", "ReadWriteDirectories"])
+    ## Paths made writable (``ReadWriteDirectories=`` is the old spelling
+    ## systemd still reads).
+  NarrowingPathKeys = ["ReadOnlyPaths", "ReadOnlyDirectories",
+    "InaccessiblePaths", "InaccessibleDirectories", "NoExecPaths",
+    "ExecPaths"]
+    ## Paths a setting only takes away from the unit; they grant nothing.
+  BindKeys = ["BindPaths", "BindReadOnlyPaths"]
+    ## ``[-]source[:destination[:options]]``: both ends are touched.
+  DirectoryKeys = [("StateDirectory", "/var/lib"), ("CacheDirectory", "/var/cache"),
+    ("LogsDirectory", "/var/log"), ("RuntimeDirectory", "/run"),
+    ("ConfigurationDirectory", "/etc")]
+    ## Relative names below a fixed root, each ``name[:symlink]``.
+  ReachAllServiceKeys = ["RootDirectory", "RootImage", "RootImageOptions",
+    "RootEphemeral", "RootHash", "RootVerity", "MountImages",
+    "ExtensionImages", "ExtensionDirectories", "JoinsNamespaceOf",
+    "NetworkNamespacePath", "IPCNamespacePath", "PAMName", "TTYPath",
+    "OpenFile", "BindsTo"]
+    ## Another root, an image or a namespace shared with another unit, a
+    ## PAM session, a file opened by the manager: not judged by path here.
+  ExecKeys = ["ExecStart", "ExecStartPre", "ExecStartPost", "ExecReload",
+    "ExecStop", "ExecStopPost", "ExecCondition"]
+  StdioKeys = ["StandardInput", "StandardOutput", "StandardError"]
+  SafeStdio = ["null", "tty", "tty-force", "tty-fail", "data", "socket",
+    "journal", "kmsg", "journal+console", "kmsg+console", "inherit",
+    "console", "syslog", "syslog+console"]
+  SafeServiceKeys = ["Type", "ExitType", "Restart", "RestartSec",
+    "RestartSteps", "RestartMaxDelaySec", "RestartPreventExitStatus",
+    "RestartForceExitStatus", "SuccessExitStatus", "TimeoutSec",
+    "TimeoutStartSec", "TimeoutStopSec", "TimeoutAbortSec", "RuntimeMaxSec",
+    "RuntimeRandomizedExtraSec", "WatchdogSec", "RemainAfterExit",
+    "GuessMainPID", "PIDFile", "BusName", "NotifyAccess", "KillMode",
+    "KillSignal", "SendSIGKILL", "SendSIGHUP", "FinalKillSignal",
+    "RestartKillSignal", "OOMPolicy", "FileDescriptorStoreMax",
+    "Environment", "EnvironmentFile", "PassEnvironment", "UnsetEnvironment",
+    "StateDirectoryMode", "RuntimeDirectoryMode", "CacheDirectoryMode",
+    "LogsDirectoryMode", "ConfigurationDirectoryMode",
+    "RuntimeDirectoryPreserve", "LoadCredential", "LoadCredentialEncrypted",
+    "SetCredential", "SyslogIdentifier", "SyslogFacility", "SyslogLevel",
+    "SyslogLevelPrefix", "LogLevelMax", "LogRateLimitIntervalSec",
+    "LogRateLimitBurst", "LogExtraFields", "Nice", "OOMScoreAdjust",
+    "IOSchedulingClass", "IOSchedulingPriority", "CPUSchedulingPolicy",
+    "CPUSchedulingPriority", "CPUAffinity", "MemoryMax", "MemoryHigh",
+    "MemoryLow", "MemoryMin", "MemorySwapMax", "MemoryAccounting",
+    "CPUQuota", "CPUWeight", "IOWeight", "TasksMax", "CPUAccounting",
+    "IOAccounting", "TasksAccounting", "IPAccounting", "IPAddressDeny",
+    "IPAddressAllow", "Slice", "PrivateNetwork", "PrivateUsers",
+    "PrivateIPC", "RemoveIPC", "KeyringMode", "ProcSubset", "DevicePolicy",
+    "DeviceAllow", "RestrictFileSystems", "RestrictNetworkInterfaces",
+    "SocketBindAllow", "SocketBindDeny", "SystemCallErrorNumber",
+    "SystemCallLog", "SystemCallFilter", "SystemCallArchitectures",
+    "RestrictAddressFamilies", "NoNewPrivileges", "ProtectHome",
+    "PrivateTmp", "PrivateDevices", "ProtectKernelTunables",
+    "ProtectKernelModules", "ProtectKernelLogs", "ProtectControlGroups",
+    "ProtectClock", "ProtectHostname", "ProtectProc", "RestrictNamespaces",
+    "RestrictRealtime", "RestrictSUIDSGID", "LockPersonality",
+    "MemoryDenyWriteExecute", "CapabilityBoundingSet", "UMask",
+    "LimitNOFILE", "LimitNPROC", "LimitCORE", "LimitMEMLOCK",
+    "LimitSTACK", "LimitAS", "LimitDATA", "LimitFSIZE", "LimitCPU",
+    "LimitRSS", "LimitLOCKS", "LimitSIGPENDING", "LimitMSGQUEUE",
+    "LimitNICE", "LimitRTPRIO", "LimitRTTIME", "CoredumpFilter",
+    "TimerSlackNSec", "Personality", "IgnoreSIGPIPE", "UtmpIdentifier",
+    "UtmpMode", "StandardInputText", "StandardInputData",
+    "ManagedOOMSwap", "ManagedOOMMemoryPressure",
+    "ManagedOOMMemoryPressureLimit", "ManagedOOMPreference",
+    "MemoryZSwapMax", "StartupCPUWeight", "StartupIOWeight",
+    "AllowedCPUs", "AllowedMemoryNodes", "NUMAPolicy", "NUMAMask",
+    "SecureBits", "Delegate", "TimeoutStartFailureMode",
+    "TimeoutStopFailureMode", "ReloadSignal", "RootDirectoryStartOnly",
+    "MountAPIVFS", "ProtectSystem", "DynamicUser", "User", "Group",
+    "SupplementaryGroups", "AmbientCapabilities", "PermissionsStartOnly",
+    "WorkingDirectory", "TemporaryFileSystem", "Sockets", "PrivateMounts",
+    "MountFlags"]
+    ## Every [Service] key this analysis understands. One not listed
+    ## reaches everything; each of these is judged below or grants no path.
+  UnitSectionSafe = ["Description", "Documentation", "After", "Before",
+    "Conflicts", "PropagatesReloadTo", "ReloadPropagatedFrom",
+    "PropagatesStopTo", "StopPropagatedFrom", "RequiresMountsFor",
+    "WantsMountsFor", "StopWhenUnneeded", "RefuseManualStart",
+    "RefuseManualStop", "DefaultDependencies", "IgnoreOnIsolate",
+    "CollectMode", "StartLimitIntervalSec", "StartLimitBurst",
+    "JobTimeoutSec", "JobRunningTimeoutSec", "OnFailureJobMode",
+    "OnSuccessJobMode", "SourcePath"]
+  UnitActivating = ["Wants", "Requires", "Requisite", "BindsTo", "Upholds",
+    "PartOf", "OnFailure", "OnSuccess"]
+    ## Units starting (or stopping) this one starts too.
+  InstallSafe = ["WantedBy", "RequiredBy", "UpheldBy", "Alias",
+    "DefaultInstance"]
+  TimerSafe = ["OnActiveSec", "OnBootSec", "OnStartupSec", "OnUnitActiveSec",
+    "OnUnitInactiveSec", "OnCalendar", "AccuracySec", "RandomizedDelaySec",
+    "RandomizedOffsetSec", "FixedRandomDelay", "OnClockChange",
+    "OnTimezoneChange", "Persistent", "WakeSystem", "RemainAfterElapse",
+    "DeferReactivation"]
+  PathWatchKeys = ["PathExists", "PathExistsGlob", "PathChanged",
+    "PathModified", "DirectoryNotEmpty"]
+    ## A path unit's watched paths (systemd.path(5)): each reached.
+  PathSafe = ["PathExists", "PathExistsGlob", "PathChanged", "PathModified",
+    "DirectoryNotEmpty", "MakeDirectory", "DirectoryMode", "TriggerLimitIntervalSec",
+    "TriggerLimitBurst"]
+
+
+proc execReach(key, value: string): string =
+  ## Why a command line runs outside the unit's sandbox, or "". Its prefix
+  ## characters, in any order (systemd.service(5), "Command lines"): ``@``,
+  ## ``-``, ``:``, ``+`` (full privileges, no namespacing), ``!``/``!!``
+  ## (no ``User=``), ``|`` (through the shell, systemd ≥ 258).
+  var i = 0
+  while i < value.len and value[i] notin {'/'} and
+      value[i] notin {'a'..'z', 'A'..'Z', '0'..'9', '_', '.', '"', '\''}:
+    let c = value[i]
+    if c in {'+', '!'}:
+      when CarriedMutation != "reach-ignores-privileged-commands":
+        return key & "=" & value & " (a privileged command, outside the sandbox)"
+    elif c notin {'@', '-', ':', '|'}:
+      return key & "=" & value & " (an unknown command prefix " & $c & ")"
+    inc i
+  ""
+
+proc pathsOf(key, value: string; r: var UnitReach) =
+  ## The paths a path-taking key grants, normalised; any form not
+  ## understood makes ``r`` reach everything.
+  var ok: bool
+  let words = unitWords(value, ok)
+  if not ok:
+    r = allReach(key & "=" & value & " (quoting or an escape not decoded)")
+    return
+  for w0 in words:
+    var w = w0
+    if key in BindKeys or key == "TemporaryFileSystem" or key in WritePathKeys:
+      while w.len > 0 and w[0] in ListPathPrefixes: w = w[1 .. ^1]
+    var ends: seq[string]
+    if key in BindKeys:
+      let parts = w.split(':')
+      ends.add(parts[0])
+      if parts.len >= 2 and parts[1].len > 0: ends.add(parts[1])
+    elif key == "TemporaryFileSystem":
+      ends.add(w.split(':')[0])
+    else:
+      ends.add(w)
+    for e in ends:
+      var okP: bool
+      let n = normalizeUnitPath(e, okP)
+      if not okP:
+        r = allReach(key & "=" & w0 & " (a path not resolved here)")
+        return
+      r.paths.add(n)
+
+proc serviceReach*(name: string; texts: seq[string];
+                   lookup: AccountLookup): UnitReach =
+  ## The paths a service can touch, from its unit file and its drop-ins in
+  ## the order systemd applies them (``texts``: the file, then drop-ins by
+  ## file name). Later assignments of a single-valued setting win, as in
+  ## systemd; a list setting's paths only accumulate (an empty assignment
+  ## that resets a list can only take reach away). The account is the one
+  ## systemd will use (``service_account``), resolved through ``lookup``.
   var strict = false
   var dynamic = false
+  var user = ""
+  var group = ""
+  var collected = UnitReach()
   for t in texts:
     for (section, key, value) in unitDirectivesOf(t):
-      if section != "Service": continue
-      case key
-      of "ProtectSystem": strict = value.toLowerAscii() == "strict"
-      of "DynamicUser": dynamic = truthy(value)
-      of "PermissionsStartOnly":
-        # Deprecated, and it runs every ExecStartPre=/Post=/Reload=/Stop=
-        # outside the sandbox (systemd.service(5)).
-        when CarriedMutation != "reach-ignores-privileged-commands":
-          if truthy(value):
-            return UnitReach(all: true, why: "PermissionsStartOnly=yes " &
-              "(its other commands run outside the sandbox)")
-      of "ExecStart", "ExecStartPre", "ExecStartPost", "ExecReload",
-         "ExecStop", "ExecStopPost", "ExecCondition":
-        # A command whose prefix carries "+" runs with full privileges and
-        # without the namespacing (ProtectSystem=, ReadWritePaths=, ...);
-        # "!" drops User=/Group=. Neither is confined to the unit's paths
-        # (systemd.service(5), "Table 1. Special executable prefixes").
-        when CarriedMutation != "reach-ignores-privileged-commands":
-          var i = 0
-          while i < value.len and value[i] in {'@', '-', ':', '+', '!'}:
-            if value[i] in {'+', '!'}:
-              return UnitReach(all: true, why: key & "=" & value &
-                " (a privileged command, outside the sandbox)")
-            inc i
-      of "RootDirectory", "RootImage":
-        if value.len > 0:
-          return UnitReach(all: true, why: key & "=")
-      of "StateDirectory", "CacheDirectory", "LogsDirectory",
-         "ReadWritePaths", "WorkingDirectory", "BindPaths",
-         "BindReadOnlyPaths":
-        for w in value.splitWhitespace():
-          var p = w
-          while p.len > 0 and p[0] in {'-', '+', '!'}: p = p[1 .. ^1]
-          if key in ["BindPaths", "BindReadOnlyPaths", "ReadWritePaths",
-                     "StateDirectory", "CacheDirectory", "LogsDirectory"]:
-            let c = p.find(':')
-            if c > 0: p = p[0 ..< c]
-          if p.len == 0: continue
-          if '%' in p or p.startsWith("~"):
-            return UnitReach(all: true, why: key & "=" & w &
-              " (a specifier: the path cannot be decided)")
-          if not p.startsWith("/"):
-            case key
-            of "StateDirectory": p = "/var/lib/" & p
-            of "CacheDirectory": p = "/var/cache/" & p
-            of "LogsDirectory": p = "/var/log/" & p
-            else:
-              return UnitReach(all: true, why: key & "=" & w)
-          result.paths.add(p)
-      else: discard
-  if not (strict or dynamic):
-    return UnitReach(all: true, why: "not confined (no ProtectSystem=strict " &
-      "or DynamicUser=yes): it can write anywhere")
+      if value == "\0":
+        return allReach("a line systemd would not read as a setting: " & key)
+      when CarriedMutation == "reach-default-allow":
+        # FALSIFYING MUTATION: what is not understood is allowed.
+        if section notin ["Service"] or (key notin SafeServiceKeys and
+            key notin WritePathKeys and key notin BindKeys and
+            key notin ExecKeys and key notin StdioKeys): continue
+      case section
+      of "Unit":
+        if key notin UnitSectionSafe and key notin UnitActivating and
+            not key.startsWith("Condition") and not key.startsWith("Assert"):
+          return allReach("[Unit] " & key & "= (not understood here)")
+      of "Install":
+        if key notin InstallSafe and key != "Also":
+          return allReach("[Install] " & key & "= (not understood here)")
+      of "Service":
+        if key notin SafeServiceKeys and key notin WritePathKeys and
+            key notin NarrowingPathKeys and key notin BindKeys and
+            key notin ExecKeys and key notin StdioKeys and
+            key notin ReachAllServiceKeys:
+          var dir = false
+          for (k, _) in DirectoryKeys:
+            if k == key: dir = true
+          if not dir:
+            return allReach("[Service] " & key & "= (not understood here)")
+        if key in ReachAllServiceKeys and value.len > 0:
+          return allReach(key & "=" & value)
+        case key
+        of "ProtectSystem": strict = value.toLowerAscii() == "strict"
+        of "DynamicUser": dynamic = truthy(value)
+        of "User": user = value
+        of "Group": group = value
+        of "SupplementaryGroups":
+          if value.len > 0:
+            return allReach("SupplementaryGroups=" & value &
+              " (a group's access is not judged here)")
+        of "AmbientCapabilities":
+          if value.len > 0:
+            return allReach("AmbientCapabilities=" & value)
+        of "PermissionsStartOnly":
+          when CarriedMutation != "reach-ignores-privileged-commands":
+            if truthy(value):
+              return allReach("PermissionsStartOnly=yes (its other " &
+                "commands run outside the sandbox)")
+        of "WorkingDirectory":
+          var w = value
+          if w.startsWith("-"): w = w[1 .. ^1]
+          if w.len > 0:
+            var ok: bool
+            let n = normalizeUnitPath(w, ok)
+            if not ok: return allReach("WorkingDirectory=" & value)
+            collected.paths.add(n)
+        else:
+          if key in ExecKeys:
+            let why = execReach(key, value)
+            if why.len > 0: return allReach(why)
+          elif key in StdioKeys:
+            let v = value
+            let c = v.find(':')
+            let kind = if c > 0: v[0 ..< c] else: v
+            if kind in ["file", "append", "truncate"]:
+              var ok: bool
+              let n = normalizeUnitPath(v[c + 1 .. ^1], ok)
+              if not ok: return allReach(key & "=" & v)
+              collected.paths.add(n)
+            elif kind != "fd" and v notin SafeStdio:
+              return allReach(key & "=" & v & " (not understood here)")
+          elif key in WritePathKeys or key in BindKeys or
+              key == "TemporaryFileSystem":
+            pathsOf(key, value, collected)
+            if collected.all: return collected
+          else:
+            for (k, base) in DirectoryKeys:
+              if k != key: continue
+              var ok: bool
+              let words = unitWords(value, ok)
+              if not ok: return allReach(key & "=" & value)
+              for w in words:
+                for part in w.split(':'):
+                  if part.len == 0: continue
+                  var okP: bool
+                  let n = normalizeUnitPath(base & "/" & part, okP)
+                  if not okP or part.startsWith("/"):
+                    return allReach(key & "=" & w)
+                  collected.paths.add(n)
+      of "Timer", "Path":
+        discard                     # judged by unitReach for those types
+      else:
+        return allReach("[" & section & "] (a section not understood here)")
+  # The account systemd will use (A13 review round 4, finding 1): its
+  # specifiers expanded, a static account of the name winning over
+  # DynamicUser=yes, uid aliases and group memberships resolved. What does
+  # not resolve reaches everything.
+  when CarriedMutation == "reach-default-allow":
+    if dynamic: return collected
+    if not strict:
+      return allReach("not confined")
+    return collected
+  let a = resolveServiceAccount(user, group, "", dynamic, name, lookup)
+  if not a.known:
+    return allReach("its account does not resolve: " & a.unknown.join("; "))
+  if a.userIsRoot:
+    return allReach("runs as root (" & a.user & "): ProtectSystem=strict " &
+      "does not hold root back (/proc/1/root)")
+  if a.groupIsRoot:
+    return allReach("holds the root group (" & a.group & ")")
+  if not a.dynamicUser and not strict:
+    return allReach("not confined (no ProtectSystem=strict, and no " &
+      "dynamic user): it can write anywhere")
+  collected
 
 proc activatedUnits(name, suffix: string; texts: seq[string]): seq[string] =
-  ## The units starting this one also starts: its requirement and want
-  ## dependencies, its failure and success handlers, and for a timer or a
-  ## path unit the unit it triggers (``Unit=``, else the service of the
-  ## same name). Ordering (``After=``/``Before=``) starts nothing.
+  ## The units starting this one also starts (``UnitActivating``, a
+  ## service's ``Sockets=``, ``[Install] Also=``), and for a timer or a path
+  ## unit the unit it triggers (``Unit=``, else the service of its name).
   var trigger = ""
   for t in texts:
     for (section, key, value) in unitDirectivesOf(t):
-      if section == "Unit" and key in ["Wants", "Requires", "Requisite",
-          "BindsTo", "Upholds", "OnFailure", "OnSuccess", "PartOf"]:
-        for w in value.splitWhitespace():
+      if (section == "Unit" and key in UnitActivating) or
+          (section == "Service" and key == "Sockets") or
+          (section == "Install" and key == "Also"):
+        var ok: bool
+        for w in unitWords(value, ok):
           if w notin result: result.add(w)
+        if not ok: result.add("<unparsed " & key & "=" & value & ">")
       elif section in ["Timer", "Path"] and key == "Unit":
         trigger = value.strip()
   if suffix in ["timer", "path"]:
@@ -566,59 +945,285 @@ proc activatedUnits(name, suffix: string; texts: seq[string]): seq[string] =
       trigger = name[0 ..< name.len - suffix.len] & "service"
     if trigger notin result: result.add(trigger)
 
-proc unitReach*(r: SystemResource; p: SystemProfile): UnitReach =
-  ## What a resource of the profile can reach (see the module header).
+const
+  UnitSearchPath = ["/etc/systemd/system.control",
+    "/run/systemd/system.control", "/run/systemd/transient",
+    "/run/systemd/generator.early", "/etc/systemd/system",
+    "/etc/systemd/system.attached", "/run/systemd/system",
+    "/run/systemd/system.attached", "/run/systemd/generator",
+    "/usr/local/lib/systemd/system", "/usr/lib/systemd/system",
+    "/lib/systemd/system", "/run/systemd/generator.late"]
+    ## The system manager's unit search path, highest priority first
+    ## (systemd.unit(5), "Unit File Load Path"; ``systemd-analyze
+    ## unit-paths``). ``/lib`` is a link to ``/usr/lib`` on a merged-/usr
+    ## base and a directory of its own elsewhere; both are read.
+  GenerationUnitDir = "/etc/systemd/system"
+    ## Where a generation writes a profile's units and drop-ins.
+
+proc dropInDirApplies(d, unit: string): bool =
+  ## Whether systemd reads drop-in directory ``d`` (``<name>.d``) for
+  ## ``unit``, or -- ``unit`` a template ``foo@.service`` -- for any of its
+  ## instances: the unit's own name, an instance's, the template's, a dashed
+  ## prefix (``foo-.service``) and the type-wide ``service.d``
+  ## (systemd.unit(5), "Description").
+  if not d.endsWith(".d"): return false
+  let n = d[0 ..< d.len - 2]
+  let dot = unit.rfind('.')
+  if dot <= 0: return false
+  let typ = unit[dot + 1 .. ^1]
+  if n == unit or n == typ: return true
+  if not n.endsWith("." & typ): return false
+  let nstem = n[0 ..< n.len - typ.len - 1]
+  let ustem = unit[0 ..< dot]
+  let at = ustem.find('@')
+  let prefix = if at >= 0: ustem[0 ..< at] else: ustem
+  if at >= 0:
+    # The template's directory, and for a template any instance's.
+    if nstem == prefix & "@": return true
+    if ustem.len == at + 1 and nstem.startsWith(prefix & "@"): return true
+  # Dashed prefixes: "a-b-c" reads "a-b-" and "a-".
+  if nstem.endsWith("-") and nstem.len > 1 and prefix.startsWith(nstem):
+    return true
+  false
+
+proc unitTexts(unit, base: string; p: SystemProfile; root: string;
+               why: var string): seq[string] =
+  ## What systemd reads for ``unit``: ``base`` (the profile's file), then
+  ## every drop-in that applies to it -- the profile's own (written as
+  ## ``50-repro-<name>.conf``) and the host's, from every directory of the
+  ## unit search path (unit-specific, template, dashed-prefix and type-wide
+  ## directories, generators', ``/run`` and ``/usr/lib`` alike) -- in one
+  ## order by file name, a name in a higher-priority directory replacing
+  ## the same name below it. Default-deny where the order is not certain:
+  ## ``why`` is set (the unit reaches everything) when a unit file of the
+  ## same name sits in a directory systemd reads before the generation's,
+  ## or when one drop-in name holds different bytes in two directories.
+  ## Left out, as the generation's own: the host's ``50-repro-*.conf`` in
+  ## the unit's directory under ``/etc/systemd/system`` (the switch writes
+  ## and removes those), and ``install-unit``'s requirement drop-in when it
+  ## holds exactly its bytes.
+  result = @[base]
+  var byName = initOrderedTable[string, string]()
+  var seen = initTable[string, string]()
+  for d in p.resources:
+    if d.kind == srkSystemdSystemDropIn and d.diUnit == unit:
+      let n = "50-repro-" & d.diName & ".conf"
+      byName[n] = d.diContent
+      seen[n] = d.diContent
+  when CarriedMutation != "reach-host-dropins-ignored":
+    var higher = true
+    for dir in UnitSearchPath:
+      let full = under(normalRoot(root), dir)
+      if dir == GenerationUnitDir: higher = false
+      if not dirExists(full): continue
+      if higher and (fileExists(full / unit) or symlinkExists(full / unit)):
+        why = "a unit file " & dir & "/" & unit & " takes precedence over " &
+          "the generation's"
+        return
+      for kind, e in walkDir(full, relative = true):
+        if kind notin {pcDir, pcLinkToDir} or not dropInDirApplies(e, unit):
+          continue
+        var files: seq[string]
+        for k2, f in walkDir(full / e, relative = true):
+          if f.endsWith(".conf"): files.add(f)
+        files.sort()
+        for f in files:
+          if dir == GenerationUnitDir and e == unit & ".d" and
+              f.startsWith("50-repro-"):
+            continue
+          var c = ""
+          try: c = readFile(full / e / f)
+          except IOError, OSError:
+            why = "the drop-in " & dir & "/" & e & "/" & f & " cannot be read"
+            return
+          if f == RestoreRequiredDropIn and c == restoreRequirementText():
+            continue
+          if f in seen:
+            if seen[f] != c:
+              why = "the drop-in name " & f & " holds different bytes in " &
+                "two directories (" & dir & "/" & e & ")"
+              return
+            continue
+          seen[f] = c
+          byName[f] = c
+  var names: seq[string]
+  for n in byName.keys: names.add(n)
+  when CarriedMutation != "reach-default-allow":
+    names.sort()
+  for n in names: result.add(byName[n])
+
+proc definedUnits(p: SystemProfile): HashSet[string] =
+  ## The units whose whole definition is in the profile.
+  for d in p.resources:
+    case d.kind
+    of srkSystemdSystemUnit:
+      if d.suCollision != "dropIn": result.incl(d.suName)
+    of srkSystemdSystemTimer: result.incl(d.stName)
+    else: discard
+
+proc triggersOutside(name, suffix: string; texts: seq[string];
+                     p: SystemProfile): string =
+  ## A unit it starts that the profile does not define, or "".
+  when CarriedMutation == "reach-trigger-units-reach-nothing":
+    return ""
+  let defined = definedUnits(p)
+  for u in activatedUnits(name, suffix, texts):
+    if u notin defined and not u.endsWith(".slice"):
+      return "it starts " & u & ", which the profile does not define"
+  ""
+
+proc timerOrPathReach(name, suffix: string; texts: seq[string];
+                      p: SystemProfile): UnitReach =
+  ## A timer reaches no path itself. A path unit reaches every path it
+  ## watches: with ``MakeDirectory=yes`` the manager creates them, as root,
+  ## outside any sandbox (systemd.path(5)), and a list is cheaper to judge
+  ## than that rule. A glob reaches the directory it is anchored in.
+  for t in texts:
+    for (section, key, value) in unitDirectivesOf(t):
+      let ok = case section
+        of "Unit": key in UnitSectionSafe or key in UnitActivating or
+                   key.startsWith("Condition") or key.startsWith("Assert")
+        of "Install": key in InstallSafe or key == "Also"
+        of "Timer": suffix == "timer" and (key in TimerSafe or key == "Unit")
+        of "Path": suffix == "path" and (key in PathSafe or key == "Unit")
+        else: false
+      if not ok or value == "\0":
+        return allReach("[" & section & "] " & key & "= (not understood here)")
+      when CarriedMutation != "reach-path-unit-paths-ignored":
+        if section == "Path" and key in PathWatchKeys and value.len > 0:
+          var v = value
+          let g = v.find({'*', '?', '['})
+          if g >= 0:
+            let slash = v.rfind('/', 0, g)
+            v = if slash > 0: v[0 ..< slash] else: "/"
+          var okP: bool
+          let n = normalizeUnitPath(v, okP)
+          if not okP: return allReach(key & "=" & value)
+          result.paths.add(n)
+  let why = triggersOutside(name, suffix, texts, p)
+  if why.len > 0: return allReach(why)
+
+proc tmpfilesReach(content: string): UnitReach =
+  ## Every path a tmpfiles.d line names (its path column and, for ``L``,
+  ## ``C`` and the like, an absolute argument), normalised
+  ## (https://www.freedesktop.org/software/systemd/man/latest/tmpfiles.d.html).
+  ## A line not understood reaches everything.
+  for raw in content.splitLines():
+    let t = raw.strip()
+    if t.len == 0 or t[0] == '#': continue
+    var ok: bool
+    let f = unitWords(t, ok)
+    if not ok or f.len < 2:
+      return allReach("tmpfiles line not understood: " & t)
+    for i in [1, 6]:
+      if i >= f.len: continue
+      let v = f[i]
+      if i == 6 and not v.startsWith("/"): continue
+      var okP: bool
+      let n = normalizeUnitPath(v, okP)
+      if not okP: return allReach("tmpfiles path not resolved here: " & t)
+      result.paths.add(n)
+
+proc unitReach*(r: SystemResource; p: SystemProfile; lookup: AccountLookup;
+                root = "/"): UnitReach =
+  ## What a resource of the profile can reach (see the module header),
+  ## reading the host under ``root`` for the drop-ins systemd will apply
+  ## and resolving accounts through ``lookup`` (``hostAccountLookup``).
+  ## Exhaustive over ``SystemResourceKind``, with no ``else``: a kind added
+  ## later does not compile here until it is classified.
+  when CarriedMutation == "reach-default-allow":
+    # FALSIFYING MUTATION: round 2's dispatch, only units judged.
+    if r.kind != srkSystemdSystemUnit: return UnitReach()
   case r.kind
   of srkSystemdSystemUnit:
     let ext = r.suName.rsplit('.', maxsplit = 1)
     let suffix = if ext.len == 2: ext[1] else: ""
     if suffix notin ["service", "timer", "target", "path", "slice"]:
-      return UnitReach(all: true, why: "a ." & suffix & " unit")
+      return allReach("a ." & suffix & " unit")
     when CarriedMutation != "reach-dropin-judged-alone":
       if r.suCollision == "dropIn":
-        # Installed as a drop-in over a unit some package ships: the
-        # unit's own file, which is not in the profile, still runs.
-        return UnitReach(all: true, why: "a drop-in over the distribution " &
-          "unit " & r.suName)
-    var texts: seq[string]
-    try: texts.add(renderedSystemUnitContent(r))
+        return allReach("a drop-in over the distribution unit " & r.suName)
+    var base = ""
+    try: base = renderedSystemUnitContent(r)
     except CatchableError as e:
-      return UnitReach(all: true, why: "unit cannot be rendered: " & e.msg)
-    for d in p.resources:
-      if d.kind == srkSystemdSystemDropIn and d.diUnit == r.suName:
-        texts.add(d.diContent)
-    # Starting this unit starts what it activates: a unit the profile does
-    # not define (a distribution unit, another package's) can reach
-    # anything, whatever this one is confined to. One the profile defines
-    # is judged on its own.
-    when CarriedMutation != "reach-trigger-units-reach-nothing":
-      var defined: HashSet[string]
-      for d in p.resources:
-        if d.kind == srkSystemdSystemUnit and d.suCollision != "dropIn":
-          defined.incl(d.suName)
-      for u in activatedUnits(r.suName, suffix, texts):
-        if u notin defined and not u.endsWith(".slice"):
-          return UnitReach(all: true, why: "it starts " & u &
-            ", which the profile does not define")
-    if suffix != "service":
-      # A timer, target, path or slice runs nothing itself; what it
-      # activates was judged above.
-      return UnitReach()
-    result = serviceReach(r.suName, texts)
-    for sd in r.suStateDirectories: result.paths.add(sd.path)
+      return allReach("unit cannot be rendered: " & e.msg)
+    # Every drop-in systemd will apply, in its order (``unitTexts``).
+    var why0 = ""
+    let texts = unitTexts(r.suName, base, p, root, why0)
+    if why0.len > 0: return allReach(why0)
+    let why = triggersOutside(r.suName, suffix, texts, p)
+    if why.len > 0: return allReach(why)
+    case suffix
+    of "service":
+      result = serviceReach(r.suName, texts, lookup)
+      if not result.all:
+        for sd in r.suStateDirectories: result.paths.add(sd.path)
+    of "timer", "path": result = timerOrPathReach(r.suName, suffix, texts, p)
+    else:
+      # A target or a slice runs nothing; what it starts was judged above,
+      # and any setting beyond [Unit]/[Install] is not understood.
+      for t in texts:
+        for (section, key, value) in unitDirectivesOf(t):
+          if section notin ["Unit", "Install"] or value == "\0":
+            return allReach("[" & section & "] " & key & "=")
+      result = UnitReach()
+  of srkSystemdSystemTimer:
+    # Read like any other unit file: its drop-ins too (A13 review round 4,
+    # finding 2).
+    var why0 = ""
+    let texts = when CarriedMutation == "reach-timer-dropins-unread":
+                  @[r.stContent]
+                else: unitTexts(r.stName, r.stContent, p, root, why0)
+    if why0.len > 0: return allReach(why0)
+    result = timerOrPathReach(r.stName, "timer", texts, p)
   of srkSystemdSystemDropIn:
-    # A drop-in over a distribution unit: the unit's own file is not in
-    # the profile, so what it can reach is not known here.
-    return UnitReach(all: true, why: "a drop-in for " & r.diUnit)
+    # A drop-in for a unit the profile defines is judged with that unit;
+    # one over a unit it does not define changes a file it cannot see.
+    if r.diUnit notin definedUnits(p):
+      result = allReach("a drop-in for " & r.diUnit &
+        ", which the profile does not define")
   of srkSystemdUnitState:
-    if r.usRunning:
-      return UnitReach(all: true, why: "a distribution unit started")
-  else: discard
-
-proc reaches(p, d: string): bool =
-  let a = p.strip(leading = false, chars = {'/'})
-  let b = d.strip(leading = false, chars = {'/'})
-  a == b or (b & "/").startsWith(a & "/") or (a & "/").startsWith(b & "/")
+    result = allReach("it enables, starts or stops " & r.usName &
+      ", a unit the profile does not define")
+  of srkFsSystemFile:
+    var ok: bool
+    let n = normalizeUnitPath(r.sfPath, ok)
+    result = if ok: UnitReach(paths: @[n]) else: allReach("path " & r.sfPath)
+  of srkFsSystemDirectory:
+    var ok: bool
+    let n = normalizeUnitPath(r.dirPath, ok)
+    result = if ok: UnitReach(paths: @[n]) else: allReach("path " & r.dirPath)
+  of srkPasswdUser:
+    let home = if r.puHome.len > 0: r.puHome else: "/home/" & r.puName
+    var ok: bool
+    let n = normalizeUnitPath(home, ok)
+    result = if ok: UnitReach(paths: @[n]) else: allReach("home " & home)
+  of srkLinuxTmpfilesRule:
+    result = tmpfilesReach(r.tmpfilesContent)
+  of srkLinuxDpkgDiversion:
+    var ok: bool
+    let n = normalizeUnitPath(r.ddPath, ok)
+    result = if ok: UnitReach(paths: @[n, n & ".distrib"])
+             else: allReach("diversion " & r.ddPath)
+  of srkLinuxSysusersEntry, srkOsTimezone, srkOsHostname, srkLinuxSysctl,
+     srkLinuxFirewallRule, srkLinuxAddOnTool:
+    # Each writes only its own fixed place: an account or group entry
+    # (sysusers does not create a home), /etc/localtime, /etc/hostname, a
+    # sysctl.d file, a firewall rule, a wrapper in /etc/repro/bin.
+    result = UnitReach()
+  of srkEnvSystemVariable, srkLinuxUdevRule, srkLinuxPolkitRule,
+     srkLinuxSudoersRule, srkPasswdGroup, srkLinuxNixDaemonSetting,
+     srkLinuxNixosSystemModule, srkLinuxFhsSandbox:
+    # An environment every process inherits, a rule that runs commands as
+    # root or grants privileges, a group membership, a daemon or a system
+    # module: what they let run is not judged here.
+    result = allReach("a " & $r.kind & " resource (what it lets run is " &
+      "not judged here)")
+  of srkWindowsRegistryValue, srkWindowsOptionalFeature, srkWindowsCapability,
+     srkWindowsService, srkWindowsScheduledTask, srkWindowsVsInstaller,
+     srkWindowsFirewallRule, srkWindowsAcl, srkMacosSystemDefault,
+     srkLaunchdSystemDaemon, srkMacosDarwinSystemModule:
+    result = allReach("a " & $r.kind & " resource on a Linux host")
 
 # ---------------------------------------------------------------------------
 # Owners.
@@ -725,7 +1330,13 @@ proc carriedStateRefusal*(p: SystemProfile; dir = CarriedStateDir;
       return "ECarriedStatePending: a state backup holds " & held.join(", ") &
         " on this host (spec §11.1); nothing is applied until it is " &
         "released (`repro system addon state release --profile <file>`)"
-  if not fileExists(dir / ManifestFileName): return ""
+  if not fileExists(dir / ManifestFileName):
+    when CarriedMutation != "missing-manifest-allowed":
+      if fileExists(installedMarkerPath(dir)):
+        return "ECarriedStatePending: carried state was installed at " & dir &
+          " (" & installedMarkerPath(dir) & "), but its manifest is " &
+          "missing; nothing is applied until it is back"
+    return ""
   var pending: seq[ManifestEntry]
   var m: StateManifest
   try:
@@ -736,8 +1347,9 @@ proc carriedStateRefusal*(p: SystemProfile; dir = CarriedStateDir;
       " cannot be read: " & e.msg
   var hits: seq[string]
   var reached = initHashSet[string]()
+  let lookup = hostAccountLookup(root, p)
   for r in p.resources:
-    let reach = unitReach(r, p)
+    let reach = unitReach(r, p, lookup, root)
     let label = r.address
     for e in m.entries:
       if e.disposition != sdCarry: continue
@@ -773,6 +1385,73 @@ proc carriedStateRefusal*(p: SystemProfile; dir = CarriedStateDir;
     return "ECarriedStatePending: the carried state's owners would not " &
       "match: " & owners.join("; ")
   ""
+
+proc carriedStateInstalled*(dir = CarriedStateDir): bool =
+  ## Whether ``install-unit`` installed carried state at ``dir`` (its
+  ## marker) and the manifest is there: when the generation's restore
+  ## requirements apply.
+  fileExists(installedMarkerPath(dir)) and fileExists(dir / ManifestFileName)
+
+proc carriedRequirementUnits*(p: SystemProfile; dir = CarriedStateDir;
+                              root = "/"): seq[string] =
+  ## The units of ``p`` that must require the first-boot restore: while
+  ## carried state is installed at ``dir`` (``install-unit`` left its marker
+  ## and the manifest is there), every unit whose reach includes a carried
+  ## directory -- by path or because it reaches everything -- whatever its
+  ## name and whether or not the manifest names it (A13 review round 4,
+  ## finding 4). Sorted; empty when no carried state is installed.
+  when CarriedMutation == "restore-requirement-by-manifest-only":
+    return
+  if not carriedStateInstalled(dir):
+    return
+  let m = readStateManifest(dir)
+  let lookup = hostAccountLookup(root, p)
+  var units = initHashSet[string]()
+  for r in p.resources:
+    let u = case r.kind
+      of srkSystemdSystemUnit: r.suName
+      of srkSystemdSystemTimer: r.stName
+      of srkSystemdSystemDropIn: r.diUnit
+      else: ""
+    if u.len == 0 or u == CarriedRestoreUnit: continue
+    let reach = unitReach(r, p, lookup, root)
+    for e in m.entries:
+      if e.disposition != sdCarry: continue
+      var hit = reach.all
+      for q in reach.paths:
+        if reaches(q, e.path): hit = true
+      if hit: units.incl(u)
+  for u in units: result.add(u)
+  result.sort()
+
+proc carriedRequirementText*(p: SystemProfile; dir = CarriedStateDir;
+                             root = "/"): string =
+  ## The ``systemd.systemDropIn`` resources (profile text) a generation adds
+  ## for ``carriedRequirementUnits``: ``RequirementDropInName``, holding
+  ## ``restoreRequirementText``. Generation content like any other drop-in:
+  ## written, recorded and removed by the switch, and judged by the add-on's
+  ## effective-unit check. A unit whose drop-in of that name the profile
+  ## already declares keeps the profile's.
+  var declared = initHashSet[string]()
+  for r in p.resources:
+    if r.kind == srkSystemdSystemDropIn and r.diName == RequirementDropInName:
+      declared.incl(r.diUnit)
+  for u in carriedRequirementUnits(p, dir, root):
+    if u in declared: continue
+    result.add("\nsystemd.systemDropIn {\n  unit = \"" & u & "\"\n" &
+      "  name = \"" & RequirementDropInName & "\"\n" &
+      "  content = \"" & restoreRequirementText() & "\"\n}\n")
+
+proc withCarriedRequirements*(profileText: string; dir = CarriedStateDir;
+                              root = "/"): string =
+  ## ``profileText`` with ``carriedRequirementText`` appended: what every
+  ## apply (``runInfraApply``, ``runAddonApply``) and ``repro infra plan``
+  ## apply instead of the text they were given, so the boot guarantee of
+  ## spec §11.1 follows reach at every apply rather than the names
+  ## ``install-unit`` wrote once.
+  if not carriedStateInstalled(dir): return profileText
+  profileText & carriedRequirementText(parseSystemProfile(profileText), dir,
+                                       root)
 
 proc requireCarriedStateReady*(p: SystemProfile; dir = CarriedStateDir;
                                root = "/") =
