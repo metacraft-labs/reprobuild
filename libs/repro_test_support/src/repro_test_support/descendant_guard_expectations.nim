@@ -1,69 +1,41 @@
-## Test-only subsystem control for platforms without a complete tree-lifetime
-## guard. Validate the real capture's fail-closed verdict and exactly one
-## platform marker before removing that marker from a separate in-memory view.
-## Every other record, including any other loss, survives. Callers must keep
-## using the original capture for product verdicts and raw evidence comparisons.
+## Test-only view of a capture for suites that grade one subsystem. It used to
+## remove exactly one diagnostic, the platform-wide "macos backend has no
+## complete tree-lifetime guard" limitation, so that subsystem suites could
+## grade what they test on a platform where every capture carried it.
 ##
-## The limitation itself is normative, not a defect to wait out: io-mon's
-## `docs/usage.md` ("macOS limitation (normative)", introduced by io-mon
-## 57ce305) requires every finished macOS capture to carry the marker below,
-## to grade `mcIncomplete`, and offers no override. The engine therefore never
-## publishes a monitored edge's record on macOS and re-runs it on every build.
-## Suites whose assertions depend on publication or reuse branch on
-## `NoTreeLifetimeGuard` instead of each spelling its own `when defined(...)`,
-## so the platform set lives here once, next to the marker it is derived from.
+## No platform carries that limitation any more. Linux proves detached-
+## descendant quiescence with its subreaper, Windows with its Job Object guard
+## (reprobuild-pm spec/io-mon-Windows-Tree-Lifetime-Guard.md), and macOS, from
+## io-mon 3d47bb1 (G42) on, with its kernel census and tree ledger (io-mon
+## `docs/usage.md`, "The macOS tree-lifetime guard (normative)"). A healthy
+## macOS capture is now complete and its edge is published, as on Linux, and a
+## capture whose descendant does survive the root is still a loss. This module
+## therefore removes NOTHING on any platform: a suite that grades through it
+## asserts the real completeness. The retired marker is deliberately not
+## recognised, so one that ever reappeared would fail the suites that expect a
+## healthy fixture instead of being filtered out.
 ##
-## WINDOWS IS NOT IN THE SET. io-mon proves Windows tree quiescence with a Job
-## Object (io-mon `docs/usage.md`, "The Windows tree-lifetime guard
-## (normative)"; reprobuild-pm spec/io-mon-Windows-Tree-Lifetime-Guard.md), so
-## a healthy Windows capture is complete and its edge is published, exactly as
-## on Linux. On Windows this module removes nothing: the retired Windows
-## marker, or any Windows guard loss, keeps a capture incomplete and fails the
-## suites that expect a healthy fixture.
-import std/strutils
+## `NoTreeLifetimeGuard` stays as the single switch the suites branch on, so a
+## future platform without a guard is added here once.
 import io_mon
 
-const NoTreeLifetimeGuard* = defined(macosx)
+const NoTreeLifetimeGuard* = false
   ## True where io-mon cannot prove detached-descendant quiescence, so every
   ## monitored capture fails closed and no monitored edge is ever published.
-  ## A plain `bool` constant rather than a `when` symbol, so a caller can
-  ## branch with an ordinary `if` and BOTH arms still compile (and are
-  ## `nim check`ed) on every host.
+  ## No platform is in that set (see above). A plain `bool` constant rather
+  ## than a `when` symbol, so a caller can branch with an ordinary `if` and
+  ## BOTH arms still compile (and are `nim check`ed) on every host.
 
-# The exact detail io-mon writes for the platform limitation, up to the
-# `run=<id>` suffix. Empty where the limitation does not apply, which
-# `isTreeLifetimeLimitation` turns into "never matches".
-const TreeLifetimeLimitationPrefix* =
-  when defined(macosx):
-    "detached-descendant quiescence cannot be established: " &
-      "macos backend has no complete tree-lifetime guard run="
-  else:
-    ""
+const TreeLifetimeLimitationPrefix* = ""
+  ## The detail io-mon wrote for the platform limitation. Empty: no platform
+  ## writes it, and `isTreeLifetimeLimitation` turns empty into "never
+  ## matches".
 
 proc isTreeLifetimeLimitation*(detail: string): bool =
-  ## Is `detail` exactly this platform's tree-lifetime marker: the prefix, a
-  ## non-empty run id, and nothing after it? Anything looser would let an
-  ## unrelated loss that merely mentions the phrase pass as the expected one.
-  if TreeLifetimeLimitationPrefix.len == 0 or
-      not detail.startsWith(TreeLifetimeLimitationPrefix):
-    return false
-  let runId = detail[TreeLifetimeLimitationPrefix.len .. ^1]
-  runId.len > 0 and runId.find({' ', '\t', '\r', '\n'}) < 0
+  ## Never true: no platform carries the limitation (see the module header).
+  ## A detail that merely mentions the phrase is an ordinary loss.
+  TreeLifetimeLimitationPrefix.len > 0 and false
 
 proc descendantSubsystemEvidence*(dep: MonitorDepFile): MonitorDepFile =
-  when NoTreeLifetimeGuard:
-    doAssert dep.completeness == mcIncomplete,
-      "real capture must fail closed without a complete tree-lifetime guard"
-    var records: seq[MonitorRecord]
-    var limitations = 0
-    for record in dep.records:
-      if record.kind == mrEventLoss and record.observationKind == moEventLoss and
-          record.detail.isTreeLifetimeLimitation:
-        inc limitations
-        continue
-      records.add record
-    doAssert limitations == 1,
-      "capture must carry exactly one explicit platform tree-lifetime limitation"
-    result = depFileFromRecords(records)
-  else:
-    result = dep
+  ## The capture itself, unchanged on every platform.
+  dep
