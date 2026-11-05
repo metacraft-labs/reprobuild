@@ -41583,24 +41583,6 @@
       "targetOs": "soAny"
     },
     {
-      "binary": "build/test-bin/t_hooks_ensure_removes_retired_repo_workspaces_dispatcher",
-      "class": "integration",
-      "classificationReason": "e2e/integration path or requires the repro binary",
-      "defines": [],
-      "language": "nim",
-      "localDependencyShape": [
-        "repro_cli_support",
-        "repro_test_support"
-      ],
-      "owner": "tests/integration",
-      "requiresReproBinary": true,
-      "source": "tests/integration/t_hooks_ensure_removes_retired_repo_workspaces_dispatcher.nim",
-      "sourceSuiteCount": 1,
-      "staticCaseCount": 16,
-      "staticallyDetectedRuntimeCompilerFlow": false,
-      "targetOs": "soAny"
-    },
-    {
       "binary": "build/test-bin/t_hooks_ensure_restores_dispatcher_displaced_by_prek",
       "class": "integration",
       "classificationReason": "e2e/integration path or requires the repro binary",
@@ -41635,6 +41617,23 @@
       "source": "tests/integration/t_hooks_noop_outside_initialized_workspace.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 7,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_hooks_record_store_cleanup_preserves_chained_user_hook",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_test_support"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_hooks_record_store_cleanup_preserves_chained_user_hook.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

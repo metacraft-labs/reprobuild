@@ -20298,8 +20298,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "t_group_tests_integration_g05",
     singleReason: ""),
   TestSpec(
-    source: "tests/integration/t_hooks_ensure_removes_retired_repo_workspaces_dispatcher.nim",
-    binary: "build/test-bin/t_hooks_ensure_removes_retired_repo_workspaces_dispatcher",
+    source: "tests/integration/t_hooks_ensure_restores_dispatcher_displaced_by_prek.nim",
+    binary: "build/test-bin/t_hooks_ensure_restores_dispatcher_displaced_by_prek",
     defines: @[],
     requiresReproBinary: true,
     extraPassC: @[],
@@ -20309,8 +20309,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "t_group_tests_integration_g05",
     singleReason: ""),
   TestSpec(
-    source: "tests/integration/t_hooks_ensure_restores_dispatcher_displaced_by_prek.nim",
-    binary: "build/test-bin/t_hooks_ensure_restores_dispatcher_displaced_by_prek",
+    source: "tests/integration/t_hooks_noop_outside_initialized_workspace.nim",
+    binary: "build/test-bin/t_hooks_noop_outside_initialized_workspace",
     defines: @[],
     requiresReproBinary: true,
     extraPassC: @[],
@@ -20320,8 +20320,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "t_group_tests_integration_g06",
     singleReason: ""),
   TestSpec(
-    source: "tests/integration/t_hooks_noop_outside_initialized_workspace.nim",
-    binary: "build/test-bin/t_hooks_noop_outside_initialized_workspace",
+    source: "tests/integration/t_hooks_record_store_cleanup_preserves_chained_user_hook.nim",
+    binary: "build/test-bin/t_hooks_record_store_cleanup_preserves_chained_user_hook",
     defines: @[],
     requiresReproBinary: true,
     extraPassC: @[],
