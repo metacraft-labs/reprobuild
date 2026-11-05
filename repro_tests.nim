@@ -487,6 +487,17 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "",
     singleReason: "module-level statement runs at every start-up: let plain = unitStanza(\"a.service\", \"User=a\\nExecStart=\" & P..."),
   TestSpec(
+    source: "libs/repro_addon/tests/t_addon_floor_round5.nim",
+    binary: "build/test-bin/t_addon_floor_round5",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "",
+    singleReason: "module-level statement runs at every start-up: let plain = unitStanza(\"a.service\", svc)"),
+  TestSpec(
     source: "libs/repro_addon/tests/t_addon_generation_attestation.nim",
     binary: "build/test-bin/t_addon_generation_attestation",
     defines: @[],

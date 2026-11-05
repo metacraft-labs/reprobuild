@@ -224,7 +224,13 @@ proc bootstrapWithAgent*(g: Guest; repro: string; step: StepFn;
   step("bootstrap with the deploy agent", boot.exitCode == 0,
        boot.stdout & boot.stderr)
   if boot.exitCode != 0: return
-  # The timer must not race the gate's own ticks.
+  # The timer must not race the gate's own ticks. Stopping it once was not
+  # enough: a later switch re-arms it (the apply's step 7), and its own
+  # cycle then applied the gate's newest sequence before the gate's tick
+  # ran ("tick 11 ... already converged", A9 review round 5, finding 6).
+  # `tickUnits` stops it again at each tick's end, and refuses a cycle the
+  # timer ran since. (Not a mask: the add-on observes its own unit files
+  # and refuses to write over a mask.)
   discard g.exec("systemctl stop repro-agent-fetch.timer")
   result.ok = true
 
@@ -284,6 +290,20 @@ proc tickUnits*(g: Guest; timeoutSec = 1800): TickResult =
       "systemctl list-jobs --no-legend 2>/dev/null | grep -q 'repro-agent-' " &
       "&& busy=1; " &
       "[ $busy = 0 ] && break; sleep 1; done", timeoutSec + 30)
+  # A cycle the fetch timer ran since the previous tick would have applied
+  # what the caller published, and this tick would observe "already
+  # converged": the gate's own cycle must be the only one (A9 review round
+  # 5, finding 6). The timer's last trigger is
+  # compared with the one recorded at the previous tick's end, when this
+  # helper stopped it again.
+  var timerFired = ""
+  if variant != "tick-trusts-the-timer":
+    let trig = g.run("systemctl show -p LastTriggerUSecMonotonic --value " &
+                     "repro-agent-fetch.timer 2>/dev/null; true").strip()
+    let prev = g.exec("cat /root/addon/tick-timer-trigger 2>/dev/null").stdout.strip()
+    if prev.len > 0 and trig != prev:
+      timerFired = "repro-agent-fetch.timer triggered (last trigger " &
+        trig & " us monotonic, " & prev & " at the previous tick's end)"
   discard g.exec("rm -f " & TickStatus)
   let since = g.run("date +%s").strip()
   # The apply unit's invocation before this tick, so a failure left over
@@ -335,6 +355,11 @@ proc tickUnits*(g: Guest; timeoutSec = 1800): TickResult =
     "sleep 1; done", timeoutSec + 30)
   result.applyLog = g.exec("journalctl -q -o cat --since @" & since &
     " -u repro-agent-apply.service").stdout
+  # The apply may have re-armed the timer: stop it again, and record its
+  # last trigger for the next tick's check.
+  discard g.exec("systemctl stop repro-agent-fetch.timer 2>/dev/null; " &
+    "systemctl show -p LastTriggerUSecMonotonic --value " &
+    "repro-agent-fetch.timer > /root/addon/tick-timer-trigger 2>/dev/null; true")
   let st = g.exec("cat " & TickStatus)
   if st.exitCode != 0:
     result.outcome = "no-record"
@@ -346,6 +371,13 @@ proc tickUnits*(g: Guest; timeoutSec = 1800): TickResult =
   result.message = j["message"].getStr
   result.errorCode = j["errorCode"].getStr
   result.sequence = j["sequence"].getInt
+  if timerFired.len > 0 and result.outcome == "aoConverged":
+    # The timer's own cycle ran since the previous tick and applied what
+    # the caller published: this tick saw that cycle's result, not its
+    # own. A named failure, never a pass (round 5, finding 6).
+    result.outcome = "timer-cycle-intervened"
+    result.message = timerFired & ": a cycle the gate did not start ran " &
+      "in between and applied this tick's sequence\n" & result.message
 
 proc `$`*(t: TickResult): string =
   t.outcome & " (exit " & $t.exitCode & ", " & t.errorCode & ") seq " &

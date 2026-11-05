@@ -139,7 +139,25 @@ proc cases(binary, prefix: string): seq[Case] =
          probes: "a9e-ti@1.service a9e-ti@2.service",
          extra: dropIn("a9e-ti@1.service", "[Service]\nEnvironment=A9E=1\n"),
          host: hostDropIn(etc & "a9e-ti@2.service.d",
-                          "[Service]\nDynamicUser=no\nUser=\nNoExecPaths=\n"))]
+                          "[Service]\nDynamicUser=no\nUser=\nNoExecPaths=\n")),
+    # Review round 5.
+    Case(name: "a9e-envwild.service", service: "EnvironmentFile=/etc/*/a9e.env\n"),
+    Case(name: "a9e-envstate.service",
+         service: "StateDirectory=a9e-envs\nEnvironmentFile=-/var/lib/a9e-envs/env\n"),
+    Case(name: "a9e-rt.service",
+         service: "CPUSchedulingPolicy=fifo\nCPUSchedulingPriority=10\n"),
+    Case(name: "a9e-fail.service", service: "FailureAction=reboot-force\n"),
+    Case(name: "a9e-memlock.service", service: "LimitMEMLOCK=infinity\n"),
+    Case(name: "a9e-sockets.service", service: "Sockets=dbus.socket\n"),
+    Case(name: "a9e-special.service", service: "",
+         extra: "systemd.systemUnit {\n  name = \"a9e-special.socket\"\n" &
+                "  content = \"[Socket]\nListenSpecial=/etc/a9e-target\n" &
+                "Writable=yes\n\n[Install]\nWantedBy=sockets.target\n\"\n" &
+                "  enabled = true\n}\n"),
+    Case(name: "a9e-shade.service", service: "User=a9s\n",
+         host: "getent group shade >/dev/null || groupadd -o -g " &
+               "$(getent group shadow | cut -d: -f3) shade; id a9s >/dev/null " &
+               "2>&1 || useradd -r -M -s /usr/sbin/nologin -G shade a9s")]
 
 proc invocation(g: Guest; unit: string): string =
   g.exec("systemctl show -p InvocationID --value " & unit).stdout.strip()
