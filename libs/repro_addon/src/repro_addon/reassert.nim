@@ -53,6 +53,7 @@ import ./ledger
 import ./mutations
 import ./pending_plan
 import ./static_tree
+import ./store_root
 import ./seams
 import ./addon_secrets
 import ./secrets_ops
@@ -316,9 +317,15 @@ proc checkCurrent*(stateDir: string; r: var ReassertReport) =
     r.findings.add("degraded: the ledger copy describes " & l.generation &
       ", not the current generation " & current)
     r.status = "degraded"
+  let quarantined = readStoreQuarantine()
   for e in l.entries:
     if e.class == lcStorePrefix and not dirExists(e.path):
       r.findings.add("degraded: store object " & e.path & " is missing")
+      r.status = "degraded"
+    elif e.class == lcStorePrefix and e.path in quarantined:
+      # Spec §13 decision 46: verification found its bytes altered.
+      r.findings.add("degraded: store object " & e.path & " is quarantined " &
+        "(its bytes differed from its realisation digest)")
       r.status = "degraded"
     if e.class == lcStaticLink:
       let target = readStaticTarget()

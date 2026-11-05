@@ -18,8 +18,11 @@
 ## 4. **Uninstall removes it.** After uninstall the table is gone and the
 ##    fingerprint equals the pre-bootstrap one.
 ##
-## Falsifying mutation (``REPRO_ADDON_MUTATION=egress-observer-not-installed``):
-## the observer unit never loads the table: steps 2 and 3 go red.
+## Falsifying mutations: ``egress-observer-not-installed`` (the observer
+## unit never loads the table: steps 2 and 3 go red);
+## ``evidence-path-rate-limited`` (the burst step: the path unit dies on the
+## start limit, A11 audit F2); ``uninstall-keeps-fetch-state`` (the
+## fetch unit's state directory survives uninstall, A11 audit F5).
 ##
 ## Seam build (the fetch unit's pause). Opt-in: ``REPRO_ADDON_VM_GATES=1``.
 ##
@@ -32,6 +35,7 @@ import repro_test_support/reasoned_skip
 import ./addon_testbed
 import ./agent_e2e_support
 import ./evidence_e2e_support
+import repro_peer_cache/evidence
 
 const Gate = "e2e_addon_egress_observer"
 
@@ -87,11 +91,39 @@ proc body(g: Guest; repro: string; step: StepFn; record: JsonNode;
   step("the DET-AO-3 record reached the sink",
        sink.waitFor(host, "addon-egress", "egress-refused", 180, since = since),
        g.exec("journalctl -q -o cat -u repro-addon-egress-check.service | tail -20").stdout)
+  # 3b. A burst of records (A11 audit F2): thirty refused destinations from
+  # the fetch slice make the check write thirty records at once. The path
+  # unit must survive the burst and ship them within a minute.
+  let burstSince = sink.headSeq()
+  discard g.exec("systemd-run --wait --quiet --slice=" & "system-reproagent.slice" &
+    " -p DynamicUser=yes -p IPAddressDeny=any -p IPAddressAllow=10.0.2.2 " &
+    "/bin/bash -c 'for i in $(seq 20 49); do timeout 1 bash -c " &
+    "\"exec 3<>/dev/tcp/198.51.100.$i/443\" 2>/dev/null; done; true'",
+    timeoutSec = 300)
+  discard g.exec("systemctl start repro-addon-egress-check.service")
+  var arrived = 0
+  for _ in 0 ..< 30:
+    arrived = 0
+    for e in sink.entries():
+      if e.seq > burstSince and e.kind == ekRecord and
+          e.record.trigger == "egress-refused" and
+          e.record.field("destination").startsWith("198.51.100."): inc arrived
+    if arrived >= 30: break
+    sleep(2000)
+  let pathState = g.exec("systemctl is-failed repro-addon-evidence.path").stdout.strip()
+  record["burst"] = %*{"arrived": arrived, "pathUnit": pathState}
+  step("a burst of thirty records leaves within a minute, the path unit alive",
+       arrived >= 30 and pathState != "failed", $arrived & " arrived; path " &
+       pathState)
   # 4. Uninstall removes it.
   let un = g.exec(repro & " system addon uninstall", timeoutSec = 1800)
   step("uninstall succeeds", un.exitCode == 0, un.stdout & un.stderr)
   let after = g.exec("nft list tables").stdout
   step("the table is gone", "repro_addon_egress" notin after, after)
+  let leftover = g.exec("ls -d /var/lib/private/repro-agent-fetch " &
+    "/var/lib/repro-agent-fetch 2>/dev/null").stdout.strip()
+  step("the fetch unit's state directory is gone (A11 audit F5)",
+       leftover.len == 0, leftover)
   # The one enumerated exception (spec §6.4): the kernel's packet-logger
   # bindings the table's log statement loaded stay after the table is gone.
   let id = identityReport(f0, g.takeFingerprint(repro),

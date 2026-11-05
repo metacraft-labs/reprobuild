@@ -11,7 +11,8 @@
 ## address is sent from it, and the table's set read back as JSON. Nothing
 ## outside the namespace is touched.
 ##
-## Falsifying build: ``egress-observer-not-installed`` -- the observer unit
+## Falsifying builds: ``egress-state-survives-reload`` (the reload step);
+## ``egress-observer-not-installed`` -- the observer unit
 ## never loads the table; the unit step goes red.
 ##
 ## Mocks: none.
@@ -63,6 +64,13 @@ suite "the egress observer's table":
     check a.len == 1
     check freshSince(@[("192.0.2.7", 1'i64)], st).len == 0
     check freshSince(@[("192.0.2.7", 3'i64)], st).len == 1
+
+  test "after a table reload a refused destination is reported again (F3)":
+    let st = root / "state-reload"
+    check freshSince(@[("192.0.2.10", 3'i64)], st, "7").len == 1
+    check freshSince(@[("192.0.2.10", 3'i64)], st, "7").len == 0
+    # Reloaded (a new handle): its counters start at zero.
+    check freshSince(@[("192.0.2.10", 2'i64)], st, "9").len == 1
 
   test "a fresh destination is a DET-AO-3 detection; a missing table too":
     writeFile(root / "evidence.conf", "sink = 127.0.0.1:1\n")

@@ -271,3 +271,27 @@ proc generationRoots*(): seq[string] =
   for r in s.listRoots():
     if r.rootId.startsWith(RootIdPrefix) and r.kind == $rkProfile:
       result.add(r.rootId[RootIdPrefix.len .. ^1])
+
+# ---------------------------------------------------------------------------
+# The store quarantine (spec §13 decision 46, DET-AO-5).
+# ---------------------------------------------------------------------------
+
+proc readStoreQuarantine*(path = StoreQuarantinePath): seq[string] =
+  ## Store paths verification found altered; none is used by a switch again.
+  try:
+    for l in readFile(path).splitLines():
+      let p = l.strip()
+      if p.len > 0 and p notin result: result.add(p)
+  except IOError, OSError:
+    discard
+
+proc quarantineStorePath*(storePath: string; path = StoreQuarantinePath) =
+  ## Add ``storePath`` (no-op when it is there already); the file is
+  ## rewritten whole, by rename.
+  var q = readStoreQuarantine(path)
+  if storePath in q: return
+  q.add(storePath)
+  createDir(parentDir(path))
+  writeFile(path & ".tmp", q.join("\n") & "\n")
+  setFilePermissions(path & ".tmp", {fpUserRead, fpUserWrite})
+  moveFile(path & ".tmp", path)

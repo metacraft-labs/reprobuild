@@ -8,7 +8,8 @@
 ##   none of these objects and keeps its generation 0 byte for byte.
 ## * Every tick outcome that threat model §9 names maps to its detector.
 ##
-## Falsifying builds: ``evidence-ship-unrestricted-egress`` and
+## Falsifying builds: ``evidence-path-rate-limited`` (the burst step),
+## ``evidence-ship-unrestricted-egress`` and
 ## ``evidence-ship-sees-agent-keys`` (the confinement steps go red),
 ## ``tick-records-no-detection`` (the tick's detection is not written: the
 ## record step goes red).
@@ -58,6 +59,14 @@ suite "generation 0 with an Evidence sink":
       if line.startsWith("ReadWritePaths="):
         check line == "ReadWritePaths=" & EvidenceStateDir & " " &
           EvidenceOutboxPath
+  test "a burst of records cannot rate-limit the shipping units (F2)":
+    check "StartLimitIntervalSec=0\n" in evidenceShipUnit(Exe, ev)
+    check "TriggerLimitIntervalSec=0\n" in evidenceShipPathUnit()
+  test "the store verification runs after boot, idle, bounded":
+    let u = storeVerifyUnit(Exe)
+    check "IOSchedulingClass=idle\n" in u
+    check "PrivateNetwork=yes\n" in u
+    check "OnBootSec=2min\n" in storeVerifyTimer()
   test "the path unit watches the outbox; the timer heartbeats":
     check ("PathChanged=" & EvidenceOutboxPath) in evidenceShipPathUnit()
     check ("Unit=" & EvidenceShipUnit) in evidenceShipPathUnit()

@@ -447,10 +447,14 @@ proc storeSignature*(dir: string): string =
 proc storeChangedSince*(realised: openArray[tuple[path, signature: string]]):
     seq[string] =
   ## The store objects whose ``storeSignature`` differs from the one
-  ## recorded, or that are gone.
+  ## recorded, or that are gone -- or that store verification quarantined
+  ## (spec §13 decision 46: no switch uses an altered path again).
+  let quarantined = readStoreQuarantine()
   for (path, sig) in realised:
     let now = if dirExists(path): storeSignature(path) else: "(gone)"
     if now != sig: result.add(path)
+    elif path in quarantined: result.add(path & " (quarantined: its bytes " &
+      "differed from its realisation digest)")
 
 proc storeObjectFor*(path: string): string =
   ## The store object a path lies in: a prefix

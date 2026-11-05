@@ -503,6 +503,23 @@
 ## ``evidence-keys-adopted``                  creating the evidence keys
 ##                                            does not refuse keys that
 ##                                            are already there
+## ``reassert-skips-digest-check``            the store verification after
+##                                            boot compares no digest
+## ``lag-from-newest-copy``                   DET-AO-10 counts a host's lag
+##                                            from the newest re-signed copy
+## ``evidence-path-rate-limited``             the shipping units keep the
+##                                            default start/trigger limits
+## ``check-ignores-ship-delay``               the check reads a stalled
+##                                            shipping unit as live
+## ``egress-state-survives-reload``           egress counts are compared
+##                                            across a table reload
+## ``check-status-ignores-silence``           a detector's status is
+##                                            live-idle beside its silence
+##                                            alert
+## ``check-forgets-enrolled-key``             the check ignores the hosts
+##                                            file's enrolled key
+## ``uninstall-keeps-fetch-state``            uninstall leaves the fetch
+##                                            unit's state directory
 ## =========================================  ==============================
 
 # The deploy agent's own mutations (``repro_deploy_agent/agent_mutations``)
@@ -782,7 +799,26 @@ const
                           "egress-observer-not-installed",
                           # Owner decision 2026-11-04 (evidence-enrol): keys
                           # already on the host are not looked for.
-                          "evidence-keys-adopted"]
+                          "evidence-keys-adopted",
+                          # Owner decision 2026-11-05 (G41): the store
+                          # verification compares no digest.
+                          "reassert-skips-digest-check",
+                          # A11 audit F1: lag counted from the newest copy.
+                          "lag-from-newest-copy",
+                          # A11 audit F2: the shipping units rate-limited as
+                          # before, and the check blind to a stall.
+                          "evidence-path-rate-limited",
+                          "check-ignores-ship-delay",
+                          # A11 audit F3: egress counts kept across a reload.
+                          "egress-state-survives-reload",
+                          # A11 audit F4: statuses beside their own alert.
+                          "check-status-ignores-silence",
+                          # A11 audit F6: the hosts file's enrolled key and
+                          # generation 0 ignored.
+                          "check-forgets-enrolled-key",
+                          # A11 audit F5: uninstall keeps the fetch unit's
+                          # state directory.
+                          "uninstall-keeps-fetch-state"]
 
 when AddonMutation.len > 0 and AddonMutation notin KnownAddonMutations and
     AddonMutation notin KnownAgentMutations:

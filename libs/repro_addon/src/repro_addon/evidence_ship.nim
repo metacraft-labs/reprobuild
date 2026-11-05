@@ -84,6 +84,9 @@ type
 
 const
   ShipDrainTimeoutMs = 20_000
+  ShipDelayAlertMs* = 60_000'i64
+    ## A record that waited longer than this to leave is a stall the
+    ## off-host check alerts on (DET-AO-8 ``shipping-stalled``).
   HookWrapperKinds* = ["verify-missing", "verify-failed", "verify-timeout"]
 
 proc defaultShipSite*(): ShipSite =
@@ -154,6 +157,10 @@ proc openAppender*(site: ShipSite; conf: EvidenceConf): EvidenceAppender =
 proc bootId*(site: ShipSite): string =
   try: readFile(site.bootIdPath).strip() except IOError, OSError: ""
 
+proc lastShipMs(site: ShipSite): int64 =
+  try: parseBiggestInt(readFile(site.stateDir / "last-ship").strip())
+  except CatchableError: 0'i64
+
 proc lastHeartbeatMs(site: ShipSite): int64 =
   try: parseBiggestInt(readFile(site.stateDir / "last-heartbeat").strip())
   except CatchableError: 0'i64
@@ -209,7 +216,21 @@ proc runEvidenceShip*(site: ShipSite; conf: EvidenceConf; host: string;
       records.add(r)
       shippable.add(p)
   let now = int64(epochTime() * 1000)
-  let beat = forceHeartbeat or
+  # How long the oldest record waited to leave (its writer's clock against
+  # this run's): a path unit that stopped starting this unit shows up here,
+  # since records then wait for the timer (A11 audit F2). A delay past
+  # ``ShipDelayAlertMs`` always heartbeats, so the sink hears of it.
+  # Counted from the later of the record's writing and this host's last
+  # successful shipment: records queued while the sink was unreachable, or
+  # before it knew the host at all, are not a stall of the path unit; the
+  # first shipment ever has none.
+  var delayMs = 0'i64
+  let lastOk = lastShipMs(site)
+  if lastOk > 0:
+    for r in records:
+      if r.senderTimeMs > 0:
+        delayMs = max(delayMs, now - max(r.senderTimeMs, lastOk))
+  let beat = forceHeartbeat or delayMs > ShipDelayAlertMs or
              now - lastHeartbeatMs(site) >= int64(conf.heartbeatSec) * 500
   if records.len == 0 and not beat:
     return
@@ -225,6 +246,7 @@ proc runEvidenceShip*(site: ShipSite; conf: EvidenceConf; host: string;
     a.append(newEvidenceRecord(ecHeartbeat, $edShip, "",
       [("intervalMs", $(conf.heartbeatSec * 1000)), ("bootId", bootId(site)),
        ("pending", $records.len), ("dpkgLastRun", dpkgLastRun(site.dpkgLog)),
+       ("shipDelayMs", $delayMs),
        ("host", host)], nowMs = now))
   discard a.drain(ShipDrainTimeoutMs)
   # The sink acknowledges in queue order: the first ``appended`` records are
@@ -237,6 +259,8 @@ proc runEvidenceShip*(site: ShipSite; conf: EvidenceConf; host: string;
   result.heartbeat = beat and a.appended == records.len + 1
   if result.heartbeat:
     writeFile(site.stateDir / "last-heartbeat", $now & "\n")
+  if a.appended > 0 and a.appended == records.len + (if beat: 1 else: 0):
+    writeFile(site.stateDir / "last-ship", $now & "\n")
   if a.appended < records.len + (if beat: 1 else: 0):
     result.error = (if a.lastError.len > 0: a.lastError
                     else: "the sink did not acknowledge every record")

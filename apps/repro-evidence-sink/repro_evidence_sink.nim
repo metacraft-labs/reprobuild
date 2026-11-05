@@ -32,10 +32,14 @@
 ##                                [--manifests DIR --deploy-signers FILE]
 ##                                [--published-artefacts SHA256SUMS]
 ##                                [--silence-factor N] [--now-ms MS]
+##                                [--update-hosts]
 ##       the ReproOS add-on's off-host detectors over the store: every
 ##       add-on detection as an alert, silence (DET-5), attestation
 ##       mismatch and lag against the producer's published manifests. Exit
-##       0 with no alert, 1 with one or more.
+##       0 with no alert, 1 with one or more. --update-hosts writes each
+##       host's attestation key and generation 0 into the hosts file the
+##       first time its bootstrap record shows them, so they outlive the
+##       store's retention.
 ##
 ## The three read-side commands open the store directory directly: reading
 ## is local to the sink host by design (EVID-3). There is no network read.
@@ -56,6 +60,7 @@ proc main(): int =
   var dir, identityDir, anchorsDir, readyFile = ""
   var hostsPath, manifestsDir, signersPath, artefactsPath = ""
   var nowMs = 0'i64
+  var updateHosts = false
   var keyDir, checkpointPub, revokedPath, expectPath = ""
   var receipts: seq[string] = @[]
   var live = false
@@ -91,6 +96,7 @@ proc main(): int =
       of "deploy-signers": signersPath = val
       of "published-artefacts": artefactsPath = val
       of "now-ms": nowMs = parseBiggestInt(val)
+      of "update-hosts": updateHosts = true
       else: return usage()
     of cmdEnd: discard
   if dir.len == 0:
@@ -158,6 +164,12 @@ proc main(): int =
     var inp = CheckInputs(storeDir: dir, silenceFactor: silenceFactor,
       nowMs: (if nowMs > 0: nowMs else: int64(epochTime() * 1000)))
     inp.hosts = parseHosts(readFile(hostsPath))
+    if updateHosts:
+      let enrolled = enrolFromStore(inp.hosts, dir)
+      inp.hosts = enrolled.hosts
+      if enrolled.changed:
+        writeFile(hostsPath & ".tmp", renderHosts(inp.hosts))
+        moveFile(hostsPath & ".tmp", hostsPath)
     if manifestsDir.len > 0:
       inp.manifests = loadPublishedManifests(manifestsDir,
         peerAuth.loadTrustAnchors(signersPath))
