@@ -294,6 +294,44 @@ _repro_test_daemon_cleanup() {
 }
 trap _repro_test_daemon_cleanup EXIT
 
+# Step 0 (opt-in): build the `ct-mcr` recorder bundle FIRST, while the
+# caller's credentials are still valid, and let `.#test-cross-repo-fixtures`
+# stage that bundle instead of building it again.
+#
+# WHY. That bundle's recipe fetches private repositories (a cargo git
+# dependency, a private flake input of the recorder's dev shell), and CI hands
+# it credentials that are GitHub App installation tokens. An installation
+# token lasts one hour. The collection that builds the bundle runs after the
+# prerequisite siblings, `.#apps`, `.#test-helpers` and `.#test-fixtures`,
+# and that is more than an hour on a CI host. Measured on run 41363427228
+# (Test job 125864626907, gpu-server-002): the token was minted at 11:38:55Z,
+# the collection started at 12:26:41Z, and cargo's fetch of the backend's
+# private git dependency was refused at 12:45:07Z with "Invalid username or
+# token" -- 66 minutes after the mint, by a token that had expired six minutes
+# earlier. Moving the build to here puts it a few minutes after the mint.
+#
+# The collection still runs, and still owns the outputs: with
+# CT_CODETRACER_NATIVE_RECORDER_PREBUILT=1 its edge stages the bundle this
+# build just produced (and fails on a missing file, as after any build). That
+# variable is exported ONLY when this build succeeded. A failed build leaves
+# it unset, so the edge builds the bundle itself and its failure is reported
+# and re-raised exactly as before -- a stale bundle a previous run left in the
+# recorder checkout is never staged as if this run had built it.
+#
+# Opt-in (REPROBUILD_PREBUILD_CROSS_REPO_FIXTURES=1, set by the CI Test job),
+# because a run without the recorder checkout would otherwise print its
+# refusal twice, once here and once from the edge.
+if [[ "${REPROBUILD_PREBUILD_CROSS_REPO_FIXTURES:-0}" == "1" &&
+      "$(uname -s)" == "Linux" && "$(uname -m)" =~ ^(x86_64|amd64)$ ]]; then
+  printf 'Building the ct-mcr recorder bundle before the build phase (REPROBUILD_PREBUILD_CROSS_REPO_FIXTURES=1)\n' >&2
+  if (unset CT_CODETRACER_NATIVE_RECORDER_PREBUILT
+      bash ./scripts/build_hcr_ct_mcr_fixture.sh); then
+    export CT_CODETRACER_NATIVE_RECORDER_PREBUILT=1
+  else
+    printf '::warning:: the early ct-mcr bundle build failed; .#test-cross-repo-fixtures will build it again and report the failure\n' >&2
+  fi
+fi
+
 # Step 1 (B5): bootstrap ./build/bin/repro from nim when missing.
 # Idempotent — the recipe no-ops when the binary already exists.
 just bootstrap
