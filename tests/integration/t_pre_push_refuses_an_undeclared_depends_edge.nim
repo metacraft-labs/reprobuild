@@ -19,6 +19,15 @@
 ## Discrimination against an unfixed binary: assertions 4-8 fail (exit 0, no
 ## failures, and the dropped edge is named nowhere in the report).
 ##
+## A dangling edge has two causes, and the refusal names the fix for each.
+## No fragment in the workspace declares the name: a typo, so fix the name or
+## add the fragment. A fragment declares it but the project being checked
+## does not include it: a membership gap, so add the fragment to the
+## project's `member_repos`. Telling the second case to "declare the missing
+## repo" reads as already satisfied, because the workspace does declare it.
+## The second test case discriminates on that: a binary with one remediation
+## for both causes fails its remediation assertions.
+##
 ## Skip rule: `git` missing on PATH.
 
 import std/[json, os, strutils, tempfiles, unittest]
@@ -116,6 +125,16 @@ proc seedRepo(gitBin, scratch, name: string): string =
   discard requireGit(gitBin, ["clone", "-q", "--bare", seed, origin], scratch)
   origin
 
+const libCFragmentToml = """
+schema = "reprobuild.workspace.repo.v2"
+
+[repo]
+name = "lib-c"
+path = "lib-c"
+remote = "lib-b-origin"
+mainline = "main"
+"""
+
 proc buildFixture(gitBin: string): Fixture =
   result.scratch = createTempDir("repro-depends-", "")
   result.gitBin = gitBin
@@ -133,6 +152,11 @@ proc buildFixture(gitBin: string): Fixture =
   writeFile(result.workspaceRoot / "projects" / "lib-a.toml",
     projectTomlTemplate % [fileUrl(originA), fileUrl(originB)])
   writeFile(result.workspaceRoot / "repos" / "lib-b.toml", libBFragmentToml)
+  # Declared by the workspace, but not a member of the `lib-a` project. The
+  # file basename differs from the declared name on purpose: `member_repos`
+  # names the basename, so the remediation must too.
+  writeFile(result.workspaceRoot / "repos" / "lib-c-fork.toml",
+    libCFragmentToml)
 
   for name, origin in {"lib-a": originA, "lib-b": originB}.items:
     let target = result.workspaceRoot / name
@@ -199,6 +223,48 @@ suite "pre-push refuses a `depends` edge naming no declared repo":
       check failure["property"].getStr() == "dependency-not-declared"
       check failure["evidence"].getStr().contains("lib-a -> lib-bee")
       check failure["remediation"].getStr().contains("does not declare")
+      check failure["remediation"].getStr().contains("fix the name")
+      check not failure["remediation"].getStr().contains("member_repos")
 
       # 9: a resolvable edge is still not reported as dangling.
       check not failure["evidence"].getStr().contains("lib-a -> lib-b,")
+
+  test "t_pre_push_names_member_repos_for_a_depends_edge_outside_the_project":
+    let gitBin = findExe("git")
+    if gitBin.len == 0:
+      skip()
+    else:
+      let fx = buildFixture(gitBin)
+      defer: removeDir(fx.scratch)
+
+      # `lib-c` is declared by `repos/lib-c-fork.toml` but the project does
+      # not include that fragment, so the gate cannot walk it.
+      fx.setDepends("\"lib-b\", \"lib-c\"")
+      let gap = runGate(fx)
+      # 1-2: still refused: the gate cannot check a repo outside the project.
+      check gap.code == 2
+      check gap.report["exitCode"].getInt() == 2
+      require gap.report["failures"].len == 1
+      let failure = gap.report["failures"][0]
+      check failure["property"].getStr() == "dependency-not-declared"
+      check failure["evidence"].getStr().contains("lib-a -> lib-c")
+      # 3-6: the remediation names the membership fix, with the fragment's
+      #      basename and the project manifest, not "declare the repo".
+      let remediation = failure["remediation"].getStr()
+      check remediation.contains("member_repos")
+      check remediation.contains("lib-c-fork")
+      check remediation.contains("projects/lib-a.toml")
+      check not remediation.contains("does not declare")
+
+      # 7-8: a typo and a membership gap together give one refusal per
+      #      cause, each with its own remediation.
+      fx.setDepends("\"lib-c\", \"lib-bee\"")
+      let both = runGate(fx)
+      check both.code == 2
+      require both.report["failures"].len == 2
+      var remediations: seq[string]
+      for f in both.report["failures"]:
+        check f["property"].getStr() == "dependency-not-declared"
+        remediations.add(f["remediation"].getStr())
+      check remediations.join("\n").contains("lib-a -> lib-bee")
+      check remediations.join("\n").contains("lib-c-fork")
