@@ -2764,6 +2764,17 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "t_group_libs_repro_cli_support_tests_g01",
     singleReason: ""),
   TestSpec(
+    source: "libs/repro_cli_support/tests/t_installed_prefix_assembly_is_recorded.nim",
+    binary: "build/test-bin/t_installed_prefix_assembly_is_recorded",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "t_group_libs_repro_cli_support_tests_g01",
+    singleReason: ""),
+  TestSpec(
     source: "libs/repro_cli_support/tests/t_installed_prefix_nim_pin_wins.nim",
     binary: "build/test-bin/t_installed_prefix_nim_pin_wins",
     defines: @[],
