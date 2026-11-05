@@ -19371,7 +19371,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g05",
+    group: "t_group_tests_integration_g04",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_execution_lease_confinement.nim",
@@ -20031,7 +20031,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g06",
+    group: "t_group_tests_integration_g05",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_host_binary_format_is_proven_before_execution.nim",
@@ -20707,6 +20707,17 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "tests/integration/t_interface_extraction_reuses_library_objects.nim",
     binary: "build/test-bin/t_interface_extraction_reuses_library_objects",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "t_group_tests_integration_g06",
+    singleReason: ""),
+  TestSpec(
+    source: "tests/integration/t_interface_extraction_sibling_shims_are_location_free.nim",
+    binary: "build/test-bin/t_interface_extraction_sibling_shims_are_location_free",
     defines: @[],
     requiresReproBinary: true,
     extraPassC: @[],

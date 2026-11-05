@@ -70,7 +70,10 @@ proc enterHermeticGit*(): string =
               "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES",
               "GIT_CONFIG", "GIT_CONFIG_PARAMETERS", "GIT_CONFIG_COUNT",
               "GIT_LITERAL_PATHSPECS", "GIT_GLOB_PATHSPECS",
-              "GIT_NOGLOB_PATHSPECS", "GIT_ICASE_PATHSPECS", "GIT_CEILING_DIRECTORIES"]:
+              "GIT_NOGLOB_PATHSPECS", "GIT_ICASE_PATHSPECS", "GIT_CEILING_DIRECTORIES",
+              # Inherited as 0 (some agent harnesses export it), it stops a
+              # plain `git status` persisting what the fsmonitor case arranges.
+              "GIT_OPTIONAL_LOCKS"]:
     delEnv(key)
   putEnv("GIT_CONFIG_NOSYSTEM", "1")
   putEnv("GIT_CONFIG_GLOBAL", config)

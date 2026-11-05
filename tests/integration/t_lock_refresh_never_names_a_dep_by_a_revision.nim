@@ -114,6 +114,13 @@ suite "lock refresh never names a dep by a revision":
     require fileExists(reproBinary)
     let scratch = createTempDir("repro-lock-revname-", "")
     defer: removeDir(scratch)
+    # The action cache the refreshes use, named so the precondition below can
+    # find the extraction's shims in it: the runner's shared root when it
+    # exports one, otherwise one of this case's own.
+    var actionCacheRoot = getEnv("REPROBUILD_ACTION_CACHE_ROOT")
+    if actionCacheRoot.len == 0:
+      actionCacheRoot = scratch / "action-cache"
+      putEnv("REPROBUILD_ACTION_CACHE_ROOT", actionCacheRoot)
 
     # ---- leg 1 (PRIMARY): the catalog comes from the lock-pinned cache ----
     # A committed lock that pins the catalog, refreshed in a SEED project
@@ -171,19 +178,27 @@ suite "lock refresh never names a dep by a revision":
     let second = refresh(consumer)
     checkpoint(second.output)
     check second.code == 0
-    # Precondition, so the assertions below are not vacuous: the provider was
+    # Precondition, so the assertions below are not vacuous: the recipe was
     # compiled against the CACHE checkout. The compile includes each catalog
-    # interface through a per-consumer shim under the temp dir naming the
-    # module it read (`usesImportCode`); a refresh that never reached the
-    # cache would carry the old pin forward and pass the checks below without
-    # exercising the catalog observation at all.
+    # interface through a shim naming the module it read (`usesImportCode`).
+    # The interface extraction keeps its shims in its computation's own
+    # scratch under the action cache (`recipe-compiles/interface/`); a compile
+    # outside an engine-owned directory keeps them in a consumer-keyed
+    # directory under the temp dir. This recipe's bytes are new every run, so
+    # the computation, and its shims, are this run's. A refresh that never
+    # reached the cache would carry the old pin forward and pass the checks
+    # below without exercising the catalog observation at all.
     var readFromCache = false
     let cachedModule = (cache / "packages" / "interfaces" / "rprevnamefixture" /
       "repro.nim").replace('\\', '/')
-    for shim in walkDirRec(getTempDir() / "repro-sibling-shims"):
-      if shim.endsWith("repro_sib_rprevnamefixture.nim") and
-          cachedModule in readFile(shim):
-        readFromCache = true
+    for shimRoot in [getTempDir() / "repro-sibling-shims",
+                     actionCacheRoot / "recipe-compiles" / "interface"]:
+      if not dirExists(shimRoot):
+        continue
+      for shim in walkDirRec(shimRoot):
+        if shim.endsWith("repro_sib_rprevnamefixture.nim") and
+            cachedModule in readFile(shim):
+          readFromCache = true
     check readFromCache
     let lockBody = readFile(consumer / "repro.lock")
     checkpoint(lockBody)

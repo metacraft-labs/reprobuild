@@ -13,6 +13,12 @@ mkdir -p build build/nimcache test-logs
 rm -rf test-logs/results test-logs/parallel-run.json test-logs/suite-finished.json
 mkdir -p test-logs/results
 repo_root="$(pwd -P)"
+# Two variables an agent or operator shell may carry, and which the suite must
+# not inherit. GIT_OPTIONAL_LOCKS=0 stops a plain `git status` writing the
+# index, which tests rely on it doing. REPROBUILD_PACKAGES_ROOT replaces the
+# whole catalog search, at recipe compile time too, so a test's fixture catalog
+# is never reached; a test that needs one sets it for itself.
+unset GIT_OPTIONAL_LOCKS REPROBUILD_PACKAGES_ROOT
 # Keep large suite scratch off /tmp and outside the checkout; some tests build
 # "outside workspace" fixtures and scan ancestors for repo markers.
 cache_home="${XDG_CACHE_HOME:-${HOME:-}/.cache}"
