@@ -437,11 +437,14 @@ proc tmpfsHalfRamSizeOption*(memTotalKb, pageSize: int): string =
   ## the same mount reads ``rw,nr_inodes=...`` when the boot's page count is
   ## even and ``rw,size=<half>k,nr_inodes=...`` when it is odd -- and that
   ## count varies by a page from one boot to the next (Debian 13's
-  ## ``tmp.mount`` is ``size=50%%``; measured on debian-13-amd64 at
-  ## reprobuild 77b01874e6: ``Memory: 1992428K`` and ``1992432K`` on two
-  ## boots of one image, and ``size=1010776k`` = ceil(505387 / 2) pages read
-  ## on a boot whose ``MemTotal`` was one page under 2021552 kB). ""
-  ## when the page count is even (nothing is printed then).
+  ## ``tmp.mount`` is ``size=50%%``. On debian-13-amd64, at reprobuild
+  ## 77b01874e6, the kernel's ``Memory:`` line read 1992428K on one boot
+  ## and 1992432K on the next boot of the same image; ``MemTotal`` was
+  ## 2021552 kB on both, and ``/tmp`` printed no ``size=``. The
+  ## ``size=1010776k`` two earlier runs recorded is ceil(505387 / 2) pages:
+  ## what a ``MemTotal`` one page under 2021552 kB prints, derived from
+  ## the kernel code, not seen in ``/proc/meminfo``.) "" when the page
+  ## count is even (nothing is printed then).
   let pages = memTotalKb * 1024 div pageSize
   if pages mod 2 == 0: return ""
   "size=" & $(((pages + 1) div 2) * (pageSize div 1024)) & "k"
