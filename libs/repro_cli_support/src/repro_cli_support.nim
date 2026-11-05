@@ -21475,8 +21475,7 @@ proc vcsDispatcherContent(hookName: string; certificatePhase = false): string =
       # in effect: its `repro.lock` carries `[certificate_policy]` (TC-9d: the
       # only place a policy can be). Elsewhere the
       # dispatcher has no third phase at all, so a commit there pays nothing
-      # for a gate that has nothing to require, and its bytes are the
-      # dispatcher's from before the gate existed. The phase embeds no rule:
+      # for a gate that has nothing to require. The phase embeds no rule:
       # `repro` reads the snapshot and the branch every time it fires.
       #
       # TC-8g — the THIRD phase: the certificate gate. It runs after every
