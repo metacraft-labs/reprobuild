@@ -529,6 +529,9 @@
 ##                                            shipping unit as live
 ## ``egress-state-survives-reload``           egress counts are compared
 ##                                            across a table reload
+## ``egress-instance-ignores-boot``           a table loaded at another
+##                                            boot, with the same handle,
+##                                            is the same instance
 ## ``check-status-ignores-silence``           a detector's status is
 ##                                            live-idle beside its silence
 ##                                            alert
@@ -834,6 +837,8 @@ const
                           "check-ignores-ship-delay",
                           # A11 audit F3: egress counts kept across a reload.
                           "egress-state-survives-reload",
+                          # The handle repeats at the next boot.
+                          "egress-instance-ignores-boot",
                           # A11 audit F4: statuses beside their own alert.
                           "check-status-ignores-silence",
                           # A11 audit F6: the hosts file's enrolled key and

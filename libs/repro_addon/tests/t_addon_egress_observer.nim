@@ -11,7 +11,8 @@
 ## address is sent from it, and the table's set read back as JSON. Nothing
 ## outside the namespace is touched.
 ##
-## Falsifying builds: ``egress-state-survives-reload`` (the reload step);
+## Falsifying builds: ``egress-state-survives-reload`` and
+## ``egress-instance-ignores-boot`` (the reload step);
 ## ``egress-observer-not-installed`` -- the observer unit
 ## never loads the table; the unit step goes red.
 ##
@@ -71,6 +72,21 @@ suite "the egress observer's table":
     check freshSince(@[("192.0.2.10", 3'i64)], st, "7").len == 0
     # Reloaded (a new handle): its counters start at zero.
     check freshSince(@[("192.0.2.10", 2'i64)], st, "9").len == 1
+    # Reloaded at the next boot: the kernel's handle counter started again,
+    # so the table has the handle it had before; the boot id differs.
+    let listed = """{"nftables": [{"metainfo": {"json_schema_version": 1}},
+      {"table": {"family": "inet", "name": "repro_addon_egress",
+                 "handle": 1}}]}"""
+    let bootA = instanceKey(listed, "5e3e48b1-d51d-4b32-a113-c194f6566aba")
+    let bootB = instanceKey(listed, "0f1c2d3e-4b5a-6978-8a9b-acbdcedf0011")
+    check bootA.len > 0
+    check bootA != bootB
+    check instanceKey(listed, "") == "1"
+    check instanceKey("""{"nftables": []}""", "x") == ""
+    let sb = root / "state-reboot"
+    check freshSince(@[("192.0.2.10", 3'i64)], sb, bootA).len == 1
+    check freshSince(@[("192.0.2.10", 3'i64)], sb, bootA).len == 0
+    check freshSince(@[("192.0.2.10", 2'i64)], sb, bootB).len == 1
 
   test "a fresh destination is a DET-AO-3 detection; a missing table too":
     writeFile(root / "evidence.conf", "sink = 127.0.0.1:1\n")
