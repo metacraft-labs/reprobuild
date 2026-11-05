@@ -214,6 +214,7 @@ import repro_cli_support/recipe_constraints
 # refusal that sends the operator to `flake.nix` prints.
 import repro_cli_support/lock_consistency
 export lock_consistency.flakeRevPinEditRemedy, lock_consistency.lockUpdateCommand,
+  lock_consistency.remedyPathWord,
   lock_consistency.H1Property,
   lock_consistency.H2Property
 # HL-11 M4: the recipe rewrites `repro lock update` makes (an exact pin in
@@ -57934,7 +57935,7 @@ proc pinRegressionShellWord(value: string): string =
   const bare = {'a'..'z', 'A'..'Z', '0'..'9', '-', '_', '.', ',', '/', '+',
                 '@', ':', '%', '='}
   if value.len > 0 and value.allCharsInSet(bare): value
-  else: quoteShell(value)
+  else: quoteShellPosix(value)
 
 proc isPinRegression*(relation: SiblingPinRelation): bool =
   relation in {sprBehind, sprDiverged, sprUnprovable}
@@ -58093,9 +58094,9 @@ proc pinRegressionSyncCommand*(workspaceRoot, repo: string): string =
       continue
     for r in resolved.repos:
       if r.name == repo:
-        return "repro ws sync " & quoteShell(p) & " --workspace-root=" &
-          quoteShell(root)
-  "repro ws sync --workspace-root=" & quoteShell(root)
+        return "repro ws sync " & quoteShellPosix(p) & " --workspace-root=" &
+          remedyPathWord(root)
+  "repro ws sync --workspace-root=" & remedyPathWord(root)
 
 proc pinRegressionForwardCommands*(r: PinRegression; workspaceRoot: string;
     identity: GitToolIdentity): seq[string] =
@@ -58115,15 +58116,15 @@ proc pinRegressionForwardCommands*(r: PinRegression; workspaceRoot: string;
         gitRunPlain(identity, ["-C", r.path, "merge-base", "--is-ancestor",
           r.pinned, "@{u}"]).code == 0:
       target = up.output.strip()
-    result.add("git -C " & quoteShell(r.path) & " merge --ff-only " &
-      quoteShell(target))
+    result.add("git -C " & remedyPathWord(r.path) & " merge --ff-only " &
+      quoteShellPosix(target))
     if sync.len > 0: result.add(sync)
   of sprDiverged:
     # `repro ws sync` also migrates a force-pushed or rewritten history, the
     # common reason a checkout diverges from a pin somebody else published.
     if sync.len > 0: result.add(sync)
   of sprUnprovable:
-    result.add("git -C " & quoteShell(r.path) & " fetch --all")
+    result.add("git -C " & remedyPathWord(r.path) & " fetch --all")
     if sync.len > 0: result.add(sync)
   else:
     discard
@@ -58166,8 +58167,8 @@ proc renderPinRegressionRefusal*(refused: openArray[PinRegression];
           "fetch it so the direction can be decided"
         else: "bring the checkout forward"
       result.add("      " & lead & ": `" & cmd & "`")
-    let dropped = "git -C " & quoteShell(r.path) & " log --oneline " &
-      r.observed & ".." & r.pinned
+    let dropped = "git -C " & remedyPathWord(r.path) & " log --oneline " &
+      quoteShellPosix(r.observed & ".." & r.pinned)
     if r.relation == sprUnprovable:
       result.add("      once fetched, `" & dropped & "` lists what this " &
         action & " would drop from the published lock")
@@ -58869,10 +58870,12 @@ proc stageRefreshedFlakeLock(repoRoot, lockPath: string;
     let res = execCmdEx(command, options = {poStdErrToStdOut, poUsePath},
       env = env)
     if res.exitCode != 0:
-      return (false, "`git add " & lockPath & "` failed (exit " &
+      return (false, "`git add " & remedyPathWord(lockPath) &
+        "` failed (exit " &
         $res.exitCode & "): " & res.output.strip())
   except CatchableError as err:
-    return (false, "`git add " & lockPath & "` could not be run: " & err.msg)
+    return (false, "`git add " & remedyPathWord(lockPath) &
+      "` could not be run: " & err.msg)
   (true, "")
 
 type
@@ -60236,7 +60239,8 @@ proc mutualPinDeferralSentence(sibling, selfName, siblingDir, pinnedRev,
     "The pinned revision " & shortRev(pinnedRev) & " IS published, so the " &
     "lock this push publishes is reproducible. The order that terminates: " &
     "publish this repo now; then publish '" & sibling &
-    "' (`repro push --current-repo=" & siblingDir & "`); then, on the next " &
+    "' (`repro push --current-repo=" & remedyPathWord(siblingDir) &
+    "`); then, on the next " &
     "commit here, record its new revision — " & recordClause
 
 proc mutualPinBlockedSentence(sibling, selfName: string): string =
@@ -60309,7 +60313,7 @@ proc verifyCommittedLockSiblingPins*(repoRoot: string;
           ", HEAD " & shortRev(o.observed) & "), " &
           mutualPinDeferralSentence(o.name, cycle.selfName, dir, o.pinned,
             "the pre-commit hook re-pins it, or run `repro lock refresh " &
-            root & "`") &
+            remedyPathWord(root) & "`") &
           " [sibling=" & o.name & " pinned=" & o.pinned & " observed=" &
           o.observed & " relation=ahead unpublished=true deferred=mutual-pin]")
         continue
@@ -60341,7 +60345,8 @@ proc verifyCommittedLockSiblingPins*(repoRoot: string;
   var remedyParts: seq[string] = @[]
   if blocked.len > 0: remedyParts.add(blocked.join(". ") & ".")
   if refreshable > 0:
-    remedyParts.add("run `repro lock refresh " & root & "`, commit " &
+    remedyParts.add("run `repro lock refresh " & remedyPathWord(root) &
+      "`, commit " &
       "repro.lock, then re-push (the managed pre-commit hook re-pins " &
       "siblings on every commit once it is installed: " &
       "`repro hooks ensure --vcs`)")
@@ -60477,12 +60482,13 @@ proc preCommitReproLock(site: CommitTimeWriterSite;
             "could NOT be staged, so THIS COMMIT DOES NOT CARRY IT: " &
             staged.diagnostic)
           stderr.writeLine(label & ": remedy: `git add " &
-            plan.lockPath & "` and `git commit --amend --no-edit`")
+            remedyPathWord(plan.lockPath) &
+            "` and `git commit --amend --no-edit`")
         of ctwsLockUpdateNode:
           stderr.writeLine(label & ": repro.lock was re-pinned but could " &
             "NOT be staged: " & staged.diagnostic)
-          stderr.writeLine(label & ": remedy: `git add " & plan.lockPath &
-            "`, then run the tests again")
+          stderr.writeLine(label & ": remedy: `git add " &
+            remedyPathWord(plan.lockPath) & "`, then run the tests again")
   if plan.warnings.len > 0:
     line.add("; " & plan.warnings.join("; "))
   appendCommitTimeWriterLog(site, workspaceRoot, line)
@@ -60756,11 +60762,12 @@ proc applyPreCommitFlakeLock(site: CommitTimeWriterSite;
         "NOT be staged, so THIS COMMIT DOES NOT CARRY IT: " &
         staged.diagnostic)
       stderr.writeLine(label & ": remedy: `git add " &
-        flake.lockPath & "` and `git commit --amend --no-edit`")
+        remedyPathWord(flake.lockPath) & "` and `git commit --amend --no-edit`")
     of ctwsLockUpdateNode:
       stderr.writeLine(label & ": flake.lock was refreshed but could " &
         "NOT be staged: " & staged.diagnostic)
-      stderr.writeLine(label & ": remedy: `git add " & flake.lockPath &
+      stderr.writeLine(label & ": remedy: `git add " &
+            remedyPathWord(flake.lockPath) &
         "`, then run the tests again")
   appendCommitTimeWriterLog(site, workspaceRoot, line)
 
@@ -61261,10 +61268,12 @@ proc lockDiffersFromIndex(repoRoot, lockPath: string):
     case diff.exitCode
     of 0: (false, "")
     of 1: (true, "")
-    else: (false, "`git diff --quiet -- " & lockPath & "` failed (exit " &
+    else: (false, "`git diff --quiet -- " & remedyPathWord(lockPath) &
+      "` failed (exit " &
       $diff.exitCode & "): " & diff.output.strip())
   except CatchableError as err:
-    (false, "`git diff -- " & lockPath & "` could not be run: " & err.msg)
+    (false, "`git diff -- " & remedyPathWord(lockPath) &
+      "` could not be run: " & err.msg)
 
 proc stageCurrentUnstagedLocks(workspaceRoot, repoRoot, timestamp: string;
     hasReproLock, hasFlake: bool; outcome: var CommitTimeWritersOutcome) =
@@ -61311,7 +61320,8 @@ proc stageCurrentUnstagedLocks(workspaceRoot, repoRoot, timestamp: string;
       outcome.notStaged.add(lockPath & ": " & staged.diagnostic)
       stderr.writeLine(label & ": " & lockPath & " is current but not " &
         "staged, and could NOT be staged: " & staged.diagnostic)
-      stderr.writeLine(label & ": remedy: `git add " & lockPath &
+      stderr.writeLine(label & ": remedy: `git add " &
+        remedyPathWord(lockPath) &
         "`, then run the tests again")
     appendCommitTimeWriterLog(ctwsLockUpdateNode, workspaceRoot, line)
 
@@ -70536,7 +70546,8 @@ proc executeCheckPrePush(parsed: CheckArgs;
               "this push does not vouch for its unpublished content. The " &
               "order that terminates: " &
               "publish this repo now; then publish '" & overrideRepo &
-              "' (`repro push --current-repo=" & sourcePath & "`). [override=" &
+              "' (`repro push --current-repo=" & remedyPathWord(sourcePath) &
+              "`). [override=" &
               overrideRepo & " head=" & headSha &
               " unpublished=true deferred=override-awaits-push]")
             continue
@@ -88109,9 +88120,9 @@ proc runCertifyingTestBuild(opts: ReproTestShardOpts; buildArgs: seq[string];
       if name notin regressing:
         regressing.add(name)
     rerun.add(" --allow-pin-regression=" &
-      quoteShell(regressing.join(",")))
+      quoteShellPosix(regressing.join(",")))
     for sel in opts.selectors:
-      rerun.add(" " & quoteShell(sel))
+      rerun.add(" " & quoteShellPosix(sel))
     reportLockUpdateRefusal(lockUpdate, rerun)
   elif not preTaken:
     # Deferred to the node, which never ran: the build stopped before it.
@@ -91240,7 +91251,7 @@ proc refreshForeignPlatformLockPins(projectDir, lockP, lockPlatform,
       if r.sibling notin names: names.add(r.sibling)
     for n in allowance.names:
       if n notin names: names.add(n)
-    let rerun = label & " " & quoteShell(projectDir) &
+    let rerun = label & " " & remedyPathWord(projectDir) &
       " --allow-pin-regression=" & pinRegressionShellWord(names.join(","))
     for line in renderPinRegressionRefusal(plan.refused,
         resolvePostCommitWorkspaceRoot(projectDir, ""), identity,
@@ -91499,7 +91510,7 @@ proc runLockGenerationVerb(rest: openArray[string]; verb: string;
         if r.sibling notin names: names.add(r.sibling)
       for n in allowance.names:
         if n notin names: names.add(n)
-      let rerun = "repro lock " & verb & " " & quoteShell(projectDir) &
+      let rerun = "repro lock " & verb & " " & remedyPathWord(projectDir) &
         " --allow-pin-regression=" & pinRegressionShellWord(names.join(","))
       for line in renderPinRegressionRefusal(gate.refused,
           resolvePostCommitWorkspaceRoot(projectDir, ""), identity,
@@ -94642,7 +94653,8 @@ proc flakeDeclaredInputsAt(flakeRoot: string):
       err.msg & "). A flake that cannot be read must not degrade into a " &
       "flake that declares no inputs: that answer is an empty override list, " &
       "which is exactly what an unreadable file must never produce. Remedy: " &
-      "fix the file's permissions (`chmod +r " & result.flakePath & "`).")
+      "fix the file's permissions (`chmod +r " &
+        remedyPathWord(result.flakePath) & "`).")
     return
   result.names = flakeDeclaredInputNames(flakeSource)
   if result.names.len == 0:
@@ -95056,7 +95068,8 @@ proc flakeBindInputsToCheckouts(inputNames: openArray[string];
       elif coordinate.present:
         report.add("NOT substituted: flake input '" & name & "' names repo '" &
           repo & "', whose original coordinates match the workspace source but whose checkout is absent at " &
-          sibling & "; it keeps its flake.lock pin. Remedy: `repro develop --only=" & repo & "` places it.")
+          sibling & "; it keeps its flake.lock pin. Remedy: `repro develop --only=" &
+          quoteShellPosix(repo) & "` places it.")
       else:
         unknownToWorkspace.add(name)
       continue
@@ -95068,7 +95081,7 @@ proc flakeBindInputsToCheckouts(inputNames: openArray[string];
       report.add("NOT substituted: flake input '" & name & "' names repo '" &
         repo & "', which is in the develop set but has no checkout at " &
         dir & " — it keeps its flake.lock pin. Remedy: `repro develop " &
-        "--only=" & repo & "` places it.")
+        "--only=" & quoteShellPosix(repo) & "` places it.")
       continue
     if not fileExists(dir / "flake.nix"):
       # The same requirement the plugin enforces (`_nfo_emit_sibling` refuses
@@ -95084,7 +95097,7 @@ proc flakeBindInputsToCheckouts(inputNames: openArray[string];
         "for it. Substituting it would put a tree nothing can name into the " &
         "build, leaving flake.lock pinning something else with no way to say " &
         "so; it keeps its flake.lock pin instead. Remedy: make " & dir &
-        " a git checkout (`repro develop --only=" & repo &
+        " a git checkout (`repro develop --only=" & quoteShellPosix(repo) &
         "` places one), or leave it on its pin.")
       continue
     # Parsed, so stdout alone; git's message, on failure, is the diagnostic.
@@ -95093,7 +95106,7 @@ proc flakeBindInputsToCheckouts(inputNames: openArray[string];
       report.add("NOT substituted: flake input '" & name & "' resolves to " &
         dir & ", whose HEAD could not be read (" & head.diagnostic.strip() &
         "), so no revision can be observed for it. It keeps its flake.lock " &
-        "pin. Remedy: repair that checkout (`git -C " & dir &
+        "pin. Remedy: repair that checkout (`git -C " & remedyPathWord(dir) &
         " rev-parse HEAD` shows the error).")
       continue
 
@@ -95139,7 +95152,8 @@ proc flakeBindInputsToCheckouts(inputNames: openArray[string];
           (if elided > 0: " (+" & $elided & " more)" else: "") &
           ". Edits to TRACKED files, committed or not, ARE included; a " &
           "brand-new file is not, until git knows about it. Remedy: `git -C " &
-          dir & " add " & shown.join(" ") &
+          remedyPathWord(dir) & " add " &
+          shown.mapIt(quoteShellPosix(it)).join(" ") &
           (if elided > 0: " …" else: "") &
           "` — staging alone is enough, no commit needed, and your " &
           "working-tree edits keep flowing afterwards.")
@@ -95276,8 +95290,8 @@ proc bulkExactFlakePins(flakeRoot, workspaceRoot: string;
       "recipe at " & pinnedBy & ", and the automatic mode does not " &
       "substitute an exact recipe pin (it means that revision, not whatever " &
       "is checked out), so it keeps its flake.lock pin. `repro develop " &
-      "--only=" & repo & "` substitutes it, as does an explicit " &
-      "`--only=" & repo & "` here or an explicit overrideInputs entry.")
+      "--only=" & quoteShellPosix(repo) & "` substitutes it, as does an " &
+      "explicit `--only=" & quoteShellPosix(repo) & "` here or an explicit overrideInputs entry.")
 
 type
   FlakeShellBindings = object
@@ -95533,8 +95547,8 @@ proc flakeBindingsFromAppliedArgs*(args: openArray[string];
       report.add("SUBSTITUTED but UNOBSERVABLE: flake input '" & input &
         "' is overridden to " & dir & ", whose HEAD could not be read (" &
         head.diagnostic.strip() & "), so nothing can name the revision your " &
-        "shell is building. Remedy: repair that checkout (`git -C " & dir &
-        " rev-parse HEAD` shows the error).")
+        "shell is building. Remedy: repair that checkout (`git -C " &
+        remedyPathWord(dir) & " rev-parse HEAD` shows the error).")
       continue
     # The repo NAME is the checkout's directory name. In the derived path it
     # comes from the workspace membership; here there is no membership to ask,
@@ -95995,7 +96009,8 @@ proc flakeClassifyPublication(identity: GitToolIdentity;
     # backticked chunk this campaign emits, is a command line the operator can
     # paste and run unchanged from wherever the message was printed.
     result.detail = "could not be shown to exist anywhere but this checkout " &
-      "— `git -C " & dir & " rev-list --max-count=1 " & headRev &
+      "— `git -C " & remedyPathWord(dir) & " rev-list --max-count=1 " &
+      quoteShellPosix(headRev) &
       " --not --remotes` failed (" & unreachable.diagnostic.strip() & ")"
     return
   if unreachable.output.strip().len == 0:
@@ -96096,13 +96111,14 @@ proc flakeOverrideStateReport*(flakeRoot: string;
       lockText = readFile(result.lockPath)
     except CatchableError as err:
       result.refusals.add(result.lockPath & " could not be read (" & err.msg &
-        "). Remedy: fix the file's permissions (`chmod +r " & result.lockPath &
+        "). Remedy: fix the file's permissions (`chmod +r " &
+          remedyPathWord(result.lockPath) &
         "`).")
       return
   let parsed = flakeLockPinnedRevisions(lockText)
   if not parsed.ok:
     result.refusals.add(result.lockPath & ": " & parsed.diagnostic &
-      ". Remedy: restore it from git (`git -C " & flakeRoot &
+      ". Remedy: restore it from git (`git -C " & remedyPathWord(flakeRoot) &
       " checkout -- flake.lock`) or regenerate it with `nix flake lock`.")
     return
   result.examined = true
@@ -96237,9 +96253,10 @@ proc flakeRowIsRecordable*(row: FlakeOverrideStateRow): bool =
 proc flakeRefreshLockCommand(flakeRoot, workspaceRoot: string): string =
   ## The refresh, spelled with BOTH location flags so it runs unchanged from
   ## wherever the message quoting it was printed — `repro flake refresh-lock`
-  ## resolves a bare invocation against the current directory.
-  "repro flake refresh-lock --flake=" & flakeRoot &
-    " --workspace-root=" & workspaceRoot
+  ## resolves a bare invocation against the current directory. Each path is
+  ## one `remedyPathWord`, so the line survives the paste into the hook's `sh`.
+  "repro flake refresh-lock --flake=" & remedyPathWord(flakeRoot) &
+    " --workspace-root=" & remedyPathWord(workspaceRoot)
 
 proc flakeReconcileCommands(row: FlakeOverrideStateRow;
     flakeRoot, workspaceRoot: string): seq[string] =
@@ -96257,21 +96274,27 @@ proc flakeReconcileCommands(row: FlakeOverrideStateRow;
   ## parenthesised aside, an "or", a second command glued on — becomes
   ## `bash: syntax error near unexpected token '('` in the hands of the person
   ## the message was written for. Multiple commands are multiple ELEMENTS, each
-  ## quoted on its own.
+  ## quoted on its own. Every path in them is a `remedyPathWord`: a bare
+  ## Windows path loses its backslashes in that shell, and a path with a space
+  ## splits in two on every OS.
+  let repoPath = remedyPathWord(row.path)
   if row.unpublished:
     # The revision has to EXIST for other people before a pin may name it, so
     # the publishing push comes first; the refresh that then records it comes
     # second, because after the push the row is recordable and one more refresh
     # is all that is missing. Both are named because either alone leaves the
     # operator with a lock that still does not describe the build.
-    return @["git -C " & row.path & " push " & row.pushRemote & " " &
-               row.siblingRev & ":refs/heads/" & row.pushBranch,
+    return @["git -C " & repoPath & " push " &
+               quoteShellPosix(row.pushRemote) & " " &
+               quoteShellPosix(row.siblingRev & ":refs/heads/" &
+                 row.pushBranch),
              flakeRefreshLockCommand(flakeRoot, workspaceRoot)]
   case row.relation
   of fprBehind:
     # The checkout is the stale half, so the FIRST remedy moves the checkout,
     # not the lock.
-    @["git -C " & row.path & " merge --ff-only " & row.pinnedRev]
+    @["git -C " & repoPath & " merge --ff-only " &
+      quoteShellPosix(row.pinnedRev)]
   of fprUnfetched:
     # Nothing can be reconciled before anything can be CONCLUDED, and the one
     # thing missing is the object, so the fetch comes first and stays this
@@ -96290,8 +96313,9 @@ proc flakeReconcileCommands(row: FlakeOverrideStateRow;
     # and fails visibly for a diverged one, so no direction is decided without
     # the evidence (Nix-Flake-Coexistence.md §4, "The remedy follows the
     # direction").
-    @["git -C " & row.path & " fetch --all",
-      "git -C " & row.path & " merge --ff-only " & row.pinnedRev]
+    @["git -C " & repoPath & " fetch --all",
+      "git -C " & repoPath & " merge --ff-only " &
+        quoteShellPosix(row.pinnedRev)]
   of fprDiverged:
     # The refresh does not record a diverged sibling on its own any more
     # (§4 "Regressions"), so naming it alone would print a command that exits
@@ -96337,10 +96361,10 @@ proc flakeReconcileAlternative(row: FlakeOverrideStateRow;
   ## and how to disprove it. It is second because the common case by far is that
   ## the commit really has never left this machine.
   if row.unpublished:
-    "git -C " & row.path & " fetch " & row.pushRemote
+    "git -C " & remedyPathWord(row.path) & " fetch " &
+      quoteShellPosix(row.pushRemote)
   elif row.relation == fprBehind:
-    "repro flake refresh-lock --flake=" & flakeRoot &
-      " --workspace-root=" & workspaceRoot & " --record-downgrade"
+    flakeRefreshLockCommand(flakeRoot, workspaceRoot) & " --record-downgrade"
   elif row.relation == fprDiverged:
     # Recording an unrelated revision deliberately is the same stated decision
     # a downgrade is, spelled with the same variable the commit path takes.
@@ -97502,8 +97526,8 @@ proc flakeUnfetchableNotice(rewrite: FlakeLockRewrite; sibling, error,
       "). The parent and its existing child nodes were LEFT ALONE; " &
       "moving only the parent would retain a dependency graph from another " &
       "revision. Explicitly re-lock the parent and its dependencies: `cd " &
-      quoteShell(flakeRoot) & " && nix flake update " &
-      quoteShell(rewrite.input) & "`. Then re-run the refresh."
+      remedyPathWord(flakeRoot) & " && nix flake update " &
+      quoteShellPosix(rewrite.input) & "`. Then re-run the refresh."
   "flake.lock NOT refreshed for input '" & rewrite.input & "': its sibling " &
     (if sibling.len > 0: sibling & " " else: "") &
     "is at " & rewrite.newRev & " and the pin names " & rewrite.oldRev &
@@ -98666,7 +98690,9 @@ proc executeLockUpdate*(req: LockUpdateRequest): LockUpdateOutcome =
       let ran = runLockUpdateNix(root, names)
       if not ran.ok:
         undoAll(LockUpdateExitFailed, "`nix flake update " &
-          names.join(" ") & " --flake " & root & "` failed; nix said:" &
+          names.mapIt(quoteShellPosix(it)).join(" ") & " --flake " &
+          remedyPathWord(root) &
+          "` failed; nix said:" &
           nixSaid(ran.output))
       flakeLockText = readFile(extendedPath(flakeLockPath))
       var tips: seq[string]
@@ -98769,11 +98795,11 @@ proc executeLockUpdate*(req: LockUpdateRequest): LockUpdateOutcome =
       if checkout.len > 0 and (flakeMoves or reproMoves):
         let pub = flakeClassifyPublication(git, checkout, target)
         if pub.unpublished:
-          let push = "git -C " & quoteShell(checkout) & " push " &
-            quoteShell(pub.remote) & " " & target & ":refs/heads/" &
-            quoteShell(pub.branch)
-          let fetch = "git -C " & quoteShell(checkout) & " fetch " &
-            quoteShell(pub.remote)
+          let push = "git -C " & remedyPathWord(checkout) & " push " &
+            quoteShellPosix(pub.remote) & " " &
+            quoteShellPosix(target & ":refs/heads/" & pub.branch)
+          let fetch = "git -C " & remedyPathWord(checkout) & " fetch " &
+            quoteShellPosix(pub.remote)
           if flakeMoves:
             undoAll(LockUpdateExitFailed, "the target " & target & " " &
               pub.detail & ". A flake.lock resolution naming it would name " &
@@ -98927,7 +98953,9 @@ proc executeLockUpdate*(req: LockUpdateRequest): LockUpdateOutcome =
       if not ran.ok:
         undoAll(LockUpdateExitFailed, "re-locking " &
           nixInputs.join(", ") & " through nix failed (`nix flake update " &
-          nixInputs.join(" ") & " --flake " & root & "`). If " & target &
+          nixInputs.mapIt(quoteShellPosix(it)).join(" ") & " --flake " &
+          remedyPathWord(root) &
+          "`). If " & target &
           " is not yet pushed to the input's url, push it first. nix said:" &
           nixSaid(ran.output))
       flakeLockText = readFile(extendedPath(flakeLockPath))
@@ -99109,7 +99137,8 @@ proc executeLockUpdate*(req: LockUpdateRequest): LockUpdateOutcome =
         checkoutHead & ", not " & target & ": unless a recipe pins it " &
         "exactly, the commit-time re-pin records whatever is checked out, " &
         "so check it out at " & target & " before committing (`git -C " &
-        quoteShell(checkout) & " checkout " & target & "`)")
+        remedyPathWord(checkout) & " checkout " & quoteShellPosix(target) &
+        "`)")
     result.report.add(label & ": wrote " & result.written.join(", ") &
       "; nothing is staged or committed")
 
@@ -99522,7 +99551,8 @@ proc refreshFlakeLockAtCommit*(workspaceRoot, currentRepo: string;
         " — so the fast pre-filter could not locate any sibling checkout, " &
         "and the repo's own sibling inputs cannot be located without it): " &
         "flake.lock was left alone; repair the workspace (`repro workspace " &
-        "status --workspace-root=" & workspaceRoot & "`) and commit again"
+        "status --workspace-root=" & remedyPathWord(workspaceRoot) &
+        "`) and commit again"
       result.failure = result.line
       return
     # §16.5 — the repo's own sibling inputs, and the exact recipe pins that
@@ -99665,7 +99695,7 @@ proc refreshFlakeLockAtCommit*(workspaceRoot, currentRepo: string;
         "inputs develop mode substitutes could not be resolved (" &
         substituted.refusals.join("; ") & "), so flake.lock was left alone; " &
         "repair the workspace (`repro workspace status --workspace-root=" &
-        workspaceRoot & "`) and commit again"
+        remedyPathWord(workspaceRoot) & "`) and commit again"
       result.failure = result.line
       return
     result.consulted = @[]
@@ -99794,8 +99824,8 @@ proc verifyFlakeLockAgainstSiblings(repoRoot, workspaceRoot: string;
     result.stale = true
     result.evidence = "flake-lock-unreadable: " & err.msg
     result.remediation = flakeRoot & "/flake.lock could not be read (" &
-      err.msg & "); fix its permissions (`chmod +r " & flakeRoot &
-      "/flake.lock`) and re-push"
+      err.msg & "); fix its permissions (`chmod +r " &
+      remedyPathWord(flakeRoot / "flake.lock") & "`) and re-push"
     result.summary = "flake.lock could not be verified: " & err.msg
     return
   let lockInputs = flakeLockPinnedRevisions(lockText)
@@ -99804,7 +99834,7 @@ proc verifyFlakeLockAgainstSiblings(repoRoot, workspaceRoot: string;
     result.stale = true
     result.evidence = "flake-lock-unreadable: " & lockInputs.diagnostic
     result.remediation = flakeRoot & "/flake.lock: " & lockInputs.diagnostic &
-      "; restore it from git (`git -C " & flakeRoot &
+      "; restore it from git (`git -C " & remedyPathWord(flakeRoot) &
       " checkout -- flake.lock`) or regenerate it with `nix flake lock`, " &
       "then re-push"
     result.summary = "flake.lock could not be verified: " &
@@ -99879,7 +99909,7 @@ proc verifyFlakeLockAgainstSiblings(repoRoot, workspaceRoot: string;
       " could not be resolved (" & selection.refusals.join("; ") &
       "), so which flake inputs are substituted is UNKNOWN and " &
       "flake.lock could not be verified; repair the workspace (`repro " &
-      "workspace status --workspace-root=" & workspaceRoot &
+      "workspace status --workspace-root=" & remedyPathWord(workspaceRoot) &
       "`) and re-push"
     result.summary = "flake.lock could not be verified: the develop set " &
       "could not be resolved"
@@ -100224,7 +100254,8 @@ proc runFlakeOverrideStatusCommand*(args: openArray[string]): int =
   if (not applied) and appliedArgs.len > 0:
     refusals.add("an argument vector was supplied after `--`, but " &
       "`--applied` was not given, so nothing would read it. Re-run as " &
-      "`repro flake override-status --applied -- " & appliedArgs.join(" ") &
+      "`repro flake override-status --applied -- " &
+      appliedArgs.mapIt(quoteShellPosix(it)).join(" ") &
       "`.")
     return refuse()
 
@@ -100275,7 +100306,7 @@ proc runFlakeOverrideStatusCommand*(args: openArray[string]): int =
     lockProbe = readFile(flakeRoot / "flake.lock")
   except CatchableError as err:
     refusals.add(flakeRoot & "/flake.lock could not be read (" & err.msg &
-      "). Remedy: `chmod +r " & flakeRoot & "/flake.lock`.")
+      "). Remedy: `chmod +r " & remedyPathWord(flakeRoot / "flake.lock") & "`.")
     return refuse()
   let lockInputs = flakeLockPinnedRevisions(lockProbe)
   if lockInputs.ok and lockInputs.pins.len == 0 and

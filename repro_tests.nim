@@ -18601,7 +18601,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g04",
+    group: "t_group_tests_integration_g03",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_dev_shell_override_guards.nim",
@@ -19316,7 +19316,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g05",
+    group: "t_group_tests_integration_g04",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_executed_binary_is_a_recorded_input.nim",
@@ -19472,6 +19472,17 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     selfInterposes: false,
     group: "",
     singleReason: "suite-scope statement runs at every start-up: let savedPath = getEnv(\"PATH\")"),
+  TestSpec(
+    source: "tests/integration/t_flake_remedies_quote_paths_for_the_hook_shell.nim",
+    binary: "build/test-bin/t_flake_remedies_quote_paths_for_the_hook_shell",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "t_group_tests_integration_g05",
+    singleReason: ""),
   TestSpec(
     source: "tests/integration/t_force_push_of_any_declared_role_is_refused.nim",
     binary: "build/test-bin/t_force_push_of_any_declared_role_is_refused",

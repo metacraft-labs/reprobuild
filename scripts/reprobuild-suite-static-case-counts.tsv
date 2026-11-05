@@ -1777,6 +1777,7 @@ tests/integration/t_first_commit_of_a_repository_is_certifiable.nim	nim	1
 tests/integration/t_fixture_processes_are_reaped_by_witness.nim	nim	4
 tests/integration/t_flake_inputs_match_original_coordinates.nim	nim	5
 tests/integration/t_flake_override_resolution_uses_the_invoking_engine.nim	nim	3
+tests/integration/t_flake_remedies_quote_paths_for_the_hook_shell.nim	nim	2
 tests/integration/t_force_push_of_any_declared_role_is_refused.nim	nim	4
 tests/integration/t_framework_field_is_present_and_filtering_works.nim	nim	1
 tests/integration/t_gate_and_sync_consume_unified_locked_deps_regardless_of_source.nim	nim	1

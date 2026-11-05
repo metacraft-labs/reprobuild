@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 34,
-    "nimTestBinaries": 2671,
+    "nimTestBinaries": 2672,
     "pureUnitConsolidationGroups": 80,
     "pureUnitTests": 738,
     "staticallyDetectedRuntimeCompilerFlowTests": 137,
-    "testEntries": 2711
+    "testEntries": 2712
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1572,7 +1572,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 19,
-      "integration": 1480,
+      "integration": 1481,
       "platform/destructive": 169,
       "pure unit": 738,
       "unclassified": 305
@@ -1783,9 +1783,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2671,
+    "nimTestBinaryCount": 2672,
     "pythonTestFileCount": 40,
-    "testEntryCount": 2711
+    "testEntryCount": 2712
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -40274,6 +40274,24 @@
       "source": "tests/integration/t_flake_override_resolution_uses_the_invoking_engine.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 3,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_flake_remedies_quote_paths_for_the_hook_shell",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_cli_support",
+        "repro_test_support"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_flake_remedies_quote_paths_for_the_hook_shell.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 2,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

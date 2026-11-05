@@ -159,6 +159,19 @@ proc recipePinsExactly*(v: ConsistencyViolation): bool =
 proc flakeRevPinFile*(flakeRoot: string): string =
   if flakeRoot.len > 0: flakeRoot / "flake.nix" else: "the flake's flake.nix"
 
+proc remedyPathWord*(path: string; windowsHost = defined(windows)): string =
+  ## ``path`` as ONE word of a remedy the operator pastes into the shell the
+  ## managed hooks run under — `sh`, Git's own on Windows — so it is quoted
+  ## for a POSIX shell on every host. ``quoteShell`` quotes for the host the
+  ## generator runs on, and an unquoted `M:\m\ws` reaches `sh` as `M:mws`.
+  ##
+  ## On Windows every separator is spelled `/` as well, so every path in one
+  ## message is spelled the same way. Every remedy path goes through here;
+  ## a remedy that quotes one path with ``quoteShell`` and its neighbour with
+  ## this spells them two ways on Windows and leaves the first broken in `sh`.
+  let spelled = if windowsHost: path.replace('\\', '/') else: path
+  quoteShellPosix(spelled)
+
 proc lockUpdateCommand*(dependency, rev, repoRoot: string): string =
   ## THE spelling of `repro lock update` in every message: the dependency,
   ## the target revision when there is one, and the repo it runs against, so
@@ -166,9 +179,9 @@ proc lockUpdateCommand*(dependency, rev, repoRoot: string): string =
   ##
   ## It is printed in backticks, because it is a runnable command line (see
   ## ``flakeRevPinEditRemedy`` on what backticks promise here).
-  "repro lock update " & quoteShell(dependency) &
-    (if rev.len > 0: " --to " & rev else: "") &
-    (if repoRoot.len > 0: " --repo-root=" & quoteShell(repoRoot) else: "")
+  "repro lock update " & quoteShellPosix(dependency) &
+    (if rev.len > 0: " --to " & quoteShellPosix(rev) else: "") &
+    (if repoRoot.len > 0: " --repo-root=" & remedyPathWord(repoRoot) else: "")
 
 proc developDropCommand*(dependency, workspaceRoot, repoRoot: string):
     string =
@@ -177,11 +190,12 @@ proc developDropCommand*(dependency, workspaceRoot, repoRoot: string):
   ## and the repo whose per-project override document may hold one too, so
   ## the command runs unchanged from wherever the message was printed.
   ## Printed in backticks, like ``lockUpdateCommand``.
-  "repro develop --drop=" & quoteShell(dependency) &
-    (if workspaceRoot.len > 0: " --workspace-root=" & quoteShell(workspaceRoot)
+  "repro develop --drop=" & quoteShellPosix(dependency) &
+    (if workspaceRoot.len > 0:
+       " --workspace-root=" & remedyPathWord(workspaceRoot)
      else: "") &
     (if repoRoot.len > 0 and repoRoot != workspaceRoot:
-       " --project-root=" & quoteShell(repoRoot)
+       " --project-root=" & remedyPathWord(repoRoot)
      else: "")
 
 proc flakeRevPinEditRemedy*(input, declaredRev, observedRev,
@@ -222,7 +236,7 @@ proc flakeRevPinEditRemedy*(input, declaredRev, observedRev,
     "and lives there, so no refresh can move it — and re-locks the node " &
     "through nix, which is what recomputes its narHash (by hand: make that " &
     "edit, then `nix flake lock" &
-    (if flakeRoot.len > 0: " " & quoteShell(flakeRoot) else: "") &
+    (if flakeRoot.len > 0: " " & remedyPathWord(flakeRoot) else: "") &
     "`, or simply re-enter the dev shell)"
 
 proc flakeRelockInputCommand*(input, flakeRoot: string): string =
@@ -235,8 +249,8 @@ proc flakeRelockInputCommand*(input, flakeRoot: string): string =
   ## 2.32.8 — a node with `original.rev = A` and `locked.rev = B` under a
   ## `flake.nix` pinning `A` survives `nix flake lock` unchanged, and
   ## `nix flake update <input>` re-locks it to `A`).
-  "nix flake update " & input &
-    (if flakeRoot.len > 0: " --flake " & flakeRoot else: "")
+  "nix flake update " & quoteShellPosix(input) &
+    (if flakeRoot.len > 0: " --flake " & remedyPathWord(flakeRoot) else: "")
 
 proc isPathFormPin*(c: FlakeInputConstraint): bool =
   ## Is the exact revision written as the URL's path (`github:o/r/<sha>`)
@@ -958,8 +972,8 @@ proc repinExclusionViolation*(e: RepinConstraintExclusion):
   # (2) The temporary experiment.
   let back = if e.pinnedRev.len > 0: e.pinnedRev else: e.lockedRev
   let checkoutCmd =
-    if back.len > 0: "`git -C " & quoteShell(e.checkout) & " checkout " &
-      back & "`"
+    if back.len > 0: "`git -C " & remedyPathWord(e.checkout) & " checkout " &
+      quoteShellPosix(back) & "`"
     else: ""
   if e.overridden:
     result.remedies.add("If " & e.observed & " was a temporary experiment, " &
