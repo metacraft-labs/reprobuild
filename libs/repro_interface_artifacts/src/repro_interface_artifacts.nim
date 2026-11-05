@@ -2174,12 +2174,13 @@ proc writeToolUse(outp: var seq[byte]; useDef: InterfaceToolUse;
   if not omitRealizations:
     for provisioning in useDef.scoopProvisioning:
       outp.writeScoopProvisioning(provisioning, version, forFingerprint)
-  if version >= 30'u16:
-    outp.writeU32Le(uint32(if omitRealizations: 0 else:
-      useDef.environmentPrefixProvisioning.len))
-    if not omitRealizations:
-      for provisioning in useDef.environmentPrefixProvisioning:
-        outp.writeEnvironmentPrefixProvisioning(provisioning, forFingerprint)
+  # Not written into the fingerprint projection at all, not even as a zero
+  # count: a v30 interface fingerprints exactly as v29 did, which is what keeps
+  # every existing interface fingerprint and tool-identity key unchanged.
+  if version >= 30'u16 and not omitRealizations:
+    outp.writeU32Le(uint32(useDef.environmentPrefixProvisioning.len))
+    for provisioning in useDef.environmentPrefixProvisioning:
+      outp.writeEnvironmentPrefixProvisioning(provisioning, forFingerprint)
   outp.writeLocation(useDef.location, forFingerprint)
 
 proc readToolUse(bytes: openArray[byte]; pos: var int;

@@ -28,7 +28,12 @@
 ## the BuildPool ``capacity`` knob — the engine guarantees one
 ## ``ClientContext`` accessor per worker thread.
 
-import std/[net, os, parseutils, strutils, times, uri]
+import std/[monotimes, nativesockets, net, os, parseutils, strutils, times, uri]
+
+when defined(windows):
+  import std/winlean
+else:
+  import std/posix
 
 when defined(ssl):
   import wrappers/openssl
@@ -88,6 +93,16 @@ type
     receiveTimeoutMs*: int
       ## Per-read deadline; surfaced as ``HttpError`` if the upstream
       ## stalls. 30s default — large payloads on slow links still fit.
+    connectTimeoutMs: int
+      ## Deadline for opening a TCP connection, covering every address
+      ## the host name resolves to. It applies to every user of the pool,
+      ## not only binary-cache lookups. A cache whose address silently drops
+      ## packets (a firewalled or powered-off host, a stale address in
+      ## ``caches.conf``) would otherwise hold the caller for the
+      ## operating system's own connect timeout — about 130s on Linux —
+      ## when the caller's next step is to fall back to building. 5s
+      ## default: a reachable cache, even over a VPN, connects well
+      ## inside it, and it still leaves room for two lost SYNs.
 
   HttpError* = object of CatchableError
 
@@ -112,13 +127,27 @@ type
 const
   DefaultMaxConnections = 16
   DefaultReceiveTimeoutMs = 30_000
+  DefaultConnectTimeoutMs* = 5_000
 
 proc newHttpPool*(maxConnections = DefaultMaxConnections;
-                  receiveTimeoutMs = DefaultReceiveTimeoutMs): HttpPool =
+                  receiveTimeoutMs = DefaultReceiveTimeoutMs;
+                  connectTimeoutMs = DefaultConnectTimeoutMs): HttpPool =
+  ## ``connectTimeoutMs`` must be positive: there is deliberately no
+  ## "wait as long as the operating system does" setting, because that
+  ## is the unbounded stall the deadline exists to prevent.
+  if connectTimeoutMs <= 0:
+    raise newException(ValueError,
+      "connectTimeoutMs must be positive, got " & $connectTimeoutMs)
   HttpPool(
     connections: @[],
     maxConnections: maxConnections,
-    receiveTimeoutMs: receiveTimeoutMs)
+    receiveTimeoutMs: receiveTimeoutMs,
+    connectTimeoutMs: connectTimeoutMs)
+
+proc connectTimeoutMs*(pool: HttpPool): int =
+  ## The pool's connect deadline. Read-only: it is set, and checked to be
+  ## positive, only by ``newHttpPool``.
+  pool.connectTimeoutMs
 
 proc close*(pool: HttpPool) =
   if pool.isNil:
@@ -162,6 +191,111 @@ proc parseTarget*(url: string): ParsedUrl =
 # Connection lease
 # ---------------------------------------------------------------------------
 
+type ConnectWait = enum
+  cwFinished     ## the connect completed, successfully or not: read SO_ERROR
+  cwTimedOut     ## the deadline passed first
+  cwInterrupted  ## a signal interrupted the wait; wait again
+
+proc awaitConnect(fd: SocketHandle; remainingMs: int64): ConnectWait =
+  ## Waits for a pending non-blocking connect on ``fd`` to finish, for at
+  ## most ``remainingMs``. Raises ``OSError`` for a failure of the wait
+  ## itself other than an interruption by a signal.
+  let waitMs = cint(min(remainingMs, int64(high(cint))))
+  when defined(windows):
+    # Winsock reports a finished connect in the WRITE set when it
+    # succeeded and only in the EXCEPT set when it failed, so both sets
+    # are watched. A write-set-only wait never wakes for a refused
+    # connect and would report it as a timeout. Behaviour documented at
+    # https://learn.microsoft.com/en-us/windows/win32/api/winsock2/nf-winsock2-select
+    # (WSAPoll is not used: older Windows builds do not report a failed
+    # connect through it.)
+    var wr, ex: TFdSet
+    FD_ZERO(wr); FD_ZERO(ex)
+    FD_SET(fd, wr); FD_SET(fd, ex)
+    var tv = Timeval(tv_sec: int32(waitMs div 1000),
+                     tv_usec: int32((waitMs mod 1000) * 1000))
+    let rc = winlean.select(0, nil, addr wr, addr ex, addr tv)
+    if rc > 0: return cwFinished
+    if rc == 0: return cwTimedOut
+    raiseOSError(osLastError())
+  else:
+    # POSIX reports both outcomes as writability (a failure also raises
+    # POLLERR, which poll(2) reports whatever ``events`` asked for).
+    var pfd = TPollfd(fd: fd.cint, events: POLLOUT, revents: 0)
+    let rc = poll(addr pfd, 1, waitMs)
+    if rc > 0: return cwFinished
+    if rc == 0: return cwTimedOut
+    let err = osLastError()
+    if err.cint == EINTR: return cwInterrupted
+    raiseOSError(err)
+
+proc connectWithDeadline(sock: Socket; domain: Domain; host: string;
+                         port: Port; timeoutMs: int) =
+  ## Connects ``sock`` (created for address family ``domain``; ``net``
+  ## does not expose a socket's family) to ``host:port``, giving up once
+  ## ``timeoutMs`` has passed. The deadline is shared by every address
+  ## ``host`` resolves to, tried in resolver order as the blocking
+  ## ``net.connect`` does. Raises ``TimeoutError`` when the deadline passes
+  ## and ``OSError`` for any other failure (name resolution, refusal,
+  ## unreachable network), carrying the operating system's own message.
+  ##
+  ## Name resolution itself (``getaddrinfo``) is not bounded here; a
+  ## cache is normally named by an address or a host-local name.
+  ##
+  ## Not the standard library's timed ``connect`` (``net.connect`` with
+  ## ``timeout``), for three reasons. It stops at the first address whose
+  ## connect is pending, so a refusal that arrives later through
+  ## ``SO_ERROR`` is raised instead of falling through to the host's next
+  ## address the way the blocking connect did. On POSIX it reports a wait
+  ## interrupted by a signal (``EINTR``) as a timeout. And on Windows it
+  ## waits only for writability, which Winsock never signals for a failed
+  ## connect (see ``awaitConnect``), so a refused port would take the whole
+  ## deadline and be reported as a timeout.
+  ## Non-blocking connect protocol:
+  ## https://pubs.opengroup.org/onlinepubs/9799919799/functions/connect.html
+  ## The deadline is on the monotonic clock, so a wall-clock step neither
+  ## cuts the wait short nor extends it.
+  let fd = sock.getFd()
+  let deadline = getMonoTime() + initDuration(milliseconds = timeoutMs)
+  let aiList = getAddrInfo(host, port, domain)
+  defer: freeAddrInfo(aiList)
+  fd.setBlocking(false)
+  var lastError = OSErrorCode(0)
+  var ai = aiList
+  while ai != nil:
+    let started =
+      when defined(windows): winlean.connect(fd, ai.ai_addr, ai.ai_addrlen.SockLen)
+      else: posix.connect(fd, ai.ai_addr, ai.ai_addrlen.SockLen)
+    if started == 0:
+      fd.setBlocking(true)
+      return
+    let err = osLastError()
+    let pending =
+      when defined(windows): err.int32 == WSAEWOULDBLOCK
+      else: err.cint == EINPROGRESS
+    if not pending:
+      lastError = err
+      ai = ai.ai_next
+      continue
+    while true:
+      let remainingMs = (deadline - getMonoTime()).inMilliseconds
+      if remainingMs <= 0:
+        raise newException(TimeoutError, "connect timed out")
+      case awaitConnect(fd, remainingMs)
+      of cwFinished: break
+      of cwTimedOut: raise newException(TimeoutError, "connect timed out")
+      of cwInterrupted: continue
+    # The connect finished. ``SO_ERROR`` says how.
+    let soError = getSockOptInt(fd, SOL_SOCKET, SO_ERROR)
+    if soError == 0:
+      fd.setBlocking(true)
+      return
+    lastError = OSErrorCode(soError)
+    ai = ai.ai_next
+  if lastError.int == 0:
+    raise newException(OSError, "no address found for " & host)
+  raiseOSError(lastError)
+
 proc leaseConnection(pool: HttpPool; host: string; port: Port;
                      secure: bool): PooledConnection =
   ## Returns a cached connection for the (host, port) tuple if one is
@@ -172,10 +306,16 @@ proc leaseConnection(pool: HttpPool; host: string; port: Port;
     if not c.inUse and c.host == host and c.port == port and c.secure == secure:
       c.inUse = true
       return c
-  let sock = newSocket()
+  let sock = newSocket(AF_INET)
   try:
-    sock.connect(host, port)
+    connectWithDeadline(sock, AF_INET, host, port, pool.connectTimeoutMs)
+  except TimeoutError:
+    try: sock.close() except CatchableError: discard
+    raise newException(HttpError,
+      "connect to " & host & ":" & $int(port) & " timed out after " &
+      $pool.connectTimeoutMs & "ms")
   except OSError as e:
+    try: sock.close() except CatchableError: discard
     raise newException(HttpError,
       "connect to " & host & ":" & $int(port) & " failed: " & e.msg)
   if secure:
