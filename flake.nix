@@ -1250,14 +1250,40 @@
             ];
             RUNQUOTA_SRC = runquota-src;
             CODETRACER_RESULTS_SRC = nim-results-src;
+            # THE WHOLE SET codetracer's own ``ct-test`` build seeds, not a
+            # subset of it. ``src/ct_test``'s closure reaches four more sibling
+            # Nim packages than the two above, and codetracer's
+            # ``config.nims`` resolves every one of them through
+            # ``addPathIfDir`` — which, by design, adds nothing and says
+            # nothing when the variable is unset. The compile therefore does
+            # not fail at the seam; it fails minutes later naming a MODULE:
+            # with ``IO_MON_SRC`` absent this derivation died on
+            # ``src/ct_test/incremental/io_mon_capture.nim(83, 14) Error:
+            # cannot open file: io_mon/depfile`` (measured 2026-11-03 against
+            # ``codetracer-src`` 008950fa91), and the named file exists in
+            # every candidate io-mon revision — so the error points at the one
+            # thing that was never wrong. The rule that keeps this from
+            # recurring is to mirror the owning repo's seeding
+            # (codetracer ``nix/packages/default.nix``, the ``ct-test``
+            # buildPhase) rather than to add variables one compile error at a
+            # time.
+            IO_MON_SRC = "${io-mon-src}/src";
+            CODETRACER_TRACE_FORMAT_NIM_SRC = "${ct-trace-format-src}/src";
+            NIM_STACKABLE_HOOKS_SRC = "${nim-stackable-hooks-src}/src";
+            TEST_CERTIFICATES_TOOLS_SRC = "${test-certificates-tools-src}/src";
             # The compile is spelled out here rather than delegated to a script
             # in the codetracer checkout (which is how ``runquotaTools`` calls
             # ``scripts/build_apps.sh``) for one concrete reason: codetracer has
             # no such script, and adding one would make this derivation
             # unbuildable at the pinned revision until that script is pushed —
-            # i.e. an override-free ``nix develop`` would break. Keeping the
-            # invocation self-contained means this input can be pinned to any
-            # codetracer revision that carries ``src/ct_test``.
+            # i.e. an override-free ``nix develop`` would break.
+            #
+            # That self-containment does NOT make this input pinnable to any
+            # codetracer revision carrying ``src/ct_test``, which is what this
+            # comment claimed until 2026-11-05. It is pinnable to a revision
+            # whose ``src/ct_test`` closure needs no sibling source path beyond
+            # the ones seeded above — a condition this file has to keep in step
+            # with the pin by hand, and which it had already fallen out of.
             #
             # It intentionally mirrors the ``ct-test`` target in codetracer's
             # ``repro.nim``, which stays the graph's declaration of this binary.

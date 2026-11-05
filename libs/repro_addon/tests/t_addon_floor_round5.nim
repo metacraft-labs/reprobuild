@@ -151,9 +151,12 @@ suite "round 5, finding 1: EnvironmentFile= is read by the manager as root":
     check environmentFileProblem(dir / "e").len > 0
     # A root-owned file under root-owned, non-writable parents (/etc and /
     # on any build host).
-    if getFileInfo("/etc/passwd").id.device >= 0 and
-        fileExists("/etc/passwd"):
+    if fileExists("/etc/passwd"):
       check environmentFileProblem("/etc/passwd") == ""
+    # A link the user owns, in a directory the user owns: refused before
+    # its target is even looked at.
+    createSymlink("/etc/passwd", dir / "l")
+    check "not owned by root" in environmentFileProblem(dir / "l")
 
 suite "round 5, finding 2: sockets and other activators":
   test "Sockets= names only the profile's own socket units":
