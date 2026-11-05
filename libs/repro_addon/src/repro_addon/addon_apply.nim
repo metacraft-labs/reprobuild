@@ -539,12 +539,6 @@ proc effectiveFloor*(r: SystemResource): string =
     if e.strip().startsWith(WholeFloorException & ":"): return ""
   if r.suFloorVersion.len > 0: r.suFloorVersion else: FloorVersion
 
-const NoHostRoot = "/nonexistent"
-  ## A root with no account databases (the conventional home of a system
-  ## account that has none): ``hostAccountLookup(NoHostRoot, p)`` knows only
-  ## the accounts the profile ``p`` creates, so a profile parses the same on
-  ## every host.
-
 proc floorAccountRefusal*(p: SystemProfile; r: SystemResource): string =
   ## Why the account the floored unit ``r`` of ``p`` runs as breaks the
   ## floor, as far as the profile alone says (A9 review round 6, finding
@@ -557,7 +551,9 @@ proc floorAccountRefusal*(p: SystemProfile; r: SystemResource): string =
   ## file, which any instance may start) is refused, since it may be root.
   ## Exceptions lift the spelling rules (``service_floor``), never these. An
   ## account neither root nor the profile's is left to the effective-unit
-  ## check, which reads the host's databases.
+  ## check, which reads the host's databases. The parse-time lookup is the
+  ## profile's alone (``profileAccountLookup``), so a profile parses the same
+  ## on every host.
   when mutated("floor-static-r3-disabled") or mutated("floor-unchecked"):
     return ""
   # The unit as the floor renders it: a unit without an account gets the
@@ -597,7 +593,7 @@ proc floorAccountRefusal*(p: SystemProfile; r: SystemResource): string =
         "cannot resolve for " & r.suName & "; a floored unit may not"
   let a = resolveServiceAccount(user, group, supplementary.join(" "),
     dynamic in ["yes", "true", "1", "on"], r.suName,
-    hostAccountLookup(NoHostRoot, p))
+    profileAccountLookup(p))
   if a.uid == 0:
     return "User=" & user & " runs the service as root (uid 0, the " &
       "account systemd resolves it to); a floored unit may not (only " &
