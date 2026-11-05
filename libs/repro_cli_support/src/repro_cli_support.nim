@@ -43127,10 +43127,45 @@ type
     cloneFailed*: int ## a newly-declared repo could not be cloned.
     refused*: int     ## refuse-and-report (dirty / locally unpublished).
     failed*: int      ## a mutating action failed.
+    unknown*: int
+      ## A row whose ``executionStatus`` this summariser does not recognise.
+      ##
+      ## Every status the executor produces today has its own bucket, so this
+      ## reads zero on every correct run. It exists so that a status added
+      ## later, or one reaching the digest from a path the classification was
+      ## not updated for, is counted as what it is. Folding it into ``noop``
+      ## would report "I do not know what happened" as "nothing needed doing"
+      ## (rendered *up-to-date*), the one reading that stops anyone looking.
+
+  SyncStatusBucket = enum
+    ## The digest bucket an ``executionStatus`` string belongs to, decided in
+    ## exactly one place so the action overrides in ``summarize`` cannot
+    ## disagree with the status switch about which statuses exist.
+    ssbSucceeded, ssbCloned, ssbSkipped, ssbCloneFailed, ssbRefused,
+    ssbFailed, ssbNoop, ssbUnknown
+
+proc syncStatusBucket(executionStatus: string): SyncStatusBucket =
+  case executionStatus
+  of "succeeded": ssbSucceeded
+  of "cloned": ssbCloned
+  of "skipped": ssbSkipped
+  of "clone_failed", "declared_branch_missing": ssbCloneFailed
+  of "refused": ssbRefused
+  of "failed": ssbFailed
+  of "noop": ssbNoop
+  else: ssbUnknown
 
 proc summarize*(report: WorkspaceSyncReport): WorkspaceSyncSummary =
   result.total = report.repos.len
   for entry in report.repos:
+    let bucket = syncStatusBucket(entry.executionStatus)
+    # An unrecognised status is counted before the action overrides below,
+    # because they test only for the known failure statuses: an unknown status
+    # on a ``force_reset`` row would otherwise be reported as a completed
+    # overwrite, and on any other row as up-to-date. Neither is known.
+    if bucket == ssbUnknown:
+      inc result.unknown
+      continue
     # ``force_reset`` is tested BEFORE the status switch, and that ordering is
     # the whole fix. A successful ``--force-sync`` overwrite reports
     # ``executionStatus = "succeeded"``, so the switch claimed it on its
@@ -43142,8 +43177,8 @@ proc summarize*(report: WorkspaceSyncReport): WorkspaceSyncSummary =
     #
     # A force-reset that FAILED or was REFUSED is not a force-reset, so those
     # statuses fall through to the switch and are counted as what they are.
-    if entry.action == "force_reset" and entry.executionStatus notin
-        ["failed", "clone_failed", "declared_branch_missing", "refused"]:
+    if entry.action == "force_reset" and bucket notin
+        {ssbFailed, ssbCloneFailed, ssbRefused}:
       inc result.forceReset
       continue
     # Same shape, same reason, for the OTHER action that moves a branch onto
@@ -43153,19 +43188,19 @@ proc summarize*(report: WorkspaceSyncReport): WorkspaceSyncSummary =
     # 12 repos reset onto a rewritten remote by one run, digest line
     # ``updated 61 … force-reset 0, skipped 0`` — every one of the 12 hidden
     # inside ``updated``.
-    if entry.action == "force_push_rebase" and entry.executionStatus notin
-        ["failed", "clone_failed", "declared_branch_missing", "refused"]:
+    if entry.action == "force_push_rebase" and bucket notin
+        {ssbFailed, ssbCloneFailed, ssbRefused}:
       inc result.rebased
       continue
-    case entry.executionStatus
-    of "succeeded": inc result.succeeded
-    of "cloned": inc result.cloned
-    of "skipped": inc result.skipped
-    of "clone_failed", "declared_branch_missing": inc result.cloneFailed
-    of "refused": inc result.refused
-    of "failed": inc result.failed
-    of "noop": inc result.noop
-    else: inc result.noop
+    case bucket
+    of ssbSucceeded: inc result.succeeded
+    of ssbCloned: inc result.cloned
+    of ssbSkipped: inc result.skipped
+    of ssbCloneFailed: inc result.cloneFailed
+    of ssbRefused: inc result.refused
+    of ssbFailed: inc result.failed
+    of ssbNoop: inc result.noop
+    of ssbUnknown: inc result.unknown
 
 proc toJsonNode*(summary: WorkspaceSyncSummary): JsonNode =
   result = newJObject()
@@ -43179,6 +43214,7 @@ proc toJsonNode*(summary: WorkspaceSyncSummary): JsonNode =
   result["cloneFailed"] = %summary.cloneFailed
   result["refused"] = %summary.refused
   result["failed"] = %summary.failed
+  result["unknown"] = %summary.unknown
 
 proc toJsonNode*(report: WorkspaceSyncReport): JsonNode =
   result = newJObject()
@@ -43307,7 +43343,13 @@ proc renderSyncSummaryLines*(report: WorkspaceSyncReport): seq[string] =
     ", skipped " & $s.skipped &
     (if s.cloneFailed > 0: ", CLONE FAILED " & $s.cloneFailed else: "") &
     ", refused " & $s.refused &
-    ", failed " & $s.failed & " (" & $s.total & " repo(s))")
+    ", failed " & $s.failed &
+    # Rendered only when non-zero, and in capitals like ``CLONE FAILED``: it
+    # reads zero on every correct run, so an unconditional term would only
+    # lengthen the line, while a non-zero one is an alarm that must not be
+    # read past. ``--json`` always carries the counter, zero included.
+    (if s.unknown > 0: ", UNKNOWN STATUS " & $s.unknown else: "") &
+    " (" & $s.total & " repo(s))")
 
 proc renderSyncTextLines*(report: WorkspaceSyncReport;
     verbose = false): seq[string] =

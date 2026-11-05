@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 34,
-    "nimTestBinaries": 2661,
+    "nimTestBinaries": 2662,
     "pureUnitConsolidationGroups": 79,
-    "pureUnitTests": 735,
+    "pureUnitTests": 736,
     "staticallyDetectedRuntimeCompilerFlowTests": 136,
-    "testEntries": 2701
+    "testEntries": 2702
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1233,7 +1233,7 @@
       "targetOs": "soAny"
     },
     {
-      "count": 4,
+      "count": 5,
       "defines": [],
       "dependencyShape": [
         "repro_cli_support"
@@ -1243,7 +1243,8 @@
         "tests/unit/t_capabilities.nim",
         "tests/unit/t_da1i_evidence_help_names_the_hazard.nim",
         "tests/unit/t_recipe_lock_consistency_check.nim",
-        "tests/unit/t_recipe_pin_edit.nim"
+        "tests/unit/t_recipe_pin_edit.nim",
+        "tests/unit/t_workspace_sync_summary_counts_an_unknown_status.nim"
       ],
       "targetOs": "soAny"
     },
@@ -1558,7 +1559,7 @@
       "graph-fixture": 19,
       "integration": 1475,
       "platform/destructive": 168,
-      "pure unit": 735,
+      "pure unit": 736,
       "unclassified": 304
     },
     "graphOwnedTestArtifacts": [
@@ -1767,9 +1768,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2661,
+    "nimTestBinaryCount": 2662,
     "pythonTestFileCount": 40,
-    "testEntryCount": 2701
+    "testEntryCount": 2702
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -56123,6 +56124,23 @@
       "source": "tests/unit/t_workspace_settings_v1_decode.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 3,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_workspace_sync_summary_counts_an_unknown_status",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_cli_support"
+      ],
+      "owner": "tests/unit",
+      "requiresReproBinary": false,
+      "source": "tests/unit/t_workspace_sync_summary_counts_an_unknown_status.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 4,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

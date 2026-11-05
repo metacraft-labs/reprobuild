@@ -28534,7 +28534,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_unit_g04",
+    group: "t_group_tests_unit_g03",
     singleReason: ""),
   TestSpec(
     source: "tests/unit/t_measurement_axes.nim",
@@ -29243,6 +29243,17 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "tests/unit/t_workspace_settings_v1_decode.nim",
     binary: "build/test-bin/t_workspace_settings_v1_decode",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "t_group_tests_unit_g04",
+    singleReason: ""),
+  TestSpec(
+    source: "tests/unit/t_workspace_sync_summary_counts_an_unknown_status.nim",
+    binary: "build/test-bin/t_workspace_sync_summary_counts_an_unknown_status",
     defines: @[],
     requiresReproBinary: false,
     extraPassC: @[],

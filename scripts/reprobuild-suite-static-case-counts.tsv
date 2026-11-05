@@ -2669,6 +2669,7 @@ tests/unit/t_windows_archiver_bundle_selection.nim	nim	5
 tests/unit/t_windows_system_hash_mode.nim	nim	2
 tests/unit/t_workspace_root_for_repo_managed_worktree.nim	nim	1
 tests/unit/t_workspace_settings_v1_decode.nim	nim	3
+tests/unit/t_workspace_sync_summary_counts_an_unknown_status.nim	nim	4
 tests/unit/test_bootstrap_dry_run_outputs.py	python	2
 tests/unit/test_build_report_attribution.py	python	20
 tests/unit/test_bump_version.py	python	6
