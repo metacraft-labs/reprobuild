@@ -98,7 +98,7 @@ mkdir -p build/test-bin
 gate_defines=()
 gate_tag=""
 case "${REPRO_ADDON_MUTATION:-}" in
-  check-silence-as-idle|check-skips-attestation|lag-detector-disabled)
+  check-silence-as-idle|check-skips-attestation|lag-detector-disabled|lag-from-newest-copy|check-ignores-ship-delay|check-status-ignores-silence|check-forgets-enrolled-key)
     gate_defines=(--define:reproAddonMutation="$REPRO_ADDON_MUTATION")
     gate_tag="-$REPRO_ADDON_MUTATION" ;;
 esac
