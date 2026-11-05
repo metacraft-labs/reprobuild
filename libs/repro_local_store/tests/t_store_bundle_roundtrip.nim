@@ -233,7 +233,7 @@ suite "store bundle round trip":
       opts.zstdLevel = 1
       let exported = exportBundle(computeClosure(f.roots), opts)
       f.wipe()
-      let last = f.outDir / exported.parts[^1].name
+      let last = f.outDir / exported.parts[^1].file
       var bytes = readFile(last)
       bytes[0] = char(ord(bytes[0]) xor 0xff)
       writeFile(last, bytes)

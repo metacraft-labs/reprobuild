@@ -23,6 +23,7 @@ import repro_core
 import repro_cli_support/workspace_restore
 import repro_cli_support/repository_identities
 import repro_cli_support/store_bundle_cli
+import repro_cli_support/bundle_cli
 # W8-R1/R2 — the one canonicalization the deleting consumers in this file ask
 # their containment question under. Imported by MODULE rather than folded into
 # `repro_core`'s re-exports on purpose: it is wanted at four named sites here
@@ -511,6 +512,8 @@ proc renderUsage*(programName: string): string =
       " stats [status|overview|rank|show|snapshot|compare]\n       " &
           programName &
       " store {gc | recover | roots | list | closure | export | import | daemon} ...\n       " &
+          programName &
+      " bundle {create | publish | restore} ...\n       " &
           programName &
       " self {install | provision | hold | which | list | prune-roots} ...\n       " &
           programName &
@@ -102987,6 +102990,15 @@ proc runThinAppDispatch(programName: string): int =
       else:
         @[]
     return cli_selfhost.runSelfCommand(selfArgs)
+  if programName == "repro" and args.len > 0 and args[0] == "bundle":
+    # Workspace bundles (docs/workspace-bundles.md).
+    return runBundleCommand(args[1 .. ^1], BundleCliHooks(
+      resolveActionCacheRoot: proc (explicit: string): string =
+        resolveActionCacheRoot(explicit),
+      allowProject: proc (projectRoot: string): int =
+        runReproAllowCommand([projectRoot]),
+      workspaceRootFor: proc (startPath: string): string =
+        enclosingWorkspaceRoot(startPath)))
   if programName == "repro" and args.len > 0 and args[0] == "store":
     let storeArgs =
       if args.len > 1:

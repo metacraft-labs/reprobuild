@@ -556,6 +556,10 @@ for libName in [
   # opening SQLite. `repro_cli_support` imports it for `repro self`, and
   # `apps/repro-trampoline` is the launcher.
   "repro_selfhost",
+  # Workspace bundles: create, publish and restore a workspace selection's
+  # Nix closure, sources and native store (docs/workspace-bundles.md).
+  # ``repro_cli_support`` imports it for `repro bundle`.
+  "repro_bundle",
   # Incremental-Test-Runner M0b-3: the former vendored ``repro_ct_incremental``
   # engine copy was DELETED. The ``repro watch --ct-incremental`` decision seam
   # now flows through the engine-free ``ct_incremental_adapter`` (resolved from

@@ -63,7 +63,7 @@ else:
   proc shellQuote(value: string): string =
     "'" & value.replace("'", "'\\''") & "'"
 
-  proc freezeDevEnv(projectRoot, storeRoot: string): FrozenDevEnv =
+  proc freezeDevEnv*(projectRoot, storeRoot: string): FrozenDevEnv =
     ## §6: run the ordinary hook export once, now, and keep its output. The
     ## export runs with auto-allow because the person producing the bundle is
     ## the one consenting here; the importing side consents separately
