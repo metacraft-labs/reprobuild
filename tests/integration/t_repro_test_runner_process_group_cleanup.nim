@@ -76,6 +76,15 @@ proc appendExternalRecord(role, label: string; pid: int; port = 0) =
     $port)
   file.close()
 
+proc publishOwnerToken() =
+  ## The controller polls for the token file and reads it as soon as it
+  ## exists, so it must never be visible before its bytes are complete:
+  ## write a sibling and rename it onto the polled path.
+  let tokenPath = getEnv("REPRO_TREE_TOKEN_FILE")
+  let partialPath = tokenPath & ".partial"
+  writeFile(partialPath, getEnv("REPRO_TEST_RUNNER_OWNER_TOKEN"))
+  moveFile(partialPath, tokenPath)
+
 proc runCommand(exe: string; args: openArray[string]):
     tuple[code: int; output: string] =
   let command = (@[exe] & @args).mapIt(quoteShell(it)).join(" ")
@@ -160,9 +169,8 @@ if params.len == 0 and
     getEnv("REPRO_TREE_MODE") == "actual-daemon-boundary":
   appendRecord("root", label)
   appendExternalRecord("supervisor", label, int(getppid()))
-  let tokenPath = getEnv("REPRO_TREE_TOKEN_FILE")
   let continuePath = getEnv("REPRO_TREE_CONTINUE_FILE")
-  writeFile(tokenPath, getEnv("REPRO_TEST_RUNNER_OWNER_TOKEN"))
+  publishOwnerToken()
   for _ in 0 ..< 1000:
     if fileExists(continuePath):
       break
@@ -402,9 +410,8 @@ elif getEnv("REPRO_TREE_MODE") == "detached-respawn":
   quit(97)
 elif getEnv("REPRO_TREE_MODE") == "owner-token-handshake":
   appendRecord("root", label)
-  let tokenPath = getEnv("REPRO_TREE_TOKEN_FILE")
   let continuePath = getEnv("REPRO_TREE_CONTINUE_FILE")
-  writeFile(tokenPath, getEnv("REPRO_TEST_RUNNER_OWNER_TOKEN"))
+  publishOwnerToken()
   for _ in 0 ..< 1000:
     if fileExists(continuePath):
       quit(0)
@@ -462,6 +469,15 @@ proc listenOnLoopback(): tuple[socket: Socket; port: int] =
 proc waitForever() =
   while true:
     sleep(1000)
+
+proc publishOwnerToken() =
+  ## The controller polls for the token file and reads it as soon as it
+  ## exists, so it must never be visible before its bytes are complete:
+  ## write a sibling and rename it onto the polled path.
+  let tokenPath = getEnv("REPRO_TREE_TOKEN_FILE")
+  let partialPath = tokenPath & ".partial"
+  writeFile(partialPath, getEnv("REPRO_TEST_RUNNER_OWNER_TOKEN"))
+  moveFile(partialPath, tokenPath)
 
 proc emitCatalog() =
   var node = newJObject()
@@ -527,8 +543,7 @@ elif params[0] == "--run" and params.len >= 2:
     stderr.writeLine "unknown case " & params[1]
     quit(1)
   appendRecord("root", label)
-  writeFile(getEnv("REPRO_TREE_TOKEN_FILE"),
-    getEnv("REPRO_TEST_RUNNER_OWNER_TOKEN"))
+  publishOwnerToken()
   let continuePath = getEnv("REPRO_TREE_CONTINUE_FILE")
   var released = false
   for _ in 0 ..< 3000:
