@@ -436,22 +436,7 @@
       "targetOs": "soAny"
     },
     {
-      "count": 3,
-      "defines": [],
-      "dependencyShape": [
-        "repro_interface_artifacts",
-        "repro_project_dsl"
-      ],
-      "owner": "libs/repro_interface_artifacts",
-      "sources": [
-        "libs/repro_interface_artifacts/tests/t_envelope_versions_do_not_collide.nim",
-        "libs/repro_interface_artifacts/tests/t_l3_lift_carries_service_and_activity_signatures.nim",
-        "libs/repro_interface_artifacts/tests/test_catalog_composition_is_order_independent.nim"
-      ],
-      "targetOs": "soAny"
-    },
-    {
-      "count": 5,
+      "count": 6,
       "defines": [],
       "dependencyShape": [
         "repro_core",
@@ -461,11 +446,26 @@
       ],
       "owner": "libs/repro_interface_artifacts",
       "sources": [
+        "libs/repro_interface_artifacts/tests/t_envelope_versions_do_not_collide.nim",
         "libs/repro_interface_artifacts/tests/t_l3_service_activity_codec_roundtrip.nim",
         "libs/repro_interface_artifacts/tests/t_l4_identity_and_scope_cross_the_lift.nim",
         "libs/repro_interface_artifacts/tests/t_l6_compatibility_major_crosses_the_lift.nim",
         "libs/repro_interface_artifacts/tests/t_rp4_resource_codec_roundtrip.nim",
         "libs/repro_interface_artifacts/tests/test_library_codec_roundtrip.nim"
+      ],
+      "targetOs": "soAny"
+    },
+    {
+      "count": 2,
+      "defines": [],
+      "dependencyShape": [
+        "repro_interface_artifacts",
+        "repro_project_dsl"
+      ],
+      "owner": "libs/repro_interface_artifacts",
+      "sources": [
+        "libs/repro_interface_artifacts/tests/t_l3_lift_carries_service_and_activity_signatures.nim",
+        "libs/repro_interface_artifacts/tests/test_catalog_composition_is_order_independent.nim"
       ],
       "targetOs": "soAny"
     },
@@ -17472,14 +17472,16 @@
       "defines": [],
       "language": "nim",
       "localDependencyShape": [
+        "repro_core",
+        "repro_hash",
         "repro_interface_artifacts",
         "repro_project_dsl"
       ],
       "owner": "libs/repro_interface_artifacts",
       "requiresReproBinary": false,
       "source": "libs/repro_interface_artifacts/tests/t_envelope_versions_do_not_collide.nim",
-      "sourceSuiteCount": 6,
-      "staticCaseCount": 10,
+      "sourceSuiteCount": 7,
+      "staticCaseCount": 14,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

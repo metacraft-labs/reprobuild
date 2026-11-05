@@ -1205,15 +1205,22 @@ static:
 
 const
   EnvelopeMagic = [byte(ord('R')), byte(ord('B')), byte(ord('S')), byte(ord('Z'))]
-  EnvelopeVersion = 30'u16
-    ## v30 (current): ``InterfaceToolUse`` retains
-    ##                ``environmentPrefixProvisioning`` (Package-Model.md
-    ##                §"Environment-provided library prefixes"), a count and
-    ##                its records after ``scoopProvisioning``. Like every
-    ##                realization it is left out of the fingerprint
-    ##                projection, and the realization digest appends it only
-    ##                when non-empty, so an artifact without one keeps its
-    ##                v29 fingerprints to the byte.
+  EnvelopeVersion = 31'u16
+    ## v31 (current): the wire payload is v30's. The fingerprint projection
+    ##                of a tool use carries no environment-prefix block at
+    ##                all, so every interface fingerprint -- and every key
+    ##                hashed from one, the tool-identity cache key among
+    ##                them -- is the one v29 computed. The realization digest
+    ##                appends the block only when non-empty, so a use without
+    ##                an arm keeps that digest too.
+    ## v30: ``InterfaceToolUse`` retains ``environmentPrefixProvisioning``
+    ##                (Package-Model.md §"Environment-provided library
+    ##                prefixes"), a count and its records after
+    ##                ``scoopProvisioning``. Its fingerprint projection writes
+    ##                a zero count for that block in every tool use, so a v30
+    ##                fingerprint differs from v29's for any interface with a
+    ##                tool use; a v30 envelope is verified against that
+    ##                projection.
     ## v29: retains ``InterfaceProvisioningContribution.imported``
     ##                (one byte after ``developInterface``; ReproOS M7
     ##                deliverable 4). Introduced as "v18" on the campaign
@@ -2174,7 +2181,16 @@ proc writeToolUse(outp: var seq[byte]; useDef: InterfaceToolUse;
   if not omitRealizations:
     for provisioning in useDef.scoopProvisioning:
       outp.writeScoopProvisioning(provisioning, version, forFingerprint)
-  if version >= 30'u16:
+  # The environment-prefix block (v30). From v31 the fingerprint projection
+  # leaves it out entirely -- not even a zero count -- so the projection of
+  # every tool use is the v29 one and no fingerprint (nor any key hashed
+  # from one) moves with the arm's arrival. v30's projection carried the
+  # zero count and still does here: the fingerprint stored in a v30 envelope
+  # was computed over it, and the decoder recomputes it at the envelope's
+  # own version.
+  let envPrefixBlock = version >= 30'u16 and
+    (not forFingerprint or version == 30'u16)
+  if envPrefixBlock:
     outp.writeU32Le(uint32(if omitRealizations: 0 else:
       useDef.environmentPrefixProvisioning.len))
     if not omitRealizations:
