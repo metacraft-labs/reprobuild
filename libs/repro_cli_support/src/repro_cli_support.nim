@@ -5309,11 +5309,25 @@ proc fetchLockPinnedProducer*(dep: LockedDep; workspaceRoot: string): string =
   proc verifyRevisionIntegrity() =
     verifyLockPinnedProducerSource(dep, checkoutRoot, workspaceRoot)
 
-  # Reuse an already-materialized + verified checkout for the SAME pin.
+  proc headReachesACommit(): bool =
+    # Ask the checkout's own repository: Git's discovery skips an invalid
+    # ``.git`` and would otherwise answer for an enclosing workspace checkout.
+    git(["--git-dir=" & (checkoutRoot / ".git"), "rev-parse", "--verify",
+      "--quiet", "--end-of-options", "HEAD^{commit}"]).code == 0
+
+  # Reuse an already-materialized checkout for the SAME pin, verifying it
+  # first. Materialization sets HEAD only in its final step, the detached
+  # checkout of the pin, so a ``.git`` whose HEAD reaches no commit at all is
+  # the remains of a run that stopped before finishing (killed, or a fetch
+  # that never delivered the pin). Nothing has been built from it; rebuild it
+  # below rather than report a lock mismatch neither remedy can fix. A HEAD
+  # that reaches some OTHER commit is a finished checkout that was moved, and
+  # the verification refuses it.
   if dirExists(extendedPath(checkoutRoot / ".git")) or
       fileExists(extendedPath(checkoutRoot / ".git")):
-    verifyRevisionIntegrity()
-    return checkoutRoot
+    if headReachesACommit():
+      verifyRevisionIntegrity()
+      return checkoutRoot
 
   createDir(extendedPath(parentDir(checkoutRoot)))
   # A partially-materialized directory from a prior interrupted fetch is not
@@ -5322,32 +5336,48 @@ proc fetchLockPinnedProducer*(dep: LockedDep; workspaceRoot: string): string =
     removeDir(extendedPath(checkoutRoot))
   createDir(extendedPath(checkoutRoot))
 
+  proc fail(detail: string) =
+    # Leave no directory behind: a later run must start over, never find a
+    # repository that looks materialized but does not hold the pin.
+    try:
+      removeDir(extendedPath(checkoutRoot))
+    except OSError:
+      discard
+    raise newException(OSError,
+      "cross-repo producer \"" & dep.name & "\" " & detail)
+
   # Initialize an empty repo and fetch exactly the pinned revision from the
   # remote, then check it out detached. ``git fetch <url> <rev>`` fetches the
   # single commit (and its reachable tree) without needing a named branch — the
   # minimal fetch the pinned-revision contract needs.
   var step = git(["-C", checkoutRoot, "init", "--quiet"])
   if step.code != 0:
-    raise newException(OSError,
-      "cross-repo producer \"" & dep.name &
-      "\" fetch failed: could not initialize a checkout at " & checkoutRoot &
+    fail("fetch failed: could not initialize a checkout at " & checkoutRoot &
       ": " & step.output.strip())
   step = git(["-C", checkoutRoot, "fetch", "--quiet", "--depth", "1", url,
     revision])
   if step.code != 0:
     # A remote that cannot serve a bare revision by SHA (some servers reject
     # ``fetch <sha>`` without ``uploadpack.allowReachableSHA1InWant``) — fall
-    # back to fetching everything, then checking out the pinned revision.
-    step = git(["-C", checkoutRoot, "fetch", "--quiet", url])
+    # back to fetching every branch and tag, then checking out the pinned
+    # revision. A bare ``fetch <url>`` takes only the remote's HEAD, which
+    # misses a pin that only a non-default branch reaches.
+    step = git(["-C", checkoutRoot, "fetch", "--quiet", url,
+      "+refs/heads/*:refs/remotes/pinned-source/*",
+      "+refs/tags/*:refs/tags/*"])
     if step.code != 0:
-      raise newException(OSError,
-        "cross-repo producer \"" & dep.name & "\" fetch failed from " & url &
-        " at pinned revision " & revision & ": " & step.output.strip())
+      fail("fetch failed from " & url & " at pinned revision " & revision &
+        ": " & step.output.strip())
+  step = git(["-C", checkoutRoot, "rev-parse", "--verify", "--quiet",
+    "--end-of-options", revision & "^{commit}"])
+  if step.code != 0:
+    fail("fetch from " & url & " did not deliver the pinned revision " &
+      revision & ": no branch or tag of the remote reaches it. Push the " &
+      "commit to the remote, or update the consumer lock to a revision the " &
+      "remote has.")
   step = git(["-C", checkoutRoot, "checkout", "--quiet", "--detach", revision])
   if step.code != 0:
-    raise newException(OSError,
-      "cross-repo producer \"" & dep.name &
-      "\" fetch succeeded but could not check out the pinned revision " &
+    fail("fetch succeeded but could not check out the pinned revision " &
       revision & " at " & checkoutRoot & ": " & step.output.strip())
 
   # Verify integrity AFTER materialization — a tampered integrity or an

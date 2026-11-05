@@ -12114,7 +12114,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_cli_support/tests/t_catalog_preparation_anchor.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 4,
+      "staticCaseCount": 7,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
