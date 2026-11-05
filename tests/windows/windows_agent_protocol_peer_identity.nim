@@ -120,7 +120,12 @@ const AnonymousLogon = "AN" ## SDDL alias of S-1-5-7
 const Everyone = "WD"
 
 proc widened(alias: string): string =
-  ownerOnlySddl(ownSid) & "(A;;GA;;;" & alias & ")"
+  ## The owner-only DACL plus an allow for `alias`, and an Untrusted
+  ## mandatory label. The anonymous token runs at Untrusted integrity, and
+  ## an object with no label counts as Medium with no-write-up, so the
+  ## label is what lets the DACL's allow actually admit that token
+  ## (https://learn.microsoft.com/en-us/windows/win32/secauthz/mandatory-integrity-control).
+  ownerOnlySddl(ownSid) & "(A;;GA;;;" & alias & ")S:(ML;;NW;;;S-1-16-0)"
 
 # --- Cases -----------------------------------------------------------
 
