@@ -21046,6 +21046,95 @@ proc moveFileReplacing(source, dest: string) =
     removeFile(extendedPath(dest))
   moveFile(extendedPath(source), extendedPath(dest))
 
+const ChainedHookMissingProgramShell = """
+local_hook_missing_program() {
+  { sed -n '1s/^#![[:space:]]*\(\/[^[:space:]]*\).*$/\1/p' "$LOCAL_HOOK"
+    sed -n 's/^exec[[:space:]][[:space:]]*"\{0,1\}\(\/[^"[:space:]]*\).*$/\1/p' "$LOCAL_HOOK"
+  } 2>/dev/null | while IFS= read -r LOCAL_HOOK_PROGRAM; do
+    if [ ! -x "$LOCAL_HOOK_PROGRAM" ]; then
+      printf '%s\n' "$LOCAL_HOOK_PROGRAM"
+      break
+    fi
+  done
+}
+
+"""
+  ## Safeguard 6 of ``vcsDispatcherContent``: prints the first program the
+  ## chained ``<hook>.repro-local`` body names that does not exist, or
+  ## nothing. ``chainedHookMissingProgram`` is the same rule in Nim, for
+  ## ``repro health``; the two must agree.
+  ##
+  ## The bodies dev-shell installers chain there (the pre-commit framework's
+  ## shim, and scripts that ``exec`` it) name the tool by absolute Nix store
+  ## path, and nothing roots that path, so a garbage collection deletes it
+  ## and every commit or push then fails inside the hook with a bare
+  ## interpreter error. Two forms are certain to fail and are the only ones
+  ## read: an absolute interpreter on the ``#!`` line, and a line that starts
+  ## with ``exec`` followed by an absolute path. A path held in a variable is
+  ## not read, because a body that guards it (prek's shim tests ``-x`` and
+  ## falls back to ``PATH``) still starts; refusing it would block a hook
+  ## that works.
+
+proc chainedHookMissingProgram*(body: string): string =
+  ## The first program ``body`` names that does not exist, or ``""``: the
+  ## ``ChainedHookMissingProgramShell`` rule, read the same way.
+  proc absoluteToken(rest: string; quotes: bool): string =
+    var start = 0
+    if quotes and rest.len > 0 and rest[0] == '"':
+      start = 1
+    if start >= rest.len or rest[start] != '/':
+      return ""
+    var stop = start
+    while stop < rest.len and rest[stop] notin Whitespace and
+        not (quotes and rest[stop] == '"'):
+      inc stop
+    rest[start ..< stop]
+  var candidates: seq[string]
+  let lines = body.splitLines()
+  if lines.len > 0 and lines[0].startsWith("#!"):
+    let interpreter = absoluteToken(lines[0][2 .. ^1].strip(trailing = false),
+      quotes = false)
+    if interpreter.len > 0:
+      candidates.add(interpreter)
+  for line in lines:
+    if line.len > 5 and line.startsWith("exec") and line[4] in Whitespace:
+      let target = absoluteToken(line[5 .. ^1].strip(trailing = false),
+        quotes = true)
+      if target.len > 0:
+        candidates.add(target)
+  for candidate in candidates:
+    if dirExists(candidate):
+      continue
+    if not fileExists(candidate):
+      return candidate
+    let perms =
+      try: getFilePermissions(candidate)
+      except OSError: return candidate
+    if perms * {fpUserExec, fpGroupExec, fpOthersExec} == {}:
+      return candidate
+  ""
+
+proc chainedHookStartFinding(repoName, hooksDir, hookName: string): string =
+  ## ``repro health``'s ``chained-hooks`` finding for one hook, or ``""``:
+  ## names the hook and the program its ``<hook>.repro-local`` cannot start.
+  ## A body that is absent or not executable is not chained (the dispatcher
+  ## skips it), so it is not a finding.
+  let local = localHookPath(hooksDir, hookName)
+  if not fileExists(extendedPath(local)):
+    return ""
+  try:
+    if getFilePermissions(extendedPath(local)) *
+        {fpUserExec, fpGroupExec, fpOthersExec} == {}:
+      return ""
+    let missing = chainedHookMissingProgram(readFile(extendedPath(local)))
+    if missing.len > 0:
+      return repoName & "/" & hookName & " (" & hookName &
+        ".repro-local runs " & missing & ", which does not exist or is not " &
+        "executable)"
+  except CatchableError:
+    discard
+  ""
+
 const PreCommitProtectedStashPrefix* =
   "reprobuild pre-commit: unstaged work protected while hooks ran"
   ## The message every stash entry the ``pre-commit`` dispatcher records
@@ -21259,6 +21348,15 @@ proc vcsDispatcherContent(hookName: string; certificatePhase = false): string =
   ##      dispatcher is signalled, and names any entry a SIGKILL left behind
   ##      on the next commit. See ``PreCommitUnstagedWorkProtection``.
   ##      Signal traps exit 128+n, so an interrupted commit still fails.
+  ##   6. A chained hook that cannot start is refused with its cause. When the
+  ##      ``.repro-local`` body's ``#!`` interpreter, or the absolute program a
+  ##      line of it ``exec``s, is gone (typically a Nix store path a garbage
+  ##      collection deleted), running it would fail with a bare interpreter
+  ##      error from inside ``.git/hooks``. The dispatcher refuses instead,
+  ##      naming the file, the missing program and the repair. It refuses
+  ##      rather than skipping: the body is the repository's own checks, and a
+  ##      commit or push past them would be one nobody checked. See
+  ##      ``ChainedHookMissingProgramShell``.
   result = "#!/usr/bin/env sh\n"
   result.add("# " & VcsDispatcherMarker & "\n")
   result.add("# Dispatches preserved user hooks and Reprobuild-managed " &
@@ -21304,11 +21402,29 @@ proc vcsDispatcherContent(hookName: string; certificatePhase = false): string =
   # (1)+(3) Chained hooks run with both frameworks' migration guards unset.
   # (4) A generated framework shim is skipped when that framework is our
   # caller: it has run its checks already.
+  # (6) A chained body that names a program which no longer exists is refused
+  # with that cause before it runs. See ``ChainedHookMissingProgramShell``.
+  result.add(ChainedHookMissingProgramShell)
   result.add("run_local_hook() {\n")
   result.add("  [ -x \"$LOCAL_HOOK\" ] || return 0\n")
   result.add("  if [ \"$RUNNING_AS_LEGACY\" = 1 ] && grep -Eq " &
     "'^# File generated by (pre-commit|prek):' \"$LOCAL_HOOK\" 2>/dev/null; then\n")
   result.add("    return 0\n")
+  result.add("  fi\n")
+  result.add("  LOCAL_HOOK_MISSING=$(local_hook_missing_program)\n")
+  result.add("  if [ -n \"$LOCAL_HOOK_MISSING\" ]; then\n")
+  result.add("    echo \"repro hooks: refusing " & hookName &
+    ": the chained hook $LOCAL_HOOK cannot start, because the program it " &
+    "runs, $LOCAL_HOOK_MISSING, does not exist or is not executable.\" >&2\n")
+  result.add("    case \"$LOCAL_HOOK_MISSING\" in\n")
+  result.add("      /nix/store/*) echo \"repro hooks: it is a Nix store path, " &
+    "and garbage collection deletes a store path that no GC root holds.\" >&2 ;;\n")
+  result.add("    esac\n")
+  result.add("    echo \"repro hooks: re-enter this repository's dev shell so " &
+    "its hook installer writes " & hookName & ".repro-local again, or delete " &
+    "$LOCAL_HOOK if nothing installs the " & hookName & " stage any more. " &
+    "'$REPRO_REMEDY_CMD health' lists every such hook.\" >&2\n")
+  result.add("    return 1\n")
   result.add("  fi\n")
   result.add("  (unset PRE_COMMIT_RUNNING_LEGACY PREK_RUNNING_LEGACY; " &
     "exec \"$LOCAL_HOOK\" \"$@\")\n")
@@ -76631,6 +76747,9 @@ proc gatherHealthChecksOverSettings(parsed: HealthArgs):
     var stale: seq[string]
     var pathUnsafe: seq[string]
     var retired: seq[string]
+    # Chained ``<hook>.repro-local`` bodies that cannot start, swept beside
+    # the managed hooks and reported in their own ``chained-hooks`` row.
+    var unstartable: seq[string]
     var okCount = 0
     var reposInspected = 0
     let enumerated = enumerateParticipatingRepos(parsed.workspaceRoot)
@@ -76640,6 +76759,8 @@ proc gatherHealthChecksOverSettings(parsed: HealthArgs):
       # 0 repos" would be an ``ok`` over a population nobody looked at, on the
       # one row an operator consults to learn whether the hooks are there.
       checks.add(skippedForUnresolvedManifest("vcs-hooks",
+        ctx.manifestRemedy))
+      checks.add(skippedForUnresolvedManifest("chained-hooks",
         ctx.manifestRemedy))
       break hooksCheck
     # Rendered ONCE for the whole sweep (see
@@ -76660,6 +76781,9 @@ proc gatherHealthChecksOverSettings(parsed: HealthArgs):
       for hookName in applicableVcsHookNames(repo.repoPath):
         let standard = hookPath(hooksDir, hookName)
         let managed = managedHookPath(hooksDir, hookName)
+        let chained = chainedHookStartFinding(repo.name, hooksDir, hookName)
+        if chained.len > 0:
+          unstartable.add(chained)
         # RETIRED: every place `ensureVcsHookDetailed` removes a retired
         # repo-workspaces file from, named file by file.
         var retiredFiles: seq[string]
@@ -76765,6 +76889,15 @@ proc gatherHealthChecksOverSettings(parsed: HealthArgs):
       # about the one repo in front of us, and answering ``ok`` "not
       # applicable" for it hid a gate that is off in every linked worktree.
       let target = gitTopLevel(parsed.workspaceRoot)
+      # So are its chained hooks: one that cannot start refuses every commit
+      # or push in this very repo.
+      if target.len > 0:
+        let targetHooksDir = gitHooksDir(target)
+        for hookName in applicableVcsHookNames(target):
+          let chained = chainedHookStartFinding(lastPathPart(target),
+            targetHooksDir, hookName)
+          if chained.len > 0:
+            unstartable.add(chained)
       let entry =
         if target.len == 0: ""
         else: hooksPathFindingLabel(target,
@@ -76902,6 +77035,36 @@ proc gatherHealthChecksOverSettings(parsed: HealthArgs):
         status: hsOk,
         detail: census &
           ", every body demanding the contract this build generates",
+        remedy: "", fixKind: hfNone))
+    # The chained bodies the dispatcher runs first. One that cannot start
+    # makes the dispatcher refuse every commit (pre-commit) or push
+    # (pre-push) of that repo, whatever the managed hook beside it says, so
+    # it is a ``fail``. Not ``--fix``-able: ``hooks ensure`` preserves the
+    # body as it finds it, and the program it names comes from whatever
+    # installed it — re-entering the dev shell, or deleting the body when
+    # nothing installs that stage any more, is the operator's call.
+    if unstartable.len > 0:
+      let fullChainedDetail = $unstartable.len & " chained hook(s) CANNOT " &
+        "START, so the dispatcher refuses that hook on every fire: " &
+        unstartable.join(", ")
+      let chainedDetail = $unstartable.len & " chained hook(s) CANNOT " &
+        "START, so the dispatcher refuses that hook on every fire: " &
+        formatFindingList(unstartable, parsed.verbose)
+      checks.add(HealthCheck(
+        name: "chained-hooks",
+        status: hsFail,
+        detail: chainedDetail,
+        fullDetail: if chainedDetail != fullChainedDetail: fullChainedDetail
+          else: "",
+        remedy: "re-enter each repository's dev shell so its hook installer " &
+          "rewrites <hook>.repro-local, or delete a <hook>.repro-local that " &
+          "nothing installs any more",
+        fixKind: hfNone))
+    else:
+      checks.add(HealthCheck(
+        name: "chained-hooks",
+        status: hsOk,
+        detail: "every chained <hook>.repro-local names programs that exist",
         remedy: "", fixKind: hfNone))
 
   # 8c. PG-14 — WHICH `repro` services those hooks, and whether the answer is
