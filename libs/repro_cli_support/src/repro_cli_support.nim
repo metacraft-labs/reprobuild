@@ -43127,10 +43127,45 @@ type
     cloneFailed*: int ## a newly-declared repo could not be cloned.
     refused*: int     ## refuse-and-report (dirty / locally unpublished).
     failed*: int      ## a mutating action failed.
+    unknown*: int
+      ## A row whose ``executionStatus`` this summariser does not recognise.
+      ##
+      ## Every status the executor produces today has its own bucket, so this
+      ## reads zero on every correct run. It exists so that a status added
+      ## later, or one reaching the digest from a path the classification was
+      ## not updated for, is counted as what it is. Folding it into ``noop``
+      ## would report "I do not know what happened" as "nothing needed doing"
+      ## (rendered *up-to-date*), the one reading that stops anyone looking.
+
+  SyncStatusBucket = enum
+    ## The digest bucket an ``executionStatus`` string belongs to, decided in
+    ## exactly one place so the action overrides in ``summarize`` cannot
+    ## disagree with the status switch about which statuses exist.
+    ssbSucceeded, ssbCloned, ssbSkipped, ssbCloneFailed, ssbRefused,
+    ssbFailed, ssbNoop, ssbUnknown
+
+proc syncStatusBucket(executionStatus: string): SyncStatusBucket =
+  case executionStatus
+  of "succeeded": ssbSucceeded
+  of "cloned": ssbCloned
+  of "skipped": ssbSkipped
+  of "clone_failed", "declared_branch_missing": ssbCloneFailed
+  of "refused": ssbRefused
+  of "failed": ssbFailed
+  of "noop": ssbNoop
+  else: ssbUnknown
 
 proc summarize*(report: WorkspaceSyncReport): WorkspaceSyncSummary =
   result.total = report.repos.len
   for entry in report.repos:
+    let bucket = syncStatusBucket(entry.executionStatus)
+    # An unrecognised status is counted before the action overrides below,
+    # because they test only for the known failure statuses: an unknown status
+    # on a ``force_reset`` row would otherwise be reported as a completed
+    # overwrite, and on any other row as up-to-date. Neither is known.
+    if bucket == ssbUnknown:
+      inc result.unknown
+      continue
     # ``force_reset`` is tested BEFORE the status switch, and that ordering is
     # the whole fix. A successful ``--force-sync`` overwrite reports
     # ``executionStatus = "succeeded"``, so the switch claimed it on its
@@ -43142,8 +43177,8 @@ proc summarize*(report: WorkspaceSyncReport): WorkspaceSyncSummary =
     #
     # A force-reset that FAILED or was REFUSED is not a force-reset, so those
     # statuses fall through to the switch and are counted as what they are.
-    if entry.action == "force_reset" and entry.executionStatus notin
-        ["failed", "clone_failed", "declared_branch_missing", "refused"]:
+    if entry.action == "force_reset" and bucket notin
+        {ssbFailed, ssbCloneFailed, ssbRefused}:
       inc result.forceReset
       continue
     # Same shape, same reason, for the OTHER action that moves a branch onto
@@ -43153,19 +43188,19 @@ proc summarize*(report: WorkspaceSyncReport): WorkspaceSyncSummary =
     # 12 repos reset onto a rewritten remote by one run, digest line
     # ``updated 61 … force-reset 0, skipped 0`` — every one of the 12 hidden
     # inside ``updated``.
-    if entry.action == "force_push_rebase" and entry.executionStatus notin
-        ["failed", "clone_failed", "declared_branch_missing", "refused"]:
+    if entry.action == "force_push_rebase" and bucket notin
+        {ssbFailed, ssbCloneFailed, ssbRefused}:
       inc result.rebased
       continue
-    case entry.executionStatus
-    of "succeeded": inc result.succeeded
-    of "cloned": inc result.cloned
-    of "skipped": inc result.skipped
-    of "clone_failed", "declared_branch_missing": inc result.cloneFailed
-    of "refused": inc result.refused
-    of "failed": inc result.failed
-    of "noop": inc result.noop
-    else: inc result.noop
+    case bucket
+    of ssbSucceeded: inc result.succeeded
+    of ssbCloned: inc result.cloned
+    of ssbSkipped: inc result.skipped
+    of ssbCloneFailed: inc result.cloneFailed
+    of ssbRefused: inc result.refused
+    of ssbFailed: inc result.failed
+    of ssbNoop: inc result.noop
+    of ssbUnknown: inc result.unknown
 
 proc toJsonNode*(summary: WorkspaceSyncSummary): JsonNode =
   result = newJObject()
@@ -43179,6 +43214,7 @@ proc toJsonNode*(summary: WorkspaceSyncSummary): JsonNode =
   result["cloneFailed"] = %summary.cloneFailed
   result["refused"] = %summary.refused
   result["failed"] = %summary.failed
+  result["unknown"] = %summary.unknown
 
 proc toJsonNode*(report: WorkspaceSyncReport): JsonNode =
   result = newJObject()
@@ -43307,7 +43343,13 @@ proc renderSyncSummaryLines*(report: WorkspaceSyncReport): seq[string] =
     ", skipped " & $s.skipped &
     (if s.cloneFailed > 0: ", CLONE FAILED " & $s.cloneFailed else: "") &
     ", refused " & $s.refused &
-    ", failed " & $s.failed & " (" & $s.total & " repo(s))")
+    ", failed " & $s.failed &
+    # Rendered only when non-zero, and in capitals like ``CLONE FAILED``: it
+    # reads zero on every correct run, so an unconditional term would only
+    # lengthen the line, while a non-zero one is an alarm that must not be
+    # read past. ``--json`` always carries the counter, zero included.
+    (if s.unknown > 0: ", UNKNOWN STATUS " & $s.unknown else: "") &
+    " (" & $s.total & " repo(s))")
 
 proc renderSyncTextLines*(report: WorkspaceSyncReport;
     verbose = false): seq[string] =
@@ -85394,14 +85436,19 @@ proc readSetFromMonitorDepFile*(path: string): CapturedReadSet =
       if not seen.containsOrIncl(record.path):
         result.paths.add(record.path)
 
-proc evaluateIssuancePreconditions*(workspaceRoot, currentRepo: string;
-    toolProvisioning: ToolProvisioningMode): IssuancePreconditions =
+proc evaluateIssuancePreconditions*(workspaceRoot, currentRepo: string):
+    IssuancePreconditions =
   ## REUSE the RA-21 gate for the SIBLINGS: a certificate is issuable only
   ## when the pre-push gate would pass for them (clean + published + at the
   ## locked revisions). We run the gate logic (NOT the publish side-effect)
   ## and translate its first failure into an issuance-precondition reason +
   ## RA-28-style remedy. The current repository is exempt from cleanliness
   ## and publication: its working tree is what is certified, by content.
+  ##
+  ## The gate resolves git as the managed `pre-push` hook does, from
+  ## ``PATH``: its dispatcher passes no ``--tool-provisioning``. A run's
+  ## ``--tool-provisioning`` selects the tools its tests use, not the git
+  ## that observes the workspace, so it is not an input here.
   let savedLocks = suspendOptionalGitLocks()
   defer: restoreOptionalGitLocks(savedLocks)
   result.platform = currentPlatformTag()
@@ -85418,8 +85465,7 @@ proc evaluateIssuancePreconditions*(workspaceRoot, currentRepo: string;
     # TC-8d): the current repo's own unpublished HEAD and its working-tree
     # modifications are what is being certified, not reasons to refuse.
     issuingForCurrentHead: true,
-    toolProvisioning:
-      if toolProvisioning == tpmUnspecified: tpmPathOnly else: toolProvisioning)
+    toolProvisioning: tpmPathOnly)
   if not isInitializedWorkspace(parsed.workspaceRoot):
     result.kind = ipNoWorkspace
     result.offender = parsed.workspaceRoot
@@ -87397,11 +87443,19 @@ proc collectorSink(collector: ActionOutcomeCollector): BuildActionOutcomeSink =
 # them.
 # ---------------------------------------------------------------------------
 
+const lockUpdateNodeToolProvisioning = tpmPathOnly
+  ## How the lock-update node's writers resolve git: from ``PATH``, as the
+  ## managed `pre-commit` hook's do (its dispatcher passes no
+  ## ``--tool-provisioning``, so ``parsePostCommitArgs`` keeps path mode). The
+  ## node runs the hook's writers, so it resolves their git the hook's way. The
+  ## run's ``--tool-provisioning`` selects the tools the TESTS use; passing it
+  ## here would make a ``nix``-provisioned run fail the node and withhold its
+  ## certificate, because git resolves only in path mode.
+
 type
   LockUpdateNodeState = ref object
     ## Shared between a certifying run and its lock-update node's executor.
     workspaceRoot, repoRoot: string
-    mode: ToolProvisioningMode
     allowance: PinRegressionAllowance
     allowedVia: string
     ran: bool
@@ -87468,7 +87522,8 @@ proc runLockUpdateNode(state: LockUpdateNodeState) =
         standDown.report)
       return
     state.outcome = applyCommitTimeLockWriters(ctwsLockUpdateNode,
-      state.workspaceRoot, state.repoRoot, state.mode, isoTimestampNow(),
+      state.workspaceRoot, state.repoRoot, lockUpdateNodeToolProvisioning,
+      isoTimestampNow(),
       state.allowance, state.allowedVia,
       certificatePolicy = state.certificatePolicy)
   except CatchableError as err:
@@ -87653,7 +87708,7 @@ proc runCertifyingTestBuild(opts: ReproTestShardOpts; buildArgs: seq[string];
     if name notin allowance.names:
       allowance.names.add(name)
   let lockUpdate = LockUpdateNodeState(workspaceRoot: workspaceRoot,
-    repoRoot: currentRepo, mode: mode, allowance: allowance,
+    repoRoot: currentRepo, allowance: allowance,
     allowedVia:
       if opts.allowPinRegression.len > 0: "--allow-pin-regression"
       else: PinRegressionAllowEnv)
@@ -87673,7 +87728,7 @@ proc runCertifyingTestBuild(opts: ReproTestShardOpts; buildArgs: seq[string];
   var deferPreconditions = false
   if workspaceRoot.len > 0 and isInitializedWorkspace(workspaceRoot):
     let wouldWrite = planCommitTimeLockWriters(workspaceRoot, currentRepo,
-      mode, allowance, lockUpdate.certificatePolicy)
+      lockUpdateNodeToolProvisioning, allowance, lockUpdate.certificatePolicy)
     deferPreconditions = wouldWrite.wouldWrite.len > 0 and
       wouldWrite.refused.len == 0
   var pre: IssuancePreconditions
@@ -87684,7 +87739,7 @@ proc runCertifyingTestBuild(opts: ReproTestShardOpts; buildArgs: seq[string];
         remedy: "run inside an initialized reprobuild workspace, or pass " &
           "--workspace-root=PATH")
     else:
-      pre = evaluateIssuancePreconditions(workspaceRoot, currentRepo, mode)
+      pre = evaluateIssuancePreconditions(workspaceRoot, currentRepo)
     preTaken = true
   lockUpdate.afterApply = proc(wrote: bool) =
     # The before-run state is the state AFTER the node (TC-8d "one tested
@@ -88007,7 +88062,7 @@ proc runReproTestCommand*(args: openArray[string];
           opts.certificateOut & ": " & tracked)
         return 1
     let pre = evaluateIssuancePreconditions(
-      opts.certWorkspaceRoot, opts.certCurrentRepo, opts.toolProvisioning)
+      opts.certWorkspaceRoot, opts.certCurrentRepo)
     # Requested targets = the selectors the fixture will run (the covered set
     # a re-certify must already cover for the no-op to hold).
     let requestedTargets = fixtureSelectors(opts)
@@ -88638,7 +88693,7 @@ proc runCiPlanCommand(args: openArray[string]): int =
   # commit (record-store lock subtree); otherwise the committed repro.lock is
   # read from the content itself.
   let pre = evaluateIssuancePreconditions(
-    parsed.workspaceRoot, parsed.currentRepo, parsed.toolProvisioning)
+    parsed.workspaceRoot, parsed.currentRepo)
   let lockSource =
     if pre.lockRecordsDir.len > 0: recordStoreLockSource(pre.lockRecordsDir)
     else: committedLockSource()

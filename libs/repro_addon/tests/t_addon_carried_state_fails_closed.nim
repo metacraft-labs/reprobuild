@@ -147,6 +147,35 @@ suite "carried state fails closed":
     check not sameDirectory(a, b)
     check not sameDirectory(DirIdentity(dev: -1, ino: -1), a)
 
+  test "a directory removed and made again is never the same directory":
+    # On the file system the test runs on, whatever it is: a new directory
+    # that got a freed inode (ext4 hands them out again) must still be told
+    # apart, and on a file system with no creation time and no generation
+    # nothing is ever "the same" (fail closed). Ported from the A13 review's
+    # round-3 probe.
+    let base = fresh("identity")
+    var before: seq[DirIdentity]
+    for i in 0 ..< 200:
+      createDir(base / $i)
+      before.add(dirIdentity(base / $i))
+    let d = base / "one"
+    createDir(d)
+    let a = dirIdentity(d)
+    removeDir(d)
+    createDir(d)
+    check not sameDirectory(a, dirIdentity(d))
+    for i in 0 ..< 200: removeDir(base / $i)
+    var reused, judgedSame = 0
+    for i in 0 ..< 200:
+      createDir(base / ("n" & $i))
+      let b = dirIdentity(base / ("n" & $i))
+      for x in before:
+        if x.dev == b.dev and x.ino == b.ino:
+          inc reused
+          if sameDirectory(x, b): inc judgedSame
+    checkpoint "inodes reused: " & $reused
+    check judgedSame == 0
+
   test "a later restore leaves a directory its receipt still identifies":
     let dst = fresh("dst-reboot")
     discard restoreStateSet(carriedDir(), stopped(), root = dst)
