@@ -146,8 +146,8 @@ did:
    ```
 
    It records the containment and ships the record to the sink first. Then
-   it stops the deploy agent's fetch and apply units and masks them, and it
-   keeps them masked across reboots. The host stays on its current
+   it stops the deploy agent's fetch and apply units, and while the
+   containment lasts they do not start again, not after a reboot either. The host stays on its current
    generation. The sink's detectors then report the agent as `contained`
    instead of `silent`. A stop that was not recorded this way, or that came
    after the agent had already gone silent, still reads as silence.
@@ -168,7 +168,8 @@ did:
    repro system addon release --operator alice --reason "compiler restored"
    ```
 
-   It records the release, unmasks the agent and starts its fetch timer.
+   It records the release, lets the agent's units start again and starts
+   its fetch timer.
 6. **Close the alerts.** Once the host has applied the next sequence and the
    detectors show it live, acknowledge each detection you dealt with
    (`ack`, above).

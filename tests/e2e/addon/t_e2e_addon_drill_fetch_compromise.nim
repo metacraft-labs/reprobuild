@@ -26,8 +26,9 @@
 ##    finds the refusal by its sink sequence, the payload in it, and the
 ##    preserved staged copy on the guest.
 ## 5. ``containment``: ``repro system addon contain`` -- its signed record
-##    reaches the sink before the agent stops; the fetch timer and units are
-##    masked; the off-host check reports the agent ``contained``, not
+##    reaches the sink before the agent stops; the fetch timer and units
+##    do not start while contained (a start is skipped on the containment
+##    condition); the off-host check reports the agent ``contained``, not
 ##    silent, even after its silence window; the preserved staging copy the
 ##    refusal record names is taken off the host (EVID-5); the host is shown
 ##    on its last good generation with the payload absent. The investigator
@@ -212,12 +213,18 @@ proc body(g: Guest; repro: string; step: StepFn; record: JsonNode;
        ct.exitCode == 0 and "reached the sink" in ct.stdout and
          sink.waitFor(host, "addon-containment", "operator-contained", 60,
                       since = beforeContain), ct.stdout & ct.stderr)
-  step("containment: the fetch timer and the agent units are masked",
-       g.exec("systemctl is-enabled repro-agent-fetch.timer").stdout.strip() ==
-         "masked-runtime" and
-       g.exec("systemctl is-active repro-agent-fetch.timer").stdout.strip() !=
-         "active", g.exec("systemctl status repro-agent-fetch.timer " &
-           "--no-pager | head -5").stdout)
+  # Contained means unstartable, not merely stopped: a start is skipped on
+  # the containment condition.
+  discard g.exec("systemctl start repro-agent-fetch.timer " &
+                 "repro-agent-fetch.service repro-agent-apply.service")
+  let cond = g.exec("systemctl show -p ConditionResult --value " &
+    "repro-agent-fetch.service").stdout.strip()
+  step("containment: the agent's units do not start while contained",
+       cond == "no" and g.exec("systemctl is-active repro-agent-fetch.timer " &
+         "repro-agent-fetch.service").stdout.splitLines().allIt(
+           it.strip() != "active"),
+       cond & " " & g.exec("systemctl status repro-agent-fetch.timer " &
+           "--no-pager | head -8").stdout)
   let snap = drill / "snapshot"
   createDir(snap)
   try:

@@ -8,17 +8,18 @@
 ##          tell the deploy agent's silence that follows from an attacker's
 ##          (it then reports the agent ``contained``, not ``silent``);
 ##       2. writes the containment marker (``<state>/addon/contained``);
-##       3. stops the fetch timer and unit and masks them for this boot
-##          (``systemctl mask --runtime --now``), so no network-fed input
-##          is fetched; then, under the host apply lock (a switch in
-##          progress finishes first), stops and masks the apply unit and
-##          clears the agent units' failed state, so the host reads as it
-##          was before the compromise;
-##       4. at every boot while the marker exists, the re-assert unit masks
-##          them again, and the apply unit refuses to run.
+##       3. gives the fetch timer, the fetch unit and the apply unit a runtime
+##          drop-in conditioning them on the marker's absence
+##          (``ConditionPathExists=!``, see ``ContainDropInName``), stops the
+##          fetch side, so no network-fed input is fetched, then, under the
+##          host apply lock (a switch in progress finishes first), the apply
+##          unit, and clears the agent units' failed state, so the host
+##          reads as it was before the compromise;
+##       4. at every boot while the marker exists, the re-assert unit writes
+##          the drop-ins again, and the apply unit refuses to run.
 ##   repro system addon release --operator NAME --reason TEXT
-##       records ``operator-released`` and ships it, removes the marker,
-##       unmasks the units and starts the fetch timer again.
+##       records ``operator-released`` and ships it, removes the marker and
+##       the drop-ins, and starts the fetch timer again.
 ##
 ## Neither verb changes a generation. A containment that the check cannot
 ## verify (unsigned, or recorded after the agent had already gone silent)
@@ -77,14 +78,49 @@ proc systemctlAll(verb: openArray[string]; units: openArray[string]): string =
     return e.msg
   ""
 
-proc maskAgent*(): seq[string] =
-  ## Stop and mask (for this boot) the agent's fetch side, then its apply
-  ## side under the apply lock, and clear their failed state.
-  let a = systemctlAll(["mask", "--runtime", "--now"], ContainedUnits)
+const ContainDropInName* = "50-repro-contained.conf"
+  ## The runtime drop-in each contained unit gets, under
+  ## ``/run/systemd/system/<unit>.d/``. A runtime MASK cannot be used: the
+  ## agent's units are files in ``/etc/systemd/system``, which takes
+  ## precedence over ``/run`` (systemd.unit(5) "Unit File Load Path"), so
+  ## ``systemctl mask --runtime`` leaves them startable (measured in the
+  ## A11 drill gate on debian-13 at reprobuild 1a9f6aa697). Drop-ins are
+  ## merged from every directory, and a condition PID 1 checks needs no
+  ## access from the unit's own sandbox.
+
+proc containDropIn*(markerPath: string): string =
+  "[Unit]\n" &
+  "# Contained by an operator (repro system addon contain, spec §13\n" &
+  "# decision 49): nothing starts while the marker exists.\n" &
+  "ConditionPathExists=!" & markerPath & "\n"
+
+proc writeContainDropIns(markerPath: string; runDir = "/run/systemd/system"):
+    seq[string] =
+  for u in @ContainedUnits & @[ContainedApplyUnit]:
+    try:
+      let d = runDir / (u & ".d")
+      createDir(d)
+      writeFile(d / ContainDropInName, containDropIn(markerPath))
+    except CatchableError as e:
+      result.add(u & ": " & e.msg)
+
+proc removeContainDropIns(runDir = "/run/systemd/system") =
+  for u in @ContainedUnits & @[ContainedApplyUnit]:
+    try: removeFile(runDir / (u & ".d") / ContainDropInName)
+    except OSError: discard
+
+proc maskAgent*(markerPath: string): seq[string] =
+  ## Make the agent's units unstartable while ``markerPath`` exists (a
+  ## runtime drop-in each), stop the fetch side, then the apply side under
+  ## the apply lock, and clear their failed state.
+  result = writeContainDropIns(markerPath)
+  let r = systemctlAll(["daemon-reload"], [])
+  if r.len > 0: result.add(r)
+  let a = systemctlAll(["stop"], ContainedUnits)
   if a.len > 0: result.add(a)
   var lock = acquireHostApplyLock("repro system addon contain")
   try:
-    let b = systemctlAll(["mask", "--runtime", "--now"], [ContainedApplyUnit])
+    let b = systemctlAll(["stop"], [ContainedApplyUnit])
     if b.len > 0: result.add(b)
   finally:
     lock.release()
@@ -113,7 +149,7 @@ proc runContain*(operator, reason: string; stateDir = "/var/lib/repro/system";
   writeFile(containedMarkerPath(stateDir), "operator=" & operator &
     "\nreason=" & reason.replace("\n", " ") & "\nat=" &
     $now().utc & "\nrecord=" & result.record & "\n")
-  let problems = maskAgent()
+  let problems = maskAgent(containedMarkerPath(stateDir))
   if problems.len > 0:
     raise newException(ContainmentError, "the record was written and the " &
       "marker set, but systemctl refused: " & problems.join("; "))
@@ -122,7 +158,7 @@ proc reapplyContainment*(stateDir = "/var/lib/repro/system"): bool =
   ## At boot: mask the agent's units again while the marker exists (a
   ## runtime mask does not survive a reboot). True when it did.
   if not isContained(stateDir): return false
-  discard maskAgent()
+  discard maskAgent(containedMarkerPath(stateDir))
   true
 
 proc runRelease*(operator, reason: string; stateDir = "/var/lib/repro/system";
@@ -140,9 +176,9 @@ proc runRelease*(operator, reason: string; stateDir = "/var/lib/repro/system";
   result.shipped = s.shipped
   result.shipError = s.error
   removeFile(containedMarkerPath(stateDir))
+  removeContainDropIns()
   var problems: seq[string]
-  let a = systemctlAll(["unmask", "--runtime"], @ContainedUnits &
-                       @[ContainedApplyUnit])
+  let a = systemctlAll(["daemon-reload"], [])
   if a.len > 0: problems.add(a)
   let b = systemctlAll(["start"], [AgentFetchTimer])
   if b.len > 0: problems.add(b)
