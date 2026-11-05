@@ -19,7 +19,10 @@
 ## there is nothing for either writer to do) and
 ## ``app`` gets a ``flake.nix`` whose input ``lib-b-src`` names lib-b's
 ## origin, with a ``flake.lock`` pinning lib-b's current revision — the shape
-## in which develop mode substitutes the sibling checkout for the input.
+## in which develop mode substitutes the sibling checkout for the input. The
+## same flake also realizes the fixture's ``cert-tool`` (its own script, copied
+## into the store with no nixpkgs), and the recipe declares that realization,
+## so the tests resolve their tool under ``--tool-provisioning=nix`` too.
 ## Then lib-b advances and is published, and:
 ##
 ##   1. ``repro test`` refreshes ``flake.lock`` to lib-b's new revision
@@ -27,14 +30,20 @@
 ##      run), stages it, and issues a certificate for the content that
 ##      carries it; ``repro.lock``'s pin of the same repository moves with it
 ##      (one plan over both locks, §16.3 H3);
-##   2. a real ``git commit`` through the installed hook finds nothing to
+##   2. lib-b advances again and ``repro test --tool-provisioning=nix`` does
+##      the same: the run's provisioning mode selects the tools the tests
+##      use, while the node resolves git as the hook does, from ``PATH``;
+##   3. a real ``git commit`` through the installed hook finds nothing to
 ##      refresh (``flake-lock up-to-date``), leaves both locks byte-identical,
 ##      and the commit's tree is the certified content.
 ##
 ## Falsifiability: a node that skipped the flake writer leaves ``flake.lock``
 ## at the old revision (step 1), and the hook then rewrites it at commit time,
-## so the committed tree is not the certified one (step 2); a node that wrote
-## without staging leaves the index stale (``git show :flake.lock``).
+## so the committed tree is not the certified one (step 3); a node that wrote
+## without staging leaves the index stale (``git show :flake.lock``); a node
+## that resolved its git under the run's ``nix`` mode fails (``git is not
+## resolvable under --tool-provisioning=nix``), so step 2 leaves
+## ``flake.lock`` behind and issues no certificate.
 ##
 ## NO MOCKS: real repositories, manifest and flakes, the built ``repro``, the
 ## real provider, engine and monitor, real ``git commit`` through the
@@ -112,15 +121,36 @@ suite "HL-10 — the node's flake.lock writer through repro test":
       fx.cf.sib.refreshAndPublishLock()
       let pinned = fx.cf.sib.headOf(libB)
       let url = "file://" & fx.originOf("lib-b")
+      let toolDir = fx.app / "cert-tool-pkg" / "bin"
+      createDir(toolDir)
+      copyFileWithPermissions(fx.binDir / "cert-tool", toolDir / "cert-tool")
       writeFile(fx.app / "flake.nix",
         "{\n" &
         "  inputs = {\n" &
         "    lib-b-src.url = \"git+" & url & "?ref=main\";\n" &
         "  };\n" &
-        "  outputs = _: { };\n" &
+        "  outputs = _:\n" &
+        "    let\n" &
+        "      certTool = builtins.path {\n" &
+        "        path = ./cert-tool-pkg;\n" &
+        "        name = \"cert-tool-1.0.0\";\n" &
+        "      };\n" &
+        "    in {\n" &
+        "      packages = builtins.listToAttrs (map (system: {\n" &
+        "        name = system;\n" &
+        "        value.cert-tool = certTool;\n" &
+        "      }) [ \"x86_64-linux\" \"aarch64-linux\" \"x86_64-darwin\"\n" &
+        "           \"aarch64-darwin\" ]);\n" &
+        "    };\n" &
         "}\n")
       writeFile(fx.app / "flake.lock", flakeLockText(url, pinned))
-      discard fx.cf.sib.git(fx.app, "add flake.nix flake.lock")
+      let toolInterface = fx.app / "reprobuild" / "packages" / "cert_tool.nim"
+      writeFile(toolInterface, readFile(toolInterface) &
+        "\nprovisioningFor \"cert-tool\":\n" &
+        "  developInterface\n" &
+        "  contributor \"app\"\n" &
+        "  nixPackage \".#cert-tool\", executablePath = \"bin/cert-tool\"\n")
+      discard fx.cf.sib.git(fx.app, "add -A")
       discard fx.cf.sib.git(fx.app, "commit -q -m flake")
       discard fx.cf.sib.git(fx.app, "push -q origin main")
       fx.ensureHooks()
@@ -149,16 +179,33 @@ suite "HL-10 — the node's flake.lock writer through repro test":
       check fx.stagedLock() == fx.lockText()
       # The tests ran on the refreshed state: lockreader saw this run's lock.
       check fx.lockSeenByTests() == fx.lockText()
+      check fx.certificatesFor(fx.contentNow(), "test").len == 1
+
+      # ---- 2. the same under --tool-provisioning=nix ----------------------
+      let advancedAgain = fx.cf.sib.advance("lib-b")
+      let nixRun = fx.reproIn(["test", "--tool-provisioning=nix"])
+      checkpoint("repro test --tool-provisioning=nix:\n" & nixRun.output)
+      check nixRun.code == 0
+      check "the lock-update node failed" notin nixRun.output
+      check "is not resolvable" notin nixRun.output
+      check "REFUSED" notin nixRun.output
+      let flakeAfterNix = readFile(fx.app / "flake.lock")
+      check advancedAgain in flakeAfterNix
+      check advanced notin flakeAfterNix
+      check fx.mustGitApp("show", ":flake.lock") == flakeAfterNix
+      check advancedAgain in fx.lockText()
+      check fx.stagedLock() == fx.lockText()
+      check fx.lockSeenByTests() == fx.lockText()
       let content = fx.contentNow()
       check fx.certificatesFor(content, "test").len == 1
 
-      # ---- 2. the commit finds nothing to refresh and is the certified tree
+      # ---- 3. the commit finds nothing to refresh and is the certified tree
       let logBefore = fx.preCommitLog().len
       let commit = fx.gitApp("commit", "-a", "-m", "after the node")
       checkpoint("git commit:\n" & commit.output)
       check commit.code == 0
-      check readFile(fx.app / "flake.lock") == flakeAfter
-      check fx.mustGitApp("show", "HEAD:flake.lock") == flakeAfter
+      check readFile(fx.app / "flake.lock") == flakeAfterNix
+      check fx.mustGitApp("show", "HEAD:flake.lock") == flakeAfterNix
       check fx.headContent() == content
       let appended = fx.preCommitLog().lastLinesSince(logBefore)
       checkpoint("pre-commit log:\n" & appended)
