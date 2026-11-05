@@ -9187,7 +9187,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_addon/tests/t_addon_store_verify.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 5,
+      "staticCaseCount": 9,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

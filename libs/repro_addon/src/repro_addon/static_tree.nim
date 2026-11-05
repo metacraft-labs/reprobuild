@@ -174,7 +174,7 @@ proc syncTree*(root: string) =
   fsyncPath(StoreRoot)
 
 proc realiseStaticTree*(files: seq[StaticFile]):
-    tuple[path: string; prefixId: PrefixIdBytes] =
+    tuple[path: string; prefixId: PrefixIdBytes; digest: string] =
   ## Step 1 of the switch: put the tree into the store (an existing
   ## identical tree is reused), verify every file in it against the bytes
   ## it was built from, and hold it with the ``addon-pending`` root until
@@ -214,6 +214,13 @@ proc realiseStaticTree*(files: seq[StaticFile]):
     if not fileExists(at) or sha256OfFile(at) != sha256Hex(f.content):
       raise newException(StaticTreeError, "static tree file " & at &
         " does not carry the planned bytes")
+  # Its realisation digest, from the staged bytes (spec §10.2): the
+  # ledger records it, and store verification compares against it. A tree
+  # the store reused that carries an entry the plan does not is refused.
+  result.digest = storeTreeDigest(staging)
+  if storeTreeDigest(result.path) != result.digest:
+    raise newException(StaticTreeError, "static tree " & result.path &
+      " holds entries the plan does not; it is left in place and not used")
   syncTree(result.path)
   s.registerRoot(PendingRootId, rkProfile)
   s.attachPrefixToRoot(PendingRootId, result.prefixId)

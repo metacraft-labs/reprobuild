@@ -13,7 +13,8 @@
 ## | DET-AO-3  | a connect to a third address from inside the fetch unit     |
 ## | DET-AO-4  | ``/etc/repro/static`` retargeted, then a reboot             |
 ## | DET-AO-5  | a store file corrupted between realise and flip (A9's), and |
-## |           | a store byte changed after the switch, found after a boot   |
+## |           | a store byte changed after the switch and its receipt       |
+## |           | deleted, found after a boot (session 2, G2)                 |
 ## | DET-AO-6  | an ``equivs`` package shipping a ledger path (A10's)         |
 ## | DET-AO-7  | a unit whose health check fails (A5's)                       |
 ## | DET-AO-8  | the timers stopped: silence past three intervals            |
@@ -28,6 +29,11 @@
 ## sees, distinct from the silence DET-AO-8's control produces (DET-5).
 ##
 ## The seam build is required (DET-AO-5's pause at step 2).
+##
+## Falsifying mutation for the DET-AO-5 boot control:
+## ``store-verify-trusts-receipt`` (the expectation read from the altered
+## path's own receipt, which the control deleted: the mismatch and
+## quarantine steps go red; A11 audit session 2, G2).
 ##
 ## Opt-in: ``REPRO_ADDON_VM_GATES=1``.
 ##
@@ -215,10 +221,17 @@ proc body(g: Guest; repro: string; step: StepFn; record: JsonNode;
   since = sink.headSeq()
   let tree = g.exec("readlink /etc/repro/static").stdout.strip()
   let victim = g.exec("find " & tree & " -type f | head -1").stdout.strip()
+  # The tree's receipt goes with the change (A11 audit session 2, G2): the
+  # expected digest is the ledger's, so a deleted receipt cannot demote the
+  # mismatch to "unverifiable".
   let tampered = g.exec("unshare --mount --propagation private /bin/sh -c " &
-    quoteShell("mount -o remount,bind,rw /repro/store && printf X >> " & victim))
-  step("DET-AO-5 (boot): a byte of the current store path was changed",
-       tampered.exitCode == 0 and victim.len > 0, victim & tampered.stderr)
+    quoteShell("mount -o remount,bind,rw /repro/store && printf X >> " &
+               victim & " && rm -f " & tree & "/.repro-receipt"))
+  step("DET-AO-5 (boot): a byte of the current store path was changed, " &
+       "its receipt deleted",
+       tampered.exitCode == 0 and victim.len > 0 and
+         g.exec("test -e " & tree & "/.repro-receipt").exitCode != 0,
+       victim & tampered.stderr)
   g.rebootGuest()
   discard g.waitReasserted()
   step("DET-AO-5 (boot): the boot did not wait for the verification",

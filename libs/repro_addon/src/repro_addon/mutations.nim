@@ -539,6 +539,15 @@
 ##                                            file's enrolled key
 ## ``uninstall-keeps-fetch-state``            uninstall leaves the fetch
 ##                                            unit's state directory
+## ``store-verify-trusts-receipt``           store verification expects
+##                                            the digest the verified
+##                                            path's own receipt names
+## ``reassert-nft-in-own-netns``              the re-assert lists nftables
+##                                            tables in its own private
+##                                            network namespace
+## ``reassert-store-trigger-missing``         a quarantined store object
+##                                            in use is reported as
+##                                            ``store-object-missing``
 ## =========================================  ==============================
 
 # The deploy agent's own mutations (``repro_deploy_agent/agent_mutations``)
@@ -854,7 +863,16 @@ const
                           "check-forgets-enrolled-key",
                           # A11 audit F5: uninstall keeps the fetch unit's
                           # state directory.
-                          "uninstall-keeps-fetch-state"]
+                          "uninstall-keeps-fetch-state",
+                          # A11 audit session 2, G2: the expected digest
+                          # read from the path being verified.
+                          "store-verify-trusts-receipt",
+                          # G4: the egress table listed in the re-assert
+                          # unit's own (empty) network namespace.
+                          "reassert-nft-in-own-netns",
+                          # Session 2, low: one trigger for a missing and a
+                          # quarantined store object.
+                          "reassert-store-trigger-missing"]
 
 when AddonMutation.len > 0 and AddonMutation notin KnownAddonMutations and
     AddonMutation notin KnownAgentMutations:
