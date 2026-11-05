@@ -1,0 +1,104 @@
+name: Agent protocol (Windows)
+
+# The ReproOS agent protocol's Windows transport, on native Windows.
+#
+# On Windows the host's two channels are named pipes rather than Unix domain
+# sockets: owner-only DACL, first-instance creation, remote clients rejected,
+# and a peer admitted only when the user SID of its impersonation token is
+# the host's own. Unit tests on Linux cannot exercise any of that, so this
+# workflow runs, natively on each Windows architecture:
+#
+#   * the transport and provider-conformance suites the Linux suite runs
+#     (`t_agent_protocol_socket_transport`, `t_agent_provider_conformance`),
+#     unchanged in their assertions;
+#   * the Windows refusals (`tests/windows/windows_agent_protocol_peer_identity`):
+#     the anonymous token, an anonymous-level client, a second local user
+#     (each against the DACL and, on a host whose DACL admits it, against the
+#     identity check alone), a squatter on either pipe name, and the SMB route;
+#   * the shipped `repro-agent-conformance` command against the fixture
+#     provider (`t_agent_conformance_cli_portability`).
+#
+# WHY IT IS ITS OWN WORKFLOW AND NOT A JOB IN ci.yml: ci.yml cancels its own
+# older runs on a saturated pool, and a Windows-only change should be
+# dispatchable on a branch without queuing the Linux suite with it (see the
+# same reasoning in hcr-lanes.yml).
+#
+# The second-user case creates a temporary local account, which needs a job
+# identity in Administrators. The job prints `whoami /groups` first so a
+# failure there names the identity it ran as.
+
+on:
+  push:
+    branches: [main, dev]
+  pull_request:
+    branches-ignore: [agents]
+  workflow_dispatch:
+
+concurrency:
+  group: agent-protocol-windows-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  windows:
+    name: Agent protocol | windows-${{ matrix.arch }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            runner: [self-hosted, windows, x64]    # CIP-5: DIY-Windows (env.ps1) -> eph-win-x64
+          - arch: arm64
+            runner: [self-hosted, windows, arm64]  # CIP-5: DIY-Windows (env.ps1) -> eph-win-arm64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Job identity
+        shell: pwsh
+        run: whoami /user /groups
+
+      - name: Mint installation token for Windows dev environment
+        id: ci_token
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.CI_TOKEN_PROVIDER_APP_ID }}
+          private-key: ${{ secrets.CI_TOKEN_PROVIDER_PRIVATE_KEY }}
+          owner: metacraft-labs
+
+      - name: Setup Windows dev environment
+        uses: metacraft-labs/metacraft-github-actions/setup-dev-env@dev
+        with:
+          env-flavor: windows-diy
+          gh-token: ${{ steps.ci_token.outputs.token }}
+
+      - name: Transport and provider-conformance suites
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force build/test-bin | Out-Null
+          foreach ($t in @(
+              'libs/repro_agent_protocol/tests/t_agent_protocol_socket_transport.nim',
+              'libs/repro_agent_protocol/tests/t_agent_provider_conformance.nim',
+              'tests/windows/windows_agent_protocol_peer_identity.nim')) {
+            $name = [IO.Path]::GetFileNameWithoutExtension($t)
+            nim c -r --threads:on --hints:off --warnings:off "--nimcache:build/nimcache/$name" "--out:build/test-bin/$name.exe" $t
+            if ($LASTEXITCODE -ne 0) { throw "$name failed with exit code $LASTEXITCODE" }
+          }
+
+      - name: The shipped conformance command passes the fixture provider
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force build/bin | Out-Null
+          nim c --threads:on --hints:off --warnings:off --nimcache:build/nimcache/repro-agent-conformance --out:build/bin/repro-agent-conformance.exe apps/repro-agent-conformance/repro_agent_conformance.nim
+          if ($LASTEXITCODE -ne 0) { throw "repro-agent-conformance failed to build ($LASTEXITCODE)" }
+          nim c -r --threads:on --hints:off --warnings:off --nimcache:build/nimcache/t_agent_conformance_cli_portability --out:build/test-bin/t_agent_conformance_cli_portability.exe tests/integration/t_agent_conformance_cli_portability.nim
+          if ($LASTEXITCODE -ne 0) { throw "t_agent_conformance_cli_portability failed with exit code $LASTEXITCODE" }
+
+      # Other providers (Agent Harbor's) prove themselves against this exact
+      # build of the harness.
+      - name: Upload the conformance harness
+        uses: actions/upload-artifact@v4
+        with:
+          name: repro-agent-conformance-windows-${{ matrix.arch }}
+          path: build/bin/repro-agent-conformance.exe
+          retention-days: 14

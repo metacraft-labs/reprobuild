@@ -2,16 +2,20 @@
 ## ``test_agent_harbor_reproos_permission_protocol`` holds over the real
 ## transport, not only through the in-process `Connection` handle.
 ##
-## Real Unix domain sockets, real peer-credential checks and the real
-## frame codec. Nothing is mocked; the backend is an empty `Backend`
+## Real Unix domain sockets (on Windows, the named pipes of spec §"The
+## Windows transport"), real peer-credential checks and the real frame
+## codec. The Windows refusals of foreign peers are
+## `tests/windows/windows_agent_protocol_peer_identity.nim`. Nothing is mocked; the backend is an empty `Backend`
 ## (checkout is the only delegated operation used, and it writes a real
 ## directory), because the subject is the transport.
 
-import std/[asyncdispatch, os, tables, unittest]
+import std/[asyncdispatch, os, strutils, tables, unittest]
 
 import cbor
 import repro_agent_protocol
 import repro_agent_protocol/transport
+when defined(windows):
+  import repro_agent_protocol/named_pipe
 
 type DirBackend = ref object of Backend
 
@@ -20,7 +24,9 @@ method createCheckout(b: DirBackend; package, root: string): OpResult =
   OpResult(status: osCompleted)
 
 # Socket paths are bounded (104 bytes on macOS), so keep the directory short.
-let dir = "/tmp/rap-" & $getCurrentProcessId()
+let dir =
+  when defined(windows): getTempDir() / "rap-" & $getCurrentProcessId()
+  else: "/tmp/rap-" & $getCurrentProcessId()
 removeDir(dir)
 
 proc call(c: HostClient; entries: openArray[CborPair]): CborItem =
@@ -36,13 +42,24 @@ suite "M0 — the channels are separate sockets":
   let h = newHost(DirBackend(), dir / "workspaces")
   let server = startServer(h, dir / "run")
 
-  test "the socket directory is private to the user":
-    check getFilePermissions(dir / "run") ==
-      {fpUserRead, fpUserWrite, fpUserExec}
+  test "the channels are private to the user":
+    when defined(windows):
+      # The pipes are created first-instance under an owner-only DACL:
+      # nobody, the host's own user included, can stand up a second
+      # server under the same names.
+      let nonce = server.providerPath.split('-')[^2]
+      let dup = newHost(DirBackend(), dir / "dup-workspaces")
+      expect OSError:
+        discard startServer(dup, dir / "dup", pipeNonce = nonce)
+      check server.providerPath.startsWith(
+        "\\\\.\\pipe\\reproos-agent-" & currentUserSid() & "-")
+    else:
+      check getFilePermissions(dir / "run") ==
+        {fpUserRead, fpUserWrite, fpUserExec}
 
   test "a session created on consent.sock is used on provider.sock":
-    let consent = waitFor connectHost(consentSocketPath(dir / "run"))
-    let provider = waitFor connectHost(providerSocketPath(dir / "run"))
+    let consent = waitFor connectHost(server.consentPath)
+    let provider = waitFor connectHost(server.providerPath)
     check consent.hello().field("outcome").text == "ok"
     check provider.hello().field("outcome").text == "ok"
     let created = consent.call([tp("kind", cText("session.create")),
@@ -91,20 +108,20 @@ suite "M0 — the channels are separate sockets":
     let strictDir = dir / "strict"
     let strict = startServer(h, strictDir,
       consentPeer = proc (pid: int): bool {.gcsafe.} = false)
-    let c = waitFor connectHost(consentSocketPath(strictDir))
+    let c = waitFor connectHost(strict.consentPath)
     let r = waitFor c.request(encodeDeterministic(cMap([
       tp("kind", cText("hello")), tp("protocol", cUInt(1)),
       tp("families", cArray([]))])))
     check r.len == 0
     c.close()
     # The provider socket of the same server is unaffected by that policy.
-    let p = waitFor connectHost(providerSocketPath(strictDir))
+    let p = waitFor connectHost(strict.providerPath)
     check p.hello().field("outcome").text == "ok"
     p.close()
     strict.stop()
 
   test "a frame that is not CBOR is refused and the connection stays open":
-    let c = waitFor connectHost(providerSocketPath(dir / "run"))
+    let c = waitFor connectHost(server.providerPath)
     check c.hello().field("outcome").text == "ok"
     let r = waitFor c.request(@[0xff'u8, 0x00])
     check decodeItem(r).field("reason").text == "malformed"

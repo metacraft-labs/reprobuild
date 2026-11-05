@@ -13,8 +13,15 @@
 ## A host whose workspaces are shared with other writers must open with
 ## `openat2(RESOLVE_BENEATH | RESOLVE_NO_MAGICLINKS)` instead
 ## (https://man7.org/linux/man-pages/man2/openat2.2.html).
+##
+## Windows has no `lstat` and Nim's `expandSymlink` does not read a reparse
+## point's target there, so the walk applies the spec's "component-wise
+## no-follow" literally: a reparse point (symbolic link or junction) as any
+## component refuses `path-escape`, whether or not it would stay inside.
+## Host paths use the platform separator; protocol paths are always
+## `/`-separated, and `listBeneath` returns them that way.
 
-import std/[algorithm, os, posix, strutils]
+import std/[algorithm, os, strutils]
 
 import ./[types, capabilities]
 
@@ -25,11 +32,12 @@ proc isBeneath*(root, path: string): bool =
   ## Whether normalized absolute `path` is `root` or inside it.
   let r = root.normalizedPath
   let p = path.normalizedPath
-  p == r or p.startsWith(r & "/")
+  p == r or p.startsWith(r & DirSep)
 
 proc isSymlinkAt(p: string): bool =
-  var st: Stat
-  lstat(p.cstring, st) == 0 and S_ISLNK(st.st_mode)
+  ## POSIX: `lstat` reports a symbolic link. Windows: the entry is a reparse
+  ## point (`FILE_ATTRIBUTE_REPARSE_POINT`), which covers junctions too.
+  symlinkExists(p)
 
 proc resolveBeneath*(root, rel: string; forWrite = false): string =
   ## The absolute path `rel` names beneath `root`, refusing `path-escape`
@@ -49,6 +57,8 @@ proc resolveBeneath*(root, rel: string; forWrite = false): string =
     let comp = pending[i]
     let next = cur / comp
     if isSymlinkAt(next):
+      when defined(windows):
+        refuse(arPathEscape, "reparse point in a workspace path: " & rel.escape)
       if forWrite and i == pending.high:
         refuse(arPathEscape, "write target is a symlink: " & rel.escape)
       inc hops
@@ -63,7 +73,7 @@ proc resolveBeneath*(root, rel: string; forWrite = false): string =
       # Continue the walk from the symlink's target: its own components
       # may be symlinks too, so restart from the root on the remainder.
       let restRel = resolved.relativePath(realRoot)
-      var rest = if restRel == ".": @[] else: restRel.split('/')
+      var rest = if restRel == ".": @[] else: restRel.split({DirSep, AltSep})
       for j in i + 1 ..< pending.len:
         rest.add pending[j]
       pending = rest
@@ -106,5 +116,5 @@ proc listBeneath*(root, rel: string): seq[string] =
     refuse(arOperationFailed, "no such directory: " & rel.escape)
   for p in walkDirRec(base, yieldFilter = {pcFile, pcLinkToFile, pcLinkToDir},
                       followFilter = {pcDir}):
-    result.add p.relativePath(root.normalizedPath)
+    result.add p.relativePath(root.normalizedPath).replace(DirSep, '/')
   result.sort()
