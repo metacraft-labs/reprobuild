@@ -422,3 +422,74 @@ suite "a depends edge outside the project names the right membership fix":
       checkpoint("after following: " & $followed.report)
       for f in followed.report["failures"]:
         check f["property"].getStr() != "dependency-not-declared"
+
+proc moveManifestsToNestedLayer(fx: Fixture): string =
+  ## Move the workspace's `projects/` and `repos/` into a `local_path`
+  ## manifest layer INSIDE the workspace root (`<ws>/team`), leaving empty
+  ## root directories, and return the layer directory.
+  result = fx.workspaceRoot / "team"
+  createDir(result)
+  moveDir(fx.workspaceRoot / "projects", result / "projects")
+  moveDir(fx.workspaceRoot / "repos", result / "repos")
+  createDir(fx.workspaceRoot / "projects")
+  createDir(fx.workspaceRoot / "repos")
+  writeFile(fx.workspaceRoot / "repro-workspace.local.toml",
+    "schema = \"reprobuild.workspace.settings-local.v1\"\n\n" &
+    "[[manifest]]\nlocal_path = \"" & result & "\"\n" &
+    "visibility = \"public\"\n")
+
+proc addMemberRepo(projectFile, basename: string) =
+  ## Add `member_repos = [basename]` to an existing project manifest.
+  writeFile(projectFile, readFile(projectFile).replace(
+    "schema = \"reprobuild.workspace.project.v1\"\n",
+    "schema = \"reprobuild.workspace.project.v1\"\n" &
+      "member_repos = [\"" & basename & "\"]\n"))
+
+proc checkNoDanglingRefusal(fx: Fixture) =
+  let followed = runGate(fx)
+  for f in followed.report["failures"]:
+    check f["property"].getStr() != "dependency-not-declared"
+
+suite "a depends edge into a nested manifest layer names the layer's file":
+
+  test "t_pre_push_names_a_nested_layer_once":
+    let gitBin = findExe("git")
+    if gitBin.len == 0:
+      skip("git not on PATH; this case needs a repository")
+    else:
+      let fx = buildFixture(gitBin)
+      defer: removeDir(fx.scratch)
+      fx.setDepends("\"lib-b\", \"lib-c\"")
+      # The project and the `lib-c-fork` fragment both live in `<ws>/team`.
+      let layer = moveManifestsToNestedLayer(fx)
+      let remediation = gapRemediation(fx)
+      check remediation.contains("`member_repos` in team/projects/lib-a.toml")
+      check not remediation.contains("team/team/")
+      check not remediation.contains("create it")
+      addMemberRepo(layer / "projects" / "lib-a.toml", "lib-c-fork")
+      fx.checkNoDanglingRefusal()
+
+  test "t_pre_push_names_the_root_file_for_a_root_fragment":
+    let gitBin = findExe("git")
+    if gitBin.len == 0:
+      skip("git not on PATH; this case needs a repository")
+    else:
+      let fx = buildFixture(gitBin)
+      defer: removeDir(fx.scratch)
+      fx.setDepends("\"lib-b\", \"lib-c\"")
+      # The project lives in `<ws>/team`; the only `lib-c` fragment is in the
+      # workspace's own `repos/`, which the team layer cannot see.
+      let layer = moveManifestsToNestedLayer(fx)
+      moveFile(layer / "repos" / "lib-c-fork.toml",
+        fx.workspaceRoot / "repos" / "lib-c-root.toml")
+      let remediation = gapRemediation(fx)
+      check remediation.contains("\"lib-c-root\" to `member_repos` in " &
+        "projects/lib-a.toml (create it")
+      check not remediation.contains("team/projects/lib-a.toml")
+      writeFile(fx.workspaceRoot / "projects" / "lib-a.toml",
+        "schema = \"reprobuild.workspace.project.v1\"\n" &
+        "member_repos = [\"lib-c-root\"]\n\n" &
+        "[project]\nname = \"lib-a\"\n\n" &
+        "[[remote]]\nname = \"lib-b-origin\"\n" &
+        "fetch = \"" & fileUrl(fx.scratch / "origin-lib-b.git") & "\"\n")
+      fx.checkNoDanglingRefusal()

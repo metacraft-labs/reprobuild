@@ -68412,7 +68412,7 @@ proc developSetClosure(repos: seq[ResolvedRepo];
   ## it). Unknown dependency names (a ``depends`` entry that names no repo
   ## in the resolved set) contribute nothing to the closure — there is no
   ## repo to observe. They are NOT thereby harmless, and the gate does not
-  ## treat them as such: ``undeclaredDependsInClosure`` below reports them and
+  ## treat them as such: ``danglingDependsInClosure`` below reports them and
   ## the gate refuses, because a name it cannot resolve is a repo the push
   ## claims to depend on and the gate did not check.
   ##
@@ -68527,7 +68527,7 @@ proc manifestDevelopSiblings(repoRoot: string): tuple[resolved: bool;
 
 proc undeclaredDependEdges(repos: seq[ResolvedRepo];
     pushedRepoName: string): seq[tuple[owner, dep: string]] =
-  ## The edges behind ``undeclaredDependsInClosure``: each ``depends`` entry
+  ## The edges behind ``danglingDependsInClosure``: each ``depends`` entry
   ## reachable from ``pushedRepoName`` that names no repo in ``repos``, with
   ## the repo that declares it, in first-seen order and de-duplicated by name.
   if pushedRepoName.len == 0:
@@ -68695,14 +68695,19 @@ proc workspaceRelativeDir(dir, workspaceRoot: string): string =
 
 proc manifestLayerOf(path: string; manifestRoots: openArray[string]):
     tuple[root, rel: string] =
-  ## The first of ``manifestRoots`` holding ``path``, and ``path`` relative
-  ## to it with forward slashes; ``("", path)`` when none does.
+  ## The most specific of ``manifestRoots`` holding ``path``, and ``path``
+  ## relative to it with forward slashes; ``("", path)`` when none does. A
+  ## layer may sit inside another root (a ``url`` layer is fetched under the
+  ## workspace's ``.repro/``), so the longest matching root is the layer that
+  ## owns the file.
   let absFile = absolutePath(path)
+  result = ("", path)
+  var bestLen = -1
   for root in manifestRoots:
     let absRoot = absolutePath(root)
-    if absFile.startsWith(absRoot & DirSep):
-      return (root, relativePath(absFile, absRoot).replace(DirSep, '/'))
-  ("", path)
+    if absFile.startsWith(absRoot & DirSep) and absRoot.len > bestLen:
+      bestLen = absRoot.len
+      result = (root, relativePath(absFile, absRoot).replace(DirSep, '/'))
 
 proc projectMembershipTarget(projectFile: string;
     manifestRoots: openArray[string]; workspaceRoot: string):
@@ -68733,12 +68738,15 @@ proc layerMembershipTarget(site: FragmentSite; manifestRel: string;
   ## Where ``site``'s ``member_repos`` entry goes, as a path from
   ## ``workspaceRoot``: ``manifestRel`` inside the manifest layer holding the
   ## fragment, since a layer resolves members against its own ``repos/``
-  ## only. Outside the workspace's own manifests that file may not exist yet.
+  ## only. A file that does not exist there yet is flagged for creation.
   result = workspaceRelativeDir(site.layerRoot, workspaceRoot) & manifestRel
-  if not sameFilesystemPath(absolutePath(site.layerRoot),
+  if not fileExists(site.layerRoot / manifestRel):
+    result.add(" (create it, with any [[remote]] the fragment uses: the " &
+      "manifest layer holding the fragment resolves members against its " &
+      "own repos/ only)")
+  elif not sameFilesystemPath(absolutePath(site.layerRoot),
       absolutePath(membershipRoot)):
-    result.add(" (in the manifest layer holding the fragment; create it " &
-      "there if absent, with any [[remote]] the fragment uses)")
+    result.add(" (in the manifest layer holding the fragment)")
 
 proc membershipPushScope(identity: GitToolIdentity; resolved: ResolvedProject;
     membershipRoot: string; ranges: openArray[PushedCommitRange]):
