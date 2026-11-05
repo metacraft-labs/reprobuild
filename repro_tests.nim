@@ -1554,6 +1554,17 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "t_group_libs_repro_build_engine_tests_g01",
     singleReason: ""),
   TestSpec(
+    source: "libs/repro_build_engine/tests/t_modified_output_restores_the_recorded_result.nim",
+    binary: "build/test-bin/t_modified_output_restores_the_recorded_result",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "",
+    singleReason: "self-spawn marker getAppFilename"),
+  TestSpec(
     source: "libs/repro_build_engine/tests/t_monitor_capture_at_long_path.nim",
     binary: "build/test-bin/t_monitor_capture_at_long_path",
     defines: @[],

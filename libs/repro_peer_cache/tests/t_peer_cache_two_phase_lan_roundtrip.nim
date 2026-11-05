@@ -42,15 +42,25 @@
 ##      (installed from A in step 2, describing the v1 binary as restored
 ##      there) and the reverted file matches its checksum again, but the
 ##      build runs IN PLACE and `out/hello` holds the v2 binary step 3
-##      compiled, not the output that record describes: the lookup
-##      fails closed and B recompiles (Incremental-Invalidation.md §"Minimum
-##      check set" Step 3.3, "declared outputs must already exist and match
-##      the recorded output metadata"; §"Output change time is the
-##      tamper-evident field"). The re-execution observes exactly what A's
-##      did, so it is A's selector again: B's store still holds two
-##      selectors, A's entry in it is byte-identical (a second write for an
-##      existing selector is a no-op, Peer-Cache.md §"Publish (producer)"),
-##      and A's own store is untouched.
+##      compiled, not the output that record describes, so it is not
+##      reused in place (Incremental-Invalidation.md §"Minimum check set"
+##      Step 3.3). The record is payload-backed and every input still
+##      matches, so B RESTORES the v1 binary from its own CAS instead of
+##      recompiling, and reports the overwrite (path, the v2 binary's hash,
+##      the v1 binary's hash). Owner decision 2026-11-03 ("Adopt + opt-in
+##      keep mode", BuildXL and Bazel both restore); until then this step
+##      asserted that B rejected the record and recompiled (agents
+##      5427fcd2f8). Nothing is compiled or published, no peer is asked, B
+##      still holds two selectors, A's entry in it is byte-identical, and
+##      A's own store is untouched.
+##   4b. A payload B stores fails verification: B's blob of the v1 binary is
+##      overwritten with other bytes under its name, and `out/hello` is
+##      modified again. B's lookup drops the corrupt blob and falls through
+##      to the next tier, A, which serves the v1 selector and blob; B
+##      restores from it. The build does not fail and nothing is compiled
+##      (owner decision 2026-11-03: a stored payload that fails verification
+##      is separated from "an output differs from the record" and falls
+##      through, never failing the build).
 ##
 ## Campaign M17 (Edge-Derived-Identities.md §3.3a and §3.6 riders of
 ## 2026-10-27, §10 decision 11): the build runs under `ffpChecksum`. It ran
@@ -119,7 +129,12 @@
 ##     `%TEMP%` (`cc*.s`, `cc*.o`, `cc*.res`, `cc*.cdtor.*`) as observed
 ##     reads, so no two executions share a PathSet.
 ## Where it ran that far, step 7's producer refusal (`make-depfile`) and
-## step 4's rejection behaved as asserted.
+## step 4's then-asserted rejection behaved as asserted. Step 4's restore and
+## step 4b (owner decision 2026-11-03) have not run on any host yet: the same
+## two blockers stop the gate before them on Windows, and no Linux host was
+## available. Their engine paths are exercised without a compiler by
+## `t_modified_output_restores_the_recorded_result` (LOCAL CAS, PEER,
+## CORRUPT).
 ##
 ## MOCK POLICY — none. Real sockets (no in-process `TableRef` peer table),
 ## real processes, the real build engine, a real C compiler, real CAS /
@@ -645,11 +660,13 @@ proc runTwoPhaseRoundtrip(profile: TrustProfile): bool =
     servedCounts.sort()
     check servedCounts == @[1, 2]
 
-    # ---- (4) revert: the original record is found, the in-place rule ----
-    # ---- fails closed, and the re-execution is A's selector again --------
+    # ---- (4) revert: the original record is found, and its result is ----
+    # ---- RESTORED from B's own CAS (owner decision 2026-11-03) -----------
     sleep(20)
     writeFile(wsB / "config.h", ConfigV1)
     let publishesBeforeRevert = hooksB.stats.publishes
+    let memoTripsBeforeRevert = hostB.client.memoRoundTripCount
+    let v2Name = $toContentHash(casFileHash(wsB / "out" / HelloName))
     let third = runBuild(helloGraph(wsB), configB)
     let again = third.byId(ActionId)
     checkpoint("third B build: status=" & $again.status & " reason=" &
@@ -660,30 +677,76 @@ proc runTwoPhaseRoundtrip(profile: TrustProfile): bool =
     # it in step 2 (step 2b reused it in place on that basis). The build
     # runs in place (`nodeEngineConfig`) and `out/hello` now holds the v2
     # binary step 3 compiled, so the output on disk is not the one the
-    # record describes: the lookup rejects it rather than fall through or
-    # restore (Incremental-Invalidation.md §"Minimum check set" Step 3.3;
-    # Action-Cache-Per-Edge-Store.md §5.3), and the action re-executes.
-    check again.cacheDecision == cdRejected
-    var rejections = 0
+    # record describes and it is not reused in place
+    # (Incremental-Invalidation.md §"Minimum check set" Step 3.3). The
+    # record is payload-backed and its inputs are unchanged, so the engine
+    # RESTORES the v1 binary from the local CAS and nothing is compiled.
+    # Owner decision 2026-11-03; until then the engine re-executed here, and
+    # this step asserted it (agents 5427fcd2f8).
+    check again.cacheDecision in {cdHit, cdHybridCutoff}
+    check not again.launched
+    check again.status == asCacheHit
+    var restoredInPlace = 0
     for event in third.trace:
-      if event.event == "cache-rejected" and
-          "output metadata changed" in event.detail:
-        inc rejections
-    check rejections == 1
-    check again.launched
-    check again.status == asSucceeded
+      if event.event == "cache-restore-modified-outputs":
+        inc restoredInPlace
+    check restoredInPlace == 1
     check execProcess(wsB / "out" / HelloName).strip() == "hello from config v1"
-    # The re-execution observed what A's execution observed, so its
-    # selector is A's. The publisher ran, and writing an existing selector
-    # is a no-op: B still holds exactly its two selectors, A's attested
-    # entry is byte-identical, and A's store is untouched.
-    check hooksB.stats.publishes == publishesBeforeRevert + 1
+    # The overwrite is reported: the path, the v2 binary that was there, the
+    # v1 binary the record restored.
+    check again.outputOverwrites.len == 1
+    if again.outputOverwrites.len == 1:
+      check again.outputOverwrites[0].onDisk == "blake3:" & v2Name
+      check again.outputOverwrites[0].restored == "blake3:" &
+        $toContentHash(casFileHash(wsB / "out" / HelloName))
+    # Served from B's own store: no trip to A, nothing published, B still
+    # holds exactly its two selectors, A's attested entry in B's store is
+    # byte-identical, and A's store is untouched.
+    check hostB.client.memoRoundTripCount == memoTripsBeforeRevert
+    check hooksB.stats.publishes == publishesBeforeRevert
     let selectorsAfterRevert = storageB.memo.listSelectors(weak)
     check selectorsAfterRevert.len == 2
     check selectorA in selectorsAfterRevert
     check selectorBOwn in selectorsAfterRevert
     check storageB.memo.readMemoEntryBytes(weak,
       selectorA.strongFingerprint).get() == encodeMemoEntry(entryA)
+    check storageA.memo.listSelectors(weak) == @[selectorA]
+
+    # ---- (4b) a corrupt local payload falls through to the peer --------
+    # B's blob of the v1 binary keeps its name and loses its bytes; the
+    # output is modified again. B drops the blob and asks the next tier: A
+    # serves the v1 selector (config.h is v1 again) and its blob, and B
+    # restores from it. Nothing is compiled; the build does not fail.
+    let v1Hash = toContentHash(entryA.outputDigests[0].bytes)
+    block:
+      var casB = openCasStore(cacheB)
+      defer: casB.close()
+      require casB.casExists(v1Hash)
+      writeFile(casB.casPath(v1Hash), "not the v1 binary\n")
+      require not casB.casVerify(v1Hash)
+    writeFile(wsB / "out" / HelloName, "modified again\n")
+    let hitsBeforeCorrupt = hooksB.stats.hits
+    let publishesBeforeCorrupt = hooksB.stats.publishes
+    let fourth = runBuild(helloGraph(wsB), configB)
+    let healed = fourth.byId(ActionId)
+    checkpoint("fourth B build: status=" & $healed.status & " reason=" &
+      healed.reason & " fetch=" & hooksB.stats.lastFetchReason &
+      traceOf(fourth))
+    check healed.status == asCacheHit
+    check not healed.launched
+    check healed.droppedCorruptPayloads == @[$v1Hash]
+    var unservable = 0
+    for event in fourth.trace:
+      if event.event == "cache-payload-unservable":
+        inc unservable
+    check unservable == 1
+    check hooksB.stats.hits == hitsBeforeCorrupt + 1
+    check hooksB.stats.publishes == publishesBeforeCorrupt
+    check execProcess(wsB / "out" / HelloName).strip() == "hello from config v1"
+    block:
+      var casB = openCasStore(cacheB)
+      defer: casB.close()
+      check casB.casVerify(v1Hash)
     check storageA.memo.listSelectors(weak) == @[selectorA]
 
     # ---- (5) M17: B does not publish a timestamp-policy record ----------

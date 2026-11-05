@@ -107,14 +107,18 @@ suite "M9.R.82 action-cache R11 CAS migration":
     #
     # The needle is also strengthened from "the name appears somewhere" to
     # what the case actually claims: the helper is DECLARED, and BOTH restore
-    # arms reach it. Three whole-identifier occurrences = the declaration plus
-    # the `aclHit` and `aclHybridCutoff` call sites; a call site that stops
-    # sharing the helper drops the count even if it keeps the name in a
+    # arms reach it. Since the owner's decision of 2026-11-03 both arms
+    # (`aclHit`, `aclHybridCutoff`) restore through ONE seam,
+    # `restoreRecordedOutputs`, which is the helper's one call site: so the
+    # helper is counted as declaration + that call (2), and the seam as its
+    # declaration + the two arms' calls (3). A restore arm that stops
+    # sharing the seam drops the second count even if it keeps the name in a
     # comment. Counted as a WHOLE identifier, folded the way Nim folds one, so
     # `materialize_action_cache_outputs` — the same symbol to the compiler —
     # counts too.
     check engineCode.contains("proc materializeActionCacheOutputs*(")
-    check countNimIdentifier(engineCode, "materializeActionCacheOutputs") >= 3
+    check countNimIdentifier(engineCode, "materializeActionCacheOutputs") >= 2
+    check countNimIdentifier(engineCode, "restoreRecordedOutputs") >= 3
     # The helper verifies through Layer-1 `casMaterialize` before touching any
     # destination. Graded as an identifier rather than as `.casMaterialize(`
     # because Nim has four spellings of one call and only two carry the dot.
@@ -254,7 +258,10 @@ suite "M9.R.82 action-cache R11 CAS migration":
     defer: r11Cas.close()
     let lookup = cache.lookupActionResult(r11Cas.inner, weakFor("legacy-record"),
       ffpChecksum)
-    check lookup.status == aclRejectedCorruptOutput
+    # The R11 store does not hold the legacy blob: a payload it cannot
+    # serve (owner decision 2026-11-03), nothing present to drop.
+    check lookup.status == aclRejectedCorruptPayload
+    check lookup.corruptPayloads.len == 0
     check not fileExists(outputPath)
 
   test "hybrid cutoff uses same R11 materialization helper":
@@ -311,7 +318,8 @@ suite "M9.R.82 action-cache R11 CAS migration":
 
     let lookup = cache.lookupActionResult(cas.inner, weakFor("corrupt-later"),
       ffpChecksum)
-    check lookup.status == aclRejectedCorruptOutput
+    check lookup.status == aclRejectedCorruptPayload
+    check lookup.corruptPayloads == @[record.outputs[1].blob.digest]
 
     var raised = false
     try:

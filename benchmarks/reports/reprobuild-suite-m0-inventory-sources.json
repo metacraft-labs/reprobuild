@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 34,
-    "nimTestBinaries": 2648,
+    "nimTestBinaries": 2649,
     "pureUnitConsolidationGroups": 79,
     "pureUnitTests": 733,
     "staticallyDetectedRuntimeCompilerFlowTests": 136,
-    "testEntries": 2688
+    "testEntries": 2689
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1555,7 +1555,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 19,
-      "integration": 1467,
+      "integration": 1468,
       "platform/destructive": 168,
       "pure unit": 733,
       "unclassified": 301
@@ -1766,9 +1766,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2648,
+    "nimTestBinaryCount": 2649,
     "pythonTestFileCount": 40,
-    "testEntryCount": 2688
+    "testEntryCount": 2689
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -2210,7 +2210,7 @@
             "wsA",
             "wsB"
           ],
-          "line": 196,
+          "line": 211,
           "path": "libs/repro_peer_cache/tests/t_peer_cache_two_phase_lan_roundtrip.nim",
           "patterns": [
             "cc"
@@ -10615,6 +10615,27 @@
       "source": "libs/repro_build_engine/tests/t_m9r73_session_invalidation_reaches_every_consumer.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 4,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_modified_output_restores_the_recorded_result",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_build_engine",
+        "repro_cas_store",
+        "repro_core",
+        "repro_local_store",
+        "repro_test_support"
+      ],
+      "owner": "libs/repro_build_engine",
+      "requiresReproBinary": true,
+      "source": "libs/repro_build_engine/tests/t_modified_output_restores_the_recorded_result.nim",
+      "sourceSuiteCount": 2,
+      "staticCaseCount": 18,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

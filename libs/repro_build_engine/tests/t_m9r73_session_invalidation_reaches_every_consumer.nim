@@ -174,6 +174,12 @@ proc producerReport(f: Fixture; run: int): string =
 proc testConfig(f: Fixture): BuildEngineConfig =
   result = defaultBuildEngineConfig(f.root / "cache")
   result.rebuildMissingOutputsOnCacheHit = true
+  # Metadata-only records, as the default `repro build` stores: removing an
+  # output is how these cases make the producer genuinely EXECUTE, and a
+  # payload-backed record would restore the missing output instead (owner
+  # decision 2026-11-03, Incremental-Invalidation.md §"Minimum check set"
+  # Step 3.3), so the producer would never run and its capture never be read.
+  result.deferLocalOutputBlobs = true
   result.bypassRunQuota = true
   result.maxParallelism = 1'u32
 
