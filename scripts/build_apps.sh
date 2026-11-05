@@ -283,6 +283,15 @@ if [ -n "${REPRO_ADDON_MUTATION:-}" ]; then
   nim_mode_flags+=("-d:reproAddonMutation=${REPRO_ADDON_MUTATION}")
 fi
 
+# The add-on's test seams (libs/repro_addon/src/repro_addon/seams.nim), for
+# a gate that must hold the engine at a seam (the conversion gate's restore):
+# built as the Nix package with this variable set
+# (`overrideAttrs (_: { REPRO_ADDON_TEST_SEAMS = "1"; })`). Never set in a
+# product build, which therefore carries no seam.
+if [ -n "${REPRO_ADDON_TEST_SEAMS:-}" ]; then
+  nim_mode_flags+=("-d:reproAddonTestSeams")
+fi
+
 case "${REPROBUILD_BUILD_MODE:-debug}" in
   debug)
     ;;

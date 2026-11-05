@@ -249,10 +249,13 @@ suite "an installed prefix":
       cc(root, "-g -shared -fPIC -Wl,-soname,libbar.so.1 -o libs/libbar.so.1 bar.c")
       var s = spec(f, @[f.libs])
       # The host's own objcopy stands in for the target's, behind a shim
-      # that records which libraries it was asked to strip.
+      # that records which libraries it was asked to strip. The strip is a
+      # filter, so the library is the file its standard input reads.
       let log = root / "stripped.log"
-      writeFile(root / "strip.sh", "#!/bin/sh\nbasename \"$1\" >> " & log &
-        "\nexec objcopy --strip-debug \"$1\" \"$2\"\n")
+      writeFile(root / "strip.sh", "#!/bin/sh\n" &
+        "basename \"$(readlink /proc/self/fd/0)\" >> " & log & "\n" &
+        "t=$(mktemp)\nobjcopy --strip-debug /dev/stdin \"$t\" && cat \"$t\"\n" &
+        "s=$?\nrm -f \"$t\"\nexit $s\n")
       setFilePermissions(root / "strip.sh", {fpUserRead, fpUserWrite, fpUserExec})
       s.debugStripCommand = root / "strip.sh"
       let r = sh(assemblyScript(s), root)
@@ -272,7 +275,7 @@ suite "an installed prefix":
       let f = makeFixture(root)
       cc(root, "-g -shared -fPIC -Wl,-soname,libbar.so.1 -o libs/libbar.so.1 bar.c")
       var s = spec(f, @[f.libs])
-      writeFile(root / "strip.sh", "#!/bin/sh\nhead -c 100 \"$1\" > \"$2\"\n" &
+      writeFile(root / "strip.sh", "#!/bin/sh\nhead -c 100\n" &
         "echo 'error: Unexpected' >&2; exit 1\n")
       setFilePermissions(root / "strip.sh", {fpUserRead, fpUserWrite, fpUserExec})
       s.debugStripCommand = root / "strip.sh"

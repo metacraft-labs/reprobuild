@@ -104,8 +104,9 @@ proc startSharedRunQuota(tempRoot: string): SharedRunQuota =
   ##      `item.launched`), and whether it launches is not stable run to run.
   ##      Two runs failed on that line alone, once on each arm.
   ##   2. With no REACHABLE coordinator at `$RUNQUOTA_SOCKET`, each build
-  ##      spawns its own at `reprobuild-runquota-<pid>` and prints that path
-  ##      on the `runQuotaSocket:` line, so the two arms differ by a pid.
+  ##      spawns its own in a fresh `reprobuild-runquota-<pid>-<random>`
+  ##      directory and prints that path on the `runQuotaSocket:` line, so
+  ##      the two arms differ by that path.
   ##
   ## Starting one and pointing both arms at it removes both branches instead
   ## of tolerating them, and it is the configuration the milestone's

@@ -7,18 +7,20 @@
 ## wrapper's own events become records; a host bootstrapped without a sink
 ## writes local records only and never an outbox entry.
 ##
-## Falsifying build: ``ship-deletes-before-ack`` -- entries are deleted as
+## Falsifying builds: ``check-ignores-ship-delay`` -- a stalled shipping
+## unit reads as live (the stall step goes red); ``ship-deletes-before-ack`` -- entries are deleted as
 ## soon as they are handed to the appender, so a run against an
 ## unreachable sink loses them; the "stays queued" step goes red.
 ##
 ## Mocks: none (see ``addon_evidence_fixture``).
 
-import std/[os, strutils, unittest]
+import std/[os, sequtils, strutils, times, unittest]
 
 import repro_peer_cache/evidence
 import repro_peer_cache/types
 
 import repro_addon/evidence as addonEvidence
+import repro_addon/evidence_check
 import repro_addon/evidence_ship
 
 import ./addon_evidence_fixture
@@ -97,6 +99,30 @@ suite "evidence ships off-host":
     check timeouts == 1
     # The cursor moved on: the same line is not reported twice.
     check runEvidenceShip(h.site, h.conf, "host-a").hookEvents == 0
+
+  test "a record that waited for the timer is a stall the check reports (F2)":
+    # The host shipped before (``last-ship`` is set); a record written two
+    # minutes ago and only now shipped is what a dead path unit leaves.
+    let t0 = int64(epochTime() * 1000)
+    writeFile(h.site.stateDir / "last-ship", $(t0 - 200_000) & "\n")
+    var r = newEvidenceRecord(ecDetection, "addon-apply-refusal", "late",
+      [("host", "host-a")], nowMs = int64(epochTime() * 1000) - 120_000)
+    writeOutboxRecord(h.site.outbox, r, "late")
+    let res = runEvidenceShip(h.site, h.conf, "host-a")
+    check res.heartbeat
+    let c = runEvidenceCheck(CheckInputs(storeDir: sink.storeDir,
+      hosts: @[EnrolledHost(hostId: h.credentialHost)],
+      nowMs: int64(epochTime() * 1000)))
+    checkpoint render(c)
+    check c.alerts.anyIt(it.detector == "DET-AO-8" and
+      it.trigger == "shipping-stalled")
+    # Shipping at once again: the next heartbeat clears it.
+    let res2 = runEvidenceShip(h.site, h.conf, "host-a", forceHeartbeat = true)
+    check res2.heartbeat
+    let c2 = runEvidenceCheck(CheckInputs(storeDir: sink.storeDir,
+      hosts: @[EnrolledHost(hostId: h.credentialHost)],
+      nowMs: int64(epochTime() * 1000)))
+    check not c2.alerts.anyIt(it.trigger == "shipping-stalled")
 
   test "a host without a sink writes local records only":
     var local = h.evidence

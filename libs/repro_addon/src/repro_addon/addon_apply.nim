@@ -62,7 +62,7 @@
 
 import std/[algorithm, json, monotimes, options, os, sets, strutils, tables,
             times]
-from std/posix import Statvfs, statvfs, Stat, lstat
+from std/posix import Statvfs, statvfs, Stat, lstat, rmdir
 import std/uri
 import repro_binary_cache_client/http_pool
 
@@ -73,6 +73,7 @@ import repro_elevation/posix_system_driver
 import repro_infra
 import repro_infra/addon_diagnostics
 import repro_infra/planner
+from repro_infra/service_floor import floorWritablePlaces, serviceDirectives
 from repro_profile import ProfileBuildAction
 import repro_local_store/store
 
@@ -447,10 +448,14 @@ proc storeSignature*(dir: string): string =
 proc storeChangedSince*(realised: openArray[tuple[path, signature: string]]):
     seq[string] =
   ## The store objects whose ``storeSignature`` differs from the one
-  ## recorded, or that are gone.
+  ## recorded, or that are gone -- or that store verification quarantined
+  ## (spec §13 decision 46: no switch uses an altered path again).
+  let quarantined = readStoreQuarantine()
   for (path, sig) in realised:
     let now = if dirExists(path): storeSignature(path) else: "(gone)"
     if now != sig: result.add(path)
+    elif path in quarantined: result.add(path & " (quarantined: its bytes " &
+      "differed from its realisation digest)")
 
 proc storeObjectFor*(path: string): string =
   ## The store object a path lies in: a prefix
@@ -1277,10 +1282,31 @@ proc writeStartHolds*(resources: openArray[SystemResource]): seq[string] =
     result.add(p)
 
 proc removeStartHolds*(holds: openArray[string]) =
+  ## Remove each hold file, and its directory only when the hold was the
+  ## last thing in it (``rmdir`` refuses a non-empty directory). Round 4
+  ## called ``os.removeDir``, which deletes recursively: every other
+  ## drop-in in the directory went with it (A9 review round 5, finding 5).
   for p in holds:
     if fileExists(p): removeFile(p)
-    try: removeDir(parentDir(p), checkDir = false)
-    except OSError: discard   # another drop-in is there: kept
+    when mutated("start-hold-removes-directory"):
+      try: removeDir(parentDir(p), checkDir = false)
+      except OSError: discard
+    else:
+      discard rmdir(parentDir(p).cstring)   # fails, harmlessly, when not empty
+
+proc clearStaleStartHolds*(root = "/run/systemd/system"): seq[string] =
+  ## Every start hold under ``root`` that an earlier switch left behind --
+  ## one whose check refused, before a revert to a generation with no
+  ## floored unit, or a switch that died -- removed (A9 review round 5,
+  ## finding 5). Returns the holds removed.
+  when mutated("stale-start-holds-kept"):
+    return
+  if not dirExists(root): return
+  for kind, d in walkDir(root):
+    if kind != pcDir or not d.endsWith(".d"): continue
+    let p = d / StartHoldName
+    if fileExists(p): result.add(p)
+  removeStartHolds(result)
 
 proc unitSearchPaths*(): seq[string] =
   ## systemd's unit search path (``systemd-analyze unit-paths``): every
@@ -1336,10 +1362,6 @@ proc foreignDropInsFor*(units: openArray[string]; own: HashSet[string];
         if f.endsWith(".conf") and f notin own:
           result.add(f)
 
-proc readableByAll(path: string): bool =
-  try: fpOthersRead in getFilePermissions(path)
-  except OSError: true    # missing: systemd reads nothing (or fails the unit)
-
 proc effectiveFloorCheck*(resources: openArray[SystemResource]): seq[string] =
   ## Every floored unit of the generation as systemd now reads it, against
   ## the floor it is rendered under (``effective_floor``; spec §10.1, A9
@@ -1355,6 +1377,14 @@ proc effectiveFloorCheck*(resources: openArray[SystemResource]): seq[string] =
   for d in resources:
     if d.kind == srkSystemdSystemDropIn: own.incl(targetPathOf(d))
   for u in flooredUnitNames(resources): own.incl(startHoldPath(u))
+  var ownUnits = initHashSet[string]()
+  for d in resources:
+    if d.kind == srkSystemdSystemUnit: ownUnits.incl(d.suName)
+  var limits = initTable[string, string]()
+  if flooredUnitNames(resources).len > 0:
+    try: limits = managerLimits()
+    except CatchableError as ex:
+      result.add("the service manager's limits: " & ex.msg)
   when not mutated("unnamed-instances-unchecked"):
     try:
       for f in foreignDropInsFor(flooredUnitNames(resources), own,
@@ -1381,7 +1411,13 @@ proc effectiveFloorCheck*(resources: openArray[SystemResource]): seq[string] =
       var e = EffectiveInput(unit: name, rendered: rendered,
         version: r.suFloorVersion, exceptions: r.suFloorExceptions,
         fragment: unitPath(r.suName), denied: denied, uidOf: systemUid,
-        groupsOf: systemGroups, readableByAll: readableByAll)
+        groupsOf: systemGroups, gidOf: systemGid, ownUnits: ownUnits,
+        limitCeilings: limits)
+      for o in resources:
+        if o.kind == srkSystemdSystemUnit and o.suName != r.suName and
+            effectiveFloor(o).len > 0 and o.suCollision != "dropIn":
+          e.otherWritable.add(floorWritablePlaces(serviceDirectives(
+            renderedSystemUnitContent(o))))
       for d in resources:
         if d.kind == srkSystemdSystemDropIn and dropInApplies(d.diUnit, name):
           e.ownDropIns.add((path: targetPathOf(d), content: d.diContent))
@@ -1400,6 +1436,20 @@ proc effectiveFloorCheck*(resources: openArray[SystemResource]): seq[string] =
         except IOError, OSError:
           result.add(name & ": cannot read " & f & ", which systemd loaded")
       result.add(effectiveFloorProblems(e))
+      # The units that trigger it: sockets, timers, path units (A9 review
+      # round 5, finding 2), whoever defines them.
+      when not mutated("activators-unchecked"):
+        for a in e.show.getOrDefault("TriggeredBy").splitWhitespace():
+          var aown: seq[string]
+          for d in resources:
+            if d.kind == srkSystemdSystemDropIn and dropInApplies(d.diUnit, a):
+              aown.add(targetPathOf(d))
+          try:
+            let at = showUnitText(a)
+            result.add(activatorProblems(a, parseShow(at), parseShowLines(at),
+                                         unitPath(a), aown))
+          except CatchableError as ex:
+            result.add(a & ": " & ex.msg)
 
 proc retargetedAddresses*(previous, wanted: openArray[SystemResource]):
     seq[tuple[address, was, now: string]] =
@@ -2813,6 +2863,22 @@ proc carriedRefusalFor(opts: AddonApplyOptions; stateDir: string): string =
      else: CarriedStateDir),
     (if opts.carriedStateRoot.len > 0: opts.carriedStateRoot else: "/"))
 
+proc hostLockWithCarriedRecheck*(opts: AddonApplyOptions;
+                                 stateDir: string): HostApplyLock =
+  ## Take the host apply lock for this apply and decide carried state again
+  ## under it: a state backup takes the same lock, so a hold it wrote while
+  ## this apply waited for the lock is seen here, before anything is
+  ## written, not after the switch has started units. Raises
+  ## ``AddonApplyError`` (with the lock released) on a refusal.
+  result = acquireHostApplyLock("add-on " &
+    (if opts.purpose.len > 0: opts.purpose else: "apply") & " (state " &
+    stateDir & ")")
+  when not mutated("carried-check-not-under-lock"):
+    let why = carriedRefusalFor(opts, stateDir)
+    if why.len > 0:
+      result.release()
+      raise newException(AddonApplyError, why)
+
 proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult
   ## Defined below, after the switch it wraps with its evidence record.
 
@@ -2856,18 +2922,8 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
   # switch, not only the infra apply inside it.
   var hostLock: HostApplyLock
   if not opts.planOnly:
-    hostLock = acquireHostApplyLock("add-on " &
-      (if opts.purpose.len > 0: opts.purpose else: "apply") & " (state " &
-      stateDir & ")")
+    hostLock = hostLockWithCarriedRecheck(opts, stateDir)
   defer: hostLock.release()
-  if not opts.planOnly:
-    # Decided again under the host lock: a state backup takes the same
-    # lock, so a hold it wrote while this apply waited is seen here, not
-    # after the switch has started units.
-    when not mutated("backup-without-host-lock"):
-      let why = carriedRefusalFor(opts, stateDir)
-      if why.len > 0:
-        raise newException(AddonApplyError, why)
   if not opts.planOnly:
     enterWritableStoreView()
     createDir(addonDir(stateDir))
@@ -4281,7 +4337,7 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
   let previousStatic =
     if replaying and priorMarker.previousStatic.len > 0: priorMarker.previousStatic
     else: readStaticTarget()
-  let (treePath, treePrefixId) = realiseStaticTree(treeFiles)
+  let (treePath, treePrefixId, treeDigest) = realiseStaticTree(treeFiles)
   var closureLocks: seq[AptClosureLock]
   for p in plans:
     # A unit's closure, and a tool's (its driver would otherwise realise it
@@ -4796,12 +4852,17 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
           if notHeld.len > 0:
             problems.add($adFloorNotEffective & ": " & notHeld.join("; ") &
               "; nothing was started")
-          elif startHolds.len > 0:
-            # Checked: the holds go, and step 7 starts on these definitions.
+          else:
+            # Checked: the holds go -- this switch's, and any an earlier
+            # switch left (a refused check before a revert to a generation
+            # with no floored unit) -- and step 7 starts on these
+            # definitions.
+            let stale = clearStaleStartHolds()
             removeStartHolds(startHolds)
+            if startHolds.len > 0 or stale.len > 0:
+              try: daemonReload()
+              except CatchableError as ex: problems.add(ex.msg)
             startHolds.setLen(0)
-            try: daemonReload()
-            except CatchableError as ex: problems.add(ex.msg)
       if startHolds.len > 0 and clean and problems.len == 0:
         # The check did not run (a record-only replay, a falsifying build):
         # the holds must not outlive the switch that wrote them.
@@ -4875,7 +4936,8 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
         linkTarget: readStaticTarget(), resource: "static-tree",
         mode: "0777", owner: "0:0"))
       put(LedgerEntry(class: lcStorePrefix, path: treePath,
-        sha256: prefixIdHex(treePrefixId), resource: "static-tree"))
+        sha256: prefixIdHex(treePrefixId), value: treeDigest,
+        resource: "static-tree"))
       for p in plans:
         if p.r.address in hookRefused:
           # The write-time re-check refused this resource's operation: what

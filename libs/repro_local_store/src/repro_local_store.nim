@@ -441,12 +441,36 @@ type
       ##
       ## APPENDED, not inserted. `aclHit` and its neighbours keep their
       ## ordinals so nothing that persisted or compared one shifts.
+    aclRejectedCorruptPayload
+      ## A payload-backed record matched on every input, and a payload it
+      ## names cannot be served from THIS content store: the blob is missing,
+      ## or it is present and fails verification against its digest (size or
+      ## BLAKE3). Returned only by a lookup that verifies payloads
+      ## (`verifyOutputBlobs`, the restore mode).
+      ##
+      ## Owner decision 2026-11-03 (Incremental-Invalidation.md §"Minimum
+      ## check set" Step 3.3, Peer-Cache.md §"Lookup (consumer)"): a payload
+      ## that fails verification is a fact about this host's STORE, not about
+      ## the outputs on disk, and it is separated from
+      ## `aclRejectedCorruptOutput`, which now means only "a declared output
+      ## on disk is not the one the record describes". Until then both
+      ## arrived as `aclRejectedCorruptOutput` and the engine re-executed
+      ## without asking another tier. The engine drops the corrupt blobs
+      ## (`corruptPayloads`, `dropCorruptPayloads`) and falls through to the
+      ## next tier exactly as for a missing payload; the build never fails
+      ## on it.
+      ##
+      ## APPENDED, like `aclMissRetentionExpired`, so no ordinal shifts.
 
   ActionCacheLookup* = object
     status*: ActionCacheLookupStatus
     record*: ActionResultRecord
     message*: string
     changedInputPath*: string
+    corruptPayloads*: seq[ContentDigest]
+      ## `aclRejectedCorruptPayload` only: the payloads that are PRESENT in
+      ## the store and fail verification, which the caller drops. A missing
+      ## payload is not listed: there is nothing to drop.
 
   HotMetadataProbe* = object
     weakFingerprint*: ContentDigest
@@ -3249,6 +3273,20 @@ proc ownedOutputKey(outputRoot, path: string): string =
   when defined(windows):
     result = result.toLowerAscii()
 
+proc isContainerOutput*(outputRoot, path: string;
+                        containerOutputs: openArray[string]): bool =
+  ## Whether the record output `path` is one of the action's CONTAINER
+  ## directory outputs (Incremental-Invalidation.md §"Non-regular outputs",
+  ## "Container directory outputs"), both sides resolved against
+  ## `outputRoot` as `outputStateMismatch` resolves them (`ownedOutputKey`).
+  if containerOutputs.len == 0:
+    return false
+  let key = ownedOutputKey(outputRoot, path)
+  for container in containerOutputs:
+    if ownedOutputKey(outputRoot, container) == key:
+      return true
+  false
+
 proc recordOutputsNotOwnedBy*(record: ActionResultRecord; outputRoot: string;
                               ownedOutputs: openArray[string]): string =
   ## Why `record` does not describe an action whose declared outputs are
@@ -3417,6 +3455,113 @@ proc outputStateMismatch*(record: ActionResultRecord;
   result = outputStateMismatchImpl(record, outputRoot, containerOutputs)
   inc outputStateCheckCalls
   outputStateCheckNanos += (getMonoTime() - started).inNanoseconds
+
+type
+  OutputOverwrite* = object
+    ## One declared output a restore writes OVER: a path that holds
+    ## something other than what the record describes. Owner decision
+    ## 2026-11-03 (Incremental-Invalidation.md §"Minimum check set" Step
+    ## 3.3): every such overwrite is reported at user-visible level, naming
+    ## the path and both identities.
+    path*: string
+      ## The output's location (the record's path resolved against the
+      ## action's working directory).
+    onDisk*: string
+      ## What is there now: `blake3:<hex>` for a regular file (named as the
+      ## content store names blobs), `tree:<hex>` for a directory (its
+      ## metadata tree digest), `symlink:<target>`, or the entry kind when
+      ## the kind itself changed.
+    restored*: string
+      ## What the restore puts there, from the RECORD, in the same terms.
+
+proc outputOverwritesImpl(record: ActionResultRecord; outputRoot: string;
+                          fileIdentity: proc (path: string): ContentDigest;
+                          containerOutputs: openArray[string]):
+                          seq[OutputOverwrite] =
+  for output in record.outputs:
+    if output.metadata.kind == ffkMissing:
+      continue
+    let path = materialPath(outputRoot, output.path)
+    let live = fingerprintMetadata(path)
+    if live.kind == ffkMissing:
+      continue  # nothing there to overwrite: a plain restore
+    if isContainerOutput(outputRoot, output.path, containerOutputs):
+      # A CONTAINER is restored by making sure the directory exists, never
+      # from its tree (`materializeActionCacheOutputs`): its other entries
+      # are other writers', and nothing of them is written over.
+      if live.kind != ffkDirectory:
+        result.add(OutputOverwrite(path: path, onDisk: $live.kind,
+          restored: "directory"))
+      continue
+    if output.linkTarget.len > 0:
+      let target = symlinkTargetOf(path)
+      if target != output.linkTarget:
+        result.add(OutputOverwrite(path: path,
+          onDisk: (if target.len > 0: "symlink:" & target else: $live.kind),
+          restored: "symlink:" & output.linkTarget))
+      continue
+    if output.metadata.kind == ffkDirectory:
+      let restored =
+        if output.hasTreeDigest: "tree:" & toHex(output.treeDigest)
+        else: "tree:unrecorded"
+      if live.kind != ffkDirectory:
+        result.add(OutputOverwrite(path: path, onDisk: $live.kind,
+          restored: restored))
+        continue
+      var walked = 0'i64
+      var digest = 0'u64
+      try:
+        digest = directoryMetadataDigest(path, walked)
+      except OSError, IOError:
+        result.add(OutputOverwrite(path: path, onDisk: "tree:unreadable",
+          restored: restored))
+        continue
+      if not output.hasTreeDigest or digest != output.treeDigest:
+        result.add(OutputOverwrite(path: path,
+          onDisk: "tree:" & toHex(digest), restored: restored))
+      continue
+    let restored = "blake3:" & digestHex(output.blob.digest)
+    if live.kind != ffkRegular:
+      result.add(OutputOverwrite(path: path, onDisk: $live.kind,
+        restored: restored))
+      continue
+    var current: ContentDigest
+    try:
+      current = fileIdentity(path)
+    except OSError, IOError:
+      result.add(OutputOverwrite(path: path, onDisk: "blake3:unreadable",
+        restored: restored))
+      continue
+    if current != output.blob.digest:
+      result.add(OutputOverwrite(path: path,
+        onDisk: "blake3:" & digestHex(current), restored: restored))
+
+proc outputOverwrites*(cas: Store; record: ActionResultRecord;
+                       outputRoot: string;
+                       containerOutputs: openArray[string] = []):
+                       seq[OutputOverwrite] =
+  ## The declared outputs a restore of payload-backed `record` would write
+  ## over (`OutputOverwrite`): present at their path, and not what the
+  ## record describes. A missing output is not an overwrite, and an output
+  ## whose CONTENT is the recorded one is not reported even when its
+  ## metadata moved (a restore replaces it with the same bytes). Regular
+  ## files are hashed as this store names blobs, so the two identities are
+  ## comparable. Cost: one read of each present regular output; the engine
+  ## asks it only on the path that is about to restore.
+  outputOverwritesImpl(record, outputRoot,
+    proc (path: string): ContentDigest =
+      r11CasDigest(casFileHash(path)), containerOutputs)
+
+proc outputOverwrites*(cas: LocalCas; record: ActionResultRecord;
+                       outputRoot: string;
+                       containerOutputs: openArray[string] = []):
+                       seq[OutputOverwrite] =
+  ## `outputOverwrites` for the legacy store, which names a blob by its
+  ## framed digest (`casFileDigest`).
+  outputOverwritesImpl(record, outputRoot,
+    proc (path: string): ContentDigest =
+      let size = getFileInfo(extendedPath(path), followSymlink = false).size
+      casFileDigest(extendedPath(path), uint64(size)), containerOutputs)
 
 proc payloadlessOutputsInPlace(record: ActionResultRecord;
                                outputRoot: string;
@@ -5991,6 +6136,117 @@ proc verifyOutputs(cas: Store; record: ActionResultRecord) =
   for output in record.outputs:
     cas.verifyBlob(output.blob)
 
+proc payloadProblems[CasT](cas: CasT; record: ActionResultRecord):
+    tuple[message: string; corrupt: seq[ContentDigest]] =
+  ## Every payload of a payload-backed `record` that this store cannot serve:
+  ## `message` names the first one ("" when all verify), and `corrupt` lists
+  ## those PRESENT and failing verification (a missing blob is not listed).
+  ## Every payload is checked, not only up to the first failure, so a caller
+  ## that drops the corrupt ones drops all of them in one pass.
+  var seen: seq[ContentDigest] = @[]
+  for output in record.outputs:
+    if output.blob.digest in seen:
+      continue
+    seen.add(output.blob.digest)
+    try:
+      cas.verifyBlob(output.blob)
+    except CacheIntegrityError as err:
+      if result.message.len == 0:
+        result.message = err.msg
+      if fileExists(extendedPath(cas.blobPath(output.blob.digest))):
+        result.corrupt.add(output.blob.digest)
+
+proc dropCorruptPayloads*(cas: LocalCas;
+                          digests: openArray[ContentDigest]): seq[string] =
+  ## Remove each blob in `digests` that is STILL present and STILL fails
+  ## verification, and return the hex of each one removed. A blob that now
+  ## verifies (another writer repaired it) or is gone is left alone, so this
+  ## never removes a good payload. A removed blob is what lets the next tier
+  ## repair the store: `storeBlob` keeps an existing file without reading
+  ## it, so a corrupt blob left in place would survive every later store of
+  ## the right bytes. Best-effort: a blob that cannot be removed is skipped
+  ## (the lookup then keeps missing on it, which is the fail-closed side).
+  for digest in digests:
+    let path = cas.blobPath(digest)
+    if not fileExists(extendedPath(path)):
+      continue
+    var size = 0'i64
+    try:
+      size = getFileInfo(extendedPath(path), followSymlink = false).size
+    except OSError:
+      continue
+    try:
+      cas.verifyBlob(CasBlobRef(digest: digest, sizeBytes: uint64(size)))
+      continue
+    except CacheIntegrityError:
+      discard
+    try:
+      removeFile(extendedPath(path))
+      result.add(digestHex(digest))
+    except OSError:
+      discard
+
+proc dropCorruptPayloads*(cas: Store;
+                          digests: openArray[ContentDigest]): seq[string] =
+  ## `dropCorruptPayloads` for the R11 store (`readCasBlob` verifies the
+  ## BLAKE3 digest of the bytes against the blob's name, whatever its size).
+  ## Also forgets the blob's last-use row, so the store GC does not account
+  ## for a blob that is no longer there.
+  for digest in digests:
+    if digest.algorithm != haBlake3_256:
+      continue
+    let path = cas.blobPath(digest)
+    if not fileExists(extendedPath(path)):
+      continue
+    try:
+      discard cas.readCasBlob(digest.bytes)
+      continue
+    except StoreError:
+      discard
+    try:
+      removeFile(extendedPath(path))
+      try: cas.forgetCasUse(digest.bytes)
+      except CatchableError: discard
+      result.add(digestHex(digest))
+    except OSError:
+      discard
+
+proc hashedInputContentChanged*(record: ActionResultRecord;
+                                inputRoot = ""): string =
+  ## The first input of `record` whose content identity, read NOW, differs
+  ## from the one the record carries, or "" when none does. Unlike
+  ## `inputContentStillRecorded` it compares only what the record can be
+  ## compared on: an input recorded with a content hash is re-hashed (and
+  ## its entry kind compared), an enumerated directory's membership is
+  ## re-read, and an input recorded WITHOUT a hash (an `ffpTimestamp`
+  ## record's) is left to the policy's own metadata check, which the lookup
+  ## that produced `record` already made.
+  ##
+  ## The engine asks it before it writes recorded bytes over a file that is
+  ## not the one the record describes (owner decision 2026-11-03,
+  ## Incremental-Invalidation.md §"Minimum check set" Step 3.3): an
+  ## `ffpHybrid` lookup trusts an input whose kind, size and mtime are
+  ## unchanged without reading it, and overwriting a file is the one place
+  ## where that trade-off is not taken. An input edited with its size and
+  ## mtime put back is then a miss, not a restore of the previous result.
+  for input in record.inputs:
+    let tracked = membershipTrackedDirectory(input.metadata)
+    if not input.hasLocalHash and not tracked:
+      continue
+    let location = recordedInputLocation(inputRoot, input.path)
+    let current =
+      if tracked:
+        observeEnumeratedDirectory(location, ffpChecksum)
+      else:
+        observeFile(location, ffpChecksum)
+    if tracked:
+      if current.metadata != input.metadata:
+        return input.path
+      continue
+    if not sameContentIdentity(input, current):
+      return input.path
+  ""
+
 proc lookupActionResultImpl[CasT](cache: var ActionCache; cas: CasT;
                                   weak: ContentDigest;
                                   policy: FileFingerprintPolicy;
@@ -6101,11 +6357,17 @@ proc lookupActionResultImpl[CasT](cache: var ActionCache; cas: CasT;
             record: candidate,
             message: "cache record does not contain output payloads")
       else:
-        try:
-          cas.verifyOutputs(candidate)
-        except CacheIntegrityError as err:
-          return ActionCacheLookup(status: aclRejectedCorruptOutput,
-            record: candidate, message: err.msg)
+        # A payload this store cannot serve is a fact about the STORE, not
+        # about the outputs on disk: `aclRejectedCorruptPayload`, never
+        # `aclRejectedCorruptOutput` (owner decision 2026-11-03). It still
+        # rejects the lookup rather than falling through to an older
+        # candidate (§"Output change time is the tamper-evident field"); the
+        # caller drops the corrupt blobs and asks the next TIER.
+        let problems = cas.payloadProblems(candidate)
+        if problems.message.len > 0:
+          return ActionCacheLookup(status: aclRejectedCorruptPayload,
+            record: candidate, message: problems.message,
+            corruptPayloads: problems.corrupt)
     elif allowMetadataOnlyHit:
       # In-place local reuse: the bytes stay at their declared paths, so the
       # CAS verification above is not what protects them. Revalidate the

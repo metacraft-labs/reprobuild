@@ -489,11 +489,27 @@
 ##                                            followed
 ## ``backup-without-host-lock``               the backup runs without the
 ##                                            host apply lock and is not
-##                                            re-checked after the hold; an
-##                                            apply's carried check is not
-##                                            repeated under the lock
+##                                            re-checked after the hold
 ## ``restore-not-required-by-units``          the carried units do not
 ##                                            require the restore unit
+## ``restore-unordered``                      the restore unit and the
+##                                            carried units' drop-in carry
+##                                            no ordering
+## ``restore-required-by-link``               the requirement is a link in
+##                                            .requires/ (removed by a
+##                                            disable or a preset)
+## ``carried-check-not-under-lock``           an apply does not decide
+##                                            carried state again under the
+##                                            host lock
+## ``reach-default-allow``                    what the reach analysis does
+##                                            not understand is allowed
+##                                            (round 2's behaviour)
+## ``reach-paths-as-text``                    reach compares paths as text
+##                                            and ignores the legacy
+##                                            ReadWriteDirectories=
+## ``missing-manifest-allowed``               a manifest missing where
+##                                            carried state was installed
+##                                            counts as none
 ## ``engine-tick-unrecorded``                 the full engine's agent tick
 ##                                            on an add-on host leaves no
 ##                                            evidence record
@@ -503,6 +519,35 @@
 ## ``evidence-keys-adopted``                  creating the evidence keys
 ##                                            does not refuse keys that
 ##                                            are already there
+## ``reassert-skips-digest-check``            the store verification after
+##                                            boot compares no digest
+## ``lag-from-newest-copy``                   DET-AO-10 counts a host's lag
+##                                            from the newest re-signed copy
+## ``evidence-path-rate-limited``             the shipping units keep the
+##                                            default start/trigger limits
+## ``check-ignores-ship-delay``               the check reads a stalled
+##                                            shipping unit as live
+## ``egress-state-survives-reload``           egress counts are compared
+##                                            across a table reload
+## ``egress-instance-ignores-boot``           a table loaded at another
+##                                            boot, with the same handle,
+##                                            is the same instance
+## ``check-status-ignores-silence``           a detector's status is
+##                                            live-idle beside its silence
+##                                            alert
+## ``check-forgets-enrolled-key``             the check ignores the hosts
+##                                            file's enrolled key
+## ``uninstall-keeps-fetch-state``            uninstall leaves the fetch
+##                                            unit's state directory
+## ``store-verify-trusts-receipt``           store verification expects
+##                                            the digest the verified
+##                                            path's own receipt names
+## ``reassert-nft-in-own-netns``              the re-assert lists nftables
+##                                            tables in its own private
+##                                            network namespace
+## ``reassert-store-trigger-missing``         a quarantined store object
+##                                            in use is reported as
+##                                            ``store-object-missing``
 ## =========================================  ==============================
 
 # The deploy agent's own mutations (``repro_deploy_agent/agent_mutations``)
@@ -709,6 +754,14 @@ const
                           "properties-not-default-denied",
                           "unnamed-instances-unchecked",
                           "floor-start-unheld",
+                          # A9 review round 5.
+                          "floor-round5-static-off",
+                          "inert-families-by-pattern",
+                          "privileged-groups-by-name",
+                          "environment-files-trusted",
+                          "activators-unchecked",
+                          "start-hold-removes-directory",
+                          "stale-start-holds-kept",
                           # A13: a state backup or restore runs while a
                           # unit of the set may run.
                           "state-units-not-checked",
@@ -774,6 +827,13 @@ const
                           "reach-trigger-units-reach-nothing",
                           "backup-without-host-lock",
                           "restore-not-required-by-units",
+                          # A13 review round 3.
+                          "restore-unordered",
+                          "restore-required-by-link",
+                          "carried-check-not-under-lock",
+                          "missing-manifest-allowed",
+                          "reach-default-allow",
+                          "reach-paths-as-text",
                           # A11 review: the full engine's deploy-agent tick
                           # on an add-on host leaves no record.
                           "engine-tick-unrecorded",
@@ -782,7 +842,37 @@ const
                           "egress-observer-not-installed",
                           # Owner decision 2026-11-04 (evidence-enrol): keys
                           # already on the host are not looked for.
-                          "evidence-keys-adopted"]
+                          "evidence-keys-adopted",
+                          # Owner decision 2026-11-05 (G41): the store
+                          # verification compares no digest.
+                          "reassert-skips-digest-check",
+                          # A11 audit F1: lag counted from the newest copy.
+                          "lag-from-newest-copy",
+                          # A11 audit F2: the shipping units rate-limited as
+                          # before, and the check blind to a stall.
+                          "evidence-path-rate-limited",
+                          "check-ignores-ship-delay",
+                          # A11 audit F3: egress counts kept across a reload.
+                          "egress-state-survives-reload",
+                          # The handle repeats at the next boot.
+                          "egress-instance-ignores-boot",
+                          # A11 audit F4: statuses beside their own alert.
+                          "check-status-ignores-silence",
+                          # A11 audit F6: the hosts file's enrolled key and
+                          # generation 0 ignored.
+                          "check-forgets-enrolled-key",
+                          # A11 audit F5: uninstall keeps the fetch unit's
+                          # state directory.
+                          "uninstall-keeps-fetch-state",
+                          # A11 audit session 2, G2: the expected digest
+                          # read from the path being verified.
+                          "store-verify-trusts-receipt",
+                          # G4: the egress table listed in the re-assert
+                          # unit's own (empty) network namespace.
+                          "reassert-nft-in-own-netns",
+                          # Session 2, low: one trigger for a missing and a
+                          # quarantined store object.
+                          "reassert-store-trigger-missing"]
 
 when AddonMutation.len > 0 and AddonMutation notin KnownAddonMutations and
     AddonMutation notin KnownAgentMutations:

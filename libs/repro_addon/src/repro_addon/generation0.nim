@@ -172,6 +172,18 @@ const
     ## The local records (one JSON document per event, spec §10.4).
   EvidenceOutboxPath* = EvidenceDirPath & "/outbox"
     ## Each record as the sink receives it, until the sink acknowledges it.
+  StoreQuarantinePath* = "/var/lib/repro/system/addon/store-quarantine"
+    ## Store paths whose bytes differed from their realisation digest (spec
+    ## §13 decision 46): one per line; no switch uses one again.
+  StoreAdoptedDigestsPath* = "/var/lib/repro/system/addon/store-digests"
+    ## Digests an operator recorded for prefixes realised before receipts
+    ## carried one (``store-verify --adopt-unverified``): ``<path> <digest>``.
+  StoreVerifyUnit* = "repro-addon-store-verify.service"
+  StoreVerifyTimer* = "repro-addon-store-verify.timer"
+  StoreVerifyIntervalSec* = 6 * 3600
+  StoreVerifyBudgetSec* = 900
+    ## One verification run's time budget; what it does not reach is the
+    ## next run's first work (a rotating cursor).
   EvidenceShipUnit* = "repro-addon-evidence.service"
   EvidenceShipPathUnit* = "repro-addon-evidence.path"
   EvidenceShipTimer* = "repro-addon-evidence.timer"
@@ -198,6 +210,10 @@ const
   AgentFetchTimer* = "repro-agent-fetch.timer"
   AgentApplyUnit* = "repro-agent-apply.service"
   AgentFetchStateName* = "repro-agent-fetch"
+  AgentFetchStatePaths* = ["/var/lib/private/repro-agent-fetch",
+                           "/var/lib/repro-agent-fetch"]
+    ## Where systemd keeps that dynamic user's StateDirectory=; uninstall
+    ## removes both.
   AgentCompileDirName* = "compile"
     ## The profile compile's directory under the fetch unit's state
     ## directory (its caches persist between ticks).
@@ -1000,6 +1016,11 @@ proc evidenceShipUnit*(reproExe: string; e: EvidenceUnitsInputs): string =
   "[Unit]\n" &
   "Description=Reprobuild add-on: ship evidence records to the Evidence sink\n" &
   "After=network-online.target\n" &
+  # Started once per record that lands, so a burst must never trip the
+  # default start limit (5 in 10 s): that failed the path unit, for good
+  # (A11 audit F2). The unit drains the whole outbox per run and does
+  # nothing when it is empty, so it needs no rate limit.
+  (when mutated("evidence-path-rate-limited"): "" else: "StartLimitIntervalSec=0\n") &
   "Wants=network-online.target\n" &
   "\n" &
   "[Service]\n" &
@@ -1035,6 +1056,37 @@ proc evidenceShipUnit*(reproExe: string; e: EvidenceUnitsInputs): string =
   "InaccessiblePaths=-/run/dbus -/var/run/dbus\n" &
   egress
 
+proc storeVerifyUnit*(reproExe: string): string =
+  ## ``repro-addon-store-verify.service`` (spec §13 decision 46): the current
+  ## generation's store paths against their realisation digests, in the
+  ## background after boot -- started by its timer, wanted by nothing at
+  ## boot, so it never holds the boot up -- at idle CPU and IO priority and
+  ## within a time budget. The apply unit's confinement, with no network.
+  "[Unit]\n" &
+  "Description=Reprobuild add-on: verify the store against its realisation digests (DET-AO-5)\n" &
+  "After=" & ReassertUnit & " repro-store.mount\n" &
+  "\n" &
+  "[Service]\n" &
+  "Type=oneshot\n" &
+  "ExecStart=" & reproExe & " system addon store-verify --background\n" &
+  "Nice=19\n" &
+  "IOSchedulingClass=idle\n" &
+  "CPUSchedulingPolicy=idle\n" &
+  "TimeoutStartSec=" & $(StoreVerifyBudgetSec + 300) & "\n" &
+  privilegedConfinement(network = false)
+
+proc storeVerifyTimer*(): string =
+  "[Unit]\n" &
+  "Description=Reprobuild add-on: store verification after boot and every 6 h\n" &
+  "\n" &
+  "[Timer]\n" &
+  "OnBootSec=2min\n" &
+  "OnUnitActiveSec=" & $StoreVerifyIntervalSec & "s\n" &
+  "Unit=" & StoreVerifyUnit & "\n" &
+  "\n" &
+  "[Install]\n" &
+  "WantedBy=repro-addon.target\n"
+
 proc evidenceShipPathUnit*(): string =
   ## Starts the shipping unit whenever a record lands in the outbox (DET-6:
   ## it leaves at once, not at the next timer).
@@ -1043,6 +1095,10 @@ proc evidenceShipPathUnit*(): string =
   "\n" &
   "[Path]\n" &
   "PathChanged=" & EvidenceOutboxPath & "\n" &
+  # No trigger limit either: a path unit that hits one fails and stays
+  # failed (A11 audit F2).
+  (when mutated("evidence-path-rate-limited"): "" else:
+     "TriggerLimitIntervalSec=0\n") &
   "MakeDirectory=yes\n" &
   "DirectoryMode=0700\n" &
   "Unit=" & EvidenceShipUnit & "\n" &
@@ -1212,6 +1268,12 @@ proc evidenceObjects*(inp: Gen0Inputs): seq[OwnObject] =
     result.add(OwnObject(kind: ookUnit, unit: EvidenceShipTimer,
       path: unitPath(EvidenceShipTimer),
       content: evidenceShipTimer(inp.evidence), enabled: true))
+    result.add(OwnObject(kind: ookUnit, unit: StoreVerifyUnit,
+      path: unitPath(StoreVerifyUnit), content: storeVerifyUnit(inp.reproExe),
+      enabled: false))
+    result.add(OwnObject(kind: ookUnit, unit: StoreVerifyTimer,
+      path: unitPath(StoreVerifyTimer), content: storeVerifyTimer(),
+      enabled: true))
 
 proc contentFileName*(o: OwnObject): string =
   ## The file under the generation's files prefix that holds ``o``'s body.

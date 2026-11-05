@@ -96,9 +96,10 @@ proc npmSourceRoot*(projectRoot: string): string =
 
 proc npmVendorRoot*(projectRoot: string): string =
   ## Scratch root for everything the vendor step writes. Under `.repro/`
-  ## (like `cargo_lock.CargoVendorSubdir`) so `repro clean` takes it and no
-  ## artefact lands in the recipe directory, where it would show up as an
-  ## untracked file in the catalog's checkout.
+  ## (like `cargo_lock.CargoVendorSubdir`) so no artefact lands in the
+  ## recipe directory, where it would show up as an untracked file in the
+  ## catalog's checkout. `repro clean` removes only the declared outputs
+  ## under it.
   projectRoot / ".repro" / "npm-vendor"
 
 proc npmVendorCacheDir*(projectRoot: string): string =

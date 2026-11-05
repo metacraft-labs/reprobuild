@@ -26,6 +26,7 @@ import std/[algorithm, os, strutils, tables, times]
 import blake3
 import repro_core
 
+import ./portable_fingerprint
 import ./prefix_paths
 import ./realization_hash
 export prefix_paths
@@ -131,6 +132,12 @@ type
     writerProcessId*: int64
     writerMode*: string                ## "direct" | "daemon"
     outputName*: string
+    contentDigest*: string
+      ## v4: the prefix's content as realised, ``tree-v2:<hex>``
+      ## (``storeTreeDigest``: ``portable_fingerprint.treeDigestOf`` over
+      ## ``treeEntries`` of the prefix, its receipt left out). "" in a v1-v3
+      ## receipt or one a realiser wrote without it (an adopted prefix): such
+      ## a prefix's content is unverifiable, never trusted for being there.
       ## Recipe-Val M8: which Nix-style package output this receipt
       ## belongs to. Empty string (the default) means "legacy
       ## single-output realize" and the on-disk encoding round-trips
@@ -295,7 +302,7 @@ const
     ## checks such a receipt against the path it records instead of the
     ## name its hash would give. Nothing else may write this adapter.
   ReceiptMagic* = "RPRC"                ## envelope magic
-  ReceiptFormatVersion* = 3'u16
+  ReceiptFormatVersion* = 4'u16
     ## v2: Recipe-Val M8 — appends ``outputName: string`` and a
     ## length-prefixed (name, relativePath) sibling-output map after
     ## the v1 ``writerMode`` field. v1 receipts decode with both
@@ -385,6 +392,22 @@ proc readPrefixId(buf: openArray[byte]; pos: var int): PrefixIdBytes =
     result[i] = buf[pos + i]
   pos += 32
 
+const StoreTreeDigestPrefix* = "tree-v2:"
+
+proc storeTreeDigest*(dir: string): string =
+  ## The canonical content digest of a realised prefix (receipt v4,
+  ## ``contentDigest``): ``tree-v2:`` and the hex of
+  ## ``portable_fingerprint.treeDigestOf`` over ``treeEntries(dir)`` --
+  ## every file by its published BLAKE3 content digest and executable bit,
+  ## every symbolic link by its target text, every directory by its
+  ## presence, sorted by relative path, framed under the domain
+  ## ``reprobuild.portable.tree.v2`` -- with the prefix's own receipt left
+  ## out, since the receipt is written after the digest and carries it.
+  var entries: seq[TreeEntry]
+  for e in treeEntries(dir):
+    if e.rel != ReceiptFileName: entries.add(e)
+  StoreTreeDigestPrefix & treeDigestOf(entries)
+
 proc encodeReceipt*(rec: RealizationReceipt): seq[byte] =
   ## Canonical binary envelope: 4-byte magic, u16 LE version, fields in
   ## a fixed order, followed by a trailing BLAKE3 checksum.
@@ -438,6 +461,8 @@ proc encodeReceipt*(rec: RealizationReceipt): seq[byte] =
   body.writeU32Le(uint32(rec.declaredPrunePaths.len))
   for prunePath in rec.declaredPrunePaths:
     body.writeString(prunePath)
+  # v4 trailing field: the content digest at realisation (see the field).
+  body.writeString(rec.contentDigest)
 
   result.add(byte(ord(ReceiptMagic[0])))
   result.add(byte(ord(ReceiptMagic[1])))
@@ -458,7 +483,7 @@ proc decodeReceipt*(buf: openArray[byte]): RealizationReceipt =
       raise newException(EReceiptCorrupt, "unknown receipt magic")
   var pos = 4
   let version = readU16Le(buf, pos)
-  if version notin {1'u16, 2'u16, ReceiptFormatVersion}:
+  if version notin {1'u16, 2'u16, 3'u16, ReceiptFormatVersion}:
     raise newException(EReceiptCorrupt,
       "unsupported receipt format version: " & $version)
   let bodyLen = int(readU32Le(buf, pos))
@@ -523,6 +548,8 @@ proc decodeReceipt*(buf: openArray[byte]): RealizationReceipt =
     result.declaredPrunePaths = newSeq[string](pruneCount)
     for i in 0 ..< pruneCount:
       result.declaredPrunePaths[i] = readString(buf, pos)
+  if version >= 4'u16:
+    result.contentDigest = readString(buf, pos)
   if pos != bodyEnd:
     raise newException(EReceiptCorrupt, "trailing receipt bytes")
 
@@ -1079,6 +1106,14 @@ proc streamHashPath(path: string): tuple[digest: PrefixIdBytes;
   finally:
     try: hasher.close() except CatchableError: discard
     try: f.close() except CatchableError: discard
+
+proc casFileHash*(path: string): PrefixIdBytes =
+  ## The name this store gives the bytes of the file at ``path``: raw
+  ## BLAKE3-256 of its content, streamed (``streamHashPath``). For a caller
+  ## that must say what a file on disk IS in the same terms a stored blob
+  ## is named -- the engine's report of a restore that overwrites a
+  ## modified output names both. Raises ``IOError`` when it cannot be read.
+  streamHashPath(path).digest
 
 proc allocateCasStagePath(s: var Store): string =
   ## A stage name under the store's own ``tmp/``.
@@ -1840,7 +1875,8 @@ proc realizePrefix*(s: var Store; prefixId: PrefixIdBytes;
       writerProcessId: int64(getCurrentProcessId()),
       writerMode: writerMode,
       outputName: hint.outputName,
-      outputPrefixes: initTable[string, string]())
+      outputPrefixes: initTable[string, string](),
+      contentDigest: storeTreeDigest(stage))
     writeReceiptFile(stage / ReceiptFileName, receipt)
     let digest = receiptDigest(receipt)
     # Publish (atomic rename):
@@ -2665,7 +2701,8 @@ proc realizeMultiOutput*(s: var Store; hint: StoreReceiptHint;
         writerProcessId: int64(getCurrentProcessId()),
         writerMode: writerMode,
         outputName: p.spec.outputName,
-        outputPrefixes: siblingMap)
+        outputPrefixes: siblingMap,
+        contentDigest: storeTreeDigest(stage))
       writeReceiptFile(stage / ReceiptFileName, receipt)
       let digest = receiptDigest(receipt)
       createDir(extendedPath(parentDir(p.absolutePath)))

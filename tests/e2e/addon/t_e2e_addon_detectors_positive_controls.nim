@@ -12,7 +12,9 @@
 ## | DET-AO-2  | a compiled resource set writing ``/etc/shadow`` (A8's)       |
 ## | DET-AO-3  | a connect to a third address from inside the fetch unit     |
 ## | DET-AO-4  | ``/etc/repro/static`` retargeted, then a reboot             |
-## | DET-AO-5  | a store file corrupted between realise and flip (A9's)      |
+## | DET-AO-5  | a store file corrupted between realise and flip (A9's), and |
+## |           | a store byte changed after the switch and its receipt       |
+## |           | deleted, found after a boot (session 2, G2)                 |
 ## | DET-AO-6  | an ``equivs`` package shipping a ledger path (A10's)         |
 ## | DET-AO-7  | a unit whose health check fails (A5's)                       |
 ## | DET-AO-8  | the timers stopped: silence past three intervals            |
@@ -27,6 +29,11 @@
 ## sees, distinct from the silence DET-AO-8's control produces (DET-5).
 ##
 ## The seam build is required (DET-AO-5's pause at step 2).
+##
+## Falsifying mutation for the DET-AO-5 boot control:
+## ``store-verify-trusts-receipt`` (the expectation read from the altered
+## path's own receipt, which the control deleted: the mismatch and
+## quarantine steps go red; A11 audit session 2, G2).
 ##
 ## Opt-in: ``REPRO_ADDON_VM_GATES=1``.
 ##
@@ -90,9 +97,9 @@ proc body(g: Guest; repro: string; step: StepFn; record: JsonNode;
       (trig.len == 0 or it.trigger == trig) and
       (it.sinkSeq == 0 or it.sinkSeq > since))
   proc control(det, detector, trigger: string; since: uint64;
-               alertTrigger = "") =
+               alertTrigger = ""; timeoutSec = 180) =
     ship()
-    let arrived = sink.waitFor(host, detector, trigger, timeoutSec = 180,
+    let arrived = sink.waitFor(host, detector, trigger, timeoutSec = timeoutSec,
                                since = since)
     step(det & ": the record left the host and reached the sink", arrived,
          detector & "/" & trigger)
@@ -107,8 +114,13 @@ proc body(g: Guest; repro: string; step: StepFn; record: JsonNode;
   let t1 = g.tickUnits()
   step("sequence 1 is applied", t1.outcome == "aoApplied", $t1)
   discard g.exec("systemctl start repro-agent-fetch.timer")
+  # The store verification's first run (its timer fires once generation 0
+  # enables it, before the sink knew the host) is made explicit, so the
+  # baseline does not race it.
+  discard g.exec("systemctl start repro-addon-store-verify.service", timeoutSec = 1200)
   ship()
   discard sink.waitFor(host, "addon-agent-tick", "", 180)
+  discard sink.waitFor(host, "addon-store", "", 180)
   let base = sink.check(host, signers)
   record["baseline"] = toJson(base)
   step("baseline: nothing detected, every detector live-idle, no alert",
@@ -203,6 +215,35 @@ proc body(g: Guest; repro: string; step: StepFn; record: JsonNode;
   control("DET-AO-9", "addon-apply", "applied", since,
           alertTrigger = "unpublished-generation")
 
+  # DET-AO-5 at boot (decision 46): one byte of the current generation's
+  # store path changed after its switch committed; the verification after
+  # the next boot finds it, records it and quarantines the path.
+  since = sink.headSeq()
+  let tree = g.exec("readlink /etc/repro/static").stdout.strip()
+  let victim = g.exec("find " & tree & " -type f | head -1").stdout.strip()
+  # The tree's receipt goes with the change (A11 audit session 2, G2): the
+  # expected digest is the ledger's, so a deleted receipt cannot demote the
+  # mismatch to "unverifiable".
+  let tampered = g.exec("unshare --mount --propagation private /bin/sh -c " &
+    quoteShell("mount -o remount,bind,rw /repro/store && printf X >> " &
+               victim & " && rm -f " & tree & "/.repro-receipt"))
+  step("DET-AO-5 (boot): a byte of the current store path was changed, " &
+       "its receipt deleted",
+       tampered.exitCode == 0 and victim.len > 0 and
+         g.exec("test -e " & tree & "/.repro-receipt").exitCode != 0,
+       victim & tampered.stderr)
+  g.rebootGuest()
+  discard g.waitReasserted()
+  step("DET-AO-5 (boot): the boot did not wait for the verification",
+       g.exec("systemctl is-active repro-addon-reassert.service").stdout.strip() in
+         ["active", "inactive"], "")
+  # The verification's timer fires two minutes after boot.
+  control("DET-AO-5", "addon-store", "store-digest-mismatch", since,
+          timeoutSec = 480)
+  step("DET-AO-5 (boot): the altered path is quarantined",
+       tree in g.exec("cat /var/lib/repro/system/addon/store-quarantine").stdout,
+       g.exec("cat /var/lib/repro/system/addon/store-quarantine").stdout)
+
   # DET-AO-10: a frozen mirror. The producer publishes a newer sequence
   # with a one-minute maximum age; the host keeps being served the old one.
   since = sink.headSeq()
@@ -212,10 +253,18 @@ proc body(g: Guest; repro: string; step: StepFn; record: JsonNode;
     profileText: canonicalFile(Managed, "ten\n"), maxAgeSeconds: 60))
   writeFile(producer.dir / AgentTarget / "latest.rdm", oldBytes)
   sleep(75_000)
+  # The producer re-signs the sequence the host is frozen below (spec §9.2
+  # expects it to): the lag still counts from its first publication (A11
+  # audit F1).
+  let resigned = prod.publish(PublishSpec(sequence: sequence,
+    profileText: canonicalFile(Managed, "ten\n"), maxAgeSeconds: 60))
+  sink.archive(resigned, sequence)
+  writeFile(producer.dir / AgentTarget / "latest.rdm", oldBytes)
   discard g.tickUnits()
   ship()
   discard sink.waitFor(host, "addon-agent-tick", "", 120, since = since)
-  step("DET-AO-10: the off-host check raises the lag alert",
+  step("DET-AO-10: the off-host check raises the lag alert, the sequence " &
+       "re-signed since",
        alerted("DET-AO-10", "lag", 0), render(sink.check(host, signers)))
 
   # DET-AO-6: an equivs package ships a ledger path (the local

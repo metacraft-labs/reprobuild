@@ -24,6 +24,7 @@ import ./evidence
 import ./evidence_ship
 import ./generation0
 import ./host_exec
+import ./mutations
 import ./nft_tables
 
 const
@@ -55,21 +56,55 @@ proc parseRefusedSet*(json: string): seq[RefusedDestination] =
         let v = e["elem"]
         result.add((v{"val"}.getStr(), v{"counter"}{"packets"}.getBiggestInt(1)))
 
-proc readState(path: string): Table[string, int64] =
+proc readState(path: string; table: string): Table[string, int64] =
+  ## The counts the previous check saw -- of THIS table instance: a table
+  ## loaded since (every boot, every restart of the observer unit) starts
+  ## its counters at zero, so counts of another instance are none (A11
+  ## audit F3).
   result = initTable[string, int64]()
   try:
+    var instance = ""
     for l in readFile(path).splitLines():
       let p = l.splitWhitespace()
-      if p.len == 2: result[p[0]] = parseBiggestInt(p[1])
+      if p.len == 2 and p[0] == "table": instance = p[1]
+      elif p.len == 2: result[p[0]] = parseBiggestInt(p[1])
+    when not mutated("egress-state-survives-reload"):
+      if instance != table: result.clear()
   except CatchableError:
     discard
 
-proc freshSince*(refused: seq[RefusedDestination];
-                 statePath: string): seq[RefusedDestination] =
-  ## The destinations new or grown since the counts in ``statePath``, which
-  ## then holds these counts.
-  let before = readState(statePath)
-  var text = ""
+proc instanceKey*(listTable, bootId: string): string =
+  ## The instance a ``nft -j list table`` answer names: this boot's id and
+  ## the table's kernel handle. The handle is new on every load (the table is
+  ## deleted and defined again), but the kernel's handle counter starts again
+  ## at every boot, so a table loaded in the same order at the next boot gets
+  ## the same handle; the boot id tells the two apart. The bare handle when
+  ## the boot id is unknown; "" when the answer names no table.
+  try:
+    for item in parseJson(listTable){"nftables"}.getElems():
+      if item{"table"} != nil:
+        let handle = $item["table"]{"handle"}.getBiggestInt()
+        when mutated("egress-instance-ignores-boot"):
+          return handle
+        else:
+          return if bootId.len > 0: bootId & "/" & handle else: handle
+  except CatchableError:
+    discard
+  ""
+
+proc tableInstance*(nft: string): string =
+  ## The instance the table's counters belong to (``instanceKey``).
+  let r = runHostTool([nft, "-j", "list", "table", EgressTableFamily,
+                       EgressTableName], mergeStderr = false, timeoutSec = 30)
+  if r.exitCode != 0: return ""
+  instanceKey(r.output, bootIdNow())
+
+proc freshSince*(refused: seq[RefusedDestination]; statePath: string;
+                 table = "-"): seq[RefusedDestination] =
+  ## The destinations new or grown since the counts in ``statePath`` (of the
+  ## same table instance ``table``), which then holds these counts.
+  let before = readState(statePath, table)
+  var text = "table " & table & "\n"
   for d in refused:
     if before.getOrDefault(d.address, 0) < d.packets: result.add(d)
     text.add(d.address & " " & $d.packets & "\n")
@@ -97,7 +132,9 @@ proc checkEgress*(nft, statePath: string): EgressCheck =
     except CatchableError as e:
       result.error = "nft list set " & setName & ": " & e.msg
       return
-  result.fresh = freshSince(result.refused, statePath)
+  let instance = tableInstance(nft)
+  result.fresh = freshSince(result.refused, statePath,
+                            if instance.len > 0: instance else: "-")
 
 proc recordEgressCheck*(c: EgressCheck; site: EvidenceSite;
                         heartbeatMs: int64) =

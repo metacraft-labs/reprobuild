@@ -11,7 +11,7 @@
 ##   repro system addon state restore [--from <dir>] [--root R] [--boot]
 ##   repro system addon state digest <path>
 ##   repro system addon state unit
-##   repro system addon state install-unit [--from <dir>] [--root R]
+##   repro system addon state install-unit [--root R]
 ##
 ## Exit status: 0 success; 1 a failure, or a verify that found a
 ## difference; 2 a usage error or a refusal decided before anything was
@@ -50,28 +50,33 @@ const
       Print a directory's state digest.
   unit
       Print the first-boot restore unit for this binary.
-  install-unit [--from <dir>] [--root R]
-      Install and enable the first-boot restore unit, and make every unit
-      of the carried state in <dir> require it: none of them starts at
-      boot unless the restore succeeded.
+  install-unit [--root R]
+      Install and enable the first-boot restore unit for the carried state
+      in /var/lib/repro/system/carried, and make every unit of it require
+      the restore: none of them starts at boot unless the restore
+      succeeded. Records the installation, so a manifest missing later
+      refuses every apply and fails the restore.
 """
   RestoreUnitName* = "repro-state-restore.service"
 
-proc stateRestoreUnitText*(repro: string): string =
+proc stateRestoreUnitText*(repro: string; carried: seq[string] = @[]): string =
   ## The first-boot unit a conversion installs with the carried directory
-  ## (spec §11.1). Ordered before ``sysinit.target``, so every ordinary
-  ## service (``DefaultDependencies=yes`` puts it after ``sysinit.target``)
-  ## starts after the restore; after ``local-fs.target``, so ``/var`` and
-  ## ``/srv`` are mounted. A failed restore fails the unit visibly, and the
-  ## apply refuses to start a unit of the pending state either way.
+  ## (spec §11.1). Ordered before ``sysinit.target``, so every service with
+  ## default dependencies starts after the restore, and ``Before=`` each
+  ## carried unit by name, so one without default dependencies does too;
+  ## after ``local-fs.target``, so ``/var`` and ``/srv`` are mounted. No
+  ## condition on the manifest: ``restore --boot`` decides, and fails when
+  ## carried state was installed here but its manifest is gone.
+  let before = (when mutated("restore-unordered"): newSeq[string]()
+                else: carried)
   "[Unit]\n" &
     "Description=Restore carried service state (Reprobuild)\n" &
     "DefaultDependencies=no\n" &
     "Wants=local-fs.target\n" &
     "After=local-fs.target\n" &
-    "Before=sysinit.target shutdown.target\n" &
+    "Before=sysinit.target shutdown.target" &
+      (if before.len > 0: " " & before.join(" ") else: "") & "\n" &
     "Conflicts=shutdown.target\n" &
-    "ConditionPathExists=" & CarriedStateDir & "/" & ManifestFileName & "\n" &
     "\n[Service]\n" &
     "Type=oneshot\n" &
     "RemainAfterExit=yes\n" &
@@ -79,38 +84,63 @@ proc stateRestoreUnitText*(repro: string): string =
     "\n[Install]\n" &
     "WantedBy=sysinit.target\n"
 
+const RestoreRequiredDropIn* = "80-repro-state-restore.conf"
+  ## The drop-in that makes a carried unit require the restore unit.
+
+proc restoreRequiredDropInText*(): string =
+  ## Owned by the carried unit, not by the restore unit's [Install]: a
+  ## ``systemctl disable`` or ``preset`` of the restore unit removes the
+  ## links to it, and this drop-in is not a link, so the requirement stays
+  ## and pulls the restore unit in at boot anyway (systemd.unit(5)).
+  ## ``Requires=`` fails the unit's start job when the restore failed;
+  ## ``After=`` orders it behind the restore whatever its own default
+  ## dependencies are.
+  "[Unit]\n" &
+    "# Carried state (ReproOS Add-On Mode §11.1): starts only after the\n" &
+    "# first-boot restore of it succeeded.\n" &
+    "Requires=" & RestoreUnitName & "\n" &
+    (when mutated("restore-unordered"): ""
+     else: "After=" & RestoreUnitName & "\n")
+
 proc installRestoreUnit*(dir, repro: string; root = "/"): seq[string] =
-  ## Install the first-boot restore unit under ``root``, enabled (a link
-  ## in ``sysinit.target.wants``), and make each unit of the carried
-  ## directories in ``dir``'s manifest require it: a link to it in
-  ## ``<unit>.requires/``, which systemd reads as ``Requires=`` on the
-  ## restore unit (systemd.unit(5), "<unit>.requires/"). Returns those
-  ## units. A failed restore then fails their start jobs ("dependency
-  ## failed"), so a carried unit already installed (a conversion that
-  ## brings the generation along) does not start on an empty or
-  ## unverified directory: the boot path is governed by the restore as the
-  ## apply path is by ``carried_state``. The ordering needs no line of its
-  ## own: the restore unit runs before ``sysinit.target``, which every
-  ## service with default dependencies starts after. A link, not a drop-in:
-  ## a unit's drop-ins are the generation's (the add-on's effective-unit
-  ## check refuses one it did not write, spec §10.1).
+  ## Install the first-boot restore unit under ``root`` (enabled: a link in
+  ## ``sysinit.target.wants``), record that carried state is installed at
+  ## ``dir`` (``installedMarkerPath``: from now on a missing manifest there
+  ## refuses every apply and fails the restore), and give each unit of the
+  ## carried directories a drop-in requiring the restore. Returns those
+  ## units. The boot path is then governed by the restore as the apply path
+  ## is by ``carried_state``. Run on the converted host, which applies in
+  ## full: on an add-on host the add-on's effective-unit check would refuse
+  ## the drop-in (spec §10.1), which fails closed.
   let m = readStateManifest(dir)
+  var units: seq[string]
+  for e in m.entries:
+    if e.disposition != sdCarry: continue
+    for u in e.units:
+      if u notin units: units.add(u)
   let unitDir = root / "etc/systemd/system"
   createDir(unitDir)
-  writeFile(unitDir / RestoreUnitName, stateRestoreUnitText(repro))
+  writeFile(unitDir / RestoreUnitName, stateRestoreUnitText(repro, units))
   proc linkInto(d: string) =
     createDir(d)
     let link = d / RestoreUnitName
     if symlinkExists(link) or fileExists(link): removeFile(link)
     createSymlink("/etc/systemd/system/" & RestoreUnitName, link)
   linkInto(unitDir / "sysinit.target.wants")
-  for e in m.entries:
-    if e.disposition != sdCarry: continue
-    for u in e.units:
-      if u in result: continue
-      when not mutated("restore-not-required-by-units"):
-        linkInto(unitDir / (u & ".requires"))
-      result.add(u)
+  let marker = under(root, installedMarkerPath(dir))
+  createDir(marker.parentDir)
+  writeFile(marker, dir & "\n")
+  for u in units:
+    when mutated("restore-not-required-by-units"):
+      discard
+    elif mutated("restore-required-by-link"):
+      # FALSIFYING MUTATION: round 2's link, removed by a disable.
+      linkInto(unitDir / (u & ".requires"))
+    else:
+      let d = unitDir / (u & ".d")
+      createDir(d)
+      writeFile(d / RestoreRequiredDropIn, restoreRequiredDropInText())
+  units
 
 proc takeArg(args: seq[string]; i: var int; flag: string): string =
   let a = args[i]
@@ -238,9 +268,12 @@ proc runStateCli*(args: seq[string]): int =
     of "restore":
       let dir = if fromDir.len > 0: fromDir else: CarriedStateDir
       if not fileExists(dir / ManifestFileName):
-        if boot:
+        if boot and not fileExists(under(root, installedMarkerPath(dir))):
           stdout.write("no carried state at " & dir & "\n")
           return 0
+        if boot:
+          raise newException(StateSetError, "carried state was installed " &
+            "at " & dir & " but its manifest is missing")
         raise newException(ValueError, "no manifest at " & dir)
       let done = restoreStateSet(dir, root = root)
       for p in done: stdout.write("restored " & p & "\n")
@@ -260,7 +293,16 @@ proc runStateCli*(args: seq[string]): int =
       stdout.write(stateRestoreUnitText(publicCliImagePath()))
       0
     of "install-unit":
-      let dir = if fromDir.len > 0: fromDir else: CarriedStateDir
+      # One location: the restore unit's `restore --boot` and every apply
+      # read the default directory, so another one would leave both guards
+      # looking at nothing.
+      if fromDir.len > 0 and fromDir.strip(leading = false, chars = {'/'}) !=
+          CarriedStateDir:
+        raise newException(ValueError, "install-unit reads " &
+          CarriedStateDir & " (the directory the restore unit and every " &
+          "apply use); move the carried state there instead of --from " &
+          fromDir)
+      let dir = CarriedStateDir
       let units = installRestoreUnit(dir, publicCliImagePath(), root)
       stdout.write("installed " & RestoreUnitName & "; required by: " &
         units.join(", ") & "\n")

@@ -366,6 +366,13 @@ proc body(g: Guest; repro: string; step: StepFn; record: JsonNode;
   var windows: seq[tuple[unit: string; a, b: float]]
   let prod = producer   # a ref: the closures below may capture it
   proc runTick(seqNo: uint64; text: string): TickResult =
+    # Stopped before the publish, not only after the previous tick: the
+    # re-assert unit's recovery (restarted below) starts every unit the
+    # current generation started, the fetch timer among them
+    # (`reassert.startCommittedUnits`, spec §7.7), and that timer's own
+    # cycle then applied the sequence published here before this tick ran
+    # ("tick 11 ... already converged", A9 review round 5, finding 6).
+    discard g.exec("systemctl stop repro-agent-fetch.timer")
     discard prod.publish(PublishSpec(sequence: seqNo, profileText: text))
     let a = g.now()
     result = g.tickUnits()
@@ -438,11 +445,13 @@ proc body(g: Guest; repro: string; step: StepFn; record: JsonNode;
   # control group (the sampler) and, where the sampler missed the
   # process, by that name -- not by `comm == "sleep"` alone (A9 review
   # round 4, finding 9).
-  discard g.run("mkdir -p /run/a9-foreign && cp /bin/sleep /run/a9-foreign/" &
-    ForeignComm)
+  # (/usr/local/libexec, not /run: /run is mounted noexec on the bases.)
+  discard g.run("mkdir -p /usr/local/libexec && cp /bin/sleep " &
+    "/usr/local/libexec/" & ForeignComm)
   discard g.run("systemd-run --quiet --unit=" & ForeignUnit &
     " -p SystemCallLog=clock_nanosleep -p SystemCallLog=nanosleep " &
-    "/bin/sh -c 'while :; do /run/a9-foreign/" & ForeignComm & " 0.05; done'")
+    "/bin/sh -c 'while :; do /usr/local/libexec/" & ForeignComm &
+    " 0.05; done'")
   tick(1, gen(1))
   # Generations past the retention policy's five: the apply releases the
   # store roots of those it drops (§5.2).

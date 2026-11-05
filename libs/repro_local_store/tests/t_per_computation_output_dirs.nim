@@ -120,7 +120,15 @@ suite "per-computation output directories (cache layer)":
     defer: fx.close()
     let weak = weakOf("edge-removed")
     let x = fx.runComputation(weak, "X", "binary-x")
-    removeDir(recordComputationDir(x))
+    # Never `removeDir` a computed path unchecked: an empty one makes
+    # `removeDir("")` walk and delete the process's CURRENT DIRECTORY, which
+    # is the checkout the test was run from (it did, on Windows, where
+    # `recordComputationDir` returns "" -- reprobuild-pm issue
+    # 2026-11-05-per-computation-output-dirs-are-never-bound-on-windows.md).
+    let dir = recordComputationDir(x)
+    check dir.len > 0
+    if dir.len > 0:
+      removeDir(dir)
     let lookup = fx.lookupInPlace(weak, "X")
     check lookup.status == aclRejectedCorruptOutput
 

@@ -164,3 +164,102 @@ suite "output cleanup executor (M84)":
     check res.deleted == 1
     check not symlinkExists(link)
     check fileExists(target)      # the symlink target outside root is untouched
+
+proc snapshotClaiming(claims: seq[OwnedEffectClaim];
+                      key = "inv-a"): ProviderGraphSnapshot =
+  ProviderGraphSnapshot(providerArtifactId: "art",
+    fragments: @[StoredGraphFragment(invocationKey: key, effectClaims: claims)])
+
+suite "project clean (repro clean)":
+
+  test "every claimed file of the build state is removed, unclaimed kept":
+    let root = createTempDir("rb-clean-", "-files")
+    defer: removeDir(root)
+    let a = touchUnder(root, "build/a.o")
+    let b = touchUnder(root, "build/b.o")
+    let mine = touchUnder(root, "build/notes.txt")
+    let res = applyProjectClean(
+      @[snapshotClaiming(@[fileClaim("build/a.o"), fileClaim("build/b.o")])],
+      root)
+    check res.deleted == 2
+    check not fileExists(a)
+    check not fileExists(b)
+    check fileExists(mine)
+
+  test "a declared output that is a directory is removed with its tree":
+    # The DSL claims every declared output as ``oekFile``, directory outputs
+    # included. A graph refresh treats that mismatch as a failure; a clean
+    # removes the tree, because the whole of it is the action's product.
+    let root = createTempDir("rb-clean-", "-tree")
+    defer: removeDir(root)
+    discard touchUnder(root, "build/nimcache/m.c")
+    discard touchUnder(root, "build/nimcache/sub/n.c")
+    let mine = touchUnder(root, "build/keep.txt")
+    let res = applyProjectClean(
+      @[snapshotClaiming(@[fileClaim("build/nimcache")])], root)
+    check outcomeOf(res, "build/nimcache") == ocoDeleted
+    check not dirExists(root / "build/nimcache")
+    check fileExists(mine)
+    # The refresh executor keeps its stricter reading of the same claim.
+    discard touchUnder(root, "build/nimcache/m.c")
+    let refresh = applyOutputCleanup(
+      reportWith(@[staleOf(fileClaim("build/nimcache"))]), root)
+    check outcomeOf(refresh, "build/nimcache") == ocoFailed
+    check fileExists(root / "build/nimcache/m.c")
+
+  test "a symlink inside a removed tree is unlinked, not followed":
+    let root = createTempDir("rb-clean-", "-treelink")
+    defer: removeDir(root)
+    let outside = createTempDir("rb-clean-", "-outside")
+    defer: removeDir(outside)
+    writeFile(outside / "precious.txt", "must survive")
+    createDir(root / "build/out")
+    createSymlink(outside, root / "build/out/link")
+    let res = applyProjectClean(
+      @[snapshotClaiming(@[fileClaim("build/out")])], root)
+    check outcomeOf(res, "build/out") == ocoDeleted
+    check not dirExists(root / "build/out")
+    check fileExists(outside / "precious.txt")
+
+  test "cleanup policy, root containment and dry run still apply":
+    let root = createTempDir("rb-clean-", "-rules")
+    defer: removeDir(root)
+    let gc = touchUnder(root, "build/gc.bin")
+    let destroy = touchUnder(root, "build/state.db")
+    let del = touchUnder(root, "build/del.o")
+    let snapshot = snapshotClaiming(@[
+      fileClaim("build/gc.bin", policy = cplKeepAsGarbageCollectable),
+      fileClaim("build/state.db", policy = cplRequireExplicitDestroy),
+      fileClaim("build/del.o"),
+      fileClaim("../escape.o")])
+    let dry = applyProjectClean(@[snapshot], root, dryRun = true)
+    check dry.wouldDelete == 1
+    check fileExists(del)
+    let res = applyProjectClean(@[snapshot], root)
+    check outcomeOf(res, "build/gc.bin") == ocoSkippedPolicy
+    check outcomeOf(res, "build/state.db") == ocoSkippedPolicy
+    check outcomeOf(res, "../escape.o") == ocoRefusedOutsideRoot
+    check outcomeOf(res, "build/del.o") == ocoDeleted
+    check fileExists(gc)
+    check fileExists(destroy)
+    check not fileExists(del)
+
+  test "a claim shared by two snapshots is considered once":
+    # Two variant snapshots of one target claim the same output path.
+    let root = createTempDir("rb-clean-", "-shared")
+    defer: removeDir(root)
+    discard touchUnder(root, "build/x.o")
+    let res = applyProjectClean(@[
+      snapshotClaiming(@[fileClaim("build/x.o")], key = "inv-debug"),
+      snapshotClaiming(@[fileClaim("build/x.o")], key = "inv-release")], root)
+    check res.actions.len == 1
+    check res.deleted == 1
+    check res.failed == 0
+
+  test "no snapshots means nothing to remove":
+    let root = createTempDir("rb-clean-", "-empty")
+    defer: removeDir(root)
+    let mine = touchUnder(root, "build/a.o")
+    let res = applyProjectClean(newSeq[ProviderGraphSnapshot](), root)
+    check res.actions.len == 0
+    check fileExists(mine)

@@ -48,7 +48,8 @@ type
     credentialHost*: string
     attestationKey*: string
 
-proc startSink*(root: string): SinkFixture =
+proc startSink*(root: string; segmentMaxEntries = 0;
+                retentionSeconds = 0): SinkFixture =
   result.root = root / "sink"
   result.storeDir = result.root / "store"
   result.anchorsDir = result.root / "anchors"
@@ -59,7 +60,11 @@ proc startSink*(root: string): SinkFixture =
   let identity = loadOrCreateHostIdentity(result.identityDir / "host-ca.crt",
                                           result.identityDir / "host-ca.key")
   result.hostId = $identity.hostId
-  let store = openEvidenceStore(result.storeDir, result.keyDir)
+  let store = openEvidenceStore(result.storeDir, result.keyDir,
+    retentionSeconds = (if retentionSeconds > 0: int64(retentionSeconds)
+                        else: int64(DefaultRetentionSeconds)),
+    segmentMaxEntries = (if segmentMaxEntries > 0: segmentMaxEntries
+                         else: DefaultSegmentMaxEntries))
   result.server = newEvidenceSinkServer(store, identity,
     loadTrustAnchorDir(result.anchorsDir), "127.0.0.1", Port(0),
     anchorsDir = result.anchorsDir)

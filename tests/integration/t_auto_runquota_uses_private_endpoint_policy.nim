@@ -14,6 +14,8 @@ import runquota_protocol
 
 when defined(posix):
   import std/posix
+  from std/net import nil
+  from std/nativesockets import Domain, SockType, Protocol
   from repro_core/paths import runquotaEndpointPath
   from runquota_ipc import hostWideEndpointDir
 
@@ -37,6 +39,36 @@ when defined(posix):
     check not fileExists(marker)
     check getEnv("RUNQUOTA_SOCKET") == endpoint
     check getEnv("RUNQUOTA_ENDPOINT_SCOPE") == scope
+
+  proc writeRealDaemonWrapper(root, daemonBin: string): string =
+    ## A `RUNQUOTAD_BIN` that execs the real daemon with this test's own
+    ## host file, identity and store, so nothing touches the host's.
+    result = root / "runquotad"
+    let hostFile = root / "host.toml"
+    writeFile(hostFile, "schema = \"runquota.host-config.v1\"\n")
+    writeFile(result, "#!/bin/sh\nexec " & quoteShell(daemonBin) &
+      " --host-config " & quoteShell(hostFile) &
+      " --host-identity-file " & quoteShell(root / "host-id") &
+      " --observation-db " & quoteShell(root / "observations.sqlite") &
+      " --ambient-sample-interval-millis 0 \"$@\"\n")
+    setFilePermissions(result, {fpUserRead, fpUserWrite, fpUserExec})
+
+  proc isSocketInode(path: string): bool =
+    var info: Stat
+    lstat(path.cstring, info) == 0 and S_ISSOCK(info.st_mode)
+
+  proc plantStaleSocket(directory: string): string =
+    ## What a killed daemon leaves behind: an owner-only rendezvous directory
+    ## holding a socket inode nothing listens on any more. Closing a bound
+    ## socket does not unlink its path.
+    if posix.mkdir(directory.cstring, Mode(0o700)) != 0:
+      raiseOSError(osLastError(), "mkdir " & directory)
+    result = directory / "runquota.sock"
+    var listener = net.newSocket(Domain.AF_UNIX, SockType.SOCK_STREAM,
+      Protocol.IPPROTO_IP) # protocol 0, the only one AF_UNIX has
+    net.bindUnix(listener, result)
+    net.close(listener)
+    doAssert isSocketInode(result)
 
   if paramCount() == 1 and paramStr(1) == "--private-action-client":
     doAssert getEnv("RUNQUOTA_ENDPOINT_SCOPE") == "private"
@@ -73,16 +105,7 @@ when defined(posix):
       forgetMachineDeclaredDaemonTrust()
 
     test "daemon parent and leased action use invocation ownership":
-      let wrapper = root / "runquotad"
-      let hostFile = root / "host.toml"
-      writeFile(hostFile, "schema = \"runquota.host-config.v1\"\n")
-      writeFile(wrapper, "#!/bin/sh\nexec " & quoteShell(daemonBin) &
-        " --host-config " & quoteShell(hostFile) &
-        " --host-identity-file " & quoteShell(root / "host-id") &
-        " --observation-db " & quoteShell(root / "observations.sqlite") &
-        " --ambient-sample-interval-millis 0 \"$@\"\n")
-      setFilePermissions(wrapper, {fpUserRead, fpUserWrite, fpUserExec})
-      putEnv("RUNQUOTAD_BIN", wrapper)
+      putEnv("RUNQUOTAD_BIN", writeRealDaemonWrapper(root, daemonBin))
       var daemon = startAutoRunQuotaIfNeeded(false)
       defer: releaseAutoRunQuotaProcess(daemon)
       require daemon != nil
@@ -123,11 +146,56 @@ when defined(posix):
       releaseAutoRunQuotaProcess(daemon)
       check getEnv("RUNQUOTA_SOCKET") == root / "absent.sock"
       check not existsEnv("RUNQUOTA_ENDPOINT_SCOPE")
-      removeDir(socket.parentDir)
+      # The invocation created the rendezvous directory, so it removes it.
+      check not dirExists(socket.parentDir)
+
+    test "a stale endpoint left at an earlier process's pid does not block start":
+      # The kernel reuses pids. A daemon killed before its orderly shutdown
+      # leaves `reprobuild-runquota-<pid>/runquota.sock` behind, and a later
+      # invocation holding the same pid must neither be refused by it nor
+      # delete it: a private bind refuses an existing endpoint, so the
+      # invocation's endpoint must not be derivable from its pid.
+      let staleDir = parentDir(runquotaEndpointPath(
+        "reprobuild-runquota-" & $getCurrentProcessId()))
+      removeDir(staleDir)
+      let stale = plantStaleSocket(staleDir)
+      putEnv("RUNQUOTAD_BIN", writeRealDaemonWrapper(root, daemonBin))
+      var daemon = startAutoRunQuotaIfNeeded(false)
+      defer: releaseAutoRunQuotaProcess(daemon)
+      require daemon != nil
+      let socket = getEnv("RUNQUOTA_SOCKET")
+      check socket != stale
+      check socket.parentDir != staleDir
+      check getFilePermissions(socket.parentDir) ==
+        {fpUserRead, fpUserWrite, fpUserExec}
+      var client = runquota_client.connectDefault()
+      client.close()
+      releaseAutoRunQuotaProcess(daemon)
+      check not dirExists(socket.parentDir)
+      # Not ours, so not touched.
+      check isSocketInode(stale)
+      removeDir(staleDir)
+
+    test "two invocations in one process never share a rendezvous directory":
+      putEnv("RUNQUOTAD_BIN", writeRealDaemonWrapper(root, daemonBin))
+      var first = startAutoRunQuotaIfNeeded(false)
+      defer: releaseAutoRunQuotaProcess(first)
+      require first != nil
+      let firstSocket = getEnv("RUNQUOTA_SOCKET")
+      releaseAutoRunQuotaProcess(first)
+      check not dirExists(firstSocket.parentDir)
+      var second = startAutoRunQuotaIfNeeded(false)
+      defer: releaseAutoRunQuotaProcess(second)
+      require second != nil
+      let secondSocket = getEnv("RUNQUOTA_SOCKET")
+      check secondSocket.parentDir != firstSocket.parentDir
+      releaseAutoRunQuotaProcess(second)
+      check not dirExists(secondSocket.parentDir)
 
     test "startup error retains both streams without filling a pipe":
       let wrapper = root / "refusing-runquotad"
       writeFile(wrapper, "#!/bin/sh\n" &
+        "printf '%s' \"$2\" > " & quoteShell(root / "socket-arg") & "\n" &
         "i=0; while [ $i -lt 4096 ]; do printf 'stdout-padding-0123456789\\n'; " &
         "printf 'stderr-padding-0123456789\\n' >&2; i=$((i+1)); done\n" &
         "printf 'specific startup stdout reason\\n'\n" &
@@ -146,6 +214,11 @@ when defined(posix):
       check "truncated" in message
       check getEnv("RUNQUOTA_SOCKET") == root / "absent.sock"
       check not existsEnv("RUNQUOTA_ENDPOINT_SCOPE")
+      # The refused daemon was handed `--socket <path>` first; the directory
+      # the invocation created for it must not outlive the failed start.
+      let attempted = readFile(root / "socket-arg")
+      check attempted.endsWith("/runquota.sock")
+      check not dirExists(attempted.parentDir)
 
     test "existing untrusted endpoint retains refusal and starts no daemon":
       let endpoint = root / "unsafe.sock"

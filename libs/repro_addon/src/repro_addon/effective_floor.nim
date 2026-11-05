@@ -43,7 +43,7 @@
 ## systemd will not show a template (``foo@.service``); the caller checks
 ## the instances the generation names.
 
-import std/[algorithm, sets, strutils, tables]
+import std/[algorithm, os, posix, sequtils, sets, strutils, tables]
 
 import ./host_exec
 import ./mutations
@@ -128,7 +128,9 @@ const
     "UserNamespacePath", "BPFDelegateCommands", "BPFDelegateMaps",
     "BPFDelegatePrograms", "BPFDelegateAttachments", "StateDirectorySymlink",
     "RuntimeDirectorySymlink", "CacheDirectorySymlink", "LogsDirectorySymlink",
-    "ConfigurationDirectorySymlink"]
+    "ConfigurationDirectorySymlink", "FailureAction", "SuccessAction",
+    "StartLimitAction", "JobTimeoutAction", "CPUSchedulingPolicy",
+    "IOSchedulingClass", "Sockets"]
     ## The properties the check compares with the floor (each one's rule is
     ## in ``effectiveFloorProblems``), together with ``ExecProps`` and their
     ## ``Ex`` forms.
@@ -161,7 +163,7 @@ const
     "OnSuccess", "OnSuccessOf", "OnFailure", "OnFailureOf", "Triggers",
     "TriggeredBy", "PropagatesReloadTo", "ReloadPropagatedFrom",
     "PropagatesStopTo", "StopPropagatedFrom", "RequiresMountsFor",
-    "WantsMountsFor", "Slice", "Sockets", "OnSuccessJobMode",
+    "WantsMountsFor", "Slice", "OnSuccessJobMode",
     "OnFailureJobMode", "DefaultDependencies", "StopWhenUnneeded",
     "RefuseManualStart", "RefuseManualStop", "AllowIsolate",
     "IgnoreOnIsolate", "CollectMode", "SurviveFinalKillSignal",
@@ -173,9 +175,8 @@ const
     "TimeoutStopUSec", "TimeoutAbortUSec", "TimeoutCleanUSec",
     "TimeoutStartFailureMode", "TimeoutStopFailureMode", "RuntimeMaxUSec",
     "RuntimeRandomizedExtraUSec", "WatchdogUSec", "WatchdogSignal",
-    "JobTimeoutUSec", "JobRunningTimeoutUSec", "JobTimeoutAction",
+    "JobTimeoutUSec", "JobRunningTimeoutUSec",
     "JobTimeoutRebootArgument", "StartLimitIntervalUSec", "StartLimitBurst",
-    "StartLimitAction", "FailureAction", "SuccessAction",
     "FailureActionExitStatus", "SuccessActionExitStatus", "RebootArgument",
     "KillMode", "KillSignal", "RestartKillSignal", "FinalKillSignal",
     "SendSIGKILL", "SendSIGHUP", "ReloadSignal", "OOMPolicy",
@@ -205,9 +206,8 @@ const
     "ManagedOOMSwap", "ManagedOOMMemoryPressure",
     "ManagedOOMMemoryPressureLimit", "ManagedOOMMemoryPressureDurationUSec",
     "ManagedOOMPreference", "CoredumpFilter", "TimerSlackNSec", "Nice",
-    "CPUSchedulingPolicy", "CPUSchedulingPriority",
-    "CPUSchedulingResetOnFork", "CPUAffinity", "CPUAffinityFromNUMA",
-    "NUMAPolicy", "NUMAMask", "IOSchedulingClass", "IOSchedulingPriority",
+    "CPUSchedulingPriority", "CPUSchedulingResetOnFork", "CPUAffinity", "CPUAffinityFromNUMA",
+    "NUMAPolicy", "NUMAMask", "IOSchedulingPriority",
     "StateDirectoryAccounting", "StateDirectoryQuota",
     "CacheDirectoryAccounting", "CacheDirectoryQuota",
     "LogsDirectoryAccounting", "LogsDirectoryQuota",
@@ -236,8 +236,18 @@ const
     # mount but the closure is noexec), and the directory is entered as
     # the service's own user.
     "Environment", "PassEnvironment", "UnsetEnvironment", "WorkingDirectory",
-    "ExecMainStartTimestampMonotonic", "ExecMainExitTimestampMonotonic",
-    "ExecMainHandoffTimestampMonotonic"]
+    # Timestamps, each by name (round 5: no family wildcard).
+    "ActiveEnterTimestamp", "ActiveEnterTimestampMonotonic",
+    "ActiveExitTimestamp", "ActiveExitTimestampMonotonic", "AssertTimestamp",
+    "AssertTimestampMonotonic", "ConditionTimestamp",
+    "ConditionTimestampMonotonic", "ExecMainExitTimestamp",
+    "ExecMainExitTimestampMonotonic", "ExecMainHandoffTimestamp",
+    "ExecMainHandoffTimestampMonotonic", "ExecMainStartTimestamp",
+    "ExecMainStartTimestampMonotonic", "InactiveEnterTimestamp",
+    "InactiveEnterTimestampMonotonic", "InactiveExitTimestamp",
+    "InactiveExitTimestampMonotonic", "StateChangeTimestamp",
+    "StateChangeTimestampMonotonic", "WatchdogTimestamp",
+    "WatchdogTimestampMonotonic"]
     ## The properties reviewed as unable to change the service's
     ## credentials, its sandbox, the files it can reach or what it executes
     ## (spec §10.1, A9 review round 4). A property ``systemctl show``
@@ -246,16 +256,29 @@ const
     ## refused until it is reviewed. Timestamps (``*Timestamp``,
     ## ``*TimestampMonotonic``) and resource limits (``Limit*``: rlimits,
     ## which only lower what the service may use) are reviewed as
-    ## families.
+    ## families until round 5; every name is now listed (A9 review round 5,
+    ## finding 3), and a ``Limit*`` is compared with the manager's default
+    ## (``LimitProps``).
+
+const LimitProps* = [
+    "LimitAS", "LimitASSoft", "LimitCORE", "LimitCORESoft", "LimitCPU",
+    "LimitCPUSoft", "LimitDATA", "LimitDATASoft", "LimitFSIZE",
+    "LimitFSIZESoft", "LimitLOCKS", "LimitLOCKSSoft", "LimitMEMLOCK",
+    "LimitMEMLOCKSoft", "LimitMSGQUEUE", "LimitMSGQUEUESoft", "LimitNICE",
+    "LimitNICESoft", "LimitNOFILE", "LimitNOFILESoft", "LimitNPROC",
+    "LimitNPROCSoft", "LimitRSS", "LimitRSSSoft", "LimitRTPRIO",
+    "LimitRTPRIOSoft", "LimitRTTIME", "LimitRTTIMESoft", "LimitSIGPENDING",
+    "LimitSIGPENDINGSoft", "LimitSTACK", "LimitSTACKSoft"]
+    ## The resource limits: each compared with the service manager's own
+    ## default (``DefaultLimit<X>``), which a unit may lower but not raise
+    ## (``LimitMEMLOCK=infinity`` raises it; A9 review round 5, finding 3).
 
 proc isInertProp*(k: string): bool =
-  if k in InertProps: return true
-  if k.endsWith("Timestamp") or k.endsWith("TimestampMonotonic"): return true
-  if k.startsWith("Limit") and k.len > 5:
-    var r = k[5 .. ^1]
-    if r.endsWith("Soft"): r = r[0 ..< r.len - 4]
-    return r.len > 0 and r.allCharsInSet({'A'..'Z'})
-  false
+  when mutated("inert-families-by-pattern"):
+    # Falsifying build: round 4's family wildcards.
+    if k.endsWith("Timestamp") or k.endsWith("TimestampMonotonic") or
+        k.startsWith("Limit"): return true
+  k in InertProps
 
 proc isExecProp*(k: string): bool =
   k in ExecProps or (k.endsWith("Ex") and k[0 ..< k.len - 2] in ExecProps)
@@ -359,6 +382,75 @@ proc writablePlaces*(show: ShowProps): seq[string] =
     for t in words(show.getOrDefault(k)):
       result.add(root & "/" & t.split(':')[0])
 
+proc systemGid*(group: string): int =
+  ## The gid ``getent group`` gives ``group``, -1 when it gives none.
+  let exe = resolveHostTool(GetentCandidates)
+  if exe.len == 0: return -1
+  let r = runHostTool([exe, "group", "--", group], mergeStderr = false)
+  if r.exitCode != 0: return -1
+  let f = r.output.strip().split(':')
+  if f.len < 3: return -1
+  try: parseInt(f[2]) except ValueError: -1
+
+proc limitValue*(v: string): uint64 =
+  ## A ``Limit*`` value as systemd shows it; ``infinity`` is the largest.
+  if v == "infinity" or v.len == 0: return high(uint64)
+  try: uint64(parseBiggestUInt(v)) except ValueError: high(uint64)
+
+proc environmentFileProblem*(path: string): string =
+  ## Why the manager may not read ``path`` as root for a floored service:
+  ## it does not exist, is not a regular file, or it or any parent
+  ## directory is not root-owned or is writable by its group or others.
+  ## "" when it may (A9 review round 5, finding 1). An error reading any of
+  ## that refuses (default-deny).
+  var st: Stat
+  if lstat(path.cstring, st) != 0: return "it does not exist (or cannot be read)"
+  if not S_ISREG(st.st_mode): return "it is not a regular file"
+  if st.st_uid != 0: return "it is not owned by root"
+  if (st.st_mode.cint and 0o022) != 0: return "it is writable by its group or others"
+  var d = parentDir(path)
+  while d.len > 0:
+    var ds: Stat
+    if lstat(d.cstring, ds) != 0: return "its directory " & d & " cannot be read"
+    if not S_ISDIR(ds.st_mode): return d & " is not a directory"
+    if ds.st_uid != 0: return "its directory " & d & " is not owned by root"
+    if (ds.st_mode.cint and 0o022) != 0:
+      return "its directory " & d & " is writable by its group or others"
+    if d == "/": break
+    d = parentDir(d)
+  ""
+
+proc managerLimits*(): Table[string, string] =
+  ## The service manager's ``DefaultLimit*`` (``systemctl show`` of the
+  ## manager itself).
+  let r = runSystemctl(["show", "--no-pager"])
+  if r.exitCode != 0:
+    raise newException(OSError, "systemctl show (the manager): " & r.output.strip())
+  for k, v in parseShow(r.output):
+    if k.startsWith("DefaultLimit"): result[k] = v
+
+proc activatorProblems*(unit: string; show: ShowProps; lines: ShowLines;
+                        fragment: string; ownDropIns: openArray[string]): seq[string] =
+  ## A socket, timer or path unit that triggers a floored service, as
+  ## systemd reads it (A9 review round 5, finding 2): loaded from the
+  ## add-on's file with only its drop-ins, no command line, and -- for a
+  ## socket -- only stream, datagram and sequential-packet listeners.
+  template problem(s: string) = result.add(unit & ": " & s)
+  if show.getOrDefault("FragmentPath") != fragment:
+    problem("FragmentPath=" & show.getOrDefault("FragmentPath") &
+            ", not a unit file the add-on wrote (" & fragment & ")")
+  for d in words(show.getOrDefault("DropInPaths")):
+    if d notin ownDropIns:
+      problem("the drop-in " & d & " is not one the add-on installed")
+  for k, v in show:
+    if k.startsWith("Exec") and not k.startsWith("ExecMain") and v.len > 0:
+      problem(k & " runs a command as root")
+  for l in lines.getOrDefault("Listen"):
+    let open = l.rfind('(')
+    let kind = if open >= 0: l[open + 1 .. ^1].strip(chars = {')', ' '}) else: ""
+    if kind notin ["Stream", "Datagram", "SequentialPacket"]:
+      problem("listener " & l & " is opened as root and handed to the service")
+
 type
   EffectiveInput* = object
     ## What the check compares: the unit as systemd reports it, and what
@@ -379,8 +471,17 @@ type
     denied*: HashSet[string]  ## the calls the floor's deny line names
     uidOf*: proc (name: string): int
     groupsOf*: proc (name: string): seq[string]
-    readableByAll*: proc (path: string): bool
-      ## whether every user can read ``path`` (an ``EnvironmentFile=``)
+    inspectFile*: proc (path: string): string
+      ## why the manager may not read ``path`` as root for the service (an
+      ## ``EnvironmentFile=``), "" when it may (``environmentFileProblem``)
+    gidOf*: proc (group: string): int
+      ## a group's gid, -1 when unknown (``systemGid``)
+    otherWritable*: seq[string]
+      ## the writable places of every other floored unit of the generation
+    ownUnits*: HashSet[string]
+      ## the units the generation installs (``Sockets=`` may name only these)
+    limitCeilings*: Table[string, string]
+      ## the manager's ``DefaultLimit<X>`` per ``Limit<X>`` (``managerLimits``)
 
 proc expectedCommands*(files: openArray[string]; key: string): seq[string] =
   ## The executables ``key`` runs when systemd reads ``files`` in order (a
@@ -508,16 +609,38 @@ proc effectiveFloorProblems*(e: EffectiveInput): seq[string] =
     # one is refused whatever exception the unit names (only a whole-floor
     # waiver lifts it, and a waived unit is not checked).
     var held: seq[string]
-    if show.getOrDefault("Group").len > 0: held.add(show.getOrDefault("Group"))
+    # A dynamic user's own group (named like the user, allocated by systemd
+    # from its dynamic range, and known to getent only while the unit
+    # runs) is not looked up; a static group Group= names is.
+    let dynamicOwn = show.getOrDefault("DynamicUser") == "yes" and
+      show.getOrDefault("Group") in [show.getOrDefault("User"),
+                                     unit[0 ..< max(0, unit.rfind('.'))]]
+    if show.getOrDefault("Group").len > 0 and not dynamicOwn:
+      held.add(show.getOrDefault("Group"))
     held.add(words(show.getOrDefault("SupplementaryGroups")))
     if show.getOrDefault("DynamicUser") != "yes":
       held.add(groupsOf(show.getOrDefault("User")))
+    # By gid (round 5, finding 4): a second name for a privileged gid is
+    # the same group, and a group getent does not know is refused.
+    let gidOf = if e.gidOf != nil: e.gidOf else: systemGid
+    var privileged = initHashSet[int]()
+    privileged.incl(0)
+    for n in PrivilegedGroups:
+      let gid = (try: parseInt(n) except ValueError: gidOf(n))
+      if gid >= 0: privileged.incl(gid)
     var seen: HashSet[string]
     for g in held:
       if g in seen: continue
       seen.incl(g)
-      if g in PrivilegedGroups:
-        problem("runs with the privileged group " & g)
+      let gid = (try: parseInt(g) except ValueError: gidOf(g))
+      when mutated("privileged-groups-by-name"):
+        if g in PrivilegedGroups:
+          problem("runs with the privileged group " & g)
+      else:
+        if gid < 0:
+          problem("runs with the group " & g & ", which getent does not know")
+        elif gid in privileged or g in PrivilegedGroups:
+          problem("runs with the privileged group " & g & " (gid " & $gid & ")")
     if "RootDirectory" notin ex:
       for k in ["RootDirectory", "RootImage"]:
         if show.getOrDefault(k).len > 0:
@@ -545,7 +668,8 @@ proc effectiveFloorProblems*(e: EffectiveInput): seq[string] =
   # compared with the generation's own rendering, or is reviewed as inert.
   when not mutated("properties-not-default-denied"):
     for k, val in show:
-      if k in ComparedProps or isExecProp(k) or isInertProp(k): continue
+      if k in ComparedProps or k in LimitProps or isExecProp(k) or
+          isInertProp(k): continue
       problem("the property " & k & "=" & val & " is neither compared " &
               "with the floor nor reviewed as inert; refused")
     # The commands, from the Ex forms (which carry the flags).
@@ -629,11 +753,50 @@ proc effectiveFloorProblems*(e: EffectiveInput): seq[string] =
             not normalisedPath(src).startsWith(CredentialRoot & "/" & svc & "/"):
           problem(k & " reads " & src & ", outside the service's own " &
                   "credentials (" & CredentialRoot & "/" & svc & ")")
+    # EnvironmentFile= (round 5, finding 1): read by the manager as root, so
+    # named exactly, existing, root-owned under root-owned parents nothing
+    # but root can write, and outside every floored unit's writable place.
+    var places: seq[string]
+    for w in writablePlaces(show): places.add(normalisedPath(w))
+    for w in e.otherWritable: places.add(normalisedPath(w))
     for t in words(show.getOrDefault("EnvironmentFiles")):
-      if t.startsWith("/") and e.readableByAll != nil and
-          not e.readableByAll(t):
-        problem("EnvironmentFile " & t & " is read as root and is not " &
-                "readable by every user")
+      when mutated("environment-files-trusted"): break
+      if not t.startsWith("/"): continue
+      let np = normalisedPath(t)
+      if t.anyIt(it in {'*', '?', '['}):
+        problem("EnvironmentFile " & t & " is a wildcard the manager expands as root")
+        continue
+      for w in places:
+        if np == w or np.startsWith(w & "/"):
+          problem("EnvironmentFile " & np & " lies in the writable place " & w)
+      let why = (if e.inspectFile != nil: e.inspectFile(np)
+                 else: environmentFileProblem(np))
+      if why.len > 0: problem("EnvironmentFile " & np & ": " & why)
+    # Every listener and activator name a profile socket (finding 2).
+    for t in words(show.getOrDefault("Sockets")):
+      if t notin e.ownUnits:
+        problem("Sockets=" & t & " is not a socket unit the add-on installed")
+    # Realtime scheduling under RestrictRealtime= (finding 3).
+    if "RestrictRealtime" in fb and "RestrictRealtime" notin ex:
+      if show.getOrDefault("CPUSchedulingPolicy") in ["1", "2", "fifo", "rr"]:
+        problem("CPUSchedulingPolicy=" & show["CPUSchedulingPolicy"] &
+                " is realtime, which RestrictRealtime=yes forbids")
+      if show.getOrDefault("IOSchedulingClass") in ["1", "realtime"]:
+        problem("IOSchedulingClass=" & show["IOSchedulingClass"] &
+                " is realtime, which RestrictRealtime=yes forbids")
+    for k in ["FailureAction", "SuccessAction", "StartLimitAction",
+              "JobTimeoutAction"]:
+      if show.getOrDefault(k) notin ["", "none"]:
+        problem(k & "=" & show[k] & " (the floor allows only none)")
+    for k in LimitProps:
+      if k notin show: continue
+      let base = if k.endsWith("Soft"): k[0 ..< k.len - 4] else: k
+      let ceilKey = "Default" & base & (if k.endsWith("Soft"): "Soft" else: "")
+      let ceil = e.limitCeilings.getOrDefault(ceilKey)
+      if ceil.len == 0:
+        problem(k & "=" & show[k] & ": no manager default to compare with")
+      elif limitValue(show[k]) > limitValue(ceil):
+        problem(k & "=" & show[k] & " raises the manager's default " & ceil)
     # The settings systemd does not report back (PermissionsStartOnly= is
     # applied at exec time and has no property): the files it loaded may
     # carry only keys the floor knows.
@@ -743,3 +906,4 @@ proc systemGroups*(name: string): seq[string] =
     if g[2] == f[3]: primary = g[0]
     elif name in g[3].split(','): result.add(g[0])
   result.insert(primary, 0)
+

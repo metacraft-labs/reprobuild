@@ -30,14 +30,59 @@ const
     ## registration's job (the edge that declares `nix-pure-flake` is the
     ## pure-flake `nix-eval` edge, M19); nothing declares it yet.
 
+const
+  PublishableBuiltinKinds* = ["ensure-dir", "write-text", "stamp"]
+    ## The builtin kinds whose reads are exactly their declared inputs and
+    ## the action's own fingerprinted payload: the ALLOWLIST of owner
+    ## decision 2026-10-31 (Edge-Derived-Identities.md §3.1 / §10 decision 23
+    ## rider: "Refuse those kinds"; the table of every kind, with its verdict
+    ## and the code it rests on, is EDI §10 decision 23's 2026-11-03 rider).
+    ##
+    ## * `ensure-dir` creates its one output directory and reads nothing;
+    ## * `write-text` writes `builtinText`, reading its own output only to
+    ##   skip a rewrite of identical bytes;
+    ## * `stamp` writes `builtinText` and `builtinEntries` and reads nothing.
+    ##
+    ## Every other kind is refused, at both ends, by NAME: `copy-file` and
+    ## `preserve-tree` copy their sources' mode bits, which no input
+    ## identity keys (and `preserve-tree` reads its previous manifest);
+    ## `ensure-line` and `ensure-snippet` read the existing contents of the
+    ## file they rewrite, which is not an input; `workspace-vcs`,
+    ## `binary-cache-substitute`, `foreign-provision`, `metadata-fetch`,
+    ## `solve-lock` and `lock-update` run a registered executor that reads
+    ## the network, a repository, a daemon or the host. A kind that is not
+    ## listed here -- a new one, an unknown name, or a record that does not
+    ## state its kind -- is refused by default.
+
+proc builtinKindRefusal*(builtinKind: string): string =
+  ## Why a builtin of `builtinKind` may not cross hosts, or "" when it may
+  ## (`PublishableBuiltinKinds`).
+  if builtinKind.len == 0:
+    return "the record's evidence is a builtin's declared inputs, but it " &
+      "does not state the builtin's kind; only builtin kinds whose reads " &
+      "are exactly their declared inputs leave this host, so a record that " &
+      "does not name its kind does not (owner decision 2026-10-31, " &
+      "Edge-Derived-Identities.md §10 decision 23)"
+  if builtinKind in PublishableBuiltinKinds:
+    return ""
+  "the record's evidence is the declared inputs of a '" & builtinKind &
+    "' builtin, a kind that reads more than its declared inputs (or is not " &
+    "known to read only them); a record of that kind does not leave this " &
+    "host (owner decision 2026-10-31, Edge-Derived-Identities.md §10 " &
+    "decision 23: only builtins whose reads are exactly their declared " &
+    "inputs publish)"
+
 proc nonMonitoredSourceRefusal*(source: EvidenceSource): string =
   ## Whether a record whose evidence came from no monitor may cross hosts.
   ## Owner decision, 2026-10-29 (Edge-Derived-Identities.md §3.1 and §3.4
-  ## riders, §10 decision 23): "builtins yes, depfiles no".
+  ## riders, §10 decision 23): "builtins yes, depfiles no", NARROWED by the
+  ## owner on 2026-10-31: only the builtin kinds whose reads are exactly
+  ## their declared inputs.
   ##
-  ## * `builtin`: publishes. An engine builtin runs in-process, and the engine
-  ##   knows every byte it reads: its declared inputs and payload ARE its
-  ##   reads.
+  ## * `builtin:<kind>`: publishes when the kind is in
+  ##   `PublishableBuiltinKinds`, and is refused, naming the kind, otherwise
+  ##   (`builtinKindRefusal`). The 2026-10-29 premise -- "the engine knows
+  ##   every byte a builtin reads" -- holds for those kinds only.
   ## * `format:<name>` and `converter:<name>`: refused, unless the format is
   ##   one EDI assigns to an edge kind (`AssignedDeclaredCompleteFormats`,
   ##   today only `nix-pure-flake`). A depfile is the tool's account of what
@@ -51,8 +96,10 @@ proc nonMonitoredSourceRefusal*(source: EvidenceSource): string =
   ## `publicationRuleRefusal`, so both transports (the portable memo and the
   ## peer cache) and both ends (producer and consumer) apply it.
   case source.kind
-  of eskBuiltin, eskMonitored:
+  of eskMonitored:
     ""
+  of eskBuiltin:
+    builtinKindRefusal(source.builtinKind)
   of eskRecognizedFormat:
     if source.format in AssignedDeclaredCompleteFormats:
       ""

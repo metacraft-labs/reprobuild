@@ -47,8 +47,8 @@ export rust_std
 
 const
   RustSysrootScratchSubdir* = ".repro/build/cross"
-    ## Beside the zig wrappers (`cross_zig.ZigCrossScratchSubdir`), so a
-    ## `repro clean` takes both.
+    ## Beside the zig wrappers (`cross_zig.ZigCrossScratchSubdir`), in the
+    ## same per-target scratch root.
 
 proc rustTargetSysrootDir*(projectRoot, triple: string): string =
   ## Where the merged prefix lands: `<projectRoot>/.repro/build/cross/<triple>/rust-sysroot`.

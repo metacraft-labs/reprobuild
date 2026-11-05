@@ -92,14 +92,13 @@
 ## macOS has no `/proc` to read it from, and Windows deliberately keeps its
 ## shared per-user daemon running.
 
-import std/[monotimes, os, osproc, strtabs, strutils, times, unittest]
+import std/[monotimes, os, osproc, sequtils, strtabs, strutils, times, unittest]
 import repro_test_support/reasoned_skip
 import repro_cli_support/owned_daemon_signals
 
 when defined(linux):
   import std/posix
   import repro_test_support/process_fixtures
-  from repro_core/paths import runquotaEndpointPath
   # Fixtures install real POSIX dispositions before ownership is acquired.
   # The handlers use only _exit, so their verdict survives signal context.
   {.emit: """
@@ -183,6 +182,12 @@ const
     ## Set (to a scratch directory) only in the re-executed child. Its
     ## presence is what selects the child arm below.
   DaemonPidMarker = "auto-runquota-daemon-pid="
+  DaemonDirMarker = "auto-runquota-daemon-dir="
+    ## The rendezvous directory the child's invocation created for its
+    ## daemon. Printed BEFORE the pid line, so a parent holding the pid
+    ## holds this too. It is fresh per invocation and cannot be derived
+    ## from the child's pid; the parent needs it to clean up after a child
+    ## it killed, which never reaches its own release.
   ChildLifetimeMillis = 120_000
     ## How long a child waits to be signalled before it releases its daemon
     ## and exits on its own -- a backstop, so a parent that died mid-case
@@ -325,6 +330,7 @@ proc childArm() =
     echo "auto-runquota-child: startAutoRunQuotaIfNeeded started no daemon"
     flushFile(stdout)
     quit 3
+  echo DaemonDirMarker, getEnv("RUNQUOTA_SOCKET").parentDir
   echo DaemonPidMarker, processID(daemon)
   flushFile(stdout)
   var waited = 0
@@ -523,12 +529,15 @@ when defined(linux):
     # describes.
     result.child = uncontrolledStartProcess(getAppFilename(), env = env)
     terminateAtProcessExit(processID(result.child))
-    result.daemonDir = runquotaEndpointPath(
-      "reprobuild-runquota-" & $processID(result.child)).parentDir
-    releaseDirAtProcessExit(result.daemonDir)
     if not expectDaemon:
       return
     result.daemonPid = readDaemonPid(result.child, result.childOutput)
+    for line in result.childOutput.splitLines():
+      if line.startsWith(DaemonDirMarker):
+        result.daemonDir = line[DaemonDirMarker.len .. ^1].strip()
+    doAssert result.daemonDir.len > 0, "the child did not report its " &
+      "daemon's directory; it said:\n" & result.childOutput
+    releaseDirAtProcessExit(result.daemonDir)
     result.daemonStart = processStartTime(result.daemonPid)
     note(tag & ": child pid=" & $processID(result.child) &
       " daemon pid=" & $result.daemonPid & " runquotad=" &
@@ -580,8 +589,6 @@ when defined(linux):
       # This self-executing fixture has no typed execution profile.
       inv.child = uncontrolledStartProcess(getAppFilename(), env = env)
       terminateAtProcessExit(processID(inv.child))
-      inv.daemonDir = runquotaEndpointPath("reprobuild-runquota-" & $processID(inv.child)).parentDir
-      releaseDirAtProcessExit(inv.daemonDir)
       let deadline = getMonoTime() + initDuration(milliseconds = StartupBudgetMillis)
       var eof = false
       while millisLeft(deadline) > 0:
@@ -595,6 +602,12 @@ when defined(linux):
       doAssert inv.child.waitForExit() == 0, inv.childOutput
       doAssert "auto-reap refusal preserved SIGCHLD and spawned no daemon" in inv.childOutput
       doAssert not fileExists(inv.scratch / "daemon-was-executed")
+      # The refused start must not leave the rendezvous directory it created
+      # before the refusal. Checked where the directory is made when the
+      # temp root is short enough to hold the socket, as on every runner.
+      let leftovers = toSeq(walkDirs(getTempDir() / ("reprobuild-runquota-" &
+        $processID(inv.child) & "-*")))
+      doAssert leftovers.len == 0, "refused start left " & $leftovers
     finally:
       cleanUp(inv)
 
@@ -676,6 +689,11 @@ suite "an auto-started runquotad ends with its invocation":
         # The daemon's own last words reach the error, so the wait saw ITS
         # exit rather than giving up on a clock.
         check SlowDaemonExitNotice in inv.childOutput
+        # The failed start removed the rendezvous directory it created.
+        # Checked where the directory is made when the temp root is short
+        # enough to hold the socket, as on every runner.
+        check toSeq(walkDirs(getTempDir() / ("reprobuild-runquota-" &
+          $processID(inv.child) & "-*"))).len == 0
       finally:
         cleanUp(inv)
     else:

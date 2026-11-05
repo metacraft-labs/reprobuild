@@ -43,6 +43,11 @@ type
     reproExe*: string             ## binaryPrefixPath / bin/repro
     filesPrefixId*: PrefixIdBytes
     filesPrefixPath*: string      ## absolute
+    binaryDigest*: string         ## realisation digest (``storeTreeDigest``)
+    filesDigest*: string          ## of each, computed from the bytes this
+                                  ## process staged, never read back from
+                                  ## the store (spec §10.2, "The digest at
+                                  ## realisation")
 
 const
   ReproRoot* = "/repro"
@@ -186,10 +191,26 @@ proc enterWritableStoreView*() =
 # Realising the add-on's prefixes and registering generation roots.
 # ---------------------------------------------------------------------------
 
+proc realisationDigest*(staged, realised: string): string =
+  ## The realisation digest of the store path ``realised``, materialised
+  ## from the directory ``staged`` this process wrote: the canonical tree
+  ## digest of the STAGED bytes, which the store path cannot change (spec
+  ## §10.2, "The digest at realisation"; it is recorded outside the store,
+  ## in the generation's ledger). A store path that already existed and
+  ## holds other entries than were staged -- an altered path the store
+  ## reused -- is refused here rather than recorded as owned.
+  result = storeTreeDigest(staged)
+  let now = storeTreeDigest(realised)
+  if now != result:
+    raise newException(StoreRootError, "the store path " & realised &
+      " does not hold the bytes realised into it (" & now & ", staged " &
+      result & "): it existed with other content; it is left in place " &
+      "and not used")
+
 proc realiseFilesInto(s: var Store; files: openArray[tuple[name, content: string]]):
-    tuple[id: PrefixIdBytes; path: string] =
+    tuple[id: PrefixIdBytes; path, digest: string] =
   ## One files prefix holding ``files`` (named by their content digest), at
-  ## the path its manifest names.
+  ## the path its manifest names, with its realisation digest.
   let ftmp = StoreRoot / "tmp" / ("addon-files-" & $getCurrentProcessId())
   removeDir(ftmp)
   createDir(ftmp)
@@ -203,10 +224,11 @@ proc realiseFilesInto(s: var Store; files: openArray[tuple[name, content: string
     StoreReceiptHint(adapter: "addon-bootstrap", packageName: FilesPackage,
       version: ReprobuildVersion,
       provenanceChecksum: "manifest:" & filesManifest(names)))
-  (filesRes.prefixId, filesRes.absolutePath)
+  (filesRes.prefixId, filesRes.absolutePath,
+   realisationDigest(ftmp, filesRes.absolutePath))
 
 proc realiseFilesPrefix*(files: openArray[tuple[name, content: string]]):
-    tuple[id: PrefixIdBytes; path: string] =
+    tuple[id: PrefixIdBytes; path, digest: string] =
   ## A files prefix of generation-0 bodies on its own (an operator verb that
   ## adds objects to generation 0 after bootstrap: ``evidence-enrol``).
   enterWritableStoreView()
@@ -240,6 +262,7 @@ proc realiseAddonPrefixes*(binaryPath, binarySha256: string;
   result.binaryPrefixId = binRes.prefixId
   result.binaryPrefixPath = binRes.absolutePath
   result.reproExe = binRes.absolutePath / "bin" / "repro"
+  result.binaryDigest = realisationDigest(tmp, binRes.absolutePath)
   if result.binaryPrefixPath != binaryPrefixPath(binarySha256):
     raise newException(StoreRootError, "store placed the add-on binary at " &
       result.binaryPrefixPath & ", not at the planned " &
@@ -247,6 +270,7 @@ proc realiseAddonPrefixes*(binaryPath, binarySha256: string;
   let f = realiseFilesInto(s, files)
   result.filesPrefixId = f.id
   result.filesPrefixPath = f.path
+  result.filesDigest = f.digest
 
 proc registerGenerationRoot*(generationId: string;
                              prefixIds: openArray[PrefixIdBytes]) =
@@ -271,3 +295,27 @@ proc generationRoots*(): seq[string] =
   for r in s.listRoots():
     if r.rootId.startsWith(RootIdPrefix) and r.kind == $rkProfile:
       result.add(r.rootId[RootIdPrefix.len .. ^1])
+
+# ---------------------------------------------------------------------------
+# The store quarantine (spec §13 decision 46, DET-AO-5).
+# ---------------------------------------------------------------------------
+
+proc readStoreQuarantine*(path = StoreQuarantinePath): seq[string] =
+  ## Store paths verification found altered; none is used by a switch again.
+  try:
+    for l in readFile(path).splitLines():
+      let p = l.strip()
+      if p.len > 0 and p notin result: result.add(p)
+  except IOError, OSError:
+    discard
+
+proc quarantineStorePath*(storePath: string; path = StoreQuarantinePath) =
+  ## Add ``storePath`` (no-op when it is there already); the file is
+  ## rewritten whole, by rename.
+  var q = readStoreQuarantine(path)
+  if storePath in q: return
+  q.add(storePath)
+  createDir(parentDir(path))
+  writeFile(path & ".tmp", q.join("\n") & "\n")
+  setFilePermissions(path & ".tmp", {fpUserRead, fpUserWrite})
+  moveFile(path & ".tmp", path)

@@ -41,6 +41,7 @@ import repro_addon/evidence as addonEvidence
 import repro_addon/evidence_check
 import repro_addon/evidence_ship
 import repro_addon/reassert
+import repro_addon/store_verify
 
 import ./addon_evidence_fixture
 
@@ -114,6 +115,7 @@ suite "the add-on's detectors, from control to off-host alert":
   applyFrom(b, "g1", mb)
   b.tick(aoConverged, "h2", 1)
   recordEgressCheck(EgressCheck(present: true), b.evidence, 30_000)
+  recordStoreVerify(StoreVerifyReport(), defaultStoreVerifySite(b.evidence.stateDir).withEvidence(b.evidence))
   recordReassertEvidence(ReassertReport(status: "ok"), b.evidence.stateDir,
     atBoot = true, site = b.evidence, bootIdPath = b.site.bootIdPath)
   b.ship()
@@ -123,6 +125,7 @@ suite "the add-on's detectors, from control to off-host alert":
   applyFrom(a, "g1", m1)
   writeFile(a.site.dpkgLog, "2026-11-04 10:00:00 startup archives unpack\n")
   a.tick(aoApplied, "h1", 1)
+  recordStoreVerify(StoreVerifyReport(), defaultStoreVerifySite(a.evidence.stateDir).withEvidence(a.evidence))
   a.tick(aoRejected, "h1", message = "signed by an unanchored key")        # DET-AO-1
   recordEgressCheck(EgressCheck(present: true,                            # DET-AO-3
     refused: @[("1.1.1.1", 1'i64)], fresh: @[("1.1.1.1", 1'i64)]),
@@ -214,7 +217,7 @@ suite "the add-on's detectors, from control to off-host alert":
   test "nothing detected is live-idle, with no alert at all":
     check now.alerts.filterIt(it.host == b.credentialHost).len == 0
     for det in ["addon-agent-tick", "addon-evidence-ship", "addon-egress",
-                "addon-reassert",
+                "addon-store", "addon-reassert",
                 "addon-apt-hook", "addon-manifest", "addon-apply-refusal",
                 "addon-store", "addon-rollback", "addon-freshness"]:
       checkpoint det
@@ -225,7 +228,7 @@ suite "the add-on's detectors, from control to off-host alert":
     check now.statusOf(c.credentialHost, "addon-agent-tick") == "never-reported"
     check now.statusOf(c.credentialHost, "addon-evidence-ship") == "never-reported"
     check now.statusOf(c.credentialHost, "addon-egress") == "never-reported"
-    check now.alertsOf(c.credentialHost, "DET-AO-8").len == 3
+    check now.alertsOf(c.credentialHost, "DET-AO-8").len == 4
 
   test "silence: the same healthy host, later, with nothing new, is silent":
     var later = inputs
@@ -234,7 +237,23 @@ suite "the add-on's detectors, from control to off-host alert":
     check r.statusOf(b.credentialHost, "addon-agent-tick") == "silent"
     check r.statusOf(b.credentialHost, "addon-evidence-ship") == "silent"
     check r.statusOf(b.credentialHost, "addon-manifest") == "silent"
+    # The store verification's interval is six hours: still live here.
+    check r.statusOf(b.credentialHost, "addon-store") == "live-idle"
     check r.alertsOf(b.credentialHost, "DET-AO-8").anyIt(it.trigger == "silent")
+
+  test "a detector's status agrees with its own silence alert (F4)":
+    # host-b: dpkg ran after bootstrap and the apt hook never recorded it.
+    writeFile(b.site.dpkgLog, "2099-01-01 00:00:00 startup packages configure\n")
+    discard runEvidenceShip(b.site, b.conf, "host-b", forceHeartbeat = true)
+    var later = inputs
+    # Past the record's grace (two heartbeats), within the shipping
+    # heartbeat's own silence (three): shipping is alive, the hook is not.
+    later.nowMs = inputs.nowMs + 750_000
+    let r = runEvidenceCheck(later)
+    check r.statusOf(b.credentialHost, "addon-evidence-ship") == "live-idle"
+    check r.alertsOf(b.credentialHost, "DET-AO-8").anyIt(
+      it.trigger == "apt-hook-silent")
+    check r.statusOf(b.credentialHost, "addon-apt-hook") == "silent"
 
   sink.server.stop()
 

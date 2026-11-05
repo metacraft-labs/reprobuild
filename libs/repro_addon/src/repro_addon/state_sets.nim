@@ -55,6 +55,7 @@ import repro_infra
 
 import ./host_exec
 import ./mutations
+import ./seams
 import ./switch
 import ./transitions
 
@@ -540,6 +541,10 @@ proc verifyEntries*(m: StateManifest; root = "/";
     if d == e.digest: result.matched.add(e.path)
     else: result.differing.add(e.path & ": " & d & " (manifest " & e.digest & ")")
 
+const RestoreSeamStateDir = "/var/lib/repro/system"
+  ## Whose ``addon/`` holds the restore's seam control files (the add-on's
+  ## state directory; a seam build only).
+
 proc rootOf(root: string): string =
   if root.len == 0: "/" else: root
 
@@ -589,6 +594,10 @@ proc restoreStateSet*(dir: string; alive: AlivenessFn = defaultAliveness();
       raise newException(StateSetError, "the carried tree of " & e.path &
         " would be owned by the wrong accounts: " & conflicts.join("; ") &
         " (declare the accounts with the source host's ids)")
+    # Test seam (seam builds only, ``seams.nim``): the conversion gate holds
+    # a restore here, before it reads an archive, to observe what systemd
+    # does with the carried units while the restore is provably running.
+    seamPause(under(root, RestoreSeamStateDir), "restore-before-archive")
     when not mutated("state-archive-unchecked"):
       if not fileExists(archive) or sha256File(archive) != e.archiveSha256:
         raise newException(StateSetError, "the archive of " & e.path &

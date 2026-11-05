@@ -266,6 +266,23 @@ proc runAddonUninstall*(opts: UninstallOptions): UninstallResult =
       # remove links the base made for units the add-on does not own.
       systemctlOrRecord(["stop", "--", u.unit], result)
 
+  # 1b. The deploy agent's fetch unit keeps its staging in a dynamic user's
+  #     StateDirectory= (/var/lib/private/repro-agent-fetch, linked from
+  #     /var/lib/repro-agent-fetch), which the add-on made exist and no
+  #     ledger entry names: systemd removes it while the unit is still
+  #     loaded and stopped (A11 audit F5).
+  for u in byClass[lcUnit]:
+    if u.unit == AgentFetchUnit and fileExists(u.path):
+      when not mutated("uninstall-keeps-fetch-state"):
+        discard runSystemctl(["clean", "--what=state", "--", u.unit])
+        for leftover in AgentFetchStatePaths:
+          try:
+            if symlinkExists(leftover): removeFile(leftover)
+            elif dirExists(leftover): removeDir(leftover)
+          except OSError as ex:
+            result.errors.add(leftover & ": " & ex.msg)
+        result.removed.add("the fetch unit's state directory")
+
   # 2. Units and drop-ins, and any install link `disable` did not remove.
   for li in byClass[lcInstallLink]:
     removeOwned(li, result)
