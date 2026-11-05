@@ -24376,8 +24376,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g12",
-    singleReason: ""),
+    group: "",
+    singleReason: "module-level statement runs at every start-up: let originalReproOverride = getEnv(\"REPROBUILD_REPRO\")"),
   TestSpec(
     source: "tests/integration/t_spi_leaf_fetches_thin_pack_over_partial_pool.nim",
     binary: "build/test-bin/t_spi_leaf_fetches_thin_pack_over_partial_pool",
@@ -24629,7 +24629,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g13",
+    group: "t_group_tests_integration_g12",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_sync_clones_commit_pinned_repo.nim",
@@ -25344,7 +25344,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g14",
+    group: "t_group_tests_integration_g13",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_undeclared_role_is_a_usage_error_before_any_fetch.nim",
@@ -25982,7 +25982,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g15",
+    group: "t_group_tests_integration_g14",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_workspace_manifests_resolve_variant_overrides_revision.nim",

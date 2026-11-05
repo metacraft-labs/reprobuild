@@ -84,7 +84,7 @@ const
                     ("LogsDirectory", "/var/log"),
                     ("ConfigurationDirectory", "/etc")]
   ExecProps* = ["ExecCondition", "ExecStartPre", "ExecStart", "ExecStartPost",
-                "ExecReload", "ExecStop", "ExecStopPost"]
+                "ExecReload", "ExecReloadPost", "ExecStop", "ExecStopPost"]
     ## The command properties. Each is shown twice: ``<Key>`` and
     ## ``<Key>Ex``, the second with the command's flags (``+`` is
     ## ``privileged``, ``!`` ``no-setuid``, ``!!`` ``ambient``, ``-``
@@ -122,7 +122,13 @@ const
     "LoadCredential", "LoadCredentialEncrypted", "ImportCredential",
     "EnvironmentFiles", "DeviceAllow", "Delegate", "CoredumpReceive",
     "BPFProgram", "USBFunctionDescriptors", "USBFunctionStrings",
-    "ExecSearchPath", "Transient"]
+    "ExecSearchPath", "Transient", "ImportCredentialEx", "NFTSet",
+    "SELinuxContext", "AccessSELinuxContext", "AppArmorProfile",
+    "SmackProcessLabel", "MountFlags", "RootHashPath", "RootHashSignaturePath",
+    "UserNamespacePath", "BPFDelegateCommands", "BPFDelegateMaps",
+    "BPFDelegatePrograms", "BPFDelegateAttachments", "StateDirectorySymlink",
+    "RuntimeDirectorySymlink", "CacheDirectorySymlink", "LogsDirectorySymlink",
+    "ConfigurationDirectorySymlink"]
     ## The properties the check compares with the floor (each one's rule is
     ## in ``effectiveFloorProblems``), together with ``ExecProps`` and their
     ## ``Ex`` forms.
@@ -142,7 +148,11 @@ const
     "EffectiveMemoryHigh", "EffectiveMemoryMax", "EffectiveTasksMax",
     "EffectiveCPUs", "EffectiveMemoryNodes", "OOMKills", "ManagedOOMKills",
     "UID", "GID", "DelegateControllers", "DelegateSubgroup",
-    "DelegateNamespaces",
+    "DelegateNamespaces", "ActivationDetails", "Job", "LoadError", "SliceOf",
+    "StateDirectoryQuotaUsage", "CacheDirectoryQuotaUsage",
+    "LogsDirectoryQuotaUsage", "DisableControllers", "BlockIODeviceWeight",
+    "BlockIOReadBandwidth", "BlockIOWriteBandwidth",
+    "ExtraFileDescriptorNames",
     # Dependencies and ordering: which other units start with this one or
     # after it, not what this one may do.
     "Requires", "Requisite", "Wants", "BindsTo", "PartOf", "Upholds",
@@ -238,7 +248,7 @@ const
     ## which only lower what the service may use) are reviewed as
     ## families.
 
-proc isInertProp(k: string): bool =
+proc isInertProp*(k: string): bool =
   if k in InertProps: return true
   if k.endsWith("Timestamp") or k.endsWith("TimestampMonotonic"): return true
   if k.startsWith("Limit") and k.len > 5:
@@ -247,7 +257,7 @@ proc isInertProp(k: string): bool =
     return r.len > 0 and r.allCharsInSet({'A'..'Z'})
   false
 
-proc isExecProp(k: string): bool =
+proc isExecProp*(k: string): bool =
   k in ExecProps or (k.endsWith("Ex") and k[0 ..< k.len - 2] in ExecProps)
 
 proc parseShow*(text: string): ShowProps =
@@ -582,16 +592,31 @@ proc effectiveFloorProblems*(e: EffectiveInput): seq[string] =
     if show.getOrDefault("KeyringMode") notin ["", "private"]:
       problem("KeyringMode=" & show["KeyringMode"] & ", not private")
     for k in ["Personality", "JoinsNamespaceOf", "NetworkNamespacePath",
-              "IPCNamespacePath", "ImportCredential", "BPFProgram",
-              "USBFunctionDescriptors", "USBFunctionStrings", "ExecSearchPath",
-              "RootHash", "RootHashSignature", "RootVerity",
-              "RootImageOptions"]:
+              "IPCNamespacePath", "ImportCredential", "ImportCredentialEx",
+              "BPFProgram", "USBFunctionDescriptors", "USBFunctionStrings",
+              "ExecSearchPath", "RootHash", "RootHashSignature", "RootVerity",
+              "RootImageOptions", "RootHashPath", "RootHashSignaturePath",
+              "UserNamespacePath", "NFTSet", "SELinuxContext",
+              "AccessSELinuxContext", "AppArmorProfile", "SmackProcessLabel",
+              "BPFDelegateCommands", "BPFDelegateMaps", "BPFDelegatePrograms",
+              "BPFDelegateAttachments"]:
       if show.getOrDefault(k).len > 0:
         problem(k & "=" & show[k])
     for k in ["RootDirectoryStartOnly", "Delegate", "CoredumpReceive",
               "RootEphemeral", "Transient"]:
       if show.getOrDefault(k) notin ["", "no"]:
         problem(k & "=" & show[k])
+    if show.getOrDefault("MountFlags") notin ["", "0"]:
+      problem("MountFlags=" & show["MountFlags"] & " (mount propagation)")
+    # A ``*Directory=`` entry is shown again with its symlinks
+    # (``name:link``, systemd 254+): each link stays inside the directory
+    # root, under a name without ``/`` or ``..``.
+    for (k, _) in DirectoryRoots:
+      for t in words(show.getOrDefault(k & "Symlink")):
+        let c = t.find(':')
+        let link = if c >= 0: t[c + 1 .. ^1] else: ""
+        if link.len > 0 and (link.startsWith("/") or hasDotDot(link)):
+          problem(k & "Symlink=" & t & ": a link outside the directory root")
     if show.getOrDefault("DeviceAllow").len > 0 and
         show.getOrDefault("PrivateDevices") != "yes":
       problem("DeviceAllow=" & show["DeviceAllow"] & " without PrivateDevices=yes")
