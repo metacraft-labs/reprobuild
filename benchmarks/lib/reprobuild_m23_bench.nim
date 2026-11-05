@@ -530,4 +530,15 @@ when isMainModule:
     quit 0
   if params.len > 0 and params[0] == "__repro-runquota-helper":
     quit runRunQuotaHelperCli(params[1 .. ^1])
-  main()
+  # A gate refusal is a ValueError whose message names every refused action
+  # in full. Left unhandled, the `-d:release` build reports it through Nim's
+  # fixed 2000-byte buffer (`reportUnhandledErrorAux`, system/excpt.nim),
+  # which drops a message that does not fit and prints
+  # "unhandled exception:  [ValueError]" -- the refusal's whole reason lost.
+  # Print it ourselves.
+  try:
+    main()
+  except ValueError as refusal:
+    stderr.writeLine("M23 production benchmark gate refused: " & refusal.msg)
+    stderr.flushFile()
+    quit 1
