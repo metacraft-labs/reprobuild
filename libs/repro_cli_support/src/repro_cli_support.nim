@@ -88964,16 +88964,6 @@ proc renderExplainChainJson(chain: ExplainChain): JsonNode =
     parents.add(pj)
   result["parentInfluences"] = parents
 
-proc renderUnsatCoreText(entries: seq[UnsatCoreEntry];
-                         programText: string): string =
-  result = "UNSAT — minimal core:\n"
-  if entries.len == 0:
-    result.add("  (no minimal core produced; falling back to " &
-               "best-effort participants)\n")
-  else:
-    for e in entries:
-      result.add("  - [" & e.kind & "] " & e.source & "\n")
-
 proc renderUnsatCoreJson(entries: seq[UnsatCoreEntry];
                         programText: string): JsonNode =
   result = newJObject()
@@ -91866,7 +91856,7 @@ proc runReproLockCommand*(args: openArray[string]): int =
       if asJson:
         echo $renderUnsatCoreJson(entries, unsatErr.programText)
       else:
-        stdout.write(renderUnsatCoreText(entries, unsatErr.programText))
+        stdout.write(renderUnsatCore(entries, unsatErr.unsatCore))
       return 3  # exit code 3 reserved for "unsat"
     try:
       let chain = explainChosen(sol, variantName, parsed.variants,

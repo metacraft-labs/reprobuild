@@ -28801,8 +28801,8 @@
       "owner": "tests/bundles",
       "requiresReproBinary": false,
       "source": "tests/bundles/bundle_repro_solver_pure_unit.nim",
-      "sourceSuiteCount": 24,
-      "staticCaseCount": 82,
+      "sourceSuiteCount": 25,
+      "staticCaseCount": 85,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
