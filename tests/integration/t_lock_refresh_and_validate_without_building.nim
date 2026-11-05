@@ -170,3 +170,37 @@ versions: 2.4.0
       # The refreshed lock now validates against the new inputs.
       check execCmdEx(reproBinary & " lock validate " &
         quoteShell(projectDir))[1] == 0
+
+  test "validate names the unsat core when the inputs become unsatisfiable":
+    # The stale check re-solves the current inputs. When that solve has no
+    # model, the problem it reports must carry the core the solver computed
+    # (the dependency edge that cannot be met), not only the fact that the
+    # inputs are unsatisfiable — otherwise the operator has to run a second
+    # command to learn which constraint to change.
+    if not fileExists(reproBinary):
+      skip("./build/bin/repro not built; this case drives the CLI binary")
+    else:
+      let projectDir = getTempDir() / "mo1-unsat-" & $getCurrentProcessId()
+      removeDir(projectDir)
+      writeProject(projectDir)
+      defer: removeDir(projectDir)
+
+      check execCmdEx(reproBinary & " lock refresh " &
+        quoteShell(projectDir))[1] == 0
+      # No published nim satisfies app's `>=2.2.0` any longer.
+      writeFile(projectDir / "repro.solver", """
+package app
+versions: 0.1.0
+depends: nim >=2.2.0 <3.0.0
+
+package nim
+versions: 2.0.0
+""")
+      let (unsatOut, unsatRc) = execCmdEx(reproBinary &
+        " lock validate " & quoteShell(projectDir))
+      check unsatRc == 2
+      check "current solver inputs are UNSAT" in unsatOut
+      # The core entry for the unmeetable edge, as `repro lock explain`
+      # renders it, nested under the problem rather than printed as a
+      # problem of its own.
+      check "    - [depends_on] app -> nim" in unsatOut
