@@ -108,8 +108,13 @@ proc body(g: Guest; repro: string; step: StepFn; record: JsonNode;
   let t1 = g.tickUnits()
   step("sequence 1 is applied", t1.outcome == "aoApplied", $t1)
   discard g.exec("systemctl start repro-agent-fetch.timer")
+  # The store verification's first run (its timer fires once generation 0
+  # enables it, before the sink knew the host) is made explicit, so the
+  # baseline does not race it.
+  discard g.exec("systemctl start repro-addon-store-verify.service", timeoutSec = 1200)
   ship()
   discard sink.waitFor(host, "addon-agent-tick", "", 180)
+  discard sink.waitFor(host, "addon-store", "", 180)
   let base = sink.check(host, signers)
   record["baseline"] = toJson(base)
   step("baseline: nothing detected, every detector live-idle, no alert",
