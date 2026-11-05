@@ -100,8 +100,8 @@ The published form is the same as the other dev-shell bundle halves:
 
 ```
 <out>/native-store.json             transport manifest
-<out>/native-store.tar.zst.0000     part 0
-<out>/native-store.tar.zst.0001     part 1
+<out>/part-0000                     part 0
+<out>/part-0001                     part 1
 ...
 ```
 
@@ -269,7 +269,7 @@ repro store export \
   --root="$WS/<project>" --root="$WS/recipes" \
   --freeze-dev-env="$WS/<project>" \
   --out="$BUNDLE_DIR/native-store"
-# -> native-store/native-store.json + native-store.tar.zst.NNNN (64 MiB parts)
+# -> native-store/native-store.json + part-NNNN (64 MiB parts)
 ```
 
 Session side, in the setup script, after the Nix half has been loaded and the

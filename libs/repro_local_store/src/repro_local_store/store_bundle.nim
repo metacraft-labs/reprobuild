@@ -97,8 +97,10 @@ type
       ## re-witnessable, with the reason (normally a stale output).
 
   BundlePart* = object
-    name*: string
-    size*: int64
+    ## One part of a half, as its manifest lists it (`{file, bytes, sha256}`,
+    ## the dev-shell bundle format's field names).
+    file*: string
+    bytes*: int64
     sha256*: string
 
   ExportOptions* = object
@@ -200,7 +202,7 @@ proc unescapeField*(value: string): string =
       result.add(value[i])
       inc i
 
-proc lowerHex(bytes: openArray[byte]): string =
+proc lowerHex*(bytes: openArray[byte]): string =
   result = newStringOfCap(bytes.len * 2)
   for b in bytes:
     result.add(toHex(int(b), 2).toLowerAscii())
@@ -268,8 +270,10 @@ proc setMtimeNs(path: string; mtimeNs: int64) =
   if c_utimensat(AtFdCwd, path.cstring, addr times, AtSymlinkNoFollow) != 0:
     raiseOSError(osLastError(), "utimensat " & path)
 
-proc requireTool(name: string): string =
-  result = uncontrolledFindExe(name)
+proc requireTool*(name: string): string =
+  # Not following links: `nix-store` is a link to the multi-call `nix`,
+  # which dispatches on the name it was run by.
+  result = uncontrolledFindExe(name, followSymlinks = false)
   if result.len == 0:
     fail("`" & name & "` is not on PATH; store bundles need GNU tar and zstd")
 
@@ -646,7 +650,7 @@ proc unpackedBytes*(closure: BundleClosure): int64 =
 # contents (§4.1)
 # ---------------------------------------------------------------------------
 
-proc renderContentsBody(c: BundleClosure): string =
+proc renderContentsBody(c: BundleClosure; forId = false): string =
   ## Everything but the header. The bundle id is derived from this text, so
   ## it is a function of what the bundle carries.
   var lines: seq[string]
@@ -665,8 +669,12 @@ proc renderContentsBody(c: BundleClosure): string =
   for prefix in c.prefixes:
     lines.add("prefix\t" & escapeField(prefix))
   for e in c.entries:
+    # A directory's mtime says nothing about what the bundle carries, and
+    # exporting moves the store root's own (it creates `bundles/<id>/`), so
+    # the id leaves it out. The tar still restores it.
+    let mtime = (if forId and e.kind == bekDir: 0'i64 else: e.mtimeNs)
     lines.add("entry\t" & $e.kind & "\t" & toOct(e.mode, 4) & "\t" & $e.size &
-      "\t" & $e.mtimeNs & "\t" & escapeField(e.digest) & "\t" &
+      "\t" & $mtime & "\t" & escapeField(e.digest) & "\t" &
       escapeField(e.path))
   for r in c.restamps:
     lines.add("restamp\t" & $r.size & "\t" & $r.mtimeNs & "\t" & r.digest &
@@ -678,7 +686,7 @@ proc renderContents*(c: BundleClosure): string =
 
 proc bundleIdOf*(c: BundleClosure): string =
   ## 32 hex digits of BLAKE3 over the contents body.
-  blake3.digest(renderContentsBody(c)).toHex()[0 ..< 32]
+  blake3.digest(renderContentsBody(c, forId = true)).toHex()[0 ..< 32]
 
 proc parseContents*(text: string): BundleClosure =
   let lines = text.splitLines()
@@ -738,15 +746,102 @@ proc defaultExportOptions*(outDir: string): ExportOptions =
   ExportOptions(outDir: outDir, partSize: DefaultPartSize,
     zstdLevel: DefaultZstdLevel, zstdThreads: 0, halfName: DefaultHalfName)
 
-proc partName(half: string; index: int): string =
-  half & ".tar.zst." & align($index, 4, '0')
+proc partName*(prefix: string; index: int): string =
+  ## `part-0000`, `part-0001`, ...
+  prefix & align($index, 4, '0')
+
+const PartPrefix* = "part-"
+
+proc zstdCompressCommand*(zstdExe: string; level, threads: int): string =
+  ## The compressor every half uses: `zstd -<level> --long=27`. The restoring
+  ## side must pass the same `--long`.
+  quoteShell(zstdExe) & " -q -c -" & $level &
+    (if level > 19: " --ultra" else: "") &
+    " --long=" & $ZstdWindowLog & " -T" & $threads
+
+proc partsJson*(parts: seq[BundlePart]): JsonNode =
+  result = newJArray()
+  for p in parts:
+    result.add(%*{"file": p.file, "bytes": p.bytes, "sha256": p.sha256})
+
+proc parsePartsJson*(node: JsonNode): seq[BundlePart] =
+  ## Refuses part names that could leave the half's directory.
+  for p in node:
+    let name = p["file"].getStr()
+    if name.len == 0 or '/' in name or name.startsWith("."):
+      raise newException(StoreBundleError, "refusing part name " & name.escape)
+    result.add(BundlePart(file: name, bytes: p["bytes"].getBiggestInt(),
+      sha256: p["sha256"].getStr().toLowerAscii()))
+
+proc writeCompressedParts*(pipeline, outDir: string; partSize: int64;
+                           prefix = PartPrefix):
+    tuple[parts: seq[BundlePart], total: int64] =
+  ## Run the shell `pipeline`, which writes the compressed stream to its
+  ## stdout, and split that stream into `outDir/<prefix>NNNN` files of
+  ## `partSize` bytes, hashing each as it is written. Parts a previous run
+  ## left in `outDir` are removed first, so the directory holds exactly what
+  ## the returned list names.
+  if partSize <= 0:
+    raise newException(StoreBundleError, "part size must be positive")
+  createDir(outDir)
+  for kind, path in walkDir(outDir):
+    if kind == pcFile and path.extractFilename.startsWith(prefix):
+      removeFile(path)
+  # stderr goes to a file: it is read only after stdout is drained, and a
+  # chatty tar must not block on a full pipe meanwhile.
+  let errPath = outDir / ".pipeline.stderr"
+  defer: removeFile(errPath)
+  let p = uncontrolledStartProcess(requireTool("bash"), args = ["-c",
+    "set -o pipefail; (" & pipeline & ") 2>" & quoteShell(errPath)],
+    options = {})
+  let output = p.outputStream
+  var buf = newString(ReadChunk)
+  var index = 0
+  var current: File
+  var currentSize = 0'i64
+  var ctx: sha256
+  var open = false
+  var parts: seq[BundlePart]
+  var total = 0'i64
+  template closePart() =
+    current.close()
+    parts.add(BundlePart(file: partName(prefix, index - 1),
+      bytes: currentSize, sha256: lowerHex(ctx.finish().data)))
+    open = false
+  while true:
+    let n = output.readData(addr buf[0], buf.len)
+    if n <= 0: break
+    var offset = 0
+    while offset < n:
+      if not open:
+        current = system.open(outDir / partName(prefix, index), fmWrite)
+        inc index
+        currentSize = 0
+        ctx.init()
+        open = true
+      let take = min(n - offset, int(partSize - currentSize))
+      discard current.writeBuffer(addr buf[offset], take)
+      ctx.update(cast[ptr byte](addr buf[offset]), uint(take))
+      currentSize += take
+      total += take
+      offset += take
+      if currentSize == partSize:
+        closePart()
+  if open:
+    closePart()
+  let code = p.waitForExit()
+  p.close()
+  let errText = (if fileExists(errPath): readFile(errPath) else: "")
+  if code != 0:
+    raise newException(StoreBundleError, "archive pipeline failed (exit " &
+      $code & "): " & errText.strip())
+  (parts, total)
 
 proc manifestJson(c: BundleClosure; id, contentsPath, contentsSha: string;
                   opts: ExportOptions; parts: seq[BundlePart];
                   compressed: int64): JsonNode =
   var partNodes = newJArray()
-  for p in parts:
-    partNodes.add(%*{"name": p.name, "size": p.size, "sha256": p.sha256})
+  partNodes = partsJson(parts)
   var devEnvNodes = newJArray()
   for env in c.devEnvs:
     devEnvNodes.add(%*{"projectRoot": env.projectRoot,
@@ -777,8 +872,6 @@ proc exportBundle*(c: BundleClosure; opts: ExportOptions): ExportReport =
   ## travels as the first tar member at that very path.
   let tarExe = requireTool("tar")
   let zstdExe = requireTool("zstd")
-  if opts.partSize <= 0:
-    fail("part size must be positive")
   let id = bundleIdOf(c)
   let contentsText = renderContents(c)
   let contentsPath = contentsPathFor(c.roots.storeRoot, id)
@@ -796,67 +889,12 @@ proc exportBundle*(c: BundleClosure; opts: ExportOptions): ExportReport =
       list.write('\0')
   defer: removeFile(listPath)
 
-  # Drop stale parts of an earlier export to the same directory, so the
-  # directory holds exactly what the manifest lists.
-  for kind, path in walkDir(opts.outDir):
-    if kind == pcFile and path.extractFilename.startsWith(
-        opts.halfName & ".tar.zst."):
-      removeFile(path)
-
   let pipeline = quoteShell(tarExe) &
     " --format=posix --numeric-owner --no-recursion --null" &
     " --verbatim-files-from -C / -cf - -T " & quoteShell(listPath) &
-    " | " & quoteShell(zstdExe) & " -q -c -" & $opts.zstdLevel &
-    (if opts.zstdLevel > 19: " --ultra" else: "") &
-    " --long=" & $ZstdWindowLog & " -T" & $opts.zstdThreads
-  # stderr goes to a file: it is read only after stdout is drained, and a
-  # chatty tar must not block on a full pipe meanwhile.
-  let errPath = opts.outDir / ("." & opts.halfName & ".stderr")
-  defer: removeFile(errPath)
-  let p = uncontrolledStartProcess(requireTool("bash"), args = ["-c",
-    "set -o pipefail; (" & pipeline & ") 2>" &
-    quoteShell(errPath)], options = {})
-  let output = p.outputStream
-  var buf = newString(ReadChunk)
-  var index = 0
-  var parts: seq[BundlePart]
-  var total = 0'i64
-  var current: File
-  var currentSize = 0'i64
-  var ctx: sha256
-  var open = false
-  proc closePart() =
-    current.close()
-    parts.add(BundlePart(name: partName(opts.halfName, index - 1),
-      size: currentSize, sha256: lowerHex(ctx.finish().data)))
-    open = false
-  while true:
-    let n = output.readData(addr buf[0], buf.len)
-    if n <= 0: break
-    var offset = 0
-    while offset < n:
-      if not open:
-        current = system.open(opts.outDir / partName(opts.halfName, index),
-          fmWrite)
-        inc index
-        currentSize = 0
-        ctx.init()
-        open = true
-      let take = min(n - offset, int(opts.partSize - currentSize))
-      discard current.writeBuffer(addr buf[offset], take)
-      ctx.update(cast[ptr byte](addr buf[offset]), uint(take))
-      currentSize += take
-      total += take
-      offset += take
-      if currentSize == opts.partSize:
-        closePart()
-  if open:
-    closePart()
-  let code = p.waitForExit()
-  p.close()
-  let errText = (if fileExists(errPath): readFile(errPath) else: "")
-  if code != 0:
-    fail("tar | zstd failed (exit " & $code & "): " & errText.strip())
+    " | " & zstdCompressCommand(zstdExe, opts.zstdLevel, opts.zstdThreads)
+  let (parts, total) = writeCompressedParts(pipeline, opts.outDir,
+    opts.partSize)
   let contentsSha = lowerHex(sha256.digest(contentsText).data)
   let manifestPath = opts.outDir / (opts.halfName & ".json")
   writeFile(manifestPath, pretty(manifestJson(c, id, contentsPath,
@@ -889,12 +927,7 @@ proc readManifest(path: string): ParsedManifest =
     result.bundleId = node["bundleId"].getStr()
     result.contentsPath = node["contents"]["path"].getStr()
     result.contentsSha = node["contents"]["sha256"].getStr()
-    for p in node["parts"]:
-      let name = p["name"].getStr()
-      if name.len == 0 or '/' in name or name.startsWith("."):
-        fail("refusing part name " & name.escape)
-      result.parts.add(BundlePart(name: name, size: p["size"].getBiggestInt(),
-        sha256: p["sha256"].getStr().toLowerAscii()))
+    result.parts = parsePartsJson(node["parts"])
   except KeyError as e:
     fail("bundle manifest " & path & " lacks a field: " & e.msg)
   if result.parts.len == 0:
@@ -902,19 +935,19 @@ proc readManifest(path: string): ParsedManifest =
   if not result.contentsPath.isAbsolute:
     fail("bundle contents path must be absolute: " & result.contentsPath)
 
-proc readVerifiedPart(dir: string; part: BundlePart): string =
+proc readVerifiedPart*(dir: string; part: BundlePart): string =
   ## The whole part, after its SHA-256 matched. §5 step 1: no byte reaches
   ## the decompressor before its part is verified.
-  let path = dir / part.name
+  let path = dir / part.file
   if not fileExists(path):
     fail("bundle part missing: " & path)
   result = readFile(path)
-  if int64(result.len) != part.size:
-    fail("bundle part " & part.name & " is " & $result.len &
-      " bytes, the manifest says " & $part.size)
+  if int64(result.len) != part.bytes:
+    fail("bundle part " & part.file & " is " & $result.len &
+      " bytes, the manifest says " & $part.bytes)
   let actual = lowerHex(sha256.digest(result).data)
   if actual != part.sha256:
-    fail("bundle part " & part.name & " has SHA-256 " & actual &
+    fail("bundle part " & part.file & " has SHA-256 " & actual &
       ", the manifest says " & part.sha256)
 
 type FeedShared = object
@@ -943,7 +976,7 @@ proc feedWriter(shared: ptr FeedShared) {.thread.} =
         break
       offset += n
 
-proc feedParts(dir: string; parts: seq[BundlePart]; command: string;
+proc feedParts*(dir: string; parts: seq[BundlePart]; command: string;
                stopEarly: bool): int =
   ## Run `command` with the verified parts streamed to its stdin and return
   ## its exit code. The command must redirect its own stdout and stderr to

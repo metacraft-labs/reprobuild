@@ -98,7 +98,7 @@ suite "repro store bundle CLI":
         checkpoint exported.output
         check exported.exitCode == 0
         check fileExists(outDir / "native-store.json")
-        check fileExists(outDir / "native-store.tar.zst.0000")
+        check fileExists(outDir / "part-0000")
 
         removeDir(cacheRoot)
         removeDir(ws / ".repro")
