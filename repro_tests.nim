@@ -1345,6 +1345,17 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "",
     singleReason: "module-level statement runs at every start-up: let TmpDir = absolutePath("),
   TestSpec(
+    source: "libs/repro_build_engine/tests/t_dry_run_restores_no_cached_output.nim",
+    binary: "build/test-bin/t_dry_run_restores_no_cached_output",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "",
+    singleReason: "suite-scope statement runs at every start-up: for mode in [\"in-place, payload-backed\", \"restore mode\"]:"),
+  TestSpec(
     source: "libs/repro_build_engine/tests/t_endpoint_daemon_trust.nim",
     binary: "build/test-bin/t_endpoint_daemon_trust",
     defines: @[],

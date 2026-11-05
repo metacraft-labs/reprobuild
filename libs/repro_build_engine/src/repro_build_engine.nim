@@ -20440,6 +20440,18 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
         return decline("input changed: " & changed & " (its content was " &
           "re-read before restoring the recorded outputs, and is not the " &
           "recorded one)", changed)
+    if config.dryRun:
+      # CLI/build.md §"Dry Run": "no declared output is written". Everything
+      # above only READ (the inputs, the outputs on disk), so the decision is
+      # the real build's -- a hit served by a restore -- and only the writes
+      # are withheld: nothing is materialized, the record is not refreshed,
+      # and an overwrite is traced as one that WOULD happen, never reported as
+      # done (`outputOverwrites` is what `repro build` prints as "restored ...
+      # over a modified file").
+      for overwrite in overwrites:
+        runResult.trace(id, "cache-restore-would-overwrite",
+          overwriteDetail(overwrite))
+      return RestoreOutcome(ok: true, detail: "would-restore")
     let restoreStart = statStart()
     try:
       cas.materializeActionCacheOutputs(record, action.cwd)
