@@ -54,6 +54,7 @@ import ./linux_fs
 import ./mutations
 import ./nft_tables
 import ./preflight
+import ./store_custody
 import ./store_root
 
 type
@@ -373,6 +374,11 @@ proc runAddonBootstrap*(opts: BootstrapOptions): BootstrapResult =
        prefixes.filesDigest)]:
     entries.add(LedgerEntry(class: lcStorePrefix, path: path,
       sha256: hexOf(id), value: digest))
+    recordRealised(custodySite(stateDir), path, digest)
+  # The host is under store custody from its first generation (§13
+  # decision 48): an object with no recorded digest is refused, never
+  # reported "unverifiable" as on a host realised before custody.
+  markCustody(custodySite(stateDir))
 
   # 5. Generation 0, through repro infra apply. The ledger copy exists
   # BEFORE the apply, holding what bootstrap created so far: generation 0

@@ -46,6 +46,15 @@ import repro_peer_cache/evidence
 
 const Gate = "e2e_addon_egress_observer"
 
+proc tmpMountFacts(g: Guest): string =
+  ## What decides how ``/tmp``'s tmpfs options read: the kernel prints
+  ## ``size=`` only when the mount's block limit differs from the default
+  ## (half of RAM at the time of reading), so ``MemTotal`` beside the
+  ## options says whether a difference is the base's RAM accounting.
+  g.exec("grep -E 'MemTotal' /proc/meminfo; findmnt -no OPTIONS /tmp; " &
+    "systemctl show tmp.mount -p Options -p ActiveEnterTimestampMonotonic; " &
+    "dmesg | grep -iE 'Memory:|Freeing|balloon|hotplug' | tail -8").stdout
+
 proc body(g: Guest; repro: string; step: StepFn; record: JsonNode;
           producer: var Producer) =
   var sink = startGateSink(g)
@@ -69,6 +78,7 @@ proc body(g: Guest; repro: string; step: StepFn; record: JsonNode;
   # first boot's fingerprint and not after: the baseline is taken after a
   # boot that is not the first, so step 4 compares like with like.
   g.rebootGuest()
+  record["tmpBefore"] = %g.tmpMountFacts()
   let f0 = g.takeFingerprint(repro)
   let bs = g.bootstrapWithAgent(repro, step, extraFlags = sink.evidenceFlags)
   producer = bs.producer
@@ -158,6 +168,7 @@ proc body(g: Guest; repro: string; step: StepFn; record: JsonNode;
        leftover.len == 0, leftover)
   # The one enumerated exception (spec §6.4): the kernel's packet-logger
   # bindings the table's log statement loaded stay after the table is gone.
+  record["tmpAfter"] = %g.tmpMountFacts()
   let id = identityReport(f0, g.takeFingerprint(repro),
                           ["sysctl:net.netfilter.nf_log.*"])
   step("the fingerprint equals the pre-bootstrap one (but the logger " &

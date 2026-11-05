@@ -93,8 +93,9 @@
 ## unbuilt, or a non-Linux host (the ``.so`` layout assumed here is Linux; kept
 ## Linux-only to stay hermetic, matching SC-3/SC-5/SC-6).
 
-import std/[os, osproc, strutils, unittest]
+import std/[os, osproc, strtabs, strutils, unittest]
 
+import repro_core/file_lock
 import repro_lock
 
 const ReprobuildRepoRoot = currentSourcePath().parentDir().parentDir().parentDir()
@@ -228,12 +229,42 @@ proc buildCmdFor(reproAbs, consumerRoot: string): string =
     " --progress=quiet --measure=none"
 
 # ---- git helpers for the lock-pinned mode "remotes" (SC-6 shape). ----
-proc gitRun(gitBin: string; args: openArray[string]; repoDir: string) =
-  var cmd = q(gitBin)
+#
+# REPEATABLE LOCK BYTES. The consumer's recipe compiles read its `repro.lock`,
+# so a lock whose bytes change between runs makes every lock-pinned recipe
+# compile of this test miss the run-wide action cache (reprobuild-pm issue
+# 2026-10-14-sibling-import-shims-in-tmpdir-make-consumer-recipe-compiles-
+# miss-every-run.md, option C, test side). The lock names each producer by its
+# remote's path and a commit, so both are made to repeat: the remotes live at
+# a fixed name under the test's scratch root (`LockPinnedRemotesDir`, not the
+# per-process scratch), and every commit carries a fixed identity and fixed
+# dates, so the same tree yields the same commit id on every run.
+const LockPinnedRemotesDir = "sc7-lockpinned-remotes"
+const FixedGitIdentity = [
+  ("GIT_AUTHOR_NAME", "SC7 Fixture"),
+  ("GIT_AUTHOR_EMAIL", "sc7@example.invalid"),
+  ("GIT_COMMITTER_NAME", "SC7 Fixture"),
+  ("GIT_COMMITTER_EMAIL", "sc7@example.invalid")]
+
+proc gitEnv(date: string): StringTableRef =
+  result = newStringTable(modeCaseSensitive)
+  for key, value in envPairs():
+    result[key] = value
+  for (key, value) in FixedGitIdentity:
+    result[key] = value
+  result["GIT_AUTHOR_DATE"] = date
+  result["GIT_COMMITTER_DATE"] = date
+
+proc gitRun(gitBin: string; args: openArray[string]; repoDir: string;
+            date = "2026-07-03T00:00:00Z") =
+  # A signed commit embeds a fresh signature, so the commit id would not
+  # repeat; the fixture never signs.
+  var cmd = q(gitBin) & " -c commit.gpgsign=false"
   for a in args:
     cmd.add(" ")
     cmd.add(q(a))
-  let r = execCmdEx(cmd, options = {poUsePath}, workingDir = repoDir)
+  let r = execCmdEx(cmd, options = {poUsePath}, workingDir = repoDir,
+    env = gitEnv(date))
   doAssert r.exitCode == 0, "git " & args.join(" ") & " failed: " & r.output
 
 proc gitInit(repoDir, gitBin: string) =
@@ -243,9 +274,9 @@ proc gitInit(repoDir, gitBin: string) =
   gitRun(gitBin, ["add", "-A"], repoDir)
   gitRun(gitBin, ["commit", "--quiet", "-m", "sc7 producer"], repoDir)
 
-proc gitCommitAll(repoDir, gitBin, message: string) =
+proc gitCommitAll(repoDir, gitBin, message: string; date: string) =
   gitRun(gitBin, ["add", "-A"], repoDir)
-  gitRun(gitBin, ["commit", "--quiet", "-m", message], repoDir)
+  gitRun(gitBin, ["commit", "--quiet", "-m", message], repoDir, date)
 
 proc gitHead(repoDir, gitBin: string): string =
   let r = execCmdEx(q(gitBin) & " -C " & q(repoDir) & " rev-parse HEAD",
@@ -398,9 +429,21 @@ created_at = "2026-07-03T00:00:00Z"
         let root = absolutePath(scratch / "lockpinned")
         createDir(root)
 
-        # Producer "remotes" live under <root>/remotes (NOT beside the consumer),
-        # so ``findSiblingProjectFile`` can NOT bypass the fetch.
-        let remotes = root / "remotes"
+        # Producer "remotes" live outside <root> (NOT beside the consumer), so
+        # ``findSiblingProjectFile`` can NOT bypass the fetch. Their path is
+        # FIXED rather than per-process, so the lock that names them repeats
+        # between runs (see `LockPinnedRemotesDir`). Two overlapping runs of
+        # this test in one scratch root would then share it, so the whole mode
+        # holds an exclusive lock beside it, and recreates it from nothing
+        # under that lock: each run's builds fetch from remotes no other run
+        # can rewrite, and the content never depends on what an earlier run
+        # left behind.
+        let remotes = getTempDir() / LockPinnedRemotesDir
+        var remotesLock = acquireExclusiveFileLock(remotes & ".lock")
+        defer:
+          removeDir(remotes)
+          releaseExclusiveFileLock(remotesLock)
+        removeDir(remotes)
         createDir(remotes)
 
         let exeRemote = remotes / "exeprod"
@@ -464,7 +507,8 @@ created_at = "2026-07-03T00:00:00Z"
         # (4) Changed pin -> re-fetch + rebuild from the NEW revision (§5.2 "a
         # changed pin invalidates the consumer").
         writeFile(libRemote / "greeting.c", libProducerSource(libStampLockEdited))
-        gitCommitAll(libRemote, gitBin, "sc7 producer edit")
+        gitCommitAll(libRemote, gitBin, "sc7 producer edit",
+          "2026-07-04T00:00:00Z")
         let libRev2 = gitHead(libRemote, gitBin)
         check libRev2 != libRev
         writeConsumerLock(consumerRoot, exeRemote, exeRev, libRemote, libRev2, "v2")

@@ -14,7 +14,10 @@
 ## ``User=`` reset; writable places the unit sets up (``ReadWritePaths=``, a
 ## bind, an ``exec`` tmpfs, a drop-in's ``StateDirectory=``); a quoted bind
 ## over the closure; an instance's drop-in over a floored template; a
-## ``collision = "dropIn"`` unit over a floored one; ``PAMName=``. Each is
+## ``collision = "dropIn"`` unit over a floored one; ``PAMName=``. Rounds 4,
+## 5 and 6 add theirs (round 6: a static account under ``DynamicUser=yes``,
+## a second name for uid 0, ``OnFailure=reboot.target``, the first of two
+## ``EnvironmentFile=`` lines). Each is
 ## applied by an operator on a fresh add-on host. A case passes when the
 ## apply is refused and the unit never started, or -- for a writable place
 ## the floor now covers -- when the unit runs and systemd shows it holding
@@ -157,7 +160,26 @@ proc cases(binary, prefix: string): seq[Case] =
     Case(name: "a9e-shade.service", service: "User=a9s\n",
          host: "getent group shade >/dev/null || groupadd -o -g " &
                "$(getent group shadow | cut -d: -f3) shade; id a9s >/dev/null " &
-               "2>&1 || useradd -r -M -s /usr/sbin/nologin -G shade a9s")]
+               "2>&1 || useradd -r -M -s /usr/sbin/nologin -G shade a9s"),
+    # Review round 6: what only the host's systemd and account databases
+    # decide. A static account in sudo under DynamicUser=yes (systemd uses
+    # it); a second name for uid 0; a dependency that reboots the host; the
+    # first of two EnvironmentFile= lines. (A hand-written LoadCredential=
+    # is refused in add-on mode before the floor sees it, since a unit gets
+    # secrets only through its `credentials` field, so the effective check's
+    # own reading of it is a unit test: t_addon_floor_round6.)
+    Case(name: "a9e-dynstatic.service", service: "DynamicUser=yes\nUser=a9d\n",
+         host: "id a9d >/dev/null 2>&1 || useradd -r -M -s /usr/sbin/nologin " &
+               "-G sudo a9d"),
+    Case(name: "a9e-alias.service", service: "User=a9z\n",
+         host: "id a9z >/dev/null 2>&1 || useradd -o -u 0 -M -s " &
+               "/usr/sbin/nologin a9z"),
+    Case(name: "a9e-onfail.service", service: "",
+         extra: dropIn("a9e-onfail.service", "[Unit]\nOnFailure=reboot.target\n")),
+    Case(name: "a9e-envtwo.service",
+         service: "EnvironmentFile=/etc/a9e-one.env\nEnvironmentFile=/etc/a9e-two.env\n",
+         host: "printf 'A=1\\n' > /etc/a9e-one.env; chown nobody /etc/a9e-one.env; " &
+               "printf 'B=1\\n' > /etc/a9e-two.env")]
 
 proc invocation(g: Guest; unit: string): string =
   g.exec("systemctl show -p InvocationID --value " & unit).stdout.strip()

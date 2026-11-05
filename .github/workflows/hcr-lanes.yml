@@ -155,6 +155,61 @@ jobs:
           ref: dev
           path: ${{ github.workspace }}/../codetracer-visual-replay
           gh-token: ${{ steps.ci_token.outputs.token }}
+      # The recorder bundle is built from FIVE siblings that must agree with
+      # each other: the recorder, the trace-format reader it compiles against,
+      # the backend and visual-replay its recipe reads, and the Rust
+      # trace-format crates the backend builds against. Their `dev` tips
+      # do not: recorder `dev` predates the 2026-10 trace-format revision that
+      # trace-format-nim `dev` carries, and a recorder new enough for this
+      # lane's replay gate (the in-process HCR arm and the emulator's patch
+      # notes) imports trace-format modules that exist only on its `agents`
+      # line. A single pinned recorder therefore either fails to compile or
+      # fails the gate ("direct patch refused: invalid-argument" with
+      # 3936bae1, job on run 42075906445).
+      #
+      # So the five are provisioned the way the Test job provisions them: at
+      # the revisions CodeTracer's committed repro.lock names, which is the
+      # set CodeTracer itself builds and tests together. Only these five
+      # entries are taken from that lock -- every other sibling stays where
+      # .github/sibling-repos puts it, so this lane's own gates still compile
+      # against the revisions the rest of CI uses. Done here, straight after
+      # the clones, while the job's first token is fresh; the credential is
+      # scoped to exactly these repositories (scripts/ci_lock_source_
+      # credentials.py) and the file holding it is removed on exit.
+      - name: Put the recorder bundle's siblings at CodeTracer's locked revisions
+        env:
+          GIT_CONFIG_NOSYSTEM: '1'
+          GIT_TERMINAL_PROMPT: '0'
+          # Drop the job-wide process-scoped header setup-nix exports for
+          # github.com/metacraft-labs/: with the scoped file below it would be
+          # a second Authorization header, which GitHub answers with HTTP 400.
+          GIT_CONFIG_COUNT: '0'
+          GH_TOKEN: ${{ steps.ci_token.outputs.token }}
+        run: |
+          set -euo pipefail
+          repro_root="${{ github.workspace }}"
+          siblings_root="$(cd "$repro_root/.." && pwd)"
+          ct_lock="$siblings_root/codetracer/repro.lock"
+          test -f "$ct_lock" || { echo "no CodeTracer lock at $ct_lock" >&2; exit 1; }
+          work="$(mktemp -d "$RUNNER_TEMP/bundle-siblings.XXXXXX")"
+          trap 'rm -rf "${work:?}"' EXIT
+          # The five entries, as brace groups, in the lock's own syntax.
+          { grep '^schema = ' "$ct_lock"
+            printf '[lock]\ndeps = ['
+            grep -o '{[^{}]*}' "$ct_lock" | grep 'coord_kind' \
+              | grep -E 'name = "(codetracer-native-recorder|codetracer-trace-format-nim|codetracer-trace-format|codetracer-native-backend|codetracer-visual-replay)"' \
+              | paste -sd, -
+            printf ']\n'; } > "$work/bundle.lock"
+          count="$(grep -o '{[^{}]*}' "$work/bundle.lock" | wc -l)"
+          [ "$count" -eq 5 ] || { echo "CodeTracer's lock names $count of the 5 bundle siblings" >&2; exit 1; }
+          dev-exec python3 scripts/ci_lock_source_credentials.py gitconfig \
+            --lock "$work/bundle.lock" --owner metacraft-labs \
+            --out "$work/gitconfig" --emit-actions-mask
+          unset GH_TOKEN
+          GIT_CONFIG_GLOBAL="$work/gitconfig" bash scripts/reconcile_locked_siblings.sh \
+            "$work/bundle.lock" "$siblings_root" "$(basename "$repro_root")" --fetch-only
+          GIT_CONFIG_GLOBAL=/dev/null bash scripts/reconcile_locked_siblings.sh \
+            "$work/bundle.lock" "$siblings_root" "$(basename "$repro_root")" --detach
       # The manifest-vs-tree check first: it is a source scan that answers in
       # seconds, and if the work list disagrees with the tree there is no point
       # compiling 46 gate binaries to find out.

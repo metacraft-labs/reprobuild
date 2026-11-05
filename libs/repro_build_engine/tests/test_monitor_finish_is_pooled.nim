@@ -24,12 +24,11 @@
 ##
 ## PLATFORMS, AND WHAT EACH ONE CAN SHOW. Both hosting forms run on Linux and
 ## macOS, and the evidence comparison runs on both. Linux has the §4.1
-## detached-descendant guard and its grace-window timing calibration. macOS
-## fails closed with an explicit tree-lifetime limitation on every capture,
-## including the quiesced control. That exact marker is required in both
-## arms; the control must remain complete after removing only that marker,
-## so unrelated loss cannot make the comparison pass vacuously. Raw records
-## and engine evidence, including the marker, are always compared in full.
+## detached-descendant guard and its grace-window timing calibration. macOS,
+## from io-mon 3d47bb1 (G42) on, has its tree-lifetime guard: the quiesced
+## control grades complete there too and the live descendant incomplete, so
+## the same two verdicts are required on both platforms. Raw records and
+## engine evidence are always compared in full.
 ##
 ## The macOS shim also stamps per-object and per-process identities
 ## (``ino=``, ``mtime=``, ``start=``, ``childstart=``, KERN_PROC_PID MIBs) that
@@ -681,14 +680,15 @@ else:
           quiescedWrapped.status == asSucceeded,
         "the quiesced fixture did not succeed on both arms: hosted=" &
         $quiescedHosted.status & " wrapped=" & $quiescedWrapped.status
-      when defined(macosx):
-        checkOrEcho quiescedHosted.completeness == mcIncomplete and
-            quiescedWrapped.completeness == mcIncomplete,
-          "macOS must fail closed on both quiesced arms without a tree-lifetime guard"
-      else:
-        checkOrEcho quiescedHosted.completeness == mcComplete and
-            quiescedWrapped.completeness == mcComplete,
-          "CONTROL: a quiesced Linux action must grade mcComplete on both arms"
+      # On macOS too, from io-mon 3d47bb1 (G42): the tree-lifetime guard
+      # proves the quiesced action left no descendant, so it grades complete
+      # and its edge is publishable. Before G42 every macOS capture graded
+      # mcIncomplete here, and no monitored edge was ever published on macOS.
+      checkOrEcho quiescedHosted.completeness == mcComplete and
+          quiescedWrapped.completeness == mcComplete,
+        "CONTROL: a quiesced action must grade mcComplete on both arms: " &
+        "hosted=" & $quiescedHosted.completeness &
+        " wrapped=" & $quiescedWrapped.completeness
       checkOrEcho quiescedHosted.subsystemCompleteness == mcComplete and
           quiescedWrapped.subsystemCompleteness == mcComplete,
         "CONTROL: the quiesced fixture has loss beyond the exact platform " &
@@ -755,18 +755,14 @@ else:
           liveWrapped.status == asSucceeded,
         "the descendant fixture did not succeed on both arms: hosted=" &
         $liveHosted.status & " wrapped=" & $liveWrapped.status
-      # Both hosting forms must reject completeness for a live descendant.
-      # Linux observes the §4.1 grace expiry; macOS carries its explicit
-      # platform limitation. The real verdict and every raw record survive
-      # the control's separate subsystem-grade calculation above.
+      # Both hosting forms must reject completeness for a live descendant:
+      # the negative control for the quiesced arm above. Linux observes the
+      # §4.1 grace expiry; macOS's tree-lifetime guard finds the surviving
+      # descendant in its census or ledger.
       checkOrEcho liveHosted.completeness == mcIncomplete,
         "the HOSTED arm graded a live detached descendant " & $liveHosted.completeness
       checkOrEcho liveWrapped.completeness == mcIncomplete,
         "the WRAPPED arm graded a live detached descendant " & $liveWrapped.completeness
-      when defined(macosx):
-        checkOrEcho liveHosted.subsystemCompleteness == mcComplete and
-            liveWrapped.subsystemCompleteness == mcComplete,
-          "the descendant fixture has unexpected loss beyond the exact platform limitation"
 
       checkOrEcho liveHosted.histogram == liveWrapped.histogram,
         "the two arms disagree about WHICH KINDS of observation the " &

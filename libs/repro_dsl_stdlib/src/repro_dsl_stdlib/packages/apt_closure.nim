@@ -599,6 +599,22 @@ proc debianArchitectureRunsOn*(debArch, machine: string): bool =
 # ---------------------------------------------------------------------------
 
 type
+  AptRealisationLog* = ref object
+    ## What a caller that keeps custody of the store learns from one
+    ## realisation (ReproOS Add-On Mode §13 decision 48): every prefix this
+    ## realiser published, with the canonical tree digest of the bytes it
+    ## staged (``storeTreeDigest`` of the scratch directory, before the
+    ## store renamed it into place -- never read back from the store), and
+    ## a check of every existing prefix it would REUSE instead of
+    ## realising. ``nil`` (the default) changes nothing.
+    published*: seq[tuple[path, digest: string]]
+    verifyReuse*: proc (path: string): string
+      ## "" when the existing member prefix at ``path`` may be reused (its
+      ## bytes are the ones recorded at its realisation); otherwise why
+      ## not, and the realisation refuses. A union is built from hard links
+      ## of its members' files, so a member reused unchecked would carry
+      ## altered bytes into a new union and its digest.
+
   AptDebFetcher* = proc (url: string; dest: string; expectedSize: int64)
     {.closure.}
     ## Write the bytes at ``url`` to ``dest``, refusing to write more than
@@ -1154,7 +1170,8 @@ const ReusedLegacyProvenance* = "reused-from-realiser-2:"
 
 proc publishThroughStore(st: var Store; tmp, final: string;
                          prefixId: PrefixIdBytes; hint: StoreReceiptHint;
-                         mechanism = "apt-unpack") =
+                         mechanism = "apt-unpack";
+                         log: AptRealisationLog = nil) =
   ## Hand the filled, verified scratch directory ``tmp`` to the store: it
   ## becomes the store's staging directory, the store seals its receipt,
   ## renames it to ``final`` and inserts the index row (the store's
@@ -1162,6 +1179,8 @@ proc publishThroughStore(st: var Store; tmp, final: string;
   ## without a receipt and a row is invisible to ``repro store gc`` and to
   ## every root, so it would never be collected.
   setFilePermissions(tmp, DirMode)
+  # The digest of what this process staged, taken before the store sees it.
+  let stagedDigest = if log != nil: storeTreeDigest(tmp) else: ""
   when AptClosureMutation == "apt-closure-unrecorded":
     discard st
     discard prefixId
@@ -1184,6 +1203,8 @@ proc publishThroughStore(st: var Store; tmp, final: string;
   if not ensureIndexed(st, final, prefixId):
     raise newException(IOError, "apt closure: " & final &
       " was published without a receipt for its realization hash")
+  if log != nil:
+    log.published.add((final, stagedDigest))
 
 proc legacyDebPrefix(dir: string): tuple[ok: bool; reason, name, version,
                                           sha: string]
@@ -1245,12 +1266,17 @@ proc reusableLegacyMember*(storeRoot: string; d: AptLockedDeb): string =
 
 proc realiseDeb(st: var Store; lock: AptClosureLock; d: AptLockedDeb;
                 storeRoot: string; cacheDir: string; fetch: AptDebFetcher;
-                retainDebCache: bool): string =
+                retainDebCache: bool; log: AptRealisationLog = nil): string =
   result = aptDebPrefixPath(storeRoot, d)
   let marker = result / DebPrefixMarker
   if fileExists(marker) and readFile(marker) == d.sha256 & "\n" and
       (AptClosureMutation == "apt-closure-unrecorded" or
        ensureIndexed(st, result, aptDebPrefixId(d))):
+    if log != nil and log.verifyReuse != nil:
+      let why = log.verifyReuse(result)
+      if why.len > 0:
+        raise newException(IOError, "apt closure: the member prefix " &
+          result & " is not reused: " & why)
     return
   # The archive, verified against the lock, whenever it is cached or the
   # archive serves it. Only when the archive answers that it no longer
@@ -1286,7 +1312,7 @@ proc realiseDeb(st: var Store; lock: AptClosureLock; d: AptLockedDeb;
           provenanceUrl: ReusedLegacyProvenance & legacy &
             "#marker-sha256=" & d.sha256 & "#unserved=" & debUrl(lock, d) &
             "#contents-not-reverified-against-the-deb"),
-        mechanism = "reused-realiser-2-prefix")
+        mechanism = "reused-realiser-2-prefix", log = log)
     except CatchableError:
       if dirExists(tmp): removeDir(tmp)
       raise
@@ -1307,7 +1333,7 @@ proc realiseDeb(st: var Store; lock: AptClosureLock; d: AptLockedDeb;
       StoreReceiptHint(adapter: AptDebStoreAdapter,
         packageName: debStorePackage(d), version: d.version,
         lockIdentity: d.sha256, provenanceUrl: debUrl(lock, d),
-        provenanceChecksum: "sha256:" & d.sha256))
+        provenanceChecksum: "sha256:" & d.sha256), log = log)
   except CatchableError:
     if dirExists(tmp): removeDir(tmp)
     if dirExists(scratch): removeDir(scratch)
@@ -1467,7 +1493,8 @@ proc realiseAptClosure*(lock: AptClosureLock; storeRoot: string;
                         fetch: AptDebFetcher = httpDebFetcher();
                         hostMachine = hostMachineName();
                         retainDebCache = false;
-                        lockDeadlineMs = AptRealisationLockDeadlineMs):
+                        lockDeadlineMs = AptRealisationLockDeadlineMs;
+                        log: AptRealisationLog = nil):
                         string =
   ## Make the closure prefix exist and return its path (spec §8.3 item 4).
   ## Idempotent: a closure already realised is returned untouched, and a
@@ -1525,7 +1552,7 @@ proc realiseAptClosure*(lock: AptClosureLock; storeRoot: string;
     var members: seq[(string, string)] = @[]
     for d in lock.debs:
       members.add((d.name, realiseDeb(st, lock, d, storeRoot, cacheDir,
-        fetch, retainDebCache)))
+        fetch, retainDebCache, log)))
     createDir(parentDir(result))
     reclaimStaleScratch(parentDir(result))
     let tmp = tempSibling(result, "apt-closure")
@@ -1538,7 +1565,7 @@ proc realiseAptClosure*(lock: AptClosureLock; storeRoot: string;
         StoreReceiptHint(adapter: AptClosureStoreAdapter,
           packageName: "apt-closure-" & root.name, version: root.version,
           lockIdentity: aptClosureIdentity(lock),
-          provenanceUrl: lock.archive))
+          provenanceUrl: lock.archive), log = log)
     except CatchableError:
       if dirExists(tmp): removeDir(tmp)
       raise

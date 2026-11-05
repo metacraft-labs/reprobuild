@@ -18,6 +18,9 @@ repro-evidence-sink serve --dir /var/lib/evidence/store \
   --checkpoint-key /var/lib/evidence/checkpoint-key --bind <address> --port <port>
 ```
 
+Every option takes its value either as `--name value` or as
+`--name=value`.
+
 It accepts appends only. It has no command that lists, reads, overwrites
 or deletes a record over the network. It chains every record with a hash
 and signs the head after every batch. It also stamps each record with the
@@ -60,7 +63,9 @@ overwritten; `evidence-enrol` refuses a host that already has either one.
 To check the credential from the host, run
 `repro system addon evidence-credential-check`. An append must be
 acknowledged, and a list, a read, an overwrite and a delete must each be
-refused.
+refused. The check announces itself to the sink first, so the sink's
+detectors list it as the host's `self-test` instead of four alerts. Four
+refused operations that were not announced that way still alert.
 
 ## The deploy agent's egress observer
 
@@ -100,3 +105,105 @@ exits 1 when there is at least one alert. The findings are:
   between records, or a generation that no published manifest produced;
 - a host still behind the producer's latest manifest after that manifest's
   maximum age.
+
+A detection you have dealt with stays in the store, and the command keeps
+listing it. To mark it handled, acknowledge it by its sink sequence (the
+`seq=` of its `ALERT` line):
+
+```sh
+repro-evidence-sink ack --dir /var/lib/evidence/store --seq 15 \
+  --operator alice --reason "compromised compiler replaced; host recovered"
+```
+
+The running sink appends the acknowledgement to the store under its own
+identity. From then on the command prints the alert as a `HANDLED` line,
+with who acknowledged it and why, and it no longer counts toward the exit
+code. A silence alert names no sequence and cannot be acknowledged: it
+clears when the host reports again.
+
+To see what a record captured (the bytes a refusal refused), print its
+payload:
+
+```sh
+repro-evidence-sink payload --dir /var/lib/evidence/store --seq 15
+```
+
+The payload is printed between `BEGIN UNTRUSTED PAYLOAD` and
+`END UNTRUSTED PAYLOAD` markers, and every byte outside printable ASCII is
+written `\xNN`, because it is whatever the compromised component produced.
+Add `--out <file>` to write the raw bytes to a new file instead. `read`
+lists each record that has a payload with its size.
+
+## Responding to a detection
+
+When the detectors raise an alert that is not explained by something you
+did:
+
+1. **Contain the host.** On the host, run
+
+   ```sh
+   repro system addon contain --operator alice --reason "DET-AO-2: refused compile"
+   ```
+
+   It records the containment and ships the record to the sink first. Then
+   it stops the deploy agent's fetch and apply units, and while the
+   containment lasts they do not start again, not after a reboot either. The host stays on its current
+   generation. The sink's detectors then report the agent as `contained`
+   instead of `silent`. A stop that was not recorded this way, or that came
+   after the agent had already gone silent, still reads as silence.
+2. **Investigate from the sink.** Read the alert's record (`read`) and its
+   payload (`payload --seq N`). A refusal record names the copy of what was
+   refused that the host keeps (`stagingCopy`, under
+   `/var/lib/repro/agent/refused/`) and the profile compiler it ran
+   (`compiler`, `compilerSha256`). Copy the staging copy off the host
+   before anything else changes.
+3. **Fix the cause.** For example, put back the compiler, or have the
+   producer publish a corrected manifest.
+4. **Re-key if root may have been reached.** If you cannot rule out that
+   the attacker became root on the host, its attestation key and its sink
+   credential must be treated as compromised. See "Re-keying a host".
+5. **Release the host.**
+
+   ```sh
+   repro system addon release --operator alice --reason "compiler restored"
+   ```
+
+   It records the release, lets the agent's units start again and starts
+   its fetch timer.
+6. **Close the alerts.** Once the host has applied the next sequence and the
+   detectors show it live, acknowledge each detection you dealt with
+   (`ack`, above).
+
+## Re-keying a host
+
+To replace a host's attestation key and its sink credential together, run
+on the host:
+
+```sh
+repro system addon evidence-enrol --rekey
+```
+
+It creates the next keys beside the current ones. The current attestation
+key then signs a hand-over to the new key and the new credential, and the
+hand-over is shipped with the current credential. The new keys replace the
+old ones only after the sink has acknowledged the hand-over. The command
+prints the new credential's host id. On the sink host:
+
+1. copy the new `/var/lib/repro/evidence/host-ca.crt` into the anchors
+   directory, and list the old host id in the `--revoked` file;
+2. run `addon-check` with `--update-hosts`. It follows the signed
+   hand-over, adds the new host id to the hosts file and marks the old one
+   `retired@<sequence>`.
+
+If the old key may itself be compromised, do not let it vouch for the new
+one:
+
+```sh
+repro system addon evidence-enrol --rekey --no-handover
+```
+
+Then enrol the new host id and key in the hosts file yourself. Mark the old
+line `retired@<sequence>`, using the sink's newest sequence at the moment
+you decided the key was compromised. The check then refuses any hand-over
+signed by the old key after that point, and alerts on any record that
+still arrives under the old id.

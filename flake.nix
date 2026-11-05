@@ -321,7 +321,13 @@
       # initializer; at 7a3e4c89 Nim re-initialised it after the shim's
       # constructor, so no late scan ever ran and every dlopen graded the
       # capture mcIncomplete on both armhf and x86-64.
-      url = "github:metacraft-labs/io-mon/e05beda08343b04b3d53f008ebcd0fe7bd27d8b1";
+      # Bumped e05beda0 -> e66e05c9 (2026-11-05, io-mon `agents`): brings 3d47bb1
+      # (G42), the macOS tree-lifetime guard. Until it, io-mon graded every macOS
+      # capture incomplete ("no complete tree-lifetime guard"), so the engine
+      # never published a monitored edge on macOS. A capture is now complete
+      # when no recorded or marked descendant survives the root; one that does
+      # survive is still a loss.
+      url = "github:metacraft-labs/io-mon/e66e05c9471ce184e9a3b0d793b2db62ca5557b9";
       flake = false;
     };
     nim-shm-gset-src = {
@@ -483,7 +489,9 @@
       # Bumped 3af8a4e -> 7533478 (2026-10-30, review fixes): the ARM body patch
       # writes its target word first; the ARM restore is idempotent; the armhf
       # test preserves r7.
-      url = "github:metacraft-labs/nim-stackable-hooks/75334780682e70b1adb58bf813d869e7f5df63f5";
+      # Bumped 7533478 -> c1d55ce (2026-11-05) with io-mon-src: io-mon e66e05c9
+      # imports `platform/linux_image_code_ranges`, which arrives in c1d55ce.
+      url = "github:metacraft-labs/nim-stackable-hooks/c1d55ce33fb2a29e4cf8d8bdbe1713f355370d0a";
       flake = false;
     };
     reprobuild-ct-test-runner-src = {

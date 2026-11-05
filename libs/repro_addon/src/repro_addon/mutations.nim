@@ -479,6 +479,20 @@
 ## ``receipt-trusts-inode``                   the restore receipt counts a
 ##                                            directory as restored on its
 ##                                            device and inode alone
+## ``account-as-written``                     a service's account is taken
+##                                            as written (no specifiers,
+##                                            no static account under
+##                                            DynamicUser=yes, no uid
+##                                            alias, no memberships)
+## ``reach-host-dropins-ignored``             reach reads the profile's
+##                                            drop-ins only, not the host's
+## ``reach-timer-dropins-unread``             a profile timer is read
+##                                            without its drop-ins
+## ``reach-path-unit-paths-ignored``          a path unit's watched paths
+##                                            reach nothing
+## ``restore-requirement-by-manifest-only``   no apply adds the restore
+##                                            requirement; only install-
+##                                            unit's manifest units have it
 ## ``receipt-no-fsync``                       the restore receipt is
 ##                                            renamed into place with
 ##                                            neither its file nor its
@@ -552,6 +566,38 @@
 ## ``reassert-store-trigger-missing``         a quarantined store object
 ##                                            in use is reported as
 ##                                            ``store-object-missing``
+## ``custody-skips-file-sources``            the switch's store custody
+##                                            leaves out the store files
+##                                            an ``fs.systemFile`` copies
+## ``custody-skips-closures``                 ... and the apt closures
+## ``custody-admits-undigested``              an object with no recorded
+##                                            digest is admitted on a host
+##                                            under custody
+## ``custody-cache-ignores-signature``        the digest cache answers for
+##                                            a path whatever changed in it
+## ``recovery-discards-evidence``             a recovered object's altered
+##                                            bytes are deleted, not kept
+## ``recovery-trusts-store-bytes``            a files prefix is recovered
+##                                            from its own altered copy
+## ``evidence-path-changed-only``            the shipping path unit uses
+##                                            ``PathChanged=`` and a run
+##                                            lists the outbox once (D1)
+## ``sink-cli-equals-only``                   the sink's options parse
+##                                            only as ``--name=value`` (D2)
+## ``check-ignores-acks``                     an acknowledged detection
+##                                            still alerts (D4)
+## ``check-ignores-containment``              a contained host's agent
+##                                            reads as silent (D5)
+## ``contain-unsigned``                       the containment record is
+##                                            not attested (D5)
+## ``refusal-names-no-copy``                  the refusal record names no
+##                                            staging copy or compiler (D6)
+## ``handover-unverified``                    a key hand-over is followed
+##                                            unverified (D7)
+## ``check-ignores-probe-announcement``       the announced credential
+##                                            self-test alerts (D9)
+## ``sink-payload-unescaped``                 the sink prints a payload's
+##                                            bytes raw (D3)
 ## =========================================  ==============================
 
 # The deploy agent's own mutations (``repro_deploy_agent/agent_mutations``)
@@ -766,6 +812,16 @@ const
                           "activators-unchecked",
                           "start-hold-removes-directory",
                           "stale-start-holds-kept",
+                          # A9 review round 6.
+                          "dynamic-user-trusted",
+                          "show-last-line-only",
+                          "absent-property-passes",
+                          "file-only-settings-unread",
+                          "read-only-binds-unjudged",
+                          "state-targets-allowed",
+                          "activator-options-unchecked",
+                          "environment-file-links-unchecked",
+                          "environment-file-links-refused",
                           # A13: a state backup or restore runs while a
                           # unit of the set may run.
                           "state-units-not-checked",
@@ -830,6 +886,15 @@ const
                           # written without its fsyncs (the hard-reset
                           # gate's receipt points).
                           "receipt-no-fsync",
+                          # A13 review round 4 finding 1: the shared
+                          # service-account resolver (repro_infra/
+                          # service_account) takes the account as written.
+                          "account-as-written",
+                          # A13 review round 4, findings 2-5.
+                          "reach-host-dropins-ignored",
+                          "reach-timer-dropins-unread",
+                          "reach-path-unit-paths-ignored",
+                          "restore-requirement-by-manifest-only",
                           "reach-ignores-privileged-commands",
                           "reach-dropin-judged-alone",
                           "reach-trigger-units-reach-nothing",
@@ -880,7 +945,22 @@ const
                           "reassert-nft-in-own-netns",
                           # Session 2, low: one trigger for a missing and a
                           # quarantined store object.
-                          "reassert-store-trigger-missing"]
+                          "reassert-store-trigger-missing",
+                          # Owner decisions 2026-11-05 (G1 / G42): store
+                          # custody and recovery.
+                          "custody-skips-file-sources",
+                          "custody-skips-closures",
+                          "custody-admits-undigested",
+                          "custody-cache-ignores-signature",
+                          "recovery-discards-evidence",
+                          "recovery-trusts-store-bytes",
+                          # The A11 drill's findings D1-D9.
+                          "evidence-path-changed-only",
+                          "sink-cli-equals-only", "check-ignores-acks",
+                          "check-ignores-containment", "contain-unsigned",
+                          "refusal-names-no-copy", "handover-unverified",
+                          "check-ignores-probe-announcement",
+                          "sink-payload-unescaped"]
 
 when AddonMutation.len > 0 and AddonMutation notin KnownAddonMutations and
     AddonMutation notin KnownAgentMutations:

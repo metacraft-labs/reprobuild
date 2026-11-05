@@ -161,8 +161,8 @@ proc socketFixture(name: string): tuple[f: Fixture; server: HostServer;
   removeDir(sockRoot / name)
   f.h = newHost(f.b, sockRoot / name / "ws")
   result.server = startServer(f.h, sockRoot / name / "run")
-  result.consent = waitFor connectHost(consentSocketPath(sockRoot / name / "run"))
-  result.agent = waitFor connectHost(providerSocketPath(sockRoot / name / "run"))
+  result.consent = waitFor connectHost(result.server.consentPath)
+  result.agent = waitFor connectHost(result.server.providerPath)
   result.consent.hello()
   result.agent.hello()
   var grants: seq[CborItem]

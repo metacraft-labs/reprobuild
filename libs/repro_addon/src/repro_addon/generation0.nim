@@ -1089,12 +1089,23 @@ proc storeVerifyTimer*(): string =
 
 proc evidenceShipPathUnit*(): string =
   ## Starts the shipping unit whenever a record lands in the outbox (DET-6:
-  ## it leaves at once, not at the next timer).
+  ## it leaves at once, not at the next timer). ``DirectoryNotEmpty=``, not
+  ## ``PathChanged=``: systemd drops a ``PathChanged=`` event that arrives
+  ## while the unit it starts is still active, so a record that landed
+  ## during a shipping run waited for the timer (A11 drill D1). A
+  ## ``DirectoryNotEmpty=`` condition is checked again whenever the shipping
+  ## unit stops, so such a record starts the next run at once
+  ## (systemd.path(5)). The shipping run waits before it exits while
+  ## entries stay queued (the sink unreachable), which bounds how often the
+  ## condition restarts it.
   "[Unit]\n" &
   "Description=Reprobuild add-on: ship each evidence record as it is written\n" &
   "\n" &
   "[Path]\n" &
-  "PathChanged=" & EvidenceOutboxPath & "\n" &
+  (when mutated("evidence-path-changed-only"):
+     "PathChanged=" & EvidenceOutboxPath & "\n"
+   else:
+     "DirectoryNotEmpty=" & EvidenceOutboxPath & "\n") &
   # No trigger limit either: a path unit that hits one fails and stays
   # failed (A11 audit F2).
   (when mutated("evidence-path-rate-limited"): "" else:

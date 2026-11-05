@@ -92,7 +92,23 @@ The add-on handles this in four ways:
     or watch a path, for example a socket that opens a device or a FIFO,
     or one that runs a command;
   - realtime scheduling, a reboot `FailureAction=`, or a resource limit
-    above the service manager's default.
+    above the service manager's default;
+  - a dependency such as `OnFailure=` or `Wants=` that starts a unit
+    which changes the whole system's state, such as `reboot.target`,
+    `poweroff.target` or `emergency.target`;
+  - a credential (`LoadCredential=`) read from outside the add-on's own
+    secrets directory for the service, and any `ImportCredential=`,
+    `NFTSet=` or `RootImageOptions=`. `systemctl show` does not print
+    these settings, so the add-on reads them from the unit files systemd
+    loaded;
+  - a property that is missing from `systemctl show`. Every entry of a
+    property that systemd prints on several lines is checked.
+
+  The service's account is the one systemd will use. Specifiers such as
+  `%u` and `%i` are expanded first. With `DynamicUser=yes`, an existing
+  account of the configured name is used, along with its groups. A second
+  account name for uid 0 counts as root. An account or group that cannot
+  be resolved is refused.
 
   This check runs on every switch: an apply, an agent tick, a revert, a
   rollback and a crash recovery. It does not run between switches. A

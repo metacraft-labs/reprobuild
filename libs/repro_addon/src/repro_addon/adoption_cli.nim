@@ -57,7 +57,7 @@ const
       succeeded. Records the installation, so a manifest missing later
       refuses every apply and fails the restore.
 """
-  RestoreUnitName* = "repro-state-restore.service"
+  RestoreUnitName* = CarriedRestoreUnit
 
 proc stateRestoreUnitText*(repro: string; carried: seq[string] = @[]): string =
   ## The first-boot unit a conversion installs with the carried directory
@@ -84,23 +84,11 @@ proc stateRestoreUnitText*(repro: string; carried: seq[string] = @[]): string =
     "\n[Install]\n" &
     "WantedBy=sysinit.target\n"
 
-const RestoreRequiredDropIn* = "80-repro-state-restore.conf"
-  ## The drop-in that makes a carried unit require the restore unit.
-
 proc restoreRequiredDropInText*(): string =
-  ## Owned by the carried unit, not by the restore unit's [Install]: a
-  ## ``systemctl disable`` or ``preset`` of the restore unit removes the
-  ## links to it, and this drop-in is not a link, so the requirement stays
-  ## and pulls the restore unit in at boot anyway (systemd.unit(5)).
-  ## ``Requires=`` fails the unit's start job when the restore failed;
-  ## ``After=`` orders it behind the restore whatever its own default
-  ## dependencies are.
-  "[Unit]\n" &
-    "# Carried state (ReproOS Add-On Mode §11.1): starts only after the\n" &
-    "# first-boot restore of it succeeded.\n" &
-    "Requires=" & RestoreUnitName & "\n" &
-    (when mutated("restore-unordered"): ""
-     else: "After=" & RestoreUnitName & "\n")
+  ## ``carried_state.restoreRequirementText``: the bytes ``install-unit``
+  ## writes as ``RestoreRequiredDropIn`` and a generation writes for every
+  ## unit reaching carried state.
+  restoreRequirementText()
 
 proc installRestoreUnit*(dir, repro: string; root = "/"): seq[string] =
   ## Install the first-boot restore unit under ``root`` (enabled: a link in

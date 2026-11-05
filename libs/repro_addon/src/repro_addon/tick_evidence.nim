@@ -33,6 +33,12 @@ type
     payload*: string
     recorded*: bool          ## the refusal already left its own record
     manifestPayload*: string ## the staged envelope, for a manifest refusal
+    stagingCopy*: string     ## where the refused staging is preserved
+                             ## (named before the record is written, D6)
+    compiler*: string        ## the profile compiler the apply unit's
+    compilerSha256*: string  ## configuration names, and its SHA-256 as the
+                             ## apply unit read it (not the compiler's own
+                             ## claim, which is attacker-chosen)
 
 proc tickIntervalMs*(confPath = EvidenceConfPath): int64 =
   ## The longest a tick may take to follow the previous one, from the
@@ -95,6 +101,11 @@ proc recordTickEvidence*(t: RecordedTick; r: TickRefusal;
     elif d.trigger == "addon-staging-refused":
       payload = r.payload
       extra.add(("reason", r.refusal))
+      when not mutated("refusal-names-no-copy"):
+        if r.stagingCopy.len > 0: extra.add(("stagingCopy", r.stagingCopy))
+        if r.compiler.len > 0:
+          extra.add(("compiler", r.compiler))
+          extra.add(("compilerSha256", r.compilerSha256))
     try:
       discard recordEvidence(EvidenceEvent(detector: d.detector,
         category: ecDetection, trigger: d.trigger, kind: kind,
