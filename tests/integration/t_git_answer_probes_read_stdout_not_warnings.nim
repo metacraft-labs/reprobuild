@@ -35,6 +35,7 @@
 import std/[os, osproc, streams, strutils, tempfiles, unittest]
 
 import repro_cli_support
+import repro_test_support/reasoned_skip
 import git_tool
 
 proc run(command: string; cwd = ""): tuple[code: int; output: string] =
