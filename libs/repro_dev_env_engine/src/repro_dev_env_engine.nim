@@ -33,6 +33,12 @@ type
   DevEnvEdgeConfig* = object
     modulePath*: string
     projectRoot*: string
+    sourceTrees*: seq[string]
+      ## The trees outside its roots that this project's activation reads as
+      ## source (``BuildEngineConfig.sourceTrees``): its workspace, the
+      ## checkouts its lock pins, its develop overrides. The CLI derives them
+      ## (``buildSourceTrees``); empty leaves the volatile-path scope to the
+      ## declared roots.
     outDir*: string
     workDir*: string
     publicCliPath*: string
@@ -319,6 +325,7 @@ proc engineConfig(config: DevEnvEdgeConfig): BuildEngineConfig =
   # direction.
   result.filesystemRoots = declaredFilesystemRoots(config.projectRoot,
     config.workDir, resolvedStoreRootOrEmpty(), outRoot = config.outDir)
+  result.sourceTrees = config.sourceTrees
   result.statsEnabled = config.statsEnabled
   result.progressCallback = config.progressCallback
   # A warm activation must stay on the no-op fast path even while it renders

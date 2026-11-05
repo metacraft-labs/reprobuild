@@ -15609,6 +15609,12 @@ proc computePublicDevEnv(selection: DevEnvCliSelection;
     progressCallback: progressCallback,
     modulePath: selection.modulePath,
     projectRoot: selection.projectRoot,
+    # The volatile-path fold's source trees, as `wireFilesystemRoots` gives
+    # every build configuration.
+    sourceTrees:
+      (if buildSourceTreesOf != nil and selection.projectRoot.len > 0:
+         buildSourceTreesOf(absolutePath(selection.projectRoot))
+       else: @[]),
     outDir: selection.outDir,
     workDir: reprobuildLibraryWorkDir(),
     publicCliPath: publicCliPath,
@@ -29328,12 +29334,14 @@ proc addDevelopOverridesOf(loc: var LockedDepLocator; root: string) =
   except CatchableError:
     discard
 
-proc lockedDepLocator*(lockDir: string): LockedDepLocator =
+proc lockedDepLocator*(lockDir: string; pathBase = ""): LockedDepLocator =
   ## The locator for the lock held in ``lockDir``, resolving the workspace
-  ## membership itself when a name needs it.
+  ## membership itself when a name needs it. ``pathBase`` is
+  ## ``committedLockPathBase(lockDir)`` when the caller already has it (it
+  ## costs two git runs); empty derives it.
   let dir = os.normalizedPath(absolutePath(lockDir))
   result = LockedDepLocator(lockDir: dir,
-    pathBase: committedLockPathBase(dir),
+    pathBase: (if pathBase.len > 0: pathBase else: committedLockPathBase(dir)),
     overrides: initTable[string, string](),
     members: initTable[string, string]())
   result.addDevelopOverridesOf(dir)
@@ -29342,12 +29350,13 @@ proc lockedDepLocator*(lockDir: string): LockedDepLocator =
     result.addDevelopOverridesOf(os.normalizedPath(absolutePath(ws)))
 
 proc lockedDepLocator*(lockDir, workspaceRoot: string;
-    members: openArray[tuple[name, path: string]]): LockedDepLocator =
+    members: openArray[tuple[name, path: string]];
+    pathBase = ""): LockedDepLocator =
   ## The locator for the lock held in ``lockDir`` when the caller already
   ## holds the workspace membership (``members``, paths relative to
   ## ``workspaceRoot``) — a reader walking every participating repo's lock
   ## then resolves the membership once, not once per lock.
-  result = lockedDepLocator(lockDir)
+  result = lockedDepLocator(lockDir, pathBase)
   result.membershipLoaded = true
   for m in members:
     if m.name.len == 0 or m.path.len == 0 or m.name in result.members:
@@ -56997,6 +57006,231 @@ proc enclosingWorkspaceRoot*(startPath: string;
     let mainRoot = mainWorktreeRootFor(startPath)
     if mainRoot.len > 0:
       return enclosingWorkspaceRoot(mainRoot, followWorktree = false)
+
+var sourceTreeMembershipMemo: Table[string,
+    tuple[stamp: string; members: seq[tuple[name, path: string]]]]
+  ## ``sourceTreeMembership`` per workspace root. Every engine configuration
+  ## of one invocation asks for the same workspace, and resolving a large
+  ## membership is the one costly step (measured 31-110 ms for 202
+  ## repositories, debug build), so it is resolved once per process and again
+  ## only when a document it is read from changes
+  ## (``sourceTreeMembershipStamp``, which holds their content: a long-lived
+  ## process, such as the Windows daemon, which builds in-process, sees every
+  ## edit).
+
+proc sourceTreeMembershipStamp(ws: string): string =
+  ## Every document the membership of the workspace at ``ws`` is resolved
+  ## from, WITH ITS CONTENT: the state and settings files and the manifest
+  ## declarations (``projects``, ``repos``, ``variants``, ``repo-sets``,
+  ## ``url-prefixes``) at the root, in ``.repro/manifests``, in each url
+  ## layer's checkout (``.repro/manifests-<i>-<name>``) and in each
+  ## ``local_path`` layer wherever it is, plus the two legacy migration
+  ## files the project name may come from. About 250 files on the
+  ## 202-repository workspace, read in a few milliseconds.
+  ##
+  ## Content, not size and modification time: an edit that keeps a
+  ## fragment's size within the filesystem's timestamp granularity (a member
+  ## renamed to another of the same length, by a script or a test, in the
+  ## same tick) kept such a stamp, and a member left out of the scope is a
+  ## read dropped silently. A file that cannot be read is named with no
+  ## content, so its appearing or disappearing still changes the stamp.
+  var roots: seq[string]
+  proc addFile(stamp: var string; path: string) =
+    stamp.add(path & "\t")
+    try:
+      let content = readFile(extendedPath(path))
+      stamp.add($content.len & "\n" & content)
+    except IOError, OSError:
+      stamp.add("-\n")
+  proc addManifests(stamp: var string; roots: var seq[string]; root: string) =
+    let normalized = os.normalizedPath(absolutePath(root, ws))
+    if normalized in roots or not dirExists(normalized):
+      return
+    roots.add(normalized)
+    for kind, path in walkDir(normalized):
+      if kind in {pcFile, pcLinkToFile} and path.endsWith(".toml"):
+        stamp.addFile(path)
+    for sub in ["projects", "repos", "variants", "repo-sets", "url-prefixes"]:
+      if dirExists(normalized / sub):
+        for path in walkDirRec(normalized / sub,
+            yieldFilter = {pcFile, pcLinkToFile}):
+          if path.endsWith(".toml"):
+            stamp.addFile(path)
+  result.addManifests(roots, ws)
+  result.addManifests(roots, ws / ".repro")
+  for kind, path in walkDir(ws / ".repro"):
+    if kind in {pcDir, pcLinkToDir} and
+        extractFilename(path).startsWith("manifests"):
+      result.addManifests(roots, path)
+  # A ``local_path`` layer may be anywhere (relative to ``ws`` or absolute).
+  # The state and settings files that name it are in the stamp already, so
+  # a layer added or moved changes the stamp whether or not it is read here.
+  try:
+    for layer in effectiveWorkspaceLocalWithNotes(ws).local.manifest:
+      if layer.local_path.isSome and layer.local_path.get().len > 0:
+        result.addManifests(roots, layer.local_path.get())
+  except CatchableError:
+    discard
+  for legacy in [ws / ".repo" / "workspace.toml",
+                 ws / ".repo" / ".repro-migration-complete"]:
+    if fileExists(extendedPath(legacy)):
+      result.addFile(legacy)
+
+proc sourceTreeMembership(ws: string): seq[tuple[name, path: string]] =
+  ## The repositories the workspace at ``ws`` declares, ``path`` relative to
+  ## ``ws``: the membership every workspace command resolves
+  ## (``resolveWorkspaceProjectShared``). Empty when the workspace declares
+  ## none (a committed-lock-only workspace, whose dependencies are its lock's)
+  ## or the declaration does not resolve, which the build reports itself.
+  ##
+  ## There is no cheaper record of it: the state file names only the active
+  ## projects, and the per-clone ignore set is best effort. So it is resolved
+  ## once per process (``sourceTreeMembershipMemo``).
+  # A malformed state or settings file raises here; the workspace command
+  # that reads it reports it, and a build that does not must not fail on it.
+  try:
+    if not hasResolvedManifestCheckout(ws) and
+        not isCompositionalWorkspaceToml(ws, ""):
+      return
+  except CatchableError:
+    return
+  let stamp = sourceTreeMembershipStamp(ws)
+  if ws in sourceTreeMembershipMemo and
+      sourceTreeMembershipMemo[ws].stamp == stamp:
+    return sourceTreeMembershipMemo[ws].members
+  try:
+    var repos: seq[ResolvedRepo]
+    {.cast(gcsafe).}:
+      repos = resolveWorkspaceProjectShared(ws, "",
+        "finding the trees a build reads").resolved.repos
+    for r in repos:
+      if r.name.len > 0 and r.path.len > 0:
+        result.add((name: r.name, path: r.path))
+  except CatchableError:
+    result = @[]
+  sourceTreeMembershipMemo[ws] = (stamp: stamp, members: result)
+
+var sourceTreeLayoutMemo: Table[string,
+    tuple[stamp, mainWorktree, lockFrame: string]]
+  ## Per project, the two answers ``buildSourceTrees`` asks git for: the main
+  ## worktree a linked worktree's workspace is found from
+  ## (``mainWorktreeRootFor``) and the frame of the committed lock's paths
+  ## (``committedLockPathBase``). Every engine configuration of one command
+  ## asks again (about eight in a no-op ``repro build``), and the git runs were
+  ## most of each call's cost: 10-20 ms, where the rest takes a few. Both
+  ## describe where the repository keeps its git data, so they are derived
+  ## again whenever that changes (``repositoryLayoutStamp``).
+
+proc repositoryLayoutStamp(project: string): string =
+  ## Where the repository enclosing ``project`` keeps its git data: the first
+  ## ``.git`` entry above it, whether a directory (a main worktree) or a file
+  ## (a linked worktree, with the pointer it holds). A repository created,
+  ## removed or relinked changes it; nothing else changes the two answers.
+  var dir = project
+  while dir.len > 0:
+    let entry = dir / ".git"
+    if dirExists(extendedPath(entry)):
+      return entry & "\tdir"
+    if fileExists(extendedPath(entry)):
+      try:
+        return entry & "\tfile\t" & readFile(extendedPath(entry))
+      except IOError, OSError:
+        return entry & "\tfile"
+    let parent = parentDir(dir)
+    if parent == dir:
+      break
+    dir = parent
+  "none"
+
+proc sourceTreeLayout(project: string; needsFrame: bool):
+    tuple[mainWorktree, lockFrame: string] =
+  ## ``sourceTreeLayoutMemo``'s entry for ``project``, derived when the
+  ## repository's layout changed or the lock frame is asked for first.
+  let stamp = repositoryLayoutStamp(project)
+  if project in sourceTreeLayoutMemo:
+    let known = sourceTreeLayoutMemo[project]
+    if known.stamp == stamp and (known.lockFrame.len > 0 or not needsFrame):
+      return (known.mainWorktree, known.lockFrame)
+  result.mainWorktree = mainWorktreeRootFor(project)
+  if needsFrame:
+    result.lockFrame = committedLockPathBase(project)
+  sourceTreeLayoutMemo[project] = (stamp: stamp,
+    mainWorktree: result.mainWorktree, lockFrame: result.lockFrame)
+
+proc buildSourceTrees*(projectRoot: string): seq[string] =
+  ## The trees outside its own roots that a build of ``projectRoot`` reads as
+  ## source (``BuildEngineConfig.sourceTrees``, installed as
+  ## ``portable_cache.buildSourceTreesOf``). The volatile-path fold never
+  ## drops a read in one of them, so a sibling repository or a dependency
+  ## checkout on a mount at ``/run/<dir>`` is fingerprinted like the project.
+  ##
+  ## * the enclosing WORKSPACE ROOT, and each repository its membership
+  ##   declares (``sourceTreeMembership``). The root holds every member's
+  ##   declared path, since a checkout path cannot leave it; each member is
+  ##   named as well because its checkout may be a link, nested inside
+  ##   another checkout or not, and the scope holds the resolved spelling of
+  ##   every tree it is given, which is where such a member's reads are seen;
+  ## * each DEPENDENCY the project's committed lock pins, at the checkout this
+  ##   machine has for it (``lockedDepCheckoutPath``, the one placement rule:
+  ##   a develop override, the workspace membership, a nested checkout or the
+  ##   ``../<name>`` sibling);
+  ## * each DEVELOP OVERRIDE's checkout, of the project and of the workspace,
+  ##   whether or not the lock names it.
+  ##
+  ## Everything here is a place the build's sources come from, never runtime
+  ## state, so keeping it errs only toward a miss. Nothing raises: a document
+  ## that cannot be read contributes nothing, and the build that reads it
+  ## reports it there.
+  proc addTree(trees: var seq[string]; path, base: string) =
+    if path.len == 0: return
+    let normalized = os.normalizedPath(absolutePath(path, base))
+    if normalized notin trees:
+      trees.add(normalized)
+  let project = os.normalizedPath(absolutePath(projectRoot))
+  let lockPath = committedLockPath(project)
+  let hasLock = fileExists(extendedPath(lockPath))
+  # ``enclosingWorkspaceRoot``, with its linked-worktree retry's git run
+  # taken from the memo: the marker walk itself is a few stats.
+  var found = findWorkspaceRoot(project)
+  var layout: tuple[mainWorktree, lockFrame: string]
+  if found.len == 0 or hasLock:
+    layout = sourceTreeLayout(project, needsFrame = hasLock)
+  if found.len == 0 and layout.mainWorktree.len > 0:
+    found = enclosingWorkspaceRoot(layout.mainWorktree, followWorktree = false)
+  let ws = if found.len > 0: os.normalizedPath(absolutePath(found)) else: ""
+  var members: seq[tuple[name, path: string]]
+  if ws.len > 0:
+    result.addTree(ws, ws)
+    members = sourceTreeMembership(ws)
+    for m in members:
+      result.addTree(m.path, ws)
+  for root in [project, ws]:
+    if root.len == 0: continue
+    try:
+      let doc = readDevelopOverridesFile(root)
+      if doc.isSome:
+        for e in listOverrides(doc.get()):
+          result.addTree(e.local_path, root)
+    except CatchableError:
+      discard
+  if hasLock:
+    try:
+      # The membership resolved above, and the frame from the memo, handed
+      # to the placement rule, which would otherwise derive both again.
+      var loc =
+        if ws.len > 0: lockedDepLocator(project, ws, members, layout.lockFrame)
+        else: lockedDepLocator(project, layout.lockFrame)
+      var deps = parseLockedDependencies(readFile(extendedPath(lockPath))).deps
+      localizeLockedDeps(deps, loc)
+      # The frame the placed paths are in (``committedLockPathBase``), as the
+      # locator resolved it: resolving it again costs two more git runs.
+      for d in deps:
+        if not isSelfLockedDep(d):
+          result.addTree(d.path, loc.pathBase)
+    except CatchableError:
+      discard
+
+buildSourceTreesOf = buildSourceTrees
 
 proc enclosingReproShell*(startPath: string): string =
   ## The nearest ancestor of ``startPath`` (inclusive) holding a ``.repro/``
