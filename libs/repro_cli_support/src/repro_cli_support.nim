@@ -85394,14 +85394,19 @@ proc readSetFromMonitorDepFile*(path: string): CapturedReadSet =
       if not seen.containsOrIncl(record.path):
         result.paths.add(record.path)
 
-proc evaluateIssuancePreconditions*(workspaceRoot, currentRepo: string;
-    toolProvisioning: ToolProvisioningMode): IssuancePreconditions =
+proc evaluateIssuancePreconditions*(workspaceRoot, currentRepo: string):
+    IssuancePreconditions =
   ## REUSE the RA-21 gate for the SIBLINGS: a certificate is issuable only
   ## when the pre-push gate would pass for them (clean + published + at the
   ## locked revisions). We run the gate logic (NOT the publish side-effect)
   ## and translate its first failure into an issuance-precondition reason +
   ## RA-28-style remedy. The current repository is exempt from cleanliness
   ## and publication: its working tree is what is certified, by content.
+  ##
+  ## The gate resolves git as the managed `pre-push` hook does, from
+  ## ``PATH``: its dispatcher passes no ``--tool-provisioning``. A run's
+  ## ``--tool-provisioning`` selects the tools its tests use, not the git
+  ## that observes the workspace, so it is not an input here.
   let savedLocks = suspendOptionalGitLocks()
   defer: restoreOptionalGitLocks(savedLocks)
   result.platform = currentPlatformTag()
@@ -85418,8 +85423,7 @@ proc evaluateIssuancePreconditions*(workspaceRoot, currentRepo: string;
     # TC-8d): the current repo's own unpublished HEAD and its working-tree
     # modifications are what is being certified, not reasons to refuse.
     issuingForCurrentHead: true,
-    toolProvisioning:
-      if toolProvisioning == tpmUnspecified: tpmPathOnly else: toolProvisioning)
+    toolProvisioning: tpmPathOnly)
   if not isInitializedWorkspace(parsed.workspaceRoot):
     result.kind = ipNoWorkspace
     result.offender = parsed.workspaceRoot
@@ -87397,11 +87401,19 @@ proc collectorSink(collector: ActionOutcomeCollector): BuildActionOutcomeSink =
 # them.
 # ---------------------------------------------------------------------------
 
+const lockUpdateNodeToolProvisioning = tpmPathOnly
+  ## How the lock-update node's writers resolve git: from ``PATH``, as the
+  ## managed `pre-commit` hook's do (its dispatcher passes no
+  ## ``--tool-provisioning``, so ``parsePostCommitArgs`` keeps path mode). The
+  ## node runs the hook's writers, so it resolves their git the hook's way. The
+  ## run's ``--tool-provisioning`` selects the tools the TESTS use; passing it
+  ## here would make a ``nix``-provisioned run fail the node and withhold its
+  ## certificate, because git resolves only in path mode.
+
 type
   LockUpdateNodeState = ref object
     ## Shared between a certifying run and its lock-update node's executor.
     workspaceRoot, repoRoot: string
-    mode: ToolProvisioningMode
     allowance: PinRegressionAllowance
     allowedVia: string
     ran: bool
@@ -87468,7 +87480,8 @@ proc runLockUpdateNode(state: LockUpdateNodeState) =
         standDown.report)
       return
     state.outcome = applyCommitTimeLockWriters(ctwsLockUpdateNode,
-      state.workspaceRoot, state.repoRoot, state.mode, isoTimestampNow(),
+      state.workspaceRoot, state.repoRoot, lockUpdateNodeToolProvisioning,
+      isoTimestampNow(),
       state.allowance, state.allowedVia,
       certificatePolicy = state.certificatePolicy)
   except CatchableError as err:
@@ -87653,7 +87666,7 @@ proc runCertifyingTestBuild(opts: ReproTestShardOpts; buildArgs: seq[string];
     if name notin allowance.names:
       allowance.names.add(name)
   let lockUpdate = LockUpdateNodeState(workspaceRoot: workspaceRoot,
-    repoRoot: currentRepo, mode: mode, allowance: allowance,
+    repoRoot: currentRepo, allowance: allowance,
     allowedVia:
       if opts.allowPinRegression.len > 0: "--allow-pin-regression"
       else: PinRegressionAllowEnv)
@@ -87673,7 +87686,7 @@ proc runCertifyingTestBuild(opts: ReproTestShardOpts; buildArgs: seq[string];
   var deferPreconditions = false
   if workspaceRoot.len > 0 and isInitializedWorkspace(workspaceRoot):
     let wouldWrite = planCommitTimeLockWriters(workspaceRoot, currentRepo,
-      mode, allowance, lockUpdate.certificatePolicy)
+      lockUpdateNodeToolProvisioning, allowance, lockUpdate.certificatePolicy)
     deferPreconditions = wouldWrite.wouldWrite.len > 0 and
       wouldWrite.refused.len == 0
   var pre: IssuancePreconditions
@@ -87684,7 +87697,7 @@ proc runCertifyingTestBuild(opts: ReproTestShardOpts; buildArgs: seq[string];
         remedy: "run inside an initialized reprobuild workspace, or pass " &
           "--workspace-root=PATH")
     else:
-      pre = evaluateIssuancePreconditions(workspaceRoot, currentRepo, mode)
+      pre = evaluateIssuancePreconditions(workspaceRoot, currentRepo)
     preTaken = true
   lockUpdate.afterApply = proc(wrote: bool) =
     # The before-run state is the state AFTER the node (TC-8d "one tested
@@ -88007,7 +88020,7 @@ proc runReproTestCommand*(args: openArray[string];
           opts.certificateOut & ": " & tracked)
         return 1
     let pre = evaluateIssuancePreconditions(
-      opts.certWorkspaceRoot, opts.certCurrentRepo, opts.toolProvisioning)
+      opts.certWorkspaceRoot, opts.certCurrentRepo)
     # Requested targets = the selectors the fixture will run (the covered set
     # a re-certify must already cover for the no-op to hold).
     let requestedTargets = fixtureSelectors(opts)
@@ -88638,7 +88651,7 @@ proc runCiPlanCommand(args: openArray[string]): int =
   # commit (record-store lock subtree); otherwise the committed repro.lock is
   # read from the content itself.
   let pre = evaluateIssuancePreconditions(
-    parsed.workspaceRoot, parsed.currentRepo, parsed.toolProvisioning)
+    parsed.workspaceRoot, parsed.currentRepo)
   let lockSource =
     if pre.lockRecordsDir.len > 0: recordStoreLockSource(pre.lockRecordsDir)
     else: committedLockSource()

@@ -1367,8 +1367,7 @@ suite "issuance accepts a cycle peer only at its own pin":
       doAssert bTip in lock and cTip in lock
 
       # Control: lib-b at the commit lib-a's lock records for lib-b is accepted.
-      let accepted = evaluateIssuancePreconditions(fx.sf.workspaceRoot, fx.app,
-        tpmPathOnly)
+      let accepted = evaluateIssuancePreconditions(fx.sf.workspaceRoot, fx.app)
       checkpoint("at its own pin: " & $accepted.kind & " " & accepted.offender &
         ": " & accepted.remedy)
       check accepted.kind == ipOk
@@ -1380,8 +1379,7 @@ suite "issuance accepts a cycle peer only at its own pin":
       discard gitOut(libB.path, "checkout", "-q", "-B", "main", cTip)
       check gitOut(libB.path, "status", "--porcelain").len == 0
       check gitOut(libB.path, "rev-parse", "HEAD") == cTip
-      let refused = evaluateIssuancePreconditions(fx.sf.workspaceRoot, fx.app,
-        tpmPathOnly)
+      let refused = evaluateIssuancePreconditions(fx.sf.workspaceRoot, fx.app)
       checkpoint("at another entry's pin: " & $refused.kind & " " &
         refused.offender & ": " & refused.remedy)
       check refused.kind == ipUnpublished
@@ -1441,8 +1439,7 @@ suite "issuance accepts a cycle peer only at its own pin":
       # exemption accepts it, so what refuses is the stale repro.lock pin, not
       # lib-b's publication.
       check gitOut(libB.path, "rev-parse", "HEAD") == zTip
-      let accepted = evaluateIssuancePreconditions(fx.sf.workspaceRoot, fx.app,
-        tpmPathOnly)
+      let accepted = evaluateIssuancePreconditions(fx.sf.workspaceRoot, fx.app)
       checkpoint("at its own flake pin: " & $accepted.kind & " " &
         accepted.offender & ": " & accepted.remedy)
       check accepted.kind != ipUnpublished
@@ -1453,8 +1450,7 @@ suite "issuance accepts a cycle peer only at its own pin":
       discard gitOut(libB.path, "fetch", "-q", libC.bare, "main")
       discard gitOut(libB.path, "checkout", "-q", "-B", "main", cTip)
       check gitOut(libB.path, "status", "--porcelain").len == 0
-      let refused = evaluateIssuancePreconditions(fx.sf.workspaceRoot, fx.app,
-        tpmPathOnly)
+      let refused = evaluateIssuancePreconditions(fx.sf.workspaceRoot, fx.app)
       checkpoint("at another input's pin: " & $refused.kind & " " &
         refused.offender & ": " & refused.remedy)
       check refused.kind == ipUnpublished
