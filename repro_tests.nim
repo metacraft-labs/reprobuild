@@ -2192,6 +2192,17 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "",
     singleReason: "self-spawn marker getAppFilename"),
   TestSpec(
+    source: "libs/repro_bundle/tests/t_repro_bundle_halves.nim",
+    binary: "build/test-bin/t_repro_bundle_halves",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "",
+    singleReason: "no other source shares its compile options"),
+  TestSpec(
     source: "libs/repro_cas_store/tests/t_cas_ingest_link.nim",
     binary: "build/test-bin/t_cas_ingest_link",
     defines: @[],
