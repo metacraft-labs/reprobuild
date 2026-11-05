@@ -241,8 +241,8 @@ stdenv.mkDerivation (finalAttrs: {
   src = fetchFromGitHub {
     owner = "metacraft-labs";
     repo = "reprobuild";
-    rev = "9a08d05e6495fc36e5a31ce4b03795284b5ca366";
-    hash = "sha256-ap/t2Snfi4r861DM3m6PHs/s8RImTrfrOOzpy8CUE8g=";
+    rev = "a650b2034947eba87c809b1a7c9169f489aebd24";
+    hash = "sha256-zHTZG97beP+AU5VSDYEroPZWBRackTvHMZHVCMnO0p4=";
   };
 
   strictDeps = true;
