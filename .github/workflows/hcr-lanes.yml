@@ -155,9 +155,10 @@ jobs:
           ref: dev
           path: ${{ github.workspace }}/../codetracer-visual-replay
           gh-token: ${{ steps.ci_token.outputs.token }}
-      # The recorder bundle is built from FOUR siblings that must agree with
+      # The recorder bundle is built from FIVE siblings that must agree with
       # each other: the recorder, the trace-format reader it compiles against,
-      # and the backend and visual-replay its recipe reads. Their `dev` tips
+      # the backend and visual-replay its recipe reads, and the Rust
+      # trace-format crates the backend builds against. Their `dev` tips
       # do not: recorder `dev` predates the 2026-10 trace-format revision that
       # trace-format-nim `dev` carries, and a recorder new enough for this
       # lane's replay gate (the in-process HCR arm and the emulator's patch
@@ -166,9 +167,9 @@ jobs:
       # fails the gate ("direct patch refused: invalid-argument" with
       # 3936bae1, job on run 42075906445).
       #
-      # So the four are provisioned the way the Test job provisions them: at
+      # So the five are provisioned the way the Test job provisions them: at
       # the revisions CodeTracer's committed repro.lock names, which is the
-      # set CodeTracer itself builds and tests together. Only these four
+      # set CodeTracer itself builds and tests together. Only these five
       # entries are taken from that lock -- every other sibling stays where
       # .github/sibling-repos puts it, so this lane's own gates still compile
       # against the revisions the rest of CI uses. Done here, straight after
@@ -192,15 +193,15 @@ jobs:
           test -f "$ct_lock" || { echo "no CodeTracer lock at $ct_lock" >&2; exit 1; }
           work="$(mktemp -d "$RUNNER_TEMP/bundle-siblings.XXXXXX")"
           trap 'rm -rf "${work:?}"' EXIT
-          # The four entries, as brace groups, in the lock's own syntax.
+          # The five entries, as brace groups, in the lock's own syntax.
           { grep '^schema = ' "$ct_lock"
             printf '[lock]\ndeps = ['
             grep -o '{[^{}]*}' "$ct_lock" | grep 'coord_kind' \
-              | grep -E 'name = "(codetracer-native-recorder|codetracer-trace-format-nim|codetracer-native-backend|codetracer-visual-replay)"' \
+              | grep -E 'name = "(codetracer-native-recorder|codetracer-trace-format-nim|codetracer-trace-format|codetracer-native-backend|codetracer-visual-replay)"' \
               | paste -sd, -
             printf ']\n'; } > "$work/bundle.lock"
           count="$(grep -o '{[^{}]*}' "$work/bundle.lock" | wc -l)"
-          [ "$count" -eq 4 ] || { echo "CodeTracer's lock names $count of the 4 bundle siblings" >&2; exit 1; }
+          [ "$count" -eq 5 ] || { echo "CodeTracer's lock names $count of the 5 bundle siblings" >&2; exit 1; }
           dev-exec python3 scripts/ci_lock_source_credentials.py gitconfig \
             --lock "$work/bundle.lock" --owner metacraft-labs \
             --out "$work/gitconfig" --emit-actions-mask

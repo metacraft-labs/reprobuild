@@ -45,11 +45,13 @@ codetracer-trace-format=dev
 # native-recorder follows `dev` here, and its `dev` does NOT compile against
 # codetracer-trace-format-nim `dev` (trace-format b8db98c6 removed the
 # `paths` parameter recorder `dev` still passes). That does not reach a
-# build: the two jobs that build the recorder put it, and the three siblings
-# its bundle is built from, at the revisions CodeTracer's committed repro.lock
-# names -- the Test job for all of CodeTracer's siblings, the HCR lane for
-# exactly those four (hcr-lanes.yml, "Put the recorder bundle's siblings at
-# CodeTracer's locked revisions"). A pin here was tried and is not enough: a
+# build: the two jobs that build the recorder put it, and the four siblings
+# its bundle is built from (trace-format-nim, the Rust trace-format crates,
+# native-backend, visual-replay), at the revisions CodeTracer's committed
+# repro.lock names -- the Test job for all of CodeTracer's siblings, the HCR
+# lane for exactly those five (hcr-lanes.yml, "Put the recorder bundle's
+# siblings at CodeTracer's locked revisions"). A pin here was tried and is
+# not enough: a
 # recorder old enough to compile against trace-format-nim `dev` (3936bae1)
 # fails the HCR replay gate, and one new enough for the gate imports
 # trace-format modules that exist only on its `agents` line.
