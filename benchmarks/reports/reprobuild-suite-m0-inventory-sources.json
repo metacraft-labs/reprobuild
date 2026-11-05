@@ -36099,7 +36099,7 @@
       "requiresReproBinary": false,
       "source": "tests/integration/t_auto_runquota_daemon_ends_with_its_invocation.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 10,
+      "staticCaseCount": 12,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
