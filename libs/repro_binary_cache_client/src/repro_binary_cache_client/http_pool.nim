@@ -91,8 +91,12 @@ type
       ## pool is full, ``streamGet`` opens a transient (non-pooled)
       ## connection instead of blocking.
     receiveTimeoutMs*: int
-      ## Per-read deadline; surfaced as ``HttpError`` if the upstream
-      ## stalls. 30s default — large payloads on slow links still fit.
+      ## Deadline for the peer to answer once connected; surfaced as
+      ## ``HttpError`` if it stalls. The status line and headers together
+      ## must arrive within it, as must each chunk-size line; each body
+      ## read, and each socket read or write of the TLS handshake, waits
+      ## at most this long. 30s default — large payloads on slow links
+      ## still fit, because the body as a whole has no deadline.
     connectTimeoutMs: int
       ## Deadline for opening a TCP connection, covering every address
       ## the host name resolves to. It applies to every user of the pool,
@@ -296,6 +300,34 @@ proc connectWithDeadline(sock: Socket; domain: Domain; host: string;
     raise newException(OSError, "no address found for " & host)
   raiseOSError(lastError)
 
+when defined(windows):
+  const
+    WinSoSndTimeo = cint(0x1005)
+    WinSoRcvTimeo = cint(0x1006)
+
+proc setIoTimeouts(fd: SocketHandle; timeoutMs: int) =
+  ## Bounds every blocking read and write on ``fd`` at ``timeoutMs``
+  ## (``SO_RCVTIMEO`` / ``SO_SNDTIMEO``). The pool's own reads wait for
+  ## data before reading, under their own deadlines; this bound covers
+  ## the blocking calls it does not control, which are OpenSSL's reads
+  ## and writes during the TLS handshake and inside a TLS record, and
+  ## ``send`` to a peer that has stopped reading. Raises ``OSError``.
+  ## https://pubs.opengroup.org/onlinepubs/9799919799/functions/setsockopt.html
+  when defined(windows):
+    # Winsock takes the timeout as a DWORD of milliseconds.
+    var ms = int32(min(timeoutMs, int(high(int32))))
+    for opt in [WinSoRcvTimeo, WinSoSndTimeo]:
+      if winlean.setsockopt(fd, SOL_SOCKET, opt, addr ms,
+                            SockLen(sizeof(ms))) != 0:
+        raiseOSError(osLastError())
+  else:
+    var tv = Timeval(tv_sec: posix.Time(timeoutMs div 1000),
+                     tv_usec: Suseconds((timeoutMs mod 1000) * 1000))
+    for opt in [SO_RCVTIMEO, SO_SNDTIMEO]:
+      if posix.setsockopt(fd, SOL_SOCKET, opt, addr tv,
+                          SockLen(sizeof(tv))) != 0:
+        raiseOSError(osLastError())
+
 proc leaseConnection(pool: HttpPool; host: string; port: Port;
                      secure: bool): PooledConnection =
   ## Returns a cached connection for the (host, port) tuple if one is
@@ -318,12 +350,29 @@ proc leaseConnection(pool: HttpPool; host: string; port: Port;
     try: sock.close() except CatchableError: discard
     raise newException(HttpError,
       "connect to " & host & ":" & $int(port) & " failed: " & e.msg)
+  if pool.receiveTimeoutMs > 0:
+    try:
+      setIoTimeouts(sock.getFd(), pool.receiveTimeoutMs)
+    except OSError as e:
+      try: sock.close() except CatchableError: discard
+      raise newException(HttpError,
+        "connect to " & host & ":" & $int(port) & " failed: " & e.msg)
   if secure:
     when defined(ssl):
+      let handshakeStart = getMonoTime()
       try:
         tlsContext().wrapConnectedSocket(sock, handshakeAsClient, host)
       except CatchableError as e:
         try: sock.close() except CatchableError: discard
+        # A blocking handshake read or write that hits the socket's
+        # timeout surfaces from OpenSSL as a generic error, so the elapsed
+        # time is what tells a silent peer from a refused handshake.
+        if pool.receiveTimeoutMs > 0 and
+            (getMonoTime() - handshakeStart).inMilliseconds >=
+              pool.receiveTimeoutMs:
+          raise newException(HttpError,
+            "TLS handshake to " & host & ":" & $int(port) &
+            " timed out after " & $pool.receiveTimeoutMs & "ms")
         raise newException(HttpError,
           "TLS handshake to " & host & ":" & $int(port) & " failed: " & e.msg)
     else:
@@ -357,29 +406,43 @@ proc releaseConnection(pool: HttpPool; conn: PooledConnection;
 # Line-oriented header read (small buffer; not on the payload hot path)
 # ---------------------------------------------------------------------------
 
-proc readLineWithTimeout(sock: Socket; timeoutMs: int): string =
-  ## Reads ``\r\n``-terminated header line. We hand-roll the byte-at-
-  ## a-time loop instead of using ``net.readLine`` because the std
-  ## implementation peeks via ``peekChar`` after each ``\r`` which has
-  ## surprised us with phantom EOF events on Windows winsock under
-  ## back-to-back keep-alive responses. Our loop reads one byte at a
-  ## time and tolerates ``\n``-only line terminators (some HTTP/1.0
-  ## servers emit them after a ``Connection: close``).
+proc readLineBefore(sock: Socket; deadline: MonoTime; timeoutMs: int;
+                    what: string): string =
+  ## Reads a ``\r\n``-terminated line, raising ``HttpError`` once
+  ## ``deadline`` (on the monotonic clock) has passed; ``timeoutMs`` and
+  ## ``what`` only word that error. We hand-roll the byte-at-a-time loop
+  ## instead of using ``net.readLine`` because the std implementation
+  ## peeks via ``peekChar`` after each ``\r`` which has surprised us with
+  ## phantom EOF events on Windows winsock under back-to-back keep-alive
+  ## responses. Our loop reads one byte at a time and tolerates
+  ## ``\n``-only line terminators (some HTTP/1.0 servers emit them after
+  ## a ``Connection: close``).
+  ##
+  ## Each byte is read with the timed ``recv``, which waits for data for
+  ## at most the time left before ``deadline``: the untimed one blocks
+  ## until the peer sends or closes, so a peer that stays silent would
+  ## never reach the deadline check.
   result = ""
   var c: char
-  let deadline = epochTime() + float(timeoutMs) / 1000.0
-  while epochTime() < deadline:
+  while true:
+    let remainingMs = (deadline - getMonoTime()).inMilliseconds
+    if remainingMs <= 0:
+      raise newException(HttpError, what & " timed out after " &
+        $timeoutMs & "ms")
     var n = 0
     try:
-      n = sock.recv(addr c, 1)
+      n = sock.recv(addr c, 1, timeout = int(remainingMs))
+    except TimeoutError:
+      raise newException(HttpError, what & " timed out after " &
+        $timeoutMs & "ms")
     except OSError as e:
-      raise newException(HttpError, "header read failed: " & e.msg)
+      raise newException(HttpError, what & " failed: " & e.msg)
     if n == 0:
       # Peer closed; return whatever we have. Header parsing decides
       # whether it's a fatal premature EOF.
       return result
     if n < 0:
-      raise newException(HttpError, "recv returned " & $n)
+      raise newException(HttpError, what & " failed: recv returned " & $n)
     if c == '\n':
       # Strip trailing \r if any.
       if result.len > 0 and result[^1] == '\r':
@@ -388,12 +451,21 @@ proc readLineWithTimeout(sock: Socket; timeoutMs: int): string =
     result.add(c)
     if result.len > 65536:
       raise newException(HttpError, "header line exceeds 64 KiB")
-  raise newException(HttpError, "header read timed out after " &
-    $timeoutMs & "ms")
+
+proc readLineWithTimeout(sock: Socket; timeoutMs: int): string =
+  ## A line of chunked framing (a chunk-size line, a trailer, the CRLF
+  ## after a chunk), which must arrive within ``timeoutMs``.
+  readLineBefore(sock, getMonoTime() + initDuration(milliseconds = timeoutMs),
+                 timeoutMs, "chunk framing read")
 
 proc readHeaders(sock: Socket; timeoutMs: int):
     tuple[statusCode: int; headers: seq[(string, string)]] =
-  let statusLine = readLineWithTimeout(sock, timeoutMs)
+  ## Reads the status line and headers, which must all arrive within
+  ## ``timeoutMs``: one deadline for the block, so a peer that sends a
+  ## header line now and then cannot hold the caller longer than a peer
+  ## that sends nothing.
+  let deadline = getMonoTime() + initDuration(milliseconds = timeoutMs)
+  let statusLine = readLineBefore(sock, deadline, timeoutMs, "header read")
   if not statusLine.startsWith("HTTP/"):
     raise newException(HttpError,
       "malformed status line: " & statusLine.escape())
@@ -405,7 +477,7 @@ proc readHeaders(sock: Socket; timeoutMs: int):
   result.statusCode = code
   result.headers = @[]
   while true:
-    let line = readLineWithTimeout(sock, timeoutMs)
+    let line = readLineBefore(sock, deadline, timeoutMs, "header read")
     if line.len == 0:
       break
     let colon = line.find(':')
