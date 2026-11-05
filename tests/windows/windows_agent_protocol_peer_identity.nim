@@ -127,6 +127,21 @@ proc widened(alias: string): string =
   ## (https://learn.microsoft.com/en-us/windows/win32/secauthz/mandatory-integrity-control).
   ownerOnlySddl(ownSid) & "(A;;GA;;;" & alias & ")S:(ML;;NW;;;S-1-16-0)"
 
+proc refuseSecondUser(token: Handle) =
+  ## Case (c) once the account exists and is logged on.
+  let strict = server("user-dacl")
+  check deniedOpen(token, anonymous = false, strict.providerPath)
+  check deniedOpen(token, anonymous = false, strict.consentPath)
+  check ownClientAnswered(strict.providerPath)
+  strict.stop()
+  let open = server("user-sid", sddl = widened(Everyone))
+  let p = openAs(token, anonymous = false, open.providerPath)
+  check not answered(newHostClient(p))
+  let q = openAs(token, anonymous = false, open.consentPath)
+  check not answered(newHostClient(q))
+  check ownClientAnswered(open.providerPath)
+  open.stop()
+
 # --- Cases -----------------------------------------------------------
 
 suite "Windows transport — only the host's user is a peer":
@@ -164,39 +179,6 @@ suite "Windows transport — only the host's user is a peer":
     check not answered(waitFor connectHost(s.consentPath, ciAnonymous))
     check ownClientAnswered(s.providerPath)
     s.stop()
-
-  test "(c) a different local user is refused by the DACL and by the identity check":
-    let user = "rap" & hex(4)
-    let password = "Rp!" & hex(12) & "a9Z"
-    var info = UserInfo1(name: newWideCString(user),
-      password: newWideCString(password), priv: USER_PRIV_USER,
-      flags: UF_SCRIPT or UF_DONT_EXPIRE_PASSWD)
-    var parmErr: int32
-    let added = NetUserAdd(nil, 1, addr info, addr parmErr)
-    checkpoint "NetUserAdd(" & user & ") = " & $added & " (5 = access denied: " &
-      "the job identity is not an Administrator; the guests need that right, " &
-      "the Windows transport's validation case (c))"
-    require added == 0
-    defer: discard NetUserDel(nil, newWideCString(user))
-    var token: Handle
-    let logged = LogonUserW(newWideCString(user), newWideCString("."),
-      newWideCString(password), LOGON32_LOGON_NETWORK,
-      LOGON32_PROVIDER_DEFAULT, addr token)
-    checkpoint "LogonUserW: " & (if logged == 0: osErrorMsg(osLastError()) else: "ok")
-    require logged != 0
-    defer: discard closeHandle(token)
-    let strict = server("user-dacl")
-    check deniedOpen(token, anonymous = false, strict.providerPath)
-    check deniedOpen(token, anonymous = false, strict.consentPath)
-    check ownClientAnswered(strict.providerPath)
-    strict.stop()
-    let open = server("user-sid", sddl = widened(Everyone))
-    let p = openAs(token, anonymous = false, open.providerPath)
-    check not answered(newHostClient(p))
-    let q = openAs(token, anonymous = false, open.consentPath)
-    check not answered(newHostClient(q))
-    check ownClientAnswered(open.providerPath)
-    open.stop()
 
   test "(d) a squatter on either pipe name stops the host from starting":
     let nonce = hex(16).toLowerAscii
@@ -248,5 +230,33 @@ suite "Windows transport — only the host's user is a peer":
       discard closeHandle(viaSmb)
     check ownClientAnswered(local)
     s.stop()
+
+  # Last, so a job identity that cannot create accounts fails this case
+  # without hiding the others' verdicts.
+  test "(c) a different local user is refused by the DACL and by the identity check":
+    let user = "rap" & hex(4)
+    let password = "Rp!" & hex(12) & "a9Z"
+    var info = UserInfo1(name: newWideCString(user),
+      password: newWideCString(password), priv: USER_PRIV_USER,
+      flags: UF_SCRIPT or UF_DONT_EXPIRE_PASSWD)
+    var parmErr: int32
+    let added = NetUserAdd(nil, 1, addr info, addr parmErr)
+    checkpoint "NetUserAdd(" & user & ") = " & $added & " (5 = access denied: " &
+      "the job identity is not an Administrator; this case needs one)"
+    check added == 0
+    if added == 0:
+      var token: Handle
+      let logged = LogonUserW(newWideCString(user), newWideCString("."),
+        newWideCString(password), LOGON32_LOGON_NETWORK,
+        LOGON32_PROVIDER_DEFAULT, addr token)
+      checkpoint "LogonUserW: " &
+        (if logged == 0: osErrorMsg(osLastError()) else: "ok")
+      check logged != 0
+      if logged != 0:
+        try:
+          refuseSecondUser(token)
+        finally:
+          discard closeHandle(token)
+      check NetUserDel(nil, newWideCString(user)) == 0
 
 removeDir(root)
