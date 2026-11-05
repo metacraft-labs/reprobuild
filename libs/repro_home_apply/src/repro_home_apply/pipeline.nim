@@ -133,6 +133,11 @@ type
     ## A non-mutating preview of the full apply.
     items*: seq[PlanItem]
     driftCount*: int                   ## items whose action is a drift
+    unrealizable*: seq[string]         ## package ids of an applied concern
+                                       ## with no realization on this host:
+                                       ## the apply fails on each, so the
+                                       ## plan fails too. Not drift: there
+                                       ## is no existing object to accept.
     generationIdHex*: string           ## the generation id this plan
                                        ## would produce
     isNoOp*: bool                      ## true when the plan matches the
@@ -2514,7 +2519,9 @@ proc runApplyPlan*(rawOpts: ApplyOptions): PlanPreview =
   # resolves the real apply's packages, so the plan and the apply cannot
   # select differently.
   # GM7: a reference of a concern the host does not apply is shown, never
-  # realized, and never a failure -- a missing realization included.
+  # realized, and never a failure -- a missing realization included. One of
+  # an applied concern is what the apply fails on: recorded as unrealizable,
+  # never as drift, so `--allow-drift` cannot accept it.
   var packageConcernOf = initTable[string, HomeConcern]()
   for pp in packagePreviews:
     let concern = packageConcern(pp)
@@ -2527,7 +2534,7 @@ proc runApplyPlan*(rawOpts: ApplyOptions): PlanPreview =
     of ppkMissing:
       item.action = piaMissing
       if not item.notApplied:
-        inc result.driftCount
+        result.unrealizable.add(pp.packageId)
     result.items.add(item)
 
   # ---- Application bundles (READ ONLY) ----------------------------------
@@ -2816,7 +2823,8 @@ proc runApplyPlan*(rawOpts: ApplyOptions): PlanPreview =
 
   # ---- No-op classification ---------------------------------------------
   result.isNoOp = activeGenIdHex.len > 0 and
-    result.generationIdHex == activeGenIdHex and result.driftCount == 0
+    result.generationIdHex == activeGenIdHex and result.driftCount == 0 and
+    result.unrealizable.len == 0
 
 proc renderPlanPreview*(preview: PlanPreview): string =
   ## Stable, line-oriented rendering of a `--plan` preview. The gate
@@ -2828,7 +2836,11 @@ proc renderPlanPreview*(preview: PlanPreview): string =
   ## host that applies every concern and released nothing, so the rendering
   ## of an undeclared profile is unchanged.
   result = "repro home apply --plan: " & $preview.items.len &
-    " operation(s) previewed, " & $preview.driftCount & " drift(s)\n"
+    " operation(s) previewed, " & $preview.driftCount & " drift(s)"
+  if preview.unrealizable.len > 0:
+    result.add(", " & $preview.unrealizable.len &
+      " unrealizable package(s)")
+  result.add("\n")
   result.add("  target generation: " & preview.generationIdHex & "\n")
   if preview.applied.declared:
     result.add("  concerns applied: " &

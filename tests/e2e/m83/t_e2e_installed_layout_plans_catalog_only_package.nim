@@ -195,7 +195,6 @@ else:
       defer:
         try: removeDir(s.root) except OSError: discard
       checkpoint(s.res.output)
-      check s.res.exitCode == 0
       # Vacuity: the profile compiled and the planner resolved a stdlib
       # package in the same run.
       check packageLine(s.res.output, "just").startsWith("realize  just  ")
@@ -206,6 +205,8 @@ else:
       # never an unknown package.
       check "unknown-package" notin line
       check line.startsWith("realize  ") or "missing-realization" in line
+      # A missing realization fails the plan even under `--allow-drift`.
+      check s.res.exitCode == (if line.startsWith("realize  "): 0 else: 1)
       # The projection was built, and its recorded inputs name the shipped
       # catalog as the catalog root -- not this checkout's sibling.
       let projection = s.stateDir / "catalog-projection"
@@ -228,12 +229,15 @@ else:
       defer:
         try: removeDir(s.root) except OSError: discard
       checkpoint(s.res.output)
-      check s.res.exitCode == 0
+      # The unknown package fails the plan even under `--allow-drift`.
+      check s.res.exitCode == 1
       check packageLine(s.res.output, "just").startsWith("realize  just  ")
       let line = packageLine(s.res.output, CatalogOnlyPackage)
       checkpoint(line)
       check line.startsWith("missing  " & CatalogOnlyPackage &
         "  (unknown-package: ")
+      check ("so the apply would fail: " & CatalogOnlyPackage) in
+        s.res.output
       check not dirExists(s.stateDir / "catalog-projection")
 
     try: removeDir(scratch) except OSError: discard

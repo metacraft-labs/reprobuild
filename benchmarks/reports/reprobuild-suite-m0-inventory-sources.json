@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 35,
-    "nimTestBinaries": 2718,
+    "nimTestBinaries": 2719,
     "pureUnitConsolidationGroups": 79,
     "pureUnitTests": 749,
     "staticallyDetectedRuntimeCompilerFlowTests": 137,
-    "testEntries": 2759
+    "testEntries": 2760
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1567,7 +1567,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 21,
-      "integration": 1494,
+      "integration": 1495,
       "platform/destructive": 174,
       "pure unit": 749,
       "unclassified": 321
@@ -1784,9 +1784,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2718,
+    "nimTestBinaryCount": 2719,
     "pythonTestFileCount": 41,
-    "testEntryCount": 2759
+    "testEntryCount": 2760
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -33008,6 +33008,24 @@
       "source": "tests/e2e/hcr-watch/t_repro_watch_refuses_an_over_long_hcr_agent_socket.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_e2e_home_apply_plan_unrealizable_package_is_not_drift",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_core",
+        "repro_home_generations"
+      ],
+      "owner": "tests/e2e",
+      "requiresReproBinary": true,
+      "source": "tests/e2e/home-apply/t_e2e_home_apply_plan_unrealizable_package_is_not_drift.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 2,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
