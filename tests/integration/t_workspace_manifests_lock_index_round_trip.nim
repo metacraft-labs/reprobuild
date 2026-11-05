@@ -1,6 +1,6 @@
 ## Legacy `locks/<project>/index.toml` parser round-trip (back-compat).
 ##
-## RA-1 (pilot `418f109`) DROPPED the shared lock index: the writer no
+## RA-1 DROPPED the shared lock index: the writer no
 ## longer emits `index.toml` and the "latest lock" lookup uses Git
 ## history over the per-repo lock subtree instead (see
 ## `t_workspace_lock_latest_resolves_via_git_history_per_repo`). The

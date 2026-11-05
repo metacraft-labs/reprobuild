@@ -1,8 +1,7 @@
 ## RA-3 — ``repro check --mode=pre-push`` publication gate, no
 ## branch-name enforcement.
 ##
-## repo-workspaces removed the gate's branch-mismatch stage (commits
-## ``b5a823a`` / ``ff76825``): heterogeneous per-class branch policies
+## The gate has no branch-mismatch stage: heterogeneous per-class branch policies
 ## are first-class (product repos on ``dev``, spec repos on ``latest``,
 ## infra on ``live``), and the lock pins commit SHAs so the published
 ## state is reproducible regardless of which branch each repo is on.

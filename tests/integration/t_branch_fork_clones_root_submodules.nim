@@ -9,8 +9,8 @@
 ## `cloneOrgRootRepo` cloned it plainly, so every submodule path arrived as an
 ## empty directory: present enough that nothing reported it missing, empty
 ## enough that whatever needed it failed later and somewhere else. The visible
-## symptom on Windows was `reprobuild/env.ps1` aborting on a missing
-## `../repo-workspaces/env.ps1` — a brand-new workspace that could not build.
+## symptom was a sibling's bootstrap script aborting on a file the submodule
+## should have supplied — a brand-new workspace that could not build.
 ##
 ## Asserted: after `repro branch <path>`, the submodule directory in the NEW
 ## workspace carries the submodule's content, not just an empty placeholder.

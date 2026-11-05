@@ -1,7 +1,6 @@
 ## RA-5c — ``repro workspace sync`` fetches repos in parallel.
 ##
-## The PRIMARY deliverable of the Workspace/RepoWorkspaces alignment
-## campaign: the sync/pull path must fan out the per-repo network fetch
+## The PRIMARY deliverable of the Workspace Alignment campaign: the sync/pull path must fan out the per-repo network fetch
 ## into the build engine + RunQuota the way Google ``repo`` does, instead
 ## of the old repo-by-repo serial loop.
 ##

@@ -18,10 +18,8 @@ $ErrorActionPreference = "Stop"
 # `scripts/build_apps.sh`'s staging step able to put `clingo.dll` next to
 # `repro.exe` in a release build.
 #
-# This lives in reprobuild rather than the shared repo-workspaces framework
-# because clingo is a reprobuild-specific dependency — repo-workspaces owns the
-# generic toolchain (nim, gcc, just, gh, python, git-repo, gpg). It is sourced
-# by this repo's `env.ps1` after the framework bootstrap.
+# It is sourced by this repo's `env.ps1` after the cold-start toolchain
+# bootstrap (windows/bootstrap-toolchain.ps1).
 #
 # Why the conda-forge package: potassco/clingo's GitHub releases ship source
 # tarballs only — no prebuilt Windows binaries — and the PyPI wheel statically

@@ -5886,8 +5886,7 @@ proc bumpWindowsNimStack*(nimExePath: string) =
   ## STATUS_STACK_OVERFLOW (-1073741571 / 0xC00000FD) during interface
   ## extraction. `editbin /STACK:33554432` rewrites the PE header in
   ## place to a 32 MB stack reserve, matching what
-  ## ``repo-workspaces/windows/ensure-nim.ps1`` does at env.ps1
-  ## install time. Idempotent (running it twice produces the same
+  ## ``windows/ensure-nim.ps1`` does at env.ps1 install time. Idempotent (running it twice produces the same
   ## bytes) and silent on failure: if editbin isn't available the
   ## extract step still attempts the compile with the smaller stack
   ## and surfaces the original error to the user.

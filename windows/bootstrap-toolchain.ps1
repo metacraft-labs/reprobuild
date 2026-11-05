@@ -27,20 +27,15 @@
     devShell gives Linux/macOS. A step that "finds" a tool on the host instead
     is not a bootstrap, it is a coin flip.
 
-    Provenance: `toolchain-utils.ps1`, `ensure-nim.ps1` and `ensure-gcc.ps1`
-    beside this file were moved here from the `repo-workspaces` framework
-    (an archived tool superseded by `repro ws`), which reprobuild's
-    `env.ps1` used to require as a sibling checkout. The two helpers below
-    (`Get-ReproToolchainInstallRoot`, `Add-PathEntry`) lived in that
-    framework's `env.ps1` rather than in its `windows/` directory, so they are
-    restated here.
+    Scope: `toolchain-utils.ps1`, `ensure-nim.ps1` and `ensure-gcc.ps1`
+    beside this file, driven from here with the two helpers below
+    (`Get-ReproToolchainInstallRoot`, `Add-PathEntry`).
 
-    Deliberately NOT carried over: the framework's gh / gpg / python3 /
-    git-repo steps. None is needed to build `repro`, and the gpg step
-    triggers a UAC elevation prompt.
+    Deliberately NOT provisioned here: gh / gpg / python3 / git-repo. None is
+    needed to build `repro`, and a gpg step triggers a UAC elevation prompt.
 
 .NOTES
-    Knobs (unchanged from the framework, so existing muscle memory works):
+    Knobs:
       $env:WINDOWS_DIY_SYNC = "0"           skip all downloads
       $env:WINDOWS_DIY_SKIP_NIM = "1"       skip the nim step
       $env:WINDOWS_DIY_SKIP_GCC = "1"       skip the gcc step
@@ -60,11 +55,9 @@ $reproWindowsDir = Split-Path -Parent $MyInvocation.MyCommand.Definition
 function Get-ReproToolchainInstallRoot {
   ## Where cold-start toolchains land.
   ##
-  ## The default is deliberately still `%LOCALAPPDATA%\repo-workspaces\
-  ## toolchains`, not a reprobuild-branded path: that is where existing
-  ## checkouts already have nim and gcc installed, and renaming it would
-  ## force every machine to re-download ~500 MB for no benefit. The name is
-  ## legacy; the directory is just a cache.
+  ## The default is `%LOCALAPPDATA%\reprobuild\toolchains`, the same root
+  ## `repro workspace provision` installs into. The directory is just a
+  ## cache: `WINDOWS_DIY_INSTALL_ROOT` points it elsewhere.
   $fromEnv = [Environment]::GetEnvironmentVariable("WINDOWS_DIY_INSTALL_ROOT")
   if (-not [string]::IsNullOrWhiteSpace($fromEnv)) { return $fromEnv.Trim() }
 
@@ -72,7 +65,7 @@ function Get-ReproToolchainInstallRoot {
   if ([string]::IsNullOrWhiteSpace($localAppData)) {
     throw "Could not resolve %LOCALAPPDATA%. Set WINDOWS_DIY_INSTALL_ROOT explicitly."
   }
-  return (Join-Path $localAppData "repo-workspaces\toolchains")
+  return (Join-Path $localAppData "reprobuild\toolchains")
 }
 
 function Add-PathEntry {
