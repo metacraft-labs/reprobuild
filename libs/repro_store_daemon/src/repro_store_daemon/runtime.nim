@@ -330,6 +330,11 @@ proc useDefForTarball(req: StoreDaemonExternalRealizeRequest): InterfaceToolUse 
     packageId: req.packageId,
     lockIdentity: req.lockIdentity,
     location: SourceLocation(file: "reprostored-ipc", line: 1))]
+  # The version is what the ``uses:`` range in ``rawConstraint`` is judged
+  # against when ``resolveTarballTool`` selects this record again: an
+  # unversioned record satisfies no range, so dropping it would refuse a
+  # record the client selected precisely because it satisfies the range.
+  result.tarballProvisioning[0].detail.version = req.version
 
 proc daemonPrefixPathForProfile(config: DevDaemonConfig;
                                 profile: PathOnlyToolProfile): string =
