@@ -246,8 +246,11 @@ suite "the add-on's detectors, from control to off-host alert":
     writeFile(b.site.dpkgLog, "2099-01-01 00:00:00 startup packages configure\n")
     discard runEvidenceShip(b.site, b.conf, "host-b", forceHeartbeat = true)
     var later = inputs
-    later.nowMs = inputs.nowMs + 4 * 300_000
+    # Past the record's grace (two heartbeats), within the shipping
+    # heartbeat's own silence (three): shipping is alive, the hook is not.
+    later.nowMs = inputs.nowMs + 750_000
     let r = runEvidenceCheck(later)
+    check r.statusOf(b.credentialHost, "addon-evidence-ship") == "live-idle"
     check r.alertsOf(b.credentialHost, "DET-AO-8").anyIt(
       it.trigger == "apt-hook-silent")
     check r.statusOf(b.credentialHost, "addon-apt-hook") == "silent"

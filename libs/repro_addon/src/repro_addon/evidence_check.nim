@@ -104,6 +104,12 @@ const
     ## Detectors whose records come out of the deploy agent's tick: alive
     ## exactly when the tick is.
   AttestedDetectors* = ["addon-agent-tick", "addon-apply", "addon-reassert"]
+  RecordGraceIntervals* = 2'i64
+    ## How long, in shipping heartbeats, a boot may go without its re-assert
+    ## record and a dpkg run without its hook record: both ship the moment
+    ## they are written, so two heartbeats is ample -- and shorter than the
+    ## heartbeat's own silence (``silenceFactor``, 3), so a host whose
+    ## shipping is alive still shows the detector silent.
   ShipStallMs* = 60_000'i64
     ## A shipping heartbeat reporting a longer wait is a stall
     ## (``evidence_ship.ShipDelayAlertMs``).
@@ -417,13 +423,13 @@ proc runEvidenceCheck*(inp: CheckInputs): CheckReport =
     for (boot, firstMs) in boots:
       if boot notin reassertBoots and boot notin exemptBoots and
           shipInterval > 0 and
-          inp.nowMs - firstMs > shipInterval * int64(factor):
+          inp.nowMs - firstMs > shipInterval * RecordGraceIntervals:
         alert("DET-AO-8", "reassert-silent", 0, "boot " & boot &
           " has no re-assert record")
         silentDetail["addon-reassert"] = "boot " & boot & " has no record"
     for (run, firstMs) in dpkgRuns:
       if not hookRuns.anyIt(it >= run) and shipInterval > 0 and
-          inp.nowMs - firstMs > shipInterval * int64(factor):
+          inp.nowMs - firstMs > shipInterval * RecordGraceIntervals:
         alert("DET-AO-8", "apt-hook-silent", 0, "dpkg ran at " & run &
           " and no apt hook record names that run")
         silentDetail["addon-apt-hook"] = "dpkg run " & run & " has no record"
