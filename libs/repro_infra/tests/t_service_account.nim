@@ -148,3 +148,28 @@ suite "accounts the profile creates":
       "  id = \"0\"\n}\n")
     let a = res("app", "", lookup = hostAccountLookup(root, p))
     check a.known and a.uid == 1001
+
+suite "a profile's accounts alone (profileAccountLookup)":
+  test "it never reads a host database: the host's accounts are unknown":
+    # The scratch root's passwd has app, and so does nearly any host's
+    # /etc/passwd have root and daemon: none of them is seen.
+    let p = parseSystemProfile("linux.sysusersEntry {\n  name = \"svc2\"\n" &
+      "  id = \"977\"\n}\n" &
+      "passwd.group {\n  name = \"svc2grp\"\n  gid = \"978\"\n" &
+      "  members = [\"svc2\"]\n}\n")
+    let l = profileAccountLookup(p)
+    for name in ["app", "root", "daemon", "nobody", "toor"]:
+      check l.uidOf(name) == UnknownId
+    check l.gidOf("adm") == UnknownId and l.gidOf("root") == UnknownId
+    check l.userOfUid(0) == "" and l.groupsOf("web").len == 0
+    # The same name resolves through the host lookup, so the difference is
+    # the host database, not the name.
+    check hostAccountLookup(root).uidOf("app") == 1001
+    check l.uidOf("svc2") == 977 and l.gidOf("svc2grp") == 978
+    check 978 in l.groupsOf("svc2")
+
+  test "an account only the host has does not resolve; root still does":
+    let l = profileAccountLookup(SystemProfile())
+    check not res("app", "", lookup = l).known
+    check res("", "", lookup = l).userIsRoot
+    check res("root", "", lookup = l).known

@@ -277,33 +277,32 @@ proc resolveServiceAccount*(user, group, supplementaryGroups: string;
 proc parseId(v: string): int =
   if isNumericId(v): parseInt(v) else: UnknownId
 
-proc hostAccountLookup*(root = "/"; p: SystemProfile = SystemProfile()): AccountLookup =
-  ## The accounts of ``<root>/etc/passwd`` and ``<root>/etc/group``, and
-  ## those the profile ``p`` creates (``passwd.user``, ``passwd.group``,
-  ## ``linux.sysusersEntry``): an account already on the host keeps its ids
-  ## (neither ``useradd`` nor ``systemd-sysusers`` changes one), a new one
-  ## gets its pinned id or ``AllocatedId``. Memberships a profile adds
-  ## (``passwd.user`` ``groups``, ``passwd.group`` ``members``) are added to
-  ## the host's.
+proc readAccountFile(root, file: string): seq[seq[string]] =
+  ## The colon-separated records of ``<root>/etc/<file>``; none when the
+  ## file is missing.
+  let f = (if root == "/" or root.len == 0: "" else: root.strip(
+    leading = false, chars = {'/'})) & "/etc/" & file
+  if not fileExists(f): return
+  for line in readFile(f).splitLines():
+    if line.len == 0 or line[0] == '#': continue
+    result.add(line.split(':'))
+
+proc accountLookupOf(passwd, group: seq[seq[string]];
+                     p: SystemProfile): AccountLookup =
+  ## The lookup over ``passwd`` and ``group`` records (a host's, or none)
+  ## and the accounts ``p`` creates; see ``hostAccountLookup``.
   var uids = initTable[string, int]()
   var pgids = initTable[string, int]()
   var gids = initTable[string, int]()
   var members = initTable[string, seq[int]]()
   var names = initTable[int, string]()
-  proc rd(file: string): seq[seq[string]] =
-    let f = (if root == "/" or root.len == 0: "" else: root.strip(
-      leading = false, chars = {'/'})) & "/etc/" & file
-    if not fileExists(f): return
-    for line in readFile(f).splitLines():
-      if line.len == 0 or line[0] == '#': continue
-      result.add(line.split(':'))
-  for f in rd("passwd"):
+  for f in passwd:
     if f.len < 4: continue
     let uid = parseId(f[2])
     if f[0] notin uids: uids[f[0]] = uid
     if f[0] notin pgids: pgids[f[0]] = parseId(f[3])
     if uid >= 0 and uid notin names: names[uid] = f[0]
-  for f in rd("group"):
+  for f in group:
     if f.len < 3: continue
     let gid = parseId(f[2])
     if f[0] notin gids: gids[f[0]] = gid
@@ -363,3 +362,23 @@ proc hostAccountLookup*(root = "/"; p: SystemProfile = SystemProfile()): Account
   result.groupsOf = proc (name: string): seq[int] =
     members.getOrDefault(name, @[])
   result.userOfUid = proc (uid: int): string = names.getOrDefault(uid, "")
+
+proc hostAccountLookup*(root = "/"; p: SystemProfile = SystemProfile()): AccountLookup =
+  ## The accounts of ``<root>/etc/passwd`` and ``<root>/etc/group``, and
+  ## those the profile ``p`` creates (``passwd.user``, ``passwd.group``,
+  ## ``linux.sysusersEntry``): an account already on the host keeps its ids
+  ## (neither ``useradd`` nor ``systemd-sysusers`` changes one), a new one
+  ## gets its pinned id or ``AllocatedId``. Memberships a profile adds
+  ## (``passwd.user`` ``groups``, ``passwd.group`` ``members``) are added to
+  ## the host's.
+  accountLookupOf(readAccountFile(root, "passwd"),
+                  readAccountFile(root, "group"), p)
+
+proc profileAccountLookup*(p: SystemProfile): AccountLookup =
+  ## Only the accounts the profile ``p`` creates, with the ids and
+  ## memberships ``hostAccountLookup`` would give them on a host that has
+  ## none of its own: no host database is read, so a check made at parse
+  ## time with it decides the same on every host. ``root`` still resolves
+  ## (``resolveServiceAccount`` knows it by name), and any other account
+  ## the profile does not create is ``UnknownId``.
+  accountLookupOf(@[], @[], p)

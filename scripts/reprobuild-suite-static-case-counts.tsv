@@ -517,7 +517,7 @@ libs/repro_home_rollback/tests/t_smoke_home_rollback.nim	nim	2
 libs/repro_homebrew_adapter/tests/t_smoke_repro_homebrew_adapter.nim	nim	65
 libs/repro_infra/tests/t_an_apply_reports_reboot_required_from_a_build_action.nim	nim	4
 libs/repro_infra/tests/t_every_apply_waits_for_carried_state.nim	nim	2
-libs/repro_infra/tests/t_service_account.nim	nim	19
+libs/repro_infra/tests/t_service_account.nim	nim	21
 libs/repro_infra/tests/t_smoke_phase_g_runinfraapply_dispatch.nim	nim	9
 libs/repro_infra/tests/t_smoke_repro_infra.nim	nim	207
 libs/repro_infra/tests/t_system_generations_distinct_within_one_second.nim	nim	4

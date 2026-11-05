@@ -17583,8 +17583,8 @@
       "owner": "libs/repro_infra",
       "requiresReproBinary": false,
       "source": "libs/repro_infra/tests/t_service_account.nim",
-      "sourceSuiteCount": 2,
-      "staticCaseCount": 19,
+      "sourceSuiteCount": 3,
+      "staticCaseCount": 21,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
