@@ -3425,8 +3425,8 @@ proc keyedOnContentAddressedToolRoot*(fingerprint: ContentDigest;
   ## in the tree is a caller who computed a fingerprint over what its edge
   ## does; some of them (`weakFingerprintForProfileBuildAction`, the typed-tool
   ## DSL site's `profile.profileFingerprint`) already cover the tool and some
-  ## (`weakFingerprintFromText(id)`, the inline-exec site's id + payload) do
-  ## not. A subtraction whose soundness depends on which caller you came
+  ## (`weakFingerprintFromText(id)`, the constructor's own default) do not.
+  ## A subtraction whose soundness depends on which caller you came
   ## through is a subtraction that is unsound somewhere, and the engine cannot
   ## tell the two apart by inspecting an opaque digest.
   ##

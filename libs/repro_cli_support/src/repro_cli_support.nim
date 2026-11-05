@@ -3154,6 +3154,36 @@ proc resolveCanonicalExecRoot*(cwdKind: ActionCwdKind; cwdCustomPath: string;
   else:
     raw
 
+proc spawnedArgvKeyText(argv: openArray[string]): string =
+  ## The argv a lowered process action SPAWNS, as text for its weak
+  ## fingerprint.
+  ##
+  ## The local action cache files a record under the weak fingerprint and
+  ## serves it to any later action with the same one whose recorded inputs
+  ## still check out. `repro_build_engine.action()` mixes the environment,
+  ## the lock and the content-addressed root of `argv[0]` into the
+  ## fingerprint its caller passes, and nothing else of argv. So the caller
+  ## has to key argv, and keying the graph node's payload is not the same
+  ## thing: the payload is what the recipe wrote, and three branches of
+  ## `lowerGraphAction` spawn something it does not spell out. Inline exec
+  ## substitutes each `@FILE:<path>` element with the file's contents; the
+  ## nim-unittest site resolves the test binary against the project root;
+  ## the typed-tool site takes `argv[0]` and any invocation prefix from the
+  ## resolved tool profile. Two actions that differ only there used to share
+  ## one record, and the second was served the first one's result.
+  ##
+  ## Keyed here, after every rewrite, rather than reconstructed from the
+  ## payload and the inputs to each rewrite, so that a rewrite added later
+  ## is keyed without anyone remembering to.
+  ##
+  ## Each element is length-framed: `["a b"]` and `["a", "b"]` must not
+  ## collide. A substituted `@FILE:` value enters the key only as part of
+  ## this digest; the plaintext spawned argv is already what the lowered
+  ## graph cache stores for the action.
+  result = "\nspawnedArgv\n" & $argv.len
+  for arg in argv:
+    result.add("\x1f" & $arg.len & ":" & arg)
+
 proc lowerGraphAction(node: GraphNode; profiles: Table[string, PathOnlyToolProfile];
                       projectRoot: string): BuildAction =
   # `BuildAction.governingLockIdentity` is required. Give `result` a complete
@@ -3353,7 +3383,8 @@ proc lowerGraphAction(node: GraphNode; profiles: Table[string, PathOnlyToolProfi
       depfile = payload.depfile,
       dynamicDepsFile = payload.dynamicDepsFile,
       cacheable = payload.cacheable,
-      weakFingerprint = weakFingerprintFromText(fingerprintText),
+      weakFingerprint = weakFingerprintFromText(fingerprintText &
+        spawnedArgvKeyText(argv)),
       actionCachePolicy = actionCachePolicy,
       dependencyPolicy = lowerDependencyPolicy(payload.id, payload.depfile,
         payload.dependencyPolicy),
@@ -3475,7 +3506,8 @@ proc lowerGraphAction(node: GraphNode; profiles: Table[string, PathOnlyToolProfi
       depfile = payload.depfile,
       dynamicDepsFile = payload.dynamicDepsFile,
       cacheable = payload.cacheable,
-      weakFingerprint = weakFingerprintFromText(fingerprintText),
+      weakFingerprint = weakFingerprintFromText(fingerprintText &
+        spawnedArgvKeyText(argv)),
       actionCachePolicy = actionCachePolicy,
       dependencyPolicy = lowerDependencyPolicy(payload.id, payload.depfile,
         payload.dependencyPolicy),
@@ -3655,7 +3687,8 @@ proc lowerGraphAction(node: GraphNode; profiles: Table[string, PathOnlyToolProfi
       depfile = payload.depfile,
       dynamicDepsFile = payload.dynamicDepsFile,
       cacheable = payload.cacheable,
-      weakFingerprint = weakFingerprintFromText(fingerprintText),
+      weakFingerprint = weakFingerprintFromText(fingerprintText &
+        spawnedArgvKeyText(argv)),
       actionCachePolicy = actionCachePolicy,
       dependencyPolicy = lowerDependencyPolicy(payload.id, payload.depfile,
         payload.dependencyPolicy),
@@ -3761,7 +3794,8 @@ proc lowerGraphAction(node: GraphNode; profiles: Table[string, PathOnlyToolProfi
     depfile = depfile,
     dynamicDepsFile = payload.dynamicDepsFile,
     cacheable = payload.cacheable,
-    weakFingerprint = weakFingerprintFromText(fingerprintText),
+    weakFingerprint = weakFingerprintFromText(fingerprintText &
+      spawnedArgvKeyText(invocationArgv)),
     actionCachePolicy = actionCachePolicy,
     dependencyPolicy = lowerDependencyPolicy(payload.id, depfile,
       payload.dependencyPolicy),
