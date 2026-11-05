@@ -530,7 +530,7 @@ libs/repro_interface_artifacts/tests/t_rp4_resource_codec_roundtrip.nim	nim	9
 libs/repro_interface_artifacts/tests/t_runtime_tool_uses_codec.nim	nim	3
 libs/repro_interface_artifacts/tests/t_sqlite_lib_dir_prefers_the_toolchain_sqlite.nim	nim	8
 libs/repro_interface_artifacts/tests/t_windows_dynlib_staging.nim	nim	4
-libs/repro_interface_artifacts/tests/t_windows_long_command_script.nim	nim	6
+libs/repro_interface_artifacts/tests/t_windows_long_command_script.nim	nim	15
 libs/repro_interface_artifacts/tests/test_catalog_composition_is_order_independent.nim	nim	25
 libs/repro_interface_artifacts/tests/test_catalog_import_declaration.nim	nim	7
 libs/repro_interface_artifacts/tests/test_contribution_fingerprint_invalidation_boundaries.nim	nim	46
@@ -1635,7 +1635,7 @@ tests/integration/t_committed_lock_records_canonical_remote_url_when_not_named_o
 tests/integration/t_committed_lock_records_develop_set_siblings.nim	nim	3
 tests/integration/t_committed_lock_records_no_materialization_path.nim	nim	3
 tests/integration/t_compiler_args_transport.nim	nim	6
-tests/integration/t_compiler_scratch_isolation.nim	nim	3
+tests/integration/t_compiler_scratch_isolation.nim	nim	6
 tests/integration/t_completion_emits_shell_script.nim	nim	2
 tests/integration/t_concurrent_lock_publishes_retry_without_user_visible_failure.nim	nim	1
 tests/integration/t_concurrent_publish_disjoint_per_backend.nim	nim	1
