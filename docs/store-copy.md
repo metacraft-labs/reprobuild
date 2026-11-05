@@ -35,9 +35,9 @@ Before anything is written, every prefix of the closure is checked in the
 source: its directory and sealed `.repro-receipt` exist, the receipt agrees
 with the index row, the directory name is the one the receipt derives, and
 the directory's content digest is the one the receipt records. The
-destination is checked too: a prefix it already has with a different
-receipt, or a directory it does not index where a prefix would land, is a
-conflict. Any failure stops the copy with the prefix and the reason, and the
+destination is checked too: a prefix it indexes at another path or holds
+with different content, or a directory it does not index where a prefix
+would land, is a conflict. Any failure stops the copy with the prefix and the reason, and the
 destination is left as it was.
 
 Each prefix is then copied into the destination's staging area, its digest
@@ -47,17 +47,23 @@ and the source's index row is inserted unchanged. Files are copied, never
 hard-linked, so the destination shares no inodes with the source.
 
 A prefix the destination already has is skipped, so copying the same closure
-twice transfers nothing the second time. Every prefix of the closure is held
+twice transfers nothing the second time. "Already has" means the same prefix
+id with the same content, whoever sealed it: a worker store that built the
+prefix itself is prewarmed, not refused. Every prefix of the closure is held
 by a destination root `copy:<closure-id>`, so the destination's
-`repro store gc` keeps it.
+`repro store gc` keeps it. An existing root is never replaced, and a copy
+that fails part-way leaves everything it found or wrote held.
+
+Neither store may be inside the other (compared after resolving symbolic
+links).
 
 ## What the report says
 
 * **unverified**: the receipt records no content digest (an adopted prefix,
   or one sealed by an older store). The copy was checked against the source
   tree, but nothing vouches for the source tree itself.
-* **external**: a `nix` or `adopted:` prefix. Its receipt and links were
-  copied; the content they point at outside the store was not.
+* **external**: the prefix has a symbolic link whose target lies outside the
+  source store. The link was copied; the content it points at was not.
 
 Absolute paths inside a prefix are not rewritten. A prefix that names its own
 store root works from the destination only where the destination is mounted

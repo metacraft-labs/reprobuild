@@ -19,12 +19,20 @@
 ##     path, and the source's index row is inserted unchanged. The staged tree
 ##     is digested again before it is published, so the transfer itself is
 ##     checked, not assumed.
-##  3. **Nothing twice.** A prefix the destination already indexes with the
-##     same receipt digest is skipped, so a repeated copy transfers nothing.
+##  3. **Nothing twice.** A prefix the destination already indexes under the
+##     same prefix id, with a receipt sealing that id and a tree whose
+##     content is the source's, is skipped -- whoever sealed it, so a store
+##     that realized the prefix itself is prewarmed, not refused. A repeated
+##     copy transfers nothing.
 ##  4. **Independent bytes.** Files are copied, never hard-linked: a store
 ##     that shares inodes with its source is not a mirror.
 ##  5. **Kept alive.** The closure is attached to a destination root
-##     `copy:<closure-id>`, or the destination's next GC would reap it.
+##     `copy:<closure-id>`, or the destination's next GC would reap it. An
+##     existing root is never replaced (that would drop its holds), what is
+##     already present is held before the first publish, and each published
+##     prefix is indexed and held in one transaction.
+##
+## Neither store may contain the other.
 ##
 ## POSIX only, like the bundle commands: the copy recreates symbolic links
 ## and permission bits with POSIX semantics.
@@ -61,9 +69,9 @@ type
       ## transfer was checked against the source tree, but nothing vouches
       ## for the source tree itself.
     external*: seq[string]
-      ## Prefixes of the closure whose adapter imports content from outside
-      ## the store (`nix`, `adopted:*`): their receipt and links are what
-      ## the destination holds, the external payload is not copied.
+      ## Prefixes of the closure holding a symbolic link whose target lies
+      ## outside the source store root: the link (pinned import metadata)
+      ## is copied, the content it points at is not.
     copiedBytes*: int64
 
   PlannedPrefix = object
@@ -72,6 +80,7 @@ type
     receiptBytes: string
     expectedDigest: string          ## `tree-v2:<hex>` the copy must reproduce
     recorded: bool                  ## the digest came from the receipt
+    external: bool                  ## a link leaves the source store
     present: bool                   ## the destination already has it
 
 const CopyRootPrefix* = "copy:"
@@ -83,10 +92,38 @@ proc hexOf(id: PrefixIdBytes): string =
   for b in id:
     result.add(toHex(b.int, 2).toLowerAscii)
 
-proc isExternalAdapter*(adapter: string): bool =
-  ## Adapters whose prefix holds pinned import metadata for content that
-  ## lives outside the store, rather than the content itself.
-  adapter == $anNix or adapter.startsWith(AdoptedAdapterPrefix)
+proc within(path, root: string): bool =
+  ## Lexical containment of two absolute, normalized paths.
+  path == root or path.startsWith(root & DirSep)
+
+proc canonicalPath(path: string): string =
+  ## `path` with symlinks resolved as far as it exists: the deepest existing
+  ## ancestor is resolved and the rest re-appended, so a destination that
+  ## does not exist yet still compares by where it WILL be.
+  var head = normalizedPath(absolutePath(path))
+  var tail: seq[string]
+  while not (dirExists(head) or fileExists(head)):
+    let parent = head.parentDir
+    if parent == head or parent.len == 0: break
+    tail.insert(head.extractFilename, 0)
+    head = parent
+  result = try: expandFilename(head) except OSError: head
+  for part in tail: result = result / part
+
+proc linksLeave*(prefixDir, storeRoot: string): bool =
+  ## Whether a symbolic link in `prefixDir` names a target outside
+  ## `storeRoot` (resolved lexically against the link's own directory).
+  ## Such a prefix holds pinned import metadata for content the copy cannot
+  ## carry: an external imported node.
+  let root = normalizedPath(storeRoot)
+  for rel in walkDirRec(prefixDir, yieldFilter = {pcLinkToFile, pcLinkToDir},
+      relative = true, followFilter = {pcDir}):
+    let link = prefixDir / rel
+    var target = expandSymlink(link)
+    if not target.isAbsolute: target = link.parentDir / target
+    if not normalizedPath(target).within(root):
+      return true
+  false
 
 proc closureRootId*(prefixIds: openArray[PrefixIdBytes]): string =
   ## `copy:` and the first 32 hex digits of BLAKE3 over the sorted prefix
@@ -142,6 +179,7 @@ proc verifySource(s: Store; row: PrefixRow): PlannedPrefix =
         receipt.contentDigest & " recorded, " & actual & " on disk): " & where)
     result.recorded = true
   result.expectedDigest = actual
+  result.external = linksLeave(result.sourceDir, s.root)
 
 proc closureOf(s: Store; req: StoreCopyRequest): seq[PrefixRow] =
   ## The selected prefixes plus, transitively, the sibling outputs a
@@ -183,19 +221,43 @@ proc closureOf(s: Store; req: StoreCopyRequest): seq[PrefixRow] =
       pending.add(hit.row)
   result.sort(proc (a, b: PrefixRow): int = cmp(a.realizedPath, b.realizedPath))
 
+proc destinationHolds(d: Store; plan: PlannedPrefix): bool =
+  ## Whether the destination's directory for `plan` is that prefix: its
+  ## receipt seals the same prefix id and its tree has the source's content.
+  ##
+  ## The receipt DIGEST is deliberately not compared. A store that realized
+  ## the same prefix itself (a prewarmed worker) holds a receipt that differs
+  ## only in when and by whom it was sealed; the prefix id is the identity
+  ## and the content is what has to agree with it. The content is checked in
+  ## every case, so a damaged destination copy is never taken for a present
+  ## one. Raises `StoreCopyError` when the directory is something else.
+  let where = plan.row.realizedPath
+  let dir = d.absolutePrefixPath(where)
+  if not dirExists(dir):
+    return false
+  var receipt: RealizationReceipt
+  try: receipt = readReceiptFile(dir / ReceiptFileName)
+  except CatchableError as e:
+    fail("destination prefix receipt is unreadable (" & e.msg & "): " & where)
+  if receipt.realizationHash != plan.row.prefixId:
+    fail("destination receipt at " & where & " seals a different prefix id")
+  let got = storeTreeDigest(dir)
+  if got != plan.expectedDigest:
+    fail("destination already holds prefix id " & hexOf(plan.row.prefixId) &
+      " with different content (" & got & ", source " & plan.expectedDigest &
+      "): " & where)
+  true
+
 proc checkDestination(d: Store; plan: var PlannedPrefix) =
   ## Rule 1, the destination half, and rule 3.
   let where = plan.row.realizedPath
   let dir = d.absolutePrefixPath(where)
   let hit = d.lookupPrefix(plan.row.prefixId)
   if hit.found:
-    if hit.row.receiptDigest != plan.row.receiptDigest:
-      fail("destination already holds prefix id " & hexOf(plan.row.prefixId) &
-        " with a different receipt: " & where)
     if hit.row.realizedPath != where:
       fail("destination indexes prefix id " & hexOf(plan.row.prefixId) &
         " at " & hit.row.realizedPath & ", not " & where)
-    if not dirExists(dir):
+    if not d.destinationHolds(plan):
       fail("destination indexes " & where & " but its directory is " &
         "missing; run `repro store recover` on " & d.root)
     plan.present = true
@@ -240,12 +302,28 @@ proc makeWritable(dir: string) =
   try: setFilePermissions(dir, {fpUserRead, fpUserWrite, fpUserExec})
   except OSError: discard
 
-proc publish(d: var Store; plan: PlannedPrefix; bytes: var int64) =
+proc indexAndHold(d: var Store; row: PrefixRow; rootId: string) =
+  ## The index row and the root's hold in ONE transaction, so no GC can
+  ## observe the prefix indexed but unheld.
+  d.db.exec("BEGIN IMMEDIATE")
+  var committed = false
+  try:
+    discard d.insertPrefixOrIgnore(row)
+    d.attachPrefixToRoot(rootId, row.prefixId)
+    d.db.exec("COMMIT")
+    committed = true
+  finally:
+    if not committed:
+      try: d.db.exec("ROLLBACK") except CatchableError: discard
+
+proc publish(d: var Store; plan: PlannedPrefix; rootId: string;
+             bytes: var int64): bool =
   ## Rule 2: stage, re-verify, rename, index — the realization protocol,
-  ## with the source's receipt and row in place of fresh ones.
+  ## with the source's receipt and row in place of fresh ones. Returns false
+  ## when another writer published the same prefix first and it verifies:
+  ## like realization's lost race, that is the prefix being present.
   let where = plan.row.realizedPath
   let stage = d.allocateStagingDir() / "prefix"
-  var published = false
   try:
     var staged = 0'i64
     copyTreeExact(plan.sourceDir, stage, staged)
@@ -257,26 +335,28 @@ proc publish(d: var Store; plan: PlannedPrefix; bytes: var int64) =
       fail("copied receipt differs from the source receipt: " & where)
     let target = d.absolutePrefixPath(where)
     createDir(target.parentDir)
-    if dirExists(target) or symlinkExists(target):
-      fail("destination gained an entry at " & where & " during the copy")
-    moveDir(stage, target)
-    published = true
-    d.db.exec("BEGIN IMMEDIATE")
-    var committed = false
-    try:
-      discard d.insertPrefixOrIgnore(plan.row)
-      d.db.exec("COMMIT")
-      committed = true
-    finally:
-      if not committed:
-        try: d.db.exec("ROLLBACK") except CatchableError: discard
+    var won = not (dirExists(target) or symlinkExists(target))
+    if won:
+      try: moveDir(stage, target)
+      except OSError:
+        if not dirExists(target): raise
+        won = false
+    if not won:
+      # Lost the race. Accept the winner only if it is this prefix; it is
+      # indexed (or about to be) by its own writer, and held here.
+      if not d.destinationHolds(plan):
+        fail("destination gained an entry at " & where & " during the copy")
+      if not d.lookupPrefix(plan.row.prefixId).found:
+        fail("destination gained an unindexed entry at " & where &
+          " during the copy; run `repro store recover` on " & d.root)
+      d.attachPrefixToRoot(rootId, plan.row.prefixId)
+      return false
+    d.indexAndHold(plan.row, rootId)
     bytes += staged
+    true
   finally:
-    if not published:
-      makeWritable(stage.parentDir)
-      try: removeDir(stage.parentDir) except OSError: discard
-    else:
-      try: removeDir(stage.parentDir) except OSError: discard
+    makeWritable(stage.parentDir)
+    try: removeDir(stage.parentDir) except OSError: discard
 
 proc copyClosure*(req: StoreCopyRequest): StoreCopyReport =
   ## Copy the closure `req` selects from `req.sourceRoot` into
@@ -292,8 +372,17 @@ proc copyClosure*(req: StoreCopyRequest): StoreCopyReport =
     fail("source is not a store root (no prefixes/ and index.db): " &
       req.sourceRoot)
   let destRoot = absolutePath(req.destinationRoot)
-  if dirExists(destRoot) and sameFile(destRoot, req.sourceRoot):
-    fail("the destination is the source store itself: " & destRoot)
+  # Neither store may contain the other: a destination inside the source
+  # would be written into a source prefix (changing its content) or into the
+  # source's `tmp/` (which its recovery sweeps), and a source inside the
+  # destination would be copied into itself.
+  let srcCanon = canonicalPath(req.sourceRoot)
+  let dstCanon = canonicalPath(destRoot)
+  if dstCanon.within(srcCanon) or srcCanon.within(dstCanon):
+    fail(if dstCanon == srcCanon: "the destination is the source store " &
+           "itself: " & destRoot
+         else: "the destination and source stores must not contain each " &
+           "other: " & destRoot & " and " & req.sourceRoot)
   result.sourceRoot = req.sourceRoot
   result.destinationRoot = destRoot
 
@@ -313,19 +402,29 @@ proc copyClosure*(req: StoreCopyRequest): StoreCopyReport =
   for plan in plans:
     ids.add(plan.row.prefixId)
     result.closure.add(plan.row.realizedPath)
+    if plan.external:
+      result.external.add(plan.row.realizedPath)
   result.rootId = closureRootId(ids)
 
-  # The root is registered before the first publish, so a copy that fails
-  # part-way leaves what it did publish held rather than reapable.
-  dst.registerRoot(result.rootId, rkWorkspace)
+  # Rule 5. The root is registered only when it is absent: re-registering
+  # replaces the row, and the cascade would drop the holds an earlier copy
+  # left. Everything already present is held BEFORE the first publish, so a
+  # copy that fails part-way leaves every prefix it found or wrote held.
+  var rootKnown = false
+  for r in dst.listRoots():
+    if r.rootId == result.rootId: rootKnown = true
+  if not rootKnown:
+    dst.registerRoot(result.rootId, rkWorkspace)
   for plan in plans:
-    if isExternalAdapter(plan.row.adapter):
-      result.external.add(plan.row.realizedPath)
     if plan.present:
+      dst.attachPrefixToRoot(result.rootId, plan.row.prefixId)
       result.alreadyPresent.add(plan.row.realizedPath)
-    else:
-      publish(dst, plan, result.copiedBytes)
+  for plan in plans:
+    if plan.present:
+      continue
+    if publish(dst, plan, result.rootId, result.copiedBytes):
       result.copied.add(plan.row.realizedPath)
       if not plan.recorded:
         result.unverified.add(plan.row.realizedPath)
-    dst.attachPrefixToRoot(result.rootId, plan.row.prefixId)
+    else:
+      result.alreadyPresent.add(plan.row.realizedPath)

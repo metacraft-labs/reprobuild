@@ -18576,7 +18576,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_local_store/tests/t_store_copy.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 8,
+      "staticCaseCount": 13,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

@@ -16,6 +16,14 @@
 ##     itself as destination are refused;
 ##   * a prefix whose receipt records no content digest is copied, checked
 ##     against the source tree, and reported as unverified.
+##   * a destination that realized the same prefix itself (a prewarmed
+##     worker: same id and bytes, its own receipt seal) is taken as present,
+##     while the same id with other bytes is a conflict;
+##   * neither store may contain the other, and refusing leaves the source
+##     intact;
+##   * a re-copy that fails part-way keeps every earlier copy held, so a GC
+##     after it reaps nothing it copied before;
+##   * a prefix with a link leaving the store is reported external.
 
 import std/[os, sequtils, tempfiles, unittest]
 
@@ -205,7 +213,7 @@ suite "repro store copy":
       check readFile(f.dst / f.tool.relativePath / "stray") == "x"
       check indexedPaths(f.dst).len == 0
 
-  test "a destination row with a different receipt is a conflict":
+  test "a destination indexing the prefix id at another path is a conflict":
     when defined(windows):
       skip("store copy is POSIX-only")
     else:
@@ -214,7 +222,7 @@ suite "repro store copy":
       discard f.copyOf(@[f.tool.relativePath])
       var d = openStore(f.dst)
       var row = d.lookupPrefix(f.tool.prefixId).row
-      row.receiptDigest[0] = row.receiptDigest[0] xor 0xff
+      row.realizedPath = "prefixes/tool/elsewhere"
       d.db.exec("BEGIN IMMEDIATE")
       d.db.exec("DELETE FROM root_holds_prefix")
       d.db.exec("DELETE FROM prefixes")
@@ -246,3 +254,100 @@ suite "repro store copy":
       check report.copied == @[rel]
       check report.unverified == @[rel]
       check storeTreeDigest(f.dst / rel) == storeTreeDigest(f.src / rel)
+
+  test "a destination that realized the same prefix itself is prewarmed":
+    when defined(windows):
+      skip("store copy is POSIX-only")
+    else:
+      let f = makeFixture()
+      defer: removeDir(f.top)
+      # The worker built the same prefix: same prefix id and bytes, but a
+      # receipt sealed at another time by another process.
+      var d = openStore(f.dst)
+      let own = d.realize(f.top / "worker", "tool")
+      d.close()
+      check own.prefixId == f.tool.prefixId
+      let report = f.copyOf(@[f.tool.relativePath])
+      check report.copied.len == 0
+      check report.alreadyPresent == @[f.tool.relativePath]
+      var d2 = openStore(f.dst)
+      defer: d2.close()
+      check d2.rootsHolding(f.tool.prefixId) == @[report.rootId]
+
+  test "a destination prefix with the same id but other bytes is a conflict":
+    when defined(windows):
+      skip("store copy is POSIX-only")
+    else:
+      let f = makeFixture()
+      defer: removeDir(f.top)
+      var d = openStore(f.dst)
+      discard d.realize(f.top / "worker", "tool")
+      d.close()
+      writeFile(f.dst / f.tool.relativePath / "share" / "data.txt", "changed\n")
+      expect StoreCopyError:
+        discard f.copyOf(@[f.tool.relativePath])
+
+  test "neither store may contain the other, and the source is left intact":
+    when defined(windows):
+      skip("store copy is POSIX-only")
+    else:
+      let f = makeFixture()
+      defer: removeDir(f.top)
+      let before = storeTreeDigest(f.src / f.tool.relativePath)
+      for inside in [f.src / f.tool.relativePath / "mirror",
+                     f.src / "tmp" / "mirror", f.src / "nested" / "store"]:
+        expect StoreCopyError:
+          discard copyClosure(StoreCopyRequest(sourceRoot: f.src,
+            destinationRoot: inside, prefixes: @[f.tool.relativePath]))
+        check not dirExists(inside)
+      # The source inside the destination.
+      expect StoreCopyError:
+        discard copyClosure(StoreCopyRequest(sourceRoot: f.src,
+          destinationRoot: f.top, prefixes: @[f.tool.relativePath]))
+      check storeTreeDigest(f.src / f.tool.relativePath) == before
+
+  test "a re-copy that fails part-way keeps every earlier copy held":
+    when defined(windows):
+      skip("store copy is POSIX-only")
+    else:
+      let f = makeFixture()
+      defer: removeDir(f.top)
+      var s = openStore(f.src)
+      let other = s.listPrefixes().filterIt(it.packageName == "other")[0]
+      s.close()
+      let first = f.copyOf(@[other.realizedPath, f.tool.relativePath])
+      check first.copied.len == 2
+      # Lose `other` at the destination, and make its republish fail: a
+      # file where its package directory belongs.
+      var d = openStore(f.dst)
+      d.db.exec("DELETE FROM prefixes WHERE realized_path = '" &
+        other.realizedPath & "'")
+      d.close()
+      removeDir(f.dst / other.realizedPath.parentDir)
+      writeFile(f.dst / other.realizedPath.parentDir, "blocker")
+      expect OSError, IOError:
+        discard f.copyOf(@[other.realizedPath, f.tool.relativePath])
+      var d2 = openStore(f.dst)
+      defer: d2.close()
+      check d2.rootsHolding(f.tool.prefixId) == @[first.rootId]
+      discard d2.gc(graceSeconds = 0)
+      check dirExists(f.dst / f.tool.relativePath)
+
+  test "a prefix linking outside the store is reported external":
+    when defined(windows):
+      skip("store copy is POSIX-only")
+    else:
+      let f = makeFixture()
+      defer: removeDir(f.top)
+      let staging = f.top / "staging-ext"
+      createDir(staging / "bin")
+      createSymlink("/bin/sh", staging / "bin" / "sh")
+      var s = openStore(f.src)
+      let ext = s.realizeDirectoryAsPrefix(staging, StoreReceiptHint(
+        adapter: "path", packageName: "ext", version: "1.0",
+        lockIdentity: "test-ext"))
+      s.close()
+      check symlinkExists(f.src / ext.relativePath / "bin" / "sh")
+      let report = f.copyOf(@[ext.relativePath, f.tool.relativePath])
+      check report.external == @[ext.relativePath]
+      check expandSymlink(f.dst / ext.relativePath / "bin" / "sh") == "/bin/sh"
