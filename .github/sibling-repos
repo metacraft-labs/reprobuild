@@ -35,13 +35,32 @@ codetracer-trace-format-nim=dev
 # missing". A check whose outcome depends on which runner picked up the job is
 # not a check.
 #
-# native-recorder at `dev` (db-backend's emulator FFI contract moves with
+# native-recorder normally at `dev` (db-backend's emulator FFI contract moves with
 # recorder dev; `stable` is only the last released snapshot). trace-format's
 # `main` branch was retired in the org branch-rename sweep; its `dev` tip
 # carries exactly the revision reprobuild's flake.nix already pins for the
 # codetracer-trace-format input, so `dev` is the same source under a live ref.
 codetracer-trace-format=dev
-codetracer-native-recorder=dev
+#
+# native-recorder is PINNED, temporarily, because its `dev` and
+# codetracer-trace-format-nim's `dev` stopped compiling together: trace-format
+# b8db98c6 (the 2026-10 format revision, on trace-format-nim `dev` since its
+# promotion on 2026-10-31) removed `writeMetaDatToBuffer`'s `paths` parameter,
+# and recorder `dev` (a18db9bd, 2026-10-09) still passes it, so the HCR lane's
+# ct-mcr bundle failed with "unknown named parameter: paths". The recorder's
+# port to the new API (c9d2126c) is on its `agents` line and reaches its `dev`
+# only by promotion.
+#
+# The pin is 3936bae1, the tip of the recorder's own agents-to-dev-2026-10-03
+# stabilization -- the counterpart of the trace-format-nim promotion that is
+# now its `dev`. Measured 2026-11-05: `just build-ct-mcr` at 3936bae1 builds
+# the complete bundle against trace-format-nim `dev` 9e27afc,
+# native-backend `dev` b0b1056f and visual-replay `dev` 4428479, and recorder
+# `dev` a18db9bd fails against the same siblings.
+#
+# REMOVE THIS PIN (back to `=dev`) once codetracer-native-recorder `dev`
+# contains c9d2126c.
+codetracer-native-recorder=3936bae14841c19ab826fce038cb949d19f4d422
 
 # codetracer's `ct` binary (built via codetracer/reprobuild.nim's `ct` target so
 # ct_incremental_adapter can exec `ct test --incremental`) imports the IsoNim UI
