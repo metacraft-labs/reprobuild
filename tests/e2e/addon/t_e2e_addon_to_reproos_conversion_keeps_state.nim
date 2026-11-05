@@ -221,6 +221,12 @@ const
     "ReadWritePaths=/var/lib/a13-r4\\nExecStart=/bin/true\\n"
     ## A confined, non-root service elsewhere (with the floor's
     ## ProtectSystem=strict): let in while the directory is pending.
+  R4ConfinedUnfloored = "[Unit]\\nDescription=A13 round-4 probe\\n\\n" &
+    "[Service]\\nProtectSystem=strict\\nUser=eth-validator\\n" &
+    "Group=eth-validator\\nReadWritePaths=/var/lib/a13-r4\\n" &
+    "ExecStart=/bin/true\\n"
+    ## The same confinement written out, without the floor: only the
+    ## carried-state reach analysis judges what activates it.
   R4Floor = "        hardening = \"serviceFloor\",\n" &
     "        floorExceptions = @[\"NoExecPaths: the conversion gate's " &
     "round-4 probe runs /bin/true\"],\n"
@@ -230,7 +236,7 @@ const
      "        content = \"[Unit]\\nDescription=A13 round-4 account probe\\n\\n" &
      "[Service]\\nDynamicUser=yes\\nUser=root\\nReadWritePaths=/var/lib/a13-r4\\n" &
      "ExecStart=/bin/true\\n\",\n        address = \"r4Account\")\n",
-     "runs as root"),
+     "runs as root", "reach"),
     ("timer", "r4Timer",
      "      systemdSystemUnit(name = \"eth-r4-timed.service\",\n" &
      "        content = \"" & R4Confined & "\",\n" & R4Floor &
@@ -241,20 +247,35 @@ const
      "      systemdSystemDropIn(unit = \"eth-r4.timer\", name = \"retarget\",\n" &
      "        content = \"[Timer]\\nUnit=apt-daily.service\\n\",\n" &
      "        address = \"r4TimerDropIn\")\n",
-     "apt-daily.service"),
-    ("path", "r4Path",
+     "apt-daily.service", "reach"),
+    ("pathfloored", "r4PathFloored",
      "      systemdSystemUnit(name = \"eth-r4-timed.service\",\n" &
      "        content = \"" & R4Confined & "\",\n" & R4Floor &
      "        address = \"r4Timed\")\n" &
      "      systemdSystemUnit(name = \"eth-r4-watch.path\",\n" &
      "        content = \"[Path]\\nDirectoryNotEmpty=/var/lib/ethereum/validator/spool\\n" &
      "MakeDirectory=yes\\nUnit=eth-r4-timed.service\\n\",\n" &
+     "        address = \"r4PathFloored\")\n",
+     "MakeDirectory=yes is not a setting the floor allows", "floor"),
+    ("path", "r4Path",
+     "      systemdSystemUnit(name = \"eth-r4-watched.service\",\n" &
+     "        content = \"" & R4ConfinedUnfloored & "\",\n" &
+     "        address = \"r4Watched\")\n" &
+     "      systemdSystemUnit(name = \"eth-r4-watch.path\",\n" &
+     "        content = \"[Path]\\nDirectoryNotEmpty=/var/lib/ethereum/validator/spool\\n" &
+     "MakeDirectory=yes\\nUnit=eth-r4-watched.service\\n\",\n" &
      "        address = \"r4Path\")\n",
-     "/var/lib/ethereum/validator (r4Path)")]
+     "/var/lib/ethereum/validator (r4Path)", "reach")]
     ## (case, the resource the refusal must name, its lines, a fragment of
-    ## the reason). Each is let in by the engine build of its finding:
-    ## ``account-as-written``, ``reach-timer-dropins-unread``,
-    ## ``reach-path-unit-paths-ignored``.
+    ## the reason, the layer that refuses it). A ``reach`` case is refused
+    ## by the carried-state check (``ECarriedStatePending``) and let in by
+    ## the engine build of its finding: ``account-as-written``,
+    ## ``reach-timer-dropins-unread``, ``reach-path-unit-paths-ignored``. The
+    ## ``floor`` case is the same path unit activating a floored service,
+    ## which the hardening floor refuses first, at parse time, whatever
+    ## reach says: defence in depth, so a change that drops either layer
+    ## turns a step red. It runs before the reach case, so the path
+    ## falsifier shows the floor still refusing and the reach step red.
   R4Host = "      systemdSystemUnit(name = \"eth-r4-host.service\",\n" &
     "        content = \"" & R4Confined & "\",\n" & R4Floor &
     "        address = \"r4Host\")\n"
@@ -553,7 +574,7 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
     # carried one.
     let probes = newJObject()
     record["roundFourProbes"] = probes
-    for (label, address, resources, reason) in R4Probes:
+    for (label, address, resources, reason, layer) in R4Probes:
       let pf = probeFile(label)
       writeFile(work / pf, probeProfile("r4" & label, resources))
       nw.copyTo(work / pf, RefDir / pf)
@@ -563,13 +584,17 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
       # Judged, then refused for the expected reason: a compile error or
       # any other failure is red here, and is never the falsifier's red
       # either (the record keeps whether each probe was judged).
+      let refused =
+        if layer == "floor": r.exitCode != 0 and reason in o and
+                             "eth-r4-watch.path" in o
+        else: r.exitCode != 0 and "ECarriedStatePending" in o and
+              ("(" & address) in o and reason in o
       probes[label] = %*{"exit": r.exitCode, "judged": judged(o),
-        "refusedForReason": r.exitCode != 0 and "ECarriedStatePending" in o and
-          ("(" & address) in o and reason in o}
+        "layer": layer, "refusedForReason": refused}
       step("round 4, " & label & ": refused while the directory is pending, " &
+           (if layer == "floor": "by the hardening floor, " else: "") &
            "naming " & address,
-           judged(o) and r.exitCode != 0 and "ECarriedStatePending" in o and
-             ("(" & address) in o and reason in o,
+           judged(o) and refused,
            (if judged(o): "" else: "NOT JUDGED (the profile did not compile): ") & o)
     # A host drop-in the profile does not have (here in /run): read as
     # systemd reads it. Without it the confined unit is let in (control);
