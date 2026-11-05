@@ -78,7 +78,7 @@ ExecStart=/bin/true
 
 proc confined(name, extra: string): string =
   "systemd.systemUnit {\n  name = \"" & name & "\"\n  content = \"[Service]\n" &
-    "ProtectSystem=strict\n" & extra & "ExecStart=/bin/true\n\"\n}\n"
+    "ProtectSystem=strict\nUser=app\n" & extra & "ExecStart=/bin/true\n\"\n}\n"
 
 proc stopped(): AlivenessFn =
   result = proc (u: string): UnitAliveness = uaEmpty

@@ -489,11 +489,27 @@
 ##                                            followed
 ## ``backup-without-host-lock``               the backup runs without the
 ##                                            host apply lock and is not
-##                                            re-checked after the hold; an
-##                                            apply's carried check is not
-##                                            repeated under the lock
+##                                            re-checked after the hold
 ## ``restore-not-required-by-units``          the carried units do not
 ##                                            require the restore unit
+## ``restore-unordered``                      the restore unit and the
+##                                            carried units' drop-in carry
+##                                            no ordering
+## ``restore-required-by-link``               the requirement is a link in
+##                                            .requires/ (removed by a
+##                                            disable or a preset)
+## ``carried-check-not-under-lock``           an apply does not decide
+##                                            carried state again under the
+##                                            host lock
+## ``reach-default-allow``                    what the reach analysis does
+##                                            not understand is allowed
+##                                            (round 2's behaviour)
+## ``reach-paths-as-text``                    reach compares paths as text
+##                                            and ignores the legacy
+##                                            ReadWriteDirectories=
+## ``missing-manifest-allowed``               a manifest missing where
+##                                            carried state was installed
+##                                            counts as none
 ## ``engine-tick-unrecorded``                 the full engine's agent tick
 ##                                            on an add-on host leaves no
 ##                                            evidence record
@@ -791,6 +807,13 @@ const
                           "reach-trigger-units-reach-nothing",
                           "backup-without-host-lock",
                           "restore-not-required-by-units",
+                          # A13 review round 3.
+                          "restore-unordered",
+                          "restore-required-by-link",
+                          "carried-check-not-under-lock",
+                          "missing-manifest-allowed",
+                          "reach-default-allow",
+                          "reach-paths-as-text",
                           # A11 review: the full engine's deploy-agent tick
                           # on an add-on host leaves no record.
                           "engine-tick-unrecorded",

@@ -2817,6 +2817,22 @@ proc carriedRefusalFor(opts: AddonApplyOptions; stateDir: string): string =
      else: CarriedStateDir),
     (if opts.carriedStateRoot.len > 0: opts.carriedStateRoot else: "/"))
 
+proc hostLockWithCarriedRecheck*(opts: AddonApplyOptions;
+                                 stateDir: string): HostApplyLock =
+  ## Take the host apply lock for this apply and decide carried state again
+  ## under it: a state backup takes the same lock, so a hold it wrote while
+  ## this apply waited for the lock is seen here, before anything is
+  ## written, not after the switch has started units. Raises
+  ## ``AddonApplyError`` (with the lock released) on a refusal.
+  result = acquireHostApplyLock("add-on " &
+    (if opts.purpose.len > 0: opts.purpose else: "apply") & " (state " &
+    stateDir & ")")
+  when not mutated("carried-check-not-under-lock"):
+    let why = carriedRefusalFor(opts, stateDir)
+    if why.len > 0:
+      result.release()
+      raise newException(AddonApplyError, why)
+
 proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult
   ## Defined below, after the switch it wraps with its evidence record.
 
@@ -2860,18 +2876,8 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
   # switch, not only the infra apply inside it.
   var hostLock: HostApplyLock
   if not opts.planOnly:
-    hostLock = acquireHostApplyLock("add-on " &
-      (if opts.purpose.len > 0: opts.purpose else: "apply") & " (state " &
-      stateDir & ")")
+    hostLock = hostLockWithCarriedRecheck(opts, stateDir)
   defer: hostLock.release()
-  if not opts.planOnly:
-    # Decided again under the host lock: a state backup takes the same
-    # lock, so a hold it wrote while this apply waited is seen here, not
-    # after the switch has started units.
-    when not mutated("backup-without-host-lock"):
-      let why = carriedRefusalFor(opts, stateDir)
-      if why.len > 0:
-        raise newException(AddonApplyError, why)
   if not opts.planOnly:
     enterWritableStoreView()
     createDir(addonDir(stateDir))

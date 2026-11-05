@@ -89,6 +89,15 @@
 ## - engine build ``restore-not-required-by-units``: at the boot after the
 ##   restored validator directory is replaced and the archives damaged, the
 ##   validator starts although the restore failed; red.
+## - engine build ``restore-unordered`` (no ordering on the restore): the
+##   validator, without default dependencies at that boot, starts beside the
+##   failing restore; red at the same step;
+## - engine build ``restore-required-by-link`` (round 2's ``.requires/``
+##   link): the disable and preset of the restore unit remove it, and the
+##   validator starts; red at the same step;
+## - engine build ``carried-reach-by-unit-name``: the renamed unit that
+##   reaches the carried directory only by its path is applied before the
+##   restore; red at the path-reach step.
 ##
 ## The last check (after the kept disk's): the boot path is governed by the
 ## restore. The restore unit is installed with ``repro system state
@@ -131,6 +140,28 @@ const
   SetUnits = ["vaultwarden.service", "eth-execution.service",
               "eth-beacon.service", DefaultValidatorUnit]
   RestoreUnit = "repro-state-restore.service"
+  PathReachProfile = """import repro_profile
+
+profile "pathReach":
+  activity vaultwarden:
+    resources:
+      fsSystemFile(path = "/etc/a13-path-reach/marker", content = "x\n",
+        address = "pathReachMarker")
+  activity ethereum_validator:
+    resources:
+      systemdSystemUnit(name = "eth-validator-renamed.service",
+        content = "[Unit]\nDescription=A13 path-reach probe\n\n[Service]\n" &
+          "User=eth-validator\nGroup=eth-validator\n" &
+          "ReadWritePaths=/var/lib/ethereum/validator\n" &
+          "ExecStart=/bin/true\n",
+        hardening = "serviceFloor",
+        floorExceptions = @["NoExecPaths: the conversion gate's path-reach " &
+          "probe runs /bin/true"],
+        address = "pathReachRenamed")
+"""
+    ## The profile of the path-reach step: the host's two activities, and in
+    ## the validator's one unit that touches the carried directory by path
+    ## only.
   # The chain clients' lines that say where each resumed and whether they
   # agree on the head: geth's loaded and repaired heads and its fork-choice
   # refusals, prysm's start head and its errors.
@@ -359,6 +390,25 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
          nw.exec("test -e /etc/systemd/system/" & DefaultValidatorUnit).exitCode != 0,
          sync.stdout & sync.stderr)
 
+    # Reach by path, end to end: a profile whose only link to the carried
+    # validator directory is a path -- a renamed, confined, non-root unit
+    # with ReadWritePaths= on it, no credentials, nothing it starts -- is
+    # refused while the directory is pending, and the refusal names the path
+    # (``<dir> (<address>)``, no "reaches everything" reason). Red when the
+    # reach is decided by unit name (engine build
+    # ``carried-reach-by-unit-name``).
+    writeFile(work / "pathreach.nim", PathReachProfile)
+    nw.copyTo(work / "pathreach.nim", RefDir / "pathreach.nim")
+    let pr = nw.exec(env & eng & " infra apply --profile " & RefDir &
+      "/pathreach.nim --host " & AgentTarget & " --no-preview", timeoutSec = 3600)
+    let prOut = pr.stdout & pr.stderr
+    step("a unit that reaches the carried directory only by its path is " &
+         "refused for it (path-based reach)",
+         pr.exitCode != 0 and "ECarriedStatePending" in prOut and
+           "/var/lib/ethereum/validator (pathReachRenamed)" in prOut and
+         nw.exec("test -e /etc/systemd/system/eth-validator-renamed.service").exitCode != 0,
+         prOut)
+
     # --- 3. The first-boot unit restores before anything starts.
     # Installed as a conversion installs it: the unit, enabled, and the
     # drop-in that makes every carried unit require it.
@@ -540,11 +590,25 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
     # validator directory replaced and its archive damaged, the restore unit
     # fails at the next boot, and the validator, which requires it, is not
     # started (review round 2, finding 4).
+    # Two more ways the requirement could be lost, both exercised here: the
+    # validator without default dependencies (so only the restore's own
+    # ordering keeps it behind the restore), and the restore unit disabled
+    # and preset (which remove every link to it; the requirement is the
+    # carried unit's own drop-in). Red under the engine builds
+    # ``restore-unordered`` and ``restore-required-by-link``.
     discard nw.run("systemctl stop " & DefaultValidatorUnit & "; " &
       "v=/var/lib/ethereum/validator; own=$(stat -c %u:%g $v); " &
       "mode=$(stat -c %a $v); rm -rf $v && mkdir $v && chown $own $v && " &
       "chmod $mode $v; for a in " & CarriedDir & "/carry-*.rsa; do " &
-      "printf x | dd of=$a bs=1 seek=4096 conv=notrunc 2>/dev/null; done")
+      "printf x | dd of=$a bs=1 seek=4096 conv=notrunc 2>/dev/null; done; " &
+      "mkdir -p /etc/systemd/system/" & DefaultValidatorUnit & ".d && " &
+      "printf '[Unit]\\nDefaultDependencies=no\\n' > /etc/systemd/system/" &
+      DefaultValidatorUnit & ".d/95-a13-no-default-deps.conf; " &
+      "systemctl daemon-reload; systemctl disable " & RestoreUnit & "; " &
+      "systemctl preset " & RestoreUnit & " || true")
+    record["bootPathSetup"] = %nw.exec("systemctl show -p DefaultDependencies " &
+      DefaultValidatorUnit & "; systemctl is-enabled " & RestoreUnit &
+      " || true").stdout
     nw.rebootGuest()
     let rres = nw.run("systemctl show -p Result -p ActiveState " & RestoreUnit)
     let vState = nw.exec("systemctl is-active " & DefaultValidatorUnit).stdout.strip()
