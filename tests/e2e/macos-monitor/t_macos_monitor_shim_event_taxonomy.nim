@@ -254,9 +254,11 @@ int main(int argc, char **argv) {
       let supportProfile = evaluateMonitorEvidence(dep,
         MacosMonitorShimTaxonomyCapabilities)
       check supportProfile.backendFamily == mbfMacosHooks
-      check not supportProfile.evidenceComplete
-      # The raw verdict above remains incomplete. This separate control
-      # removes only the exact platform marker, retaining every other loss.
+      # From io-mon 3d47bb1 (G42) on, macOS has its tree-lifetime guard, so
+      # the raw capture of this quiesced fixture is complete, not only the
+      # subsystem view of it.
+      check dep.completeness == mcComplete
+      check supportProfile.evidenceComplete
       check evaluateMonitorEvidence(subsystem,
         MacosMonitorShimTaxonomyCapabilities).evidenceComplete
       check mcapEndpointSecurity notin supportProfile.supportedCapabilities
@@ -330,13 +332,13 @@ int main(int argc, char **argv) {
       # accordingly part of ``MacosMonitorShimTaxonomyCapabilities`` and of the
       # macOS supported set in io-mon's ``capabilities.nim``. Requiring
       # ``mcapRename`` must leave the subsystem evidence complete with no
-      # capability gap, while the real verdict retains the platform lifetime
-      # limitation (rename used to be an unsupported gap before the hook landed).
+      # capability gap (rename used to be an unsupported gap before the hook
+      # landed).
       check mcapRename in MacosMonitorShimTaxonomyCapabilities
       var renameRequired = MacosMonitorShimTaxonomyCapabilities
       renameRequired.incl mcapRename
       let renameRequiredProfile = evaluateMonitorEvidence(dep, renameRequired)
-      check not renameRequiredProfile.evidenceComplete
+      check renameRequiredProfile.evidenceComplete
       check evaluateMonitorEvidence(subsystem, renameRequired).evidenceComplete
       check mcapRename in renameRequiredProfile.supportedCapabilities
       check not hasGap(renameRequiredProfile, mcapRename, true)
@@ -358,7 +360,7 @@ int main(int argc, char **argv) {
       let rendered = parseJson(renderMonitorDepFileJson(dep))
       check rendered["format"].getStr() == "iomon"
       check rendered["backendFamily"].getStr() == "macos-interpose-hooks"
-      check not rendered["backendProfile"]["evidenceComplete"].getBool()
+      check rendered["backendProfile"]["evidenceComplete"].getBool()
       check rendered["capabilityGaps"].len >= 3
 
 when not defined(macosx):
