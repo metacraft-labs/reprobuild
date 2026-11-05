@@ -68562,15 +68562,23 @@ proc undeclaredDependEdges(repos: seq[ResolvedRepo];
         pending.add(dep)
 
 type
+  FragmentSite = object
+    ## One ``repos/*.toml`` fragment declaring a repo name.
+    basename: string
+      ## What a ``member_repos`` entry names.
+    layerRoot: string
+      ## The manifest layer holding it. A layer resolves ``member_repos``
+      ## against its own ``repos/`` only, so the entry belongs in that
+      ## layer's project manifest.
+
   DanglingDependGap = object
     ## One ``depends`` edge whose name a workspace fragment declares but the
     ## project being checked does not include.
     label: string
       ## ``owner -> dep``.
-    fragments: seq[string]
-      ## The basenames of the fragments declaring that name, which is what a
-      ## ``member_repos`` entry names. More than one means alternatives (one
-      ## name, several upstreams), of which a project includes one.
+    sites: seq[FragmentSite]
+      ## The fragments declaring that name. More than one means alternatives
+      ## (one name, several upstreams), of which a project includes one.
 
   DanglingDependEdges = object
     ## The closure's dangling ``depends`` edges, split by cause, in
@@ -68586,8 +68594,8 @@ type
       ## ``undeclared`` verdict holds only for the fragments that were read.
 
   DeclaredFragments = object
-    byName: Table[string, seq[string]]
-      ## Declared repo name -> basenames of the fragments declaring it.
+    byName: Table[string, seq[FragmentSite]]
+      ## Declared repo name -> the fragments declaring it.
     unreadable: seq[string]
 
 proc fragmentDeclaredName(text: string): string =
@@ -68605,36 +68613,37 @@ proc fragmentDeclaredName(text: string): string =
 
 proc declaredFragments(manifestRoots: openArray[string]): DeclaredFragments =
   ## Every repo name a ``repos/*.toml`` fragment under any of
-  ## ``manifestRoots`` declares, mapped to the basenames of the fragments that
-  ## declare it (sorted, de-duplicated). Two fragments may share one name, and
-  ## a basename need not equal the name it declares. Each fragment is read
-  ## with the strict reader; one it refuses is listed in ``unreadable``
-  ## rather than guessed at.
-  var paths: seq[string]
+  ## ``manifestRoots`` declares, mapped to the fragments that declare it and
+  ## the layer each was found in (sorted by layer order, then basename). Two
+  ## fragments may share one name, and a basename need not equal the name it
+  ## declares. Each fragment is read with the strict reader; one it refuses
+  ## is listed in ``unreadable`` rather than guessed at.
   var seenDirs = initHashSet[string]()
   for root in manifestRoots:
     let dir = absolutePath(root / reposDirName)
     if dir in seenDirs or not dirExists(dir):
       continue
     seenDirs.incl(dir)
+    var paths: seq[string]
     for kind, path in walkDir(dir):
       if kind in {pcFile, pcLinkToFile} and path.endsWith(".toml"):
         paths.add(path)
-  paths.sort()
-  for path in paths:
-    var name = ""
-    try:
-      name = readRepoFragment(path).repo.name
-    except WorkspaceManifestParseError:
-      result.unreadable.add(path)
-      continue
-    let basename = path.extractFilename.changeFileExt("")
-    if name notin result.byName:
-      result.byName[name] = @[]
-    if basename notin result.byName[name]:
-      result.byName[name].add(basename)
-  for basenames in result.byName.mvalues:
-    basenames.sort()
+    paths.sort(proc(a, b: string): int =
+      cmp(a.extractFilename.changeFileExt(""),
+        b.extractFilename.changeFileExt("")))
+    for path in paths:
+      var name = ""
+      try:
+        name = readRepoFragment(path).repo.name
+      except WorkspaceManifestParseError:
+        result.unreadable.add(path)
+        continue
+      let site = FragmentSite(basename: path.extractFilename.changeFileExt(""),
+        layerRoot: root)
+      if name notin result.byName:
+        result.byName[name] = @[]
+      if site notin result.byName[name]:
+        result.byName[name].add(site)
 
 proc danglingDependsInClosure(repos: seq[ResolvedRepo];
     pushedRepoName: string; manifestRoots: openArray[string]):
@@ -68667,33 +68676,58 @@ proc danglingDependsInClosure(repos: seq[ResolvedRepo];
     let label = edge.owner & " -> " & edge.dep
     if edge.dep in declared.byName:
       result.outsideProject.add(DanglingDependGap(label: label,
-        fragments: declared.byName[edge.dep]))
+        sites: declared.byName[edge.dep]))
     else:
       result.undeclared.add(label)
 
-proc projectMembershipTarget(projectFile: string;
-    manifestRoots: openArray[string]): string =
-  ## Where an operator adds a ``member_repos`` entry for the project resolved
-  ## from ``projectFile``, as a path relative to the manifest layer holding
-  ## it. A variant's own extra membership is not yet composed by name, so for
-  ## a variant this names its base project manifest.
-  if projectFile.len == 0:
-    return "the project manifest"
-  var display = projectFile
+proc displayManifestPath(path: string; manifestRoots: openArray[string]):
+    string =
+  ## ``path`` relative to the first of ``manifestRoots`` holding it, with
+  ## forward slashes; ``path`` itself when none does.
+  let absFile = absolutePath(path)
   for root in manifestRoots:
     let absRoot = absolutePath(root)
-    let absFile = absolutePath(projectFile)
     if absFile.startsWith(absRoot & DirSep):
-      display = relativePath(absFile, absRoot).replace(DirSep, '/')
-      break
+      return relativePath(absFile, absRoot).replace(DirSep, '/')
+  path
+
+proc projectMembershipTarget(projectFile: string;
+    manifestRoots: openArray[string]): tuple[path, note: string] =
+  ## The project manifest an operator adds a ``member_repos`` entry to, for
+  ## the project resolved from ``projectFile``, relative to its manifest
+  ## layer. A variant's own extra membership is not yet composed by name, so
+  ## for a variant this is its base project, and ``note`` says so.
+  if projectFile.len == 0:
+    return ("the project manifest", "")
+  let display = displayManifestPath(projectFile, manifestRoots)
   if display.startsWith("variants/"):
     try:
       let base = readVariantManifest(projectFile).variant.base
       if base.len > 0:
-        return base & " (the base project of variant " & display & ")"
+        return (base, " (the base project of variant " & display & ")")
     except WorkspaceManifestParseError:
       discard
-  display
+  (display, "")
+
+proc layerMembershipTarget(site: FragmentSite; rootTarget: string;
+    membershipRoot, workspaceRoot: string): string =
+  ## Where ``site``'s ``member_repos`` entry goes: ``rootTarget`` when the
+  ## fragment is in the workspace's own manifests, else the same project
+  ## manifest inside the fragment's layer, which resolves members against
+  ## its own ``repos/`` only.
+  if sameFilesystemPath(absolutePath(site.layerRoot),
+      absolutePath(membershipRoot)):
+    return rootTarget
+  let absLayer = absolutePath(site.layerRoot)
+  let absWorkspace = absolutePath(workspaceRoot)
+  let layerDisplay =
+    if absLayer.startsWith(absWorkspace & DirSep):
+      relativePath(absLayer, absWorkspace).replace(DirSep, '/')
+    else:
+      absLayer.replace(DirSep, '/')
+  layerDisplay & "/" & rootTarget &
+    " (in the manifest layer holding the fragment; create it there if " &
+    "absent, with any [[remote]] the fragment uses)"
 
 proc membershipPushScope(identity: GitToolIdentity; resolved: ResolvedProject;
     membershipRoot: string; ranges: openArray[PushedCommitRange]):
@@ -69693,30 +69727,49 @@ proc executeCheckPrePush(parsed: CheckArgs;
         "readable fragment in this workspace's manifest layers declares: " &
         dangling.undeclared.join(", ") & unreadableNote))
   if dangling.outsideProject.len > 0:
-    let target = projectMembershipTarget(resolved.projectFile, manifestRoots)
+    let rootTarget = projectMembershipTarget(resolved.projectFile,
+      manifestRoots)
     var additions, labels, fragmentLists: seq[string]
     for gap in dangling.outsideProject:
-      var quoted: seq[string]
-      for basename in gap.fragments:
-        quoted.add("\"" & basename & "\"")
-      let choice =
-        if quoted.len == 1: quoted[0]
-        else: "one of " & quoted.join(", ")
-      additions.add(choice & " (for " & gap.label & ")")
+      var targets: seq[string]
+      for site in gap.sites:
+        let target = layerMembershipTarget(site, rootTarget.path,
+          membershipRoot, parsed.workspaceRoot)
+        if target notin targets:
+          targets.add(target)
+      var choice = ""
+      if targets.len == 1:
+        var quoted: seq[string]
+        for site in gap.sites:
+          quoted.add("\"" & site.basename & "\"")
+        choice =
+          (if quoted.len == 1: quoted[0] else: "one of " & quoted.join(", ")) &
+          " to `member_repos` in " & targets[0]
+      else:
+        var options: seq[string]
+        for site in gap.sites:
+          options.add("\"" & site.basename & "\" to `member_repos` in " &
+            layerMembershipTarget(site, rootTarget.path, membershipRoot,
+              parsed.workspaceRoot))
+        choice = "one of: " & options.join("; or ")
+      additions.add(choice & rootTarget.note & " (for " & gap.label & ")")
       labels.add(gap.label)
-      fragmentLists.add(gap.label & ": " & gap.fragments.join(" | "))
+      var basenames: seq[string]
+      for site in gap.sites:
+        basenames.add(site.basename)
+      fragmentLists.add(gap.label & ": " & basenames.join(" | "))
     result.failures.add(CheckFailure(
       repo: currentRepoPath,
       property: "dependency-not-declared",
-      remediation: "add " & additions.join("; ") & " to `member_repos` in " &
-        target & ", or make active a project that includes it — the " &
-        "workspace declares the repo but the project being pushed does not " &
-        "include it, so the gate cannot check it; edges: " &
-        labels.join(", "),
+      remediation: "add " & additions.join("; ") &
+        ", or make active a project that includes it — the workspace " &
+        "declares the repo but the project being pushed does not include " &
+        "it, so the gate cannot check it; edges: " & labels.join(", "),
       evidence: $dangling.outsideProject.len &
         " `depends` edge(s) in the pushed repo's closure name a repo the " &
         "workspace declares but project '" & resolved.projectName &
-        "' does not include: " & fragmentLists.join(", ")))
+        "' does not include: " & fragmentLists.join(", ") &
+        unreadableNote))
   if dangling.undeclared.len > 0 or dangling.outsideProject.len > 0:
     result.exitCode = 2
     return

@@ -341,6 +341,25 @@ suite "a depends edge outside the project names the right membership fix":
       check remediation.contains("\"lib-c-layer\"")
       check remediation.contains("member_repos")
       check not remediation.contains("does not declare")
+      # A layer resolves `member_repos` against its own `repos/` only, so
+      # the entry belongs in that layer's project manifest. The root
+      # `projects/lib-a.toml` cannot name a fragment it cannot see.
+      check remediation.contains(
+        "`member_repos` in " & layer & "/projects/lib-a.toml")
+      check not remediation.contains("`member_repos` in projects/lib-a.toml")
+
+      # Following the advice clears the refusal: the layer's own project
+      # manifest names the fragment (and the remote it uses). The layer is
+      # private, so other gate findings may remain; this one must not.
+      writeFile(layer / "projects" / "lib-a.toml",
+        "schema = \"reprobuild.workspace.project.v1\"\n\n" &
+        "[project]\nname = \"lib-a\"\n\n" &
+        "[[remote]]\nname = \"lib-b-origin\"\n" &
+        "fetch = \"" & fileUrl(fx.scratch / "origin-lib-b.git") & "\"\n\n" &
+        "member_repos = [\"lib-c-layer\"]\n")
+      let followed = runGate(fx)
+      for f in followed.report["failures"]:
+        check f["property"].getStr() != "dependency-not-declared"
 
   test "t_pre_push_names_the_base_project_of_an_active_variant":
     let gitBin = findExe("git")
