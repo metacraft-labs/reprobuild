@@ -2,10 +2,12 @@
 #
 # Validate .github/ the way GitHub does, before pushing.
 #
-# Two gates live here:
+# Three gates live here:
 #
 #   1. actionlint over .github/workflows -- a workflow GitHub cannot LOAD.
-#   2. sibling-repo pins -- explicit commit pins must agree with committed
+#   2. shared-action refs -- every `uses: metacraft-labs/...` names `@dev` or a
+#      40-hex commit SHA, never a retired or frozen branch.
+#   3. sibling-repo pins -- explicit commit pins must agree with committed
 #      locks; named refs must exist in the repository they name.
 #
 # WHY GATE 1 EXISTS
@@ -106,7 +108,138 @@ echo "== actionlint: .github/workflows =="
 echo "ok: all workflow files load"
 
 # =============================================================================
-# GATE 2 -- explicit sibling pins agree with locks and named refs EXIST.
+# GATE 2 -- every `uses: metacraft-labs/...` names `@dev` or a commit SHA.
+#
+# WHY THIS EXISTS
+#
+# metacraft-labs moved its mainline from `main` to `dev`. In
+# `metacraft-github-actions` there is no `main` branch at all, so a `@main`
+# reference is a step GitHub cannot resolve: the job dies at "Run
+# metacraft-labs/metacraft-github-actions/setup-dev-env@main" before doing
+# anything, and the run says nothing about a branch. `devops-modules` (formerly
+# `nixos-modules`) kept a frozen `main`, so `@main` there still resolves -- to a
+# snapshot that stopped moving while `dev` carried on. Nothing fails; CI just
+# runs an older action than everybody else. A ref that resolves is not a ref
+# that is current.
+#
+# A repo-wide rewrite fixes the references that exist that day; a workflow on a
+# branch already in flight reintroduces them. This gate is the rule, so the next
+# one fails lint on its own branch instead of after it lands.
+#
+# ACCEPTED REFS
+#
+#   dev                 -- the mainline, for every metacraft-labs repo.
+#   <40-hex commit sha> -- a deliberate, stronger pin than a branch.
+#
+# Everything else fails, including a `uses:` with no `@ref` at all. There is no
+# exemption list on purpose: an exemption is how `@main` would come back.
+# =============================================================================
+echo "== shared metacraft-labs action refs =="
+
+# The `uses:` spellings YAML accepts. `uses: "...@main"` is the same defect
+# wearing a quote; a scanner that understands only the bare form is a rule
+# with a one-character bypass in it.
+shared_action_ref_grep='^[[:space:]]*(-[[:space:]]+)?uses:[[:space:]]*["'"'"']?metacraft-labs/'
+
+# Emits one `<file>:<line>:<uses-line>` per reference that is neither `@dev`
+# nor a 40-hex SHA. Takes the directory to scan so the self-test can run it
+# over a synthetic tree.
+shared_action_ref_violations() {
+  local root="$1"
+  grep -rnE "${shared_action_ref_grep}" "${root}" 2>/dev/null |
+    sed -E 's/[[:space:]]+#.*$//' |
+    awk '
+      {
+        marker = index($0, "uses:")
+        spec = substr($0, marker + 5)
+        gsub(/^[ \t]+|[ \t]+$/, "", spec)
+        gsub(/^["'"'"']|["'"'"']$/, "", spec)
+        at = 0
+        for (i = length(spec); i > 0; i--)
+          if (substr(spec, i, 1) == "@") { at = i; break }
+        if (at == 0) { print; next }        # unpinned `uses:` -- also a defect
+        ref = substr(spec, at + 1)
+        if (ref == "dev") next
+        if (ref ~ /^[0-9a-f]{40}$/) next
+        print
+      }
+    ' || true
+}
+
+# Counts `uses:` references to metacraft-labs repos under $1. A second
+# argument narrows the count to one repo.
+shared_action_ref_count() {
+  local root="$1"
+  local repo="${2:-}"
+  grep -rcE "${shared_action_ref_grep}${repo}" \
+    "${root}" 2>/dev/null | awk -F: '{ total += $NF } END { print total + 0 }'
+}
+
+# Prove the scanner still has teeth before trusting a clean result from it. A
+# scan that silently matches nothing -- a moved directory, a `uses:` spelling
+# the pattern stopped recognising -- is a green light that means nothing.
+shared_ref_selftest="$(mktemp -d)"
+mkdir -p "${shared_ref_selftest:?}/workflows"
+cat >"${shared_ref_selftest:?}/workflows/good.yml" <<'GOOD'
+      - uses: metacraft-labs/metacraft-github-actions/setup-dev-env@dev
+      - uses: "metacraft-labs/metacraft-github-actions/setup-dev-env@dev"
+      - uses: metacraft-labs/metacraft-github-actions/clone-repo@0123456789abcdef0123456789abcdef01234567
+      - uses: actions/checkout@v4
+GOOD
+cat >"${shared_ref_selftest:?}/workflows/bad.yml" <<'BAD'
+      - uses: metacraft-labs/devops-modules/.github/setup-nix@main
+      - uses: metacraft-labs/metacraft-github-actions/setup-dev-env@main
+      - uses: "metacraft-labs/metacraft-github-actions/setup-dev-env@main"
+      - uses: 'metacraft-labs/metacraft-github-actions/setup-dev-env@main'
+      - uses: metacraft-labs/metacraft-github-actions/setup-nix
+BAD
+selftest_hits="$(shared_action_ref_violations "${shared_ref_selftest:?}" | wc -l | tr -d ' ')"
+good_hits="$(shared_action_ref_violations "${shared_ref_selftest:?}/workflows/good.yml" | wc -l | tr -d ' ')"
+rm -rf -- "${shared_ref_selftest:?}"
+if [ "${selftest_hits}" != "5" ]; then
+  echo "FAIL: the shared-action-ref scanner found ${selftest_hits} of 5 planted" >&2
+  echo "      violations (@main bare, double-quoted and single-quoted, plus an" >&2
+  echo "      unpinned \`uses:\`). It is not scanning what it claims to; fix it" >&2
+  echo "      before trusting a clean run." >&2
+  exit 1
+fi
+if [ "${good_hits}" != "0" ]; then
+  echo "FAIL: the shared-action-ref scanner rejects \`@dev\` or a 40-hex SHA." >&2
+  echo "      It would refuse every correct reference in the repo." >&2
+  exit 1
+fi
+echo "ok: shared-action-ref scanner catches @main and an unpinned uses:"
+
+# Non-vacuity: this repo's CI runs through `setup-dev-env`
+# (scripts/check_repo_requirements.sh asserts it), so a scan of .github that
+# finds no metacraft-github-actions reference has stopped looking where the
+# references live.
+found_refs="$(shared_action_ref_count .github)"
+anchor_refs="$(shared_action_ref_count .github metacraft-github-actions/)"
+if [ "${anchor_refs}" -lt 1 ]; then
+  echo "FAIL: no \`uses: metacraft-labs/metacraft-github-actions/...\` found under" >&2
+  echo "      .github/. Either the shared actions were removed -- and this gate" >&2
+  echo "      and scripts/check_repo_requirements.sh both need updating -- or" >&2
+  echo "      the scan is looking in the wrong place." >&2
+  exit 1
+fi
+
+violations="$(shared_action_ref_violations .github)"
+if [ -n "${violations}" ]; then
+  echo "FAIL: shared metacraft-labs action reference(s) name neither \`@dev\`" >&2
+  echo "      nor a commit SHA:" >&2
+  printf '%s\n' "${violations}" | sed 's/^/      /' >&2
+  echo "" >&2
+  echo "      metacraft-github-actions has no \`main\` branch, so \`@main\` is a" >&2
+  echo "      step that cannot start; devops-modules keeps a frozen one, so" >&2
+  echo "      \`@main\` there silently runs an old copy of the action." >&2
+  echo "      Use \`@dev\`, or a 40-hex commit SHA for a deliberate pin." >&2
+  exit 1
+fi
+echo "ok: all ${found_refs} shared-action reference(s) name @dev or a SHA"
+
+# =============================================================================
+# GATE 3 -- explicit sibling pins agree with locks and named refs EXIST.
 #
 # WHY THIS EXISTS
 #
