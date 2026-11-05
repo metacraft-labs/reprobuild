@@ -362,10 +362,17 @@ proc runAddonBootstrap*(opts: BootstrapOptions): BootstrapResult =
     raise newException(AddonBootstrapError, "the store copy of the add-on " &
       "binary hashes to " & storeCopy & ", not the planned " &
       plan.binarySha256)
-  for (path, id) in [(prefixes.binaryPrefixPath, prefixes.binaryPrefixId),
-                     (prefixes.filesPrefixPath, prefixes.filesPrefixId)]:
+  # Each prefix's realisation digest is recorded here, in the ledger
+  # (root-only, outside the store, attested by the generation's statement):
+  # store verification takes the expected digest from it, never from the
+  # path it verifies (spec §10.2).
+  for (path, id, digest) in [
+      (prefixes.binaryPrefixPath, prefixes.binaryPrefixId,
+       prefixes.binaryDigest),
+      (prefixes.filesPrefixPath, prefixes.filesPrefixId,
+       prefixes.filesDigest)]:
     entries.add(LedgerEntry(class: lcStorePrefix, path: path,
-      sha256: hexOf(id)))
+      sha256: hexOf(id), value: digest))
 
   # 5. Generation 0, through repro infra apply. The ledger copy exists
   # BEFORE the apply, holding what bootstrap created so far: generation 0

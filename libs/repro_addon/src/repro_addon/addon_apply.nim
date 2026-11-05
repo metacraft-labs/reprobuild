@@ -4337,7 +4337,7 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
   let previousStatic =
     if replaying and priorMarker.previousStatic.len > 0: priorMarker.previousStatic
     else: readStaticTarget()
-  let (treePath, treePrefixId) = realiseStaticTree(treeFiles)
+  let (treePath, treePrefixId, treeDigest) = realiseStaticTree(treeFiles)
   var closureLocks: seq[AptClosureLock]
   for p in plans:
     # A unit's closure, and a tool's (its driver would otherwise realise it
@@ -4936,7 +4936,8 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
         linkTarget: readStaticTarget(), resource: "static-tree",
         mode: "0777", owner: "0:0"))
       put(LedgerEntry(class: lcStorePrefix, path: treePath,
-        sha256: prefixIdHex(treePrefixId), resource: "static-tree"))
+        sha256: prefixIdHex(treePrefixId), value: treeDigest,
+        resource: "static-tree"))
       for p in plans:
         if p.r.address in hookRefused:
           # The write-time re-check refused this resource's operation: what

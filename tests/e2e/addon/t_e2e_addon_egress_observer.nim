@@ -15,6 +15,11 @@
 ##    fetch unit is refused by the unit's filter, counted by the table, and
 ##    recorded by the check (``addon-egress`` / ``egress-refused``), which
 ##    reaches the gate's sink.
+## 3c. **The re-assert sees the host's table** (A11 audit session 2, G4).
+##    A reboot of the healthy host: the re-assert reports ``ok``, with no
+##    finding about the table. Then the table is deleted and the re-assert
+##    run again: it reports the table ``missing`` (drift), not
+##    ``unreadable``. The observer unit then loads it again.
 ## 4. **Uninstall removes it.** After uninstall the table is gone and the
 ##    fingerprint equals the pre-bootstrap one.
 ##
@@ -22,7 +27,9 @@
 ## unit never loads the table: steps 2 and 3 go red);
 ## ``evidence-path-rate-limited`` (the burst step: the path unit dies on the
 ## start limit, A11 audit F2); ``uninstall-keeps-fetch-state`` (the
-## fetch unit's state directory survives uninstall, A11 audit F5).
+## fetch unit's state directory survives uninstall, A11 audit F5);
+## ``reassert-nft-in-own-netns`` (the re-assert lists the tables in its own
+## private network namespace: both steps of 3c go red, session 2 G4).
 ##
 ## Seam build (the fetch unit's pause). Opt-in: ``REPRO_ADDON_VM_GATES=1``.
 ##
@@ -57,6 +64,11 @@ proc body(g: Guest; repro: string; step: StepFn; record: JsonNode;
        refused.exitCode != 0 and "EAddOnEgressObserverUnavailable" in refused.stdout,
        refused.stdout & refused.stderr)
   # 2. Bootstrap installs the table, ledgered.
+  # Step 3c reboots the host, and the units a cloud image runs only on its
+  # first boot (ldconfig, sysusers, machine-id commit, ...) are active in a
+  # first boot's fingerprint and not after: the baseline is taken after a
+  # boot that is not the first, so step 4 compares like with like.
+  g.rebootGuest()
   let f0 = g.takeFingerprint(repro)
   let bs = g.bootstrapWithAgent(repro, step, extraFlags = sink.evidenceFlags)
   producer = bs.producer
@@ -115,6 +127,26 @@ proc body(g: Guest; repro: string; step: StepFn; record: JsonNode;
   step("a burst of thirty records leaves within a minute, the path unit alive",
        arrived >= 30 and pathState != "failed", $arrived & " arrived; path " &
        pathState)
+  # 3c. The re-assert, confined to a private network namespace, reads the
+  # HOST's table (session 2, G4): a healthy reboot is ``ok``, a deleted
+  # table is ``missing``.
+  g.rebootGuest()
+  discard g.waitReasserted()
+  let healthy = g.exec("cat /var/lib/repro/system/addon/reassert-report").stdout
+  record["reassertHealthy"] = %healthy
+  step("a healthy reboot: the re-assert is ok, nothing about the table (G4)",
+       "repro-addon reassert: ok" in healthy and
+         "nftTable" notin healthy, healthy)
+  discard g.exec("nft delete table inet repro_addon_egress")
+  discard g.exec("systemctl restart repro-addon-reassert.service",
+                 timeoutSec = 900)
+  let removed = g.exec("cat /var/lib/repro/system/addon/reassert-report").stdout
+  record["reassertRemoved"] = %removed
+  step("the table deleted: the re-assert reports it missing (G4)",
+       "nftTable inet repro_addon_egress: missing" in removed, removed)
+  discard g.exec("systemctl restart repro-addon-egress.service")
+  step("the observer unit loads the table again",
+       "table inet repro_addon_egress" in g.exec("nft list tables").stdout, "")
   # 4. Uninstall removes it.
   let un = g.exec(repro & " system addon uninstall", timeoutSec = 1800)
   step("uninstall succeeds", un.exitCode == 0, un.stdout & un.stderr)
