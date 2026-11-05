@@ -110,69 +110,104 @@ proc canonicalPath(path: string): string =
   result = try: expandFilename(head) except OSError: head
   for part in tail: result = result / part
 
-iterator linkTargets(prefixDir: string): string =
-  ## The target of every symbolic link in `prefixDir`, resolved lexically
-  ## against the link's own directory and normalized. Links are never
-  ## followed: what is classified is where the link POINTS.
+const MaxLinkHops = 40   ## the kernel's ELOOP bound (Linux MAXSYMLINKS)
+
+proc resolveLink(link: string; crossed: var seq[string]): string =
+  ## Where the symbolic link `link` leads, resolved the way the kernel
+  ## resolves it: one component at a time, following every symbolic link met
+  ## on the way, so `d/..` goes to the parent of where `d` POINTS, not back
+  ## to the directory holding `d`. Every symbolic link crossed (including
+  ## `link` itself) is added to `crossed` as the canonical path of the link's
+  ## own location. A component that does not exist is taken lexically from
+  ## there on: the link dangles, and what matters is where it was aimed.
+  ##
+  ## Resolving the text alone is not enough. A link `x -> q/d/../../c/f`
+  ## whose `q/d` is itself a link reaches a different prefix than its text
+  ## says, and a closure walked by text would leave that prefix behind.
+  let first = expandSymlink(link)
+  crossed.add(canonicalPath(link.parentDir) / link.extractFilename)
+  var current = if first.isAbsolute: "/" else: canonicalPath(link.parentDir)
+  var pending = first.split('/')
+  var hops = 1
+  while pending.len > 0:
+    let part = pending[0]
+    pending.delete(0)
+    if part.len == 0 or part == ".":
+      continue
+    if part == "..":
+      if current != "/": current = current.parentDir
+      continue
+    let candidate = if current == "/": "/" & part else: current / part
+    if symlinkExists(candidate):
+      inc hops
+      if hops > MaxLinkHops:
+        fail("too many levels of symbolic links resolving " & link)
+      crossed.add(candidate)
+      let target = expandSymlink(candidate)
+      if target.isAbsolute: current = "/"
+      pending = target.split('/') & pending
+    else:
+      current = candidate
+  current
+
+proc storeRelative(path, root: string; rel: var string): bool =
+  ## Whether the canonical `path` lies in the store whose canonical root is
+  ## `root`, and if so its store-relative, `/`-separated path.
+  if not path.within(root):
+    return false
+  rel = (if path == root: "" else: path[root.len + 1 .. ^1]).replace(DirSep, '/')
+  true
+
+iterator linksIn(prefixDir: string): string =
+  ## Every symbolic link in `prefixDir`. Links are not descended into.
   for rel in walkDirRec(prefixDir, yieldFilter = {pcLinkToFile, pcLinkToDir},
       relative = true, followFilter = {pcDir}):
-    let link = prefixDir / rel
-    var target = expandSymlink(link)
-    if not target.isAbsolute: target = link.parentDir / target
-    yield normalizedPath(target)
-
-proc storeRelative(target: string; storeRoots: openArray[string];
-                   rel: var string): bool =
-  ## Whether `target` lies in the store under any of its spellings (the root
-  ## as given and as resolved), and if so its store-relative,
-  ## `/`-separated path.
-  for root in storeRoots:
-    if target.within(root):
-      rel = (if target == root: "" else: target[root.len + 1 .. ^1]).replace(
-        DirSep, '/')
-      return true
-  false
-
-proc storeSpellings(storeRoot: string): seq[string] =
-  result.add(normalizedPath(absolutePath(storeRoot)))
-  let canon = canonicalPath(storeRoot)
-  if canon != result[0]: result.add(canon)
+    yield prefixDir / rel
 
 proc linksLeave*(prefixDir, storeRoot: string): bool =
-  ## Whether a symbolic link in `prefixDir` names a target outside the store
-  ## (`storeRoot` under either spelling). Such a prefix holds pinned import
-  ## metadata for content the copy cannot carry: an external imported node.
-  let roots = storeSpellings(storeRoot)
+  ## Whether a symbolic link in `prefixDir` leads outside the store (both
+  ## resolved as the kernel resolves them, so a store root reached through a
+  ## symbolic link is recognised in either spelling). Such a prefix holds
+  ## pinned import metadata for content the copy cannot carry: an external
+  ## imported node.
+  let root = canonicalPath(storeRoot)
   var rel: string
-  for target in linkTargets(prefixDir):
-    if not target.storeRelative(roots, rel):
+  for link in linksIn(prefixDir):
+    var crossed: seq[string]
+    if not resolveLink(link, crossed).storeRelative(root, rel):
       return true
   false
 
 proc linkedPrefixes(s: Store; row: PrefixRow): seq[PrefixRow] =
   ## The OTHER prefixes of the source store that a link in `row`'s prefix
-  ## points into. A link is an edge of the closure just as a multi-output
-  ## sibling is: copying the prefix without its target would leave the link
-  ## dangling at the destination, a silently incomplete closure. A link into
-  ## the store that does not land in an indexed prefix cannot be carried
-  ## faithfully and is refused.
-  let roots = storeSpellings(s.root)
+  ## leads into or through. A link is an edge of the closure just as a
+  ## multi-output sibling is: copying the prefix without what its link
+  ## reaches would leave the link dangling at the destination, a silently
+  ## incomplete closure. So the prefix holding the final target AND every
+  ## prefix whose own link the resolution crosses is an edge. A link that
+  ## leads to, or through, a part of the store that no indexed prefix holds
+  ## cannot be carried faithfully and is refused.
+  let root = canonicalPath(s.root)
   let own = row.realizedPath
   var rel: string
-  for target in linkTargets(s.absolutePrefixPath(own)):
-    if not target.storeRelative(roots, rel):
-      continue                      # external: reported, not walked
-    if rel == own or rel.startsWith(own & "/"):
-      continue                      # inside the prefix itself
-    let parts = rel.split('/')
-    if parts.len < 3 or parts[0] != "prefixes":
-      fail("prefix " & own & " links into the store outside any prefix (" &
-        rel & "); it cannot be copied without it")
-    let hit = s.lookupPrefixByRealizedPath(parts[0 .. 2].join("/"))
-    if not hit.found:
-      fail("prefix " & own & " links into " & rel &
-        ", which no prefix of the source index holds")
-    result.add(hit.row)
+  for link in linksIn(s.absolutePrefixPath(own)):
+    var touched: seq[string]
+    touched.add(resolveLink(link, touched))
+    for path in touched:
+      if not path.storeRelative(root, rel):
+        continue                    # outside the store: external, not walked
+      if rel == own or rel.startsWith(own & "/"):
+        continue                    # inside the prefix itself
+      let parts = rel.split('/')
+      if parts.len < 3 or parts[0] != "prefixes":
+        fail("prefix " & own & " has a link that leads into the store " &
+          "outside any prefix (" & (if rel.len == 0: "the store root" else: rel) &
+          "); it cannot be copied without it")
+      let hit = s.lookupPrefixByRealizedPath(parts[0 .. 2].join("/"))
+      if not hit.found:
+        fail("prefix " & own & " has a link that leads into " & rel &
+          ", which no prefix of the source index holds")
+      result.add(hit.row)
 
 proc closureRootId*(prefixIds: openArray[PrefixIdBytes]): string =
   ## `copy:` and the first 32 hex digits of BLAKE3 over the sorted prefix
@@ -308,6 +343,13 @@ proc checkDestination(d: Store; plan: var PlannedPrefix) =
   ## Rule 1, the destination half, and rule 3.
   let where = plan.row.realizedPath
   let dir = d.absolutePrefixPath(where)
+  # Rule 4. The prefix must land in THIS store: a symbolic link anywhere on
+  # its path (the prefix, its package directory, `prefixes/` itself) that
+  # leads into another store would make the "copy" share that store's bytes,
+  # and a publish through it would write there.
+  if not canonicalPath(dir).within(canonicalPath(d.root)):
+    fail("destination prefix path " & where & " resolves outside the " &
+      "destination store (through a symbolic link): " & canonicalPath(dir))
   let hit = d.lookupPrefix(plan.row.prefixId)
   if hit.found:
     if hit.row.realizedPath != where:
@@ -484,11 +526,22 @@ proc copyClosure*(req: StoreCopyRequest): StoreCopyReport =
   # replaces the row, and the cascade would drop the holds an earlier copy
   # left. Everything already present is held BEFORE the first publish, so a
   # copy that fails part-way leaves every prefix it found or wrote held.
-  var rootKnown = false
-  for r in dst.listRoots():
-    if r.rootId == result.rootId: rootKnown = true
-  if not rootKnown:
-    dst.registerRoot(result.rootId, rkWorkspace)
+  # The look and the register are one transaction, so two copies of the same
+  # closure racing cannot both register it (the second replacing the first's
+  # row, and the cascade dropping the holds the first had attached).
+  dst.db.exec("BEGIN IMMEDIATE")
+  var registered = false
+  try:
+    var rootKnown = false
+    for r in dst.listRoots():
+      if r.rootId == result.rootId: rootKnown = true
+    if not rootKnown:
+      dst.registerRoot(result.rootId, rkWorkspace)
+    dst.db.exec("COMMIT")
+    registered = true
+  finally:
+    if not registered:
+      try: dst.db.exec("ROLLBACK") except CatchableError: discard
   for plan in plans:
     if plan.present:
       dst.holdIndexed(plan, result.rootId)

@@ -27,7 +27,10 @@
 ##   * a link into another prefix brings that prefix along (in either
 ##     spelling of a symlinked store root), a link into the store outside
 ##     any prefix is refused, and a destination prefix that is a link to the
-##     source's is refused.
+##     source's is refused;
+##   * links are resolved as the kernel resolves them: a link through a
+##     directory symlink and `..` brings the prefix it really reaches, and a
+##     destination whose package directory links into the source is refused.
 
 import std/[os, sequtils, strutils, tempfiles, unittest]
 
@@ -447,3 +450,69 @@ suite "repro store copy: link edges":
       d.close()
       expect StoreCopyError:
         discard f.copyOf(@[f.tool.relativePath])
+
+proc realizeWith(f: Fixture; name: string;
+                 populate: proc (stagingDir: string)): RealizeResult =
+  ## A prefix whose staging tree `populate` lays out directly, so directory
+  ## symlinks survive (realizeDirectoryAsPrefix's copier would drop them).
+  var s = openStore(f.src)
+  defer: s.close()
+  let hint = StoreReceiptHint(adapter: "path", packageName: name,
+    version: "1.0", lockIdentity: "test-" & name)
+  let id = computeRealizationHash(hint.packageName, hint.version,
+    hint.adapter, hint.lockIdentity, hint.declaredExecutablePath,
+    hint.provenanceUrl, hint.provenanceChecksum, [])
+  s.realizePrefix(id, hint,
+    proc (stagingDir: string; mechanism: var string) = populate(stagingDir))
+
+suite "repro store copy: links resolved as the kernel resolves them":
+  test "a link through a directory symlink and `..` brings its target":
+    when defined(windows):
+      skip("store copy is POSIX-only")
+    else:
+      let f = makeFixture()
+      defer: removeDir(f.top)
+      let toolDir = f.tool.relativePath.split('/')[2]
+      # q/r/d -> ../.. is the prefix's own root, so by TEXT
+      # `q/r/d/../../tool/<dir>/bin/tool` stays inside the prefix, while the
+      # kernel follows d first and lands in prefixes/tool/<dir>.
+      let a2 = f.realizeWith("a2", proc (dir: string) =
+        createDir(dir / "q" / "r")
+        createSymlink("../..", dir / "q" / "r" / "d")
+        createSymlink("q/r/d/../../tool/" & toolDir & "/bin/tool", dir / "x"))
+      check fileExists(f.src / a2.relativePath / "x")
+      let report = f.copyOf(@[a2.relativePath])
+      check f.tool.relativePath in report.closure
+      check report.external.len == 0
+      check fileExists(f.dst / a2.relativePath / "x")
+      check expandFilename(f.dst / a2.relativePath / "x") ==
+        expandFilename(f.dst / f.tool.relativePath / "bin" / "tool")
+
+  test "a destination whose package directory links into the source is refused":
+    when defined(windows):
+      skip("store copy is POSIX-only")
+    else:
+      let f = makeFixture()
+      defer: removeDir(f.top)
+      var src = openStore(f.src)
+      let row = src.lookupPrefix(f.tool.prefixId).row
+      src.close()
+      var d = openStore(f.dst)
+      let pkg = f.tool.relativePath.parentDir    # prefixes/tool
+      createSymlink(f.src / pkg, f.dst / pkg)
+      discard d.insertPrefixOrIgnore(row)
+      d.close()
+      expect StoreCopyError:
+        discard f.copyOf(@[f.tool.relativePath])
+      # Nor may a fresh prefix be published through such a link.
+      var s = openStore(f.src)
+      let other = s.listPrefixes().filterIt(it.packageName == "other")[0]
+      s.close()
+      let fresh = f.top / "fresh"
+      var d2 = openStore(fresh)
+      d2.close()
+      createSymlink(f.src / other.realizedPath.parentDir,
+        fresh / other.realizedPath.parentDir)
+      expect StoreCopyError:
+        discard copyClosure(StoreCopyRequest(sourceRoot: f.src,
+          destinationRoot: fresh, prefixes: @[other.realizedPath]))
