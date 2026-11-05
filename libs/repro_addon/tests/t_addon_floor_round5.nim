@@ -87,7 +87,7 @@ proc goodInput(): EffectiveInput =
   s["ExecPaths"] = floorBlock(ru)["ExecPaths"].join(" ")
   result = EffectiveInput(unit: "a.service", rendered: ru,
     version: FloorVersion, show: s, fragment: fragment,
-    denied: toHashSet(["memfd_create", "mount"]))
+    denied: toHashSet(["memfd_create", "mount"]), partialShow: true)
   result.uidOf = proc (n: string): int = (if n == "root": 0 else: 1000)
   result.groupsOf = proc (n: string): seq[string] = @[n]
   result.gidOf = proc (g: string): int =
@@ -151,16 +151,19 @@ suite "round 5, finding 1: EnvironmentFile= is read by the manager as root":
     check environmentFileProblem(dir / "e").len > 0
     # A root-owned file under root-owned, non-writable parents (/etc and /
     # on any build host).
-    if getFileInfo("/etc/passwd").id.device >= 0 and
-        fileExists("/etc/passwd"):
+    if fileExists("/etc/passwd"):
       check environmentFileProblem("/etc/passwd") == ""
+    # A link the user owns, in a directory the user owns: refused before
+    # its target is even looked at.
+    createSymlink("/etc/passwd", dir / "l")
+    check "not owned by root" in environmentFileProblem(dir / "l")
 
 suite "round 5, finding 2: sockets and other activators":
   test "Sockets= names only the profile's own socket units":
     check "not a socket unit of this profile" in refused(unitStanza(
       "a.service", "Sockets=dbus.socket\n" & svc))
     var e = goodInput()
-    e.show["Sockets"] = "dbus.socket"
+    e.loaded = @[(path: fragment, content: ru.replace("[Install]", "Sockets=dbus.socket\n\n[Install]"))]
     check "Sockets=dbus.socket is not a socket unit the add-on installed" in
       problemsOf(e)
     e.ownUnits = toHashSet(["dbus.socket"])
@@ -258,6 +261,7 @@ suite "round 5, finding 4: privileged groups by gid":
     e.show["DynamicUser"] = "yes"
     e.show["User"] = "a-dyn"
     e.show["Group"] = "a-dyn"
+    e.uidOf = proc (n: string): int = -1      # no static account of that name
     check problemsOf(e) == ""
     e.show["Group"] = "toor"
     check "privileged group toor" in problemsOf(e)

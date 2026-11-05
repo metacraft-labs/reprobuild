@@ -631,5 +631,9 @@ proc restoreStateSet*(dir: string; alive: AlivenessFn = defaultAliveness();
     receipt[e.path] = ReceiptEntry(digest: e.digest, root: rootOf(root),
                                    id: dirIdentity(target))
     result.add(e.path)
-  writeReceipt(dir, receipt)
+  # Test seams (seam builds only): the hard-reset gate resets the host
+  # inside the receipt's replacement (``receipt-before-rename``,
+  # ``receipt-before-dir-fsync``) and requires a whole receipt after it.
+  let seamDir = under(root, RestoreSeamStateDir)
+  writeReceipt(dir, receipt, proc (point: string) = seamPause(seamDir, point))
 

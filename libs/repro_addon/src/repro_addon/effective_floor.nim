@@ -49,6 +49,7 @@ import ./host_exec
 import ./mutations
 
 import repro_infra/service_floor
+import repro_infra/service_account
 
 type
   ShowProps* = Table[string, string]
@@ -72,13 +73,13 @@ const
     ## ``SecretsRunRoot``): ``LoadCredential=`` may read only
     ## ``<root>/<service>/``.
   FloorMarker* = "# serviceFloor (ReproOS add-on hardening default)"
-  ScalarFloorKeys = ["NoNewPrivileges", "ProtectSystem", "ProtectHome",
+  ScalarFloorKeys* = ["NoNewPrivileges", "ProtectSystem", "ProtectHome",
     "PrivateTmp", "PrivateDevices", "ProtectKernelTunables",
     "ProtectKernelModules", "ProtectKernelLogs", "ProtectControlGroups",
     "ProtectClock", "ProtectHostname", "ProtectProc", "RestrictNamespaces",
     "RestrictRealtime", "RestrictSUIDSGID", "LockPersonality",
     "MemoryDenyWriteExecute", "SystemCallArchitectures", "UMask"]
-  DirectoryRoots = [("StateDirectory", "/var/lib"),
+  DirectoryRoots* = [("StateDirectory", "/var/lib"),
                     ("RuntimeDirectory", "/run"),
                     ("CacheDirectory", "/var/cache"),
                     ("LogsDirectory", "/var/log"),
@@ -108,29 +109,29 @@ const
     "ProtectKernelLogs", "ProtectControlGroups", "ProtectClock",
     "ProtectHostname", "ProtectProc", "RestrictNamespaces", "RestrictRealtime",
     "RestrictSUIDSGID", "LockPersonality", "MemoryDenyWriteExecute",
-    "SystemCallArchitectures", "SystemCallFilter", "SystemCallErrorNumber",
+    "SystemCallArchitectures", "SystemCallFilter",
     "CapabilityBoundingSet", "AmbientCapabilities", "UMask",
     "RestrictAddressFamilies", "NoExecPaths", "ExecPaths", "ReadOnlyPaths",
     "ReadWritePaths", "BindPaths", "BindReadOnlyPaths", "TemporaryFileSystem",
     "StateDirectory", "RuntimeDirectory", "CacheDirectory", "LogsDirectory",
     "ConfigurationDirectory", "RootDirectory", "RootImage", "RootEphemeral",
-    "RootHash", "RootHashSignature", "RootVerity", "RootImageOptions",
+    "RootHash", "RootHashSignature", "RootVerity",
     "MountImages", "ExtensionImages", "ExtensionDirectories", "OpenFile",
     "StandardInput", "StandardOutput", "StandardError", "TTYPath",
     "SecureBits", "KeyringMode", "Personality", "RootDirectoryStartOnly",
     "JoinsNamespaceOf", "NetworkNamespacePath", "IPCNamespacePath",
-    "LoadCredential", "LoadCredentialEncrypted", "ImportCredential",
+   
     "EnvironmentFiles", "DeviceAllow", "Delegate", "CoredumpReceive",
     "BPFProgram", "USBFunctionDescriptors", "USBFunctionStrings",
-    "ExecSearchPath", "Transient", "ImportCredentialEx", "NFTSet",
+    "ExecSearchPath", "Transient",
     "SELinuxContext", "AccessSELinuxContext", "AppArmorProfile",
     "SmackProcessLabel", "MountFlags", "RootHashPath", "RootHashSignaturePath",
     "UserNamespacePath", "BPFDelegateCommands", "BPFDelegateMaps",
     "BPFDelegatePrograms", "BPFDelegateAttachments", "StateDirectorySymlink",
     "RuntimeDirectorySymlink", "CacheDirectorySymlink", "LogsDirectorySymlink",
-    "ConfigurationDirectorySymlink", "FailureAction", "SuccessAction",
+    "FailureAction", "SuccessAction",
     "StartLimitAction", "JobTimeoutAction", "CPUSchedulingPolicy",
-    "IOSchedulingClass", "Sockets"]
+    "IOSchedulingClass"]
     ## The properties the check compares with the floor (each one's rule is
     ## in ``effectiveFloorProblems``), together with ``ExecProps`` and their
     ## ``Ex`` forms.
@@ -215,7 +216,10 @@ const
     "SyslogPriority", "SyslogIdentifier", "SyslogLevelPrefix",
     "SyslogLevel", "SyslogFacility", "LogLevelMax", "LogRateLimitIntervalUSec",
     "LogRateLimitBurst", "LogExtraFields", "LogFilterPatterns",
-    "LogNamespace", "SystemCallLog", "StandardInputFileDescriptorName",
+    "LogNamespace", "SystemCallLog",
+    # The errno a denied call returns instead of the kill: the call is
+    # still denied either way.
+    "SystemCallErrorNumber", "StandardInputFileDescriptorName",
     "StandardOutputFileDescriptorName", "StandardErrorFileDescriptorName",
     "StandardInputData",
     # Settings that only restrict the service further (the floor's own
@@ -230,7 +234,7 @@ const
     "RootImagePolicy", "MountImagePolicy", "ExtensionImagePolicy",
     "StateDirectoryMode", "RuntimeDirectoryMode", "CacheDirectoryMode",
     "LogsDirectoryMode", "ConfigurationDirectoryMode",
-    "RuntimeDirectoryPreserve", "SetCredential", "SetCredentialEncrypted",
+    "RuntimeDirectoryPreserve",
     # The service's own environment and working directory. What a variable
     # can make the service run is bounded by the exec confinement (every
     # mount but the closure is noexec), and the directory is entered as
@@ -273,6 +277,50 @@ const LimitProps* = [
     ## default (``DefaultLimit<X>``), which a unit may lower but not raise
     ## (``LimitMEMLOCK=infinity`` raises it; A9 review round 5, finding 3).
 
+const
+  FileJudgedProps* = ["LoadCredential", "LoadCredentialEncrypted",
+    "ImportCredential", "ImportCredentialEx", "NFTSet", "RootImageOptions",
+    "SetCredential", "SetCredentialEncrypted", "Sockets"]
+    ## Settings ``systemctl show`` reports as ``[unprintable]`` (measured on
+    ## systemd 252, 255, 257 and 259; A9 review round 6, finding 4), or do
+    ## not print at all (``Sockets=``, reported only as the socket's
+    ## ``Triggers=``): their
+    ## rules read the files systemd loaded (``EffectiveInput.loaded``),
+    ## which provenance holds to the generation's own bytes.
+
+  RequiredProps* = [
+    "LoadState", "FragmentPath", "SourcePath", "DropInPaths", "User",
+    "Group", "DynamicUser", "SupplementaryGroups", "PAMName",
+    "NoNewPrivileges", "ProtectSystem", "ProtectHome", "PrivateTmp",
+    "PrivateDevices", "ProtectKernelTunables", "ProtectKernelModules",
+    "ProtectKernelLogs", "ProtectControlGroups", "ProtectClock",
+    "ProtectHostname", "ProtectProc", "RestrictNamespaces",
+    "RestrictRealtime", "RestrictSUIDSGID", "LockPersonality",
+    "MemoryDenyWriteExecute", "SystemCallArchitectures", "SystemCallFilter",
+    "CapabilityBoundingSet", "AmbientCapabilities", "UMask",
+    "RestrictAddressFamilies", "NoExecPaths", "ExecPaths", "ReadOnlyPaths",
+    "ReadWritePaths", "BindPaths", "BindReadOnlyPaths",
+    "TemporaryFileSystem", "StateDirectory", "RuntimeDirectory",
+    "CacheDirectory", "LogsDirectory", "ConfigurationDirectory",
+    "RootDirectory", "RootImage", "RootHash", "RootHashSignature",
+    "RootVerity", "MountImages", "ExtensionImages", "ExtensionDirectories",
+    "StandardInput", "StandardOutput", "StandardError", "TTYPath",
+    "SecureBits", "KeyringMode", "Personality", "RootDirectoryStartOnly",
+    "JoinsNamespaceOf", "NetworkNamespacePath", "IPCNamespacePath",
+    "Delegate", "USBFunctionDescriptors", "USBFunctionStrings",
+    "ExecSearchPath", "Transient", "SELinuxContext", "AccessSELinuxContext",
+    "AppArmorProfile", "SmackProcessLabel", "MountFlags", "RootHashPath",
+    "RootHashSignaturePath", "FailureAction", "SuccessAction",
+    "StartLimitAction", "JobTimeoutAction", "CPUSchedulingPolicy",
+    "IOSchedulingClass"]
+    ## The compared properties every supported systemd prints under
+    ## ``systemctl show --all`` for a unit that sets none of them
+    ## (``fixtures/systemd_properties/show-all-minimal-*``, all four
+    ## bases): absent, they
+    ## refuse, never pass (A9 review round 6, finding 3). The other
+    ## compared properties are printed only when set, or only by newer
+    ## systemd.
+
 proc isInertProp*(k: string): bool =
   when mutated("inert-families-by-pattern"):
     # Falsifying build: round 4's family wildcards.
@@ -284,11 +332,23 @@ proc isExecProp*(k: string): bool =
   k in ExecProps or (k.endsWith("Ex") and k[0 ..< k.len - 2] in ExecProps)
 
 proc parseShow*(text: string): ShowProps =
-  ## ``key=value`` lines (the order differs between systemd versions); the
-  ## last line of a key.
+  ## ``key=value`` lines (the order differs between systemd versions). A
+  ## key systemd prints on several lines (``EnvironmentFiles=``,
+  ## ``*DirectorySymlink=``, ``BindPaths=`` ... one entry per line) gets
+  ## every value, space-separated, so every entry is judged; round 5 kept
+  ## only the last line (A9 review round 6, finding 2).
   for l in text.splitLines():
     let eq = l.find('=')
-    if eq > 0: result[l[0 ..< eq]] = l[eq + 1 .. ^1]
+    if eq <= 0: continue
+    let k = l[0 ..< eq]
+    let v = l[eq + 1 .. ^1]
+    when mutated("show-last-line-only"):
+      result[k] = v
+    else:
+      if k in result and result[k].len > 0 and v.len > 0:
+        result[k] = result[k] & " " & v
+      elif k notin result or v.len > 0:
+        result[k] = v
 
 proc parseShowLines*(text: string): ShowLines =
   ## Every ``key=value`` line, per key in order.
@@ -301,7 +361,7 @@ proc showUnitText*(unit: string): string =
   ## with a value; raises when systemd will not show it). Run through
   ## ``host_exec`` (the distribution's systemctl by absolute path, a fixed
   ## environment).
-  let r = runSystemctl(["show", "--no-pager", "--", unit])
+  let r = runSystemctl(["show", "--all", "--no-pager", "--", unit])
   if r.exitCode != 0:
     raise newException(OSError, "systemctl show " & unit & ": " &
                        r.output.strip())
@@ -392,33 +452,185 @@ proc systemGid*(group: string): int =
   if f.len < 3: return -1
   try: parseInt(f[2]) except ValueError: -1
 
+proc systemUid*(name: string): int =
+  ## The uid ``getent passwd`` gives ``name``, -1 when it gives none.
+  let exe = resolveHostTool(GetentCandidates)
+  if exe.len == 0: return -1
+  let r = runHostTool([exe, "passwd", "--", name], mergeStderr = false)
+  if r.exitCode != 0: return -1
+  let f = r.output.strip().split(':')
+  if f.len < 3: return -1
+  try: parseInt(f[2]) except ValueError: -1
+
+proc systemGroups*(name: string): seq[string] =
+  ## The groups a static account is in: its primary group (``getent
+  ## passwd``'s gid, named by ``getent group``; the number when no group
+  ## has it, ``root`` for gid 0) and every group whose member list names it
+  ## (``getent group``: /etc/group and NSS). An account getent does not
+  ## know is reported in ``root``: refused rather than trusted.
+  let exe = resolveHostTool(GetentCandidates)
+  if exe.len == 0 or name.len == 0: return @["root"]
+  let pw = runHostTool([exe, "passwd", "--", name], mergeStderr = false)
+  if pw.exitCode != 0: return @["root"]
+  let f = pw.output.strip().split(':')
+  if f.len < 4: return @["root"]
+  let all = runHostTool([exe, "group"], mergeStderr = false)
+  if all.exitCode != 0: return @["root"]
+  var primary = if f[3] == "0": "root" else: f[3]
+  for l in all.output.splitLines():
+    let g = l.split(':')
+    if g.len < 4: continue
+    if g[2] == f[3]: primary = g[0]
+    elif name in g[3].split(','): result.add(g[0])
+  result.insert(primary, 0)
+
+proc systemUserOfUid*(uid: int): string =
+  ## The name ``getent passwd`` gives ``uid``, "" when it gives none.
+  let exe = resolveHostTool(GetentCandidates)
+  if exe.len == 0 or uid < 0: return ""
+  let r = runHostTool([exe, "passwd", "--", $uid], mergeStderr = false)
+  if r.exitCode != 0: return ""
+  r.output.strip().split(':')[0]
+
+proc accountProblems*(user, group, supplementaryGroups, dynamicUser,
+                      unit: string;
+                      uidOf: proc (name: string): int;
+                      groupsOf: proc (name: string): seq[string];
+                      gidOf: proc (group: string): int;
+                      userOfUid: proc (uid: int): string = systemUserOfUid):
+                      seq[string] =
+  ## Why the account ``unit`` runs with these settings (as ``systemctl
+  ## show`` prints them) breaks the floor, one line each: it runs as uid 0,
+  ## holds a privileged group (``PrivilegedGroups``, by gid), or does not
+  ## resolve. The account is resolved by ``resolveServiceAccount`` over the
+  ## account databases ``uidOf``, ``groupsOf`` (every group an account is
+  ## in, its primary group first: ``systemGroups``) and ``gidOf`` -- the
+  ## live host's, through getent, in a product build.
+  ##
+  ## Every group ``groupsOf`` names counts as held, the primary group as
+  ## well even when ``Group=`` replaces it: a refusal more than systemd
+  ## needs, never less.
+  if dynamicUser == "yes" and mutated("dynamic-user-trusted"):
+    # Falsifying build: round 5's reading, under which DynamicUser=yes
+    # skipped the account rules whatever account systemd would use.
+    return
+  var names: seq[tuple[name: string; gid: int]]
+  proc note(n: string; gid: int) =
+    for x in names:
+      if x.name == n: return
+    names.add((n, gid))
+  var lookup: AccountLookup
+  lookup.uidOf = uidOf
+  lookup.gidOf = proc (g: string): int =
+    result = gidOf(g)
+    note(g, result)
+  lookup.primaryGidOf = proc (n: string): int =
+    let gs = groupsOf(n)
+    if gs.len == 0: return UnknownId
+    result = (try: parseInt(gs[0]) except ValueError: gidOf(gs[0]))
+    note(gs[0], result)
+  lookup.groupsOf = proc (n: string): seq[int] =
+    for g in groupsOf(n):
+      let gid = (try: parseInt(g) except ValueError: gidOf(g))
+      note(g, gid)
+      result.add(gid)
+  lookup.userOfUid = userOfUid
+  let a = resolveServiceAccount(user, group, supplementaryGroups,
+                                dynamicUser == "yes", unit, lookup)
+  for u in a.unknown:
+    result.add(u & ", which getent does not know or systemd cannot " &
+               "resolve: refused, not taken for an unprivileged account")
+  if a.uid == 0:
+    result.add("runs as root (User=" & user & ", DynamicUser=" &
+               dynamicUser & ")")
+  var privileged = initHashSet[int]()
+  privileged.incl(0)
+  for n in PrivilegedGroups:
+    let gid = (try: parseInt(n) except ValueError: gidOf(n))
+    if gid >= 0: privileged.incl(gid)
+  proc nameOf(gid: int): string =
+    for x in names:
+      if x.gid == gid: return x.name
+    $gid
+  let held = a.allGids
+  when mutated("privileged-groups-by-name"):
+    # Falsifying build (round 5, finding 4): round 4's rule, by name only
+    # -- a second name for a privileged gid, and an unknown group, pass.
+    for x in names:
+      if x.gid in held and x.name in PrivilegedGroups:
+        result.add("runs with the privileged group " & x.name)
+    return
+  var flagged = initHashSet[int]()
+  for gid in held:
+    if gid >= 0 and gid in privileged and gid notin flagged:
+      flagged.incl(gid)
+      result.add("runs with the privileged group " & nameOf(gid) &
+                 " (gid " & $gid & ")")
+  for x in names:
+    if x.gid notin held: continue
+    if x.gid == UnknownId:
+      # A membership the resolver does not report (it reports what
+      # User=, Group= and SupplementaryGroups= name).
+      var told = false
+      for u in a.unknown:
+        if x.name in u: told = true
+      if not told:
+        result.add("runs with the group " & x.name &
+                   ", which getent does not know")
+    elif x.name in PrivilegedGroups and x.gid notin flagged:
+      # A privileged group's name, whatever gid this host gives it.
+      flagged.incl(x.gid)
+      result.add("runs with the privileged group " & x.name)
+
 proc limitValue*(v: string): uint64 =
   ## A ``Limit*`` value as systemd shows it; ``infinity`` is the largest.
   if v == "infinity" or v.len == 0: return high(uint64)
   try: uint64(parseBiggestUInt(v)) except ValueError: high(uint64)
 
-proc environmentFileProblem*(path: string): string =
-  ## Why the manager may not read ``path`` as root for a floored service:
-  ## it does not exist, is not a regular file, or it or any parent
-  ## directory is not root-owned or is writable by its group or others.
-  ## "" when it may (A9 review round 5, finding 1). An error reading any of
-  ## that refuses (default-deny).
-  var st: Stat
-  if lstat(path.cstring, st) != 0: return "it does not exist (or cannot be read)"
-  if not S_ISREG(st.st_mode): return "it is not a regular file"
-  if st.st_uid != 0: return "it is not owned by root"
-  if (st.st_mode.cint and 0o022) != 0: return "it is writable by its group or others"
+proc ownedChainProblem(path: string): string =
+  ## Why the directories above ``path`` are not all root-owned and closed
+  ## to their group and others, or "".
   var d = parentDir(path)
   while d.len > 0:
     var ds: Stat
     if lstat(d.cstring, ds) != 0: return "its directory " & d & " cannot be read"
-    if not S_ISDIR(ds.st_mode): return d & " is not a directory"
+    if not S_ISDIR(ds.st_mode) and not S_ISLNK(ds.st_mode):
+      return d & " is not a directory"
     if ds.st_uid != 0: return "its directory " & d & " is not owned by root"
-    if (ds.st_mode.cint and 0o022) != 0:
+    if not S_ISLNK(ds.st_mode) and (ds.st_mode.cint and 0o022) != 0:
       return "its directory " & d & " is writable by its group or others"
     if d == "/": break
     d = parentDir(d)
   ""
+
+proc environmentFileProblem*(path: string): string =
+  ## Why the manager may not read ``path`` as root for a floored service:
+  ## it does not exist, is not a regular file, or it or any directory on
+  ## the way to it is not root-owned or is writable by its group or
+  ## others. A symbolic link (the add-on materialises an /etc file as a
+  ## link into the read-only store) is judged twice: the link's own
+  ## directories, which could swap it, and the file it resolves to with its
+  ## directories. "" when it may (A9 review round 5, finding 1). An error
+  ## reading any of that refuses (default-deny).
+  var st: Stat
+  if lstat(path.cstring, st) != 0: return "it does not exist (or cannot be read)"
+  var target = path
+  when mutated("environment-file-links-refused"):
+    # Falsifying build: round 5's lstat, which refused the add-on's own
+    # /etc files (links into the store) as "not a regular file".
+    if S_ISLNK(st.st_mode): return "it is not a regular file"
+  if S_ISLNK(st.st_mode):
+    when not mutated("environment-file-links-unchecked"):
+      if st.st_uid != 0: return "the link is not owned by root"
+      let why = ownedChainProblem(path)
+      if why.len > 0: return why
+    try: target = expandFilename(path)
+    except OSError: return "the link cannot be resolved"
+    if stat(target.cstring, st) != 0: return "its target " & target & " cannot be read"
+  if not S_ISREG(st.st_mode): return "it is not a regular file"
+  if st.st_uid != 0: return "it is not owned by root"
+  if (st.st_mode.cint and 0o022) != 0: return "it is writable by its group or others"
+  ownedChainProblem(target)
 
 proc managerLimits*(): Table[string, string] =
   ## The service manager's ``DefaultLimit*`` (``systemctl show`` of the
@@ -480,6 +692,10 @@ type
       ## the writable places of every other floored unit of the generation
     ownUnits*: HashSet[string]
       ## the units the generation installs (``Sockets=`` may name only these)
+    partialShow*: bool
+      ## ``show`` is a hand-written excerpt (unit tests), not ``systemctl
+      ## show --all``: ``RequiredProps`` are not all expected. The floor's
+      ## own settings must be there either way.
     limitCeilings*: Table[string, string]
       ## the manager's ``DefaultLimit<X>`` per ``Limit<X>`` (``managerLimits``)
 
@@ -506,8 +722,6 @@ proc effectiveFloorProblems*(e: EffectiveInput): seq[string] =
   let (unit, rendered, version, show) = (e.unit, e.rendered, e.version, e.show)
   let exceptions = e.exceptions
   let denied = e.denied
-  let uidOf = e.uidOf
-  let groupsOf = e.groupsOf
   let fb = floorBlock(rendered)
   let ex = exceptionKeys(exceptions)
   let v = versionNumber(version)
@@ -597,50 +811,22 @@ proc effectiveFloorProblems*(e: EffectiveInput): seq[string] =
   if v >= 2:
     # Root is refused whatever the unit's exceptions (A9 review round 4,
     # finding 4: a User= or DynamicUser= exception lifts the account's
-    # spelling rules, never uid 0).
-    if show.getOrDefault("DynamicUser") != "yes":
-      let u = show.getOrDefault("User")
-      if u.len == 0 or u in ["root", "0"] or uidOf(u) == 0:
-        problem("runs as root (User=" & u & ", DynamicUser=" &
-                show.getOrDefault("DynamicUser") & ")")
-    # Every group the service runs with (A9 review round 4, finding 1):
-    # Group=, SupplementaryGroups= and, for a static account, its primary
-    # group and every group /etc/group (or NSS) lists it in. A privileged
-    # one is refused whatever exception the unit names (only a whole-floor
-    # waiver lifts it, and a waived unit is not checked).
-    var held: seq[string]
-    # A dynamic user's own group (named like the user, allocated by systemd
-    # from its dynamic range, and known to getent only while the unit
-    # runs) is not looked up; a static group Group= names is.
-    let dynamicOwn = show.getOrDefault("DynamicUser") == "yes" and
-      show.getOrDefault("Group") in [show.getOrDefault("User"),
-                                     unit[0 ..< max(0, unit.rfind('.'))]]
-    if show.getOrDefault("Group").len > 0 and not dynamicOwn:
-      held.add(show.getOrDefault("Group"))
-    held.add(words(show.getOrDefault("SupplementaryGroups")))
-    if show.getOrDefault("DynamicUser") != "yes":
-      held.add(groupsOf(show.getOrDefault("User")))
-    # By gid (round 5, finding 4): a second name for a privileged gid is
-    # the same group, and a group getent does not know is refused.
-    let gidOf = if e.gidOf != nil: e.gidOf else: systemGid
-    var privileged = initHashSet[int]()
-    privileged.incl(0)
-    for n in PrivilegedGroups:
-      let gid = (try: parseInt(n) except ValueError: gidOf(n))
-      if gid >= 0: privileged.incl(gid)
-    var seen: HashSet[string]
-    for g in held:
-      if g in seen: continue
-      seen.incl(g)
-      let gid = (try: parseInt(g) except ValueError: gidOf(g))
-      when mutated("privileged-groups-by-name"):
-        if g in PrivilegedGroups:
-          problem("runs with the privileged group " & g)
-      else:
-        if gid < 0:
-          problem("runs with the group " & g & ", which getent does not know")
-        elif gid in privileged or g in PrivilegedGroups:
-          problem("runs with the privileged group " & g & " (gid " & $gid & ")")
+    # spelling rules, never uid 0), and so is every privileged group the
+    # service runs with (round 4, finding 1; by gid, round 5, finding 4).
+    #
+    # The account is the one systemd will use (A9 review round 6, finding
+    # 1), resolved by the shared resolver (``service_account``) over the
+    # live host's account databases: specifiers expanded, a static account
+    # of the configured name winning over DynamicUser=yes for the user and
+    # the group, a second name for uid 0 being root, and the user's
+    # /etc/group memberships held. Whatever does not resolve is refused.
+    for p in accountProblems(show.getOrDefault("User"),
+        show.getOrDefault("Group"), show.getOrDefault("SupplementaryGroups"),
+        show.getOrDefault("DynamicUser"), unit,
+        (if e.uidOf != nil: e.uidOf else: systemUid),
+        (if e.groupsOf != nil: e.groupsOf else: systemGroups),
+        (if e.gidOf != nil: e.gidOf else: systemGid)):
+      problem(p)
     if "RootDirectory" notin ex:
       for k in ["RootDirectory", "RootImage"]:
         if show.getOrDefault(k).len > 0:
@@ -668,8 +854,8 @@ proc effectiveFloorProblems*(e: EffectiveInput): seq[string] =
   # compared with the generation's own rendering, or is reviewed as inert.
   when not mutated("properties-not-default-denied"):
     for k, val in show:
-      if k in ComparedProps or k in LimitProps or isExecProp(k) or
-          isInertProp(k): continue
+      if k in ComparedProps or k in LimitProps or k in FileJudgedProps or
+          isExecProp(k) or isInertProp(k): continue
       problem("the property " & k & "=" & val & " is neither compared " &
               "with the floor nor reviewed as inert; refused")
     # The commands, from the Ex forms (which carry the flags).
@@ -716,11 +902,11 @@ proc effectiveFloorProblems*(e: EffectiveInput): seq[string] =
     if show.getOrDefault("KeyringMode") notin ["", "private"]:
       problem("KeyringMode=" & show["KeyringMode"] & ", not private")
     for k in ["Personality", "JoinsNamespaceOf", "NetworkNamespacePath",
-              "IPCNamespacePath", "ImportCredential", "ImportCredentialEx",
-              "BPFProgram", "USBFunctionDescriptors", "USBFunctionStrings",
-              "ExecSearchPath", "RootHash", "RootHashSignature", "RootVerity",
-              "RootImageOptions", "RootHashPath", "RootHashSignaturePath",
-              "UserNamespacePath", "NFTSet", "SELinuxContext",
+              "IPCNamespacePath", "BPFProgram", "USBFunctionDescriptors",
+              "USBFunctionStrings", "ExecSearchPath", "RootHash",
+              "RootHashSignature", "RootVerity", "RootHashPath",
+              "RootHashSignaturePath",
+              "UserNamespacePath", "SELinuxContext",
               "AccessSELinuxContext", "AppArmorProfile", "SmackProcessLabel",
               "BPFDelegateCommands", "BPFDelegateMaps", "BPFDelegatePrograms",
               "BPFDelegateAttachments"]:
@@ -745,14 +931,52 @@ proc effectiveFloorProblems*(e: EffectiveInput): seq[string] =
         show.getOrDefault("PrivateDevices") != "yes":
       problem("DeviceAllow=" & show["DeviceAllow"] & " without PrivateDevices=yes")
     let svc = unit[0 ..< max(0, unit.rfind('.'))]
-    for k in ["LoadCredential", "LoadCredentialEncrypted"]:
-      for t in words(show.getOrDefault(k)):
-        let c = t.find(':')
-        let src = if c >= 0: t[c + 1 .. ^1] else: ""
-        if src.startsWith("/") and
-            not normalisedPath(src).startsWith(CredentialRoot & "/" & svc & "/"):
-          problem(k & " reads " & src & ", outside the service's own " &
-                  "credentials (" & CredentialRoot & "/" & svc & ")")
+    # The settings systemd shows as [unprintable], from the files it
+    # loaded (round 6, finding 4).
+    when not mutated("file-only-settings-unread"):
+      for (path, content) in e.loaded:
+        for d in sectionDirectives(content, ["Service"]):
+          case d.key
+          of "LoadCredential", "LoadCredentialEncrypted":
+            let c = d.value.find(':')
+            let src = if c >= 0: d.value[c + 1 .. ^1].strip() else: ""
+            if src.startsWith("/") and
+                not normalisedPath(src).startsWith(CredentialRoot & "/" & svc & "/"):
+              problem(d.key & " reads " & src & ", outside the service's " &
+                      "own credentials (" & CredentialRoot & "/" & svc & ")")
+          of "Sockets":
+            for t in d.value.splitWhitespace():
+              if t notin e.ownUnits:
+                problem("Sockets=" & t & " is not a socket unit the add-on installed")
+          of "ImportCredential", "NFTSet", "RootImageOptions":
+            if d.value.strip().len > 0:
+              problem(d.key & "=" & d.value & " (in " & path & ")")
+          else: discard
+    # A compared property every supported systemd prints must be there
+    # (round 6, finding 3): its absence is not a pass.
+    when not mutated("absent-property-passes"):
+      for k, _ in fb:
+        if k notin show:
+          problem("the floor's " & k & " is missing from systemctl show")
+      if not e.partialShow:
+        for k in RequiredProps:
+          if k notin show:
+            problem("the property " & k & " is missing from systemctl show")
+    # A read-only bind over the executable paths replaces what may run
+    # (round 6, finding 4): only a store object's own tree may be bound
+    # there (the apt closure's /usr).
+    when not mutated("read-only-binds-unjudged"):
+      for t in words(show.getOrDefault("BindReadOnlyPaths")):
+        let parts = t.strip(leading = true, trailing = false,
+                            chars = {'-', '+'}).split(':')
+        if parts.len < 2: continue
+        let src = normalisedPath(parts[0])
+        let dst = normalisedPath(parts[1])
+        if src.startsWith("/repro/store/"): continue
+        for x in execPaths:
+          if dst == x or dst.startsWith(x & "/") or x.startsWith(dst & "/"):
+            problem("BindReadOnlyPaths=" & t & " binds " & src &
+                    " over the executable path " & x)
     # EnvironmentFile= (round 5, finding 1): read by the manager as root, so
     # named exactly, existing, root-owned under root-owned parents nothing
     # but root can write, and outside every floored unit's writable place.
@@ -772,10 +996,8 @@ proc effectiveFloorProblems*(e: EffectiveInput): seq[string] =
       let why = (if e.inspectFile != nil: e.inspectFile(np)
                  else: environmentFileProblem(np))
       if why.len > 0: problem("EnvironmentFile " & np & ": " & why)
-    # Every listener and activator name a profile socket (finding 2).
-    for t in words(show.getOrDefault("Sockets")):
-      if t notin e.ownUnits:
-        problem("Sockets=" & t & " is not a socket unit the add-on installed")
+    # Sockets= names only profile sockets (round 5, finding 2), read from
+    # the loaded files: systemctl show never prints it (round 6, finding 4).
     # Realtime scheduling under RestrictRealtime= (finding 3).
     if "RestrictRealtime" in fb and "RestrictRealtime" notin ex:
       if show.getOrDefault("CPUSchedulingPolicy") in ["1", "2", "fifo", "rr"]:
@@ -784,6 +1006,11 @@ proc effectiveFloorProblems*(e: EffectiveInput): seq[string] =
       if show.getOrDefault("IOSchedulingClass") in ["1", "realtime"]:
         problem("IOSchedulingClass=" & show["IOSchedulingClass"] &
                 " is realtime, which RestrictRealtime=yes forbids")
+    when not mutated("state-targets-allowed"):
+      for k in StartingDependencyKeys:
+        for t in words(show.getOrDefault(k)):
+          if t in SystemStateTargets:
+            problem(k & "=" & t & " changes the whole system's state")
     for k in ["FailureAction", "SuccessAction", "StartLimitAction",
               "JobTimeoutAction"]:
       if show.getOrDefault(k) notin ["", "none"]:
@@ -875,35 +1102,4 @@ proc baseSyscallGroups*(): Table[string, seq[string]] =
                        r.output.strip())
   parseSyscallGroups(r.output)
 
-proc systemUid*(name: string): int =
-  ## The uid ``getent passwd`` gives ``name``, -1 when it gives none.
-  let exe = resolveHostTool(GetentCandidates)
-  if exe.len == 0: return -1
-  let r = runHostTool([exe, "passwd", "--", name], mergeStderr = false)
-  if r.exitCode != 0: return -1
-  let f = r.output.strip().split(':')
-  if f.len < 3: return -1
-  try: parseInt(f[2]) except ValueError: -1
-
-proc systemGroups*(name: string): seq[string] =
-  ## The groups a static account is in: its primary group (``getent
-  ## passwd``'s gid, named by ``getent group``; the number when no group
-  ## has it, ``root`` for gid 0) and every group whose member list names it
-  ## (``getent group``: /etc/group and NSS). An account getent does not
-  ## know is reported in ``root``: refused rather than trusted.
-  let exe = resolveHostTool(GetentCandidates)
-  if exe.len == 0 or name.len == 0: return @["root"]
-  let pw = runHostTool([exe, "passwd", "--", name], mergeStderr = false)
-  if pw.exitCode != 0: return @["root"]
-  let f = pw.output.strip().split(':')
-  if f.len < 4: return @["root"]
-  let all = runHostTool([exe, "group"], mergeStderr = false)
-  if all.exitCode != 0: return @["root"]
-  var primary = if f[3] == "0": "root" else: f[3]
-  for l in all.output.splitLines():
-    let g = l.split(':')
-    if g.len < 4: continue
-    if g[2] == f[3]: primary = g[0]
-    elif name in g[3].split(','): result.add(g[0])
-  result.insert(primary, 0)
 

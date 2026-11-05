@@ -30,6 +30,7 @@ import std/[algorithm, os, posix, sets, strutils, tables]
 import ./etc_write
 import ./fingerprint
 import ./host_exec
+import ./mutations
 import ./nft_tables
 
 type
@@ -142,7 +143,13 @@ type
                            ## generation's static tree, ``linkTarget`` its
                            ## target; spec §7.2); "" reads as ``copy``
     value*: string         ## sysctl: the value applied; account: the
-                           ## fingerprint value of the account
+                           ## fingerprint value of the account;
+                           ## storePrefix: its realisation digest
+                           ## (``tree-v2:<hex>``, spec §10.2), the digest
+                           ## store verification expects -- kept here,
+                           ## outside the store, so the path cannot vouch
+                           ## for itself; "" for a prefix realised before
+                           ## the ledger carried one
     displaced*: string     ## where the bytes the MOST RECENT reconcile of
                            ## this object displaced are kept; ``preserved``
                            ## keeps the first-touch bytes removal restores.
@@ -371,7 +378,10 @@ proc observeDrift*(e: LedgerEntry): string =
     # missing record is not drift -- the agent may rotate its files.
     ""
   of lcNftTable:
-    let l = listTableNames()
+    # Through PID 1, in the host's network namespace: the units that walk
+    # the ledger run with a private one (A11 audit session 2, G4).
+    let l = when mutated("reassert-nft-in-own-netns"): listTableNames()
+            else: listTableNames(hostNamespaces = true)
     if not l.ok: return "unreadable: " & l.why
     if e.path notin l.tables: return "missing"
     ""

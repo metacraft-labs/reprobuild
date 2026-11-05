@@ -54,6 +54,7 @@ import ./linux_fs
 import ./mutations
 import ./nft_tables
 import ./preflight
+import ./store_custody
 import ./store_root
 
 type
@@ -362,10 +363,22 @@ proc runAddonBootstrap*(opts: BootstrapOptions): BootstrapResult =
     raise newException(AddonBootstrapError, "the store copy of the add-on " &
       "binary hashes to " & storeCopy & ", not the planned " &
       plan.binarySha256)
-  for (path, id) in [(prefixes.binaryPrefixPath, prefixes.binaryPrefixId),
-                     (prefixes.filesPrefixPath, prefixes.filesPrefixId)]:
+  # Each prefix's realisation digest is recorded here, in the ledger
+  # (root-only, outside the store, attested by the generation's statement):
+  # store verification takes the expected digest from it, never from the
+  # path it verifies (spec §10.2).
+  for (path, id, digest) in [
+      (prefixes.binaryPrefixPath, prefixes.binaryPrefixId,
+       prefixes.binaryDigest),
+      (prefixes.filesPrefixPath, prefixes.filesPrefixId,
+       prefixes.filesDigest)]:
     entries.add(LedgerEntry(class: lcStorePrefix, path: path,
-      sha256: hexOf(id)))
+      sha256: hexOf(id), value: digest))
+    recordRealised(custodySite(stateDir), path, digest)
+  # The host is under store custody from its first generation (§13
+  # decision 48): an object with no recorded digest is refused, never
+  # reported "unverifiable" as on a host realised before custody.
+  markCustody(custodySite(stateDir))
 
   # 5. Generation 0, through repro infra apply. The ledger copy exists
   # BEFORE the apply, holding what bootstrap created so far: generation 0

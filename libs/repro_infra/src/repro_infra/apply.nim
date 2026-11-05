@@ -609,6 +609,18 @@ proc runInfraApply*(profileText: string; opts: ApplyOptions): ApplyResult =
         (if opts.carriedStateDir.len > 0: opts.carriedStateDir
          else: CarriedStateDir),
         (if opts.carriedStateRoot.len > 0: opts.carriedStateRoot else: "/"))
+  # While carried state is installed, every unit that reaches it requires
+  # the first-boot restore through a drop-in this generation writes
+  # (spec §11.1; A13 review round 4, finding 4). An add-on apply has added
+  # them to its own profile already (``carriedStateChecked``).
+  let profileText =
+    when defined(posix):
+      if opts.carriedStateChecked: profileText
+      else: withCarriedRequirements(profileText,
+        (if opts.carriedStateDir.len > 0: opts.carriedStateDir
+         else: CarriedStateDir),
+        (if opts.carriedStateRoot.len > 0: opts.carriedStateRoot else: "/"))
+    else: profileText
   resetBrokerLaunchCount()
   refreshApplyLock(opts.stateDir)
 

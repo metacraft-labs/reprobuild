@@ -843,6 +843,23 @@ proc formRefusal(key, value: string; f: ValueForm): string =
       return "'" & value & "' is not a number, size or duration"
     ""
 
+const
+  SystemStateTargets* = ["reboot.target", "poweroff.target",
+  "halt.target", "kexec.target", "emergency.target", "rescue.target",
+  "exit.target", "soft-reboot.target", "ctrl-alt-del.target",
+  "systemd-reboot.service", "systemd-poweroff.service",
+  "systemd-halt.service", "systemd-kexec.service", "systemd-exit.service",
+  "systemd-soft-reboot.service", "emergency.service", "rescue.service"]
+  ## Units that change the whole system's state. Round 3 left
+  ## ``FailureAction=``, ``SuccessAction=`` and ``StartLimitAction=`` off
+  ## the allowlist for that reason; a dependency that starts one of these
+  ## is the same action (A9 review round 6, finding 5). The ``-force``
+  ## forms are actions, not units, and are covered by the ``*Action=``
+  ## keys.
+  StartingDependencyKeys* = ["OnFailure", "OnSuccess", "Wants", "Requires",
+    "Requisite", "BindsTo", "Upholds"]
+    ## The ``[Unit]`` keys whose units start with, or because of, this one.
+
 proc allowlistRefusal*(unitName, content: string;
                        ex: openArray[FloorException]; dropIn: bool): string =
   ## The first line of ``content`` (a floored unit, or a drop-in of one)
@@ -860,6 +877,13 @@ proc allowlistRefusal*(unitName, content: string;
     if d.key == "PAMName":
       return what & " opens a login session outside the floor; it is " &
         "refused under the floor, with or without an exception"
+    when FloorMutation != "state-targets-allowed":
+      if d.section == "Unit" and d.key in StartingDependencyKeys:
+        for t in d.value.splitWhitespace():
+          if t in SystemStateTargets:
+            return what & " starts " & t & ", which changes the whole " &
+              "system's state (the floor refuses it as it refuses " &
+              "FailureAction=)"
     if d.section notin ["Unit", "Service", "Install"]:
       if ExceptionsLiftRoot and waived(ex, d.key): continue
       return what & ": the section is not one a floored unit may carry " &
@@ -989,7 +1013,7 @@ proc activatorRefusal*(unitName, content: string; dropIn: bool): string =
   ## its commands as root. Only network and unix-socket listeners, no
   ## command line, and only the keys above in its own section; ``[Unit]``
   ## and ``[Install]`` as for a floored service.
-  when Round5Off:
+  when Round5Off or FloorMutation == "activator-options-unchecked":
     return ""
   let dot = unitName.rfind('.')
   let typ = if dot >= 0: unitName[dot + 1 .. ^1] else: ""

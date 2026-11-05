@@ -124,16 +124,13 @@ jobs:
           attic-token: ${{ secrets.ATTIC_TOKEN }}
           attic-cache: ${{ vars.ATTIC_CACHE }}
           attic-endpoint: ${{ vars.ATTIC_ENDPOINT }}
-      # The manifest-vs-tree check first: it is a source scan that answers in
-      # seconds, and if the work list disagrees with the tree there is no point
-      # compiling 46 gate binaries to find out.
-      - name: HCR lane manifest against the tree
-        run: dev-exec python3 scripts/check_hcr_lane_manifest.py --check
-      # Four gates in the family assert `build/bin/repro` exists rather than
-      # recompiling it (`requiresReproBinary` in repro_tests.nim). The lane
-      # refuses to start without it; this is the step that supplies it.
-      - name: Build repro
-        run: dev-exec just build
+      # The two clones run HERE, straight after setup, because they use the
+      # token minted at the top of the job, and an installation token expires
+      # after an hour. They used to run after `Build repro`; on job
+      # 127318531856 (2026-11-05) that step reached the clone 75 minutes in,
+      # and the clone failed with git exit 128 on the expired token. Every
+      # credentialed step after `Build repro` uses the `ci_token_lane` token
+      # minted just before the lane.
       # `e2e_hcr_linux_replay_of_patched_recording` records and replays with
       # the `ct-mcr` bundle its recipe builds through `hcr_ct_mcr_fixture`
       # (scripts/build_hcr_ct_mcr_fixture.sh): the recorder's own `just
@@ -158,6 +155,16 @@ jobs:
           ref: dev
           path: ${{ github.workspace }}/../codetracer-visual-replay
           gh-token: ${{ steps.ci_token.outputs.token }}
+      # The manifest-vs-tree check first: it is a source scan that answers in
+      # seconds, and if the work list disagrees with the tree there is no point
+      # compiling 46 gate binaries to find out.
+      - name: HCR lane manifest against the tree
+        run: dev-exec python3 scripts/check_hcr_lane_manifest.py --check
+      # Four gates in the family assert `build/bin/repro` exists rather than
+      # recompiling it (`requiresReproBinary` in repro_tests.nim). The lane
+      # refuses to start without it; this is the step that supplies it.
+      - name: Build repro
+        run: dev-exec just build
       # Installation tokens expire after an hour; the lane (and the recorder
       # build at its start) can outlast the one minted above.
       - name: Refresh installation token for the lane

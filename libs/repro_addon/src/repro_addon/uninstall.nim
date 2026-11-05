@@ -52,6 +52,7 @@ import ./ledger
 import ./nft_tables
 import ./mutations
 import ./static_tree
+import ./store_custody
 import ./store_root
 import ./switch
 
@@ -405,6 +406,12 @@ proc runAddonUninstall*(opts: UninstallOptions): UninstallResult =
     releaseRunDir(defaultSecretsLayout())
   except CatchableError as ex:
     result.errors.add(defaultSecretsLayout().runDir & ": " & ex.msg)
+  # The store evidence directory (§13 decision 47) goes with the state:
+  # each entry's DET-AO-5 record left the host when it was made. It is
+  # named in the report so an operator can copy it out first (run with
+  # --keep-store to keep the store, and copy the entries before this).
+  for e in evidenceEntries(custodySite(stateDir)):
+    result.removed.add(e & " (store evidence)")
   for root in ["/etc/repro", "/var/lib/repro", "/run/repro"]:
     if dirExists(root):
       try:

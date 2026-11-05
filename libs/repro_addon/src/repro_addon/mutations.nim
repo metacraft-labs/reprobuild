@@ -479,6 +479,24 @@
 ## ``receipt-trusts-inode``                   the restore receipt counts a
 ##                                            directory as restored on its
 ##                                            device and inode alone
+## ``account-as-written``                     a service's account is taken
+##                                            as written (no specifiers,
+##                                            no static account under
+##                                            DynamicUser=yes, no uid
+##                                            alias, no memberships)
+## ``reach-host-dropins-ignored``             reach reads the profile's
+##                                            drop-ins only, not the host's
+## ``reach-timer-dropins-unread``             a profile timer is read
+##                                            without its drop-ins
+## ``reach-path-unit-paths-ignored``          a path unit's watched paths
+##                                            reach nothing
+## ``restore-requirement-by-manifest-only``   no apply adds the restore
+##                                            requirement; only install-
+##                                            unit's manifest units have it
+## ``receipt-no-fsync``                       the restore receipt is
+##                                            renamed into place with
+##                                            neither its file nor its
+##                                            directory fsync'd
 ## ``reach-ignores-privileged-commands``      a "+"/"!" Exec*= command and
 ##                                            PermissionsStartOnly= do not
 ##                                            widen a unit's reach
@@ -539,6 +557,28 @@
 ##                                            file's enrolled key
 ## ``uninstall-keeps-fetch-state``            uninstall leaves the fetch
 ##                                            unit's state directory
+## ``store-verify-trusts-receipt``           store verification expects
+##                                            the digest the verified
+##                                            path's own receipt names
+## ``reassert-nft-in-own-netns``              the re-assert lists nftables
+##                                            tables in its own private
+##                                            network namespace
+## ``reassert-store-trigger-missing``         a quarantined store object
+##                                            in use is reported as
+##                                            ``store-object-missing``
+## ``custody-skips-file-sources``            the switch's store custody
+##                                            leaves out the store files
+##                                            an ``fs.systemFile`` copies
+## ``custody-skips-closures``                 ... and the apt closures
+## ``custody-admits-undigested``              an object with no recorded
+##                                            digest is admitted on a host
+##                                            under custody
+## ``custody-cache-ignores-signature``        the digest cache answers for
+##                                            a path whatever changed in it
+## ``recovery-discards-evidence``             a recovered object's altered
+##                                            bytes are deleted, not kept
+## ``recovery-trusts-store-bytes``            a files prefix is recovered
+##                                            from its own altered copy
 ## =========================================  ==============================
 
 # The deploy agent's own mutations (``repro_deploy_agent/agent_mutations``)
@@ -753,6 +793,16 @@ const
                           "activators-unchecked",
                           "start-hold-removes-directory",
                           "stale-start-holds-kept",
+                          # A9 review round 6.
+                          "dynamic-user-trusted",
+                          "show-last-line-only",
+                          "absent-property-passes",
+                          "file-only-settings-unread",
+                          "read-only-binds-unjudged",
+                          "state-targets-allowed",
+                          "activator-options-unchecked",
+                          "environment-file-links-unchecked",
+                          "environment-file-links-refused",
                           # A13: a state backup or restore runs while a
                           # unit of the set may run.
                           "state-units-not-checked",
@@ -813,6 +863,19 @@ const
                           "evidence-ship-sees-agent-keys",
                           # A13 review round 2.
                           "receipt-trusts-inode",
+                          # A13 review round 3 item 11: the receipt
+                          # written without its fsyncs (the hard-reset
+                          # gate's receipt points).
+                          "receipt-no-fsync",
+                          # A13 review round 4 finding 1: the shared
+                          # service-account resolver (repro_infra/
+                          # service_account) takes the account as written.
+                          "account-as-written",
+                          # A13 review round 4, findings 2-5.
+                          "reach-host-dropins-ignored",
+                          "reach-timer-dropins-unread",
+                          "reach-path-unit-paths-ignored",
+                          "restore-requirement-by-manifest-only",
                           "reach-ignores-privileged-commands",
                           "reach-dropin-judged-alone",
                           "reach-trigger-units-reach-nothing",
@@ -854,7 +917,24 @@ const
                           "check-forgets-enrolled-key",
                           # A11 audit F5: uninstall keeps the fetch unit's
                           # state directory.
-                          "uninstall-keeps-fetch-state"]
+                          "uninstall-keeps-fetch-state",
+                          # A11 audit session 2, G2: the expected digest
+                          # read from the path being verified.
+                          "store-verify-trusts-receipt",
+                          # G4: the egress table listed in the re-assert
+                          # unit's own (empty) network namespace.
+                          "reassert-nft-in-own-netns",
+                          # Session 2, low: one trigger for a missing and a
+                          # quarantined store object.
+                          "reassert-store-trigger-missing",
+                          # Owner decisions 2026-11-05 (G1 / G42): store
+                          # custody and recovery.
+                          "custody-skips-file-sources",
+                          "custody-skips-closures",
+                          "custody-admits-undigested",
+                          "custody-cache-ignores-signature",
+                          "recovery-discards-evidence",
+                          "recovery-trusts-store-bytes"]
 
 when AddonMutation.len > 0 and AddonMutation notin KnownAddonMutations and
     AddonMutation notin KnownAgentMutations:

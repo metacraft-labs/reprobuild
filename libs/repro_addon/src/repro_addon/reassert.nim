@@ -139,7 +139,7 @@ proc finishCommittedSwitch(stateDir: string; m: PendingMarker): seq[string] =
   let lp = generationLedgerPath(stateDir, current)
   if fileExists(lp):
     for e in readLedger(lp).entries:
-      if e.class == lcStorePrefix:
+      if e.class == lcStorePrefix and e.sha256.len > 0:
         prefixIds.add(parsePrefixIdHex(e.sha256))
   promotePendingRoot(current, prefixIds)
   var previous = ""
@@ -443,6 +443,27 @@ proc renderReassert*(r: ReassertReport): string =
   for f in r.findings: result.add("  " & f & "\n")
   for n in r.notes: result.add("  note: " & n & "\n")
 
+const QuarantinedFinding = " is quarantined "
+  ## How ``checkCurrent`` words a store object in use that verification
+  ## quarantined.
+
+proc storeFindings*(findings: openArray[string]):
+    seq[tuple[trigger: string; found: seq[string]]] =
+  ## The re-assert's store findings grouped under the DET-AO-5 trigger that
+  ## names what happened (spec §10.4): a quarantined object -- present, its
+  ## bytes other than at realisation -- is ``store-digest-mismatch``; an
+  ## absent object or store is ``store-object-missing``. Empty groups are
+  ## left out.
+  var missing, altered: seq[string]
+  for f in findings:
+    if not ("store object" in f or ("the store " & StoreRoot) in f): continue
+    when mutated("reassert-store-trigger-missing"):
+      missing.add(f)    # FALSIFYING BUILD: session 1's single trigger
+    else:
+      if QuarantinedFinding in f: altered.add(f) else: missing.add(f)
+  if missing.len > 0: result.add(("store-object-missing", missing))
+  if altered.len > 0: result.add(("store-digest-mismatch", altered))
+
 proc recordReassertEvidence*(r: ReassertReport; stateDir: string;
                              atBoot: bool; site = defaultSite(DefaultStateDir);
                              bootIdPath = "/proc/sys/kernel/random/boot_id") =
@@ -464,13 +485,10 @@ proc recordReassertEvidence*(r: ReassertReport; stateDir: string;
                  else: ecAudit),
       trigger: r.status, kind: "reassert-" & r.status, fields: fields,
       attest: true), site)
-    var missing: seq[string]
-    for f in r.findings:
-      if "store object" in f or ("the store " & StoreRoot) in f: missing.add(f)
-    if missing.len > 0:
+    for (trigger, found) in storeFindings(r.findings):
       discard recordEvidence(EvidenceEvent(detector: edStore,
-        category: ecDetection, trigger: "store-object-missing",
-        fields: @[("bootId", boot), ("message", missing.join("; "))],
+        category: ecDetection, trigger: trigger,
+        fields: @[("bootId", boot), ("message", found.join("; "))],
         attest: true), site)
   except CatchableError as e:
     stderr.write("repro-addon: cannot write the re-assert's evidence " &

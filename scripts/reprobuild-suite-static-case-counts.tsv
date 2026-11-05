@@ -33,7 +33,7 @@ libs/repro_addon/tests/t_addon_agent_repin.nim	nim	3
 libs/repro_addon/tests/t_addon_agent_split.nim	nim	25
 libs/repro_addon/tests/t_addon_agent_staging_copy_streams.nim	nim	4
 libs/repro_addon/tests/t_addon_apt_hook_and_base_identity.nim	nim	21
-libs/repro_addon/tests/t_addon_carried_state_fails_closed.nim	nim	18
+libs/repro_addon/tests/t_addon_carried_state_fails_closed.nim	nim	36
 libs/repro_addon/tests/t_addon_collision.nim	nim	35
 libs/repro_addon/tests/t_addon_crash_recovery_records.nim	nim	25
 libs/repro_addon/tests/t_addon_cross_prefix_needs_the_sysroot_glibc.nim	nim	5
@@ -48,10 +48,11 @@ libs/repro_addon/tests/t_addon_evidence_key_survives_retention.nim	nim	4
 libs/repro_addon/tests/t_addon_evidence_lag_resigned.nim	nim	2
 libs/repro_addon/tests/t_addon_evidence_ships_off_host.nim	nim	7
 libs/repro_addon/tests/t_addon_evidence_units_and_tick_records.nim	nim	8
-libs/repro_addon/tests/t_addon_fingerprint.nim	nim	15
+libs/repro_addon/tests/t_addon_fingerprint.nim	nim	16
 libs/repro_addon/tests/t_addon_floor_round3.nim	nim	16
 libs/repro_addon/tests/t_addon_floor_round4.nim	nim	16
 libs/repro_addon/tests/t_addon_floor_round5.nim	nim	15
+libs/repro_addon/tests/t_addon_floor_round6.nim	nim	23
 libs/repro_addon/tests/t_addon_generation_attestation.nim	nim	6
 libs/repro_addon/tests/t_addon_host_lock_guards_the_switch_and_the_store.nim	nim	8
 libs/repro_addon/tests/t_addon_import_skeleton.nim	nim	9
@@ -70,7 +71,8 @@ libs/repro_addon/tests/t_addon_secret_files_created_private_and_never_through_sy
 libs/repro_addon/tests/t_addon_secrets_envelopes_and_rotation.nim	nim	13
 libs/repro_addon/tests/t_addon_service_floor.nim	nim	32
 libs/repro_addon/tests/t_addon_state_sets.nim	nim	17
-libs/repro_addon/tests/t_addon_store_verify.nim	nim	5
+libs/repro_addon/tests/t_addon_store_custody.nim	nim	7
+libs/repro_addon/tests/t_addon_store_verify.nim	nim	9
 libs/repro_addon/tests/t_addon_switch_exclusive_retention.nim	nim	35
 libs/repro_addon/tests/t_addon_switch_planning.nim	nim	28
 libs/repro_addon/tests/t_addon_tmpfiles_scope.nim	nim	7
@@ -293,6 +295,7 @@ libs/repro_cli_support/tests/t_runquota_auto_spawn_defers_to_host_config.nim	nim
 libs/repro_cli_support/tests/t_s7_build_paths_reach_the_restore_config.nim	nim	6
 libs/repro_cli_support/tests/t_strategy_unknown_name_refused.nim	nim	8
 libs/repro_cli_support/tests/t_trust_profiles_and_pinned_host_keys.nim	nim	3
+libs/repro_cli_support/tests/t_version_verb_realizes_no_pinned_toolchain.nim	nim	2
 libs/repro_cli_support/tests/t_w2_activation_surfaces_declare_producer_ops.nim	nim	5
 libs/repro_cli_support/tests/t_w2_dev_env_producer_pin_binding.nim	nim	9
 libs/repro_cli_support/tests/t_watch_ct_incremental_flags.nim	nim	3
@@ -514,6 +517,7 @@ libs/repro_home_rollback/tests/t_smoke_home_rollback.nim	nim	2
 libs/repro_homebrew_adapter/tests/t_smoke_repro_homebrew_adapter.nim	nim	65
 libs/repro_infra/tests/t_an_apply_reports_reboot_required_from_a_build_action.nim	nim	4
 libs/repro_infra/tests/t_every_apply_waits_for_carried_state.nim	nim	2
+libs/repro_infra/tests/t_service_account.nim	nim	21
 libs/repro_infra/tests/t_smoke_phase_g_runinfraapply_dispatch.nim	nim	9
 libs/repro_infra/tests/t_smoke_repro_infra.nim	nim	207
 libs/repro_infra/tests/t_system_generations_distinct_within_one_second.nim	nim	4
@@ -575,6 +579,7 @@ libs/repro_local_store/tests/t_retention_gc.nim	nim	6
 libs/repro_local_store/tests/t_sqlite_smoke.nim	nim	4
 libs/repro_local_store/tests/t_store_budget_gc.nim	nim	12
 libs/repro_local_store/tests/t_store_bundle_roundtrip.nim	nim	5
+libs/repro_local_store/tests/t_store_copy.nim	nim	22
 libs/repro_local_store/tests/t_store_optimise_dedup.nim	nim	2
 libs/repro_local_store/tests/t_win_store_gc_refuses_referenced_entry.nim	nim	9
 libs/repro_local_store/tests/t_win_store_hardlink_cap_falls_back_per_file.nim	nim	7
@@ -1214,6 +1219,7 @@ tests/e2e/addon/t_e2e_addon_service_cannot_exec_outside_closure.nim	nim	1
 tests/e2e/addon/t_e2e_addon_service_reads_only_its_credentials.nim	nim	1
 tests/e2e/addon/t_e2e_addon_staging_swap_after_verify_is_refused.nim	nim	1
 tests/e2e/addon/t_e2e_addon_stale_manifest_is_reported.nim	nim	1
+tests/e2e/addon/t_e2e_addon_store_custody.nim	nim	1
 tests/e2e/addon/t_e2e_addon_store_is_read_only_to_everything_else.nim	nim	1
 tests/e2e/addon/t_e2e_addon_store_roots_and_btrfs.nim	nim	1
 tests/e2e/addon/t_e2e_addon_survives_point_upgrades.nim	nim	1
@@ -1775,6 +1781,7 @@ tests/integration/t_first_commit_of_a_repository_is_certifiable.nim	nim	1
 tests/integration/t_fixture_processes_are_reaped_by_witness.nim	nim	4
 tests/integration/t_flake_inputs_match_original_coordinates.nim	nim	5
 tests/integration/t_flake_override_resolution_uses_the_invoking_engine.nim	nim	3
+tests/integration/t_flake_remedies_quote_paths_for_the_hook_shell.nim	nim	2
 tests/integration/t_force_push_of_any_declared_role_is_refused.nim	nim	4
 tests/integration/t_framework_field_is_present_and_filtering_works.nim	nim	1
 tests/integration/t_gate_and_sync_consume_unified_locked_deps_regardless_of_source.nim	nim	1
@@ -1805,7 +1812,7 @@ tests/integration/t_health_reports_a_refusing_hook_as_not_ok.nim	nim	3
 tests/integration/t_health_reports_a_worktree_unsafe_hooks_path.nim	nim	5
 tests/integration/t_health_reports_certificate_propagation_config.nim	nim	3
 tests/integration/t_health_reports_disjoint_local_branches.nim	nim	1
-tests/integration/t_health_reports_each_layer_status_with_remedy.nim	nim	6
+tests/integration/t_health_reports_each_layer_status_with_remedy.nim	nim	7
 tests/integration/t_health_reports_forge_repository_renames.nim	nim	1
 tests/integration/t_health_reports_the_certificate_store_and_reference_tool.nim	nim	8
 tests/integration/t_health_vcs_hooks_digest_output.nim	nim	1
@@ -2169,6 +2176,7 @@ tests/integration/t_repro_test_runner_survives_its_binary_being_replaced.nim	nim
 tests/integration/t_repro_test_workspace_mode_issues_a_content_bound_certificate.nim	nim	1
 tests/integration/t_repro_up_resolver_reads_the_owner_interface_under_its_writers_lock.nim	nim	1
 tests/integration/t_repro_up_shared_service_checks_use_the_dev_env_edge_copy.nim	nim	1
+tests/integration/t_repro_version_verb.nim	nim	3
 tests/integration/t_reproos_source_bridge_inventory.nim	nim	1
 tests/integration/t_reproos_uki_through_the_cvm_path.nim	nim	8
 tests/integration/t_required_features_are_a_subset_of_host_features.nim	nim	1
@@ -2254,6 +2262,7 @@ tests/integration/t_stdlib_catalog_tarball_arms_realize.nim	nim	1
 tests/integration/t_stdlib_python_tarball_arms_realize.nim	nim	1
 tests/integration/t_store_and_registry_deps_carry_coordinates_and_integrity.nim	nim	1
 tests/integration/t_store_bundle_cli.nim	nim	1
+tests/integration/t_store_copy_cli.nim	nim	1
 tests/integration/t_store_daemon_m66_dev.nim	nim	6
 tests/integration/t_store_roots_resolve_or_report_unresolved.nim	nim	1
 tests/integration/t_suite_artifact_generator_refuses_arguments_it_cannot_honour.nim	nim	6
