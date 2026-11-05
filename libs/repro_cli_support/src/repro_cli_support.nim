@@ -23,6 +23,7 @@ import repro_core
 import repro_cli_support/workspace_restore
 import repro_cli_support/repository_identities
 import repro_cli_support/store_bundle_cli
+import repro_cli_support/store_copy_cli
 import repro_cli_support/bundle_cli
 # W8-R1/R2 — the one canonicalization the deleting consumers in this file ask
 # their containment question under. Imported by MODULE rather than folded into
@@ -39158,7 +39159,8 @@ proc runStoreCommand*(args: seq[string]): int =
   ## is honoured otherwise.
   if args.len == 0:
     echo "usage: repro store {gc | recover | roots | list | optimise | " &
-      "materialize <src-dir> <dst-dir> | closure | export | import} " &
+      "materialize <src-dir> <dst-dir> | closure | export | import | " &
+      "copy} " &
       "[--store-root=PATH] [--grace-seconds=N] [--json] [--no-shared-inode] " &
       "[--budget=SIZE [--target=SIZE] [--keep-recent=DURATION] " &
       "[--evict-cas] [--dry-run]]"
@@ -39172,6 +39174,24 @@ proc runStoreCommand*(args: seq[string]): int =
   if args[0] == "daemon":
     let daemonArgs = if args.len > 1: args[1 .. ^1] else: @[]
     return runStoreDaemonCommand(daemonArgs)
+  if args[0] == "copy":
+    # Closure copy into another store root. Routed before the flag loop
+    # below: it takes its own flags (--to, --root-id, ...).
+    return runStoreCopyCommand(args, StoreCopyCliHooks(
+      withDestinationLock: proc (dest: string; body: proc (): int): int =
+        when defined(linux):
+          # The add-on's system store is written under the host apply lock
+          # by every add-on writer (see the gc arm below), however its path
+          # is spelled.
+          var isSystemStore = false
+          if dirExists(AddOnSystemStoreRoot / "prefixes") and dirExists(dest):
+            try: isSystemStore = sameFile(dest, AddOnSystemStoreRoot)
+            except OSError: discard
+          if isSystemStore:
+            var lock = acquireHostApplyLock("repro store copy")
+            defer: lock.release()
+            return body()
+        body()))
   if args[0] in ["closure", "export", "import"]:
     # Native-store bundles (docs/store-bundles.md). Routed before the flag
     # loop below: they take their own flags (--root, --out, ...) and must

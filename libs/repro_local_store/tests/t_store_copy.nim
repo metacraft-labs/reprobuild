@@ -1,0 +1,248 @@
+## `copyClosure` (`repro store copy --to=STORE-ROOT`): a realized closure
+## moved from one local store root into another, on a real temporary
+## filesystem through the production store. No mocks.
+##
+## What it pins:
+##   * every copied prefix verifies at the destination: the same index row,
+##     a byte-identical receipt, a tree that hashes to the receipt's content
+##     digest, symbolic links and executable bits intact, and a destination
+##     recovery that finds nothing to fix;
+##   * the destination keeps the closure alive: a GC there reaps nothing;
+##   * a second copy transfers nothing;
+##   * a source prefix with one file deleted makes the copy fail before
+##     anything is written, rather than copying the rest;
+##   * multi-output siblings and root selection widen the closure;
+##   * conflicts, an unknown root, a non-prefix path and the source store
+##     itself as destination are refused;
+##   * a prefix whose receipt records no content digest is copied, checked
+##     against the source tree, and reported as unverified.
+
+import std/[os, sequtils, tempfiles, unittest]
+
+import repro_local_store/store
+import repro_local_store/sqlite3_binding
+import repro_local_store/store_copy
+import repro_test_support/reasoned_skip
+
+type Fixture = object
+  top, src, dst: string
+  tool: RealizeResult
+
+proc stagingTree(top, name: string): string =
+  result = top / ("staging-" & name)
+  createDir(result / "bin")
+  createDir(result / "share" / "empty")
+  writeFile(result / "bin" / name, "#!/bin/sh\necho " & name & "\n")
+  setFilePermissions(result / "bin" / name,
+    {fpUserRead, fpUserWrite, fpUserExec, fpGroupRead, fpGroupExec})
+  writeFile(result / "share" / "data.txt", name & " data\n")
+  createSymlink("../bin/" & name, result / "share" / "link")
+
+proc realize(s: var Store; top, name: string): RealizeResult =
+  s.realizeDirectoryAsPrefix(stagingTree(top, name), StoreReceiptHint(
+    adapter: "path", packageName: name, version: "1.0",
+    lockIdentity: "test-" & name))
+
+proc makeFixture(): Fixture =
+  result.top = createTempDir("repro-store-copy-", "")
+  result.src = result.top / "src-store"
+  result.dst = result.top / "dst-store"
+  var s = openStore(result.src)
+  defer: s.close()
+  result.tool = s.realize(result.top, "tool")
+  discard s.realize(result.top, "other")
+
+proc copyOf(f: Fixture; prefixes: seq[string] = @[];
+            rootIds: seq[string] = @[]): StoreCopyReport =
+  copyClosure(StoreCopyRequest(sourceRoot: f.src, destinationRoot: f.dst,
+    prefixes: prefixes, rootIds: rootIds))
+
+proc indexedPaths(root: string): seq[string] =
+  if not fileExists(root / "index.db"): return
+  var s = openStore(root)
+  defer: s.close()
+  for row in s.listPrefixes(): result.add(row.realizedPath)
+
+suite "repro store copy":
+  test "a closure copied into an empty store verifies there and survives gc":
+    when defined(windows):
+      skip("store copy is POSIX-only")
+    else:
+      let f = makeFixture()
+      defer: removeDir(f.top)
+      let rel = f.tool.relativePath
+      let report = f.copyOf(@[f.src / rel / "bin" / "tool"])
+      check report.closure == @[rel]
+      check report.copied == @[rel]
+      check report.alreadyPresent.len == 0
+      check report.unverified.len == 0
+      check report.copiedBytes > 0
+      check indexedPaths(f.dst) == @[rel]
+
+      var src = openStore(f.src)
+      defer: src.close()
+      var dst = openStore(f.dst)
+      defer: dst.close()
+      let srcRow = src.lookupPrefix(f.tool.prefixId)
+      let dstRow = dst.lookupPrefix(f.tool.prefixId)
+      check dstRow.found
+      check dstRow.row == srcRow.row
+      let dstDir = dst.absolutePrefixPath(rel)
+      check readFile(dstDir / ReceiptFileName) ==
+        readFile(f.src / rel / ReceiptFileName)
+      let receipt = readReceiptFile(dstDir / ReceiptFileName)
+      check receipt.contentDigest.len > 0
+      check storeTreeDigest(dstDir) == receipt.contentDigest
+      check expandSymlink(dstDir / "share" / "link") == "../bin/tool"
+      check fpUserExec in getFilePermissions(dstDir / "bin" / "tool")
+      # Realization drops empty directories; the copy carries exactly the
+      # directories the source prefix has.
+      check dirExists(dstDir / "share" / "empty") ==
+        dirExists(f.src / rel / "share" / "empty")
+      # An independent store: no shared inodes with the source.
+      check getFileInfo(dstDir / "bin" / "tool").id !=
+        getFileInfo(f.src / rel / "bin" / "tool").id
+
+      let recovered = dst.recover()
+      check recovered.reinsertedPrefixes.len == 0
+      check recovered.quarantinedPrefixes.len == 0
+      check dst.rootsHolding(f.tool.prefixId) == @[report.rootId]
+      let gcReport = dst.gc(graceSeconds = 0)
+      check gcReport.quarantined.len == 0
+      check dirExists(dstDir)
+
+  test "a second copy transfers nothing":
+    when defined(windows):
+      skip("store copy is POSIX-only")
+    else:
+      let f = makeFixture()
+      defer: removeDir(f.top)
+      let first = f.copyOf(@[f.tool.relativePath])
+      let again = f.copyOf(@[f.tool.relativePath])
+      check first.copied.len == 1
+      check again.copied.len == 0
+      check again.copiedBytes == 0
+      check again.alreadyPresent == @[f.tool.relativePath]
+      check again.rootId == first.rootId
+
+  test "a source prefix with a deleted file fails the copy and writes nothing":
+    when defined(windows):
+      skip("store copy is POSIX-only")
+    else:
+      let f = makeFixture()
+      defer: removeDir(f.top)
+      var s = openStore(f.src)
+      let other = s.listPrefixes().filterIt(it.packageName == "other")[0]
+      s.close()
+      removeFile(f.src / f.tool.relativePath / "share" / "data.txt")
+      expect StoreCopyError:
+        discard f.copyOf(@[other.realizedPath, f.tool.relativePath])
+      # Neither the damaged prefix nor the intact one reached the
+      # destination: the closure is copied whole or not at all.
+      check indexedPaths(f.dst).len == 0
+      check not dirExists(f.dst / other.realizedPath)
+
+  test "a damaged receipt fails the copy":
+    when defined(windows):
+      skip("store copy is POSIX-only")
+    else:
+      let f = makeFixture()
+      defer: removeDir(f.top)
+      writeFile(f.src / f.tool.relativePath / ReceiptFileName, "not a receipt")
+      expect StoreCopyError:
+        discard f.copyOf(@[f.tool.relativePath])
+      check indexedPaths(f.dst).len == 0
+
+  test "a root selects what it holds; multi-output siblings come along":
+    when defined(windows):
+      skip("store copy is POSIX-only")
+    else:
+      let f = makeFixture()
+      defer: removeDir(f.top)
+      var s = openStore(f.src)
+      let bin = stagingTree(f.top, "multi-bin")
+      let man = f.top / "staging-man"
+      createDir(man / "man1")
+      writeFile(man / "man1" / "multi.1", ".TH MULTI 1\n")
+      let multi = s.realizeMultiOutput(StoreReceiptHint(adapter: "path",
+        packageName: "multi", version: "2.0", lockIdentity: "test-multi"),
+        [MultiOutputSpec(outputName: "bin", stagingDir: bin),
+         MultiOutputSpec(outputName: "man", stagingDir: man)])
+      s.registerRoot("held", rkPin)
+      s.attachPrefixToRoot("held", f.tool.prefixId)
+      s.close()
+      let viaRoot = f.copyOf(rootIds = @["held"])
+      check viaRoot.copied == @[f.tool.relativePath]
+      # Naming only the `bin` output copies the `man` output too.
+      let viaSibling = f.copyOf(@[multi.perOutput[0].relativePath])
+      check viaSibling.closure.len == 2
+      check multi.perOutput[1].relativePath in viaSibling.copied
+      check multi.perOutput[0].relativePath in viaSibling.copied
+      for o in multi.perOutput:
+        check dirExists(f.dst / o.relativePath)
+
+  test "refusals: unknown root, non-prefix path, self, conflicts":
+    when defined(windows):
+      skip("store copy is POSIX-only")
+    else:
+      let f = makeFixture()
+      defer: removeDir(f.top)
+      expect StoreCopyError:
+        discard f.copyOf(rootIds = @["no-such-root"])
+      expect StoreCopyError:
+        discard f.copyOf(@[f.top])
+      expect StoreCopyError:
+        discard copyClosure(StoreCopyRequest(sourceRoot: f.src,
+          destinationRoot: f.src, prefixes: @[f.tool.relativePath]))
+      expect StoreCopyError:
+        discard f.copyOf()
+      # An unindexed directory where the prefix would land is not
+      # overwritten.
+      createDir(f.dst / f.tool.relativePath)
+      writeFile(f.dst / f.tool.relativePath / "stray", "x")
+      expect StoreCopyError:
+        discard f.copyOf(@[f.tool.relativePath])
+      check readFile(f.dst / f.tool.relativePath / "stray") == "x"
+      check indexedPaths(f.dst).len == 0
+
+  test "a destination row with a different receipt is a conflict":
+    when defined(windows):
+      skip("store copy is POSIX-only")
+    else:
+      let f = makeFixture()
+      defer: removeDir(f.top)
+      discard f.copyOf(@[f.tool.relativePath])
+      var d = openStore(f.dst)
+      var row = d.lookupPrefix(f.tool.prefixId).row
+      row.receiptDigest[0] = row.receiptDigest[0] xor 0xff
+      d.db.exec("BEGIN IMMEDIATE")
+      d.db.exec("DELETE FROM root_holds_prefix")
+      d.db.exec("DELETE FROM prefixes")
+      discard d.insertPrefixOrIgnore(row)
+      d.db.exec("COMMIT")
+      d.close()
+      expect StoreCopyError:
+        discard f.copyOf(@[f.tool.relativePath])
+
+  test "a receipt without a content digest is copied and reported unverified":
+    when defined(windows):
+      skip("store copy is POSIX-only")
+    else:
+      let f = makeFixture()
+      defer: removeDir(f.top)
+      let rel = f.tool.relativePath
+      var receipt = readReceiptFile(f.src / rel / ReceiptFileName)
+      receipt.contentDigest = ""
+      writeReceiptFile(f.src / rel / ReceiptFileName, receipt)
+      var s = openStore(f.src)
+      var row = s.lookupPrefix(f.tool.prefixId).row
+      row.receiptDigest = receiptDigest(receipt)
+      s.db.exec("BEGIN IMMEDIATE")
+      s.db.exec("DELETE FROM prefixes")
+      discard s.insertPrefixOrIgnore(row)
+      s.db.exec("COMMIT")
+      s.close()
+      let report = f.copyOf(@[rel])
+      check report.copied == @[rel]
+      check report.unverified == @[rel]
+      check storeTreeDigest(f.dst / rel) == storeTreeDigest(f.src / rel)
