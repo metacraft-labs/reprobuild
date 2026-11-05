@@ -26962,7 +26962,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false,
     group: "",
-    singleReason: "suite-scope statement runs at every start-up: putEnv(\"REPRO_CACHE_DISABLE\", \"1\")"),
+    singleReason: "self-spawn marker getAppFilename"),
   TestSpec(
     source: "tests/unit/t_cmake_direct_tool_identity.nim",
     binary: "build/test-bin/t_cmake_direct_tool_identity",
