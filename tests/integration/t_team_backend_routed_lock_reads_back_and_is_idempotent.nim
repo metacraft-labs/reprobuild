@@ -4,9 +4,8 @@
 ## must be able to READ BACK the per-repo lock records it wrote, and re-locking
 ## an unchanged workspace must stay a clean no-op.
 ##
-## This is the migration happy path (``repo-workspaces`` committed workspace
-## locks to the manifest repo; the reprobuild equivalent is the team route over
-## the same checkout). Three defects on this path are pinned here:
+## This is the happy path of a team that commits workspace locks to its
+## manifest repo: the team route over that checkout. Three defects on this path are pinned here:
 ##
 ##   * **#2 (the crash) — routed records are readable.** ``repro workspace lock``
 ##     writes each repo's record as a schema-less ``[[repo]]`` git-checkout

@@ -649,7 +649,7 @@ proc getFetchUrl*(fetchBase, repoName: string): string =
 #      into the fragment's `name` (Android-`repo` semantics: `name` is the
 #      server-side path, `path` is the local checkout dir). Nothing is added
 #      to the project's remote table. This single rule reproduces both
-#      hand-written families in the pilot manifests, which declare `github` →
+#      hand-written remote families the manifests declare, `github` →
 #      `https://github.com` AND `metacraft-labs` → `https://github.com/metacraft-labs`:
 #
 #        https://github.com/metacraft-labs/nim-shm-queue
@@ -738,7 +738,7 @@ proc orgLabelFor(base: string): string =
   ## The name to give a newly minted remote: the org segment of the base
   ## (`https://github.com/metacraft-labs` → `metacraft-labs`), or — when the
   ## base is just a host — the host's first label (`https://github.com` →
-  ## `github`, matching the hand-written `github` remote in the pilot
+  ## `github`, matching the hand-written `github` remote in the
   ## manifests).
   var rest = base
   let scheme = rest.find("://")

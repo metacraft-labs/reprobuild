@@ -275,8 +275,6 @@ nim-shm-gset=6333cc915689559b00f81371734783c2e894ca45
 # Moved e3254b7 -> 22e3100 (2026-10-20) with the runquota pin above, whose
 # flake.lock names it; e3254b7 is an ancestor.
 nim-shm-lease=22e3100cdb4fbc374689ddac55b4b32c90654140
-# `main` retired in the org branch-rename sweep; mainline is now `dev`.
-repo-workspaces=dev
 
 # The shared-actions repo, declared here as an ordinary sibling because
 # `tests/e2e/codetracer-subset/t_e2e_codetracer_in_place_project_file.nim`

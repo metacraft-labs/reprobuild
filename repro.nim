@@ -658,7 +658,7 @@ proc windowsDiyInstallRoot(): string =
   ## Candidates are VALIDATED rather than taken on faith, because
   ## ``WINDOWS_DIY_INSTALL_ROOT`` means two different things in this tree.
   ## ``windows/bootstrap-toolchain.ps1`` sets it to the TOOLCHAIN install
-  ## root -- ``%LOCALAPPDATA%\repo-workspaces\toolchains``, where
+  ## root -- ``%LOCALAPPDATA%\reprobuild\toolchains``, where
   ## ``ensure-nim.ps1`` and ``ensure-gcc.ps1`` unpack nim and gcc -- while
   ## everything below wants the metacraft-dev-deps root that holds msys2 and
   ## the fixture toolchains. One name, two roots.

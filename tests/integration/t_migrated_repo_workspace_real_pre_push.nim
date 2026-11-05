@@ -1,11 +1,11 @@
-## Legacy repo-workspaces migration compatibility through a real Git hook.
+## A workspace migrated in place from the ``.repo/`` layout, through a real
+## Git hook.
 ##
-## The shipped repo-workspaces v2.10 migration wrote local workspace metadata
-## to ``.repo/workspace.toml`` and an exact completion sentinel beside it.
-## Reprobuild's later native-layout cutover made ``.repro/workspace.toml`` the
-## canonical metadata path and root-level ``projects/`` / ``repos/`` the
-## canonical membership. Existing migrated workspaces therefore have native
-## membership but only the known legacy metadata artifact.
+## Such a workspace carries its local metadata in ``.repo/workspace.toml``
+## with an exact completion sentinel (``.repo/.repro-migration-complete``)
+## beside it, and root-level ``projects/`` / ``repos/`` membership. The
+## canonical metadata path is ``.repro/workspace-state.toml``; a migrated
+## workspace has native membership but only the ``.repo/`` metadata artifact.
 ##
 ## This fixture reproduces the production Google Repo topology:
 ##

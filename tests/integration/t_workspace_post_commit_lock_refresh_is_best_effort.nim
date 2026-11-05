@@ -522,7 +522,7 @@ suite "M19 — repro hooks dispatch post-commit (best-effort lock)":
       cloneAll(gitBin, fx)
       # No seedWorkspaceToml call AND no resolved manifest checkout — the
       # workspace is genuinely uninitialized (RA-10 canonical marker
-      # [Workspace-RepoWorkspaces-Alignment.milestones.org RA-10; hooksRoot
+      # [Workspace-Alignment.milestones.org RA-10; hooksRoot
       # discovery walks up for a ``.repro/`` dir]: a bare ``.repro/`` with no
       # ``workspace.toml`` and no resolved ``projects/*.toml`` is NOT a
       # workspace). The wrapper must announce ``skipped-no-workspace`` on

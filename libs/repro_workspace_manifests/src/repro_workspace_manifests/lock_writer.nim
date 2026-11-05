@@ -36,8 +36,7 @@
 ##         reason = "<why it could not be observed>" },
 ##     ]
 ##
-## RA-1 aligns the writer with the ``repo-workspaces`` pilot (commit
-## ``418f109``): locks live under a **per-repo directory**, keyed by
+## Locks live under a **per-repo directory**, keyed by
 ## the trigger repo whose commit produced the lock, and the filename
 ## is the **full** commit SHA (``locks/<project>/<repo>/<sha>.toml``).
 ## There is **no** committed lock index. The "latest published lock
@@ -172,7 +171,7 @@ template emitKv(buf: var string; key, value: string) =
 
 proc lockFileName*(triggerSha: string): string =
   ## Build the basename of the lock file: the **full** trigger commit
-  ## SHA plus ``.toml``. RA-1 (pilot ``418f109``) keys the file by the
+  ## SHA plus ``.toml``. RA-1 keys the file by the
   ## full SHA inside a per-repo directory, so the repo name is a path
   ## segment (see ``lockFilePath``) rather than a filename prefix.
   lockRecordFileName(triggerSha)
@@ -356,7 +355,7 @@ proc writeLockFile*(lock: WorkspaceLockFile; path: string) =
   let body = serializeLockToToml(lock)
   # RA-7: never write an empty / zero-byte lock. A zero-byte lock would
   # be silently committed and published as a "reproducible state" that
-  # reproduces nothing; reject it at the writer boundary (pilot 5884c31).
+  # reproduces nothing; reject it at the writer boundary.
   if body.strip().len == 0:
     raise newException(ValueError,
       "refusing to write empty/zero-byte lock file: " & path)

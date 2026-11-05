@@ -470,8 +470,8 @@ jobs:
           & ./windows/raise-nim-stack.ps1
 
           # Provision `just`: the reprobuild dev-env summary reports
-          # `just = (not on PATH)` on the windows-diy runners (the repo-workspaces
-          # framework provisions nim/gcc but not just here), yet both builds below
+          # `just = (not on PATH)` on the windows-diy runners (the cold-start
+          # bootstrap provisions nim/gcc but not just here), yet both builds below
           # invoke it. Fetch the single static just.exe and put it on PATH. Pinned
           # to the version the windows dev-env docs record.
           if (-not (Get-Command just -ErrorAction SilentlyContinue)) {
