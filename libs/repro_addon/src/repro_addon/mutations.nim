@@ -479,6 +479,10 @@
 ## ``receipt-trusts-inode``                   the restore receipt counts a
 ##                                            directory as restored on its
 ##                                            device and inode alone
+## ``receipt-no-fsync``                       the restore receipt is
+##                                            renamed into place with
+##                                            neither its file nor its
+##                                            directory fsync'd
 ## ``reach-ignores-privileged-commands``      a "+"/"!" Exec*= command and
 ##                                            PermissionsStartOnly= do not
 ##                                            widen a unit's reach
@@ -822,6 +826,10 @@ const
                           "evidence-ship-sees-agent-keys",
                           # A13 review round 2.
                           "receipt-trusts-inode",
+                          # A13 review round 3 item 11: the receipt
+                          # written without its fsyncs (the hard-reset
+                          # gate's receipt points).
+                          "receipt-no-fsync",
                           "reach-ignores-privileged-commands",
                           "reach-dropin-judged-alone",
                           "reach-trigger-units-reach-nothing",

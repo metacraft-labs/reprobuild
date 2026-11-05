@@ -965,21 +965,21 @@ proc holdWriteback*(g: Guest) =
     raise newException(TestBedError, "could not hold writeback back: " &
       r.stdout & r.stderr)
 
-proc startSwitchPausedAt*(g: Guest; repro, name, text, point: string;
-                          timeoutSec = 900): ExecOut =
-  ## Start ``repro infra apply --profile <text>`` in the background with the
-  ## seam build's pause at ``point``, and wait until the switch reports it
-  ## has stopped there. Returns the paused-at check (exit 0 when reached);
-  ## a switch that ended without reaching the point is a non-zero result
-  ## carrying its log.
+proc startPausedAt*(g: Guest; command, point: string;
+                    timeoutSec = 900): ExecOut =
+  ## Start ``command`` (a guest shell command line running the seam build)
+  ## in the background with the seam build's pause at ``point``, and wait
+  ## until it reports it has stopped there. Returns the paused-at check
+  ## (exit 0 when reached); a command that ended without reaching the
+  ## point is a non-zero result carrying its log. ``resumeSwitch`` lets it
+  ## continue.
   if not testSeams():
-    raise newException(TestBedError, "a paused switch needs the seam build " &
-      "(REPRO_ADDON_TEST_SEAMS=1)")
-  let p = g.putProfile(name, text)
+    raise newException(TestBedError, "a paused command needs the seam " &
+      "build (REPRO_ADDON_TEST_SEAMS=1)")
   discard g.run("rm -f " & SeamDir & "/test-paused-at " & SeamDir &
     "/test-resume /root/addon/bg-apply.log /root/addon/bg-apply.rc; printf '%s\\n' " &
     point & " > " & SeamDir & "/test-pause-at; sync")
-  discard g.run("setsid nohup sh -c '" & repro & " infra apply --profile " & p &
+  discard g.run("setsid nohup sh -c '" & command &
     " > /root/addon/bg-apply.log 2>&1; echo $? > /root/addon/bg-apply.rc' " &
     "> /dev/null 2>&1 < /dev/null &")
   let deadline = epochTime() + timeoutSec.float
@@ -989,13 +989,37 @@ proc startSwitchPausedAt*(g: Guest; repro, name, text, point: string;
     if r.stdout.strip() == point:
       return ExecOut(exitCode: 0, stdout: point)
     if r.stdout.strip().len > 0 and r.stdout.strip() != point:
-      # The apply ended (its exit code is there) without pausing.
+      # The command ended (its exit code is there) without pausing.
       return ExecOut(exitCode: 1, stdout: r.stdout,
         stderr: g.exec("cat /root/addon/bg-apply.log").stdout)
     sleep(500)
-  ExecOut(exitCode: 1, stderr: "the switch did not reach " & point &
+  ExecOut(exitCode: 1, stderr: "the command did not reach " & point &
     " within " & $timeoutSec & " s: " &
     g.exec("cat /root/addon/bg-apply.log").stdout)
+
+proc startSwitchPausedAt*(g: Guest; repro, name, text, point: string;
+                          timeoutSec = 900): ExecOut =
+  ## Start ``repro infra apply --profile <text>`` in the background with the
+  ## seam build's pause at ``point``, and wait until the switch reports it
+  ## has stopped there (``startPausedAt``).
+  let p = g.putProfile(name, text)
+  g.startPausedAt(repro & " infra apply --profile " & p, point, timeoutSec)
+
+proc commitJournalOnly*(g: Guest) =
+  ## Make ext4 commit its running journal transaction -- every rename and
+  ## metadata change made so far -- without writing anyone else's file
+  ## data: one fsync of a file of the gate's own. Under ``holdWriteback``
+  ## nothing else commits the journal, so this is the moment a real host
+  ## reaches on its own within ``commit=`` seconds (5 by default): a
+  ## rename made before it is on the disk, and the renamed file's data is
+  ## there only if someone fsync'd it (delayed allocation, no
+  ## ``auto_da_alloc``). ``sync`` would write every dirty page and hide a
+  ## missing fsync; this does not.
+  let r = g.exec("dd if=/dev/zero of=/root/addon/journal-commit bs=4096 " &
+    "count=1 conv=fsync status=none")
+  if r.exitCode != 0:
+    raise newException(TestBedError, "could not commit the journal: " &
+      r.stdout & r.stderr)
 
 proc resumeSwitch*(g: Guest; timeoutSec = 900): ExecOut =
   ## Let a paused switch continue and wait for it to end; its exit code and

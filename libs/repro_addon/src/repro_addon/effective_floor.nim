@@ -397,28 +397,45 @@ proc limitValue*(v: string): uint64 =
   if v == "infinity" or v.len == 0: return high(uint64)
   try: uint64(parseBiggestUInt(v)) except ValueError: high(uint64)
 
-proc environmentFileProblem*(path: string): string =
-  ## Why the manager may not read ``path`` as root for a floored service:
-  ## it does not exist, is not a regular file, or it or any parent
-  ## directory is not root-owned or is writable by its group or others.
-  ## "" when it may (A9 review round 5, finding 1). An error reading any of
-  ## that refuses (default-deny).
-  var st: Stat
-  if lstat(path.cstring, st) != 0: return "it does not exist (or cannot be read)"
-  if not S_ISREG(st.st_mode): return "it is not a regular file"
-  if st.st_uid != 0: return "it is not owned by root"
-  if (st.st_mode.cint and 0o022) != 0: return "it is writable by its group or others"
+proc ownedChainProblem(path: string): string =
+  ## Why the directories above ``path`` are not all root-owned and closed
+  ## to their group and others, or "".
   var d = parentDir(path)
   while d.len > 0:
     var ds: Stat
     if lstat(d.cstring, ds) != 0: return "its directory " & d & " cannot be read"
-    if not S_ISDIR(ds.st_mode): return d & " is not a directory"
+    if not S_ISDIR(ds.st_mode) and not S_ISLNK(ds.st_mode):
+      return d & " is not a directory"
     if ds.st_uid != 0: return "its directory " & d & " is not owned by root"
-    if (ds.st_mode.cint and 0o022) != 0:
+    if not S_ISLNK(ds.st_mode) and (ds.st_mode.cint and 0o022) != 0:
       return "its directory " & d & " is writable by its group or others"
     if d == "/": break
     d = parentDir(d)
   ""
+
+proc environmentFileProblem*(path: string): string =
+  ## Why the manager may not read ``path`` as root for a floored service:
+  ## it does not exist, is not a regular file, or it or any directory on
+  ## the way to it is not root-owned or is writable by its group or
+  ## others. A symbolic link (the add-on materialises an /etc file as a
+  ## link into the read-only store) is judged twice: the link's own
+  ## directories, which could swap it, and the file it resolves to with its
+  ## directories. "" when it may (A9 review round 5, finding 1). An error
+  ## reading any of that refuses (default-deny).
+  var st: Stat
+  if lstat(path.cstring, st) != 0: return "it does not exist (or cannot be read)"
+  var target = path
+  if S_ISLNK(st.st_mode):
+    if st.st_uid != 0: return "the link is not owned by root"
+    let why = ownedChainProblem(path)
+    if why.len > 0: return why
+    try: target = expandFilename(path)
+    except OSError: return "the link cannot be resolved"
+    if stat(target.cstring, st) != 0: return "its target " & target & " cannot be read"
+  if not S_ISREG(st.st_mode): return "it is not a regular file"
+  if st.st_uid != 0: return "it is not owned by root"
+  if (st.st_mode.cint and 0o022) != 0: return "it is writable by its group or others"
+  ownedChainProblem(target)
 
 proc managerLimits*(): Table[string, string] =
   ## The service manager's ``DefaultLimit*`` (``systemctl show`` of the
