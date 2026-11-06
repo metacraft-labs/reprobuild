@@ -36,6 +36,7 @@
 
 import std/[asyncdispatch, os, strutils, times]
 
+import repro_core/file_lock
 import repro_peer_cache/evidence as sinkEvidence
 import repro_peer_cache/identity
 import repro_peer_cache/pki
@@ -223,14 +224,36 @@ proc clearStaleOutbox(site: ShipSite; host: string): int =
 proc runEvidenceShipOnce(site: ShipSite; conf: EvidenceConf; host: string;
                          forceHeartbeat: bool): ShipResult
 
+proc shipLockPath*(site: ShipSite): string =
+  ## Held for a whole shipping run: one run ships at a time.
+  site.stateDir / "ship.lock"
+
 proc runEvidenceShip*(site: ShipSite; conf: EvidenceConf; host: string;
                       forceHeartbeat = false;
-                      onPass: proc () = nil): ShipResult =
+                      onPass: proc () = nil;
+                      lockWaitMs = 120_000): ShipResult =
   ## One shipping run (see the module documentation): the outbox is listed
   ## again after each pass, so a record that lands while the run ships goes
   ## with it. Never raises for an unreachable sink; raises
   ## ``EvidenceConfError`` for a broken credential or configuration.
+  ##
+  ## Runs are serialised by ``shipLockPath``: the shipping unit (started by
+  ## the path unit as records land) and ``contain``/``release`` (which ship
+  ## their record at once) would otherwise both read an entry before either
+  ## deleted it, and the sink would hold the record twice. A run that cannot
+  ## take the lock within ``lockWaitMs`` ships nothing and says so; the
+  ## holder lists the outbox again after each pass.
   createDir(site.stateDir)
+  var lock: ReproFileLock
+  when not mutated("ship-runs-concurrently"):
+    try:
+      lock = acquireExclusiveLockWithin(shipLockPath(site), lockWaitMs)
+    except IOError as e:
+      result.pending = outboxEntries(site.outbox).len
+      result.error = "another shipping run holds " & shipLockPath(site) &
+        ": " & e.msg
+      return
+  defer: releaseExclusiveFileLock(lock)
   discard clearStaleOutbox(site, host)
   result = runEvidenceShipOnce(site, conf, host, forceHeartbeat)
   when mutated("evidence-path-changed-only"):

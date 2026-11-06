@@ -465,6 +465,7 @@ proc runEvidenceCheck*(inp: CheckInputs): CheckReport =
       ## documented verbs it has absorbed.
     var announcements: seq[int64]
     var lastContainSeq = 0'u64
+    var lastContainStatement = ""
     var selfTests = 0
     var afterRetirement = false
     for e in mine:
@@ -614,6 +615,13 @@ proc runEvidenceCheck*(inp: CheckInputs): CheckReport =
           elif v.c.credentialHost != h.hostId or v.c.action != action:
             alert("DET-AO-9", "containment-invalid", e.seq, "the statement " &
               "is for " & v.c.credentialHost & " / " & v.c.action)
+          elif v.c.sequence == lastContainSeq and
+              r.field("containment") == lastContainStatement and
+              not mutated("containment-duplicate-is-replay"):
+            # The same statement delivered again (shipping is at least
+            # once: a run that crashed after the sink's acknowledgement and
+            # before deleting the entry sends it again). It changes nothing.
+            discard
           elif v.c.sequence <= lastContainSeq:
             alert("DET-AO-9", "containment-replayed", e.seq, "containment " &
               "sequence " & $v.c.sequence & " is not newer than " &
@@ -623,6 +631,7 @@ proc runEvidenceCheck*(inp: CheckInputs): CheckReport =
               $v.c.atMs & ", received at " & $e.receivedAtMs)
           else:
             lastContainSeq = v.c.sequence
+            lastContainStatement = r.field("containment")
             containment.add((e.seq, e.receivedAtMs, action == "contain",
               v.c.operator, v.c.reason))
       let a = parseStatement(stmt)
