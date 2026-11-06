@@ -675,6 +675,36 @@ proc managerPathProblem*(path: string; uid: int; dynamic: bool): string =
   "it exists and belongs to uid " & $owner & ", not to the unit's own " &
     "account; the manager would hand it to the service"
 
+proc ownUnitOf*(unit: string; own: HashSet[string]): bool =
+  ## ``unit`` is one of the generation's units, or an instance of a
+  ## template it installs.
+  if unit in own: return true
+  let at = unit.find('@')
+  let dot = unit.rfind('.')
+  at > 0 and dot > at and (unit[0 .. at] & unit[dot .. ^1]) in own
+
+proc conflictsProblems*(unit: string; show: ShowProps;
+                        own: HashSet[string];
+                        predecessors: openArray[string] = []): seq[string] =
+  ## The units ``Conflicts=`` names, as systemd reports them, that the
+  ## generation does not install (§13 decision 55). ``shutdown.target`` is
+  ## the one systemd adds itself for a unit with default dependencies
+  ## (systemd.special(7), systemd.service(5) "Default Dependencies"); one
+  ## the unit's own files name is refused there by ``conflictsRefusal``.
+  ## ``predecessors``: for an exclusive successor, the ``.service`` units
+  ## the switch's exclusive check holds as its predecessors
+  ## (``switch.predecessorsOf``, resolved as systemd resolves them) -- the
+  ## decision's amendment, confirmed from the switch, not from the unit.
+  when mutated("conflicts-unchecked"): return
+  for t in words(show.getOrDefault("Conflicts")):
+    if t == "shutdown.target" or ownUnitOf(t, own): continue
+    when mutated("exclusive-predecessor-by-say-so"):
+      if predecessors.len > 0 and t.endsWith(".service"): continue
+    else:
+      if t in predecessors and t.endsWith(".service"): continue
+    result.add(unit & ": Conflicts=" & t & " names a unit the generation " &
+               "does not install; starting the unit would stop it")
+
 proc ownedStorePath*(path: string; owned: openArray[string]): bool =
   ## ``path`` (normalised, no ``..``) lies inside one of the store objects
   ## ``owned``, compared by path component: ``/repro/store`` itself, and a
@@ -807,7 +837,8 @@ const
 proc activatorProblems*(unit: string; show: ShowProps; lines: ShowLines;
                         fragment: string; ownDropIns: openArray[string];
                         loaded: openArray[tuple[path, content: string]] = [];
-                        startsOf: proc (u: string): seq[string] = nil):
+                        startsOf: proc (u: string): seq[string] = nil;
+                        ownUnits = initHashSet[string]()):
                         seq[string] =
   ## A socket, timer or path unit that triggers a floored service, as
   ## systemd reads it (A9 review rounds 5 and 7): loaded from the add-on's
@@ -864,6 +895,10 @@ proc activatorProblems*(unit: string; show: ShowProps; lines: ShowLines;
       let why = activatorRefusal(unit, content, dropIn = path != fragment,
                                  half = fhEffective)
       if why.len > 0: problem(path & ", by the floor's rules: " & why)
+      let c = conflictsRefusal(unit, content,
+        proc (u: string): bool = ownUnitOf(u, ownUnits), half = fhEffective)
+      if c.len > 0: problem(path & ", by the floor's rules: " & c)
+  result.add(conflictsProblems(unit, show, ownUnits))
 
 type
   EffectiveInput* = object
@@ -915,6 +950,10 @@ type
     startsOf*: proc (unit: string): seq[string]
       ## what another unit starts, as systemd reports it (``nil``: only the
       ## unit's own dependencies are followed)
+    exclusive*: bool
+      ## the unit is exclusive (``X-Repro-Exclusive=true``, spec §7.3)
+    predecessors*: seq[string]
+      ## its predecessors as the switch's exclusive check holds them
     inspectPath*: proc (path: string; uid: int; dynamic: bool): string
       ## why the manager may not create ``path`` for the unit, as it is on
       ## the host now (``managerPathProblem``)
@@ -1304,6 +1343,7 @@ proc effectiveFloorProblems*(e: EffectiveInput): seq[string] =
       if route.len > 0:
         problem("starts " & route[^1] & " (" & route.join(" -> ") &
                 "), which changes the whole system's state")
+    result.add(conflictsProblems(unit, show, e.ownUnits, e.predecessors))
     for k in ["OnFailureJobMode", "OnSuccessJobMode"]:
       if show.getOrDefault(k) notin ["", "replace", "fail"]:
         problem(k & "=" & show[k] & " changes the system's state beyond " &
@@ -1349,6 +1389,13 @@ proc effectiveFloorProblems*(e: EffectiveInput): seq[string] =
       for (path, content) in e.loaded:
         if path == e.fragment or (e.fragment.len == 0 and own.len == 0):
           own = withoutFloorBlock(content)
+      let ownUnits = e.ownUnits
+      let isOwn = proc (u: string): bool = ownUnitOf(u, ownUnits)
+      for (path, content) in e.loaded:
+        if path.endsWith("/" & StartHoldName): continue
+        let why = conflictsRefusal(unit, content, isOwn, half = fhEffective,
+                                   exclusive = e.exclusive)
+        if why.len > 0: problem(path & ", by the floor's rules: " & why)
       if own.len > 0:
         try:
           for why in [allowlistRefusal(unit, own, exParsed, dropIn = false,

@@ -1014,6 +1014,38 @@ proc managerPathRefusal*(directives: openArray[tuple[key, value: string]]): stri
         "manager creates it as root"
   ""
 
+proc conflictsRefusal*(unitName, content: string;
+                       isOwn: proc (unit: string): bool;
+                       half = fhParse; exclusive = false): string =
+  ## Why a ``[Unit]`` ``Conflicts=`` of a floored unit, or of a unit that
+  ## activates one, is refused, or "" (§13 decision 55): it may name only
+  ## units the profile defines (``isOwn``, a template's instances
+  ## included). Starting the unit stops every unit it conflicts with, so
+  ## naming a base target (``multi-user.target``) or another package's
+  ## service would stop it -- the same class of action as decision 49.
+  ##
+  ## *Amended by the owner, 2026-11-06:* an exclusive successor
+  ## (``exclusive``, ``X-Repro-Exclusive=true``, spec §7.3) may also name a
+  ## ``.service``: its predecessor. Never a target, never another type. That
+  ## the name is a predecessor the switch's exclusive check holds is
+  ## confirmed by the effective-unit check, from the switch's own
+  ## computation (``effective_floor.conflictsProblems``).
+  if off3(half) or FloorMutation == "conflicts-unchecked":
+    return ""
+  for d in sectionDirectives(content, ["Unit"]):
+    if d.key != "Conflicts": continue
+    for t in d.value.splitWhitespace():
+      if exclusive and t.endsWith(".service") and
+          FloorMutation != "exclusive-conflicts-any-unit":
+        continue
+      if exclusive and FloorMutation == "exclusive-conflicts-any-unit":
+        continue
+      if not isOwn(t):
+        return "[Unit] Conflicts=" & t & " names a unit the profile does " &
+          "not define; starting " & unitName & " would stop it (only the " &
+          "profile's own units may be named)"
+  ""
+
 proc isSafeSecretComponent*(s: string): bool =
   ## One path segment of `[A-Za-z0-9._-]`, at most 64 bytes, not starting
   ## with `.` (so never `.`, `..`, or the materialiser's hidden temporary

@@ -109,6 +109,12 @@ The add-on handles this in four ways:
     `emergency.target`, whether directly or through other units. An
     `OnFailureJobMode=` other than `replace` or `fail`, and
     `AllowIsolate=yes`, are refused too;
+  - a `Conflicts=` naming a unit the profile does not define. Starting the
+    unit would stop it, whether it is a base target such as
+    `multi-user.target` or another package's service. The one exception
+    is an exclusive successor (`exclusive = true`): it may name the
+    `.service` it replaces, but only one the switch has already confirmed
+    as its predecessor, and never a target;
   - a credential (`LoadCredential=`) read from outside the add-on's own
     secrets directory for the service, and any `ImportCredential=`,
     `NFTSet=` or `RootImageOptions=`. `systemctl show` does not print
