@@ -26,6 +26,8 @@ when not defined(windows):
 import std/[asyncdispatch, os, strutils, sysrand, unittest, widestrs]
 import std/winlean
 
+import repro_test_support/reasoned_skip
+
 import cbor
 import repro_agent_protocol
 import repro_agent_protocol/[named_pipe, transport]
@@ -243,7 +245,15 @@ suite "Windows transport — only the host's user is a peer":
     let added = NetUserAdd(nil, 1, addr info, addr parmErr)
     checkpoint "NetUserAdd(" & user & ") = " & $added & " (5 = access denied: " &
       "the job identity is not an Administrator; this case needs one)"
-    check added == 0
+    if added == ERROR_ACCESS_DENIED:
+      # The case's precondition, not its subject: only an Administrator may
+      # create the second local account the refusal is checked against. A
+      # job identity that is not one cannot run the case, and says so; any
+      # other NetUserAdd failure is still a failure.
+      skip("conditions not met: creating a second local user needs an " &
+        "Administrator job identity (NetUserAdd = 5, access denied)")
+    else:
+      check added == 0
     if added == 0:
       var token: Handle
       let logged = LogonUserW(newWideCString(user), newWideCString("."),
