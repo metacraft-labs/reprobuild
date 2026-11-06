@@ -194,6 +194,19 @@ suite "Distributed-Execution M7: trust profiles":
               check "Landlock" in hr.reason
             if not (subids and tools):
               check "the floor" in hr.reason
+    # Installed helpers and a subordinate range are not yet the floor: where
+    # the helpers cannot write the map (a service whose capability bounding
+    # set strips their setuid capabilities), trusted runs without the floor
+    # and hardened is refused, naming what the helper said.
+    let denied = LinuxLeaseHostProbe(userNamespaces: true, pidfdGetfd: true,
+      landlock: true, subordinateIds: true, idMappingTools: true,
+      idMappingRefused: "newuidmap: open of uid_map failed: Permission denied")
+    let deniedTrusted = decideLinuxLeaseLayers(denied, hardened = false)
+    check deniedTrusted.ok
+    check llFloor notin deniedTrusted.layers
+    let deniedHardened = decideLinuxLeaseLayers(denied, hardened = true)
+    check not deniedHardened.ok
+    check "open of uid_map failed" in deniedHardened.reason
     # Without the namespace layer neither profile runs a worker.
     let noNs = LinuxLeaseHostProbe(userNamespaces: false, pidfdGetfd: true,
       landlock: true, subordinateIds: true, idMappingTools: true)

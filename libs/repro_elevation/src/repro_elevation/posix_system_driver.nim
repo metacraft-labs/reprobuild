@@ -1888,13 +1888,41 @@ when defined(linux) or defined(macosx):
     let (output, code) = execCmdEx(cmd)
     (output, code)
 
+  const GetentNotRunnable = 127
+    ## The shell's "command not found" exit, which `runArgv` reports when
+    ## no `getent` is on PATH.
+
+  proc getentArgv(db, name: string): tuple[output: string; code: int] =
+    ## `getent <db> <name>`: exit 0 with the record, or getent's own 2 for
+    ## "no such key". When `getent` cannot be run at all the answer comes
+    ## from the files database (`/etc/passwd`, `/etc/group`) instead.
+    ##
+    ## "Could not run the probe" is not "the account does not exist". A
+    ## service whose PATH carries no `getent` (a NixOS unit's PATH holds
+    ## only its declared packages) used to read every account as absent:
+    ## an existing group was decided `create`, and its driver would have
+    ## gone on to `groupadd` it. The files database is what `getent`
+    ## itself answers from for local accounts, so the fallback observes the
+    ## same records the system tools create and modify.
+    let r = runArgv("getent", [db, name])
+    if r.code != GetentNotRunnable or passwdArgvRunner != nil:
+      return r
+    let file = "/etc" / db
+    if not fileExists(file):
+      raiseProtocol("cannot observe " & db & " entry '" & name &
+        "': no `getent` on PATH (" & r.output.strip() & ") and no " & file)
+    for line in readFile(file).splitLines():
+      if line.startsWith(name & ":"):
+        return (line & "\n", 0)
+    ("", 2)
+
   proc observePasswdUserRaw(name: string): PasswdUserObservation =
     ## Collect the three probe outputs and assemble the observation.
     ## On Linux the canonical probes are `getent passwd`, `id -nG`,
     ## `id -gn`; on macOS the equivalent commands render into the same
     ## colon-separated / space-separated forms the pure parser reads.
     when defined(linux):
-      let (getentOut, getentCode) = runArgv("getent", @["passwd", name])
+      let (getentOut, getentCode) = getentArgv("passwd", name)
       if getentCode != 0 or getentOut.strip().len == 0:
         return PasswdUserObservation(present: false)
       let (idGroupsOut, _) = runArgv("id", @["-nG", name])
@@ -1994,7 +2022,7 @@ proc applyPasswdUser*(op: PrivilegedOperation): ObservedOperationState =
     let before = observePasswdUserRaw(op.puName)
     if not before.present:
       when defined(linux):
-        let (groupOut, groupCode) = runArgv("getent", @["group", op.puName])
+        let (groupOut, groupCode) = getentArgv("group", op.puName)
         let sameNameGroupExists = groupCode == 0 and groupOut.strip().len > 0
         var addArgs: seq[string]
         try:
@@ -2525,7 +2553,8 @@ proc sysusersAccountExists*(name, kind: string): bool =
   ## `getent passwd|group <name>` exits 0 when the account exists.
   when defined(linux):
     let db = if kind == "group": "group" else: "passwd"
-    execCmd("getent " & db & " " & quoteShell(name) & " >/dev/null 2>&1") == 0
+    let (output, code) = getentArgv(db, name)
+    code == 0 and output.strip().len > 0
   else:
     false
 
@@ -2995,7 +3024,7 @@ when defined(linux):
     ## Collect a group observation via `getent group <name>`. An exit
     ## code other than zero, or an empty output, means the group does
     ## not exist.
-    let (getentOut, getentCode) = runArgv("getent", @["group", name])
+    let (getentOut, getentCode) = getentArgv("group", name)
     if getentCode != 0 or getentOut.strip().len == 0:
       return PasswdGroupObservation(present: false)
     parseGetentGroup(getentOut)

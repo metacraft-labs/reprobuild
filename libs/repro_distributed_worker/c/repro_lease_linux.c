@@ -140,6 +140,15 @@ int repro_lease_arch_supported(void) { return 0; }
 int repro_lease_supported(void) { return -1; }
 int repro_lease_pidfd_supported(void) { return 0; }
 int repro_lease_userns_supported(void) { return 0; }
+int repro_lease_floor_mapping_works(const char *newuidmap,
+                                    const char *newgidmap, long uid,
+                                    long gid, long subuid, long subgid,
+                                    char *err, int errlen) {
+  (void)newuidmap; (void)newgidmap; (void)uid; (void)gid;
+  (void)subuid; (void)subgid;
+  if (errlen > 0) snprintf(err, (size_t)errlen, "no lease launcher");
+  return -1;
+}
 int repro_lease_memfd_noexec_supported(void) { return 0; }
 #else /* x86_64 or aarch64: the real launcher */
 #define _GNU_SOURCE
@@ -1918,6 +1927,105 @@ int repro_lease_userns_supported(void) {
   int st = 0;
   while (waitpid(k, &st, 0) < 0 && errno == EINTR) {}
   return WIFEXITED(st) && WEXITSTATUS(st) == 0;
+}
+
+/* Runs one id-mapping helper exactly as map_ids() does for the floor, with
+   its stdout and stderr captured into err. 0 when it exits 0. */
+static int probe_map(const char *tool, pid_t pid, long self, long sub,
+                     char *err, int errlen) {
+  char p[32], a[32], b[32];
+  snprintf(p, sizeof p, "%d", (int)pid);
+  snprintf(a, sizeof a, "%ld", self);
+  snprintf(b, sizeof b, "%ld", sub);
+  int out[2];
+  if (pipe2(out, O_CLOEXEC) != 0) {
+    snprintf(err, (size_t)errlen, "pipe: %s", strerror(errno));
+    return -1;
+  }
+  pid_t k = fork();
+  if (k < 0) {
+    snprintf(err, (size_t)errlen, "fork: %s", strerror(errno));
+    close(out[0]); close(out[1]);
+    return -1;
+  }
+  if (k == 0) {
+    dup2(out[1], 1);
+    dup2(out[1], 2);
+    execl(tool, tool, p, "0", a, "1", "1000", b, "1", (char *)NULL);
+    dprintf(2, "cannot run %s: %s", tool, strerror(errno));
+    _exit(127);
+  }
+  close(out[1]);
+  int used = 0;
+  for (;;) {
+    ssize_t n = read(out[0], err + used, (size_t)(errlen - 1 - used));
+    if (n < 0 && errno == EINTR) continue;
+    if (n <= 0) break;
+    used += (int)n;
+    if (used >= errlen - 1) break;
+  }
+  err[used] = 0;
+  close(out[0]);
+  int st = 0;
+  while (waitpid(k, &st, 0) < 0 && errno == EINTR) {}
+  return WIFEXITED(st) && WEXITSTATUS(st) == 0 ? 0 : -1;
+}
+
+/* Whether the floor's id mapping actually works for this process: a child
+   enters a fresh user namespace and newgidmap/newuidmap map it the way
+   map_ids() maps a lease (0 -> this uid/gid, 1000 -> the subordinate id).
+   A subordinate range in /etc/subuid and the helpers on PATH are not
+   enough: a service whose capability bounding set lacks CAP_SETUID /
+   CAP_SETGID strips them from the setuid helpers, which then fail with
+   "open of uid_map failed: Permission denied". 0 when both maps were
+   written; otherwise -1 with the failing helper's diagnostic in err. */
+int repro_lease_floor_mapping_works(const char *newuidmap,
+                                    const char *newgidmap, long uid,
+                                    long gid, long subuid, long subgid,
+                                    char *err, int errlen) {
+  if (errlen < 2) return -1;
+  err[0] = 0;
+  int ready[2], gate[2];
+  if (pipe2(ready, O_CLOEXEC) != 0) {
+    snprintf(err, (size_t)errlen, "pipe: %s", strerror(errno));
+    return -1;
+  }
+  if (pipe2(gate, O_CLOEXEC) != 0) {
+    snprintf(err, (size_t)errlen, "pipe: %s", strerror(errno));
+    close(ready[0]); close(ready[1]);
+    return -1;
+  }
+  pid_t child = fork();
+  if (child < 0) {
+    snprintf(err, (size_t)errlen, "fork: %s", strerror(errno));
+    close(ready[0]); close(ready[1]); close(gate[0]); close(gate[1]);
+    return -1;
+  }
+  if (child == 0) {
+    close(ready[0]); close(gate[1]);
+    char ok = unshare(CLONE_NEWUSER) == 0 ? 'y' : 'n';
+    while (write(ready[1], &ok, 1) < 0 && errno == EINTR) {}
+    char c;
+    while (read(gate[0], &c, 1) < 0 && errno == EINTR) {}
+    _exit(0);
+  }
+  close(ready[1]); close(gate[0]);
+  char ok = 0;
+  ssize_t n;
+  while ((n = read(ready[0], &ok, 1)) < 0 && errno == EINTR) {}
+  close(ready[0]);
+  int rc = -1;
+  if (n != 1 || ok != 'y') {
+    snprintf(err, (size_t)errlen, "a child could not enter a new user namespace");
+  } else if (probe_map(newgidmap, child, gid, subgid, err, errlen) == 0 &&
+             probe_map(newuidmap, child, uid, subuid, err, errlen) == 0) {
+    rc = 0;
+    err[0] = 0;
+  }
+  close(gate[1]);
+  int st = 0;
+  while (waitpid(child, &st, 0) < 0 && errno == EINTR) {}
+  return rc;
 }
 
 /* Whether memfd_create(2) knows MFD_NOEXEC_SEAL (Linux 6.3+): the hardened

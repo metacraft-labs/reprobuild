@@ -464,6 +464,7 @@ suite "M83 Phase A e2e: compile + run user profiles":
       "$ProgressPreference = 'SilentlyContinue'; " &
         "$ErrorActionPreference = 'Stop'; " &
         "Add-Type -AssemblyName System.IO.Compression.FileSystem; " &
+        "Add-Type -AssemblyName System.IO.Compression; " &
         "$root = [System.IO.Directory]::CreateDirectory(" &
           "'C:\\actions-runner').FullName; " &
         "$root = $root.TrimEnd([char[]]'\\/') + " &

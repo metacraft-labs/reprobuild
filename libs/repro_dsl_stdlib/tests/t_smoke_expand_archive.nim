@@ -157,6 +157,7 @@ suite "Phase F — argv assemblers (pure)":
       "$ProgressPreference = 'SilentlyContinue'; " &
         "$ErrorActionPreference = 'Stop'; " &
         "Add-Type -AssemblyName System.IO.Compression.FileSystem; " &
+        "Add-Type -AssemblyName System.IO.Compression; " &
         "$root = [System.IO.Directory]::CreateDirectory(" &
           "'C:\\agent''s runner').FullName; " &
         "$root = $root.TrimEnd([char[]]'\\/') + " &

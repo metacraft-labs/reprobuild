@@ -12,6 +12,17 @@
 import std/[os, osproc, strtabs, strutils, tempfiles, times, unittest]
 
 import repro_test_support/reasoned_skip
+when defined(posix):
+  from repro_test_support/process_fixtures import shortSocketDirAtProcessExit
+
+proc gpgHome(prefix: string): string =
+  ## A GNUPGHOME whose agent socket fits ``sun_path``. A host account with
+  ## no ``/run/user/<uid>`` (a CI runner's system user) has gpg-agent put
+  ## ``S.gpg-agent*`` in GNUPGHOME itself, and under a suite TMPDIR inside
+  ## a long work directory that path is too long: the agent exits and every
+  ## gpg call fails with "can't connect to the gpg-agent".
+  when defined(posix): shortSocketDirAtProcessExit("rgpg")
+  else: createTempDir(prefix, "")
 
 import blake3
 
@@ -175,7 +186,7 @@ suite "C2 P3 gpg status verdict":
     else:
       proc fixture(expiry: string): (string, string) =
         ## (InRelease bytes, keyring file) for a key that expires ``expiry``.
-        let home = createTempDir("c2-sig-gpg-", "")
+        let home = gpgHome("c2-sig-gpg-")
         setFilePermissions(home, {fpUserRead, fpUserWrite, fpUserExec})
         let env = newStringTable()
         env["GNUPGHOME"] = home
@@ -236,7 +247,7 @@ suite "C2 P3 Valid-Until through fetchAndVerifyIndexes":
     if gpgBin.len == 0:
       skip("no gpg on PATH (set REPRO_GPG_BIN)")
     else:
-      let home = createTempDir("c2-sig-vu-", "")
+      let home = gpgHome("c2-sig-vu-")
       setFilePermissions(home, {fpUserRead, fpUserWrite, fpUserExec})
       let env = newStringTable()
       env["GNUPGHOME"] = home

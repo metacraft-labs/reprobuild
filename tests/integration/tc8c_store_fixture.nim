@@ -292,10 +292,19 @@ proc upstreamTip(fx: StoreFixture): string =
     "rev-parse", "refs/heads/main"]))
   if res.exitCode != 0: "" else: res.output.strip()
 
+const NoCiJobBranch = @[(name: "GITHUB_BASE_REF", value: ""),
+                         (name: "GITHUB_REF_NAME", value: "")]
+  ## ``repro ci plan`` takes its target branch from ``$GITHUB_BASE_REF``,
+  ## else ``$GITHUB_REF_NAME``, before the checkout's own branch. Under
+  ## GitHub Actions those name the job running THIS suite (a pull request
+  ## into ``dev``), not the fixture's checkout, and the plan then looked for
+  ## ``origin/dev`` in a fixture whose published base is ``origin/main``. A
+  ## variable set to "" reads as unset, so the plan sees the fixture alone.
+
 proc ciPlan(fx: StoreFixture; platform: string): JsonNode =
   let res = runArgv(@[fx.reproBin, "ci", "plan", "--platform=" & platform,
     "--workspace-root=" & fx.workspaceRoot, "--current-repo=" & fx.libAPath,
-    "--json"])
+    "--json"], env = NoCiJobBranch)
   checkpoint("ci plan output:\n" & res.output)
   doAssert res.code == 0, "repro ci plan failed:\n" & res.output
   let start = res.output.find("{\n")

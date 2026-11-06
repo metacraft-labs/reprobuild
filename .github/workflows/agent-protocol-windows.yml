@@ -62,10 +62,19 @@ jobs:
         include:
           - arch: x64
             runner: [self-hosted, windows, x64]    # CIP-5: DIY-Windows (env.ps1) -> eph-win-x64
+            toolchain_arch: ''
           - arch: arm64
             runner: [self-hosted, windows, arm64]  # CIP-5: DIY-Windows (env.ps1) -> eph-win-arm64
+            # The DIY toolchain pins are x64-only: the prebuilt Nim, WinLibs
+            # gcc, clingo and OpenSSL all refuse an arm64 host and name
+            # WINDOWS_DIY_ARCH_OVERRIDE=x64 as the remedy. Windows on Arm runs
+            # that toolchain and what it builds under x64 emulation, which is
+            # what this lane then exercises on the arm64 host.
+            toolchain_arch: x64
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 90
+    env:
+      WINDOWS_DIY_ARCH_OVERRIDE: ${{ matrix.toolchain_arch }}
     steps:
       - uses: actions/checkout@v4
 

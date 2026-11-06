@@ -36,6 +36,8 @@ import repro_test_support/reasoned_skip
 
 import repro_hcr_agent
 from repro_test_support import requireBinary, monitorShimPath
+when defined(posix):
+  from repro_test_support/process_fixtures import shortSocketDirAtProcessExit
 
 const
   SupportProfile = defaultDirectSupportProfile()
@@ -286,8 +288,10 @@ suite "t_e2e_repro_watch_hcr_multi_target_independent_patches":
       let logPath = tempRoot / "repro-watch.log"
       let artifactsA = projectRoot / ".repro" / "hcr-a"
       let artifactsB = projectRoot / ".repro" / "hcr-b"
-      let socketA = tempRoot / "hcr-a.sock"
-      let socketB = tempRoot / "hcr-b.sock"
+      # The agents' sockets must fit sun_path whatever the suite TMPDIR is.
+      let socketDir = shortSocketDirAtProcessExit("rhcr")
+      let socketA = socketDir / "hcr-a.sock"
+      let socketB = socketDir / "hcr-b.sock"
       let metadataA = projectRoot / "hcr-a-metadata.json"
       let metadataB = projectRoot / "hcr-b-metadata.json"
       createDir(parentDir(sourceA))

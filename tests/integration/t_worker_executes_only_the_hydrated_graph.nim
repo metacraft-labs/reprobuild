@@ -121,8 +121,8 @@ suite "Distributed-Execution M7 gate: the worker executes only the hydrated grap
 
   test "t_worker_executes_only_the_hydrated_graph":
     if not hardenedWorkerHere():
-      echo HardenedWorkerNA
-      skip("platform N/A: hardened workers are Linux-only")
+      echo hardenedWorkerNotHere()
+      skip(hardenedWorkerNotHere())
     else:
       let cc = ccPath()
       if cc.len == 0:
@@ -380,8 +380,8 @@ suite "Distributed-Execution M7 gate: the worker executes only the hydrated grap
 
   test "a snapshot naming an uncached develop sibling is refused before materializing":
     if not hardenedWorkerHere():
-      echo HardenedWorkerNA
-      skip("platform N/A: hardened workers are Linux-only")
+      echo hardenedWorkerNotHere()
+      skip(hardenedWorkerNotHere())
     else:
       let base = m7TestBase("repro-m7-siblings")
       var w = newTestNode(base, "worker")

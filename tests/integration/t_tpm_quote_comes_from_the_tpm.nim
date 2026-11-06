@@ -94,6 +94,8 @@
 ## measurements that were really performed on the device.
 
 import std/[options, os, osproc, strutils, sysrand, times, unittest]
+when defined(posix):
+  from repro_test_support/process_fixtures import shortSocketDirAtProcessExit
 
 import repro_attest
 import repro_attest_agent
@@ -195,9 +197,13 @@ proc startLiveTpm(): LiveTpm =
   ## this run's own: `swtpm` manufactures a fresh TPM, with a fresh
   ## hierarchy seed, into an empty directory.
   result = LiveTpm()
-  result.dir = getTempDir() / ("repro-live-tpm-" & $getCurrentProcessId() &
-                               "-" & $int64(epochTime() * 1000.0))
-  removeDir(result.dir)
+  # A fresh owner-only directory directly under /tmp: the emulator's unix
+  # sockets must fit sun_path, which a suite TMPDIR under a long work
+  # directory does not leave room for ("Path for UnioIO socket is too long").
+  result.dir =
+    when defined(posix): shortSocketDirAtProcessExit("rtpm")
+    else: getTempDir() / ("repro-live-tpm-" & $getCurrentProcessId() &
+                          "-" & $int64(epochTime() * 1000.0))
   createDir(result.dir)
   result.dataSocket = result.dir / "tpm-data.sock"
   result.ctrlSocket = result.dir / "tpm-ctrl.sock"

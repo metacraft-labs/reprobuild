@@ -417,6 +417,9 @@ when defined(linux):
     "repro_lease_pidfd_supported".}
   proc c_repro_lease_userns_supported(): cint {.importc:
     "repro_lease_userns_supported".}
+  proc c_repro_lease_floor_mapping_works(newuidmap, newgidmap: cstring;
+      uid, gid, subuid, subgid: clong; err: cstring; errlen: cint): cint
+    {.importc: "repro_lease_floor_mapping_works".}
 
   proc subordinateIds*(): tuple[ok: bool; uid, gid, count: int] =
     ## The first subordinate uid/gid range of the current user
@@ -1342,6 +1345,12 @@ type
     subordinateIds*: bool
     idMappingTools*: bool
       ## newuidmap and newgidmap installed.
+    idMappingRefused*: string
+      ## Empty when newgidmap/newuidmap really mapped a probe child the way
+      ## the floor maps a lease; otherwise why they did not. Installed
+      ## helpers and a subordinate range are not enough: a service whose
+      ## capability bounding set lacks CAP_SETUID/CAP_SETGID strips them
+      ## from the setuid helpers, which then refuse to write the map.
 
 proc decideLinuxLeaseLayers*(probe: LinuxLeaseHostProbe; hardened: bool):
     tuple[ok: bool; layers: set[LeaseLayer]; reason: string] =
@@ -1371,6 +1380,9 @@ proc decideLinuxLeaseLayers*(probe: LinuxLeaseHostProbe; hardened: bool):
     missing.add("the floor: no subordinate uid/gid range for the lease user")
   elif not probe.idMappingTools:
     missing.add("the floor: newuidmap/newgidmap are not installed")
+  elif probe.idMappingRefused.len > 0:
+    missing.add("the floor: the lease user cannot be mapped (" &
+      probe.idMappingRefused & ")")
   else:
     layers.incl(llFloor)
   if hardened and missing.len > 0:
@@ -1386,8 +1398,19 @@ when defined(linux):
     result.pidfdGetfd = c_repro_lease_pidfd_supported() != 0
     result.landlock = landlockAbi() >= 1
     result.subordinateIds = subordinateIds().ok
-    result.idMappingTools = uncontrolledFindExe("newuidmap").len > 0 and
-      uncontrolledFindExe("newgidmap").len > 0
+    let newuidmap = uncontrolledFindExe("newuidmap")
+    let newgidmap = uncontrolledFindExe("newgidmap")
+    result.idMappingTools = newuidmap.len > 0 and newgidmap.len > 0
+    let ids = subordinateIds()
+    if result.userNamespaces and result.idMappingTools and ids.ok:
+      var err = newString(512)
+      if c_repro_lease_floor_mapping_works(newuidmap.cstring,
+          newgidmap.cstring, clong(getuid()), clong(getgid()), clong(ids.uid),
+          clong(ids.gid), err.cstring, cint(err.len)) != 0:
+        let said = $err.cstring
+        result.idMappingRefused =
+          if said.strip().len > 0: said.strip().splitLines().join("; ")
+          else: "newgidmap/newuidmap failed without a diagnostic"
 
 proc availableLeaseLayers*(hardened = false):
     tuple[ok: bool; layers: set[LeaseLayer]; reason: string] =

@@ -69,8 +69,8 @@ suite "Distributed-Execution M7: per-message authorization at the worker":
 
   test "t_worker_message_authorization_is_per_message_not_per_peer":
     if not hardenedWorkerHere():
-      echo HardenedWorkerNA
-      skip("platform N/A: hardened workers are Linux-only")
+      echo hardenedWorkerNotHere()
+      skip(hardenedWorkerNotHere())
     else:
       let cc = ccPath()
       if cc.len == 0:

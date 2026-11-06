@@ -7,6 +7,8 @@
 
 import std/[unittest, os, osproc, json, strutils, net, nativesockets, times,
   streams, tempfiles, strtabs]
+when defined(posix):
+  from repro_test_support/process_fixtures import shortSocketDirAtProcessExit
 
 const RepoMarker = "repro.nim"
 const FixtureRelRoot = "tests/fixtures/nix-daemon-local-flake"
@@ -152,7 +154,8 @@ printf '%s\n' /tmp/reprobuild-nix-daemon-fake-store
 """)
       setFilePermissions(fakeNix, {fpUserRead, fpUserWrite, fpUserExec})
 
-      let socketPath = fixtureRoot / "nix-daemon.sock"
+      # The socket must fit sun_path whatever the suite TMPDIR is.
+      let socketPath = shortSocketDirAtProcessExit("rnd") / "nix-daemon.sock"
       var childEnv = newStringTable(modeCaseSensitive)
       for key, value in envPairs():
         childEnv[key] = value
@@ -306,23 +309,69 @@ printf '%s\n' /tmp/reprobuild-nix-daemon-fake-store
     check fileExists(expressionResp["paths"][0].getStr() / FixtureExecutable)
     check fixtureDependencyHash(expressionResp, expressionFile).len > 0
     
-    # Scenario 1.3: Warm In-Memory Cache Performance
-    # Measure duration of the second identical request
+    # Scenario 1.3: a repeated request for LOCAL source is evaluated again,
+    # never answered from the helper's response cache. Its key sees only the
+    # top-level flake files, not what they import, so a cached answer would
+    # name the previous evaluation's store path after an imported file
+    # changed (the helper's ``is_mutable_local_nix_selector``, the same
+    # policy as ``repro_core/nix_evaluation_policy``). The repeat of the
+    # unchanged request answers the same paths...
     sock = newSocket(domain = AF_UNIX, sockType = SOCK_STREAM, protocol = IPPROTO_IP)
     sock.connectUnix(socketPath)
-    
-    let startTime = epochTime()
     sock.send($req & "\n")
     respLine = ""
     sock.readLine(respLine)
     sock.close()
-    let durationMs = (epochTime() - startTime) * 1000.0
-    
     check respLine.len > 0
     let resp2 = parseJson(respLine)
     check resp2["status"].getStr() == "success"
-    checkpoint("Cache hit resolution completed in: " & $durationMs & " ms")
-    check durationMs < 50.0 # Warm cache hit should easily resolve within <50ms
+    check resp2["paths"] == resp["paths"]
+
+    # ...and after an edit to a file the flake IMPORTS -- which leaves every
+    # file the key hashes byte-identical -- the repeat names the new
+    # realization. A response cache keyed as before would return the first.
+    let importingFixture = prepareFixtureRoot(repoRoot)
+    defer: removeDir(importingFixture)
+    let shippedFlake = readFile(importingFixture / "flake.nix")
+    let shippedText = "text = ''\n" &
+      "            printf '%s\\n' reprobuild-nix-daemon-fixture\n" &
+      "          '';"
+    doAssert shippedText in shippedFlake,
+      "the fixture flake no longer has the shape this case edits"
+    writeFile(importingFixture / "flake.nix",
+      shippedFlake.replace(shippedText, "text = import ./greeting.nix;"))
+    proc greet(word: string) =
+      writeFile(importingFixture / "greeting.nix",
+        "\"printf '%s\\\\n' " & word & "\\n\"\n")
+    greet("first-import")
+    let (addOut, addCode) = execCmdEx("git -C " & quoteShell(importingFixture) &
+      " add flake.nix greeting.nix")
+    doAssert addCode == 0, addOut
+    let importingReq = %*{
+      "action": "resolve",
+      "selector": FixtureSelector,
+      "workspaceRoot": importingFixture
+    }
+    proc resolveImporting(): JsonNode =
+      var s = newSocket(domain = AF_UNIX, sockType = SOCK_STREAM,
+        protocol = IPPROTO_IP)
+      s.connectUnix(socketPath)
+      s.send($importingReq & "\n")
+      var line = ""
+      s.readLine(line)
+      s.close()
+      checkpoint("importing fixture response: " & line)
+      parseJson(line)
+    let beforeEdit = resolveImporting()
+    check beforeEdit["status"].getStr() == "success"
+    let beforeProgram = beforeEdit["paths"][0].getStr() / FixtureExecutable
+    check "first-import" in readFile(beforeProgram)
+    greet("second-import")
+    let afterEdit = resolveImporting()
+    check afterEdit["status"].getStr() == "success"
+    check afterEdit["paths"][0].getStr() != beforeEdit["paths"][0].getStr()
+    check "second-import" in
+      readFile(afterEdit["paths"][0].getStr() / FixtureExecutable)
 
     # Cache invalidation: the daemon cache key must include the observed input
     # hashes, otherwise this second response would reuse the first dependency

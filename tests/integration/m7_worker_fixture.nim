@@ -285,16 +285,36 @@ proc workerSpec*(sink: SinkProcess; reposFile: string; heartbeatMs = 300;
     sink.endpoint & "&repos=" & reposFile & "&heartbeat=" & $heartbeatMs &
     (if signer.len > 0: "&signer=" & signer else: "") & extra
 
-proc hardenedWorkerHere*(): bool =
+const HardenedWorkerNA* = "[platform N/A] the hardened profile refuses " &
+  "macOS and Windows workers until a VM-grade lease boundary exists (M8); " &
+  "this host's worker is covered by the trusted-profile case"
+
+proc hardenedWorkerNotHere*(): string =
+  ## Why a hardened worker cannot run on this host, or "" when it can.
+  ##
   ## Trust profiles (2026-10-20): the HARDENED profile refuses macOS and
   ## Windows workers until a VM-grade lease boundary exists for them (an M8
   ## deliverable), so a hardened worker case runs on Linux only; elsewhere it
   ## is `[platform N/A]` and the trusted case covers the host.
-  defined(linux)
+  ##
+  ## On Linux the worker role itself decides, from what the host can confine
+  ## (`leaseConfinementAvailable`): Landlock and the floor, whose id mapping
+  ## is tried for real. A host that cannot give a lease the floor -- no
+  ## subordinate range for this user, or setuid id-mapping helpers that a
+  ## service's capability bounding set leaves unable to write the map --
+  ## refuses the hardened role, and the case says so instead of failing on
+  ## a refusal it did not cause. Where the floor works the case runs.
+  when defined(linux):
+    let available = leaseConfinementAvailable(hardened = true)
+    if available.ok: ""
+    else: "[host N/A] this host cannot confine a hardened worker's lease: " &
+      available.reason
+  else:
+    HardenedWorkerNA
 
-const HardenedWorkerNA* = "[platform N/A] the hardened profile refuses " &
-  "macOS and Windows workers until a VM-grade lease boundary exists (M8); " &
-  "this host's worker is covered by the trusted-profile case"
+proc hardenedWorkerHere*(): bool =
+  ## See `hardenedWorkerNotHere`.
+  hardenedWorkerNotHere().len == 0
 
 proc trustedWorkerSpec*(reposFile: string; extra = "";
                         cidr = "127.0.0.0/8"): string =

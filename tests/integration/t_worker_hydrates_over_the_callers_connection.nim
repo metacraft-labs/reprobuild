@@ -110,8 +110,8 @@ suite "Distributed-Execution M7: the worker hydrates over the caller's connectio
 
   test "the worker never dials the requester, and the requester refuses it":
     if not hardenedWorkerHere():
-      echo HardenedWorkerNA
-      skip("platform N/A: hardened workers are Linux-only")
+      echo hardenedWorkerNotHere()
+      skip(hardenedWorkerNotHere())
     else:
       let cc = ccPath()
       check cc.len > 0

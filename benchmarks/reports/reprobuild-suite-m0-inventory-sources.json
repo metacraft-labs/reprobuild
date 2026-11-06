@@ -1573,10 +1573,10 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 19,
-      "integration": 1483,
+      "integration": 1484,
       "platform/destructive": 173,
       "pure unit": 740,
-      "unclassified": 307
+      "unclassified": 306
     },
     "graphOwnedTestArtifacts": [
       {
@@ -3288,7 +3288,7 @@
             "socketB",
             "sourcePath"
           ],
-          "line": 177,
+          "line": 179,
           "path": "tests/e2e/hcr-watch/t_e2e_repro_watch_hcr_multi_target_independent_patches.nim",
           "patterns": [
             "gcc"
@@ -3314,7 +3314,7 @@
             "socketB",
             "sourcePath"
           ],
-          "line": 180,
+          "line": 182,
           "path": "tests/e2e/hcr-watch/t_e2e_repro_watch_hcr_multi_target_independent_patches.nim",
           "patterns": [
             "cc"
@@ -4851,7 +4851,7 @@
             "shell",
             "workRoot"
           ],
-          "line": 531,
+          "line": 538,
           "path": "tests/integration/t_declared_daemon_ipc_trust.nim",
           "patterns": [
             "cc"
@@ -4873,7 +4873,7 @@
             "shell",
             "workRoot"
           ],
-          "line": 533,
+          "line": 540,
           "path": "tests/integration/t_declared_daemon_ipc_trust.nim",
           "patterns": [
             "cc"
@@ -4897,7 +4897,7 @@
             "readyPath",
             "workRoot"
           ],
-          "line": 369,
+          "line": 379,
           "path": "tests/integration/t_derived_daemon_ipc_trust.nim",
           "patterns": [
             "cc"
@@ -4915,7 +4915,7 @@
             "readyPath",
             "workRoot"
           ],
-          "line": 371,
+          "line": 381,
           "path": "tests/integration/t_derived_daemon_ipc_trust.nim",
           "patterns": [
             "cc"
@@ -5249,7 +5249,7 @@
             "d",
             "tools"
           ],
-          "line": 392,
+          "line": 411,
           "path": "tests/integration/t_execution_lease_confinement.nim",
           "patterns": [
             "cc"
@@ -5266,7 +5266,7 @@
             "d",
             "tools"
           ],
-          "line": 422,
+          "line": 441,
           "path": "tests/integration/t_execution_lease_confinement.nim",
           "patterns": [
             "cc"
@@ -5283,7 +5283,7 @@
             "d",
             "tools"
           ],
-          "line": 698,
+          "line": 723,
           "path": "tests/integration/t_execution_lease_confinement.nim",
           "patterns": [
             "cc"
@@ -5300,7 +5300,7 @@
             "d",
             "tools"
           ],
-          "line": 707,
+          "line": 732,
           "path": "tests/integration/t_execution_lease_confinement.nim",
           "patterns": [
             "cc"
@@ -5317,7 +5317,7 @@
             "d",
             "tools"
           ],
-          "line": 747,
+          "line": 775,
           "path": "tests/integration/t_execution_lease_confinement.nim",
           "patterns": [
             "cc"
@@ -5334,7 +5334,7 @@
             "d",
             "tools"
           ],
-          "line": 766,
+          "line": 794,
           "path": "tests/integration/t_execution_lease_confinement.nim",
           "patterns": [
             "cc"
@@ -5351,7 +5351,7 @@
             "d",
             "tools"
           ],
-          "line": 829,
+          "line": 857,
           "path": "tests/integration/t_execution_lease_confinement.nim",
           "patterns": [
             "cc"
@@ -5368,7 +5368,7 @@
             "d",
             "tools"
           ],
-          "line": 839,
+          "line": 867,
           "path": "tests/integration/t_execution_lease_confinement.nim",
           "patterns": [
             "cc"
@@ -5385,7 +5385,7 @@
             "d",
             "tools"
           ],
-          "line": 1064,
+          "line": 1092,
           "path": "tests/integration/t_execution_lease_confinement.nim",
           "patterns": [
             "cc"
@@ -5402,7 +5402,7 @@
             "d",
             "tools"
           ],
-          "line": 1074,
+          "line": 1102,
           "path": "tests/integration/t_execution_lease_confinement.nim",
           "patterns": [
             "cc"
@@ -7514,7 +7514,7 @@
             "cmd",
             "tmp"
           ],
-          "line": 330,
+          "line": 326,
           "path": "tests/integration/t_spec_6_2_matches_implementation.nim",
           "patterns": [
             "nim-compile-verb"
@@ -12714,8 +12714,8 @@
     },
     {
       "binary": "build/test-bin/t_e2e_watch_via_adapter",
-      "class": "unclassified",
-      "classificationReason": "mutates the process environment",
+      "class": "integration",
+      "classificationReason": "subprocess or repro CLI invocation in test body",
       "defines": [],
       "language": "nim",
       "localDependencyShape": [
@@ -36325,7 +36325,8 @@
       "language": "nim",
       "localDependencyShape": [
         "repro_attest",
-        "repro_attest_agent"
+        "repro_attest_agent",
+        "repro_test_support"
       ],
       "owner": "tests/integration",
       "requiresReproBinary": false,
@@ -44711,7 +44712,9 @@
       "classificationReason": "e2e/integration path or requires the repro binary",
       "defines": [],
       "language": "nim",
-      "localDependencyShape": [],
+      "localDependencyShape": [
+        "repro_test_support"
+      ],
       "owner": "tests/integration",
       "requiresReproBinary": false,
       "source": "tests/integration/t_nix_daemon_ipc.nim",
@@ -48795,6 +48798,7 @@
       "defines": [],
       "language": "nim",
       "localDependencyShape": [
+        "repro_core",
         "repro_test_support"
       ],
       "owner": "tests/integration",
@@ -50192,7 +50196,8 @@
       "localDependencyShape": [
         "repro_attest",
         "repro_attest_agent",
-        "repro_attest_verify"
+        "repro_attest_verify",
+        "repro_test_support"
       ],
       "owner": "tests/integration",
       "requiresReproBinary": false,
@@ -50227,7 +50232,8 @@
       "defines": [],
       "language": "nim",
       "localDependencyShape": [
-        "repro_attest"
+        "repro_attest",
+        "repro_test_support"
       ],
       "owner": "tests/integration",
       "requiresReproBinary": false,
@@ -55906,7 +55912,8 @@
       "defines": [],
       "language": "nim",
       "localDependencyShape": [
-        "repro_runquota"
+        "repro_runquota",
+        "repro_test_support"
       ],
       "owner": "tests/unit",
       "requiresReproBinary": false,
