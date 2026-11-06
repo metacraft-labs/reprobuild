@@ -78,6 +78,10 @@ proc fresh(name: string): string =
     "app:x:1001:1001::/:/usr/sbin/nologin\n" &
     "validator:x:1002:1002::/:/usr/sbin/nologin\n")
   writeFile(result / "etc/group", "root:x:0:\napp:x:1001:\nvalidator:x:1002:\n")
+  # Every NSS source the lookup reads, so it is authoritative: a name it
+  # does not know does not exist (``service_account.nssCovered``).
+  writeFile(result / "etc/nsswitch.conf", "passwd: files systemd\n" &
+    "group: files systemd\n")
 
 proc unit(name, body: string; extra = ""): string =
   "systemd.systemUnit {\n  name = \"" & name & "\"\n  content = \"" & body &
@@ -206,27 +210,27 @@ suite "carried state fails closed":
   test "a command outside the sandbox reaches everything":
     let dst = fresh("dst-reach")
     for body in [
-        "[Service]\nProtectSystem=strict\nUser=app\nReadWritePaths=/var/lib/other\n" &
+        "[Service]\nProtectSystem=strict\nNoNewPrivileges=yes\nUser=app\nReadWritePaths=/var/lib/other\n" &
           "ExecStartPre=+/bin/sh -c 'touch /var/lib/ethereum/validator/x'\n" &
           "ExecStart=/bin/true\n",
-        "[Service]\nProtectSystem=strict\nUser=app\n" &
+        "[Service]\nProtectSystem=strict\nNoNewPrivileges=yes\nUser=app\n" &
           "ExecStartPost=+/usr/bin/rm -rf /var/lib/ethereum/validator\n" &
           "ExecStart=/bin/true\n",
-        "[Service]\nProtectSystem=strict\nUser=app\nExecStart=!/bin/true\n",
-        "[Service]\nProtectSystem=strict\nUser=app\nExecStart=-+/bin/true\n",
-        "[Service]\nProtectSystem=strict\nUser=app\nPermissionsStartOnly=yes\n" &
+        "[Service]\nProtectSystem=strict\nNoNewPrivileges=yes\nUser=app\nExecStart=!/bin/true\n",
+        "[Service]\nProtectSystem=strict\nNoNewPrivileges=yes\nUser=app\nExecStart=-+/bin/true\n",
+        "[Service]\nProtectSystem=strict\nNoNewPrivileges=yes\nUser=app\nPermissionsStartOnly=yes\n" &
           "ExecStart=/bin/true\n"]:
       checkpoint body
       check refusal(unit("other.service", body), dst).
         startsWith("ECarriedStatePending")
     # The same unit without the privileged command stays out of it.
-    check refusal(unit("other.service", "[Service]\nProtectSystem=strict\nUser=app\n" &
+    check refusal(unit("other.service", "[Service]\nProtectSystem=strict\nNoNewPrivileges=yes\nUser=app\n" &
       "ReadWritePaths=/var/lib/other\nExecStartPre=-/bin/true\n" &
       "ExecStart=/bin/true\n"), dst) == ""
 
   test "a drop-in over a distribution unit reaches everything":
     check refusal(unit("pkg-validator.service", "[Service]\n" &
-      "ProtectSystem=strict\nUser=app\nExecStart=\nExecStart=/bin/true\n",
+      "ProtectSystem=strict\nNoNewPrivileges=yes\nUser=app\nExecStart=\nExecStart=/bin/true\n",
       "  collision = \"dropIn\"\n"), fresh("dst-dropin")).
       startsWith("ECarriedStatePending")
 
@@ -239,22 +243,29 @@ suite "carried state fails closed":
         ("x.target", "[Unit]\nWants=lighthouse-vc.service\n"),
         ("y.target", "[Unit]\nRequires=lighthouse-vc.service\n"),
         ("z.service", "[Unit]\nOnFailure=lighthouse-vc.service\n" &
-          "[Service]\nProtectSystem=strict\nUser=app\nExecStart=/bin/true\n"),
+          "[Service]\nProtectSystem=strict\nNoNewPrivileges=yes\nUser=app\nExecStart=/bin/true\n"),
         ("w.service", "[Unit]\nWants=lighthouse-vc.service\n[Service]\n" &
-          "ProtectSystem=strict\nUser=app\nExecStart=/bin/true\n")]:
+          "ProtectSystem=strict\nNoNewPrivileges=yes\nUser=app\nExecStart=/bin/true\n")]:
       checkpoint name
       check refusal(unit(name, body), dst).startsWith("ECarriedStatePending")
     # A timer of a service the profile defines (and confines elsewhere) is
     # judged by that service, and ordering alone starts nothing.
-    let svc = unit("other.service", "[Service]\nProtectSystem=strict\nUser=app\n" &
+    let svc = unit("other.service", "[Service]\nProtectSystem=strict\nNoNewPrivileges=yes\nUser=app\n" &
       "ReadWritePaths=/var/lib/other\nExecStart=/bin/true\n")
     check refusal(svc & unit("other.timer", "[Timer]\nOnBootSec=1\n"), dst) == ""
     check refusal(svc & unit("t.target", "[Unit]\nWants=other.service\n" &
       "After=lighthouse-vc.service\n"), dst) == ""
 
   test "the restore unit is required by every carried unit":
+    # ``install-unit --root R`` reads R's carried directory, as a conversion
+    # preparing a target disk runs it (A13 review round 5, finding 8): the
+    # manifest is under R only, none on this host.
     let root = fresh("root-install")
-    let units = installRestoreUnit(carriedDir(), "/usr/bin/repro", root)
+    let rooted = under(root, CarriedStateDir)
+    createDir(rooted.parentDir)
+    copyDir(carriedDir(), rooted)
+    check runStateCli(@["install-unit", "--root", root]) == 0
+    let units = installRestoreUnit(rooted, "/usr/bin/repro", root)
     check units == @["eth-validator.service"]
     let d = root / "etc/systemd/system"
     check fileExists(d / RestoreUnitName)
@@ -273,7 +284,8 @@ suite "carried state fails closed":
     check "Before=sysinit.target shutdown.target eth-validator.service" in unitText
     check "ConditionPathExists" notin unitText
     # The installation is recorded beside the carried directory.
-    check fileExists(root / installedMarkerPath(carriedDir()))
+    check fileExists(installedMarkerPath(rooted))
+    check not fileExists(root / installedMarkerPath(rooted))   # not rooted twice
 
   test "a manifest missing where carried state was installed refuses":
     let src = fresh("src-missing")
@@ -327,7 +339,8 @@ suite "carried state fails closed":
     var written = 0
     for f in walkDirRec(state):
       # The scratch root's account files (``fresh``) are the fixture's.
-      if f notin [state / "etc/passwd", state / "etc/group"]: inc written
+      if f notin [state / "etc/passwd", state / "etc/group",
+                  state / "etc/nsswitch.conf"]: inc written
     check written == 0
 
   test "a backup takes the host apply lock and checks the units again":
@@ -379,7 +392,7 @@ suite "reach is default-deny":
     why.startsWith("ECarriedStatePending")
 
   proc confinedWith(name, extra: string): string =
-    unit(name, "[Service]\nProtectSystem=strict\nUser=app\n" & extra &
+    unit(name, "[Service]\nProtectSystem=strict\nNoNewPrivileges=yes\nUser=app\n" & extra &
       "ExecStart=/bin/true\n")
 
   test "a path is compared as systemd resolves it":
@@ -506,7 +519,7 @@ proc pendingRefused(text: string; prepare: proc (root: string) = nil): bool =
   why.startsWith("ECarriedStatePending") or why.startsWith("PARSE")
 
 proc confinedR(name, extra: string): string =
-  unit(name, "[Service]\nProtectSystem=strict\nUser=app\n" & extra &
+  unit(name, "[Service]\nProtectSystem=strict\nNoNewPrivileges=yes\nUser=app\n" & extra &
     "ExecStart=/bin/true\n")
 
 proc hostFile(root, path, content: string) =
@@ -545,7 +558,8 @@ suite "reach judges the account systemd will use (round 4)":
 
   test "a dynamic user is confined without ProtectSystem=":
     check not pendingRefused(unit("dyn.service",
-      "[Service]\nDynamicUser=yes\nUser=nosuchdyn\nExecStart=/bin/true\n"))
+      "[Service]\nDynamicUser=yes\nNoNewPrivileges=yes\nUser=nosuchdyn\n" &
+      "ExecStart=/bin/true\n"))
 
 suite "reach reads every drop-in systemd applies (round 4)":
   test "F3: a profile drop-in retargets a profile timer at a distribution unit":
@@ -567,7 +581,7 @@ suite "reach reads every drop-in systemd applies (round 4)":
       "  content = \"[Timer]\nOnActiveSec=1\nUnit=c0.service\n\"\n}\n" &
       confinedR("c0.service", ""))
 
-  const C0 = "[Service]\nProtectSystem=strict\nUser=app\nExecStart=/bin/true\n"
+  const C0 = "[Service]\nProtectSystem=strict\nNoNewPrivileges=yes\nUser=app\nExecStart=/bin/true\n"
   for (label, path, content) in [
       ("a type-wide service.d drop-in in /usr/lib",
        "/usr/lib/systemd/system/service.d/50-x.conf", "[Service]\nProtectSystem=no\n"),
@@ -601,10 +615,21 @@ suite "reach reads every drop-in systemd applies (round 4)":
         "/etc/systemd/system/o.service.d/90-unconfine.conf",
         "[Service]\nProtectSystem=no\n"))
 
-  test "the generation's own drop-ins on the host are the profile's to decide":
-    check not pendingRefused(confinedR("c0-x.service", ""),
+  test "a 50-repro drop-in the profile no longer declares is read like any drop-in":
+    # Round 4 skipped every 50-repro-*.conf as the generation's; systemd
+    # loads any .conf there (A13 review round 5, finding 3).
+    check pendingRefused(confinedR("c0-x.service", ""),
       proc (root: string) = hostFile(root,
         "/etc/systemd/system/c0-x.service.d/50-repro-old.conf",
+        "[Service]\nProtectSystem=no\n"))
+
+  test "a 50-repro drop-in the profile declares is judged by the profile's bytes":
+    # The on-disk copy is the previous generation's; the profile's replaces it.
+    check not pendingRefused(confinedR("c0-x.service", "") &
+      "systemd.systemDropIn {\n  unit = \"c0-x.service\"\n  name = \"tune\"\n" &
+      "  content = \"[Service]\nTimeoutStopSec=5\n\"\n}\n",
+      proc (root: string) = hostFile(root,
+        "/etc/systemd/system/c0-x.service.d/50-repro-tune.conf",
         "[Service]\nProtectSystem=no\n"))
 
 suite "a path unit reaches the paths it watches (round 4)":
@@ -661,5 +686,203 @@ suite "the restore requirement follows reach at every apply (round 4)":
       RequirementDropInName & ".conf", restoreRequirementText())
     check carriedRequirementUnits(parseSystemProfile(renamed & elsewhere),
                                   d2, root) == @["validator2.service"]
+
+
+# ---------------------------------------------------------------------------
+# A13 review round 5: values as systemd parses them, confinement under
+# decision 54, the account under DynamicUser=, every name a unit loads
+# under, the requirement on what a profile starts, a stored plan, and the
+# live cross-check. Each case has a control that passes first (the round-4
+# probe's control once went red only because accounts began to resolve).
+# Ported from the reviewer's probe (t_rev_a13r6_probe.nim, R6-1 .. R6-11).
+# ---------------------------------------------------------------------------
+
+proc confinedNnp(name, extra: string): string =
+  unit(name, "[Service]\nProtectSystem=strict\nNoNewPrivileges=yes\n" &
+    "User=app\n" & extra & "ExecStart=/bin/true\n")
+
+proc withGroup(line: string): proc (root: string) =
+  result = proc (root: string) =
+    writeFile(root / "etc/group", readFile(root / "etc/group") & line & "\n")
+
+suite "reach reads setting values as systemd does (round 5)":
+  test "control: ProtectSystem=strict with NoNewPrivileges=yes is let in":
+    check not pendingRefused(confinedNnp("v0.service", ""))
+
+  test "R6-10: ProtectSystem=Strict is ignored by systemd, so not confined":
+    check pendingRefused(unit("v1.service", "[Service]\nProtectSystem=Strict\n" &
+      "NoNewPrivileges=yes\nUser=app\nExecStart=/bin/true\n"))
+
+  test "an ignored ProtectSystem= value keeps the earlier assignment":
+    check not pendingRefused(unit("v2.service", "[Service]\nProtectSystem=strict\n" &
+      "ProtectSystem=Strict\nNoNewPrivileges=yes\nUser=app\nExecStart=/bin/true\n"))
+
+  test "R6-1: PermissionsStartOnly= is true for y, t, Y, T, TRUE and On":
+    check not pendingRefused(confinedNnp("v3.service",
+      "PermissionsStartOnly=no\nExecStartPre=/bin/true\n"))
+    for v in ["y", "t", "Y", "T", "TRUE", "On"]:
+      checkpoint "PermissionsStartOnly=" & v
+      check pendingRefused(confinedNnp("v3.service",
+        "PermissionsStartOnly=" & v & "\nExecStartPre=/bin/true\n"))
+
+  test "NoNewPrivileges= is read with parse_boolean, and an ignored value sets nothing":
+    for v in ["y", "Yes", "1", "on"]:
+      checkpoint "NoNewPrivileges=" & v
+      check not pendingRefused(unit("v4.service", "[Service]\n" &
+        "ProtectSystem=strict\nNoNewPrivileges=" & v & "\nUser=app\n" &
+        "ExecStart=/bin/true\n"))
+    check pendingRefused(unit("v4.service", "[Service]\nProtectSystem=strict\n" &
+      "NoNewPrivileges=maybe\nUser=app\nExecStart=/bin/true\n"))
+
+suite "confinement needs NoNewPrivileges= and no privileged group (decision 54)":
+  test "without NoNewPrivileges=yes a unit is not confined":
+    check pendingRefused(unit("n1.service", "[Service]\nProtectSystem=strict\n" &
+      "User=app\nExecStart=/bin/true\n"))
+
+  test "R6-6: a member of a privileged group is not confined":
+    for g in ["disk:x:6:app", "docker:x:999:app", "adm:x:4:app", "sudo:x:27:app"]:
+      checkpoint g
+      check pendingRefused(confinedNnp("n2.service", ""), withGroup(g))
+    # Control: membership of a group not on the list.
+    check not pendingRefused(confinedNnp("n2.service", ""),
+                             withGroup("audio-ish:x:63:app"))
+
+  test "a privileged primary group is not confined":
+    check pendingRefused(confinedNnp("n3.service", "Group=adm\n"),
+                         withGroup("adm:x:4:"))
+
+  test "R6-7: a NOPASSWD sudo grant is held back by NoNewPrivileges=yes":
+    proc sudoer(root: string) =
+      hostFile(root, "/etc/sudoers.d/90-cloud-init-users",
+               "app ALL=(ALL) NOPASSWD:ALL\n")
+    check not pendingRefused(confinedNnp("n4.service", ""), sudoer)
+    check pendingRefused(unit("n4.service", "[Service]\nProtectSystem=strict\n" &
+      "User=app\nExecStart=/bin/true\n"), sudoer)
+
+suite "the account under DynamicUser= (round 5)":
+  test "R6-4: an instance's dynamic account is named after the unit's prefix":
+    check not pendingRefused(unit("dyn@x.service",
+      "[Service]\nDynamicUser=yes\nNoNewPrivileges=yes\nExecStart=/bin/true\n"))
+    check pendingRefused(unit("root@x.service",
+      "[Service]\nDynamicUser=yes\nNoNewPrivileges=yes\nExecStart=/bin/true\n"))
+
+  test "R6-5: a userdb record is a static account":
+    check not pendingRefused(unit("d5.service", "[Service]\nDynamicUser=yes\n" &
+      "NoNewPrivileges=yes\nUser=ops\nExecStart=/bin/true\n"))
+    check pendingRefused(unit("d5.service", "[Service]\nDynamicUser=yes\n" &
+      "NoNewPrivileges=yes\nUser=ops\nExecStart=/bin/true\n"),
+      proc (root: string) = hostFile(root, "/etc/userdb/ops.user",
+        "{\"userName\":\"ops\",\"uid\":0,\"gid\":0,\"disposition\":\"system\"}\n"))
+
+  test "a host whose NSS has other sources does not let a name be dynamic":
+    check pendingRefused(unit("d6.service", "[Service]\nDynamicUser=yes\n" &
+      "NoNewPrivileges=yes\nUser=svcx\nExecStart=/bin/true\n"),
+      proc (root: string) = writeFile(root / "etc/nsswitch.conf",
+        "passwd: files ldap\ngroup: files ldap\n"))
+
+suite "every name a unit loads under (round 5)":
+  test "R6-2: the drop-ins of an [Install] Alias= name are read":
+    proc rootDropIn(root: string) =
+      hostFile(root, "/run/systemd/system/a0alias.service.d/10-root.conf",
+               "[Service]\nUser=root\n")
+    check not pendingRefused(confinedNnp("a0.service", ""), rootDropIn)
+    # [Install] after [Service], so the alias is the only change.
+    let aliased = unit("a0.service", "[Service]\nProtectSystem=strict\n" &
+      "NoNewPrivileges=yes\nUser=app\nExecStart=/bin/true\n[Install]\n" &
+      "WantedBy=multi-user.target\nAlias=a0alias.service\n")
+    check not pendingRefused(aliased)          # no host drop-in: let in
+    check pendingRefused(aliased, rootDropIn)
+
+  test "R6-2b: the drop-ins of a host link to the unit are read":
+    check not pendingRefused(confinedNnp("a1.service", ""))
+    check pendingRefused(confinedNnp("a1.service", ""),
+      proc (root: string) =
+        createDir(root / "etc/systemd/system")
+        createSymlink("/etc/systemd/system/a1.service",
+                      root / "etc/systemd/system/a1link.service")
+        hostFile(root, "/etc/systemd/system/a1link.service.d/10-root.conf",
+                 "[Service]\nUser=root\n"))
+
+suite "the requirement covers what the profile starts (round 5)":
+  proc installedAt(name: string): (string, string) =
+    let root = fresh(name)
+    let d = scratch / (name & "-carried")
+    removeDir(d)
+    copyDir(carriedDir(), d)
+    discard restoreStateSet(d, stopped(), root = root)
+    writeFile(installedMarkerPath(d), d & "\n")
+    (root, d)
+
+  test "a unit the profile starts but does not define requires the restore itself":
+    let (root, d) = installedAt("req-wants")
+    let starter = confinedNnp("w0.service", "ReadWritePaths=/var/lib/other\n")
+    check carriedRequirementUnits(parseSystemProfile(starter), d, root).len == 0
+    let wants = unit("w1.service", "[Unit]\nWants=dist9.service\n[Service]\n" &
+      "ProtectSystem=strict\nNoNewPrivileges=yes\nUser=app\nExecStart=/bin/true\n")
+    let units = carriedRequirementUnits(parseSystemProfile(wants), d, root)
+    check "dist9.service" in units
+    check "w1.service" in units
+
+  test "a Wants= chain within the profile: the wanted unit that reaches gets its own":
+    let (root, d) = installedAt("req-chain")
+    let a = unit("c-a.service", "[Unit]\nWants=c-b.service\n[Service]\n" &
+      "ProtectSystem=strict\nNoNewPrivileges=yes\nUser=app\n" &
+      "ReadWritePaths=/var/lib/other\nExecStart=/bin/true\n")
+    let b = confinedNnp("c-b.service", "ReadWritePaths=/var/lib/ethereum/validator\n")
+    let units = carriedRequirementUnits(parseSystemProfile(a & b), d, root)
+    check units == @["c-b.service"]
+
+suite "a stored plan is of the text the apply runs (round 5)":
+  test "R6-8: a plan made before install-unit is stale once the requirement is due":
+    let root = fresh("plan-r5")
+    let d = scratch / "plan-r5-carried"
+    removeDir(d)
+    copyDir(carriedDir(), d)
+    discard restoreStateSet(d, stopped(), root = root)
+    let renamed = confinedNnp("p0.service",
+      "ReadWritePaths=/var/lib/ethereum/validator\n")
+    let state = fresh("plan-r5-state")
+    let plan = producePlan(withCarriedRequirements(renamed, d, root), "h5")
+    writePlanFile(planPath(state, plan.envelope.planId), plan.envelope)
+    # Control: before install-unit the apply's text is the plan's.
+    check digestProfileText(withCarriedRequirements(renamed, d, root)) ==
+      plan.envelope.profileDigestHex
+    writeFile(installedMarkerPath(d), d & "\n")
+    check digestProfileText(withCarriedRequirements(renamed, d, root)) !=
+      plan.envelope.profileDigestHex
+    var why = ""
+    try:
+      discard runInfraApply(renamed, ApplyOptions(stateDir: state,
+        hostIdentity: "h5", planId: plan.envelope.planId,
+        reproExe: "/usr/bin/false", elevationMode: emNoElevate,
+        noPreview: true, carriedStateDir: d, carriedStateRoot: root))
+    except EPlanStale as e:
+      why = e.msg
+    checkpoint why
+    check "carried-state requirements" in why
+
+suite "the switch re-judges reach from the live unit (round 5)":
+  proc props(t: openArray[(string, string)]): proc (k: string): string =
+    var tab = initTable[string, string]()
+    for (k, v) in t: tab[k] = v
+    result = proc (k: string): string = tab.getOrDefault(k)
+
+  test "a unit systemd loaded unconfined is a problem, whatever its text said":
+    let lookup = hostAccountLookup(fresh("live-r5"))
+    # Control: as systemd shows a confined unit.
+    check liveConfinementProblem("l.service", props([("ProtectSystem", "strict"),
+      ("DynamicUser", "no"), ("NoNewPrivileges", "yes"), ("User", "app"),
+      ("Group", ""), ("SupplementaryGroups", "")]), lookup) == ""
+    # systemd ignored ProtectSystem=Strict: it shows no.
+    check liveConfinementProblem("l.service", props([("ProtectSystem", "no"),
+      ("DynamicUser", "no"), ("NoNewPrivileges", "yes"), ("User", "app"),
+      ("Group", ""), ("SupplementaryGroups", "")]), lookup).len > 0
+    # An alias drop-in made it run as root.
+    check liveConfinementProblem("l.service", props([("ProtectSystem", "strict"),
+      ("DynamicUser", "no"), ("NoNewPrivileges", "yes"), ("User", "root"),
+      ("Group", ""), ("SupplementaryGroups", "")]), lookup).len > 0
+    check liveConfinementProblem("l.service", props([("ProtectSystem", "strict"),
+      ("DynamicUser", "no"), ("NoNewPrivileges", "no"), ("User", "app"),
+      ("Group", ""), ("SupplementaryGroups", "")]), lookup).len > 0
 
 removeDir(scratch)

@@ -1573,8 +1573,8 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 19,
-      "integration": 1484,
-      "platform/destructive": 172,
+      "integration": 1483,
+      "platform/destructive": 173,
       "pure unit": 740,
       "unclassified": 307
     },
@@ -8515,8 +8515,8 @@
       "owner": "libs/repro_addon",
       "requiresReproBinary": false,
       "source": "libs/repro_addon/tests/t_addon_carried_state_fails_closed.nim",
-      "sourceSuiteCount": 6,
-      "staticCaseCount": 36,
+      "sourceSuiteCount": 13,
+      "staticCaseCount": 55,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -17641,8 +17641,8 @@
       "owner": "libs/repro_infra",
       "requiresReproBinary": false,
       "source": "libs/repro_infra/tests/t_every_apply_waits_for_carried_state.nim",
-      "sourceSuiteCount": 1,
-      "staticCaseCount": 2,
+      "sourceSuiteCount": 2,
+      "staticCaseCount": 3,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -17659,8 +17659,8 @@
       "owner": "libs/repro_infra",
       "requiresReproBinary": false,
       "source": "libs/repro_infra/tests/t_service_account.nim",
-      "sourceSuiteCount": 3,
-      "staticCaseCount": 21,
+      "sourceSuiteCount": 4,
+      "staticCaseCount": 25,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -30479,8 +30479,8 @@
     },
     {
       "binary": "build/test-bin/t_e2e_addon_to_reproos_conversion_keeps_state",
-      "class": "integration",
-      "classificationReason": "e2e/integration path or requires the repro binary",
+      "class": "platform/destructive",
+      "classificationReason": "platform path, target OS, VM, privileged, or host mutation signal",
       "defines": [],
       "language": "nim",
       "localDependencyShape": [

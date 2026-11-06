@@ -104,6 +104,11 @@ type
       ## comparison. An empty `stateDir`, or a state dir with no
       ## active generation, means "first apply ever" — no drift
       ## comparison is performed.
+    destroyResources*: seq[SystemResource]
+      ## Resources the active generation declared and the profile no
+      ## longer does that the apply removes (``apply.undeclaredDropIns``):
+      ## each is planned as a ``destroy`` (``no-op`` when already absent),
+      ## so ``repro infra plan`` shows it and a stored plan carries it.
     acceptDrift*: bool
       ## The plan-time `--accept-drift` / `--reconcile-drift` flag.
       ## When set, every actionable `DriftFinding` is marked
@@ -751,6 +756,19 @@ proc producePlan*(profileText: string; hostIdentity: string;
           classification: classifyDrift(recorded, obs.observedDigestHex,
                                         desired),
           accepted: opts.acceptDrift))
+  for r in opts.destroyResources:
+    let obs = observeResource(r)
+    result.observations.add(obs)
+    let op = toPrivilegedOperation(r, destroy = true)
+    let action = decideAction(obs, "", destroy = true)
+    env.operations.add(PlannedOperationRecord(
+      address: r.address,
+      kindTag: $op.kind,
+      privileged: requiresElevation(op.kind),
+      action: action,
+      baselineDigestHex: obs.observedDigestHex,
+      desiredDigestHex: "",
+      summary: summaryLine(r, action)))
   # Add-On spec §7.3: a unit whose dependency changes is restarted even
   # though its own bytes are a no-op. Decided here, in the plan, so the
   # operator reads `[restart]` before the apply runs it.

@@ -551,6 +551,10 @@ proc accountProblems*(user, group, supplementaryGroups, dynamicUser,
       note(g, gid)
       result.add(gid)
   lookup.userOfUid = userOfUid
+  # Answered by NSS (getent), as systemd asks it: a name it does not know
+  # is no account, so DynamicUser=yes allocates one (service_account,
+  # ``AccountLookup.authoritative``).
+  lookup.authoritative = true
   let a = resolveServiceAccount(user, group, supplementaryGroups,
                                 dynamicUser == "yes", unit, lookup)
   for u in a.unknown:

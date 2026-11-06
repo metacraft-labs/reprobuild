@@ -65,6 +65,8 @@ import nimcrypto/[hash, sha2]
 import ./errors
 import ./profile
 import ./service_account
+import ./service_floor
+import ./systemd_values
 
 const CarriedMutation {.strdefine: "reproAddonMutation".} = ""
   ## A falsifying build (``repro_addon/mutations``); never a product build.
@@ -576,8 +578,47 @@ proc unitDirectivesOf(text: string): seq[(string, string, string)] =
       continue
     result.add((section, t[0 ..< eq].strip(), t[eq + 1 .. ^1].strip()))
 
-proc truthy(v: string): bool =
-  v.toLowerAscii() in ["yes", "true", "1", "on"]
+proc confinementProblem*(protect: ProtectSystemMode; dynamic, noNewPrivileges: bool;
+                         user, group, supplementaryGroups, unit: string;
+                         lookup: AccountLookup): string =
+  ## Why a service with these (effective) settings is not confined to the
+  ## paths its unit names, or "" (spec §11.1; §13 decision 54). Confined
+  ## only when all hold: its account (``service_account``: the one systemd
+  ## will use) resolves, is not root and holds neither the root group nor
+  ## any group on the floor's ``PrivilegedGroups`` list (the floor's own
+  ## definition, matched by gid on this host); ``NoNewPrivileges=yes``, so
+  ## no setuid program, file capability or ``sudo`` grant lifts it; and it
+  ## runs as a dynamic user or under ``ProtectSystem=strict``. Shared by the
+  ## static analysis (``serviceReach``) and the live cross-check
+  ## (``liveConfinementProblem``).
+  when CarriedMutation == "reach-default-allow":
+    if dynamic or protect == psStrict: return ""
+    return "not confined"
+  let a = resolveServiceAccount(user, group, supplementaryGroups, dynamic,
+                                unit, lookup)
+  if not a.known:
+    return "its account does not resolve: " & a.unknown.join("; ")
+  if a.userIsRoot:
+    return "runs as root (" & a.user & "): ProtectSystem=strict does not " &
+      "hold root back (/proc/1/root)"
+  if a.groupIsRoot:
+    return "holds the root group (" & a.group & ")"
+  when CarriedMutation != "confined-without-nnp-or-groups":
+    var privileged: seq[(string, int)]
+    for g in PrivilegedGroups:
+      let gid = if g.allCharsInSet(Digits): parseInt(g) else: lookup.gidOf(g)
+      if gid >= 0: privileged.add((g, gid))
+    for gid in a.allGids:
+      for (g, pg) in privileged:
+        if gid == pg:
+          return "holds the privileged group " & g & " (gid " & $gid & ")"
+    if not noNewPrivileges:
+      return "NoNewPrivileges= is not yes: a setuid program, a file " &
+        "capability or a sudo grant lifts it out of its account"
+  if not a.dynamicUser and protect != psStrict:
+    return "not confined (no ProtectSystem=strict, and no dynamic user): " &
+      "it can write anywhere"
+  ""
 
 proc unitWords*(value: string; ok: var bool): seq[string] =
   ## A unit value split into words the way systemd splits a list setting
@@ -806,8 +847,9 @@ proc serviceReach*(name: string; texts: seq[string];
   ## systemd; a list setting's paths only accumulate (an empty assignment
   ## that resets a list can only take reach away). The account is the one
   ## systemd will use (``service_account``), resolved through ``lookup``.
-  var strict = false
+  var protect = psNo
   var dynamic = false
+  var nnp = false
   var user = ""
   var group = ""
   var collected = UnitReach()
@@ -841,8 +883,16 @@ proc serviceReach*(name: string; texts: seq[string];
         if key in ReachAllServiceKeys and value.len > 0:
           return allReach(key & "=" & value)
         case key
-        of "ProtectSystem": strict = value.toLowerAscii() == "strict"
-        of "DynamicUser": dynamic = truthy(value)
+        # Read with systemd's grammar (``systemd_values``): a value systemd
+        # ignores leaves the earlier assignment in place (A13 review round
+        # 5, finding 1).
+        of "ProtectSystem": discard parseProtectSystem(value, protect)
+        of "DynamicUser":
+          var b: bool
+          if parseSystemdBoolean(value, b) == srValid: dynamic = b
+        of "NoNewPrivileges":
+          var b: bool
+          if parseSystemdBoolean(value, b) == srValid: nnp = b
         of "User": user = value
         of "Group": group = value
         of "SupplementaryGroups":
@@ -854,9 +904,10 @@ proc serviceReach*(name: string; texts: seq[string];
             return allReach("AmbientCapabilities=" & value)
         of "PermissionsStartOnly":
           when CarriedMutation != "reach-ignores-privileged-commands":
-            if truthy(value):
-              return allReach("PermissionsStartOnly=yes (its other " &
-                "commands run outside the sandbox)")
+            var b: bool
+            if parseSystemdBoolean(value, b) == srValid and b:
+              return allReach("PermissionsStartOnly=" & value & " (its " &
+                "other commands run outside the sandbox)")
         of "WorkingDirectory":
           var w = value
           if w.startsWith("-"): w = w[1 .. ^1]
@@ -906,22 +957,9 @@ proc serviceReach*(name: string; texts: seq[string];
   # specifiers expanded, a static account of the name winning over
   # DynamicUser=yes, uid aliases and group memberships resolved. What does
   # not resolve reaches everything.
-  when CarriedMutation == "reach-default-allow":
-    if dynamic: return collected
-    if not strict:
-      return allReach("not confined")
-    return collected
-  let a = resolveServiceAccount(user, group, "", dynamic, name, lookup)
-  if not a.known:
-    return allReach("its account does not resolve: " & a.unknown.join("; "))
-  if a.userIsRoot:
-    return allReach("runs as root (" & a.user & "): ProtectSystem=strict " &
-      "does not hold root back (/proc/1/root)")
-  if a.groupIsRoot:
-    return allReach("holds the root group (" & a.group & ")")
-  if not a.dynamicUser and not strict:
-    return allReach("not confined (no ProtectSystem=strict, and no " &
-      "dynamic user): it can write anywhere")
+  let why = confinementProblem(protect, dynamic, nnp, user, group, "", name,
+                               lookup)
+  if why.len > 0: return allReach(why)
   collected
 
 proc activatedUnits(name, suffix: string; texts: seq[string]): seq[string] =
@@ -986,30 +1024,75 @@ proc dropInDirApplies(d, unit: string): bool =
     return true
   false
 
+proc unitNames(unit: string; texts: seq[string]; root: string): seq[string] =
+  ## Every name systemd loads ``unit`` under (A13 review round 5, finding
+  ## 2): its own; each ``[Install] Alias=`` in ``texts`` (a link once the
+  ## unit is enabled); and every link in the unit search path whose target
+  ## is the unit's file (``unit_find_dropin_paths()`` reads the drop-ins of
+  ## each, https://github.com/systemd/systemd/blob/v257/src/core/dropin.c).
+  result = @[unit]
+  when CarriedMutation == "reach-alias-dropins-unread":
+    return
+  for t in texts:
+    for (section, key, value) in unitDirectivesOf(t):
+      if section == "Install" and key == "Alias":
+        var ok: bool
+        for w in unitWords(value, ok):
+          if w notin result: result.add(w)
+        if not ok: result.add("<unparsed Alias=" & value & ">")
+  for dir in UnitSearchPath:
+    let full = under(normalRoot(root), dir)
+    if not dirExists(full): continue
+    for kind, e in walkDir(full, relative = true):
+      if kind != pcLinkToFile and kind != pcLinkToDir: continue
+      var target = ""
+      try: target = expandSymlink(full / e)
+      except OSError: continue
+      if target.extractFilename == unit and e notin result:
+        result.add(e)
+
 proc unitTexts(unit, base: string; p: SystemProfile; root: string;
                why: var string): seq[string] =
   ## What systemd reads for ``unit``: ``base`` (the profile's file), then
-  ## every drop-in that applies to it -- the profile's own (written as
+  ## every drop-in that applies to it under any of its names
+  ## (``unitNames``) -- the profile's own (written as
   ## ``50-repro-<name>.conf``) and the host's, from every directory of the
-  ## unit search path (unit-specific, template, dashed-prefix and type-wide
-  ## directories, generators', ``/run`` and ``/usr/lib`` alike) -- in one
-  ## order by file name, a name in a higher-priority directory replacing
-  ## the same name below it. Default-deny where the order is not certain:
-  ## ``why`` is set (the unit reaches everything) when a unit file of the
-  ## same name sits in a directory systemd reads before the generation's,
-  ## or when one drop-in name holds different bytes in two directories.
-  ## Left out, as the generation's own: the host's ``50-repro-*.conf`` in
-  ## the unit's directory under ``/etc/systemd/system`` (the switch writes
-  ## and removes those), and ``install-unit``'s requirement drop-in when it
-  ## holds exactly its bytes.
+  ## unit search path (unit-specific, alias, template, dashed-prefix and
+  ## type-wide directories, generators', ``/run`` and ``/usr/lib`` alike) --
+  ## in one order by file name, a name in a higher-priority directory
+  ## replacing the same name below it. Default-deny where the order is not
+  ## certain: ``why`` is set (the unit reaches everything) when a unit file
+  ## of the same name sits in a directory systemd reads before the
+  ## generation's, when one drop-in name holds different bytes in two
+  ## directories, or when an alias cannot be read.
+  ##
+  ## Left out, as the generation's own (A13 review round 5, finding 3), only
+  ## what the generation being applied writes there: a host
+  ## ``/etc/systemd/system/<name>.d/50-repro-<d>.conf`` the profile declares
+  ## (its bytes are the profile's, judged above), the generation's restore
+  ## requirement (``50-repro-state-restore.conf``) and ``install-unit``'s,
+  ## each only when it holds exactly ``restoreRequirementText``. Any other
+  ## ``50-repro-*.conf`` -- one an earlier generation declared, or one
+  ## placed by hand -- is loaded by systemd and so is read like any drop-in.
   result = @[base]
   var byName = initOrderedTable[string, string]()
   var seen = initTable[string, string]()
+  var declared = initHashSet[string]()       # "<dir>.d/<file>"
+  var texts0 = @[base]
   for d in p.resources:
     if d.kind == srkSystemdSystemDropIn and d.diUnit == unit:
+      texts0.add(d.diContent)
+  let names = unitNames(unit, texts0, root)
+  for n in names:
+    if n.startsWith("<unparsed"):
+      why = "an alias that cannot be read (" & n & ")"
+      return
+  for d in p.resources:
+    if d.kind == srkSystemdSystemDropIn and d.diUnit in names:
       let n = "50-repro-" & d.diName & ".conf"
       byName[n] = d.diContent
       seen[n] = d.diContent
+      declared.incl(d.diUnit & ".d/" & n)
   when CarriedMutation != "reach-host-dropins-ignored":
     var higher = true
     for dir in UnitSearchPath:
@@ -1021,22 +1104,30 @@ proc unitTexts(unit, base: string; p: SystemProfile; root: string;
           "the generation's"
         return
       for kind, e in walkDir(full, relative = true):
-        if kind notin {pcDir, pcLinkToDir} or not dropInDirApplies(e, unit):
-          continue
+        if kind notin {pcDir, pcLinkToDir}: continue
+        var applies = false
+        for n in names:
+          if dropInDirApplies(e, n): applies = true
+        if not applies: continue
         var files: seq[string]
         for k2, f in walkDir(full / e, relative = true):
           if f.endsWith(".conf"): files.add(f)
         files.sort()
         for f in files:
-          if dir == GenerationUnitDir and e == unit & ".d" and
-              f.startsWith("50-repro-"):
-            continue
+          let own = dir == GenerationUnitDir and f.startsWith("50-repro-")
+          when CarriedMutation == "reach-stale-generation-dropins-skipped":
+            # FALSIFYING MUTATION: round 4's reading -- every 50-repro-*.conf
+            # in the unit's own directory is the generation's.
+            if own and e == unit & ".d": continue
+          else:
+            if own and (e & "/" & f) in declared: continue
           var c = ""
           try: c = readFile(full / e / f)
           except IOError, OSError:
             why = "the drop-in " & dir & "/" & e & "/" & f & " cannot be read"
             return
-          if f == RestoreRequiredDropIn and c == restoreRequirementText():
+          if c == restoreRequirementText() and (f == RestoreRequiredDropIn or
+              (own and f == "50-repro-" & RequirementDropInName & ".conf")):
             continue
           if f in seen:
             if seen[f] != c:
@@ -1046,11 +1137,11 @@ proc unitTexts(unit, base: string; p: SystemProfile; root: string;
             continue
           seen[f] = c
           byName[f] = c
-  var names: seq[string]
-  for n in byName.keys: names.add(n)
+  var ordered: seq[string]
+  for n in byName.keys: ordered.add(n)
   when CarriedMutation != "reach-default-allow":
-    names.sort()
-  for n in names: result.add(byName[n])
+    ordered.sort()
+  for n in ordered: result.add(byName[n])
 
 proc definedUnits(p: SystemProfile): HashSet[string] =
   ## The units whose whole definition is in the profile.
@@ -1386,6 +1477,31 @@ proc carriedStateRefusal*(p: SystemProfile; dir = CarriedStateDir;
       "match: " & owners.join("; ")
   ""
 
+proc liveConfinementProblem*(unit: string;
+                             prop: proc (key: string): string {.closure.};
+                             lookup: AccountLookup): string =
+  ## ``confinementProblem`` over the unit as systemd loaded it, from its
+  ## ``systemctl show`` properties (``prop``): what a switch on a live host
+  ## checks after daemon-reload and before any start, so that a value the
+  ## static reading took one way and systemd another is decided by systemd
+  ## (A13 review round 5, finding 1). ``systemctl show`` prints the
+  ## effective values: ``ProtectSystem=no|yes|full|strict``,
+  ## ``DynamicUser=``/``NoNewPrivileges=`` as ``yes``/``no``, and the
+  ## account settings with specifiers expanded.
+  when CarriedMutation == "live-reach-unchecked":
+    return ""
+  var protect = psNo
+  if parseProtectSystem(prop("ProtectSystem"), protect) == srIgnored:
+    return "systemd reports ProtectSystem=" & prop("ProtectSystem") &
+      ", which this check does not read"
+  var dynamic, nnp: bool
+  if parseSystemdBoolean(prop("DynamicUser"), dynamic) != srValid:
+    return "systemd reports DynamicUser=" & prop("DynamicUser")
+  if parseSystemdBoolean(prop("NoNewPrivileges"), nnp) != srValid:
+    return "systemd reports NoNewPrivileges=" & prop("NoNewPrivileges")
+  confinementProblem(protect, dynamic, nnp, prop("User"), prop("Group"),
+                     prop("SupplementaryGroups"), unit, lookup)
+
 proc carriedStateInstalled*(dir = CarriedStateDir): bool =
   ## Whether ``install-unit`` installed carried state at ``dir`` (its
   ## marker) and the manifest is there: when the generation's restore
@@ -1421,6 +1537,33 @@ proc carriedRequirementUnits*(p: SystemProfile; dir = CarriedStateDir;
       for q in reach.paths:
         if reaches(q, e.path): hit = true
       if hit: units.incl(u)
+  # What a profile unit starts that the profile does not define reaches
+  # everything (``triggersOutside``), and a requirement on the starting
+  # unit does not hold it back: ``Wants=`` and the rest queue it as a job
+  # of its own, which runs when the restore failed (A13 review round 5,
+  # finding 5). So each such unit gets the requirement itself.
+  when CarriedMutation != "restore-requirement-skips-activated":
+    let defined = definedUnits(p)
+    for r in p.resources:
+      var name, suffix, base: string
+      case r.kind
+      of srkSystemdSystemUnit:
+        if r.suCollision == "dropIn": continue
+        name = r.suName
+        try: base = renderedSystemUnitContent(r)
+        except CatchableError: continue      # reaches everything; above
+      of srkSystemdSystemTimer:
+        name = r.stName
+        base = r.stContent
+      else: continue
+      let ext = name.rsplit('.', maxsplit = 1)
+      suffix = if ext.len == 2: ext[1] else: ""
+      var why = ""
+      let texts = unitTexts(name, base, p, root, why)
+      for a in activatedUnits(name, suffix, texts):
+        if a notin defined and not a.endsWith(".slice") and
+            a != CarriedRestoreUnit and not a.startsWith("<unparsed"):
+          units.incl(a)
   for u in units: result.add(u)
   result.sort()
 

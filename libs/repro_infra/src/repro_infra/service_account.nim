@@ -33,7 +33,7 @@
 ## id) are ``AllocatedId``, and a dynamic user's or group's id is
 ## ``DynamicId`` (61184-65519): neither is ever 0.
 
-import std/[os, sets, strutils, tables]
+import std/[json, os, posix, sets, strutils, tables]
 
 import ./profile
 
@@ -62,6 +62,12 @@ type
       ## (``/etc/group``'s fourth field).
     userOfUid*: proc (uid: int): string {.closure.}
       ## A user's name by uid ("" when there is none).
+    authoritative*: bool
+      ## A name this lookup does not know does not exist on the host. Only
+      ## then may ``DynamicUser=yes`` with a name it does not know be taken
+      ## as a dynamic user; otherwise that name is unresolved (systemd asks
+      ## NSS, which can know accounts the files do not: nss-systemd's
+      ## userdb records, LDAP, SSSD).
 
   ResolvedAccount* = object
     ## The account a service runs as.
@@ -177,7 +183,12 @@ proc resolveServiceAccount*(user, group, supplementaryGroups: string;
   if not ok:
     result.unknown.add("Group=" & group & " (a specifier that does not resolve)")
   let parts = unitParts(unitName)
-  let unitStem = if parts.instance.len > 0: parts.prefix & "@" & parts.instance
+  # With User= empty under DynamicUser=yes systemd names the account after
+  # the unit's prefix (``user_from_unit_name()`` uses
+  # ``unit_name_to_prefix()``): ``root@x.service`` runs as ``root``.
+  let unitStem = when AccountMutation == "account-dynamic-name-from-stem":
+                   (if parts.instance.len > 0: parts.prefix & "@" & parts.instance
+                    else: parts.prefix)
                  else: parts.prefix
 
   # --- The user.
@@ -187,11 +198,16 @@ proc resolveServiceAccount*(user, group, supplementaryGroups: string;
     when AccountMutation == "account-as-written":
       return UnknownId
     lookup.uidOf(name)
+  let dynName = if u.len > 0: u else: unitStem
   when AccountMutation == "account-as-written":
     let dynamicUserNow = dynamicUser
   else:
-    let dynamicUserNow = dynamicUser and
-      staticUid(if u.len > 0: u else: unitStem) == UnknownId
+    let dynamicUserNow = dynamicUser and staticUid(dynName) == UnknownId
+    if dynamicUserNow and not lookup.authoritative and
+        AccountMutation != "account-nss-unread":
+      result.unknown.add("User=" & dynName & " under DynamicUser=yes: not " &
+        "known here, and this host's accounts are not all known (NSS " &
+        "sources beyond files and userdb), so it may be a static account")
   if dynamicUserNow:
     result.dynamicUser = true
     result.user = if u.len > 0: u else: unitStem
@@ -219,9 +235,13 @@ proc resolveServiceAccount*(user, group, supplementaryGroups: string;
     let gid = staticGid(g)
     result.group = g
     if gid == UnknownId and dynamicUser:
-      # A group of that name does not exist: a dynamic one is allocated.
+      # A group of that name does not exist: a dynamic one is allocated --
+      # provided the lookup knows every group on the host.
       result.dynamicGroup = true
       result.primaryGid = DynamicId
+      if not lookup.authoritative and AccountMutation != "account-nss-unread":
+        result.unknown.add("Group=" & g & " under DynamicUser=yes: not known " &
+          "here, and this host's groups are not all known")
     else:
       result.primaryGid = gid
       when AccountMutation == "account-as-written":
@@ -236,6 +256,10 @@ proc resolveServiceAccount*(user, group, supplementaryGroups: string;
     if gid == UnknownId:
       result.dynamicGroup = true
       result.primaryGid = DynamicId
+      if not lookup.authoritative and AccountMutation != "account-nss-unread":
+        result.unknown.add("the group " & result.user & " under " &
+          "DynamicUser=yes: not known here, and this host's groups are not " &
+          "all known")
     else:
       result.primaryGid = gid
   else:
@@ -295,6 +319,70 @@ proc readAccountFile(root, file: string): seq[seq[string]] =
     if line.len == 0 or line[0] == '#': continue
     result.add(line.split(':'))
 
+const
+  UserdbDirs = ["/etc/userdb", "/run/userdb", "/run/host/userdb",
+                "/usr/local/lib/userdb", "/usr/lib/userdb"]
+    ## Where nss-systemd reads JSON user and group records
+    ## (https://systemd.io/USER_GROUP_API/, "Drop-in JSON records";
+    ## nss-systemd(8)).
+  CoveredNssSources = ["files", "systemd"]
+    ## The NSS sources this lookup reads in full: the account files (and,
+    ## on the live root, libc's lookups) and nss-systemd's userdb records.
+
+proc rootedPath(root, path: string): string =
+  (if root == "/" or root.len == 0: "" else: root.strip(leading = false,
+    chars = {'/'})) & path
+
+proc userdbRecords(root: string; ok: var bool): tuple[users, groups: seq[seq[string]]] =
+  ## The userdb drop-in records under ``root`` as passwd/group-like rows
+  ## (name, x, id, gid / name, x, gid, members). ``ok`` is false when a
+  ## record could not be read.
+  for d in UserdbDirs:
+    let dir = rootedPath(root, d)
+    if not dirExists(dir): continue
+    for kind, f in walkDir(dir):
+      let isUser = f.endsWith(".user")
+      if not isUser and not f.endsWith(".group"): continue
+      try:
+        let j = parseJson(readFile(f))
+        if isUser:
+          let name = j{"userName"}.getStr()
+          let uid = j{"uid"}.getInt(-1)
+          let gid = j{"gid"}.getInt(uid)
+          if name.len == 0 or uid < 0: ok = false; continue
+          var groups: seq[string]
+          for g in j{"memberOf"}.getElems(): groups.add(g.getStr())
+          result.users.add(@[name, "x", $uid, $gid, groups.join(",")])
+        else:
+          let name = j{"groupName"}.getStr()
+          let gid = j{"gid"}.getInt(-1)
+          if name.len == 0 or gid < 0: ok = false; continue
+          var members: seq[string]
+          for m in j{"members"}.getElems(): members.add(m.getStr())
+          result.groups.add(@[name, "x", $gid, members.join(",")])
+      except CatchableError:
+        ok = false
+
+proc nssCovered(root: string): bool =
+  ## Whether ``<root>/etc/nsswitch.conf`` names, for both ``passwd`` and
+  ## ``group``, only sources this lookup reads in full. A missing file, or
+  ## a line that names another source (``ldap``, ``sss``, ``winbind``), is
+  ## not covered.
+  let f = rootedPath(root, "/etc/nsswitch.conf")
+  if not fileExists(f): return false
+  var seen = 0
+  for raw in readFile(f).splitLines():
+    let line = raw.split('#')[0].strip()
+    let c = line.find(':')
+    if c < 0: continue
+    let db = line[0 ..< c].strip()
+    if db notin ["passwd", "group"]: continue
+    inc seen
+    for w in line[c + 1 .. ^1].splitWhitespace():
+      if w.startsWith("["): continue        # an action, [NOTFOUND=return]
+      if w notin CoveredNssSources: return false
+  seen == 2
+
 proc accountLookupOf(passwd, group: seq[seq[string]];
                      p: SystemProfile): AccountLookup =
   ## The lookup over ``passwd`` and ``group`` records (a host's, or none)
@@ -304,12 +392,16 @@ proc accountLookupOf(passwd, group: seq[seq[string]];
   var gids = initTable[string, int]()
   var members = initTable[string, seq[int]]()
   var names = initTable[int, string]()
+  var memberOfNames: seq[(string, string)]
   for f in passwd:
     if f.len < 4: continue
     let uid = parseId(f[2])
     if f[0] notin uids: uids[f[0]] = uid
     if f[0] notin pgids: pgids[f[0]] = parseId(f[3])
     if uid >= 0 and uid notin names: names[uid] = f[0]
+    # A userdb record's memberOf (rows built by ``userdbRecords``).
+    if f.len == 5 and f[1] == "x" and f[4].len > 0:
+      for g in f[4].split(','): memberOfNames.add((f[0], g))
   for f in group:
     if f.len < 3: continue
     let gid = parseId(f[2])
@@ -317,6 +409,8 @@ proc accountLookupOf(passwd, group: seq[seq[string]];
     if f.len >= 4:
       for m in f[3].split(','):
         if m.len > 0: members.mgetOrPut(m, @[]).add(gid)
+  for (u, g) in memberOfNames:
+    members.mgetOrPut(u, @[]).add(gids.getOrDefault(g, UnknownId))
   # The profile's accounts, after the host's (which win).
   var hostUsers = initHashSet[string]()
   for k in uids.keys: hostUsers.incl(k)
@@ -371,16 +465,81 @@ proc accountLookupOf(passwd, group: seq[seq[string]];
     members.getOrDefault(name, @[])
   result.userOfUid = proc (uid: int): string = names.getOrDefault(uid, "")
 
+proc libcUid(name: string; gid: var int): int =
+  ## The live host's NSS (glibc's ``getpwnam`` consults every source
+  ## nsswitch.conf names; a static musl build reads the files only, which
+  ## ``nssCovered`` accounts for).
+  let pw = posix.getpwnam(name.cstring)
+  if pw == nil: return UnknownId
+  gid = int(pw.pw_gid)
+  int(pw.pw_uid)
+
+proc c_getgrouplist(user: cstring; group: Gid; groups: ptr Gid;
+                    ngroups: ptr cint): cint {.importc: "getgrouplist",
+                    header: "<grp.h>".}
+
+proc libcGroups(name: string): seq[int] =
+  ## Every group NSS gives ``name`` (``getgrouplist(3)``), its primary group
+  ## included.
+  var g = -1
+  if libcUid(name, g) == UnknownId: return
+  var n: cint = 64
+  var buf = newSeq[Gid](n)
+  if c_getgrouplist(name.cstring, Gid(g), addr buf[0], addr n) < 0:
+    buf.setLen(n)
+    if c_getgrouplist(name.cstring, Gid(g), addr buf[0], addr n) < 0:
+      return @[UnknownId]
+  for i in 0 ..< int(n): result.add(int(buf[i]))
+
+proc libcGid(name: string): int =
+  let gr = posix.getgrnam(name.cstring)
+  if gr == nil: UnknownId else: int(gr.gr_gid)
+
 proc hostAccountLookup*(root = "/"; p: SystemProfile = SystemProfile()): AccountLookup =
-  ## The accounts of ``<root>/etc/passwd`` and ``<root>/etc/group``, and
-  ## those the profile ``p`` creates (``passwd.user``, ``passwd.group``,
-  ## ``linux.sysusersEntry``): an account already on the host keeps its ids
-  ## (neither ``useradd`` nor ``systemd-sysusers`` changes one), a new one
-  ## gets its pinned id or ``AllocatedId``. Memberships a profile adds
-  ## (``passwd.user`` ``groups``, ``passwd.group`` ``members``) are added to
-  ## the host's.
-  accountLookupOf(readAccountFile(root, "passwd"),
-                  readAccountFile(root, "group"), p)
+  ## The accounts of ``<root>/etc/passwd`` and ``<root>/etc/group``, the
+  ## userdb records nss-systemd serves (``UserdbDirs``), on the live root
+  ## (``/``) whatever else NSS knows, and the accounts the profile ``p``
+  ## creates (``passwd.user``, ``passwd.group``, ``linux.sysusersEntry``):
+  ## an account already on the host keeps its ids (neither ``useradd`` nor
+  ## ``systemd-sysusers`` changes one), a new one gets its pinned id or
+  ## ``AllocatedId``. Memberships a profile adds (``passwd.user``
+  ## ``groups``, ``passwd.group`` ``members``) are added to the host's.
+  ## ``authoritative`` when the root's nsswitch.conf names only sources
+  ## read here (``nssCovered``) and every userdb record could be read.
+  var ok = true
+  let db = when AccountMutation == "account-nss-unread":
+             (users: newSeq[seq[string]](), groups: newSeq[seq[string]]())
+           else: userdbRecords(root, ok)
+  result = accountLookupOf(readAccountFile(root, "passwd") & db.users,
+                           readAccountFile(root, "group") & db.groups, p)
+  when AccountMutation == "account-nss-unread":
+    result.authoritative = true
+  else:
+    result.authoritative = ok and nssCovered(root)
+    if root == "/" or root.len == 0:
+      # The live host: what the files and the profile do not know, NSS may.
+      let filesUid = result.uidOf
+      let filesPgid = result.primaryGidOf
+      let filesGid = result.gidOf
+      result.uidOf = proc (name: string): int =
+        result = filesUid(name)
+        if result == UnknownId:
+          var g = -1
+          result = libcUid(name, g)
+      result.primaryGidOf = proc (name: string): int =
+        result = filesPgid(name)
+        if result == UnknownId:
+          var g = UnknownId
+          discard libcUid(name, g)
+          result = g
+      result.gidOf = proc (name: string): int =
+        result = filesGid(name)
+        if result == UnknownId: result = libcGid(name)
+      let filesGroups = result.groupsOf
+      result.groupsOf = proc (name: string): seq[int] =
+        # An account only NSS knows: its memberships are NSS's too.
+        result = filesGroups(name)
+        if filesUid(name) == UnknownId: result.add(libcGroups(name))
 
 proc profileAccountLookup*(p: SystemProfile): AccountLookup =
   ## Only the accounts the profile ``p`` creates, with the ids and
@@ -388,5 +547,7 @@ proc profileAccountLookup*(p: SystemProfile): AccountLookup =
   ## none of its own: no host database is read, so a check made at parse
   ## time with it decides the same on every host. ``root`` still resolves
   ## (``resolveServiceAccount`` knows it by name), and any other account
-  ## the profile does not create is ``UnknownId``.
-  accountLookupOf(@[], @[], p)
+  ## the profile does not create is ``UnknownId``. ``authoritative``: it
+  ## decides as for a host that has no accounts of its own, by design.
+  result = accountLookupOf(@[], @[], p)
+  result.authoritative = true

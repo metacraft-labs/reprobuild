@@ -95,3 +95,36 @@ suite "every apply waits for carried state":
       why = e.msg
     check "/var/lib/app (systemUnit:app.service" in why
     check readCurrentGenerationId(state) == active
+
+suite "a full apply removes the drop-ins it no longer declares (round 5)":
+  test "an earlier generation's drop-in is planned as a destroy":
+    let tmp = createTempDir("carried-undeclared-", "")
+    defer: removeDir(tmp)
+    let state = tmp / "state"
+    createDir(tmp / "root")
+    let first = runInfraApply("", options(state, tmp / "none", tmp / "root"))
+    # The active generation declared a drop-in (as an earlier apply would
+    # have: the carried-state requirement among them).
+    const DropIn = """systemd.systemDropIn {
+  unit = "a13r5-undeclared.service"
+  name = "state-restore"
+  content = "[Unit]
+Requires=repro-state-restore.service
+"
+}
+"""
+    var env = readGenerationEnvelope(pointerPath(state, first.generationId))
+    env.profileText = DropIn
+    writeGenerationEnvelope(pointerPath(state, first.generationId), env)
+    # Control: a profile that still declares it removes nothing.
+    check undeclaredDropIns(state, DropIn).len == 0
+    let gone = undeclaredDropIns(state, "")
+    check gone.len == 1 and gone[0].kind == srkSystemdSystemDropIn and
+      gone[0].diUnit == "a13r5-undeclared.service"
+    let plan = producePlan("", Host,
+      opts = PlannerOptions(stateDir: state, destroyResources: gone))
+    var planned = ""
+    for rec in plan.envelope.operations:
+      if rec.address == gone[0].address: planned = rec.action
+    # Absent on this host, so the destroy is a no-op; planned either way.
+    check planned in ["destroy", "no-op"]
