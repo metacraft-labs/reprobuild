@@ -186,6 +186,23 @@ const
     ## next run's first work (a rotating cursor).
   EvidenceShipUnit* = "repro-addon-evidence.service"
   EvidenceShipPathUnit* = "repro-addon-evidence.path"
+  ShipBackoffMaxSec* = 240
+    ## The longest a shipping run waits before it exits (the backoff's
+    ## ceiling).
+  ShipLockWaitSec* = 120
+    ## The longest a shipping run waits for another one to finish.
+  ShipDrainTimeoutSec* = 20
+    ## The longest one pass of a shipping run waits for the sink.
+  ShipPassesMaxN* = 20
+    ## Re-listings of the outbox one run makes (``ShipPassesMax``).
+  EvidenceShipTimeoutStartSec* = 900
+    ## ``TimeoutStartSec=`` of the shipping unit (a oneshot: it covers the
+    ## whole run, the backoff's wait included). Strictly above the longest
+    ## run its own bounds allow, so systemd never kills a run that is
+    ## waiting by design (A11 review round 2: the 300 s ceiling equalled
+    ## the 5 min timeout, and every run past five minutes of an
+    ## unreachable sink ended killed).
+
   EvidenceShipTimer* = "repro-addon-evidence.timer"
   AgentSlice* = "system-reproagent.slice"
     ## The fetch unit's slice when the egress observer is present: a slice
@@ -356,6 +373,11 @@ proc unitPath*(name: string): string =
   ## derivation (``systemUnitPath``), so what the collision pass observes
   ## and what the write lands on are one string by construction.
   systemUnitPath(name)
+
+static:
+  doAssert ShipBackoffMaxSec + ShipLockWaitSec +
+           ShipPassesMaxN * ShipDrainTimeoutSec < EvidenceShipTimeoutStartSec,
+    "the shipping unit's timeout must exceed its longest run"
 
 proc assertInlineSafe*(what, text: string) =
   ## The canonical profile text has no escapes: a double quote ends the
@@ -762,15 +784,29 @@ proc agentSliceUnit*(): string =
   "[Install]\n" &
   "WantedBy=repro-addon.target\n"
 
-proc egressUnit*(nft: string): string =
+proc egressUnit*(nft: string; tableSha256 = ""): string =
   ## ``repro-addon-egress.service``: loads the table and deletes it when
   ## stopped (uninstall stops it). Root with ``CAP_NET_ADMIN`` alone and no
   ## IP socket; ordered before the fetch unit, which requires it, and the
   ## re-assert unit, which checks the table.
+  ##
+  ## ``tableSha256`` is the SHA-256 of the ``egress.nft`` it loads, carried
+  ## in an ``X-`` key, which systemd ignores (systemd.unit(5), "Unit files
+  ## may include ... options prefixed with X-"; the canonical profile text
+  ## cannot carry a ``#`` comment): a new table (``agent-repin``) is then a changed unit, and
+  ## the switch restarts a changed unit, which loads the new table into the
+  ## kernel. Without it the unit's bytes stayed the same and the old sets
+  ## stayed loaded until a reboot (A11 review round 2).
   let load = when mutated("egress-observer-not-installed"): "/bin/true"
              else: nft & " -f " & EgressNftPath
+  let table = when mutated("egress-unit-ignores-table"): ""
+              else:
+                if tableSha256.len > 0:
+                  "X-Repro-Egress-Table-Sha256=" & tableSha256 & "\n"
+                else: ""
   "[Unit]\n" &
   "Description=Reprobuild add-on: egress observer (its own nftables table)\n" &
+  table &
   "Requires=" & AgentSlice & "\n" &
   "After=" & AgentSlice & "\n" &
   "Before=" & AgentFetchUnit & " " & ReassertUnit & "\n" &
@@ -1059,7 +1095,8 @@ proc evidenceShipUnit*(reproExe: string; e: EvidenceUnitsInputs): string =
   "[Service]\n" &
   "Type=oneshot\n" &
   "ExecStart=" & reproExe & " system addon evidence-ship\n" &
-  "TimeoutStartSec=5min\n" &
+  "TimeoutStartSec=" & (when mutated("ship-backoff-reaches-timeout"): "300"
+                         else: $EvidenceShipTimeoutStartSec) & "\n" &
   "CapabilityBoundingSet=\n" &
   "AmbientCapabilities=\n" &
   "NoNewPrivileges=yes\n" &
@@ -1229,7 +1266,9 @@ proc egressObjects*(inp: Gen0Inputs): seq[OwnObject] =
     OwnObject(kind: ookUnit, unit: AgentSlice, path: unitPath(AgentSlice),
               content: agentSliceUnit(), enabled: true),
     OwnObject(kind: ookUnit, unit: EgressUnit, path: unitPath(EgressUnit),
-              content: egressUnit(inp.egress.nft), enabled: true),
+              content: egressUnit(inp.egress.nft,
+                sha256Hex(renderEgressNft(inp.egress.allowedAddresses))),
+              enabled: true),
     OwnObject(kind: ookUnit, unit: EgressCheckUnit,
               path: unitPath(EgressCheckUnit),
               content: egressCheckUnit(inp.reproExe), enabled: false),

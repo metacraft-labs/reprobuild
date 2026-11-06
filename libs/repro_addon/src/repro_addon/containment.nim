@@ -38,6 +38,7 @@ import ./evidence
 import ./evidence_ship
 import ./generation0
 import ./host_exec
+import ./ledger
 import ./mutations
 
 export contain_marker
@@ -141,17 +142,28 @@ proc maskAgent*(markerPath: string): seq[string] =
     lock.release()
   discard systemctlAll(["reset-failed"], [AgentFetchUnit, ContainedApplyUnit])
 
-proc nextContainmentSequence(stateDir: string): uint64 =
-  ## Strictly increasing per host, kept root-only beside the marker.
+proc nextContainmentSequence*(stateDir: string; nowMs = 0'i64): uint64 =
+  ## Strictly increasing per host, kept root-only beside the marker: the
+  ## larger of the last one plus one and the time in milliseconds. The time
+  ## floor means a counter file lost or rolled back (a crash before its
+  ## data reached the disk, a restore) cannot hand out a sequence the
+  ## check already accepted, which would refuse a genuine contain or
+  ## release as replayed. The file is written durably (fsync, rename,
+  ## directory fsync) all the same (A11 review round 2).
   let p = stateDir / "addon" / "containment-sequence"
   var n = 0'u64
   try: n = parseBiggestUInt(readFile(p).strip()).uint64
   except CatchableError: discard
   inc n
+  when not mutated("containment-sequence-unsynced"):
+    let t = if nowMs > 0: nowMs else: int64(epochTime() * 1000)
+    n = max(n, uint64(t))
   createDir(parentDir(p))
-  writeFile(p & ".tmp", $n & "\n")
-  setFilePermissions(p & ".tmp", {fpUserRead, fpUserWrite})
-  moveFile(p & ".tmp", p)
+  when mutated("containment-sequence-unsynced"):
+    writeFile(p & ".tmp", $n & "\n")
+    moveFile(p & ".tmp", p)
+  else:
+    writeFileAtomic(p, $n & "\n", 0o600)
   n
 
 proc credentialHostId(): string =

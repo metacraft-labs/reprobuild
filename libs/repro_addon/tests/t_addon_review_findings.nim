@@ -304,9 +304,12 @@ suite "the A11 code review's findings":
     check readFile(again.path / staticRelPath(files[0].path)) == files[0].content
     check evidenceEntries(site).len == 1
     check evidenceRecords("store-recovered", site.evidence.dir).len == 1
-    # A tear the crash marker names is repaired silently.
+    # A tear of a write the crash marker names, and that never completed
+    # (the realisation index records a tree only after it is synced), is
+    # repaired silently.
     removeFile(again.path / staticRelPath(files[1].path))
     writeFile(treeRealisingMarker(site), again.path & "\n")
+    forgetRealised(site, again.path)
     discard realiseStaticTree(files, site)
     check evidenceEntries(site).len == 1
 
@@ -459,7 +462,7 @@ suite "the A11 code review's findings":
   test "11: the shipping backoff is bounded; the outbox holds only entries":
     check shipBackoffSec(0, 300) == 5
     check shipBackoffSec(1, 300) == 10
-    check shipBackoffSec(20, 300) == 300
+    check shipBackoffSec(20, 300) == ShipBackoffMaxSec
     check shipBackoffSec(20, 30) == 30
     let ob = root / "outbox11" / "outbox"
     createDir(ob)

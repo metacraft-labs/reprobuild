@@ -20,6 +20,11 @@
 ##    finding about the table. Then the table is deleted and the re-assert
 ##    run again: it reports the table ``missing`` (drift), not
 ##    ``unreadable``. The observer unit then loads it again.
+## 3d. **A re-pin reloads the table** (A11 review round 2). The cache
+##    origin is a name in the base's ``/etc/hosts``; it moves to another
+##    address and ``agent-repin`` applies the new plan: ``egress.nft``, the
+##    fetch unit's ``IPAddressAllow=`` and the kernel's LOADED ``allowed4``
+##    set all hold the new address and not the old.
 ## 4. **Uninstall removes it.** After uninstall the table is gone and the
 ##    fingerprint equals the pre-bootstrap one.
 ##
@@ -29,7 +34,9 @@
 ## start limit, A11 audit F2); ``uninstall-keeps-fetch-state`` (the
 ## fetch unit's state directory survives uninstall, A11 audit F5);
 ## ``reassert-nft-in-own-netns`` (the re-assert lists the tables in its own
-## private network namespace: both steps of 3c go red, session 2 G4).
+## private network namespace: both steps of 3c go red, session 2 G4);
+## ``egress-unit-ignores-table`` (the observer unit does not name its
+## table, so the re-pin switch leaves the old set loaded: step 3d red).
 ##
 ## Seam build (the fetch unit's pause). Opt-in: ``REPRO_ADDON_VM_GATES=1``.
 ##
@@ -42,9 +49,17 @@ import repro_test_support/reasoned_skip
 import ./addon_testbed
 import ./agent_e2e_support
 import ./evidence_e2e_support
+import repro_peer_cache/auth as peerAuth
 import repro_peer_cache/evidence
 
-const Gate = "e2e_addon_egress_observer"
+const
+  Gate = "e2e_addon_egress_observer"
+  CacheName = "repro-cache.a11.test"
+  CacheOldAddr = "10.0.2.3"
+  CacheNewAddr = "10.0.2.4"
+
+proc hexKey(k: openArray[byte]): string =
+  for b in k: result.add(toHex(int(b), 2).toLowerAscii())
 
 proc tmpMountFacts(g: Guest): string =
   ## What decides how ``/tmp``'s tmpfs options read: the kernel prints
@@ -78,9 +93,16 @@ proc body(g: Guest; repro: string; step: StepFn; record: JsonNode;
   # first boot's fingerprint and not after: the baseline is taken after a
   # boot that is not the first, so step 4 compares like with like.
   g.rebootGuest()
+  # A cache origin given by name (step 3d moves it): resolved through the
+  # base's /etc/hosts at bootstrap and pinned in the fetch unit's allow-list.
+  # Nothing listens there; only the allow-list matters.
+  discard g.exec("printf '%s\\n' " & quoteShell(CacheOldAddr & " " & CacheName) &
+                 " >> /etc/hosts")
   record["tmpBefore"] = %g.tmpMountFacts()
   let f0 = g.takeFingerprint(repro)
-  let bs = g.bootstrapWithAgent(repro, step, extraFlags = sink.evidenceFlags)
+  let bs = g.bootstrapWithAgent(repro, step, extraFlags = sink.evidenceFlags,
+    cacheUrl = "http://" & CacheName & ":9",
+    cachePublishers = @[hexKey(peerAuth.generateKeypair().publicKey)])
   producer = bs.producer
   if not bs.ok: return
   let host = g.enrol(sink)
@@ -157,6 +179,37 @@ proc body(g: Guest; repro: string; step: StepFn; record: JsonNode;
   discard g.exec("systemctl restart repro-addon-egress.service")
   step("the observer unit loads the table again",
        "table inet repro_addon_egress" in g.exec("nft list tables").stdout, "")
+  # 3d. A re-pin reloads the kernel's table (A11 review round 2): the cache
+  # name moves to another address, `agent-repin` re-renders the fetch unit
+  # and egress.nft, and the switch must restart the observer so the LOADED
+  # set is the new one -- the file alone is not enough.
+  proc liveSet(): string =
+    g.exec("nft list set inet repro_addon_egress allowed4").stdout
+  step("before the re-pin the loaded set holds the cache's address",
+       CacheOldAddr in liveSet(), liveSet())
+  discard g.exec("sed -i " & quoteShell("s/^" & CacheOldAddr & " " & CacheName &
+                 "$/" & CacheNewAddr & " " & CacheName & "/") & " /etc/hosts")
+  let plan = g.exec(repro & " system addon agent-repin")
+  var digest = ""
+  for l in plan.stdout.splitLines():
+    let i = l.find("--apply ")
+    if l.startsWith("plan ") and i >= 0: digest = l[i + "--apply ".len .. ^1].strip()
+  let applied = g.exec(repro & " system addon agent-repin --apply " & digest,
+                       timeoutSec = 1800)
+  record["repin"] = %(plan.stdout & applied.stdout & applied.stderr)
+  step("agent-repin plans and applies the moved origin",
+       digest.len > 0 and applied.exitCode == 0, plan.stdout & applied.stdout &
+         applied.stderr)
+  step("egress.nft names the new address",
+       CacheNewAddr in g.exec("cat /etc/repro/egress.nft").stdout, "")
+  let live = liveSet()
+  step("the kernel's loaded set holds the new address, not the old",
+       CacheNewAddr in live and CacheOldAddr notin live, live)
+  step("the fetch unit allows the new address",
+       CacheNewAddr in g.exec("systemctl show -p IPAddressAllow --value " &
+         "repro-agent-fetch.service").stdout, "")
+  discard g.exec("sed -i " & quoteShell("s/^" & CacheNewAddr & " " & CacheName &
+                 "$/" & CacheOldAddr & " " & CacheName & "/") & " /etc/hosts")
   # 4. Uninstall removes it.
   let un = g.exec(repro & " system addon uninstall", timeoutSec = 1800)
   step("uninstall succeeds", un.exitCode == 0, un.stdout & un.stderr)

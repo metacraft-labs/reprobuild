@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 34,
-    "nimTestBinaries": 2683,
+    "nimTestBinaries": 2685,
     "pureUnitConsolidationGroups": 79,
     "pureUnitTests": 740,
     "staticallyDetectedRuntimeCompilerFlowTests": 137,
-    "testEntries": 2723
+    "testEntries": 2725
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1561,10 +1561,10 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 19,
-      "integration": 1483,
+      "integration": 1484,
       "platform/destructive": 173,
       "pure unit": 740,
-      "unclassified": 308
+      "unclassified": 309
     },
     "graphOwnedTestArtifacts": [
       {
@@ -1772,9 +1772,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2683,
+    "nimTestBinaryCount": 2685,
     "pythonTestFileCount": 40,
-    "testEntryCount": 2723
+    "testEntryCount": 2725
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -8761,6 +8761,24 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_addon_evidence_probe_owns_its_connection",
+      "class": "integration",
+      "classificationReason": "subprocess or repro CLI invocation in test body",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_addon",
+        "repro_peer_cache"
+      ],
+      "owner": "libs/repro_addon",
+      "requiresReproBinary": false,
+      "source": "libs/repro_addon/tests/t_addon_evidence_probe_owns_its_connection.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 3,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_addon_evidence_ships_off_host",
       "class": "unclassified",
       "classificationReason": "binds an OS-global endpoint (through `libs/repro_addon/tests/addon_evidence_fixture.nim`)",
@@ -9191,6 +9209,25 @@
       "source": "libs/repro_addon/tests/t_addon_review_findings.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 16,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_addon_review_round2",
+      "class": "unclassified",
+      "classificationReason": "binds an OS-global endpoint (through `libs/repro_addon/tests/addon_evidence_fixture.nim`)",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_addon",
+        "repro_deploy_agent",
+        "repro_peer_cache"
+      ],
+      "owner": "libs/repro_addon",
+      "requiresReproBinary": false,
+      "source": "libs/repro_addon/tests/t_addon_review_round2.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 9,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

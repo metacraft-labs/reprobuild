@@ -5,7 +5,7 @@
 ## findings 2 and 8). Shared by every path that rewrites generation 0
 ## (``agent-repin``, ``evidence-enrol``, the switch).
 
-import std/strutils
+import std/[os, strutils]
 
 import ./generation0
 import ./mutations
@@ -61,6 +61,30 @@ proc replaceFileSource*(own, path, source: string): string =
   if old.len == 0: return own
   own.replace("  sourceLocal = \"" & old & "\"", "  sourceLocal = \"" & source & "\"")
 
+proc egressNftBinaryOf*(unit: string): string =
+  ## The ``nft`` the egress observer unit runs (its ``ExecStop=`` line).
+  for l in unit.splitLines():
+    if l.startsWith("ExecStop=") and l.endsWith(" delete table inet repro_addon_egress"):
+      return l["ExecStop=".len ..< l.len - " delete table inet repro_addon_egress".len]
+  ""
+
+proc refreshEgressUnit*(own: string): string =
+  ## ``own`` with the egress observer unit naming the SHA-256 of the
+  ## ``egress.nft`` the own profile installs (its files-prefix source is
+  ## named by it), so a changed table restarts the unit (A11 review round
+  ## 2). Unchanged when the own profile has no observer.
+  result = own
+  let unit = unitContentOf(own, EgressUnit)
+  if unit.len == 0: return
+  let source = fileBlockSourceOf(own, EgressNftPath)
+  let nft = egressNftBinaryOf(unit)
+  if source.len == 0 or nft.len == 0: return
+  when mutated("egress-unit-ignores-table"):
+    return
+  let fresh = egressUnit(nft, extractFilename(source))
+  if fresh != unit:
+    result = replaceUnitContent(result, EgressUnit, fresh)
+
 proc migrateOwnProfile*(own: string): string =
   ## Generation 0's own objects re-rendered by this build where a fix
   ## changed them, from what they were rendered from (A11 review findings 2
@@ -75,6 +99,18 @@ proc migrateOwnProfile*(own: string): string =
     if exe.len > 0:
       result = replaceUnitContent(result, AgentFetchUnit,
         agentFetchUnit(exe, fetchUnitInputsOf(fetch), ownObserved(own)))
+  result = refreshEgressUnit(result)
+  # The shipping unit's start timeout (A11 review round 2): only its
+  # ``TimeoutStartSec=`` line, which this build renders from one constant.
+  let ship = unitContentOf(result, EvidenceShipUnit)
+  if ship.len > 0:
+    var lines = ship.split('\n')
+    for l in lines.mitems:
+      if l.startsWith("TimeoutStartSec="):
+        l = "TimeoutStartSec=" & $EvidenceShipTimeoutStartSec
+    let fixed = lines.join("\n")
+    if fixed != ship:
+      result = replaceUnitContent(result, EvidenceShipUnit, fixed)
   when not mutated("path-unit-not-migrated"):
     if unitContentOf(result, EvidenceShipPathUnit).len > 0:
       result = replaceUnitContent(result, EvidenceShipPathUnit,

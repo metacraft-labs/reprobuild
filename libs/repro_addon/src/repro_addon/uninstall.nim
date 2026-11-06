@@ -233,7 +233,7 @@ proc runAddonUninstall*(opts: UninstallOptions): UninstallResult =
   # The altered store objects kept as evidence go with /var/lib/repro. They
   # are named, and nothing is removed, until the operator says to discard
   # them (having copied them out).
-  let evidenceKept = evidenceEntries(custodySite(stateDir))
+  let evidenceKept = pendingStoreEvidence(custodySite(stateDir))
   if evidenceKept.len > 0 and not opts.discardStoreEvidence and
       not mutated("uninstall-discards-evidence-silently"):
     for e in evidenceKept:

@@ -80,7 +80,9 @@ const
     # of a host's evidence keys to new ones (D7).
     "acknowledges", "operator", "containment", "containmentSignature",
     "handover",
-    "handoverSignature", "newAttestationKey", "newCredentialHost"]
+    "handoverSignature", "newAttestationKey", "newCredentialHost",
+    # A truncated egress check's summary names the destinations it owes.
+    "destinations", "truncated"]
     ## The only field names a record may carry (EVID-6). Deliberately no
     ## free-form "data"/"body"/"env" field: an environment can hold
     ## credentials, a body can hold source.
