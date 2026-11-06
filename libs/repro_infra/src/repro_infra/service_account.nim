@@ -474,22 +474,46 @@ proc libcUid(name: string; gid: var int): int =
   gid = int(pw.pw_gid)
   int(pw.pw_uid)
 
-proc c_getgrouplist(user: cstring; group: Gid; groups: ptr Gid;
-                    ngroups: ptr cint): cint {.importc: "getgrouplist",
-                    header: "<grp.h>".}
+when defined(macosx):
+  # Darwin declares the BSD signature in <unistd.h>:
+  #   int getgrouplist(const char *name, int basegid, int *groups,
+  #                    int *ngroups);
+  # (ids as `int`, not `gid_t`), and <grp.h> does not declare it at all.
+  type GroupListId = cint
+  proc c_getgrouplist(user: cstring; group: GroupListId;
+                      groups: ptr GroupListId; ngroups: ptr cint): cint
+    {.importc: "getgrouplist", header: "<unistd.h>".}
+else:
+  # glibc and musl: <grp.h>,
+  #   int getgrouplist(const char *user, gid_t group, gid_t *groups,
+  #                    int *ngroups);
+  type GroupListId = Gid
+  proc c_getgrouplist(user: cstring; group: GroupListId;
+                      groups: ptr GroupListId; ngroups: ptr cint): cint
+    {.importc: "getgrouplist", header: "<grp.h>".}
+
+const MaxGroupListLength = 65536
 
 proc libcGroups(name: string): seq[int] =
   ## Every group NSS gives ``name`` (``getgrouplist(3)``), its primary group
   ## included.
+  ##
+  ## A list longer than the buffer returns -1. glibc then sets ``ngroups`` to
+  ## the length needed; the BSDs and Darwin leave it at what fit. So the
+  ## buffer grows to at least twice its size each time rather than trusting
+  ## ``ngroups`` alone, up to a bound.
   var g = -1
   if libcUid(name, g) == UnknownId: return
-  var n: cint = 64
-  var buf = newSeq[Gid](n)
-  if c_getgrouplist(name.cstring, Gid(g), addr buf[0], addr n) < 0:
-    buf.setLen(n)
-    if c_getgrouplist(name.cstring, Gid(g), addr buf[0], addr n) < 0:
+  var size = 64
+  while true:
+    var buf = newSeq[GroupListId](size)
+    var n = cint(size)
+    if c_getgrouplist(name.cstring, GroupListId(g), addr buf[0], addr n) >= 0:
+      for i in 0 ..< int(n): result.add(int(buf[i]))
+      return
+    if size >= MaxGroupListLength:
       return @[UnknownId]
-  for i in 0 ..< int(n): result.add(int(buf[i]))
+    size = min(MaxGroupListLength, max(int(n), size * 2))
 
 proc libcGid(name: string): int =
   let gr = posix.getgrnam(name.cstring)
