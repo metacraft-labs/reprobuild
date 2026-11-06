@@ -9174,6 +9174,7 @@
       "language": "nim",
       "localDependencyShape": [
         "repro_addon",
+        "repro_core",
         "repro_deploy_agent",
         "repro_dsl_stdlib",
         "repro_local_store",

@@ -36,6 +36,7 @@
 
 import std/[asyncdispatch, os, strutils, times]
 
+import repro_core/file_lock
 import repro_peer_cache/evidence as sinkEvidence
 import repro_peer_cache/identity
 import repro_peer_cache/pki
@@ -223,14 +224,36 @@ proc clearStaleOutbox(site: ShipSite; host: string): int =
 proc runEvidenceShipOnce(site: ShipSite; conf: EvidenceConf; host: string;
                          forceHeartbeat: bool): ShipResult
 
+proc shipLockPath*(site: ShipSite): string =
+  ## Held for a whole shipping run: one run ships at a time.
+  site.stateDir / "ship.lock"
+
 proc runEvidenceShip*(site: ShipSite; conf: EvidenceConf; host: string;
                       forceHeartbeat = false;
-                      onPass: proc () = nil): ShipResult =
+                      onPass: proc () = nil;
+                      lockWaitMs = 120_000): ShipResult =
   ## One shipping run (see the module documentation): the outbox is listed
   ## again after each pass, so a record that lands while the run ships goes
   ## with it. Never raises for an unreachable sink; raises
   ## ``EvidenceConfError`` for a broken credential or configuration.
+  ##
+  ## Runs are serialised by ``shipLockPath``: the shipping unit (started by
+  ## the path unit as records land) and ``contain``/``release`` (which ship
+  ## their record at once) would otherwise both read an entry before either
+  ## deleted it, and the sink would hold the record twice. A run that cannot
+  ## take the lock within ``lockWaitMs`` ships nothing and says so; the
+  ## holder lists the outbox again after each pass.
   createDir(site.stateDir)
+  var lock: ReproFileLock
+  when not mutated("ship-runs-concurrently"):
+    try:
+      lock = acquireExclusiveLockWithin(shipLockPath(site), lockWaitMs)
+    except IOError as e:
+      result.pending = outboxEntries(site.outbox).len
+      result.error = "another shipping run holds " & shipLockPath(site) &
+        ": " & e.msg
+      return
+  defer: releaseExclusiveFileLock(lock)
   discard clearStaleOutbox(site, host)
   result = runEvidenceShipOnce(site, conf, host, forceHeartbeat)
   when mutated("evidence-path-changed-only"):
@@ -359,6 +382,32 @@ proc shipBackoffSec*(failures, heartbeatSec: int): int =
   for i in 0 ..< min(failures, 10): w = min(cap, w * 2)
   min(cap, w)
 
+proc shipRunWait*(site: ShipSite; heartbeatSec: int): int =
+  ## The seconds a run waits before it exits: ``shipBackoffSec`` of the runs
+  ## in a row that left the outbox non-empty (counted in the unit's state,
+  ## ``ship-failures``), 0 once it is empty (the count is cleared). Every
+  ## run ends with it, whatever kept the outbox non-empty -- a sink that is
+  ## down, a credential that is broken, an entry that will not go -- so the
+  ## path unit's ``DirectoryNotEmpty=`` restarts it at a bounded pace (A11
+  ## review finding 11).
+  let failuresPath = site.stateDir / "ship-failures"
+  var failures = 0
+  try: failures = parseInt(readFile(failuresPath).strip())
+  except CatchableError: discard
+  when mutated("ship-no-backoff"):
+    return 0
+  if outboxBusy(site.outbox):
+    inc failures
+    try:
+      createDir(site.stateDir)
+      writeFile(failuresPath, $failures & "\n")
+    except CatchableError: discard
+    shipBackoffSec(failures - 1, heartbeatSec)
+  else:
+    if failures > 0:
+      try: removeFile(failuresPath) except CatchableError: discard
+    0
+
 proc runEvidenceShipCli*(args: seq[string]): int =
   var force = false
   for a in args:
@@ -367,9 +416,6 @@ proc runEvidenceShipCli*(args: seq[string]): int =
       stderr.write("usage: repro system addon evidence-ship [--heartbeat]\n")
       return 2
   let site = defaultShipSite()
-  let failuresPath = site.stateDir / "ship-failures"
-  var failures = 0
-  try: failures = parseInt(readFile(failuresPath).strip()) except CatchableError: discard
   var heartbeat = DefaultEvidenceHeartbeatSec
   var broken = ""
   result = 0
@@ -403,16 +449,7 @@ proc runEvidenceShipCli*(args: seq[string]): int =
           kind: "evidence-ship-broken", fields: @[("message", broken)]),
           defaultSite())
       except CatchableError: discard
-  when not mutated("ship-no-backoff"):
-    if outboxBusy(site.outbox):
-      inc failures
-      try:
-        createDir(site.stateDir)
-        writeFile(failuresPath, $failures & "\n")
-      except CatchableError: discard
-      sleep(1000 * shipBackoffSec(failures - 1, heartbeat))
-    elif failures > 0:
-      try: removeFile(failuresPath) except CatchableError: discard
+  sleep(1000 * shipRunWait(site, heartbeat))
 
 proc runCredentialCheckCli*(args: seq[string]): int =
   if args.len != 0:

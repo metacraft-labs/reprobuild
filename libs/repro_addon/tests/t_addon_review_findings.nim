@@ -40,6 +40,7 @@
 ## ``tree-tear-by-shape`` (5), ``contained-agent-applies`` (6),
 ## ``lag-ignores-check-state`` (7), ``path-unit-not-migrated`` (8),
 ## ``ack-by-sequence-only`` (9), ``custody-forgets-before-rebuild`` (10),
+## ``containment-duplicate-is-replay`` (3), ``ship-runs-concurrently`` (11),
 ## ``evidence-copy-unbounded`` (10), ``custody-ignores-leftovers`` (10),
 ## ``custody-skips-unrecorded`` (10), ``outbox-temporary-inside`` (11),
 ## ``custody-prefixes-only`` (12), ``egress-ignores-counter`` (13),
@@ -52,11 +53,13 @@
 ## ``nowMs``.
 
 import std/[asyncdispatch, os, sequtils, strutils, tables, times, unittest]
+from std/posix import Stat, stat
 
 import repro_peer_cache/auth as peerAuth
 import repro_peer_cache/evidence
 import repro_peer_cache/evidence_record
 import repro_peer_cache/types
+import repro_core/file_lock
 import repro_local_store/store as localStore
 import repro_deploy_agent/agent
 import repro_deploy_agent/manifest
@@ -87,6 +90,12 @@ import ../../../tests/e2e/addon/deb_fixture_support
 let root = getTempDir() / ("addon-review-" & $getCurrentProcessId())
 removeDir(root)
 createDir(root)
+
+proc statDevice(path: string): uint64 =
+  ## The device a path lives on (``stat(2)`` ``st_dev``).
+  var st: Stat
+  doAssert stat(path.cstring, st) == 0, path
+  uint64(st.st_dev)
 
 proc scratchSite(name: string): CustodySite =
   let st = root / name / "state"
@@ -236,9 +245,15 @@ suite "the A11 code review's findings":
       if p.endsWith("-contained.evr"): genuine = readFile(p)
     check genuine.len > 0
     h2.ship()
+    # The same statement delivered twice (at-least-once shipping) is not a
+    # replay: still contained, no alert.
+    writeOutboxEntry(h2.site.outbox, "99999999999999999998-1-again.evr",
+                     genuine)
+    h2.ship()
     let hosts2 = @[EnrolledHost(hostId: h2.credentialHost, target: "t")]
-    check statusOf(runEvidenceCheck(inputs(hosts2, later)), h2.credentialHost,
-                   "addon-agent-tick") == "contained"
+    let dup = runEvidenceCheck(inputs(hosts2, later))
+    check statusOf(dup, h2.credentialHost, "addon-agent-tick") == "contained"
+    check not dup.alerts.anyIt(it.trigger.startsWith("containment-"))
     discard recordContainmentAs(h2.evidence, h2.credentialHost, "release",
       "alice", "done", 2)
     h2.tick()
@@ -401,6 +416,28 @@ suite "the A11 code review's findings":
     check evidenceRecords("store-recovery-interrupted", site.evidence.dir).len == 1
     check not dirExists(asideRoot(site)) or
       toSeq(walkDir(asideRoot(site))).len == 0
+    # Across filesystems (the evidence directory on /dev/shm, a tmpfs; the
+    # store here) the altered object is copied, at most the bound: a larger
+    # one keeps its manifest and record only.
+    var far = site
+    far.evidenceDir = "/dev/shm" / ("a11-review10-" & $getCurrentProcessId())
+    far.evidenceMaxBytes = 64
+    removeDir(far.evidenceDir)
+    defer: removeDir(far.evidenceDir)
+    check statDevice(far.evidenceDir.parentDir) != statDevice(site.storeRoot)
+    let big = site.storeRoot / "prefixes" / "x" / "3-c"
+    createDir(big)
+    writeFile(big / "f", "x".repeat(4096))
+    let bigEntry = fileEvidence(far, moveAside(far, big), big, "e", "o", "big")
+    check fileExists(bigEntry / "manifest") and fileExists(bigEntry / "record")
+    check not dirExists(bigEntry / "tree")
+    check "manifest only" in readFile(bigEntry / "record")
+    let small = site.storeRoot / "prefixes" / "x" / "4-d"
+    createDir(small)
+    writeFile(small / "f", "tiny\n")
+    let smallEntry = fileEvidence(far, moveAside(far, small), small, "e", "o",
+                                  "small")
+    check readFile(smallEntry / "tree" / "f") == "tiny\n"
     # A crash after the entry was filed and the object rebuilt, before its
     # record: the next pass records it, once.
     let obj2 = site.storeRoot / "prefixes" / "x" / "2-b"
@@ -431,6 +468,29 @@ suite "the A11 code review's findings":
       check p.endsWith(".evr")
     # Written beside the outbox first, then renamed in.
     check dirExists(outboxStaging(ob))
+    # Every run that leaves the outbox non-empty waits, longer each time in
+    # a row; an empty outbox ends the backoff.
+    let ss = ShipSite(stateDir: root / "outbox11" / "state", outbox: ob)
+    check shipRunWait(ss, 300) == 5
+    check shipRunWait(ss, 300) == 10
+    check shipRunWait(ss, 300) == 20
+    for kind, p in walkDir(ob): removeFile(p)
+    check shipRunWait(ss, 300) == 0
+    writeOutboxEntry(ob, "2-x.evr", "bytes")
+    check shipRunWait(ss, 300) == 5
+    # One shipping run at a time: while another holds the lock, a run ships
+    # nothing; once it is released, the entry ships once.
+    let h = fastHost(sink, "ship11")
+    h.tick()
+    var held = acquireExclusiveFileLock(shipLockPath(h.site))
+    let before = sink.entries().len
+    let busy = runEvidenceShip(h.site, h.conf, h.evidence.host,
+                               lockWaitMs = 300)
+    check busy.shipped == 0 and busy.pending > 0 and "holds" in busy.error
+    check sink.entries().len == before
+    releaseExclusiveFileLock(held)
+    let free = runEvidenceShip(h.site, h.conf, h.evidence.host)
+    check free.shipped > 0 and free.error == ""
 
   test "12: a store path outside every prefix is named":
     let named = storeObjectsNamedIn("ExecStart=/repro/store/tmp/evil/bin/sh -c x\n" &
