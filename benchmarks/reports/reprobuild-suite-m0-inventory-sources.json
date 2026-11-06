@@ -1572,10 +1572,10 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 19,
-      "integration": 1481,
+      "integration": 1482,
       "platform/destructive": 169,
       "pure unit": 738,
-      "unclassified": 305
+      "unclassified": 304
     },
     "graphOwnedTestArtifacts": [
       {
@@ -7513,7 +7513,7 @@
             "cmd",
             "tmp"
           ],
-          "line": 330,
+          "line": 326,
           "path": "tests/integration/t_spec_6_2_matches_implementation.nim",
           "patterns": [
             "nim-compile-verb"
@@ -12600,8 +12600,8 @@
     },
     {
       "binary": "build/test-bin/t_e2e_watch_via_adapter",
-      "class": "unclassified",
-      "classificationReason": "mutates the process environment",
+      "class": "integration",
+      "classificationReason": "subprocess or repro CLI invocation in test body",
       "defines": [],
       "language": "nim",
       "localDependencyShape": [
@@ -44528,7 +44528,9 @@
       "classificationReason": "e2e/integration path or requires the repro binary",
       "defines": [],
       "language": "nim",
-      "localDependencyShape": [],
+      "localDependencyShape": [
+        "repro_test_support"
+      ],
       "owner": "tests/integration",
       "requiresReproBinary": false,
       "source": "tests/integration/t_nix_daemon_ipc.nim",
@@ -48611,6 +48613,7 @@
       "defines": [],
       "language": "nim",
       "localDependencyShape": [
+        "repro_core",
         "repro_test_support"
       ],
       "owner": "tests/integration",

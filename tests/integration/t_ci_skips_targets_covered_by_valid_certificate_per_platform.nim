@@ -242,11 +242,15 @@ proc issueRealCert(fx: Fixture; daemonKey, keyId: string;
   result = readCertificateFile(certFile)
 
 proc planJson(fx: Fixture; platform: string): JsonNode =
+  # ``repro ci plan`` reads its target branch from ``$GITHUB_BASE_REF`` /
+  # ``$GITHUB_REF_NAME`` first. Under GitHub Actions they describe the job
+  # running this suite, not the fixture; set to "" they read as unset.
   let res = runShell(shellCommand(@[
     fx.reproBin, "ci", "plan",
     "--platform=" & platform,
     "--workspace-root=" & fx.workspaceRoot,
-    "--current-repo=" & fx.libAPath, "--json"]))
+    "--current-repo=" & fx.libAPath, "--json"],
+    [(name: "GITHUB_BASE_REF", value: ""), (name: "GITHUB_REF_NAME", value: "")]))
   checkpoint("ci plan (" & platform & ") output:\n" & res.output)
   check res.code == 0
   # The JSON is the LAST object in the output (stderr notes may precede on
