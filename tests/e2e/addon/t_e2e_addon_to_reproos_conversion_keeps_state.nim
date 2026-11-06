@@ -266,7 +266,7 @@ const
      "        content = \"[Path]\\nDirectoryNotEmpty=/var/lib/ethereum/validator/spool\\n" &
      "MakeDirectory=yes\\nUnit=eth-r4-timed.service\\n\",\n" &
      "        address = \"r4PathFloored\")\n",
-     "MakeDirectory=yes is not a setting the floor allows", "floor"),
+     "activates a floored service", "floor"),
     ("path", "r4Path",
      "      systemdSystemUnit(name = \"eth-r4-watched.service\",\n" &
      "        content = \"" & R4ConfinedUnfloored & "\",\n" &
@@ -667,7 +667,12 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
       # any other failure is red here, and is never the falsifier's red
       # either (the record keeps whether each probe was judged).
       let refused =
-        if layer == "floor": r.exitCode != 0 and reason in o and
+        # The floor's refusal, by its stable parts: no error code reaches
+        # the output (ESystemProfileInvalid is printed as "invalid system
+        # profile"), and the floor's wording of the rule is A9's to change.
+        if layer == "floor": r.exitCode != 0 and
+                             "invalid system profile" in o and reason in o and
+                             "MakeDirectory=yes" in o and
                              "eth-r4-watch.path" in o
         else: r.exitCode != 0 and "ECarriedStatePending" in o and
               ("(" & address) in o and reason in o
