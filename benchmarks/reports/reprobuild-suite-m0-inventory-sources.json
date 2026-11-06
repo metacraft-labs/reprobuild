@@ -5248,7 +5248,7 @@
             "d",
             "tools"
           ],
-          "line": 392,
+          "line": 411,
           "path": "tests/integration/t_execution_lease_confinement.nim",
           "patterns": [
             "cc"
@@ -5265,7 +5265,7 @@
             "d",
             "tools"
           ],
-          "line": 422,
+          "line": 441,
           "path": "tests/integration/t_execution_lease_confinement.nim",
           "patterns": [
             "cc"
@@ -5282,7 +5282,7 @@
             "d",
             "tools"
           ],
-          "line": 698,
+          "line": 723,
           "path": "tests/integration/t_execution_lease_confinement.nim",
           "patterns": [
             "cc"
@@ -5299,7 +5299,7 @@
             "d",
             "tools"
           ],
-          "line": 707,
+          "line": 732,
           "path": "tests/integration/t_execution_lease_confinement.nim",
           "patterns": [
             "cc"
@@ -5316,7 +5316,7 @@
             "d",
             "tools"
           ],
-          "line": 747,
+          "line": 775,
           "path": "tests/integration/t_execution_lease_confinement.nim",
           "patterns": [
             "cc"
@@ -5333,7 +5333,7 @@
             "d",
             "tools"
           ],
-          "line": 766,
+          "line": 794,
           "path": "tests/integration/t_execution_lease_confinement.nim",
           "patterns": [
             "cc"
@@ -5350,7 +5350,7 @@
             "d",
             "tools"
           ],
-          "line": 829,
+          "line": 857,
           "path": "tests/integration/t_execution_lease_confinement.nim",
           "patterns": [
             "cc"
@@ -5367,7 +5367,7 @@
             "d",
             "tools"
           ],
-          "line": 839,
+          "line": 867,
           "path": "tests/integration/t_execution_lease_confinement.nim",
           "patterns": [
             "cc"
@@ -5384,7 +5384,7 @@
             "d",
             "tools"
           ],
-          "line": 1064,
+          "line": 1092,
           "path": "tests/integration/t_execution_lease_confinement.nim",
           "patterns": [
             "cc"
@@ -5401,7 +5401,7 @@
             "d",
             "tools"
           ],
-          "line": 1074,
+          "line": 1102,
           "path": "tests/integration/t_execution_lease_confinement.nim",
           "patterns": [
             "cc"

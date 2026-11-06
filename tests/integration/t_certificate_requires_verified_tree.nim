@@ -110,8 +110,8 @@ suite "Distributed-Execution M7: certificates require a re-verified tree":
 
   test "t_certificate_is_not_issued_for_an_unverified_tree":
     if not hardenedWorkerHere():
-      echo HardenedWorkerNA
-      skip("platform N/A: hardened workers are Linux-only")
+      echo hardenedWorkerNotHere()
+      skip(hardenedWorkerNotHere())
     else:
       if findExe("ssh-keygen").len == 0:
         checkpoint("ssh-keygen is the certificate signer and verifier; " &

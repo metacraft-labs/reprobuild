@@ -386,371 +386,399 @@ when defined(linux):
     discard cleanupLease(spec)
     quit(0)
 
+proc floorNotHere(): string =
+  ## Why this host's leases cannot have the floor, or "" when they can. The
+  ## cases below run leases WITH the floor (`DefaultLeaseLayers`), so on a
+  ## Linux host whose lease user cannot be mapped -- no subordinate uid/gid
+  ## range, or setuid id-mapping helpers a service's capability bounding set
+  ## leaves unable to write the map -- they would fail on the launcher's
+  ## refusal, not on anything they assert. The probe tries the mapping for
+  ## real (`probeLinuxLeaseHost`), so where it works these cases run.
+  when defined(linux):
+    let available = availableLeaseLayers(hardened = false)
+    if available.ok and llFloor notin available.layers:
+      "[host N/A] the lease floor is unavailable on this host: " &
+        available.reason
+    else: ""
+  else: ""
+
 suite "Distributed-Execution M7: execution-lease confinement, layer by layer":
 
   test "t_execution_lease_confinement_layer_by_layer":
-    let cc = ccPath()
-    let available = leaseConfinementAvailable()
-    checkpoint("lease confinement on this host: " & $available)
-    check available.ok
-    check cc.len > 0
-    if available.ok and cc.len > 0:
-      let base = m7TestBase("repro-m7-confine")
-      let leaseRoot = base / "worker-state" / "leases"
-      let metaRoot = base / "lease-meta"
-      # A neighbour lease with a worktree another lease must never see.
-      createDir(leaseRoot / "neighbour" / "wt")
-      writeFile(leaseRoot / "neighbour" / "wt" / "secret.c", "neighbour-secret\n")
-      # A world-writable directory OUTSIDE every lease: if a lease can write
-      # here, only Landlock stood in its way (the floor's lease user is not
-      # the daemon's user, so a user-owned directory would test DAC instead).
-      let outside = base / "outside"
-      createDir(outside)
-      setFilePermissions(outside, {fpUserRead, fpUserWrite, fpUserExec,
-        fpGroupRead, fpGroupWrite, fpGroupExec, fpOthersRead, fpOthersWrite,
-        fpOthersExec})
-      # The daemon: a real one, its state dir holding a key.
-      var daemon = newWorkerDaemon(base, newTestNode(base, "daemon"))
-      daemon.stateDir = base / "worker-state"
-      daemon.logPath = base / "daemon.log"
-      createDir(daemon.stateDir)
-      writeFile(daemon.stateDir / "host-ca.key", "daemon-private-key\n")
-      # The probe TOOL, compiled outside the lease into a closure root.
-      let tools = base / "tools"
-      createDir(tools)
-      writeFile(tools / "probe.c", ProbeSource)
-      check execCmdEx(quoteShellCommand([cc, "-o", tools / "probe",
-        tools / "probe.c"])).exitCode == 0
-      when defined(linux):
-        createDir(base / "run")
-        daemon.endpoint = base / "run" / "daemon.sock"
-      startPlainDaemon(daemon)
-      # Linux: a daemon-owned 0600 file under a VISIBLE read root, beside
-      # the control socket: only the floor's different uid keeps it unread.
-      # macOS: none (the Seatbelt lease runs as the daemon's uid by design;
-      # its floor is the unix-socket rule, asserted through the socket).
-      let daemonPrivate =
-        when defined(linux):
-          let f = base / "run" / "daemon-private"
-          writeFile(f, "daemon-only\n")
-          setFilePermissions(f, {fpUserRead, fpUserWrite})
-          f
-        else:
-          ""
-      # A descriptor this (worker) process holds WITHOUT close-on-exec, the
-      # way a library or a careless opener leaves one. Whatever the layers,
-      # it must not reach the action: an inherited socket would bypass the
-      # network namespace and the floor, a file the hidden state.
-      writeFile(base / "fd-secret", "inherited-secret\n")
-      let leakedFd = posix.open(cstring(base / "fd-secret"), O_RDONLY)
-      check leakedFd >= 0
-      defer:
-        discard posix.close(leakedFd)
-        stopWorkerDaemon(daemon)
-        removeDir(base)
-      check socketExists(daemon.endpoint)
-
-      proc runCase(layers: set[LeaseLayer]; tag: string): tuple[output: string;
-          built: bool; outcome: LeaseOutcome] =
-        let id = "L-" & tag
-        let leaseDir = leaseRoot / id
-        createDir(leaseDir / "wt")
-        writeFile(leaseDir / "wt" / "probe.c", ProbeSource)
-        let canary = outside / ("canary-" & tag)
-        let script = "set -u; \"$CC\" -o out/probe probe.c && " &
-          "\"$PROBE\" \"$1\" \"$2\" \"$3\" \"$4\" \"$5\" \"$6\" > out/probe.txt; " &
-          "cp /bin/sh \"$TMPDIR/sh-copy\" && \"$TMPDIR/sh-copy\" -c true; true"
-        let roots = (when defined(macosx):
-            (@["/usr", "/bin", "/System", "/Library", "/private/etc",
-               "/private/var/db/timezone", "/nix/store",
-               "/Applications/Xcode.app"],
-             @["/usr/bin", "/bin", "/usr/libexec", "/nix/store",
-               "/Library/Developer/CommandLineTools", "/Applications/Xcode.app"])
-          else:
-            (@["/usr", "/bin", "/lib", "/lib64", "/etc", "/nix/store", "/opt"],
-             @["/usr/bin", "/bin", "/usr/lib", "/nix/store"]))
-        let spec = LeaseSpec(leaseId: id, leaseRoot: leaseRoot,
-          leaseDir: leaseDir, metaDir: metaRoot / id, cwd: leaseDir / "wt",
-          argv: @["/bin/sh", "-c", script, "sh",
-            leaseRoot / "neighbour" / "wt" / "secret.c", canary,
-            daemon.stateDir / "host-ca.key", daemon.endpoint, daemonPrivate,
-            $leakedFd],
-          env: @[("PATH", parentDir(cc) & ":" & coreToolDir() &
-              ":/usr/bin:/bin"), ("CC", cc),
-            ("PROBE", tools / "probe"),
-            ("HOME", leaseDir / "home"), ("TMPDIR", leaseDir / "tmp")],
-          readRoots: roots[0] & @[tools, base / "run"],
-          closureRoots: roots[1] & @[tools],
-          outputDirs: @[leaseDir / "wt" / "out"],
-          extraWritable: (when defined(linux): @[base / "run"] else: @[]),
-          hidePaths: @[daemon.stateDir], layers: layers, timeoutMs: 180_000)
-        let outcome = waitFor runLease(spec)
-        let probeOut = leaseDir / "wt" / "out" / "probe.txt"
-        result.outcome = outcome
-        result.output = if fileExists(probeOut): readFile(probeOut) else: ""
-        result.built = fileExists(leaseDir / "wt" / "out" / "probe")
-        checkpoint(tag & ": started=" & $outcome.started & " exit=" &
-          $outcome.exitCode & " error=" & outcome.error & "\n  probe: " &
-          result.output.replace("\n", " ") & "\n  stderr: " & outcome.stderr &
-          "\n  reports: " & $outcome.reports)
-        # Remove the canary (it may belong to the floor's lease user) and the
-        # lease itself.
-        if fileExists(canary):
-          var c = spec
-          c.leaseDir = canary
-          discard cleanupLease(c)
-        discard cleanupLease(spec)
-
-      let full = runCase(DefaultLeaseLayers, "full")
-      check full.outcome.started
-      check full.built                                   # positive control
-      check "probe-ran" in full.output
-      for breach in ["BREACH-neighbour", "BREACH-write", "BREACH-state",
-                     "BREACH-daemon-socket", "BREACH-uid-file", "BREACH-fd"]:
-        check breach notin full.output
-      when defined(linux):
-        # The floor's refusal of the daemon-socket connect is REPORTED
-        # (DET-2), not silent, and names the socket.
-        var unixDenied = false
-        for r in full.outcome.reports:
-          if r.kind == "egress-denied" and
-              r.detail == "unix:" & daemon.endpoint:
-            unixDenied = true
-        check unixDenied
-        # G38: the compile's unreachable unix attempts (the libc's nscd
-        # probe) are not reported, and creating a unix socket is not a
-        # denial: the only unix destination reported is the daemon's.
-        for r in full.outcome.reports:
-          check not (r.kind == "syscall-denied" and
-            "socket family 1" in r.detail)
-          if r.detail.startsWith("unix:"):
-            check r.detail == "unix:" & daemon.endpoint
-      var execReported = false
-      for r in full.outcome.reports:
-        if r.kind == "exec-outside-closure" and "sh-copy" in r.detail:
-          execReported = true
-      check execReported                                 # DET-1
-
-      let noNamespace = runCase(DefaultLeaseLayers - {llNamespace}, "no-ns")
-      check noNamespace.built
-      check "BREACH-neighbour" in noNamespace.output
-      check "BREACH-write" notin noNamespace.output
-      check "BREACH-daemon-socket" notin noNamespace.output
-      check "BREACH-uid-file" notin noNamespace.output
-      check "BREACH-state" notin noNamespace.output
-      check "BREACH-fd" notin noNamespace.output
-
-      let noLandlock = runCase(DefaultLeaseLayers - {llLandlock}, "no-landlock")
-      check noLandlock.built
-      when defined(linux):
-        # The new root mounts nothing writable outside the lease.
-        check "BREACH-write" notin noLandlock.output
-        let neither = runCase(DefaultLeaseLayers - {llNamespace, llLandlock},
-          "no-ns-no-landlock")
-        check neither.built
-        check "BREACH-write" in neither.output      # Landlock's breach
-        check "BREACH-daemon-socket" notin neither.output
-        check "BREACH-uid-file" notin neither.output
-        # (BREACH-state is not asserted here: the two layers that keep the
-        # daemon's state unreadable are exactly the two removed.)
-        check "BREACH-fd" notin neither.output
-      else:
-        check "BREACH-write" in noLandlock.output
-      check "BREACH-neighbour" notin noLandlock.output
-      check "BREACH-daemon-socket" notin noLandlock.output
-      check "BREACH-uid-file" notin noLandlock.output
-      check "BREACH-state" notin noLandlock.output
-      check "BREACH-fd" notin noLandlock.output
-
-      let noFloor = runCase(DefaultLeaseLayers - {llFloor}, "no-floor")
-      check noFloor.built
-      check "BREACH-daemon-socket" in noFloor.output    # the floor's breach
-      when defined(linux):
-        check "BREACH-uid-file" in noFloor.output       # …and its uid
-        # Without the floor the connect is still CHECKED and REPORTED.
-        var unixReported = false
-        for r in noFloor.outcome.reports:
-          if r.kind == "unix-socket-connect" and daemon.endpoint in r.detail:
-            unixReported = true
-        check unixReported
-      check "BREACH-neighbour" notin noFloor.output
-      check "BREACH-write" notin noFloor.output
-      check "BREACH-state" notin noFloor.output
-      check "BREACH-fd" notin noFloor.output
-
-  test "noexec: a binary written into the lease does not run; the closure's do":
-    when not defined(linux):
-      echo "[platform N/A] noexec writable mounts are the Linux namespace " &
-        "layer; a macOS lease is the Seatbelt isolation level, which " &
-        "allows executing declared outputs"
-      skip("platform N/A: noexec writable mounts are Linux-only")
-    else:
-      let available = leaseConfinementAvailable()
-      check available.ok
-      if available.ok:
-        let base = m7TestBase("repro-m7-noexec")
-        defer: removeDir(base)
-        let leaseRoot = base / "worker-state" / "leases"
-        proc runWritten(layers: set[LeaseLayer]; id: string):
-            tuple[output: string; outcome: LeaseOutcome] =
-          let leaseDir = leaseRoot / id
-          createDir(leaseDir / "wt" / "out")
-          # The written binary goes into the DECLARED OUTPUT directory: the
-          # closure check and Landlock's EXECUTE rule both allow executing
-          # from there, so only the mount's noexec flag can stop it.
-          # `/bin/sh -c` works under the copied name. A multi-call `true`
-          # may fail solely because argv[0] changed, even on an exec mount.
-          # Fail setup errors directly rather than mistaking them for denial.
-          let script = "set -eu; cp /bin/sh out/written-sh; " &
-            "chmod +x out/written-sh; " &
-            "if ./out/written-sh -c 'exit 0'; then echo WRITTEN-RAN; " &
-            "else echo WRITTEN-BLOCKED; fi > out/result.txt; " &
-            "if \"$TRUE\"; then echo TOOLCHAIN-RAN >> out/result.txt; fi"
-          let spec = LeaseSpec(leaseId: id, leaseRoot: leaseRoot,
-            leaseDir: leaseDir, metaDir: base / "lease-meta" / id,
-            cwd: leaseDir / "wt", argv: @["/bin/sh", "-c", script],
-            env: @[("PATH", coreToolDir() & ":/usr/bin:/bin"),
-              ("TRUE", coreToolDir() / "true"), ("HOME", leaseDir / "home"),
-              ("TMPDIR", leaseDir / "tmp")],
-            readRoots: @["/usr", "/bin", "/lib", "/lib64", "/etc", "/nix/store"],
-            closureRoots: @["/usr/bin", "/bin", "/usr/lib", "/lib", "/lib64",
-              "/nix/store"],
-            outputDirs: @[leaseDir / "wt" / "out"],
-            layers: layers, timeoutMs: 60_000)
-          result.outcome = waitFor runLease(spec)
-          let outcome = result.outcome
-          let resultPath = leaseDir / "wt" / "out" / "result.txt"
-          result.output = if fileExists(resultPath): readFile(resultPath) else: ""
-          let observed = result.output
-          checkpoint(id & " lease: started=" & $outcome.started & " exit=" &
-            $outcome.exitCode & " error=" & outcome.error & "\n  result: " &
-            observed & "\n  stderr: " & outcome.stderr & "\n  reports: " &
-            $outcome.reports)
-          check outcome.started
-          check outcome.exitCode == 0
-          check fileExists(leaseDir / "wt" / "out" / "written-sh")
-          check "TOOLCHAIN-RAN" in observed
-          for r in outcome.reports:
-            check not (r.kind == "exec-outside-closure" and
-              "written-sh" in r.detail)
-          discard cleanupLease(spec)
-        # Identical payload, with the namespace's noexec mounts absent:
-        # a renamed multi-call `true` must not make the denial vacuous.
-        let executable = runWritten(DefaultLeaseLayers - {llNamespace},
-          "exec-control")
-        check "WRITTEN-RAN" in executable.output
-        check "WRITTEN-BLOCKED" notin executable.output
-        let blocked = runWritten(DefaultLeaseLayers, "noexec")
-        check blocked.outcome.isolation == "linux-namespace+landlock+floor"
-        check "WRITTEN-BLOCKED" in blocked.output
-        check "WRITTEN-RAN" notin blocked.output
-        # Without the floor (and without Landlock) the lease is the
-        # namespace's root and owns the top level of its new root: that
-        # tmpfs is READ-ONLY once entered (and noexec), so nothing can be
-        # written there — the load-bearing assertion here (neuter `rootro`
-        # reddens exactly it). Running a copy from `/` or `/dev` is refused
-        # twice over — the mounts are noexec AND the supervisor refuses an
-        # execve outside the closure — so those two lines are defence in
-        # depth, not a test of noexec alone (the declared-output case above
-        # is). Positive control: the toolchain still runs.
-        let rootDir = leaseRoot / "noexec-root"
-        createDir(rootDir / "wt")
-        let rootScript = "set -u; " &
-          "if cp /bin/sh /root-sh 2>/dev/null; then echo ROOT-WRITTEN; " &
-          "else echo ROOT-WRITE-BLOCKED; fi > result.txt; " &
-          "if /root-sh -c 'exit 0' 2>/dev/null; then echo ROOT-RAN >> result.txt; fi; " &
-          "if cp /bin/sh /dev/dev-sh 2>/dev/null && /dev/dev-sh -c 'exit 0'; " &
-          "then echo DEV-RAN >> result.txt; fi; " &
-          "if \"$TRUE\"; then echo TOOLCHAIN-RAN >> result.txt; fi"
-        let rootSpec = LeaseSpec(leaseId: "noexec-root", leaseRoot: leaseRoot,
-          leaseDir: rootDir, metaDir: base / "lease-meta" / "noexec-root",
-          cwd: rootDir / "wt", argv: @["/bin/sh", "-c", rootScript],
-          env: @[("PATH", coreToolDir() & ":/usr/bin:/bin"),
-            ("TRUE", coreToolDir() / "true"), ("HOME", rootDir / "home"),
-            ("TMPDIR", rootDir / "tmp")],
-          readRoots: @["/usr", "/bin", "/lib", "/lib64", "/etc", "/nix/store"],
-          closureRoots: @["/usr/bin", "/bin", "/usr/lib", "/lib", "/lib64",
-            "/nix/store"],
-          # Namespace layer only: no Landlock (whose write rule would refuse
-          # the copy first) and no floor — exactly a trusted worker on a host
-          # without Landlock or a subordinate uid range.
-          layers: {llNamespace}, timeoutMs: 60_000)
-        let rootOutcome = waitFor runLease(rootSpec)
-        let rootResult =
-          if fileExists(rootDir / "wt" / "result.txt"):
-            readFile(rootDir / "wt" / "result.txt")
-          else: ""
-        checkpoint("no-floor root lease: started=" & $rootOutcome.started &
-          " error=" & rootOutcome.error & "\n  result: " & rootResult &
-          "\n  stderr: " & rootOutcome.stderr)
-        check rootOutcome.started
-        check rootOutcome.isolation == "linux-namespace"
-        check "ROOT-WRITE-BLOCKED" in rootResult
-        check "ROOT-RAN" notin rootResult
-        check "DEV-RAN" notin rootResult
-        check "TOOLCHAIN-RAN" in rootResult
-        discard cleanupLease(rootSpec)
-
-  test "a library preloaded into the worker does not reach the lease's environment":
-    when not defined(linux):
-      skip("the Linux lease's raw exec is what is under test")
+    if floorNotHere().len > 0:
+      skip(floorNotHere())
     else:
       let cc = ccPath()
       let available = leaseConfinementAvailable()
+      checkpoint("lease confinement on this host: " & $available)
       check available.ok
       check cc.len > 0
       if available.ok and cc.len > 0:
-        let base = m7TestBase("repro-m7-interpose")
-        defer: removeDir(base)
-        createDir(base)
-        writeFile(base / "interposer.c", InterposerSource)
-        check execCmdEx(quoteShellCommand([cc, "-shared", "-fPIC", "-o",
-          base / "interposer.so", base / "interposer.c", "-ldl"])).exitCode == 0
-        var env = newStringTable(modeCaseSensitive)
-        for k, v in envPairs(): env[k] = v
-        env["LD_PRELOAD"] = base / "interposer.so"
-        env[InterposeChildEnv] = base
-        let child = startProcess(getAppFilename(), env = env,
-          options = {poStdErrToStdOut})
-        let childOut = child.outputStream.readAll()
-        let code = child.waitForExit()
-        child.close()
-        checkpoint("child exit " & $code & ":\n" & childOut)
-        check code == 0
-        let control = if fileExists(base / "control-env.txt"):
-            readFile(base / "control-env.txt") else: ""
-        let leased = if fileExists(base / "lease-env.txt"):
-            readFile(base / "lease-env.txt") else: ""
-        checkpoint("lease: " & (if fileExists(base / "lease-outcome.txt"):
-          readFile(base / "lease-outcome.txt") else: "<no outcome>"))
-        checkpoint("lease env:\n" & leased)
-        # The control: the interposer reaches an ordinary execve child, so
-        # the lease assertion below cannot pass because nothing interposed.
-        check InterposeMarker in control
-        # The lease ran, and its environment is what its spec names: no
-        # marker and no preload.
-        check "PATH=" in leased
-        check InterposeMarker notin leased
-        check "LD_PRELOAD" notin leased
-
-  test "hardened memfd policy: no executable memfd; a sealed one still works":
-    when not defined(linux):
-      echo "[platform N/A] the memfd policy is a Linux lease control " &
-        "(hardened profile; macOS and Windows workers are trusted-only)"
-      skip("platform N/A: Linux-only")
-    else:
-      if not memfdNoexecSupported():
-        echo "[platform N/A] this kernel has no MFD_NOEXEC_SEAL (Linux 6.3+); " &
-          "a hardened lease runs without the memfd policy and its level says so"
-        skip("kernel without MFD_NOEXEC_SEAL")
-      else:
-        let cc = ccPath()
-        check cc.len > 0
-        let base = m7TestBase("repro-m7-memfd")
-        defer: removeDir(base)
+        let base = m7TestBase("repro-m7-confine")
+        let leaseRoot = base / "worker-state" / "leases"
+        let metaRoot = base / "lease-meta"
+        # A neighbour lease with a worktree another lease must never see.
+        createDir(leaseRoot / "neighbour" / "wt")
+        writeFile(leaseRoot / "neighbour" / "wt" / "secret.c", "neighbour-secret\n")
+        # A world-writable directory OUTSIDE every lease: if a lease can write
+        # here, only Landlock stood in its way (the floor's lease user is not
+        # the daemon's user, so a user-owned directory would test DAC instead).
+        let outside = base / "outside"
+        createDir(outside)
+        setFilePermissions(outside, {fpUserRead, fpUserWrite, fpUserExec,
+          fpGroupRead, fpGroupWrite, fpGroupExec, fpOthersRead, fpOthersWrite,
+          fpOthersExec})
+        # The daemon: a real one, its state dir holding a key.
+        var daemon = newWorkerDaemon(base, newTestNode(base, "daemon"))
+        daemon.stateDir = base / "worker-state"
+        daemon.logPath = base / "daemon.log"
+        createDir(daemon.stateDir)
+        writeFile(daemon.stateDir / "host-ca.key", "daemon-private-key\n")
+        # The probe TOOL, compiled outside the lease into a closure root.
         let tools = base / "tools"
         createDir(tools)
-        writeFile(tools / "memfd.c", """
+        writeFile(tools / "probe.c", ProbeSource)
+        check execCmdEx(quoteShellCommand([cc, "-o", tools / "probe",
+          tools / "probe.c"])).exitCode == 0
+        when defined(linux):
+          createDir(base / "run")
+          daemon.endpoint = base / "run" / "daemon.sock"
+        startPlainDaemon(daemon)
+        # Linux: a daemon-owned 0600 file under a VISIBLE read root, beside
+        # the control socket: only the floor's different uid keeps it unread.
+        # macOS: none (the Seatbelt lease runs as the daemon's uid by design;
+        # its floor is the unix-socket rule, asserted through the socket).
+        let daemonPrivate =
+          when defined(linux):
+            let f = base / "run" / "daemon-private"
+            writeFile(f, "daemon-only\n")
+            setFilePermissions(f, {fpUserRead, fpUserWrite})
+            f
+          else:
+            ""
+        # A descriptor this (worker) process holds WITHOUT close-on-exec, the
+        # way a library or a careless opener leaves one. Whatever the layers,
+        # it must not reach the action: an inherited socket would bypass the
+        # network namespace and the floor, a file the hidden state.
+        writeFile(base / "fd-secret", "inherited-secret\n")
+        let leakedFd = posix.open(cstring(base / "fd-secret"), O_RDONLY)
+        check leakedFd >= 0
+        defer:
+          discard posix.close(leakedFd)
+          stopWorkerDaemon(daemon)
+          removeDir(base)
+        check socketExists(daemon.endpoint)
+
+        proc runCase(layers: set[LeaseLayer]; tag: string): tuple[output: string;
+            built: bool; outcome: LeaseOutcome] =
+          let id = "L-" & tag
+          let leaseDir = leaseRoot / id
+          createDir(leaseDir / "wt")
+          writeFile(leaseDir / "wt" / "probe.c", ProbeSource)
+          let canary = outside / ("canary-" & tag)
+          let script = "set -u; \"$CC\" -o out/probe probe.c && " &
+            "\"$PROBE\" \"$1\" \"$2\" \"$3\" \"$4\" \"$5\" \"$6\" > out/probe.txt; " &
+            "cp /bin/sh \"$TMPDIR/sh-copy\" && \"$TMPDIR/sh-copy\" -c true; true"
+          let roots = (when defined(macosx):
+              (@["/usr", "/bin", "/System", "/Library", "/private/etc",
+                 "/private/var/db/timezone", "/nix/store",
+                 "/Applications/Xcode.app"],
+               @["/usr/bin", "/bin", "/usr/libexec", "/nix/store",
+                 "/Library/Developer/CommandLineTools", "/Applications/Xcode.app"])
+            else:
+              (@["/usr", "/bin", "/lib", "/lib64", "/etc", "/nix/store", "/opt"],
+               @["/usr/bin", "/bin", "/usr/lib", "/nix/store"]))
+          let spec = LeaseSpec(leaseId: id, leaseRoot: leaseRoot,
+            leaseDir: leaseDir, metaDir: metaRoot / id, cwd: leaseDir / "wt",
+            argv: @["/bin/sh", "-c", script, "sh",
+              leaseRoot / "neighbour" / "wt" / "secret.c", canary,
+              daemon.stateDir / "host-ca.key", daemon.endpoint, daemonPrivate,
+              $leakedFd],
+            env: @[("PATH", parentDir(cc) & ":" & coreToolDir() &
+                ":/usr/bin:/bin"), ("CC", cc),
+              ("PROBE", tools / "probe"),
+              ("HOME", leaseDir / "home"), ("TMPDIR", leaseDir / "tmp")],
+            readRoots: roots[0] & @[tools, base / "run"],
+            closureRoots: roots[1] & @[tools],
+            outputDirs: @[leaseDir / "wt" / "out"],
+            extraWritable: (when defined(linux): @[base / "run"] else: @[]),
+            hidePaths: @[daemon.stateDir], layers: layers, timeoutMs: 180_000)
+          let outcome = waitFor runLease(spec)
+          let probeOut = leaseDir / "wt" / "out" / "probe.txt"
+          result.outcome = outcome
+          result.output = if fileExists(probeOut): readFile(probeOut) else: ""
+          result.built = fileExists(leaseDir / "wt" / "out" / "probe")
+          checkpoint(tag & ": started=" & $outcome.started & " exit=" &
+            $outcome.exitCode & " error=" & outcome.error & "\n  probe: " &
+            result.output.replace("\n", " ") & "\n  stderr: " & outcome.stderr &
+            "\n  reports: " & $outcome.reports)
+          # Remove the canary (it may belong to the floor's lease user) and the
+          # lease itself.
+          if fileExists(canary):
+            var c = spec
+            c.leaseDir = canary
+            discard cleanupLease(c)
+          discard cleanupLease(spec)
+
+        let full = runCase(DefaultLeaseLayers, "full")
+        check full.outcome.started
+        check full.built                                   # positive control
+        check "probe-ran" in full.output
+        for breach in ["BREACH-neighbour", "BREACH-write", "BREACH-state",
+                       "BREACH-daemon-socket", "BREACH-uid-file", "BREACH-fd"]:
+          check breach notin full.output
+        when defined(linux):
+          # The floor's refusal of the daemon-socket connect is REPORTED
+          # (DET-2), not silent, and names the socket.
+          var unixDenied = false
+          for r in full.outcome.reports:
+            if r.kind == "egress-denied" and
+                r.detail == "unix:" & daemon.endpoint:
+              unixDenied = true
+          check unixDenied
+          # G38: the compile's unreachable unix attempts (the libc's nscd
+          # probe) are not reported, and creating a unix socket is not a
+          # denial: the only unix destination reported is the daemon's.
+          for r in full.outcome.reports:
+            check not (r.kind == "syscall-denied" and
+              "socket family 1" in r.detail)
+            if r.detail.startsWith("unix:"):
+              check r.detail == "unix:" & daemon.endpoint
+        var execReported = false
+        for r in full.outcome.reports:
+          if r.kind == "exec-outside-closure" and "sh-copy" in r.detail:
+            execReported = true
+        check execReported                                 # DET-1
+
+        let noNamespace = runCase(DefaultLeaseLayers - {llNamespace}, "no-ns")
+        check noNamespace.built
+        check "BREACH-neighbour" in noNamespace.output
+        check "BREACH-write" notin noNamespace.output
+        check "BREACH-daemon-socket" notin noNamespace.output
+        check "BREACH-uid-file" notin noNamespace.output
+        check "BREACH-state" notin noNamespace.output
+        check "BREACH-fd" notin noNamespace.output
+
+        let noLandlock = runCase(DefaultLeaseLayers - {llLandlock}, "no-landlock")
+        check noLandlock.built
+        when defined(linux):
+          # The new root mounts nothing writable outside the lease.
+          check "BREACH-write" notin noLandlock.output
+          let neither = runCase(DefaultLeaseLayers - {llNamespace, llLandlock},
+            "no-ns-no-landlock")
+          check neither.built
+          check "BREACH-write" in neither.output      # Landlock's breach
+          check "BREACH-daemon-socket" notin neither.output
+          check "BREACH-uid-file" notin neither.output
+          # (BREACH-state is not asserted here: the two layers that keep the
+          # daemon's state unreadable are exactly the two removed.)
+          check "BREACH-fd" notin neither.output
+        else:
+          check "BREACH-write" in noLandlock.output
+        check "BREACH-neighbour" notin noLandlock.output
+        check "BREACH-daemon-socket" notin noLandlock.output
+        check "BREACH-uid-file" notin noLandlock.output
+        check "BREACH-state" notin noLandlock.output
+        check "BREACH-fd" notin noLandlock.output
+
+        let noFloor = runCase(DefaultLeaseLayers - {llFloor}, "no-floor")
+        check noFloor.built
+        check "BREACH-daemon-socket" in noFloor.output    # the floor's breach
+        when defined(linux):
+          check "BREACH-uid-file" in noFloor.output       # …and its uid
+          # Without the floor the connect is still CHECKED and REPORTED.
+          var unixReported = false
+          for r in noFloor.outcome.reports:
+            if r.kind == "unix-socket-connect" and daemon.endpoint in r.detail:
+              unixReported = true
+          check unixReported
+        check "BREACH-neighbour" notin noFloor.output
+        check "BREACH-write" notin noFloor.output
+        check "BREACH-state" notin noFloor.output
+        check "BREACH-fd" notin noFloor.output
+
+  test "noexec: a binary written into the lease does not run; the closure's do":
+    if floorNotHere().len > 0:
+      skip(floorNotHere())
+    else:
+      when not defined(linux):
+        echo "[platform N/A] noexec writable mounts are the Linux namespace " &
+          "layer; a macOS lease is the Seatbelt isolation level, which " &
+          "allows executing declared outputs"
+        skip("platform N/A: noexec writable mounts are Linux-only")
+      else:
+        let available = leaseConfinementAvailable()
+        check available.ok
+        if available.ok:
+          let base = m7TestBase("repro-m7-noexec")
+          defer: removeDir(base)
+          let leaseRoot = base / "worker-state" / "leases"
+          proc runWritten(layers: set[LeaseLayer]; id: string):
+              tuple[output: string; outcome: LeaseOutcome] =
+            let leaseDir = leaseRoot / id
+            createDir(leaseDir / "wt" / "out")
+            # The written binary goes into the DECLARED OUTPUT directory: the
+            # closure check and Landlock's EXECUTE rule both allow executing
+            # from there, so only the mount's noexec flag can stop it.
+            # `/bin/sh -c` works under the copied name. A multi-call `true`
+            # may fail solely because argv[0] changed, even on an exec mount.
+            # Fail setup errors directly rather than mistaking them for denial.
+            let script = "set -eu; cp /bin/sh out/written-sh; " &
+              "chmod +x out/written-sh; " &
+              "if ./out/written-sh -c 'exit 0'; then echo WRITTEN-RAN; " &
+              "else echo WRITTEN-BLOCKED; fi > out/result.txt; " &
+              "if \"$TRUE\"; then echo TOOLCHAIN-RAN >> out/result.txt; fi"
+            let spec = LeaseSpec(leaseId: id, leaseRoot: leaseRoot,
+              leaseDir: leaseDir, metaDir: base / "lease-meta" / id,
+              cwd: leaseDir / "wt", argv: @["/bin/sh", "-c", script],
+              env: @[("PATH", coreToolDir() & ":/usr/bin:/bin"),
+                ("TRUE", coreToolDir() / "true"), ("HOME", leaseDir / "home"),
+                ("TMPDIR", leaseDir / "tmp")],
+              readRoots: @["/usr", "/bin", "/lib", "/lib64", "/etc", "/nix/store"],
+              closureRoots: @["/usr/bin", "/bin", "/usr/lib", "/lib", "/lib64",
+                "/nix/store"],
+              outputDirs: @[leaseDir / "wt" / "out"],
+              layers: layers, timeoutMs: 60_000)
+            result.outcome = waitFor runLease(spec)
+            let outcome = result.outcome
+            let resultPath = leaseDir / "wt" / "out" / "result.txt"
+            result.output = if fileExists(resultPath): readFile(resultPath) else: ""
+            let observed = result.output
+            checkpoint(id & " lease: started=" & $outcome.started & " exit=" &
+              $outcome.exitCode & " error=" & outcome.error & "\n  result: " &
+              observed & "\n  stderr: " & outcome.stderr & "\n  reports: " &
+              $outcome.reports)
+            check outcome.started
+            check outcome.exitCode == 0
+            check fileExists(leaseDir / "wt" / "out" / "written-sh")
+            check "TOOLCHAIN-RAN" in observed
+            for r in outcome.reports:
+              check not (r.kind == "exec-outside-closure" and
+                "written-sh" in r.detail)
+            discard cleanupLease(spec)
+          # Identical payload, with the namespace's noexec mounts absent:
+          # a renamed multi-call `true` must not make the denial vacuous.
+          let executable = runWritten(DefaultLeaseLayers - {llNamespace},
+            "exec-control")
+          check "WRITTEN-RAN" in executable.output
+          check "WRITTEN-BLOCKED" notin executable.output
+          let blocked = runWritten(DefaultLeaseLayers, "noexec")
+          check blocked.outcome.isolation == "linux-namespace+landlock+floor"
+          check "WRITTEN-BLOCKED" in blocked.output
+          check "WRITTEN-RAN" notin blocked.output
+          # Without the floor (and without Landlock) the lease is the
+          # namespace's root and owns the top level of its new root: that
+          # tmpfs is READ-ONLY once entered (and noexec), so nothing can be
+          # written there — the load-bearing assertion here (neuter `rootro`
+          # reddens exactly it). Running a copy from `/` or `/dev` is refused
+          # twice over — the mounts are noexec AND the supervisor refuses an
+          # execve outside the closure — so those two lines are defence in
+          # depth, not a test of noexec alone (the declared-output case above
+          # is). Positive control: the toolchain still runs.
+          let rootDir = leaseRoot / "noexec-root"
+          createDir(rootDir / "wt")
+          let rootScript = "set -u; " &
+            "if cp /bin/sh /root-sh 2>/dev/null; then echo ROOT-WRITTEN; " &
+            "else echo ROOT-WRITE-BLOCKED; fi > result.txt; " &
+            "if /root-sh -c 'exit 0' 2>/dev/null; then echo ROOT-RAN >> result.txt; fi; " &
+            "if cp /bin/sh /dev/dev-sh 2>/dev/null && /dev/dev-sh -c 'exit 0'; " &
+            "then echo DEV-RAN >> result.txt; fi; " &
+            "if \"$TRUE\"; then echo TOOLCHAIN-RAN >> result.txt; fi"
+          let rootSpec = LeaseSpec(leaseId: "noexec-root", leaseRoot: leaseRoot,
+            leaseDir: rootDir, metaDir: base / "lease-meta" / "noexec-root",
+            cwd: rootDir / "wt", argv: @["/bin/sh", "-c", rootScript],
+            env: @[("PATH", coreToolDir() & ":/usr/bin:/bin"),
+              ("TRUE", coreToolDir() / "true"), ("HOME", rootDir / "home"),
+              ("TMPDIR", rootDir / "tmp")],
+            readRoots: @["/usr", "/bin", "/lib", "/lib64", "/etc", "/nix/store"],
+            closureRoots: @["/usr/bin", "/bin", "/usr/lib", "/lib", "/lib64",
+              "/nix/store"],
+            # Namespace layer only: no Landlock (whose write rule would refuse
+            # the copy first) and no floor — exactly a trusted worker on a host
+            # without Landlock or a subordinate uid range.
+            layers: {llNamespace}, timeoutMs: 60_000)
+          let rootOutcome = waitFor runLease(rootSpec)
+          let rootResult =
+            if fileExists(rootDir / "wt" / "result.txt"):
+              readFile(rootDir / "wt" / "result.txt")
+            else: ""
+          checkpoint("no-floor root lease: started=" & $rootOutcome.started &
+            " error=" & rootOutcome.error & "\n  result: " & rootResult &
+            "\n  stderr: " & rootOutcome.stderr)
+          check rootOutcome.started
+          check rootOutcome.isolation == "linux-namespace"
+          check "ROOT-WRITE-BLOCKED" in rootResult
+          check "ROOT-RAN" notin rootResult
+          check "DEV-RAN" notin rootResult
+          check "TOOLCHAIN-RAN" in rootResult
+          discard cleanupLease(rootSpec)
+
+  test "a library preloaded into the worker does not reach the lease's environment":
+    if floorNotHere().len > 0:
+      skip(floorNotHere())
+    else:
+      when not defined(linux):
+        skip("the Linux lease's raw exec is what is under test")
+      else:
+        let cc = ccPath()
+        let available = leaseConfinementAvailable()
+        check available.ok
+        check cc.len > 0
+        if available.ok and cc.len > 0:
+          let base = m7TestBase("repro-m7-interpose")
+          defer: removeDir(base)
+          createDir(base)
+          writeFile(base / "interposer.c", InterposerSource)
+          check execCmdEx(quoteShellCommand([cc, "-shared", "-fPIC", "-o",
+            base / "interposer.so", base / "interposer.c", "-ldl"])).exitCode == 0
+          var env = newStringTable(modeCaseSensitive)
+          for k, v in envPairs(): env[k] = v
+          env["LD_PRELOAD"] = base / "interposer.so"
+          env[InterposeChildEnv] = base
+          let child = startProcess(getAppFilename(), env = env,
+            options = {poStdErrToStdOut})
+          let childOut = child.outputStream.readAll()
+          let code = child.waitForExit()
+          child.close()
+          checkpoint("child exit " & $code & ":\n" & childOut)
+          check code == 0
+          let control = if fileExists(base / "control-env.txt"):
+              readFile(base / "control-env.txt") else: ""
+          let leased = if fileExists(base / "lease-env.txt"):
+              readFile(base / "lease-env.txt") else: ""
+          checkpoint("lease: " & (if fileExists(base / "lease-outcome.txt"):
+            readFile(base / "lease-outcome.txt") else: "<no outcome>"))
+          checkpoint("lease env:\n" & leased)
+          # The control: the interposer reaches an ordinary execve child, so
+          # the lease assertion below cannot pass because nothing interposed.
+          check InterposeMarker in control
+          # The lease ran, and its environment is what its spec names: no
+          # marker and no preload.
+          check "PATH=" in leased
+          check InterposeMarker notin leased
+          check "LD_PRELOAD" notin leased
+
+  test "hardened memfd policy: no executable memfd; a sealed one still works":
+    if floorNotHere().len > 0:
+      skip(floorNotHere())
+    else:
+      when not defined(linux):
+        echo "[platform N/A] the memfd policy is a Linux lease control " &
+          "(hardened profile; macOS and Windows workers are trusted-only)"
+        skip("platform N/A: Linux-only")
+      else:
+        if not memfdNoexecSupported():
+          echo "[platform N/A] this kernel has no MFD_NOEXEC_SEAL (Linux 6.3+); " &
+            "a hardened lease runs without the memfd policy and its level says so"
+          skip("kernel without MFD_NOEXEC_SEAL")
+        else:
+          let cc = ccPath()
+          check cc.len > 0
+          let base = m7TestBase("repro-m7-memfd")
+          defer: removeDir(base)
+          let tools = base / "tools"
+          createDir(tools)
+          writeFile(tools / "memfd.c", """
 #define _GNU_SOURCE
 #include <stdio.h>
 #include <sys/syscall.h>
@@ -763,48 +791,48 @@ int main(void) {
   return 0;
 }
 """)
-        check execCmdEx(quoteShellCommand([cc, "-o", tools / "memfd",
-          tools / "memfd.c"])).exitCode == 0
-        let leaseRoot = base / "worker-state" / "leases"
-        proc runMemfd(id: string; policy: bool): tuple[output: string;
-            outcome: LeaseOutcome] =
-          let leaseDir = leaseRoot / id
-          createDir(leaseDir / "wt")
-          let spec = LeaseSpec(leaseId: id, leaseRoot: leaseRoot,
-            leaseDir: leaseDir, metaDir: base / "lease-meta" / id,
-            cwd: leaseDir / "wt",
-            argv: @["/bin/sh", "-c", "\"$TOOL\" > out.txt"],
-            env: @[("PATH", "/usr/bin:/bin"), ("TOOL", tools / "memfd"),
-              ("HOME", leaseDir / "home"), ("TMPDIR", leaseDir / "tmp")],
-            readRoots: @["/usr", "/bin", "/lib", "/lib64", "/etc", "/nix/store",
-              tools],
-            closureRoots: @["/usr/bin", "/bin", "/usr/lib", "/lib", "/lib64",
-              "/nix/store", tools],
-            layers: DefaultLeaseLayers, memfdNoexec: policy, timeoutMs: 60_000)
-          result.outcome = waitFor runLease(spec)
-          let outPath = leaseDir / "wt" / "out.txt"
-          result.output = if fileExists(outPath): readFile(outPath) else: ""
-          checkpoint(id & ": started=" & $result.outcome.started & " error=" &
-            result.outcome.error & " isolation=" & result.outcome.isolation &
-            "\n  out: " & result.output & "\n  reports: " &
-            $result.outcome.reports)
-          discard cleanupLease(spec)
-        let hard = runMemfd("memfd-policy", true)
-        check hard.outcome.started
-        check hard.outcome.isolation ==
-          "linux-namespace+landlock+floor+memfd-noexec"
-        check "MEMFD-EXEC-REFUSED" in hard.output
-        check "MEMFD-SEALED-CREATED" in hard.output     # positive control
-        var reported = false
-        for r in hard.outcome.reports:
-          if r.kind == "syscall-denied" and "MFD_NOEXEC_SEAL" in r.detail:
-            reported = true
-        check reported
-        let plain = runMemfd("memfd-plain", false)
-        check plain.outcome.started
-        check plain.outcome.isolation == "linux-namespace+landlock+floor"
-        check "MEMFD-EXEC-CREATED" in plain.output      # the policy refused it
-        check "MEMFD-SEALED-CREATED" in plain.output
+          check execCmdEx(quoteShellCommand([cc, "-o", tools / "memfd",
+            tools / "memfd.c"])).exitCode == 0
+          let leaseRoot = base / "worker-state" / "leases"
+          proc runMemfd(id: string; policy: bool): tuple[output: string;
+              outcome: LeaseOutcome] =
+            let leaseDir = leaseRoot / id
+            createDir(leaseDir / "wt")
+            let spec = LeaseSpec(leaseId: id, leaseRoot: leaseRoot,
+              leaseDir: leaseDir, metaDir: base / "lease-meta" / id,
+              cwd: leaseDir / "wt",
+              argv: @["/bin/sh", "-c", "\"$TOOL\" > out.txt"],
+              env: @[("PATH", "/usr/bin:/bin"), ("TOOL", tools / "memfd"),
+                ("HOME", leaseDir / "home"), ("TMPDIR", leaseDir / "tmp")],
+              readRoots: @["/usr", "/bin", "/lib", "/lib64", "/etc", "/nix/store",
+                tools],
+              closureRoots: @["/usr/bin", "/bin", "/usr/lib", "/lib", "/lib64",
+                "/nix/store", tools],
+              layers: DefaultLeaseLayers, memfdNoexec: policy, timeoutMs: 60_000)
+            result.outcome = waitFor runLease(spec)
+            let outPath = leaseDir / "wt" / "out.txt"
+            result.output = if fileExists(outPath): readFile(outPath) else: ""
+            checkpoint(id & ": started=" & $result.outcome.started & " error=" &
+              result.outcome.error & " isolation=" & result.outcome.isolation &
+              "\n  out: " & result.output & "\n  reports: " &
+              $result.outcome.reports)
+            discard cleanupLease(spec)
+          let hard = runMemfd("memfd-policy", true)
+          check hard.outcome.started
+          check hard.outcome.isolation ==
+            "linux-namespace+landlock+floor+memfd-noexec"
+          check "MEMFD-EXEC-REFUSED" in hard.output
+          check "MEMFD-SEALED-CREATED" in hard.output     # positive control
+          var reported = false
+          for r in hard.outcome.reports:
+            if r.kind == "syscall-denied" and "MFD_NOEXEC_SEAL" in r.detail:
+              reported = true
+          check reported
+          let plain = runMemfd("memfd-plain", false)
+          check plain.outcome.started
+          check plain.outcome.isolation == "linux-namespace+landlock+floor"
+          check "MEMFD-EXEC-CREATED" in plain.output      # the policy refused it
+          check "MEMFD-SEALED-CREATED" in plain.output
 
   test "egress forwarder: half-close, interactive traffic, one-sided close":
     # The supervisor's egress forwarder (macOS: `lease.nim`, in THIS

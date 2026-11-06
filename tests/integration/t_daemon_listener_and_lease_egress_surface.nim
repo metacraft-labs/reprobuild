@@ -222,7 +222,7 @@ suite "Distributed-Execution M7: daemon listener and lease egress surface":
     if not hardenedWorkerHere():
       # The hardened profile refuses this host's worker (macOS/Windows):
       # the trusted phase below covers the listener and egress here.
-      echo HardenedWorkerNA
+      echo hardenedWorkerNotHere()
     else:
       # -- The daemon binds the declared interface, nothing else ---------------
       worker.startWorkerDaemon(workerSpec(sink, base / "repos", cidr = cidr,

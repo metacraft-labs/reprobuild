@@ -45,8 +45,8 @@ suite "Distributed-Execution M7: evidence liveness and fail-closed workers":
 
   test "detectors prove themselves; the worker stops without its sink":
     if not hardenedWorkerHere():
-      echo HardenedWorkerNA
-      skip("platform N/A: hardened workers are Linux-only")
+      echo hardenedWorkerNotHere()
+      skip(hardenedWorkerNotHere())
     else:
       let base = m7TestBase("repro-m7-live")
       var w = newTestNode(base, "worker")
