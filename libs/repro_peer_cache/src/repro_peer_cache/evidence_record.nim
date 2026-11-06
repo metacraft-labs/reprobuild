@@ -78,7 +78,8 @@ const
     # The sink operator's acknowledgement of a handled detection (D4), an
     # operator's containment and release of a host (D5), and the hand-over
     # of a host's evidence keys to new ones (D7).
-    "acknowledges", "operator", "containment", "handover",
+    "acknowledges", "operator", "containment", "containmentSignature",
+    "handover",
     "handoverSignature", "newAttestationKey", "newCredentialHost"]
     ## The only field names a record may carry (EVID-6). Deliberately no
     ## free-form "data"/"body"/"env" field: an environment can hold

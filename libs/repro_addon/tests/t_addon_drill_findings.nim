@@ -131,7 +131,8 @@ suite "the A11 drill's findings":
           e.record.category == ecDetection: det = e.seq
     check det > 0'u64
     # A host forging an acknowledgement: ignored.
-    var forged = ackRecord(det, "mallory", "nothing to see", 0)
+    var forged = ackRecord(det, "DET-AO-2/apply-refused", "mallory",
+                           "nothing to see", 0)
     writeOutboxRecord(h.site.outbox, forged, "forged-ack")
     h.ship()
     let hosts = @[EnrolledHost(hostId: h.credentialHost, target: "t")]
@@ -140,7 +141,8 @@ suite "the A11 drill's findings":
     # The operator, through the sink's own inbox.
     let inbox = sink.storeDir / OperatorInboxName
     createDir(inbox)
-    writeFile(inbox / "1.ack", $det & "\nalice\ninvestigated\n")
+    writeFile(inbox / "1.ack", $det & "\nDET-AO-2/apply-refused\nalice\n" &
+      "investigated\n")
     check processOperatorInbox(sink.server.store, peerIdOfHex(sink.hostId),
                                inbox) == 1
     let after = runEvidenceCheck(inputsFor(sink, hosts, int64(epochTime() * 1000)))
@@ -159,10 +161,23 @@ suite "the A11 drill's findings":
       result.conf = loadEvidenceConf(result.site.confPath)
       sink.enrol(result)
       bootstrapHost(result)
+    var sequence = 0'u64
     proc contain(h: HostFixture; signed: bool; trigger = "operator-contained") =
+      # The verb's record: its own statement, signed (decision 51); the
+      # unsigned one carries none.
+      var fields = @[("operator", "alice"), ("reason", "drill")]
+      if signed:
+        inc sequence
+        let st = signContainment(ContainmentStatement(host: h.evidence.host,
+          credentialHost: h.credentialHost,
+          action: (if trigger == "operator-contained": "contain" else: "release"),
+          operator: "alice", reason: "drill", sequence: sequence,
+          atMs: int64(epochTime() * 1000)), h.evidence.attestationKey)
+        fields.add(("containment", st.statement))
+        fields.add(("containmentSignature", st.signature))
       discard recordEvidence(EvidenceEvent(detector: edContainment,
-        category: ecAudit, trigger: trigger, fields: @[("operator", "alice"),
-        ("reason", "drill")], attest: signed), h.evidence)
+        category: ecAudit, trigger: trigger, fields: fields, attest: signed),
+        h.evidence)
     let ok = fastHost("contained")
     let unsigned = fastHost("unsigned")
     let late = fastHost("late")

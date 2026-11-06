@@ -1494,7 +1494,8 @@ proc realiseAptClosure*(lock: AptClosureLock; storeRoot: string;
                         hostMachine = hostMachineName();
                         retainDebCache = false;
                         lockDeadlineMs = AptRealisationLockDeadlineMs;
-                        log: AptRealisationLog = nil):
+                        log: AptRealisationLog = nil;
+                        rebuildMissingMembers = false):
                         string =
   ## Make the closure prefix exist and return its path (spec §8.3 item 4).
   ## Idempotent: a closure already realised is returned untouched, and a
@@ -1544,10 +1545,18 @@ proc realiseAptClosure*(lock: AptClosureLock; storeRoot: string;
         (AptClosureMutation == "apt-closure-unrecorded" or
          ensureIndexed(st, result, aptClosurePrefixId(lock))):
       # Members still on disk are re-indexed too (a lost row would leave
-      # one the collector cannot see); a missing member stays missing.
+      # one the collector cannot see); a missing member stays missing --
+      # unless the caller keeps custody of every member (``rebuildMissing
+      # Members``: a member moved aside as altered is realised again from
+      # its archive, whatever the union's state; the ReproOS add-on, A11
+      # review finding 1).
       for d in lock.debs:
         let dp = aptDebPrefixPath(storeRoot, d)
         if dirExists(dp): discard ensureIndexed(st, dp, aptDebPrefixId(d))
+        elif rebuildMissingMembers and
+            AptClosureMutation != "apt-closure-member-stays-missing":
+          discard realiseDeb(st, lock, d, storeRoot, cacheDir, fetch,
+                             retainDebCache, log)
       return
     var members: seq[(string, string)] = @[]
     for d in lock.debs:

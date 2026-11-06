@@ -27,13 +27,20 @@
 
 import std/[os, strutils, times]
 
+import repro_peer_cache/identity
+import repro_peer_cache/types
+
 import repro_core/host_apply_lock
 
+import ./attestation
+import ./contain_marker
 import ./evidence
 import ./evidence_ship
 import ./generation0
 import ./host_exec
 import ./mutations
+
+export contain_marker
 
 type
   ContainmentError* = object of CatchableError
@@ -49,12 +56,6 @@ const
     ## Stopped and masked first: no more network-fed input.
   ContainedApplyUnit* = AgentApplyUnit
 
-proc containedMarkerPath*(stateDir = "/var/lib/repro/system"): string =
-  stateDir / "addon" / "contained"
-
-proc isContained*(stateDir = "/var/lib/repro/system"): bool =
-  fileExists(containedMarkerPath(stateDir))
-
 proc shipNow(site: EvidenceSite): tuple[shipped: bool; error: string] =
   ## Ship the outbox now, through the shipping run itself; ``shipped`` when
   ## nothing stayed queued.
@@ -67,10 +68,24 @@ proc shipNow(site: EvidenceSite): tuple[shipped: bool; error: string] =
   except CatchableError as e:
     (false, e.msg)
 
+proc unitLoaded(u: string): bool =
+  ## The unit exists on this host (a host whose agent is the full engine's
+  ## ``repro deploy-agent`` has no add-on agent units, finding 6).
+  try:
+    let r = runSystemctl(["show", "-p", "LoadState", "--value", u])
+    r.exitCode == 0 and r.output.strip() notin ["not-found", ""]
+  except CatchableError: false
+
 proc systemctlAll(verb: openArray[string]; units: openArray[string]): string =
-  ## "" when systemctl accepted the request, otherwise its output.
+  ## "" when systemctl accepted the request, otherwise its output. Units
+  ## this host does not have are left out.
   var args = @verb
-  for u in units: args.add(u)
+  var any = units.len == 0
+  for u in units:
+    if unitLoaded(u):
+      args.add(u)
+      any = true
+  if not any: return ""
   try:
     let r = runSystemctl(args)
     if r.exitCode != 0: return r.output.strip()
@@ -126,6 +141,56 @@ proc maskAgent*(markerPath: string): seq[string] =
     lock.release()
   discard systemctlAll(["reset-failed"], [AgentFetchUnit, ContainedApplyUnit])
 
+proc nextContainmentSequence(stateDir: string): uint64 =
+  ## Strictly increasing per host, kept root-only beside the marker.
+  let p = stateDir / "addon" / "containment-sequence"
+  var n = 0'u64
+  try: n = parseBiggestUInt(readFile(p).strip()).uint64
+  except CatchableError: discard
+  inc n
+  createDir(parentDir(p))
+  writeFile(p & ".tmp", $n & "\n")
+  setFilePermissions(p & ".tmp", {fpUserRead, fpUserWrite})
+  moveFile(p & ".tmp", p)
+  n
+
+proc credentialHostId(): string =
+  ## The sink credential's host id (the id the sink stamps), "" when the
+  ## host has no credential.
+  if not (fileExists(EvidenceCredentialCertPath) and
+          fileExists(EvidenceCredentialKeyPath)): return ""
+  try: $loadOrCreateHostIdentity(EvidenceCredentialCertPath,
+                                 EvidenceCredentialKeyPath).hostId
+  except CatchableError: ""
+
+proc recordContainmentAs*(site: EvidenceSite; credentialHost, action,
+                          operator, reason: string; sequence: uint64;
+                          atMs = int64(epochTime() * 1000)): string =
+  ## The record of a containment or a release, carrying a statement of its
+  ## own signed by the attestation key: host, credential id, action,
+  ## operator, reason, a strictly increasing sequence and the time (finding
+  ## 3). The generation attestation alone would bind none of it. Exported
+  ## so a test writes the record the contain verb writes.
+  var fields = @[("outcome", "aoOperatorAction"), ("operator", operator),
+                 ("reason", reason)]
+  when not mutated("contain-unsigned"):
+    let c = ContainmentStatement(host: site.host,
+      credentialHost: credentialHost, action: action, operator: operator,
+      reason: reason, sequence: sequence, atMs: atMs)
+    let signed = signContainment(c, site.attestationKey)
+    fields.add(("containment", signed.statement))
+    fields.add(("containmentSignature", signed.signature))
+  recordEvidence(EvidenceEvent(detector: edContainment, category: ecAudit,
+    trigger: (if action == "contain": "operator-contained"
+              else: "operator-released"),
+    kind: (if action == "contain": "contained" else: "released"),
+    fields: fields, attest: true), site)
+
+proc recordContainment(stateDir: string; site: EvidenceSite;
+                       action, operator, reason: string): string =
+  recordContainmentAs(site, credentialHostId(), action, operator, reason,
+                      nextContainmentSequence(stateDir))
+
 proc runContain*(operator, reason: string; stateDir = "/var/lib/repro/system";
                  site = defaultSite()): ContainResult =
   if operator.len == 0 or reason.len == 0:
@@ -136,11 +201,8 @@ proc runContain*(operator, reason: string; stateDir = "/var/lib/repro/system";
     result.already = true
     return
   # 1. The record leaves the host before anything stops.
-  result.record = recordEvidence(EvidenceEvent(detector: edContainment,
-    category: ecAudit, trigger: "operator-contained", kind: "contained",
-    fields: @[("outcome", "aoOperatorAction"), ("operator", operator),
-              ("reason", reason), ("containment", "fetch-and-apply")],
-    attest: not mutated("contain-unsigned")), site)
+  result.record = recordContainment(stateDir, site, "contain", operator,
+                                    reason)
   let s = shipNow(site)
   result.shipped = s.shipped
   result.shipError = s.error
@@ -167,11 +229,8 @@ proc runRelease*(operator, reason: string; stateDir = "/var/lib/repro/system";
     raise newException(ContainmentError, "--operator and --reason are required")
   if not isContained(stateDir):
     raise newException(ContainmentError, "this host is not contained")
-  result.record = recordEvidence(EvidenceEvent(detector: edContainment,
-    category: ecAudit, trigger: "operator-released", kind: "released",
-    fields: @[("outcome", "aoOperatorAction"), ("operator", operator),
-              ("reason", reason), ("containment", "fetch-and-apply")],
-    attest: true), site)
+  result.record = recordContainment(stateDir, site, "release", operator,
+                                    reason)
   let s = shipNow(site)
   result.shipped = s.shipped
   result.shipError = s.error

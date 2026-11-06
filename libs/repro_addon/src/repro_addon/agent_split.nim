@@ -52,7 +52,7 @@ import ./addon_secrets
 import ./agent_checks
 import ./agent_record
 import ./agent_switch
-import ./containment
+import ./contain_marker
 import repro_local_store/store
 import ./store_custody
 import ./apt_hook
@@ -265,7 +265,14 @@ proc debNeedsStaging*(lock: AptClosureLock; d: AptLockedDeb;
   ## archive is the source whenever it is served, threat model C20.) The
   ## store is world-readable, so the fetch unit's dynamic user decides this
   ## itself.
-  not aptClosureRealised(storeRoot, lock) and
+  ##
+  ## A member whose prefix is gone needs its archive WHATEVER the union's
+  ## state: the add-on's custody moves an altered member aside and realises
+  ## it again from that archive (A11 review finding 1).
+  when mutated("fetch-skips-missing-member"):
+    not aptClosureRealised(storeRoot, lock) and
+      not fileExists(aptDebPrefixPath(storeRoot, d) / ".repro-apt-deb")
+  else:
     not fileExists(aptDebPrefixPath(storeRoot, d) / ".repro-apt-deb")
 
 proc stageDebs(canonical: string; dir: string; notes: var seq[string];
@@ -682,7 +689,6 @@ proc installStagedOutputs*(m: DeployManifest; actions: seq[ProfileBuildAction];
     if recover:
       entry = preserveEvidence(custody, cwd, digest, observed,
         "altered; re-installed from the signed manifest's pinned outputs")
-      forgetRealised(custody, cwd)
     if not dirExists(cwd):
       createDir(parentDir(cwd))
       copyDirWithPermissions(tree, cwd)
@@ -694,6 +700,7 @@ proc installStagedOutputs*(m: DeployManifest; actions: seq[ProfileBuildAction];
       recordRecovered(custody, StoreObjectRef(path: cwd, kind: sokPrefix,
         referrer: "build-action"), digest, observed, entry,
         "the signed manifest's pinned outputs")
+      markRecorded(entry)
 
 type AgentApplyContext* = object
   ## What one agent apply works from: the copy of the staging area (""

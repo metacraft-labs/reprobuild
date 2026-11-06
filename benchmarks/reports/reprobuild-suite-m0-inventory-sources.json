@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 34,
-    "nimTestBinaries": 2680,
+    "nimTestBinaries": 2682,
     "pureUnitConsolidationGroups": 80,
     "pureUnitTests": 740,
     "staticallyDetectedRuntimeCompilerFlowTests": 137,
-    "testEntries": 2720
+    "testEntries": 2722
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1573,10 +1573,10 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 19,
-      "integration": 1483,
+      "integration": 1484,
       "platform/destructive": 172,
       "pure unit": 740,
-      "unclassified": 306
+      "unclassified": 307
     },
     "graphOwnedTestArtifacts": [
       {
@@ -1784,9 +1784,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2680,
+    "nimTestBinaryCount": 2682,
     "pythonTestFileCount": 40,
-    "testEntryCount": 2720
+    "testEntryCount": 2722
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -8714,7 +8714,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_addon/tests/t_addon_evidence_docs_commands_parse.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 2,
+      "staticCaseCount": 3,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -9163,6 +9163,27 @@
       "source": "libs/repro_addon/tests/t_addon_retargeted_address_is_refused.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 3,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_addon_review_findings",
+      "class": "unclassified",
+      "classificationReason": "imports `asyncdispatch`, which grants out-of-process reach",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_addon",
+        "repro_deploy_agent",
+        "repro_dsl_stdlib",
+        "repro_local_store",
+        "repro_peer_cache"
+      ],
+      "owner": "libs/repro_addon",
+      "requiresReproBinary": false,
+      "source": "libs/repro_addon/tests/t_addon_review_findings.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 16,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -29634,6 +29655,23 @@
       "owner": "tests/e2e",
       "requiresReproBinary": false,
       "source": "tests/e2e/addon/t_e2e_addon_confirm_or_revert.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_e2e_addon_custody_crash_points",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_test_support"
+      ],
+      "owner": "tests/e2e",
+      "requiresReproBinary": false,
+      "source": "tests/e2e/addon/t_e2e_addon_custody_crash_points.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 1,
       "staticallyDetectedRuntimeCompilerFlow": false,

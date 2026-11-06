@@ -17,19 +17,28 @@
 ##    the ``/etc`` copy and the store file hold the original bytes, the
 ##    quarantine is released, the altered tree is in the evidence directory
 ##    (0700, root), and ``store-recovered`` reaches the sink.
-## 3. **An apt closure member, refused, then recovered.** A file of the
-##    closure's member prefix changes. The next switch has no copy of the
-##    member's ``.deb``: it refuses (``EAddOnStoreChanged``) and moves the
-##    altered member aside; once the archive is staged again the switch
-##    re-realises it and applies, the member and the union holding the
-##    original bytes.
+## 3. **An apt closure member, its union intact, refused, then recovered
+##    through the fetch.** A file is planted in the closure's member prefix
+##    only; the union keeps its bytes. The closure's unit is published to
+##    the deploy agent, whose archive (the lock's) is served by the
+##    producer. The first tick's fetch stages nothing (the member is
+##    there) and its switch has no copy of the member's ``.deb``: it
+##    refuses (``EAddOnStoreChanged``) and moves the altered member aside.
+##    The next tick's fetch stages the missing member's archive from the
+##    lock's URL, and its switch re-realises the member and applies, the
+##    member and the union holding the original bytes (A11 review finding
+##    1: the member used to stay missing behind an intact union, and the
+##    fetch stage it only when the union was missing, so every switch
+##    refused).
 ## 4. **The egress observer's source, no wedge.** The store file behind
 ##    ``/etc/repro/egress.nft`` changes and no verification runs: the
 ##    agent's next switch finds it by digest and recovers it; after a
 ##    reboot the observer loads its table and the agent applies the next
 ##    sequence (the audit's wedge: an altered ``egress.nft`` installed made
 ##    the fetch unit's ``Requires=`` fail).
-## 5. **Uninstall** names the evidence entries it removes with the state.
+## 5. **Uninstall** names the evidence entries before it removes anything:
+##    without ``--discard-store-evidence`` it refuses, naming each, and
+##    removes nothing; with it, it removes them with the state.
 ##
 ## Falsifying mutations: ``custody-skips-file-sources`` (steps 2 and 4: the
 ## altered bytes are installed into /etc), ``custody-skips-closures`` (step
@@ -40,10 +49,12 @@
 ##
 ## Opt-in: ``REPRO_ADDON_VM_GATES=1``.
 ##
-## *Mocking.* The fixture ``.deb`` is built here and seeded into the
-## realiser's ``.deb`` cache, where it is verified against the lock as a
-## download would be (as in ``e2e_addon_closure_prefixes_survive_gc``);
-## seeding it again stands for the fetch unit staging it. Nothing else.
+## *Mocking.* The fixture ``.deb`` is built here. Step 1's operator apply
+## (which has no fetch unit) finds it seeded into the realiser's ``.deb``
+## cache, verified against the lock as a download would be (as in
+## ``e2e_addon_closure_prefixes_survive_gc``); step 3's recovery takes it
+## through the deploy agent's own fetch, from the producer serving the
+## lock's archive URL. The archive is the fixture's, not a Debian mirror.
 
 import std/[json, os, strutils, unittest]
 
@@ -106,7 +117,12 @@ proc body(g: Guest; repro: string; step: StepFn; record: JsonNode;
   writeDeb(deb, @[dir("./"), dir("./usr/"), dir("./usr/share/"),
     dir("./usr/share/custody/"),
     ("./usr/share/custody/ok.txt", '0', 0o644, "custody\n", "")])
-  let lock = fixtureLock("custody", deb)
+  var lock = fixtureLock("custody", deb)
+  # The lock's archive is the producer's origin, so the agent's fetch unit
+  # can stage the member's archive from the URL the lock names.
+  lock.archive = producer.originUrl() & "/debian"
+  createDir(producer.dir / "debian" / parentDir(lock.debs[0].filename))
+  copyFile(deb, producer.dir / "debian" / lock.debs[0].filename)
   let lockText = renderAptClosureLock(lock)
   let union = aptClosurePrefixPath(AddOnSystemStoreRoot, lock)
   let member = aptDebPrefixPath(AddOnSystemStoreRoot, lock.debs[0])
@@ -166,28 +182,39 @@ proc body(g: Guest; repro: string; step: StepFn; record: JsonNode;
        sink.waitFor(host, "addon-store", "store-recovered", 180,
                     since = since2), "")
 
-  # 3. An apt closure member: refused without its archive, then recovered.
+  # 3. An apt closure member, its union intact: refused without its
+  #    archive, then recovered through the fetch.
   let memberFile = member / "usr/share/custody/ok.txt"
-  let t3 = g.tamper(memberFile, "planted\n")
-  step("a file of the closure's member changed", t3.exitCode == 0, t3.stderr)
-  let a3 = g.applyProfile(repro, "custody-3", unitBlock(lockText, "three"))
-  record["closureRefusal"] = %(a3.stdout & a3.stderr)
-  step("without the member's archive the switch refuses",
-       a3.exitCode != 0 and "EAddOnStoreChanged" in a3.stdout & a3.stderr,
-       a3.stdout & a3.stderr)
+  let unionFile = union / "usr/share/custody/ok.txt"
+  let unionSha = g.sha(unionFile)
+  let t3 = g.exec("unshare --mount --propagation private /bin/sh -c " &
+    quoteShell("mount -o remount,bind,rw /repro/store && printf planted > " &
+      quoteShell(member / "usr/share/custody/planted.txt")))
+  step("a file was planted in the closure's member, its union untouched",
+       t3.exitCode == 0 and g.sha(unionFile) == unionSha and
+         g.exec("test -e " & quoteShell(union /
+           "usr/share/custody/planted.txt")).exitCode != 0,
+       t3.stderr)
+  discard producer.publish(PublishSpec(sequence: 1,
+    profileText: unitBlock(lockText, "three")))
+  let k3 = g.tickUnits()
+  record["closureRefusal"] = %($k3)
+  step("without the member's archive the agent's switch refuses",
+       k3.outcome != "aoApplied" and
+         "EAddOnStoreChanged" in k3.message & k3.applyLog, $k3)
   step("the altered member was moved aside, its bytes kept",
        g.exec("test -e " & quoteShell(member)).exitCode != 0 and
          g.exec("grep -rl planted " & Evidence).stdout.splitLines().len >= 2,
        g.exec("ls " & Evidence).stdout)
-  seed()
-  let a4 = g.applyProfile(repro, "custody-4", unitBlock(lockText, "four"))
-  step("with the archive staged again the switch re-realises it and commits",
-       a4.exitCode == 0, a4.stdout & a4.stderr)
+  let k4 = g.tickUnits()
+  step("the next fetch stages the member's archive and the switch applies",
+       k4.outcome == "aoApplied" and k4.sequence == 1, $k4)
   step("the member and the union hold the original bytes",
        g.run("cat " & memberFile).strip() == "custody" and
-         g.run("cat " & union & "/usr/share/custody/ok.txt").strip() ==
-           "custody",
-       g.run("cat " & memberFile & " " & union & "/usr/share/custody/ok.txt"))
+         g.sha(unionFile) == unionSha and
+         g.exec("test -e " & quoteShell(member /
+           "usr/share/custody/planted.txt")).exitCode != 0,
+       g.run("cat " & memberFile & " " & unionFile))
 
   # 4. The egress observer's source, recovered by digest, no wedge.
   let nftConf = "/etc/repro/egress.nft"
@@ -196,7 +223,7 @@ proc body(g: Guest; repro: string; step: StepFn; record: JsonNode;
   let t5 = g.tamper(nftSrc, "this is not nft syntax\n")
   step("the store file behind " & nftConf & " changed",
        nftSrc.len > 0 and t5.exitCode == 0, nftSrc & t5.stderr)
-  discard producer.publish(PublishSpec(sequence: 1,
+  discard producer.publish(PublishSpec(sequence: 2,
     profileText: canonicalFile(Managed, "agent one\n")))
   let k1 = g.tickUnits()
   step("the agent's switch recovers it and applies", k1.outcome == "aoApplied",
@@ -208,18 +235,29 @@ proc body(g: Guest; repro: string; step: StepFn; record: JsonNode;
        g.exec("systemctl is-active repro-addon-egress.service").stdout.strip() ==
          "active", g.exec("systemctl status repro-addon-egress.service " &
            "--no-pager | tail -5").stdout)
-  discard producer.publish(PublishSpec(sequence: 2,
+  discard producer.publish(PublishSpec(sequence: 3,
     profileText: canonicalFile(Managed, "agent two\n")))
   let k2 = g.tickUnits()
   step("and the agent fetches and applies the next sequence",
-       k2.outcome == "aoApplied" and k2.sequence == 2, $k2)
+       k2.outcome == "aoApplied" and k2.sequence == 3, $k2)
 
-  # 5. Uninstall names the evidence it removes.
+  # 5. Uninstall names the evidence before it removes anything.
   let entries = g.evidenceCount()
-  let un = g.exec(repro & " system addon uninstall", timeoutSec = 1800)
+  let un0 = g.exec(repro & " system addon uninstall", timeoutSec = 1800)
+  record["uninstallRefused"] = %(un0.stdout & un0.stderr)
+  step("without --discard-store-evidence uninstall refuses, naming each " &
+       "entry, and removes nothing",
+       un0.exitCode != 0 and entries > 0 and
+         (un0.stdout & un0.stderr).count("store evidence ") == entries and
+         "nothing was removed" in un0.stdout & un0.stderr and
+         g.evidenceCount() == entries and
+         g.exec("test -d /var/lib/repro/system").exitCode == 0,
+       un0.stdout & un0.stderr)
+  let un = g.exec(repro & " system addon uninstall --discard-store-evidence",
+                  timeoutSec = 1800)
   record["uninstall"] = %(un.stdout & un.stderr)
-  step("uninstall succeeds and names each store-evidence entry",
-       un.exitCode == 0 and entries > 0 and
+  step("with it, uninstall succeeds and names each store-evidence entry",
+       un.exitCode == 0 and
          (un.stdout & un.stderr).count("(store evidence)") == entries,
        un.stdout & un.stderr)
   step("the evidence directory is gone with the state",

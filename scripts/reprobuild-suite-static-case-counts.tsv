@@ -44,7 +44,7 @@ libs/repro_addon/tests/t_addon_engine_agent_tick_records.nim	nim	1
 libs/repro_addon/tests/t_addon_etc_write_never_follows_symlinks.nim	nim	8
 libs/repro_addon/tests/t_addon_evidence_credential_is_append_only.nim	nim	4
 libs/repro_addon/tests/t_addon_evidence_detectors.nim	nim	9
-libs/repro_addon/tests/t_addon_evidence_docs_commands_parse.nim	nim	2
+libs/repro_addon/tests/t_addon_evidence_docs_commands_parse.nim	nim	3
 libs/repro_addon/tests/t_addon_evidence_enrol_never_adopts_keys.nim	nim	4
 libs/repro_addon/tests/t_addon_evidence_key_survives_retention.nim	nim	4
 libs/repro_addon/tests/t_addon_evidence_lag_resigned.nim	nim	2
@@ -69,6 +69,7 @@ libs/repro_addon/tests/t_addon_reassert_defers_to_a_live_switch.nim	nim	2
 libs/repro_addon/tests/t_addon_recipient_key_mode_checked_at_load.nim	nim	6
 libs/repro_addon/tests/t_addon_restore_before_start.nim	nim	2
 libs/repro_addon/tests/t_addon_retargeted_address_is_refused.nim	nim	3
+libs/repro_addon/tests/t_addon_review_findings.nim	nim	16
 libs/repro_addon/tests/t_addon_secret_declarations.nim	nim	5
 libs/repro_addon/tests/t_addon_secret_files_created_private_and_never_through_symlinks.nim	nim	6
 libs/repro_addon/tests/t_addon_secrets_envelopes_and_rotation.nim	nim	13
@@ -1184,6 +1185,7 @@ tests/e2e/addon/t_e2e_addon_compiled_pin_carries_activity_selection.nim	nim	1
 tests/e2e/addon/t_e2e_addon_compromised_compiler_is_refused.nim	nim	1
 tests/e2e/addon/t_e2e_addon_compromised_fetch_cannot_write_etc.nim	nim	1
 tests/e2e/addon/t_e2e_addon_confirm_or_revert.nim	nim	1
+tests/e2e/addon/t_e2e_addon_custody_crash_points.nim	nim	1
 tests/e2e/addon/t_e2e_addon_debian_12_to_13_release_upgrade.nim	nim	1
 tests/e2e/addon/t_e2e_addon_detectors_positive_controls.nim	nim	1
 tests/e2e/addon/t_e2e_addon_divert_survives_package_upgrade.nim	nim	1

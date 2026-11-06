@@ -36,6 +36,7 @@ import ./fingerprint
 import ./generation0
 import ./host_exec
 import ./ledger
+import ./mutations
 
 export evidence_record.EvidenceCategory
 
@@ -136,6 +137,33 @@ proc toRecord*(e: EvidenceEvent; extra: seq[(string, string)]): EvidenceRecord =
     cast[seq[byte]](e.payload), nowMs = int64(epochTime() * 1000))
   result.senderPid = int32(getCurrentProcessId())
 
+proc outboxStaging*(outbox: string): string =
+  ## Where an outbox entry is written before it is renamed into the outbox:
+  ## beside it, on the same filesystem, so the outbox itself only ever holds
+  ## complete entries (the path unit starts the shipping unit on a
+  ## non-empty outbox; a torn temporary inside it would start it for
+  ## nothing, A11 review finding 11).
+  outbox.parentDir / ".outbox-staging"
+
+proc writeOutboxEntry*(outbox, name, bytes: string) =
+  ## A writer that cannot use the staging directory (a unit whose writable
+  ## paths are the outbox alone: a rename between two bind mounts fails
+  ## with EXDEV) writes its temporary inside the outbox as before; such a
+  ## torn temporary is swept by the shipping run, under its bounded
+  ## backoff (``evidence_ship``).
+  when mutated("outbox-temporary-inside"):
+    # FALSIFYING BUILD: the temporary inside the outbox, as before.
+    writeFileAtomic(outbox / name, bytes, 0o600)
+  else:
+    try:
+      let staging = outboxStaging(outbox)
+      createDir(staging)
+      setFilePermissions(staging, {fpUserRead, fpUserWrite, fpUserExec})
+      writeFileAtomic(staging / name, bytes, 0o600)
+      moveFile(staging / name, outbox / name)
+    except OSError, IOError:
+      writeFileAtomic(outbox / name, bytes, 0o600)
+
 proc recordEvidence*(e: EvidenceEvent; site = defaultSite()): string =
   ## Write one record (local JSON, then the outbox entry) and return the
   ## local record's path. Raises when either cannot be written.
@@ -175,8 +203,8 @@ proc recordEvidence*(e: EvidenceEvent; site = defaultSite()): string =
     createDir(site.outbox)
     setFilePermissions(site.outbox, {fpUserRead, fpUserWrite, fpUserExec})
     let rec = redact(toRecord(e, extra))
-    writeFileAtomic(site.outbox / outboxName(e.kind),
-                    cast[string](encodeEvidenceRecord(rec)), 0o600)
+    writeOutboxEntry(site.outbox, outboxName(e.kind),
+                     cast[string](encodeEvidenceRecord(rec)))
   if site.journal and not e.offHostOnly:
     # The journal line is best effort; the files above are the record.
     try:

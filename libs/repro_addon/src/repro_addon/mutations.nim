@@ -598,6 +598,76 @@
 ##                                            self-test alerts (D9)
 ## ``sink-payload-unescaped``                 the sink prints a payload's
 ##                                            bytes raw (D3)
+## ``apt-closure-member-stays-missing``       a closure whose union is
+##                                            realised leaves a missing
+##                                            member unrealised (review 1)
+## ``fetch-skips-missing-member``             the fetch stages a member's
+##                                            archive only when the union is
+##                                            missing (review 1)
+## ``fetch-unit-paths-diverge``               re-pinning renders the fetch
+##                                            unit without its observed-unit
+##                                            directives (review 2)
+## ``containment-unbound``                    any attested containment
+##                                            record counts, whatever its
+##                                            statement (review 3)
+## ``handover-to-enrolled-id``                a hand-over to an enrolled id,
+##                                            or the sender's own, is
+##                                            followed (review 4)
+## ``retired-without-successor-ok``           a retired id without an
+##                                            enrolled successor raises
+##                                            nothing (review 4)
+## ``tree-tear-by-shape``                     any static tree missing a file
+##                                            is repaired as a crash tear
+##                                            (review 5)
+## ``contained-agent-applies``                the engine agent ticks and
+##                                            applies on a contained host
+##                                            (review 6)
+## ``lag-ignores-check-state``                lag counts from the archive's
+##                                            re-signed copy, not the
+##                                            check's own first-seen state
+##                                            (review 7)
+## ``path-unit-not-migrated``                 the own-object migration
+##                                            leaves a stale shipping path
+##                                            unit (review 8)
+## ``ack-by-sequence-only``                   an acknowledgement handles
+##                                            every alert of its record
+##                                            (review 9)
+## ``custody-forgets-before-rebuild``         custody drops the expected
+##                                            digest before the rebuild is
+##                                            verified (review 10)
+## ``evidence-copy-unbounded``                an altered object's cross-
+##                                            filesystem copy has no size
+##                                            bound (review 10)
+## ``ship-no-backoff``                        the shipping unit retries a
+##                                            failing upload with no backoff
+##                                            (review 11)
+## ``outbox-temporary-inside``                an outbox entry's temporary
+##                                            file is written inside the
+##                                            outbox (review 11)
+## ``custody-prefixes-only``                  a store path outside every
+##                                            prefix is not named to custody
+##                                            (review 12)
+## ``egress-ignores-counter``                 refused packets the full sets
+##                                            do not attribute raise nothing
+##                                            (review 13)
+## ``evidence-aged-by-mtime``                 store evidence ages by its
+##                                            mtime, not its name's stamp
+##                                            (review 14)
+## ``uninstall-discards-evidence-silently``   uninstall removes kept store
+##                                            evidence without being told to
+##                                            (review 14)
+## ``self-test-any-verb``                     a self-test window absorbs any
+##                                            verb, any number of times
+##                                            (review 15)
+## ``hosts-retired-fifth-only``               the hosts file's retired@ is
+##                                            read only in the fifth field
+##                                            (review 16)
+## ``custody-ignores-leftovers``             an object a crashed recovery
+##                                            renamed aside is never filed
+##                                            as evidence (review 10)
+## ``custody-skips-unrecorded``               an evidence entry a crash left
+##                                            without its record is never
+##                                            recorded (review 10)
 ## =========================================  ==============================
 
 # The deploy agent's own mutations (``repro_deploy_agent/agent_mutations``)
@@ -988,7 +1058,24 @@ const
                           "check-ignores-containment", "contain-unsigned",
                           "refusal-names-no-copy", "handover-unverified",
                           "check-ignores-probe-announcement",
-                          "sink-payload-unescaped"]
+                          "sink-payload-unescaped",
+                          # The A11 code review's findings 1-16.
+                          "apt-closure-member-stays-missing",
+                          "fetch-skips-missing-member",
+                          "fetch-unit-paths-diverge",
+                          "containment-unbound", "handover-to-enrolled-id",
+                          "retired-without-successor-ok",
+                          "tree-tear-by-shape", "contained-agent-applies",
+                          "lag-ignores-check-state", "path-unit-not-migrated",
+                          "ack-by-sequence-only",
+                          "custody-forgets-before-rebuild",
+                          "evidence-copy-unbounded", "ship-no-backoff",
+                          "outbox-temporary-inside", "custody-prefixes-only",
+                          "egress-ignores-counter", "evidence-aged-by-mtime",
+                          "uninstall-discards-evidence-silently",
+                          "self-test-any-verb", "hosts-retired-fifth-only",
+                          "custody-ignores-leftovers",
+                          "custody-skips-unrecorded"]
 
 when AddonMutation.len > 0 and AddonMutation notin KnownAddonMutations and
     AddonMutation notin KnownAgentMutations:

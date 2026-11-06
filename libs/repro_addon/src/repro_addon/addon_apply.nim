@@ -76,11 +76,14 @@ import repro_infra/planner
 from repro_infra/service_floor import floorWritablePlaces, serviceDirectives,
   StartingDependencyKeys, BaseReachKeys, normalisedPath,
   PrivilegedGroups
+import repro_infra/service_floor as serviceFloor
 from repro_profile import ProfileBuildAction
 import repro_local_store/store
 
 import ./agent_record
 import ./collision
+import ./own_profile
+import ./contain_marker
 import ./tmpfiles_scope
 import ./addon_secrets
 import ./base_identity
@@ -3008,6 +3011,32 @@ proc fileSourceObject*(r: SystemResource): StoreObjectRef =
       return StoreObjectRef(path: o, kind: classifyStoreObject(o),
                             referrer: r.address)
 
+proc storeObjectsNamedIn*(text: string): seq[string] =
+  ## Every store object any ``/repro/store`` path in ``text`` names, read as
+  ## systemd reads paths (``normalisedPath``) and placed by
+  ## ``storeObjectFor``: a prefix, or the top-level store entry a path
+  ## outside every prefix lies in (``/repro/store/tmp``, a loose directory),
+  ## which custody then refuses as having no realiser (default deny, A11
+  ## review finding 12). The store itself and its prefixes directory name no
+  ## object.
+  when mutated("custody-prefixes-only"):
+    return       # FALSIFYING BUILD: only prefixes are seen, as before
+  var tok = ""
+  proc take(tok: var string; acc: var seq[string]) =
+    let i = tok.find("/repro")
+    if i >= 0:
+      let p = serviceFloor.normalisedPath(tok[i .. ^1])
+      if p.startsWith(StoreRoot & "/"):
+        let obj = storeObjectFor(p)
+        if obj.len > 0 and obj != StoreRoot / "prefixes" and obj notin acc:
+          acc.add(obj)
+    tok = ""
+  for c in text & " ":
+    if c in {' ', '\t', '\n', '\r', '\'', '"', ';', ':', '=', ',', '(', ')'}:
+      take(tok, result)
+    else:
+      tok.add(c)
+
 proc isSha256Name(s: string): bool =
   s.len == 64 and s.allCharsInSet(HexDigits)
 
@@ -3064,46 +3093,55 @@ proc filesRecovery*(prefix: string; resources: openArray[SystemResource];
       realiseFilesPrefix(files, version).digest)
 
 proc closureRecovery*(o: StoreObjectRef; locks: openArray[AptClosureLock];
-                      site: CustodySite; fetch: AptDebFetcher): Recovery =
+                      site: CustodySite; fetch: AptDebFetcher;
+                      storeRoot = AddOnSystemStoreRoot;
+                      cacheDir = AddOnAptDebCacheDir): Recovery =
   ## An apt closure's union or member is realised again from the lock's
   ## ``.deb`` archives (SHA-256 pinned by the lock in the signed manifest),
-  ## which the apply reads from what the fetch unit staged. Every altered
-  ## prefix of that closure -- the union shares its members' files by hard
-  ## link -- is moved into the evidence directory first; a member whose
-  ## archive the apply has no copy of is not realised, the switch refuses,
-  ## and the next fetch, finding the member gone, stages its archive.
+  ## which the apply reads from what the fetch unit staged. A member is
+  ## rebuilt whenever it is gone, whatever the union's state (an altered
+  ## member's union may be intact: it holds hard links, and a file added to
+  ## or removed from the member's directory is not in it; A11 review finding
+  ## 1). The union, when its own bytes are altered too, is moved aside and
+  ## rebuilt with the member. A member whose archive the apply has no copy
+  ## of is not realised: the switch refuses, and the next fetch, finding the
+  ## member gone, stages its archive.
   for lock in locks:
-    var paths = @[aptClosurePrefixPath(AddOnSystemStoreRoot, lock)]
-    for d in lock.debs: paths.add(aptDebPrefixPath(AddOnSystemStoreRoot, d))
+    var paths = @[aptClosurePrefixPath(storeRoot, lock)]
+    for d in lock.debs: paths.add(aptDebPrefixPath(storeRoot, d))
     if o.path notin paths: continue
     let l = lock
     let union = paths[0]
     return Recovery(ok: true, source: "the lock's .deb archives (pinned " &
       "by SHA-256 in the signed manifest)",
       realise: proc (): string =
-        # The union carries its members' bytes; it goes too when altered.
+        var unionAside, unionExp, unionNow = ""
         if dirExists(union) and union != o.path:
-          let exp = expectedDigests(site).getOrDefault(union, "")
-          let now = storeTreeDigest(union)
-          if exp.len > 0 and now != exp:
-            let entry = preserveEvidence(site, union, exp, now,
-              "built from the altered member " & o.path)
-            forgetRealised(site, union)
-            recordRecovered(site, StoreObjectRef(path: union,
-              kind: sokAptClosure, referrer: o.referrer), exp, now, entry,
-              "rebuilt with the recovered member")
+          unionExp = expectedDigests(site).getOrDefault(union, "")
+          unionNow = storeTreeDigest(union)
+          if unionExp.len > 0 and unionNow != unionExp:
+            unionAside = moveAside(site, union)
         let log = AptRealisationLog(verifyReuse: proc (p: string): string =
           let exp = expectedDigests(site).getOrDefault(p, "")
           if exp.len == 0:
             return (if custodyHost(site): "it has no recorded digest" else: "")
           let c = verifiedDigest(site, p, exp)
           if c.verdict == cvVerified: "" else: "its bytes are altered")
-        discard realiseAptClosure(l, AddOnSystemStoreRoot,
-          AddOnAptDebCacheDir, fetch, log = log)
+        discard realiseAptClosure(l, storeRoot, cacheDir, fetch,
+          log = log, rebuildMissingMembers = true)
         result = ""
         for (p, d) in log.published:
           recordRealised(site, p, d)
-          if p == o.path: result = d)
+          if p == o.path: result = d
+        if unionAside.len > 0 and dirExists(union) and
+            storeTreeDigest(union) == unionExp:
+          # The union is back: only now is its alteration filed and recorded.
+          let entry = fileEvidence(site, unionAside, union, unionExp, unionNow,
+            "built from the altered member " & o.path)
+          recordRecovered(site, StoreObjectRef(path: union,
+            kind: sokAptClosure, referrer: o.referrer), unionExp, unionNow,
+            entry, "rebuilt with the recovered member")
+          markRecorded(entry))
   Recovery(why: "no closure of this generation consists of it")
 
 proc storeRecovery*(o: StoreObjectRef; resources: openArray[SystemResource];
@@ -3154,6 +3192,16 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
       parseAddOnUserProfile(opts.userProfileText), carriedAt,
       (if opts.carriedStateRoot.len > 0: opts.carriedStateRoot else: "/"))
   let stateDir = if opts.stateDir.len > 0: opts.stateDir else: DefaultStateDir
+  # An operator contained the host (decision 51): no deploy agent applies,
+  # whichever agent it is -- the add-on's own units or the full engine's
+  # ``repro deploy-agent`` (A11 review finding 6). Enforced here, in the
+  # switch every agent apply goes through, not only in the units.
+  if opts.agentSequence > 0'u64 and isContained(stateDir) and
+      not mutated("contained-agent-applies"):
+    raise newException(AddonApplyError, "EAddOnContained: the host is " &
+      "contained by an operator (" & containedMarkerPath(stateDir) & "); " &
+      "a deploy-agent apply is refused until `repro system addon release`; " &
+      "nothing was written")
   if opts.agentRecord.present and opts.agentSequence > 0'u64 and
       opts.agentRecord.sequence != opts.agentSequence:
     # The generation would carry two different sequences, and the floor
@@ -3241,10 +3289,15 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
   let seamPrefix = if replaying: "replay:"
                    elif purpose == "revert": "revert:"
                    else: ""
+  # Generation 0's objects this build renders differently are re-rendered
+  # by every switch (A11 review findings 2 and 8: a host bootstrapped
+  # before a fix gets it with its next switch; ``own_profile``). A replay
+  # applies exactly what the interrupted switch planned.
   let ownText =
     if replaying: replayPlan.targetOwnText
-    elif opts.ownProfileText.len > 0: opts.ownProfileText
-    elif fileExists(ownProfilePath(stateDir)): readFile(ownProfilePath(stateDir))
+    elif opts.ownProfileText.len > 0: migrateOwnProfile(opts.ownProfileText)
+    elif fileExists(ownProfilePath(stateDir)):
+      migrateOwnProfile(readFile(ownProfilePath(stateDir)))
     else: raise newException(AddonApplyError,
       "not an add-on host: " & ownProfilePath(stateDir) & " is missing")
   let previous =
@@ -4740,8 +4793,10 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
       when not mutated("recheck-skips-dropin-prefixes"):
         # Any kind's declaration and installed bytes (default deny: a kind
         # whose store references nothing collects is still covered).
-        for o in referencedStoreObjects(renderStanza(p.r).join("\n") &
-                                        "\n" & p.content):
+        let named = renderStanza(p.r).join("\n") & "\n" & p.content
+        for o in referencedStoreObjects(named):
+          add(o, p.r.address)
+        for o in storeObjectsNamedIn(named):
           add(o, p.r.address)
       add(fileSourceObject(p.r).path, p.r.address)
       if p.r.kind == srkSystemdSystemUnit:

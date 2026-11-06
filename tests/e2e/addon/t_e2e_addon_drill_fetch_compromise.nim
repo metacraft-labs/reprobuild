@@ -178,8 +178,9 @@ proc body(g: Guest; repro: string; step: StepFn; record: JsonNode;
       "A record's payload: " & sinkBinary() & " payload --dir " & sink.storeDir &
         " --seq <n>\n" &
       "Off-host check: " & sinkBinary() & " " & checkCmd & " --update-hosts\n" &
-      "Acknowledge a handled detection: " & sinkBinary() & " ack --dir " &
-        sink.storeDir & " --seq <n> --operator <you> --reason <text>\n" &
+      "Acknowledge a handled alert: " & sinkBinary() & " ack --dir " &
+        sink.storeDir & " --seq <n> --alert <detector>/<trigger> " &
+        "--operator <you> --reason <text>\n" &
       "Evidence ids of the detection: " & evidenceIds.mapIt($it).join(" ") & "\n" &
       "Run a command in the guest: write " & drill / "requests/<n>.sh" &
         " and read <n>.out\n" &
@@ -250,21 +251,25 @@ proc body(g: Guest; repro: string; step: StepFn; record: JsonNode;
   step("containment: the check reports the agent contained, not silent (D5)",
        "addon-agent-tick contained" in c2.output and
          "DET-AO-8 silent addon-agent-tick" notin c2.output, c2.output)
-  # Every refused tick before the containment raised its own DET-AO-2 (the
-  # timer kept fetching the compromised compile): the investigator
-  # acknowledges each, by the sequences the check printed.
-  var refusals: seq[uint64]
-  for e in sink.entries():
-    if e.seq > before and e.kind == ekRecord and $e.senderHostId == host and
-        e.record.category == ecDetection:
-      refusals.add(e.seq)
-  record["acknowledged"] = %refusals
-  for sq in refusals:
-    let ack = sink.sinkCli("ack --dir " & quoteShell(sink.storeDir) & " --seq " &
-      $sq & " --operator drill --reason " &
-      quoteShell("investigated: compromised compiler, contained"))
-    step("containment: the investigator acknowledges sequence " & $sq,
-         ack.code == 0, ack.output)
+  # Every refused tick before the containment raised its own refusal alert
+  # (the timer kept fetching the compromised compile): the investigator
+  # acknowledges each, by the sequence AND the alert the check printed --
+  # never by sequence alone, which would also handle any other alert of the
+  # same record (A11 review finding 9).
+  var acked: seq[string]
+  for line in c2.output.splitLines():
+    let f = line.splitWhitespace()
+    if f.len >= 5 and f[0] == "ALERT" and f[4].startsWith("seq="):
+      let kind = f[2] & "/" & f[3]
+      let sq = f[4]["seq=".len .. ^1]
+      let ack = sink.sinkCli("ack --dir " & quoteShell(sink.storeDir) &
+        " --seq " & sq & " --alert " & quoteShell(kind) &
+        " --operator drill --reason " &
+        quoteShell("investigated: compromised compiler, contained"))
+      acked.add(sq & " " & kind)
+      step("containment: the investigator acknowledges " & kind & " at " & sq,
+           ack.code == 0, ack.output)
+  record["acknowledged"] = %acked
   phase("containment", %*{"snapshot": snap})
 
   # 6. recovery
