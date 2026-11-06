@@ -82,6 +82,10 @@ type
     evidence*: EvidenceSite
     noWrites*: bool
       ## A plan: the cache is consulted, never written.
+    evidenceMaxBytes*: int64
+      ## The most an altered object copied across filesystems may hold
+      ## (``StoreEvidenceMaxBytes`` on a host); a larger one keeps its
+      ## manifest only. 0 reads as the host's bound.
 
   CustodyVerdict* = enum
     cvVerified, cvUnverifiable, cvAltered
@@ -456,7 +460,9 @@ proc fileEvidence*(site: CustodySite; aside, path, expected, observed,
       # Another filesystem (a btrfs store subvolume): a bounded copy.
       let size = dirBytes(aside)
       when not mutated("evidence-copy-unbounded"):
-        if size > StoreEvidenceMaxBytes:
+        let bound = if site.evidenceMaxBytes > 0: site.evidenceMaxBytes
+                    else: StoreEvidenceMaxBytes
+        if size > bound:
           kept = "manifest only (" & $size & " bytes, over the limit)"
         else:
           copyDirWithPermissions(aside, result / "tree")

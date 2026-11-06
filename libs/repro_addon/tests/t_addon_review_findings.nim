@@ -52,6 +52,7 @@
 ## ``nowMs``.
 
 import std/[asyncdispatch, os, sequtils, strutils, tables, times, unittest]
+from std/posix import Stat, stat
 
 import repro_peer_cache/auth as peerAuth
 import repro_peer_cache/evidence
@@ -87,6 +88,12 @@ import ../../../tests/e2e/addon/deb_fixture_support
 let root = getTempDir() / ("addon-review-" & $getCurrentProcessId())
 removeDir(root)
 createDir(root)
+
+proc statDevice(path: string): uint64 =
+  ## The device a path lives on (``stat(2)`` ``st_dev``).
+  var st: Stat
+  doAssert stat(path.cstring, st) == 0, path
+  uint64(st.st_dev)
 
 proc scratchSite(name: string): CustodySite =
   let st = root / name / "state"
@@ -401,6 +408,28 @@ suite "the A11 code review's findings":
     check evidenceRecords("store-recovery-interrupted", site.evidence.dir).len == 1
     check not dirExists(asideRoot(site)) or
       toSeq(walkDir(asideRoot(site))).len == 0
+    # Across filesystems (the evidence directory on /dev/shm, a tmpfs; the
+    # store here) the altered object is copied, at most the bound: a larger
+    # one keeps its manifest and record only.
+    var far = site
+    far.evidenceDir = "/dev/shm" / ("a11-review10-" & $getCurrentProcessId())
+    far.evidenceMaxBytes = 64
+    removeDir(far.evidenceDir)
+    defer: removeDir(far.evidenceDir)
+    check statDevice(far.evidenceDir.parentDir) != statDevice(site.storeRoot)
+    let big = site.storeRoot / "prefixes" / "x" / "3-c"
+    createDir(big)
+    writeFile(big / "f", "x".repeat(4096))
+    let bigEntry = fileEvidence(far, moveAside(far, big), big, "e", "o", "big")
+    check fileExists(bigEntry / "manifest") and fileExists(bigEntry / "record")
+    check not dirExists(bigEntry / "tree")
+    check "manifest only" in readFile(bigEntry / "record")
+    let small = site.storeRoot / "prefixes" / "x" / "4-d"
+    createDir(small)
+    writeFile(small / "f", "tiny\n")
+    let smallEntry = fileEvidence(far, moveAside(far, small), small, "e", "o",
+                                  "small")
+    check readFile(smallEntry / "tree" / "f") == "tiny\n"
     # A crash after the entry was filed and the object rebuilt, before its
     # record: the next pass records it, once.
     let obj2 = site.storeRoot / "prefixes" / "x" / "2-b"
@@ -431,6 +460,16 @@ suite "the A11 code review's findings":
       check p.endsWith(".evr")
     # Written beside the outbox first, then renamed in.
     check dirExists(outboxStaging(ob))
+    # Every run that leaves the outbox non-empty waits, longer each time in
+    # a row; an empty outbox ends the backoff.
+    let ss = ShipSite(stateDir: root / "outbox11" / "state", outbox: ob)
+    check shipRunWait(ss, 300) == 5
+    check shipRunWait(ss, 300) == 10
+    check shipRunWait(ss, 300) == 20
+    for kind, p in walkDir(ob): removeFile(p)
+    check shipRunWait(ss, 300) == 0
+    writeOutboxEntry(ob, "2-x.evr", "bytes")
+    check shipRunWait(ss, 300) == 5
 
   test "12: a store path outside every prefix is named":
     let named = storeObjectsNamedIn("ExecStart=/repro/store/tmp/evil/bin/sh -c x\n" &

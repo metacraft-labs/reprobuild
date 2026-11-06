@@ -359,6 +359,32 @@ proc shipBackoffSec*(failures, heartbeatSec: int): int =
   for i in 0 ..< min(failures, 10): w = min(cap, w * 2)
   min(cap, w)
 
+proc shipRunWait*(site: ShipSite; heartbeatSec: int): int =
+  ## The seconds a run waits before it exits: ``shipBackoffSec`` of the runs
+  ## in a row that left the outbox non-empty (counted in the unit's state,
+  ## ``ship-failures``), 0 once it is empty (the count is cleared). Every
+  ## run ends with it, whatever kept the outbox non-empty -- a sink that is
+  ## down, a credential that is broken, an entry that will not go -- so the
+  ## path unit's ``DirectoryNotEmpty=`` restarts it at a bounded pace (A11
+  ## review finding 11).
+  let failuresPath = site.stateDir / "ship-failures"
+  var failures = 0
+  try: failures = parseInt(readFile(failuresPath).strip())
+  except CatchableError: discard
+  when mutated("ship-no-backoff"):
+    return 0
+  if outboxBusy(site.outbox):
+    inc failures
+    try:
+      createDir(site.stateDir)
+      writeFile(failuresPath, $failures & "\n")
+    except CatchableError: discard
+    shipBackoffSec(failures - 1, heartbeatSec)
+  else:
+    if failures > 0:
+      try: removeFile(failuresPath) except CatchableError: discard
+    0
+
 proc runEvidenceShipCli*(args: seq[string]): int =
   var force = false
   for a in args:
@@ -367,9 +393,6 @@ proc runEvidenceShipCli*(args: seq[string]): int =
       stderr.write("usage: repro system addon evidence-ship [--heartbeat]\n")
       return 2
   let site = defaultShipSite()
-  let failuresPath = site.stateDir / "ship-failures"
-  var failures = 0
-  try: failures = parseInt(readFile(failuresPath).strip()) except CatchableError: discard
   var heartbeat = DefaultEvidenceHeartbeatSec
   var broken = ""
   result = 0
@@ -403,16 +426,7 @@ proc runEvidenceShipCli*(args: seq[string]): int =
           kind: "evidence-ship-broken", fields: @[("message", broken)]),
           defaultSite())
       except CatchableError: discard
-  when not mutated("ship-no-backoff"):
-    if outboxBusy(site.outbox):
-      inc failures
-      try:
-        createDir(site.stateDir)
-        writeFile(failuresPath, $failures & "\n")
-      except CatchableError: discard
-      sleep(1000 * shipBackoffSec(failures - 1, heartbeat))
-    elif failures > 0:
-      try: removeFile(failuresPath) except CatchableError: discard
+  sleep(1000 * shipRunWait(site, heartbeat))
 
 proc runCredentialCheckCli*(args: seq[string]): int =
   if args.len != 0:
