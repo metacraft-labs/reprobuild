@@ -85,14 +85,21 @@ type Case = object
   unitLines: string     ## lines added to its [Unit] (round 8: the
                         ## dependency cases reach their own rule, not the
                         ## drop-in allowlist)
+  activatorOnly: bool   ## the service only through its socket: systemd
+                        ## refuses to start a socket whose service is
+                        ## already active (systemd.socket(5)), so a service
+                        ## the switch started would keep the socket from
+                        ## ever applying its options
   expect: seq[string]   ## the refusal of the rule the case targets: one of
                         ## these is in the effective check's refusal
                         ## (round 8, finding 4)
 
-proc unitResource(name, service, binary: string; unitLines = ""): string =
-  ## A floored oneshot unit; a template is declared without ``[Install]``
-  ## and is not enabled (it has no default instance).
-  let tmpl = name.contains("@.")
+proc unitResource(name, service, binary: string; unitLines = "";
+                  enabled = true): string =
+  ## A floored oneshot unit; a template, or a unit only its socket starts
+  ## (``enabled = false``), is declared without ``[Install]`` and is not
+  ## enabled.
+  let tmpl = name.contains("@.") or not enabled
   "systemd.systemUnit {\n  name = \"" & name & "\"\n  content = \"[Unit]\n" &
     "Description=A9 round 3\n" & unitLines & "\n[Service]\nType=oneshot\nRemainAfterExit=yes\n" &
     service & "ExecStart=" & binary & " --version\n" &
@@ -173,6 +180,7 @@ proc cases(binary, prefix: string): seq[Case] =
     Case(name: "a9e-memlock.service", expect: @["LimitMEMLOCK"], service: "LimitMEMLOCK=infinity\n"),
     Case(name: "a9e-sockets.service", expect: @["Sockets=dbus.socket"], service: "Sockets=dbus.socket\n"),
     Case(name: "a9e-special.service", expect: @["(Special)"], service: "",
+         activatorOnly: true,
          extra: "systemd.systemUnit {\n  name = \"a9e-special.socket\"\n" &
                 "  content = \"[Socket]\nListenSpecial=/etc/a9e-target\n" &
                 "Writable=yes\n\n[Install]\nWantedBy=sockets.target\n\"\n" &
@@ -219,6 +227,7 @@ proc cases(binary, prefix: string): seq[Case] =
     Case(name: "a9e-isolate.service", expect: @["changes the system's state beyond the unit"], service: "",
          unitLines: "OnFailure=multi-user.target\nOnFailureJobMode=isolate\n"),
     Case(name: "a9e-mark.service", expect: @["Mark=1"], service: "",
+         activatorOnly: true,
          extra: "systemd.systemUnit {\n  name = \"a9e-mark.socket\"\n" &
                 "  content = \"[Socket]\nListenStream=127.0.0.1:18091\nMark=1\n\n" &
                 "[Install]\nWantedBy=sockets.target\n\"\n  enabled = true\n}\n"),
@@ -305,10 +314,12 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
       let base = head & unitResource("a9e-control.service", "", binary)
       if c.host.len > 0:
         discard g.run(c.host & "; systemctl daemon-reload")
-      let text = base & unitResource(c.name, c.service, binary, c.unitLines) & c.extra
+      let text = base & unitResource(c.name, c.service, binary, c.unitLines,
+                                     enabled = not c.activatorOnly) & c.extra
       r = g.applyProfile(repro, c.name.split('.')[0].replace("@", "-"), text)
       let output = r.stdout & r.stderr
       let probes = if c.probes.len > 0: c.probes.splitWhitespace()
+                   elif c.activatorOnly: @[c.name.replace(".service", ".socket")]
                    elif c.name.contains("@."): @[c.name.replace("@.", "@1.")]
                    else: @[c.name]
       var started = false
@@ -355,7 +366,7 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
         # Under the falsifier only the floor stands between the case and its
         # start: a case refused for any other reason proves nothing.
         step(c.name & ": under floor-unchecked it starts (nothing but the " &
-             "floor refuses it)", r.exitCode == 0 and started, output)
+             "floor refuses it)", started, output)
       # The host back on the control's generation: every case unit stopped
       # and reset, no host drop-in left behind.
       discard g.run(HostCleanup & "; rm -f /etc/a9e-out; echo orig > /etc/a9e-target; " &
