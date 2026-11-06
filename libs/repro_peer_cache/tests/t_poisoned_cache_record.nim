@@ -181,6 +181,17 @@ proc awaitHandshakeToken() =
                  Vocabulary[bmHello].ratePerSecond)
   pumpFor(int(1000.0 / rate) + 50)
 
+proc capturedIs(e: EvidenceEntry; served: seq[byte]): bool =
+  ## Whether the evidence record captured exactly ``served``. The capture is
+  ## the payload as observed, truncated to ``MaxCapturedPayloadBytes``
+  ## (EVID-1), with the full size beside it. A memo entry for a MONITORED
+  ## record does not fit: its read set makes this fixture's entry about
+  ## 180 KB, so decoding the capture fails with "truncated memo entry
+  ## record". The record is identified instead by its observed size and the
+  ## captured prefix, which carries the entry header (the fingerprints).
+  e.record.payloadSize == uint64(served.len) and
+    e.record.payload == served[0 ..< min(served.len, MaxCapturedPayloadBytes)]
+
 proc fromPeer(entries: seq[EvidenceEntry]; field, value: string):
     seq[EvidenceEntry] =
   for e in entries:
@@ -370,7 +381,7 @@ suite "Distributed-Execution M7: poisoned cache records":
         check e.record.field("strongFingerprint") == $strongV2
         # The forged entry itself is captured (metadata, EVID-1).
         check e.record.payload.len > 0
-        check decodeMemoEntry(e.record.payload).strongFingerprint == strongV2
+        check capturedIs(e, encodeMemoEntry(forged))
 
       # An UNATTESTED entry (the pre-M7 shape) is refused the same way.
       var bare = entryA
@@ -433,7 +444,7 @@ suite "Distributed-Execution M7: poisoned cache records":
         check e.senderHostId == c.identity.hostId
         check e.record.field("strongFingerprint") == $staleStrong
         check e.record.field("issuer") == $a.identity.hostId
-        check decodeMemoEntry(e.record.payload).issuedAtUnix == longAgo
+        check capturedIs(e, staleBytes)
       # Expired is not forged: no suspicion from this consumer.
       check hostC3.client.suspectMarks == 0
       check not hostC3.registry.entries[m.identity.hostId].suspect
@@ -505,8 +516,7 @@ suite "Distributed-Execution M7: poisoned cache records":
       for e in disagreeing:
         check e.senderHostId == c.identity.hostId
         check e.record.field("issuer") == $m.identity.hostId
-        check decodeMemoEntry(e.record.payload).outputDigests ==
-          inconsistent.outputDigests
+        check capturedIs(e, encodeMemoEntry(inconsistent))
       # (d3) an entry for another selector.
       var elsewhere = entryA
       elsewhere.strongFingerprint = strongV2
@@ -517,7 +527,7 @@ suite "Distributed-Execution M7: poisoned cache records":
       for e in mismatched:
         check e.senderHostId == c.identity.hostId
         check e.record.field("strongFingerprint") == $s1
-        check decodeMemoEntry(e.record.payload).strongFingerprint == strongV2
+        check capturedIs(e, encodeMemoEntry(elsewhere))
       hostM.server.memoEntryReader = nil
 
       # -- No suspicion was ever recorded against the honest peer -------------
