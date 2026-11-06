@@ -372,7 +372,10 @@ proc body(g: Guest; repro: string; step: StepFn; record: JsonNode;
     # (`reassert.startCommittedUnits`, spec §7.7), and that timer's own
     # cycle then applied the sequence published here before this tick ran
     # ("tick 11 ... already converged", A9 review round 5, finding 6).
-    discard g.exec("systemctl stop repro-agent-fetch.timer")
+    # Stopped, settled and recorded as the tick helper's baseline: a cycle
+    # the timer ran before this point cannot have applied what the gate
+    # publishes next (A9 review round 7, finding 7).
+    g.recordTimerBaseline()
     discard prod.publish(PublishSpec(sequence: seqNo, profileText: text))
     let a = g.now()
     result = g.tickUnits()

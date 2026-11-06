@@ -77,7 +77,10 @@ proc body(g: Guest; repro: string; step: StepFn; record: JsonNode;
   # After a reboot the floor still holds, and the older manifest still is
   # not applied.
   g.rebootGuest()
-  discard g.exec("systemctl stop repro-agent-fetch.timer")
+  # Stopped, settled and recorded as the tick helper's baseline: a cycle
+  # the timer ran before this point cannot have applied what the gate
+  # publishes next (A9 review round 7, finding 7).
+  g.recordTimerBaseline()
   let t2 = g.tickUnits()
   step("after the reboot the older sequence 3 is not applied",
        t2.outcome == "aoConverged", $t2 & t2.applyLog)

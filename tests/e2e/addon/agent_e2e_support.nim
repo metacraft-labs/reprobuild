@@ -226,8 +226,23 @@ proc recordTimerBaseline*(g: Guest; timeoutSec = 1800) =
   ## next tick take it for the gate's own (round 7, finding 7).
   discard g.exec("systemctl stop repro-agent-fetch.timer 2>/dev/null; true")
   g.waitAgentIdle(timeoutSec)
-  discard g.exec("systemctl show -p LastTriggerUSecMonotonic --value " &
-    "repro-agent-fetch.timer > " & TimerBaseline & " 2>/dev/null; true")
+  # With the boot it was taken in: the trigger is on CLOCK_MONOTONIC,
+  # which restarts at every boot.
+  discard g.exec("printf '%s %s\\n' \"$(cat /proc/sys/kernel/random/boot_id)\" " &
+    "\"$(systemctl show -p LastTriggerUSecMonotonic --value " &
+    "repro-agent-fetch.timer)\" > " & TimerBaseline & " 2>/dev/null; true")
+
+proc timerBaseline(g: Guest): tuple[sameBoot: bool; trigger: string] =
+  ## The recorded baseline, and whether it was taken in this boot. A
+  ## baseline from before a reboot says nothing about the clock now: then
+  ## only "no trigger since the boot" ("0") is the baseline.
+  let f = g.exec("cat " & TimerBaseline & " 2>/dev/null").stdout.strip()
+  if f.len == 0: return (true, "")
+  let boot = g.run("cat /proc/sys/kernel/random/boot_id").strip()
+  let parts = f.split(' ', maxsplit = 1)
+  if parts.len < 2: return (true, f)       # round 5's file: the trigger only
+  if parts[0] != boot: return (false, "0")
+  (true, parts[1].strip())
 
 proc bootstrapWithAgent*(g: Guest; repro: string; step: StepFn;
                          extraFlags = ""; cacheUrl = "";
@@ -333,15 +348,17 @@ proc tickUnits*(g: Guest; timeoutSec = 1800): TickResult =
   var timerFired = ""
   let trigStart = g.timerTrigger()
   if variant != "tick-trusts-the-timer":
-    let prev = g.exec("cat " & TimerBaseline & " 2>/dev/null").stdout.strip()
+    let (sameBoot, prev) = g.timerBaseline()
     if prev.len == 0:
       if trigStart notin ["", "0"] and variant != "tick-compares-previous-end":
         timerFired = "repro-agent-fetch.timer has triggered (last trigger " &
           trigStart & " us monotonic) and no baseline was recorded when " &
           "the gate stopped it"
-    elif trigStart != prev:
+    elif trigStart != prev and not (prev == "0" and trigStart.len == 0):
       timerFired = "repro-agent-fetch.timer triggered (last trigger " &
-        trigStart & " us monotonic, " & prev & " when the gate last stopped it)"
+        trigStart & " us monotonic, " & prev &
+        (if sameBoot: " when the gate last stopped it)"
+         else: ": none since this boot, the gate's last stop being before it)")
   discard g.exec("rm -f " & TickStatus)
   let since = g.run("date +%s").strip()
   # The apply unit's invocation before this tick, so a failure left over
@@ -400,7 +417,7 @@ proc tickUnits*(g: Guest; timeoutSec = 1800): TickResult =
   # started settle, and record its last trigger for the next tick.
   g.recordTimerBaseline(timeoutSec)
   if variant notin ["tick-trusts-the-timer", "tick-compares-previous-end"]:
-    let trigEnd = g.exec("cat " & TimerBaseline & " 2>/dev/null").stdout.strip()
+    let trigEnd = g.timerBaseline().trigger
     if trigEnd != trigStart and timerFired.len == 0:
       timerFired = "repro-agent-fetch.timer triggered during this tick " &
         "(last trigger " & trigEnd & " us monotonic, " & trigStart &
