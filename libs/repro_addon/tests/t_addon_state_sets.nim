@@ -97,6 +97,16 @@ proc fresh(name: string): string =
   removeDir(result)
   createDir(result)
 
+proc withAccounts(root: string): string =
+  ## ``root`` with the accounts the confined fixtures name: the reach
+  ## analysis resolves a unit's account (``service_account``), and an
+  ## account the host does not have reaches everything.
+  createDir(root / "etc")
+  writeFile(root / "etc/passwd", "root:x:0:0::/root:/bin/sh\n" &
+    "app:x:1001:1001::/:/usr/sbin/nologin\n")
+  writeFile(root / "etc/group", "root:x:0:\napp:x:1001:\n")
+  root
+
 proc populate(root: string) =
   createDir(root / "var/lib/app/db")
   writeFile(root / "var/lib/app/db/data.sqlite", "rows\n")
@@ -256,7 +266,7 @@ suite "state sets":
     let p = parseSystemProfile(Profile)
     discard backupStateSet(p, src / "out", "h1", stopped(), hold = false,
                            root = src)
-    let dst = fresh("pend-dst")
+    let dst = withAccounts(fresh("pend-dst"))
     let why = carriedStateRefusal(p, src / "out", dst)
     check why.startsWith("ECarriedStatePending")
     check "/var/lib/app (systemUnit:app.service" in why

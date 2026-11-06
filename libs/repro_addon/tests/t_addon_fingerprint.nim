@@ -62,6 +62,21 @@ Version: 1.7.1-6
     check r[2].key == "/repro/store#2"
     check r[3].key == "/mnt/with space"
 
+  test "a 50%-of-RAM tmpfs reads the same on an odd and an even page count":
+    # Debian 13's /tmp is size=50%: the kernel prints size= only when the
+    # page count is odd (A11, the egress gate's G4 falsifier run).
+    let odd = "30 22 0:40 / /tmp rw,nosuid,nodev shared:5 - tmpfs tmpfs " &
+      "rw,size=1010776k,nr_inodes=1048576,inode64\n"
+    let even = "30 22 0:40 / /tmp rw,nosuid,nodev shared:5 - tmpfs tmpfs " &
+      "rw,nr_inodes=1048576,inode64\n"
+    check parseMountinfo(odd, 2021548) == parseMountinfo(even, 2021552)
+    check tmpfsHalfRamSizeOption(2021552, 4096) == ""
+    check tmpfsHalfRamSizeOption(2021548, 4096) == "size=1010776k"
+    # An explicit limit stays.
+    let other = "30 22 0:40 / /tmp rw shared:5 - tmpfs tmpfs rw,size=512000k\n"
+    check "size=512000k" in parseMountinfo(other, 2021548)[0].value
+    check "size=1010776k" in parseMountinfo(odd)[0].value
+
   test "proc net tables keep listeners only":
     let tcp = """  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode
    0: 00000000:0016 00000000:0000 0A 00000000:00000000 00:00000000 00000000     0        0 1 1 0000000000000000 100 0 0 10 0

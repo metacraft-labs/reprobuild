@@ -33,7 +33,10 @@
 ## Falsifying mutation for the DET-AO-5 boot control:
 ## ``store-verify-trusts-receipt`` (the expectation read from the altered
 ## path's own receipt, which the control deleted: the mismatch and
-## quarantine steps go red; A11 audit session 2, G2).
+## quarantine steps go red; A11 audit session 2, G2). For the DET-AO-10
+## control: ``lag-ignores-check-state`` (the check forgets when it first
+## saw the sequence, and the manifest directory holds only the re-signed
+## copy: no lag alert; A11 review finding 7).
 ##
 ## Opt-in: ``REPRO_ADDON_VM_GATES=1``.
 ##
@@ -252,10 +255,14 @@ proc body(g: Guest; repro: string; step: StepFn; record: JsonNode;
   discard publish(PublishSpec(sequence: sequence,
     profileText: canonicalFile(Managed, "ten\n"), maxAgeSeconds: 60))
   writeFile(producer.dir / AgentTarget / "latest.rdm", oldBytes)
+  # The check runs while the first copy is published, as a deployment's
+  # periodic check would, and keeps when it saw it in its own state.
+  discard sink.check(host, signers)
   sleep(75_000)
   # The producer re-signs the sequence the host is frozen below (spec §9.2
-  # expects it to): the lag still counts from its first publication (A11
-  # audit F1).
+  # expects it to), and the manifest directory keeps only the re-signed
+  # copy: the lag still counts from the first publication, which the
+  # check's own state holds (A11 audit F1, A11 review finding 7).
   let resigned = prod.publish(PublishSpec(sequence: sequence,
     profileText: canonicalFile(Managed, "ten\n"), maxAgeSeconds: 60))
   sink.archive(resigned, sequence)
@@ -279,7 +286,17 @@ proc body(g: Guest; repro: string; step: StepFn; record: JsonNode;
   discard g.exec("DEBIAN_FRONTEND=noninteractive apt-get purge -y -q " &
                  "repro-a11-fixture", timeoutSec = 900)
 
-  # DET-AO-8: silence. Every timer stopped; three intervals pass.
+  # DET-AO-8: silence. The gate drives the ticks itself (the fetch timer
+  # has been stopped since the baseline), so the tick's last heartbeat is
+  # as old as the controls above took -- DET-AO-6's package build alone can
+  # exceed its two-interval grace on a loaded host (measured at
+  # b79ceba86c, debian-13: 206 s). One tick, shipped, makes "live before
+  # the silence" a statement about the host rather than about the gate's
+  # pace. Then every timer stops and three intervals pass.
+  let pre8 = sink.headSeq()
+  discard g.tickUnits()
+  ship()
+  discard sink.waitFor(host, "addon-agent-tick", "", 120, since = pre8)
   discard g.exec("systemctl stop repro-agent-fetch.timer " &
                  "repro-addon-evidence.timer repro-addon-evidence.path")
   let quiet = sink.check(host, signers)

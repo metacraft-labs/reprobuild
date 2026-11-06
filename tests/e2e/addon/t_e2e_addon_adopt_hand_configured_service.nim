@@ -457,6 +457,36 @@ proc runBase(m: SnapshotMirror; b: BaseImage; record: JsonNode): seq[string] =
     record["ledgerBeforeAdoptionBytes"] = %ledgerBefore.len
     if fails.len > 0: return fails
 
+    # --- 2b. An operator edits an adopted file (§13 decision 50, amended
+    # 2026-11-06 by the owner; spec §4.3): the next switch refuses, naming
+    # both remedies; `repro system adopt` keeps the edit, and the ledger
+    # then records the new digest. Falsifier: owned-drift-not-adoptable.
+    var amAddress = ""
+    for e in led.entries:
+      if e.path == "/etc/default/alertmanager": amAddress = e.resource
+    step("the adopted /etc/default/alertmanager has an address", amAddress.len > 0,
+         g.ledgerOf())
+    discard g.run("printf '# edited by the operator\\n' >> /etc/default/alertmanager")
+    let edited = g.run("sha256sum /etc/default/alertmanager | cut -d' ' -f1").strip()
+    let re0 = g.applyProfile(repro, "skeleton", skeleton)
+    let reOut = re0.stdout & re0.stderr
+    step("after the edit, the switch refuses with EDrift naming `repro " &
+         "system adopt` and --reconcile-drift", re0.exitCode != 0 and
+         "EDrift" in reOut and ("repro system adopt " & amAddress) in reOut and
+         "--reconcile-drift" in reOut, reOut)
+    let readopt = g.adoptResource(repro, "skeleton", skeleton, amAddress)
+    step("`repro system adopt` keeps the edit", readopt.exitCode == 0 and
+         g.run("tail -1 /etc/default/alertmanager").strip() ==
+           "# edited by the operator", readopt.stdout & readopt.stderr)
+    var newDigest = ""
+    for e in parseLedger(g.ledgerOf()).entries:
+      if e.path == "/etc/default/alertmanager": newDigest = e.sha256
+    step("the ledger records the edited bytes' digest", newDigest == edited,
+         newDigest & " " & edited)
+    let re1 = g.applyProfile(repro, "skeleton", skeleton)
+    step("the switch then succeeds", re1.exitCode == 0, re1.stdout & re1.stderr)
+    if fails.len > 0: return fails
+
     # --- 3. Converge: hardened, from the store, state untouched.
     let work = g.runDir / "a13"
     createDir(work)

@@ -576,7 +576,12 @@ proc runInfraPlan(args: openArray[string]): int =
   # previously-applied generation's recorded `postWriteDigest` per
   # resource and surface external drift. The `--accept-drift` /
   # `--reconcile-drift` flag annotates findings as operator-accepted.
-  let planResult = producePlan(profileText, host,
+  # The plan an apply of this text on this host will run: with the
+  # carried-state requirements every apply adds (``withCarriedRequirements``),
+  # so a plan made here is not stale when it is applied.
+  let planResult = producePlan(
+    (when defined(posix): withCarriedRequirements(profileText)
+     else: profileText), host,
     opts = PlannerOptions(stateDir: stateDir,
                           acceptDrift: flags.acceptDrift))
   let env = planResult.envelope

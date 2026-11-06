@@ -173,10 +173,7 @@ proc writeOutboxRecord*(outbox: string; r: EvidenceRecord; kind: string) =
   let ns = t.toUnix() * 1_000_000_000 + int64(t.nanosecond)
   let name = align($ns, 20, '0') & "-" & $getCurrentProcessId() & "-" &
              kind & ".evr"
-  let tmp = outbox / ("." & name & ".tmp")
-  writeFile(tmp, cast[string](encodeEvidenceRecord(redact(r))))
-  setFilePermissions(tmp, {fpUserRead, fpUserWrite})
-  moveFile(tmp, outbox / name)
+  writeOutboxEntry(outbox, name, cast[string](encodeEvidenceRecord(redact(r))))
 
 proc harvestHookWrapperEvents*(site: ShipSite; host: string): int =
   ## The apt hook wrapper's ``verify-*`` lines since the last run, each as a
@@ -193,11 +190,66 @@ proc harvestHookWrapperEvents*(site: ShipSite; host: string): int =
     writeOutboxRecord(site.outbox, r, parts[1])
     inc result
 
+const
+  StaleOutboxMs* = 60_000'i64
+    ## A file in the outbox that is not an entry (a torn ``.tmp`` of a
+    ## writer that died, anything else) is removed after this long and
+    ## reported: the path unit's ``DirectoryNotEmpty=`` would otherwise start
+    ## the shipping unit for it again and again.
+  ShipPassesMax* = 20
+    ## Re-listings of the outbox one run makes, so records that land while
+    ## it ships leave with it (A11 drill D1); bounded against a writer that
+    ## never stops.
+
+proc clearStaleOutbox(site: ShipSite; host: string): int =
+  ## Remove stale non-entries, writing a record for each.
+  if not dirExists(site.outbox): return
+  let now = getTime()
+  for kind, p in walkDir(site.outbox):
+    if kind == pcFile and p.endsWith(".evr"): continue
+    try:
+      if (now - getLastModificationTime(p)).inMilliseconds < StaleOutboxMs:
+        continue
+      if kind == pcDir: removeDir(p) else: removeFile(p)
+      var r = newEvidenceRecord(ecDetection, $edShip, "outbox-entry-unreadable",
+        [("path", p), ("reason", "not an outbox entry; removed"),
+         ("host", host)], nowMs = int64(epochTime() * 1000))
+      r.senderPid = int32(getCurrentProcessId())
+      writeOutboxRecord(site.outbox, r, "outbox-stale")
+      inc result
+    except CatchableError:
+      discard
+
+proc runEvidenceShipOnce(site: ShipSite; conf: EvidenceConf; host: string;
+                         forceHeartbeat: bool): ShipResult
+
 proc runEvidenceShip*(site: ShipSite; conf: EvidenceConf; host: string;
-                      forceHeartbeat = false): ShipResult =
-  ## One shipping run (see the module documentation). Never raises for an
-  ## unreachable sink; raises ``EvidenceConfError`` for a broken credential
-  ## or configuration.
+                      forceHeartbeat = false;
+                      onPass: proc () = nil): ShipResult =
+  ## One shipping run (see the module documentation): the outbox is listed
+  ## again after each pass, so a record that lands while the run ships goes
+  ## with it. Never raises for an unreachable sink; raises
+  ## ``EvidenceConfError`` for a broken credential or configuration.
+  createDir(site.stateDir)
+  discard clearStaleOutbox(site, host)
+  result = runEvidenceShipOnce(site, conf, host, forceHeartbeat)
+  when mutated("evidence-path-changed-only"):
+    # FALSIFYING BUILD: one listing per run, as before D1.
+    if onPass != nil: onPass()
+    return
+  var passes = 1
+  if onPass != nil: onPass()      # a test's writer, between two passes
+  while result.error.len == 0 and passes < ShipPassesMax and
+      outboxEntries(site.outbox).len > 0:
+    let more = runEvidenceShipOnce(site, conf, host, false)
+    result.shipped += more.shipped
+    result.pending = more.pending
+    result.heartbeat = result.heartbeat or more.heartbeat
+    result.error = more.error
+    inc passes
+
+proc runEvidenceShipOnce(site: ShipSite; conf: EvidenceConf; host: string;
+                         forceHeartbeat: bool): ShipResult =
   createDir(site.stateDir)
   result.hookEvents = harvestHookWrapperEvents(site, host)
   let entries = outboxEntries(site.outbox)
@@ -291,6 +343,22 @@ proc readHost(): string =
   try: readFile("/proc/sys/kernel/hostname").strip()
   except IOError, OSError: "localhost"
 
+proc outboxBusy(outbox: string): bool =
+  ## Anything in the outbox (the path unit's ``DirectoryNotEmpty=`` sees it).
+  if not dirExists(outbox): return false
+  for kind, p in walkDir(outbox): return true
+  false
+
+proc shipBackoffSec*(failures, heartbeatSec: int): int =
+  ## The wait before a run that left the outbox non-empty exits: doubling
+  ## with each consecutive such run from 5 s, at most the heartbeat
+  ## interval (and 300 s). Bounds how often the path unit restarts the unit
+  ## whatever kept the outbox non-empty (A11 review finding 11).
+  let cap = min(300, max(5, heartbeatSec))
+  var w = 5
+  for i in 0 ..< min(failures, 10): w = min(cap, w * 2)
+  min(cap, w)
+
 proc runEvidenceShipCli*(args: seq[string]): int =
   var force = false
   for a in args:
@@ -299,8 +367,15 @@ proc runEvidenceShipCli*(args: seq[string]): int =
       stderr.write("usage: repro system addon evidence-ship [--heartbeat]\n")
       return 2
   let site = defaultShipSite()
+  let failuresPath = site.stateDir / "ship-failures"
+  var failures = 0
+  try: failures = parseInt(readFile(failuresPath).strip()) except CatchableError: discard
+  var heartbeat = DefaultEvidenceHeartbeatSec
+  var broken = ""
+  result = 0
   try:
     let conf = loadEvidenceConf(site.confPath)
+    heartbeat = conf.heartbeatSec
     let r = runEvidenceShip(site, conf, readHost(), force)
     stdout.write("evidence: shipped " & $r.shipped & ", queued " & $r.pending &
       (if r.heartbeat: ", heartbeat sent" else: "") &
@@ -309,13 +384,35 @@ proc runEvidenceShipCli*(args: seq[string]): int =
     if r.error.len > 0:
       stderr.write("repro-addon evidence: the sink at " & conf.sinkEndpoint &
         " did not take every record (they stay queued): " & r.error & "\n")
-    0
-  except EvidenceConfError as e:
-    stderr.write("repro system addon evidence-ship: " & e.msg & "\n")
-    2
   except CatchableError as e:
+    broken = e.msg
     stderr.write("repro system addon evidence-ship: " & e.msg & "\n")
-    2
+    result = 2
+  if broken.len > 0:
+    # A credential or configuration that cannot be used: a local detection
+    # record (the sink will see the heartbeat stop), once per distinct
+    # error, not once per restart.
+    let lastPath = site.stateDir / "ship-broken"
+    let last = try: readFile(lastPath).strip() except CatchableError: ""
+    if last != broken:
+      try:
+        createDir(site.stateDir)
+        writeFile(lastPath, broken & "\n")
+        discard recordEvidence(EvidenceEvent(detector: edShip,
+          category: ecDetection, trigger: "evidence-ship-broken",
+          kind: "evidence-ship-broken", fields: @[("message", broken)]),
+          defaultSite())
+      except CatchableError: discard
+  when not mutated("ship-no-backoff"):
+    if outboxBusy(site.outbox):
+      inc failures
+      try:
+        createDir(site.stateDir)
+        writeFile(failuresPath, $failures & "\n")
+      except CatchableError: discard
+      sleep(1000 * shipBackoffSec(failures - 1, heartbeat))
+    elif failures > 0:
+      try: removeFile(failuresPath) except CatchableError: discard
 
 proc runCredentialCheckCli*(args: seq[string]): int =
   if args.len != 0:

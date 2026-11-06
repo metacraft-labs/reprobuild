@@ -22,12 +22,16 @@ import repro_peer_cache/types
 import repro_deploy_agent/manifest
 
 import repro_addon/evidence_check
+import repro_addon/evidence_sink_cli
 
 import ./addon_testbed
 import ./agent_e2e_support
 
 const
-  SinkMutations* = ["sink-credential-has-read-scope"]
+  SinkMutations* = ["sink-credential-has-read-scope",
+    # The sink's command line and the off-host check it runs (A11 drill).
+    "sink-cli-equals-only", "sink-payload-unescaped", "check-ignores-acks",
+    "check-ignores-containment", "check-ignores-probe-announcement"]
     ## Falsifying builds that live in the sink, not in the add-on binary.
   GuestSinkCa* = "/root/addon/evidence-sink.crt"
   GuestCredentialCert* = "/var/lib/repro/evidence/host-ca.crt"
@@ -163,11 +167,16 @@ proc archive*(s: GateSink; m: seq[byte]; sequence: uint64) =
   ## with the producer's whole history, not only its latest).
   var bytes = newString(m.len)
   for i, b in m: bytes[i] = char(b)
-  # One file per copy: a re-signed copy of a sequence must not replace the
-  # first (the lag check counts from the first publication).
-  let t = getTime()
-  writeFile(s.published / ($sequence & "-" & $t.toUnix() & "-" &
-    $t.nanosecond & ".rdm"), bytes)
+  # One file per sequence, a re-signed copy replacing the first, as a
+  # producer that keeps only its latest copies does: the lag check must
+  # count from the first publication it saw by itself (its own state,
+  # ``checkState``), not from an archive only a gate keeps (A11 review
+  # finding 7).
+  writeFile(s.published / ($sequence & ".rdm"), bytes)
+
+proc checkState*(s: GateSink): string =
+  ## The off-host check's own state file, kept between the gate's checks.
+  s.published & ".check-state"
 
 proc check*(s: GateSink; host: string; signersPath: string;
             nowMs = 0'i64): CheckReport =
@@ -177,7 +186,13 @@ proc check*(s: GateSink; host: string; signersPath: string;
     manifests: loadPublishedManifests(s.published,
       peerAuth.loadTrustAnchors(signersPath)),
     nowMs: (if nowMs > 0: nowMs else: int64(epochTime() * 1000)),
-    silenceFactor: 3))
+    silenceFactor: 3, sinkHostId: sinkHostOf(s.storeDir),
+    statePath: s.checkState))
+
+proc sinkCli*(s: GateSink; args: string): tuple[code: int; output: string] =
+  ## The sink's own command line, as an operator on the sink host runs it.
+  let (o, c) = execCmdEx(quoteShell(sinkBinary()) & " " & args)
+  (c, o)
 
 proc toJson*(r: CheckReport): JsonNode =
   result = %*{"alerts": newJArray(), "statuses": newJArray()}

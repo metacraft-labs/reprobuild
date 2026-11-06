@@ -139,7 +139,7 @@ proc finishCommittedSwitch(stateDir: string; m: PendingMarker): seq[string] =
   let lp = generationLedgerPath(stateDir, current)
   if fileExists(lp):
     for e in readLedger(lp).entries:
-      if e.class == lcStorePrefix:
+      if e.class == lcStorePrefix and e.sha256.len > 0:
         prefixIds.add(parsePrefixIdHex(e.sha256))
   promotePendingRoot(current, prefixIds)
   var previous = ""

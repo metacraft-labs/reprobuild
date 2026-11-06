@@ -479,6 +479,20 @@
 ## ``receipt-trusts-inode``                   the restore receipt counts a
 ##                                            directory as restored on its
 ##                                            device and inode alone
+## ``account-as-written``                     a service's account is taken
+##                                            as written (no specifiers,
+##                                            no static account under
+##                                            DynamicUser=yes, no uid
+##                                            alias, no memberships)
+## ``reach-host-dropins-ignored``             reach reads the profile's
+##                                            drop-ins only, not the host's
+## ``reach-timer-dropins-unread``             a profile timer is read
+##                                            without its drop-ins
+## ``reach-path-unit-paths-ignored``          a path unit's watched paths
+##                                            reach nothing
+## ``restore-requirement-by-manifest-only``   no apply adds the restore
+##                                            requirement; only install-
+##                                            unit's manifest units have it
 ## ``receipt-no-fsync``                       the restore receipt is
 ##                                            renamed into place with
 ##                                            neither its file nor its
@@ -552,6 +566,108 @@
 ## ``reassert-store-trigger-missing``         a quarantined store object
 ##                                            in use is reported as
 ##                                            ``store-object-missing``
+## ``custody-skips-file-sources``            the switch's store custody
+##                                            leaves out the store files
+##                                            an ``fs.systemFile`` copies
+## ``custody-skips-closures``                 ... and the apt closures
+## ``custody-admits-undigested``              an object with no recorded
+##                                            digest is admitted on a host
+##                                            under custody
+## ``custody-cache-ignores-signature``        the digest cache answers for
+##                                            a path whatever changed in it
+## ``recovery-discards-evidence``             a recovered object's altered
+##                                            bytes are deleted, not kept
+## ``recovery-trusts-store-bytes``            a files prefix is recovered
+##                                            from its own altered copy
+## ``evidence-path-changed-only``            the shipping path unit uses
+##                                            ``PathChanged=`` and a run
+##                                            lists the outbox once (D1)
+## ``sink-cli-equals-only``                   the sink's options parse
+##                                            only as ``--name=value`` (D2)
+## ``check-ignores-acks``                     an acknowledged detection
+##                                            still alerts (D4)
+## ``check-ignores-containment``              a contained host's agent
+##                                            reads as silent (D5)
+## ``contain-unsigned``                       the containment record is
+##                                            not attested (D5)
+## ``refusal-names-no-copy``                  the refusal record names no
+##                                            staging copy or compiler (D6)
+## ``handover-unverified``                    a key hand-over is followed
+##                                            unverified (D7)
+## ``check-ignores-probe-announcement``       the announced credential
+##                                            self-test alerts (D9)
+## ``sink-payload-unescaped``                 the sink prints a payload's
+##                                            bytes raw (D3)
+## ``apt-closure-member-stays-missing``       a closure whose union is
+##                                            realised leaves a missing
+##                                            member unrealised (review 1)
+## ``fetch-skips-missing-member``             the fetch stages a member's
+##                                            archive only when the union is
+##                                            missing (review 1)
+## ``fetch-unit-paths-diverge``               re-pinning renders the fetch
+##                                            unit without its observed-unit
+##                                            directives (review 2)
+## ``containment-unbound``                    any attested containment
+##                                            record counts, whatever its
+##                                            statement (review 3)
+## ``handover-to-enrolled-id``                a hand-over to an enrolled id,
+##                                            or the sender's own, is
+##                                            followed (review 4)
+## ``retired-without-successor-ok``           a retired id without an
+##                                            enrolled successor raises
+##                                            nothing (review 4)
+## ``tree-tear-by-shape``                     any static tree missing a file
+##                                            is repaired as a crash tear
+##                                            (review 5)
+## ``contained-agent-applies``                the engine agent ticks and
+##                                            applies on a contained host
+##                                            (review 6)
+## ``lag-ignores-check-state``                lag counts from the archive's
+##                                            re-signed copy, not the
+##                                            check's own first-seen state
+##                                            (review 7)
+## ``path-unit-not-migrated``                 the own-object migration
+##                                            leaves a stale shipping path
+##                                            unit (review 8)
+## ``ack-by-sequence-only``                   an acknowledgement handles
+##                                            every alert of its record
+##                                            (review 9)
+## ``custody-forgets-before-rebuild``         custody drops the expected
+##                                            digest before the rebuild is
+##                                            verified (review 10)
+## ``evidence-copy-unbounded``                an altered object's cross-
+##                                            filesystem copy has no size
+##                                            bound (review 10)
+## ``ship-no-backoff``                        the shipping unit retries a
+##                                            failing upload with no backoff
+##                                            (review 11)
+## ``outbox-temporary-inside``                an outbox entry's temporary
+##                                            file is written inside the
+##                                            outbox (review 11)
+## ``custody-prefixes-only``                  a store path outside every
+##                                            prefix is not named to custody
+##                                            (review 12)
+## ``egress-ignores-counter``                 refused packets the full sets
+##                                            do not attribute raise nothing
+##                                            (review 13)
+## ``evidence-aged-by-mtime``                 store evidence ages by its
+##                                            mtime, not its name's stamp
+##                                            (review 14)
+## ``uninstall-discards-evidence-silently``   uninstall removes kept store
+##                                            evidence without being told to
+##                                            (review 14)
+## ``self-test-any-verb``                     a self-test window absorbs any
+##                                            verb, any number of times
+##                                            (review 15)
+## ``hosts-retired-fifth-only``               the hosts file's retired@ is
+##                                            read only in the fifth field
+##                                            (review 16)
+## ``custody-ignores-leftovers``             an object a crashed recovery
+##                                            renamed aside is never filed
+##                                            as evidence (review 10)
+## ``custody-skips-unrecorded``               an evidence entry a crash left
+##                                            without its record is never
+##                                            recorded (review 10)
 ## =========================================  ==============================
 
 # The deploy agent's own mutations (``repro_deploy_agent/agent_mutations``)
@@ -766,6 +882,44 @@ const
                           "activators-unchecked",
                           "start-hold-removes-directory",
                           "stale-start-holds-kept",
+                          # A9 review round 6.
+                          "dynamic-user-trusted",
+                          "show-last-line-only",
+                          "absent-property-passes",
+                          "file-only-settings-unread",
+                          "read-only-binds-unjudged",
+                          "state-targets-allowed",
+                          "activator-options-unchecked",
+                          "environment-file-links-unchecked",
+                          "environment-file-links-refused",
+                          # A9 review round 7: the start hold a unit can
+                          # satisfy; manager-created paths in the add-on's
+                          # trees; a unix listener anywhere under /run;
+                          # round 5's socket key list; the round-6
+                          # direct-only state rule; EnvironmentFile= by
+                          # owner and mode; a bind source by string prefix;
+                          # the effective half without the parse-time rules;
+                          # the profile's own memberships ignored; an
+                          # activator's reported properties unjudged; a
+                          # printed file-judged setting trusted.
+                          "hold-path-creatable",
+                          "manager-paths-unchecked",
+                          "listeners-anywhere-under-run",
+                          "socket-options-by-list",
+                          "state-routes-direct-only",
+                          "environment-files-by-mode",
+                          "bind-sources-by-prefix",
+                          "effective-skips-parse-rules",
+                          "profile-memberships-ignored",
+                          "activator-show-unjudged",
+                          "printed-file-settings-trusted",
+                          # §13 decision 50 (amended): an adopted
+                          # EnvironmentFile= accepted whatever its bytes.
+                          "adopted-files-unverified",
+                          # spec §4.3: an owned file that drifted cannot be
+                          # adopted again (the row before decision 50's
+                          # amendment).
+                          "owned-drift-not-adoptable",
                           # A13: a state backup or restore runs while a
                           # unit of the set may run.
                           "state-units-not-checked",
@@ -830,6 +984,15 @@ const
                           # written without its fsyncs (the hard-reset
                           # gate's receipt points).
                           "receipt-no-fsync",
+                          # A13 review round 4 finding 1: the shared
+                          # service-account resolver (repro_infra/
+                          # service_account) takes the account as written.
+                          "account-as-written",
+                          # A13 review round 4, findings 2-5.
+                          "reach-host-dropins-ignored",
+                          "reach-timer-dropins-unread",
+                          "reach-path-unit-paths-ignored",
+                          "restore-requirement-by-manifest-only",
                           "reach-ignores-privileged-commands",
                           "reach-dropin-judged-alone",
                           "reach-trigger-units-reach-nothing",
@@ -880,7 +1043,39 @@ const
                           "reassert-nft-in-own-netns",
                           # Session 2, low: one trigger for a missing and a
                           # quarantined store object.
-                          "reassert-store-trigger-missing"]
+                          "reassert-store-trigger-missing",
+                          # Owner decisions 2026-11-05 (G1 / G42): store
+                          # custody and recovery.
+                          "custody-skips-file-sources",
+                          "custody-skips-closures",
+                          "custody-admits-undigested",
+                          "custody-cache-ignores-signature",
+                          "recovery-discards-evidence",
+                          "recovery-trusts-store-bytes",
+                          # The A11 drill's findings D1-D9.
+                          "evidence-path-changed-only",
+                          "sink-cli-equals-only", "check-ignores-acks",
+                          "check-ignores-containment", "contain-unsigned",
+                          "refusal-names-no-copy", "handover-unverified",
+                          "check-ignores-probe-announcement",
+                          "sink-payload-unescaped",
+                          # The A11 code review's findings 1-16.
+                          "apt-closure-member-stays-missing",
+                          "fetch-skips-missing-member",
+                          "fetch-unit-paths-diverge",
+                          "containment-unbound", "handover-to-enrolled-id",
+                          "retired-without-successor-ok",
+                          "tree-tear-by-shape", "contained-agent-applies",
+                          "lag-ignores-check-state", "path-unit-not-migrated",
+                          "ack-by-sequence-only",
+                          "custody-forgets-before-rebuild",
+                          "evidence-copy-unbounded", "ship-no-backoff",
+                          "outbox-temporary-inside", "custody-prefixes-only",
+                          "egress-ignores-counter", "evidence-aged-by-mtime",
+                          "uninstall-discards-evidence-silently",
+                          "self-test-any-verb", "hosts-retired-fifth-only",
+                          "custody-ignores-leftovers",
+                          "custody-skips-unrecorded"]
 
 when AddonMutation.len > 0 and AddonMutation notin KnownAddonMutations and
     AddonMutation notin KnownAgentMutations:

@@ -42,25 +42,20 @@ codetracer-trace-format-nim=dev
 # codetracer-trace-format input, so `dev` is the same source under a live ref.
 codetracer-trace-format=dev
 #
-# native-recorder is PINNED, temporarily, because its `dev` and
-# codetracer-trace-format-nim's `dev` stopped compiling together: trace-format
-# b8db98c6 (the 2026-10 format revision, on trace-format-nim `dev` since its
-# promotion on 2026-10-31) removed `writeMetaDatToBuffer`'s `paths` parameter,
-# and recorder `dev` (a18db9bd, 2026-10-09) still passes it, so the HCR lane's
-# ct-mcr bundle failed with "unknown named parameter: paths". The recorder's
-# port to the new API (c9d2126c) is on its `agents` line and reaches its `dev`
-# only by promotion.
-#
-# The pin is 3936bae1, the tip of the recorder's own agents-to-dev-2026-10-03
-# stabilization -- the counterpart of the trace-format-nim promotion that is
-# now its `dev`. Measured 2026-11-05: `just build-ct-mcr` at 3936bae1 builds
-# the complete bundle against trace-format-nim `dev` 9e27afc,
-# native-backend `dev` b0b1056f and visual-replay `dev` 4428479, and recorder
-# `dev` a18db9bd fails against the same siblings.
-#
-# REMOVE THIS PIN (back to `=dev`) once codetracer-native-recorder `dev`
-# contains c9d2126c.
-codetracer-native-recorder=3936bae14841c19ab826fce038cb949d19f4d422
+# native-recorder follows `dev` here, and its `dev` does NOT compile against
+# codetracer-trace-format-nim `dev` (trace-format b8db98c6 removed the
+# `paths` parameter recorder `dev` still passes). That does not reach a
+# build: the two jobs that build the recorder put it, and the four siblings
+# its bundle is built from (trace-format-nim, the Rust trace-format crates,
+# native-backend, visual-replay), at the revisions CodeTracer's committed
+# repro.lock names -- the Test job for all of CodeTracer's siblings, the HCR
+# lane for exactly those five (hcr-lanes.yml, "Put the recorder bundle's
+# siblings at CodeTracer's locked revisions"). A pin here was tried and is
+# not enough: a
+# recorder old enough to compile against trace-format-nim `dev` (3936bae1)
+# fails the HCR replay gate, and one new enough for the gate imports
+# trace-format modules that exist only on its `agents` line.
+codetracer-native-recorder=dev
 
 # codetracer's `ct` binary (built via codetracer/reprobuild.nim's `ct` target so
 # ct_incremental_adapter can exec `ct test --incremental`) imports the IsoNim UI
@@ -216,7 +211,13 @@ reprobuild-packages=b68b01d3a775709869b1f2ba5f7f70f01873f20c
 # capture + preallocated shm segments), matching `io-mon-src` in flake.nix.
 # Moved to 7a3e4c89 (2026-10-30): Thumb-capable images fail closed on ARM.
 # Moved to e05beda0 (2026-10-30): patch-status global static again (re-review blocker).
-io-mon=e05beda08343b04b3d53f008ebcd0fe7bd27d8b1
+# Moved to e66e05c9 (2026-11-05), io-mon's `agents` tip: it carries 3d47bb1
+# (G42), the macOS tree-lifetime guard. Before it every macOS capture graded
+# incomplete with "macos backend has no complete tree-lifetime guard", so no
+# monitored edge was ever published on macOS and the M23 benchmark's warm
+# no-op workload re-executed every action. Needs nim-stackable-hooks c1d55ce
+# (below). e05beda0 is an ancestor.
+io-mon=e66e05c9471ce184e9a3b0d793b2db62ca5557b9
 # Must match `nim-stackable-hooks-src` in flake.nix. `release.yml` overrides
 # that input to THIS clone, so a divergent revision here silently substitutes a
 # different stackable_hooks for the one the flake pins. c6cf6ad, which stood
@@ -250,7 +251,9 @@ io-mon=e05beda08343b04b3d53f008ebcd0fe7bd27d8b1
 # Moved 059c549 -> 3af8a4e (2026-10-30) with `nim-stackable-hooks-src`: the armhf
 # raw-syscall substrate.
 # Moved 3af8a4e -> 7533478 (2026-10-30) with `nim-stackable-hooks-src`.
-nim-stackable-hooks=75334780682e70b1adb58bf813d869e7f5df63f5
+# Moved 7533478 -> c1d55ce (2026-11-05) with `nim-stackable-hooks-src`, for
+# io-mon e66e05c9 (`platform/linux_image_code_ranges`).
+nim-stackable-hooks=c1d55ce33fb2a29e4cf8d8bdbe1713f355370d0a
 # Must match `runquota-src` in flake.lock, for the reason the
 # nim-stackable-hooks note above gives: `release.yml` overrides that input to
 # THIS clone. The release also builds the `runquotad` and `runquota` every

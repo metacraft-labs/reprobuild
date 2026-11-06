@@ -52,6 +52,7 @@ import ./ledger
 import ./nft_tables
 import ./mutations
 import ./static_tree
+import ./store_custody
 import ./store_root
 import ./switch
 
@@ -60,6 +61,10 @@ type
   UninstallOptions* = object
     stateDir*: string
     keepStore*: bool
+    discardStoreEvidence*: bool
+      ## Remove the store evidence directory's entries with the state; an
+      ## uninstall that would remove any refuses without it, naming them
+      ## first (A11 review finding 14).
 
   UninstallResult* = object
     removed*: seq[string]
@@ -225,6 +230,17 @@ proc runAddonUninstall*(opts: UninstallOptions): UninstallResult =
   # writing at the same moment (``repro_core/host_apply_lock``).
   var hostLock = acquireHostApplyLock("repro system addon uninstall")
   defer: hostLock.release()
+  # The altered store objects kept as evidence go with /var/lib/repro. They
+  # are named, and nothing is removed, until the operator says to discard
+  # them (having copied them out).
+  let evidenceKept = evidenceEntries(custodySite(stateDir))
+  if evidenceKept.len > 0 and not opts.discardStoreEvidence and
+      not mutated("uninstall-discards-evidence-silently"):
+    for e in evidenceKept:
+      result.errors.add("store evidence " & e & " would be removed; copy it " &
+        "out, then run uninstall with --discard-store-evidence")
+    result.errors.add("nothing was removed")
+    return
   let l = readLedger(ledgerCopyPath(stateDir))
   # Pre-bootstrap inputs the add-on took over go back exactly as found
   # (spec §6.1, §6.4). Their bytes are captured FIRST -- before any unit
@@ -405,6 +421,12 @@ proc runAddonUninstall*(opts: UninstallOptions): UninstallResult =
     releaseRunDir(defaultSecretsLayout())
   except CatchableError as ex:
     result.errors.add(defaultSecretsLayout().runDir & ": " & ex.msg)
+  # The store evidence directory (§13 decision 47) goes with the state
+  # (`/var/lib/repro`), whatever --keep-store says (that keeps `/repro`).
+  # Its entries were named, and the uninstall refused, before anything was
+  # removed unless the operator passed --discard-store-evidence (above).
+  for e in evidenceEntries(custodySite(stateDir)):
+    result.removed.add(e & " (store evidence)")
   for root in ["/etc/repro", "/var/lib/repro", "/run/repro"]:
     if dirExists(root):
       try:

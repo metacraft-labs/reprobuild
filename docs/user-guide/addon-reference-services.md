@@ -68,12 +68,15 @@ The add-on handles this in four ways:
 - **Before anything starts, systemd's own view is checked.** From just
   before the switch reloads systemd until this check passes, the switch
   holds every floored unit, so no socket, timer or other start request can
-  run it. The add-on then reads everything `systemctl show` reports for
+  run it. The hold is an assertion that `/` does not exist, so nothing a
+  unit creates or removes can lift it. The add-on then reads everything `systemctl show` reports for
   each floored unit and compares it with the floor the unit was written
   under, minus its named exceptions. A property the floor neither checks
   nor lists as harmless is refused, so a setting from a newer systemd is
   refused until it is reviewed. If anything differs, the switch starts
-  nothing and reverts. The check also refuses:
+  nothing and reverts. This check applies every rule the profile was
+  checked against once more, to the unit files systemd actually loaded, so
+  it does not rely on the earlier check. It also refuses:
   - any drop-in the add-on did not write, wherever systemd would read it
     for the unit or for any instance of a templated unit. This includes a
     package's drop-in under `/usr/lib/systemd` and a type-wide
@@ -83,16 +86,42 @@ The add-on handles this in four ways:
     `StandardOutput=file:`);
   - a privileged group, including one the service's account belongs to in
     `/etc/group`, or a second group name for the same gid;
-  - an `EnvironmentFile=` that the service or another user could have
-    written: a wildcard, a missing file, or a file under a writable place
-    or a parent directory that someone other than root can write. The
-    manager reads it as root;
+  - an `EnvironmentFile=` that is neither a file the generation installs
+    from the add-on's store nor a file in the service's own secrets
+    directory, after every link in its path is followed. The manager reads
+    the file as root and passes its contents to the service, so a file
+    the service could not read itself, such as another service's secret
+    or a host file under `/etc`, is refused whatever its owner or mode;
   - a socket, timer or path unit that starts a floored service and does
-    more than listen on a network address or a unix socket under `/run`,
-    or watch a path, for example a socket that opens a device or a FIFO,
-    or one that runs a command;
+    more than listen on a network address or on a unix socket named after
+    the unit under `/run`, or watch a path. Examples are a socket that
+    opens a device or a FIFO, one that runs a command, and one that sets
+    an option needing a capability the service does not have
+    (`Mark=`, `Transparent=`, `BindToDevice=`, a `Priority=` above 6);
+  - a directory or link that the service manager would create for the
+    unit inside the add-on's own directories, or that already exists and
+    belongs to another account (for example `RuntimeDirectory=systemd`);
   - realtime scheduling, a reboot `FailureAction=`, or a resource limit
-    above the service manager's default.
+    above the service manager's default;
+  - a dependency such as `OnFailure=` or `Wants=` that starts a unit
+    which changes the whole system's state, such as `reboot.target`,
+    `poweroff.target`, `shutdown.target`, `suspend.target` or
+    `emergency.target`, whether directly or through other units. An
+    `OnFailureJobMode=` other than `replace` or `fail`, and
+    `AllowIsolate=yes`, are refused too;
+  - a credential (`LoadCredential=`) read from outside the add-on's own
+    secrets directory for the service, and any `ImportCredential=`,
+    `NFTSet=` or `RootImageOptions=`. `systemctl show` does not print
+    these settings, so the add-on reads them from the unit files systemd
+    loaded;
+  - a property that is missing from `systemctl show`. Every entry of a
+    property that systemd prints on several lines is checked.
+
+  The service's account is the one systemd will use. Specifiers such as
+  `%u` and `%i` are expanded first. With `DynamicUser=yes`, an existing
+  account of the configured name is used, along with its groups. A second
+  account name for uid 0 counts as root. An account or group that cannot
+  be resolved is refused.
 
   This check runs on every switch: an apply, an agent tick, a revert, a
   rollback and a crash recovery. It does not run between switches. A

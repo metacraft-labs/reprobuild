@@ -39,7 +39,17 @@ type
     present*: bool
     refused*: seq[RefusedDestination]   ## everything the table holds
     fresh*: seq[RefusedDestination]     ## new or grown since the last check
+    counted*: int64                     ## the named counter now
+    unattributed*: int64
+      ## refused packets since the last check that no set element accounts
+      ## for: the sets were full (A11 review finding 13)
+    setFull*: bool                      ## a set holds ``EgressSetSize``
     error*: string
+
+const
+  EgressDetectionsMax* = 64
+    ## Destinations one check records one by one; the rest in one summary,
+    ## so a flood of throwaway addresses cannot fill the host's records.
 
 proc parseRefusedSet*(json: string): seq[RefusedDestination] =
   ## The elements of one ``nft -j list set`` answer: ``{"elem": {"val":
@@ -56,6 +66,13 @@ proc parseRefusedSet*(json: string): seq[RefusedDestination] =
         let v = e["elem"]
         result.add((v{"val"}.getStr(), v{"counter"}{"packets"}.getBiggestInt(1)))
 
+proc parseCounterPackets*(json: string): int64 =
+  ## The packets of a ``nft -j list counter`` answer.
+  for item in parseJson(json){"nftables"}.getElems():
+    let c = item{"counter"}
+    if c != nil: return c{"packets"}.getBiggestInt(0)
+  0'i64
+
 proc readState(path: string; table: string): Table[string, int64] =
   ## The counts the previous check saw -- of THIS table instance: a table
   ## loaded since (every boot, every restart of the observer unit) starts
@@ -68,6 +85,7 @@ proc readState(path: string; table: string): Table[string, int64] =
       let p = l.splitWhitespace()
       if p.len == 2 and p[0] == "table": instance = p[1]
       elif p.len == 2: result[p[0]] = parseBiggestInt(p[1])
+      elif p.len == 3 and p[0] == "counter": result[" counter"] = parseBiggestInt(p[2])
     when not mutated("egress-state-survives-reload"):
       if instance != table: result.clear()
   except CatchableError:
@@ -100,14 +118,26 @@ proc tableInstance*(nft: string): string =
   instanceKey(r.output, bootIdNow())
 
 proc freshSince*(refused: seq[RefusedDestination]; statePath: string;
-                 table = "-"): seq[RefusedDestination] =
+                 table = "-"; counted = -1'i64;
+                 unattributed: ptr int64 = nil): seq[RefusedDestination] =
   ## The destinations new or grown since the counts in ``statePath`` (of the
-  ## same table instance ``table``), which then holds these counts.
+  ## same table instance ``table``), which then holds these counts. With
+  ## ``counted`` (the named counter), ``unattributed`` is set to the refused
+  ## packets since the last check that no set element's growth accounts for.
   let before = readState(statePath, table)
   var text = "table " & table & "\n"
+  var grown = 0'i64
   for d in refused:
-    if before.getOrDefault(d.address, 0) < d.packets: result.add(d)
+    let was = before.getOrDefault(d.address, 0)
+    if was < d.packets:
+      result.add(d)
+      grown += d.packets - was
     text.add(d.address & " " & $d.packets & "\n")
+  if counted >= 0 and not mutated("egress-ignores-counter"):
+    let wasCounted = before.getOrDefault(" counter", 0)
+    if unattributed != nil:
+      unattributed[] = max(0'i64, (counted - wasCounted) - grown)
+    text.add("counter refused " & $counted & "\n")
   createDir(parentDir(statePath))
   writeFile(statePath & ".tmp", text)
   moveFile(statePath & ".tmp", statePath)
@@ -132,9 +162,23 @@ proc checkEgress*(nft, statePath: string): EgressCheck =
     except CatchableError as e:
       result.error = "nft list set " & setName & ": " & e.msg
       return
+  let c = runHostTool([nft, "-j", "list", "counter", EgressTableFamily,
+                       EgressTableName, "refused"], mergeStderr = false,
+                      timeoutSec = 30)
+  result.counted = -1
+  if c.exitCode == 0:
+    try: result.counted = parseCounterPackets(c.output)
+    except CatchableError: discard
+  var v4, v6 = 0
+  for d in result.refused:
+    if ':' in d.address: inc v6 else: inc v4
+  result.setFull = v4 >= EgressSetSize or v6 >= EgressSetSize
   let instance = tableInstance(nft)
+  var un = 0'i64
   result.fresh = freshSince(result.refused, statePath,
-                            if instance.len > 0: instance else: "-")
+                            if instance.len > 0: instance else: "-",
+                            result.counted, addr un)
+  result.unattributed = un
 
 proc recordEgressCheck*(c: EgressCheck; site: EvidenceSite;
                         heartbeatMs: int64) =
@@ -146,12 +190,29 @@ proc recordEgressCheck*(c: EgressCheck; site: EvidenceSite;
       category: ecDetection, trigger: "egress-observer-missing",
       fields: @[("message", "the add-on's nftables table " & EgressTableKey &
                  " is not loaded")]), site)
-  for d in c.fresh:
+  let cap = min(c.fresh.len, EgressDetectionsMax)
+  for d in c.fresh[0 ..< cap]:
     discard recordEvidence(EvidenceEvent(detector: edEgress,
       category: ecDetection, trigger: "egress-refused",
       fields: @[("destination", d.address), ("count", $d.packets),
                 ("message", "the deploy agent's fetch unit sent to " &
                  d.address & ", outside its allow-list")]), site)
+  if c.fresh.len > cap:
+    discard recordEvidence(EvidenceEvent(detector: edEgress,
+      category: ecDetection, trigger: "egress-refused-summary",
+      fields: @[("count", $(c.fresh.len - cap)),
+                ("message", $(c.fresh.len - cap) & " more refused " &
+                 "destinations than one check records one by one")]), site)
+  if c.setFull or c.unattributed > 0:
+    # The sets no longer tell every destination apart: the counter still
+    # counts, and this says so (A11 review finding 13).
+    discard recordEvidence(EvidenceEvent(detector: edEgress,
+      category: ecDetection, trigger: "egress-set-full",
+      fields: @[("count", $c.unattributed),
+                ("message", "the refused-destination sets are full; " &
+                 $c.unattributed & " refused packet(s) since the last " &
+                 "check are counted but not attributed to a destination")]),
+      site)
   discard recordEvidence(EvidenceEvent(detector: edEgress,
     category: ecHeartbeat, kind: "egress-check", offHostOnly: true,
     fields: @[("intervalMs", $heartbeatMs),

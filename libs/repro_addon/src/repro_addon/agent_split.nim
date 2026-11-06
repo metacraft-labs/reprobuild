@@ -30,7 +30,7 @@
 ## unit: the fetch unit is the network-facing half, and a compromise of it
 ## must yield at most what the signed manifest already allows.
 
-import std/[algorithm, json, os, posix, strutils, times]
+import std/[algorithm, json, os, posix, strutils, tables, times]
 
 import repro_core/host_apply_lock
 import repro_infra
@@ -52,6 +52,9 @@ import ./addon_secrets
 import ./agent_checks
 import ./agent_record
 import ./agent_switch
+import ./contain_marker
+import repro_local_store/store
+import ./store_custody
 import ./apt_hook
 import ./evidence
 import ./evidence_ship
@@ -262,7 +265,14 @@ proc debNeedsStaging*(lock: AptClosureLock; d: AptLockedDeb;
   ## archive is the source whenever it is served, threat model C20.) The
   ## store is world-readable, so the fetch unit's dynamic user decides this
   ## itself.
-  not aptClosureRealised(storeRoot, lock) and
+  ##
+  ## A member whose prefix is gone needs its archive WHATEVER the union's
+  ## state: the add-on's custody moves an altered member aside and realises
+  ## it again from that archive (A11 review finding 1).
+  when mutated("fetch-skips-missing-member"):
+    not aptClosureRealised(storeRoot, lock) and
+      not fileExists(aptDebPrefixPath(storeRoot, d) / ".repro-apt-deb")
+  else:
     not fileExists(aptDebPrefixPath(storeRoot, d) / ".repro-apt-deb")
 
 proc stageDebs(canonical: string; dir: string; notes: var seq[string];
@@ -589,8 +599,31 @@ proc stagedAptFetcher(copyDir: string): AptDebFetcher =
         "the lock's size")
     copyFile(src, dest)
 
+proc stagedOutputsTree(copyDir: string;
+                       group: openArray[tuple[i: int; a: ProfileBuildAction]];
+                       dst: string) =
+  ## ``dst`` holding exactly the declared outputs of the actions in
+  ## ``group`` (one ``cwd``), copied from the staged copy: what the store
+  ## object at that ``cwd`` must hold, and nothing else.
+  removeDir(dst)
+  createDir(dst)
+  for (i, a) in group:
+    let src = copyDir / StagedOutputsDir / $i
+    when mutated("agent-install-copies-undeclared"):
+      var rels: seq[string]
+      for kind, p in walkDir(src, relative = true): rels.add(p)
+    else:
+      let rels = outputRelPaths(a)
+    for rel in rels:
+      let p = src / rel
+      let d = dst / rel
+      createDir(parentDir(d))
+      if dirExists(p): copyDirWithPermissions(p, d)
+      elif fileExists(p): copyFileWithPermissions(p, d)
+
 proc installStagedOutputs*(m: DeployManifest; actions: seq[ProfileBuildAction];
-                           copyDir: string; storeRoot = StoreRoot) =
+                           copyDir: string; storeRoot = StoreRoot;
+                           custody = custodySite(DefaultStateDir)) =
   ## Verify each action's staged outputs against the digest the signed
   ## manifest pins, BEFORE anything is moved into the store, linked or
   ## named in a unit; then copy exactly those declared outputs -- nothing
@@ -598,6 +631,15 @@ proc installStagedOutputs*(m: DeployManifest; actions: seq[ProfileBuildAction];
   ## store, through the private writable view. Raises on the first
   ## refusal, mismatch or missing output; nothing is written before every
   ## action has passed.
+  ##
+  ## Custody (spec §13 decisions 47, 48): the store object at a ``cwd``
+  ## must hold exactly its declared outputs, and its digest -- computed
+  ## from the staged, pin-verified bytes -- goes into the realisation
+  ## index. One that holds other bytes is another's and is refused, as
+  ## before, UNLESS the index (or a ledger) records that this path was
+  ## realised with exactly these outputs: then it is an altered copy of
+  ## them, moved into the evidence directory and installed again from the
+  ## pinned outputs, with a DET-AO-5 record.
   let pinned = pinActionsToClosureDigests(m, actions)
   if pinned.refusal.len > 0:
     raise newException(AddonApplyError, "closure digests: " & pinned.refusal)
@@ -612,34 +654,53 @@ proc installStagedOutputs*(m: DeployManifest; actions: seq[ProfileBuildAction];
     if refusal.len > 0:
       raise newException(AddonApplyError, refusal & "; nothing of it was " &
         "moved into the store")
-    # A prefix path already holding other bytes is another closure's: it
-    # is never overwritten in place (a new version is a new path).
-    for rel in outputRelPaths(a):
-      let dst = a.cwd / rel
-      if (fileExists(dst) or dirExists(dst) or symlinkExists(dst)) and
-          localOutputsDigest(a) != a.expectedOutputDigest:
-        raise newException(AddonApplyError, a.cwd & " already holds outputs " &
-          "that do not hash to " & a.id & "'s pin; refusing to overwrite them")
+  # One store object per cwd, holding the outputs of every action there.
+  var groups = initOrderedTable[string, seq[tuple[i: int; a: ProfileBuildAction]]]()
   for i, a in pinned.actions:
-    # Present already, with the pinned bytes: nothing to do.
-    if localOutputsDigest(a) == a.expectedOutputDigest: continue
+    groups.mgetOrPut(a.cwd, @[]).add((i, a))
+  let expectedAll = expectedDigests(custody)
+  let scratch = copyDir / ".custody"
+  var plan: seq[tuple[cwd, digest, tree: string; recover: bool;
+                     observed: string]]
+  var n = 0
+  for cwd, group in groups:
+    let tree = scratch / $n
+    inc n
+    stagedOutputsTree(copyDir, group, tree)
+    let digest = storeTreeDigest(tree)
+    if dirExists(cwd) or fileExists(cwd) or symlinkExists(cwd):
+      let observed = if dirExists(cwd): storeTreeDigest(cwd) else: "(not a directory)"
+      if observed == digest:
+        plan.add((cwd, digest, tree, false, observed))
+        continue
+      # Other bytes than these outputs. Recovered only when this very path
+      # was realised with them before; otherwise it is not ours to replace.
+      if expectedAll.getOrDefault(cwd, "") == digest and dirExists(cwd):
+        plan.add((cwd, digest, tree, true, observed))
+        continue
+      raise newException(AddonApplyError, cwd & " already holds outputs " &
+        "that do not hash to " & group[0].a.id & "'s pin; refusing to " &
+        "overwrite them")
+    plan.add((cwd, digest, tree, false, ""))
+  defer: removeDir(scratch)
+  for (cwd, digest, tree, recover, observed) in plan:
     if storeRoot == StoreRoot: enterWritableStoreView()
-    createDir(a.cwd)
-    let src = copyDir / StagedOutputsDir / $i
-    when mutated("agent-install-copies-undeclared"):
-      var rels: seq[string]
-      for kind, p in walkDir(src, relative = true): rels.add(p)
-    else:
-      let rels = outputRelPaths(a)
-    for rel in rels:
-      let p = src / rel
-      let dst = a.cwd / rel
-      createDir(parentDir(dst))
-      if dirExists(p): copyDirWithPermissions(p, dst)
-      elif fileExists(p): copyFileWithPermissions(p, dst)
-    if localOutputsDigest(a) != a.expectedOutputDigest:
-      raise newException(AddonApplyError, "the outputs of " & a.id &
-        " do not hash to their pin after the copy into the store")
+    var entry = ""
+    if recover:
+      entry = preserveEvidence(custody, cwd, digest, observed,
+        "altered; re-installed from the signed manifest's pinned outputs")
+    if not dirExists(cwd):
+      createDir(parentDir(cwd))
+      copyDirWithPermissions(tree, cwd)
+    if storeTreeDigest(cwd) != digest:
+      raise newException(AddonApplyError, "the store object " & cwd &
+        " does not hold exactly its declared outputs after the copy")
+    recordRealised(custody, cwd, digest)
+    if recover:
+      recordRecovered(custody, StoreObjectRef(path: cwd, kind: sokPrefix,
+        referrer: "build-action"), digest, observed, entry,
+        "the signed manifest's pinned outputs")
+      markRecorded(entry)
 
 type AgentApplyContext* = object
   ## What one agent apply works from: the copy of the staging area (""
@@ -654,6 +715,11 @@ type AgentApplyContext* = object
   refusalPayload*: string
   refusalRecorded*: bool
     ## The refusal already left its own record (the compiled-profile pin).
+  stagingCopy*: string
+    ## Where a refused staging copy will be preserved, chosen before the
+    ## tick so its record can name it (A11 drill D6).
+  compiler*: string
+  compilerSha256*: string
 
 proc refuse(ctx: ptr AgentApplyContext; why: string; payload = "";
             recorded = false): tuple[ok: bool; message: string] =
@@ -776,17 +842,22 @@ const RefusedStagingKeep* = 4
 
 proc refusedStagingRoot*(): string = AgentDir / "refused"
 
-proc preserveRefusedStaging*(copyDir: string): string =
+proc plannedRefusedStaging*(): string =
+  ## The name the next refused staging copy will be kept under.
+  refusedStagingRoot() / (format(getTime(), "yyyyMMdd'T'HHmmss") & "-" &
+                          $getTime().nanosecond)
+
+proc preserveRefusedStaging*(copyDir: string; dest = ""): string =
   ## Move the apply unit's copy of a refused staging area under
-  ## ``refusedStagingRoot`` and return where it went ("" when it could not
-  ## be kept).
+  ## ``refusedStagingRoot`` (at ``dest`` when given: the name its record
+  ## already carries) and return where it went ("" when it could not be
+  ## kept).
   if copyDir.len == 0 or not dirExists(copyDir): return ""
   try:
     let root = refusedStagingRoot()
     createDir(root)
     setFilePermissions(root, {fpUserRead, fpUserWrite, fpUserExec})
-    result = root / (format(getTime(), "yyyyMMdd'T'HHmmss") & "-" &
-                     $getTime().nanosecond)
+    result = if dest.len > 0: dest else: plannedRefusedStaging()
     moveDir(copyDir, result)
     var kept: seq[string]
     for kind, p in walkDir(root):
@@ -801,7 +872,9 @@ proc preserveRefusedStaging*(copyDir: string): string =
 proc refusalOf(ctx: AgentApplyContext): TickRefusal =
   TickRefusal(refusal: ctx.refusal, payload: ctx.refusalPayload,
     recorded: ctx.refusalRecorded,
-    manifestPayload: stagedText(ctx.copyDir, StagedManifestName))
+    manifestPayload: stagedText(ctx.copyDir, StagedManifestName),
+    stagingCopy: ctx.stagingCopy, compiler: ctx.compiler,
+    compilerSha256: ctx.compilerSha256)
 
 proc tickDetection*(t: RecordedTick; ctx: AgentApplyContext):
     tuple[found: bool; detector: AddonDetector; trigger: string;
@@ -915,12 +988,24 @@ proc runAgentApplyCli*(args: seq[string]): int =
   if args.len != 0:
     stderr.write("usage: repro system addon agent-apply\n")
     return 2
+  if isContained():
+    # An operator contained the host (decision 51): its units do not start;
+    # should anything start it regardless, it applies nothing.
+    stderr.write("repro system addon agent-apply: the host is contained by " &
+      "an operator (" & containedMarkerPath() & "); nothing was applied\n")
+    return 0
   var conf: AgentConf
   try: conf = loadAgentConf()
   except CatchableError as e:
     stderr.write("repro system addon agent-apply: " & e.msg & "\n")
     return 2
-  var ctx = AgentApplyContext(copyDir: applyCopyDir() / "current")
+  var ctx = AgentApplyContext(copyDir: applyCopyDir() / "current",
+    stagingCopy: plannedRefusedStaging())
+  # The compiler the fetch unit runs, as this unit reads it (RESP-1, D6).
+  if conf.profileCompiler.len > 0:
+    ctx.compiler = conf.profileCompiler
+    ctx.compilerSha256 = try: sha256OfFile(conf.profileCompiler)
+                         except CatchableError: "(unreadable)"
   try:
     discard copyLatestStaging(applyStagingRoot(), ctx.copyDir)
   except CatchableError as e:
@@ -947,7 +1032,8 @@ proc runAgentApplyCli*(args: seq[string]): int =
   # keeping it would hold a second copy of every staged archive until the
   # next tick -- unless the apply refused it, when it is what an
   # investigation needs (EVID-5) and is kept, bounded.
-  if ctx.refusal.len > 0: discard preserveRefusedStaging(ctx.copyDir)
+  if ctx.refusal.len > 0:
+    discard preserveRefusedStaging(ctx.copyDir, ctx.stagingCopy)
   try: removeDir(ctx.copyDir) except CatchableError: discard
   when mutated("agent-floor-in-fetch-state"):
     # The floor belongs to the fetch unit there, as anything in its state

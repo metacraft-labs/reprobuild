@@ -31,6 +31,10 @@ from repro_infra/apply_lock import currentBootId, processAlive
 import ./etc_write
 import ./fingerprint
 import ./generation0
+import ./ledger
+import ./mutations
+import ./seams
+import ./store_custody
 import ./store_root
 
 type
@@ -85,7 +89,7 @@ type
 
 const
   StaticLinkPath* = "/etc/repro/static"
-  StaticTreePackage* = "repro-addon-etc"
+  StaticTreePackage* = StaticTreePackageName
   PendingMarkerHeader* = "# repro-addon-pending v1"
   PendingRootId* = "addon-pending"
     ## The store root that holds the tree being switched to until the
@@ -132,34 +136,31 @@ proc treeManifest*(files: seq[StaticFile]): string =
   lines.sort()
   lines.join("\n") & "\n"
 
-proc staticTreePath*(files: seq[StaticFile]): string =
+proc staticTreePath*(files: seq[StaticFile]; storeRoot = StoreRoot): string =
   ## Where the store places the tree for ``files``: pure, so a plan can
   ## name it without writing.
   let id = computeRealizationHash(StaticTreePackage, ReprobuildVersion,
     "addon-switch", "", "",
     provenanceChecksum = "tree:" & sha256Hex(treeManifest(files)))
-  StoreRoot / prefixRelativePath(StaticTreePackage, ReprobuildVersion, id)
+  storeRoot / prefixRelativePath(StaticTreePackage, ReprobuildVersion, id)
 
-proc treeCarries(path: string; files: seq[StaticFile]): bool =
-  ## Every file of the tree at ``path`` carries its planned bytes.
-  for f in files:
-    let at = path / staticRelPath(f.path)
-    if not fileExists(at) or sha256OfFile(at) != sha256Hex(f.content):
-      return false
+proc treeTorn(path: string; files: seq[StaticFile]): bool =
+  ## The tree at ``path`` is what a crash leaves of these files: nothing
+  ## but declared files (and their directories), each missing or a prefix
+  ## of its planned bytes (written only in part). Anything else -- an extra
+  ## entry, other bytes -- is an alteration.
+  var planned = initTable[string, string]()
+  for f in files: planned[staticRelPath(f.path)] = f.content
+  for rel in walkDirRec(path, yieldFilter = {pcFile, pcLinkToFile,
+                                              pcLinkToDir},
+                        followFilter = {pcDir}, relative = true):
+    if rel == ReceiptFileName: continue
+    if rel notin planned or symlinkExists(path / rel): return false
+    let bytes = try: readFile(path / rel) except IOError, OSError: return false
+    if not planned[rel].startsWith(bytes): return false
   true
 
-proc fsyncPath(path: string) =
-  ## fsync one file or directory by path (opened read-only).
-  let fd = posix.open(path.cstring, O_RDONLY or O_CLOEXEC)
-  if fd < 0:
-    raiseOSError(osLastError(), "open " & path & " to sync it")
-  try:
-    if posix.fsync(fd) != 0:
-      raiseOSError(osLastError(), "fsync " & path)
-  finally:
-    discard posix.close(fd)
-
-proc syncTree*(root: string) =
+proc syncTree*(root: string; storeRoot = StoreRoot) =
   ## Make a realised tree durable: every file and directory in it, and the
   ## directories its name lives in. The store writes a prefix without
   ## syncing it (a build cache can recompute what a crash loses), but the
@@ -168,28 +169,47 @@ proc syncTree*(root: string) =
   for path in walkDirRec(root, yieldFilter = {pcFile, pcDir}):
     fsyncPath(path)
   var d = root
-  while d.len > StoreRoot.len and d.startsWith(StoreRoot):
+  while d.len > storeRoot.len and d.startsWith(storeRoot):
     fsyncPath(d)
     d = parentDir(d)
-  fsyncPath(StoreRoot)
+  fsyncPath(storeRoot)
 
-proc realiseStaticTree*(files: seq[StaticFile]):
+proc treeRealisingMarker*(site: CustodySite): string =
+  ## The crash marker of a static-tree write: it names the tree from before
+  ## its first byte is written until it is synced and recorded. Only a tree
+  ## it names can have been torn by a crash (A11 review finding 5).
+  site.stateDir / "addon" / "tree-realising"
+
+proc realiseStaticTree*(files: seq[StaticFile];
+                        site = custodySite(SystemStateDir)):
     tuple[path: string; prefixId: PrefixIdBytes; digest: string] =
   ## Step 1 of the switch: put the tree into the store (an existing
   ## identical tree is reused), verify every file in it against the bytes
   ## it was built from, and hold it with the ``addon-pending`` root until
   ## the generation is committed. Every file is 0644; a secret never
   ## travels this way (the ``secret`` class is tmpfs-only, §10.3).
-  enterWritableStoreView()
-  # A tree a crash tore (the store had indexed it, its files never reached
-  # the disk) is removed so the store re-materialises it: the store
-  # re-creates a prefix whose directory is gone.
-  let planned = staticTreePath(files)
-  if dirExists(planned) and not treeCarries(planned, files):
-    removeDir(planned)
-  var s = openStore(StoreRoot)
-  defer: s.close()
-  let staging = StoreRoot / "tmp" / ("addon-etc-" & $getCurrentProcessId())
+  ##
+  ## Its realisation digest is the canonical tree digest of the bytes
+  ## staged here (spec §10.2), recorded in the realisation index and, by
+  ## the switch, in the ledger. A tree already at the planned path that
+  ## holds other bytes is:
+  ##
+  ## * a crash tear only when the tree-write crash marker names it (an
+  ##   interrupted write of exactly that tree) and its shape is one -- every
+  ##   entry a declared file, missing or a prefix of its bytes. It is
+  ##   removed and written again, silently;
+  ## * otherwise an alteration (a committed, synced tree a store writer
+  ##   deleted from or truncated is one too): its replacement's bytes are
+  ##   staged and hashed first, the altered tree is renamed aside within the
+  ##   store and the replacement published at once; only once the
+  ##   replacement is verified is the altered tree filed in the evidence
+  ##   directory and the DET-AO-5 ``store-recovered`` record written (§13
+  ##   decision 47; A11 review finding 10). A failed publish puts the altered
+  ##   tree back and raises.
+  let storeRoot = site.storeRoot
+  if storeRoot == StoreRoot: enterWritableStoreView()
+  fileLeftoverAsides(site)
+  let staging = storeRoot / "tmp" / ("addon-etc-" & $getCurrentProcessId())
   removeDir(staging)
   createDir(staging)
   defer: removeDir(staging)
@@ -199,29 +219,62 @@ proc realiseStaticTree*(files: seq[StaticFile]):
     writeFile(dest, f.content)
     setFilePermissions(dest, {fpUserRead, fpUserWrite, fpGroupRead,
                               fpOthersRead})
-  let res = s.realizeDirectoryAsPrefix(staging,
-    StoreReceiptHint(adapter: "addon-switch", packageName: StaticTreePackage,
-      version: ReprobuildVersion,
-      provenanceChecksum: "tree:" & sha256Hex(treeManifest(files))))
-  result.path = res.absolutePath
-  result.prefixId = res.prefixId
-  if result.path != staticTreePath(files):
-    raise newException(StaticTreeError, "store placed the static tree at " &
-      result.path & ", not at the planned " & staticTreePath(files))
-  # Verify: the bytes that will be linked are the bytes that were planned.
-  for f in files:
-    let at = result.path / staticRelPath(f.path)
-    if not fileExists(at) or sha256OfFile(at) != sha256Hex(f.content):
-      raise newException(StaticTreeError, "static tree file " & at &
-        " does not carry the planned bytes")
-  # Its realisation digest, from the staged bytes (spec §10.2): the
-  # ledger records it, and store verification compares against it. A tree
-  # the store reused that carries an entry the plan does not is refused.
   result.digest = storeTreeDigest(staging)
-  if storeTreeDigest(result.path) != result.digest:
-    raise newException(StaticTreeError, "static tree " & result.path &
-      " holds entries the plan does not; it is left in place and not used")
-  syncTree(result.path)
+  let planned = staticTreePath(files, storeRoot)
+  let marker = treeRealisingMarker(site)
+  let markerNames = try: readFile(marker).strip() == planned
+                    except CatchableError: false
+  var aside, observed = ""
+  if dirExists(planned):
+    observed = storeTreeDigest(planned)
+    if observed != result.digest:
+      let crashTear = when mutated("tree-tear-by-shape"): treeTorn(planned, files)
+                      else: markerNames and treeTorn(planned, files)
+      if crashTear:
+        removeDir(planned)
+      else:
+        aside = moveAside(site, planned)
+        seamPause(site.stateDir, "tree-after-move-aside")
+  createDir(parentDir(marker))
+  writeFileAtomic(marker, planned & "\n", 0o600)
+  var s = openStore(storeRoot)
+  defer: s.close()
+  try:
+    let res = s.realizeDirectoryAsPrefix(staging,
+      StoreReceiptHint(adapter: "addon-switch", packageName: StaticTreePackage,
+        version: ReprobuildVersion,
+        provenanceChecksum: "tree:" & sha256Hex(treeManifest(files))))
+    result.path = res.absolutePath
+    result.prefixId = res.prefixId
+    if result.path != planned:
+      raise newException(StaticTreeError, "store placed the static tree at " &
+        result.path & ", not at the planned " & planned)
+    # Verify: the bytes that will be linked are the bytes that were planned.
+    for f in files:
+      let at = result.path / staticRelPath(f.path)
+      if not fileExists(at) or sha256OfFile(at) != sha256Hex(f.content):
+        raise newException(StaticTreeError, "static tree file " & at &
+          " does not carry the planned bytes")
+    if storeTreeDigest(result.path) != result.digest:
+      raise newException(StaticTreeError, "static tree " & result.path &
+        " does not hold the bytes staged for it")
+  except CatchableError:
+    if aside.len > 0 and not dirExists(planned):
+      # The host keeps what it ran from (quarantined), not a dangling link.
+      try: moveDir(aside, planned) except CatchableError: discard
+      quarantineStorePath(planned, site.quarantinePath)
+    raise
+  syncTree(result.path, storeRoot)
+  recordRealised(site, result.path, result.digest)
+  try: removeFile(marker) except OSError: discard
+  if aside.len > 0:
+    let entry = fileEvidence(site, aside, planned, result.digest, observed,
+      "holds other bytes than the plan's")
+    seamPause(site.stateDir, "tree-before-record")
+    recordRecovered(site, StoreObjectRef(path: planned, kind: sokStaticTree,
+      referrer: "static-tree"), result.digest, observed, entry,
+      "the switch's plan")
+    markRecorded(entry)
   s.registerRoot(PendingRootId, rkProfile)
   s.attachPrefixToRoot(PendingRootId, result.prefixId)
 

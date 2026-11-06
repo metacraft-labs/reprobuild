@@ -14,7 +14,14 @@
 ## ``User=`` reset; writable places the unit sets up (``ReadWritePaths=``, a
 ## bind, an ``exec`` tmpfs, a drop-in's ``StateDirectory=``); a quoted bind
 ## over the closure; an instance's drop-in over a floored template; a
-## ``collision = "dropIn"`` unit over a floored one; ``PAMName=``. Each is
+## ``collision = "dropIn"`` unit over a floored one; ``PAMName=``. Rounds 4,
+## 5 and 6 add theirs (round 6: a static account under ``DynamicUser=yes``,
+## a second name for uid 0, ``OnFailure=reboot.target``, the first of two
+## ``EnvironmentFile=`` lines; round 7: ``EnvironmentFile=`` naming a host
+## file or another service's secrets, a ``RuntimeDirectory=`` in the
+## add-on's tree or at the existing ``/run/systemd``, a system-state target
+## reached through a unit of the profile, an isolating job mode, an
+## activator socket with ``Mark=``). Each is
 ## applied by an operator on a fresh add-on host. A case passes when the
 ## apply is refused and the unit never started, or -- for a writable place
 ## the floor now covers -- when the unit runs and systemd shows it holding
@@ -157,7 +164,50 @@ proc cases(binary, prefix: string): seq[Case] =
     Case(name: "a9e-shade.service", service: "User=a9s\n",
          host: "getent group shade >/dev/null || groupadd -o -g " &
                "$(getent group shadow | cut -d: -f3) shade; id a9s >/dev/null " &
-               "2>&1 || useradd -r -M -s /usr/sbin/nologin -G shade a9s")]
+               "2>&1 || useradd -r -M -s /usr/sbin/nologin -G shade a9s"),
+    # Review round 6: what only the host's systemd and account databases
+    # decide. A static account in sudo under DynamicUser=yes (systemd uses
+    # it); a second name for uid 0; a dependency that reboots the host; the
+    # first of two EnvironmentFile= lines. (A hand-written LoadCredential=
+    # is refused in add-on mode before the floor sees it, since a unit gets
+    # secrets only through its `credentials` field, so the effective check's
+    # own reading of it is a unit test: t_addon_floor_round6.)
+    Case(name: "a9e-dynstatic.service", service: "DynamicUser=yes\nUser=a9d\n",
+         host: "id a9d >/dev/null 2>&1 || useradd -r -M -s /usr/sbin/nologin " &
+               "-G sudo a9d"),
+    Case(name: "a9e-alias.service", service: "User=a9z\n",
+         host: "id a9z >/dev/null 2>&1 || useradd -o -u 0 -M -s " &
+               "/usr/sbin/nologin a9z"),
+    Case(name: "a9e-onfail.service", service: "",
+         extra: dropIn("a9e-onfail.service", "[Unit]\nOnFailure=reboot.target\n")),
+    Case(name: "a9e-envtwo.service",
+         service: "EnvironmentFile=/etc/a9e-one.env\nEnvironmentFile=/etc/a9e-two.env\n",
+         host: "printf 'A=1\\n' > /etc/a9e-one.env; chown nobody /etc/a9e-one.env; " &
+               "printf 'B=1\\n' > /etc/a9e-two.env"),
+    # Review round 7. EnvironmentFile= naming a host file (root-owned, 0644)
+    # and another service's secrets (§13 decision 50); a RuntimeDirectory=
+    # in the add-on's tree and one at /run/systemd, which exists and is
+    # root's; a system-state target reached through a unit of the profile,
+    # and an isolating job mode (both through OnFailure= of a unit that
+    # succeeds, so nothing fires if a build lets them through); an activator
+    # socket with Mark= (CAP_NET_ADMIN).
+    Case(name: "a9e-envhost.service", service: "EnvironmentFile=/etc/a9e-host.env\n",
+         host: "printf 'A=1\\n' > /etc/a9e-host.env; chmod 0644 /etc/a9e-host.env"),
+    Case(name: "a9e-envsecret.service",
+         service: "EnvironmentFile=-/run/repro/secrets/a9e-other/env\n"),
+    Case(name: "a9e-rtrepro.service", service: "User=a9e\nRuntimeDirectory=repro/a9e-x\n"),
+    Case(name: "a9e-rtsys.service", service: "User=a9e\nRuntimeDirectory=systemd\n"),
+    Case(name: "a9e-reach.service", service: "",
+         extra: dropIn("a9e-reach.service", "[Unit]\nOnFailure=a9e-reach-x.target\n") &
+                "systemd.systemUnit {\n  name = \"a9e-reach-x.target\"\n" &
+                "  content = \"[Unit]\nWants=reboot.target\n\"\n  enabled = false\n}\n"),
+    Case(name: "a9e-isolate.service", service: "",
+         extra: dropIn("a9e-isolate.service", "[Unit]\nOnFailure=multi-user.target\n" &
+                       "OnFailureJobMode=isolate\n")),
+    Case(name: "a9e-mark.service", service: "",
+         extra: "systemd.systemUnit {\n  name = \"a9e-mark.socket\"\n" &
+                "  content = \"[Socket]\nListenStream=127.0.0.1:18091\nMark=1\n\n" &
+                "[Install]\nWantedBy=sockets.target\n\"\n  enabled = true\n}\n")]
 
 proc invocation(g: Guest; unit: string): string =
   g.exec("systemctl show -p InvocationID --value " & unit).stdout.strip()

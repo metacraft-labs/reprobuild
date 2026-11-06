@@ -68,7 +68,19 @@ const
     "finding", "status", "errorCode", "message", "bootId", "purpose",
     "attestation", "attestationSignature", "attestationKey",
     "appliedSequence", "dpkgLastRun", "pending", "planDigest",
-    "recipientKey", "credentialHost", "previousGeneration", "shipDelayMs"]
+    "recipientKey", "credentialHost", "previousGeneration", "shipDelayMs",
+    # Store custody (decisions 47, 48): where an altered object's bytes are
+    # kept and what it was recovered from; the unverifiable paths' digests.
+    "evidence", "source", "paths",
+    # A refusal's preserved staging copy and the compiler the apply unit
+    # ran (RESP-1, A11 drill D6).
+    "stagingCopy", "compiler", "compilerSha256",
+    # The sink operator's acknowledgement of a handled detection (D4), an
+    # operator's containment and release of a host (D5), and the hand-over
+    # of a host's evidence keys to new ones (D7).
+    "acknowledges", "operator", "containment", "containmentSignature",
+    "handover",
+    "handoverSignature", "newAttestationKey", "newCredentialHost"]
     ## The only field names a record may carry (EVID-6). Deliberately no
     ## free-form "data"/"body"/"env" field: an environment can hold
     ## credentials, a body can hold source.
