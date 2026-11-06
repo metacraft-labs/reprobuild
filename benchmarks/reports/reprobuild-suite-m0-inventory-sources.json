@@ -3287,7 +3287,7 @@
             "socketB",
             "sourcePath"
           ],
-          "line": 177,
+          "line": 179,
           "path": "tests/e2e/hcr-watch/t_e2e_repro_watch_hcr_multi_target_independent_patches.nim",
           "patterns": [
             "gcc"
@@ -3313,7 +3313,7 @@
             "socketB",
             "sourcePath"
           ],
-          "line": 180,
+          "line": 182,
           "path": "tests/e2e/hcr-watch/t_e2e_repro_watch_hcr_multi_target_independent_patches.nim",
           "patterns": [
             "cc"
@@ -4850,7 +4850,7 @@
             "shell",
             "workRoot"
           ],
-          "line": 531,
+          "line": 538,
           "path": "tests/integration/t_declared_daemon_ipc_trust.nim",
           "patterns": [
             "cc"
@@ -4872,7 +4872,7 @@
             "shell",
             "workRoot"
           ],
-          "line": 533,
+          "line": 540,
           "path": "tests/integration/t_declared_daemon_ipc_trust.nim",
           "patterns": [
             "cc"
@@ -4896,7 +4896,7 @@
             "readyPath",
             "workRoot"
           ],
-          "line": 369,
+          "line": 379,
           "path": "tests/integration/t_derived_daemon_ipc_trust.nim",
           "patterns": [
             "cc"
@@ -4914,7 +4914,7 @@
             "readyPath",
             "workRoot"
           ],
-          "line": 371,
+          "line": 381,
           "path": "tests/integration/t_derived_daemon_ipc_trust.nim",
           "patterns": [
             "cc"
@@ -36158,7 +36158,8 @@
       "language": "nim",
       "localDependencyShape": [
         "repro_attest",
-        "repro_attest_agent"
+        "repro_attest_agent",
+        "repro_test_support"
       ],
       "owner": "tests/integration",
       "requiresReproBinary": false,
@@ -50007,7 +50008,8 @@
       "localDependencyShape": [
         "repro_attest",
         "repro_attest_agent",
-        "repro_attest_verify"
+        "repro_attest_verify",
+        "repro_test_support"
       ],
       "owner": "tests/integration",
       "requiresReproBinary": false,
@@ -50042,7 +50044,8 @@
       "defines": [],
       "language": "nim",
       "localDependencyShape": [
-        "repro_attest"
+        "repro_attest",
+        "repro_test_support"
       ],
       "owner": "tests/integration",
       "requiresReproBinary": false,
@@ -55721,7 +55724,8 @@
       "defines": [],
       "language": "nim",
       "localDependencyShape": [
-        "repro_runquota"
+        "repro_runquota",
+        "repro_test_support"
       ],
       "owner": "tests/unit",
       "requiresReproBinary": false,

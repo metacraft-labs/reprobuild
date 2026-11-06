@@ -360,9 +360,19 @@ proc isVolatilePrefix(path: string): bool =
   ## it stays out of all of them.
   isVolatileRuntimeStatePath(path)
 
-proc nonVolatileTempBase(): string =
+const SunPathBytes = when defined(linux): 108 else: 104
+  ## The kernel's ``sun_path``, NUL included; the C helpers bind and dial.
+
+proc nonVolatileTempBase(socketTail = 0; limit = high(int)): string =
+  ## Where the fixture root goes: the suite TMPDIR, unless it is volatile or
+  ## so long that a socket ``socketTail`` bytes below the root it would hold
+  ## cannot be bound (``limit`` counts the NUL). A persistent CI runner's
+  ## TMPDIR is a slot under its 74-byte work directory, which left these
+  ## sockets at 110-117 bytes; ``/tmp`` is neither volatile nor long.
   result = getTempDir()
-  if result.isVolatilePrefix():
+  # createTempDir appends the prefix's random part: 8 characters.
+  if result.isVolatilePrefix() or
+      result.len + socketTail + 8 >= limit:
     result = "/tmp"
 
 proc compileC(source, output, workRoot, name: string) =
@@ -374,7 +384,9 @@ proc compileC(source, output, workRoot, name: string) =
     raise newException(OSError, "helper " & name & " was not produced: " & res)
 
 proc makeFixture(): Fixture =
-  let root = createTempDir("repro-ipctrust-", "", dir = nonVolatileTempBase())
+  let root = createTempDir("repro-ipctrust-", "",
+    dir = nonVolatileTempBase(len("/repro-ipctrust-/work/untrusted.sock"),
+      SunPathBytes))
   if root.isVolatilePrefix():
     raise newException(IOError,
       "fixture root " & root & " is under a volatile prefix the engine drops " &
@@ -401,7 +413,6 @@ proc makeFixture(): Fixture =
   # — Linux's value, which let a 104..107-byte path through on macOS — and to
   # probe `d.sock`, eight bytes shorter than the longest name `startDaemon`
   # is actually given (`untrusted`).
-  const SunPathBytes = when defined(linux): 108 else: 104
   let probeSocket = workRoot / "untrusted.sock"
   if probeSocket.len >= SunPathBytes:
     raise newException(IOError,

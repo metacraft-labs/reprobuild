@@ -64,6 +64,7 @@
 ## `t_tpm_quote_comes_from_the_tpm`.
 
 import std/[monotimes, net, os, posix, strutils, times, unittest]
+from repro_test_support/process_fixtures import shortSocketDirAtProcessExit
 
 import repro_attest
 
@@ -175,10 +176,10 @@ proc connectedPair(): SocketPair =
   ## Built through `newTpm2Transport` rather than by hand so the
   ## transport is configured exactly as a daemon's would be — the same
   ## unbuffered socket and the same read bound.
-  result.dir = getTempDir() / ("repro-tpm-wait-" & $getCurrentProcessId() &
-                               "-" & $getMonoTime().ticks)
-  removeDir(result.dir)
-  createDir(result.dir)
+  # A fresh owner-only directory directly under /tmp: the emulator's unix
+  # sockets must fit sun_path, which a suite TMPDIR under a long work
+  # directory does not leave room for ("Path for UnioIO socket is too long").
+  result.dir = shortSocketDirAtProcessExit("rtpm")
   let path = result.dir / "tpm-data.sock"
   result.listener = newSocket(Domain.AF_UNIX, SockType.SOCK_STREAM,
                               Protocol.IPPROTO_IP, buffered = false)

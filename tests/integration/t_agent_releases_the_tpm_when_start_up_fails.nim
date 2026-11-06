@@ -70,6 +70,7 @@
 ## directory holding it may also be named in `REPROOS_SWTPM_BIN`.
 
 import std/[net, os, osproc, posix, strutils, times, unittest]
+from repro_test_support/process_fixtures import shortSocketDirAtProcessExit
 
 import repro_attest
 import repro_attest_agent/cli
@@ -146,11 +147,10 @@ proc startLiveTpm(): LiveTpm =
   ## first real command — and it fails there as a transport error, which
   ## reads like a broken endpoint rather than like a slow start.
   result = LiveTpm()
-  result.dir = getTempDir() / ("repro-agent-release-tpm-" &
-                               $getCurrentProcessId() & "-" &
-                               $epochTime().int64)
-  removeDir(result.dir)
-  createDir(result.dir)
+  # A fresh owner-only directory directly under /tmp: the emulator's unix
+  # sockets must fit sun_path, which a suite TMPDIR under a long work
+  # directory does not leave room for ("Path for UnioIO socket is too long").
+  result.dir = shortSocketDirAtProcessExit("rtpm")
   result.dataSocket = result.dir / "tpm-data.sock"
   result.ctrlSocket = result.dir / "tpm-ctrl.sock"
 

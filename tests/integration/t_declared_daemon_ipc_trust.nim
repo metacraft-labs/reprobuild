@@ -522,9 +522,16 @@ proc isVolatilePrefix(path: string): bool =
   ## it stays out of all of them.
   isVolatileRuntimeStatePath(path)
 
-proc nonVolatileTempBase(): string =
+proc nonVolatileTempBase(socketTail = 0; limit = high(int)): string =
+  ## Where the fixture root goes: the suite TMPDIR, unless it is volatile or
+  ## so long that a socket ``socketTail`` bytes below the root it would hold
+  ## cannot be bound (``limit`` counts the NUL). A persistent CI runner's
+  ## TMPDIR is a slot under its 74-byte work directory, which left these
+  ## sockets at 110-117 bytes; ``/tmp`` is neither volatile nor long.
   result = getTempDir()
-  if result.isVolatilePrefix():
+  # createTempDir appends the prefix's random part: 8 characters.
+  if result.isVolatilePrefix() or
+      result.len + socketTail + 8 >= limit:
     result = "/tmp"
 
 proc compileC(source, output, workRoot, name: string) =
@@ -541,7 +548,9 @@ proc makeFixture(): Fixture =
   # `~/.cache/reprobuild-test-tmp/`, and with the longer `repro-decltrust-` /
   # `work` spelling a fixture socket there reached 95 bytes on macOS, past
   # std/net's 92.
-  let root = createTempDir("rdt-", "", dir = nonVolatileTempBase())
+  let root = createTempDir("rdt-", "",
+    dir = nonVolatileTempBase(len("/rdt-/w/0123456789012345.sock"),
+      Sockaddr_un_path_length))
   if root.isVolatilePrefix():
     raise newException(IOError,
       "fixture root " & root & " is under a volatile prefix the engine drops " &

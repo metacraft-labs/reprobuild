@@ -68,6 +68,7 @@ import repro_test_support/reasoned_skip
 
 when defined(linux):
   import std/[monotimes, posix, strtabs, times]
+  from repro_test_support/process_fixtures import shortSocketDirAtProcessExit
 
   type PipeState = enum
     psEof, psOpen
@@ -111,7 +112,8 @@ when defined(linux):
       let engine = requireBinary(reproBinaryPath(stem = "reprobuild"),
         "reprobuild.apps.reprobuild")
       let stateDir = createTempDir("repro-daemon-stdio-", "")
-      let endpoint = stateDir / "d.sock"
+      # The endpoint must fit sun_path whatever the suite TMPDIR is.
+      let endpoint = shortSocketDirAtProcessExit("rds") / "d.sock"
       var daemonPid = 0
       var output = ""
       try:
