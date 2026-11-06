@@ -35,7 +35,10 @@
 ## expected digest is gone with the object, and every later switch
 ## refuses), ``custody-ignores-leftovers`` (both ``*-after-move-aside``
 ## points: the altered object is never filed), ``custody-skips-unrecorded``
-## (both ``*-before-record`` points: the record is never written).
+## (both ``*-before-record`` points: the record is never written),
+## ``custody-rebuild-unsynced`` (``custody-before-record``: the rebuilt
+## prefix is not on the disk after the reset, so the next switch files it
+## as a second alteration).
 ## ``REPRO_ADDON_CRASH_POINTS`` (comma separated) selects points.
 ##
 ## Opt-in: ``REPRO_ADDON_VM_GATES=1``; needs the seam build and a QEMU

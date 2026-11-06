@@ -717,6 +717,21 @@ proc custodyPass*(site: CustodySite; objects: openArray[StoreObjectRef];
         result.refusals.add(o.path & ": re-realised from " & r.source &
           ", it hashes to " & now & ", not " & expected)
         continue
+      # Durable before it is recorded: a rebuild a crash left unwritten
+      # would read as a second alteration at the next pass (measured in
+      # ``e2e_addon_custody_crash_points``, reset at custody-before-record).
+      when not mutated("custody-rebuild-unsynced"):
+        try:
+          syncTreeFiles(o.path)
+          fsyncPath(parentDir(o.path))
+        except OSError as e:
+          quarantineStorePath(o.path, site.quarantinePath)
+          recordRefused(site, o, expected, now, "re-realised from " &
+            r.source & " but it could not be synced: " & e.msg)
+          markRecorded(entry)
+          result.refusals.add(o.path & ": re-realised from " & r.source &
+            " but it could not be synced: " & e.msg)
+          continue
       recordRealised(site, o.path, expected)
       seamPause(site.stateDir, "custody-before-record")
       # Recorded only now that the recovery is done, then the quarantine

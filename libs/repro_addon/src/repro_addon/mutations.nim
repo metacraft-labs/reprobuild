@@ -701,6 +701,9 @@
 ## ``custody-skips-unrecorded``               an evidence entry a crash left
 ##                                            without its record is never
 ##                                            recorded (review 10)
+## ``custody-rebuild-unsynced``              a recovered object is recorded
+##                                            before its rebuilt bytes are
+##                                            synced (review 10)
 ## =========================================  ==============================
 
 # The deploy agent's own mutations (``repro_deploy_agent/agent_mutations``)
@@ -1122,7 +1125,8 @@ const
                           "uninstall-discards-evidence-silently",
                           "self-test-any-verb", "hosts-retired-fifth-only",
                           "custody-ignores-leftovers",
-                          "custody-skips-unrecorded"]
+                          "custody-skips-unrecorded",
+                          "custody-rebuild-unsynced"]
 
 when AddonMutation.len > 0 and AddonMutation notin KnownAddonMutations and
     AddonMutation notin KnownAgentMutations:
