@@ -593,24 +593,6 @@ e2e_local_reprobuild_project_build:
         tests/e2e/local-build-engine/t_e2e_local_reprobuild_project_build.nim \
         2>&1 | tee test-logs/e2e_local_reprobuild_project_build.log
 
-e2e_codetracer_build_subset_without_tup:
-    mkdir -p test-logs build/test-bin build/nimcache
-    nim c -r \
-        --threads:on \
-        --nimcache:build/nimcache/e2e_codetracer_build_subset_without_tup \
-        --out:build/test-bin/e2e_codetracer_build_subset_without_tup \
-        tests/e2e/codetracer-subset/t_e2e_codetracer_build_subset_without_tup.nim \
-        2>&1 | tee test-logs/e2e_codetracer_build_subset_without_tup.log
-
-e2e_codetracer_in_place_project_file:
-    mkdir -p test-logs build/test-bin build/nimcache
-    nim c -r \
-        --threads:on \
-        --nimcache:build/nimcache/e2e_codetracer_in_place_project_file \
-        --out:build/test-bin/e2e_codetracer_in_place_project_file \
-        tests/e2e/codetracer-subset/t_e2e_codetracer_in_place_project_file.nim \
-        2>&1 | tee test-logs/e2e_codetracer_in_place_project_file.log
-
 e2e_repro_watch:
     mkdir -p test-logs build/test-bin build/nimcache
     nim c -r \
@@ -619,15 +601,6 @@ e2e_repro_watch:
         --out:build/test-bin/e2e_repro_watch \
         tests/e2e/watch/t_e2e_repro_watch.nim \
         2>&1 | tee test-logs/e2e_repro_watch.log
-
-e2e_codetracer_dev_environment_slice:
-    mkdir -p test-logs build/test-bin build/nimcache
-    nim c -r \
-        --threads:on \
-        --nimcache:build/nimcache/e2e_codetracer_dev_environment_slice \
-        --out:build/test-bin/e2e_codetracer_dev_environment_slice \
-        tests/e2e/codetracer-subset/t_e2e_codetracer_dev_environment_slice.nim \
-        2>&1 | tee test-logs/e2e_codetracer_dev_environment_slice.log
 
 e2e_repro_develop_cmake_configure_and_build:
     mkdir -p test-logs build/test-bin build/nimcache

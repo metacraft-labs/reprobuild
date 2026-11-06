@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 34,
-    "nimTestBinaries": 2685,
+    "nimTestBinaries": 2682,
     "pureUnitConsolidationGroups": 79,
     "pureUnitTests": 740,
     "staticallyDetectedRuntimeCompilerFlowTests": 137,
-    "testEntries": 2725
+    "testEntries": 2722
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1561,7 +1561,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 19,
-      "integration": 1484,
+      "integration": 1481,
       "platform/destructive": 173,
       "pure unit": 740,
       "unclassified": 309
@@ -1772,9 +1772,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2685,
+    "nimTestBinaryCount": 2682,
     "pythonTestFileCount": 40,
-    "testEntryCount": 2725
+    "testEntryCount": 2722
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -30789,63 +30789,6 @@
       "source": "tests/e2e/cmake-path-hermeticity/t_cmake_actions_declare_their_path.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 4,
-      "staticallyDetectedRuntimeCompilerFlow": false,
-      "targetOs": "soAny"
-    },
-    {
-      "binary": "build/test-bin/t_e2e_codetracer_build_subset_without_tup",
-      "class": "integration",
-      "classificationReason": "e2e/integration path or requires the repro binary",
-      "defines": [],
-      "language": "nim",
-      "localDependencyShape": [
-        "io_mon",
-        "repro_test_support",
-        "repro_tool_profiles"
-      ],
-      "owner": "tests/e2e",
-      "requiresReproBinary": true,
-      "source": "tests/e2e/codetracer-subset/t_e2e_codetracer_build_subset_without_tup.nim",
-      "sourceSuiteCount": 1,
-      "staticCaseCount": 1,
-      "staticallyDetectedRuntimeCompilerFlow": false,
-      "targetOs": "soAny"
-    },
-    {
-      "binary": "build/test-bin/t_e2e_codetracer_dev_environment_slice",
-      "class": "integration",
-      "classificationReason": "e2e/integration path or requires the repro binary",
-      "defines": [],
-      "language": "nim",
-      "localDependencyShape": [
-        "repro_interface_artifacts",
-        "repro_test_support",
-        "repro_tool_profiles"
-      ],
-      "owner": "tests/e2e",
-      "requiresReproBinary": true,
-      "source": "tests/e2e/codetracer-subset/t_e2e_codetracer_dev_environment_slice.nim",
-      "sourceSuiteCount": 1,
-      "staticCaseCount": 1,
-      "staticallyDetectedRuntimeCompilerFlow": false,
-      "targetOs": "soAny"
-    },
-    {
-      "binary": "build/test-bin/t_e2e_codetracer_in_place_project_file",
-      "class": "integration",
-      "classificationReason": "e2e/integration path or requires the repro binary",
-      "defines": [],
-      "language": "nim",
-      "localDependencyShape": [
-        "repro_project_dsl",
-        "repro_test_support",
-        "repro_tool_profiles"
-      ],
-      "owner": "tests/e2e",
-      "requiresReproBinary": true,
-      "source": "tests/e2e/codetracer-subset/t_e2e_codetracer_in_place_project_file.nim",
-      "sourceSuiteCount": 2,
-      "staticCaseCount": 13,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

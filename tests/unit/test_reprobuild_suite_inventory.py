@@ -7020,10 +7020,6 @@ test "incomplete name" and:
             "tests/integration/t_ti2_thin_interface_consumer_reads_cached_artifact.nim",
             helper_sources,
         )
-        self.assertNotIn(
-            "tests/e2e/codetracer-subset/t_e2e_codetracer_dev_environment_slice.nim",
-            helper_sources,
-        )
 
     def test_compiler_detection_tracks_transitive_command_composition(self):
         compile_fragment = "c " + "--compileOnly --hints:off"
@@ -8442,8 +8438,6 @@ compileProfileBinary()
             "tests/e2e/m83/t_e2e_home_facts_from_isolated_plan.nim",
             "tests/e2e/m83/t_e2e_nix_reads_data_like_profile.nim",
             "tests/e2e/m83/t_e2e_nix_reads_intent_like_export.nim",
-            "tests/e2e/codetracer-subset/"
-            "t_e2e_codetracer_in_place_project_file.nim",
             "tests/e2e/local-build-engine/"
             "t_e2e_local_reprobuild_project_build.nim",
             "tests/e2e/watch/t_e2e_repro_watch_multiple_named_targets.nim",
