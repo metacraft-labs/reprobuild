@@ -511,6 +511,9 @@ proc runAddonCli*(args: seq[string]): int =
       let r = runAddonUninstall(parseUninstallArgs(rest))
       for p in r.removed: stdout.write("removed " & p & "\n")
       for d in r.drift: stdout.write("left in place (drift): " & d & "\n")
+      for k in r.keptEvidence:
+        stdout.write("kept with the store (store evidence left aside): " &
+                     k & "\n")
       for e in r.errors: stderr.write("error: " & e & "\n")
       stdout.write("accounts kept: " &
         (if r.keptAccounts.len == 0: "none" else: r.keptAccounts.join(", ")) &
