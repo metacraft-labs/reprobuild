@@ -341,7 +341,13 @@ const
     ## A unit the profile does not define (as a distribution's), which a
     ## profile unit wants: it must get the restore requirement itself.
   R5DistDropIn = "/etc/systemd/system/a13r5-dist.service.d/50-repro-state-restore.conf"
-  R5TuneDropIn = "/etc/systemd/system/a13r5-dist.service.d/50-repro-tune.conf"
+  R5TunedUnit = "a13r5-tuned.service"
+    ## A second unit the profile does not define, carrying the drop-in the
+    ## next generation drops (finding 3). Apart from ``R5DistUnit``, so that
+    ## unit gets the restore requirement only because a profile unit wants
+    ## it: a drop-in for an undefined unit reaches everything and would give
+    ## it the requirement too (the confound of the first round-5 cell).
+  R5TuneDropIn = "/etc/systemd/system/a13r5-tuned.service.d/50-repro-tune.conf"
   R5Resources = """
       # A13 review round 5, finding 5: a profile unit that wants a unit the
       # profile does not define.
@@ -356,7 +362,7 @@ const
         address = "r5Wants")"""
   R5TuneResource = """
       # A13 review round 5, finding 3: a drop-in the next generation drops.
-      systemdSystemDropIn(unit = "a13r5-dist.service", name = "tune",
+      systemdSystemDropIn(unit = "a13r5-tuned.service", name = "tune",
         content = "[Service]\nEnvironment=A13R5=1\n", address = "r5Tune")"""
   ShadowUnit = "eth-validator-shadow.service"
   ShadowResource = """
@@ -823,10 +829,11 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
     # A unit the profile does not define (as a distribution ships one), in
     # the distribution's directory, not enabled: only the profile's
     # eth-r5-wants.service pulls it in (finding 5).
-    discard nw.run("mkdir -p /var/lib/a13-r5-dist && printf '[Unit]\\n" &
-      "Description=A13 round-5 distribution-like unit\\n[Service]\\n" &
-      "ExecStart=/bin/sleep infinity\\n' > /usr/lib/systemd/system/" &
-      R5DistUnit & " && systemctl daemon-reload")
+    for u in [R5DistUnit, R5TunedUnit]:
+      discard nw.run("printf '[Unit]\\n" &
+        "Description=A13 round-5 distribution-like unit\\n[Service]\\n" &
+        "ExecStart=/bin/sleep infinity\\n' > /usr/lib/systemd/system/" & u)
+    discard nw.run("systemctl daemon-reload")
     # --- 4. The full realisation.
     let applied = nw.exec(applyCmd, timeoutSec = 3600)
     record["applyOutput"] = %((applied.stdout & applied.stderr)[0 ..< min(
@@ -855,6 +862,16 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
          nw.exec("test -f " & R5DistDropIn).exitCode == 0 and
          distDeps.count(RestoreUnit) >= 2,
          distDeps & "\n" & nw.exec("cat " & R5DistDropIn).stdout)
+    # Finding 5's other derivation path: a unit the profile does not define
+    # but drops in on reaches everything, so it requires the restore through
+    # that drop-in. Red under ``restore-requirement-skips-dropin-targets``.
+    let tunedReq = "/etc/systemd/system/" & R5TunedUnit &
+      ".d/50-repro-state-restore.conf"
+    let tunedDeps = nw.run("systemctl show -p Requires -p After " & R5TunedUnit)
+    step("round 5, dropin: a unit the profile drops in on but does not " &
+         "define requires the restore, through the generation's drop-in",
+         nw.exec("test -f " & tunedReq).exitCode == 0 and
+         tunedDeps.count(RestoreUnit) >= 2, tunedDeps)
     # Finding 3: the next generation no longer declares the tune drop-in;
     # a host realised in full removes it (and keeps the requirement). Red
     # under the engine build ``full-apply-keeps-undeclared-dropins``.
@@ -868,7 +885,8 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
          nw.exec("test -e " & R5TuneDropIn).exitCode != 0 and
          nw.exec("test -f " & R5DistDropIn).exitCode == 0,
          "before: " & $tuneBefore & "\n" & nextApply.stdout & nextApply.stderr &
-         "\n" & nw.exec("ls -la /etc/systemd/system/" & R5DistUnit & ".d").stdout)
+         "\n" & nw.exec("ls -la /etc/systemd/system/" & R5DistUnit & ".d " &
+           "/etc/systemd/system/" & R5TunedUnit & ".d").stdout)
     for (u, check) in [("vaultwarden.service", "http://127.0.0.1:8000/alive"),
                        ("eth-execution.service", "tcp:127.0.0.1:8545"),
                        ("eth-beacon.service",

@@ -8516,7 +8516,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_addon/tests/t_addon_carried_state_fails_closed.nim",
       "sourceSuiteCount": 13,
-      "staticCaseCount": 55,
+      "staticCaseCount": 56,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -8911,8 +8911,8 @@
       "owner": "libs/repro_addon",
       "requiresReproBinary": false,
       "source": "libs/repro_addon/tests/t_addon_floor_round7.nim",
-      "sourceSuiteCount": 10,
-      "staticCaseCount": 32,
+      "sourceSuiteCount": 12,
+      "staticCaseCount": 38,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

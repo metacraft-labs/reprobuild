@@ -24,7 +24,9 @@
 ## ``socket-options-by-list``, ``state-routes-direct-only``,
 ## ``activator-show-unjudged``, ``effective-skips-parse-rules``,
 ## ``bind-sources-by-prefix``, ``profile-memberships-ignored``,
-## ``printed-file-settings-trusted``, ``adopted-files-unverified``, ``getent-errors-as-absent``. Finding 7 is the tick helper's, a VM
+## ``printed-file-settings-trusted``, ``adopted-files-unverified``, ``getent-errors-as-absent``,
+## ``conflicts-unchecked``, ``exclusive-predecessor-by-say-so``,
+## ``exclusive-conflicts-any-unit`` (§13 decision 55). Finding 7 is the tick helper's, a VM
 ## gate (``e2e_addon_tick_observes_a_fresh_cycle``).
 ##
 ## Mocks: as in ``t_addon_floor_round6``, ``systemctl show`` text and stubs
@@ -386,7 +388,8 @@ suite "round 7, finding 5: the effective half is the authority":
       ("OnFailure=reboot.target\n", ""), ("Wants=shutdown.target\n", ""),
       ("OnFailureJobMode=isolate\n", ""), ("", "Group=shadow\n"),
       ("", "SupplementaryGroups=disk\n"), ("JoinsNamespaceOf=x.service\n", ""),
-      ("", "ExecStartPost=+/bin/true\n"), ("", "OpenFile=/etc/shadow\n")]
+      ("", "ExecStartPost=+/bin/true\n"), ("", "OpenFile=/etc/shadow\n"),
+      ("Conflicts=sshd.service\n", "")]
     for (u, sv) in corpus:
       checkpoint u & sv
       check refused(unitStanza("a.service", svc & sv, u)).len > 0
@@ -458,6 +461,69 @@ suite "A13 round 5: a template instance's dynamic account is the prefix's":
     check "runs as root" in problemsOf(e)
     e.unit = "app@root.service"
     check "runs as root" notin problemsOf(e)
+
+suite "§13 decision 55: Conflicts= names only the profile's own units":
+  # Falsifier: conflicts-unchecked.
+  test "parse time":
+    for t in ["multi-user.target", "sshd.service", "shutdown.target"]:
+      checkpoint t
+      check "names a unit the profile does not define" in refused(
+        unitStanza("a.service", svc, "Conflicts=" & t & "\n"))
+    check refused(unitStanza("a.service", svc, "Conflicts=b.service\n") &
+      unitStanza("b.service", svc)) == ""
+    check refused(unitStanza("a.service", svc, "Conflicts=t@x.service\n") &
+      rawUnit("t@.service", "[Service]\nUser=a\nExecStart=" & Prefix & "/bin/svc\n")) == ""
+  test "parse time, an activator":
+    check "names a unit the profile does not define" in refused(plain &
+      rawUnit("a.socket", "[Unit]\nConflicts=ssh.socket\n\n[Socket]\nListenStream=/run/a.sock\n"))
+  test "the effective check, from systemd's report and from the files":
+    var e = goodInput()
+    e.show["Conflicts"] = "shutdown.target"          # what systemd adds itself
+    check problemsOf(e) == ""
+    e.show["Conflicts"] = "shutdown.target sshd.service"
+    check "Conflicts=sshd.service names a unit the generation does not install" in problemsOf(e)
+    e.ownUnits = toHashSet(["a.service", "sshd.service"])
+    check problemsOf(e) == ""
+    e = goodInput()
+    e.loaded = @[(path: fragment, content: withLines(ru, "Conflicts=shutdown.target\n", ""))]
+    check "names a unit the profile does not define" in problemsOf(e)
+  test "the effective check of an activator":
+    let base = "FragmentPath=/etc/systemd/system/a.socket\nDropInPaths=\n"
+    check activatorProblems("a.socket", parseShow(base & "Conflicts=shutdown.target ssh.socket\n"),
+      parseShowLines("Listen=/run/a.sock (Stream)\n"), "/etc/systemd/system/a.socket", []).len > 0
+    check activatorProblems("a.socket", parseShow(base & "Conflicts=shutdown.target\n"),
+      parseShowLines("Listen=/run/a.sock (Stream)\n"), "/etc/systemd/system/a.socket", []).len == 0
+
+suite "§13 decision 55, amended: an exclusive successor's predecessor":
+  # Falsifiers: exclusive-predecessor-by-say-so (the effective half takes
+  # the unit's word for it), exclusive-conflicts-any-unit (a target too).
+  # A floored unit is exclusive by the resource's field (its X- marker is
+  # not on the floor's allowlist).
+  let excl = "  exclusive = true\n"
+  test "parse time: a .service, never a target, only when exclusive":
+    check refused(unitStanza("a.service", svc, "Conflicts=old.service\n", excl)) == ""
+    check "names a unit the profile does not define" in refused(unitStanza(
+      "a.service", svc, "Conflicts=multi-user.target\n", excl))
+    check "names a unit the profile does not define" in refused(unitStanza(
+      "a.service", svc, "Conflicts=old.socket\n", excl))
+    check "names a unit the profile does not define" in refused(unitStanza(
+      "a.service", svc, "Conflicts=old.service\n"))
+  test "the effective check: only what the switch holds as its predecessor":
+    var e = goodInput()
+    e.exclusive = true
+    e.predecessors = @["old.service"]
+    e.loaded = @[(path: fragment, content: withLines(ru, "Conflicts=old.service\n", ""))]
+    e.show["Conflicts"] = "shutdown.target old.service"
+    check problemsOf(e) == ""
+    e.show["Conflicts"] = "shutdown.target other.service"
+    check "Conflicts=other.service names a unit the generation does not install" in problemsOf(e)
+    e.show["Conflicts"] = "shutdown.target multi-user.target"
+    check "Conflicts=multi-user.target" in problemsOf(e)
+    e = goodInput()
+    e.exclusive = true
+    e.predecessors = @["old.service"]
+    e.loaded = @[(path: fragment, content: withLines(ru, "Conflicts=x.target\n", ""))]
+    check "names a unit the profile does not define" in problemsOf(e)
 
 suite "round 7, finding 6: the profile's own memberships at parse time":
   test "passwd.user groups and passwd.group members":

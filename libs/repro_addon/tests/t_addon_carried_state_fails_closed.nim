@@ -533,19 +533,19 @@ suite "reach judges the account systemd will use (round 4)":
 
   test "F1: DynamicUser=yes with User=root runs as root":
     check pendingRefused(unit("f1.service",
-      "[Service]\nDynamicUser=yes\nUser=root\nExecStart=/bin/true\n"))
+      "[Service]\nDynamicUser=yes\nNoNewPrivileges=yes\nUser=root\nExecStart=/bin/true\n"))
 
   test "F1b: DynamicUser=yes with Group=root holds gid 0":
     check pendingRefused(unit("f1b.service",
-      "[Service]\nDynamicUser=yes\nUser=app\nGroup=root\nExecStart=/bin/true\n"))
+      "[Service]\nDynamicUser=yes\nNoNewPrivileges=yes\nUser=app\nGroup=root\nExecStart=/bin/true\n"))
 
   test "F2: User=%U is the system manager's uid, 0":
     check pendingRefused(unit("f2.service",
-      "[Service]\nProtectSystem=strict\nUser=%U\nExecStart=/bin/true\n"))
+      "[Service]\nProtectSystem=strict\nNoNewPrivileges=yes\nUser=%U\nExecStart=/bin/true\n"))
 
   test "F2b: a template's User=%i names no account (DefaultInstance=root)":
     check pendingRefused(unit("f2b@.service",
-      "[Service]\nProtectSystem=strict\nUser=%i\nExecStart=/bin/true\n" &
+      "[Service]\nProtectSystem=strict\nNoNewPrivileges=yes\nUser=%i\nExecStart=/bin/true\n" &
       "[Install]\nWantedBy=multi-user.target\nDefaultInstance=root\n"))
 
   test "a uid alias of root, and an account the host does not have, reach everything":
@@ -554,7 +554,7 @@ suite "reach judges the account systemd will use (round 4)":
         writeFile(root / "etc/passwd", "root:x:0:0::/root:/bin/sh\n" &
           "app:x:0:0::/:/bin/sh\n"))
     check pendingRefused(unit("gh.service", "[Service]\nProtectSystem=strict\n" &
-      "User=ghost\nExecStart=/bin/true\n"))
+      "NoNewPrivileges=yes\nUser=ghost\nExecStart=/bin/true\n"))
 
   test "a dynamic user is confined without ProtectSystem=":
     check not pendingRefused(unit("dyn.service",
@@ -608,7 +608,7 @@ suite "reach reads every drop-in systemd applies (round 4)":
   test "drop-ins of all sources apply in one file-name order":
     # The host's 90- unconfines; the profile's 50- confines: systemd reads
     # 50 then 90, so the unit is not confined.
-    check pendingRefused(unit("o.service", "[Service]\nUser=app\nExecStart=/bin/true\n") &
+    check pendingRefused(unit("o.service", "[Service]\nNoNewPrivileges=yes\nUser=app\nExecStart=/bin/true\n") &
       "systemd.systemDropIn {\n  unit = \"o.service\"\n  name = \"confine\"\n" &
       "  content = \"[Service]\nProtectSystem=strict\n\"\n}\n",
       proc (root: string) = hostFile(root,
@@ -822,6 +822,15 @@ suite "the requirement covers what the profile starts (round 5)":
     let units = carriedRequirementUnits(parseSystemProfile(wants), d, root)
     check "dist9.service" in units
     check "w1.service" in units
+
+  test "a unit the profile does not define but drops in on requires the restore through it":
+    let (root, d) = installedAt("req-dropin")
+    let dropIn = "systemd.systemDropIn {\n  unit = \"tuned9.service\"\n" &
+      "  name = \"tune\"\n  content = \"[Service]\nEnvironment=A=1\n\"\n}\n"
+    check carriedRequirementUnits(parseSystemProfile(
+      confinedNnp("w0.service", "ReadWritePaths=/var/lib/other\n")), d, root).len == 0
+    check carriedRequirementUnits(parseSystemProfile(dropIn), d, root) ==
+      @["tuned9.service"]
 
   test "a Wants= chain within the profile: the wanted unit that reaches gets its own":
     let (root, d) = installedAt("req-chain")

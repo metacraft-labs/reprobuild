@@ -1117,6 +1117,31 @@ proc checkFloorDropIns*(p: SystemProfile) =
       except EServiceFloor as e:
         raiseSystemProfileInvalid(e.msg)
 
+proc unitContentDeclaresExclusive*(content: string): bool =
+  ## `X-Repro-Exclusive=true|yes|1` in the `[Unit]` section (ReproOS Add-On
+  ## Mode §7.3: "a unit whose X- metadata says exclusive = true"). systemd
+  ## ignores `X-` keys, so the marker travels in the unit file itself and
+  ## an adopted hand-written unit can carry it.
+  var inUnit = false
+  for raw in content.splitLines():
+    let line = raw.strip()
+    if line.startsWith("["):
+      inUnit = line == "[Unit]"
+      continue
+    if not inUnit or line.len == 0 or line[0] in {'#', ';'}:
+      continue
+    let eq = line.find('=')
+    if eq < 0: continue
+    if line[0 ..< eq].strip() == "X-Repro-Exclusive":
+      return line[eq + 1 .. ^1].strip().toLowerAscii() in ["true", "yes", "1", "on"]
+  false
+
+proc isExclusiveUnit*(r: SystemResource): bool =
+  ## The resource's `exclusive` field, or the marker in its content.
+  r.kind == srkSystemdSystemUnit and
+    (r.suExclusive or unitContentDeclaresExclusive(r.suContent))
+
+
 proc floorWaivedWhole*(r: SystemResource): bool =
   ## The unit names the whole-floor waiver (``serviceFloor: <why>``): it has
   ## no floor, and no floor rule applies to it.
@@ -1320,6 +1345,14 @@ proc checkFloorReach*(p: SystemProfile) =
         if (svc == f or dropInApplies(svc, f)) and r.suName notin roots:
           roots.add(r.suName)
   for root in roots:
+    # Conflicts= may name only the profile's own units (§13 decision 55).
+    let ri = profileUnitOf(p, root)
+    let exclusive = ri >= 0 and isExclusiveUnit(p.resources[ri])
+    for c in unitFilesOf(p, root):
+      let why = conflictsRefusal(root, c,
+        proc (u: string): bool = profileUnitOf(p, u) >= 0, exclusive = exclusive)
+      if why.len > 0:
+        raiseSystemProfileInvalid("systemd.systemUnit '" & root & "': " & why)
     let route = systemStateRoute([root],
       proc (u: string): seq[string] = profileStartsOf(p, u))
     if route.len > 0:
@@ -1468,30 +1501,6 @@ proc sysusersEntryContent*(r: SystemResource): string =
   doAssert r.kind == srkLinuxSysusersEntry
   sysusersFragmentContent(r.seKind, r.seName, r.seId, r.seDescription,
                           r.seHome, r.seShell)
-
-proc unitContentDeclaresExclusive*(content: string): bool =
-  ## `X-Repro-Exclusive=true|yes|1` in the `[Unit]` section (ReproOS Add-On
-  ## Mode §7.3: "a unit whose X- metadata says exclusive = true"). systemd
-  ## ignores `X-` keys, so the marker travels in the unit file itself and
-  ## an adopted hand-written unit can carry it.
-  var inUnit = false
-  for raw in content.splitLines():
-    let line = raw.strip()
-    if line.startsWith("["):
-      inUnit = line == "[Unit]"
-      continue
-    if not inUnit or line.len == 0 or line[0] in {'#', ';'}:
-      continue
-    let eq = line.find('=')
-    if eq < 0: continue
-    if line[0 ..< eq].strip() == "X-Repro-Exclusive":
-      return line[eq + 1 .. ^1].strip().toLowerAscii() in ["true", "yes", "1", "on"]
-  false
-
-proc isExclusiveUnit*(r: SystemResource): bool =
-  ## The resource's `exclusive` field, or the marker in its content.
-  r.kind == srkSystemdSystemUnit and
-    (r.suExclusive or unitContentDeclaresExclusive(r.suContent))
 
 proc checkUnitStateConflicts*(resources: openArray[SystemResource]) =
   ## A unit name may not be declared both as a `systemd.unitState` (a unit
