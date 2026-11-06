@@ -99,6 +99,7 @@ proc goodInput(): EffectiveInput =
     of "a", "admx": 1000
     else: -1
   result.inspectFile = proc (p: string): string = ""
+  result.userOfUid = proc (uid: int): string = (if uid == 0: "root" else: "")
   result.lines["ExecStartEx"] = @["{ path=" & Prefix & "/bin/svc ; argv[]=" &
     Prefix & "/bin/svc ; flags= ; start_time=[n/a] }"]
   result.loaded = @[(path: fragment, content: ru)]
@@ -107,8 +108,11 @@ proc problemsOf(e: EffectiveInput): string = effectiveFloorProblems(e).join("\n"
 
 proc fixtureFiles(): seq[string] =
   for kind, f in walkDir(Fixtures):
-    if f.extractFilename.startsWith("show-all-") and
-        not f.extractFilename.startsWith("show-all-minimal-"): result.add(f)
+    let n = f.extractFilename
+    # A service unit's output (round 7 adds socket, timer and path units').
+    if n.startsWith("show-all-") and not n.startsWith("show-all-minimal-") and
+        not n.startsWith("show-all-socket-") and not n.startsWith("show-all-timer-") and
+        not n.startsWith("show-all-path-"): result.add(f)
 
 suite "round 6: the baseline":
   test "a unit that holds its floor has no problem":

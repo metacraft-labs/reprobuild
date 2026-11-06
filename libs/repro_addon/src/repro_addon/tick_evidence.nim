@@ -19,6 +19,7 @@ import repro_deploy_agent/tick_record
 import repro_deploy_agent/tick_status
 
 import ./agent_checks
+import ./contain_marker
 import ./agent_record
 import ./evidence
 import ./evidence_ship
@@ -133,6 +134,14 @@ proc engineAgentTick*(cfg: AgentConfig; deps: AgentDeps;
   ## One tick of the full engine's ``repro deploy-agent`` on an add-on host
   ## (decision 29: held to every A8 rule), recorded as the add-on agent's
   ## ticks are. ``site`` is the add-on's (``defaultSite(<add-on state>)``).
+  # A contained host (decision 51): the engine's agent neither fetches nor
+  # applies, and records nothing -- the containment record speaks for the
+  # silence that follows (A11 review finding 6).
+  if isContained(site.stateDir) and not mutated("contained-agent-applies"):
+    result.outcome = AgentOutcome(kind: aoPaused, target: cfg.target,
+      message: "contained by an operator (" &
+        containedMarkerPath(site.stateDir) & "); nothing was fetched or applied")
+    return
   result = runAgentTickRecorded(cfg, deps)
   when not mutated("engine-tick-unrecorded"):
     recordTickEvidence(result, TickRefusal(), site)

@@ -4,12 +4,15 @@
 ##
 ## Each ``sh`` block's lines (continuations joined) and each inline
 ## ``repro-evidence-sink ...`` / ``repro system addon ...`` command in the
-## prose are parsed by the command's own parser: the sink's
-## (``evidence_sink_cli.parseSinkCommand``), and for ``repro system addon``
-## the verb is held to the CLI's usage text and, for ``contain`` and
-## ``release``, to their own parser. Placeholders (``<port>``, ``<digest>``)
-## are given sample values first; an elided line (``...``) is checked for
-## its verb only.
+## prose are parsed WHOLE by the command's own parser: the sink's
+## (``evidence_sink_cli.parseSinkCommand``), and for each ``repro system
+## addon`` verb the guide uses, that verb's (``parsePreflightArgs``,
+## ``parseBootstrapArgs``, ``parseEnrolArgs``, ``parseContainArgs``,
+## ``parseUninstallArgs``, or no option at all). A verb the test has no parser for fails it, and so does
+## an elided line (``...``) or a prose span that names a sink command
+## without the tool (``addon-check --update-hosts``): every command the
+## guide prints is one the reader can run (A11 review finding 16).
+## Placeholders (``<port>``, ``<digest>``) are given sample values first.
 ##
 ## Falsifying build: ``sink-cli-equals-only`` (the old parser, which read
 ## ``--dir D`` as an empty ``--dir``): the sink lines go red.
@@ -20,6 +23,7 @@ import std/[os, strutils, unittest]
 
 import repro_addon/cli
 import repro_addon/containment
+import repro_addon/evidence_enrol
 import repro_addon/evidence_sink_cli
 
 const Guide = currentSourcePath().parentDir.parentDir.parentDir.parentDir /
@@ -58,37 +62,47 @@ proc sample(line: string): string =
                     ("<you>", "alice"), ("<n>", "15"))
 
 suite "the user guide's command lines parse":
-  let lines = commandLines(readFile(Guide))
+  let text = readFile(Guide)
+  let lines = commandLines(text)
   var sinkLines, addonLines = 0
 
-  test "every documented command parses":
+  test "every documented command parses, whole":
     for l in lines:
       checkpoint l
+      check "..." notin l
       let args = parseCmdLine(sample(l))
-      if args[0] == "repro-evidence-sink":
-        inc sinkLines
-        # A bare verb mentioned in the prose (`repro-evidence-sink read`)
-        # needs its store to run; the documented form is still checked.
-        if args.len == 2 and args[1] in SinkVerbs: continue
-        var ok = true
-        var why = ""
-        try: discard parseSinkCommand(args[1 .. ^1])
-        except SinkUsageError as e:
-          ok = false
-          why = e.msg
-        check ok
-        if not ok: checkpoint why
-      elif args.len >= 4 and args[0] == "repro" and args[1] == "system" and
-          args[2] == "addon":
-        inc addonLines
-        let verb = args[3]
-        check ("\n  " & verb) in AddonUsage
-        if verb in ["contain", "release"]:
-          var ok = true
-          try: discard parseContainArgs(args[4 .. ^1])
-          except ValueError: ok = false
-          check ok
+      var ok = true
+      var why = ""
+      try:
+        if args[0] == "repro-evidence-sink":
+          inc sinkLines
+          discard parseSinkCommand(args[1 .. ^1])
+        elif args.len >= 4 and args[0] == "repro" and args[1] == "system" and
+            args[2] == "addon":
+          inc addonLines
+          let rest = args[4 .. ^1]
+          case args[3]
+          of "preflight": discard parsePreflightArgs(rest)
+          of "bootstrap": discard parseBootstrapArgs(rest)
+          of "evidence-enrol": discard parseEnrolArgs(rest)
+          of "contain", "release": discard parseContainArgs(rest)
+          of "uninstall": discard parseUninstallArgs(rest)
+          of "evidence-credential-check", "migrate":
+            if rest.len > 0: raise newException(ValueError, "takes no option")
+          else:
+            raise newException(ValueError, "no parser for " & args[3])
+        else:
+          raise newException(ValueError, "not a command the guide may print")
+      except CatchableError as e:
+        ok = false
+        why = e.msg
+      if not ok: checkpoint why
+      check ok
+
+  test "no prose names a sink command without its tool":
+    for verb in SinkVerbs:
+      check ("`" & verb & " --") notin text
 
   test "the check is not vacuous":
-    check sinkLines >= 5
-    check addonLines >= 6
+    check sinkLines >= 7
+    check addonLines >= 7

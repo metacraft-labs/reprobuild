@@ -40,7 +40,8 @@ from ./service_floor_v3 as floorV3 import nil
 export service_floor.EServiceFloor, service_floor.ServiceFloorHardening,
   service_floor.FloorVersion, service_floor.WholeFloorException,
   service_floor.commandStoreObjects, service_floor.referencedStoreObjects,
-  service_floor.storeObjectOf
+  service_floor.storeObjectOf, service_floor.isSafeSecretComponent,
+  service_floor.credentialServiceOf
 
 const InfraAddonMutation {.strdefine: "reproAddonMutation".} = ""
   ## A falsifying build of the add-on's gates (``repro_addon/mutations``);
@@ -806,32 +807,11 @@ const
     ## On a host without it (full ReproOS) `Wants=`/`After=` on a unit
     ## that does not exist pull in and order nothing.
 
-proc isSafeSecretComponent*(s: string): bool =
-  ## One path segment of `[A-Za-z0-9._-]`, at most 64 bytes, not starting
-  ## with `.` (so never `.`, `..`, or the materialiser's hidden temporary
-  ## names): a secret's service and name both become a path component
-  ## under `/run/repro/secrets` and part of a `LoadCredential=` line.
-  if s.len == 0 or s.len > 64 or s[0] == '.':
-    return false
-  for c in s:
-    if c notin {'A'..'Z', 'a'..'z', '0'..'9', '.', '-', '_'}:
-      return false
-  true
-
 proc secretEntryPath*(service, name: string): string =
   ## The sealed entry a `secrets.secretFile` names: `<service>/<name>`, the
   ## same relative path it is materialised at under `SecretsRunRoot`. The
   ## entry itself names the one service that may load it (CRED-3).
   service & "/" & name
-
-proc credentialServiceOf*(unitName: string): string =
-  ## The secrets service of a unit: its name without `.service`, or "" when
-  ## the unit cannot load credentials (not a `.service`, a template
-  ## instance, or a name that is not a safe component).
-  if not unitName.endsWith(".service"):
-    return ""
-  let stem = unitName[0 ..< unitName.len - ".service".len]
-  if isSafeSecretComponent(stem): stem else: ""
 
 proc credentialLines*(unitName: string; credentials: openArray[string]):
     seq[string] =
@@ -1137,6 +1117,12 @@ proc checkFloorDropIns*(p: SystemProfile) =
       except EServiceFloor as e:
         raiseSystemProfileInvalid(e.msg)
 
+proc floorWaivedWhole*(r: SystemResource): bool =
+  ## The unit names the whole-floor waiver (``serviceFloor: <why>``): it has
+  ## no floor, and no floor rule applies to it.
+  for e in r.suFloorExceptions:
+    if e.strip().startsWith(WholeFloorException & ":"): return true
+
 proc activatedService(name, content: string): string =
   ## The service a socket, timer or path unit starts: its ``Service=`` /
   ## ``Unit=``, else the unit of the same name (``foo@.service`` for a
@@ -1223,6 +1209,22 @@ proc checkFloorActivators*(p: SystemProfile) =
       if why.len > 0:
         raiseSystemProfileInvalid("the drop-in '" & d.address & "' onto " &
           target & ", which activates a floored service: " & why)
+  # EnvironmentFile= is default-deny (§13 decision 50): a store path, a file
+  # the profile installs, or the service's own secrets.
+  var ownFiles: seq[string]
+  for f in p.resources:
+    if f.kind == srkFsSystemFile: ownFiles.add(f.sfPath)
+  for r in p.resources:
+    if r.kind != srkSystemdSystemUnit or r.suHardening != ServiceFloorHardening or
+        floorWaivedWhole(r):
+      continue
+    for d in sectionDirectives(r.suContent, ["Service"]):
+      if d.key != "EnvironmentFile": continue
+      for t in d.value.splitWhitespace():
+        let why = environmentFileRefusal(r.suName, t, ownFiles)
+        if why.len > 0:
+          raiseSystemProfileInvalid("systemd.systemUnit '" & r.suName &
+            "': EnvironmentFile=" & t & ": " & why)
   # EnvironmentFile= against every other floored unit's writable places.
   for r in p.resources:
     if r.kind != srkSystemdSystemUnit or r.suHardening != ServiceFloorHardening:
@@ -1242,6 +1244,110 @@ proc checkFloorActivators*(p: SystemProfile) =
                 "': EnvironmentFile=" & np & " lies in " & o.suName &
                 "'s writable place " & w & "; the manager reads it as root")
 
+proc profileUnitOf(p: SystemProfile; name: string): int =
+  ## The index of the profile's own unit ``name`` (or of the template an
+  ## instance ``name`` is of), -1 when the profile does not define it.
+  for i, r in p.resources:
+    if r.kind == srkSystemdSystemUnit and r.suCollision != "dropIn" and
+        r.suName == name: return i
+  let at = name.find('@')
+  let dot = name.rfind('.')
+  if at > 0 and dot > at:
+    let tmpl = name[0 .. at] & name[dot .. ^1]
+    for i, r in p.resources:
+      if r.kind == srkSystemdSystemUnit and r.suCollision != "dropIn" and
+          r.suName == tmpl: return i
+  -1
+
+proc unitFilesOf(p: SystemProfile; name: string): seq[string] =
+  ## The profile's bytes systemd reads for ``name``: its unit and every
+  ## drop-in of the profile that applies to it.
+  let i = profileUnitOf(p, name)
+  if i >= 0: result.add(p.resources[i].suContent)
+  for d in p.resources:
+    if d.kind == srkSystemdSystemDropIn and dropInApplies(d.diUnit, name):
+      result.add(d.diContent)
+    elif d.kind == srkSystemdSystemUnit and d.suCollision == "dropIn" and
+        dropInApplies(d.suName, name):
+      result.add(d.suContent)
+
+proc profileStartsOf*(p: SystemProfile; name: string): seq[string] =
+  ## The units starting ``name`` starts, as far as the profile says: its
+  ## ``[Unit]`` starting dependencies (``StartingDependencyKeys``) in its
+  ## files, the units of the profile its ``[Install]`` names pull in when
+  ## enabled (``WantedBy=``, ``RequiredBy=``, ``UpheldBy=`` naming it), and
+  ## for a socket, timer or path unit the unit it activates. A unit the
+  ## profile does not define starts nothing the profile can see; the
+  ## effective-unit check follows it on the host.
+  let files = unitFilesOf(p, name)
+  for c in files:
+    for d in sectionDirectives(c, ["Unit"]):
+      if d.key in StartingDependencyKeys:
+        for t in d.value.splitWhitespace(): result.add(t)
+  for r in p.resources:
+    if r.kind != srkSystemdSystemUnit or r.suCollision == "dropIn" or
+        not r.suEnabled: continue
+    for d in sectionDirectives(r.suContent, ["Install"]):
+      if d.key in ["WantedBy", "RequiredBy", "UpheldBy"] and
+          name in d.value.splitWhitespace():
+        result.add(r.suName)
+  if files.len > 0 and (name.endsWith(".socket") or name.endsWith(".timer") or
+                        name.endsWith(".path")):
+    result.add(activatedService(name, files[0]))
+
+proc checkFloorReach*(p: SystemProfile) =
+  ## No floored unit, and no unit that activates one, reaches a system-state
+  ## unit (``SystemStateTargets``) by any route the profile defines (§13
+  ## decision 49; A9 review round 7, finding 4), and every unit of the
+  ## profile on such a route queues its ``OnFailure=``/``OnSuccess=`` units
+  ## only with ``replace`` or ``fail`` and allows no isolation.
+  when InfraAddonMutation in ["floor-static-r3-disabled", "floor-unchecked",
+                              "floor-round5-static-off"]:
+    return
+  var roots: seq[string]
+  for r in p.resources:
+    if r.kind == srkSystemdSystemUnit and r.suCollision != "dropIn" and
+        r.suHardening == ServiceFloorHardening and not floorWaivedWhole(r):
+      roots.add(r.suName)
+  if roots.len == 0: return
+  let floored = roots
+  for r in p.resources:
+    if r.kind == srkSystemdSystemUnit and r.suCollision != "dropIn" and
+        (r.suName.endsWith(".socket") or r.suName.endsWith(".timer") or
+         r.suName.endsWith(".path")):
+      let svc = activatedService(r.suName, r.suContent)
+      for f in floored:
+        if (svc == f or dropInApplies(svc, f)) and r.suName notin roots:
+          roots.add(r.suName)
+  for root in roots:
+    let route = systemStateRoute([root],
+      proc (u: string): seq[string] = profileStartsOf(p, u))
+    if route.len > 0:
+      raiseSystemProfileInvalid("systemd.systemUnit '" & root & "' starts " &
+        route[^1] & " (" & route.join(" -> ") & "), which changes the " &
+        "whole system's state; a floored unit, and a unit that activates " &
+        "one, may not reach it by any route")
+    # The job modes and isolation of every profile unit it reaches.
+    var seen = initHashSet[string]()
+    var queue = @[root]
+    while queue.len > 0 and seen.len <= RouteLimit:
+      let u = queue.pop()
+      if u in seen: continue
+      seen.incl(u)
+      for c in unitFilesOf(p, u):
+        for d in sectionDirectives(c, ["Unit"]):
+          if d.key in JobModeKeys and d.value.strip() notin SafeJobModes:
+            raiseSystemProfileInvalid("systemd.systemUnit '" & u & "' (" &
+              "reached from " & root & "): " & d.key & "=" & d.value &
+              " changes the system's state beyond the unit (only " &
+              SafeJobModes.join(" or ") & ")")
+          if d.key == "AllowIsolate" and d.value.strip().toLowerAscii() in
+              ["yes", "true", "1", "on"]:
+            raiseSystemProfileInvalid("systemd.systemUnit '" & u & "' (" &
+              "reached from " & root & "): AllowIsolate=yes lets a job " &
+              "stop every unit the target does not want")
+      for d in profileStartsOf(p, u): queue.add(d)
+
 proc applyAddOnServiceFloor*(p: var SystemProfile) =
   ## The add-on realisation's default (ReproOS-Add-On-Mode §10.1): every
   ## unit `floorAppliesByDefault` selects gets `hardening = "serviceFloor"`.
@@ -1252,6 +1358,7 @@ proc applyAddOnServiceFloor*(p: var SystemProfile) =
       discard renderedSystemUnitContent(r)
   checkFloorDropIns(p)
   checkFloorActivators(p)
+  checkFloorReach(p)
 
 proc floorExceptionPlanLines*(p: SystemProfile): seq[string] =
   ## Every floor exception of the profile's units under the floor, one
@@ -2759,6 +2866,7 @@ proc parseSystemProfile*(text: string; addOnDefaults = false;
   if not stored:
     checkFloorDropIns(result)
     checkFloorActivators(result)
+    checkFloorReach(result)
   checkStateDirectories(result)
 
 # ---------------------------------------------------------------------------

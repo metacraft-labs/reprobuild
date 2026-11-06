@@ -36,6 +36,7 @@
 ## deny.
 
 import std/[algorithm, os, strutils, tables, times]
+from std/posix import nil
 
 import repro_local_store/store
 
@@ -44,6 +45,7 @@ import ./fingerprint
 import ./generation0
 import ./ledger
 import ./mutations
+import ./seams
 import ./store_root
 
 type
@@ -80,6 +82,10 @@ type
     evidence*: EvidenceSite
     noWrites*: bool
       ## A plan: the cache is consulted, never written.
+    evidenceMaxBytes*: int64
+      ## The most an altered object copied across filesystems may hold
+      ## (``StoreEvidenceMaxBytes`` on a host); a larger one keeps its
+      ## manifest only. 0 reads as the host's bound.
 
   CustodyVerdict* = enum
     cvVerified, cvUnverifiable, cvAltered
@@ -156,16 +162,34 @@ proc readTable(path: string; fields: int): Table[string, seq[string]] =
   except IOError, OSError:
     discard
 
+proc fsyncPath*(path: string) =
+  ## fsync one file or directory by path (opened read-only).
+  let fd = posix.open(path.cstring, posix.O_RDONLY or posix.O_CLOEXEC)
+  if fd < 0:
+    raiseOSError(osLastError(), "open " & path & " to sync it")
+  try:
+    if posix.fsync(fd) != 0:
+      raiseOSError(osLastError(), "fsync " & path)
+  finally:
+    discard posix.close(fd)
+
+proc syncTreeFiles(root: string) =
+  ## Every file and directory under ``root``, and ``root``.
+  for path in walkDirRec(root, yieldFilter = {pcFile, pcDir}):
+    fsyncPath(path)
+  fsyncPath(root)
+
 proc writeTable(path: string; t: Table[string, seq[string]]) =
+  ## Durably (fsync, rename, directory fsync): the realisation index may be
+  ## the only record of an object's expected digest, and a crash must not
+  ## leave it renamed into place empty (A11 review finding 10).
   var keys: seq[string]
   for k in t.keys: keys.add(k)
   keys.sort()
   var text = ""
   for k in keys: text.add(k & "\t" & t[k].join("\t") & "\n")
   createDir(parentDir(path))
-  writeFile(path & ".tmp", text)
-  setFilePermissions(path & ".tmp", {fpUserRead, fpUserWrite})
-  moveFile(path & ".tmp", path)
+  writeFileAtomic(path, text, 0o600)
 
 proc readAdopted*(path: string): Table[string, string] =
   ## ``store-digests``: ``<path> <digest>`` per line (an operator's).
@@ -329,6 +353,15 @@ proc dirBytes(dir: string): int64 =
   for f in walkDirRec(dir, yieldFilter = {pcFile}):
     try: result += getFileSize(f) except OSError: discard
 
+proc entryMadeAt*(entry: string): Time =
+  ## The time an evidence entry's name records (``yyyyMMdd'T'HHmmss'Z'``);
+  ## its directory's mtime when the name carries none.
+  let name = extractFilename(entry)
+  try:
+    parse(name[0 ..< 16], "yyyyMMdd'T'HHmmss'Z'", utc()).toTime()
+  except CatchableError:
+    getLastModificationTime(entry)
+
 proc pruneEvidence*(site: CustodySite; now = getTime()) =
   ## Retention (decision 47): at most ``StoreEvidenceMaxEntries`` entries,
   ## none older than ``StoreEvidenceMaxAgeDays``, and no more than
@@ -344,8 +377,13 @@ proc pruneEvidence*(site: CustodySite; now = getTime()) =
     entries.delete(0)
   var kept: seq[string]
   for d in entries:
-    let age = now - getLastModificationTime(d)
-    if age.inDays > StoreEvidenceMaxAgeDays: removeDir(d)
+    # Aged by the UTC stamp its name begins with -- when it was made -- not
+    # by the directory's mtime, which removing its tree/ moves (A11 review
+    # finding 14).
+    let made = when mutated("evidence-aged-by-mtime"):
+                 getLastModificationTime(d)
+               else: entryMadeAt(d)
+    if (now - made).inDays > StoreEvidenceMaxAgeDays: removeDir(d)
     else: kept.add(d)
   var total = 0'i64
   for d in kept:
@@ -358,13 +396,43 @@ proc pruneEvidence*(site: CustodySite; now = getTime()) =
       removeDir(t)
     inc i
 
-proc preserveEvidence*(site: CustodySite; path, expected, observed,
-                       why: string; now = getTime()): string =
-  ## Move the altered object at ``path`` into a new entry of the evidence
-  ## directory (``<UTC stamp>-<package>-<version>/``: ``tree/`` the object
-  ## as it was, ``manifest`` its entries' digests, ``record`` what was
-  ## expected and found) and return the entry. Root-only (0700), pruned
-  ## first. The object no longer exists at ``path`` afterwards.
+proc cRename(a, b: cstring): cint {.importc: "rename", header: "<stdio.h>".}
+  ## rename(2): fails (EXDEV) across filesystems instead of copying.
+
+proc asideRoot*(site: CustodySite): string =
+  ## Where an altered object is renamed first: inside the store (one
+  ## filesystem, so the rename is atomic and instant), never served. A
+  ## crash leaves it here, and the next custody pass files it as evidence
+  ## (``fileLeftoverAsides``).
+  site.storeRoot / "tmp" / "custody-aside"
+
+proc moveAside*(site: CustodySite; path: string; now = getTime()): string =
+  ## Rename the object at ``path`` aside (``asideRoot``) and return where.
+  createDir(asideRoot(site))
+  let stamp = now.utc.format("yyyyMMdd'T'HHmmss'Z'")
+  result = asideRoot(site) / (stamp & "-" & extractFilename(parentDir(path)) &
+                              "-" & extractFilename(path))
+  var n = 1
+  let base = result
+  while dirExists(result):
+    inc n
+    result = base & "." & $n
+  writeFileAtomic(result & ".from", path & "\n", 0o600)
+  moveDir(path, result)        # a directory rename, within the store
+  # Both directories, so a crash leaves the object at one name or the
+  # other, never neither.
+  fsyncPath(asideRoot(site))
+  fsyncPath(parentDir(path))
+
+proc fileEvidence*(site: CustodySite; aside, path, expected, observed,
+                   why: string; now = getTime()): string =
+  ## Turn the altered object renamed aside into a new entry of the evidence
+  ## directory (``<UTC stamp>-<package>-<version>/``: ``tree/`` the object as
+  ## it was, ``manifest`` its entries' digests, ``record`` what was expected
+  ## and found) and return the entry. Root-only (0700), pruned. The evidence
+  ## directory is outside the store: a rename where they share a
+  ## filesystem, otherwise a copy of at most ``StoreEvidenceMaxBytes`` -- a
+  ## larger tree keeps its manifest only (A11 review finding 10).
   createDir(site.evidenceDir)
   setFilePermissions(site.evidenceDir, {fpUserRead, fpUserWrite, fpUserExec})
   pruneEvidence(site, now)
@@ -378,17 +446,50 @@ proc preserveEvidence*(site: CustodySite; path, expected, observed,
     result = site.evidenceDir / (name & "." & $n)
   createDir(result)
   setFilePermissions(result, {fpUserRead, fpUserWrite, fpUserExec})
-  writeFile(result / "manifest", treeManifest(path))
-  writeFile(result / "record", "path\t" & path & "\nexpected\t" & expected &
-    "\nobserved\t" & observed & "\nwhy\t" & why & "\nat\t" & stamp & "\n")
+  writeFileAtomic(result / "manifest", treeManifest(aside), 0o600)
+  var kept = "tree"
   when mutated("recovery-discards-evidence"):
     # FALSIFYING BUILD: the altered tree is deleted, not kept.
-    removeDir(path)
+    removeDir(aside)
+    kept = "nothing"
   else:
-    # A rename where the evidence directory shares the store's filesystem,
-    # a copy and a removal otherwise (``moveDir``).
-    moveDir(path, result / "tree")
+    if cRename(aside.cstring, (result / "tree").cstring) == 0:
+      fsyncPath(result)
+      fsyncPath(asideRoot(site))
+    else:
+      # Another filesystem (a btrfs store subvolume): a bounded copy.
+      let size = dirBytes(aside)
+      when not mutated("evidence-copy-unbounded"):
+        let bound = if site.evidenceMaxBytes > 0: site.evidenceMaxBytes
+                    else: StoreEvidenceMaxBytes
+        if size > bound:
+          kept = "manifest only (" & $size & " bytes, over the limit)"
+        else:
+          copyDirWithPermissions(aside, result / "tree")
+          syncTreeFiles(result / "tree")
+      else:
+        copyDirWithPermissions(aside, result / "tree")
+      fsyncPath(result)
+      removeDir(aside)
+  try: removeFile(aside & ".from") except OSError: discard
+  writeFileAtomic(result / "record", "path\t" & path & "\nexpected\t" &
+    expected & "\nobserved\t" & observed & "\nwhy\t" & why & "\nat\t" &
+    stamp & "\nkept\t" & kept & "\n", 0o600)
+  fsyncPath(site.evidenceDir)
   pruneEvidence(site, now)
+
+proc preserveEvidence*(site: CustodySite; path, expected, observed,
+                       why: string; now = getTime()): string =
+  ## ``moveAside`` and ``fileEvidence`` at once (when nothing serves the
+  ## object in between).
+  let aside = moveAside(site, path, now)
+  fileEvidence(site, aside, path, expected, observed, why, now)
+
+proc markRecorded*(entry: string) =
+  ## The entry's DET-AO-5 record is written: nothing to flush for it.
+  if entry.len > 0:
+    try: writeFileAtomic(entry / "recorded", "", 0o600)
+    except CatchableError: discard
 
 proc evidenceEntries*(site: CustodySite): seq[string] =
   if dirExists(site.evidenceDir):
@@ -453,6 +554,54 @@ proc custodyOrder(o: StoreObjectRef): int =
   elif pkg.startsWith("apt-closure-"): 1
   else: 2
 
+proc fileLeftoverAsides*(site: CustodySite) =
+  ## Objects a crashed recovery renamed aside and never filed: each becomes
+  ## an evidence entry and a DET-AO-5 record now, so the alteration is never
+  ## lost to the crash (A11 review finding 10).
+  if not dirExists(asideRoot(site)) or mutated("custody-ignores-leftovers"):
+    return
+  for kind, d in walkDir(asideRoot(site)):
+    if kind != pcDir: continue
+    let path = try: readFile(d & ".from").strip() except CatchableError: ""
+    let entry = fileEvidence(site, d, (if path.len > 0: path else: d), "",
+      storeTreeDigest(d), "kept after a recovery interrupted by a crash")
+    discard recordEvidence(EvidenceEvent(detector: edStore,
+      category: ecDetection, trigger: "store-recovery-interrupted",
+      fields: @[("path", path), ("evidence", entry),
+                ("message", path & ": a recovery was interrupted; the " &
+                 "altered object is kept at " & entry)], attest: true),
+      site.evidence)
+    markRecorded(entry)
+
+proc flushUnrecorded*(site: CustodySite) =
+  ## Entries a crash left without their DET-AO-5 record (filed, the record
+  ## not yet written): written now.
+  if mutated("custody-skips-unrecorded"): return
+  for entry in evidenceEntries(site):
+    if fileExists(entry / "recorded") or not fileExists(entry / "record"):
+      continue
+    var path, expected, observed = ""
+    for l in readFile(entry / "record").splitLines():
+      let p = l.split('\t', 1)
+      if p.len == 2:
+        case p[0]
+        of "path": path = p[1]
+        of "expected": expected = p[1]
+        of "observed": observed = p[1]
+        else: discard
+    let ok = expected.len > 0 and dirExists(path) and
+             storeTreeDigest(path) == expected
+    discard recordEvidence(EvidenceEvent(detector: edStore,
+      category: ecDetection,
+      trigger: (if ok: "store-recovered" else: "store-digest-mismatch"),
+      fields: @[("path", path), ("digest", expected),
+                ("observedDigest", observed), ("evidence", entry),
+                ("message", path & (if ok: " was recovered" else:
+                 " was moved aside and is not recovered") &
+                 "; its record was interrupted by a crash")], attest: true),
+      site.evidence)
+    markRecorded(entry)
+
 proc custodyPass*(site: CustodySite; objects: openArray[StoreObjectRef];
                   recover: proc (o: StoreObjectRef): Recovery;
                   mayRecover: bool): CustodyResult =
@@ -464,6 +613,9 @@ proc custodyPass*(site: CustodySite; objects: openArray[StoreObjectRef];
     result = cmp(custodyOrder(a), custodyOrder(b))
     if result == 0: result = cmp(a.path, b.path))
   var seen: seq[string]
+  if mayRecover and not site.noWrites:
+    fileLeftoverAsides(site)
+    flushUnrecorded(site)
   let expectedAll = expectedDigests(site)
   let custody = custodyHost(site)
   for o in objs:
@@ -476,6 +628,21 @@ proc custodyPass*(site: CustodySite; objects: openArray[StoreObjectRef];
     let quarantined = o.path in readStoreQuarantine(site.quarantinePath)
     let expected = expectedAll.getOrDefault(o.path, "")
     if expected.len == 0 and not dirExists(o.path):
+      # An apt closure member is realised afresh from its lock-pinned
+      # archive (a realisation, recorded as one); anything else is refused.
+      if o.kind == sokAptClosure and mayRecover:
+        let r = recover(o)
+        if r.ok:
+          try:
+            let d = r.realise()
+            if d.len > 0 and dirExists(o.path) and storeTreeDigest(o.path) == d:
+              recordRealised(site, o.path, d)
+              result.verified.add(o.path)
+              continue
+          except CatchableError as e:
+            result.refusals.add(o.path & " (named by " & o.referrer &
+              ") does not exist, and realising it failed: " & e.msg)
+            continue
       result.refusals.add(o.path & " (named by " & o.referrer & ") does not " &
         "exist, and no realisation records a digest to recover it to")
       continue
@@ -513,20 +680,28 @@ proc custodyPass*(site: CustodySite; objects: openArray[StoreObjectRef];
         var entry = ""
         if r.evictOnRefusal and dirExists(o.path):
           entry = preserveEvidence(site, o.path, expected, chk.observed, r.why)
-          forgetRealised(site, o.path)
         else:
           quarantineStorePath(o.path, site.quarantinePath)
         recordRefused(site, o, expected, chk.observed, r.why &
           (if entry.len > 0: "; kept at " & entry else: ""))
+        markRecorded(entry)
         result.refusals.add(o.path & " no longer holds the bytes it was " &
           "realised with and is not recovered: " & r.why &
           (if entry.len > 0: " (kept at " & entry & ")" else: ""))
         continue
-      let entry = if dirExists(o.path):
-                    preserveEvidence(site, o.path, expected, chk.observed,
-                                     "altered; recovered from " & r.source)
+      # The expected digest is KEPT until the replacement is verified (the
+      # realisation index may be its only record; finding 10).
+      when mutated("custody-forgets-before-rebuild"):
+        forgetRealised(site, o.path)
+      # Renamed aside within the store first (atomic); a crash before it is
+      # filed leaves it there, and the next pass files it
+      # (``fileLeftoverAsides``).
+      let aside = if dirExists(o.path): moveAside(site, o.path) else: ""
+      seamPause(site.stateDir, "custody-after-move-aside")
+      let entry = if aside.len > 0:
+                    fileEvidence(site, aside, o.path, expected, chk.observed,
+                                 "altered; recovered from " & r.source)
                   else: ""
-      forgetRealised(site, o.path)
       var again = ""
       try:
         again = r.realise()
@@ -534,6 +709,7 @@ proc custodyPass*(site: CustodySite; objects: openArray[StoreObjectRef];
         quarantineStorePath(o.path, site.quarantinePath)
         recordRefused(site, o, expected, chk.observed, "re-realising it " &
           "from " & r.source & " failed: " & e.msg)
+        markRecorded(entry)
         result.refusals.add(o.path & ": re-realising it from " & r.source &
           " failed: " & e.msg)
         continue
@@ -543,10 +719,31 @@ proc custodyPass*(site: CustodySite; objects: openArray[StoreObjectRef];
         recordRefused(site, o, expected, now, "re-realised from " & r.source &
           " it hashes to " & now & " (staged " & again & "), not the " &
           "recorded digest")
+        markRecorded(entry)
         result.refusals.add(o.path & ": re-realised from " & r.source &
           ", it hashes to " & now & ", not " & expected)
         continue
-      releaseStoreQuarantine(o.path, site.quarantinePath)
+      # Durable before it is recorded: a rebuild a crash left unwritten
+      # would read as a second alteration at the next pass (measured in
+      # ``e2e_addon_custody_crash_points``, reset at custody-before-record).
+      when not mutated("custody-rebuild-unsynced"):
+        try:
+          syncTreeFiles(o.path)
+          fsyncPath(parentDir(o.path))
+        except OSError as e:
+          quarantineStorePath(o.path, site.quarantinePath)
+          recordRefused(site, o, expected, now, "re-realised from " &
+            r.source & " but it could not be synced: " & e.msg)
+          markRecorded(entry)
+          result.refusals.add(o.path & ": re-realised from " & r.source &
+            " but it could not be synced: " & e.msg)
+          continue
       recordRealised(site, o.path, expected)
+      seamPause(site.stateDir, "custody-before-record")
+      # Recorded only now that the recovery is done, then the quarantine
+      # goes; a crash in between leaves the entry unrecorded, which the next
+      # pass records (``flushUnrecorded``).
       recordRecovered(site, o, expected, chk.observed, entry, r.source)
+      markRecorded(entry)
+      releaseStoreQuarantine(o.path, site.quarantinePath)
       result.recovered.add((o.path, entry, r.source))

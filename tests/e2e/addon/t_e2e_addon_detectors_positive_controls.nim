@@ -33,7 +33,10 @@
 ## Falsifying mutation for the DET-AO-5 boot control:
 ## ``store-verify-trusts-receipt`` (the expectation read from the altered
 ## path's own receipt, which the control deleted: the mismatch and
-## quarantine steps go red; A11 audit session 2, G2).
+## quarantine steps go red; A11 audit session 2, G2). For the DET-AO-10
+## control: ``lag-ignores-check-state`` (the check forgets when it first
+## saw the sequence, and the manifest directory holds only the re-signed
+## copy: no lag alert; A11 review finding 7).
 ##
 ## Opt-in: ``REPRO_ADDON_VM_GATES=1``.
 ##
@@ -126,7 +129,10 @@ proc body(g: Guest; repro: string; step: StepFn; record: JsonNode;
   step("baseline: nothing detected, every detector live-idle, no alert",
        base.alerts.len == 0 and base.statuses.allIt(it.status == "live-idle"),
        render(base))
-  discard g.exec("systemctl stop repro-agent-fetch.timer")
+  # Stopped, settled and recorded as the tick helper's baseline: a cycle
+  # the timer ran before this point cannot have applied what the gate
+  # publishes next (A9 review round 7, finding 7).
+  g.recordTimerBaseline()
 
   # DET-AO-1: a manifest signed by a key the host does not anchor.
   var since = sink.headSeq()
@@ -252,10 +258,14 @@ proc body(g: Guest; repro: string; step: StepFn; record: JsonNode;
   discard publish(PublishSpec(sequence: sequence,
     profileText: canonicalFile(Managed, "ten\n"), maxAgeSeconds: 60))
   writeFile(producer.dir / AgentTarget / "latest.rdm", oldBytes)
+  # The check runs while the first copy is published, as a deployment's
+  # periodic check would, and keeps when it saw it in its own state.
+  discard sink.check(host, signers)
   sleep(75_000)
   # The producer re-signs the sequence the host is frozen below (spec §9.2
-  # expects it to): the lag still counts from its first publication (A11
-  # audit F1).
+  # expects it to), and the manifest directory keeps only the re-signed
+  # copy: the lag still counts from the first publication, which the
+  # check's own state holds (A11 audit F1, A11 review finding 7).
   let resigned = prod.publish(PublishSpec(sequence: sequence,
     profileText: canonicalFile(Managed, "ten\n"), maxAgeSeconds: 60))
   sink.archive(resigned, sequence)

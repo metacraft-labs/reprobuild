@@ -74,12 +74,16 @@ import repro_infra
 import repro_infra/addon_diagnostics
 import repro_infra/planner
 from repro_infra/service_floor import floorWritablePlaces, serviceDirectives,
+  StartingDependencyKeys, BaseReachKeys, normalisedPath,
   PrivilegedGroups
+import repro_infra/service_floor as serviceFloor
 from repro_profile import ProfileBuildAction
 import repro_local_store/store
 
 import ./agent_record
 import ./collision
+import ./own_profile
+import ./contain_marker
 import ./tmpfiles_scope
 import ./addon_secrets
 import ./base_identity
@@ -609,6 +613,24 @@ proc floorAccountRefusal*(p: SystemProfile; r: SystemResource): string =
     if n in PrivilegedGroups and not (n == a.group and a.dynamicGroup):
       return "the service runs in the privileged group " & n & "; a " &
         "floored unit may not (only \"serviceFloor: <why>\" allows it)"
+  # The memberships the profile itself gives the account (A9 review round
+  # 7, finding 6): `passwd.user` `groups` and `passwd.group` `members`.
+  # The resolver knows their gids only for groups the profile creates, so
+  # they are judged by name here; the effective half judges them by gid.
+  when not mutated("profile-memberships-ignored"):
+    if not a.dynamicUser:
+      for o in p.resources:
+        var g = ""
+        if o.kind == srkPasswdUser and o.puName == a.user:
+          for gn in o.puGroups:
+            if gn in PrivilegedGroups or gn == "root": g = gn
+        elif o.kind == srkPasswdGroup and a.user in o.pgMembers and
+            (o.pgName in PrivilegedGroups or o.pgName == "root"):
+          g = o.pgName
+        if g.len > 0:
+          return "the profile puts the service's account " & a.user &
+            " in the privileged group " & g & " (" & o.address & "); a " &
+            "floored unit may not (only \"serviceFloor: <why>\" allows it)"
   ""
 
 proc parseAddOnUserProfile*(text: string): SystemProfile =
@@ -1419,7 +1441,32 @@ proc foreignDropInsFor*(units: openArray[string]; own: HashSet[string];
         if f.endsWith(".conf") and f notin own:
           result.add(f)
 
-proc effectiveFloorCheck*(resources: openArray[SystemResource]): seq[string] =
+proc unitStartsReported*(unit: string; own: HashSet[string];
+                         cache: var Table[string, seq[string]]): seq[string] =
+  ## What starting ``unit`` starts, as systemd reports it: for a unit of the
+  ## generation (``own``, a template's instances included) every starting
+  ## dependency and what it triggers; for a unit the base defines what it
+  ## pulls in (``BaseReachKeys``), not its own ``OnFailure=`` (A9 review
+  ## round 7, finding 4). Cached per check. A unit systemd cannot show
+  ## starts nothing it could report.
+  if unit in cache: return cache[unit]
+  let mine = declaredByProfile(unit, own)
+  var keys = if mine: @StartingDependencyKeys & @["Triggers"] else: @BaseReachKeys
+  try:
+    let r = runSystemctl(@["show", "--no-pager", "-p", keys.join(","), "--", unit])
+    if r.exitCode == 0:
+      for k, v in parseShow(r.output):
+        for t in v.splitWhitespace(): result.add(t)
+  except CatchableError:
+    discard
+  cache[unit] = result
+
+proc effectiveFloorCheck*(resources: openArray[SystemResource];
+                          owned: seq[string] = @[];
+                          adopted = initTable[string, string]()): seq[string] =
+  ## ``owned``: the store objects the generation owns with a recorded
+  ## digest; an ``EnvironmentFile=`` or a read-only bind source must lie in
+  ## one (A9 review round 7, findings 1 and 5).
   ## Every floored unit of the generation as systemd now reads it, against
   ## the floor it is rendered under (``effective_floor``; spec §10.1, A9
   ## review rounds 3 and 4): one problem line per difference. For a
@@ -1437,6 +1484,12 @@ proc effectiveFloorCheck*(resources: openArray[SystemResource]): seq[string] =
   var ownUnits = initHashSet[string]()
   for d in resources:
     if d.kind == srkSystemdSystemUnit: ownUnits.incl(d.suName)
+  var ownFiles: seq[string]
+  for d in resources:
+    if d.kind == srkFsSystemFile: ownFiles.add(d.sfPath)
+  var startsCache = initTable[string, seq[string]]()
+  let startsOf = proc (u: string): seq[string] =
+    unitStartsReported(u, ownUnits, startsCache)
   var limits = initTable[string, string]()
   if flooredUnitNames(resources).len > 0:
     try: limits = managerLimits()
@@ -1469,7 +1522,8 @@ proc effectiveFloorCheck*(resources: openArray[SystemResource]): seq[string] =
         version: r.suFloorVersion, exceptions: r.suFloorExceptions,
         fragment: unitPath(r.suName), denied: denied, uidOf: systemUid,
         groupsOf: systemGroups, gidOf: systemGid, ownUnits: ownUnits,
-        limitCeilings: limits)
+        limitCeilings: limits, storeObjects: owned, ownFiles: ownFiles,
+        adoptedFiles: adopted, startsOf: startsOf)
       for o in resources:
         if o.kind == srkSystemdSystemUnit and o.suName != r.suName and
             effectiveFloor(o).len > 0 and o.suCollision != "dropIn":
@@ -1503,8 +1557,16 @@ proc effectiveFloorCheck*(resources: openArray[SystemResource]): seq[string] =
               aown.add(targetPathOf(d))
           try:
             let at = showUnitText(a)
-            result.add(activatorProblems(a, parseShow(at), parseShowLines(at),
-                                         unitPath(a), aown))
+            let ash = parseShow(at)
+            var aloaded: seq[tuple[path, content: string]]
+            for f in @[ash.getOrDefault("FragmentPath")] &
+                     ash.getOrDefault("DropInPaths").splitWhitespace():
+              if f.len == 0: continue
+              try: aloaded.add((path: f, content: readFile(f)))
+              except IOError, OSError:
+                result.add(a & ": cannot read " & f & ", which systemd loaded")
+            result.add(activatorProblems(a, ash, parseShowLines(at),
+                                         unitPath(a), aown, aloaded, startsOf))
           except CatchableError as ex:
             result.add(a & ": " & ex.msg)
 
@@ -2905,6 +2967,37 @@ proc revertOverwritesRestored*(purpose: string; ledgerOwns, regularFile: bool;
   purpose == "revert" and ledgerOwns and regularFile and
     preservedPath.len > 0 and currentSha == extractFilename(preservedPath)
 
+proc liveReachProblems(opts: AddonApplyOptions;
+                       resources: openArray[SystemResource]): seq[string] =
+  ## Each service of the generation that the carried-state reach analysis
+  ## judges confined, re-judged from ``systemctl show``
+  ## (``carried_state.liveConfinementProblem``) -- only while carried state
+  ## is on this host (a manifest in the carried directory, pending or
+  ## restored), where a unit that is not confined reaches it.
+  let carriedAt = if opts.carriedStateDir.len > 0: opts.carriedStateDir
+                  else: CarriedStateDir
+  if not fileExists(carriedAt / ManifestFileName): return
+  let root = if opts.carriedStateRoot.len > 0: opts.carriedStateRoot else: "/"
+  var p = SystemProfile()
+  for r in resources: p.resources.add(r)
+  let lookup = hostAccountLookup(root, p)
+  for r in resources:
+    if r.kind != srkSystemdSystemUnit or r.suCollision == "dropIn" or
+        not r.suName.endsWith(".service"):
+      continue
+    if unitReach(r, p, lookup, root).all: continue   # refused or required
+    var show: ShowProps
+    try: show = showUnit(r.suName)
+    except CatchableError as e:
+      result.add(r.suName & ": " & e.msg)
+      continue
+    let why = liveConfinementProblem(r.suName,
+      proc (k: string): string = show.getOrDefault(k), lookup)
+    if why.len > 0:
+      result.add("ECarriedStatePending: " & r.suName & " as systemd " &
+        "loaded it is not confined (" & why & "), though its unit text " &
+        "reads as confined")
+
 proc carriedRefusalFor(opts: AddonApplyOptions; stateDir: string): string =
   ## The carried-state refusal for this apply (``carried_state``), "" when
   ## it may go ahead. A stored generation (a revert, a rollback, a replay)
@@ -2948,6 +3041,32 @@ proc fileSourceObject*(r: SystemResource): StoreObjectRef =
     if o.len > 0:
       return StoreObjectRef(path: o, kind: classifyStoreObject(o),
                             referrer: r.address)
+
+proc storeObjectsNamedIn*(text: string): seq[string] =
+  ## Every store object any ``/repro/store`` path in ``text`` names, read as
+  ## systemd reads paths (``normalisedPath``) and placed by
+  ## ``storeObjectFor``: a prefix, or the top-level store entry a path
+  ## outside every prefix lies in (``/repro/store/tmp``, a loose directory),
+  ## which custody then refuses as having no realiser (default deny, A11
+  ## review finding 12). The store itself and its prefixes directory name no
+  ## object.
+  when mutated("custody-prefixes-only"):
+    return       # FALSIFYING BUILD: only prefixes are seen, as before
+  var tok = ""
+  proc take(tok: var string; acc: var seq[string]) =
+    let i = tok.find("/repro")
+    if i >= 0:
+      let p = serviceFloor.normalisedPath(tok[i .. ^1])
+      if p.startsWith(StoreRoot & "/"):
+        let obj = storeObjectFor(p)
+        if obj.len > 0 and obj != StoreRoot / "prefixes" and obj notin acc:
+          acc.add(obj)
+    tok = ""
+  for c in text & " ":
+    if c in {' ', '\t', '\n', '\r', '\'', '"', ';', ':', '=', ',', '(', ')'}:
+      take(tok, result)
+    else:
+      tok.add(c)
 
 proc isSha256Name(s: string): bool =
   s.len == 64 and s.allCharsInSet(HexDigits)
@@ -3005,46 +3124,55 @@ proc filesRecovery*(prefix: string; resources: openArray[SystemResource];
       realiseFilesPrefix(files, version).digest)
 
 proc closureRecovery*(o: StoreObjectRef; locks: openArray[AptClosureLock];
-                      site: CustodySite; fetch: AptDebFetcher): Recovery =
+                      site: CustodySite; fetch: AptDebFetcher;
+                      storeRoot = AddOnSystemStoreRoot;
+                      cacheDir = AddOnAptDebCacheDir): Recovery =
   ## An apt closure's union or member is realised again from the lock's
   ## ``.deb`` archives (SHA-256 pinned by the lock in the signed manifest),
-  ## which the apply reads from what the fetch unit staged. Every altered
-  ## prefix of that closure -- the union shares its members' files by hard
-  ## link -- is moved into the evidence directory first; a member whose
-  ## archive the apply has no copy of is not realised, the switch refuses,
-  ## and the next fetch, finding the member gone, stages its archive.
+  ## which the apply reads from what the fetch unit staged. A member is
+  ## rebuilt whenever it is gone, whatever the union's state (an altered
+  ## member's union may be intact: it holds hard links, and a file added to
+  ## or removed from the member's directory is not in it; A11 review finding
+  ## 1). The union, when its own bytes are altered too, is moved aside and
+  ## rebuilt with the member. A member whose archive the apply has no copy
+  ## of is not realised: the switch refuses, and the next fetch, finding the
+  ## member gone, stages its archive.
   for lock in locks:
-    var paths = @[aptClosurePrefixPath(AddOnSystemStoreRoot, lock)]
-    for d in lock.debs: paths.add(aptDebPrefixPath(AddOnSystemStoreRoot, d))
+    var paths = @[aptClosurePrefixPath(storeRoot, lock)]
+    for d in lock.debs: paths.add(aptDebPrefixPath(storeRoot, d))
     if o.path notin paths: continue
     let l = lock
     let union = paths[0]
     return Recovery(ok: true, source: "the lock's .deb archives (pinned " &
       "by SHA-256 in the signed manifest)",
       realise: proc (): string =
-        # The union carries its members' bytes; it goes too when altered.
+        var unionAside, unionExp, unionNow = ""
         if dirExists(union) and union != o.path:
-          let exp = expectedDigests(site).getOrDefault(union, "")
-          let now = storeTreeDigest(union)
-          if exp.len > 0 and now != exp:
-            let entry = preserveEvidence(site, union, exp, now,
-              "built from the altered member " & o.path)
-            forgetRealised(site, union)
-            recordRecovered(site, StoreObjectRef(path: union,
-              kind: sokAptClosure, referrer: o.referrer), exp, now, entry,
-              "rebuilt with the recovered member")
+          unionExp = expectedDigests(site).getOrDefault(union, "")
+          unionNow = storeTreeDigest(union)
+          if unionExp.len > 0 and unionNow != unionExp:
+            unionAside = moveAside(site, union)
         let log = AptRealisationLog(verifyReuse: proc (p: string): string =
           let exp = expectedDigests(site).getOrDefault(p, "")
           if exp.len == 0:
             return (if custodyHost(site): "it has no recorded digest" else: "")
           let c = verifiedDigest(site, p, exp)
           if c.verdict == cvVerified: "" else: "its bytes are altered")
-        discard realiseAptClosure(l, AddOnSystemStoreRoot,
-          AddOnAptDebCacheDir, fetch, log = log)
+        discard realiseAptClosure(l, storeRoot, cacheDir, fetch,
+          log = log, rebuildMissingMembers = true)
         result = ""
         for (p, d) in log.published:
           recordRealised(site, p, d)
-          if p == o.path: result = d)
+          if p == o.path: result = d
+        if unionAside.len > 0 and dirExists(union) and
+            storeTreeDigest(union) == unionExp:
+          # The union is back: only now is its alteration filed and recorded.
+          let entry = fileEvidence(site, unionAside, union, unionExp, unionNow,
+            "built from the altered member " & o.path)
+          recordRecovered(site, StoreObjectRef(path: union,
+            kind: sokAptClosure, referrer: o.referrer), unionExp, unionNow,
+            entry, "rebuilt with the recovered member")
+          markRecorded(entry))
   Recovery(why: "no closure of this generation consists of it")
 
 proc storeRecovery*(o: StoreObjectRef; resources: openArray[SystemResource];
@@ -3095,6 +3223,16 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
       parseAddOnUserProfile(opts.userProfileText), carriedAt,
       (if opts.carriedStateRoot.len > 0: opts.carriedStateRoot else: "/"))
   let stateDir = if opts.stateDir.len > 0: opts.stateDir else: DefaultStateDir
+  # An operator contained the host (decision 51): no deploy agent applies,
+  # whichever agent it is -- the add-on's own units or the full engine's
+  # ``repro deploy-agent`` (A11 review finding 6). Enforced here, in the
+  # switch every agent apply goes through, not only in the units.
+  if opts.agentSequence > 0'u64 and isContained(stateDir) and
+      not mutated("contained-agent-applies"):
+    raise newException(AddonApplyError, "EAddOnContained: the host is " &
+      "contained by an operator (" & containedMarkerPath(stateDir) & "); " &
+      "a deploy-agent apply is refused until `repro system addon release`; " &
+      "nothing was written")
   if opts.agentRecord.present and opts.agentSequence > 0'u64 and
       opts.agentRecord.sequence != opts.agentSequence:
     # The generation would carry two different sequences, and the floor
@@ -3182,10 +3320,15 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
   let seamPrefix = if replaying: "replay:"
                    elif purpose == "revert": "revert:"
                    else: ""
+  # Generation 0's objects this build renders differently are re-rendered
+  # by every switch (A11 review findings 2 and 8: a host bootstrapped
+  # before a fix gets it with its next switch; ``own_profile``). A replay
+  # applies exactly what the interrupted switch planned.
   let ownText =
     if replaying: replayPlan.targetOwnText
-    elif opts.ownProfileText.len > 0: opts.ownProfileText
-    elif fileExists(ownProfilePath(stateDir)): readFile(ownProfilePath(stateDir))
+    elif opts.ownProfileText.len > 0: migrateOwnProfile(opts.ownProfileText)
+    elif fileExists(ownProfilePath(stateDir)):
+      migrateOwnProfile(readFile(ownProfilePath(stateDir)))
     else: raise newException(AddonApplyError,
       "not an add-on host: " & ownProfilePath(stateDir) & " is missing")
   let previous =
@@ -4681,8 +4824,10 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
       when not mutated("recheck-skips-dropin-prefixes"):
         # Any kind's declaration and installed bytes (default deny: a kind
         # whose store references nothing collects is still covered).
-        for o in referencedStoreObjects(renderStanza(p.r).join("\n") &
-                                        "\n" & p.content):
+        let named = renderStanza(p.r).join("\n") & "\n" & p.content
+        for o in referencedStoreObjects(named):
+          add(o, p.r.address)
+        for o in storeObjectsNamedIn(named):
           add(o, p.r.address)
       add(fileSourceObject(p.r).path, p.r.address)
       if p.r.kind == srkSystemdSystemUnit:
@@ -5151,7 +5296,37 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
       when not mutated("effective-check-skipped") and
           not mutated("floor-unchecked"):
         if not opts.recordOnly and clean and problems.len == 0:
-          let notHeld = effectiveFloorCheck(composed.resources)
+          var ownedObjects: seq[string]
+          block:
+            let expected = expectedDigests(custody)
+            for o in custodyObjects:
+              if expected.getOrDefault(o.path, "").len > 0:
+                ownedObjects.add(o.path)
+          # The files the generation adopts, with the digest its ledger
+          # records (§13 decision 50, amended): this switch's adoption
+          # (the preserved copy is named by its sha256), or the previous
+          # generation's ledger entry for an object it already owns.
+          var adoptedFiles = initTable[string, string]()
+          for p in plans:
+            if p.r.kind != srkFsSystemFile or p.r.sfCollision != "adopt": continue
+            var digest = ""
+            if p.collision == "adopt" and p.preserved.len > 0:
+              digest = extractFilename(p.preserved)
+            else:
+              for e in previous.entries:
+                if e.class == lcEtcFile and e.path == p.targetPath: digest = e.sha256
+            if digest.len == 64:
+              adoptedFiles[normalisedPath(p.targetPath)] = digest
+          let notHeld = effectiveFloorCheck(composed.resources, ownedObjects,
+                                            adoptedFiles)
+          # The carried-state reach, cross-checked against the units as
+          # systemd loaded them (A13 review round 5, finding 1): wherever
+          # carried state is on this host, a unit the static analysis took
+          # as confined must be confined as systemd reads it too, or nothing
+          # starts (a problem stops step 7, and the switch reverts).
+          let reachLive = liveReachProblems(opts, composed.resources)
+          if reachLive.len > 0:
+            problems.add(reachLive.join("; ") & "; nothing was started")
           if notHeld.len > 0:
             problems.add($adFloorNotEffective & ": " & notHeld.join("; ") &
               "; nothing was started")

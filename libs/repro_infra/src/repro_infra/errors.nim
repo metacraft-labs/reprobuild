@@ -103,6 +103,16 @@ proc raisePlanStale*(planId: string; drifted: seq[string]) {.noreturn.} =
   e.drifted = drifted
   raise e
 
+proc raisePlanProfileChanged*(planId, why: string) {.noreturn.} =
+  ## A stored plan made from another profile text than the one the apply
+  ## runs: stale as a whole, not because one resource drifted.
+  var e = newException(EPlanStale,
+    "repro infra: plan '" & planId & "' is stale — " & why &
+    "; nothing was applied. Re-run `repro infra plan`.")
+  e.planId = planId
+  e.drifted = @[why]
+  raise e
+
 proc raisePlanHostMismatch*(planId, planHost, applyHost: string) {.noreturn.} =
   var e = newException(EPlanHostMismatch,
     "repro infra: plan '" & planId & "' was made for host '" & planHost &

@@ -31,6 +31,8 @@ writeFile(root / "etc/group",
   "root:x:0:\nadm:x:4:app\nshadow:x:42:\napp:x:1001:\nweb:x:1002:\n" &
   "svc:x:1003:\nf2b:x:1004:\nsneaky:x:0:\nwheel-ish:x:0:web\n")
 
+writeFile(root / "etc/nsswitch.conf", "passwd: files systemd\ngroup: files systemd\n")
+
 let host = hostAccountLookup(root)
 
 proc res(user, group: string; dyn = false; unit = "x.service";
@@ -173,3 +175,54 @@ suite "a profile's accounts alone (profileAccountLookup)":
     check not res("app", "", lookup = l).known
     check res("", "", lookup = l).userIsRoot
     check res("root", "", lookup = l).known
+
+suite "what systemd would find through NSS (round 5)":
+  test "a lookup over files and userdb is authoritative only when NSS names no other source":
+    check host.authoritative
+    let r2 = getTempDir() / ("t_service_account-nss" & testCaseScratchSlug())
+    removeDir(r2)
+    createDir(r2 / "etc")
+    writeFile(r2 / "etc/passwd", "root:x:0:0::/root:/bin/sh\n")
+    writeFile(r2 / "etc/group", "root:x:0:\n")
+    check not hostAccountLookup(r2).authoritative          # no nsswitch.conf
+    writeFile(r2 / "etc/nsswitch.conf", "passwd: files sss\ngroup: files sss\n")
+    check not hostAccountLookup(r2).authoritative
+    writeFile(r2 / "etc/nsswitch.conf", "passwd: files [NOTFOUND=return] systemd\n" &
+      "group: files systemd\n")
+    check hostAccountLookup(r2).authoritative
+
+  test "under DynamicUser=yes a name a non-authoritative lookup does not know is unresolved":
+    let r3 = getTempDir() / ("t_service_account-auth" & testCaseScratchSlug())
+    removeDir(r3)
+    createDir(r3 / "etc")
+    writeFile(r3 / "etc/passwd", "root:x:0:0::/root:/bin/sh\n")
+    writeFile(r3 / "etc/group", "root:x:0:\n")
+    writeFile(r3 / "etc/nsswitch.conf", "passwd: files ldap\ngroup: files ldap\n")
+    let a = res("dynx", "", dyn = true, lookup = hostAccountLookup(r3))
+    check not a.known
+    let b = res("dynx", "", dyn = true)                     # authoritative
+    check b.known and b.dynamicUser
+
+  test "a userdb record is a static account, whatever /etc/passwd says":
+    let r4 = getTempDir() / ("t_service_account-userdb" & testCaseScratchSlug())
+    removeDir(r4)
+    createDir(r4 / "etc/userdb")
+    writeFile(r4 / "etc/passwd", "root:x:0:0::/root:/bin/sh\n")
+    writeFile(r4 / "etc/group", "root:x:0:\n")
+    writeFile(r4 / "etc/nsswitch.conf", "passwd: files systemd\ngroup: files systemd\n")
+    writeFile(r4 / "etc/userdb/ops.user",
+      "{\"userName\":\"ops\",\"uid\":0,\"gid\":0}\n")
+    writeFile(r4 / "etc/userdb/svc.user",
+      "{\"userName\":\"svc5\",\"uid\":1500,\"memberOf\":[\"disk5\"]}\n")
+    writeFile(r4 / "etc/userdb/disk5.group", "{\"groupName\":\"disk5\",\"gid\":6}\n")
+    let l = hostAccountLookup(r4)
+    let a = res("ops", "", dyn = true, lookup = l)
+    check a.known and a.userIsRoot and not a.dynamicUser
+    let b = res("svc5", "", lookup = l)
+    check b.known and b.uid == 1500 and 6 in b.memberGids
+
+  test "DynamicUser=yes without User= on an instance takes the unit's prefix":
+    let a = res("", "", dyn = true, unit = "root@x.service")
+    check a.known and a.userIsRoot and not a.dynamicUser
+    let b = res("", "", dyn = true, unit = "svc@foo.service")
+    check b.known and b.uid == 1003 and not b.dynamicUser

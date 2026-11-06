@@ -28,19 +28,27 @@
 ##       written `\xNN` -- the payload is hostile data (RESP-3) and is never
 ##       written raw to a terminal; `--out` writes the raw bytes to FILE
 ##       (created 0600, never overwritten).
-##   repro-evidence-sink ack      --dir D --seq N --operator NAME
-##                                --reason TEXT [--wait-seconds N]
-##       records that the detection at sink sequence N was handled: an
+##   repro-evidence-sink ack      --dir D --seq N --alert KIND
+##                                --operator NAME --reason TEXT
+##                                [--wait-seconds N]
+##       records that the alert KIND (``<detector>/<trigger>``, as its
+##       ALERT line prints them) raised at sink sequence N was handled: an
 ##       append-only record in the store, written by the running sink under
-##       its own id. `addon-check` then lists the alert as handled instead
-##       of alerting on it. The acknowledged record itself stays.
+##       its own id. `addon-check` then lists that alert -- and only that
+##       one: a record can raise several -- as handled. The acknowledged
+##       record itself stays.
 ##   repro-evidence-sink addon-check --dir D --hosts FILE
 ##                                [--manifests DIR --deploy-signers FILE]
 ##                                [--published-artefacts SHA256SUMS]
 ##                                [--silence-factor N] [--now-ms MS]
-##                                [--update-hosts]
+##                                [--update-hosts] [--state FILE]
 ##       the ReproOS add-on's off-host detectors over the store. Exit 0 with
-##       no alert, 1 with one or more (handled alerts do not count).
+##       no alert, 1 with one or more (handled alerts do not count). It
+##       keeps, in ``--state`` (default ``<hosts file>.check-state``), when
+##       it first saw each published sequence: lag counts from that first
+##       publication, so the manifest directory may hold only what the
+##       producer serves now, provided the check runs at least once while
+##       each sequence's first copy is served.
 ##
 ## Every option takes its value as `--name=value` or `--name value`.
 ## The read-side commands open the store directory directly: reading is
@@ -74,6 +82,8 @@ type
     seqNo*: uint64
     outPath*: string
     operator*, reason*: string
+    alertKind*: string
+    statePath*: string
     waitSeconds*: int
 
   SinkUsageError* = object of CatchableError
@@ -87,7 +97,7 @@ const
     "retention-seconds", "ready-file", "silence-factor", "segment-max-entries",
     "checkpoint-key", "checkpoint-pub", "receipt", "revoked", "expect", "hosts",
     "manifests", "deploy-signers", "published-artefacts", "now-ms", "seq",
-    "out", "operator", "reason", "wait-seconds"]
+    "out", "operator", "reason", "wait-seconds", "alert", "state"]
   OperatorInboxName* = "operator-inbox"
   SinkHostName* = "sink-host"
   SinkOperatorDetector* = "sink-operator"
@@ -162,6 +172,8 @@ proc parseSinkCommand*(args: openArray[string]): SinkCommand =
       of "operator": result.operator = value
       of "reason": result.reason = value
       of "wait-seconds": result.waitSeconds = int(num(name, value))
+      of "alert": result.alertKind = value
+      of "state": result.statePath = value
       else: discard
     else:
       if result.verb.len > 0:
@@ -189,9 +201,9 @@ proc parseSinkCommand*(args: openArray[string]): SinkCommand =
       raise newException(SinkUsageError, "payload needs --seq N")
   of "ack":
     if result.seqNo == 0'u64 or result.operator.len == 0 or
-        result.reason.len == 0:
-      raise newException(SinkUsageError, "ack needs --seq N, --operator NAME " &
-        "and --reason TEXT")
+        result.reason.len == 0 or '/' notin result.alertKind:
+      raise newException(SinkUsageError, "ack needs --seq N, --alert " &
+        "<detector>/<trigger>, --operator NAME and --reason TEXT")
   of "addon-check":
     if result.hostsPath.len == 0 or
         (result.manifestsDir.len > 0) != (result.signersPath.len > 0):
@@ -203,16 +215,17 @@ proc parseSinkCommand*(args: openArray[string]): SinkCommand =
 # The sink operator's acknowledgements (D4).
 # ---------------------------------------------------------------------------
 
-proc ackRecord*(seqNo: uint64; operator, reason: string;
+proc ackRecord*(seqNo: uint64; alertKind, operator, reason: string;
                 nowMs: int64): EvidenceRecord =
   newEvidenceRecord(ecAudit, SinkOperatorDetector, "acknowledged",
-    [("acknowledges", $seqNo), ("operator", operator), ("reason", reason)],
-    nowMs = nowMs)
+    [("acknowledges", $seqNo), ("finding", alertKind), ("operator", operator),
+     ("reason", reason)], nowMs = nowMs)
 
 proc processOperatorInbox*(store: EvidenceStore; sink: PeerId;
                            inbox: string): int =
   ## Append each acknowledgement an operator dropped into ``inbox``
-  ## (``<seq>\n<operator>\n<reason>`` per file) under the sink's own id, then
+  ## (``<seq>\n<alert kind>\n<operator>\n<reason>`` per file) under the
+  ## sink's own id, then
   ## delete the file. The sink is the store's only writer, so this runs in
   ## it. Returns how many were appended.
   if not dirExists(inbox): return
@@ -222,10 +235,11 @@ proc processOperatorInbox*(store: EvidenceStore; sink: PeerId;
   for p in names:
     try:
       let lines = readFile(p).splitLines()
-      if lines.len >= 3:
+      if lines.len >= 4:
         let n = parseBiggestUInt(lines[0].strip()).uint64
         discard store.appendRecord(sink, lrDaemon,
-          ackRecord(n, lines[1].strip(), lines[2 .. ^1].join(" ").strip(),
+          ackRecord(n, lines[1].strip(), lines[2].strip(),
+                    lines[3 .. ^1].join(" ").strip(),
                     int64(epochTime() * 1000)))
         inc result
     except CatchableError:
@@ -377,16 +391,18 @@ proc runSinkCli*(args: openArray[string]): int =
         " (is the sink running on this store?)")
       return 1
     let name = inbox / ($c.seqNo & "-" & $getCurrentProcessId() & ".ack")
-    writeFile(name & ".tmp", $c.seqNo & "\n" & c.operator & "\n" &
-      c.reason.replace("\n", " ") & "\n")
+    writeFile(name & ".tmp", $c.seqNo & "\n" & c.alertKind & "\n" &
+      c.operator & "\n" & c.reason.replace("\n", " ") & "\n")
     moveFile(name & ".tmp", name)
     let deadline = epochTime() + float(c.waitSeconds)
     while epochTime() < deadline:
       for x in readEvidenceStore(c.dir):
         if x.kind == ekRecord and x.record.detector == SinkOperatorDetector and
             x.record.field("acknowledges") == $c.seqNo and
+            x.record.field("finding") == c.alertKind and
             x.record.field("operator") == c.operator:
-          stdout.writeLine("acknowledged sequence " & $c.seqNo &
+          stdout.writeLine("acknowledged " & c.alertKind & " at sequence " &
+            $c.seqNo &
             " as record " & $x.seq)
           return 0
       sleep(250)
@@ -396,7 +412,9 @@ proc runSinkCli*(args: openArray[string]): int =
   of "addon-check":
     var inp = CheckInputs(storeDir: c.dir, silenceFactor: c.silenceFactor,
       nowMs: (if c.nowMs > 0: c.nowMs else: int64(epochTime() * 1000)),
-      sinkHostId: sinkHostOf(c.dir))
+      sinkHostId: sinkHostOf(c.dir),
+      statePath: (if c.statePath.len > 0: c.statePath
+                  else: c.hostsPath & ".check-state"))
     inp.hosts = parseHosts(readFile(c.hostsPath))
     if c.updateHosts:
       let enrolled = enrolFromStore(inp.hosts, c.dir)

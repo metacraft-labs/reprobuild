@@ -200,6 +200,50 @@ proc agentFlags*(a: Anchors; p: Producer; cacheUrl = ""): string =
     result.add(" --cache-publishers /root/addon/cache-publishers.anchors" &
                " --cache-url " & cacheUrl)
 
+const TimerBaseline* = "/root/addon/tick-timer-trigger"
+  ## The fetch timer's last trigger when the gate last stopped it and every
+  ## cycle had settled: what the next tick compares with.
+
+proc timerTrigger(g: Guest): string =
+  g.run("systemctl show -p LastTriggerUSecMonotonic --value " &
+        "repro-agent-fetch.timer 2>/dev/null; true").strip()
+
+proc waitAgentIdle(g: Guest; timeoutSec: int) =
+  ## Until neither agent unit is running or queued.
+  discard g.exec("for i in $(seq 1 " & $timeoutSec & "); do " &
+    "busy=0; for u in repro-agent-fetch.service repro-agent-apply.service; do " &
+    "case \"$(systemctl show -p ActiveState --value $u)\" in " &
+    "activating|active|deactivating|reloading) busy=1;; esac; done; " &
+    # A job OnSuccess= queued is not active yet, but it is in flight.
+    "systemctl list-jobs --no-legend 2>/dev/null | grep -q 'repro-agent-' " &
+    "&& busy=1; " &
+    "[ $busy = 0 ] && break; sleep 1; done", timeoutSec + 30)
+
+proc recordTimerBaseline*(g: Guest; timeoutSec = 1800) =
+  ## Stop the fetch timer, let any cycle it started finish, and record its
+  ## last trigger: a trigger just before the stop starts a cycle that runs
+  ## on after it, and recording before that cycle settles would let the
+  ## next tick take it for the gate's own (round 7, finding 7).
+  discard g.exec("systemctl stop repro-agent-fetch.timer 2>/dev/null; true")
+  g.waitAgentIdle(timeoutSec)
+  # With the boot it was taken in: the trigger is on CLOCK_MONOTONIC,
+  # which restarts at every boot.
+  discard g.exec("printf '%s %s\\n' \"$(cat /proc/sys/kernel/random/boot_id)\" " &
+    "\"$(systemctl show -p LastTriggerUSecMonotonic --value " &
+    "repro-agent-fetch.timer)\" > " & TimerBaseline & " 2>/dev/null; true")
+
+proc timerBaseline(g: Guest): tuple[sameBoot: bool; trigger: string] =
+  ## The recorded baseline, and whether it was taken in this boot. A
+  ## baseline from before a reboot says nothing about the clock now: then
+  ## only "no trigger since the boot" ("0") is the baseline.
+  let f = g.exec("cat " & TimerBaseline & " 2>/dev/null").stdout.strip()
+  if f.len == 0: return (true, "")
+  let boot = g.run("cat /proc/sys/kernel/random/boot_id").strip()
+  let parts = f.split(' ', maxsplit = 1)
+  if parts.len < 2: return (true, f)       # round 5's file: the trigger only
+  if parts[0] != boot: return (false, "0")
+  (true, parts[1].strip())
+
 proc bootstrapWithAgent*(g: Guest; repro: string; step: StepFn;
                          extraFlags = ""; cacheUrl = "";
                          cachePublishers: seq[string] = @[]):
@@ -232,6 +276,11 @@ proc bootstrapWithAgent*(g: Guest; repro: string; step: StepFn;
   # timer ran since. (Not a mask: the add-on observes its own unit files
   # and refuses to write over a mask.)
   discard g.exec("systemctl stop repro-agent-fetch.timer")
+  # The baseline the first tick compares with (A9 review round 7, finding
+  # 7): without it a cycle between here and the first tick went unseen.
+  # (Variant ``tick-compares-previous-end`` restores round 5's helper.)
+  if getEnv("REPRO_A13_MUTATION") != "tick-compares-previous-end":
+    g.recordTimerBaseline()
   result.ok = true
 
 type TickResult* = object
@@ -282,28 +331,34 @@ proc tickUnits*(g: Guest; timeoutSec = 1800): TickResult =
   let variant = getEnv("REPRO_A13_MUTATION")
   let oldHelper = variant == "tick-joins-in-flight"
   if not oldHelper and variant != "tick-skips-idle-wait":
-    discard g.exec("for i in $(seq 1 " & $timeoutSec & "); do " &
-      "busy=0; for u in repro-agent-fetch.service repro-agent-apply.service; do " &
-      "case \"$(systemctl show -p ActiveState --value $u)\" in " &
-      "activating|active|deactivating|reloading) busy=1;; esac; done; " &
-      # A job OnSuccess= queued is not active yet, but it is in flight.
-      "systemctl list-jobs --no-legend 2>/dev/null | grep -q 'repro-agent-' " &
-      "&& busy=1; " &
-      "[ $busy = 0 ] && break; sleep 1; done", timeoutSec + 30)
+    g.waitAgentIdle(timeoutSec)
   # A cycle the fetch timer ran since the previous tick would have applied
   # what the caller published, and this tick would observe "already
   # converged": the gate's own cycle must be the only one (A9 review round
   # 5, finding 6). The timer's last trigger is
   # compared with the one recorded at the previous tick's end, when this
   # helper stopped it again.
+  #
+  # Complete since round 7 (finding 7): the baseline is recorded at the
+  # agent's bootstrap too, so the first tick compares with something; it is
+  # recorded only after the timer is stopped and every cycle has settled;
+  # the trigger is read again at this tick's end, so a cycle the timer ran
+  # during the tick is seen; and any such cycle names the tick, whatever its
+  # outcome -- not only a converged one.
   var timerFired = ""
+  let trigStart = g.timerTrigger()
   if variant != "tick-trusts-the-timer":
-    let trig = g.run("systemctl show -p LastTriggerUSecMonotonic --value " &
-                     "repro-agent-fetch.timer 2>/dev/null; true").strip()
-    let prev = g.exec("cat /root/addon/tick-timer-trigger 2>/dev/null").stdout.strip()
-    if prev.len > 0 and trig != prev:
+    let (sameBoot, prev) = g.timerBaseline()
+    if prev.len == 0:
+      if trigStart notin ["", "0"] and variant != "tick-compares-previous-end":
+        timerFired = "repro-agent-fetch.timer has triggered (last trigger " &
+          trigStart & " us monotonic) and no baseline was recorded when " &
+          "the gate stopped it"
+    elif trigStart != prev and not (prev == "0" and trigStart.len == 0):
       timerFired = "repro-agent-fetch.timer triggered (last trigger " &
-        trig & " us monotonic, " & prev & " at the previous tick's end)"
+        trigStart & " us monotonic, " & prev &
+        (if sameBoot: " when the gate last stopped it)"
+         else: ": none since this boot, the gate's last stop being before it)")
   discard g.exec("rm -f " & TickStatus)
   let since = g.run("date +%s").strip()
   # The apply unit's invocation before this tick, so a failure left over
@@ -318,6 +373,7 @@ proc tickUnits*(g: Guest; timeoutSec = 1800): TickResult =
     result.outcome = "tick-clock-unavailable"
     result.message = "cannot read the guest's CLOCK_MONOTONIC from " &
       "/proc/timer_list, so this tick cannot prove its cycle is new"
+    g.recordTimerBaseline(timeoutSec)
     return
   let f = g.exec("systemctl start repro-agent-fetch.service", timeoutSec)
   result.fetchLog = g.exec("journalctl -q -o cat --since @" & since &
@@ -325,6 +381,7 @@ proc tickUnits*(g: Guest; timeoutSec = 1800): TickResult =
   if f.exitCode != 0:
     result.outcome = "fetch-failed"
     result.message = f.stdout & f.stderr & result.fetchLog
+    g.recordTimerBaseline(timeoutSec)
     return
   if not oldHelper:
     let fetchAfter = g.fetchStartMonotonic()
@@ -341,6 +398,7 @@ proc tickUnits*(g: Guest; timeoutSec = 1800): TickResult =
         " us monotonic, before the start it was " & fetchBefore &
         ", the tick began at " & startedAfter & "): it joined a cycle " &
         "already in flight\n" & result.fetchLog
+      g.recordTimerBaseline(timeoutSec)
       return
   # The apply job OnSuccess queued: wait until the unit is inactive again
   # and the record exists -- or until this tick's apply has ended failed
@@ -355,11 +413,15 @@ proc tickUnits*(g: Guest; timeoutSec = 1800): TickResult =
     "sleep 1; done", timeoutSec + 30)
   result.applyLog = g.exec("journalctl -q -o cat --since @" & since &
     " -u repro-agent-apply.service").stdout
-  # The apply may have re-armed the timer: stop it again, and record its
-  # last trigger for the next tick's check.
-  discard g.exec("systemctl stop repro-agent-fetch.timer 2>/dev/null; " &
-    "systemctl show -p LastTriggerUSecMonotonic --value " &
-    "repro-agent-fetch.timer > /root/addon/tick-timer-trigger 2>/dev/null; true")
+  # The apply may have re-armed the timer: stop it again, let what it
+  # started settle, and record its last trigger for the next tick.
+  g.recordTimerBaseline(timeoutSec)
+  if variant notin ["tick-trusts-the-timer", "tick-compares-previous-end"]:
+    let trigEnd = g.timerBaseline().trigger
+    if trigEnd != trigStart and timerFired.len == 0:
+      timerFired = "repro-agent-fetch.timer triggered during this tick " &
+        "(last trigger " & trigEnd & " us monotonic, " & trigStart &
+        " when the tick began)"
   let st = g.exec("cat " & TickStatus)
   if st.exitCode != 0:
     result.outcome = "no-record"
@@ -371,13 +433,15 @@ proc tickUnits*(g: Guest; timeoutSec = 1800): TickResult =
   result.message = j["message"].getStr
   result.errorCode = j["errorCode"].getStr
   result.sequence = j["sequence"].getInt
-  if timerFired.len > 0 and result.outcome == "aoConverged":
-    # The timer's own cycle ran since the previous tick and applied what
-    # the caller published: this tick saw that cycle's result, not its
-    # own. A named failure, never a pass (round 5, finding 6).
+  if timerFired.len > 0 and (result.outcome == "aoConverged" or
+      variant != "tick-compares-previous-end"):
+    # A cycle the gate did not start ran since it last stopped the timer:
+    # whatever this tick reports may be that cycle's doing, not its own
+    # (rounds 5 and 7, findings 6 and 7). A named failure, never a pass.
+    let was = result.outcome
     result.outcome = "timer-cycle-intervened"
-    result.message = timerFired & ": a cycle the gate did not start ran " &
-      "in between and applied this tick's sequence\n" & result.message
+    result.message = timerFired & ": a cycle the gate did not start ran, " &
+      "and this tick's outcome (" & was & ") may be its doing\n" & result.message
 
 proc `$`*(t: TickResult): string =
   t.outcome & " (exit " & $t.exitCode & ", " & t.errorCode & ") seq " &

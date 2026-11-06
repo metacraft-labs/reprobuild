@@ -148,7 +148,8 @@ proc runEvidenceEnrol*(opts: EnrolOptions): EnrolResult =
     let blk = own[a ..< b]
     newOwn = own[0 ..< a] &
       blk.replace("  content = \"" & fetch & "\"",
-                  "  content = \"" & observeFetchUnit(fetch) & "\"") &
+                  "  content = \"" & agentFetchUnit(fetchUnitExe(fetch),
+                    fetchUnitInputsOf(fetch), observed = true) & "\"") &
       own[b .. ^1]
   # The objects the fetch unit requires go before it; appending them is
   # enough because a switch orders unit starts by their dependencies.
@@ -300,18 +301,50 @@ proc runEvidenceRekey*(stateDir = DefaultStateDir; noHandover = false):
               ("purpose", if noHandover: "rekey-no-handover" else: "rekey")],
     attest: true), defaultSite(stateDir))
 
-proc runEvidenceEnrolCli*(args: seq[string]): int =
-  var opts: EnrolOptions
+proc parseEnrolArgs*(args: seq[string]):
+    tuple[rekey, noHandover: bool; opts: EnrolOptions] =
+  ## ``evidence-enrol``'s options (also the docs test's parser, A11 review
+  ## finding 16). Raises ``ValueError``.
   if "--rekey" in args:
-    var noHandover = false
+    result.rekey = true
     for a in args:
-      if a == "--no-handover": noHandover = true
+      if a == "--no-handover": result.noHandover = true
       elif a != "--rekey":
-        stderr.write("usage: repro system addon evidence-enrol --rekey " &
-          "[--no-handover]\n")
-        return 2
+        raise newException(ValueError, "usage: repro system addon " &
+          "evidence-enrol --rekey [--no-handover]")
+    return
+  var i = 0
+  proc value(flag: string): string =
+    let a = args[i]
+    if a.startsWith(flag & "="): return a[flag.len + 1 .. ^1]
+    if a != flag: raise newException(ValueError, "unknown option " & a)
+    if i + 1 >= args.len: raise newException(ValueError, flag & " needs a value")
+    inc i
+    args[i]
+  while i < args.len:
+    let a = args[i]
+    if a.startsWith("--evidence-sink-ca"):
+      result.opts.sinkCaPath = value("--evidence-sink-ca")
+    elif a.startsWith("--evidence-sink"):
+      result.opts.sink = value("--evidence-sink")
+    elif a.startsWith("--heartbeat-interval"):
+      result.opts.heartbeatSec = parseInt(value("--heartbeat-interval"))
+    else: raise newException(ValueError, "unknown option " & a)
+    inc i
+  if result.opts.sink.len == 0 or result.opts.sinkCaPath.len == 0:
+    raise newException(ValueError, "--evidence-sink and --evidence-sink-ca " &
+      "are required")
+
+proc runEvidenceEnrolCli*(args: seq[string]): int =
+  var parsed: tuple[rekey, noHandover: bool; opts: EnrolOptions]
+  try: parsed = parseEnrolArgs(args)
+  except ValueError as e:
+    stderr.write("repro system addon evidence-enrol: " & e.msg & "\n")
+    return 2
+  let opts = parsed.opts
+  if parsed.rekey:
     try:
-      let r = runEvidenceRekey(noHandover = noHandover)
+      let r = runEvidenceRekey(noHandover = parsed.noHandover)
       stdout.write("generation:           " & r.generationId & "\n" &
         "attestation key:      " & r.newAttestationKey & " (was " &
           r.oldAttestationKey & ")\n" &
@@ -320,38 +353,16 @@ proc runEvidenceEnrolCli*(args: seq[string]): int =
         "hand-over:            " & (if r.handedOver: "signed by the old " &
           "key and on the sink" else: "none (--no-handover)") & "\n" &
         "next, on the sink:    copy " & EvidenceCredentialCertPath &
-          " into the anchors, list " & r.oldCredentialHost &
-          " in --revoked, then " & (if r.handedOver:
+          " into the anchors and remove the old id's certificate (" &
+          r.oldCredentialHost & ") from them, then " & (if r.handedOver:
             "run addon-check --update-hosts (it follows the hand-over)"
-          else: "replace the host's line in the hosts file with the new " &
-            "id and key, and mark the old line retired@<the sink's head " &
-            "sequence now>") & "\n")
+          else: "add a line for the new id and key to the hosts file and " &
+            "mark the old line retired@<the sink's head sequence now>:" &
+            r.newCredentialHost) & "\n")
       return 0
     except CatchableError as e:
       stderr.write("repro system addon evidence-enrol --rekey: " & e.msg & "\n")
       return 2
-  var i = 0
-  proc value(flag: string): string =
-    let a = args[i]
-    if a.startsWith(flag & "="): return a[flag.len + 1 .. ^1]
-    if i + 1 >= args.len: raise newException(ValueError, flag & " needs a value")
-    inc i
-    args[i]
-  try:
-    while i < args.len:
-      let a = args[i]
-      if a.startsWith("--evidence-sink-ca"): opts.sinkCaPath = value("--evidence-sink-ca")
-      elif a.startsWith("--evidence-sink"): opts.sink = value("--evidence-sink")
-      elif a.startsWith("--heartbeat-interval"):
-        opts.heartbeatSec = parseInt(value("--heartbeat-interval"))
-      else: raise newException(ValueError, "unknown option " & a)
-      inc i
-    if opts.sink.len == 0 or opts.sinkCaPath.len == 0:
-      raise newException(ValueError, "--evidence-sink and --evidence-sink-ca " &
-        "are required")
-  except ValueError as e:
-    stderr.write("repro system addon evidence-enrol: " & e.msg & "\n")
-    return 2
   try:
     let r = runEvidenceEnrol(opts)
     stdout.write("generation:           " & r.generationId & "\n" &
