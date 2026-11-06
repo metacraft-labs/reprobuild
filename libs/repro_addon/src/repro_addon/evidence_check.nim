@@ -262,6 +262,10 @@ proc enrolFromStore*(hosts: seq[EnrolledHost]; storeDir: string):
   # credential's host id is enrolled with the new key and the same target
   # and generation 0, and the old id is retired at the hand-over. A host
   # already retired follows none after that point.
+  # Each hand-over record is followed at most once, so the walk ends
+  # whatever the records say (a chain of hand-overs grows the list by one
+  # host per record, never more).
+  var followed: seq[uint64]
   var i = 0
   while i < result.hosts.len:
     let h = result.hosts[i]
@@ -271,6 +275,7 @@ proc enrolFromStore*(hosts: seq[EnrolledHost]; storeDir: string):
       if e.kind != ekRecord or $e.senderHostId != h.hostId or
           e.record.detector != KeysDetector or
           e.record.trigger != "rekey-handover": continue
+      if e.seq in followed: continue
       if h.retiredAt > 0'u64 and e.seq > h.retiredAt: break
       let v = verifyHandover(e.record.field("handover"),
         e.record.field("handoverSignature"), h.attestationKey)
@@ -278,6 +283,7 @@ proc enrolFromStore*(hosts: seq[EnrolledHost]; storeDir: string):
       if h.retiredAt > 0'u64:
         break                           # followed already (or retired by hand)
       if handoverRefusal(v.h, h.hostId, result.hosts).len > 0: continue
+      followed.add(e.seq)
       result.hosts[i - 1].retiredAt = e.seq
       result.hosts[i - 1].successor = v.h.newCredentialHost
       result.hosts.add(EnrolledHost(hostId: v.h.newCredentialHost,
