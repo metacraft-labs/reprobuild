@@ -234,9 +234,9 @@ suite "round 4: every property systemd reports is classified":
 
   test "directory symlinks stay inside the directory root":
     var e = goodInput()
-    e.show["StateDirectorySymlink"] = "a9-st:"
+    e.show["StateDirectorySymlink"] = "a-st:"
     check problemsOf(e) == ""
-    e.show["StateDirectorySymlink"] = "a9-st:../../etc/x"
+    e.show["StateDirectorySymlink"] = "a-st:../../etc/x"
     check "a link outside the directory root" in problemsOf(e)
     e = goodInput()
     e.show["MountFlags"] = "shared"

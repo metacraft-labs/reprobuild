@@ -80,11 +80,11 @@ proc service(page: string): string =
   # for the base's python3): a dynamic user, a read-only system, a runtime
   # directory for its page.
   "[Unit]\nDescription=confirm fixture\n[Service]\n" &
-    "RuntimeDirectory=repro-fixture-www\n" &
+    "RuntimeDirectory=repro-fixture-web\n" &
     "ExecStartPre=/bin/sh -c 'echo " & page &
-    " > /run/repro-fixture-www/index.html'\n" &
+    " > /run/repro-fixture-web/index.html'\n" &
     "ExecStart=/usr/bin/python3 -m http.server " & $Port &
-    " --bind 127.0.0.1 --directory /run/repro-fixture-www\n\n" &
+    " --bind 127.0.0.1 --directory /run/repro-fixture-web\n\n" &
     "[Install]\nWantedBy=multi-user.target\n"
 
 proc profile(page, check: string; timeout = 0): string =

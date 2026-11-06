@@ -945,6 +945,19 @@ proc systemStateRoute*(roots: openArray[string];
       if parent.len > limit: return @["(more than " & $limit & " units)"]
       queue.add(d)
 
+proc unitStem*(unitName: string): string =
+  ## ``a.socket`` -> ``a``; ``a@.socket`` and ``a@x.socket`` -> ``a``.
+  let dot = unitName.rfind('.')
+  result = if dot > 0: unitName[0 ..< dot] else: unitName
+  let at = result.find('@')
+  if at >= 0: result = result[0 ..< at]
+
+proc ownNamed*(stem, name: string): bool =
+  ## ``name`` is named for a unit of stem ``stem``: the stem itself, or the
+  ## stem followed by ``.``, ``-`` or ``_`` and more.
+  name == stem or name.startsWith(stem & ".") or name.startsWith(stem & "-") or
+    name.startsWith(stem & "_")
+
 const
   AddOnOwnedRoots* = ["/repro", "/run/repro", "/var/lib/repro",
     "/var/cache/repro", "/var/log/repro", "/etc/repro"]
@@ -991,7 +1004,44 @@ proc managerCreatedPaths*(directives: openArray[tuple[key, value: string]]):
         if c >= 0:
           result.add((k & "Symlink", normalisedPath(root & "/" & t[c + 1 .. ^1])))
 
-proc managerPathRefusal*(directives: openArray[tuple[key, value: string]]): string =
+proc managerDirectoryRefusal*(unitName, key, token: string): string =
+  ## Why one ``*Directory=`` value (``dir`` or ``dir:link``) of
+  ## ``unitName`` names a place the floor does not allow, or "" (A9 review
+  ## round 8, finding 1). Default deny by shape: every component of the
+  ## directory and of its link is a plain name (letters, digits, ``.``,
+  ## ``-``, ``_``; never ``.`` or ``..``), the link is one name, and the
+  ## first component of each is named for the unit (``ownNamed``: its stem,
+  ## or the stem and ``.``, ``-`` or ``_`` and more). So the directory the
+  ## manager creates and hands to the unit is the unit's own, directly
+  ## under its base (``/run``, ``/var/lib``, ...), or below its own one; never
+  ## in another program's tree (``systemd/system/x.service.d`` is a drop-in
+  ## directory for any unit, ``udev/rules.d`` is udev's rules).
+  when FloorMutation == "directory-names-unchecked":
+    return ""
+  let stem = unitStem(unitName)
+  let c = token.find(':')
+  let dir = if c >= 0: token[0 ..< c] else: token
+  let link = if c >= 0: token[c + 1 .. ^1] else: ""
+  proc plain(n: string): bool =
+    n.len > 0 and n notin [".", ".."] and
+      n.allCharsInSet({'a'..'z', 'A'..'Z', '0'..'9', '.', '-', '_'})
+  let parts = dir.split('/')
+  for p in parts:
+    if not plain(p):
+      return key & "=" & token & ": each component is a plain name"
+  if not ownNamed(stem, parts[0]):
+    return key & "=" & token & ": the directory is the unit's own, named " &
+      "for it (" & stem & ", " & stem & "-...); " & parts[0] & " is not"
+  if c >= 0 and link.len > 0:          # "dir:" (systemd's report): no link
+    if '/' in link or not plain(link):
+      return key & "=" & token & ": a directory's link is one plain name"
+    if not ownNamed(stem, link):
+      return key & "=" & token & ": the link is named for the unit (" & stem &
+        "...); " & link & " is not"
+  ""
+
+proc managerPathRefusal*(directives: openArray[tuple[key, value: string]];
+                         unitName = ""): string =
   ## Why a path the manager would create for these lines is not one a
   ## floored unit may have created (A9 review round 7, finding 2): one of
   ## the add-on's own trees (``inAddOnTree``), or a link with more than one
@@ -1000,6 +1050,13 @@ proc managerPathRefusal*(directives: openArray[tuple[key, value: string]]): stri
   ## drop-in directory for any unit). "" when none is.
   when FloorMutation == "manager-paths-unchecked":
     return ""
+  if unitName.len > 0:
+    for (k, v) in directives:
+      for (dk, _) in ManagerDirectoryRoots:
+        if k != dk: continue
+        for t in v.splitWhitespace():
+          let why = managerDirectoryRefusal(unitName, k, t)
+          if why.len > 0: return why
   for (k, v) in directives:
     for (dk, _) in ManagerDirectoryRoots:
       if k != dk: continue
@@ -1016,30 +1073,20 @@ proc managerPathRefusal*(directives: openArray[tuple[key, value: string]]): stri
 
 proc conflictsRefusal*(unitName, content: string;
                        isOwn: proc (unit: string): bool;
-                       half = fhParse; exclusive = false): string =
+                       half = fhParse): string =
   ## Why a ``[Unit]`` ``Conflicts=`` of a floored unit, or of a unit that
   ## activates one, is refused, or "" (§13 decision 55): it may name only
   ## units the profile defines (``isOwn``, a template's instances
   ## included). Starting the unit stops every unit it conflicts with, so
   ## naming a base target (``multi-user.target``) or another package's
-  ## service would stop it -- the same class of action as decision 49.
-  ##
-  ## *Amended by the owner, 2026-11-06:* an exclusive successor
-  ## (``exclusive``, ``X-Repro-Exclusive=true``, spec §7.3) may also name a
-  ## ``.service``: its predecessor. Never a target, never another type. That
-  ## the name is a predecessor the switch's exclusive check holds is
-  ## confirmed by the effective-unit check, from the switch's own
-  ## computation (``effective_floor.conflictsProblems``).
+  ## service would stop it -- the same class of action as decision 49. The
+  ## exception for an exclusive successor's predecessor was withdrawn by the
+  ## owner (A9 review round 8): it rested on the unit's own Conflicts=.
   if off3(half) or FloorMutation == "conflicts-unchecked":
     return ""
   for d in sectionDirectives(content, ["Unit"]):
     if d.key != "Conflicts": continue
     for t in d.value.splitWhitespace():
-      if exclusive and t.endsWith(".service") and
-          FloorMutation != "exclusive-conflicts-any-unit":
-        continue
-      if exclusive and FloorMutation == "exclusive-conflicts-any-unit":
-        continue
       if not isOwn(t):
         return "[Unit] Conflicts=" & t & " names a unit the profile does " &
           "not define; starting " & unitName & " would stop it (only the " &
@@ -1320,13 +1367,6 @@ const
     "SocketProtocol", "FlushPending", "Writable"]
     ## Round 5's list, kept for the falsifying build ``socket-options-by-list``.
 
-proc unitStem*(unitName: string): string =
-  ## ``a.socket`` -> ``a``; ``a@.socket`` and ``a@x.socket`` -> ``a``.
-  let dot = unitName.rfind('.')
-  result = if dot > 0: unitName[0 ..< dot] else: unitName
-  let at = result.find('@')
-  if at >= 0: result = result[0 ..< at]
-
 proc listenerRefusal*(unitName, value: string): string =
   ## Why a ``ListenStream=``/``ListenDatagram=``/``ListenSequentialPacket=``
   ## value of an activator is not one the floor allows, or "": a network
@@ -1340,9 +1380,7 @@ proc listenerRefusal*(unitName, value: string): string =
   let v = value.strip()
   if v.len == 0: return ""   # a reset
   let stem = unitStem(unitName)
-  proc ownName(n: string): bool =
-    n == stem or n.startsWith(stem & ".") or n.startsWith(stem & "-") or
-      n.startsWith(stem & "_")
+  proc ownName(n: string): bool = ownNamed(stem, n)
   if v.startsWith("/"):
     if v.anyIt(it in QuoteOrSpecifier) or hasDotDot(v):
       return "a unix socket path is a literal path without `..`"
@@ -1475,7 +1513,7 @@ proc floorRefusal*(unitName: string;
   # finding 2): never in the add-on's own trees, and a directory's link is
   # one name.
   if not off3(half):
-    let mp = managerPathRefusal(directives)
+    let mp = managerPathRefusal(directives, unitName)
     if mp.len > 0:
       return (if dropIn: "a drop-in's " else: "") & mp
   for (k, v) in directives:

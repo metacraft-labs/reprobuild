@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 34,
-    "nimTestBinaries": 2682,
+    "nimTestBinaries": 2683,
     "pureUnitConsolidationGroups": 80,
-    "pureUnitTests": 740,
+    "pureUnitTests": 741,
     "staticallyDetectedRuntimeCompilerFlowTests": 137,
-    "testEntries": 2722
+    "testEntries": 2723
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -22,7 +22,7 @@
       "targetOs": "soAny"
     },
     {
-      "count": 3,
+      "count": 4,
       "defines": [],
       "dependencyShape": [
         "repro_addon",
@@ -31,6 +31,7 @@
       "owner": "libs/repro_addon",
       "sources": [
         "libs/repro_addon/tests/t_addon_agent_repin.nim",
+        "libs/repro_addon/tests/t_addon_floor_round8.nim",
         "libs/repro_addon/tests/t_addon_retargeted_address_is_refused.nim",
         "libs/repro_addon/tests/t_addon_tmpfiles_scope.nim"
       ],
@@ -1575,7 +1576,7 @@
       "graph-fixture": 19,
       "integration": 1483,
       "platform/destructive": 173,
-      "pure unit": 740,
+      "pure unit": 741,
       "unclassified": 307
     },
     "graphOwnedTestArtifacts": [
@@ -1784,9 +1785,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2682,
+    "nimTestBinaryCount": 2683,
     "pythonTestFileCount": 40,
-    "testEntryCount": 2722
+    "testEntryCount": 2723
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -8913,6 +8914,24 @@
       "source": "libs/repro_addon/tests/t_addon_floor_round7.nim",
       "sourceSuiteCount": 12,
       "staticCaseCount": 38,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_addon_floor_round8",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_addon",
+        "repro_infra"
+      ],
+      "owner": "libs/repro_addon",
+      "requiresReproBinary": false,
+      "source": "libs/repro_addon/tests/t_addon_floor_round8.nim",
+      "sourceSuiteCount": 4,
+      "staticCaseCount": 9,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

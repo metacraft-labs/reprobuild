@@ -1463,9 +1463,7 @@ proc unitStartsReported*(unit: string; own: HashSet[string];
 
 proc effectiveFloorCheck*(resources: openArray[SystemResource];
                           owned: seq[string] = @[];
-                          adopted = initTable[string, string]();
-                          predecessors = initTable[string, seq[string]]()):
-                          seq[string] =
+                          adopted = initTable[string, string]()): seq[string] =
   ## ``owned``: the store objects the generation owns with a recorded
   ## digest; an ``EnvironmentFile=`` or a read-only bind source must lie in
   ## one (A9 review round 7, findings 1 and 5).
@@ -1492,6 +1490,14 @@ proc effectiveFloorCheck*(resources: openArray[SystemResource];
   var startsCache = initTable[string, seq[string]]()
   let startsOf = proc (u: string): seq[string] =
     unitStartsReported(u, ownUnits, startsCache)
+  var conflictsCache = initTable[string, seq[string]]()
+  let conflictsOf = proc (u: string): seq[string] =
+    if u in conflictsCache: return conflictsCache[u]
+    try:
+      let r = runSystemctl(@["show", "--no-pager", "-p", "Conflicts", "--value", "--", u])
+      if r.exitCode == 0: result = r.output.splitWhitespace()
+    except CatchableError: discard
+    conflictsCache[u] = result
   var limits = initTable[string, string]()
   if flooredUnitNames(resources).len > 0:
     try: limits = managerLimits()
@@ -1525,9 +1531,7 @@ proc effectiveFloorCheck*(resources: openArray[SystemResource];
         fragment: unitPath(r.suName), denied: denied, uidOf: systemUid,
         groupsOf: systemGroups, gidOf: systemGid, ownUnits: ownUnits,
         limitCeilings: limits, storeObjects: owned, ownFiles: ownFiles,
-        adoptedFiles: adopted, startsOf: startsOf,
-        exclusive: isExclusiveUnit(r),
-        predecessors: predecessors.getOrDefault(r.suName))
+        adoptedFiles: adopted, startsOf: startsOf, conflictsOf: conflictsOf)
       for o in resources:
         if o.kind == srkSystemdSystemUnit and o.suName != r.suName and
             effectiveFloor(o).len > 0 and o.suCollision != "dropIn":
@@ -5322,14 +5326,8 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
                 if e.class == lcEtcFile and e.path == p.targetPath: digest = e.sha256
             if digest.len == 64:
               adoptedFiles[normalisedPath(p.targetPath)] = digest
-          # The predecessors the switch's exclusive check holds (§7.3,
-          # §13 decision 55 as amended): the only units outside the
-          # generation a floored successor's Conflicts= may name.
-          var held = initTable[string, seq[string]]()
-          for f in facts:
-            if f.exclusive: held[f.unit] = f.predecessors
           let notHeld = effectiveFloorCheck(composed.resources, ownedObjects,
-                                            adoptedFiles, held)
+                                            adoptedFiles)
           # The carried-state reach, cross-checked against the units as
           # systemd loaded them (A13 review round 5, finding 1): wherever
           # carried state is on this host, a unit the static analysis took

@@ -91,7 +91,10 @@ The add-on handles this in four ways:
     directory, after every link in its path is followed. The manager reads
     the file as root and passes its contents to the service, so a file
     the service could not read itself, such as another service's secret
-    or a host file under `/etc`, is refused whatever its owner or mode;
+    or a host file under `/etc`, is refused whatever its owner or mode.
+    A store file counts only when the add-on has recorded its digest; on
+    a host whose store predates that record, review the store and run
+    `repro system addon store-verify --adopt-unverified`;
   - a socket, timer or path unit that starts a floored service and does
     more than listen on a network address or on a unix socket named after
     the unit under `/run`, or watch a path. Examples are a socket that
@@ -99,8 +102,13 @@ The add-on handles this in four ways:
     an option needing a capability the service does not have
     (`Mark=`, `Transparent=`, `BindToDevice=`, a `Priority=` above 6);
   - a directory or link that the service manager would create for the
-    unit inside the add-on's own directories, or that already exists and
-    belongs to another account (for example `RuntimeDirectory=systemd`);
+    unit and that is not the unit's own: each `RuntimeDirectory=`,
+    `StateDirectory=`, `CacheDirectory=`, `LogsDirectory=` and
+    `ConfigurationDirectory=` must be named after the unit (`foo`,
+    `foo-data`, or below them for `foo.service`), never inside another
+    program's tree (`systemd/system/...`, `udev/rules.d`) or the add-on's
+    own directories, and never a directory that already exists and belongs
+    to another account (for example `RuntimeDirectory=systemd`);
   - realtime scheduling, a reboot `FailureAction=`, or a resource limit
     above the service manager's default;
   - a dependency such as `OnFailure=` or `Wants=` that starts a unit
@@ -109,12 +117,11 @@ The add-on handles this in four ways:
     `emergency.target`, whether directly or through other units. An
     `OnFailureJobMode=` other than `replace` or `fail`, and
     `AllowIsolate=yes`, are refused too;
-  - a `Conflicts=` naming a unit the profile does not define. Starting the
-    unit would stop it, whether it is a base target such as
-    `multi-user.target` or another package's service. The one exception
-    is an exclusive successor (`exclusive = true`): it may name the
-    `.service` it replaces, but only one the switch has already confirmed
-    as its predecessor, and never a target;
+  - a `Conflicts=` naming a unit the profile does not define, on the
+    unit or on any unit of the profile it starts. Starting it would stop
+    the named unit, whether a base target such as `multi-user.target` or
+    another package's service. An exclusive successor that must stop a
+    predecessor the profile does not define needs the whole-floor waiver;
   - a credential (`LoadCredential=`) read from outside the add-on's own
     secrets directory for the service, and any `ImportCredential=`,
     `NFTSet=` or `RootImageOptions=`. `systemctl show` does not print

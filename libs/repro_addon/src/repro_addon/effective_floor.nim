@@ -89,6 +89,10 @@ const
     ## ``SecretsRunRoot``): ``LoadCredential=`` may read only
     ## ``<root>/<service>/``.
   FloorMarker* = "# serviceFloor (ReproOS add-on hardening default)"
+  NoDigestRemedy* = "; no store object of this generation has a recorded " &
+    "digest on this host (it was realised before store custody, §13 " &
+    "decision 46): review the store and record them with `repro system " &
+    "addon store-verify --adopt-unverified`, then apply again"
   ScalarFloorKeys* = ["NoNewPrivileges", "ProtectSystem", "ProtectHome",
     "PrivateTmp", "PrivateDevices", "ProtectKernelTunables",
     "ProtectKernelModules", "ProtectKernelLogs", "ProtectControlGroups",
@@ -684,24 +688,17 @@ proc ownUnitOf*(unit: string; own: HashSet[string]): bool =
   at > 0 and dot > at and (unit[0 .. at] & unit[dot .. ^1]) in own
 
 proc conflictsProblems*(unit: string; show: ShowProps;
-                        own: HashSet[string];
-                        predecessors: openArray[string] = []): seq[string] =
+                        own: HashSet[string]): seq[string] =
   ## The units ``Conflicts=`` names, as systemd reports them, that the
   ## generation does not install (§13 decision 55). ``shutdown.target`` is
   ## the one systemd adds itself for a unit with default dependencies
   ## (systemd.special(7), systemd.service(5) "Default Dependencies"); one
   ## the unit's own files name is refused there by ``conflictsRefusal``.
-  ## ``predecessors``: for an exclusive successor, the ``.service`` units
-  ## the switch's exclusive check holds as its predecessors
-  ## (``switch.predecessorsOf``, resolved as systemd resolves them) -- the
-  ## decision's amendment, confirmed from the switch, not from the unit.
+  ## (The exception for an exclusive successor's predecessor was withdrawn
+  ## by the owner, A9 review round 8.)
   when mutated("conflicts-unchecked"): return
   for t in words(show.getOrDefault("Conflicts")):
     if t == "shutdown.target" or ownUnitOf(t, own): continue
-    when mutated("exclusive-predecessor-by-say-so"):
-      if predecessors.len > 0 and t.endsWith(".service"): continue
-    else:
-      if t in predecessors and t.endsWith(".service"): continue
     result.add(unit & ": Conflicts=" & t & " names a unit the generation " &
                "does not install; starting the unit would stop it")
 
@@ -947,13 +944,11 @@ type
     adoptedFiles*: Table[string, string]
       ## the ``fs.systemFile`` paths the generation adopts (``collision =
       ## adopt``), each with the sha256 its ledger records
+    conflictsOf*: proc (unit: string): seq[string]
+      ## what another unit's ``Conflicts=`` names, as systemd reports it
     startsOf*: proc (unit: string): seq[string]
       ## what another unit starts, as systemd reports it (``nil``: only the
       ## unit's own dependencies are followed)
-    exclusive*: bool
-      ## the unit is exclusive (``X-Repro-Exclusive=true``, spec §7.3)
-    predecessors*: seq[string]
-      ## its predecessors as the switch's exclusive check holds them
     inspectPath*: proc (path: string; uid: int; dynamic: bool): string
       ## why the manager may not create ``path`` for the unit, as it is on
       ## the host now (``managerPathProblem``)
@@ -982,8 +977,16 @@ proc effectiveFloorProblems*(e: EffectiveInput): seq[string] =
   let exceptions = e.exceptions
   let denied = e.denied
   let fb = floorBlock(rendered)
-  let owned = if e.storeObjects.len > 0: e.storeObjects
-              else: referencedStoreObjects(rendered)
+  # Only what the generation owns with a recorded digest (§13 decisions 48
+  # and 50; A9 review round 8, finding 3): never the unit's own references,
+  # which would vouch for themselves. On a host realised before custody
+  # nothing has a digest yet, and a store-sourced EnvironmentFile= or bind
+  # is refused, naming the remedy (``NoDigestRemedy``).
+  let owned = when mutated("owned-objects-fall-back"):
+                (if e.storeObjects.len > 0: e.storeObjects
+                 else: referencedStoreObjects(rendered))
+              else: e.storeObjects
+  let remedy = if owned.len == 0: NoDigestRemedy else: ""
   let ex = exceptionKeys(exceptions)
   let v = versionNumber(version)
   var ownDropIns: seq[string]
@@ -1225,6 +1228,10 @@ proc effectiveFloorProblems*(e: EffectiveInput): seq[string] =
       if user.len > 0 and e.uidOf != nil:
         try: uid = e.uidOf(user)
         except AccountLookupFailed: uid = -1   # refused by accountProblems
+      for (k, _) in DirectoryRoots:
+        for t in words(show.getOrDefault(k)) & words(show.getOrDefault(k & "Symlink")):
+          let why = managerDirectoryRefusal(unit, k, t)
+          if why.len > 0: problem(why)
       for (k, p) in created:
         if inAddOnTree(p):
           problem(k & " creates " & p & ", in the add-on's own tree")
@@ -1292,7 +1299,7 @@ proc effectiveFloorProblems*(e: EffectiveInput): seq[string] =
         for x in execPaths:
           if dst == x or dst.startsWith(x & "/") or x.startsWith(dst & "/"):
             problem("BindReadOnlyPaths=" & t & " binds " & src &
-                    " over the executable path " & x)
+                    " over the executable path " & x & remedy)
     # EnvironmentFile= (round 5, finding 1): read by the manager as root, so
     # named exactly, existing, root-owned under root-owned parents nothing
     # but root can write, and outside every floored unit's writable place.
@@ -1319,7 +1326,7 @@ proc effectiveFloorProblems*(e: EffectiveInput): seq[string] =
       let why = (if e.inspectFile != nil: e.inspectFile(np)
                  else: environmentFileProblem(np, credentialServiceOf(unit), owned,
                                               e.adoptedFiles))
-      if why.len > 0: problem("EnvironmentFile " & np & ": " & why)
+      if why.len > 0: problem("EnvironmentFile " & np & ": " & why & remedy)
     # Sockets= names only profile sockets (round 5, finding 2), read from
     # the loaded files: systemctl show never prints it (round 6, finding 4).
     # Realtime scheduling under RestrictRealtime= (finding 3).
@@ -1343,7 +1350,25 @@ proc effectiveFloorProblems*(e: EffectiveInput): seq[string] =
       if route.len > 0:
         problem("starts " & route[^1] & " (" & route.join(" -> ") &
                 "), which changes the whole system's state")
-    result.add(conflictsProblems(unit, show, e.ownUnits, e.predecessors))
+    result.add(conflictsProblems(unit, show, e.ownUnits))
+    # Every unit of the generation the unit reaches is held to the same
+    # rule (A9 review round 8, the open question): starting it stops what
+    # its Conflicts= names.
+    when not mutated("reached-conflicts-unchecked"):
+      if e.startsOf != nil and e.conflictsOf != nil:
+        var seen = initHashSet[string]()
+        var queue: seq[string]
+        for k in StartingDependencyKeys: queue.add(words(show.getOrDefault(k)))
+        while queue.len > 0 and seen.len <= RouteLimit:
+          let u = queue.pop()
+          if u in seen or u == unit: continue
+          seen.incl(u)
+          if not ownUnitOf(u, e.ownUnits): continue
+          for t in e.conflictsOf(u):
+            if t != "shutdown.target" and not ownUnitOf(t, e.ownUnits):
+              problem(u & " (reached from " & unit & "): Conflicts=" & t &
+                      " names a unit the generation does not install")
+          for d in e.startsOf(u): queue.add(d)
     for k in ["OnFailureJobMode", "OnSuccessJobMode"]:
       if show.getOrDefault(k) notin ["", "replace", "fail"]:
         problem(k & "=" & show[k] & " changes the system's state beyond " &
@@ -1393,8 +1418,7 @@ proc effectiveFloorProblems*(e: EffectiveInput): seq[string] =
       let isOwn = proc (u: string): bool = ownUnitOf(u, ownUnits)
       for (path, content) in e.loaded:
         if path.endsWith("/" & StartHoldName): continue
-        let why = conflictsRefusal(unit, content, isOwn, half = fhEffective,
-                                   exclusive = e.exclusive)
+        let why = conflictsRefusal(unit, content, isOwn, half = fhEffective)
         if why.len > 0: problem(path & ", by the floor's rules: " & why)
       if own.len > 0:
         try:

@@ -25,8 +25,7 @@
 ## ``activator-show-unjudged``, ``effective-skips-parse-rules``,
 ## ``bind-sources-by-prefix``, ``profile-memberships-ignored``,
 ## ``printed-file-settings-trusted``, ``adopted-files-unverified``, ``getent-errors-as-absent``,
-## ``conflicts-unchecked``, ``exclusive-predecessor-by-say-so``,
-## ``exclusive-conflicts-any-unit`` (§13 decision 55). Finding 7 is the tick helper's, a VM
+## ``conflicts-unchecked`` (§13 decision 55). Finding 7 is the tick helper's, a VM
 ## gate (``e2e_addon_tick_observes_a_fresh_cycle``).
 ##
 ## Mocks: as in ``t_addon_floor_round6``, ``systemctl show`` text and stubs
@@ -389,7 +388,9 @@ suite "round 7, finding 5: the effective half is the authority":
       ("OnFailureJobMode=isolate\n", ""), ("", "Group=shadow\n"),
       ("", "SupplementaryGroups=disk\n"), ("JoinsNamespaceOf=x.service\n", ""),
       ("", "ExecStartPost=+/bin/true\n"), ("", "OpenFile=/etc/shadow\n"),
-      ("Conflicts=sshd.service\n", "")]
+      ("Conflicts=sshd.service\n", ""),
+      ("", "RuntimeDirectory=systemd/system/x.service.d\n"),
+      ("", "RuntimeDirectory=udev/rules.d\n")]
     for (u, sv) in corpus:
       checkpoint u & sv
       check refused(unitStanza("a.service", svc & sv, u)).len > 0
@@ -494,36 +495,25 @@ suite "§13 decision 55: Conflicts= names only the profile's own units":
     check activatorProblems("a.socket", parseShow(base & "Conflicts=shutdown.target\n"),
       parseShowLines("Listen=/run/a.sock (Stream)\n"), "/etc/systemd/system/a.socket", []).len == 0
 
-suite "§13 decision 55, amended: an exclusive successor's predecessor":
-  # Falsifiers: exclusive-predecessor-by-say-so (the effective half takes
-  # the unit's word for it), exclusive-conflicts-any-unit (a target too).
-  # A floored unit is exclusive by the resource's field (its X- marker is
-  # not on the floor's allowlist).
+suite "§13 decision 55: the exclusive-predecessor exception is withdrawn":
+  # The owner withdrew it (A9 review round 8, finding 2): the predecessor
+  # was taken from the unit's own Conflicts=. A floored exclusive successor
+  # conflicts only with the profile's units. Falsifier: conflicts-unchecked.
   let excl = "  exclusive = true\n"
-  test "parse time: a .service, never a target, only when exclusive":
-    check refused(unitStanza("a.service", svc, "Conflicts=old.service\n", excl)) == ""
-    check "names a unit the profile does not define" in refused(unitStanza(
-      "a.service", svc, "Conflicts=multi-user.target\n", excl))
-    check "names a unit the profile does not define" in refused(unitStanza(
-      "a.service", svc, "Conflicts=old.socket\n", excl))
-    check "names a unit the profile does not define" in refused(unitStanza(
-      "a.service", svc, "Conflicts=old.service\n"))
-  test "the effective check: only what the switch holds as its predecessor":
+  test "parse time: refused, a .service as much as a target":
+    for t in ["old.service", "systemd-timedated.service", "multi-user.target"]:
+      checkpoint t
+      check "names a unit the profile does not define" in refused(unitStanza(
+        "a.service", svc, "Conflicts=" & t & "\n", excl))
+    check refused(unitStanza("a.service", svc, "Conflicts=b.service\n", excl) &
+      unitStanza("b.service", svc)) == ""
+  test "the effective check: refused from the files and from systemd's report":
     var e = goodInput()
-    e.exclusive = true
-    e.predecessors = @["old.service"]
     e.loaded = @[(path: fragment, content: withLines(ru, "Conflicts=old.service\n", ""))]
-    e.show["Conflicts"] = "shutdown.target old.service"
-    check problemsOf(e) == ""
-    e.show["Conflicts"] = "shutdown.target other.service"
-    check "Conflicts=other.service names a unit the generation does not install" in problemsOf(e)
-    e.show["Conflicts"] = "shutdown.target multi-user.target"
-    check "Conflicts=multi-user.target" in problemsOf(e)
-    e = goodInput()
-    e.exclusive = true
-    e.predecessors = @["old.service"]
-    e.loaded = @[(path: fragment, content: withLines(ru, "Conflicts=x.target\n", ""))]
     check "names a unit the profile does not define" in problemsOf(e)
+    e = goodInput()
+    e.show["Conflicts"] = "shutdown.target systemd-timedated.service"
+    check "Conflicts=systemd-timedated.service names a unit the generation does not install" in problemsOf(e)
 
 suite "round 7, finding 6: the profile's own memberships at parse time":
   test "passwd.user groups and passwd.group members":

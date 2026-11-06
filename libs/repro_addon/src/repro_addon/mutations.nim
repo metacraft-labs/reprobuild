@@ -970,11 +970,13 @@ const
                           # §13 decision 55: Conflicts= naming a unit the
                           # profile does not define, accepted.
                           "conflicts-unchecked",
-                          # decision 55's amendment: the effective half
-                          # takes any .service as a predecessor on the
-                          # unit's say-so; an exclusive unit names any unit.
-                          "exclusive-predecessor-by-say-so",
-                          "exclusive-conflicts-any-unit",
+                          # A9 review round 8: a *Directory= by its leaf
+                          # only; owned store objects falling back to the
+                          # unit's own references; a reached profile unit's
+                          # Conflicts= unjudged.
+                          "directory-names-unchecked",
+                          "owned-objects-fall-back",
+                          "reached-conflicts-unchecked",
                           # A13: a state backup or restore runs while a
                           # unit of the set may run.
                           "state-units-not-checked",
