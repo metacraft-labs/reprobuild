@@ -31,15 +31,19 @@
 ## bytes in a new entry.
 ##
 ## Falsifying mutations (each red at the points named):
-## ``custody-forgets-before-rebuild`` (``custody-after-move-aside``: the
-## expected digest is gone with the object, and every later switch
-## refuses), ``custody-ignores-leftovers`` (both ``*-after-move-aside``
+## ``custody-ignores-leftovers`` (both ``*-after-move-aside``
 ## points: the altered object is never filed), ``custody-skips-unrecorded``
 ## (both ``*-before-record`` points: the record is never written),
 ## ``custody-rebuild-unsynced`` (``custody-before-record``: the rebuilt
 ## prefix is not on the disk after the reset, so the next switch files it
 ## as a second alteration).
 ## ``REPRO_ADDON_CRASH_POINTS`` (comma separated) selects points.
+## ``custody-forgets-before-rebuild`` is NOT one: both objects here are
+## named by a committed generation's ledger, which keeps their expected
+## digests whatever the realisation index loses, so the gate stays green
+## under it (measured on debian-13 at reprobuild ``13b0faf531``). The
+## index is the only record of an object a switch realised and never
+## committed; ``t_addon_review_findings`` case 10 holds that case.
 ##
 ## Opt-in: ``REPRO_ADDON_VM_GATES=1``; needs the seam build and a QEMU
 ## guest (``hardReset``).
