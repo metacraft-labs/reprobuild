@@ -129,7 +129,10 @@ proc body(g: Guest; repro: string; step: StepFn; record: JsonNode;
   step("baseline: nothing detected, every detector live-idle, no alert",
        base.alerts.len == 0 and base.statuses.allIt(it.status == "live-idle"),
        render(base))
-  discard g.exec("systemctl stop repro-agent-fetch.timer")
+  # Stopped, settled and recorded as the tick helper's baseline: a cycle
+  # the timer ran before this point cannot have applied what the gate
+  # publishes next (A9 review round 7, finding 7).
+  g.recordTimerBaseline()
 
   # DET-AO-1: a manifest signed by a key the host does not anchor.
   var since = sink.headSeq()

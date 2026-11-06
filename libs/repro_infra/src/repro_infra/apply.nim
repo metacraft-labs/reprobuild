@@ -336,6 +336,46 @@ proc allocateGenerationId(stateDir, profileDigestHex, hostIdentity: string;
 # (typed op + plan baseline digest).
 # ---------------------------------------------------------------------------
 
+const ApplyMutation {.strdefine: "reproAddonMutation".} = ""
+  ## ``plan-ignores-profile-digest``, ``full-apply-keeps-undeclared-dropins``
+  ## (falsifying builds, ``repro_addon/mutations``).
+
+proc undeclaredDropIns*(stateDir, profileText: string): seq[SystemResource] =
+  ## The ``systemd.systemDropIn`` resources the active generation declares
+  ## and ``profileText`` does not: a host realised in full removes them
+  ## (A13 review round 5, finding 3), as the add-on's switch removes what
+  ## its ledger no longer owns. Otherwise a drop-in written by an earlier
+  ## generation -- the carried-state requirement among them -- would stay
+  ## loaded by systemd though no profile declares it. Empty when there is
+  ## no active generation.
+  when ApplyMutation == "full-apply-keeps-undeclared-dropins":
+    return
+  if stateDir.len == 0: return
+  let activeId = readCurrentGenerationId(stateDir)
+  if activeId.len == 0: return
+  let active = readGenerationEnvelope(pointerPath(stateDir, activeId))
+  var wanted: seq[string]
+  for r in parseSystemProfile(profileText).resources: wanted.add(r.address)
+  var old: SystemProfile
+  try:
+    old = parseSystemProfile(active.profileText)
+  except CatchableError:
+    # A generation this build cannot read: nothing is removed for it. The
+    # carried-state reach analysis still reads every such file on the host
+    # (``carried_state.unitTexts``), so a stale drop-in is judged, not
+    # trusted.
+    return
+  for r in old.resources:
+    if r.kind == srkSystemdSystemDropIn and r.address notin wanted:
+      # The carried-state requirement goes only with its unit: a host
+      # realised in full keeps a unit file the profile no longer declares,
+      # and that unit must still not start at a boot whose restore failed.
+      when defined(posix):
+        if r.diName == RequirementDropInName and
+            fileExists("/etc/systemd/system" / r.diUnit):
+          continue
+      result.add(r)
+
 proc plannedOperationsFor*(profileText: string;
                            env: PlanEnvelope): seq[PlannedOperation] =
   ## Build the typed `PlannedOperation` list for the EFFECTIVE
@@ -633,6 +673,12 @@ proc runInfraApply*(profileText: string; opts: ApplyOptions): ApplyResult =
   dispatchBuildActions(opts, result)
   refreshApplyLock(opts.stateDir)
 
+  # Drop-ins an earlier generation declared and this profile does not: the
+  # apply removes them (planned as destroys, dispatched below).
+  # An add-on apply (``carriedStateChecked``) removes what its ledger no
+  # longer owns in its own switch, so it is not asked here.
+  let undeclared = if opts.carriedStateChecked: newSeq[SystemResource]()
+                   else: undeclaredDropIns(opts.stateDir, profileText)
   # --- 1. Resolve the plan. ---
   var env: PlanEnvelope
   if opts.planId.len > 0:
@@ -644,6 +690,16 @@ proc runInfraApply*(profileText: string; opts: ApplyOptions): ApplyResult =
     # is touched; a fresh plan is cheap.
     if env.hostIdentity != opts.hostIdentity:
       raisePlanHostMismatch(opts.planId, env.hostIdentity, opts.hostIdentity)
+    # The plan must be of the very text this apply runs: the carried-state
+    # requirements are added at apply time (``withCarriedRequirements``),
+    # so a host whose reach changed since the plan -- install-unit, a host
+    # drop-in -- applies a different text, which a stored plan would
+    # silently not write (A13 review round 5, finding 4).
+    when ApplyMutation != "plan-ignores-profile-digest":
+      if env.profileDigestHex != digestProfileText(profileText):
+        raisePlanProfileChanged(opts.planId, "the profile text this apply " &
+          "runs (with the carried-state requirements this host needs now) " &
+          "is not the text the plan was made from")
     # Stale-detection: the live world must still be consistent with
     # the plan's recorded observations.
     let stale = detectStaleResources(env.operations, profileText)
@@ -657,6 +713,7 @@ proc runInfraApply*(profileText: string; opts: ApplyOptions): ApplyResult =
     # is the integrity check.
     let fresh = producePlan(profileText, opts.hostIdentity,
       opts = PlannerOptions(stateDir: opts.stateDir,
+                            destroyResources: undeclared,
                             acceptDrift: false))
     env = fresh.envelope
     # Persist the fresh plan so the apply is auditable by id.
@@ -696,7 +753,10 @@ proc runInfraApply*(profileText: string; opts: ApplyOptions): ApplyResult =
   # drift gate treats it uniformly. An already-reverted resource
   # (observe says absent) is dispatched as a destroy no-op.
   var destroys: seq[PlannedOperation]
-  for r in opts.extraDestroyResources:
+  var destroyed: seq[string]
+  for r in opts.extraDestroyResources & undeclared:
+    if r.address in destroyed: continue
+    destroyed.add(r.address)
     let obs = observeResource(r)
     destroys.add(PlannedOperation(
       operation: toPrivilegedOperation(r, destroy = true),

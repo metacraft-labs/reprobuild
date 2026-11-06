@@ -493,6 +493,39 @@
 ## ``restore-requirement-by-manifest-only``   no apply adds the restore
 ##                                            requirement; only install-
 ##                                            unit's manifest units have it
+## ``reach-values-as-text``                  setting values read as round 4
+##                                           did: booleans from
+##                                           yes/true/1/on only,
+##                                           ProtectSystem= lower-cased
+## ``confined-without-nnp-or-groups``        a confined service need not
+##                                           have NoNewPrivileges=yes, and
+##                                           may hold a privileged group
+## ``account-dynamic-name-from-stem``        DynamicUser=yes without User=
+##                                           names the account after the
+##                                           unit's prefix and instance
+## ``account-nss-unread``                    the account lookup reads no
+##                                           userdb records and is always
+##                                           authoritative
+## ``reach-alias-dropins-unread``            reach reads the drop-ins of
+##                                           the unit's own name only, not
+##                                           of its aliases
+## ``reach-stale-generation-dropins-skipped``reach skips every
+##                                           50-repro-*.conf in the unit's
+##                                           directory, declared or not
+## ``restore-requirement-skips-activated``   the restore requirement is not
+##                                           given to units the profile
+##                                           starts but does not define
+## ``plan-ignores-profile-digest``           an apply of a stored plan does
+##                                           not compare the plan's profile
+##                                           digest with the text it runs
+## ``full-apply-keeps-undeclared-dropins``   a full apply leaves the
+##                                           drop-ins an earlier generation
+##                                           declared and this one does not
+## ``install-unit-reads-host-manifest``      install-unit and restore
+##                                           --root read the running host's
+##                                           carried directory
+## ``live-reach-unchecked``                  the switch does not re-judge
+##                                           reach from systemctl show
 ## ``receipt-no-fsync``                       the restore receipt is
 ##                                            renamed into place with
 ##                                            neither its file nor its
@@ -920,6 +953,8 @@ const
                           # adopted again (the row before decision 50's
                           # amendment).
                           "owned-drift-not-adoptable",
+                          # getent errors read as "no such account".
+                          "getent-errors-as-absent",
                           # A13: a state backup or restore runs while a
                           # unit of the set may run.
                           "state-units-not-checked",
@@ -993,6 +1028,18 @@ const
                           "reach-timer-dropins-unread",
                           "reach-path-unit-paths-ignored",
                           "restore-requirement-by-manifest-only",
+                          # A13 review round 5.
+                          "reach-values-as-text",
+                          "confined-without-nnp-or-groups",
+                          "account-dynamic-name-from-stem",
+                          "account-nss-unread",
+                          "reach-alias-dropins-unread",
+                          "reach-stale-generation-dropins-skipped",
+                          "restore-requirement-skips-activated",
+                          "plan-ignores-profile-digest",
+                          "full-apply-keeps-undeclared-dropins",
+                          "install-unit-reads-host-manifest",
+                          "live-reach-unchecked",
                           "reach-ignores-privileged-commands",
                           "reach-dropin-judged-alone",
                           "reach-trigger-units-reach-nothing",

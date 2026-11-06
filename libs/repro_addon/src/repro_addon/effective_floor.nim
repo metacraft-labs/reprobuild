@@ -458,24 +458,47 @@ proc writablePlaces*(show: ShowProps): seq[string] =
     for t in words(show.getOrDefault(k)):
       result.add(root & "/" & t.split(':')[0])
 
+type AccountLookupFailed* = object of OSError
+  ## getent could not answer: not "no such entry" (exit 2) but an error --
+  ## getent missing, an NSS backend down, any other exit. The account is
+  ## then unknown, never nonexistent (A13 review round 5: under
+  ## DynamicUser=yes an authoritative "not found" allocates a dynamic user,
+  ## so an error read as "not found" would wave a static account through).
+
+proc getentAt*(exe, db, key: string): tuple[found: bool; fields: seq[string]] =
+  ## ``<exe> <db> -- <key>`` (getent): found and its fields, or not found
+  ## (exit 2, getent(1): "One or more supplied key could not be found in
+  ## the database"). Any other outcome raises ``AccountLookupFailed``.
+  if exe.len == 0:
+    raise newException(AccountLookupFailed, "getent not found at " &
+      GetentCandidates.join(" or "))
+  let r = runHostTool([exe, db, "--", key], mergeStderr = false)
+  when mutated("getent-errors-as-absent"):
+    # Falsifying build: every non-zero exit read as "not found".
+    if r.exitCode != 0: return (false, @[])
+  case r.exitCode
+  of 0: (true, r.output.strip().splitLines()[0].split(':'))
+  of 2: (false, @[])
+  else:
+    raise newException(AccountLookupFailed, "getent " & db & " " & key &
+      " exited " & $r.exitCode & ": " & r.output.strip())
+
+proc getent(db: string; key: string): tuple[found: bool; fields: seq[string]] =
+  ## ``getentAt`` with the host's getent.
+  getentAt(resolveHostTool(GetentCandidates), db, key)
+
 proc systemGid*(group: string): int =
-  ## The gid ``getent group`` gives ``group``, -1 when it gives none.
-  let exe = resolveHostTool(GetentCandidates)
-  if exe.len == 0: return -1
-  let r = runHostTool([exe, "group", "--", group], mergeStderr = false)
-  if r.exitCode != 0: return -1
-  let f = r.output.strip().split(':')
-  if f.len < 3: return -1
+  ## The gid ``getent group`` gives ``group``, -1 when it has none (exit
+  ## 2). Raises ``AccountLookupFailed`` when getent cannot answer.
+  let (found, f) = getent("group", group)
+  if not found or f.len < 3: return -1
   try: parseInt(f[2]) except ValueError: -1
 
 proc systemUid*(name: string): int =
-  ## The uid ``getent passwd`` gives ``name``, -1 when it gives none.
-  let exe = resolveHostTool(GetentCandidates)
-  if exe.len == 0: return -1
-  let r = runHostTool([exe, "passwd", "--", name], mergeStderr = false)
-  if r.exitCode != 0: return -1
-  let f = r.output.strip().split(':')
-  if f.len < 3: return -1
+  ## The uid ``getent passwd`` gives ``name``, -1 when it has none (exit
+  ## 2). Raises ``AccountLookupFailed`` when getent cannot answer.
+  let (found, f) = getent("passwd", name)
+  if not found or f.len < 3: return -1
   try: parseInt(f[2]) except ValueError: -1
 
 proc systemGroups*(name: string): seq[string] =
@@ -483,15 +506,16 @@ proc systemGroups*(name: string): seq[string] =
   ## passwd``'s gid, named by ``getent group``; the number when no group
   ## has it, ``root`` for gid 0) and every group whose member list names it
   ## (``getent group``: /etc/group and NSS). An account getent does not
-  ## know is reported in ``root``: refused rather than trusted.
+  ## know is reported in ``root``: refused rather than trusted. Raises
+  ## ``AccountLookupFailed`` when getent cannot answer.
+  if name.len == 0: return @["root"]
+  let (found, f) = getent("passwd", name)
+  if not found or f.len < 4: return @["root"]
   let exe = resolveHostTool(GetentCandidates)
-  if exe.len == 0 or name.len == 0: return @["root"]
-  let pw = runHostTool([exe, "passwd", "--", name], mergeStderr = false)
-  if pw.exitCode != 0: return @["root"]
-  let f = pw.output.strip().split(':')
-  if f.len < 4: return @["root"]
   let all = runHostTool([exe, "group"], mergeStderr = false)
-  if all.exitCode != 0: return @["root"]
+  if all.exitCode != 0:
+    raise newException(AccountLookupFailed, "getent group exited " &
+      $all.exitCode & ": " & all.output.strip())
   var primary = if f[3] == "0": "root" else: f[3]
   for l in all.output.splitLines():
     let g = l.split(':')
@@ -501,12 +525,12 @@ proc systemGroups*(name: string): seq[string] =
   result.insert(primary, 0)
 
 proc systemUserOfUid*(uid: int): string =
-  ## The name ``getent passwd`` gives ``uid``, "" when it gives none.
-  let exe = resolveHostTool(GetentCandidates)
-  if exe.len == 0 or uid < 0: return ""
-  let r = runHostTool([exe, "passwd", "--", $uid], mergeStderr = false)
-  if r.exitCode != 0: return ""
-  r.output.strip().split(':')[0]
+  ## The name ``getent passwd`` gives ``uid``, "" when it has none. Raises
+  ## ``AccountLookupFailed`` when getent cannot answer.
+  if uid < 0: return ""
+  let (found, f) = getent("passwd", $uid)
+  if not found: return ""
+  f[0]
 
 proc accountProblems*(user, group, supplementaryGroups, dynamicUser,
                       unit: string;
@@ -551,8 +575,18 @@ proc accountProblems*(user, group, supplementaryGroups, dynamicUser,
       note(g, gid)
       result.add(gid)
   lookup.userOfUid = userOfUid
-  let a = resolveServiceAccount(user, group, supplementaryGroups,
-                                dynamicUser == "yes", unit, lookup)
+  # Answered by NSS (getent), as systemd asks it: a name it does not know
+  # is no account, so DynamicUser=yes allocates one (service_account,
+  # ``AccountLookup.authoritative``).
+  lookup.authoritative = true
+  var a: ResolvedAccount
+  try:
+    a = resolveServiceAccount(user, group, supplementaryGroups,
+                              dynamicUser == "yes", unit, lookup)
+  except AccountLookupFailed as x:
+    # Unknown, not nonexistent: refused.
+    return @["the account databases cannot be read (" & x.msg & "); the " &
+             "account is unknown and refused"]
   for u in a.unknown:
     result.add(u & ", which getent does not know or systemd cannot " &
                "resolve: refused, not taken for an unprivileged account")
@@ -856,6 +890,8 @@ type
       ## ``EnvironmentFile=``), "" when it may (``environmentFileProblem``)
     gidOf*: proc (group: string): int
       ## a group's gid, -1 when unknown (``systemGid``)
+    userOfUid*: proc (uid: int): string
+      ## a uid's account name, "" when none (``systemUserOfUid``)
     otherWritable*: seq[string]
       ## the writable places of every other floored unit of the generation
     ownUnits*: HashSet[string]
@@ -1006,13 +1042,17 @@ proc effectiveFloorProblems*(e: EffectiveInput): seq[string] =
     # of the configured name winning over DynamicUser=yes for the user and
     # the group, a second name for uid 0 being root, and the user's
     # /etc/group memberships held. Whatever does not resolve is refused.
-    for p in accountProblems(show.getOrDefault("User"),
-        show.getOrDefault("Group"), show.getOrDefault("SupplementaryGroups"),
-        show.getOrDefault("DynamicUser"), unit,
-        (if e.uidOf != nil: e.uidOf else: systemUid),
-        (if e.groupsOf != nil: e.groupsOf else: systemGroups),
-        (if e.gidOf != nil: e.gidOf else: systemGid)):
-      problem(p)
+    try:
+      for p in accountProblems(show.getOrDefault("User"),
+          show.getOrDefault("Group"), show.getOrDefault("SupplementaryGroups"),
+          show.getOrDefault("DynamicUser"), unit,
+          (if e.uidOf != nil: e.uidOf else: systemUid),
+          (if e.groupsOf != nil: e.groupsOf else: systemGroups),
+          (if e.gidOf != nil: e.gidOf else: systemGid),
+          (if e.userOfUid != nil: e.userOfUid else: systemUserOfUid)):
+        problem(p)
+    except AccountLookupFailed as x:
+      problem("the account databases cannot be read (" & x.msg & "); refused")
     if "RootDirectory" notin ex:
       for k in ["RootDirectory", "RootImage"]:
         if show.getOrDefault(k).len > 0:
@@ -1142,7 +1182,10 @@ proc effectiveFloorProblems*(e: EffectiveInput): seq[string] =
             created.add((k & "Symlink", normalisedPath(root & "/" & t[c + 1 .. ^1])))
       let dynamic = show.getOrDefault("DynamicUser") == "yes"
       let user = show.getOrDefault("User")
-      let uid = if user.len > 0 and e.uidOf != nil: e.uidOf(user) else: -1
+      var uid = -1
+      if user.len > 0 and e.uidOf != nil:
+        try: uid = e.uidOf(user)
+        except AccountLookupFailed: uid = -1   # refused by accountProblems
       for (k, p) in created:
         if inAddOnTree(p):
           problem(k & " creates " & p & ", in the add-on's own tree")

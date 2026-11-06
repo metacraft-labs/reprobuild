@@ -99,6 +99,7 @@ proc goodInput(): EffectiveInput =
     of "a", "admx": 1000
     else: -1
   result.inspectFile = proc (p: string): string = ""
+  result.userOfUid = proc (uid: int): string = (if uid == 0: "root" else: "")
   result.lines["ExecStartEx"] = @["{ path=" & Prefix & "/bin/svc ; argv[]=" &
     Prefix & "/bin/svc ; flags= ; start_time=[n/a] }"]
   result.loaded = @[(path: fragment, content: ru)]

@@ -579,10 +579,11 @@ proc runInfraPlan(args: openArray[string]): int =
   # The plan an apply of this text on this host will run: with the
   # carried-state requirements every apply adds (``withCarriedRequirements``),
   # so a plan made here is not stale when it is applied.
-  let planResult = producePlan(
-    (when defined(posix): withCarriedRequirements(profileText)
-     else: profileText), host,
+  let plannedText = when defined(posix): withCarriedRequirements(profileText)
+                    else: profileText
+  let planResult = producePlan(plannedText, host,
     opts = PlannerOptions(stateDir: stateDir,
+                          destroyResources: undeclaredDropIns(stateDir, plannedText),
                           acceptDrift: flags.acceptDrift))
   let env = planResult.envelope
   writePlanFile(planPath(stateDir, env.planId), env)

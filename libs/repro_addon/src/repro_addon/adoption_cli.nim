@@ -115,7 +115,9 @@ proc installRestoreUnit*(dir, repro: string; root = "/"): seq[string] =
     if symlinkExists(link) or fileExists(link): removeFile(link)
     createSymlink("/etc/systemd/system/" & RestoreUnitName, link)
   linkInto(unitDir / "sysinit.target.wants")
-  let marker = under(root, installedMarkerPath(dir))
+  # ``dir`` is the carried directory as this process sees it (under
+  # ``root`` already, ``runStateCli``), so its marker is beside it.
+  let marker = installedMarkerPath(dir)
   createDir(marker.parentDir)
   writeFile(marker, dir & "\n")
   for u in units:
@@ -254,9 +256,14 @@ proc runStateCli*(args: seq[string]): int =
           return 1
       (if r.differing.len == 0: 0 else: 1)
     of "restore":
-      let dir = if fromDir.len > 0: fromDir else: CarriedStateDir
+      # Without --from, the carried directory of the system under --root
+      # (A13 review round 5, finding 8).
+      let dir = if fromDir.len > 0: fromDir
+                else: (when mutated("install-unit-reads-host-manifest"):
+                         CarriedStateDir
+                       else: under(root, CarriedStateDir))
       if not fileExists(dir / ManifestFileName):
-        if boot and not fileExists(under(root, installedMarkerPath(dir))):
+        if boot and not fileExists(installedMarkerPath(dir)):
           stdout.write("no carried state at " & dir & "\n")
           return 0
         if boot:
@@ -290,7 +297,10 @@ proc runStateCli*(args: seq[string]): int =
           CarriedStateDir & " (the directory the restore unit and every " &
           "apply use); move the carried state there instead of --from " &
           fromDir)
-      let dir = CarriedStateDir
+      # The system under --root: its manifest, its unit, its marker (A13
+      # review round 5, finding 8).
+      let dir = when mutated("install-unit-reads-host-manifest"): CarriedStateDir
+                else: under(root, CarriedStateDir)
       let units = installRestoreUnit(dir, publicCliImagePath(), root)
       stdout.write("installed " & RestoreUnitName & "; required by: " &
         units.join(", ") & "\n")

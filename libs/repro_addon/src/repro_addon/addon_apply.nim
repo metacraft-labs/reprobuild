@@ -2967,6 +2967,37 @@ proc revertOverwritesRestored*(purpose: string; ledgerOwns, regularFile: bool;
   purpose == "revert" and ledgerOwns and regularFile and
     preservedPath.len > 0 and currentSha == extractFilename(preservedPath)
 
+proc liveReachProblems(opts: AddonApplyOptions;
+                       resources: openArray[SystemResource]): seq[string] =
+  ## Each service of the generation that the carried-state reach analysis
+  ## judges confined, re-judged from ``systemctl show``
+  ## (``carried_state.liveConfinementProblem``) -- only while carried state
+  ## is on this host (a manifest in the carried directory, pending or
+  ## restored), where a unit that is not confined reaches it.
+  let carriedAt = if opts.carriedStateDir.len > 0: opts.carriedStateDir
+                  else: CarriedStateDir
+  if not fileExists(carriedAt / ManifestFileName): return
+  let root = if opts.carriedStateRoot.len > 0: opts.carriedStateRoot else: "/"
+  var p = SystemProfile()
+  for r in resources: p.resources.add(r)
+  let lookup = hostAccountLookup(root, p)
+  for r in resources:
+    if r.kind != srkSystemdSystemUnit or r.suCollision == "dropIn" or
+        not r.suName.endsWith(".service"):
+      continue
+    if unitReach(r, p, lookup, root).all: continue   # refused or required
+    var show: ShowProps
+    try: show = showUnit(r.suName)
+    except CatchableError as e:
+      result.add(r.suName & ": " & e.msg)
+      continue
+    let why = liveConfinementProblem(r.suName,
+      proc (k: string): string = show.getOrDefault(k), lookup)
+    if why.len > 0:
+      result.add("ECarriedStatePending: " & r.suName & " as systemd " &
+        "loaded it is not confined (" & why & "), though its unit text " &
+        "reads as confined")
+
 proc carriedRefusalFor(opts: AddonApplyOptions; stateDir: string): string =
   ## The carried-state refusal for this apply (``carried_state``), "" when
   ## it may go ahead. A stored generation (a revert, a rollback, a replay)
@@ -5288,6 +5319,14 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
               adoptedFiles[normalisedPath(p.targetPath)] = digest
           let notHeld = effectiveFloorCheck(composed.resources, ownedObjects,
                                             adoptedFiles)
+          # The carried-state reach, cross-checked against the units as
+          # systemd loaded them (A13 review round 5, finding 1): wherever
+          # carried state is on this host, a unit the static analysis took
+          # as confined must be confined as systemd reads it too, or nothing
+          # starts (a problem stops step 7, and the switch reverts).
+          let reachLive = liveReachProblems(opts, composed.resources)
+          if reachLive.len > 0:
+            problems.add(reachLive.join("; ") & "; nothing was started")
           if notHeld.len > 0:
             problems.add($adFloorNotEffective & ": " & notHeld.join("; ") &
               "; nothing was started")
