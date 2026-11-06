@@ -515,6 +515,9 @@
 ## ``restore-requirement-skips-activated``   the restore requirement is not
 ##                                           given to units the profile
 ##                                           starts but does not define
+## ``restore-requirement-skips-dropin-targets`` the restore requirement is
+##                                            not given to a unit only a
+##                                            profile drop-in reaches
 ## ``plan-ignores-profile-digest``           an apply of a stored plan does
 ##                                           not compare the plan's profile
 ##                                           digest with the text it runs
@@ -1053,6 +1056,7 @@ const
                           "reach-alias-dropins-unread",
                           "reach-stale-generation-dropins-skipped",
                           "restore-requirement-skips-activated",
+                          "restore-requirement-skips-dropin-targets",
                           "plan-ignores-profile-digest",
                           "full-apply-keeps-undeclared-dropins",
                           "install-unit-reads-host-manifest",

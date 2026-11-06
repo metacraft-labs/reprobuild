@@ -823,6 +823,15 @@ suite "the requirement covers what the profile starts (round 5)":
     check "dist9.service" in units
     check "w1.service" in units
 
+  test "a unit the profile does not define but drops in on requires the restore through it":
+    let (root, d) = installedAt("req-dropin")
+    let dropIn = "systemd.systemDropIn {\n  unit = \"tuned9.service\"\n" &
+      "  name = \"tune\"\n  content = \"[Service]\nEnvironment=A=1\n\"\n}\n"
+    check carriedRequirementUnits(parseSystemProfile(
+      confinedNnp("w0.service", "ReadWritePaths=/var/lib/other\n")), d, root).len == 0
+    check carriedRequirementUnits(parseSystemProfile(dropIn), d, root) ==
+      @["tuned9.service"]
+
   test "a Wants= chain within the profile: the wanted unit that reaches gets its own":
     let (root, d) = installedAt("req-chain")
     let a = unit("c-a.service", "[Unit]\nWants=c-b.service\n[Service]\n" &

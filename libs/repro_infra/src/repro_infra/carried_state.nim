@@ -1527,7 +1527,11 @@ proc carriedRequirementUnits*(p: SystemProfile; dir = CarriedStateDir;
     let u = case r.kind
       of srkSystemdSystemUnit: r.suName
       of srkSystemdSystemTimer: r.stName
-      of srkSystemdSystemDropIn: r.diUnit
+      of srkSystemdSystemDropIn:
+        # A drop-in for a unit the profile does not define reaches
+        # everything: that unit requires the restore through it.
+        when CarriedMutation == "restore-requirement-skips-dropin-targets": ""
+        else: r.diUnit
       else: ""
     if u.len == 0 or u == CarriedRestoreUnit: continue
     let reach = unitReach(r, p, lookup, root)
