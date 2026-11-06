@@ -18,8 +18,11 @@
 ## as answered), and through ``runCredentialCheck`` itself.
 ##
 ## Falsifying build: ``probe-shares-connection`` (the old shared-connection
-## probe): the unenrolled case goes red (the child dies with SIGSEGV within
-## the first run, measured by the reviewer at ``6e3e63d7a7``).
+## probe): the first case goes red, every run (the probe closes and clears
+## the appender's connection). The two 150-iteration cases go red under it
+## only when the timing lands (measured at ``46c8151056``: one run in three
+## each, a SIGSEGV in the child or a probe reading the flush's reply); they
+## stay as the reviewer's reproducer, green with the fix.
 ##
 ## Mocks: none. The sink is the real in-process sink fixture over real TLS.
 
@@ -75,6 +78,32 @@ if getEnv("A11_PROBE_CONN_CHILD").len > 0:
   quit(childRun(getEnv("A11_PROBE_CONN_CHILD")))
 
 suite "a forbidden-verb probe owns its connection":
+  test "a probe leaves the appender's own connection as it found it":
+    # Deterministic: the appender is connected (its record acknowledged);
+    # each probe must use a connection of its own, so the appender's stays
+    # open and the next record goes out on it.
+    let root = getTempDir() / ("a11-probe-own-" & $getCurrentProcessId())
+    removeDir(root)
+    createDir(root)
+    defer: removeDir(root)
+    let sink = startSink(root)
+    defer: sink.server.stop()
+    let h = newHost(root, "own", sink)
+    sink.enrol(h)
+    let a = openAppender(h.site, h.conf)
+    a.append(newEvidenceRecord(ecAudit, "addon-evidence-ship",
+      "credential-probe", [("host", "own")], nowMs = 1))
+    check a.drain(20_000)
+    check a.connected
+    for op in ForbiddenOperation:
+      check not waitFor(a.probeForbiddenOperation(op))
+      check a.connected
+    a.append(newEvidenceRecord(ecAudit, "addon-evidence-ship", "after",
+      [("host", "own")], nowMs = 2))
+    check a.drain(20_000)
+    check a.appended == 2
+    a.close()
+
   test "unenrolled: probes after a timed-out drain never crash":
     let r = inChild("unenrolled")
     checkpoint r.output[max(0, r.output.len - 2000) .. ^1]

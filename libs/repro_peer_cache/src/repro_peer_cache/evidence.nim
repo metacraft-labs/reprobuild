@@ -1214,6 +1214,11 @@ proc drain*(a: EvidenceAppender; timeoutMs = 5_000): bool =
     try: poll(20) except ValueError: sleep(20)
   a.queue.len == 0
 
+proc connected*(a: EvidenceAppender): bool =
+  ## Whether the appender holds its connection to the sink now (for tests
+  ## and status: a probe of the sink must leave it as it found it).
+  not a.isNil and not a.conn.isNil
+
 proc pending*(a: EvidenceAppender): int =
   ## Records queued but not yet acknowledged by the sink.
   if a.isNil: 0 else: a.queue.len
