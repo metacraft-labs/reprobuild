@@ -171,6 +171,25 @@ suite "the decision table, file rows":
     # unlike a plain no-op. At 59c075685f it was indistinguishable from one.
     check same.acceptedOutOfBand and not n.acceptedOutOfBand
 
+  test "owned and changed out of band: adopt keeps the edit, EDrift names both remedies":
+    # §13 decision 50, amended 2026-11-06 by the owner; spec §4.3. Falsifier:
+    # owned-drift-not-adoptable.
+    writeFile(at("/etc/app/edited.conf"), "edited\n")
+    let ledger = sha256Hex("adopted\n")
+    try:
+      discard d.decide(fileInputs("f", "adopted\n", ledgerSha = ledger), at("/etc/app/edited.conf"))
+      check false
+    except AddonDriftError as e:
+      check "repro system adopt f --profile <file>" in e.msg
+      check "--reconcile-drift" in e.msg
+    let (a, _) = d.decide(fileInputs("f", "adopted\n", ledgerSha = ledger, adopt = true),
+                          at("/etc/app/edited.conf"))
+    check a.verdict == cvAdopt and a.preWriteBytes == "edited\n"
+    # Adopt wins over --reconcile-drift: the operator named the object.
+    let (b, _) = d.decide(fileInputs("f", "adopted\n", ledgerSha = ledger, adopt = true,
+                                     reconcile = true), at("/etc/app/edited.conf"))
+    check b.verdict == cvAdopt
+
   test "package-owned conffile: EAddOnPackageOwned naming the package and the drop-in":
     # The fixture's dpkg index lists the dpkg-side path; the driver is
     # asked about that path and the file need not exist for the row.

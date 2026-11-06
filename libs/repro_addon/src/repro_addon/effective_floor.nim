@@ -47,6 +47,7 @@ import std/[algorithm, os, posix, sequtils, sets, strutils, tables]
 
 import ./host_exec
 import ./mutations
+from ./fingerprint import sha256OfFile
 
 import repro_infra/service_floor
 import repro_infra/service_account
@@ -65,9 +66,24 @@ const
     ## §10.1, A9 review round 4, finding 7): an assertion that always
     ## fails, so nothing -- a socket, a timer, a path unit, D-Bus or a
     ## ``Wants=`` -- can start the unit in between.
+  StartHoldAssertion* =
+    when mutated("hold-path-creatable"):
+      # Falsifying build: round 4's assertion, a path a unit can create
+      # (a listener, a RuntimeDirectory=) and so satisfy for every unit.
+      "AssertPathExists=/run/repro/floor-hold/never"
+    else:
+      "AssertPathExists=!/"
+    ## The hold's assertion (A9 review round 7, finding 2): that ``/`` does
+    ## not exist. systemd.unit(5): a path prefixed with ``!`` negates the
+    ## test, and the unit starts only if the path does not exist. ``/`` is
+    ## the root of PID 1's mount namespace, in which the manager checks the
+    ## assertion; it exists for as long as the manager runs and no unit can
+    ## remove or replace it (``rmdir("/")`` fails with ``EBUSY``,
+    ## rmdir(2)), so nothing any unit creates or removes can satisfy the
+    ## hold. A rename into ``/`` is impossible for the same reason.
   StartHoldText* = "# Written by the ReproOS add-on switch: the unit may not " &
     "start until its\n# effective configuration has been checked against " &
-    "its hardening floor.\n[Unit]\nAssertPathExists=/run/repro/floor-hold/never\n"
+    "its hardening floor.\n[Unit]\n" & StartHoldAssertion & "\n"
   CredentialRoot* = "/run/repro/secrets"
     ## Where the add-on stages a service's credentials (``profile``'s
     ## ``SecretsRunRoot``): ``LoadCredential=`` may read only
@@ -103,6 +119,7 @@ const
     ## wrote into ``/etc``).
 
   ComparedProps* = ["LoadState", "FragmentPath", "SourcePath", "DropInPaths",
+    "OnFailureJobMode", "OnSuccessJobMode", "AllowIsolate",
     "User", "Group", "DynamicUser", "SupplementaryGroups", "PAMName",
     "NoNewPrivileges", "ProtectSystem", "ProtectHome", "PrivateTmp",
     "PrivateDevices", "ProtectKernelTunables", "ProtectKernelModules",
@@ -164,9 +181,8 @@ const
     "OnSuccess", "OnSuccessOf", "OnFailure", "OnFailureOf", "Triggers",
     "TriggeredBy", "PropagatesReloadTo", "ReloadPropagatedFrom",
     "PropagatesStopTo", "StopPropagatedFrom", "RequiresMountsFor",
-    "WantsMountsFor", "Slice", "OnSuccessJobMode",
-    "OnFailureJobMode", "DefaultDependencies", "StopWhenUnneeded",
-    "RefuseManualStart", "RefuseManualStop", "AllowIsolate",
+    "WantsMountsFor", "Slice", "DefaultDependencies", "StopWhenUnneeded",
+    "RefuseManualStart", "RefuseManualStop",
     "IgnoreOnIsolate", "CollectMode", "SurviveFinalKillSignal",
     # Start, stop and restart policy, timeouts and signals.
     "Type", "ExitType", "Restart", "RestartMode", "RestartUSec",
@@ -603,17 +619,95 @@ proc ownedChainProblem(path: string): string =
     d = parentDir(d)
   ""
 
-proc environmentFileProblem*(path: string): string =
-  ## Why the manager may not read ``path`` as root for a floored service:
-  ## it does not exist, is not a regular file, or it or any directory on
-  ## the way to it is not root-owned or is writable by its group or
-  ## others. A symbolic link (the add-on materialises an /etc file as a
-  ## link into the read-only store) is judged twice: the link's own
-  ## directories, which could swap it, and the file it resolves to with its
-  ## directories. "" when it may (A9 review round 5, finding 1). An error
-  ## reading any of that refuses (default-deny).
+proc managerPathProblem*(path: string; uid: int; dynamic: bool): string =
+  ## Why the service manager may not create ``path`` (a ``*Directory=`` or
+  ## its link) for a unit running as ``uid`` (``dynamic``: a dynamic user),
+  ## as the host is now, or "": it does not exist yet, or it is the unit's
+  ## own -- owned by its static account, or, for a dynamic user, a dynamic
+  ## id's or the manager's link into ``private/`` (systemd.exec(5),
+  ## ``DynamicUser=``). An existing path of anyone else's -- ``/run/systemd``
+  ## for ``RuntimeDirectory=systemd`` -- would be chowned to the service by
+  ## the manager, as root (A9 review round 7, finding 2).
+  var st: Stat
+  if lstat(path.cstring, st) != 0: return ""
+  let owner = int(st.st_uid)
+  if not dynamic and uid > 0 and owner == uid: return ""
+  if dynamic:
+    if owner in 61184 .. 65519: return ""
+    if S_ISLNK(st.st_mode) and owner == 0:
+      try:
+        if expandSymlink(path).startsWith("private/"): return ""
+      except OSError: discard
+  "it exists and belongs to uid " & $owner & ", not to the unit's own " &
+    "account; the manager would hand it to the service"
+
+proc ownedStorePath*(path: string; owned: openArray[string]): bool =
+  ## ``path`` (normalised, no ``..``) lies inside one of the store objects
+  ## ``owned``, compared by path component: ``/repro/store`` itself, and a
+  ## store path in no owned object, are not.
+  for o in owned:
+    let r = normalisedPath(o)
+    if path == r or path.startsWith(r & "/"): return true
+
+proc withoutFloorBlock*(rendered: string): string =
+  ## A rendered unit file without the floor's own block (``FloorMarker`` to
+  ## the end of its ``[Service]`` section): the bytes the floor judged
+  ## before appending it.
+  var inBlock = false
+  var lines: seq[string]
+  for raw in rendered.split('\n'):
+    let l = raw.strip()
+    if l == FloorMarker:
+      inBlock = true
+      continue
+    if inBlock and l.startsWith("[") and l.endsWith("]"): inBlock = false
+    if not inBlock: lines.add(raw)
+  lines.join("\n")
+
+proc environmentFileProblem*(path: string; service = "";
+                             owned: openArray[string] = [];
+                             adopted = initTable[string, string]()): string =
+  ## Why the manager may not read ``path`` as root for a floored service's
+  ## ``EnvironmentFile=``, or "" (§13 decision 50; A9 review rounds 5-7).
+  ## The whole path is resolved, every link in it followed; the file it
+  ## resolves to must lie in one of the store objects ``owned`` (the
+  ## generation's own, with a recorded digest), or under the service's own
+  ## ``/run/repro/secrets/<service>/``. Anything else is refused whatever
+  ## its owner or mode: with neither given, every path is. The link (the
+  ## add-on materialises an /etc file as a link into the read-only store)
+  ## and its directories, and the file and its directories, must also be
+  ## root-owned and closed to group and others, so nothing could swap them.
+  ## An error reading any of that refuses (default-deny).
+  ##
+  ## *Amended by the owner, 2026-11-06* (decision 50, third case): a file
+  ## the generation adopts (``adopted``: path -> the sha256 the ledger
+  ## records for it) is accepted where it is: a regular file, not a link,
+  ## root-owned and closed to group and others under such directories,
+  ## whose current bytes are exactly the ones adopted. An operator's edit
+  ## since the adoption changes them, and the check refuses until the file
+  ## is adopted again.
   var st: Stat
   if lstat(path.cstring, st) != 0: return "it does not exist (or cannot be read)"
+  let np0 = normalisedPath(path)
+  if np0 in adopted:
+    if S_ISLNK(st.st_mode) or not S_ISREG(st.st_mode):
+      return "the adopted file is not a regular file"
+    if st.st_uid != 0: return "the adopted file is not owned by root"
+    if (st.st_mode.cint and 0o022) != 0:
+      return "the adopted file is writable by its group or others"
+    let chain = ownedChainProblem(path)
+    if chain.len > 0: return chain
+    when not mutated("adopted-files-unverified"):
+      var now = ""
+      try: now = sha256OfFile(path)
+      except IOError, OSError: return "the adopted file cannot be read"
+      if now != adopted[np0]:
+        return "the adopted file has changed since it was adopted (sha256 " &
+          "now " & now & ", the ledger records " & adopted[np0] & "): the " &
+          "manager would hand the service bytes no generation reviewed; " &
+          "review the file and adopt it again with `repro system adopt " &
+          "<its address> --profile <file>`"
+    return ""
   var target = path
   when mutated("environment-file-links-refused"):
     # Falsifying build: round 5's lstat, which refused the add-on's own
@@ -624,13 +718,25 @@ proc environmentFileProblem*(path: string): string =
       if st.st_uid != 0: return "the link is not owned by root"
       let why = ownedChainProblem(path)
       if why.len > 0: return why
-    try: target = expandFilename(path)
-    except OSError: return "the link cannot be resolved"
-    if stat(target.cstring, st) != 0: return "its target " & target & " cannot be read"
+  # Every link on the way, not only the last component.
+  try: target = expandFilename(path)
+  except OSError: return "the path cannot be resolved"
+  if stat(target.cstring, st) != 0: return "its target " & target & " cannot be read"
   if not S_ISREG(st.st_mode): return "it is not a regular file"
   if st.st_uid != 0: return "it is not owned by root"
   if (st.st_mode.cint and 0o022) != 0: return "it is writable by its group or others"
-  ownedChainProblem(target)
+  let chain = ownedChainProblem(target)
+  if chain.len > 0: return chain
+  when not mutated("environment-files-by-mode"):
+    let rt = normalisedPath(target)
+    if service.len > 0 and rt.startsWith(CredentialRoot & "/" & service & "/"):
+      return ""
+    if ownedStorePath(rt, owned): return ""
+    return "it resolves to " & rt & ", which is neither in a store object " &
+      "this generation owns nor under the service's own secrets directory" &
+      (if service.len > 0: " (" & CredentialRoot & "/" & service & "/)" else: "") &
+      "; the manager reads it as root and hands its contents to the service"
+  ""
 
 proc managerLimits*(): Table[string, string] =
   ## The service manager's ``DefaultLimit*`` (``systemctl show`` of the
@@ -641,12 +747,44 @@ proc managerLimits*(): Table[string, string] =
   for k, v in parseShow(r.output):
     if k.startsWith("DefaultLimit"): result[k] = v
 
+const
+  ActivatorDefaults* = [
+    ("Mark", @["-1"]), ("Transparent", @["no"]), ("BindToDevice", @[""]),
+    ("FreeBind", @["no"]), ("PassSecurity", @["no"]), ("ReusePort", @["no"]),
+    ("ReceiveBuffer", @["0"]), ("SendBuffer", @["0"]), ("TCPCongestion", @[""]),
+    ("SmackLabel", @[""]), ("SmackLabelIPIn", @[""]), ("SmackLabelIPOut", @[""]),
+    ("SELinuxContextFromNet", @["", "no"]), ("Symlinks", @[""]),
+    ("Writable", @["no"]), ("PipeSize", @["0"]),
+    ("MessageQueueMaxMessages", @["0"]), ("MessageQueueMessageSize", @["0"]),
+    ("PassFileDescriptorsToExec", @["", "no"]), ("WakeSystem", @["", "no"]),
+    ("MakeDirectory", @["", "no"]), ("AllowIsolate", @["", "no"]),
+    ("OnFailureJobMode", @["", "replace", "fail"]),
+    ("OnSuccessJobMode", @["", "replace", "fail"])]
+    ## The reported value each refused option of an activator must have:
+    ## its default, as ``systemctl show --all`` prints it on systemd 252,
+    ## 255, 257 and 259 for a unit that does not set it
+    ## (``tests/fixtures/systemd_properties/show-all-{socket,timer,path}-*``;
+    ## A9 review round 7, findings 3 and 5). The socket options that need a
+    ## capability (``Mark=``, ``Transparent=``, ``BindToDevice=``, the forced
+    ## buffers, ``TCPCongestion=``), that act on paths (``Symlinks=``,
+    ## ``MakeDirectory=``), that wake the host (``WakeSystem=``), and the job
+    ## modes and isolation (finding 4).
+
 proc activatorProblems*(unit: string; show: ShowProps; lines: ShowLines;
-                        fragment: string; ownDropIns: openArray[string]): seq[string] =
+                        fragment: string; ownDropIns: openArray[string];
+                        loaded: openArray[tuple[path, content: string]] = [];
+                        startsOf: proc (u: string): seq[string] = nil):
+                        seq[string] =
   ## A socket, timer or path unit that triggers a floored service, as
-  ## systemd reads it (A9 review round 5, finding 2): loaded from the
-  ## add-on's file with only its drop-ins, no command line, and -- for a
-  ## socket -- only stream, datagram and sequential-packet listeners.
+  ## systemd reads it (A9 review rounds 5 and 7): loaded from the add-on's
+  ## file with only its drop-ins; no command line; each listener a stream,
+  ## datagram or sequential-packet socket at an address the floor allows
+  ## (``listenerRefusal``); each refused option at its default
+  ## (``ActivatorDefaults``); ``Priority=`` 0-6; socket accounts not root; no
+  ## system-state unit reached by any route; and the parse-time rules
+  ## (``activatorRefusal``) applied again to the files it loaded. The other
+  ## properties a socket reports are its execution context, used only by
+  ## its command lines, which are refused here and in its files.
   template problem(s: string) = result.add(unit & ": " & s)
   if show.getOrDefault("FragmentPath") != fragment:
     problem("FragmentPath=" & show.getOrDefault("FragmentPath") &
@@ -662,6 +800,36 @@ proc activatorProblems*(unit: string; show: ShowProps; lines: ShowLines;
     let kind = if open >= 0: l[open + 1 .. ^1].strip(chars = {')', ' '}) else: ""
     if kind notin ["Stream", "Datagram", "SequentialPacket"]:
       problem("listener " & l & " is opened as root and handed to the service")
+      continue
+    when not mutated("activator-show-unjudged"):
+      let address = (if open >= 0: l[0 ..< open] else: l).strip()
+      let why = listenerRefusal(unit, address)
+      if why.len > 0: problem("listener " & l & ": " & why)
+  when not mutated("activator-show-unjudged"):
+    for (k, allowed) in ActivatorDefaults:
+      if k in show and show[k] notin allowed:
+        problem(k & "=" & show[k] & " is refused on a unit that activates " &
+                "a floored service (only " & allowed.join(" or ") & ")")
+    if "Priority" in show:
+      let n = (try: parseInt(show["Priority"]) except ValueError: 99)
+      if n != -1 and n notin 0 .. 6:
+        problem("Priority=" & show["Priority"] & " needs CAP_NET_ADMIN (0-6 only)")
+    for k in ["SocketUser", "SocketGroup"]:
+      if show.getOrDefault(k) in ["root", "0"]:
+        problem(k & "=" & show[k] & " (the floor allows only a non-root account)")
+    let route = systemStateRoute([unit], proc (u: string): seq[string] =
+      if u == unit:
+        for k in StartingDependencyKeys: result.add(words(show.getOrDefault(k)))
+        result.add(words(show.getOrDefault("Triggers")))
+      elif startsOf != nil:
+        result = startsOf(u))
+    if route.len > 0:
+      problem("starts " & route[^1] & " (" & route.join(" -> ") &
+              "), which changes the whole system's state")
+    for (path, content) in loaded:
+      let why = activatorRefusal(unit, content, dropIn = path != fragment,
+                                 half = fhEffective)
+      if why.len > 0: problem(path & ", by the floor's rules: " & why)
 
 type
   EffectiveInput* = object
@@ -698,6 +866,22 @@ type
       ## own settings must be there either way.
     limitCeilings*: Table[string, string]
       ## the manager's ``DefaultLimit<X>`` per ``Limit<X>`` (``managerLimits``)
+    storeObjects*: seq[string]
+      ## the store objects the generation owns and has a recorded digest
+      ## for (§13 decisions 46 and 48); when empty, the unit's own closure
+      ## (``referencedStoreObjects`` of its rendering)
+    ownFiles*: seq[string]
+      ## the ``fs.systemFile`` paths the generation installs (as links into
+      ## its store)
+    adoptedFiles*: Table[string, string]
+      ## the ``fs.systemFile`` paths the generation adopts (``collision =
+      ## adopt``), each with the sha256 its ledger records
+    startsOf*: proc (unit: string): seq[string]
+      ## what another unit starts, as systemd reports it (``nil``: only the
+      ## unit's own dependencies are followed)
+    inspectPath*: proc (path: string; uid: int; dynamic: bool): string
+      ## why the manager may not create ``path`` for the unit, as it is on
+      ## the host now (``managerPathProblem``)
 
 proc expectedCommands*(files: openArray[string]; key: string): seq[string] =
   ## The executables ``key`` runs when systemd reads ``files`` in order (a
@@ -723,6 +907,8 @@ proc effectiveFloorProblems*(e: EffectiveInput): seq[string] =
   let exceptions = e.exceptions
   let denied = e.denied
   let fb = floorBlock(rendered)
+  let owned = if e.storeObjects.len > 0: e.storeObjects
+              else: referencedStoreObjects(rendered)
   let ex = exceptionKeys(exceptions)
   let v = versionNumber(version)
   var ownDropIns: seq[string]
@@ -854,7 +1040,17 @@ proc effectiveFloorProblems*(e: EffectiveInput): seq[string] =
   # compared with the generation's own rendering, or is reviewed as inert.
   when not mutated("properties-not-default-denied"):
     for k, val in show:
-      if k in ComparedProps or k in LimitProps or k in FileJudgedProps or
+      if k in FileJudgedProps:
+        # Judged from the loaded files because systemd prints it as
+        # [unprintable] or not at all; a systemd that prints a value has not
+        # been reviewed (round 7: a printed Sockets= was accepted unjudged).
+        if val in ["", "[unprintable]"] or mutated("printed-file-settings-trusted"):
+          continue
+        problem("the property " & k & "=" & val & " is one the floor reads " &
+                "from the loaded files; this systemd prints it, which is " &
+                "not reviewed; refused")
+        continue
+      if k in ComparedProps or k in LimitProps or
           isExecProp(k) or isInertProp(k): continue
       problem("the property " & k & "=" & val & " is neither compared " &
               "with the floor nor reviewed as inert; refused")
@@ -927,6 +1123,33 @@ proc effectiveFloorProblems*(e: EffectiveInput): seq[string] =
         let link = if c >= 0: t[c + 1 .. ^1] else: ""
         if link.len > 0 and (link.startsWith("/") or hasDotDot(link)):
           problem(k & "Symlink=" & t & ": a link outside the directory root")
+        elif link.len > 0 and '/' in link and not mutated("manager-paths-unchecked"):
+          # Round 7, finding 2: a link of more than one name is created by
+          # the manager, as root, inside a tree other software reads.
+          problem(k & "Symlink=" & t & ": a directory's link is one name")
+    # The paths the manager creates for the unit, as root (A9 review round
+    # 7, finding 2): none in the add-on's own trees -- where its start hold
+    # and its decisions live -- and none that already exists and belongs to
+    # someone else, which the manager would hand over to the service.
+    when not mutated("manager-paths-unchecked"):
+      var created: seq[tuple[key, path: string]]
+      for (k, root) in DirectoryRoots:
+        for t in words(show.getOrDefault(k)):
+          created.add((k, normalisedPath(root & "/" & t.split(':')[0])))
+        for t in words(show.getOrDefault(k & "Symlink")):
+          let c = t.find(':')
+          if c >= 0 and t[c + 1 .. ^1].len > 0 and not t[c + 1 .. ^1].startsWith("/"):
+            created.add((k & "Symlink", normalisedPath(root & "/" & t[c + 1 .. ^1])))
+      let dynamic = show.getOrDefault("DynamicUser") == "yes"
+      let user = show.getOrDefault("User")
+      let uid = if user.len > 0 and e.uidOf != nil: e.uidOf(user) else: -1
+      for (k, p) in created:
+        if inAddOnTree(p):
+          problem(k & " creates " & p & ", in the add-on's own tree")
+          continue
+        let why = (if e.inspectPath != nil: e.inspectPath(p, uid, dynamic)
+                   else: managerPathProblem(p, uid, dynamic))
+        if why.len > 0: problem(k & " " & p & ": " & why)
     if show.getOrDefault("DeviceAllow").len > 0 and
         show.getOrDefault("PrivateDevices") != "yes":
       problem("DeviceAllow=" & show["DeviceAllow"] & " without PrivateDevices=yes")
@@ -970,9 +1193,20 @@ proc effectiveFloorProblems*(e: EffectiveInput): seq[string] =
         let parts = t.strip(leading = true, trailing = false,
                             chars = {'-', '+'}).split(':')
         if parts.len < 2: continue
+        # A source in a store object the generation owns, compared by path
+        # component after systemd's normalisation; a `..` is refused, since
+        # systemd resolves it on the file system, not lexically (round 7,
+        # finding 5).
+        if hasDotDot(parts[0]):
+          problem("BindReadOnlyPaths=" & t & ": a source with `..` is " &
+                  "resolved by systemd at run time; refused")
+          continue
         let src = normalisedPath(parts[0])
         let dst = normalisedPath(parts[1])
-        if src.startsWith("/repro/store/"): continue
+        when mutated("bind-sources-by-prefix"):
+          if src.startsWith("/repro/store/"): continue
+        else:
+          if ownedStorePath(src, owned): continue
         for x in execPaths:
           if dst == x or dst.startsWith(x & "/") or x.startsWith(dst & "/"):
             problem("BindReadOnlyPaths=" & t & " binds " & src &
@@ -990,11 +1224,19 @@ proc effectiveFloorProblems*(e: EffectiveInput): seq[string] =
       if t.anyIt(it in {'*', '?', '['}):
         problem("EnvironmentFile " & t & " is a wildcard the manager expands as root")
         continue
+      # Default-deny by its form (§13 decision 50): a store path, a file the
+      # generation installs, or the service's own secrets.
+      let form = environmentFileRefusal(unit, t, e.ownFiles)
+      if form.len > 0:
+        problem("EnvironmentFile " & t & ": " & form)
+        continue
       for w in places:
         if np == w or np.startsWith(w & "/"):
           problem("EnvironmentFile " & np & " lies in the writable place " & w)
+      # And by where it resolves, every link followed.
       let why = (if e.inspectFile != nil: e.inspectFile(np)
-                 else: environmentFileProblem(np))
+                 else: environmentFileProblem(np, credentialServiceOf(unit), owned,
+                                              e.adoptedFiles))
       if why.len > 0: problem("EnvironmentFile " & np & ": " & why)
     # Sockets= names only profile sockets (round 5, finding 2), read from
     # the loaded files: systemctl show never prints it (round 6, finding 4).
@@ -1006,11 +1248,26 @@ proc effectiveFloorProblems*(e: EffectiveInput): seq[string] =
       if show.getOrDefault("IOSchedulingClass") in ["1", "realtime"]:
         problem("IOSchedulingClass=" & show["IOSchedulingClass"] &
                 " is realtime, which RestrictRealtime=yes forbids")
+    # A system-state unit reached by any route (§13 decision 49; round 7,
+    # finding 4): the unit's own starting dependencies, then what each
+    # reached unit starts as systemd reports it (``startsOf``).
     when not mutated("state-targets-allowed"):
-      for k in StartingDependencyKeys:
-        for t in words(show.getOrDefault(k)):
-          if t in SystemStateTargets:
-            problem(k & "=" & t & " changes the whole system's state")
+      let starts = e.startsOf
+      let route = systemStateRoute([unit], proc (u: string): seq[string] =
+        if u == unit:
+          for k in StartingDependencyKeys: result.add(words(show.getOrDefault(k)))
+        elif starts != nil:
+          result = starts(u))
+      if route.len > 0:
+        problem("starts " & route[^1] & " (" & route.join(" -> ") &
+                "), which changes the whole system's state")
+    for k in ["OnFailureJobMode", "OnSuccessJobMode"]:
+      if show.getOrDefault(k) notin ["", "replace", "fail"]:
+        problem(k & "=" & show[k] & " changes the system's state beyond " &
+                "the unit (only replace or fail)")
+    if show.getOrDefault("AllowIsolate") notin ["", "no"]:
+      problem("AllowIsolate=" & show["AllowIsolate"] & " lets a job stop " &
+              "every unit the target does not want")
     for k in ["FailureAction", "SuccessAction", "StartLimitAction",
               "JobTimeoutAction"]:
       if show.getOrDefault(k) notin ["", "none"]:
@@ -1034,6 +1291,37 @@ proc effectiveFloorProblems*(e: EffectiveInput): seq[string] =
         if not floorKnowsKey(d.section, d.key, dropIn):
           problem(path & " sets " & d.key & "=, which the floor does not " &
                   "know (it is refused as systemd would not report it)")
+  # Every rule of the parse-time half, applied again to the files systemd
+  # loaded (A9 review round 7, finding 5): the effective-unit check is the
+  # authority, so a rule enforced only at parse time is enforced here too,
+  # on the same functions (``service_floor``, ``fhEffective``). The
+  # fragment is judged without the floor's own block, exactly as the floor
+  # judged the unit before appending it; each drop-in as a drop-in.
+  if v >= 4:
+    when not mutated("effective-skips-parse-rules"):
+      var exParsed: seq[FloorException]
+      try: exParsed = parseFloorExceptions(unit, exceptions)
+      except EServiceFloor as x: problem(x.msg)
+      var own = ""
+      for (path, content) in e.loaded:
+        if path == e.fragment or (e.fragment.len == 0 and own.len == 0):
+          own = withoutFloorBlock(content)
+      if own.len > 0:
+        try:
+          for why in [allowlistRefusal(unit, own, exParsed, dropIn = false,
+                                       half = fhEffective),
+                      floorRefusal(unit, serviceDirectives(own), exParsed,
+                                   floorExecPaths(unit, own, exParsed),
+                                   dropIn = false, half = fhEffective)]:
+            if why.len > 0: problem("by the floor's rules: " & why)
+        except EServiceFloor as x: problem("by the floor's rules: " & x.msg)
+        for (path, content) in e.loaded:
+          if path == e.fragment or path.endsWith("/" & StartHoldName): continue
+          try:
+            let why = dropInFloorRefusal(unit, own, content, exParsed,
+                                         half = fhEffective)
+            if why.len > 0: problem(path & ", by the floor's rules: " & why)
+          except EServiceFloor as x: problem(path & ": " & x.msg)
 
 # ---------------------------------------------------------------------------
 # The deny line, expanded with the base's own systemd.

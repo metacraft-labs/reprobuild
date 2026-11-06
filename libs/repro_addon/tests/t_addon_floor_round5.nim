@@ -114,31 +114,44 @@ suite "round 5, finding 1: EnvironmentFile= is read by the manager as root":
   test "parse time: no wildcard, nowhere a service or a user can write":
     check "wildcard" in refused(unitStanza("a.service",
       "EnvironmentFile=/etc/*/a.env\n" & svc))
-    check "own writable place" in refused(unitStanza("a.service",
+    # Since §13 decision 50 (round 7) every one of these is refused by the
+    # default-deny rule before the round-5 rules are reached.
+    const deny = "is neither in the add-on's store"
+    check deny in refused(unitStanza("a.service",
       "StateDirectory=a\nEnvironmentFile=-/var/lib/a/env\n" & svc))
-    check "lies under /tmp" in refused(unitStanza("a.service",
+    check deny in refused(unitStanza("a.service",
       "EnvironmentFile=/tmp/a.env\n" & svc))
-    check "b.service's writable place" in refused(unitStanza("a.service",
+    check deny in refused(unitStanza("a.service",
       "EnvironmentFile=/var/lib/b/env\n" & svc) &
       unitStanza("b.service", "User=a\nStateDirectory=b\nExecStart=" & Prefix &
                  "/bin/svc\n"))
-    check refused(unitStanza("a.service", "EnvironmentFile=/etc/a/env\n" & svc)) == ""
+    check deny in refused(unitStanza("a.service", "EnvironmentFile=/etc/a/env\n" & svc))
+    # A file the profile installs (a link into the store) is accepted.
+    check refused("fs.systemFile {\n  path = \"/etc/a/env\"\n  content = \"A=1\"\n}\n" &
+      unitStanza("a.service", "EnvironmentFile=/etc/a/env\n" & svc)) == ""
 
   test "the effective check: wildcard, writable places, the file itself":
     var e = goodInput()
     e.show["EnvironmentFiles"] = "/etc/*/a.env (ignore_errors=no)"
     check "wildcard" in problemsOf(e)
+    # Since §13 decision 50 (round 7): refused by the default-deny form
+    # rule before the round-5 writable-place rule.
     e = goodInput()
     e.show["StateDirectory"] = "a"
     e.show["EnvironmentFiles"] = "/var/lib/a/env (ignore_errors=yes)"
-    check "lies in the writable place /var/lib/a" in problemsOf(e)
+    check "is neither in the add-on's store" in problemsOf(e)
     e = goodInput()
     e.otherWritable = @["/var/lib/b"]
     e.show["EnvironmentFiles"] = "/var/lib/b/env (ignore_errors=no)"
-    check "lies in the writable place /var/lib/b" in problemsOf(e)
+    check "is neither in the add-on's store" in problemsOf(e)
+    # A store path in another floored unit's writable place is still caught.
+    e = goodInput()
+    e.otherWritable = @["/repro/store/prefixes/x"]
+    e.show["EnvironmentFiles"] = "/repro/store/prefixes/x/1/env (ignore_errors=no)"
+    check "lies in the writable place /repro/store/prefixes/x" in problemsOf(e)
     e = goodInput()
     e.inspectFile = nil         # the real check
-    e.show["EnvironmentFiles"] = "/nonexistent/a9r5.env (ignore_errors=yes)"
+    e.show["EnvironmentFiles"] = "/run/repro/secrets/a/a9r5.env (ignore_errors=yes)"
     check "it does not exist" in problemsOf(e)
 
   test "the real file check: root-owned, under root-owned parents":
@@ -151,8 +164,12 @@ suite "round 5, finding 1: EnvironmentFile= is read by the manager as root":
     check environmentFileProblem(dir / "e").len > 0
     # A root-owned file under root-owned, non-writable parents (/etc and /
     # on any build host).
+    # Since §13 decision 50 (round 7) only where it resolves decides, owner
+    # and mode aside: refused with no owned object, accepted inside one
+    # (the owner checks still pass on /etc and / on any build host).
     if fileExists("/etc/passwd"):
-      check environmentFileProblem("/etc/passwd") == ""
+      check "neither in a store object" in environmentFileProblem("/etc/passwd")
+      check environmentFileProblem("/etc/passwd", "", ["/etc"]) == ""
     # A link the user owns, in a directory the user owns: refused before
     # its target is even looked at.
     createSymlink("/etc/passwd", dir / "l")

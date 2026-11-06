@@ -822,6 +822,34 @@ const
                           "activator-options-unchecked",
                           "environment-file-links-unchecked",
                           "environment-file-links-refused",
+                          # A9 review round 7: the start hold a unit can
+                          # satisfy; manager-created paths in the add-on's
+                          # trees; a unix listener anywhere under /run;
+                          # round 5's socket key list; the round-6
+                          # direct-only state rule; EnvironmentFile= by
+                          # owner and mode; a bind source by string prefix;
+                          # the effective half without the parse-time rules;
+                          # the profile's own memberships ignored; an
+                          # activator's reported properties unjudged; a
+                          # printed file-judged setting trusted.
+                          "hold-path-creatable",
+                          "manager-paths-unchecked",
+                          "listeners-anywhere-under-run",
+                          "socket-options-by-list",
+                          "state-routes-direct-only",
+                          "environment-files-by-mode",
+                          "bind-sources-by-prefix",
+                          "effective-skips-parse-rules",
+                          "profile-memberships-ignored",
+                          "activator-show-unjudged",
+                          "printed-file-settings-trusted",
+                          # §13 decision 50 (amended): an adopted
+                          # EnvironmentFile= accepted whatever its bytes.
+                          "adopted-files-unverified",
+                          # spec §4.3: an owned file that drifted cannot be
+                          # adopted again (the row before decision 50's
+                          # amendment).
+                          "owned-drift-not-adoptable",
                           # A13: a state backup or restore runs while a
                           # unit of the set may run.
                           "state-units-not-checked",

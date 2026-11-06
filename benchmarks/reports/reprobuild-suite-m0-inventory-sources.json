@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 34,
-    "nimTestBinaries": 2679,
+    "nimTestBinaries": 2680,
     "pureUnitConsolidationGroups": 80,
     "pureUnitTests": 740,
     "staticallyDetectedRuntimeCompilerFlowTests": 137,
-    "testEntries": 2719
+    "testEntries": 2720
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1574,7 +1574,7 @@
     "classificationCounts": {
       "graph-fixture": 19,
       "integration": 1483,
-      "platform/destructive": 171,
+      "platform/destructive": 172,
       "pure unit": 740,
       "unclassified": 306
     },
@@ -1784,9 +1784,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2679,
+    "nimTestBinaryCount": 2680,
     "pythonTestFileCount": 40,
-    "testEntryCount": 2719
+    "testEntryCount": 2720
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -8535,7 +8535,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_addon/tests/t_addon_collision.nim",
       "sourceSuiteCount": 5,
-      "staticCaseCount": 35,
+      "staticCaseCount": 36,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -8895,6 +8895,24 @@
       "source": "libs/repro_addon/tests/t_addon_floor_round6.nim",
       "sourceSuiteCount": 7,
       "staticCaseCount": 23,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_addon_floor_round7",
+      "class": "platform/destructive",
+      "classificationReason": "platform path, target OS, VM, privileged, or host mutation signal",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_addon",
+        "repro_infra"
+      ],
+      "owner": "libs/repro_addon",
+      "requiresReproBinary": false,
+      "source": "libs/repro_addon/tests/t_addon_floor_round7.nim",
+      "sourceSuiteCount": 8,
+      "staticCaseCount": 29,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

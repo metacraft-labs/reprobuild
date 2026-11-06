@@ -34,7 +34,7 @@ libs/repro_addon/tests/t_addon_agent_split.nim	nim	25
 libs/repro_addon/tests/t_addon_agent_staging_copy_streams.nim	nim	4
 libs/repro_addon/tests/t_addon_apt_hook_and_base_identity.nim	nim	21
 libs/repro_addon/tests/t_addon_carried_state_fails_closed.nim	nim	36
-libs/repro_addon/tests/t_addon_collision.nim	nim	35
+libs/repro_addon/tests/t_addon_collision.nim	nim	36
 libs/repro_addon/tests/t_addon_crash_recovery_records.nim	nim	25
 libs/repro_addon/tests/t_addon_cross_prefix_needs_the_sysroot_glibc.nim	nim	5
 libs/repro_addon/tests/t_addon_drill_findings.nim	nim	7
@@ -55,6 +55,7 @@ libs/repro_addon/tests/t_addon_floor_round3.nim	nim	16
 libs/repro_addon/tests/t_addon_floor_round4.nim	nim	16
 libs/repro_addon/tests/t_addon_floor_round5.nim	nim	15
 libs/repro_addon/tests/t_addon_floor_round6.nim	nim	23
+libs/repro_addon/tests/t_addon_floor_round7.nim	nim	29
 libs/repro_addon/tests/t_addon_generation_attestation.nim	nim	6
 libs/repro_addon/tests/t_addon_host_lock_guards_the_switch_and_the_store.nim	nim	8
 libs/repro_addon/tests/t_addon_import_skeleton.nim	nim	9

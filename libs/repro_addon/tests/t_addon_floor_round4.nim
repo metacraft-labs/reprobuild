@@ -167,7 +167,8 @@ suite "round 4: the effective-unit check is the authority":
       check (k & "=" & v & " opens a file or terminal") in problemsOf(e)
     e = goodInput()
     e.show["EnvironmentFiles"] = "/etc/shadow (ignore_errors=no)"
-    check "EnvironmentFile /etc/shadow: it is not readable by every user" in problemsOf(e)
+    # Superseded by §13 decision 50 (round 7): default-deny, not readability.
+    check "EnvironmentFile /etc/shadow: /etc/shadow is neither in the add-on's store" in problemsOf(e)
     # LoadCredential= is [unprintable] in systemctl show: judged from the
     # files systemd loaded (round 6).
     e = goodInput()

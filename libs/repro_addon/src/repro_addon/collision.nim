@@ -608,6 +608,16 @@ proc decideFile(d: CollisionDriver; o: TargetObservation;
       result.acceptedOutOfBand = true
       result.reason = AcceptedOutOfBandReason
       return
+    if inp.adopt and not mutated("owned-drift-not-adoptable"):
+      # Owned, changed out of band, and named by `repro system adopt`
+      # (§13 decision 50, amended 2026-11-06 by the owner; spec §4.3): the
+      # operator keeps the edit. Nothing is written; the current bytes
+      # become the ledger's, which records their digest.
+      result.verdict = cvAdopt
+      result.preWriteBytes = readFile(o.path)
+      result.reason = "owned by the ledger, changed out of band, claimed " &
+        "again by `repro system adopt`: its current bytes become the ledger's"
+      return
     if inp.reconcileDrift:
       result.verdict = cvReconcile
       result.preWriteBytes = readFile(o.path)
@@ -626,8 +636,10 @@ proc decideFile(d: CollisionDriver; o: TargetObservation;
       " (" & inp.address & ") is owned by the ledger but its content " &
       "changed out of band" & byPackage & " (sha256 " & o.sha256[0 ..< 12] & ", ledger " &
       inp.ledgerSha256[0 ..< min(12, inp.ledgerSha256.len)] & "); " &
-      "review it, then re-run with --reconcile-drift to replace it " &
-      "(the current bytes are kept in the ledger)")
+      "review it, then either keep the edit with `repro system adopt " &
+      inp.address & " --profile <file>` (the ledger records the current " &
+      "bytes) or re-run with --reconcile-drift to replace it with the " &
+      "profile's (the current bytes are kept in the ledger)")
   # Package-owned rows.
   if o.ownership.package.len > 0:
     let optIn = inp.collision == "divert" or inp.divertedByProfile

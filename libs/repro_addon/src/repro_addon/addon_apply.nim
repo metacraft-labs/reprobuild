@@ -74,6 +74,7 @@ import repro_infra
 import repro_infra/addon_diagnostics
 import repro_infra/planner
 from repro_infra/service_floor import floorWritablePlaces, serviceDirectives,
+  StartingDependencyKeys, BaseReachKeys, normalisedPath,
   PrivilegedGroups
 from repro_profile import ProfileBuildAction
 import repro_local_store/store
@@ -609,6 +610,24 @@ proc floorAccountRefusal*(p: SystemProfile; r: SystemResource): string =
     if n in PrivilegedGroups and not (n == a.group and a.dynamicGroup):
       return "the service runs in the privileged group " & n & "; a " &
         "floored unit may not (only \"serviceFloor: <why>\" allows it)"
+  # The memberships the profile itself gives the account (A9 review round
+  # 7, finding 6): `passwd.user` `groups` and `passwd.group` `members`.
+  # The resolver knows their gids only for groups the profile creates, so
+  # they are judged by name here; the effective half judges them by gid.
+  when not mutated("profile-memberships-ignored"):
+    if not a.dynamicUser:
+      for o in p.resources:
+        var g = ""
+        if o.kind == srkPasswdUser and o.puName == a.user:
+          for gn in o.puGroups:
+            if gn in PrivilegedGroups or gn == "root": g = gn
+        elif o.kind == srkPasswdGroup and a.user in o.pgMembers and
+            (o.pgName in PrivilegedGroups or o.pgName == "root"):
+          g = o.pgName
+        if g.len > 0:
+          return "the profile puts the service's account " & a.user &
+            " in the privileged group " & g & " (" & o.address & "); a " &
+            "floored unit may not (only \"serviceFloor: <why>\" allows it)"
   ""
 
 proc parseAddOnUserProfile*(text: string): SystemProfile =
@@ -1419,7 +1438,32 @@ proc foreignDropInsFor*(units: openArray[string]; own: HashSet[string];
         if f.endsWith(".conf") and f notin own:
           result.add(f)
 
-proc effectiveFloorCheck*(resources: openArray[SystemResource]): seq[string] =
+proc unitStartsReported*(unit: string; own: HashSet[string];
+                         cache: var Table[string, seq[string]]): seq[string] =
+  ## What starting ``unit`` starts, as systemd reports it: for a unit of the
+  ## generation (``own``, a template's instances included) every starting
+  ## dependency and what it triggers; for a unit the base defines what it
+  ## pulls in (``BaseReachKeys``), not its own ``OnFailure=`` (A9 review
+  ## round 7, finding 4). Cached per check. A unit systemd cannot show
+  ## starts nothing it could report.
+  if unit in cache: return cache[unit]
+  let mine = declaredByProfile(unit, own)
+  var keys = if mine: @StartingDependencyKeys & @["Triggers"] else: @BaseReachKeys
+  try:
+    let r = runSystemctl(@["show", "--no-pager", "-p", keys.join(","), "--", unit])
+    if r.exitCode == 0:
+      for k, v in parseShow(r.output):
+        for t in v.splitWhitespace(): result.add(t)
+  except CatchableError:
+    discard
+  cache[unit] = result
+
+proc effectiveFloorCheck*(resources: openArray[SystemResource];
+                          owned: seq[string] = @[];
+                          adopted = initTable[string, string]()): seq[string] =
+  ## ``owned``: the store objects the generation owns with a recorded
+  ## digest; an ``EnvironmentFile=`` or a read-only bind source must lie in
+  ## one (A9 review round 7, findings 1 and 5).
   ## Every floored unit of the generation as systemd now reads it, against
   ## the floor it is rendered under (``effective_floor``; spec §10.1, A9
   ## review rounds 3 and 4): one problem line per difference. For a
@@ -1437,6 +1481,12 @@ proc effectiveFloorCheck*(resources: openArray[SystemResource]): seq[string] =
   var ownUnits = initHashSet[string]()
   for d in resources:
     if d.kind == srkSystemdSystemUnit: ownUnits.incl(d.suName)
+  var ownFiles: seq[string]
+  for d in resources:
+    if d.kind == srkFsSystemFile: ownFiles.add(d.sfPath)
+  var startsCache = initTable[string, seq[string]]()
+  let startsOf = proc (u: string): seq[string] =
+    unitStartsReported(u, ownUnits, startsCache)
   var limits = initTable[string, string]()
   if flooredUnitNames(resources).len > 0:
     try: limits = managerLimits()
@@ -1469,7 +1519,8 @@ proc effectiveFloorCheck*(resources: openArray[SystemResource]): seq[string] =
         version: r.suFloorVersion, exceptions: r.suFloorExceptions,
         fragment: unitPath(r.suName), denied: denied, uidOf: systemUid,
         groupsOf: systemGroups, gidOf: systemGid, ownUnits: ownUnits,
-        limitCeilings: limits)
+        limitCeilings: limits, storeObjects: owned, ownFiles: ownFiles,
+        adoptedFiles: adopted, startsOf: startsOf)
       for o in resources:
         if o.kind == srkSystemdSystemUnit and o.suName != r.suName and
             effectiveFloor(o).len > 0 and o.suCollision != "dropIn":
@@ -1503,8 +1554,16 @@ proc effectiveFloorCheck*(resources: openArray[SystemResource]): seq[string] =
               aown.add(targetPathOf(d))
           try:
             let at = showUnitText(a)
-            result.add(activatorProblems(a, parseShow(at), parseShowLines(at),
-                                         unitPath(a), aown))
+            let ash = parseShow(at)
+            var aloaded: seq[tuple[path, content: string]]
+            for f in @[ash.getOrDefault("FragmentPath")] &
+                     ash.getOrDefault("DropInPaths").splitWhitespace():
+              if f.len == 0: continue
+              try: aloaded.add((path: f, content: readFile(f)))
+              except IOError, OSError:
+                result.add(a & ": cannot read " & f & ", which systemd loaded")
+            result.add(activatorProblems(a, ash, parseShowLines(at),
+                                         unitPath(a), aown, aloaded, startsOf))
           except CatchableError as ex:
             result.add(a & ": " & ex.msg)
 
@@ -5151,7 +5210,29 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
       when not mutated("effective-check-skipped") and
           not mutated("floor-unchecked"):
         if not opts.recordOnly and clean and problems.len == 0:
-          let notHeld = effectiveFloorCheck(composed.resources)
+          var ownedObjects: seq[string]
+          block:
+            let expected = expectedDigests(custody)
+            for o in custodyObjects:
+              if expected.getOrDefault(o.path, "").len > 0:
+                ownedObjects.add(o.path)
+          # The files the generation adopts, with the digest its ledger
+          # records (§13 decision 50, amended): this switch's adoption
+          # (the preserved copy is named by its sha256), or the previous
+          # generation's ledger entry for an object it already owns.
+          var adoptedFiles = initTable[string, string]()
+          for p in plans:
+            if p.r.kind != srkFsSystemFile or p.r.sfCollision != "adopt": continue
+            var digest = ""
+            if p.collision == "adopt" and p.preserved.len > 0:
+              digest = extractFilename(p.preserved)
+            else:
+              for e in previous.entries:
+                if e.class == lcEtcFile and e.path == p.targetPath: digest = e.sha256
+            if digest.len == 64:
+              adoptedFiles[normalisedPath(p.targetPath)] = digest
+          let notHeld = effectiveFloorCheck(composed.resources, ownedObjects,
+                                            adoptedFiles)
           if notHeld.len > 0:
             problems.add($adFloorNotEffective & ": " & notHeld.join("; ") &
               "; nothing was started")
