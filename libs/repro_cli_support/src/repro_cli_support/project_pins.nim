@@ -205,6 +205,11 @@ proc publishPinnedProviderNim*(nimExe: string) =
   ## recipe, and an ambient variable that silently outranked it would be the
   ## "whatever compiler the invocation finds" the pin replaces. Overriding a
   ## DIFFERENT explicit value is said out loud, once.
+  ##
+  ## An inherited ``REPRO_INSTALLED_PREFIX_NIM`` is cleared: it says the
+  ## provider compiler is the installed prefix's Nim, and with the pin
+  ## published it is not, so a later ``uses: nim`` check would judge the
+  ## recipe against the wrong release (N3: "A project pin still wins").
   let existing = getEnv(NimCompilerEnvVar)
   if existing.len > 0 and existing != nimExe:
     try:
@@ -217,6 +222,7 @@ proc publishPinnedProviderNim*(nimExe: string) =
         existing & " is overridden by the project's pinned provider " &
         "compiler " & nimExe)
   putEnv(NimCompilerEnvVar, nimExe)
+  delEnv(InstalledPrefixNimEnvVar)
 
 proc exemptFromPins(args: openArray[string]): bool =
   ## Verbs the bootstrap answers for ITSELF, in any project:

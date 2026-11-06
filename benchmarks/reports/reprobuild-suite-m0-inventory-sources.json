@@ -2,8 +2,8 @@
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 34,
     "nimTestBinaries": 2683,
-    "pureUnitConsolidationGroups": 80,
-    "pureUnitTests": 741,
+    "pureUnitConsolidationGroups": 79,
+    "pureUnitTests": 740,
     "staticallyDetectedRuntimeCompilerFlowTests": 137,
     "testEntries": 2723
   },
@@ -667,19 +667,6 @@
       "sources": [
         "libs/repro_profile_compile/tests/t_compiled_profile_keeps_secrets_and_credentials.nim",
         "libs/repro_profile_compile/tests/t_system_unit_state_directories.nim"
-      ],
-      "targetOs": "soAny"
-    },
-    {
-      "count": 2,
-      "defines": [],
-      "dependencyShape": [
-        "repro_profile_compile"
-      ],
-      "owner": "libs/repro_profile_compile",
-      "sources": [
-        "libs/repro_profile_compile/tests/t_profile_compile_relative_dirs_are_anchored.nim",
-        "libs/repro_profile_compile/tests/t_profile_compile_uses_the_installed_nim.nim"
       ],
       "targetOs": "soAny"
     },
@@ -1576,8 +1563,8 @@
       "graph-fixture": 19,
       "integration": 1483,
       "platform/destructive": 173,
-      "pure unit": 741,
-      "unclassified": 307
+      "pure unit": 740,
+      "unclassified": 308
     },
     "graphOwnedTestArtifacts": [
       {
@@ -12980,13 +12967,15 @@
       "localDependencyShape": [
         "repro_cli_support",
         "repro_core",
+        "repro_interface_artifacts",
+        "repro_test_support",
         "repro_tool_profiles"
       ],
       "owner": "libs/repro_cli_support",
       "requiresReproBinary": true,
       "source": "libs/repro_cli_support/tests/t_installed_prefix_nim_pin_wins.nim",
-      "sourceSuiteCount": 1,
-      "staticCaseCount": 1,
+      "sourceSuiteCount": 2,
+      "staticCaseCount": 3,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -20848,8 +20837,8 @@
     },
     {
       "binary": "build/test-bin/t_profile_compile_uses_the_installed_nim",
-      "class": "pure unit",
-      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "class": "unclassified",
+      "classificationReason": "mutates the process environment",
       "defines": [],
       "language": "nim",
       "localDependencyShape": [
@@ -20858,8 +20847,8 @@
       "owner": "libs/repro_profile_compile",
       "requiresReproBinary": false,
       "source": "libs/repro_profile_compile/tests/t_profile_compile_uses_the_installed_nim.nim",
-      "sourceSuiteCount": 1,
-      "staticCaseCount": 4,
+      "sourceSuiteCount": 2,
+      "staticCaseCount": 6,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -25459,13 +25448,14 @@
       "localDependencyShape": [
         "repro_core",
         "repro_interface_artifacts",
+        "repro_test_support",
         "repro_tool_profiles"
       ],
       "owner": "libs/repro_tool_profiles",
       "requiresReproBinary": true,
       "source": "libs/repro_tool_profiles/tests/t_installed_prefix_nim_route.nim",
       "sourceSuiteCount": 2,
-      "staticCaseCount": 10,
+      "staticCaseCount": 12,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

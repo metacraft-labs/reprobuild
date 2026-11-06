@@ -11128,24 +11128,24 @@ proc ensureLockPinnedCatalog*(modulePath, consumerRoot: string): string =
     discard
   return ""
 
-proc extractInterfaceEdge(modulePath, artifactPath, stubPath: string;
-                          workDir, scratchDir, consumerRoot, publicCliPath,
-                          cacheRoot: string;
-                          stats: var BuildStats;
-                          requireStub = true;
-                          resourceModule = "";
-                          extraPaths: openArray[string] = [];
-                          bypassRunQuota = false;
-                          fallbackToRunQuotaBypass = false;
-                          forceRebuild = false;
-                          suppressTrace = true;
-                          skipCacheHitEvidence = true;
-                          statsEnabled = false;
-                          validateExistingOnly = false;
-                          providerCompilerCommand: seq[string] = @[];
-                          cancelCheck: BuildCancelCallback = nil;
-                          observeRunResult: proc(r: BuildRunResult) {.closure.}
-                            = nil):
+proc extractInterfaceEdgeUnchecked(modulePath, artifactPath, stubPath: string;
+                                   workDir, scratchDir, consumerRoot,
+                                   publicCliPath, cacheRoot: string;
+                                   stats: var BuildStats;
+                                   requireStub = true;
+                                   resourceModule = "";
+                                   extraPaths: openArray[string] = [];
+                                   bypassRunQuota = false;
+                                   fallbackToRunQuotaBypass = false;
+                                   forceRebuild = false;
+                                   suppressTrace = true;
+                                   skipCacheHitEvidence = true;
+                                   statsEnabled = false;
+                                   validateExistingOnly = false;
+                                   providerCompilerCommand: seq[string] = @[];
+                                   cancelCheck: BuildCancelCallback = nil;
+                                   observeRunResult:
+                                     proc(r: BuildRunResult) {.closure.} = nil):
     ProjectInterfaceArtifact =
   ## Materialize a project interface through the build engine.
   ##
@@ -11566,6 +11566,43 @@ proc extractInterfaceEdge(modulePath, artifactPath, stubPath: string;
     releaseInterfaceArtifactLock(artifactLock)
     if relocatable:
       releaseInterfaceArtifactLock(edgeLock)
+
+proc extractInterfaceEdge(modulePath, artifactPath, stubPath: string;
+                          workDir, scratchDir, consumerRoot, publicCliPath,
+                          cacheRoot: string;
+                          stats: var BuildStats;
+                          requireStub = true;
+                          resourceModule = "";
+                          extraPaths: openArray[string] = [];
+                          bypassRunQuota = false;
+                          fallbackToRunQuotaBypass = false;
+                          forceRebuild = false;
+                          suppressTrace = true;
+                          skipCacheHitEvidence = true;
+                          statsEnabled = false;
+                          validateExistingOnly = false;
+                          providerCompilerCommand: seq[string] = @[];
+                          cancelCheck: BuildCancelCallback = nil;
+                          observeRunResult: proc(r: BuildRunResult) {.closure.}
+                            = nil):
+    ProjectInterfaceArtifact =
+  ## ``extractInterfaceEdgeUnchecked``, then N3's check of the recipe's own
+  ## ``uses: nim`` range against the installed prefix's compiler
+  ## (Distribution-And-Packaging §5.3, amendment N3:
+  ## ``requireProjectNimAdmitsInstalledPrefixNim``). The interface is the
+  ## first moment the range can be read, and every recipe this engine reads
+  ## an interface of -- the project's own, a sibling source recipe, a
+  ## cross-repo producer, a durable solver provider -- is one whose provider
+  ## it may then compile. Checking here rather than after each call is what
+  ## keeps a new call site from being the one that forgets (A15 round-3
+  ## verification, 2026-11-06, found four).
+  result = extractInterfaceEdgeUnchecked(modulePath, artifactPath, stubPath,
+    workDir, scratchDir, consumerRoot, publicCliPath, cacheRoot, stats,
+    requireStub, resourceModule, extraPaths, bypassRunQuota,
+    fallbackToRunQuotaBypass, forceRebuild, suppressTrace,
+    skipCacheHitEvidence, statsEnabled, validateExistingOnly,
+    providerCompilerCommand, cancelCheck, observeRunResult)
+  requireProjectNimAdmitsInstalledPrefixNim(result.projectInterface.toolUses)
 
 proc cacheAttributionLines*(item: ActionResult): seq[string] =
   ## The follow-on lines a `--log=actions` entry needs before a PERMANENT
@@ -12706,10 +12743,6 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
     observeRunResult = proc(r: BuildRunResult) =
       warnRunQuotaBypassIfUsed(r, enabled = interfaceEdgeRunQuotaBypass,
         scope = "the project-interface extraction edge"))
-  # N3 (Distribution-And-Packaging §5.3): the recipe's own `uses: nim`
-  # range must admit the installed prefix's compiler, before the provider
-  # compile.
-  requireProjectNimAdmitsInstalledPrefixNim(artifact.projectInterface.toolUses)
   finishStat(buildStats, statsEnabled, "repro interface extract",
     interfaceStart)
   recordInterfaceArtifactWarmStats(buildStats, statsEnabled)
@@ -31249,10 +31282,6 @@ proc prepareBuildGraphInspection(target: string; mode: ToolProvisioningMode;
       effectiveProviderCompileRunQuotaBypass(bypassRunQuotaExplicit),
     fallbackToRunQuotaBypass =
       mode in {tpmPathOnly, tpmScoop, tpmUnspecified})
-  # N3 (Distribution-And-Packaging §5.3): the recipe's own `uses: nim`
-  # range must admit the installed prefix's compiler, before the provider
-  # compile.
-  requireProjectNimAdmitsInstalledPrefixNim(artifact.projectInterface.toolUses)
   result.interfacePath = interfacePath
 
   var effectiveMode = mode
@@ -31543,13 +31572,6 @@ proc refreshRecipeProviderSnapshot(target: string;
     fallbackToRunQuotaBypass =
       mode in {tpmPathOnly, tpmScoop, tpmUnspecified})
 
-  # N3 (Distribution-And-Packaging §5.3): the recipe's own `uses: nim`
-
-  # range must admit the installed prefix's compiler, before the provider
-
-  # compile.
-
-  requireProjectNimAdmitsInstalledPrefixNim(artifact.projectInterface.toolUses)
   var effectiveMode = mode
   if effectiveMode == tpmUnspecified and
       artifact.projectInterface.defaultToolProvisioning.len > 0:
@@ -39118,13 +39140,6 @@ proc runDevelopCommand*(args: openArray[string]): int =
     compileWorkDir, compileScratchDir, projectRootForModule(modulePath),
     stablePublicCliPath(), outDir / "build-engine-cache", developStats)
 
-  # N3 (Distribution-And-Packaging §5.3): the recipe's own `uses: nim`
-
-  # range must admit the installed prefix's compiler, before the provider
-
-  # compile.
-
-  requireProjectNimAdmitsInstalledPrefixNim(artifact.projectInterface.toolUses)
   var effectiveMode = mode
   if effectiveMode == tpmUnspecified and
       artifact.projectInterface.defaultToolProvisioning.len > 0:
@@ -90232,10 +90247,6 @@ proc solverInputsFromCompiledProvider(projectDir: string;
           compileWorkDir, scratchDir, projectRootForModule(modulePath),
           publicCliPath, cacheRoot, compileStats, requireStub = false,
           bypassRunQuota = runQuotaBypassedByEnv())
-    # N3 (Distribution-And-Packaging §5.3): the recipe's own `uses: nim`
-    # range must admit the installed prefix's compiler, before the provider
-    # compile.
-    requireProjectNimAdmitsInstalledPrefixNim(artifact.projectInterface.toolUses)
     # Only recipes with solver-bound ``uses:`` produce a non-trivial solve;
     # skip the (more expensive) provider compile otherwise so a plain recipe
     # falls straight back to the sidecar without paying for it.
