@@ -142,10 +142,78 @@ proc findLockedCatalogRevision*(lockContent: string): string =
                 return rev
     searchFrom = idx + ReprobuildPackagesRepositoryName.len
 
+const LockedCatalogEnv* = "REPRO_LOCKED_CATALOG"
+  ## The answer to `findEnclosingLockPinnedCatalog` for the files of ONE
+  ## recipe directory, resolved by the process that launches the recipe's
+  ## compile and declared in that compile's environment:
+  ## ``<recipe dir>\t<lock dir>\t<revision>``, the last two empty when no
+  ## enclosing lock pins the catalog. It answers for a consumer file directly
+  ## in the recipe directory (the recipe and the modules beside it), whose
+  ## walk would start where the recipe's does; any other file still walks.
+  ##
+  ## WHY. The compile resolves catalog ``uses:`` at macro time, and the walk
+  ## READS the nearest ``repro.lock`` to do it. Inside a monitored compile
+  ## edge that read made the WHOLE lock an input of the edge, so every
+  ## ``repro lock refresh`` -- which rewrites the lock -- re-ran the recipe's
+  ## interface and provider compiles, though all they take from the lock is
+  ## the catalog revision. That revision is already part of both edges'
+  ## identity (`catalogSelectionIdentity`), and the paths name the recipe's
+  ## own location, so the compile edges pass the variable through rather
+  ## than key on it (`ProviderCompileEnvironmentPassthrough`).
+
+proc findEnclosingLockPinnedCatalogByWalk(consumerSourceFile: string):
+    tuple[consumerRoot, revision: string]
+
+proc absoluteSpelling(path: string): string =
+  ## ``path`` absolute and normalized. At compile time (macro expansion) the
+  ## compiler hands absolute paths already, and the VM has no getcwd.
+  when nimvm:
+    normalizedPath(path)
+  else:
+    normalizedPath(absolutePath(path))
+
+proc lockedCatalogFromEnv(consumerSourceFile: string;
+                          answer: var tuple[consumerRoot, revision: string]):
+    bool =
+  let declared = getEnv(LockedCatalogEnv)
+  if declared.len == 0:
+    return false
+  let fields = declared.split('\t')
+  if fields.len != 3 or fields[0].len == 0:
+    return false
+  if absoluteSpelling(consumerSourceFile).parentDir != fields[0]:
+    return false
+  answer = (fields[1], fields[2])
+  true
+
+proc declaredLockedCatalog*(consumerSourceFile: string;
+                            answer: var tuple[consumerRoot, revision: string]):
+    bool =
+  ## Whether this process was launched with a `LockedCatalogEnv` that answers
+  ## for ``consumerSourceFile``, and the answer when it was.
+  lockedCatalogFromEnv(consumerSourceFile, answer)
+
+proc lockedCatalogDeclaration*(recipe: string): string =
+  ## The `LockedCatalogEnv` value for ``recipe``, computed by walking now.
+  ## For the launching process, which is not monitored.
+  let recipePath = absoluteSpelling(recipe)
+  let found = findEnclosingLockPinnedCatalogByWalk(recipePath)
+  recipePath.parentDir & "\t" & found.consumerRoot & "\t" & found.revision
+
 proc findEnclosingLockPinnedCatalog*(consumerSourceFile: string):
     tuple[consumerRoot, revision: string] =
   ## Find the nearest enclosing `repro.lock` walking up from `consumerSourceFile`
-  ## and extract the locked `reprobuild-packages` revision, if any.
+  ## and extract the locked `reprobuild-packages` revision, if any. A compile
+  ## launched with `LockedCatalogEnv` for this file takes the declared answer
+  ## and reads no lock.
+  if consumerSourceFile.len == 0:
+    return ("", "")
+  if lockedCatalogFromEnv(consumerSourceFile, result):
+    return
+  findEnclosingLockPinnedCatalogByWalk(consumerSourceFile)
+
+proc findEnclosingLockPinnedCatalogByWalk(consumerSourceFile: string):
+    tuple[consumerRoot, revision: string] =
   if consumerSourceFile.len == 0:
     return ("", "")
   var dir = if dirExists(consumerSourceFile): consumerSourceFile else: consumerSourceFile.parentDir

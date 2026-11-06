@@ -3722,6 +3722,12 @@ proc graph*(actions: openArray[BuildAction];
             pools: openArray[BuildPool] = []): BuildGraph =
   BuildGraph(actions: @actions, pools: @pools)
 
+let explainCacheMisses = getEnv("REPRO_EXPLAIN_CACHE_MISSES") == "1"
+  ## `REPRO_EXPLAIN_CACHE_MISSES=1`: every cacheable action whose lookup does
+  ## not hit writes the lookup's status and message (for an input change,
+  ## the first input that differs) to stderr. For diagnosing a warm path
+  ## that keeps re-running; off by default.
+
 proc trace(result: var BuildRunResult; actionId, event, detail: string) =
   if not result.traceEnabled:
     return
@@ -22022,6 +22028,12 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
             buildEpoch = config.buildEpoch,
             containerOutputs = action.containerDirectoryOutputs())
           finishStat("repro cache lookup", lookupStart)
+          if lookup.status != aclHit and explainCacheMisses:
+            # Diagnostic only: name why the lookup did not hit. A caller
+            # that suppresses the trace (the lock-refresh compile probes
+            # do) otherwise leaves no record of the reason at all.
+            stderr.writeLine("repro: cache " & $lookup.status & " for " &
+              id & ": " & lookup.message)
           # OWNER DECISION 2026-11-03 (Incremental-Invalidation.md §"Minimum
           # check set" Step 3.3; Peer-Cache.md §"Lookup (consumer)"; it
           # reverses agents 5427fcd2f8 / specs 55b39ef1, which made this a

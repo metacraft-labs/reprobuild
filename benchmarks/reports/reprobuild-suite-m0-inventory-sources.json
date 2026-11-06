@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 34,
-    "nimTestBinaries": 2682,
+    "nimTestBinaries": 2683,
     "pureUnitConsolidationGroups": 80,
     "pureUnitTests": 740,
     "staticallyDetectedRuntimeCompilerFlowTests": 137,
-    "testEntries": 2722
+    "testEntries": 2723
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1576,7 +1576,7 @@
       "integration": 1484,
       "platform/destructive": 173,
       "pure unit": 740,
-      "unclassified": 306
+      "unclassified": 307
     },
     "graphOwnedTestArtifacts": [
       {
@@ -1784,9 +1784,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2682,
+    "nimTestBinaryCount": 2683,
     "pythonTestFileCount": 40,
-    "testEntryCount": 2722
+    "testEntryCount": 2723
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -53765,6 +53765,23 @@
       "source": "tests/unit/t_lock_writer_trace_reader_classifies_refusal_runs.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 14,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_locked_catalog_is_declared_not_read",
+      "class": "unclassified",
+      "classificationReason": "mutates the process environment",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_project_dsl"
+      ],
+      "owner": "tests/unit",
+      "requiresReproBinary": false,
+      "source": "tests/unit/t_locked_catalog_is_declared_not_read.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 2,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
