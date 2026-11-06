@@ -964,6 +964,14 @@ const
                           "owned-drift-not-adoptable",
                           # getent errors read as "no such account".
                           "getent-errors-as-absent",
+                          # §13 decision 55: Conflicts= naming a unit the
+                          # profile does not define, accepted.
+                          "conflicts-unchecked",
+                          # decision 55's amendment: the effective half
+                          # takes any .service as a predecessor on the
+                          # unit's say-so; an exclusive unit names any unit.
+                          "exclusive-predecessor-by-say-so",
+                          "exclusive-conflicts-any-unit",
                           # A13: a state backup or restore runs while a
                           # unit of the set may run.
                           "state-units-not-checked",

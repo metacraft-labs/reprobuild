@@ -21,7 +21,8 @@
 ## file or another service's secrets, a ``RuntimeDirectory=`` in the
 ## add-on's tree or at the existing ``/run/systemd``, a system-state target
 ## reached through a unit of the profile, an isolating job mode, an
-## activator socket with ``Mark=``). Each is
+## activator socket with ``Mark=``; §13 decision 55: ``Conflicts=`` naming a
+## base service). Each is
 ## applied by an operator on a fresh add-on host. A case passes when the
 ## apply is refused and the unit never started, or -- for a writable place
 ## the floor now covers -- when the unit runs and systemd shows it holding
@@ -207,7 +208,12 @@ proc cases(binary, prefix: string): seq[Case] =
     Case(name: "a9e-mark.service", service: "",
          extra: "systemd.systemUnit {\n  name = \"a9e-mark.socket\"\n" &
                 "  content = \"[Socket]\nListenStream=127.0.0.1:18091\nMark=1\n\n" &
-                "[Install]\nWantedBy=sockets.target\n\"\n  enabled = true\n}\n")]
+                "[Install]\nWantedBy=sockets.target\n\"\n  enabled = true\n}\n"),
+    # §13 decision 55: Conflicts= naming a unit the profile does not define
+    # (a base service that is harmless to stop, if a build lets it through).
+    Case(name: "a9e-conflicts.service", service: "",
+         extra: dropIn("a9e-conflicts.service",
+                       "[Unit]\nConflicts=systemd-timesyncd.service\n"))]
 
 proc invocation(g: Guest; unit: string): string =
   g.exec("systemctl show -p InvocationID --value " & unit).stdout.strip()
