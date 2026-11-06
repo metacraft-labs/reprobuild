@@ -953,6 +953,8 @@ const
                           # adopted again (the row before decision 50's
                           # amendment).
                           "owned-drift-not-adoptable",
+                          # getent errors read as "no such account".
+                          "getent-errors-as-absent",
                           # A13: a state backup or restore runs while a
                           # unit of the set may run.
                           "state-units-not-checked",

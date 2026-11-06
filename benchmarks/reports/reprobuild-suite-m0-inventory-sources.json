@@ -8911,8 +8911,8 @@
       "owner": "libs/repro_addon",
       "requiresReproBinary": false,
       "source": "libs/repro_addon/tests/t_addon_floor_round7.nim",
-      "sourceSuiteCount": 8,
-      "staticCaseCount": 29,
+      "sourceSuiteCount": 10,
+      "staticCaseCount": 32,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

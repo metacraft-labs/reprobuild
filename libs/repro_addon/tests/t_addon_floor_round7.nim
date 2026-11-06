@@ -24,7 +24,7 @@
 ## ``socket-options-by-list``, ``state-routes-direct-only``,
 ## ``activator-show-unjudged``, ``effective-skips-parse-rules``,
 ## ``bind-sources-by-prefix``, ``profile-memberships-ignored``,
-## ``printed-file-settings-trusted``, ``adopted-files-unverified``. Finding 7 is the tick helper's, a VM
+## ``printed-file-settings-trusted``, ``adopted-files-unverified``, ``getent-errors-as-absent``. Finding 7 is the tick helper's, a VM
 ## gate (``e2e_addon_tick_observes_a_fresh_cycle``).
 ##
 ## Mocks: as in ``t_addon_floor_round6``, ``systemctl show`` text and stubs
@@ -415,6 +415,49 @@ suite "round 7, finding 5: the effective half is the authority":
     check "this systemd prints it" in problemsOf(e)
     e.show["Sockets"] = "[unprintable]"
     check problemsOf(e) == ""
+
+suite "A13 round 5's caveat: getent's \"not found\" is not an error":
+  # Under DynamicUser=yes an authoritative "not found" allocates a dynamic
+  # user, so a lookup that failed must refuse. Falsifier:
+  # getent-errors-as-absent. The fake getents are scripts in a temporary
+  # directory: what is under test is the exit-code reading.
+  test "exit 2 is not found; any other failure raises":
+    let dir = createTempDir("a9r7-", "-getent")
+    defer: removeDir(dir)
+    for (n, body) in [("found", "echo 'a:x:1000:1000::/:/bin/false'"),
+                      ("absent", "exit 2"), ("broken", "echo nss down >&2; exit 1")]:
+      writeFile(dir / n, "#!/bin/sh\n" & body & "\n")
+      setFilePermissions(dir / n, {fpUserRead, fpUserWrite, fpUserExec})
+    check getentAt(dir / "found", "passwd", "a").found
+    check getentAt(dir / "found", "passwd", "a").fields[2] == "1000"
+    check not getentAt(dir / "absent", "passwd", "a").found
+    expect AccountLookupFailed:
+      discard getentAt(dir / "broken", "passwd", "a")
+    expect AccountLookupFailed:
+      discard getentAt("", "passwd", "a")
+  test "a lookup that fails refuses the unit":
+    var e = goodInput()
+    e.show["DynamicUser"] = "yes"
+    e.show["User"] = "a-dyn"
+    e.show["Group"] = ""
+    e.uidOf = proc (n: string): int = raise newException(AccountLookupFailed, "nss down")
+    check "the account databases cannot be read" in problemsOf(e)
+
+suite "A13 round 5: a template instance's dynamic account is the prefix's":
+  # systemd's user_from_unit_name(): DynamicUser=yes with no User= names
+  # the account after the unit's prefix, so root@x.service runs as root.
+  test "parse time and the effective check":
+    check "root" in refused(unitStanza("root@x.service",
+      "DynamicUser=yes\nExecStart=" & Prefix & "/bin/svc\n", "",
+      "  floorExceptions = [\"DynamicUser: allocated\"]\n"))
+    var e = goodInput()
+    e.unit = "root@x.service"
+    e.show["DynamicUser"] = "yes"
+    e.show["User"] = ""
+    e.show["Group"] = ""
+    check "runs as root" in problemsOf(e)
+    e.unit = "app@root.service"
+    check "runs as root" notin problemsOf(e)
 
 suite "round 7, finding 6: the profile's own memberships at parse time":
   test "passwd.user groups and passwd.group members":
