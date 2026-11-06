@@ -127,7 +127,12 @@ proc body(g: Guest; repro: string; step: StepFn; record: JsonNode;
   let base = sink.check(host, signers)
   record["baseline"] = toJson(base)
   step("baseline: nothing detected, every detector live-idle, no alert",
-       base.alerts.len == 0 and base.statuses.allIt(it.status == "live-idle"),
+       base.alerts.len == 0 and
+         base.statuses.filterIt(it.detector != "check-state").allIt(
+           it.status == "live-idle") and
+         # The check's own state: new at its first run, nothing else.
+         base.statuses.filterIt(it.detector == "check-state").allIt(
+           it.status == "new"),
        render(base))
   # Stopped, settled and recorded as the tick helper's baseline: a cycle
   # the timer ran before this point cannot have applied what the gate
