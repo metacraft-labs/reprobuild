@@ -704,6 +704,10 @@ if [ "${REPRO_HOST_PLATFORM}" = "darwin" ]; then
   darwin_headerpad=("--passL:-Wl,-headerpad_max_install_names")
 fi
 
+# The build/bin helpers tests check with repro_test_support/fresh_binary
+# (§13 decision 65 of the ReproOS Add-On Mode spec: the add-on's and the
+# Evidence sink's test helpers). Each gets a dependency list.
+HELPER_DEPS_APPS="repro-evidence-sink repro-binary-cache"
 while read -r name path extra_flags; do
   name="${name%$'\r'}"
   path="${path%$'\r'}"
@@ -743,10 +747,10 @@ while read -r name path extra_flags; do
   # Both spellings, because Nim appends ``.exe`` on Windows (see
   # resolve_built_binary); the one that does not exist is skipped.
   artifacts=("build/bin/${name}" "build/bin/${name}.exe")
-  # build/nimcache/<name>/<name>.json, Nim's build record, names every
-  # module object linked into the binary; repro_test_support/fresh_binary reads
-  # it to refuse a build/bin binary older than its sources (a test must
-  # never report on an old build).
+  # The helpers a test runs from build/bin get their dependency list beside
+  # the build (scripts/write_helper_deps.sh, below): repro_test_support/
+  # fresh_binary reads it to refuse a binary older than any source it was
+  # compiled from (a test must never report on an old build).
   entrypoint_status=0
   (
     unset_clingo_searchpath
@@ -777,6 +781,16 @@ while read -r name path extra_flags; do
   if built_binary="$(resolve_built_binary "${name}")"; then
     if verify_fresh_artifact "${built_binary}" "${name}"; then
       clear_set_aside_build "${artifacts[@]}"
+      case " ${HELPER_DEPS_APPS} " in
+        *" ${name} "*)
+          if ! (unset_clingo_searchpath
+                bash scripts/write_helper_deps.sh "${name}" "${path}" \
+                  ${nim_mode_flags[@]+"${nim_mode_flags[@]}"} \
+                  ${extra_flag_array[@]+"${extra_flag_array[@]}"}); then
+            record_failure "${name}: built, but its dependency list (scripts/write_helper_deps.sh) could not be written; a test will refuse the binary"
+          fi
+          ;;
+      esac
     else
       # verify_fresh_artifact has already recorded the failure; this line only
       # says where the artifact it refused went. Deliberately not a second

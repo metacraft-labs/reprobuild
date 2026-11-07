@@ -264,35 +264,79 @@ const UninstallOverrideDir* = "/var/log/repro-addon"
   ## Where §13 decision 62's override record is written: outside
   ## ``/var/lib/repro`` and ``/etc/repro``, which uninstall removes.
 
+const
+  DiscardRecordSchema* = "repro-addon-store-evidence-discarded-unshipped/2"
+    ## /2: the record file holds the record alone, and the signature is
+    ## over exactly its bytes, beside it in ``<record>.sig`` (§13 decision
+    ## 64). /1 signed a compact re-serialisation the file did not hold.
+  DiscardRecordSigExt* = ".sig"
+
 proc writeOverrideRecord(custody: CustodySite; dir: string;
                          objects: seq[string]; why: string):
     tuple[path, text: string] =
-  ## §13 decision 62: the signed local record of the store evidence an
-  ## uninstall discards before the sink acknowledged its records -- every
-  ## object, every record still queued, and why -- signed by the
-  ## attestation key (when the host has one). Raises when it cannot be
-  ## written: then nothing is discarded.
+  ## §13 decisions 62, 63 and 64: the signed local record of the store
+  ## evidence an uninstall discards before the sink acknowledged its
+  ## records -- every object, every record still queued, why, and the
+  ## public half of the key that signs it. The file holds exactly the bytes
+  ## signed; the signature (hex) is ``<record>.sig``. The caller has checked
+  ## that the attestation key exists (decision 63). Raises when the record
+  ## or its signature cannot be written: then nothing is discarded.
   let t = getTime()
-  var j = %*{"schema": "repro-addon-store-evidence-discarded-unshipped/1",
+  let keyPath = custody.evidence.attestationKey
+  let keyless = not fileExists(keyPath)   # only under override-keyless-unsigned
+  var j = %*{"schema": DiscardRecordSchema,
              "time": t.utc.format("yyyy-MM-dd'T'HH:mm:ss'Z'"),
              "host": custody.evidence.host, "why": why,
              "objects": objects,
-             "queuedRecords": outboxEntries(custody.evidence.outbox)}
-  let body = $j
-  var signed = %*{"record": j}
-  if fileExists(custody.evidence.attestationKey):
-    let sig = signText(body, custody.evidence.attestationKey)
-    signed["signature"] = %sig.signature
-    signed["attestationKey"] = %sig.publicKeyHex
-  else:
-    signed["signature"] = %""
-    signed["unsigned"] = %"the host has no attestation key"
-  result.text = pretty(signed) & "\n"
+             "queuedRecords": outboxEntries(custody.evidence.outbox),
+             "attestationKey": (if keyless: "" else: attestationPublicKeyHex(keyPath))}
+  if keyless: j["unsigned"] = %"the host has no attestation key"
+  result.text = pretty(j) & "\n"
+  var signature = ""
+  if not keyless:
+    when mutated("override-signs-other-bytes"):
+      signature = signText("not the record", keyPath).signature
+    elif mutated("override-empty-signature"):
+      signature = ""
+    else:
+      signature = signText(result.text, keyPath).signature
   createDir(dir)
   setFilePermissions(dir, {fpUserRead, fpUserWrite, fpUserExec})
   result.path = dir / ("uninstall-" & t.utc.format("yyyyMMdd'T'HHmmss'Z'") &
                        "-discarded-unshipped.json")
   writeFileAtomic(result.path, result.text, 0o600)
+  writeFileAtomic(result.path & DiscardRecordSigExt, signature & "\n", 0o600)
+
+proc verifyDiscardRecord*(path: string; expectedKeyHex = ""):
+    tuple[ok: bool; why, keyHex: string; objects: seq[string]] =
+  ## §13 decision 64: whether the record at ``path`` is signed, over
+  ## exactly the bytes the file holds, by the key it names -- and, when
+  ## ``expectedKeyHex`` is given (the host's enrolled attestation key, from
+  ## the sink's hosts file), by that key. Reads ``<path>.sig``.
+  let text = try: readFile(path)
+             except IOError as e: return (false, "cannot read " & path & ": " & e.msg, "", @[])
+  let sig = try: readFile(path & DiscardRecordSigExt).strip()
+            except IOError as e:
+              return (false, "cannot read the signature " & path &
+                DiscardRecordSigExt & ": " & e.msg, "", @[])
+  var doc: JsonNode
+  try: doc = parseJson(text)
+  except CatchableError as e: return (false, path & " is not a record: " & e.msg, "", @[])
+  if doc{"schema"}.getStr() != DiscardRecordSchema:
+    return (false, path & " is not a " & DiscardRecordSchema & " record", "", @[])
+  result.keyHex = doc{"attestationKey"}.getStr()
+  for o in doc{"objects"}.getElems(): result.objects.add(o.getStr())
+  if result.keyHex.len == 0:
+    result.why = "the record names no attestation key: it is unsigned"
+    return
+  if expectedKeyHex.len > 0 and
+      expectedKeyHex.toLowerAscii() != result.keyHex.toLowerAscii():
+    result.why = "the record names the key " & result.keyHex &
+      ", not the expected " & expectedKeyHex
+    return
+  let v = verifyText(text, sig, result.keyHex)
+  result.ok = v.ok
+  result.why = v.why
 
 proc storeEvidenceGate*(custody: CustodySite; opts: UninstallOptions;
                         ship: proc (): tuple[ok: bool; why: string];
@@ -331,15 +375,25 @@ proc storeEvidenceGate*(custody: CustodySite; opts: UninstallOptions;
   if opts.discardUnacknowledgedStoreEvidence:
     when mutated("override-unrecorded"):
       return
+    # Decision 63: no key, no signed record, no discard.
+    if not fileExists(custody.evidence.attestationKey) and
+        not mutated("override-keyless-unsigned"):
+      result.errors.add("the host's attestation key " &
+        custody.evidence.attestationKey & " is missing, so the record of " &
+        "the store evidence discarded unshipped cannot be signed; restore " &
+        "the key (or ship the records) and run uninstall again")
+      result.errors.add("nothing was removed")
+      return
     try:
       let r = writeOverrideRecord(custody, overrideDir, result.pending,
                                   shipped.why)
       result.overrideRecord = r.path
       result.overrideRecordText = r.text
     except CatchableError as e:
-      result.errors.add("the record of the store evidence discarded " &
-        "unshipped could not be written (" & e.msg & ")")
-      result.errors.add("nothing was removed")
+      when not mutated("override-write-error-swallowed"):
+        result.errors.add("the record of the store evidence discarded " &
+          "unshipped could not be written (" & e.msg & ")")
+        result.errors.add("nothing was removed")
     return
   when not mutated("uninstall-skips-ack-refusal"):
     result.errors.add("the Evidence sink has not acknowledged the " &

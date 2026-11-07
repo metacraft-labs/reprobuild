@@ -247,9 +247,12 @@ proc timerBaseline(g: Guest): tuple[sameBoot: bool; trigger: string] =
 proc bootstrapWithAgent*(g: Guest; repro: string; step: StepFn;
                          extraFlags = ""; cacheUrl = "";
                          cachePublishers: seq[string] = @[]):
-    tuple[ok: bool; anchors: Anchors; producer: Producer] =
+    tuple[ok: bool; anchors: Anchors; producer: Producer;
+          attestationKey: string] =
   ## Preflight and bootstrap with the deploy agent configured, its producer
-  ## started first (the plan pins its address).
+  ## started first (the plan pins its address). ``attestationKey`` is the
+  ## public key bootstrap printed (when a sink was configured): what the
+  ## operator enrols.
   let anchors = g.installAnchors()
   result.anchors = anchors
   if cachePublishers.len > 0:
@@ -267,6 +270,9 @@ proc bootstrapWithAgent*(g: Guest; repro: string; step: StepFn;
                     planDigestOf(pre.stdout) & flags, timeoutSec = 1800)
   step("bootstrap with the deploy agent", boot.exitCode == 0,
        boot.stdout & boot.stderr)
+  for l in boot.stdout.splitLines():
+    if l.startsWith("attestation key:"):
+      result.attestationKey = l["attestation key:".len .. ^1].strip()
   if boot.exitCode != 0: return
   # The timer must not race the gate's own ticks. Stopping it once was not
   # enough: a later switch re-arms it (the apply's step 7), and its own

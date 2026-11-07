@@ -377,41 +377,76 @@ proc spawnSimFleet*(specs: seq[SimPeerSpec];
 # (`t_peer_cache_tls_*`) carry the full TLS-wrap coverage.
 # ---------------------------------------------------------------------------
 
+const SimMutation {.strdefine: "reproAddonMutation".} = ""
+  ## A falsifying build's name (``repro_addon/mutations``); "" otherwise.
+
 proc runTlsHandshakeSmokePass*(n: int = 4): Future[bool] {.async.} =
   ## Spawns `n` loopback peers with real BearSSL TLS wrap and waits
   ## for the handshake-driven membership to fill in. Returns `true`
   ## iff every peer has reached the same-tenant view (`n - 1` peers).
   ## Used by the demonstration driver when `--tls-enabled=true`.
-  let peers = await spawnLoopbackTlsPeers(n)
-  # The peers are stopped after the body in sequence, never with an
-  # ``await`` in a ``finally`` (Nim 2.2.4 resumes such a ``finally`` with a
-  # nil future: "yielded nil"); a failure of the body is re-raised after.
-  var failure: ref CatchableError = nil
-  try:
-    for i in 0 ..< n:
-      await peers[i].client.start()
-    var settled = false
-    var waited = 0
-    while waited < 8_000:
-      try: poll(0) except ValueError: discard
-      await sleepAsync(50)
-      waited += 50
-      var ok = true
-      for peer in peers:
-        if peer.registry.peerCount() < n - 1:
-          ok = false
+  when SimMutation == "sim-stop-in-finally":
+    # FALSIFYING BUILD: the peers stopped in a ``finally``, as before
+    # round 4.
+    let peers = await spawnLoopbackTlsPeers(n)
+    try:
+      for i in 0 ..< n:
+        await peers[i].client.start()
+      var settled = false
+      var waited = 0
+      while waited < 8_000:
+        try: poll(0) except ValueError: discard
+        await sleepAsync(50)
+        waited += 50
+        var ok = true
+        for peer in peers:
+          if peer.registry.peerCount() < n - 1:
+            ok = false
+            break
+        if ok:
+          settled = true
           break
-      if ok:
-        settled = true
-        break
-    result = settled
-  except CatchableError as e:
-    failure = e
-  for i in 0 ..< n:
-    try: await peers[i].client.stop() except CatchableError: discard
-  for peer in peers:
-    peer.server.stop()
-  if failure != nil: raise failure
+      result = settled
+    finally:
+      for i in 0 ..< n:
+        try: await peers[i].client.stop() except CatchableError: discard
+      for peer in peers:
+        peer.server.stop()
+  else:
+    let peers = await spawnLoopbackTlsPeers(n)
+    # Stopped after the body in sequence, not by `await`s in a `finally`:
+    # Nim 2.2.4 resumes such a `finally` with a nil future ("yielded
+    # nil") when a `return` leaves through it. This body has no
+    # `return`, so the old shape was not broken (measured: the
+    # `sim-stop-in-finally` control is green under 2.2.4); the shape is
+    # kept so a later `return` cannot reintroduce it. A failure of the
+    # body is re-raised after.
+    var failure: ref CatchableError = nil
+    try:
+      for i in 0 ..< n:
+        await peers[i].client.start()
+      var settled = false
+      var waited = 0
+      while waited < 8_000:
+        try: poll(0) except ValueError: discard
+        await sleepAsync(50)
+        waited += 50
+        var ok = true
+        for peer in peers:
+          if peer.registry.peerCount() < n - 1:
+            ok = false
+            break
+        if ok:
+          settled = true
+          break
+      result = settled
+    except CatchableError as e:
+      failure = e
+    for i in 0 ..< n:
+      try: await peers[i].client.stop() except CatchableError: discard
+    for peer in peers:
+      peer.server.stop()
+    if failure != nil: raise failure
 
 # ---------------------------------------------------------------------------
 # Lifecycle.

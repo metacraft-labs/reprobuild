@@ -800,6 +800,29 @@
 ##                                            refusal as a constant tuple
 ##                                            literal, as before; SIGSEGV
 ##                                            under Nim 2.2.4 (round 4)
+## ``override-signs-other-bytes``            the override record's signature
+##                                            is over other bytes than the
+##                                            file holds (decision 64)
+## ``override-empty-signature``               the override record's signature
+##                                            file is empty (decision 64)
+## ``override-keyless-unsigned``              without the attestation key the
+##                                            override writes an unsigned
+##                                            record and discards (decision
+##                                            63)
+## ``override-write-error-swallowed``         an override record that cannot
+##                                            be written does not stop the
+##                                            discard (decision 62)
+## ``sim-stop-in-finally``                    a CONTROL, not a falsifier: the
+##                                            simulator's TLS smoke pass as
+##                                            before round 4 (peers stopped
+##                                            in a finally no return leaves
+##                                            through); green under Nim
+##                                            2.2.4 too (round 5)
+## ``fresh-skips-included``                   fresh_binary ignores files a
+##                                            module includes (decision 65)
+## ``fresh-skips-outside-tree``               fresh_binary ignores modules
+##                                            from outside the tree
+##                                            (decision 65)
 ## ``stale-helper-accepted``                  a test's helper binary is used
 ##                                            however old it is
 ##                                            (``repro_test_support/
@@ -1284,7 +1307,13 @@ const
                           "containment-skew-ignored",
                           "signer-close-in-finally",
                           "signer-constant-tuple-return",
-                          "stale-helper-accepted"]
+                          "stale-helper-accepted",
+                          "override-signs-other-bytes",
+                          "override-empty-signature",
+                          "override-keyless-unsigned",
+                          "override-write-error-swallowed",
+                          "sim-stop-in-finally", "fresh-skips-included",
+                          "fresh-skips-outside-tree"]
 
 when AddonMutation.len > 0 and AddonMutation notin KnownAddonMutations and
     AddonMutation notin KnownAgentMutations:

@@ -13,7 +13,8 @@
 ##    discard goes ahead.
 ## 3. Decision 62's override: ``--discard-unacknowledged-store-evidence``
 ##    discards only after a signed local record naming every object is
-##    written.
+##    written; ``verify-discard-record`` accepts it with the enrolled key and
+##    refuses another key or a changed byte.
 ## 4. Sequence 0 is a sequence: ``ack --seq 0`` and ``payload --seq 0``
 ##    parse, ``retired@0:<id>`` is a retirement and is written back.
 ## 5. A tick heartbeat at sequence 0 is a beat before a containment.
@@ -21,7 +22,10 @@
 ##    refused as stale; a fresh one after it is honoured.
 ##
 ## Falsifying builds (each turns its own case red): ``allow-source-field``
-## (1), ``uninstall-skips-ack-refusal`` (2), ``override-unrecorded`` (3),
+## (1), ``uninstall-skips-ack-refusal`` (2), ``override-unrecorded``,
+## ``override-signs-other-bytes`` and ``override-empty-signature`` (3; the
+## record is checked through ``repro system addon verify-discard-record``,
+## §13 decision 64),
 ## ``seq-zero-sentinel`` (4, 5), ``containment-skew-ignored`` (6).
 ##
 ## Mocks: case 3's ``ship`` is a stub answering "not acknowledged" (the
@@ -37,6 +41,7 @@ import repro_deploy_agent/agent
 import repro_deploy_agent/tick_status
 
 import repro_addon/agent_split
+import repro_addon/cli
 import repro_addon/attestation
 import repro_addon/containment
 import repro_addon/evidence as addonEvidence
@@ -138,11 +143,20 @@ suite "the A11 code review's fourth round":
     check g.errors.len == 0
     check g.overrideRecord.len > 0 and fileExists(g.overrideRecord)
     let doc = parseJson(readFile(g.overrideRecord))
-    check doc["record"]["objects"].getElems().mapIt(it.getStr()).anyIt(it == aside)
-    check "did not acknowledge" in doc["record"]["why"].getStr()
-    check doc["attestationKey"].getStr() == pub
-    check doc["signature"].getStr().len == 128
+    check doc["objects"].getElems().mapIt(it.getStr()).anyIt(it == aside)
+    check "did not acknowledge" in doc["why"].getStr()
     check g.overrideRecordText == readFile(g.overrideRecord)
+    # Decision 64: verified through the operator's command, against the
+    # enrolled key, over exactly the bytes the file holds.
+    check runAddonCli(@["verify-discard-record", g.overrideRecord,
+                        "--key", pub]) == 0
+    # Another key, or one byte changed, does not verify.
+    check runAddonCli(@["verify-discard-record", g.overrideRecord,
+                        "--key", "04" & "ab".repeat(64)]) == 1
+    let tampered = root / "over3" / "tampered.json"
+    writeFile(tampered, readFile(g.overrideRecord).replace(aside, aside & "x"))
+    copyFile(g.overrideRecord & DiscardRecordSigExt, tampered & DiscardRecordSigExt)
+    check runAddonCli(@["verify-discard-record", tampered, "--key", pub]) == 1
 
   test "4: sequence 0 is a sequence for the sink's commands and the hosts file":
     let ack = parseSinkCommand(["ack", "--dir", "d", "--seq", "0", "--alert",

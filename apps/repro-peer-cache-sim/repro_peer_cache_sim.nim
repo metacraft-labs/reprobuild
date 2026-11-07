@@ -176,9 +176,13 @@ proc main() {.async.} =
   var fleet = await spawnSimFleet(
     specs, cfg, seedsPerPeer = 5, options = fleetOptions)
   let startedAll = getMonoTime()
-  # The fleet is shut down after the body in sequence, never with an
-  # ``await`` in a ``finally`` (Nim 2.2.4 resumes such a ``finally`` with a
-  # nil future: "yielded nil"); a failure of the body is re-raised after.
+  # Stopped after the body in sequence, not by `await`s in a `finally`:
+  # Nim 2.2.4 resumes such a `finally` with a nil future ("yielded
+  # nil") when a `return` leaves through it. This body has no
+  # `return`, so the old shape was not broken (measured: the
+  # `sim-stop-in-finally` control is green under 2.2.4); the shape is
+  # kept so a later `return` cannot reintroduce it. A failure of the
+  # body is re-raised after.
   var failure: ref CatchableError = nil
   try:
     startSwim(fleet)

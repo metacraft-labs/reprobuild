@@ -418,6 +418,31 @@ proc signText*(text: string; keyPath = AttestationKeyPath):
   finally:
     for i in 0 ..< kp.privateKey.len: kp.privateKey[i] = 0
 
+proc attestationPublicKeyHex*(keyPath = AttestationKeyPath): string =
+  ## The public half of the attestation key at ``keyPath``, hex. Raises when
+  ## the key cannot be read.
+  var priv = peerAuth.loadPrivateKeyFile(keyPath)
+  try:
+    result = toHex(peerAuth.derivePublicKey(priv))
+  finally:
+    for i in 0 ..< priv.len: priv[i] = 0
+
+proc verifyText*(text, signature, keyHex: string): tuple[ok: bool; why: string] =
+  ## Whether ``signature`` (hex) is ``keyHex``'s signature over exactly the
+  ## bytes of ``text``.
+  if signature.len == 0:
+    return (false, "the signature is empty")
+  var sig: SignatureBytes
+  try:
+    let raw = fromHex(signature, sig.len, "signature")
+    for i in 0 ..< sig.len: sig[i] = raw[i]
+  except AttestationError as e: return (false, e.msg)
+  let key = try: publicKeyOf(keyHex)
+            except AttestationError as e: return (false, e.msg)
+  if not peerAuth.verifySignature(key, cast[seq[byte]](text), sig):
+    return (false, "the signature does not verify over the record's bytes")
+  (true, "")
+
 proc verifyContainment*(statement, signature, expectedKeyHex: string):
     tuple[ok: bool; why: string; c: ContainmentStatement] =
   ## Well-formed, of this scope, and signed by the enrolled key.

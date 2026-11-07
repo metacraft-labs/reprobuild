@@ -1,30 +1,34 @@
 ## A helper binary a test runs from ``build/bin`` must be built from the
 ## tree under test.
 ##
-## A test that spawns ``build/bin/<name>`` (the Evidence sink, the engine,
-## a daemon) runs whatever binary is there. When nothing rebuilt it since
-## its sources changed, the test reports on an old build, and a red case
-## reads green: the A11 round-4 review found the sink's redaction case
-## green only because ``build/bin/repro-evidence-sink`` predated the change
-## that broke it (reprobuild-pm issue 2026-11-07-addon-allow-listed-source-
-## field-turns-the-sinks-redaction-case-red-masked-by-a-stale-sink).
+## A test that spawns ``build/bin/<name>`` (the Evidence sink, the binary
+## cache) runs whatever binary is there. When nothing rebuilt it since its
+## sources changed, the test reports on an old build, and a red case reads
+## green: the A11 round-4 review found the sink's redaction case green only
+## because ``build/bin/repro-evidence-sink`` predated the change that broke
+## it (reprobuild-pm issue 2026-11-07-addon-allow-listed-source-field-turns-
+## the-sinks-redaction-case-red-masked-by-a-stale-sink).
 ##
-## ``freshRepoBinary`` refuses such a binary. ``scripts/build_apps.sh``
-## compiles every app with its own nimcache (``build/nimcache/<name>/``),
-## where Nim's build record (``<name>.json``) names every object it links
-## -- one generated per Nim module, named after the module -- and every C
-## file the last run compiled, a library's own C among them. A binary is
-## fresh when each such source of the tree still exists and none is newer
-## than the binary. (A library's C file is known only from the run that
-## compiled it: after an incremental build that compiled nothing, Nim's
-## record no longer names it, and an edit to it alone is not seen.) Anything
-## else raises ``StaleHelperBinary`` naming the first offending file and
-## the command that rebuilds it: the test fails, it never silently runs an
-## old build.
+## ``freshRepoBinary`` refuses such a binary. Its sources are the list Nim
+## itself writes with ``--genDeps`` (``scripts/write_helper_deps.sh``, which
+## ``scripts/build_apps.sh`` runs for each helper it builds, into
+## ``build/nimcache/<name>/<name>.deps``): every file the compiler read,
+## files a module ``include``s and modules from outside the tree (a sibling
+## checkout such as ``../io-mon``) among them (reprobuild-pm issue
+## 2026-11-08-fresh-binary-does-not-see-included-files-or-modules-outside-
+## the-tree; §13 decision 65 of the ReproOS Add-On Mode spec). A file under
+## ``/nix/store`` cannot change and is skipped. The binary is fresh when
+## every other listed file still exists and none is newer than the binary,
+## checked when the test runs. Anything else raises ``StaleHelperBinary``
+## naming the first offending file and the command that rebuilds it: the
+## test fails, it never silently runs an old build.
 ##
-## Falsifying build: ``-d:reproAddonMutation=stale-helper-accepted``
-## accepts a binary older than its sources
-## (``t_fresh_helper_binary_refuses_a_stale_build`` goes red).
+## Falsifying builds (``-d:reproAddonMutation=...``), each turning its case
+## of ``t_fresh_helper_binary_refuses_a_stale_build`` red:
+## ``stale-helper-accepted`` (a binary older than its sources is accepted),
+## ``fresh-skips-included`` (an included file is not checked),
+## ``fresh-skips-outside-tree`` (a module from outside the tree is not
+## checked).
 ##
 ## Mocks: none -- this is test support; it reads the real build outputs.
 
@@ -49,68 +53,57 @@ proc helperBuildDir*(repoRoot: string): string =
   let d = getEnv("REPRO_TEST_BUILD_DIR")
   if d.len > 0: absolutePath(d, repoRoot) else: repoRoot / "build"
 
-proc moduleSearchRoots(repoRoot: string): seq[string] =
-  ## Where a module the build record names by package path can live in the
-  ## tree: every library's ``src`` and every app, then the tree itself.
+proc linkedModules(repoRoot, name: string): seq[string] =
+  ## The tree's modules that have an object in Nim's build record
+  ## (``<name>.json``'s ``link``): what the round-4 guard checked. Used only
+  ## by the ``fresh-skips-included`` falsifier, to drop what it misses.
+  let record = helperBuildDir(repoRoot) / "nimcache" / name / (name & ".json")
+  if not fileExists(record): return
+  var roots: seq[string]
   for kind, d in walkDir(repoRoot / "libs"):
-    if kind in {pcDir, pcLinkToDir} and dirExists(d / "src"): result.add(d / "src")
+    if kind in {pcDir, pcLinkToDir} and dirExists(d / "src"): roots.add(d / "src")
   for kind, d in walkDir(repoRoot / "apps"):
-    if kind in {pcDir, pcLinkToDir}: result.add(d)
-  result.add(repoRoot)
+    if kind in {pcDir, pcLinkToDir}: roots.add(d)
+  roots.add(repoRoot)
+  for o in parseJson(readFile(record)){"link"}.getElems():
+    var m = extractFilename(o.getStr())
+    if not m.endsWith(".nim.c.o"): continue
+    m = m[2 ..< m.len - 4].replace("@s", "/")
+    for r in roots:
+      if fileExists(r / m):
+        result.add(r / m)
+        break
 
 proc helperDependencies*(repoRoot, name: string): seq[string] =
-  ## The tree's source files ``build/bin/<name>`` was compiled from, read
-  ## from Nim's build record, ``build/nimcache/<name>/<name>.json``: each C
-  ## file it compiled that is not generated (a library's C), and each
-  ## module whose generated object it linked, named by Nim's mangling
-  ## (``@p<package>@s<path>.nim.c``, ``@m<path>.nim.c``) and found in the
-  ## tree. A module outside the tree (the standard library, the Nix store)
-  ## is immutable for this purpose and left out. Raises
-  ## ``StaleHelperBinary`` when there is no build record.
-  let cache = helperBuildDir(repoRoot) / "nimcache" / name
-  let record = cache / (name & ".json")
-  if not fileExists(record):
+  ## Every source ``build/bin/<name>`` was compiled from that can change:
+  ## the paths of ``build/nimcache/<name>/<name>.deps`` not under
+  ## ``/nix/store``. Raises ``StaleHelperBinary`` when there is no list.
+  let list = helperBuildDir(repoRoot) / "nimcache" / name / (name & ".deps")
+  if not fileExists(list):
     raise newException(StaleHelperBinary, "build/bin/" & name & " has no " &
-      "build record (" & record & "): nothing shows what it was built " &
+      "dependency list (" & list & "): nothing shows what it was built " &
       "from; " & helperRebuildHint(name))
-  let j = try: parseJson(readFile(record))
-          except CatchableError as e:
-            raise newException(StaleHelperBinary, record & " is not a " &
-              "Nim build record (" & e.msg & "); " & helperRebuildHint(name))
-  let roots = moduleSearchRoots(repoRoot)
-  proc addModule(generated: string; into: var seq[string]) =
-    var mangled = extractFilename(generated)
-    if not mangled.endsWith(".nim.c") or mangled.len < 3: return
-    mangled = mangled[2 ..< mangled.len - 2]          # drop "@p"/"@m", ".c"
-    let rel = mangled.replace("@s", "/")
-    for root in roots:
-      if fileExists(root / rel):
-        if root / rel notin into: into.add(root / rel)
-        return
-  # "compile" lists only what this run compiled -- empty after an
-  # incremental build that changed no C -- so the modules are read from
-  # "link", which names every object of every build. A library's own C
-  # appears by its source path only in "compile".
-  for c in j{"compile"}.getElems():
-    let src = c[0].getStr()
-    if src.len == 0: continue
-    if src.startsWith(cache): addModule(src, result)
-    elif src.startsWith(repoRoot) and src notin result: result.add(src)
-  for o in j{"link"}.getElems():
-    let obj = o.getStr()
-    if obj.startsWith(cache) and obj.endsWith(".c.o"):
-      addModule(obj[0 ..< obj.len - 2], result)
+  let root = absolutePath(repoRoot)
+  when FreshMutation == "fresh-skips-included":
+    let linked = linkedModules(repoRoot, name)
+  for raw in readFile(list).splitLines():
+    let dep = raw.strip()
+    if dep.len == 0 or dep.startsWith("/nix/store/"): continue
+    when FreshMutation == "fresh-skips-outside-tree":
+      if not dep.startsWith(root & "/"): continue
+    when FreshMutation == "fresh-skips-included":
+      if dep.startsWith(root & "/") and dep notin linked: continue
+    result.add(dep)
 
 proc freshRepoBinary*(repoRoot, name: string): string =
-  ## ``<repoRoot>/build/bin/<name>`` when it is at least as new as every
-  ## source it was compiled from; raises ``StaleHelperBinary`` otherwise.
+  ## ``<build>/bin/<name>`` when it is at least as new as every source it
+  ## was compiled from; raises ``StaleHelperBinary`` otherwise.
   result = helperBuildDir(repoRoot) / "bin" / addFileExt(name, ExeExt)
   if not fileExists(result):
     raise newException(StaleHelperBinary, result & " does not exist; " &
       helperRebuildHint(name))
   let built = getLastModificationTime(result)
   for dep in helperDependencies(repoRoot, name):
-    if dep.startsWith("/nix/store/"): continue        # immutable inputs
     if not fileExists(dep):
       raise newException(StaleHelperBinary, result & " was built from " &
         dep & ", which no longer exists; " & helperRebuildHint(name))

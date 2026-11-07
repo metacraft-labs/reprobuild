@@ -246,11 +246,28 @@ repro system addon uninstall --discard-unacknowledged-store-evidence
 
 Before it removes anything, this writes a record of every object it
 discards without the sink having acknowledged it, and of every record
-still queued, signed with the host's attestation key, to
+still queued, to
 `/var/log/repro-addon/uninstall-<time>-discarded-unshipped.json` (root
-only). It prints the record's path and text. The file stays after
-uninstall: keep it with the entries you copied off the host. If the
-record cannot be written, uninstall refuses and removes nothing.
+only). The record names the public half of the host's attestation key,
+and `<record>.sig` beside it holds that key's signature over exactly the
+bytes of the record file. Uninstall prints the record's path and text.
+Both files stay after uninstall: keep them with the entries you copied
+off the host. If the attestation key is missing, or the record cannot be
+written, uninstall refuses and removes nothing.
+
+To check a record, on the host or on any machine you copied both files
+to, give as `<key>` the attestation key the sink has enrolled for the
+host (the one bootstrap printed):
+
+```sh
+repro system addon verify-discard-record \
+  /var/log/repro-addon/uninstall-20261108T101500Z-discarded-unshipped.json \
+  --key <key>
+```
+
+It exits 0 and lists the objects only when the signature is over the
+file's exact bytes and by that key. A changed byte, another key or an
+empty signature is refused.
 
 A host bootstrapped by an older release is brought up to date by its
 first switch, or at once with

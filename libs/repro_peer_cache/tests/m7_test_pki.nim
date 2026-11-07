@@ -87,7 +87,12 @@ proc evidenceSinkBin*(): string =
   freshRepoBinary(repoRootDir(), "repro-evidence-sink")
 
 proc engineBin*(): string =
-  freshRepoBinary(repoRootDir(), "reprobuild")
+  ## Not checked by ``fresh_binary``: §13 decision 65 of the ReproOS Add-On
+  ## Mode spec scopes that guard to the add-on's and the Evidence sink's
+  ## test helpers; converting the others is a milestone of its own
+  ## (reprobuild-pm issue 2026-11-07-tests-run-build-bin-helpers-without-
+  ## checking-they-are-built-from-the-tree).
+  repoRootDir() / "build" / "bin" / addFileExt("reprobuild", ExeExt)
 
 proc newTestNode*(base, name: string): TestNode =
   ## A node with a freshly minted host CA under

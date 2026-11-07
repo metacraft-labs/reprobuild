@@ -48,7 +48,9 @@
 ##    ``--discard-unacknowledged-store-evidence`` (decision 62) uninstall
 ##    removes them, after writing a signed record of each object discarded
 ##    unshipped to ``/var/log/repro-addon``, which it prints and which
-##    stays after it.
+##    stays after it; ``repro system addon verify-discard-record`` accepts
+##    its signature with the attestation key bootstrap printed (decision
+##    64).
 ##
 ## Falsifying mutations: ``custody-skips-file-sources`` (steps 2 and 4: the
 ## altered bytes are installed into /etc), ``custody-skips-closures`` (step
@@ -61,7 +63,9 @@
 ## uninstall removes the evidence), ``uninstall-discards-unrecorded`` (step
 ## 5: the object left aside reaches no record), ``uninstall-skips-ack-refusal``
 ## (step 5: the unacknowledged discard goes ahead), ``override-unrecorded``
-## (step 5: the override writes and prints no record).
+## (step 5: the override writes and prints no record),
+## ``override-signs-other-bytes`` and ``override-empty-signature`` (step 5:
+## ``verify-discard-record`` refuses the record).
 ##
 ## Opt-in: ``REPRO_ADDON_VM_GATES=1``.
 ##
@@ -338,6 +342,7 @@ proc body(g: Guest; repro: string; step: StepFn; record: JsonNode;
   var recordPath = ""
   if marker in said:
     recordPath = said[said.find(marker) + marker.len .. ^1].splitLines()[0]
+    recordPath = recordPath.split(' ')[0]
     recordPath.removeSuffix(":")
   step("with --discard-unacknowledged-store-evidence uninstall succeeds, " &
        "names each store-evidence entry and prints its signed record",
@@ -348,18 +353,18 @@ proc body(g: Guest; repro: string; step: StepFn; record: JsonNode;
          aside2 in said[said.find(marker) .. ^1],
        said)
   let kept = g.exec("cat " & quoteShell(recordPath)).stdout
-  var signed = false
-  try:
-    let doc = parseJson(kept)
-    var objects: seq[string]
-    for o in doc["record"]["objects"]: objects.add(o.getStr())
-    signed = aside2 in objects and doc["signature"].getStr().len == 128 and
-      doc["record"]["schema"].getStr() ==
-        "repro-addon-store-evidence-discarded-unshipped/1"
-  except CatchableError: discard
+  # Decision 64: checked the way an operator checks it, with the command,
+  # against the attestation key bootstrap printed (the enrolled one).
+  let verify = g.exec(repro & " system addon verify-discard-record " &
+    quoteShell(recordPath) & " --key " & quoteShell(bs.attestationKey))
+  record["overrideVerify"] = %(verify.stdout & verify.stderr)
+  let signed = bs.attestationKey.len > 0 and verify.exitCode == 0 and
+    ("  " & aside2) in verify.stdout
   record["overrideRecord"] = %kept
-  step("the signed record names the object discarded unshipped and stays " &
-       "after uninstall (decision 62)", signed, kept)
+  step("the record names the object discarded unshipped, stays after " &
+       "uninstall, and verify-discard-record accepts its signature with the " &
+       "enrolled key (decisions 62, 64)", signed,
+       kept & "\n" & verify.stdout & verify.stderr)
   step("the evidence directory is gone with the state",
        g.exec("test -e " & Evidence).exitCode != 0, "")
 

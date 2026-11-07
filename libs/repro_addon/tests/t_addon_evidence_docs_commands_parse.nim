@@ -8,7 +8,8 @@
 ## (``evidence_sink_cli.parseSinkCommand``), and for each ``repro system
 ## addon`` verb the guide uses, that verb's (``parsePreflightArgs``,
 ## ``parseBootstrapArgs``, ``parseEnrolArgs``, ``parseContainArgs``,
-## ``parseUninstallArgs``, or no option at all). A verb the test has no parser for fails it, and so does
+## ``parseUninstallArgs``, ``parseVerifyDiscardRecordArgs``, or no
+## option at all). A verb the test has no parser for fails it, and so does
 ## an elided line (``...``) or a prose span that names a sink command
 ## without the tool (``addon-check --update-hosts``): every command the
 ## guide prints is one the reader can run (A11 review finding 16).
@@ -59,7 +60,8 @@ proc commandLines(text: string): seq[string] =
 proc sample(line: string): string =
   line.multiReplace(("<port>", "7443"), ("<address>", "10.0.0.5"),
                     ("<digest>", "ab"), ("<file>", "/tmp/x"),
-                    ("<you>", "alice"), ("<n>", "15"))
+                    ("<you>", "alice"), ("<n>", "15"),
+                    ("<key>", "04ab"))
 
 suite "the user guide's command lines parse":
   let text = readFile(Guide)
@@ -87,6 +89,7 @@ suite "the user guide's command lines parse":
           of "evidence-enrol": discard parseEnrolArgs(rest)
           of "contain", "release": discard parseContainArgs(rest)
           of "uninstall": discard parseUninstallArgs(rest)
+          of "verify-discard-record": discard parseVerifyDiscardRecordArgs(rest)
           of "evidence-credential-check", "migrate":
             if rest.len > 0: raise newException(ValueError, "takes no option")
           else:

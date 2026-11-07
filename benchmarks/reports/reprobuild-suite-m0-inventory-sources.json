@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 34,
-    "nimTestBinaries": 2692,
+    "nimTestBinaries": 2694,
     "pureUnitConsolidationGroups": 79,
-    "pureUnitTests": 740,
+    "pureUnitTests": 741,
     "staticallyDetectedRuntimeCompilerFlowTests": 139,
-    "testEntries": 2732
+    "testEntries": 2735
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -54,7 +54,7 @@
       "targetOs": "soAny"
     },
     {
-      "count": 4,
+      "count": 5,
       "defines": [],
       "dependencyShape": [
         "repro_addon"
@@ -64,7 +64,8 @@
         "libs/repro_addon/tests/t_addon_cross_prefix_needs_the_sysroot_glibc.nim",
         "libs/repro_addon/tests/t_addon_evidence_docs_commands_parse.nim",
         "libs/repro_addon/tests/t_addon_evidence_enrol_never_adopts_keys.nim",
-        "libs/repro_addon/tests/t_addon_preflight_needs_a_c_compiler.nim"
+        "libs/repro_addon/tests/t_addon_preflight_needs_a_c_compiler.nim",
+        "libs/repro_addon/tests/t_addon_review_round5.nim"
       ],
       "targetOs": "soAny"
     },
@@ -1563,8 +1564,8 @@
       "graph-fixture": 21,
       "integration": 1485,
       "platform/destructive": 173,
-      "pure unit": 740,
-      "unclassified": 313
+      "pure unit": 741,
+      "unclassified": 315
     },
     "graphOwnedTestArtifacts": [
       {
@@ -1772,9 +1773,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2692,
-    "pythonTestFileCount": 40,
-    "testEntryCount": 2732
+    "nimTestBinaryCount": 2694,
+    "pythonTestFileCount": 41,
+    "testEntryCount": 2735
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -2514,18 +2515,21 @@
       "class": "graph-fixture",
       "matches": [
         {
-          "assignedCommandVariable": "cmd",
-          "commandVariableExecuted": true,
-          "directExecutionLine": false,
+          "assignedCommandVariable": "",
+          "commandVariableExecuted": false,
+          "directExecutionLine": true,
           "executedVariables": [
-            "cmd"
+            "app",
+            "binary",
+            "flags",
+            "tree"
           ],
-          "line": 41,
+          "line": 61,
           "path": "libs/repro_test_support/tests/t_fresh_helper_binary_refuses_a_stale_build.nim",
           "patterns": [
             "nim-argv"
           ],
-          "snippet": "let cmd = quoteShellCommand([\"nim\", \"c\", \"--hints:off\", \"--warnings:off\","
+          "snippet": "let (o1, c1) = execCmdEx(quoteShellCommand(@[\"nim\", \"c\", \"--hints:off\","
         }
       ],
       "source": "libs/repro_test_support/tests/t_fresh_helper_binary_refuses_a_stale_build.nim"
@@ -9390,6 +9394,23 @@
       "source": "libs/repro_addon/tests/t_addon_review_round4.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 6,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_addon_review_round5",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_addon"
+      ],
+      "owner": "libs/repro_addon",
+      "requiresReproBinary": false,
+      "source": "libs/repro_addon/tests/t_addon_review_round5.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 2,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -20702,6 +20723,23 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_sim_tls_smoke_pass_stops_its_peers",
+      "class": "unclassified",
+      "classificationReason": "imports `asyncdispatch`, which grants out-of-process reach",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_peer_cache"
+      ],
+      "owner": "libs/repro_peer_cache",
+      "requiresReproBinary": false,
+      "source": "libs/repro_peer_cache/tests/t_sim_tls_smoke_pass_stops_its_peers.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_snapshot_index_lock_fails_closed",
       "class": "integration",
       "classificationReason": "subprocess or repro CLI invocation in test body",
@@ -25539,7 +25577,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_test_support/tests/t_fresh_helper_binary_refuses_a_stale_build.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 5,
+      "staticCaseCount": 7,
       "staticallyDetectedRuntimeCompilerFlow": true,
       "targetOs": "soAny"
     },
@@ -57112,6 +57150,21 @@
       "owner": "tests/unit",
       "requiresReproBinary": false,
       "source": "tests/unit/test_lint_gate_ordering.py",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 4,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "",
+      "class": "unclassified",
+      "classificationReason": "imports `subprocess`, which this scan does not recognize; refusing to call it pure rather than assuming it is",
+      "defines": [],
+      "language": "python",
+      "localDependencyShape": [],
+      "owner": "tests/unit",
+      "requiresReproBinary": false,
+      "source": "tests/unit/test_nim224_lane_selection.py",
       "sourceSuiteCount": 1,
       "staticCaseCount": 4,
       "staticallyDetectedRuntimeCompilerFlow": false,

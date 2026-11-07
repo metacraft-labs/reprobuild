@@ -10,6 +10,7 @@
 ##   repro system addon evidence-ship [--heartbeat]
 ##   repro system addon evidence-credential-check
 ##   repro system addon uninstall [--keep-store]
+##   repro system addon verify-discard-record RECORD [--key HEX]
 ##   repro system addon verify [--boot | --after-dpkg]
 ##   repro system addon reassert [--boot]
 ##   repro system addon recover
@@ -151,6 +152,15 @@ commands:
   uninstall [--keep-store] [--discard-store-evidence]
             [--discard-unacknowledged-store-evidence]
       Reverse everything the ownership ledger records.
+      --discard-unacknowledged-store-evidence discards store evidence the
+      Evidence sink has not acknowledged, after writing a record of it to
+      /var/log/repro-addon signed by the host's attestation key; without
+      that key it refuses.
+  verify-discard-record RECORD [--key HEX]
+      Check such a record: its signature (RECORD.sig) must be over exactly
+      the bytes of RECORD, by the key it names, and with --key (the host's
+      enrolled attestation key) by that key. Exit 0 only then. Runs on any
+      machine; the files may be copied off the host.
   verify [--boot | --after-dpkg]
       Compare every ledger object with the host (report only). --after-dpkg
       (the apt hook): also report packages that now own ledger paths and
@@ -314,6 +324,24 @@ proc parsePreflightArgs*(rest: seq[string]): tuple[inp: PreflightInputs;
       raise newException(ValueError, "unknown option " & a)
     inc i
   (inp, json)
+
+proc parseVerifyDiscardRecordArgs*(rest: seq[string]):
+    tuple[path, key: string] =
+  ## ``RECORD [--key HEX]`` of ``verify-discard-record``. Raises
+  ## ``ValueError`` on anything else.
+  var i = 0
+  while i < rest.len:
+    if rest[i] == "--key" and i + 1 < rest.len:
+      result.key = rest[i + 1]; inc i
+    elif rest[i].startsWith("--key="): result.key = rest[i][6 .. ^1]
+    elif result.path.len == 0 and not rest[i].startsWith("-"):
+      result.path = rest[i]
+    else:
+      raise newException(ValueError, "unexpected " & rest[i])
+    inc i
+  if result.path.len == 0:
+    raise newException(ValueError, "usage: repro system addon " &
+      "verify-discard-record RECORD [--key HEX]")
 
 proc parseUninstallArgs*(rest: seq[string]): UninstallOptions =
   ## ``uninstall``'s options. Raises ``ValueError``.
@@ -510,13 +538,35 @@ proc runAddonCli*(args: seq[string]): int =
       except AddonPlanMismatch as e:
         stderr.write("repro system addon bootstrap: " & e.msg & "\n")
         return 2
+    of "verify-discard-record":
+      var path, key: string
+      try:
+        (path, key) = parseVerifyDiscardRecordArgs(rest)
+      except ValueError as e:
+        stderr.write("repro system addon verify-discard-record: " & e.msg &
+                     "\n")
+        return 2
+      let v = verifyDiscardRecord(path, key)
+      if not v.ok:
+        stderr.write("repro system addon verify-discard-record: " & path &
+                     " does not verify: " & v.why & "\n")
+        return 1
+      stdout.write("verified: " & path & " is signed by " & v.keyHex &
+                   " over exactly its bytes; " & $v.objects.len &
+                   " object(s) discarded unshipped:\n")
+      for o in v.objects: stdout.write("  " & o & "\n")
+      return 0
     of "uninstall":
       let r = runAddonUninstall(parseUninstallArgs(rest))
       if r.overrideRecord.len > 0:
-        # §13 decision 62: the record of what was discarded unshipped.
+        # §13 decisions 62 and 64: the record of what was discarded
+        # unshipped, its signature beside it.
         stdout.write("store evidence discarded before the Evidence sink " &
           "acknowledged it; the signed record is " & r.overrideRecord &
-          ":\n" & r.overrideRecordText)
+          " (signature " & r.overrideRecord & DiscardRecordSigExt &
+          "; check it with `repro system addon verify-discard-record " &
+          r.overrideRecord & " --key <enrolled key>`):\n" &
+          r.overrideRecordText)
       for p in r.removed: stdout.write("removed " & p & "\n")
       for d in r.drift: stdout.write("left in place (drift): " & d & "\n")
       for k in r.keptEvidence:
