@@ -4818,6 +4818,12 @@ proc providerCompileLaunchEnv*(homeDir: string; modulePath = ""): seq[string] =
   for name in seenRoots:
     if existsEnv(name):
       result.add(name & "=" & getEnv(name))
+  # The catalog revision the recipe's enclosing lock pins, resolved HERE
+  # (unmonitored) rather than by the compile reading the lock: otherwise the
+  # whole lock becomes an input of the edge, and every lock refresh, which
+  # rewrites it, recompiles the recipe. See `LockedCatalogEnv`.
+  if modulePath.len > 0:
+    result.add(LockedCatalogEnv & "=" & lockedCatalogDeclaration(modulePath))
 
 proc recipeCCompilerPath*(): string =
   ## The C compiler the next recipe compile (interface extractor or provider)
@@ -7086,7 +7092,8 @@ const
     "TMPDIR",
     "TMP",
     "TEMP",
-    "TEMPDIR"
+    "TEMPDIR",
+    LockedCatalogEnv
   ]
     ## Environment values already represented by the provider compile command
     ## or affecting scratch placement only. The command-derived action key
@@ -7094,6 +7101,8 @@ const
     ## only choose disposable nimcache/temp locations. Keying monitored cache
     ## evidence on their per-process values would make every new `repro`
     ## invocation miss an otherwise unchanged provider compile.
+    ## `LockedCatalogEnv`: its revision is in both edges' identity
+    ## (`catalogSelectionIdentity`), its paths are the recipe's own location.
 
 proc activeVariantSignature*(): string =
   ## Canonical (sorted, de-duplicated) form of the active variant

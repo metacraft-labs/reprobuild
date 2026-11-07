@@ -11098,6 +11098,21 @@ proc ensureLockPinnedCatalog*(modulePath, consumerRoot: string): string =
       return ""
     dir = parent
 
+  # Inside a recipe compile edge the launcher has already prepared the pin
+  # and declared it (`LockedCatalogEnv`); reading the lock here would make the
+  # whole lock an input of the edge.
+  if modulePath.len > 0:
+    var declared: tuple[consumerRoot, revision: string]
+    if declaredLockedCatalog(absolutePath(modulePath), declared):
+      if declared.revision.len == 0:
+        return ""
+      let prepared = declared.consumerRoot / ".repro" / "cross-repo-producers" /
+        ReprobuildPackagesRepositoryName / declared.revision
+      if dirExists(extendedPath(prepared)):
+        return prepared
+      # Not materialized (a launcher that did not prepare it): fetch it the
+      # usual way below, which reads the lock for the pin's coordinates.
+
   # Find enclosing repro.lock
   var lockDir = ""
   var lockFile = ""
@@ -11377,6 +11392,9 @@ proc extractInterfaceEdgeUnchecked(modulePath, artifactPath, stubPath: string;
     # when the metadata moved, which is what lets that copy be served.
     actionCachePolicy = (if relocatable: ffpHybrid else: ffpTimestamp),
     envPassthrough = ProviderCompileEnvironmentPassthrough,
+    # The lock-pinned catalog, resolved here so the extraction does not read
+    # the lock (and depend on all of it); see `LockedCatalogEnv`.
+    env = @[LockedCatalogEnv & "=" & lockedCatalogDeclaration(modulePath)],
     nonDeterminism = ndpEntropyBlessed,
     nonDeterminismJustification = ProviderCompilerEntropyJustification,
     dependencyPolicy =

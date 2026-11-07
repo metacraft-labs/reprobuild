@@ -27778,6 +27778,17 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "",
     singleReason: "module-level statement runs at every start-up: let now = parse(\"2026-10-20T12:00:00Z\", \"yyyy-MM-dd'T'HH:mm:..."),
   TestSpec(
+    source: "tests/unit/t_locked_catalog_is_declared_not_read.nim",
+    binary: "build/test-bin/t_locked_catalog_is_declared_not_read",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "t_group_tests_unit_g02",
+    singleReason: ""),
+  TestSpec(
     source: "tests/unit/t_m21_history_fed_scheduling.nim",
     binary: "build/test-bin/t_m21_history_fed_scheduling",
     defines: @[],
@@ -28193,7 +28204,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_unit_g02",
+    group: "t_group_tests_unit_g03",
     singleReason: ""),
   TestSpec(
     source: "tests/unit/t_m9r15q_2_from_source_custom_registry_population.nim",
@@ -28754,7 +28765,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_unit_g03",
+    group: "t_group_tests_unit_g04",
     singleReason: ""),
   TestSpec(
     source: "tests/unit/t_measurement_axes.nim",
