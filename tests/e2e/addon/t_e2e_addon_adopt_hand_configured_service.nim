@@ -544,7 +544,14 @@ proc runBase(m: SnapshotMirror; b: BaseImage; record: JsonNode): seq[string] =
     # installed without a reload, makes it run as root only from that
     # reload on: the static reading cannot see it, the live check does. The
     # switch refuses and reverts with the unit held: it never starts.
-    # Falsifier: the add-on build addon-live-reach-skipped.
+    # The switch's own unit writes reload systemd before step 6, so the
+    # generator has run by then: the units the check judges are the ones the
+    # refusal let in, chosen before anything is written. Falsifiers: the
+    # add-on builds addon-live-reach-skipped (no check) and
+    # live-units-chosen-after-writes (the set chosen at step 6, after the
+    # generator's drop-in made the unit read as reaching everything, which
+    # left it out of the check -- what this gate first found on
+    # ubuntu-24.04).
     let liveUnit = "a13r6-live.service"
     let liveProfile = skeleton2 & "\nsystemd.systemUnit {\n" &
       "  name = \"" & liveUnit & "\"\n" &

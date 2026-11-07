@@ -548,6 +548,13 @@
 ## ``infra-live-reach-skipped``              a full apply does not run the
 ##                                           carried-state cross-check
 ##                                           (decision 59)
+## ``live-units-chosen-after-writes``      the add-on switch chooses the
+##                                           units it re-checks at step 6,
+##                                           after its own reloads ran the
+##                                           host's generators
+## ``post-reload-refusal-skipped``           the carried-state refusal is not
+##                                           decided again after a switch's
+##                                           reload
 ## ``adopt-without-profile``                 ``repro system adopt`` takes
 ##                                           drifted bytes the profile does
 ##                                           not declare (decision 61)
@@ -1297,6 +1304,8 @@ const
                           "addon-live-reach-skipped",
                           "infra-live-reach-skipped",
                           "adopt-without-profile",
+                          "live-units-chosen-after-writes",
+                          "post-reload-refusal-skipped",
                           "plan-ignores-profile-digest",
                           "full-apply-keeps-undeclared-dropins",
                           "install-unit-reads-host-manifest",

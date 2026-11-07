@@ -3242,15 +3242,25 @@ proc liveReachUnitsFor(opts: AddonApplyOptions;
   let root = if opts.carriedStateRoot.len > 0: opts.carriedStateRoot else: "/"
   liveReachUnits(liveReachProfile(resources), carriedAt, root)
 
+proc carriedRefusalFor(opts: AddonApplyOptions; stateDir: string): string
+
 proc liveReachProblemsFor(opts: AddonApplyOptions; units: seq[string];
-                          resources: openArray[SystemResource]): seq[string] =
-  ## Each of ``units`` re-judged from ``systemctl show``
-  ## (``carried_state.liveReachProblems``, shared with ``runInfraApply``).
+                          resources: openArray[SystemResource];
+                          stateDir: string): seq[string] =
+  ## After step 6's reload, before any start: each of ``units`` re-judged
+  ## from ``systemctl show`` (``carried_state.liveReachProblems``, shared
+  ## with ``runInfraApply``), and the carried-state refusal decided again
+  ## over the host as the reload left it -- a drop-in a host generator made
+  ## at the switch's own reloads is read now, so a path or a command it
+  ## adds is judged too, not only the account (A13 round 6).
   when mutated("addon-live-reach-skipped"):
     return
   let root = if opts.carriedStateRoot.len > 0: opts.carriedStateRoot else: "/"
-  liveReachProblems(units, liveReachProfile(resources),
+  result = liveReachProblems(units, liveReachProfile(resources),
     proc (u: string): Table[string, string] = showUnit(u), root)
+  when not mutated("post-reload-refusal-skipped"):
+    let why = carriedRefusalFor(opts, stateDir)
+    if why.len > 0: result.add(why & " (decided again after the reload)")
 
 proc carriedRefusalFor(opts: AddonApplyOptions; stateDir: string): string =
   ## The carried-state refusal for this apply (``carried_state``), "" when
@@ -4361,6 +4371,18 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
     x.dependsOn = deps
     infraProfile.resources.add(x)
   let composedText = renderProfileText(infraProfile)
+  # The services the carried-state cross-check judges at step 6, chosen
+  # now, as the refusal judged them, before anything of this switch is
+  # written: each write of a unit reloads systemd, which runs the host's
+  # generators, and a drop-in a generator makes from then on can turn a
+  # unit the refusal let in into one the analysis would read as reaching
+  # everything -- so a set chosen at step 6 left it out of the check
+  # altogether (A13 round 6, the adopt gate's live probe on ubuntu-24.04).
+  let preWriteLiveUnits =
+    when mutated("live-units-chosen-after-writes"): newSeq[string]()
+    else:
+      if opts.recordOnly: newSeq[string]()
+      else: liveReachUnitsFor(opts, composed.resources)
   var wanted = initHashSet[string]()
   for r in composed.resources: wanted.incl(r.address)
 
@@ -5436,7 +5458,10 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
           # socket, a timer, D-Bus or a Wants= would otherwise start it on
           # definitions nothing has checked yet; spec §10.1, round 4).
           if not opts.recordOnly:
-            liveUnits = liveReachUnitsFor(opts, composed.resources)
+            liveUnits =
+              when mutated("live-units-chosen-after-writes"):
+                liveReachUnitsFor(opts, composed.resources)
+              else: preWriteLiveUnits
             startHolds = writeStartHolds(composed.resources, liveUnits)
           daemonReload()
           # From here on every start runs the generation's definitions:
@@ -5634,7 +5659,7 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
           # as confined must be confined as systemd reads it too, or nothing
           # starts (a problem stops step 7, and the switch reverts).
           let reachLive = liveReachProblemsFor(opts, liveUnits,
-                                               composed.resources)
+                                               composed.resources, stateDir)
           if reachLive.len > 0:
             problems.add(reachLive.join("; ") & "; nothing was started")
           if notHeld.len > 0:

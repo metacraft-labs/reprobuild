@@ -622,7 +622,7 @@ when defined(posix):
                               liveCheckHoldText())
     systemctlOrRaise(["daemon-reload"])
 
-  proc finishLiveCheck(c: LiveCheck; p: SystemProfile; root: string): seq[string] =
+  proc finishLiveCheck(c: LiveCheck; p: SystemProfile; dir, root: string): seq[string] =
     ## After the privileged set: reload, judge each held unit as systemd
     ## loaded it (``liveReachProblems``, the add-on switch's own check), and
     ## either release and start what should run, or keep the refused units
@@ -634,6 +634,11 @@ when defined(posix):
     when ApplyMutation != "infra-live-reach-skipped":
       problems = liveReachProblems(c.units, p,
         proc (u: string): Table[string, string] = systemctlShow(u), root)
+      # And the refusal again over the host as the reload left it: a
+      # drop-in a generator made at a reload of this apply is read now.
+      when ApplyMutation != "post-reload-refusal-skipped":
+        let why = carriedStateRefusal(p, dir, root)
+        if why.len > 0: problems.add(why & " (decided again after the reload)")
     if problems.len > 0:
       var refused: seq[string]
       for u in c.units:
@@ -938,7 +943,7 @@ proc runInfraApply*(profileText: string; opts: ApplyOptions): ApplyResult =
 
   when defined(posix):
     for pr in finishLiveCheck(liveCheck, parseSystemProfile(profileText),
-                              liveRoot):
+                              liveDir, liveRoot):
       inc result.errorCount
       result.diagnostics.add(pr)
 

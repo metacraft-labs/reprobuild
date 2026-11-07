@@ -379,7 +379,17 @@ const
        "/etc/systemd/system-generators/a13r6-gen && chmod 755 " &
        "/etc/systemd/system-generators/a13r6-gen",
      "rm -f /etc/systemd/system-generators/a13r6-gen && rm -rf " &
-       "/etc/systemd/system/eth-r6-gen.service.d && systemctl daemon-reload")]
+       "/etc/systemd/system/eth-r6-gen.service.d && systemctl daemon-reload"),
+    ("liverw", r5Unit("eth-r6-genrw.service", R6Confined, "r6GenRw"),
+     "decided again after the reload",
+     "mkdir -p /etc/systemd/system-generators && printf '#!/bin/sh\\n" &
+       "mkdir -p \"$1/eth-r6-genrw.service.d\"\\nprintf \"[Service]\\\\n" &
+       "ReadWritePaths=/var/lib/ethereum/validator\\\\n\" " &
+       "> \"$1/eth-r6-genrw.service.d/10-rw.conf\"\\n' > " &
+       "/etc/systemd/system-generators/a13r6-genrw && chmod 755 " &
+       "/etc/systemd/system-generators/a13r6-genrw",
+     "rm -f /etc/systemd/system-generators/a13r6-genrw && rm -rf " &
+       "/etc/systemd/system/eth-r6-genrw.service.d && systemctl daemon-reload")]
     ## Round 6 (A13 review) and owner decisions 58 and 59: (case, its lines,
     ## a fragment the refusal must hold, host set-up, clean-up), each applied
     ## while the carried directory is pending and refused, each let in by
@@ -847,22 +857,24 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
       var refused = r.exitCode != 0 and "ECarriedStatePending" in o and
         needle in o
       var detail = o
-      if label == "live":
+      if label in ["live", "liverw"]:
         # Held from before the first write to the refusal: never started.
+        let liveUnit = if label == "live": "eth-r6-gen.service"
+                       else: "eth-r6-genrw.service"
         let started = nw.exec("systemctl show -p " &
-          "ExecMainStartTimestampMonotonic eth-r6-gen.service").stdout.strip()
-        let held = nw.exec("test -f /etc/systemd/system/eth-r6-gen.service.d/" &
+          "ExecMainStartTimestampMonotonic " & liveUnit).stdout.strip()
+        let held = nw.exec("test -f /etc/systemd/system/" & liveUnit & ".d/" &
           "zz-repro-carried-check-hold.conf").exitCode == 0
         refused = refused and held and
           started in ["ExecMainStartTimestampMonotonic=0",
                       "ExecMainStartTimestampMonotonic="]
         detail = o & "\n" & started & "\nheld: " & $held
       probes["r6" & label] = %*{"exit": r.exitCode, "judged": judged(o),
-        "layer": (if label == "live": "live" else: "reach"),
+        "layer": (if label in ["live", "liverw"]: "live" else: "reach"),
         "refusedForReason": refused}
       if cleanup.len > 0: discard nw.run(cleanup)
       step("round 6, " & label & ": refused while the directory is pending" &
-           (if label == "live": ", by the live cross-check, never started"
+           (if label in ["live", "liverw"]: ", after the apply's reload, never started"
             else: ""), judged(o) and refused,
            (if judged(o): "" else: "NOT JUDGED (the profile did not compile): ") &
            detail)
