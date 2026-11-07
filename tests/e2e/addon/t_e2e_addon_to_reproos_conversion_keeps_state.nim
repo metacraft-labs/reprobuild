@@ -522,30 +522,90 @@ static:
       "a probe unit's ReadWritePaths= names " & p & ", which the gate does " &
       "not create (add it to ProbeWritableDirs)"
 
+proc journalRan*(journal, unit: string): bool =
+  ## Whether the journal of ``unit`` (``journalctl -b -u <unit>``, oldest
+  ## first) shows its last start completing: a "Started"/"Starting" line,
+  ## then "Deactivated successfully" or nothing after it that failed. A unit
+  ## only ever "skipped" (a start condition unmet), or one whose last start
+  ## failed ("Failed with result", "Failed to start", a "Main process
+  ## exited" with a status other than 0), did not run. ``systemctl show``
+  ## cannot say this: once a unit that ran is inactive and unreferenced,
+  ## systemd unloads it, and a fresh load reports every runtime property
+  ## zero (measured, debian-13, A13 round 6).
+  var lines: seq[string]
+  for l in journal.splitLines():
+    if (unit) in l: lines.add(l)
+  var last = -1
+  for k, l in lines:
+    if ("Started " in l or "Starting " in l) and "skipped" notin l: last = k
+  if last < 0: return false
+  var completed = false
+  for l in lines[last .. ^1]:
+    if "Failed with result" in l or "Failed to start" in l or
+        ("Main process exited" in l and "status=0/" notin l): return false
+    if "Deactivated successfully" in l or "Started " in l: completed = true
+  completed
+
+const
+  CapturedNeverStarted = """
+[  248.692251] addon-tb systemd[1]: eth-r4-host.service - A13 round-4 probe skipped, unmet condition check ConditionPathExists=!/
+"""
+    ## Captured, debian-13 (A13 round 6): a unit held, never started.
+  CapturedStartedFailed = """
+[  281.483513] addon-tb systemd[1]: eth-r6-exec.service - A13 round-5 probe skipped, unmet condition check ConditionPathExists=!/
+[  281.803476] addon-tb systemd[1]: Starting eth-r6-exec.service - A13 round-5 probe...
+[  281.837865] addon-tb (true)[6284]: eth-r6-exec.service: Failed to set up mount namespacing: /var/lib/a13-r5: No such file or directory
+[  281.837893] addon-tb (true)[6284]: eth-r6-exec.service: Failed at step NAMESPACE spawning /bin/true: No such file or directory
+[  281.838693] addon-tb systemd[1]: eth-r6-exec.service: Control process exited, code=exited, status=226/NAMESPACE
+[  281.838751] addon-tb systemd[1]: eth-r6-exec.service: Failed with result 'exit-code'.
+[  281.838875] addon-tb systemd[1]: Failed to start eth-r6-exec.service - A13 round-5 probe.
+"""
+    ## Captured, debian-13 (A13 round 6): a unit started that failed.
+  CapturedRan = """
+[  265.228332] addon-tb systemd[1]: eth-r4-host.service - A13 round-4 probe skipped, unmet condition check ConditionPathExists=!/
+[  265.749769] addon-tb systemd[1]: Started eth-r4-host.service - A13 round-4 probe.
+[  265.821244] addon-tb systemd[1]: eth-r4-host.service: Deactivated successfully.
+"""
+    ## Captured, debian-13 (A13 round 6): a unit held, then started by the
+    ## apply after its check, ran and exited 0.
+
+static:
+  # The check's negative and positive controls, on captured journals: it
+  # cannot pass a unit that never started or one that failed.
+  doAssert not journalRan(CapturedNeverStarted, "eth-r4-host.service")
+  doAssert not journalRan(CapturedStartedFailed, "eth-r6-exec.service")
+  doAssert journalRan(CapturedRan, "eth-r4-host.service")
+
 proc unitRan(g: Guest; unit: string; marker = ""): (bool, JsonNode) =
-  ## Whether ``unit`` really ran, as the guest's systemd and the unit's own
-  ## marker say: ``Result=success`` and either active or exited 0, and --
-  ## ``marker`` given -- the file its command wrote. Waits for a unit that
-  ## is still starting, a few seconds at most.
-  var props = ""
+  ## Whether ``unit`` really ran: its journal shows its last start
+  ## completing (``journalRan``) and -- ``marker`` given -- the file its
+  ## command wrote is there. Waits a few seconds for a unit still starting.
+  var journal = ""
   for i in 0 ..< 10:
-    props = g.exec("systemctl show " & unit & " -p Result -p ActiveState " &
-      "-p SubState -p ExecMainStatus -p ExecMainStartTimestampMonotonic").stdout
-    if "ActiveState=activating" notin props: break
+    journal = g.exec("journalctl -b --no-pager -o short-monotonic -u " & unit &
+      " 2>&1").stdout
+    let state = g.exec("systemctl is-active " & unit & " 2>&1").stdout.strip()
+    if state != "activating": break
     discard g.exec("sleep 1")
-  var tab = initTable[string, string]()
-  for l in props.splitLines():
-    let i = l.find('=')
-    if i > 0: tab[l[0 ..< i]] = l[i + 1 .. ^1]
-  let started = tab.getOrDefault("ExecMainStartTimestampMonotonic", "0") notin ["", "0"]
-  let ok = tab.getOrDefault("Result") == "success" and started and
-    (tab.getOrDefault("ActiveState") == "active" or
-     tab.getOrDefault("ExecMainStatus") == "0")
+  let ok = journalRan(journal, unit)
   var m = ""
   if marker.len > 0:
     m = g.exec("cat " & marker & " 2>/dev/null").stdout.strip()
   result = (ok and (marker.len == 0 or m.len > 0),
-            %*{"props": props, "marker": marker, "markerContent": m})
+            %*{"journal": journal, "marker": marker, "markerContent": m})
+  if not result[0]:
+    # Why it did not run, while the guest is still there: how systemd sees
+    # the unit, whether a hold is still loaded (its drop-in and mtime), and
+    # the apply's audit log.
+    let gen = g.exec("ls -t /var/lib/repro/system/generations 2>/dev/null | " &
+      "head -1").stdout.strip()
+    result[1]["diagnosis"] = %g.exec("systemctl status --no-pager -l " & unit &
+      " 2>&1 | tail -30; echo '--- is-enabled'; systemctl is-enabled " & unit &
+      " 2>&1; echo '--- drop-ins'; ls -la --time-style=full-iso " &
+      "/run/systemd/system/" & unit & ".d /etc/systemd/system/" & unit &
+      ".d 2>&1; date --iso-8601=ns; echo '--- audit'; grep -a " & unit &
+      " /var/lib/repro/system/generations/" & gen & "/log/apply.log 2>&1 | " &
+      "tail -10").stdout
 
 proc hexKey(k: openArray[byte]): string =
   for b in k: result.add(toHex(int(b), 2).toLowerAscii())
