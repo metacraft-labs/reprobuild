@@ -79,6 +79,7 @@ suite "TC-8b — content matching":
 
   test "t_certificate_matches_by_content_never_by_base":
     let scratch = enterHermeticGit()
+    defer: leaveHermeticGit(scratch)
     let repo = newRepo(scratch, "lib-a")
     writeEntryFile(repo, "src/lib.nim", "proc f*() = discard\n")
     writeEntryFile(repo, "README.md", "lib-a\n")
@@ -249,4 +250,3 @@ suite "TC-8b — content matching":
     check attached.misattached.len == 1
 
     check libraryTempLeftovers(scratch).len == 0
-    removeDir(scratch)

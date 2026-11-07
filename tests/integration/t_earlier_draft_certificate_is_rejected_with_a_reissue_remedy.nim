@@ -84,6 +84,7 @@ suite "TC-8b — the earlier-draft boundary":
       fail()
     else:
       let scratch = enterHermeticGit()
+      defer: leaveHermeticGit(scratch)
       let repo = newRepo(scratch, "lib-a")
       writeEntryFile(repo, "src/lib.nim", "proc f*() = discard\n")
       commitAll(repo, "tested")
@@ -189,4 +190,3 @@ suite "TC-8b — the earlier-draft boundary":
           read: readCertificateRecord(serializeCertificateToToml(reissued)))],
         atCommit, requirement(), store)
       check reissuedReport.outcome == voCovered
-      removeDir(scratch)
