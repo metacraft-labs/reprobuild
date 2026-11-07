@@ -405,6 +405,19 @@ proc signContainment*(c: ContainmentStatement; keyPath = AttestationKeyPath):
   finally:
     for i in 0 ..< kp.privateKey.len: kp.privateKey[i] = 0
 
+proc signText*(text: string; keyPath = AttestationKeyPath):
+    tuple[signature, publicKeyHex: string] =
+  ## ``text`` signed by the attestation key (a record the host keeps
+  ## locally: §13 decision 62's override record).
+  var kp: PeerKeypair
+  kp.privateKey = peerAuth.loadPrivateKeyFile(keyPath)
+  try:
+    kp.publicKey = peerAuth.derivePublicKey(kp.privateKey)
+    result.signature = toHex(peerAuth.signMessage(kp, cast[seq[byte]](text)))
+    result.publicKeyHex = toHex(kp.publicKey)
+  finally:
+    for i in 0 ..< kp.privateKey.len: kp.privateKey[i] = 0
+
 proc verifyContainment*(statement, signature, expectedKeyHex: string):
     tuple[ok: bool; why: string; c: ContainmentStatement] =
   ## Well-formed, of this scope, and signed by the enrolled key.

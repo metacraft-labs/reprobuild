@@ -890,121 +890,27 @@ proc serveSinkFrames(sink: EvidenceSinkServer; conn: TlsConn;
 proc serveSinkConnection(sink: EvidenceSinkServer; conn: TlsConn;
                          anchors: TrustAnchorSet) {.async.} =
   ## The proof exchange, then the frames.
-  let who = await exchangeProofs(conn, sink.leaf, anchors,
-    sink.nowMsS() div 1000)
-  if not who.ok:
-    inc sink.rejectedHandshakes
-    return
-  await serveSinkFrames(sink, conn, who)
-
-when SinkMutation == "sink-close-in-finally":
-  # FALSIFYING BUILD: the handler as it was before the A11 round-3 fix,
-  # verbatim -- the close awaited in a ``finally`` that the frame loop's
-  # exits leave through. Red under Nim 2.2.4 only (its async transform
-  # resumes that ``finally`` with a nil future); later releases compile it
-  # right.
-  proc handleSinkConnectionWithFinally(sink: EvidenceSinkServer;
-                            sock: AsyncSocket) {.async.} =
-    if sink.leaf.needsRenewal:
-      sink.leaf = mintLeaf(sink.identity, lrDaemon)
-    let anchors = sink.currentAnchors()
-    let connOpt = await wrapServerSocket(sock, sink.leaf.cert.certDer,
-      sink.leaf.key, anchors)
-    if connOpt.isNone:
-      inc sink.rejectedHandshakes
-      try: sock.close() except CatchableError: discard
-      return
-    let conn = connOpt.get()
+  when SinkMutation == "sink-close-in-finally":
+    # FALSIFYING BUILD: the same body, with the close awaited in a
+    # ``finally`` the early return leaves through instead of after it in
+    # ``handleSinkConnection`` -- the one construct the fix removed. Red
+    # under Nim 2.2.4 only ("yielded nil", counted in failedConnections).
     try:
       let who = await exchangeProofs(conn, sink.leaf, anchors,
         sink.nowMsS() div 1000)
       if not who.ok:
         inc sink.rejectedHandshakes
         return
-      let key = bucketKey(who.hostId, who.role)
-      while sink.running:
-        let frame = await readSinkFrame(conn, idle = true)
-        if not frame.ok:
-          break
-        # The appender's credential is judged on every frame: a connection
-        # does not outlive its leaf (G15), nor a revocation (G17).
-        if sink.nowMsS() div 1000 - LeafClockSkewSeconds >= who.notAfter:
-          inc sink.expiredConnections
-          break
-        if sink.isRevoked(who.hostId):
-          inc sink.revokedConnections
-          sink.recordRefusal(who, frame.verb)
-          break
-        case frame.verb
-        of vAppend, vAppendBatch:
-          var bodies: seq[seq[byte]] = @[]
-          if frame.verb == vAppend:
-            bodies.add(frame.body)
-          else:
-            var p = 0
-            let rawCount = getU32(frame.body, p)
-            # Each record is at least its u32 length (repro_core/codec).
-            if not elementCountFits(rawCount, frame.body.len - p, 4) or
-                int(rawCount) > MaxBatchRecords:
-              break
-            let count = int(rawCount)
-            for _ in 0 ..< count:
-              let n = int(getU32(frame.body, p))
-              if n > MaxEncodedRecordBytes or p + n > frame.body.len:
-                raise newException(EvidenceStoreError, "bad batch")
-              bodies.add(frame.body[p ..< p + n])
-              p += n
-          # Over its budget the sender is SLOWED, not refused (G18): its
-          # records wait for tokens and the acknowledgement waits with them,
-          # so the appender's own queue absorbs the excess and nothing it
-          # sent is lost here. A sender over budget for longer than
-          # `SinkBackpressureMaxWaitMs` is disconnected (and that is
-          # recorded); it re-sends after reconnecting.
-          let waitStart = sink.nowMsS()
-          var admitted = sink.takeTokens(key, bodies.len)
-          while not admitted and sink.running and
-              sink.nowMsS() - waitStart < SinkBackpressureMaxWaitMs:
-            inc sink.backpressureWaits
-            await sleepAsync(50)
-            admitted = sink.takeTokens(key, bodies.len)
-          if not admitted:
-            sink.recordRefusal(who, frame.verb)
-            break
-          for body in bodies:
-            let record = decodeEvidenceRecord(body)
-            discard sink.store.appendRecord(who.hostId, who.role, record)
-            inc sink.appendedCount
-          # Every accepted batch ends with a signed checkpoint, returned as
-          # the receipt (G28).
-          let receipt = sink.store.appendCheckpointReceipt()
-          var ack: seq[byte] = @[]
-          ack.putU64(receipt.headSeq)
-          ack.putU64(cast[uint64](receipt.receivedAtMs))
-          ack.add(receipt.headHash)
-          ack.add(receipt.signature)
-          await sendSinkFrame(conn, vAck, ack)
-        else:
-          when SinkMutation == "sink-credential-has-read-scope":
-            # FALSIFYING BUILD (see ``SinkMutation``): a list or a read is
-            # answered with the store's entries.
-            if frame.verb in {vList, vRead}:
-              var listing: seq[byte] = @[]
-              let entries = readEvidenceStore(sink.store.dir)
-              listing.putU32(uint32(entries.len))
-              for e in entries:
-                listing.putU64(e.seq)
-                listing.add(e.entryHash)
-              await sendSinkFrame(conn, vListing, listing)
-              continue
-          # Read / list / overwrite / delete / anything else: not in the
-          # vocabulary.
-          inc sink.refusedVerbCount
-          sink.recordRefusal(who, frame.verb)
-          break
-    except CatchableError:
-      discard
+      await serveSinkFrames(sink, conn, who)
     finally:
       try: await tls.close(conn) except CatchableError: discard
+  else:
+    let who = await exchangeProofs(conn, sink.leaf, anchors,
+      sink.nowMsS() div 1000)
+    if not who.ok:
+      inc sink.rejectedHandshakes
+      return
+    await serveSinkFrames(sink, conn, who)
 
 proc handleSinkConnection(sink: EvidenceSinkServer;
                           sock: AsyncSocket) {.async.} =
@@ -1030,7 +936,8 @@ proc handleSinkConnection(sink: EvidenceSinkServer;
     await serveSinkConnection(sink, conn, anchors)
   except CatchableError:
     discard
-  try: await tls.close(conn) except CatchableError: discard
+  when SinkMutation != "sink-close-in-finally":
+    try: await tls.close(conn) except CatchableError: discard
 proc acceptLoop(sink: EvidenceSinkServer) {.async.} =
   while sink.running:
     var client: AsyncSocket
@@ -1040,9 +947,7 @@ proc acceptLoop(sink: EvidenceSinkServer) {.async.} =
       break
     # One connection's failure never stops the sink: its future's error is
     # counted, never re-raised into the dispatcher (``asyncCheck`` would).
-    let f = when SinkMutation == "sink-close-in-finally":
-              handleSinkConnectionWithFinally(sink, client)
-            else: handleSinkConnection(sink, client)
+    let f = handleSinkConnection(sink, client)
     f.addCallback(proc (x: Future[void]) =
       if x.failed:
         inc sink.failedConnections)

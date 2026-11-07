@@ -47,6 +47,9 @@ type
     identityDir*: string
     anchorsDir*: string
     keyDir*: string
+    revokedPath*: string
+      ## The sink's revocation list (``--revoked``): absent, nobody is
+      ## revoked; ``revoke`` writes a host into it.
     port*: int
     hostId*: string
     process: Process
@@ -79,6 +82,7 @@ proc startGateSink*(g: Guest): GateSink =
   result.identityDir = result.root / "identity"
   result.anchorsDir = result.root / "anchors"
   result.keyDir = result.root / "checkpoint-key"
+  result.revokedPath = result.root / "revoked"
   result.published = result.root / "published"
   result.log = result.root / "sink.log"
   for d in [result.storeDir, result.anchorsDir, result.published]: createDir(d)
@@ -91,6 +95,7 @@ proc startGateSink*(g: Guest): GateSink =
     " --identity=" & quoteShell(result.identityDir) &
     " --anchors=" & quoteShell(result.anchorsDir) &
     " --checkpoint-key=" & quoteShell(result.keyDir) &
+    " --revoked=" & quoteShell(result.revokedPath) &
     " --bind=127.0.0.1 --port=0 --ready-file=" & quoteShell(ready) &
     " >> " & quoteShell(result.log) & " 2>&1"])
   while true:
@@ -142,6 +147,12 @@ proc enrol*(g: Guest; s: GateSink): string =
   g.copyFrom(GuestCredentialCert, local)
   result = $derivePeerIdFromPublicKey(certPublicKey(certPemToDer(readFile(local))))
   copyFile(local, s.anchorsDir / (result & ".crt"))
+
+proc revoke*(s: GateSink; host: string) =
+  ## Revoke ``host``'s credential at the sink: it still proves and is
+  ## enrolled, so the sink reads its frames, records each as refused and
+  ## acknowledges none (re-read at every frame, G17).
+  writeFile(s.revokedPath, host & "\n")
 
 proc entries*(s: GateSink): seq[EvidenceEntry] =
   ## Read locally, as an investigator on the sink host would (EVID-3).

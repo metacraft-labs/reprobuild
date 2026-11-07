@@ -256,7 +256,7 @@ suite "the A11 drill's findings":
     let followed = enrolFromStore(hosts, sink.storeDir)
     check followed.changed
     check followed.hosts.anyIt(it.hostId == newHost and it.attestationKey == newKey)
-    check followed.hosts[0].retiredAt > 0'u64
+    check followed.hosts[0].retiredAt.isSome
     # A record under the retired id is an alert.
     h.tick()
     h.ship()
@@ -266,7 +266,7 @@ suite "the A11 drill's findings":
     check statusOf(r, h.credentialHost, "host") == "retired"
     # Retired before the hand-over (presumed compromised): it is refused.
     var early = hosts
-    early[0].retiredAt = 1
+    early[0].retiredAt = some(1'u64)
     let refused = enrolFromStore(early, sink.storeDir)
     check not refused.hosts.anyIt(it.hostId == newHost)
     check runEvidenceCheck(inputsFor(sink, early, int64(epochTime() * 1000))).alerts.anyIt(

@@ -24,6 +24,7 @@ import repro_binary_cache_server/manifest_codec as serverCodec
 import repro_profile
 import repro_profile_compile/binary_cache_build_actions
 import repro_peer_cache/auth as peerAuth
+import repro_test_support/fresh_binary
 
 import ./addon_testbed
 import ./agent_e2e_support
@@ -37,14 +38,18 @@ type CacheServer* = ref object
 proc cacheServerExe(): string =
   ## The daemon of THIS tree: ``REPRO_ADDON_CACHE_SERVER``, else the one in
   ## the engine closure the gate was given (``REPRO_ADDON_ENGINE_CLOSURE``),
-  ## else ``build/bin`` of the checkout. Never a ``repro`` found on PATH: a
-  ## pinned older daemon is another program than the one under test.
+  ## else ``build/bin`` of the checkout, built from it as it is now. Never
+  ## a ``repro`` found on PATH: a pinned older daemon is another program
+  ## than the one under test.
   result = getEnv("REPRO_ADDON_CACHE_SERVER")
   if result.len > 0: return
   let engine = getEnv("REPRO_ADDON_ENGINE_CLOSURE")
-  for cand in [(if engine.len > 0: engine / "bin" / "repro-binary-cache" else: ""),
-               reproRoot() / "build" / "bin" / "repro-binary-cache"]:
-    if cand.len > 0 and fileExists(cand): return cand
+  if engine.len > 0 and fileExists(engine / "bin" / "repro-binary-cache"):
+    return engine / "bin" / "repro-binary-cache"
+  # ``build/bin``'s only when built from this tree as it is now: a daemon
+  # older than its sources is refused (``StaleHelperBinary``), not run.
+  if fileExists(reproRoot() / "build" / "bin" / "repro-binary-cache"):
+    return freshRepoBinary(reproRoot(), "repro-binary-cache")
   raise newException(TestBedError, "no repro-binary-cache of this tree: set " &
     "REPRO_ADDON_CACHE_SERVER or REPRO_ADDON_ENGINE_CLOSURE, or build it")
 

@@ -149,6 +149,7 @@ commands:
       only then. It announces itself first, so the sink's check reads it as
       a self-test, not as a probe (G34).
   uninstall [--keep-store] [--discard-store-evidence]
+            [--discard-unacknowledged-store-evidence]
       Reverse everything the ownership ledger records.
   verify [--boot | --after-dpkg]
       Compare every ledger object with the host (report only). --after-dpkg
@@ -319,6 +320,8 @@ proc parseUninstallArgs*(rest: seq[string]): UninstallOptions =
   for a in rest:
     if a == "--keep-store": result.keepStore = true
     elif a == "--discard-store-evidence": result.discardStoreEvidence = true
+    elif a == "--discard-unacknowledged-store-evidence":
+      result.discardUnacknowledgedStoreEvidence = true
     else: raise newException(ValueError, "unknown option " & a)
 
 proc parseBootstrapArgs*(rest: seq[string]): BootstrapOptions =
@@ -509,6 +512,11 @@ proc runAddonCli*(args: seq[string]): int =
         return 2
     of "uninstall":
       let r = runAddonUninstall(parseUninstallArgs(rest))
+      if r.overrideRecord.len > 0:
+        # §13 decision 62: the record of what was discarded unshipped.
+        stdout.write("store evidence discarded before the Evidence sink " &
+          "acknowledged it; the signed record is " & r.overrideRecord &
+          ":\n" & r.overrideRecordText)
       for p in r.removed: stdout.write("removed " & p & "\n")
       for d in r.drift: stdout.write("left in place (drift): " & d & "\n")
       for k in r.keptEvidence:

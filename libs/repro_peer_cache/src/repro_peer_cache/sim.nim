@@ -383,6 +383,10 @@ proc runTlsHandshakeSmokePass*(n: int = 4): Future[bool] {.async.} =
   ## iff every peer has reached the same-tenant view (`n - 1` peers).
   ## Used by the demonstration driver when `--tls-enabled=true`.
   let peers = await spawnLoopbackTlsPeers(n)
+  # The peers are stopped after the body in sequence, never with an
+  # ``await`` in a ``finally`` (Nim 2.2.4 resumes such a ``finally`` with a
+  # nil future: "yielded nil"); a failure of the body is re-raised after.
+  var failure: ref CatchableError = nil
   try:
     for i in 0 ..< n:
       await peers[i].client.start()
@@ -401,11 +405,13 @@ proc runTlsHandshakeSmokePass*(n: int = 4): Future[bool] {.async.} =
         settled = true
         break
     result = settled
-  finally:
-    for i in 0 ..< n:
-      try: await peers[i].client.stop() except CatchableError: discard
-    for peer in peers:
-      peer.server.stop()
+  except CatchableError as e:
+    failure = e
+  for i in 0 ..< n:
+    try: await peers[i].client.stop() except CatchableError: discard
+  for peer in peers:
+    peer.server.stop()
+  if failure != nil: raise failure
 
 # ---------------------------------------------------------------------------
 # Lifecycle.

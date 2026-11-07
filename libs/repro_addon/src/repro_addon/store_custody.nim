@@ -505,7 +505,7 @@ proc recordRecovered*(site: CustodySite; obj: StoreObjectRef;
     category: ecDetection, trigger: "store-recovered",
     fields: @[("path", obj.path), ("kind", $obj.kind),
               ("digest", expected), ("observedDigest", observed),
-              ("evidence", entry), ("source", source),
+              ("evidence", entry), ("recoveredFrom", source),
               ("message", obj.path & " no longer held the bytes it was " &
                "realised with; kept at " & entry & " and re-realised from " &
                source)], attest: true), site.evidence)

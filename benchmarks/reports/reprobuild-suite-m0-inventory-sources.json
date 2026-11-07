@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 34,
-    "nimTestBinaries": 2689,
+    "nimTestBinaries": 2692,
     "pureUnitConsolidationGroups": 79,
     "pureUnitTests": 740,
-    "staticallyDetectedRuntimeCompilerFlowTests": 138,
-    "testEntries": 2729
+    "staticallyDetectedRuntimeCompilerFlowTests": 139,
+    "testEntries": 2732
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1560,11 +1560,11 @@
   ],
   "static": {
     "classificationCounts": {
-      "graph-fixture": 20,
-      "integration": 1484,
+      "graph-fixture": 21,
+      "integration": 1485,
       "platform/destructive": 173,
       "pure unit": 740,
-      "unclassified": 312
+      "unclassified": 313
     },
     "graphOwnedTestArtifacts": [
       {
@@ -1772,9 +1772,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2689,
+    "nimTestBinaryCount": 2692,
     "pythonTestFileCount": 40,
-    "testEntryCount": 2729
+    "testEntryCount": 2732
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -2493,6 +2493,26 @@
         }
       ],
       "source": "libs/repro_profile_compile/tests/t_template_in_template_named_args.nim"
+    },
+    {
+      "class": "graph-fixture",
+      "matches": [
+        {
+          "assignedCommandVariable": "cmd",
+          "commandVariableExecuted": true,
+          "directExecutionLine": false,
+          "executedVariables": [
+            "cmd"
+          ],
+          "line": 41,
+          "path": "libs/repro_test_support/tests/t_fresh_helper_binary_refuses_a_stale_build.nim",
+          "patterns": [
+            "nim-argv"
+          ],
+          "snippet": "let cmd = quoteShellCommand([\"nim\", \"c\", \"--hints:off\", \"--warnings:off\","
+        }
+      ],
+      "source": "libs/repro_test_support/tests/t_fresh_helper_binary_refuses_a_stale_build.nim"
     },
     {
       "class": "integration",
@@ -9321,8 +9341,8 @@
     },
     {
       "binary": "build/test-bin/t_addon_review_round3",
-      "class": "unclassified",
-      "classificationReason": "imports `asyncdispatch`, which grants out-of-process reach",
+      "class": "integration",
+      "classificationReason": "subprocess or repro CLI invocation in test body",
       "defines": [],
       "language": "nim",
       "localDependencyShape": [
@@ -9335,6 +9355,25 @@
       "source": "libs/repro_addon/tests/t_addon_review_round3.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 8,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_addon_review_round4",
+      "class": "unclassified",
+      "classificationReason": "binds an OS-global endpoint (through `libs/repro_addon/tests/addon_evidence_fixture.nim`)",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_addon",
+        "repro_deploy_agent",
+        "repro_peer_cache"
+      ],
+      "owner": "libs/repro_addon",
+      "requiresReproBinary": false,
+      "source": "libs/repro_addon/tests/t_addon_review_round4.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 6,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -15003,6 +15042,24 @@
       "source": "libs/repro_distributed_worker/tests/t_reach_goal_derivation_and_lease_plumbing.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 10,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_signer_closes_after_its_early_returns",
+      "class": "unclassified",
+      "classificationReason": "imports `net`, which grants out-of-process reach",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_distributed_worker",
+        "repro_peer_cache"
+      ],
+      "owner": "libs/repro_distributed_worker",
+      "requiresReproBinary": false,
+      "source": "libs/repro_distributed_worker/tests/t_signer_closes_after_its_early_returns.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -25451,6 +25508,23 @@
       "sourceSuiteCount": 7,
       "staticCaseCount": 14,
       "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_fresh_helper_binary_refuses_a_stale_build",
+      "class": "graph-fixture",
+      "classificationReason": "test body compiles or links a helper/fixture artifact",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_test_support"
+      ],
+      "owner": "libs/repro_test_support",
+      "requiresReproBinary": false,
+      "source": "libs/repro_test_support/tests/t_fresh_helper_binary_refuses_a_stale_build.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 5,
+      "staticallyDetectedRuntimeCompilerFlow": true,
       "targetOs": "soAny"
     },
     {

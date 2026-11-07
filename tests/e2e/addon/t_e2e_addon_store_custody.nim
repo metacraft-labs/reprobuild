@@ -41,7 +41,14 @@
 ##    removes nothing; with it, it removes them with the state. An object
 ##    left aside in the store (as a crash leaves it) is named too, and (§13
 ##    decision 56) its DET-AO-5 ``store-recovery-interrupted`` record
-##    reaches the sink before anything is discarded.
+##    reaches the sink before anything is discarded. Then the sink
+##    receives the records and does not acknowledge them (the host's
+##    credential revoked at the sink), and ``--discard-store-evidence`` is
+##    refused, removing nothing (decision 56). With
+##    ``--discard-unacknowledged-store-evidence`` (decision 62) uninstall
+##    removes them, after writing a signed record of each object discarded
+##    unshipped to ``/var/log/repro-addon``, which it prints and which
+##    stays after it.
 ##
 ## Falsifying mutations: ``custody-skips-file-sources`` (steps 2 and 4: the
 ## altered bytes are installed into /etc), ``custody-skips-closures`` (step
@@ -52,7 +59,9 @@
 ## and ``fetch-skips-missing-member`` (step 3: the second tick refuses
 ## too), ``uninstall-discards-evidence-silently`` (step 5: the first
 ## uninstall removes the evidence), ``uninstall-discards-unrecorded`` (step
-## 5: the object left aside reaches no record).
+## 5: the object left aside reaches no record), ``uninstall-skips-ack-refusal``
+## (step 5: the unacknowledged discard goes ahead), ``override-unrecorded``
+## (step 5: the override writes and prints no record).
 ##
 ## Opt-in: ``REPRO_ADDON_VM_GATES=1``.
 ##
@@ -281,14 +290,76 @@ proc body(g: Guest; repro: string; step: StepFn; record: JsonNode;
       asideRecorded = true
   step("the object left aside was recorded and the record reached the sink " &
        "before anything was discarded (decision 56)", asideRecorded, "")
-  let un = g.exec(repro & " system addon uninstall --discard-store-evidence",
-                  timeoutSec = 1800)
+
+  # Decision 56's refusal: the sink receives the records and does not
+  # acknowledge them (the host's credential is revoked at the sink: it
+  # still proves, the sink reads the append and records it refused, and
+  # sends no receipt). A second object left aside is recorded but not
+  # acknowledged, and ``--discard-store-evidence`` is refused.
+  let aside2 = "/repro/store/tmp/custody-aside/20261107T000001Z-gate-2-a"
+  let leave2 = g.exec("unshare --mount --propagation private /bin/sh -c " &
+    quoteShell("mount -o remount,bind,rw /repro/store && mkdir -p " & aside2 &
+      " && printf altered > " & aside2 & "/f && printf '%s\\n' " &
+      "/repro/store/prefixes/gate/2-a > " & aside2 & ".from"))
+  step("a second object is left aside in the store",
+       leave2.exitCode == 0, leave2.stderr)
+  sink.revoke(host)
+  let since6 = sink.headSeq()
+  let un1 = g.exec(repro & " system addon uninstall --discard-store-evidence",
+                   timeoutSec = 1800)
+  record["uninstallUnacknowledged"] = %(un1.stdout & un1.stderr)
+  step("the sink receiving but not acknowledging, --discard-store-evidence " &
+       "is refused and nothing is removed (decision 56)",
+       un1.exitCode != 0 and
+         "has not acknowledged" in un1.stdout & un1.stderr and
+         "--discard-unacknowledged-store-evidence" in un1.stdout & un1.stderr and
+         "nothing was removed" in un1.stdout & un1.stderr and
+         g.evidenceCount() == entries and
+         g.exec("test -d " & aside2).exitCode == 0 and
+         g.exec("test -d /var/lib/repro/system").exitCode == 0,
+       un1.stdout & un1.stderr)
+  var refusedAppend, aside2Appended = false
+  for e in sink.entries():
+    if e.seq > since6 and $e.senderHostId == host:
+      if e.kind == ekRefusedVerb: refusedAppend = true
+      if e.kind == ekRecord and e.record.field("evidence") == aside2:
+        aside2Appended = true
+  step("the sink received the append and appended none of its records",
+       refusedAppend and not aside2Appended, "")
+
+  # Decision 62, the explicit recorded override: uninstall discards anyway,
+  # after a signed local record of every object discarded unshipped, which
+  # it prints and leaves outside the state it removes.
+  let un = g.exec(repro & " system addon uninstall " &
+                  "--discard-unacknowledged-store-evidence", timeoutSec = 1800)
   record["uninstall"] = %(un.stdout & un.stderr)
-  step("with it, uninstall succeeds and names each store-evidence entry",
+  let said = un.stdout & un.stderr
+  let marker = "the signed record is "
+  var recordPath = ""
+  if marker in said:
+    recordPath = said[said.find(marker) + marker.len .. ^1].splitLines()[0]
+    recordPath.removeSuffix(":")
+  step("with --discard-unacknowledged-store-evidence uninstall succeeds, " &
+       "names each store-evidence entry and prints its signed record",
        un.exitCode == 0 and
-         (un.stdout & un.stderr).count("(store evidence)") == entries and
-         (aside & " (store evidence left aside)") in un.stdout & un.stderr,
-       un.stdout & un.stderr)
+         said.count("(store evidence)") == entries and
+         (aside2 & " (store evidence left aside)") in said and
+         recordPath.startsWith("/var/log/repro-addon/") and
+         aside2 in said[said.find(marker) .. ^1],
+       said)
+  let kept = g.exec("cat " & quoteShell(recordPath)).stdout
+  var signed = false
+  try:
+    let doc = parseJson(kept)
+    var objects: seq[string]
+    for o in doc["record"]["objects"]: objects.add(o.getStr())
+    signed = aside2 in objects and doc["signature"].getStr().len == 128 and
+      doc["record"]["schema"].getStr() ==
+        "repro-addon-store-evidence-discarded-unshipped/1"
+  except CatchableError: discard
+  record["overrideRecord"] = %kept
+  step("the signed record names the object discarded unshipped and stays " &
+       "after uninstall (decision 62)", signed, kept)
   step("the evidence directory is gone with the state",
        g.exec("test -e " & Evidence).exitCode != 0, "")
 

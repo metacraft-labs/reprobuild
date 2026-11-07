@@ -771,6 +771,39 @@
 ##                                            first entry (sequence 0)
 ##                                            prints and matches as one
 ##                                            without a sequence
+## ``allow-source-field``                     the record redaction lets a
+##                                            ``source`` field through
+##                                            (round 4)
+## ``uninstall-skips-ack-refusal``            uninstall discards when the
+##                                            sink received the records but
+##                                            did not acknowledge them
+##                                            (round 4, decision 56)
+## ``override-unrecorded``                    the explicit override
+##                                            discards without writing its
+##                                            signed record (decision 62)
+## ``seq-zero-sentinel``                      sequence 0 reads as "no
+##                                            sequence" in the sink's
+##                                            commands, a retirement and a
+##                                            beat before a containment
+##                                            (round 4)
+## ``containment-skew-ignored``               a containment stated more
+##                                            than 10 minutes from its
+##                                            receipt is honoured (round 4)
+## ``signer-close-in-finally``                the Distributed Execution
+##                                            signer awaits its close in a
+##                                            finally, as before; red under
+##                                            Nim 2.2.4 (round 4; the
+##                                            signer's own switch,
+##                                            ``repro_distributed_worker/
+##                                            signer``)
+## ``signer-constant-tuple-return``          the signer's client returns a
+##                                            refusal as a constant tuple
+##                                            literal, as before; SIGSEGV
+##                                            under Nim 2.2.4 (round 4)
+## ``stale-helper-accepted``                  a test's helper binary is used
+##                                            however old it is
+##                                            (``repro_test_support/
+##                                            fresh_binary``; round 4)
 ## =========================================  ==============================
 
 # The deploy agent's own mutations (``repro_deploy_agent/agent_mutations``)
@@ -1244,7 +1277,14 @@ const
                           "ack-rules-cli-only",
                           "uninstall-discards-unrecorded",
                           "egress-state-empty-is-valid",
-                          "alert-seq-zero-is-none"]
+                          "alert-seq-zero-is-none",
+                          # The A11 code review, round 4.
+                          "allow-source-field", "uninstall-skips-ack-refusal",
+                          "override-unrecorded", "seq-zero-sentinel",
+                          "containment-skew-ignored",
+                          "signer-close-in-finally",
+                          "signer-constant-tuple-return",
+                          "stale-helper-accepted"]
 
 when AddonMutation.len > 0 and AddonMutation notin KnownAddonMutations and
     AddonMutation notin KnownAgentMutations:

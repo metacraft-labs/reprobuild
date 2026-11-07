@@ -19,8 +19,8 @@
 ##    entry filed but not recorded gets a ``store-recovery-interrupted``
 ##    record, once.
 ## 7. The containment sequence keeps growing when the host clock goes back.
-## 8. An alert on the sink store's first entry names sequence 0, and can be
-##    acknowledged; a silence names none.
+## 8. An alert on the sink store's first entry names sequence 0, and the
+##    operator's own `ack --seq 0` command handles it; a silence names none.
 ##
 ## Falsifying builds (each turns its own case red):
 ## ``egress-owed-by-listing`` (1), ``egress-owed-dropped-at-reload`` (2),
@@ -33,7 +33,7 @@
 ##
 ## Mocks: none. The sinks are the real in-process sink fixture.
 
-import std/[asyncdispatch, options, os, sequtils, strutils, tables, times, unittest]
+import std/[asyncdispatch, options, os, osproc, sequtils, streams, strtabs, strutils, tables, times, unittest]
 
 import repro_peer_cache/auth as peerAuth
 import repro_peer_cache/evidence
@@ -65,6 +65,12 @@ proc scratchSite(name: string): CustodySite =
     stateDir: st, dir: root / name / "ev", outbox: root / name / "ev" / "outbox",
     confPath: root / name / "evidence.conf", attestationKey: root / "none",
     host: "h", journal: false))
+
+if getEnv("A11_ACK_CHILD").len > 0:
+  # Case 8's operator: the sink's `ack` command, exactly as documented.
+  quit(runSinkCli(["ack", "--dir", getEnv("A11_ACK_CHILD"), "--seq", "0",
+    "--alert", "DET-AO-2/apply-refused", "--operator", "alice",
+    "--reason", "handled", "--wait-seconds", "60"]))
 
 suite "the A11 code review's third round":
   let sink = startSink(root)
@@ -249,11 +255,26 @@ suite "the A11 code review's third round":
     check r0.alerts.anyIt(it.trigger == "apply-refused" and
                           it.sinkSeq == some(0'u64))
     check "apply-refused seq=0" in render(r0)
+    # Through the operator's own command, `repro-evidence-sink ack --seq 0`
+    # (run in a child process, as an operator runs it); this process stands
+    # in for the running sink's inbox loop meanwhile.
     let inbox = sink8.storeDir / OperatorInboxName
     createDir(inbox)
-    writeFile(inbox / "first.ack", "0\nDET-AO-2/apply-refused\nalice\nhandled\n")
-    check processOperatorInbox(sink8.server.store, peerIdOfHex(sink8.hostId),
-                               inbox) == 1
+    let child = startProcess(getAppFilename(), env = newStringTable({
+      "A11_ACK_CHILD": sink8.storeDir, "TMPDIR": getTempDir()}),
+      options = {poStdErrToStdOut})
+    var appended = 0
+    while child.running:
+      appended += processOperatorInbox(sink8.server.store,
+                                       peerIdOfHex(sink8.hostId), inbox)
+      sleep(100)
+    appended += processOperatorInbox(sink8.server.store,
+                                     peerIdOfHex(sink8.hostId), inbox)
+    let ackOut = child.outputStream.readAll()
+    let ackCode = child.waitForExit()
+    child.close()
+    checkpoint ackOut
+    check ackCode == 0 and appended == 1
     let r1 = run8()
     checkpoint render(r1)
     check not r1.alerts.anyIt(it.trigger == "apply-refused")

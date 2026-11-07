@@ -743,6 +743,10 @@ while read -r name path extra_flags; do
   # Both spellings, because Nim appends ``.exe`` on Windows (see
   # resolve_built_binary); the one that does not exist is skipped.
   artifacts=("build/bin/${name}" "build/bin/${name}.exe")
+  # build/nimcache/<name>/<name>.json, Nim's build record, names every
+  # module object linked into the binary; repro_test_support/fresh_binary reads
+  # it to refuse a build/bin binary older than its sources (a test must
+  # never report on an old build).
   entrypoint_status=0
   (
     unset_clingo_searchpath

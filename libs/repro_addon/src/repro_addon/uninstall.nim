@@ -35,7 +35,7 @@
 ## (``e2e_addon_bootstrap_uninstall_byte_identity``), with a negative
 ## control built with ``-d:reproAddonMutation=uninstall-skips-diversion-removal``.
 
-import std/[algorithm, os, posix, sets, strutils]
+import std/[algorithm, json, os, posix, sets, strutils, times]
 
 import repro_core/host_apply_lock
 
@@ -43,6 +43,7 @@ import repro_elevation/posix_system_driver
 
 import ./addon_apply
 import ./collision
+import ./attestation
 import ./etc_write
 import ./evidence
 import ./evidence_ship
@@ -63,6 +64,10 @@ type
   UninstallOptions* = object
     stateDir*: string
     keepStore*: bool
+    discardUnacknowledgedStoreEvidence*: bool
+      ## §13 decision 62: discard the store evidence even when the sink has
+      ## not acknowledged its records, after a signed local record of each
+      ## object discarded unshipped is written and printed.
     discardStoreEvidence*: bool
       ## Remove the store evidence directory's entries with the state; an
       ## uninstall that would remove any refuses without it, naming them
@@ -72,6 +77,10 @@ type
     removed*: seq[string]
     drift*: seq[string]          ## objects left in place, with the reason
     keptAccounts*: seq[string]
+    overrideRecord*: string
+      ## §13 decision 62: the signed local record written when store
+      ## evidence was discarded unshipped ("" when none was).
+    overrideRecordText*: string
     keptEvidence*: seq[string]
       ## Store evidence left with a kept store (``--keep-store``): objects a
       ## crashed recovery left aside, named, not removed.
@@ -228,21 +237,117 @@ proc restorePreBootstrapInputs*(captured: CapturedInputs; keepStore: bool;
     except CatchableError as ex:
       r.errors.add(e.path & ": " & ex.msg)
 
-proc shipEvidenceNow*(stateDir: string): tuple[ok: bool; why: string] =
-  ## Ship the outbox now and report whether the sink acknowledged every
-  ## record in it (an entry leaves the outbox only once acknowledged). A
-  ## host without a sink keeps local records only: there is nothing to
-  ## wait for.
-  let site = defaultShipSite()
+proc shipAndConfirm*(site: ShipSite; host: string):
+    tuple[ok: bool; why: string] =
+  ## Ship ``site``'s outbox once and report whether the sink acknowledged
+  ## every record in it: ``ok`` only when the outbox is empty after the
+  ## run. A sink that refuses, does not answer, or answers without a
+  ## receipt leaves the records queued, and ``why`` says how many and why.
   if not fileExists(site.confPath): return (true, "")
   try:
     let conf = loadEvidenceConf(site.confPath)
-    let r = runEvidenceShip(site, conf, readHostName())
+    let r = runEvidenceShip(site, conf, host)
     if r.pending == 0 and r.error.len == 0: (true, "")
     else: (false, $r.pending & " record(s) still queued" &
            (if r.error.len > 0: ": " & r.error else: ""))
   except CatchableError as e:
     (false, e.msg)
+
+proc shipEvidenceNow*(stateDir: string): tuple[ok: bool; why: string] =
+  ## Ship the outbox now and report whether the sink acknowledged every
+  ## record in it (an entry leaves the outbox only once acknowledged). A
+  ## host without a sink keeps local records only: there is nothing to
+  ## wait for.
+  shipAndConfirm(defaultShipSite(), readHostName())
+
+const UninstallOverrideDir* = "/var/log/repro-addon"
+  ## Where §13 decision 62's override record is written: outside
+  ## ``/var/lib/repro`` and ``/etc/repro``, which uninstall removes.
+
+proc writeOverrideRecord(custody: CustodySite; dir: string;
+                         objects: seq[string]; why: string):
+    tuple[path, text: string] =
+  ## §13 decision 62: the signed local record of the store evidence an
+  ## uninstall discards before the sink acknowledged its records -- every
+  ## object, every record still queued, and why -- signed by the
+  ## attestation key (when the host has one). Raises when it cannot be
+  ## written: then nothing is discarded.
+  let t = getTime()
+  var j = %*{"schema": "repro-addon-store-evidence-discarded-unshipped/1",
+             "time": t.utc.format("yyyy-MM-dd'T'HH:mm:ss'Z'"),
+             "host": custody.evidence.host, "why": why,
+             "objects": objects,
+             "queuedRecords": outboxEntries(custody.evidence.outbox)}
+  let body = $j
+  var signed = %*{"record": j}
+  if fileExists(custody.evidence.attestationKey):
+    let sig = signText(body, custody.evidence.attestationKey)
+    signed["signature"] = %sig.signature
+    signed["attestationKey"] = %sig.publicKeyHex
+  else:
+    signed["signature"] = %""
+    signed["unsigned"] = %"the host has no attestation key"
+  result.text = pretty(signed) & "\n"
+  createDir(dir)
+  setFilePermissions(dir, {fpUserRead, fpUserWrite, fpUserExec})
+  result.path = dir / ("uninstall-" & t.utc.format("yyyyMMdd'T'HHmmss'Z'") &
+                       "-discarded-unshipped.json")
+  writeFileAtomic(result.path, result.text, 0o600)
+
+proc storeEvidenceGate*(custody: CustodySite; opts: UninstallOptions;
+                        ship: proc (): tuple[ok: bool; why: string];
+                        overrideDir = UninstallOverrideDir):
+    tuple[pending, errors: seq[string]; overrideRecord,
+          overrideRecordText: string] =
+  ## What uninstall may discard of the store evidence (§10.2 Uninstall,
+  ## §13 decisions 56 and 62). ``errors`` non-empty: refuse, remove
+  ## nothing.
+  ##
+  ## - Every pending object (entries, objects left aside) is named, and
+  ##   without ``--discard-store-evidence`` the uninstall refuses.
+  ## - Decision 56, record and ship first: before anything is discarded,
+  ##   each object left aside and each entry filed but not recorded gets
+  ##   its DET-AO-5 record, and the outbox is shipped. Until the sink has
+  ##   acknowledged every record, ``--discard-store-evidence`` is refused.
+  ## - Decision 62, the explicit recorded override:
+  ##   ``--discard-unacknowledged-store-evidence`` discards anyway, after a
+  ##   signed local record of everything discarded unshipped is written
+  ##   (and returned, for the caller to print). Nothing is lost silently,
+  ##   and the operator is never stuck.
+  result.pending = pendingStoreEvidence(custody)
+  if result.pending.len == 0: return
+  let discarding = opts.discardStoreEvidence or
+                   opts.discardUnacknowledgedStoreEvidence
+  when not mutated("uninstall-discards-unrecorded"):
+    discard recordUnreportedStoreEvidence(custody)
+  let shipped = ship()
+  if not discarding and not mutated("uninstall-discards-evidence-silently"):
+    for e in result.pending:
+      result.errors.add("store evidence " & e & " would be removed; copy it " &
+        "out, then run uninstall with --discard-store-evidence")
+    result.errors.add("nothing was removed")
+    return
+  if shipped.ok: return
+  if opts.discardUnacknowledgedStoreEvidence:
+    when mutated("override-unrecorded"):
+      return
+    try:
+      let r = writeOverrideRecord(custody, overrideDir, result.pending,
+                                  shipped.why)
+      result.overrideRecord = r.path
+      result.overrideRecordText = r.text
+    except CatchableError as e:
+      result.errors.add("the record of the store evidence discarded " &
+        "unshipped could not be written (" & e.msg & ")")
+      result.errors.add("nothing was removed")
+    return
+  when not mutated("uninstall-skips-ack-refusal"):
+    result.errors.add("the Evidence sink has not acknowledged the " &
+      "records of the store evidence uninstall would discard (" &
+      shipped.why & "); run uninstall again once it has, or discard them " &
+      "unshipped with --discard-unacknowledged-store-evidence, which " &
+      "writes and prints a signed record of each")
+    result.errors.add("nothing was removed")
 
 proc runAddonUninstall*(opts: UninstallOptions): UninstallResult =
   let stateDir = if opts.stateDir.len > 0: opts.stateDir else: DefaultStateDir
@@ -255,27 +360,13 @@ proc runAddonUninstall*(opts: UninstallOptions): UninstallResult =
   # are named, and nothing is removed, until the operator says to discard
   # them (having copied them out).
   let custody = custodySite(stateDir)
-  let evidenceKept = pendingStoreEvidence(custody)
-  # §13 decision 56 (owner, 2026-11-07): record and ship first. Every
-  # object left aside and every entry filed but not recorded gets its
-  # DET-AO-5 record now, shipped while the shipping unit still exists, and
-  # nothing is discarded before the sink has acknowledged them.
-  if evidenceKept.len > 0:
-    discard recordUnreportedStoreEvidence(custody)
-    let shipped = shipEvidenceNow(stateDir)
-    if opts.discardStoreEvidence and not shipped.ok and
-        not mutated("uninstall-discards-unrecorded"):
-      result.errors.add("the Evidence sink has not acknowledged the " &
-        "records of the store evidence uninstall would discard (" &
-        shipped.why & "); run uninstall again once it has")
-      result.errors.add("nothing was removed")
-      return
-  if evidenceKept.len > 0 and not opts.discardStoreEvidence and
-      not mutated("uninstall-discards-evidence-silently"):
-    for e in evidenceKept:
-      result.errors.add("store evidence " & e & " would be removed; copy it " &
-        "out, then run uninstall with --discard-store-evidence")
-    result.errors.add("nothing was removed")
+  let gate = storeEvidenceGate(custody, opts,
+    proc (): tuple[ok: bool; why: string] = shipEvidenceNow(stateDir))
+  let evidenceKept = gate.pending
+  result.overrideRecord = gate.overrideRecord
+  result.overrideRecordText = gate.overrideRecordText
+  if gate.errors.len > 0:
+    result.errors.add(gate.errors)
     return
   let l = readLedger(ledgerCopyPath(stateDir))
   # Pre-bootstrap inputs the add-on took over go back exactly as found

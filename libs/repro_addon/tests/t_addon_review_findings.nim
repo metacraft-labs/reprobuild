@@ -281,11 +281,11 @@ suite "the A11 code review's findings":
                                attestationKey: h.attestationKey),
                   EnrolledHost(hostId: other, target: "t")]
     let followed = enrolFromStore(hosts, sink.storeDir)
-    check followed.hosts[0].retiredAt == 0'u64
+    check followed.hosts[0].retiredAt.isNone
     check runEvidenceCheck(inputs(hosts)).alerts.anyIt(
       it.trigger == "handover-invalid")
     var retired = hosts[0 .. 0]
-    retired[0].retiredAt = 5
+    retired[0].retiredAt = some(5'u64)
     check runEvidenceCheck(inputs(retired)).alerts.anyIt(
       it.trigger == "retired-without-successor")
 
@@ -544,7 +544,7 @@ suite "the A11 code review's findings":
     let id = "ab".repeat(32)
     let succ = "cd".repeat(32)
     let hs = parseHosts(id & " t retired@7:" & succ & "\n")
-    check hs[0].retiredAt == 7'u64
+    check hs[0].retiredAt == some(7'u64)
     check hs[0].successor == succ
     check hs[0].attestationKey == ""
     check parseHosts(renderHosts(hs)) == hs

@@ -3285,6 +3285,12 @@ e2e_hcr_linux_registration_payloads_travel_over_the_production_wire:
         tests/e2e/hcr-linux-unwind/t_e2e_hcr_linux_registration_payloads_travel_over_the_production_wire.nim \
         2>&1 | tee test-logs/e2e_hcr_linux_registration_payloads_travel_over_the_production_wire.log
 
+# The Nim 2.2.4 lane: the async suites that once awaited inside a `finally`,
+# built and run with the lowest Nim repro.nim's `uses:` range admits (owner
+# decision 2026-11-07). Needs the dev shell.
+test-nim224 *tests:
+    bash scripts/run_nim224_lane.sh {{tests}}
+
 # Exercise the actual fork parser and independent script publication guard.
 test-format:
     bash ./tests/integration/t_format_preserves_meaning.sh

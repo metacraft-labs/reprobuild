@@ -13,6 +13,7 @@
 import std/[os, osproc, strtabs, strutils, times]
 
 import repro_peer_cache
+import repro_test_support/fresh_binary
 
 type
   TestNode* = object
@@ -80,10 +81,13 @@ proc m7TestBase*(name: string): string =
     fpGroupRead, fpGroupExec, fpOthersRead, fpOthersExec})
 
 proc evidenceSinkBin*(): string =
-  repoRootDir() / "build" / "bin" / addFileExt("repro-evidence-sink", ExeExt)
+  ## ``build/bin/repro-evidence-sink``, refused when it is older than any
+  ## source it was built from (``repro_test_support/fresh_binary``): these
+  ## tests must hold the sink of the tree under test.
+  freshRepoBinary(repoRootDir(), "repro-evidence-sink")
 
 proc engineBin*(): string =
-  repoRootDir() / "build" / "bin" / addFileExt("reprobuild", ExeExt)
+  freshRepoBinary(repoRootDir(), "reprobuild")
 
 proc newTestNode*(base, name: string): TestNode =
   ## A node with a freshly minted host CA under

@@ -219,7 +219,7 @@ and the altered copy is kept on the host, readable by root only, under
 as it was found (`tree/`), a `manifest` of its entries' digests and a
 `record` of what was expected and found. The host ships an `addon-store`
 record for it: `store-recovered` once the object holds its original bytes
-again. If the host lost power during a recovery, the next switch files
+again, its `recoveredFrom` field naming the trusted source. If the host lost power during a recovery, the next switch files
 what it had moved aside and ships `store-recovery-interrupted`. At most
 eight entries are kept, none older than 90 days.
 
@@ -235,6 +235,22 @@ run
 ```sh
 repro system addon uninstall --discard-store-evidence
 ```
+
+If the sink cannot acknowledge them (it is gone, or no longer accepts
+this host) and you must remove the add-on anyway, override the refusal
+explicitly:
+
+```sh
+repro system addon uninstall --discard-unacknowledged-store-evidence
+```
+
+Before it removes anything, this writes a record of every object it
+discards without the sink having acknowledged it, and of every record
+still queued, signed with the host's attestation key, to
+`/var/log/repro-addon/uninstall-<time>-discarded-unshipped.json` (root
+only). It prints the record's path and text. The file stays after
+uninstall: keep it with the entries you copied off the host. If the
+record cannot be written, uninstall refuses and removes nothing.
 
 A host bootstrapped by an older release is brought up to date by its
 first switch, or at once with
