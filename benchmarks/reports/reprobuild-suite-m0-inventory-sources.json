@@ -2806,7 +2806,7 @@
             "repoRoot",
             "targetBin"
           ],
-          "line": 104,
+          "line": 111,
           "path": "tests/e2e/hcr-linux-direct/t_e2e_hcr_linux_x86_64_single_threaded_direct_patch.nim",
           "patterns": [
             "gcc"
@@ -2825,7 +2825,7 @@
             "repoRoot",
             "targetBin"
           ],
-          "line": 131,
+          "line": 138,
           "path": "tests/e2e/hcr-linux-direct/t_e2e_hcr_linux_x86_64_single_threaded_direct_patch.nim",
           "patterns": [
             "gcc"
@@ -2993,7 +2993,7 @@
             "repro",
             "target"
           ],
-          "line": 152,
+          "line": 159,
           "path": "tests/e2e/hcr-linux-hardening/t_integration_hcr_linux_hardened_host_refuses_at_negotiation.nim",
           "patterns": [
             "gcc"
@@ -3020,7 +3020,7 @@
             "repro",
             "source"
           ],
-          "line": 143,
+          "line": 150,
           "path": "tests/e2e/hcr-linux-hardening/t_integration_hcr_linux_provider_code_pages_are_sealed_dual_mappings.nim",
           "patterns": [
             "gcc"
@@ -3041,7 +3041,7 @@
             "repro",
             "source"
           ],
-          "line": 168,
+          "line": 175,
           "path": "tests/e2e/hcr-linux-hardening/t_integration_hcr_linux_provider_code_pages_are_sealed_dual_mappings.nim",
           "patterns": [
             "gcc"
@@ -3163,7 +3163,7 @@
             "repoRoot",
             "targetBin"
           ],
-          "line": 270,
+          "line": 277,
           "path": "tests/e2e/hcr-linux-threads/t_e2e_hcr_linux_concurrent_patch_no_torn_instruction.nim",
           "patterns": [
             "gcc"
@@ -32001,7 +32001,8 @@
       "localDependencyShape": [
         "repro_hcr_agent",
         "repro_hcr_linker",
-        "repro_project_dsl"
+        "repro_project_dsl",
+        "repro_test_support"
       ],
       "owner": "tests/e2e",
       "requiresReproBinary": false,
@@ -32074,7 +32075,8 @@
       "language": "nim",
       "localDependencyShape": [
         "repro_hcr_agent",
-        "repro_project_dsl"
+        "repro_project_dsl",
+        "repro_test_support"
       ],
       "owner": "tests/e2e",
       "requiresReproBinary": true,
@@ -32128,7 +32130,8 @@
       "defines": [],
       "language": "nim",
       "localDependencyShape": [
-        "repro_hcr_agent"
+        "repro_hcr_agent",
+        "repro_test_support"
       ],
       "owner": "tests/e2e",
       "requiresReproBinary": true,
