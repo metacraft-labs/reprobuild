@@ -11143,25 +11143,36 @@ proc ensureLockPinnedCatalog*(modulePath, consumerRoot: string): string =
     discard
   return ""
 
-proc extractInterfaceEdgeUnchecked(modulePath, artifactPath, stubPath: string;
-                                   workDir, scratchDir, consumerRoot,
-                                   publicCliPath, cacheRoot: string;
-                                   stats: var BuildStats;
-                                   requireStub = true;
-                                   resourceModule = "";
-                                   extraPaths: openArray[string] = [];
-                                   bypassRunQuota = false;
-                                   fallbackToRunQuotaBypass = false;
-                                   forceRebuild = false;
-                                   suppressTrace = true;
-                                   skipCacheHitEvidence = true;
-                                   statsEnabled = false;
-                                   validateExistingOnly = false;
-                                   providerCompilerCommand: seq[string] = @[];
-                                   cancelCheck: BuildCancelCallback = nil;
-                                   observeRunResult:
-                                     proc(r: BuildRunResult) {.closure.} = nil):
+proc extractInterfaceEdge(modulePath, artifactPath, stubPath: string;
+                          workDir, scratchDir, consumerRoot,
+                          publicCliPath, cacheRoot: string;
+                          stats: var BuildStats;
+                          requireStub = true;
+                          resourceModule = "";
+                          extraPaths: openArray[string] = [];
+                          bypassRunQuota = false;
+                          fallbackToRunQuotaBypass = false;
+                          forceRebuild = false;
+                          suppressTrace = true;
+                          skipCacheHitEvidence = true;
+                          statsEnabled = false;
+                          validateExistingOnly = false;
+                          providerCompilerCommand: seq[string] = @[];
+                          cancelCheck: BuildCancelCallback = nil;
+                          observeRunResult:
+                            proc(r: BuildRunResult) {.closure.} = nil):
     ProjectInterfaceArtifact =
+  ## N3 (Distribution-And-Packaging §5.3): the recipe's `uses: nim` range is
+  ## checked inside the extraction itself
+  ## (`repro_interface_artifacts.extractInterfaceFromModule`), and the
+  ## extraction reads `$REPRO_INSTALLED_PREFIX_NIM` as it does so, so the
+  ## monitor records the variable as an input of this edge: a cache hit
+  ## returns only an artifact that passed the check under the same value
+  ## (measured: `aclMissInputChanged ... environment:
+  ## REPRO_INSTALLED_PREFIX_NIM`), and an edge whose capture was incomplete is
+  ## not recorded at all. No check after the call is needed, and none is made
+  ## (A15 round-4 verification, 2026-11-07).
+  ##
   ## Materialize a project interface through the build engine.
   ##
   ## THE ENGINE ALONE decides whether the edge re-runs. There is deliberately
@@ -11584,43 +11595,6 @@ proc extractInterfaceEdgeUnchecked(modulePath, artifactPath, stubPath: string;
     releaseInterfaceArtifactLock(artifactLock)
     if relocatable:
       releaseInterfaceArtifactLock(edgeLock)
-
-proc extractInterfaceEdge(modulePath, artifactPath, stubPath: string;
-                          workDir, scratchDir, consumerRoot, publicCliPath,
-                          cacheRoot: string;
-                          stats: var BuildStats;
-                          requireStub = true;
-                          resourceModule = "";
-                          extraPaths: openArray[string] = [];
-                          bypassRunQuota = false;
-                          fallbackToRunQuotaBypass = false;
-                          forceRebuild = false;
-                          suppressTrace = true;
-                          skipCacheHitEvidence = true;
-                          statsEnabled = false;
-                          validateExistingOnly = false;
-                          providerCompilerCommand: seq[string] = @[];
-                          cancelCheck: BuildCancelCallback = nil;
-                          observeRunResult: proc(r: BuildRunResult) {.closure.}
-                            = nil):
-    ProjectInterfaceArtifact =
-  ## ``extractInterfaceEdgeUnchecked``, then N3's check of the recipe's own
-  ## ``uses: nim`` range against the installed prefix's compiler
-  ## (Distribution-And-Packaging §5.3, amendment N3:
-  ## ``requireProjectNimAdmitsInstalledPrefixNim``). The interface is the
-  ## first moment the range can be read, and every recipe this engine reads
-  ## an interface of -- the project's own, a sibling source recipe, a
-  ## cross-repo producer, a durable solver provider -- is one whose provider
-  ## it may then compile. Checking here rather than after each call is what
-  ## keeps a new call site from being the one that forgets (A15 round-3
-  ## verification, 2026-11-06, found four).
-  result = extractInterfaceEdgeUnchecked(modulePath, artifactPath, stubPath,
-    workDir, scratchDir, consumerRoot, publicCliPath, cacheRoot, stats,
-    requireStub, resourceModule, extraPaths, bypassRunQuota,
-    fallbackToRunQuotaBypass, forceRebuild, suppressTrace,
-    skipCacheHitEvidence, statsEnabled, validateExistingOnly,
-    providerCompilerCommand, cancelCheck, observeRunResult)
-  requireProjectNimAdmitsInstalledPrefixNim(result.projectInterface.toolUses)
 
 proc cacheAttributionLines*(item: ActionResult): seq[string] =
   ## The follow-on lines a `--log=actions` entry needs before a PERMANENT

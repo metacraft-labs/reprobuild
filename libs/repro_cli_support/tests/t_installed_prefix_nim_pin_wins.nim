@@ -18,21 +18,13 @@
 ## use, so publishing the pin clears it (A15 round-3 verification,
 ## 2026-11-06; checked by removing the clear).
 ##
-## Every interface extraction is followed by the recipe's `uses: nim`
-## check, because `extractInterfaceEdge` is a wrapper that runs it after
-## `extractInterfaceEdgeUnchecked`. Four extraction sites once had no check
-## (sibling source recipes, cross-repo producers, the inspection's
-## producers, durable solver providers; A15 round-3 verification). The last
-## suite holds that structure by reading the source: the unchecked proc has
-## one caller, the wrapper, and the wrapper runs the check.
-##
 ## A missing gcc fails a gate run (`REPROBUILD_GATE_RUN=1`) and is reported
 ## SKIPPED elsewhere.
 ##
 ## *Mocking.* None: a real installed-prefix layout; the shipped `bin/nim`
 ## and the pinned compiler are files the route never runs.
 
-import std/[os, strutils, tempfiles, unittest]
+import std/[os, tempfiles, unittest]
 
 import repro_cli_support/project_pins
 import repro_core/installed_prefix_nim
@@ -117,17 +109,3 @@ suite "a project pin wins over the installed prefix's Nim":
       requireProjectNimAdmitsInstalledPrefixNim(@[InterfaceToolUse(
         rawConstraint: "nim ==2.2.10", packageSelector: "nim",
         executableName: "nim")])
-
-suite "every interface extraction checks the recipe's uses: nim":
-  test "the unchecked extraction has one caller, and it runs the check":
-    let src = readFile(currentSourcePath().parentDir.parentDir / "src" /
-      "repro_cli_support.nim")
-    # The definition and the wrapper's call; a direct caller elsewhere would
-    # be an extraction the check does not follow.
-    check src.count("extractInterfaceEdgeUnchecked(") == 2
-    let wrapper = src.find("proc extractInterfaceEdge(")
-    require wrapper >= 0
-    let body = src[wrapper ..< src.find("\nproc ", wrapper + 1)]
-    check "result = extractInterfaceEdgeUnchecked(" in body
-    check "requireProjectNimAdmitsInstalledPrefixNim(" &
-      "result.projectInterface.toolUses)" in body

@@ -5811,6 +5811,17 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "t_group_libs_repro_interface_artifacts_tests_g01",
     singleReason: ""),
   TestSpec(
+    source: "libs/repro_interface_artifacts/tests/t_extraction_checks_the_prefix_nim.nim",
+    binary: "build/test-bin/t_extraction_checks_the_prefix_nim",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "t_group_libs_repro_interface_artifacts_tests_g01",
+    singleReason: ""),
+  TestSpec(
     source: "libs/repro_interface_artifacts/tests/t_installed_layout_source_roots.nim",
     binary: "build/test-bin/t_installed_layout_source_roots",
     defines: @[],

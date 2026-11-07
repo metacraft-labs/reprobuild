@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 34,
-    "nimTestBinaries": 2687,
+    "nimTestBinaries": 2688,
     "pureUnitConsolidationGroups": 79,
     "pureUnitTests": 740,
-    "staticallyDetectedRuntimeCompilerFlowTests": 137,
-    "testEntries": 2727
+    "staticallyDetectedRuntimeCompilerFlowTests": 138,
+    "testEntries": 2728
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1560,7 +1560,7 @@
   ],
   "static": {
     "classificationCounts": {
-      "graph-fixture": 19,
+      "graph-fixture": 20,
       "integration": 1484,
       "platform/destructive": 173,
       "pure unit": 740,
@@ -1772,9 +1772,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2687,
+    "nimTestBinaryCount": 2688,
     "pythonTestFileCount": 40,
-    "testEntryCount": 2727
+    "testEntryCount": 2728
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -2135,6 +2135,60 @@
         }
       ],
       "source": "libs/repro_home_resources/tests/t_macos_app_vendor_updates.nim"
+    },
+    {
+      "class": "graph-fixture",
+      "matches": [
+        {
+          "assignedCommandVariable": "",
+          "callableReachable": true,
+          "commandVariableExecuted": false,
+          "directExecutionLine": false,
+          "enclosingCallable": "extract",
+          "executedVariables": [],
+          "line": 65,
+          "path": "libs/repro_interface_artifacts/tests/t_extraction_checks_the_prefix_nim.nim",
+          "patterns": [
+            "repro-extract-interface"
+          ],
+          "runtimeCompilerApi": "extractInterfaceFromModule",
+          "runtimeCompilerApiModule": "repro_interface_artifacts",
+          "snippet": "extractInterfaceFromModule(projectRoot / \"repro.nim\","
+        },
+        {
+          "assignedCommandVariable": "",
+          "callableReachable": true,
+          "commandVariableExecuted": false,
+          "directExecutionLine": true,
+          "enclosingCallable": "",
+          "executedVariables": [],
+          "line": 120,
+          "path": "libs/repro_interface_artifacts/tests/t_extraction_checks_the_prefix_nim.nim",
+          "patterns": [
+            "repro-lift-interface-artifact"
+          ],
+          "runtimeCompilerApi": "liftInterfaceArtifact",
+          "runtimeCompilerApiModule": "repro_interface_artifacts",
+          "snippet": "discard liftInterfaceArtifact(plan)"
+        },
+        {
+          "assignedCommandVariable": "",
+          "callableReachable": true,
+          "commandVariableExecuted": false,
+          "directExecutionLine": true,
+          "enclosingCallable": "",
+          "executedVariables": [],
+          "line": 124,
+          "path": "libs/repro_interface_artifacts/tests/t_extraction_checks_the_prefix_nim.nim",
+          "patterns": [
+            "repro-lift-interface-artifact"
+          ],
+          "runtimeCompilerApi": "liftInterfaceArtifact",
+          "runtimeCompilerApiModule": "repro_interface_artifacts",
+          "snippet": "discard liftInterfaceArtifact(plan)"
+        }
+      ],
+      "source": "libs/repro_interface_artifacts/tests/t_extraction_checks_the_prefix_nim.nim"
     },
     {
       "class": "graph-fixture",
@@ -13030,8 +13084,8 @@
       "owner": "libs/repro_cli_support",
       "requiresReproBinary": true,
       "source": "libs/repro_cli_support/tests/t_installed_prefix_nim_pin_wins.nim",
-      "sourceSuiteCount": 2,
-      "staticCaseCount": 3,
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 2,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -17891,6 +17945,24 @@
       "sourceSuiteCount": 7,
       "staticCaseCount": 14,
       "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_extraction_checks_the_prefix_nim",
+      "class": "graph-fixture",
+      "classificationReason": "test body compiles or links a helper/fixture artifact",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_core",
+        "repro_interface_artifacts"
+      ],
+      "owner": "libs/repro_interface_artifacts",
+      "requiresReproBinary": false,
+      "source": "libs/repro_interface_artifacts/tests/t_extraction_checks_the_prefix_nim.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 4,
+      "staticallyDetectedRuntimeCompilerFlow": true,
       "targetOs": "soAny"
     },
     {
@@ -31337,7 +31409,7 @@
       "requiresReproBinary": true,
       "source": "tests/e2e/dev-env/t_e2e_repro_exec_installed_prefix_nim.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 3,
+      "staticCaseCount": 4,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

@@ -1,0 +1,124 @@
+## Holding a recipe's interface means its `uses: nim` was checked against
+## the installed prefix's compiler (reprobuild-pm
+## Distribution-And-Packaging.md §5.3, amendment N3, approved by Zahary
+## Karadjov, 2026-11-04: a range that excludes the shipped release "is
+## refused by the existing range check, not silently replaced").
+##
+## The check used to run after each call site's extraction, and a
+## text-scanning test held that structure; the A15 round-4 verification
+## (2026-11-07) showed it could be slipped past by a `when false:`, a
+## command-syntax call, or a new direct `extractInterfaceFromModule` call.
+## It now runs inside the only exported extractor, and on the lift's
+## fresh-artifact path, which runs no extraction. These cases hold that by
+## behaviour:
+##
+## * with `REPRO_INSTALLED_PREFIX_NIM` unset nothing is checked;
+## * with it set, a recipe whose range excludes the release is refused by
+##   `extractInterfaceFromModule`, on a cold extraction and on its warm
+##   short-circuit alike, and an admitting range passes;
+## * a lift whose artifact is already fresh is refused the same way.
+##
+## Each is falsified by removing its check (see the A15 record).
+##
+## *Mocking.* None: real recipes compiled by the real extractor; only the
+## environment variable the bootstrap would set is set by hand.
+
+import std/[os, strutils, unittest]
+
+import repro_core/installed_prefix_nim
+import repro_interface_artifacts
+
+proc recipe(usesNim: string): string =
+  "import repro_project_dsl\n\n" &
+  "package prefixNimCheckProbe:\n" &
+  "  uses:\n" &
+  "    \"" & usesNim & "\"\n" &
+  "  executable placeholder:\n" &
+  "    discard\n"
+
+proc scratchRoot(tag: string): string =
+  ## Per-process and per-case: the runner executes each case as its own
+  ## process and runs cases of one binary concurrently.
+  result = getTempDir() / ("repro-prefix-nim-extract-" &
+    $getCurrentProcessId() & "-" & tag)
+  removeDir(result)
+  createDir(result)
+
+template withMarker(value: string; body: untyped) =
+  let present = existsEnv(InstalledPrefixNimEnvVar)
+  let saved = getEnv(InstalledPrefixNimEnvVar)
+  if value.len > 0: putEnv(InstalledPrefixNimEnvVar, value)
+  else: delEnv(InstalledPrefixNimEnvVar)
+  try:
+    body
+  finally:
+    if present: putEnv(InstalledPrefixNimEnvVar, saved)
+    else: delEnv(InstalledPrefixNimEnvVar)
+
+proc project(base, usesNim: string): string =
+  result = base / "owner"
+  createDir(result)
+  writeFile(result / "repro.nim", recipe(usesNim))
+
+proc extract(projectRoot, outDir: string): ProjectInterfaceArtifact =
+  createDir(outDir)
+  extractInterfaceFromModule(projectRoot / "repro.nim",
+    outDir / "project-interface.rbsz", outDir / "project-interface.nim",
+    workDir = getCurrentDir(), consumerRoot = projectRoot)
+
+proc usesOf(a: ProjectInterfaceArtifact): seq[string] =
+  for u in a.projectInterface.toolUses:
+    result.add(u.rawConstraint)
+
+suite "an interface is held only once its uses: nim is checked":
+
+  test "without the prefix route nothing is checked":
+    let base = scratchRoot("unset")
+    defer: removeDir(base)
+    let root = project(base, "nim ==2.2.10")
+    withMarker(""):
+      let a = extract(root, base / "out")
+      check "nim ==2.2.10" in usesOf(a)
+
+  test "an excluding range is refused, cold and on the warm short-circuit":
+    let base = scratchRoot("refused")
+    defer: removeDir(base)
+    let root = project(base, "nim ==2.2.10")
+    # A first extraction without the route leaves the warm short-circuit
+    # primed, so the second call below is answered without compiling.
+    withMarker(""):
+      discard extract(root, base / "warm")
+    withMarker("2.3.1"):
+      for outDir in [base / "cold", base / "warm"]:
+        checkpoint(outDir)
+        try:
+          discard extract(root, outDir)
+          check false
+        except InstalledPrefixNimError as err:
+          checkpoint(err.msg)
+          check "nim ==2.2.10" in err.msg
+          check "excludes Nim 2.3.1" in err.msg
+
+  test "an admitting range passes":
+    let base = scratchRoot("admitted")
+    defer: removeDir(base)
+    let root = project(base, "nim ^2.2")
+    withMarker("2.3.1"):
+      let a = extract(root, base / "out")
+      check "nim ^2.2" in usesOf(a)
+
+  test "a lift whose artifact is fresh is refused the same way":
+    let base = scratchRoot("lift")
+    defer: removeDir(base)
+    let root = project(base, "nim ==2.2.10")
+    let outDir = base / "out"
+    createDir(outDir)
+    let plan = interfaceLiftPlan(root / "repro.nim",
+      outDir / "project-interface.rbsz", outDir / "project-interface.nim",
+      workDir = getCurrentDir())
+    withMarker(""):
+      discard liftInterfaceArtifact(plan)
+    require interfaceArtifactFresh(plan)
+    withMarker("2.3.1"):
+      expect InstalledPrefixNimError:
+        discard liftInterfaceArtifact(plan)
