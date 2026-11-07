@@ -23,7 +23,7 @@
 ## MOCK POLICY: none. The real script runs in a real bash; the preload paths
 ## are strings the loader never sees (nothing is executed under them).
 
-import std/[os, strutils, tempfiles, unittest]
+import std/[os, osproc, strutils, tempfiles, unittest]
 
 import repro_test_support
 import repro_test_support/reasoned_skip
@@ -244,4 +244,77 @@ suite "every add-on gate and harness entry point applies the guard":
     check "foreign preload(s); removed for this run" in res.output
     check "no such gate" in res.output
     check "exit=2" in res.output
+
+suite "an add-on gate's helpers end with it (scripts/lib/process_group.sh)":
+  # A13 (2026-11-07): a hung gate's binary was killed; its teardown never
+  # ran, and the binary cache and an HTTP origin it had started kept running,
+  # holding the VM slot's flock (inherited) for hours. run_addon_gate.sh now
+  # runs the gate through ``run_in_own_group``: one process group, ended
+  # whatever ends the gate, with no descriptor of the caller. Each case
+  # starts a real background ``sleep`` inside the group and looks for it by
+  # a marker in its argv afterwards.
+  const PG = "scripts/lib/process_group.sh"
+
+  proc alive(marker: string): bool =
+    for kind, d in walkDir("/proc"):
+      let pid = d.extractFilename
+      if not pid.allCharsInSet(Digits): continue
+      try:
+        if marker in readFile(d / "cmdline").replace('\0', ' '): return true
+      except IOError, OSError: discard
+    false
+
+  proc marker(tag: string): string =
+    # A sleep length no other process uses, as the marker in its argv.
+    "31" & $(getCurrentProcessId() mod 1000) & tag
+
+  test "a helper the command left behind is ended when the command exits":
+    let m = marker("1")
+    let res = runShell(shellCommand(["bash", "-c",
+      "source " & PG & "; run_in_own_group bash -c 'sleep " & m &
+      " & exit 3'; echo \"rc=$?\""]), repoRoot())
+    checkpoint(res.output)
+    check "rc=3" in res.output
+    check not alive("sleep " & m)
+
+  test "a helper is ended when the command itself is killed":
+    let m = marker("2")
+    let res = runShell(shellCommand(["bash", "-c",
+      "source " & PG & "; run_in_own_group bash -c 'sleep " & m &
+      " & kill -KILL $$'; echo \"rc=$?\""]), repoRoot())
+    checkpoint(res.output)
+    check "rc=137" in res.output
+    check not alive("sleep " & m)
+
+  test "a helper is ended when the script running the group is stopped":
+    let m = marker("3")
+    let res = runShell(shellCommand(["bash", "-c",
+      "bash -c 'source " & PG & "; run_in_own_group bash -c \"sleep " & m &
+      " & wait\"; echo unreachable' & s=$!; sleep 1; kill -TERM $s; " &
+      "wait $s; echo \"rc=$?\""]), repoRoot())
+    checkpoint(res.output)
+    check "rc=143" in res.output
+    check "unreachable" notin res.output
+    sleep(500)
+    check not alive("sleep " & m)
+
+  test "the command inherits no descriptor above stderr":
+    let res = runShell(shellCommand(["bash", "-c",
+      "exec 9>/dev/null; source " & PG & "; run_in_own_group bash -c " &
+      "'[ -e /proc/self/fd/9 ] && echo fd9-open || echo fd9-closed'"]),
+      repoRoot())
+    checkpoint(res.output)
+    check "fd9-closed" in res.output
+
+  test "negative control: without the group the helper outlives the command":
+    let m = marker("5")
+    discard runShell(shellCommand(["bash", "-c",
+      "bash -c 'sleep " & m & " & exit 0'"]), repoRoot())
+    check alive("sleep " & m)
+    discard execShellCmd("pkill -f 'sleep " & m & "'")
+
+  test "run_addon_gate.sh runs the gate through run_in_own_group":
+    let text = readFile(repoRoot() / "scripts" / "run_addon_gate.sh")
+    check "source scripts/lib/process_group.sh" in text
+    check "run_in_own_group env REPRO_ADDON_VM_GATES=1" in text
 

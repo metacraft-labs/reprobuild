@@ -126,4 +126,11 @@ bin="build/test-bin/${test}${gate_tag}.run-$$"
   cp "build/test-bin/${test}${gate_tag}" "$bin"
 ) 8>"build/nimcache/${test}${gate_tag}.lock"
 trap 'rm -f "$bin"' EXIT
-REPRO_ADDON_VM_GATES=1 REPRO_ADDON_BASES="$bases" "$bin"
+# The gate and every helper it starts (cache, HTTP origins, sink, QEMU) run
+# as one process group, ended together however the gate ends, and with no
+# descriptor of this script's caller (scripts/lib/process_group.sh).
+# shellcheck source=scripts/lib/process_group.sh
+source scripts/lib/process_group.sh
+gate_rc=0
+run_in_own_group env REPRO_ADDON_VM_GATES=1 REPRO_ADDON_BASES="$bases" "$bin" || gate_rc=$?
+exit "$gate_rc"

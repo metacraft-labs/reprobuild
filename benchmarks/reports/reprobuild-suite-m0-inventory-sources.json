@@ -47962,8 +47962,8 @@
       "owner": "tests/integration",
       "requiresReproBinary": false,
       "source": "tests/integration/t_run_tests_strips_foreign_preload.nim",
-      "sourceSuiteCount": 2,
-      "staticCaseCount": 9,
+      "sourceSuiteCount": 3,
+      "staticCaseCount": 15,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
