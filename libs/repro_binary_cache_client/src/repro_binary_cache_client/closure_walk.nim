@@ -45,6 +45,13 @@ type
 
   ClosureWalkError* = object of CatchableError
 
+  ClosureWalkTrustError* = object of ClosureWalkError
+    ## The walk refused a manifest on TRUST: it verified, but its producer
+    ## key is not one this endpoint anchors (or the endpoint anchors none).
+    ## A distinct type so a caller can tell "refused" from "absent" without
+    ## reading the message; `substituteInProcess` folds it into
+    ## `InProcessOutcome.trustRejected` across every endpoint it tried.
+
 proc hexOfDigest(d: Blake3Hash): string =
   bcsKey.digestToHex(d)
 
@@ -101,7 +108,7 @@ proc fetchAndVerifyManifest*(ctx: ClientContext;
   # the next configured cache. Recheck even a cached manifest: the current
   # endpoint's trust configuration can differ from the preceding request.
   if not isTrustedSigner(endpoint, m):
-    raise newException(ClosureWalkError,
+    raise newException(ClosureWalkTrustError,
       "manifest " & entryKeyHex & " from " & endpoint.baseUrl &
       ": producer key not trusted for this cache " &
       "(default-untrusted): rejected")

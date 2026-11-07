@@ -29,6 +29,7 @@
 import std/[os, strutils, tables, tempfiles, unittest]
 
 import repro_core/cli_images
+from repro_core/installed_prefix_nim import InstalledPrefixNimEnvVar
 import repro_lock
 import repro_selfhost
 import repro_selfhost/handover
@@ -166,11 +167,14 @@ suite "the hand-over changes only what it must in the environment":
     var byName = initTable[string, EnvEdit]()
     for e in edits:
       byName[e.name] = e
-    check byName.len == 4
+    check byName.len == 5
     check byName[ResolvedEnvVar].value == d.prefixIdHex
     check byName[PublicCliEnvVar].value == d.engine
     check byName[FullCliEnvVar].remove
     check byName[NimCompilerEnvVar].value == "C:/nim/bin/nim.exe"
+    # An inherited record that the installed prefix's Nim compiles providers
+    # is false once the pin names another compiler (N3).
+    check byName[InstalledPrefixNimEnvVar].remove
 
   test "without a compiler pin the compiler variable is left alone":
     let s = newScenario()
@@ -178,3 +182,4 @@ suite "the hand-over changes only what it must in the environment":
     let d = decideHandOver(s.pin, s.store, s.bootstrapImage, Bootstrap, "")
     for e in handOverEnvironment(d, ""):
       check e.name != NimCompilerEnvVar
+      check e.name != InstalledPrefixNimEnvVar

@@ -26,6 +26,8 @@
 ## operator output.
 
 import std/[algorithm, os, strutils, times]
+
+import repro_core/host_apply_lock
 from repro_core/paths import extendedPath
 
 import repro_system_apply
@@ -294,6 +296,9 @@ proc switchGeneration*(targetGen: int;
   ## Activate generation ``targetGen``.
   let stateDir = resolveStateDir(opts.stateDir)
   let lockTimeout = lockSeconds(opts.lockTimeoutSeconds)
+  var hostLock = acquireHostApplyLock("repro system rollback (state " &
+    stateDir & ")")
+  defer: hostLock.release()
   var lock = acquireApplyLock(stateDir, lockTimeout)
   try:
     let knownNums = enumGenerationNumbers(stateDir)
@@ -442,6 +447,9 @@ proc gcGenerations*(opts: GcOptions): GcResult =
   ## ``--older-than=0`` should not be able to brick the box).
   let stateDir = resolveStateDir(opts.stateDir)
   let lockTimeout = lockSeconds(opts.lockTimeoutSeconds)
+  var hostLock = acquireHostApplyLock("repro system rollback (state " &
+    stateDir & ")")
+  defer: hostLock.release()
   var lock = acquireApplyLock(stateDir, lockTimeout)
   try:
     let current = readCurrentGeneration(stateDir)
@@ -511,6 +519,9 @@ proc bootFailureAutoRollback*(opts: AutoRollbackOptions): AutoRollbackResult =
     result.triggered = true
     result.reason = "dry-run: would clear staged-next " & $staged
     return
+  var hostLock = acquireHostApplyLock("repro system rollback (state " &
+    stateDir & ")")
+  defer: hostLock.release()
   var lock = acquireApplyLock(stateDir, DefaultLockTimeoutSeconds)
   try:
     let sp = stagedNextPathFor(stateDir)

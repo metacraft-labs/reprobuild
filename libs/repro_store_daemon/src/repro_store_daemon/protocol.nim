@@ -8,7 +8,11 @@ when defined(posix):
   import std/posix
 
 const
-  StoreDaemonProtocolVersion* = 5'u16
+  StoreDaemonProtocolVersion* = 6'u16
+    ## v6: the external-realize body also carries ``version``. Same
+    ## reasoning as every bump below: a v5 peer reading a v6 body would read
+    ## the version string's length as ``stripComponents``.
+    ##
     ## v5: the external-realize body also carries ``closureManifest``. Same
     ## reasoning as every bump below: a v4 peer reading a v5 body would read
     ## the manifest string's length as ``stripComponents``.
@@ -116,6 +120,13 @@ type
       ## either does not fail — it produces a DIFFERENT prefix under a
       ## different cache key than the same realize performed in-process,
       ## which is the one way this path can go wrong silently.
+    version*: string
+      ## Upstream version the selected tarball record declares; empty for an
+      ## unversioned record. The daemon re-runs selection on the record it
+      ## rebuilds, and that selection filters by the ``uses:`` range in
+      ## ``rawConstraint``: without the version, a record the client
+      ## selected because it satisfies the range arrives unversioned, and an
+      ## unversioned record is eligible only when there is no range.
     stripComponents*: int
 
 proc bytesOf(text: string): seq[byte] =
@@ -149,7 +160,7 @@ proc writeStringSeq(buf: var seq[byte]; values: openArray[string]) =
     buf.writeString(value)
 
 proc readStringSeq(buf: openArray[byte]; pos: var int): seq[string] =
-  let count = int(buf.readU32Le(pos))
+  let count = readElementCount(buf, pos, 4)
   result = newSeq[string](count)
   for i in 0 ..< count:
     result[i] = buf.readString(pos)
@@ -302,6 +313,7 @@ proc externalRealizeBody*(req: StoreDaemonExternalRealizeRequest): seq[byte] =
   result.writeU32Le(if req.nonRedistributable: 1'u32 else: 0'u32)
   result.writeString(req.launcher)
   result.writeString(req.closureManifest)
+  result.writeString(req.version)
   result.writeU32Le(uint32(max(req.stripComponents, 0)))
 
 proc parseExternalRealizeBody*(body: openArray[byte]):
@@ -330,6 +342,7 @@ proc parseExternalRealizeBody*(body: openArray[byte]):
   result.nonRedistributable = body.readU32Le(pos) != 0'u32
   result.launcher = body.readString(pos)
   result.closureManifest = body.readString(pos)
+  result.version = body.readString(pos)
   result.stripComponents = int(body.readU32Le(pos))
 
 proc releaseRootBody*(holderId, rootId: string): seq[byte] =
@@ -370,13 +383,32 @@ proc currentUid*(): int64 =
     0'i64
 
 proc defaultDevEndpoint*(): string =
+  ## The dev store daemon's endpoint. ``REPROSTORED_ENDPOINT`` is taken
+  ## verbatim, and so is a socket under ``XDG_RUNTIME_DIR`` (the session
+  ## manager's short ``/run/user/<uid>``); an over-long explicit choice is
+  ## reported by ``bindIpcListener``, naming the limit, rather than moved.
+  ##
+  ## Only the ``getTempDir()`` fallback is bounded. ``$TMPDIR`` has no length
+  ## limit -- the suite's ``~/.cache/reprobuild-test-tmp/<slot>``, a
+  ## ``nix-shell`` session directory -- and the socket must fit what
+  ## ``std/net`` binds (107 bytes on Linux, 91 on macOS;
+  ## ``repro_core/paths.unixSocketPathMaxLen``) with room beside it for
+  ## ``bindIpcListener``'s staging name (``ipcEndpointFits``). Where it would
+  ## not, the socket goes straight into ``/tmp``, the location this default
+  ## already has whenever ``TMPDIR=/tmp``, as
+  ## ``repro_core/paths.runquotaEndpointPath`` does for its own sockets. The
+  ## status file (``statusFileForEndpoint``) stays in ``devRuntimeDir``: it
+  ## is a regular file, with no address limit.
   let override = getEnv("REPROSTORED_ENDPOINT")
   if override.len > 0:
     return override
   when defined(windows):
     "\\\\.\\pipe\\reprostored-dev-current-user"
   else:
-    devRuntimeDir() / ("reprostore-" & $currentUid() & ".sock")
+    let leaf = "reprostore-" & $currentUid() & ".sock"
+    result = devRuntimeDir() / leaf
+    if getEnv("XDG_RUNTIME_DIR").len == 0 and not ipcEndpointFits(result):
+      result = "/tmp" / leaf
 
 proc statusFileForEndpoint*(endpoint: string): string =
   let leaf = endpoint.extractFilename

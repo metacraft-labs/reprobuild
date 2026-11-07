@@ -119,14 +119,27 @@ stage_tree() {
   # shipped .deb/.rpm packages whose repro failed its first compile. What
   # the archive carries, the package carries.
   cp -a "$payload/." "$_t/usr/lib/reprobuild/"
+  # The archive's bin/ carries runquotad, which the engine starts when no
+  # RunQuota daemon answers; under --tool-provisioning=tarball and nix a build
+  # cannot run without one. It is NOT given a /usr/bin wrapper: runquota's own
+  # .deb and .rpm install /usr/bin/runquotad and /usr/bin/runquota, and two
+  # packages owning one path cannot both be installed. The wrappers name it in
+  # RUNQUOTAD_BIN instead, the first place the engine looks, unless the caller
+  # already chose one.
+  _runquotad_line=''
+  if [ -x "$payload/bin/runquotad" ]; then
+    _runquotad_line=': "${RUNQUOTAD_BIN:=/usr/lib/reprobuild/bin/runquotad}"; export RUNQUOTAD_BIN\n'
+  fi
   _ncmd=0
   for _c in "$payload/bin"/*; do
     _n="$(basename "$_c")"
     # Public commands only: not the dot-prefixed `.X.real` binaries the
-    # launchers exec, and not data files that live beside them.
-    case "$_n" in .*|*.json) continue ;; esac
+    # launchers exec, not data files that live beside them, and not
+    # runquota's commands (above).
+    case "$_n" in .*|*.json|runquotad|runquota) continue ;; esac
     [ -f "$_c" ] && [ -x "$_c" ] || continue
-    printf '#!/bin/sh\nexec /usr/lib/reprobuild/bin/%s "$@"\n' "$_n" > "$_t/usr/bin/$_n"
+    # shellcheck disable=SC2059 # the format is assembled from fixed text
+    printf "#!/bin/sh\n${_runquotad_line}exec /usr/lib/reprobuild/bin/%s \"\$@\"\n" "$_n" > "$_t/usr/bin/$_n"
     chmod 0755 "$_t/usr/bin/$_n"
     _ncmd=$((_ncmd + 1))
   done

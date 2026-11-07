@@ -1,55 +1,30 @@
-## M0 (Realize-Layer-Plumbing-Closures spec) — hermetic gate for the
-## planner's topological sort over realize ops.
-##
-## Pre-M0 the planner sorted ``PlannedPackage`` entries alphabetically
-## by ``packageId``. That is latent-buggy when a home profile bundles
-## both an extractor catalog package (``7zip`` / ``lessmsi`` / ``wix3``
-## / ``innounp``) and a consumer that needs the extractor pre-realized:
-## the alphabetical order may schedule the consumer first, which then
-## fails closed because its extractor's prefix does not yet exist.
-##
-## The M0 fix replaces the alphabetical sort with Kahn's algorithm
-## keyed on the extractor-discovery graph (encoded as a hard-coded map
-## in ``package_catalog.extractorDependencies``). This gate exercises
-## the six contract cases the spec calls out:
-##
-##   1. ``test_m0_topo_sort_7zip_before_erlang`` — erlang uses
-##      ``imInstallerNsis`` which needs ``7z.exe``; 7zip must realize
-##      first.
-##   2. ``test_m0_topo_sort_lessmsi_before_meson`` — meson uses
-##      ``imInstallerMsi`` which needs ``lessmsi.exe``; lessmsi must
-##      realize first.
-##   3. ``test_m0_topo_sort_wix3_and_lessmsi_before_swift`` — swift
-##      uses ``imInstallerNsisBundle`` which needs BOTH ``dark.exe``
-##      (from wix3) AND ``lessmsi.exe``; both must realize first, with
-##      stable alphabetical order between them.
-##   4. ``test_m0_topo_sort_innounp_before_fpc`` — fpc uses
-##      ``imInstallerInnoSetup`` which needs ``innounp.exe``; innounp
-##      must realize first.
-##   5. ``test_m0_topo_sort_cycle_fails_closed`` — synthetic catalog
-##      with a deliberate cycle raises ``EPlanCycleDetected``.
-##   6. ``test_m0_topo_sort_m71_reference_profile_stable`` — load the
-##      M71 reference home.nim and assert the planner's package
-##      ordering is byte-identical to the pre-M0 alphabetical sort.
-##      The M71 reference profile has NO extractor catalog packages
-##      bundled, so every extractor edge points outside the plan and
-##      is silently dropped — the topo sort reduces to the
-##      alphabetical tiebreak.
-##
-## Hermetic: no network, no real Scoop install, no realize-time
-## dispatch. All six tests build ``PlannedPackage`` sequences directly
-## and drive ``topologicallySortPackages`` with synthetic / real
-## callbacks. Test 6 also confirms the M71 reference home.nim still
-## exists at the documented path so the stability gate keys off a real
-## artefact — but it does NOT invoke the M60 text parser
-## (``loadProfile``), which rejects the macro-library form
-## ``package("dotnet-sdk", "...")`` the M71 reference profile carries.
+## The exported Kahn utility retains deterministic ties and cycle detection.
+## Four synthetic legacy dependency maps preserve its original concrete order
+## cases. Production home ordering has no extractor edges: each tarball's
+## common provisioning graph owns those dependencies, checked separately here.
+## No mocks or network: only metadata selection and explicit graph callbacks.
 
 import std/[algorithm, os, tables, unittest]
 from repro_core/paths import extendedPath
 import repro_test_support
 
 import repro_home_apply/plan
+import repro_home_apply/package_catalog
+from repro_tool_profiles import installationToolRoles
+
+let windowsTarget = realizationTargetFor(pcX86_64, poWindows, mlX86_64_v1)
+let defaultExtractorDeps = profileExtractorDeps(windowsTarget,
+  DefaultSelectionPolicy)
+
+# Explicit synthetic historical graph, testing the utility independently of
+# today's provisioning policy. These edges no longer come from home planning.
+let legacyExtractorDeps: ExtractorDepsCallback = proc(p: PlannedPackage): seq[string] =
+  case p.packageId
+  of "erlang": @["7zip"]
+  of "meson": @["lessmsi"]
+  of "swift": @["wix3", "lessmsi"]
+  of "fpc": @["innounp"]
+  else: @[]
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -83,7 +58,7 @@ suite "M0 — plan.nim topological sort over realize ops":
     # already, so the pre-M0 alphabetical sort happened to produce
     # the right order for this case — the topo sort must agree.
     let inputs = @[pkg("erlang", "28.5"), pkg("7zip", "26.01")]
-    let sorted = topologicallySortPackages(inputs, defaultExtractorDeps)
+    let sorted = topologicallySortPackages(inputs, legacyExtractorDeps)
     check orderOf(sorted) == @["7zip", "erlang"]
 
   test "test_m0_topo_sort_lessmsi_before_meson":
@@ -92,7 +67,7 @@ suite "M0 — plan.nim topological sort over realize ops":
     # lessmsi before meson anyway (l < m), so this is structurally
     # the same case as test 1 — the topo sort must agree.
     let inputs = @[pkg("meson", "1.11.0"), pkg("lessmsi", "")]
-    let sorted = topologicallySortPackages(inputs, defaultExtractorDeps)
+    let sorted = topologicallySortPackages(inputs, legacyExtractorDeps)
     check orderOf(sorted) == @["lessmsi", "meson"]
 
   test "test_m0_topo_sort_wix3_and_lessmsi_before_swift":
@@ -100,7 +75,7 @@ suite "M0 — plan.nim topological sort over realize ops":
     # wix3) AND lessmsi.exe (from lessmsi). Both must precede swift.
     # Order between wix3 and lessmsi: alphabetical (lessmsi < wix3).
     let inputs = @[pkg("swift", "6.3.1"), pkg("wix3"), pkg("lessmsi")]
-    let sorted = topologicallySortPackages(inputs, defaultExtractorDeps)
+    let sorted = topologicallySortPackages(inputs, legacyExtractorDeps)
     let order = orderOf(sorted)
     # Both extractors precede swift.
     check order.find("lessmsi") < order.find("swift")
@@ -115,7 +90,7 @@ suite "M0 — plan.nim topological sort over realize ops":
     # alphabetical sort would have ordered fpc FIRST, which is the
     # bug. The topo sort must reverse the order).
     let inputs = @[pkg("fpc", "3.2.2"), pkg("innounp", "")]
-    let sorted = topologicallySortPackages(inputs, defaultExtractorDeps)
+    let sorted = topologicallySortPackages(inputs, legacyExtractorDeps)
     check orderOf(sorted) == @["innounp", "fpc"]
     # Sanity: confirm the pre-M0 alphabetical sort would have ordered
     # them the WRONG way around.
@@ -128,10 +103,7 @@ suite "M0 — plan.nim topological sort over realize ops":
     # M11 LIVE-smoke regression).
 
   test "test_m0_topo_sort_cycle_fails_closed":
-    # The M0 hard-coded extractor map cannot cycle by construction —
-    # the providers (7zip / lessmsi / wix3 / innounp) all resolve via
-    # ``imExtract`` whose dep set is empty. To exercise the cycle
-    # arm we inject a synthetic dep callback that DOES cycle:
+    # The utility also rejects caller-supplied dependency cycles:
     # ``a`` depends on ``b`` and ``b`` depends on ``a``.
     let inputs = @[pkg("synthetic-a"), pkg("synthetic-b")]
     let depMap = {
@@ -175,8 +147,7 @@ suite "M0 — plan.nim topological sort over realize ops":
     check fileExists(extendedPath(M71ReferenceHome))
 
     # The 24-package set in document order — copied from the reference
-    # home.nim. Versions are inert for the topo sort (defaultExtractorDeps
-    # looks them up but only reads archive_format/install_method).
+    # home.nim. Versions are inert for the historical graph callback.
     let m71Packages = @[
       pkg("cmake", "4.3.3"),
       pkg("ninja", "1.13.2"),
@@ -205,7 +176,7 @@ suite "M0 — plan.nim topological sort over realize ops":
     ]
     check m71Packages.len == 24
 
-    let sorted = topologicallySortPackages(m71Packages, defaultExtractorDeps)
+    let sorted = topologicallySortPackages(m71Packages, legacyExtractorDeps)
     let actual = orderOf(sorted)
 
     # The pre-M0 alphabetical sort over the same input set — this is
@@ -228,3 +199,22 @@ suite "M0 — plan.nim topological sort over realize ops":
     check "lessmsi" notin actual      # provider — NOT in the plan
     check "wix3" notin actual         # provider — NOT in the plan
     check "innounp" notin actual      # provider — NOT in the plan
+
+  test "production profile order is independent of installer helper packages":
+    let inputs = @[pkg("swift"), pkg("wix3"), pkg("lessmsi"),
+      pkg("fpc"), pkg("innounp"), pkg("erlang"), pkg("7zip"), pkg("meson")]
+    for entry in inputs:
+      check defaultExtractorDeps(entry).len == 0
+    check orderOf(topologicallySortPackages(inputs, defaultExtractorDeps)) ==
+      @["7zip", "erlang", "fpc", "innounp", "lessmsi", "meson", "swift", "wix3"]
+    # The helper requirements remain on the actual common provisioning path;
+    # removing home-ordering edges must not discard installation dependencies.
+    for (packageId, roles, legacyProviders) in [
+        ("erlang", @["7z"], @["7zip"]),
+        ("meson", @["lessmsi"], @["lessmsi"]),
+        ("swift", @["7z", "lessmsi", "wix3"], @["wix3", "lessmsi"]),
+        ("fpc", @["innounp"], @["innounp"])]:
+      let resolution = resolveProfilePackage(packageId, windowsTarget, @[rkTarball])
+      checkpoint(packageId)
+      check installationToolRoles(resolution.selection.tarball) == roles
+      check extractorDependencies(packageId, resolution.archive) == legacyProviders

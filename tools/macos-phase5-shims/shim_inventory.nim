@@ -3,7 +3,7 @@
 ##
 ## This module knows WHICH macOS binaries the Phase-5 drivers shell
 ## out to. The actual shim INSTALLATION primitive lives in the
-## standalone vm-harness Nim library (`metacraft-labs/vm-harness`,
+## standalone gosti Nim library (`metacraft-labs/gosti`,
 ## per the M0 milestone in
 ## `reprobuild-specs/Multi-OS-VM-Automation-Campaign.milestones.org`)
 ## as a generic argv-tracer that can wrap any named binary. This
@@ -82,7 +82,7 @@ const Phase5Shims*: seq[Phase5ShimSpec] = @[
 
 proc phase5ShimBinaries*(): seq[string] =
   ## The flat list of macOS-specific binary basenames the M7-M11
-  ## destructive-half blocks pass to the vm-harness Tier-1
+  ## destructive-half blocks pass to the gosti Tier-1
   ## argv-tracing-shim-installer primitive at the start of a
   ## sandbox-gated run.
   result = @[]

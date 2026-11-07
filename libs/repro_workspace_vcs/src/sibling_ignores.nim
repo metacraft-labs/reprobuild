@@ -66,6 +66,16 @@ const
     "# git ls-files --others --exclude-from=.git/info/exclude",
     "# Lines that start with '#' are comments."]
     ## Git's own seed header, written when ``info/exclude`` is absent.
+  LocalSettingsIgnoreEntry* = "/repro-workspace.local.toml"
+    ## The one NON-sibling entry of the block: the per-user workspace
+    ## settings file (Workspace-Settings-Files.md §4). It is never committed,
+    ## so it is ignored here, per clone, rather than in the tracked
+    ## ``.gitignore`` — a clone that never creates the file carries no
+    ## committed entry for it. It is listed whether or not the file exists
+    ## (the point is to keep a future one out of ``git add -A``), under the
+    ## same tracked-probe rule as every sibling: a root that tracks it by
+    ## mistake does NOT ignore it, so the mistake stays visible in
+    ## ``git status`` and ``repro health`` reports it with its remedy.
 
 type
   SiblingIgnoreResult* = object
@@ -117,7 +127,9 @@ proc collectSiblingIgnoreEntries*(gitBin, workspaceRoot: string;
   ## Sorted, de-duplicated managed entries for ``workspaceRoot``.
   ##
   ## Candidates are every top-level directory (or symlink-to-directory)
-  ## in the workspace root, plus each path in ``declaredPaths`` — the
+  ## in the workspace root, the local settings file
+  ## (``LocalSettingsIgnoreEntry``, never a directory), plus each path in
+  ## ``declaredPaths`` — the
   ## repo-relative checkout paths the caller's own workspace enumeration
   ## resolved, which is how *nested* checkouts (``a/references/b``) are
   ## covered without reimplementing manifest discovery here. Paths that
@@ -148,6 +160,13 @@ proc collectSiblingIgnoreEntries*(gitBin, workspaceRoot: string;
       # Not present (or a dangling symlink / plain file): nothing to ignore.
       continue
     consider(rel, symlinkExists(abs))
+
+  # The local settings file: the leading ``/`` anchors it at the root, and
+  # no trailing slash because it is a file. The walk above only considers
+  # directories, so no sibling can produce the same entry.
+  if not isTracked(gitBin, workspaceRoot,
+                   LocalSettingsIgnoreEntry.strip(chars = {'/'})):
+    entries.add(LocalSettingsIgnoreEntry)
 
   entries.sort()
   entries

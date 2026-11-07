@@ -7,7 +7,7 @@
 # unknown-field rejection (Workspace-Manifests.md §"Common Conventions" +
 # §"Future Extensions").
 
-import std/[options, tables]
+import std/[options, strutils, tables]
 import toml_serialization
 import toml_serialization/types as toml_types
 
@@ -70,7 +70,12 @@ type
     innerMessage*: string
 
 const
-  schemaRepoFragmentV1*     = "reprobuild.workspace.repo.v1"
+  schemaRepoFragmentV2*     = "reprobuild.workspace.repo.v2"
+    ## Workspace-Branch-Roles.md §3.1 / §3.6 — the repo fragment: `mainline`,
+    ## the five optional built-in role keys, `profile`, and a
+    ## `[repo.branch-roles]` sub-table of custom roles. The only fragment
+    ## schema read and written; `retired_names.nim` names the one before it,
+    ## so its diagnostic can say what to change.
   schemaRepoSetV1*          = "reprobuild.workspace.repo-set.v1"
     ## Workspace-Membership-Model.md — a named membership list. A repo-set that
     ## is enabled in a workspace is what used to be called a project; there is
@@ -93,8 +98,25 @@ const
   schemaLockIndexV1*        = "reprobuild.workspace.lock-index.v1"
   schemaSnapshotV1*         = "reprobuild.workspace.snapshot.v1"
   schemaWorkspaceLocalV1*   = "reprobuild.workspace.local.v1"
+    ## The schema of the per-checkout state file under its retired name
+    ## (`retired_names.nim`). Read ONLY by `repro health --fix`, which moves
+    ## that file to the current name (Workspace-Settings-Files.md §8 step 2);
+    ## no other verb reads it, and nothing writes it.
+  schemaWorkspaceStateV1*   = "reprobuild.workspace.state.v1"
+    ## Workspace-Settings-Files.md §5 — the per-checkout state file
+    ## `.repro/workspace-state.toml`: the `[workspace]` table of the old file
+    ## under a name that says what it is.
   schemaDevelopOverridesV1* = "reprobuild.workspace.develop-overrides.v1"
-  schemaWorkspaceBootstrapV1* = "reprobuild.workspace.bootstrap.v1"
+  pushGatewayOptOutValues* = ["off"]
+    ## The values the settings files' top-level `push_gateway` key may take:
+    ## Push-Gateway-Wiring-And-Policy.md §7.4 defines exactly one, the
+    ## per-workspace opt-out `push_gateway = "off"`. Absent means the default.
+  schemaWorkspaceSettingsV1* = "reprobuild.workspace.settings.v1"
+    ## Workspace-Settings-Files.md §3 — the shared, committed workspace
+    ## settings file `repro-workspace.toml`.
+  schemaWorkspaceSettingsLocalV1* = "reprobuild.workspace.settings-local.v1"
+    ## Workspace-Settings-Files.md §4 — the per-user, never-committed
+    ## `repro-workspace.local.toml`. Carries `[[manifest]]` layers only.
   schemaReprobuildConfigV1* = "reprobuild.config.v1"
     ## HL-1 (Unified-Locking-And-Hooks) — the layered configuration file read
     ## by the system-config (layer 2), user-dotfiles (layer 3), and
@@ -103,7 +125,164 @@ const
     ## path-scoped bindings (inline-table array) and/or `[locking]` routes.
 
 type
+  # --- branch roles (Workspace-Branch-Roles.md §2–§3) -------------------------
+
+  BranchRoleValueKind* = enum
+    ## What one declarer says about one role.
+    brvUndeclared  ## the key is absent: this declarer says nothing
+    brvBranch      ## the key names a branch
+    brvAbsent      ## the key is `false`: the tier is declared ABSENT, so the
+                   ## role falls back exactly as if nothing declared it — but
+                   ## the absence is written down and reviewable (§3.1)
+
+  BranchRoleValue* = object
+    ## The value of one role key — a branch name, or the boolean `false`.
+    ##
+    ## Decoded by a custom `readValue` (below) because the strict decoder has
+    ## no "string or false" type. A value of any other shape (`true`, a number,
+    ## a table) is recorded in `rejected` rather than raised from inside the
+    ## decoder, where the key path would be lost; the reader then names the
+    ## file and key (`rejectBadRoleValues`).
+    kind*: BranchRoleValueKind
+    branch*: string        ## the branch when `kind == brvBranch`
+    rejected*: string      ## non-empty: the value had an illegal shape
+
+  CustomRoleTable* = object
+    ## A `branch-roles` sub-table: custom role name -> branch name or `false`
+    ## (Workspace-Branch-Roles.md §2.4, §3.1). Kept in declaration order.
+    entries*: seq[(string, BranchRoleValue)]
+
+  BranchRoleDecls* = object
+    ## The role declarations ONE declarer makes: a repo fragment's `[repo]`,
+    ## a `[profiles.<name>]` table, or the settings file's `[workspace]` table
+    ## (the root repo, §3.4). Resolving them — fragment, then its profile,
+    ## then the default profile, then the fallback chain (§3.3) — is the
+    ## resolver's job, not the reader's; the reader only reports what is
+    ## written.
+    mainline*: Option[string]
+      ## Required to RESOLVE (every repo has a mainline) but optional to
+      ## DECLARE, because a profile may supply it. Never `false`.
+    unstable*: BranchRoleValue
+    staging*: BranchRoleValue
+    stable*: BranchRoleValue
+    production*: BranchRoleValue
+    lts*: BranchRoleValue
+    custom*: seq[(string, BranchRoleValue)]
+      ## The `branch-roles` sub-table, in declaration order.
+
+const
+  builtinOptionalRoleNames* = ["unstable", "staging", "stable", "production",
+                               "lts"]
+    ## The five optional built-in roles (§2.1). `mainline` is the sixth and
+    ## the only required one; it is not in this list because it alone may not
+    ## be `false`.
+
+proc isDeclared*(v: BranchRoleValue): bool = v.kind != brvUndeclared
+
+proc roleBranch*(v: string): BranchRoleValue =
+  BranchRoleValue(kind: brvBranch, branch: v)
+
+proc roleAbsent*(): BranchRoleValue =
+  BranchRoleValue(kind: brvAbsent)
+
+proc branchRoleValueFromToml*(node: TomlValueRef): BranchRoleValue =
+  ## Classify one TOML value as a role value. Never raises: an illegal shape
+  ## lands in `rejected` for the caller to report with its key path.
+  if node.isNil:
+    return BranchRoleValue(kind: brvUndeclared)
+  case node.kind
+  of TomlKind.String:
+    BranchRoleValue(kind: brvBranch, branch: node.stringVal)
+  of TomlKind.Bool:
+    if node.boolVal:
+      BranchRoleValue(kind: brvUndeclared,
+        rejected: "`true` is not a role value; a role is a branch name, or " &
+          "`false` to declare the tier absent")
+    else:
+      BranchRoleValue(kind: brvAbsent)
+  else:
+    BranchRoleValue(kind: brvUndeclared,
+      rejected: "a role is a branch name or `false`, not a " &
+        ($node.kind).toLowerAscii())
+
+proc readValue*(r: var TomlReader, v: var BranchRoleValue) =
+  ## Strict-decoder hook for one role key; see `BranchRoleValue`.
+  var inner: TomlValueRef
+  r.readValue(inner)
+  v = branchRoleValueFromToml(inner)
+
+proc readValue*(r: var TomlReader, v: var CustomRoleTable) =
+  ## Strict-decoder hook for the INLINE spelling of a `branch-roles` table
+  ## (`branch-roles = { beta = "beta" }`). The header spelling
+  ## (`[repo.branch-roles]`) never reaches this hook — the pinned
+  ## toml-serialization silently drops dotted sub-table headers of a typed
+  ## record — so the reader re-reads that spelling from the generic TOML tree
+  ## (`reader.nim`, `fillRoleSubTables`).
+  parseTable(r, key):
+    var inner: TomlValueRef
+    r.readValue(inner)
+    v.entries.add((key, branchRoleValueFromToml(inner)))
+
+type
   # --- repos/<repo>.toml -----------------------------------------------------
+
+  PreviousRepoIdentity* = object
+    ## One prior identity of a repo — Declared-Repository-Renames.md §2.
+    ##
+    ## Authored as an inline-table-array element under `[extensions]`, NOT
+    ## under `[repo]`:
+    ##
+    ##   [extensions]
+    ##   previously = [{ name = "reprobuild-specs", path = "reprobuild-specs" }]
+    ##
+    ## **`[extensions]`, deliberately.** `decodeStrict` decodes every record
+    ## with `TomlUnknownFields` unset, so an unknown key under `[repo]` RAISES
+    ## on every `repro` that predates the key — the whole repo, and whatever
+    ## resolve needed it, then fails. `Extensions.readValue` above passes an
+    ## unknown key under `[extensions]` through untouched, so an older binary
+    ## parses such a fragment and behaves exactly as it does today (clones
+    ## fresh, leaves the orphan). That is the only placement whose
+    ## rollout-order failure degrades to the status quo rather than to a
+    ## workspace that will not resolve, which matters because the pin cannot
+    ## always be moved before the manifest edit lands (on Windows it waits on
+    ## a published release). Promotion to `[repo] previously` under a
+    ## `reprobuild.workspace.repo.v2` bump happens when a floor can actually
+    ## be asserted. Do not "tidy" this into `[repo]`.
+    ##
+    ## Every field is OPTIONAL and an omitted field means "unchanged from
+    ## `[repo]`", so a pure path move names only `path`. An entry must differ
+    ## from the present identity in at least one field (`readRepoFragment`
+    ## enforces it). Declaration order is "most recent first"; the validator
+    ## cannot verify that, so first-match-wins in `sync` is the only
+    ## observable consequence of the order.
+    ##
+    ## The four fields are exactly the four that determine where a checkout
+    ## sits and what it talks to. `branch` is deliberately NOT among them: a
+    ## mainline rename strands nothing, because the directory stays where it is
+    ## and `repro switch --mainline` already moves a checkout between branches.
+    ##
+    ## ONE TUPLE ARRAY, NOT TWO PARALLEL LISTS. `path` and `name` are
+    ## independent but PAIRED at any given moment, and the pairing is
+    ## load-bearing twice: the prior URL is DERIVED from the prior `name` (plus
+    ## a prefix), and a repo can move twice (`foo` → `vendor/foo` →
+    ## `vendor/bar`), which flat lists cannot express. The inline-table array
+    ## is also the shape this schema is already obliged to use — see
+    ## `CopyLinkFileEntry` for the pinned deserializer's nested
+    ## array-of-tables limitation.
+    name*: string
+      ## The identity the repo was declared under — what `--only`,
+      ## `member_repos`, lock record paths and the sidecar file name used.
+    path*: string
+      ## The working tree it occupied: workspace-root-relative, forward
+      ## slashes, no `..` segment. Validated by the SAME check a live
+      ## `repo.path` gets (`declaredCheckoutPathRejection`), because a prior
+      ## path places a directory MOVE on every machine that syncs.
+    url_prefix*: string
+      ## The prefix entry its URL was composed from, for a repo that changed
+      ## org or host.
+    url_suffix*: string
+      ## The remainder under that prefix, for a repo that carried its org in
+      ## the suffix.
 
   CopyLinkFileEntry* = object
     ## RA-18 — one copyfile / linkfile directive (the `repo`
@@ -138,11 +317,30 @@ type
     path*: string
     remote*: Option[string]        ## deprecated spelling of `url_prefix`.
     remotes*: seq[RepoRemoteEntry]
-    revision*: Option[string]      ## deprecated; split into `branch` + the lock.
-    branch*: Option[string]
-      ## The branch this repo follows. Only ever a branch name — never a commit
-      ## id and never a fully-qualified ref, so it is always a legal argument to
-      ## `git clone --branch`. Pins live in lock files.
+    revision*: Option[string]
+      ## An optional pin of the checkout revision, beside the `mainline` it
+      ## follows; pins otherwise live in lock files.
+    mainline*: Option[string]
+      ## Workspace-Branch-Roles.md §3.1: the branch where completed work is
+      ## integrated. Only ever a branch name — never a commit id and never a
+      ## fully-qualified ref, so it is always a legal argument to
+      ## `git clone --branch`. Optional here when the fragment's profile (or
+      ## the workspace default profile) supplies it; a repo that resolves no
+      ## mainline at all does not load (§3.3).
+    unstable*: BranchRoleValue
+    staging*: BranchRoleValue
+    stable*: BranchRoleValue
+    production*: BranchRoleValue
+    lts*: BranchRoleValue
+      ## `repo.v2`: the five optional built-in roles (§2.1), each a branch
+      ## name or `false` (§3.1).
+    profile*: Option[string]
+      ## `repo.v2`: the `[profiles.<name>]` of the settings file this repo
+      ## follows (§3.2).
+    `branch-roles`*: CustomRoleTable
+      ## `repo.v2`: custom roles (`[repo.branch-roles]`), name -> branch name
+      ## or `false` (§3.1). Under a sub-table so a workspace-chosen word can
+      ## never collide with a present or future `[repo]` key.
     url_prefix*: Option[string]
     url_suffix*: Option[string]
     vcs*: Option[string]
@@ -193,6 +391,15 @@ type
     repo*: RepoBody
     extensions*: Extensions
 
+proc roleDecls*(body: RepoBody): BranchRoleDecls =
+  ## The role declarations this fragment itself makes (§3.3 step 1).
+  BranchRoleDecls(mainline: body.mainline,
+    unstable: body.unstable, staging: body.staging, stable: body.stable,
+    production: body.production, lts: body.lts,
+    custom: body.`branch-roles`.entries)
+
+type
+
   # --- url-prefixes/<name>.toml ----------------------------------------------
 
   UrlPrefixBody* = object
@@ -236,7 +443,7 @@ type
 
   TemplateBody* = object
     ## A template's own identity, and nothing else. It carries no
-    ## `default_revision` / `default_remote` / `trunk` for the same reason a
+    ## `default_remote` for the same reason a
     ## repo-set does not: a collection-level default would make a member
     ## resolve differently depending on which template happened to scaffold the
     ## set that names it.
@@ -265,10 +472,12 @@ type
   # --- projects/<project>.toml -----------------------------------------------
 
   ProjectBody* = object
+    ## `[project]`. It names no branch: each repo's branches are its roles
+    ## (Workspace-Branch-Roles.md §3), and the project's default workspace
+    ## branch is the ROOT repository's resolved mainline (§3.4). The keys
+    ## that once declared either are refused by name (`retired_names.nim`).
     name*: string
-    default_revision*: Option[string]
     default_remote*: Option[string]
-    trunk*: Option[string]
 
   RemoteEntry* = object
     name*: string
@@ -288,35 +497,16 @@ type
     revision*: Option[string]
 
   CertificatesBody* = object
-    ## TC-3 / TC-6 / RA-32 — the project's test-certificate gating policy
-    ## (Test-Certificates.md §"Per-project configuration"). Authored as a
-    ## top-level `[certificates]` table in `projects/<project>.toml`:
-    ##
-    ##   [certificates]
-    ##   gate_mode = "required"            # off (default) | advisory | required
-    ##   required_targets = ["t-unit"]    # targets a cert must cover
-    ##   required_platforms = ["linux/amd64", "macos/arm64"]
-    ##
-    ## Every field is OPTIONAL. A missing `[certificates]` table — or a table
-    ## that omits `gate_mode` — resolves to `off`, so a project that never
-    ## opts in is never cert-gated (the default-off onboarding guarantee:
-    ## RA-32). `gate_mode` ∈ {off, advisory, required}; `advisory` records
-    ## coverage without ever blocking the push; `required` refuses the push
-    ## unless the submitted certificates cover the pushed commit for the
-    ## required targets on each required platform.
-    ##
-    ## TC-4 — `ci_trust` controls whether CI fast-tracks (skips) targets a
-    ## valid certificate already covers, or treats the certificate as purely
-    ## informational and re-runs everything. `skip` is the high-trust
-    ## fast-track ("trust the certificate, don't re-run"); `advisory` (the
-    ## DEFAULT, the SAFER choice) re-runs everything but surfaces the
-    ## certificate as a signal. Trust is an EXPLICIT project decision: an
-    ## absent / omitted `ci_trust` never silently fast-tracks
-    ## (Test-Certificates.md §"CI integration — skipping certified work").
+    ## A `[certificates]` table in `projects/<project>.toml`, which is NOT
+    ## supported (Test-Certificates TC-9d, operator decision D18). It is
+    ## decoded only so ``resolveProject`` can recognise it and refuse the
+    ## manifest with a remedy (``refuseLegacyCertificatesTable``) instead of
+    ## the strict decoder's generic unknown-key error. No field is read.
     gate_mode*: Option[string]
     required_targets*: seq[string]
     required_platforms*: seq[string]
     ci_trust*: Option[string]
+    untracked_inputs*: Option[string]
 
   ProjectManifest* = object
     schema*: string
@@ -336,11 +526,8 @@ type
       ## dependencies; backward-compatible with manifests authored before
       ## RA-22.
     certificates*: CertificatesBody
-      ## TC-3 / TC-6 / RA-32 — the project's test-certificate gating policy.
-      ## A missing `[certificates]` table leaves every field at its zero
-      ## value (`gate_mode` = none ⇒ resolved `off`), so enforcement is
-      ## strictly opt-in and backward-compatible with manifests authored
-      ## before this milestone.
+      ## The retired `[certificates]` table (see `CertificatesBody`). A
+      ## manifest that carries it does not resolve (TC-9d).
     extensions*: Extensions
 
   # --- variants/<...>.toml ---------------------------------------------------
@@ -415,7 +602,7 @@ type
     repo*: seq[LockedRepo]
     extensions*: Extensions
 
-  # --- <workspace-root>/.repro/workspace.toml --------------------------------
+  # --- <workspace-root>/.repro/workspace-state.toml --------------------------
 
   WorkspaceBody* = object
     project*: string
@@ -438,16 +625,49 @@ type
       ## (backward-compatible with workspaces written before M16).
 
   ManifestLayer* = object
+    ## One manifest layer the composer acquires. Decoded from the `[[manifest]]`
+    ## entries of a state file (the pre-settings-file location of the layer
+    ## list) and BUILT from the settings files' `[[manifest]]` entries
+    ## (`composeSettingsLayers`). `name` and `revision` exist only in the
+    ## settings files, so the state-file reader rejects them.
     url*: Option[string]
     local_path*: Option[string]
     visibility*: string
     branch*: Option[string]
+    name*: Option[string]
+      ## The settings-file layer name (Workspace-Settings-Files.md §3–§4).
+      ## Also marks the root repo's own base layer (`workspaceRootLayerName`).
+    revision*: Option[string]
+      ## A settings-file layer pin (§3): the layer is cloned AT this revision
+      ## (`git clone --branch`, so a tag or a branch) and its HEAD is verified
+      ## to resolve to it — the RA-17 pin check, applied per layer.
+    from_settings*: Option[bool]
+      ## Set (`some(true)`) on every layer BUILT from the settings files
+      ## (`composeSettingsLayers`) and on the implicit root base layer
+      ## `withSettingsLayers` adds; never decoded from a state file (the
+      ## state-file reader rejects it). It is the layer's ORIGIN, and the
+      ## composer reads it per layer: a settings-file layer composes
+      ## additively per project — without `projects/<p>.toml` it contributes
+      ## nothing to <p> (Workspace-Settings-Files.md §4 "Layers are additive
+      ## per project") — while a layer listed in the legacy state file keeps
+      ## the M8 rule that it must declare the project. Per layer rather than
+      ## per composition so a workspace mixing both kinds gets each rule.
 
   WorkspaceLocal* = object
+    ## The per-checkout state file `.repro/workspace-state.toml` (`state.v1`).
+    ## `manifest` is set only when `repro health --fix` reads a file it is
+    ## migrating (`readStateFileForMigration`); every other reader refuses a
+    ## state file carrying layers.
     schema*: string
     workspace*: WorkspaceBody
     manifest*: seq[ManifestLayer]
+      ## Layers a state file being MIGRATED still records (the retired
+      ## `local.v1` kept them there): `repro health --fix` moves them to
+      ## `repro-workspace.local.toml` (Workspace-Settings-Files.md §8 step 2).
+      ## Always empty from every other reader, which refuses the key (§5). No
+      ## writer adds one.
     extensions*: Extensions
+
 
   # --- <workspace-root>/.repro/develop-overrides.toml ------------------------
 
@@ -463,38 +683,11 @@ type
     `override`*: seq[DevelopOverrideEntry]
     extensions*: Extensions
 
-  # --- <host-repo>/.repro-workspace.toml (RA-8 host bootstrap config) ---------
+  # --- shared tables of the settings file (repro-workspace.toml) ------------
   #
-  # Committed by the *host* product repo (canonical home `<org>/repro-workspace`)
-  # so a new user joins a workspace with a single `repro workspace init` and no
-  # `--manifest-url` flag. The `repro` binary ships NO org-specific default URL;
-  # this file is the org-config side of the generic-tool-vs-host-config split
-  # (Workspace-Manifests.md §"Host Bootstrap Config").
-
-  BootstrapManifestBody* = object
-    url*: string
-    branch*: Option[string]
-    private_url*: Option[string]
-      ## Optional private companion manifest URL. May also be supplied from a
-      ## sibling `.repro-workspace-private.toml` file (see `readWorkspaceBootstrap`)
-      ## that carries credentialed/SSH URLs the public config must not embed.
-    revision*: Option[string]
-      ## RA-17 — optional manifest-revision pin (a commit SHA or tag name). When
-      ## set, `init`/refresh verify the manifest source's HEAD resolves to this
-      ## exact revision so a moved branch can't silently swap the manifest out.
-      ## When signature verification is also required, the SIGNATURE is checked
-      ## against this pinned revision (a tag's signature, or the pinned commit's
-      ## signature) rather than whatever the branch currently points at.
-    publish_locks*: Option[bool]
-      ## MO-14 — OPT-IN to central workspace-lock PUBLICATION. When true, a
-      ## passing pre-push gate commits + pushes the `locks/` subtree to the
-      ## manifest repo (the RA-7/RA-21 publication boundary). When absent or
-      ## false, the workspace operates COMMITTED-LOCK-ONLY: the pre-push gate
-      ## still writes/refreshes the lock locally and passes, but never publishes
-      ## to the central manifest repo (Workspace-Manifests.md §"Lock
-      ## publication"). This gates PUBLICATION ONLY — manifest FETCH / refresh /
-      ## augmentation for private deps (via `[manifest] url` / `private_url`) is
-      ## independent and unaffected.
+  # The `Bootstrap*` record names are historical: these are the tables of the
+  # shared settings file (Workspace-Settings-Files.md §3), kept under their
+  # names because every consumer and the HL-1 configuration file share them.
 
   BootstrapProjectsBody* = object
     default*: seq[string]
@@ -514,7 +707,7 @@ type
   BootstrapVerifyBody* = object
     ## RA-17 — manifest provenance / trust anchor (Workspace-Manifests.md
     ## §"Manifest Provenance and Verification"). Declared in the host
-    ## bootstrap config, NEVER hardcoded. When `require_signature` is true,
+    ## settings file, NEVER hardcoded. When `require_signature` is true,
     ## `init`/refresh verify that the manifest source's HEAD commit (or the
     ## pinned `manifest_revision` tag) carries a VALID signature from a key in
     ## the configured allowed-signers set, and FAIL CLOSED otherwise. When
@@ -531,7 +724,7 @@ type
     allowed_signers*: Option[string]
       ## Path to a git `allowed_signers` file (the `gpg.ssh.allowedSignersFile`
       ## format: `<principal> <key-type> <base64-key>` per line). Relative
-      ## paths are resolved against the bootstrap config's directory.
+      ## paths are resolved against the settings file's directory.
     allowed_keys*: seq[string]
       ## Inline allowed signer entries, each one line of the
       ## `allowed_signers` format. Folded into a temporary allowed-signers file
@@ -558,8 +751,8 @@ type
       ## the dependency's remote URL.
 
   LockingRouteEntry* = object
-    ## MO-4 — one per-repo-set → store-backend route in the host bootstrap
-    ## config's `[locking]` table (Workspace-Manifests.md §"Routing repo-sets
+    ## MO-4 — one per-repo-set → store-backend route in the settings
+    ## file's `[locking]` table (Workspace-Manifests.md §"Routing repo-sets
     ## to stores"; Workspace-And-Develop-Mode.md §"Locking backends per
     ## repo-set"). Each entry maps a VISIBILITY tier (`wvPublic` / `wvOrg` /
     ## `wvTeam` / `wvPersonal`) to the `LockStore` backend that records the
@@ -623,10 +816,79 @@ type
     auto_load_envrc*: Option[bool]
     auto_load_flake*: Option[bool]
 
-  WorkspaceBootstrap* = object
+  # --- repro-workspace.toml / repro-workspace.local.toml ----------------------
+  #
+  # Workspace-Settings-Files.md §3–§4. Both files are decoded from the generic
+  # TOML tree by `settings.nim` rather than by the typed strict decoder: the
+  # pinned toml-serialization drops dotted sub-table headers
+  # (`[profiles.product]`, `[profiles.product.branch-roles]`) of a typed record
+  # without an error, and fails with an empty message on several shapes this
+  # file uses. The records below are the decoded result, not decode targets.
+
+  WorkspaceRootSettings* = object
+    ## `[workspace]` — the ROOT repo's own branch roles (Branch-Roles §3.4)
+    ## plus the workspace default profile (§3.2).
+    profile*: Option[string]
+    default_profile*: Option[string]
+    roles*: BranchRoleDecls
+
+  WorkspaceRecordsSettings* = object
+    ## `[records]` — the record store (generated lock records). Absent means
+    ## committed-lock-only.
+    url*: Option[string]
+    branch*: Option[string]
+    publish_locks*: Option[bool]
+      ## MO-14 — OPT-IN to central workspace-lock PUBLICATION. When true, a
+      ## passing pre-push gate commits + pushes the `locks/` subtree to the
+      ## record store (the RA-7/RA-21 publication boundary). When absent or
+      ## false, the workspace operates COMMITTED-LOCK-ONLY: the pre-push gate
+      ## still writes/refreshes the lock locally and passes, but never
+      ## publishes to the central store (Workspace-Manifests.md §"Lock
+      ## publication"). This gates PUBLICATION ONLY — manifest layer fetch and
+      ## refresh are independent and unaffected.
+
+  SettingsManifestLayer* = object
+    ## One `[[manifest]]` entry as a settings file declares it. Composed into
+    ## `ManifestLayer`s by `composeSettingsLayers` (§4 "Layer resolution").
+    name*: Option[string]
+    url*: Option[string]
+    branch*: Option[string]
+    visibility*: Option[string]
+    revision*: Option[string]
+    local_path*: Option[string]
+
+  CustomRoleDecl* = object
+    ## `[branch-roles.<name>]` (Branch-Roles §2.4).
+    name*: string
+    fallback*: string
+
+  WorkspaceSettings* = object
+    ## The workspace settings (Workspace-Settings-Files.md §3–§4): the shared
+    ## `repro-workspace.toml` (`settings.v1`) and the per-user
+    ## `repro-workspace.local.toml` beside it, decoded by `settings.nim`.
+    path*: string
+      ## The settings file that was read.
     schema*: string
-    manifest*: BootstrapManifestBody
+      ## `settings.v1`; `settings-local.v1` for a lone local file
+      ## (`readLoneLocalSettings`).
+    localPath*: string
+      ## The `repro-workspace.local.toml` read beside `path`, or "".
+    workspace*: WorkspaceRootSettings
     projects*: BootstrapProjectsBody
+    records*: WorkspaceRecordsSettings
+    sharedLayers*: seq[SettingsManifestLayer]
+      ## `[[manifest]]` of the shared file, in file order.
+    localLayers*: seq[SettingsManifestLayer]
+      ## `[[manifest]]` of the local file, in file order.
+    push_gateway*: Option[string]
+      ## Push-Gateway-Wiring-And-Policy.md §7.4's per-WORKSPACE opt-out: the
+      ## top-level `push_gateway = "off"` (the one value §7.4 defines; any
+      ## other is refused naming the file and key). Shared policy, so the local
+      ## file may not set it (§4).
+    profiles*: seq[(string, BranchRoleDecls)]
+      ## `[profiles.<name>]`, sorted by name (TOML tables are unordered).
+    customRoles*: seq[CustomRoleDecl]
+      ## `[branch-roles.<name>]`, sorted by name.
     verify*: BootstrapVerifyBody
     develop*: BootstrapDevelopBody
     locking*: BootstrapLockingBody
@@ -661,7 +923,7 @@ type
   # On-disk form (Q-A/Q-B, DECIDED): to stay within the pinned
   # toml-serialization (no `[[array.of.tables]]` for nested arrays), BOTH
   # `apply_if` and `[locking] route` are authored as INLINE-table arrays — the
-  # same convention `.repro-workspace.toml`'s `[locking] route = [{ … }]` uses:
+  # same convention `repro-workspace.toml`'s `[locking] route = [{ … }]` uses:
   #
   #   schema = "reprobuild.config.v1"
   #   apply_if = [{ under = "~/work/acme/", config = "team-routes.toml" }]
@@ -690,21 +952,6 @@ type
     apply_if*: seq[ApplyIfEntry]
     locking*: BootstrapLockingBody
     foreign_env*: BootstrapForeignEnvBody
-    extensions*: Extensions
-
-  # --- <host-repo>/.repro-workspace-private.toml (RA-8 private companion) -----
-  #
-  # Sibling of the public bootstrap config. Carries credentialed/SSH manifest
-  # URLs so the committed public file never embeds a secret-bearing URL. Read
-  # only for its `[manifest] private_url`; intentionally not committed where the
-  # URL is credentialed.
-
-  BootstrapPrivateManifestBody* = object
-    private_url*: string
-
-  WorkspaceBootstrapPrivate* = object
-    schema*: string
-    manifest*: BootstrapPrivateManifestBody
     extensions*: Extensions
 
   # NOTE on the schema probe: the reader does NOT define a typed "probe"

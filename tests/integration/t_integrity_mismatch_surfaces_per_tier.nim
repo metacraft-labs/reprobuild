@@ -172,19 +172,18 @@ proc projectToml(coreUrl, secretUrl: string): string =
   "schema = \"reprobuild.workspace.project.v1\"\n\n" &
   "[project]\n" &
   "name = \"mix\"\n" &
-  "default_revision = \"main\"\n" &
-  "trunk = \"main\"\n\n" &
+  "\n" &
   "[[remote]]\nname = \"core-origin\"\nfetch = \"" & coreUrl & "\"\n\n" &
   "[[remote]]\nname = \"secret-origin\"\nfetch = \"" & secretUrl & "\"\n\n" &
   "includes = [\n  \"repos/core.toml\",\n  \"repos/secret.toml\",\n]\n"
 
 proc repoFragment(name, remote: string): string =
-  "schema = \"reprobuild.workspace.repo.v1\"\n\n" &
+  "schema = \"reprobuild.workspace.repo.v2\"\n\n" &
   "[repo]\n" &
   "name = \"" & name & "\"\n" &
   "path = \"" & name & "\"\n" &
   "remote = \"" & remote & "\"\n" &
-  "revision = \"main\"\n"
+  "mainline = \"main\"\n"
 
 proc readReport(ws: string): JsonNode =
   parseFile(ws / ".repro" / "build" / "reports" / "check-report.json")
@@ -238,9 +237,9 @@ suite "HL-4 — integrity mismatch surfaces per tier on the manifest-present pat
       putEnv("DB_DIR", db)
       defer: delEnv("DB_DIR")
 
-      writeFile(ws / ".repro-workspace.toml",
-        "schema = \"reprobuild.workspace.bootstrap.v1\"\n\n" &
-        "[manifest]\n" &
+      writeFile(ws / "repro-workspace.toml",
+        "schema = \"reprobuild.workspace.settings.v1\"\n\n" &
+        "[records]\n" &
         "url = \"https://example.invalid/manifests.git\"\n\n" &
         "[locking]\n" &
         "route = [" &

@@ -33,7 +33,7 @@
 ## missing sled is a LOUD failure. The `skip()` arm exists only for platforms
 ## that are not Linux x86_64.
 
-import std/[json, options, os, osproc, streams, strtabs, strutils, unittest]
+import std/[json, options, os, osproc, streams, strtabs, strutils, tempfiles, unittest]
 
 when defined(linux) and defined(amd64):
   import repro_hcr_agent
@@ -94,6 +94,13 @@ when defined(linux) and defined(amd64):
       let workDir = repoRoot / "build" / "hcr-linux-m2-shared"
       let agentDir = repoRoot / "libs" / "repro_hcr_agent" / "c"
       createDir(workDir)
+      # The agent socket cannot live under the work directory: sun_path is 108
+      # bytes and the checkout prefix alone can exhaust it (the CI runner's is
+      # 57), so the gate died on "socket path too long" before asserting
+      # anything. Build artifacts stay put; only the socket moves to a short
+      # private directory, removed with the case.
+      let socketRoot = createTempDir("hlx-", "", "/tmp")
+      defer: removeDir(socketRoot)
 
       let gcc = findExe("gcc")
       ck "gcc is on PATH", gcc.len > 0
@@ -156,7 +163,7 @@ when defined(linux) and defined(amd64):
           @["-ldl", "-lpthread"]), repoRoot)
 
       proc runCase(targetBin: string; patchId: string): RunOutcome =
-        let socketPath = workDir / (patchId & ".sock")
+        let socketPath = socketRoot / (patchId & ".sock")
         removeFile(socketPath)
         var listener = listenHcrAgentUnixSocket(socketPath)
         defer: listener.close()

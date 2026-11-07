@@ -97,8 +97,10 @@ deps = [{ name = "reprobuild", path = "reprobuild", coord_kind = "vcs", url = "g
     check dep0.name == "reprobuild"
     check dep0.coordinates.kind == ckVcs
     check dep0.coordinates.url == "github.com"
-    check dep0.coordinates.gitRef == "main"
     check dep0.coordinates.revision == "abc"
+    # The `ref` a writer of that time recorded is not read, and a rewrite
+    # drops it: a lock pins a commit, never a branch (§14.2).
+    check "ref = " notin serializeLockedDependencies(ld)
     
     # Verify Store dep
     let dep1 = ld.deps[1]

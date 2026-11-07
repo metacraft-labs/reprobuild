@@ -75,7 +75,9 @@ const
 
   CargoVendorSubdir* = ".repro/cargo-vendor"
     ## Scratch root: the unpacked vendor tree and the crate download cache.
-    ## Under ``.repro/`` so ``repro clean`` takes it with everything else.
+    ## Under the gitignored ``.repro/`` tree. Only the vendor stamp is a
+    ## declared output, so ``repro clean`` removes the stamp and keeps the
+    ## download.
 
 proc cargoVendorManifestPath*(projectRoot: string): string =
   projectRoot / CargoVendorManifestName
@@ -104,9 +106,11 @@ proc cargoVendorStampPath*(projectRoot: string): string =
   cargoVendorRoot(projectRoot) / "vendor.stamp"
 
 proc cargoConfigDir*(projectRoot: string): string =
-  ## ``.cargo/`` beside the EXTRACTED SOURCE, not beside the recipe: cargo
-  ## looks for configuration upward from the manifest directory it is
-  ## building, and the recipe root is not on that path.
+  ## ``.cargo/`` beside the EXTRACTED SOURCE. Cargo reads configuration from
+  ## its WORKING directory upward, not from the manifest's, so a build run
+  ## from the recipe root names this file explicitly (``cargo --config``)
+  ## rather than relying on the search
+  ## (https://doc.rust-lang.org/cargo/reference/config.html#hierarchical-structure).
   projectRoot / "src" / ".cargo"
 
 proc cargoVendorActionId*(packageName: string): string =

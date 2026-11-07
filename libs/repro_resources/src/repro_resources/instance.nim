@@ -3,7 +3,7 @@
 ##
 ## This is the SELF-CONTAINED generic lane: it operates on a
 ## `typeId`-tagged, type-erased `ResourceInstance` rather than the
-## home-scope `Resource` union, so a downstream repo (vm-harness,
+## home-scope `Resource` union, so a downstream repo (gosti,
 ## infra) can define resource TYPES in its own source and have a
 ## generic reconciler drive them through a registered driver — the
 ## resource analog of how `package` lowers to a generic `PackageDef`.
@@ -80,7 +80,7 @@ type
       ## perform the create/update/destroy; return the new recorded binding.
 
   ResourceProviderDef* = object
-    typeId*: string                 ## stable, e.g. "vm_harness.container"
+    typeId*: string                 ## stable, e.g. "gosti.container"
     determinism*: ResourceDeterminism
     driver*: ResourceProviderDriver
 

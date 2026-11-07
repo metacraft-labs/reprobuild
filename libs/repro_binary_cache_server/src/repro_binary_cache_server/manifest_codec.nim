@@ -26,6 +26,7 @@
 ## The signed payload is everything UP TO ``signature``. ``signature``
 ## itself is the last 64 bytes; the verifier slices the buffer there.
 
+from repro_core import elementCountFits
 import std/[strutils]
 
 import blake3
@@ -197,7 +198,10 @@ proc decodeCacheEntryKey(payload: openArray[byte]): CacheEntryKey =
       ", expected " & $BinaryCacheFormatVersion)
   result.packageName = readString(payload, pos)
   result.packageVersion = readString(payload, pos)
-  let optCount = int(readU32LE(payload, pos))
+  let optCountRaw = readU32LE(payload, pos)
+  if not elementCountFits(optCountRaw, payload.len - pos, 8):
+    raise newException(BinaryCacheCodecError, "element count exceeds remaining bytes")
+  let optCount = int(optCountRaw)
   result.selectedOptions = newSeqOfCap[(string, string)](optCount)
   for _ in 0 ..< optCount:
     let k = readString(payload, pos)
@@ -302,12 +306,18 @@ proc decodeManifest*(buf: openArray[byte]): BinaryCacheManifest =
   if recomputedKeyDigest != declaredKeyDigest:
     raise newException(BinaryCacheCodecError,
       "manifest CacheEntryKey digest mismatch (envelope tampered?)")
-  let payloadCount = int(readU32LE(buf, pos))
+  let payloadCountRaw = readU32LE(buf, pos)
+  if not elementCountFits(payloadCountRaw, buf.len - pos, 54):
+    raise newException(BinaryCacheCodecError, "element count exceeds remaining bytes")
+  let payloadCount = int(payloadCountRaw)
   result.payloads = newSeqOfCap[PayloadObject](payloadCount)
   for _ in 0 ..< payloadCount:
     result.payloads.add(decodePayload(buf, pos))
   result.realizedPrefixDigest = readDigest(buf, pos)
-  let depCount = int(readU32LE(buf, pos))
+  let depCountRaw = readU32LE(buf, pos)
+  if not elementCountFits(depCountRaw, buf.len - pos, 32):
+    raise newException(BinaryCacheCodecError, "element count exceeds remaining bytes")
+  let depCount = int(depCountRaw)
   result.depReferences = newSeqOfCap[Blake3Hash](depCount)
   for _ in 0 ..< depCount:
     result.depReferences.add(readDigest(buf, pos))

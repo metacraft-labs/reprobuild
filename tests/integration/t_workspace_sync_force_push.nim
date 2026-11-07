@@ -143,13 +143,13 @@ type
     pushedSha: string # P0
 
 const libFragmentToml = """
-schema = "reprobuild.workspace.repo.v1"
+schema = "reprobuild.workspace.repo.v2"
 
 [repo]
 name = "lib"
 path = "lib"
 remote = "lib-origin"
-revision = "main"
+mainline = "main"
 """
 
 proc projectTomlWithRemote(libUrl: string): string =
@@ -157,8 +157,7 @@ proc projectTomlWithRemote(libUrl: string): string =
     "schema = \"reprobuild.workspace.project.v1\"\n\n" &
     "[project]\n" &
     "name = \"myproject\"\n" &
-    "default_revision = \"main\"\n" &
-    "trunk = \"main\"\n\n" &
+    "\n" &
     "[[remote]]\nname = \"lib-origin\"\nfetch = \"" & libUrl & "\"\n\n" &
     "includes = [\n" &
     "  \"repos/lib.toml\",\n" &

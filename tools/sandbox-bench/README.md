@@ -2,23 +2,23 @@
 
 > **Note 2026-06-08**: the Hyper-V hot-revert and portability primitives
 > measured by the scripts in this directory are now first-class API
-> calls in `vm-harness`:
+> calls in `gosti`:
 >
 > - `snapshotRunning` / `restoreSnapshot` / `removeSnapshot`
 > - `exportBaseline` / `importBaseline`
-> - CLI: `vm-harness snapshot create --running ...`,
->   `vm-harness baseline export|import ...`
+> - CLI: `gosti snapshot create --running ...`,
+>   `gosti baseline export|import ...`
 >
 > A backend-agnostic Nim benchmark that drives the same measurement
 > through the library API ships at
-> `metacraft-labs/vm-harness:tools/bench/snapshot_revert_bench.nim`
+> `metacraft-labs/gosti:tools/bench/snapshot_revert_bench.nim`
 > (build: `nimble buildBench`). The PowerShell scripts in this
 > directory remain the canonical reproducer for the original
 > measurements documented here, but new measurement work should
-> prefer the vm-harness bench so future backends (Tart `suspend`,
+> prefer the gosti bench so future backends (Tart `suspend`,
 > libvirt native snapshots) can re-measure under the same harness.
 > See `docs/per-backend-notes/hyperv-snapshot-benchmarks.md` in
-> vm-harness for the project-agnostic version of the numbers below.
+> gosti for the project-agnostic version of the numbers below.
 
 Concrete wall-time measurements for the three options reprobuild has
 to run a destructive-class e2e test:

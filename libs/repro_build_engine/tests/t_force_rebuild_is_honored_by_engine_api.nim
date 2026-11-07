@@ -182,8 +182,11 @@ suite "engine-API forceRebuild is honored":
     check gen.cacheDecision == cdMiss
     check probe.cacheDecision == cdMiss
     # `reason` is overwritten by the execution outcome once the edge runs
-    # (`exit=0`), so the cache-skip note is not observable here; the
-    # `cdMiss` decision above is the engine's record of the forced miss.
+    # (`exit=0`); `cacheMissReason` keeps why the cache was not consulted,
+    # as it does for a lookup that missed. Without it a report showed a
+    # launched miss with no explanation.
+    check gen.cacheMissReason == "force-rebuild"
+    check probe.cacheMissReason == "force-rebuild"
     check gen.status == asSucceeded
     check probe.status == asSucceeded
 

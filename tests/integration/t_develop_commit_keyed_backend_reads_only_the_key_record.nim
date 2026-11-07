@@ -185,18 +185,17 @@ proc projectToml(remoteUrl: string; repoNames: openArray[string]): string =
   "schema = \"reprobuild.workspace.project.v1\"\n\n" &
   "[project]\n" &
   "name = \"mix\"\n" &
-  "default_revision = \"main\"\n" &
-  "trunk = \"main\"\n\n" &
+  "\n" &
   "[[remote]]\nname = \"lib-origin\"\nfetch = \"" & remoteUrl & "\"\n\n" &
   "includes = [\n" & includes & "]\n"
 
 proc repoFragment(name, path: string): string =
-  "schema = \"reprobuild.workspace.repo.v1\"\n\n" &
+  "schema = \"reprobuild.workspace.repo.v2\"\n\n" &
   "[repo]\n" &
   "name = \"" & name & "\"\n" &
   "path = \"" & path & "\"\n" &
   "remote = \"lib-origin\"\n" &
-  "revision = \"main\"\n"
+  "mainline = \"main\"\n"
 
 proc lockBody(pins: openArray[(string, string, string)]): string =
   ## The exact ``reprobuild.workspace.lock.v1`` partition body the git-checkout
@@ -262,12 +261,12 @@ proc buildFixture(gitBin, repro: string;
     " commit -m manifests")
 
   createDir(result.ws / ".repro")
-  writeFile(result.ws / ".repro" / "workspace.toml",
-    "schema = \"reprobuild.workspace.local.v1\"\n\n" &
+  writeFile(result.ws / ".repro" / "workspace-state.toml",
+    "schema = \"reprobuild.workspace.state.v1\"\n\n" &
     "[workspace]\nproject = \"mix\"\nbranch = \"main\"\n")
-  writeFile(result.ws / ".repro-workspace.toml",
-    "schema = \"reprobuild.workspace.bootstrap.v1\"\n\n" &
-    "[manifest]\nurl = \"https://example.invalid/manifests.git\"\n")
+  writeFile(result.ws / "repro-workspace.toml",
+    "schema = \"reprobuild.workspace.settings.v1\"\n\n" &
+    "[records]\nurl = \"https://example.invalid/manifests.git\"\n")
   createDir(result.ws / ".git" / "repro")
   writeFile(result.ws / ".git" / "repro" / "config.toml",
     "schema = \"reprobuild.config.v1\"\n\n" &

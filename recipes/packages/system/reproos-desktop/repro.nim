@@ -85,7 +85,7 @@
 ##   the ``mergedLdConf`` file + the ``displayManagerSymlink`` intent
 ##   + the generation manifest. The activation layer that plants the
 ##   live ``/etc/`` symlinks into the booted system + swaps the symlink
-##   farm on rollback is deferred to NDEM2 (vm-harness gate) + a
+##   farm on rollback is deferred to NDEM2 (gosti gate) + a
 ##   follow-up activation runtime milestone.
 ##
 ## * **Bootloader integration is DEFERRED at the apply layer.** The
@@ -94,7 +94,7 @@
 ##   walks ``registeredBootloaderConfig("reproosDesktop").menuEntries``
 ##   and emits the live ``/boot/loader/entries/*.conf`` /
 ##   ``/boot/grub/grub.cfg`` snippet is NDEM2 work alongside the
-##   vm-harness e2e test. The impl module's ``renderGrubMenuEntry`` /
+##   gosti e2e test. The impl module's ``renderGrubMenuEntry`` /
 ##   ``emitGrubMenuEntries`` retain the legacy single-entry shape so
 ##   the v1 invariant suite keeps passing.
 ##
@@ -261,7 +261,7 @@ proc registerReproosDesktopFiles*() =
 package reproosDesktop:
   ## NDEM1 native reproos-desktop system-level package.
   ##
-  ## Downstream Tier-1 system tooling (NDEM2 vm-harness gate;
+  ## Downstream Tier-1 system tooling (NDEM2 gosti gate;
   ## reproos-rebuild CLI) ``uses:`` this and consume the recipe's
   ## fs.* artifacts plus the exported ``materializeReproosDesktop``
   ## proc to obtain the emission outputs (the multi-contributor merged

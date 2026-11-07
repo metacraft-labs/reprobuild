@@ -31,14 +31,18 @@
 ##   1. after a commit, `flake.lock`'s `alpha-src` node names the SIBLING's
 ##      `HEAD` — the revision the shell built against — and not the pin it
 ##      carried before;
-##   2. the fields DERIVED from the old revision's content (`narHash`,
-##      `lastModified`, `revCount`) are gone from that node. This is not
-##      tidiness. Measured on this host with nix 2.32.8: rewriting `rev` and
-##      leaving a stale `narHash` behind makes `nix eval` return the OLD
-##      revision's content while the lock names the NEW one — no warning, no
-##      error. A pin that reads correct and builds something else is §5's
-##      inert knob in its purest form, so a refresh that left those fields
-##      behind would have REPLACED one silent lie with another;
+##   2. the fields DERIVED from the revision's content (`narHash`,
+##      `lastModified`, `revCount`) describe the NEW revision: present, and
+##      none of them the old node's values. Both halves matter. Measured on
+##      this host with nix 2.32.8: rewriting `rev` and leaving a stale
+##      `narHash` behind makes `nix eval` return the OLD revision's content
+##      while the lock names the NEW one — no warning, no error, §5's inert
+##      knob in its purest form. And deleting them (what this refresh used to
+##      do) leaves a node weaker than the one it replaced: no content hash to
+##      verify the fetch against, and not what `nix flake update` writes
+##      (reprobuild-pm issue 2026-09-27). The values are checked against an
+##      independent `nix flake lock` by
+##      `t_a_refreshed_flake_pin_carries_what_nix_would_write`;
 ##   3. the two siblings that did not move keep their nodes BYTE-identical;
 ##   4. the refresh announces itself in the pre-commit log, naming the input,
 ##      both revisions, and that it STAGED the result. A refresh nobody can see
@@ -59,7 +63,7 @@
 ## generated, whether the recorded revision is the one an evaluation resolves
 ## to. That is the only observation here that cannot be satisfied by a refresh
 ## that wrote plausible bytes, and it is announced LOUDLY when nix is absent.
-## The third asks nix the follow-up question the `narHash` decision rests on:
+## The third asks nix the question the `narHash` treatment must answer:
 ## does a refreshed lock stay put under a lock-WRITING evaluation?
 ##
 ## ## Mutation (from the milestone): skip the refresh ⇒ RED
@@ -78,7 +82,7 @@ import nf2_flake_lock_fixture
 suite "NF-2: the commit records the sibling revision the shell used":
 
   test "t_commit_records_the_sibling_revision_the_shell_actually_used":
-    if not nf2Prerequisites(
+    if not nf2RecordingPrerequisites(
         "t_commit_records_the_sibling_revision_the_shell_actually_used"):
       skip()
     else:
@@ -130,10 +134,14 @@ suite "NF-2: the commit records the sibling revision the shell used":
       check alphaLocked["rev"].getStr() == newAlpha
       check seedAlpha notin nodeText(after, "alpha-src")
 
-      # ---- (2) the derived fields are gone, not stale. ---------------------
-      check not alphaLocked.hasKey("narHash")
-      check not alphaLocked.hasKey("lastModified")
-      check not alphaLocked.hasKey("revCount")
+      # ---- (2) the derived fields describe the new revision. ---------------
+      # Present (not deleted), and none of them the seed node's value (not
+      # stale). The fixture's seed node carries placeholder values, so a
+      # recomputed field can never coincide with one by accident.
+      let alphaBefore = parseJson(before)["nodes"]["alpha-src"]["locked"]
+      for field in ["narHash", "lastModified", "revCount"]:
+        check alphaLocked.hasKey(field)
+        check alphaLocked{field} != alphaBefore{field}
       # …and the fields that describe the input rather than the revision are
       # untouched, so the node is still a usable git input.
       check alphaLocked["type"].getStr() == "git"
@@ -307,35 +315,34 @@ suite "NF-2: the commit records the sibling revision the shell used":
     ##         no warning and no error. That is the case immediately above, and
     ##         it is §5's inert knob — a pin that reads correct and builds
     ##         something else. Rejected outright.
-    ##   (ii)  **recompute them.** Not rejected on the "never run the solver on
-    ##         the commit path" rule — re-pinning one input to a known revision
-    ##         is not a solve — but on what the computation needs. A correct
-    ##         `narHash` requires nix to FETCH that revision from the input's
-    ##         declared URL. Measured: ~120 ms per input when nix already has
-    ##         the revision (against a ~65 ms floor for starting nix at all),
-    ##         ~135–180 ms cold, and an outright FAILURE (`Failed to fetch git
-    ##         repository … fatal: git upload-pack`) when the revision exists
-    ##         only in the sibling's local checkout while the input's URL is
-    ##         that sibling's origin. That last case is the normal state on a
-    ##         commit hook: a developer commits in a sibling, then commits here,
-    ##         before either is pushed. So (ii) would cost per-commit latency
-    ##         and still produce no hash exactly when the refresh matters most.
-    ##   (iii) **delete them.** Chosen.
+    ##   (ii)  **delete them.** What the refresh did until reprobuild-pm issue
+    ##         2026-09-27: nix resolves a `rev`-only node correctly, but the
+    ##         node no longer records the content hash that makes its fetch
+    ##         verifiable, and it is not what `nix flake update` writes. It was
+    ##         chosen only because recomputing needs nix to FETCH the revision,
+    ##         and that fetch fails for a revision that exists only in the
+    ##         sibling's local checkout. NF-2 no longer records such a revision
+    ##         at all (`t_an_unpushed_sibling_revision_is_not_recorded`), so the
+    ##         premise is gone.
+    ##   (iii) **recompute them** from what nix reports for the new revision.
+    ##         Chosen.
     ##
-    ## ## Why (iii) needs a test of its own
+    ## ## Why (iii) still needs this test
     ##
-    ## (iii) has one plausible objection, and it is not about correctness: if
-    ## nix RE-ADDS the fields on the next evaluation, then `flake.lock` changes
-    ## underfoot after every refresh. That is lock churn — `direnv`'s
-    ## `watch_file` on `flake.lock` re-fires, every tree watcher sees a modified
-    ## input, and "most commits do not touch the lock" (§13.3) is defeated one
-    ## evaluation later rather than at the commit.
+    ## A refresh that writes nix's lock nodes by hand has one way to cause
+    ## churn: write a node that differs from the one nix would write — a field
+    ## missing, a value off, a key out of nix's order — so that nix RE-WRITES
+    ## it on the next evaluation. That is lock churn: `direnv`'s `watch_file` on
+    ## `flake.lock` re-fires, every tree watcher sees a modified input, and
+    ## "most commits do not touch the lock" (§13.3) is defeated one evaluation
+    ## later rather than at the commit. (The question was first asked of
+    ## treatment (ii), and nix did not re-add the deleted fields either.)
     ##
-    ## Measured, and pinned here: it does not happen. With lock writing ALLOWED
-    ## — no `--no-write-lock-file`, which is the flag that would make this
-    ## question unanswerable — repeated evaluations against a clean tree leave
-    ## the refreshed lock BYTE- and MTIME-identical, `git status` empty, and
-    ## still resolving to the new revision's content.
+    ## Pinned here: with lock writing ALLOWED — no `--no-write-lock-file`,
+    ## which is the flag that would make this question unanswerable — repeated
+    ## evaluations against a clean tree leave the refreshed lock BYTE- and
+    ## MTIME-identical, `git status` empty, and still resolving to the new
+    ## revision's content.
     ##
     ## Test-double policy: NO mocks. Real nix, real git, real evaluations.
     if not nf2Prerequisites("t_a_refreshed_lock_does_not_churn_under_nix"):
@@ -348,7 +355,7 @@ suite "NF-2: the commit records the sibling revision the shell used":
           "refreshed lock', and nothing about it can be answered without " &
           "nix. nix=MISSING. NOT CHECKED by this run: that a refresh does " &
           "not make the next evaluation rewrite flake.lock, which is the " &
-          "objection the delete-the-derived-fields decision rests on."
+          "property a refresh that writes nix's lock nodes by hand must keep."
         skip()
       else:
         let fx = setupNf2Fixture("nix-churn")
@@ -380,6 +387,8 @@ suite "NF-2: the commit records the sibling revision the shell used":
           skip()
         else:
           check readFile(lockPath(fx)).contains("narHash")
+          let seedLocked = parseJson(readFile(lockPath(fx)))["nodes"][
+            "alpha-src"]["locked"]
           discard requireCmd(q(fx.gitBin) & " -C " & q(fx.app) & " add -A")
           discard requireCmd(q(fx.gitBin) & " -C " & q(fx.app) &
             " commit -q -m " & q("lock the flake"))
@@ -398,7 +407,12 @@ suite "NF-2: the commit records the sibling revision the shell used":
           let refreshed = readFile(lockPath(fx))
           let alphaLocked = parseJson(refreshed)["nodes"]["alpha-src"]["locked"]
           check alphaLocked["rev"].getStr() == newAlpha
-          check not alphaLocked.hasKey("narHash")
+          # The refreshed node carries the NEW revision's derived fields —
+          # which is what makes the churn question non-trivial: every byte of
+          # them was written by the refresh, not by nix.
+          for field in ["narHash", "lastModified", "revCount"]:
+            check alphaLocked.hasKey(field)
+          check alphaLocked{"narHash"} != seedLocked{"narHash"}
           # The tree must be CLEAN for this question to be the right one: a
           # dirty tree makes nix print "Git tree … is dirty" and changes what
           # it is entitled to do, and the state after a pre-commit refresh is

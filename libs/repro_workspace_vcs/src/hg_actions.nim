@@ -47,6 +47,11 @@ import std/[os, osproc, strutils]
 
 import repro_build_engine
 import repro_core/codec
+# ``execCmdExCloseOnce``: ``execCmdEx`` without ``osproc.close``'s double close
+# of the merged stdout/stderr descriptor. These helpers run inside the build
+# engine's workspace-VCS executor, on the scheduler thread, while the engine's
+# worker pool may be live; see ``repro_core/process_close``.
+from repro_core/process_exec import execCmdExCloseOnce
 import repro_hash
 
 import git_actions
@@ -251,7 +256,7 @@ proc runHg(payload: HgVcsPayload; args: openArray[string];
   for arg in args:
     cmd.add(" ")
     cmd.add(quoteShell(arg))
-  let res = execCmdEx(cmd, workingDir = workingDir)
+  let res = execCmdExCloseOnce(cmd, workingDir = workingDir)
   (exitCode: res.exitCode, output: res.output)
 
 proc trimmed(value: string): string = value.strip()

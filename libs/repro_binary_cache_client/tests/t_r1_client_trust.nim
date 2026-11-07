@@ -307,6 +307,54 @@ suite "R1 — client trust + default-untrusted substitution":
     try: removeDir(clientRoot) except CatchableError: discard
     try: removeDir(serverRoot) except CatchableError: discard
 
+
+  test "a trust refusal on the preferred cache survives a plain miss on the next":
+    # `InProcessOutcome.reason` keeps only the LAST endpoint's text, so a
+    # caller that read "trust refused" out of it would see the 404 of the
+    # lower-priority cache instead and report a refusal as an absence. The
+    # typed `trustRejected` flag is OR-ed across every endpoint tried, so the
+    # refusal survives. Control: two empty caches are a plain miss, and the
+    # flag stays false.
+    randomize()
+    let portA = pickPort()
+    var portB = pickPort()
+    while portB == portA: portB = pickPort()
+    let srvRootA = getTempDir() / ("r1_orA_" & $rand(999_999))
+    let srvRootB = getTempDir() / ("r1_orB_" & $rand(999_999))
+    let clientRoot = getTempDir() / ("r1_cliOr_" & $rand(999_999))
+    for d in [srvRootA, srvRootB, clientRoot]:
+      removeDir(d); createDir(d)
+    let attacker = peerAuth.generateKeypair()
+    let good = peerAuth.generateKeypair()
+    # Cache A holds the entry, signed by a key nobody anchors; cache B is
+    # EMPTY, so it answers the same key with a plain 404.
+    var stateA = openBinaryCacheServer(srvRootA)
+    let entryA = publishMember(stateA, attacker, "pkg", 13)
+    close(stateA)
+    let procA = startServer(srvRootA, portA)
+    let procB = startServer(srvRootB, portB)
+    defer:
+      for p in [procA, procB]:
+        try: p.terminate() except CatchableError: discard
+        try: p.close() except CatchableError: discard
+    check waitForListener(portA)
+    check waitForListener(portB)
+    let endpoints = @[
+      SubstituteEndpoint(baseUrl: "http://127.0.0.1:" & $portA,
+                         trustedSigners: @[good.publicKey],
+                         priority: 10, enforceTrust: true),
+      SubstituteEndpoint(baseUrl: "http://127.0.0.1:" & $portB,
+                         trustedSigners: @[good.publicKey],
+                         priority: 20, enforceTrust: true)]
+    let res = substituteInProcess(entryA.entryKeyHex, clientRoot, endpoints)
+    check not res.ok
+    check res.trustRejected                  # the refusal on A survived
+    check "127.0.0.1:" & $portB in res.reason # while `reason` is B's miss
+    # Control: the same two caches, an entry neither holds.
+    let absent = substituteInProcess("ab" & entryA.entryKeyHex[2 .. ^1],
+                                     clientRoot, endpoints)
+    check not absent.ok
+    check not absent.trustRejected
   test "multi-cache: untrusted high-priority falls through to trusted lower-priority":
     randomize()
     let portA = pickPort()

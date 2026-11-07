@@ -68,6 +68,8 @@
 import std/[algorithm, options, os, osproc, posix, strutils, times,
             unittest]
 
+import repro_test_support/process_fixtures
+
 import repro_attest
 import repro_attest/cloud_lease
 import repro_cli_support/attest
@@ -165,7 +167,12 @@ if childRole.len > 0:
 # ---------------------------------------------------------------------
 
 let scratch = getTempDir() / "repro-cloud-lease-" & $getCurrentProcessId()
-createDir(scratch)
+# Removed when THIS process exits, whichever cases it ran — not by a final
+# "teardown" case, which under the runner's one-process-per-case model ran in
+# one process and left every other case process's scratch behind. Registering
+# a path that is never created is harmless. See
+# ``repro_test_support/process_fixtures``.
+releaseDirAtProcessExit(scratch)
 
 var caseCounter = 0
 proc freshCase(name: string): tuple[store: CloudLeaseStore;
@@ -678,6 +685,12 @@ suite "the liveness probe answers about real processes":
     # probe that says `olDead` to everything.
     let probe = processOwnerLiveness()
     let me = thisProcessOwner()
+    when defined(linux) or defined(macosx):
+      # These hosts have kernel identity sources. An empty token must fail
+      # here, rather than turn all the real-process measurements into skips.
+      check me.host.len > 0
+      check me.bootToken.len > 0
+      check me.startToken.len > 0
     if me.host.len == 0 or me.bootToken.len == 0 or me.startToken.len == 0:
       # This platform does not publish what the answer needs. The case
       # asserts THAT rather than a verdict it did not measure — and the
@@ -690,6 +703,8 @@ suite "the liveness probe answers about real processes":
   test "a killed process is DEAD, and a recycled number does not save it":
     let probe = processOwnerLiveness()
     let me = thisProcessOwner()
+    when defined(linux) or defined(macosx):
+      check me.startToken.len > 0
     if me.startToken.len == 0:
       check probe(me) == olUnknowable
       checkpoint("this platform publishes no process start token")
@@ -715,6 +730,18 @@ suite "the liveness probe answers about real processes":
     var elsewhere = thisProcessOwner()
     elsewhere.host = "a-host-this-process-is-not-on"
     check probe(elsewhere) == olUnknowable
+    let me = thisProcessOwner()
+    for missing in 0 .. 2:
+      var incomplete = me
+      case missing
+      of 0: incomplete.host = ""
+      of 1: incomplete.bootToken = ""
+      else: incomplete.startToken = ""
+      check probe(incomplete) == olUnknowable
+    for pid in [-1, 0]:
+      var invalid = me
+      invalid.pid = pid
+      check probe(invalid) == olUnknowable
     # …and after a reboot the owner is dead whatever its number is now.
     var beforeReboot = thisProcessOwner()
     if beforeReboot.bootToken.len == 0:
@@ -2112,12 +2139,3 @@ suite "how long a leaked instance can keep billing, as a number":
     check reapDecision(lease, now + 1, olUnknowable) == rdHeld
     check reapDecision(lease, now + MaxLeaseTtlSeconds, olUnknowable) ==
       rdExpired
-
-suite "teardown":
-
-  test "every child this gate started is gone":
-    # A gate about not leaking processes must not leak processes. The
-    # children are all killed and waited for in their own cases; this
-    # asserts the scratch tree is the only thing left, and removes it.
-    removeDir(scratch)
-    check not dirExists(scratch)

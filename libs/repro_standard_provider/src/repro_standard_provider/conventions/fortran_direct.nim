@@ -110,8 +110,10 @@ import repro_standard_provider/convention
 
 const
   ScratchDirName* = ".repro/build"
-    ## Mirror of every other Mode 3 convention's scratch dir so
-    ## ``repro clean`` (a single rm -rf .repro/) sweeps all outputs.
+    ## Mirror of every other Mode 3 convention's scratch dir. The
+    ## convention declares its outputs there, and ``repro clean`` removes
+    ## declared outputs by their ownership records, not by deleting
+    ## ``.repro/``.
 
   FortranSourceExtensions = [".f90", ".f95", ".f03", ".f08"]
     ## Free-form Fortran sources only. Fixed-form ``.f`` / ``.for`` is

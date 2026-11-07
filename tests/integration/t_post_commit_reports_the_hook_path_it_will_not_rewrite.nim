@@ -42,6 +42,11 @@
 ##      still DOES rewrite it. The demotion is about which call site writes,
 ##      not about abandoning the repair.
 ##
+##   4. `git worktree add` — which runs the main worktree's `post-checkout`
+##      INSIDE the new linked worktree — prints the same diagnosis and attempts
+##      no per-hook repair there: no "could NOT repair … Failed to create
+##      '<wt>/.git/'" per hook, and nothing written under the `.git` file.
+##
 ## Assertion 3 is the control that keeps 1 from being satisfiable by simply
 ## deleting the repair.
 ##
@@ -56,6 +61,7 @@
 ## every child process this file starts.
 
 import std/[os, strutils, tempfiles, unittest]
+import repro_test_support/reasoned_skip
 
 import repro_test_support
 
@@ -128,19 +134,19 @@ proc setup(gitBin: string): Fixture =
   createDir(fx.workspace / ".repro")
   createDir(fx.workspace / "projects")
   createDir(fx.workspace / "repos")
-  writeFile(fx.workspace / ".repro" / "workspace.toml",
-    "schema = \"reprobuild.workspace.local.v1\"\n\n" &
+  writeFile(fx.workspace / ".repro" / "workspace-state.toml",
+    "schema = \"reprobuild.workspace.state.v1\"\n\n" &
     "[workspace]\nproject = \"app\"\nprojects = [\"app\"]\n")
   writeFile(fx.workspace / "projects" / "app.toml",
     "schema = \"reprobuild.workspace.project.v1\"\n\n" &
-    "[project]\nname = \"app\"\ndefault_revision = \"main\"\n" &
-    "trunk = \"main\"\n\n" &
+    "[project]\nname = \"app\"\n" &
+    "\n" &
     "[[remote]]\nname = \"origin\"\nfetch = \"" & fileUrl(fx.origin) &
     "\"\n\nincludes = [\"repos/app.toml\"]\n")
   writeFile(fx.workspace / "repos" / "app.toml",
-    "schema = \"reprobuild.workspace.repo.v1\"\n\n" &
+    "schema = \"reprobuild.workspace.repo.v2\"\n\n" &
     "[repo]\nname = \"app\"\npath = \"app\"\n" &
-    "remote = \"origin\"\nrevision = \"main\"\n")
+    "remote = \"origin\"\nmainline = \"main\"\n")
 
 proc installHooks(fx: Fixture): tuple[code: int; output: string] =
   fx.sh(q(reproBinary()) & " hooks ensure --vcs " & q(fx.workspace))
@@ -221,3 +227,69 @@ suite "post-commit reports a worktree-unsafe core.hooksPath without rewriting it
       checkpoint("core.hooksPath after ensure: " & after)
       check after.isAbsolute
       check after == fx.app / ".git" / "hooks"
+
+  test "t_worktree_add_reports_the_relative_hook_path_and_writes_nothing_there":
+    ## THE ONE PLACE A HOOK DOES RUN IN A LINKED WORKTREE OF SUCH A REPO.
+    ##
+    ## A relative `core.hooksPath` means Git finds no hooks in a linked
+    ## worktree — except while CREATING one. `git worktree add` resolves the
+    ## hooks directory in the parent process, i.e. in the main worktree, and
+    ## then runs `post-checkout` with the NEW worktree as its directory. So the
+    ## self-heal does run there, and it used to join `.git/hooks` onto the new
+    ## worktree's top level — a path under a `.git` that is a FILE — and print,
+    ## once per managed hook:
+    ##
+    ##     repro hooks: could NOT repair pre-push in <wt>: Failed to create
+    ##     '<wt>/.git/'
+    ##
+    ## which is exactly the noise the issue quotes. Five warnings about a
+    ## `mkdir` that could never succeed bury the one diagnosis that matters.
+    ##
+    ## Asserted: the diagnosis is printed (the value, the consequence, the
+    ## remedy); no repair is ATTEMPTED (no `could NOT repair`, no `Failed to
+    ## create`); `<wt>/.git` is still the gitdir FILE git wrote and nothing
+    ## else; and the shared value is untouched — the self-heal reports the
+    ## path, it does not rewrite it.
+    let gitBin = findExe("git")
+    if gitBin.len == 0:
+      skip("git is not on PATH; this case needs a real repository and a real " &
+        "`git worktree add`")
+    else:
+      let fx = setup(gitBin)
+      defer: removeDirEventually(fx.scratch)
+
+      let ensured = fx.installHooks()
+      checkpoint("hooks ensure (exit " & $ensured.code & "):\n" &
+        ensured.output)
+      check ensured.code == 0
+      check fileExists(fx.app / ".git" / "hooks" / "post-checkout")
+
+      discard fx.requireGit("config --local core.hooksPath " &
+        q(DevShellRelativeHooksPath))
+      check fx.hooksPathValue() == DevShellRelativeHooksPath
+
+      let wt = fx.scratch / "wt"
+      let added = fx.git("worktree add " & q(wt) & " -b wt")
+      checkpoint("worktree add output:\n" & added.output)
+      check added.code == 0
+
+      # The hook really fired in the new worktree, so the absence of the
+      # repair noise below is a statement about what it did rather than about
+      # a hook that never ran.
+      check added.output.contains("core.hooksPath")
+      check added.output.contains(DevShellRelativeHooksPath)
+      check added.output.contains("linked worktree")
+      check added.output.contains("repro hooks ensure")
+
+      # THE MUTATION GUARD: the shipped self-heal prints one of each per hook.
+      check not added.output.contains("could NOT repair")
+      check not added.output.contains("Failed to create")
+
+      # The topology is real (a linked worktree's `.git` is a file), and the
+      # self-heal created nothing beside or beneath it.
+      check fileExists(wt / ".git")
+      check not dirExists(wt / ".git")
+      check readFile(wt / ".git").startsWith("gitdir:")
+
+      # Reported, not rewritten.
+      check fx.hooksPathValue() == DevShellRelativeHooksPath

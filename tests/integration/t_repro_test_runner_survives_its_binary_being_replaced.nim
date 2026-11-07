@@ -29,6 +29,8 @@
 ## fixture is a real compiled executable, and the replacement is a real
 ## rename(2) observed through the kernel's own /proc view.
 
+import repro_test_support/reasoned_skip
+
 when defined(linux):
   import std/[json, os, osproc, streams, strutils, tempfiles, times, unittest]
 

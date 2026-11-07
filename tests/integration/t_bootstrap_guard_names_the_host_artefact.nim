@@ -274,6 +274,107 @@ suite "W15 bootstrap guard":
     check after.startsWith("skip")
     check after == before
 
+  test "HCR library outputs keep a fresh CLI fresh, but its source does not":
+    # The native producer bootstraps its engine BEFORE writing these graph
+    # outputs. Their newer mtimes must not trigger another engine bootstrap;
+    # its canonical header remains an engine-source freshness witness.
+    let root = newFixtureRoot("hcr-outputs")
+    defer: removeDirEventually(root)
+    ageSources(root, 600)
+    stage(root / "build" / "bin" / HostBinName, hostImage(), true)
+    touchAt(root / "build" / "bin" / HostBinName, 60)
+    stageHostPair(root, 60)
+    let header = root / "libs/repro_hcr_agent/c/repro_hcr_agent.h"
+    stage(header, "/* source */\n", false)
+    touchAt(header, 600)
+    stage(root / "libs/repro_hcr_agent/build/librepro_hcr_agent.so",
+      "primary graph output", false)
+    stage(root / "libs/repro_hcr_agent/build/lib/librepro_hcr_agent.so",
+      "healthy mirror graph output", false)
+    let generated = decisionFor(root)
+    checkpoint("newer graph outputs: " & generated)
+    check generated.startsWith("skip")
+
+    touchAt(header, 10)
+    let changedSource = decisionFor(root)
+    checkpoint("newer canonical header: " & changedSource)
+    check changedSource.startsWith("bootstrap stale:")
+    check "libs/repro_hcr_agent/c/repro_hcr_agent.h" in changedSource
+
+  test "in a git checkout, ignored build output under a source root is not a source":
+    ## Full run 41: a test built the HCR agent library, and `build_lib.sh`
+    ## mirrored it into the gitignored `libs/repro_hcr_agent/build/lib/`.
+    ## The guard's `find` counted that `.so` as a source newer than
+    ## `build/bin/repro`, so the B5 case's `just bootstrap` relinked every
+    ## app in the live `build/bin` while the rest of the suite was executing
+    ## them (`.../build/bin/reprobuild (deleted): No such file or directory`).
+    ##
+    ## The fixture is a real git checkout and the stray output deliberately
+    ## sits under a library OTHER than `repro_hcr_agent`: what has to hold is
+    ## "git ignores it, so it is not a source", not one more hard-coded prune.
+    ## Both halves are checked, because a guard that ignores EVERYTHING would
+    ## pass the first: a tracked edit and a new not-yet-added file must still
+    ## rebuild.
+    let gitExe = findExe("git")
+    doAssert gitExe.len > 0, "git is required to stage a checkout fixture"
+    let root = newFixtureRoot("git-ignored-output")
+    defer: removeDirEventually(root)
+    writeFile(root / ".gitignore", "build/\n")
+    let tracked = root / "libs/some_lib/src/some_lib.nim"
+    stage(tracked, "# source\n", false)
+    for argv in [@[gitExe, "init", "-q", root],
+                 @[gitExe, "-C", root, "add", "-A"]]:
+      let r = runShell(shellCommand(argv), root)
+      doAssert r.code == 0, $argv & " exited " & $r.code & ": " & r.output
+    ageSources(root, 600)
+    touchAt(tracked, 600)
+    touchAt(root / ".gitignore", 600)
+    stage(root / "build" / "bin" / HostBinName, hostImage(), true)
+    touchAt(root / "build" / "bin" / HostBinName, 60)
+    stageHostPair(root, 60)
+
+    let control = decisionFor(root)
+    checkpoint("before any output is written: " & control)
+    check control.startsWith("skip")
+
+    let output = root / "libs/some_lib/build/lib/libsome_lib.so"
+    stage(output, "ignored build output", false)
+    let ignored = decisionFor(root)
+    checkpoint("newer ignored output under libs/: " & ignored)
+    check ignored.startsWith("skip")
+
+    touchAt(tracked, 10)
+    let edited = decisionFor(root)
+    checkpoint("newer tracked source: " & edited)
+    check edited.startsWith("bootstrap stale:")
+    check "libs/some_lib/src/some_lib.nim" in edited
+
+    touchAt(tracked, 600)
+    let added = root / "libs/some_lib/src/new_module.nim"
+    stage(added, "# not yet git-added\n", false)
+    let untracked = decisionFor(root)
+    checkpoint("newer untracked, not-ignored source: " & untracked)
+    check untracked.startsWith("bootstrap stale:")
+    check "libs/some_lib/src/new_module.nim" in untracked
+
+  test "outside git, the fallback scan still sees a newer source":
+    ## The `find` fallback is what an exported tree or a non-git fixture
+    ## gets. Every other fixture in this file is non-git and therefore
+    ## exercises it; this case names the property so a regression in the
+    ## fallback reads as one.
+    let root = newFixtureRoot("no-git")
+    defer: removeDirEventually(root)
+    ageSources(root, 600)
+    stage(root / "build" / "bin" / HostBinName, hostImage(), true)
+    touchAt(root / "build" / "bin" / HostBinName, 60)
+    stageHostPair(root, 60)
+    check decisionFor(root).startsWith("skip")
+    touchAt(root / "repro.nim", 10)
+    let decision = decisionFor(root)
+    checkpoint("decision = " & decision)
+    check decision.startsWith("bootstrap stale:")
+    check "repro.nim" in decision
+
   test "a thin client with no engine beside it is not a bootstrapped tree":
     ## THE SECOND HOST ARTEFACT, and why its absence cannot be left to the
     ## clauses above. `build/bin/repro` is the thin daemon client; it routes a

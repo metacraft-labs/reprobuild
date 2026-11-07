@@ -165,3 +165,56 @@ proc sourceOnlyPackagePath*(envName: string; candidates: openArray[string];
        "`scripts/dev-shell.sh`), which exports $" & envName &
        " from the flake's pinned input; or set $" & envName &
        " to a checkout that carries `" & marker & "`."))
+
+proc workspaceRelativeSourcePath*(path, projectRoot: string): string =
+  ## The spelling of a resolved source root that a compile's COMMAND LINE and
+  ## DECLARED ENVIRONMENT should carry: relative to ``projectRoot`` when the
+  ## directory is a workspace sibling, ``path`` unchanged otherwise.
+  ##
+  ## ## Why the spelling matters
+  ##
+  ## Every ``--path:`` element and every declared environment value is part of
+  ## an action's weak fingerprint (Incremental-Invalidation.md §"Step 1"). A
+  ## source root that is ALSO an input of every compile therefore decides,
+  ## by its NAME alone, whether every compile in the graph can be served from
+  ## the cache. Spelled ``/nix/store/<hash>-source/src`` — the content-hashed
+  ## store path of the flake input — it changed on every sibling commit and
+  ## every pin bump, and each such change made every one of the ~1,866
+  ## ``.#test-builds`` compiles miss, including the ones that never import
+  ## the sibling. Spelled ``../io-mon/src`` it is the same string at every
+  ## revision of that sibling, and what invalidates a compile is what the
+  ## compile actually READ from it: the strong fingerprint's observed path
+  ## set (§"Step 3").
+  ##
+  ## Relative rather than absolute so that two worktrees laid out the same
+  ## way — each beside its own siblings — compute the same weak key.
+  ##
+  ## ## What is left alone
+  ##
+  ## * A relative ``path``: it already is the spelling (the recipe's own
+  ##   ``../<sibling>`` candidates).
+  ## * A path outside ``projectRoot``'s parent directory: a store path is
+  ##   already stable per pin (and is what a checkout with no siblings — CI —
+  ##   compiles), and an explicit checkout elsewhere is left as its owner
+  ##   named it.
+  ## * Anything when the parent directory is the filesystem root, where
+  ##   "inside the workspace" would mean "anywhere".
+  ##
+  ## The consumer resolves the relative spelling against the action's working
+  ## directory, which is ``projectRoot`` for every edge this applies to: Nim
+  ## resolves a command-line ``--path:`` against its current directory, and
+  ## ``config.nims`` resolves the declared value both for ``fileExists`` (the
+  ## process directory) and for ``switch("path", …)`` (the directory of
+  ## ``config.nims``, which is ``projectRoot``).
+  if path.len == 0 or projectRoot.len == 0 or not path.isAbsolute or
+      not projectRoot.isAbsolute:
+    return path
+  let root = normalizedPath(projectRoot)
+  let workspace = root.parentDir
+  if workspace.len == 0 or workspace == root or
+      workspace.parentDir.len == 0 or workspace.parentDir == workspace:
+    return path
+  let target = normalizedPath(path)
+  if not target.isRelativeTo(workspace):
+    return path
+  relativePath(target, root, sep = '/')

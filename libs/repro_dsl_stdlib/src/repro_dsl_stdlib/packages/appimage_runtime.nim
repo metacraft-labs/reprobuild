@@ -87,6 +87,7 @@ package `appimage-runtime`:
       sha256 = AppImageRuntimeSha256,
       archiveType = "raw",
       executablePath = AppImageRuntimeFileName,
+      version = AppImageRuntimeRelease,
       packageId = "appimage-runtime@" & AppImageRuntimeRelease,
       cpu = "x86_64",
       os = "linux",

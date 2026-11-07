@@ -9,7 +9,7 @@
 version       = "0.1.0"
 author        = "Metacraft Labs"
 description   = "Peer-cache admin CLI: status / peers / metrics views against a running tier-2 daemon"
-license       = "MIT"
+license       = "Apache-2.0"
 srcDir        = "."
 bin           = @["repro_peer_cache_admin"]
 

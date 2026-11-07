@@ -1,12 +1,16 @@
 import std/[os, osproc, strutils, tempfiles, times, unittest]
 
 import repro_test_support
+from repro_core/cli_images import reprobuildEngineExeName
 
 proc repoRoot(): string =
   getCurrentDir()
 
 proc publicReproBin(): string =
   repoRoot() / "build" / "bin" / addFileExt("repro", ExeExt)
+
+proc engineReproBin(): string =
+  repoRoot() / "build" / "bin" / reprobuildEngineExeName()
 
 proc fixtureSource(): string =
   repoRoot() / "tests" / "fixtures" / "local-daemons-control-plane" /
@@ -145,7 +149,7 @@ suite "Local daemons/control-plane M3 build routing":
         putEnv("REPRO_DAEMON_M3_BUILD_RESPONSE_DELAY_MS", "10000")
         let daemon = startProcess(publicReproBin(),
           args = @["daemon", "start", "--foreground", "--dev",
-            "--source-exe", publicReproBin()] & daemonArgs(tempRoot),
+            "--source-exe", engineReproBin()] & daemonArgs(tempRoot),
           workingDir = repoRoot(),
           options = {poUsePath, poStdErrToStdOut})
         delEnv("REPRO_DAEMON_M3_BUILD_RESPONSE_DELAY_MS")
@@ -157,6 +161,11 @@ suite "Local daemons/control-plane M3 build routing":
 
         waitForLogContains(daemonLogPath(tempRoot),
           "started role=repro-daemon/user")
+
+        # The delayed foreground engine must serve this request itself. A
+        # thin-client source makes the real build client replace it first.
+        check readFile(daemonLogPath(tempRoot)).contains(
+          " source=" & engineReproBin() & " running=")
 
         let client = startProcess("env",
           args = @[
@@ -182,6 +191,10 @@ suite "Local daemons/control-plane M3 build routing":
 
         waitForLogContains(daemonLogPath(tempRoot),
           "build request accepted session=")
+        check daemon.running()
+        let acceptedLog = readFile(daemonLogPath(tempRoot))
+        check not acceptedLog.contains("restarting outdated daemon")
+        check acceptedLog.count("started role=repro-daemon/user") == 1
         check client.running()
         client.terminate()
         discard client.waitForExit()

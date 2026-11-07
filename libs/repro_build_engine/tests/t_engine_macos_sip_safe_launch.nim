@@ -26,7 +26,8 @@
 ##     action rather than running it unmonitored. The macOS-only arms assert both
 ##     halves of that contract.
 
-import std/[os, strutils, tempfiles, unittest]
+import std/[os, osproc, strutils, tempfiles, unittest]
+from repro_test_support import ReprobuildRepoRoot, requireBinary
 
 import repro_build_engine
 
@@ -154,59 +155,15 @@ when defined(macosx):
       check resolveNonSipShell() == dropInSh
 
     test "fail-safe: monitored action fails when no non-SIP shell is resolvable":
-      # Monitor-Hook-Shim.md:501 — when monitoring is required but injection
-      # cannot be preserved (no non-SIP wrapper shell), the action MUST fail
-      # (and therefore is never published/cached) rather than run unmonitored.
-      # We force that state by pointing PATH at a directory with no `sh` and
-      # clearing CT_SANDBOX_TOOLS_DIR, so resolveNonSipShell() returns "".
-      let tempRoot = createTempDir("repro-b1-failsafe", "")
-      defer: removeDir(tempRoot)
-      let workRoot = tempRoot / "work"
-      let cacheRoot = tempRoot / ".repro-cache"
-      let emptyBin = tempRoot / "empty-bin"  # no `sh` here
-      createDir(workRoot)
-      createDir(emptyBin)
-
-      let prevPath = getEnv("PATH")
-      let prevSandbox = getEnv("CT_SANDBOX_TOOLS_DIR")
-      putEnv("PATH", emptyBin)
-      delEnv("CT_SANDBOX_TOOLS_DIR")
-      defer:
-        putEnv("PATH", prevPath)
-        if prevSandbox.len > 0: putEnv("CT_SANDBOX_TOOLS_DIR", prevSandbox)
-
-      # Sanity: in this environment no non-SIP shell resolves.
-      check resolveNonSipShell().len == 0
-
-      var config = defaultBuildEngineConfig(cacheRoot)
-      config.bypassRunQuota = true
-      config.maxParallelism = 1'u32
-      config.stdoutLimit = 65536
-      config.stderrLimit = 65536
-      # Wire a (dummy but non-empty) monitor CLI path so the engine tags the
-      # action as monitored (monitorDepfile gets set) and routes it through the
-      # bypass launch — where the SIP-safe gate lives. The monitor itself is
-      # never actually exec'd because the launch fails first.
-      config.monitorCliPath = "/usr/bin/true"
-      config.monitorCliArgs = @[]
-
-      let buildResult = runBuild(graph([
-        action("sip-failsafe", ["/usr/bin/true"], cwd = workRoot,
-          outputs = @[], commandStatsId = "b1-failsafe",
-          governingLockIdentity = lockIdentityOutsideSolvedGraph())
-      ]), config)
-
-      var sawAction = false
-      for item in buildResult.results:
-        if item.id == "sip-failsafe":
-          sawAction = true
-          # The action MUST be failed (conservative fail-safe), not succeeded.
-          check item.status == asFailed
-          # The diagnostic MUST explain the SIP-safety refusal so the failure
-          # is actionable (conservative failure diagnostics).
-          check item.stderr.contains("SIP-safe") or
-            item.stderr.contains("non-SIP shell")
-      check sawAction
+      # The graph builds this engine fixture with an explicitly empty embedded
+      # bundle. Its assertions preserve the unavailable-shell fail-closed arm.
+      let fixture = requireBinary(
+        ReprobuildRepoRoot / "build/test-fixtures/macos-no-bundle/no_bundle_launch",
+        "reprobuild.test_fixtures.macos_no_bundle_launch")
+      let checked = execCmdEx(quoteShell(fixture))
+      checkpoint(checked.output)
+      check checked.exitCode == 0
+      check checked.output.strip() == "SIP_NO_BUNDLE_FAIL_CLOSED"
 
     test "positive: monitored action launches via a non-SIP wrapper shell":
       # B1 positive path: with a non-SIP shell resolvable (always true in the

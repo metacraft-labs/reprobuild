@@ -231,7 +231,21 @@ suite "M9.R.72.3 monitor-loss classifier":
       "a hardened image, or IPC connect to an out-of-tree breakaway daemon)")
     let benign = classifyEventLossDetail("libc raw syscall unsupported nr=436")
     check subtree == mesUnknownScopeLoss
-    check ord(benign) < ord(subtree)
+    # nr=436 is ``close_range`` only on the tables `benignRawSyscallLoss`
+    # carries (x86_64 and arm64 Linux). Every other compile target gets an
+    # EMPTY allowlist by design — "Architectures without a verified table get
+    # an empty allowlist and keep failing closed" (spec/Monitor-Loss-Path-
+    # Invalidation.md §"Architecture Selection Is Load-Bearing") — so there
+    # the same detail is itself Level 2 and the strict ordering is not the
+    # property. Each arm pins what holds on its target; neither is vacuous.
+    when defined(linux) and (defined(amd64) or defined(arm64)):
+      check benign == mesComplete
+      check ord(benign) < ord(subtree)
+    else:
+      # Fail closed: an unverified table never makes a raw syscall benign,
+      # so it can neither downgrade nor be ranked below the subtree loss.
+      check benign == mesUnknownScopeLoss
+      check benign == subtree
 
   test "status ordering (worseMonitorStatus semantics)":
     # The `worseMonitorStatus` helper picks the more severe status. The

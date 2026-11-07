@@ -114,6 +114,9 @@ proc initRepo(gitBin, dir: string) =
   check git(gitBin, "", "init -q -b main " & q(dir)).code == 0
   check git(gitBin, dir, "config user.email t@example.invalid").code == 0
   check git(gitBin, dir, "config user.name Tester").code == 0
+  # Every sibling pin needs fetch coordinates; the real local repository
+  # itself is a fetchable origin for this hermetic fixture.
+  check git(gitBin, dir, "remote add origin " & q(dir)).code == 0
 
 suite "FUP-M: lock refresh folds uses: sibling producer deps":
 
@@ -145,7 +148,7 @@ suite "FUP-M: lock refresh folds uses: sibling producer deps":
       createDir(consumer)
       initRepo(gitBin, consumer)
       check git(gitBin, consumer,
-        "remote add origin https://example.invalid/acme/consumer.git").code == 0
+        "remote set-url origin https://example.invalid/acme/consumer.git").code == 0
       writeFile(consumer / "repro.nim", consumerRecipe)
       check git(gitBin, consumer, "add repro.nim").code == 0
       check git(gitBin, consumer, "commit -q -m consumer").code == 0
@@ -161,12 +164,14 @@ suite "FUP-M: lock refresh folds uses: sibling producer deps":
       check fileExists(consumer / "repro.lock")
       let lockBody = readFile(consumer / "repro.lock")
 
-      check "name = \"consumer\", path = \".\"" in lockBody
-      check "name = \"consumer-checkout\", path = \".\"" notin lockBody
+      check "name = \"consumer\", self = \"true\"" in lockBody
+      check "name = \"consumer-checkout\", self = \"true\"" notin lockBody
 
-      # (1) The sibling producer is a first-class locked dep: workspace-relative
-      # path, VCS coordinates (kind + revision) + a self-describing integrity.
-      check "path = \"../producer\"" in lockBody
+      # (1) The sibling producer is a first-class locked dep, recorded by NAME
+      # (a lock records no checkout path), with VCS coordinates (kind +
+      # revision) + a self-describing integrity.
+      check "{ name = \"producer\", coord_kind = \"vcs\"" in lockBody
+      check "path =" notin lockBody
       check "coord_kind = \"vcs\"" in lockBody
       let producerSha = git(gitBin, producer, "rev-parse HEAD").output.strip()
       check producerSha in lockBody              # the sibling revision is pinned
@@ -179,8 +184,7 @@ suite "FUP-M: lock refresh folds uses: sibling producer deps":
 
       # (3) The toolchain ``uses: "nim"`` is NOT folded as a dep — no ``nim``
       # sibling exists, so only genuine cross-repo source siblings are locked.
-      check "path = \"../nim\"" notin lockBody
-      check "name = \"nim\", path" notin lockBody
+      check "{ name = \"nim\", coord_kind = \"vcs\"" notin lockBody
 
   test "t_lock_refresh_folds_resource_provider_constraints_without_a_build_block":
     let gitBin = findExe("git")
@@ -212,7 +216,7 @@ suite "FUP-M: lock refresh folds uses: sibling producer deps":
         createDir(leaf)
         initRepo(gitBin, leaf)
         writeFile(leaf / "repro.nim", resourceProducerRecipe
-          .replace("vm_harness.container", "leaf.instance")
+          .replace("gosti.container", "leaf.instance")
           .replace("wrapper: container", "wrapper: instance")
           .replace("prodres5a", "leafProducer")
           .replace("constraintCarrier", "leafConstraints")

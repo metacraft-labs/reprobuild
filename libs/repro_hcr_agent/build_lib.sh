@@ -17,6 +17,14 @@
 # the healthy agent cannot tell a passing assertion from a vacuous one. A build
 # with any define set is NOT copied to `build/lib`, because the canonical
 # artifact every other consumer links must never be one of these.
+#
+# OUTPUT_DIR decides where the library goes, and ONLY there. With no
+# OUTPUT_DIR the canonical build writes `build/<lib>` beside this script and
+# mirrors it to `build/lib/<lib>` (the two outputs the `hcr-agent-lib` graph
+# edge declares). A caller that names a directory gets exactly that
+# directory: tests build private copies, and a copy that also landed in this
+# library's source tree was a write outside the caller's scratch space that
+# `just bootstrap`'s freshness check once read as a newer engine source.
 
 set -euo pipefail
 
@@ -124,7 +132,11 @@ if [[ "$PRINT_NAME" -eq 1 ]]; then
   exit 0
 fi
 
-OUT_DIR="${OUT_DIR:-$SCRIPT_DIR/build}"
+OUT_DIR_GIVEN=1
+if [[ -z "$OUT_DIR" ]]; then
+  OUT_DIR_GIVEN=0
+  OUT_DIR="$SCRIPT_DIR/build"
+fi
 mkdir -p "$OUT_DIR"
 OUT_PATH="$OUT_DIR/$LIB_NAME"
 
@@ -146,13 +158,15 @@ echo "[repro_hcr_agent] Compiling $LIB_NAME with $CC for $TARGET_OS${EXTRA_DEFIN
 
 echo "[repro_hcr_agent] Successfully built: $OUT_PATH"
 
-# Also copy to build/lib for standard -L.../build/lib link conventions.
+# The canonical build (no OUTPUT_DIR given) also copies to build/lib for
+# standard -L.../build/lib link conventions. A caller-named OUTPUT_DIR gets
+# nothing outside it; see the header.
 #
 # A falsifier build is deliberately excluded: `build/lib` is what every other
 # consumer's `-L` points at, and silently putting an agent there with one of
 # its obligations removed would make every OTHER gate's green result a
 # fiction. A falsifier lives only in the output directory its caller named.
-if [[ ${#EXTRA_DEFINES[@]} -eq 0 ]]; then
+if [[ "$OUT_DIR_GIVEN" -eq 0 && ${#EXTRA_DEFINES[@]} -eq 0 ]]; then
   mkdir -p "$SCRIPT_DIR/build/lib"
   if [[ "$OUT_PATH" != "$SCRIPT_DIR/build/lib/$LIB_NAME" ]]; then
     cp -f "$OUT_PATH" "$SCRIPT_DIR/build/lib/$LIB_NAME"

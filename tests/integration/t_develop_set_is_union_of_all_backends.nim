@@ -117,23 +117,22 @@ proc projectToml(coreUrl, teamUrl: string): string =
   "schema = \"reprobuild.workspace.project.v1\"\n\n" &
   "[project]\n" &
   "name = \"mix\"\n" &
-  "default_revision = \"main\"\n" &
-  "trunk = \"main\"\n\n" &
+  "\n" &
   "[[remote]]\nname = \"core-origin\"\nfetch = \"" & coreUrl & "\"\n\n" &
   "[[remote]]\nname = \"team-origin\"\nfetch = \"" & teamUrl & "\"\n\n" &
   "includes = [\n  \"repos/core.toml\",\n  \"repos/team-lib.toml\",\n]\n"
 
 proc repoFragment(name, remote: string): string =
-  "schema = \"reprobuild.workspace.repo.v1\"\n\n" &
+  "schema = \"reprobuild.workspace.repo.v2\"\n\n" &
   "[repo]\n" &
   "name = \"" & name & "\"\n" &
   "path = \"" & name & "\"\n" &
   "remote = \"" & remote & "\"\n" &
-  "revision = \"main\"\n"
+  "mainline = \"main\"\n"
 
 proc depInline(name, path, url, sha: string): string =
   "{ name = \"" & name & "\", path = \"" & path &
-    "\", coord_kind = \"vcs\", url = \"" & url & "\", ref = \"main\"" &
+    "\", coord_kind = \"vcs\", url = \"" & url & "\"" &
     ", revision = \"" & sha & "\", integrity = \"git-sha1:" & sha &
     "\", version = \"\", visibility = \"public\", participation = \"\"" &
     ", depends = \"\", groups = \"\" }"
@@ -195,9 +194,9 @@ suite "DS-1: the develop set is the union of every lock backend":
 
       # The TEAM tier's route — byte-for-byte what `repro locking
       # adopt-manifest` scaffolds, naming ONLY `team-lib`.
-      writeFile(ws / ".repro-workspace.toml",
-        "schema = \"reprobuild.workspace.bootstrap.v1\"\n\n" &
-        "[manifest]\n" &
+      writeFile(ws / "repro-workspace.toml",
+        "schema = \"reprobuild.workspace.settings.v1\"\n\n" &
+        "[records]\n" &
         "url = \"https://example.invalid/manifests.git\"\n\n" &
         "[locking]\n" &
         "route = [{ visibility = \"team\", backend = \"git-checkout\", " &

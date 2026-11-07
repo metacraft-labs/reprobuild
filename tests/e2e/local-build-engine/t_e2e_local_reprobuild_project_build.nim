@@ -1,8 +1,11 @@
-import std/[json, os, osproc, sequtils, strutils, tempfiles, unittest]
+import std/[compilesettings, json, os, osproc, sequtils, strutils, tempfiles, unittest]
+import repro_test_support/reasoned_skip
 
 import repro_tool_profiles
 import repro_runquota
 import repro_test_support
+
+const CompileSearchPaths = querySettingSeq(MultipleValueSetting.searchPaths)
 
 proc removeDirEventually(path: string) =
   ## Daemon-backed builds can leave just-closed metadata files visible briefly.
@@ -849,9 +852,17 @@ when defined(macosx) or defined(linux):
       "      inputs = @[\"public/main.css\"])\n" &
       "    defaultBuildAction(aggregate)\n")
 
-proc writeM53BuiltinFsProject(path: string) =
+proc writeM53BuiltinFsProject(path: string; runSalt = "") =
+  ## `runSalt`: a case that asserts the provider is COMPILED on its first
+  ## build passes a value unique to the run (its temp root). The provider
+  ## compile is shared by every copy of identical recipe bytes that shares
+  ## the action cache (Hermetic-Builds-And-Path-Independence.md
+  ## §"Engine-internal recipe compiles"), and the suite's action cache
+  ## outlives a run, so without it the recipe this case wrote last time - or
+  ## another case's identical one - would serve that compile.
   createDir(path.splitPath.head)
   writeFile(path,
+    (if runSalt.len > 0: "# fixture run: " & runSalt & "\n" else: "") &
     "import repro_project_dsl\n\n" &
     "package m53Fs:\n" &
     "  build:\n" &
@@ -1291,44 +1302,34 @@ suite "e2e_local_reprobuild_project_build":
         "nim", "check", "--verbosity:0", "--hints:off", "--skipUserCfg:on",
         "--skipParentCfg:on", "--skipProjCfg:on", "--noNimblePath"
       ]
-      for relativePath in [
-        "libs/repro_project_dsl/src",
-        "libs/repro_dsl_stdlib/src",
-        "libs/repro_solver/src",
-        "libs/repro_binary_cache_client/src",
-        "libs/repro_binary_cache_server/src",
-        "libs/repro_core/src",
-        # ``repro_project_dsl`` re-exports ``install_mirror_resolver``, which
-        # uses the local store's prefix-path helpers and, since "Reject
-        # foreign source realizations", ``repro_platform``'s ``currentHost``
-        # to name the host a mirror was realized for. This list is
-        # hand-maintained, so an import added to anything in
-        # ``repro_project_dsl``'s closure has to be added here too —
-        # otherwise the arm below stops testing what it says it tests: the
-        # check fails with "cannot open file:" long before it can reach the
-        # ``m46Tool`` identifier this case is about.
-        "libs/repro_local_store/src",
-        "libs/repro_platform/src",
-        # ``repro_project_dsl`` also re-exports ``repro_lock_files`` (and
-        # its ``ct_registry``) since "The DSL surface for named lock files".
-        "libs/repro_lock_files/src",
-        "libs/blake3/src",
-        "libs/nimcrypto",
-        "libs/nim-faststreams/src",
-        "libs/nim-stew/src",
-        "libs/nim-serialization/src",
-        "libs/nim-json-serialization/src",
-        "libs/nim-ssz-serialization/src",
-        "libs/results/src",
-        "libs/stint/src",
-      ]:
-        checkArgs.add("--path:" & repoRoot / relativePath)
+      # Reuse the configured compilation's library roots so new DSL imports
+      # cannot turn this into a missing-dependency test. Exclude project and
+      # test roots: exposing package helper directories would defeat the
+      # visibility boundary. Nim prepends --path entries, so replay its search
+      # order backwards to preserve which version of a dependency is selected.
+      let repositoryRoot = normalizedPath(repoRoot)
+      let libraryRoot = repositoryRoot / "libs" & DirSep
+      for index in countdown(CompileSearchPaths.high, 0):
+        let path = normalizedPath(CompileSearchPaths[index])
+        if path.startsWith(libraryRoot) or
+            (path != repositoryRoot and
+             not path.startsWith(repositoryRoot & DirSep)):
+          # Dependency roots may be supplied by the shell from a sibling
+          # checkout or a package store, rather than from vendored libs/.
+          checkArgs.add("--path:" & path)
       checkArgs.add(projectRoot / "reprobuild.nim")
 
       let output = requireFailure(shellCommand(checkArgs), projectRoot)
       checkpoint(output)
       check output.contains("undeclared identifier: 'm46Tool'")
       check not output.contains("cannot open file:")
+
+      # A successful compile with only the opt-in added proves the negative
+      # arm reached the helper visibility boundary with a complete DSL closure.
+      let recipePath = projectRoot / "reprobuild.nim"
+      writeFile(recipePath, readFile(recipePath).replace("package m46Project:\n",
+        "package m46Project:\n  usesImportPath \"reprobuild/packages\"\n"))
+      discard requireSuccess(shellCommand(checkArgs), projectRoot)
 
     test "generated tool object records action and path roles without buildAction":
       let repoRoot = getCurrentDir()
@@ -1520,7 +1521,8 @@ suite "e2e_local_reprobuild_project_build":
 
       let reproBin = reproBinary(repoRoot)
       let projectRoot = tempRoot / "project"
-      writeM53BuiltinFsProject(projectRoot / "reprobuild.nim")
+      writeM53BuiltinFsProject(projectRoot / "reprobuild.nim",
+        runSalt = tempRoot)
       let output = buildCurrentProject(reproBin, projectRoot, getEnv("PATH"))
       check output.contains("defaultTarget: stamp")
       check output.contains(
@@ -1604,6 +1606,8 @@ suite "e2e_local_reprobuild_project_build":
       # Guarded: a failed length check must not abort the whole binary with an
       # IndexDefect and take every later test in the suite with it.
       if providerCompileActions.len > 0:
+        checkpoint("warm provider compile cacheMissReason=" &
+          providerCompileActions[0]{"cacheMissReason"}.getStr())
         check not providerCompileActions[0]{"launched"}.getBool()
 
     test "graph why and debug artifact inspect the materialized build graph":
@@ -1701,7 +1705,7 @@ suite "e2e_local_reprobuild_project_build":
       let reproBin = reproBinary(repoRoot)
       let projectRoot = tempRoot / "project"
       let modulePath = projectRoot / "reprobuild.nim"
-      writeM53BuiltinFsProject(modulePath)
+      writeM53BuiltinFsProject(modulePath, runSalt = tempRoot)
       writeFile(projectRoot / "provider_salt.nim",
         "const providerSalt* = \"one\"\n")
       writeFile(modulePath, readFile(modulePath).replace(
@@ -1731,6 +1735,8 @@ suite "e2e_local_reprobuild_project_build":
       check secondProviderActions.len == 1
       # Guarded for the same reason as the sibling assertion above.
       if secondProviderActions.len > 0:
+        checkpoint("second provider compile cacheMissReason=" &
+          secondProviderActions[0]{"cacheMissReason"}.getStr())
         check not secondProviderActions[0]{"launched"}.getBool()
 
       writeFile(projectRoot / "provider_salt.nim",

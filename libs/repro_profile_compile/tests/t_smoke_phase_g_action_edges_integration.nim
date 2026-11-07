@@ -71,7 +71,7 @@ proc passthroughMonitorCli(cacheRoot: string): string =
   let dir = cacheRoot / "monitor-cli"
   createDir(dir)
   let rmdfTemplate = dir / "empty.rmdf"
-  writeFile(rmdfTemplate, cast[string](encodeCanonical(@[])))
+  writeFile(rmdfTemplate, encodeCanonical(@[]))
   when defined(windows):
     result = dir / "passthrough-monitor.cmd"
     writeFile(result,
@@ -128,6 +128,12 @@ proc shellWriteProfileBuildAction(id, outputPath, payload: string;
 # ---------------------------------------------------------------------------
 # Tests.
 # ---------------------------------------------------------------------------
+
+# The dispatcher under test consults the binary cache through caches.conf.
+# Pin it off so a host /etc/repro/caches.conf (fleet hosts render one with the
+# live cache and its keys) cannot turn a local-build assertion into a network
+# substitute attempt.
+putEnv("REPRO_CACHE_DISABLE", "1")
 
 suite "Windows-System-Resources Phase G — action-edge dispatcher integration":
 

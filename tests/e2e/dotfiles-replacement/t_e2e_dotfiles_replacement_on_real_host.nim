@@ -36,6 +36,7 @@
 
 import std/[algorithm, os, osproc, sequtils, streams, strtabs,
   strutils, tables, tempfiles, times, unittest]
+import repro_test_support/reasoned_skip
 
 import blake3
 import repro_home_generations

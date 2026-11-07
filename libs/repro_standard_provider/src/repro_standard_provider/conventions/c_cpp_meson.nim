@@ -59,17 +59,12 @@
 ##   2. ``ccpp-meson-build-<member>`` — one per declared member:
 ##      ``meson compile -C <scratch> <member>``. Deps:
 ##      ``ccpp-meson-configure``. Outputs: the produced binary or
-##      static archive at the predicted path under ``<scratch>``.
+##      static archive at the tool-reported path.
 ##
-## **Output paths** (Ninja backend, GCC/Clang archiver convention):
-##   * Executable: ``<scratch>/<member>[.exe]``.
-##     Meson lays the produced binary at the build dir root by default
-##     (subdir-of-meson.build under multi-directory projects; the M39
-##     fixture is single-directory so this lands at ``<scratch>/<member>``).
-##   * Static library: ``<scratch>/lib<member>.a``. Meson's default
-##     static library naming on GNU toolchains is ``lib<name>.a``;
-##     MSVC-style ``<member>.lib`` is deferred to a multi-config follow-
-##     up.
+## **Output paths**: the configure action derives each target's artifacts
+## from the tool's configured metadata and writes a dynamic-output fragment.
+## Member build edges load it before running, so output name/directory
+## overrides, subdirectory targets and native archive suffixes are honored.
 ##
 ## **Honest scope** (deferred):
 ##   * Per-source lift via parsing the generated ``build.ninja`` — a
@@ -91,6 +86,7 @@ import repro_core
 import repro_provider_runtime
 import repro_project_dsl
 import repro_standard_provider/convention
+import repro_standard_provider/conventions/output_discovery
 import repro_standard_provider/conventions/fetch_action
 
 const
@@ -344,22 +340,6 @@ proc sanitizeNamePart(value: string): string =
   if result.len == 0:
     result = "x"
 
-proc executableOutputPath(projectRoot, member: string): string =
-  ## Predicted output path for an ``executable('<member>', ...)`` Meson
-  ## target. Single-directory project + Ninja backend: Meson places
-  ## binaries at the build dir root (on Windows the ``.exe`` suffix is
-  ## added automatically).
-  when defined(windows):
-    scratchPathFor(projectRoot) / (member & ".exe")
-  else:
-    scratchPathFor(projectRoot) / member
-
-proc staticLibraryOutputPath(projectRoot, member: string): string =
-  ## Predicted output path for a ``static_library('<member>', ...)``
-  ## Meson target. GNU archiver convention is ``lib<name>.a``; MSVC-
-  ## style ``<member>.lib`` is deferred.
-  scratchPathFor(projectRoot) / ("lib" & member & ".a")
-
 proc collectMesonInputs(projectRoot: string): seq[string] =
   ## Conservative input enumeration for the configure action: every
   ## ``meson.build``, ``meson.options``, ``meson_options.txt`` file
@@ -401,25 +381,12 @@ proc collectMesonInputs(projectRoot: string): seq[string] =
 proc emitConfigureAction(projectRoot, mesonExe, ccExe: string;
                          mesonOptions: seq[string];
                          extraDeps: seq[string] = @[];
-                         extraInputs: seq[string] = @[]):
+                         extraInputs: seq[string] = @[];
+                         members: seq[CCppMesonMember] = @[]):
     tuple[action: BuildActionDef; stamp: string] =
-  ## Emit the ``meson setup <scratch> <root> --buildtype=release`` action.
-  ## On success the action runs a follow-up touch via a sh-c wrapper if
-  ## one is available; otherwise the action declares ``build.ninja`` as
-  ## its primary output and a stamp file written by the action itself.
-  ##
-  ## Implementation note: mirrors the cmake convention's wrapper shape.
-  ##
-  ## **Compiler pinning via ``CC``**. Meson's compiler auto-detection
-  ## probes ``cc`` before ``gcc``. On Windows hosts that ship MSYS2
-  ## (``D:/metacraft-dev-deps/msys2/msys64/mingw64/bin/cc.exe``) alongside
-  ## a separate winlibs gcc (``D:/metacraft-dev-deps/gcc/15.2.0/bin/gcc.exe``)
-  ## meson would pick the MSYS2 ``cc`` even when the winlibs gcc is
-  ## explicitly on PATH first. To force the convention to honour
-  ## ``ccCompiler()``'s resolved compiler, we always pass ``CC=<ccExe>``
-  ## into meson's environment via the sh wrapper. The fallback path
-  ## (no sh on PATH) sets ``CC`` in the action's process env via the
-  ## ``inlineExecCall`` env channel.
+  ## Run meson configure through the catalog-provisioned shell, then derive
+  ## target output metadata and touch the completion stamp in the same action.
+  ## The shell is an explicit tool dependency, not an optional PATH fallback.
   let scratch = scratchPathFor(projectRoot)
   createDir(extendedPath(scratch))
   let buildNinja = buildNinjaPath(projectRoot)
@@ -427,48 +394,39 @@ proc emitConfigureAction(projectRoot, mesonExe, ccExe: string;
   # M9.N Batch B: bare ``sh`` resolved via ``toolIdentityRefs``.
   let shExe = "sh"
   var argv: seq[string]
-  if shExe.len > 0:
-    # Compound: meson setup, then touch the stamp.
-    let escapedStamp = stamp.replace("\\", "/").replace("\"", "\\\"")
-    let escapedMeson = mesonExe.replace("\\", "/").replace("\"", "\\\"")
-    let escapedCc = ccExe.replace("\\", "/").replace("\"", "\\\"")
-    let escapedRoot = projectRoot.replace("\\", "/").replace("\"", "\\\"")
-    let escapedScratch = scratch.replace("\\", "/").replace("\"", "\\\"")
-    # DSL-port M9.K: append M9.I-registered mesonOptions to the
-    # ``meson setup`` invocation. Each flag is double-quote-escaped
-    # for the shell context. Order is preserved verbatim — the M9.I
-    # registry stores flags in source-declaration order.
-    var trailingOpts = ""
-    for opt in mesonOptions:
-      trailingOpts.add(" \"")
-      trailingOpts.add(opt.replace("\"", "\\\""))
-      trailingOpts.add("\"")
-    let script = "set -e; export CC=\"" & escapedCc & "\"; \"" &
-      escapedMeson & "\" setup \"" &
-      escapedScratch & "\" \"" & escapedRoot &
-      "\" --buildtype=release --backend=ninja" & trailingOpts &
-      "; touch \"" & escapedStamp & "\""
-    argv = @[shExe, "-c", script]
-  else:
-    # No sh on PATH (rare on dev hosts): invoke meson directly. The
-    # stamp won't be touched, but ``build.ninja`` IS declared as the
-    # primary output so the engine still records success. The
-    # ``CC=<ccExe>`` pin is not applied on this path; if a host
-    # somehow ends up here AND has a broken ``cc`` shadowing ``gcc``,
-    # the configure step fails loudly rather than silently building
-    # with the wrong toolchain.
-    argv = @[mesonExe, "setup", scratch, projectRoot,
-      "--buildtype=release", "--backend=ninja"]
-    # DSL-port M9.K: append M9.I-registered mesonOptions verbatim.
-    for opt in mesonOptions:
-      argv.add(opt)
+  # Compound: meson setup, then touch the stamp.
+  let escapedStamp = stamp.replace("\\", "/").replace("\"", "\\\"")
+  let escapedMeson = mesonExe.replace("\\", "/").replace("\"", "\\\"")
+  let escapedCc = ccExe.replace("\\", "/").replace("\"", "\\\"")
+  let escapedRoot = projectRoot.replace("\\", "/").replace("\"", "\\\"")
+  let escapedScratch = scratch.replace("\\", "/").replace("\"", "\\\"")
+  # DSL-port M9.K: append M9.I-registered mesonOptions to the
+  # ``meson setup`` invocation. Each flag is double-quote-escaped
+  # for the shell context. Order is preserved verbatim — the M9.I
+  # registry stores flags in source-declaration order.
+  var trailingOpts = ""
+  for opt in mesonOptions:
+    trailingOpts.add(" \"")
+    trailingOpts.add(opt.replace("\"", "\\\""))
+    trailingOpts.add("\"")
+  var outputTargets: seq[tuple[id, name, fragment: string]]
+  for member in members:
+    outputTargets.add(("ccpp-meson-build-" & sanitizeNamePart(member.name),
+      member.name, scratch / ("outputs-" & sanitizeNamePart(member.name) & ".dyndep")))
+  let discover = outputDiscoveryCommand("meson", scratch, outputTargets)
+  let script = "set -e; export CC=\"" & escapedCc & "\"; \"" &
+    escapedMeson & "\" setup \"" &
+    escapedScratch & "\" \"" & escapedRoot &
+    "\" --buildtype=release --backend=ninja" & trailingOpts &
+    "; " & discover & "; touch \"" & escapedStamp & "\""
+  argv = @[shExe, "-c", script]
   var inputs = collectMesonInputs(projectRoot)
   for ei in extraInputs:
     if ei notin inputs:
       inputs.add(ei)
-  var outputs = @[buildNinja]
-  if shExe.len > 0:
-    outputs.add(stamp)
+  var outputs = @[buildNinja, stamp]
+  for member in members:
+    outputs.add(scratch / ("outputs-" & sanitizeNamePart(member.name) & ".dyndep"))
   let action = buildAction(
     id = "ccpp-meson-configure",
     call = inlineExecCall(argv, projectRoot),
@@ -495,8 +453,8 @@ proc emitBuildAction(projectRoot, mesonExe: string;
                      ninjaFlags: seq[string]):
                        BuildActionDef =
   ## Emit ``meson compile -C <scratch> <member>`` for a single member.
-  ## The output path is the convention's predicted location of the
-  ## produced artefact.
+  ## Configured tool metadata supplies the obligatory output paths through
+  ## the pre-execution dynamic-output fragment.
   ##
   ## DSL-port M9.K: ninja flags from the M9.I registry are passed
   ## through to ninja via meson's ``--ninja-args=<joined>`` pass-through
@@ -505,10 +463,7 @@ proc emitBuildAction(projectRoot, mesonExe: string;
   ## emitter passes each literal flag verbatim, and these are normally
   ## simple tokens like ``-j4``.
   let scratch = scratchPathFor(projectRoot)
-  let outputPath = case member.kind
-    of ccmsExecutable: executableOutputPath(projectRoot, member.name)
-    of ccmsLibraryStatic: staticLibraryOutputPath(projectRoot, member.name)
-  createDir(extendedPath(parentDir(outputPath)))
+  let fragment = scratch / ("outputs-" & sanitizeNamePart(member.name) & ".dyndep")
   var argv = @[mesonExe, "compile", "-C", scratch, member.name]
   if ninjaFlags.len > 0:
     # Meson's ``--ninja-args`` accepts a single argument whose contents
@@ -521,8 +476,9 @@ proc emitBuildAction(projectRoot, mesonExe: string;
     id = "ccpp-meson-build-" & sanitizeNamePart(member.name),
     call = inlineExecCall(argv, projectRoot),
     deps = @[configureActionId],
-    inputs = @[configureStamp],
-    outputs = @[outputPath],
+    inputs = @[configureStamp, fragment],
+    outputs = @[],
+    dynamicDepsFile = fragment,
     pool = "compile",
     dependencyPolicy = automaticMonitorPolicy(),
     commandStatsId = "ccpp-meson." & kindTag & ".build",
@@ -602,7 +558,7 @@ proc cCppMesonEmitFragment(projectRoot: string;
         configureDeps.add(fetchAct.id)
         configureInputsExtra.add(fetchStampPath(projectRoot, fetchSpec.hashHex))
       let configurePair = emitConfigureAction(projectRoot, mesonExe, ccExe,
-        mesonOptions, configureDeps, configureInputsExtra)
+        mesonOptions, configureDeps, configureInputsExtra, members)
       allActions.add(configurePair.action)
       for member in members:
         let buildAct = emitBuildAction(projectRoot, mesonExe, member,

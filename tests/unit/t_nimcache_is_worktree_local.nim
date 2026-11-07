@@ -28,8 +28,17 @@
 ## about a second in total.
 ##
 ## NO MOCKS: the real compiler, the real config files, the real checkout.
+##
+## The three checks are unittest cases, so this binary speaks the case
+## protocol (`--list`, `--list-json`, one case per process) like every other
+## test in the suite. It used to be a plain script that ran every probe at
+## module scope: it answered `--list` by running the whole check and printing
+## no case list, so the inventory could only quarantine it and count nothing.
+## Each case resets the failure tally and requires it to be zero at the end,
+## so a probe that fails is reported with its message and fails its case.
 
-import std/[compilesettings, json, os, osproc, streams, strtabs, strutils]
+import std/[compilesettings, json, os, osproc, streams, strtabs, strutils,
+  unittest]
 
 const
   SelfNimcache = querySetting(nimcacheDir)
@@ -48,9 +57,10 @@ const
 
 var failures = 0
 
-proc fail(msg: string) =
+proc refuse(msg: string) =
   inc failures
   echo "  FAIL  ", msg
+  checkpoint(msg)
 
 proc pass(msg: string) =
   echo "  ok    ", msg
@@ -78,22 +88,24 @@ var rootGuess = selfFile.parentDir
 for _ in 1 .. LevelsBelowRoot:
   rootGuess = rootGuess.parentDir
 let root = canonical(rootGuess)
-if not fileExists(root / RootMarker):
-  echo "nimcache-locality: cannot locate the checkout root from ", SelfSource,
-    " (derived ", root, ", which has no ", RootMarker,
-    "): refusing to report a verdict about an unknown tree"
-  quit(2)
 
 let nimExe =
   if fileExists(CompilerAtBuild): CompilerAtBuild
   else: findExe("nim")
-if nimExe.len == 0:
-  echo "nimcache-locality: no `nim` to probe with (neither ", CompilerAtBuild,
-    " nor one on PATH): refusing to report a verdict"
-  quit(2)
 
-echo "nimcache-locality: checkout ", root
-echo "nimcache-locality: probing with ", nimExe
+proc requireProbeable() =
+  ## Refuse to report a verdict about an unknown tree or without a compiler.
+  ## Called at the top of every case rather than at module scope, so that
+  ## enumerating the cases never depends on it.
+  if not fileExists(root / RootMarker):
+    refuse("cannot locate the checkout root from " & SelfSource &
+      " (derived " & root & ", which has no " & RootMarker &
+      "): refusing to report a verdict about an unknown tree")
+  if nimExe.len == 0:
+    refuse("no `nim` to probe with (neither " & CompilerAtBuild &
+      " nor one on PATH): refusing to report a verdict")
+  echo "nimcache-locality: checkout ", root
+  echo "nimcache-locality: probing with ", nimExe
 
 proc nimcacheOf(workDir, project: string; extra: seq[string] = @[];
                 env: StringTableRef = nil): string =
@@ -112,19 +124,19 @@ proc nimcacheOf(workDir, project: string; extra: seq[string] = @[];
     code = p.waitForExit()
     p.close()
   except CatchableError as e:
-    fail("could not run " & what & ": " & e.msg)
+    refuse("could not run " & what & ": " & e.msg)
     return ""
   if code != 0:
-    fail(what & " exited " & $code & ":\n" & output)
+    refuse(what & " exited " & $code & ":\n" & output)
     return ""
   for line in output.splitLines():
     if line.startsWith("{"):
       try:
         return parseJson(line)["nimcache"].getStr()
       except CatchableError as e:
-        fail(what & " printed unparseable JSON (" & e.msg & "): " & line)
+        refuse(what & " printed unparseable JSON (" & e.msg & "): " & line)
         return ""
-  fail(what & " printed no JSON:\n" & output)
+  refuse(what & " printed no JSON:\n" & output)
   ""
 
 proc expectedFor(projectRel, suffix: string): string =
@@ -139,78 +151,92 @@ proc checkLayout(label, got, want: string) =
   if got.len == 0:
     return # the probe failure is already recorded
   if not isInside(got, root):
-    fail(label & ": resolves OUTSIDE the checkout, to " & got &
+    refuse(label & ": resolves OUTSIDE the checkout, to " & got &
          " -- a cache every checkout on this machine shares")
   elif not sameDir(got, want):
-    fail(label & ": resolves to " & got & ", not the documented " & want)
+    refuse(label & ": resolves to " & got & ", not the documented " & want)
   else:
     pass(label & " -> " & relativePath(got, root))
 
 let selfRel = relativePath(selfFile, root).replace('\\', '/')
 
-# ---------------------------------------------------------------------------
-echo "nimcache-locality: [1] the cache this test binary was compiled with"
-if isInside(SelfNimcache, root):
-  pass("this binary was compiled in " & relativePath(SelfNimcache, root))
-else:
-  fail("this test binary was compiled with the nimcache " & SelfNimcache &
-       ", OUTSIDE the checkout: whatever built it bypassed config.nims " &
-       "without naming a checkout-local --nimcache:")
+suite "nimcache locality":
+  setup:
+    failures = 0
+    requireProbeable()
+    require failures == 0
 
-# ---------------------------------------------------------------------------
-echo "nimcache-locality: [2] the documented layout"
-checkLayout(selfRel & " (from the checkout root)",
-            nimcacheOf(root, selfRel), expectedFor(selfRel, "_d"))
-checkLayout(selfRel & " (from its own directory)",
-            nimcacheOf(selfFile.parentDir, selfFile.extractFilename),
-            expectedFor(selfRel, "_d"))
-for m in MainModules:
-  if not fileExists(root / m):
-    fail(m & ": listed as a main module to probe, but it does not exist")
-    continue
-  checkLayout(m & " (debug)", nimcacheOf(root, m), expectedFor(m, "_d"))
-  checkLayout(m & " (-d:release)", nimcacheOf(root, m, @["-d:release"]),
-              expectedFor(m, "_r"))
+  teardown:
+    if failures > 0:
+      echo "nimcache-locality: FAILED, ", failures, " failure(s): a Nim ",
+        "build in this checkout can reach a nimcache that other checkouts ",
+        "share.  See the header of config.nims."
 
-let explicitDir = getTempDir() / "nimcache-locality-explicit"
-let explicitGot = nimcacheOf(root, selfRel, @["--nimcache:" & explicitDir])
-if explicitGot.len > 0:
-  if sameDir(explicitGot, explicitDir):
-    pass("an explicit --nimcache: on the command line still wins")
-  else:
-    fail("an explicit --nimcache:" & explicitDir & " resolved to " &
-         explicitGot & ": the config overrides the command line")
-
-# ---------------------------------------------------------------------------
-echo "nimcache-locality: [3] negative control: repo-root config switched off"
-var controlEnv = newStringTable(modeCaseSensitive)
-for k, v in envPairs():
-  controlEnv[k] = v
-let fakeXdg = getTempDir() / "nimcache-locality-control-xdg"
-controlEnv["XDG_CACHE_HOME"] = fakeXdg
-let controlGot = nimcacheOf(root, selfRel, @["--skipParentCfg"], controlEnv)
-if controlGot.len > 0:
-  if isInside(controlGot, root):
-    fail("CONTROL did not fail: with the repo-root config switched off the " &
-         "probe still reports " & controlGot & ", inside the checkout -- so " &
-         "it cannot tell a shared cache from a local one, and every verdict " &
-         "above is vacuous")
-  else:
-    when defined(posix):
-      let want = fakeXdg / "nim" / (selfFile.splitFile.name & "_d")
-      if sameDir(controlGot, want):
-        pass("with the config off, this file resolves to Nim's shared " &
-             "default " & controlGot)
-      else:
-        fail("CONTROL resolved outside the checkout but not to Nim's " &
-             "default formula ($XDG_CACHE_HOME/nim/<project>_d): " & controlGot)
+  test "self: this binary was compiled with a nimcache inside the checkout":
+    if isInside(SelfNimcache, root):
+      pass("this binary was compiled in " & relativePath(SelfNimcache, root))
     else:
-      pass("with the config off, this file resolves outside the checkout: " &
-           controlGot)
+      refuse("this test binary was compiled with the nimcache " &
+        SelfNimcache & ", OUTSIDE the checkout: whatever built it bypassed " &
+        "config.nims without naming a checkout-local --nimcache:")
+    check failures == 0
 
-if failures > 0:
-  echo "nimcache-locality: FAILED, ", failures, " failure(s): a Nim build in ",
-    "this checkout can reach a nimcache that other checkouts share.  See the ",
-    "header of config.nims."
-  quit(1)
-echo "nimcache-locality: PASS"
+  test "layout: nim dump reports the documented directory in debug and release":
+    checkLayout(selfRel & " (from the checkout root)",
+                nimcacheOf(root, selfRel), expectedFor(selfRel, "_d"))
+    checkLayout(selfRel & " (from its own directory)",
+                nimcacheOf(selfFile.parentDir, selfFile.extractFilename),
+                expectedFor(selfRel, "_d"))
+    for m in MainModules:
+      if not fileExists(root / m):
+        refuse(m & ": listed as a main module to probe, but it does not exist")
+        continue
+      checkLayout(m & " (debug)", nimcacheOf(root, m), expectedFor(m, "_d"))
+      checkLayout(m & " (-d:release)", nimcacheOf(root, m, @["-d:release"]),
+                  expectedFor(m, "_r"))
+    check failures == 0
+
+  test "layout: an explicit --nimcache: on the command line still wins":
+    let explicitDir = getTempDir() / ("nimcache-locality-explicit-" &
+      $getCurrentProcessId())
+    let explicitGot = nimcacheOf(root, selfRel,
+      @["--nimcache:" & explicitDir])
+    check explicitGot.len > 0
+    if explicitGot.len > 0:
+      if sameDir(explicitGot, explicitDir):
+        pass("an explicit --nimcache: on the command line still wins")
+      else:
+        refuse("an explicit --nimcache:" & explicitDir & " resolved to " &
+          explicitGot & ": the config overrides the command line")
+    check failures == 0
+
+  test "control: with the repo-root config off the probe resolves outside":
+    var controlEnv = newStringTable(modeCaseSensitive)
+    for k, v in envPairs():
+      controlEnv[k] = v
+    let fakeXdg = getTempDir() / ("nimcache-locality-control-xdg-" &
+      $getCurrentProcessId())
+    controlEnv["XDG_CACHE_HOME"] = fakeXdg
+    let controlGot = nimcacheOf(root, selfRel, @["--skipParentCfg"],
+      controlEnv)
+    check controlGot.len > 0
+    if controlGot.len > 0:
+      if isInside(controlGot, root):
+        refuse("CONTROL did not fail: with the repo-root config switched " &
+          "off the probe still reports " & controlGot & ", inside the " &
+          "checkout -- so it cannot tell a shared cache from a local one, " &
+          "and every verdict of the cases above is vacuous")
+      else:
+        when defined(posix):
+          let want = fakeXdg / "nim" / (selfFile.splitFile.name & "_d")
+          if sameDir(controlGot, want):
+            pass("with the config off, this file resolves to Nim's shared " &
+                 "default " & controlGot)
+          else:
+            refuse("CONTROL resolved outside the checkout but not to Nim's " &
+              "default formula ($XDG_CACHE_HOME/nim/<project>_d): " &
+              controlGot)
+        else:
+          pass("with the config off, this file resolves outside the " &
+               "checkout: " & controlGot)
+    check failures == 0

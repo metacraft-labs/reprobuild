@@ -61,6 +61,29 @@ type
     digestHex*: string
     absoluteOutputPath*: string
 
+  ERollbackAppBundleFailed* = object of EHomeRollback
+    ## Re-placing a macOS application bundle from the target generation's
+    ## store copy failed: the staged copy failed a check (``check`` names
+    ## it, with the same names as apply's ``EApplyAppBundleFailed``:
+    ## "signature", "identity", "info-plist", ...), the copy or rename
+    ## failed ("placement"), or the target generation's store copy of the
+    ## bundle is gone ("store-copy"). Every bundle the rollback re-places
+    ## is staged and verified before any rollback operation runs, so
+    ## nothing was changed: no staged copy is left, the bundle the current
+    ## generation placed is still at ``targetPath``, the current
+    ## generation's other files and resources are untouched, ``current``
+    ## did not move, and no disk image is attached (rollback copies from
+    ## the store, never from an image). Store-And-Installation-Layout.md
+    ## § macOS Application Bundles, "Rollback".
+    packageId*: string
+    resourceAddress*: string
+    bundleName*: string
+      ## ``<Name>.app``.
+    targetPath*: string
+    check*: string
+    targetGenerationIdHex*: string
+      ## The generation whose bundle could not be re-placed.
+
 # ---------------------------------------------------------------------------
 # Constructors.
 # ---------------------------------------------------------------------------
@@ -123,4 +146,31 @@ proc raiseContentMissing*(digestHex, absoluteOutputPath: string) {.noreturn.} =
     "Refusing to restore unknown content.")
   e.digestHex = digestHex
   e.absoluteOutputPath = absoluteOutputPath
+  raise e
+
+proc raiseRollbackAppBundleFailed*(packageId, resourceAddress, bundleName,
+                                   targetPath, check, targetGenerationIdHex,
+                                   msg: string) {.noreturn.} =
+  ## A bundle the target generation placed could not be re-placed
+  ## (``ERollbackAppBundleFailed``); nothing was rolled back.
+  let what =
+    case check
+    of "placement": "could not be placed"
+    of "store-copy": "has no usable copy in the store"
+    else: "was refused: the staged copy failed the " & check & " check"
+  let generation =
+    if targetGenerationIdHex.len > 12: targetGenerationIdHex[0 ..< 12]
+    else: targetGenerationIdHex
+  var e = newException(ERollbackAppBundleFailed,
+    "repro home rollback: could not re-place " & bundleName &
+    " for package " & packageId & " from generation " & generation & ": " &
+    bundleName & " " & what & ". Nothing was rolled back: " & targetPath &
+    " is as the current generation left it, the staged copy was removed " &
+    "and the current generation is still active. " & msg)
+  e.packageId = packageId
+  e.resourceAddress = resourceAddress
+  e.bundleName = bundleName
+  e.targetPath = targetPath
+  e.check = check
+  e.targetGenerationIdHex = targetGenerationIdHex
   raise e

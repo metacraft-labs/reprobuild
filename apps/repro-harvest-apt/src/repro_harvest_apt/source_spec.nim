@@ -5,6 +5,12 @@
 ##
 ##   apt:git@debian/bookworm:20260601T000000Z
 ##   apt:{git,vim,curl}@debian/bookworm:20260601T000000Z
+##   apt:prometheus-node-exporter@raspbian/trixie
+##
+## The last form names no snapshot: the archive has no snapshot service
+## (Raspbian), so the harvester reads the archive given by ``--archive``
+## and the closure lock it writes (``--emit-lock``) is the only pin. See
+## ``reprobuild-pm/spec/ReproOS-Add-On-Mode.md`` §8.3 item 1.
 ##
 ## The brace-expansion form is the C2 "multi-package" mode: the
 ## harvester walks the union closure of the listed packages and emits
@@ -19,7 +25,10 @@ type
                              ## landed later
     suite*: string           ## "bookworm", "trixie", "sid", "noble", ...
     snapshot*: string        ## "20260601T000000Z" (Debian) or the
-                             ## same-shape Ubuntu equivalent
+                             ## same-shape Ubuntu equivalent; "" when
+                             ## the archive has no snapshot service
+    archive*: string         ## archive base URL overriding the
+                             ## snapshot.debian.org default ("" = default)
     packages*: seq[string]   ## non-empty list of root package names
 
   SourceSpecError* = object of CatchableError
@@ -45,11 +54,14 @@ proc parseAptSourceSpec*(raw: string): AptSourceSpec =
   let distro = tail[0 ..< slashIdx]
   let suiteAndSnap = tail[slashIdx + 1 .. ^1]
   let colonIdx = suiteAndSnap.find(':')
-  if colonIdx < 0:
-    raise newException(SourceSpecError,
-      "apt source spec missing ':' between suite + snapshot: " & raw)
-  let suite = suiteAndSnap[0 ..< colonIdx]
-  let snapshot = suiteAndSnap[colonIdx + 1 .. ^1]
+  var suite = suiteAndSnap
+  var snapshot = ""
+  if colonIdx >= 0:
+    suite = suiteAndSnap[0 ..< colonIdx]
+    snapshot = suiteAndSnap[colonIdx + 1 .. ^1]
+    if snapshot.len == 0:
+      raise newException(SourceSpecError,
+        "apt source spec has an empty snapshot after ':': " & raw)
 
   result.distro = distro
   result.suite = suite
@@ -76,12 +88,20 @@ proc parseAptSourceSpec*(raw: string): AptSourceSpec =
 
   for f, val in fieldPairs(result):
     when val is string:
-      if val.len == 0:
+      if val.len == 0 and f notin ["snapshot", "archive"]:
         raise newException(SourceSpecError,
           "apt source spec has empty " & f & ": " & raw)
 
 proc snapshotBaseUrl*(spec: AptSourceSpec): string =
-  ## ``https://snapshot.debian.org/archive/debian/<snapshot>``
+  ## The archive base URL: ``spec.archive`` when given, otherwise
+  ## ``https://snapshot.debian.org/archive/<distro>/<snapshot>``. A spec
+  ## with neither names no archive and is refused.
+  if spec.archive.len > 0:
+    return spec.archive.strip(leading = false, chars = {'/'})
+  if spec.snapshot.len == 0:
+    raise newException(SourceSpecError,
+      "apt source spec for " & spec.distro & "/" & spec.suite &
+      " names no snapshot; pass --archive <url>")
   "https://snapshot.debian.org/archive/" & spec.distro & "/" &
     spec.snapshot
 
@@ -99,5 +119,6 @@ proc packagesIndexUrl*(spec: AptSourceSpec; component = "main";
 proc canonicalSnapshotPin*(spec: AptSourceSpec): string =
   ## Returns the snapshot pin string the catalog files store. Matches
   ## the B1 grammar (3 segments) which the C1 schema requires:
-  ## ``<distro>/<suite>/<snapshot>``.
+  ## ``<distro>/<suite>/<snapshot>``. Catalog emission needs a snapshot;
+  ## a snapshot-less spec is refused by ``mkForeignPackageRef``.
   spec.distro & "/" & spec.suite & "/" & spec.snapshot

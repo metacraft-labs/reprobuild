@@ -16,7 +16,7 @@ milestone.
   (consumes the layout decided here).
 * W3 — extend the catalog format with `runtime=wine` records (consumes
   the layout decided here).
-* W4 — `vm-harness` end-to-end Windows-via-WINE boot test.
+* W4 — `gosti` end-to-end Windows-via-WINE boot test.
 
 ## Summary of decisions
 

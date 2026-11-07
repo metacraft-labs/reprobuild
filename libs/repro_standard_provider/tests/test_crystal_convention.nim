@@ -27,6 +27,7 @@
 ##     the M60 honest-scope cut).
 
 import std/[os, strutils, unittest]
+import repro_test_support/reasoned_skip
 import repro_test_support
 
 import repro_core

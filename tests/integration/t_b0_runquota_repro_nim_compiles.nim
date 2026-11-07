@@ -58,6 +58,20 @@ proc nimCheckPathFlags(reprobuildRoot: string): seq[string] =
     let candidate = reprobuildRoot / "libs" / ctLib / "src"
     if dirExists(candidate):
       result.add("--path:" & candidate)
+  # ``packages/nim.nim`` reaches ``repro_dsl_stdlib/active_context``, which
+  # imports the ``TestRunner`` contract from the standalone
+  # ``reprobuild-test-adapters`` package. Resolve it as reprobuild's own
+  # ``config.nims`` does: ``REPRO_TEST_ADAPTERS_SRC`` (the pinned flake
+  # input), else the workspace sibling checkout.
+  let fromEnv = getEnv("REPRO_TEST_ADAPTERS_SRC")
+  for candidate in [
+    fromEnv,
+    workspaceRootForRepo(reprobuildRoot) / "reprobuild-test-adapters" / "src",
+    reprobuildRoot.parentDir / "reprobuild-test-adapters" / "src",
+  ]:
+    if candidate.len > 0 and dirExists(candidate):
+      result.add("--path:" & candidate)
+      break
 
 suite "Bootstrap-And-Self-Build B0: runquota repro.nim compiles":
 

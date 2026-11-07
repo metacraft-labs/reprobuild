@@ -33,6 +33,7 @@ import std/[os, strutils, tempfiles, unittest]
 import repro_interface_artifacts
 import repro_local_store
 import repro_tool_profiles
+from repro_core/c_compiler import BuiltCCompilerPath
 
 template withEnv(names: openArray[string]; body: untyped) =
   var saved: seq[tuple[name: string; present: bool; value: string]]
@@ -91,14 +92,17 @@ suite "a bootstrap provisioning failure is a hard failure":
     let dir = createTempDir("repro-bootstrap-cc-fails-", "")
     defer: removeDir(dir)
     let missing = dir / "no-such-compiler"
+    let missingBuilt = dir / "no-such-built-compiler"
     var raised = false
     try:
-      discard provisionBootstrapCCompiler(dir / "store", bcrSystem, @[missing])
+      discard provisionBootstrapCCompiler(dir / "store", bcrSystem, @[missing],
+        builtCompiler = missingBuilt)
     except BootstrapToolchainError as err:
       raised = true
       checkpoint err.msg
       check "could not provision the C compiler" in err.msg
       check missing in err.msg
+      check missingBuilt in err.msg
       check "remedy: " in err.msg
     check raised
     # The pinned-archive route, against a store it cannot write (or, off
@@ -132,3 +136,62 @@ suite "a bootstrap provisioning failure is a hard failure":
       check raised
       # Refused BEFORE anything was fetched in its place.
       check not dirExists(dir / "store" / "prefixes")
+
+suite "the no-Nix C compiler route":
+
+  # Where there is neither a `nix` executable nor a system C compiler at
+  # its fixed location -- the Nix build sandbox, where an installed package
+  # runs a consumer's `repro home export` (import-from-derivation) and its
+  # own `packaged-runtime-compile` check -- the route used to stop the
+  # command although the compiler `repro` was built with is in the
+  # package's closure (reprobuild-pm
+  # issues/2026-10-14-packaged-runtime-compile-check-has-no-c-compiler-in-the-sandbox.md).
+  # The system candidates are a path that does not exist, which is what the
+  # sandbox's `/usr/bin/cc` is; `BuiltCCompilerPath` is this test binary's
+  # real build compiler, probed for real.
+
+  test "falls back to the compiler repro was built with":
+    when defined(windows):
+      # Windows has no build-time compiler constant and never takes this
+      # route (it uses the pinned winlibs archive); nothing to fall back to.
+      check BuiltCCompilerPath.len == 0
+    else:
+      check BuiltCCompilerPath.len > 0
+      check fileExists(BuiltCCompilerPath)
+      let dir = createTempDir("repro-bootstrap-cc-built-", "")
+      defer: removeDir(dir)
+      let provisioned = provisionBootstrapCCompiler(dir / "store", bcrSystem,
+        @[dir / "no-such-system-compiler"])
+      check provisioned.path == BuiltCCompilerPath
+      check describeBootstrapCRoute(bcrSystem,
+        @[dir / "no-such-system-compiler"]).contains(BuiltCCompilerPath)
+
+  test "a system compiler at its fixed location still comes first":
+    when not defined(windows):
+      let dir = createTempDir("repro-bootstrap-cc-system-", "")
+      defer: removeDir(dir)
+      # A second name for the real build compiler, standing in for the
+      # host's `/usr/bin/cc`: the route must pick it, not the built one.
+      let system = dir / "cc"
+      createSymlink(BuiltCCompilerPath, system)
+      let provisioned = provisionBootstrapCCompiler(dir / "store", bcrSystem,
+        @[system])
+      check provisioned.path == system
+
+  test "a compiler that cannot be spawned leaves the current directory alone":
+    # `probeCCompiler` spawns the candidate in a scratch directory it then
+    # deletes. `osproc` chdirs the parent there for the spawn and restored it
+    # only on success, so a candidate that is not an executable left this
+    # process in a deleted directory and every later spawn failed with "No
+    # such file or directory" (it failed the two tests above whenever they
+    # ran after "an unusable REPRO_BOOTSTRAP_CC is refused").
+    when not defined(windows):
+      let before = getCurrentDir()
+      let dir = createTempDir("repro-bootstrap-cc-cwd-", "")
+      defer: removeDir(dir)
+      let fake = dir / "not-a-compiler"
+      writeFile(fake, "this is not a compiler\n")
+      setFilePermissions(fake, {fpUserRead, fpUserWrite, fpUserExec})
+      let probe = probeCCompiler(fake)
+      check not probe.usable
+      check getCurrentDir() == before

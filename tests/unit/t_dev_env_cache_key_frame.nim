@@ -32,7 +32,7 @@ import blake3
 const
   FrameMagic = "reprobuild.hash.v1\0"
   Tag = "action-fingerprint"
-  CacheKeySchemaLiteral = "reprobuild.dev-env.cache-key.v1"
+  CacheKeySchemaLiteral = "reprobuild.dev-env.cache-key.v2"
 
 proc textBytes(text: string): seq[byte] =
   result = newSeq[byte](text.len)
@@ -116,10 +116,22 @@ suite "dev-env cache key frame":
     let savedStoreRoot = getEnv("REPRO_STORE_ROOT")
     let hadStoreRoot = existsEnv("REPRO_STORE_ROOT")
     putEnv("REPRO_STORE_ROOT", "/some/store")
+    # The libs-override pair likewise: one with a value, one unset, so the
+    # pinned payload does not depend on the ambient dev shell.
+    let savedLibsDir = getEnv("REPROBUILD_LIBS_DIR")
+    let hadLibsDir = existsEnv("REPROBUILD_LIBS_DIR")
+    let savedRepoRoot = getEnv("REPROBUILD_REPO_ROOT")
+    let hadRepoRoot = existsEnv("REPROBUILD_REPO_ROOT")
+    putEnv("REPROBUILD_LIBS_DIR", "/some/libs")
+    delEnv("REPROBUILD_REPO_ROOT")
     defer:
       delEnv("REPRO_DEVELOP_OVERRIDES_FILE")
       if hadStoreRoot: putEnv("REPRO_STORE_ROOT", savedStoreRoot)
       else: delEnv("REPRO_STORE_ROOT")
+      if hadLibsDir: putEnv("REPROBUILD_LIBS_DIR", savedLibsDir)
+      else: delEnv("REPROBUILD_LIBS_DIR")
+      if hadRepoRoot: putEnv("REPROBUILD_REPO_ROOT", savedRepoRoot)
+      else: delEnv("REPROBUILD_REPO_ROOT")
 
     for activity in ["", "build", "shell"]:
       for lockSliceId in ["", "slice-1"]:
@@ -135,7 +147,17 @@ suite "dev-env cache key frame":
             fingerprintPart(os.normalizedPath(absolutePath(overrides))),
           envPart("REPRO_DEVELOP_OVERRIDES_FILE"),
           envPart("REPRO_TOOL_PROVISIONING"),
-          envPart("REPRO_STORE_ROOT")
+          envPart("REPRO_STORE_ROOT"),
+          # Keyed since c71f33495: the extracted interface depends on which
+          # reprobuild libs the recipe is compiled against.
+          envPart("REPROBUILD_LIBS_DIR"),
+          envPart("REPROBUILD_REPO_ROOT"),
+          # Keyed since cache-key v2: the observed inputs of the activation
+          # being compared against (`issues/2026-09-28-dev-env-prompt-key-
+          # ignores-flake-inputs.md`). With no watch manifest the part is a
+          # fixed token; `t_dev_env_prompt_watch_key.nim` pins what a real
+          # manifest contributes.
+          "promptWatch=<none>"
         ]
         check computeDevEnvEdgeCacheKey(root, activity, lockSliceId,
           overrides) == expectedKey(parts.join("\n"))

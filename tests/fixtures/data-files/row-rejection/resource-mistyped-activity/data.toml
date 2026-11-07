@@ -1,0 +1,5 @@
+[[resource]]
+kind = "env.userVariable"
+activity = ["desktop_core"]
+name = "GM9"
+value = "1"

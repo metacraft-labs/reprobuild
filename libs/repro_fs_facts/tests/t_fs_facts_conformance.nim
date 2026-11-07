@@ -45,6 +45,7 @@
 import std/[os, strutils, tables, times, unittest]
 
 from repro_core/paths import extendedPath
+from repro_test_support/process_fixtures import releaseDirAtProcessExit
 
 import repro_fs_facts
 import repro_cas_store
@@ -189,12 +190,14 @@ type
     dir: string       ## a writable scratch directory on the volume
     obs: FilesystemObservation
 
-var scratchDirs: seq[string] = @[]
-
 proc claimScratchDir(parent, tag: string): string =
+  ## A scratch directory on ``parent``'s volume, owned by THIS process: its
+  ## removal is registered with ``releaseDirAtProcessExit`` before it is
+  ## created, so it goes when this process exits, whichever cases it ran.
   if parent.len == 0 or not dirExists(extendedPath(parent)):
     return ""
   let candidate = parent / ("repro-f2-" & $getCurrentProcessId() & "-" & tag)
+  releaseDirAtProcessExit(candidate)
   try:
     createDir(extendedPath(candidate))
     let witness = candidate / "witness"
@@ -202,7 +205,6 @@ proc claimScratchDir(parent, tag: string): string =
     removeFile(extendedPath(witness))
   except CatchableError, Defect:
     return ""
-  scratchDirs.add(candidate)
   candidate
 
 proc candidateParents(): seq[string] =
@@ -237,7 +239,46 @@ proc discoverVolumes(): seq[HostVolume] =
     seen.add(probe.volumeKey)
     result.add(HostVolume(dir: dir, obs: observeFilesystem(dir)))
 
-let volumes = discoverVolumes()
+## Discovery is LAZY: it runs on the first use, from inside a case, and
+## never at module scope. The runner runs every case in its own process and
+## probes the binary with ``--list-json`` besides, and all of those execute
+## module-level code; discovery there created a scratch directory on every
+## volume in every one of them, and the cases that never touch a volume
+## (the table-integrity ones) paid for it too. Each process that does
+## discover releases what it claimed at exit — see ``claimScratchDir``.
+var discoveredVolumes: seq[HostVolume] = @[]
+var discoveredByFilesystem: OrderedTable[FilesystemId, HostVolume]
+var volumesDiscovered = false
+
+proc ensureVolumesDiscovered() =
+  if volumesDiscovered:
+    return
+  volumesDiscovered = true
+  discoveredVolumes = discoverVolumes()
+  # One representative volume per KNOWN filesystem id. Facts are a
+  # property of the filesystem, so driving them once per id is the right
+  # granularity; ``volumes`` keeps every instance for the discovery and
+  # cross-device arms.
+  for v in discoveredVolumes:
+    if v.obs.queried and v.obs.known and
+        v.obs.id notin discoveredByFilesystem:
+      discoveredByFilesystem[v.obs.id] = v
+
+proc hostVolumes(): seq[HostVolume] =
+  ensureVolumesDiscovered()
+  discoveredVolumes
+
+proc hostVolumesByFilesystem(): OrderedTable[FilesystemId, HostVolume] =
+  ensureVolumesDiscovered()
+  discoveredByFilesystem
+
+template volumes(): untyped =
+  ## Every discovered volume; discovers on first use.
+  hostVolumes()
+
+template byFilesystem(): untyped =
+  ## One volume per known filesystem id; discovers on first use.
+  hostVolumesByFilesystem()
 
 proc subjectOf(v: HostVolume): string =
   ## The label a contradiction names. Carries the OS-reported name AND
@@ -245,15 +286,6 @@ proc subjectOf(v: HostVolume): string =
   ## three volumes disagreed.
   (if v.obs.reportedName.len > 0: v.obs.reportedName else: "?") &
     " (" & v.obs.volumeKey & ")"
-
-## One representative volume per KNOWN filesystem id. Facts are a
-## property of the filesystem, so driving them once per id is the right
-## granularity; ``volumes`` keeps every instance for the discovery and
-## cross-device arms.
-var byFilesystem: OrderedTable[FilesystemId, HostVolume]
-for v in volumes:
-  if v.obs.queried and v.obs.known and v.obs.id notin byFilesystem:
-    byFilesystem[v.obs.id] = v
 
 proc presentFilesystems(): seq[FilesystemId] =
   result = @[]
@@ -2029,18 +2061,12 @@ suite "F2 filesystem-facts conformance — coverage report":
     check untested + partial > 0
     check absent.len > 0 or byFilesystem.len == ord(high(FilesystemId)) + 1
 
-suite "F2 filesystem-facts conformance — teardown":
-  # Deliberately a test rather than an ``addExitProc``: under ORC the
-  # exit-proc closure runs after this module's globals are destroyed.
-  test "every scratch directory this suite created is removed":
-    var surviving: seq[string] = @[]
-    for d in scratchDirs:
-      try:
-        removeDir(extendedPath(d))
-      except CatchableError, Defect:
-        discard
-      if dirExists(extendedPath(d)):
-        surviving.add(d)
-    if surviving.len > 0:
-      checkpoint("surviving scratch directories: " & surviving.join(", "))
-    check surviving.len == 0
+# There is deliberately no "teardown" suite. This file used to end with a
+# case that removed every scratch directory — and the runner runs each case
+# in its own process, so that case removed only the directories ITS OWN
+# process had claimed, while every other case process and the
+# ``--list-json`` probe left one directory per volume behind (144 from one
+# runner-alone run, measured at reprobuild 6aa91f75). Release now belongs to
+# the process that claimed the directory (``claimScratchDir``), and the
+# guarantee is checked from outside, the way the runner runs this file, by
+# ``tests/integration/t_when_each_case_runs_alone_no_fixture_outlives_its_process``.

@@ -174,10 +174,16 @@ suite "Local daemons/control-plane M6 warm no-op path":
       check phaseUs(warmBenchmark, "cacheChecksUs") > 0.0
       check metricPresent(warmBenchmark, "repro lowered graph cache read")
       check metricPresent(warmBenchmark, "repro fast noop scan")
-      check metricCount(warmBenchmark,
-        "repro interface metadata warm hit") > 0
-      check metricCount(warmBenchmark,
-        "repro interface artifact warm hit") > 0
+      # The recipe's interface and provider are build edges served from the
+      # action cache like the 80 copies (66bdb1887 made the extraction a
+      # monitored edge and removed the in-process freshness gate whose
+      # counters, "repro interface metadata/artifact warm hit", this case
+      # used to read; nothing on the CLI path reaches that gate now, so
+      # they are always 0). Every lookup of the warm run resolves to a
+      # record, and there is one for each copy plus those two edges.
+      check metricCount(warmBenchmark, "repro cache lookup") > 80
+      check metricCount(warmBenchmark, "repro action index resolved hit") ==
+        metricCount(warmBenchmark, "repro cache lookup")
       check metricCount(warmBenchmark,
         "repro file metadata warm revalidate") > 0
       check metricCount(warmBenchmark,

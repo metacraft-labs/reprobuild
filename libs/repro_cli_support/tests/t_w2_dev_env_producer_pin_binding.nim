@@ -109,7 +109,7 @@ proc writeLockPin(workspaceRoot: string) =
     name: producerName,
     path: "../prod",
     coordinates: Coordinates(kind: ckVcs, url: pinnedUrl,
-      gitRef: "main", revision: pinnedRevision),
+      revision: pinnedRevision),
     integrity: "git-sha1:" & pinnedRevision,
     visibility: "public"))
   writeFile(committedLockPath(workspaceRoot), serializeLockedDependencies(ld))

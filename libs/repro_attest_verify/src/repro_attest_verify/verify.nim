@@ -710,6 +710,68 @@ proc checkTransparencyLog(p: AttestationPolicy;
     "has witnessed (" & ctx.inclusion.verifiedLogs.join(", ") & ")")
 
 # ---------------------------------------------------------------------
+# The build plane on its own
+# ---------------------------------------------------------------------
+
+type
+  ManifestEvidenceJudgement* = object
+    ## What a verifier can establish about a measurement manifest from
+    ## the BUILD plane alone — with no runtime report in front of it.
+    ##
+    ## The two rows are the same two the full verdict carries, computed
+    ## by the same two procedures over the same context. They are
+    ## reachable on their own because the question "is this document one
+    ## a quorum of admitted rebuilders vouched for?" has an answer before
+    ## any machine has booted, and a caller that wanted that answer
+    ## otherwise had to assemble a runtime report it has no use for —
+    ## which would make the answer depend on a document that has nothing
+    ## to do with it.
+    ##
+    ## Nothing here is a second implementation. A manifest judged through
+    ## this entry point and the same manifest judged inside a full
+    ## verdict are judged by one copy of the rules.
+    quorum*: CheckFinding
+    inclusion*: CheckFinding
+    required*: tuple[quorum, inclusion: bool]
+      ## Whether the policy requires each row, which is what turns "could
+      ## not be performed" into a failure rather than a skip. Carried
+      ## beside the findings because the finding alone does not say.
+
+proc judgeManifestEvidence*(req: VerificationRequest):
+    ManifestEvidenceJudgement =
+  ## The quorum and the transparency-log rows for the measurement
+  ## manifest in ``req``, judged without a runtime report.
+  ##
+  ## ``req.reportText`` is not read and need not be set. Everything this
+  ## answers rests on the manifest, the bundle, the roster, the witnessed
+  ## roots and the policy.
+  var haveManifest = false
+  if req.manifestText.isSome:
+    try:
+      discard parseAttestedImageManifest(req.manifestText.get,
+                                         req.manifestSource)
+      haveManifest = true
+    except ManifestError:
+      haveManifest = false
+    except MeasurementError:
+      haveManifest = false
+  let ctx = evidenceContextFor(req,
+    (if req.manifestText.isSome: req.manifestText.get else: ""), haveManifest)
+  result.quorum = checkEvidenceQuorum(req.policy, ctx)
+  result.inclusion = checkTransparencyLog(req.policy, ctx)
+  result.required = (req.policy.acceptsEvidence,
+                     req.policy.requiresTransparencyLog)
+
+proc outcomeOf*(f: CheckFinding; required: bool): CheckOutcome =
+  ## One finding's outcome, through the single rule in ``verdict``.
+  ##
+  ## Written as a forwarding call rather than as a second ``case`` so a
+  ## caller outside a full verdict cannot come to disagree with the
+  ## driver about what "inapplicable and required" means.
+  outcome(CheckRecord(performed: true, kind: f.kind, required: required,
+                      detail: f.detail))
+
+# ---------------------------------------------------------------------
 # The instance's own claims — advisory, and kept away from the decision
 # ---------------------------------------------------------------------
 

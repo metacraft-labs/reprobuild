@@ -146,23 +146,113 @@ proc isSystemDefaultDomain*(domain: string): bool =
 const SystemdSystemUnitDir* = "/etc/systemd/system"
   ## The directory a `systemd.systemUnit` unit file lands in.
 
+const UnitNameMutation {.strdefine: "reproAddonMutation".} = ""
+  ## ``scope-accepts-unnormalised-paths`` (the add-on's falsifying build)
+  ## also compiles the strict unit-name check out, so the collision gate
+  ## shows it is what refuses `" cron.service"`.
+
 proc systemUnitPath*(name: string): string =
   ## The on-disk location of a systemd SYSTEM unit. A forward-slash
   ## join so the derivation is platform-independent for unit testing.
-  ## `name` is the unit file name (e.g. `repro-agent.service`).
-  let n = name.strip()
-  SystemdSystemUnitDir & "/" & n
+  ## `name` is the unit file name (e.g. `repro-agent.service`), already
+  ## validated by `systemdUnitNameError`: it is used exactly as written,
+  ## never stripped, so the path the driver writes and the path any
+  ## observer (the add-on's collision pass) looks at are the same string.
+  SystemdSystemUnitDir & "/" & name
+
+proc hasKnownUnitSuffix*(name: string): bool
+  ## Forward declaration; defined with `systemd.unitState`'s checks.
+
+proc systemdUnitNameError*(field, name: string; requireSuffix = true): string =
+  ## "" when ``name`` is a unit name systemd accepts, else why not
+  ## (systemd.unit(5), `unit_name_is_valid()` in systemd's
+  ## src/basic/unit-name.c): at most 255 characters of
+  ## `[A-Za-z0-9:_.@-]` (systemd's `\` escapes are refused here: a
+  ## profile spells the escaped form's target instead), a non-empty
+  ## prefix, at most one `@` (an instance or a template, `foo@.service`),
+  ## and, with ``requireSuffix``, a unit-type suffix. Nothing is stripped
+  ## or rewritten: `" cron.service"` is refused, because systemd would
+  ## not load it and the driver would otherwise write a different file
+  ## than the one the name's text names.
+  when UnitNameMutation == "scope-accepts-unnormalised-paths":
+    if name.strip().len > 0 and '/' notin name: return ""
+  if name.len == 0:
+    return field & " is empty"
+  if name.len > 255:
+    return field & " '" & name & "' is longer than 255 characters"
+  if name == "." or name == "..":
+    return field & " '" & name & "' is not a unit name"
+  for c in name:
+    if c notin {'A'..'Z', 'a'..'z', '0'..'9', ':', '_', '.', '@', '-'}:
+      return field & " '" & name.escape() & "' contains '" & ($c).escape() &
+        "', which is not a character of a systemd unit name " &
+        "([A-Za-z0-9:_.@-]; no whitespace)"
+  if name[0] in {'.', '@'}:
+    return field & " '" & name & "' has an empty unit-name prefix"
+  if name.count('@') > 1:
+    return field & " '" & name & "' has more than one '@'"
+  if requireSuffix and not hasKnownUnitSuffix(name):
+    return field & " '" & name & "' has no unit-type suffix " &
+      "(.service, .socket, .timer, ...)"
+  ""
 
 proc isSafeUnitName*(name: string): bool =
-  ## A systemd unit name must be a single path segment — no `/`, no
-  ## `..`, non-empty — so a `systemd.systemUnit` resource cannot
-  ## escape `/etc/systemd/system/`.
-  let n = name.strip()
-  if n.len == 0:
+  ## A unit name systemd accepts (`systemdUnitNameError`, suffix not
+  ## required: callers that need one check it), so a `systemd.systemUnit`
+  ## resource cannot escape `/etc/systemd/system/` and names exactly the
+  ## file it writes.
+  systemdUnitNameError("unit name", name, requireSuffix = false).len == 0
+
+const
+  SystemdSysusersDir* = "/etc/sysusers.d"
+    ## Where a `linux.sysusersEntry` fragment lands (ReproOS Add-On Mode
+    ## spec §4.1, the `sysusers` class).
+  AddOnFragmentPrefix* = "repro-"
+    ## The add-on's fragment naming convention (`repro-<name>.conf` for
+    ## sysusers and tmpfiles fragments, spec §4.1): so that a human can
+    ## see which fragments are the add-on's. Ownership is the ledger's,
+    ## never the name's.
+  AddOnDropInPrefix* = "50-repro-"
+    ## A `systemd.systemDropIn` is `<unit>.d/50-repro-<name>.conf`.
+  AddOnSysctlPrefix* = "90-repro-"
+    ## A `linux.sysctl` fragment on an add-on host is
+    ## `/etc/sysctl.d/90-repro-<name>.conf` (spec §4.1).
+
+proc isSafeFragmentName*(name: string): bool =
+  ## One path segment of `[A-Za-z0-9._-]`, not `.` or `..`: the `<name>`
+  ## part of every add-on fragment file name.
+  if name.len == 0 or name == "." or name == "..":
     return false
-  if n == "." or n == "..":
-    return false
-  '/' notin n and '\\' notin n
+  for c in name:
+    if c notin {'A'..'Z', 'a'..'z', '0'..'9', '.', '-', '_'}:
+      return false
+  true
+
+proc systemDropInPath*(unit, name: string): string =
+  ## `/etc/systemd/system/<unit>.d/50-repro-<name>.conf` (spec §4.1, the
+  ## `dropIn` class). `name` defaults to `addon`.
+  let n = if name.len > 0: name else: "addon"
+  SystemdSystemUnitDir & "/" & unit & ".d/" & AddOnDropInPrefix &
+    n & ".conf"
+
+proc sysusersFragmentPath*(name: string): string =
+  ## `/etc/sysusers.d/repro-<name>.conf` (spec §4.1, the `sysusers` class).
+  SystemdSysusersDir & "/" & AddOnFragmentPrefix & name & ".conf"
+
+proc sysusersFragmentContent*(kind, name, id, description, home,
+                              shell: string): string =
+  ## The canonical bytes of a sysusers fragment for one entry, in the
+  ## sysusers.d(5) line format: `u <name> <uid|-> "<description>" <home>
+  ## <shell>` for an account, `g <name> <gid|->` for a group. A field left
+  ## empty is written as `-` (systemd-sysusers' "unspecified"). The
+  ## description may not carry a double quote; the validator refuses one.
+  let dash = proc(s: string): string = (if s.len > 0: s else: "-")
+  case kind
+  of "group":
+    "g " & name & " " & dash(id) & "\n"
+  else:
+    "u " & name & " " & dash(id) & " \"" & description & "\" " &
+      dash(home) & " " & dash(shell) & "\n"
 
 type
   SystemdUnitObservation* = object
@@ -323,6 +413,59 @@ proc isAllowedSystemFilePath*(path: string; programDataRoot = ""): bool =
     if norm.startsWith(pdRoot):
       return true
   return false
+
+const NonCanonicalPathMutation {.strdefine: "reproAddonMutation".} = ""
+  ## The add-on's falsifying-mutation selector (``repro_addon/mutations``).
+  ## ``scope-accepts-unnormalised-paths`` compiles the check below out, so
+  ## the add-on's collision gate can show it is what refuses
+  ## ``/etc/ssh//sshd_config``. A build without the define has no switch.
+
+proc nonCanonicalPathError*(field, path: string;
+                            allowTrailingSlash = false): string =
+  ## "" when ``path`` is an absolute POSIX path in canonical form, else a
+  ## diagnostic naming ``field``. Canonical means: starts with ``/``, has
+  ## no empty segment (``//``), no ``.`` or ``..`` segment, no leading or
+  ## trailing whitespace, no control character, and ends with ``/`` only
+  ## when ``allowTrailingSlash`` (a directory prefix such as a managed
+  ## ``/etc`` prefix) and is then more than ``/``.
+  ##
+  ## Why refuse rather than canonicalise: every consumer of these paths
+  ## compares their TEXT -- dpkg's file lists, its diversion database and
+  ## ucf's registry hold canonical paths, and the scope checks are prefix
+  ## compares -- so ``/etc/ssh//sshd_config`` reads as "no package owns
+  ## it" and ``/etc/./systemd/system/x.service`` as "not under the unit
+  ## directory" while the kernel resolves both to the package's file. A
+  ## silently canonicalised path would also leave the profile and the
+  ## ledger naming different strings for one object. Refusing makes the
+  ## canonical form the only spelling, so every text compare downstream is
+  ## a compare of what the kernel resolves (threat model G8, T9).
+  when NonCanonicalPathMutation == "scope-accepts-unnormalised-paths":
+    return ""
+  else:
+    if path.len == 0:
+      return field & " is empty"
+    if path != path.strip():
+      return field & " '" & path & "' has leading or trailing whitespace"
+    for c in path:
+      if ord(c) < 32 or ord(c) == 127:
+        return field & " '" & path.escape() & "' contains a control character"
+    if path[0] != '/':
+      return field & " '" & path & "' is not an absolute path"
+    if path.endsWith("/") and not allowTrailingSlash:
+      return field & " '" & path & "' ends with '/'; a file path names " &
+        "the file itself"
+    let body = if path.endsWith("/"): path[1 ..< path.len - 1]
+               else: path[1 .. ^1]
+    if body.len == 0:
+      return field & " '" & path & "' names the root directory"
+    for seg in body.split('/'):
+      if seg.len == 0:
+        return field & " '" & path & "' has an empty segment ('//'); " &
+          "write the path in canonical form"
+      if seg == "." or seg == "..":
+        return field & " '" & path & "' has a '" & seg & "' segment; " &
+          "write the path in canonical form"
+    ""
 
 proc systemFileScopeError*(path: string; programDataRoot = ""): string =
   ## Returns "" when the path is in-scope, otherwise a human
@@ -571,6 +714,23 @@ proc normalizeGroupSet(groups: openArray[string]): seq[string] =
       result.add(n)
   result.sort()
 
+proc memberGroups(observed: PasswdUserObservation;
+                  desired: openArray[string]): seq[string] =
+  ## The groups ``observed`` is a member of, as far as a declaration of
+  ## ``desired`` is concerned: its supplementary groups, plus its primary
+  ## group when that group is declared. A user whose primary group is
+  ## ``nut`` is a member of ``nut``; ``id -nG`` lists such a group once, and
+  ## ``parsePasswdObservation`` files it as the primary only, so without
+  ## this a declared group that is also the primary would read as missing
+  ## forever (reprobuild-pm issue
+  ## 2026-10-30-addon-passwd-user-primary-group-digest-mismatch).
+  result = normalizeGroupSet(observed.groups)
+  let primary = observed.primaryGroup.strip()
+  if primary.len > 0 and primary notin result and
+      primary in normalizeGroupSet(desired):
+    result.add(primary)
+    result.sort()
+
 type
   PasswdUserDiff* = object
     ## The result of comparing a desired `passwd.user` against the
@@ -602,7 +762,7 @@ proc diffPasswdUser*(desired: PasswdUserDesired;
      desired.shell.strip() != observed.shell.strip():
     result.shellDiffers = true
   let want = normalizeGroupSet(desired.groups)
-  let have = normalizeGroupSet(observed.groups)
+  let have = memberGroups(observed, want)
   for g in want:
     if g notin have:
       result.missingGroups.add(g)
@@ -688,7 +848,7 @@ proc canonicalPasswdUserStateMaskedBy*(observed: PasswdUserObservation;
     if desired.shell.len > 0: observed.shell else: "*"
   let desiredSet = normalizeGroupSet(desired.groups)
   var groupsMasked: seq[string]
-  for g in normalizeGroupSet(observed.groups):
+  for g in memberGroups(observed, desiredSet):
     if g in desiredSet:
       groupsMasked.add(g)
   "user:present;uid=*" &
@@ -702,10 +862,28 @@ proc canonicalPasswdUserStateMaskedBy*(observed: PasswdUserObservation;
 # and never interpolates an operator string into a shell line.
 # ---------------------------------------------------------------------------
 
-proc buildUseraddArgs*(desired: PasswdUserDesired): seq[string] =
+type
+  EUseraddGroupCollision* = object of ValueError
+    ## A group named like the new account exists and the resource does not
+    ## declare membership in it.
+
+proc buildUseraddArgs*(desired: PasswdUserDesired;
+                       sameNameGroupExists = false): seq[string] =
   ## Build the `useradd` argv for creating a new account. `--system`
   ## is deliberately NOT forced — a `passwd.user` resource may
   ## declare an ordinary login account.
+  ##
+  ## `sameNameGroupExists` reports whether a group named like the account
+  ## exists already, typically because a `passwd.group` of the same name
+  ## was applied first. With `USERGROUPS_ENAB yes` (the Debian default)
+  ## `useradd` would try to create that group as the account's private
+  ## group and refuse ("group nut exists - if you want to add this user to
+  ## that group, use -g"). When the resource declares membership in the
+  ## group, it becomes the account's primary group (`--gid`), which is the
+  ## user-private-group layout `adduser --system --group` produces. When it
+  ## does not, joining an existing group the profile never named would
+  ## grant access nobody declared, so it is refused
+  ## (`EUseraddGroupCollision`).
   result.add(desired.name)
   if desired.homeDir.len > 0:
     result.add("--home-dir")
@@ -714,7 +892,17 @@ proc buildUseraddArgs*(desired: PasswdUserDesired): seq[string] =
   if desired.shell.len > 0:
     result.add("--shell")
     result.add(desired.shell)
-  let groups = normalizeGroupSet(desired.groups)
+  var groups = normalizeGroupSet(desired.groups)
+  if sameNameGroupExists:
+    let name = desired.name.strip()
+    if name notin groups:
+      raise newException(EUseraddGroupCollision, "a group named '" & name &
+        "' already exists and passwd.user '" & name & "' does not declare " &
+        "membership in it; declare it in the account's groups to make it " &
+        "the account's primary group, or remove the group")
+    result.add("--gid")
+    result.add(name)
+    groups.delete(groups.find(name))
   if groups.len > 0:
     result.add("--groups")
     result.add(groups.join(","))
@@ -857,23 +1045,45 @@ proc canonicalPasswdGroupState*(observed: PasswdGroupObservation): string =
   "group:present;gid=" & observed.gid &
     ";members=" & observed.members.join(",")
 
+proc declaredGroupMembers(desired: PasswdGroupDesired): seq[string] =
+  for m in desired.members:
+    let n = m.strip()
+    if n.len > 0 and n notin result:
+      result.add(n)
+  result.sort()
+
 proc canonicalPasswdGroupDesired*(desired: PasswdGroupDesired): string =
   ## The desired canonical string. An unpinned `gid` (empty) is
   ## rendered `*` so a desired state that does not pin the gid does
-  ## not falsely equal an observed state that has one. ADDITIVE-only
-  ## semantics: the canonical digest reflects the DECLARED members
-  ## only — an observation with extra members will not match the
-  ## desired digest, so the driver runs the apply (which is a no-op
-  ## for already-present declared members and an `-aG` for missing
-  ## ones). This is intentional: a profile that adds a member then is
-  ## re-applied should converge the new member; ditto for the gid.
-  var members: seq[string]
-  for m in desired.members:
-    let n = m.strip()
-    if n.len > 0 and n notin members:
-      members.add(n)
-  members.sort()
+  ## not falsely equal an observed state that has one. Members are the
+  ## DECLARED set; `members` is a subset requirement (System-Profile-
+  ## And-Infra-Apply.md, `passwd.group`), so the observation it is
+  ## compared with is masked to the same set
+  ## (`canonicalPasswdGroupStateMaskedBy`).
   "group:present;gid=" & (if desired.gid.len > 0: desired.gid else: "*") &
+    ";members=" & declaredGroupMembers(desired).join(",")
+
+proc canonicalPasswdGroupStateMaskedBy*(observed: PasswdGroupObservation;
+    desired: PasswdGroupDesired): string =
+  ## An observed group in the SAME canonical form as
+  ## `canonicalPasswdGroupDesired`: an unpinned gid renders `*`, and the
+  ## member list is the observed members that the resource declares. The
+  ## driver adds missing members and never removes one it was not asked
+  ## for, so a member the profile does not name is not a difference: a
+  ## group with an undeclared live member plans a no-op, and one missing a
+  ## declared member still plans an update. Comparing the unmasked state
+  ## instead made every such group plan "update" on every apply. The plan,
+  ## the apply's recorded digest and drift detection all use this, so the
+  ## three agree; `canonicalPasswdGroupState` stays the literal record.
+  if not observed.present:
+    return "group:absent"
+  let declared = declaredGroupMembers(desired)
+  var members: seq[string]
+  for m in observed.members:
+    if m in declared and m notin members:
+      members.add(m)
+  members.sort()
+  "group:present;gid=" & (if desired.gid.len > 0: observed.gid else: "*") &
     ";members=" & members.join(",")
 
 # ---------------------------------------------------------------------------
@@ -1393,3 +1603,26 @@ proc fsSystemDirectoryDigestPayload*(present: bool;
     return "fs.systemDirectory:present"
   "fs.systemDirectory:present|" &
     canonicalDirAclDesired(true, aclOwner, aclEntries, aclInheritance)
+
+proc hasKnownUnitSuffix*(name: string): bool =
+  ## `systemd.unitState` names a unit the add-on does not own, so the only
+  ## shape check available is systemd's own: the name carries a unit-type
+  ## suffix (systemd.unit(5)).
+  for suffix in [".service", ".socket", ".timer", ".target", ".path",
+                 ".mount", ".automount", ".swap", ".slice", ".scope",
+                 ".device"]:
+    if name.endsWith(suffix) and name.len > suffix.len:
+      return true
+  false
+
+proc isSafeAddOnToolCommand*(name: string): bool =
+  ## A `linux.addOnTool` command is a single file name under
+  ## `/etc/repro/bin`, spliced into a shell wrapper and a launcher manifest
+  ## path, so it is held to a conservative charset: letters, digits, `.`,
+  ## `-`, `_`, `+`, not starting with `.` or `-`.
+  if name.len == 0 or name[0] in {'.', '-'}:
+    return false
+  for c in name:
+    if c notin {'a'..'z', 'A'..'Z', '0'..'9', '.', '-', '_', '+'}:
+      return false
+  true

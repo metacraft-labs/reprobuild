@@ -111,9 +111,9 @@ proc buildWorkspace(root, prefix: string; names: openArray[string]) =
   var includes: seq[string]
   for name in names:
     writeFile(root / "repos" / (name & ".toml"),
-      "schema = \"reprobuild.workspace.repo.v1\"\n\n" &
+      "schema = \"reprobuild.workspace.repo.v2\"\n\n" &
       "[repo]\nname = \"" & name & "\"\npath = \"" & name & "\"\n" &
-      "remote = \"metacraft-labs\"\nbranch = \"dev\"\n")
+      "remote = \"metacraft-labs\"\nmainline = \"dev\"\n")
     includes.add("repos/" & name & ".toml")
   var project = "schema = \"reprobuild.workspace.project.v1\"\n\n" &
     "[project]\nname = \"demo\"\n\n" &
@@ -123,8 +123,8 @@ proc buildWorkspace(root, prefix: string; names: openArray[string]) =
     project.add("  \"" & inc & "\",\n")
   project.add("]\n")
   writeFile(root / "projects" / "demo.toml", project)
-  writeFile(root / ".repro" / "workspace.toml",
-    "schema = \"reprobuild.workspace.local.v1\"\n\n" &
+  writeFile(root / ".repro" / "workspace-state.toml",
+    "schema = \"reprobuild.workspace.state.v1\"\n\n" &
     "[workspace]\nproject = \"demo\"\nprojects = [\"demo\"]\n")
 
 proc migrate(root: string): CmdResult =

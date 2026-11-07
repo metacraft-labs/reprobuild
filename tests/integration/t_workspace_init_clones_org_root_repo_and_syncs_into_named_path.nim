@@ -92,25 +92,24 @@ proc projectTomlBody(libUrl: string): string =
   "schema = \"reprobuild.workspace.project.v1\"\n\n" &
   "[project]\n" &
   "name = \"myproject\"\n" &
-  "default_revision = \"main\"\n" &
-  "trunk = \"main\"\n\n" &
+  "\n" &
   "[[remote]]\nname = \"lib-origin\"\nfetch = \"" & libUrl & "\"\n\n" &
   "includes = [\n  \"repos/lib-a.toml\",\n]\n"
 
 const libATomlBody = """
-schema = "reprobuild.workspace.repo.v1"
+schema = "reprobuild.workspace.repo.v2"
 
 [repo]
 name = "lib-a"
 path = "lib-a"
 remote = "lib-origin"
-revision = "main"
+mainline = "main"
 """
 
 proc bootstrapTomlBody(manifestUrl: string): string =
   ## The host bootstrap config committed in the org root repo.
-  "schema = \"reprobuild.workspace.bootstrap.v1\"\n\n" &
-  "[manifest]\n" &
+  "schema = \"reprobuild.workspace.settings.v1\"\n\n" &
+  "[records]\n" &
   "url = \"" & manifestUrl & "\"\n" &
   "branch = \"main\"\n\n" &
   "[projects]\n" &
@@ -164,7 +163,7 @@ suite "RA-31 — clone org root repo + sync into named path":
       let rootBare = hostBase / org / "repro-workspace"
       createDir(hostBase / org)
       seedBareWithFiles(gitBin, scratch, rootBare, [
-        (".repro-workspace.toml", bootstrapTomlBody(fileUrl(manifestBare))),
+        ("repro-workspace.toml", bootstrapTomlBody(fileUrl(manifestBare))),
       ])
 
       # A clean working directory to run ``init`` from. The named dir must be
@@ -200,7 +199,7 @@ suite "RA-31 — clone org root repo + sync into named path":
       check childCount == 1
 
       # The org root repo was cloned (carrying the bootstrap config).
-      check fileExists(named / ".repro-workspace.toml")
+      check fileExists(named / "repro-workspace.toml")
 
       # ``.repro/manifests`` materialised from the manifest URL, with the
       # project TOML — proving the cloned bootstrap config drove the sync.

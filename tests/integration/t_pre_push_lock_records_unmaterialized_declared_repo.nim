@@ -90,13 +90,13 @@ proc seedOrigin(gitBin, originPath, seedPath, marker: string) =
   discard requireGit(q(gitBin) & " -C " & q(seedPath) & " push origin main")
 
 proc fragmentToml(name, remote: string): string =
-  "schema = \"reprobuild.workspace.repo.v1\"\n\n" &
+  "schema = \"reprobuild.workspace.repo.v2\"\n\n" &
   "[repo]\nname = \"" & name & "\"\npath = \"" & name & "\"\n" &
-  "remote = \"" & remote & "\"\nrevision = \"main\"\n"
+  "remote = \"" & remote & "\"\nmainline = \"main\"\n"
 
 proc projectToml(alphaUrl, betaUrl, gammaUrl: string): string =
   "schema = \"reprobuild.workspace.project.v1\"\n\n" &
-  "[project]\nname = \"ws\"\ndefault_revision = \"main\"\ntrunk = \"main\"\n\n" &
+  "[project]\nname = \"ws\"\n\n" &
   "[[remote]]\nname = \"alpha-origin\"\nfetch = \"" & alphaUrl & "\"\n\n" &
   "[[remote]]\nname = \"beta-origin\"\nfetch = \"" & betaUrl & "\"\n\n" &
   "[[remote]]\nname = \"gamma-origin\"\nfetch = \"" & gammaUrl & "\"\n\n" &
@@ -155,8 +155,8 @@ proc buildFixture(gitBin, slug: string): Fixture =
     q(manifestsOrigin))
   discard requireGit(q(gitBin) & " -C " & q(manifests) & " push origin main")
 
-  writeFile(workspaceRoot / ".repro" / "workspace.toml",
-    "schema = \"reprobuild.workspace.local.v1\"\n\n" &
+  writeFile(workspaceRoot / ".repro" / "workspace-state.toml",
+    "schema = \"reprobuild.workspace.state.v1\"\n\n" &
     "[workspace]\nproject = \"ws\"\nprojects = [\"ws\"]\nbranch = \"main\"\n")
 
   # ---- the workspace-root repo -------------------------------------------

@@ -14,8 +14,15 @@
 ## Each case below changes one thing a recipe decides and checks the key
 ## moves; the first checks two checkouts of an unchanged recipe agree; the
 ## last checks the record published is the record a lookup finds.
+##
+## Campaign M17 (Edge-Derived-Identities.md §3.3a): only checksum- and
+## hybrid-policy records are published, so the producing action is recorded
+## under `ffpChecksum` (it was `ffpTimestamp`, whose records the portable
+## publisher now refuses). The final case pins that refusal: the same package
+## produced under `ffpTimestamp` still has its identity, and publishes
+## nothing.
 
-import std/[options, os, unittest]
+import std/[options, os, strutils, unittest]
 
 from repro_test_support import testCaseScratchSlug
 
@@ -42,8 +49,10 @@ type Produced = object
   published: seq[PortableMemoRecord]
   sharedRoot: string
   project: string
+  trace: string
 
-proc produce(checkout: string; recipe: Recipe): Produced =
+proc produce(checkout: string; recipe: Recipe;
+             policy = ffpChecksum): Produced =
   let project = absolutePath(TmpDir / checkout / "pkg")
   createDir(project / "toolchain")
   writeFile(project / "toolchain" / "cc", recipe.toolchain)
@@ -60,7 +69,7 @@ proc produce(checkout: string; recipe: Recipe): Produced =
     env: @["PKG_OPTIONS=" & recipe.option],
     cwd: project,
     cacheable: true,
-    actionCachePolicy: ffpTimestamp,
+    actionCachePolicy: policy,
     weakFingerprint: weakFingerprintFromText("install-mirror-pkg"),
     builtinText: "implementation=" & recipe.implementation & "\n",
     publishToBinaryCache: true)
@@ -84,6 +93,8 @@ proc produce(checkout: string; recipe: Recipe): Produced =
   require run.results[0].portable
   result.result = run.results[0]
   result.published = published[]
+  for event in run.trace:
+    result.trace.add(event.event & ": " & event.detail & "\n")
 
 suite "reprobuild#171: a package is identified by the action producing it":
 
@@ -146,3 +157,12 @@ suite "reprobuild#171: a package is identified by the action producing it":
     require found.isSome
     check found.get().strongHex == sent.strongHex
     check found.get().outputs == sent.outputs
+
+  test "a package produced under the timestamp policy is not published":
+    # M17: the identity is computed as before -- it is a local fact -- but a
+    # record whose inputs were checked by metadata never leaves the host.
+    let a = produce("a", baseline(), policy = ffpTimestamp)
+    check a.result.portableStrongHex.len == 64
+    check a.published.len == 0
+    check "portable-memo-publish-refused" in a.trace
+    check "ffpTimestamp input-check policy" in a.trace

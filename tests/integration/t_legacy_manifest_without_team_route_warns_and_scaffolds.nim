@@ -111,19 +111,18 @@ proc projectToml(aUrl, bUrl: string): string =
   "schema = \"reprobuild.workspace.project.v1\"\n\n" &
   "[project]\n" &
   "name = \"legacy\"\n" &
-  "default_revision = \"main\"\n" &
-  "trunk = \"main\"\n\n" &
+  "\n" &
   "[[remote]]\nname = \"a-origin\"\nfetch = \"" & aUrl & "\"\n\n" &
   "[[remote]]\nname = \"b-origin\"\nfetch = \"" & bUrl & "\"\n\n" &
   "includes = [\n  \"repos/a.toml\",\n  \"repos/b.toml\",\n]\n"
 
 proc repoFragment(name, remote: string): string =
-  "schema = \"reprobuild.workspace.repo.v1\"\n\n" &
+  "schema = \"reprobuild.workspace.repo.v2\"\n\n" &
   "[repo]\n" &
   "name = \"" & name & "\"\n" &
   "path = \"" & name & "\"\n" &
   "remote = \"" & remote & "\"\n" &
-  "revision = \"main\"\n"
+  "mainline = \"main\"\n"
 
 suite "HL-2 — legacy manifest without team route warns and scaffolds":
 

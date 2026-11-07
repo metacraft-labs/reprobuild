@@ -71,7 +71,7 @@ proc encodePreTi3V12ProjectInterfaceArtifact(pi: ProjectInterface): seq[byte] =
 
 proc sampleResource(): InterfaceResource =
   InterfaceResource(
-    typeId: "vm_harness.container",
+    typeId: "gosti.container",
     determinism: irdVolatile,
     attributes: @[
       InterfaceResourceAttr(name: "image", nimType: "string",
@@ -79,11 +79,11 @@ proc sampleResource(): InterfaceResource =
       InterfaceResourceAttr(name: "cpus", nimType: "int",
         location: SourceLocation(file: "reprobuild.nim", line: 6))],
     entrypoints: InterfaceResourceEntrypoints(
-      identity: "vm_harness.container.identity",
-      digest: "vm_harness.container.digest",
-      observe: "vm_harness.container.observe",
-      plan: "vm_harness.container.plan",
-      apply: "vm_harness.container.apply"),
+      identity: "gosti.container.identity",
+      digest: "gosti.container.digest",
+      observe: "gosti.container.observe",
+      plan: "gosti.container.plan",
+      apply: "gosti.container.apply"),
     location: SourceLocation(file: "reprobuild.nim", line: 4))
 
 suite "interface-artifact codec RP4 (v12) publicResources":
@@ -95,17 +95,17 @@ suite "interface-artifact codec RP4 (v12) publicResources":
     pi.standardBuildEligible = true
     pi.publicResources.add(sampleResource())
     pi.publicResources.add(InterfaceResource(
-      typeId: "vm_harness.exec",
+      typeId: "gosti.exec",
       determinism: irdHostBound,
       attributes: @[
         InterfaceResourceAttr(name: "cmd", nimType: "seq[string]",
           location: SourceLocation(file: "reprobuild.nim", line: 20))],
       entrypoints: InterfaceResourceEntrypoints(
-        identity: "vm_harness.exec.identity",
-        digest: "vm_harness.exec.digest",
-        observe: "vm_harness.exec.observe",
-        plan: "vm_harness.exec.plan",
-        apply: "vm_harness.exec.apply"),
+        identity: "gosti.exec.identity",
+        digest: "gosti.exec.digest",
+        observe: "gosti.exec.observe",
+        plan: "gosti.exec.plan",
+        apply: "gosti.exec.apply"),
       location: SourceLocation(file: "reprobuild.nim", line: 18)))
     let artifact = artifactFor(pi)
 
@@ -117,7 +117,7 @@ suite "interface-artifact codec RP4 (v12) publicResources":
     check decoded.projectInterface.publicResources.len == 2
 
     let r0 = decoded.projectInterface.publicResources[0]
-    check r0.typeId == "vm_harness.container"
+    check r0.typeId == "gosti.container"
     check r0.determinism == irdVolatile
     check r0.attributes.len == 2
     check r0.attributes[0].name == "image"
@@ -125,15 +125,15 @@ suite "interface-artifact codec RP4 (v12) publicResources":
     check r0.attributes[0].location.line == 5
     check r0.attributes[1].name == "cpus"
     check r0.attributes[1].nimType == "int"
-    check r0.entrypoints.identity == "vm_harness.container.identity"
-    check r0.entrypoints.digest == "vm_harness.container.digest"
-    check r0.entrypoints.observe == "vm_harness.container.observe"
-    check r0.entrypoints.plan == "vm_harness.container.plan"
-    check r0.entrypoints.apply == "vm_harness.container.apply"
+    check r0.entrypoints.identity == "gosti.container.identity"
+    check r0.entrypoints.digest == "gosti.container.digest"
+    check r0.entrypoints.observe == "gosti.container.observe"
+    check r0.entrypoints.plan == "gosti.container.plan"
+    check r0.entrypoints.apply == "gosti.container.apply"
     check r0.location.line == 4
 
     let r1 = decoded.projectInterface.publicResources[1]
-    check r1.typeId == "vm_harness.exec"
+    check r1.typeId == "gosti.exec"
     check r1.determinism == irdHostBound
     check r1.attributes[0].nimType == "seq[string]"
 
@@ -152,7 +152,7 @@ suite "interface-artifact codec RP4 (v12) publicResources":
     let readBack = readInterfaceArtifact(scratch)
     check readBack.projectInterface.publicResources.len == 1
     check readBack.projectInterface.publicResources[0].typeId ==
-      "vm_harness.container"
+      "gosti.container"
     check readBack.interfaceFingerprint == artifact.interfaceFingerprint
     removeFile(scratch)
 
@@ -242,7 +242,7 @@ suite "interface-artifact codec RP4 (v12) publicResources":
     piB.projectName = "fpOp"
     piB.packageName = "fpOp"
     var reop = sampleResource()
-    reop.entrypoints.apply = "vm_harness.container.applyRENAMED"
+    reop.entrypoints.apply = "gosti.container.applyRENAMED"
     piB.publicResources.add(reop)
 
     check artifactFor(piA).interfaceFingerprint !=

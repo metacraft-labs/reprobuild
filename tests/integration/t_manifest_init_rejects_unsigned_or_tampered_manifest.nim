@@ -84,19 +84,18 @@ proc projectTomlBody(libUrl: string): string =
   "schema = \"reprobuild.workspace.project.v1\"\n\n" &
   "[project]\n" &
   "name = \"myproject\"\n" &
-  "default_revision = \"main\"\n" &
-  "trunk = \"main\"\n\n" &
+  "\n" &
   "[[remote]]\nname = \"lib-origin\"\nfetch = \"" & libUrl & "\"\n\n" &
   "includes = [\n  \"repos/lib-a.toml\",\n]\n"
 
 const libATomlBody = """
-schema = "reprobuild.workspace.repo.v1"
+schema = "reprobuild.workspace.repo.v2"
 
 [repo]
 name = "lib-a"
 path = "lib-a"
 remote = "lib-origin"
-revision = "main"
+mainline = "main"
 """
 
 proc writeManifestFiles(workPath, libUrl: string) =
@@ -149,8 +148,8 @@ proc seedSignedBare(gitBin, scratch, barePath, libUrl: string;
 proc bootstrapConfigBody(manifestUrl: string; verifyTable: string): string =
   ## A `.repro-workspace.toml`. `verifyTable` is the raw `[verify]` body
   ## (empty string ⇒ no verification table at all).
-  "schema = \"reprobuild.workspace.bootstrap.v1\"\n\n" &
-  "[manifest]\n" &
+  "schema = \"reprobuild.workspace.settings.v1\"\n\n" &
+  "[records]\n" &
   "url = \"" & manifestUrl & "\"\n" &
   "branch = \"main\"\n\n" &
   "[projects]\n" &
@@ -224,7 +223,7 @@ template runProvenanceCases(gitBin, scratch: string) =
       ## workspace root for post-assertions.
       let configDir = scratch / ("host-" & caseTag)
       createDir(configDir)
-      writeFile(configDir / ".repro-workspace.toml",
+      writeFile(configDir / "repro-workspace.toml",
         bootstrapConfigBody(fileUrl(manifestBare), verifyBody))
       let workspaceRoot = scratch / ("ws-" & caseTag)
       createDir(workspaceRoot)
@@ -235,7 +234,7 @@ template runProvenanceCases(gitBin, scratch: string) =
       ], env = @[
         (name: "REPRO_MANIFEST_CACHE", value: cacheRoot),
         (name: "REPRO_WORKSPACE_CONFIG",
-          value: configDir / ".repro-workspace.toml"),
+          value: configDir / "repro-workspace.toml"),
       ]))
       (code: init.code, output: init.output, wsRoot: workspaceRoot)
 

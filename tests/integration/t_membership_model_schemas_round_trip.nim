@@ -130,18 +130,18 @@ member_repos = ["infra"]
     # a DIFFERENT path. Sharing one `name` across bindings could only compose
     # `kitware/reprobuild-cmake`; the upstream is `kitware/CMake`.
     let f = write(d, "reprobuild-cmake.toml", """
-schema = "reprobuild.workspace.repo.v1"
+schema = "reprobuild.workspace.repo.v2"
 
 [repo]
 name = "reprobuild-cmake"
 path = "reprobuild-cmake"
-branch = "reprobuild"
+mainline = "reprobuild"
 url_prefix = "metacraft-labs"
 remotes = [{ name = "upstream", url_prefix = "kitware", url_suffix = "CMake" }]
 """)
     let m = readRepoFragment(f)
     check m.repo.name == "reprobuild-cmake"
-    check m.repo.branch.get() == "reprobuild"
+    check m.repo.mainline.get() == "reprobuild"
     check m.repo.url_prefix.get() == "metacraft-labs"
     check m.repo.remotes.len == 1
     let up = m.repo.remotes[0]
@@ -154,16 +154,17 @@ remotes = [{ name = "upstream", url_prefix = "kitware", url_suffix = "CMake" }]
     defer: removeDir(d)
     # Step 1 is additive: an unconverted fragment must read exactly as before.
     let f = write(d, "legacy.toml", """
-schema = "reprobuild.workspace.repo.v1"
+schema = "reprobuild.workspace.repo.v2"
 
 [repo]
 name = "legacy"
 path = "legacy"
 remote = "metacraft-labs"
+mainline = "main"
 revision = "dev"
 """)
     let m = readRepoFragment(f)
     check m.repo.remote.get() == "metacraft-labs"
     check m.repo.revision.get() == "dev"
-    check m.repo.branch.isNone()
+    check m.repo.mainline.get() == "main"
     check m.repo.url_prefix.isNone()

@@ -69,6 +69,7 @@
 ## `git init --bare` upstream, no network. Skip rule: `git` missing on PATH.
 
 import std/[json, os, osproc, strutils, tempfiles, unittest]
+import repro_test_support/reasoned_skip
 
 import repro_test_support
 import repro_workspace_manifests
@@ -134,22 +135,22 @@ suite "post-commit files its report in the disposable build tree":
       createDir(workspaceRoot / "repos")
       writeFile(workspaceRoot / "projects" / "lib-a.toml",
         "schema = \"reprobuild.workspace.project.v1\"\n\n" &
-        "[project]\nname = \"lib-a\"\ndefault_revision = \"main\"\n" &
-        "trunk = \"main\"\n\n" &
+        "[project]\nname = \"lib-a\"\n" &
+        "\n" &
         "[[remote]]\nname = \"lib-a-origin\"\nfetch = \"" &
           originUrl & "\"\n\n" &
         "includes = [\n  \"repos/lib-a.toml\",\n]\n")
       writeFile(workspaceRoot / "repos" / "lib-a.toml",
-        "schema = \"reprobuild.workspace.repo.v1\"\n\n" &
+        "schema = \"reprobuild.workspace.repo.v2\"\n\n" &
         "[repo]\nname = \"lib-a\"\npath = \"lib-a\"\n" &
-        "remote = \"lib-a-origin\"\nrevision = \"main\"\n")
+        "remote = \"lib-a-origin\"\nmainline = \"main\"\n")
       writeWorkspaceBranch(workspaceRoot, project = "lib-a", branch = "main")
-      check fileExists(workspaceRoot / ".repro" / "workspace.toml")
+      check fileExists(workspaceRoot / ".repro" / "workspace-state.toml")
 
       # The two DISPOSABLE subtrees under `.repro/` are ignored; the marker
       # beside them is not. This is the spec's own distinction, written out as
       # an ignore file: `.repro/build/` is derived output, `.repro/manifests/`
-      # is a nested checkout, and `.repro/workspace.toml` is metadata that is
+      # is a nested checkout, and `.repro/workspace-state.toml` is metadata that is
       # kept and committed.
       writeFile(workspaceRoot / ".gitignore",
         "/lib-a/\n/.repro/build/\n/.repro/manifests/\n")
@@ -166,17 +167,17 @@ suite "post-commit files its report in the disposable build tree":
         " commit -m \"seed lock store\"")
 
       # (1) THE TRAP. The workspace root is a git checkout that TRACKS
-      # `.repro/workspace.toml`, and it is CLEAN. Anything the hook drops
+      # `.repro/workspace-state.toml`, and it is CLEAN. Anything the hook drops
       # beside that marker is therefore visible to `git status`.
       discard requireGit(q(gitBin) & " init -b main " & q(workspaceRoot))
       configIdentity(gitBin, workspaceRoot)
       discard requireGit(q(gitBin) & " -C " & q(workspaceRoot) &
-        " add .gitignore projects repos " & q(".repro/workspace.toml"))
+        " add .gitignore projects repos " & q(".repro/workspace-state.toml"))
       discard requireGit(q(gitBin) & " -C " & q(workspaceRoot) &
         " commit -m \"seed workspace manifests\"")
       let tracked = requireGit(q(gitBin) & " -C " & q(workspaceRoot) &
         " ls-files -- .repro").strip()
-      check tracked == ".repro/workspace.toml"
+      check tracked == ".repro/workspace-state.toml"
       let cleanBefore = requireGit(q(gitBin) & " -C " & q(workspaceRoot) &
         " status --porcelain --untracked-files=all")
       checkpoint("workspace status before the commit: " & cleanBefore)

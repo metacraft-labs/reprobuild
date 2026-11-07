@@ -1,0 +1,4 @@
+# A single table is not a list of rows.
+[package]
+name = "jq"
+activity = "default"

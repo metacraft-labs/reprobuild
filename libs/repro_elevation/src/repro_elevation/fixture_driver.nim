@@ -45,12 +45,45 @@ type
     present*: bool
     digestHex*: string
     restartNeeded*: bool
+    serviceRestartPending*: bool
+      ## Set by the `systemd.systemUnit` driver when the unit changed while
+      ## active but its profile says `restartIfChanged = false`: the new
+      ## file is on disk and the running instance still uses the old one
+      ## (Add-On spec §7.3). Surfaced in the apply log, never acted on.
+
+  AddOnMaterialisation* = object
+    ## How the ReproOS add-on switch wants one operation's object put on
+    ## the host (ReproOS Add-On Mode §7.2 steps 4 and 5): as a link into
+    ## the generation's static tree (`linkTarget`, non-empty) or as a
+    ## copy (empty, the default outside add-on mode); and whether the
+    ## switch itself runs the service transitions and the fragment tools
+    ## (`orchestrated`), in which case the driver writes the object,
+    ## reloads systemd and converges enablement, but never starts, stops,
+    ## restarts or reloads a service and never runs `sysctl -p` -- the
+    ## switch does that in its own steps, in dependency order.
+    linkTarget*: string
+    orchestrated*: bool
+
+  AddOnDispatchPolicy* = proc(op: PrivilegedOperation): AddOnMaterialisation
+    {.gcsafe.}
+    ## Consulted by the drivers for every operation of an add-on apply;
+    ## `nil` (every other apply) means copies and driver-run transitions.
 
   FixtureContext* = object
     ## Per-apply context the broker hands every fixture driver call.
     ## `filePrefix` is the sandbox root for `pokFixtureFile`; it MUST
-    ## be an existing absolute directory.
+    ## be an existing absolute directory. `addOn` is the add-on switch's
+    ## materialisation policy, set only on the in-process apply path of
+    ## an add-on host (the broker never carries it: the add-on applies as
+    ## root, in process).
     filePrefix*: string
+    addOn*: AddOnDispatchPolicy
+
+proc materialisationOf*(ctx: FixtureContext;
+                        op: PrivilegedOperation): AddOnMaterialisation =
+  ## The add-on's answer for `op`, or the plain default.
+  if ctx.addOn == nil: AddOnMaterialisation()
+  else: ctx.addOn(op)
 
 proc digestHexOf(bytes: openArray[byte]): string =
   let d = blake3.digest(bytes)

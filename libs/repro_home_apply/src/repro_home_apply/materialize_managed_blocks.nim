@@ -19,6 +19,7 @@ from repro_core/paths import extendedPath
 import blake3
 import repro_home_generations
 
+import repro_home_resources/test_home_fence
 import ./errors
 
 type
@@ -84,6 +85,7 @@ proc spliceBlock(existing, blockBytes, openSentinel, closeSentinel: string):
     closeSentinel & "\n"
 
 proc applyManagedBlock*(planned: PlannedManagedBlock): AppliedManagedBlockRecord =
+  enforceTestHomeFence(planned.hostFilePath, "home.managedBlock apply")
   let parent = parentDir(planned.hostFilePath)
   if parent.len > 0:
     createDir(extendedPath(parent))

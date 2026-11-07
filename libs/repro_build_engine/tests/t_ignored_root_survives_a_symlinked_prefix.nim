@@ -85,3 +85,42 @@ suite "an ignored root fires through a symlinked spelling":
 
     # Widening the root to a second spelling must not widen its reach.
     check inputs.hasPath(observedKept)
+
+  test "a physical prefix ignores logical existing and missing observations":
+    let base = getTempDir() / "repro-symlink-opposite-" & $getCurrentProcessId()
+    removeDir(base)
+    createDir(base / "real" / "cache")
+    createDir(base / "real" / "cache-sibling")
+    defer: removeDir(base)
+    let physical = expandFilename(base / "real")
+    let logical = base / "link"
+    createSymlink(physical, logical)
+    writeFile(physical / "cache" / "existing", "scratch")
+    require logical != physical
+    require expandFilename(logical) == physical
+    let existing = logical / "cache" / "existing"
+    let missing = logical / "cache" / "absent" / "extract_runner"
+    let kept = logical / "cache-sibling" / "source"
+    let declared = logical / "cache" / "declared"
+    let act = action("compile", ["nim", "c"], cwd = physical,
+      inputs = @[declared], outputs = @["out/provider"], cacheable = true,
+      governingLockIdentity = lockIdentityOutsideSolvedGraph(),
+      dependencyPolicy = automaticMonitorGatheringPolicy(@[physical / "cache"]))
+    var evidence: PathSetEvidence
+    evidence.declaredInputs = act.inputs
+    evidence.monitorReads.observeAll(evidence.evidenceProvenance,
+      evcMonitorCapture, [existing, missing, kept, declared])
+    evidence.depfileInputs.observeAll(evidence.evidenceProvenance,
+      evcToolReportedDepfile, [missing])
+    evidence.monitorProbes.observeAll(evidence.evidenceProvenance,
+      evcMonitorCapture, [missing])
+    evidence.monitorDirectoryEnumerations.observeAll(evidence.evidenceProvenance,
+      evcMonitorCapture, [logical / "cache", logical / "cache-sibling"])
+    let inputs = act.cacheInputPaths(evidence)
+    check not inputs.hasPath(existing)
+    check not inputs.hasPath(missing)
+    check inputs.hasPath(kept)
+    check inputs.hasPath(declared)
+    let enumerations = act.cacheEnumeratedDirectories(evidence)
+    check not enumerations.hasPath(logical / "cache")
+    check enumerations.hasPath(logical / "cache-sibling")

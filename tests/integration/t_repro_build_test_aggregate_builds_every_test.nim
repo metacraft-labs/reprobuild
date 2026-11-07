@@ -59,6 +59,24 @@ proc countDeclaredTestSpecs(repoRoot: string): int =
     if stripped.startsWith("TestSpec("):
       inc result
 
+proc countDeclaredExecuteUnits(repoRoot: string): int =
+  ## Test-Binary-Grouping M2: a grouped source shares ONE execute edge with
+  ## the rest of its group (``group: "t_group_…"`` in its row), so the
+  ## engine emits one execute action per single source plus one per group.
+  ## Counted from the table independently of ``repro.nim``.
+  var groups: seq[string] = @[]
+  var singles = 0
+  for line in readFile(repoRoot / "repro_tests.nim").splitLines():
+    let stripped = line.strip()
+    if not stripped.startsWith("group: \""):
+      continue
+    let value = stripped["group: \"".len ..< stripped.rfind('"')]
+    if value.len == 0:
+      inc singles
+    elif value notin groups:
+      groups.add(value)
+  singles + groups.len
+
 proc collectsTestActions(repoRoot: string): bool =
   ## Verify that ``repro.nim``'s ``build:`` body closes the test
   ## iteration with exactly one ``collect("test", …)``. The accumulator
@@ -168,6 +186,11 @@ suite "t_repro_build_test_aggregate_builds_every_test":
             # each generated ``TestSpec`` still has one stable execute action.
             if id.startsWith("reprobuild.test_execute."):
               inc testEdgeActions
-          checkpoint("declared test edges: " & $declaredCount)
+          let executeUnits = countDeclaredExecuteUnits(repoRoot)
+          checkpoint("declared test sources: " & $declaredCount)
+          checkpoint("declared execute units (singles + groups): " &
+            $executeUnits)
           checkpoint("test edge actions in report: " & $testEdgeActions)
-          check testEdgeActions >= declaredCount
+          check executeUnits > 0
+          check executeUnits <= declaredCount
+          check testEdgeActions >= executeUnits

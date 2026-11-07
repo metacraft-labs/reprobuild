@@ -24,6 +24,7 @@ import blake3
 import repro_home_generations
 import repro_local_store
 
+import repro_home_resources/test_home_fence
 import ./errors
 import ./plan
 
@@ -46,6 +47,7 @@ proc digestBytes(content: openArray[byte]): Digest256 =
 
 proc atomicWriteBytes(dst: string; content: openArray[byte]) =
   ## Stage at `<dst>.repro.tmp` then move into place.
+  enforceTestHomeFence(dst, "home.file write")
   let parent = parentDir(dst)
   if parent.len > 0:
     createDir(extendedPath(parent))
@@ -100,6 +102,7 @@ proc deleteRemovedFile*(absoluteOutputPath: string) =
   ## absent from the current plan. Called by the pipeline when the
   ## diff identifies a `removed` file. The function never raises if
   ## the file is already absent (intent and reality already agree).
+  enforceTestHomeFence(absoluteOutputPath, "home.file remove")
   if not fileExists(extendedPath(absoluteOutputPath)) and
      not symlinkExists(extendedPath(absoluteOutputPath)):
     return

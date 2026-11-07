@@ -101,7 +101,7 @@ let rp8PrivateContainerDriver = ResourceProviderDriver(
   identity: rp8PrivateIdentity, digest: rp8PrivateDigest,
   observe: rp8PrivateObserve, apply: rp8PrivateApply)
 
-resourceType "vm_harness.container":
+resourceType "gosti.container":
   attrs: ContainerAttrs
   wrapper: container
   determinism: rdVolatile
@@ -119,7 +119,7 @@ const producerDriverClosureMarkers = [
 ]
 
 # The producer ``repro.nim`` names the SEPARATE module via a ``resourceModule``
-# surface entry (the RP5c2 vm-harness shape) and imports ONLY
+# surface entry (the RP5c2 gosti shape) and imports ONLY
 # ``repro_project_dsl`` (never the resources module), so the producer core stays
 # driver-free.
 const producerRepro = """
@@ -239,7 +239,7 @@ suite "RP8: LSP typecheck + go-to-definition via interface extraction":
     check fileExists(accessorPath)
     let accessorBefore = readFile(accessorPath)
     check accessorBefore.contains("proc container*")
-    check accessorBefore.contains("\"vm_harness.container\"")
+    check accessorBefore.contains("\"gosti.container\"")
     check accessorBefore.contains("image: string")
     check accessorBefore.contains("cpus: int")
     check not accessorBefore.contains("registerResourceProvider")
@@ -322,22 +322,22 @@ suite "RP8: LSP typecheck + go-to-definition via interface extraction":
     let hitContainer =
       gotoDefinitionForProducerSymbol(producerSelector, workspace, "container")
     check hitContainer.kind == gdskResourceType
-    check hitContainer.typeId == "vm_harness.container"
+    check hitContainer.typeId == "gosti.container"
     # The returned FILE is the producer's resource module.
     check sameFile(hitContainer.location.file, resourcesPath)
     # The returned LINE points at the real ``resourceType`` public declaration.
     let expectedResLine =
-      lineOfDecl(resourcesModule, "resourceType \"vm_harness.container\"")
+      lineOfDecl(resourcesModule, "resourceType \"gosti.container\"")
     check expectedResLine > 0
     check hitContainer.location.line == expectedResLine
     # Read back the producer source at that line and confirm the content.
     let resSrcLines = readFile(resourcesPath).splitLines
     check resSrcLines[hitContainer.location.line - 1].strip
-      .startsWith("resourceType \"vm_harness.container\"")
+      .startsWith("resourceType \"gosti.container\"")
 
     # The full typeId also resolves to the same decl.
     let hitByTypeId = gotoDefinitionForProducerSymbol(
-      producerSelector, workspace, "vm_harness.container")
+      producerSelector, workspace, "gosti.container")
     check hitByTypeId.kind == gdskResourceType
     check hitByTypeId.location.line == expectedResLine
 
@@ -345,7 +345,7 @@ suite "RP8: LSP typecheck + go-to-definition via interface extraction":
     let hitAttr =
       gotoDefinitionForProducerSymbol(producerSelector, workspace, "cpus")
     check hitAttr.kind == gdskResourceAttr
-    check hitAttr.typeId == "vm_harness.container"
+    check hitAttr.typeId == "gosti.container"
     check sameFile(hitAttr.location.file, resourcesPath)
     let expectedAttrLine = lineOfDecl(resourcesModule, "attr cpus: int")
     check expectedAttrLine > 0

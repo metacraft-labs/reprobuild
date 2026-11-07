@@ -7,9 +7,18 @@ import ../types/library
 import ../types/options
 import ../packages/gcc as gcc_module
 import ../packages/clang as clang_module
+import ../active_context
+import ./zig_c
 
 proc link*(opts: LinkOptions): BuildActionDef =
   ## Dispatch on ``currentCompiler()``.
+  # Under a zig cross target the target is threaded here (zig_c); any
+  # other non-native target still refuses, as before.
+  let zigTarget = activeZigCrossTarget()
+  if zigTarget != nil:
+    requireZigDeclared("link")
+    return zig_c.zigLink(opts, zigTarget)
+  requireCrossTargetConsulted("link")
   case currentCompiler()
   of cfGcc:   gcc_module.gccLink(opts)
   of cfClang: clang_module.clangLink(opts)

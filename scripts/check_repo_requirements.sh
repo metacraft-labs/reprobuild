@@ -70,6 +70,14 @@ for path in README.md LICENSE flake.nix flake.lock .envrc .gitignore Justfile re
   require_file "${path}"
 done
 
+# The official install channel must be discoverable from the public README
+# (repository requirements §7.1). Keep this offline: channel availability is
+# deployment evidence, not something a local documentation gate can promise.
+require_contains README.md 'curl -fsSL https://get.reprobuild.com/sh | sh'
+if grep -Fq 'That host does not exist yet' README.md; then
+  fail 'README.md must not deny the official get.reprobuild.com install channel'
+fi
+
 for path in .github .github/workflows nix docs libs apps tests benchmarks scripts examples tools references vendor; do
   require_dir "${path}"
 done
@@ -98,30 +106,44 @@ require_contains flake.nix 'nixos-modules.url = "github:metacraft-labs/devops-mo
 require_contains flake.nix 'nixpkgs.follows = "nixos-modules/nixpkgs-unstable"'
 require_contains flake.nix 'flake-parts.follows = "nixos-modules/flake-parts"'
 require_contains flake.nix 'git-hooks.follows = "nixos-modules/git-hooks-nix"'
-for system in x86_64-linux aarch64-linux x86_64-darwin aarch64-darwin; do
+# metacraft-dev-guidelines repo-requirements.md §1 lists the flake systems.
+# x86_64-darwin is not among them here: the pinned nixpkgs (26.11) dropped it,
+# so nothing can be built or evaluated for it. Its absence is required, so a
+# re-added entry (which fails `nix flake check --all-systems`) is caught here.
+for system in x86_64-linux aarch64-linux aarch64-darwin; do
   require_contains flake.nix "\"${system}\""
 done
+if sed -n '/^      systems = \[/,/^      \];/p' flake.nix | grep -Fq '"x86_64-darwin"'; then
+  fail "flake.nix systems must not list x86_64-darwin: the pinned nixpkgs dropped it"
+fi
 require_contains flake.nix "devShells.default"
 require_contains flake.nix "packages.default"
 require_contains flake.nix "checks ="
 require_contains flake.nix "git-hooks.lib"
-# The dev shell must still run git-hooks.nix's installer. It is no longer the
-# WHOLE shellHook: Reprobuild's own hook reconciliation runs after it, and the
-# pre-commit hook handoff runs on both sides of it, so the requirement is that
-# the installer is composed in — not that nothing else is.
-require_contains flake.nix "+ pre-commit-check.shellHook"
+# The dev shell must install the committed .pre-commit-config.yaml as the
+# pre-commit hook, run by the flake's pre-commit. git-hooks.nix's own installer
+# refuses to replace a committed config and installs nothing, so it must not be
+# what the shell runs. Reprobuild's own hook reconciliation runs after the
+# installer; the requirement is that the installer is composed in, not that
+# nothing else is.
+require_contains flake.nix "\${./scripts/install-git-hooks.sh} \${pkgs.lib.getExe pre-commit-check.config.package}"
+if grep -Fq "+ pre-commit-check.shellHook" flake.nix; then
+  fail "flake.nix must not compose git-hooks.nix's installer into the dev shell; it refuses the committed .pre-commit-config.yaml"
+fi
 
 # CodeTracer's canonical native target imports span_stream. The trace-format
 # pin and every Nix execution surface must therefore agree on one immutable
 # source root. Exact counts make removal of any one surface fail this quick
 # repository check instead of surfacing after a minute-long CodeTracer compile.
-trace_format_rev="bc7c5d256d0a4b1246f9a9bbb51a83071d3d8e26"
+trace_format_rev="31be9a10007c007af429951616c13bc275587c76"
 require_contains flake.nix "github:metacraft-labs/codetracer-trace-format-nim/${trace_format_rev}"
 # The bootstrap modules follow this Repro flake, so its former nested Repro
 # release (and duplicate trace-format node) is absent. The remaining node
 # records the same immutable revision in both `locked` and `original`.
 # t_flake_lock_has_no_competing_reprobuild_pin also checks the parsed graph
 # so a differently pinned extra trace-format node cannot evade this count.
+# Whether this is the RIGHT revision -- the one the pinned CodeTracer's
+# repro.lock names -- is the flake check `ct-trace-format-pin-coherence`.
 require_count flake.lock "\"rev\": \"${trace_format_rev}\"" 2
 require_contains "${package_nix}" 'requiredModule = "${sourceRoot}/codetracer_trace_writer/span_stream.nim";'
 # ONE definition of the guarded source root, in the derivation, read back by
@@ -138,8 +160,39 @@ require_contains tests/e2e/codetracer-subset/t_e2e_codetracer_in_place_project_f
   '"CODETRACER_TRACE_FORMAT_NIM_SRC",'
 require_contains tests/e2e/codetracer-subset/t_e2e_codetracer_in_place_project_file.nim \
   'let pinnedSource = getEnv("CODETRACER_TRACE_FORMAT_NIM_SRC")'
-require_contains tests/fixtures/codetracer-subset/config-a9ef983e.nims \
-  'addPathIfDir(getEnv("CODETRACER_TRACE_FORMAT_NIM_SRC"))'
+
+# The CodeTracer e2e fixtures (tests/e2e/codetracer-subset/README.md) pin the
+# SAME CodeTracer revision `codetracer-src` does: the vendored repro.nim and
+# config.nims payloads and the Tuprules command-semantics extract name one
+# reviewed commit. Moving `codetracer-src` without refreshing them is not caught
+# by anything quicker than the full suite, and there only once a sibling
+# checkout contains the new pin -- it went unnoticed across four pin moves
+# (222a4a00 -> f1745b89). Fail here, at the commit that moves the pin, instead.
+codetracer_rev="$(sed -n 's|^ *url = "github:metacraft-labs/codetracer/\([0-9a-f]\{40\}\)";$|\1|p' flake.nix)"
+if [ "$(printf '%s\n' "${codetracer_rev}" | grep -c .)" != 1 ]; then
+  fail "flake.nix must pin codetracer-src to exactly one full revision (found: ${codetracer_rev:-none})"
+else
+  # `locked` and `original` both record it.
+  require_count flake.lock "\"rev\": \"${codetracer_rev}\"" 2
+  codetracer_short="${codetracer_rev:0:8}"
+  ct_fixture_refresh="refresh the CodeTracer e2e fixtures to codetracer-src ${codetracer_rev} (tests/e2e/codetracer-subset/README.md)"
+  for fixture in "repro-${codetracer_short}.nim" "config-${codetracer_short}.nims" "Tuprules-${codetracer_short}.tup"; do
+    if [ -f "tests/fixtures/codetracer-subset/${fixture}" ]; then
+      # The provenance header names the revision twice: commit and source URL.
+      require_count "tests/fixtures/codetracer-subset/${fixture}" "${codetracer_rev}" 2
+    else
+      fail "missing tests/fixtures/codetracer-subset/${fixture}: ${ct_fixture_refresh}"
+    fi
+  done
+  for t in t_e2e_codetracer_in_place_project_file.nim t_e2e_codetracer_build_subset_without_tup.nim; do
+    grep -Fq "\"${codetracer_rev}\"" "tests/e2e/codetracer-subset/${t}" ||
+      fail "tests/e2e/codetracer-subset/${t} does not pin codetracer-src ${codetracer_rev}: ${ct_fixture_refresh}"
+  done
+  if [ -f "tests/fixtures/codetracer-subset/config-${codetracer_short}.nims" ]; then
+    require_contains "tests/fixtures/codetracer-subset/config-${codetracer_short}.nims" \
+      'addPathIfDir(getEnv("CODETRACER_TRACE_FORMAT_NIM_SRC"))'
+  fi
+fi
 
 # The incremental-test seam (``ct_incremental_adapter.nim``), for the same
 # reason and with one extra requirement the trace-format case does not have.
@@ -231,10 +284,9 @@ require_contains .github/workflows/ci.yml "dev-exec nix flake metadata --no-upda
 require_contains .github/workflows/ci.yml "run: dev-exec nix build --no-update-lock-file --log-lines 200 .#default"
 require_contains .github/workflows/ci.yml "if: always()"
 require_contains .github/workflows/ci.yml "actions/upload-artifact@v4"
-require_contains .github/workflows/benchmark.yml 'runner: '\''["self-hosted", "Linux", "X64", "benchmark"]'\'''
-# The macOS benchmark leg uses capability labels. The Linux benchmark leg
-# retains its dedicated persistent benchmark runner requirement above.
-require_contains .github/workflows/benchmark.yml 'runner: '\''["self-hosted", "macos", "arm64"]'\'''
+require_contains .github/workflows/benchmark.yml 'runner: '\''["linux", "x64", "benchmark"]'\'''
+# Both measurement legs require dedicated benchmark runners.
+require_contains .github/workflows/benchmark.yml 'runner: '\''["self-hosted", "macOS", "ARM64", "benchmark"]'\'''
 require_contains .github/workflows/benchmark.yml "metacraft-labs/runquota"
 require_contains .github/workflows/benchmark.yml "metacraft-labs/reprobuild-cmake"
 require_contains .github/workflows/benchmark.yml "ref: reprobuild"

@@ -45,6 +45,7 @@ package nsis:
       archiveType = "zip",
       stripComponents = 1,
       executablePath = "bin/makensis.exe",
+      version = "3.12",
       packageId = "nsis@3.12",
       cpu = "x86_64",
       os = "windows",

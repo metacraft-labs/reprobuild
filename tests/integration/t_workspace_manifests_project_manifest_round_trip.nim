@@ -14,14 +14,14 @@
 import std/[options, os, strutils, tempfiles, unittest]
 
 import repro_workspace_manifests
+import repro_test_support/process_fixtures
 
 const happyToml = """
 schema = "reprobuild.workspace.project.v1"
 
 [project]
 name = "reprobuild"
-default_revision = "main"
-trunk = "main"
+default_remote = "metacraft-labs"
 
 [[remote]]
 name = "metacraft-labs"
@@ -56,7 +56,6 @@ const missingProjectNameToml = """
 schema = "reprobuild.workspace.project.v1"
 
 [project]
-default_revision = "main"
 """
 
 # A manifest written against a NEWER schema than this build knows. The real
@@ -98,16 +97,19 @@ proc writeFixture(dir, name, content: string): string =
 
 suite "M5 — ProjectManifest round-trip":
   let dir = createTempDir("reprobuild-m5-project-", "")
+  # Removed when THIS process exits. Suite-level code runs in every
+  # process the runner starts -- one per case, plus its ``--list-json``
+  # probe -- and nothing removed this directory in any of them. See
+  # ``repro_test_support/process_fixtures``.
+  releaseDirAtProcessExit(dir)
 
   test "happy path populates remotes and includes":
     let path = writeFixture(dir, "project-happy.toml", happyToml)
     let p = readProjectManifest(path)
     check p.schema == "reprobuild.workspace.project.v1"
     check p.project.name == "reprobuild"
-    check p.project.default_revision.isSome
-    check p.project.default_revision.get() == "main"
-    check p.project.trunk.isSome
-    check p.project.trunk.get() == "main"
+    check p.project.default_remote.isSome
+    check p.project.default_remote.get() == "metacraft-labs"
     check p.remote.len == 2
     check p.remote[0].name == "metacraft-labs"
     check p.remote[0].fetch == "https://github.com/metacraft-labs"

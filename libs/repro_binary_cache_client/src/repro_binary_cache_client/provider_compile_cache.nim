@@ -94,7 +94,7 @@
 ## across arbitrary machines. A differently-laid-out consumer derives a
 ## different key and simply misses.
 
-import std/[options, os, strutils]
+import std/[os]
 
 import repro_core
 import repro_hash
@@ -125,18 +125,10 @@ const
   PrefixSidecarName* = "provider-compile.rbsz.inputs"
 
 type
-  ProviderCompileCacheConfig* = object
-    ## Resolved once per process by ``resolveProviderCompileCacheConfig``.
-    configured*: bool
-      ## At least one trusted endpoint is configured and the cache is not
-      ## disabled. Required for BOTH substitute and publish.
-    keypairOk*: bool
-      ## A signing keypair is available. Required for publish only —
-      ## substitution verifies the server's signature and needs no key.
-    endpoints*: seq[SubstituteEndpoint]
-    publishEndpoint*: string
-    keyPath*: string
-    certPath*: string
+  ProviderCompileCacheConfig* = TrustedCacheConfig
+    ## Resolved once per process by ``resolveProviderCompileCacheConfig``:
+    ## the shared ``caches_config.TrustedCacheConfig`` (substitution under the
+    ## R1 trust anchors, publishing only with an operator-supplied key).
 
   ProviderCompileSubstituteAttempt* = object
     hit*: bool
@@ -153,37 +145,14 @@ type
     entryKeyHex*: string
     bytesUploaded*: int
 
-proc cacheDisabled(): bool =
-  getEnv("REPRO_CACHE_DISABLE", "") in ["1", "true", "yes"]
-
 proc resolveProviderCompileCacheConfig*(): ProviderCompileCacheConfig =
-  ## Resolve trust and credentials. Mirrors the from-source substitution's
-  ## configuration probe (``loadEndpoints`` + ``REPRO_CACHE_DISABLE``) so a
-  ## wrapper that disables one disables the other, and resolves the signing
-  ## keypair exactly as the engine's publisher does.
-  if cacheDisabled():
-    return
-  try:
-    result.endpoints = loadEndpoints()
-  except CatchableError:
-    return
-  if result.endpoints.len == 0:
-    return
-  result.configured = true
-  result.publishEndpoint = getEnv("REPRO_BINARY_CACHE_URL", "")
-  if result.publishEndpoint.len == 0:
-    result.publishEndpoint = result.endpoints[0].baseUrl
-  let keyPath = getEnv("REPRO_BINARY_CACHE_KEY_PATH", "")
-  let certPath = getEnv("REPRO_BINARY_CACHE_CERT_PATH", "")
-  # Deliberately NOT falling back to an auto-generated keypair. An
-  # auto-generated producer is not on a shared cache's allowed-signer list, so
-  # every publish would be refused with an authz error that reads like a bug.
-  # No key means "this host does not publish", which is a legitimate state.
-  if keyPath.len > 0 and certPath.len > 0 and
-      fileExists(keyPath) and fileExists(certPath):
-    result.keyPath = keyPath
-    result.certPath = certPath
-    result.keypairOk = true
+  ## Resolve trust and credentials through the shared
+  ## ``resolveTrustedCacheConfig``: the from-source substitution's probe
+  ## (``loadEndpoints`` + ``REPRO_CACHE_DISABLE``) for substitution, and an
+  ## operator-supplied keypair, never an auto-generated one, for publishing.
+  ## The apply-time build-action substitute resolves through the same proc,
+  ## so the two cannot drift apart on who is trusted or who may publish.
+  resolveTrustedCacheConfig()
 
 proc providerCompileIdentityDigest*(plan: ProviderCompilePlan): ContentDigest =
   ## The one digest the entry key is a function of. See the module header for

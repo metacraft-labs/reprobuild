@@ -422,7 +422,7 @@ suite "M66 — Scoop manifest parser":
   test "M4: msi URL emits imInstallerMsi (was imExtract pre-M4)":
     ## A Scoop manifest with a ``.msi`` URL and no installer block
     ## translates to ``install_method == imInstallerMsi`` (so the
-    ## cakBuiltin realize loop dispatches through dark.exe) instead
+    ## home archive realizer dispatches through dark.exe) instead
     ## of the pre-M4 default of ``imExtract`` (which would fail at
     ## apply time because afInstallerMsi is incompatible with
     ## imExtract). Emits the ``dkInstallMethodMsi`` diagnostic.

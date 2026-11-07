@@ -1,0 +1,4 @@
+let compiler = "gcc"
+let arguments = @["-c", "fixture.c", "-o", "fixture.o"]
+let metadata = newStringTable("CC", "rustc")
+discard startProcess(compiler, args = arguments, env = metadata)

@@ -9,7 +9,9 @@
 ## refresh takes), and two checkouts that borrow from it through
 ## ``git clone --reference``. Leaf A is registered the way reprobuild
 ## registers a leaf (``wireAlternates``); leaf B is left unregistered, the
-## way a checkout reprobuild never touched would be. Upstream then deletes
+## way a checkout outside the sibling discovery domain would be. The discovery
+## tests instead place B in a sibling workspace, representing an older
+## reprobuild checkout that must be discovered and protected. Upstream then deletes
 ## the branches the leaves still point at, the pool's refresh prunes them, the
 ## pool's objects are aged past the two-week window, and the pool is gc'd.
 ## What survives is the assertion.
@@ -67,9 +69,18 @@
 ## Hermetic: everything lives under one ``createTempDir`` root; git config
 ## comes from a private ``GIT_CONFIG_GLOBAL``; probes run with
 ## ``GIT_NO_LAZY_FETCH=1`` so a probe can never heal the fixture by fetching.
-## Skip rule: ``git`` missing on PATH, or older than 2.42 (the hook needs it).
+## Index integrity regressions also seed real split chains and a multi-pack-index
+## over two packs. They verify expired objects leave the pool's active indexes,
+## registered borrowers migrate before pool layers disappear, and real graph
+## locks fail maintenance without a success stamp. Broken chains and a pool
+## with no reachable commits exercise migration and Git's empty-write no-op.
+##
+## Skip rule: legacy cases skip when ``git`` is missing or older than 2.42;
+## index integrity regressions require the supported Git toolchain.
+## The denied-traversal fixture additionally requires POSIX directory permissions.
 
 import std/[os, osproc, strutils, tempfiles, times, unittest]
+import repro_test_support/reasoned_skip
 
 import shared_clones
 
@@ -120,7 +131,7 @@ proc ageObjects(pool: string) =
   for f in walkDirRec(pool / "objects"):
     setLastModificationTime(f, past)
 
-proc setUp(root: string): Fixture =
+proc setUp(root: string; siblingBorrower = false; splitGraphs = false): Fixture =
   result.root = root
   result.gitBin = findExe("git")
   result.up = root / "up"
@@ -141,8 +152,11 @@ proc setUp(root: string): Fixture =
   let created = refreshSharedBare(result.gitBin, result.cache, url)
   doAssert created.ok, created.diagnostic
   result.pool = created.sharedBarePath
+  if splitGraphs:
+    discard must(result.pool, "commit-graph", "write", "--reachable", "--split")
   result.a = root / "ws-a" / "up"
-  result.b = root / "ws-b" / "up"
+  result.b = (if siblingBorrower: root / "ws-b" / "up"
+    else: root / "outside" / "other" / "ws-b" / "up")
   for leaf in [result.a, result.b]:
     createDir(leaf.parentDir)
     discard must(root, "clone", "-q", "--reference", result.pool, url, leaf)
@@ -173,6 +187,12 @@ proc setUp(root: string): Fixture =
   discard must(result.a, "update-ref", "-d", "refs/remotes/origin/feat3")
   removeDir(result.a / ".git" / "logs")
 
+  if splitGraphs:
+    discard must(result.a, "commit-graph", "write", "--reachable", "--split")
+    let chain = readFile(result.a / ".git/objects/info/commit-graphs/commit-graph-chain")
+    let poolChain = readFile(result.pool / "objects/info/commit-graphs/commit-graph-chain")
+    doAssert chain.startsWith(poolChain), "leaf must really chain onto the pool"
+
   # Upstream deletes all three branches; the pool's refresh prunes them.
   discard must(result.up, "branch", "-q", "-D", "feat", "feat2", "feat3")
   let refreshed = refreshSharedBare(result.gitBin, result.cache, url)
@@ -198,7 +218,146 @@ proc mutateHook(pool, dropFrom, dropTo: string) =
   doAssert i >= 0 and j > i, "mutation anchors not found in the hook"
   writeFile(retentionHookPath(pool), script[0 ..< i] & script[j .. ^1])
 
+proc seedMultiPackIndex(f: Fixture) =
+  # A second real pack, overlapping the first, makes MIDX verification exercise
+  # an actual index which gc must update when replacing the original packs.
+  let ids = f.root / "pack-ids"
+  writeFile(ids, must(f.pool, "rev-parse", "main") & "\n")
+  let packed = execCmdEx("git -C " & q(f.pool) & " pack-objects " &
+    q(f.pool / "objects/pack/pack") & " < " & q(ids))
+  doAssert packed.exitCode == 0, packed.output
+  var packs = 0
+  for path in walkFiles(f.pool / "objects/pack/*.pack"):
+    inc packs
+  doAssert packs >= 2
+  discard must(f.pool, "multi-pack-index", "write")
+  doAssert fileExists(f.pool / "objects/pack/multi-pack-index")
+
+proc seedBorrowerSplit(f: Fixture) =
+  removeFile(f.a / ".git/objects/info/commit-graph")
+  discard must(f.a, "commit-graph", "write", "--reachable", "--split")
+  doAssert readFile(f.a / ".git/objects/info/commit-graphs/commit-graph-chain").startsWith(
+    readFile(f.pool / "objects/info/commit-graphs/commit-graph-chain"))
+
 suite "SPI-1: the pool retains what registered leaves name":
+
+  test "discovery_keeps_never_until_registry_is_complete":
+    let root = createTempDir("repro-spi1-discovery-ready-", "")
+    defer:
+      tearDown()
+      removeDir(root)
+    let f = setUp(root, siblingBorrower = true)
+    writeFile(borrowersPath(f.pool), f.a & "\n")
+    check prepareSharedBare(f.gitBin, f.pool) == ""
+    check must(f.pool, "config", "--get", "gc.pruneExpire") == PoolNeverExpire
+    check f.b in readBorrowers(f.pool)
+    check prepareSharedBare(f.gitBin, f.pool) == ""
+    check must(f.pool, "config", "--get", "gc.pruneExpire") == PoolPruneExpire
+
+  test "hook_discovers_unregistered_sibling_and_retains_its_history":
+    let root = createTempDir("repro-spi1-discovery-gc-", "")
+    defer:
+      tearDown()
+      removeDir(root)
+    let f = setUp(root, siblingBorrower = true)
+    writeFile(borrowersPath(f.pool), f.a & "\n")
+    # B's own tip is absent in the pool: discovering only tips loses its base.
+    discard must(f.b, "checkout", "-q", "-b", "own", "origin/feat3")
+    commitFile(f.b, "own", "own\n")
+    discard must(f.b, "update-ref", "-d", "refs/remotes/origin/feat3")
+    removeDir(f.b / ".git" / "logs")
+    discard must(f.pool, "config", "gc.pruneExpire", PoolPruneExpire)
+    let gc = gitIn(f.pool, "gc", "--quiet")
+    checkpoint(gc.output)
+    check gc.code == 0
+    check has(f.pool, f.bFeat)
+    check f.b in readBorrowers(f.pool)
+    check gitIn(f.b, "fsck", "--connectivity-only").code == 0
+
+  test "discovery_handles_nested_repos_relative_alternates_and_worktrees":
+    let root = createTempDir("repro-spi1-discovery-paths-", "")
+    defer:
+      tearDown()
+      removeDir(root)
+    let f = setUp(root, siblingBorrower = true)
+    let nested = root / ".ws-hidden" / "nested" / ".up"
+    createDir(nested.parentDir)
+    moveDir(f.b, nested)
+    writeFile(alternatesFilePath(nested),
+      relativePath(f.pool / "objects", nested / ".git" / "objects") & "\n")
+    let linked = root / "ws-c" / "linked"
+    createDir(linked.parentDir)
+    discard must(nested, "worktree", "add", "-q", "--detach", linked)
+    writeFile(borrowersPath(f.pool), f.a & "\n")
+    let hook = execCmdEx("sh " & q(retentionHookPath(f.pool)))
+    checkpoint(hook.output)
+    check hook.exitCode == 0
+    check f.bFeat in hook.output.splitLines()
+    check nested in readBorrowers(f.pool)
+    check linked in readBorrowers(f.pool)
+
+  test "unreadable_discovered_sibling_refuses_expiry_and_gc":
+    let root = createTempDir("repro-spi1-discovery-unreadable-", "")
+    defer:
+      tearDown()
+      removeDir(root)
+    let f = setUp(root, siblingBorrower = true)
+    writeFile(borrowersPath(f.pool), f.a & "\n")
+    writeFile(f.b / ".git" / "config", "[broken\n")
+    check not poolRetentionReady(f.gitBin, f.pool)
+    discard must(f.pool, "config", "gc.pruneExpire", PoolPruneExpire)
+    let gc = gitIn(f.pool, "gc", "--quiet")
+    checkpoint(gc.output)
+    check gc.code != 0
+    check has(f.pool, f.aFeat)
+    check has(f.pool, f.bFeat)
+
+  test "workspace_root_seed_uses_marked_workspace_parent":
+    let root = createTempDir("repro-spi1-discovery-workspace-", "")
+    defer:
+      tearDown()
+      removeDir(root)
+    let f = setUp(root, siblingBorrower = true)
+    let workspace = root / "domain" / "ws"
+    let sibling = root / "domain" / "other" / "up"
+    createDir(workspace.parentDir)
+    createDir(sibling.parentDir)
+    moveDir(f.a, workspace)
+    moveDir(f.b, sibling)
+    writeFile(workspace / "repro-workspace.toml", "")
+    # If the workspace-root seed were treated as workspace/repo, scanning
+    # would escape to root and this unrelated broken repository would refuse.
+    let unrelated = root / "unrelated"
+    createDir(unrelated)
+    discard must(unrelated, "init", "-q")
+    writeFile(unrelated / ".git" / "config", "[broken\n")
+    writeFile(borrowersPath(f.pool), workspace & "\n")
+    check not poolRetentionReady(f.gitBin, f.pool)
+    check sibling in readBorrowers(f.pool)
+    check poolRetentionReady(f.gitBin, f.pool)
+
+  test "inaccessible_alternates_parent_refuses_expiry_and_gc":
+    when defined(windows):
+      skip("needs POSIX directory traversal permissions; chmod cannot deny traversal on Windows")
+    else:
+      let root = createTempDir("repro-spi1-discovery-inaccessible-", "")
+      defer:
+        tearDown()
+        removeDir(root)
+      let f = setUp(root, siblingBorrower = true)
+      writeFile(borrowersPath(f.pool), f.a & "\n")
+      let info = f.b / ".git" / "objects" / "info"
+      let permissions = getFilePermissions(info)
+      defer: setFilePermissions(info, permissions)
+      setFilePermissions(info, {})
+      # Positive control: this host must actually enforce the denied traversal.
+      doAssert execCmdEx("test -x " & q(info)).exitCode != 0
+      check not poolRetentionReady(f.gitBin, f.pool)
+      discard must(f.pool, "config", "gc.pruneExpire", PoolPruneExpire)
+      let gc = gitIn(f.pool, "gc", "--quiet")
+      checkpoint(gc.output)
+      check gc.code != 0
+      check has(f.pool, f.bFeat)
 
   test "registered_leaf_survives_unregistered_expires":
     if findExe("git").len == 0 or not gitAtLeast(2, 42):
@@ -225,6 +384,173 @@ suite "SPI-1: the pool retains what registered leaves name":
       check fsck.code == 0
       # B is not registered: its commit expired, so expiry really ran.
       check not has(f.pool, f.bFeat)
+
+  test "gc_expires_objects_without_stale_pool_or_borrower_indexes":
+    if findExe("git").len == 0 or not gitAtLeast(2, 42):
+      skip("needs git on PATH, version 2.42 or newer (gc.recentObjectsHook)")
+    else:
+      let root = createTempDir("repro-spi-graph-expiry-", "")
+      defer:
+        tearDown()
+        removeDir(root)
+      let f = setUp(root, splitGraphs = true)
+      seedMultiPackIndex(f)
+      seedBorrowerSplit(f)
+      let m = maintainSharedBare(f.gitBin, f.pool, ["ws-a", "ws-b"], force = true)
+      checkpoint(m.diagnostic)
+      check m.ok and m.ran
+      check not has(f.pool, f.bFeat) # expiry must really happen
+      check has(f.pool, f.aBase)
+      for repo in [f.pool, f.a]:
+        let fsck = gitIn(repo, "fsck", "--connectivity-only")
+        checkpoint(repo & " fsck: " & $fsck.code & " " & fsck.output)
+        check fsck.code == 0
+        check "commit-graph" notin fsck.output
+      check fileExists(f.pool / "objects/pack/multi-pack-index")
+      let midx = gitIn(f.pool, "multi-pack-index", "verify")
+      checkpoint(midx.output)
+      check midx.code == 0
+      check fileExists(f.pool / "objects/info/commit-graph")
+      check fileExists(f.a / ".git/objects/info/commit-graph")
+      check not fileExists(f.pool / "objects/info/commit-graphs/commit-graph-chain")
+      check not fileExists(f.a / ".git/objects/info/commit-graphs/commit-graph-chain")
+
+  test "borrower_graph_lock_aborts_gc_before_expiry":
+    if findExe("git").len == 0 or not gitAtLeast(2, 42):
+      skip("needs git on PATH, version 2.42 or newer (gc.recentObjectsHook)")
+    else:
+      let root = createTempDir("repro-spi-graph-locked-", "")
+      defer:
+        tearDown()
+        removeDir(root)
+      let f = setUp(root, splitGraphs = true)
+      seedBorrowerSplit(f)
+      writeFile(f.a / ".git/objects/info/commit-graph.lock", "locked\n")
+      let m = maintainSharedBare(f.gitBin, f.pool, ["ws-a"], force = true)
+      checkpoint(m.diagnostic)
+      check not m.ok and not m.ran
+      check "commit-graph" in m.diagnostic
+      check has(f.pool, f.bFeat)
+      check not fileExists(f.pool / MaintenanceStampRelPath)
+
+  test "shallow_borrower_cannot_silently_skip_graph_migration":
+    if findExe("git").len == 0 or not gitAtLeast(2, 42):
+      skip("needs git on PATH, version 2.42 or newer (gc.recentObjectsHook)")
+    else:
+      let root = createTempDir("repro-spi-graph-shallow-", "")
+      defer:
+        tearDown()
+        removeDir(root)
+      let f = setUp(root, splitGraphs = true)
+      seedBorrowerSplit(f)
+      writeFile(f.a / ".git/shallow", must(f.a, "rev-parse", "HEAD~1") & "\n")
+      # Git silently returns success without converting a shallow graph. The
+      # migration must refuse instead of replacing the pool below that chain.
+      let skipped = gitIn(f.a, "-c", "core.commitGraph=true",
+        "commit-graph", "write", "--reachable")
+      doAssert skipped.code == 0
+      doAssert fileExists(f.a / ".git/objects/info/commit-graphs/commit-graph-chain")
+      doAssert not fileExists(f.a / ".git/objects/info/commit-graph")
+      let m = maintainSharedBare(f.gitBin, f.pool, ["ws-a"], force = true)
+      checkpoint(m.diagnostic)
+      check not m.ok and not m.ran
+      check "commit-graph" in m.diagnostic
+      check has(f.pool, f.bFeat)
+      check not fileExists(f.pool / MaintenanceStampRelPath)
+
+  test "pool_graph_noop_conditions_abort_before_expiry":
+    if findExe("git").len == 0 or not gitAtLeast(2, 42):
+      skip("needs git on PATH, version 2.42 or newer (gc.recentObjectsHook)")
+    else:
+      for blocker in ["shallow", "grafts"]:
+        block:
+          let root = createTempDir("repro-spi-pool-graph-noop-", "")
+          defer:
+            tearDown()
+            removeDir(root)
+          let f = setUp(root)
+          discard must(f.pool, "commit-graph", "write", "--reachable")
+          doAssert fileExists(f.pool / "objects/info/commit-graph")
+          if blocker == "shallow":
+            writeFile(f.pool / "shallow", must(f.pool, "rev-parse", "main~1") & "\n")
+          else:
+            writeFile(f.pool / "info/grafts", must(f.pool, "rev-parse", "main") & "\n")
+          # A preexisting monolithic file cannot prove that a successful Git
+          # exit refreshed the index. Both real Git conditions skip its write.
+          doAssert gitIn(f.pool, "-c", "core.commitGraph=true",
+            "commit-graph", "write", "--reachable").code == 0
+          let m = maintainSharedBare(f.gitBin, f.pool, ["ws-a"], force = true)
+          checkpoint(blocker & ": " & m.diagnostic)
+          check not m.ok and not m.ran
+          check "commit-graph" in m.diagnostic
+          check has(f.pool, f.bFeat)
+          check not fileExists(f.pool / MaintenanceStampRelPath)
+
+  test "broken_borrower_chain_is_rebuilt_on_touch":
+    if findExe("git").len == 0 or not gitAtLeast(2, 42):
+      skip("needs git on PATH, version 2.42 or newer (gc.recentObjectsHook)")
+    else:
+      let root = createTempDir("repro-spi-graph-broken-", "")
+      defer:
+        tearDown()
+        removeDir(root)
+      let f = setUp(root, splitGraphs = true)
+      seedBorrowerSplit(f)
+      let chainDir = f.a / ".git/objects/info/commit-graphs"
+      for path in walkFiles(chainDir / "graph-*.graph"):
+        removeFile(path)
+      let broken = gitIn(f.a, "fsck", "--connectivity-only")
+      doAssert broken.code != 0 and "commit-graph" in broken.output
+      check ensureLeafPoolConfig(f.gitBin, f.a, f.pool) == ""
+      check fileExists(f.a / ".git/objects/info/commit-graph")
+      let healed = gitIn(f.a, "fsck", "--connectivity-only")
+      checkpoint(healed.output)
+      check healed.code == 0
+
+  test "empty_pool_drops_graph_for_expired_commits":
+    if findExe("git").len == 0 or not gitAtLeast(2, 42):
+      skip("needs git on PATH, version 2.42 or newer (gc.recentObjectsHook)")
+    else:
+      let root = createTempDir("repro-spi-graph-empty-", "")
+      defer:
+        tearDown()
+        removeDir(root)
+      let f = setUp(root, splitGraphs = true)
+      discard must(f.pool, "commit-graph", "write", "--reachable")
+      let tree = must(f.pool, "rev-parse", "main^{tree}")
+      let head = must(f.pool, "rev-parse", "main")
+      discard must(f.pool, "update-ref", "--no-deref", "HEAD", head)
+      for line in must(f.pool, "for-each-ref", "--format=%(refname)").splitLines():
+        discard must(f.pool, "update-ref", "-d", line)
+      # Non-commit refs and a detached HEAD do not make --reachable write a
+      # graph. Neither may leave the stale graph masquerading as a fresh one.
+      discard must(f.pool, "update-ref", "refs/tags/tree-only", tree)
+      # A remains registered, so expiry runs. Main and A's history are retained
+      # through the hook even though the pool has no refs of its own.
+      let m = maintainSharedBare(f.gitBin, f.pool, ["ws-a"], force = true)
+      checkpoint(m.diagnostic)
+      check m.ok and m.ran
+      check not has(f.pool, f.bFeat)
+      for repo in [f.pool, f.a]:
+        let fsck = gitIn(repo, "fsck", "--connectivity-only")
+        checkpoint(fsck.output)
+        check fsck.code == 0
+
+  test "pool_graph_lock_reports_failed_pass_without_stamp":
+    if findExe("git").len == 0 or not gitAtLeast(2, 42):
+      skip("needs git on PATH, version 2.42 or newer (gc.recentObjectsHook)")
+    else:
+      let root = createTempDir("repro-spi-pool-graph-locked-", "")
+      defer:
+        tearDown()
+        removeDir(root)
+      let f = setUp(root)
+      writeFile(f.pool / "objects/info/commit-graph.lock", "locked\n")
+      let m = maintainSharedBare(f.gitBin, f.pool, ["ws-a"], force = true)
+      checkpoint(m.diagnostic)
+      check not m.ok and m.ran
+      check "commit-graph" in m.diagnostic
+      check not fileExists(f.pool / MaintenanceStampRelPath)
 
   test "mutation_hook_without_env_reset_protects_nothing":
     if findExe("git").len == 0 or not gitAtLeast(2, 42):
@@ -315,7 +641,10 @@ suite "SPI-1: the pool retains what registered leaves name":
       let script = readFile(hook)
       let refuse = "|| { status=1; continue; }\n  : > "
       doAssert script.contains(refuse), "mutation anchor not found in the hook"
-      writeFile(hook, script.replace(refuse, "|| continue\n  : > "))
+      let discoveryRefusal = "--git-common-dir 2>/dev/null) || return 1"
+      doAssert script.contains(discoveryRefusal)
+      writeFile(hook, script.replace(refuse, "|| continue\n  : > ").replace(
+        discoveryRefusal, "--git-common-dir 2>/dev/null) || return 0"))
       discard must(f.pool, "gc", "--quiet")
       check not has(f.pool, f.aFeat)      # skipping the leaf expired its objects
 
@@ -374,7 +703,7 @@ suite "SPI-1: the pool retains what registered leaves name":
       check must(pool, "config", "--get", "gc.pruneExpire") == PoolNeverExpire
       check fileExists(retentionHookPath(pool))
       # A registered leaf and git >= 2.42: the expiry window.
-      let leaf = root / "leaf"
+      let leaf = root / "ws" / "leaf"
       discard must(root, "clone", "-q", "--reference", pool, url, leaf)
       check wireAlternates(leaf, pool, gitBin).ok
       check prepareSharedBare(gitBin, pool) == ""

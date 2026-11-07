@@ -92,7 +92,7 @@ proc configIdentity(gitBin, repoPath: string) =
     " config user.name \"Hook Contract Tester\"")
 
 const bogusDiagnostic =
-  ".repro-workspace.toml: TOML parser raised with no message; " &
+  "repro-workspace.toml: TOML parser raised with no message; " &
   "common cause: unescaped backslash"
 
 proc writeStaleStub(path, marker: string) =

@@ -11,7 +11,6 @@
 ## install-glue lands, these tools come from stdlib (nix on Linux/macOS,
 ## scoop on Windows) which ships the full install tree intact.
 
-import std/tables
 import repro_project_dsl
 import repro_dsl_stdlib/nixpkgs_pin
 import repro_dsl_stdlib/packages_schema
@@ -22,30 +21,39 @@ package libtool:
     nixPackage "nixpkgs#libtool", executablePath = "bin/libtool",
       nixpkgsRev = CanonicalNixpkgsRev,
       nixpkgsNarHash = CanonicalNixpkgsNarHash
+    # GM4b: archive realizations formerly held by the retired
+    # `VersionedProvisioning` catalog record (see the conflict notes
+    # in the Gradual-Nix-To-Reprobuild-Migration GM4b milestone).
+    tarball url = "https://repo.msys2.org/msys/x86_64/libtool-2.5.4-5-x86_64.pkg.tar.zst",
+      sha256 = "e7d27e7543dbe6ce2dae863a412455ab68f7bf8d1670762a0aded62480bf08f0",
+      archiveType = "tar.zst",
+      executablePath = "bin/libtool",
+      extraExecutable = "bin/libtoolize",
+      version = "2.5.4-5",
+      packageId = "libtool@2.5.4-5",
+      installMethod = "msys2-pacman",
+      extractPath = "usr",
+      pacmanPackage = "libtool",
+      cpu = "x86_64",
+      os = "windows"
 
 package libtoolize:
   provisioning:
     nixPackage "nixpkgs#libtool", executablePath = "bin/libtoolize",
       nixpkgsRev = CanonicalNixpkgsRev,
       nixpkgsNarHash = CanonicalNixpkgsNarHash
-
-# ---------------------------------------------------------------------------
-# Harvested MSYS2 catalog (cakBuiltin adapter consumer on Windows).
-# ---------------------------------------------------------------------------
-
-let libtoolCatalog* = @[
-  VersionedProvisioning(
-    version: "2.5.4-5",
-    archive_format: afTarZst,
-    install_method: imMsys2Pacman,
-    bin_relpath: @["bin/libtool", "bin/libtoolize"],
-    platforms: @[
-      PlatformBinary(cpu: pcX86_64, os: poWindows, url: "https://repo.msys2.org/msys/x86_64/libtool-2.5.4-5-x86_64.pkg.tar.zst", sha256: "e7d27e7543dbe6ce2dae863a412455ab68f7bf8d1670762a0aded62480bf08f0", sha512: "", sha1: "", extract_path: "usr")
-    ],
-    installer_args: @[],
-    pacman_packages: @["libtool"],
-    bootstrap_argv: @[],
-    env: initTable[string, string]())
-]
-
-let libtoolizeCatalog* = libtoolCatalog
+    # GM4b: archive realizations formerly held by the retired
+    # `VersionedProvisioning` catalog record (see the conflict notes
+    # in the Gradual-Nix-To-Reprobuild-Migration GM4b milestone).
+    tarball url = "https://repo.msys2.org/msys/x86_64/libtool-2.5.4-5-x86_64.pkg.tar.zst",
+      sha256 = "e7d27e7543dbe6ce2dae863a412455ab68f7bf8d1670762a0aded62480bf08f0",
+      archiveType = "tar.zst",
+      executablePath = "bin/libtool",
+      extraExecutable = "bin/libtoolize",
+      version = "2.5.4-5",
+      packageId = "libtoolize@2.5.4-5",
+      installMethod = "msys2-pacman",
+      extractPath = "usr",
+      pacmanPackage = "libtool",
+      cpu = "x86_64",
+      os = "windows"

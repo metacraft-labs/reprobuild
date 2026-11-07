@@ -34,7 +34,8 @@
 ##       its ``deps`` list contains every compile action id, and the
 ##       compile actions depend on the configure action.
 
-import std/[os, strutils, unittest]
+import std/[os, osproc, strutils, unittest]
+import repro_test_support/reasoned_skip
 import repro_test_support
 
 import repro_core
@@ -518,23 +519,19 @@ suite "c-cpp-autotools convention — Mode B (crude fallback)":
         sawJobs = true
     check sawJobs
 
-    # install argv — ``make DESTDIR=<stage> install`` (spec line 131).
+    # The install wrapper owns creation of the stage, even for empty installs.
     let installArgv = inlineArgvOf(install.action)
-    check installArgv[0].endsWith("make") or installArgv[0] == "make"
-    check "install" in installArgv
-    var sawDestdir = false
-    var stageRoot = ""
-    for a in installArgv:
-      if a.startsWith("DESTDIR="):
-        sawDestdir = true
-        stageRoot = a["DESTDIR=".len .. ^1]
-    check sawDestdir
+    check installArgv[0] == "sh"
+    check installArgv[1] == "-c"
+    check "mkdir -p" in installArgv[2]
+    check "DESTDIR=" in installArgv[2]
+    check "install" in installArgv[2]
 
     # Sequencing: configure → make → install.
     check configure.action.id in make.action.deps
     check make.action.id in install.action.deps
 
-  test "emitFragment: Mode B lifts artifacts from <stage>/{bin,lib,include,share}":
+  test "emitFragment: Mode B owns the complete staging tree including partial installs":
     # Spec §lines 136-137: "Artifacts lifted from
     # ``<stage>/{bin,lib,include,share}/``." The install action declares
     # exactly those four sub-trees as outputs so they become the
@@ -548,24 +545,7 @@ suite "c-cpp-autotools convention — Mode B (crude fallback)":
     let fragment = conv.emitFragment(scratch, request)
     let install = actionById(fragment, "ccpp-autotools-modeb-install")
     require install.found
-    var sawBin = false
-    var sawLib = false
-    var sawInclude = false
-    var sawShare = false
-    for output in install.action.outputs:
-      if output.endsWith("/bin") or output.endsWith("\\bin"): sawBin = true
-      if output.endsWith("/lib") or output.endsWith("\\lib"): sawLib = true
-      if output.endsWith("/include") or output.endsWith("\\include"):
-        sawInclude = true
-      if output.endsWith("/share") or output.endsWith("\\share"):
-        sawShare = true
-    check sawBin
-    check sawLib
-    check sawInclude
-    check sawShare
-    # Every staged sub-tree lives under the same ``stage`` root.
-    for output in install.action.outputs:
-      check ("stage" in output) or ("Stage" in output)
+    check install.action.outputs == @[scratch / ".repro/build/stage"]
 
   test "emitFragment: Mode B actions are monitored (real dep capture)":
     # Spec line 135: "io-monitor extends." Each Mode-B action runs under
@@ -651,3 +631,28 @@ suite "c-cpp-autotools convention — Mode B (crude fallback)":
     check actionById(fragment, "ccpp-autotools-link-hello").found
     check not actionById(fragment, "ccpp-autotools-modeb-configure").found
     check not actionById(fragment, "ccpp-autotools-modeb-make").found
+
+  test "Mode B partial and empty installs fulfill the staged tree obligation":
+    let scratch = getTempDir() / "test_autotools_partial_install_output"
+    writeGnulibProject(scratch, "partialInstallPkg")
+    defer: removeDir(scratch)
+    let fragment = autotools_convention.cCppAutotoolsConvention().emitFragment(scratch, dummyRequest(scratch))
+    let install = actionById(fragment, "ccpp-autotools-modeb-install")
+    require install.found
+    let buildDir = scratch / ".repro/build/_build"
+    createDir(buildDir)
+    let stage = install.action.outputs[0]
+    for partial in [false, true]:
+      if dirExists(stage): removeDir(stage)
+      let recipe = if partial:
+        "\tmkdir -p $(DESTDIR)/share\n\tprintf contents > $(DESTDIR)/share/data\n"
+        else: "\t@true\n"
+      writeFile(buildDir / "Makefile", "install:\n" & recipe)
+      let outcome = execCmdEx(inlineArgvOf(install.action).quoteShellCommand())
+      checkpoint outcome.output
+      require outcome.exitCode == 0
+      check dirExists(stage)
+      check not dirExists(stage / "bin")
+      check not dirExists(stage / "lib")
+      check not dirExists(stage / "include")
+      if partial: check readFile(stage / "share/data") == "contents"

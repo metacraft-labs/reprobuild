@@ -27,6 +27,7 @@
 ## — a real regression would surface as a build/runner failure first.
 
 import std/[json, os, strutils, times, unittest]
+import repro_test_support/reasoned_skip
 
 import sharding_test_support
 

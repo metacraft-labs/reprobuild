@@ -3,7 +3,8 @@
 ## least one Levenshtein candidate when a near-match exists in the
 ## project's target-export table.
 
-import std/[os, osproc, strutils, tempfiles, unittest]
+import std/[monotimes, os, osproc, streams, strutils, tempfiles, times,
+  unittest]
 
 import repro_test_support
 
@@ -13,6 +14,9 @@ proc pathExists(path: string): bool =
     true
   except OSError:
     false
+
+const DaemonStartDeadlineMs = 30_000
+  ## How long a freshly started runquotad may take to bind its socket.
 
 proc ensureRunQuotaDaemon(repoRoot: string): tuple[process: owned(Process);
     socket: string] =
@@ -28,14 +32,36 @@ proc ensureRunQuotaDaemon(repoRoot: string): tuple[process: owned(Process);
     # Test daemon: keep it out of the host-wide observation store, which
     # it would otherwise open (and write) before it binds its socket.
     "--no-write-stats"
-  ], options = {poUsePath})
+  ], options = {poUsePath, poStdErrToStdOut})
   putEnv("RUNQUOTA_SOCKET", socketPath)
-  for _ in 0 ..< 200:
+  # The deadline is for a daemon that is starting, on a host that may be
+  # running a full suite beside this case. Five seconds was not enough there
+  # (full run 38, eight cases in parallel at a load average near 100), and
+  # the case then said only that the socket "did not appear", with the
+  # daemon's output thrown away. A daemon that has EXITED is a different
+  # failure and is reported at once, with its status and output, rather
+  # than waited out.
+  let deadline = getMonoTime() + initDuration(milliseconds =
+    DaemonStartDeadlineMs)
+  while getMonoTime() < deadline:
     if pathExists(socketPath):
       return (process: daemon, socket: socketPath)
+    if not daemon.running:
+      let code = daemon.peekExitCode()
+      let output =
+        if daemon.outputStream != nil: daemon.outputStream.readAll() else: ""
+      daemon.close()
+      raise newException(OSError, "runquotad exited with status " & $code &
+        " before its socket appeared (" & daemonBin & "): " & output)
     sleep(25)
   daemon.terminate()
-  raise newException(OSError, "runquotad socket did not appear")
+  discard daemon.waitForExit()
+  let output =
+    if daemon.outputStream != nil: daemon.outputStream.readAll() else: ""
+  daemon.close()
+  raise newException(OSError, "runquotad socket did not appear within " &
+    $DaemonStartDeadlineMs & " ms (" & daemonBin & "); daemon output: " &
+    output)
 
 proc reproBinary(repoRoot: string): string =
   ## Test-Fixtures-In-Build-Graph M1: ``repro`` is a build-graph artifact

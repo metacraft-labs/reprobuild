@@ -35,7 +35,7 @@ suite "RDMF v2 sealed secrets":
 
   test "round-trips to the intended recipient":
     let recipient = peerAuth.generateKeypair()
-    let sealed = sealSecrets(recipient.publicKey, "win-ci-bare-001", sampleFiles)
+    let sealed = sealSecrets(recipient.publicKey, "win-ci-bare-001", sampleFiles, noRevokedRecipientKeys("test"))
     let opened = openSecrets(recipient.privateKey, "win-ci-bare-001", sealed)
 
     check opened.len == sampleFiles.len
@@ -50,14 +50,14 @@ suite "RDMF v2 sealed secrets":
     let recipient = peerAuth.generateKeypair()
     let secret = "AGHJ7QDUMMYREGISTRATIONTOKEN"
     let sealed = sealSecrets(recipient.publicKey, "win-ci-bare-001",
-      @[SecretFile(path: "mcl.token", mode: 0o600'u32, content: bytesOf(secret))])
+      @[SecretFile(path: "mcl.token", mode: 0o600'u32, content: bytesOf(secret))], noRevokedRecipientKeys("test"))
     check secret notin stringOf(sealed.ciphertext)
     check "mcl.token" notin stringOf(sealed.ciphertext)
 
   test "a fresh ephemeral key per seal, so no key or nonce is ever reused":
     let recipient = peerAuth.generateKeypair()
-    let a = sealSecrets(recipient.publicKey, "win-ci-bare-001", sampleFiles)
-    let b = sealSecrets(recipient.publicKey, "win-ci-bare-001", sampleFiles)
+    let a = sealSecrets(recipient.publicKey, "win-ci-bare-001", sampleFiles, noRevokedRecipientKeys("test"))
+    let b = sealSecrets(recipient.publicKey, "win-ci-bare-001", sampleFiles, noRevokedRecipientKeys("test"))
     check a.ephemeralPubKey != b.ephemeralPubKey
     check a.nonce != b.nonce
     check a.ciphertext != b.ciphertext
@@ -65,7 +65,7 @@ suite "RDMF v2 sealed secrets":
   test "the wrong recipient cannot open it":
     let recipient = peerAuth.generateKeypair()
     let attacker = peerAuth.generateKeypair()
-    let sealed = sealSecrets(recipient.publicKey, "win-ci-bare-001", sampleFiles)
+    let sealed = sealSecrets(recipient.publicKey, "win-ci-bare-001", sampleFiles, noRevokedRecipientKeys("test"))
     expect SecretsError:
       discard openSecrets(attacker.privateKey, "win-ci-bare-001", sealed)
 
@@ -73,20 +73,20 @@ suite "RDMF v2 sealed secrets":
     # The target is bound into the KDF info AND the GCM aad, so the same
     # bytes presented to another box derive a different key and fail the tag.
     let recipient = peerAuth.generateKeypair()
-    let sealed = sealSecrets(recipient.publicKey, "win-ci-bare-001", sampleFiles)
+    let sealed = sealSecrets(recipient.publicKey, "win-ci-bare-001", sampleFiles, noRevokedRecipientKeys("test"))
     expect SecretsError:
       discard openSecrets(recipient.privateKey, "win-ci-vm-001", sealed)
 
   test "a tampered ciphertext fails the tag check":
     let recipient = peerAuth.generateKeypair()
-    var sealed = sealSecrets(recipient.publicKey, "win-ci-bare-001", sampleFiles)
+    var sealed = sealSecrets(recipient.publicKey, "win-ci-bare-001", sampleFiles, noRevokedRecipientKeys("test"))
     sealed.ciphertext[0] = sealed.ciphertext[0] xor 0x01'u8
     expect SecretsError:
       discard openSecrets(recipient.privateKey, "win-ci-bare-001", sealed)
 
   test "a tampered tag fails":
     let recipient = peerAuth.generateKeypair()
-    var sealed = sealSecrets(recipient.publicKey, "win-ci-bare-001", sampleFiles)
+    var sealed = sealSecrets(recipient.publicKey, "win-ci-bare-001", sampleFiles, noRevokedRecipientKeys("test"))
     sealed.tag[0] = sealed.tag[0] xor 0x01'u8
     expect SecretsError:
       discard openSecrets(recipient.privateKey, "win-ci-bare-001", sealed)
@@ -94,7 +94,7 @@ suite "RDMF v2 sealed secrets":
   test "a substituted ephemeral public key fails":
     let recipient = peerAuth.generateKeypair()
     let other = peerAuth.generateKeypair()
-    var sealed = sealSecrets(recipient.publicKey, "win-ci-bare-001", sampleFiles)
+    var sealed = sealSecrets(recipient.publicKey, "win-ci-bare-001", sampleFiles, noRevokedRecipientKeys("test"))
     sealed.ephemeralPubKey = other.publicKey
     expect SecretsError:
       discard openSecrets(recipient.privateKey, "win-ci-bare-001", sealed)
@@ -105,11 +105,11 @@ suite "RDMF v2 sealed secrets":
     for i in 1 ..< peerAuth.P256PubLen:
       bogus[i] = 0x01'u8
     expect SecretsError:
-      discard sealSecrets(bogus, "win-ci-bare-001", sampleFiles)
+      discard sealSecrets(bogus, "win-ci-bare-001", sampleFiles, noRevokedRecipientKeys("test"))
 
   test "an empty secret list round-trips":
     let recipient = peerAuth.generateKeypair()
-    let sealed = sealSecrets(recipient.publicKey, "win-ci-bare-001", @[])
+    let sealed = sealSecrets(recipient.publicKey, "win-ci-bare-001", @[], noRevokedRecipientKeys("test"))
     check openSecrets(recipient.privateKey, "win-ci-bare-001", sealed).len == 0
 
   test "path traversal is rejected on both encode and decode":
@@ -118,7 +118,7 @@ suite "RDMF v2 sealed secrets":
                  "back\\slash", "", "a//b"]:
       expect SecretsError:
         discard sealSecrets(recipient.publicKey, "win-ci-bare-001",
-          @[SecretFile(path: bad, mode: 0o600'u32, content: bytesOf("x"))])
+          @[SecretFile(path: bad, mode: 0o600'u32, content: bytesOf("x"))], noRevokedRecipientKeys("test"))
 
   test "a truncated payload is rejected, not silently accepted":
     expect SecretsError:
@@ -136,7 +136,7 @@ suite "RDMF v2 sealed secrets":
     for i in 0 ..< 256:
       raw[i] = byte(i)
     let sealed = sealSecrets(recipient.publicKey, "win-ci-bare-001",
-      @[SecretFile(path: "binary.bin", mode: 0o600'u32, content: raw)])
+      @[SecretFile(path: "binary.bin", mode: 0o600'u32, content: raw)], noRevokedRecipientKeys("test"))
     let opened = openSecrets(recipient.privateKey, "win-ci-bare-001", sealed)
     check opened.len == 1
     check opened[0].content == raw

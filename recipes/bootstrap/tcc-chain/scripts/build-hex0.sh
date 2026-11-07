@@ -20,6 +20,13 @@
 
 set -euo pipefail
 
+# A recipe invokes this script as a cacheable build action. A lookup-only run
+# cannot satisfy its output contract; use cache-helper.sh for cache diagnostics.
+if [[ "${REPRO_CACHE_DRY_RUN:-0}" == "1" ]]; then
+  echo "[bootstrap] REPRO_CACHE_DRY_RUN=1 cannot produce declared outputs" >&2
+  exit 2
+fi
+
 : "${SOURCE_DATE_EPOCH:=1735689600}"
 : "${LC_ALL:=C}"
 : "${TZ:=UTC}"
@@ -60,8 +67,8 @@ if cache_repro_binary_cache_client_bin >/dev/null 2>&1; then
     echo "[build-hex0] cache hit produced unexpected prefix shape; rebuilding"
     rm -rf "${OUT_ABS}/prefix"
   elif [[ "${CACHE_HIT}" == "2" ]]; then
-    echo "[build-hex0] REPRO_CACHE_DRY_RUN=1; skipping build."
-    exit 0
+    echo "[build-hex0] cache dry-run cannot produce declared outputs" >&2
+    exit 2
   else
     echo "[build-hex0] cache miss; proceeding with build."
   fi

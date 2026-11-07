@@ -12,8 +12,8 @@
 ##   - Each unique upstream fetch URL → a stable filesystem slug → ONE
 ##     bare clone under a per-user cache root. The shared bare is
 ##     refreshed clone-if-missing / fetch-if-present
-##     (``git fetch --all --prune``), never rewrites its commit-graph
-##     (``SharedBareSafetyConfig``), and expires only objects no registered
+##     (``git fetch --all --prune``), rewrites non-split commit-graphs only
+##     after migrating borrowers, and expires only objects no registered
 ##     borrower names (``poolIntegrityConfig``, see
 ##     ``reprobuild-specs/spec/Shared-Clone-Pool-Integrity.md``): other
 ##     checkouts borrow from it.
@@ -33,9 +33,19 @@
 ## same identity-bound binary ``git_actions`` uses) via ``execCmdEx`` —
 ## no new third-party dependency, matching the M2 subprocess shape.
 
-import std/[os, osproc, strtabs, strutils, times]
+import std/[locks, os, osproc, sets, strtabs, strutils, tables, tempfiles, times]
+when defined(windows):
+  import std/winlean
+else:
+  import std/posix as posix
 
 import git_tool
+# ``execCmdExCloseOnce``: ``execCmdEx`` without ``osproc.close``'s double close
+# of the merged stdout/stderr descriptor. These helpers run inside the build
+# engine's workspace-VCS executor, on the scheduler thread, while the engine's
+# worker pool may be live; see ``repro_core/process_close``.
+from repro_core/process_exec import execCmdExCloseOnce
+from repro_core/ambient_execution import uncontrolledFindExe, uncontrolledStartProcess
 
 const
   AlternatesRelPath* = "objects/info/alternates"
@@ -69,6 +79,7 @@ type
     lfkStaleRemoteRef      ## refs/remotes/* whose commit exists nowhere (A)
     lfkLocalTipMissing     ## a local ref's own commit exists nowhere (B)
     lfkLocalHistoryMissing ## a local branch's commits are intact, a parent is gone (B)
+    lfkRefetchChainMissing ## partial-pool leaf lacked its lazy-refetch chain
     lfkOldGit              ## git < 2.42: the pool keeps every object (§3.6)
 
   LeafFinding* = object
@@ -612,6 +623,271 @@ proc disambiguatedManifestCachePath*(cacheRoot, manifestUrl: string): string =
   cacheRoot / (urlSlug(manifestUrl) & "-" &
     identityDigestHex(canonicalRemoteIdentity(manifestUrl)))
 
+# ---- cross-process and cross-thread VCS serialization ----------------------
+
+const
+  VcsLockDefaultTimeoutMs* {.intdefine.} = 120_000
+    ## Maximum wait time (2 minutes) when acquiring a per-cache-entry or
+    ## per-checkout lock before giving up.
+  VcsLockPollIntervalMs = 25
+
+when defined(windows):
+  const
+    FILE_ATTRIBUTE_NORMAL_W = int32(0x80)
+else:
+  proc cFlock(fd: cint; operation: cint): cint {.importc: "flock", header: "<sys/file.h>".}
+
+  const
+    LOCK_EX_C = cint(2)
+    LOCK_NB_C = cint(4)
+    LOCK_UN_C = cint(8)
+
+type
+  VcsLockEntry = object
+    ownerThread: int
+    depth: int
+    when defined(windows):
+      handle: Handle
+    else:
+      fd: cint
+
+  VcsFileLock* = object
+    key*: string
+    lockFile*: string
+    acquired*: bool
+
+var
+  vcsLockTableGuard: Lock
+  vcsLockEntries {.guard: vcsLockTableGuard.}: Table[string, VcsLockEntry]
+
+initLock(vcsLockTableGuard)
+
+proc canonicalLockKey(path: string): string {.gcsafe.} =
+  if path.len == 0:
+    return ""
+  result = absolutePath(path)
+  if DirSep != '/':
+    result = result.replace('/', DirSep)
+  if AltSep != DirSep:
+    result = result.replace(AltSep, DirSep)
+  try:
+    result = normalizedPath(result)
+  except CatchableError:
+    discard
+  while result.len > 1 and result[^1] in {DirSep, AltSep}:
+    result.setLen(result.len - 1)
+  when defined(windows) or defined(macosx):
+    result = result.toLowerAscii()
+
+proc cacheEntryLockPath*(entryPath: string): string {.gcsafe.} =
+  ## Sibling lock file for a shared bare cache entry or manifest cache entry.
+  ## Lives alongside ``entryPath`` (never inside it) so locking an entry
+  ## before its initial clone neither creates the target directory early nor
+  ## turns a non-git directory at ``entryPath`` into a non-empty one.
+  var clean = entryPath
+  while clean.len > 1 and clean[^1] in {DirSep, AltSep}:
+    clean.setLen(clean.len - 1)
+  if clean.len == 0: "" else: clean & ".repro-lock"
+
+proc checkoutLockPath*(repoPath: string): string {.gcsafe.} =
+  ## Per-checkout lock file inside ``<repoPath>/.git/repro-vcs-lock`` (or
+  ## ``<repoPath>/repro-vcs-lock`` for a bare repository) used to serialize
+  ## reprobuild-managed mutating fetches against a working tree or bare repo
+  ## without creating untracked files in the working tree.
+  if repoPath.len == 0:
+    return ""
+  if dirExists(repoPath / ".git"):
+    return repoPath / ".git" / "repro-vcs-lock"
+  if fileExists(repoPath / ".git"):
+    try:
+      let firstLine = readFile(repoPath / ".git").strip()
+      if firstLine.startsWith("gitdir:"):
+        let gd = firstLine["gitdir:".len .. ^1].strip()
+        let absGd = if gd.isAbsolute: gd else: absolutePath(gd, absolutePath(repoPath))
+        if dirExists(absGd):
+          var commonDir = absGd
+          if fileExists(absGd / "commondir"):
+            let common = readFile(absGd / "commondir").strip()
+            commonDir = if common.isAbsolute: common
+              else: absolutePath(common, absGd)
+          return commonDir / "repro-vcs-lock"
+    except CatchableError:
+      discard
+  if dirExists(repoPath / "objects") and fileExists(repoPath / "HEAD"):
+    return repoPath / "repro-vcs-lock"
+  ""
+
+proc acquireVcsFileLock*(lockFile: string;
+                         timeoutMs = VcsLockDefaultTimeoutMs): VcsFileLock {.gcsafe.} =
+  ## Acquire a cross-process and cross-thread re-entrant exclusive lock on
+  ## ``lockFile``. When ``lockFile`` is empty, returns an unacquired no-op
+  ## handle so callers can wrap optional paths unconditionally. A negative
+  ## timeout waits indefinitely for contention, but refuses permanent I/O
+  ## errors; lazy pool refills must not fail just because another refill or
+  ## maintenance pass takes longer than the ordinary command deadline.
+  if lockFile.len == 0:
+    return VcsFileLock(acquired: false)
+  let key = canonicalLockKey(lockFile)
+  if key.len == 0:
+    return VcsFileLock(acquired: false)
+  let parent = lockFile.parentDir
+  if parent.len > 0:
+    try:
+      createDir(parent)
+    except IOError, OSError:
+      return VcsFileLock(acquired: false)
+
+  let tid = getThreadId()
+  let deadline = epochTime() + (float(max(0, timeoutMs)) / 1000.0)
+  while true:
+    var inUseByOtherThread = false
+    var reentered = false
+    {.cast(gcsafe).}:
+      withLock(vcsLockTableGuard):
+        if key in vcsLockEntries:
+          if vcsLockEntries[key].ownerThread == tid and
+              vcsLockEntries[key].depth > 0:
+            inc vcsLockEntries[key].depth
+            reentered = true
+          else:
+            inUseByOtherThread = true
+        else:
+          vcsLockEntries[key] = VcsLockEntry(ownerThread: tid, depth: 0)
+    if reentered:
+      return VcsFileLock(key: key, lockFile: lockFile, acquired: true)
+    if inUseByOtherThread:
+      if timeoutMs >= 0 and epochTime() >= deadline:
+        return VcsFileLock(acquired: false)
+      sleep(VcsLockPollIntervalMs)
+      continue
+
+    var osAcquired = false
+    var permanentFault = false
+    when defined(windows):
+      let h = createFileW(
+        newWideCString(lockFile),
+        GENERIC_READ or GENERIC_WRITE,
+        0,
+        nil,
+        OPEN_ALWAYS,
+        FILE_ATTRIBUTE_NORMAL_W,
+        0)
+      if h != INVALID_HANDLE_VALUE:
+        osAcquired = true
+        {.cast(gcsafe).}:
+          withLock(vcsLockTableGuard):
+            vcsLockEntries[key] = VcsLockEntry(
+              ownerThread: tid, depth: 1, handle: h)
+      elif timeoutMs < 0:
+        # Only sharing/locking violations mean another live holder can
+        # release this resource. Access or filesystem errors cannot heal by
+        # waiting indefinitely.
+        permanentFault = int(osLastError()) notin [32, ERROR_LOCK_VIOLATION]
+    else:
+      # This new mode has no contention deadline. An exec'd credential or
+      # transport helper must not retain its lock if the owner is interrupted.
+      let descriptorFlags = if timeoutMs < 0: posix.O_CLOEXEC else: cint(0)
+      let fd = posix.open(cstring(lockFile),
+        posix.O_CREAT or posix.O_RDWR or descriptorFlags, posix.Mode(0o600))
+      if fd >= 0:
+        if cFlock(fd, LOCK_EX_C or LOCK_NB_C) == 0:
+          osAcquired = true
+          {.cast(gcsafe).}:
+            withLock(vcsLockTableGuard):
+              vcsLockEntries[key] = VcsLockEntry(
+                ownerThread: tid, depth: 1, fd: fd)
+        else:
+          let failure = osLastError()
+          discard posix.close(fd)
+          if timeoutMs < 0:
+            permanentFault = int(failure) notin
+              [int(posix.EAGAIN), int(posix.EWOULDBLOCK), int(posix.EINTR)]
+      elif timeoutMs < 0:
+        permanentFault = int(osLastError()) != int(posix.EINTR)
+
+    if osAcquired:
+      return VcsFileLock(key: key, lockFile: lockFile, acquired: true)
+
+    {.cast(gcsafe).}:
+      withLock(vcsLockTableGuard):
+        if key in vcsLockEntries and vcsLockEntries[key].ownerThread == tid and
+            vcsLockEntries[key].depth == 0:
+          vcsLockEntries.del(key)
+
+    if permanentFault or (timeoutMs >= 0 and epochTime() >= deadline):
+      return VcsFileLock(acquired: false)
+    sleep(VcsLockPollIntervalMs)
+
+proc releaseVcsFileLock*(lock: var VcsFileLock) {.gcsafe.} =
+  if not lock.acquired:
+    return
+  var toClose: VcsLockEntry
+  var shouldClose = false
+  {.cast(gcsafe).}:
+    withLock(vcsLockTableGuard):
+      if lock.key in vcsLockEntries:
+        dec vcsLockEntries[lock.key].depth
+        if vcsLockEntries[lock.key].depth <= 0:
+          toClose = vcsLockEntries[lock.key]
+          vcsLockEntries.del(lock.key)
+          shouldClose = true
+  if shouldClose:
+    when defined(windows):
+      if toClose.handle != 0 and toClose.handle != INVALID_HANDLE_VALUE:
+        discard closeHandle(toClose.handle)
+    else:
+      if toClose.fd >= 0:
+        discard cFlock(toClose.fd, LOCK_UN_C)
+        discard posix.close(toClose.fd)
+  lock.acquired = false
+
+template withVcsFileLock*(lockFile: string; onFailure, body: untyped) =
+  ## A nonempty path requires ownership before running the protected body.
+  ## Failure is a separate branch so callers retain their structured refusal
+  ## or safe fallback. An empty optional path still executes unconditionally.
+  block:
+    let requiredLockFile = lockFile
+    var vcsLock = acquireVcsFileLock(requiredLockFile)
+    defer: releaseVcsFileLock(vcsLock)
+    if requiredLockFile.len > 0 and not vcsLock.acquired:
+      onFailure
+    else:
+      body
+
+template withVcsFileLock*(lockFile: string; body: untyped) =
+  ## Raise IOError when a required lock cannot be acquired. Result-returning
+  ## callers use the explicit failure-branch overload to preserve their API.
+  block:
+    let requiredLockFile = lockFile
+    withVcsFileLock(requiredLockFile,
+        (block: raise newException(IOError, "could not acquire VCS lock: " & requiredLockFile))):
+      body
+
+template withCacheEntryVcsLock*(entryPath: string; onFailure, body: untyped) =
+  withVcsFileLock(cacheEntryLockPath(entryPath), onFailure):
+    body
+
+template withCacheEntryVcsLock*(entryPath: string; body: untyped) =
+  withVcsFileLock(cacheEntryLockPath(entryPath)):
+    body
+
+template withCheckoutVcsLock*(repoPath: string; onFailure, body: untyped) =
+  withVcsFileLock(checkoutLockPath(repoPath), onFailure):
+    body
+
+template withCheckoutVcsLock*(repoPath: string; body: untyped) =
+  withVcsFileLock(checkoutLockPath(repoPath)):
+    body
+
+proc isTransientGitLockContention*(output: string): bool {.gcsafe.} =
+  ## True when ``git`` failed because another process concurrently updated or
+  ## locked a ref or config file in the same repository.
+  output.contains("cannot lock ref ") or
+    output.contains("incorrect old value provided") or
+    output.contains("reference_transaction") or
+    output.contains("could not lock config file") or
+    (output.contains("Unable to create '") and output.contains(".lock'"))
+
 # ---- git plumbing ----------------------------------------------------------
 
 proc runGit(gitBin: string; args: openArray[string];
@@ -620,9 +896,15 @@ proc runGit(gitBin: string; args: openArray[string];
   for arg in args:
     cmd.add(" ")
     cmd.add(quoteShell(arg))
-  let res = execCmdEx(cmd, workingDir = workingDir,
-    env = scrubbedGitRepositoryEnv())
-  (code: res.exitCode, output: res.output)
+  const MaxLockRetries = 5
+  for attempt in 0 .. MaxLockRetries:
+    let res = execCmdExCloseOnce(cmd, workingDir = workingDir,
+      env = scrubbedGitRepositoryEnv())
+    result = (code: res.exitCode, output: res.output)
+    if result.code == 0 or attempt == MaxLockRetries or
+        not isTransientGitLockContention(result.output):
+      return
+    sleep(25 * (attempt + 1))
 
 proc looksLikeGitDir(path: string): bool =
   ## A bare repo has ``HEAD`` + ``objects`` directly; a normal repo has a
@@ -748,15 +1030,10 @@ const SharedBareSafetyConfig* = [
   ##      sets ``gc.pruneExpire`` and the retention hook that tells gc what
   ##      the registered borrowers still name
   ##      (``reprobuild-specs/spec/Shared-Clone-Pool-Integrity.md`` §3).
-  ##   2. Commit-graph rewrites. A borrower that writes a split commit-graph
-  ##      chains its layer onto the bare's layers. ``fetch.writeCommitGraph``
-  ##      MERGES the bare's split chain on every fetch, and gc replaces it; each
-  ##      leaves every chained borrower printing ``unable to find all
-  ##      commit-graph files`` on every command. Measured on git 2.54 under both
-  ##      the ``gc`` and ``geometric`` maintenance strategies: disabling
-  ##      automatic maintenance alone does NOT prevent this -- the fetch-time
-  ##      write does it by itself -- so ``fetch.writeCommitGraph=false`` is
-  ##      required in addition, and ``gc.writeCommitGraph=false`` covers gc.
+  ##   2. Automatic split commit-graph rewrites can remove layers still used
+  ##      by a borrower. Keep those writers off. ``maintainSharedBare`` first
+  ##      converts registered borrowers to independent non-split graphs, then
+  ##      rebuilds the pool graph after gc so expired commits leave it too.
   ##
   ## Persisted in the bare's own config (not only passed per command) so the
   ## property holds for whoever touches the cache: an operator's hand-run
@@ -820,58 +1097,80 @@ proc refreshSharedBare*(gitBin, cacheRoot, fetchUrl: string): SharedCloneResult 
   ## with a diagnostic on any failure (the caller then falls back to a
   ## standalone clone). This is the single shared-state write per unique
   ## URL; per RA-5c it is done once up front before per-repo clones fan
-  ## out, so concurrent clones read a consistent pool without racing.
+  ## out, and is serialized across concurrent processes via
+  ## ``withCacheEntryVcsLock(bare)`` so concurrent workspace initializations
+  ## or forks never race on the same shared bare entry.
   let bare = sharedBarePath(cacheRoot, fetchUrl)
-  if looksLikeGitDir(bare):
-    # Migrate-then-fetch. Without the refspec the fetch below is a no-op
-    # that reports success (see ``SharedBareFetchRefspec``), so installing
-    # it is not an optimization -- it is what makes the refresh a refresh.
-    # The safety config goes in FIRST: a ``--prune`` that finally advances
-    # refs is exactly what makes a rewritten upstream's old history
-    # unreachable here while borrowers still use it (``SharedBareSafetyConfig``).
-    let prepared = prepareSharedBare(gitBin, bare)
-    if prepared.len > 0:
-      return SharedCloneResult(ok: false, sharedBarePath: bare,
-        diagnostic: prepared)
-    # fetch-if-present: refresh all refs, prune deleted ones.
-    let res = runGit(gitBin, sharedBareFetchArgs(bare))
-    if res.code != 0:
-      return SharedCloneResult(ok: false, sharedBarePath: bare,
-        diagnostic: "git fetch in shared bare failed (" & $res.code & "): " &
-          res.output.strip())
+  var checkLeaves = false
+  withCacheEntryVcsLock(bare,
+      (block: return SharedCloneResult(ok: false, sharedBarePath: bare,
+        diagnostic: "could not lock shared bare: " & bare))):
+    if looksLikeGitDir(bare):
+      # Migrate-then-fetch. Without the refspec the fetch below is a no-op
+      # that reports success (see ``SharedBareFetchRefspec``), so installing
+      # it is not an optimization -- it is what makes the refresh a refresh.
+      # The safety config goes in FIRST: a ``--prune`` that finally advances
+      # refs is exactly what makes a rewritten upstream's old history
+      # unreachable here while borrowers still use it (``SharedBareSafetyConfig``).
+      let prepared = prepareSharedBare(gitBin, bare)
+      if prepared.len > 0:
+        return SharedCloneResult(ok: false, sharedBarePath: bare,
+          diagnostic: prepared)
+      # fetch-if-present: refresh all refs, prune deleted ones.
+      let res = runGit(gitBin, sharedBareFetchArgs(bare))
+      if res.code != 0:
+        return SharedCloneResult(ok: false, sharedBarePath: bare,
+          diagnostic: "git fetch in shared bare failed (" & $res.code & "): " &
+            res.output.strip())
+      checkLeaves = true
+    else:
+      # clone-if-missing: create the parent and a bare mirror clone.
+      let parent = bare.splitPath.head
+      if parent.len > 0:
+        try:
+          createDir(parent)
+        except OSError as e:
+          return SharedCloneResult(ok: false, sharedBarePath: bare,
+            diagnostic: "could not create cache parent " & parent & ": " & e.msg)
+      let res = runGit(gitBin,
+        ["clone", "--bare", "--no-local", "--quiet", fetchUrl, bare])
+      if res.code != 0:
+        if looksLikeGitDir(bare):
+          let prepared = prepareSharedBare(gitBin, bare)
+          if prepared.len > 0:
+            return SharedCloneResult(ok: false, sharedBarePath: bare,
+              diagnostic: prepared)
+          let fetched = runGit(gitBin, sharedBareFetchArgs(bare))
+          if fetched.code != 0:
+            return SharedCloneResult(ok: false, sharedBarePath: bare,
+              diagnostic: "git fetch in shared bare failed (" &
+                $fetched.code & "): " & fetched.output.strip())
+          checkLeaves = true
+        else:
+          # Leave no half-populated bare behind so the next attempt re-clones
+          # cleanly rather than mistaking a broken dir for a present cache.
+          if dirExists(bare):
+            try: removeDir(bare)
+            except OSError: discard
+          return SharedCloneResult(ok: false, sharedBarePath: bare,
+            diagnostic: "git clone --bare into shared cache failed (" &
+              $res.code & "): " & res.output.strip())
+      else:
+        # A freshly-cloned bare is current, but it is born WITHOUT a fetch
+        # refspec, so its NEXT refresh would be the silent no-op described on
+        # ``SharedBareFetchRefspec``. Install it at birth, so no bare in the
+        # cache ever spends a single refresh cycle frozen.
+        let prepared = prepareSharedBare(gitBin, bare)
+        if prepared.len > 0:
+          return SharedCloneResult(ok: false, sharedBarePath: bare,
+            diagnostic: "cloned the shared bare but " & prepared)
+  if checkLeaves:
     # A refresh is what makes a rewritten upstream's old commits unreachable
     # here, so it is also the moment to look at every leaf that borrows them
-    # (Shared-Clone-Pool-Integrity §4.2).
+    # (Shared-Clone-Pool-Integrity §4.2). Run outside the bare lock so lock
+    # acquisition stays strictly checkout -> pool.
     return SharedCloneResult(ok: true, sharedBarePath: bare,
       leafReports: checkRegisteredLeaves(gitBin, bare))
-
-  # clone-if-missing: create the parent and a bare mirror clone.
-  let parent = bare.splitPath.head
-  if parent.len > 0:
-    try:
-      createDir(parent)
-    except OSError as e:
-      return SharedCloneResult(ok: false, sharedBarePath: bare,
-        diagnostic: "could not create cache parent " & parent & ": " & e.msg)
-  let res = runGit(gitBin,
-    ["clone", "--bare", "--quiet", fetchUrl, bare])
-  if res.code != 0:
-    # Leave no half-populated bare behind so the next attempt re-clones
-    # cleanly rather than mistaking a broken dir for a present cache.
-    if dirExists(bare):
-      try: removeDir(bare)
-      except OSError: discard
-    return SharedCloneResult(ok: false, sharedBarePath: bare,
-      diagnostic: "git clone --bare into shared cache failed (" & $res.code &
-        "): " & res.output.strip())
-  # A freshly-cloned bare is current, but it is born WITHOUT a fetch
-  # refspec, so its NEXT refresh would be the silent no-op described on
-  # ``SharedBareFetchRefspec``. Install it at birth, so no bare in the cache
-  # ever spends a single refresh cycle frozen.
-  let prepared = prepareSharedBare(gitBin, bare)
-  if prepared.len > 0:
-    return SharedCloneResult(ok: false, sharedBarePath: bare,
-      diagnostic: "cloned the shared bare but " & prepared)
   SharedCloneResult(ok: true, sharedBarePath: bare)
 
 # ---- bootstrap manifest cache population (RA-11) ---------------------------
@@ -996,15 +1295,22 @@ proc cloneManifestCacheEntry(gitBin, target, manifestUrl, branch: string):
         manifestEntry: mceAbsent,
         diagnostic: "could not create manifest cache parent " & parent &
           ": " & e.msg)
-  var cloneArgs = @["clone", "--quiet"]
+  # Cache entries must own their objects even when a local manifest source
+  # borrows from a pool outside the selected cache root.
+  var cloneArgs = @["clone", "--no-local", "--quiet"]
   if branch.len > 0:
     cloneArgs.add(["--single-branch", "--branch", branch])
   cloneArgs.add([manifestUrl, target])
   let res = runGit(gitBin, cloneArgs)
   if res.code != 0:
-    if dirExists(target):
-      try: removeDir(target)
-      except OSError: discard
+    if looksLikeGitDir(target):
+      let post = inspectManifestCacheEntry(gitBin, target, manifestUrl)
+      if post.status == mceMatches:
+        return refreshManifestCacheEntry(gitBin, target)
+    else:
+      if dirExists(target):
+        try: removeDir(target)
+        except OSError: discard
     return SharedCloneResult(ok: false, sharedBarePath: target,
       manifestEntry: mceAbsent,
       diagnostic: "git clone of manifest repo into cache failed (" &
@@ -1072,36 +1378,43 @@ proc ensureManifestCache*(gitBin, cacheRoot, manifestUrl: string;
   ## The walk cannot recurse further, so a pathological third collision ends
   ## in a refusal rather than a search.
   let primary = manifestCachePath(cacheRoot, manifestUrl)
-  let entry = inspectManifestCacheEntry(gitBin, primary, manifestUrl)
-  case entry.status
-  of mceMatches:
-    return refreshManifestCacheEntry(gitBin, primary)
-  of mceAbsent:
-    return cloneManifestCacheEntry(gitBin, primary, manifestUrl, branch)
-  of mceNoOrigin, mceUnreadable, mceUnknown:
-    return unverifiableManifestCacheRefusal(entry, manifestUrl)
-  of mceForeign:
-    discard
+  var entry: ManifestCacheEntry
+  withCacheEntryVcsLock(primary,
+      (block: return SharedCloneResult(ok: false, sharedBarePath: primary,
+        diagnostic: "could not lock manifest cache: " & primary))):
+    entry = inspectManifestCacheEntry(gitBin, primary, manifestUrl)
+    case entry.status
+    of mceMatches:
+      return refreshManifestCacheEntry(gitBin, primary)
+    of mceAbsent:
+      return cloneManifestCacheEntry(gitBin, primary, manifestUrl, branch)
+    of mceNoOrigin, mceUnreadable, mceUnknown:
+      return unverifiableManifestCacheRefusal(entry, manifestUrl)
+    of mceForeign:
+      discard
 
   # The primary slug is owned by a DIFFERENT repository. Re-key onto the
   # identity-digest path and ask the same question there; the incumbent is
   # left untouched, because it is a legitimate cache entry for its own URL.
   let rekeyed = disambiguatedManifestCachePath(cacheRoot, manifestUrl)
-  let alt = inspectManifestCacheEntry(gitBin, rekeyed, manifestUrl)
-  case alt.status
-  of mceMatches:
-    refreshManifestCacheEntry(gitBin, rekeyed)
-  of mceAbsent:
-    cloneManifestCacheEntry(gitBin, rekeyed, manifestUrl, branch)
-  of mceForeign:
-    SharedCloneResult(ok: false, sharedBarePath: rekeyed,
-      manifestEntry: mceForeign,
-      diagnostic: "refusing to use the manifest cache for '" & manifestUrl &
-        "': the slug path '" & primary & "' holds '" & entry.observedUrl &
-        "' and the re-keyed path '" & rekeyed & "' holds '" &
-        alt.observedUrl & "', so neither is this URL's entry.")
-  else:
-    unverifiableManifestCacheRefusal(alt, manifestUrl)
+  withCacheEntryVcsLock(rekeyed,
+      (block: return SharedCloneResult(ok: false, sharedBarePath: rekeyed,
+        diagnostic: "could not lock manifest cache: " & rekeyed))):
+    let alt = inspectManifestCacheEntry(gitBin, rekeyed, manifestUrl)
+    case alt.status
+    of mceMatches:
+      return refreshManifestCacheEntry(gitBin, rekeyed)
+    of mceAbsent:
+      return cloneManifestCacheEntry(gitBin, rekeyed, manifestUrl, branch)
+    of mceForeign:
+      return SharedCloneResult(ok: false, sharedBarePath: rekeyed,
+        manifestEntry: mceForeign,
+        diagnostic: "refusing to use the manifest cache for '" & manifestUrl &
+          "': the slug path '" & primary & "' holds '" & entry.observedUrl &
+          "' and the re-keyed path '" & rekeyed & "' holds '" &
+          alt.observedUrl & "', so neither is this URL's entry.")
+    else:
+      return unverifiableManifestCacheRefusal(alt, manifestUrl)
 
 # ---- alternates wiring -----------------------------------------------------
 
@@ -1109,25 +1422,123 @@ proc gitObjectDir(repoPath: string): string =
   ## Return the object-store dir for ``repoPath`` whether it is a normal
   ## working tree (``<repo>/.git/objects``) or a bare repo
   ## (``<repo>/objects``).
-  if dirExists(repoPath / ".git"):
-    repoPath / ".git" / "objects"
-  else:
-    repoPath / "objects"
+  var gitDir = repoPath / ".git"
+  if fileExists(gitDir):
+    let text = readFile(gitDir).strip()
+    if not text.startsWith("gitdir:"):
+      raise newException(IOError, "invalid gitdir file: " & gitDir)
+    let target = text["gitdir:".len .. ^1].strip()
+    gitDir = if target.isAbsolute: target else: absolutePath(target, absolutePath(repoPath))
+  elif not dirExists(gitDir):
+    gitDir = repoPath
+  if fileExists(gitDir / "commondir"):
+    let common = readFile(gitDir / "commondir").strip()
+    gitDir = if common.isAbsolute: common else: absolutePath(common, absolutePath(gitDir))
+  gitDir / "objects"
 
 proc alternatesFilePath*(repoPath: string): string =
   ## Path of the alternates file for ``repoPath`` (normal or bare).
   gitObjectDir(repoPath) / "info" / "alternates"
 
-proc readAlternates*(repoPath: string): seq[string] =
-  ## Return the alternates currently wired for ``repoPath`` (empty if the
-  ## file is absent). Blank lines are skipped.
-  let p = alternatesFilePath(repoPath)
-  if not fileExists(p):
+proc readAlternatesFile(path: string): seq[string] =
+  ## The entries of the alternates file at ``path``, verbatim (empty if the
+  ## file is absent). Blank lines are skipped and nothing else is
+  ## interpreted, so a caller that rewrites the file keeps every line it did
+  ## not change. Raises ``IOError`` when the file exists but cannot be read.
+  if not fileExists(path):
     return @[]
-  for line in readFile(p).splitLines:
+  for line in readFile(path).splitLines:
     let trimmed = line.strip()
     if trimmed.len > 0:
       result.add(trimmed)
+
+proc readAlternates*(repoPath: string): seq[string] =
+  ## Return the alternates currently wired for ``repoPath`` (empty if the
+  ## file is absent). Blank lines are skipped.
+  readAlternatesFile(alternatesFilePath(repoPath))
+
+proc resolveAlternateEntry(entry, objectDir: string): string =
+  ## The object directory that an entry in ``objectDir``'s alternates file
+  ## names. Git resolves a relative entry against the object directory whose
+  ## ``info/alternates`` lists it, not against the repository or the working
+  ## directory (``parse_alternates`` in git's ``odb.c``).
+  if entry.isAbsolute: entry
+  else: absolutePath(entry, absolutePath(objectDir))
+
+proc alternateObjectDirs*(leaf: string): seq[string] =
+  ## Resolve relative alternates against the object directory, including a
+  ## linked worktree's common store. Keep missing targets visible to health.
+  let objectDir = gitObjectDir(leaf)
+  for entry in readAlternates(leaf):
+    result.add(resolveAlternateEntry(entry, objectDir))
+
+const GitMaxAlternateDepth = 5
+  ## How deep git follows nested alternates. In git 2.54.0's ``odb.c``,
+  ## ``odb_prepare_alternates`` links the primary store's entries at depth 0,
+  ## and ``odb_add_alternate_recursively`` follows the ``info/alternates`` of
+  ## a store at depth ``d`` only while ``d + 1 <= 5``; past that it reports
+  ## "ignoring alternate object stores, nesting too deep". So stores up to
+  ## six hops away are part of a repository's object database, and a seventh
+  ## is not. Older gits apply the same limit in ``link_alt_odb_entries``
+  ## (``if (depth > 5)``, in ``sha1_file.c`` and later ``object-file.c``).
+  ## https://github.com/git/git/blob/v2.54.0/odb.c
+
+proc objectStoreIdentity(objectDir: string): string =
+  ## The spelling git keys an object store by: its real path, since
+  ## ``parse_alternates`` normalises each entry with ``strbuf_realpath``. A
+  ## store whose path cannot be resolved keeps its absolute lexical spelling.
+  try:
+    result = expandFilename(objectDir)
+  except OSError:
+    result = absolutePath(objectDir)
+  while result.len > 1 and result[^1] in {DirSep, AltSep}:
+    result.setLen(result.len - 1)
+
+proc linkAlternateStores(objectDir: string; childDepth: int;
+                         seen, stores: var seq[string]) =
+  ## Append to ``stores`` every store that ``objectDir``'s alternates file
+  ## names, each followed by the stores IT borrows from, the way git builds
+  ## an object database: depth first, in file order, each store once.
+  ##
+  ## Mirrors git's rules, so the result is the set of stores git itself
+  ## reads. An absent or unreadable ``info/alternates`` contributes nothing
+  ## (git warns and carries on, ``odb_source_files_read_alternates``). A
+  ## ``#`` line is a comment. An entry naming a missing directory is skipped
+  ## (git: "object directory ... does not exist"). A store already linked,
+  ## or the primary one, is skipped (``odb_is_source_usable``), and that is
+  ## also what makes a cycle terminate. Nesting stops at
+  ## ``GitMaxAlternateDepth``. A C-quoted entry is not unquoted, so it is
+  ## skipped as a missing directory; git never writes one itself.
+  var entries: seq[string]
+  try:
+    entries = readAlternatesFile(objectDir / "info" / "alternates")
+  except IOError, OSError:
+    return
+  if entries.len > 0 and childDepth > GitMaxAlternateDepth:
+    return
+  for entry in entries:
+    if entry.startsWith("#"):
+      continue
+    let resolved = resolveAlternateEntry(entry, objectDir)
+    if not dirExists(resolved):
+      continue
+    let store = objectStoreIdentity(resolved)
+    if store in seen:
+      continue
+    seen.add(store)
+    stores.add(store)
+    linkAlternateStores(store, childDepth + 1, seen, stores)
+
+proc borrowedObjectStores*(repoPath: string): seq[string] =
+  ## Every object store ``repoPath`` reads objects from through alternates,
+  ## TRANSITIVELY: the stores its own ``objects/info/alternates`` names, the
+  ## stores their alternates name, and so on, as git follows them (see
+  ## ``linkAlternateStores``). Each is given by its real path, and the
+  ## repository's own store is not included. Raises ``IOError`` for an
+  ## invalid ``.git`` file, like ``gitObjectDir``.
+  let primary = objectStoreIdentity(gitObjectDir(repoPath))
+  var seen = @[primary]
+  linkAlternateStores(primary, 0, seen, result)
 
 proc wireAlternates*(repoPath, sharedBarePath: string;
                      gitBin = "git"): SharedCloneResult =
@@ -1143,32 +1554,35 @@ proc wireAlternates*(repoPath, sharedBarePath: string;
   ## fails (Shared-Clone-Pool-Integrity §3.2). It also gets the refetch
   ## chain and ``fetch.hideRefs`` (§3.4, §3.5); a failure there is reported
   ## but does not unwire it, because it costs recovery, not safety.
-  let sharedObjects = sharedBarePath / "objects"
-  if not dirExists(sharedObjects):
-    return SharedCloneResult(ok: false, sharedBarePath: sharedBarePath,
-      diagnostic: "shared bare has no objects dir: " & sharedObjects)
-  if not registerBorrower(sharedBarePath, repoPath):
-    return SharedCloneResult(ok: false, sharedBarePath: sharedBarePath,
-      diagnostic: "could not register " & repoPath & " as a borrower in " &
-        borrowersPath(sharedBarePath))
-  let altPath = alternatesFilePath(repoPath)
-  let infoDir = altPath.splitPath.head
-  try:
-    createDir(infoDir)
-  except OSError as e:
-    return SharedCloneResult(ok: false, sharedBarePath: sharedBarePath,
-      diagnostic: "could not create " & infoDir & ": " & e.msg)
-  var entries = readAlternates(repoPath)
-  if sharedObjects notin entries:
-    entries.add(sharedObjects)
-    try:
-      writeFile(altPath, entries.join("\n") & "\n")
-    except IOError as e:
+  withCheckoutVcsLock(repoPath,
+      (block: return SharedCloneResult(ok: false, sharedBarePath: sharedBarePath,
+        diagnostic: "could not lock checkout: " & repoPath))):
+    let sharedObjects = sharedBarePath / "objects"
+    if not dirExists(sharedObjects):
       return SharedCloneResult(ok: false, sharedBarePath: sharedBarePath,
-        diagnostic: "could not write alternates " & altPath & ": " & e.msg)
-  let configured = ensureLeafPoolConfig(gitBin, repoPath, sharedBarePath)
-  SharedCloneResult(ok: true, sharedBarePath: sharedBarePath,
-    diagnostic: configured)
+        diagnostic: "shared bare has no objects dir: " & sharedObjects)
+    if not registerBorrower(sharedBarePath, repoPath):
+      return SharedCloneResult(ok: false, sharedBarePath: sharedBarePath,
+        diagnostic: "could not register " & repoPath & " as a borrower in " &
+          borrowersPath(sharedBarePath))
+    let altPath = alternatesFilePath(repoPath)
+    let infoDir = altPath.splitPath.head
+    try:
+      createDir(infoDir)
+    except OSError as e:
+      return SharedCloneResult(ok: false, sharedBarePath: sharedBarePath,
+        diagnostic: "could not create " & infoDir & ": " & e.msg)
+    var entries = readAlternates(repoPath)
+    if sharedObjects notin entries:
+      entries.add(sharedObjects)
+      try:
+        writeFile(altPath, entries.join("\n") & "\n")
+      except IOError as e:
+        return SharedCloneResult(ok: false, sharedBarePath: sharedBarePath,
+          diagnostic: "could not write alternates " & altPath & ": " & e.msg)
+    let configured = ensureLeafPoolConfig(gitBin, repoPath, sharedBarePath)
+    return SharedCloneResult(ok: true, sharedBarePath: sharedBarePath,
+      diagnostic: configured)
 
 proc samePathOnDisk*(a, b: string): bool =
   ## Path equality for two spellings of what may be ONE location.
@@ -1262,17 +1676,34 @@ const
     ## First git release that runs ``gc.recentObjectsHook``.
   LeafPoolRemoteName* = "repro-pool"
     ## The remote every leaf carries for its pool (§3.4).
-  LeafPoolUploadPack* = "env GIT_NO_LAZY_FETCH=0 git-upload-pack"
-    ## ``remote.repro-pool.uploadpack``. ``upload-pack`` refuses to lazily
-    ## fetch on behalf of a client by default (it exports
-    ## ``GIT_NO_LAZY_FETCH=1``, because a lazy fetch runs the SERVED
-    ## repository's configuration). This opts this one remote in, so a
-    ## leaf's request for an object the pool lacks is passed on to upstream.
-    ## It is a deliberate widening of trust: the pool's configuration now
-    ## runs inside the leaf's git commands. The pool is the user's own cache,
-    ## written only by reprobuild.
+  LeafPoolUploadPack* = "internal shared-pool-upload-pack"
+    ## Internal transport role. ``leafPoolUploadPackCommand`` binds this to
+    ## the selected repro executable; the old unrestricted lazy upload-pack
+    ## command could refill the same history concurrently without negotiation.
   LeafHiddenFetchRefs* = "refs/remotes/"
     ## ``fetch.hideRefs`` in every leaf (§3.5).
+
+proc quotePoolShell(value: string): string =
+  ## Git's bundled Windows shell takes POSIX paths and quoting, rather than
+  ## cmd.exe's command syntax or the native process argument quoting.
+  when defined(windows): quoteShellPosix(value.replace('\\', '/'))
+  else: quoteShellPosix(value)
+
+proc leafPoolUploadPackCommand*(): string =
+  ## Use the same explicit executable override as managed Git hooks. Library
+  ## callers are not necessarily running in the CLI, so getAppFilename() is
+  ## not a valid way to select the transport service.
+  let override = getEnv("REPROBUILD_REPRO")
+  let hint = getEnv("REPRO_SHARED_POOL_CLI")
+  let executable = if override.len > 0: override
+    elif hint.len > 0: hint
+    else: uncontrolledFindExe("repro")
+  let resolved = if executable.len == 0: "repro"
+    else:
+      let found = uncontrolledFindExe(executable)
+      if found.len > 0: found else: absolutePath(executable)
+  # Git evaluates this configuration through its POSIX shell on Windows too.
+  quotePoolShell(resolved) & " " & LeafPoolUploadPack
 
 proc poolReproDir*(pool: string): string = pool / PoolReproDirName
 proc borrowersPath*(pool: string): string =
@@ -1280,9 +1711,31 @@ proc borrowersPath*(pool: string): string =
 proc retentionHookPath*(pool: string): string =
   poolReproDir(pool) / RetentionHookFileName
 
+proc poolTransportShell(gitBin: string): string =
+  ## Use an explicit shell for file redirection. poEvalCommand does not
+  ## invoke a shell on Windows, and cmd.exe cannot safely quote arbitrary
+  ## paths containing percent signs. Git itself already requires this shell.
+  when defined(windows):
+    let declared = runGit(gitBin, ["var", "GIT_SHELL_PATH"])
+    if declared.code == 0 and fileExists(declared.output.strip()):
+      return declared.output.strip()
+    # Older Git versions do not expose GIT_SHELL_PATH. Cover the cmd/, bin/
+    # and mingw64/libexec/git-core/ executable locations in Git for Windows.
+    var directory = absolutePath(gitBin).parentDir
+    for depth in 0 .. 3:
+      for candidate in [directory / "sh.exe", directory / "bin/sh.exe",
+          directory / "usr/bin/sh.exe"]:
+        if fileExists(candidate): return candidate
+      directory = directory.parentDir
+    raise newException(IOError, "could not locate Git's POSIX shell")
+  else:
+    "/bin/sh"
+
 proc runGitEnv(gitBin: string; args: openArray[string];
                lazyFetch: bool; input = "";
-               workingDir = ""): tuple[code: int; output: string] =
+               workingDir = ""; inputFile = "";
+               objectDirectory = ""; alternateObjectDirectory = ""):
+               tuple[code: int; output: string] =
   ## ``runGit`` with lazy fetching pinned on or off, and optional stdin.
   ## Lazy fetching is decided explicitly in BOTH directions so an ambient
   ## ``GIT_NO_LAZY_FETCH`` cannot decide whether a probe touches the network:
@@ -1293,22 +1746,575 @@ proc runGitEnv(gitBin: string; args: openArray[string];
   for arg in args:
     cmd.add(" ")
     cmd.add(quoteShell(arg))
+  if inputFile.len > 0:
+    var script = quotePoolShell(gitBin)
+    for arg in args: script.add(" " & quotePoolShell(arg))
+    script.add(" < " & quotePoolShell(inputFile))
+    cmd = quoteShellCommand(@[poolTransportShell(gitBin), "-c", script])
   let env = scrubbedGitRepositoryEnv()
+  if objectDirectory.len > 0:
+    # These are our explicit ingestion store and read-only pool, never the
+    # invoking leaf's inherited object-store bindings. Git accepts C-quoted
+    # alternate paths, so separators and quotes inside a path stay literal.
+    env["GIT_OBJECT_DIRECTORY"] = absolutePath(objectDirectory)
+    if alternateObjectDirectory.len > 0:
+      var quoted = "\""
+      for ch in absolutePath(alternateObjectDirectory):
+        case ch
+        of '\\', '"': quoted.add('\\'); quoted.add(ch)
+        else:
+          if ord(ch) < 32 or ord(ch) == 127:
+            quoted.add('\\'); quoted.add(toOct(ord(ch), 3))
+          else: quoted.add(ch)
+      quoted.add('"')
+      env["GIT_ALTERNATE_OBJECT_DIRECTORIES"] = quoted
   # Lazy fetching ON is the variable ABSENT, exactly as a user's shell has
-  # it, not ``=0``: upload-pack only sets ``GIT_NO_LAZY_FETCH=1`` when it is
-  # unset, so an inherited ``0`` would let the pool fetch on our behalf even
-  # without ``remote.repro-pool.uploadpack``, and the refill would not be
-  # exercising the path a user's own git takes.
+  # it, not ``=0``. This exercises the same path as a user's own Git; the
+  # pool transport separately disables lazy fetching throughout its service.
   if lazyFetch:
     env.del("GIT_NO_LAZY_FETCH")
   else:
     env["GIT_NO_LAZY_FETCH"] = "1"
-  let res = execCmdEx(cmd, workingDir = workingDir, env = env, input = input)
+  let res = execCmdExCloseOnce(cmd, workingDir = workingDir, env = env,
+    input = input)
   (code: res.exitCode, output: res.output)
 
 proc isObjectId(text: string): bool =
   (text.len == 40 or text.len == 64) and
     text.allCharsInSet({'0'..'9', 'a'..'f'})
+
+proc poolObjectKinds(gitBin, pool: string; ids: seq[string]): seq[string] =
+  if ids.len == 0: return
+  # Use a file for stdin: a batch response can fill the output pipe while
+  # its parent is still writing a large checkout's list of wanted IDs.
+  let temporary = createTempFile("pool-presence-", ".ids")
+  defer: removeFile(temporary.path)
+  try:
+    temporary.cfile.write(ids.join("\n") & "\n")
+  finally:
+    temporary.cfile.close()
+  let presence = runGitEnv(gitBin, ["--no-replace-objects", "-C", pool,
+    "-c", "core.commitGraph=false", "cat-file",
+    "--batch-check=%(objectname) %(objecttype)"],
+    lazyFetch = false, inputFile = temporary.path)
+  if presence.code != 0:
+    raise newException(IOError, "could not inspect wanted objects")
+  let rows = presence.output.strip().splitLines()
+  if rows.len != ids.len:
+    raise newException(IOError, "incomplete wanted-object presence response")
+  for i, row in rows:
+    if row == ids[i] & " missing":
+      result.add("missing")
+    elif row notin [ids[i] & " commit", ids[i] & " tree",
+        ids[i] & " blob", ids[i] & " tag"]:
+      raise newException(IOError, "invalid wanted-object presence response")
+    else:
+      result.add(row.splitWhitespace()[1])
+
+proc absentPoolObjects(gitBin, pool: string; ids: seq[string]): seq[string] =
+  for i, kind in poolObjectKinds(gitBin, pool, ids):
+    if kind == "missing": result.add(ids[i])
+
+proc presentPoolCommits(gitBin, pool: string; ids: seq[string]): seq[string] =
+  var seen = initHashSet[string]()
+  for i, kind in poolObjectKinds(gitBin, pool, ids):
+    if kind == "commit" and ids[i] notin seen:
+      seen.incl(ids[i])
+      result.add(ids[i])
+
+proc suppliedCommitTips(gitBin, pool: string; ids: seq[string]): seq[string] =
+  result = presentPoolCommits(gitBin, pool, ids)
+  let kinds = poolObjectKinds(gitBin, pool, ids)
+  for i, kind in kinds:
+    if kind == "tag":
+      let peeled = runGitEnv(gitBin, ["--no-replace-objects", "-C", pool,
+        "-c", "core.commitGraph=false", "rev-parse", "--verify",
+        ids[i] & "^{commit}"], lazyFetch = false)
+      let id = peeled.output.strip()
+      if peeled.code == 0 and isObjectId(id) and id notin result:
+        result.add(id)
+
+proc refillTipsPath(pool: string): string = poolReproDir(pool) / "refill-tips"
+
+proc readRefillTips(pool: string): seq[string] =
+  let path = refillTipsPath(pool)
+  if not fileExists(path) and not dirExists(path): return
+  try:
+    for line in readFile(path).splitLines():
+      if line.len == 0: continue
+      if not isObjectId(line):
+        raise newException(IOError, "invalid object id in " & path)
+      result.add(line)
+  except IOError, OSError:
+    raise newException(IOError, "could not read refill negotiation tips " &
+      path & ": " & getCurrentExceptionMsg())
+
+proc writeRefillTips(pool: string; tips: seq[string]) =
+  ## Hints are deliberately outside refs: they neither retain objects for GC
+  ## nor change the upstream/ref mirror. The caller holds the pool VCS lock.
+  let path = refillTipsPath(pool)
+  let temporary = path & ".tmp-" & $getCurrentProcessId()
+  try:
+    createDir(poolReproDir(pool))
+    writeFile(temporary, if tips.len > 0: tips.join("\n") & "\n" else: "")
+    moveFile(temporary, path)
+  except IOError, OSError:
+    if fileExists(temporary): removeFile(temporary)
+    raise newException(IOError, "could not write refill negotiation tips " &
+      path & ": " & getCurrentExceptionMsg())
+
+proc incompletePoolHistory(gitBin, pool: string; hiddenRefs: HashSet[string];
+                           hints: seq[string]; includeRefs = true): HashSet[string] =
+  var args = @["--no-replace-objects", "-C", pool, "-c",
+    "core.commitGraph=false", "rev-list", "--parents", "--topo-order",
+    "--missing=print"]
+  if includeRefs:
+    args.add("--exclude=HEAD")
+    for name in hiddenRefs: args.add("--exclude=" & name)
+    args.add("--all")
+  args.add(hints)
+  let walk = runGitEnv(gitBin, args, lazyFetch = false)
+  if walk.code != 0:
+    raise newException(IOError, "could not inspect physical negotiation history: " &
+      walk.output.strip())
+  let rows = walk.output.splitLines()
+  result = initHashSet[string]()
+  for row in rows:
+    if row.startsWith("?") and isObjectId(row[1 .. ^1]):
+      result.incl(row[1 .. ^1])
+  # Children precede parents in topological order. Reverse it to mark every
+  # ref or raw hint which depends on a physically missing ancestor.
+  for i in countdown(rows.high, 0):
+    let fields = rows[i].splitWhitespace()
+    if fields.len == 0 or not isObjectId(fields[0]): continue
+    for parent in fields[1 .. ^1]:
+      if parent in result:
+        result.incl(fields[0])
+        break
+
+proc missingWantedAncestors(gitBin, pool: string; incomplete: HashSet[string];
+                            tips: seq[string]): seq[string] =
+  var required: seq[string]
+  for tip in tips:
+    if tip in incomplete: required.add(tip)
+  if required.len == 0: return
+  # Advisory haves must not make an unrelated, otherwise complete read depend
+  # on repairing their history. Only wanted commits' ancestors are required.
+  let broken = incompletePoolHistory(gitBin, pool, initHashSet[string](),
+    required, includeRefs = false)
+  var candidates: seq[string]
+  for id in broken: candidates.add(id)
+  absentPoolObjects(gitBin, pool, candidates)
+
+proc independentRefillTips(gitBin, pool: string; oldTips, newTips: seq[string]):
+    seq[string] =
+  result = oldTips
+  for candidate in newTips:
+    if candidate in result: continue
+    var kept: seq[string]
+    var redundant = false
+    var offset = 0
+    # The old frontier is already independent. Comparing each new tip with
+    # bounded chunks preserves that invariant without unbounded merge-base
+    # argv or an ancestry walk on ordinary missing-blob requests.
+    while offset < result.len:
+      let stop = min(result.len, offset + 128)
+      let chunk = result[offset ..< stop]
+      let merged = runGitEnv(gitBin, @["--no-replace-objects", "-C", pool,
+        "-c", "core.commitGraph=false", "merge-base", "--independent"] &
+        chunk & @[candidate], lazyFetch = false)
+      if merged.code != 0:
+        raise newException(IOError, "could not compact refill negotiation tips: " &
+          merged.output.strip())
+      let survivors = merged.output.splitWhitespace().toHashSet()
+      if candidate notin survivors:
+        redundant = true
+        break
+      for tip in chunk:
+        if tip in survivors: kept.add(tip)
+      offset = stop
+    if not redundant:
+      kept.add(candidate)
+      result = kept
+
+const
+  RefillStageMarkerName = ".repro-refill-stage"
+  RefillStageMarker = "reprobuild.pool-refill.v1\n"
+
+proc removeOwnedRefillStage(stage: string) =
+  ## Keep the ownership marker until every potentially large payload is gone.
+  ## A kill during cleanup must not strand unmarked incoming packs either.
+  for kind, child in walkDir(stage):
+    if child.lastPathPart == RefillStageMarkerName: continue
+    if kind == pcDir: removeDir(child)
+    else: removeFile(child)
+  let marker = stage / RefillStageMarkerName
+  if fileExists(marker): removeFile(marker)
+  removeDir(stage)
+
+proc cleanupAbandonedRefillStages(pool: string) =
+  ## The caller owns the same pool lock as every active refill, so a marked
+  ## direct child here can only belong to a process which has already exited.
+  ## Unknown directories and symlinks stay intact, including unreadable magic.
+  for kind, stage in walkDir(poolReproDir(pool)):
+    if kind != pcDir or not stage.lastPathPart.startsWith("refill-"): continue
+    let marker = stage / RefillStageMarkerName
+    if not fileExists(marker) or symlinkExists(marker): continue
+    var magic: string
+    try: magic = readFile(marker)
+    except IOError, OSError: continue
+    if magic != RefillStageMarker: continue
+    try:
+      removeOwnedRefillStage(stage)
+    except IOError, OSError:
+      raise newException(IOError, "could not remove abandoned pool refill stage " &
+        stage & ": " & getCurrentExceptionMsg())
+
+proc refillPoolObjects(gitBin, pool: string; args: seq[string];
+                       ids: seq[string]): tuple[code: int; output: string] =
+  ## Negotiate into a private object store, then publish only genuinely new
+  ## objects. Git's negotiation can repeat trees even with correct commit
+  ## haves; directly installing its promisor pack would retain those copies.
+  ## The caller owns the pool lock throughout. Readers see the original pool
+  ## until a complete, self-contained promisor pack becomes visible.
+  let originalObjects = absolutePath(gitObjectDir(pool))
+  createDir(poolReproDir(pool))
+  cleanupAbandonedRefillStages(pool)
+  let scratch = createTempDir("refill-", "", poolReproDir(pool))
+  defer: removeOwnedRefillStage(scratch)
+  writeFile(scratch / RefillStageMarkerName, RefillStageMarker)
+  let incomingObjects = absolutePath(scratch / "objects")
+  createDir(incomingObjects / "pack")
+  # The alternate exists for object lookup, not another source of haves.
+  # Discovering its refs would reintroduce this same pool's damaged tips
+  # after the caller has deliberately excluded them from negotiation.
+  # A trailing space makes Git invoke its shell for the ':' builtin rather
+  # than try to execute a file named ':'.
+  let fetchArgs = @["-c", "core.alternateRefsCommand=: "] & args
+  result = runGitEnv(gitBin, fetchArgs, lazyFetch = false,
+    input = ids.join("\n") & "\n", objectDirectory = incomingObjects,
+    alternateObjectDirectory = originalObjects)
+
+  # A failed fetch can still have received a valid pack before its
+  # connectivity check found damaged old history. Ingest complete objects
+  # too, and preserve the fetch status for the caller's recovery decision.
+  let format = runGitEnv(gitBin, ["-C", pool, "rev-parse",
+    "--show-object-format"], lazyFetch = false)
+  if format.code != 0 or format.output.strip() notin ["sha1", "sha256"]:
+    raise newException(IOError, "could not identify shared pool object format")
+  var incoming: seq[string]
+  var seen = initHashSet[string]()
+  for index in walkFiles(incomingObjects / "pack/*.idx"):
+    let contents = runGitEnv(gitBin, ["-C", pool, "show-index",
+      "--object-format=" & format.output.strip()], lazyFetch = false,
+      inputFile = index)
+    if contents.code != 0:
+      raise newException(IOError, "could not enumerate received pool objects: " &
+        contents.output.strip())
+    for line in contents.output.splitLines():
+      if line.len == 0: continue
+      let fields = line.splitWhitespace()
+      if fields.len < 2 or not isObjectId(fields[1]):
+        raise newException(IOError, "invalid received pack index")
+      if fields[1] notin seen:
+        seen.incl(fields[1])
+        incoming.add(fields[1])
+  # Current Git keeps filtered transfers in promisor packs. Accept loose
+  # arrivals as well without depending on that implementation choice.
+  for kind, directory in walkDir(incomingObjects):
+    let prefix = directory.lastPathPart
+    if kind != pcDir or prefix.len != 2 or
+        not prefix.allCharsInSet({'0'..'9', 'a'..'f'}): continue
+    for fileKind, path in walkDir(directory):
+      let id = prefix & path.lastPathPart
+      if fileKind == pcFile and isObjectId(id) and id notin seen:
+        seen.incl(id)
+        incoming.add(id)
+  let missing = absentPoolObjects(gitBin, pool, incoming)
+  if missing.len == 0: return
+  let idFile = scratch / "missing-objects"
+  writeFile(idFile, missing.join("\n") & "\n")
+  let prefix = absolutePath(scratch / "compact/pack")
+  createDir(prefix.parentDir)
+  let packed = runGitEnv(gitBin, ["--no-replace-objects", "-C", pool,
+    "pack-objects", "-q", "--no-reuse-delta", "--index-version=2", prefix],
+    lazyFetch = false, inputFile = idFile, objectDirectory = incomingObjects,
+    alternateObjectDirectory = originalObjects)
+  let hash = packed.output.strip()
+  if packed.code != 0 or not isObjectId(hash):
+    raise newException(IOError, "could not pack new shared pool objects: " &
+      packed.output.strip())
+  let source = prefix & "-" & hash
+  if not fileExists(source & ".pack") or not fileExists(source & ".idx"):
+    raise newException(IOError, "new shared pool pack was not produced")
+  writeFile(source & ".promisor", "")
+  let packDir = originalObjects / "pack"
+  createDir(packDir)
+  let destination = packDir / ("pack-" & hash)
+  for extension in [".pack", ".promisor", ".idx"]:
+    if fileExists(destination & extension):
+      raise newException(IOError, "refusing to replace an existing shared pool pack")
+  var installed: seq[string]
+  try:
+    # Git discovers packs through their indexes. Publish the promise marker
+    # before the index, so no reader sees unmarked partial-clone objects.
+    for extension in [".pack", ".promisor", ".idx"]:
+      moveFile(source & extension, destination & extension)
+      installed.add(destination & extension)
+  except CatchableError:
+    # Before the index is visible these files cannot have readers. Once it
+    # is visible, preserve the pack even if a later check reports failure.
+    if not fileExists(destination & ".idx"):
+      for path in installed: removeFile(path)
+    raise
+  if absentPoolObjects(gitBin, pool, missing).len > 0:
+    raise newException(IOError, "new shared pool pack did not supply its objects")
+
+proc serveSharedPoolUploadPack*(gitBin, pool: string): int =
+  ## Serve the private promisor remote using Git's v0 stateless transport.
+  ## Git specifies pkt-line framing and the v0 request grammar in:
+  ## https://git-scm.com/docs/gitprotocol-common
+  ## https://git-scm.com/docs/gitprotocol-pack
+  ## A lazy-fetch client sends no haves: letting upload-pack itself refill a
+  ## missing want consequently downloads its entire history with noop
+  ## negotiation. Refill explicitly, under the same lock as refresh/gc, before
+  ## stock upload-pack sees the request. A second client rechecks presence
+  ## after acquiring the lock and cannot write another copy of that history.
+  ##
+  ## This remote is only for lazy fetches, never a normal refspec fetch. Refuse
+  ## interactive have/ACK negotiation immediately rather than waiting for a
+  ## client which is itself waiting for our ACK. Git clients which request v2
+  ## transparently fall back when the advertisement is v0.
+  if gitBin.len == 0:
+    stderr.writeLine("repro pool transport: cannot find git")
+    return 1
+  let env = scrubbedGitRepositoryEnv()
+  env.del("GIT_PROTOCOL")
+  env["GIT_NO_LAZY_FETCH"] = "1"
+  let serviceArgs = @["-c", "uploadpack.allowFilter=true", "-c",
+    "uploadpack.allowAnySHA1InWant=true", "upload-pack"]
+  try:
+    # --advertise-refs never reads stdin. Inherit the client's stdout and
+    # stderr directly, avoiding buffering the advertisement or deadlocking on
+    # a pool whose warnings fill stderr before stdout reaches EOF.
+    var advertised = uncontrolledStartProcess(gitBin, args = serviceArgs &
+      @["--advertise-refs", pool], env = env,
+      options = {poUsePath, poParentStreams})
+    let advertisedCode = advertised.waitForExit()
+    advertised.close()
+    if advertisedCode != 0: return advertisedCode
+    stdout.flushFile()
+    var request = ""
+    var wants: seq[string]
+    var seenWants = initHashSet[string]()
+    var flushed = false
+    # Git pkt-lines are at most 65520 bytes. Bound the aggregate too so an
+    # invalid local client cannot retain arbitrary input in this process.
+    const MaxRequestBytes = 256 * 1024 * 1024
+    while true:
+      var header = newString(4)
+      if stdin.readBuffer(addr header[0], 4) != 4:
+        raise newException(IOError, "incomplete packet header")
+      if not header.allCharsInSet({'0'..'9', 'a'..'f', 'A'..'F'}):
+        raise newException(IOError, "invalid packet length")
+      let length = parseHexInt(header)
+      if length != 0 and (length < 4 or length > 65520):
+        raise newException(IOError, "invalid packet length")
+      if request.len + max(length, 4) > MaxRequestBytes:
+        raise newException(IOError, "request exceeds transport limit")
+      request.add(header)
+      if length == 0:
+        # A client can discover that another borrower has just supplied all
+        # its wants after reading the advertisement. Stock upload-pack treats
+        # an empty want list as a successful no-op too.
+        if wants.len == 0: return 0
+        flushed = true
+        continue
+      var payload = newString(length - 4)
+      if payload.len > 0 and
+          stdin.readBuffer(addr payload[0], payload.len) != payload.len:
+        raise newException(IOError, "incomplete packet payload")
+      request.add(payload)
+      if payload.strip() == "done" and flushed and wants.len > 0:
+        break
+      if payload.startsWith("want ") and not flushed:
+        let fields = payload.splitWhitespace()
+        if fields.len < 2 or not isObjectId(fields[1]):
+          raise newException(IOError, "invalid wanted object id")
+        if fields[1] notin seenWants:
+          seenWants.incl(fields[1])
+          wants.add(fields[1])
+      elif payload.startsWith("shallow ") and not flushed:
+        let fields = payload.splitWhitespace()
+        if fields.len != 2 or not isObjectId(fields[1]):
+          raise newException(IOError, "invalid shallow boundary object id")
+      elif payload.strip() == "filter blob:none" and not flushed:
+        discard
+      else:
+        raise newException(IOError,
+          "the pool remote supports only non-negotiating lazy fetches")
+    block:
+      # A legitimate LLVM refill can outlast the ordinary two-minute VCS
+      # deadline. Wait for its owner rather than failing a concurrent read.
+      var refillLock = acquireVcsFileLock(cacheEntryLockPath(pool), timeoutMs = -1)
+      if not refillLock.acquired:
+        raise newException(IOError, "could not lock shared pool")
+      defer: releaseVcsFileLock(refillLock)
+      let absent = absentPoolObjects(gitBin, pool, wants)
+      if absent.len > 0:
+        let recordedTips = readRefillTips(pool)
+        var hints = presentPoolCommits(gitBin, pool, recordedTips)
+        if hints != recordedTips: writeRefillTips(pool, hints)
+        var refillArgs = @["-C", pool, "-c",
+          "fetch.negotiationAlgorithm=consecutive"]
+        let refs = runGitEnv(gitBin, ["-C", pool, "for-each-ref",
+          "--format=%(objectname) %(refname)"], lazyFetch = false)
+        if refs.code != 0:
+          raise newException(IOError, "could not inspect pool negotiation refs")
+        var refIds: seq[string]
+        var refNames: seq[string]
+        for line in refs.output.splitLines():
+          let fields = line.splitWhitespace()
+          if fields.len == 2 and isObjectId(fields[0]):
+            refIds.add(fields[0])
+            refNames.add(fields[1])
+        let missingRefs = absentPoolObjects(gitBin, pool, refIds).toHashSet()
+        var hiddenRefs = initHashSet[string]()
+        for i, id in refIds:
+          if id in missingRefs:
+            hiddenRefs.incl(refNames[i])
+            refillArgs.add(["-c", "fetch.hideRefs=" & refNames[i]])
+        var fetchArgs = @["fetch", "origin", "--filter=blob:none", "--no-tags",
+          "--no-write-fetch-head", "--no-auto-maintenance",
+          "--recurse-submodules=no", "--stdin"]
+        if hints.len > 0:
+          # --negotiation-tip restricts Git's defaults; include ordinary refs
+          # as well as raw refilled tips whose objects have no retaining ref.
+          fetchArgs.add("--negotiation-tip=*")
+          for tip in hints: fetchArgs.add("--negotiation-tip=" & tip)
+        proc refillWithoutHaves(ids: seq[string]): tuple[code: int; output: string] =
+          # A server need not send a wanted object that one of our haves
+          # reaches, and GitHub does not: it answers an empty pack, and the
+          # fetch dies with "bad revision '<want>'". A blob that a blob:none
+          # pool lacks is normally reachable from its own refs, so negotiated
+          # haves make exactly those wants unservable. Ask for whatever is
+          # still absent the way Git's own lazy fetch does, with no haves.
+          # Only wants the negotiated fetch failed to supply come here; a
+          # commit among them costs its full history, which is still better
+          # than failing the read.
+          var plainArgs: seq[string]
+          for arg in fetchArgs:
+            if not arg.startsWith("--negotiation-tip="): plainArgs.add(arg)
+          refillPoolObjects(gitBin, pool, refillArgs &
+            @["-c", "fetch.negotiationAlgorithm=noop"] & plainArgs, ids)
+        proc recoverKnownHistory(incomplete: HashSet[string];
+                                 targets: seq[string]): bool =
+          var recoveryArgs = @["--no-replace-objects"] & refillArgs &
+            @["-c", "core.commitGraph=false"]
+          var removedBrokenHave = false
+          var safeTips = initHashSet[string]()
+          var safeHints: seq[string]
+          for tip in hints:
+            if tip in incomplete:
+              removedBrokenHave = true
+            else:
+              safeHints.add(tip)
+              safeTips.incl(tip)
+          if safeHints != hints:
+            hints = safeHints
+            writeRefillTips(pool, hints)
+          for i, id in refIds:
+            if refNames[i] in hiddenRefs: continue
+            # An annotated (including nested) tag names a tag object, while
+            # the ancestry walk reports its peeled commit. Resolve that same
+            # commit before deciding whether this ref is a safe have.
+            let peeled = runGitEnv(gitBin, ["--no-replace-objects", "-C", pool,
+              "-c", "core.commitGraph=false", "rev-parse", "--verify",
+              refNames[i] & "^{commit}"], lazyFetch = false)
+            if peeled.code != 0 or not isObjectId(peeled.output.strip()):
+              continue
+            let commit = peeled.output.strip()
+            if id in incomplete or commit in incomplete:
+              recoveryArgs.add(["-c", "fetch.hideRefs=" & refNames[i]])
+              removedBrokenHave = true
+            else:
+              safeTips.incl(commit)
+          if not removedBrokenHave: return false
+          if targets.len == 0: return true
+          if safeTips.len == 0:
+            recoveryArgs.add(["-c", "fetch.negotiationAlgorithm=noop"])
+          var recoveryFetchArgs: seq[string]
+          for arg in fetchArgs:
+            if not arg.startsWith("--negotiation-tip="):
+              recoveryFetchArgs.add(arg)
+          for tip in safeTips:
+            recoveryFetchArgs.add("--negotiation-tip=" & tip)
+          let recovered = refillPoolObjects(gitBin, pool,
+            recoveryArgs & recoveryFetchArgs, targets)
+          var stillAbsent = absentPoolObjects(gitBin, pool, targets)
+          var wantedAbsent: seq[string]
+          for id in stillAbsent:
+            if id in absent: wantedAbsent.add(id)
+          if wantedAbsent.len > 0:
+            discard refillWithoutHaves(wantedAbsent)
+            stillAbsent = absentPoolObjects(gitBin, pool, targets)
+          if stillAbsent.len > 0:
+            raise newException(IOError, "could not refill shared pool: " &
+              recovered.output.strip())
+          true
+        let refill = refillPoolObjects(gitBin, pool, refillArgs & fetchArgs, absent)
+        let remaining = absentPoolObjects(gitBin, pool, absent)
+        var newTips = suppliedCommitTips(gitBin, pool, absent)
+        if remaining.len > 0 or refill.code != 0:
+          # A failed connectivity check may have supplied the requested tip
+          # while an older hint still has a hole. Include newly supplied tips
+          # in the physical proof and repair the actual missing ancestors too.
+          let incomplete = incompletePoolHistory(gitBin, pool, hiddenRefs,
+            hints & newTips)
+          var targets = missingWantedAncestors(gitBin, pool, incomplete, newTips)
+          for id in remaining:
+            if id notin targets: targets.add(id)
+          let recovered = recoverKnownHistory(incomplete, targets)
+          if remaining.len > 0 and not recovered:
+            let plain = refillWithoutHaves(remaining)
+            if absentPoolObjects(gitBin, pool, remaining).len > 0:
+              raise newException(IOError, "could not refill shared pool: " &
+                refill.output.strip() & "; without haves: " &
+                plain.output.strip())
+        newTips = suppliedCommitTips(gitBin, pool, absent)
+        if newTips.len > 0:
+          var compacted: seq[string]
+          try:
+            compacted = independentRefillTips(gitBin, pool, hints, newTips)
+          except IOError:
+            let incomplete = incompletePoolHistory(gitBin, pool, hiddenRefs,
+              hints & newTips)
+            let targets = missingWantedAncestors(gitBin, pool, incomplete, newTips)
+            if not recoverKnownHistory(incomplete, targets): raise
+            compacted = independentRefillTips(gitBin, pool, hints, newTips)
+          if compacted != hints or compacted != recordedTips:
+            writeRefillTips(pool, compacted)
+    # Redirect only stdin while inheriting stdout/stderr. In particular packs
+    # stream directly to the client; they are never buffered in Nim memory.
+    let temporary = createTempFile("pool-request-", ".pkt")
+    let requestFile = temporary.path
+    defer: removeFile(requestFile)
+    try:
+      temporary.cfile.write(request)
+    finally:
+      temporary.cfile.close()
+    var command = quotePoolShell(gitBin)
+    for arg in serviceArgs & @["--stateless-rpc", pool]:
+      command.add(" " & quotePoolShell(arg))
+    command.add(" < " & quotePoolShell(requestFile))
+    var served = uncontrolledStartProcess(poolTransportShell(gitBin),
+      args = @["-c", command], env = env,
+      options = {poUsePath, poParentStreams})
+    result = served.waitForExit()
+    served.close()
+  except CatchableError:
+    stderr.writeLine("repro pool transport: " & getCurrentExceptionMsg())
+    result = 1
 
 proc isNullObjectId(text: string): bool =
   text.len > 0 and text.allCharsInSet({'0'})
@@ -1384,42 +2390,44 @@ proc registerBorrower*(pool, leaf: string): bool =
   ## write is a single short append, so two workspaces registering at once
   ## both land (``readBorrowers`` folds a duplicate); nothing here rewrites
   ## the file, so a registration can never erase another.
-  let entry = canonicalLeafPath(leaf)
-  for existing in readBorrowers(pool):
-    if samePathOnDisk(existing, entry):
+  withCacheEntryVcsLock(pool, (block: return false)):
+    let entry = canonicalLeafPath(leaf)
+    for existing in readBorrowers(pool):
+      if samePathOnDisk(existing, entry):
+        return true
+    try:
+      createDir(poolReproDir(pool))
+      let f = open(borrowersPath(pool), fmAppend)
+      defer: f.close()
+      f.write(entry & "\n")
       return true
-  try:
-    createDir(poolReproDir(pool))
-    let f = open(borrowersPath(pool), fmAppend)
-    defer: f.close()
-    f.write(entry & "\n")
-    true
-  except IOError, OSError:
-    false
+    except IOError, OSError:
+      return false
 
 proc pruneBorrowers*(pool: string): seq[string] =
   ## Remove every registry entry whose path no longer exists or no longer
   ## borrows from ``pool``, and return the removed entries. Those are the
   ## only two reasons an entry ever leaves (§3.2): a leaf that exists and
   ## still borrows stays registered no matter what else is wrong with it.
-  let entries = readBorrowers(pool)
-  var keep: seq[string]
-  for entry in entries:
-    if dirExists(entry) and isWiredTo(entry, pool):
-      keep.add(entry)
-    else:
-      result.add(entry)
-  if result.len == 0:
-    return
-  let path = borrowersPath(pool)
-  let tmp = path & ".tmp-" & $getCurrentProcessId()
-  try:
-    writeFile(tmp, (if keep.len > 0: keep.join("\n") & "\n" else: ""))
-    moveFile(tmp, path)
-  except IOError, OSError:
-    try: removeFile(tmp)
-    except OSError: discard
-    result.setLen(0)
+  withCacheEntryVcsLock(pool, (block: return @[])):
+    let entries = readBorrowers(pool)
+    var keep: seq[string]
+    for entry in entries:
+      if dirExists(entry) and isWiredTo(entry, pool):
+        keep.add(entry)
+      else:
+        result.add(entry)
+    if result.len == 0:
+      return
+    let path = borrowersPath(pool)
+    let tmp = path & ".tmp-" & $getCurrentProcessId()
+    try:
+      writeFile(tmp, (if keep.len > 0: keep.join("\n") & "\n" else: ""))
+      moveFile(tmp, path)
+    except IOError, OSError:
+      try: removeFile(tmp)
+      except OSError: discard
+      result.setLen(0)
 
 # -- retention hook (§3.3) ----------------------------------------------------
 
@@ -1456,6 +2464,101 @@ rm -rf "$work" && mkdir "$work" || exit 1
 trap 'rm -rf "$work"' EXIT
 git --git-dir="$pool" for-each-ref --format='^%(objectname)' > "$work/pooltips" || exit 1
 
+# Snapshot the registry for this invocation. Discovery is repeated on every gc.
+# Git for Windows accepts forward-slash drive paths; dirname and shell globs
+# also need that spelling when Nim wrote native separators to the registry.
+tr '\\' '/' < "$registry" > "$work/leaves" || exit 1
+[ -s "$work/leaves" ] || exit 1
+while IFS= read -r leaf || [ -n "$leaf" ]; do
+  [ -n "$leaf" ] || continue
+  # A registered leaf may be the workspace checkout itself, or a nested repo.
+  # Prefer the workspace's marker; plain-git trees retain the sibling fallback.
+  # The settings and state files' RETIRED names mark a workspace here too:
+  # repro refuses to work in such a root until it is migrated, but its
+  # checkouts still borrow from this pool, and a missed parent means objects
+  # they need are not retained.
+  workspace=$leaf
+  marked=0
+  while [ "$workspace" != / ] && [ "$workspace" != . ]; do
+    if [ -f "$workspace/repro-workspace.toml" ] ||
+       [ -f "$workspace/.repro/workspace-state.toml" ] ||
+       [ -f "$workspace/.repro-workspace.toml" ] ||
+       [ -f "$workspace/.repro/workspace.toml" ]; then
+      dirname "$workspace"
+      marked=1
+      break
+    fi
+    ancestor=$(dirname "$workspace")
+    [ "$ancestor" != "$workspace" ] || break
+    workspace=$ancestor
+  done
+  [ "$marked" = 1 ] || dirname "$(dirname "$leaf")"
+done < "$work/leaves" | sort -u > "$work/parents" || exit 1
+
+# Bound the walk to the sibling-workspace layout, including nested repos and
+# .git files (linked worktrees). Do not inspect objects or trigger lazy fetches.
+discover_leaf() {
+  candidate=$1
+  [ -e "$candidate/.git" ] || return 0
+  common=$(git -C "$candidate" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || return 1
+  objects="$common/objects"
+  # An inaccessible parent makes test -e report absence too. Establish access
+  # before interpreting a missing alternates file as a standalone checkout.
+  [ -r "$objects" ] && [ -x "$objects" ] || return 1
+  if [ -d "$objects/info" ]; then
+    [ -r "$objects/info" ] && [ -x "$objects/info" ] || return 1
+  fi
+  alternates="$objects/info/alternates"
+  [ -e "$alternates" ] || return 0
+  [ -r "$alternates" ] || return 1
+  while IFS= read -r alternate || [ -n "$alternate" ]; do
+    [ -n "$alternate" ] || continue
+    alternate=$(printf '%s' "$alternate" | tr '\\' '/') || return 1
+    case $alternate in /* | [A-Za-z]:/*) ;; *) alternate="$objects/$alternate" ;; esac
+    resolved=$(cd "$alternate" && pwd -P) || return 1
+    if [ "$resolved" = "$poolobjects" ]; then
+      printf '%s\n' "$candidate" >> "$work/found" || return 1
+      break
+    fi
+  done < "$alternates"
+}
+scan_dir() {
+  directory=$1
+  depth=$2
+  [ -r "$directory" ] && [ -x "$directory" ] || return 1
+  discover_leaf "$directory" || return 1
+  [ "$depth" -gt 0 ] || return 0
+  for child in "$directory"/* "$directory"/.[!.]* "$directory"/..?*; do
+    [ -d "$child" ] || continue
+    # A subshell keeps recursive calls from changing this call's variables.
+    (scan_dir "$child" "$((depth - 1))") || return 1
+  done
+}
+poolobjects=$(cd "$pool/objects" && pwd -P) || exit 1
+: > "$work/found"
+while IFS= read -r parent || [ -n "$parent" ]; do
+  [ -d "$parent" ] || continue
+  [ -r "$parent" ] && [ -x "$parent" ] || exit 1
+  for workspace in "$parent"/* "$parent"/.[!.]* "$parent"/..?*; do
+    [ -d "$workspace" ] || continue
+    (scan_dir "$workspace" 2) || exit 1
+  done
+done < "$work/parents"
+sort -u "$work/found" > "$work/discovered" || exit 1
+incomplete=0
+while IFS= read -r leaf || [ -n "$leaf" ]; do
+  if ! grep -F -x -e "$leaf" "$work/leaves" >/dev/null; then
+    # One append per record, matching registerBorrower's append-only protocol.
+    printf '%s\n' "$leaf" >> "$registry" || exit 1
+    printf '%s\n' "$leaf" >> "$work/leaves" || exit 1
+    incomplete=1
+  fi
+done < "$work/discovered"
+if [ "${1-}" = --discover ]; then
+  [ "$incomplete" = 0 ] || exit 2
+  exit 0
+fi
+
 status=0
 while IFS= read -r leaf || [ -n "$leaf" ]; do
   [ -n "$leaf" ] || continue
@@ -1491,7 +2594,7 @@ while IFS= read -r leaf || [ -n "$leaf" ]; do
     cat "$work/foreign" "$work/pooltips" |
       git -C "$leaf" rev-list --objects --no-object-names --missing=allow-any --ignore-missing --stdin || status=1
   fi
-done < "$registry"
+done < "$work/leaves"
 exit $status
 """
   ## The script ``ensureRetentionHook`` writes. POSIX ``sh`` plus ``git``
@@ -1521,13 +2624,17 @@ proc retentionHookConfigValue*(pool: string): string =
   quoteShellPosix(retentionHookPath(pool).replace('\\', '/'))
 
 proc poolRetentionReady*(gitBin, pool: string): bool =
-  ## True when expiring unreachable objects in ``pool`` is safe for its
-  ## registered leaves: git runs the hook, the hook is in place, and the
-  ## registry names at least one leaf. Anything else keeps ``never`` (§3.6,
-  ## §5): a pool must never expire objects on the strength of an empty
-  ## registry or a hook git will not run.
-  gitSupportsRetentionHook(gitBin) and
-    fileExists(retentionHookPath(pool)) and readBorrowers(pool).len > 0
+  ## The hook and readiness share one discovery implementation. A newly
+  ## found borrower is registered, but this pass still keeps ``never``; only
+  ## a later complete pass can enable expiry. Discovery errors fail closed.
+  if not gitSupportsRetentionHook(gitBin) or
+      not fileExists(retentionHookPath(pool)) or readBorrowers(pool).len == 0:
+    return false
+  let env = scrubbedGitRepositoryEnv()
+  env["PATH"] = gitBin.parentDir & $PathSep & getEnv("PATH")
+  let discovered = execCmdExCloseOnce("sh " &
+    quoteShell(retentionHookPath(pool)) & " --discover", env = env)
+  discovered.exitCode == 0
 
 proc poolIntegrityConfig*(gitBin, pool: string): seq[(string, string)] =
   ## The pool-specific rows of §3.1, beyond the static
@@ -1574,6 +2681,164 @@ proc gitDirOf(gitBin, leaf: string): tuple[gitDir, commonDir: string] =
     return ("", "")
   (lines[0], lines[1])
 
+proc commitGraphWriteRefusal(gitBin, repo: string): string =
+  ## Git silently skips commit-graph writes for shallow or grafted histories.
+  ## Refuse those repositories before expiry rather than trust a successful
+  ## exit that can leave a borrower's old split base or a stale pool graph.
+  let shallow = runGitEnv(gitBin, ["-C", repo, "rev-parse",
+    "--is-shallow-repository"], lazyFetch = false)
+  if shallow.code != 0 or shallow.output.strip() != "false":
+    return "cannot rebuild the commit-graph in shallow or unreadable repository " &
+      repo & ": " & shallow.output.strip()
+  let dirs = gitDirOf(gitBin, repo)
+  if dirs.commonDir.len == 0:
+    return "could not locate the commit-graph directory in " & repo
+  if fileExists(dirs.commonDir / "info/grafts"):
+    return "cannot rebuild the commit-graph with legacy grafts in " & repo
+  ""
+
+proc writeNonSplitCommitGraph(gitBin, repo: string): string =
+  ## A non-split write walks reachable objects afresh, including when the old
+  ## graph is stale or its split base is missing. ``core.commitGraph=false``
+  ## cannot be used here: Git then returns success without writing anything.
+  ## Force it on for this explicit write, even if global config disables it.
+  let refusal = commitGraphWriteRefusal(gitBin, repo)
+  if refusal.len > 0:
+    return refusal
+  # Git leaves an old graph untouched when there are no reachable commits.
+  # That graph may name exactly the objects gc has just expired. A repository
+  # without commits reachable from refs needs no commit-graph. Like Git's
+  # --reachable writer, exclude a detached HEAD from that set. Disable graph
+  # reads for the probe so broken-chain warnings cannot impersonate a commit.
+  # Remove both legacy representations when the set is empty.
+  let refs = runGitEnv(gitBin, ["--no-replace-objects", "-C", repo,
+    "-c", "core.commitGraph=false",
+    "rev-list", "--exclude=HEAD", "--all", "--max-count=1"], lazyFetch = false)
+  if refs.code != 0:
+    return "could not enumerate commits before rebuilding the commit-graph in " &
+      repo & ": " & refs.output.strip()
+  if refs.output.strip().len == 0:
+    let dirs = gitDirOf(gitBin, repo)
+    if dirs.commonDir.len == 0:
+      return "could not locate the commit-graph directory in " & repo
+    let info = dirs.commonDir / "objects/info"
+    if fileExists(info / "commit-graph.lock") or
+        fileExists(info / "commit-graphs/commit-graph-chain.lock"):
+      return "could not remove the empty commit-graph in " & repo &
+        ": commit-graph is locked"
+    try:
+      removeFile(info / "commit-graph")
+      if dirExists(info / "commit-graphs"):
+        removeDir(info / "commit-graphs")
+    except IOError, OSError:
+      return "could not remove the empty commit-graph in " & repo & ": " &
+        getCurrentExceptionMsg()
+    return ""
+  let graph = runGitEnv(gitBin, ["--no-replace-objects", "-C", repo,
+    "-c", "core.commitGraph=true",
+    "commit-graph", "write", "--reachable"], lazyFetch = false)
+  if graph.code != 0:
+    return "could not rebuild the non-split commit-graph in " & repo &
+      " (" & $graph.code & "): " & graph.output.strip()
+  let dirs = gitDirOf(gitBin, repo)
+  if dirs.commonDir.len == 0 or
+      not fileExists(dirs.commonDir / "objects/info/commit-graph") or
+      fileExists(dirs.commonDir / "objects/info/commit-graphs/commit-graph-chain"):
+    return "git did not create an independent non-split commit-graph in " & repo
+  ""
+
+proc migrateLeafCommitGraph(gitBin, leaf: string): string =
+  let dirs = gitDirOf(gitBin, leaf)
+  if dirs.commonDir.len == 0:
+    return "could not locate the shared object directory in " & leaf
+  # Do not create a graph on every on-touch configuration. Only a split chain
+  # can depend on the pool; an existing monolithic graph is already independent.
+  if fileExists(dirs.commonDir / "objects/info/commit-graphs/commit-graph-chain"):
+    return writeNonSplitCommitGraph(gitBin, leaf)
+  ""
+
+proc leafPoolConfigRows(pool: string): seq[(string, string)] =
+  @[("remote." & LeafPoolRemoteName & ".url", poolFileUrl(pool)),
+    ("remote." & LeafPoolRemoteName & ".promisor", "true"),
+    # Git otherwise records this during the first lazy fetch, so concurrent
+    # readers of a newly wired leaf would race for its config.lock.
+    ("remote." & LeafPoolRemoteName & ".partialclonefilter", "blob:none"),
+    ("remote." & LeafPoolRemoteName & ".uploadpack", leafPoolUploadPackCommand()),
+    ("maintenance.auto", "false"),
+    ("gc.auto", "0"),
+    ("remote." & LeafPoolRemoteName & ".skipFetchAll", "true")]
+
+proc hasPromisorRemoteConfig(gitBin, repo: string): bool =
+  ## Whether ``repo``'s effective config names a promisor remote: either
+  ## ``extensions.partialClone`` (which makes the remote it names one) or any
+  ## ``remote.<name>.promisor=true``. These are the settings under which git
+  ## fetches a missing object on demand instead of failing on it.
+  let extension = runGit(gitBin, ["-C", repo, "config", "--get",
+    "extensions.partialClone"])
+  if extension.code == 0 and extension.output.strip().len > 0:
+    return true
+  let promisors = runGit(gitBin, ["-C", repo, "config", "--bool",
+    "--get-regexp", "^remote\\..*\\.promisor$"])
+  if promisors.code == 0:
+    for line in promisors.output.splitLines():
+      if line.strip().endsWith(" true"): return true
+  false
+
+proc hasPromisorPacks(objectDir: string): bool =
+  ## Whether ``objectDir`` holds a pack received from a promisor remote: a
+  ## ``*.promisor`` file beside it marks every object it does not contain
+  ## but references as promised rather than missing.
+  let packDir = objectDir / "pack"
+  if dirExists(packDir):
+    for _ in walkFiles(packDir / "*.promisor"):
+      return true
+  false
+
+proc repoIsPartialClone*(gitBin, repo: string): bool =
+  ## Whether ``repo`` may advertise objects it only promises, so that a
+  ## repository borrowing from it can "have" a commit whose blobs are absent.
+  ##
+  ## Config is the usual signal, but not the only one: a ``*.promisor`` file
+  ## beside a pack marks that pack as received from a promisor remote, and it
+  ## stays there after the config that made the remote a promisor is edited
+  ## away. A foreign cache (one another tool made, outside reprobuild's cache
+  ## root) may show only that file, so it counts too.
+  if hasPromisorRemoteConfig(gitBin, repo):
+    return true
+  var objectDir = ""
+  try:
+    objectDir = gitObjectDir(repo)
+  except IOError:
+    return false
+  hasPromisorPacks(objectDir)
+
+proc objectStoreIsPartial*(gitBin, objectDir: string): bool =
+  ## ``repoIsPartialClone`` for an object store reached through alternates,
+  ## which may belong to a bare repository (``<pool>.git/objects``) or to a
+  ## non-bare one's ``.git`` directory (``<checkout>/.git/objects``).
+  ##
+  ## The ``*.promisor`` packs are the store's own signal. The config signal
+  ## is read from the repository that owns the store, its parent directory,
+  ## and only when that directory is a git directory (it has ``HEAD``):
+  ## ``git -C`` on any other directory would discover and answer for some
+  ## unrelated enclosing repository.
+  if hasPromisorPacks(objectDir):
+    return true
+  let owner = objectDir.parentDir
+  objectDir.lastPathPart == "objects" and fileExists(owner / "HEAD") and
+    hasPromisorRemoteConfig(gitBin, owner)
+
+proc needsLeafRefetchChain(gitBin, leaf, pool: string): bool =
+  ## Ref-tip presence cannot detect missing blobs below present commits.
+  ## Inspect the actual chain before on-touch configuration repairs it.
+  if not repoIsPartialClone(gitBin, pool): return false
+  for (key, value) in leafPoolConfigRows(pool):
+    let current = runGit(gitBin, ["-C", leaf, "config", "--local",
+      "--get-all", key])
+    if current.code != 0 or current.output.strip() != value: return true
+  runGit(gitBin, ["-C", leaf, "config", "--local", "--get-all",
+    "remote." & LeafPoolRemoteName & ".fetch"]).code == 0
+
 proc ensureLeafPoolConfig*(gitBin, leaf, pool: string): string =
   ## Install §3.4 and §3.5 into ``leaf``'s config. Returns "" on success,
   ## otherwise the diagnostic. Idempotent.
@@ -1589,14 +2854,13 @@ proc ensureLeafPoolConfig*(gitBin, leaf, pool: string): string =
   ## with it. ``remote.repro-pool.promisor=true`` on its own is enough for
   ## git 2.54 to fetch a missing object on demand through the pool (the read
   ## healed leaf and pool), and leaves the repository format alone.
-  let rows = [
-    ("remote." & LeafPoolRemoteName & ".url", poolFileUrl(pool)),
-    ("remote." & LeafPoolRemoteName & ".promisor", "true"),
-    ("remote." & LeafPoolRemoteName & ".uploadpack", LeafPoolUploadPack),
-    ("remote." & LeafPoolRemoteName & ".skipFetchAll", "true")]
+  let selectedOverride = getEnv("REPROBUILD_REPRO")
+  if selectedOverride.len > 0 and uncontrolledFindExe(selectedOverride).len == 0:
+    return "cannot install refetch chain: REPROBUILD_REPRO is not executable: " &
+      selectedOverride
   var failedKeys: seq[string]
-  for (key, value) in rows:
-    let current = runGit(gitBin, ["-C", leaf, "config", "--local", "--get", key])
+  for (key, value) in leafPoolConfigRows(pool):
+    let current = runGit(gitBin, ["-C", leaf, "config", "--local", "--get-all", key])
     if current.code == 0 and current.output.strip() == value:
       continue
     if runGit(gitBin, ["-C", leaf, "config", "--local", "--replace-all", key,
@@ -1607,8 +2871,9 @@ proc ensureLeafPoolConfig*(gitBin, leaf, pool: string): string =
   let fetchKey = "remote." & LeafPoolRemoteName & ".fetch"
   if runGit(gitBin, ["-C", leaf, "config", "--local", "--get-all",
       fetchKey]).code == 0:
-    discard runGit(gitBin, ["-C", leaf, "config", "--local", "--unset-all",
-      fetchKey])
+    if runGit(gitBin, ["-C", leaf, "config", "--local", "--unset-all",
+        fetchKey]).code != 0:
+      failedKeys.add(fetchKey)
   var hidden = false
   let hide = runGit(gitBin, ["-C", leaf, "config", "--local", "--get-all",
     "fetch.hideRefs"])
@@ -1628,16 +2893,13 @@ proc ensureLeafPoolConfig*(gitBin, leaf, pool: string): string =
       "extensions.partialClone"])
   if failedKeys.len > 0:
     return "could not write " & failedKeys.join(", ") & " in " & leaf
-  ""
+  migrateLeafCommitGraph(gitBin, leaf)
 
 proc poolsOfLeaf*(leaf: string; cacheRoot = ""): seq[string] =
   ## The pools ``leaf`` borrows from: every alternates entry whose parent is
   ## a bare repository, restricted to ``cacheRoot`` when one is given (the
   ## detector only ever writes into pools reprobuild owns).
-  for entry in readAlternates(leaf):
-    var objects = entry
-    if not objects.isAbsolute:
-      objects = alternatesFilePath(leaf).parentDir.parentDir / objects
+  for objects in alternateObjectDirs(leaf):
     let pool = objects.parentDir
     if not (dirExists(pool / "objects") and fileExists(pool / "HEAD")) or
         dirExists(pool / ".git"):
@@ -1649,6 +2911,46 @@ proc poolsOfLeaf*(leaf: string; cacheRoot = ""): seq[string] =
           canon.replace('\\', '/').startsWith(root.replace('\\', '/') & "/")):
         continue
     result.add(pool)
+
+proc leafFetchNeedsPromisor*(gitBin, leaf: string): bool =
+  ## Whether a ``git fetch`` in ``leaf`` needs a promisor remote it does not
+  ## have, from which to fetch a thin pack's missing delta bases.
+  ##
+  ## A server answers a fetch with a THIN pack: it may send an object as a
+  ## delta against a base the client said it has. A leaf says it has every
+  ## commit its alternates reach, but when the repository behind an
+  ## alternate is a partial clone, the blobs of those commits may only be
+  ## promised. ``index-pack`` then cannot resolve the delta ("unresolved
+  ## deltas left after unpacking") unless the leaf has a promisor remote to
+  ## fetch the base from.
+  ##
+  ## True when ANY object store in the leaf's object database is a partial
+  ## clone's (``objectStoreIsPartial``) and the leaf's own config names no
+  ## promisor remote. The stores are those git itself reads, so the walk is
+  ## transitive (``borrowedObjectStores``): a leaf whose alternate is a full
+  ## repository that in turn borrows from a ``blob:none`` one advertises that
+  ## one's commits too, and is in the same position as a direct leaf of it.
+  ## Owned or foreign, bare or a non-bare ``.git`` directory, all count. A
+  ## leaf carrying the §3.4 refetch chain (``remote.repro-pool.promisor=
+  ## true``) answers false: the chain already supplies a missing base
+  ## through the pool.
+  ##
+  ## Failing safe means answering false, i.e. running the fetch exactly as
+  ## before this check existed: for an unreadable ``.git`` file (the fetch
+  ## itself reports it), and for an alternates file anywhere in the chain
+  ## that cannot be read. The latter contributes no stores, which is not a
+  ## guess: git skips such a file too, so the stores beyond it are not in
+  ## the leaf's object database and their commits are not advertised. Every
+  ## other branch of the chain is still evaluated.
+  var stores: seq[string]
+  try:
+    stores = borrowedObjectStores(leaf)
+  except IOError, OSError:
+    return false
+  for store in stores:
+    if objectStoreIsPartial(gitBin, store):
+      return not hasPromisorRemoteConfig(gitBin, leaf)
+  false
 
 # -- detector (§4) ------------------------------------------------------------
 
@@ -1678,8 +2980,9 @@ proc displayPath*(path: string): string =
     discard
   quoteShell(shown)
 
-proc displayPoolPath(pool: string): string =
+proc displayPoolPath*(pool: string): string =
   ## The pool path for prose (never pasted): ``~`` for the home directory.
+  ## Exported so tests that pin a message build it with the same rule.
   let home = getHomeDir()
   var h = home
   while h.len > 1 and h[^1] in {DirSep, AltSep}:
@@ -1966,147 +3269,160 @@ proc checkLeaf*(gitBin, leaf: string; mode: LeafCheckMode;
   ## that the detector has seen but not registered would be exactly the
   ## unprotected borrower §3.2 exists to prevent. ``mode`` governs the one
   ## destructive step, removing a stale remote-tracking ref.
-  result.leaf = leaf
-  var thePool = pool
-  if thePool.len == 0:
-    let pools = poolsOfLeaf(leaf, cacheRoot)
-    if pools.len == 0:
-      return                           # not a leaf of any pool: nothing to do
-    thePool = pools[0]
-  result.pool = thePool
-  let (gitDir, commonDir) = gitDirOf(gitBin, leaf)
-  if gitDir.len == 0:
-    result.diagnostic = "not a git checkout: " & leaf
-    return
+  withCheckoutVcsLock(leaf,
+      (block: return LeafCheckReport(leaf: leaf, pool: pool,
+        diagnostic: "could not lock checkout: " & leaf))):
+    result.leaf = leaf
+    var thePool = pool
+    if thePool.len == 0:
+      let pools = poolsOfLeaf(leaf, cacheRoot)
+      if pools.len == 0:
+        return                           # not a leaf of any pool: nothing to do
+      thePool = pools[0]
+    result.pool = thePool
+    let (gitDir, commonDir) = gitDirOf(gitBin, leaf)
+    if gitDir.len == 0:
+      result.diagnostic = "not a git checkout: " & leaf
+      return
 
-  # §4.3 self-registration.
-  result.registered = registerBorrower(thePool, leaf)
-  let configured = ensureLeafPoolConfig(gitBin, leaf, thePool)
-  result.configured = configured.len == 0
-  if configured.len > 0:
-    result.diagnostic = configured
+    let missingChain = needsLeafRefetchChain(gitBin, leaf, thePool)
+    # §4.3 self-registration precedes presence probes even when every ref
+    # tip exists: missing blobs are healed on subsequent reads, not by an
+    # expensive eager walk of every tree.
+    result.registered = registerBorrower(thePool, leaf)
+    let configured = ensureLeafPoolConfig(gitBin, leaf, thePool)
+    result.configured = configured.len == 0
+    if configured.len > 0:
+      result.diagnostic = configured
+    if missingChain:
+      result.findings.add(LeafFinding(kind: lfkRefetchChainMissing,
+        message: "repro: " & displayPath(leaf) &
+          ": missing or incorrect refetch chain to partial shared clone " &
+          displayPath(thePool) & ". " &
+          (if result.configured: "Installed on touch; missing blobs can now be fetched on read."
+           else: configured & ". Repair with: repro health --fix")))
 
-  # §3.6: report an old git once per pool.
-  if not gitSupportsRetentionHook(gitBin):
-    let marker = poolReproDir(thePool) / OldGitReportedFileName
-    if not fileExists(marker):
-      result.findings.add(LeafFinding(kind: lfkOldGit,
-        message: messageOldGit(gitBin, thePool)))
-      try:
-        createDir(poolReproDir(thePool))
-        writeFile(marker, "")
-      except IOError, OSError:
-        discard
+    # §3.6: report an old git once per pool.
+    if not gitSupportsRetentionHook(gitBin):
+      let marker = poolReproDir(thePool) / OldGitReportedFileName
+      if not fileExists(marker):
+        result.findings.add(LeafFinding(kind: lfkOldGit,
+          message: messageOldGit(gitBin, thePool)))
+        try:
+          createDir(poolReproDir(thePool))
+          writeFile(marker, "")
+        except IOError, OSError:
+          discard
 
-  let targets = listLeafTargets(gitBin, leaf, commonDir)
-  var ids: seq[string]
-  for t in targets:
-    if t.id notin ids: ids.add(t.id)
-  let missing = batchPresence(gitBin, leaf, ids)
-  var stillMissing: seq[string]
-  for id in missing:
-    if refill(gitBin, leaf, id):
-      result.findings.add(LeafFinding(kind: lfkRefilled, objectId: id))
-    else:
-      stillMissing.add(id)
+    let targets = listLeafTargets(gitBin, leaf, commonDir)
+    var ids: seq[string]
+    for t in targets:
+      if t.id notin ids: ids.add(t.id)
+    let missing = batchPresence(gitBin, leaf, ids)
+    var stillMissing: seq[string]
+    for id in missing:
+      if refill(gitBin, leaf, id):
+        result.findings.add(LeafFinding(kind: lfkRefilled, objectId: id))
+      else:
+        stillMissing.add(id)
 
-  # Local work first (SPI-AREQ-4): a local ref whose own commit is gone, and
-  # a local branch or detached HEAD whose commits are intact but sit on
-  # parents that are gone. Nothing is changed for either; and a
-  # remote-tracking ref whose commit one of them needs is left alone too, so
-  # message A's "none of your branches depend on it" is only ever said when
-  # it is true.
-  var neededByLocal: seq[string]
-  for t in targets:
-    if t.id notin stillMissing or t.refName.startsWith("refs/remotes/"):
-      continue
-    result.findings.add(LeafFinding(kind: lfkLocalTipMissing,
-      refName: t.refName, objectId: t.id,
-      message: messageLocalTipMissing(gitBin, leaf, thePool, t.refName,
-        t.id)))
-    neededByLocal.add(t.id)
+    # Local work first (SPI-AREQ-4): a local ref whose own commit is gone, and
+    # a local branch or detached HEAD whose commits are intact but sit on
+    # parents that are gone. Nothing is changed for either; and a
+    # remote-tracking ref whose commit one of them needs is left alone too, so
+    # message A's "none of your branches depend on it" is only ever said when
+    # it is true.
+    var neededByLocal: seq[string]
+    for t in targets:
+      if t.id notin stillMissing or t.refName.startsWith("refs/remotes/"):
+        continue
+      result.findings.add(LeafFinding(kind: lfkLocalTipMissing,
+        refName: t.refName, objectId: t.id,
+        message: messageLocalTipMissing(gitBin, leaf, thePool, t.refName,
+          t.id)))
+      neededByLocal.add(t.id)
 
-  # Walk only what upstream's present refs do not already reach: in the
-  # common case that is the handful of unpushed commits, and one process for
-  # all of them.
-  var localTips: seq[LeafTarget]
-  var stopAt: seq[string]
-  for t in targets:
-    if t.id in stillMissing:
-      continue
-    if t.refName.startsWith("refs/heads/") or t.refName == "HEAD" or
-        t.refName.startsWith("worktree:"):
-      localTips.add(t)
-    elif t.refName.startsWith("refs/remotes/"):
-      if t.id notin stopAt: stopAt.add(t.id)
-  var allTips: seq[string]
-  for t in localTips:
-    if t.id notin allTips: allTips.add(t.id)
-  if allTips.len > 0:
-    let combined = missingAncestry(gitBin, leaf, allTips, stopAt)
-    var settled = combined.missing.len == 0
-    if not settled:
-      var refilled = 0
-      for m in combined.missing:
-        if refill(gitBin, leaf, m):
-          inc refilled
-          result.findings.add(LeafFinding(kind: lfkRefilled, objectId: m))
-      # Refilling a parent can expose the next missing one; one more walk
-      # settles it (each refill brings the history behind the commit too).
-      if refilled == combined.missing.len:
-        settled = missingAncestry(gitBin, leaf, allTips,
-          stopAt).missing.len == 0
-    if not settled:
-      for t in localTips:
-        let own = missingAncestry(gitBin, leaf, @[t.id], stopAt)
-        if own.missing.len == 0:
-          continue
-        let m = own.missing[0]
-        var child = ""
-        for (parent, c) in own.childOf:
-          if parent == m:
-            child = c
-            break
-        # "Your own commits are intact" must be true before it is said: walk
-        # the trees of the commits that are here, and look for files that
-        # went with the old history.
-        var input = t.id & "\n"
-        for st in stopAt: input.add("^" & st & "\n")
-        let objs = runGitEnv(gitBin, ["-C", leaf, "rev-list", "--objects",
-          "--no-object-names", "--missing=print", "--ignore-missing",
-          "--stdin"], lazyFetch = false, input = input)
-        var contentLost = false
-        for line in objs.output.splitLines():
-          let x = line.strip()
-          if x.startsWith("?") and x[1 .. ^1] notin own.missing:
-            contentLost = true
-            break
-        result.findings.add(LeafFinding(kind: lfkLocalHistoryMissing,
-          refName: t.refName, objectId: m, childId: child,
-          message: messageLocalHistoryMissing(leaf, thePool, t.refName, m,
-            child, contentLost)))
-        for id in own.missing:
-          if id notin neededByLocal: neededByLocal.add(id)
+    # Walk only what upstream's present refs do not already reach: in the
+    # common case that is the handful of unpushed commits, and one process for
+    # all of them.
+    var localTips: seq[LeafTarget]
+    var stopAt: seq[string]
+    for t in targets:
+      if t.id in stillMissing:
+        continue
+      if t.refName.startsWith("refs/heads/") or t.refName == "HEAD" or
+          t.refName.startsWith("worktree:"):
+        localTips.add(t)
+      elif t.refName.startsWith("refs/remotes/"):
+        if t.id notin stopAt: stopAt.add(t.id)
+    var allTips: seq[string]
+    for t in localTips:
+      if t.id notin allTips: allTips.add(t.id)
+    if allTips.len > 0:
+      let combined = missingAncestry(gitBin, leaf, allTips, stopAt)
+      var settled = combined.missing.len == 0
+      if not settled:
+        var refilled = 0
+        for m in combined.missing:
+          if refill(gitBin, leaf, m):
+            inc refilled
+            result.findings.add(LeafFinding(kind: lfkRefilled, objectId: m))
+        # Refilling a parent can expose the next missing one; one more walk
+        # settles it (each refill brings the history behind the commit too).
+        if refilled == combined.missing.len:
+          settled = missingAncestry(gitBin, leaf, allTips,
+            stopAt).missing.len == 0
+      if not settled:
+        for t in localTips:
+          let own = missingAncestry(gitBin, leaf, @[t.id], stopAt)
+          if own.missing.len == 0:
+            continue
+          let m = own.missing[0]
+          var child = ""
+          for (parent, c) in own.childOf:
+            if parent == m:
+              child = c
+              break
+          # "Your own commits are intact" must be true before it is said: walk
+          # the trees of the commits that are here, and look for files that
+          # went with the old history.
+          var input = t.id & "\n"
+          for st in stopAt: input.add("^" & st & "\n")
+          let objs = runGitEnv(gitBin, ["-C", leaf, "rev-list", "--objects",
+            "--no-object-names", "--missing=print", "--ignore-missing",
+            "--stdin"], lazyFetch = false, input = input)
+          var contentLost = false
+          for line in objs.output.splitLines():
+            let x = line.strip()
+            if x.startsWith("?") and x[1 .. ^1] notin own.missing:
+              contentLost = true
+              break
+          result.findings.add(LeafFinding(kind: lfkLocalHistoryMissing,
+            refName: t.refName, objectId: m, childId: child,
+            message: messageLocalHistoryMissing(leaf, thePool, t.refName, m,
+              child, contentLost)))
+          for id in own.missing:
+            if id notin neededByLocal: neededByLocal.add(id)
 
-  # Stale copies of upstream (SPI-AREQ-3).
-  let logPath = gitDir / PoolReproDirName / DroppedRefsLogFileName
-  for t in targets:
-    if t.id notin stillMissing or not t.refName.startsWith("refs/remotes/"):
-      continue
-    if t.id in neededByLocal:
-      continue                         # message B covers it; nothing changes
-    var removed = false
-    if mode == lcmRepair:
-      # ``update-ref -d <ref> <old>`` checks the ref store, not the object,
-      # and refuses if someone moved the ref since we read it.
-      if runGit(gitBin, ["-C", leaf, "update-ref", "-d", t.refName,
-          t.id]).code == 0:
-        removed = true
-        discard appendDroppedRefLog(logPath, t.refName, t.id, thePool)
-    result.findings.add(LeafFinding(kind: lfkStaleRemoteRef,
-      refName: t.refName, objectId: t.id, removed: removed,
-      message: messageStaleRemoteRef(leaf, thePool, t.refName, t.id,
-        logPath, removed)))
+    # Stale copies of upstream (SPI-AREQ-3).
+    let logPath = gitDir / PoolReproDirName / DroppedRefsLogFileName
+    for t in targets:
+      if t.id notin stillMissing or not t.refName.startsWith("refs/remotes/"):
+        continue
+      if t.id in neededByLocal:
+        continue                         # message B covers it; nothing changes
+      var removed = false
+      if mode == lcmRepair:
+        # ``update-ref -d <ref> <old>`` checks the ref store, not the object,
+        # and refuses if someone moved the ref since we read it.
+        if runGit(gitBin, ["-C", leaf, "update-ref", "-d", t.refName,
+            t.id]).code == 0:
+          removed = true
+          discard appendDroppedRefLog(logPath, t.refName, t.id, thePool)
+      result.findings.add(LeafFinding(kind: lfkStaleRemoteRef,
+        refName: t.refName, objectId: t.id, removed: removed,
+        message: messageStaleRemoteRef(leaf, thePool, t.refName, t.id,
+          logPath, removed)))
 
 proc checkRegisteredLeaves*(gitBin, pool: string;
                             mode = lcmRepair): seq[LeafCheckReport] {.gcsafe.} =
@@ -2121,9 +3437,10 @@ proc registerLeafWithPool*(gitBin, leaf, pool: string): string =
   ## What wiring a leaf to a pool must also do (§3.2, §3.4, §3.5): register it
   ## and configure it. Returns "" on success, otherwise the diagnostic. Used by
   ## ``wireAlternates`` and by the ``git clone --reference`` path.
-  if not registerBorrower(pool, leaf):
-    return "could not register " & leaf & " in " & borrowersPath(pool)
-  ensureLeafPoolConfig(gitBin, leaf, pool)
+  withCheckoutVcsLock(leaf, (block: return "could not lock checkout: " & leaf)):
+    if not registerBorrower(pool, leaf):
+      return "could not register " & leaf & " in " & borrowersPath(pool)
+    return ensureLeafPoolConfig(gitBin, leaf, pool)
 
 # -- migration (§5) -----------------------------------------------------------
 
@@ -2398,7 +3715,7 @@ proc cacheRefPushArgv*(repoPath: string; plan: CacheRefPushPlan): seq[string] =
   ## having been validated, which is why the argv is built from it and not
   ## from raw arguments.
   if not plan.ok: return @[]
-  @["-C", repoPath, "push", "--force", "--no-verify", plan.destination,
+  @["-C", repoPath, "push", "--no-thin", "--force", "--no-verify", plan.destination,
     "HEAD:" & plan.cacheRef]
 
 proc pushCacheRef*(gitBin, repoPath, sharedBarePath, workspaceName: string;
@@ -2438,12 +3755,20 @@ proc pushCacheRef*(gitBin, repoPath, sharedBarePath, workspaceName: string;
       diagnostic: "refusing to run the cache-ref push: it " & fault)
   # ``HEAD:<cacheRef>`` pushes whatever the working tree currently has
   # checked out; the cache ref is the destination in the bare.
-  let res = runGit(gitBin, argv)
-  if res.code != 0:
-    return SharedCloneResult(ok: false, sharedBarePath: sharedBarePath,
-      diagnostic: "cache-ref push failed (" & $res.code & "): " &
-        res.output.strip())
-  SharedCloneResult(ok: true, sharedBarePath: sharedBarePath)
+  withCacheEntryVcsLock(sharedBarePath,
+      (block: return SharedCloneResult(ok: false, sharedBarePath: sharedBarePath,
+        diagnostic: "could not lock shared bare: " & sharedBarePath))):
+    # Thin-pack delta selection can read a promised old blob in the sender,
+    # recursively entering this pool's transport while we hold its lock.
+    # Send a self-contained pack and disable all lazy fetches in this locked
+    # best-effort operation. Unexpected missing history then refuses the cache
+    # push rather than waiting on the lock its own parent holds.
+    let res = runGitEnv(gitBin, argv, lazyFetch = false)
+    if res.code != 0:
+      return SharedCloneResult(ok: false, sharedBarePath: sharedBarePath,
+        diagnostic: "cache-ref push failed (" & $res.code & "): " &
+          res.output.strip())
+    return SharedCloneResult(ok: true, sharedBarePath: sharedBarePath)
 
 # ---- cache maintenance: gc / repack / dead-ref prune (RA-15) ---------------
 #
@@ -2657,63 +3982,281 @@ proc maintainSharedBare*(gitBin, barePath: string;
   ## trigger). When ``liveWorkspaces`` is empty the prune step is skipped (we
   ## refuse to delete every cache ref just because no live set was supplied —
   ## that would be the unsafe interpretation).
-  result.sharedBarePath = barePath
-  if not looksLikeGitDir(barePath):
-    result.ok = false
-    result.diagnostic = "shared bare missing for maintenance: " & barePath
-    return
-  result.ok = true
-  result.looseBefore = looseObjectCount(gitBin, barePath)
+  withCacheEntryVcsLock(barePath,
+      (block: return MaintenanceResult(ok: false, sharedBarePath: barePath,
+        diagnostic: "could not lock shared bare: " & barePath))):
+    result.sharedBarePath = barePath
+    if not looksLikeGitDir(barePath):
+      result.ok = false
+      result.diagnostic = "shared bare missing for maintenance: " & barePath
+      return
+    result.ok = true
+    result.looseBefore = looseObjectCount(gitBin, barePath)
 
-  # (1) Dead-workspace ref prune. Only when we were actually given a live
-  # set; an empty set means "unknown", and pruning everything would be
-  # destructive, so we skip it.
-  if liveWorkspaces.len > 0:
-    result.prunedRefs = pruneDeadCacheRefs(gitBin, barePath, liveWorkspaces)
+    # (1) Dead-workspace ref prune. Only when we were actually given a live
+    # set; an empty set means "unknown", and pruning everything would be
+    # destructive, so we skip it.
+    if liveWorkspaces.len > 0:
+      result.prunedRefs = pruneDeadCacheRefs(gitBin, barePath, liveWorkspaces)
 
-  # (2) Budget-gated gc/repack.
-  let due = force or maintenanceDue(gitBin, barePath, budget)
-  if not due:
-    result.ran = false
-    result.looseAfter = result.looseBefore
-    return
+    # (2) Budget-gated gc/repack.
+    let due = force or maintenanceDue(gitBin, barePath, budget)
+    if not due:
+      result.ran = false
+      result.looseAfter = result.looseBefore
+      return
 
-  # The expiry is the POOL's: ``gc.pruneExpire`` and ``gc.recentObjectsHook``
-  # from its config (Shared-Clone-Pool-Integrity §3.1, §3.3), so no prune
-  # flag is passed. ``--prune=now`` in particular must never appear here:
-  # git does not run the retention hook in that mode, so it would delete
-  # every object the pool's own refs no longer reach -- including the ones
-  # checkouts in sibling workspaces still borrow through alternates.
-  #
-  # Registry entries for leaves that are gone, or that no longer borrow from
-  # this pool, are dropped first; then the config is re-asserted, which is
-  # what moves a pool between ``never`` and the expiry window as its
-  # registry fills or empties. If that cannot be written the gc does not
-  # run: a pool whose config we could not establish is a pool we do not
-  # prune (SPI-GOAL-5).
-  discard pruneBorrowers(barePath)
-  if not ensureSharedBareSafety(gitBin, barePath):
-    result.ok = false
-    result.ran = false
-    result.looseAfter = result.looseBefore
-    result.diagnostic = "could not install the shared-bare safety config on " &
-      barePath & "; gc skipped so nothing a borrower uses can be expired"
-    return
-  var gcArgs = sharedBareSafetyArgs()
-  gcArgs.add(["-C", barePath, "gc", "--quiet"])
-  let gc = runGit(gitBin, gcArgs)
-  if gc.code != 0:
-    result.ok = false
-    result.ran = false
-    result.looseAfter = result.looseBefore
-    result.diagnostic = "git gc failed (" & $gc.code & "): " &
-      gc.output.strip()
-    return
-  result.ran = true
-  result.looseAfter = looseObjectCount(gitBin, barePath)
-  touchMaintenanceStamp(barePath)
+    # The expiry is the POOL's: ``gc.pruneExpire`` and ``gc.recentObjectsHook``
+    # from its config (Shared-Clone-Pool-Integrity §3.1, §3.3), so no prune
+    # flag is passed. ``--prune=now`` in particular must never appear here:
+    # git does not run the retention hook in that mode, so it would delete
+    # every object the pool's own refs no longer reach -- including the ones
+    # checkouts in sibling workspaces still borrow through alternates.
+    #
+    # Registry entries for leaves that are gone, or that no longer borrow from
+    # this pool, are dropped first; then the config is re-asserted, which is
+    # what moves a pool between ``never`` and the expiry window as its
+    # registry fills or empties. If that cannot be written the gc does not
+    # run: a pool whose config we could not establish is a pool we do not
+    # prune (SPI-GOAL-5).
+    discard pruneBorrowers(barePath)
+    if not ensureSharedBareSafety(gitBin, barePath):
+      result.ok = false
+      result.ran = false
+      result.looseAfter = result.looseBefore
+      result.diagnostic = "could not install the shared-bare safety config on " &
+        barePath & "; gc skipped so nothing a borrower uses can be expired"
+      return
+    # Old leaves may have chained onto the pool's split layers. Convert all
+    # registered leaves before gc can expire anything or the pool's graph write
+    # removes those layers. A failed migration must leave object retention intact.
+    let borrowers = readBorrowers(barePath)
+    for leaf in borrowers:
+      let migrated = ensureLeafPoolConfig(gitBin, leaf, barePath)
+      if migrated.len > 0:
+        result.ok = false
+        result.diagnostic = migrated & "; gc skipped before borrower graph migration"
+        result.looseAfter = result.looseBefore
+        return
+    let preserveLegacyChain = borrowers.len == 0 and fileExists(
+      barePath / "objects/info/commit-graphs/commit-graph-chain")
+    if not preserveLegacyChain:
+      let refusal = commitGraphWriteRefusal(gitBin, barePath)
+      if refusal.len > 0:
+        result.ok = false
+        result.looseAfter = result.looseBefore
+        result.diagnostic = refusal & "; gc skipped before pool graph rebuild"
+        return
+    let packDir = barePath / "objects/pack"
+    let hadMultiPackIndex = fileExists(packDir / "multi-pack-index") or
+      dirExists(packDir / "multi-pack-index.d")
+    var gcArgs = sharedBareSafetyArgs()
+    gcArgs.add(["-C", barePath, "gc", "--quiet"])
+    let gc = runGit(gitBin, gcArgs)
+    if gc.code != 0:
+      result.ok = false
+      result.ran = false
+      result.looseAfter = result.looseBefore
+      result.diagnostic = "git gc failed (" & $gc.code & "): " &
+        gc.output.strip()
+      return
+    # gc deliberately leaves graph writes disabled. Rebuild explicitly, after
+    # expiry, so no cached graph can still name a commit gc just removed.
+    # With no registered borrowers expiry is disabled. Preserve a legacy split
+    # graph: unknown borrowers may still chain onto it and cannot be migrated.
+    let graphFault = if preserveLegacyChain: "" else:
+      writeNonSplitCommitGraph(gitBin, barePath)
+    if graphFault.len > 0:
+      result.ok = false
+      result.ran = true
+      result.looseAfter = looseObjectCount(gitBin, barePath)
+      result.diagnostic = graphFault
+      return
+    if hadMultiPackIndex:
+      let midx = runGitEnv(gitBin, ["-C", barePath, "multi-pack-index", "write"],
+        lazyFetch = false)
+      if midx.code != 0:
+        result.ok = false
+        result.ran = true
+        result.looseAfter = looseObjectCount(gitBin, barePath)
+        result.diagnostic = "could not rebuild the multi-pack-index in " &
+          barePath & " (" & $midx.code & "): " & midx.output.strip()
+        return
+    result.ran = true
+    result.looseAfter = looseObjectCount(gitBin, barePath)
+    touchMaintenanceStamp(barePath)
 
 # ---- inspection (the `shared-clones list` surface) -------------------------
+
+proc inspectSharedBareVerdict*(barePath: string): string =
+  ## Directly inspect the bare repository's git config at ``barePath / "config"``
+  ## without spawning git subprocesses.
+  ##
+  ## Verdicts:
+  ##   - "no-bare" when not looksLikeGitDir(barePath) or config does not exist
+  ##   - "ok" when both the fetch refspec and all safety keys are present
+  ##   - "refspec-without-safety" when refspec is present but safety keys are not
+  ##   - "safety-without-refspec" when safety keys are present but refspec is not
+  ##   - "unconfigured" when neither is present
+  if not looksLikeGitDir(barePath):
+    return "no-bare"
+  let configPath = barePath / "config"
+  if not fileExists(configPath):
+    return "no-bare"
+
+  var content: string
+  try:
+    content = readFile(configPath)
+  except CatchableError:
+    return "no-bare"
+
+  var currentSection = ""
+  var fetchValues: seq[string] = @[]
+  var gcAuto = ""
+  var maintAuto = ""
+  var maintStrategy = ""
+  var gcWriteCommitGraph = ""
+  var fetchWriteCommitGraph = ""
+  var gcPruneExpire = ""
+
+  for rawLine in content.splitLines():
+    let line = rawLine.strip()
+    if line.len == 0 or line.startsWith("#") or line.startsWith(";"):
+      continue
+    if line.startsWith("[") and line.endsWith("]"):
+      let inside = line[1 .. ^2].strip()
+      let quoteStart = inside.find('"')
+      if quoteStart >= 0:
+        let quoteEnd = inside.rfind('"')
+        let sec = inside[0 ..< quoteStart].strip().toLowerAscii
+        let subsec = if quoteEnd > quoteStart:
+                       inside[quoteStart + 1 ..< quoteEnd]
+                     else:
+                       inside[quoteStart + 1 .. ^1]
+        currentSection = sec & "." & subsec.toLowerAscii
+      else:
+        currentSection = inside.toLowerAscii
+    else:
+      let eqIdx = line.find('=')
+      if eqIdx >= 0:
+        let k = line[0 ..< eqIdx].strip().toLowerAscii
+        var v = line[eqIdx + 1 .. ^1].strip()
+        var commentIdx = -1
+        for i in 0 ..< v.len:
+          if (v[i] == '#' or v[i] == ';') and i > 0 and v[i - 1] in Whitespace:
+            commentIdx = i
+            break
+        if commentIdx >= 0:
+          v = v[0 ..< commentIdx].strip()
+        if v.len >= 2 and v.startsWith("\"") and v.endsWith("\""):
+          v = v[1 .. ^2]
+        let fullKey = if currentSection.len > 0: currentSection & "." & k else: k
+        case fullKey
+        of "remote.origin.fetch":
+          fetchValues.add(v)
+        of "gc.auto":
+          gcAuto = v
+        of "maintenance.auto":
+          maintAuto = v
+        of "maintenance.strategy":
+          maintStrategy = v
+        of "gc.writecommitgraph":
+          gcWriteCommitGraph = v
+        of "fetch.writecommitgraph":
+          fetchWriteCommitGraph = v
+        of "gc.pruneexpire":
+          gcPruneExpire = v
+        else:
+          discard
+
+  var hasRefspec = false
+  for f in fetchValues:
+    if f == SharedBareFetchRefspec or f.contains(SharedBareFetchRefspec):
+      hasRefspec = true
+      break
+
+  let hasSafety = gcAuto == "0" and
+    maintAuto.toLowerAscii == "false" and
+    maintStrategy.toLowerAscii == "none" and
+    gcWriteCommitGraph.toLowerAscii == "false" and
+    fetchWriteCommitGraph.toLowerAscii == "false" and
+    gcPruneExpire.len > 0 and gcPruneExpire.toLowerAscii != "now"
+
+  if hasRefspec and hasSafety:
+    "ok"
+  elif hasRefspec and not hasSafety:
+    "refspec-without-safety"
+  elif not hasRefspec and hasSafety:
+    "safety-without-refspec"
+  else:
+    "unconfigured"
+
+# ---- whole-cache sweep (``shared-clones gc`` / ``rewire``) -----------------
+
+type
+  SharedBareSweepEntry* = object
+    path*: string
+    before*: string
+      ## ``inspectSharedBareVerdict`` as found, recorded before anything was
+      ## written, so a repair never erases the evidence of what it repaired.
+    after*: string
+    repaired*: bool
+    diagnostic*: string
+
+proc sharedBareLastFetch*(barePath: string): string =
+  ## UTC time of the bare's last fetch (``FETCH_HEAD``'s mtime), or "" when
+  ## nothing has ever fetched into it. Next to the config verdict it makes a
+  ## pool frozen at its clone-time tips visible rather than inferred.
+  let fetchHead = barePath / "FETCH_HEAD"
+  if fileExists(fetchHead):
+    try:
+      return getLastModificationTime(fetchHead).utc.format(
+        "yyyy-MM-dd'T'HH:mm:ss'Z'")
+    except OSError:
+      discard
+  ""
+
+proc findSharedBares*(cacheRoot: string): seq[string] =
+  ## Every bare repository under ``cacheRoot``, declared by an enabled project
+  ## or not. Descends until it meets a git directory and never below one; a
+  ## non-bare checkout found in the cache is not a pool and is skipped.
+  if cacheRoot.len == 0 or not dirExists(cacheRoot):
+    return
+  var stack = @[cacheRoot]
+  while stack.len > 0:
+    let dir = stack.pop()
+    for kind, entry in walkDir(dir):
+      if kind != pcDir:
+        continue
+      if dirExists(entry / "objects") and dirExists(entry / "refs") and
+          fileExists(entry / "HEAD"):
+        result.add(entry)
+      elif dirExists(entry / ".git"):
+        continue
+      else:
+        stack.add(entry)
+
+proc sweepSharedBares*(gitBin, cacheRoot: string): seq[SharedBareSweepEntry] =
+  ## The EAGER half of the pool migration. ``prepareSharedBare`` runs only on
+  ## the bares a refresh touches, so a property installed that way converges
+  ## "as repos happen to be synced" and is never checkably true of the cache:
+  ## a bare no enabled project declares is never visited at all. This visits
+  ## every bare under ``cacheRoot``, records its verdict, and installs the
+  ## refspec and the borrower-safety config where either is missing --
+  ## through ``prepareSharedBare``, so the safety-before-refspec order holds
+  ## here too. Each entry carries the verdict found BEFORE the repair.
+  for bare in findSharedBares(cacheRoot):
+    let before = inspectSharedBareVerdict(bare)
+    var entry = SharedBareSweepEntry(path: bare, before: before, after: before)
+    if before == "no-bare":
+      entry.diagnostic = "could not read the config of " & bare
+    elif before != "ok":
+      let prepared = prepareSharedBare(gitBin, bare)
+      entry.after = inspectSharedBareVerdict(bare)
+      entry.repaired = prepared.len == 0 and entry.after == "ok"
+      if prepared.len > 0:
+        entry.diagnostic = prepared
+    result.add(entry)
 
 type
   SharedCloneRepoInfo* = object
@@ -2723,6 +4266,35 @@ type
     sharedBarePath*: string
     barePresent*: bool
     wired*: bool
+    verdict*: string
+
+
+proc sameObjectDirectory(a, b: string): bool =
+  ## Existing stores have filesystem identity: a symlink spelling is not a
+  ## foreign pool. Missing stores still need the lexical comparison so health
+  ## can name them instead of silently omitting their borrowers.
+  if dirExists(a) and dirExists(b):
+    try:
+      return sameFile(a, b)
+    except OSError:
+      discard
+  samePathOnDisk(a, b)
+
+proc borrowsFromPool*(leaf, canonicalPool: string): bool =
+  ## Whether any resolved alternate names this object store, including relative
+  ## entries and symlink aliases. Share the classifier with foreign detection:
+  ## otherwise health can skip a canonical leaf while reporting it as healthy.
+  for objects in alternateObjectDirs(leaf):
+    if sameObjectDirectory(objects, canonicalPool / "objects"):
+      return true
+  false
+
+proc foreignAlternates*(leaf, canonicalPool: string): seq[string] =
+  ## A former URL key in our own cache is foreign just like another tool's
+  ## cache. Only this manifest URL's canonical objects directory is retained.
+  for objects in alternateObjectDirs(leaf):
+    if not sameObjectDirectory(objects, canonicalPool / "objects"):
+      result.add(objects)
 
 proc inspectRepoWiring*(workspaceRoot, cacheRoot, repoRelPath,
                         fetchUrl: string): SharedCloneRepoInfo =
@@ -2734,4 +4306,172 @@ proc inspectRepoWiring*(workspaceRoot, cacheRoot, repoRelPath,
     fetchUrl: fetchUrl,
     sharedBarePath: bare,
     barePresent: looksLikeGitDir(bare),
-    wired: isWiredTo(repoAbs, bare))
+    wired: borrowsFromPool(repoAbs, bare),
+    verdict: inspectSharedBareVerdict(bare))
+
+proc leafConnectivityDiagnostic*(gitBin, leaf: string; full = false): string =
+  ## Observation only: no registration, configuration, lazy fetch or repair.
+  ## fsck includes dangling symbolic refs, which for-each-ref silently omits.
+  let checked = runGitEnv(gitBin, ["-C", leaf, "fsck",
+    (if full: "--full" else: "--connectivity-only")], lazyFetch = false)
+  if checked.code != 0 or "warning:" in checked.output or
+      "error:" in checked.output:
+    return checked.output.strip()
+  ""
+
+proc leafMissingObjects(gitBin, leaf, commonDir: string): tuple[missing: seq[string], diagnostic: string] =
+  # Promisor fsck deliberately tolerates missing objects. Traverse explicitly
+  # instead: retiring a promisor remote must not silently lose readable data.
+  var args = @["-C", leaf, "rev-list", "--objects", "--all", "--reflog",
+    "--indexed-objects", "--no-object-names", "--missing=print"]
+  for target in listLeafTargets(gitBin, leaf, commonDir):
+    args.add(target.id)
+  let walked = runGitEnv(gitBin, args, lazyFetch = false)
+  if walked.code != 0:
+    result.diagnostic = walked.output.strip()
+    return
+  for line in walked.output.splitLines():
+    if line.startsWith("?"):
+      result.missing.add(line[1 .. ^1].strip())
+
+proc consolidateLeafPool*(gitBin, leaf, canonicalPool: string): SharedCloneResult =
+  ## Materialize the leaf before retiring any of its alternate stores. This
+  ## never prunes a shared pool or deletes a ref. A replacement graph is built
+  ## as a non-split file with NO alternates, so it is entirely local. Until final
+  ## verification succeeds the original wiring/config/graphs are rollback state.
+  result.sharedBarePath = canonicalPool
+  let (_, commonDir) = gitDirOf(gitBin, leaf)
+  if commonDir.len == 0:
+    result.diagnostic = "not a git checkout: " & leaf
+    return
+  var lock = acquireVcsFileLock(checkoutLockPath(leaf))
+  if not lock.acquired:
+    result.diagnostic = "could not lock checkout: " & leaf
+    return
+  defer: releaseVcsFileLock(lock)
+  let altPath = alternatesFilePath(leaf)
+  let hadAlt = fileExists(altPath)
+  let configPath = commonDir / "config"
+  let graphDir = commonDir / "objects/info/commit-graphs"
+  let graphFile = commonDir / "objects/info/commit-graph"
+  let backupSuffix = ".repro-consolidate-backup"
+  let savedDir = graphDir & backupSuffix
+  let savedFile = graphFile & backupSuffix
+  var oldAlt, oldConfig: string
+  var changedAlt, changedConfig, movedDir, movedFile, replacedGraph: bool
+  try:
+    oldAlt = if hadAlt: readFile(altPath) else: ""
+    oldConfig = readFile(configPath)
+    if dirExists(savedDir) or fileExists(savedFile):
+      result.diagnostic = "previous consolidation graph backup exists; inspect " & savedDir
+      return
+    # Refuse existing corruption before modifying the leaf's metadata. In
+    # particular no repair is permitted to erase a dangling symbolic ref.
+    let before = leafConnectivityDiagnostic(gitBin, leaf, full = true)
+    if before.len > 0:
+      result.diagnostic = "consolidation refused: " & before
+      return
+    if not dirExists(canonicalPool / "objects") or
+        not registerBorrower(canonicalPool, leaf):
+      result.diagnostic = "cannot register checkout with canonical pool " & canonicalPool
+      return
+    var recoveryUrls: seq[string]
+    # rewire may already have repointed repro-pool. Read the former pools'
+    # upstream URLs, then fetch directly INTO THE LEAF, never into a foreign
+    # bare whose gc/retention policy this process does not own.
+    for objects in alternateObjectDirs(leaf):
+      let origin = runGit(gitBin,
+        ["-C", objects.parentDir, "config", "--get", "remote.origin.url"])
+      let url = origin.output.strip()
+      if origin.code == 0 and url.len > 0 and url notin recoveryUrls:
+        recoveryUrls.add(url)
+    # Hydrate promised objects while the old refetch chain is still usable.
+    # Each pass can reveal deeper missing trees; stop when a pass cannot heal
+    # an object, rather than trusting fsck's intentional promisor omissions.
+    while true:
+      let walked = leafMissingObjects(gitBin, leaf, commonDir)
+      if walked.diagnostic.len > 0:
+        result.diagnostic = "consolidation object traversal failed: " & walked.diagnostic
+        return
+      if walked.missing.len == 0: break
+      for id in walked.missing:
+        if refill(gitBin, leaf, id): continue
+        var recovered = false
+        for url in recoveryUrls:
+          discard runGitEnv(gitBin,
+            ["-C", leaf, "-c", "gc.auto=0", "-c", "maintenance.auto=false",
+            "-c", "fetch.writeCommitGraph=false", "fetch", "--no-tags",
+            "--no-write-fetch-head", "--no-auto-maintenance",
+            "--no-recurse-submodules", url, id], lazyFetch = false)
+          if objectPresent(gitBin, leaf, id):
+            recovered = true
+            break
+        if not recovered:
+          result.diagnostic = "consolidation cannot materialize promised object " & id
+          return
+    # No --local: objects borrowed from every old pool must be copied. Normal
+    # repack retains reflog and linked-worktree roots as well as all refs.
+    let packed = runGitEnv(gitBin,
+      ["-C", leaf, "-c", "gc.auto=0", "repack", "-a", "-d"], lazyFetch = false)
+    if packed.code != 0:
+      result.diagnostic = "consolidation repack failed: " & packed.output.strip()
+      return
+    changedAlt = true
+    writeFile(altPath, "")
+    # Checking without ANY alternate also prevents a promised foreign-only
+    # object being mistaken for one supplied by the canonical pool.
+    let targets = listLeafTargets(gitBin, leaf, commonDir)
+    for target in targets:
+      if not objectPresent(gitBin, leaf, target.id):
+        result.diagnostic = "consolidation did not materialize " & target.refName & " " & target.id
+        return
+    let materialized = leafMissingObjects(gitBin, leaf, commonDir)
+    if materialized.diagnostic.len > 0 or materialized.missing.len > 0:
+      result.diagnostic = "consolidation left missing local objects: " &
+        materialized.diagnostic & " " & materialized.missing.join(", ")
+      return
+    if dirExists(graphDir):
+      moveDir(graphDir, savedDir)
+      movedDir = true
+    if fileExists(graphFile):
+      moveFile(graphFile, savedFile)
+      movedFile = true
+    replacedGraph = true
+    let graphFault = writeNonSplitCommitGraph(gitBin, leaf)
+    if graphFault.len > 0:
+      result.diagnostic = "consolidation graph rebuild failed: " & graphFault
+      return
+    let disconnected = leafConnectivityDiagnostic(gitBin, leaf, full = true)
+    if disconnected.len > 0:
+      result.diagnostic = "consolidation verification failed: " & disconnected
+      return
+    writeFile(altPath, canonicalPool / "objects" & "\n")
+    changedConfig = true
+    let configured = ensureLeafPoolConfig(gitBin, leaf, canonicalPool)
+    if configured.len > 0:
+      result.diagnostic = configured
+      return
+    let verified = leafConnectivityDiagnostic(gitBin, leaf, full = true)
+    if verified.len > 0:
+      result.diagnostic = "consolidation verification failed: " & verified
+      return
+    result.ok = true
+  except CatchableError as error:
+    result.diagnostic = "consolidation failed: " & error.msg
+  finally:
+    if not result.ok:
+      try:
+        if changedAlt:
+          if hadAlt: writeFile(altPath, oldAlt)
+          elif fileExists(altPath): removeFile(altPath)
+        if changedConfig: writeFile(configPath, oldConfig)
+        if replacedGraph:
+          if dirExists(graphDir): removeDir(graphDir)
+          if fileExists(graphFile): removeFile(graphFile)
+        if movedDir: moveDir(savedDir, graphDir)
+        if movedFile: moveFile(savedFile, graphFile)
+      except CatchableError as error:
+        result.diagnostic.add("; rollback failed: " & error.msg)
+    else:
+      if movedDir: removeDir(savedDir)
+      if movedFile: removeFile(savedFile)

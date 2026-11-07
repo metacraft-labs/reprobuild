@@ -167,8 +167,8 @@ if cache_repro_binary_cache_client_bin >/dev/null 2>&1; then
     fi
     rm -rf "${{OUT_ABS}}/prefix"
   elif [[ "${{CACHE_HIT}}" == "2" ]]; then
-    echo "[cache] {pkg_name}: REPRO_CACHE_DRY_RUN=1; skipping build."
-    exit 0
+    echo "[cache] {pkg_name}: cache dry-run cannot produce declared outputs" >&2
+    exit 2
   fi
 fi
 {PRELUDE_MARKER_END}
@@ -247,8 +247,8 @@ if [ -n "$__R7_REPO_ROOT" ] && [ -f "$__R7_REPO_ROOT/recipes/cache/scripts/cache
       fi
       rm -rf "$OUT_ABS/prefix"
     elif [ "${{CACHE_HIT}}" = "2" ]; then
-      echo "[cache] {pkg_name}: REPRO_CACHE_DRY_RUN=1; skipping build."
-      exit 0
+      echo "[cache] {pkg_name}: cache dry-run cannot produce declared outputs" >&2
+      exit 2
     fi
   fi
 fi

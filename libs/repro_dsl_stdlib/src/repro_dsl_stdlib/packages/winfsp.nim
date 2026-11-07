@@ -48,6 +48,7 @@ package winfsp:
       sha256 = "073a70e00f77423e34bed98b86e600def93393ba5822204fac57a29324db9f7a",
       archiveType = "msi",
       executablePath = "DYNAMIC/SxS/DYNAMIC/bin/fsptool-x64.exe",
+      version = WinFspVersion,
       packageId = "winfsp@" & WinFspVersion,
       cpu = "x86_64",
       os = "windows",

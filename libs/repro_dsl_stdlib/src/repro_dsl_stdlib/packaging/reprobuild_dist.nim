@@ -139,7 +139,7 @@
 ## it was installed would be a security decision the package is not
 ## entitled to make.
 
-import std/strutils
+import std/[os, strutils]
 
 import ./types
 import ./runtime_contract
@@ -310,16 +310,20 @@ proc reprobuildWindowsOmittedVariables*(): seq[string] =
   ##   same reason the cache package's whole list was (see
   ##   ``reprobuildCacheWrapperValues``).
   ##
-  ## WHAT THIS DOES **NOT** SETTLE is where a packaged Windows compile
-  ## would find the VENDORED headers instead. ``config.nims``'s
-  ## vendored branch resolves them against ``reproRepoRoot``, which is
-  ## the directory of the ``config.nims`` being evaluated, and the
-  ## package ships ``share/repro/source/libs`` with no ``config.nims``
-  ## beside it. So M1's gate item 4 — a packaged ``repro build`` — is
-  ## NOT discharged on Windows by this change and is recorded as a
-  ## residual. What the change does is stop the package from shipping
-  ## six values that name nothing, which is the defect the payload work
-  ## closed for Linux.
+  ## A packaged Windows compile therefore takes ``config.nims``'s
+  ## VENDORED branch, which resolves the headers against
+  ## ``reproRepoRoot``, the directory of the ``config.nims`` being
+  ## evaluated. Every package ships one at
+  ## ``share/repro/source/config.nims``: the packages this layer
+  ## describes stage their source root through
+  ## ``scripts/lib/stage_source_root.sh``, the list the release archives'
+  ## stager reads too, so the branch finds
+  ## ``libs/blake3/src/blake3/vendor`` and ``libs/xxh3/src/xxh3/vendor``
+  ## inside that same root. WHAT THIS DOES **NOT** SETTLE is that a
+  ## packaged Windows ``repro build`` then gets through its compile: no
+  ## packaged Windows build has been measured doing so. What this list
+  ## does is stop the package from shipping six values that name
+  ## nothing, which is the defect the payload work closed for Linux.
   @["BLAKE3_PREFIX", "REPROBUILD_USE_SYSTEM_HASH_LIBS",
     "REPROBUILD_NIX_DAEMON_BIN", "SQLITE_PREFIX", "XXHASH_PREFIX",
     "CLINGO_PREFIX"]
@@ -375,6 +379,7 @@ proc reprobuildToolWrapperValues*(dist: Distribution): seq[(string, string)] =
     ("CODETRACER_PINNED_SRC", src & "/codetracer/src"),
     ("REPRO_CT_TEST_RUNNER_SRC", src & "/reprobuild-ct-test-runner"),
     ("REPRO_TEST_ADAPTERS_SRC", src & "/reprobuild-test-adapters/src"),
+    ("TEST_CERTIFICATES_TOOLS_SRC", src & "/test-certificates-tools/src"),
     # ``CT_INTERPOSE_SRC`` WAS HERE AND IS GONE. It named
     # ``share/repro/src/ct-interpose``, the package shipped that tree,
     # and no consumer has read the variable since ``86cb1bf6`` removed
@@ -915,7 +920,7 @@ proc newReprobuildDistribution*(version: string; targetOs: TargetOs;
       "processes and the per-user build daemon.",
     maintainer: "Reprobuild Developers <dev@reprobuild.invalid>",
     vendor: "Metacraft Labs",
-    license: "MIT",
+    license: "Apache-2.0",
     homepage: "https://github.com/metacraft-labs/reprobuild",
     section: "devel",
     priority: "optional",
@@ -974,8 +979,55 @@ proc newReprobuildCacheDistribution*(version: string; targetOs: TargetOs;
       "is first class rather than an afterthought.",
     maintainer: "Reprobuild Developers <dev@reprobuild.invalid>",
     vendor: "Metacraft Labs",
-    license: "MIT",
+    license: "Apache-2.0",
     homepage: "https://github.com/metacraft-labs/reprobuild",
     section: "devel",
     priority: "optional",
     upgradeCode: "{4D19A6C7-2F80-4E3B-B5A9-71C6E20D8F35}")
+
+proc nimForkGuardScript*(forkTree, flakeLock: string): string =
+  ## The shell program with which `.#prefix` refuses a prefix whose images
+  ## were not compiled by the Nim it ships (reprobuild-pm
+  ## Distribution-And-Packaging.md §5.3, decision N, amended 2026-11-03).
+  ##
+  ## `forkTree` is the catalog `nim-fork` built for the target (its `nim/`
+  ## tree, with `.nim-fork-revision`); `flakeLock` is reprobuild's
+  ## `flake.lock`. Three refusals, each naming what it found:
+  ##
+  ## * the catalog fork is not at `flake.lock`'s `nim-fork-src` revision;
+  ## * no `nim` is on the edge's PATH;
+  ## * the `nim` on the edge's PATH -- the one the build's `nim.c` edges
+  ##   resolve, since every edge resolves `nim` the same way -- is not
+  ##   that fork: its installation's `lib/` differs from the fork's. The
+  ##   fork binary records no revision, so its standard library is what
+  ##   identifies it; stock Nim's differs. This is the case path mode
+  ##   produces when the fork is not on PATH: it falls back to the stock
+  ##   tarball Nim silently.
+  proc q(value: string): string =
+    "'" & value.replace("'", "'\\''") & "'"
+  "want=$(awk '/\"nim-fork-src\": \\{/ { f = 1 } f && /\"rev\":/ " &
+    "{ gsub(/[\",]/, \"\", $2); print $2; exit }' " & q(flakeLock) & "); " &
+  "if [ ${#want} != 40 ]; then echo " &
+    q("repro build .#prefix: cannot read the nim-fork-src revision from " &
+      flakeLock) & " >&2; exit 1; fi; " &
+  "have=$(cat " & q(forkTree / ".nim-fork-revision") & " 2>/dev/null || true); " &
+  "if [ \"$want\" != \"$have\" ]; then echo \"repro build .#prefix: the " &
+    "catalog's nim-fork is ${have:-not built}, but reprobuild is compiled " &
+    "with $want (flake.lock nim-fork-src); build the nim-fork recipe at " &
+    "$want\" >&2; exit 1; fi; " &
+  "n=$(command -v nim || true); " &
+  "if [ -z \"$n\" ]; then echo 'repro build .#prefix: no nim on this " &
+    "edge'\"'\"'s PATH; the images must be compiled by the fork, which " &
+    "the dev shell provides' >&2; exit 1; fi; " &
+  "home=$(dirname \"$(dirname \"$(readlink -f \"$n\")\")\"); " &
+  "ver=$(\"$n\" --version 2>/dev/null | head -1); " &
+  "d=$(diff -rq \"$home/lib\" " & q(forkTree / "lib") & " 2>&1 || true); " &
+  "if [ -n \"$d\" ]; then echo \"repro build .#prefix: the nim this build " &
+    "compiles with ($n: $ver) is not the fork at $want, which the prefix " &
+    "ships under nim/: its standard library differs from the fork's. " &
+    "Build in the dev shell, which puts the fork on PATH:\" >&2; " &
+    "printf '%s\\n' \"$d\" | head -5 | sed 's/^/  /' >&2; exit 1; fi"
+
+const NimForkGuardTools* = ["awk", "cat", "readlink", "dirname", "diff",
+  "head", "sed"]
+  ## The tools `nimForkGuardScript` runs, for the edge that runs it.

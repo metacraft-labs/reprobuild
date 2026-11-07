@@ -67,6 +67,20 @@ import ./packaging_test_support
 # move repointed some readers and not others. The file name in this
 # suite's own name is historical; the guarantee is not.
 
+proc expectedNixWrapperVariables(): seq[string] =
+  ## Nix retains a matching RunQuota runtime in its closure. The native
+  ## distribution has no bundled daemon, so those executable defaults belong
+  ## only to Nix; the remaining shared contract still agrees name-for-name.
+  for name in ReprobuildWrapperVariables:
+    result.add(name)
+    if name == "RUNQUOTA_SRC":
+      result.add(@ReprobuildNixRuntimeToolVariables)
+
+proc sharedNixWrapperVariables(): seq[string] =
+  for name in packageNixWrapperVariables():
+    if name notin ReprobuildNixRuntimeToolVariables:
+      result.add(name)
+
 suite "packaging: the §5 wrapper-var list tracks the reprobuild derivation":
 
   test "package.nix still has a recognisable wrapProgram contract":
@@ -78,9 +92,9 @@ suite "packaging: the §5 wrapper-var list tracks the reprobuild derivation":
     check "REPROBUILD_SOURCE_ROOT" in names
     check "CLINGO_PREFIX" in names
 
-  test "the layer's list is exactly the flake's list, in the same order":
-    check ReprobuildWrapperVariables.len == packageNixWrapperVariables().len
-    check @ReprobuildWrapperVariables == packageNixWrapperVariables()
+  test "shared defaults and Nix runtime tools match the canonical wrapper":
+    check expectedNixWrapperVariables() == packageNixWrapperVariables()
+    check @ReprobuildWrapperVariables == sharedNixWrapperVariables()
 
   test "the dlopen-by-leaf-name set is the one §5 names":
     # §5: "blake3, xxHash, sqlite, openssl, zstd, clingo — the last two
@@ -222,12 +236,15 @@ suite "packaging: the drift guard has a PER-BINARY dimension":
     let cli = newReprobuildDistribution("0.1.3", toLinux)
     let cache = newReprobuildCacheDistribution("0.1.3", toLinux)
 
-    # THE CLI ROLE: the flake's list, name for name, in order. This is
-    # the property the suite above already held; it is restated here so
-    # the two roles can be read side by side.
+    # THE CLI ROLE: the common source/prefix list, name for name, in order.
+    # Only Nix supplies a matching RunQuota runtime package; native wrappers
+    # omit those two paths because their payload does not bundle the tools.
     var cliNames: seq[string] = @[]
     for (name, _) in reprobuildWrapperValues(cli): cliNames.add(name)
-    check cliNames == packageNixWrapperVariables()
+    check cliNames == sharedNixWrapperVariables()
+    for name in ReprobuildNixRuntimeToolVariables:
+      check name in packageNixWrapperVariables()
+      check name notin cliNames
 
     # THE CACHE ROLE: empty, DELIBERATELY, against a flake that gives
     # the same binary every one of these variables. The divergence is

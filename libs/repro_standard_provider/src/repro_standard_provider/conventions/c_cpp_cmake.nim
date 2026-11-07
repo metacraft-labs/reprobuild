@@ -50,14 +50,12 @@
 ##   2. ``ccpp-cmake-build-<member>`` — one per declared member:
 ##      ``cmake --build <scratch> --target <member>``. Deps:
 ##      ``ccpp-cmake-configure``. Outputs: the produced binary or static
-##      archive at the predicted path under ``<scratch>``.
+##      archive at the tool-reported path.
 ##
-## **Output paths** (single-config generators):
-##   * Executable: ``<scratch>/<member>[.exe]``.
-##   * Static library: ``<scratch>/lib<member>.a`` (POSIX), or
-##     ``<scratch>/lib<member>.a`` (MinGW Makefiles / Ninja on Windows —
-##     gcc's archiver convention). MSVC-style ``<member>.lib`` is deferred
-##     to multi-config follow-up.
+## **Output paths**: the configure action derives each target's artifacts
+## from the tool's configured metadata and writes a dynamic-output fragment.
+## Member build edges load it before running, so output name/directory
+## overrides, subdirectory targets and native archive suffixes are honored.
 ##
 ## **Honest scope** (deferred):
 ##   * Per-source lift via parsing the generated Makefile (Tier 1's job).
@@ -74,6 +72,7 @@ import repro_core
 import repro_provider_runtime
 import repro_project_dsl
 import repro_standard_provider/convention
+import repro_standard_provider/conventions/output_discovery
 import repro_standard_provider/conventions/fetch_action
 
 const
@@ -330,23 +329,6 @@ proc sanitizeNamePart(value: string): string =
   if result.len == 0:
     result = "x"
 
-proc executableOutputPath(projectRoot, member: string): string =
-  ## Predicted output path for an ``add_executable(<member> ...)`` target.
-  ## Single-config generators place binaries at ``<build dir>/<name>``
-  ## (or ``<build dir>/<name>.exe`` on Windows).
-  when defined(windows):
-    scratchPathFor(projectRoot) / (member & ".exe")
-  else:
-    scratchPathFor(projectRoot) / member
-
-proc staticLibraryOutputPath(projectRoot, member: string): string =
-  ## Predicted output path for an ``add_library(<member> STATIC ...)``
-  ## target with the GNU archiver convention. CMake's
-  ## ``CMAKE_STATIC_LIBRARY_PREFIX`` defaults to ``lib`` for both
-  ## ``MinGW Makefiles`` and ``Ninja`` (when using gcc/clang), and the
-  ## suffix defaults to ``.a``. MSVC-style ``<member>.lib`` is deferred.
-  scratchPathFor(projectRoot) / ("lib" & member & ".a")
-
 proc collectCMakeInputs(projectRoot: string): seq[string] =
   ## Conservative input enumeration for the configure action:
   ## every ``CMakeLists.txt`` and ``*.cmake`` file anywhere under
@@ -386,22 +368,12 @@ proc collectCMakeInputs(projectRoot: string): seq[string] =
 proc emitConfigureAction(projectRoot, cmakeExe, generator: string;
                          cmakeFlags: seq[string];
                          extraDeps: seq[string] = @[];
-                         extraInputs: seq[string] = @[]):
+                         extraInputs: seq[string] = @[];
+                         members: seq[CCppCMakeMember] = @[]):
     tuple[action: BuildActionDef; stamp: string] =
-  ## Emit the ``cmake -S <root> -B <scratch> -G <generator>`` action.
-  ## On success the action runs a follow-up touch via a sh-c wrapper if
-  ## one is available; otherwise the action declares the cache file as
-  ## its primary output and a stamp file written by the action itself.
-  ##
-  ## Implementation note: we issue a single CMake invocation, then the
-  ## engine inspects the cache file's existence as the success signal.
-  ## The "stamp" path is written by a follow-up touch via Nim's runtime
-  ## in the post-action verify phase — but to keep the action self-
-  ## contained at the engine level, we declare BOTH the cache file AND
-  ## a stamp file the action produces by wrapping the cmake invocation
-  ## in a sh-c when sh is available. When sh isn't available the stamp
-  ## isn't written by the action itself; the engine still keys off the
-  ## cache file's mtime.
+  ## Run cmake configure through the catalog-provisioned shell, then derive
+  ## target output metadata and touch the completion stamp in the same action.
+  ## The shell is an explicit tool dependency, not an optional PATH fallback.
   let scratch = scratchPathFor(projectRoot)
   createDir(extendedPath(scratch))
   let cache = cmakeCachePath(projectRoot)
@@ -412,41 +384,38 @@ proc emitConfigureAction(projectRoot, cmakeExe, generator: string;
   # M9.N Batch B: bare ``sh`` resolved via ``toolIdentityRefs``.
   let shExe = "sh"
   var argv: seq[string]
-  if shExe.len > 0:
-    # Compound: cmake configure, then touch the stamp.
-    let escapedStamp = stamp.replace("\\", "/").replace("\"", "\\\"")
-    let escapedCmake = cmakeExe.replace("\\", "/").replace("\"", "\\\"")
-    let escapedRoot = projectRoot.replace("\\", "/").replace("\"", "\\\"")
-    let escapedScratch = scratch.replace("\\", "/").replace("\"", "\\\"")
-    # DSL-port M9.K: append M9.I-registered cmakeFlags to the
-    # ``cmake -S ... -B ... -G ...`` invocation. Each flag is
-    # double-quote-escaped for the shell context.
-    var trailingFlags = ""
-    for flag in cmakeFlags:
-      trailingFlags.add(" \"")
-      trailingFlags.add(flag.replace("\"", "\\\""))
-      trailingFlags.add("\"")
-    let script = "set -e; \"" & escapedCmake & "\" -S \"" & escapedRoot &
-      "\" -B \"" & escapedScratch & "\" -G \"" & generator &
-      "\" -DCMAKE_BUILD_TYPE=Release" & trailingFlags &
-      "; touch \"" & escapedStamp & "\""
-    argv = @[shExe, "-c", script]
-  else:
-    # No sh on PATH (rare on dev hosts): invoke cmake directly. The
-    # stamp won't be touched, but the cache file IS declared as the
-    # primary output so the engine still records success.
-    argv = @[cmakeExe, "-S", projectRoot, "-B", scratch, "-G", generator,
-      "-DCMAKE_BUILD_TYPE=Release"]
-    # DSL-port M9.K: append M9.I-registered cmakeFlags verbatim.
-    for flag in cmakeFlags:
-      argv.add(flag)
+  # Compound: cmake configure, then touch the stamp.
+  let escapedStamp = stamp.replace("\\", "/").replace("\"", "\\\"")
+  let escapedCmake = cmakeExe.replace("\\", "/").replace("\"", "\\\"")
+  let escapedRoot = projectRoot.replace("\\", "/").replace("\"", "\\\"")
+  let escapedScratch = scratch.replace("\\", "/").replace("\"", "\\\"")
+  # DSL-port M9.K: append M9.I-registered cmakeFlags to the
+  # ``cmake -S ... -B ... -G ...`` invocation. Each flag is
+  # double-quote-escaped for the shell context.
+  var trailingFlags = ""
+  for flag in cmakeFlags:
+    trailingFlags.add(" \"")
+    trailingFlags.add(flag.replace("\"", "\\\""))
+    trailingFlags.add("\"")
+  var outputTargets: seq[tuple[id, name, fragment: string]]
+  for member in members:
+    outputTargets.add(("ccpp-cmake-build-" & sanitizeNamePart(member.name),
+      member.name, scratch / ("outputs-" & sanitizeNamePart(member.name) & ".dyndep")))
+  let discover = outputDiscoveryCommand("cmake", scratch, outputTargets)
+  let query = scratch / ".cmake/api/v1/query/codemodel-v2"
+  let script = "set -e; mkdir -p " & quoteShell(query.parentDir) &
+    "; touch " & quoteShell(query) & "; \"" & escapedCmake & "\" -S \"" & escapedRoot &
+    "\" -B \"" & escapedScratch & "\" -G \"" & generator &
+    "\" -DCMAKE_BUILD_TYPE=Release" & trailingFlags &
+    "; " & discover & "; touch \"" & escapedStamp & "\""
+  argv = @[shExe, "-c", script]
   var inputs = collectCMakeInputs(projectRoot)
   for ei in extraInputs:
     if ei notin inputs:
       inputs.add(ei)
-  var outputs = @[cache]
-  if shExe.len > 0:
-    outputs.add(stamp)
+  var outputs = @[cache, stamp]
+  for member in members:
+    outputs.add(scratch / ("outputs-" & sanitizeNamePart(member.name) & ".dyndep"))
   let action = buildAction(
     id = "ccpp-cmake-configure",
     call = inlineExecCall(argv, projectRoot),
@@ -471,13 +440,10 @@ proc emitBuildAction(projectRoot, cmakeExe: string;
                      configureActionId, configureStamp: string):
                        BuildActionDef =
   ## Emit ``cmake --build <scratch> --target <member>`` for a single
-  ## member. The output path is the convention's predicted location of
-  ## the produced artefact.
+  ## member. Its configured tool metadata supplies the obligatory outputs
+  ## through the pre-execution dynamic-output fragment.
   let scratch = scratchPathFor(projectRoot)
-  let outputPath = case member.kind
-    of cccmkExecutable: executableOutputPath(projectRoot, member.name)
-    of cccmkLibraryStatic: staticLibraryOutputPath(projectRoot, member.name)
-  createDir(extendedPath(parentDir(outputPath)))
+  let fragment = scratch / ("outputs-" & sanitizeNamePart(member.name) & ".dyndep")
   let argv = @[cmakeExe, "--build", scratch, "--target", member.name]
   let kindTag = case member.kind
     of cccmkExecutable: "executable"
@@ -486,8 +452,9 @@ proc emitBuildAction(projectRoot, cmakeExe: string;
     id = "ccpp-cmake-build-" & sanitizeNamePart(member.name),
     call = inlineExecCall(argv, projectRoot),
     deps = @[configureActionId],
-    inputs = @[configureStamp],
-    outputs = @[outputPath],
+    inputs = @[configureStamp, fragment],
+    outputs = @[],
+    dynamicDepsFile = fragment,
     pool = "compile",
     dependencyPolicy = automaticMonitorPolicy(),
     commandStatsId = "ccpp-cmake." & kindTag & ".build",
@@ -566,7 +533,7 @@ proc cCppCMakeEmitFragment(projectRoot: string;
         configureDeps.add(fetchAct.id)
         configureInputsExtra.add(fetchStampPath(projectRoot, fetchSpec.hashHex))
       let configurePair = emitConfigureAction(projectRoot, cmakeExe, gen.name,
-        cmakeFlags, configureDeps, configureInputsExtra)
+        cmakeFlags, configureDeps, configureInputsExtra, members)
       allActions.add(configurePair.action)
       for member in members:
         let buildAct = emitBuildAction(projectRoot, cmakeExe, member,

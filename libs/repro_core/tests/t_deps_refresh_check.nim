@@ -16,6 +16,7 @@
 ## ``t_nim_dep_scanner.nim``; this test covers the CLI plumbing.
 
 import std/[os, osproc, strutils, unittest]
+import repro_test_support/reasoned_skip
 import repro_test_support
 
 const NoReproBinaryReason =

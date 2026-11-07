@@ -148,7 +148,7 @@ suite "MO-1: committed lock pins solved graph and build consumes it":
       # self-describing committed lock that also carries per-dependency
       # coordinates + integrity; the v1 solved-graph payload is preserved as a
       # sub-part).
-      check "reprobuild.solved-graph-lock.v2" in lockBody
+      check "reprobuild.solved-graph-lock.v3" in lockBody
       check NimSelected in lockBody
       check AppSelected in lockBody
       # NLF-M9 — the unselected instance is RECORDED, and it is still HERE.

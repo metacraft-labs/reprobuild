@@ -112,9 +112,9 @@ suite "membership model — fork upstream reaches the checkout":
         "schema = \"reprobuild.workspace.url-prefix.v1\"\n\n" &
         "[url-prefix]\nname = \"kitware\"\nurl = \"" & kitwarePrefix & "\"\n")
       writeFile(manifestRoot / "repos" / "reprobuild-cmake.toml",
-        "schema = \"reprobuild.workspace.repo.v1\"\n\n" &
+        "schema = \"reprobuild.workspace.repo.v2\"\n\n" &
         "[repo]\nname = \"reprobuild-cmake\"\npath = \"reprobuild-cmake\"\n" &
-        "branch = \"reprobuild\"\n" &
+        "mainline = \"reprobuild\"\n" &
         "url_prefix = \"metacraft-labs\"\n" &
         "remotes = [{ name = \"upstream\", url_prefix = \"kitware\", " &
           "url_suffix = \"CMake\" }]\n")
@@ -175,9 +175,9 @@ suite "membership model — fork upstream reaches the checkout":
         "[url-prefix]\nname = \"metacraft-labs\"\nurl = \"" & orgPrefix &
         "\"\n")
       writeFile(manifestRoot / "repos" / "reprobuild-cmake.toml",
-        "schema = \"reprobuild.workspace.repo.v1\"\n\n" &
+        "schema = \"reprobuild.workspace.repo.v2\"\n\n" &
         "[repo]\nname = \"reprobuild-cmake\"\npath = \"reprobuild-cmake\"\n" &
-        "branch = \"reprobuild\"\nurl_prefix = \"metacraft-labs\"\n")
+        "mainline = \"reprobuild\"\nurl_prefix = \"metacraft-labs\"\n")
       writeFile(manifestRoot / "repo-sets" / "cmake.toml",
         "schema = \"reprobuild.workspace.repo-set.v1\"\n\n" &
         "[repo-set]\nname = \"cmake\"\n\nmember_repos = [\"reprobuild-cmake\"]\n")

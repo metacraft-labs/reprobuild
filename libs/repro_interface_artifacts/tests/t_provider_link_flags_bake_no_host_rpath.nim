@@ -21,6 +21,7 @@
 ## NO MOCKS: the real flag builder over the real filesystem and /nix/store.
 
 import std/[os, strutils, unittest]
+import repro_test_support/reasoned_skip
 
 import repro_interface_artifacts
 

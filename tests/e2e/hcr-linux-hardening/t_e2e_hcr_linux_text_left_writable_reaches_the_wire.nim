@@ -6,14 +6,18 @@
 ##
 ## WHAT THIS GATE IS FOR. Both HCR arms have always RECORDED the fact that a
 ## publication could not restore the target's text mapping to
-## `PROT_READ|PROT_EXEC`, and neither has ever REPORTED it: the Linux value
-## died in `repro_hcr_lx_last_report.text_left_writable`, read by one probe
-## accessor nothing called, and the Apple value in
-## `repro_hcr_apple_text_left_writable`, the same. A process in that state is
-## carrying writable executable text for the rest of its lifetime and the only
-## way to find out was to go looking with a gate. HLX-M9 owns it because this
-## milestone's subject is what a host's hardening policy does to the RW->RX
-## round trip.
+## `PROT_READ|PROT_EXEC`, and HLX-M9 made the agent REPORT it, as
+## `textLeftWritable` on the `patchApplied` frame.
+##
+## On Linux that state can no longer arise, and this gate now proves it rather
+## than provoking it. The provider never makes target text writable: it builds
+## the patched page as a separate copy, makes the copy executable, and remaps
+## it over the live page (`repro_hcr_lx_replace_text_word`). The step that
+## used to leave text writable when it failed — the post-store restore — does
+## not exist, and the step that replaced it (making the COPY executable)
+## fails BEFORE the target is touched. So the property is: a failed protection
+## step is a clean refusal, the target keeps running its original code, and
+## its text is executable and not writable throughout.
 ##
 ## `allowed_mocks: none`. Real GCC, the real patchable build profile, the
 ## production C agent linked into a real target process, the real agent Unix
@@ -23,27 +27,22 @@
 ## TWO ARMS, ONE BINARY, ONE VARIABLE. Both arms run the SAME target
 ## executable with the SAME patch bytes over the SAME socket transport. They
 ## differ in exactly one environment variable,
-## `REPRO_HCR_TEST_FAIL_TEXT_RESTORE`, which makes the provider skip the
-## post-store restore syscall for site 0. It does NOT forge the flag: the
-## syscall is not issued, so the page really is left writable, which is what
-## makes the second producer below meaningful.
+## `REPRO_HCR_TEST_FAIL_TEXT_RESTORE`, which makes the provider's step that
+## turns the replacement page executable fail for site 0. It does not forge an
+## outcome: the provider takes its production failure path.
 ##
-## TWO INDEPENDENT PRODUCERS, REQUIRED TO AGREE. The first is the agent's new
-## `textLeftWritable` field on the `patchApplied` frame. The second is the
-## target's own reading of `/proc/self/maps` for the mapping containing the
-## patched entry — written by the KERNEL, through a file the agent never
-## touches. Asserting only the first would be asserting the agent's bookkeeping
-## against itself (Verification-Harness-Traps §7a). The gate requires
-## `textLeftWritable == false` AND `r-xp` in the healthy arm, and
-## `textLeftWritable == true` AND a `w` in the permission string in the faulted
-## arm, so a provider that set the flag without leaving the page writable — or
-## left it writable without setting the flag — fails.
+## TWO INDEPENDENT PRODUCERS, REQUIRED TO AGREE. The first is the agent's
+## frame (`patchApplied` with `textLeftWritable == false`, or `patchFailed`
+## naming the protection failure). The second is the target's own reading of
+## `/proc/self/maps` for the mapping containing the patched entry — written by
+## the KERNEL, through a file the agent never touches. The gate requires
+## executable-and-not-writable text in BOTH arms, and the target's own call
+## result to show which code ran: the patched body (77) in the healthy arm,
+## the original (11) in the faulted one, so a provider that published despite
+## reporting a refusal — or refused while leaving a half-done page — fails.
 ##
-## ANTI-VACUITY. The faulted arm asserts the PATCH STILL WORKED (11 -> 77): the
-## whole design decision this field embodies is that a failed restore is a
-## successful publication plus a degradation, not a refusal. An arm in which
-## the patch failed would prove nothing about the field's severity. Both arms
-## also assert `patchFailed.isNone`, so neither can be satisfied by a refusal.
+## The wire field stays (the Apple arm can still set it), and its protocol
+## round trip is still asserted.
 ##
 ## NO SILENT SKIP on Linux x86_64. Off-platform prints the loud unsupported
 ## diagnostic through the shared helper rather than a bare `skip()`.
@@ -161,7 +160,7 @@ when defined(linux) and defined(amd64):
       result.applied = delivery.patchApplied.get()
 
   suite "e2e_hcr_linux_text_left_writable_reaches_the_wire":
-    test "a failed text restore is reported on the applied frame, and procfs agrees":
+    test "target text is never left writable, and a failed protection step is a clean refusal":
       let found = findExe("gcc")
       if found.len == 0:
         checkpoint("required compiler not on PATH: gcc")
@@ -223,39 +222,42 @@ when defined(linux) and defined(amd64):
       let faulted = runArm(targetBin, workDir, repoRoot, "m9-faulted.sock",
                            patchBytes, failRestore = true)
 
-      # The design decision this field embodies: a failed restore is a
-      # SUCCESSFUL publication plus a degradation. An arm in which the patch
-      # was refused would say nothing about the field's severity.
-      ck not faulted.refused
+      # The provider could not make its replacement page executable, so it
+      # must REFUSE, by name, before touching the target.
+      ck faulted.refused
+      checkpoint("faulted refusal: " & faulted.refusalMessage)
+      ck faulted.refusalMessage.contains("text-protection-failed")
       ck faulted.targetJson["faultLeverSet"].getBool() == true
       ck faulted.targetJson["before"].getInt() == 11
-      ck faulted.targetJson["after"].getInt() == 77
+      # The target still runs its ORIGINAL code: nothing was published.
+      ck faulted.targetJson["after"].getInt() == 11
 
-      ck faulted.applied.textLeftWritableReported
-      ck faulted.applied.textLeftWritable == true
-
-      # Second producer again, and this is the assertion that makes the flag
-      # mean something: the page really is writable, according to procfs.
+      # Second producer again: the kernel says the entry's text is still
+      # executable and was not left writable.
       let faultedPerms = faulted.targetJson["entryPermsAfter"].getStr()
       checkpoint("faulted entryPermsAfter=" & faultedPerms)
-      ck faultedPerms.contains('w')
       ck faultedPerms.contains('x')
+      ck not faultedPerms.contains('w')
 
-      # 5. The two arms must DIFFER, asserted directly rather than inferred
-      # from two separate constants (Verification-Harness-Traps §22: a
-      # cross-check whose sides come from one expression is an identity).
-      ck healthy.applied.textLeftWritable != faulted.applied.textLeftWritable
-      ck healthyPerms != faultedPerms
+      # 5. The arms differ in the code that ran, not in the text's protection:
+      # asserted directly rather than inferred from two constants
+      # (Verification-Harness-Traps §22).
+      ck healthy.targetJson["after"].getInt() !=
+        faulted.targetJson["after"].getInt()
+      ck healthyPerms == faultedPerms
 
       # 6. The field survives a protocol round trip, so a coordinator that
-      # re-emits the frame does not drop it.
+      # re-emits the frame does not drop it. Built here with the flag set,
+      # since the Linux agent can no longer produce that frame.
+      var leftWritable = healthy.applied
+      leftWritable.textLeftWritable = true
       let reEmitted = parseAgentMessage(agentMessageJson(
         HcrAgentMessage(kind: hmkPatchApplied,
-                        patchApplied: faulted.applied)))
+                        patchApplied: leftWritable)))
       ck reEmitted.patchApplied.textLeftWritable
       ck reEmitted.patchApplied.textLeftWritableReported
 
-      expectCount(25)
+      expectCount(24)
 else:
   suite "e2e_hcr_linux_text_left_writable_reaches_the_wire":
     test "requires linux x86_64":

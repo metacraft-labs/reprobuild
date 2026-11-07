@@ -133,6 +133,21 @@ proc openCasStore*(root: string): CasStore =
   ## ``Local-Content-Addressed-Store.md`` §"Layout" specifies.
   result.inner = openStore(root)
 
+proc openCasStoreReadOnly*(root: string): CasStore =
+  ## A READ-ONLY view of the CAS rooted at ``root``: ``casGet``,
+  ## ``casExists``, ``casVerify`` and ``casPath`` work, and nothing else may
+  ## be called on it. Blob reads only need the on-disk blob tree, so this
+  ## view opens no SQLite index handle and creates nothing.
+  ##
+  ## It exists for long-lived readers that share a root with writers in
+  ## other processes — the peer-cache server inside ``repro-daemon`` serves
+  ## blobs that forked build workers write. Holding an index handle there
+  ## would put a SQLite connection on the far side of every ``fork()`` the
+  ## daemon performs, which SQLite forbids using in the child, for no gain:
+  ## a read never touches the index. ``close`` on the view is a no-op.
+  result.inner.root = root
+  result.inner.casRoot = root / "cas" / "blake3"
+
 proc close*(cas: var CasStore) =
   ## Close the underlying handle. Idempotent on already-closed stores.
   cas.inner.close()

@@ -33,8 +33,7 @@ proc reproDaemonCommand(tempRoot: string; action: string;
     daemonArgs(tempRoot))
 
 proc statusPath(tempRoot: string): string =
-  tempRoot / "state" / "status" /
-    (daemonEndpoint(tempRoot).extractFilename & ".status")
+  statusFileForEndpoint(tempRoot / "state", daemonEndpoint(tempRoot))
 
 proc stopDaemon(tempRoot: string) =
   discard runShell(reproDaemonCommand(tempRoot, "stop"), repoRoot())

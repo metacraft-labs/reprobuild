@@ -110,7 +110,9 @@ proc desiredDigest(op: PrivilegedOperation): string =
      pokLinuxTmpfilesRule, pokLinuxSudoersRule, pokPasswdGroup,
      pokLinuxNixDaemonSetting, pokSystemdSystemTimer,
      pokLinuxFirewallRule, pokLinuxNixosSystemModule,
-     pokMacosDarwinSystemModule, pokLinuxFhsSandbox:
+     pokMacosDarwinSystemModule, pokLinuxFhsSandbox, pokLinuxDpkgDiversion,
+     pokSystemdUnitState, pokLinuxAddOnTool, pokSystemdSystemDropIn,
+     pokLinuxSysusersEntry:
     posixSystemDesiredDigestHex(op)
   of pokInlineExecCall:
     # Windows-System-Resources Phase E: an inline-exec edge has no
@@ -194,6 +196,8 @@ proc reobserve*(ctx: FixtureContext;
       observePosixOsHostname(op)
   of pokLinuxSysctl:
     observeLinuxSysctl(op)
+  of pokLinuxDpkgDiversion:
+    observeLinuxDpkgDiversion(op)
   of pokLinuxUdevRule:
     observeLinuxUdevRule(op)
   of pokLinuxPolkitRule:
@@ -214,6 +218,14 @@ proc reobserve*(ctx: FixtureContext;
     observeLinuxNixosSystemModule(op)
   of pokMacosDarwinSystemModule:
     observeMacosDarwinSystemModule(op)
+  of pokSystemdUnitState:
+    observeSystemdUnitState(op)
+  of pokLinuxAddOnTool:
+    observeLinuxAddOnTool(op)
+  of pokSystemdSystemDropIn:
+    observeSystemdSystemDropIn(op)
+  of pokLinuxSysusersEntry:
+    observeLinuxSysusersEntry(op)
   of pokLinuxFhsSandbox:
     observeLinuxFhsSandbox(op)
   of pokInlineExecCall:
@@ -257,11 +269,11 @@ proc applyOne(ctx: FixtureContext;
   of pokMacosSystemDefault:
     result = applyMacosSystemDefault(op)
   of pokSystemdSystemUnit:
-    result = applySystemdSystemUnit(op)
+    result = applySystemdSystemUnit(ctx, op)
   of pokLaunchdSystemDaemon:
     result = applyLaunchdSystemDaemon(op)
   of pokFsSystemFile:
-    result = applyFsSystemFile(op)
+    result = applyFsSystemFile(ctx, op)
   of pokFsSystemDirectory:
     result = applyFsSystemDirectory(op)
   of pokEnvSystemVariable:
@@ -282,7 +294,9 @@ proc applyOne(ctx: FixtureContext;
     else:
       result = applyPosixOsHostname(op)
   of pokLinuxSysctl:
-    result = applyLinuxSysctl(op)
+    result = applyLinuxSysctl(ctx, op)
+  of pokLinuxDpkgDiversion:
+    result = applyLinuxDpkgDiversion(op)
   of pokLinuxUdevRule:
     result = applyLinuxUdevRule(op)
   of pokLinuxPolkitRule:
@@ -303,6 +317,14 @@ proc applyOne(ctx: FixtureContext;
     result = applyLinuxNixosSystemModule(op)
   of pokMacosDarwinSystemModule:
     result = applyMacosDarwinSystemModule(op)
+  of pokSystemdUnitState:
+    result = applySystemdUnitState(op)
+  of pokLinuxAddOnTool:
+    result = applyLinuxAddOnTool(op)
+  of pokSystemdSystemDropIn:
+    result = applySystemdSystemDropIn(ctx, op)
+  of pokLinuxSysusersEntry:
+    result = applyLinuxSysusersEntry(op)
   of pokLinuxFhsSandbox:
     result = applyLinuxFhsSandbox(op)
   of pokInlineExecCall:
@@ -389,6 +411,7 @@ proc dispatchOperation*(ctx: FixtureContext;
     (op.kind == pokPasswdUser and op.puDestroy) or
     (op.kind == pokLinuxSysctl and op.sysctlDestroy) or
     (op.kind == pokLinuxUdevRule and op.udevDestroy) or
+    (op.kind == pokLinuxDpkgDiversion and op.ddDestroy) or
     (op.kind == pokLinuxPolkitRule and op.polkitDestroy) or
     (op.kind == pokLinuxTmpfilesRule and op.tmpfilesDestroy) or
     (op.kind == pokLinuxSudoersRule and op.sudoersDestroy) or
@@ -398,9 +421,21 @@ proc dispatchOperation*(ctx: FixtureContext;
     (op.kind == pokLinuxFirewallRule and op.lfwDestroy) or
     (op.kind == pokLinuxNixosSystemModule and op.nixosModuleDestroy) or
     (op.kind == pokMacosDarwinSystemModule and op.darwinModuleDestroy) or
-    (op.kind == pokLinuxFhsSandbox and op.fsbDestroy)
+    (op.kind == pokLinuxFhsSandbox and op.fsbDestroy) or
+    (op.kind == pokSystemdUnitState and op.usDestroy) or
+    (op.kind == pokLinuxAddOnTool and op.atDestroy) or
+    (op.kind == pokSystemdSystemDropIn and op.diDestroy) or
+    (op.kind == pokLinuxSysusersEntry and op.seDestroy)
+  # Add-On spec §7.3: a unit whose `depends_on` resource changed in this
+  # apply has an UNCHANGED file, so by digest it is a cache-hit. The apply
+  # step marked it (`suRestartRequested`), and the driver, not this loop,
+  # decides whether the running instance is restarted; so the no-op
+  # short-circuit is skipped for it.
+  let dependencyRestart = op.kind == pokSystemdSystemUnit and
+    op.suRestartRequested and not op.suDestroy
   let firstSampleLooksLikeCacheHit =
-    if destroyOp: not observed.present
+    if dependencyRestart: false
+    elif destroyOp: not observed.present
     else: observed.present and observed.digestHex == desiredHex
 
   # Confirm an apparent cache-hit with a second observation taken
@@ -481,8 +516,14 @@ proc dispatchOperation*(ctx: FixtureContext;
   result.restartNeeded = post.restartNeeded
   result.detail =
     if destroyOp: "destroyed"
+    elif dependencyRestart and observed.present and
+        observed.digestHex == desiredHex:
+      "unit unchanged; restarted because a resource it depends_on changed"
     elif observed.present: "updated"
     else: "created"
+  if post.serviceRestartPending:
+    result.detail.add("; pending restart: the unit changed while active " &
+      "and the profile holds its restart (restartIfChanged = false)")
   if post.restartNeeded:
     result.detail.add("; a reboot is required to finish the change " &
       "(Reprobuild does not auto-reboot)")

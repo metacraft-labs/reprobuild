@@ -11,16 +11,27 @@
 ## Live verification of the fpc shape is the REPRO_M4_LIVE smoke
 ## documented in the M4 hand-off.
 
+## Negative cases exercise foreign-target refusal or the native consumer's
+## missing-helper receipt, and separately preserve the compatibility discovery
+## diagnostic. These use real metadata, the executor and empty stores; no mocks.
+
 import std/[os, osproc, strutils, tables, unittest]
+import repro_test_support/reasoned_skip
 from repro_core/paths import extendedPath
 
 import repro_local_store
 import repro_dsl_stdlib/packages_schema
+import repro_interface_artifacts
+import repro_tool_profiles
+when defined(windows) and defined(amd64):
+  import repro_build_engine
 
 import repro_home_apply/package_catalog
 import repro_home_apply/builtin_adapter
+from repro_test_support import testCaseScratchSlug
 
-const FixtureRoot = "build/test-tmp/t-builtin-adapter-installer-innosetup-fpc"
+let FixtureRoot = "build/test-tmp/t-builtin-adapter-installer-innosetup-fpc" /
+  testCaseScratchSlug()
 
 proc resetDir(path: string) =
   if dirExists(extendedPath(path)):
@@ -125,7 +136,61 @@ PrivilegesRequired=lowest
     return absolutePath(produced)
   return ""
 
-suite "M4 — cakBuiltin Inno Setup realize (fpc shape)":
+# ---------------------------------------------------------------------------
+# GM4b: an archive realization is a `tarball` record of a package definition
+# (Provisioning-Contributions.md §"Profile Package References"). A test
+# realization is a synthetic record for this host, SELECTED by the same
+# `selectRealization` a profile reference goes through and projected by
+# `archiveRealizationOf` into the archive realizer's input — so the realizer
+# is driven exactly as `repro home apply` drives it.
+# ---------------------------------------------------------------------------
+
+proc hostRecord(url, archiveType, executablePath: string;
+                extraExecutables: seq[string] = @[];
+                sha256 = ""; sha1 = ""; version = "1.0.0";
+                installMethod = ""; extractPath = "";
+                installerArgs: seq[string] = @[];
+                pacmanPackages: seq[string] = @[];
+                env: seq[string] = @[]; nested7z = false;
+                msiAdminInstall = false;
+                preInstall: seq[string] = @[];
+                preInstallUnrecognized: seq[string] = @[];
+                launcherEmit: seq[string] = @[];
+                anyCpu = false): InterfaceTarballProvisioning =
+  ## A synthetic `tarball` record for this host's (cpu, os); ``anyCpu``
+  ## leaves the cpu open, as a record for every CPU family does.
+  let host = hostRealizationTarget()
+  result = InterfaceTarballProvisioning(url: url, sha256: sha256,
+    archiveType: archiveType, executablePath: executablePath,
+    cpu: (if anyCpu: "" else: $host.platform.family), os: $host.os)
+  result.detail.version = version
+  result.detail.sha1 = sha1
+  result.detail.installMethod = installMethod
+  result.detail.extractPath = extractPath
+  result.detail.extraExecutables = extraExecutables
+  result.detail.installerArgs = installerArgs
+  result.detail.pacmanPackages = pacmanPackages
+  result.detail.env = env
+  result.detail.nested7z = nested7z
+  result.detail.msiAdminInstall = msiAdminInstall
+  result.detail.preInstall = preInstall
+  result.detail.preInstallUnrecognized = preInstallUnrecognized
+  result.detail.launcherEmit = launcherEmit
+
+proc selectArchive(packageId: string;
+                   records: openArray[InterfaceTarballProvisioning];
+                   version = ""): ArchiveRealization =
+  ## Select among ``records`` for this host (policy ``[tarball]``) and
+  ## project the selection into the archive realizer's input.
+  var useDef = InterfaceToolUse(rawConstraint: packageId,
+    packageSelector: packageId, executableName: packageId)
+  useDef.tarballProvisioning = @records
+  let selection = selectRealization(useDef, SelectionRequest(
+    packageName: packageId, target: hostRealizationTarget(),
+    policy: @[rkTarball], version: version, definitionKnown: true))
+  archiveRealizationOf(packageId, selection.tarball)
+
+suite "M4 — archive realizer Inno Setup realize (fpc shape)":
 
   test "test_m4_innosetup_realize_synthetic_fpc_shape":
     ## File:// realize of a synthetic Inno Setup installer flattens
@@ -153,22 +218,11 @@ suite "M4 — cakBuiltin Inno Setup realize (fpc shape)":
       var store = openStore(storeDir)
       defer: store.close()
       discard seedInnounpPrefix(store, hostInnounp)
-      let vp = initVersionedProvisioning(
-        version = "test-fpc-1.0",
-        archive_format = afRaw,
-        install_method = imInstallerInnoSetup,
-        bin_relpath = @["bin/fpc.exe", "bin/ppcx64.exe"],
-        platforms = @[
-          initPlatformBinary(
-            cpu = detectHostCpu(), os = detectHostOs(),
-            url = fileToUrl(exePath),
-            sha256 = sha,
-            extract_path = "")
-        ])
-      let res = resolveBuiltinPackage("fpc-inno", @[vp])
-      check res.found
-      check res.resolution.installMethod == imInstallerInnoSetup
-      let outR = realizeBuiltinPackage(store, res.resolution)
+      let res = selectArchive("fpc-inno", [hostRecord(fileToUrl(exePath),
+        "raw", "bin/fpc.exe", @["bin/ppcx64.exe"], sha256 = sha,
+        version = "test-fpc-1.0", installMethod = "installer-inno-setup")])
+      check res.installMethod == imInstallerInnoSetup
+      let outR = realizeBuiltinPackage(store, res)
       check (not outR.cacheHit)
       let realizedFpc = outR.prefixAbsolutePath / "bin" / "fpc.exe"
       check fileExists(extendedPath(realizedFpc))
@@ -176,51 +230,70 @@ suite "M4 — cakBuiltin Inno Setup realize (fpc shape)":
       let realizedPpc = outR.prefixAbsolutePath / "bin" / "ppcx64.exe"
       check fileExists(extendedPath(realizedPpc))
 
-  test "test_m4_innosetup_missing_extractor_fails_closed":
-    ## Same fixture realized on a host where innounp is not
-    ## discoverable raises EBuiltinInnounpUnavailable with the
-    ## ``repro home add innounp`` remediation hint.
-    let fixtureDir = FixtureRoot / "fpc-missing-innounp"
+  test "m4_innosetup_foreign_target_or_missing_helper_receipt_fails_closed":
+    ## The real Windows record is still selected, with its installer metadata
+    ## intact. A foreign host refuses it before downloads. On its native host,
+    ## executing the consumer without its helper receipt fails before staging;
+    ## helper execution and download are covered by the common graph fixtures.
+    let fixtureDir = FixtureRoot / "fpc-target-and-helper-refusal"
     let storeDir = fixtureDir / "store"
-    let buildDir = fixtureDir / "build-inno"
-    resetDir(fixtureDir); resetDir(storeDir); resetDir(buildDir)
-    # We don't need a real Inno installer for this test — the discovery
-    # raises BEFORE the download (and certainly before extraction)
-    # because needsInnounp() returns true for imInstallerInnoSetup. We
-    # use a stub file just to satisfy the digest sanity check.
-    let stubPath = buildDir / "stub.exe"
-    writeFile(extendedPath(stubPath), "stub-inno-bytes\n")
-    let sha = fileShaHex(stubPath, "sha256")
+    resetDir(fixtureDir); resetDir(storeDir)
+    var store = openStore(storeDir)
+    defer: store.close()
+    let resolution = resolveProfilePackage("fpc",
+      realizationTargetFor(pcX86_64, poWindows, mlX86_64_v1), @[rkTarball])
+    check resolution.archiveRoute == arExtract
+    let res = resolution.archive
+    check res.installMethod == imInstallerInnoSetup
+    check res.digestAlgorithm == "sha1"
+    when defined(windows) and defined(amd64):
+      let edges = tarballProvisioningEdges(resolution.useDef, absolutePath(storeDir))
+      check edges.actions.len >= 2
+      let consumer = edges.actions[^1]
+      check consumer.id == edges.rootId
+      check consumer.deps.len >= 1
+      check consumer.inputs.len >= 1
+      let outcome = executeTarballProvisionEdge(consumer)
+      checkpoint(outcome.stderr)
+      check outcome.status == asFailed
+      check "the innounp dependency edge left no receipt" in outcome.stderr
+      check not fileExists(edges.rootReceipt)
+    else:
+      let host = hostRealizationTarget()
+      var refused = false
+      try:
+        discard realizeBuiltinPackage(store, res)
+      except ValueError as err:
+        refused = true
+        check "no tarball provisioning entry for package \"fpc\"" in err.msg
+        check "matches host cpu=" & $host.platform.family & " os=" & $host.os in err.msg
+      check refused
+    check listPrefixes(store).len == 0
+    for prefix in walkDirs(storeDir / "prefixes" / "fpc" / "*"):
+      checkpoint(prefix)
+      check false
+
+  test "m4_innosetup_compatibility_discovery_missing_helper_fails_closed":
+    ## The exported compatibility discovery API keeps its typed diagnostic;
+    ## production realization instead requires the helper's dependency receipt.
+    let fixtureDir = FixtureRoot / "fpc-compatibility-discovery"
+    let storeDir = fixtureDir / "store"
     let emptyDir = fixtureDir / "empty-path"
-    resetDir(emptyDir)
+    resetDir(fixtureDir); resetDir(storeDir); resetDir(emptyDir)
     let savedPath = getEnv("PATH")
-    putEnv("PATH", emptyDir)
+    putEnv("PATH", absolutePath(emptyDir))
     defer: putEnv("PATH", savedPath)
     var store = openStore(storeDir)
     defer: store.close()
-    let vp = initVersionedProvisioning(
-      version = "test-stub-1.0",
-      archive_format = afRaw,
-      install_method = imInstallerInnoSetup,
-      bin_relpath = @["bin/fpc.exe"],
-      platforms = @[
-        initPlatformBinary(
-          cpu = detectHostCpu(), os = detectHostOs(),
-          url = fileToUrl(absolutePath(stubPath)),
-          sha256 = sha,
-          extract_path = "")
-      ])
-    let res = resolveBuiltinPackage("fpc-missing-innounp", @[vp])
-    check res.found
     var raised = false
-    var pkg = ""
-    var msg = ""
     try:
-      discard realizeBuiltinPackage(store, res.resolution)
+      discard discoverInnounpExe(store, "fpc")
     except EBuiltinInnounpUnavailable as err:
       raised = true
-      pkg = err.packageId
-      msg = err.msg
+      check err.packageId == "fpc"
+      check err.discoveryTrace.len >= 2
+      check "catalog-prefix:scanned 0 rows" in err.discoveryTrace[0]
+      check "path:no" in err.discoveryTrace[^1]
+      check "repro home add innounp" in err.msg
     check raised
-    check pkg == "fpc-missing-innounp"
-    check "repro home add innounp" in msg
+    check listPrefixes(store).len == 0

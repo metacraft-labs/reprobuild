@@ -27,6 +27,7 @@ package jq:
       sha256 = "7451fbbf37feffb9bf262bd97c54f0da558c63f0748e64152dd87b0a07b6d6ab",
       archiveType = "raw",
       executablePath = "jq.exe",
+      version = "1.7.1",
       packageId = "jq@1.7.1",
       cpu = "x86_64",
       os = "windows",

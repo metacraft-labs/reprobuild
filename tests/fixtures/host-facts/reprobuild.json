@@ -1,0 +1,28 @@
+{
+  "format": "repro.host-facts",
+  "schemaVersion": 1,
+  "side": "reprobuild",
+  "host": "gm6-host",
+  "system": "x86_64-linux",
+  "categories": {
+    "packages": [
+      { "id": "bash", "origin": "activity default" }
+    ],
+    "files": [
+      { "id": "~/.config/gm6/app.conf", "origin": "resource fs.userFile:~/.config/gm6/app.conf", "mode": "0644", "digest": "sha256:0a775022744f64c352863f165f2e125898419999bc57c83204772036d0ef6b2e" },
+      { "id": "~/.zshrc", "origin": "stow zsh/.zshrc", "mode": "0644", "digest": "sha256:e3dd696969b6447bd5031b34bececc6bc6d0113fbbef48ae1ae2c2a0351dcf27" }
+    ],
+    "environment": [
+      { "id": "path:~/.local/bin", "origin": "resource env.userPath:path" },
+      { "id": "var:GM6_EDITOR", "origin": "resource env.userVariable:GM6_EDITOR", "value": "nvim" }
+    ],
+    "services": [
+      { "id": "systemd:gm6.service", "origin": "resource systemd.userUnit:gm6.service", "enabled": true, "digest": "sha256:1f454cdbf5f38f97748d61574f646163e50943b9678ed5c015398c757497ce16" },
+      { "id": "systemd:gm6-same.timer", "origin": "resource systemd.userUnit:gm6-same.timer", "enabled": true, "digest": "sha256:2222222222222222222222222222222222222222222222222222222222222222" }
+    ]
+  },
+  "unmapped": [],
+  "uncategorized": [
+    { "category": null, "id": "linux.dconfKey:/org/gm6/answer", "origin": "resource linux.dconfKey:/org/gm6/answer", "reason": "no host-facts category covers resource kind `linux.dconfKey`" }
+  ]
+}

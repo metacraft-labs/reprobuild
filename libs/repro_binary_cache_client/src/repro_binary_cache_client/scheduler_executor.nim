@@ -46,6 +46,10 @@ type
   SubstituteOutcome* = object
     ok*: bool
     reason*: string
+    trustRejected*: bool
+      ## The compat check refused the manifest on trust (gate 6: producer
+      ## key not in the endpoint's trusted set under enforcement). Computed
+      ## here from the same inputs the gate uses, not parsed from `reason`.
     casPath*: string
     bytesFetched*: int64
     wallclockMillis*: int64
@@ -91,6 +95,15 @@ proc executeSubstituteAction*(ctx: ClientContext;
                 request.endpoint.enforceTrust)
   if not compatOk:
     result.reason = "compat rejected: " & compatReason
+    # The trust gate is the only compat gate that depends on the signer set;
+    # recompute its verdict rather than match the reason text.
+    if request.endpoint.enforceTrust:
+      var trusted = false
+      for ts in request.endpoint.trustedSigners:
+        if ts == manifest.producerPubKey:
+          trusted = true
+          break
+      result.trustRejected = not trusted
     result.wallclockMillis = int64(epochTime() * 1000.0 - startMs)
     return
 

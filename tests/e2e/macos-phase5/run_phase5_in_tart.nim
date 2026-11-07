@@ -150,7 +150,7 @@
 ##   1. Cross-build the gate binary on the host (arm64 macOS host →
 ##      arm64 macOS guest; same arch, same OS, so a plain `nim c
 ##      --os:macosx` produces a binary the guest can execute).
-##   2. Invoke `vm-harness run --backend tart-macos` with --copy-to to
+##   2. Invoke `gosti run --backend tart-macos` with --copy-to to
 ##      stage the binary into the guest at /tmp/<gate>.
 ##   3. Run the gate inside the guest (via the cirruslabs admin user)
 ##      with the appropriate env var; the fs.systemFile gate is
@@ -160,7 +160,7 @@
 ##      exists, and the captured exit code is 0.
 ##
 ## Skips cleanly on non-macOS hosts or when tart / sshpass are
-## missing. Honors `VMH_TART_SKIP_MACOS=1` to opt out on
+## missing. Honors `GOSTI_TART_SKIP_MACOS=1` to opt out on
 ## space-constrained CI (the cirruslabs macOS golden is multi-GB).
 ##
 ## Run with:
@@ -183,7 +183,7 @@ when not defined(macosx):
 const ProjectRoot = currentSourcePath().parentDir().parentDir()
   .parentDir().parentDir()
 
-const VmHarnessBin = "/Users/zahary/metacraft/vm-harness/build/bin/vm-harness"
+const GostiBin = "/Users/zahary/metacraft/gosti/build/bin/gosti"
 
 type
   GateSpec = object
@@ -191,7 +191,7 @@ type
     sourcePath: string      ## relative-to-repo-root Nim test source
     envVar: string          ## env var to set inside the guest
     needsRoot: bool         ## true → wrap in `sudo -E -n` in guest
-    timeoutSec: int         ## per-gate timeout (vm-harness exec)
+    timeoutSec: int         ## per-gate timeout (gosti exec)
 
 let Gates = @[
   GateSpec(
@@ -334,8 +334,8 @@ proc buildGateBinary(gate: GateSpec; outDir: string): string =
   binPath
 
 # ---------------------------------------------------------------------------
-# vm-harness invocation. Per the M7 prompt's authoring pattern, we use
-# the vm-harness CLI (the same one the M2 baseline tests use) rather
+# gosti invocation. Per the M7 prompt's authoring pattern, we use
+# the gosti CLI (the same one the M2 baseline tests use) rather
 # than embedding the Nim library, so the runner is a thin wrapper that
 # is auditable end-to-end.
 
@@ -348,7 +348,7 @@ type
     outputDir: string
 
 proc runGateInTart(gate: GateSpec; binPath, outDir: string): GateRunResult =
-  ## Invoke `vm-harness run --backend tart-macos`. The gate binary is
+  ## Invoke `gosti run --backend tart-macos`. The gate binary is
   ## copied into the guest at /tmp/<name>-gate; the guest-side command
   ## sets the env var and (for fs.systemFile) elevates via sudo. The
   ## DONE sentinel + RESULT.txt are inspected after the run completes.
@@ -365,7 +365,7 @@ proc runGateInTart(gate: GateSpec; binPath, outDir: string): GateRunResult =
                  "env", gate.envVar & "=1", guestBin]
   else:
     guestCmd = @["env", gate.envVar & "=1", guestBin]
-  let args = @[VmHarnessBin, "run",
+  let args = @[GostiBin, "run",
                "--backend", "tart-macos",
                "--guest", "macos",
                "--baseline", "phase5-" & gate.name,
@@ -377,7 +377,7 @@ proc runGateInTart(gate: GateSpec; binPath, outDir: string): GateRunResult =
                "--copy-to", binPath & ":" & guestBin,
                "--timeout-sec", $gate.timeoutSec,
                "--"] & guestCmd
-  echo "  [vm-harness] gate=" & gate.name & " output=" & outDir
+  echo "  [gosti] gate=" & gate.name & " output=" & outDir
   let runStart = epochTime()
   let proc1 = startProcess(args[0], args = args[1 .. ^1],
                            options = {poUsePath, poStdErrToStdOut,
@@ -409,12 +409,12 @@ proc checkPrerequisites(): bool =
   if findExe("sshpass").len == 0:
     echo "[skip] sshpass not on PATH"
     return false
-  if not fileExists(VmHarnessBin):
-    echo "[skip] vm-harness binary missing at " & VmHarnessBin &
-      " — build it via `nim c` in vm-harness repo first"
+  if not fileExists(GostiBin):
+    echo "[skip] gosti binary missing at " & GostiBin &
+      " — build it via `nim c` in gosti repo first"
     return false
-  if getEnv("VMH_TART_SKIP_MACOS", "") == "1":
-    echo "[skip] VMH_TART_SKIP_MACOS=1 set; macOS golden pull is " &
+  if getEnv("GOSTI_TART_SKIP_MACOS", "") == "1":
+    echo "[skip] GOSTI_TART_SKIP_MACOS=1 set; macOS golden pull is " &
       "multi-GB and may exceed CI disk budgets"
     return false
   true
@@ -429,7 +429,7 @@ proc main(): int =
   let workRoot = createTempDir("repro-m7-phase5-", "")
   echo "[m7-runner] workRoot=" & workRoot
   echo "[m7-runner] ProjectRoot=" & ProjectRoot
-  echo "[m7-runner] vm-harness=" & VmHarnessBin
+  echo "[m7-runner] gosti=" & GostiBin
 
   # 1. Build all gate binaries up front so we fail fast on any build
   #    error before incurring the multi-minute Tart provisioning cost.

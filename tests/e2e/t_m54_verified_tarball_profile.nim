@@ -115,6 +115,10 @@ proc writeTarballPackage(projectRoot, primaryUrl, mirrorUrl, expectedSha: string
     "      archiveType = \"tar.gz\",\n" &
     "      stripComponents = 1,\n" &
     "      executablePath = " & executablePath.escape() & ",\n" &
+    # The archive realizes 1.0.0 and the consumer asks for ">=1.0 <2.0". A
+    # ranged `uses` is proved against the record's declared version, so an
+    # unversioned record would be refused before any download.
+    "      version = \"1.0.0\",\n" &
     "      packageId = \"m54tool@1.0.0\",\n" &
     "      lockIdentity = \"tarball:m54tool@1.0.0:sha256:" & expectedSha & "\"\n\n" &
     "  executable m54tool:\n" &

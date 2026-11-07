@@ -472,10 +472,30 @@ suite "M7 — repro consumes the HTTPS binary cache end-to-end (M4 + M5 over TLS
           "HTTPS cache daemon did not become healthy on 127.0.0.1:" &
             $tlsPort & " (" & processState(srvProc) & ")"
 
-        putEnv("REPRO_BINARY_CACHE_AUTO_CRED_DIR", tmpRoot / "cred")
-        defer: delEnv("REPRO_BINARY_CACHE_AUTO_CRED_DIR")
+        # Run 1 is a PUBLISHER (operator-supplied keypair) and run 2 a
+        # consumer whose caches.conf anchors that key: the apply-time path
+        # substitutes only under R1 trust anchors and publishes only with a
+        # configured keypair. REPRO_CACHES_CONFIG pins the trust config to
+        # this test so the host's own /etc/repro/caches.conf cannot leak in.
+        let producerDir = tmpRoot / "producer"; createDir(producerDir)
+        let producerKey = producerDir / "producer.key"
+        let producerCert = producerDir / "producer.cert"
+        discard peerAuth.loadOrGenerateKeypair(producerCert, producerKey)
+        let cachesConf = tmpRoot / "caches.conf"
+        writeFile(cachesConf, "[m7]\nurl = \"" & httpsUrl & "\"\n" &
+          "trusted-public-keys = \"" & readFile(producerCert).strip() &
+          "\"\n")
+        putEnv("REPRO_CACHES_CONFIG", cachesConf)
+        defer: delEnv("REPRO_CACHES_CONFIG")
         putEnv("REPRO_BINARY_CACHE_URL", httpsUrl)
         defer: delEnv("REPRO_BINARY_CACHE_URL")
+        putEnv("REPRO_BINARY_CACHE_KEY_PATH", producerKey)
+        putEnv("REPRO_BINARY_CACHE_CERT_PATH", producerCert)
+        putEnv("REPRO_APPLY_PUBLISH", "1")  # the apply-time publish opt-in
+        defer:
+          delEnv("REPRO_BINARY_CACHE_KEY_PATH")
+          delEnv("REPRO_BINARY_CACHE_CERT_PATH")
+          delEnv("REPRO_APPLY_PUBLISH")
 
         # RUN 1: empty cache → build locally + publish over HTTPS.
         let cwd1 = tmpRoot / "m4-cwd1"
@@ -496,6 +516,9 @@ suite "M7 — repro consumes the HTTPS binary cache end-to-end (M4 + M5 over TLS
 
         # RUN 2: FRESH cwd + FRESH engine cache → SUBSTITUTE over HTTPS.
         # If -d:ssl were absent this would RAISE at http_pool.parseTarget.
+        # A consumer from here on: no keypair, only the anchored caches.conf.
+        delEnv("REPRO_BINARY_CACHE_KEY_PATH")
+        delEnv("REPRO_BINARY_CACHE_CERT_PATH")
         let cwd2 = tmpRoot / "m4-cwd2"
         let cacheRoot2 = tmpRoot / "m4-cache2"
         createDir(cwd2); createDir(cacheRoot2)

@@ -173,7 +173,7 @@ fi
 
 # GRUB config: console on tty1 + ttyS0 so the boot is visible both on
 # graphical consoles AND on Hyper-V's COM1 named pipe (which the
-# vm-harness boot gate tails).
+# gosti boot gate tails).
 #
 # The Debian Installer's d-i kernel reads `console=` kernel cmdline
 # options to decide where to write its early UI; piping it to ttyS0 at

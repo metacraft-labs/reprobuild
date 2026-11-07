@@ -53,18 +53,41 @@
 ##     with one put back ``health --fix`` removes it, and with another put
 ##     back ``repro workspace sync`` does, each printing message A; ``health``
 ##     is then ok. The init clone itself must have registered the leaf with
-##     its pool.
+##     its pool. Before losing any ref tips, remove the refetch chain and
+##     require health to report its absence; hold a real config.lock to prove
+##     a failed installation stays a warning, then health --fix recovers it.
 ##
-## No mocks. Hermetic: one ``createTempDir`` root, a private
-## ``GIT_CONFIG_GLOBAL``, ``file://`` URLs. Skip rule: ``git`` missing on
-## PATH; the CLI case additionally needs the built ``repro``.
+## Transport. A lazy refill runs the leaf's ``remote.repro-pool.uploadpack``,
+## ``<selected repro> internal shared-pool-upload-pack``, and the library
+## cases call ``checkLeaf`` in-process, so no running CLI names itself. Each
+## library case therefore selects the checkout's own ``build/bin/repro``
+## through ``REPROBUILD_REPRO`` (the override every selection honours first)
+## and, on POSIX hosts, puts a decoy ``repro`` that refuses every request
+## first on PATH. ``refillable_object_gets_no_message``, the case whose refill
+## must succeed, checks that the leaf names the built transport, and its
+## refill would reach the decoy if the selection fell back to PATH: it fails
+## every time, not only on a machine whose PATH holds an older build, and
+## cannot pass on a different build's transport.
+##
+## No mocks: the decoy is never meant to run. Hermetic: one ``createTempDir``
+## root, a private ``GIT_CONFIG_GLOBAL``, ``file://`` URLs. Skip rule: ``git``
+## missing on PATH. Every case needs the built ``repro``, and a missing one is
+## reported, not skipped.
 
 import std/[json, os, osproc, strutils, tempfiles, unittest]
+import repro_test_support/reasoned_skip
 
 import repro_test_support
 import shared_clones
 
 proc q(value: string): string = quoteShell(value)
+
+proc sharedCloneHealthRow(output: string): tuple[status, detail: string] =
+  for line in output.splitLines():
+    let fields = line.splitWhitespace()
+    if fields.len >= 3 and fields[0] == "shared-clone-leaves":
+      return (fields[1], line)
+
 
 proc run(cwd: string; lazy: bool; args: varargs[string]):
     tuple[code: int; output: string] =
@@ -135,7 +158,38 @@ proc useGlobalConfig(root: string) =
   putEnv("GIT_CONFIG_GLOBAL", root / "gitconfig")
   putEnv("GIT_CONFIG_NOSYSTEM", "1")
 
+proc repoRoot(): string =
+  currentSourcePath().parentDir.parentDir.parentDir
+
+proc builtRepro(): string =
+  requireBinary(repoRoot() / "build" / "bin" / addFileExt("repro", ExeExt),
+    "reprobuild.apps.repro")
+
+let originalReproOverride = getEnv("REPROBUILD_REPRO")
+let originalPath = getEnv("PATH")
+
+proc selectBuiltTransport(root: string) =
+  ## Make every lazy refill in this process, and in the git and repro
+  ## processes it starts, run the transport built from this checkout. A
+  ## decoy ``repro`` first on PATH turns a fallback to the ambient PATH into
+  ## a refill that fails, which the cases observe.
+  putEnv("REPROBUILD_REPRO", builtRepro())
+  when not defined(windows):
+    let decoyDir = root / "decoy-bin"
+    createDir(decoyDir)
+    let decoy = decoyDir / "repro"
+    writeFile(decoy, "#!/bin/sh\n" &
+      "echo 'decoy repro on PATH: the transport was not selected' >&2\n" &
+      "exit 97\n")
+    setFilePermissions(decoy, {fpUserRead, fpUserWrite, fpUserExec})
+    putEnv("PATH", decoyDir & $PathSep & originalPath)
+
 proc tearDown() =
+  if originalReproOverride.len > 0:
+    putEnv("REPROBUILD_REPRO", originalReproOverride)
+  else:
+    delEnv("REPROBUILD_REPRO")
+  putEnv("PATH", originalPath)
   delEnv("GIT_CONFIG_GLOBAL")
   delEnv("GIT_CONFIG_NOSYSTEM")
 
@@ -145,6 +199,7 @@ type Fixture = object
 proc setUp(root: string): Fixture =
   result.root = root
   result.gitBin = findExe("git")
+  selectBuiltTransport(root)
   result.up = root / "up"
   result.cache = root / "cache"
   useGlobalConfig(root)
@@ -220,7 +275,7 @@ proc expectedMainMessage(f: Fixture; w: LocalWork): string =
   let l = f.leaf
   "repro: " & l & ": your branch 'main' points at " & abbrev(w.oldMain) &
     ", which no longer\n" &
-  "exists here, in the shared cache (" & f.pool & "), or upstream.\n" &
+  "exists here, in the shared cache (" & displayPoolPath(f.pool) & "), or upstream.\n" &
   "  Why:  upstream rewrote its history and the old commits were removed everywhere this\n" &
   "        machine can reach. Commits that existed only on this ref and were never\n" &
   "        pushed are gone from this checkout too.\n" &
@@ -280,7 +335,7 @@ suite "SPI-3: detector, repair and messages":
         "repro: " & f.leaf & ": removed refs/remotes/origin/feat (" &
           abbrev(old) & ")\n" &
         "  Upstream rewrote or deleted that branch, and the old commit no longer exists\n" &
-        "  upstream or in the shared cache (" & f.pool & "). The ref was only a copy of upstream; none of\n" &
+        "  upstream or in the shared cache (" & displayPoolPath(f.pool) & "). The ref was only a copy of upstream; none of\n" &
         "  your branches depend on it. The next fetch recreates it if the branch still exists.\n" &
         "  Logged in " & logPath
       if stale.len == 1:
@@ -330,7 +385,7 @@ suite "SPI-3: detector, repair and messages":
       check refExists(f.leaf, "refs/remotes/origin/feat")
 
       let l = f.leaf
-      let cache = "the shared cache (" & f.pool & ")"
+      let cache = "the shared cache (" & displayPoolPath(f.pool) & ")"
       let expectedMywork =
         "repro: " & l & ": your branch 'mywork' is built on " & abbrev(w.featTip) &
           ", which no\n" &
@@ -399,7 +454,7 @@ suite "SPI-3: detector, repair and messages":
       let expected =
         "repro: " & l & ": your branch 'mywork' is built on " & abbrev(w.featTip) &
           ", which no\n" &
-        "longer exists here, in the shared cache (" & f.pool & "), or upstream.\n" &
+        "longer exists here, in the shared cache (" & displayPoolPath(f.pool) & "), or upstream.\n" &
         "  Why:  upstream rewrote its history and the old commits were removed everywhere this\n" &
         "        machine can reach. Your own commits on 'mywork' are still here, but some of\n" &
         "        the files in them existed only in that old history and are gone as well, so\n" &
@@ -434,6 +489,12 @@ suite "SPI-3: detector, repair and messages":
         tearDown()
         removeDir(root)
       let f = setUp(root)
+      # The refill below runs this command: the transport of this checkout.
+      # Git runs it through its POSIX shell, on Windows with forward slashes.
+      let transport = when defined(windows): builtRepro().replace('\\', '/')
+                      else: builtRepro()
+      check must(f.leaf, "config", "--get", "remote.repro-pool.uploadpack") ==
+        quoteShellPosix(transport) & " " & LeafPoolUploadPack
       let keepTip = must(f.leaf, "rev-parse", "refs/remotes/origin/keep")
       # The pool loses keep; upstream still has it.
       discard must(f.pool, "update-ref", "-d", "refs/heads/keep")
@@ -476,26 +537,22 @@ suite "SPI-3: detector, repair and messages":
 
 # ---- CLI --------------------------------------------------------------------
 
-proc repoRoot(): string =
-  currentSourcePath().parentDir.parentDir.parentDir
-
 proc projectToml(libUrl: string): string =
   "schema = \"reprobuild.workspace.project.v1\"\n\n" &
   "[project]\n" &
   "name = \"spiproj\"\n" &
-  "default_revision = \"main\"\n" &
-  "trunk = \"main\"\n\n" &
+  "\n" &
   "[[remote]]\nname = \"lib-origin\"\nfetch = \"" & libUrl & "\"\n\n" &
   "includes = [\n  \"repos/lib.toml\",\n]\n"
 
 const libFragmentToml = """
-schema = "reprobuild.workspace.repo.v1"
+schema = "reprobuild.workspace.repo.v2"
 
 [repo]
 name = "lib"
 path = "lib"
 remote = "lib-origin"
-revision = "main"
+mainline = "main"
 """
 
 suite "SPI-3: the detector behind repro health, workspace status and sync":
@@ -504,8 +561,7 @@ suite "SPI-3: the detector behind repro health, workspace status and sync":
     if findExe("git").len == 0:
       skip("needs git on PATH")
     else:
-      let reproBin = requireBinary(repoRoot() / "build" / "bin" /
-        addFileExt("repro", ExeExt), "reprobuild.apps.repro")
+      let reproBin = builtRepro()
       let root = createTempDir("repro-spi3-cli-", "")
       defer:
         tearDown()
@@ -547,6 +603,34 @@ suite "SPI-3: the detector behind repro health, workspace status and sync":
       check readBorrowers(pool) == @[leaf]
       check must(leaf, "config", "--get-all", "fetch.hideRefs") ==
         LeafHiddenFetchRefs
+      # All ref tips exist, but a pre-migration partial-pool leaf has no
+      # lazy-refetch chain. Health must report it independently of ref tips.
+      discard must(leaf, "remote", "remove", LeafPoolRemoteName)
+      let unmigrated = runShell(shellCommand(@[reproBin, "health", "spiproj",
+        "--workspace-root=" & ws], env))
+      checkpoint("health unmigrated: " & unmigrated.output)
+      let unmigratedRow = sharedCloneHealthRow(unmigrated.output)
+      check unmigratedRow.status == "warn"
+      check "refetch chain" in unmigratedRow.detail
+      check "health --fix" in unmigrated.output
+      check must(leaf, "config", "--get", "remote.repro-pool.promisor") == "true"
+      # A real config lock makes installation fail without mocking git. It
+      # must remain a health warning, rather than a healthy ref-tip report.
+      discard must(leaf, "remote", "remove", LeafPoolRemoteName)
+      writeFile(leaf / ".git" / "config.lock", "held by test\n")
+      let locked = runShell(shellCommand(@[reproBin, "health", "spiproj",
+        "--workspace-root=" & ws], env))
+      checkpoint("health config locked: " & locked.output)
+      let lockedRow = sharedCloneHealthRow(locked.output)
+      check lockedRow.status == "warn"
+      check "could not write" in lockedRow.detail
+      check "health --fix" in locked.output
+      check gitIn(leaf, "config", "--get", "remote.repro-pool.url").code != 0
+      removeFile(leaf / ".git" / "config.lock")
+      let repairedChain = runShell(shellCommand(@[reproBin, "health", "spiproj",
+        "--fix", "--workspace-root=" & ws], env))
+      checkpoint("health chain repaired: " & repairedChain.output)
+      check must(leaf, "config", "--get", "remote.repro-pool.url") == poolFileUrl(pool)
       var tips: seq[string]
       for br in ["f1", "f2", "f3"]:
         tips.add(must(leaf, "rev-parse", "refs/remotes/origin/" & br))

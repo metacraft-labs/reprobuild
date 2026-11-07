@@ -1,22 +1,24 @@
-## Dotfiles-Migration-Completion M0 — claude-code catalog smoke test.
+## Dotfiles-Migration-Completion M0 — claude-code realizations smoke test.
 ##
-## Asserts that the two-version ``claudeCodeCatalog`` (2.1.169 + 2.1.170)
-## is structurally well-formed, resolves cleanly for each declared
-## (cpu, os) slice across both versions, and round-trips through the
-## ``catalog_registry`` lookup with the documented case + separator
-## sensitivity contract.
+## GM4b: the two-version ``claudeCodeCatalog`` record (2.1.169 + 2.1.170) is
+## now a set of ``tarball`` realizations of ``package `claude-code``` — the
+## canonical definition the engine links (``package_registry``). This test
+## asserts that those realizations are well-formed, that the realization
+## selection a recipe or profile runs (``selectTarballRecord``) picks the
+## right one for each declared (version, cpu, os) slice, that the old default
+## (2.1.169) is still what an unpinned reference selects, and that the name
+## lookup keeps its documented case + separator sensitivity.
 
 import std/[options, strutils, unittest]
 
-import repro_dsl_stdlib/packages_schema
-import repro_dsl_stdlib/packages/claude_code
-import repro_dsl_stdlib/catalog_registry
+import repro_interface_artifacts
+import repro_dsl_stdlib/package_registry
+import repro_home_apply/package_catalog
 
 const ExpectedVersions = ["2.1.170", "2.1.169"]
 
-# Per the M0 brief: every (version, platform) slice declared in the
-# catalog. Held as a static list so the test fails loudly if a future
-# edit drops a slice without updating the expectation.
+# Every (version, platform) slice declared. Held as a static list so the
+# test fails loudly if a future edit drops a slice without updating it.
 const ExpectedSlices = [
   (version: "2.1.170", cpu: pcX86_64,  os: poWindows),
   (version: "2.1.170", cpu: pcAArch64, os: poWindows),
@@ -39,113 +41,89 @@ proc isHex64(s: string): bool =
       return false
   true
 
-suite "Dotfiles-Migration-Completion M0 — claude-code catalog":
+let records = profileToolUse("claude-code").useDef.tarballProvisioning
 
-  test "catalog is non-empty and lists both expected versions":
-    check claudeCodeCatalog.len == 2
+proc selectSlice(version: string; cpu: PlatformCpu; os: PlatformOs):
+    tuple[ok: bool; record: InterfaceTarballProvisioning] =
+  let choice = selectTarballRecord(records,
+    realizationTargetFor(cpu, os, baselineMicroarchLevel(cpu)), version)
+  if choice.status != kcSelected:
+    return (false, InterfaceTarballProvisioning())
+  (true, records[choice.index])
+
+suite "Dotfiles-Migration-Completion M0 — claude-code realizations":
+
+  test "the definition is linked and lists both expected versions":
+    check isLinkedPackage("claude-code")
+    check records.len == ExpectedSlices.len
     var sawVersions: seq[string] = @[]
-    for vp in claudeCodeCatalog:
-      sawVersions.add(vp.version)
+    for r in records:
+      if r.detail.version notin sawVersions:
+        sawVersions.add(r.detail.version)
+    check sawVersions.len == 2
     for expected in ExpectedVersions:
       check expected in sawVersions
 
-  test "validateCatalog returns no errors":
-    let errors = validateCatalog(claudeCodeCatalog)
-    if errors.len > 0:
-      for e in errors: echo "validateCatalog error: " & e
-    check errors.len == 0
-
-  test "every declared (version, platform) slice resolves cleanly":
+  test "every declared (version, platform) slice selects cleanly":
     for slice in ExpectedSlices:
-      let pick = selectVersion(claudeCodeCatalog, slice.version)
-      check pick.found
-      if not pick.found:
-        echo "MISSING version: " & slice.version
+      let pick = selectSlice(slice.version, slice.cpu, slice.os)
+      check pick.ok
+      if not pick.ok:
+        echo "MISSING slice: " & slice.version & " " & $slice.cpu & "/" &
+          $slice.os
         continue
-      # validateVersionedProvisioning per-version (the M0 brief: "real
-      # validateVersionedProvisioning calls").
-      let perVpErrors = validateVersionedProvisioning(pick.entry)
-      if perVpErrors.len > 0:
-        for e in perVpErrors:
-          echo "validateVersionedProvisioning error (" &
-            slice.version & "): " & e
-      check perVpErrors.len == 0
-      let sel = selectPlatformBinary(pick.entry, slice.cpu, slice.os)
-      check sel.found
-      if not sel.found:
-        echo "MISSING slice: " & slice.version & " " &
-          $slice.cpu & "/" & $slice.os
-        continue
-      let pb = sel.binary
-      check pb.url.len > 0
-      check pb.sha256.len == 64
-      check isHex64(pb.sha256)
-      # afRaw never carries an inner extract_path; the upstream
-      # distribution is a single bare binary.
-      check pb.extract_path == ""
+      check pick.record.url.len > 0
+      check isHex64(pick.record.sha256)
+      check pick.record.detail.version == slice.version
+      # A raw distribution never carries an inner extract path; the
+      # upstream ships a single bare binary, realized by the `uses:` edge.
+      check pick.record.detail.extractPath == ""
+      check pick.record.archiveType == "raw"
+      check archiveInstallerFeatures(pick.record).len == 0
+
+  test "an unpinned reference selects the former default version":
+    # The retired catalog's default was its LAST record (2.1.169); GM4b's
+    # conversion lists it first, and an unpinned reference takes the first
+    # eligible realization in declaration order.
+    for cpu in [pcX86_64, pcAArch64]:
+      for os in [poWindows, poLinux, poMacos]:
+        let pick = selectSlice("", cpu, os)
+        check pick.ok
+        check pick.record.detail.version == "2.1.169"
 
   test "Windows slices declare claude.exe; non-Windows declare claude":
     for slice in ExpectedSlices:
-      let pick = selectVersion(claudeCodeCatalog, slice.version)
-      check pick.found
-      if not pick.found: continue
-      let sel = selectPlatformBinary(pick.entry, slice.cpu, slice.os)
-      check sel.found
-      if not sel.found: continue
-      # bin_relpath is the resolved binary path. Windows uses the parent
-      # ``bin_relpath`` (@["claude.exe"]); non-Windows slices use the
-      # per-platform ``bin_relpath_override`` (@["claude"]).
-      let pb = sel.binary
+      let pick = selectSlice(slice.version, slice.cpu, slice.os)
+      check pick.ok
+      if not pick.ok: continue
       if slice.os == poWindows:
-        check pick.entry.bin_relpath == @["claude.exe"]
-        # No override on Windows.
-        check pb.bin_relpath_override.len == 0
+        check pick.record.executablePath == "claude.exe"
       else:
-        check pb.bin_relpath_override == @["claude"]
-
-  test "no slice carries an inner extract_path (afRaw distribution)":
-    for vp in claudeCodeCatalog:
-      check vp.archive_format == afRaw
-      check vp.install_method == imExtract
-      for pb in vp.platforms:
-        check pb.extract_path == ""
-        # No per-platform archive override either — afRaw is uniform.
-        check not pb.has_archive_format_override
+        check pick.record.executablePath == "claude"
 
   test "URLs follow the upstream GCS prefix + per-platform suffix":
     const Prefix = "https://storage.googleapis.com/" &
       "claude-code-dist-86c565f3-f756-42ad-8dfa-d59b1c096819/" &
       "claude-code-releases/"
-    for vp in claudeCodeCatalog:
-      for pb in vp.platforms:
-        check pb.url.startsWith(Prefix)
-        check pb.url.contains("/" & vp.version & "/")
-        if pb.os == poWindows:
-          check pb.url.endsWith("/claude.exe")
-        else:
-          check pb.url.endsWith("/claude")
+    for r in records:
+      check r.url.startsWith(Prefix)
+      check r.url.contains("/" & r.detail.version & "/")
+      if r.os == "windows":
+        check r.url.endsWith("/claude.exe")
+      else:
+        check r.url.endsWith("/claude")
 
   test "every declared platform slice has a unique URL":
     var seenUrls: seq[string] = @[]
-    for vp in claudeCodeCatalog:
-      for pb in vp.platforms:
-        check pb.url notin seenUrls
-        seenUrls.add(pb.url)
+    for r in records:
+      check r.url notin seenUrls
+      seenUrls.add(r.url)
 
-  test "registry lookup: getCatalog('claude-code') returns the catalog":
-    let opt = getCatalog("claude-code")
-    check opt.isSome
-    if opt.isSome:
-      check opt.get().len == claudeCodeCatalog.len
-
-  test "registry lookup: case + separator sensitivity":
-    # Documented contract: registry keys are case-sensitive and
-    # separator-sensitive (kebab vs snake). Both negative forms must
-    # return none.
-    check getCatalog("CLAUDE-CODE").isNone
-    check getCatalog("Claude-Code").isNone
-    check getCatalog("claude_code").isNone
-
-  test "isRegistered reports true for claude-code":
-    check isRegistered("claude-code")
-    check not isRegistered("claude_code")
+  test "name lookup: case + separator sensitivity":
+    # Package names are case-sensitive and separator-sensitive (kebab vs
+    # snake). The negative forms are unknown names.
+    check profileToolUse("claude-code").known
+    check not profileToolUse("CLAUDE-CODE").known
+    check not profileToolUse("Claude-Code").known
+    check not profileToolUse("claude_code").known
+    check profileToolUse("claude_code").useDef.tarballProvisioning.len == 0

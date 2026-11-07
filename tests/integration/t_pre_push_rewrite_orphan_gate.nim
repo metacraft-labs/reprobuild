@@ -125,13 +125,13 @@ proc writeManifest(fx: Fixture) =
   createDir(manifests / "projects")
   createDir(manifests / "repos")
   createDir(fx.workspace / ".repro")
-  writeFile(fx.workspace / ".repro" / "workspace.toml",
-    "schema = \"reprobuild.workspace.local.v1\"\n\n" &
+  writeFile(fx.workspace / ".repro" / "workspace-state.toml",
+    "schema = \"reprobuild.workspace.state.v1\"\n\n" &
     "[workspace]\nproject = \"app\"\nbranch = \"main\"\n")
   writeFile(manifests / "projects" / "app.toml",
     "schema = \"reprobuild.workspace.project.v1\"\n\n" &
-    "[project]\nname = \"app\"\ndefault_revision = \"main\"\n" &
-    "trunk = \"main\"\n\n" &
+    "[project]\nname = \"app\"\n" &
+    "\n" &
     "[[remote]]\nname = \"app-origin\"\nfetch = \"" &
       fx.appOrigin.replace('\\', '/') & "\"\n\n" &
     "[[remote]]\nname = \"lib-origin\"\nfetch = \"" &
@@ -141,13 +141,13 @@ proc writeManifest(fx: Fixture) =
   # mainline; the mainline clause below refuses a rewrite of exactly that
   # branch name and of no other.
   writeFile(manifests / "repos" / "app.toml",
-    "schema = \"reprobuild.workspace.repo.v1\"\n\n" &
+    "schema = \"reprobuild.workspace.repo.v2\"\n\n" &
     "[repo]\nname = \"app\"\npath = \"app\"\n" &
-    "remote = \"app-origin\"\nrevision = \"main\"\n")
+    "remote = \"app-origin\"\nmainline = \"main\"\n")
   writeFile(manifests / "repos" / "lib.toml",
-    "schema = \"reprobuild.workspace.repo.v1\"\n\n" &
+    "schema = \"reprobuild.workspace.repo.v2\"\n\n" &
     "[repo]\nname = \"lib\"\npath = \"lib\"\n" &
-    "remote = \"lib-origin\"\nrevision = \"main\"\n")
+    "remote = \"lib-origin\"\nmainline = \"main\"\n")
 
 proc setupFixture(gitBin, slug: string): Fixture =
   result.scratch = createTempDir("repro-rewrite-orphan-" & slug & "-", "")
@@ -395,12 +395,20 @@ suite "pre-push gate — publication versus history rewrite":
         let published = fx.commitIn(fx.app, "mainline work")
         passes(fx.gitIn(fx.app, ["push", "app-origin", "main"],
           required = false))
+        # A surviving sibling snapshot independently pins the commit that
+        # this mainline rewrite discards: both refusals must be reported.
+        discard fx.commitIn(fx.lib, "lib pins published mainline")
+        passes(fx.gitIn(fx.lib, ["push", "lib-origin", "main"],
+          required = false))
+        let libSha = fx.headOf(fx.lib)
+        require fx.lockNaming(published).len > 0
         discard fx.gitIn(fx.app, ["reset", "--hard", "HEAD~1"])
         let rewritten = fx.commitIn(fx.app, "mainline rewritten")
         let refused = fx.gitIn(fx.app,
           ["push", "--force", "app-origin", "main"], required = false)
         refuses(refused,
-          needles = ["mainline-history-rewrite", "'main'", "is publishable"],
+          needles = ["mainline-history-rewrite", "orphans-locked-commit",
+                     published, libSha, "'main'", "is publishable"],
           forbidden = ["unpublished", "will not help"])
         check fx.gitIn(fx.app, ["ls-remote", "app-origin", "refs/heads/main"])
           .output.strip().startsWith(published)

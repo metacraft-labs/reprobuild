@@ -7,6 +7,8 @@
 
 import std/[unittest, os, osproc, json, strutils, net, nativesockets, times,
   streams, tempfiles, strtabs]
+when defined(posix):
+  from repro_test_support/process_fixtures import shortSocketDirAtProcessExit
 
 const RepoMarker = "repro.nim"
 const FixtureRelRoot = "tests/fixtures/nix-daemon-local-flake"
@@ -69,14 +71,51 @@ proc prepareFixtureRoot(repoRoot: string): string =
         "failed to prepare Nix fixture git index: " & output)
 
 proc fixtureDependencyHash(resp: JsonNode; path: string): string =
+  # The helper's dependency contract resolves symlinks, including macOS's
+  # /var and /tmp aliases; compare the same file identity on both sides.
+  let canonicalPath = expandFilename(path)
   for dep in resp["dependencies"]:
-    if dep["path"].getStr() == path:
+    if dep["path"].getStr() == canonicalPath:
       return dep["hash"].getStr()
   check false
   ""
 
 proc requireFixtureDependency(resp: JsonNode; path, expectedHash: string) =
   check fixtureDependencyHash(resp, path) == expectedHash
+
+const HelperShutdownGraceMs = 10_000
+  ## How long a SIGTERMed helper gets to finish its own shutdown before it is
+  ## SIGKILLed. Far above the milliseconds it takes on an idle host; the bound
+  ## exists so that a wedged helper costs the case seconds instead of hanging
+  ## it.
+
+proc stopHelperAndWait(p: Process) =
+  ## Stop a helper this case started and RETURN ONLY ONCE IT HAS EXITED.
+  ##
+  ## On SIGTERM the helper is not gone yet: ``serve`` logs
+  ## ``signal 15; released <socket>`` and runs ``give_up_path()``, which
+  ## re-opens ``<socket>.lock`` with ``O_CREAT`` -- so for as long as it is
+  ## shutting down it writes entries beside its socket. A case that removed
+  ## the socket's directory right after ``terminate()`` raced those writes and
+  ## failed in ``removeDir`` with ``Directory not empty`` whenever the helper
+  ## was slow to handle the signal, as it is under suite load (reprobuild-pm
+  ## issue 2026-10-20, "the loader-env case of `t_nix_daemon_ipc` removes its
+  ## fixture root while the helper is still writing to it"). Waiting for the
+  ## exit orders the helper's last write before the case's cleanup.
+  ##
+  ## Bounded: a helper still running after ``HelperShutdownGraceMs`` is
+  ## SIGKILLed, which cannot be caught, and then reaped.
+  try:
+    if p.running:
+      p.terminate()
+      let deadline = epochTime() + HelperShutdownGraceMs.float / 1000.0
+      while p.peekExitCode() == -1 and epochTime() < deadline:
+        sleep(10)
+      if p.peekExitCode() == -1:
+        p.kill()
+    discard p.waitForExit()
+  finally:
+    p.close()
 
 suite "Python Nix Evaluation Daemon IPC Integration Tests":
 
@@ -115,7 +154,8 @@ printf '%s\n' /tmp/reprobuild-nix-daemon-fake-store
 """)
       setFilePermissions(fakeNix, {fpUserRead, fpUserWrite, fpUserExec})
 
-      let socketPath = fixtureRoot / "nix-daemon.sock"
+      # The socket must fit sun_path whatever the suite TMPDIR is.
+      let socketPath = shortSocketDirAtProcessExit("rnd") / "nix-daemon.sock"
       var childEnv = newStringTable(modeCaseSensitive)
       for key, value in envPairs():
         childEnv[key] = value
@@ -125,10 +165,12 @@ printf '%s\n' /tmp/reprobuild-nix-daemon-fake-store
       let daemonProcess = startProcess(daemonPath,
         args = ["--idle-exit-ms=30000", "--socket-path=" & socketPath],
         env = childEnv, options = {})
+      # Runs before the ``removeDir(fixtureRoot)`` above (defers unwind in
+      # reverse), and the socket, its ``.lock`` and its ``.log`` all live in
+      # that root -- so the helper must have EXITED, not merely been
+      # signalled, before the root is removed. See ``stopHelperAndWait``.
       defer:
-        if daemonProcess.running:
-          daemonProcess.terminate()
-        daemonProcess.close()
+        stopHelperAndWait(daemonProcess)
         removeFile(socketPath)
 
       var sock = newSocket(domain = AF_UNIX, sockType = SOCK_STREAM,
@@ -175,8 +217,18 @@ printf '%s\n' /tmp/reprobuild-nix-daemon-fake-store
     discard execCmd("pkill -f -u $USER reprobuild-nix-daemon-ipc.sock || true")
     removeFile(socketPath)
     
-    # Spawn daemon process detached
-    discard startProcess(daemonPath, args = ["--idle-exit-ms=30000", "--socket-path=" & socketPath], options = {})
+    # Spawn the daemon, keeping its handle so this case stops and reaps the
+    # helper it started, also when an exception ends the case early. This
+    # helper's socket, `.lock` and `.log` are under /tmp, not in a fixture
+    # root, so its shutdown writes do not race the fixture removal the way
+    # the loader-env case's did; waiting still means no helper of this case
+    # outlives it. See ``stopHelperAndWait``.
+    let daemonProcess = startProcess(daemonPath,
+      args = ["--idle-exit-ms=30000", "--socket-path=" & socketPath],
+      options = {})
+    defer:
+      stopHelperAndWait(daemonProcess)
+      removeFile(socketPath)
     
     # Connect to the UNIX domain socket
     var sock = newSocket(domain = AF_UNIX, sockType = SOCK_STREAM, protocol = IPPROTO_IP)
@@ -257,23 +309,69 @@ printf '%s\n' /tmp/reprobuild-nix-daemon-fake-store
     check fileExists(expressionResp["paths"][0].getStr() / FixtureExecutable)
     check fixtureDependencyHash(expressionResp, expressionFile).len > 0
     
-    # Scenario 1.3: Warm In-Memory Cache Performance
-    # Measure duration of the second identical request
+    # Scenario 1.3: a repeated request for LOCAL source is evaluated again,
+    # never answered from the helper's response cache. Its key sees only the
+    # top-level flake files, not what they import, so a cached answer would
+    # name the previous evaluation's store path after an imported file
+    # changed (the helper's ``is_mutable_local_nix_selector``, the same
+    # policy as ``repro_core/nix_evaluation_policy``). The repeat of the
+    # unchanged request answers the same paths...
     sock = newSocket(domain = AF_UNIX, sockType = SOCK_STREAM, protocol = IPPROTO_IP)
     sock.connectUnix(socketPath)
-    
-    let startTime = epochTime()
     sock.send($req & "\n")
     respLine = ""
     sock.readLine(respLine)
     sock.close()
-    let durationMs = (epochTime() - startTime) * 1000.0
-    
     check respLine.len > 0
     let resp2 = parseJson(respLine)
     check resp2["status"].getStr() == "success"
-    checkpoint("Cache hit resolution completed in: " & $durationMs & " ms")
-    check durationMs < 50.0 # Warm cache hit should easily resolve within <50ms
+    check resp2["paths"] == resp["paths"]
+
+    # ...and after an edit to a file the flake IMPORTS -- which leaves every
+    # file the key hashes byte-identical -- the repeat names the new
+    # realization. A response cache keyed as before would return the first.
+    let importingFixture = prepareFixtureRoot(repoRoot)
+    defer: removeDir(importingFixture)
+    let shippedFlake = readFile(importingFixture / "flake.nix")
+    let shippedText = "text = ''\n" &
+      "            printf '%s\\n' reprobuild-nix-daemon-fixture\n" &
+      "          '';"
+    doAssert shippedText in shippedFlake,
+      "the fixture flake no longer has the shape this case edits"
+    writeFile(importingFixture / "flake.nix",
+      shippedFlake.replace(shippedText, "text = import ./greeting.nix;"))
+    proc greet(word: string) =
+      writeFile(importingFixture / "greeting.nix",
+        "\"printf '%s\\\\n' " & word & "\\n\"\n")
+    greet("first-import")
+    let (addOut, addCode) = execCmdEx("git -C " & quoteShell(importingFixture) &
+      " add flake.nix greeting.nix")
+    doAssert addCode == 0, addOut
+    let importingReq = %*{
+      "action": "resolve",
+      "selector": FixtureSelector,
+      "workspaceRoot": importingFixture
+    }
+    proc resolveImporting(): JsonNode =
+      var s = newSocket(domain = AF_UNIX, sockType = SOCK_STREAM,
+        protocol = IPPROTO_IP)
+      s.connectUnix(socketPath)
+      s.send($importingReq & "\n")
+      var line = ""
+      s.readLine(line)
+      s.close()
+      checkpoint("importing fixture response: " & line)
+      parseJson(line)
+    let beforeEdit = resolveImporting()
+    check beforeEdit["status"].getStr() == "success"
+    let beforeProgram = beforeEdit["paths"][0].getStr() / FixtureExecutable
+    check "first-import" in readFile(beforeProgram)
+    greet("second-import")
+    let afterEdit = resolveImporting()
+    check afterEdit["status"].getStr() == "success"
+    check afterEdit["paths"][0].getStr() != beforeEdit["paths"][0].getStr()
+    check "second-import" in
+      readFile(afterEdit["paths"][0].getStr() / FixtureExecutable)
 
     # Cache invalidation: the daemon cache key must include the observed input
     # hashes, otherwise this second response would reuse the first dependency
@@ -309,10 +407,6 @@ printf '%s\n' /tmp/reprobuild-nix-daemon-fake-store
     let mutatedHash = fixtureDependencyHash(mutatedResp,
       mutableFixture / "flake.nix")
     check mutatedHash != originalMutableHash
-    
-    # Clean up daemon
-    discard execCmd("pkill -f -u $USER reprobuild-nix-daemon-ipc.sock || true")
-    removeFile(socketPath)
 
   test "Scenario 1.6: Self-Reaping Timeout":
     let repoRoot = findRepoRoot()
@@ -360,3 +454,108 @@ printf '%s\n' /tmp/reprobuild-nix-daemon-fake-store
       socketDeleted = true
     check socketDeleted
     pProcess.close()
+
+  # THE HELPER IS SHARED by every reprobuild process of the user, so starting
+  # one, stopping one and one going idle all happen while other processes are
+  # connecting. The three cases below pin the socket-path discipline that
+  # keeps a connecting client from finding the path gone; each was red on
+  # the helper before it took the path under ``<socket>.lock``.
+  when defined(linux):
+    proc shortSocketRoot(): string =
+      # sun_path is 108 bytes; the suite's TMPDIR can be deeper than that.
+      createTempDir("rnd-", "", "/tmp")
+
+    proc waitForSocket(path: string; timeoutMs = 20_000): bool =
+      let deadline = epochTime() + timeoutMs.float / 1000.0
+      while epochTime() < deadline:
+        var sock = newSocket(domain = AF_UNIX, sockType = SOCK_STREAM,
+          protocol = IPPROTO_IP)
+        try:
+          sock.connectUnix(path)
+          sock.close()
+          return true
+        except CatchableError:
+          sock.close()
+        sleep(25)
+      false
+
+    proc awaitExit(p: Process; timeoutMs: int): int =
+      let deadline = epochTime() + timeoutMs.float / 1000.0
+      while epochTime() < deadline:
+        let code = p.peekExitCode()
+        if code != -1:
+          return code
+        sleep(25)
+      -1
+
+    proc socketInode(path: string): int64 =
+      try:
+        int64(getFileInfo(path, followSymlink = false).id.file)
+      except OSError:
+        -1
+
+    proc startHelper(daemonPath, socketPath: string; idleMs: int): Process =
+      startProcess(daemonPath, args = ["--idle-exit-ms=" & $idleMs,
+        "--socket-path=" & socketPath], options = {})
+
+    proc stopHelper(p: Process) =
+      if p.running:
+        p.kill()
+        discard p.waitForExit()
+      p.close()
+
+    test "a helper started beside a live one leaves the live socket alone":
+      # Two clients that both find no helper both start one. The second used
+      # to unlink the first's socket and bind its own, orphaning the first.
+      let daemonPath = findNixDaemon(findRepoRoot())
+      let root = shortSocketRoot()
+      defer: removeDir(root)
+      let socketPath = root / "s.sock"
+      let first = startHelper(daemonPath, socketPath, 30_000)
+      defer: stopHelper(first)
+      check waitForSocket(socketPath)
+      let boundInode = socketInode(socketPath)
+      let second = startHelper(daemonPath, socketPath, 30_000)
+      defer: stopHelper(second)
+      check awaitExit(second, 20_000) == 0
+      check first.running
+      check socketInode(socketPath) == boundInode
+      check waitForSocket(socketPath, 1_000)
+
+    test "a helper going idle unlinks only its own socket":
+      # The helper that lost a start race used to unlink THE PATH when it went
+      # idle -- by then the winner's socket -- so a client that had just
+      # started a fresh helper found nothing to connect to.
+      let daemonPath = findNixDaemon(findRepoRoot())
+      let root = shortSocketRoot()
+      defer: removeDir(root)
+      let socketPath = root / "s.sock"
+      let older = startHelper(daemonPath, socketPath, 1_500)
+      defer: stopHelper(older)
+      check waitForSocket(socketPath)
+      # The older helper is now unreachable (as if its path had been taken
+      # over); a newer helper binds the path.
+      removeFile(socketPath)
+      let newer = startHelper(daemonPath, socketPath, 30_000)
+      defer: stopHelper(newer)
+      check waitForSocket(socketPath)
+      let newerInode = socketInode(socketPath)
+      check awaitExit(older, 20_000) == 0
+      check newer.running
+      check socketInode(socketPath) == newerInode
+      check waitForSocket(socketPath, 1_000)
+
+    test "a stopped helper releases its socket":
+      # SIGTERM -- what a suite runner sends a finished case's processes, and
+      # what anyone stopping "their" helper sends -- used to end the helper
+      # without unlinking, leaving a socket file nothing listens on.
+      let daemonPath = findNixDaemon(findRepoRoot())
+      let root = shortSocketRoot()
+      defer: removeDir(root)
+      let socketPath = root / "s.sock"
+      let helper = startHelper(daemonPath, socketPath, 30_000)
+      defer: stopHelper(helper)
+      check waitForSocket(socketPath)
+      helper.terminate()
+      check awaitExit(helper, 20_000) == 0
+      check not fileExists(socketPath) and socketInode(socketPath) == -1

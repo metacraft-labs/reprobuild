@@ -43,11 +43,81 @@
 ## a throwaway out-of-tree consumer ``workDir`` under one ``createTempDir``; no
 ## network, no compiler invocation beyond the key computation itself.
 
-import std/[os, tempfiles, unittest]
+import std/[os, strutils, tempfiles, unittest]
 
 import repro_interface_artifacts
 
 suite "harness lib-path skew — which key an external reprobuild lib edit moves":
+
+  test "caller temp and action scratch do not relocate the provider nimcache":
+    let scratch = createTempDir("repro-nimcache-root-", "")
+    defer: removeDir(scratch)
+    let names = ["TMPDIR", "TMP", "TEMP", "TEMPDIR"]
+    var saved: seq[tuple[name, value: string; present: bool]]
+    for name in names:
+      saved.add((name, getEnv(name), existsEnv(name)))
+    defer:
+      for item in saved:
+        if item.present: putEnv(item.name, item.value)
+        else: delEnv(item.name)
+    let original = providerCompileNimcacheRoot()
+    for name in names:
+      putEnv(name, scratch / "caller-temp")
+    check providerCompileNimcacheRoot() == original
+    proc valueIn(env: seq[string]; name: string): string =
+      for entry in env:
+        if entry.startsWith(name & "="):
+          return entry[name.len + 1 .. ^1]
+    let homeA = scratch / "action-a" / "home"
+    let homeB = scratch / "action-b" / "home"
+    let envA = providerCompileLaunchEnv(homeA)
+    let envB = providerCompileLaunchEnv(homeB)
+    let cacheHomeEnv = when defined(windows): "LOCALAPPDATA" else: "XDG_CACHE_HOME"
+    check valueIn(envA, cacheHomeEnv) / "repro-nimcache-provider" == original
+    check valueIn(envB, cacheHomeEnv) / "repro-nimcache-provider" == original
+    for name in ["TMPDIR", "TMP", "TEMP", "TEMPDIR"]:
+      check valueIn(envA, name) == homeA / "tmp"
+      check valueIn(envB, name) == homeB / "tmp"
+    check valueIn(envA, "HOME") == homeA
+    check valueIn(envB, "HOME") == homeB
+    # Exercise the TARGET standard library's actual home semantics, rather
+    # than pretending HOME controls Windows getHomeDir. Only this case's
+    # process environment is changed and the existing defer restores it.
+    let previousHome = getEnv("HOME")
+    let hadHome = existsEnv("HOME")
+    let previousProfile = getEnv("USERPROFILE")
+    let hadProfile = existsEnv("USERPROFILE")
+    try:
+      for env in [envA, envB]:
+        let expected = valueIn(env, "HOME")
+        putEnv("HOME", expected)
+        when defined(windows):
+          check valueIn(env, "USERPROFILE") == expected
+          putEnv("USERPROFILE", valueIn(env, "USERPROFILE"))
+        check getHomeDir().normalizedPath().strip(leading = false,
+          trailing = true, chars = {DirSep, AltSep}) == expected.normalizedPath()
+    finally:
+      if hadHome: putEnv("HOME", previousHome)
+      else: delEnv("HOME")
+      if hadProfile: putEnv("USERPROFILE", previousProfile)
+      else: delEnv("USERPROFILE")
+    check original in providerCompileIgnoredInputPrefixes(scratch / "action-a")
+
+  test "a cache selector never exempts the semantic root itself":
+    let semanticRoot = createTempDir("repro-nimcache-semantic-", "")
+    defer: removeDir(semanticRoot)
+    let cacheHomeEnv = when defined(windows): "LOCALAPPDATA" else: "XDG_CACHE_HOME"
+    let names = [cacheHomeEnv, "REPRO_PROVIDER_NIMCACHE_ROOT"]
+    var saved: seq[tuple[name, value: string; present: bool]]
+    for name in names:
+      saved.add((name, getEnv(name), existsEnv(name)))
+      putEnv(name, semanticRoot)
+    defer:
+      for item in saved:
+        if item.present: putEnv(item.name, item.value)
+        else: delEnv(item.name)
+    check providerCompileNimcacheRoot() == semanticRoot / "repro-nimcache-provider"
+    check semanticRoot notin providerCompileIgnoredInputPrefixes()
 
   test "an external lib edit re-keys the ARTIFACT fingerprint, not the nimcache":
     let scratch = createTempDir("repro-libskew-", "")
@@ -140,3 +210,59 @@ suite "harness lib-path skew — which key an external reprobuild lib edit moves
         ProviderCacheName, recipeA, consumer, @[], @[]) !=
       positionKeyedNimcacheKey(
         InterfaceCacheName, recipeA, consumer, @[], @[])
+
+  test "the nimcache key carries the compile configuration: defines never share":
+    ## One recipe compiled under two sets of ``--define``s must get two
+    ## directories, and the same set twice must get one. Run 34 of the full
+    ## suite compiled one recipe as a standalone C-ABI library and then as a
+    ## ``-d:useNimRtl -d:reproNimRtlShared`` library into ONE nimcache; Nim
+    ## reused C generated under the other configuration and clang failed with
+    ## "incomplete definition of type 'Exception'" in ``@pjson.nim.c``.
+    let scratch = createTempDir("repro-nimcache-defines-", "")
+    defer: removeDir(scratch)
+    let recipe = scratch / "recipe" / "repro.nim"
+    createDir(parentDir(recipe))
+    writeFile(recipe, "discard\n")
+
+    proc nimcacheOf(command: openArray[string]): string =
+      for arg in command:
+        if arg.startsWith("--nimcache:"):
+          return arg["--nimcache:".len .. ^1]
+      raise newException(ValueError, "no --nimcache: in " & $(@command))
+
+    # Key level: the compile flags are a key component.
+    let base = positionKeyedNimcacheKey(ProviderCacheName, recipe, scratch,
+      @[], @[], @["--define:a"])
+    check base == positionKeyedNimcacheKey(ProviderCacheName, recipe,
+      scratch, @[], @[], @["--define:a"])
+    check base != positionKeyedNimcacheKey(ProviderCacheName, recipe,
+      scratch, @[], @[], @["--define:a", "--define:b"])
+    check base != positionKeyedNimcacheKey(ProviderCacheName, recipe,
+      scratch, @[], @[], @["--define:b"])
+    # A flag cannot move between the library set and the compile flags and
+    # keep its key.
+    check positionKeyedNimcacheKey(ProviderCacheName, recipe, scratch,
+        @[], @["--define:a"]) != base
+
+    # Command level, through the real builders: plain provider, standalone
+    # C-ABI library and nimRtl-shared library are three directories.
+    let outBin = scratch / "out" / "provider"
+    let plain = nimcacheOf(providerCompileCommand(recipe, outBin, scratch))
+    let standalone = nimcacheOf(providerLibraryCompileCommand(recipe, outBin,
+      rtlStandaloneCAbi, scratch))
+    let shared = nimcacheOf(providerLibraryCompileCommand(recipe, outBin,
+      rtlNimRtlShared, scratch))
+    check plain != standalone
+    check plain != shared
+    check standalone != shared
+    # A caller's extra define is part of the configuration too.
+    check nimcacheOf(providerCompileCommand(recipe, outBin, scratch,
+        extraFlags = @["--define:useMalloc"])) != plain
+
+    # Identical configurations land on one directory -- including through a
+    # different output path, which is location, not configuration.
+    check nimcacheOf(providerCompileCommand(recipe, outBin, scratch)) == plain
+    check nimcacheOf(providerCompileCommand(recipe, scratch / "elsewhere" /
+        "provider", scratch)) == plain
+    check nimcacheOf(providerLibraryCompileCommand(recipe, outBin,
+      rtlNimRtlShared, scratch)) == shared

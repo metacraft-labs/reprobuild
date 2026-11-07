@@ -53,6 +53,8 @@ import std/[options, strutils, times]
 
 import bearssl/abi/bearssl_ec as bsslEcAbi
 import bearssl/abi/bearssl_hash as bsslHashAbi
+import bearssl/abi/bearssl_rand as bsslRandAbi
+import bearssl/abi/bearssl_rsa as bsslRsaAbi
 
 import nimcrypto/sysrand
 
@@ -109,7 +111,7 @@ proc newTestKey*(): TestKey =
     raise newException(ValueError, "ecComputePub produced " & $n & " bytes")
   for i in 0 ..< P256PointLen: result.pub[i] = pkBuf[i]
 
-proc sha256Of(msg: openArray[byte]): array[32, byte] =
+proc sha256Of*(msg: openArray[byte]): array[32, byte] =
   var ctx: bsslHashAbi.Sha256Context
   bsslHashAbi.sha256Init(ctx)
   if msg.len > 0:
@@ -144,7 +146,7 @@ proc signRawEcdsa*(key: TestKey; message: openArray[byte]):
     result.r[i] = char(raw[i])
     result.s[i] = char(raw[32 + i])
 
-proc signDer(key: TestKey; message: openArray[byte]): seq[byte] =
+proc signDer*(key: TestKey; message: openArray[byte]): seq[byte] =
   ## An ``ECDSA-Sig-Value`` over SHA-256 of ``message``.
   var digest = sha256Of(message)
   var scalar = key.priv
@@ -177,19 +179,19 @@ proc encodeLen(n: int): seq[byte] =
   else: @[0x83'u8, byte((n shr 16) and 0xff), byte((n shr 8) and 0xff),
           byte(n and 0xff)]
 
-proc tlv(tag: byte; payload: openArray[byte]): seq[byte] =
+proc tlv*(tag: byte; payload: openArray[byte]): seq[byte] =
   result.add tag
   result.add encodeLen(payload.len)
   for b in payload: result.add b
 
-proc cat(parts: varargs[seq[byte]]): seq[byte] =
+proc cat*(parts: varargs[seq[byte]]): seq[byte] =
   for p in parts:
     for b in p: result.add b
 
-proc derSeq(parts: varargs[seq[byte]]): seq[byte] = tlv(0x30'u8, cat(parts))
-proc derSet(parts: varargs[seq[byte]]): seq[byte] = tlv(0x31'u8, cat(parts))
+proc derSeq*(parts: varargs[seq[byte]]): seq[byte] = tlv(0x30'u8, cat(parts))
+proc derSet*(parts: varargs[seq[byte]]): seq[byte] = tlv(0x31'u8, cat(parts))
 
-proc derInteger(value: openArray[byte]): seq[byte] =
+proc derInteger*(value: openArray[byte]): seq[byte] =
   var i = 0
   while i < value.len - 1 and value[i] == 0: inc i
   var payload: seq[byte] = @[]
@@ -198,7 +200,7 @@ proc derInteger(value: openArray[byte]): seq[byte] =
   if payload.len == 0: payload.add 0x00'u8
   tlv(0x02'u8, payload)
 
-proc derSmallInt(n: int): seq[byte] =
+proc derSmallInt*(n: int): seq[byte] =
   if n == 0: tlv(0x02'u8, @[0x00'u8])
   elif n < 0x80: tlv(0x02'u8, @[byte(n)])
   else: tlv(0x02'u8, @[0x00'u8, byte(n)])
@@ -224,27 +226,27 @@ proc derOid*(dotted: string): seq[byte] =
     for j in countdown(groups.high, 0): payload.add groups[j]
   tlv(0x06'u8, payload)
 
-proc derUtf8(s: string): seq[byte] =
+proc derUtf8*(s: string): seq[byte] =
   var p: seq[byte] = @[]
   for c in s: p.add byte(c)
   tlv(0x0c'u8, p)
 
-proc derIa5(s: string): seq[byte] =
+proc derIa5*(s: string): seq[byte] =
   var p: seq[byte] = @[]
   for c in s: p.add byte(c)
   tlv(0x16'u8, p)
 
-proc derOctets(content: openArray[byte]): seq[byte] = tlv(0x04'u8, content)
+proc derOctets*(content: openArray[byte]): seq[byte] = tlv(0x04'u8, content)
 
-proc derBitString(content: openArray[byte]; unused = 0): seq[byte] =
+proc derBitString*(content: openArray[byte]; unused = 0): seq[byte] =
   var p: seq[byte] = @[byte(unused)]
   for b in content: p.add b
   tlv(0x03'u8, p)
 
-proc derBool(b: bool): seq[byte] =
+proc derBool*(b: bool): seq[byte] =
   tlv(0x01'u8, @[if b: 0xff'u8 else: 0x00'u8])
 
-proc derUtcTime(unix: int64): seq[byte] =
+proc derUtcTime*(unix: int64): seq[byte] =
   let t = utc(fromUnix(unix))
   let s = align($(t.year mod 100), 2, '0') & align($ord(t.month), 2, '0') &
           align($t.monthday, 2, '0') & align($t.hour, 2, '0') &
@@ -256,19 +258,19 @@ proc derUtcTime(unix: int64): seq[byte] =
 proc nameWithCn*(cn: string): seq[byte] =
   derSeq(derSet(derSeq(derOid(OidCommonName), derUtf8(cn))))
 
-proc algEcdsaSha256(): seq[byte] = derSeq(derOid(OidEcdsaWithSha256))
+proc algEcdsaSha256*(): seq[byte] = derSeq(derOid(OidEcdsaWithSha256))
 
-proc spkiOf(key: TestKey): seq[byte] =
+proc spkiOf*(key: TestKey): seq[byte] =
   var point: seq[byte] = @[]
   for b in key.pub: point.add b
   derSeq(derSeq(derOid(OidEcPublicKey), derOid(OidPrime256v1)),
          derBitString(point))
 
-proc extension(oid: string; critical: bool; value: seq[byte]): seq[byte] =
+proc extension*(oid: string; critical: bool; value: seq[byte]): seq[byte] =
   if critical: derSeq(derOid(oid), derBool(true), derOctets(value))
   else: derSeq(derOid(oid), derOctets(value))
 
-proc keyUsageExt(bits: openArray[int]): seq[byte] =
+proc keyUsageExt*(bits: openArray[int]): seq[byte] =
   var highest = 0
   for b in bits:
     if b > highest: highest = b
@@ -279,7 +281,7 @@ proc keyUsageExt(bits: openArray[int]): seq[byte] =
   let unused = (byteCount * 8) - (highest + 1)
   extension(OidKeyUsage, true, derBitString(mask, unused))
 
-proc basicConstraintsExt(isCa: bool): seq[byte] =
+proc basicConstraintsExt*(isCa: bool): seq[byte] =
   extension(OidBasicConstraints, true,
             (if isCa: derSeq(derBool(true)) else: derSeq()))
 
@@ -307,7 +309,7 @@ const
   MarkerText* = "software root: this hierarchy is for testing and is " &
     "trusted by no production verifier"
 
-proc markerExt(): seq[byte] =
+proc markerExt*(): seq[byte] =
   extension(SoftwareRootMarkerTestOid, true, derUtf8(MarkerText))
 
 const
@@ -810,3 +812,172 @@ proc recombine*(tbs, signature: openArray[byte]): string =
   let der = derSeq(@tbs, algEcdsaSha256(), derBitString(signature))
   result = newString(der.len)
   for i in 0 ..< der.len: result[i] = char(der[i])
+
+# ---------------------------------------------------------------------
+# The two further key shapes a confidential-computing endorsement chain
+# is made of
+#
+# They live HERE, beside the P-256 keys, for the reason this module's
+# header states: a private scalar must be handled in exactly one place.
+# A second module that minted its own keys would be a second place, and
+# "there is no key material in this repository" would then be a claim
+# about two files instead of one.
+#
+# What is added is the key SHAPES, not the certificate PROFILES. Which
+# distinguished names, which extensions and which product fields a
+# vendor's chain carries is the business of whoever is emulating that
+# vendor; what a P-384 scalar and a 4096-bit modulus are is this
+# module's.
+# ---------------------------------------------------------------------
+
+const
+  P384ScalarLen* = 48
+  P384PointLen* = 97            ## `0x04 ‖ X(48) ‖ Y(48)`.
+  Rsa4096Bits* = 4096
+  Rsa4096ModulusLen* = 512
+
+  OidSecp384r1Curve* = "1.3.132.0.34"
+  OidRsaEncryptionAlg* = "1.2.840.113549.1.1.1"
+
+type
+  TestP384Key* = object
+    ## An ECDSA P-384 keypair. The curve an SEV-SNP endorsement key
+    ## signs a report with.
+    priv*: array[P384ScalarLen, byte]
+    pub*: array[P384PointLen, byte]
+
+  TestRsaKey* = object
+    ## A 4096-bit RSA keypair. The key an AMD root and its signing
+    ## authority hold, and therefore the key a chain that is to be
+    ## REFUSED for the right reason has to carry: a test root with a
+    ## P-256 key would be refused as the wrong key type, which says
+    ## nothing about whether the root is the vendor's.
+    modulus*: seq[byte]
+    exponent*: seq[byte]
+    privBuf: seq[byte]
+    priv: bsslRsaAbi.RsaPrivateKey
+
+proc derNull*(): seq[byte] = tlv(0x05'u8, [])
+
+proc sha384Of*(msg: openArray[byte]): array[48, byte] =
+  var ctx: bsslHashAbi.Sha384Context
+  bsslHashAbi.sha384Init(ctx)
+  if msg.len > 0:
+    bsslHashAbi.sha384Update(ctx, unsafeAddr msg[0], uint(msg.len))
+  bsslHashAbi.sha384Out(ctx, addr result[0])
+
+proc newTestP384Key*(): TestP384Key =
+  ## A fresh P-384 keypair from the operating system's random source.
+  ##
+  ## The scalar is NOT rejection-sampled against the group order the way
+  ## the P-256 one is, because BearSSL's `ecComputePub` reduces it for
+  ## us and then reports the reduced key — the bias that rejection
+  ## sampling exists to avoid is a property of signing keys that must be
+  ## indistinguishable from uniform, and the signatures this key makes
+  ## are worth nothing by construction. Stated rather than left as an
+  ## asymmetry a reader has to explain.
+  if randomBytes(addr result.priv[0], P384ScalarLen) != P384ScalarLen:
+    raise newException(ValueError,
+      "the OS random source returned short for a P-384 scalar")
+  # Keep the scalar inside the order by clearing the top byte: the
+  # P-384 order's leading byte is 0xff, so any value below 2^376 is
+  # usable, and this is a test key.
+  result.priv[0] = result.priv[0] and 0x7f'u8
+  if result.priv[0] == 0: result.priv[0] = 0x01'u8
+  var sk: bsslEcAbi.EcPrivateKey
+  sk.curve = cint(bsslEcAbi.EC_secp384r1)
+  sk.x = addr result.priv[0]
+  sk.xlen = uint(P384ScalarLen)
+  var pkBuf: array[bsslEcAbi.EC_KBUF_PUB_MAX_SIZE, byte]
+  var pk: bsslEcAbi.EcPublicKey
+  let n = bsslEcAbi.ecComputePub(bsslEcAbi.ecGetDefault(), addr pk,
+                                 addr pkBuf[0], addr sk)
+  if n == 0 or pk.qlen != uint(P384PointLen):
+    raise newException(ValueError,
+      "ecComputePub produced " & $n & " bytes for a P-384 point")
+  for i in 0 ..< P384PointLen: result.pub[i] = pkBuf[i]
+
+proc signRawEcdsaP384*(key: TestP384Key; message: openArray[byte]):
+                      tuple[r, s: seq[byte]] =
+  ## ECDSA-P384 over SHA-384 of `message`, as the two 48-byte
+  ## big-endian scalars rather than as a DER `SEQUENCE`.
+  var digest = sha384Of(message)
+  var scalar = key.priv
+  var sk: bsslEcAbi.EcPrivateKey
+  sk.curve = cint(bsslEcAbi.EC_secp384r1)
+  sk.x = addr scalar[0]
+  sk.xlen = uint(P384ScalarLen)
+  var raw: array[2 * P384ScalarLen, byte]
+  let n = bsslEcAbi.ecdsaSignRawGetDefault()(
+    bsslEcAbi.ecGetDefault(), addr bsslHashAbi.sha384Vtable,
+    addr digest[0], addr sk, addr raw[0])
+  if n != uint(2 * P384ScalarLen):
+    raise newException(ValueError,
+      "ecdsaSignRaw produced " & $n & " bytes for P-384")
+  result.r = newSeq[byte](P384ScalarLen)
+  result.s = newSeq[byte](P384ScalarLen)
+  for i in 0 ..< P384ScalarLen:
+    result.r[i] = raw[i]
+    result.s[i] = raw[P384ScalarLen + i]
+
+proc spkiOfP384*(key: TestP384Key): seq[byte] =
+  var point: seq[byte] = @[]
+  for b in key.pub: point.add b
+  derSeq(derSeq(derOid(OidEcPublicKey), derOid(OidSecp384r1Curve)),
+         derBitString(point))
+
+proc newTestRsa4096Key*(): TestRsaKey =
+  ## A fresh 4096-bit RSA keypair, seeded from the operating system's
+  ## random source.
+  ##
+  ## Expensive — seconds, not milliseconds — which is why every caller
+  ## here mints one per PROCESS rather than per call. That is a cost
+  ## decision and not a weakening: a key reused inside one test process
+  ## is still a key that exists nowhere else and is written nowhere.
+  var seed: array[32, byte]
+  if randomBytes(addr seed[0], 32) != 32:
+    raise newException(ValueError,
+      "the OS random source returned short for an RSA seed")
+  var rng: bsslRandAbi.HmacDrbgContext
+  bsslRandAbi.hmacDrbgInit(rng, addr bsslHashAbi.sha256Vtable,
+                           addr seed[0], 32)
+  result.privBuf = newSeq[byte](bsslRsaAbi.rsaKbufPrivSize(Rsa4096Bits))
+  var pubBuf = newSeq[byte](bsslRsaAbi.rsaKbufPubSize(Rsa4096Bits))
+  var pk: bsslRsaAbi.RsaPublicKey
+  let ok = bsslRsaAbi.rsaKeygenGetDefault()(
+    addr rng.vtable, addr result.priv, addr result.privBuf[0],
+    addr pk, addr pubBuf[0], cuint(Rsa4096Bits), 0x10001'u32)
+  if ok != 1'u32:
+    raise newException(ValueError, "br_rsa_keygen refused a 4096-bit key")
+  result.modulus = newSeq[byte](int(pk.nlen))
+  for i in 0 ..< int(pk.nlen): result.modulus[i] = cast[ptr UncheckedArray[byte]](pk.n)[i]
+  result.exponent = newSeq[byte](int(pk.elen))
+  for i in 0 ..< int(pk.elen): result.exponent[i] = cast[ptr UncheckedArray[byte]](pk.e)[i]
+  if result.modulus.len != Rsa4096ModulusLen:
+    raise newException(ValueError,
+      "br_rsa_keygen produced a " & $(result.modulus.len * 8) & "-bit key")
+
+proc signRsaPssSha384*(key: var TestRsaKey;
+                       message: openArray[byte]): seq[byte] =
+  ## RSASSA-PSS over SHA-384, MGF1-SHA-384, 48-byte salt — the one
+  ## signature shape an AMD endorsement chain carries.
+  var digest = sha384Of(message)
+  var seed: array[32, byte]
+  if randomBytes(addr seed[0], 32) != 32:
+    raise newException(ValueError,
+      "the OS random source returned short for a PSS salt seed")
+  var rng: bsslRandAbi.HmacDrbgContext
+  bsslRandAbi.hmacDrbgInit(rng, addr bsslHashAbi.sha256Vtable,
+                           addr seed[0], 32)
+  result = newSeq[byte](Rsa4096ModulusLen)
+  let ok = bsslRsaAbi.rsaPssSignGetDefault()(
+    addr rng.vtable, addr bsslHashAbi.sha384Vtable,
+    addr bsslHashAbi.sha384Vtable, addr digest[0], csize_t(48),
+    addr key.priv, addr result[0])
+  if ok != 1'u32:
+    raise newException(ValueError, "br_rsa_pss_sign refused")
+
+proc spkiOfRsa*(key: TestRsaKey): seq[byte] =
+  derSeq(derSeq(derOid(OidRsaEncryptionAlg), derNull()),
+         derBitString(derSeq(derInteger(key.modulus),
+                             derInteger(key.exponent))))

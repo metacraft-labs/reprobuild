@@ -65,21 +65,18 @@ const
 
 let thisDir = currentSourcePath().parentDir
 
-proc findUpFile(startDir, rel: string): string =
-  var dir = startDir
-  for _ in 0 .. 8:
-    let candidate = dir / rel
-    if fileExists(candidate): return candidate
-    let parent = dir.parentDir
-    if parent.len == 0 or parent == dir: break
-    dir = parent
-  ""
-
 proc findUpDir(startDir, rel: string): string =
+  ## The nearest ancestor-relative ``rel`` that is a specification checkout,
+  ## i.e. holds a ``spec`` directory. A directory that merely carries the
+  ## name is not one: on a CI runner the walk climbs out of the job's
+  ## workspace into the runner's work root, where ``reprobuild-pm`` is the
+  ## workspace of ANOTHER repository's jobs (its checkout one level further
+  ## down), and taking it for the spec checkout failed every case with the
+  ## document "missing" instead of skipping them.
   var dir = startDir
   for _ in 0 .. 8:
     let candidate = dir / rel
-    if dirExists(candidate): return candidate
+    if dirExists(candidate / "spec"): return candidate
     let parent = dir.parentDir
     if parent.len == 0 or parent == dir: break
     dir = parent
@@ -333,12 +330,23 @@ suite "the attest exit codes are documented and stable":
     # that checkout is absent altogether there is nothing to read; if it
     # is present the page must be there, so removing the file is not a
     # way out of this assertion.
-    let specsRoot = findUpDir(thisDir, ".." / "reprobuild-specs")
+    #
+    # The checkout carries TWO names: it was renamed from `reprobuild-specs`
+    # to `reprobuild-pm`, and this assertion looked only for the old one. A
+    # name that no longer exists is not an absent checkout, it is an
+    # unreachable one, and the `skip()` below reported it as the former --
+    # so this case passed by never running. Both names are accepted, newest
+    # first, because a workspace may still hold either.
+    var specsRoot = findUpDir(thisDir, ".." / "reprobuild-pm")
+    if specsRoot.len == 0:
+      specsRoot = findUpDir(thisDir, ".." / "reprobuild-specs")
     if specsRoot.len == 0:
       skip()
     else:
-      let docPath = findUpFile(thisDir,
-        ".." / "reprobuild-specs" / "CLI" / "attest.md")
+      let docPath =
+        if fileExists(specsRoot / "spec" / "CLI" / "attest.md"):
+          specsRoot / "spec" / "CLI" / "attest.md"
+        else: ""
       check docPath.len > 0
       if docPath.len > 0:
         let md = readFile(docPath)

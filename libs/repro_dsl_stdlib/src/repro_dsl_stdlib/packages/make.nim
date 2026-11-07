@@ -23,11 +23,14 @@ package make:
     # peer; reusing the same tarball as ``gcc.nim`` also folds the
     # download into the same tool-store prefix the gcc auto-recurse
     # already realizes, so there is no separate download cost.
+    # ``version`` is GNU Make's, not the WinLibs release's:
+    # ``bin/mingw32-make.exe --version`` in this archive reports 4.4.1.
     tarball url = "https://github.com/brechtsanders/winlibs_mingw/releases/download/16.1.0posix-14.0.0-ucrt-r2/winlibs-x86_64-posix-seh-gcc-16.1.0-mingw-w64ucrt-14.0.0-r2.7z",
       sha256 = "62fb8588d2deee7d662dbcbd386702adbf19643764c971c38aa4839472eee232",
       archiveType = "7z",
       stripComponents = 1,
       executablePath = "bin/mingw32-make.exe",
+      version = "4.4.1",
       packageId = "make-winlibs@16.1.0",
       cpu = "x86_64",
       os = "windows",

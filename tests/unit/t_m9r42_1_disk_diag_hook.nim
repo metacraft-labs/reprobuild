@@ -30,8 +30,9 @@ import std/[os, strutils, tables, unittest]
 
 import repro_profile
 import repro_cli_support/disk as cli_disk
+from repro_test_support import testCaseScratchSlug
 
-const TmpRoot = "build/m9r42_1_tmp"
+let TmpRoot = "build/m9r42_1_tmp" / testCaseScratchSlug()
 
 proc resetDir(sub: string): string =
   let dir = TmpRoot / sub

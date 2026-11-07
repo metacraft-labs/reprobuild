@@ -544,8 +544,6 @@ suite "integration_build_engine_api_ready_queue":
         staleAction.actionCachePolicy, staleAction.inputs, staleAction.outputs,
         workRoot)
       cache.flushHotIndex()
-      fixtureWrite(staleInput, "stale input after\n")
-
       var config = BuildEngineConfig(
         cacheRoot: cacheRoot,
         runQuotaCliPath: app,
@@ -556,6 +554,16 @@ suite "integration_build_engine_api_ready_queue":
         suppressTrace: true,
         skipCacheHitEvidence: true)
       config.statsEnabled = true
+      # The first warm build of an action whose outputs predate the Nix
+      # reference ledger takes the scheduler path once, which records the
+      # action's manifest (`nixLedgerRefusesFastNoop`); only later warm
+      # builds take the fast no-op shortcut. Prime that once, before the
+      # unrelated input goes stale, so the build under test is the shortcut.
+      let primed = runBuild(graph([selectedAction]), config)
+      check primed.results.len == 1
+      check primed.results[0].status in {asCacheHit, asUpToDate}
+      check not primed.results[0].launched
+      fixtureWrite(staleInput, "stale input after\n")
 
       let buildResult = runBuild(graph([selectedAction]), config)
       check buildResult.results.len == 1

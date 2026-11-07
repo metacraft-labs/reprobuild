@@ -1,8 +1,16 @@
-import std/[os, strutils, unittest]
+import std/[os, sequtils, strutils, tempfiles, unittest]
 import repro_core/paths
 
 when defined(posix):
   import std/posix
+
+  const PathLimit = min(Sockaddr_un_path_length,
+    sizeof(Sockaddr_un().sun_path)) - 1
+    ## The longest Unix-socket path `std/net` binds or dials: `makeUnixAddr`
+    ## refuses `path.len >= Sockaddr_un_path_length` and copies the NUL too.
+    ## 107 on Linux, 91 on macOS. Stated here rather than taken from
+    ## `unixSocketPathMaxLen`, so the bound is checked independently of the
+    ## code under test, which is also checked to agree with it.
 
 template withTempRoot(root: string; body: untyped) =
   let wasSet = existsEnv("TMPDIR")
@@ -30,8 +38,8 @@ suite "RunQuota endpoint paths":
         let first = runquotaEndpointPath("caller-1")
         let second = runquotaEndpointPath("caller-2")
         checkpoint(first)
-        check first.len < sizeof(Sockaddr_un().sun_path)
-        check second.len < sizeof(Sockaddr_un().sun_path)
+        check first.len <= PathLimit
+        check second.len <= PathLimit
         check first.parentDir != second.parentDir
         check first.parentDir != "/tmp"
         check first.isAbsolute
@@ -41,7 +49,8 @@ suite "RunQuota endpoint paths":
 
   test "the terminating NUL counts against the native socket address budget":
     when defined(posix):
-      let limit = sizeof(Sockaddr_un().sun_path) - 1
+      check unixSocketPathMaxLen() == PathLimit
+      let limit = PathLimit
       let root = "/tmp/" & repeat('x', limit - "/tmp//caller/runquota.sock".len)
       withTempRoot(root):
         let exact = root / "caller" / "runquota.sock"
@@ -60,7 +69,7 @@ suite "RunQuota endpoint paths":
         let common = repeat('n', 200)
         let first = runquotaEndpointPath(common & "a")
         let second = runquotaEndpointPath(common & "b")
-        check first.len < sizeof(Sockaddr_un().sun_path)
+        check first.len <= PathLimit
         check first.parentDir != second.parentDir
 
     else:
@@ -79,6 +88,69 @@ suite "RunQuota endpoint paths":
   test "UTF-8 paths are bounded in bytes rather than characters":
     when defined(posix):
       withTempRoot("/tmp/" & repeat("\xc3\xa9", 60)):
-        check runquotaEndpointPath("caller").len < sizeof(Sockaddr_un().sun_path)
+        check runquotaEndpointPath("caller").len <= PathLimit
     else:
       skip()
+
+when defined(posix):
+  # POSIX only: `createPrivateRunQuotaEndpoint` makes a filesystem
+  # rendezvous directory, which a Windows named pipe has no equivalent of.
+  proc modeOf(path: string): int =
+    var info: Stat
+    doAssert lstat(path.cstring, info) == 0
+    int(info.st_mode) and 0o7777
+
+  suite "fresh private RunQuota endpoints":
+    test "every call creates a new owner-only directory nobody held before":
+      let root = createTempDir("repro-rq-fresh-", "")
+      defer: removeDir(root)
+      withTempRoot(root):
+        let first = createPrivateRunQuotaEndpoint("caller-")
+        let second = createPrivateRunQuotaEndpoint("caller-")
+        checkpoint(first & " / " & second)
+        check first.parentDir != second.parentDir
+        check first.parentDir.parentDir == root
+        check first.extractFilename == "runquota.sock"
+        check first.parentDir.extractFilename.startsWith("caller-")
+        check dirExists(first.parentDir)
+        check modeOf(first.parentDir) == 0o700
+        # The socket itself is the daemon's to bind.
+        check not fileExists(first) and not symlinkExists(first)
+
+    test "a directory left at a predictable name is never chosen":
+      # The defect a pid-derived name had: a leftover from an earlier holder
+      # of the same name. Whatever is already there, the result is new.
+      let root = createTempDir("repro-rq-stale-", "")
+      defer: removeDir(root)
+      withTempRoot(root):
+        createDir(root / "caller-")
+        for _ in 0 ..< 32:
+          let endpoint = createPrivateRunQuotaEndpoint("caller-")
+          check endpoint.parentDir != root / "caller-"
+          check walkDir(endpoint.parentDir).toSeq.len == 0
+
+    test "the umask cannot narrow the exact mode the private policy requires":
+      let root = createTempDir("repro-rq-umask-", "")
+      defer: removeDir(root)
+      let previous = umask(Mode(0o277))
+      defer: discard umask(previous)
+      withTempRoot(root):
+        check modeOf(createPrivateRunQuotaEndpoint("caller-").parentDir) == 0o700
+
+    test "a temp root too long for a socket moves the directory under /tmp":
+      withTempRoot("/tmp/" & repeat('x', 180)):
+        let endpoint = createPrivateRunQuotaEndpoint("caller-")
+        defer: removeDir(endpoint.parentDir)
+        checkpoint(endpoint)
+        check endpoint.len <= PathLimit
+        check endpoint.parentDir.parentDir == "/tmp"
+        check endpoint.parentDir.extractFilename.startsWith(
+          "repro-rq-" & $getuid() & "-")
+        check modeOf(endpoint.parentDir) == 0o700
+
+    test "a missing temp root is an error, not a silent relocation":
+      let root = createTempDir("repro-rq-missing-", "")
+      removeDir(root)
+      withTempRoot(root):
+        expect OSError:
+          discard createPrivateRunQuotaEndpoint("caller-")

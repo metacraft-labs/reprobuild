@@ -1606,11 +1606,7 @@ proc applyWindowsScheduledTask*(op: PrivilegedOperation):
     # System.Xml.XmlDocument ... to CimInstance[]``).
     let triggerExpr =
       renderScheduledTaskTriggerCmdletExpr(op.wstSchedule)
-    var argList = ""
-    for i, a in op.wstArguments:
-      if i > 0:
-        argList.add(' ')
-      argList.add(a)
+    let argList = scheduledTaskArgumentLine(op.wstArguments)
     var actionExpr = "New-ScheduledTaskAction -Execute " &
       psQuote(op.wstExecutable)
     if op.wstArguments.len > 0:

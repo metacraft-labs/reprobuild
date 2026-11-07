@@ -15,6 +15,36 @@ covers the behavior you touched.
 - `just test` runs the local Nim test suite.
 - `just lint` runs repository requirement and Nim source checks.
 
+## Windows OpenSSL Download Checks
+
+Run `windows/tests/test-openssl-mirrors.ps1` with PowerShell to exercise
+HTTP failures, corrupt and truncated responses, timeout cleanup, and the real
+OpenSSL provisioning path against a local HTTP fixture. It also checks reuse
+of verified downloads. Run `windows/tests/test-openssl-mirrors-live.ps1`
+separately to fetch the pinned archive from the official HTTPS mirrors and
+verify checksum rejection. The live check requires network access and fails
+when no mirror can supply the pinned bytes.
+
+`windows/tests/test-openssl-redirects.ps1` uses an owned local HTTPS server
+with an ephemeral certificate. A scoped handler-construction override trusts
+only that exact certificate while retaining hostname, validity and chain-error
+checks; production uses default system trust, which the test verifies before
+and after the override. The fixture requires the built-in CertificateRequest
+APIs (.NET Framework 4.7.2+ or current .NET), creates no certificate-store entries,
+and installs no packages.
+
+The deadline oracle requires TLS authentication, the exact request, response
+headers and body progress from the actual timed transaction. Same-URI controls
+that stall before TLS or after headers must fail that oracle even after a prior
+successful request. These local controls need no public test service. The live
+archive script separately verifies the official ACC HTTPS redirect and pin.
+
+All three checks run in the Windows CI boundary job. Its
+`scripts/check_windows_bootstrap_syntax.ps1` gate recursively parses bootstrap
+scripts and their tests under Windows PowerShell 5.1. Running the download
+checks under PowerShell 7 on Linux or macOS does not qualify Windows PowerShell
+5.1 parsing, Windows extraction or native DLL loading.
+
 ## Windows HCR Test Environment
 
 Enable the same pinned Python runtime and LLVM compilers used by the Windows
@@ -89,9 +119,21 @@ each built binary's own `--list-json`. That artifact went stale six times, and
 every one of the six was an entry-set change — visible to a source scan, but
 fixable only by a four-hour build, so nothing gated it. Splitting the document
 along that line is what lets the entry set be gated at every push while the
-catalog-derived half stays an output of the job that already builds
-everything. **Do not regenerate the full inventory by hand**; `just test`
-produces it.
+catalog-derived half requires a complete build. `just test` checks the tracked
+snapshot; it does not rewrite it before checking. After an intentional suite
+change, refresh the full snapshot from a completely built tree:
+
+```bash
+python3 scripts/reprobuild_suite_inventory.py
+python3 tests/unit/test_reprobuild_suite_inventory.py
+```
+
+Review the generated diff, especially lost cases and quarantine membership.
+Do not hand-edit catalog counts or regenerate from a partially built tree.
+The snapshot records the catalog's OS and CPU. Its built-tree gates compare
+every source across Linux x86_64 and Darwin arm64 using the exact named
+platform-case ledger, while retaining exact raw comparisons on the recording
+host; a platform-conditioned source is never exempted from comparison.
 
 ## Adding a test file in a new place
 
@@ -136,6 +178,36 @@ is the defect — do not work around it by renaming the file out of the gate's
 view. A test that needs its own `--path` or `-d:` flag carries it in a
 sibling `<test>.nim.cfg`; `TestSpec` has no field for either, and every build
 route honours the `.cfg`.
+
+## Test fixtures: one process per case
+
+The suite runner probes every test binary with `--list-json` and then runs each
+case in a process of its own (`<binary> --run "<suite>::<test>"`). Every one of
+those processes executes the file's module-level code, and none of them sees
+what another one did. So:
+
+- **Acquire a fixture lazily, from inside the case that needs it** — not at
+  module scope, where the `--list-json` probe and every unrelated case pay for
+  it.
+- **Release it in the process that acquired it**, with
+  `repro_test_support/process_fixtures`: `releaseDirAtProcessExit(path)` for a
+  scratch directory (register it before creating the directory),
+  `terminateAtProcessExit(pid)` for a daemon you started. Never in a final
+  "teardown" case: that case runs in one process and releases only what that
+  process acquired, so every other case's fixture is leaked for good.
+- **Do not release through an `addExitProc` closure over module globals.**
+  Under ORC the compiler destroys every heap-backed global (strings, seqs,
+  refs, closures) when the main module's top-level code ends, before any exit
+  hook runs; such a closure reads freed memory, usually works, and sometimes
+  crashes or silently removes nothing. `process_fixtures` keeps its state
+  outside the Nim heap for that reason.
+
+`tests/integration/t_when_each_case_runs_alone_no_fixture_outlives_its_process.nim`
+runs files that once had the teardown-as-a-case shape exactly as the runner
+does and fails when anything they created survives; add a file there when it
+acquires fixtures the gate can attribute (under `$TMPDIR`/`$HOME`, or named
+with the pid). `repro_test_support/per_case_runs` is the runner emulation it
+uses.
 
 ## Why these refreshes are enforced
 

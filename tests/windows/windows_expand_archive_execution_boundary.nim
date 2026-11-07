@@ -37,7 +37,12 @@ when not defined(windows):
 
 import std/[os, osproc, streams, strtabs, strutils, tempfiles, unittest]
 
+from std/sysrand import urandom
+from repro_core/paths import extendedPath
+import repro_test_support/process_fixtures
+
 import repro_dsl_stdlib/packages/expand_archive
+import repro_tool_profiles {.all.}
 
 type
   ProcessResult = object
@@ -220,6 +225,17 @@ proc makeArchive(root, archive: string; files: openArray[(string, string)]) =
     " -Force")
   requireProcessSuccess(compress, "create fixture archive")
 
+proc toolStoreFixtureRoot(): string =
+  # Process-owned cleanup also runs when the test exits via quit or a failed
+  # assertion; discovery and unrelated cases acquire nothing.
+  var nonce: string
+  for value in urandom(8):
+    nonce.add(toHex(value, 2))
+  result = getTempDir() / ("repro-tool-store-deep-" & $getCurrentProcessId() & "-" & nonce)
+  doAssert not dirExists(result) and not fileExists(result) and not symlinkExists(result)
+  releaseDirAtProcessExit(result)
+  createDir(result)
+
 suite "M3f Windows expandArchive runtime boundary":
 
   test "process capture retains delayed stdout and stderr after a short read":
@@ -305,3 +321,140 @@ suite "M3f Windows expandArchive runtime boundary":
     check failed.exitCode != 0
     check failed.scratchPath.len == 0
     check remainingScratchFiles(root) == @[invalidArchive]
+
+  test "tool-store retains encoded names at the original deep staging shape":
+    # Tool-store extraction is exclusive: unlike the DSL cases above it
+    # must not overwrite existing files. The generated archives require no
+    # network or separately provisioned immutable fixture.
+    let root = toolStoreFixtureRoot()
+    let extractor = repro_tool_profiles.resolveZipExtractor()
+    doAssert extractor.kind == "powershell" and extractor.exe.isAbsolute
+    echo "tool-store absolute extractor: ", extractor.exe
+    for utf8 in [false, true]:
+      let label = if utf8: "utf8" else: "cp437"
+      let archive = root / (label & ".archive")
+      let name = "pkg/" & repeat('a', 100) &
+        (if utf8: "/雪.nim" else: "/åäö.nim")
+      let encoding = if utf8: "[System.Text.Encoding]::UTF8"
+                     else: "[System.Text.Encoding]::GetEncoding(437)"
+      let fixture = runProcess(extractor.exe,
+        @["-NoProfile", "-NonInteractive", "-Command",
+        "$ErrorActionPreference = 'Stop'; " &
+        "Add-Type -AssemblyName System.IO.Compression, System.IO.Compression.FileSystem; " &
+        "$fs = [System.IO.File]::Open(" & powershellSingleQuotedLiteral(archive) & ", 'CreateNew'); " &
+        "try { $zip = New-Object System.IO.Compression.ZipArchive($fs, 'Create', $false, " & encoding & "); " &
+        "try { $entry = $zip.CreateEntry(" & powershellSingleQuotedLiteral(name) & "); " &
+        "$stream = $entry.Open(); try { $bytes = [System.Text.Encoding]::ASCII.GetBytes('encoded-body'); " &
+        "$stream.Write($bytes, 0, $bytes.Length) } finally { $stream.Dispose() } " &
+        "} finally { $zip.Dispose() } } finally { $fs.Dispose() }"])
+      requireProcessSuccess(fixture, "create genuine encoded ZIP fixture")
+      let raw = readFile(archive)
+      doAssert raw.len >= 30 and raw[0 .. 3] == "PK\x03\x04"
+      let flags = ord(raw[6]) or (ord(raw[7]) shl 8)
+      let nameLength = ord(raw[26]) or (ord(raw[27]) shl 8)
+      doAssert nameLength > 0 and nameLength <= raw.len - 30
+      check ((flags and 0x800) != 0) == utf8
+      check raw[30 ..< 30 + nameLength] ==
+        (if utf8: name else: "pkg/" & repeat('a', 100) & "/\x86\x84\x94.nim")
+      let destination = root / "codetracer-ton-recorder" / "codetracer-ton-recorder" /
+        ".repro" / "build" / "repro" / "tool-store" / "tmp" /
+        ("extract.1234567890.1234567890.fe0686a9b298e5b1-" & label)
+      # Measure .NET UTF-16 units, not UTF-8 byte length. The real path must
+      # reach the original >=282-unit boundary; shortening is not acceptance.
+      let depth = runProcess(extractor.exe,
+        @["-NoProfile", "-NonInteractive", "-Command",
+        "$d = " & powershellSingleQuotedLiteral(destination) & "; " &
+        "$p = [System.IO.Path]::Combine($d, " & powershellSingleQuotedLiteral(name) & "); " &
+        "[Console]::Out.WriteLine('destination=' + $d.Length + '; member=' + $p.Length); " &
+        "if ($d.Length -lt 154 -or $p.Length -lt 282) { exit 1 }"])
+      echo depth.output
+      requireProcessSuccess(depth, "retain original deep staging length")
+      let extracted = runProcess(extractor.exe,
+        @["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+          "-Command",
+          "$ErrorActionPreference = 'Stop'; " &
+          "$image = [Diagnostics.Process]::GetCurrentProcess().MainModule.FileName; " &
+          "[Console]::Out.WriteLine('ZIP_EXTRACTOR_IMAGE=' + $image); " &
+          "[Console]::Out.WriteLine('ZIP_EXTRACTOR_SHA256=' + (Get-FileHash -LiteralPath $image -Algorithm SHA256).Hash); " &
+          "[Console]::Out.WriteLine('ZIP_RUNTIME=' + $PSVersionTable.PSVersion + '; CLR=' + [Environment]::Version); " &
+          powershellZipExtractScript(archive, destination)])
+      echo extracted.output
+      requireProcessSuccess(extracted, "tool-store deep-path extraction")
+      # The oracle uses the repository's Windows file API spelling. Only
+      # verification gets an extended prefix; production above receives the
+      # original unshortened, unprefixed destination.
+      var names: seq[string]
+      for path in walkDirRec(extendedPath(destination)):
+        names.add(relativePath(path, extendedPath(destination)).replace('\\', '/'))
+      check names == @[name]
+      check readFile(extendedPath(destination / name)) == "encoded-body"
+
+  test "DSL retains CP437 and flagged UTF-8 names without scratch copies":
+    let root = toolStoreFixtureRoot()
+    let extractor = repro_tool_profiles.resolveZipExtractor()
+    doAssert extractor.kind == "powershell" and extractor.exe.isAbsolute
+    for utf8 in [false, true]:
+      let label = if utf8: "utf8" else: "cp437"
+      let archive = root / (label & ".archive")
+      let name = "pkg/" & repeat('a', 100) &
+        (if utf8: "/雪.nim" else: "/åäö.nim")
+      let encoding = if utf8: "[System.Text.Encoding]::UTF8"
+                     else: "[System.Text.Encoding]::GetEncoding(437)"
+      let fixture = runProcess(extractor.exe,
+        @["-NoProfile", "-NonInteractive", "-Command",
+        "$ErrorActionPreference = 'Stop'; " &
+        "Add-Type -AssemblyName System.IO.Compression, System.IO.Compression.FileSystem; " &
+        "$fs = [System.IO.File]::Open(" & powershellSingleQuotedLiteral(archive) & ", 'CreateNew'); " &
+        "try { $zip = New-Object System.IO.Compression.ZipArchive($fs, 'Create', $false, " & encoding & "); " &
+        "try { $entry = $zip.CreateEntry(" & powershellSingleQuotedLiteral(name) & "); " &
+        "$stream = $entry.Open(); try { $bytes = [System.Text.Encoding]::ASCII.GetBytes('encoded-body'); " &
+        "$stream.Write($bytes, 0, $bytes.Length) } finally { $stream.Dispose() } " &
+        "} finally { $zip.Dispose() } } finally { $fs.Dispose() }"])
+      requireProcessSuccess(fixture, "create genuine encoded ZIP fixture")
+      let raw = readFile(archive)
+      doAssert raw.len >= 30 and raw[0 .. 3] == "PK\x03\x04"
+      let flags = ord(raw[6]) or (ord(raw[7]) shl 8)
+      let nameLength = ord(raw[26]) or (ord(raw[27]) shl 8)
+      doAssert nameLength > 0 and nameLength <= raw.len - 30
+      check ((flags and 0x800) != 0) == utf8
+      check raw[30 ..< 30 + nameLength] ==
+        (if utf8: name else: "pkg/" & repeat('a', 100) & "/\x86\x84\x94.nim")
+      let destination = root / (label & "-dsl")
+      createDir(destination)
+      writeFile(destination / "keep.txt", "unrelated-body")
+      for pass in 0 .. 1:
+        let extracted = runObserved(buildZipArgvWindows(archive, destination), root)
+        check extracted.exitCode == 0
+        check extracted.scratchPath.len == 0
+        if extracted.exitCode != 0: echo extracted.output
+        check readFile(extendedPath(destination / name)) == "encoded-body"
+        check readFile(extendedPath(destination / "keep.txt")) == "unrelated-body"
+        var names: seq[string]
+        for path in walkDirRec(extendedPath(destination)):
+          names.add(relativePath(path, extendedPath(destination)).replace('\\', '/'))
+        check names.len == 2
+        check name in names and "keep.txt" in names
+        check remainingScratchFiles(root).len == 0
+
+      # The bootstrap helper is a third owning producer entry point. Invoke
+      # its actual file in the same absolute OS PowerShell, without switching
+      # runtime or weakening its exclusive destination contract.
+      let helper = currentSourcePath().parentDir.parentDir.parentDir /
+        "windows" / "toolchain-utils.ps1"
+      doAssert fileExists(helper), "canonical SDK helper is required"
+      let bootstrapDestination = root / (label & "-bootstrap")
+      let bootstrapScript = ". " & powershellSingleQuotedLiteral(helper) &
+        "; Expand-ZipArchive -ArchivePath " & powershellSingleQuotedLiteral(archive) &
+        " -Destination " & powershellSingleQuotedLiteral(bootstrapDestination)
+      let bootstrapped = runProcess(extractor.exe,
+        @["-NoProfile", "-NonInteractive", "-Command", bootstrapScript])
+      requireProcessSuccess(bootstrapped, "canonical SDK encoded-name extraction")
+      var bootstrapNames: seq[string]
+      for path in walkDirRec(extendedPath(bootstrapDestination)):
+        bootstrapNames.add(relativePath(path, extendedPath(bootstrapDestination)).replace('\\', '/'))
+      check bootstrapNames == @[name]
+      check readFile(extendedPath(bootstrapDestination / name)) == "encoded-body"
+      let repeated = runProcess(extractor.exe,
+        @["-NoProfile", "-NonInteractive", "-Command", bootstrapScript])
+      check repeated.exitCode != 0
+      check readFile(extendedPath(bootstrapDestination / name)) == "encoded-body"

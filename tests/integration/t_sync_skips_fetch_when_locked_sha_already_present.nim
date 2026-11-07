@@ -128,8 +128,7 @@ proc projectTomlWithRepos(remotes: seq[(string, string)]): string =
     "schema = \"reprobuild.workspace.project.v1\"\n\n" &
     "[project]\n" &
     "name = \"myproject\"\n" &
-    "default_revision = \"main\"\n" &
-    "trunk = \"main\"\n\n"
+    "\n"
   for (name, url) in remotes:
     result.add("[[remote]]\nname = \"" & name & "\"\nfetch = \"" & url & "\"\n\n")
   result.add("includes = [\n")
@@ -138,19 +137,19 @@ proc projectTomlWithRepos(remotes: seq[(string, string)]): string =
   result.add("]\n")
 
 proc repoFragmentToml(name, remoteName: string): string =
-  "schema = \"reprobuild.workspace.repo.v1\"\n\n" &
+  "schema = \"reprobuild.workspace.repo.v2\"\n\n" &
   "[repo]\n" &
   "name = \"" & name & "\"\n" &
   "path = \"" & name & "\"\n" &
   "remote = \"" & remoteName & "\"\n" &
-  "revision = \"main\"\n"
+  "mainline = \"main\"\n"
 
 proc repoFragmentTomlPinned(name, remoteName, sha: string): string =
   ## Fragment pinned to a concrete COMMIT rather than a branch name --
   ## the shape every vendored reference tree in a real workspace uses,
   ## and the only shape for which skipping the network fetch is sound.
-  "schema = \"reprobuild.workspace.repo.v1\"\n\n" &
-  "[repo]\n" &
+  "schema = \"reprobuild.workspace.repo.v2\"\n\n" &
+  "[repo]\nmainline = \"main\"\n" &
   "name = \"" & name & "\"\n" &
   "path = \"" & name & "\"\n" &
   "remote = \"" & remoteName & "\"\n" &

@@ -26,7 +26,11 @@
 ## hidden the cause: that 82 MB is the symptom that made 19 session records
 ## stuck in `state=running` -- every one with a dead writer pid, permanently
 ## deferring the dev self-restart -- findable at all. The fix must shrink the
-## log by saying less, not by discarding what it said.
+## log by saying less, not by discarding what it said. The log IS now bounded
+## by rotation as well (`appendUserDaemonLogLine`, pinned by
+## `t_daemon_log_is_bounded_by_rotation.nim`), but that bounds the file, not
+## the flood: a flood would now fill the retained generations and push out
+## everything else, so it is no substitute for this window.
 ##
 ## MOCK POLICY: no mocks, and none needed. `deferralLogDue` takes the clock
 ## as an argument, so the cases drive it with synthetic millisecond values.

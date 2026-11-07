@@ -1,0 +1,1 @@
+{ "description": "host is a string; it must be compared.", "error": ["row 1", "`when`", "not a valid predicate"] }

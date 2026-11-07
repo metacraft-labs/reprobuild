@@ -25,6 +25,7 @@
 
 import std/[os, strutils, times]
 
+import repro_core/host_apply_lock
 import repro_elevation
 import repro_profile
 
@@ -36,6 +37,8 @@ import ./plan_envelope
 import ./planner
 import ./profile
 import ./state_dir
+when defined(posix):
+  import ./carried_state
 
 export apply_lock
 
@@ -143,6 +146,38 @@ type
     ## explicitly forbids (see ``Windows-System-Resources.md`` § "What
     ## NOT to do — silent fallbacks").
 
+  ApplyPhaseHooks* = object
+    ## Hooks a layered apply attaches around the privileged set. The
+    ## ReproOS add-on switch (ReproOS-Add-On-Mode §7.2) uses them: its
+    ## steps 1-3 (realise, pre-stop, flip) run after the plan is resolved
+    ## and before the first write, its steps 6-8 (fragment tools, start,
+    ## confirm) and its ledger run after the last write and before the
+    ## generation is committed. Every field is optional.
+    beforePrivilegedSet*: proc(planId: string) {.gcsafe.}
+      ## Called once the plan is resolved and persisted, before any
+      ## privileged operation is dispatched. A raise aborts the apply
+      ## with nothing written by it.
+    afterPrivilegedSet*: proc(generationId: string; clean: bool):
+      seq[string] {.gcsafe.}
+      ## Called after the privileged set with the generation id the
+      ## commit would use (its directory and audit log exist by then) and
+      ## whether the set ran without an error or drift finding. Returns
+      ## diagnostics: a non-empty result is an error, counted and
+      ## withholding the commit under `commitOnlyWhenClean`.
+    commitPoint*: proc(point: string) {.gcsafe.}
+      ## Told at the commit's crash-relevant points (``commit-envelope``:
+      ## the envelope is durable, `current` not moved yet; and inside the
+      ## move). A test seam for the add-on's crash gate; nil otherwise.
+    commitOnlyWhenClean*: bool
+      ## Move `current` and write the generation envelope only when the
+      ## privileged set and the after-hook reported no error and no
+      ## drift. Otherwise the attempt's audit log stays under the
+      ## generation's directory (no envelope, so `history` and `rollback`
+      ## never see it as a state the host reached) and `current` keeps
+      ## naming the previous generation: a failed switch is not a
+      ## generation (spec §7.2 step 9, §7.5; reprobuild-pm issue
+      ## 2026-10-30-infra-apply-commits-a-generation-whose-privileged-set-failed).
+
   ApplyOptions* = object
     stateDir*: string
     hostIdentity*: string
@@ -157,6 +192,12 @@ type
       ## user account; the apply fails closed with `EPasswdDestroy`
       ## BEFORE any mutation unless this flag is set. The symmetric
       ## counterpart of the `--accept-feature-destroy` rollback gate.
+    destroysFirst*: bool
+      ## Dispatch the `extraDestroyResources` before the profile's own
+      ## operations instead of after them. The add-on switch needs it: its
+      ## flip leaves the link of a removed drop-in dangling, and systemd
+      ## refuses to load (or `enable`) a unit with a dangling drop-in, so
+      ## the removal must happen before the unit it modifies is written.
     extraDestroyResources*: seq[SystemResource]
       ## `repro system rollback` seam: resources the rollback must
       ## actively REVERT (a feature disable / capability uninstall /
@@ -165,6 +206,12 @@ type
       ## declares them. They are folded into the SAME apply as the
       ## target-profile convergence, so a rollback still raises at
       ## most one elevation prompt.
+    preWriteGuard*: PreWriteGuard
+      ## Consulted before every privileged operation on the in-process
+      ## (already-elevated) path; see `repro_elevation.PreWriteGuard`. The
+      ## ReproOS add-on re-runs its collision observer here. `nil` (the
+      ## default) checks nothing extra. The broker path does not carry
+      ## it: the add-on applies as root, in process.
     buildActions*: seq[ProfileBuildAction]
       ## Windows-System-Resources Phase G: the action-edge intent
       ## items the profile macro emitted from inside the
@@ -186,10 +233,31 @@ type
     buildActionDispatcher*: BuildActionDispatcher
       ## See ``BuildActionDispatcher``. ``nil`` is the default;
       ## non-nil enables the action-edge half of the apply.
+    phases*: ApplyPhaseHooks
+      ## See ``ApplyPhaseHooks``; all-nil (the default) applies as before.
+    carriedStateDir*: string
+      ## Where a conversion left carried state (ReproOS Add-On Mode
+      ## §11.1); "" is ``carried_state.CarriedStateDir``. A test seam,
+      ## like ``carriedStateRoot`` (the root the carried directories are
+      ## looked for under; "" is ``/``).
+    carriedStateRoot*: string
+    carriedStateChecked*: bool
+      ## The caller (the add-on's ``runAddonApply``) already refused this
+      ## apply's profile against carried state and holds, before its own
+      ## first write; the composed profile it hands over carries the
+      ## add-on's own objects as well, which are not the operator's.
+    addOnDispatch*: AddOnDispatchPolicy
+      ## The add-on switch's per-operation materialisation policy
+      ## (`repro_elevation.AddOnDispatchPolicy`), carried to the drivers
+      ## through the in-process dispatch context. `nil` outside add-on
+      ## mode.
 
   ApplyResult* = object
     generationId*: string
     planId*: string
+    committed*: bool
+      ## `current` names `generationId` now. False only under
+      ## `ApplyPhaseHooks.commitOnlyWhenClean` for an apply that failed.
     appliedCount*: int
     noOpCount*: int
     skippedCount*: int
@@ -202,7 +270,8 @@ type
       ## Windows-Runner-Binary-Cache-Deploy M4: how many build-action
       ## edges had their outputs SERVED FROM THE BINARY CACHE this
       ## apply (``BuildActionApplyOutcome.substitutedFromCache``). Zero
-      ## when no cache is configured (``REPRO_BINARY_CACHE_URL`` unset)
+      ## when no cache is configured (no ``caches.conf`` entry and no
+      ## ``REPRO_BINARY_CACHE_URL``)
       ## or every edge missed the cache and built locally. The apply
       ## summary reports "N substituted from cache, M built locally"
       ## where N == this count and M == the number of applied edges
@@ -224,32 +293,113 @@ type
 
 # ---------------------------------------------------------------------------
 # Generation-id derivation. A 32-hex-char id over the profile digest +
-# host + commit timestamp — the same shape as the home generation id.
+# host + commit timestamp + the generation that was current at commit.
 # ---------------------------------------------------------------------------
 
-proc deriveGenerationId(profileDigestHex, hostIdentity: string;
-                        ts: int64): string =
-  computePlanId(profileDigestHex & ".generation", hostIdentity, ts)
+proc deriveGenerationId*(profileDigestHex, hostIdentity: string;
+                         ts: int64; previousGenerationId: string): string =
+  ## A system generation is history, not a disposable proposal: every
+  ## commit must name a distinct generation. The timestamp has whole-second
+  ## resolution and the digest is of the RENDERED profile (the empty text
+  ## for every action-edge-only profile), so digest + host + second alone
+  ## collide for two commits within one second, and the second overwrote
+  ## the first (reprobuild-pm issue
+  ## 2026-10-18-system-generation-ids-collide-within-one-second). Chaining
+  ## the previously current generation makes consecutive commits distinct:
+  ## each commit moves `current` to its own id, so the next commit's input
+  ## differs. Every input is recorded in the generation's envelope
+  ## (`profileDigestHex`, `hostIdentity`, `activationTimestamp`,
+  ## `previousGenerationId`), so the id is recomputable from it. The digest
+  ## is fixed-width hex, so joining it with the predecessor is unambiguous.
+  computePlanId(profileDigestHex & ".generation:" & previousGenerationId,
+    hostIdentity, ts)
+
+proc allocateGenerationId(stateDir, profileDigestHex, hostIdentity: string;
+                          previousGenerationId: string;
+                          ts: var int64): string =
+  ## The id the commit will use, never one whose directory already exists.
+  ## The chain above already separates every completed commit; what is
+  ## left is a directory left behind by an apply that died between
+  ## creating it and moving `current` (the apply lock serializes live
+  ## applies). Rather than overwrite that directory, the commit takes the
+  ## next second: `ts` is advanced and is what the envelope records as the
+  ## activation time, so the id stays recomputable from the envelope.
+  result = deriveGenerationId(profileDigestHex, hostIdentity, ts,
+    previousGenerationId)
+  while dirExists(generationDir(stateDir, result)):
+    inc ts
+    result = deriveGenerationId(profileDigestHex, hostIdentity, ts,
+      previousGenerationId)
 
 # ---------------------------------------------------------------------------
 # Convert plan operation records into the broker's PlannedOperation
 # (typed op + plan baseline digest).
 # ---------------------------------------------------------------------------
 
-proc plannedOperationsFor(profileText: string;
-                          env: PlanEnvelope): seq[PlannedOperation] =
+const ApplyMutation {.strdefine: "reproAddonMutation".} = ""
+  ## ``plan-ignores-profile-digest``, ``full-apply-keeps-undeclared-dropins``
+  ## (falsifying builds, ``repro_addon/mutations``).
+
+proc undeclaredDropIns*(stateDir, profileText: string): seq[SystemResource] =
+  ## The ``systemd.systemDropIn`` resources the active generation declares
+  ## and ``profileText`` does not: a host realised in full removes them
+  ## (A13 review round 5, finding 3), as the add-on's switch removes what
+  ## its ledger no longer owns. Otherwise a drop-in written by an earlier
+  ## generation -- the carried-state requirement among them -- would stay
+  ## loaded by systemd though no profile declares it. Empty when there is
+  ## no active generation.
+  when ApplyMutation == "full-apply-keeps-undeclared-dropins":
+    return
+  if stateDir.len == 0: return
+  let activeId = readCurrentGenerationId(stateDir)
+  if activeId.len == 0: return
+  let active = readGenerationEnvelope(pointerPath(stateDir, activeId))
+  var wanted: seq[string]
+  for r in parseSystemProfile(profileText).resources: wanted.add(r.address)
+  var old: SystemProfile
+  try:
+    old = parseSystemProfile(active.profileText)
+  except CatchableError:
+    # A generation this build cannot read: nothing is removed for it. The
+    # carried-state reach analysis still reads every such file on the host
+    # (``carried_state.unitTexts``), so a stale drop-in is judged, not
+    # trusted.
+    return
+  for r in old.resources:
+    if r.kind == srkSystemdSystemDropIn and r.address notin wanted:
+      # The carried-state requirement goes only with its unit: a host
+      # realised in full keeps a unit file the profile no longer declares,
+      # and that unit must still not start at a boot whose restore failed.
+      when defined(posix):
+        if r.diName == RequirementDropInName and
+            fileExists("/etc/systemd/system" / r.diUnit):
+          continue
+      result.add(r)
+
+proc plannedOperationsFor*(profileText: string;
+                           env: PlanEnvelope): seq[PlannedOperation] =
   ## Build the typed `PlannedOperation` list for the EFFECTIVE
   ## (non-no-op) operations of a plan. Each carries the plan's
   ## recorded baseline digest so the broker's drift gate can tell a
   ## safe update from a mid-flight drift.
+  ##
+  ## A record the planner marked `DependencyRestartAction` (a unit whose
+  ## own bytes are unchanged but whose `depends_on` resource changes in
+  ## this plan, Add-On spec §7.3) is dispatched with `suRestartRequested`,
+  ## which makes the dispatch loop skip its no-op short-circuit and the
+  ## driver restart the running instance.
   let profile = parseSystemProfile(profileText)
   for rec in env.operations:
     if rec.action == "no-op":
       continue
     for r in profile.resources:
       if r.address == rec.address:
+        var op = toPrivilegedOperation(r)
+        if rec.action == DependencyRestartAction and
+            op.kind == pokSystemdSystemUnit:
+          op.suRestartRequested = true
         result.add(PlannedOperation(
-          operation: toPrivilegedOperation(r),
+          operation: op,
           baselineDigestHex: rec.baselineDigestHex))
         break
 
@@ -428,6 +578,17 @@ proc dispatchBuildActions(opts: ApplyOptions; result: var ApplyResult) =
       # M4: a non-cache-hit edge ran a local process this apply.
       inc result.locallyBuiltActionCount
 
+type
+  PendingSwitchGuard* = proc (applyStateDir: string):
+    tuple[ok: bool; why: string] {.closure, gcsafe.}
+
+var pendingSwitchGuard*: PendingSwitchGuard = nil
+  ## Installed by the add-on layer (`repro_addon/reassert`), which owns the
+  ## switch and its pending marker; nil where that layer is not linked.
+  ## `runInfraApply` calls it with the host apply lock held: ok when no
+  ## interrupted switch is pending (or it was just recovered), otherwise
+  ## why not.
+
 proc runInfraApply*(profileText: string; opts: ApplyOptions): ApplyResult =
   ## Drive a full `repro infra apply`. The caller has already loaded
   ## the `system.nim` text and resolved `opts`.
@@ -456,6 +617,50 @@ proc runInfraApply*(profileText: string; opts: ApplyOptions): ApplyResult =
   ## `refreshApplyLock` is a no-op when this process does not hold the
   ## lock (library tests, in-process drivers), so every beat is safe to
   ## issue unconditionally.
+  ##
+  ## The whole apply holds the host-wide apply lock
+  ## (``repro_core/host_apply_lock``): the per-state-directory lock above
+  ## does not stop a second apply that uses another state directory, and
+  ## the deploy agent's tick reaches this proc without taking it at all.
+  var hostLock = acquireHostApplyLock("repro infra apply (state " &
+    opts.stateDir & ")", privileged = isProcessElevated())
+  defer: hostLock.release()
+  # Before any mutation: an add-on switch interrupted on this host (its
+  # pending marker present, its owner gone) is recovered first, under the
+  # lock this apply already holds, and the apply refuses if it cannot be.
+  # Applying on top of a half switch would bury it; the deploy agent would
+  # otherwise keep doing exactly that until the next boot.
+  if pendingSwitchGuard != nil:
+    let g = pendingSwitchGuard(opts.stateDir)
+    if not g.ok:
+      raise newException(EPendingSwitch, "an interrupted add-on switch " &
+        "is pending on this host and recovery did not resolve it; " &
+        "refusing to apply on top of it: " & g.why)
+  # Before any mutation: carried state a conversion brought must be
+  # restored before anything that can reach it is applied, nothing is
+  # applied while a state backup holds the host, and carried owners must
+  # keep their ids (ReproOS Add-On Mode §11.1). Here, in the library every
+  # apply path reaches (`repro infra apply`, `repro system sync`, `repro
+  # system rollback`, the engine's deploy agent), so no entry point skips
+  # it.
+  when defined(posix):
+    if not opts.carriedStateChecked:
+      requireCarriedStateReady(parseSystemProfile(profileText),
+        (if opts.carriedStateDir.len > 0: opts.carriedStateDir
+         else: CarriedStateDir),
+        (if opts.carriedStateRoot.len > 0: opts.carriedStateRoot else: "/"))
+  # While carried state is installed, every unit that reaches it requires
+  # the first-boot restore through a drop-in this generation writes
+  # (spec §11.1; A13 review round 4, finding 4). An add-on apply has added
+  # them to its own profile already (``carriedStateChecked``).
+  let profileText =
+    when defined(posix):
+      if opts.carriedStateChecked: profileText
+      else: withCarriedRequirements(profileText,
+        (if opts.carriedStateDir.len > 0: opts.carriedStateDir
+         else: CarriedStateDir),
+        (if opts.carriedStateRoot.len > 0: opts.carriedStateRoot else: "/"))
+    else: profileText
   resetBrokerLaunchCount()
   refreshApplyLock(opts.stateDir)
 
@@ -468,10 +673,33 @@ proc runInfraApply*(profileText: string; opts: ApplyOptions): ApplyResult =
   dispatchBuildActions(opts, result)
   refreshApplyLock(opts.stateDir)
 
+  # Drop-ins an earlier generation declared and this profile does not: the
+  # apply removes them (planned as destroys, dispatched below).
+  # An add-on apply (``carriedStateChecked``) removes what its ledger no
+  # longer owns in its own switch, so it is not asked here.
+  let undeclared = if opts.carriedStateChecked: newSeq[SystemResource]()
+                   else: undeclaredDropIns(opts.stateDir, profileText)
   # --- 1. Resolve the plan. ---
   var env: PlanEnvelope
   if opts.planId.len > 0:
     env = readPlanFile(planPath(opts.stateDir, opts.planId))
+    # The plan is one host's: its id and the generation this apply commits
+    # derive from the host identity, so applying another host's plan -- or
+    # one recorded under the pre-unification identity rule -- would commit a
+    # generation whose plan names a different host. Refused before anything
+    # is touched; a fresh plan is cheap.
+    if env.hostIdentity != opts.hostIdentity:
+      raisePlanHostMismatch(opts.planId, env.hostIdentity, opts.hostIdentity)
+    # The plan must be of the very text this apply runs: the carried-state
+    # requirements are added at apply time (``withCarriedRequirements``),
+    # so a host whose reach changed since the plan -- install-unit, a host
+    # drop-in -- applies a different text, which a stored plan would
+    # silently not write (A13 review round 5, finding 4).
+    when ApplyMutation != "plan-ignores-profile-digest":
+      if env.profileDigestHex != digestProfileText(profileText):
+        raisePlanProfileChanged(opts.planId, "the profile text this apply " &
+          "runs (with the carried-state requirements this host needs now) " &
+          "is not the text the plan was made from")
     # Stale-detection: the live world must still be consistent with
     # the plan's recorded observations.
     let stale = detectStaleResources(env.operations, profileText)
@@ -485,12 +713,19 @@ proc runInfraApply*(profileText: string; opts: ApplyOptions): ApplyResult =
     # is the integrity check.
     let fresh = producePlan(profileText, opts.hostIdentity,
       opts = PlannerOptions(stateDir: opts.stateDir,
+                            destroyResources: undeclared,
                             acceptDrift: false))
     env = fresh.envelope
     # Persist the fresh plan so the apply is auditable by id.
     writePlanFile(planPath(opts.stateDir, env.planId), env)
   result.planId = env.planId
   refreshApplyLock(opts.stateDir)
+  # A layered apply's work between the plan and the first write (the
+  # add-on switch's realise, pre-stop and flip steps). A raise here leaves
+  # the plan on disk and nothing else touched.
+  if opts.phases.beforePrivilegedSet != nil:
+    opts.phases.beforePrivilegedSet(env.planId)
+    refreshApplyLock(opts.stateDir)
 
   # --- 2. Partition the effective operations. ---
   var planned = plannedOperationsFor(profileText, env)
@@ -517,11 +752,19 @@ proc runInfraApply*(profileText: string; opts: ApplyOptions): ApplyResult =
   # digest is the resource's live observed state, so the broker's
   # drift gate treats it uniformly. An already-reverted resource
   # (observe says absent) is dispatched as a destroy no-op.
-  for r in opts.extraDestroyResources:
+  var destroys: seq[PlannedOperation]
+  var destroyed: seq[string]
+  for r in opts.extraDestroyResources & undeclared:
+    if r.address in destroyed: continue
+    destroyed.add(r.address)
     let obs = observeResource(r)
-    planned.add(PlannedOperation(
+    destroys.add(PlannedOperation(
       operation: toPrivilegedOperation(r, destroy = true),
       baselineDigestHex: obs.observedDigestHex))
+  if opts.destroysFirst:
+    planned = destroys & planned
+  else:
+    planned.add(destroys)
 
   let partition = partitionApply(
     block:
@@ -553,7 +796,8 @@ proc runInfraApply*(profileText: string; opts: ApplyOptions): ApplyResult =
       # Already-elevated fast path: run the privileged set in-process,
       # no broker, no prompt.
       outcome = applyPrivilegedSetInProcess(
-        FixtureContext(), planned, onProgress = beat)
+        FixtureContext(addOn: opts.addOnDispatch), planned, onProgress = beat,
+        preWriteGuard = opts.preWriteGuard)
       result.usedBroker = false
     else:
       # Launch EXACTLY ONE broker. A declined prompt is equivalent to
@@ -589,10 +833,16 @@ proc runInfraApply*(profileText: string; opts: ApplyOptions): ApplyResult =
     if rec.restartNeeded:
       result.restartNeeded = true
 
+  for d in outcome.results:
+    if d.driftDetected or (not d.ok and "requires elevation" notin
+        d.diagnostic):
+      result.diagnostics.add(d.operationAddress & ": " & d.diagnostic)
+
   # --- 4. Commit the generation + write the audit log. ---
-  let commitTs = getTime().toUnix()
-  let generationId = deriveGenerationId(
-    env.profileDigestHex, opts.hostIdentity, commitTs)
+  var commitTs = getTime().toUnix()
+  let previousGenerationId = readCurrentGenerationId(opts.stateDir)
+  let generationId = allocateGenerationId(opts.stateDir,
+    env.profileDigestHex, opts.hostIdentity, previousGenerationId, commitTs)
   result.generationId = generationId
   let genDir = generationDir(opts.stateDir, generationId)
   createDir(genDir)
@@ -603,6 +853,27 @@ proc runInfraApply*(profileText: string; opts: ApplyOptions): ApplyResult =
   writeAuditRecords(logPath, outcome.applyLog, noOps,
     result.buildActionResults)
   result.auditLogPath = logPath
+  # A layered apply's work between the last write and the commit (the
+  # add-on switch's fragment tools, service starts, confirmation and
+  # ledger). Its diagnostics are errors of this apply.
+  var clean = result.errorCount == 0 and result.driftCount == 0
+  if opts.phases.afterPrivilegedSet != nil:
+    let problems = opts.phases.afterPrivilegedSet(generationId, clean)
+    for p in problems:
+      inc result.errorCount
+      result.diagnostics.add(p)
+    clean = clean and problems.len == 0
+    refreshApplyLock(opts.stateDir)
+  if opts.phases.commitOnlyWhenClean and not clean:
+    # The attempt is on disk for audit (its log, under its id) but it is
+    # not a generation: no envelope, and `current` stays where it was.
+    result.committed = false
+    result.diagnostics.add("generation " & generationId & " was NOT " &
+      "committed: the apply did not complete cleanly, so `current` still " &
+      "names " & (if previousGenerationId.len > 0: previousGenerationId
+                  else: "no generation"))
+    refreshApplyLock(opts.stateDir)
+    return
   # Write the per-generation RBSG envelope. It embeds the applied
   # `system.nim` text so `repro system history` can enumerate this
   # generation and `repro system rollback` can re-apply a prior
@@ -618,12 +889,15 @@ proc runInfraApply*(profileText: string; opts: ApplyOptions): ApplyResult =
       profileDigestHex: env.profileDigestHex,
       profileText: profileText,
       appliedCount: result.appliedCount,
-      noOpCount: result.noOpCount))
+      noOpCount: result.noOpCount,
+      previousGenerationId: previousGenerationId))
   # The generation pointer / `current` marker is updated by the
   # NON-elevated parent (this proc), never the broker.
-  writeCurrentGenerationId(opts.stateDir, generationId)
-  refreshApplyLock(opts.stateDir)
-  for d in outcome.results:
-    if d.driftDetected or (not d.ok and "requires elevation" notin
-        d.diagnostic):
-      result.diagnostics.add(d.operationAddress & ": " & d.diagnostic)
+  if opts.phases.commitPoint != nil:
+    opts.phases.commitPoint("commit-envelope")
+  writeCurrentGenerationId(opts.stateDir, generationId,
+    onPoint = (if opts.phases.commitPoint != nil:
+                 proc(p: string) = opts.phases.commitPoint(p)
+               else: nil))
+  result.committed = true
+  discard refreshApplyLock(opts.stateDir)

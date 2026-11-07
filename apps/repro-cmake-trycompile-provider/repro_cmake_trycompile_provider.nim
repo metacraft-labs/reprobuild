@@ -60,6 +60,7 @@ proc registerAction(action: TryCompileActionDef;
     deps = action.deps,
     inputs = action.inputs,
     outputs = action.outputs,
+    optionalOutputs = action.optionalOutputs,
     pool = action.pool,
     poolUnits = action.poolUnits,
     depfile = action.depfile,

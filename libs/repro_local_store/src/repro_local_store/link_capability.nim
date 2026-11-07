@@ -380,6 +380,15 @@ when defined(windows):
                 message: what & " failed with Windows error " & $code)
 
 when defined(posix):
+  const FreshFileCreateMode = Mode(0o666)
+    ## The mode a new regular file is requested with before the umask
+    ## applies. It mirrors ``fopen(path, "w")``, which is what Nim's
+    ## ``open(fmWrite)`` — and so the copy arm (``streamCopyFile``) —
+    ## calls, and which creates with ``0666 & ~umask`` (POSIX ``fopen``,
+    ## https://pubs.opengroup.org/onlinepubs/9799919799/functions/fopen.html).
+    ## ``attemptReflink`` gives its clone this mode so that a reflinked
+    ## output and a copied one are indistinguishable by mode.
+
   proc classifyPosixError(code: int; what: string): LinkAttempt =
     let outcome =
       if code == EXDEV: loCrossDevice
@@ -493,6 +502,19 @@ proc attemptReflink*(src, dst: string): LinkAttempt =
   ##
   ## Any partially created ``dst`` is removed before returning a failure,
   ## so a failed attempt leaves no debris for the caller to clean up.
+  ##
+  ## **Mode contract.** On POSIX the clone carries the mode of a FRESHLY
+  ## CREATED file (``FreshFileCreateMode`` masked by the process umask),
+  ## never the source's. That is what the copy arm produces, and the spec
+  ## requires that correctness not depend on which mechanism was used
+  ## (§"Hardlink, Reflink, and Copy Policy"). It matters because a CAS
+  ## blob may be read-only: on APFS ``clonefile(2)`` copies the source's
+  ## permission bits onto the clone, so without the reset below a
+  ## read-only blob materialized by reflink became a read-only build
+  ## output that the step producing it could not rewrite — while the very
+  ## same materialization by copy was writable. On Windows there are no
+  ## POSIX mode bits; the destination is created fresh and carries none
+  ## of the source's attributes.
   reflinkAttemptsIssued.atomicInc()
   when defined(windows):
     let srcW = newWideCString(extendedPath(src))
@@ -562,8 +584,11 @@ proc attemptReflink*(src, dst: string): LinkAttempt =
     let srcFd = posix.open(cstring(src), O_RDONLY)
     if srcFd < 0:
       return classifyPosixError(int(errno), "open(source)")
+    # Created with ``FreshFileCreateMode`` so the umask shapes the clone
+    # exactly as it shapes a copy (see the mode contract above). FICLONE
+    # shares extents only; it does not touch the destination's mode.
     let dstFd = posix.open(cstring(dst), O_WRONLY or O_CREAT or O_TRUNC,
-                           Mode(0o644))
+                           FreshFileCreateMode)
     if dstFd < 0:
       let code = int(errno)
       discard posix.close(srcFd)
@@ -577,8 +602,40 @@ proc attemptReflink*(src, dst: string): LinkAttempt =
       return classifyPosixError(code, "ioctl(FICLONE)")
     LinkAttempt(outcome: loOk)
   elif defined(macosx):
+    # ``clonefile(2)`` copies the source's mode onto the clone, which
+    # breaks the mode contract above, so the mode is reset afterwards to
+    # that of a fresh file. The fresh-file mode depends on the umask, and
+    # the umask can only be READ by setting it (``umask(0)`` then
+    # restoring), which races every other thread creating files in this
+    # multithreaded process. Instead it is measured: create ``dst`` the
+    # way the copy arm would, ``fstat`` it, and remove it again so
+    # ``clonefile`` — which refuses an existing destination — can take
+    # the name. ``O_EXCL`` keeps the probe from adopting a file that was
+    # already there; that case fails with ``EEXIST`` here exactly as
+    # ``clonefile`` itself would.
+    let probeFd = posix.open(cstring(dst), O_WRONLY or O_CREAT or O_EXCL,
+                             FreshFileCreateMode)
+    if probeFd < 0:
+      return classifyPosixError(int(errno), "open(destination)")
+    var st: Stat
+    let statRc = fstat(probeFd, st)
+    let statCode = int(errno)
+    discard posix.close(probeFd)
+    if statRc != 0:
+      discard posix.unlink(cstring(dst))
+      return classifyPosixError(statCode, "fstat(destination)")
+    if posix.unlink(cstring(dst)) != 0:
+      # Nothing further can remove what ``unlink`` itself could not.
+      return classifyPosixError(int(errno), "unlink(destination)")
     if clonefile(cstring(src), cstring(dst), 0) != 0:
       return classifyPosixError(int(errno), "clonefile()")
+    # Only the permission bits: the file-type bits of ``st_mode`` are not
+    # something ``chmod`` accepts, and a fresh regular file carries no
+    # setuid/setgid/sticky bits the mask would drop.
+    if chmod(cstring(dst), Mode(int(st.st_mode) and 0o7777)) != 0:
+      let code = int(errno)
+      discard posix.unlink(cstring(dst))
+      return classifyPosixError(code, "chmod(clone)")
     LinkAttempt(outcome: loOk)
   else:
     LinkAttempt(outcome: loUnsupported,

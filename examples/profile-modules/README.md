@@ -30,12 +30,13 @@ machinery resolves `import ./modules/git_dev_environment`.
 When you run `repro home apply` (or one of the lower-level commands
 that calls `compileProfileToRbpi`), reprobuild:
 
-1. **Discovers sources.** Starting from your `home.nim`, the
-   profile-compile pipeline walks every `import ./...` /
-   `import "./..."` line and the chain of sibling modules they
-   transitively reach. Each discovered file becomes part of the
-   compile's source set and digest (so touching any file in the
-   closure invalidates the cache).
+1. **Checks the cache.** The compile is one monitored build edge.
+   Reprobuild records every file the compiler and your compiled
+   profile read the last time it ran — your `home.nim`, every
+   sibling module it imports (directly or transitively), files
+   pulled in with `staticRead`, and files the profile opens when it
+   runs. If none of them changed, the previous result is reused and
+   Nim does not run; if any did, the steps below run again.
 2. **Compiles via Nim.** The compile pipeline invokes the bundled
    Nim toolchain with the right `--path:` entries so
    `import repro_profile` resolves and your sibling imports
@@ -44,9 +45,9 @@ that calls `compileProfileToRbpi`), reprobuild:
    the runtime that builds the `ProfileIntent` value.
 3. **Encodes RBPI + caches.** The compiled binary prints a
    JSON representation of the `ProfileIntent`; the pipeline
-   re-encodes that through the binary RBPI envelope and parks
-   the bytes in `<state-dir>/profile-cache/<digest>.rbpi` for
-   reuse on the next apply.
+   re-encodes that through the binary RBPI envelope and publishes
+   the bytes to `<state-dir>/profile-cache/<profile-key>.rbpi`
+   (one file per profile) for reuse on the next apply.
 4. **Hands the intent to the apply pipeline.** From there the
    adapter chain (`profileIntentToHomeProfile`) feeds the
    apply pipeline the same way a hand-rolled profile would.

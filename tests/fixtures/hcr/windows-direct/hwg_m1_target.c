@@ -21,9 +21,23 @@ int wmain(int argc, wchar_t **argv) {
          sequence < 4000) {
     FILE *observations = NULL;
     int value = hwg_m1_victim(7);
-    if (_wfopen_s(&observations, argv[1], sequence == 0 ? L"wb" : L"ab") != 0 ||
-        observations == NULL) {
-      return 3;
+    /* The gate polls this file every 25ms while we reopen it ~100 times a
+     * second. A reader holding it for the instant we reopen is routine and
+     * transient, so retry: treating it as fatal kills the observation stream
+     * on a race with the very gate that is watching it, and the gate then
+     * reports a count it never reached with no way to tell why. Exit 3 is
+     * kept for an open that stays broken, which is a real failure. */
+    {
+      const wchar_t *mode = sequence == 0 ? L"wb" : L"ab";
+      unsigned open_attempt = 0;
+      while (_wfopen_s(&observations, argv[1], mode) != 0 ||
+             observations == NULL) {
+        observations = NULL;
+        if (++open_attempt >= 100) {
+          return 3;
+        }
+        Sleep(10);
+      }
     }
     fprintf(observations, "%u,%d\n", sequence, value);
     fclose(observations);

@@ -40,7 +40,7 @@
 ## so a record with no provenance round-trips cleanly through the M5
 ## strict reader, which already accepts the field as ``Option[string]``.
 
-import std/[algorithm, options, os, sequtils]
+import std/[algorithm, options, os, sequtils, strutils]
 
 import types
 import diagnostics
@@ -253,3 +253,58 @@ proc newDevelopOverrides*(): DevelopOverrides =
   ## time starts from this value and folds in the requested entry via
   ## ``addOverride``.
   result.schema = schemaDevelopOverridesV1
+
+# ---- provenance: an explicit selection or a bulk one ----------------------
+#
+# An exact recipe pin is substituted only by an EXPLICIT develop selection:
+# `repro develop --only=<dependency>` names it, a bulk selection
+# (`repro develop --all`, and every other mode or pattern selector) does not
+# (Unified-Locking-And-Hooks.md §16.4). The managed hooks read this file to
+# decide whether such a pin is substituted, so an entry has to say which kind
+# of selection wrote it. It says so in ``provenance``.
+#
+# The rule for entries written before the distinction existed: every entry
+# `repro develop --all` AND `repro develop --only=…` wrote carried the same
+# provenance, ``repro develop --all``, so the two cannot be told apart after
+# the fact. Such an entry, an entry with no provenance, and an entry whose
+# provenance names no explicit selection are all read as BULK. That is the
+# spec's default ("an exact recipe pin is not substituted by default"), and
+# misreading in that direction is visible and cheap — the pin is listed as
+# pinned by recipe and one `repro develop --only=<dependency>` restores the
+# substitution — whereas misreading a bulk entry as explicit makes the hooks
+# compare, and refuse commits over, a pin nobody asked to substitute.
+
+const
+  developOverrideOnlyProvenancePrefix* = "repro develop --only="
+    ## ``repro develop --only=<dependency>``: the explicit set-form selection.
+  developOverrideBulkProvenance* = "repro develop --all"
+    ## Written by every bulk set-form selection, and, before explicit
+    ## provenance existed, by ``--only`` as well.
+
+proc developOverrideOnlyProvenance*(dependency: string): string =
+  ## The provenance an explicit ``--only`` selection records for one entry.
+  developOverrideOnlyProvenancePrefix & dependency
+
+proc isExplicitDevelopOverride*(entry: DevelopOverrideEntry): bool =
+  ## Was ``entry`` recorded by a selection that NAMED its dependency?
+  ##
+  ## Explicit: ``repro develop --only=<dependency>`` (the set form), and
+  ## ``repro develop <dependency>`` (the single-dependency M22 form, which
+  ## records ``repro develop <dependency>``), and the per-project
+  ## ``repro develop <dependency> --into`` documents translated into this
+  ## shape (``repro develop --into``). Everything else is bulk; see the
+  ## section comment for why legacy and unknown entries fall on that side.
+  if entry.provenance.isNone: return false
+  let p = entry.provenance.get()
+  if p.startsWith(developOverrideOnlyProvenancePrefix):
+    return p.len > developOverrideOnlyProvenancePrefix.len
+  if p == "repro develop --into": return true
+  const single = "repro develop "
+  if p.startsWith(single):
+    # ``repro develop <dependency>``: exactly one positional word, the
+    # dependency the entry is for. ``repro develop --all`` and any other
+    # flag-led spelling is not a named selection.
+    let rest = p[single.len .. ^1]
+    return rest.len > 0 and not rest.startsWith("-") and ' ' notin rest and
+      rest == entry.package
+  false

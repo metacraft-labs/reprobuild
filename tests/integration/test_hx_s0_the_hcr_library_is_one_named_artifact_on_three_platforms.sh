@@ -165,6 +165,30 @@ mkdir -p "$WORK_DIR/build"
 
 "$BUILD_SCRIPT" "$WORK_DIR/build"
 
+# A caller-named output directory must be the ONLY place the build writes.
+# build_lib.sh used to mirror every healthy build into the library's own
+# source tree as well, so this gate (and every other caller with a private
+# directory) rewrote `libs/repro_hcr_agent/build/lib/` under a running suite.
+# Checked on a private copy of the script and its C sources: the real
+# `$AGENT_DIR/build` is also written by the `hcr-agent-lib` graph edge, which
+# may run concurrently with this gate, so its mtimes prove nothing.
+ISOLATED_AGENT="$WORK_DIR/agent-copy"
+rm -rf "$ISOLATED_AGENT"
+mkdir -p "$ISOLATED_AGENT"
+cp "$BUILD_SCRIPT" "$ISOLATED_AGENT/build_lib.sh"
+cp -R "$AGENT_DIR/c" "$ISOLATED_AGENT/c"
+bash "$ISOLATED_AGENT/build_lib.sh" "$WORK_DIR/isolated-out" >/dev/null
+if [[ ! -f "$WORK_DIR/isolated-out/$HOST_LIB_NAME" ]]; then
+  echo "ERROR: isolated build_lib.sh copy did not produce $WORK_DIR/isolated-out/$HOST_LIB_NAME" >&2
+  exit 1
+fi
+if [[ -e "$ISOLATED_AGENT/build" ]]; then
+  echo "ERROR: build_lib.sh with an explicit output directory also wrote under its own build/:" >&2
+  find "$ISOLATED_AGENT/build" >&2
+  exit 1
+fi
+echo "  [OK] Explicit output directory: build_lib.sh wrote nothing beside itself"
+
 HOST_LIB="$WORK_DIR/build/$HOST_LIB_NAME"
 if [[ ! -f "$HOST_LIB" ]]; then
   echo "ERROR: Built artifact not found at $HOST_LIB" >&2

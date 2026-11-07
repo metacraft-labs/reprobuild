@@ -133,19 +133,19 @@ proc setup(gitBin: string): Fixture =
 
   createDir(fx.workspace / "projects")
   createDir(fx.workspace / "repos")
-  writeFile(fx.workspace / ".repro" / "workspace.toml",
-    "schema = \"reprobuild.workspace.local.v1\"\n\n" &
+  writeFile(fx.workspace / ".repro" / "workspace-state.toml",
+    "schema = \"reprobuild.workspace.state.v1\"\n\n" &
     "[workspace]\nproject = \"app\"\nprojects = [\"app\"]\n")
   writeFile(fx.workspace / "projects" / "app.toml",
     "schema = \"reprobuild.workspace.project.v1\"\n\n" &
-    "[project]\nname = \"app\"\ndefault_revision = \"main\"\n" &
-    "trunk = \"main\"\n\n" &
+    "[project]\nname = \"app\"\n" &
+    "\n" &
     "[[remote]]\nname = \"origin\"\nfetch = \"" & fileUrl(fx.origin) &
     "\"\n\nincludes = [\"repos/app.toml\"]\n")
   writeFile(fx.workspace / "repos" / "app.toml",
-    "schema = \"reprobuild.workspace.repo.v1\"\n\n" &
+    "schema = \"reprobuild.workspace.repo.v2\"\n\n" &
     "[repo]\nname = \"app\"\npath = \"app\"\n" &
-    "remote = \"origin\"\nrevision = \"main\"\n")
+    "remote = \"origin\"\nmainline = \"main\"\n")
 
 proc installHooks(fx: Fixture) =
   ## Installed AFTER the fixture's own seed commits, so the only hook firings

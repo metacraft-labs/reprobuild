@@ -14,6 +14,7 @@
 import std/[os, tempfiles, unittest]
 
 import repro_workspace_manifests
+import repro_test_support/process_fixtures
 
 const happyToml = """
 schema = "reprobuild.workspace.lock-index.v1"
@@ -80,6 +81,11 @@ proc writeFixture(dir, name, content: string): string =
 
 suite "Legacy LockIndex parser round-trip (RA-1 back-compat)":
   let dir = createTempDir("reprobuild-m5-lock-index-", "")
+  # Removed when THIS process exits. Suite-level code runs in every
+  # process the runner starts -- one per case, plus its ``--list-json``
+  # probe -- and nothing removed this directory in any of them. See
+  # ``repro_test_support/process_fixtures``.
+  releaseDirAtProcessExit(dir)
 
   test "happy path populates each entry":
     let path = writeFixture(dir, "lock-index-happy.toml", happyToml)

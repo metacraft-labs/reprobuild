@@ -90,7 +90,7 @@ proc cApply(inst: ResourceInstance; action: ResourceActionKind;
 let containerDriver = ResourceProviderDriver(
   identity: cIdentity, digest: cDigest, observe: cObserve, apply: cApply)
 
-resourceType "vm_harness.container":
+resourceType "gosti.container":
   attrs: ContainerAttrs
   wrapper: container
   determinism: rdVolatile
@@ -192,10 +192,16 @@ proc enginePathFlags(engineRoot: string): seq[string] =
 
 proc compileConsumer(consumerRecipe, nimcache, outBin: string;
                      pathFlags: openArray[string];
-                     workDir: string): tuple[ok: bool, output: string] =
+                     workDir: string;
+                     checkOnly = false): tuple[ok: bool, output: string] =
+  ## ``checkOnly`` compiles with ``nim check`` instead of ``nim c``: the verb
+  ## that does NOT execute ``staticExec``, which the ``nim check`` cases are
+  ## about.
   let nimExe = findExe("nim")
   doAssert nimExe.len > 0, "nim compiler not on PATH"
-  var cmd = quoteShell(nimExe) & " c --compileOnly --hints:off --warnings:off"
+  var cmd =
+    if checkOnly: quoteShell(nimExe) & " check --hints:off --warnings:off"
+    else: quoteShell(nimExe) & " c --compileOnly --hints:off --warnings:off"
   for flag in pathFlags:
     cmd.add(" " & quoteShell(flag))
   cmd.add(" --nimcache:" & quoteShell(nimcache))
@@ -322,3 +328,138 @@ suite "F0.6: an installed engine never writes into its own source":
       check compiled.output.contains("not writable")
       # …and a remedy.
       check compiled.output.contains("REPRO_DSL_SCRATCH_ROOT")
+
+# ---------------------------------------------------------------------------
+# `nim check` and the scratch-dir refusal
+#
+# ## The defect these cases pin
+#
+# `nim check` does not execute `staticExec`: it returns "" for every command
+# (measured on nim-fork-2.3.1-codetracer: `staticExec("echo hi")` is "" under
+# `nim check` and "hi" under `nim c`). The writability probe behind
+# `requireDslScratchDir` was `staticExec("test -w <dir> && echo REPRO_RW")`, so
+# under `nim check` it answered NOT WRITABLE for every directory, and the
+# refusal asserted a permissions problem on a directory this user can write,
+# with a remedy (`REPRO_DSL_SCRATCH_ROOT`) that cannot help. One layer up, the
+# accessor generator also runs through `staticExec`, and its refusal said only
+# "generator produced no output".
+#
+# A refusal must name its real cause. These cases compile the same consumer
+# under `nim check` in a fresh, WRITABLE workspace and require the diagnostic
+# to say that the compile does not run `staticExec`, not that a directory is
+# unwritable.
+#
+# ## No mocks
+#
+# The compiler is the real `nim`, invoked as `nim check`; the workspace is a
+# real directory whose writability is asserted before the compile.
+#
+# ## Falsifiability
+#
+# Without the fix, the first case fails on `not contains("not writable by this
+# user")` and the second on `not contains("generator produced no output")`.
+# Each case first asserts, as a positive control, that the directory the
+# refusal would blame really is writable (first case) or already exists
+# (second case), so a pass cannot come from a fixture that happens to be
+# genuinely unwritable. Both require the output to name `nim check` and
+# `staticExec`, so a diagnostic that merely drops the permissions wording
+# without naming the real cause also fails. The third case pins that the
+# remedy both refusals give -- compile once with `nim c`, after which
+# `nim check` reuses the cached accessors -- is true.
+# ---------------------------------------------------------------------------
+
+proc nimCheckFixture(tag: string): tuple[base, nimcache, outBin: string] =
+  ## A fresh workspace under this repository's `build/`, so Nim's config walk
+  ## wires the consumer compile the ordinary way.
+  let base = repoRoot / "build" / "nimcache" /
+    (tag & "-" & $getCurrentProcessId())
+  (base, base & "-nc", base & ".bin")
+
+suite "nim check: the DSL scratch refusals name the real cause":
+
+  test "t_nim_check_scratch_refusal_does_not_blame_permissions":
+    let fx = nimCheckFixture("nimcheck-scratch")
+    removeDir(fx.base)
+    createDir(fx.base)
+    defer:
+      removeDir(fx.base)
+      removeDir(fx.nimcache)
+      removeFile(fx.outBin)
+    let producerSelector = "producer_nck_" & $getCurrentProcessId()
+    writeWorkspace(fx.base, producerSelector)
+
+    # Positive control: the directory the old refusal blamed IS writable, and
+    # the scratch dir does not exist yet (the path that runs the probe).
+    createDir(fx.base / ".writable-probe")
+    check dirExists(fx.base / ".writable-probe")
+    removeDir(fx.base / ".writable-probe")
+    check not dirExists(fx.base / ".repro")
+
+    let checked = compileConsumer(
+      fx.base / "consumer" / "repro.nim", fx.nimcache, fx.outBin,
+      enginePathFlags(repoRoot), workDir = repoRoot, checkOnly = true)
+    checkpoint checked.output
+    # `nim check` cannot generate the accessors, so it still refuses...
+    check not checked.ok
+    # ...but not with a false reason, nor with an unhandled exception.
+    check not checked.output.contains("not writable by this user")
+    check not checked.output.contains("unhandled exception")
+    # It names the path, the real cause and the way out.
+    check checked.output.contains(accessorCacheDir(fx.base, producerSelector))
+    check checked.output.contains("nim check")
+    check checked.output.contains("staticExec")
+    check checked.output.contains("compile the recipe once with `nim c`")
+
+  test "t_nim_check_generator_refusal_names_suppressed_staticexec":
+    let fx = nimCheckFixture("nimcheck-gen")
+    removeDir(fx.base)
+    createDir(fx.base)
+    defer:
+      removeDir(fx.base)
+      removeDir(fx.nimcache)
+      removeFile(fx.outBin)
+    let producerSelector = "producer_nckg_" & $getCurrentProcessId()
+    writeWorkspace(fx.base, producerSelector)
+
+    # The scratch dir is pre-created, so the probe is skipped and the refusal
+    # moves to the generator, which also runs through `staticExec`.
+    let accDir = accessorCacheDir(fx.base, producerSelector)
+    createDir(accDir)
+    check dirExists(accDir)
+    check not fileExists(accDir / (producerSelector & ".accessors.nim"))
+
+    let checked = compileConsumer(
+      fx.base / "consumer" / "repro.nim", fx.nimcache, fx.outBin,
+      enginePathFlags(repoRoot), workDir = repoRoot, checkOnly = true)
+    checkpoint checked.output
+    check not checked.ok
+    check not checked.output.contains("generator produced no output")
+    check checked.output.contains("resource accessor generation")
+    check checked.output.contains("nim check")
+    check checked.output.contains("staticExec")
+    check checked.output.contains("compile the recipe once with `nim c`")
+
+  test "t_nim_check_reuses_accessors_a_nim_c_compile_cached":
+    let fx = nimCheckFixture("nimcheck-reuse")
+    removeDir(fx.base)
+    createDir(fx.base)
+    defer:
+      removeDir(fx.base)
+      removeDir(fx.nimcache)
+      removeFile(fx.outBin)
+    let producerSelector = "producer_nckr_" & $getCurrentProcessId()
+    writeWorkspace(fx.base, producerSelector)
+
+    let compiled = compileConsumer(
+      fx.base / "consumer" / "repro.nim", fx.nimcache, fx.outBin,
+      enginePathFlags(repoRoot), workDir = repoRoot)
+    checkpoint compiled.output
+    check compiled.ok
+    check fileExists(accessorCacheDir(fx.base, producerSelector) /
+      (producerSelector & ".accessors.nim"))
+
+    let checked = compileConsumer(
+      fx.base / "consumer" / "repro.nim", fx.nimcache, fx.outBin,
+      enginePathFlags(repoRoot), workDir = repoRoot, checkOnly = true)
+    checkpoint checked.output
+    check checked.ok

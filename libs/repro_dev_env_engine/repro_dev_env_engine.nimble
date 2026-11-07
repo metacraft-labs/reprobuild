@@ -1,5 +1,5 @@
 version = "0.1.0"
 author = "Metacraft Labs"
 description = "Development-environment build edge engine"
-license = "MIT"
+license = "Apache-2.0"
 requires "nim >= 2.2.0"

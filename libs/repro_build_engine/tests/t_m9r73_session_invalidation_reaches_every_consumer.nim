@@ -70,8 +70,11 @@ import repro_core
 import repro_hash
 import repro_local_store
 import io_mon/[types, writer, capabilities]
+from repro_test_support import testCaseScratchSlug
 
-const TmpDir = "build/test-tmp/t_m9r73_session_invalidation_reaches_every_consumer"
+let TmpDir =
+  "build/test-tmp/t_m9r73_session_invalidation_reaches_every_consumer" /
+  testCaseScratchSlug()
 const ReuseDecisions = {cdHit, cdHybridCutoff}
 
 proc weak(name: string): ContentDigest =
@@ -171,6 +174,12 @@ proc producerReport(f: Fixture; run: int): string =
 proc testConfig(f: Fixture): BuildEngineConfig =
   result = defaultBuildEngineConfig(f.root / "cache")
   result.rebuildMissingOutputsOnCacheHit = true
+  # Metadata-only records, as the default `repro build` stores: removing an
+  # output is how these cases make the producer genuinely EXECUTE, and a
+  # payload-backed record would restore the missing output instead (owner
+  # decision 2026-11-03, Incremental-Invalidation.md §"Minimum check set"
+  # Step 3.3), so the producer would never run and its capture never be read.
+  result.deferLocalOutputBlobs = true
   result.bypassRunQuota = true
   result.maxParallelism = 1'u32
 

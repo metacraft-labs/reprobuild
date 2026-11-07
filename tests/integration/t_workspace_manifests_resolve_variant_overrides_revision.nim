@@ -26,9 +26,7 @@ schema = "reprobuild.workspace.project.v1"
 
 [project]
 name = "reprobuild"
-default_revision = "main"
 default_remote = "metacraft-labs"
-trunk = "main"
 
 [[remote]]
 name = "metacraft-labs"
@@ -46,35 +44,39 @@ includes = [
 """
 
 const repoReprobuildToml = """
-schema = "reprobuild.workspace.repo.v1"
+schema = "reprobuild.workspace.repo.v2"
 
 [repo]
+mainline = "main"
 name = "reprobuild"
 path = "reprobuild"
 remote = "metacraft-labs"
 """
 
 const repoRunquotaToml = """
-schema = "reprobuild.workspace.repo.v1"
+schema = "reprobuild.workspace.repo.v2"
 
 [repo]
+mainline = "main"
 name = "runquota"
 path = "runquota"
 """
 
 const repoNimEverywhereToml = """
-schema = "reprobuild.workspace.repo.v1"
+schema = "reprobuild.workspace.repo.v2"
 
 [repo]
+mainline = "main"
 name = "nim-everywhere"
 path = "nim-everywhere"
 remote = "metacraft-labs"
 """
 
 const repoExtraComponentToml = """
-schema = "reprobuild.workspace.repo.v1"
+schema = "reprobuild.workspace.repo.v2"
 
 [repo]
+mainline = "main"
 name = "extra-component"
 path = "extra-component"
 remote = "github"
@@ -183,8 +185,7 @@ suite "M7 — resolveVariant against a metacraft-shaped fixture":
     check resolved.projectFile == variantFile
 
     # ---- base-inherited facts ----
-    check resolved.defaultRevision == "main"
-    check resolved.trunk == "main"
+    check resolved.workspaceMainline == ""
     check resolved.repos.len == 3
 
     # ---- source order preservation ----
@@ -326,8 +327,7 @@ suite "M7 — resolveVariant against a metacraft-shaped fixture":
 
     # Everything else MUST be identical: a trivial variant (no extras,
     # no overrides) is by construction the same workspace as its base.
-    check asProject.defaultRevision == asVariant.defaultRevision
-    check asProject.trunk == asVariant.trunk
+    check asProject.workspaceMainline == asVariant.workspaceMainline
     check asProject.repos.len == asVariant.repos.len
     for i in 0 ..< asProject.repos.len:
       check asProject.repos[i].name == asVariant.repos[i].name

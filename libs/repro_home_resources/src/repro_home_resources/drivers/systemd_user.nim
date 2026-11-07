@@ -27,6 +27,7 @@ when defined(linux):
 
 import ./../errors
 import ./../manifest_record
+import ./../test_home_fence
 import ./../types
 
 # ---------------------------------------------------------------------------
@@ -126,6 +127,7 @@ proc applyUserUnit*(homeDir, name, unitContent: string;
   ## fields is now reachable.
   when defined(linux):
     let path = userUnitPath(homeDir, name)
+    enforceTestHomeFence(path, "systemd.userUnit apply")
     createDir(extendedPath(parentDir(path)))
     writeFile(extendedPath(path), unitContent)
     let (reloadOut, reloadCode) = execCmdEx("systemctl --user daemon-reload")
@@ -180,6 +182,7 @@ proc destroyUserUnit*(homeDir, name: string) =
   ## not whether each transitive command was a no-op.
   when defined(linux):
     let path = userUnitPath(homeDir, name)
+    enforceTestHomeFence(path, "systemd.userUnit destroy")
     # `name` is `quoteShell`'d (layer 2; validated at layer 1).
     let qname = quoteShell(name)
     discard execCmd("systemctl --user stop " & qname)

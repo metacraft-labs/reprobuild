@@ -83,7 +83,7 @@ let containerDriver = ResourceProviderDriver(
 # THE MACRO UNDER TEST — one declaration, five lowerings.
 # ---------------------------------------------------------------------------
 
-resourceType "vm_harness.container":
+resourceType "gosti.container":
   attrs: ContainerAttrs
   wrapper: container
   determinism: rdVolatile
@@ -93,14 +93,14 @@ resourceType "vm_harness.container":
 
 # ---------------------------------------------------------------------------
 # Regression guard (RP8 fix): the header typeId may be a CONST identifier bound
-# to a string, not only a string literal — the form vm-harness's real provider
+# to a string, not only a string literal — the form gosti's real provider
 # uses (``const TypeContainer = ...`` then ``resourceType TypeContainer:``).
 # A ``static string`` param folded a const to its value; the ``untyped`` param
 # added for go-to-def must keep that compatibility, so we pin a const-ident
 # declaration compiles and registers with the const's string VALUE.
 # ---------------------------------------------------------------------------
 
-const TypeContainerConst = "vm_harness.container.constid"
+const TypeContainerConst = "gosti.container.constid"
 
 resourceType TypeContainerConst:
   attrs: ContainerAttrs
@@ -130,8 +130,8 @@ suite "RP4: resourceType macro":
     resetDesiredResources()
 
   test "macro registered the provider + marshaller (runtime lane works)":
-    check isResourceProviderRegistered("vm_harness.container")
-    let def = lookupResourceProvider("vm_harness.container")
+    check isResourceProviderRegistered("gosti.container")
+    let def = lookupResourceProvider("gosti.container")
     check def.determinism == rdVolatile
     check def.driver.apply != nil
 
@@ -139,7 +139,7 @@ suite "RP4: resourceType macro":
     discard container("web", image = "nginx", cpus = 2)
     let desired = collectedResources()
     check desired.len == 1
-    check desired[0].typeId == "vm_harness.container"
+    check desired[0].typeId == "gosti.container"
     check desired[0].determinism == rdVolatile
 
     let r = reconcileResources(desired)
@@ -149,7 +149,7 @@ suite "RP4: resourceType macro":
 
     # attrs box round-trips by typeId (the registerExtension marshaller).
     let wire = marshalAttrs(desired[0].attrs)
-    let back = unmarshalAttrs("vm_harness.container", wire)
+    let back = unmarshalAttrs("gosti.container", wire)
     check TypedExtensionBox[ContainerAttrs](back).val ==
       TypedExtensionBox[ContainerAttrs](desired[0].attrs).val
 
@@ -159,16 +159,16 @@ suite "RP4: resourceType macro":
     let pi = toProjectInterface(hostPkg)
     check pi.publicExecutables.len == 1
     # Two ``resourceType`` blocks register at module init (the literal-typeId
-    # ``vm_harness.container`` under test here + the const-ident regression
+    # ``gosti.container`` under test here + the const-ident regression
     # guard ``…​.constid``); select the one under test by typeId.
     var res: InterfaceResource
     var sawContainer = false
     for r in pi.publicResources:
-      if r.typeId == "vm_harness.container":
+      if r.typeId == "gosti.container":
         res = r
         sawContainer = true
     check sawContainer
-    check res.typeId == "vm_harness.container"
+    check res.typeId == "gosti.container"
     check res.determinism == irdVolatile
     # Attribute schema tracks the declaration order + types.
     check res.attributes.len == 2
@@ -177,19 +177,19 @@ suite "RP4: resourceType macro":
     check res.attributes[1].name == "cpus"
     check res.attributes[1].nimType == "int"
     # Entry-point descriptors are the driver ops as ``<typeId>.<op>``.
-    check res.entrypoints.identity == "vm_harness.container.identity"
-    check res.entrypoints.digest == "vm_harness.container.digest"
-    check res.entrypoints.observe == "vm_harness.container.observe"
-    check res.entrypoints.plan == "vm_harness.container.plan"
-    check res.entrypoints.apply == "vm_harness.container.apply"
+    check res.entrypoints.identity == "gosti.container.identity"
+    check res.entrypoints.digest == "gosti.container.digest"
+    check res.entrypoints.observe == "gosti.container.observe"
+    check res.entrypoints.plan == "gosti.container.plan"
+    check res.entrypoints.apply == "gosti.container.apply"
 
   test "const-identifier typeId compiles + registers with the const's value":
     # RP8-fix regression guard: ``resourceType TypeContainerConst:`` (a const
     # IDENT header, not a literal) must lower exactly as the literal form —
     # registering under the const's string VALUE and emitting a working wrapper.
-    check TypeContainerConst == "vm_harness.container.constid"
+    check TypeContainerConst == "gosti.container.constid"
     check isResourceProviderRegistered(TypeContainerConst)
-    let def = lookupResourceProvider("vm_harness.container.constid")
+    let def = lookupResourceProvider("gosti.container.constid")
     check def.determinism == rdVolatile
     check def.driver.apply != nil
 
@@ -199,16 +199,16 @@ suite "RP4: resourceType macro":
     discard containerByConst("svc", image = "nginx", cpus = 1)
     let desired = collectedResources()
     check desired.len == 1
-    check desired[0].typeId == "vm_harness.container.constid"
+    check desired[0].typeId == "gosti.container.constid"
 
     # Entry-point ids also resolve the const at runtime (``<typeId> & ".op"``).
     let pi = toProjectInterface(hostPkg)
     var found = false
     for res in pi.publicResources:
-      if res.typeId == "vm_harness.container.constid":
+      if res.typeId == "gosti.container.constid":
         found = true
-        check res.entrypoints.identity == "vm_harness.container.constid.identity"
-        check res.entrypoints.apply == "vm_harness.container.constid.apply"
+        check res.entrypoints.identity == "gosti.container.constid.identity"
+        check res.entrypoints.apply == "gosti.container.constid.apply"
     check found
 
   test "a project with no resource type exposes no publicResources":

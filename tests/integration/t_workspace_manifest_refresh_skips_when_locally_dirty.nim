@@ -105,9 +105,7 @@ schema = "reprobuild.workspace.project.v1"
 
 [project]
 name = "myproject"
-default_revision = "main"
 default_remote = "origin"
-trunk = "main"
 
 [[remote]]
 name = "origin"
@@ -119,24 +117,28 @@ includes = [
 """
 
 const libATomlBody = """
-schema = "reprobuild.workspace.repo.v1"
+schema = "reprobuild.workspace.repo.v2"
 
 [repo]
 name = "lib-a"
 path = "lib-a"
-revision = "main"
+mainline = "main"
 """
 
 proc writeWorkspaceTomlWithLayer(workspaceRoot, layerUrl: string) =
+  ## The workspace's state (project + branch) in the state file, and the
+  ## ``url`` manifest layer in the shared settings file, which is where
+  ## extra manifest layers are declared (Workspace-Settings-Files.md §3).
   let dotRepo = workspaceRoot / ".repro"
   createDir(dotRepo)
-  let body =
-    "schema = \"reprobuild.workspace.local.v1\"\n\n" &
-    "[workspace]\nproject = \"myproject\"\nbranch = \"main\"\n\n" &
+  writeFile(dotRepo / "workspace-state.toml",
+    "schema = \"reprobuild.workspace.state.v1\"\n\n" &
+    "[workspace]\nproject = \"myproject\"\nbranch = \"main\"\n")
+  writeFile(workspaceRoot / "repro-workspace.toml",
+    "schema = \"reprobuild.workspace.settings.v1\"\n\n" &
     "[[manifest]]\n" &
     "url = \"" & layerUrl & "\"\n" &
-    "visibility = \"public\"\nbranch = \"main\"\n"
-  writeFile(dotRepo / "workspace.toml", body)
+    "visibility = \"public\"\nbranch = \"main\"\n")
 
 proc invokePostMerge(reproBin, currentRepo, cacheHome: string;
                      squashFlag: string): CmdResult =
@@ -199,9 +201,9 @@ suite "M19a — post-merge manifest auto-refresh (skips dirty layer)":
       discard requireGit(q(gitBin) & " -C " & q(manifestSeedWork) &
         " config user.name \"M19a Tester\"")
       writeFile(manifestSeedWork / "repos" / "lib-b.toml",
-        "schema = \"reprobuild.workspace.repo.v1\"\n\n" &
+        "schema = \"reprobuild.workspace.repo.v2\"\n\n" &
         "[repo]\nname = \"lib-b\"\npath = \"lib-b\"\n" &
-        "revision = \"main\"\n")
+        "mainline = \"main\"\n")
       discard requireGit(q(gitBin) & " -C " & q(manifestSeedWork) &
         " add -A")
       discard requireGit(q(gitBin) & " -C " & q(manifestSeedWork) &

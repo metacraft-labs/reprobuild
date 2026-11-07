@@ -58,71 +58,58 @@ if [ "${#nim_files[@]}" -eq 0 ]; then
   exit 1
 fi
 
-# nimpretty REFUSES some files, and that is a feature: it re-parses its own
-# output and, if the result does not parse, reports `nimpretty_bug.nim(L,C)
-# Error: ...`, exits 1 and leaves the input BYTE-IDENTICAL. Measured over this
-# tree (2026-08-22): 7 of 2144 files, all left untouched. Those refusals must
-# not be swallowed — that is how this script got into trouble in the first
-# place — so they are collected and NAMED. They do not fail the run: the
-# formatting the caller asked for did happen, on every file nimpretty could
-# handle, and a `just format` that exits nonzero forever until seven files
-# (two of them vendored upstream trees) are hand-fixed would just be routed
-# around. A MISSING nimpretty is the hard error; a nimpretty that declines a
-# file, loudly, having changed nothing, is information.
-refused=()
-would_change=()
-jobs_n="$(nproc 2>/dev/null || echo 4)"
+# A re-parse alone cannot detect `or name` becoming the valid identifier
+# `orname`. Require the fork's AST verifier, stage every output, and publish
+# only after equivalent parsed meaning is established. Older nimpretty exits
+# successfully on unknown options, so probe its advertised capability first.
+if ! nimpretty --help | grep -q -- '--checkEquivalent:file'; then
+  echo "format_sources.sh: nimpretty lacks the required AST verifier; update the Nim toolchain." >&2
+  exit 1
+fi
+
 scratch="$(mktemp -d)"
 trap 'rm -rf "$scratch"' EXIT
-
-# One nimpretty process per file so a refusal can be attributed to a file
-# (batching several paths into one invocation loses that), fanned out with
-# `xargs -P` so 2000+ files still take seconds. Workers append their verdicts
-# to two files; single short lines opened O_APPEND do not interleave.
-if [ "$MODE" = check ]; then
-  # shellcheck disable=SC2016  # the worker body is expanded by the spawned bash, not here
-  printf '%s\0' "${nim_files[@]}" |
-    xargs -0 -P "$jobs_n" -I{} bash -c '
-      f=$1; scratch=$2
-      out="$scratch/out.$$.nim"
-      if nimpretty --out:"$out" "$f" >/dev/null 2>&1; then
-        cmp -s "$f" "$out" || printf "%s\n" "$f" >>"$scratch/would_change"
+jobs_n="${FORMAT_JOBS:-2}"
+# Each worker owns its output; originals are untouched on any refusal, even
+# when the formatter itself writes an invalid output before returning failure.
+# shellcheck disable=SC2016
+printf '%s\0' "${nim_files[@]}" |
+  xargs -0 -P "$jobs_n" -I{} bash -c '
+    f=$1; scratch=$2; mode=$3
+    out="$scratch/out.$$.nim"
+    if ! nimpretty --out:"$out" "$f" >"$out.log" 2>&1 ||
+        [ ! -f "$out" ] ||
+        ! nimpretty --checkEquivalent:"$f" "$out" >>"$out.log" 2>&1; then
+      printf "%s\n" "$f" >>"$scratch/failed"
+      cat "$out.log" >&2
+    elif ! cmp -s "$f" "$out"; then
+      if [ "$mode" = check ]; then
+        printf "%s\n" "$f" >>"$scratch/would_change"
       else
-        printf "%s\n" "$f" >>"$scratch/refused"
+        # Publish by same-directory rename so a failed write cannot truncate
+        # the input source. Preserve its permissions in the replacement.
+        staged=$(mktemp "${f}.format.XXXXXX")
+        if ! cp -p "$f" "$staged" || ! cat "$out" >"$staged" ||
+            ! mv -f "$staged" "$f"; then
+          printf "%s\n" "$f" >>"$scratch/failed"
+        fi
+        rm -f "$staged"
       fi
-      rm -f "$out"
-    ' _ {} "$scratch"
-  if [ -f "$scratch/would_change" ]; then
-    mapfile -t would_change < <(sort "$scratch/would_change")
-  fi
-else
-  # shellcheck disable=SC2016  # the worker body is expanded by the spawned bash, not here
-  printf '%s\0' "${nim_files[@]}" |
-    xargs -0 -P "$jobs_n" -I{} bash -c '
-      f=$1; scratch=$2
-      nimpretty "$f" >/dev/null 2>&1 || printf "%s\n" "$f" >>"$scratch/refused"
-    ' _ {} "$scratch"
-fi
-if [ -f "$scratch/refused" ]; then
-  mapfile -t refused < <(sort "$scratch/refused")
-fi
+    fi
+    rm -f "$out" "$out.log"
+  ' _ {} "$scratch" "$MODE"
 
-if [ "${#refused[@]}" -gt 0 ]; then
-  echo "format_sources.sh: nimpretty DECLINED ${#refused[@]} file(s) (left unmodified;" >&2
-  echo "  its output failed its own re-parse check). Run nimpretty on one to see why:" >&2
-  printf '  %s\n' "${refused[@]}" >&2
+if [ -f "$scratch/failed" ]; then
+  echo "format_sources.sh: formatting or equivalence verification FAILED; refused files:" >&2
+  sort "$scratch/failed" >&2
+  exit 1
 fi
-
-if [ "$MODE" = check ]; then
-  if [ "${#would_change[@]}" -gt 0 ]; then
-    printf '%s\n' "${would_change[@]}"
-    echo "format_sources.sh: ${#would_change[@]} of ${#nim_files[@]} Nim file(s) are not nimpretty-clean." >&2
-    exit 1
-  fi
-  echo "format_sources.sh: all ${#nim_files[@]} Nim file(s) are nimpretty-clean."
-else
-  echo "format_sources.sh: nimpretty ran over $(( ${#nim_files[@]} - ${#refused[@]} )) of ${#nim_files[@]} Nim file(s)."
+if [ "$MODE" = check ] && [ -f "$scratch/would_change" ]; then
+  sort "$scratch/would_change"
+  echo "format_sources.sh: Nim files are not nimpretty-clean." >&2
+  exit 1
 fi
+echo "format_sources.sh: verified ${#nim_files[@]} Nim file(s)."
 
 if command -v nixfmt >/dev/null 2>&1; then
   if [ "$MODE" = check ]; then

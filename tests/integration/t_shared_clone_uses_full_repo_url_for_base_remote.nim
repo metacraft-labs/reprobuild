@@ -86,16 +86,16 @@ suite "regression — shared cache keys the bare by the full repo URL":
       createDir(manifestsRoot / "repos")
       writeFile(manifestsRoot / "projects" / "p.toml",
         "schema = \"reprobuild.workspace.project.v1\"\n\n" &
-        "[project]\nname = \"p\"\ndefault_revision = \"main\"\n\n" &
+        "[project]\nname = \"p\"\n\n" &
         "[[remote]]\nname = \"o\"\nfetch = \"" & baseUrl & "\"\n\n" &
         "includes = [\n  \"repos/proj.toml\",\n]\n")
       writeFile(manifestsRoot / "repos" / "proj.toml",
-        "schema = \"reprobuild.workspace.repo.v1\"\n\n" &
+        "schema = \"reprobuild.workspace.repo.v2\"\n\n" &
         "[repo]\nname = \"proj\"\npath = \"proj\"\nremote = \"o\"\n" &
-        "revision = \"main\"\n")
+        "mainline = \"main\"\n")
       createDir(ws / ".repro")
-      writeFile(ws / ".repro" / "workspace.toml",
-        "schema = \"reprobuild.workspace.local.v1\"\n\n[workspace]\n" &
+      writeFile(ws / ".repro" / "workspace-state.toml",
+        "schema = \"reprobuild.workspace.state.v1\"\n\n[workspace]\n" &
         "project = \"p\"\n")
       # Existing checkout, not yet wired to any shared bare.
       discard requireGit(q(gitBin) & " clone " & q(baseUrl & "/proj") & " " &
@@ -118,7 +118,7 @@ suite "regression — shared cache keys the bare by the full repo URL":
       for r in report["repos"]:
         if r["path"].getStr() == "proj":
           entry = r
-      check entry != nil
+      check not entry.isNil
       check entry["barePresent"].getBool()
       check entry["wired"].getBool()
       # The alternates file physically points the checkout at the shared bare.

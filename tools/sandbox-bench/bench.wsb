@@ -32,7 +32,7 @@
       <ReadOnly>true</ReadOnly>
     </MappedFolder>
     <MappedFolder>
-      <HostFolder>D:\metacraft\reprobuild\tools\sandbox-migration\vcruntime</HostFolder>
+      <HostFolder>D:\metacraft\reprobuild\tools\sandbox-bench\vcruntime</HostFolder>
       <SandboxFolder>C:\harness\vcruntime</SandboxFolder>
       <ReadOnly>true</ReadOnly>
     </MappedFolder>

@@ -108,18 +108,17 @@ proc projectToml(coreUrl: string): string =
   "schema = \"reprobuild.workspace.project.v1\"\n\n" &
   "[project]\n" &
   "name = \"team\"\n" &
-  "default_revision = \"main\"\n" &
-  "trunk = \"main\"\n\n" &
+  "\n" &
   "[[remote]]\nname = \"core-origin\"\nfetch = \"" & coreUrl & "\"\n\n" &
   "includes = [\n  \"repos/core.toml\",\n]\n"
 
 proc repoFragment(name, remote: string): string =
-  "schema = \"reprobuild.workspace.repo.v1\"\n\n" &
+  "schema = \"reprobuild.workspace.repo.v2\"\n\n" &
   "[repo]\n" &
   "name = \"" & name & "\"\n" &
   "path = \"" & name & "\"\n" &
   "remote = \"" & remote & "\"\n" &
-  "revision = \"main\"\n"
+  "mainline = \"main\"\n"
 
 proc seedManifestGitLayer(gitBin, manifestsRoot, bare: string) =
   ## ``.repro/manifests`` is a healthy git checkout WITH an upstream so the gate
@@ -182,9 +181,9 @@ suite "HL-3 — pre-push refuses on an unreachable team backend":
       seedGitCheckoutBackend(gitBin, teamBackend, teamBare)
 
       # ---- route the team repo to that separate git-checkout backend ---
-      writeFile(ws / ".repro-workspace.toml",
-        "schema = \"reprobuild.workspace.bootstrap.v1\"\n\n" &
-        "[manifest]\n" &
+      writeFile(ws / "repro-workspace.toml",
+        "schema = \"reprobuild.workspace.settings.v1\"\n\n" &
+        "[records]\n" &
         "url = \"https://example.invalid/manifests.git\"\n\n" &
         "[locking]\n" &
         "route = [" &
@@ -228,7 +227,7 @@ suite "HL-3 — pre-push refuses on an unreachable team backend":
 
       # ---- the lock-backend-unreachable failure, tier + backend named ---
       let bf = backendUnreachableFailure(report)
-      check bf != nil
+      check not bf.isNil
       let remedy = bf["remediation"].getStr()
       check remedy.contains("team")
       check remedy.contains("git-checkout")
