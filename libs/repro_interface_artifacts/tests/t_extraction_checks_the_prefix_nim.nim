@@ -16,8 +16,10 @@
 ## * with it set, a recipe whose range excludes the release is refused by
 ##   `extractInterfaceFromModule`, on a cold extraction and on its warm
 ##   short-circuit alike, and an admitting range passes;
-## * a lift is refused the same way, on its cold path (it extracts) and on
-##   its fresh-artifact path (it reads the artifact back without extracting);
+## * a lift is refused the same way, on its cold path (it extracts), on a
+##   cold path an earlier extraction's warm record answers (no `.liftkey`, so
+##   not fresh: the extractor body checks its warm short-circuit) and on its
+##   fresh-artifact path (it reads the artifact back without extracting);
 ## * a refused cold extraction publishes nothing: an empty output directory
 ##   stays empty, and an earlier, admitted artifact, its stub and its warm
 ##   records stay byte for byte as they were.
@@ -128,8 +130,8 @@ suite "extracting an interface checks its uses: nim":
         discard liftInterfaceArtifact(plan)
 
   test "a cold lift is refused the same way":
-    # The lift's extraction branch, with nothing recorded yet: it must go
-    # through the exported extractor, not the module-private body beside it.
+    # The lift's extraction branch, with nothing recorded yet: a cold
+    # extraction, checked inside the extractor body before it publishes.
     let base = scratchRoot("lift-cold")
     defer: removeDir(base)
     let root = project(base, "nim ==2.2.10")
@@ -146,6 +148,26 @@ suite "extracting an interface checks its uses: nim":
       except InstalledPrefixNimError as err:
         checkpoint(err.msg)
         check "excludes Nim 2.3.1" in err.msg
+
+  test "a cold lift over an extraction's warm record is refused":
+    # An extraction with no marker records its warm short-circuit but no
+    # `.liftkey`, so the lift is not fresh and takes its extraction branch,
+    # which the warm record then answers without compiling. That answer is
+    # checked inside the extractor body itself, so it is refused however the
+    # lift reaches the body (A15 round-7 verification, 2026-11-07).
+    let base = scratchRoot("lift-over-warm")
+    defer: removeDir(base)
+    let root = project(base, "nim ==2.2.10")
+    let outDir = base / "out"
+    withMarker(""):
+      discard extract(root, outDir)
+    let plan = interfaceLiftPlan(root / "repro.nim",
+      outDir / "project-interface.rbsz", outDir / "project-interface.nim",
+      workDir = getCurrentDir())
+    require not interfaceArtifactFresh(plan)
+    withMarker("2.3.1"):
+      expect InstalledPrefixNimError:
+        discard liftInterfaceArtifact(plan)
 
 proc filesIn(dir: string): seq[(string, string)] =
   ## Every file under `dir`, relative, with its bytes, sorted.

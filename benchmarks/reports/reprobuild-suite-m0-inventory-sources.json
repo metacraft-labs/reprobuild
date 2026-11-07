@@ -2146,7 +2146,7 @@
           "directExecutionLine": false,
           "enclosingCallable": "extract",
           "executedVariables": [],
-          "line": 69,
+          "line": 71,
           "path": "libs/repro_interface_artifacts/tests/t_extraction_checks_the_prefix_nim.nim",
           "patterns": [
             "repro-extract-interface"
@@ -2162,7 +2162,7 @@
           "directExecutionLine": true,
           "enclosingCallable": "",
           "executedVariables": [],
-          "line": 124,
+          "line": 126,
           "path": "libs/repro_interface_artifacts/tests/t_extraction_checks_the_prefix_nim.nim",
           "patterns": [
             "repro-lift-interface-artifact"
@@ -2178,7 +2178,7 @@
           "directExecutionLine": true,
           "enclosingCallable": "",
           "executedVariables": [],
-          "line": 128,
+          "line": 130,
           "path": "libs/repro_interface_artifacts/tests/t_extraction_checks_the_prefix_nim.nim",
           "patterns": [
             "repro-lift-interface-artifact"
@@ -2194,7 +2194,23 @@
           "directExecutionLine": true,
           "enclosingCallable": "",
           "executedVariables": [],
-          "line": 144,
+          "line": 146,
+          "path": "libs/repro_interface_artifacts/tests/t_extraction_checks_the_prefix_nim.nim",
+          "patterns": [
+            "repro-lift-interface-artifact"
+          ],
+          "runtimeCompilerApi": "liftInterfaceArtifact",
+          "runtimeCompilerApiModule": "repro_interface_artifacts",
+          "snippet": "discard liftInterfaceArtifact(plan)"
+        },
+        {
+          "assignedCommandVariable": "",
+          "callableReachable": true,
+          "commandVariableExecuted": false,
+          "directExecutionLine": true,
+          "enclosingCallable": "",
+          "executedVariables": [],
+          "line": 170,
           "path": "libs/repro_interface_artifacts/tests/t_extraction_checks_the_prefix_nim.nim",
           "patterns": [
             "repro-lift-interface-artifact"
@@ -18052,7 +18068,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_interface_artifacts/tests/t_extraction_checks_the_prefix_nim.nim",
       "sourceSuiteCount": 2,
-      "staticCaseCount": 7,
+      "staticCaseCount": 8,
       "staticallyDetectedRuntimeCompilerFlow": true,
       "targetOs": "soAny"
     },

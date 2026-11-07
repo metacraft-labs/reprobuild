@@ -87,8 +87,9 @@ proc requireUsesAdmitInstalledPrefixNim*(rawConstraints: openArray[string]) =
   ##
   ## Run inside the extraction
   ## (`repro_interface_artifacts.extractInterfaceFromModule`, whose body is
-  ## not exported: a cold extraction is checked before it publishes anything,
-  ## its warm short-circuit by the exported entry) and on
+  ## not exported and checks every artifact it returns: a cold extraction
+  ## before it publishes anything, its warm short-circuit on the artifact it
+  ## returns) and on
   ## `liftInterfaceArtifact`'s fresh-artifact path, which reads a recorded
   ## artifact without extracting.
   ## The build engine's interface edge (`repro_cli_support.extractInterfaceEdge`)

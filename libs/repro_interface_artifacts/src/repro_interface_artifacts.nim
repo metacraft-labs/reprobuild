@@ -7798,22 +7798,22 @@ proc extractInterfaceFromModuleBody(modulePath, artifactPath,
     ProjectInterfaceArtifact =
   ## The extraction itself. Deliberately NOT exported: the only way to
   ## EXTRACT an interface from outside this module is
-  ## ``extractInterfaceFromModule``. A cold extraction checks the recipe's
-  ## ``uses: nim`` against the installed prefix's compiler (N3) on the
-  ## runner's staged output, BEFORE anything is published at
-  ## ``artifactPath`` / ``stubPath`` or a warm record is written, so a refused
-  ## extraction leaves nothing of its own and leaves an earlier, admitted
-  ## artifact at that path untouched. The warm short-circuit returns an
-  ## already-published artifact without checking; the exported entry checks
-  ## that. Inside this module, ``liftInterfaceArtifact`` extracts through the
-  ## exported entry too (``t_extraction_checks_the_prefix_nim`` holds its cold
-  ## and fresh paths).
+  ## ``extractInterfaceFromModule``, which forwards here. Every return of this
+  ## body is checked against the installed prefix's compiler (N3,
+  ## ``requireUsesAdmitInstalledPrefixNim``): the warm short-circuit checks the
+  ## already-published artifact it returns, and a cold extraction checks the
+  ## runner's staged output BEFORE anything is published at ``artifactPath`` /
+  ## ``stubPath`` or a warm record is written, so a refused extraction leaves
+  ## nothing of its own and leaves an earlier, admitted artifact at that path
+  ## untouched. A caller inside this module (``liftInterfaceArtifact``) is
+  ## therefore checked whether it calls this body or the exported entry.
   ##
   ## This does not cover READING an interface already on disk:
   ## ``readInterfaceArtifact`` is exported, and readers take an artifact from
-  ## its path without extracting -- e.g. ``repro_tool_profiles``,
-  ## ``repro_cli_support`` (``m9r14fLoadInterfaceToolUses``) and
-  ## ``repro_agent_backend/stage`` (its fingerprint only). What they find was
+  ## its path without extracting -- e.g. ``repro_tool_profiles``
+  ## (``m9r14fLoadInterfaceToolUses``), ``repro_cli_support``
+  ## (``producerInterfaceExecutableNames``) and ``repro_agent_backend/stage``
+  ## (its fingerprint only). What they find was
   ## published by an extraction that passed the check under the value of
   ## ``$REPRO_INSTALLED_PREFIX_NIM`` it ran with; nothing re-checks a read
   ## against a different value.
@@ -7855,7 +7855,13 @@ proc extractInterfaceFromModuleBody(modulePath, artifactPath,
     let probe = interfaceExtractionCacheProbe(modulePath, artifactPath,
       stubPath, workDir, requireStub, resourceModule, extraPaths)
     if probe.artifact.isSome:
-      return probe.artifact.get()
+      # The warm short-circuit answers without compiling; it is checked here,
+      # like a cold extraction below, so no return of this body is unchecked
+      # (A15 round-7 verification, 2026-11-07).
+      result = probe.artifact.get()
+      requireUsesAdmitInstalledPrefixNim(
+        result.projectInterface.toolUses.mapIt(it.rawConstraint))
+      return
     fingerprintContext = probe.fingerprintContext
     inputFingerprint = probe.inputFingerprint
   else:
@@ -8280,14 +8286,12 @@ proc extractInterfaceFromModule*(modulePath, artifactPath, stubPath: string;
   ## interface, not a step each caller has to remember (A15 round-4
   ## verification, 2026-11-07, found a text-scanning guard that a
   ## ``when false:`` or a new direct call slipped past). It is not a
-  ## property of reading one: see ``extractInterfaceFromModuleBody``. A cold
-  ## extraction is checked inside the body before it publishes; the check
-  ## here answers for the warm short-circuit.
-  result = extractInterfaceFromModuleBody(modulePath, artifactPath,
+  ## property of reading one: see ``extractInterfaceFromModuleBody``, which
+  ## checks every artifact it returns, warm or cold, so this entry makes no
+  ## check of its own.
+  extractInterfaceFromModuleBody(modulePath, artifactPath,
     stubPath, workDir, scratchDir, requireStub, resourceModule, extraPaths,
     consumerRoot, useExtractionCache, recipeRelative, relocationAnchors)
-  requireUsesAdmitInstalledPrefixNim(
-    result.projectInterface.toolUses.mapIt(it.rawConstraint))
 
 proc providerFingerprintFor*(inputSources: openArray[string];
                              interfaceFingerprint: ContentDigest;
