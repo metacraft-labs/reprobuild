@@ -187,3 +187,51 @@ suite "run_tests.sh strips a foreign preload":
       env = [("T_FP_INPUT", Foreign)]), repoRoot())
     check res.code == 0
     check res.output == Foreign
+
+suite "every add-on gate and harness entry point applies the guard":
+  # A13 round 6 (2026-11-07): scripts/run_addon_gate.sh did not call the
+  # guard, so a VM gate started from an agent-harbor session ran its engine
+  # actions with the harness's command-trace shim beside the monitor shim;
+  # agent-harbor 0.6.16's shim then deadlocks in its constructor
+  # (ld_preload::later_copy_original) and the gate's profile compile hangs.
+  # Every scripts/run_addon_*.sh, and run_tests.sh, must source the lib and
+  # call the guard before it changes directory or does anything else.
+
+  proc entryPoints(): seq[string] =
+    for f in walkFiles(repoRoot() / "scripts" / "run_addon_*.sh"):
+      result.add(f)
+    result.add(repoRoot() / "scripts" / "run_tests.sh")
+
+  test "each entry point sources the lib and calls the guard first":
+    let eps = entryPoints()
+    check eps.len >= 3
+    for f in eps:
+      checkpoint(f)
+      var guardAt, sourceAt, cdAt = -1
+      var i = 0
+      for raw in lines(f):
+        let l = raw.strip()
+        if l.len > 0 and l[0] != '#':
+          if sourceAt < 0 and l.startsWith("source ") and
+              "lib/foreign_preload.sh" in l:
+            sourceAt = i
+          if guardAt < 0 and l.startsWith("foreign_preload_guard"):
+            guardAt = i
+          if cdAt < 0 and l.startsWith("cd "):
+            cdAt = i
+        inc i
+      check sourceAt >= 0
+      check guardAt > sourceAt
+      check cdAt < 0 or guardAt < cdAt
+
+  test "run_addon_gate.sh strips a foreign preload before it does anything":
+    let v = preloadVar()
+    let res = runShell(shellCommand(["bash", "-c",
+      "export " & v & "=\"$T_FP_INPUT\"; bash scripts/run_addon_gate.sh " &
+      "t_no_such_gate_for_the_guard_test; echo \"exit=$?\""],
+      env = [("T_FP_INPUT", Foreign)]), repoRoot())
+    checkpoint(res.output)
+    check "foreign preload(s); removed for this run" in res.output
+    check "no such gate" in res.output
+    check "exit=2" in res.output
+
