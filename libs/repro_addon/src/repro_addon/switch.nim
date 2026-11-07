@@ -511,7 +511,7 @@ proc startedSince*(unit: string; since: float): bool =
 
 proc runStart*(ts: seq[Transition]; paused: openArray[string] = [];
                notRunning: openArray[string] = []; noBlock = false;
-               reloadedAt = 0.0) =
+               reloadedAt = 0.0; afterStart: proc (unit: string) = nil) =
   ## Step 7: start, restart or reload in the order given. A
   ## ``stop-start`` unit was stopped in step 2 and is started here. Every
   ## start of an exclusive unit first confirms the unit and its
@@ -531,7 +531,13 @@ proc runStart*(ts: seq[Transition]; paused: openArray[string] = [];
   ## enabled (§7.3 Upheld units). It is left running and only its
   ## predecessors are confirmed exited: stopping it would have the upholder
   ## start it again at once, and the confirmation could never succeed.
+  ##
+  ## ``afterStart`` runs right after each unit's own start or restart, before
+  ## the next unit's: what that start created is the unit's (§13 decision 68,
+  ## the floor's record of the directories a start made).
   let pausedSet = @paused
+  proc started(u: string) =
+    if afterStart != nil: afterStart(u)
   var restored: seq[string]
   proc restoreTriggers(units: openArray[string]) =
     for trig in units:
@@ -568,9 +574,11 @@ proc runStart*(ts: seq[Transition]; paused: openArray[string] = [];
         # activation from here on runs the new definition.
         restoreTriggers(t.triggers)
         startUnit(t.unit, noBlock)
+        started(t.unit)
     of tvRestart:
       if t.secretsChanged: discard restartForChangedSecrets(t.unit, noBlock)
       else: tryRestartUnit(t.unit, noBlock)
+      started(t.unit)
     of tvReload: reloadUnit(t.unit, noBlock)
     else: discard
   when mutated("exclusive-as-plain-restart"):

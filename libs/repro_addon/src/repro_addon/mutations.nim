@@ -1140,6 +1140,44 @@ const
                           # again by where it resolves (two rules, one
                           # refusal).
                           "writable-env-judged-twice",
+                          # A9 review round 10 (§13 decisions 67-70):
+                          # ownership as provenance; the record keyed by
+                          # path alone; the record taken after the whole
+                          # start step; a unit named after a base tree
+                          # refused only through a directory; a longer
+                          # name taken as the unit's own; the activator's
+                          # reached units unchecked; refusal lines with no
+                          # rule tag, and a gate that skips them.
+                          "ownership-as-provenance",
+                          "created-dirs-by-path",
+                          "created-dirs-per-step",
+                          "base-tree-units-by-directory",
+                          "own-names-by-prefix",
+                          "activator-reach-unchecked",
+                          "refusal-lines-untagged",
+                          "untagged-lines-skipped",
+                          # a directory the unit's own restart made
+                          # again not recorded again.
+                          "created-dirs-not-rerecorded",
+                          # §13 decision 71, one per condition: a
+                          # directory not recorded for the unit, one not
+                          # exactly declared, one systemd's state does not
+                          # show it made, each taken as made again.
+                          "recreated-unrecorded-accepted",
+                          "recreated-any-path",
+                          "recreated-systemd-unchecked",
+                          # a directory decision 71 accepted, then made
+                          # again by the same switch, not recorded again.
+                          "accepted-not-rerecorded",
+                          # §13 decision 72, the one-time migration:
+                          # it runs again over an existing record; it
+                          # takes a directory not exactly declared; a
+                          # corrupt record counts as absent; it takes a
+                          # unit the committed generation did not install.
+                          "migration-reruns",
+                          "migration-any-path",
+                          "corrupt-record-as-absent",
+                          "migration-any-unit",
                           # A13: a state backup or restore runs while a
                           # unit of the set may run.
                           "state-units-not-checked",

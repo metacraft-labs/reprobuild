@@ -673,27 +673,151 @@ proc firstComponentPaths*(show: ShowProps): seq[tuple[key, path: string]] =
         result.add((k & "Symlink", normalisedPath(root & "/" &
                     t[c + 1 .. ^1].split('/')[0])))
 
+type
+  PathIdentity* = tuple[exists: bool; dev, ino: uint64]
+    ## A path's identity as ``lstat`` reports it: the device and the inode
+    ## (a directory removed and made again at the same path is another).
+  CreatedDir* = object
+    ## One entry of ``floor-created-dirs`` (§13 decision 68): the directory
+    ## the start of ``unit`` created, with the identity it had then and the
+    ## unit's ``InvocationID`` at that start (decision 71).
+    unit*: string
+    dev*, ino*: uint64
+    invocation*: string
+  SystemdView* = object
+    ## What systemd's own state says about a directory of a unit, for §13
+    ## decision 71 (``systemdRecreated``).
+    dynamicUid*: int
+      ## the uid whose record in ``/run/systemd/dynamic-uid/`` names the
+      ## unit's dynamic user, or -1 (systemd ``src/core/dynamic-user.c``:
+      ## one file per allocated uid, holding the user's name)
+    owner*: int
+      ## the directory's owner, through systemd's own ``private/<name>``
+      ## link of a dynamic user and no other link; -1 when it cannot be read
+    ctime*: int64
+      ## the directory's ctime, seconds since the epoch
+    invocationId*: string
+      ## the unit's current ``InvocationID``
+    invocationStart*: int64
+      ## when its current invocation began (``InactiveExitTimestamp``,
+      ## seconds since the epoch); 0 when unknown
+
+proc identityOfPath*(path: string): PathIdentity =
+  ## ``path``'s identity now (not following a final link), or not there.
+  var st: Stat
+  if lstat(path.cstring, st) != 0: return (false, 0'u64, 0'u64)
+  (true, uint64(st.st_dev), uint64(st.st_ino))
+
+proc createdForUnit*(path, unit: string; now: PathIdentity;
+                     created: Table[string, CreatedDir];
+                     ledgerDirs: HashSet[string]): bool =
+  ## ``path`` was created for ``unit`` (§13 decision 67): the add-on
+  ## recorded it when the unit's own start created it and it is still that
+  ## directory (the same device and inode, §13 decision 68), or the ledger
+  ## names it as a directory the add-on made. Nothing else counts: not who
+  ## owns it, not a dynamic id, not a link into ``private/``.
+  if path in ledgerDirs: return true
+  if path notin created: return false
+  let c = created[path]
+  if c.unit != unit: return false
+  when mutated("created-dirs-by-path"):
+    return true
+  now.exists and c.dev == now.dev and c.ino == now.ino
+
+proc startMayCreate*(path, unit: string; now: PathIdentity;
+                     created: Table[string, CreatedDir];
+                     acceptedNow: openArray[string] = []): bool =
+  ## ``path`` is one the start of ``unit`` in this switch may create, so the
+  ## record is written for it right after that start (§13 decision 68): it
+  ## is absent now, or it is the unit's recorded directory, which a restart
+  ## removes and makes again with a new identity (systemd.exec(5),
+  ## ``RuntimeDirectoryPreserve=no``). So is one this switch's check just
+  ## accepted as made again by systemd (``acceptedNow``, §13 decision 71).
+  ## Anything else that exists is not the unit's to record.
+  if not now.exists: return true
+  when not mutated("accepted-not-rerecorded"):
+    if path in acceptedNow: return true
+  when mutated("created-dirs-not-rerecorded"):
+    return false
+  path in created and created[path].unit == unit and
+    created[path].dev == now.dev and created[path].ino == now.ino
+
+proc declaredDirectories*(show: ShowProps): seq[string] =
+  ## Every directory the unit declares, as systemd resolves it: each
+  ## ``RuntimeDirectory=``, ``StateDirectory=``, ``CacheDirectory=``,
+  ## ``LogsDirectory=`` and ``ConfigurationDirectory=`` value under its root
+  ## (systemd.exec(5)), the whole value, not its first component.
+  for (k, root) in DirectoryRoots:
+    for t in words(show.getOrDefault(k)):
+      let d = t.split(':')[0]
+      if d.len > 0: result.add(normalisedPath(root & "/" & d))
+
+proc systemdRecreated*(path, unit: string; declared: openArray[string];
+                       created: Table[string, CreatedDir]; dynamic: bool;
+                       v: SystemdView): string =
+  ## Why ``path``, recorded for ``unit`` under another identity, may not be
+  ## taken as made again for it by systemd, or "" (§13 decision 71): a
+  ## restart outside a switch (``Restart=``, an operator), or an activation
+  ## by its socket or timer, removes and makes again a directory the
+  ## add-on recorded at the unit's start in a switch. All three must hold:
+  ##
+  ## 1. the record names ``path`` for this same unit;
+  ## 2. ``path`` is exactly one of the directories the unit declares
+  ##    (``declaredDirectories``), never a prefix or a parent of one;
+  ## 3. systemd's state shows it made the directory for the unit's current
+  ##    invocation: for a dynamic user, ``/run/systemd/dynamic-uid/`` names
+  ##    the unit's user and the directory is that uid's; otherwise the
+  ##    unit's ``InvocationID`` is not the one recorded at the add-on's
+  ##    start, and the directory's ctime is not before the current
+  ##    invocation began.
+  ##
+  ## Ownership alone never counts (decision 67): it is condition 3's
+  ## second half for a dynamic user, after systemd's own record names the
+  ## uid.
+  when not mutated("recreated-unrecorded-accepted"):
+    if path notin created: return "the add-on has no record of it"
+    if created[path].unit != unit:
+      return "the record names it for " & created[path].unit
+  when not mutated("recreated-any-path"):
+    if path notin declared:
+      return "it is not exactly a directory the unit declares"
+  when not mutated("recreated-systemd-unchecked"):
+    if dynamic:
+      if v.dynamicUid < 0:
+        return "no record in /run/systemd/dynamic-uid names the unit's user"
+      if v.owner != v.dynamicUid:
+        return "it is not owned by the unit's dynamic uid " & $v.dynamicUid
+    else:
+      if v.invocationId.len == 0 or v.invocationId == created[path].invocation:
+        return "the unit's invocation is the one the add-on recorded, or unknown"
+      if v.invocationStart <= 0 or v.ctime < v.invocationStart:
+        return "it predates the unit's current invocation"
+  ""
+
 proc managerPathProblem*(path: string; uid: int; dynamic: bool): string =
   ## Why the service manager may not create ``path`` (a ``*Directory=`` or
-  ## its link) for a unit running as ``uid`` (``dynamic``: a dynamic user),
-  ## as the host is now, or "": it does not exist yet, or it is the unit's
-  ## own -- owned by its static account, or, for a dynamic user, a dynamic
-  ## id's or the manager's link into ``private/`` (systemd.exec(5),
-  ## ``DynamicUser=``). An existing path of anyone else's -- ``/run/systemd``
-  ## for ``RuntimeDirectory=systemd`` -- would be chowned to the service by
-  ## the manager, as root (A9 review round 7, finding 2).
+  ## its link) for a unit running as ``uid`` (``dynamic``: a dynamic user)
+  ## as the host is now, or "": it does not exist yet. An existing path is
+  ## judged by its provenance alone (``createdForUnit``; §13 decision 67):
+  ## who owns it says nothing of which unit it was made for -- any dynamic
+  ## id, a root link into another unit's ``private/``, a static account
+  ## other units or packages share (A9 review round 10, finding 1). Round
+  ## 7's ``/run/systemd`` for ``RuntimeDirectory=systemd`` is one: the
+  ## manager would chown it to the service, as root.
   var st: Stat
   if lstat(path.cstring, st) != 0: return ""
   let owner = int(st.st_uid)
-  if not dynamic and uid > 0 and owner == uid: return ""
-  if dynamic:
-    if owner in 61184 .. 65519: return ""
-    if S_ISLNK(st.st_mode) and owner == 0:
-      try:
-        if expandSymlink(path).startsWith("private/"): return ""
-      except OSError: discard
-  "it exists and belongs to uid " & $owner & ", not to the unit's own " &
-    "account; the manager would hand it to the service"
+  when mutated("ownership-as-provenance"):
+    # Falsifying build: round 9's reading, ownership as provenance.
+    if not dynamic and uid > 0 and owner == uid: return ""
+    if dynamic:
+      if owner in 61184 .. 65519: return ""
+      if S_ISLNK(st.st_mode) and owner == 0:
+        try:
+          if expandSymlink(path).startsWith("private/"): return ""
+        except OSError: discard
+  "it exists (owned by uid " & $owner & ") and the manager would hand it " &
+    "to the service"
 
 proc ownUnitOf*(unit: string; own: HashSet[string]): bool =
   ## ``unit`` is one of the generation's units, or an instance of a
@@ -714,6 +838,90 @@ proc implicitConflict*(t: string): bool =
   ## ``t`` is one systemd adds to ``Conflicts=`` itself (``ImplicitConflicts``).
   when mutated("implicit-conflicts-refused"): false
   else: t in ImplicitConflicts
+
+proc depsFrom*(root: string; show: ShowProps;
+               startsOf: proc (u: string): seq[string];
+               ownUnits: HashSet[string]; triggers = false):
+               proc (u: string): seq[string] =
+  ## What a unit starts, as the effective check reads it, for a walk from
+  ## ``root``: the root's own starting dependencies from ``systemctl show``
+  ## (and, for an activator, ``Triggers=``), any other unit's as systemd
+  ## reports it (``startsOf``) -- a unit the generation does not install
+  ## included. The one dependency reading of the effective half: the
+  ## floored service and its activators both walk it (A9 review rounds 9
+  ## and 10).
+  result = proc (u: string): seq[string] =
+    if u == root:
+      for k in StartingDependencyKeys: result.add(words(show.getOrDefault(k)))
+      if triggers: result.add(words(show.getOrDefault("Triggers")))
+    elif startsOf != nil:
+      when mutated("reach-stops-at-base-units"):
+        # Falsifying build: round 8's walk, which ended at a unit the
+        # generation does not install.
+        if not ownUnitOf(u, ownUnits): return
+      result = startsOf(u)
+
+proc reachedConflicts*(root: string; deps: proc (u: string): seq[string];
+                       ownUnits: HashSet[string];
+                       conflictsOf: proc (unit: string): seq[string]):
+                       seq[tuple[unit, target: string]] =
+  ## Each unit of the generation ``root`` reaches (``reachedUnits`` over
+  ## ``deps``) whose ``Conflicts=`` names a unit the generation does not
+  ## install (§13 decision 55): starting the root starts it, and starting
+  ## it stops that unit. Shared by the floored service and its activators.
+  if conflictsOf == nil: return
+  for u in reachedUnits([root], deps).units:
+    if not ownUnitOf(u, ownUnits): continue
+    for t in conflictsOf(u):
+      if not implicitConflict(t) and not ownUnitOf(t, ownUnits):
+        result.add((u, t))
+
+
+const UnitSuffixes = [".service", ".socket", ".timer", ".path", ".target",
+  ".mount", ".automount", ".swap", ".slice", ".scope", ".device"]
+
+proc refusalRuleCodes*(output, stem: string): seq[string] =
+  ## The rule codes of the effective check's refusals in ``output`` (an
+  ## apply's output) that bear on the units of stem ``stem`` (``<stem>.`` or
+  ## ``<stem>@``: its service, socket, instances), for the effective-unit
+  ## gate. The check prints one refusal per line under
+  ## ``EAddOnFloorNotEffective:`` until ``nothing was started``, each
+  ## ``<subject>: <text> [rule:<code> key:<Key>]``. A tagged line counts when
+  ## its subject is one of those units or is not a unit at all (the
+  ## service manager, the unit search path): such a refusal stops every
+  ## unit. A line with no tag counts, as ``untagged``, whatever its subject:
+  ## it is a reason the case was refused that no rule names (A9 review round
+  ## 10, finding 4).
+  var inBlock = false
+  for raw in output.splitLines():
+    var l = raw.strip()
+    if not inBlock:
+      let at = l.find("EAddOnFloorNotEffective:")
+      if at < 0: continue
+      inBlock = true
+      l = l[at + "EAddOnFloorNotEffective:".len .. ^1].strip()
+      if l.len == 0: continue
+    if l == "nothing was started":
+      inBlock = false
+      continue
+    if l.len == 0: continue
+    let tag = l.rfind("[rule:")
+    if tag < 0:
+      when not mutated("untagged-lines-skipped"):
+        if "untagged" notin result: result.add("untagged")
+      continue
+    let colon = l.find(": ")
+    let subject = if colon >= 0: l[0 ..< colon] else: ""
+    let own = subject.startsWith(stem) and subject.len > stem.len and
+      subject[stem.len] in {'.', '@'}
+    let isUnit = UnitSuffixes.anyIt(subject.endsWith(it))
+    if not own and isUnit: continue
+    let close = l.find(']', tag)
+    var code = ""
+    for ch in l[tag + "[rule:".len ..< (if close > 0: close else: l.len)]:
+      if ch == ' ': break
+      code.add(ch)
+    if code notin result: result.add(code)
 
 proc conflictsProblems*(unit: string; show: ShowProps;
                         own: HashSet[string]): seq[string] =
@@ -907,7 +1115,8 @@ proc activatorProblems*(unit: string; show: ShowProps; lines: ShowLines;
                         fragment: string; ownDropIns: openArray[string];
                         loaded: openArray[tuple[path, content: string]] = [];
                         startsOf: proc (u: string): seq[string] = nil;
-                        ownUnits = initHashSet[string]()):
+                        ownUnits = initHashSet[string]();
+                        conflictsOf: proc (unit: string): seq[string] = nil):
                         seq[string] =
   ## A socket, timer or path unit that triggers a floored service, as
   ## systemd reads it (A9 review rounds 5 and 7): loaded from the add-on's
@@ -954,15 +1163,19 @@ proc activatorProblems*(unit: string; show: ShowProps; lines: ShowLines;
     for k in ["SocketUser", "SocketGroup"]:
       if show.getOrDefault(k) in ["root", "0"]:
         problem2("socket-option", k, k & "=" & show[k] & " (the floor allows only a non-root account)")
-    let route = systemStateRoute([unit], proc (u: string): seq[string] =
-      if u == unit:
-        for k in StartingDependencyKeys: result.add(words(show.getOrDefault(k)))
-        result.add(words(show.getOrDefault("Triggers")))
-      elif startsOf != nil:
-        result = startsOf(u))
+    let deps = depsFrom(unit, show, startsOf, ownUnits, triggers = true)
+    let route = systemStateRoute([unit], deps)
     if route.len > 0:
       problem2("system-state", StartingDependencyKeys.join(","), "starts " & route[^1] & " (" & route.join(" -> ") &
               "), which changes the whole system's state")
+    # The units the activator reaches are held to decision 55 as the
+    # floored service's are: the same walk, the same check (A9 review round
+    # 10, finding 3).
+    when not mutated("activator-reach-unchecked"):
+      for (u, t) in reachedConflicts(unit, deps, ownUnits, conflictsOf):
+        problem2("conflicts", "Conflicts", u & " (reached from " & unit &
+                 "): Conflicts=" & t & " names a unit the generation " &
+                 "does not install")
     for (path, content) in loaded:
       let why = activatorRefusal(unit, content, dropIn = path != fragment,
                                  half = fhEffective)
@@ -1025,9 +1238,21 @@ type
     adoptedFiles*: Table[string, string]
       ## the ``fs.systemFile`` paths the generation adopts (``collision =
       ## adopt``), each with the sha256 its ledger records
-    createdDirs*: Table[string, string]
-      ## the directories the add-on recorded as created for a unit when it
-      ## started (path -> unit; ``floor-created-dirs``, §13 decision 57)
+    createdDirs*: Table[string, CreatedDir]
+      ## the directories the add-on recorded as created for a unit by its
+      ## own start, with their identity (``floor-created-dirs``, §13
+      ## decisions 57, 67 and 68)
+    ledgerDirs*: HashSet[string]
+      ## the directories the ledger records as the add-on's (``lcDir``):
+      ## created for the profile, so for its unit (§13 decision 67)
+    pathIdentity*: proc (path: string): PathIdentity
+      ## a path's identity now (``identityOfPath``; a test stands in for it)
+    systemdView*: proc (path, unit: string; show: ShowProps): SystemdView
+      ## systemd's own state of a directory of the unit (§13 decision 71);
+      ## ``nil``: none is consulted, so a changed identity is refused
+    onRecreated*: proc (path, unit: string; v: SystemdView)
+      ## told of each directory accepted by decision 71, to record it again
+      ## under its new identity and log the acceptance
     conflictsOf*: proc (unit: string): seq[string]
       ## what another unit's ``Conflicts=`` names, as systemd reports it
     startsOf*: proc (unit: string): seq[string]
@@ -1050,22 +1275,8 @@ proc expectedCommands*(files: openArray[string]; key: string): seq[string] =
       for c in commands(d.value): result.add(c.path)
 
 proc effectiveDepsOf*(e: EffectiveInput): proc (u: string): seq[string] =
-  ## What a unit starts, as the effective check reads it: the checked unit's
-  ## own starting dependencies from ``systemctl show``, any other unit's as
-  ## systemd reports it (``startsOf``) -- a unit the generation does not
-  ## install included.
-  let unit = e.unit
-  let show = e.show
-  let starts = e.startsOf
-  result = proc (u: string): seq[string] =
-    if u == unit:
-      for k in StartingDependencyKeys: result.add(words(show.getOrDefault(k)))
-    elif starts != nil:
-      when mutated("reach-stops-at-base-units"):
-        # Falsifying build: round 8's walk, which ended at a unit the
-        # generation does not install.
-        if not ownUnitOf(u, e.ownUnits): return
-      result = starts(u)
+  ## ``depsFrom`` for the checked unit.
+  depsFrom(e.unit, e.show, e.startsOf, e.ownUnits)
 
 proc effectiveReach*(e: EffectiveInput): seq[string] =
   ## Every unit the checked unit reaches, by the floor's one reach
@@ -1121,6 +1332,11 @@ proc effectiveFloorProblems*(e: EffectiveInput): seq[string] =
         problem2(code, k, msg)
   if show.getOrDefault("LoadState") != "loaded":
     problem2("load-state", "LoadState", "LoadState=" & show.getOrDefault("LoadState") & ", not loaded")
+  # §13 decisions 57 and 70: a floored unit is never named after a base
+  # tree, whatever directories it declares.
+  block:
+    let bn = baseTreeUnitRefusal(unit)
+    if bn.len > 0: problem2("unit-name", "Id", bn)
   for k in ScalarFloorKeys:
     if k in fb:
       let want = fb[k][^1]
@@ -1364,12 +1580,12 @@ proc effectiveFloorProblems*(e: EffectiveInput): seq[string] =
           if why.len > 0:
             problem2("directories", k, why)
             shapeRefused.incl(normalisedPath(root & "/" & t.split(':')[0].split('/')[0]))
-      # §13 decision 57, on every apply: the first component of each
-      # directory, if it exists, was created for this unit -- owned by its
-      # account (systemd made it for an earlier generation), or recorded by
-      # the add-on when the unit's start created it. A tree another package
-      # put there is refused. A tree installed after this check is caught at
-      # the next apply (the residual the decision names).
+      # §13 decisions 57, 67 and 68, on every apply: the first component of
+      # each directory, if it exists, was created for this unit -- the add-on
+      # recorded it when the unit's own start made it, and it is still that
+      # directory, or the ledger names it. Ownership never counts. A tree
+      # another package put there is refused; one installed after this
+      # check is caught at the next apply (the residual the decision names).
       when not mutated("existing-trees-allowed"):
         for fp in firstComponentPaths(show):
           if fp.path in shapeRefused or inAddOnTree(fp.path): continue
@@ -1377,7 +1593,17 @@ proc effectiveFloorProblems*(e: EffectiveInput): seq[string] =
                      else: managerPathProblem(fp.path, uid, dynamic))
           if why.len == 0: continue
           when not mutated("created-dirs-ignored"):
-            if e.createdDirs.getOrDefault(fp.path) == unit: continue
+            let now = (if e.pathIdentity != nil: e.pathIdentity(fp.path)
+                       else: identityOfPath(fp.path))
+            if createdForUnit(fp.path, unit, now, e.createdDirs, e.ledgerDirs): continue
+            # §13 decision 71: made again by systemd for the unit's current
+            # invocation, outside a switch.
+            if fp.path in e.createdDirs and e.systemdView != nil:
+              let v = e.systemdView(fp.path, unit, show)
+              if systemdRecreated(fp.path, unit, declaredDirectories(show),
+                                  e.createdDirs, dynamic, v).len == 0:
+                if e.onRecreated != nil: e.onRecreated(fp.path, unit, v)
+                continue
           problem2("existing-tree", fp.key, fp.key & " " & fp.path & ": " & why &
                    "; it exists and was not created for this unit (§13 decision 57)")
       for (k, p) in created:
@@ -1507,14 +1733,10 @@ proc effectiveFloorProblems*(e: EffectiveInput): seq[string] =
     # Every unit of the generation the unit reaches is held to decision 55:
     # starting it stops what its Conflicts= names.
     when not mutated("reached-conflicts-unchecked"):
-      if e.conflictsOf != nil:
-        for u in effectiveReach(e):
-          if not ownUnitOf(u, e.ownUnits): continue
-          for t in e.conflictsOf(u):
-            if not implicitConflict(t) and not ownUnitOf(t, e.ownUnits):
-              problem2("conflicts", "Conflicts", u & " (reached from " & unit &
-                       "): Conflicts=" & t & " names a unit the generation " &
-                       "does not install")
+      for (u, t) in reachedConflicts(unit, effectiveDepsOf(e), e.ownUnits, e.conflictsOf):
+        problem2("conflicts", "Conflicts", u & " (reached from " & unit &
+                 "): Conflicts=" & t & " names a unit the generation " &
+                 "does not install")
     for k in ["OnFailureJobMode", "OnSuccessJobMode"]:
       if show.getOrDefault(k) notin ["", "replace", "fail"]:
         problem2("job-mode", k, k & "=" & show[k] & " changes the system's state beyond " &

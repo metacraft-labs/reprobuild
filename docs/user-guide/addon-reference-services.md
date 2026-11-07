@@ -106,15 +106,30 @@ The add-on handles this in four ways:
   - a directory or link that the service manager would create for the
     unit and that is not the unit's own: each `RuntimeDirectory=`,
     `StateDirectory=`, `CacheDirectory=`, `LogsDirectory=` and
-    `ConfigurationDirectory=` must be named after the unit (`foo`,
-    `foo-data`, or below them for `foo.service`), never inside another
-    program's tree (`systemd/system/...`, `udev/rules.d`) or the add-on's
-    own directories. A unit may not be named after a directory the base
-    system already has (`systemd.service`, `udev.service`), and a
-    directory that already exists on the host is refused unless it was
-    created for this unit: by its own account, or by its start in an
-    earlier apply. A directory another package installs after an apply is
-    refused at the next one;
+    `ConfigurationDirectory=` must be named exactly after the unit (`foo`
+    for `foo.service`, with anything more below it: `foo/data`), never
+    inside another program's tree (`systemd/system/...`, `udev/rules.d`)
+    or the add-on's own directories. A directory's link must have the
+    same name, so in practice a floored unit sets none. A unit may not be
+    named after a directory the base system already has
+    (`systemd.service`, `udev.service`, `ssh.service`), whatever
+    directories it sets. A directory that already exists on the host is
+    refused unless the add-on recorded it when the unit's own start, in an
+    earlier apply, created it, and it is still that same directory; who
+    owns it does not matter. When the unit is restarted or activated
+    between applies, systemd removes such a directory and makes it again;
+    the next apply accepts it only if it is exactly one of the unit's
+    directories and systemd's own state shows it was made for the unit's
+    current run, and it logs that acceptance in the generation's audit
+    log. On a host upgraded from an add-on version that kept no such
+    record, the first apply records, once, the directories the installed
+    services exactly declare and logs each one. A directory first created outside an apply (the unit's first
+    start by its socket or timer, or by hand) is refused at the next
+    apply, and so is one another package installs.
+    The list of base-system directory names was measured on the amd64
+    Debian 12 and 13 and Ubuntu 24.04 and 26.04 test images; on other
+    bases, such as Raspberry Pi OS, only the existence check applies;
+  - a unix socket of such a unit must be `/run/foo` or below `/run/foo/`;
   - realtime scheduling, a reboot `FailureAction=`, or a resource limit
     above the service manager's default;
   - a dependency such as `OnFailure=` or `Wants=` that starts a unit

@@ -131,7 +131,11 @@ suite "round 9, finding 1 (§13 decision 57): never an existing tree":
   test "every reviewer example, at parse time":
     for (u, d) in examples:
       checkpoint u & " " & d
-      check "a tree the base system owns" in refused(unitStanza(u, d & "\n" & svc))
+      # Round 10 (§13 decision 67): a name longer than the unit's stem is
+      # refused by the shape rule before decision 57's list is consulted
+      # (modules-load.d for modules-load.service); either refuses it.
+      let why = refused(unitStanza(u, d & "\n" & svc))
+      check "a tree the base system owns" in why or "named for it" in why
   test "every reviewer example, in the effective check":
     for (u, d) in examples:
       var e = goodInput()
@@ -139,7 +143,8 @@ suite "round 9, finding 1 (§13 decision 57): never an existing tree":
       let eq = d.find('=')
       e.show[d[0 ..< eq]] = d[eq + 1 .. ^1]
       checkpoint u & " " & d
-      check "a tree the base system owns" in problemsOf(e)
+      let p = problemsOf(e)
+      check "a tree the base system owns" in p or "named for it" in p
   test "a conventional name stays allowed":
     check refused(unitStanza("nginx.service", "RuntimeDirectory=nginx\nStateDirectory=nginx/cache\n" & svc)) == ""
   test "the base trees are the measured ones":
@@ -156,21 +161,21 @@ suite "round 9, finding 1 (§13 decision 57): never an existing tree":
     check n == 4
   test "an existing tree not created for the unit is refused":
     var e = goodInput()
-    e.show["RuntimeDirectory"] = "a-rt"
-    e.inspectPath = existing(["/run/a-rt"])
+    e.show["RuntimeDirectory"] = "a"
+    e.inspectPath = existing(["/run/a"])
     check "it exists and was not created for this unit" in problemsOf(e)
-  test "the unit's own existing directory is allowed: recorded, or its account's":
+  test "the unit's own existing directory is allowed: recorded for it":
+    # Round 10 (§13 decision 67): recorded for this unit and still that
+    # directory; ownership alone no longer counts (t_addon_floor_round10).
+    let here: PathIdentity = (true, 1'u64, 2'u64)
     var e = goodInput()
-    e.show["RuntimeDirectory"] = "a-rt"
-    e.inspectPath = existing(["/run/a-rt"])
-    e.createdDirs = {"/run/a-rt": "a.service"}.toTable
+    e.show["RuntimeDirectory"] = "a"
+    e.inspectPath = existing(["/run/a"])
+    e.pathIdentity = proc (p: string): PathIdentity = here
+    e.createdDirs = {"/run/a": CreatedDir(unit: "a.service", dev: 1, ino: 2)}.toTable
     check "[rule:existing-tree" notin problemsOf(e)
-    e.createdDirs = {"/run/a-rt": "b.service"}.toTable
+    e.createdDirs = {"/run/a": CreatedDir(unit: "b.service", dev: 1, ino: 2)}.toTable
     check "it exists and was not created for this unit" in problemsOf(e)
-    e = goodInput()
-    e.show["RuntimeDirectory"] = "a-rt"
-    e.inspectPath = existing([])           # owned by the unit's account
-    check "[rule:existing-tree" notin problemsOf(e)
   test "a tree installed after the first apply is refused at the next":
     let state = createTempDir("a9r9-", "-state")
     defer: removeDir(state)
@@ -180,19 +185,23 @@ suite "round 9, finding 1 (§13 decision 57): never an existing tree":
     # The first apply: both absent at the check; the unit's start creates
     # one of them, and the record is written right after the start.
     createDir(created)
-    recordCreatedDirs(state, [(created, "a.service"), (later, "a.service")])
-    check readCreatedDirs(state).getOrDefault(created) == "a.service"
+    recordCreatedDirs(state, "a.service", [(created, "a.service"), (later, "a.service")])
+    check readCreatedDirs(state).getOrDefault(created).unit == "a.service"
     check later notin readCreatedDirs(state)
     # A package installs the other tree after that; the next apply's check
     # finds it existing and unrecorded.
     createDir(later)
     var e = goodInput()
-    e.show["RuntimeDirectory"] = "a-rt a-other"
-    e.inspectPath = existing(["/run/a-rt", "/run/a-other"])
-    e.createdDirs = {"/run/a-rt": "a.service"}.toTable   # recorded at its start
+    e.show["RuntimeDirectory"] = "a"
+    e.show["StateDirectory"] = "a"
+    e.inspectPath = existing(["/run/a", "/var/lib/a"])
+    let rec = readCreatedDirs(state)[created]
+    e.pathIdentity = proc (p: string): PathIdentity =
+      if p == "/run/a": identityOfPath(created) else: identityOfPath(later)
+    e.createdDirs = {"/run/a": rec}.toTable   # recorded at its start
     let p = problemsOf(e)
-    check "RuntimeDirectory /run/a-other: it exists and belongs to uid 0" in p
-    check "RuntimeDirectory /run/a-rt:" notin p
+    check "StateDirectory /var/lib/a: it exists" in p
+    check "RuntimeDirectory /run/a:" notin p
 
 suite "round 9, finding 2: one reach for both halves":
   # The profile of the reviewer's probe "r9 C": a floored unit that wants a

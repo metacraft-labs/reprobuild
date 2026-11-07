@@ -988,10 +988,16 @@ proc unitStem*(unitName: string): string =
   if at >= 0: result = result[0 ..< at]
 
 proc ownNamed*(stem, name: string): bool =
-  ## ``name`` is named for a unit of stem ``stem``: the stem itself, or the
-  ## stem followed by ``.``, ``-`` or ``_`` and more.
-  name == stem or name.startsWith(stem & ".") or name.startsWith(stem & "-") or
-    name.startsWith(stem & "_")
+  ## ``name`` is named for a unit of stem ``stem``: exactly the stem (§13
+  ## decision 67). A longer name -- ``foo-bar``, ``foo.bar``, ``foo_bar`` for
+  ## ``foo`` -- is another unit's name as much as this one's (the stem of
+  ## ``foo-bar.service``), so a unit names only its own; what it needs
+  ## more of goes below it (``foo/bar``).
+  when FloorMutation == "own-names-by-prefix":
+    name == stem or name.startsWith(stem & ".") or name.startsWith(stem & "-") or
+      name.startsWith(stem & "_")
+  else:
+    name == stem
 
 const
   AddOnOwnedRoots* = ["/repro", "/run/repro", "/var/lib/repro",
@@ -1106,6 +1112,23 @@ const BaseSystemTreeNames* = [
   ## named like one of these, or a directory of its whose first component
   ## is one, is refused even before the tree exists on the host.
 
+proc baseTreeUnitRefusal*(unitName: string): string =
+  ## Why a floored unit may not have this name, or "": its stem is a tree
+  ## the base system owns (``BaseSystemTreeNames``), whatever directories
+  ## it declares (§13 decisions 57 and 70). The name alone would make every
+  ## directory it may own a base tree's.
+  # ``base-tree-names-allowed`` falsifies the whole list (round 9's
+  # falsifier; round 10 made the unit's name the place it bites first);
+  # ``base-tree-units-by-directory`` only the refusal by the name.
+  when FloorMutation in ["base-tree-units-by-directory", "base-tree-names-allowed"]:
+    return ""
+  let stem = unitStem(unitName)
+  if stem in BaseSystemTreeNames:
+    return unitName & " is named after " & stem & ", a tree the base system " &
+      "owns under /etc, /run, /var/lib, /var/cache or /var/log; a floored " &
+      "unit is never named after one (§13 decisions 57 and 70)"
+  ""
+
 proc managerDirectoryRefusal*(unitName, key, token: string): string =
   ## Why one ``*Directory=`` value (``dir`` or ``dir:link``) of
   ## ``unitName`` names a place the floor does not allow, or "" (A9 review
@@ -1133,7 +1156,7 @@ proc managerDirectoryRefusal*(unitName, key, token: string): string =
       return key & "=" & token & ": each component is a plain name"
   if not ownNamed(stem, parts[0]):
     return key & "=" & token & ": the directory is the unit's own, named " &
-      "for it (" & stem & ", " & stem & "-...); " & parts[0] & " is not"
+      "for it (" & stem & ", or below " & stem & "/); " & parts[0] & " is not"
   # §13 decision 57: never a tree the base system owns, whatever the unit
   # is called (``systemd.service`` with ``systemd/system/...``).
   when FloorMutation != "base-tree-names-allowed":
@@ -1147,7 +1170,7 @@ proc managerDirectoryRefusal*(unitName, key, token: string): string =
       return key & "=" & token & ": a directory's link is one plain name"
     if not ownNamed(stem, link):
       return key & "=" & token & ": the link is named for the unit (" & stem &
-        "...); " & link & " is not"
+        "); " & link & " is not"
   ""
 
 proc managerPathRefusal*(directives: openArray[tuple[key, value: string]];
@@ -1481,9 +1504,9 @@ proc listenerRefusal*(unitName, value: string): string =
   ## Why a ``ListenStream=``/``ListenDatagram=``/``ListenSequentialPacket=``
   ## value of an activator is not one the floor allows, or "": a network
   ## address (``port``, ``addr:port``, ``[addr]:port``, ``vsock:cid:port``),
-  ## an abstract socket named for the unit (``@<stem>...``), or a unix socket
-  ## named for the unit directly under ``/run`` (``/run/<stem>``,
-  ## ``/run/<stem>.<x>``, ``/run/<stem>-<x>`` or below ``/run/<stem>/``), so
+  ## an abstract socket named for the unit (``@<stem>`` or below it), or a
+  ## unix socket named for the unit under ``/run`` (``/run/<stem>`` or below
+  ## ``/run/<stem>/``; §13 decision 67: exactly the stem), so
   ## that the manager creates and removes, as root, only the unit's own
   ## path, never another service's socket or the add-on's own tree (A9
   ## review rounds 5 and 7, findings 2 and 3).
@@ -1503,12 +1526,13 @@ proc listenerRefusal*(unitName, value: string): string =
         return np & " is in the add-on's own tree"
       let first = np["/run/".len .. ^1].split('/')[0]
       if not ownName(first):
-        return np & " is not named for the unit (/run/" & stem & "..., so " &
+        return np & " is not named for the unit (/run/" & stem & " or below " &
+          "/run/" & stem & "/, so " &
           "the manager never creates, chowns or removes another's path)"
     return ""
   if v.startsWith("@"):
     if not ownName(v[1 .. ^1].split('/')[0]):
-      return "an abstract socket is named for the unit (@" & stem & "...)"
+      return "an abstract socket is named for the unit (@" & stem & " or below it)"
     return ""
   if not v.allCharsInSet({'0'..'9', '.', ':', '[', ']', 'a'..'f', 'A'..'F',
                           'v', 's', 'o', 'c', 'k'}):
@@ -1622,6 +1646,11 @@ proc floorRefusal*(unitName: string;
   # The paths the manager creates for the unit, as root (A9 review round 7,
   # finding 2): never in the add-on's own trees, and a directory's link is
   # one name.
+  # The unit's name, at parse time only: the effective half has its own
+  # rule for it (``unit-name``), so the rerun does not report it twice.
+  if half == fhParse and not off3(half):
+    let bn = baseTreeUnitRefusal(unitName)
+    if bn.len > 0: return bn
   if not off3(half):
     let mp = managerPathRefusal(directives, unitName)
     if mp.len > 0:

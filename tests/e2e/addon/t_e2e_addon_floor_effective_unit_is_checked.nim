@@ -58,6 +58,7 @@ import repro_test_support/reasoned_skip
 
 import repro_dsl_stdlib/packages/apt_closure
 import repro_addon/generation0
+from repro_addon/effective_floor import refusalRuleCodes
 
 import ./addon_testbed
 import ./deb_fixture_support
@@ -134,7 +135,7 @@ proc cases(binary, prefix: string): seq[Case] =
     Case(name: "a9e-tmpfs-exec.service", rule: "writable-place",
          service: "TemporaryFileSystem=/srv/a9e-t:mode=1777,exec\n"),
     Case(name: "a9e-drop-state.service", rule: "writable-place", service: "",
-         extra: dropIn("a9e-drop-state.service", "[Service]\nStateDirectory=a9e-drop-state-x\n")),
+         extra: dropIn("a9e-drop-state.service", "[Service]\nStateDirectory=a9e-drop-state\n")),
     Case(name: "a9e-quoted.service", rule: "writable-place",
          service: "User=a9e\nBindPaths=/var/lib/a9e-rw:'" & prefix & "/drop'\n"),
     # An instance's drop-in over a floored template of the same generation
@@ -174,7 +175,7 @@ proc cases(binary, prefix: string): seq[Case] =
     # Review round 5.
     Case(name: "a9e-envwild.service", rule: "environment-file", service: "EnvironmentFile=/etc/*/a9e.env\n"),
     Case(name: "a9e-envstate.service", rule: "environment-file",
-         service: "StateDirectory=a9e-envstate-s\nEnvironmentFile=-/var/lib/a9e-envstate-s/env\n"),
+         service: "StateDirectory=a9e-envstate\nEnvironmentFile=-/var/lib/a9e-envstate/env\n"),
     Case(name: "a9e-rt.service", rule: "realtime",
          service: "CPUSchedulingPolicy=fifo\nCPUSchedulingPriority=10\n"),
     Case(name: "a9e-fail.service", rule: "actions", service: "FailureAction=reboot-force\n"),
@@ -266,33 +267,30 @@ proc cases(binary, prefix: string): seq[Case] =
          service: "User=a9e\nRuntimeDirectory=a9e-exist\n",
          host: "mkdir -p /run/a9e-exist && chown root:root /run/a9e-exist && " &
                "chmod 0755 /run/a9e-exist"),
+    # Round 10: a timer's reach held to decision 55 in the effective half,
+    # as the service's is (finding 3): the timer wants a profile target
+    # that conflicts with a base service. A unit named after a base tree,
+    # with no directory at all (§13 decision 70; /etc/xml is the base's).
+    Case(name: "a9e-tconf.service", rule: "conflicts", service: "",
+         activatorOnly: true, probes: "a9e-tconf.timer",
+         extra: "systemd.systemUnit {\n  name = \"a9e-tconf.timer\"\n" &
+                "  content = \"[Unit]\nWants=a9e-tconf-x.target\n\n[Timer]\n" &
+                "OnCalendar=2099-01-01\n\n[Install]\nWantedBy=timers.target\n\"\n" &
+                "  enabled = true\n}\n" &
+                "systemd.systemUnit {\n  name = \"a9e-tconf-x.target\"\n" &
+                "  content = \"[Unit]\nConflicts=systemd-timesyncd.service\n\"\n" &
+                "  enabled = false\n}\n"),
+    Case(name: "xml.service", rule: "unit-name", service: ""),
     Case(name: "a9e-udev.service", rule: "directories", service: "User=a9e\nRuntimeDirectory=udev/rules.d\n"),
     Case(name: "a9e-rtnested.service", rule: "directories",
          service: "User=a9e\nRuntimeDirectory=systemd/system/zz-a9e.service.d\n"),
     Case(name: "a9e-rtsys.service", rule: "directories", service: "User=a9e\nRuntimeDirectory=systemd\n")]
 
 proc ruleCodesOf*(output, caseName: string): seq[string] =
-  ## The rule codes of the effective check's refusals of the case's own
-  ## units (``<stem>.`` or ``<stem>@``: its service, socket, instances).
-  ## The check prints one refusal per line, ``<unit>: <text> [rule:<code>
-  ## key:<Key>]``; a line that is not one has no tag.
-  let stem = caseName[0 ..< caseName.find({'.', '@'})]
-  for raw in output.splitLines():
-    var l = raw.strip()
-    let tag = l.rfind("[rule:")
-    if tag < 0: continue
-    if l.startsWith("EAddOnFloorNotEffective:"): l = l["EAddOnFloorNotEffective:".len .. ^1].strip()
-    let colon = l.find(": ")
-    if colon < 0: continue
-    let unit = l[0 ..< colon]
-    if not (unit.startsWith(stem) and unit.len > stem.len and unit[stem.len] in {'.', '@'}):
-      continue
-    let close = l.find(']', tag)
-    var code = ""
-    for ch in l[tag + "[rule:".len ..< (if close > 0: close else: l.len)]:
-      if ch == ' ': break
-      code.add(ch)
-    if code notin result: result.add(code)
+  ## The rule codes of the refusals bearing on the case's units
+  ## (``effective_floor.refusalRuleCodes``; a refusal line with no tag is
+  ## ``untagged``, so the case fails on it).
+  refusalRuleCodes(output, caseName[0 ..< caseName.find({'.', '@'})])
 
 proc invocation(g: Guest; unit: string): string =
   g.exec("systemctl show -p InvocationID --value " & unit).stdout.strip()
@@ -416,7 +414,7 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
       # The host back on the control's generation: every case unit stopped
       # and reset, no host drop-in left behind.
       discard g.run(HostCleanup & "; rm -f /etc/a9e-out; echo orig > /etc/a9e-target; " &
-        "systemctl stop 'a9e-*' 2>/dev/null; systemctl reset-failed 'a9e-*' " &
+        "systemctl stop 'a9e-*' xml.service 2>/dev/null; systemctl reset-failed 'a9e-*' xml.service " &
         "2>/dev/null; systemctl daemon-reload; true")
       let back = g.applyProfile(repro, "back", head &
         unitResource("a9e-control.service", "", binary))

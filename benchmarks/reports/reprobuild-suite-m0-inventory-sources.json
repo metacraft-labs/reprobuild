@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 34,
-    "nimTestBinaries": 2698,
+    "nimTestBinaries": 2700,
     "pureUnitConsolidationGroups": 79,
     "pureUnitTests": 742,
     "staticallyDetectedRuntimeCompilerFlowTests": 141,
-    "testEntries": 2739
+    "testEntries": 2741
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1562,10 +1562,10 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 22,
-      "integration": 1487,
+      "integration": 1488,
       "platform/destructive": 173,
       "pure unit": 742,
-      "unclassified": 315
+      "unclassified": 316
     },
     "graphOwnedTestArtifacts": [
       {
@@ -1773,9 +1773,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2698,
+    "nimTestBinaryCount": 2700,
     "pythonTestFileCount": 41,
-    "testEntryCount": 2739
+    "testEntryCount": 2741
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -9008,6 +9008,24 @@
       "source": "libs/repro_addon/tests/t_addon_fingerprint.nim",
       "sourceSuiteCount": 3,
       "staticCaseCount": 16,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_addon_floor_round10",
+      "class": "unclassified",
+      "classificationReason": "imports `posix`, which grants out-of-process reach",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_addon",
+        "repro_infra"
+      ],
+      "owner": "libs/repro_addon",
+      "requiresReproBinary": false,
+      "source": "libs/repro_addon/tests/t_addon_floor_round10.nim",
+      "sourceSuiteCount": 8,
+      "staticCaseCount": 33,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -29918,6 +29936,24 @@
       "owner": "tests/e2e",
       "requiresReproBinary": false,
       "source": "tests/e2e/addon/t_e2e_addon_base_boots_without_store.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_e2e_addon_base_tree_names_are_measured",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_infra",
+        "repro_test_support"
+      ],
+      "owner": "tests/e2e",
+      "requiresReproBinary": false,
+      "source": "tests/e2e/addon/t_e2e_addon_base_tree_names_are_measured.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 1,
       "staticallyDetectedRuntimeCompilerFlow": false,

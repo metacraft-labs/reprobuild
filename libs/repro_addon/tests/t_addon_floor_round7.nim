@@ -210,13 +210,16 @@ suite "round 7, finding 2: the start hold and the paths the manager creates":
               "CacheDirectory=a:../x"]:
       checkpoint d
       check refused(unitStanza("a.service", d & "\n" & svc)).len > 0
-    check refused(unitStanza("a.service", "RuntimeDirectory=a-rt:a-link\n" & svc)) == ""
+    # §13 decision 67: the directory and its link are named exactly for
+    # the unit, so a link of another name is refused.
+    check refused(unitStanza("a.service", "RuntimeDirectory=a/rt\n" & svc)) == ""
+    check refused(unitStanza("a.service", "RuntimeDirectory=a/rt:a-link\n" & svc)).len > 0
   test "the effective check: the add-on's trees, links, someone else's path":
     var e = goodInput()
     e.show["RuntimeDirectory"] = "repro/floor-hold/never"
     check "in the add-on's own tree" in problemsOf(e)
     e = goodInput()
-    e.show["RuntimeDirectorySymlink"] = "a-rt:systemd/system/x.service.d"
+    e.show["RuntimeDirectorySymlink"] = "a/rt:systemd/system/x.service.d"
     check "a directory's link is one name" in problemsOf(e)
     e = goodInput()
     e.show["RuntimeDirectory"] = "systemd"
@@ -258,10 +261,10 @@ suite "round 7, finding 3: each socket option by its rule":
                    ("BindToDevice", "eth0"), ("SocketUser", "root")]:
       checkpoint k & "=" & v
       check activatorProblems("a.socket", parseShow(base & k & "=" & v & "\n"),
-        parseShowLines("Listen=/run/a.sock (Stream)\n"),
+        parseShowLines("Listen=/run/a/a.sock (Stream)\n"),
         "/etc/systemd/system/a.socket", []).len > 0
     check activatorProblems("a.socket", parseShow(base & "Mark=-1\nPriority=-1\n"),
-      parseShowLines("Listen=/run/a.sock (Stream)\n"),
+      parseShowLines("Listen=/run/a/a.sock (Stream)\n"),
       "/etc/systemd/system/a.socket", []).len == 0
     check activatorProblems("a.path", parseShow("FragmentPath=/etc/systemd/system/a.path\n" &
       "DropInPaths=\nMakeDirectory=yes\n"), parseShowLines("Paths=PathExists /etc/x\n"),
@@ -292,10 +295,10 @@ suite "round 7, finding 3: each socket option by its rule":
   test "the effective check applies the parse-time rules to its files":
     let base = "FragmentPath=/etc/systemd/system/a.socket\nDropInPaths=\n"
     check activatorProblems("a.socket", parseShow(base),
-      parseShowLines("Listen=/run/a.sock (Stream)\n"),
+      parseShowLines("Listen=/run/a/a.sock (Stream)\n"),
       "/etc/systemd/system/a.socket", [],
       [(path: "/etc/systemd/system/a.socket",
-        content: "[Socket]\nListenStream=/run/a.sock\nFreeBind=yes\n")]).len > 0
+        content: "[Socket]\nListenStream=/run/a/a.sock\nFreeBind=yes\n")]).len > 0
 
 suite "round 7, finding 4: system-state units by any route":
   test "through a unit of the profile, at parse time":
@@ -338,12 +341,12 @@ suite "round 7, finding 4: system-state units by any route":
       check problemsOf(e).len > 0
   test "an activator's [Unit], at parse time and in the effective check":
     check refused(plain & rawUnit("a.socket",
-      "[Unit]\nOnFailure=reboot.target\n\n[Socket]\nListenStream=/run/a.sock\n")).len > 0
+      "[Unit]\nOnFailure=reboot.target\n\n[Socket]\nListenStream=/run/a/a.sock\n")).len > 0
     check refused(plain & rawUnit("a.socket",
-      "[Unit]\nWants=x.target\n\n[Socket]\nListenStream=/run/a.sock\n") &
+      "[Unit]\nWants=x.target\n\n[Socket]\nListenStream=/run/a/a.sock\n") &
       rawUnit("x.target", "[Unit]\nWants=halt.target\n")).len > 0
     check activatorProblems("a.socket", parseShow("FragmentPath=/etc/systemd/system/a.socket\n" &
-      "DropInPaths=\nOnFailure=reboot.target\n"), parseShowLines("Listen=/run/a.sock (Stream)\n"),
+      "DropInPaths=\nOnFailure=reboot.target\n"), parseShowLines("Listen=/run/a/a.sock (Stream)\n"),
       "/etc/systemd/system/a.socket", []).len > 0
 
 suite "round 7, finding 5: the effective half is the authority":
@@ -480,7 +483,7 @@ suite "§13 decision 55: Conflicts= names only the profile's own units":
       rawUnit("t@.service", "[Service]\nUser=a\nExecStart=" & Prefix & "/bin/svc\n")) == ""
   test "parse time, an activator":
     check "names a unit the profile does not define" in refused(plain &
-      rawUnit("a.socket", "[Unit]\nConflicts=ssh.socket\n\n[Socket]\nListenStream=/run/a.sock\n"))
+      rawUnit("a.socket", "[Unit]\nConflicts=ssh.socket\n\n[Socket]\nListenStream=/run/a/a.sock\n"))
   test "the effective check, from systemd's report and from the files":
     var e = goodInput()
     e.show["Conflicts"] = "shutdown.target"          # what systemd adds itself
@@ -495,9 +498,9 @@ suite "§13 decision 55: Conflicts= names only the profile's own units":
   test "the effective check of an activator":
     let base = "FragmentPath=/etc/systemd/system/a.socket\nDropInPaths=\n"
     check activatorProblems("a.socket", parseShow(base & "Conflicts=shutdown.target ssh.socket\n"),
-      parseShowLines("Listen=/run/a.sock (Stream)\n"), "/etc/systemd/system/a.socket", []).len > 0
+      parseShowLines("Listen=/run/a/a.sock (Stream)\n"), "/etc/systemd/system/a.socket", []).len > 0
     check activatorProblems("a.socket", parseShow(base & "Conflicts=shutdown.target\n"),
-      parseShowLines("Listen=/run/a.sock (Stream)\n"), "/etc/systemd/system/a.socket", []).len == 0
+      parseShowLines("Listen=/run/a/a.sock (Stream)\n"), "/etc/systemd/system/a.socket", []).len == 0
 
 suite "§13 decision 55: the exclusive-predecessor exception is withdrawn":
   # The owner withdrew it (A9 review round 8, finding 2): the predecessor

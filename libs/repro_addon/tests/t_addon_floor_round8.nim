@@ -114,27 +114,29 @@ suite "round 8, finding 1: every component of a *Directory= value":
                "ConfigurationDirectory=systemd/system/zz-a9r8.service.d",
                "StateDirectory=other", "CacheDirectory=a-c/../../x",
                "LogsDirectory=a/b:c", "RuntimeDirectory=a-rt:other",
-               "StateDirectory=%n"]
+               "StateDirectory=%n",
+               # §13 decision 67: a longer name is another unit's.
+               "StateDirectory=a-st", "CacheDirectory=a.c", "LogsDirectory=a_l",
+               "RuntimeDirectory=a-rt:a-link"]
   test "parse time":
     for d in bad:
       checkpoint d
       check refused(unitStanza("a.service", d & "\n" & svc)).len > 0
-    for d in ["RuntimeDirectory=a", "StateDirectory=a-st", "CacheDirectory=a.c",
-              "LogsDirectory=a_l", "StateDirectory=a/sub", "RuntimeDirectory=a-rt:a-link",
-              "ConfigurationDirectory=a"]:
+    for d in ["RuntimeDirectory=a", "StateDirectory=a/st", "CacheDirectory=a/c",
+              "LogsDirectory=a/l", "StateDirectory=a/sub", "ConfigurationDirectory=a"]:
       checkpoint d
       check refused(unitStanza("a.service", d & "\n" & svc)) == ""
   test "the effective check, from systemd's report":
     for (k, v) in [("RuntimeDirectory", "systemd/system/zz-a9r8.service.d"),
                    ("RuntimeDirectory", "udev/rules.d"),
                    ("ConfigurationDirectory", "systemd/system/zz-a9r8.service.d"),
-                   ("StateDirectorySymlink", "a-st:other")]:
+                   ("StateDirectorySymlink", "a/st:other")]:
       var e = goodInput()
       e.show[k] = v
       checkpoint k & "=" & v
       check problemsOf(e).len > 0
     var e = goodInput()
-    e.show["RuntimeDirectory"] = "a-rt a/sub"
+    e.show["RuntimeDirectory"] = "a/rt a/sub"
     check "is the unit's own" notin problemsOf(e)
     check "plain name" notin problemsOf(e)
   test "the effective check, from the loaded files (the counterpart)":
@@ -143,7 +145,8 @@ suite "round 8, finding 1: every component of a *Directory= value":
       "RuntimeDirectory=udev/rules.d\n" & FloorMarker))]
     check "udev is not" in problemsOf(e)
   test "a template's instance is named for its prefix":
-    check managerDirectoryRefusal("a@x.service", "RuntimeDirectory", "a-x") == ""
+    check managerDirectoryRefusal("a@x.service", "RuntimeDirectory", "a/x") == ""
+    check managerDirectoryRefusal("a@x.service", "RuntimeDirectory", "a-x").len > 0
     check managerDirectoryRefusal("a@x.service", "RuntimeDirectory", "x").len > 0
 
 suite "round 8, finding 3: owned store objects only, never the unit's say-so":
