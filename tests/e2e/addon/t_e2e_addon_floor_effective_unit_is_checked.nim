@@ -90,9 +90,10 @@ type Case = object
                         ## already active (systemd.socket(5)), so a service
                         ## the switch started would keep the socket from
                         ## ever applying its options
-  expect: seq[string]   ## the refusal of the rule the case targets: one of
-                        ## these is in the effective check's refusal
-                        ## (round 8, finding 4)
+  rule: string          ## the code of the rule the case targets
+                        ## (``[rule:<code>]`` on the effective check's
+                        ## refusal of the case's own unit; round 9,
+                        ## finding 3)
 
 proc unitResource(name, service, binary: string; unitLines = "";
                   enabled = true): string =
@@ -116,76 +117,76 @@ proc hostDropIn(dir, content: string): string =
 
 const HostCleanup = "rm -rf /etc/systemd/system/a9e-*.service.d/host.conf " &
   "/usr/lib/systemd/system/a9e-*.service.d " &
-  "/usr/lib/systemd/system/service.d/zz-a9e.conf; systemctl daemon-reload"
+  "/usr/lib/systemd/system/service.d/zz-a9e.conf /run/a9e-exist; systemctl daemon-reload"
 
 proc cases(binary, prefix: string): seq[Case] =
   let etc = "/etc/systemd/system/"
   let vendor = "/usr/lib/systemd/system/"
-  @[Case(name: "a9e-user-empty.service", expect: @["runs as root"], service: "User=\n"),
-    Case(name: "a9e-dyn-n.service", expect: @["runs as root"], service: "DynamicUser=n\n"),
-    Case(name: "a9e-drop-user.service", expect: @["runs as root"], service: "User=a9e\n",
+  @[Case(name: "a9e-user-empty.service", rule: "account", service: "User=\n"),
+    Case(name: "a9e-dyn-n.service", rule: "account", service: "DynamicUser=n\n"),
+    Case(name: "a9e-drop-user.service", rule: "account", service: "User=a9e\n",
          extra: dropIn("a9e-drop-user.service", "[Service]\nUser=\n")),
-    Case(name: "a9e-rw.service", expect: @["/var/lib/a9e-rw"], service: "User=a9e\nReadWritePaths=/var/lib/a9e-rw\n",
+    Case(name: "a9e-rw.service", rule: "writable-place", service: "User=a9e\nReadWritePaths=/var/lib/a9e-rw\n",
          coveredPlace: "/var/lib/a9e-rw"),
-    Case(name: "a9e-bind.service", expect: @["/srv/a9e-b"],
+    Case(name: "a9e-bind.service", rule: "writable-place",
          service: "User=a9e\nBindPaths=/var/lib/a9e-rw:/srv/a9e-b\n",
          coveredPlace: "/srv/a9e-b"),
-    Case(name: "a9e-tmpfs-exec.service", expect: @["/srv/a9e-t"],
+    Case(name: "a9e-tmpfs-exec.service", rule: "writable-place",
          service: "TemporaryFileSystem=/srv/a9e-t:mode=1777,exec\n"),
-    Case(name: "a9e-drop-state.service", expect: @["a9e-evil"], service: "",
-         extra: dropIn("a9e-drop-state.service", "[Service]\nStateDirectory=a9e-evil\n")),
-    Case(name: "a9e-quoted.service", expect: @["/drop"],
+    Case(name: "a9e-drop-state.service", rule: "writable-place", service: "",
+         extra: dropIn("a9e-drop-state.service", "[Service]\nStateDirectory=a9e-drop-state-x\n")),
+    Case(name: "a9e-quoted.service", rule: "writable-place",
          service: "User=a9e\nBindPaths=/var/lib/a9e-rw:'" & prefix & "/drop'\n"),
     # An instance's drop-in over a floored template of the same generation
     # (round 4, finding 8: no first generation needed).
-    Case(name: "a9e-tpl@.service", expect: @["MemoryDenyWriteExecute=no"], service: "",
+    Case(name: "a9e-tpl@.service", rule: "floor-setting", service: "",
          extra: dropIn("a9e-tpl@1.service", "[Service]\nMemoryDenyWriteExecute=no\n")),
-    Case(name: "a9e-cd@.service", expect: @["runs as root"], service: "User=a9e\n",
+    Case(name: "a9e-cd@.service", rule: "account", service: "User=a9e\n",
          extra: "systemd.systemUnit {\n  name = \"a9e-cd@1.service\"\n" &
                 "  collision = \"dropIn\"\n  content = \"[Service]\nUser=\n\"\n}\n"),
-    Case(name: "a9e-pam.service", expect: @["PAMName"], service: "User=a9e\nPAMName=login\n"),
+    Case(name: "a9e-pam.service", rule: "pam", service: "User=a9e\nPAMName=login\n"),
     # Review round 4.
-    Case(name: "a9e-gshadow.service", expect: @["privileged group shadow"], service: "User=a9e\nGroup=shadow\n"),
-    Case(name: "a9e-member.service", expect: @["privileged group adm", "privileged group shadow"], service: "User=a9g\n",
+    Case(name: "a9e-gshadow.service", rule: "account", service: "User=a9e\nGroup=shadow\n"),
+    Case(name: "a9e-member.service", rule: "account", service: "User=a9g\n",
          host: "id a9g >/dev/null 2>&1 || useradd -r -M -s /usr/sbin/nologin " &
                "-G shadow,adm a9g"),
-    Case(name: "a9e-psonly.service", expect: @["PermissionsStartOnly"], service: "User=a9e\nPermissionsStartOnly=yes\n" &
+    Case(name: "a9e-psonly.service", rule: "file-keys", service: "User=a9e\nPermissionsStartOnly=yes\n" &
          "ExecStartPre=" & binary & " --version\n"),
-    Case(name: "a9e-openfile.service", expect: @["OpenFile"], service: "OpenFile=/etc/a9e-target:t\n"),
-    Case(name: "a9e-stdout.service", expect: @["StandardOutput=truncate"], service: "StandardOutput=truncate:/etc/a9e-out\n"),
-    Case(name: "a9e-hostdrop.service", expect: @["a drop-in the add-on did not install"], service: "",
+    Case(name: "a9e-openfile.service", rule: "open-as-root", service: "OpenFile=/etc/a9e-target:t\n"),
+    Case(name: "a9e-stdout.service", rule: "open-as-root", service: "StandardOutput=truncate:/etc/a9e-out\n"),
+    Case(name: "a9e-hostdrop.service", rule: "foreign-drop-in", service: "",
          host: hostDropIn(etc & "a9e-hostdrop.service.d",
-                          "[Service]\nDynamicUser=no\nUser=\nNoExecPaths=\n")),
-    Case(name: "a9e-vplus.service", expect: @["a drop-in the add-on did not install"], service: "",
+                          "[Service]\nEnvironment=A9E_HOST=1\n")),
+    Case(name: "a9e-vplus.service", rule: "foreign-drop-in", service: "",
          host: hostDropIn(vendor & "a9e-vplus.service.d",
-                          "[Service]\nExecStartPre=+" & binary & " --version\n")),
-    Case(name: "a9e-vtype.service", expect: @["a drop-in the add-on did not install"], service: "",
+                          "[Service]\nEnvironment=A9E_HOST=1\n")),
+    Case(name: "a9e-vtype.service", rule: "foreign-drop-in", service: "",
          host: "mkdir -p " & vendor & "service.d && printf '[Service]\\n" &
-               "PermissionsStartOnly=yes\\n' > " & vendor & "service.d/zz-a9e.conf"),
-    Case(name: "a9e-th@.service", expect: @["a drop-in the add-on did not install"], service: "", probes: "a9e-th@x.service",
+               "Environment=A9E_HOST=1\\n' > " & vendor & "service.d/zz-a9e.conf"),
+    Case(name: "a9e-th@.service", rule: "foreign-drop-in", service: "", probes: "a9e-th@x.service",
          host: hostDropIn(etc & "a9e-th@.service.d",
-                          "[Service]\nDynamicUser=no\nUser=\nNoExecPaths=\n")),
-    Case(name: "a9e-ti@.service", expect: @["a drop-in the add-on did not install"], service: "",
+                          "[Service]\nEnvironment=A9E_HOST=1\n")),
+    Case(name: "a9e-ti@.service", rule: "foreign-drop-in", service: "",
          probes: "a9e-ti@1.service a9e-ti@2.service",
          extra: dropIn("a9e-ti@1.service", "[Service]\nEnvironment=A9E=1\n"),
          host: hostDropIn(etc & "a9e-ti@2.service.d",
-                          "[Service]\nDynamicUser=no\nUser=\nNoExecPaths=\n")),
+                          "[Service]\nEnvironment=A9E_HOST=1\n")),
     # Review round 5.
-    Case(name: "a9e-envwild.service", expect: @["wildcard"], service: "EnvironmentFile=/etc/*/a9e.env\n"),
-    Case(name: "a9e-envstate.service", expect: @["/var/lib/a9e-envs/env"],
-         service: "StateDirectory=a9e-envs\nEnvironmentFile=-/var/lib/a9e-envs/env\n"),
-    Case(name: "a9e-rt.service", expect: @["realtime"],
+    Case(name: "a9e-envwild.service", rule: "environment-file", service: "EnvironmentFile=/etc/*/a9e.env\n"),
+    Case(name: "a9e-envstate.service", rule: "environment-file",
+         service: "StateDirectory=a9e-envstate-s\nEnvironmentFile=-/var/lib/a9e-envstate-s/env\n"),
+    Case(name: "a9e-rt.service", rule: "realtime",
          service: "CPUSchedulingPolicy=fifo\nCPUSchedulingPriority=10\n"),
-    Case(name: "a9e-fail.service", expect: @["FailureAction"], service: "FailureAction=reboot-force\n"),
-    Case(name: "a9e-memlock.service", expect: @["LimitMEMLOCK"], service: "LimitMEMLOCK=infinity\n"),
-    Case(name: "a9e-sockets.service", expect: @["Sockets=dbus.socket"], service: "Sockets=dbus.socket\n"),
-    Case(name: "a9e-special.service", expect: @["(Special)"], service: "",
+    Case(name: "a9e-fail.service", rule: "actions", service: "FailureAction=reboot-force\n"),
+    Case(name: "a9e-memlock.service", rule: "limits", service: "LimitMEMLOCK=infinity\n"),
+    Case(name: "a9e-sockets.service", rule: "sockets", service: "Sockets=dbus.socket\n"),
+    Case(name: "a9e-special.service", rule: "listener", service: "",
          activatorOnly: true,
          extra: "systemd.systemUnit {\n  name = \"a9e-special.socket\"\n" &
                 "  content = \"[Socket]\nListenSpecial=/etc/a9e-target\n" &
-                "Writable=yes\n\n[Install]\nWantedBy=sockets.target\n\"\n" &
+                "\n[Install]\nWantedBy=sockets.target\n\"\n" &
                 "  enabled = true\n}\n"),
-    Case(name: "a9e-shade.service", expect: @["privileged group shade"], service: "User=a9s\n",
+    Case(name: "a9e-shade.service", rule: "account", service: "User=a9s\n",
          host: "getent group shade >/dev/null || groupadd -o -g " &
                "$(getent group shadow | cut -d: -f3) shade; id a9s >/dev/null " &
                "2>&1 || useradd -r -M -s /usr/sbin/nologin -G shade a9s"),
@@ -196,15 +197,15 @@ proc cases(binary, prefix: string): seq[Case] =
     # is refused in add-on mode before the floor sees it, since a unit gets
     # secrets only through its `credentials` field, so the effective check's
     # own reading of it is a unit test: t_addon_floor_round6.)
-    Case(name: "a9e-dynstatic.service", expect: @["privileged group sudo"], service: "DynamicUser=yes\nUser=a9d\n",
+    Case(name: "a9e-dynstatic.service", rule: "account", service: "DynamicUser=yes\nUser=a9d\n",
          host: "id a9d >/dev/null 2>&1 || useradd -r -M -s /usr/sbin/nologin " &
                "-G sudo a9d"),
-    Case(name: "a9e-alias.service", expect: @["runs as root"], service: "User=a9z\n",
+    Case(name: "a9e-alias.service", rule: "account", service: "User=a9z\n",
          host: "id a9z >/dev/null 2>&1 || useradd -o -u 0 -M -s " &
                "/usr/sbin/nologin a9z"),
-    Case(name: "a9e-onfail.service", expect: @["reboot.target"], service: "",
+    Case(name: "a9e-onfail.service", rule: "system-state", service: "",
          unitLines: "OnFailure=reboot.target\n"),
-    Case(name: "a9e-envtwo.service", expect: @["/etc/a9e-one.env"],
+    Case(name: "a9e-envtwo.service", rule: "environment-file",
          service: "EnvironmentFile=/etc/a9e-one.env\nEnvironmentFile=/etc/a9e-two.env\n",
          host: "printf 'A=1\\n' > /etc/a9e-one.env; chown nobody /etc/a9e-one.env; " &
                "printf 'B=1\\n' > /etc/a9e-two.env"),
@@ -215,40 +216,83 @@ proc cases(binary, prefix: string): seq[Case] =
     # and an isolating job mode (both through OnFailure= of a unit that
     # succeeds, so nothing fires if a build lets them through); an activator
     # socket with Mark= (CAP_NET_ADMIN).
-    Case(name: "a9e-envhost.service", expect: @["/etc/a9e-host.env"], service: "EnvironmentFile=/etc/a9e-host.env\n",
+    # Round 9 (finding 3): the round-5 writable-place rule on its own. The
+    # file is named as the service's own secret (decision 50 allows the
+    # form), but another floored unit of the generation makes its directory
+    # writable. Whether it exists is not judged once that refuses it (the
+    # add-on's secrets step removes any file no declaration covers, so it
+    # does not).
+    Case(name: "a9e-envw.service", rule: "environment-file-writable",
+         service: "EnvironmentFile=/run/repro/secrets/a9e-envw/env\n",
+         extra: "systemd.systemUnit {\n  name = \"a9e-envwx.service\"\n" &
+                "  content = \"[Service]\nType=oneshot\nUser=a9e\n" &
+                "ReadWritePaths=/run/repro/secrets/a9e-envw\nExecStart=" & binary &
+                " --version\n\"\n  enabled = false\n}\n"),
+    Case(name: "a9e-envhost.service", rule: "environment-file", service: "EnvironmentFile=/etc/a9e-host.env\n",
          host: "printf 'A=1\\n' > /etc/a9e-host.env; chmod 0644 /etc/a9e-host.env"),
-    Case(name: "a9e-envsecret.service", expect: @["/run/repro/secrets/a9e-other/env"],
+    Case(name: "a9e-envsecret.service", rule: "environment-file",
          service: "EnvironmentFile=-/run/repro/secrets/a9e-other/env\n"),
-    Case(name: "a9e-rtrepro.service", expect: @["/run/repro/a9e-x"], service: "User=a9e\nRuntimeDirectory=repro/a9e-x\n"),
-    Case(name: "a9e-reach.service", expect: @["reboot.target"], service: "",
+    Case(name: "a9e-rtrepro.service", rule: "directories", service: "User=a9e\nRuntimeDirectory=repro/a9e-x\n"),
+    Case(name: "a9e-reach.service", rule: "system-state", service: "",
          unitLines: "OnFailure=a9e-reach-x.target\n",
          extra: "systemd.systemUnit {\n  name = \"a9e-reach-x.target\"\n" &
                 "  content = \"[Unit]\nWants=reboot.target\n\"\n  enabled = false\n}\n"),
-    Case(name: "a9e-isolate.service", expect: @["changes the system's state beyond the unit"], service: "",
+    Case(name: "a9e-isolate.service", rule: "job-mode", service: "",
          unitLines: "OnFailure=multi-user.target\nOnFailureJobMode=isolate\n"),
-    Case(name: "a9e-mark.service", expect: @["Mark=1"], service: "",
+    Case(name: "a9e-mark.service", rule: "socket-option", service: "",
          activatorOnly: true,
          extra: "systemd.systemUnit {\n  name = \"a9e-mark.socket\"\n" &
                 "  content = \"[Socket]\nListenStream=127.0.0.1:18091\nMark=1\n\n" &
                 "[Install]\nWantedBy=sockets.target\n\"\n  enabled = true\n}\n"),
     # §13 decision 55: Conflicts= naming a unit the profile does not define
     # (a base service that is harmless to stop, if a build lets it through).
-    Case(name: "a9e-conflicts.service", expect: @["Conflicts=systemd-timesyncd.service names a unit"], service: "",
+    Case(name: "a9e-conflicts.service", rule: "conflicts", service: "",
          unitLines: "Conflicts=systemd-timesyncd.service\n"),
     # Review round 8: a profile target the unit reaches, conflicting with a
     # base service (decision 55, the reviewer's open question); directories
     # inside other software's trees (finding 1). Last, because a build that
     # lets them through changes the host for every later case: a directory
     # handed to the service at /run/systemd, the existing /run/systemd itself.
-    Case(name: "a9e-rconf.service", expect: @["reached from a9e-rconf.service"], service: "",
+    Case(name: "a9e-rconf.service", rule: "conflicts", service: "",
          unitLines: "Wants=a9e-rconf-x.target\n",
          extra: "systemd.systemUnit {\n  name = \"a9e-rconf-x.target\"\n" &
                 "  content = \"[Unit]\nConflicts=systemd-timesyncd.service\n\"\n" &
                 "  enabled = false\n}\n"),
-    Case(name: "a9e-udev.service", expect: @["udev is not"], service: "User=a9e\nRuntimeDirectory=udev/rules.d\n"),
-    Case(name: "a9e-rtnested.service", expect: @["systemd is not"],
+    # Round 9 (§13 decision 57): a directory whose first component exists
+    # on the host and was not created for this unit, with a name the shape
+    # rules allow (the unit's own). Before the destructive cases: a build
+    # that lets it through hands a root-owned directory to the service.
+    Case(name: "a9e-exist.service", rule: "existing-tree",
+         service: "User=a9e\nRuntimeDirectory=a9e-exist\n",
+         host: "mkdir -p /run/a9e-exist && chown root:root /run/a9e-exist && " &
+               "chmod 0755 /run/a9e-exist"),
+    Case(name: "a9e-udev.service", rule: "directories", service: "User=a9e\nRuntimeDirectory=udev/rules.d\n"),
+    Case(name: "a9e-rtnested.service", rule: "directories",
          service: "User=a9e\nRuntimeDirectory=systemd/system/zz-a9e.service.d\n"),
-    Case(name: "a9e-rtsys.service", expect: @["systemd is not", "/run/systemd: it exists"], service: "User=a9e\nRuntimeDirectory=systemd\n")]
+    Case(name: "a9e-rtsys.service", rule: "directories", service: "User=a9e\nRuntimeDirectory=systemd\n")]
+
+proc ruleCodesOf*(output, caseName: string): seq[string] =
+  ## The rule codes of the effective check's refusals of the case's own
+  ## units (``<stem>.`` or ``<stem>@``: its service, socket, instances).
+  ## The check prints one refusal per line, ``<unit>: <text> [rule:<code>
+  ## key:<Key>]``; a line that is not one has no tag.
+  let stem = caseName[0 ..< caseName.find({'.', '@'})]
+  for raw in output.splitLines():
+    var l = raw.strip()
+    let tag = l.rfind("[rule:")
+    if tag < 0: continue
+    if l.startsWith("EAddOnFloorNotEffective:"): l = l["EAddOnFloorNotEffective:".len .. ^1].strip()
+    let colon = l.find(": ")
+    if colon < 0: continue
+    let unit = l[0 ..< colon]
+    if not (unit.startsWith(stem) and unit.len > stem.len and unit[stem.len] in {'.', '@'}):
+      continue
+    let close = l.find(']', tag)
+    var code = ""
+    for ch in l[tag + "[rule:".len ..< (if close > 0: close else: l.len)]:
+      if ch == ' ': break
+      code.add(ch)
+    if code notin result: result.add(code)
 
 proc invocation(g: Guest; unit: string): string =
   g.exec("systemctl show -p InvocationID --value " & unit).stdout.strip()
@@ -343,11 +387,13 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
           if t.strip(leading = true, trailing = false, chars = {'-'}) ==
               c.coveredPlace: noexec = true
         held = notRoot and noexec
-      var ownRule = false
-      for m in c.expect:
-        if m in output: ownRule = true
+      let codes = ruleCodesOf(output, c.name)
+      var others: seq[string]
+      for x in codes:
+        if x != c.rule and x notin others: others.add(x)
+      let ownRule = c.rule in codes and others.len == 0
       results.add(%*{"case": c.name, "exit": r.exitCode, "started": started,
-                     "held": held, "ownRule": ownRule,
+                     "held": held, "ownRule": ownRule, "rules": codes,
                      "output": output[max(0, output.len - 6000) .. ^1]})
       if c.coveredPlace.len > 0 and r.exitCode == 0:
         step(c.name & ": runs, holding its floor (not root, the place " &
@@ -360,8 +406,8 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
                "EAddOnFloorNotEffective" in output, output)
           # By the rule the case targets, not by another (round 8, finding
           # 4: the drop-in allowlist stood in for the route rule).
-          step(c.name & ": refused by its own rule (" & c.expect.join(" | ") & ")",
-               ownRule, output)
+          step(c.name & ": refused by its own rule (" & c.rule & ") and no " &
+               "other (" & others.join(", ") & ")", ownRule, output)
       if unchecked and c.coveredPlace.len == 0:
         # Under the falsifier only the floor stands between the case and its
         # start: a case refused for any other reason proves nothing.

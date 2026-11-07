@@ -1461,9 +1461,54 @@ proc unitStartsReported*(unit: string; own: HashSet[string];
     discard
   cache[unit] = result
 
+proc createdDirsPath*(stateDir: string): string =
+  ## The directories the add-on recorded as created for a floored unit by
+  ## its start (§13 decision 57): one ``<path>\t<unit>`` line each.
+  addonDir(stateDir) / "floor-created-dirs"
+
+proc readCreatedDirs*(stateDir: string): Table[string, string] =
+  ## ``createdDirsPath``, path -> unit; an unreadable file records nothing
+  ## (every existing tree is then judged by its owner alone).
+  try:
+    for l in readFile(createdDirsPath(stateDir)).splitLines():
+      let f = l.split('\t')
+      if f.len == 2 and f[0].startsWith("/"): result[f[0]] = f[1]
+  except IOError, OSError: discard
+
+proc writeLines(path: string; t: Table[string, string]) =
+  var text = ""
+  for k, v in t: text.add(k & "\t" & v & "\n")
+  let tmp = path & ".tmp"
+  writeFile(tmp, text)
+  moveFile(tmp, path)
+
+proc recordCreatedDirs*(stateDir: string; pending: openArray[tuple[path, unit: string]]) =
+  ## Record, for its unit, each directory the check found absent that
+  ## exists right after the switch's own start: the unit's start created it
+  ## (systemd.exec(5)). Only then: a path that appears later, by a queued
+  ## start or by anything else, is not recorded, so a tree another package
+  ## installs is refused at the next switch (§13 decision 57). Written
+  ## atomically; a path already recorded keeps its unit.
+  when mutated("created-dirs-ignored"): return
+  var t = readCreatedDirs(stateDir)
+  var changed = false
+  for (path, unit) in pending:
+    if path notin t and (dirExists(path) or symlinkExists(path)):
+      t[path] = unit
+      changed = true
+  if not changed: return
+  var text = ""
+  for k, v in t: text.add(k & "\t" & v & "\n")
+  let tmp = createdDirsPath(stateDir) & ".tmp"
+  writeFile(tmp, text)
+  moveFile(tmp, createdDirsPath(stateDir))
+
 proc effectiveFloorCheck*(resources: openArray[SystemResource];
                           owned: seq[string] = @[];
-                          adopted = initTable[string, string]()): seq[string] =
+                          adopted = initTable[string, string]();
+                          created = initTable[string, string]();
+                          pending: ptr seq[tuple[path, unit: string]] = nil):
+                          seq[string] =
   ## ``owned``: the store objects the generation owns with a recorded
   ## digest; an ``EnvironmentFile=`` or a read-only bind source must lie in
   ## one (A9 review round 7, findings 1 and 5).
@@ -1507,8 +1552,13 @@ proc effectiveFloorCheck*(resources: openArray[SystemResource];
     try:
       for f in foreignDropInsFor(flooredUnitNames(resources), own,
                                  unitSearchPaths()):
-        result.add(f & ": a drop-in the add-on did not install, read for a " &
-                   "floored unit (or an instance of a floored template)")
+        # Named by the unit its directory is for (<unit>.d), and tagged with
+        # its rule like every other refusal (A9 review round 9, finding 3).
+        let dir = extractFilename(parentDir(f))
+        let unit = if dir.endsWith(".d"): dir[0 ..< dir.len - 2] else: dir
+        result.add(unit & ": " & f & ": a drop-in the add-on did not install, " &
+                   "read for a floored unit (or an instance of a floored " &
+                   "template) [rule:foreign-drop-in key:DropInPaths]")
     except CatchableError as e:
       result.add("the unit search path: " & e.msg)
   for r in resources:
@@ -1531,7 +1581,8 @@ proc effectiveFloorCheck*(resources: openArray[SystemResource];
         fragment: unitPath(r.suName), denied: denied, uidOf: systemUid,
         groupsOf: systemGroups, gidOf: systemGid, ownUnits: ownUnits,
         limitCeilings: limits, storeObjects: owned, ownFiles: ownFiles,
-        adoptedFiles: adopted, startsOf: startsOf, conflictsOf: conflictsOf)
+        adoptedFiles: adopted, startsOf: startsOf, conflictsOf: conflictsOf,
+        createdDirs: created)
       for o in resources:
         if o.kind == srkSystemdSystemUnit and o.suName != r.suName and
             effectiveFloor(o).len > 0 and o.suCollision != "dropIn":
@@ -1555,6 +1606,11 @@ proc effectiveFloorCheck*(resources: openArray[SystemResource];
         except IOError, OSError:
           result.add(name & ": cannot read " & f & ", which systemd loaded")
       result.add(effectiveFloorProblems(e))
+      # The first components the unit's start may create (§13 decision 57).
+      if pending != nil:
+        for fp in firstComponentPaths(e.show):
+          var st: Stat
+          if lstat(fp.path.cstring, st) != 0: pending[].add((fp.path, name))
       # The units that trigger it: sockets, timers, path units (A9 review
       # round 5, finding 2), whoever defines them.
       when not mutated("activators-unchecked"):
@@ -5140,6 +5196,7 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
       var problems: seq[string]
       var reloadedAt = 0.0
       var startHolds: seq[string]   # spec §10.1: kept until the check passes
+      var createdPending: seq[tuple[path, unit: string]]  # §13 decision 57
         ## CLOCK_MONOTONIC seconds just after step 6's daemon-reload; 0
         ## when there was none.
       hookGeneration = generationId
@@ -5327,7 +5384,8 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
             if digest.len == 64:
               adoptedFiles[normalisedPath(p.targetPath)] = digest
           let notHeld = effectiveFloorCheck(composed.resources, ownedObjects,
-                                            adoptedFiles)
+                                            adoptedFiles, readCreatedDirs(stateDir),
+                                            addr createdPending)
           # The carried-state reach, cross-checked against the units as
           # systemd loaded them (A13 review round 5, finding 1): wherever
           # carried state is on this host, a unit the static analysis took
@@ -5337,8 +5395,10 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
           if reachLive.len > 0:
             problems.add(reachLive.join("; ") & "; nothing was started")
           if notHeld.len > 0:
-            problems.add($adFloorNotEffective & ": " & notHeld.join("; ") &
-              "; nothing was started")
+            # One refusal per line: each ends with its rule tag, and the
+            # gate reads them line by line (A9 review round 9, finding 3).
+            problems.add($adFloorNotEffective & ":\n  " & notHeld.join("\n  ") &
+              "\n  nothing was started")
           else:
             # Checked: the holds go -- this switch's, and any an earlier
             # switch left (a refused check before a revert to a generation
@@ -5361,6 +5421,12 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
         try:
           runStart(stepTransitions, paused, notRunning,
                    noBlock = opts.nonBlockingStarts, reloadedAt = reloadedAt)
+          # What the floored units' starts created is theirs (§13 decision
+          # 57). A queued start (--no-block, the boot-time recovery of a
+          # generation an earlier switch already started) records nothing.
+          if not opts.nonBlockingStarts:
+            try: recordCreatedDirs(stateDir, createdPending)
+            except IOError, OSError: discard
           # A replay or a revert plans the units the interrupted switch had
           # running as running, but `try-restart` leaves a unit the crash
           # (or step 2) stopped stopped: start every such unit of this

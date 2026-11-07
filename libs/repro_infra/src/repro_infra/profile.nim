@@ -1359,12 +1359,14 @@ proc checkFloorReach*(p: SystemProfile) =
         "whole system's state; a floored unit, and a unit that activates " &
         "one, may not reach it by any route")
     # The job modes and isolation of every profile unit it reaches.
-    var seen = initHashSet[string]()
-    var queue = @[root]
-    while queue.len > 0 and seen.len <= RouteLimit:
-      let u = queue.pop()
-      if u in seen: continue
-      seen.incl(u)
+    # Over the floor's one reach (``walkReach``, shared with the effective
+    # check: A9 review round 9, finding 2).
+    let reach = reachedUnits([root],
+      proc (u: string): seq[string] = profileStartsOf(p, u))
+    if not reach.complete:
+      raiseSystemProfileInvalid("systemd.systemUnit '" & root & "': it " &
+        "reaches more than " & $RouteLimit & " units; not judged, refused")
+    for u in @[root] & reach.units:
       for c in unitFilesOf(p, u):
         # A profile unit the floored unit reaches stops what its own
         # Conflicts= names when it starts, too (A9 review round 8, the
@@ -1387,7 +1389,6 @@ proc checkFloorReach*(p: SystemProfile) =
             raiseSystemProfileInvalid("systemd.systemUnit '" & u & "' (" &
               "reached from " & root & "): AllowIsolate=yes lets a job " &
               "stop every unit the target does not want")
-      for d in profileStartsOf(p, u): queue.add(d)
 
 proc applyAddOnServiceFloor*(p: var SystemProfile) =
   ## The add-on realisation's default (ReproOS-Add-On-Mode §10.1): every

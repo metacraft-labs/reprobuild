@@ -906,22 +906,18 @@ const
   RouteLimit* = 4096
     ## A closure larger than this is not judged: refused (default deny).
 
-proc systemStateRoute*(roots: openArray[string];
-                       depsOf: proc (u: string): seq[string] {.closure.};
-                       limit = RouteLimit): seq[string] =
-  ## The chain of units from one of ``roots`` (not itself checked) to a
-  ## system-state unit (``SystemStateTargets``) through ``depsOf`` (the
-  ## units a unit starts), breadth first, or ``@[]`` when none is reachable.
-  ## A closure of more than ``limit`` units returns the one-element chain
-  ## ``@["(more than <limit> units)"]``: not judged, so refused. Shared by
-  ## the parse-time half (over the profile's units) and the effective-unit
-  ## check (over what systemd reports).
-  when FloorMutation == "state-routes-direct-only":
-    # Falsifying build: round 6's rule, the roots' direct dependencies only.
-    for r in roots:
-      for d in depsOf(r):
-        if d in SystemStateTargets: return @[r, d]
-    return @[]
+proc walkReach*(roots: openArray[string];
+                depsOf: proc (u: string): seq[string] {.closure.};
+                visit: proc (u, parent: string): bool {.closure.};
+                limit = RouteLimit): bool =
+  ## The one reach of the floor (§13 decisions 49 and 55; A9 review round
+  ## 9, finding 2): breadth first from ``roots`` through ``depsOf`` (what a
+  ## unit starts -- the profile's units at parse time, systemd's report in
+  ## the effective check), calling ``visit`` once per reached unit (not the
+  ## roots) with the unit it was reached from; ``visit`` returns ``false``
+  ## to stop. Units the generation does not install are walked through like
+  ## any other. Returns ``false`` when more than ``limit`` units were
+  ## reached (not judged: the callers refuse).
   var parent = initTable[string, string]()
   var queue: seq[string]
   for r in roots:
@@ -935,15 +931,54 @@ proc systemStateRoute*(roots: openArray[string];
     for d in depsOf(u):
       if d.len == 0 or d in parent: continue
       parent[d] = u
-      if d in SystemStateTargets:
-        var chain = @[d]
-        var c = u
-        while c.len > 0:
-          chain.insert(c, 0)
-          c = parent[c]
-        return chain
-      if parent.len > limit: return @["(more than " & $limit & " units)"]
+      if parent.len > limit: return false
+      if not visit(d, u): return true
       queue.add(d)
+  true
+
+proc reachedUnits*(roots: openArray[string];
+                   depsOf: proc (u: string): seq[string] {.closure.};
+                   limit = RouteLimit): tuple[units: seq[string]; complete: bool] =
+  ## Every unit ``walkReach`` reaches from ``roots``, in order.
+  var acc: seq[string]
+  let complete = walkReach(roots, depsOf,
+    proc (u, parent: string): bool =
+      acc.add(u)
+      true, limit)
+  (acc, complete)
+
+proc systemStateRoute*(roots: openArray[string];
+                       depsOf: proc (u: string): seq[string] {.closure.};
+                       limit = RouteLimit): seq[string] =
+  ## The chain of units from one of ``roots`` (not itself checked) to a
+  ## system-state unit (``SystemStateTargets``), by ``walkReach``, or
+  ## ``@[]`` when none is reachable. A closure of more than ``limit`` units
+  ## returns the one-element chain ``@["(more than <limit> units)"]``: not
+  ## judged, so refused.
+  when FloorMutation == "state-routes-direct-only":
+    # Falsifying build: round 6's rule, the roots' direct dependencies only.
+    for r in roots:
+      for d in depsOf(r):
+        if d in SystemStateTargets: return @[r, d]
+    return @[]
+  var parents = initTable[string, string]()
+  for r in roots: parents[r] = ""
+  var found = ""
+  let complete = walkReach(roots, depsOf,
+    proc (u, parent: string): bool =
+      parents[u] = parent
+      if u in SystemStateTargets:
+        found = u
+        return false
+      true, limit)
+  if not complete: return @["(more than " & $limit & " units)"]
+  if found.len == 0: return @[]
+  var chain = @[found]
+  var c = parents[found]
+  while c.len > 0:
+    chain.insert(c, 0)
+    c = parents.getOrDefault(c, "")
+  chain
 
 proc unitStem*(unitName: string): string =
   ## ``a.socket`` -> ``a``; ``a@.socket`` and ``a@x.socket`` -> ``a``.
@@ -1004,6 +1039,73 @@ proc managerCreatedPaths*(directives: openArray[tuple[key, value: string]]):
         if c >= 0:
           result.add((k & "Symlink", normalisedPath(root & "/" & t[c + 1 .. ^1])))
 
+const BaseSystemTreeNames* = [
+    "ModemManager", "NetworkManager", "PackageKit", "README", "X11",
+    "adduser", "adduser.conf", "agetty.reload", "alternatives",
+    "alternatives.log", "app-info", "apparmor", "apparmor.d", "apport",
+    "apport.log", "apt", "auth.log", "bash.bashrc", "bash_completion",
+    "bash_completion.d", "bindresvport.blacklist", "binfmt.d", "blkid",
+    "boltd", "btmp", "byobu", "ca-certificates", "ca-certificates.conf",
+    "ca-certificates.conf.dpkg-old", "chrony", "cloud", "cloud-init",
+    "cloud-init-output.log", "cloud-init.log", "cloud-release",
+    "command-not-found", "console-setup", "credentials", "credstore",
+    "credstore.encrypted", "cron.d", "cron.daily", "cron.hourly",
+    "cron.monthly", "cron.weekly", "cron.yearly", "crond.pid",
+    "crond.reboot", "crontab", "cryptsetup", "cryptsetup-initramfs",
+    "crypttab", "dbus", "dbus-1", "debconf", "debconf.conf",
+    "debian_version", "debuginfod", "default", "deluser.conf", "depmod.d",
+    "dhcp", "dhcpcd", "dhcpcd.conf", "dist-upgrade", "dmesg",
+    "dmeventd-client", "dmeventd-server", "dpkg", "dpkg.log", "dracut",
+    "dracut.conf", "dracut.conf.d", "e2scrub.conf", "ec2_version",
+    "environment", "ethertypes", "faillog", "fonts", "fsck", "fstab",
+    "fuse.conf", "fwupd", "gai.conf", "git", "gnutls", "gprofng.rc", "groff",
+    "group", "group-", "grub", "grub.d", "gshadow", "gshadow-", "gss",
+    "hdparm.conf", "host.conf", "hostname", "hosts", "hosts.allow",
+    "hosts.deny", "ieee-data", "init.d", "initctl", "initramfs",
+    "initramfs-tools", "inputrc", "iproute2", "iscsi", "issue", "issue.net",
+    "journal", "kern.log", "kernel", "kernel-img.conf", "landscape",
+    "lastlog", "ld.so.cache", "ld.so.conf", "ld.so.conf.d", "ldap",
+    "ldconfig", "legal", "libaudit.conf", "libblockdev", "libibverbs.d",
+    "libnl-3", "libuuid", "locale.alias", "locale.conf", "locale.gen",
+    "localtime", "lock", "log", "logcheck", "login.defs", "logrotate",
+    "logrotate.conf", "logrotate.d", "lsb-release", "lvm",
+    "lxd-installer.socket", "machine-id", "magic", "magic.mime", "man",
+    "man-db", "manpath.config", "mdadm", "media", "mime.types", "misc",
+    "mke2fs.conf", "modprobe.d", "modules", "modules-load.d", "motd",
+    "motd-news", "motd.dynamic", "mount", "mtab", "multipath",
+    "multipath.conf", "multipathd.pid", "multipathd.socket", "nanorc",
+    "needrestart", "netconfig", "netplan", "network", "networkd-dispatcher",
+    "networks", "newt", "nftables.conf", "nsswitch.conf", "opt", "os-prober",
+    "os-release", "overlayroot.conf", "overlayroot.local.conf", "pam",
+    "pam.conf", "pam.d", "passwd", "passwd-", "perl", "pki", "plymouth",
+    "pm", "polkit", "polkit-1", "pollinate", "ppp", "private", "profile",
+    "profile.d", "protocols", "python", "python3", "python3.11",
+    "python3.12", "python3.13", "python3.14", "rc0.d", "rc1.d", "rc2.d",
+    "rc3.d", "rc4.d", "rc5.d", "rc6.d", "rcS.d", "reportbug.conf",
+    "resolv.conf", "rmt", "rpc", "rsyslog.conf", "rsyslog.d", "runit",
+    "screen", "screenrc", "security", "selinux", "sendsigs.omit.d",
+    "sensors.d", "sensors3.conf", "services", "setrans", "sgml", "sgml-base",
+    "shadow", "shadow-", "shells", "shells.state", "shim-signed", "shm",
+    "skel", "snapd", "snapd-snap.socket", "snapd.socket", "sos", "ssh",
+    "ssh-unix-local", "sshd", "sshd.pid", "ssl", "subgid", "subgid-",
+    "subuid", "subuid-", "sudo", "sudo.conf", "sudo_logsrvd.conf", "sudoers",
+    "sudoers.d", "supercat", "sv", "swcatalog", "sysctl.conf", "sysctl.d",
+    "syslog", "sysstat", "systemd", "terminfo", "timezone", "tmpfiles.d",
+    "tpm", "tpm2-tss", "ubuntu-advantage", "ubuntu-release-upgrader", "ucf",
+    "ucf.conf", "udev", "udisks2", "ufw", "unattended-upgrades",
+    "unattended-upgrades.lock", "update-manager", "update-motd.d",
+    "update-notifier", "usb_modeswitch", "usb_modeswitch.conf",
+    "usb_modeswitch.d", "user", "utmp", "uuidd", "vconsole.conf", "vim",
+    "vmware-tools", "vtrgb", "wgetrc", "wtmp", "wtmpdb", "xattr.conf", "xdg",
+    "xfsprogs", "xml", "xml-core", "zsh_command_not_found"]
+  ## Every name the base system has directly under ``/etc``, ``/run``,
+  ## ``/var/lib``, ``/var/cache`` and ``/var/log`` on the supported bases
+  ## (debian-12, debian-13, ubuntu-24.04, ubuntu-26.04 as the test bed
+  ## prepares them; measured 2026-11-07, ``tests/fixtures/base_trees`` in
+  ## ``repro_addon``; dot-files left out). §13 decision 57: a floored unit
+  ## named like one of these, or a directory of its whose first component
+  ## is one, is refused even before the tree exists on the host.
+
 proc managerDirectoryRefusal*(unitName, key, token: string): string =
   ## Why one ``*Directory=`` value (``dir`` or ``dir:link``) of
   ## ``unitName`` names a place the floor does not allow, or "" (A9 review
@@ -1032,6 +1134,14 @@ proc managerDirectoryRefusal*(unitName, key, token: string): string =
   if not ownNamed(stem, parts[0]):
     return key & "=" & token & ": the directory is the unit's own, named " &
       "for it (" & stem & ", " & stem & "-...); " & parts[0] & " is not"
+  # §13 decision 57: never a tree the base system owns, whatever the unit
+  # is called (``systemd.service`` with ``systemd/system/...``).
+  when FloorMutation != "base-tree-names-allowed":
+    if stem in BaseSystemTreeNames or parts[0] in BaseSystemTreeNames:
+      return key & "=" & token & ": " & parts[0] & " is a tree the base " &
+        "system owns (" & (if stem in BaseSystemTreeNames: "the unit is named " &
+        "after it" else: "its first component") & "); a floored unit's " &
+        "directories are its own, never an existing tree (§13 decision 57)"
   if c >= 0 and link.len > 0:          # "dir:" (systemd's report): no link
     if '/' in link or not plain(link):
       return key & "=" & token & ": a directory's link is one plain name"

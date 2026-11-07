@@ -1035,6 +1035,28 @@ const
                           "directory-names-unchecked",
                           "owned-objects-fall-back",
                           "reached-conflicts-unchecked",
+                          # A9 review round 9 (§13 decision 57): a unit
+                          # named after a base tree; an existing tree not
+                          # created for the unit; the record of the unit's
+                          # own directories ignored.
+                          "base-tree-names-allowed",
+                          "existing-trees-allowed",
+                          "created-dirs-ignored",
+                          # the effective reach ending at units the
+                          # generation does not install; the parse-rule
+                          # rerun reported beside the dedicated rule.
+                          "reach-stops-at-base-units",
+                          "rerun-not-suppressed",
+                          # an own secret EnvironmentFile= read in the
+                          # switch's own mount namespace, not PID 1's.
+                          "secrets-read-in-own-namespace",
+                          # shutdown.target and umount.target, which
+                          # systemd adds itself, judged as the unit's own.
+                          "implicit-conflicts-refused",
+                          # an EnvironmentFile= in a writable place judged
+                          # again by where it resolves (two rules, one
+                          # refusal).
+                          "writable-env-judged-twice",
                           # A13: a state backup or restore runs while a
                           # unit of the set may run.
                           "state-units-not-checked",
