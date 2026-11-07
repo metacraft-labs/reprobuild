@@ -476,6 +476,43 @@ const
           "probe runs /bin/sleep"],
         address = "validatorShadow")"""
 
+const ProbeWritableDirs = ["/var/lib/a13-r4", "/var/lib/a13-r5", "/var/lib/a13-r6"]
+  ## The writable directories the probe units name besides the carried one,
+  ## created on the converted host before any probe is applied. systemd
+  ## refuses to start a unit whose ``ReadWritePaths=`` names a missing path
+  ## (226/NAMESPACE, "Failed to set up mount namespacing"); a probe a
+  ## falsifier lets in must start, or its red is not its own (A13 round 6:
+  ## the exec probe, whose ``ExecStartPre=`` made the start synchronous,
+  ## failed this way; a probe with only a ``Type=simple`` ``ExecStart=``
+  ## reported its start done before the namespace failed).
+
+proc probeWritablePaths(text: string): seq[string] =
+  ## Every ``ReadWritePaths=`` path in a probe's lines.
+  var i = 0
+  const Key = "ReadWritePaths="
+  while true:
+    i = text.find(Key, i)
+    if i < 0: return
+    var j = i + Key.len
+    var p = ""
+    while j < text.len and text[j] notin {'\\', '\n', '"', ' '}:
+      p.add(text[j]); inc j
+    result.add(p)
+    i = j
+
+static:
+  # Every probe unit's writable path is one the gate creates, or the carried
+  # directory itself: checked when the gate compiles.
+  var all = PathReachProfile & R4Host & R5Plan & R5Resources & R6Resources &
+    ShadowResource
+  for (_, _, res, _, _) in R4Probes: all.add(res)
+  for (_, _, res, _, _, _) in R5Probes: all.add(res)
+  for (_, res, _, _, _) in R6Probes: all.add(res)
+  for p in probeWritablePaths(all):
+    doAssert p in ProbeWritableDirs or p == "/var/lib/ethereum/validator",
+      "a probe unit's ReadWritePaths= names " & p & ", which the gate does " &
+      "not create (add it to ProbeWritableDirs)"
+
 proc hexKey(k: openArray[byte]): string =
   for b in k: result.add(toHex(int(b), 2).toLowerAscii())
 
@@ -653,6 +690,7 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
     nw.prepareBase()
     nw.mountKeep(format = false)
     nw.installEngineClosure(engine)
+    discard nw.run("mkdir -p " & ProbeWritableDirs.join(" "))
     discard nw.run("mkdir -p /etc/repro /etc/repro-testbed " & CarriedDir &
       " " & RefDir & " && printf 'ID=reproos\\nNAME=\"ReproOS (re-identified " &
       "by the test bed)\"\\nVERSION_ID=test\\nREPRO_TESTBED_REIDENTIFIED=1\\n' > " &
@@ -872,6 +910,24 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
       probes["r6" & label] = %*{"exit": r.exitCode, "judged": judged(o),
         "layer": (if label in ["live", "liverw"]: "live" else: "reach"),
         "refusedForReason": refused}
+      if r.exitCode != 0 and "ECarriedStatePending" notin o:
+        # Failed for another reason (a falsifier let the probe in, and its
+        # unit did not start): what systemd says of the probe's units, so
+        # the record explains it after the guest is gone.
+        var units = ""
+        for l in resources.splitLines():
+          let i = l.find("systemdSystemUnit(name = \"")
+          if i >= 0:
+            let n = l[i + len("systemdSystemUnit(name = \"") .. ^1]
+            units.add(" " & n[0 ..< n.find('"')])
+        var cmds = "systemctl status --no-pager -l" & units & " 2>&1 | tail -60"
+        for u in units.splitWhitespace():
+          cmds.add("; echo '--- " & u & "'; journalctl -u " & u &
+            " -b --no-pager -o short-monotonic 2>&1 | tail -60; " &
+            "systemctl show " & u & " -p ExecStartPre -p ExecStartPreEx " &
+            "-p Result -p ExecMainStatus 2>&1; systemctl cat " & u & " 2>&1")
+        probes["r6" & label]["unitStatus"] = %nw.exec(cmds).stdout
+        detail.add("\n" & probes["r6" & label]["unitStatus"].getStr())
       if cleanup.len > 0: discard nw.run(cleanup)
       step("round 6, " & label & ": refused while the directory is pending" &
            (if label in ["live", "liverw"]: ", after the apply's reload, never started"
