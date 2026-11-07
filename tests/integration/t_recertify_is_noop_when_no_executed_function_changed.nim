@@ -27,6 +27,7 @@
 ## Skip rule: ``git`` missing on PATH.
 
 import std/[json, os, osproc, strutils, tempfiles, unittest]
+import repro_test_support/scoped_env
 
 import repro_test_support
 import repro_cli_support
@@ -113,6 +114,7 @@ mainline = "main"
 
 type
   Fixture = object
+    storeEnv: ScopedEnv
     scratch: string
     reproBin: string
     workspaceRoot: string
@@ -124,7 +126,7 @@ type
 
 proc setupFixture(gitBin, slug: string): Fixture =
   result.scratch = createTempDir("repro-tc1n-" & slug & "-", "")
-  result.certStore = isolateCertificateStore(result.scratch)
+  result.certStore = isolateCertificateStore(result.scratch, result.storeEnv)
   result.reproBin = reproBinary()
   # TC-5: issuance signs the certificate with the daemon key; provide a
   # real ed25519 key (and register it via the env overlay below) so the
