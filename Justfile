@@ -1184,15 +1184,6 @@ integration_hcr_linux_cf_protection_sled_layout:
         tests/integration/t_integration_hcr_linux_cf_protection_sled_layout.nim \
         2>&1 | tee test-logs/integration_hcr_linux_cf_protection_sled_layout.log
 
-integration_hcr_linux_claim_conflict_with_recorder_refused:
-    mkdir -p test-logs build/test-bin build/nimcache
-    nim c -r \
-        --threads:on \
-        --nimcache:build/nimcache/integration_hcr_linux_claim_conflict_with_recorder_refused \
-        --out:build/test-bin/integration_hcr_linux_claim_conflict_with_recorder_refused \
-        tests/unit/t_unit_hcr_linux_claim_conflict_with_recorder_refused.nim \
-        2>&1 | tee test-logs/integration_hcr_linux_claim_conflict_with_recorder_refused.log
-
 unit_hcr_linux_x86_64_trampoline_encoding_and_atomicity_preconditions:
     mkdir -p test-logs build/test-bin build/nimcache
     nim c -r \
@@ -1278,34 +1269,6 @@ e2e_hcr_linux_x86_64_single_threaded_direct_patch:
         --out:build/test-bin/e2e_hcr_linux_x86_64_single_threaded_direct_patch \
         tests/e2e/hcr-linux-direct/t_e2e_hcr_linux_x86_64_single_threaded_direct_patch.nim \
         2>&1 | tee test-logs/e2e_hcr_linux_x86_64_single_threaded_direct_patch.log
-
-# HLX-M7 third entry / HX-S-2 — a recorded patch bundle is applied AGAIN, at
-# its recorded geid, by the recorded program's own in-process HCR agent, and
-# the events either side of the boundary reproduce the body that produced them.
-# Campaigns: reprobuild-specs/HCR-Linux-ELF-Provider.milestones.org HLX-M7;
-#            reprobuild-specs/HCR-Per-Platform-Handoff.milestones.org HX-S-2.
-# Records and replays with the `ct-mcr` bundle that `hcr_ct_mcr_fixture`
-# (below) builds -- the same script the graph edge
-# `reprobuild.test_fixtures.hcr_ct_mcr_bundle` runs -- so the HCR lane, which
-# runs this recipe, has the recorder without anyone building it by hand.
-e2e_hcr_linux_replay_of_patched_recording: hcr_ct_mcr_fixture
-    mkdir -p test-logs build/test-bin build/nimcache
-    nim c -r \
-        --threads:on \
-        --path:tests/e2e/hcr-linux-direct \
-        --nimcache:build/nimcache/e2e_hcr_linux_replay_of_patched_recording \
-        --out:build/test-bin/e2e_hcr_linux_replay_of_patched_recording \
-        tests/e2e/hcr-linux-direct/t_e2e_hcr_linux_replay_of_patched_recording.nim \
-        2>&1 | tee test-logs/e2e_hcr_linux_replay_of_patched_recording.log
-
-# The `ct-mcr` recorder bundle `e2e_hcr_linux_replay_of_patched_recording`
-# needs, staged into build/test-fixtures/hcr-ct-mcr: the recorder's own
-# `just build-ct-mcr`, run in the recorder's own flake dev shell (sibling from
-# $CT_CODETRACER_NATIVE_RECORDER_SIBLING, else ../codetracer-native-recorder).
-# The graph edge `reprobuild.test_fixtures.hcr_ct_mcr_bundle` runs this same
-# script; see its header. A no-op that says so off Linux x86_64.
-hcr_ct_mcr_fixture:
-    bash ./scripts/build_hcr_ct_mcr_fixture.sh
 
 # HLX-M2 — a function inside a `dlopen`ed shared library is patched.
 # Campaign: reprobuild-specs/HCR-Linux-ELF-Provider.milestones.org, HLX-M2.

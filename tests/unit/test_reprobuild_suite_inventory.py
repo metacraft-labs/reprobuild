@@ -3433,7 +3433,6 @@ test "incomplete name" and:
                 "tests/unit/test_dev_shell_hook_scope.py",
                 "tests/unit/test_generated_artifact_merge_policy.py",
                 "tests/unit/test_graph_owned_test_artifacts.py",
-                "tests/unit/test_hcr_replay_gate_ct_mcr_fixture_edge.py",
                 "tests/unit/test_install_nix_paths.py",
                 "tests/unit/test_lint_gate_ordering.py",
                 "tests/unit/test_nix_daemon_descriptors.py",
@@ -7506,14 +7505,6 @@ compileProfileBinary()
                     "kqueue-only in M31"
                 },
                 "darwin": {
-                    "e2e_repro_watch::CodeTracer copied checkout watch builds "
-                    "added frontend public resource",
-                    "e2e_repro_watch::CodeTracer copied checkout watch "
-                    "rebuilds selected C action only",
-                    "e2e_repro_watch::CodeTracer copied checkout watch "
-                    "rebuilds selected app aggregate",
-                    "e2e_repro_watch::CodeTracer copied checkout watch "
-                    "rebuilds selected frontend aggregate",
                     "e2e_repro_watch::local project no-target watch uses "
                     "current project default action",
                     "e2e_repro_watch::local project watch rebuilds selected "
@@ -7632,18 +7623,6 @@ compileProfileBinary()
                     "same-basename endpoints",
                 },
                 "darwin": set(),
-            },
-            "tests/e2e/hcr-linux-direct/"
-            "t_e2e_hcr_linux_replay_of_patched_recording.nim": {
-                "linux": {
-                    "e2e_hcr_linux_replay_of_patched_recording::a recorded "
-                    "patch bundle is applied again at its geid by the real "
-                    "in-process agent",
-                },
-                "darwin": {
-                    "e2e_hcr_linux_replay_of_patched_recording::linux x86_64 "
-                    "only",
-                },
             },
             "tests/e2e/hcr-linux-direct/"
             "t_e2e_hcr_linux_x86_64_single_threaded_direct_patch.nim": {
@@ -7940,8 +7919,6 @@ compileProfileBinary()
                     "three-function set commits, which is what makes a failure "
                     "mean something",
                     "integration_hcr_linux_commit_failure_rolls_back_published_sites::the "
-                    "claim map the leak assertion needs is present",
-                    "integration_hcr_linux_commit_failure_rolls_back_published_sites::the "
                     "same arm goes RED against a provider with no undo path",
                 },
                 "darwin": {
@@ -7955,8 +7932,6 @@ compileProfileBinary()
                     "integration_hcr_linux_prepare_failure_leaves_process_byte_identical::every "
                     "prepare-phase failure class leaves the text "
                     "byte-identical",
-                    "integration_hcr_linux_prepare_failure_leaves_process_byte_identical::the "
-                    "claim map the leak check needs is present",
                     "integration_hcr_linux_prepare_failure_leaves_process_byte_identical::the "
                     "same arm goes RED against a provider without the unwind",
                 },
@@ -7972,8 +7947,6 @@ compileProfileBinary()
                     "window modified behind the provider's back is REFUSED",
                     "integration_hcr_linux_repeated_patch_of_same_function::rollback "
                     "goes RED against a provider that restores generation N-1",
-                    "integration_hcr_linux_repeated_patch_of_same_function::the "
-                    "claim map the rollback assertion needs is present",
                     "integration_hcr_linux_repeated_patch_of_same_function::three "
                     "generations, retained bodies, rollback to the ORIGINAL",
                 },
@@ -8190,24 +8163,6 @@ compileProfileBinary()
                     "a distinct, inspectable error",
                 },
                 "darwin": set(),
-            },
-            "tests/unit/"
-            "t_unit_hcr_linux_claim_conflict_with_recorder_refused.nim": {
-                "linux": {
-                    "HLX-M7 HCR/MCR claim arbitration::MCR is refused the "
-                    "bytes HCR holds — the arbitration is symmetric",
-                    "HLX-M7 HCR/MCR claim arbitration::a publication that "
-                    "fails after claiming RELEASES the claim",
-                    "HLX-M7 HCR/MCR claim arbitration::a window MCR has "
-                    "claimed is refused, named, and left untouched",
-                    "HLX-M7 HCR/MCR claim arbitration::the claim is RETAINED "
-                    "across re-patch generations, not re-taken",
-                    "HLX-M7 HCR/MCR claim arbitration::with the recorder's "
-                    "claim released the same publication succeeds",
-                },
-                "darwin": {
-                    "HLX-M7 HCR/MCR claim arbitration::linux/amd64 only",
-                },
             },
             "tests/unit/"
             "t_unit_hcr_linux_x86_64_trampoline_encoding_and_atomicity_preconditions.nim": {
@@ -8784,7 +8739,7 @@ compileProfileBinary()
     def assert_platform_catalog_ledger_census(self, data):
         exclusive, identical = self.linux_darwin_catalog_ledger()
         self.assertEqual(self.platform_gated_test_sources(data), set(exclusive) | identical)
-        self.assertEqual(len(exclusive), 76)
+        self.assertEqual(len(exclusive), 74)
         self.assertEqual(len(identical), 21)
         # The per-host totals are pure ledger arithmetic, so they are checked
         # here, where no built binary is needed: a ledger entry added without
@@ -8793,8 +8748,8 @@ compileProfileBinary()
         # never used as a substitute for their exact per-source assertions.
         linux_only = sum(len(item["linux"]) for item in exclusive.values())
         darwin_only = sum(len(item["darwin"]) for item in exclusive.values())
-        self.assertEqual((linux_only, darwin_only), (136, 156))
-        self.assertEqual(linux_only - darwin_only, -20)
+        self.assertEqual((linux_only, darwin_only), (127, 150))
+        self.assertEqual(linux_only - darwin_only, -23)
         specs, _ = inventory.parse_repro_tests(REPO_ROOT)
         defines_by_source = {spec.source: spec.defines for spec in specs}
         for source in sorted(set(exclusive) | identical):
@@ -8877,9 +8832,9 @@ compileProfileBinary()
     def assert_linux_darwin_catalog_delta_is_exact(self, data):
         """Validate the ledger against this host's real catalog and source census.
 
-        The ledger currently covers 76 asymmetric sources and 21 sources
-        whose platform gates select identical names. Its 136 Linux-only and
-        156 Darwin-only identities yield a net 20 extra Darwin cases. Newly
+        The ledger currently covers 74 asymmetric sources and 21 sources
+        whose platform gates select identical names. Its 127 Linux-only and
+        150 Darwin-only identities yield a net 23 extra Darwin cases. Newly
         reconciled Darwin names are measured at 4f7d8624d7; their explicit
         Linux branches supply expectations checked by a Linux run, rather
         than a claim that Linux was measured on m1.

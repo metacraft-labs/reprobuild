@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 34,
-    "nimTestBinaries": 2683,
+    "nimTestBinaries": 2681,
     "pureUnitConsolidationGroups": 79,
-    "pureUnitTests": 740,
-    "staticallyDetectedRuntimeCompilerFlowTests": 137,
-    "testEntries": 2723
+    "pureUnitTests": 739,
+    "staticallyDetectedRuntimeCompilerFlowTests": 135,
+    "testEntries": 2719
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1560,11 +1560,11 @@
   ],
   "static": {
     "classificationCounts": {
-      "graph-fixture": 19,
-      "integration": 1481,
+      "graph-fixture": 18,
+      "integration": 1480,
       "platform/destructive": 173,
-      "pure unit": 740,
-      "unclassified": 310
+      "pure unit": 739,
+      "unclassified": 309
     },
     "graphOwnedTestArtifacts": [
       {
@@ -1772,9 +1772,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2683,
-    "pythonTestFileCount": 40,
-    "testEntryCount": 2723
+    "nimTestBinaryCount": 2681,
+    "pythonTestFileCount": 38,
+    "testEntryCount": 2719
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -2744,52 +2744,6 @@
         }
       ],
       "source": "tests/e2e/hcr-direct-linker/t_e2e_hcr_in_target_link_and_trampoline.nim"
-    },
-    {
-      "class": "integration",
-      "matches": [
-        {
-          "assignedCommandVariable": "",
-          "commandVariableExecuted": false,
-          "directExecutionLine": true,
-          "executedVariables": [
-            "PatchableCompileFlags",
-            "PatchableLinkFlags",
-            "caseDir",
-            "ctMcr",
-            "patchObj",
-            "repoRoot",
-            "targetBin"
-          ],
-          "line": 357,
-          "path": "tests/e2e/hcr-linux-direct/t_e2e_hcr_linux_replay_of_patched_recording.nim",
-          "patterns": [
-            "gcc"
-          ],
-          "snippet": "\"gcc\", \"-c\", \"-O2\", \"-fcf-protection=full\", \"-ffunction-sections\","
-        },
-        {
-          "assignedCommandVariable": "",
-          "commandVariableExecuted": false,
-          "directExecutionLine": true,
-          "executedVariables": [
-            "PatchableCompileFlags",
-            "PatchableLinkFlags",
-            "caseDir",
-            "ctMcr",
-            "patchObj",
-            "repoRoot",
-            "targetBin"
-          ],
-          "line": 373,
-          "path": "tests/e2e/hcr-linux-direct/t_e2e_hcr_linux_replay_of_patched_recording.nim",
-          "patterns": [
-            "gcc"
-          ],
-          "snippet": "@[\"gcc\", \"-O2\", \"-g\"] & PatchableCompileFlags &"
-        }
-      ],
-      "source": "tests/e2e/hcr-linux-direct/t_e2e_hcr_linux_replay_of_patched_recording.nim"
     },
     {
       "class": "integration",
@@ -4515,120 +4469,6 @@
       "class": "integration",
       "matches": [
         {
-          "assignedCommandVariable": "gccPath",
-          "commandVariableExecuted": true,
-          "directExecutionLine": false,
-          "executedVariables": [
-            "clangPath",
-            "codeTracerRoot",
-            "daemonBin",
-            "destPath",
-            "gccPath",
-            "pathValue",
-            "projectRoot",
-            "repoRoot",
-            "reproBin",
-            "script",
-            "socketPath",
-            "sourcePath",
-            "stylusPath",
-            "stylusSourcePath"
-          ],
-          "line": 735,
-          "path": "tests/e2e/watch/t_e2e_repro_watch.nim",
-          "patterns": [
-            "gcc"
-          ],
-          "snippet": "let gccPath = binDir / \"gcc\""
-        },
-        {
-          "assignedCommandVariable": "clangPath",
-          "commandVariableExecuted": true,
-          "directExecutionLine": false,
-          "executedVariables": [
-            "clangPath",
-            "codeTracerRoot",
-            "daemonBin",
-            "destPath",
-            "gccPath",
-            "pathValue",
-            "projectRoot",
-            "repoRoot",
-            "reproBin",
-            "script",
-            "socketPath",
-            "sourcePath",
-            "stylusPath",
-            "stylusSourcePath"
-          ],
-          "line": 736,
-          "path": "tests/e2e/watch/t_e2e_repro_watch.nim",
-          "patterns": [
-            "clang"
-          ],
-          "snippet": "let clangPath = binDir / \"clang\""
-        },
-        {
-          "assignedCommandVariable": "",
-          "commandVariableExecuted": false,
-          "directExecutionLine": true,
-          "executedVariables": [
-            "clangPath",
-            "codeTracerRoot",
-            "daemonBin",
-            "destPath",
-            "gccPath",
-            "pathValue",
-            "projectRoot",
-            "repoRoot",
-            "reproBin",
-            "script",
-            "socketPath",
-            "sourcePath",
-            "stylusPath",
-            "stylusSourcePath"
-          ],
-          "line": 738,
-          "path": "tests/e2e/watch/t_e2e_repro_watch.nim",
-          "patterns": [
-            "cc"
-          ],
-          "snippet": "discard requireSuccess(shellCommand([\"cc\", sourcePath, \"-o\", gccPath]))"
-        },
-        {
-          "assignedCommandVariable": "",
-          "commandVariableExecuted": false,
-          "directExecutionLine": true,
-          "executedVariables": [
-            "clangPath",
-            "codeTracerRoot",
-            "daemonBin",
-            "destPath",
-            "gccPath",
-            "pathValue",
-            "projectRoot",
-            "repoRoot",
-            "reproBin",
-            "script",
-            "socketPath",
-            "sourcePath",
-            "stylusPath",
-            "stylusSourcePath"
-          ],
-          "line": 744,
-          "path": "tests/e2e/watch/t_e2e_repro_watch.nim",
-          "patterns": [
-            "cc"
-          ],
-          "snippet": "discard requireSuccess(shellCommand([\"cc\", stylusSourcePath, \"-o\", stylusPath]))"
-        }
-      ],
-      "source": "tests/e2e/watch/t_e2e_repro_watch.nim"
-    },
-    {
-      "class": "integration",
-      "matches": [
-        {
           "assignedCommandVariable": "",
           "commandVariableExecuted": false,
           "directExecutionLine": true,
@@ -6132,11 +5972,11 @@
           "commandVariableExecuted": false,
           "directExecutionLine": true,
           "executedVariables": [
-            "codeProject",
             "daemonBin",
             "fixtureProject",
             "helperBin",
             "helperSource",
+            "multiInputProject",
             "repoRoot",
             "reproBin",
             "socketPath",
@@ -31918,24 +31758,6 @@
       "targetOs": "soAny"
     },
     {
-      "binary": "build/test-bin/t_e2e_hcr_linux_replay_of_patched_recording",
-      "class": "integration",
-      "classificationReason": "e2e/integration path or requires the repro binary",
-      "defines": [],
-      "language": "nim",
-      "localDependencyShape": [
-        "repro_hcr_agent",
-        "repro_project_dsl"
-      ],
-      "owner": "tests/e2e",
-      "requiresReproBinary": false,
-      "source": "tests/e2e/hcr-linux-direct/t_e2e_hcr_linux_replay_of_patched_recording.nim",
-      "sourceSuiteCount": 2,
-      "staticCaseCount": 2,
-      "staticallyDetectedRuntimeCompilerFlow": true,
-      "targetOs": "soAny"
-    },
-    {
       "binary": "build/test-bin/t_e2e_hcr_linux_x86_64_single_threaded_direct_patch",
       "class": "integration",
       "classificationReason": "e2e/integration path or requires the repro binary",
@@ -32308,7 +32130,7 @@
       "requiresReproBinary": false,
       "source": "tests/e2e/hcr-linux-txn/t_integration_hcr_linux_commit_failure_rolls_back_published_sites.nim",
       "sourceSuiteCount": 2,
-      "staticCaseCount": 5,
+      "staticCaseCount": 4,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -32323,7 +32145,7 @@
       "requiresReproBinary": false,
       "source": "tests/e2e/hcr-linux-txn/t_integration_hcr_linux_prepare_failure_leaves_process_byte_identical.nim",
       "sourceSuiteCount": 2,
-      "staticCaseCount": 4,
+      "staticCaseCount": 3,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -32338,7 +32160,7 @@
       "requiresReproBinary": false,
       "source": "tests/e2e/hcr-linux-txn/t_integration_hcr_linux_repeated_patch_of_same_function.nim",
       "sourceSuiteCount": 2,
-      "staticCaseCount": 5,
+      "staticCaseCount": 4,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -35538,8 +35360,8 @@
       "requiresReproBinary": true,
       "source": "tests/e2e/watch/t_e2e_repro_watch.nim",
       "sourceSuiteCount": 2,
-      "staticCaseCount": 8,
-      "staticallyDetectedRuntimeCompilerFlow": true,
+      "staticCaseCount": 4,
+      "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
     {
@@ -56347,21 +56169,6 @@
       "targetOs": "soAny"
     },
     {
-      "binary": "build/test-bin/t_unit_hcr_linux_claim_conflict_with_recorder_refused",
-      "class": "pure unit",
-      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
-      "defines": [],
-      "language": "nim",
-      "localDependencyShape": [],
-      "owner": "tests/unit",
-      "requiresReproBinary": false,
-      "source": "tests/unit/t_unit_hcr_linux_claim_conflict_with_recorder_refused.nim",
-      "sourceSuiteCount": 2,
-      "staticCaseCount": 6,
-      "staticallyDetectedRuntimeCompilerFlow": false,
-      "targetOs": "soAny"
-    },
-    {
       "binary": "build/test-bin/t_unit_hcr_linux_x86_64_trampoline_encoding_and_atomicity_preconditions",
       "class": "pure unit",
       "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
@@ -56778,36 +56585,6 @@
       "source": "tests/unit/test_graph_owned_test_artifacts.py",
       "sourceSuiteCount": 1,
       "staticCaseCount": 26,
-      "staticallyDetectedRuntimeCompilerFlow": false,
-      "targetOs": "soAny"
-    },
-    {
-      "binary": "",
-      "class": "graph-fixture",
-      "classificationReason": "fixture path or fixture-oriented test",
-      "defines": [],
-      "language": "python",
-      "localDependencyShape": [],
-      "owner": "tests/unit",
-      "requiresReproBinary": false,
-      "source": "tests/unit/test_hcr_replay_gate_ct_mcr_fixture_edge.py",
-      "sourceSuiteCount": 1,
-      "staticCaseCount": 13,
-      "staticallyDetectedRuntimeCompilerFlow": false,
-      "targetOs": "soAny"
-    },
-    {
-      "binary": "",
-      "class": "unclassified",
-      "classificationReason": "imports `pathlib`, which this scan does not recognize; refusing to call it pure rather than assuming it is",
-      "defines": [],
-      "language": "python",
-      "localDependencyShape": [],
-      "owner": "tests/unit",
-      "requiresReproBinary": false,
-      "source": "tests/unit/test_hcr_replay_gate_monitor_policy.py",
-      "sourceSuiteCount": 1,
-      "staticCaseCount": 2,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

@@ -1096,40 +1096,6 @@ proc workspaceRootForRepo*(repoRoot: string): string =
 
   normalizedPath(direct)
 
-proc codeTracerSourceRoot*(repoRoot: string): string =
-  ## Locate a Codetracer checkout for integration tests that copy a small,
-  ## real source subset. Tests may run from a temporary reprobuild worktree, so
-  ## the normal sibling checkout is not always adjacent to ``repoRoot``.
-  var candidates: seq[string]
-
-  let envRoot = getEnv("CODETRACER_ROOT")
-  if envRoot.len > 0:
-    candidates.add(absoluteCandidate(repoRoot, envRoot))
-
-  let envSrc = getEnv("CODETRACER_SRC")
-  if envSrc.len > 0:
-    let sourcePath = absoluteCandidate(repoRoot, envSrc)
-    candidates.add(sourcePath)
-    candidates.add(sourcePath.parentDir)
-
-  candidates.add(repoRoot.parentDir / "codetracer")
-  candidates.add(workspaceRootForRepo(repoRoot) / "codetracer")
-
-  let commonDir = gitCommonDir(repoRoot)
-  if commonDir.len > 0:
-    candidates.add(commonDir.parentDir.parentDir / "codetracer")
-
-  for candidate in candidates:
-    if isCodeTracerSourceRoot(candidate):
-      return normalizedPath(candidate)
-
-proc requireCodeTracerSourceRoot*(repoRoot: string): string =
-  result = codeTracerSourceRoot(repoRoot)
-  if result.len == 0:
-    raise newException(OSError,
-      "Codetracer checkout missing; set CODETRACER_ROOT to the checkout " &
-      "root or CODETRACER_SRC to its src directory")
-
 proc resolveRunQuotaExecutable*(repoRoot, envName, exeName: string): string =
   ## Resolve runquota tools from env/PATH first, then a built source checkout.
   let executableName = addFileExt(exeName, ExeExt)

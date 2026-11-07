@@ -45,16 +45,13 @@ codetracer-trace-format=dev
 # native-recorder follows `dev` here, and its `dev` does NOT compile against
 # codetracer-trace-format-nim `dev` (trace-format b8db98c6 removed the
 # `paths` parameter recorder `dev` still passes). That does not reach a
-# build: the two jobs that build the recorder put it, and the four siblings
-# its bundle is built from (trace-format-nim, the Rust trace-format crates,
-# native-backend, visual-replay), at the revisions CodeTracer's committed
-# repro.lock names -- the Test job for all of CodeTracer's siblings, the HCR
-# lane for exactly those five (hcr-lanes.yml, "Put the recorder bundle's
-# siblings at CodeTracer's locked revisions"). A pin here was tried and is
-# not enough: a
-# recorder old enough to compile against trace-format-nim `dev` (3936bae1)
-# fails the HCR replay gate, and one new enough for the gate imports
-# trace-format modules that exist only on its `agents` line.
+# build: the Test job puts the recorder and the siblings CodeTracer builds
+# with at the revisions CodeTracer's committed repro.lock names, and the
+# downstream job (downstream-tests.yml) replaces it with the recorder's
+# `agents` line and puts the recorder's build siblings at the revisions the
+# recorder's own lock names, so the recorder's own recipe builds it there.
+# The bundle is no longer a fixture of this repository's suite: the tests
+# that recorded with it moved to the recorder on 2026-11-07.
 codetracer-native-recorder=dev
 
 # codetracer's `ct` binary (built via codetracer/reprobuild.nim's `ct` target so

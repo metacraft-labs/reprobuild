@@ -8,7 +8,7 @@
 ##
 ## THE CLAIM. A commit that fails after N of M sites are published restores all
 ## N to their saved words, every function returns its original value, and no
-## patch page or claim is leaked. §11.1's description of the pre-milestone
+## patch page is leaked (no claim either -- asserted downstream, see below). §11.1's description of the pre-milestone
 ## state is the thing being removed: "an eight-operation commit sequence with
 ## no undo path; a failure mid-sequence ... leaves the target in whatever
 ## partial state it reached."
@@ -35,8 +35,17 @@
 ##
 ## `allowed_mocks: none`. Real multi-function patch set over three real
 ## patchable victims in a real process, real bodies from a real relocatable
-## object, the production transaction through the no-mock probe shim, the real
-## cross-patcher claim map, and `/proc/self/maps` for the leak check.
+## object, the production transaction through the no-mock probe shim, and
+## `/proc/self/maps` for the leak check.
+##
+## The claim-map arms of this gate (no claim leaked, one claim per published
+## window, every claim released) moved to codetracer-native-recorder
+## `tests/reprobuild-hcr/t_integration_hcr_linux_txn_claim_map.nim` on
+## 2026-11-07: the claim map is the recorder's, and the recorder runs them
+## against this checkout (`.github/workflows/downstream-tests.yml` runs them
+## against every reprobuild commit). This gate builds without the map
+## (`m3_fixture.nim`), so the provider's claim calls take the bridge's no-map
+## path and every assertion below is about text, values and pages.
 ##
 ## ------------------------------------------------------------------------
 ## DISCRIMINATION, measured by this file:
@@ -62,13 +71,6 @@ when defined(linux) and defined(amd64):
   suite "integration_hcr_linux_commit_failure_rolls_back_published_sites":
     setup:
       let repoRoot = getCurrentDir()
-
-    test "the claim map the leak assertion needs is present":
-      let path = claimMapPath(repoRoot)
-      if not fileExists(path):
-        checkpoint("HLX-M3 gate needs the codetracer-native-recorder " &
-          "checkout beside this repo: " & path & " is not there.")
-      require fileExists(path)
 
     test "a three-function set commits, which is what makes a failure mean something":
       # THE POSITIVE CONTROL, run first. If a three-site commit could not
@@ -117,11 +119,9 @@ when defined(linux) and defined(amd64):
           check windows.contains(a and not 7'u64)
           movedWindows.incl(a and not 7'u64)
       check movedWindows.len == 3
-      # Three retained bodies, one page each, all still mapped — and the claim
-      # map holds one claim per published window.
+      # Three retained bodies, one page each, all still mapped.
       check run["anonExecAfter"].getInt() -
         run["anonExecBefore"].getInt() == 3 * PageSize
-      check run["claimsAfter"].getInt() == 3
 
     test "a commit failing after N of M restores all N, for N = 0, 1 and 2":
       let bodies = buildPatchBodies(repoRoot)
@@ -161,11 +161,6 @@ when defined(linux) and defined(amd64):
           # Rollback retires the site, so the window is an all-NOP pre-state
           # again and a later patch re-plans from scratch (§4.5).
           check fn["siteLive"].getInt() == 0
-
-        # NO CLAIM LEAKED. Every window this transaction claimed — published or
-        # not — is claimable by anyone again.
-        check run["claimsAfter"].getInt() == 0
-        check run["txn"]["releasedClaimCount"].getInt() == 3
 
         # NO PATCH PAGE LEAKED, answered by the kernel rather than by the
         # provider's own counter. Exactly the N published bodies are retained
