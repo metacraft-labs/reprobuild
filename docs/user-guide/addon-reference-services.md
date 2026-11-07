@@ -74,7 +74,9 @@ The add-on handles this in four ways:
   under, minus its named exceptions. A property the floor neither checks
   nor lists as harmless is refused, so a setting from a newer systemd is
   refused until it is reviewed. If anything differs, the switch starts
-  nothing and reverts. This check applies every rule the profile was
+  nothing and reverts. It prints one refusal per line, each ending with
+  the rule that refused it and the setting it judged, for example
+  `[rule:existing-tree key:RuntimeDirectory]`. This check applies every rule the profile was
   checked against once more, to the unit files systemd actually loaded, so
   it does not rely on the earlier check. It also refuses:
   - any drop-in the add-on did not write, wherever systemd would read it
@@ -107,8 +109,12 @@ The add-on handles this in four ways:
     `ConfigurationDirectory=` must be named after the unit (`foo`,
     `foo-data`, or below them for `foo.service`), never inside another
     program's tree (`systemd/system/...`, `udev/rules.d`) or the add-on's
-    own directories, and never a directory that already exists and belongs
-    to another account (for example `RuntimeDirectory=systemd`);
+    own directories. A unit may not be named after a directory the base
+    system already has (`systemd.service`, `udev.service`), and a
+    directory that already exists on the host is refused unless it was
+    created for this unit: by its own account, or by its start in an
+    earlier apply. A directory another package installs after an apply is
+    refused at the next one;
   - realtime scheduling, a reboot `FailureAction=`, or a resource limit
     above the service manager's default;
   - a dependency such as `OnFailure=` or `Wants=` that starts a unit

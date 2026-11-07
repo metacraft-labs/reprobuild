@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 34,
-    "nimTestBinaries": 2688,
+    "nimTestBinaries": 2689,
     "pureUnitConsolidationGroups": 79,
     "pureUnitTests": 740,
     "staticallyDetectedRuntimeCompilerFlowTests": 138,
-    "testEntries": 2728
+    "testEntries": 2729
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1564,7 +1564,7 @@
       "integration": 1484,
       "platform/destructive": 173,
       "pure unit": 740,
-      "unclassified": 311
+      "unclassified": 312
     },
     "graphOwnedTestArtifacts": [
       {
@@ -1772,9 +1772,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2688,
+    "nimTestBinaryCount": 2689,
     "pythonTestFileCount": 40,
-    "testEntryCount": 2728
+    "testEntryCount": 2729
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -8991,6 +8991,24 @@
       "source": "libs/repro_addon/tests/t_addon_floor_round8.nim",
       "sourceSuiteCount": 4,
       "staticCaseCount": 9,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_addon_floor_round9",
+      "class": "unclassified",
+      "classificationReason": "imports `posix`, which grants out-of-process reach",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_addon",
+        "repro_infra"
+      ],
+      "owner": "libs/repro_addon",
+      "requiresReproBinary": false,
+      "source": "libs/repro_addon/tests/t_addon_floor_round9.nim",
+      "sourceSuiteCount": 5,
+      "staticCaseCount": 20,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

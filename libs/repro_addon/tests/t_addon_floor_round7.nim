@@ -221,8 +221,12 @@ suite "round 7, finding 2: the start hold and the paths the manager creates":
     e = goodInput()
     e.show["RuntimeDirectory"] = "systemd"
     e.inspectPath = nil           # the real host: /run/systemd is root's
-    if dirExists("/run/systemd"):
-      check "belongs to uid 0" in problemsOf(e)
+    # Since round 9 (§13 decision 57) its shape refuses it first: systemd
+    # is a tree the base system owns, and the existing-tree check does not
+    # judge a path the shape rules refused (one rule per refusal).
+    let p = problemsOf(e)
+    check "[rule:directories key:RuntimeDirectory]" in p
+    check "[rule:existing-tree" notin p
     check managerPathProblem("/nonexistent/a9r7", 1000, false) == ""
   test "the effective activator check refuses a listener in the add-on's tree":
     let show = parseShow("FragmentPath=/etc/systemd/system/a.socket\nDropInPaths=\n")
