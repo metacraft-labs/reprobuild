@@ -203,6 +203,12 @@ proc judged(output: string): bool =
   "profile compilation failed" notin output and
     "nim compile failed" notin output
 
+const ProbeMarkerDir = "/var/lib/a13-r5"
+  ## Where a round-5/6 probe unit's ``ExecStart=`` writes its uid
+  ## (``<unit>.ran``) when it runs: evidence, read from the guest, that a
+  ## probe a falsifier let in really ran (a ``Type=simple`` unit reports its
+  ## start done before it can fail). Mode 1777: any probe account may write.
+
 proc r5Unit(name, body, address: string; install = ""): string =
   ## A round-5 probe unit without the floor: its own ``[Service]`` lines
   ## ``body`` (newline-separated), writing nowhere near the carried state;
@@ -210,7 +216,8 @@ proc r5Unit(name, body, address: string; install = ""): string =
   "      systemdSystemUnit(name = \"" & name & "\",\n" &
     "        content = \"[Unit]\\nDescription=A13 round-5 probe\\n\\n" &
     "[Service]\\n" & body.replace("\n", "\\n") &
-    "ReadWritePaths=/var/lib/a13-r5\\nExecStart=/bin/true\\n" & install &
+    "ReadWritePaths=/var/lib/a13-r5\\nExecStart=/bin/sh -c 'id -u > " &
+    ProbeMarkerDir & "/" & name & ".ran'\\n" & install &
     "\",\n        address = \"" & address & "\")\n"
 
 proc probeProfile(name, resources: string): string =
@@ -343,15 +350,17 @@ const
        "/run/systemd/system/eth-r6-lines.service.d/10-env.conf",
      "rm -rf /run/systemd/system/eth-r6-lines.service.d"),
     ("exec", r5Unit("eth-r6-exec.service", R6Confined &
-       "ExecStartPre=/bin/true ; +/bin/true\n", "r6Exec"),
+       "ExecStartPre=/bin/true ; +/bin/sh -c 'id -u > " & ProbeMarkerDir &
+       "/eth-r6-exec.service.priv'\n", "r6Exec"),
      "a privileged command", "", ""),
     ("aliaschain", r5Unit("eth-r6-chain.service", R6Confined, "r6Chain"),
-     "runs as root (root)",
+     "/var/lib/ethereum/validator (r6Chain)",
      "ln -sf /etc/systemd/system/eth-r6-chain.service " &
        "/etc/systemd/system/eth-r6-l1.service && ln -sf " &
        "/etc/systemd/system/eth-r6-l1.service /etc/systemd/system/eth-r6-l2.service" &
        " && mkdir -p /run/systemd/system/eth-r6-l2.service.d && printf " &
-       "'[Service]\\nUser=root\\n' > /run/systemd/system/eth-r6-l2.service.d/10-root.conf",
+       "'[Service]\\nReadWritePaths=/var/lib/ethereum/validator\\n' > " &
+       "/run/systemd/system/eth-r6-l2.service.d/10-rw.conf",
      "rm -rf /etc/systemd/system/eth-r6-l1.service /etc/systemd/system/eth-r6-l2.service " &
        "/run/systemd/system/eth-r6-l2.service.d"),
     ("wantslink", r5Unit("eth-r6-wants.service", R6Confined, "r6Wants"),
@@ -512,6 +521,31 @@ static:
     doAssert p in ProbeWritableDirs or p == "/var/lib/ethereum/validator",
       "a probe unit's ReadWritePaths= names " & p & ", which the gate does " &
       "not create (add it to ProbeWritableDirs)"
+
+proc unitRan(g: Guest; unit: string; marker = ""): (bool, JsonNode) =
+  ## Whether ``unit`` really ran, as the guest's systemd and the unit's own
+  ## marker say: ``Result=success`` and either active or exited 0, and --
+  ## ``marker`` given -- the file its command wrote. Waits for a unit that
+  ## is still starting, a few seconds at most.
+  var props = ""
+  for i in 0 ..< 10:
+    props = g.exec("systemctl show " & unit & " -p Result -p ActiveState " &
+      "-p SubState -p ExecMainStatus -p ExecMainStartTimestampMonotonic").stdout
+    if "ActiveState=activating" notin props: break
+    discard g.exec("sleep 1")
+  var tab = initTable[string, string]()
+  for l in props.splitLines():
+    let i = l.find('=')
+    if i > 0: tab[l[0 ..< i]] = l[i + 1 .. ^1]
+  let started = tab.getOrDefault("ExecMainStartTimestampMonotonic", "0") notin ["", "0"]
+  let ok = tab.getOrDefault("Result") == "success" and started and
+    (tab.getOrDefault("ActiveState") == "active" or
+     tab.getOrDefault("ExecMainStatus") == "0")
+  var m = ""
+  if marker.len > 0:
+    m = g.exec("cat " & marker & " 2>/dev/null").stdout.strip()
+  result = (ok and (marker.len == 0 or m.len > 0),
+            %*{"props": props, "marker": marker, "markerContent": m})
 
 proc hexKey(k: openArray[byte]): string =
   for b in k: result.add(toHex(int(b), 2).toLowerAscii())
@@ -690,7 +724,8 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
     nw.prepareBase()
     nw.mountKeep(format = false)
     nw.installEngineClosure(engine)
-    discard nw.run("mkdir -p " & ProbeWritableDirs.join(" "))
+    discard nw.run("mkdir -p " & ProbeWritableDirs.join(" ") & " && chmod 1777 " &
+      ProbeWritableDirs.join(" "))
     discard nw.run("mkdir -p /etc/repro /etc/repro-testbed " & CarriedDir &
       " " & RefDir & " && printf 'ID=reproos\\nNAME=\"ReproOS (re-identified " &
       "by the test bed)\"\\nVERSION_ID=test\\nREPRO_TESTBED_REIDENTIFIED=1\\n' > " &
@@ -820,6 +855,21 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
               ("(" & address) in o and reason in o
       probes[label] = %*{"exit": r.exitCode, "judged": judged(o),
         "layer": layer, "refusedForReason": refused}
+      if r.exitCode == 0:
+        # Let in (a falsifier's cell): evidence that its units ran.
+        var ranAll = true
+        let ev = newJObject()
+        for l in resources.splitLines():
+          let i = l.find("systemdSystemUnit(name = \"")
+          if i >= 0:
+            let n = l[i + len("systemdSystemUnit(name = \"") .. ^1]
+            let u = n[0 ..< n.find('"')]
+            if not u.endsWith(".service"): continue
+            let (ok, e) = nw.unitRan(u)
+            ranAll = ranAll and ok
+            ev[u] = e
+        probes[label]["ran"] = %ranAll
+        probes[label]["runEvidence"] = ev
       step("round 4, " & label & ": refused while the directory is pending, " &
            (if layer == "floor": "by the hardening floor, " else: "") &
            "naming " & address,
@@ -840,6 +890,11 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
     step("round 4, host drop-in (control): without it the confined unit is " &
          "let in while the directory is pending",
          ctl.exitCode == 0, ctl.stdout & ctl.stderr)
+    let (ctlRan, ctlEv) = nw.unitRan("eth-r4-host.service")
+    probes["hostControl"]["ran"] = %ctlRan
+    probes["hostControl"]["runEvidence"] = ctlEv
+    step("round 4, host drop-in (control): the unit let in really ran",
+         ctlRan, $ctlEv)
     discard nw.run("mkdir -p " & R4HostDropIn.parentDir & " && printf " &
       "'[Service]\\nProtectSystem=no\\n' > " & R4HostDropIn &
       " && systemctl daemon-reload")
@@ -863,6 +918,7 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
     record["nsswitch"] = %nw.exec("grep -E '^(passwd|group):' " &
       "/etc/nsswitch.conf || true").stdout
     for (label, address, resources, reason, setup, cleanup) in R5Probes:
+      discard nw.run("rm -f " & ProbeMarkerDir & "/*.ran")
       if setup.len > 0: discard nw.run(setup)
       let pf = probeFile("r5" & label)
       writeFile(work / pf, probeProfile("r5" & label, resources))
@@ -874,6 +930,12 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
         ("(" & address) in o and reason in o
       probes["r5" & label] = %*{"exit": r.exitCode, "judged": judged(o),
         "layer": "reach", "refusedForReason": refused}
+      if r.exitCode == 0:
+        let u = resources[resources.find("name = \"") + 8 .. ^1]
+        let unitName = u[0 ..< u.find('"')]
+        let (ok, e) = nw.unitRan(unitName, ProbeMarkerDir & "/" & unitName & ".ran")
+        probes["r5" & label]["ran"] = %ok
+        probes["r5" & label]["runEvidence"] = e
       if label == "userdb":
         # What this host's NSS says of the record (nss-systemd serves it
         # where installed); the analysis reads the record itself either way.
@@ -885,6 +947,7 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
     # --- Review round 6 and owner decisions 58 and 59, while the directory
     # is pending: each refused for its own reason and judged.
     for (label, resources, needle, setup, cleanup) in R6Probes:
+      discard nw.run("rm -f " & ProbeMarkerDir & "/*.ran " & ProbeMarkerDir & "/*.priv")
       if setup.len > 0: discard nw.run(setup)
       let pf = probeFile("r6" & label)
       writeFile(work / pf, probeProfile("r6" & label, resources))
@@ -910,6 +973,23 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
       probes["r6" & label] = %*{"exit": r.exitCode, "judged": judged(o),
         "layer": (if label in ["live", "liverw"]: "live" else: "reach"),
         "refusedForReason": refused}
+      if r.exitCode == 0:
+        # Let in (a falsifier's cell): the probe's unit really ran, and --
+        # for the exec probe -- its privileged command did, as root,
+        # observed on the guest (A13 round 6: a let-in unit can fail after
+        # its start is reported, and then proves nothing).
+        let u0 = resources[resources.find("name = \"") + 8 .. ^1]
+        let unitName = u0[0 ..< u0.find('"')]
+        var (ok, e) = nw.unitRan(unitName, ProbeMarkerDir & "/" & unitName & ".ran")
+        if label == "exec":
+          let priv = nw.exec("cat " & ProbeMarkerDir &
+            "/eth-r6-exec.service.priv 2>/dev/null").stdout.strip()
+          e["privilegedUid"] = %priv
+          ok = ok and priv == "0"
+        if label == "live":
+          ok = ok and e["markerContent"].getStr() == "0"
+        probes["r6" & label]["ran"] = %ok
+        probes["r6" & label]["runEvidence"] = e
       if r.exitCode != 0 and "ECarriedStatePending" notin o:
         # Failed for another reason (a falsifier let the probe in, and its
         # unit did not start): what systemd says of the probe's units, so
