@@ -85,10 +85,14 @@ proc requireUsesAdmitInstalledPrefixNim*(rawConstraints: openArray[string]) =
   ## `uses:` entries as written. A pinned compiler (rule 1) never sets the
   ## variable, so it is never second-guessed here.
   ##
-  ## Run by every route that hands an engine a recipe's interface: the
-  ## extraction itself (`repro_interface_artifacts.extractInterfaceFromModule`)
-  ## and the build engine's interface edge, whose cache hit runs no
-  ## extraction (`repro_cli_support.extractInterfaceEdge`).
+  ## Run inside the extraction
+  ## (`repro_interface_artifacts.extractInterfaceFromModule`, whose body is
+  ## not exported) and on `liftInterfaceArtifact`'s
+  ## fresh-artifact path, which reads a recorded artifact without extracting.
+  ## The build engine's interface edge (`repro_cli_support.extractInterfaceEdge`)
+  ## makes no check of its own: because the extraction reads this variable,
+  ## the monitor keys the edge's record on it, so a cached record answers only
+  ## a run with the same value, one whose extraction passed this check.
   let version = getEnv(InstalledPrefixNimEnvVar)
   if version.len == 0:
     return

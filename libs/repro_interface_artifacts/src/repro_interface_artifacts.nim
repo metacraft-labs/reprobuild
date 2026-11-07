@@ -7796,10 +7796,19 @@ proc extractInterfaceFromModuleUnchecked(modulePath, artifactPath,
                                          relocationAnchors:
                                            openArray[string] = []):
     ProjectInterfaceArtifact =
-  ## The extraction itself. Deliberately NOT exported: the only way in from
-  ## outside this module is ``extractInterfaceFromModule``, which checks the
-  ## recipe's ``uses: nim`` against the installed prefix's compiler (N3), so
-  ## no caller can hold an interface that check has not seen.
+  ## The extraction itself. Deliberately NOT exported: the only way to
+  ## EXTRACT an interface from outside this module is
+  ## ``extractInterfaceFromModule``, which checks the recipe's ``uses: nim``
+  ## against the installed prefix's compiler (N3). Inside this module,
+  ## ``liftInterfaceArtifact`` extracts through that checked entry too
+  ## (``t_extraction_checks_the_prefix_nim`` holds its cold and fresh paths).
+  ##
+  ## This does not cover READING an interface already on disk:
+  ## ``readInterfaceArtifact*`` is exported, and ``repro_tool_profiles`` and
+  ## ``repro_cli_support`` read recorded artifacts without extracting. Those
+  ## artifacts were written by an extraction, which checked under the value
+  ## of ``$REPRO_INSTALLED_PREFIX_NIM`` it ran with; nothing re-checks a read
+  ## against a different value.
   ## ``useExtractionCache`` controls the built-in warm short-circuit. It is
   ## ``false`` for exactly one caller: the child of the extraction EDGE.
   ##

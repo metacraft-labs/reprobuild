@@ -16,7 +16,8 @@
 ## * with it set, a recipe whose range excludes the release is refused by
 ##   `extractInterfaceFromModule`, on a cold extraction and on its warm
 ##   short-circuit alike, and an admitting range passes;
-## * a lift whose artifact is already fresh is refused the same way.
+## * a lift is refused the same way, on its cold path (it extracts) and on
+##   its fresh-artifact path (it reads the artifact back without extracting).
 ##
 ## Each is falsified by removing its check (see the A15 record).
 ##
@@ -122,3 +123,24 @@ suite "an interface is held only once its uses: nim is checked":
     withMarker("2.3.1"):
       expect InstalledPrefixNimError:
         discard liftInterfaceArtifact(plan)
+
+  test "a cold lift is refused the same way":
+    # The lift's extraction branch, with nothing recorded yet: it must go
+    # through the checked extractor, not the module-private one beside it.
+    let base = scratchRoot("lift-cold")
+    defer: removeDir(base)
+    let root = project(base, "nim ==2.2.10")
+    let outDir = base / "out"
+    createDir(outDir)
+    let plan = interfaceLiftPlan(root / "repro.nim",
+      outDir / "project-interface.rbsz", outDir / "project-interface.nim",
+      workDir = getCurrentDir())
+    require not interfaceArtifactFresh(plan)
+    withMarker("2.3.1"):
+      try:
+        discard liftInterfaceArtifact(plan)
+        check false
+      except InstalledPrefixNimError as err:
+        checkpoint(err.msg)
+        check "excludes Nim 2.3.1" in err.msg
+
