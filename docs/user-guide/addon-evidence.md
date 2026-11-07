@@ -72,7 +72,9 @@ overwritten; `evidence-enrol` refuses a host that already has either one.
 To check the credential from the host, run
 `repro system addon evidence-credential-check`. An append must be
 acknowledged, and a list, a read, an overwrite and a delete must each be
-refused. The check announces itself to the sink first, so the sink's
+refused: the sink records each refusal and says so. An operation the sink
+never received (it went away, or could not be reached) proves nothing
+about the credential, and fails the check. The check announces itself to the sink first, so the sink's
 detectors list it as the host's `self-test` instead of four alerts. Four
 refused operations that were not announced that way still alert.
 
@@ -223,7 +225,11 @@ eight entries are kept, none older than 90 days.
 
 Uninstalling the add-on removes `/var/lib/repro`, and with it these
 entries. So while any exist, `repro system addon uninstall` refuses: it
-names each entry and removes nothing. Copy the entries off the host, then
+names each entry and removes nothing. It also names any object a recovery
+left in the store when the host lost power, and records each of them,
+and each entry whose record was never written, at the sink first.
+`--discard-store-evidence` is refused until the sink has acknowledged
+those records. Copy the entries off the host, then
 run
 
 ```sh

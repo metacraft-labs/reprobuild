@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 34,
-    "nimTestBinaries": 2686,
+    "nimTestBinaries": 2687,
     "pureUnitConsolidationGroups": 79,
     "pureUnitTests": 740,
     "staticallyDetectedRuntimeCompilerFlowTests": 137,
-    "testEntries": 2726
+    "testEntries": 2727
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1564,7 +1564,7 @@
       "integration": 1484,
       "platform/destructive": 173,
       "pure unit": 740,
-      "unclassified": 310
+      "unclassified": 311
     },
     "graphOwnedTestArtifacts": [
       {
@@ -1772,9 +1772,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2686,
+    "nimTestBinaryCount": 2687,
     "pythonTestFileCount": 40,
-    "testEntryCount": 2726
+    "testEntryCount": 2727
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -9228,6 +9228,25 @@
       "source": "libs/repro_addon/tests/t_addon_review_round2.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 9,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_addon_review_round3",
+      "class": "unclassified",
+      "classificationReason": "imports `asyncdispatch`, which grants out-of-process reach",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_addon",
+        "repro_deploy_agent",
+        "repro_peer_cache"
+      ],
+      "owner": "libs/repro_addon",
+      "requiresReproBinary": false,
+      "source": "libs/repro_addon/tests/t_addon_review_round3.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 7,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -30411,6 +30430,7 @@
       "language": "nim",
       "localDependencyShape": [
         "repro_dsl_stdlib",
+        "repro_peer_cache",
         "repro_test_support"
       ],
       "owner": "tests/e2e",

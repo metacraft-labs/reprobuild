@@ -215,18 +215,6 @@ proc parseSinkCommand*(args: openArray[string]): SinkCommand =
 # The sink operator's acknowledgements (D4).
 # ---------------------------------------------------------------------------
 
-proc validAlertKind*(k: string): bool =
-  ## ``<detector>/<trigger>``: ``DET-AO-<n>`` or ``G<n>``, then a trigger
-  ## of lower-case words joined by ``-``.
-  let p = k.split('/')
-  if p.len != 2 or p[1].len == 0: return false
-  let det = p[0]
-  let detOk = (det.startsWith("DET-AO-") and det.len > 7 and
-               det[7 .. ^1].allCharsInSet(Digits)) or
-              (det.len > 1 and det[0] == 'G' and
-               det[1 .. ^1].allCharsInSet(Digits))
-  detOk and p[1].allCharsInSet({'a' .. 'z', '0' .. '9', '-'})
-
 proc entryAt(dir: string; seqNo: uint64): tuple[found: bool; e: EvidenceEntry] =
   for e in readEvidenceStore(dir):
     if e.seq == seqNo: return (true, e)
@@ -275,11 +263,21 @@ proc processOperatorInbox*(store: EvidenceStore; sink: PeerId;
       let lines = readFile(p).splitLines()
       if lines.len >= 4:
         let n = parseBiggestUInt(lines[0].strip()).uint64
-        discard store.appendRecord(sink, lrDaemon,
-          ackRecord(n, lines[1].strip(), lines[2].strip(),
-                    lines[3 .. ^1].join(" ").strip(),
-                    int64(epochTime() * 1000)))
-        inc result
+        # The rules are the store writer's, not only the ``ack`` command's
+        # (A11 review round 3): whatever dropped the request, a malformed
+        # kind, a sequence not in the store, or the sink's own
+        # acknowledgement is refused here, never appended.
+        let refusal = when mutated("ack-rules-cli-only"): ""
+                      else: ackRefusal(store.dir, n, lines[1].strip())
+        if refusal.len > 0:
+          stderr.writeLine("repro-evidence-sink: acknowledgement " &
+            extractFilename(p) & " refused: " & refusal)
+        else:
+          discard store.appendRecord(sink, lrDaemon,
+            ackRecord(n, lines[1].strip(), lines[2].strip(),
+                      lines[3 .. ^1].join(" ").strip(),
+                      int64(epochTime() * 1000)))
+          inc result
     except CatchableError:
       discard           # a malformed request is dropped, not appended
     try: removeFile(p) except OSError: discard

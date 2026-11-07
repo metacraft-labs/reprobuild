@@ -38,14 +38,21 @@
 ##    the fetch unit's ``Requires=`` fail).
 ## 5. **Uninstall** names the evidence entries before it removes anything:
 ##    without ``--discard-store-evidence`` it refuses, naming each, and
-##    removes nothing; with it, it removes them with the state.
+##    removes nothing; with it, it removes them with the state. An object
+##    left aside in the store (as a crash leaves it) is named too, and (§13
+##    decision 56) its DET-AO-5 ``store-recovery-interrupted`` record
+##    reaches the sink before anything is discarded.
 ##
 ## Falsifying mutations: ``custody-skips-file-sources`` (steps 2 and 4: the
 ## altered bytes are installed into /etc), ``custody-skips-closures`` (step
 ## 3: the altered member is used), ``recovery-discards-evidence`` (the
 ## evidence steps), ``recovery-trusts-store-bytes`` (step 2: the files
 ## prefix is "recovered" from its own altered copy, does not hash to its
-## recorded digest, and the switch refuses).
+## recorded digest, and the switch refuses), ``apt-closure-member-stays-missing``
+## and ``fetch-skips-missing-member`` (step 3: the second tick refuses
+## too), ``uninstall-discards-evidence-silently`` (step 5: the first
+## uninstall removes the evidence), ``uninstall-discards-unrecorded`` (step
+## 5: the object left aside reaches no record).
 ##
 ## Opt-in: ``REPRO_ADDON_VM_GATES=1``.
 ##
@@ -60,6 +67,8 @@ import std/[json, os, strutils, unittest]
 
 import repro_test_support/reasoned_skip
 import repro_dsl_stdlib/packages/apt_closure
+import repro_peer_cache/evidence
+import repro_peer_cache/types
 
 import ./addon_testbed
 import ./agent_e2e_support
@@ -241,24 +250,44 @@ proc body(g: Guest; repro: string; step: StepFn; record: JsonNode;
   step("and the agent fetches and applies the next sequence",
        k2.outcome == "aoApplied" and k2.sequence == 3, $k2)
 
-  # 5. Uninstall names the evidence before it removes anything.
+  # 5. Uninstall names the evidence before it removes anything, and (§13
+  # decision 56) records and ships first what no record named yet: here an
+  # object a crashed recovery left aside in the store.
+  let aside = "/repro/store/tmp/custody-aside/20261107T000000Z-gate-1-a"
+  let leave = g.exec("unshare --mount --propagation private /bin/sh -c " &
+    quoteShell("mount -o remount,bind,rw /repro/store && mkdir -p " & aside &
+      " && printf altered > " & aside & "/f && printf '%s\\n' " &
+      "/repro/store/prefixes/gate/1-a > " & aside & ".from"))
+  step("an object is left aside in the store, as a crash leaves it",
+       leave.exitCode == 0, leave.stderr)
+  let since5 = sink.headSeq()
   let entries = g.evidenceCount()
   let un0 = g.exec(repro & " system addon uninstall", timeoutSec = 1800)
   record["uninstallRefused"] = %(un0.stdout & un0.stderr)
   step("without --discard-store-evidence uninstall refuses, naming each " &
-       "entry, and removes nothing",
+       "entry and the object left aside, and removes nothing",
        un0.exitCode != 0 and entries > 0 and
-         (un0.stdout & un0.stderr).count("store evidence ") == entries and
+         (un0.stdout & un0.stderr).count("store evidence ") == entries + 1 and
+         aside in un0.stdout & un0.stderr and
          "nothing was removed" in un0.stdout & un0.stderr and
          g.evidenceCount() == entries and
          g.exec("test -d /var/lib/repro/system").exitCode == 0,
        un0.stdout & un0.stderr)
+  var asideRecorded = false
+  for e in sink.entries():
+    if e.seq > since5 and e.kind == ekRecord and $e.senderHostId == host and
+        e.record.trigger == "store-recovery-interrupted" and
+        e.record.field("evidence") == aside:
+      asideRecorded = true
+  step("the object left aside was recorded and the record reached the sink " &
+       "before anything was discarded (decision 56)", asideRecorded, "")
   let un = g.exec(repro & " system addon uninstall --discard-store-evidence",
                   timeoutSec = 1800)
   record["uninstall"] = %(un.stdout & un.stderr)
   step("with it, uninstall succeeds and names each store-evidence entry",
        un.exitCode == 0 and
-         (un.stdout & un.stderr).count("(store evidence)") == entries,
+         (un.stdout & un.stderr).count("(store evidence)") == entries and
+         (aside & " (store evidence left aside)") in un.stdout & un.stderr,
        un.stdout & un.stderr)
   step("the evidence directory is gone with the state",
        g.exec("test -e " & Evidence).exitCode != 0, "")

@@ -321,6 +321,23 @@ proc parseUnsigned(s: string): uint64 =
 proc parseSigned(s: string): int64 =
   try: parseBiggestInt(s) except ValueError: 0'i64
 
+proc validAlertKind*(k: string): bool =
+  ## ``<detector>/<trigger>``: ``DET-AO-<n>`` or ``G<n>``, then a trigger
+  ## of lower-case words joined by ``-``.
+  let p = k.split('/')
+  if p.len != 2 or p[1].len == 0: return false
+  let det = p[0]
+  let detOk = (det.startsWith("DET-AO-") and det.len > 7 and
+               det[7 .. ^1].allCharsInSet(Digits)) or
+              (det.len > 1 and det[0] == 'G' and
+               det[1 .. ^1].allCharsInSet(Digits))
+  detOk and p[1].allCharsInSet({'a' .. 'z', '0' .. '9', '-'})
+
+const CheckStateHeader* = "repro-check-state 1"
+  ## The first line ``writeFirstSeen`` writes. A file without it is not the
+  ## check's: empty, truncated or foreign (A11 review round 3), unless it
+  ## is round 2's format (lines only, at least one), which is read once.
+
 proc readFirstSeen*(path: string): Table[string, uint64] =
   ## ``<target> <sequence> <first issuedAt>`` per line. A file that does not
   ## exist is the first run (empty). A file that exists and cannot be read,
@@ -338,7 +355,18 @@ proc readFirstSeen*(path: string): Table[string, uint64] =
     else:
       raise newException(EvidenceCheckError, "the check's state file " &
         path & " exists and cannot be read: " & getCurrentExceptionMsg())
-  for l in text.splitLines():
+  var lines = text.splitLines()
+  if lines.len > 0 and lines[0] == CheckStateHeader:
+    lines = lines[1 .. ^1]
+  elif not mutated("check-state-empty-is-valid"):
+    # Round 2 wrote no header: such a file is read when it holds at least
+    # one entry. An empty one -- zero bytes, or blank lines -- is a state
+    # the check never wrote, and restarts every count: refused.
+    if text.strip().len == 0:
+      raise newException(EvidenceCheckError, "the check's state file " &
+        path & " is empty: it is not a state the check wrote (lost or " &
+        "truncated), and every lag count would restart")
+  for l in lines:
     if l.strip().len == 0: continue
     let p = l.splitWhitespace()
     var ok = p.len == 3
@@ -368,6 +396,7 @@ proc writeFirstSeen*(path: string; t: Table[string, uint64]) =
   var lines: seq[string]
   for k, v in t: lines.add(k & " " & $v)
   lines.sort()
+  lines.insert(CheckStateHeader, 0)
   let tmp = path & ".tmp"
   try:
     createDir(parentDir(path))
@@ -482,6 +511,12 @@ proc runEvidenceCheck*(inp: CheckInputs): CheckReport =
   # it handled -- one record can raise several alerts (finding 9).
   var acks = initTable[string, HandledAlert]()
   if inp.sinkHostId.len > 0:
+    # The sink's own acknowledgements are never acknowledged.
+    var sinkOwnAcks = initHashSet[string]()
+    for e in entries:
+      if e.kind == ekRecord and $e.senderHostId == inp.sinkHostId and
+          e.record.detector == "sink-operator":
+        sinkOwnAcks.incl($e.seq)
     for e in entries:
       if e.kind == ekRecord and $e.senderHostId == inp.sinkHostId and
           e.record.detector == "sink-operator" and
@@ -490,7 +525,16 @@ proc runEvidenceCheck*(inp: CheckInputs): CheckReport =
         let finding = e.record.field("finding")
         let k = when mutated("ack-by-sequence-only"): $n
                 else: $n & " " & finding
-        if n > 0'u64 and finding.len > 0 and k notin acks:
+        # The same rules the sink applies when it appends (A11 review round
+        # 3), and one the check alone can apply: an acknowledgement handles
+        # only a record that came BEFORE it.
+        let valid = when mutated("ack-rules-cli-only"): true
+                    else: validAlertKind(finding) and n < e.seq and
+                          $n notin sinkOwnAcks
+        # Sequence 0 is a store's first entry, acknowledgeable like any.
+        let named = e.record.field("acknowledges").len > 0 and
+                    e.record.field("acknowledges").allCharsInSet(Digits)
+        if named and finding.len > 0 and valid and k notin acks:
           acks[k] = HandledAlert(ackSeq: e.seq,
             operator: e.record.field("operator"),
             reason: e.record.field("reason"))

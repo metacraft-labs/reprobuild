@@ -729,6 +729,17 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "",
     singleReason: "module-level statement runs at every start-up: let root = getTempDir() / (\"a11-round2-\" & $getCurrentProces..."),
   TestSpec(
+    source: "libs/repro_addon/tests/t_addon_review_round3.nim",
+    binary: "build/test-bin/t_addon_review_round3",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "",
+    singleReason: "module-level statement runs at every start-up: let root = getTempDir() / (\"a11-round3-\" & $getCurrentProces..."),
+  TestSpec(
     source: "libs/repro_addon/tests/t_addon_secret_declarations.nim",
     binary: "build/test-bin/t_addon_secret_declarations",
     defines: @[],

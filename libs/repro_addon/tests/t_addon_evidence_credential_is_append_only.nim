@@ -40,14 +40,19 @@ suite "the Evidence sink write credential is append-only":
     let c = runCredentialCheck(a.site, a.conf, "host-a")
     check not c.appended
     check sink.entries().len == 0
+    # The sink dropped those connections and kept serving: no handler
+    # ended in an error (under Nim 2.2.4 one did, "yielded nil", and it
+    # stopped the sink; A11 review round 3).
+    check sink.server.failedConnections == 0
+    check sink.server.running
 
   test "an enrolled credential appends, and cannot list, read, overwrite or delete":
     sink.enrol(a)
     let c = runCredentialCheck(a.site, a.conf, "host-a")
     check c.appended
-    for (op, answered) in c.answered:
+    for (op, outcome) in c.answered:
       checkpoint $op
-      check not answered
+      check outcome == poRefused
     check credentialCheckOk(c)
     # The sink holds the probe, under the host id it verified, and one
     # refusal entry per forbidden operation, naming the verb.

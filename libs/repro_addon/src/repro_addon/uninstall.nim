@@ -44,6 +44,8 @@ import repro_elevation/posix_system_driver
 import ./addon_apply
 import ./collision
 import ./etc_write
+import ./evidence
+import ./evidence_ship
 import ./generation0
 import ./handback
 import ./host_exec
@@ -226,6 +228,22 @@ proc restorePreBootstrapInputs*(captured: CapturedInputs; keepStore: bool;
     except CatchableError as ex:
       r.errors.add(e.path & ": " & ex.msg)
 
+proc shipEvidenceNow*(stateDir: string): tuple[ok: bool; why: string] =
+  ## Ship the outbox now and report whether the sink acknowledged every
+  ## record in it (an entry leaves the outbox only once acknowledged). A
+  ## host without a sink keeps local records only: there is nothing to
+  ## wait for.
+  let site = defaultShipSite()
+  if not fileExists(site.confPath): return (true, "")
+  try:
+    let conf = loadEvidenceConf(site.confPath)
+    let r = runEvidenceShip(site, conf, readHostName())
+    if r.pending == 0 and r.error.len == 0: (true, "")
+    else: (false, $r.pending & " record(s) still queued" &
+           (if r.error.len > 0: ": " & r.error else: ""))
+  except CatchableError as e:
+    (false, e.msg)
+
 proc runAddonUninstall*(opts: UninstallOptions): UninstallResult =
   let stateDir = if opts.stateDir.len > 0: opts.stateDir else: DefaultStateDir
   # The host-wide apply lock for the whole uninstall: it removes the store,
@@ -236,7 +254,22 @@ proc runAddonUninstall*(opts: UninstallOptions): UninstallResult =
   # The altered store objects kept as evidence go with /var/lib/repro. They
   # are named, and nothing is removed, until the operator says to discard
   # them (having copied them out).
-  let evidenceKept = pendingStoreEvidence(custodySite(stateDir))
+  let custody = custodySite(stateDir)
+  let evidenceKept = pendingStoreEvidence(custody)
+  # §13 decision 56 (owner, 2026-11-07): record and ship first. Every
+  # object left aside and every entry filed but not recorded gets its
+  # DET-AO-5 record now, shipped while the shipping unit still exists, and
+  # nothing is discarded before the sink has acknowledged them.
+  if evidenceKept.len > 0:
+    discard recordUnreportedStoreEvidence(custody)
+    let shipped = shipEvidenceNow(stateDir)
+    if opts.discardStoreEvidence and not shipped.ok and
+        not mutated("uninstall-discards-unrecorded"):
+      result.errors.add("the Evidence sink has not acknowledged the " &
+        "records of the store evidence uninstall would discard (" &
+        shipped.why & "); run uninstall again once it has")
+      result.errors.add("nothing was removed")
+      return
   if evidenceKept.len > 0 and not opts.discardStoreEvidence and
       not mutated("uninstall-discards-evidence-silently"):
     for e in evidenceKept:

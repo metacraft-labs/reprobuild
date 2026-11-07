@@ -743,6 +743,30 @@
 ## ``egress-unit-ignores-table``              the egress observer unit does
 ##                                            not name the table it loads
 ##                                            (round 2)
+## ``sink-close-in-finally``                  the sink's connection handler
+##                                            awaits its close in a finally,
+##                                            as before; red under Nim 2.2.4
+##                                            (round 3)
+## ``egress-owed-by-listing``                 owed egress destinations are
+##                                            taken in the set's listing
+##                                            order (round 3)
+## ``egress-owed-dropped-at-reload``          owed egress destinations are
+##                                            forgotten at a table reload
+##                                            (round 3)
+## ``egress-state-empty-is-valid``            an empty or headerless egress
+##                                            state reads as a first check
+##                                            (round 3)
+## ``check-state-empty-is-valid``             an empty check state reads as
+##                                            a valid empty state (round 3)
+## ``probe-undelivered-is-refused``           a forbidden-verb probe with no
+##                                            reply counts as refused (round
+##                                            3)
+## ``ack-rules-cli-only``                     the sink appends, and the
+##                                            check honours, any
+##                                            acknowledgement (round 3)
+## ``uninstall-discards-unrecorded``          uninstall records nothing it
+##                                            discards, and does not wait
+##                                            for the sink (round 3)
 ## =========================================  ==============================
 
 # The deploy agent's own mutations (``repro_deploy_agent/agent_mutations``)
@@ -1185,7 +1209,15 @@ const
                           "ship-backoff-reaches-timeout",
                           "egress-cap-advances-all", "uninstall-ignores-asides",
                           "tree-marker-on-reuse", "containment-sequence-unsynced",
-                          "egress-unit-ignores-table"]
+                          "egress-unit-ignores-table",
+                          # The A11 code review, round 3.
+                          "sink-close-in-finally", "egress-owed-by-listing",
+                          "egress-owed-dropped-at-reload",
+                          "check-state-empty-is-valid",
+                          "probe-undelivered-is-refused",
+                          "ack-rules-cli-only",
+                          "uninstall-discards-unrecorded",
+                          "egress-state-empty-is-valid"]
 
 when AddonMutation.len > 0 and AddonMutation notin KnownAddonMutations and
     AddonMutation notin KnownAgentMutations:

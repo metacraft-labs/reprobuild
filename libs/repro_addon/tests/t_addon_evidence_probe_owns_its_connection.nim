@@ -48,12 +48,16 @@ proc childRun(mode: string): int =
   defer: sink.server.stop()
   let h = newHost(root, "race", sink)
   if mode != "unenrolled": sink.enrol(h)
-  var answered = 0
+  # Wrong: a probe read as answered, or -- on an enrolled credential, whose
+  # verbs the sink receives -- one that is not a confirmed refusal (A11
+  # review round 3: an undelivered probe used to read as refused).
+  var wrong = 0
   for i in 0 ..< Iterations:
     if mode == "credential-check":
       let c = runCredentialCheck(h.site, h.conf, "race")
-      for (op, got) in c.answered:
-        if got: inc answered
+      if not credentialCheckOk(c):
+        inc wrong
+        echo "iteration ", i, ": ", c.answered, " ", c.probeErrors
       continue
     let a = openAppender(h.site, h.conf)
     a.append(newEvidenceRecord(ecAudit, "addon-evidence-ship",
@@ -61,12 +65,12 @@ proc childRun(mode: string): int =
     discard a.drain(1 + (i * 7) mod 60)     # the deadline lands anywhere
     for op in ForbiddenOperation:
       let got = try: waitFor a.probeForbiddenOperation(op)
-                except CatchableError: false
-      if got:
-        inc answered
-        echo "iteration ", i, ": ", op, " read as ANSWERED"
+                except CatchableError: poUndelivered
+      if got == poAnswered or (mode == "enrolled" and got != poRefused):
+        inc wrong
+        echo "iteration ", i, ": ", op, " read as ", got
     a.close()
-  if answered == 0: 0 else: 1
+  if wrong == 0: 0 else: 1
 
 proc inChild(mode: string): tuple[code: int; output: string] =
   let (o, c) = execCmdEx(quoteShell(getAppFilename()),
@@ -96,7 +100,7 @@ suite "a forbidden-verb probe owns its connection":
     check a.drain(20_000)
     check a.connected
     for op in ForbiddenOperation:
-      check not waitFor(a.probeForbiddenOperation(op))
+      check waitFor(a.probeForbiddenOperation(op)) == poRefused
       check a.connected
     a.append(newEvidenceRecord(ecAudit, "addon-evidence-ship", "after",
       [("host", "own")], nowMs = 2))
