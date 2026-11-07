@@ -588,6 +588,7 @@ libs/repro_local_store/tests/t_store_budget_gc.nim	nim	12
 libs/repro_local_store/tests/t_store_bundle_roundtrip.nim	nim	5
 libs/repro_local_store/tests/t_store_copy.nim	nim	22
 libs/repro_local_store/tests/t_store_optimise_dedup.nim	nim	2
+libs/repro_local_store/tests/t_store_use_record_lost_to_a_writer_leaves_no_lock.nim	nim	1
 libs/repro_local_store/tests/t_win_store_gc_refuses_referenced_entry.nim	nim	9
 libs/repro_local_store/tests/t_win_store_hardlink_cap_falls_back_per_file.nim	nim	7
 libs/repro_lock/tests/t_a_store_pin_carries_its_archive_through_the_lock.nim	nim	5

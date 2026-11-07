@@ -801,6 +801,12 @@ proc casPath*(s: Store; digest: PrefixIdBytes): string =
 # one indexed SELECT. The write never waits for the index lock: a use that
 # loses a race with a writer is simply not recorded this time, and a read
 # never fails or stalls because its use could not be noted.
+#
+# Losing that race is the expected outcome under load, so the error is
+# dropped. Every statement in the body is finalized on every path for the
+# same reason: one left behind by the error keeps the connection from
+# closing, and `sqlite3_binding.step` resets it so it cannot hold the
+# connection's next write open (see there).
 
 template recordUseWithoutWaiting(db: Database; body: untyped) =
   try:
@@ -827,17 +833,18 @@ proc touchPrefix*(s: Store; prefixId: PrefixIdBytes; now: int64 = 0): bool =
     var q = s.db.prepare(
       "SELECT COALESCE(last_used_at, created_at) FROM prefixes " &
       "WHERE prefix_id = ?")
+    defer: q.finalize()
     q.bindBlob(1, prefixId)
     if q.step() == SqliteRow:
       stale = q.columnInt(0) <= t - LastUseResolutionSeconds
-    q.finalize()
+    q.reset()
     if stale:
       var u = s.db.prepare(
         "UPDATE prefixes SET last_used_at = ? WHERE prefix_id = ?")
+      defer: u.finalize()
       u.bindInt(1, t)
       u.bindBlob(2, prefixId)
       discard u.step()
-      u.finalize()
       result = s.db.changes() > 0
 
 proc prefixLastUsed*(s: Store; prefixId: PrefixIdBytes): int64 =
@@ -866,20 +873,21 @@ proc touchCasBlob*(s: Store; digest: PrefixIdBytes; now: int64 = 0): bool =
   recordUseWithoutWaiting(s.db):
     var last = 0'i64
     var q = s.db.prepare("SELECT last_used_at FROM cas_use WHERE digest = ?")
+    defer: q.finalize()
     q.bindBlob(1, digest)
     if q.step() == SqliteRow:
       last = q.columnInt(0)
-    q.finalize()
+    q.reset()
     if last == 0:
       last = fileMtimeOrZero(s.casPath(digest))
     if last <= t - LastUseResolutionSeconds:
       var u = s.db.prepare(
         "INSERT INTO cas_use(digest, last_used_at) VALUES (?, ?) " &
         "ON CONFLICT(digest) DO UPDATE SET last_used_at = excluded.last_used_at")
+      defer: u.finalize()
       u.bindBlob(1, digest)
       u.bindInt(2, t)
       discard u.step()
-      u.finalize()
       result = true
 
 proc casLastUseTable*(s: Store): Table[string, int64] =
