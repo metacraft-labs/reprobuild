@@ -215,6 +215,44 @@ proc parseSinkCommand*(args: openArray[string]): SinkCommand =
 # The sink operator's acknowledgements (D4).
 # ---------------------------------------------------------------------------
 
+proc validAlertKind*(k: string): bool =
+  ## ``<detector>/<trigger>``: ``DET-AO-<n>`` or ``G<n>``, then a trigger
+  ## of lower-case words joined by ``-``.
+  let p = k.split('/')
+  if p.len != 2 or p[1].len == 0: return false
+  let det = p[0]
+  let detOk = (det.startsWith("DET-AO-") and det.len > 7 and
+               det[7 .. ^1].allCharsInSet(Digits)) or
+              (det.len > 1 and det[0] == 'G' and
+               det[1 .. ^1].allCharsInSet(Digits))
+  detOk and p[1].allCharsInSet({'a' .. 'z', '0' .. '9', '-'})
+
+proc entryAt(dir: string; seqNo: uint64): tuple[found: bool; e: EvidenceEntry] =
+  for e in readEvidenceStore(dir):
+    if e.seq == seqNo: return (true, e)
+
+proc ackRefusal*(dir: string; seqNo: uint64; alertKind: string): string =
+  ## Why an acknowledgement of ``alertKind`` at ``seqNo`` is refused, ""
+  ## when it is accepted. The check raises sequenced alerts on records of
+  ## every category -- an invalid attestation on a heartbeat, a replayed
+  ## containment on an audit record, a retirement's -- so any entry of the
+  ## store can carry one (A11 review round 2). The acknowledgement names the
+  ## alert kind, and the check honours it for that kind only. Only the
+  ## sink's own acknowledgements are not acknowledged.
+  if not validAlertKind(alertKind):
+    return "--alert " & alertKind & " is not <detector>/<trigger> as an " &
+      "ALERT line prints it"
+  let (found, e) = entryAt(dir, seqNo)
+  when mutated("ack-detections-only"):
+    let ackable = found and (e.kind == ekRefusedVerb or
+      (e.kind == ekRecord and e.record.category == ecDetection))
+  else:
+    let ackable = found and not (e.kind == ekRecord and
+      e.record.detector == SinkOperatorDetector)
+  if ackable: ""
+  elif found: "sequence " & $seqNo & " is the sink operator's own record"
+  else: "sequence " & $seqNo & " is not in the store"
+
 proc ackRecord*(seqNo: uint64; alertKind, operator, reason: string;
                 nowMs: int64): EvidenceRecord =
   newEvidenceRecord(ecAudit, SinkOperatorDetector, "acknowledged",
@@ -281,10 +319,6 @@ proc renderPayload*(e: EvidenceEntry): string =
     "escaped) -----\n" & escapePayload(p)
   if result.len > 0 and result[^1] != '\n': result.add("\n")
   result.add("----- END UNTRUSTED PAYLOAD -----\n")
-
-proc entryAt(dir: string; seqNo: uint64): tuple[found: bool; e: EvidenceEntry] =
-  for e in readEvidenceStore(dir):
-    if e.seq == seqNo: return (true, e)
 
 # ---------------------------------------------------------------------------
 # The command.
@@ -379,11 +413,9 @@ proc runSinkCli*(args: openArray[string]): int =
     stdout.write(renderPayload(e))
     return 0
   of "ack":
-    let (found, e) = entryAt(c.dir, c.seqNo)
-    if not found or not (e.kind == ekRefusedVerb or
-        (e.kind == ekRecord and e.record.category == ecDetection)):
-      stderr.writeLine("repro-evidence-sink ack: sequence " & $c.seqNo &
-        " is not a detection in the store")
+    let refusal = ackRefusal(c.dir, c.seqNo, c.alertKind)
+    if refusal.len > 0:
+      stderr.writeLine("repro-evidence-sink ack: " & refusal)
       return 1
     let inbox = c.dir / OperatorInboxName
     if not dirExists(inbox):

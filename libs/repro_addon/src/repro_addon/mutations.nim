@@ -713,6 +713,36 @@
 ## ``containment-duplicate-is-replay``        a containment statement
 ##                                            delivered twice reads as a
 ##                                            replay (review 3)
+## ``probe-shares-connection``                the credential self-test's
+##                                            probes use the appender's
+##                                            connection (round 2)
+## ``lag-state-fails-open``                   an unreadable check state
+##                                            reads as empty and an
+##                                            unwritable one is ignored
+##                                            (round 2)
+## ``ack-detections-only``                    only a detection or a refused
+##                                            verb can be acknowledged
+##                                            (round 2)
+## ``successor-chain-one-step``               a retired id's successor must
+##                                            itself be live; the chain is
+##                                            not followed (round 2)
+## ``ship-backoff-reaches-timeout``           the backoff ceiling and the
+##                                            shipping unit's timeout are
+##                                            both 300 s (round 2)
+## ``egress-cap-advances-all``                destinations past the per-
+##                                            check cap advance in the
+##                                            state, unrecorded (round 2)
+## ``uninstall-ignores-asides``               uninstall does not file an
+##                                            object left aside (round 2)
+## ``tree-marker-on-reuse``                   the tree marker is written for
+##                                            every realisation and kept on
+##                                            failure (round 2)
+## ``containment-sequence-unsynced``          the containment sequence is a
+##                                            bare counter, written without
+##                                            fsync (round 2)
+## ``egress-unit-ignores-table``              the egress observer unit does
+##                                            not name the table it loads
+##                                            (round 2)
 ## =========================================  ==============================
 
 # The deploy agent's own mutations (``repro_deploy_agent/agent_mutations``)
@@ -970,11 +1000,13 @@ const
                           # §13 decision 55: Conflicts= naming a unit the
                           # profile does not define, accepted.
                           "conflicts-unchecked",
-                          # decision 55's amendment: the effective half
-                          # takes any .service as a predecessor on the
-                          # unit's say-so; an exclusive unit names any unit.
-                          "exclusive-predecessor-by-say-so",
-                          "exclusive-conflicts-any-unit",
+                          # A9 review round 8: a *Directory= by its leaf
+                          # only; owned store objects falling back to the
+                          # unit's own references; a reached profile unit's
+                          # Conflicts= unjudged.
+                          "directory-names-unchecked",
+                          "owned-objects-fall-back",
+                          "reached-conflicts-unchecked",
                           # A13: a state backup or restore runs while a
                           # unit of the set may run.
                           "state-units-not-checked",
@@ -1146,7 +1178,14 @@ const
                           "custody-skips-unrecorded",
                           "custody-rebuild-unsynced",
                           "ship-runs-concurrently",
-                          "containment-duplicate-is-replay"]
+                          "containment-duplicate-is-replay",
+                          # The A11 code review, round 2.
+                          "probe-shares-connection", "lag-state-fails-open",
+                          "ack-detections-only", "successor-chain-one-step",
+                          "ship-backoff-reaches-timeout",
+                          "egress-cap-advances-all", "uninstall-ignores-asides",
+                          "tree-marker-on-reuse", "containment-sequence-unsynced",
+                          "egress-unit-ignores-table"]
 
 when AddonMutation.len > 0 and AddonMutation notin KnownAddonMutations and
     AddonMutation notin KnownAgentMutations:

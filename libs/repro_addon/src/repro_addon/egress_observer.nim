@@ -18,7 +18,7 @@
 ## runs before that program, so the table sees every packet the unit sends;
 ## it drops none (the unit's filter does).
 
-import std/[json, os, strutils, tables, times]
+import std/[json, os, sets, strutils, tables, times]
 
 import ./evidence
 import ./evidence_ship
@@ -47,6 +47,8 @@ type
     error*: string
 
 const
+  EgressSummaryNamesMax* = 64
+    ## Addresses a truncated check's summary names.
   EgressDetectionsMax* = 64
     ## Destinations one check records one by one; the rest in one summary,
     ## so a flood of throwaway addresses cannot fill the host's records.
@@ -73,21 +75,28 @@ proc parseCounterPackets*(json: string): int64 =
     if c != nil: return c{"packets"}.getBiggestInt(0)
   0'i64
 
-proc readState(path: string; table: string): Table[string, int64] =
+proc readState(path: string; table: string):
+    tuple[counts: Table[string, int64]; deferred: HashSet[string]] =
   ## The counts the previous check saw -- of THIS table instance: a table
   ## loaded since (every boot, every restart of the observer unit) starts
   ## its counters at zero, so counts of another instance are none (A11
-  ## audit F3).
-  result = initTable[string, int64]()
+  ## audit F3) -- and the destinations it saw but did not record by
+  ## address (``deferred <address> -``).
+  result.counts = initTable[string, int64]()
+  result.deferred = initHashSet[string]()
   try:
     var instance = ""
     for l in readFile(path).splitLines():
       let p = l.splitWhitespace()
       if p.len == 2 and p[0] == "table": instance = p[1]
-      elif p.len == 2: result[p[0]] = parseBiggestInt(p[1])
-      elif p.len == 3 and p[0] == "counter": result[" counter"] = parseBiggestInt(p[2])
+      elif p.len == 2: result.counts[p[0]] = parseBiggestInt(p[1])
+      elif p.len == 3 and p[0] == "counter":
+        result.counts[" counter"] = parseBiggestInt(p[2])
+      elif p.len == 3 and p[0] == "deferred": result.deferred.incl(p[1])
     when not mutated("egress-state-survives-reload"):
-      if instance != table: result.clear()
+      if instance != table:
+        result.counts.clear()
+        # A destination not yet recorded stays owed across a reload.
   except CatchableError:
     discard
 
@@ -119,22 +128,43 @@ proc tableInstance*(nft: string): string =
 
 proc freshSince*(refused: seq[RefusedDestination]; statePath: string;
                  table = "-"; counted = -1'i64;
-                 unattributed: ptr int64 = nil): seq[RefusedDestination] =
+                 unattributed: ptr int64 = nil;
+                 recordMax = EgressDetectionsMax): seq[RefusedDestination] =
   ## The destinations new or grown since the counts in ``statePath`` (of the
   ## same table instance ``table``), which then holds these counts. With
   ## ``counted`` (the named counter), ``unattributed`` is set to the refused
   ## packets since the last check that no set element's growth accounts for.
+  ##
+  ## The first ``recordMax`` of the result are the ones the check records
+  ## by address (``recordEgressCheck``): those owed from an earlier check
+  ## first, then new destinations, then grown ones. Only they advance in the
+  ## state; every other fresh destination keeps its old count and is marked
+  ## owed, so a later check records it by address. A flood of decoys kept
+  ## fresh cannot hide a destination for good (A11 review round 2).
   let before = readState(statePath, table)
-  var text = "table " & table & "\n"
+  var owed, fresh0, grown0: seq[RefusedDestination]
   var grown = 0'i64
   for d in refused:
-    let was = before.getOrDefault(d.address, 0)
+    let was = before.counts.getOrDefault(d.address, 0)
     if was < d.packets:
-      result.add(d)
       grown += d.packets - was
-    text.add(d.address & " " & $d.packets & "\n")
+      if d.address in before.deferred: owed.add(d)
+      elif was == 0: fresh0.add(d)
+      else: grown0.add(d)
+  result = owed & fresh0 & grown0
+  var recorded = initHashSet[string]()
+  for i, d in result:
+    if i < recordMax or mutated("egress-cap-advances-all"): recorded.incl(d.address)
+  var text = "table " & table & "\n"
+  for d in refused:
+    let was = before.counts.getOrDefault(d.address, 0)
+    if was < d.packets and d.address notin recorded:
+      if was > 0: text.add(d.address & " " & $was & "\n")
+      text.add("deferred " & d.address & " -\n")
+    else:
+      text.add(d.address & " " & $d.packets & "\n")
   if counted >= 0 and not mutated("egress-ignores-counter"):
-    let wasCounted = before.getOrDefault(" counter", 0)
+    let wasCounted = before.counts.getOrDefault(" counter", 0)
     if unattributed != nil:
       unattributed[] = max(0'i64, (counted - wasCounted) - grown)
     text.add("counter refused " & $counted & "\n")
@@ -198,11 +228,20 @@ proc recordEgressCheck*(c: EgressCheck; site: EvidenceSite;
                 ("message", "the deploy agent's fetch unit sent to " &
                  d.address & ", outside its allow-list")]), site)
   if c.fresh.len > cap:
+    # Truncated: the rest are owed (their state did not advance) and a
+    # later check records them by address. The summary names the first of
+    # them too, bounded.
+    var named: seq[string]
+    for d in c.fresh[cap ..< min(c.fresh.len, cap + EgressSummaryNamesMax)]:
+      named.add(d.address)
     discard recordEvidence(EvidenceEvent(detector: edEgress,
       category: ecDetection, trigger: "egress-refused-summary",
-      fields: @[("count", $(c.fresh.len - cap)),
+      fields: @[("count", $(c.fresh.len - cap)), ("truncated", "true"),
+                ("destinations", named.join(" ")),
                 ("message", $(c.fresh.len - cap) & " more refused " &
-                 "destinations than one check records one by one")]), site)
+                 "destinations than one check records one by one: the " &
+                 "list was truncated, and they are recorded by later " &
+                 "checks")]), site)
   if c.setFull or c.unattributed > 0:
     # The sets no longer tell every destination apart: the counter still
     # counts, and this says so (A11 review finding 13).

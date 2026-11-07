@@ -31,8 +31,12 @@
 ##    condition); the off-host check reports the agent ``contained``, not
 ##    silent, even after its silence window; the preserved staging copy the
 ##    refusal record names is taken off the host (EVID-5); the host is shown
-##    on its last good generation with the payload absent. The investigator
-##    acknowledges the refusal at the sink (``repro-evidence-sink ack``).
+##    on its last good generation with the payload absent. The check must
+##    print exactly the refusal alerts the drill caused (computed from the
+##    sink's entries) and no other; an acknowledgement of another kind at a
+##    refusal's sequence leaves it alerting; the investigator then
+##    acknowledges exactly those refusals at the sink
+##    (``repro-evidence-sink ack``), never whatever the check printed.
 ## 6. ``recovery``: the honest compiler is restored, ``repro system addon
 ##    release`` resumes the agent, the producer publishes sequence 3 and the
 ##    natural tick applies it; the documented off-host check, run as the
@@ -47,12 +51,16 @@
 ## evidence: ``reprobuild-pm/spec/Test-Designs`` holds the report
 ## template the investigator fills in.
 ##
+## Falsifying builds (sink side): ``ack-by-sequence-only`` (the
+## mistyped-kind acknowledgement handles the refusal),
+## ``check-ignores-acks``, ``check-ignores-containment``.
+##
 ## Opt-in: ``REPRO_ADDON_VM_GATES=1``.
 ##
 ## *Mocking.* The compiler is a shell script standing for a compromised
 ## one: the compromise under drill. Nothing else.
 
-import std/[json, os, sequtils, strutils, times, unittest]
+import std/[algorithm, json, os, sequtils, strutils, times, unittest]
 
 import repro_test_support/reasoned_skip
 import repro_deploy_agent/manifest
@@ -251,24 +259,48 @@ proc body(g: Guest; repro: string; step: StepFn; record: JsonNode;
   step("containment: the check reports the agent contained, not silent (D5)",
        "addon-agent-tick contained" in c2.output and
          "DET-AO-8 silent addon-agent-tick" notin c2.output, c2.output)
-  # Every refused tick before the containment raised its own refusal alert
-  # (the timer kept fetching the compromised compile): the investigator
-  # acknowledges each, by the sequence AND the alert the check printed --
-  # never by sequence alone, which would also handle any other alert of the
-  # same record (A11 review finding 9).
+  # Every refused tick before the containment raised its own refusal
+  # alert (the timer kept fetching the compromised compile), and nothing
+  # else may alert: the gate computes the alerts the scenario caused from
+  # the sink's entries, requires the check to print exactly those, and
+  # acknowledges only those, by sequence AND kind (A11 review finding 9 and
+  # round 2: the gate used to acknowledge whatever the check printed, so it
+  # drove the state it then asserted).
+  proc alertSet(output: string): seq[string] =
+    for line in output.splitLines():
+      let f = line.splitWhitespace()
+      if f.len >= 5 and f[0] == "ALERT" and f[4].startsWith("seq="):
+        result.add(f[4]["seq=".len .. ^1] & " " & f[2] & "/" & f[3])
+    result.sort()
+  var expected: seq[string]
+  for e in sink.entries():
+    if e.seq > before and e.kind == ekRecord and $e.senderHostId == host and
+        e.record.trigger == "addon-staging-refused":
+      expected.add($e.seq & " DET-AO-2/addon-staging-refused")
+  expected.sort()
+  record["expectedAlerts"] = %expected
+  step("containment: the check alerts exactly the refusals the drill caused",
+       expected.len > 0 and alertSet(c2.output) == expected,
+       "expected " & $expected & ", printed " & $alertSet(c2.output))
+  proc ack(sq, kind, reason: string): tuple[code: int; output: string] =
+    sink.sinkCli("ack --dir " & quoteShell(sink.storeDir) & " --seq " & sq &
+      " --alert " & quoteShell(kind) & " --operator drill --reason " &
+      quoteShell(reason))
+  # An acknowledgement of another kind at a refusal's sequence handles
+  # nothing: the refusal still alerts.
+  let first = expected[0].split(' ')
+  let wrong = ack(first[0], "DET-AO-9/attestation-invalid", "mistyped kind")
+  let afterWrong = sink.sinkCli(checkCmd)
+  step("containment: an acknowledgement of another kind leaves the refusal alerting",
+       wrong.code == 0 and alertSet(afterWrong.output) == expected,
+       wrong.output & afterWrong.output)
   var acked: seq[string]
-  for line in c2.output.splitLines():
-    let f = line.splitWhitespace()
-    if f.len >= 5 and f[0] == "ALERT" and f[4].startsWith("seq="):
-      let kind = f[2] & "/" & f[3]
-      let sq = f[4]["seq=".len .. ^1]
-      let ack = sink.sinkCli("ack --dir " & quoteShell(sink.storeDir) &
-        " --seq " & sq & " --alert " & quoteShell(kind) &
-        " --operator drill --reason " &
-        quoteShell("investigated: compromised compiler, contained"))
-      acked.add(sq & " " & kind)
-      step("containment: the investigator acknowledges " & kind & " at " & sq,
-           ack.code == 0, ack.output)
+  for x in expected:
+    let f = x.split(' ')
+    let r = ack(f[0], f[1], "investigated: compromised compiler, contained")
+    acked.add(x)
+    step("containment: the investigator acknowledges " & f[1] & " at " & f[0],
+         r.code == 0, r.output)
   record["acknowledged"] = %acked
   phase("containment", %*{"snapshot": snap})
 

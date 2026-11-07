@@ -1018,7 +1018,14 @@ proc markDown(a: EvidenceAppender) =
   if a.connDownSinceMs == 0:
     a.connDownSinceMs = nowMsE()
 
-proc connect(a: EvidenceAppender): Future[bool] {.async.} =
+const EvidenceMutation {.strdefine: "reproAddonMutation".} = ""
+  ## The add-on's falsifying-build switch (``repro_addon/mutations``), read
+  ## here for the one falsifier of this module's own (a test-only build).
+
+proc openConnection(a: EvidenceAppender):
+    Future[tuple[ok: bool; conn: TlsConn; leafNotAfter: int64]] {.async.} =
+  ## A new, verified connection to the sink, owned by the caller: nothing
+  ## here reads or writes ``a.conn``. ``lastError`` says why when not ok.
   a.lastConnectAttemptMs = nowMsE()
   let sock = newAsyncSocket()
   try:
@@ -1026,32 +1033,49 @@ proc connect(a: EvidenceAppender): Future[bool] {.async.} =
   except CatchableError as err:
     a.lastError = "connect: " & err.msg
     try: sock.close() except CatchableError: discard
-    return false
+    return
   let leaf = a.leafProvider()
   if leaf.key.isNil or not leaf.key.available:
     a.lastError = "this process holds no usable leaf for the evidence sink"
     try: sock.close() except CatchableError: discard
-    return false
+    return
   let connOpt = await wrapClientSocket(sock, a.endpoint.host,
     leaf.cert.certDer, leaf.key, a.anchors)
   if connOpt.isNone:
     a.lastError = "TLS handshake with the evidence sink failed"
     try: sock.close() except CatchableError: discard
-    return false
+    return
   let who = await exchangeProofs(connOpt.get(), leaf, a.anchors,
     getTime().toUnix)
   if not who.ok:
     a.lastError = "evidence sink identity: " & who.reason
     try: await tls.close(connOpt.get()) except CatchableError: discard
-    return false
+    return
   var zero: PeerId
   if a.expectedSink != zero and who.hostId != a.expectedSink:
     a.lastError = "the evidence sink is host " & $who.hostId &
       ", not the pinned sink " & $a.expectedSink
     try: await tls.close(connOpt.get()) except CatchableError: discard
+    return
+  return (true, connOpt.get(), leaf.cert.notAfter)
+
+proc connect(a: EvidenceAppender): Future[bool] {.async.} =
+  ## The appender's own connection (``a.conn``). Only the flush (one at a
+  ## time, ``kick``) calls it; anything else that needs to talk to the sink
+  ## opens a connection of its own (``openConnection``), so two coroutines
+  ## never share one TLS stream and nothing finds ``a.conn`` cleared under
+  ## it (the credential self-test crashed so, reprobuild-pm issue
+  ## 2026-11-06-evidence-sink-raw-verb-test-client-segfaults-in-tls-recv).
+  let c = await a.openConnection()
+  if not c.ok:
     return false
-  a.conn = connOpt.get()
-  a.connLeafNotAfter = leaf.cert.notAfter
+  if a.closed:
+    # ``close`` ran while this connection was being opened: it must not
+    # outlive the appender.
+    try: await tls.close(c.conn) except CatchableError: discard
+    return false
+  a.conn = c.conn
+  a.connLeafNotAfter = c.leafNotAfter
   a.everConnected = true
   a.connDownSinceMs = 0
   return true
@@ -1109,6 +1133,9 @@ proc flushOnce(a: EvidenceAppender) {.async.} =
     # flush is suspended, and the error path below must never close a nil
     # connection (that crashed the process with SIGSEGV).
     let conn = a.conn
+    if conn.isNil:
+      # ``close`` cleared it between the connect and here.
+      return
     try:
       await sendSinkFrame(conn, vAppendBatch, body)
       let ack = await readSinkFrame(conn)
@@ -1186,6 +1213,11 @@ proc drain*(a: EvidenceAppender; timeoutMs = 5_000): bool =
     a.kick()
     try: poll(20) except ValueError: sleep(20)
   a.queue.len == 0
+
+proc connected*(a: EvidenceAppender): bool =
+  ## Whether the appender holds its connection to the sink now (for tests
+  ## and status: a probe of the sink must leave it as it found it).
+  not a.isNil and not a.conn.isNil
 
 proc pending*(a: EvidenceAppender): int =
   ## Records queued but not yet acknowledged by the sink.
@@ -1305,18 +1337,38 @@ proc sendRawVerbForTesting*(a: EvidenceAppender; verb: uint8;
   ## "read", "list" or "delete" attempt) with the worker's real credential
   ## and reports whether the sink answered anything. The sink's contract is
   ## that it never does.
-  if a.conn.isNil:
-    if not await a.connect():
+  ##
+  ## On a connection of its own, never the appender's: a flush may be in
+  ## flight on ``a.conn`` (a ``drain`` that timed out leaves one), and on a
+  ## shared stream the flush and this request would read each other's
+  ## frames -- an acknowledgement read here as an answer -- and the flush's
+  ## error path clears ``a.conn`` while this request is suspended.
+  when EvidenceMutation == "probe-shares-connection":
+    # FALSIFYING BUILD: the old shared-connection probe.
+    if a.conn.isNil:
+      if not await a.connect():
+        return false
+    try:
+      await sendSinkFrame(a.conn, verb, body)
+      let reply = await readSinkFrame(a.conn)
+      result = reply.ok
+    except CatchableError:
+      result = false
+    try: await tls.close(a.conn) except CatchableError: discard
+    a.conn = nil
+    a.markDown()
+  else:
+    let c = await a.openConnection()
+    if not c.ok:
       return false
-  try:
-    await sendSinkFrame(a.conn, verb, body)
-    let reply = await readSinkFrame(a.conn)
-    result = reply.ok
-  except CatchableError:
-    result = false
-  try: await tls.close(a.conn) except CatchableError: discard
-  a.conn = nil
-  a.markDown()
+    let conn = c.conn
+    try:
+      await sendSinkFrame(conn, verb, body)
+      let reply = await readSinkFrame(conn)
+      result = reply.ok
+    except CatchableError:
+      result = false
+    try: await tls.close(conn) except CatchableError: discard
 
 proc probeForbiddenOperation*(a: EvidenceAppender;
                               op: ForbiddenOperation): Future[bool]

@@ -48,6 +48,7 @@ libs/repro_addon/tests/t_addon_evidence_docs_commands_parse.nim	nim	3
 libs/repro_addon/tests/t_addon_evidence_enrol_never_adopts_keys.nim	nim	4
 libs/repro_addon/tests/t_addon_evidence_key_survives_retention.nim	nim	4
 libs/repro_addon/tests/t_addon_evidence_lag_resigned.nim	nim	2
+libs/repro_addon/tests/t_addon_evidence_probe_owns_its_connection.nim	nim	4
 libs/repro_addon/tests/t_addon_evidence_ships_off_host.nim	nim	7
 libs/repro_addon/tests/t_addon_evidence_units_and_tick_records.nim	nim	8
 libs/repro_addon/tests/t_addon_fingerprint.nim	nim	16
@@ -56,6 +57,7 @@ libs/repro_addon/tests/t_addon_floor_round4.nim	nim	16
 libs/repro_addon/tests/t_addon_floor_round5.nim	nim	15
 libs/repro_addon/tests/t_addon_floor_round6.nim	nim	23
 libs/repro_addon/tests/t_addon_floor_round7.nim	nim	38
+libs/repro_addon/tests/t_addon_floor_round8.nim	nim	9
 libs/repro_addon/tests/t_addon_generation_attestation.nim	nim	6
 libs/repro_addon/tests/t_addon_host_lock_guards_the_switch_and_the_store.nim	nim	8
 libs/repro_addon/tests/t_addon_import_skeleton.nim	nim	9
@@ -70,6 +72,7 @@ libs/repro_addon/tests/t_addon_recipient_key_mode_checked_at_load.nim	nim	6
 libs/repro_addon/tests/t_addon_restore_before_start.nim	nim	2
 libs/repro_addon/tests/t_addon_retargeted_address_is_refused.nim	nim	3
 libs/repro_addon/tests/t_addon_review_findings.nim	nim	16
+libs/repro_addon/tests/t_addon_review_round2.nim	nim	9
 libs/repro_addon/tests/t_addon_secret_declarations.nim	nim	5
 libs/repro_addon/tests/t_addon_secret_files_created_private_and_never_through_symlinks.nim	nim	6
 libs/repro_addon/tests/t_addon_secrets_envelopes_and_rotation.nim	nim	13
@@ -267,7 +270,7 @@ libs/repro_cli_support/tests/t_infra_apply_retention_flags.nim	nim	3
 libs/repro_cli_support/tests/t_infra_cache_keys.nim	nim	13
 libs/repro_cli_support/tests/t_installed_layout_resolvers.nim	nim	8
 libs/repro_cli_support/tests/t_installed_prefix_assembly_is_recorded.nim	nim	1
-libs/repro_cli_support/tests/t_installed_prefix_nim_pin_wins.nim	nim	1
+libs/repro_cli_support/tests/t_installed_prefix_nim_pin_wins.nim	nim	3
 libs/repro_cli_support/tests/t_l5_environment_is_in_the_graph_cache_key.nim	nim	12
 libs/repro_cli_support/tests/t_l7_shared_instance_declaration_refuses_near_misses.nim	nim	19
 libs/repro_cli_support/tests/t_l8_minted_attribute_reaches_the_service_argv.nim	nim	11
@@ -696,7 +699,7 @@ libs/repro_profile_compile/tests/t_guarded_intent_plans_per_host.nim	nim	5
 libs/repro_profile_compile/tests/t_infra_apply_audits_build_action_edges.nim	nim	5
 libs/repro_profile_compile/tests/t_infra_apply_substitutes_from_cache.nim	nim	13
 libs/repro_profile_compile/tests/t_profile_compile_relative_dirs_are_anchored.nim	nim	2
-libs/repro_profile_compile/tests/t_profile_compile_uses_the_installed_nim.nim	nim	4
+libs/repro_profile_compile/tests/t_profile_compile_uses_the_installed_nim.nim	nim	6
 libs/repro_profile_compile/tests/t_profile_runtime_stderr.nim	nim	8
 libs/repro_profile_compile/tests/t_smoke_apply_integration.nim	nim	4
 libs/repro_profile_compile/tests/t_smoke_infra_apply_broker_spawn.nim	nim	7
@@ -939,7 +942,7 @@ libs/repro_tool_profiles/tests/t_bootstrap_cc_override_is_honoured_and_scoped.ni
 libs/repro_tool_profiles/tests/t_bootstrap_provisioning_failure_is_a_hard_failure.nim	nim	6
 libs/repro_tool_profiles/tests/t_bootstrap_toolchain_provisioned_in_every_mode.nim	nim	3
 libs/repro_tool_profiles/tests/t_environment_prefix_provisioning.nim	nim	11
-libs/repro_tool_profiles/tests/t_installed_prefix_nim_route.nim	nim	10
+libs/repro_tool_profiles/tests/t_installed_prefix_nim_route.nim	nim	12
 libs/repro_tool_profiles/tests/t_n48_tool_profiles_tar_operands.nim	nim	3
 libs/repro_tool_profiles/tests/t_native_and_target_outputs_are_disjoint.nim	nim	12
 libs/repro_tool_profiles/tests/t_one_tarball_realizer.nim	nim	4

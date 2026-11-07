@@ -1346,11 +1346,9 @@ proc checkFloorReach*(p: SystemProfile) =
           roots.add(r.suName)
   for root in roots:
     # Conflicts= may name only the profile's own units (§13 decision 55).
-    let ri = profileUnitOf(p, root)
-    let exclusive = ri >= 0 and isExclusiveUnit(p.resources[ri])
     for c in unitFilesOf(p, root):
       let why = conflictsRefusal(root, c,
-        proc (u: string): bool = profileUnitOf(p, u) >= 0, exclusive = exclusive)
+        proc (u: string): bool = profileUnitOf(p, u) >= 0)
       if why.len > 0:
         raiseSystemProfileInvalid("systemd.systemUnit '" & root & "': " & why)
     let route = systemStateRoute([root],
@@ -1368,6 +1366,16 @@ proc checkFloorReach*(p: SystemProfile) =
       if u in seen: continue
       seen.incl(u)
       for c in unitFilesOf(p, u):
+        # A profile unit the floored unit reaches stops what its own
+        # Conflicts= names when it starts, too (A9 review round 8, the
+        # reviewer's open question; §13 decision 55).
+        when InfraAddonMutation != "reached-conflicts-unchecked":
+          if u != root:
+            let why = conflictsRefusal(u, c,
+              proc (x: string): bool = profileUnitOf(p, x) >= 0)
+            if why.len > 0:
+              raiseSystemProfileInvalid("systemd.systemUnit '" & u & "' (" &
+                "reached from " & root & "): " & why)
         for d in sectionDirectives(c, ["Unit"]):
           if d.key in JobModeKeys and d.value.strip() notin SafeJobModes:
             raiseSystemProfileInvalid("systemd.systemUnit '" & u & "' (" &

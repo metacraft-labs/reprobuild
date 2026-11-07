@@ -228,15 +228,31 @@ proc realiseStaticTree*(files: seq[StaticFile];
   if dirExists(planned):
     observed = storeTreeDigest(planned)
     if observed != result.digest:
+      # A tear only of a write the marker names AND that never completed:
+      # a tree the realisation index records was written whole and synced,
+      # so whatever it lost since is an alteration, marker or not (A11
+      # review round 2: a marker a crash left named a committed tree).
       let crashTear = when mutated("tree-tear-by-shape"): treeTorn(planned, files)
-                      else: markerNames and treeTorn(planned, files)
+                      elif mutated("tree-marker-on-reuse"):
+                        markerNames and treeTorn(planned, files)
+                      else: markerNames and treeTorn(planned, files) and
+                            planned notin readRealised(site)
       if crashTear:
         removeDir(planned)
       else:
         aside = moveAside(site, planned)
         seamPause(site.stateDir, "tree-after-move-aside")
-  createDir(parentDir(marker))
-  writeFileAtomic(marker, planned & "\n", 0o600)
+  # The marker names a tree whose first byte this switch is about to
+  # write -- only when the planned tree is not there (new, removed as a
+  # tear, or moved aside). A reused tree is not being written. It is
+  # removed on every path out, success or failure.
+  let writing = when mutated("tree-marker-on-reuse"): true
+                else: not dirExists(planned)
+  if writing:
+    createDir(parentDir(marker))
+    writeFileAtomic(marker, planned & "\n", 0o600)
+  elif markerNames and planned in readRealised(site):
+    try: removeFile(marker) except OSError: discard   # stale, harmless
   var s = openStore(storeRoot)
   defer: s.close()
   try:
@@ -263,10 +279,20 @@ proc realiseStaticTree*(files: seq[StaticFile];
       # The host keeps what it ran from (quarantined), not a dangling link.
       try: moveDir(aside, planned) except CatchableError: discard
       quarantineStorePath(planned, site.quarantinePath)
+    when not mutated("tree-marker-on-reuse"):
+      if writing:
+        try: removeFile(marker) except OSError: discard
     raise
-  syncTree(result.path, storeRoot)
-  recordRealised(site, result.path, result.digest)
-  try: removeFile(marker) except OSError: discard
+  try:
+    syncTree(result.path, storeRoot)
+    recordRealised(site, result.path, result.digest)
+  except CatchableError:
+    when not mutated("tree-marker-on-reuse"):
+      if writing:
+        try: removeFile(marker) except OSError: discard
+    raise
+  if writing:
+    try: removeFile(marker) except OSError: discard
   if aside.len > 0:
     let entry = fileEvidence(site, aside, planned, result.digest, observed,
       "holds other bytes than the plan's")

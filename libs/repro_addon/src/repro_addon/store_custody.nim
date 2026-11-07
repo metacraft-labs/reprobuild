@@ -573,6 +573,21 @@ proc fileLeftoverAsides*(site: CustodySite) =
       site.evidence)
     markRecorded(entry)
 
+proc pendingStoreEvidence*(site: CustodySite): seq[string] =
+  ## Every store-evidence entry, and every object a crashed recovery left
+  ## in ``asideRoot`` (not yet filed): what uninstall must name before it
+  ## removes anything (A11 review round 2: an aside went with ``/repro``
+  ## unnamed). Nothing is moved: filing an aside needs the store's writable
+  ## view, which uninstall must not enter (it unmounts the store).
+  result = evidenceEntries(site)
+  when not mutated("uninstall-ignores-asides"):
+    if dirExists(asideRoot(site)):
+      var asides: seq[string]
+      for kind, d in walkDir(asideRoot(site)):
+        if kind == pcDir: asides.add(d)
+      asides.sort()
+      result.add(asides)
+
 proc flushUnrecorded*(site: CustodySite) =
   ## Entries a crash left without their DET-AO-5 record (filed, the record
   ## not yet written): written now.

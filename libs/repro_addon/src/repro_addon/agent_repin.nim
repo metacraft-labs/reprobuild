@@ -119,6 +119,9 @@ proc repinOwnProfile*(own: string; fresh: AgentUnitsInputs;
       result.ownText = replaceFileSource(result.ownText, EgressNftPath,
                                          prefix / name)
       result.newFiles.add((name, nft))
+      # The observer unit names the table it loads, so the switch restarts
+      # it and the kernel's sets are the new ones.
+      result.ownText = refreshEgressUnit(result.ownText)
       result.diff.add(EgressNftPath & ": allow-list " &
         fresh.allowedAddresses.join(" "))
   result.changed = result.diff.len > 0

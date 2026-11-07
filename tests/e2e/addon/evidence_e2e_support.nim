@@ -31,7 +31,9 @@ const
   SinkMutations* = ["sink-credential-has-read-scope",
     # The sink's command line and the off-host check it runs (A11 drill).
     "sink-cli-equals-only", "sink-payload-unescaped", "check-ignores-acks",
-    "check-ignores-containment", "check-ignores-probe-announcement"]
+    "check-ignores-containment", "check-ignores-probe-announcement",
+    # A11 code review rounds 1 and 2: acknowledgements by kind, of any record.
+    "ack-by-sequence-only", "ack-detections-only"]
     ## Falsifying builds that live in the sink, not in the add-on binary.
   GuestSinkCa* = "/root/addon/evidence-sink.crt"
   GuestCredentialCert* = "/var/lib/repro/evidence/host-ca.crt"

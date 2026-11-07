@@ -40,6 +40,7 @@
 ## that are trustworthy and cannot be erased (G34).
 
 import std/[algorithm, os, sequtils, sets, strutils, tables]
+from std/posix import nil
 
 import repro_peer_cache/auth as peerAuth
 import repro_peer_cache/evidence
@@ -321,26 +322,84 @@ proc parseSigned(s: string): int64 =
   try: parseBiggestInt(s) except ValueError: 0'i64
 
 proc readFirstSeen*(path: string): Table[string, uint64] =
-  ## ``<target> <sequence> <first issuedAt>`` per line.
+  ## ``<target> <sequence> <first issuedAt>`` per line. A file that does not
+  ## exist is the first run (empty). A file that exists and cannot be read,
+  ## or holds a line that is not one of these, raises
+  ## ``EvidenceCheckError``: it is the only memory of when sequences were
+  ## first published, and reading it as empty -- then rewriting it -- would
+  ## destroy that memory (A11 review round 2).
   result = initTable[string, uint64]()
-  try:
-    for l in readFile(path).splitLines():
-      let p = l.splitWhitespace()
-      if p.len == 3:
-        result[p[0] & " " & p[1]] = parseUnsigned(p[2])
+  if not fileExists(path) and not symlinkExists(path): return
+  var text = ""
+  try: text = readFile(path)
   except IOError, OSError:
-    discard
+    when mutated("lag-state-fails-open"):
+      return
+    else:
+      raise newException(EvidenceCheckError, "the check's state file " &
+        path & " exists and cannot be read: " & getCurrentExceptionMsg())
+  for l in text.splitLines():
+    if l.strip().len == 0: continue
+    let p = l.splitWhitespace()
+    var ok = p.len == 3
+    var v = 0'u64
+    if ok:
+      try:
+        discard parseBiggestUInt(p[1])        # the sequence: a number
+        v = parseBiggestUInt(p[2]).uint64
+      except ValueError: ok = false
+    if not ok:
+      raise newException(EvidenceCheckError, "the check's state file " &
+        path & " holds a line that is not <target> <sequence> <issuedAt>: " & l)
+    result[p[0] & " " & p[1]] = v
+
+proc fsyncPathOrRaise(path: string) =
+  let fd = posix.open(path.cstring, posix.O_RDONLY or posix.O_CLOEXEC)
+  if fd < 0: raiseOSError(osLastError(), "open " & path & " to sync it")
+  try:
+    if posix.fsync(fd) != 0: raiseOSError(osLastError(), "fsync " & path)
+  finally:
+    discard posix.close(fd)
 
 proc writeFirstSeen*(path: string; t: Table[string, uint64]) =
+  ## Durably: a temporary file in the same directory, fsync'd, renamed over
+  ## the state, then the directory fsync'd. Raises ``EvidenceCheckError``
+  ## when it cannot: the caller reports it, it is never swallowed.
   var lines: seq[string]
   for k, v in t: lines.add(k & " " & $v)
   lines.sort()
+  let tmp = path & ".tmp"
   try:
     createDir(parentDir(path))
-    writeFile(path & ".tmp", lines.join("\n") & "\n")
-    moveFile(path & ".tmp", path)
-  except CatchableError:
-    discard            # the next run merges again
+    writeFile(tmp, lines.join("\n") & "\n")
+    fsyncPathOrRaise(tmp)
+    moveFile(tmp, path)
+    fsyncPathOrRaise(parentDir(path))
+  except CatchableError as e:
+    try: removeFile(tmp) except CatchableError: discard
+    raise newException(EvidenceCheckError, "the check's state file " &
+      path & " cannot be written: " & e.msg)
+
+proc successorChainLive*(hosts: seq[EnrolledHost]; h: EnrolledHost): bool =
+  ## Whether the chain of successors from the retired ``h`` ends at an
+  ## enrolled, live host (A retired to B, B to C, C live: true). Bounded by
+  ## the number of hosts, so a loop (A to B, B to A) or an id that is not
+  ## enrolled is false (A11 review round 2: a host re-keyed twice raised a
+  ## false alert, since its first successor is retired too).
+  var cur = h
+  for step in 0 .. hosts.len:
+    if cur.successor.len == 0: return false
+    var found = false
+    for x in hosts:
+      if x.hostId == cur.successor:
+        cur = x
+        found = true
+        break
+    if not found: return false
+    when mutated("successor-chain-one-step"):
+      return cur.retiredAt == 0'u64
+    if cur.retiredAt == 0'u64: return true
+  false
 
 proc runEvidenceCheck*(inp: CheckInputs): CheckReport =
   let factor = if inp.silenceFactor > 0: inp.silenceFactor else: 3
@@ -369,9 +428,26 @@ proc runEvidenceCheck*(inp: CheckInputs): CheckReport =
   # The check's own memory of first publications (finding 7): the earliest
   # ``issuedAt`` it has ever seen for each (target, sequence), merged with
   # what the manifests directory holds now, and kept.
+  # A state file the check cannot use is an alert of its own (it is not
+  # host-specific, so it has no sequence and cannot be acknowledged: it
+  # clears once the file is usable), and lag is then judged from the
+  # manifest directory alone. An unreadable file is never rewritten.
+  template stateAlert(trig, d: string) =
+    result.alerts.add(Alert(host: "-", detector: "DET-AO-10", trigger: trig,
+                            sinkSeq: 0, detail: d))
   when not mutated("lag-ignores-check-state"):
     if inp.statePath.len > 0:
-      var seen = readFirstSeen(inp.statePath)
+      var readable = true
+      var seen: Table[string, uint64]
+      try: seen = readFirstSeen(inp.statePath)
+      except EvidenceCheckError as e:
+        readable = false
+        stateAlert("check-state-unreadable", e.msg & "; lag is judged from " &
+          "the manifest directory alone, and the file is left as it is")
+      if readable and not fileExists(inp.statePath):
+        result.statuses.add(DetectorStatus(host: "-", detector: "check-state",
+          status: "new", detail: inp.statePath & " did not exist: lag " &
+            "counts from the first publications seen from now on"))
       for target, bySeq in earliest:
         for sq, m in bySeq:
           let k = target & " " & $sq
@@ -394,7 +470,12 @@ proc runEvidenceCheck*(inp: CheckInputs): CheckReport =
           m.sequence = sq
           m.issuedAt = issued
           byTarget[][sq] = m
-      writeFirstSeen(inp.statePath, seen)
+      if readable:
+        try: writeFirstSeen(inp.statePath, seen)
+        except EvidenceCheckError as e:
+          when not mutated("lag-state-fails-open"):
+            stateAlert("check-state-unwritable", e.msg & "; the first " &
+              "publications seen this run are not kept")
   let artefacts = toHashSet(inp.publishedArtefacts)
   # The sink operator's acknowledgements (D4): records the sink itself
   # appended, naming the sink sequence AND the alert (detector and trigger)
@@ -730,8 +811,7 @@ proc runEvidenceCheck*(inp: CheckInputs): CheckReport =
       # The successor carries the host's silence checks; a retirement
       # without an enrolled successor would mute it (finding 4).
       when not mutated("retired-without-successor-ok"):
-        if h.successor.len == 0 or
-            not inp.hosts.anyIt(it.hostId == h.successor and it.retiredAt == 0'u64):
+        if not successorChainLive(inp.hosts, h):
           alert("DET-AO-8", "retired-without-successor", h.retiredAt,
             "retired at sink sequence " & $h.retiredAt & " with no enrolled " &
             "successor (" & (if h.successor.len > 0: h.successor else: "none") &

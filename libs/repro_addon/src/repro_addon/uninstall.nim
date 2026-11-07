@@ -70,6 +70,9 @@ type
     removed*: seq[string]
     drift*: seq[string]          ## objects left in place, with the reason
     keptAccounts*: seq[string]
+    keptEvidence*: seq[string]
+      ## Store evidence left with a kept store (``--keep-store``): objects a
+      ## crashed recovery left aside, named, not removed.
     undone*: HashSet[string]
       ## ``<class> <path>`` of every ledger entry this run undid; what the
       ## kept ledger of an incomplete run drops.
@@ -233,7 +236,7 @@ proc runAddonUninstall*(opts: UninstallOptions): UninstallResult =
   # The altered store objects kept as evidence go with /var/lib/repro. They
   # are named, and nothing is removed, until the operator says to discard
   # them (having copied them out).
-  let evidenceKept = evidenceEntries(custodySite(stateDir))
+  let evidenceKept = pendingStoreEvidence(custodySite(stateDir))
   if evidenceKept.len > 0 and not opts.discardStoreEvidence and
       not mutated("uninstall-discards-evidence-silently"):
     for e in evidenceKept:
@@ -427,6 +430,14 @@ proc runAddonUninstall*(opts: UninstallOptions): UninstallResult =
   # removed unless the operator passed --discard-store-evidence (above).
   for e in evidenceEntries(custodySite(stateDir)):
     result.removed.add(e & " (store evidence)")
+  # Objects a crashed recovery left aside in the store were named above
+  # (the refusal); they went with the store, or stay with it.
+  for e in evidenceKept:
+    if e.startsWith(asideRoot(custodySite(stateDir))):
+      if dirExists(e):
+        result.keptEvidence.add(e)
+      else:
+        result.removed.add(e & " (store evidence left aside)")
   for root in ["/etc/repro", "/var/lib/repro", "/run/repro"]:
     if dirExists(root):
       try:

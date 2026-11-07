@@ -84,7 +84,7 @@ type
   EvidenceConfError* = object of CatchableError
 
 const
-  ShipDrainTimeoutMs = 20_000
+  ShipDrainTimeoutMs = ShipDrainTimeoutSec * 1000
   ShipDelayAlertMs* = 60_000'i64
     ## A record that waited longer than this to leave is a stall the
     ## off-host check alerts on (DET-AO-8 ``shipping-stalled``).
@@ -197,7 +197,7 @@ const
     ## writer that died, anything else) is removed after this long and
     ## reported: the path unit's ``DirectoryNotEmpty=`` would otherwise start
     ## the shipping unit for it again and again.
-  ShipPassesMax* = 20
+  ShipPassesMax* = ShipPassesMaxN
     ## Re-listings of the outbox one run makes, so records that land while
     ## it ships leave with it (A11 drill D1); bounded against a writer that
     ## never stops.
@@ -231,7 +231,7 @@ proc shipLockPath*(site: ShipSite): string =
 proc runEvidenceShip*(site: ShipSite; conf: EvidenceConf; host: string;
                       forceHeartbeat = false;
                       onPass: proc () = nil;
-                      lockWaitMs = 120_000): ShipResult =
+                      lockWaitMs = ShipLockWaitSec * 1000): ShipResult =
   ## One shipping run (see the module documentation): the outbox is listed
   ## again after each pass, so a record that lands while the run ships goes
   ## with it. Never raises for an unreachable sink; raises
@@ -351,6 +351,10 @@ proc runCredentialCheck*(site: ShipSite; conf: EvidenceConf;
   discard a.drain(ShipDrainTimeoutMs)
   result.appended = a.appended == 1
   if not result.appended: result.error = a.lastError
+  # Stop the appender before the probes: a drain that timed out leaves a
+  # flush in flight, which must neither reconnect nor share anything with
+  # them (each probe opens a connection of its own).
+  a.close()
   for op in ForbiddenOperation:
     let answered = try: waitFor a.probeForbiddenOperation(op)
                    except CatchableError: false
@@ -375,9 +379,11 @@ proc outboxBusy(outbox: string): bool =
 proc shipBackoffSec*(failures, heartbeatSec: int): int =
   ## The wait before a run that left the outbox non-empty exits: doubling
   ## with each consecutive such run from 5 s, at most the heartbeat
-  ## interval (and 300 s). Bounds how often the path unit restarts the unit
+  ## interval (and ``ShipBackoffMaxSec``, below the unit's start timeout). Bounds how often the path unit restarts the unit
   ## whatever kept the outbox non-empty (A11 review finding 11).
-  let cap = min(300, max(5, heartbeatSec))
+  let cap = when mutated("ship-backoff-reaches-timeout"):
+              min(300, max(5, heartbeatSec))
+            else: min(ShipBackoffMaxSec, max(5, heartbeatSec))
   var w = 5
   for i in 0 ..< min(failures, 10): w = min(cap, w * 2)
   min(cap, w)

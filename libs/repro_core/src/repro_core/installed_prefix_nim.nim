@@ -25,6 +25,8 @@
 
 import std/[os, strutils]
 
+import repro_solver/uses_constraints
+
 const
   InstalledPrefixRecordPath* = "share" / "repro" / "cross-build-info"
     ## Where an installed prefix records how it was built.
@@ -43,7 +45,6 @@ type
     prefix*: string
     exe*: string      ## "" when no candidate prefix ships `nim/bin/nim`
     version*: string
-    revision*: string
 
 proc installedPrefixNimVersion*(nimTree: string): string =
   ## The Nim release `nimTree` is, from its `lib/system/compilation.nim`
@@ -63,45 +64,14 @@ proc installedPrefixNimVersion*(nimTree: string): string =
       return ""
   parts.join(".")
 
-proc compareReleases(a, b: string): int =
-  ## Numeric comparison of dotted releases; a missing component is 0.
-  let x = a.split('.')
-  let y = b.split('.')
-  for i in 0 ..< max(x.len, y.len):
-    let u = if i < x.len: (try: parseInt(x[i]) except ValueError: 0) else: 0
-    let v = if i < y.len: (try: parseInt(y[i]) except ValueError: 0) else: 0
-    if u != v:
-      return cmp(u, v)
-  0
-
 proc nimReleaseAdmitted*(version, rawConstraint: string): bool =
-  ## Whether `version` satisfies a `uses:` constraint such as
-  ## `nim >=2.2 <3.0` or `nim ==2.3.1` (the package name may be absent; the
-  ## comparators may be separated by spaces or commas). An empty or
-  ## name-only constraint admits every release.
-  var tokens = rawConstraint.replace(",", " ").splitWhitespace()
-  if tokens.len > 0 and tokens[0][0] notin {'<', '>', '=', '0' .. '9'}:
-    tokens.delete(0)
-  for token in tokens:
-    var op = ""
-    for prefix in [">=", "<=", "==", ">", "<", "="]:
-      if token.startsWith(prefix):
-        op = prefix
-        break
-    let bound = token[op.len .. ^1].strip()
-    if bound.len == 0:
-      continue
-    let c = compareReleases(version, bound)
-    let ok =
-      case op
-      of ">=": c >= 0
-      of ">": c > 0
-      of "<=": c <= 0
-      of "<": c < 0
-      else: c == 0
-    if not ok:
-      return false
-  true
+  ## Whether release `version` satisfies the `uses:` constraint
+  ## `rawConstraint` (`nim >=2.2 <3.0`, `nim ^2.2`, `nim v2.3.1`, ...), read
+  ## by the `uses:` grammar itself (`repro_solver/uses_constraints`), so the
+  ## installed prefix's compiler is admitted exactly when the recipe's range
+  ## admits it (N3: "refused by the existing range check"). A name-only
+  ## constraint admits every release; an unparseable one admits none.
+  parseReproUsesConstraint(rawConstraint).admits(version)
 
 proc findInstalledPrefixNim*(prefixes: openArray[string];
                              rawConstraint = "nim >=2.2 <3.0"):
@@ -147,5 +117,4 @@ proc findInstalledPrefixNim*(prefixes: openArray[string];
         ", outside the range " & rawConstraint &
         "\n  remedy: pin the provider compiler in the project's lock, or " &
         "widen the range")
-    return InstalledPrefixNim(prefix: prefix, exe: exe, version: version,
-      revision: recorded)
+    return InstalledPrefixNim(prefix: prefix, exe: exe, version: version)

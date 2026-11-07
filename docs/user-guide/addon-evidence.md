@@ -106,7 +106,11 @@ newest copy of each: the command keeps, in a state file beside the hosts
 file (`hosts.txt.check-state`, or `--state <file>`), when it first saw each
 published sequence, and counts a host's lag from that. Run it at least once
 while each sequence's first copy is served -- for example from a timer
-every few minutes. The command prints
+every few minutes. Keep the state file: losing it restarts every count,
+and the command reports a missing one as `check-state new`. A state file
+it cannot read or write is an alert of its own
+(`check-state-unreadable`, `check-state-unwritable`), and an unreadable
+one is never overwritten. The command prints
 a status for each detector of each host (`live-idle`, `live-detecting`,
 `silent` or `never-reported`) and one `ALERT` line for each finding. It
 exits 1 when there is at least one alert. The findings are:
@@ -135,6 +139,8 @@ repro-evidence-sink ack --dir /var/lib/evidence/store --seq 15 \
   --reason "compromised compiler replaced; host recovered"
 ```
 
+Any alert that names a sequence can be acknowledged, whatever record
+raised it: a refusal, a heartbeat or an operator's record.
 The acknowledgement handles that alert only. Another alert the same record
 raised (a signature that does not verify, say) stays until you acknowledge
 it too.
