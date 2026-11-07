@@ -41,16 +41,26 @@ proc repoRoot(): string =
     result = getCurrentDir()
 
 proc findLoadableSharedObject(): string =
-  ## A real shared object the loader can preload into bash without
-  ## complaint: the C library this process has mapped. Read from
-  ## /proc/self/maps on Linux; elsewhere the kept-shim case is skipped by
-  ## the caller.
+  ## A real shared object the loader can preload into any program without
+  ## complaint and without effect: the ``libdl.so.2`` this process has
+  ## mapped, which since glibc 2.34 is an empty compatibility stub (its
+  ## functions live in libc). Read from /proc/self/maps on Linux; elsewhere,
+  ## or when none is mapped, the kept-shim case is skipped by the caller.
+  ##
+  ## Not the C library itself, which this used to name: an explicit
+  ## ``libc.so.6`` in ``LD_PRELOAD`` is a different C library build from the
+  ## one the preloaded program links (this binary's glibc is not bash's or
+  ## coreutils'), and under an agent-harbor 0.6.16 session, whose
+  ## command-trace shim every child also carries, such a program dies of
+  ## SIGSEGV at start -- the re-executed bash exited 139 and the case read
+  ## red from every agent shell (measured 2026-11-07; agent-harbor issue
+  ## 2026-11-07-a-program-that-preloads-a-c-library-explicitly-segfaults-under-the-command-trace-shim).
   when defined(linux):
     for line in lines("/proc/self/maps"):
       let sp = line.rfind(' ')
       if sp < 0: continue
       let path = line[sp + 1 .. ^1]
-      if path.startsWith("/") and "libc.so" in path.extractFilename:
+      if path.startsWith("/") and path.extractFilename == "libdl.so.2":
         return path
   ""
 
@@ -146,11 +156,11 @@ suite "run_tests.sh strips a foreign preload":
       "\"${" & v & ":-<unset>}\"\n")
     # The kept entry must be loadable, or the re-executed bash prints the
     # loader's complaint for an absent file: it is a real shared object (the
-    # C library this process has mapped) under our shim's name. Skipped
-    # where no such object can be named.
+    # empty libdl stub this process has mapped) under our shim's name.
+    # Skipped where no such object can be named.
     let loadable = findLoadableSharedObject()
     if loadable.len == 0:
-      skip("no mapped C library found in /proc/self/maps; this case needs " &
+      skip("no mapped libdl.so.2 found in /proc/self/maps; this case needs " &
         "a loadable shared object to stand in for the kept shim")
       return
     let kept = dir / "librepro_monitor_shim.so"
