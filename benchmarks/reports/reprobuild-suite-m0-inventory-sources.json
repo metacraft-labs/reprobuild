@@ -8720,8 +8720,8 @@
       "owner": "libs/repro_addon",
       "requiresReproBinary": false,
       "source": "libs/repro_addon/tests/t_addon_carried_state_fails_closed.nim",
-      "sourceSuiteCount": 13,
-      "staticCaseCount": 56,
+      "sourceSuiteCount": 21,
+      "staticCaseCount": 82,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -8740,7 +8740,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_addon/tests/t_addon_collision.nim",
       "sourceSuiteCount": 5,
-      "staticCaseCount": 36,
+      "staticCaseCount": 38,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

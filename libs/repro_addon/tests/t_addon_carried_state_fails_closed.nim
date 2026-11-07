@@ -32,7 +32,12 @@
 ## ``account-as-written`` (F1-F2b), ``reach-timer-dropins-unread`` (F3,
 ## F3b), ``reach-host-dropins-ignored`` (each host source),
 ## ``reach-path-unit-paths-ignored`` (F4) and
-## ``restore-requirement-by-manifest-only`` (F6).
+## ``restore-requirement-by-manifest-only`` (F6); round 6:
+## ``unit-lines-continue-as-text`` (R7-1, R7-1b, R7-2),
+## ``exec-first-command-only`` (R7-3), ``alias-chain-first-link-only``
+## (R7-4), ``dependency-links-unread`` (R7-5, R7-7),
+## ``requirement-name-not-reserved`` (R7-6), ``privileged-daemons-unread``
+## (decision 58), ``restore-requirement-skips-closure`` (decision 60).
 ##
 ## *Mocking.* The unit liveness (``AlivenessFn``), as in
 ## ``t_addon_state_sets``: a unit test has no systemd unit whose cgroup the
@@ -46,6 +51,7 @@ import std/[json, os, osproc, strutils, tables, unittest]
 import repro_core/host_apply_lock
 
 import repro_infra
+import repro_infra/systemd_syntax
 from repro_test_support import testCaseScratchSlug
 import repro_addon/[addon_apply, adoption_cli, state_sets, transitions]
 
@@ -877,21 +883,283 @@ suite "the switch re-judges reach from the live unit (round 5)":
     result = proc (k: string): string = tab.getOrDefault(k)
 
   test "a unit systemd loaded unconfined is a problem, whatever its text said":
-    let lookup = hostAccountLookup(fresh("live-r5"))
+    let liveRoot = fresh("live-r5")
+    let lookup = hostAccountLookup(liveRoot)
     # Control: as systemd shows a confined unit.
     check liveConfinementProblem("l.service", props([("ProtectSystem", "strict"),
       ("DynamicUser", "no"), ("NoNewPrivileges", "yes"), ("User", "app"),
-      ("Group", ""), ("SupplementaryGroups", "")]), lookup) == ""
+      ("Group", ""), ("SupplementaryGroups", "")]), lookup, liveRoot) == ""
     # systemd ignored ProtectSystem=Strict: it shows no.
     check liveConfinementProblem("l.service", props([("ProtectSystem", "no"),
       ("DynamicUser", "no"), ("NoNewPrivileges", "yes"), ("User", "app"),
-      ("Group", ""), ("SupplementaryGroups", "")]), lookup).len > 0
+      ("Group", ""), ("SupplementaryGroups", "")]), lookup, liveRoot).len > 0
     # An alias drop-in made it run as root.
     check liveConfinementProblem("l.service", props([("ProtectSystem", "strict"),
       ("DynamicUser", "no"), ("NoNewPrivileges", "yes"), ("User", "root"),
-      ("Group", ""), ("SupplementaryGroups", "")]), lookup).len > 0
+      ("Group", ""), ("SupplementaryGroups", "")]), lookup, liveRoot).len > 0
     check liveConfinementProblem("l.service", props([("ProtectSystem", "strict"),
       ("DynamicUser", "no"), ("NoNewPrivileges", "no"), ("User", "app"),
-      ("Group", ""), ("SupplementaryGroups", "")]), lookup).len > 0
+      ("Group", ""), ("SupplementaryGroups", "")]), lookup, liveRoot).len > 0
+
+# ---------------------------------------------------------------------------
+# Review round 6 (A13): the line and command grammar of a unit file, alias
+# chains, the host's dependency directories, the reserved requirement name,
+# and owner decisions 58 (privileged daemons) and 60 (the dependency
+# closure). Each case has a control that passes first. Ported from the
+# reviewer's probe (t_rev_a13r7_probe.nim, R7-1 .. R7-7).
+# ---------------------------------------------------------------------------
+
+proc installedR6(name: string): (string, string) =
+  ## A scratch host with the validator's carried directory restored and
+  ## carried state installed (the requirement applies).
+  let root = fresh(name)
+  let d = scratch / (name & "-carried")
+  removeDir(d)
+  copyDir(carriedDir(), d)
+  discard restoreStateSet(d, stopped(), root = root)
+  writeFile(installedMarkerPath(d), d & "\n")
+  (root, d)
+
+proc requiresRestore(text, u: string; d, root: string): bool =
+  for r in parseSystemProfile(withCarriedRequirements(text, d, root)).resources:
+    if r.kind == srkSystemdSystemDropIn and r.diUnit == u and
+        ("Requires=" & CarriedRestoreUnit) in r.diContent:
+      return true
+
+suite "a unit's lines are read as systemd's config_parse reads them (round 6)":
+  test "systemd's line grammar: continuation only after an unescaped backslash":
+    check systemdLogicalLines("A=1\\\nB=2\n") == @["A=1 B=2"]
+    check systemdLogicalLines("A=1\\\\\nB=2\n") == @["A=1\\\\", "B=2"]
+    check systemdLogicalLines("A=1\\ \nB=2\n") == @["A=1\\ ", "B=2"]
+    check systemdLogicalLines("A=1\\\n# c\nB=2\n") == @["A=1 B=2"]
+    check systemdLogicalLines("A=1\r\nB=2\rC=3\n\nD=4") ==
+      @["A=1", "B=2", "C=3", "", "D=4"]
+
+  test "control: a host drop-in with a plain Environment= keeps the unit confined":
+    check not pendingRefused(confinedNnp("c1.service", ""), proc (root: string) =
+      hostFile(root, "/run/systemd/system/c1.service.d/10-env.conf",
+               "[Service]\nEnvironment=X=a\n"))
+
+  test "R7-1: a line ending in an escaped backslash does not continue":
+    check pendingRefused(confinedNnp("c1.service", ""), proc (root: string) =
+      hostFile(root, "/run/systemd/system/c1.service.d/10-env.conf",
+               "[Service]\nEnvironment=X=a\\\\\nUser=root\n"))
+
+  test "R7-1b: the same with a path the live check never compares":
+    check pendingRefused(confinedNnp("c1.service", ""), proc (root: string) =
+      hostFile(root, "/run/systemd/system/c1.service.d/10-env.conf",
+               "[Service]\nEnvironment=X=a\\\\\n" &
+               "ReadWritePaths=/var/lib/ethereum/validator\n"))
+
+  test "R7-2: a line ending in backslash and a blank does not continue":
+    check pendingRefused(confinedNnp("c2.service", ""), proc (root: string) =
+      hostFile(root, "/run/systemd/system/c2.service.d/10-env.conf",
+               "[Service]\nEnvironment=X=a\\ \n" &
+               "ReadWritePaths=/var/lib/ethereum/validator\n"))
+
+suite "every command of an Exec line is read (round 6)":
+  test "systemd's command grammar: commands split at a lone ';'":
+    var ok: bool
+    let c = execCommands("/bin/true ; +/bin/id -u", ok)
+    check ok and c.len == 2 and c[1].prefix == "+" and c[1].path == "/bin/id"
+    let q = execCommands("/bin/echo \\; \"+x\" ; -/bin/x", ok)
+    check ok and q.len == 2 and q[0].args == @[";", "+x"] and q[1].prefix == "-"
+    discard execCommands("/bin/echo \"open", ok)
+    check not ok
+
+  test "control: a single unprivileged ExecStartPre= is let in":
+    check not pendingRefused(confinedNnp("c3.service", "ExecStartPre=/bin/true\n"))
+
+  test "R7-3: a privileged command after ';' in one Exec line":
+    check pendingRefused(confinedNnp("c3.service",
+      "ExecStartPre=/bin/true ; +/bin/true\n"))
+
+  test "a quoted prefix is a prefix":
+    check pendingRefused(confinedNnp("c3q.service",
+      "ExecStartPre=\"+/bin/true\"\n"))
+
+suite "an alias chain carries its drop-ins (round 6)":
+  test "control: a link to the unit with no drop-ins is let in":
+    check not pendingRefused(confinedNnp("c4.service", ""), proc (root: string) =
+      createDir(root / "etc/systemd/system")
+      createSymlink("/etc/systemd/system/c4.service",
+                    root / "etc/systemd/system/c4l1.service"))
+
+  test "R7-4: the drop-ins of an alias of an alias are read":
+    check pendingRefused(confinedNnp("c4.service", ""), proc (root: string) =
+      createDir(root / "etc/systemd/system")
+      createSymlink("/etc/systemd/system/c4.service",
+                    root / "etc/systemd/system/c4l1.service")
+      createSymlink("/etc/systemd/system/c4l1.service",
+                    root / "etc/systemd/system/c4l2.service")
+      hostFile(root, "/etc/systemd/system/c4l2.service.d/10-root.conf",
+               "[Service]\nUser=root\n"))
+
+  test "an alias loop reaches everything":
+    check pendingRefused(confinedNnp("c4.service", ""), proc (root: string) =
+      createDir(root / "etc/systemd/system")
+      createSymlink("/etc/systemd/system/c4x.service",
+                    root / "etc/systemd/system/c4y.service")
+      createSymlink("/etc/systemd/system/c4y.service",
+                    root / "etc/systemd/system/c4x.service"))
+
+suite "the host's dependency directories are read (round 6)":
+  test "control: an empty .wants/ directory adds nothing":
+    check not pendingRefused(confinedNnp("c5.service", ""), proc (root: string) =
+      createDir(root / "etc/systemd/system/c5.service.wants"))
+
+  test "R7-5: a host .wants/ link starts a unit the profile does not define":
+    check pendingRefused(confinedNnp("c5.service", ""), proc (root: string) =
+      createDir(root / "etc/systemd/system/c5.service.wants")
+      createSymlink("/lib/systemd/system/dist5.service",
+                    root / "etc/systemd/system/c5.service.wants/dist5.service"))
+
+  test "a .requires/ link of the template, and a masked link that adds nothing":
+    check pendingRefused(confinedNnp("c5@x.service", ""), proc (root: string) =
+      createDir(root / "run/systemd/system/c5@.service.requires")
+      createSymlink("/lib/systemd/system/dist5.service",
+                    root / "run/systemd/system/c5@.service.requires/dist5.service"))
+    check not pendingRefused(confinedNnp("c5.service", ""), proc (root: string) =
+      createDir(root / "etc/systemd/system/c5.service.upholds")
+      createSymlink("/dev/null",
+                    root / "etc/systemd/system/c5.service.upholds/dist5.service"))
+
+  test "R7-7: the unit a host .wants/ link starts gets the requirement":
+    let (root, d) = installedR6("r7-wants")
+    let starter = confinedNnp("c7.service", "ReadWritePaths=/var/lib/other\n")
+    check not requiresRestore(starter, "dist7.service", d, root)
+    createDir(root / "etc/systemd/system/c7.service.wants")
+    createSymlink("/lib/systemd/system/dist7.service",
+                  root / "etc/systemd/system/c7.service.wants/dist7.service")
+    check requiresRestore(starter, "dist7.service", d, root)
+
+suite "the requirement's drop-in name is reserved (round 6)":
+  test "control: without a drop-in of the name the reaching unit requires the restore":
+    let (root, d) = installedR6("r7-name0")
+    check requiresRestore(confinedNnp("c6.service",
+      "ReadWritePaths=/var/lib/ethereum/validator\n"), "c6.service", d, root)
+
+  test "R7-6: a profile drop-in named state-restore is refused":
+    let (root, d) = installedR6("r7-name")
+    let own = confinedNnp("c6.service",
+      "ReadWritePaths=/var/lib/ethereum/validator\n") &
+      "systemd.systemDropIn {\n  unit = \"c6.service\"\n" &
+      "  name = \"state-restore\"\n  content = \"[Unit]\nDescription=x\n\"\n}\n"
+    let why = carriedStateRefusal(parseSystemProfile(own), d, root)
+    checkpoint why
+    check why.startsWith("ECarriedStatePending") and "reserved" in why
+    var raised = false
+    try: discard withCarriedRequirements(own, d, root)
+    except ECarriedStatePending: raised = true
+    check raised
+
+  test "the generation's own requirement, applied again, is let through":
+    let (root, d) = installedR6("r7-name2")
+    let reaching = confinedNnp("c6.service",
+      "ReadWritePaths=/var/lib/ethereum/validator\n")
+    let applied = withCarriedRequirements(reaching, d, root)
+    check carriedStateRefusal(parseSystemProfile(applied), d, root) == ""
+    check withCarriedRequirements(applied, d, root) == applied
+
+suite "a privileged daemon's grant reaches everything (decision 58)":
+  test "control: no polkit rule or D-Bus policy names the account":
+    check not pendingRefused(confinedNnp("d0.service", ""), proc (root: string) =
+      hostFile(root, "/usr/share/polkit-1/rules.d/10-net.rules",
+        "polkit.addRule(function(action, subject) {\n" &
+        "  if (action.id.indexOf(\"org.freedesktop.network1.\") == 0 &&\n" &
+        "      subject.user == \"systemd-network\") {\n" &
+        "    return polkit.Result.YES;\n  }\n});\n")
+      hostFile(root, "/usr/share/polkit-1/rules.d/40-admin.rules",
+        "polkit.addAdminRule(function(action, subject) {\n" &
+        "  return [\"unix-group:sudo\"];\n});\n")
+      hostFile(root, "/usr/share/dbus-1/system.conf",
+        "<busconfig><policy context=\"default\"><allow user=\"*\"/>" &
+        "</policy><includedir>system.d</includedir>" &
+        "<include if_selinux_enabled=\"yes\" selinux_root_relative=\"yes\">" &
+        "contexts/dbus_contexts</include></busconfig>\n")
+      hostFile(root, "/usr/share/dbus-1/system.d/x.conf",
+        "<busconfig><policy user=\"root\"><allow own=\"x\"/></policy>" &
+        "<policy group=\"validator\"><allow send_destination=\"x\"/>" &
+        "</policy></busconfig>\n"))
+
+  test "a polkit rule that grants the account, by name or by group":
+    check pendingRefused(confinedNnp("d1.service", ""), proc (root: string) =
+      hostFile(root, "/etc/polkit-1/rules.d/50-app.rules",
+        "polkit.addRule(function(action, subject) {\n" &
+        "  if (subject.user == \"app\") { return polkit.Result.YES; }\n});\n"))
+    check pendingRefused(confinedNnp("d1.service", ""), proc (root: string) =
+      hostFile(root, "/etc/polkit-1/rules.d/50-app.rules",
+        "polkit.addRule(function(action, subject) {\n" &
+        "  if (subject.isInGroup(\"app\")) return \"yes\";\n});\n"))
+
+  test "a polkit rule this check cannot judge counts as naming the account":
+    check pendingRefused(confinedNnp("d2.service", ""), proc (root: string) =
+      hostFile(root, "/etc/polkit-1/rules.d/50-any.rules",
+        "polkit.addRule(function(action, subject) {\n" &
+        "  return subject.local ? polkit.Result.YES : polkit.Result.NO;\n});\n"))
+    check pendingRefused(confinedNnp("d2.service", ""), proc (root: string) =
+      hostFile(root, "/etc/polkit-1/rules.d/50-all.rules",
+        "polkit.addRule(function(action, subject) {\n" &
+        "  if (action.id == \"org.x\") return polkit.Result.YES;\n});\n"))
+
+  test "a .pkla identity and a D-Bus policy naming the account or a group":
+    check pendingRefused(confinedNnp("d3.service", ""), proc (root: string) =
+      hostFile(root, "/etc/polkit-1/localauthority/50-local.d/x.pkla",
+        "[x]\nIdentity=unix-user:app\nAction=*\nResultAny=yes\n"))
+    check pendingRefused(confinedNnp("d3.service", ""), proc (root: string) =
+      hostFile(root, "/etc/dbus-1/system.d/app.conf",
+        "<busconfig><policy group=\"app\"><allow own=\"org.app\"/></policy>" &
+        "</busconfig>\n"))
+    check pendingRefused(confinedNnp("d3.service", ""), proc (root: string) =
+      hostFile(root, "/etc/dbus-1/system.d/app.conf",
+        "<busconfig><include>/opt/elsewhere.conf</include></busconfig>\n"))
+
+suite "the requirement follows the distribution's dependency closure (decision 60)":
+  test "a service started only through a distribution unit's dependencies":
+    let (root, d) = installedR6("r7-closure")
+    hostFile(root, "/lib/systemd/system/dista.service",
+      "[Unit]\nWants=distb.service distc.service\n[Service]\nExecStart=/bin/true\n")
+    hostFile(root, "/lib/systemd/system/distb.service",
+      "[Service]\nExecStart=/bin/true\n")
+    hostFile(root, "/lib/systemd/system/distc.service",
+      "[Service]\nExecStart=/bin/true\n")
+    # The boot starts distc anyway: it is the distribution's.
+    hostFile(root, "/lib/systemd/system/default.target",
+      "[Unit]\nWants=distc.service\n")
+    let starter = unit("cl.service", "[Unit]\nWants=dista.service\n[Service]\n" &
+      "ProtectSystem=strict\nNoNewPrivileges=yes\nUser=app\n" &
+      "ReadWritePaths=/var/lib/other\nExecStart=/bin/true\n")
+    let units = carriedRequirementUnits(parseSystemProfile(starter), d, root)
+    checkpoint $units
+    check "dista.service" in units          # control: round 5's direct rule
+    check "distb.service" in units          # through dista's Wants=
+    check "distc.service" notin units       # the boot starts it anyway
+
+  test "a unit whose file is missing keeps the requirement it has":
+    let (root, d) = installedR6("r7-closure2")
+    let starter = unit("cm.service", "[Unit]\nWants=nofile.service\n[Service]\n" &
+      "ProtectSystem=strict\nNoNewPrivileges=yes\nUser=app\n" &
+      "ReadWritePaths=/var/lib/other\nExecStart=/bin/true\n")
+    check "nofile.service" in carriedRequirementUnits(parseSystemProfile(starter), d, root)
+
+suite "the live cross-check is one shared check (round 6)":
+  test "liveReachUnits names the services judged confined, liveReachProblems judges them":
+    let (root, d) = installedR6("r7-live")
+    let p = parseSystemProfile(confinedNnp("lv.service", "ReadWritePaths=/var/lib/other\n") &
+      confinedNnp("lw.service", "ReadWritePaths=/var/lib/ethereum/validator\n"))
+    let units = liveReachUnits(p, d, root)
+    check units == @["lv.service", "lw.service"]
+    let confinedShow = proc (u: string): Table[string, string] =
+      {"ProtectSystem": "strict", "DynamicUser": "no", "NoNewPrivileges": "yes",
+       "User": "app", "Group": "", "SupplementaryGroups": ""}.toTable
+    check liveReachProblems(["lv.service"], p, confinedShow, root).len == 0
+    let rootShow = proc (u: string): Table[string, string] =
+      {"ProtectSystem": "strict", "DynamicUser": "no", "NoNewPrivileges": "yes",
+       "User": "root", "Group": "", "SupplementaryGroups": ""}.toTable
+    let probs = liveReachProblems(["lv.service"], p, rootShow, root)
+    check probs.len == 1 and "lv.service as systemd loaded it" in probs[0]
+    let failing = proc (u: string): Table[string, string] =
+      raise newException(OSError, "no such unit")
+    check liveReachProblems(["lv.service"], p, failing, root).len == 1
 
 removeDir(scratch)

@@ -458,9 +458,16 @@ proc runBase(m: SnapshotMirror; b: BaseImage; record: JsonNode): seq[string] =
     if fails.len > 0: return fails
 
     # --- 2b. An operator edits an adopted file (§13 decision 50, amended
-    # 2026-11-06 by the owner; spec §4.3): the next switch refuses, naming
-    # both remedies; `repro system adopt` keeps the edit, and the ledger
-    # then records the new digest. Falsifier: owned-drift-not-adoptable.
+    # 2026-11-06 by the owner; §13 decision 61, decided 2026-11-07 by the
+    # owner; spec §4.3): the next switch refuses, naming both remedies;
+    # `repro system adopt` refuses while the profile still declares the old
+    # bytes, printing the resource to put in it; once the profile declares
+    # the edit, the adopt records it and every later switch keeps it. No
+    # switch ever writes the old bytes back over the edit. Falsifiers (the
+    # add-on builds): owned-drift-not-adoptable, and adopt-without-profile
+    # (decision 50's first amendment: the adopt takes the edit while the
+    # profile still has the old bytes, and the next switch silently reverts
+    # it).
     var amAddress = ""
     for e in led.entries:
       if e.path == "/etc/default/alertmanager": amAddress = e.resource
@@ -468,14 +475,40 @@ proc runBase(m: SnapshotMirror; b: BaseImage; record: JsonNode): seq[string] =
          g.ledgerOf())
     discard g.run("printf '# edited by the operator\\n' >> /etc/default/alertmanager")
     let edited = g.run("sha256sum /etc/default/alertmanager | cut -d' ' -f1").strip()
+    let editedBytes = g.run("cat /etc/default/alertmanager")
     let re0 = g.applyProfile(repro, "skeleton", skeleton)
     let reOut = re0.stdout & re0.stderr
     step("after the edit, the switch refuses with EDrift naming `repro " &
          "system adopt` and --reconcile-drift", re0.exitCode != 0 and
          "EDrift" in reOut and ("repro system adopt " & amAddress) in reOut and
          "--reconcile-drift" in reOut, reOut)
-    let readopt = g.adoptResource(repro, "skeleton", skeleton, amAddress)
-    step("`repro system adopt` keeps the edit", readopt.exitCode == 0 and
+    # The resource as the profile must now declare it: the edited bytes.
+    var updated = newSeq[string]()
+    var expectedStanza = ""
+    for r in parseSystemProfile(skeleton).resources:
+      var x = r
+      if r.address == amAddress:
+        x.sfContent = editedBytes
+        expectedStanza = renderStanza(x).join("\n")
+      updated.add(renderStanza(x).join("\n"))
+    let skeleton2 = updated.join("\n\n") & "\n"
+    let refusedAdopt = g.adoptResource(repro, "skeleton", skeleton, amAddress)
+    let raOut = refusedAdopt.stdout & refusedAdopt.stderr
+    step("`repro system adopt` refuses while the profile declares the old " &
+         "bytes, printing the resource with the edit (decision 61)",
+         refusedAdopt.exitCode != 0 and "decision 61" in raOut and
+         expectedStanza.len > 0 and expectedStanza in raOut, raOut &
+         "\n--- expected:\n" & expectedStanza)
+    # The silent revert decision 61 rules out: whatever the adopt did, a
+    # switch of the old profile now never puts the old bytes back.
+    let oldSwitch = g.applyProfile(repro, "skeleton", skeleton)
+    step("a switch of the old profile does not revert the edit",
+         g.run("tail -1 /etc/default/alertmanager").strip() ==
+           "# edited by the operator",
+         oldSwitch.stdout & oldSwitch.stderr)
+    let readopt = g.adoptResource(repro, "skeleton2", skeleton2, amAddress)
+    step("with the edit in the profile, `repro system adopt` keeps it",
+         readopt.exitCode == 0 and
          g.run("tail -1 /etc/default/alertmanager").strip() ==
            "# edited by the operator", readopt.stdout & readopt.stderr)
     var newDigest = ""
@@ -483,8 +516,62 @@ proc runBase(m: SnapshotMirror; b: BaseImage; record: JsonNode): seq[string] =
       if e.path == "/etc/default/alertmanager": newDigest = e.sha256
     step("the ledger records the edited bytes' digest", newDigest == edited,
          newDigest & " " & edited)
-    let re1 = g.applyProfile(repro, "skeleton", skeleton)
-    step("the switch then succeeds", re1.exitCode == 0, re1.stdout & re1.stderr)
+    for i in 1 .. 2:
+      let re1 = g.applyProfile(repro, "skeleton2", skeleton2)
+      step("switch " & $i & " of the updated profile succeeds and keeps the edit",
+           re1.exitCode == 0 and
+           g.sha256InGuest("/etc/default/alertmanager") == edited,
+           re1.stdout & re1.stderr)
+    if fails.len > 0: return fails
+
+    # --- 2c. The add-on switch's carried-state cross-check (spec §11.1;
+    # A13 review round 6, finding 6). With carried state on the host (a
+    # manifest; here one with no directories, so nothing is pending and the
+    # check alone decides), a service the static analysis takes as confined
+    # -- DynamicUser=yes, NoNewPrivileges=yes, without the floor -- is held
+    # from step 6's reload and judged as systemd loaded it. A generator,
+    # installed without a reload, makes it run as root only from that
+    # reload on: the static reading cannot see it, the live check does. The
+    # switch refuses and reverts with the unit held: it never starts.
+    # Falsifier: the add-on build addon-live-reach-skipped.
+    let liveUnit = "a13r6-live.service"
+    let liveProfile = skeleton2 & "\nsystemd.systemUnit {\n" &
+      "  name = \"" & liveUnit & "\"\n" &
+      "  content = \"[Unit]\nDescription=A13 live cross-check probe\n\n" &
+      "[Service]\nDynamicUser=yes\nNoNewPrivileges=yes\n" &
+      "ExecStart=/bin/sleep infinity\n\n[Install]\n" &
+      "WantedBy=multi-user.target\n\"\n" &
+      "  floorExceptions = [\"serviceFloor: the A13 live cross-check probe\"]\n}\n"
+    discard g.run("mkdir -p /var/lib/repro/system/carried && chmod 700 " &
+      "/var/lib/repro/system/carried && printf '%s' '{\"schema\": " &
+      "\"repro-state-set/1\", \"host\": \"a13r6\", \"createdAt\": " &
+      "\"2026-11-07T00:00:00Z\", \"entries\": []}' > " &
+      "/var/lib/repro/system/carried/state-set.json")
+    discard g.run("mkdir -p /etc/systemd/system-generators && printf " &
+      "'#!/bin/sh\\nmkdir -p \"$1/" & liveUnit & ".d\"\\nprintf " &
+      "\"[Service]\\\\nUser=root\\\\n\" > \"$1/" & liveUnit &
+      ".d/10-root.conf\"\\n' > /etc/systemd/system-generators/a13r6-gen " &
+      "&& chmod 755 /etc/systemd/system-generators/a13r6-gen")
+    let la = g.applyProfile(repro, "live", liveProfile)
+    let laOut = la.stdout & la.stderr
+    let started = g.run("systemctl show -p ExecMainStartTimestampMonotonic " &
+      liveUnit & " || true").strip()
+    record["liveCrossCheck"] = %*{"exit": la.exitCode, "started": started,
+      "generatorDropIn": g.run("cat /run/systemd/generator/" & liveUnit &
+        ".d/10-root.conf 2>&1 || true")}
+    step("the add-on switch refuses a unit systemd loaded unconfined, and " &
+         "it never starts (held through the revert)",
+         la.exitCode != 0 and "ECarriedStatePending" in laOut and
+         (liveUnit & " as systemd loaded it is not confined") in laOut and
+         started in ["ExecMainStartTimestampMonotonic=0",
+                     "ExecMainStartTimestampMonotonic="],
+         laOut & "\n" & started)
+    discard g.run("rm -f /etc/systemd/system-generators/a13r6-gen " &
+      "/var/lib/repro/system/carried/state-set.json && " &
+      "rmdir /var/lib/repro/system/carried 2>/dev/null; systemctl daemon-reload")
+    let after = g.applyProfile(repro, "skeleton2", skeleton2)
+    step("after the generator and the manifest are gone, the switch succeeds",
+         after.exitCode == 0, after.stdout & after.stderr)
     if fails.len > 0: return fails
 
     # --- 3. Converge: hardened, from the store, state untouched.

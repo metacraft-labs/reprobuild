@@ -529,6 +529,33 @@
 ## ``restore-requirement-skips-dropin-targets`` the restore requirement is
 ##                                            not given to a unit only a
 ##                                            profile drop-in reaches
+## ``unit-lines-continue-as-text``           round 5's line reading: a line
+##                                           ending in ``\\`` or ``\ `` joins
+##                                           the next (A13 review round 6)
+## ``exec-first-command-only``               only the first command of an
+##                                           ``Exec*=`` line is read
+## ``alias-chain-first-link-only``           only a link straight to the unit
+##                                           is an alias; a link to a link
+##                                           is not followed
+## ``dependency-links-unread``               host ``.wants/``, ``.requires/``
+##                                           and ``.upholds/`` links are not
+##                                           read
+## ``requirement-name-not-reserved``         a profile drop-in named
+##                                           ``state-restore`` replaces the
+##                                           restore requirement
+## ``privileged-daemons-unread``             polkit rules and D-Bus policy
+##                                           are not read (§13 decision 58)
+## ``restore-requirement-skips-closure``     a unit started only through a
+##                                           distribution unit's dependencies
+##                                           gets no requirement (decision 60)
+## ``addon-live-reach-skipped``              the add-on switch does not run
+##                                           the carried-state cross-check
+## ``infra-live-reach-skipped``              a full apply does not run the
+##                                           carried-state cross-check
+##                                           (decision 59)
+## ``adopt-without-profile``                 ``repro system adopt`` takes
+##                                           drifted bytes the profile does
+##                                           not declare (decision 61)
 ## ``plan-ignores-profile-digest``           an apply of a stored plan does
 ##                                           not compare the plan's profile
 ##                                           digest with the text it runs
@@ -1270,6 +1297,16 @@ const
                           "reach-stale-generation-dropins-skipped",
                           "restore-requirement-skips-activated",
                           "restore-requirement-skips-dropin-targets",
+                          "unit-lines-continue-as-text",
+                          "exec-first-command-only",
+                          "alias-chain-first-link-only",
+                          "dependency-links-unread",
+                          "requirement-name-not-reserved",
+                          "privileged-daemons-unread",
+                          "restore-requirement-skips-closure",
+                          "addon-live-reach-skipped",
+                          "infra-live-reach-skipped",
+                          "adopt-without-profile",
                           "plan-ignores-profile-digest",
                           "full-apply-keeps-undeclared-dropins",
                           "install-unit-reads-host-manifest",

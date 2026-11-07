@@ -521,6 +521,10 @@ type
     divertedByProfile*: bool   ## a `linux.dpkgDiversion` of the path is declared
     reconcileDrift*: bool
     adopt*: bool               ## `repro system adopt` named this address
+    stanza*: proc (bytes: string): string {.closure.}
+      ## The resource as the profile would declare it with ``bytes`` as
+      ## its content (an ``fs.systemFile``), for a refusal to print; nil
+      ## where there is none.
 
 proc refuseLink(o: TargetObservation; address: string) =
   if o.linkComponent.len > 0:
@@ -609,15 +613,39 @@ proc decideFile(d: CollisionDriver; o: TargetObservation;
       result.reason = AcceptedOutOfBandReason
       return
     if inp.adopt and not mutated("owned-drift-not-adoptable"):
-      # Owned, changed out of band, and named by `repro system adopt`
-      # (§13 decision 50, amended 2026-11-06 by the owner; spec §4.3): the
-      # operator keeps the edit. Nothing is written; the current bytes
-      # become the ledger's, which records their digest.
-      result.verdict = cvAdopt
-      result.preWriteBytes = readFile(o.path)
-      result.reason = "owned by the ledger, changed out of band, claimed " &
-        "again by `repro system adopt`: its current bytes become the ledger's"
-      return
+      when mutated("adopt-without-profile"):
+        # FALSIFYING MUTATION: decision 50's first amendment -- the current
+        # bytes become the ledger's while the profile still declares the
+        # old ones, so the next switch writes the old bytes back.
+        result.verdict = cvAdopt
+        result.preWriteBytes = readFile(o.path)
+        result.reason = "owned by the ledger, changed out of band, claimed " &
+          "again by `repro system adopt`: its current bytes become the ledger's"
+        return
+      else:
+        # Owned, changed out of band, and named by `repro system adopt`
+        # while the profile declares other bytes (§13 decision 61, decided
+        # 2026-11-07 by the owner): refused. The profile is the source of
+        # truth: once it declares the edited bytes, the adopt (and any
+        # switch) accepts them (the branch above), and no later switch
+        # writes the old bytes back over the edit. The refusal prints the
+        # resource to put in the profile.
+        let current = readFile(o.path)
+        let ready = if inp.stanza != nil: inp.stanza(current) else: ""
+        raise newException(AddonDriftError, "EDrift: " & o.path & " (" &
+          inp.address & ") changed out of band (sha256 " &
+          o.sha256[0 ..< 12] & "), and the profile still declares other " &
+          "bytes (sha256 " & inp.desiredSha256[0 ..< min(12,
+          inp.desiredSha256.len)] & "); `repro system adopt` keeps an edit " &
+          "only once the profile declares it (spec §13 decision 61). " &
+          (if ready.len > 0:
+             "Replace the resource in the profile with:\n" & ready & "\n" &
+             "then run `repro system adopt " & inp.address & "` again"
+           else:
+             "Declare the file's current bytes in the profile, then run " &
+             "`repro system adopt " & inp.address & "` again") &
+          "; or replace the file with the profile's bytes with " &
+          "--reconcile-drift")
     if inp.reconcileDrift:
       result.verdict = cvReconcile
       result.preWriteBytes = readFile(o.path)
@@ -636,9 +664,10 @@ proc decideFile(d: CollisionDriver; o: TargetObservation;
       " (" & inp.address & ") is owned by the ledger but its content " &
       "changed out of band" & byPackage & " (sha256 " & o.sha256[0 ..< 12] & ", ledger " &
       inp.ledgerSha256[0 ..< min(12, inp.ledgerSha256.len)] & "); " &
-      "review it, then either keep the edit with `repro system adopt " &
+      "review it, then either keep the edit by declaring its bytes in the " &
+      "profile and running `repro system adopt " &
       inp.address & " --profile <file>` (the ledger records the current " &
-      "bytes) or re-run with --reconcile-drift to replace it with the " &
+      "bytes; spec §13 decision 61) or re-run with --reconcile-drift to replace it with the " &
       "profile's (the current bytes are kept in the ledger)")
   # Package-owned rows.
   if o.ownership.package.len > 0:

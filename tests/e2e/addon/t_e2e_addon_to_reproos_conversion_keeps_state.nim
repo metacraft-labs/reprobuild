@@ -332,6 +332,94 @@ const
     ## ``NoNewPrivileges=yes``), ``account-nss-unread`` (a userdb record of
     ## uid 0 under ``DynamicUser=yes``), ``account-dynamic-name-from-stem``
     ## (an instance of ``root@.service`` under ``DynamicUser=yes``).
+  R6Confined = "ProtectSystem=strict\nNoNewPrivileges=yes\n" &
+    "User=eth-validator\nGroup=eth-validator\n"
+  R6Probes = [
+    ("lines", r5Unit("eth-r6-lines.service", R6Confined, "r6Lines"),
+     "/var/lib/ethereum/validator (r6Lines)",
+     "mkdir -p /run/systemd/system/eth-r6-lines.service.d && printf " &
+       "'[Service]\\nEnvironment=X=a\\\\\\\\\\n" &
+       "ReadWritePaths=/var/lib/ethereum/validator\\n' > " &
+       "/run/systemd/system/eth-r6-lines.service.d/10-env.conf",
+     "rm -rf /run/systemd/system/eth-r6-lines.service.d"),
+    ("exec", r5Unit("eth-r6-exec.service", R6Confined &
+       "ExecStartPre=/bin/true ; +/bin/true\n", "r6Exec"),
+     "a privileged command", "", ""),
+    ("aliaschain", r5Unit("eth-r6-chain.service", R6Confined, "r6Chain"),
+     "runs as root (root)",
+     "ln -sf /etc/systemd/system/eth-r6-chain.service " &
+       "/etc/systemd/system/eth-r6-l1.service && ln -sf " &
+       "/etc/systemd/system/eth-r6-l1.service /etc/systemd/system/eth-r6-l2.service" &
+       " && mkdir -p /run/systemd/system/eth-r6-l2.service.d && printf " &
+       "'[Service]\\nUser=root\\n' > /run/systemd/system/eth-r6-l2.service.d/10-root.conf",
+     "rm -rf /etc/systemd/system/eth-r6-l1.service /etc/systemd/system/eth-r6-l2.service " &
+       "/run/systemd/system/eth-r6-l2.service.d"),
+    ("wantslink", r5Unit("eth-r6-wants.service", R6Confined, "r6Wants"),
+     "it starts a13r6-dist5.service",
+     "mkdir -p /etc/systemd/system/eth-r6-wants.service.wants && ln -sf " &
+       "/usr/lib/systemd/system/a13r6-dist5.service " &
+       "/etc/systemd/system/eth-r6-wants.service.wants/a13r6-dist5.service",
+     "rm -rf /etc/systemd/system/eth-r6-wants.service.wants"),
+    ("reserved", r5Unit("eth-r6-name.service", R6Confined, "r6Name") &
+       "      systemdSystemDropIn(unit = \"eth-r6-name.service\", " &
+       "name = \"state-restore\",\n        content = \"[Unit]\\nDescription=x\\n\", " &
+       "address = \"r6NameDropIn\")\n",
+     "reserved for the carried-state restore requirement", "", ""),
+    ("polkit", r5Unit("eth-r6-polkit.service", R6Confined, "r6Polkit"),
+     "a privileged daemon may act for its account",
+     "mkdir -p /etc/polkit-1/rules.d && printf 'polkit.addRule(function(" &
+       "action, subject) {\\n  if (subject.user == \"eth-validator\") " &
+       "{ return polkit.Result.YES; }\\n});\\n' > /etc/polkit-1/rules.d/50-a13r6.rules",
+     "rm -f /etc/polkit-1/rules.d/50-a13r6.rules"),
+    ("live", r5Unit("eth-r6-gen.service", R6Confined, "r6Gen"),
+     "eth-r6-gen.service as systemd loaded it is not confined",
+     "mkdir -p /etc/systemd/system-generators && printf '#!/bin/sh\\n" &
+       "mkdir -p \"$1/eth-r6-gen.service.d\"\\nprintf \"[Service]\\\\nUser=root\\\\n\" " &
+       "> \"$1/eth-r6-gen.service.d/10-root.conf\"\\n' > " &
+       "/etc/systemd/system-generators/a13r6-gen && chmod 755 " &
+       "/etc/systemd/system-generators/a13r6-gen",
+     "rm -f /etc/systemd/system-generators/a13r6-gen && rm -rf " &
+       "/etc/systemd/system/eth-r6-gen.service.d && systemctl daemon-reload")]
+    ## Round 6 (A13 review) and owner decisions 58 and 59: (case, its lines,
+    ## a fragment the refusal must hold, host set-up, clean-up), each applied
+    ## while the carried directory is pending and refused, each let in by
+    ## the engine build of its finding: ``unit-lines-continue-as-text`` (a
+    ## line ending in ``\\`` continues no line), ``exec-first-command-only``
+    ## (a privileged second command), ``alias-chain-first-link-only`` (the
+    ## drop-ins of an alias of an alias), ``dependency-links-unread`` (a host
+    ## ``.wants/`` link), ``requirement-name-not-reserved``,
+    ## ``privileged-daemons-unread`` (a polkit rule granting the account),
+    ## and ``infra-live-reach-skipped`` (a generator, installed without a
+    ## reload, makes the unit root from the apply's own reload on: only the
+    ## live cross-check sees it; the unit must never start).
+  R6DistA = "a13r6-dista.service"
+  R6DistB = "a13r6-distb.service"
+  R6DistB_DropIn = "/etc/systemd/system/a13r6-distb.service.d/50-repro-state-restore.conf"
+  R6Dist7 = "a13r6-dist7.service"
+  R6Dist7_DropIn = "/etc/systemd/system/a13r6-dist7.service.d/50-repro-state-restore.conf"
+  R6Resources = """
+      # A13 owner decision 60: a profile unit that wants a distribution-like
+      # unit, which wants another; the second is started only through the
+      # first's dependencies.
+      systemdSystemUnit(name = "eth-r6-closure.service",
+        content = unitText("A13 round-6 probe: wants a distribution unit",
+          "User=eth-validator\nGroup=eth-validator\n" &
+          "ReadWritePaths=/var/lib/a13-r6\nExecStart=/bin/sleep infinity\n",
+          after = "a13r6-dista.service"),
+        hardening = "serviceFloor",
+        floorExceptions = @["NoExecPaths: the conversion gate's round-6 " &
+          "probe runs /bin/sleep"],
+        address = "r6Closure")
+      # A13 review round 6, finding 4 (R7-7): a profile unit a host
+      # .wants/ link makes start a unit the profile does not define.
+      systemdSystemUnit(name = "eth-r6-linked.service",
+        content = unitText("A13 round-6 probe: a host .wants/ link",
+          "User=eth-validator\nGroup=eth-validator\n" &
+          "ReadWritePaths=/var/lib/a13-r6\nExecStart=/bin/sleep infinity\n"),
+        hardening = "serviceFloor",
+        floorExceptions = @["NoExecPaths: the conversion gate's round-6 " &
+          "probe runs /bin/sleep"],
+        address = "r6Linked")"""
   R5Plan = r5Unit("eth-r5-plan.service", "ProtectSystem=strict\n" &
     "NoNewPrivileges=yes\nUser=eth-validator\nGroup=eth-validator\n" &
     "ReadWritePaths=/var/lib/ethereum/validator\n", "r5Plan")
@@ -571,10 +659,10 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
       raise newException(CatchableError, "the reference profile's " &
         "validator account is not where the gate adds the shadow unit")
     writeFile(work / "system.nim", src0.replace(anchor, anchor & ShadowResource &
-      R5Resources & R5TuneResource))
+      R5Resources & R6Resources & R5TuneResource))
     # The next generation: the same, without the tune drop-in (finding 3).
     writeFile(work / "system_next.nim", src0.replace(anchor, anchor &
-      ShadowResource & R5Resources))
+      ShadowResource & R5Resources & R6Resources))
     writeFile(work / PinsModule, pinsSource(pins))
     writeFile(work / "home.nim", readFile(FixtureDir / "home.nim"))
     for f in ["system.nim", "system_next.nim", PinsModule, "home.nim"]:
@@ -746,6 +834,38 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
       step("round 5, " & label & ": refused while the directory is pending, " &
            "naming " & address, judged(o) and refused,
            (if judged(o): "" else: "NOT JUDGED (the profile did not compile): ") & o)
+    # --- Review round 6 and owner decisions 58 and 59, while the directory
+    # is pending: each refused for its own reason and judged.
+    for (label, resources, needle, setup, cleanup) in R6Probes:
+      if setup.len > 0: discard nw.run(setup)
+      let pf = probeFile("r6" & label)
+      writeFile(work / pf, probeProfile("r6" & label, resources))
+      nw.copyTo(work / pf, RefDir / pf)
+      let r = nw.exec(env & eng & " infra apply --profile " & RefDir & "/" &
+        pf & " --host " & AgentTarget & " --no-preview", timeoutSec = 3600)
+      let o = r.stdout & r.stderr
+      var refused = r.exitCode != 0 and "ECarriedStatePending" in o and
+        needle in o
+      var detail = o
+      if label == "live":
+        # Held from before the first write to the refusal: never started.
+        let started = nw.exec("systemctl show -p " &
+          "ExecMainStartTimestampMonotonic eth-r6-gen.service").stdout.strip()
+        let held = nw.exec("test -f /etc/systemd/system/eth-r6-gen.service.d/" &
+          "zz-repro-carried-check-hold.conf").exitCode == 0
+        refused = refused and held and
+          started in ["ExecMainStartTimestampMonotonic=0",
+                      "ExecMainStartTimestampMonotonic="]
+        detail = o & "\n" & started & "\nheld: " & $held
+      probes["r6" & label] = %*{"exit": r.exitCode, "judged": judged(o),
+        "layer": (if label == "live": "live" else: "reach"),
+        "refusedForReason": refused}
+      if cleanup.len > 0: discard nw.run(cleanup)
+      step("round 6, " & label & ": refused while the directory is pending" &
+           (if label == "live": ", by the live cross-check, never started"
+            else: ""), judged(o) and refused,
+           (if judged(o): "" else: "NOT JUDGED (the profile did not compile): ") &
+           detail)
     # A stored plan made now, before install-unit: no requirement is due
     # yet, so the plan has none (finding 4; applied after the restore).
     let planFile = probeFile("r5plan")
@@ -829,10 +949,18 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
     # A unit the profile does not define (as a distribution ships one), in
     # the distribution's directory, not enabled: only the profile's
     # eth-r5-wants.service pulls it in (finding 5).
-    for u in [R5DistUnit, R5TunedUnit]:
+    for u in [R5DistUnit, R5TunedUnit, R6DistB, R6Dist7]:
       discard nw.run("printf '[Unit]\\n" &
-        "Description=A13 round-5 distribution-like unit\\n[Service]\\n" &
+        "Description=A13 distribution-like unit\\n[Service]\\n" &
         "ExecStart=/bin/sleep infinity\\n' > /usr/lib/systemd/system/" & u)
+    # Decision 60: a distribution-like unit that wants another.
+    discard nw.run("printf '[Unit]\\nDescription=A13 distribution-like " &
+      "unit\\nWants=" & R6DistB & "\\n[Service]\\n" &
+      "ExecStart=/bin/sleep infinity\\n' > /usr/lib/systemd/system/" & R6DistA)
+    # R7-7: a host .wants/ link on a profile unit.
+    discard nw.run("mkdir -p /etc/systemd/system/eth-r6-linked.service.wants && " &
+      "ln -sf /usr/lib/systemd/system/" & R6Dist7 &
+      " /etc/systemd/system/eth-r6-linked.service.wants/" & R6Dist7)
     discard nw.run("systemctl daemon-reload")
     # --- 4. The full realisation.
     let applied = nw.exec(applyCmd, timeoutSec = 3600)
@@ -872,6 +1000,22 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
          "define requires the restore, through the generation's drop-in",
          nw.exec("test -f " & tunedReq).exitCode == 0 and
          tunedDeps.count(RestoreUnit) >= 2, tunedDeps)
+    # Round 6, finding 4 (R7-7): the unit a host .wants/ link on a profile
+    # unit starts requires the restore itself. Red under the engine build
+    # ``dependency-links-unread`` (whose first red is the pending probe).
+    let d7Deps = nw.run("systemctl show -p Requires -p After " & R6Dist7)
+    step("round 6, wants-link: a unit a host .wants/ link on a profile unit " &
+         "starts requires the restore, through the generation's drop-in",
+         nw.exec("test -f " & R6Dist7_DropIn).exitCode == 0 and
+         d7Deps.count(RestoreUnit) >= 2, d7Deps)
+    # Owner decision 60: a unit started only through a distribution unit's
+    # dependencies requires the restore too. Red under the engine build
+    # ``restore-requirement-skips-closure``.
+    let dbDeps = nw.run("systemctl show -p Requires -p After " & R6DistB)
+    step("round 6, closure: a unit started only through a distribution " &
+         "unit's dependencies requires the restore",
+         nw.exec("test -f " & R6DistB_DropIn).exitCode == 0 and
+         dbDeps.count(RestoreUnit) >= 2, dbDeps)
     # Finding 3: the next generation no longer declares the tune drop-in;
     # a host realised in full removes it (and keeps the requirement). Red
     # under the engine build ``full-apply-keeps-undeclared-dropins``.
