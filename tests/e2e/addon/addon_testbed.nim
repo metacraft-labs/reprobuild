@@ -634,6 +634,20 @@ proc destroy*(g: Guest) =
         g.qemu.stopAndCleanup(g.vm, deleteVm = true)
     except CatchableError as e:
       g.note("teardown: " & e.msg)
+  # The guest's serial console is the one record of what happened inside
+  # it -- a reboot, the OOM killer, sshd or the network -- and the run
+  # directory goes below. Kept beside the gate records under the guest's
+  # name, so a failed cell can be explained after its teardown (A13 round
+  # 6: an `scp` failure whose cause could not be found, its serial log
+  # removed with the run).
+  try:
+    if g.serialLog.len > 0 and fileExists(g.serialLog):
+      let kept = recordsDir() / "serial" / (g.name & ".serial.log")
+      createDir(parentDir(kept))
+      copyFile(g.serialLog, kept)
+      g.note("serial console kept at " & kept)
+  except CatchableError as e:
+    g.note("teardown: keeping the serial console: " & e.msg)
   try:
     releaseRunDir(g.runDir, g.ownerToken)
   except CatchableError as e:
