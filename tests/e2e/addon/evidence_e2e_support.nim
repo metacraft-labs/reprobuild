@@ -12,7 +12,7 @@
 ##
 ## *Mocking.* None: a real sink process, real TLS, the guest's real units.
 
-import std/[json, os, osproc, strutils, times]
+import std/[json, options, os, osproc, strutils, times]
 
 import repro_peer_cache/auth as peerAuth
 import repro_peer_cache/evidence
@@ -200,7 +200,7 @@ proc toJson*(r: CheckReport): JsonNode =
   result = %*{"alerts": newJArray(), "statuses": newJArray()}
   for a in r.alerts:
     result["alerts"].add(%*{"detector": a.detector, "trigger": a.trigger,
-      "sinkSeq": a.sinkSeq, "detail": a.detail})
+      "sinkSeq": (if a.sinkSeq.isSome: %a.sinkSeq.get else: newJNull()), "detail": a.detail})
   for st in r.statuses:
     result["statuses"].add(%*{"detector": st.detector, "status": st.status,
       "detections": st.detections})

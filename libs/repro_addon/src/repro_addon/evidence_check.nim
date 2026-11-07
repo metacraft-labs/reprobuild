@@ -39,7 +39,7 @@
 ## copy the producer's sequence and attestation. Records shipped before
 ## that are trustworthy and cannot be erased (G34).
 
-import std/[algorithm, os, sequtils, sets, strutils, tables]
+import std/[algorithm, options, os, sequtils, sets, strutils, tables]
 from std/posix import nil
 
 import repro_peer_cache/auth as peerAuth
@@ -76,7 +76,12 @@ type
     host*: string
     detector*: string          ## DET-AO-n, or G34 for a probe of the sink
     trigger*: string
-    sinkSeq*: uint64
+    sinkSeq*: Option[uint64]
+      ## The sink sequence of the record that raised the alert, or none (a
+      ## silence, the check's own state). An option, not a sentinel: a
+      ## store numbers its entries from 0, and an alert on its first entry
+      ## names sequence 0 (A11; before, 0 meant "none", and that alert
+      ## printed no sequence and could not be acknowledged).
     detail*: string
 
   DetectorStatus* = object
@@ -409,6 +414,18 @@ proc writeFirstSeen*(path: string; t: Table[string, uint64]) =
     raise newException(EvidenceCheckError, "the check's state file " &
       path & " cannot be written: " & e.msg)
 
+proc sequenceOf*(a: Alert): Option[uint64] =
+  ## The alert's sequence, as the check prints and matches it.
+  when mutated("alert-seq-zero-is-none"):
+    # FALSIFYING BUILD: 0 stands for "no sequence" again.
+    if a.sinkSeq.isSome and a.sinkSeq.get == 0'u64: return none(uint64)
+  a.sinkSeq
+
+proc seqText*(a: Alert): string =
+  ## `` seq=N`` for an alert a record raised, "" for one none did.
+  let sq = sequenceOf(a)
+  if sq.isSome: " seq=" & $sq.get else: ""
+
 proc successorChainLive*(hosts: seq[EnrolledHost]; h: EnrolledHost): bool =
   ## Whether the chain of successors from the retired ``h`` ends at an
   ## enrolled, live host (A retired to B, B to C, C live: true). Bounded by
@@ -463,7 +480,7 @@ proc runEvidenceCheck*(inp: CheckInputs): CheckReport =
   # manifest directory alone. An unreadable file is never rewritten.
   template stateAlert(trig, d: string) =
     result.alerts.add(Alert(host: "-", detector: "DET-AO-10", trigger: trig,
-                            sinkSeq: 0, detail: d))
+                            sinkSeq: none(uint64), detail: d))
   when not mutated("lag-ignores-check-state"):
     if inp.statePath.len > 0:
       var readable = true
@@ -543,7 +560,11 @@ proc runEvidenceCheck*(inp: CheckInputs): CheckReport =
     let mine = byHost.getOrDefault(h.hostId, @[])
     template alert(det, trig: string; s: uint64; d: string) =
       result.alerts.add(Alert(host: h.hostId, detector: det, trigger: trig,
-                              sinkSeq: s, detail: d))
+                              sinkSeq: some(s), detail: d))
+    template alertUnsequenced(det, trig, d: string) =
+      ## An alert no single record raised (a silence, a lag).
+      result.alerts.add(Alert(host: h.hostId, detector: det, trigger: trig,
+                              sinkSeq: none(uint64), detail: d))
     # The host's attestation key: enrolled, or the one its bootstrap record
     # named (the first record a host ships).
     # Generation 0 is bootstrap's own, applied from no manifest: the
@@ -879,7 +900,7 @@ proc runEvidenceCheck*(inp: CheckInputs): CheckReport =
         alive[det] = false
       elif det notin lastBeat or lastBeat[det].interval <= 0:
         st.status = "never-reported"
-        alert("DET-AO-8", "never-reported", 0, det & " never sent a heartbeat")
+        alertUnsequenced("DET-AO-8", "never-reported", det & " never sent a heartbeat")
         alive[det] = false
       else:
         let (ms, interval) = lastBeat[det]
@@ -888,7 +909,7 @@ proc runEvidenceCheck*(inp: CheckInputs): CheckReport =
           st.status = "silent"
           st.detail = "last heartbeat " & $((inp.nowMs - ms) div 1000) &
             " s ago, interval " & $(interval div 1000) & " s"
-          alert("DET-AO-8", "silent", 0, det & ": " & st.detail)
+          alertUnsequenced("DET-AO-8", "silent", det & ": " & st.detail)
           alive[det] = false
         else:
           st.status = if st.detections > 0: "live-detecting" else: "live-idle"
@@ -907,13 +928,13 @@ proc runEvidenceCheck*(inp: CheckInputs): CheckReport =
       if boot notin reassertBoots and boot notin exemptBoots and
           shipInterval > 0 and
           inp.nowMs - firstMs > shipInterval * RecordGraceIntervals:
-        alert("DET-AO-8", "reassert-silent", 0, "boot " & boot &
+        alertUnsequenced("DET-AO-8", "reassert-silent", "boot " & boot &
           " has no re-assert record")
         silentDetail["addon-reassert"] = "boot " & boot & " has no record"
     for (run, firstMs) in dpkgRuns:
       if not hookRuns.anyIt(it >= run) and shipInterval > 0 and
           inp.nowMs - firstMs > shipInterval * RecordGraceIntervals:
-        alert("DET-AO-8", "apt-hook-silent", 0, "dpkg ran at " & run &
+        alertUnsequenced("DET-AO-8", "apt-hook-silent", "dpkg ran at " & run &
           " and no apt hook record names that run")
         silentDetail["addon-apt-hook"] = "dpkg run " & run & " has no record"
     if shipStalled:
@@ -969,7 +990,7 @@ proc runEvidenceCheck*(inp: CheckInputs): CheckReport =
         if found:
           let ageMs = inp.nowMs - int64(since.issuedAt) * 1000
           if ageMs > int64(since.maxAgeSeconds) * 1000:
-            alert("DET-AO-10", "lag", 0, "applied sequence " &
+            alertUnsequenced("DET-AO-10", "lag", "applied sequence " &
               (if applied < 0: "none" else: $applied) & " is behind the " &
               "producer's " & $l.sequence & " for " & h.target &
               "; sequence " & $since.sequence & " was first published " &
@@ -979,16 +1000,17 @@ proc runEvidenceCheck*(inp: CheckInputs): CheckReport =
   when not mutated("check-ignores-acks"):
     var open: seq[Alert]
     for a in result.alerts:
-      let k = when mutated("ack-by-sequence-only"): $a.sinkSeq
-              else: $a.sinkSeq & " " & a.detector & "/" & a.trigger
-      if a.sinkSeq > 0'u64 and k in acks:
+      let sq = sequenceOf(a)
+      let k = when mutated("ack-by-sequence-only"): $sq.get(0)
+              else: $sq.get(0) & " " & a.detector & "/" & a.trigger
+      if sq.isSome and k in acks:
         var hnd = acks[k]
         hnd.alert = a
         result.handled.add(hnd)
       else: open.add(a)
     result.alerts = open
-  result.alerts.sort(proc(a, b: Alert): int = cmp(a.host & a.detector & $a.sinkSeq,
-                                                   b.host & b.detector & $b.sinkSeq))
+  result.alerts.sort(proc(a, b: Alert): int =
+    cmp(a.host & a.detector & seqText(a), b.host & b.detector & seqText(b)))
 
 proc render*(r: CheckReport): string =
   for s in r.statuses:
@@ -997,10 +1019,10 @@ proc render*(r: CheckReport): string =
       (if s.detail.len > 0: " (" & s.detail & ")" else: "") & "\n")
   for x in r.handled:
     result.add("HANDLED " & x.alert.host & " " & x.alert.detector & " " &
-      x.alert.trigger & " seq=" & $x.alert.sinkSeq & " acknowledged by " &
+      x.alert.trigger & seqText(x.alert) & " acknowledged by " &
       x.operator & " at seq=" & $x.ackSeq & ": " &
       x.reason.replace("\n", " ") & "\n")
   for a in r.alerts:
     result.add("ALERT " & a.host & " " & a.detector & " " & a.trigger &
-      (if a.sinkSeq > 0'u64: " seq=" & $a.sinkSeq else: "") &
+      seqText(a) &
       (if a.detail.len > 0: " " & a.detail.replace("\n", " ") else: "") & "\n")

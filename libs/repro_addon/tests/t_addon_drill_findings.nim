@@ -33,7 +33,7 @@
 ## Mocks: none. The sink runs in this process (``addon_evidence_fixture``,
 ## for the reason given there); time is the check's ``nowMs``.
 
-import std/[asyncdispatch, os, sequtils, strutils, times, unittest]
+import std/[asyncdispatch, options, os, sequtils, strutils, times, unittest]
 
 import repro_peer_cache/evidence
 import repro_peer_cache/evidence_record
@@ -137,7 +137,7 @@ suite "the A11 drill's findings":
     h.ship()
     let hosts = @[EnrolledHost(hostId: h.credentialHost, target: "t")]
     let before = runEvidenceCheck(inputsFor(sink, hosts, int64(epochTime() * 1000)))
-    check before.alerts.anyIt(it.sinkSeq == det)
+    check before.alerts.anyIt(it.sinkSeq == some(det))
     # The operator, through the sink's own inbox.
     let inbox = sink.storeDir / OperatorInboxName
     createDir(inbox)
@@ -146,8 +146,8 @@ suite "the A11 drill's findings":
     check processOperatorInbox(sink.server.store, peerIdOfHex(sink.hostId),
                                inbox) == 1
     let after = runEvidenceCheck(inputsFor(sink, hosts, int64(epochTime() * 1000)))
-    check not after.alerts.anyIt(it.sinkSeq == det)
-    check after.handled.anyIt(it.alert.sinkSeq == det and it.operator == "alice")
+    check not after.alerts.anyIt(it.sinkSeq == some(det))
+    check after.handled.anyIt(it.alert.sinkSeq == some(det) and it.operator == "alice")
     check "HANDLED" in render(after)
 
   test "D5: a signed containment reads contained; an unsigned or late one, silent":

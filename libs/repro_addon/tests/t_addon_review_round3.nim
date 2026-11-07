@@ -19,18 +19,21 @@
 ##    entry filed but not recorded gets a ``store-recovery-interrupted``
 ##    record, once.
 ## 7. The containment sequence keeps growing when the host clock goes back.
+## 8. An alert on the sink store's first entry names sequence 0, and can be
+##    acknowledged; a silence names none.
 ##
 ## Falsifying builds (each turns its own case red):
 ## ``egress-owed-by-listing`` (1), ``egress-owed-dropped-at-reload`` (2),
 ## ``egress-state-empty-is-valid`` and ``check-state-empty-is-valid`` (3),
 ## ``probe-undelivered-is-refused`` (4), ``ack-rules-cli-only`` (5),
-## ``uninstall-discards-unrecorded`` (6). Case 7 holds behaviour the time
+## ``uninstall-discards-unrecorded`` (6), ``alert-seq-zero-is-none`` (8).
+## Case 7 holds behaviour the time
 ## floor's ``last + 1`` already gives; no build breaks it but one that drops
 ## that floor.
 ##
 ## Mocks: none. The sinks are the real in-process sink fixture.
 
-import std/[asyncdispatch, os, sequtils, strutils, tables, times, unittest]
+import std/[asyncdispatch, options, os, sequtils, strutils, tables, times, unittest]
 
 import repro_peer_cache/auth as peerAuth
 import repro_peer_cache/evidence
@@ -148,11 +151,6 @@ suite "the A11 code review's third round":
     let h = newHost(root, "ack5", sink)
     sink.enrol(h)
     let a = openAppender(h.site, h.conf)
-    # A record first: an alert at the store's sequence 0 prints no sequence
-    # (reprobuild-pm issue 2026-11-07-addon-alert-on-the-sink-stores-first-
-    # entry-has-no-sequence), which is not what this case is about.
-    a.append(newEvidenceRecord(ecAudit, "addon-bootstrap", "bootstrap",
-      [("host", "ack5")], nowMs = 1))
     a.append(newEvidenceRecord(ecDetection, "addon-apply-refusal",
       "apply-refused", [("host", "ack5")], nowMs = 1))
     check a.drain(20_000)
@@ -197,8 +195,8 @@ suite "the A11 code review's third round":
       nowMs: int64(epochTime() * 1000), silenceFactor: 3,
       sinkHostId: sinkHostOf(sink.storeDir)))
     checkpoint render(r)
-    check r.handled.anyIt(it.alert.sinkSeq == det)
-    check r.alerts.anyIt(it.trigger == "apply-refused" and it.sinkSeq == D)
+    check r.handled.anyIt(it.alert.sinkSeq == some(det))
+    check r.alerts.anyIt(it.trigger == "apply-refused" and it.sinkSeq == some(D))
 
   test "6: uninstall reports set-aside and unrecorded evidence first, once":
     let site = scratchSite("un6")
@@ -226,6 +224,43 @@ suite "the A11 code review's third round":
     let a = nextContainmentSequence(st, t)
     let b = nextContainmentSequence(st, t - 3_600_000)    # an hour back
     check b > a
+
+  test "8: an alert on the store's first entry names sequence 0 and can be handled":
+    let sink8 = startSink(root / "s8")
+    defer: sink8.server.stop()
+    writeFile(sink8.storeDir / SinkHostName, sink8.hostId & "\n")
+    let h = newHost(root / "s8", "first", sink8)
+    sink8.enrol(h)
+    let a = openAppender(h.site, h.conf)
+    a.append(newEvidenceRecord(ecDetection, "addon-apply-refusal",
+      "apply-refused", [("host", "first")], nowMs = 1))
+    check a.drain(20_000)
+    a.close()
+    check sink8.entries()[0].kind == ekRecord and
+          sink8.entries()[0].record.trigger == "apply-refused"
+    let first = sink8.entries()[0].seq
+    check first == 0'u64
+    proc run8(): CheckReport =
+      runEvidenceCheck(CheckInputs(storeDir: sink8.storeDir,
+        hosts: @[EnrolledHost(hostId: h.credentialHost, target: "t")],
+        nowMs: int64(epochTime() * 1000), silenceFactor: 3,
+        sinkHostId: sinkHostOf(sink8.storeDir)))
+    let r0 = run8()
+    check r0.alerts.anyIt(it.trigger == "apply-refused" and
+                          it.sinkSeq == some(0'u64))
+    check "apply-refused seq=0" in render(r0)
+    let inbox = sink8.storeDir / OperatorInboxName
+    createDir(inbox)
+    writeFile(inbox / "first.ack", "0\nDET-AO-2/apply-refused\nalice\nhandled\n")
+    check processOperatorInbox(sink8.server.store, peerIdOfHex(sink8.hostId),
+                               inbox) == 1
+    let r1 = run8()
+    checkpoint render(r1)
+    check not r1.alerts.anyIt(it.trigger == "apply-refused")
+    check r1.handled.anyIt(it.alert.sinkSeq == some(0'u64))
+    # A silence has no sequence at all, and prints none.
+    check r1.alerts.filterIt(it.trigger == "never-reported").allIt(
+      it.sinkSeq.isNone)
 
   sink.server.stop()
 removeDir(root)

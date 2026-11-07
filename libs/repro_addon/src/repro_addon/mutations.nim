@@ -767,6 +767,10 @@
 ## ``uninstall-discards-unrecorded``          uninstall records nothing it
 ##                                            discards, and does not wait
 ##                                            for the sink (round 3)
+## ``alert-seq-zero-is-none``                an alert on the sink store's
+##                                            first entry (sequence 0)
+##                                            prints and matches as one
+##                                            without a sequence
 ## =========================================  ==============================
 
 # The deploy agent's own mutations (``repro_deploy_agent/agent_mutations``)
@@ -1217,7 +1221,8 @@ const
                           "probe-undelivered-is-refused",
                           "ack-rules-cli-only",
                           "uninstall-discards-unrecorded",
-                          "egress-state-empty-is-valid"]
+                          "egress-state-empty-is-valid",
+                          "alert-seq-zero-is-none"]
 
 when AddonMutation.len > 0 and AddonMutation notin KnownAddonMutations and
     AddonMutation notin KnownAgentMutations:

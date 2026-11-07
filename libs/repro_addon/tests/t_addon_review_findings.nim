@@ -52,7 +52,7 @@
 ## engine tick's apply hook records that it was reached. Time is the check's
 ## ``nowMs``.
 
-import std/[asyncdispatch, os, sequtils, strutils, tables, times, unittest]
+import std/[asyncdispatch, options, os, sequtils, strutils, tables, times, unittest]
 from std/posix import Stat, stat
 
 import repro_peer_cache/auth as peerAuth
@@ -385,7 +385,7 @@ suite "the A11 code review's findings":
                               it.sinkSeq == det[0].sinkSeq)
     let inbox = sink.storeDir / OperatorInboxName
     createDir(inbox)
-    writeFile(inbox / "9.ack", $det[0].sinkSeq & "\n" & det[0].detector & "/" &
+    writeFile(inbox / "9.ack", $det[0].sinkSeq.get & "\n" & det[0].detector & "/" &
       det[0].trigger & "\nalice\nhandled\n")
     discard processOperatorInbox(sink.server.store, peerIdOfHex(sink.hostId),
                                  inbox)
