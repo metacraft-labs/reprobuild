@@ -86467,6 +86467,10 @@ type
     ipDirty             ## a SIBLING in the closure has a dirty tree.
     ipUnpublished       ## a sibling in the closure has an unpublished HEAD.
     ipOffLock           ## a sibling differs from the locked revision.
+    ipUndeclaredCheckout ## the attested repository is not a checkout the
+                         ## workspace declares (a second path to one, or a
+                         ## stray clone): no lock or publication state
+                         ## describes it.
     ipNoWorkspace       ## not a resolvable workspace → cannot bind to a lock.
     ipNoContentId       ## the tested state has no honest content id
                         ## (Content-Id §3) → nothing a certificate could name.
@@ -86803,6 +86807,18 @@ proc evaluateIssuancePreconditions*(workspaceRoot, currentRepo: string):
       result.kind = ipUnpublished
     of "lock-stale", "lock-failure":
       result.kind = ipOffLock
+    of "current-repo-identity":
+      # The repository being certified is not one this workspace declares:
+      # a second path to a declared checkout (a bind mount, a copy) or a
+      # stray clone. Nothing was published or locked wrongly, so neither the
+      # off-lock label nor the gate's push remedy describes it.
+      result.kind = ipUndeclaredCheckout
+      result.offender = currentRepo
+      result.remedy = "certify from the workspace's own checkout of this " &
+        "repository, or declare this checkout in the workspace membership; " &
+        "the workspace locks and publishes its declared checkouts, so it " &
+        "cannot say what this one was tested against" &
+        (if f.evidence.len > 0: " (" & f.evidence & ")" else: "")
     else:
       # A visibility / develop-missing failure is still a "not in a
       # publishable state" condition; treat it as off-lock so no cert is
@@ -88409,6 +88425,8 @@ proc issuancePreconditionLabel(kind: IssuancePreconditionKind): string =
   of ipDirty: "a develop-mode sibling's working tree is dirty"
   of ipUnpublished: "dependency has unpushed commits"
   of ipOffLock: "repo not at the locked revision"
+  of ipUndeclaredCheckout:
+    "this checkout is not a repository the workspace declares"
   of ipNoWorkspace: "not a workspace"
   of ipNoContentId: "the tested state has no content id"
   of ipNoLockInContent: "the tested content carries no usable lock"
