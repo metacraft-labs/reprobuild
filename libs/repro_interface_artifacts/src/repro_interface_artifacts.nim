@@ -7783,7 +7783,7 @@ proc buildScratchRoot(workDir, scratchDir: string): string =
   else:
     workDir / "build"
 
-proc extractInterfaceFromModuleUnchecked(modulePath, artifactPath,
+proc extractInterfaceFromModuleBody(modulePath, artifactPath,
                                          stubPath: string;
                                          workDir = getCurrentDir();
                                          scratchDir = "";
@@ -7798,17 +7798,26 @@ proc extractInterfaceFromModuleUnchecked(modulePath, artifactPath,
     ProjectInterfaceArtifact =
   ## The extraction itself. Deliberately NOT exported: the only way to
   ## EXTRACT an interface from outside this module is
-  ## ``extractInterfaceFromModule``, which checks the recipe's ``uses: nim``
-  ## against the installed prefix's compiler (N3). Inside this module,
-  ## ``liftInterfaceArtifact`` extracts through that checked entry too
-  ## (``t_extraction_checks_the_prefix_nim`` holds its cold and fresh paths).
+  ## ``extractInterfaceFromModule``. A cold extraction checks the recipe's
+  ## ``uses: nim`` against the installed prefix's compiler (N3) on the
+  ## runner's staged output, BEFORE anything is published at
+  ## ``artifactPath`` / ``stubPath`` or a warm record is written, so a refused
+  ## extraction leaves nothing of its own and leaves an earlier, admitted
+  ## artifact at that path untouched. The warm short-circuit returns an
+  ## already-published artifact without checking; the exported entry checks
+  ## that. Inside this module, ``liftInterfaceArtifact`` extracts through the
+  ## exported entry too (``t_extraction_checks_the_prefix_nim`` holds its cold
+  ## and fresh paths).
   ##
   ## This does not cover READING an interface already on disk:
-  ## ``readInterfaceArtifact*`` is exported, and ``repro_tool_profiles`` and
-  ## ``repro_cli_support`` read recorded artifacts without extracting. Those
-  ## artifacts were written by an extraction, which checked under the value
-  ## of ``$REPRO_INSTALLED_PREFIX_NIM`` it ran with; nothing re-checks a read
+  ## ``readInterfaceArtifact`` is exported, and readers take an artifact from
+  ## its path without extracting -- e.g. ``repro_tool_profiles``,
+  ## ``repro_cli_support`` (``m9r14fLoadInterfaceToolUses``) and
+  ## ``repro_agent_backend/stage`` (its fingerprint only). What they find was
+  ## published by an extraction that passed the check under the value of
+  ## ``$REPRO_INSTALLED_PREFIX_NIM`` it ran with; nothing re-checks a read
   ## against a different value.
+  ##
   ## ``useExtractionCache`` controls the built-in warm short-circuit. It is
   ## ``false`` for exactly one caller: the child of the extraction EDGE.
   ##
@@ -8187,20 +8196,50 @@ proc extractInterfaceFromModuleUnchecked(modulePath, artifactPath,
   # lives in a temp tree with no DLLs of its own. See the proc's docstring.
   stageHostDynlibsBesideBinary(parentDir(runnerExe))
   ensureExecutable(runnerExe)
+  # The runner writes BESIDE the destination, and nothing reaches the
+  # destination until the recipe's `uses: nim` is admitted (N3,
+  # `requireUsesAdmitInstalledPrefixNim`). Exported readers read an interface
+  # from its path without extracting, so a refused extraction must leave no
+  # artifact, stub or warm record of its own there, and must not clobber the
+  # one an earlier, admitted extraction published (A15 round-6 verification,
+  # 2026-11-07). The content does not depend on the path it is written to.
+  let stagedArtifact = artifactPath & ".pending"
+  let stagedStub =
+    if stubPath.len > 0: stubPath & ".pending"
+    else: tempRoot / "unrequested-stub.nim"
+  proc dropStaged() =
+    for path in [stagedArtifact, stagedStub]:
+      try:
+        if fileExists(extendedPath(path)): removeFile(extendedPath(path))
+      except OSError:
+        discard
+  dropStaged()
   var runnerArgs = @[
     runnerExe,
-    absolutePath(artifactPath),
-    absolutePath(stubPath),
+    absolutePath(stagedArtifact),
+    absolutePath(stagedStub),
     absoluteModulePath]
   if recipeRelative:
     runnerArgs.add(absoluteModuleDir)
     for anchor in relocationAnchors:
       runnerArgs.add(anchor)
-  let execution = runCommand(runnerArgs, cwd = tempRoot)
-  if not fileExists(extendedPath(artifactPath)):
-    raise newException(IOError,
-      "interface extraction did not write artifact: " & artifactPath &
-        "\n" & execution.output)
+  try:
+    let execution = runCommand(runnerArgs, cwd = tempRoot)
+    if not fileExists(extendedPath(stagedArtifact)):
+      raise newException(IOError,
+        "interface extraction did not write artifact: " & artifactPath &
+          "\n" & execution.output)
+    let staged =
+      if recipeRelative: readInterfaceArtifactRebased(stagedArtifact,
+        absoluteModuleDir)
+      else: readInterfaceArtifact(stagedArtifact)
+    requireUsesAdmitInstalledPrefixNim(
+      staged.projectInterface.toolUses.mapIt(it.rawConstraint))
+    moveFile(extendedPath(stagedArtifact), extendedPath(artifactPath))
+    if stubPath.len > 0 and fileExists(extendedPath(stagedStub)):
+      moveFile(extendedPath(stagedStub), extendedPath(stubPath))
+  finally:
+    dropStaged()
   result =
     if recipeRelative: readInterfaceArtifactRebased(artifactPath,
       absoluteModuleDir)
@@ -8222,7 +8261,7 @@ proc extractInterfaceFromModule*(modulePath, artifactPath, stubPath: string;
                                  relocationAnchors: openArray[string] = []):
     ProjectInterfaceArtifact =
   ## Extract the project interface of ``modulePath`` (see
-  ## ``extractInterfaceFromModuleUnchecked``), then refuse it when the
+  ## ``extractInterfaceFromModuleBody``), then refuse it when the
   ## installed prefix's compiler compiles recipes in this process and the
   ## recipe's own ``uses: nim`` range excludes that release
   ## (reprobuild-pm Distribution-And-Packaging.md §5.3, amendment N3,
@@ -8237,11 +8276,14 @@ proc extractInterfaceFromModule*(modulePath, artifactPath, stubPath: string;
   ## Every extraction route reaches the extractor through here -- the build
   ## engine's interface edge and its helper process, the dev-env engine,
   ## catalog publication, the home-apply catalog projection and
-  ## ``liftInterfaceArtifact`` -- so the check is a property of holding an
+  ## ``liftInterfaceArtifact`` -- so the check is a property of EXTRACTING an
   ## interface, not a step each caller has to remember (A15 round-4
   ## verification, 2026-11-07, found a text-scanning guard that a
-  ## ``when false:`` or a new direct call slipped past).
-  result = extractInterfaceFromModuleUnchecked(modulePath, artifactPath,
+  ## ``when false:`` or a new direct call slipped past). It is not a
+  ## property of reading one: see ``extractInterfaceFromModuleBody``. A cold
+  ## extraction is checked inside the body before it publishes; the check
+  ## here answers for the warm short-circuit.
+  result = extractInterfaceFromModuleBody(modulePath, artifactPath,
     stubPath, workDir, scratchDir, requireStub, resourceModule, extraPaths,
     consumerRoot, useExtractionCache, recipeRelative, relocationAnchors)
   requireUsesAdmitInstalledPrefixNim(

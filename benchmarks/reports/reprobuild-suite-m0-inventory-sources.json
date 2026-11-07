@@ -2146,7 +2146,7 @@
           "directExecutionLine": false,
           "enclosingCallable": "extract",
           "executedVariables": [],
-          "line": 66,
+          "line": 69,
           "path": "libs/repro_interface_artifacts/tests/t_extraction_checks_the_prefix_nim.nim",
           "patterns": [
             "repro-extract-interface"
@@ -2162,7 +2162,7 @@
           "directExecutionLine": true,
           "enclosingCallable": "",
           "executedVariables": [],
-          "line": 121,
+          "line": 124,
           "path": "libs/repro_interface_artifacts/tests/t_extraction_checks_the_prefix_nim.nim",
           "patterns": [
             "repro-lift-interface-artifact"
@@ -2178,7 +2178,7 @@
           "directExecutionLine": true,
           "enclosingCallable": "",
           "executedVariables": [],
-          "line": 125,
+          "line": 128,
           "path": "libs/repro_interface_artifacts/tests/t_extraction_checks_the_prefix_nim.nim",
           "patterns": [
             "repro-lift-interface-artifact"
@@ -2194,7 +2194,7 @@
           "directExecutionLine": true,
           "enclosingCallable": "",
           "executedVariables": [],
-          "line": 141,
+          "line": 144,
           "path": "libs/repro_interface_artifacts/tests/t_extraction_checks_the_prefix_nim.nim",
           "patterns": [
             "repro-lift-interface-artifact"
@@ -17994,8 +17994,8 @@
       "owner": "libs/repro_interface_artifacts",
       "requiresReproBinary": false,
       "source": "libs/repro_interface_artifacts/tests/t_extraction_checks_the_prefix_nim.nim",
-      "sourceSuiteCount": 1,
-      "staticCaseCount": 5,
+      "sourceSuiteCount": 2,
+      "staticCaseCount": 7,
       "staticallyDetectedRuntimeCompilerFlow": true,
       "targetOs": "soAny"
     },

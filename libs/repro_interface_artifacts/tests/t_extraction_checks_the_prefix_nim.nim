@@ -1,5 +1,5 @@
-## Holding a recipe's interface means its `uses: nim` was checked against
-## the installed prefix's compiler (reprobuild-pm
+## Extracting a recipe's interface checks its `uses: nim` against the
+## installed prefix's compiler (reprobuild-pm
 ## Distribution-And-Packaging.md §5.3, amendment N3, approved by Zahary
 ## Karadjov, 2026-11-04: a range that excludes the shipped release "is
 ## refused by the existing range check, not silently replaced").
@@ -17,14 +17,17 @@
 ##   `extractInterfaceFromModule`, on a cold extraction and on its warm
 ##   short-circuit alike, and an admitting range passes;
 ## * a lift is refused the same way, on its cold path (it extracts) and on
-##   its fresh-artifact path (it reads the artifact back without extracting).
+##   its fresh-artifact path (it reads the artifact back without extracting);
+## * a refused cold extraction publishes nothing: an empty output directory
+##   stays empty, and an earlier, admitted artifact, its stub and its warm
+##   records stay byte for byte as they were.
 ##
 ## Each is falsified by removing its check (see the A15 record).
 ##
 ## *Mocking.* None: real recipes compiled by the real extractor; only the
 ## environment variable the bootstrap would set is set by hand.
 
-import std/[os, strutils, unittest]
+import std/[algorithm, os, strutils, unittest]
 
 import repro_core/installed_prefix_nim
 import repro_interface_artifacts
@@ -71,7 +74,7 @@ proc usesOf(a: ProjectInterfaceArtifact): seq[string] =
   for u in a.projectInterface.toolUses:
     result.add(u.rawConstraint)
 
-suite "an interface is held only once its uses: nim is checked":
+suite "extracting an interface checks its uses: nim":
 
   test "without the prefix route nothing is checked":
     let base = scratchRoot("unset")
@@ -126,7 +129,7 @@ suite "an interface is held only once its uses: nim is checked":
 
   test "a cold lift is refused the same way":
     # The lift's extraction branch, with nothing recorded yet: it must go
-    # through the checked extractor, not the module-private one beside it.
+    # through the exported extractor, not the module-private body beside it.
     let base = scratchRoot("lift-cold")
     defer: removeDir(base)
     let root = project(base, "nim ==2.2.10")
@@ -143,4 +146,45 @@ suite "an interface is held only once its uses: nim is checked":
       except InstalledPrefixNimError as err:
         checkpoint(err.msg)
         check "excludes Nim 2.3.1" in err.msg
+
+proc filesIn(dir: string): seq[(string, string)] =
+  ## Every file under `dir`, relative, with its bytes, sorted.
+  for path in walkDirRec(dir):
+    result.add((path.relativePath(dir), readFile(path)))
+  result.sort()
+
+suite "a refused extraction leaves nothing of its own behind":
+  # Exported readers (e.g. `m9r14fLoadInterfaceToolUses`,
+  # `repro_agent_backend/stage`) read an interface from its path without
+  # extracting, so a refused extraction must not publish one there
+  # (A15 round-6 verification, 2026-11-07).
+
+  test "into an empty directory it writes nothing":
+    let base = scratchRoot("refused-empty")
+    defer: removeDir(base)
+    let root = project(base, "nim ==2.2.10")
+    let outDir = base / "out"
+    withMarker("2.3.1"):
+      expect InstalledPrefixNimError:
+        discard extract(root, outDir)
+    check filesIn(outDir).len == 0
+
+  test "over an earlier artifact it leaves that artifact as it was":
+    let base = scratchRoot("refused-over")
+    defer: removeDir(base)
+    let root = project(base, "nim ^2.2")
+    let outDir = base / "out"
+    withMarker("2.3.1"):
+      discard extract(root, outDir)
+      let before = filesIn(outDir)
+      require before.len > 0
+      # The recipe now excludes the release: a cold extraction, refused.
+      writeFile(root / "repro.nim", recipe("nim ==2.2.10"))
+      expect InstalledPrefixNimError:
+        discard extract(root, outDir)
+      let after = filesIn(outDir)
+      check after.len == before.len
+      for i in 0 ..< min(before.len, after.len):
+        checkpoint(after[i][0])
+        check after[i] == before[i]
 
