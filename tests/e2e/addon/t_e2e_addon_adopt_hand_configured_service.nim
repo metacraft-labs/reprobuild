@@ -483,15 +483,26 @@ proc runBase(m: SnapshotMirror; b: BaseImage; record: JsonNode): seq[string] =
          "EDrift" in reOut and ("repro system adopt " & amAddress) in reOut and
          "--reconcile-drift" in reOut, reOut)
     # The resource as the profile must now declare it: the edited bytes.
-    var updated = newSeq[string]()
+    # The operator's update replaces that one stanza in the profile, every
+    # other byte kept (the profile's `addOn` block included), with the
+    # system profile editor's own span of it (``intent.stanzaSpans``).
     var expectedStanza = ""
     for r in parseSystemProfile(skeleton).resources:
-      var x = r
       if r.address == amAddress:
+        var x = r
         x.sfContent = editedBytes
         expectedStanza = renderStanza(x).join("\n")
-      updated.add(renderStanza(x).join("\n"))
-    let skeleton2 = updated.join("\n\n") & "\n"
+    writeFile(g.runDir / "skeleton-edit.nim", skeleton)
+    var doc = loadSystemIntent(g.runDir / "skeleton-edit.nim")
+    var skeleton2 = ""
+    for sp in stanzaSpans(doc):
+      if sp.address == amAddress and expectedStanza.len > 0:
+        doc.lines = doc.lines[0 ..< sp.startLine] &
+          expectedStanza.split("\n") & doc.lines[sp.endLine + 1 .. ^1]
+        skeleton2 = serialize(doc)
+    step("the profile is updated with the printed resource", skeleton2.len > 0 and
+         parseSystemProfile(skeleton2).resources.len ==
+           parseSystemProfile(skeleton).resources.len, skeleton2)
     let refusedAdopt = g.adoptResource(repro, "skeleton", skeleton, amAddress)
     let raOut = refusedAdopt.stdout & refusedAdopt.stderr
     step("`repro system adopt` refuses while the profile declares the old " &
