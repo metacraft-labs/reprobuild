@@ -585,8 +585,19 @@ proc synthesiseImage*(o: InfraImageOptions): InfraImageResult =
     # Replay the root filesystem's journal before reading or writing it:
     # debugfs does not, and the next boot's replay would undo what it
     # wrote. A clean power-off leaves nothing to replay; anything else
-    # does. e2fsck exits 1 when it corrected something (fsck(8)).
-    discard run([tool("e2fsck"), "-fy", root.spec], okCodes = [0, 1])
+    # does. The check runs on a copy of the partition: e2fsck re-opens the
+    # filesystem after a journal recovery WITHOUT the `?offset=` option,
+    # and then reads the image's own first sector as the superblock
+    # ("Bad magic number ... while trying to re-open"; measured with
+    # e2fsprogs 1.47.3 on a raspi2b assembly that powered off with a dirty
+    # journal).
+    let rootOffset = partOffset(t, rootIdx)
+    let rootLength = t.partitions[rootIdx].sectors * int64(t.sectorSize)
+    let check = image & ".fsck-part"
+    copyRange(image, rootOffset, rootLength, check, 0)
+    discard run([tool("e2fsck"), "-fy", check], okCodes = [0, 1])
+    copyRange(check, 0, getFileSize(check), image, rootOffset)
+    removeFile(check)
     let resultPath = AssemblyPayloadDir / AssemblyResultName
     if not root.exists(resultPath):
       fail("the assembly boot left no " & resultPath & "; serial log tail:\n" &
