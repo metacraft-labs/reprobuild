@@ -23,10 +23,10 @@
 # Pass the flags the binary was built with. How it works: nim's --genDeps
 # (an alias of --genScript) runs the compiler's front end without
 # compiling or linking, in a nimcache of its own, and writes
-# <module>.deps. That run, and a compile of each {.compile.} C file, run
-# under `strace -f`, so every file opened is seen: staticRead targets,
-# files read by a staticExec command, and the headers the C compiler
-# opens. The list starts with the sha256 of the binary it describes, and
+# <module>.deps. That run is traced with `strace -f`, the only way to see
+# what Nim does not record anywhere: staticRead targets and the files a
+# staticExec command reads. Each {.compile.} C file is compiled again with
+# the C compiler's own depfile (-MD), which names its headers. The list starts with the sha256 of the binary it describes, and
 # fresh_binary refuses a list written for another binary.
 #
 # The published list is removed first. A run that fails, for any reason,
@@ -122,13 +122,19 @@ for i, (src, cmd) in enumerate(compiles):
             argv[k + 1] = os.path.join(cache, "c%d.o" % i)
         elif os.path.basename(a) == os.path.basename(src) and not a.startswith("-"):
             argv[k] = src
-    r = subprocess.run([strace, "-f", "-qq", "-e", "trace=open,openat,openat2",
-                        "-o", os.path.join(cache, "c%d.trace" % i)] + argv,
-                       capture_output=True, text=True,
-                       cwd=os.path.dirname(src))
+    dep = os.path.join(cache, "c%d.d" % i)
+    r = subprocess.run(argv + ["-MD", "-MF", dep], capture_output=True,
+                       text=True, cwd=os.path.dirname(src))
     if r.returncode != 0:
         sys.exit("write_helper_deps: compiling a {.compile.} C file again "
                  "failed: " + r.stderr[-2000:])
+    # The compiler's own depfile (make syntax): every header it included.
+    text = open(dep).read().replace("\\\n", " ")
+    for tok in text.split(":", 1)[1].split() if ":" in text else []:
+        p = tok if os.path.isabs(tok) else os.path.join(os.path.dirname(src), tok)
+        ok, p = wanted(p)
+        if ok and p.startswith(workspace + "/") and p not in traced:
+            traced.append(p)
 opened = re.compile(r'open(?:at2?)?\((?:[^,]+, )?"([^"]+)".*\)\s+=\s+(\d+)')
 for f in sorted(os.listdir(cache)):
     if not f.endswith(".trace"):

@@ -705,9 +705,42 @@ if [ "${REPRO_HOST_PLATFORM}" = "darwin" ]; then
 fi
 
 # The build/bin helpers tests check with repro_test_support/fresh_binary
-# (§13 decision 65 of the ReproOS Add-On Mode spec: the add-on's and the
-# Evidence sink's test helpers). Each gets a dependency list.
+# (§13 decisions 65 and its round-6 amendment in the ReproOS Add-On Mode
+# spec: the add-on's and the Evidence sink's test helpers). Each gets a
+# dependency list (scripts/write_helper_deps.sh), in one of two named modes:
+#
+#   REPRO_BUILD_APPS_HELPER_DEPS=write  write each list; a failure to write
+#                                       one fails the build. The default on
+#                                       Linux (the writer traces the
+#                                       compiler with strace).
+#   REPRO_BUILD_APPS_HELPER_DEPS=none   write none, and REMOVE any list a
+#                                       previous build left, so a test that
+#                                       runs these helpers refuses them (the
+#                                       guard stays fail-closed). For builds
+#                                       that run no such test: the Nix
+#                                       package (nix/pkgs/by-name/re/
+#                                       reprobuild/package.nix) sets it. The
+#                                       default elsewhere than Linux, where
+#                                       the writer cannot trace.
+#
+# The mode is printed; any other value is refused.
 HELPER_DEPS_APPS="repro-evidence-sink repro-binary-cache"
+if [ -z "${REPRO_BUILD_APPS_HELPER_DEPS:-}" ]; then
+  if [ "$(uname -s)" = Linux ]; then REPRO_BUILD_APPS_HELPER_DEPS=write
+  else REPRO_BUILD_APPS_HELPER_DEPS=none; fi
+fi
+case "${REPRO_BUILD_APPS_HELPER_DEPS}" in
+  write)
+    echo "build_apps: helper dependency lists: write (${HELPER_DEPS_APPS})" >&2 ;;
+  none)
+    echo "build_apps: helper dependency lists: none (REPRO_BUILD_APPS_HELPER_DEPS=none); removing any old list, so tests that run ${HELPER_DEPS_APPS} from build/bin refuse them" >&2
+    for helper in ${HELPER_DEPS_APPS}; do
+      rm -f "build/nimcache/${helper}/${helper}.deps"
+    done ;;
+  *)
+    echo "build_apps: REPRO_BUILD_APPS_HELPER_DEPS must be 'write' or 'none', not '${REPRO_BUILD_APPS_HELPER_DEPS}'" >&2
+    exit 2 ;;
+esac
 while read -r name path extra_flags; do
   name="${name%$'\r'}"
   path="${path%$'\r'}"
@@ -783,7 +816,7 @@ while read -r name path extra_flags; do
       clear_set_aside_build "${artifacts[@]}"
       case " ${HELPER_DEPS_APPS} " in
         *" ${name} "*)
-          if ! (unset_clingo_searchpath
+          if [ "${REPRO_BUILD_APPS_HELPER_DEPS}" = write ] && ! (unset_clingo_searchpath
                 bash scripts/write_helper_deps.sh "${name}" "${path}" \
                   ${nim_mode_flags[@]+"${nim_mode_flags[@]}"} \
                   ${extra_flag_array[@]+"${extra_flag_array[@]}"}); then

@@ -287,6 +287,11 @@ stdenv.mkDerivation (finalAttrs: {
   ];
 
   env = {
+    # The package runs no test, so it writes no test-helper dependency
+    # lists (scripts/build_apps.sh's named mode; ReproOS Add-On Mode spec
+    # §13 decision 65). Tests that would run its build/bin helpers refuse
+    # them without a list, so nothing relies on one being here.
+    REPRO_BUILD_APPS_HELPER_DEPS = "none";
     STACKABLE_HOOKS_BUILT_TOOLS_DIR = if stdenv.isDarwin then "${macosTools}" else "";
     BLAKE3_PREFIX = "${blake3Prefix}";
     NIMCRYPTO_SRC = "${nimcryptoSrc}";
