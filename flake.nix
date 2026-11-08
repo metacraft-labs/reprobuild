@@ -808,8 +808,14 @@
     # Advanced from 9a49ee3c to 197089cd (metacraft-labs/nim#16): the
     # compiler records its own message origins relative to the Nim root, so
     # a compiler built from a checkout names no path of it.
+    #
+    # Advanced from 197089cd to 8384ff3f: `std/jsonutils` decodes an `int64`
+    # above `int.high` and a `uint32` above `int32.high` where `int` is 32
+    # bits (wasm32, i386, JS) instead of raising a RangeDefect. 259a2595
+    # rides along: `std/osproc` applies `workingDir` in the child process
+    # instead of changing the parent's directory around the spawn.
     nim-fork-src = {
-      url = "git+https://github.com/metacraft-labs/nim?ref=codetracer&rev=197089cda27f656f8010e2b31b40e0e12f3f209b";
+      url = "git+https://github.com/metacraft-labs/nim?ref=codetracer&rev=8384ff3fecfdbd8772d46c79054967769915d6fd";
       flake = false;
     };
     nim-csources-src = {
