@@ -12,7 +12,11 @@
 #                     slurp targets, and what staticExec's commands read
 #
 # Paths under /nix/store, /proc, /sys, /dev, /etc and /run, and the build
-# directory, are left out (immutable, or not sources).
+# directory, are left out (immutable, or not sources). Of what strace sees,
+# only files in the directory the script runs from and its siblings (the
+# workspace) count, outside any .git directory: a config.nims probe of a
+# sibling's git metadata, the user's git config and shared caches are not
+# sources of the binary.
 #
 #   scripts/write_helper_deps.sh <name> <entry.nim> [nim flags...]
 #
@@ -77,6 +81,7 @@ import hashlib, json, os, re, shlex, subprocess, sys
 cache, module, build, strace, binary, published = sys.argv[1:7]
 cache = os.path.abspath(cache)
 build = os.path.abspath(build)
+workspace = os.path.dirname(os.path.abspath(os.getcwd()))
 excluded = ["/nix/store/", "/proc/", "/sys/", "/dev/", "/etc/", "/run/",
             build + "/"]
 
@@ -91,7 +96,12 @@ for line in open(os.path.join(cache, module + ".deps")):
     ok, p = wanted(p) if p else (False, p)
     if ok and p not in modules:
         modules.append(p)
-record = json.load(open(os.path.join(cache, module + ".json")))
+# Nim names its build record after the --out file (<name>.json), and the
+# .deps file after the main module.
+rec_path = os.path.join(cache, os.path.basename(published)[:-len(".deps")] + ".json")
+if not os.path.exists(rec_path):
+    rec_path = os.path.join(cache, module + ".json")
+record = json.load(open(rec_path))
 compiles = []
 for src, cmd in record.get("compile", []):
     src = os.path.abspath(src)
@@ -128,7 +138,13 @@ for f in sorted(os.listdir(cache)):
         if not m:
             continue
         ok, p = wanted(m.group(1))
-        if ok and p not in traced:
+        # What the compiler read that can be a source: files in the
+        # directory the build runs from and its siblings (the workspace:
+        # sibling checkouts sit beside the repository), outside any .git
+        # directory. Git metadata a config.nims probe reads, the user's own
+        # config files and shared caches are not sources of the binary.
+        if (ok and p.startswith(workspace + "/") and "/.git/" not in p
+                and p not in traced):
             traced.append(p)
 h = hashlib.sha256()
 with open(binary, "rb") as fh:

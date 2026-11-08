@@ -4,7 +4,8 @@
 ## 2026-11-08-fresh-binary-does-not-see-included-files-or-modules-outside-
 ## the-tree; §13 decision 65 of the ReproOS Add-On Mode spec).
 ##
-## A small tree is compiled by the real Nim into ``build/bin`` with its own
+## A small tree is compiled by the real Nim into ``build/bin/foo-helper``
+## (a name other than the main module's, as ``repro-evidence-sink`` is) with its own
 ## nimcache, and its dependency list written by
 ## ``scripts/write_helper_deps.sh``, as ``scripts/build_apps.sh`` does for a
 ## helper. The app imports a library module of the tree, ``include``s a file
@@ -74,7 +75,7 @@ proc writeApp(extra = "") =
     "const fromExec = staticExec(\"cat " & execInput & "\")\n" &
     "echo greeting(), farAway(), part(), fooHelper(), blob, fromExec\n" & extra)
 writeApp()
-let binary = tree / "build" / "bin" / addFileExt("foo", ExeExt)
+let binary = tree / "build" / "bin" / addFileExt("foo-helper", ExeExt)
 
 proc build() =
   ## Compile the tree and write its dependency list, after dating its
@@ -85,11 +86,11 @@ proc build() =
   let flags = @["--path:" & tree / "libs" / "foolib" / "src",
                 "--path:" & parentDir(outside)]
   let (o1, c1) = execCmdEx(quoteShellCommand(@["nim", "c", "--hints:off",
-    "--warnings:off"] & flags & @["--nimcache:" & tree / "build" / "nimcache" / "foo",
+    "--warnings:off"] & flags & @["--nimcache:" & tree / "build" / "nimcache" / "foo-helper",
     "--out:" & binary, app]))
   doAssert c1 == 0, o1
   let (o2, c2) = execCmdEx(quoteShellCommand(@["bash",
-    RepoRoot / "scripts" / "write_helper_deps.sh", "foo", app] & flags),
+    RepoRoot / "scripts" / "write_helper_deps.sh", "foo-helper", app] & flags),
     workingDir = tree)
   doAssert c2 == 0, o2
 
@@ -101,7 +102,7 @@ proc touchAfterBinary(path: string) =
 
 proc refusal(): string =
   try:
-    discard freshRepoBinary(tree, "foo")
+    discard freshRepoBinary(tree, "foo-helper")
     ""
   except StaleHelperBinary as e:
     e.msg
@@ -109,12 +110,12 @@ proc refusal(): string =
 suite "a helper binary is used only when built from the tree under test":
   test "1: built from the tree as it is, it is returned":
     build()
-    check freshRepoBinary(tree, "foo") == binary
-    let deps = helperDependencies(tree, "foo")
+    check freshRepoBinary(tree, "foo-helper") == binary
+    let deps = helperDependencies(tree, "foo-helper")
     checkpoint deps.join("\n")
     for want in [lib, app, included, outside, csrc, header, blob, execInput]:
       check want in deps
-    let list = readFile(tree / "build" / "nimcache" / "foo" / "foo.deps")
+    let list = readFile(tree / "build" / "nimcache" / "foo-helper" / "foo-helper.deps")
     check list.startsWith("binary-sha256 ")
     check ("csource " & csrc) in list
     check ("header " & header) in list
@@ -186,7 +187,7 @@ suite "a helper binary is used only when built from the tree under test":
     let (o, c) = execCmdEx(quoteShellCommand(@["nim", "c", "--hints:off",
       "--warnings:off", "--path:" & tree / "libs" / "foolib" / "src",
       "--path:" & parentDir(outside),
-      "--nimcache:" & tree / "build" / "nimcache" / "foo",
+      "--nimcache:" & tree / "build" / "nimcache" / "foo-helper",
       "--out:" & binary, app]))
     doAssert c == 0, o
     let why = refusal()
@@ -198,14 +199,14 @@ suite "a helper binary is used only when built from the tree under test":
     build()
     check refusal() == ""
     let (o, c) = execCmdEx(quoteShellCommand(@["bash",
-      RepoRoot / "scripts" / "write_helper_deps.sh", "foo",
+      RepoRoot / "scripts" / "write_helper_deps.sh", "foo-helper",
       tree / "apps" / "foo" / "no_such_entry.nim"]), workingDir = tree)
     checkpoint o
     check c != 0
     check "has no dependency list" in refusal()
 
   test "7: no binary, or no dependency list, is refused":
-    removeFile(tree / "build" / "nimcache" / "foo" / "foo.deps")
+    removeFile(tree / "build" / "nimcache" / "foo-helper" / "foo-helper.deps")
     check "has no dependency list" in refusal()
     removeFile(binary)
     check "does not exist" in refusal()
