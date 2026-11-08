@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 34,
-    "nimTestBinaries": 2700,
+    "nimTestBinaries": 2702,
     "pureUnitConsolidationGroups": 79,
     "pureUnitTests": 742,
     "staticallyDetectedRuntimeCompilerFlowTests": 141,
-    "testEntries": 2741
+    "testEntries": 2743
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1562,7 +1562,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 22,
-      "integration": 1488,
+      "integration": 1490,
       "platform/destructive": 173,
       "pure unit": 742,
       "unclassified": 316
@@ -1773,9 +1773,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2700,
+    "nimTestBinaryCount": 2702,
     "pythonTestFileCount": 41,
-    "testEntryCount": 2741
+    "testEntryCount": 2743
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -8362,6 +8362,42 @@
       "source": "apps/repro-harvest-apt/tests/t_c2_signature.nim",
       "sourceSuiteCount": 5,
       "staticCaseCount": 13,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_dnf_gpg_home_fits_sun_path",
+      "class": "integration",
+      "classificationReason": "subprocess or repro CLI invocation in test body",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_harvest_dnf",
+        "repro_test_support"
+      ],
+      "owner": "apps",
+      "requiresReproBinary": false,
+      "source": "apps/repro-harvest-dnf/tests/t_dnf_gpg_home_fits_sun_path.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_pacman_gpg_home_fits_sun_path",
+      "class": "integration",
+      "classificationReason": "subprocess or repro CLI invocation in test body",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_harvest_pacman",
+        "repro_test_support"
+      ],
+      "owner": "apps",
+      "requiresReproBinary": false,
+      "source": "apps/repro-harvest-pacman/tests/t_pacman_gpg_home_fits_sun_path.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
