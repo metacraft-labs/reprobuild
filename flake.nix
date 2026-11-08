@@ -327,7 +327,12 @@
       # never published a monitored edge on macOS. A capture is now complete
       # when no recorded or marked descendant survives the root; one that does
       # survive is still a loss.
-      url = "github:metacraft-labs/io-mon/e66e05c9471ce184e9a3b0d793b2db62ca5557b9";
+      # Bumped e66e05c9 -> ac06360d (2026-11-08, io-mon `agents`): brings 23556a3,
+      # the exported dlsym answers dlsym(RTLD_NEXT) relative to its caller. Before it,
+      # an LD_PRELOAD hook library loaded after the monitor shim (an agent session's
+      # command-trace shim) got its own export back as the "next" definition and
+      # recursed until it crashed, so every monitored action failed silently.
+      url = "github:metacraft-labs/io-mon/ac06360d15be70aca46202d0ce04c5b17cba5ac1";
       flake = false;
     };
     nim-shm-gset-src = {

@@ -217,7 +217,11 @@ reprobuild-packages=b68b01d3a775709869b1f2ba5f7f70f01873f20c
 # monitored edge was ever published on macOS and the M23 benchmark's warm
 # no-op workload re-executed every action. Needs nim-stackable-hooks c1d55ce
 # (below). e05beda0 is an ancestor.
-io-mon=e66e05c9471ce184e9a3b0d793b2db62ca5557b9
+# Moved to ac06360d (2026-11-08), io-mon's `agents` tip: it carries 23556a3, which
+# answers dlsym(RTLD_NEXT) relative to the caller, so a hook library preloaded
+# after the monitor shim no longer finds itself and recurses. e66e05c9 is an
+# ancestor.
+io-mon=ac06360d15be70aca46202d0ce04c5b17cba5ac1
 # Must match `nim-stackable-hooks-src` in flake.nix. `release.yml` overrides
 # that input to THIS clone, so a divergent revision here silently substitutes a
 # different stackable_hooks for the one the flake pins. c6cf6ad, which stood
