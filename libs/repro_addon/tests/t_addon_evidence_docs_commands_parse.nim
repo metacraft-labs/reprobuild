@@ -57,6 +57,13 @@ proc commandLines(text: string): seq[string] =
       result.add(span)
     i = b + 1
 
+proc isSinkCommand(args: seq[string]): bool =
+  args.len >= 1 and args[0] == "repro-evidence-sink"
+
+proc isAddonCommand(args: seq[string]): bool =
+  args.len >= 4 and args[0] == "repro" and args[1] == "system" and
+    args[2] == "addon"
+
 proc sample(line: string): string =
   line.multiReplace(("<port>", "7443"), ("<address>", "10.0.0.5"),
                     ("<digest>", "ab"), ("<file>", "/tmp/x"),
@@ -66,7 +73,6 @@ proc sample(line: string): string =
 suite "the user guide's command lines parse":
   let text = readFile(Guide)
   let lines = commandLines(text)
-  var sinkLines, addonLines = 0
 
   test "every documented command parses, whole":
     for l in lines:
@@ -76,12 +82,9 @@ suite "the user guide's command lines parse":
       var ok = true
       var why = ""
       try:
-        if args[0] == "repro-evidence-sink":
-          inc sinkLines
+        if isSinkCommand(args):
           discard parseSinkCommand(args[1 .. ^1])
-        elif args.len >= 4 and args[0] == "repro" and args[1] == "system" and
-            args[2] == "addon":
-          inc addonLines
+        elif isAddonCommand(args):
           let rest = args[4 .. ^1]
           case args[3]
           of "preflight": discard parsePreflightArgs(rest)
@@ -107,5 +110,12 @@ suite "the user guide's command lines parse":
       check ("`" & verb & " --") notin text
 
   test "the check is not vacuous":
+    # Counted here, not by the parsing case: each case runs in a process of
+    # its own, so a count that case kept would read zero in this one.
+    var sinkLines, addonLines = 0
+    for l in lines:
+      let args = parseCmdLine(sample(l))
+      if isSinkCommand(args): inc sinkLines
+      elif isAddonCommand(args): inc addonLines
     check sinkLines >= 7
     check addonLines >= 7

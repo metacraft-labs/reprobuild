@@ -19,15 +19,20 @@ let root = getTempDir() / ("addon-enrol-" & $getCurrentProcessId())
 removeDir(root)
 createDir(root)
 
-suite "the evidence keys are created, never adopted":
-  let k = EvidenceKeyPaths(attestationKey: root / "agent" / "attestation.key",
-    attestationPub: root / "agent" / "attestation.pub",
-    credentialKey: root / "evidence" / "host-ca.key",
-    credentialCert: root / "evidence" / "host-ca.crt")
-  createDir(root / "agent")
-  createDir(root / "evidence")
+proc keyPaths(name: string): EvidenceKeyPaths =
+  ## A fresh key layout of its own for one case: each case runs in a process
+  ## of its own, so none may rely on keys another case created.
+  let dir = root / name
+  result = EvidenceKeyPaths(attestationKey: dir / "agent" / "attestation.key",
+    attestationPub: dir / "agent" / "attestation.pub",
+    credentialKey: dir / "evidence" / "host-ca.key",
+    credentialCert: dir / "evidence" / "host-ca.crt")
+  createDir(dir / "agent")
+  createDir(dir / "evidence")
 
+suite "the evidence keys are created, never adopted":
   test "a first creation makes all four, private where they must be":
+    let k = keyPaths("first")
     let keys = createEvidenceKeys(k)
     check keys.attestationPublicKeyHex.len == 130
     check keys.credentialHost.len == 64
@@ -36,14 +41,19 @@ suite "the evidence keys are created, never adopted":
       check (getFilePermissions(p) * {fpGroupRead, fpOthersRead}).len == 0
 
   test "a second creation is refused, naming what is there":
+    let k = keyPaths("second")
+    discard createEvidenceKeys(k)
     expect EvidenceKeysError:
       discard createEvidenceKeys(k)
     check existingEvidenceKeys(k).len == 4
 
   test "one key left over is enough to refuse":
+    let k = keyPaths("left-over")
+    discard createEvidenceKeys(k)
     removeFile(k.attestationPub)
     removeFile(k.credentialKey)
     removeFile(k.credentialCert)
+    check existingEvidenceKeys(k).len == 1
     expect EvidenceKeysError:
       discard createEvidenceKeys(k)
 

@@ -75,6 +75,10 @@ suite "the Evidence sink write credential is append-only":
     # The host announced its probe (``credential-probe``) before it: the
     # four refusals are that test's answer, not four alerts (A11 drill D9).
     # An unannounced probe still alerts (``t_addon_drill_findings``, D9).
+    # Each case runs in a process of its own, so this one makes its own
+    # announced probe rather than reading the one the case above made.
+    sink.enrol(a)
+    check credentialCheckOk(runCredentialCheck(a.site, a.conf, "host-a"))
     let r = runEvidenceCheck(CheckInputs(storeDir: sink.storeDir,
       hosts: @[EnrolledHost(hostId: a.credentialHost)], nowMs: 1))
     var probes = 0
