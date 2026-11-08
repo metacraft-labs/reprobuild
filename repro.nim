@@ -2853,7 +2853,16 @@ package reprobuild:
     # ``apps`` collection only, not in ``release``: a release build runs no
     # test and needs no list, and a build without one leaves the binary
     # refused by the tests, never accepted (the guard is fail-closed).
+    #
+    # strace is not a tool the graph provisions into an action's PATH, so
+    # the edge is given the host's strace by absolute path, found while the
+    # graph is built (as the Windows DLL staging below finds its sources).
+    # A host without strace gets no such edge: `repro build .#apps` then
+    # leaves the binary without a list, and the tests refuse it -- the
+    # guard stays fail-closed, it is never satisfied by an absent list.
+    let hostStrace = when defined(linux): uncontrolledFindExe("strace") else: ""
     when defined(linux):
+     if hostStrace.len > 0:
       var binaryCacheDepsArgs = @["bash", "scripts/write_helper_deps.sh",
         "repro-binary-cache", "apps/repro-binary-cache/repro_binary_cache.nim",
         "--define:release", "--define:ssl"]
@@ -2866,10 +2875,11 @@ package reprobuild:
                         "build/bin/repro-binary-cache"],
         extraOutputs = @[
           "build/nimcache/repro-binary-cache/repro-binary-cache.deps"],
-        extraEnv = sourceOnlyEnv,
+        extraEnv = sourceOnlyEnv & @[("REPRO_STRACE", hostStrace)],
         cacheable = false)
       appendRegisteredActionToolIdentityRefs(binaryCacheDeps.id,
-        ["bash", "nim", "strace", "python3", "rm", "mkdir", "cp", "basename"])
+        ["bash", "nim", "python3", "gcc", "rm", "mkdir", "cp", "basename",
+         "uname"])
       reprobuildAppsOnlyActions.add(binaryCacheDeps)
       discard target("repro-binary-cache-deps", binaryCacheDeps)
 

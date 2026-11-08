@@ -390,9 +390,12 @@ proc runTlsHandshakeSmokePass*(n: int = 4;
   ## caller can observe that the pass stopped its peers (the ports refuse
   ## a connection afterwards).
   when SimMutation == "sim-stop-in-finally":
-    # FALSIFYING BUILD: the peers stopped in a ``finally``, as before
-    # round 4.
+    # CONTROL BUILD (not a falsifier): the peers stopped in a ``finally``,
+    # as before round 4. It reports its ports like the product branch, so
+    # the test's observation of the stop applies to it too.
     let peers = await spawnLoopbackTlsPeers(n)
+    if listened != nil:
+      for peer in peers: listened[].add(Port(peer.server.actualPort))
     try:
       for i in 0 ..< n:
         await peers[i].client.start()
