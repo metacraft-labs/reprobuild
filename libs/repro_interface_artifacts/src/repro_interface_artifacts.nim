@@ -8104,6 +8104,33 @@ proc extractInterfaceFromModuleBody(modulePath, artifactPath,
       slot = acquireInterfaceNimcacheSlot(
         interfaceExtractionNimcacheRoot() / key)
       slot.dir
+  # The recipe's sibling-import shims (`usesImportCode`) go to a directory
+  # this computation owns, named by selector alone: Hermetic-Builds-And-Path-
+  # Independence.md §"Per-computation output directories". Under the
+  # recipe-relative edge that is the scratch tree of the identity's staging
+  # directory -- the same path for every copy of the recipe, emptied under the
+  # identity lock before each run, and an ignored input prefix of the edge.
+  # The shims' only content is the absolute path of a sibling the compile
+  # then reads, and that read is recorded relative to the recipe. Left in the
+  # shared temporary directory, keyed by the consumer's absolute path, they
+  # were recorded inputs that named the consumer's location, so another copy
+  # of the recipe, or the same one after the temporary directory was wiped,
+  # could never hit. Only the recipe-relative child sets it: it is the only
+  # caller that runs alone in its process and owns its scratch exclusively.
+  let shimDirOverride = recipeRelative
+  let priorShimDir = getEnv(SiblingShimDirEnv)
+  let hadPriorShimDir = existsEnv(SiblingShimDirEnv)
+  if shimDirOverride:
+    let shimDir = absolutePath(buildScratchRoot(workDir, scratchDir)) /
+      "sibling-shims"
+    if dirExists(extendedPath(shimDir)):
+      removeDir(extendedPath(shimDir))
+    createDir(extendedPath(shimDir))
+    putEnv(SiblingShimDirEnv, shimDir)
+  defer:
+    if shimDirOverride:
+      if hadPriorShimDir: putEnv(SiblingShimDirEnv, priorShimDir)
+      else: delEnv(SiblingShimDirEnv)
   var compileExecution: ProviderCompileExecutionResult
   try:
     let runnerPath = runnerDir / runnerName
