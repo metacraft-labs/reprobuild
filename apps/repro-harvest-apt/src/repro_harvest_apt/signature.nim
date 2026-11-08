@@ -58,6 +58,9 @@ import std/[os, osproc, strtabs, strutils, tempfiles, times]
 
 import blake3
 
+when defined(posix):
+  from repro_core/paths import unixSocketPathFits
+
 type
   SignatureBackend* = enum
     sbExternalGpg = "external-gpg"
@@ -305,20 +308,39 @@ proc gpgStatusVerdict*(statusOutput: string): GpgStatusVerdict =
     result.good = true
     result.signerKeyId = validSig
 
+const GpgLongestSocketName = "S.gpg-agent.browser"
+  ## The longest socket name gpg-agent binds in its socket directory.
+
+proc gpgTempHome(): string =
+  ## A fresh, owner-only ephemeral GNUPGHOME whose agent sockets fit
+  ## ``sun_path``. Even ``gpg --import`` of public keys starts gpg-agent.
+  ## On an account with no ``/run/user/<uid>`` (a service or CI runner's
+  ## system user) the agent binds its sockets in GNUPGHOME itself, and a
+  ## GNUPGHOME under a deep TMPDIR makes those paths too long: the agent
+  ## exits and every gpg call fails with "can't connect to the gpg-agent".
+  ## Such a home is made directly under ``/tmp`` instead.
+  result = createTempDir("apt-harvest-gpg-", "")
+  when defined(posix):
+    if not unixSocketPathFits(result / GpgLongestSocketName):
+      removeDir(result)
+      result = createTempDir("rgpg-", "", "/tmp")
+  # gpg warns about a GNUPGHOME others can read; on Windows the default
+  # ACL is fine for our purposes.
+  when defined(posix):
+    setFilePermissions(result, {fpUserRead, fpUserWrite, fpUserExec})
+
 proc verifyViaExternalGpg*(inRelease: string; keyBundleDir: string;
                            gpgBin: string): InReleaseVerification =
   ## Shell-out backend.
   ## Steps:
-  ##   1. Create an ephemeral GNUPGHOME under a TMP directory.
+  ##   1. Create an ephemeral GNUPGHOME (``gpgTempHome``).
   ##   2. ``gpg --import`` every ``*.gpg`` blob from the key bundle.
   ##   3. ``gpg --verify`` the InRelease bytes (read from a temp file).
   ##   4. Parse the result; on success, slice out the signed payload.
-  let tmpHome = createTempDir("apt-harvest-gpg-", "")
+  let tmpHome = gpgTempHome()
   defer:
     try: removeDir(tmpHome)
     except: discard
-  # Restrict perms (gpg complains if GNUPGHOME is world-readable, but
-  # on Windows the default ACL is fine for our purposes).
   let gpgEnv = newStringTable()
   gpgEnv["GNUPGHOME"] = tmpHome
   # Import keys.

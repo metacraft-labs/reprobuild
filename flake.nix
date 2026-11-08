@@ -2906,6 +2906,25 @@
               #     all.
               pkgs.OVMF.fd
               pkgs.swtpm
+              # Host tools that unit gates drive for real and that a CI
+              # runner's service PATH does not carry (a developer's NixOS
+              # PATH usually does, which is how their absence went unseen):
+              #
+              #   * ``ip`` and ``nft`` -- the add-on egress observer's table
+              #     is loaded into a private network namespace and read back
+              #     (libs/repro_addon/tests/t_addon_egress_observer.nim).
+              #   * ``llvm-objcopy`` -- the installed prefix strips bundled
+              #     libraries with it (``LlvmObjcopyDebugStrip``; repro.nim
+              #     declares it for ``.#prefix``), and
+              #     t_installed_prefix_assembly_is_recorded runs that strip
+              #     and fails a gate run without it. Only that one binary:
+              #     the rest of ``pkgs.llvm``'s bin/ is not wanted on PATH.
+              pkgs.iproute2
+              pkgs.nftables
+              (pkgs.runCommand "llvm-objcopy" { } ''
+                mkdir -p $out/bin
+                ln -s ${pkgs.llvm}/bin/llvm-objcopy $out/bin/llvm-objcopy
+              '')
             ];
             shellHook = siblingCheckoutSourcesHook + ''
               # Consumers may borrow this toolchain with `nix develop PATH`.

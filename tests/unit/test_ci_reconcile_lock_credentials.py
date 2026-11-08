@@ -358,10 +358,17 @@ class GitconfigScopeTests(ScriptCase):
         return out, result
 
     def header_for(self, config: Path, url: str) -> str | None:
+        # Read from the scratch directory with discovery stopped there, so
+        # only the rendered file answers. From the checkout, git would also
+        # read its `.git/config`, and on a CI runner `actions/checkout` has
+        # persisted a github.com-wide `http.<url>.extraheader` there, which
+        # matches every URL this test expects to get nothing.
+        env = isolated_git_env(self.base, str(config))
+        env["GIT_CEILING_DIRECTORIES"] = str(self.base.parent)
         result = subprocess.run(
             ["git", "config", "--get-urlmatch", "http.extraHeader", url],
             capture_output=True, text=True, check=False,
-            env=isolated_git_env(self.base, str(config)),
+            cwd=self.base, env=env,
         )
         # 1 is git's "no value matched"; anything else is a real error.
         self.assertIn(result.returncode, (0, 1), result.stderr)
