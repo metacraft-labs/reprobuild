@@ -2930,8 +2930,15 @@
               #     t_installed_prefix_assembly_is_recorded runs that strip
               #     and fails a gate run without it. Only that one binary:
               #     the rest of ``pkgs.llvm``'s bin/ is not wanted on PATH.
+              #   * ``strace`` -- scripts/write_helper_deps.sh traces each
+              #     helper's compile to list its staticRead inputs and C
+              #     headers, and writes no list without it, so `just build`
+              #     fails and the tests refuse the helper binaries. Its
+              #     `nix build nixpkgs#strace` fallback is not a substitute
+              #     on CI: Test and Lint both stopped there.
               pkgs.iproute2
               pkgs.nftables
+              pkgs.strace
               (pkgs.runCommand "llvm-objcopy" { } ''
                 mkdir -p $out/bin
                 ln -s ${pkgs.llvm}/bin/llvm-objcopy $out/bin/llvm-objcopy
