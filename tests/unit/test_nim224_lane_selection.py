@@ -7,8 +7,9 @@ The real script runs with ``NIM224_LANE_SELECT_ONLY=1``, which stops it
 after the selection, before it resolves Nim or builds anything.
 
 Falsifier: ``NIM224_LANE_MUTATION=unknown-suite-runs-nothing`` (the
-selection as before round 5) turns the two refusal cases red; run them with
-``A11_LANE_FALSIFIER=1``.
+selection as before round 5) turns the three refusal cases red; run them
+with ``A11_LANE_FALSIFIER=1``. The empty-selection case needs no such
+variable to reach its refusal (round 6).
 
 Mocks: none -- the real script; only its build half is not reached.
 """
@@ -39,6 +40,14 @@ class LaneSelection(unittest.TestCase):
         r = lane("t_addon_review_round4", "t_addon_reveiw_round5")
         self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
         self.assertIn("'t_addon_reveiw_round5' is not a lane suite", r.stderr)
+
+    def test_an_empty_selection_is_refused(self):
+        # Reachable without the falsifier variable: arguments that are all
+        # empty select nothing.
+        r = lane("")
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+        self.assertIn("no suite selected; nothing would run", r.stderr)
+        self.assertNotIn("green", r.stdout)
 
     def test_a_known_suite_is_selected(self):
         r = lane("t_sim_tls_smoke_pass_stops_its_peers")

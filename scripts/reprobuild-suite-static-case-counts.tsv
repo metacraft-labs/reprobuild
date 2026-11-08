@@ -77,7 +77,7 @@ libs/repro_addon/tests/t_addon_review_findings.nim	nim	16
 libs/repro_addon/tests/t_addon_review_round2.nim	nim	9
 libs/repro_addon/tests/t_addon_review_round3.nim	nim	8
 libs/repro_addon/tests/t_addon_review_round4.nim	nim	6
-libs/repro_addon/tests/t_addon_review_round5.nim	nim	2
+libs/repro_addon/tests/t_addon_review_round5.nim	nim	3
 libs/repro_addon/tests/t_addon_secret_declarations.nim	nim	5
 libs/repro_addon/tests/t_addon_secret_files_created_private_and_never_through_symlinks.nim	nim	6
 libs/repro_addon/tests/t_addon_secrets_envelopes_and_rotation.nim	nim	13
@@ -943,7 +943,7 @@ libs/repro_system_apply/tests/t_b1_dsl_lowering.nim	nim	10
 libs/repro_system_apply/tests/t_b1_dsl_parse.nim	nim	12
 libs/repro_system_apply/tests/t_b2_pipeline.nim	nim	15
 libs/repro_system_rollback/tests/t_b3_rollback_unit.nim	nim	14
-libs/repro_test_support/tests/t_fresh_helper_binary_refuses_a_stale_build.nim	nim	7
+libs/repro_test_support/tests/t_fresh_helper_binary_refuses_a_stale_build.nim	nim	12
 libs/repro_test_support/tests/t_home_apply_guard.nim	nim	9
 libs/repro_tool_profiles/tests/t_a_declared_alias_is_never_served_from_a_prefix_without_it.nim	nim	1
 libs/repro_tool_profiles/tests/t_a_symlinked_declared_executable_is_not_reported_missing.nim	nim	4
@@ -2725,7 +2725,7 @@ tests/unit/test_hcr_replay_gate_ct_mcr_fixture_edge.py	python	13
 tests/unit/test_hcr_replay_gate_monitor_policy.py	python	2
 tests/unit/test_install_nix_paths.py	python	14
 tests/unit/test_lint_gate_ordering.py	python	4
-tests/unit/test_nim224_lane_selection.py	python	4
+tests/unit/test_nim224_lane_selection.py	python	5
 tests/unit/test_nix_daemon_descriptors.py	python	7
 tests/unit/test_nix_daemon_expression_file_is_never_cached.py	python	4
 tests/unit/test_nix_daemon_request_requires_workspace_root.py	python	4

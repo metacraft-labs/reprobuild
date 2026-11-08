@@ -265,9 +265,12 @@ repro system addon verify-discard-record \
   --key <key>
 ```
 
-It exits 0 and lists the objects only when the signature is over the
-file's exact bytes and by that key. A changed byte, another key or an
-empty signature is refused.
+`--key` is required: without it the command refuses with a usage error
+(exit 2), because a signature that matches only the key the record names
+itself proves nothing about who wrote the record. It exits 0 and lists
+the objects only when the signature is over the file's exact bytes and
+by the key you gave. A changed byte, another key or an empty signature
+is refused (exit 1).
 
 A host bootstrapped by an older release is brought up to date by its
 first switch, or at once with

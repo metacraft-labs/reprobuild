@@ -65,7 +65,8 @@
 ## (step 5: the unacknowledged discard goes ahead), ``override-unrecorded``
 ## (step 5: the override writes and prints no record),
 ## ``override-signs-other-bytes`` and ``override-empty-signature`` (step 5:
-## ``verify-discard-record`` refuses the record).
+## ``verify-discard-record`` refuses the record), ``verify-accepts-missing-key``
+## (step 5: it verifies without ``--key``).
 ##
 ## Opt-in: ``REPRO_ADDON_VM_GATES=1``.
 ##
@@ -358,13 +359,20 @@ proc body(g: Guest; repro: string; step: StepFn; record: JsonNode;
   let verify = g.exec(repro & " system addon verify-discard-record " &
     quoteShell(recordPath) & " --key " & quoteShell(bs.attestationKey))
   record["overrideVerify"] = %(verify.stdout & verify.stderr)
+  # Without --key nothing is verified: a usage error (decision 64, amended
+  # round 6).
+  let keyless = g.exec(repro & " system addon verify-discard-record " &
+    quoteShell(recordPath))
+  record["overrideVerifyWithoutKey"] = %(keyless.stdout & keyless.stderr)
   let signed = bs.attestationKey.len > 0 and verify.exitCode == 0 and
-    ("  " & aside2) in verify.stdout
+    ("  " & aside2) in verify.stdout and keyless.exitCode == 2 and
+    "verified" notin keyless.stdout
   record["overrideRecord"] = %kept
   step("the record names the object discarded unshipped, stays after " &
        "uninstall, and verify-discard-record accepts its signature with the " &
-       "enrolled key (decisions 62, 64)", signed,
-       kept & "\n" & verify.stdout & verify.stderr)
+       "enrolled key and refuses to verify without one (decisions 62, 64)",
+       signed, kept & "\n" & verify.stdout & verify.stderr & "\n" &
+       keyless.stdout & keyless.stderr)
   step("the evidence directory is gone with the state",
        g.exec("test -e " & Evidence).exitCode != 0, "")
 

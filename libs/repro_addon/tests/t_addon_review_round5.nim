@@ -12,15 +12,20 @@
 ## (The record's signature, checked through ``repro system addon
 ## verify-discard-record``, is ``t_addon_review_round4`` case 3.)
 ##
+## 3. (round 6) When only the signature's write fails, uninstall refuses,
+##    discards nothing, and leaves no record of the discard: the signature
+##    is written first and the record last.
+##
 ## Falsifying builds (each turns its own case red):
-## ``override-keyless-unsigned`` (1), ``override-write-error-swallowed`` (2).
+## ``override-keyless-unsigned`` (1), ``override-write-error-swallowed`` (2),
+## ``override-sig-write-error-swallowed`` (3).
 ##
 ## Mocks: ``ship`` is a stub answering "not acknowledged" -- the sink's
 ## refusal to acknowledge is held against a real sink by
 ## ``t_addon_review_round4`` case 2; what these cases hold is what the gate
 ## does after it. Nothing else.
 
-import std/[os, sequtils, strutils, unittest]
+import std/[os, sequtils, strutils, times, unittest]
 
 import repro_addon/attestation
 import repro_addon/evidence as addonEvidence
@@ -83,5 +88,32 @@ suite "the A11 code review's fifth round":
     check g.overrideRecord.len == 0
     check fileExists(logDir)
     check dirExists(aside)
+
+  test "3: a failed signature write stops the discard and leaves no record":
+    let key = root / "sigfail" / "agent" / "attestation.key"
+    createDir(parentDir(key))
+    discard ensureAttestationKey(key)
+    let site = scratchSite("sigfail", key)
+    let aside = leaveAside(site, "1-a")
+    let logDir = root / "sigfail" / "log"
+    createDir(logDir)
+    # A directory where the signature of each record the next seconds could
+    # write goes: only that write fails.
+    let t0 = getTime()
+    for s in 0 .. 20:
+      createDir(logDir / ("uninstall-" &
+        (t0 + initDuration(seconds = s)).utc.format("yyyyMMdd'T'HHmmss'Z'") &
+        "-discarded-unshipped.json" & DiscardRecordSigExt))
+    let g = storeEvidenceGate(site, override, notAcknowledged,
+                              overrideDir = logDir)
+    checkpoint g.errors.join("\n")
+    check g.errors.anyIt("could not be written" in it)
+    check g.errors.anyIt(it == "nothing was removed")
+    check g.overrideRecord.len == 0
+    check dirExists(aside)
+    var records = 0
+    for kind, p in walkDir(logDir):
+      if kind == pcFile and p.endsWith("-discarded-unshipped.json"): inc records
+    check records == 0
 
 removeDir(root)

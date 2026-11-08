@@ -50,6 +50,10 @@ suites=(
 if [ "$#" -gt 0 ]; then
   selected=()
   for t in "$@"; do
+    # An empty argument (an unset variable, `just test-nim224 ''`) names no
+    # suite; if every argument is empty the selection is empty and refused
+    # below.
+    [ -z "$t" ] && continue
     found=0
     for s in "${suites[@]}"; do
       if [ "$(basename "$s" .nim)" = "$t" ]; then

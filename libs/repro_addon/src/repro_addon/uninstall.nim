@@ -304,15 +304,33 @@ proc writeOverrideRecord(custody: CustodySite; dir: string;
   setFilePermissions(dir, {fpUserRead, fpUserWrite, fpUserExec})
   result.path = dir / ("uninstall-" & t.utc.format("yyyyMMdd'T'HHmmss'Z'") &
                        "-discarded-unshipped.json")
-  writeFileAtomic(result.path, result.text, 0o600)
-  writeFileAtomic(result.path & DiscardRecordSigExt, signature & "\n", 0o600)
+  # The signature goes first and the record last, so a record exists only
+  # with its signature beside it: a failed write of either leaves no
+  # record of a discard that does not happen (round 6). A record write
+  # that fails after the signature was written removes the signature.
+  try:
+    writeFileAtomic(result.path & DiscardRecordSigExt, signature & "\n", 0o600)
+  except CatchableError:
+    when not mutated("override-sig-write-error-swallowed"):
+      raise
+  try:
+    writeFileAtomic(result.path, result.text, 0o600)
+  except CatchableError:
+    try: removeFile(result.path & DiscardRecordSigExt) except OSError: discard
+    raise
 
-proc verifyDiscardRecord*(path: string; expectedKeyHex = ""):
+proc verifyDiscardRecord*(path: string; expectedKeyHex: string):
     tuple[ok: bool; why, keyHex: string; objects: seq[string]] =
-  ## §13 decision 64: whether the record at ``path`` is signed, over
-  ## exactly the bytes the file holds, by the key it names -- and, when
-  ## ``expectedKeyHex`` is given (the host's enrolled attestation key, from
-  ## the sink's hosts file), by that key. Reads ``<path>.sig``.
+  ## §13 decision 64 (amended round 6): whether the record at ``path`` is
+  ## signed, over exactly the bytes the file holds, by ``expectedKeyHex``
+  ## -- the host's enrolled attestation key, which the caller must give. A
+  ## signature that matches only the key the record itself names proves
+  ## nothing about who wrote it, so without an expected key nothing is
+  ## verified. Reads ``<path>.sig``.
+  when not mutated("verify-accepts-missing-key"):
+    if expectedKeyHex.len == 0:
+      return (false, "no expected key: give the host's enrolled attestation " &
+        "key with --key", "", @[])
   let text = try: readFile(path)
              except IOError as e: return (false, "cannot read " & path & ": " & e.msg, "", @[])
   let sig = try: readFile(path & DiscardRecordSigExt).strip()

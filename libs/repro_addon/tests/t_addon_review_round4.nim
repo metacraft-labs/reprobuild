@@ -23,7 +23,8 @@
 ##
 ## Falsifying builds (each turns its own case red): ``allow-source-field``
 ## (1), ``uninstall-skips-ack-refusal`` (2), ``override-unrecorded``,
-## ``override-signs-other-bytes`` and ``override-empty-signature`` (3; the
+## ``override-signs-other-bytes``, ``override-empty-signature`` and
+## ``verify-accepts-missing-key`` (3; the
 ## record is checked through ``repro system addon verify-discard-record``,
 ## §13 decision 64),
 ## ``seq-zero-sentinel`` (4, 5), ``containment-skew-ignored`` (6).
@@ -150,6 +151,10 @@ suite "the A11 code review's fourth round":
     # enrolled key, over exactly the bytes the file holds.
     check runAddonCli(@["verify-discard-record", g.overrideRecord,
                         "--key", pub]) == 0
+    # Without --key nothing is verified: a usage error (decision 64,
+    # amended round 6; falsifier verify-accepts-missing-key).
+    check runAddonCli(@["verify-discard-record", g.overrideRecord]) == 2
+    check not verifyDiscardRecord(g.overrideRecord, "").ok
     # Another key, or one byte changed, does not verify.
     check runAddonCli(@["verify-discard-record", g.overrideRecord,
                         "--key", "04" & "ab".repeat(64)]) == 1

@@ -5,25 +5,39 @@
 ## (reprobuild-pm issue 2026-11-08-nim224-lane-reports-green-for-an-
 ## unknown-suite-and-does-not-hold-the-simulator).
 ##
-## No falsifier can be red here, and that is a finding, not a gap. The
-## build ``sim-stop-in-finally`` puts back the round-4 code exactly (the
-## peers stopped by ``await``s in a ``finally``), and it is GREEN under Nim
-## 2.2.4 as well. That ``finally`` is left only by falling off the end or
-## by an exception, never by a ``return``, and Nim 2.2.4's "yielded nil"
-## defect needs a ``return`` that leaves through a ``finally`` holding a
-## ``try: await ... except``. The round-4 change was therefore not a fix
-## for 2.2.4. It is kept so that no such ``finally`` is left to gain a
-## ``return`` later, and this suite and the build stay in the lane as the
-## control that shows it.
+## After the pass returns, every peer's server port refuses a connection:
+## the pass stopped its peers. (Whether the dispatcher is idle afterwards
+## is not checked: the peer-cache client leaves timers behind even when
+## stopped, so that check fails with the stops in place.)
 ##
+## Falsifying build: ``sim-skips-stop`` (the pass never stops its peers:
+## their ports still accept, red). The build ``sim-stop-in-finally`` puts
+## back the round-4 code exactly, with the stops awaited in a ``finally``.
+## It is a CONTROL and stays green under Nim 2.2.4 too, because that
+## ``finally`` is never left by a ``return``, which Nim 2.2.4's "yielded
+## nil" defect needs.
+
 ## Mocks: none -- real loopback peers over BearSSL TLS.
 
-import std/[asyncdispatch, unittest]
+import std/[asyncdispatch, net, unittest]
 
 import repro_peer_cache/sim
 
+proc refuses(port: Port): bool =
+  ## A TCP connection to ``port`` on loopback is refused.
+  let sock = newSocket()
+  defer: sock.close()
+  try:
+    sock.connect("127.0.0.1", port, timeout = 2000)
+    false
+  except OSError, TimeoutError:
+    true
+
 suite "the simulator's TLS smoke pass":
   test "three loopback peers settle, then stop":
-    check waitFor runTlsHandshakeSmokePass(3)
-    # Stopped: a second pass on fresh peers settles as well.
-    check waitFor runTlsHandshakeSmokePass(2)
+    let ports = new(seq[Port])
+    check waitFor runTlsHandshakeSmokePass(3, ports)
+    check ports[].len == 3
+    for p in ports[]:
+      checkpoint "port " & $p
+      check refuses(p)

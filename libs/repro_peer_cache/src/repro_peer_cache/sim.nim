@@ -380,11 +380,15 @@ proc spawnSimFleet*(specs: seq[SimPeerSpec];
 const SimMutation {.strdefine: "reproAddonMutation".} = ""
   ## A falsifying build's name (``repro_addon/mutations``); "" otherwise.
 
-proc runTlsHandshakeSmokePass*(n: int = 4): Future[bool] {.async.} =
+proc runTlsHandshakeSmokePass*(n: int = 4;
+                               listened: ref seq[Port] = nil): Future[bool] {.async.} =
   ## Spawns `n` loopback peers with real BearSSL TLS wrap and waits
   ## for the handshake-driven membership to fill in. Returns `true`
   ## iff every peer has reached the same-tenant view (`n - 1` peers).
   ## Used by the demonstration driver when `--tls-enabled=true`.
+  ## ``listened``, when given, receives each peer's server port, so a
+  ## caller can observe that the pass stopped its peers (the ports refuse
+  ## a connection afterwards).
   when SimMutation == "sim-stop-in-finally":
     # FALSIFYING BUILD: the peers stopped in a ``finally``, as before
     # round 4.
@@ -442,10 +446,13 @@ proc runTlsHandshakeSmokePass*(n: int = 4): Future[bool] {.async.} =
       result = settled
     except CatchableError as e:
       failure = e
-    for i in 0 ..< n:
-      try: await peers[i].client.stop() except CatchableError: discard
-    for peer in peers:
-      peer.server.stop()
+    if listened != nil:
+      for peer in peers: listened[].add(Port(peer.server.actualPort))
+    when SimMutation != "sim-skips-stop":
+      for i in 0 ..< n:
+        try: await peers[i].client.stop() except CatchableError: discard
+      for peer in peers:
+        peer.server.stop()
     if failure != nil: raise failure
 
 # ---------------------------------------------------------------------------

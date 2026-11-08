@@ -829,6 +829,22 @@
 ## ``fresh-skips-outside-tree``               fresh_binary ignores modules
 ##                                            from outside the tree
 ##                                            (decision 65)
+## ``fresh-skips-c-sources``                  fresh_binary ignores the C files
+##                                            compiled with {.compile.}
+##                                            (decision 65, round 6)
+## ``fresh-skips-headers``                    fresh_binary ignores the headers
+##                                            those C files include
+## ``fresh-skips-static-reads``               fresh_binary ignores staticRead
+##                                            and staticExec inputs
+## ``fresh-ignores-list-binary``              fresh_binary accepts a list
+##                                            written for another binary
+## ``override-sig-write-error-swallowed``     a failed signature write does
+##                                            not stop the discard (round 6)
+## ``verify-accepts-missing-key``             verify-discard-record verifies
+##                                            without --key (round 6)
+## ``sim-skips-stop``                         the simulator's TLS smoke pass
+##                                            never stops its peers
+##                                            (round 6)
 ## ``stale-helper-accepted``                  a test's helper binary is used
 ##                                            however old it is
 ##                                            (``repro_test_support/
@@ -1324,7 +1340,12 @@ const
                           "override-keyless-unsigned",
                           "override-write-error-swallowed",
                           "sim-stop-in-finally", "fresh-skips-included",
-                          "fresh-skips-outside-tree"]
+                          "fresh-skips-outside-tree",
+                          "fresh-skips-c-sources", "fresh-skips-headers",
+                          "fresh-skips-static-reads",
+                          "fresh-ignores-list-binary",
+                          "override-sig-write-error-swallowed",
+                          "verify-accepts-missing-key", "sim-skips-stop"]
 
 when AddonMutation.len > 0 and AddonMutation notin KnownAddonMutations and
     AddonMutation notin KnownAgentMutations:

@@ -2823,7 +2823,7 @@ package reprobuild:
     # ``--define:ssl``. The ``nim.c`` alias adds portable OpenSSL linker names
     # and records the ``openssl`` tool identity ref, whose resolved library
     # channels supply the platform-specific search path.
-    reprobuildAppsActions.add(nim.c(
+    let binaryCacheBuild = nim.c(
       source = "apps/repro-binary-cache/repro_binary_cache.nim",
       binary = "build/bin/repro-binary-cache",
       defines = @["release", "ssl"],
@@ -2831,7 +2831,37 @@ package reprobuild:
       extraEnv = sourceOnlyEnv,
       nimcache = "build/nimcache/repro-binary-cache",
       runInSourceDir = true,
-      actionId = "reprobuild.apps.repro-binary-cache"))
+      actionId = "reprobuild.apps.repro-binary-cache")
+    reprobuildAppsActions.add(binaryCacheBuild)
+    # The binary cache is a helper tests run from build/bin
+    # (tests/e2e/addon/cache_e2e_support.nim), checked by
+    # repro_test_support/fresh_binary against the dependency list
+    # scripts/write_helper_deps.sh writes. Every path that builds it writes
+    # that list (ReproOS Add-On Mode spec §13 decision 65, amended round 6):
+    # scripts/build_apps.sh does, and this edge does for `repro build
+    # .#apps`. It runs the compiler's front end with the binary's defines
+    # and paths, under strace, and records the binary's sha256, so the list
+    # is tied to the binary this graph produced. Not cacheable: its output
+    # describes a file it reads (the binary) by digest, and it must run
+    # whenever that binary was rebuilt.
+    var binaryCacheDepsArgs = @["bash", "scripts/write_helper_deps.sh",
+      "repro-binary-cache", "apps/repro-binary-cache/repro_binary_cache.nim",
+      "--define:release", "--define:ssl"]
+    for p in sourceOnlyNimPaths: binaryCacheDepsArgs.add("--path:" & p)
+    let binaryCacheDeps = shell(
+      command = quoteShellCommand(binaryCacheDepsArgs),
+      actionId = "reprobuild.apps.repro-binary-cache.deps",
+      after = @[binaryCacheBuild],
+      extraInputs = @["scripts/write_helper_deps.sh",
+                      "build/bin/repro-binary-cache"],
+      extraOutputs = @[
+        "build/nimcache/repro-binary-cache/repro-binary-cache.deps"],
+      extraEnv = sourceOnlyEnv,
+      cacheable = false)
+    appendRegisteredActionToolIdentityRefs(binaryCacheDeps.id,
+      ["bash", "nim", "strace", "python3", "rm", "mkdir", "cp", "basename"])
+    reprobuildAppsActions.add(binaryCacheDeps)
+    discard target("repro-binary-cache-deps", binaryCacheDeps)
 
     reprobuildAppsActions.add(nim.c(
       source =

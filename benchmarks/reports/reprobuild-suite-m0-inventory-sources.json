@@ -2544,14 +2544,33 @@
             "app",
             "binary",
             "flags",
+            "outside",
             "tree"
           ],
-          "line": 61,
+          "line": 87,
           "path": "libs/repro_test_support/tests/t_fresh_helper_binary_refuses_a_stale_build.nim",
           "patterns": [
             "nim-argv"
           ],
           "snippet": "let (o1, c1) = execCmdEx(quoteShellCommand(@[\"nim\", \"c\", \"--hints:off\","
+        },
+        {
+          "assignedCommandVariable": "",
+          "commandVariableExecuted": false,
+          "directExecutionLine": true,
+          "executedVariables": [
+            "app",
+            "binary",
+            "flags",
+            "outside",
+            "tree"
+          ],
+          "line": 186,
+          "path": "libs/repro_test_support/tests/t_fresh_helper_binary_refuses_a_stale_build.nim",
+          "patterns": [
+            "nim-argv"
+          ],
+          "snippet": "let (o, c) = execCmdEx(quoteShellCommand(@[\"nim\", \"c\", \"--hints:off\","
         }
       ],
       "source": "libs/repro_test_support/tests/t_fresh_helper_binary_refuses_a_stale_build.nim"
@@ -9478,7 +9497,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_addon/tests/t_addon_review_round5.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 2,
+      "staticCaseCount": 3,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -25665,7 +25684,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_test_support/tests/t_fresh_helper_binary_refuses_a_stale_build.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 7,
+      "staticCaseCount": 12,
       "staticallyDetectedRuntimeCompilerFlow": true,
       "targetOs": "soAny"
     },
@@ -57291,7 +57310,7 @@
       "requiresReproBinary": false,
       "source": "tests/unit/test_nim224_lane_selection.py",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 4,
+      "staticCaseCount": 5,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
