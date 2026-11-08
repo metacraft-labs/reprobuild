@@ -167,14 +167,14 @@ suite "round 9, finding 1 (§13 decision 57): never an existing tree":
   test "the unit's own existing directory is allowed: recorded for it":
     # Round 10 (§13 decision 67): recorded for this unit and still that
     # directory; ownership alone no longer counts (t_addon_floor_round10).
-    let here: PathIdentity = (true, 1'u64, 2'u64)
+    let here: PathIdentity = (true, 1'u64, 2'u64, 3'i64)
     var e = goodInput()
     e.show["RuntimeDirectory"] = "a"
     e.inspectPath = existing(["/run/a"])
     e.pathIdentity = proc (p: string): PathIdentity = here
-    e.createdDirs = {"/run/a": CreatedDir(unit: "a.service", dev: 1, ino: 2)}.toTable
+    e.createdDirs = {"/run/a": CreatedDir(unit: "a.service", dev: 1, ino: 2, btime: 3)}.toTable
     check "[rule:existing-tree" notin problemsOf(e)
-    e.createdDirs = {"/run/a": CreatedDir(unit: "b.service", dev: 1, ino: 2)}.toTable
+    e.createdDirs = {"/run/a": CreatedDir(unit: "b.service", dev: 1, ino: 2, btime: 3)}.toTable
     check "it exists and was not created for this unit" in problemsOf(e)
   test "a tree installed after the first apply is refused at the next":
     let state = createTempDir("a9r9-", "-state")

@@ -1224,6 +1224,31 @@ const
                           "migration-any-path",
                           "corrupt-record-as-absent",
                           "migration-any-unit",
+                          # A9 review round 11 (§13 decisions 76-78):
+                          # the birth time left out of a directory's
+                          # identity; condition 3 read from ownership or
+                          # ctime; a template's instances not sharing; an
+                          # acceptance or a migration made unlogged; a
+                          # migration over a generation an engine with
+                          # the record wrote; one reading systemd's view;
+                          # a no-op try-restart recorded as a start; an
+                          # activator's listener named for the socket, or
+                          # one named after a base tree, or one on an
+                          # existing path.
+                          "identity-without-btime",
+                          "recreated-by-ctime-or-owner",
+                          "instances-not-shared",
+                          "unlogged-acceptance",
+                          "unlogged-migration",
+                          "migration-ignores-engine",
+                          "migration-reads-systemd",
+                          "record-after-noop-restart",
+                          "listener-named-for-socket",
+                          "base-tree-activators-allowed",
+                          "existing-listeners-allowed",
+                          # a unit a dependency started during the
+                          # switch never recorded.
+                          "dependency-starts-unrecorded",
                           # A13: a state backup or restore runs while a
                           # unit of the set may run.
                           "state-units-not-checked",

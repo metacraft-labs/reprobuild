@@ -674,55 +674,147 @@ proc firstComponentPaths*(show: ShowProps): seq[tuple[key, path: string]] =
                     t[c + 1 .. ^1].split('/')[0])))
 
 type
-  PathIdentity* = tuple[exists: bool; dev, ino: uint64]
-    ## A path's identity as ``lstat`` reports it: the device and the inode
-    ## (a directory removed and made again at the same path is another).
+  PathIdentity* = tuple[exists: bool; dev, ino: uint64; btime: int64]
+    ## A path's identity (``statx(2)``, not following a final link): its
+    ## device, inode and birth time in nanoseconds since the epoch (§13
+    ## decision 76). A file system reuses a freed inode number at once
+    ## (ext4 does), so device and inode alone do not tell a directory from
+    ## the next one made at the same path; the birth time does. ``btime``
+    ## is 0 where the file system reports none, and such a path never
+    ## matches a record (fail closed).
   CreatedDir* = object
-    ## One entry of ``floor-created-dirs`` (§13 decision 68): the directory
-    ## the start of ``unit`` created, with the identity it had then and the
-    ## unit's ``InvocationID`` at that start (decision 71).
+    ## One entry of ``floor-created-dirs`` (§13 decisions 68 and 76): the
+    ## directory the start of ``unit`` created, with the identity it had
+    ## then and the unit's ``InvocationID`` at that start (decision 71).
     unit*: string
     dev*, ino*: uint64
+    btime*: int64
     invocation*: string
   SystemdView* = object
     ## What systemd's own state says about a directory of a unit, for §13
-    ## decision 71 (``systemdRecreated``).
+    ## decisions 71 and 77 (``systemdRecreated``).
     dynamicUid*: int
       ## the uid whose record in ``/run/systemd/dynamic-uid/`` names the
       ## unit's dynamic user, or -1 (systemd ``src/core/dynamic-user.c``:
-      ## one file per allocated uid, holding the user's name)
+      ## one file per allocated uid, holding the user's name); logged only
     owner*: int
       ## the directory's owner, through systemd's own ``private/<name>``
-      ## link of a dynamic user and no other link; -1 when it cannot be read
+      ## link of a dynamic user and no other link; -1 when it cannot be
+      ## read; logged only: ownership is never evidence (decision 67)
+    btime*: int64
+      ## the directory's birth time, nanoseconds since the epoch, through
+      ## that link; 0 when the file system reports none
     ctime*: int64
-      ## the directory's ctime, seconds since the epoch
+      ## the directory's ctime, seconds; logged only (systemd's adoption of
+      ## an existing tree, and any write into it, move it)
     invocationId*: string
       ## the unit's current ``InvocationID``
     invocationStart*: int64
-      ## when its current invocation began (``InactiveExitTimestamp``,
-      ## seconds since the epoch); 0 when unknown
+      ## when its current invocation began (``InactiveExitTimestamp``),
+      ## nanoseconds since the epoch; 0 when unknown
+
+# statx(2) through the raw system call: glibc and the static musl build
+# both have syscall(2), and the struct is the kernel's own
+# (include/uapi/linux/stat.h; https://man7.org/linux/man-pages/man2/statx.2.html).
+type
+  StatxTimestamp {.pure.} = object
+    tvSec: int64
+    tvNsec: uint32
+    reserved: int32
+  StatxBuf {.pure.} = object
+    mask, blksize: uint32
+    attributes: uint64
+    nlink, uid, gid: uint32
+    mode, spare0: uint16
+    ino, size, blocks, attributesMask: uint64
+    atime, btime, ctime, mtime: StatxTimestamp
+    rdevMajor, rdevMinor, devMajor, devMinor: uint32
+    spare2: array[14, uint64]
+
+proc c_syscall(n: clong): clong {.importc: "syscall", varargs, header: "<unistd.h>".}
+
+const
+  SysStatx =
+    # The numbers are Linux's; elsewhere (macOS arm64 also defines arm64)
+    # there is no statx, so no identity is read and every check that needs
+    # one refuses.
+    when not defined(linux): -1
+    elif defined(amd64): 332
+    elif defined(arm64): 291
+    elif defined(arm): 397
+    elif defined(i386): 383
+    else: -1
+  AtFdcwd = -100
+  AtSymlinkNoFollow = 0x100
+  StatxIno = 0x100'u32
+  StatxBtime = 0x800'u32
+
+proc statxOf(path: string; follow: bool): tuple[ok: bool; buf: StatxBuf] =
+  ## ``statx(2)`` of ``path``: the inode and the birth time it reports.
+  when SysStatx < 0:
+    return (false, StatxBuf())
+  else:
+    var buf: StatxBuf
+    let flags = (if follow: 0 else: AtSymlinkNoFollow)
+    let r = c_syscall(clong(SysStatx), cint(AtFdcwd), path.cstring, cint(flags),
+                      cuint(StatxIno or StatxBtime), addr buf)
+    (r == 0, buf)
 
 proc identityOfPath*(path: string): PathIdentity =
   ## ``path``'s identity now (not following a final link), or not there.
-  var st: Stat
-  if lstat(path.cstring, st) != 0: return (false, 0'u64, 0'u64)
-  (true, uint64(st.st_dev), uint64(st.st_ino))
+  let (ok, b) = statxOf(path, follow = false)
+  if not ok: return (false, 0'u64, 0'u64, 0'i64)
+  let bt =
+    when mutated("identity-without-btime"):
+      1'i64        # Falsifying build: every birth time alike, so device and inode decide
+    else:
+      if (b.mask and StatxBtime) != 0:
+        b.btime.tvSec * 1_000_000_000'i64 + int64(b.btime.tvNsec)
+      else: 0'i64
+  (true, (uint64(b.devMajor) shl 32) or uint64(b.devMinor), b.ino, bt)
+
+proc birthTimeOf*(path: string; follow = true): int64 =
+  ## ``path``'s birth time in nanoseconds (following links unless told
+  ## not to), or 0 where the file system reports none.
+  let (ok, b) = statxOf(path, follow)
+  if not ok or (b.mask and StatxBtime) == 0: return 0
+  b.btime.tvSec * 1_000_000_000'i64 + int64(b.btime.tvNsec)
+
+proc sameIdentity(c: CreatedDir; now: PathIdentity): bool =
+  ## The recorded directory is the one at the path now: same device,
+  ## inode and birth time, the birth time known (§13 decision 76).
+  now.exists and now.btime != 0 and c.btime != 0 and c.dev == now.dev and
+    c.ino == now.ino and c.btime == now.btime
+
+proc flooredKey*(unit: string): string =
+  ## The floored resource a unit name stands for: a template's instances
+  ## and its observation instance are the template (``a@x.service`` ->
+  ## ``a@.service``), any other unit is itself. A template's instances can
+  ## only share their directories (a directory is the stem, exactly, and
+  ## takes no specifier), so what one instance's start created is the
+  ## template's (A9 review round 11, finding 4).
+  when mutated("instances-not-shared"):
+    return unit
+  let at = unit.find('@')
+  let dot = unit.rfind('.')
+  if at > 0 and dot > at: unit[0 .. at] & unit[dot .. ^1] else: unit
 
 proc createdForUnit*(path, unit: string; now: PathIdentity;
                      created: Table[string, CreatedDir];
                      ledgerDirs: HashSet[string]): bool =
   ## ``path`` was created for ``unit`` (§13 decision 67): the add-on
   ## recorded it when the unit's own start created it and it is still that
-  ## directory (the same device and inode, §13 decision 68), or the ledger
-  ## names it as a directory the add-on made. Nothing else counts: not who
-  ## owns it, not a dynamic id, not a link into ``private/``.
+  ## directory (the same device, inode and birth time, §13 decisions 68 and
+  ## 76), or the ledger names it as a directory the add-on made. Nothing
+  ## else counts: not who owns it, not a dynamic id, not a link into
+  ## ``private/``. A template's instances share it (``flooredKey``).
   if path in ledgerDirs: return true
   if path notin created: return false
   let c = created[path]
-  if c.unit != unit: return false
+  if flooredKey(c.unit) != flooredKey(unit): return false
   when mutated("created-dirs-by-path"):
     return true
-  now.exists and c.dev == now.dev and c.ino == now.ino
+  sameIdentity(c, now)
 
 proc startMayCreate*(path, unit: string; now: PathIdentity;
                      created: Table[string, CreatedDir];
@@ -739,8 +831,8 @@ proc startMayCreate*(path, unit: string; now: PathIdentity;
     if path in acceptedNow: return true
   when mutated("created-dirs-not-rerecorded"):
     return false
-  path in created and created[path].unit == unit and
-    created[path].dev == now.dev and created[path].ino == now.ino
+  path in created and flooredKey(created[path].unit) == flooredKey(unit) and
+    sameIdentity(created[path], now)
 
 proc declaredDirectories*(show: ShowProps): seq[string] =
   ## Every directory the unit declares, as systemd resolves it: each
@@ -765,33 +857,36 @@ proc systemdRecreated*(path, unit: string; declared: openArray[string];
   ## 2. ``path`` is exactly one of the directories the unit declares
   ##    (``declaredDirectories``), never a prefix or a parent of one;
   ## 3. systemd's state shows it made the directory for the unit's current
-  ##    invocation: for a dynamic user, ``/run/systemd/dynamic-uid/`` names
-  ##    the unit's user and the directory is that uid's; otherwise the
-  ##    unit's ``InvocationID`` is not the one recorded at the add-on's
-  ##    start, and the directory's ctime is not before the current
-  ##    invocation began.
-  ##
-  ## Ownership alone never counts (decision 67): it is condition 3's
-  ## second half for a dynamic user, after systemd's own record names the
-  ## uid.
+  ##    invocation: the directory's birth time is not earlier than the
+  ##    current invocation's start (§13 decision 77), for a static and a
+  ##    dynamic user alike. Where the file system reports no birth time, or
+  ##    systemd no start, it is refused. Neither ownership nor ctime counts:
+  ##    systemd's adoption of an existing tree (it chowns it, or moves a
+  ##    public one into ``private/``) and any write into it change both, and
+  ##    neither makes the tree new.
   when not mutated("recreated-unrecorded-accepted"):
     if path notin created: return "the add-on has no record of it"
-    if created[path].unit != unit:
+    if flooredKey(created[path].unit) != flooredKey(unit):
       return "the record names it for " & created[path].unit
   when not mutated("recreated-any-path"):
     if path notin declared:
       return "it is not exactly a directory the unit declares"
-  when not mutated("recreated-systemd-unchecked"):
+  when mutated("recreated-by-ctime-or-owner"):
+    # Falsifying build: round 10's evidence, ownership or ctime.
     if dynamic:
-      if v.dynamicUid < 0:
-        return "no record in /run/systemd/dynamic-uid names the unit's user"
-      if v.owner != v.dynamicUid:
-        return "it is not owned by the unit's dynamic uid " & $v.dynamicUid
-    else:
-      if v.invocationId.len == 0 or v.invocationId == created[path].invocation:
-        return "the unit's invocation is the one the add-on recorded, or unknown"
-      if v.invocationStart <= 0 or v.ctime < v.invocationStart:
-        return "it predates the unit's current invocation"
+      if v.dynamicUid >= 0 and v.owner == v.dynamicUid: return ""
+      return "not the dynamic uid's"
+    if v.invocationId.len > 0 and v.invocationId != created[path].invocation and
+        v.ctime * 1_000_000_000'i64 >= v.invocationStart:
+      return ""
+    return "ctime predates the invocation"
+  elif not mutated("recreated-systemd-unchecked"):
+    if v.btime == 0:
+      return "the file system reports no birth time for it"
+    if v.invocationStart <= 0:
+      return "systemd reports no start for the unit's current invocation"
+    if v.btime < v.invocationStart:
+      return "it was born before the unit's current invocation began"
   ""
 
 proc managerPathProblem*(path: string; uid: int; dynamic: bool): string =
@@ -1116,7 +1211,8 @@ proc activatorProblems*(unit: string; show: ShowProps; lines: ShowLines;
                         loaded: openArray[tuple[path, content: string]] = [];
                         startsOf: proc (u: string): seq[string] = nil;
                         ownUnits = initHashSet[string]();
-                        conflictsOf: proc (unit: string): seq[string] = nil):
+                        conflictsOf: proc (unit: string): seq[string] = nil;
+                        listenerProvenance: proc (path: string): string = nil):
                         seq[string] =
   ## A socket, timer or path unit that triggers a floored service, as
   ## systemd reads it (A9 review rounds 5 and 7): loaded from the add-on's
@@ -1132,6 +1228,13 @@ proc activatorProblems*(unit: string; show: ShowProps; lines: ShowLines;
   template problem2(code, key, s: string) =
     result.add(unit & ": " & s & " [rule:" & code & (if key.len > 0: " key:" & key else: "") & "]")
     for k in key.split(','): keysRefused.incl(k)
+  # §13 decision 78: the service the activator starts names its listeners,
+  # and the activator is never named after a base tree.
+  let service = words(show.getOrDefault("Triggers")).filterIt(not it.endsWith(".socket"))
+  let serviceName = if service.len > 0: service[0] else: ""
+  block:
+    let bn = baseTreeActivatorRefusal(unit)
+    if bn.len > 0: problem2("unit-name", "Id", bn)
   if show.getOrDefault("FragmentPath") != fragment:
     problem2("provenance", "FragmentPath", "FragmentPath=" & show.getOrDefault("FragmentPath") &
             ", not a unit file the add-on wrote (" & fragment & ")")
@@ -1149,8 +1252,18 @@ proc activatorProblems*(unit: string; show: ShowProps; lines: ShowLines;
       continue
     when not mutated("activator-show-unjudged"):
       let address = (if open >= 0: l[0 ..< open] else: l).strip()
-      let why = listenerRefusal(unit, address)
-      if why.len > 0: problem2("listener", ListenerKeys, "listener " & l & ": " & why)
+      let why = listenerRefusal(unit, address, serviceName)
+      if why.len > 0:
+        problem2("listener", ListenerKeys, "listener " & l & ": " & why)
+      elif address.startsWith("/") and listenerProvenance != nil:
+        # §13 decision 78: a unix listener the manager would bind at a path
+        # that already exists and was not created for this activator (it
+        # unlinks an existing socket and binds its own).
+        when not mutated("existing-listeners-allowed"):
+          let ex = listenerProvenance(normalisedPath(address))
+          if ex.len > 0:
+            problem2("existing-listener", ListenerKeys, "listener " & l & ": " & ex &
+                     "; it exists and was not created for this unit (§13 decision 78)")
   when not mutated("activator-show-unjudged"):
     for (k, allowed) in ActivatorDefaults:
       if k in show and show[k] notin allowed:
@@ -1250,9 +1363,12 @@ type
     systemdView*: proc (path, unit: string; show: ShowProps): SystemdView
       ## systemd's own state of a directory of the unit (§13 decision 71);
       ## ``nil``: none is consulted, so a changed identity is refused
-    onRecreated*: proc (path, unit: string; v: SystemdView)
-      ## told of each directory accepted by decision 71, to record it again
-      ## under its new identity and log the acceptance
+    onRecreated*: proc (path, unit: string; v: SystemdView): bool
+      ## told of each directory decision 71 would accept: it records the
+      ## directory again under its new identity and writes the audit
+      ## record, and says whether both were written. An acceptance that
+      ## cannot be logged is not made (A9 review round 11, finding 6);
+      ## ``nil`` accepts nothing
     conflictsOf*: proc (unit: string): seq[string]
       ## what another unit's ``Conflicts=`` names, as systemd reports it
     startsOf*: proc (unit: string): seq[string]
@@ -1602,8 +1718,16 @@ proc effectiveFloorProblems*(e: EffectiveInput): seq[string] =
               let v = e.systemdView(fp.path, unit, show)
               if systemdRecreated(fp.path, unit, declaredDirectories(show),
                                   e.createdDirs, dynamic, v).len == 0:
-                if e.onRecreated != nil: e.onRecreated(fp.path, unit, v)
-                continue
+                when mutated("unlogged-acceptance"):
+                  if e.onRecreated != nil: discard e.onRecreated(fp.path, unit, v)
+                  continue
+                else:
+                  if e.onRecreated != nil and e.onRecreated(fp.path, unit, v): continue
+                  problem2("existing-tree", fp.key, fp.key & " " & fp.path &
+                           ": systemd made it again for the unit, but the " &
+                           "acceptance could not be recorded and logged (§13 " &
+                           "decision 71); it stays refused")
+                  continue
           problem2("existing-tree", fp.key, fp.key & " " & fp.path & ": " & why &
                    "; it exists and was not created for this unit (§13 decision 57)")
       for (k, p) in created:

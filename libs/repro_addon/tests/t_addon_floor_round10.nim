@@ -144,8 +144,8 @@ suite "round 10, finding 1 (§13 decision 67): provenance, never ownership":
     check managerPathProblem(d / "alloy", -1, true).len > 0
     check managerPathProblem(d, -1, true).len > 0
   test "only the record, for this unit and this directory, or the ledger":
-    let now: PathIdentity = (true, 7'u64, 42'u64)
-    let rec = {"/run/a": CreatedDir(unit: "a.service", dev: 7, ino: 42)}.toTable
+    let now: PathIdentity = (true, 7'u64, 42'u64, 99'i64)
+    let rec = {"/run/a": CreatedDir(unit: "a.service", dev: 7, ino: 42, btime: 99)}.toTable
     check createdForUnit("/run/a", "a.service", now, rec, initHashSet[string]())
     check not createdForUnit("/run/a", "b.service", now, rec, initHashSet[string]())
     check not createdForUnit("/run/b", "a.service", now, rec, initHashSet[string]())
@@ -163,7 +163,7 @@ suite "round 10, finding 1 (§13 decision 67): provenance, never ownership":
     e.pathIdentity = proc (p: string): PathIdentity = identityOfPath(d)
     check "[rule:existing-tree key:RuntimeDirectory]" in problemsOf(e)
     let id = identityOfPath(d)
-    e.createdDirs = {"/run/a": CreatedDir(unit: "a.service", dev: id.dev, ino: id.ino)}.toTable
+    e.createdDirs = {"/run/a": CreatedDir(unit: "a.service", dev: id.dev, ino: id.ino, btime: id.btime)}.toTable
     check "[rule:existing-tree" notin problemsOf(e)
   test "a unit names only its own stem":
     check ownNamed("foo", "foo")
@@ -236,8 +236,8 @@ suite "round 10, finding 2 (§13 decision 68): the record of a unit's own start"
     let p = state / "rt-a"
     createDir(p)
     recordCreatedDirs(state, "a.service", [(p, "a.service")])
-    let line = readFile(createdDirsPath(state)).strip()
-    check line.split('\t').len == 4
+    let line = readFile(createdDirsPath(state)).strip(chars = {'\n'})
+    check line.split('\t').len == 6
     check not fileExists(createdDirsPath(state) & ".tmp")
     # Round 9's two-field lines carry no identity and record nothing.
     writeFile(createdDirsPath(state), p & "\ta.service\n")
@@ -322,15 +322,16 @@ suite "round 10 (§13 decision 70): a unit named after a base tree":
     e.unit = "ssh.service"
     check "[rule:unit-name key:Id]" in problemsOf(e)
 
-suite "round 10 (§13 decision 71): made again by systemd outside a switch":
+suite "round 10 (§13 decisions 71 and 77): made again by systemd outside a switch":
   # The record says the add-on's start in a switch made /run/a (identity
-  # 1/2, invocation I1); it is gone and made again (identity 1/3).
-  let rec = {"/run/a": CreatedDir(unit: "a.service", dev: 1, ino: 2,
+  # 1/2, born 50, invocation I1); it is gone and made again (identity 1/3,
+  # born 2000) by the unit's invocation I2, which began at 1999.
+  let rec = {"/run/a": CreatedDir(unit: "a.service", dev: 1, ino: 2, btime: 50,
                                   invocation: "I1")}.toTable
-  let madeAgain: PathIdentity = (true, 1'u64, 3'u64)
+  let madeAgain: PathIdentity = (true, 1'u64, 3'u64, 2000'i64)
   proc restarted(): SystemdView =
-    SystemdView(dynamicUid: -1, owner: 1000, ctime: 2000, invocationId: "I2",
-                invocationStart: 1999)
+    SystemdView(dynamicUid: -1, owner: 1000, btime: 2000, ctime: 0,
+                invocationId: "I2", invocationStart: 1999)
   proc input(dirs = "a"; view = restarted(); r = rec; dynamic = false): EffectiveInput =
     result = goodInput()
     result.show["RuntimeDirectory"] = dirs
@@ -342,19 +343,23 @@ suite "round 10 (§13 decision 71): made again by systemd outside a switch":
     result.createdDirs = r
     let v = view
     result.systemdView = proc (p, u: string; s: ShowProps): SystemdView = v
+    result.onRecreated = proc (p, u: string; v: SystemdView): bool = true
   test "a restart outside a switch (Restart=, an operator) is the unit's again":
     var e = input()
     var seen: seq[string]
-    e.onRecreated = proc (p, u: string; v: SystemdView) = seen.add(p & " " & u & " " & v.invocationId)
+    e.onRecreated = proc (p, u: string; v: SystemdView): bool =
+      seen.add(p & " " & u & " " & v.invocationId)
+      true
     check "[rule:existing-tree" notin problemsOf(e)
     check seen == @["/run/a a.service I2"]
   test "so is one its socket or timer made, once a switch recorded it":
-    # The same evidence: a later invocation, the directory no older.
+    # The same evidence: the directory born after its invocation began.
     check "[rule:existing-tree" notin problemsOf(input())
   test "a directory never recorded stays refused, whatever systemd says":
     check "[rule:existing-tree" in problemsOf(input(r = initTable[string, CreatedDir]()))
   test "condition 1: recorded for this same unit":
-    let other = {"/run/a": CreatedDir(unit: "b.service", dev: 1, ino: 2, invocation: "I1")}.toTable
+    let other = {"/run/a": CreatedDir(unit: "b.service", dev: 1, ino: 2, btime: 50,
+                                      invocation: "I1")}.toTable
     check "[rule:existing-tree" in problemsOf(input(r = other))
     check systemdRecreated("/run/a", "a.service", ["/run/a"], other, false,
                            restarted()) == "the record names it for b.service"
@@ -363,19 +368,20 @@ suite "round 10 (§13 decision 71): made again by systemd outside a switch":
     check "[rule:existing-tree" in problemsOf(input(dirs = "a/rt"))
     check systemdRecreated("/run/a", "a.service", ["/run/a/rt"], rec, false,
                            restarted()) == "it is not exactly a directory the unit declares"
-  test "condition 3: systemd made it for the unit's current invocation":
+  test "condition 3 (§13 decision 77): born no earlier than the invocation":
     var v = restarted()
-    v.invocationId = "I1"                 # the invocation the add-on recorded
+    v.btime = 1000                        # born before the invocation began
     check "[rule:existing-tree" in problemsOf(input(view = v))
     v = restarted()
-    v.ctime = 1000                        # older than the invocation
+    v.btime = 0                           # no birth time reported
     check "[rule:existing-tree" in problemsOf(input(view = v))
-    # A dynamic user: systemd's dynamic-uid record, and that uid's directory.
-    var d = SystemdView(dynamicUid: 61200, owner: 61200)
+    v = restarted()
+    v.invocationStart = 0                 # no start reported
+    check "[rule:existing-tree" in problemsOf(input(view = v))
+    # A dynamic user by the same evidence, and no other.
+    var d = SystemdView(dynamicUid: 61200, owner: 61200, btime: 2000, invocationStart: 1999)
     check "[rule:existing-tree" notin problemsOf(input(view = d, dynamic = true))
-    d.dynamicUid = -1
-    check "[rule:existing-tree" in problemsOf(input(view = d, dynamic = true))
-    d = SystemdView(dynamicUid: 61200, owner: 61201)
+    d.btime = 1000
     check "[rule:existing-tree" in problemsOf(input(view = d, dynamic = true))
   test "systemd's view follows its own private/ link and no other":
     let d = createTempDir("a9r10-", "-lib")
@@ -386,11 +392,12 @@ suite "round 10 (§13 decision 71): made again by systemd outside a switch":
     createSymlink("../etc", d / "b")
     let show = parseShow("DynamicUser=no\n")
     check hostSystemdView(d / "a", "a.service", show).owner == int(getuid())
+    check hostSystemdView(d / "a", "a.service", show).btime == birthTimeOf(d / "private" / "a")
     check hostSystemdView(d / "b", "b.service", show).owner == -1
   test "one accepted in this switch is recorded again after its restart":
     # Accepted by decision 71 at the check, then made again by the
     # switch's own restart: the record follows the restart.
-    let other: PathIdentity = (true, 9'u64, 9'u64)
+    let other: PathIdentity = (true, 9'u64, 9'u64, 9'i64)
     check startMayCreate("/run/a", "a.service", other, rec, ["/run/a"])
     check not startMayCreate("/run/a", "a.service", other, rec, [])
   test "an accepted directory is recorded again under its new identity":
@@ -411,75 +418,83 @@ suite "round 10 (§13 decision 71): made again by systemd outside a switch":
     check createdForUnit(p, "a.service", identityOfPath(p), r, initHashSet[string]())
 
 suite "round 10 (§13 decision 72): the one-time migration":
-  # A host an older engine left: a committed generation, a ledger naming
-  # its floored unit files, and no record file.
-  proc host(): tuple[state, unitFile: string; ledger: Ledger] =
+  # A host an older engine left: a committed generation without the
+  # record-kept marker, a ledger naming its floored unit files, and no
+  # record file.
+  proc host(declares = "RuntimeDirectory=a\n"): tuple[state, unitFile: string; ledger: Ledger] =
     result.state = createTempDir("a9r10-", "-mig")
     createDir(result.state / "addon")
     result.unitFile = result.state / "a.service"
-    writeFile(result.unitFile, "[Service]\nRuntimeDirectory=a\n" & FloorMarker & "\nDynamicUser=yes\n")
+    writeFile(result.unitFile, "[Service]\n" & declares & FloorMarker & "\nDynamicUser=yes\n")
     result.ledger = Ledger(entries: @[LedgerEntry(class: lcUnit,
       path: result.unitFile, unit: "a.service")])
   let present = proc (paths: openArray[string]): proc (p: string): PathIdentity =
     let s = @paths
     result = proc (p: string): PathIdentity =
-      if p in s: (true, 5'u64, uint64(s.find(p) + 10)) else: (false, 0'u64, 0'u64)
+      if p in s: (true, 5'u64, uint64(s.find(p) + 10), 99'i64) else: (false, 0'u64, 0'u64, 0'i64)
   proc showing(dirs: string): proc (u: string): ShowProps =
     result = proc (u: string): ShowProps = parseShow("RuntimeDirectory=" & dirs & "\n")
   let inv = proc (u: string): string = "I0"
+  let logged = proc (p: string; c: CreatedDir): bool = true
   test "it records the committed unit's declared directory, once, and logs it":
     let h = host()
     defer: removeDir(h.state)
-    let m = migrateCreatedDirs(h.state, "g1", h.ledger, showing("a"), inv,
-                               present(["/run/a"]))
+    var seen: seq[string]
+    let m = migrateCreatedDirs(h.state, "g1", h.ledger, inv,
+      proc (p: string; c: CreatedDir): bool =
+        seen.add(p)
+        true,
+      present(["/run/a"]))
     check m.len == 1
     check m[0].path == "/run/a" and m[0].entry.unit == "a.service" and m[0].entry.ino == 10
+    check seen == @["/run/a"]
     check readCreatedDirs(h.state)["/run/a"].invocation == "I0"
   test "it never runs again once the record file exists, even empty":
     let h = host()
     defer: removeDir(h.state)
-    check migrateCreatedDirs(h.state, "g1", h.ledger, showing("b"), inv,
-                             present(["/run/a"])).len == 0    # nothing to take
+    check migrateCreatedDirs(h.state, "g1", h.ledger, inv, logged,
+                             present([])).len == 0           # nothing to take
     check fileExists(createdDirsPath(h.state))
-    check migrateCreatedDirs(h.state, "g1", h.ledger, showing("a"), inv,
+    check migrateCreatedDirs(h.state, "g1", h.ledger, inv, logged,
                              present(["/run/a"])).len == 0
   test "a corrupt record is present: it fails closed and never starts the migration":
     let h = host()
     defer: removeDir(h.state)
     writeFile(createdDirsPath(h.state), "not a record\n")
     check not createdDirsAbsent(h.state)
-    check migrateCreatedDirs(h.state, "g1", h.ledger, showing("a"), inv,
+    check migrateCreatedDirs(h.state, "g1", h.ledger, inv, logged,
                              present(["/run/a"])).len == 0
     check readFile(createdDirsPath(h.state)) == "not a record\n"
   test "only exactly declared directories, never a parent or a prefix":
-    let h = host()
+    let h = host("RuntimeDirectory=a/rt\n")
     defer: removeDir(h.state)
     # a/rt declared: /run/a is only its parent.
-    check migrateCreatedDirs(h.state, "g1", h.ledger, showing("a/rt"), inv,
-                             present(["/run/a", "/run/a/rt"])).len == 0
+    check migrateCreatedDirs(h.state, "g1", h.ledger, inv, logged,
+                             present(["/run/a", "/run/a/rt"]),
+                             showOf = showing("a/rt")).len == 0
   test "only units the committed generation installed":
     let h = host()
     defer: removeDir(h.state)
-    let m = migrateCreatedDirs(h.state, "g1", h.ledger,
-      proc (u: string): ShowProps =
+    let m = migrateCreatedDirs(h.state, "g1", h.ledger, inv, logged, present(["/run/b"]),
+      showOf = proc (u: string): ShowProps =
         if u == "b.service": parseShow("RuntimeDirectory=b\n") else: parseShow(""),
-      inv, present(["/run/b"]), alsoUnits = ["b.service"])
+      alsoUnits = ["b.service"])
     check m.len == 0
   test "not a unit named after a base tree, nor one without the floor":
     let h = host()
     defer: removeDir(h.state)
     writeFile(h.unitFile, "[Service]\nRuntimeDirectory=a\n")     # no floor block
-    check migrateCreatedDirs(h.state, "g1", h.ledger, showing("a"), inv,
+    check migrateCreatedDirs(h.state, "g1", h.ledger, inv, logged,
                              present(["/run/a"])).len == 0
-    let h2 = host()
+    let h2 = host("RuntimeDirectory=ssh\n")
     defer: removeDir(h2.state)
     let ssh = Ledger(entries: @[LedgerEntry(class: lcUnit, path: h2.unitFile, unit: "ssh.service")])
-    check migrateCreatedDirs(h2.state, "g1", ssh, showing("ssh"), inv,
+    check migrateCreatedDirs(h2.state, "g1", ssh, inv, logged,
                              present(["/run/ssh"])).len == 0
   test "with no committed generation it only writes the empty record":
     let h = host()
     defer: removeDir(h.state)
-    check migrateCreatedDirs(h.state, "", h.ledger, showing("a"), inv,
+    check migrateCreatedDirs(h.state, "", h.ledger, inv, logged,
                              present(["/run/a"])).len == 0
     check fileExists(createdDirsPath(h.state))
     check readCreatedDirs(h.state).len == 0

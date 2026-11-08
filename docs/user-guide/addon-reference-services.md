@@ -115,13 +115,15 @@ The add-on handles this in four ways:
     (`systemd.service`, `udev.service`, `ssh.service`), whatever
     directories it sets. A directory that already exists on the host is
     refused unless the add-on recorded it when the unit's own start, in an
-    earlier apply, created it, and it is still that same directory; who
-    owns it does not matter. When the unit is restarted or activated
+    earlier apply, created it, and it is still that same directory (the
+    same device, inode and birth time; on a file system that reports no
+    birth time it is always refused); who owns it does not matter. The
+    instances of a template share their directories. When the unit is restarted or activated
     between applies, systemd removes such a directory and makes it again;
     the next apply accepts it only if it is exactly one of the unit's
-    directories and systemd's own state shows it was made for the unit's
-    current run, and it logs that acceptance in the generation's audit
-    log. On a host upgraded from an add-on version that kept no such
+    directories and it was born after the unit's current run began, and
+    it logs that acceptance in the generation's audit log (if the log
+    cannot be written, the directory is refused). On a host upgraded from an add-on version that kept no such
     record, the first apply records, once, the directories the installed
     services exactly declare and logs each one. A directory first created outside an apply (the unit's first
     start by its socket or timer, or by hand) is refused at the next
@@ -129,7 +131,12 @@ The add-on handles this in four ways:
     The list of base-system directory names was measured on the amd64
     Debian 12 and 13 and Ubuntu 24.04 and 26.04 test images; on other
     bases, such as Raspberry Pi OS, only the existence check applies;
-  - a unix socket of such a unit must be `/run/foo` or below `/run/foo/`;
+  - a unix socket of such a unit must be `/run/foo` or below `/run/foo/`,
+    named after the service the socket starts (`foo.service`) whatever
+    the socket is called; a socket or timer named after a directory the
+    base system has (`udev.socket`, `systemd.socket`) is refused, and so
+    is a socket path that already exists and that this socket did not
+    create;
   - realtime scheduling, a reboot `FailureAction=`, or a resource limit
     above the service manager's default;
   - a dependency such as `OnFailure=` or `Wants=` that starts a unit

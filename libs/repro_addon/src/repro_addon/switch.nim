@@ -509,6 +509,14 @@ proc startedSince*(unit: string; since: float): bool =
   except ValueError:
     false
 
+proc restartRecords*(wasActive: bool): bool =
+  ## Whether a ``try-restart`` started the unit, so that what exists after
+  ## it may be recorded as the unit's own start's (§13 decision 68): only
+  ## when the unit was running; ``try-restart`` of a stopped unit is a
+  ## no-op (systemctl(1)).
+  when mutated("record-after-noop-restart"): true
+  else: wasActive
+
 proc runStart*(ts: seq[Transition]; paused: openArray[string] = [];
                notRunning: openArray[string] = []; noBlock = false;
                reloadedAt = 0.0; afterStart: proc (unit: string) = nil) =
@@ -545,6 +553,9 @@ proc runStart*(ts: seq[Transition]; paused: openArray[string] = [];
           unitProperty(trig, "LoadState") == "loaded":
         startUnit(trig, noBlock)
         restored.add(trig)
+        # The activator's own start: its listener is its own (§13
+        # decision 78).
+        started(trig)
   for t in startEntries(ts):
     case t.verb
     of tvStart, tvStopStart:
@@ -576,9 +587,13 @@ proc runStart*(ts: seq[Transition]; paused: openArray[string] = [];
         startUnit(t.unit, noBlock)
         started(t.unit)
     of tvRestart:
+      # A try-restart of a unit that is not running starts nothing, so
+      # nothing it finds is the unit's to record (A9 review round 11,
+      # finding 6).
+      let wasActive = unitIsActive(t.unit)
       if t.secretsChanged: discard restartForChangedSecrets(t.unit, noBlock)
       else: tryRestartUnit(t.unit, noBlock)
-      started(t.unit)
+      if restartRecords(wasActive): started(t.unit)
     of tvReload: reloadUnit(t.unit, noBlock)
     else: discard
   when mutated("exclusive-as-plain-restart"):

@@ -1135,10 +1135,10 @@ proc managerDirectoryRefusal*(unitName, key, token: string): string =
   ## round 8, finding 1). Default deny by shape: every component of the
   ## directory and of its link is a plain name (letters, digits, ``.``,
   ## ``-``, ``_``; never ``.`` or ``..``), the link is one name, and the
-  ## first component of each is named for the unit (``ownNamed``: its stem,
-  ## or the stem and ``.``, ``-`` or ``_`` and more). So the directory the
-  ## manager creates and hands to the unit is the unit's own, directly
-  ## under its base (``/run``, ``/var/lib``, ...), or below its own one; never
+  ## first component of each is named for the unit (``ownNamed``: exactly
+  ## its stem, §13 decision 67). So the directory the manager creates and
+  ## hands to the unit is the unit's own, directly under its base (``/run``,
+  ## ``/var/lib``, ...), or below its own one; never
   ## in another program's tree (``systemd/system/x.service.d`` is a drop-in
   ## directory for any unit, ``udev/rules.d`` is udev's rules).
   when FloorMutation == "directory-names-unchecked":
@@ -1500,7 +1500,7 @@ const
     "SocketProtocol", "FlushPending", "Writable"]
     ## Round 5's list, kept for the falsifying build ``socket-options-by-list``.
 
-proc listenerRefusal*(unitName, value: string): string =
+proc listenerRefusal*(unitName, value: string; service = ""): string =
   ## Why a ``ListenStream=``/``ListenDatagram=``/``ListenSequentialPacket=``
   ## value of an activator is not one the floor allows, or "": a network
   ## address (``port``, ``addr:port``, ``[addr]:port``, ``vsock:cid:port``),
@@ -1512,8 +1512,23 @@ proc listenerRefusal*(unitName, value: string): string =
   ## review rounds 5 and 7, findings 2 and 3).
   let v = value.strip()
   if v.len == 0: return ""   # a reset
-  let stem = unitStem(unitName)
+  # §13 decision 78: named for the service the activator starts, not for
+  # the activator, whose own name a profile chooses freely (``udev.socket``
+  # with ``Service=a.service``). Without a known service, the activator's.
+  let named =
+    when FloorMutation == "listener-named-for-socket": unitName
+    else: (if service.len > 0: service else: unitName)
+  let stem = unitStem(named)
   proc ownName(n: string): bool = ownNamed(stem, n)
+  when FloorMutation != "base-tree-activators-allowed":
+    let firstName =
+      if v.startsWith("/run/"): normalisedPath(v)["/run/".len .. ^1].split('/')[0]
+      elif v.startsWith("@"): v[1 .. ^1].split('/')[0]
+      else: ""
+    if firstName in BaseSystemTreeNames:
+      return v & " is inside " & firstName & ", a tree the base system owns; " &
+        "the manager would unlink and replace that tree's socket as root " &
+        "(§13 decision 78)"
   if v.startsWith("/"):
     if v.anyIt(it in QuoteOrSpecifier) or hasDotDot(v):
       return "a unix socket path is a literal path without `..`"
@@ -1539,7 +1554,7 @@ proc listenerRefusal*(unitName, value: string): string =
     return "not a network address or a unix socket path"
   ""
 
-proc socketOptionRefusal*(unitName, key, value: string): string =
+proc socketOptionRefusal*(unitName, key, value: string; service = ""): string =
   ## Why one ``[Socket]`` option of an activator is refused, or ""
   ## (``SocketOptionRules``).
   when FloorMutation == "socket-options-by-list":
@@ -1555,7 +1570,7 @@ proc socketOptionRefusal*(unitName, key, value: string): string =
     if k != key: continue
     let v = value.strip()
     case rule
-    of sorListener: return listenerRefusal(unitName, v)
+    of sorListener: return listenerRefusal(unitName, v, service)
     of sorBool:
       if v.toLowerAscii() notin ["yes", "no", "true", "false", "1", "0", "on", "off"]:
         return "not a boolean"
@@ -1580,8 +1595,22 @@ proc socketOptionRefusal*(unitName, key, value: string): string =
   "is not an option the floor reviewed for a unit that activates a " &
     "floored service (systemd.socket(5))"
 
+proc baseTreeActivatorRefusal*(unitName: string): string =
+  ## Why a unit that activates a floored service may not have this name,
+  ## or "": its stem is a tree the base system owns (§13 decision 78), as
+  ## for the floored unit itself (decision 70). ``udev.socket`` would be
+  ## the base's own socket name.
+  when FloorMutation == "base-tree-activators-allowed":
+    return ""
+  let stem = unitStem(unitName)
+  if stem in BaseSystemTreeNames:
+    return unitName & " activates a floored service and is named after " & stem &
+      ", a tree the base system owns; such a unit is never named after one " &
+      "(§13 decision 78)"
+  ""
+
 proc activatorRefusal*(unitName, content: string; dropIn: bool;
-                       half = fhParse): string =
+                       half = fhParse; service = ""): string =
   ## A socket, timer or path unit that activates a floored service, or a
   ## drop-in onto one (A9 review rounds 5 and 7): the manager opens a
   ## socket's listeners as root and hands them to the service, applies its
@@ -1600,6 +1629,11 @@ proc activatorRefusal*(unitName, content: string; dropIn: bool;
     of "path": "Path"
     else: ""
   if section.len == 0: return ""
+  # Its name, at parse time only: the effective half has its own rule for
+  # it (``unit-name``), so the rerun does not report it twice.
+  if half == fhParse and not dropIn:
+    let bn = baseTreeActivatorRefusal(unitName)
+    if bn.len > 0: return bn
   for d in sectionDirectives(content):
     let what = (if dropIn: "a drop-in's " else: "") & "[" & d.section & "] " &
                d.key & "=" & d.value
@@ -1608,7 +1642,7 @@ proc activatorRefusal*(unitName, content: string; dropIn: bool;
         "service runs as root, outside the floor"
     if d.section == section:
       let why = case typ
-        of "socket": socketOptionRefusal(unitName, d.key, d.value)
+        of "socket": socketOptionRefusal(unitName, d.key, d.value, service)
         of "timer": (if d.key in TimerKeys: "" else: "is not a timer setting the floor allows")
         else: (if d.key in PathKeys: "" else: "is not a path-unit setting the floor allows (MakeDirectory= creates, as root)")
       if why.len > 0:

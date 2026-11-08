@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 34,
-    "nimTestBinaries": 2705,
+    "nimTestBinaries": 2706,
     "pureUnitConsolidationGroups": 79,
     "pureUnitTests": 743,
     "staticallyDetectedRuntimeCompilerFlowTests": 141,
-    "testEntries": 2746
+    "testEntries": 2747
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1566,7 +1566,7 @@
       "integration": 1492,
       "platform/destructive": 173,
       "pure unit": 743,
-      "unclassified": 316
+      "unclassified": 317
     },
     "graphOwnedTestArtifacts": [
       {
@@ -1774,9 +1774,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2705,
+    "nimTestBinaryCount": 2706,
     "pythonTestFileCount": 41,
-    "testEntryCount": 2746
+    "testEntryCount": 2747
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -9064,6 +9064,24 @@
       "source": "libs/repro_addon/tests/t_addon_floor_round10.nim",
       "sourceSuiteCount": 8,
       "staticCaseCount": 33,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_addon_floor_round11",
+      "class": "unclassified",
+      "classificationReason": "spawns a subprocess",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_addon",
+        "repro_infra"
+      ],
+      "owner": "libs/repro_addon",
+      "requiresReproBinary": false,
+      "source": "libs/repro_addon/tests/t_addon_floor_round11.nim",
+      "sourceSuiteCount": 6,
+      "staticCaseCount": 16,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

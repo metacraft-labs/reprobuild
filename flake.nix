@@ -2890,6 +2890,12 @@
               # tools of the command and of its gates
               # (e2e_addon_zero_touch_image_synthesis_boots_converged).
               pkgs.e2fsprogs
+              # ``fuse2fs``, with ``mkfs.ext4`` from e2fsprogs above:
+              # t_addon_floor_round11 builds a small ext4 image and mounts it
+              # as the user, to show that a directory removed and made again
+              # at the same path, which ext4 gives the same inode number, is
+              # told apart by its birth time. Without them that test fails.
+              pkgs.e2fsprogs.fuse2fs
               pkgs.mtools
               # ReproOS attestation boot gates: they boot a
               # disk image under QEMU through gosti's

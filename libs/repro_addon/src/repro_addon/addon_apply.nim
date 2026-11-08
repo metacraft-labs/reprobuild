@@ -1453,22 +1453,30 @@ proc unitStartsReported*(unit: string; own: HashSet[string];
 
 proc createdDirsPath*(stateDir: string): string =
   ## The directories the add-on recorded as created for a floored unit by
-  ## its own start (§13 decisions 57, 67, 68 and 71): one
-  ## ``<path>\t<unit>\t<st_dev>\t<st_ino>\t<InvocationID>`` line each.
+  ## its own start (§13 decisions 57, 67, 68, 71 and 76): one
+  ## ``<path>\t<unit>\t<st_dev>\t<st_ino>\t<birth ns>\t<InvocationID>``
+  ## line each.
   addonDir(stateDir) / "floor-created-dirs"
 
+proc recordKeptMarker*(stateDir, generationId: string): string =
+  ## The marker an engine that keeps ``floor-created-dirs`` writes into
+  ## every generation it sets (§13 decision 72): a committed generation
+  ## without it was written by an older engine.
+  generationDir(stateDir, generationId) / "floor-record-kept"
+
 proc readCreatedDirs*(stateDir: string): Table[string, CreatedDir] =
-  ## ``createdDirsPath``. An unreadable file, or a line without an identity
-  ## (round 9's two-field form), records nothing: every existing tree is
-  ## then refused until the unit's next start records it (fail closed).
+  ## ``createdDirsPath``. An unreadable file, or a line without the full
+  ## identity (round 9's and round 10's shorter forms), records nothing:
+  ## every existing tree is then refused until the unit's next start
+  ## records it (fail closed).
   try:
     for l in readFile(createdDirsPath(stateDir)).splitLines():
       let f = l.split('\t')
-      if f.len in 4 .. 5 and f[0].startsWith("/") and f[1].len > 0:
+      if f.len == 6 and f[0].startsWith("/") and f[1].len > 0:
         try:
           result[f[0]] = CreatedDir(unit: f[1], dev: parseBiggestUInt(f[2]),
                                     ino: parseBiggestUInt(f[3]),
-                                    invocation: (if f.len == 5: f[4] else: ""))
+                                    btime: parseBiggestInt(f[4]), invocation: f[5])
         except ValueError: discard
   except IOError, OSError: discard
 
@@ -1499,8 +1507,12 @@ proc writeCreatedDirs(stateDir: string; t: Table[string, CreatedDir]) =
   var text = ""
   for k, v in t:
     text.add(k & "\t" & v.unit & "\t" & $v.dev & "\t" & $v.ino & "\t" &
-             v.invocation & "\n")
+             $v.btime & "\t" & v.invocation & "\n")
   writeDurably(createdDirsPath(stateDir), text)
+
+proc entryOf(unit: string; now: PathIdentity; invocation: string): CreatedDir =
+  CreatedDir(unit: unit, dev: now.dev, ino: now.ino, btime: now.btime,
+             invocation: invocation)
 
 proc recordCreatedDirs*(stateDir, unit: string;
                         pending: openArray[tuple[path, unit: string]];
@@ -1508,7 +1520,9 @@ proc recordCreatedDirs*(stateDir, unit: string;
                         invocation = "") =
   ## Called right after ``unit``'s own start (§13 decision 68): record, for
   ## it, each of its directories the check found absent that exists now, so
-  ## its start created it (systemd.exec(5)), with the identity it has. Only
+  ## its start created it (systemd.exec(5)), with the identity it has (§13
+  ## decision 76: device, inode and birth time; a path whose file system
+  ## reports no birth time is not recorded, so it stays refused). Only
   ## ``unit``'s own pending paths: another unit's start, later in the same
   ## step, records its own. Every entry already there is kept only while its
   ## path still has the recorded identity; one whose directory is gone (a
@@ -1523,26 +1537,62 @@ proc recordCreatedDirs*(stateDir, unit: string;
     when mutated("created-dirs-by-path"):
       t[path] = c
     else:
-      if now.exists and now.dev == c.dev and now.ino == c.ino: t[path] = c
+      if now.exists and now.btime != 0 and now.dev == c.dev and now.ino == c.ino and
+          now.btime == c.btime:
+        t[path] = c
   for (path, u) in pending:
     when not mutated("created-dirs-per-step"):
       if u != unit: continue
     if path in t: continue
     let now = identityOf(path)
-    if now.exists:
-      t[path] = CreatedDir(unit: u, dev: now.dev, ino: now.ino, invocation: invocation)
+    if now.exists and now.btime != 0:
+      t[path] = entryOf(u, now, invocation)
   if t == before: return
   writeCreatedDirs(stateDir, t)
+
+proc recordStartedSince*(stateDir: string;
+                         pending: openArray[tuple[path, unit: string]];
+                         sinceNs: int64;
+                         invocationOf: proc (u: string): tuple[id: string; start: int64];
+                         identityOf: proc (p: string): PathIdentity = identityOfPath) =
+  ## After the start step: each pending directory of a unit the switch did
+  ## not start by name, but which started during it (a template instance a
+  ## ``Wants=`` pulled in, an instance its socket started), is recorded for
+  ## that unit when systemd's state shows the unit's own start made it:
+  ## the unit's current invocation began at or after ``sinceNs`` (this
+  ## switch's start step), and the directory was born at or after that
+  ## invocation began (§13 decisions 68 and 77; A9 review round 11, finding
+  ## 4). Anything else stays unrecorded, so it is refused at the next apply.
+  when mutated("dependency-starts-unrecorded"): return
+  when mutated("created-dirs-ignored"): return
+  var t = readCreatedDirs(stateDir)
+  var changed = false
+  for (path, u) in pending:
+    let now = identityOf(path)
+    if not now.exists or now.btime == 0: continue
+    if path in t:
+      let c = t[path]
+      # Kept while it is still that directory; a stale entry (the unit's
+      # restart made it again) is replaced by the same evidence.
+      if c.dev == now.dev and c.ino == now.ino and c.btime == now.btime: continue
+    let inv = invocationOf(u)
+    if inv.id.len == 0 or inv.start <= 0 or inv.start < sinceNs: continue
+    if now.btime < inv.start: continue
+    t[path] = entryOf(u, now, inv.id)
+    changed = true
+  if changed: writeCreatedDirs(stateDir, t)
 
 proc acceptRecreated*(stateDir, path, unit, invocation: string;
                       identityOf: proc (p: string): PathIdentity = identityOfPath) =
   ## Record ``path`` again for ``unit`` under the identity it has now and
   ## the invocation systemd made it for, once the effective check accepted
-  ## it by §13 decision 71.
+  ## it by §13 decision 71. Raises when it cannot be written, so the
+  ## acceptance is not made.
   var t = readCreatedDirs(stateDir)
   let now = identityOf(path)
-  if not now.exists: return
-  t[path] = CreatedDir(unit: unit, dev: now.dev, ino: now.ino, invocation: invocation)
+  if not now.exists or now.btime == 0:
+    raise newException(IOError, path & ": no identity to record")
+  t[path] = entryOf(unit, now, invocation)
   writeCreatedDirs(stateDir, t)
 
 proc createdDirsAbsent*(stateDir: string): bool =
@@ -1559,36 +1609,67 @@ proc createdDirsAbsent*(stateDir: string): bool =
   if lstat(createdDirsPath(stateDir).cstring, st) == 0: return false
   osLastError().int32 == ENOENT
 
+proc installedDirectories*(unitFile: string; dropIns: openArray[string]): seq[string] =
+  ## The directories a unit the add-on installed declares, read from the
+  ## files the add-on wrote for it (its unit file, then its own drop-ins in
+  ## order), not from systemd's view, which a drop-in the add-on did not
+  ## write could add to (A9 review round 11, finding 5). Each
+  ## ``*Directory=`` value under its root; an empty assignment resets.
+  var vals = initTable[string, seq[string]]()
+  for f in @[unitFile] & @dropIns:
+    var text = ""
+    try: text = readFile(f)
+    except IOError, OSError: continue
+    for (k, v) in serviceDirectives(text):
+      for (dk, _) in DirectoryRoots:
+        if k != dk: continue
+        if v.strip().len == 0: vals[k] = @[]
+        else: vals.mgetOrPut(k, @[]).add(v.splitWhitespace())
+  for (k, root) in DirectoryRoots:
+    for v in vals.getOrDefault(k):
+      let d = v.split(':')[0]
+      if d.len > 0 and '/' notin d: result.add(normalisedPath(root & "/" & d))
+
 proc migrateCreatedDirs*(stateDir, committed: string; previous: Ledger;
-                         showOf: proc (unit: string): ShowProps;
                          invocationOf: proc (unit: string): string;
+                         audit: proc (path: string; c: CreatedDir): bool;
                          identityOf: proc (p: string): PathIdentity = identityOfPath;
+                         showOf: proc (unit: string): ShowProps = nil;
                          alsoUnits: openArray[string] = []):
                          seq[tuple[path: string; entry: CreatedDir]] =
   ## §13 decision 72, the one-time migration of a host whose committed
   ## generation an engine without the record wrote. It runs only when the
-  ## record file is absent (``createdDirsAbsent``) and ``committed`` names a
-  ## committed generation; every engine that keeps the record writes the
-  ## file at its first switch, so an absent file with a committed
-  ## generation means an older engine wrote it. It records, with its
-  ## identity and the unit's invocation, each existing directory exactly
-  ## declared (``declaredDirectories``: the whole value, which must be its
-  ## own first component, so never a parent or a prefix) by a floored unit
-  ## the committed generation's ledger installed (``lcUnit``, its unit file
-  ## carrying the floor's block), whose name is no base tree and whose
-  ## directory passes the shape rule. It then writes the record file,
+  ## record file is absent (``createdDirsAbsent``) and the committed
+  ## generation carries no ``recordKeptMarker``, which every engine that
+  ## keeps the record writes into each generation it sets. It records, with
+  ## its identity (device, inode, birth time) and the unit's invocation,
+  ## each existing directory exactly declared by a floored unit the
+  ## committed generation's ledger installed (``lcUnit``, its unit file
+  ## carrying the floor's block), as that generation's own files declare it
+  ## (``installedDirectories``, never systemd's view), whose name is no
+  ## base tree and whose directory passes the shape rule. Each entry is
+  ## audit-logged first (``audit``); one that cannot be logged is not
+  ## recorded, so it stays refused. Then it writes the record file,
   ## atomically and durably, even empty, so it never runs again; with no
-  ## committed generation it only writes the empty file. After it, only
-  ## provenance counts (decision 71).
+  ## committed generation, or one an engine with the record wrote, it only
+  ## writes the empty file. After it, only provenance counts (decision 71).
+  ## ``showOf`` serves only the falsifying build ``migration-reads-systemd``.
   when not mutated("migration-reruns"):
     if not createdDirsAbsent(stateDir): return
   var t = initTable[string, CreatedDir]()
-  if committed.len > 0:
+  var olderEngine = committed.len > 0 and
+    not fileExists(recordKeptMarker(stateDir, committed))
+  when mutated("migration-ignores-engine"):
+    olderEngine = committed.len > 0
+  if olderEngine:
     var units: seq[tuple[name, file: string]]
+    var dropIns = initTable[string, seq[string]]()
     for e in previous.entries:
-      if e.class != lcUnit: continue
-      let name = if e.unit.len > 0: e.unit else: extractFilename(e.path)
-      units.add((name, e.path))
+      if e.class == lcUnit:
+        let name = if e.unit.len > 0: e.unit else: extractFilename(e.path)
+        units.add((name, e.path))
+      elif e.class == lcDropIn and e.unit.len > 0:
+        dropIns.mgetOrPut(e.unit, @[]).add(e.path)
     when mutated("migration-any-unit"):
       for u in alsoUnits: units.add((u, ""))
     for (unit, file) in units:
@@ -1599,47 +1680,80 @@ proc migrateCreatedDirs*(stateDir, committed: string; previous: Ledger;
         try: text = readFile(file)
         except IOError, OSError: continue
         if FloorMarker notin text: continue     # not a floored unit
-      let show = showOf(unit)
       var candidates: seq[string]
+      when mutated("migration-any-unit"):
+        # Falsifying build: a unit the committed generation did not install
+        # (no file of its own) taken from systemd's view.
+        if file.len == 0 and showOf != nil:
+          let sh = showOf(unit)
+          for (k, root) in DirectoryRoots:
+            for v in sh.getOrDefault(k).splitWhitespace():
+              let d = v.split(':')[0]
+              if d.len > 0 and '/' notin d: candidates.add(normalisedPath(root & "/" & d))
       when mutated("migration-any-path"):
-        for fp in firstComponentPaths(show): candidates.add(fp.path)
+        if showOf != nil:
+          for fp in firstComponentPaths(showOf(unit)): candidates.add(fp.path)
+      elif mutated("migration-reads-systemd"):
+        # Falsifying build: round 10's reading, systemd's view (foreign
+        # drop-ins included).
+        if showOf != nil:
+          let sh = showOf(unit)
+          for (k, root) in DirectoryRoots:
+            for v in sh.getOrDefault(k).splitWhitespace():
+              let d = v.split(':')[0]
+              if d.len > 0 and '/' notin d: candidates.add(normalisedPath(root & "/" & d))
       else:
-        for (k, root) in DirectoryRoots:
-          for v in show.getOrDefault(k).splitWhitespace():
-            let d = v.split(':')[0]
-            if '/' in d or managerDirectoryRefusal(unit, k, v).len > 0: continue
-            candidates.add(normalisedPath(root & "/" & d))
+        for d in installedDirectories(file, dropIns.getOrDefault(unit)):
+          let first = d.split('/')[^1]
+          var shapeOk = true
+          for (k, root) in DirectoryRoots:
+            if d == normalisedPath(root & "/" & first) and
+                managerDirectoryRefusal(unit, k, first).len > 0:
+              shapeOk = false
+          if shapeOk: candidates.add(d)
       for path in candidates:
         if inAddOnTree(path) or path in t: continue
         let now = identityOf(path)
-        if now.exists:
-          t[path] = CreatedDir(unit: unit, dev: now.dev, ino: now.ino,
-                               invocation: invocationOf(unit))
+        if now.exists and now.btime != 0:
+          let c = entryOf(unit, now, invocationOf(unit))
+          when mutated("unlogged-migration"):
+            discard audit(path, c)
+            t[path] = c
+          else:
+            if audit(path, c): t[path] = c
   writeCreatedDirs(stateDir, t)
   for k, v in t: result.add((k, v))
 
 proc unitInvocation*(unit: string): tuple[id: string; start: int64] =
   ## The unit's current ``InvocationID`` and when that invocation began
-  ## (``InactiveExitTimestamp``, seconds; systemctl(1) ``--timestamp=unix``),
-  ## or empty when systemd does not say.
+  ## (``InactiveExitTimestamp``, nanoseconds since the epoch, read with
+  ## microseconds in UTC: systemctl(1) ``--timestamp=us+utc``), or empty
+  ## when systemd does not say.
   try:
-    let r = runSystemctl(@["show", "--no-pager", "--timestamp=unix", "-p",
+    let r = runSystemctl(@["show", "--no-pager", "--timestamp=us+utc", "-p",
                            "InvocationID", "-p", "InactiveExitTimestamp", "--", unit])
     if r.exitCode != 0: return
     for l in r.output.splitLines():
       if l.startsWith("InvocationID="): result.id = l["InvocationID=".len .. ^1].strip()
-      elif l.startsWith("InactiveExitTimestamp=@"):
-        try: result.start = parseBiggestInt(l["InactiveExitTimestamp=@".len .. ^1].strip())
-        except ValueError: discard
+      elif l.startsWith("InactiveExitTimestamp="):
+        let v = l["InactiveExitTimestamp=".len .. ^1].strip()
+        # "Sun 2026-11-08 10:00:00.123456 UTC"
+        let parts = v.splitWhitespace()
+        if parts.len == 4 and parts[3] == "UTC":
+          try:
+            let dt = parse(parts[1] & " " & parts[2].split('.')[0], "yyyy-MM-dd HH:mm:ss", utc())
+            var us = 0'i64
+            if '.' in parts[2]: us = parseBiggestInt(parts[2].split('.')[1])
+            result.start = dt.toTime.toUnix * 1_000_000_000'i64 + us * 1000
+          except ValueError, TimeParseError: discard
   except CatchableError: discard
 
 proc hostSystemdView*(path, unit: string; show: ShowProps): SystemdView =
   ## systemd's own state of ``path``, a directory of ``unit``, for §13
-  ## decision 71: the dynamic-uid record naming the unit's dynamic user
-  ## (``/run/systemd/dynamic-uid/<uid>`` holds the user's name; systemd
-  ## ``src/core/dynamic-user.c``), the directory's owner and ctime through
-  ## systemd's own ``private/<name>`` link and no other, and the unit's
-  ## current invocation.
+  ## decisions 71 and 77: the directory's birth time (through systemd's own
+  ## ``private/<name>`` link of a dynamic user and no other link) and the
+  ## start of the unit's current invocation. The dynamic-uid record, the
+  ## owner and the ctime are read for the audit log only.
   result.dynamicUid = -1
   result.owner = -1
   if show.getOrDefault("DynamicUser") == "yes":
@@ -1671,6 +1785,7 @@ proc hostSystemdView*(path, unit: string; show: ShowProps): SystemdView =
   if stat(target.cstring, st) == 0:
     result.owner = int(st.st_uid)
     result.ctime = int64(st.st_ctim.tv_sec)
+  result.btime = birthTimeOf(target)
   let inv = unitInvocation(unit)
   result.invocationId = inv.id
   result.invocationStart = inv.start
@@ -1691,7 +1806,8 @@ proc effectiveFloorCheck*(resources: openArray[SystemResource];
                           created = initTable[string, CreatedDir]();
                           pending: ptr seq[tuple[path, unit: string]] = nil;
                           ledgerDirs = initHashSet[string]();
-                          recreated: ptr seq[tuple[path, unit: string; v: SystemdView]] = nil):
+                          recreated: ptr seq[tuple[path, unit: string; v: SystemdView]] = nil;
+                          acceptRecreatedLogged: proc (path, unit: string; v: SystemdView): bool = nil):
                           seq[string] =
   ## ``owned``: the store objects the generation owns with a recorded
   ## digest; an ``EnvironmentFile=`` or a read-only bind source must lie in
@@ -1771,9 +1887,14 @@ proc effectiveFloorCheck*(resources: openArray[SystemResource];
         createdDirs: created, ledgerDirs: ledgerDirs,
         systemdView: hostSystemdView)
       var acceptedNow: seq[string]
-      e.onRecreated = proc (path, unit: string; v: SystemdView) =
+      e.onRecreated = proc (path, unit: string; v: SystemdView): bool =
+        # Recorded again and logged, or not accepted (§13 decision 71; A9
+        # review round 11, finding 6).
+        if acceptRecreatedLogged == nil or not acceptRecreatedLogged(path, unit, v):
+          return false
         acceptedNow.add(path)
         if recreated != nil: recreated[].add((path, unit, v))
+        true
       for o in resources:
         if o.kind == srkSystemdSystemUnit and o.suName != r.suName and
             effectiveFloor(o).len > 0 and o.suCollision != "dropIn":
@@ -1826,9 +1947,23 @@ proc effectiveFloorCheck*(resources: openArray[SystemResource];
               except IOError, OSError:
                 result.add(refusalLine(a, "unreadable", "FragmentPath,DropInPaths",
                                        "cannot read " & f & ", which systemd loaded"))
+            # §13 decision 78: a unix listener is the activator's when its
+            # path is absent now (its start creates it, and that start
+            # records it) or the record names it for the activator, still
+            # the same inode and birth time.
+            let act = a
+            let listenerProvenance = proc (path: string): string =
+              let now = identityOfPath(path)
+              if not now.exists:
+                if pending != nil: pending[].add((path, act))
+                return ""
+              if createdForUnit(path, act, now, created, ledgerDirs): return ""
+              if pending != nil and startMayCreate(path, act, now, created):
+                pending[].add((path, act))
+              "it exists"
             result.add(activatorProblems(a, ash, parseShowLines(at),
                                          unitPath(a), aown, aloaded, startsOf,
-                                         ownUnits, conflictsOf))
+                                         ownUnits, conflictsOf, listenerProvenance))
           except CatchableError as ex:
             result.add(refusalLine(a, "show", "-", ex.msg))
 
@@ -3612,20 +3747,25 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
   # writes nothing; a replay or a revert finishes a switch an engine with
   # the record started.
   if not opts.planOnly and purpose notin ["replay", "revert"]:
-    let migrated = migrateCreatedDirs(stateDir, committedPrevious, previous,
-      proc (u: string): ShowProps =
-        try: parseShow(showUnitText(u)) except CatchableError: initTable[string, string](),
-      proc (u: string): string = unitInvocation(u).id)
-    for (path, c) in migrated:
-      try:
-        appendAuditRecord(applyLogPath(stateDir, committedPrevious), AuditRecord(
-          timestamp: getTime().toUnix(), operationKind: "addon.floor",
-          resourceAddress: "directory:" & path, outcome: "migrated",
-          diagnostic: c.unit & ": recorded once from the committed generation " &
-            committedPrevious & " (st_dev " & $c.dev & ", st_ino " & $c.ino &
-            ", invocation " & c.invocation & "; §13 decision 72)",
-          recordClass: AuditClassLiveState))
-      except CatchableError: discard
+    # Each entry is logged before it is recorded; one whose audit record
+    # cannot be written is not recorded, so it stays refused (A9 review
+    # round 11, finding 6).
+    discard migrateCreatedDirs(stateDir, committedPrevious, previous,
+      proc (u: string): string = unitInvocation(u).id,
+      proc (path: string; c: CreatedDir): bool =
+        try:
+          appendAuditRecord(applyLogPath(stateDir, committedPrevious), AuditRecord(
+            timestamp: getTime().toUnix(), operationKind: "addon.floor",
+            resourceAddress: "directory:" & path, outcome: "migrated",
+            diagnostic: c.unit & ": recorded once from the committed generation " &
+              committedPrevious & " (st_dev " & $c.dev & ", st_ino " & $c.ino &
+              ", birth " & $c.btime & " ns, invocation " & c.invocation &
+              "; §13 decision 72)",
+            recordClass: AuditClassLiveState))
+          true
+        except CatchableError: false,
+      showOf = proc (u: string): ShowProps =
+        try: parseShow(showUnitText(u)) except CatchableError: initTable[string, string]())
   let previousUserText =
     if replaying: replayPlan.fromUserText
     elif fileExists(userProfilePath(stateDir)): readFile(userProfilePath(stateDir))
@@ -5438,6 +5578,17 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
         ## CLOCK_MONOTONIC seconds just after step 6's daemon-reload; 0
         ## when there was none.
       hookGeneration = generationId
+      # §13 decision 72: this engine keeps the record of floored units'
+      # directories, and says so in every generation it sets, so a later
+      # migration can tell its generations from an older engine's.
+      when not mutated("migration-ignores-engine"):
+        try:
+          createDir(generationDir(stateDir, generationId))
+          writeFile(recordKeptMarker(stateDir, generationId), "")
+        except IOError, OSError:
+          problems.add("cannot mark generation " & generationId & " as written " &
+                       "by an engine that keeps the record of floored units' " &
+                       "directories (§13 decision 72)")
       # Steps 4 and 5 are the drivers' writes, in the profile's apply
       # order (links and copies interleave); both are complete here.
       marker.attempt = generationId
@@ -5634,25 +5785,24 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
           let notHeld = effectiveFloorCheck(composed.resources, ownedObjects,
                                             adoptedFiles, readCreatedDirs(stateDir),
                                             addr createdPending, ledgerDirs,
-                                            addr recreated)
-          # §13 decision 71: each directory systemd made again for its unit
-          # outside a switch is recorded under its new identity, and the
-          # acceptance is in the generation's audit log.
-          for (path, unit, v) in recreated:
-            try: acceptRecreated(stateDir, path, unit, v.invocationId)
-            except IOError, OSError: discard
-            try:
-              appendAuditRecord(applyLogPath(stateDir, generationId), AuditRecord(
-                timestamp: getTime().toUnix(), operationKind: "addon.floor",
-                resourceAddress: "directory:" & path,
-                outcome: "recreated-accepted",
-                diagnostic: unit & ": made again by systemd for invocation " &
-                  v.invocationId & (if v.dynamicUid >= 0: " (dynamic uid " &
-                  $v.dynamicUid & ")" else: "") & ", ctime " & $v.ctime &
-                  " >= invocation start " & $v.invocationStart &
-                  " (§13 decision 71)",
-                recordClass: AuditClassLiveState))
-            except CatchableError: discard
+                                            addr recreated,
+            # §13 decision 71: each directory systemd made again for its unit
+            # outside a switch is recorded under its new identity and the
+            # acceptance written to the generation's audit log, both before
+            # it counts; either failing refuses it.
+            proc (path, unit: string; v: SystemdView): bool =
+              try:
+                appendAuditRecord(applyLogPath(stateDir, generationId), AuditRecord(
+                  timestamp: getTime().toUnix(), operationKind: "addon.floor",
+                  resourceAddress: "directory:" & path,
+                  outcome: "recreated-accepted",
+                  diagnostic: unit & ": made again by systemd for invocation " &
+                    v.invocationId & ", born " & $v.btime & " ns >= invocation " &
+                    "start " & $v.invocationStart & " ns (§13 decisions 71, 77)",
+                  recordClass: AuditClassLiveState))
+                acceptRecreated(stateDir, path, unit, v.invocationId)
+                true
+              except CatchableError: false)
           # The carried-state reach, cross-checked against the units as
           # systemd loaded them (A13 review round 5, finding 1): wherever
           # carried state is on this host, a unit the static analysis took
@@ -5707,9 +5857,14 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
                 try: recordCreatedDirs(stateDir, u, createdPending,
                                        invocation = unitInvocation(u).id)
                 except IOError, OSError: discard
+          let startStepNs = getTime().toUnix * 1_000_000_000'i64 +
+                            int64(getTime().nanosecond)
           runStart(stepTransitions, paused, notRunning,
                    noBlock = opts.nonBlockingStarts, reloadedAt = reloadedAt,
                    afterStart = recordAfter)
+          if not opts.nonBlockingStarts and createdPending.len > 0:
+            try: recordStartedSince(stateDir, createdPending, startStepNs, unitInvocation)
+            except IOError, OSError: discard
           # A replay or a revert plans the units the interrupted switch had
           # running as running, but `try-restart` leaves a unit the crash
           # (or step 2) stopped stopped: start every such unit of this
