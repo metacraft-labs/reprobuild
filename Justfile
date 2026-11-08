@@ -78,6 +78,14 @@ addon-static *ARCHES="amd64 arm64 armhf":
 e2e_addon_bootstrap_uninstall_byte_identity:
     bash ./scripts/run_addon_gate.sh t_e2e_addon_bootstrap_uninstall_byte_identity
 
+# A16 (spec §6.5): image synthesis and remote bootstrap. Both run the full
+# engine of this checkout on the build host: `just build` first.
+e2e_addon_zero_touch_image_synthesis_boots_converged:
+    REPRO_ADDON_BASES="${REPRO_ADDON_BASES:-debian-13-amd64}" bash ./scripts/run_addon_gate.sh t_e2e_addon_zero_touch_image_synthesis_boots_converged
+
+e2e_addon_anywhere_remote_bootstrap_converges_clean_guest:
+    REPRO_ADDON_BASES="${REPRO_ADDON_BASES:-debian-13-amd64}" bash ./scripts/run_addon_gate.sh t_e2e_addon_anywhere_remote_bootstrap_converges_clean_guest
+
 e2e_addon_preflight_is_zero_write:
     bash ./scripts/run_addon_gate.sh t_e2e_addon_preflight_is_zero_write
 
@@ -3284,6 +3292,12 @@ e2e_hcr_linux_registration_payloads_travel_over_the_production_wire:
         --out:build/test-bin/e2e_hcr_linux_registration_payloads_travel_over_the_production_wire \
         tests/e2e/hcr-linux-unwind/t_e2e_hcr_linux_registration_payloads_travel_over_the_production_wire.nim \
         2>&1 | tee test-logs/e2e_hcr_linux_registration_payloads_travel_over_the_production_wire.log
+
+# The Nim 2.2.4 lane: the async suites that once awaited inside a `finally`,
+# built and run with the lowest Nim repro.nim's `uses:` range admits (owner
+# decision 2026-11-07). Needs the dev shell.
+test-nim224 *tests:
+    bash scripts/run_nim224_lane.sh {{tests}}
 
 # Exercise the actual fork parser and independent script publication guard.
 test-format:

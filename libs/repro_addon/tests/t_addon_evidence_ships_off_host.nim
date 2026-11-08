@@ -33,108 +33,135 @@ proc records(sink: SinkFixture; detector: string): seq[EvidenceEntry] =
   for e in sink.entries():
     if e.kind == ekRecord and e.record.detector == detector: result.add(e)
 
-suite "evidence ships off-host":
-  let sink = startSink(root)
-  var h = newHost(root, "host-a", sink, endpoint = "127.0.0.1:" & $closedPort())
-  sink.enrol(h)
+template withHost(caseName: string; reachable: bool; body: untyped) =
+  ## A sink and a host of the case's own. Each case runs in a process of its
+  ## own, so none may rely on a sink, an outbox or a cursor another case
+  ## left: a case that needs an earlier step takes it itself.
+  block:
+    let sink {.inject.} = startSink(root / caseName)
+    var h {.inject.} = newHost(root / caseName, "host-a", sink,
+      endpoint = (if reachable: sink.endpoint
+                  else: "127.0.0.1:" & $closedPort()))
+    sink.enrol(h)
+    try:
+      body
+    finally:
+      sink.server.stop()
 
+proc queueTwo(h: HostFixture): string =
+  ## The two detections the shipping cases send; the local record's path.
+  result = recordEvidence(EvidenceEvent(detector: edApplyRefusal,
+    category: ecDetection, trigger: "apply-refused",
+    fields: @[("message", "first")]), h.evidence)
+  discard recordEvidence(EvidenceEvent(detector: edRollback,
+    category: ecDetection, trigger: "rolled-back",
+    fields: @[("message", "second")]), h.evidence)
+
+suite "evidence ships off-host":
   test "a record lands locally and in the outbox":
-    let p = recordEvidence(EvidenceEvent(detector: edApplyRefusal,
-      category: ecDetection, trigger: "apply-refused",
-      fields: @[("message", "first")]), h.evidence)
-    check fileExists(p)
-    check "\"detector\": \"addon-apply-refusal\"" in readFile(p)
-    discard recordEvidence(EvidenceEvent(detector: edRollback,
-      category: ecDetection, trigger: "rolled-back",
-      fields: @[("message", "second")]), h.evidence)
-    check outboxEntries(h.site.outbox).len == 2
+    withHost("local", reachable = false):
+      let p = queueTwo(h)
+      check fileExists(p)
+      check "\"detector\": \"addon-apply-refusal\"" in readFile(p)
+      check outboxEntries(h.site.outbox).len == 2
 
   test "an unreachable sink leaves every entry queued, and the run does not fail":
-    let r = runEvidenceShip(h.site, h.conf, "host-a")
-    check r.shipped == 0
-    check r.pending == 2
-    check r.error.len > 0
-    check outboxEntries(h.site.outbox).len == 2
+    withHost("unreachable", reachable = false):
+      discard queueTwo(h)
+      let r = runEvidenceShip(h.site, h.conf, "host-a")
+      check r.shipped == 0
+      check r.pending == 2
+      check r.error.len > 0
+      check outboxEntries(h.site.outbox).len == 2
 
   test "a reachable sink takes them in order, then the heartbeat; the outbox empties":
-    h.pointAt(sink.endpoint)
-    writeFile(h.site.dpkgLog,
-      "2026-11-04 10:00:00 startup archives unpack\n" &
-      "2026-11-04 10:00:01 install foo:amd64 <none> 1.0\n" &
-      "2026-11-04 10:05:00 startup packages configure\n")
-    let r = runEvidenceShip(h.site, h.conf, "host-a")
-    check r.error == ""
-    check r.shipped == 2
-    check r.heartbeat
-    check outboxEntries(h.site.outbox).len == 0
-    var order: seq[string]
-    for e in sink.entries():
-      if e.kind == ekRecord:
-        check $e.senderHostId == h.credentialHost
-        order.add(e.record.trigger & e.record.field("message"))
-    check order[0 .. 1] == @["apply-refusedfirst", "rolled-backsecond"]
-    let beats = sink.records("addon-evidence-ship")
-    check beats.len == 1
-    check beats[0].record.category == ecHeartbeat
-    check beats[0].record.field("intervalMs") == "300000"
-    check beats[0].record.field("bootId") == "boot-host-a"
-    check beats[0].record.field("dpkgLastRun") == "2026-11-04 10:05:00"
+    withHost("reachable", reachable = true):
+      discard queueTwo(h)
+      writeFile(h.site.dpkgLog,
+        "2026-11-04 10:00:00 startup archives unpack\n" &
+        "2026-11-04 10:00:01 install foo:amd64 <none> 1.0\n" &
+        "2026-11-04 10:05:00 startup packages configure\n")
+      let r = runEvidenceShip(h.site, h.conf, "host-a")
+      check r.error == ""
+      check r.shipped == 2
+      check r.heartbeat
+      check outboxEntries(h.site.outbox).len == 0
+      var order: seq[string]
+      for e in sink.entries():
+        if e.kind == ekRecord:
+          check $e.senderHostId == h.credentialHost
+          order.add(e.record.trigger & e.record.field("message"))
+      check order.len >= 2
+      if order.len >= 2:
+        check order[0 .. 1] == @["apply-refusedfirst", "rolled-backsecond"]
+      let beats = sink.records("addon-evidence-ship")
+      check beats.len == 1
+      if beats.len == 1:
+        check beats[0].record.category == ecHeartbeat
+        check beats[0].record.field("intervalMs") == "300000"
+        check beats[0].record.field("bootId") == "boot-host-a"
+        check beats[0].record.field("dpkgLastRun") == "2026-11-04 10:05:00"
 
   test "nothing queued and a recent heartbeat: the run sends nothing":
-    let before = sink.entries().len
-    let r = runEvidenceShip(h.site, h.conf, "host-a")
-    check r.shipped == 0 and not r.heartbeat
-    check sink.entries().len == before
+    withHost("idle", reachable = true):
+      discard queueTwo(h)
+      let first = runEvidenceShip(h.site, h.conf, "host-a")
+      check first.shipped == 2 and first.heartbeat
+      let before = sink.entries().len
+      let r = runEvidenceShip(h.site, h.conf, "host-a")
+      check r.shipped == 0 and not r.heartbeat
+      check sink.entries().len == before
 
   test "the apt hook wrapper's events become DET-AO-6 records":
-    writeFile(h.site.aptHookLog,
-      "2026-11-04T10:06:00Z verify-timeout exit=137 timeout=60s\n" &
-      "2026-11-04T10:07:00Z drift 1 finding(s)\n")
-    let r = runEvidenceShip(h.site, h.conf, "host-a", forceHeartbeat = true)
-    check r.hookEvents == 1
-    var timeouts = 0
-    for e in sink.records("addon-apt-hook"):
-      if e.record.trigger == "verify-timeout" and
-          e.record.category == ecDetection: inc timeouts
-    check timeouts == 1
-    # The cursor moved on: the same line is not reported twice.
-    check runEvidenceShip(h.site, h.conf, "host-a").hookEvents == 0
+    withHost("apt-hook", reachable = true):
+      writeFile(h.site.aptHookLog,
+        "2026-11-04T10:06:00Z verify-timeout exit=137 timeout=60s\n" &
+        "2026-11-04T10:07:00Z drift 1 finding(s)\n")
+      let r = runEvidenceShip(h.site, h.conf, "host-a", forceHeartbeat = true)
+      check r.hookEvents == 1
+      var timeouts = 0
+      for e in sink.records("addon-apt-hook"):
+        if e.record.trigger == "verify-timeout" and
+            e.record.category == ecDetection: inc timeouts
+      check timeouts == 1
+      # The cursor moved on: the same line is not reported twice.
+      check runEvidenceShip(h.site, h.conf, "host-a").hookEvents == 0
 
   test "a record that waited for the timer is a stall the check reports (F2)":
-    # The host shipped before (``last-ship`` is set); a record written two
-    # minutes ago and only now shipped is what a dead path unit leaves.
-    let t0 = int64(epochTime() * 1000)
-    writeFile(h.site.stateDir / "last-ship", $(t0 - 200_000) & "\n")
-    var r = newEvidenceRecord(ecDetection, "addon-apply-refusal", "late",
-      [("host", "host-a")], nowMs = int64(epochTime() * 1000) - 120_000)
-    writeOutboxRecord(h.site.outbox, r, "late")
-    let res = runEvidenceShip(h.site, h.conf, "host-a")
-    check res.heartbeat
-    let c = runEvidenceCheck(CheckInputs(storeDir: sink.storeDir,
-      hosts: @[EnrolledHost(hostId: h.credentialHost)],
-      nowMs: int64(epochTime() * 1000)))
-    checkpoint render(c)
-    check c.alerts.anyIt(it.detector == "DET-AO-8" and
-      it.trigger == "shipping-stalled")
-    # Shipping at once again: the next heartbeat clears it.
-    let res2 = runEvidenceShip(h.site, h.conf, "host-a", forceHeartbeat = true)
-    check res2.heartbeat
-    let c2 = runEvidenceCheck(CheckInputs(storeDir: sink.storeDir,
-      hosts: @[EnrolledHost(hostId: h.credentialHost)],
-      nowMs: int64(epochTime() * 1000)))
-    check not c2.alerts.anyIt(it.trigger == "shipping-stalled")
+    withHost("stall", reachable = true):
+      # The host shipped before (``last-ship`` is set); a record written two
+      # minutes ago and only now shipped is what a dead path unit leaves.
+      let t0 = int64(epochTime() * 1000)
+      writeFile(h.site.stateDir / "last-ship", $(t0 - 200_000) & "\n")
+      var r = newEvidenceRecord(ecDetection, "addon-apply-refusal", "late",
+        [("host", "host-a")], nowMs = int64(epochTime() * 1000) - 120_000)
+      writeOutboxRecord(h.site.outbox, r, "late")
+      let res = runEvidenceShip(h.site, h.conf, "host-a")
+      check res.heartbeat
+      let c = runEvidenceCheck(CheckInputs(storeDir: sink.storeDir,
+        hosts: @[EnrolledHost(hostId: h.credentialHost)],
+        nowMs: int64(epochTime() * 1000)))
+      checkpoint render(c)
+      check c.alerts.anyIt(it.detector == "DET-AO-8" and
+        it.trigger == "shipping-stalled")
+      # Shipping at once again: the next heartbeat clears it.
+      let res2 = runEvidenceShip(h.site, h.conf, "host-a", forceHeartbeat = true)
+      check res2.heartbeat
+      let c2 = runEvidenceCheck(CheckInputs(storeDir: sink.storeDir,
+        hosts: @[EnrolledHost(hostId: h.credentialHost)],
+        nowMs: int64(epochTime() * 1000)))
+      check not c2.alerts.anyIt(it.trigger == "shipping-stalled")
 
   test "a host without a sink writes local records only":
-    var local = h.evidence
-    local.confPath = root / "no-such-evidence.conf"
-    local.outbox = root / "no-outbox"
-    discard recordEvidence(EvidenceEvent(detector: edApplyRefusal,
-      category: ecDetection, trigger: "apply-refused"), local)
-    check not dirExists(local.outbox)
-    # A heartbeat goes off-host only: on such a host it is written nowhere.
-    check recordEvidence(EvidenceEvent(detector: edAgentTick,
-      category: ecHeartbeat, offHostOnly: true), local) == ""
-
-  sink.server.stop()
+    withHost("no-sink", reachable = false):
+      var local = h.evidence
+      local.confPath = root / "no-such-evidence.conf"
+      local.outbox = root / "no-outbox"
+      discard recordEvidence(EvidenceEvent(detector: edApplyRefusal,
+        category: ecDetection, trigger: "apply-refused"), local)
+      check not dirExists(local.outbox)
+      # A heartbeat goes off-host only: on such a host it is written nowhere.
+      check recordEvidence(EvidenceEvent(detector: edAgentTick,
+        category: ecHeartbeat, offHostOnly: true), local) == ""
 
 removeDir(root)

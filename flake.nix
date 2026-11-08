@@ -327,7 +327,12 @@
       # never published a monitored edge on macOS. A capture is now complete
       # when no recorded or marked descendant survives the root; one that does
       # survive is still a loss.
-      url = "github:metacraft-labs/io-mon/e66e05c9471ce184e9a3b0d793b2db62ca5557b9";
+      # Bumped e66e05c9 -> ac06360d (2026-11-08, io-mon `agents`): brings 23556a3,
+      # the exported dlsym answers dlsym(RTLD_NEXT) relative to its caller. Before it,
+      # an LD_PRELOAD hook library loaded after the monitor shim (an agent session's
+      # command-trace shim) got its own export back as the "next" definition and
+      # recursed until it crashed, so every monitored action failed silently.
+      url = "github:metacraft-labs/io-mon/ac06360d15be70aca46202d0ce04c5b17cba5ac1";
       flake = false;
     };
     nim-shm-gset-src = {
@@ -808,8 +813,14 @@
     # Advanced from 9a49ee3c to 197089cd (metacraft-labs/nim#16): the
     # compiler records its own message origins relative to the Nim root, so
     # a compiler built from a checkout names no path of it.
+    #
+    # Advanced from 197089cd to 8384ff3f: `std/jsonutils` decodes an `int64`
+    # above `int.high` and a `uint32` above `int32.high` where `int` is 32
+    # bits (wasm32, i386, JS) instead of raising a RangeDefect. 259a2595
+    # rides along: `std/osproc` applies `workingDir` in the child process
+    # instead of changing the parent's directory around the spawn.
     nim-fork-src = {
-      url = "git+https://github.com/metacraft-labs/nim?ref=codetracer&rev=197089cda27f656f8010e2b31b40e0e12f3f209b";
+      url = "git+https://github.com/metacraft-labs/nim?ref=codetracer&rev=8384ff3fecfdbd8772d46c79054967769915d6fd";
       flake = false;
     };
     nim-csources-src = {
@@ -2871,6 +2882,15 @@
               pkgs.qemu
               pkgs.grub2_efi
               pkgs.kmod
+              # ReproOS add-on mode A16 (`repro infra image`, spec §6.5.2):
+              # the image command writes filesystems inside an image file
+              # without mounting them -- ext4 with e2fsprogs' `debugfs`,
+              # `e2fsck` and `resize2fs`, FAT with `mtools` -- and decompresses
+              # `.img.xz` upstream images with `xz`. They are build-host
+              # tools of the command and of its gates
+              # (e2e_addon_zero_touch_image_synthesis_boots_converged).
+              pkgs.e2fsprogs
+              pkgs.mtools
               # ReproOS attestation boot gates: they boot a
               # disk image under QEMU through gosti's
               # QemuBootBackend and assert on its serial console.  The
@@ -2897,6 +2917,25 @@
               #     all.
               pkgs.OVMF.fd
               pkgs.swtpm
+              # Host tools that unit gates drive for real and that a CI
+              # runner's service PATH does not carry (a developer's NixOS
+              # PATH usually does, which is how their absence went unseen):
+              #
+              #   * ``ip`` and ``nft`` -- the add-on egress observer's table
+              #     is loaded into a private network namespace and read back
+              #     (libs/repro_addon/tests/t_addon_egress_observer.nim).
+              #   * ``llvm-objcopy`` -- the installed prefix strips bundled
+              #     libraries with it (``LlvmObjcopyDebugStrip``; repro.nim
+              #     declares it for ``.#prefix``), and
+              #     t_installed_prefix_assembly_is_recorded runs that strip
+              #     and fails a gate run without it. Only that one binary:
+              #     the rest of ``pkgs.llvm``'s bin/ is not wanted on PATH.
+              pkgs.iproute2
+              pkgs.nftables
+              (pkgs.runCommand "llvm-objcopy" { } ''
+                mkdir -p $out/bin
+                ln -s ${pkgs.llvm}/bin/llvm-objcopy $out/bin/llvm-objcopy
+              '')
             ];
             shellHook = siblingCheckoutSourcesHook + ''
               # Consumers may borrow this toolchain with `nix develop PATH`.

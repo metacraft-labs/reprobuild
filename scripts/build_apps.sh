@@ -704,6 +704,43 @@ if [ "${REPRO_HOST_PLATFORM}" = "darwin" ]; then
   darwin_headerpad=("--passL:-Wl,-headerpad_max_install_names")
 fi
 
+# The build/bin helpers tests check with repro_test_support/fresh_binary
+# (§13 decisions 65 and its round-6 amendment in the ReproOS Add-On Mode
+# spec: the add-on's and the Evidence sink's test helpers). Each gets a
+# dependency list (scripts/write_helper_deps.sh), in one of two named modes:
+#
+#   REPRO_BUILD_APPS_HELPER_DEPS=write  write each list; a failure to write
+#                                       one fails the build. The default on
+#                                       Linux (the writer traces the
+#                                       compiler with strace).
+#   REPRO_BUILD_APPS_HELPER_DEPS=none   write none, and REMOVE any list a
+#                                       previous build left, so a test that
+#                                       runs these helpers refuses them (the
+#                                       guard stays fail-closed). For builds
+#                                       that run no such test: the Nix
+#                                       package (nix/pkgs/by-name/re/
+#                                       reprobuild/package.nix) sets it. The
+#                                       default elsewhere than Linux, where
+#                                       the writer cannot trace.
+#
+# The mode is printed; any other value is refused.
+HELPER_DEPS_APPS="repro-evidence-sink repro-binary-cache"
+if [ -z "${REPRO_BUILD_APPS_HELPER_DEPS:-}" ]; then
+  if [ "$(uname -s)" = Linux ]; then REPRO_BUILD_APPS_HELPER_DEPS=write
+  else REPRO_BUILD_APPS_HELPER_DEPS=none; fi
+fi
+case "${REPRO_BUILD_APPS_HELPER_DEPS}" in
+  write)
+    echo "build_apps: helper dependency lists: write (${HELPER_DEPS_APPS})" >&2 ;;
+  none)
+    echo "build_apps: helper dependency lists: none (REPRO_BUILD_APPS_HELPER_DEPS=none); removing any old list, so tests that run ${HELPER_DEPS_APPS} from build/bin refuse them" >&2
+    for helper in ${HELPER_DEPS_APPS}; do
+      rm -f "build/nimcache/${helper}/${helper}.deps"
+    done ;;
+  *)
+    echo "build_apps: REPRO_BUILD_APPS_HELPER_DEPS must be 'write' or 'none', not '${REPRO_BUILD_APPS_HELPER_DEPS}'" >&2
+    exit 2 ;;
+esac
 while read -r name path extra_flags; do
   name="${name%$'\r'}"
   path="${path%$'\r'}"
@@ -743,6 +780,10 @@ while read -r name path extra_flags; do
   # Both spellings, because Nim appends ``.exe`` on Windows (see
   # resolve_built_binary); the one that does not exist is skipped.
   artifacts=("build/bin/${name}" "build/bin/${name}.exe")
+  # The helpers a test runs from build/bin get their dependency list beside
+  # the build (scripts/write_helper_deps.sh, below): repro_test_support/
+  # fresh_binary reads it to refuse a binary older than any source it was
+  # compiled from (a test must never report on an old build).
   entrypoint_status=0
   (
     unset_clingo_searchpath
@@ -773,6 +814,16 @@ while read -r name path extra_flags; do
   if built_binary="$(resolve_built_binary "${name}")"; then
     if verify_fresh_artifact "${built_binary}" "${name}"; then
       clear_set_aside_build "${artifacts[@]}"
+      case " ${HELPER_DEPS_APPS} " in
+        *" ${name} "*)
+          if [ "${REPRO_BUILD_APPS_HELPER_DEPS}" = write ] && ! (unset_clingo_searchpath
+                bash scripts/write_helper_deps.sh "${name}" "${path}" \
+                  ${nim_mode_flags[@]+"${nim_mode_flags[@]}"} \
+                  ${extra_flag_array[@]+"${extra_flag_array[@]}"}); then
+            record_failure "${name}: built, but its dependency list (scripts/write_helper_deps.sh) could not be written; a test will refuse the binary"
+          fi
+          ;;
+      esac
     else
       # verify_fresh_artifact has already recorded the failure; this line only
       # says where the artifact it refused went. Deliberately not a second

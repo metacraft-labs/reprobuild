@@ -25,7 +25,7 @@ import ./errors
 
 const
   RbpiMagic*         = "RBPI"           ## 4-byte ASCII envelope magic.
-  RbpiSchemaVersion* = 13'u16           ## Current envelope schema version.
+  RbpiSchemaVersion* = 14'u16           ## Current envelope schema version.
     ##
     ## Version history:
     ##   1 (M83 Phase B): initial envelope; ActivityElement carries
@@ -123,6 +123,12 @@ const
     ##     a schema-11 reader refuses the value as corrupt rather than
     ##     reading it, so a profile using it must be recompiled by a build
     ##     that knows it.
+    ##  14 (ReproOS add-on mode A16, spec §6.5.1): ProfileIntent gains an
+    ##     OPTIONAL top-level ``"baseOs"`` text item -- the profile's
+    ##     ``baseOs:`` section as its canonical JSON. Bumped because a build
+    ##     that did not know the key would read a profile that declares a
+    ##     base image as one that declares none, and `repro infra image`
+    ##     would refuse it as undeclared after a cache hit.
     ## When you change the on-the-wire CBOR shape of ANY field that
     ## affects how a downstream consumer would interpret the envelope,
     ## bump this constant AND document the change here.

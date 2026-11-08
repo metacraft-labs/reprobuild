@@ -16,6 +16,8 @@
 # Review the diff. A row that DECREASES or DISAPPEARS is a test leaving
 # the suite; that is the event this baseline exists to make visible.
 apps/repro-harvest-apt/tests/t_c2_signature.nim	nim	13
+apps/repro-harvest-dnf/tests/t_dnf_gpg_home_fits_sun_path.nim	nim	1
+apps/repro-harvest-pacman/tests/t_pacman_gpg_home_fits_sun_path.nim	nim	1
 libs/ct_test_interface/tests/t_smoke_ct_test_interface.nim	nim	1
 libs/ct_test_nim_unittest/tests/t_smoke_ct_test_nim_unittest.nim	nim	1
 libs/ct_test_nim_unittest/tests/t_test_binary_grouping_plan.nim	nim	36
@@ -52,14 +54,17 @@ libs/repro_addon/tests/t_addon_evidence_probe_owns_its_connection.nim	nim	4
 libs/repro_addon/tests/t_addon_evidence_ships_off_host.nim	nim	7
 libs/repro_addon/tests/t_addon_evidence_units_and_tick_records.nim	nim	8
 libs/repro_addon/tests/t_addon_fingerprint.nim	nim	16
+libs/repro_addon/tests/t_addon_floor_round10.nim	nim	33
 libs/repro_addon/tests/t_addon_floor_round3.nim	nim	16
 libs/repro_addon/tests/t_addon_floor_round4.nim	nim	16
 libs/repro_addon/tests/t_addon_floor_round5.nim	nim	15
 libs/repro_addon/tests/t_addon_floor_round6.nim	nim	23
 libs/repro_addon/tests/t_addon_floor_round7.nim	nim	38
 libs/repro_addon/tests/t_addon_floor_round8.nim	nim	9
+libs/repro_addon/tests/t_addon_floor_round9.nim	nim	20
 libs/repro_addon/tests/t_addon_generation_attestation.nim	nim	6
 libs/repro_addon/tests/t_addon_host_lock_guards_the_switch_and_the_store.nim	nim	8
+libs/repro_addon/tests/t_addon_image_layout_and_boot.nim	nim	14
 libs/repro_addon/tests/t_addon_import_skeleton.nim	nim	9
 libs/repro_addon/tests/t_addon_key_lists_accept_utf8_comments.nim	nim	5
 libs/repro_addon/tests/t_addon_ledger_and_plan.nim	nim	46
@@ -73,6 +78,9 @@ libs/repro_addon/tests/t_addon_restore_before_start.nim	nim	2
 libs/repro_addon/tests/t_addon_retargeted_address_is_refused.nim	nim	3
 libs/repro_addon/tests/t_addon_review_findings.nim	nim	16
 libs/repro_addon/tests/t_addon_review_round2.nim	nim	9
+libs/repro_addon/tests/t_addon_review_round3.nim	nim	8
+libs/repro_addon/tests/t_addon_review_round4.nim	nim	6
+libs/repro_addon/tests/t_addon_review_round5.nim	nim	3
 libs/repro_addon/tests/t_addon_secret_declarations.nim	nim	5
 libs/repro_addon/tests/t_addon_secret_files_created_private_and_never_through_symlinks.nim	nim	6
 libs/repro_addon/tests/t_addon_secrets_envelopes_and_rotation.nim	nim	13
@@ -270,7 +278,7 @@ libs/repro_cli_support/tests/t_infra_apply_retention_flags.nim	nim	3
 libs/repro_cli_support/tests/t_infra_cache_keys.nim	nim	13
 libs/repro_cli_support/tests/t_installed_layout_resolvers.nim	nim	8
 libs/repro_cli_support/tests/t_installed_prefix_assembly_is_recorded.nim	nim	1
-libs/repro_cli_support/tests/t_installed_prefix_nim_pin_wins.nim	nim	3
+libs/repro_cli_support/tests/t_installed_prefix_nim_pin_wins.nim	nim	2
 libs/repro_cli_support/tests/t_l5_environment_is_in_the_graph_cache_key.nim	nim	12
 libs/repro_cli_support/tests/t_l7_shared_instance_declaration_refuses_near_misses.nim	nim	19
 libs/repro_cli_support/tests/t_l8_minted_attribute_reaches_the_service_argv.nim	nim	11
@@ -374,6 +382,7 @@ libs/repro_deploy_agent/tests/t_repro_deploy_agent_secrets_seal_open.nim	nim	14
 libs/repro_deploy_agent/tests/t_repro_deploy_agent_unsupported_base_is_operator_action.nim	nim	4
 libs/repro_deploy_agent/tests/t_repro_https_cache_end_to_end.nim	nim	1
 libs/repro_distributed_worker/tests/t_reach_goal_derivation_and_lease_plumbing.nim	nim	10
+libs/repro_distributed_worker/tests/t_signer_closes_after_its_early_returns.nim	nim	1
 libs/repro_dsl_stdlib/tests/t_addon_apt_closure.nim	nim	38
 libs/repro_dsl_stdlib/tests/t_addon_apt_closure_trixie_armhf.nim	nim	2
 libs/repro_dsl_stdlib/tests/t_apt_deb_reader_streams.nim	nim	4
@@ -534,6 +543,7 @@ libs/repro_interface_artifacts/tests/t_compiler_crash_is_not_a_compile_error.nim
 libs/repro_interface_artifacts/tests/t_consumer_compile_paths_carry_the_shm_packages.nim	nim	2
 libs/repro_interface_artifacts/tests/t_contribution_records.nim	nim	3
 libs/repro_interface_artifacts/tests/t_envelope_versions_do_not_collide.nim	nim	14
+libs/repro_interface_artifacts/tests/t_extraction_checks_the_prefix_nim.nim	nim	8
 libs/repro_interface_artifacts/tests/t_installed_layout_source_roots.nim	nim	5
 libs/repro_interface_artifacts/tests/t_interface_artifact_provenance_is_recorded_by_the_lift.nim	nim	3
 libs/repro_interface_artifacts/tests/t_interface_nimcache_slots.nim	nim	3
@@ -680,6 +690,7 @@ libs/repro_peer_cache/tests/t_peer_cache_tls_per_tenant_isolation.nim	nim	1
 libs/repro_peer_cache/tests/t_peer_cache_tls_signed_advertisement_round_trip.nim	nim	1
 libs/repro_peer_cache/tests/t_peer_cache_two_phase_lan_roundtrip.nim	nim	2
 libs/repro_peer_cache/tests/t_poisoned_cache_record.nim	nim	2
+libs/repro_peer_cache/tests/t_sim_tls_smoke_pass_stops_its_peers.nim	nim	1
 libs/repro_peer_cache/tests/t_snapshot_index_lock_fails_closed.nim	nim	3
 libs/repro_platform/tests/test_msvc_activation_multiline_env.nim	nim	5
 libs/repro_platform/tests/test_msvc_activation_spawns_no_telemetry.nim	nim	5
@@ -692,6 +703,7 @@ libs/repro_profile_compile/tests/t_addon_apt_closure_system_unit.nim	nim	5
 libs/repro_profile_compile/tests/t_addon_debian_realisation_profile_is_exhaustive.nim	nim	8
 libs/repro_profile_compile/tests/t_addon_profile_collision_and_managed_prefixes.nim	nim	6
 libs/repro_profile_compile/tests/t_addon_unit_state_and_tools.nim	nim	9
+libs/repro_profile_compile/tests/t_base_os_section_round_trip.nim	nim	13
 libs/repro_profile_compile/tests/t_build_action_substitute_copies_only_declared_outputs.nim	nim	7
 libs/repro_profile_compile/tests/t_builtin_predicate_fixtures.nim	nim	3
 libs/repro_profile_compile/tests/t_compiled_profile_keeps_secrets_and_credentials.nim	nim	1
@@ -934,6 +946,7 @@ libs/repro_system_apply/tests/t_b1_dsl_lowering.nim	nim	10
 libs/repro_system_apply/tests/t_b1_dsl_parse.nim	nim	12
 libs/repro_system_apply/tests/t_b2_pipeline.nim	nim	15
 libs/repro_system_rollback/tests/t_b3_rollback_unit.nim	nim	14
+libs/repro_test_support/tests/t_fresh_helper_binary_refuses_a_stale_build.nim	nim	12
 libs/repro_test_support/tests/t_home_apply_guard.nim	nim	9
 libs/repro_tool_profiles/tests/t_a_declared_alias_is_never_served_from_a_prefix_without_it.nim	nim	1
 libs/repro_tool_profiles/tests/t_a_symlinked_declared_executable_is_not_reported_missing.nim	nim	4
@@ -1175,10 +1188,12 @@ tests/e2e/addon/t_e2e_addon_agent_apply_sets_net_sysctl_in_host_namespace.nim	ni
 tests/e2e/addon/t_e2e_addon_agent_end_to_end.nim	nim	1
 tests/e2e/addon/t_e2e_addon_agent_generations_and_rollback.nim	nim	1
 tests/e2e/addon/t_e2e_addon_agent_refuses_management_path_classes.nim	nim	1
+tests/e2e/addon/t_e2e_addon_anywhere_remote_bootstrap_converges_clean_guest.nim	nim	1
 tests/e2e/addon/t_e2e_addon_apply_unit_has_no_network.nim	nim	1
 tests/e2e/addon/t_e2e_addon_apt_hook_never_blocks_dpkg.nim	nim	1
 tests/e2e/addon/t_e2e_addon_audit_bed.nim	nim	1
 tests/e2e/addon/t_e2e_addon_base_boots_without_store.nim	nim	1
+tests/e2e/addon/t_e2e_addon_base_tree_names_are_measured.nim	nim	1
 tests/e2e/addon/t_e2e_addon_bootstrap_changes_nothing_preexisting.nim	nim	1
 tests/e2e/addon/t_e2e_addon_bootstrap_installs_anchors_and_private_recipient_key.nim	nim	1
 tests/e2e/addon/t_e2e_addon_bootstrap_uninstall_byte_identity.nim	nim	1
@@ -1241,6 +1256,7 @@ tests/e2e/addon/t_e2e_addon_unit_syscall_filters_cover_their_traces.nim	nim	1
 tests/e2e/addon/t_e2e_addon_validator_never_double_signs.nim	nim	1
 tests/e2e/addon/t_e2e_addon_write_time_recheck.nim	nim	1
 tests/e2e/addon/t_e2e_addon_writes_never_follow_symlinks.nim	nim	1
+tests/e2e/addon/t_e2e_addon_zero_touch_image_synthesis_boots_converged.nim	nim	1
 tests/e2e/addon/t_system_profile_host_selection.nim	nim	0
 tests/e2e/addon/t_validator_safety_checks.nim	nim	11
 tests/e2e/agent-harbor/t_e2e_agent_harbor_change_to_generation_and_remix.nim	nim	5
@@ -1277,7 +1293,7 @@ tests/e2e/dev-env/t_e2e_provider_dev_env_introspection.nim	nim	2
 tests/e2e/dev-env/t_e2e_repro_dev_sessions.nim	nim	26
 tests/e2e/dev-env/t_e2e_repro_down_activity_discovery.nim	nim	7
 tests/e2e/dev-env/t_e2e_repro_exec_does_not_leak_engine_source_root.nim	nim	3
-tests/e2e/dev-env/t_e2e_repro_exec_installed_prefix_nim.nim	nim	3
+tests/e2e/dev-env/t_e2e_repro_exec_installed_prefix_nim.nim	nim	4
 tests/e2e/dev-env/t_e2e_repro_exec_recipe_compiler.nim	nim	2
 tests/e2e/dev-env/t_e2e_repro_exec_shell.nim	nim	5
 tests/e2e/dev-env/t_e2e_shell_hook_cd_activate_deactivate.nim	nim	1
@@ -2203,7 +2219,7 @@ tests/integration/t_rp8_lsp_typecheck_and_goto_def.nim	nim	3
 tests/integration/t_run_consumes_opaque_out_of_tree.nim	nim	1
 tests/integration/t_run_consumes_session_store_out_of_tree.nim	nim	1
 tests/integration/t_run_edge_session_resolver_auto.nim	nim	2
-tests/integration/t_run_tests_strips_foreign_preload.nim	nim	7
+tests/integration/t_run_tests_strips_foreign_preload.nim	nim	15
 tests/integration/t_runner_cpu_progress_liveness.nim	nim	5
 tests/integration/t_runner_exclusive_phase_budget.nim	nim	2
 tests/integration/t_runner_progress_visibility.nim	nim	2
@@ -2638,6 +2654,7 @@ tests/unit/t_nonredistributable_publish_gate.nim	nim	3
 tests/unit/t_npm_vendor_action.nim	nim	2
 tests/unit/t_prefix_env_ops.nim	nim	4
 tests/unit/t_provider_compile_cache_entry_is_content_addressed.nim	nim	7
+tests/unit/t_provider_compile_failure_says_how_the_action_ended.nim	nim	2
 tests/unit/t_provider_graph_snapshot_version_skew.nim	nim	11
 tests/unit/t_provider_snapshot_binary_binding.nim	nim	3
 tests/unit/t_provider_startup_body_containment.nim	nim	14
@@ -2713,6 +2730,7 @@ tests/unit/test_hcr_replay_gate_ct_mcr_fixture_edge.py	python	13
 tests/unit/test_hcr_replay_gate_monitor_policy.py	python	2
 tests/unit/test_install_nix_paths.py	python	14
 tests/unit/test_lint_gate_ordering.py	python	4
+tests/unit/test_nim224_lane_selection.py	python	5
 tests/unit/test_nix_daemon_descriptors.py	python	7
 tests/unit/test_nix_daemon_expression_file_is_never_cached.py	python	4
 tests/unit/test_nix_daemon_request_requires_workspace_root.py	python	4

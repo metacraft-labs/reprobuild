@@ -8,7 +8,8 @@
 ## (``evidence_sink_cli.parseSinkCommand``), and for each ``repro system
 ## addon`` verb the guide uses, that verb's (``parsePreflightArgs``,
 ## ``parseBootstrapArgs``, ``parseEnrolArgs``, ``parseContainArgs``,
-## ``parseUninstallArgs``, or no option at all). A verb the test has no parser for fails it, and so does
+## ``parseUninstallArgs``, ``parseVerifyDiscardRecordArgs``, or no
+## option at all). A verb the test has no parser for fails it, and so does
 ## an elided line (``...``) or a prose span that names a sink command
 ## without the tool (``addon-check --update-hosts``): every command the
 ## guide prints is one the reader can run (A11 review finding 16).
@@ -56,15 +57,22 @@ proc commandLines(text: string): seq[string] =
       result.add(span)
     i = b + 1
 
+proc isSinkCommand(args: seq[string]): bool =
+  args.len >= 1 and args[0] == "repro-evidence-sink"
+
+proc isAddonCommand(args: seq[string]): bool =
+  args.len >= 4 and args[0] == "repro" and args[1] == "system" and
+    args[2] == "addon"
+
 proc sample(line: string): string =
   line.multiReplace(("<port>", "7443"), ("<address>", "10.0.0.5"),
                     ("<digest>", "ab"), ("<file>", "/tmp/x"),
-                    ("<you>", "alice"), ("<n>", "15"))
+                    ("<you>", "alice"), ("<n>", "15"),
+                    ("<key>", "04ab"))
 
 suite "the user guide's command lines parse":
   let text = readFile(Guide)
   let lines = commandLines(text)
-  var sinkLines, addonLines = 0
 
   test "every documented command parses, whole":
     for l in lines:
@@ -74,12 +82,9 @@ suite "the user guide's command lines parse":
       var ok = true
       var why = ""
       try:
-        if args[0] == "repro-evidence-sink":
-          inc sinkLines
+        if isSinkCommand(args):
           discard parseSinkCommand(args[1 .. ^1])
-        elif args.len >= 4 and args[0] == "repro" and args[1] == "system" and
-            args[2] == "addon":
-          inc addonLines
+        elif isAddonCommand(args):
           let rest = args[4 .. ^1]
           case args[3]
           of "preflight": discard parsePreflightArgs(rest)
@@ -87,6 +92,7 @@ suite "the user guide's command lines parse":
           of "evidence-enrol": discard parseEnrolArgs(rest)
           of "contain", "release": discard parseContainArgs(rest)
           of "uninstall": discard parseUninstallArgs(rest)
+          of "verify-discard-record": discard parseVerifyDiscardRecordArgs(rest)
           of "evidence-credential-check", "migrate":
             if rest.len > 0: raise newException(ValueError, "takes no option")
           else:
@@ -104,5 +110,12 @@ suite "the user guide's command lines parse":
       check ("`" & verb & " --") notin text
 
   test "the check is not vacuous":
+    # Counted here, not by the parsing case: each case runs in a process of
+    # its own, so a count that case kept would read zero in this one.
+    var sinkLines, addonLines = 0
+    for l in lines:
+      let args = parseCmdLine(sample(l))
+      if isSinkCommand(args): inc sinkLines
+      elif isAddonCommand(args): inc addonLines
     check sinkLines >= 7
     check addonLines >= 7

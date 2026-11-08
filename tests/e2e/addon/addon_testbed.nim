@@ -477,6 +477,37 @@ proc newGuest*(b: BaseImage; diskGiB = 8; relayPort = 0; cpus = 0;
     result.qemu = newQemuBootBackend(stateDir = cacheDir() / "qemu-state",
       namePrefix = QemuNamePrefix, sshUser = "root", sshKeyPath = result.keyPath)
 
+proc newImageGuest*(b: BaseImage; image, keyPath: string; diskGiB = 0):
+    Guest =
+  ## Claim a run and prepare (not boot) a guest that boots a SYNTHESISED
+  ## image (`repro infra image`, A16) rather than the cached base: the disk
+  ## is a qcow2 overlay over ``image`` (raw, read-only to QEMU), and there is
+  ## no seed volume -- the image carries its own cloud-init seed, which
+  ## authorises ``keyPath``'s public half for root. ``b`` names the
+  ## architecture and the base the image was built from.
+  when not defined(gostiAvailable):
+    raise newException(TestBedError,
+      "gosti is not available: set GOSTI_SRC to gosti's src directory")
+  else:
+    if useIncus():
+      raise newException(TestBedError, "an image guest boots a disk image; " &
+        "it is QEMU only")
+    let name = QemuNamePrefix & "img-" & $getCurrentProcessId() & "-" &
+      randomHex(6)
+    let (dir, token) = claimRunDir(name)
+    result = Guest(base: b, name: name, runDir: dir, ownerToken: token,
+                   kind: gkQemu, keyPath: keyPath)
+    result.diskPath = dir / "disk.qcow2"
+    var cmd = "qemu-img create -q -f qcow2 -F raw -b " & quoteShell(image) &
+      " " & quoteShell(result.diskPath)
+    if diskGiB > 0: cmd.add " " & $diskGiB & "G"
+    if execCmd(cmd) != 0:
+      raise newException(TestBedError, "qemu-img create over " & image &
+        " failed")
+    result.serialLog = dir / "serial.log"
+    result.qemu = newQemuBootBackend(stateDir = cacheDir() / "qemu-state",
+      namePrefix = QemuNamePrefix, sshUser = "root", sshKeyPath = keyPath)
+
 proc bootTimeout(g: Guest): int =
   case g.base.debArch
   of "amd64": 300
@@ -634,6 +665,20 @@ proc destroy*(g: Guest) =
         g.qemu.stopAndCleanup(g.vm, deleteVm = true)
     except CatchableError as e:
       g.note("teardown: " & e.msg)
+  # The guest's serial console is the one record of what happened inside
+  # it -- a reboot, the OOM killer, sshd or the network -- and the run
+  # directory goes below. Kept beside the gate records under the guest's
+  # name, so a failed cell can be explained after its teardown (A13 round
+  # 6: an `scp` failure whose cause could not be found, its serial log
+  # removed with the run).
+  try:
+    if g.serialLog.len > 0 and fileExists(g.serialLog):
+      let kept = recordsDir() / "serial" / (g.name & ".serial.log")
+      createDir(parentDir(kept))
+      copyFile(g.serialLog, kept)
+      g.note("serial console kept at " & kept)
+  except CatchableError as e:
+    g.note("teardown: keeping the serial console: " & e.msg)
   try:
     releaseRunDir(g.runDir, g.ownerToken)
   except CatchableError as e:

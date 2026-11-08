@@ -54,7 +54,7 @@
 ## The read-side commands open the store directory directly: reading is
 ## local to the sink host by design (EVID-3). There is no network read.
 
-import std/[asyncdispatch, os, posix, strutils, tables, times]
+import std/[asyncdispatch, options, os, posix, strutils, tables, times]
 
 import nimcrypto/[hash, sha2]
 
@@ -79,7 +79,9 @@ type
     silenceFactor*: int
     segmentMaxEntries*: int
     nowMs*: int64
-    seqNo*: uint64
+    seqNo*: Option[uint64]
+      ## ``--seq N``: absent unless given. 0 is a store's first entry, a
+      ## sequence like any other (A11 review round 4).
     outPath*: string
     operator*, reason*: string
     alertKind*: string
@@ -167,7 +169,11 @@ proc parseSinkCommand*(args: openArray[string]): SinkCommand =
       of "published-artefacts": result.artefactsPath = value
       of "now-ms": result.nowMs = num(name, value)
       of "update-hosts": result.updateHosts = true
-      of "seq": result.seqNo = uint64(num(name, value))
+      of "seq":
+        result.seqNo = some(uint64(num(name, value)))
+        when mutated("seq-zero-sentinel"):
+          # FALSIFYING BUILD: 0 reads as "no --seq", as before round 4.
+          if result.seqNo.get == 0'u64: result.seqNo = none(uint64)
       of "out": result.outPath = value
       of "operator": result.operator = value
       of "reason": result.reason = value
@@ -197,10 +203,10 @@ proc parseSinkCommand*(args: openArray[string]): SinkCommand =
         "(the checkpoint key's certificate, pinned out of band; never read " &
         "from the store)")
   of "payload":
-    if result.seqNo == 0'u64:
+    if result.seqNo.isNone:
       raise newException(SinkUsageError, "payload needs --seq N")
   of "ack":
-    if result.seqNo == 0'u64 or result.operator.len == 0 or
+    if result.seqNo.isNone or result.operator.len == 0 or
         result.reason.len == 0 or '/' notin result.alertKind:
       raise newException(SinkUsageError, "ack needs --seq N, --alert " &
         "<detector>/<trigger>, --operator NAME and --reason TEXT")
@@ -214,18 +220,6 @@ proc parseSinkCommand*(args: openArray[string]): SinkCommand =
 # ---------------------------------------------------------------------------
 # The sink operator's acknowledgements (D4).
 # ---------------------------------------------------------------------------
-
-proc validAlertKind*(k: string): bool =
-  ## ``<detector>/<trigger>``: ``DET-AO-<n>`` or ``G<n>``, then a trigger
-  ## of lower-case words joined by ``-``.
-  let p = k.split('/')
-  if p.len != 2 or p[1].len == 0: return false
-  let det = p[0]
-  let detOk = (det.startsWith("DET-AO-") and det.len > 7 and
-               det[7 .. ^1].allCharsInSet(Digits)) or
-              (det.len > 1 and det[0] == 'G' and
-               det[1 .. ^1].allCharsInSet(Digits))
-  detOk and p[1].allCharsInSet({'a' .. 'z', '0' .. '9', '-'})
 
 proc entryAt(dir: string; seqNo: uint64): tuple[found: bool; e: EvidenceEntry] =
   for e in readEvidenceStore(dir):
@@ -275,11 +269,21 @@ proc processOperatorInbox*(store: EvidenceStore; sink: PeerId;
       let lines = readFile(p).splitLines()
       if lines.len >= 4:
         let n = parseBiggestUInt(lines[0].strip()).uint64
-        discard store.appendRecord(sink, lrDaemon,
-          ackRecord(n, lines[1].strip(), lines[2].strip(),
-                    lines[3 .. ^1].join(" ").strip(),
-                    int64(epochTime() * 1000)))
-        inc result
+        # The rules are the store writer's, not only the ``ack`` command's
+        # (A11 review round 3): whatever dropped the request, a malformed
+        # kind, a sequence not in the store, or the sink's own
+        # acknowledgement is refused here, never appended.
+        let refusal = when mutated("ack-rules-cli-only"): ""
+                      else: ackRefusal(store.dir, n, lines[1].strip())
+        if refusal.len > 0:
+          stderr.writeLine("repro-evidence-sink: acknowledgement " &
+            extractFilename(p) & " refused: " & refusal)
+        else:
+          discard store.appendRecord(sink, lrDaemon,
+            ackRecord(n, lines[1].strip(), lines[2].strip(),
+                      lines[3 .. ^1].join(" ").strip(),
+                      int64(epochTime() * 1000)))
+          inc result
     except CatchableError:
       discard           # a malformed request is dropped, not appended
     try: removeFile(p) except OSError: discard
@@ -395,10 +399,10 @@ proc runSinkCli*(args: openArray[string]): int =
       stdout.writeLine(line)
     return 0
   of "payload":
-    let (found, e) = entryAt(c.dir, c.seqNo)
+    let (found, e) = entryAt(c.dir, c.seqNo.get)
     if not found or e.kind != ekRecord:
       stderr.writeLine("repro-evidence-sink payload: no record at sequence " &
-        $c.seqNo)
+        $c.seqNo.get)
       return 1
     if c.outPath.len > 0:
       let fd = posix.open(c.outPath.cstring, O_WRONLY or O_CREAT or O_EXCL or
@@ -413,7 +417,8 @@ proc runSinkCli*(args: openArray[string]): int =
     stdout.write(renderPayload(e))
     return 0
   of "ack":
-    let refusal = ackRefusal(c.dir, c.seqNo, c.alertKind)
+    let seqNo = c.seqNo.get
+    let refusal = ackRefusal(c.dir, seqNo, c.alertKind)
     if refusal.len > 0:
       stderr.writeLine("repro-evidence-sink ack: " & refusal)
       return 1
@@ -422,19 +427,19 @@ proc runSinkCli*(args: openArray[string]): int =
       stderr.writeLine("repro-evidence-sink ack: no " & inbox &
         " (is the sink running on this store?)")
       return 1
-    let name = inbox / ($c.seqNo & "-" & $getCurrentProcessId() & ".ack")
-    writeFile(name & ".tmp", $c.seqNo & "\n" & c.alertKind & "\n" &
+    let name = inbox / ($seqNo & "-" & $getCurrentProcessId() & ".ack")
+    writeFile(name & ".tmp", $seqNo & "\n" & c.alertKind & "\n" &
       c.operator & "\n" & c.reason.replace("\n", " ") & "\n")
     moveFile(name & ".tmp", name)
     let deadline = epochTime() + float(c.waitSeconds)
     while epochTime() < deadline:
       for x in readEvidenceStore(c.dir):
         if x.kind == ekRecord and x.record.detector == SinkOperatorDetector and
-            x.record.field("acknowledges") == $c.seqNo and
+            x.record.field("acknowledges") == $seqNo and
             x.record.field("finding") == c.alertKind and
             x.record.field("operator") == c.operator:
           stdout.writeLine("acknowledged " & c.alertKind & " at sequence " &
-            $c.seqNo &
+            $seqNo &
             " as record " & $x.seq)
           return 0
       sleep(250)

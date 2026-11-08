@@ -269,8 +269,13 @@ proc body(g: Guest; repro: string; step: StepFn; record: JsonNode;
   proc alertSet(output: string): seq[string] =
     for line in output.splitLines():
       let f = line.splitWhitespace()
-      if f.len >= 5 and f[0] == "ALERT" and f[4].startsWith("seq="):
-        result.add(f[4]["seq=".len .. ^1] & " " & f[2] & "/" & f[3])
+      # Every ALERT line, those without a sequence too (a silence, a state
+      # the check cannot use): any alert the scenario did not cause fails
+      # the comparison (A11 review round 3).
+      if f.len >= 4 and f[0] == "ALERT":
+        let sq = if f.len >= 5 and f[4].startsWith("seq="): f[4]["seq=".len .. ^1]
+                 else: "-"
+        result.add(sq & " " & f[2] & "/" & f[3])
     result.sort()
   var expected: seq[string]
   for e in sink.entries():

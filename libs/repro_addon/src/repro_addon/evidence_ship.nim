@@ -76,9 +76,12 @@ type
 
   CredentialCheck* = object
     appended*: bool
-    answered*: seq[(ForbiddenOperation, bool)]
-      ## true: the sink ANSWERED the operation (the credential can do more
-      ## than append)
+    answered*: seq[(ForbiddenOperation, ProbeOutcome)]
+      ## Per forbidden operation: answered (the credential can do more than
+      ## append), refused (the sink recorded the refusal and said so), or
+      ## undelivered (the attempt tells nothing; A11 review round 3)
+    probeErrors*: seq[string]
+      ## Why an undelivered attempt was not delivered.
     error*: string
 
   EvidenceConfError* = object of CatchableError
@@ -356,14 +359,19 @@ proc runCredentialCheck*(site: ShipSite; conf: EvidenceConf;
   # them (each probe opens a connection of its own).
   a.close()
   for op in ForbiddenOperation:
-    let answered = try: waitFor a.probeForbiddenOperation(op)
-                   except CatchableError: false
-    result.answered.add((op, answered))
+    let outcome = try: waitFor a.probeForbiddenOperation(op)
+                  except CatchableError: poUndelivered
+    if outcome == poUndelivered: result.probeErrors.add($op & ": " & a.lastError)
+    result.answered.add((op, outcome))
 
 proc credentialCheckOk*(c: CredentialCheck): bool =
   if not c.appended: return false
-  for (_, answered) in c.answered:
-    if answered: return false
+  ## Only when the sink took the probe record and confirmed the refusal of
+  ## every forbidden operation: an operation it never received tells
+  ## nothing about the credential, and fails the self-test.
+  if c.answered.len != ForbiddenOperation.high.ord + 1: return false
+  for (_, outcome) in c.answered:
+    if outcome != poRefused: return false
   true
 
 proc readHost(): string =
@@ -467,9 +475,13 @@ proc runCredentialCheckCli*(args: seq[string]): int =
     let c = runCredentialCheck(site, conf, readHost())
     stdout.write("append: " & (if c.appended: "acknowledged" else:
       "NOT acknowledged (" & c.error & ")") & "\n")
-    for (op, answered) in c.answered:
-      stdout.write($op & ": " & (if answered: "ANSWERED (the credential " &
-        "can " & $op & " the sink)" else: "refused") & "\n")
+    for (op, outcome) in c.answered:
+      stdout.write($op & ": " & (case outcome
+        of poAnswered: "ANSWERED (the credential can " & $op & " the sink)"
+        of poRefused: "refused, and the sink recorded the refusal"
+        of poUndelivered: "NOT DELIVERED (the sink never said it refused " &
+          "it; nothing is known of the credential's scope)") & "\n")
+    for e in c.probeErrors: stdout.write("  " & e & "\n")
     if credentialCheckOk(c): 0 else: 1
   except CatchableError as e:
     stderr.write("repro system addon evidence-credential-check: " & e.msg & "\n")

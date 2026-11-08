@@ -23,7 +23,7 @@
 ## MOCK POLICY: none. The real script runs in a real bash; the preload paths
 ## are strings the loader never sees (nothing is executed under them).
 
-import std/[os, strutils, tempfiles, unittest]
+import std/[os, osproc, strutils, tempfiles, unittest]
 
 import repro_test_support
 import repro_test_support/reasoned_skip
@@ -41,16 +41,26 @@ proc repoRoot(): string =
     result = getCurrentDir()
 
 proc findLoadableSharedObject(): string =
-  ## A real shared object the loader can preload into bash without
-  ## complaint: the C library this process has mapped. Read from
-  ## /proc/self/maps on Linux; elsewhere the kept-shim case is skipped by
-  ## the caller.
+  ## A real shared object the loader can preload into any program without
+  ## complaint and without effect: the ``libdl.so.2`` this process has
+  ## mapped, which since glibc 2.34 is an empty compatibility stub (its
+  ## functions live in libc). Read from /proc/self/maps on Linux; elsewhere,
+  ## or when none is mapped, the kept-shim case is skipped by the caller.
+  ##
+  ## Not the C library itself, which this used to name: an explicit
+  ## ``libc.so.6`` in ``LD_PRELOAD`` is a different C library build from the
+  ## one the preloaded program links (this binary's glibc is not bash's or
+  ## coreutils'), and under an agent-harbor 0.6.16 session, whose
+  ## command-trace shim every child also carries, such a program dies of
+  ## SIGSEGV at start -- the re-executed bash exited 139 and the case read
+  ## red from every agent shell (measured 2026-11-07; agent-harbor issue
+  ## 2026-11-07-a-program-that-preloads-a-c-library-explicitly-segfaults-under-the-command-trace-shim).
   when defined(linux):
     for line in lines("/proc/self/maps"):
       let sp = line.rfind(' ')
       if sp < 0: continue
       let path = line[sp + 1 .. ^1]
-      if path.startsWith("/") and "libc.so" in path.extractFilename:
+      if path.startsWith("/") and path.extractFilename == "libdl.so.2":
         return path
   ""
 
@@ -146,11 +156,11 @@ suite "run_tests.sh strips a foreign preload":
       "\"${" & v & ":-<unset>}\"\n")
     # The kept entry must be loadable, or the re-executed bash prints the
     # loader's complaint for an absent file: it is a real shared object (the
-    # C library this process has mapped) under our shim's name. Skipped
-    # where no such object can be named.
+    # empty libdl stub this process has mapped) under our shim's name.
+    # Skipped where no such object can be named.
     let loadable = findLoadableSharedObject()
     if loadable.len == 0:
-      skip("no mapped C library found in /proc/self/maps; this case needs " &
+      skip("no mapped libdl.so.2 found in /proc/self/maps; this case needs " &
         "a loadable shared object to stand in for the kept shim")
       return
     let kept = dir / "librepro_monitor_shim.so"
@@ -187,3 +197,124 @@ suite "run_tests.sh strips a foreign preload":
       env = [("T_FP_INPUT", Foreign)]), repoRoot())
     check res.code == 0
     check res.output == Foreign
+
+suite "every add-on gate and harness entry point applies the guard":
+  # A13 round 6 (2026-11-07): scripts/run_addon_gate.sh did not call the
+  # guard, so a VM gate started from an agent-harbor session ran its engine
+  # actions with the harness's command-trace shim beside the monitor shim;
+  # agent-harbor 0.6.16's shim then deadlocks in its constructor
+  # (ld_preload::later_copy_original) and the gate's profile compile hangs.
+  # Every scripts/run_addon_*.sh, and run_tests.sh, must source the lib and
+  # call the guard before it changes directory or does anything else.
+
+  proc entryPoints(): seq[string] =
+    for f in walkFiles(repoRoot() / "scripts" / "run_addon_*.sh"):
+      result.add(f)
+    result.add(repoRoot() / "scripts" / "run_tests.sh")
+
+  test "each entry point sources the lib and calls the guard first":
+    let eps = entryPoints()
+    check eps.len >= 3
+    for f in eps:
+      checkpoint(f)
+      var guardAt, sourceAt, cdAt = -1
+      var i = 0
+      for raw in lines(f):
+        let l = raw.strip()
+        if l.len > 0 and l[0] != '#':
+          if sourceAt < 0 and l.startsWith("source ") and
+              "lib/foreign_preload.sh" in l:
+            sourceAt = i
+          if guardAt < 0 and l.startsWith("foreign_preload_guard"):
+            guardAt = i
+          if cdAt < 0 and l.startsWith("cd "):
+            cdAt = i
+        inc i
+      check sourceAt >= 0
+      check guardAt > sourceAt
+      check cdAt < 0 or guardAt < cdAt
+
+  test "run_addon_gate.sh strips a foreign preload before it does anything":
+    let v = preloadVar()
+    let res = runShell(shellCommand(["bash", "-c",
+      "export " & v & "=\"$T_FP_INPUT\"; bash scripts/run_addon_gate.sh " &
+      "t_no_such_gate_for_the_guard_test; echo \"exit=$?\""],
+      env = [("T_FP_INPUT", Foreign)]), repoRoot())
+    checkpoint(res.output)
+    check "foreign preload(s); removed for this run" in res.output
+    check "no such gate" in res.output
+    check "exit=2" in res.output
+
+suite "an add-on gate's helpers end with it (scripts/lib/process_group.sh)":
+  # A13 (2026-11-07): a hung gate's binary was killed; its teardown never
+  # ran, and the binary cache and an HTTP origin it had started kept running,
+  # holding the VM slot's flock (inherited) for hours. run_addon_gate.sh now
+  # runs the gate through ``run_in_own_group``: one process group, ended
+  # whatever ends the gate, with no descriptor of the caller. Each case
+  # starts a real background ``sleep`` inside the group and looks for it by
+  # a marker in its argv afterwards.
+  const PG = "scripts/lib/process_group.sh"
+
+  proc alive(marker: string): bool =
+    for kind, d in walkDir("/proc"):
+      let pid = d.extractFilename
+      if not pid.allCharsInSet(Digits): continue
+      try:
+        if marker in readFile(d / "cmdline").replace('\0', ' '): return true
+      except IOError, OSError: discard
+    false
+
+  proc marker(tag: string): string =
+    # A sleep length no other process uses, as the marker in its argv.
+    "31" & $(getCurrentProcessId() mod 1000) & tag
+
+  test "a helper the command left behind is ended when the command exits":
+    let m = marker("1")
+    let res = runShell(shellCommand(["bash", "-c",
+      "source " & PG & "; run_in_own_group bash -c 'sleep " & m &
+      " & exit 3'; echo \"rc=$?\""]), repoRoot())
+    checkpoint(res.output)
+    check "rc=3" in res.output
+    check not alive("sleep " & m)
+
+  test "a helper is ended when the command itself is killed":
+    let m = marker("2")
+    let res = runShell(shellCommand(["bash", "-c",
+      "source " & PG & "; run_in_own_group bash -c 'sleep " & m &
+      " & kill -KILL $$'; echo \"rc=$?\""]), repoRoot())
+    checkpoint(res.output)
+    check "rc=137" in res.output
+    check not alive("sleep " & m)
+
+  test "a helper is ended when the script running the group is stopped":
+    let m = marker("3")
+    let res = runShell(shellCommand(["bash", "-c",
+      "bash -c 'source " & PG & "; run_in_own_group bash -c \"sleep " & m &
+      " & wait\"; echo unreachable' & s=$!; sleep 1; kill -TERM $s; " &
+      "wait $s; echo \"rc=$?\""]), repoRoot())
+    checkpoint(res.output)
+    check "rc=143" in res.output
+    check "unreachable" notin res.output
+    sleep(500)
+    check not alive("sleep " & m)
+
+  test "the command inherits no descriptor above stderr":
+    let res = runShell(shellCommand(["bash", "-c",
+      "exec 9>/dev/null; source " & PG & "; run_in_own_group bash -c " &
+      "'[ -e /proc/self/fd/9 ] && echo fd9-open || echo fd9-closed'"]),
+      repoRoot())
+    checkpoint(res.output)
+    check "fd9-closed" in res.output
+
+  test "negative control: without the group the helper outlives the command":
+    let m = marker("5")
+    discard runShell(shellCommand(["bash", "-c",
+      "bash -c 'sleep " & m & " & exit 0'"]), repoRoot())
+    check alive("sleep " & m)
+    discard execShellCmd("pkill -f 'sleep " & m & "'")
+
+  test "run_addon_gate.sh runs the gate through run_in_own_group":
+    let text = readFile(repoRoot() / "scripts" / "run_addon_gate.sh")
+    check "source scripts/lib/process_group.sh" in text
+    check "run_in_own_group env REPRO_ADDON_VM_GATES=1" in text
+

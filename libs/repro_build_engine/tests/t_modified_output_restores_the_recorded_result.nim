@@ -60,6 +60,8 @@
 ## case's modified output be reported up to date.
 
 import std/[options, os, strutils, times, unittest]
+when defined(posix):
+  import std/posix
 
 from repro_test_support import testCaseScratchSlug
 
@@ -154,6 +156,42 @@ proc run(ws, text: string; config: BuildEngineConfig;
   runGraph(@[theAction(ws, text, policy)], config)
 
 proc output(ws: string): string = readFile(ws / "out" / "result.txt")
+
+when defined(posix):
+  # Not in std/posix (t_portable_memo_hybrid_hit_publishes_only_recorded_
+  # content.nim declares the same pair, for the same reason).
+  var AtFdcwd {.importc: "AT_FDCWD", header: "<fcntl.h>".}: cint
+  proc utimensat(dirfd: cint; path: cstring; times: ptr array[2, Timespec];
+                 flags: cint): cint {.importc, header: "<sys/stat.h>".}
+
+proc rewriteKeepingMetadata(path, text: string) =
+  ## New bytes, the same size and the same mtime: an edit `ffpHybrid` cannot
+  ## see without reading the file.
+  ##
+  ## The mtime is put back with `utimensat(2)`, to the nanosecond. With
+  ## `os.setLastModificationTime` (`utimes(2)`, microseconds) the restored
+  ## mtime differed from the recorded `mtimeNs` on any filesystem with
+  ## sub-microsecond timestamps, the hybrid lookup saw the metadata move,
+  ## hashed the input and missed -- so the restore's own input re-read, which
+  ## these cases are about, was never reached. The final assertion is the
+  ## control: the metadata the store compares is exactly what it was.
+  doAssert readFile(path).len == text.len
+  let before = observeFile(path, ffpTimestamp).metadata
+  when defined(posix):
+    var st: Stat
+    doAssert stat(path.cstring, st) == 0
+    var times = [st.st_atim, st.st_mtim]
+    writeFile(path, text)
+    doAssert utimensat(AtFdcwd, path.cstring, addr times, 0) == 0
+  else:
+    let mtime = getLastModificationTime(path)
+    writeFile(path, text)
+    setLastModificationTime(path, mtime)
+  let after = observeFile(path, ffpTimestamp).metadata
+  doAssert after == before,
+    "the rewrite moved the metadata the hybrid lookup compares (" &
+    $before & " -> " & $after & "); the case would then measure a miss, " &
+    "not the restore's input re-read"
 
 proc recordOf(cacheRoot, id: string): ActionResultRecord =
   let raw = readFile(dependencyEvidencePath(cacheRoot, id))
@@ -396,10 +434,7 @@ suite "owner decision 2026-11-03: a modified output is restored, not rebuilt":
     let config = inPlaceConfig(TmpDir / "hybrid" / "cache")
     let source = ws / "src" / "main.c"
     check run(ws, Recorded, config, ffpHybrid).result.launched
-    let mtime = getLastModificationTime(source)
-    writeFile(source, "int MAIN;\n")          # same size, other content
-    setLastModificationTime(source, mtime)
-    require getFileSize(source) == "int main;\n".len
+    rewriteKeepingMetadata(source, "int MAIN;\n")   # same size, other content
     writeFile(ws / "out" / "result.txt", Tampered)
     let second = run(ws, Rerun, config, ffpHybrid)
     check second.result.launched
@@ -416,9 +451,7 @@ suite "owner decision 2026-11-03: a modified output is restored, not rebuilt":
     let config = inPlaceConfig(TmpDir / "hybrid-missing" / "cache")
     let source = ws / "src" / "main.c"
     check run(ws, Recorded, config, ffpHybrid).result.launched
-    let mtime = getLastModificationTime(source)
-    writeFile(source, "int MAIN;\n")
-    setLastModificationTime(source, mtime)
+    rewriteKeepingMetadata(source, "int MAIN;\n")
     removeFile(ws / "out" / "result.txt")
     let second = run(ws, Rerun, config, ffpHybrid)
     check second.result.launched

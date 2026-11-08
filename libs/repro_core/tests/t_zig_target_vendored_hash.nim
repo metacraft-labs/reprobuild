@@ -89,9 +89,13 @@ suite "a zig-target image links no ambient OpenSSL":
 proc probeTypeNameUnder(args: openArray[string]): string =
   ## The mangled C name of an object type the probe defines, as compiled
   ## with `args` from a directory under this repository.
-  # One fixed directory for every case: the probe's path is part of the
-  # hash, so only the map may differ between the compiles compared.
-  let dir = RepoRoot / "build" / "zig-target-typehash-probe"
+  # One fixed directory for every compile this process compares: the
+  # probe's path is part of the hash, so only the map may differ between
+  # them. It is this process's own: the suite runner runs each case in a
+  # process of its own and in parallel, and two processes sharing one
+  # directory removed each other's probe mid-compile.
+  let dir = RepoRoot / "build" /
+    ("zig-target-typehash-probe-" & $getCurrentProcessId())
   removeDir(dir)
   createDir(dir)
   defer: removeDir(dir)
@@ -117,10 +121,12 @@ suite "a zig-target image's type hashes do not depend on the checkout path":
   # different bytes (measured 2026-11-04). `--typeHashPathMap` hashes the
   # repository as `/reprobuild/` and the workspace as `/workspace/`, as
   # scripts/build_addon_static.sh does.
-  let mapped = probeTypeNameUnder(["--typeHashPathMap:" & RepoRoot & "/=/reprobuild/"])
-  let plain = probeTypeNameUnder([])
+  proc mappedTypeName(): string =
+    probeTypeNameUnder(["--typeHashPathMap:" & RepoRoot & "/=/reprobuild/"])
 
   test "the control: the map changes the type's hash":
+    let mapped = mappedTypeName()
+    let plain = probeTypeNameUnder([])
     checkpoint(mapped & " / " & plain)
     check mapped.startsWith("tyObject_")
     check plain.startsWith("tyObject_")
@@ -129,5 +135,6 @@ suite "a zig-target image's type hashes do not depend on the checkout path":
   test "a zig-target compile applies the map":
     let target = probeTypeNameUnder(
       ["-d:reproZigTarget=armv7-unknown-linux-gnueabihf"])
+    let mapped = mappedTypeName()
     checkpoint(target & " / " & mapped)
     check target == mapped

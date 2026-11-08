@@ -505,7 +505,7 @@ proc recordRecovered*(site: CustodySite; obj: StoreObjectRef;
     category: ecDetection, trigger: "store-recovered",
     fields: @[("path", obj.path), ("kind", $obj.kind),
               ("digest", expected), ("observedDigest", observed),
-              ("evidence", entry), ("source", source),
+              ("evidence", entry), ("recoveredFrom", source),
               ("message", obj.path & " no longer held the bytes it was " &
                "realised with; kept at " & entry & " and re-realised from " &
                source)], attest: true), site.evidence)
@@ -587,6 +587,71 @@ proc pendingStoreEvidence*(site: CustodySite): seq[string] =
         if kind == pcDir: asides.add(d)
       asides.sort()
       result.add(asides)
+
+proc uninstallRecordedPath(site: CustodySite): string =
+  site.stateDir / "addon" / "store-evidence-reported"
+
+proc recordUnreportedStoreEvidence*(site: CustodySite): int =
+  ## §13 decision 56 (owner, 2026-11-07): before uninstall discards
+  ## anything, every object a crashed recovery left aside and every evidence
+  ## entry filed but not recorded gets a DET-AO-5 ``store-recovery-
+  ## interrupted`` record, written to the outbox for the sink. Read-only on
+  ## the store: the aside's digest is computed where it lies, nothing is
+  ## moved (uninstall must not enter the store's writable view). Each is
+  ## reported once (``store-evidence-reported``, beside the state). Returns
+  ## how many records it wrote.
+  when mutated("uninstall-discards-unrecorded"):
+    return 0
+  var done = initTable[string, bool]()
+  let rp = uninstallRecordedPath(site)
+  try:
+    for l in readFile(rp).splitLines():
+      if l.strip().len > 0: done[l.strip()] = true
+  except IOError, OSError: discard
+  var added: seq[string]
+  if dirExists(asideRoot(site)):
+    for kind, d in walkDir(asideRoot(site)):
+      if kind != pcDir or d in done: continue
+      let path = try: readFile(d & ".from").strip() except CatchableError: ""
+      let observed = try: storeTreeDigest(d) except CatchableError: "(unreadable)"
+      discard recordEvidence(EvidenceEvent(detector: edStore,
+        category: ecDetection, trigger: "store-recovery-interrupted",
+        fields: @[("path", path), ("observedDigest", observed),
+                  ("evidence", d),
+                  ("message", path & ": a recovery was interrupted; the " &
+                   "altered object was left aside at " & d & ", and " &
+                   "uninstall is about to discard it")], attest: true),
+        site.evidence)
+      added.add(d)
+  for entry in evidenceEntries(site):
+    if fileExists(entry / "recorded") or entry in done: continue
+    var path, expected, observed = ""
+    try:
+      for l in readFile(entry / "record").splitLines():
+        let p = l.split('\t', 1)
+        if p.len == 2:
+          case p[0]
+          of "path": path = p[1]
+          of "expected": expected = p[1]
+          of "observed": observed = p[1]
+          else: discard
+    except IOError, OSError: discard
+    discard recordEvidence(EvidenceEvent(detector: edStore,
+      category: ecDetection, trigger: "store-recovery-interrupted",
+      fields: @[("path", path), ("digest", expected),
+                ("observedDigest", observed), ("evidence", entry),
+                ("message", path & ": filed at " & entry & " by a recovery " &
+                 "a crash interrupted before its record; uninstall is " &
+                 "about to discard it")], attest: true),
+      site.evidence)
+    added.add(entry)
+  if added.len > 0:
+    var text = ""
+    for k in done.keys: text.add(k & "\n")
+    for k in added: text.add(k & "\n")
+    createDir(parentDir(rp))
+    writeFileAtomic(rp, text, 0o600)
+  added.len
 
 proc flushUnrecorded*(site: CustodySite) =
   ## Entries a crash left without their DET-AO-5 record (filed, the record

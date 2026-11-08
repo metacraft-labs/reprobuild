@@ -301,12 +301,12 @@ suite "stored generations keep the rules they were installed with":
 suite "A9 review round 2: floor version 3":
   test "the private mounts and the unit's directories are noexec":
     # Red under floor-private-mounts-exec.
-    let u = rendered(unitStanza("a.service", "RuntimeDirectory=a-rt\n" &
-      "StateDirectory=a-st:a-link\nCacheDirectory=a-c\nLogsDirectory=a-l\n" &
-      "ConfigurationDirectory=a-cf\nExecStart=" & Prefix & "/bin/svc\n"))
+    let u = rendered(unitStanza("a.service", "RuntimeDirectory=a/rt\n" &
+      "StateDirectory=a/st\nCacheDirectory=a/c\nLogsDirectory=a/l\n" &
+      "ConfigurationDirectory=a/cf\nExecStart=" & Prefix & "/bin/svc\n"))
     check "NoExecPaths=/\nNoExecPaths=-/tmp -/var/tmp -/dev/shm " &
-      "-/dev/hugepages -/dev/mqueue -/run -/run/a-rt -/var/lib/a-st -/var/cache/a-c " &
-      "-/var/log/a-l -/etc/a-cf\n" in u
+      "-/dev/hugepages -/dev/mqueue -/run -/run/a/rt -/var/lib/a/st -/var/cache/a/c " &
+      "-/var/log/a/l -/etc/a/cf\n" in u
 
   test "/proc is read-only and SysV shared memory is denied":
     # Red under floor-proc-writable and floor-allows-sysv-shm.

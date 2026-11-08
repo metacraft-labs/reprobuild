@@ -91,13 +91,32 @@ type Case = object
   tree: string               ## relative: the tool's output tree
   product: string            ## relative: the obligatory main product
   restorable: bool           ## whether S7 admits the record
+  privateHome: bool          ## run the case under a HOME of its own
   setup: proc (root: string) {.closure.}
+
+proc mavenMissing(): string =
+  ## "" when the Maven case can run here, else why not. The convention runs
+  ## Maven OFFLINE and its output discovery runs the pinned
+  ## ``maven-help-plugin`` (java_maven.nim), so the plugin has to be in the
+  ## local repository already -- the same precondition, and the same reasoned
+  ## skip, as ``libs/repro_standard_provider/tests/
+  ## test_delegated_build_outputs.nim``'s ``mavenReady``. Without it the
+  ## first build fails before anything this file checks has happened.
+  if findExe("mvn").len == 0 or findExe("javac").len == 0:
+    return "mvn or javac not on PATH"
+  let local = getHomeDir() / ".m2" / "repository" / "org" / "apache" /
+    "maven" / "plugins" / "maven-help-plugin" / "3.5.1"
+  if not dirExists(local):
+    return "maven-help-plugin 3.5.1 is not in the local repository " &
+      "(warm it once online: mvn org.apache.maven.plugins:" &
+      "maven-help-plugin:3.5.1:evaluate -Dexpression=project.version " &
+      "-q -DforceStdout)"
+  ""
 
 proc cases(): seq[Case] =
   result.add(Case(name: "maven", buildId: "java-maven-package",
     tree: "target", product: "target/hello-1.0.jar", restorable: true,
-    missing: (if findExe("mvn").len == 0 or findExe("javac").len == 0:
-      "mvn or javac not on PATH" else: ""),
+    missing: mavenMissing(),
     setup: proc (root: string) =
       writeProject(root, [
         ("pom.xml", "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n" &
@@ -127,17 +146,31 @@ proc cases(): seq[Case] =
           "    \"dotnet >=8\"\n", "hello"))])
       putEnv("DOTNET_CLI_TELEMETRY_OPTOUT", "1")
       tool(@["dotnet", "restore", root / "hello.csproj", "--use-lock-file"], root)))
+  # The convention assumes a Cabal store that already exists
+  # (haskell_cabal.nim, "Honest scope"). The first `cabal` build under a HOME
+  # whose store does not exist yet creates `~/.local/state/cabal/store/
+  # ghc-<version>-<abi>/package.db`, paths no declared output accounts for,
+  # so S7 withholds that build's payloads and nothing can be restored: the
+  # case passed on a host whose store an earlier build had made, and failed
+  # on a runner whose HOME had none. So it runs under a HOME of its own,
+  # whose store a throwaway build of the same package creates first -- what
+  # the convention's precondition says, made true here instead of assumed.
+  const cabalFiles = [
+    ("hello.cabal", "cabal-version: 2.4\nname: hello\nversion: 1.0\n" &
+      "build-type: Simple\n\nexecutable hello\n  main-is: Main.hs\n" &
+      "  hs-source-dirs: app\n  build-depends: base\n" &
+      "  default-language: Haskell2010\n"),
+    ("app/Main.hs", "main :: IO ()\nmain = putStrLn \"hello\"\n")]
   result.add(Case(name: "cabal", buildId: "haskell-cabal-build",
-    tree: "dist-newstyle", product: "", restorable: true,
+    tree: "dist-newstyle", product: "", restorable: true, privateHome: true,
     missing: (if findExe("cabal").len == 0 or findExe("ghc").len == 0:
       "cabal or ghc not on PATH" else: ""),
     setup: proc (root: string) =
+      let warm = root.parentDir / "cabal-store-warm-up"
+      writeProject(warm, cabalFiles)
+      tool(@["cabal", "v2-build", "--offline"], warm)
+      writeProject(root, cabalFiles)
       writeProject(root, [
-        ("hello.cabal", "cabal-version: 2.4\nname: hello\nversion: 1.0\n" &
-          "build-type: Simple\n\nexecutable hello\n  main-is: Main.hs\n" &
-          "  hs-source-dirs: app\n  build-depends: base\n" &
-          "  default-language: Haskell2010\n"),
-        ("app/Main.hs", "main :: IO ()\nmain = putStrLn \"hello\"\n"),
         ("reprobuild.nim", reproNim("cabalRestore",
           "    \"ghc >=9\"\n    \"cabal >=3.10\"\n", "hello"))])))
   result.add(Case(name: "gradle", buildId: "kotlin-gradle-build",
@@ -169,6 +202,15 @@ suite "a delegated build's output tree is restored from the cache":
         defer: removeDir(extendedPath(scratch))
         let project = scratch / "project"
         createDir(project)
+        let hadHome = existsEnv("HOME")
+        let previousHome = getEnv("HOME")
+        if testCase.privateHome:
+          createDir(scratch / "home")
+          putEnv("HOME", scratch / "home")
+        defer:
+          if testCase.privateHome:
+            if hadHome: putEnv("HOME", previousHome)
+            else: delEnv("HOME")
         testCase.setup(project)
         # Gradle must not fall back to the ambient user home: point it at a
         # path that does not exist, and require that it still does not.

@@ -27,9 +27,10 @@ const RepoRoot = currentSourcePath().parentDir.parentDir.parentDir
 const CatalogModuleRel = "libs/repro_project_dsl/src/repro_project_dsl/" &
   "reprobuild_packages_catalog.nim"
 const CoreSrcRel = "libs/repro_core/src"
-const CoreModulesRel = ["repro_core/source_root.nim", "repro_core/paths.nim"]
-  ## What the lookup module imports beyond std, shipped beside it in the
-  ## installed tree exactly as `stage_release_sources.sh` ships `libs/`.
+  ## What the lookup module imports beyond std (`repro_core/source_root` and
+  ## what that imports in turn), shipped beside it in the installed tree as
+  ## `stage_release_sources.sh` ships `libs/`: the whole library, so a new
+  ## import inside it cannot leave the installed copy short of a module.
 const StageScript = RepoRoot / "scripts" / "release" / "stage_release_catalog.sh"
 
 const FixtureInterface = """
@@ -115,9 +116,8 @@ suite "an installed reprobuild carries the catalog it was released with":
   createDir(installedModule.parentDir)
   copyFile(RepoRoot / CatalogModuleRel, installedModule)
   let installedCoreSrc = prefix / "share" / "repro" / "source" / CoreSrcRel
-  for rel in CoreModulesRel:
-    createDir((installedCoreSrc / rel).parentDir)
-    copyFile(RepoRoot / CoreSrcRel / rel, installedCoreSrc / rel)
+  createDir(installedCoreSrc.parentDir)
+  copyDir(RepoRoot / CoreSrcRel, installedCoreSrc)
 
   let staged = prefix / "share" / "repro" / "reprobuild-packages"
 

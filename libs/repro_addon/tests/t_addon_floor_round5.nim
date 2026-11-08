@@ -195,7 +195,7 @@ suite "round 5, finding 2: sockets and other activators":
     check "under /run" in refused(plain & rawUnit("a.socket",
       "[Socket]\nListenStream=/etc/a.sock\n"))
     check refused(plain & rawUnit("a.socket",
-      "[Socket]\nListenStream=/run/a.sock\nListenStream=127.0.0.1:8080\n" &
+      "[Socket]\nListenStream=/run/a/a.sock\nListenStream=127.0.0.1:8080\n" &
       "\n[Install]\nWantedBy=sockets.target\n")) == ""
     # A timer and a path unit that start it: watch-only keys.
     check "activates a floored service" in refused(plain & rawUnit("a.path",
@@ -204,13 +204,13 @@ suite "round 5, finding 2: sockets and other activators":
 
   test "no command line in a drop-in onto any socket, timer or path unit":
     check "carries a command line" in refused(rawUnit("b.socket",
-      "[Socket]\nListenStream=/run/b.sock\n") &
+      "[Socket]\nListenStream=/run/b/b.sock\n") &
       dropInStanza("b.socket", "[Socket]\nExecStartPre=/bin/true\n"))
 
   test "the effective check of an activator":
     var show = parseShow("FragmentPath=/etc/systemd/system/a.socket\n" &
       "DropInPaths=\n")
-    var lines = parseShowLines("Listen=/run/a.sock (Stream)\n" &
+    var lines = parseShowLines("Listen=/run/a/a.sock (Stream)\n" &
       "Listen=/etc/a-target (Special)\n")
     let p = activatorProblems("a.socket", show, lines,
       "/etc/systemd/system/a.socket", [])

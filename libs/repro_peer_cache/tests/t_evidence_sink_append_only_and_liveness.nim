@@ -302,7 +302,7 @@ suite "Distributed-Execution M7: the evidence sink":
     check app.drain()
     let later = int64(epochTime() * 1000) + AppenderUnhealthyAfterMs + 1_000
     check app.healthy(later)          # connected, nothing waiting
-    check not (waitFor app.sendRawVerbForTesting(7'u8, @[]))
+    waitFor app.dropConnectionForTesting()   # the sink ended it
     check app.pending == 0
     check app.healthy()               # within the grace: a reconnect may follow
     check not app.healthy(int64(epochTime() * 1000) +

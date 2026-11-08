@@ -10,6 +10,7 @@
 ##   repro system addon evidence-ship [--heartbeat]
 ##   repro system addon evidence-credential-check
 ##   repro system addon uninstall [--keep-store]
+##   repro system addon verify-discard-record RECORD --key HEX
 ##   repro system addon verify [--boot | --after-dpkg]
 ##   repro system addon reassert [--boot]
 ##   repro system addon recover
@@ -17,6 +18,7 @@
 ##   repro system addon probe <healthCheck>
 ##   repro system addon secret put --service S --name N [--target T] < secret
 ##   repro system addon rotate-recipient-key
+##   repro system addon image-assemble --payload <dir>
 ##   repro system addon agent-tick --source <manifest>... [--target T]
 ##   repro system rollback [<generation>] [--reconcile-drift]
 ##   repro system addon fingerprint [--root R] [--no-live] [--out F]
@@ -54,6 +56,7 @@ import repro_local_store/store as local_store
 
 import ./addon_apply
 import ./adoption_cli
+import ./image_assemble
 import ./addon_rollback
 import ./agent_record
 import ./agent_repin
@@ -64,6 +67,7 @@ import ./bootstrap
 import ./collision
 import ./own_profile
 import ./containment
+import ./mutations
 import ./evidence_ship
 import ./evidence_enrol
 import ./egress_observer
@@ -149,7 +153,17 @@ commands:
       only then. It announces itself first, so the sink's check reads it as
       a self-test, not as a probe (G34).
   uninstall [--keep-store] [--discard-store-evidence]
+            [--discard-unacknowledged-store-evidence]
       Reverse everything the ownership ledger records.
+      --discard-unacknowledged-store-evidence discards store evidence the
+      Evidence sink has not acknowledged, after writing a record of it to
+      /var/log/repro-addon signed by the host's attestation key; without
+      that key it refuses.
+  verify-discard-record RECORD --key HEX
+      Check such a record: its signature (RECORD.sig) must be over exactly
+      the bytes of RECORD, by HEX, the host's enrolled attestation key
+      (required; without it this is a usage error, exit 2). Exit 0 only
+      then. Runs on any machine; the files may be copied off the host.
   verify [--boot | --after-dpkg]
       Compare every ledger object with the host (report only). --after-dpkg
       (the apt hook): also report packages that now own ledger paths and
@@ -177,6 +191,12 @@ commands:
       Generate the next recipient key and print its public half; the
       current key is deleted when the first envelope sealed to the new
       one opens.
+  image-assemble --payload <dir>
+      The assembly boot of `repro infra image` (spec §6.5.2 step 5), run
+      by the image's one-shot assembly unit, never by an operator:
+      preflight, bootstrap and the host profile's apply on this system,
+      a plan that must predict nothing, then the clean-up; writes
+      <dir>/result.json.
   agent-repin [--apply <digest>]
       Resolve the deploy agent's origins again and print the plan for the
       fetch unit's egress allow-list and hosts file (writing nothing), or
@@ -314,11 +334,35 @@ proc parsePreflightArgs*(rest: seq[string]): tuple[inp: PreflightInputs;
     inc i
   (inp, json)
 
+proc parseVerifyDiscardRecordArgs*(rest: seq[string]):
+    tuple[path, key: string] =
+  ## ``RECORD --key HEX`` of ``verify-discard-record``. Raises
+  ## ``ValueError`` on anything else, and when ``--key`` is missing.
+  var i = 0
+  while i < rest.len:
+    if rest[i] == "--key" and i + 1 < rest.len:
+      result.key = rest[i + 1]; inc i
+    elif rest[i].startsWith("--key="): result.key = rest[i][6 .. ^1]
+    elif result.path.len == 0 and not rest[i].startsWith("-"):
+      result.path = rest[i]
+    else:
+      raise newException(ValueError, "unexpected " & rest[i])
+    inc i
+  # The key is required (§13 decision 64, amended round 6): a record
+  # checked only against the key it names itself is not authenticated.
+  if result.path.len == 0 or
+      (result.key.len == 0 and not mutated("verify-accepts-missing-key")):
+    raise newException(ValueError, "usage: repro system addon " &
+      "verify-discard-record RECORD --key HEX (HEX: the host's enrolled " &
+      "attestation key)")
+
 proc parseUninstallArgs*(rest: seq[string]): UninstallOptions =
   ## ``uninstall``'s options. Raises ``ValueError``.
   for a in rest:
     if a == "--keep-store": result.keepStore = true
     elif a == "--discard-store-evidence": result.discardStoreEvidence = true
+    elif a == "--discard-unacknowledged-store-evidence":
+      result.discardUnacknowledgedStoreEvidence = true
     else: raise newException(ValueError, "unknown option " & a)
 
 proc parseBootstrapArgs*(rest: seq[string]): BootstrapOptions =
@@ -507,8 +551,35 @@ proc runAddonCli*(args: seq[string]): int =
       except AddonPlanMismatch as e:
         stderr.write("repro system addon bootstrap: " & e.msg & "\n")
         return 2
+    of "verify-discard-record":
+      var path, key: string
+      try:
+        (path, key) = parseVerifyDiscardRecordArgs(rest)
+      except ValueError as e:
+        stderr.write("repro system addon verify-discard-record: " & e.msg &
+                     "\n")
+        return 2
+      let v = verifyDiscardRecord(path, key)
+      if not v.ok:
+        stderr.write("repro system addon verify-discard-record: " & path &
+                     " does not verify: " & v.why & "\n")
+        return 1
+      stdout.write("verified: " & path & " is signed by " & v.keyHex &
+                   " over exactly its bytes; " & $v.objects.len &
+                   " object(s) discarded unshipped:\n")
+      for o in v.objects: stdout.write("  " & o & "\n")
+      return 0
     of "uninstall":
       let r = runAddonUninstall(parseUninstallArgs(rest))
+      if r.overrideRecord.len > 0:
+        # §13 decisions 62 and 64: the record of what was discarded
+        # unshipped, its signature beside it.
+        stdout.write("store evidence discarded before the Evidence sink " &
+          "acknowledged it; the signed record is " & r.overrideRecord &
+          " (signature " & r.overrideRecord & DiscardRecordSigExt &
+          "; check it with `repro system addon verify-discard-record " &
+          r.overrideRecord & " --key <enrolled key>`):\n" &
+          r.overrideRecordText)
       for p in r.removed: stdout.write("removed " & p & "\n")
       for d in r.drift: stdout.write("left in place (drift): " & d & "\n")
       for k in r.keptEvidence:
@@ -579,6 +650,29 @@ proc runAddonCli*(args: seq[string]): int =
       return (if atBoot or r.ok: 0 else: 1)
     of "secret":
       return runSecretPutCli(rest)
+    of "image-assemble":
+      var payload = ""
+      var i = 0
+      while i < rest.len:
+        let a = rest[i]
+        if a == "--payload" or a.startsWith("--payload="):
+          payload = takeValue(rest, i, "--payload")
+        else:
+          raise newException(ValueError, "unknown option " & a)
+        inc i
+      if payload.len == 0:
+        raise newException(ValueError, "--payload <dir> is required")
+      let spec = parseAssemblySpec(readFile(payload / "assembly.json"))
+      # The payload's binary is this one: refuse a payload staged for
+      # another (the build host pinned it by digest).
+      let self = sha256OfFile(getAppFilename())
+      if self != spec.binarySha256:
+        raise newException(ValueError, "this binary hashes to " & self &
+          ", but the payload was staged for " & spec.binarySha256)
+      let (inp, _) = parsePreflightArgs(spec.preflightFlags)
+      let opts = parseBootstrapArgs(spec.preflightFlags)
+      let r = runImageAssembly(payload, spec, inp, opts)
+      return (if r.ok: 0 else: 1)
     of "rotate-recipient-key":
       return runRotateRecipientKeyCli(rest)
     of "evidence-ship":

@@ -27,6 +27,18 @@
 # land in build/addon-gates/records/. Missing KVM, QEMU or gosti is a failure
 # with the reason, never a skip: a gate the operator invoked must run.
 set -euo pipefail
+# A library another tool preloaded into this shell (an agent harness's
+# command-trace shim) is inherited by every engine action the gate starts,
+# where it sits beside the monitor shim: a monitor loss on every monitored
+# edge, and agent-harbor 0.6.16's shim deadlocks in its constructor under
+# the monitor (its ld_preload::later_copy_original waits without bound), so
+# the profile compile a gate runs hangs. The shared guard removes it and
+# re-executes this script once without it, as run_tests.sh and
+# run_addon_unit_mutation.sh do. It runs before the `cd`, so the re-exec
+# finds this script by the path it was given.
+# shellcheck source=scripts/lib/foreign_preload.sh
+source "$(dirname "$0")/lib/foreign_preload.sh"
+foreign_preload_guard "$@"
 cd "$(dirname "$0")/.."
 
 test="${1:?usage: run_addon_gate.sh <test-basename>}"
@@ -114,4 +126,11 @@ bin="build/test-bin/${test}${gate_tag}.run-$$"
   cp "build/test-bin/${test}${gate_tag}" "$bin"
 ) 8>"build/nimcache/${test}${gate_tag}.lock"
 trap 'rm -f "$bin"' EXIT
-REPRO_ADDON_VM_GATES=1 REPRO_ADDON_BASES="$bases" "$bin"
+# The gate and every helper it starts (cache, HTTP origins, sink, QEMU) run
+# as one process group, ended together however the gate ends, and with no
+# descriptor of this script's caller (scripts/lib/process_group.sh).
+# shellcheck source=scripts/lib/process_group.sh
+source scripts/lib/process_group.sh
+gate_rc=0
+run_in_own_group env REPRO_ADDON_VM_GATES=1 REPRO_ADDON_BASES="$bases" "$bin" || gate_rc=$?
+exit "$gate_rc"

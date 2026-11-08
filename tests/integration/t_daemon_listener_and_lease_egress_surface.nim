@@ -58,6 +58,10 @@ proc tcpListenersOf*(pid: int): seq[Listener] =
   ## The TCP listeners process `pid` holds, from the OS's socket table.
   when defined(linux):
     let res = execCmdEx("ss -H -tlnp")
+    # A missing or failing `ss` must not read as "no listeners": that is the
+    # answer the undeclared-listener checks below accept.
+    doAssert res.exitCode == 0,
+      "ss -H -tlnp failed (exit " & $res.exitCode & "): " & res.output
     for line in res.output.splitLines:
       if ("pid=" & $pid & ",") notin line: continue
       let cols = line.splitWhitespace()

@@ -40,6 +40,12 @@
 ##                                            key group- and world-readable
 ## ``provisions-publisher-key``               bootstrap also leaves a binary
 ##                                            cache publisher keypair
+## ``image-omits-gen0-ledger``                the image assembly (A16)
+##                                            deletes the add-on's ledger
+##                                            copy before power-off
+## ``image-omits-store-closure``              the image assembly deletes
+##                                            every apt closure's store
+##                                            prefix before power-off
 ## ``observer-never-package-owned``           the collision observer reports
 ##                                            no package provenance: no
 ##                                            path is package-owned and no
@@ -743,6 +749,106 @@
 ## ``egress-unit-ignores-table``              the egress observer unit does
 ##                                            not name the table it loads
 ##                                            (round 2)
+## ``sink-close-in-finally``                  the sink's connection handler
+##                                            awaits its close in a finally,
+##                                            as before; red under Nim 2.2.4
+##                                            (round 3)
+## ``egress-owed-by-listing``                 owed egress destinations are
+##                                            taken in the set's listing
+##                                            order (round 3)
+## ``egress-owed-dropped-at-reload``          owed egress destinations are
+##                                            forgotten at a table reload
+##                                            (round 3)
+## ``egress-state-empty-is-valid``            an empty or headerless egress
+##                                            state reads as a first check
+##                                            (round 3)
+## ``check-state-empty-is-valid``             an empty check state reads as
+##                                            a valid empty state (round 3)
+## ``probe-undelivered-is-refused``           a forbidden-verb probe with no
+##                                            reply counts as refused (round
+##                                            3)
+## ``ack-rules-cli-only``                     the sink appends, and the
+##                                            check honours, any
+##                                            acknowledgement (round 3)
+## ``uninstall-discards-unrecorded``          uninstall records nothing it
+##                                            discards, and does not wait
+##                                            for the sink (round 3)
+## ``alert-seq-zero-is-none``                an alert on the sink store's
+##                                            first entry (sequence 0)
+##                                            prints and matches as one
+##                                            without a sequence
+## ``allow-source-field``                     the record redaction lets a
+##                                            ``source`` field through
+##                                            (round 4)
+## ``uninstall-skips-ack-refusal``            uninstall discards when the
+##                                            sink received the records but
+##                                            did not acknowledge them
+##                                            (round 4, decision 56)
+## ``override-unrecorded``                    the explicit override
+##                                            discards without writing its
+##                                            signed record (decision 62)
+## ``seq-zero-sentinel``                      sequence 0 reads as "no
+##                                            sequence" in the sink's
+##                                            commands, a retirement and a
+##                                            beat before a containment
+##                                            (round 4)
+## ``containment-skew-ignored``               a containment stated more
+##                                            than 10 minutes from its
+##                                            receipt is honoured (round 4)
+## ``signer-close-in-finally``                the Distributed Execution
+##                                            signer awaits its close in a
+##                                            finally, as before; red under
+##                                            Nim 2.2.4 (round 4; the
+##                                            signer's own switch,
+##                                            ``repro_distributed_worker/
+##                                            signer``)
+## ``signer-constant-tuple-return``          the signer's client returns a
+##                                            refusal as a constant tuple
+##                                            literal, as before; SIGSEGV
+##                                            under Nim 2.2.4 (round 4)
+## ``override-signs-other-bytes``            the override record's signature
+##                                            is over other bytes than the
+##                                            file holds (decision 64)
+## ``override-empty-signature``               the override record's signature
+##                                            file is empty (decision 64)
+## ``override-keyless-unsigned``              without the attestation key the
+##                                            override writes an unsigned
+##                                            record and discards (decision
+##                                            63)
+## ``override-write-error-swallowed``         an override record that cannot
+##                                            be written does not stop the
+##                                            discard (decision 62)
+## ``sim-stop-in-finally``                    a CONTROL, not a falsifier: the
+##                                            simulator's TLS smoke pass as
+##                                            before round 4 (peers stopped
+##                                            in a finally no return leaves
+##                                            through); green under Nim
+##                                            2.2.4 too (round 5)
+## ``fresh-skips-included``                   fresh_binary ignores files a
+##                                            module includes (decision 65)
+## ``fresh-skips-outside-tree``               fresh_binary ignores modules
+##                                            from outside the tree
+##                                            (decision 65)
+## ``fresh-skips-c-sources``                  fresh_binary ignores the C files
+##                                            compiled with {.compile.}
+##                                            (decision 65, round 6)
+## ``fresh-skips-headers``                    fresh_binary ignores the headers
+##                                            those C files include
+## ``fresh-skips-static-reads``               fresh_binary ignores staticRead
+##                                            and staticExec inputs
+## ``fresh-ignores-list-binary``              fresh_binary accepts a list
+##                                            written for another binary
+## ``override-sig-write-error-swallowed``     a failed signature write does
+##                                            not stop the discard (round 6)
+## ``verify-accepts-missing-key``             verify-discard-record verifies
+##                                            without --key (round 6)
+## ``sim-skips-stop``                         the simulator's TLS smoke pass
+##                                            never stops its peers
+##                                            (round 6)
+## ``stale-helper-accepted``                  a test's helper binary is used
+##                                            however old it is
+##                                            (``repro_test_support/
+##                                            fresh_binary``; round 4)
 ## =========================================  ==============================
 
 # The deploy agent's own mutations (``repro_deploy_agent/agent_mutations``)
@@ -761,6 +867,11 @@ const
                           "switch-fails-before-ledger",
                           "bootstrap-installs-jq", "preflight-writes",
                           "recipient-key-0644", "provisions-publisher-key",
+                          # A16 (e2e_addon_zero_touch_image_synthesis_boots_
+                          # converged): an image assembly that leaves the
+                          # ledger, or an apt closure's store prefix, out of
+                          # the image (image_assemble.runImageAssembly).
+                          "image-omits-gen0-ledger", "image-omits-store-closure",
                           "apply-skips-kind-check",
                           "uninstall-discards-state-on-drift",
                           "observer-never-package-owned",
@@ -1007,6 +1118,66 @@ const
                           "directory-names-unchecked",
                           "owned-objects-fall-back",
                           "reached-conflicts-unchecked",
+                          # A9 review round 9 (§13 decision 57): a unit
+                          # named after a base tree; an existing tree not
+                          # created for the unit; the record of the unit's
+                          # own directories ignored.
+                          "base-tree-names-allowed",
+                          "existing-trees-allowed",
+                          "created-dirs-ignored",
+                          # the effective reach ending at units the
+                          # generation does not install; the parse-rule
+                          # rerun reported beside the dedicated rule.
+                          "reach-stops-at-base-units",
+                          "rerun-not-suppressed",
+                          # an own secret EnvironmentFile= read in the
+                          # switch's own mount namespace, not PID 1's.
+                          "secrets-read-in-own-namespace",
+                          # shutdown.target and umount.target, which
+                          # systemd adds itself, judged as the unit's own.
+                          "implicit-conflicts-refused",
+                          # an EnvironmentFile= in a writable place judged
+                          # again by where it resolves (two rules, one
+                          # refusal).
+                          "writable-env-judged-twice",
+                          # A9 review round 10 (§13 decisions 67-70):
+                          # ownership as provenance; the record keyed by
+                          # path alone; the record taken after the whole
+                          # start step; a unit named after a base tree
+                          # refused only through a directory; a longer
+                          # name taken as the unit's own; the activator's
+                          # reached units unchecked; refusal lines with no
+                          # rule tag, and a gate that skips them.
+                          "ownership-as-provenance",
+                          "created-dirs-by-path",
+                          "created-dirs-per-step",
+                          "base-tree-units-by-directory",
+                          "own-names-by-prefix",
+                          "activator-reach-unchecked",
+                          "refusal-lines-untagged",
+                          "untagged-lines-skipped",
+                          # a directory the unit's own restart made
+                          # again not recorded again.
+                          "created-dirs-not-rerecorded",
+                          # §13 decision 71, one per condition: a
+                          # directory not recorded for the unit, one not
+                          # exactly declared, one systemd's state does not
+                          # show it made, each taken as made again.
+                          "recreated-unrecorded-accepted",
+                          "recreated-any-path",
+                          "recreated-systemd-unchecked",
+                          # a directory decision 71 accepted, then made
+                          # again by the same switch, not recorded again.
+                          "accepted-not-rerecorded",
+                          # §13 decision 72, the one-time migration:
+                          # it runs again over an existing record; it
+                          # takes a directory not exactly declared; a
+                          # corrupt record counts as absent; it takes a
+                          # unit the committed generation did not install.
+                          "migration-reruns",
+                          "migration-any-path",
+                          "corrupt-record-as-absent",
+                          "migration-any-unit",
                           # A13: a state backup or restore runs while a
                           # unit of the set may run.
                           "state-units-not-checked",
@@ -1185,7 +1356,34 @@ const
                           "ship-backoff-reaches-timeout",
                           "egress-cap-advances-all", "uninstall-ignores-asides",
                           "tree-marker-on-reuse", "containment-sequence-unsynced",
-                          "egress-unit-ignores-table"]
+                          "egress-unit-ignores-table",
+                          # The A11 code review, round 3.
+                          "sink-close-in-finally", "egress-owed-by-listing",
+                          "egress-owed-dropped-at-reload",
+                          "check-state-empty-is-valid",
+                          "probe-undelivered-is-refused",
+                          "ack-rules-cli-only",
+                          "uninstall-discards-unrecorded",
+                          "egress-state-empty-is-valid",
+                          "alert-seq-zero-is-none",
+                          # The A11 code review, round 4.
+                          "allow-source-field", "uninstall-skips-ack-refusal",
+                          "override-unrecorded", "seq-zero-sentinel",
+                          "containment-skew-ignored",
+                          "signer-close-in-finally",
+                          "signer-constant-tuple-return",
+                          "stale-helper-accepted",
+                          "override-signs-other-bytes",
+                          "override-empty-signature",
+                          "override-keyless-unsigned",
+                          "override-write-error-swallowed",
+                          "sim-stop-in-finally", "fresh-skips-included",
+                          "fresh-skips-outside-tree",
+                          "fresh-skips-c-sources", "fresh-skips-headers",
+                          "fresh-skips-static-reads",
+                          "fresh-ignores-list-binary",
+                          "override-sig-write-error-swallowed",
+                          "verify-accepts-missing-key", "sim-skips-stop"]
 
 when AddonMutation.len > 0 and AddonMutation notin KnownAddonMutations and
     AddonMutation notin KnownAgentMutations:

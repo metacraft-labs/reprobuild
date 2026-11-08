@@ -24,7 +24,6 @@ from repro_core/process_exec import execCmdExCloseOnce
 import repro_core/paths as corepaths
 import repro_core/source_root
 import repro_core/installed_prefix_nim
-import repro_solver/uses_constraints
 export installed_prefix_nim
 from repro_core/c_compiler import BuiltCCompilerPath
 import repro_domain_types
@@ -6411,28 +6410,12 @@ proc installedPrefixNim*(prefixes: openArray[string];
 
 proc requireProjectNimAdmitsInstalledPrefixNim*(
     toolUses: openArray[InterfaceToolUse]) =
-  ## N3: when the provider compiler is the installed prefix's Nim (the
-  ## bootstrap recorded its release in `$REPRO_INSTALLED_PREFIX_NIM`), a
-  ## project whose own `uses:` names `nim` with a range that excludes that
-  ## release is refused, naming both, rather than compiled with a compiler
-  ## the recipe says it does not accept. Called once the interface is
-  ## extracted -- the first moment the recipe's `uses:` can be read -- and
-  ## before the provider compile. A pinned compiler (rule 1) never sets the
-  ## variable, so it is never second-guessed here.
-  let version = getEnv(InstalledPrefixNimEnvVar)
-  if version.len == 0:
-    return
-  for use in toolUses:
-    let constraint = parseReproUsesConstraint(use.rawConstraint)
-    if constraint.selector != "nim":
-      continue
-    if not constraint.admits(version):
-      raise newException(BootstrapNimError, "the recipe's `uses: \"" &
-        use.rawConstraint & "\"` excludes Nim " & version &
-        ", the compiler this installed prefix ships and compiles recipes " &
-        "with (" & getEnv(bootstrapNimCompilerEnv) & ")" &
-        "\n  remedy: widen the range to admit " & version &
-        ", or pin the provider compiler in the project's lock")
+  ## `repro_core/installed_prefix_nim.requireUsesAdmitInstalledPrefixNim` over
+  ## an extracted interface's `uses:`, raising `BootstrapNimError`.
+  try:
+    requireUsesAdmitInstalledPrefixNim(toolUses.mapIt(it.rawConstraint))
+  except InstalledPrefixNimError as err:
+    raise newException(BootstrapNimError, err.msg)
 
 proc provisionBootstrapNim*(storeRoot: string; route = bootstrapNimRoute();
                             cc = ""): string =

@@ -78,9 +78,9 @@ suite "round 3: the parse-time half (red under floor-static-r3-disabled)":
       "ReadWritePaths=/var/lib/a-rw -/var/lib/a-opt\n" &
       "BindPaths=/var/lib/a-src:/srv/a-b\n" &
       "TemporaryFileSystem=/srv/a-t:mode=1777\n" &
-      "StateDirectory=a-st\nExecStart=" & Prefix & "/bin/svc\n"))
+      "StateDirectory=a/st\nExecStart=" & Prefix & "/bin/svc\n"))
     for p in ["-/var/lib/a-rw", "-/var/lib/a-opt", "-/srv/a-b", "-/srv/a-t",
-              "-/var/lib/a-st"]:
+              "-/var/lib/a/st"]:
       checkpoint p
       check (" " & p) in u
     check "TemporaryFileSystem" in refused(unitStanza("a.service",

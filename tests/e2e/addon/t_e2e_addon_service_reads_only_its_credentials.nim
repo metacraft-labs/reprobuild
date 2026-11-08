@@ -36,7 +36,7 @@ proc sha256Hex(s: string): string =
   ($sha256.digest(s)).toLowerAscii()
 
 proc unit(me, other: string): string =
-  let d = "/run/" & me & "-probe/"
+  let d = "/run/" & me & "/probe/"
   let script =
     "ls -A $$CREDENTIALS_DIRECTORY > " & d & "creds; " &
     "sha256sum $$CREDENTIALS_DIRECTORY/token | cut -c1-64 > " & d & "own; " &
@@ -51,7 +51,7 @@ proc unit(me, other: string): string =
     "systemd.systemUnit {\n  floorExceptions = [\"NoExecPaths: probes " &
     "with the base's own shell\"]\n  name = \"" & me & ".service\"\n" &
     "  content = \"[Unit]\nDescription=credential isolation probe\n\n" &
-    "[Service]\nDynamicUser=yes\nRuntimeDirectory=" & me & "-probe\n" &
+    "[Service]\nDynamicUser=yes\nRuntimeDirectory=" & me & "/probe\n" &
     "RuntimeDirectoryMode=0755\nExecStart=/bin/sh -c '" & script & "'\n\n" &
     "[Install]\nWantedBy=multi-user.target\n\"\n" &
     "  credentials = [\"token\"]\n}\n\n"
@@ -83,7 +83,7 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
     step("the two services apply", r.exitCode == 0, r.stdout & r.stderr)
     for (me, value) in values:
       let other = if me == "svc-a": "svc-b" else: "svc-a"
-      let d = "/run/" & me & "-probe/"
+      let d = "/run/" & me & "/probe/"
       discard g.exec("for i in $(seq 1 30); do [ -e " & d & "done ] && break; " &
                      "sleep 1; done")
       let creds = g.exec("cat " & d & "creds").stdout.strip()

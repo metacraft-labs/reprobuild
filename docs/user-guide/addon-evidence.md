@@ -72,7 +72,9 @@ overwritten; `evidence-enrol` refuses a host that already has either one.
 To check the credential from the host, run
 `repro system addon evidence-credential-check`. An append must be
 acknowledged, and a list, a read, an overwrite and a delete must each be
-refused. The check announces itself to the sink first, so the sink's
+refused: the sink records each refusal and says so. An operation the sink
+never received (it went away, or could not be reached) proves nothing
+about the credential, and fails the check. The check announces itself to the sink first, so the sink's
 detectors list it as the host's `self-test` instead of four alerts. Four
 refused operations that were not announced that way still alert.
 
@@ -217,18 +219,58 @@ and the altered copy is kept on the host, readable by root only, under
 as it was found (`tree/`), a `manifest` of its entries' digests and a
 `record` of what was expected and found. The host ships an `addon-store`
 record for it: `store-recovered` once the object holds its original bytes
-again. If the host lost power during a recovery, the next switch files
+again, its `recoveredFrom` field naming the trusted source. If the host lost power during a recovery, the next switch files
 what it had moved aside and ships `store-recovery-interrupted`. At most
 eight entries are kept, none older than 90 days.
 
 Uninstalling the add-on removes `/var/lib/repro`, and with it these
 entries. So while any exist, `repro system addon uninstall` refuses: it
-names each entry and removes nothing. Copy the entries off the host, then
+names each entry and removes nothing. It also names any object a recovery
+left in the store when the host lost power, and records each of them,
+and each entry whose record was never written, at the sink first.
+`--discard-store-evidence` is refused until the sink has acknowledged
+those records. Copy the entries off the host, then
 run
 
 ```sh
 repro system addon uninstall --discard-store-evidence
 ```
+
+If the sink cannot acknowledge them (it is gone, or no longer accepts
+this host) and you must remove the add-on anyway, override the refusal
+explicitly:
+
+```sh
+repro system addon uninstall --discard-unacknowledged-store-evidence
+```
+
+Before it removes anything, this writes a record of every object it
+discards without the sink having acknowledged it, and of every record
+still queued, to
+`/var/log/repro-addon/uninstall-<time>-discarded-unshipped.json` (root
+only). The record names the public half of the host's attestation key,
+and `<record>.sig` beside it holds that key's signature over exactly the
+bytes of the record file. Uninstall prints the record's path and text.
+Both files stay after uninstall: keep them with the entries you copied
+off the host. If the attestation key is missing, or the record cannot be
+written, uninstall refuses and removes nothing.
+
+To check a record, on the host or on any machine you copied both files
+to, give as `<key>` the attestation key the sink has enrolled for the
+host (the one bootstrap printed):
+
+```sh
+repro system addon verify-discard-record \
+  /var/log/repro-addon/uninstall-20261108T101500Z-discarded-unshipped.json \
+  --key <key>
+```
+
+`--key` is required: without it the command refuses with a usage error
+(exit 2), because a signature that matches only the key the record names
+itself proves nothing about who wrote the record. It exits 0 and lists
+the objects only when the signature is over the file's exact bytes and
+by the key you gave. A changed byte, another key or an empty signature
+is refused (exit 1).
 
 A host bootstrapped by an older release is brought up to date by its
 first switch, or at once with

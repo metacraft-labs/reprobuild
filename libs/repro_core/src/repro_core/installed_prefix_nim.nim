@@ -32,6 +32,9 @@ const
     ## Where an installed prefix records how it was built.
   InstalledPrefixNimRevisionPath* = "nim" / ".nim-fork-revision"
     ## The fork revision the shipped compiler was built from.
+  InstalledPrefixCompilerEnvVar = "REPRO_NIM_COMPILER"
+    ## The provider compiler in use (`repro_tool_profiles.bootstrapNimCompilerEnv`),
+    ## named in a refusal.
   InstalledPrefixNimEnvVar* = "REPRO_INSTALLED_PREFIX_NIM"
     ## Set by the provider-compile bootstrap when it chose the prefix's Nim,
     ## to `<version>`, so a later check of the project's own `uses: nim`
@@ -72,6 +75,41 @@ proc nimReleaseAdmitted*(version, rawConstraint: string): bool =
   ## admits it (N3: "refused by the existing range check"). A name-only
   ## constraint admits every release; an unparseable one admits none.
   parseReproUsesConstraint(rawConstraint).admits(version)
+
+proc requireUsesAdmitInstalledPrefixNim*(rawConstraints: openArray[string]) =
+  ## N3: when the provider compiler is the installed prefix's Nim (the
+  ## bootstrap recorded its release in `$REPRO_INSTALLED_PREFIX_NIM`), a
+  ## recipe whose own `uses:` names `nim` with a range that excludes that
+  ## release is refused, naming both, rather than compiled with a compiler
+  ## the recipe says it does not accept. `rawConstraints` are the recipe's
+  ## `uses:` entries as written. A pinned compiler (rule 1) never sets the
+  ## variable, so it is never second-guessed here.
+  ##
+  ## Run inside the extraction
+  ## (`repro_interface_artifacts.extractInterfaceFromModule`, whose body is
+  ## not exported and checks every artifact it returns: a cold extraction
+  ## before it publishes anything, its warm short-circuit on the artifact it
+  ## returns) and on
+  ## `liftInterfaceArtifact`'s fresh-artifact path, which reads a recorded
+  ## artifact without extracting.
+  ## The build engine's interface edge (`repro_cli_support.extractInterfaceEdge`)
+  ## makes no check of its own: because the extraction reads this variable,
+  ## the monitor keys the edge's record on it, so a cached record answers only
+  ## a run with the same value, one whose extraction passed this check.
+  let version = getEnv(InstalledPrefixNimEnvVar)
+  if version.len == 0:
+    return
+  for raw in rawConstraints:
+    let constraint = parseReproUsesConstraint(raw)
+    if constraint.selector != "nim":
+      continue
+    if not constraint.admits(version):
+      raise newException(InstalledPrefixNimError, "the recipe's `uses: \"" &
+        raw & "\"` excludes Nim " & version &
+        ", the compiler this installed prefix ships and compiles recipes " &
+        "with (" & getEnv(InstalledPrefixCompilerEnvVar) & ")" &
+        "\n  remedy: widen the range to admit " & version &
+        ", or pin the provider compiler in the project's lock")
 
 proc findInstalledPrefixNim*(prefixes: openArray[string];
                              rawConstraint = "nim >=2.2 <3.0"):

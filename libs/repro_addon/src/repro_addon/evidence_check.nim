@@ -39,7 +39,7 @@
 ## copy the producer's sequence and attestation. Records shipped before
 ## that are trustworthy and cannot be erased (G34).
 
-import std/[algorithm, os, sequtils, sets, strutils, tables]
+import std/[algorithm, options, os, sequtils, sets, strutils, tables]
 from std/posix import nil
 
 import repro_peer_cache/auth as peerAuth
@@ -61,7 +61,10 @@ type
       ## deletes old records, the bootstrap record among them (A11 audit
       ## F6), so ``--update-hosts`` writes both into the hosts file the
       ## first time it sees them.
-    retiredAt*: uint64
+    retiredAt*: Option[uint64]
+      ## The sink sequence the id was retired at, absent while it is live.
+      ## An option: a hand-over can be a store's first entry, sequence 0
+      ## (A11 review round 4; 0 used to mean "not retired").
       ## 0, or the sink sequence after which this host id and its key are
       ## retired (spec §13 decision 52): its keys were handed over to new
       ## ones (``--update-hosts`` sets it to the hand-over's sequence), or an
@@ -76,7 +79,12 @@ type
     host*: string
     detector*: string          ## DET-AO-n, or G34 for a probe of the sink
     trigger*: string
-    sinkSeq*: uint64
+    sinkSeq*: Option[uint64]
+      ## The sink sequence of the record that raised the alert, or none (a
+      ## silence, the check's own state). An option, not a sentinel: a
+      ## store numbers its entries from 0, and an alert on its first entry
+      ## names sequence 0 (A11; before, 0 meant "none", and that alert
+      ## printed no sequence and could not be acknowledged).
     detail*: string
 
   DetectorStatus* = object
@@ -172,7 +180,9 @@ proc parseRetired(f: string; h: var EnrolledHost) =
   let v = f["retired@".len .. ^1]
   let colon = v.find(':')
   try:
-    h.retiredAt = parseBiggestUInt(if colon >= 0: v[0 ..< colon] else: v).uint64
+    h.retiredAt = some(parseBiggestUInt(if colon >= 0: v[0 ..< colon] else: v).uint64)
+    when mutated("seq-zero-sentinel"):
+      if h.retiredAt.get == 0'u64: h.retiredAt = none(uint64)
   except ValueError:
     raise newException(EvidenceCheckError, "malformed " & f)
   if colon >= 0:
@@ -217,8 +227,8 @@ proc renderHosts*(hosts: openArray[EnrolledHost]): string =
     result.add(h.hostId & " " & (if h.target.len > 0: h.target else: "-") &
       " " & (if h.attestationKey.len > 0: h.attestationKey else: "-") &
       " " & (if h.generation0.len > 0: h.generation0 else: "-") &
-      (if h.retiredAt > 0'u64:
-         " retired@" & $h.retiredAt &
+      (if h.retiredAt.isSome:
+         " retired@" & $h.retiredAt.get &
            (if h.successor.len > 0: ":" & h.successor else: "")
        else: "") & "\n")
 
@@ -277,15 +287,15 @@ proc enrolFromStore*(hosts: seq[EnrolledHost]; storeDir: string):
           e.record.detector != KeysDetector or
           e.record.trigger != "rekey-handover": continue
       if e.seq in followed: continue
-      if h.retiredAt > 0'u64 and e.seq > h.retiredAt: break
+      if h.retiredAt.isSome and e.seq > h.retiredAt.get: break
       let v = verifyHandover(e.record.field("handover"),
         e.record.field("handoverSignature"), h.attestationKey)
       if not v.ok: continue
-      if h.retiredAt > 0'u64:
+      if h.retiredAt.isSome:
         break                           # followed already (or retired by hand)
       if handoverRefusal(v.h, h.hostId, result.hosts).len > 0: continue
       followed.add(e.seq)
-      result.hosts[i - 1].retiredAt = e.seq
+      result.hosts[i - 1].retiredAt = some(e.seq)
       result.hosts[i - 1].successor = v.h.newCredentialHost
       result.hosts.add(EnrolledHost(hostId: v.h.newCredentialHost,
         target: h.target, attestationKey: v.h.newKey,
@@ -321,6 +331,23 @@ proc parseUnsigned(s: string): uint64 =
 proc parseSigned(s: string): int64 =
   try: parseBiggestInt(s) except ValueError: 0'i64
 
+proc validAlertKind*(k: string): bool =
+  ## ``<detector>/<trigger>``: ``DET-AO-<n>`` or ``G<n>``, then a trigger
+  ## of lower-case words joined by ``-``.
+  let p = k.split('/')
+  if p.len != 2 or p[1].len == 0: return false
+  let det = p[0]
+  let detOk = (det.startsWith("DET-AO-") and det.len > 7 and
+               det[7 .. ^1].allCharsInSet(Digits)) or
+              (det.len > 1 and det[0] == 'G' and
+               det[1 .. ^1].allCharsInSet(Digits))
+  detOk and p[1].allCharsInSet({'a' .. 'z', '0' .. '9', '-'})
+
+const CheckStateHeader* = "repro-check-state 1"
+  ## The first line ``writeFirstSeen`` writes. A file without it is not the
+  ## check's: empty, truncated or foreign (A11 review round 3), unless it
+  ## is round 2's format (lines only, at least one), which is read once.
+
 proc readFirstSeen*(path: string): Table[string, uint64] =
   ## ``<target> <sequence> <first issuedAt>`` per line. A file that does not
   ## exist is the first run (empty). A file that exists and cannot be read,
@@ -338,7 +365,18 @@ proc readFirstSeen*(path: string): Table[string, uint64] =
     else:
       raise newException(EvidenceCheckError, "the check's state file " &
         path & " exists and cannot be read: " & getCurrentExceptionMsg())
-  for l in text.splitLines():
+  var lines = text.splitLines()
+  if lines.len > 0 and lines[0] == CheckStateHeader:
+    lines = lines[1 .. ^1]
+  elif not mutated("check-state-empty-is-valid"):
+    # Round 2 wrote no header: such a file is read when it holds at least
+    # one entry. An empty one -- zero bytes, or blank lines -- is a state
+    # the check never wrote, and restarts every count: refused.
+    if text.strip().len == 0:
+      raise newException(EvidenceCheckError, "the check's state file " &
+        path & " is empty: it is not a state the check wrote (lost or " &
+        "truncated), and every lag count would restart")
+  for l in lines:
     if l.strip().len == 0: continue
     let p = l.splitWhitespace()
     var ok = p.len == 3
@@ -368,6 +406,7 @@ proc writeFirstSeen*(path: string; t: Table[string, uint64]) =
   var lines: seq[string]
   for k, v in t: lines.add(k & " " & $v)
   lines.sort()
+  lines.insert(CheckStateHeader, 0)
   let tmp = path & ".tmp"
   try:
     createDir(parentDir(path))
@@ -379,6 +418,18 @@ proc writeFirstSeen*(path: string; t: Table[string, uint64]) =
     try: removeFile(tmp) except CatchableError: discard
     raise newException(EvidenceCheckError, "the check's state file " &
       path & " cannot be written: " & e.msg)
+
+proc sequenceOf*(a: Alert): Option[uint64] =
+  ## The alert's sequence, as the check prints and matches it.
+  when mutated("alert-seq-zero-is-none"):
+    # FALSIFYING BUILD: 0 stands for "no sequence" again.
+    if a.sinkSeq.isSome and a.sinkSeq.get == 0'u64: return none(uint64)
+  a.sinkSeq
+
+proc seqText*(a: Alert): string =
+  ## `` seq=N`` for an alert a record raised, "" for one none did.
+  let sq = sequenceOf(a)
+  if sq.isSome: " seq=" & $sq.get else: ""
 
 proc successorChainLive*(hosts: seq[EnrolledHost]; h: EnrolledHost): bool =
   ## Whether the chain of successors from the retired ``h`` ends at an
@@ -397,8 +448,8 @@ proc successorChainLive*(hosts: seq[EnrolledHost]; h: EnrolledHost): bool =
         break
     if not found: return false
     when mutated("successor-chain-one-step"):
-      return cur.retiredAt == 0'u64
-    if cur.retiredAt == 0'u64: return true
+      return cur.retiredAt.isNone
+    if cur.retiredAt.isNone: return true
   false
 
 proc runEvidenceCheck*(inp: CheckInputs): CheckReport =
@@ -434,7 +485,7 @@ proc runEvidenceCheck*(inp: CheckInputs): CheckReport =
   # manifest directory alone. An unreadable file is never rewritten.
   template stateAlert(trig, d: string) =
     result.alerts.add(Alert(host: "-", detector: "DET-AO-10", trigger: trig,
-                            sinkSeq: 0, detail: d))
+                            sinkSeq: none(uint64), detail: d))
   when not mutated("lag-ignores-check-state"):
     if inp.statePath.len > 0:
       var readable = true
@@ -482,6 +533,12 @@ proc runEvidenceCheck*(inp: CheckInputs): CheckReport =
   # it handled -- one record can raise several alerts (finding 9).
   var acks = initTable[string, HandledAlert]()
   if inp.sinkHostId.len > 0:
+    # The sink's own acknowledgements are never acknowledged.
+    var sinkOwnAcks = initHashSet[string]()
+    for e in entries:
+      if e.kind == ekRecord and $e.senderHostId == inp.sinkHostId and
+          e.record.detector == "sink-operator":
+        sinkOwnAcks.incl($e.seq)
     for e in entries:
       if e.kind == ekRecord and $e.senderHostId == inp.sinkHostId and
           e.record.detector == "sink-operator" and
@@ -490,7 +547,16 @@ proc runEvidenceCheck*(inp: CheckInputs): CheckReport =
         let finding = e.record.field("finding")
         let k = when mutated("ack-by-sequence-only"): $n
                 else: $n & " " & finding
-        if n > 0'u64 and finding.len > 0 and k notin acks:
+        # The same rules the sink applies when it appends (A11 review round
+        # 3), and one the check alone can apply: an acknowledgement handles
+        # only a record that came BEFORE it.
+        let valid = when mutated("ack-rules-cli-only"): true
+                    else: validAlertKind(finding) and n < e.seq and
+                          $n notin sinkOwnAcks
+        # Sequence 0 is a store's first entry, acknowledgeable like any.
+        let named = e.record.field("acknowledges").len > 0 and
+                    e.record.field("acknowledges").allCharsInSet(Digits)
+        if named and finding.len > 0 and valid and k notin acks:
           acks[k] = HandledAlert(ackSeq: e.seq,
             operator: e.record.field("operator"),
             reason: e.record.field("reason"))
@@ -499,7 +565,11 @@ proc runEvidenceCheck*(inp: CheckInputs): CheckReport =
     let mine = byHost.getOrDefault(h.hostId, @[])
     template alert(det, trig: string; s: uint64; d: string) =
       result.alerts.add(Alert(host: h.hostId, detector: det, trigger: trig,
-                              sinkSeq: s, detail: d))
+                              sinkSeq: some(s), detail: d))
+    template alertUnsequenced(det, trig, d: string) =
+      ## An alert no single record raised (a silence, a lag).
+      result.alerts.add(Alert(host: h.hostId, detector: det, trigger: trig,
+                              sinkSeq: none(uint64), detail: d))
     # The host's attestation key: enrolled, or the one its bootstrap record
     # named (the first record a host ships).
     # Generation 0 is bootstrap's own, applied from no manifest: the
@@ -541,20 +611,20 @@ proc runEvidenceCheck*(inp: CheckInputs): CheckReport =
     var tickBeats: seq[tuple[seq: uint64; ms: int64]]
     var containment: seq[tuple[seq: uint64; ms: int64; contained: bool;
                                operator, reason: string]]
-    var probe = (seq: 0'u64, ms: 0'i64, verbs: 0, seen: 0'u8)
-      ## The open self-test window: the announcement, and the bit set of the
-      ## documented verbs it has absorbed.
+    var probe = none(tuple[seq: uint64; ms: int64; verbs: int; seen: uint8])
+      ## The open self-test window, if one is open: the announcement, and
+      ## the bit set of the documented verbs it has absorbed.
     var announcements: seq[int64]
-    var lastContainSeq = 0'u64
+    var lastContainSeq = none(uint64)
     var lastContainStatement = ""
     var selfTests = 0
     var afterRetirement = false
     for e in mine:
-      if h.retiredAt > 0'u64 and e.seq > h.retiredAt and not afterRetirement:
+      if h.retiredAt.isSome and e.seq > h.retiredAt.get and not afterRetirement:
         # A retired host id still sending: its old credential is in use.
         afterRetirement = true
         alert("DET-AO-9", "record-after-retirement", e.seq, "the host id " &
-          "was retired at sink sequence " & $h.retiredAt & " (its keys " &
+          "was retired at sink sequence " & $h.retiredAt.get & " (its keys " &
           "were handed over or presumed compromised) and is still sending")
       if e.kind == ekRefusedVerb:
         # The host's own credential self-test announces itself with a
@@ -571,14 +641,18 @@ proc runEvidenceCheck*(inp: CheckInputs): CheckReport =
           let documented = when mutated("self-test-any-verb"): true
                            else: bit >= 0 and bit < ProbeVerbs
           let fresh = when mutated("self-test-any-verb"): true
-                      else: documented and (probe.seen and (1'u8 shl bit)) == 0
-          if probe.ms > 0'i64 and e.receivedAtMs - probe.ms <= ProbeWindowMs and
-              probe.verbs < ProbeVerbs and documented and fresh:
-            inc probe.verbs
-            if bit >= 0 and bit < 8: probe.seen = probe.seen or (1'u8 shl bit)
-            if probe.verbs == ProbeVerbs:
+                      else: documented and probe.isSome and
+                            (probe.get.seen and (1'u8 shl bit)) == 0
+          if probe.isSome and e.receivedAtMs - probe.get.ms <= ProbeWindowMs and
+              probe.get.verbs < ProbeVerbs and documented and fresh:
+            var p = probe.get
+            inc p.verbs
+            if bit >= 0 and bit < 8: p.seen = p.seen or (1'u8 shl bit)
+            probe = some(p)
+            if p.verbs == ProbeVerbs:
               inc selfTests
-              probe.ms = 0              # the window closes with the test
+              probe = none(tuple[seq: uint64; ms: int64; verbs: int;
+                                 seen: uint8])     # the window closes
             continue
         alert("G34", "sink-probe", e.seq, "the host's credential sent a " &
           "verb outside the sink's vocabulary (" &
@@ -592,10 +666,10 @@ proc runEvidenceCheck*(inp: CheckInputs): CheckReport =
         # announcement opens no window (finding 15).
         announcements.keepItIf(e.receivedAtMs - it < 86_400_000'i64)
         when mutated("self-test-any-verb"):
-          probe = (e.seq, e.receivedAtMs, 0, 0'u8)
+          probe = some((seq: e.seq, ms: e.receivedAtMs, verbs: 0, seen: 0'u8))
         else:
           if announcements.len < ProbeAnnouncementsPerDay:
-            probe = (e.seq, e.receivedAtMs, 0, 0'u8)
+            probe = some((seq: e.seq, ms: e.receivedAtMs, verbs: 0, seen: 0'u8))
           else:
             alert("G34", "self-test-flood", e.seq, "more than " &
               $ProbeAnnouncementsPerDay & " credential self-tests " &
@@ -604,10 +678,10 @@ proc runEvidenceCheck*(inp: CheckInputs): CheckReport =
       if det == "addon-agent-tick" and r.category == ecHeartbeat:
         tickBeats.add((e.seq, e.receivedAtMs))
       if det == KeysDetector and r.trigger == "rekey-handover":
-        if h.retiredAt > 0'u64 and e.seq > h.retiredAt:
+        if h.retiredAt.isSome and e.seq > h.retiredAt.get:
           alert("DET-AO-9", "handover-after-retirement", e.seq, "a key " &
             "hand-over signed by a key retired at sink sequence " &
-            $h.retiredAt & " is refused")
+            $h.retiredAt.get & " is refused")
         else:
           let v = verifyHandover(r.field("handover"),
             r.field("handoverSignature"), key)
@@ -696,22 +770,23 @@ proc runEvidenceCheck*(inp: CheckInputs): CheckReport =
           elif v.c.credentialHost != h.hostId or v.c.action != action:
             alert("DET-AO-9", "containment-invalid", e.seq, "the statement " &
               "is for " & v.c.credentialHost & " / " & v.c.action)
-          elif v.c.sequence == lastContainSeq and
+          elif lastContainSeq.isSome and v.c.sequence == lastContainSeq.get and
               r.field("containment") == lastContainStatement and
               not mutated("containment-duplicate-is-replay"):
             # The same statement delivered again (shipping is at least
             # once: a run that crashed after the sink's acknowledgement and
             # before deleting the entry sends it again). It changes nothing.
             discard
-          elif v.c.sequence <= lastContainSeq:
+          elif lastContainSeq.isSome and v.c.sequence <= lastContainSeq.get:
             alert("DET-AO-9", "containment-replayed", e.seq, "containment " &
               "sequence " & $v.c.sequence & " is not newer than " &
-              $lastContainSeq)
-          elif abs(e.receivedAtMs - v.c.atMs) > ContainmentClockSkewMs:
+              $lastContainSeq.get)
+          elif abs(e.receivedAtMs - v.c.atMs) > ContainmentClockSkewMs and
+              not mutated("containment-skew-ignored"):
             alert("DET-AO-9", "containment-stale", e.seq, "made at " &
               $v.c.atMs & ", received at " & $e.receivedAtMs)
           else:
-            lastContainSeq = v.c.sequence
+            lastContainSeq = some(v.c.sequence)
             lastContainStatement = r.field("containment")
             containment.add((e.seq, e.receivedAtMs, action == "contain",
               v.c.operator, v.c.reason))
@@ -781,14 +856,15 @@ proc runEvidenceCheck*(inp: CheckInputs): CheckReport =
     var containDetail = ""
     if containment.len > 0 and not mutated("check-ignores-containment"):
       let c = containment[^1]
-      var beatBefore = (seq: 0'u64, ms: 0'i64)
+      var beatBefore = none(tuple[seq: uint64; ms: int64])
       for b in tickBeats:
-        if b.seq < c.seq: beatBefore = b
+        if b.seq < c.seq and not (mutated("seq-zero-sentinel") and b.seq == 0'u64):
+          beatBefore = some(b)
       let interval = if "addon-agent-tick" in lastBeat:
                        lastBeat["addon-agent-tick"].interval else: 0'i64
       if c.contained:
-        if beatBefore.seq > 0'u64 and interval > 0 and
-            c.ms - beatBefore.ms <= interval * int64(factor):
+        if beatBefore.isSome and interval > 0 and
+            c.ms - beatBefore.get.ms <= interval * int64(factor):
           contained = true
           containDetail = "contained by operator " & c.operator & " at sink " &
             "sequence " & $c.seq & ": " & c.reason
@@ -804,16 +880,16 @@ proc runEvidenceCheck*(inp: CheckInputs): CheckReport =
         detector: "sink-credential", status: "self-test",
         detail: $selfTests & " announced credential self-test(s): every " &
           "forbidden operation refused"))
-    if h.retiredAt > 0'u64:
+    if h.retiredAt.isSome:
       result.statuses.add(DetectorStatus(host: h.hostId, detector: "host",
-        status: "retired", detail: "retired at sink sequence " & $h.retiredAt &
+        status: "retired", detail: "retired at sink sequence " & $h.retiredAt.get &
           (if h.successor.len > 0: ", succeeded by " & h.successor else: "")))
       # The successor carries the host's silence checks; a retirement
       # without an enrolled successor would mute it (finding 4).
       when not mutated("retired-without-successor-ok"):
         if not successorChainLive(inp.hosts, h):
-          alert("DET-AO-8", "retired-without-successor", h.retiredAt,
-            "retired at sink sequence " & $h.retiredAt & " with no enrolled " &
+          alert("DET-AO-8", "retired-without-successor", h.retiredAt.get,
+            "retired at sink sequence " & $h.retiredAt.get & " with no enrolled " &
             "successor (" & (if h.successor.len > 0: h.successor else: "none") &
             "): nothing reports for it")
       continue
@@ -835,7 +911,7 @@ proc runEvidenceCheck*(inp: CheckInputs): CheckReport =
         alive[det] = false
       elif det notin lastBeat or lastBeat[det].interval <= 0:
         st.status = "never-reported"
-        alert("DET-AO-8", "never-reported", 0, det & " never sent a heartbeat")
+        alertUnsequenced("DET-AO-8", "never-reported", det & " never sent a heartbeat")
         alive[det] = false
       else:
         let (ms, interval) = lastBeat[det]
@@ -844,7 +920,7 @@ proc runEvidenceCheck*(inp: CheckInputs): CheckReport =
           st.status = "silent"
           st.detail = "last heartbeat " & $((inp.nowMs - ms) div 1000) &
             " s ago, interval " & $(interval div 1000) & " s"
-          alert("DET-AO-8", "silent", 0, det & ": " & st.detail)
+          alertUnsequenced("DET-AO-8", "silent", det & ": " & st.detail)
           alive[det] = false
         else:
           st.status = if st.detections > 0: "live-detecting" else: "live-idle"
@@ -863,13 +939,13 @@ proc runEvidenceCheck*(inp: CheckInputs): CheckReport =
       if boot notin reassertBoots and boot notin exemptBoots and
           shipInterval > 0 and
           inp.nowMs - firstMs > shipInterval * RecordGraceIntervals:
-        alert("DET-AO-8", "reassert-silent", 0, "boot " & boot &
+        alertUnsequenced("DET-AO-8", "reassert-silent", "boot " & boot &
           " has no re-assert record")
         silentDetail["addon-reassert"] = "boot " & boot & " has no record"
     for (run, firstMs) in dpkgRuns:
       if not hookRuns.anyIt(it >= run) and shipInterval > 0 and
           inp.nowMs - firstMs > shipInterval * RecordGraceIntervals:
-        alert("DET-AO-8", "apt-hook-silent", 0, "dpkg ran at " & run &
+        alertUnsequenced("DET-AO-8", "apt-hook-silent", "dpkg ran at " & run &
           " and no apt hook record names that run")
         silentDetail["addon-apt-hook"] = "dpkg run " & run & " has no record"
     if shipStalled:
@@ -925,7 +1001,7 @@ proc runEvidenceCheck*(inp: CheckInputs): CheckReport =
         if found:
           let ageMs = inp.nowMs - int64(since.issuedAt) * 1000
           if ageMs > int64(since.maxAgeSeconds) * 1000:
-            alert("DET-AO-10", "lag", 0, "applied sequence " &
+            alertUnsequenced("DET-AO-10", "lag", "applied sequence " &
               (if applied < 0: "none" else: $applied) & " is behind the " &
               "producer's " & $l.sequence & " for " & h.target &
               "; sequence " & $since.sequence & " was first published " &
@@ -935,16 +1011,17 @@ proc runEvidenceCheck*(inp: CheckInputs): CheckReport =
   when not mutated("check-ignores-acks"):
     var open: seq[Alert]
     for a in result.alerts:
-      let k = when mutated("ack-by-sequence-only"): $a.sinkSeq
-              else: $a.sinkSeq & " " & a.detector & "/" & a.trigger
-      if a.sinkSeq > 0'u64 and k in acks:
+      let sq = sequenceOf(a)
+      let k = when mutated("ack-by-sequence-only"): $sq.get(0)
+              else: $sq.get(0) & " " & a.detector & "/" & a.trigger
+      if sq.isSome and k in acks:
         var hnd = acks[k]
         hnd.alert = a
         result.handled.add(hnd)
       else: open.add(a)
     result.alerts = open
-  result.alerts.sort(proc(a, b: Alert): int = cmp(a.host & a.detector & $a.sinkSeq,
-                                                   b.host & b.detector & $b.sinkSeq))
+  result.alerts.sort(proc(a, b: Alert): int =
+    cmp(a.host & a.detector & seqText(a), b.host & b.detector & seqText(b)))
 
 proc render*(r: CheckReport): string =
   for s in r.statuses:
@@ -953,10 +1030,10 @@ proc render*(r: CheckReport): string =
       (if s.detail.len > 0: " (" & s.detail & ")" else: "") & "\n")
   for x in r.handled:
     result.add("HANDLED " & x.alert.host & " " & x.alert.detector & " " &
-      x.alert.trigger & " seq=" & $x.alert.sinkSeq & " acknowledged by " &
+      x.alert.trigger & seqText(x.alert) & " acknowledged by " &
       x.operator & " at seq=" & $x.ackSeq & ": " &
       x.reason.replace("\n", " ") & "\n")
   for a in r.alerts:
     result.add("ALERT " & a.host & " " & a.detector & " " & a.trigger &
-      (if a.sinkSeq > 0'u64: " seq=" & $a.sinkSeq else: "") &
+      seqText(a) &
       (if a.detail.len > 0: " " & a.detail.replace("\n", " ") else: "") & "\n")

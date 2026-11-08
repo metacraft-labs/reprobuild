@@ -36,7 +36,7 @@
 ## Mocks: none. The sink is the real in-process sink fixture; the store is
 ## a scratch root.
 
-import std/[os, sequtils, strutils, tables, times, unittest]
+import std/[options, os, sequtils, strutils, tables, times, unittest]
 
 import repro_peer_cache/auth as peerAuth
 import repro_peer_cache/evidence
@@ -267,11 +267,11 @@ suite "the A11 code review's second round":
     let bad = check7().alerts.filterIt(it.trigger == "attestation-invalid")
     check bad.len == 1
     let kind = bad[0].detector & "/" & bad[0].trigger
-    check ackRefusal(sink.storeDir, bad[0].sinkSeq, kind) == ""
-    check ackRefusal(sink.storeDir, bad[0].sinkSeq, "not a kind").len > 0
+    check ackRefusal(sink.storeDir, bad[0].sinkSeq.get, kind) == ""
+    check ackRefusal(sink.storeDir, bad[0].sinkSeq.get, "not a kind").len > 0
     let inbox = sink.storeDir / OperatorInboxName
     createDir(inbox)
-    writeFile(inbox / "7.ack", $bad[0].sinkSeq & "\n" & kind &
+    writeFile(inbox / "7.ack", $bad[0].sinkSeq.get & "\n" & kind &
       "\nalice\nforged heartbeat investigated\n")
     discard processOperatorInbox(sink.server.store, peerIdOfHex(sink.hostId),
                                  inbox)

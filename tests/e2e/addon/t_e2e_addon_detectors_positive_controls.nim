@@ -44,7 +44,7 @@
 ## compromised compiler, as in A8's ``e2e_addon_compromised_fetch_cannot_
 ## write_etc``: the threat under test. Nothing else.
 
-import std/[json, os, sequtils, strutils, times, unittest]
+import std/[json, options, os, sequtils, strutils, times, unittest]
 
 import repro_test_support/reasoned_skip
 import repro_deploy_agent/manifest
@@ -98,7 +98,7 @@ proc body(g: Guest; repro: string; step: StepFn; record: JsonNode;
   proc alerted(det, trig: string; since: uint64): bool =
     sink.check(host, signers).alerts.anyIt(it.detector == det and
       (trig.len == 0 or it.trigger == trig) and
-      (it.sinkSeq == 0 or it.sinkSeq > since))
+      (it.sinkSeq.isNone or it.sinkSeq.get > since))
   proc control(det, detector, trigger: string; since: uint64;
                alertTrigger = ""; timeoutSec = 180) =
     ship()

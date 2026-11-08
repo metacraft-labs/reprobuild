@@ -250,6 +250,97 @@ proc encodeBuildAction(b: ProfileBuildAction): string =
     result.add ",\"activity\":" & encodeStr(b.activity)
   result.add "}"
 
+proc encodeDiskLayout*(l: DiskLayout): string
+  ## The canonical JSON of a disko layout (defined with the hardware
+  ## emitter below; forward-declared for the `baseOs:` section).
+proc parseDiskLayout*(n: JsonNode): DiskLayout
+
+proc encodeBaseOs*(b: BaseOsIntent): string =
+  ## The `baseOs:` section (ReproOS Add-On Mode §6.5.1) as one JSON object.
+  ## Fixed key order; the optional sub-objects only when declared, so the
+  ## encoding of a section without them is stable.
+  result = "{\"image\":" & encodeStr(b.image) &
+    ",\"sha256\":" & encodeStr(b.sha256) &
+    ",\"arch\":" & encodeStr(b.arch) &
+    ",\"buildBoot\":" & encodeStr(b.buildBoot) &
+    ",\"diskSize\":" & encodeStr(b.diskSize) &
+    ",\"hostname\":" & encodeStr(b.hostname) &
+    ",\"bootMountpoint\":" & encodeStr(b.bootMountpoint) &
+    ",\"layout\":" & encodeDiskLayout(b.layout) &
+    ",\"bootFiles\":["
+  for i, f in b.bootFiles:
+    if i > 0: result.add ","
+    result.add "{\"name\":" & encodeStr(f.name) & ",\"content\":" &
+      encodeStr(f.content) & "}"
+  result.add "]"
+  if b.cloudInit.declared:
+    result.add ",\"cloudInit\":{\"seed\":" & encodeStr(b.cloudInit.seed) &
+      ",\"userData\":" & encodeStr(b.cloudInit.userData) &
+      ",\"metaData\":" & encodeStr(b.cloudInit.metaData) &
+      ",\"networkConfig\":" & encodeStr(b.cloudInit.networkConfig) & "}"
+  let bs = b.bootstrap
+  result.add ",\"bootstrap\":{\"deploySigners\":" &
+    encodeStr(bs.deploySigners) &
+    ",\"cachePublishers\":" & encodeStr(bs.cachePublishers) &
+    ",\"cacheUrl\":" & encodeStr(bs.cacheUrl) &
+    ",\"agentTarget\":" & encodeStr(bs.agentTarget) &
+    ",\"agentSources\":" & encodeStringArray(bs.agentSources) &
+    ",\"pollInterval\":" & $bs.pollIntervalSec & "}}"
+
+proc parseBaseOs*(n: JsonNode): BaseOsIntent =
+  ## The inverse of `encodeBaseOs`. A malformed section is refused, never
+  ## dropped: an image built from half a section would not be the declared
+  ## one.
+  proc str(o: JsonNode; k, ctx: string): string =
+    if o.kind != JObject or not o.hasKey(k) or o[k].kind != JString:
+      raise newException(ValueError, ctx & "." & k & " must be a string")
+    o[k].getStr()
+  if n.kind != JObject:
+    raise newException(ValueError, "baseOs must be an object")
+  result.declared = true
+  result.image = str(n, "image", "baseOs")
+  result.sha256 = str(n, "sha256", "baseOs")
+  result.arch = str(n, "arch", "baseOs")
+  result.buildBoot = str(n, "buildBoot", "baseOs")
+  result.diskSize = str(n, "diskSize", "baseOs")
+  result.hostname = str(n, "hostname", "baseOs")
+  result.bootMountpoint = str(n, "bootMountpoint", "baseOs")
+  if not n.hasKey("layout") or n["layout"].kind != JObject:
+    raise newException(ValueError, "baseOs.layout must be an object")
+  result.layout = parseDiskLayout(n["layout"])
+  if not n.hasKey("bootFiles") or n["bootFiles"].kind != JArray:
+    raise newException(ValueError, "baseOs.bootFiles must be an array")
+  for f in n["bootFiles"]:
+    result.bootFiles.add BaseOsBootFile(name: str(f, "name", "baseOs.bootFiles"),
+      content: str(f, "content", "baseOs.bootFiles"))
+  if n.hasKey("cloudInit"):
+    let c = n["cloudInit"]
+    result.cloudInit = BaseOsCloudInit(declared: true,
+      seed: str(c, "seed", "baseOs.cloudInit"),
+      userData: str(c, "userData", "baseOs.cloudInit"),
+      metaData: str(c, "metaData", "baseOs.cloudInit"),
+      networkConfig: str(c, "networkConfig", "baseOs.cloudInit"))
+  if not n.hasKey("bootstrap"):
+    raise newException(ValueError, "baseOs.bootstrap must be an object")
+  let b = n["bootstrap"]
+  result.bootstrap.deploySigners = str(b, "deploySigners", "baseOs.bootstrap")
+  result.bootstrap.cachePublishers = str(b, "cachePublishers", "baseOs.bootstrap")
+  result.bootstrap.cacheUrl = str(b, "cacheUrl", "baseOs.bootstrap")
+  result.bootstrap.agentTarget = str(b, "agentTarget", "baseOs.bootstrap")
+  if not b.hasKey("agentSources") or b["agentSources"].kind != JArray:
+    raise newException(ValueError,
+      "baseOs.bootstrap.agentSources must be an array")
+  for s in b["agentSources"]:
+    if s.kind != JString:
+      raise newException(ValueError,
+        "baseOs.bootstrap.agentSources must be an array of strings")
+    result.bootstrap.agentSources.add s.getStr()
+  if not b.hasKey("pollInterval") or b["pollInterval"].kind != JInt or
+      b["pollInterval"].getInt() < 0:
+    raise newException(ValueError,
+      "baseOs.bootstrap.pollInterval must be a non-negative integer")
+  result.bootstrap.pollIntervalSec = b["pollInterval"].getInt()
+
 proc emitProfileIntentJson*(p: ProfileIntent): string =
   ## Serialise `p` to a deterministic JSON form. Field order is
   ## fixed (name, activities, configOverrides, hosts, resources,
@@ -314,6 +405,10 @@ proc emitProfileIntentJson*(p: ProfileIntent): string =
     if p.addOn.confirmTimeoutSec > 0:
       result.add ",\"confirmTimeout\":" & $p.addOn.confirmTimeoutSec
     result.add "}"
+  # ReproOS add-on mode A16: the `baseOs:` section, only when declared, so
+  # the key set of a profile without one is unchanged.
+  if p.baseOs.declared:
+    result.add ",\"baseOs\":" & encodeBaseOs(p.baseOs)
   # The concerns Reprobuild applies per host (`applies:` in a block-form
   # `hosts:` entry), only when some host declares them, so the key set of a
   # profile without a declaration is unchanged
@@ -559,6 +654,9 @@ proc parseProfileIntentJson*(s: string): ProfileIntent =
         raise newException(ValueError,
           "addOn.confirmTimeout must be a positive number of seconds")
       result.addOn.confirmTimeoutSec = a["confirmTimeout"].getInt()
+  # Optional; absent when the profile has no `baseOs:` section.
+  if root.hasKey("baseOs"):
+    result.baseOs = parseBaseOs(root["baseOs"])
   # Optional; absent when no host declares the concerns Reprobuild applies.
   if root.hasKey("hostApplies"):
     for k, v in root["hostApplies"]:
@@ -761,7 +859,7 @@ proc encodeDiskSpec(d: DiskSpec): string =
     result.add encodePartitionSpec(v)
   result.add "}}"
 
-proc encodeDiskLayout(l: DiskLayout): string =
+proc encodeDiskLayout*(l: DiskLayout): string =
   result = "{\"disks\":{"
   var firstDisk = true
   for k, v in l.disks:
@@ -934,7 +1032,7 @@ proc parseDiskSpec(n: JsonNode): DiskSpec =
   for pk, pv in n["partitions"]:
     result.partitions[pk] = parsePartitionSpec(pv)
 
-proc parseDiskLayout(n: JsonNode): DiskLayout =
+proc parseDiskLayout*(n: JsonNode): DiskLayout =
   for dk, dv in n["disks"]:
     result.disks[dk] = parseDiskSpec(dv)
   if n.hasKey("pools"):
