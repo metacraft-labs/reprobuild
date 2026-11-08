@@ -7191,17 +7191,6 @@ proc publishProviderCompileIfRequested(plan: ProviderCompilePlan;
     log("provider compile cache publish SKIPPED for \"" & projectName &
       "\": " & attempt.reason)
 
-proc providerCompileFailure(buildResult: BuildRunResult): string =
-  for item in buildResult.results:
-    if item.status in {asFailed, asBlocked}:
-      var parts = @[item.id & " " & $item.status]
-      if item.stderr.len > 0:
-        parts.add(item.stderr)
-      if item.stdout.len > 0:
-        parts.add(item.stdout)
-      return parts.join("\n")
-  "provider compile failed"
-
 proc readTextIfExists(path: string): string =
   if path.len == 0 or not fileExists(extendedPath(path)):
     return ""
