@@ -5,7 +5,12 @@
 ## anywhere --mode addon --host <host> root@<guest>`` run from this host
 ## (the operator's workstation) runs the read-only preflight, carries the
 ## static ``repro`` and the anchors to the guest's ``/run``, bootstraps with
-## the digest the preflight printed, applies the profile and plans it again.
+## the digest the operator acknowledged, applies the profile and plans it
+## again. Plan and apply are separate (§6.5.3, approved 2026-11-08 with that
+## change): the gate first runs the command WITHOUT ``--expect-plan`` and
+## checks it prints the digest, exits 3 and leaves the guest unbootstrapped
+## and its fingerprint unchanged; then with a digest that is not the host's,
+## which is refused the same way; then with the printed one.
 ## Afterwards, checked independently from the guest:
 ##
 ## - ``repro infra plan`` predicts nothing (no ledger change, no
@@ -89,9 +94,15 @@ proc runBase(b: BaseImage; record: JsonNode; work: string): seq[string] =
     let det = identityReport(f0, f0b)
     step("fingerprint is deterministic", det.ok, det.text)
     if not det.ok: return fails
-    let gen = g.exec("ls /var/lib/repro 2>&1; ls /etc/repro 2>&1")
-    step("the guest is unbootstrapped", "No such file" in gen.stdout,
-         gen.stdout)
+    proc unbootstrapped(): tuple[ok: bool; detail: string] =
+      # BOTH roots absent: either one present is a bootstrapped host.
+      let r = g.exec("for d in /var/lib/repro /etc/repro; do " &
+        "if test -e $d; then echo present $d; else echo absent $d; fi; done")
+      (r.exitCode == 0 and "absent /var/lib/repro" in r.stdout and
+         "absent /etc/repro" in r.stdout and "present" notin r.stdout,
+       r.stdout & r.stderr)
+    let u0 = unbootstrapped()
+    step("the guest is unbootstrapped", u0.ok, u0.detail)
 
     # The operator's inputs.
     let prof = work / b.name
@@ -111,8 +122,9 @@ proc runBase(b: BaseImage; record: JsonNode; work: string): seq[string] =
       hostKey.splitWhitespace()[0 .. 1].join(" ") & "\n")
     let (addonPath, addonSha) = artefact(b.debArch)
 
-    # ONE command.
-    let cmd = quoteShell(engine()) & " anywhere --mode addon --host " & Host &
+    # ONE command (run three times: unacknowledged, wrongly acknowledged,
+    # acknowledged).
+    let base = quoteShell(engine()) & " anywhere --mode addon --host " & Host &
       " --profile " & quoteShell(prof / "system.nim") &
       " --addon-binary " & quoteShell(addonPath) & " --addon-sha256 " & addonSha &
       " --known-hosts " & quoteShell(prof / "known_hosts") &
@@ -121,8 +133,37 @@ proc runBase(b: BaseImage; record: JsonNode; work: string): seq[string] =
       " --cache-publishers " & quoteShell(prof / "cache-publishers.anchors") &
       " --cache-url " & TestCacheUrl &
       " --recipient-out " & quoteShell(prof / "recipient.pub") &
-      " --applied-profile-out " & quoteShell(prof / "applied.profile") &
-      " root@127.0.0.1"
+      " --applied-profile-out " & quoteShell(prof / "applied.profile")
+    let target = " root@127.0.0.1"
+
+    # Without an acknowledged plan: the digest, and nothing applied.
+    let (planOut, planRc) = execCmdEx(base & target)
+    record["planOnlyOutput"] = %planOut
+    var digest = ""
+    for line in planOut.splitLines():
+      if line.strip().startsWith("plan digest:"):
+        digest = line.split(':', 1)[1].strip()
+    let u1 = unbootstrapped()
+    let carried0 = g.exec("test -e /run/repro-anywhere && echo present || echo gone")
+    let fPlan = g.takeFingerprint(repro)
+    let dPlan = identityReport(f0, fPlan)
+    step("without --expect-plan it prints the digest and applies nothing",
+         planRc == 3 and digest.len == 64 and
+           "nothing was applied" in planOut and u1.ok and
+           carried0.stdout.strip() == "gone" and dPlan.ok,
+         "exit " & $planRc & "\n" & planOut & "\n" & u1.detail &
+           "\ncarried: " & carried0.stdout & "\n" & dPlan.text)
+    if digest.len == 0: return fails
+
+    # A digest that is not this host's plan: refused, nothing written.
+    let wrong = (if digest[0] == '0': "1" else: "0") & digest[1 .. ^1]
+    let (wrongOut, wrongRc) = execCmdEx(base & " --expect-plan " & wrong & target)
+    let u2 = unbootstrapped()
+    step("a digest that is not the host's plan is refused",
+         wrongRc != 0 and "nothing was written" in wrongOut and u2.ok,
+         "exit " & $wrongRc & "\n" & wrongOut & "\n" & u2.detail)
+
+    let cmd = base & " --expect-plan " & digest & target
     record["command"] = %cmd
     let started = epochTime()
     let (out1, rc) = execCmdEx(cmd)

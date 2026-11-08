@@ -319,7 +319,13 @@ proc copyRange(src: string; srcOff, length: int64; dst: string; dstOff: int64) =
   if getFileSize(d) < dstOff + length:
     setLength(dst, dstOff + length)
 
-proc grow(o: InfraImageOptions; image: string; t: var ImageTable) =
+proc fsck(args: openArray[string]): tuple[rc: int; output: string] =
+  let r = runHostTool(@[tool("e2fsck")] & @args, path = getEnv("PATH"))
+  (r.exitCode, r.output)
+
+proc grow(o: InfraImageOptions; image: string; t: var ImageTable): string =
+  ## Grow the image to ``diskSize``; returns the upstream filesystem's
+  ## check record for the manifest ("" when nothing was grown).
   if o.baseOs.diskSize.len == 0: return
   let want = parseDiskSize(o.baseOs.diskSize)
   let have = getFileSize(image)
@@ -354,9 +360,15 @@ proc grow(o: InfraImageOptions; image: string; t: var ImageTable) =
   let length = t.partitions[gi].sectors * int64(t.sectorSize)
   copyRange(image, offset, oldLength, part, 0)
   setLength(part, length)
-  # e2fsck exits 1 when it corrected something (fsck(8)); resize2fs needs a
-  # freshly checked filesystem.
-  discard run([tool("e2fsck"), "-fy", part], okCodes = [0, 1])
+  # resize2fs needs a freshly checked filesystem. This is the UPSTREAM
+  # image's filesystem, not ours: e2fsck may tidy what the vendor left
+  # (Raspberry Pi OS ships with orphan inodes to clean up), and exit 1
+  # (fsck(8): "errors corrected"). That is accepted, and what it did is
+  # recorded in the image's manifest; anything worse is refused.
+  let (rc, outp) = fsck(["-fy", part])
+  if rc notin [0, 1]:
+    fail("e2fsck of the upstream root filesystem exited " & $rc & ":\n" & outp)
+  result = "upstream root: e2fsck -fy exited " & $rc & "\n" & outp
   discard run([tool("resize2fs"), part])
   # resize2fs sets the file to the filesystem's own length, a whole number
   # of blocks, which can end before the partition does.
@@ -427,6 +439,9 @@ proc bootstrapFlags(o: InfraImageOptions; work: string;
       files.add (p, name)
       result.add @[flag, AssemblyPayloadDir / name]
   if bs.cacheUrl.len > 0: result.add @["--cache-url", bs.cacheUrl]
+  # No image ever carries a recipient key: the device creates its own at its
+  # first boot (spec §6.5.2, owner decision 2026-11-08).
+  result.add "--defer-recipient-key"
   if bs.agentTarget.len > 0:
     result.add @["--target", bs.agentTarget]
     for s in bs.agentSources: result.add @["--manifest", s]
@@ -492,7 +507,9 @@ proc synthesiseImage*(o: InfraImageOptions): InfraImageResult =
     var t = readTable(image)
     let why = verifyLayout(o.baseOs, t, probeAll(image, t))
     if why.len > 0: fail("the image does not match baseOs.layout: " & why)
-    grow(o, image, t)
+    var fsckNotes: seq[string]
+    let grown = grow(o, image, t)
+    if grown.len > 0: fsckNotes.add(grown)
     let rootIdx = partitionIndexAt(o.baseOs, "/")
     let root = ext4At(image, partOffset(t, rootIdx))
     if probeFilesystem(image, partOffset(t, rootIdx)).format != "ext4":
@@ -597,7 +614,20 @@ proc synthesiseImage*(o: InfraImageOptions): InfraImageResult =
     let rootLength = t.partitions[rootIdx].sectors * int64(t.sectorSize)
     let check = image & ".fsck-part"
     copyRange(image, rootOffset, rootLength, check, 0)
-    discard run([tool("e2fsck"), "-fy", check], okCodes = [0, 1])
+    #
+    # Only the journal is replayed (`-E journal_only`); the filesystem is
+    # then checked READ-ONLY and must be clean (exit 0). A filesystem the
+    # assembly boot left damaged is refused, never repaired into an image.
+    let (jrc, jout) = fsck(["-y", "-E", "journal_only", check])
+    if jrc notin [0, 1]:
+      fail("replaying the root filesystem's journal after the assembly " &
+        "boot: e2fsck exited " & $jrc & ":\n" & jout)
+    let (crc, cout) = fsck(["-fn", check])
+    if crc != 0:
+      fail("the root filesystem is not clean after the assembly boot " &
+        "(e2fsck -fn exited " & $crc & "); refusing to write the image:\n" & cout)
+    fsckNotes.add("assembly root: journal replay exited " & $jrc &
+      "; e2fsck -fn exited 0")
     copyRange(check, 0, getFileSize(check), image, rootOffset)
     removeFile(check)
     let resultPath = AssemblyPayloadDir / AssemblyResultName
@@ -610,6 +640,14 @@ proc synthesiseImage*(o: InfraImageOptions): InfraImageResult =
       for s in result.assembly.steps:
         if not s.ok: why = s.name & ": " & s.detail
       fail("the assembly failed at " & why)
+    # No image carries a recipient key (spec §6.5.2): every device creates
+    # its own at its first boot. An image that holds one is refused.
+    if root.exists("/var/lib/repro/agent"):
+      for n in root.listDir("/var/lib/repro/agent"):
+        if n.startsWith("recipient.key"):
+          fail("the assembled image holds a recipient key (/var/lib/repro/" &
+            "agent/" & n & "); every device must create its own. Nothing " &
+            "was written")
 
     # Step 6: finish.
     var fin: seq[string]
@@ -684,6 +722,7 @@ proc synthesiseImage*(o: InfraImageOptions): InfraImageResult =
       "debs": stagedShas,
       "assembly": parseJson(renderAssemblyResult(result.assembly)),
       "reprobuildRevision": ReprobuildSourceRevision,
+      "fsck": fsckNotes,
       "output": {"file": o.output.extractFilename, "compress": o.compress,
                  "sha256": result.outputSha256}}
     result.manifestPath = o.output & ".manifest.json"

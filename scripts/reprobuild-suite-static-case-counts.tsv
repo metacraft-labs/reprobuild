@@ -35,8 +35,8 @@ libs/repro_addon/tests/t_addon_agent_repin.nim	nim	3
 libs/repro_addon/tests/t_addon_agent_split.nim	nim	25
 libs/repro_addon/tests/t_addon_agent_staging_copy_streams.nim	nim	4
 libs/repro_addon/tests/t_addon_apt_hook_and_base_identity.nim	nim	21
-libs/repro_addon/tests/t_addon_carried_state_fails_closed.nim	nim	56
-libs/repro_addon/tests/t_addon_collision.nim	nim	36
+libs/repro_addon/tests/t_addon_carried_state_fails_closed.nim	nim	83
+libs/repro_addon/tests/t_addon_collision.nim	nim	38
 libs/repro_addon/tests/t_addon_crash_recovery_records.nim	nim	25
 libs/repro_addon/tests/t_addon_cross_prefix_needs_the_sysroot_glibc.nim	nim	5
 libs/repro_addon/tests/t_addon_drill_findings.nim	nim	7
@@ -64,6 +64,7 @@ libs/repro_addon/tests/t_addon_floor_round8.nim	nim	9
 libs/repro_addon/tests/t_addon_floor_round9.nim	nim	20
 libs/repro_addon/tests/t_addon_generation_attestation.nim	nim	6
 libs/repro_addon/tests/t_addon_host_lock_guards_the_switch_and_the_store.nim	nim	8
+libs/repro_addon/tests/t_addon_image_assembly_cleanup.nim	nim	6
 libs/repro_addon/tests/t_addon_image_layout_and_boot.nim	nim	14
 libs/repro_addon/tests/t_addon_import_skeleton.nim	nim	9
 libs/repro_addon/tests/t_addon_key_lists_accept_utf8_comments.nim	nim	5
@@ -80,7 +81,7 @@ libs/repro_addon/tests/t_addon_review_findings.nim	nim	16
 libs/repro_addon/tests/t_addon_review_round2.nim	nim	9
 libs/repro_addon/tests/t_addon_review_round3.nim	nim	8
 libs/repro_addon/tests/t_addon_review_round4.nim	nim	6
-libs/repro_addon/tests/t_addon_review_round5.nim	nim	3
+libs/repro_addon/tests/t_addon_review_round5.nim	nim	4
 libs/repro_addon/tests/t_addon_secret_declarations.nim	nim	5
 libs/repro_addon/tests/t_addon_secret_files_created_private_and_never_through_symlinks.nim	nim	6
 libs/repro_addon/tests/t_addon_secrets_envelopes_and_rotation.nim	nim	13
@@ -946,7 +947,7 @@ libs/repro_system_apply/tests/t_b1_dsl_lowering.nim	nim	10
 libs/repro_system_apply/tests/t_b1_dsl_parse.nim	nim	12
 libs/repro_system_apply/tests/t_b2_pipeline.nim	nim	15
 libs/repro_system_rollback/tests/t_b3_rollback_unit.nim	nim	14
-libs/repro_test_support/tests/t_fresh_helper_binary_refuses_a_stale_build.nim	nim	12
+libs/repro_test_support/tests/t_fresh_helper_binary_refuses_a_stale_build.nim	nim	14
 libs/repro_test_support/tests/t_home_apply_guard.nim	nim	9
 libs/repro_tool_profiles/tests/t_a_declared_alias_is_never_served_from_a_prefix_without_it.nim	nim	1
 libs/repro_tool_profiles/tests/t_a_symlinked_declared_executable_is_not_reported_missing.nim	nim	4
@@ -1183,7 +1184,7 @@ tests/bundles/bundle_repro_solver_pure_unit.nim	nim	85
 tests/e2e/addon/t_addon_agent_apply_unit_lacks_cap_net_admin.nim	nim	2
 tests/e2e/addon/t_addon_mode_mismatch_is_refused.nim	nim	0
 tests/e2e/addon/t_addon_registry_mode_round_trip.nim	nim	0
-tests/e2e/addon/t_e2e_addon_adopt_hand_configured_service.nim	nim	1
+tests/e2e/addon/t_e2e_addon_adopt_hand_configured_service.nim	nim	2
 tests/e2e/addon/t_e2e_addon_agent_apply_sets_net_sysctl_in_host_namespace.nim	nim	1
 tests/e2e/addon/t_e2e_addon_agent_end_to_end.nim	nim	1
 tests/e2e/addon/t_e2e_addon_agent_generations_and_rollback.nim	nim	1
@@ -1584,6 +1585,7 @@ tests/integration/t_an_unobservable_sibling_is_not_substituted.nim	nim	1
 tests/integration/t_an_unpushed_sibling_revision_is_not_recorded.nim	nim	2
 tests/integration/t_an_unresolvable_membership_is_not_read_as_no_overrides.nim	nim	1
 tests/integration/t_apply_if_binds_config_by_workspace_path.nim	nim	1
+tests/integration/t_apps_writes_the_helper_lists.nim	nim	1
 tests/integration/t_arm_outside_declared_platforms_is_a_lint_error.nim	nim	1
 tests/integration/t_attestation_fixture_lifecycle.nim	nim	62
 tests/integration/t_attestation_module_census.nim	nim	9

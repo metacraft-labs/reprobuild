@@ -46,6 +46,11 @@
 ## ``image-omits-store-closure``              the image assembly deletes
 ##                                            every apt closure's store
 ##                                            prefix before power-off
+## ``image-bakes-recipient-key``              the image assembly creates the
+##                                            recipient key in the image
+## ``image-keeps-first-boot-state``           the image assembly's clean-up
+##                                            keeps the assembly boot's
+##                                            machine id and SSH host keys
 ## ``observer-never-package-owned``           the collision observer reports
 ##                                            no package provenance: no
 ##                                            path is package-owned and no
@@ -524,6 +529,42 @@
 ## ``restore-requirement-skips-dropin-targets`` the restore requirement is
 ##                                            not given to a unit only a
 ##                                            profile drop-in reaches
+## ``unit-lines-continue-as-text``           round 5's line reading: a line
+##                                           ending in ``\\`` or ``\ `` joins
+##                                           the next (A13 review round 6)
+## ``exec-first-command-only``               only the first command of an
+##                                           ``Exec*=`` line is read
+## ``alias-chain-first-link-only``           only a link straight to the unit
+##                                           is an alias; a link to a link
+##                                           is not followed
+## ``dependency-links-unread``               host ``.wants/``, ``.requires/``
+##                                           and ``.upholds/`` links are not
+##                                           read
+## ``requirement-name-not-reserved``         a profile drop-in named
+##                                           ``state-restore`` replaces the
+##                                           restore requirement
+## ``privileged-daemons-unread``             polkit rules and D-Bus policy
+##                                           are not read (§13 decision 58)
+## ``restore-requirement-skips-closure``     a unit started only through a
+##                                           distribution unit's dependencies
+##                                           gets no requirement (decision 60)
+## ``addon-live-reach-skipped``              the add-on switch does not run
+##                                           the carried-state cross-check
+## ``infra-live-reach-skipped``              a full apply does not run the
+##                                           carried-state cross-check
+##                                           (decision 59)
+## ``optional-paths-ignored``              a ``-``-prefixed (optional) path
+##                                           is taken as granting nothing
+## ``live-units-chosen-after-writes``      the add-on switch chooses the
+##                                           units it re-checks at step 6,
+##                                           after its own reloads ran the
+##                                           host's generators
+## ``post-reload-refusal-skipped``           the carried-state refusal is not
+##                                           decided again after a switch's
+##                                           reload
+## ``adopt-without-profile``                 ``repro system adopt`` takes
+##                                           drifted bytes the profile does
+##                                           not declare (decision 61)
 ## ``plan-ignores-profile-digest``           an apply of a stored plan does
 ##                                           not compare the plan's profile
 ##                                           digest with the text it runs
@@ -840,6 +881,9 @@
 ##                                            written for another binary
 ## ``override-sig-write-error-swallowed``     a failed signature write does
 ##                                            not stop the discard (round 6)
+## ``override-rollback-removes-sig``         a failed record write removes
+##                                            the signature even when the
+##                                            record is in place (round 7)
 ## ``verify-accepts-missing-key``             verify-discard-record verifies
 ##                                            without --key (round 6)
 ## ``sim-skips-stop``                         the simulator's TLS smoke pass
@@ -872,6 +916,8 @@ const
                           # ledger, or an apt closure's store prefix, out of
                           # the image (image_assemble.runImageAssembly).
                           "image-omits-gen0-ledger", "image-omits-store-closure",
+                          "image-bakes-recipient-key",
+                          "image-keeps-first-boot-state",
                           "apply-skips-kind-check",
                           "uninstall-discards-state-on-drift",
                           "observer-never-package-owned",
@@ -1260,6 +1306,19 @@ const
                           "reach-stale-generation-dropins-skipped",
                           "restore-requirement-skips-activated",
                           "restore-requirement-skips-dropin-targets",
+                          "unit-lines-continue-as-text",
+                          "exec-first-command-only",
+                          "alias-chain-first-link-only",
+                          "dependency-links-unread",
+                          "requirement-name-not-reserved",
+                          "privileged-daemons-unread",
+                          "restore-requirement-skips-closure",
+                          "addon-live-reach-skipped",
+                          "infra-live-reach-skipped",
+                          "adopt-without-profile",
+                          "live-units-chosen-after-writes",
+                          "optional-paths-ignored",
+                          "post-reload-refusal-skipped",
                           "plan-ignores-profile-digest",
                           "full-apply-keeps-undeclared-dropins",
                           "install-unit-reads-host-manifest",
@@ -1383,7 +1442,8 @@ const
                           "fresh-skips-static-reads",
                           "fresh-ignores-list-binary",
                           "override-sig-write-error-swallowed",
-                          "verify-accepts-missing-key", "sim-skips-stop"]
+                          "verify-accepts-missing-key", "sim-skips-stop",
+                          "override-rollback-removes-sig"]
 
 when AddonMutation.len > 0 and AddonMutation notin KnownAddonMutations and
     AddonMutation notin KnownAgentMutations:

@@ -215,5 +215,7 @@ suite "the documents the build host and the assembly boot exchange":
     let r = AssemblyResult(ok: true, planDigest: "p", generationId: "g",
       reproExe: "/repro/store/x/bin/repro", ledgerSha256: "l",
       storePrefixes: @["/repro/store/prefixes/apt-closure-tb-hello/1.0-1-abc"],
-      steps: @[AssemblyStep(name: "preflight", ok: true)])
+      steps: @[AssemblyStep(name: "preflight", ok: true)],
+      generation0Id: "g0", assemblyMachineId: "0123",
+      assemblySshHostKeys: @["ssh_host_ed25519_key.pub abc"])
     check parseAssemblyResult(renderAssemblyResult(r)) == r

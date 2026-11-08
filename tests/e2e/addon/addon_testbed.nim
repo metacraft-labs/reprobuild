@@ -1138,3 +1138,75 @@ proc rebootGuest*(g: Guest; timeoutSec = 600) =
   discard g.exec("systemctl reboot", timeoutSec = 30)
   discard g.waitPoweredOff(timeoutSec)
   g.boot()
+
+# ---------------------------------------------------------------------------
+# Whether a unit ran, from its journal (A13 round 6).
+# ---------------------------------------------------------------------------
+
+proc journalStarted*(journal, unit: string): bool =
+  ## Whether the journal of ``unit`` shows any start of it (a "Starting" or
+  ## "Started" line that is not a skipped start): what a gate asserts was
+  ## never there for a unit that must not start.
+  for l in journal.splitLines():
+    if unit in l and ("Started " in l or "Starting " in l) and "skipped" notin l:
+      return true
+  false
+
+proc journalRan*(journal, unit: string): bool =
+  ## Whether the journal of ``unit`` (``journalctl -b -u <unit>``, oldest
+  ## first) shows its last start completing: a "Started"/"Starting" line,
+  ## then "Deactivated successfully" or nothing after it that failed. A unit
+  ## only ever "skipped" (a start condition unmet), or one whose last start
+  ## failed ("Failed with result", "Failed to start", a "Main process
+  ## exited" with a status other than 0), did not run. ``systemctl show``
+  ## cannot say this: once a unit that ran is inactive and unreferenced,
+  ## systemd unloads it, and a fresh load reports every runtime property
+  ## zero (measured, debian-13, A13 round 6).
+  var lines: seq[string]
+  for l in journal.splitLines():
+    if (unit) in l: lines.add(l)
+  var last = -1
+  for k, l in lines:
+    if ("Started " in l or "Starting " in l) and "skipped" notin l: last = k
+  if last < 0: return false
+  var completed = false
+  for l in lines[last .. ^1]:
+    if "Failed with result" in l or "Failed to start" in l or
+        ("Main process exited" in l and "status=0/" notin l): return false
+    if "Deactivated successfully" in l or "Started " in l: completed = true
+  completed
+
+const
+  CapturedNeverStarted = """
+[  248.692251] addon-tb systemd[1]: eth-r4-host.service - A13 round-4 probe skipped, unmet condition check ConditionPathExists=!/
+"""
+    ## Captured, debian-13 (A13 round 6): a unit held, never started.
+  CapturedStartedFailed = """
+[  281.483513] addon-tb systemd[1]: eth-r6-exec.service - A13 round-5 probe skipped, unmet condition check ConditionPathExists=!/
+[  281.803476] addon-tb systemd[1]: Starting eth-r6-exec.service - A13 round-5 probe...
+[  281.837865] addon-tb (true)[6284]: eth-r6-exec.service: Failed to set up mount namespacing: /var/lib/a13-r5: No such file or directory
+[  281.837893] addon-tb (true)[6284]: eth-r6-exec.service: Failed at step NAMESPACE spawning /bin/true: No such file or directory
+[  281.838693] addon-tb systemd[1]: eth-r6-exec.service: Control process exited, code=exited, status=226/NAMESPACE
+[  281.838751] addon-tb systemd[1]: eth-r6-exec.service: Failed with result 'exit-code'.
+[  281.838875] addon-tb systemd[1]: Failed to start eth-r6-exec.service - A13 round-5 probe.
+"""
+    ## Captured, debian-13 (A13 round 6): a unit started that failed.
+  CapturedRan = """
+[  265.228332] addon-tb systemd[1]: eth-r4-host.service - A13 round-4 probe skipped, unmet condition check ConditionPathExists=!/
+[  265.749769] addon-tb systemd[1]: Started eth-r4-host.service - A13 round-4 probe.
+[  265.821244] addon-tb systemd[1]: eth-r4-host.service: Deactivated successfully.
+"""
+    ## Captured, debian-13 (A13 round 6): a unit held, then started by the
+    ## apply after its check, ran and exited 0.
+
+static:
+  # The checks' negative and positive controls, on captured journals: they
+  # cannot pass a unit that never started or one that failed, nor miss a
+  # start.
+  doAssert not journalRan(CapturedNeverStarted, "eth-r4-host.service")
+  doAssert not journalRan(CapturedStartedFailed, "eth-r6-exec.service")
+  doAssert journalRan(CapturedRan, "eth-r4-host.service")
+  doAssert not journalStarted(CapturedNeverStarted, "eth-r4-host.service")
+  doAssert journalStarted(CapturedStartedFailed, "eth-r6-exec.service")
+  doAssert journalStarted(CapturedRan, "eth-r4-host.service")
+

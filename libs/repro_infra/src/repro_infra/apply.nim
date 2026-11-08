@@ -38,7 +38,9 @@ import ./planner
 import ./profile
 import ./state_dir
 when defined(posix):
+  import std/tables
   import ./carried_state
+  import ./start_holds
 
 export apply_lock
 
@@ -589,6 +591,85 @@ var pendingSwitchGuard*: PendingSwitchGuard = nil
   ## interrupted switch is pending (or it was just recovered), otherwise
   ## why not.
 
+when defined(posix):
+  type LiveCheck = object
+    ## The carried-state cross-check of a full apply (spec §11.1, §13
+    ## decision 59): the units it judges, held from before the first write
+    ## until they pass, and whether each was running before.
+    units: seq[string]
+    holds: seq[string]
+    wasActive: seq[string]
+
+  proc liveCheckHoldText(): string =
+    holdText(hmCondition, "Written by repro infra apply: the unit may not " &
+      "start until its loaded configuration has been checked against the " &
+      "carried-state reach (ReproOS Add-On Mode spec §11.1).")
+
+  proc beginLiveCheck(p: SystemProfile; dir, root: string): LiveCheck =
+    ## Hold every unit ``liveReachUnits`` names before the drivers write
+    ## and start anything: under the hold their ``enable --now`` and
+    ## ``restart`` jobs succeed without running the unit. Holds an earlier
+    ## apply left are cleared first; a refused unit's persistent hold stays
+    ## until this check passes for it.
+    try: discard clearStaleHolds(CarriedCheckHoldName)
+    except OSError: discard          # not root: nothing of ours to clear
+    result.units = liveReachUnits(p, dir, root)
+    if result.units.len == 0: return
+    for u in result.units:
+      let r = runSystemctlArgs(["is-active", "--quiet", "--", u])
+      if r.exitCode == 0: result.wasActive.add(u)
+    result.holds = writeHolds(result.units, CarriedCheckHoldName,
+                              liveCheckHoldText())
+    systemctlOrRaise(["daemon-reload"])
+
+  proc finishLiveCheck(c: LiveCheck; p: SystemProfile; dir, root: string): seq[string] =
+    ## After the privileged set: reload, judge each held unit as systemd
+    ## loaded it (``liveReachProblems``, the add-on switch's own check), and
+    ## either release and start what should run, or keep the refused units
+    ## held -- in ``/etc`` too, so a reboot does not start them -- and
+    ## report each as a problem of this apply.
+    if c.units.len == 0: return
+    systemctlOrRaise(["daemon-reload"])
+    var problems: seq[string]
+    when ApplyMutation != "infra-live-reach-skipped":
+      problems = liveReachProblems(c.units, p,
+        proc (u: string): Table[string, string] = systemctlShow(u), root)
+      # And the refusal again over the host as the reload left it: a
+      # drop-in a generator made at a reload of this apply is read now.
+      when ApplyMutation != "post-reload-refusal-skipped":
+        let why = carriedStateRefusal(p, dir, root)
+        if why.len > 0: problems.add(why & " (decided again after the reload)")
+    if problems.len > 0:
+      var refused: seq[string]
+      for u in c.units:
+        for pr in problems:
+          if (": " & u & " ") in pr or (": " & u & ":") in pr:
+            if u notin refused: refused.add(u)
+      if refused.len == 0: refused = c.units
+      discard writeHolds(refused, CarriedCheckHoldName, liveCheckHoldText(),
+                         PersistentUnitDir)
+      systemctlOrRaise(["daemon-reload"])
+      for pr in problems:
+        result.add(pr & "; the unit is held (not started) until an apply " &
+          "whose check it passes")
+      return
+    removeHolds(c.holds)
+    var persistent: seq[string]
+    for u in c.units:
+      let h = holdPath(u, CarriedCheckHoldName, PersistentUnitDir)
+      if fileExists(h): persistent.add(h)
+    removeHolds(persistent)
+    systemctlOrRaise(["daemon-reload"])
+    # What the drivers would have started: every unit the profile enables,
+    # and every unit that was running before (its restart was skipped).
+    for r in p.resources:
+      if r.kind != srkSystemdSystemUnit or r.suName notin c.units: continue
+      if r.suEnabled or r.suName in c.wasActive:
+        let s = runSystemctlArgs(["start", "--", r.suName])
+        if s.exitCode != 0:
+          result.add("systemctl start " & r.suName & " after the " &
+            "carried-state check: " & s.output.strip())
+
 proc runInfraApply*(profileText: string; opts: ApplyOptions): ApplyResult =
   ## Drive a full `repro infra apply`. The caller has already loaded
   ## the `system.nim` text and resolved `opts`.
@@ -774,6 +855,28 @@ proc runInfraApply*(profileText: string; opts: ApplyOptions): ApplyResult =
     nonPrivilegedOperationCount = 0)
   refreshApplyLock(opts.stateDir)
 
+  # The carried-state cross-check (§13 decision 59): the units it judges
+  # are held from here until they pass it, as in the add-on's switch.
+  # An add-on apply runs it in its own switch (``carriedStateChecked``).
+  when defined(posix):
+    let liveDir = if opts.carriedStateDir.len > 0: opts.carriedStateDir
+                  else: CarriedStateDir
+    let liveRoot = if opts.carriedStateRoot.len > 0: opts.carriedStateRoot
+                   else: "/"
+    var liveCheck: LiveCheck
+    # Only on the live host: a scratch root (a library test) has no systemd
+    # of its own to ask.
+    if not opts.carriedStateChecked and opts.elevationMode != emNoElevate and
+        liveRoot == "/":
+      let pLive = parseSystemProfile(profileText)
+      if not isProcessElevated() and
+          liveReachUnits(pLive, liveDir, liveRoot).len > 0:
+        raise newException(ECarriedStatePending, "ECarriedStatePending: " &
+          "carried state is on this host, so the units that can reach it " &
+          "are held and checked as systemd loads them before they start " &
+          "(spec §11.1); that needs the apply itself to run as root")
+      liveCheck = beginLiveCheck(pLive, liveDir, liveRoot)
+
   # --- 3. Apply the privileged set. ---
   # The privileged set is the longest unbounded stretch of the apply: a
   # profile that installs a Visual Studio workload plus its siblings can
@@ -837,6 +940,12 @@ proc runInfraApply*(profileText: string; opts: ApplyOptions): ApplyResult =
     if d.driftDetected or (not d.ok and "requires elevation" notin
         d.diagnostic):
       result.diagnostics.add(d.operationAddress & ": " & d.diagnostic)
+
+  when defined(posix):
+    for pr in finishLiveCheck(liveCheck, parseSystemProfile(profileText),
+                              liveDir, liveRoot):
+      inc result.errorCount
+      result.diagnostics.add(pr)
 
   # --- 4. Commit the generation + write the audit log. ---
   var commitTs = getTime().toUnix()

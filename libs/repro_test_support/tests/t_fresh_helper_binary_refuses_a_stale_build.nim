@@ -30,13 +30,20 @@
 ##     list from another build): refused.
 ## 12. ``write_helper_deps.sh`` failing after a good build: the old list is
 ##     removed, so the binary is refused.
+## 13. A file a ``staticExec`` command reads by a RELATIVE path (Nim runs
+##     the command in the calling module's directory): listed, and an edit
+##     to it after the build is refused.
+## 14. Eight files a ``staticExec`` command reads concurrently (``cat … &``):
+##     all eight listed, in each of three runs (the list does not depend on
+##     scheduling).
 ##
 ## Falsifying builds: ``stale-helper-accepted`` (cases 2-5 and 8-10 red),
 ## ``fresh-skips-included`` (case 4), ``fresh-skips-outside-tree`` (case
 ## 5), ``fresh-skips-c-sources`` (case 8), ``fresh-skips-headers`` (case
 ## 9), ``fresh-skips-static-reads`` (case 10), ``fresh-ignores-list-binary``
-## (case 11); and the script's ``WRITE_HELPER_DEPS_MUTATION=keep-old-list``
-## in the environment (case 12).
+## (case 11); and the script's ``WRITE_HELPER_DEPS_MUTATION`` in the
+## environment: ``keep-old-list`` (case 12), ``relative-to-script-dir``
+## (case 13), ``single-trace`` (case 14).
 ##
 ## Mocks: none -- the real compiler, the real script, strace.
 
@@ -56,6 +63,9 @@ let csrc = tree / "apps" / "foo" / "helper.c"
 let header = tree / "apps" / "foo" / "inc" / "helper.h"
 let blob = tree / "apps" / "foo" / "blob.txt"
 let execInput = tree / "apps" / "foo" / "exec-input.txt"
+let relInput = tree / "apps" / "foo" / "rel-input.txt"
+var parInputs: seq[string]
+for i in 1 .. 8: parInputs.add(tree / "apps" / "foo" / ("par" & $i & ".txt"))
 createDir(parentDir(lib))
 createDir(parentDir(app))
 createDir(parentDir(outside))
@@ -64,6 +74,11 @@ writeFile(csrc, "#include \"helper.h\"\nint fooHelper(void) { return HELPER_VALU
 writeFile(header, "#define HELPER_VALUE 7\n")
 writeFile(blob, "read at compile time\n")
 writeFile(execInput, "read by a staticExec command\n")
+writeFile(relInput, "read by a relative path, in the module's directory\n")
+for p in parInputs: writeFile(p, "read concurrently\n")
+var parCmd = ""
+for p in parInputs: parCmd.add("cat " & p & " & ")
+parCmd.add("wait")
 writeFile(lib, "proc greeting*(): string = \"hello\"\n")
 writeFile(outside, "proc farAway*(): string = \"from outside\"\n")
 writeFile(included, "proc part(): string = \"included\"\n")
@@ -73,7 +88,9 @@ proc writeApp(extra = "") =
     "proc fooHelper(): cint {.importc.}\n" &
     "const blob = staticRead(\"blob.txt\")\n" &
     "const fromExec = staticExec(\"cat " & execInput & "\")\n" &
-    "echo greeting(), farAway(), part(), fooHelper(), blob, fromExec\n" & extra)
+    "const fromRel = staticExec(\"cat rel-input.txt\")\n" &
+    "const fromPar = staticExec(\"" & parCmd & "\")\n" &
+    "echo greeting(), farAway(), part(), fooHelper(), blob, fromExec, fromRel, fromPar.len\n" & extra)
 writeApp()
 let binary = tree / "build" / "bin" / addFileExt("foo-helper", ExeExt)
 
@@ -81,7 +98,7 @@ proc build() =
   ## Compile the tree and write its dependency list, after dating its
   ## sources a minute back (an earlier case may have dated one into the
   ## future).
-  for src in [lib, app, included, outside, csrc, header, blob, execInput]:
+  for src in @[lib, app, included, outside, csrc, header, blob, execInput, relInput] & parInputs:
     setLastModificationTime(src, getTime() - initDuration(seconds = 60))
   let flags = @["--path:" & tree / "libs" / "foolib" / "src",
                 "--path:" & parentDir(outside)]
@@ -204,6 +221,25 @@ suite "a helper binary is used only when built from the tree under test":
     checkpoint o
     check c != 0
     check "has no dependency list" in refusal()
+
+  test "13: a file a staticExec command reads by a relative path is checked":
+    build()
+    check relInput in helperDependencies(tree, "foo-helper")
+    check refusal() == ""
+    touchAfterBinary(relInput)
+    let why = refusal()
+    checkpoint why
+    check ("older than " & relInput) in why
+
+  test "14: files a staticExec command reads concurrently are all listed, every run":
+    for run in 1 .. 3:
+      build()
+      let deps = helperDependencies(tree, "foo-helper")
+      var missing: seq[string]
+      for p in parInputs:
+        if p notin deps: missing.add(p)
+      checkpoint "run " & $run & ": missing " & $missing
+      check missing.len == 0
 
   test "7: no binary, or no dependency list, is refused":
     removeFile(tree / "build" / "nimcache" / "foo-helper" / "foo-helper.deps")

@@ -36,14 +36,26 @@
 # this exits 1 and the guarded helpers' tests refuse the binary.
 #
 # REPRO_TEST_BUILD_DIR names another build directory (the Nim 2.2.4
-# lane's). WRITE_HELPER_DEPS_MUTATION=keep-old-list is the falsifier of
-# the removal (the published list is then left in place on failure).
+# lane's). WRITE_HELPER_DEPS_MUTATION selects a falsifier: keep-old-list
+# (the published list is left in place on failure), single-trace (one
+# trace for every process, so a syscall split by another process's is
+# lost), relative-to-script-dir (a traced path resolved against this
+# script's directory, not the opening process's). A file
+# <build>/nimcache/<name>/write-helper-deps.mutation selects one too, for
+# a run inside a graph edge, whose environment the engine sets; it is
+# read only when present.
 set -euo pipefail
 name="${1:?usage: write_helper_deps.sh <name> <entry.nim> [nim flags...]}"
 entry="${2:?usage: write_helper_deps.sh <name> <entry.nim> [nim flags...]}"
 shift 2
 build="${REPRO_TEST_BUILD_DIR:-build}"
 published="${build}/nimcache/${name}/${name}.deps"
+mutation_file="${build}/nimcache/${name}/write-helper-deps.mutation"
+if [ -z "${WRITE_HELPER_DEPS_MUTATION:-}" ] && [ -f "${mutation_file}" ]; then
+  WRITE_HELPER_DEPS_MUTATION="$(cat "${mutation_file}")"
+  echo "write_helper_deps: FALSIFYING RUN: ${WRITE_HELPER_DEPS_MUTATION} (from ${mutation_file})" >&2
+fi
+export WRITE_HELPER_DEPS_MUTATION="${WRITE_HELPER_DEPS_MUTATION:-}"
 if [ "${WRITE_HELPER_DEPS_MUTATION:-}" != "keep-old-list" ]; then
   rm -f "${published}"
 fi
@@ -67,9 +79,21 @@ fi
 cache="${build}/nimcache/${name}-deps"
 rm -rf "${cache}"
 mkdir -p "${cache}" "${build}/nimcache/${name}"
-"${strace_bin}" -f -qq -e trace=open,openat,openat2 -o "${cache}/front.trace" \
-  nim c --hints:off --warnings:off "$@" --genDeps:on \
-    --nimcache:"${cache}" --out:"${cache}/${name}" "${entry}"
+# One trace file per process (-ff), so no syscall is split across lines
+# by another process's, and -y, so each successful open prints the
+# absolute path of the file it opened (`= 3</abs/path>`): a staticExec
+# command runs in the calling module's directory (Nim's gorgeimpl), and
+# its relative opens resolve there, not here.
+if [ "${WRITE_HELPER_DEPS_MUTATION:-}" = single-trace ]; then
+  # FALSIFIER: one trace for every process, as before round 7.
+  "${strace_bin}" -f -qq -e trace=open,openat,openat2 -o "${cache}/front.trace" \
+    nim c --hints:off --warnings:off "$@" --genDeps:on \
+      --nimcache:"${cache}" --out:"${cache}/${name}" "${entry}"
+else
+  "${strace_bin}" -ff -y -qq -e trace=open,openat,openat2 -o "${cache}/front.trace" \
+    nim c --hints:off --warnings:off "$@" --genDeps:on \
+      --nimcache:"${cache}" --out:"${cache}/${name}" "${entry}"
+fi
 module="$(basename "${entry}" .nim)"
 if [ ! -s "${cache}/${module}.deps" ]; then
   echo "write_helper_deps: nim wrote no ${cache}/${module}.deps" >&2
@@ -135,12 +159,21 @@ for i, (src, cmd) in enumerate(compiles):
         ok, p = wanted(p)
         if ok and p.startswith(workspace + "/") and p not in traced:
             traced.append(p)
-opened = re.compile(r'open(?:at2?)?\((?:[^,]+, )?"([^"]+)".*\)\s+=\s+(\d+)')
+mutation = os.environ.get("WRITE_HELPER_DEPS_MUTATION", "")
+# A successful open, with strace -y: `openat(..., "p", ...) = 3</abs/path>`.
+resolved = re.compile(r'^open(?:at2?)?\(.*\)\s+=\s+\d+<(.+)>\s*$')
+# Without -y (the falsifiers): the path as the process gave it.
+as_given = re.compile(r'open(?:at2?)?\((?:[^,]+, )?"([^"]+)".*\)\s+=\s+(\d+)')
 for f in sorted(os.listdir(cache)):
-    if not f.endswith(".trace"):
+    if not f.startswith("front.trace"):
         continue
     for line in open(os.path.join(cache, f), errors="replace"):
-        m = opened.search(line)
+        if mutation in ("single-trace", "relative-to-script-dir"):
+            # FALSIFIERS: the path as given, resolved against this
+            # script's directory, one line at a time (as before round 7).
+            m = as_given.search(line)
+        else:
+            m = resolved.match(line)
         if not m:
             continue
         ok, p = wanted(m.group(1))
@@ -156,7 +189,11 @@ h = hashlib.sha256()
 with open(binary, "rb") as fh:
     for chunk in iter(lambda: fh.read(1 << 20), b""):
         h.update(chunk)
-lines = ["binary-sha256 " + h.hexdigest()]
+digest = h.hexdigest()
+if mutation == "list-for-earlier-binary":
+    # FALSIFIER: a list written for another build of the binary.
+    digest = hashlib.sha256(b"an earlier build").hexdigest()
+lines = ["binary-sha256 " + digest]
 lines += ["module " + p for p in modules]
 lines += ["csource " + p for p in csources]
 seen = set(modules) | set(csources)

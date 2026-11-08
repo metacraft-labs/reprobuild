@@ -26,7 +26,7 @@
 ## ``result.json`` is the one file left there; the build host reads it with
 ## ``debugfs`` after QEMU exits and removes the directory.
 
-import std/[base64, json, os, strutils]
+import std/[algorithm, base64, json, os, strutils]
 
 import repro_infra/state_dir
 
@@ -39,9 +39,10 @@ import ./ledger
 import ./mutations
 import ./preflight
 import ./store_root
+from repro_deploy_agent/secrets import ensureRecipientKeyFile
 
 const
-  AssemblyPayloadDir* = "/var/lib/addon-image-assembly"
+  AssemblyPayloadDir* = ImageAssemblyDir
     ## Not under ``/var/lib/repro``: the preflight refuses a foreign occupant
     ## there (§6.1), and this directory is gone before the image is written.
   AssemblyUnitName* = "addon-image-assembly.service"
@@ -83,6 +84,11 @@ type
     reproExe*: string
     ledgerSha256*: string
     storePrefixes*: seq[string]
+    generation0Id*: string        ## bootstrap's generation
+    assemblyMachineId*: string    ## the assembly boot's own machine id
+    assemblySshHostKeys*: seq[string]
+      ## ``<name> <sha256>`` of the SSH host public keys the assembly boot
+      ## had: a device booted from the image must have none of them.
 
 proc renderAssemblySpec*(s: AssemblySpec): string =
   $(%*{"schema": "reprobuild.addon.image-assembly.v1",
@@ -115,7 +121,10 @@ proc renderAssemblyResult*(r: AssemblyResult): string =
   $(%*{"schema": "reprobuild.addon.image-assembly-result.v1", "ok": r.ok,
        "steps": steps, "planDigest": r.planDigest,
        "generationId": r.generationId, "reproExe": r.reproExe,
-       "ledgerSha256": r.ledgerSha256, "storePrefixes": r.storePrefixes})
+       "ledgerSha256": r.ledgerSha256, "storePrefixes": r.storePrefixes,
+       "generation0Id": r.generation0Id,
+       "assemblyMachineId": r.assemblyMachineId,
+       "assemblySshHostKeys": r.assemblySshHostKeys})
 
 proc parseAssemblyResult*(text: string): AssemblyResult =
   let j = parseJson(text)
@@ -130,6 +139,9 @@ proc parseAssemblyResult*(text: string): AssemblyResult =
   result.reproExe = j["reproExe"].getStr()
   result.ledgerSha256 = j["ledgerSha256"].getStr()
   for p in j["storePrefixes"]: result.storePrefixes.add p.getStr()
+  result.generation0Id = j{"generation0Id"}.getStr()
+  result.assemblyMachineId = j{"assemblyMachineId"}.getStr()
+  for k in j{"assemblySshHostKeys"}.getElems(): result.assemblySshHostKeys.add k.getStr()
 
 proc planIsClean*(r: AddonApplyResult): string =
   ## "" when an add-on plan predicts nothing -- no ledger change, no service
@@ -167,18 +179,21 @@ proc storePrefixesNow(): seq[string] =
       for k2, v in walkDir(p):
         if k2 in {pcDir, pcLinkToDir}: result.add v
 
-proc cleanUp*(spec: AssemblySpec; payload: string) =
+proc cleanUp*(spec: AssemblySpec; payload: string; root = "/";
+              rotateJournal = true) =
   ## Remove what the assembly added that the add-on does not own and put
-  ## back the first-boot state the boot consumed (§6.5.2 step 5).
+  ## back the first-boot state the boot consumed (§6.5.2 step 5). ``root``
+  ## is the system's root (``/`` in the assembly boot; a scratch tree in
+  ## the unit test); ``payload`` is an absolute path.
   for d in spec.stagedDebs:
-    removeIfPresent(AssemblyDebCacheDir / d)
+    removeIfPresent(root / AssemblyDebCacheDir / d)
   for d in spec.removeDebCacheParents:
-    if dirExists(d):
+    if dirExists(root / d):
       var empty = true
-      for _ in walkDir(d): empty = false
-      if empty: removeDir(d)
-  removeIfPresent(AssemblyWantsLink)
-  removeIfPresent(AssemblyUnitPath)
+      for _ in walkDir(root / d): empty = false
+      if empty: removeDir(root / d)
+  removeIfPresent(root / AssemblyWantsLink)
+  removeIfPresent(root / AssemblyUnitPath)
   for kind, p in walkDir(payload):
     if p.extractFilename != AssemblyResultName:
       removeIfPresent(p)
@@ -186,17 +201,34 @@ proc cleanUp*(spec: AssemblySpec; payload: string) =
   # "uninitialized", is what makes systemd treat the next boot as the
   # first), no SSH host key the image did not carry, no random seed and no
   # credential secret of this boot.
-  writeFile("/etc/machine-id", spec.machineId)
-  if dirExists("/etc/ssh"):
-    for kind, p in walkDir("/etc/ssh"):
+  when not mutated("image-keeps-first-boot-state"):
+    writeFile(root / "etc/machine-id", spec.machineId)
+    if dirExists(root / "etc/ssh"):
+      for kind, p in walkDir(root / "etc/ssh"):
+        let n = p.extractFilename
+        if n.startsWith("ssh_host_") and n notin spec.keepSshHostKeys:
+          removeIfPresent(p)
+  else:
+    # FALSIFYING MUTATION (see mutations.nim): an assembly that leaves the
+    # assembly boot's machine id and SSH host keys in the image, so every
+    # device boots with the same identity.
+    discard
+  removeIfPresent(root / "var/lib/systemd/random-seed")
+  removeIfPresent(root / "var/lib/systemd/credential.secret")
+  if rotateJournal:
+    discard runHostTool(["/usr/bin/journalctl", "--rotate"], timeoutSec = 60)
+    discard runHostTool(["/usr/bin/journalctl", "--vacuum-time=1s"],
+                        timeoutSec = 60)
+
+proc sshHostKeyDigests*(root = "/"): seq[string] =
+  ## ``<name> <sha256>`` of every SSH host public key under ``/etc/ssh``,
+  ## sorted: the identity a booted host must NOT share with its assembly.
+  if dirExists(root / "etc/ssh"):
+    for kind, p in walkDir(root / "etc/ssh"):
       let n = p.extractFilename
-      if n.startsWith("ssh_host_") and n notin spec.keepSshHostKeys:
-        removeIfPresent(p)
-  removeIfPresent("/var/lib/systemd/random-seed")
-  removeIfPresent("/var/lib/systemd/credential.secret")
-  discard runHostTool(["/usr/bin/journalctl", "--rotate"], timeoutSec = 60)
-  discard runHostTool(["/usr/bin/journalctl", "--vacuum-time=1s"],
-                      timeoutSec = 60)
+      if n.startsWith("ssh_host_") and n.endsWith(".pub"):
+        result.add(n & " " & sha256OfFile(p))
+  result.sort()
 
 proc runImageAssembly*(payload: string; spec: AssemblySpec;
                        preflightInputs: PreflightInputs;
@@ -227,6 +259,12 @@ proc runImageAssembly*(payload: string; spec: AssemblySpec;
     let b = runAddonBootstrap(opts)
     result.reproExe = b.reproExe
     result.generationId = b.generationId
+    result.generation0Id = b.generationId
+  when mutated("image-bakes-recipient-key"):
+    # FALSIFYING MUTATION (see mutations.nim): an assembly that creates the
+    # recipient key in the image, so every device flashed from it shares
+    # one private key.
+    discard ensureRecipientKeyFile(RecipientKeyPath)
   let profileText = try: readFile(payload / spec.profileFile)
                     except IOError: ""
   step("apply"):
@@ -249,6 +287,8 @@ proc runImageAssembly*(payload: string; spec: AssemblySpec;
     result.generationId = readCurrentGenerationId(stateDir)
     result.ledgerSha256 = sha256OfFile(ledgerCopyPath(stateDir))
     result.storePrefixes = storePrefixesNow()
+    result.assemblyMachineId = readFile("/etc/machine-id").strip()
+    result.assemblySshHostKeys = sshHostKeyDigests()
   when mutated("image-omits-gen0-ledger"):
     # FALSIFYING MUTATION (see mutations.nim): an assembly that leaves the
     # add-on's ledger out of the image.

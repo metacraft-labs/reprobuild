@@ -20,13 +20,26 @@
 ## - ``repro infra plan`` on the booted guest predicts nothing (no ledger
 ##   change, no transition) and ``repro system addon verify`` is ok;
 ## - the boot was a first boot: a machine id and SSH host keys of its own,
-##   and cloud-init ran the declared instance.
+##   none of them the assembly boot's (recorded in the manifest), systemd
+##   initialised the machine id itself, and cloud-init ran the declared
+##   instance;
+## - the image holds no secrets recipient key, read offline from the built
+##   file (spec §6.5.2: the key is deferred), and the first boot created
+##   one, ``0400`` root, whose public half the re-assert reported;
+## - a second first boot of the same image creates a different key and a
+##   different machine id;
+## - ``repro system addon uninstall`` on the booted image succeeds and takes
+##   the late key with it.
 ##
 ## Falsifying mutations (``REPRO_ADDON_MUTATION``):
 ## ``image-omits-gen0-ledger`` and ``image-omits-store-closure`` make the
 ## assembly delete the ledger copy, or the apt closure's store prefixes,
 ## before power-off. The first boot's re-assert must then report
 ## ``degraded`` (and the plan or verify fail): red.
+## ``image-bakes-recipient-key`` makes the assembly create the recipient key
+## after bootstrap: the image command must refuse the image (red).
+## ``image-keeps-first-boot-state`` makes the clean-up keep the assembly
+## boot's machine id and SSH host keys: the first-boot step goes red.
 ##
 ## Opt-in: ``REPRO_ADDON_VM_GATES=1`` (``just
 ## e2e_addon_zero_touch_image_synthesis_boots_converged``). Bases:
@@ -42,7 +55,7 @@
 ## never contacted. The upstream image is the test bed's digest-pinned
 ## cloud image, named by ``file://`` URL with its SHA-256.
 
-import std/[json, os, osproc, strutils, times, unittest]
+import std/[algorithm, json, os, osproc, strutils, times, unittest]
 
 import repro_test_support/reasoned_skip
 
@@ -81,6 +94,42 @@ proc helloDeb(work, debArch: string): tuple[path: string; lock: AptClosureLock] 
   writeDeb(result.path, @[dir("./"), dir("./usr/"), dir("./usr/bin/"),
     ("./usr/bin/tb-hello", '0', 0o755, readFile(bin), "")])
   result.lock = fixtureLock("tb-hello", result.path, debArch)
+
+proc offlineAgentDir(raw: string): tuple[found: bool; listing, machineId: string] =
+  ## Read the built image WITHOUT booting it: for each partition sfdisk
+  ## reports, ask debugfs (read-only) for ``/var/lib/repro/agent`` and
+  ## ``/etc/machine-id``. ``found`` is false when no partition holds the
+  ## agent directory -- the positive control that the check looked at the
+  ## right filesystem.
+  let (j, c) = execCmdEx("sfdisk -J " & quoteShell(raw))
+  if c != 0: raise newException(TestBedError, "sfdisk -J: " & j)
+  let table = parseJson(j)["partitiontable"]
+  let sector = table{"sectorsize"}.getInt(512)
+  for part in table["partitions"]:
+    let spec = quoteShell(raw & "?offset=" & $(part["start"].getInt() * sector))
+    let (st, _) = execCmdEx("debugfs -R 'stat /var/lib/repro/agent' " & spec &
+                            " 2>&1")
+    if "Type: directory" notin st: continue
+    result.found = true
+    result.listing = execCmdEx("debugfs -R 'ls -l /var/lib/repro/agent' " &
+                               spec & " 2>/dev/null").output
+    result.machineId = execCmdEx("debugfs -R 'cat /etc/machine-id' " & spec &
+                                 " 2>/dev/null").output
+    return
+
+proc hostKeyShas(g: Guest): seq[string] =
+  ## The SHA-256 of each SSH host public key the booted guest holds.
+  for line in g.exec("sha256sum /etc/ssh/ssh_host_*_key.pub").stdout.splitLines():
+    let f = line.splitWhitespace()
+    if f.len >= 1 and f[0].len == 64: result.add(f[0])
+
+proc isKeyHex(s: string): bool =
+  ## A recipient public key as ``recipient.pub`` holds it: hex, non-empty.
+  s.len >= 64 and s.allCharsInSet(HexDigits)
+
+proc firstBootIdentity(g: Guest): tuple[machineId, recipientPub: string] =
+  result.machineId = g.exec("cat /etc/machine-id").stdout.strip()
+  result.recipientPub = g.exec("cat /var/lib/repro/agent/recipient.pub").stdout.strip()
 
 proc profileText(b: BaseImage; imageUrl, imageSha, pubKey: string): string =
   """import repro_profile
@@ -196,6 +245,17 @@ proc runBase(b: BaseImage; record: JsonNode; work: string): seq[string] =
     let (xo, xc) = execCmdEx("xz -dc " & quoteShell(output) & " > " &
                              quoteShell(raw))
     step("the xz output unpacks", xc == 0, xo)
+    let assembly = manifest["assembly"]
+    let off = offlineAgentDir(raw)
+    record["offlineAgentDir"] = %off.listing
+    step("the built image holds no recipient key (read offline)",
+         off.found and "recipient.key" notin off.listing and
+           "recipient.pub" notin off.listing,
+         "agent dir found: " & $off.found & "\n" & off.listing)
+    let assemblyId = assembly{"assemblyMachineId"}.getStr()
+    step("the built image does not carry the assembly boot's machine id",
+         assemblyId.len == 32 and assemblyId notin off.machineId,
+         "assembly " & assemblyId & ", image " & off.machineId.strip())
 
     # The boot: a fresh overlay of the output, the image's own seed.
     g = newImageGuest(b, raw, key)
@@ -209,9 +269,30 @@ proc runBase(b: BaseImage; record: JsonNode; work: string): seq[string] =
     let ci = g.exec("cloud-init status --long; cloud-init query instance-id")
     step("cloud-init ran the declared instance", "status: done" in ci.stdout and
          "tb-image-first-boot" in ci.stdout, ci.stdout & ci.stderr)
-    let mid = g.exec("cat /etc/machine-id; ls /etc/ssh/ssh_host_*_key.pub")
+    # Its own identity, compared with the one the assembly boot recorded
+    # in the manifest: a kept machine id or host key is the same bytes.
+    let first = g.firstBootIdentity()
+    let keys = g.hostKeyShas()
+    var assemblyKeys: seq[string]
+    for k in assembly{"assemblySshHostKeys"}.getElems():
+      assemblyKeys.add(k.getStr().splitWhitespace()[^1])
+    var shared: seq[string]
+    for k in keys:
+      if k in assemblyKeys: shared.add(k)
+    let serial = (try: readFile(g.serialLog) except IOError: "")
     step("a first boot: its own machine id and SSH host keys",
-         mid.exitCode == 0 and mid.stdout.splitLines()[0].len == 32, mid.stdout)
+         first.machineId.len == 32 and assemblyId.len == 32 and
+           first.machineId != assemblyId and keys.len > 0 and
+           shared.len == 0 and
+           "Initializing machine ID from random generator" in serial,
+         "machine id " & first.machineId & " (assembly " & assemblyId &
+           "); host keys " & $keys & " (assembly " & $assemblyKeys &
+           "); shared " & $shared & "; serial initialised the id: " &
+           $("Initializing machine ID from random generator" in serial))
+    let rk = g.exec("stat -c '%a %U' /var/lib/repro/agent/recipient.key")
+    step("the first boot created its own recipient key, 0400 root",
+         rk.stdout.strip() == "400 root" and first.recipientPub.isKeyHex,
+         rk.stdout & rk.stderr & " pub " & first.recipientPub)
 
     let store = g.exec("findmnt -n -o OPTIONS /repro/store; " &
                        "ls -d /repro/store/prefixes/*/*")
@@ -223,12 +304,32 @@ proc runBase(b: BaseImage; record: JsonNode; work: string): seq[string] =
     let reproExe = manifest["assembly"]["reproExe"].getStr()
     step("the store holds the add-on binary", reproExe.len > 0 and
          g.exec("test -x " & quoteShell(reproExe)).exitCode == 0, reproExe)
-    let anchors = g.exec("cat /etc/repro/anchors/deploy-signers.anchors; " &
-                         "cat /etc/repro/caches.conf")
-    var anchorsOk = anchors.exitCode == 0 and publisher in anchors.stdout
-    for s in signers: anchorsOk = anchorsOk and s in anchors.stdout
-    step("/etc/repro holds exactly the declared anchors", anchorsOk,
-         anchors.stdout)
+    # Exactly: the signer set and the cache publishers equal the declared
+    # ones, not merely contain them.
+    let signerFile = g.exec("cat /etc/repro/anchors/deploy-signers.anchors")
+    var gotSigners: seq[string]
+    for l in signerFile.stdout.splitLines():
+      let s = l.strip()
+      if s.len > 0 and not s.startsWith("#"): gotSigners.add(s)
+    let anchorFiles = g.exec("ls -A /etc/repro/anchors").stdout.strip()
+    let caches = g.exec("cat /etc/repro/caches.conf")
+    var gotPublishers, sections, urls: seq[string]
+    for l in caches.stdout.splitLines():
+      let s = l.strip()
+      if s.startsWith("["): sections.add(s)
+      elif s.startsWith("url"): urls.add(s.split('=', 1)[1].strip().strip(chars = {'"'}))
+      elif s.startsWith("trusted-public-keys"):
+        for k in s.split('=', 1)[1].strip().strip(chars = {'"'}).split(','):
+          gotPublishers.add(k.strip())
+    step("/etc/repro holds exactly the declared anchors",
+         signerFile.exitCode == 0 and caches.exitCode == 0 and
+           gotSigners.sorted() == signers.sorted() and
+           sections.len == 1 and urls == @[TestCacheUrl] and
+           anchorFiles == "deploy-signers.anchors" and
+           gotPublishers == @[publisher],
+         "signers " & $gotSigners & " (declared " & $signers &
+           "); anchor files " & anchorFiles & "; publishers " & $gotPublishers & " (declared " & publisher &
+           ")\n" & caches.stdout)
 
     let status = g.exec(reproExe & " system addon status")
     record["status"] = %status.stdout
@@ -239,9 +340,16 @@ proc runBase(b: BaseImage; record: JsonNode; work: string): seq[string] =
     step("the initial generation is current", current.len > 0 and
          current == manifest["assembly"]["generationId"].getStr(),
          current & " / " & status.stdout)
-    let gens = g.exec("ls /var/lib/repro/system/generations")
+    let gens = g.exec("ls -1 /var/lib/repro/system/generations")
+    var gotGens: seq[string]
+    for l in gens.stdout.splitLines():
+      if l.strip().len > 0: gotGens.add(l.strip())
+    let gen0 = assembly{"generation0Id"}.getStr()
     step("generation 0 and the initial generation are recorded",
-         gens.stdout.splitLines().len >= 2, gens.stdout)
+         gen0.len > 0 and current.len > 0 and gen0 != current and
+           gotGens.sorted() == @[gen0, current].sorted(),
+         "recorded " & $gotGens & ", expected generation 0 " & gen0 &
+           " and " & current)
     let active = g.exec("systemctl is-active " & ServiceUnit &
       " repro-addon.target repro-store.mount repro-addon-reassert.service")
     step("the profile's service and generation 0's units are active",
@@ -268,6 +376,35 @@ proc runBase(b: BaseImage; record: JsonNode; work: string): seq[string] =
     let v = g.exec(reproExe & " system addon verify")
     step("repro system addon verify is ok", v.exitCode == 0 and
          "verify: ok" in v.stdout, v.stdout & v.stderr)
+    step("the re-assert reported the recipient key's public half",
+         first.recipientPub.isKeyHex and first.recipientPub in journal.stdout,
+         journal.stdout)
+
+    # Uninstall the booted image: the late key goes with everything else.
+    # From a copy outside the store, which uninstall unmounts (as every
+    # other gate runs it, from the artefact it installed).
+    let un = g.exec("cp " & quoteShell(reproExe) & " /root/repro-uninstall && " &
+                    "/root/repro-uninstall system addon uninstall")
+    let keyLeft = g.exec("ls -A /var/lib/repro/agent 2>/dev/null; " &
+                         "test -e /var/lib/repro/agent/recipient.key")
+    step("uninstall on the booted image succeeds and removes the late key",
+         un.exitCode == 0 and keyLeft.exitCode != 0,
+         un.stdout & un.stderr & "\nleft: " & keyLeft.stdout)
+    g.destroy()
+    g = nil
+
+    # A second first boot of the same image: another device.
+    g = newImageGuest(b, raw, key)
+    g.boot()
+    discard g.exec("systemctl is-system-running --wait", timeoutSec = 600)
+    let second = g.firstBootIdentity()
+    record["recipientKeys"] = %[first.recipientPub, second.recipientPub]
+    step("a second first boot of the image creates a different key",
+         second.recipientPub.isKeyHex and first.recipientPub.isKeyHex and
+           second.recipientPub != first.recipientPub and
+           second.machineId.len == 32 and second.machineId != first.machineId,
+         "first " & first.recipientPub & " / " & first.machineId &
+           ", second " & second.recipientPub & " / " & second.machineId)
   except CatchableError as e:
     fails.add(b.name & ": " & e.msg)
     steps.add(%*{"step": "exception", "ok": false, "detail": e.msg})

@@ -65,6 +65,14 @@ type
       ## package's file, now at ``<path>.distrib``.
     lcKey = "key"
       ## Key material bootstrap created (the recipient key pair).
+    lcLateKey = "lateKey"
+      ## Key material the host creates for itself AFTER generation 0: the
+      ## secrets recipient key pair of a host bootstrapped with
+      ## ``--defer-recipient-key`` (an image's assembly boot, spec §6.5.2),
+      ## which its first real boot's re-assert generates. Content UNPINNED
+      ## (every device has its own key) and absent until then; when present
+      ## it must be a root-owned regular file with the entry's mode. Not a
+      ## pre-bootstrap input: uninstall removes it.
     lcStorePrefix = "storePrefix"
       ## A store prefix the add-on realised into ``/repro/store``.
     lcKept = "kept"
@@ -377,6 +385,17 @@ proc observeDrift*(e: LedgerEntry): string =
     # Content unpinned by definition: the agent owns the bytes. Even a
     # missing record is not drift -- the agent may rotate its files.
     ""
+  of lcLateKey:
+    # Absent until the host's first real boot creates it; then only its
+    # shape is the ledger's (each device has its own bytes).
+    if symlinkExists(e.path) or dirExists(e.path):
+      return "not a regular file"
+    if not fileExists(e.path): return ""
+    let st = statOwner(e.path)
+    if st.mode != e.mode or st.owner != e.owner:
+      return "mode " & st.mode & " owner " & st.owner & ", ledger " &
+             e.mode & " " & e.owner
+    ""
   of lcNftTable:
     # Through PID 1, in the host's network namespace: the units that walk
     # the ledger run with a private one (A11 audit session 2, G4).
@@ -557,7 +576,7 @@ proc expectedRecords*(l: Ledger): seq[ExpectedRecord] =
       # load) is not undone when it is deleted.
       result.add(ExpectedRecord(component: fcSysctl,
         key: "net.netfilter.nf_log.*", value: "*", coupled: true))
-    of lcKey, lcStorePrefix, lcKept:
+    of lcKey, lcStorePrefix, lcKept, lcLateKey:
       discard  # under /var/lib/repro and /repro: not fingerprinted
 
 proc expectedDelta*(before, after: Ledger): seq[Expectation] =

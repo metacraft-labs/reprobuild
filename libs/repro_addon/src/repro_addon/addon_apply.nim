@@ -75,6 +75,7 @@ import repro_elevation/posix_system_driver
 import repro_infra
 import repro_infra/addon_diagnostics
 import repro_infra/planner
+import repro_infra/start_holds
 from repro_infra/service_floor import floorWritablePlaces, serviceDirectives,
   StartingDependencyKeys, BaseReachKeys, normalisedPath,
   PrivilegedGroups
@@ -1340,9 +1341,9 @@ proc floorTemplateOf(name: string): string =
 
 proc startHoldPath*(unit: string): string =
   ## Where the switch's start hold for ``unit`` (a template's, for an
-  ## instance: one hold covers every instance) is written.
-  let t = floorTemplateOf(unit)
-  "/run/systemd/system" / ((if t.len > 0: t else: unit) & ".d") / StartHoldName
+  ## instance: one hold covers every instance) is written
+  ## (``start_holds.holdPath``, shared with the full apply).
+  holdPath(unit, StartHoldName)
 
 proc flooredUnitNames(resources: openArray[SystemResource]): seq[string] =
   for r in resources:
@@ -1350,44 +1351,31 @@ proc flooredUnitNames(resources: openArray[SystemResource]): seq[string] =
         effectiveFloor(r).len > 0:
       result.add(r.suName)
 
-proc writeStartHolds*(resources: openArray[SystemResource]): seq[string] =
-  ## A start hold for every floored unit of the generation, written before
-  ## step 6's reload (spec §10.1, A9 review round 4, finding 7). Returns
-  ## the holds written.
+proc writeStartHolds*(resources: openArray[SystemResource];
+                      extra: openArray[string] = []): seq[string] =
+  ## A start hold for every floored unit of the generation, and for each
+  ## unit of ``extra`` (the services the carried-state cross-check judges;
+  ## A13 review round 6, finding 6), written before step 6's reload (spec
+  ## §10.1, A9 review round 4, finding 7). Returns the holds written.
   when mutated("floor-start-unheld"):
     return
-  for u in flooredUnitNames(resources):
-    let p = startHoldPath(u)
-    createDir(parentDir(p))
-    writeFile(p, StartHoldText)
-    result.add(p)
+  var units = flooredUnitNames(resources)
+  for u in extra:
+    if u notin units: units.add(u)
+  writeHolds(units, StartHoldName, StartHoldText)
 
 proc removeStartHolds*(holds: openArray[string]) =
   ## Remove each hold file, and its directory only when the hold was the
-  ## last thing in it (``rmdir`` refuses a non-empty directory). Round 4
-  ## called ``os.removeDir``, which deletes recursively: every other
-  ## drop-in in the directory went with it (A9 review round 5, finding 5).
-  for p in holds:
-    if fileExists(p): removeFile(p)
-    when mutated("start-hold-removes-directory"):
-      try: removeDir(parentDir(p), checkDir = false)
-      except OSError: discard
-    else:
-      discard rmdir(parentDir(p).cstring)   # fails, harmlessly, when not empty
+  ## last thing in it (``start_holds.removeHolds``; A9 review round 5,
+  ## finding 5).
+  removeHolds(holds)
 
 proc clearStaleStartHolds*(root = "/run/systemd/system"): seq[string] =
   ## Every start hold under ``root`` that an earlier switch left behind --
   ## one whose check refused, before a revert to a generation with no
   ## floored unit, or a switch that died -- removed (A9 review round 5,
   ## finding 5). Returns the holds removed.
-  when mutated("stale-start-holds-kept"):
-    return
-  if not dirExists(root): return
-  for kind, d in walkDir(root):
-    if kind != pcDir or not d.endsWith(".d"): continue
-    let p = d / StartHoldName
-    if fileExists(p): result.add(p)
-  removeStartHolds(result)
+  clearStaleHolds(StartHoldName, root)
 
 proc unitSearchPaths*(): seq[string] =
   ## systemd's unit search path (``systemd-analyze unit-paths``): every
@@ -3241,36 +3229,38 @@ proc revertOverwritesRestored*(purpose: string; ledgerOwns, regularFile: bool;
   purpose == "revert" and ledgerOwns and regularFile and
     preservedPath.len > 0 and currentSha == extractFilename(preservedPath)
 
-proc liveReachProblems(opts: AddonApplyOptions;
+proc liveReachProfile(resources: openArray[SystemResource]): SystemProfile =
+  for r in resources: result.resources.add(r)
+
+proc liveReachUnitsFor(opts: AddonApplyOptions;
                        resources: openArray[SystemResource]): seq[string] =
-  ## Each service of the generation that the carried-state reach analysis
-  ## judges confined, re-judged from ``systemctl show``
-  ## (``carried_state.liveConfinementProblem``) -- only while carried state
-  ## is on this host (a manifest in the carried directory, pending or
-  ## restored), where a unit that is not confined reaches it.
+  ## The services the carried-state cross-check judges for this switch
+  ## (``carried_state.liveReachUnits``): held with the floored units from
+  ## step 6's reload until the check passes.
   let carriedAt = if opts.carriedStateDir.len > 0: opts.carriedStateDir
                   else: CarriedStateDir
-  if not fileExists(carriedAt / ManifestFileName): return
   let root = if opts.carriedStateRoot.len > 0: opts.carriedStateRoot else: "/"
-  var p = SystemProfile()
-  for r in resources: p.resources.add(r)
-  let lookup = hostAccountLookup(root, p)
-  for r in resources:
-    if r.kind != srkSystemdSystemUnit or r.suCollision == "dropIn" or
-        not r.suName.endsWith(".service"):
-      continue
-    if unitReach(r, p, lookup, root).all: continue   # refused or required
-    var show: ShowProps
-    try: show = showUnit(r.suName)
-    except CatchableError as e:
-      result.add(r.suName & ": " & e.msg)
-      continue
-    let why = liveConfinementProblem(r.suName,
-      proc (k: string): string = show.getOrDefault(k), lookup)
-    if why.len > 0:
-      result.add("ECarriedStatePending: " & r.suName & " as systemd " &
-        "loaded it is not confined (" & why & "), though its unit text " &
-        "reads as confined")
+  liveReachUnits(liveReachProfile(resources), carriedAt, root)
+
+proc carriedRefusalFor(opts: AddonApplyOptions; stateDir: string): string
+
+proc liveReachProblemsFor(opts: AddonApplyOptions; units: seq[string];
+                          resources: openArray[SystemResource];
+                          stateDir: string): seq[string] =
+  ## After step 6's reload, before any start: each of ``units`` re-judged
+  ## from ``systemctl show`` (``carried_state.liveReachProblems``, shared
+  ## with ``runInfraApply``), and the carried-state refusal decided again
+  ## over the host as the reload left it -- a drop-in a host generator made
+  ## at the switch's own reloads is read now, so a path or a command it
+  ## adds is judged too, not only the account (A13 round 6).
+  when mutated("addon-live-reach-skipped"):
+    return
+  let root = if opts.carriedStateRoot.len > 0: opts.carriedStateRoot else: "/"
+  result = liveReachProblems(units, liveReachProfile(resources),
+    proc (u: string): Table[string, string] = showUnit(u), root)
+  when not mutated("post-reload-refusal-skipped"):
+    let why = carriedRefusalFor(opts, stateDir)
+    if why.len > 0: result.add(why & " (decided again after the reload)")
 
 proc carriedRefusalFor(opts: AddonApplyOptions; stateDir: string): string =
   ## The carried-state refusal for this apply (``carried_state``), "" when
@@ -4101,6 +4091,12 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
         inp.kind = tkFile
         inp.collision = r.sfCollision
         inp.divertedByProfile = hasDiversionFor(userResources, r.sfPath)
+        let declared = r
+        inp.stanza = proc (bytes: string): string =
+          var x = declared
+          x.sfContent = bytes
+          x.sfSourceLocal = ""
+          renderStanza(x).join("\n")
         if r.sfSourceLocal.len > 0:
           inp.desiredContent = readFile(r.sfSourceLocal)
         else:
@@ -4375,6 +4371,18 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
     x.dependsOn = deps
     infraProfile.resources.add(x)
   let composedText = renderProfileText(infraProfile)
+  # The services the carried-state cross-check judges at step 6, chosen
+  # now, as the refusal judged them, before anything of this switch is
+  # written: each write of a unit reloads systemd, which runs the host's
+  # generators, and a drop-in a generator makes from then on can turn a
+  # unit the refusal let in into one the analysis would read as reaching
+  # everything -- so a set chosen at step 6 left it out of the check
+  # altogether (A13 round 6, the adopt gate's live probe on ubuntu-24.04).
+  let preWriteLiveUnits =
+    when mutated("live-units-chosen-after-writes"): newSeq[string]()
+    else:
+      if opts.recordOnly: newSeq[string]()
+      else: liveReachUnitsFor(opts, composed.resources)
   var wanted = initHashSet[string]()
   for r in composed.resources: wanted.incl(r.address)
 
@@ -5426,6 +5434,7 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
       var reloadedAt = 0.0
       var startHolds: seq[string]   # spec §10.1: kept until the check passes
       var createdPending: seq[tuple[path, unit: string]]  # §13 decision 57
+      var liveUnits: seq[string]    # §11.1: the carried-state cross-check's
         ## CLOCK_MONOTONIC seconds just after step 6's daemon-reload; 0
         ## when there was none.
       hookGeneration = generationId
@@ -5449,7 +5458,11 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
           # socket, a timer, D-Bus or a Wants= would otherwise start it on
           # definitions nothing has checked yet; spec §10.1, round 4).
           if not opts.recordOnly:
-            startHolds = writeStartHolds(composed.resources)
+            liveUnits =
+              when mutated("live-units-chosen-after-writes"):
+                liveReachUnitsFor(opts, composed.resources)
+              else: preWriteLiveUnits
+            startHolds = writeStartHolds(composed.resources, liveUnits)
           daemonReload()
           # From here on every start runs the generation's definitions:
           # step 7 accepts an exclusive instance started after this point
@@ -5645,7 +5658,8 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
           # carried state is on this host, a unit the static analysis took
           # as confined must be confined as systemd reads it too, or nothing
           # starts (a problem stops step 7, and the switch reverts).
-          let reachLive = liveReachProblems(opts, composed.resources)
+          let reachLive = liveReachProblemsFor(opts, liveUnits,
+                                               composed.resources, stateDir)
           if reachLive.len > 0:
             problems.add(reachLive.join("; ") & "; nothing was started")
           if notHeld.len > 0:
@@ -5653,6 +5667,12 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
             # gate reads them line by line (A9 review round 9, finding 3).
             problems.add($adFloorNotEffective & ":\n  " & notHeld.join("\n  ") &
               "\n  nothing was started")
+          if reachLive.len > 0 or notHeld.len > 0:
+            # Refused: the holds stay until the revert's own switch has
+            # checked its generation and cleared them (A13 review round 6,
+            # finding 6), so no socket, timer or dependency starts a unit
+            # systemd loaded unconfined in between.
+            discard
           else:
             # Checked: the holds go -- this switch's, and any an earlier
             # switch left (a refused check before a revert to a generation
