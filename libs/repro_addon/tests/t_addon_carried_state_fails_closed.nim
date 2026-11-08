@@ -401,6 +401,15 @@ suite "reach is default-deny":
     unit(name, "[Service]\nProtectSystem=strict\nNoNewPrivileges=yes\nUser=app\n" & extra &
       "ExecStart=/bin/true\n")
 
+  test "an optional (-) path reaches as the plain form does":
+    # The gate's round-6 probes widen a unit to the carried directory with
+    # ReadWritePaths=- (a missing path is ignored, so a probe a falsifier
+    # lets in can run while the directory is pending): both forms are
+    # refused for the carried path. Falsifier: optional-paths-ignored.
+    check refused(confinedWith("o.service", "ReadWritePaths=/var/lib/ethereum/validator\n"))
+    check refused(confinedWith("o.service", "ReadWritePaths=-/var/lib/ethereum/validator\n"))
+    check refused(confinedWith("o.service", "BindPaths=-/var/lib/ethereum/validator\n"))
+
   test "a path is compared as systemd resolves it":
     for extra in ["ReadWritePaths=/var/lib//ethereum/validator\n",
                   "ReadWritePaths=/var/lib/./ethereum/validator\n",

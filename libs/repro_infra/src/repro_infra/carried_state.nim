@@ -833,6 +833,11 @@ proc pathsOf(key, value: string; r: var UnitReach) =
   for w0 in words:
     var w = w0
     if key in BindKeys or key == "TemporaryFileSystem" or key in WritePathKeys:
+      # ``-`` makes a missing path not an error (systemd.exec(5),
+      # "ReadWritePaths="); the path is granted all the same when it exists,
+      # so it reaches exactly as the plain form does.
+      when CarriedMutation == "optional-paths-ignored":
+        if w.startsWith("-"): continue
       while w.len > 0 and w[0] in ListPathPrefixes: w = w[1 .. ^1]
     var ends: seq[string]
     if key in BindKeys:

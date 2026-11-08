@@ -557,6 +557,8 @@ proc runBase(m: SnapshotMirror; b: BaseImage; record: JsonNode): seq[string] =
       "  name = \"" & liveUnit & "\"\n" &
       "  content = \"[Unit]\nDescription=A13 live cross-check probe\n\n" &
       "[Service]\nDynamicUser=yes\nNoNewPrivileges=yes\n" &
+      "RuntimeDirectory=a13r6-live\n" &
+      "ExecStartPre=/bin/sh -c 'id -u > /run/a13r6-live/uid'\n" &
       "ExecStart=/bin/sleep infinity\n\n[Install]\n" &
       "WantedBy=multi-user.target\n\"\n" &
       "  floorExceptions = [\"serviceFloor: the A13 live cross-check probe\"]\n}\n"
@@ -572,18 +574,24 @@ proc runBase(m: SnapshotMirror; b: BaseImage; record: JsonNode): seq[string] =
       "&& chmod 755 /etc/systemd/system-generators/a13r6-gen")
     let la = g.applyProfile(repro, "live", liveProfile)
     let laOut = la.stdout & la.stderr
-    let started = g.run("systemctl show -p ExecMainStartTimestampMonotonic " &
-      liveUnit & " || true").strip()
-    record["liveCrossCheck"] = %*{"exit": la.exitCode, "started": started,
+    # Whether it started, from its journal (systemctl show cannot tell: an
+    # unloaded unit reports its start timestamps as zero either way); and,
+    # under a falsifier that lets it start, the evidence that it ran as root.
+    let journal = g.run("journalctl -b --no-pager -o short-monotonic -u " &
+      liveUnit & " 2>&1 || true")
+    let uid = g.run("cat /run/a13r6-live/uid 2>/dev/null || true").strip()
+    record["liveCrossCheck"] = %*{"exit": la.exitCode,
+      "started": journalStarted(journal, liveUnit),
+      "ranAsRoot": journalRan(journal, liveUnit) and uid == "0",
+      "uid": uid, "journal": journal,
       "generatorDropIn": g.run("cat /run/systemd/generator/" & liveUnit &
         ".d/10-root.conf 2>&1 || true")}
     step("the add-on switch refuses a unit systemd loaded unconfined, and " &
          "it never starts (held through the revert)",
          la.exitCode != 0 and "ECarriedStatePending" in laOut and
          (liveUnit & " as systemd loaded it is not confined") in laOut and
-         started in ["ExecMainStartTimestampMonotonic=0",
-                     "ExecMainStartTimestampMonotonic="],
-         laOut & "\n" & started)
+         not journalStarted(journal, liveUnit),
+         laOut & "\n" & journal)
     discard g.run("rm -f /etc/systemd/system-generators/a13r6-gen " &
       "/var/lib/repro/system/carried/state-set.json && " &
       "rmdir /var/lib/repro/system/carried 2>/dev/null; systemctl daemon-reload")

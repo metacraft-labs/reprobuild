@@ -346,7 +346,7 @@ const
      "/var/lib/ethereum/validator (r6Lines)",
      "mkdir -p /run/systemd/system/eth-r6-lines.service.d && printf " &
        "'[Service]\\nEnvironment=X=a\\\\\\\\\\n" &
-       "ReadWritePaths=/var/lib/ethereum/validator\\n' > " &
+       "ReadWritePaths=-/var/lib/ethereum/validator\\n' > " &
        "/run/systemd/system/eth-r6-lines.service.d/10-env.conf",
      "rm -rf /run/systemd/system/eth-r6-lines.service.d"),
     ("exec", r5Unit("eth-r6-exec.service", R6Confined &
@@ -359,7 +359,7 @@ const
        "/etc/systemd/system/eth-r6-l1.service && ln -sf " &
        "/etc/systemd/system/eth-r6-l1.service /etc/systemd/system/eth-r6-l2.service" &
        " && mkdir -p /run/systemd/system/eth-r6-l2.service.d && printf " &
-       "'[Service]\\nReadWritePaths=/var/lib/ethereum/validator\\n' > " &
+       "'[Service]\\nReadWritePaths=-/var/lib/ethereum/validator\\n' > " &
        "/run/systemd/system/eth-r6-l2.service.d/10-rw.conf",
      "rm -rf /etc/systemd/system/eth-r6-l1.service /etc/systemd/system/eth-r6-l2.service " &
        "/run/systemd/system/eth-r6-l2.service.d"),
@@ -393,7 +393,7 @@ const
      "decided again after the reload",
      "mkdir -p /etc/systemd/system-generators && printf '#!/bin/sh\\n" &
        "mkdir -p \"$1/eth-r6-genrw.service.d\"\\nprintf \"[Service]\\\\n" &
-       "ReadWritePaths=/var/lib/ethereum/validator\\\\n\" " &
+       "ReadWritePaths=-/var/lib/ethereum/validator\\\\n\" " &
        "> \"$1/eth-r6-genrw.service.d/10-rw.conf\"\\n' > " &
        "/etc/systemd/system-generators/a13r6-genrw && chmod 755 " &
        "/etc/systemd/system-generators/a13r6-genrw",
@@ -521,60 +521,6 @@ static:
     doAssert p in ProbeWritableDirs or p == "/var/lib/ethereum/validator",
       "a probe unit's ReadWritePaths= names " & p & ", which the gate does " &
       "not create (add it to ProbeWritableDirs)"
-
-proc journalRan*(journal, unit: string): bool =
-  ## Whether the journal of ``unit`` (``journalctl -b -u <unit>``, oldest
-  ## first) shows its last start completing: a "Started"/"Starting" line,
-  ## then "Deactivated successfully" or nothing after it that failed. A unit
-  ## only ever "skipped" (a start condition unmet), or one whose last start
-  ## failed ("Failed with result", "Failed to start", a "Main process
-  ## exited" with a status other than 0), did not run. ``systemctl show``
-  ## cannot say this: once a unit that ran is inactive and unreferenced,
-  ## systemd unloads it, and a fresh load reports every runtime property
-  ## zero (measured, debian-13, A13 round 6).
-  var lines: seq[string]
-  for l in journal.splitLines():
-    if (unit) in l: lines.add(l)
-  var last = -1
-  for k, l in lines:
-    if ("Started " in l or "Starting " in l) and "skipped" notin l: last = k
-  if last < 0: return false
-  var completed = false
-  for l in lines[last .. ^1]:
-    if "Failed with result" in l or "Failed to start" in l or
-        ("Main process exited" in l and "status=0/" notin l): return false
-    if "Deactivated successfully" in l or "Started " in l: completed = true
-  completed
-
-const
-  CapturedNeverStarted = """
-[  248.692251] addon-tb systemd[1]: eth-r4-host.service - A13 round-4 probe skipped, unmet condition check ConditionPathExists=!/
-"""
-    ## Captured, debian-13 (A13 round 6): a unit held, never started.
-  CapturedStartedFailed = """
-[  281.483513] addon-tb systemd[1]: eth-r6-exec.service - A13 round-5 probe skipped, unmet condition check ConditionPathExists=!/
-[  281.803476] addon-tb systemd[1]: Starting eth-r6-exec.service - A13 round-5 probe...
-[  281.837865] addon-tb (true)[6284]: eth-r6-exec.service: Failed to set up mount namespacing: /var/lib/a13-r5: No such file or directory
-[  281.837893] addon-tb (true)[6284]: eth-r6-exec.service: Failed at step NAMESPACE spawning /bin/true: No such file or directory
-[  281.838693] addon-tb systemd[1]: eth-r6-exec.service: Control process exited, code=exited, status=226/NAMESPACE
-[  281.838751] addon-tb systemd[1]: eth-r6-exec.service: Failed with result 'exit-code'.
-[  281.838875] addon-tb systemd[1]: Failed to start eth-r6-exec.service - A13 round-5 probe.
-"""
-    ## Captured, debian-13 (A13 round 6): a unit started that failed.
-  CapturedRan = """
-[  265.228332] addon-tb systemd[1]: eth-r4-host.service - A13 round-4 probe skipped, unmet condition check ConditionPathExists=!/
-[  265.749769] addon-tb systemd[1]: Started eth-r4-host.service - A13 round-4 probe.
-[  265.821244] addon-tb systemd[1]: eth-r4-host.service: Deactivated successfully.
-"""
-    ## Captured, debian-13 (A13 round 6): a unit held, then started by the
-    ## apply after its check, ran and exited 0.
-
-static:
-  # The check's negative and positive controls, on captured journals: it
-  # cannot pass a unit that never started or one that failed.
-  doAssert not journalRan(CapturedNeverStarted, "eth-r4-host.service")
-  doAssert not journalRan(CapturedStartedFailed, "eth-r6-exec.service")
-  doAssert journalRan(CapturedRan, "eth-r4-host.service")
 
 proc unitRan(g: Guest; unit: string; marker = ""): (bool, JsonNode) =
   ## Whether ``unit`` really ran: its journal shows its last start
@@ -1022,14 +968,14 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
         # Held from before the first write to the refusal: never started.
         let liveUnit = if label == "live": "eth-r6-gen.service"
                        else: "eth-r6-genrw.service"
-        let started = nw.exec("systemctl show -p " &
-          "ExecMainStartTimestampMonotonic " & liveUnit).stdout.strip()
+        # From its journal: systemctl show cannot tell (an unloaded unit
+        # reports its start timestamps as zero whether it ran or not).
+        let journal = nw.exec("journalctl -b --no-pager -o short-monotonic -u " &
+          liveUnit & " 2>&1").stdout
         let held = nw.exec("test -f /etc/systemd/system/" & liveUnit & ".d/" &
           "zz-repro-carried-check-hold.conf").exitCode == 0
-        refused = refused and held and
-          started in ["ExecMainStartTimestampMonotonic=0",
-                      "ExecMainStartTimestampMonotonic="]
-        detail = o & "\n" & started & "\nheld: " & $held
+        refused = refused and held and not journalStarted(journal, liveUnit)
+        detail = o & "\n" & journal & "\nheld: " & $held
       probes["r6" & label] = %*{"exit": r.exitCode, "judged": judged(o),
         "layer": (if label in ["live", "liverw"]: "live" else: "reach"),
         "refusedForReason": refused}

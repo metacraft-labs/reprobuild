@@ -553,6 +553,8 @@
 ## ``infra-live-reach-skipped``              a full apply does not run the
 ##                                           carried-state cross-check
 ##                                           (decision 59)
+## ``optional-paths-ignored``              a ``-``-prefixed (optional) path
+##                                           is taken as granting nothing
 ## ``live-units-chosen-after-writes``      the add-on switch chooses the
 ##                                           units it re-checks at step 6,
 ##                                           after its own reloads ran the
@@ -1315,6 +1317,7 @@ const
                           "infra-live-reach-skipped",
                           "adopt-without-profile",
                           "live-units-chosen-after-writes",
+                          "optional-paths-ignored",
                           "post-reload-refusal-skipped",
                           "plan-ignores-profile-digest",
                           "full-apply-keeps-undeclared-dropins",
