@@ -16,11 +16,20 @@
 ##    discards nothing, and leaves no record of the discard: the signature
 ##    is written first and the record last.
 ##
+## 4. (round 7) When the record's write fails AFTER the record reached its
+##    name (the directory sync), the record and its signature both stay,
+##    the error is reported, and nothing is discarded: a signature is
+##    never deleted once its record is in place.
+##
 ## Falsifying builds (each turns its own case red):
 ## ``override-keyless-unsigned`` (1), ``override-write-error-swallowed`` (2),
-## ``override-sig-write-error-swallowed`` (3).
+## ``override-sig-write-error-swallowed`` (3),
+## ``override-rollback-removes-sig`` (4).
 ##
-## Mocks: ``ship`` is a stub answering "not acknowledged" -- the sink's
+## Mocks: case 4's record writer writes the file as the real one does and
+## then raises, as the real one does when the directory's fsync fails
+## after the rename (a failure of the file system cannot be produced on
+## demand). ``ship`` is a stub answering "not acknowledged" -- the sink's
 ## refusal to acknowledge is held against a real sink by
 ## ``t_addon_review_round4`` case 2; what these cases hold is what the gate
 ## does after it. Nothing else.
@@ -115,5 +124,29 @@ suite "the A11 code review's fifth round":
     for kind, p in walkDir(logDir):
       if kind == pcFile and p.endsWith("-discarded-unshipped.json"): inc records
     check records == 0
+
+  test "4: a record in place keeps its signature when its directory sync fails":
+    let key = root / "syncfail" / "agent" / "attestation.key"
+    createDir(parentDir(key))
+    discard ensureAttestationKey(key)
+    let site = scratchSite("syncfail", key)
+    let aside = leaveAside(site, "1-a")
+    let logDir = root / "syncfail" / "log"
+    let failAfterRename = proc (path, text: string) =
+      atomicRecordWriter(path, text)
+      if not path.endsWith(DiscardRecordSigExt):
+        raise newException(OSError, "fsync of the record's directory failed")
+    let g = storeEvidenceGate(site, override, notAcknowledged,
+                              overrideDir = logDir, recordWriter = failAfterRename)
+    checkpoint g.errors.join("\n")
+    check g.errors.anyIt("both are kept" in it)
+    check g.errors.anyIt(it == "nothing was removed")
+    check dirExists(aside)
+    var records, sigs = 0
+    for kind, p in walkDir(logDir):
+      if kind == pcFile and p.endsWith("-discarded-unshipped.json"): inc records
+      if kind == pcFile and p.endsWith("-discarded-unshipped.json" & DiscardRecordSigExt): inc sigs
+    check records == 1
+    check sigs == 1
 
 removeDir(root)

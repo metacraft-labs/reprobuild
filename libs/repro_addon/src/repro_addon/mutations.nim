@@ -845,6 +845,9 @@
 ##                                            written for another binary
 ## ``override-sig-write-error-swallowed``     a failed signature write does
 ##                                            not stop the discard (round 6)
+## ``override-rollback-removes-sig``         a failed record write removes
+##                                            the signature even when the
+##                                            record is in place (round 7)
 ## ``verify-accepts-missing-key``             verify-discard-record verifies
 ##                                            without --key (round 6)
 ## ``sim-skips-stop``                         the simulator's TLS smoke pass
@@ -1390,7 +1393,8 @@ const
                           "fresh-skips-static-reads",
                           "fresh-ignores-list-binary",
                           "override-sig-write-error-swallowed",
-                          "verify-accepts-missing-key", "sim-skips-stop"]
+                          "verify-accepts-missing-key", "sim-skips-stop",
+                          "override-rollback-removes-sig"]
 
 when AddonMutation.len > 0 and AddonMutation notin KnownAddonMutations and
     AddonMutation notin KnownAgentMutations:

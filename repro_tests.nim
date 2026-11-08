@@ -17361,6 +17361,17 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "t_group_tests_integration_g01",
     singleReason: ""),
   TestSpec(
+    source: "tests/integration/t_apps_writes_the_helper_lists.nim",
+    binary: "build/test-bin/t_apps_writes_the_helper_lists",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "t_group_tests_integration_g01",
+    singleReason: ""),
+  TestSpec(
     source: "tests/integration/t_arm_outside_declared_platforms_is_a_lint_error.nim",
     binary: "build/test-bin/t_arm_outside_declared_platforms_is_a_lint_error",
     defines: @[],
@@ -17468,7 +17479,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g01",
+    group: "t_group_tests_integration_g02",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_b0_develop_mode_uses_local_source.nim",
@@ -18183,7 +18194,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g02",
+    group: "t_group_tests_integration_g03",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_ci_skips_targets_covered_by_valid_certificate_per_platform.nim",
@@ -18920,7 +18931,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g03",
+    group: "t_group_tests_integration_g04",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_dev_shell_override_guards.nim",
@@ -19646,7 +19657,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g04",
+    group: "t_group_tests_integration_g05",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_execution_lease_confinement.nim",

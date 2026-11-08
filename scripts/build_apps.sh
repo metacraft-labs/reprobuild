@@ -820,7 +820,7 @@ while read -r name path extra_flags; do
                 bash scripts/write_helper_deps.sh "${name}" "${path}" \
                   ${nim_mode_flags[@]+"${nim_mode_flags[@]}"} \
                   ${extra_flag_array[@]+"${extra_flag_array[@]}"}); then
-            record_failure "${name}: built, but its dependency list (scripts/write_helper_deps.sh) could not be written; a test will refuse the binary"
+            record_failure "${name}: built, but its dependency list (scripts/write_helper_deps.sh) could not be written; a test will refuse the binary. On a host that denies ptrace (strace cannot run), build with REPRO_BUILD_APPS_HELPER_DEPS=none (see CONTRIBUTING.md); the tests that run this helper then refuse it"
           fi
           ;;
       esac

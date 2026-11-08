@@ -271,8 +271,17 @@ const
     ## 64). /1 signed a compact re-serialisation the file did not hold.
   DiscardRecordSigExt* = ".sig"
 
+type DiscardRecordWriter* = proc (path, text: string) {.closure.}
+  ## Writes one file of the discard record durably (write, rename into
+  ## place, sync the directory). The default is ``writeFileAtomic``; a
+  ## test passes one that fails at a chosen step.
+
+proc atomicRecordWriter*(path, text: string) =
+  writeFileAtomic(path, text, 0o600)
+
 proc writeOverrideRecord(custody: CustodySite; dir: string;
-                         objects: seq[string]; why: string):
+                         objects: seq[string]; why: string;
+                         writer: DiscardRecordWriter):
     tuple[path, text: string] =
   ## §13 decisions 62, 63 and 64: the signed local record of the store
   ## evidence an uninstall discards before the sink acknowledged its
@@ -309,13 +318,24 @@ proc writeOverrideRecord(custody: CustodySite; dir: string;
   # record of a discard that does not happen (round 6). A record write
   # that fails after the signature was written removes the signature.
   try:
-    writeFileAtomic(result.path & DiscardRecordSigExt, signature & "\n", 0o600)
+    writer(result.path & DiscardRecordSigExt, signature & "\n")
   except CatchableError:
     when not mutated("override-sig-write-error-swallowed"):
       raise
   try:
-    writeFileAtomic(result.path, result.text, 0o600)
-  except CatchableError:
+    writer(result.path, result.text)
+  except CatchableError as e:
+    # A signature is never deleted once its record is in place (round 7):
+    # when the record's write failed AFTER the rename (the directory sync),
+    # the record is at its name with its signature beside it, and both
+    # stay; the error is reported and nothing is discarded. Only a record
+    # that never reached its name has its signature removed.
+    let recordInPlace = fileExists(result.path) and
+      (try: readFile(result.path) == result.text except IOError: false)
+    if recordInPlace and not mutated("override-rollback-removes-sig"):
+      raise newException(OSError, "the record " & result.path & " and its " &
+        "signature are in place, but making them durable failed (" & e.msg &
+        "); both are kept")
     try: removeFile(result.path & DiscardRecordSigExt) except OSError: discard
     raise
 
@@ -358,7 +378,8 @@ proc verifyDiscardRecord*(path: string; expectedKeyHex: string):
 
 proc storeEvidenceGate*(custody: CustodySite; opts: UninstallOptions;
                         ship: proc (): tuple[ok: bool; why: string];
-                        overrideDir = UninstallOverrideDir):
+                        overrideDir = UninstallOverrideDir;
+                        recordWriter: DiscardRecordWriter = atomicRecordWriter):
     tuple[pending, errors: seq[string]; overrideRecord,
           overrideRecordText: string] =
   ## What uninstall may discard of the store evidence (§10.2 Uninstall,
@@ -404,7 +425,7 @@ proc storeEvidenceGate*(custody: CustodySite; opts: UninstallOptions;
       return
     try:
       let r = writeOverrideRecord(custody, overrideDir, result.pending,
-                                  shipped.why)
+                                  shipped.why, recordWriter)
       result.overrideRecord = r.path
       result.overrideRecordText = r.text
     except CatchableError as e:
