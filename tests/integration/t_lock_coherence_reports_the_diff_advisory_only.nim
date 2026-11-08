@@ -251,6 +251,24 @@ suite "lock coherence reports a difference and never blocks":
       # (5) advisory: the host command's exit code is untouched.
       check syncOut.code == coherentSyncCode
 
+      # ---- (2b) a lagging OWN entry never contradicts another lock. ------
+      # lib-b's lock claims lib-a at its checkout while lib-a's own lock still
+      # names the commit it was written against: the state every dependent's
+      # lock and every dependency's own lock are in once the dependency has
+      # committed on top of its lock. The two revisions differ by
+      # construction and no re-pin can make them agree, so this is the
+      # informational lag of (2), not a contradiction (CLI/README.md §"Lock
+      # Coherence"). Before the rule it was "contradict EACH OTHER", 1
+      # needing attention.
+      writeFile(fx.libB / "repro.lock",
+        committedLock([depInline("lib-a", "../lib-a", advancedA),
+                       depInline("lib-b", ".", headB)]))
+      syncOut = invokeSync(fx)
+      check "contradict EACH OTHER" notin syncOut.output
+      check "0 needing attention, 1 informational" in syncOut.output
+      check "lib-b/repro.lock claims " & advancedA & " (match)" in syncOut.output
+      removeFile(fx.libB / "repro.lock")
+
       # ---- (3) a claim on a divergent history: INTERRUPTING. -------------
       # Build a commit that is genuinely unreachable from the checkout by
       # committing on a side branch and then returning.

@@ -153,7 +153,7 @@ proc lockDep(scratch, name, path, sha, depends, origin: string): string =
   "\", version = \"\", visibility = \"public\", participation = \"\"" &
   ", depends = \"" & depends & "\", groups = \"\" }"
 
-proc seedOrigin(fx: Nf2Fixture; name: string): string =
+proc seedOrigin(fx: Nf2Fixture; name: string; recipe = false): string =
   ## One real bare origin plus one real seeded working tree, pushed to it.
   ##
   ## The seed content is keyed on the repo NAME, and that is load-bearing: a
@@ -174,6 +174,12 @@ proc seedOrigin(fx: Nf2Fixture; name: string): string =
   # `flake.nix`.
   writeFile(work / "flake.nix", "{ outputs = _: { }; }\n")
   writeFile(work / "marker.txt", name & " revision 1\n")
+  if recipe:
+    # The minimal recipe that lets another recipe's `uses:` name this repo
+    # (Unified-Locking-And-Hooks.md §14.9), and the ignore its compile needs.
+    writeFile(work / "repro.nim", "import repro_project_dsl\n\npackage " &
+      name.replace('-', '_') & ":\n  discard\n")
+    writeFile(work / ".gitignore", ".repro/\n")
   discard requireCmd(q(fx.gitBin) & " -C " & q(work) & " add -A")
   discard requireCmd(q(fx.gitBin) & " -C " & q(work) & " commit -q -m " &
     q("seed " & name))
@@ -357,7 +363,7 @@ proc removePreCommitDispatch*(fx: Nf2Fixture) =
   if fileExists(preCommitHookPath(fx)): removeFile(preCommitHookPath(fx))
 
 proc setupNf2Fixture*(label: string;
-    revPinned: openArray[string] = []): Nf2Fixture =
+    revPinned: openArray[string] = []; siblingRecipes = false): Nf2Fixture =
   ## Build the whole workspace. Returns a fixture whose `flake.lock` names
   ## exactly the revision every sibling checkout is sitting at — the
   ## "nothing has drifted" starting state.
@@ -368,6 +374,10 @@ proc setupNf2Fixture*(label: string;
   ## `original.rev`. The default is the floating-`ref` shape, so a fixture
   ## built without the argument is byte-identical to the one every other case
   ## has always got.
+  ##
+  ## ``siblingRecipes`` seeds every repo but `app` with a minimal `repro.nim`,
+  ## for a case whose `app` lock pins a sibling: such a pin must be one `app`'s
+  ## recipe derives, and a recipe can name only a repo that carries one.
   result.gitBin = findExe("git")
   result.repro = absolutePath(reproBinaryPath())
   # Git renders checkout paths physically; Darwin's /tmp aliases /private/tmp.
@@ -379,7 +389,7 @@ proc setupNf2Fixture*(label: string;
 
   var shas: seq[string]
   for name in Nf2Repos:
-    let sha = seedOrigin(result, name)
+    let sha = seedOrigin(result, name, recipe = siblingRecipes and name != "app")
     shas.add(sha)
     discard requireCmd(q(result.gitBin) & " clone -q " &
       q(originUrl(result, name)) & " " & q(result.ws / name))

@@ -237,6 +237,49 @@ proc moveUpstream(fx: PushFixture; file, body: string): string =
 type Sibling = object
   path, bare: string
 
+proc memberModule(name: string): string = name.replace('-', '_')
+
+proc memberRecipe(name: string; uses: seq[string]): string =
+  ## ``recipe`` for the member ``name``: its own package, and a ``uses:``
+  ## entry for each sibling it depends on, which is where reprobuild reads a
+  ## dependency (owner decision 2026-11-05, Unified-Locking-And-Hooks.md
+  ## §14.9; these fixtures used to put the edges in fragment ``depends``).
+  var extra = ""
+  for u in uses: extra.add("    \"" & u & "\"\n")
+  recipe.replace("package lib_a:", "package " & memberModule(name) & ":")
+    .replace("    \"cert-tool >=1.0 <2.0\"\n",
+      "    \"cert-tool >=1.0 <2.0\"\n" & extra)
+
+proc declareMemberUses(fx: PushFixture;
+    graph: openArray[tuple[name, path, bare: string; uses: seq[string]]]) =
+  ## Give each member the recipe that ``uses:`` its dependencies and the lock
+  ## `repro lock refresh` derives from it, in ``graph`` order (dependencies
+  ## first), committed and published to its upstream bare: the state a case
+  ## starts from. The recipe opts into ``usesImportPath "reprobuild/packages"``,
+  ## so each used sibling gets a module there; it is empty, because a sibling
+  ## exports no tool surface to these recipes. Committed and pushed with the
+  ## managed hooks bypassed: this is setup, published before the case, and a
+  ## gateway under ``required`` would rightly refuse an untested commit.
+  proc plainGit(dir: string; args: varargs[string]) =
+    discard gitOut(dir, @["-c", "core.hooksPath=/dev/null"] & @args)
+  for m in graph:
+    for u in m.uses:
+      writeFile(m.path / "reprobuild" / "packages" / (memberModule(u) & ".nim"),
+        "## ``uses: \"" & u & "\"`` names a workspace sibling; it has no " &
+        "typed surface for this recipe.\n")
+    writeFile(m.path / "repro.nim", memberRecipe(m.name, m.uses))
+  for m in graph:
+    let refreshed = runArgv(@[fx.sf.reproBin, "lock", "refresh"], m.path,
+      daemonKeyEnv(fx.sf.daemonKey, storeKeyId) &
+      @[(name: "PATH", value: fx.binDir & $PathSep & pathWithoutTool()),
+        (name: "REPROBUILD_REPRO", value: fx.sf.reproBin)])
+    doAssert refreshed.code == 0, m.path & ": " & refreshed.output
+    plainGit(m.path, "add", "-A")
+    plainGit(m.path, "commit", "-q", "-m", m.name & " declares its dependencies")
+  for m in graph:
+    plainGit(m.path, "push", "-q", fileUrl(m.bare), "HEAD:main")
+    plainGit(m.path, "fetch", "-q", "origin")
+
 proc addSibling(fx: PushFixture; name: string; cycle: bool): Sibling =
   ## A second repository lib-a depends on, with the same recipe and policy. With
   ## ``cycle`` it depends on lib-a too. Its own policy, its own bare, no gateway:
@@ -252,10 +295,7 @@ proc addSibling(fx: PushFixture; name: string; cycle: bool): Sibling =
   writeFile(ws / "repos" / (name & ".toml"),
     "schema = \"reprobuild.workspace.repo.v2\"\n\n[repo]\nname = \"" & name &
     "\"\npath = \"" & name & "\"\nremote = \"" & name & "-origin\"\n" &
-    "mainline = \"main\"\n" &
-    (if cycle: "depends = [\"lib-a\"]\n" else: ""))
-  writeFile(ws / "repos" / "lib-a.toml", storeLibAFragment &
-    "depends = [\"" & name & "\"]\n")
+    "mainline = \"main\"\n")
   writeFile(ws / "projects" / "lib-a.toml",
     "schema = \"reprobuild.workspace.project.v1\"\n\n[project]\nname = \"lib-a\"\n\n" &
     "[[remote]]\nname = \"lib-a-origin\"\nfetch = \"" &
@@ -266,6 +306,10 @@ proc addSibling(fx: PushFixture; name: string; cycle: bool): Sibling =
   let hooks = runArgv(@[fx.sf.reproBin, "hooks", "ensure", "--vcs", result.path],
     env = @[(name: "REPROBUILD_REPRO", value: fx.sf.reproBin)])
   doAssert hooks.code == 0, hooks.output
+  fx.declareMemberUses([
+    (name: name, path: result.path, bare: result.bare,
+     uses: if cycle: @["lib-a"] else: newSeq[string]()),
+    (name: "lib-a", path: fx.app, bare: fx.sf.upstreamBare, uses: @[name])])
 
 proc commitIn(fx: PushFixture; sibling: Sibling; body, message: string): string =
   writeFile(sibling.path / "src" / "unit.txt", body)
@@ -761,15 +805,12 @@ proc addGatewayedChain(fx: PushFixture): seq[Sibling] =
         registeredKeysPath: registeredKeyStorePath(fx.sf.workspaceRoot)))
     doAssert wired.ok, wired.diagnostic
     result.add(s)
-  proc fragment(name, depends: string): string =
+  proc fragment(name: string): string =
     "schema = \"reprobuild.workspace.repo.v2\"\n\n[repo]\nname = \"" & name &
       "\"\npath = \"" & name & "\"\nremote = \"" & name & "-origin\"\n" &
-      "mainline = \"main\"\n" &
-      (if depends.len > 0: "depends = [\"" & depends & "\"]\n" else: "")
-  writeFile(ws / "repos" / "lib-b.toml", fragment("lib-b", "lib-c"))
-  writeFile(ws / "repos" / "lib-c.toml", fragment("lib-c", ""))
-  writeFile(ws / "repos" / "lib-a.toml", storeLibAFragment &
-    "depends = [\"lib-b\"]\n")
+      "mainline = \"main\"\n"
+  writeFile(ws / "repos" / "lib-b.toml", fragment("lib-b"))
+  writeFile(ws / "repos" / "lib-c.toml", fragment("lib-c"))
   writeFile(ws / "projects" / "lib-a.toml",
     "schema = \"reprobuild.workspace.project.v1\"\n\n[project]\nname = \"lib-a\"\n\n" &
     "[[remote]]\nname = \"lib-a-origin\"\nfetch = \"" &
@@ -784,6 +825,12 @@ proc addGatewayedChain(fx: PushFixture): seq[Sibling] =
     let hooks = runArgv(@[fx.sf.reproBin, "hooks", "ensure", "--vcs", s.path],
       env = @[(name: "REPROBUILD_REPRO", value: fx.sf.reproBin)])
     doAssert hooks.code == 0, hooks.output
+  fx.declareMemberUses([
+    (name: "lib-c", path: result[1].path, bare: result[1].bare,
+     uses: newSeq[string]()),
+    (name: "lib-b", path: result[0].path, bare: result[0].bare,
+     uses: @["lib-c"]),
+    (name: "lib-a", path: fx.app, bare: fx.sf.upstreamBare, uses: @["lib-b"])])
 
 proc gatewayOf(fx: PushFixture; name: string): string =
   if name == "lib-a": fx.sf.gatewayBare
@@ -948,8 +995,6 @@ proc addMembers(fx: PushFixture;
   ## upstream bare, behind its own gateway when ``gateways``. lib-a depends on
   ## ``libADepends``; a member that depends on lib-a closes a cycle with it.
   let ws = fx.sf.workspaceRoot
-  proc quoted(names: seq[string]): string =
-    names.mapIt("\"" & it & "\"").join(", ")
   var remotes = "[[remote]]\nname = \"lib-a-origin\"\nfetch = \"" &
     fileUrl(fx.sf.upstreamBare) & "\"\n\n"
   var includes = "  \"repos/lib-a.toml\",\n"
@@ -970,15 +1015,11 @@ proc addMembers(fx: PushFixture;
     writeFile(ws / "repos" / (member.name & ".toml"),
       "schema = \"reprobuild.workspace.repo.v2\"\n\n[repo]\nname = \"" &
       member.name & "\"\npath = \"" & member.name & "\"\nremote = \"" &
-      member.name & "-origin\"\nmainline = \"main\"\n" &
-      (if member.depends.len > 0: "depends = [" & quoted(member.depends) & "]\n"
-       else: ""))
+      member.name & "-origin\"\nmainline = \"main\"\n")
     remotes.add("[[remote]]\nname = \"" & member.name & "-origin\"\nfetch = \"" &
       fileUrl(s.bare) & "\"\n\n")
     includes.add("  \"repos/" & member.name & ".toml\",\n")
     result.add(s)
-  writeFile(ws / "repos" / "lib-a.toml", storeLibAFragment &
-    "depends = [" & quoted(libADepends) & "]\n")
   writeFile(ws / "projects" / "lib-a.toml",
     "schema = \"reprobuild.workspace.project.v1\"\n\n[project]\nname = \"lib-a\"\n\n" &
     remotes & "includes = [\n" & includes & "]\n")
@@ -987,6 +1028,21 @@ proc addMembers(fx: PushFixture;
       env = @[(name: "REPROBUILD_REPRO", value: fx.sf.reproBin)])
     doAssert hooks.code == 0, hooks.output
   installHooks(fx.sf)
+  # The members that do not depend on lib-a first, lib-a, then the members
+  # that close a cycle with it: each lock is written after what it pins, and a
+  # cycle's member written last pins its peer's final commit.
+  var graph: seq[tuple[name, path, bare: string; uses: seq[string]]]
+  for i, member in members:
+    if "lib-a" notin member.depends:
+      graph.add((name: member.name, path: result[i].path, bare: result[i].bare,
+        uses: member.depends))
+  graph.add((name: "lib-a", path: fx.app, bare: fx.sf.upstreamBare,
+    uses: libADepends))
+  for i, member in members:
+    if "lib-a" in member.depends:
+      graph.add((name: member.name, path: result[i].path, bare: result[i].bare,
+        uses: member.depends))
+  fx.declareMemberUses(graph)
 
 proc reproIn(fx: PushFixture; dir: string; args: seq[string]):
     tuple[code: int; output: string] =
@@ -1338,6 +1394,29 @@ suite "repro push publishes a certified dependency cycle through every member's 
       check gitOut(libB.bare, "rev-parse", "refs/heads/main") == bBefore
       check upstreamTip(fx.sf) == a0
 
+template withEngineImage(fx: PushFixture; body: untyped) =
+  ## ``evaluateIssuancePreconditions`` runs the pre-push gate in THIS process,
+  ## and the gate derives the pushed repo's dependency set from its repro.nim
+  ## (§13.5, ``committed_lock_dependency_set_*``), which compiles the recipe's
+  ## provider by spawning a ``repro`` image. A test binary is not one, so it
+  ## names the engine the fixture runs, as an embedded caller must
+  ## (``REPRO_PUBLIC_CLI_PATH``).
+  block:
+    let engine = parentDir(fx.sf.reproBin) / addFileExt("reprobuild", ExeExt)
+    let prior = getEnv("REPRO_PUBLIC_CLI_PATH")
+    putEnv("REPRO_PUBLIC_CLI_PATH",
+      if fileExists(engine): engine else: fx.sf.reproBin)
+    try:
+      body
+    finally:
+      if prior.len > 0: putEnv("REPRO_PUBLIC_CLI_PATH", prior)
+      else: delEnv("REPRO_PUBLIC_CLI_PATH")
+
+proc issuanceNow(fx: PushFixture): IssuancePreconditions =
+  ## lib-a's issuance preconditions, evaluated now, with an engine image.
+  withEngineImage(fx):
+    result = evaluateIssuancePreconditions(fx.sf.workspaceRoot, fx.app)
+
 proc publishOnly(fx: PushFixture; sibling: Sibling; file, body: string): string =
   ## Someone else's commit on ``sibling``'s upstream, fast-forwarded into its
   ## checkout: published, and a commit no other repository's upstream has.
@@ -1359,10 +1438,14 @@ suite "issuance accepts a cycle peer only at its own pin":
     guarded:
       let fx = setupPush("issuance-cycle-own-entry", "required", gateway = false)
       defer: removeDir(fx.sf.scratch)
-      # lib-a <-> lib-b is a cycle; lib-c is an ordinary, published dependency
-      # of lib-a, at a commit only lib-c's upstream has.
+      # lib-a <-> lib-b is a cycle; lib-c is a published dependency of lib-a,
+      # at a commit only lib-c's upstream has. lib-c uses lib-a too, so lib-c's
+      # commit carries a lock that pins lib-a: a dependency edge is read from
+      # the checkout's committed lock (§14.9), and lib-b checked out at lib-c's
+      # commit below must still be lib-a's cycle peer for the exemption to be
+      # what is asked.
       let members = fx.addMembers([(name: "lib-b", depends: @["lib-a"]),
-        (name: "lib-c", depends: newSeq[string]())], @["lib-b", "lib-c"],
+        (name: "lib-c", depends: @["lib-a"])], @["lib-b", "lib-c"],
         gateways = false)
       let (libB, libC) = (members[0], members[1])
       let cTip = fx.publishOnly(libC, "notes.txt", "lib-c\n")
@@ -1375,7 +1458,7 @@ suite "issuance accepts a cycle peer only at its own pin":
       doAssert bTip in lock and cTip in lock
 
       # Control: lib-b at the commit lib-a's lock records for lib-b is accepted.
-      let accepted = evaluateIssuancePreconditions(fx.sf.workspaceRoot, fx.app)
+      let accepted = fx.issuanceNow()
       checkpoint("at its own pin: " & $accepted.kind & " " & accepted.offender &
         ": " & accepted.remedy)
       check accepted.kind == ipOk
@@ -1387,7 +1470,7 @@ suite "issuance accepts a cycle peer only at its own pin":
       discard gitOut(libB.path, "checkout", "-q", "-B", "main", cTip)
       check gitOut(libB.path, "status", "--porcelain").len == 0
       check gitOut(libB.path, "rev-parse", "HEAD") == cTip
-      let refused = evaluateIssuancePreconditions(fx.sf.workspaceRoot, fx.app)
+      let refused = fx.issuanceNow()
       checkpoint("at another entry's pin: " & $refused.kind & " " &
         refused.offender & ": " & refused.remedy)
       check refused.kind == ipUnpublished
@@ -1405,8 +1488,11 @@ suite "issuance accepts a cycle peer only at its own pin":
       # lib-a <-> lib-b is a cycle. lib-c is a workspace repository lib-a does
       # not depend on, so its `repro.lock` has no entry for it: only the
       # flake.lock names lib-c's commit, through an input bound to lib-c.
+      # lib-c uses lib-a, so lib-b checked out at lib-c's commit below still
+      # carries a lock pinning lib-a and stays lib-a's cycle peer (edges are
+      # read from the checkout's committed lock, §14.9).
       let members = fx.addMembers([(name: "lib-b", depends: @["lib-a"]),
-        (name: "lib-c", depends: newSeq[string]())], @["lib-b"],
+        (name: "lib-c", depends: @["lib-a"])], @["lib-b"],
         gateways = false)
       let (libB, libC) = (members[0], members[1])
       let cTip = fx.publishOnly(libC, "notes.txt", "lib-c\n")
@@ -1447,7 +1533,7 @@ suite "issuance accepts a cycle peer only at its own pin":
       # exemption accepts it, so what refuses is the stale repro.lock pin, not
       # lib-b's publication.
       check gitOut(libB.path, "rev-parse", "HEAD") == zTip
-      let accepted = evaluateIssuancePreconditions(fx.sf.workspaceRoot, fx.app)
+      let accepted = fx.issuanceNow()
       checkpoint("at its own flake pin: " & $accepted.kind & " " &
         accepted.offender & ": " & accepted.remedy)
       check accepted.kind != ipUnpublished
@@ -1458,7 +1544,7 @@ suite "issuance accepts a cycle peer only at its own pin":
       discard gitOut(libB.path, "fetch", "-q", libC.bare, "main")
       discard gitOut(libB.path, "checkout", "-q", "-B", "main", cTip)
       check gitOut(libB.path, "status", "--porcelain").len == 0
-      let refused = evaluateIssuancePreconditions(fx.sf.workspaceRoot, fx.app)
+      let refused = fx.issuanceNow()
       checkpoint("at another input's pin: " & $refused.kind & " " &
         refused.offender & ": " & refused.remedy)
       check refused.kind == ipUnpublished
@@ -1502,15 +1588,19 @@ cp "$input" "$output"
 """
 
 proc subRecipe(record: string): string =
-  ## lib-b's recipe: lib-a's, with two more tests in ``t-unit`` that read a
-  ## file of submodule ``sub`` and of its nested submodule ``sub/nested``.
+  ## lib-b's recipe: ``memberRecipe("lib-b", @["lib-a"])``'s shape, with two
+  ## more tests in ``t-unit`` that read a file of submodule ``sub`` and of its
+  ## nested submodule ``sub/nested``. It keeps ``uses: "lib-a"``: the recipe is
+  ## where lib-b's dependency on lib-a is declared, so its lock keeps pinning
+  ## lib-a (Unified-Locking-And-Hooks.md §14.9).
   "import repro_project_dsl\n" &
     "import \"policy/team_policy\"\n\n" &
-    "package lib_a:\n" &
+    "package " & memberModule("lib-b") & ":\n" &
     "  usesImportPath \"reprobuild/packages\"\n" &
     "  enactCertificatePolicy teamPolicy\n" &
     "  uses:\n" &
     "    \"cert-tool >=1.0 <2.0\"\n" &
+    "    \"lib-a\"\n" &
     "    \"sub-tool >=1.0 <2.0\"\n\n" &
     "  build:\n" &
     "    let unit = certTool(actionId = \"unit\",\n" &

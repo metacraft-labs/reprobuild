@@ -20,8 +20,11 @@
 ## (app → lib-b → lib-c, lib-d unrelated) of real git repositories cloned from
 ## real bare origins, refreshed and published with the built `repro`. The
 ## committed lock is given the recorder's shape: a platform other than the
-## host's, and a sibling pin (lib-d) the CURRENT manifest's develop set no
-## longer names, as a stale workspace manifest leaves it.
+## host's, and a sibling pin (lib-d) the CURRENT recipe no longer derives:
+## app's `repro.nim` stopped using lib-d after the lock was written. (This
+## used to be staged through a stale manifest's `depends`; dependencies come
+## only from repro.nim now, owner decision 2026-11-05, so the recipe is what
+## drifts.)
 ##
 ## Cases:
 ##   * the regression: the refresh exits 0, keeps `platform`, `packages`,
@@ -115,12 +118,12 @@ type Started = object
 
 proc startWithLock(label: string; platform: string): Started =
   ## A published lock pinning lib-b, lib-c and lib-d, with `platform` set to
-  ## ``platform``; then the manifest stops naming lib-d (a stale manifest's
-  ## develop set), so only the committed lock still records it.
+  ## ``platform``; then app's recipe stops using lib-d (committed, no
+  ## refresh), so only the committed lock still records it.
   var fx = setupSiblingFixture(label)
   result.libBSeed = fx.headOf(fx.ws / "lib-b")
   discard fx.advance("lib-b")
-  fx.setAppDepends(@["lib-b", "lib-d"])
+  fx.setAppUses(@["lib-b", "lib-d"])
   fx.refreshAndPublishLock()
   var body = readFile(fx.app / "repro.lock")
   doAssert platformOf(body) == HostPlatform,
@@ -133,7 +136,7 @@ proc startWithLock(label: string; platform: string): Started =
     discard fx.git(fx.app, "add repro.lock")
     discard fx.git(fx.app, "commit -q -m retarget-lock")
     discard fx.git(fx.app, "push -q origin main")
-  fx.setAppDepends(@["lib-b"])
+  fx.setAppUses(@["lib-b"])
   result.committed = fx.git(fx.app, "show HEAD:repro.lock")
   doAssert platformOf(result.committed) == platform
   doAssert depNames(result.committed) == @["lib-b", "lib-c", "lib-d"],
@@ -174,7 +177,7 @@ suite "repro lock refresh keeps a lock solved for another platform":
     # The solve and the platform: every line but `deps`, byte for byte.
     check platformOf(after) == ForeignPlatform
     check nonDepsLines(after) == nonDepsLines(s.committed)
-    # The dep set, including the pin the current manifest no longer names.
+    # The dep set, including the pin the current recipe no longer derives.
     check depNames(after) == depNames(s.committed)
     # Only the stale revisions moved.
     check pinOf(after, "lib-b") == libB
@@ -208,7 +211,7 @@ suite "repro lock refresh keeps a lock solved for another platform":
   test "t_a_lock_solved_for_this_host_is_still_re_solved":
     # Falsifier: only a FOREIGN platform is intercepted. On the lock's own
     # platform the refresh is the ordinary re-solve, which drops the pin the
-    # current manifest no longer names (and says so).
+    # current recipe no longer derives (and says so).
     var s = startWithLock("host-refresh", HostPlatform)
     let r = s.fx.refresh()
     checkpoint(r.output)

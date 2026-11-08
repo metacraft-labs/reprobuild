@@ -5,18 +5,27 @@
 ## `.repro/workspace.toml` — with four real git repositories, each cloned from
 ## its own bare origin and published:
 ##
-##   app    carries `repro.solver` (the lock's solver inputs; no recipe needed)
-##          and depends on lib-b
-##   lib-b  depends on lib-c
-##   lib-c
-##   lib-d  in the workspace, in nobody's develop set until a case adds it
+##   app    repro.nim `uses: "lib-b"`
+##   lib-b  repro.nim `uses: "lib-c"` (a library)
+##   lib-c  repro.nim (a library)
+##   lib-d  repro.nim (a library), in nobody's dependency set until a case
+##          adds it to app's `uses:` (``setAppUses``)
+##
+## The dependencies are declared in the recipes because that is the only place
+## reprobuild reads them (owner decision 2026-11-05,
+## Unified-Locking-And-Hooks.md §14.9): `repro lock refresh` derives app's
+## lock from app's recipe, transitively through lib-b's. The fragments declare
+## membership and placement only. This fixture used to put the edges in
+## fragment `depends` and give app a `repro.solver` sidecar instead.
 ##
 ## Nothing is mocked: the manifest is read by the production resolver, the
-## repositories are real, and `repro` is the built `./build/bin/repro`.
+## repositories are real, the recipes are compiled by the real provider path,
+## and `repro` is the built `./build/bin/repro`.
 
 import std/[os, osproc, strutils, tempfiles, unittest]
 
 import repro_test_support
+import repro_test_support/recipe_dependencies
 import repro_workspace_manifests
 
 proc q*(value: string): string = quoteShell(value)
@@ -37,19 +46,11 @@ proc reproBinary*(): string =
   requireBinary(currentSourcePath().parentDir.parentDir.parentDir / "build" /
     "bin" / addFileExt("repro", ExeExt), "reprobuild.apps.repro")
 
-const solverInputs = """
-package app
-versions: 0.1.0
-depends: nim >=2.2.0 <3.0.0
-
-package nim
-versions: 2.2.0
-"""
-
 type SiblingFixture* = object
   gitBin*, repro*, scratch*, ws*, app*: string
   origins*: seq[(string, string)]
-  appDepends*: seq[string]
+  appUses*: seq[string]
+    ## The workspace siblings app's recipe currently `uses:`.
 
 proc git*(fx: SiblingFixture; repo, args: string): string =
   requireCmd(q(fx.gitBin) & " -C " & q(repo) & " " & args)
@@ -57,20 +58,25 @@ proc git*(fx: SiblingFixture; repo, args: string): string =
 proc headOf*(fx: SiblingFixture; repo: string): string =
   fx.git(repo, "rev-parse HEAD").strip()
 
-proc fragment(name: string; depends: seq[string]): string =
-  result = "schema = \"reprobuild.workspace.repo.v2\"\n\n[repo]\n" &
+proc fragment(name: string): string =
+  "schema = \"reprobuild.workspace.repo.v2\"\n\n[repo]\n" &
     "name = \"" & name & "\"\npath = \"" & name & "\"\n" &
     "remote = \"" & name & "-origin\"\nmainline = \"main\"\n"
-  if depends.len > 0:
-    result.add("depends = [")
-    for i, d in depends:
-      if i > 0: result.add(", ")
-      result.add("\"" & d & "\"")
-    result.add("]\n")
 
-proc setAppDepends*(fx: var SiblingFixture; depends: seq[string]) =
-  fx.appDepends = depends
-  writeFile(fx.ws / "repos" / "app.toml", fragment("app", depends))
+const fixtureUses = [("app", @["lib-b"]), ("lib-b", @["lib-c"]),
+  ("lib-c", newSeq[string]()), ("lib-d", newSeq[string]())]
+  ## Each repo's recipe `uses:` at setup.
+
+proc setAppUses*(fx: var SiblingFixture; uses: seq[string]) =
+  ## Change the siblings app's recipe `uses:`, then commit and publish the
+  ## recipe (not the lock): the state after a dependency edit pushed without
+  ## running `repro lock refresh`. Published so that the pre-push gate's only
+  ## question about app's own HEAD is the lock, not its publication.
+  fx.appUses = uses
+  writeDependencyRecipe(fx.app, uses, library = false)
+  discard fx.git(fx.app, "add repro.nim .gitignore")
+  discard fx.git(fx.app, "commit -q -m uses")
+  discard fx.git(fx.app, "push -q origin main")
 
 proc setupSiblingFixture*(label: string): SiblingFixture =
   result.gitBin = findExe("git")
@@ -88,9 +94,9 @@ proc setupSiblingFixture*(label: string): SiblingFixture =
     discard result.git(work, "config user.name \"Lock Tester\"")
     discard result.git(work, "config commit.gpgsign false")
     writeFile(work / "README.md", name & " fixture\n")
-    if name == "app":
-      writeFile(work / "repro.solver", solverInputs)
-      writeFile(work / ".gitignore", ".repro/\n")
+    for (repo, uses) in fixtureUses:
+      if repo == name:
+        writeDependencyRecipe(work, uses, library = name != "app")
     discard result.git(work, "add -A")
     discard result.git(work, "commit -q -m seed")
     discard result.git(work, "push -q origin main")
@@ -108,11 +114,20 @@ proc setupSiblingFixture*(label: string): SiblingFixture =
     "  \"repos/lib-b.toml\",\n  \"repos/lib-c.toml\",\n" &
     "  \"repos/lib-d.toml\",\n]\n")
   writeFile(result.ws / "projects" / "app.toml", project)
-  result.setAppDepends(@["lib-b"])
-  writeFile(result.ws / "repos" / "lib-b.toml", fragment("lib-b", @["lib-c"]))
-  writeFile(result.ws / "repos" / "lib-c.toml", fragment("lib-c", @[]))
-  writeFile(result.ws / "repos" / "lib-d.toml", fragment("lib-d", @[]))
+  result.appUses = @["lib-b"]
+  for name in ["app", "lib-b", "lib-c", "lib-d"]:
+    writeFile(result.ws / "repos" / (name & ".toml"), fragment(name))
   writeWorkspaceBranch(result.ws, project = "app", branch = "main")
+  # lib-b depends on lib-c, so lib-b carries the lock that records it (a repo
+  # whose recipe derives a dependency the lock does not pin is refused at its
+  # own push). app's lock is written by the case (``refreshAndPublishLock``).
+  let libB = result.ws / "lib-b"
+  let refreshed = refreshCommittedLock(result.repro, libB)
+  doAssert refreshed.code == 0, "lib-b lock refresh failed:\n" &
+    refreshed.output
+  discard result.git(libB, "add repro.lock")
+  discard result.git(libB, "commit -q -m lock")
+  discard result.git(libB, "push -q origin main")
 
 proc refreshAndPublishLock*(fx: SiblingFixture) =
   ## `repro lock refresh` (the explicit door), then commit + push the lock.

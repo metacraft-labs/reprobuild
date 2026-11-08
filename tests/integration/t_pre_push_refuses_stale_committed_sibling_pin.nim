@@ -19,8 +19,16 @@
 ##      property `committed_lock_sibling_pin_stale`, evidence naming lib-b and
 ##      both commits, remediation naming `repro lock refresh`.
 ##   3. After `repro lock refresh` is committed and pushed → passes again.
-##   4. The manifest gains app → lib-d, the lock does not carry it → refused
-##      naming lib-d as unpinned.
+##   4. app's recipe gains `uses: "lib-d"`, committed without a refresh, so
+##      the lock does not carry it → refused, property
+##      `committed_lock_dependency_set_stale`, naming lib-d as missing. This
+##      case used to add the edge to app's MANIFEST fragment and expect the
+##      pin-stale property; a fragment declares no dependency now (owner
+##      decision 2026-11-05), and the set check is the stage that owns "the
+##      lock lacks a dependency". Case 5 is the regression for that removal.
+##   5. The manifest fragment of app declares `depends = ["lib-d"]` (and
+##      nothing in a recipe does) → the gate passes: no stage refuses over a
+##      manifest edge, and the fragment's key draws the "ignored" notice.
 ##
 ## Falsifiability (observed): before the stage existed, case 2 exits 0.
 ##
@@ -43,13 +51,16 @@ proc gate(fx: SiblingFixture): tuple[code: int; output: string; report: JsonNode
     if fileExists(reportPath): parseFile(reportPath) else: newJObject()
   (code: r.code, output: r.output, report: report)
 
-proc staleFailure(report: JsonNode): JsonNode =
+proc failureNamed(report: JsonNode; property: string): JsonNode =
   let failures = report{"failures"}
   if failures == nil or failures.kind != JArray: return nil
   for f in failures:
-    if f{"property"}.getStr() == "committed_lock_sibling_pin_stale":
+    if f{"property"}.getStr() == property:
       return f
   nil
+
+proc staleFailure(report: JsonNode): JsonNode =
+  failureNamed(report, "committed_lock_sibling_pin_stale")
 
 suite "pre-push refuses stale committed sibling pins":
 
@@ -87,12 +98,28 @@ suite "pre-push refuses stale committed sibling pins":
       checkpoint(g3.output)
       check g3.code == 0
 
-      # 4. a declared sibling the lock does not carry.
-      fx.setAppDepends(@["lib-b", "lib-d"])
+      # 4. a dependency the recipe declares that the lock does not carry.
+      fx.setAppUses(@["lib-b", "lib-d"])
       let g4 = fx.gate()
       checkpoint(g4.output)
       check g4.code == 2
-      let f4 = staleFailure(g4.report)
+      let f4 = failureNamed(g4.report, "committed_lock_dependency_set_stale")
       check not f4.isNil
       if not f4.isNil:
-        check "lib-d" in f4{"evidence"}.getStr()
+        check "missing=lib-d " in f4{"evidence"}.getStr()
+        check "repro lock refresh" in f4{"remediation"}.getStr()
+      # The pins it does carry are current, so that stage stays quiet.
+      check staleFailure(g4.report).isNil
+
+      # 5. a MANIFEST edge to a sibling the lock does not carry refuses
+      #    nothing (the removed "declared in the develop set but not pinned").
+      fx.setAppUses(@["lib-b"])
+      writeFile(fx.ws / "repos" / "app.toml",
+        readFile(fx.ws / "repos" / "app.toml") & "depends = [\"lib-d\"]\n")
+      let g5 = fx.gate()
+      checkpoint(g5.output)
+      check g5.code == 0
+      check staleFailure(g5.report).isNil
+      check failureNamed(g5.report,
+        "committed_lock_dependency_set_stale").isNil
+      check "which is ignored" in $g5.report{"notices"}

@@ -10745,10 +10745,17 @@ proc selectorFilesystemKey(selector: string): string =
 
 proc producerSourceRoot(binding: ProducerBinding; selector,
                         workspaceRoot: string;
-                        fetchMissingPinnedSource: bool): string =
+                        fetchMissingPinnedSource: bool;
+                        verifyPlacedSibling = true): string =
   ## Resolve the source root used by both producer builds and graph
   ## inspection. Inspection normally finds an existing workspace sibling;
   ## lock-only consumers may fetch the pinned source when requested.
+  ##
+  ## ``verifyPlacedSibling = false`` defers the pin-agreement check of a
+  ## placed (already checked-out) sibling to the caller, which then makes it
+  ## only once it has decided to ADMIT the producer's source into the build
+  ## (``verifyLockPinnedProducerSource``). A fetched source is always
+  ## verified here: the fetch exists only to supply the pinned revision.
   case binding.kind
   of pbkDevelopOverride:
     result = binding.localPathAbsolute
@@ -10756,7 +10763,8 @@ proc producerSourceRoot(binding: ProducerBinding; selector,
     let sibling = findSiblingProjectFile(selector, workspaceRoot)
     if sibling.len > 0:
       result = parentDir(sibling)
-      verifyLockPinnedProducerSource(binding.lockedDep, result, workspaceRoot)
+      if verifyPlacedSibling:
+        verifyLockPinnedProducerSource(binding.lockedDep, result, workspaceRoot)
     elif fetchMissingPinnedSource:
       result = fetchLockPinnedProducer(binding.lockedDep, workspaceRoot)
   of pbkOnDiskSibling, pbkNotProducer:
@@ -13435,8 +13443,13 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
       # sibling on disk) builds the producer from its own repo source at the
       # pinned revision — identical to develop mode from the consuming action's
       # perspective.
+      # A placed sibling's agreement with the consumer's pin is checked below,
+      # once the producer is ADMITTED (the SC-6 check after the admission
+      # gate), not here: a ``uses:`` sibling whose source this build never
+      # builds or splices supplies no revision to it.
       let producerRoot = producerSourceRoot(producer, selector,
-        result.projectRoot, fetchMissingPinnedSource = true)
+        result.projectRoot, fetchMissingPinnedSource = true,
+        verifyPlacedSibling = false)
       if producerRoot.len == 0 or
           not dirExists(extendedPath(producerRoot)):
         continue
@@ -13622,6 +13635,21 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
             "action closure, and exports a compiled artifact rather than a " &
             "Nim source root — not building or splicing it for this target.")
           continue
+        # ADMITTED: from here on the producer's source reaches this build (a
+        # sub-build of its compiled artifact, or its Nim source root on the
+        # consumer's `--path`). A lock-pinned producer must then be exactly the
+        # revision the consumer's lock pins (Cross-Repo-Source-Consumption
+        # SC-6), whether its source was fetched or found checked out beside
+        # the consumer. The check is made HERE rather than when the source
+        # root is resolved: a `uses:` sibling the build does not consume — a
+        # repo named only so the lock records it as a dependency
+        # (Unified-Locking-And-Hooks.md §14.9) — supplies no revision, and a
+        # checkout that has moved past the pin is then the lock-update node's
+        # and the pre-push gate's to report (§13.3, §13.5), not a reason the
+        # build cannot start.
+        if producer.kind == pbkLockPinned:
+          verifyLockPinnedProducerSource(producer.lockedDep, producerRootAbs,
+            result.projectRoot)
         if needsProducerBuild:
           let producerOutcome = executeBuildTarget(producerProjectFile,
             effectiveMode, publicCliPath,
@@ -28255,6 +28283,10 @@ proc typedContractResourceAttrs*(contract: ProducerTypedContract;
         result.add(attr.name)
       return
 
+proc committedLockPathBase(projectRoot: string): string
+  ## Forward declaration; defined beside the locked-dependency placement
+  ## helpers.
+
 proc discoverProducerSourceRoot*(selector: string;
                                  workspaceRoot: string): string =
   ## SC-8 workspace-name-keyed producer SOURCE discovery. Locate the producer's
@@ -28292,6 +28324,18 @@ proc discoverProducerSourceRoot*(selector: string;
   let sibling = findSiblingProjectFile(selector, workspaceRoot)
   if sibling.len > 0:
     return parentDir(sibling)
+  # 3. the same probe from the repository's MAIN worktree. A linked worktree
+  #    kept outside the workspace (``git worktree add ../elsewhere``) has no
+  #    siblings around it, but it is a checkout of the same repository, and
+  #    its dependencies are where they are for the main checkout — the frame
+  #    a committed lock is placed in (``committedLockPathBase``). Without it a
+  #    refresh there could not read a single sibling recipe, and refused
+  #    (exit 5) where the same refresh in the main checkout succeeds.
+  let mainBase = committedLockPathBase(workspaceRoot)
+  if cmpPaths(mainBase, os.normalizedPath(absolutePath(workspaceRoot))) != 0:
+    let fromMain = findSiblingProjectFile(selector, mainBase)
+    if fromMain.len > 0:
+      return parentDir(fromMain)
   ""
 
 proc resolveProducerTypedContract*(selector: string;
@@ -29222,10 +29266,10 @@ proc repositoryNameFromUrl(url: string): string =
     value.setLen(value.len - 4)
   value
 
-proc manifestDevelopSiblings(repoRoot: string): tuple[resolved: bool;
-    workspaceRoot: string; siblings: seq[ResolvedRepo]]
-  ## Forward declaration; defined beside ``developSetClosure``, whose closure it
-  ## computes.
+proc manifestMembershipOf(repoRoot: string;
+    workspaceRootHint = ""): tuple[resolved: bool;
+    workspaceRoot: string; repos: seq[ResolvedRepo]; selfName: string]
+  ## Forward declaration; defined beside ``developSetClosure``.
 
 proc lockedDepFromCheckout(name, depAbs, pathBase: string): LockedDep =
   ## A locked VCS dependency observed from the checkout at ``depAbs``: its
@@ -29681,10 +29725,15 @@ proc parseLockedDepsAt*(content, lockDir: string): LockedDependencies =
   result = parseLockedDependencies(content)
   localizeLockedDeps(result.deps, lockDir)
 
+type UsesEdge* = tuple[owner, selector: string]
+  ## One ``uses:`` declaration: the directory of the recipe that makes it
+  ## (absolute) and the selector it names.
+
 proc lockedDepsForWorkspace*(workspaceRoot: string;
                             usesSelectors: seq[string] = @[];
                             sourceRecipeRoots: seq[string] = @[];
-                            catalogRoots: seq[string] = @[]):
+                            catalogRoots: seq[string] = @[];
+                            usesEdges: seq[UsesEdge] = @[]):
                             seq[LockedDep] =
   ## MO-8 — observe the workspace's participating repos and produce a
   ## ``LockedDep`` per dependency, each with checkout COORDINATES (vcs
@@ -29712,6 +29761,16 @@ proc lockedDepsForWorkspace*(workspaceRoot: string;
   ## lock resolved by the solver carried the sibling in ``packages`` but the
   ## unified ``deps`` set omitted it, so a lock-only build could not resolve the
   ## producer graph.
+  ##
+  ## ``usesEdges`` (which recipe named which selector, ``foldProviderSolverInputs``)
+  ## makes the lock record the GRAPH, not only the set: the root entry's
+  ## ``depends`` names the root's DIRECT dependencies, and each sibling entry's
+  ## ``depends`` names the siblings its own recipe ``uses:``. The entries are
+  ## still the whole transitive set, so "what does this repo depend on" is the
+  ## entries and "what does it depend on directly" is the root's ``depends``
+  ## (``repro develop --direct``; Unified-Locking-And-Hooks.md §14.2). With no
+  ## edges to go on (a ``repro.solver`` sidecar, which names no producer), the
+  ## root ``depends`` names every sibling, as it always did.
   result = @[]
   let root = absolutePath(workspaceRoot)
   # Every ``path`` below — observed here, or derived for an entry of the
@@ -29776,13 +29835,18 @@ proc lockedDepsForWorkspace*(workspaceRoot: string;
       depends: @[], tags: @[]))
     observedCheckouts.add(observedKey(rel))
     seenNames.add(d.name)
+  # Which entry each ``uses:`` selector resolved to, for the edges below.
+  var selectorEntry = initTable[string, string]()
   for selector in usesSelectors:
-    if selector in seenNames: continue
+    if selector in seenNames:
+      selectorEntry[selector] = selector
+      continue
     let depOpt = usesProducerLockedDep(selector, root, pathBase, existingDeps)
     if depOpt.isNone: continue
     let dep = depOpt.get()
     let key = observedKey(dep.path)
     if isRootCheckout(key): continue
+    selectorEntry[selector] = dep.name
     if dep.name in seenNames or key in observedCheckouts: continue
     siblingDeps.add(dep)
     seenNames.add(dep.name)
@@ -29846,79 +29910,67 @@ proc lockedDepsForWorkspace*(workspaceRoot: string;
     siblingDeps.add(dep)
     seenNames.add(dep.name)
     if isGitCheckoutDir(key): observedCheckouts.add(key)
-  # The develop set declared by the workspace manifest: the transitive closure
-  # of this repo's ``depends`` edges — the same closure the pre-push gate holds
-  # clean and published (Unified-Locking-And-Hooks.md §14). A sibling can reach
-  # the build outside the solved graph (a cargo ``path`` dependency, a script
-  # reading ``../<sibling>``), so neither ``uses:`` nor the develop overrides
-  # would ever name it; the manifest edge is the declaration that does.
+  # Nothing else is a dependency. The sets above are what this repo's
+  # ``repro.nim`` derives — its ``uses:`` producers walked transitively through
+  # every sibling recipe they reach, the develop overrides and nested deps that
+  # say WHERE such a source is, and the catalogs the solve read — and the
+  # owner decided they are the WHOLE develop set (2026-11-05,
+  # Unified-Locking-And-Hooks.md §14.9: "the lock file includes only the
+  # transitive set of dependencies derived from repro.nim files").
   #
-  # Each sibling is OBSERVED from its checkout. One that is declared but not
-  # checked out keeps the pin the committed lock already carries; with no such
-  # pin there is nothing true to record, and the omission is said out loud
-  # rather than written as a lock that looks complete.
-  let manifest = manifestDevelopSiblings(root)
-  if manifest.resolved:
-    for sib in manifest.siblings:
-      let depAbs = absolutePath(manifest.workspaceRoot / sib.path)
-      if isRootCheckout(depAbs): continue
-      let rel = relativePath(depAbs, pathBase).replace('\\', '/')
-      if sib.name in seenNames or observedKey(rel) in observedCheckouts:
-        continue
-      if isGitCheckoutDir(depAbs):
-        siblingDeps.add(lockedDepFromCheckout(sib.name, depAbs, pathBase))
-        observedCheckouts.add(observedKey(rel))
-      else:
-        # Carried forward BY NAME: the existing lock's entry for this
-        # sibling is its identity, whatever location an older lock recorded.
-        var carried = false
-        for d in existingDeps:
-          if not isSelfLockedDep(d) and d.coordinates.kind == ckVcs and
-              d.name == sib.name:
-            var kept = d
-            kept.path = rel
-            siblingDeps.add(kept)
-            carried = true
-            break
-        if not carried:
-          stderr.writeLine("repro lock refresh: develop-set sibling '" &
-            sib.name & "' (declared by the workspace manifest at " &
-            manifest.workspaceRoot & ") is not checked out at " & depAbs &
-            " and the committed lock carries no pin for it, so this lock " &
-            "records NO revision for it; check it out (`repro sync`) and " &
-            "refresh again")
-          continue
-      seenNames.add(sib.name)
-  else:
-    # No workspace membership to consult — a standalone clone, a CI checkout.
-    # The committed lock's sibling pins are the only record of the develop set
-    # here, so they are carried forward: re-observed where the checkout is
-    # present, kept verbatim where it is not. Dropping them because the
-    # siblings are not visible would silently turn a complete lock into a
-    # self-only one.
-    #
-    # "Where the checkout is present" is decided at the location THIS machine
-    # has for the name (``localizeLockedDeps`` placed ``d.path``), never at a
-    # location the old lock recorded: a recorded path that had gone stale
-    # made a present sibling look absent, so its pin was carried verbatim
-    # instead of being re-observed.
-    for d in existingDeps:
-      if isSelfLockedDep(d) or d.coordinates.kind != ckVcs: continue
-      if d.name in seenNames: continue
-      let depAbs = absolutePath(pathBase / d.path)
-      let key = observedKey(d.path)
-      if isRootCheckout(key): continue
-      if key in observedCheckouts: continue
-      if isGitCheckoutDir(depAbs):
-        var observed = lockedDepFromCheckout(d.name, depAbs, pathBase)
-        observed.path = d.path
-        siblingDeps.add(observed)
-        observedCheckouts.add(key)
-      else:
-        siblingDeps.add(d)
-      seenNames.add(d.name)
+  # That holds inside a workspace and outside one alike. A workspace manifest
+  # edge used to be folded in here, and outside a workspace (a standalone
+  # clone, a CI checkout) every pin of the committed lock used to be carried
+  # forward whether or not a recipe still asked for it. Neither survives: a
+  # pin no recipe derives is dropped (and the refresh's removal report names
+  # it). Nothing is lost silently by that: a ``uses:`` sibling that is not
+  # checked out keeps its committed pin (``usesProducerLockedDep`` carries it
+  # by name), and its recipe's own dependencies, which this run could not
+  # read, make the refresh refuse rather than write a smaller set
+  # (``unreachedDevelopSiblings``, exit 5).
+  # The graph. An edge is a ``uses:`` its recipe declares: the owner recipe's
+  # directory is matched to the entry whose checkout holds it, the selector to
+  # the entry it resolved to. A sibling no edge reaches — a develop override,
+  # a nested dep, a catalog the solve read — is the root's own dependency, so
+  # every entry stays reachable from the root through ``depends``.
   var rootDepends: seq[string] = @[]
-  for d in siblingDeps: rootDepends.add(d.name)
+  if usesEdges.len == 0:
+    for d in siblingDeps: rootDepends.add(d.name)
+  else:
+    proc canonical(path: string): string =
+      let abs = os.normalizedPath(absolutePath(path))
+      try: os.normalizedPath(expandFilename(abs)) except CatchableError: abs
+    let rootDir = canonical(root)
+    var entryDirs: seq[tuple[name, dir: string]]
+    for d in siblingDeps:
+      entryDirs.add((d.name, canonical(absolutePath(pathBase / d.path))))
+    proc ownerEntry(owner: string): string =
+      ## "" for the root, the entry name for a sibling, "?" for neither.
+      let dir = canonical(owner)
+      if dir == rootDir: return ""
+      for e in entryDirs:
+        if dir == e.dir or dir.startsWith(e.dir & DirSep): return e.name
+      "?"
+    var siblingEdges = initTable[string, seq[string]]()
+    var reached = initHashSet[string]()
+    for edge in usesEdges:
+      let target = selectorEntry.getOrDefault(edge.selector, "")
+      if target.len == 0: continue
+      let owner = ownerEntry(edge.owner)
+      if owner == "?" or owner == target: continue
+      if owner.len == 0:
+        if target notin rootDepends: rootDepends.add(target)
+      else:
+        reached.incl(target)
+        var targets = siblingEdges.getOrDefault(owner, @[])
+        if target notin targets: targets.add(target)
+        siblingEdges[owner] = targets
+    for d in siblingDeps.mitems:
+      # Derived, never carried: a pin carried forward for an absent checkout
+      # keeps its revision, not the edges an older lock gave it.
+      d.depends = siblingEdges.getOrDefault(d.name, @[])
+      if d.name notin rootDepends and d.name notin reached:
+        rootDepends.add(d.name)
   result.add(LockedDep(
     name: rootName, path: SelfLockedDepPath,
     coordinates: Coordinates(kind: ckVcs, url: rootFacts.originUrl,
@@ -32559,7 +32611,9 @@ proc runCertificatesCommand*(args: openArray[string];
     return 2
   var asJson = false
   var noCertify = false
-  var bypassRunQuota = false
+  # ``REPROBUILD_NO_RUNQUOTA`` is the documented full bypass, honoured as the
+  # default exactly as the build's own parser does (``runBuildCommand``).
+  var bypassRunQuota = runQuotaBypassedByEnv()
   var mode = tpmPathOnly
   var selectors: seq[string] = @[]
   for i in 1 ..< args.len:
@@ -44490,7 +44544,91 @@ proc noNameableProjectError(workspaceRoot, opLabel: string;
       "--workspace-root " & workspaceRoot & "` is what establishes the " &
       "`.repro/` shell that makes it one.")
 
-proc resolveWorkspaceProjectShared*(workspaceRoot, projectName, opLabel: string):
+proc committedLockDirectDependencyNames(checkout: string): seq[string] =
+  ## The ``depends`` of the root entry of the committed ``repro.lock`` at
+  ## ``checkout``: the repos its recipe names directly (lock generation writes
+  ## them so, ``lockedDepsForWorkspace``). A lock written before it recorded
+  ## the graph names every sibling there. Empty when there is no readable
+  ## lock. Parsed without placing, like ``committedLockDependencyNames``.
+  let lockPath = checkout / CommittedLockFileName
+  if checkout.len == 0 or not fileExists(extendedPath(lockPath)): return
+  try:
+    for d in parseLockedDependencies(readFile(extendedPath(lockPath))).deps:
+      if not isSelfLockedDep(d): continue
+      for name in d.depends:
+        if name.len > 0 and name notin result: result.add(name)
+  except CatchableError:
+    result = @[]
+
+proc committedLockDependencyNames*(checkout: string):
+    tuple[present, readable: bool; names: seq[string]] =
+  ## The repositories the committed ``repro.lock`` at ``checkout`` pins: the
+  ## names of its non-root VCS entries, each once, in lock order.
+  ##
+  ## This is where every closure question reads a repo's dependency EDGES
+  ## (Unified-Locking-And-Hooks.md §14.2 / §14.9, owner decision 2026-11-05:
+  ## "the list of dependencies should be tracked only in the repro.nim file of
+  ## the particular repo"). The lock is not a second declaration: it is what
+  ## lock generation derives from ``repro.nim`` (``recipeDependencySet``), and
+  ## the pre-push gate refuses to publish a lock that has drifted from that
+  ## derivation (``verifyCommittedLockDependencySet``). Reading the lock rather
+  ## than re-deriving keeps a workspace-wide question (``repro push`` ordering,
+  ## a sibling's closure in the mutual-pin rule) at one file read per repo
+  ## instead of one provider compile per repo.
+  ##
+  ## Parsed WITHOUT placing the entries (``parseLockedDependencies``, not
+  ## ``parseLockedDepsAt``): placing a name resolves the workspace membership,
+  ## and the membership resolution is what calls this. ``present`` is false
+  ## when there is no lock; ``readable`` is false when one exists and does not
+  ## parse (its names are then unknown, and are reported as none).
+  result = (false, false, @[])
+  let lockPath = checkout / CommittedLockFileName
+  if checkout.len == 0 or not fileExists(extendedPath(lockPath)): return
+  result.present = true
+  try:
+    for d in parseLockedDependencies(readFile(extendedPath(lockPath))).deps:
+      if isSelfLockedDep(d) or d.coordinates.kind != ckVcs or d.name.len == 0:
+        continue
+      if d.name notin result.names: result.names.add(d.name)
+    result.readable = true
+  except CatchableError:
+    result.names = @[]
+
+proc withRecipeDerivedEdges(workspaceRoot: string;
+    resolved: ResolvedProject): ResolvedProject =
+  ## ``resolved`` with every repo's ``depends`` read from its own committed
+  ## ``repro.lock`` (``committedLockDependencyNames``) — the repro.nim-derived
+  ## edges — and nothing else. The manifest resolver never fills ``depends``
+  ## (a fragment's ``depends`` key is deprecated and ignored), so after this
+  ## the resolved graph cannot carry an edge a manifest declared: project
+  ## membership decides which repos a workspace checks out, never what one
+  ## depends on.
+  ##
+  ## A repo whose checkout is absent or carries no lock has no edges of its
+  ## own; it can still be IN a closure, through the lock of a repo that pins
+  ## it. A lock is transitive (lock generation walks every sibling recipe the
+  ## root recipe reaches), so a sibling whose own lock is missing or stale
+  ## does not shrink the pushed repo's closure.
+  ##
+  ## Edges the ladder already resolved are KEPT, and the checkout's own lock
+  ## edges are added to them: the manifest resolver produces none, so any that
+  ## are present were read from a lock too — a committed-lock-only workspace
+  ## (MO-2) resolves its whole repo set, edges included, from the workspace
+  ## root's ``repro.lock`` (``committedLockDerivedProject``).
+  result = resolved
+  for r in result.repos.mitems:
+    let checkout =
+      if r.path.len == 0: ""
+      elif isAbsolute(r.path): r.path
+      else: workspaceRoot / r.path
+    for name in committedLockDependencyNames(checkout).names:
+      if name != r.name and name notin r.depends: r.depends.add(name)
+    for name in committedLockDirectDependencyNames(checkout):
+      if name != r.name and name in r.depends and name notin r.directDepends:
+        r.directDepends.add(name)
+
+proc resolveWorkspaceMembershipLadder(workspaceRoot, projectName,
+    opLabel: string):
     tuple[resolved: ResolvedProject; workspaceLocal: Option[WorkspaceLocal]] =
   ## MO-9 — the ONE membership-resolution ladder shared by ``sync`` / ``pull``
   ## / ``check`` / the pre-push gate. It collapses the previously hand-
@@ -44572,6 +44710,16 @@ proc resolveWorkspaceProjectShared*(workspaceRoot, projectName, opLabel: string)
     "no repo-set, project or variant named '" & name & "' found under '" &
       manifestsRoot & "' (looked for '" & projectFile & "', '" &
       variantFile & "' and '" & repoSetFile & "')")
+
+proc resolveWorkspaceProjectShared*(workspaceRoot, projectName, opLabel: string):
+    tuple[resolved: ResolvedProject; workspaceLocal: Option[WorkspaceLocal]] =
+  ## The membership ``resolveWorkspaceMembershipLadder`` resolves, with each
+  ## repo's dependency edges read from its committed ``repro.lock``
+  ## (``withRecipeDerivedEdges``). Every verb that resolves a workspace comes
+  ## through here, so no caller can see an edge a manifest declared.
+  let ladder = resolveWorkspaceMembershipLadder(workspaceRoot, projectName,
+    opLabel)
+  (withRecipeDerivedEdges(workspaceRoot, ladder.resolved), ladder.workspaceLocal)
 
 proc resolveWorkspaceSyncProject(parsed: WorkspaceSyncArgs;
     command: string): ResolvedProject =
@@ -45431,6 +45579,9 @@ type
     revision*: string    ## the revision it claims
     source*: string      ## operator-facing origin ("lib-a/repro.lock", …)
     relation*: CoherenceRelation
+    selfEntry*: bool
+      ## The claim is the lock's OWN entry (its repo's revision when the lock
+      ## was written), not another repo's lock's pin.
 
   CoherenceFinding* = object
     ## One node about which at least one lock disagrees with reality.
@@ -45555,6 +45706,25 @@ proc coherenceRemedies(finding: CoherenceFinding): seq[string] =
   of crNoCheckout:
     @["`repro sync` — materialize the missing checkout"]
 
+proc selfEntryIsTheLocksBase(identity: GitToolIdentity;
+                             repoAbs, revision: string): bool =
+  ## Whether ``revision``, the own entry of the committed lock at ``repoAbs``,
+  ## is a parent of the commit that last changed that lock, with the lock in
+  ## the working tree exactly as committed. That is the state every committed
+  ## lock is in by construction (it cannot name the commit that carries it).
+  let status = gitRunPlainQuery(identity, ["-C", repoAbs, "status", "--porcelain",
+    "--", CommittedLockFileName])
+  if status.code != 0 or status.output.strip().len > 0: return false
+  let tracked = gitRunPlain(identity, ["-C", repoAbs, "ls-files", "--error-unmatch",
+    "--", CommittedLockFileName])
+  if tracked.code != 0: return false
+  let parents = gitRunPlainQuery(identity, ["-C", repoAbs, "log", "-1",
+    "--format=%P", "HEAD", "--", CommittedLockFileName])
+  if parents.code != 0: return false
+  for parent in parents.output.strip().splitWhitespace():
+    if sameRevision(parent, revision): return true
+  false
+
 proc collectLockCoherence*(identity: GitToolIdentity;
                            workspaceRoot: string;
                            repos: openArray[CoherenceNode];
@@ -45623,7 +45793,8 @@ proc collectLockCoherence*(identity: GitToolIdentity;
       repoClaims[key].add(LockClaim(
         node: dep.name,
         revision: dep.coordinates.revision,
-        source: (repo.path & "/" & CommittedLockFileName).replace('\\', '/')))
+        source: (repo.path & "/" & CommittedLockFileName).replace('\\', '/'),
+        selfEntry: isSelfLockedDep(dep)))
 
   for repo in repos:
     # A claims-only repo contributed its lock above and nothing else: it is out
@@ -45656,7 +45827,25 @@ proc collectLockCoherence*(identity: GitToolIdentity;
     for claim in claims.mitems:
       claim.relation = classifyClaim(identity, repoAbs, claim.revision,
         finding.checkoutHead)
-      distinctRevisions.incl(claim.revision.toLowerAscii())
+      # A lock's own entry names the commit the lock was written against, and
+      # the lock is committed on top of it: so in a checkout whose lock is
+      # exactly as committed, an own entry naming a parent of the commit that
+      # last changed the lock is the lock being current, not lagging. Only a
+      # lock edited since (or never committed), or one whose own entry is older
+      # than that, is a lag worth reporting.
+      if claim.selfEntry and claim.relation == crAncestor and
+          selfEntryIsTheLocksBase(identity, repoAbs, claim.revision):
+        claim.relation = crMatch
+      # A lock's own entry that merely LAGS the checkout (an ancestor, or a
+      # match) stays a claim about its checkout but takes no part in "the
+      # locks contradict each other": it names an ancestor of the commit that
+      # carries it by construction, while another repo's lock pins that
+      # carrying commit or a later one, so the two can never agree and no
+      # re-pin would clear the finding. A self entry on another history (or
+      # not even fetched) is a real disagreement and still counts
+      # (CLI/README.md §"Lock Coherence").
+      if not (claim.selfEntry and claim.relation in {crMatch, crAncestor}):
+        distinctRevisions.incl(claim.revision.toLowerAscii())
       if claim.relation in {crUnreachable, crNotFetched, crNoCheckout}:
         finding.interrupting = true
     finding.claims = claims
@@ -47510,7 +47699,13 @@ proc lockedDepFromStoreRepo(source: LockSource; repo: ResolvedRepo): LockedDep =
       revision: rev),
     integrity: integrity, version: "",
     visibility: lockingTierLabel(repo.visibility),
-    participation: repo.participation, depends: repo.depends,
+    participation: repo.participation,
+    # The repo's DIRECT edges where its lock records them (the root entry's
+    # `depends`), so a lock set built from these entries is a graph whose
+    # root edges are direct (`repro develop --direct`) and whose transitive
+    # walk is still complete; the closure where no lock says.
+    depends: (if repo.directDepends.len > 0: repo.directDepends
+              else: repo.depends),
     tags: repo.tags)
 
 proc populateLockedDeps*(source: LockSource;
@@ -57485,15 +57680,29 @@ proc enclosingWorkspaceRoot*(startPath: string;
   ## (``repro_core/workspace_root``) -- the one walk every workspace-root
   ## lookup uses, whose marker set also includes the settings file
   ## (Workspace-Settings-Files.md §6) and honours ``REPRO_WORKSPACE_CONFIG``.
-  result = findWorkspaceRoot(startPath)
-  if result.len == 0 and followWorktree:
+  ##
+  ## The retry also runs when the ascent found only the MO-2 fallback (a
+  ## committed ``repro.lock``), and a real workspace above the main worktree
+  ## then wins. A worktree carries the repo's committed lock like any
+  ## checkout of it — and since dependencies come only from ``repro.nim``,
+  ## every repo that has one also has a lock (Unified-Locking-And-Hooks.md
+  ## §14.9) — so for a worktree outside the workspace that fallback was
+  ## always the worktree ITSELF: its gate checked a closure of one repo and
+  ## passed, and `repro push` refused it as resolving the wrong workspace.
+  ## A main worktree whose own walk also ends at its lock is a standalone
+  ## committed-lock repo, and the worktree's own answer stands.
+  let found = discoverWorkspaceRoot(startPath)
+  result = found.root
+  if followWorktree and found.marker in {wrmNone, wrmCommittedLock}:
     # The linked-worktree retry documented above. `agents` replaced the inline
     # ascent with the shared walk, which does not follow worktrees; `dev`
     # carries the retry. Keeping both is the union -- dropping either would
     # lose the shared marker set or lose HL-1 §4.3.
     let mainRoot = mainWorktreeRootFor(startPath)
     if mainRoot.len > 0:
-      return enclosingWorkspaceRoot(mainRoot, followWorktree = false)
+      let viaMain = discoverWorkspaceRoot(mainRoot)
+      if result.len == 0 or viaMain.marker notin {wrmNone, wrmCommittedLock}:
+        return enclosingWorkspaceRoot(mainRoot, followWorktree = false)
 
 var sourceTreeMembershipMemo: Table[string,
     tuple[stamp: string; members: seq[tuple[name, path: string]]]]
@@ -59841,7 +60050,6 @@ type
     aheadBy, behindBy: int    ## the distance, when the direction is known
     detail: string            ## why an `unknown` relation is unknown
     dirty: bool
-    declared: bool            ## a manifest-declared develop-set sibling
 
 proc committedLockDepsLine(ld: LockedDependencies): string =
   ## The ``deps = [...]`` line ``serializeLockedDependencies`` writes for
@@ -60018,9 +60226,10 @@ proc gatherConsistencyInputs(repoRoot: string; source: ConsistencySource;
 # flake input was consulted at all depended on lock records of repos it does
 # not depend on. The set the hooks consult is now:
 #
-#   * for a repo with a committed `repro.lock`: the §14.2 union — the lock's
-#     own non-root VCS entries plus the manifest-declared develop-set siblings
-#     (`observeCommittedLockSiblings`, unchanged);
+#   * for a repo with a committed `repro.lock`: the lock's own non-root VCS
+#     entries (`observeCommittedLockSiblings`) — what its repro.nim derives
+#     (§14.2; the manifest-declared siblings this once added are gone with the
+#     manifest edges, owner decision 2026-11-05);
 #   * plus every repository the repo's `flake.lock` resolves that has a
 #     sibling checkout in the workspace (`hookDevelopSetOf`).
 #
@@ -60056,11 +60265,6 @@ proc gatherConsistencyInputs(repoRoot: string; source: ConsistencySource;
 # `nixos-modules` checkout. ``hookSubstitutedDevelopSet`` applies the rule; an
 # explicitly overridden exact pin stays compared (§16.4).
 # ---------------------------------------------------------------------------
-
-proc manifestMembershipOf(repoRoot: string;
-    workspaceRootHint = ""): tuple[resolved: bool;
-    workspaceRoot: string; repos: seq[ResolvedRepo]; selfName: string]
-  ## Forward declaration; defined beside ``manifestDevelopSiblings``.
 
 type
   RecipePinnedSibling = object
@@ -60616,12 +60820,16 @@ proc pinnedSiblingMatching(pinned: openArray[RecipePinnedSibling];
 
 proc observeCommittedLockSiblings(repoRoot: string; ld: LockedDependencies;
     pinned: seq[RecipePinnedSibling] = @[]):
-    tuple[observations: seq[CommittedPinObservation]; manifestResolved: bool;
-          workspaceRoot: string; pinnedByRecipe: seq[string]] =
-  ## Every non-root VCS entry of the committed lock plus every manifest-
-  ## declared develop-set sibling it does not carry, each observed from its
+    tuple[observations: seq[CommittedPinObservation];
+          pinnedByRecipe: seq[string]] =
+  ## Every non-root VCS entry of the committed lock, each observed from its
   ## checkout and related to its pin by ``classifySiblingPin``. Reads only;
   ## writes nothing.
+  ##
+  ## Only the lock's own entries: which repos the lock SHOULD carry is a
+  ## question about the recipe (``verifyCommittedLockDependencySet``), and a
+  ## manifest no longer has an answer to it (owner decision 2026-11-05). This
+  ## used to add every manifest-declared develop-set sibling the lock lacked.
   ##
   ## A sibling named by ``pinned`` — one the repo's recipe pins by exact
   ## revision and no develop override substitutes (§16.5) — is NOT observed:
@@ -60635,11 +60843,10 @@ proc observeCommittedLockSiblings(repoRoot: string; ld: LockedDependencies;
   let pathBase = committedLockPathBase(root)
   let identity = ensureGitToolResolvable(tpmPathOnly, getEnv("PATH"))
   var seen: seq[string] = @[]
-  proc observe(name, depAbs, pinned: string; declared: bool):
-      CommittedPinObservation =
+  proc observe(name, depAbs, pinned: string): CommittedPinObservation =
     result = CommittedPinObservation(name: name,
       path: relativePath(depAbs, pathBase).replace('\\', '/'), pinned: pinned,
-      declared: declared, relation: sprUnknown)
+      relation: sprUnknown)
     if not isGitCheckoutDir(depAbs): return
     # Parsed, so stdout alone (``gitRunPlainQuery``): a stderr warning is not
     # part of the revision.
@@ -60661,33 +60868,17 @@ proc observeCommittedLockSiblings(repoRoot: string; ld: LockedDependencies;
     let described = describeRecipePin(pinned[idx])
     if described notin result.pinnedByRecipe:
       result.pinnedByRecipe.add(described)
-  let manifest = manifestDevelopSiblings(root)
-  result.manifestResolved = manifest.resolved
-  result.workspaceRoot = manifest.workspaceRoot
-  var declaredNames: seq[string] = @[]
-  for sib in manifest.siblings: declaredNames.add(sib.name)
   for d in ld.deps:
     if isSelfLockedDep(d) or d.coordinates.kind != ckVcs or d.path.len == 0:
       continue
     let depAbs = absolutePath(pathBase / d.path)
+    if d.name in seen: continue
     seen.add(d.name)
-    seen.add(relativePath(depAbs, pathBase).replace('\\', '/'))
     let pin = pinnedSiblingMatching(pinned, depAbs, d.coordinates.url)
     if pin >= 0:
       notePinned(pin)
       continue
-    result.observations.add(observe(d.name, depAbs, d.coordinates.revision,
-      d.name in declaredNames))
-  if manifest.resolved:
-    for sib in manifest.siblings:
-      let depAbs = absolutePath(manifest.workspaceRoot / sib.path)
-      let rel = relativePath(depAbs, pathBase).replace('\\', '/')
-      if sib.name in seen or rel in seen: continue
-      let pin = pinnedSiblingMatching(pinned, depAbs, sib.fetchUrl)
-      if pin >= 0:
-        notePinned(pin)
-        continue
-      result.observations.add(observe(sib.name, depAbs, "", true))
+    result.observations.add(observe(d.name, depAbs, d.coordinates.revision))
 
 type
   ReproLockMove = object
@@ -60823,9 +61014,12 @@ proc planCommittedLockRepin(repoRoot: string;
     allowRegression: openArray[string]): CommittedLockRepinPlan =
   ## §13.3 — the commit-path re-pin of a committed ``repro.lock``, computed
   ## but not written. Observation only: existing non-root VCS entries whose
-  ## checkout is present are re-observed, missing manifest-declared siblings
-  ## are added, nothing is removed, the root revision is untouched, the solve
-  ## is carried verbatim.
+  ## checkout is present are re-observed; nothing is added or removed, the
+  ## root revision is untouched, the solve is carried verbatim. Which entries
+  ## the lock carries is decided by the recipe and changed only by
+  ## ``repro lock refresh`` (the pre-push gate refuses a lock whose set has
+  ## drifted from it); this used to add manifest-declared siblings, which no
+  ## longer exist (owner decision 2026-11-05).
   ##
   ## A pin never moves backward silently: an entry whose checkout is behind
   ## its pin, has diverged from it, or lacks the pinned commit is REFUSED
@@ -60863,9 +61057,6 @@ proc planCommittedLockRepin(repoRoot: string;
   # Resolved once: the lookup costs a subprocess, and every observation below
   # shares the same base.
   let pathBase = committedLockPathBase(root)
-  var rootIdx = -1
-  for i, d in ld.deps:
-    if isSelfLockedDep(d): rootIdx = i
   for o in obs.observations:
     if o.name notin result.examined: result.examined.add(o.name)
     if o.observed.len == 0: continue
@@ -60876,16 +61067,13 @@ proc planCommittedLockRepin(repoRoot: string;
         "against")
     let depAbs = absolutePath(pathBase / o.path)
     let fresh = lockedDepFromCheckout(o.name, depAbs, pathBase)
-    var found = false
+    # Every observation is of an entry the lock already carries
+    # (``observeCommittedLockSiblings``); it is matched back to that entry by
+    # NAME, the identity the entry records.
     for i in 0 ..< ld.deps.len:
       if isSelfLockedDep(ld.deps[i]) or ld.deps[i].coordinates.kind != ckVcs:
         continue
-      # By NAME, the identity the entry records. (Both paths here are local —
-      # the entry's derived, the observation's observed — but the name is
-      # what the lock says, and an observation of a manifest sibling at an
-      # entry's derived location is already skipped by the observer.)
       if ld.deps[i].name == o.name:
-        found = true
         var d = ld.deps[i]
         let pinned = d.coordinates.revision
         if pinned.len > 0 and pinned != fresh.coordinates.revision and
@@ -60923,13 +61111,6 @@ proc planCommittedLockRepin(repoRoot: string;
           d.integrity = fresh.integrity
           ld.deps[i] = d
         break
-    if not found:
-      ld.deps.add(fresh)
-      result.moves.add(ReproLockMove(name: fresh.name, path: fresh.path,
-        depAbs: depAbs, url: fresh.coordinates.url, oldRev: "",
-        newRev: fresh.coordinates.revision, added: true))
-      if rootIdx >= 0 and o.name notin ld.deps[rootIdx].depends:
-        ld.deps[rootIdx].depends.add(o.name)
   result.plannedLd = ld
   summarizeCommittedLockRepin(result)
 
@@ -60991,7 +61172,7 @@ type PushCycleView = object
 
 proc developSetClosure(repos: seq[ResolvedRepo];
     pushedRepoName: string): HashSet[string]
-  ## Forward declaration; defined beside ``manifestDevelopSiblings``.
+  ## Forward declaration; defined beside ``manifestMembershipOf``.
 
 proc flakeClassifyPublication(identity: GitToolIdentity;
     dir, headRev: string):
@@ -61003,17 +61184,43 @@ proc pushCycleViewOf(repoRoot, workspaceRoot: string;
     identity: GitToolIdentity): PushCycleView
   ## Forward declaration; defined beside ``manifestMembershipOf``.
 
+proc siblingDependencyClosure(view: PushCycleView;
+    sibling, siblingDir: string): HashSet[string] =
+  ## ``sibling``'s own dependency closure over lock edges (``developSetClosure``
+  ## over the repro.nim-derived ``depends`` of ``withRecipeDerivedEdges``). A
+  ## sibling the active project does not include has no entry in
+  ## ``view.repos``, yet its committed lock still says what it depends on: its
+  ## lock at ``siblingDir`` seeds the walk, which then continues through the
+  ## members' locks. Without that, a cycle with a repo outside the project
+  ## would never be recognised — the same blindness the manifest-edge version
+  ## of this rule had for every cycle that only the locks recorded.
+  for r in view.repos:
+    if r.name == sibling: return developSetClosure(view.repos, sibling)
+  if siblingDir.len == 0: return initHashSet[string]()
+  var repos = view.repos
+  repos.add(ResolvedRepo(name: sibling,
+    depends: committedLockDependencyNames(siblingDir).names))
+  developSetClosure(repos, sibling)
+
 proc siblingAwaitsThisPush(view: PushCycleView; sibling: string;
-    siblingHeadUnpublished: bool): bool =
+    siblingHeadUnpublished: bool; siblingDir = ""): bool =
   ## Is ``sibling`` one that CANNOT be published before the pushed repo?
   ##
-  ## True when its HEAD is unpublished, its own develop closure contains the
-  ## pushed repo, and the pushed repo's HEAD is itself unpublished: its
+  ## True when its HEAD is unpublished, its own dependency closure contains
+  ## the pushed repo, and the pushed repo's HEAD is itself unpublished: its
   ## pre-push gate then refuses it over the pushed repo's unpublished HEAD, so
   ## "publish the sibling first" is proven not to work.
+  ##
+  ## "Its own dependency closure" is read from the LOCKS — the sibling's
+  ## committed ``repro.lock`` and, transitively, those of the repos it pins —
+  ## never from a manifest (owner decision 2026-11-05). Two repos whose locks
+  ## pin each other are therefore a cycle whether or not any fragment says so
+  ## (the shape `isonim` / `isonim-render-serve` had, which the manifest-edge
+  ## rule could not see). ``siblingDir`` is the sibling's checkout, needed only
+  ## when the active project does not include it.
   view.known and view.selfHeadUnpublished and siblingHeadUnpublished and
     sibling.len > 0 and sibling != view.selfName and
-    view.selfName in developSetClosure(view.repos, sibling)
+    view.selfName in siblingDependencyClosure(view, sibling, siblingDir)
 
 proc flakeLockPinnedRevisions*(lockText: string):
     tuple[ok: bool; diagnostic: string;
@@ -61176,7 +61383,7 @@ proc pinDefersToMutualPin(view: PushCycleView; identity: GitToolIdentity;
   ##     publishes names content anybody can obtain. A pin that exists only in
   ##     the local checkout is a lock nobody can reproduce, cycle or no cycle.
   ahead and pinnedRev.len > 0 and
-    siblingAwaitsThisPush(view, sibling, siblingHeadUnpublished) and
+    siblingAwaitsThisPush(view, sibling, siblingHeadUnpublished, siblingDir) and
     not flakeClassifyPublication(identity, siblingDir, pinnedRev).unpublished
 
 proc mutualPinDeferralSentence(sibling, selfName, siblingDir, pinnedRev,
@@ -61223,19 +61430,34 @@ proc flakeLockResolvedRepositories(repoRoot: string):
         lockedRev: r.lockedRev.toLowerAscii()))
 
 proc verifyCommittedLockSiblingPins*(repoRoot: string;
-    workspaceRoot = ""):
+    workspaceRoot = ""; componentPeers: seq[string] = @[]):
     tuple[examined, stale: bool; evidence, remediation, summary: string;
           notices: seq[string]] =
   ## §13.5 — the pre-push stage for a committed ``repro.lock``. Refuses a pin
-  ## that differs from the sibling checkout and a manifest-declared sibling
-  ## the lock does not carry. A sibling that is not checked out is not
-  ## refused: its committed pin is what CI builds.
+  ## that differs from the sibling checkout. A sibling that is not checked out
+  ## is not refused: its committed pin is what CI builds. Whether the lock
+  ## carries the RIGHT set of siblings is ``verifyCommittedLockDependencySet``'s
+  ## question, asked of the recipe; this stage used to also refuse a
+  ## manifest-declared sibling the lock did not carry, and no longer can,
+  ## because a manifest declares no dependencies (owner decision 2026-11-05).
   ##
   ## One disagreement is DEFERRED to a notice instead (§13.5 "Mutually pinned
   ## siblings", ``pinDefersToMutualPin``): an ahead pin of an unpublished
   ## sibling that depends on this repo, whose pinned revision is published.
   ## ``workspaceRoot`` names the membership that question is asked against;
   ## empty walks up from ``repoRoot``.
+  ##
+  ## ``componentPeers`` are the other members of the dependency cycle a
+  ## `repro push` is publishing together under its source-component authority
+  ## (the gate's ``publicationMembers``). An ahead pin of one of them whose
+  ## pinned revision is published is deferred too, whether or not either HEAD
+  ## is still unpublished: the component is preflighted and published as one
+  ## unit, so the raw-push proof that no order works (``siblingAwaitsThisPush``)
+  ## is not what makes it acceptable, and requiring it refused the retry of a
+  ## component run whose first member had already reached a remote (§13.5,
+  ## amended 2026-11-07). A pin of a peer's UNPUBLISHED HEAD is never
+  ## deferred: the gate refuses it separately
+  ## (`source-component-unpublished-pin`), and here it is not a disagreement.
   let root = absolutePath(repoRoot)
   let lockPath = root / CommittedLockFileName
   if not fileExists(extendedPath(lockPath)): return
@@ -61270,12 +61492,7 @@ proc verifyCommittedLockSiblingPins*(repoRoot: string;
   var cycleResolved = false
   let identity = ensureGitToolResolvable(tpmPathOnly, getEnv("PATH"))
   for o in obs.observations:
-    if o.pinned.len == 0 and o.declared:
-      bad.add(o.name & " (" & o.path & "): declared in the develop set but " &
-        "not pinned" & (if o.observed.len > 0: "; checkout at " & o.observed
-                        else: ""))
-      inc refreshable
-    elif o.observed.len > 0 and o.pinned.len > 0 and o.observed != o.pinned:
+    if o.observed.len > 0 and o.pinned.len > 0 and o.observed != o.pinned:
       let dir = absolutePath(pathBase / o.path)
       # The publication axis is asked of exactly the relations NF-2 asks it of
       # (ahead and diverged): a behind sibling is published whenever its pin
@@ -61285,6 +61502,20 @@ proc verifyCommittedLockSiblingPins*(repoRoot: string;
       if headUnpublished and not cycleResolved:
         cycle = pushCycleViewOf(root, workspaceRoot, identity)
         cycleResolved = true
+      if o.name in componentPeers and o.relation == sprAhead and
+          not flakeClassifyPublication(identity, dir, o.pinned).unpublished:
+        result.notices.add("repro.lock pin DEFERRED, not refused: sibling '" &
+          o.name & "' (" & o.path & ") is " & $o.aheadBy & " commit(s) " &
+          "AHEAD of the revision repro.lock pins (pin " & shortRev(o.pinned) &
+          ", HEAD " & shortRev(o.observed) & "), and is a member of the " &
+          "dependency cycle this `repro push` publishes together. The pinned " &
+          "revision " & shortRev(o.pinned) & " IS published, so the lock " &
+          "this push publishes is reproducible; record the new revision on " &
+          "the next commit here (the pre-commit hook re-pins it, or run " &
+          "`repro lock refresh " & root & "`) [sibling=" & o.name &
+          " pinned=" & o.pinned & " observed=" & o.observed &
+          " relation=ahead deferred=component-peer]")
+        continue
       if pinDefersToMutualPin(cycle, identity, o.name, dir, o.pinned,
           o.relation == sprAhead, headUnpublished):
         result.notices.add("repro.lock pin DEFERRED, not refused: sibling '" &
@@ -61301,7 +61532,7 @@ proc verifyCommittedLockSiblingPins*(repoRoot: string;
         ", checkout is at " & o.observed & " (" &
         siblingPinRelationTag(o.relation) & ")" &
         (if headUnpublished: "; HEAD unpublished" else: ""))
-      if not siblingAwaitsThisPush(cycle, o.name, headUnpublished):
+      if not siblingAwaitsThisPush(cycle, o.name, headUnpublished, dir):
         inc refreshable
         if flakeResolves(o.name): updatable.add(o.name)
       else:
@@ -69505,18 +69736,21 @@ proc runGatewayCommand*(args: openArray[string]): int =
 
 proc developSetClosure(repos: seq[ResolvedRepo];
     pushedRepoName: string): HashSet[string] =
-  ## RA-21 — compute the transitive develop-set dependency closure of the
-  ## pushed repo, as a set of repo NAMES. The closure is the pushed repo
-  ## itself plus every repo reachable through the per-repo ``depends``
-  ## edges (Workspace-And-Develop-Mode.md §"VCS Hook Integration": a
-  ## develop-mode sibling is a git-submodule replacement, so only the
-  ## pushed repo's own dependency closure can break a teammate's build of
-  ## it). Unknown dependency names (a ``depends`` entry that names no repo
-  ## in the resolved set) contribute nothing to the closure — there is no
-  ## repo to observe. They are NOT thereby harmless, and the gate does not
-  ## treat them as such: ``danglingDependsInClosure`` below reports them and
-  ## the gate refuses, because a name it cannot resolve is a repo the push
-  ## claims to depend on and the gate did not check.
+  ## RA-21 — the transitive dependency closure of the pushed repo, as a set of
+  ## repo NAMES: the pushed repo itself plus every repo reachable through the
+  ## per-repo ``depends`` edges (Workspace-And-Develop-Mode.md §"VCS Hook
+  ## Integration": a develop-mode sibling is a git-submodule replacement, so
+  ## only the pushed repo's own dependency closure can break a teammate's build
+  ## of it).
+  ##
+  ## The edges are the ones ``withRecipeDerivedEdges`` read from each repo's
+  ## committed ``repro.lock`` — derived from ``repro.nim``, never from a
+  ## manifest (owner decision 2026-11-05, Unified-Locking-And-Hooks.md §14.9).
+  ## A name a lock pins that the resolved membership does not contain is IN
+  ## the closure (a repo the active project does not check out is still a
+  ## dependency, and the gate observes it where the lock rule places it); it
+  ## contributes no further edges, which loses nothing because the pushed
+  ## repo's own lock is already transitive.
   ##
   ## When ``pushedRepoName`` is empty (the hook was invoked without a
   ## resolvable ``--current-repo``), the closure is empty and the caller
@@ -69545,11 +69779,19 @@ proc manifestMembershipOf(repoRoot: string;
     workspaceRootHint = ""): tuple[resolved: bool;
     workspaceRoot: string; repos: seq[ResolvedRepo]; selfName: string] =
   ## The enclosing workspace's resolved membership and the name it gives the
-  ## repo at ``repoRoot``: the lookup ``manifestDevelopSiblings`` and the lock
-  ## writer's ``declaredDevelopSet`` share. ``resolved`` is false under the
-  ## same conditions ``manifestDevelopSiblings`` documents (no workspace, a
-  ## workspace that is the repo itself, a membership that fails to resolve or
-  ## does not contain this repo).
+  ## repo at ``repoRoot``. It answers WHERE a workspace keeps its repos and
+  ## whether this repo is in one — never what a repo depends on (each repo's
+  ## ``depends`` here comes from its committed lock, ``withRecipeDerivedEdges``).
+  ## ``resolved`` is false when there is no workspace, when the workspace is
+  ## the repo itself (a standalone committed-lock repo, whose membership is
+  ## DERIVED from its own lock), when the membership fails to resolve, or when
+  ## it does not contain this repo.
+  ##
+  ## ``repoRoot`` is mapped through ``committedLockPathBase`` first, because a
+  ## manifest declares a repository by ITS path and a LINKED WORKTREE is the
+  ## same repository at a different one: identified by the invoking directory,
+  ## a worktree matched no declared repo and every caller took the
+  ## "no workspace" branch.
   ##
   ## ``workspaceRootHint`` is for a caller that has already been TOLD which
   ## workspace it serves (the pre-push gate's ``--workspace-root``): it is used
@@ -69591,115 +69833,6 @@ proc pushCycleViewOf(repoRoot, workspaceRoot: string;
     result.selfHeadUnpublished = flakeClassifyPublication(identity,
       absolutePath(repoRoot), head.output.strip()).unpublished
 
-proc manifestDevelopSiblings(repoRoot: string): tuple[resolved: bool;
-    workspaceRoot: string; siblings: seq[ResolvedRepo]] =
-  ## The develop-set siblings of the repo at ``repoRoot`` as the enclosing
-  ## workspace MANIFEST declares them: every repo reachable from it through
-  ## ``depends`` edges (``developSetClosure``), excluding the repo itself, in
-  ## name order.
-  ##
-  ## ``resolved`` is false when there is no manifest membership to consult —
-  ## no enclosing workspace, a workspace that is the repo itself (a standalone
-  ## committed-lock repo, whose membership is DERIVED from the very lock being
-  ## refreshed and so cannot be an independent declaration), a membership that
-  ## fails to resolve, or one that does not contain this repo. The caller then
-  ## falls back to the committed lock's own pins rather than treating "could
-  ## not look" as "declares nothing".
-  ##
-  ## ``repoRoot`` is mapped through ``committedLockPathBase`` first, because a
-  ## manifest declares a repository by ITS path and a LINKED WORKTREE is the
-  ## same repository at a different one. Identifying the repo by the invoking
-  ## directory matched no declared repo when the refresh ran from a worktree,
-  ## ``selfName`` stayed empty, and this returned ``resolved = false`` — so a
-  ## worktree refresh wrote a lock with NO develop set at all, indistinguishable
-  ## from a repo that declares none. That is the same defect as the dep paths
-  ## (see ``committedLockPathBase``) in the membership dimension rather than
-  ## the path dimension.
-  result = (false, "", @[])
-  let membership = manifestMembershipOf(repoRoot)
-  if not membership.resolved:
-    return
-  let closure = developSetClosure(membership.repos, membership.selfName)
-  var siblings: seq[ResolvedRepo] = @[]
-  for r in membership.repos:
-    if r.name != membership.selfName and r.name in closure:
-      siblings.add(r)
-  siblings.sort(proc(a, b: ResolvedRepo): int = cmp(a.name, b.name))
-  result = (true, membership.workspaceRoot, siblings)
-
-proc undeclaredDependEdges(repos: seq[ResolvedRepo];
-    pushedRepoName: string): seq[tuple[owner, dep: string]] =
-  ## The edges behind ``danglingDependsInClosure``: each ``depends`` entry
-  ## reachable from ``pushedRepoName`` that names no repo in ``repos``, with
-  ## the repo that declares it, in first-seen order and de-duplicated by name.
-  if pushedRepoName.len == 0:
-    return
-  var byName = initHashSet[string]()
-  for repo in repos:
-    byName.incl(repo.name)
-  if pushedRepoName notin byName:
-    return
-  var byNameRepo = initTable[string, ResolvedRepo]()
-  for repo in repos:
-    byNameRepo[repo.name] = repo
-  var seen = initHashSet[string]()
-  var reported = initHashSet[string]()
-  var pending = @[pushedRepoName]
-  while pending.len > 0:
-    let name = pending.pop()
-    if name in seen:
-      continue
-    seen.incl(name)
-    if name notin byNameRepo:
-      continue
-    for dep in byNameRepo[name].depends:
-      if dep.len == 0:
-        continue
-      if dep notin byName:
-        if dep notin reported:
-          reported.incl(dep)
-          result.add((owner: name, dep: dep))
-        continue
-      if dep notin seen:
-        pending.add(dep)
-
-type
-  FragmentSite = object
-    ## One ``repos/*.toml`` fragment declaring a repo name.
-    basename: string
-      ## What a ``member_repos`` entry names.
-    layerRoot: string
-      ## The manifest layer holding it. A layer resolves ``member_repos``
-      ## against its own ``repos/`` only, so the entry belongs in that
-      ## layer's project manifest.
-
-  DanglingDependGap = object
-    ## One ``depends`` edge whose name a workspace fragment declares but the
-    ## project being checked does not include.
-    label: string
-      ## ``owner -> dep``.
-    sites: seq[FragmentSite]
-      ## The fragments declaring that name. More than one means alternatives
-      ## (one name, several upstreams), of which a project includes one.
-
-  DanglingDependEdges = object
-    ## The closure's dangling ``depends`` edges, split by cause, in
-    ## first-seen order.
-    undeclared: seq[string]
-      ## ``owner -> dep`` edges no readable ``repos/*.toml`` fragment in any
-      ## composed manifest layer declares: a typo, or a fragment nobody has
-      ## written yet.
-    outsideProject: seq[DanglingDependGap]
-      ## Edges a fragment declares but the project does not include.
-    unreadableFragments: seq[string]
-      ## Fragments the strict reader refused. Their names are unknown, so an
-      ## ``undeclared`` verdict holds only for the fragments that were read.
-
-  DeclaredFragments = object
-    byName: Table[string, seq[FragmentSite]]
-      ## Declared repo name -> the fragments declaring it.
-    unreadable: seq[string]
-
 proc fragmentDeclaredName(text: string): string =
   ## The repo NAME a ``repos/<file>.toml`` fragment declares (its
   ## ``[repo] name``), or "" when the text carries none. The file's basename
@@ -69712,162 +69845,6 @@ proc fragmentDeclaredName(text: string): string =
       let unquoted = value.strip(chars = {'"', '\''})
       if unquoted.len > 0:
         return unquoted
-
-proc canonicalManifestPath(path: string): string =
-  ## ``path`` made absolute and normalised, without a trailing separator, so
-  ## that ``team/`` and ``team`` (or a ``--workspace-root`` spelled with a
-  ## trailing ``/``) compare and prefix-match as the same directory.
-  result = os.normalizedPath(absolutePath(path))
-  while result.len > 1 and result.endsWith(DirSep):
-    result.setLen(result.len - 1)
-
-proc isWithin(path, root: string): bool =
-  ## Whether canonical ``path`` lies strictly inside canonical ``root``.
-  path.startsWith(root & DirSep)
-
-proc declaredFragments(manifestRoots: openArray[string]): DeclaredFragments =
-  ## Every repo name a ``repos/*.toml`` fragment under any of
-  ## ``manifestRoots`` declares, mapped to the fragments that declare it and
-  ## the layer each was found in (sorted by layer order, then basename). Two
-  ## fragments may share one name, and a basename need not equal the name it
-  ## declares. Each fragment is read with the strict reader; one it refuses
-  ## is listed in ``unreadable`` rather than guessed at.
-  var seenDirs = initHashSet[string]()
-  for root in manifestRoots:
-    let dir = canonicalManifestPath(root / reposDirName)
-    if dir in seenDirs or not dirExists(dir):
-      continue
-    seenDirs.incl(dir)
-    var paths: seq[string]
-    for kind, path in walkDir(dir):
-      if kind in {pcFile, pcLinkToFile} and path.endsWith(".toml"):
-        paths.add(path)
-    paths.sort(proc(a, b: string): int =
-      cmp(a.extractFilename.changeFileExt(""),
-        b.extractFilename.changeFileExt("")))
-    for path in paths:
-      var name = ""
-      try:
-        name = readRepoFragment(path).repo.name
-      except WorkspaceManifestParseError:
-        result.unreadable.add(path)
-        continue
-      let site = FragmentSite(basename: path.extractFilename.changeFileExt(""),
-        layerRoot: root)
-      if name notin result.byName:
-        result.byName[name] = @[]
-      if site notin result.byName[name]:
-        result.byName[name].add(site)
-
-proc danglingDependsInClosure(repos: seq[ResolvedRepo];
-    pushedRepoName: string; manifestRoots: openArray[string]):
-      DanglingDependEdges =
-  ## Every ``depends`` entry reachable from ``pushedRepoName`` that names no
-  ## repo in the resolved project, classified by whether a fragment in one
-  ## of the workspace's composed manifest layers declares that name.
-  ##
-  ## The gate refuses on such an edge rather than skipping it. A skipped edge
-  ## would let the gate verify a SMALLER set than the manifests declare while
-  ## still reporting success: one typo in a ``depends`` list would remove a
-  ## real dependency from the cleanliness / publication / lock stages, and
-  ## nothing would say so.
-  ##
-  ## The resolver refuses a fragment that references an undeclared remote for
-  ## the same reason ("turning a typo into a silent success is a worse failure
-  ## mode than the transitional convenience is worth"); this is the same rule
-  ## applied to the other cross-reference a fragment can make.
-  ##
-  ## The two causes need different fixes. A name no fragment declares is fixed
-  ## in the ``depends`` list or by writing the fragment. A name a fragment
-  ## does declare is fixed in the project's membership, and telling the
-  ## operator to "declare" it would name a step that is already done.
-  let edges = undeclaredDependEdges(repos, pushedRepoName)
-  if edges.len == 0:
-    return
-  let declared = declaredFragments(manifestRoots)
-  result.unreadableFragments = declared.unreadable
-  for edge in edges:
-    let label = edge.owner & " -> " & edge.dep
-    if edge.dep in declared.byName:
-      result.outsideProject.add(DanglingDependGap(label: label,
-        sites: declared.byName[edge.dep]))
-    else:
-      result.undeclared.add(label)
-
-proc workspaceRelativeDir(dir, workspaceRoot: string): string =
-  ## ``dir`` as an operator at ``workspaceRoot`` would type it, with forward
-  ## slashes and a trailing ``/``: empty for the workspace root itself,
-  ## relative below it, absolute elsewhere. Every path a remediation names
-  ## starts from here, so the operator never has to guess the base.
-  let absDir = canonicalManifestPath(dir)
-  let absWorkspace = canonicalManifestPath(workspaceRoot)
-  if sameFilesystemPath(absDir, absWorkspace):
-    return ""
-  if absDir.isWithin(absWorkspace):
-    return relativePath(absDir, absWorkspace).replace(DirSep, '/') & "/"
-  absDir.replace(DirSep, '/') & "/"
-
-proc manifestLayerOf(path: string; manifestRoots: openArray[string]):
-    tuple[root, rel: string] =
-  ## The most specific of ``manifestRoots`` holding ``path``, and ``path``
-  ## relative to it with forward slashes; ``("", <canonical path>)`` when
-  ## none does. A layer may sit inside another root (a ``url`` layer is
-  ## fetched under the workspace's ``.repro/``), so the longest matching root
-  ## is the layer that owns the file.
-  let absFile = canonicalManifestPath(path)
-  result = ("", absFile)
-  var bestLen = -1
-  for root in manifestRoots:
-    let absRoot = canonicalManifestPath(root)
-    if absFile.isWithin(absRoot) and absRoot.len > bestLen:
-      bestLen = absRoot.len
-      result = (root, relativePath(absFile, absRoot).replace(DirSep, '/'))
-
-proc projectMembershipTarget(projectFile: string;
-    manifestRoots: openArray[string]; workspaceRoot: string):
-      tuple[manifestRel, note: string] =
-  ## The project manifest an operator adds a ``member_repos`` entry to, for
-  ## the project resolved from ``projectFile``, relative to the root of the
-  ## manifest layer that will hold the entry (``layerMembershipTarget``
-  ## prefixes the layer). A variant's own extra membership is not yet
-  ## composed by name, so for a variant this is its base project, and
-  ## ``note`` names the variant.
-  if projectFile.len == 0:
-    return ("projects/<project>.toml", "")
-  let (layerRoot, rel) = manifestLayerOf(projectFile, manifestRoots)
-  if rel.startsWith("variants/"):
-    try:
-      let base = readVariantManifest(projectFile).variant.base
-      if base.len > 0:
-        let variantDisplay =
-          (if layerRoot.len > 0: workspaceRelativeDir(layerRoot, workspaceRoot)
-           else: "") & rel
-        return (base, " (the base project of variant " & variantDisplay & ")")
-    except WorkspaceManifestParseError:
-      discard
-  (rel, "")
-
-proc layerMembershipTarget(site: FragmentSite; manifestRel: string;
-    membershipRoot, workspaceRoot: string): string =
-  ## Where ``site``'s ``member_repos`` entry goes, as a path from
-  ## ``workspaceRoot``: ``manifestRel`` inside the manifest layer holding the
-  ## fragment, since a layer resolves members against its own ``repos/``
-  ## only. A file that does not exist there yet is flagged for creation. An
-  ## absolute ``manifestRel`` (a project file no known layer holds) is named
-  ## as it is, never re-rooted under a layer.
-  let targetFile =
-    if isAbsolute(manifestRel): manifestRel
-    else: canonicalManifestPath(site.layerRoot) / manifestRel
-  result =
-    if isAbsolute(manifestRel): manifestRel.replace(DirSep, '/')
-    else: workspaceRelativeDir(site.layerRoot, workspaceRoot) & manifestRel
-  if not fileExists(targetFile):
-    result.add(" (create it, with any [[remote]] the fragment uses: the " &
-      "manifest layer holding the fragment resolves members against its " &
-      "own repos/ only)")
-  elif not sameFilesystemPath(canonicalManifestPath(site.layerRoot),
-      canonicalManifestPath(membershipRoot)):
-    result.add(" (in the manifest layer holding the fragment)")
 
 proc membershipPushScope(identity: GitToolIdentity; resolved: ResolvedProject;
     membershipRoot: string; ranges: openArray[PushedCommitRange]):
@@ -70582,6 +70559,12 @@ proc roleHistoryRewriteFailure(declared: tuple[role, branch: string];
       declaredFor & ", and this update is not a fast-forward: it would make " &
       discarded & " unreachable there, including " & remoteOldOid)
 
+proc verifyCommittedLockDependencySet*(repoRoot: string):
+    tuple[examined, stale, unverified: bool;
+          evidence, remediation: string]
+  ## Forward declaration; defined beside ``unreachedDevelopSiblings``, whose
+  ## solve-completeness rule it shares with ``repro lock refresh``.
+
 proc executeCheckPrePush(parsed: CheckArgs;
     publicationMembers: seq[HookPublicationMember] = @[];
     publicationWorkspace = ""): CheckReport =
@@ -70601,7 +70584,9 @@ proc executeCheckPrePush(parsed: CheckArgs;
   result.currentRepo = parsed.currentRepo
   result.pushedRefsPath = parsed.pushedRefsPath
 
-  let (resolved, workspaceLocal) = resolveCheckProject(parsed)
+  # ``var``: the pushed repo's dependency edges are re-read from the checkout
+  # being pushed once it is identified (see the RA-21 scope below).
+  var (resolved, workspaceLocal) = resolveCheckProject(parsed)
   result.project = resolved.projectName
 
   let identity = ensureGitToolResolvable(
@@ -70804,7 +70789,9 @@ proc executeCheckPrePush(parsed: CheckArgs;
   # closure can break a teammate's build of it, so an unrelated dirty repo
   # elsewhere in the workspace MUST NOT block the push. The closure is a
   # set of repo NAMES (pushed repo + everything reachable via the per-repo
-  # ``depends`` edges). Recognized manifest-layer and membership pushes have
+  # ``depends`` edges, which are the repro.nim-derived edges each committed
+  # ``repro.lock`` records — never a manifest's). Recognized manifest-layer
+  # and membership pushes have
   # their dedicated scopes below. An explicit root with no recognized identity
   # has already failed closed above, so whole-workspace fallback cannot turn an
   # unrelated checkout into an authorized push.
@@ -70847,84 +70834,38 @@ proc executeCheckPrePush(parsed: CheckArgs;
       result.exitCode = 2
       return
     membershipScope = some(membership.names)
+  # The pushed repo's dependency edges include its OWN committed lock's, read
+  # from the checkout being pushed: a linked worktree carries the lock of the
+  # commit being pushed, which ``resolved`` (reading the declared checkout)
+  # has not seen. Added to, not substituted for, the resolved edges, so a
+  # stale declared checkout can only widen the scope, never narrow it. Stage
+  # 3d holds the pushed lock to what the recipe derives
+  # (``verifyCommittedLockDependencySet``), so the closure below is the
+  # repro.nim closure whenever the push can pass at all.
+  if currentRepoName.len > 0 and parsed.currentRepo.len > 0:
+    for r in resolved.repos.mitems:
+      if r.name != currentRepoName: continue
+      for name in committedLockDependencyNames(parsed.currentRepo).names:
+        if name != currentRepoName and name notin r.depends:
+          r.depends.add(name)
+      # A fragment `depends` is ignored, and says so (owner decision
+      # 2026-11-05): an author who still maintains one must not believe it
+      # scopes this gate or the lock.
+      if r.declaredDepends.len > 0:
+        result.notices.add("repos/" & currentRepoName & ".toml declares " &
+          "`depends = [" & r.declaredDepends.join(", ") & "]`, which is " &
+          "ignored: dependencies come only from repro.nim (the committed " &
+          "repro.lock records what it derives). Remove the key, and declare " &
+          "any real dependency in repro.nim (`uses:`).")
   let scope = prePushScope(resolved, currentRepoName, currentManifestLayer,
     membershipScope)
-  # A `depends` edge that names no repo in the project silently SHRANK the
-  # scope the stages below walk. Refuse instead: the gate must not report
-  # success over a dependency it could not resolve. The offending edge is
-  # named, with the fix for its cause, so the manifest can be fixed rather
-  # than guessed at.
-  var manifestRoots = @[membershipRoot]
-  for layer in layerLocations:
-    if layer.absPath.len > 0:
-      manifestRoots.add(layer.absPath)
-  let dangling = danglingDependsInClosure(resolved.repos, currentRepoName,
-    manifestRoots)
-  let unreadableNote =
-    if dangling.unreadableFragments.len == 0: ""
-    else:
-      "; the strict reader refused " & $dangling.unreadableFragments.len &
-        " fragment(s), whose names are unknown: " &
-        dangling.unreadableFragments.join(", ")
-  if dangling.undeclared.len > 0:
-    result.failures.add(CheckFailure(
-      repo: currentRepoPath,
-      property: "dependency-not-declared",
-      remediation: "fix the name in the `depends` list, or add a " &
-        "`repos/<name>.toml` fragment that declares it — the gate cannot " &
-        "verify a dependency the workspace does not declare; edges: " &
-        dangling.undeclared.join(", "),
-      evidence: $dangling.undeclared.len &
-        " `depends` edge(s) in the pushed repo's closure name a repo no " &
-        "readable fragment in this workspace's manifest layers declares: " &
-        dangling.undeclared.join(", ") & unreadableNote))
-  if dangling.outsideProject.len > 0:
-    let rootTarget = projectMembershipTarget(resolved.projectFile,
-      manifestRoots, parsed.workspaceRoot)
-    var additions, labels, fragmentLists: seq[string]
-    for gap in dangling.outsideProject:
-      var siteTargets, targets: seq[string]
-      for site in gap.sites:
-        let target = layerMembershipTarget(site, rootTarget.manifestRel,
-          membershipRoot, parsed.workspaceRoot)
-        siteTargets.add(target)
-        if target notin targets:
-          targets.add(target)
-      var choice = ""
-      if targets.len == 1:
-        var quoted: seq[string]
-        for site in gap.sites:
-          quoted.add("\"" & site.basename & "\"")
-        choice =
-          (if quoted.len == 1: quoted[0] else: "one of " & quoted.join(", ")) &
-          " to `member_repos` in " & targets[0]
-      else:
-        var options: seq[string]
-        for idx, site in gap.sites:
-          options.add("\"" & site.basename & "\" to `member_repos` in " &
-            siteTargets[idx])
-        choice = "one of: " & options.join("; or ")
-      additions.add(choice & rootTarget.note & " (for " & gap.label & ")")
-      labels.add(gap.label)
-      var basenames: seq[string]
-      for site in gap.sites:
-        basenames.add(site.basename)
-      fragmentLists.add(gap.label & ": " & basenames.join(" | "))
-    result.failures.add(CheckFailure(
-      repo: currentRepoPath,
-      property: "dependency-not-declared",
-      remediation: "add " & additions.join("; ") &
-        ", or make active a project that includes it — the workspace " &
-        "declares the repo but the project being pushed does not include " &
-        "it, so the gate cannot check it; edges: " & labels.join(", "),
-      evidence: $dangling.outsideProject.len &
-        " `depends` edge(s) in the pushed repo's closure name a repo the " &
-        "workspace declares but project '" & resolved.projectName &
-        "' does not include: " & fragmentLists.join(", ") &
-        unreadableNote))
-  if dangling.undeclared.len > 0 or dangling.outsideProject.len > 0:
-    result.exitCode = 2
-    return
+  # No refusal for a dependency the MANIFEST does not declare. That check
+  # (`dependency-not-declared`) existed while fragments carried the edges;
+  # edges now come from the lock generation derives from repro.nim, a
+  # dependency that resolves to no fetchable repository is refused where the
+  # lock is written, and project membership decides only which repos a
+  # workspace checks out. A dependency the active project does not include is
+  # still IN the scope below and is observed where the lock rule places it.
   let scopeClosure = scope.names
   let scopeIsWholeWorkspace = scope.wholeWorkspace
   proc repoInScope(name: string): bool =
@@ -70991,6 +70932,32 @@ proc executeCheckPrePush(parsed: CheckArgs;
   # below, where an evidence-only repo is verified from published evidence and
   # a shared-private repo is an actionable clone-required error.
   var unreadablePrivate: seq[ResolvedRepo]
+  proc observeCheckout(obs: var RepoObs; remoteName: string) =
+    ## The M4 evidence triple (HEAD, clean, published) plus the branch, for a
+    ## checkout already known to be a git worktree. ``remoteName`` scopes the
+    ## publication question; "" asks whether ANY remote-tracking ref has HEAD.
+    obs.hasGit = true
+    let absRepo = obs.absPath
+    let headRes = queryGitState(headShaQuery(absRepo), identity)
+    if headRes.status == gqsOk:
+      obs.headSha = headRes.headSha
+    let cleanRes = queryGitState(isCleanQuery(absRepo), identity)
+    if cleanRes.status == gqsOk:
+      obs.isClean = cleanRes.isClean
+    else:
+      obs.cleanDiagnostic = cleanRes.diagnostic
+    obs.remoteName = remoteName
+    let pubRes = queryGitState(
+      isPublishedQuery(absRepo, remoteName), identity)
+    obs.pubScope = pubRes.publishedScope
+    if pubRes.status == gqsOk:
+      obs.isPublished = pubRes.isPublished
+    else:
+      obs.pubDiagnostic = pubRes.diagnostic
+    let branchRes = gitRunPlainQuery(identity,
+      ["-C", absRepo, "symbolic-ref", "--short", "-q", "HEAD"])
+    if branchRes.code == 0:
+      obs.branch = branchRes.output.strip()
   for repo in resolved.repos:
     if not repoInScope(repo.name):
       continue
@@ -71005,29 +70972,52 @@ proc executeCheckPrePush(parsed: CheckArgs;
         unreadablePrivate.add(repo)
       observations.add(obs)
       continue
-    obs.hasGit = true
-    let headRes = queryGitState(headShaQuery(absRepo), identity)
-    if headRes.status == gqsOk:
-      obs.headSha = headRes.headSha
-    let cleanRes = queryGitState(isCleanQuery(absRepo), identity)
-    if cleanRes.status == gqsOk:
-      obs.isClean = cleanRes.isClean
-    else:
-      obs.cleanDiagnostic = cleanRes.diagnostic
-    let rName = gitRemoteNameFor(repo)
-    obs.remoteName = rName
-    let pubRes = queryGitState(
-      isPublishedQuery(absRepo, rName), identity)
-    obs.pubScope = pubRes.publishedScope
-    if pubRes.status == gqsOk:
-      obs.isPublished = pubRes.isPublished
-    else:
-      obs.pubDiagnostic = pubRes.diagnostic
-    let branchRes = gitRunPlainQuery(identity,
-      ["-C", absRepo, "symbolic-ref", "--short", "-q", "HEAD"])
-    if branchRes.code == 0:
-      obs.branch = branchRes.output.strip()
+    observeCheckout(obs, gitRemoteNameFor(repo))
     observations.add(obs)
+  # Dependencies the active project does not include. The closure is read from
+  # the locks, and a lock pins what the recipe uses whether or not a project
+  # lists it (owner decision 2026-11-05: membership decides what is checked
+  # out, never what a repo depends on), so such a repo is in scope like any
+  # other. It is observed at the checkout the pushed repo's lock places it at
+  # (Unified-Locking-And-Hooks.md §14.2: develop overrides, then membership,
+  # then beneath the lock's directory, then `../<name>`). One that is not
+  # checked out cannot be observed and is not refused — its committed pin is
+  # what CI builds, the rule stage 3c applies to every lock entry. Having no
+  # declared remote, it is asked the any-remote publication question, as a
+  # develop override is.
+  if currentRepoName.len > 0 and parsed.currentRepo.len > 0 and
+      not scopeIsWholeWorkspace:
+    var declaredNames = initHashSet[string]()
+    for repo in resolved.repos: declaredNames.incl(repo.name)
+    let lockPath = parsed.currentRepo / CommittedLockFileName
+    var undeclared: seq[LockedDep]
+    if fileExists(extendedPath(lockPath)):
+      try:
+        for d in parseLockedDepsAt(readFile(extendedPath(lockPath)),
+            parsed.currentRepo).deps:
+          if isSelfLockedDep(d) or d.coordinates.kind != ckVcs or
+              d.path.len == 0 or d.name in declaredNames or
+              d.name notin scopeClosure:
+            continue
+          undeclared.add(d)
+      except CatchableError:
+        # An unreadable lock is stage 3c's refusal
+        # (`committed_lock_dependency_set_unverified`), not a reason to guess.
+        discard
+    let pathBase = committedLockPathBase(parsed.currentRepo)
+    for d in undeclared:
+      let absRepo = os.normalizedPath(absolutePath(pathBase / d.path))
+      if not discoverGitWorktree(identity, absRepo).ok:
+        continue
+      # Named the way every other observation is — relative to the workspace
+      # root — unless the lock rule placed it outside the workspace, where a
+      # `../..` spelling would name nothing the reader can find.
+      let rel = relativePath(absRepo, absolutePath(parsed.workspaceRoot)).replace(
+        '\\', '/')
+      var obs = RepoObs(name: d.name, absPath: absRepo,
+        path: if rel.startsWith("../") or rel == "..": absRepo else: rel)
+      observeCheckout(obs, "")
+      observations.add(obs)
   if currentRepoName.len > 0:
     for obs in observations:
       if obs.name == currentRepoName and obs.headSha.len > 0:
@@ -71877,18 +71867,21 @@ proc executeCheckPrePush(parsed: CheckArgs;
   #
   # Unified-Locking-And-Hooks.md §13.5, "The `repro.lock` stage". CI builds
   # the committed pins (§14.5), so a pin that differs from the sibling
-  # checkout this repo is being pushed against — or a declared develop-set
-  # sibling the lock does not carry — publishes a revision that was built
-  # against something CI will not build. Reads only; the pre-commit hook is
-  # the writer (§13.3), so a refusal here means the commit path was bypassed
-  # or a sibling moved after the commit.
+  # checkout this repo is being pushed against publishes a revision that was
+  # built against something CI will not build. (Whether the lock carries the
+  # right SET of siblings is stage 3d's question, asked of repro.nim.) Reads
+  # only; the pre-commit hook is the writer (§13.3), so a refusal here means
+  # the commit path was bypassed or a sibling moved after the commit.
   if parsed.currentRepo.len > 0:
     var pins: tuple[examined, stale: bool;
                     evidence, remediation, summary: string;
                     notices: seq[string]]
     try:
+      var componentPeers: seq[string]
+      for member in publicationMembers:
+        if member.name != currentRepoName: componentPeers.add(member.name)
       pins = verifyCommittedLockSiblingPins(parsed.currentRepo,
-        parsed.workspaceRoot)
+        parsed.workspaceRoot, componentPeers)
     except CatchableError as err:
       pins = (examined: true, stale: true,
         evidence: "committed-lock-verify-failed: " & err.msg,
@@ -71904,6 +71897,35 @@ proc executeCheckPrePush(parsed: CheckArgs;
         property: "committed_lock_sibling_pin_stale",
         remediation: pins.remediation,
         evidence: pins.evidence,
+        source: parsed.currentRepo / CommittedLockFileName))
+      result.exitCode = 2
+
+    # ---- 3d. the committed repro.lock carries what repro.nim derives ------
+    #
+    # Unified-Locking-And-Hooks.md §13.5 / §14.9 (owner decision 2026-11-05):
+    # "The goal of the gate is to ensure that we have an up-to-date lock file
+    # before pushing and the lock file includes only the transitive set of
+    # dependencies derived from repro.nim files." Stage 3c checks each pin
+    # against its checkout; this checks the SET against the recipe, through
+    # the derivation `repro lock refresh` itself uses. Together with stages 1
+    # and 2 over the closure those pins span, a passing push publishes a lock
+    # that is current and names only committed, published revisions.
+    var depSet: tuple[examined, stale, unverified: bool;
+                      evidence, remediation: string]
+    try:
+      depSet = verifyCommittedLockDependencySet(parsed.currentRepo)
+    except CatchableError as err:
+      depSet = (examined: true, stale: false, unverified: true,
+        evidence: "the dependency set could not be verified: " & err.msg,
+        remediation: "investigate the failure (" & err.msg & "), then re-push")
+    if depSet.stale or depSet.unverified:
+      result.failures.add(CheckFailure(
+        repo: currentRepoPath,
+        property:
+          if depSet.stale: "committed_lock_dependency_set_stale"
+          else: "committed_lock_dependency_set_unverified",
+        remediation: depSet.remediation,
+        evidence: depSet.evidence,
         source: parsed.currentRepo / CommittedLockFileName))
       result.exitCode = 2
 
@@ -75386,6 +75408,103 @@ proc executePush(args: PushArgs): PushReport =
         result.exitCode = 2
         return
 
+    # ---- 2b. re-pin the dependents of what the sync moved ----------------
+    # A sync that integrated upstream movement gave a member a NEW HEAD, and
+    # every closure member whose committed repro.lock pinned the old one now
+    # records a revision its dependency no longer holds — after a rebase, one
+    # no ref reaches at all. Nothing else would ever fix that: the commit-time
+    # re-pin (§13.3) runs only when the dependent itself commits, and the
+    # pre-push gate refuses the stale pin (`committed_lock_sibling_pin_stale`),
+    # so `push --sync` would stop at the first dependent of every repo it
+    # integrated. The re-pin is committed in the dependent, as the hook would
+    # have done at the dependent's next commit.
+    #
+    # Narrow by construction: an entry moves only when it pinned EXACTLY the
+    # HEAD the sync replaced, and only to the HEAD the sync produced. A rebase
+    # makes that move a divergence, which the regression rule would refuse;
+    # it is allowed for those repos alone, because this command made it. Every
+    # other entry of the lock is held as committed, so a pin that was already
+    # stale stays the gate's to report.
+    var syncMoved = initTable[string, tuple[before, after: string]]()
+    for sr in result.syncResults:
+      if not sr.integrated or sr.name notin beforeSync: continue
+      let before = beforeSync[sr.name].headSha
+      let after = revParse(identity, args.workspaceRoot / sr.path, "HEAD")
+      if before.len > 0 and after.len > 0 and before != after:
+        syncMoved[sr.name] = (before: before, after: after)
+    if syncMoved.len > 0:
+      # In closure order, dependencies first: a re-pin commit is itself a new
+      # HEAD, so it joins ``syncMoved`` for the dependents that follow.
+      for name in result.order:
+        var movedNames: seq[string]
+        for n in syncMoved.keys: movedNames.add(n)
+        let memberAbs = args.workspaceRoot / byName[name].path
+        if not fileExists(extendedPath(memberAbs / CommittedLockFileName)):
+          continue
+        var plan: CommittedLockRepinPlan
+        try:
+          plan = planCommittedLockRepin(memberAbs, movedNames)
+        except CatchableError as err:
+          result.syncResults.add(PushSyncResult(name: name,
+            path: byName[name].path, action: "re-pin", stopped: true,
+            diagnostic: "could not plan the re-pin of " &
+              memberAbs / CommittedLockFileName & ": " & err.msg,
+            remediation: "run `repro lock refresh " & memberAbs &
+              "`, commit repro.lock, then retry 'repro push'"))
+          result.stoppedRepo = name
+          result.stoppedStage = "sync"
+          result.retryCommand = "repro push"
+          result.exitCode = 2
+          return
+        var hold: seq[string]
+        var repinned: seq[string]
+        for m in plan.moves:
+          if m.name in syncMoved and m.oldRev == syncMoved[m.name].before and
+              m.newRev == syncMoved[m.name].after:
+            repinned.add(m.name)
+          else:
+            hold.add(m.name)
+        holdCommittedLockEntries(plan, hold)
+        if repinned.len == 0 or not plan.changed: continue
+        let applied = applyCommittedLockRepin(plan)
+        var commitRes = (code: 1, output: applied.line)
+        if applied.ok:
+          # Each step's ``diagnostic`` is git's merged stdout+stderr, which is
+          # what the failure message below quotes.
+          let added = gitRunPlainQuery(identity,
+            ["-C", memberAbs, "add", "--", CommittedLockFileName])
+          commitRes =
+            if added.code != 0: (code: added.code, output: added.diagnostic)
+            else:
+              let c = gitRunPlainQuery(identity, ["-C", memberAbs, "commit",
+                "--quiet", "-m", "chore(lock): re-pin " & repinned.join(", ") &
+                " after repro push --sync", "--", CommittedLockFileName])
+              (code: c.code, output: c.diagnostic)
+        if commitRes.code != 0:
+          result.syncResults.add(PushSyncResult(name: name,
+            path: byName[name].path, action: "re-pin", stopped: true,
+            diagnostic: "re-pinning " & repinned.join(", ") & " in " &
+              memberAbs / CommittedLockFileName & " failed: " &
+              commitRes.output.strip(),
+            remediation: "commit the re-pinned repro.lock in " & memberAbs &
+              " (or run `repro lock refresh` there), then retry 'repro push'"))
+          result.stoppedRepo = name
+          result.stoppedStage = "sync"
+          result.retryCommand = "repro push"
+          result.exitCode = 2
+          return
+        result.syncResults.add(PushSyncResult(name: name,
+          path: byName[name].path, action: "re-pin", integrated: true,
+          diagnostic: "re-pinned " & repinned.join(", ") & " in " &
+            CommittedLockFileName & " at the HEAD the sync produced"))
+        let repinHead = revParse(identity, memberAbs, "HEAD")
+        let previous =
+          if name in syncMoved: syncMoved[name].before
+          elif name in beforeSync: beforeSync[name].headSha
+          else: ""
+        if previous.len > 0 and repinHead.len > 0:
+          syncMoved[name] = (before: previous, after: repinHead)
+
     var refreshed = initTable[string, PushPreflightRepo]()
     for name in result.order:
       let observed = preflightPushRepo(identity, args.workspaceRoot,
@@ -75871,6 +75990,8 @@ proc renderPushTextLines(report: PushReport): seq[string] =
       var line = "repro push: sync " & sr.path & " action=" & sr.action
       if sr.stopped:
         line.add(" → STOPPED (" & sr.diagnostic & ")")
+      elif sr.action == "re-pin":
+        line.add(" → " & sr.diagnostic)
       elif sr.integrated:
         line.add(" → integrated upstream")
       result.add(line)
@@ -83265,7 +83386,9 @@ type
     target: string            ## repo NAME to add (a logical dependency).
     remoteUrl: string         ## fetch URL (drives the develop/binary policy).
     revision: string          ## revision/branch pin (defaults to project default).
-    dependsOf: string         ## optional repo whose `depends` gains the new edge.
+    dependsOf: string
+      ## ``--depends-of``, still parsed so that it is REFUSED with a pointer
+      ## to repro.nim rather than rejected as an unknown flag.
     mode: AddMode
     dryRun: bool
     json: bool
@@ -83280,7 +83403,9 @@ type
     overridden*: bool         ## whether a flag overrode the policy default.
     checkedOut*: bool         ## whether a sibling checkout was created.
     declarationChanged*: bool
-    dependsEdgeOn*: string    ## the repo whose `depends` gained an edge, if any.
+    dependsEdgeOn*: string
+      ## Always empty now that `--depends-of` is refused; kept so a `--json`
+      ## consumer of the report keeps finding the key.
     diagnostic*: string
     exitCode*: int
 
@@ -83437,6 +83562,20 @@ proc executeAdd(parsed: AddArgs): AddReport =
   result.workspaceRoot = parsed.workspaceRoot
   result.target = parsed.target
 
+  # `--depends-of` used to write a `[repo] depends` edge into the dependent's
+  # fragment. A fragment no longer declares dependencies — they come only
+  # from repro.nim (owner decision 2026-11-05, CLI/add.md) — so writing one
+  # would record an edge nothing reads while telling the caller it was
+  # recorded. Refused before anything is written, as a usage error.
+  if parsed.dependsOf.len > 0:
+    result.exitCode = 2
+    result.diagnostic = "`--depends-of` is no longer supported: a repo's " &
+      "dependencies are declared only in its repro.nim. Add the repo " &
+      "without it, then declare the dependency in " & parsed.dependsOf &
+      "'s repro.nim (`uses: \"" & parsed.target & "\"`) and run " &
+      "`repro lock refresh` there"
+    return
+
   let resolved = resolveAddProject(parsed)
   result.project = resolved.projectName
 
@@ -83537,12 +83676,13 @@ proc executeAdd(parsed: AddArgs): AddReport =
     # `includes` edge so the dependency participates in the workspace.
     # Reuse a declared remote that already serves this URL for this repo
     # name; only fall back to a per-repo remote when none can. `repro add`
-    # keeps `[repo].name == target` because the develop-set `depends` edges
-    # it writes name the target, and the closure keys off `[repo].name` — a
-    # fragment named after its server-side path would leave those edges
-    # dangling. So the plan is asked to PRESERVE the name (`repro workspace
-    # repos add`, which writes no `depends` edges, takes the
-    # unrestricted plan and may put a server-side path in `name`), and a plan
+    # keeps `[repo].name == target` because a dependent's repro.nim names the
+    # added repo by that name (`uses: "<target>"`, discovered at
+    # `../<target>/repro.nim`) and its lock records it under it — a fragment
+    # named after its server-side path would leave that name pointing at
+    # nothing. So the plan is asked to PRESERVE the name (`repro workspace
+    # repos add` takes the unrestricted plan and may put a server-side path
+    # in `name`), and a plan
     # that would still rename the repo — a bare `…/<repo>.git` directory URL,
     # where the name can only come out as `<repo>.git` — is declined in favour
     # of a per-repo remote that keeps the fragment's identity intact.
@@ -83591,24 +83731,6 @@ proc executeAdd(parsed: AddArgs): AddReport =
                      else: none(string))))))
     result.declarationChanged = projectDoc.appendInclude(fragmentRel)
     projectDoc.saveManifestDoc()
-    # RA-21 develop-set edge: when `--depends-of=<repo>` is given, record
-    # that the named repo depends on the newly added one.
-    if parsed.dependsOf.len > 0:
-      var dependentFragment = ""
-      for repo in resolved.repos:
-        if repo.name == parsed.dependsOf:
-          dependentFragment = repo.fragmentPath
-          break
-      if dependentFragment.len == 0:
-        result.exitCode = 1
-        result.diagnostic = "`--depends-of` names '" & parsed.dependsOf &
-          "' which is not a repo in project '" & resolved.projectName & "'"
-        return
-      # The edge goes in `[repo] depends` — the array NAMED `depends` in the
-      # `[repo]` table, created inline when the fragment has none.
-      if addArrayMemberInFile(dependentFragment, "repo", "depends",
-          parsed.target, alInline):
-        result.dependsEdgeOn = parsed.dependsOf
     result.exitCode = 0
 
 proc renderAddTextLines*(report: AddReport): seq[string] =
@@ -89441,7 +89563,15 @@ proc runCertifyingTestBuild(opts: ReproTestShardOpts; buildArgs: seq[string];
   var buildSelectors: seq[string]
   try:
     # ``--no-runquota`` reaches the plan's own edges too, not only the build.
-    let bypassRunQuota = "--no-runquota" in opts.buildFlags
+    # So does ``REPROBUILD_NO_RUNQUOTA``, the documented full-bypass switch
+    # the build's own parser defaults from (``runBuildCommand``): reading the
+    # flag alone made `repro test` ask a RunQuota daemon for the plan read
+    # that the build it then runs had been told not to ask, and on a host
+    # whose daemon socket the user cannot open the certificate plan was
+    # reported unreadable. ``--runquota`` still overrides the variable, as
+    # it does for the build.
+    let bypassRunQuota = "--no-runquota" in opts.buildFlags or
+      ("--runquota" notin opts.buildFlags and runQuotaBypassedByEnv())
     var autoRunQuota = startAutoRunQuotaIfNeeded(bypassRunQuota)
     defer: releaseAutoRunQuotaProcess(autoRunQuota)
     if selectors.len == 0 and opts.certifyExplicit:
@@ -91077,7 +91207,9 @@ type
     allowRegression: seq[string]
       ## ``--allow-pin-regression=<sibling>[,<sibling>…]`` (refresh only)
     allowStaleManifest: bool
-      ## Explicitly permit committed sibling removal from a known-behind manifest.
+      ## ``--allow-stale-manifest``: DEPRECATED, accepted and ignored. It
+      ## permitted a removal the retired exit-6 refusal held back; manifests
+      ## no longer decide which pins a lock keeps (owner decision 2026-11-05).
     reselectProvisioning: bool
       ## ReproOS M7 deliverable 5 — ``repro lock refresh --provisioning``:
       ## re-select the lock's provisioning records instead of carrying them
@@ -91151,6 +91283,9 @@ proc parseLockVerbArgs(rest: openArray[string]; verb: string;
       asJson = true
     elif verb == "refresh" and arg == "--allow-stale-manifest":
       gen.allowStaleManifest = true
+      stderr.writeLine("repro lock refresh: --allow-stale-manifest is " &
+        "deprecated and has no effect: a manifest no longer decides which " &
+        "sibling pins a lock keeps (dependencies come only from repro.nim)")
     elif verb == "refresh" and (arg == "--allow-pin-regression" or
         arg.startsWith("--allow-pin-regression=")):
       let parsedAllow = parsePinRegressionAllowance(
@@ -91265,6 +91400,12 @@ type CompiledProviderSolverInputs = object
     ## Every ``uses:`` selector the transitive walk could not reach, with the
     ## recipe that named it. Filled by ``foldProviderSolverInputs``; the lock
     ## writer refuses when one names a develop-set sibling.
+  usesEdges: seq[UsesEdge]
+    ## Which recipe named which ``uses:`` selector, for every recipe the
+    ## transitive walk read (the root included). Filled by
+    ## ``foldProviderSolverInputs``; the lock writer turns it into each
+    ## entry's ``depends`` (``lockedDepsForWorkspace``), so a lock records the
+    ## dependency GRAPH its recipes declare and not only the set.
   declarationSites: Table[string, string]
     ## Where THIS provider's recipe registered each parent package
     ## (``variants.SolverDeclarationSite`` spelled as text), read from the
@@ -91504,7 +91645,8 @@ proc solverInputsFromCompiledProvider(projectDir: string;
                                       requireSolverBinding = true;
                                       strict = false;
                                       allowEmptySolve = false;
-                                      failure: ptr string = nil):
+                                      failure: ptr string = nil;
+                                      readDeclarationUses = false):
     Option[CompiledProviderSolverInputs] =
   ## MO-12 — obtain solver inputs from the compiled project provider. Compiles
   ## the project's ``repro.nim`` / ``reprobuild.nim`` recipe to a provider
@@ -91523,6 +91665,15 @@ proc solverInputsFromCompiledProvider(projectDir: string;
   ## swallowed, so a caller that has no fallback can say why it has none. Compile artifacts live in the user cache; only
   ## the fresh manifest request and solver emission use disposable scratch.
   ## Refresh still writes NO build artifacts into the project tree.
+  ##
+  ## ``readDeclarationUses`` keeps the ``requireSolverBinding`` skips for a
+  ## recipe that has nothing to say, but no longer skips one merely for having
+  ## no ``build:`` block: a recipe with ``uses:`` and no build block — the
+  ## minimal recipe a sibling that is only cloned, or only reached through a
+  ## foreign build tool, carries so that others can name it — is compiled and
+  ## its ``uses:`` reported. Its dependencies are declared in it and nowhere
+  ## else (Unified-Locking-And-Hooks.md §14.9), so a lock writer that skipped
+  ## it would record none of them.
   result = none(CompiledProviderSolverInputs)
   # With ``allowEmptySolve``: what to answer, once the interface is known,
   # for every outcome that yields no solve.
@@ -91533,7 +91684,8 @@ proc solverInputsFromCompiledProvider(projectDir: string;
   if match.path.len == 0:
     return result
   let modulePath = absolutePath(match.path)
-  if requireSolverBinding and not moduleHasBuildBlock(modulePath):
+  if requireSolverBinding and not readDeclarationUses and
+      not moduleHasBuildBlock(modulePath):
     # NLF-M8, folded from NLF-M7. This return, and the `toolUses` one below,
     # are correct for the SOLVER-INPUTS caller: a recipe with no `build:`
     # block and no solver-bound `uses:` has no non-trivial solve, and the
@@ -91859,10 +92011,14 @@ proc foldProviderSolverInputs(projectDir: string;
   # owner and hit from another; only a selector no owner reached is reported.
   var reachedSelectors: seq[string] = @[]
   var unreached: seq[UnreachedUsesSelector] = @[]
+  var edges: seq[UsesEdge] = @[]
   var cursor = 0
   while cursor < pending.len:
     let (owner, useDef) = pending[cursor]
     inc cursor
+    if useDef.packageSelector.len > 0:
+      let edge: UsesEdge = (owner: owner, selector: useDef.packageSelector)
+      if edge notin edges: edges.add(edge)
     var recipeDir = discoverProducerSourceRoot(useDef.packageSelector, owner)
     if recipeDir.len == 0 and fromSource and useDef.executableName.len > 0:
       let outcome = tryResolveFromSourceTool(useDef, recipeRoot)
@@ -91896,6 +92052,7 @@ proc foldProviderSolverInputs(projectDir: string;
       pending.add((recipeDir, transitiveUse))
     aggregate.mergeProviderSolverInputs(producerInputs)
   aggregate.sourceRecipeRoots = seenRecipeDirs[1 .. ^1]
+  aggregate.usesEdges = edges
   aggregate.unreachedSelectors = @[]
   for miss in unreached:
     if miss.selector notin reachedSelectors:
@@ -91917,7 +92074,7 @@ type RefreshSolverInputs = tuple[
     packages: seq[PackageDecl]; text: string; source: string;
     usesSelectors: seq[string]; sourceRecipeRoots: seq[string];
     catalogRoots: seq[string]; unreachedSelectors: seq[UnreachedUsesSelector];
-    rootDeclarationSites: Table[string, string]]
+    rootDeclarationSites: Table[string, string]; usesEdges: seq[UsesEdge]]
   ## What ``resolveRefreshSolverInputs`` answers. Named once because
   ## ``repro lock validate`` declares a variable of it.
 
@@ -91938,8 +92095,13 @@ proc resolveRefreshSolverInputs(projectDir, inputsOverride: string):
   ## writer can refuse a solve that is missing a develop-set sibling's recipe.
   var probeFailure = ""
   if inputsOverride.len == 0:
+    # ``readDeclarationUses``: the root recipe may be a minimal one (a
+    # package and its ``uses:``, no build block), and its ``uses:`` are this
+    # lock's whole dependency set. The sibling recipes the fold below reaches
+    # are read the same way (``requireSolverBinding = false`` there).
     let fromProvider = solverInputsFromCompiledProvider(projectDir,
-      allowEmptySolve = true, failure = addr probeFailure)
+      allowEmptySolve = true, failure = addr probeFailure,
+      readDeclarationUses = true)
     if fromProvider.isSome:
       if probeFailure.len > 0:
         # The interface was read but the solve behind it failed: what came
@@ -91956,17 +92118,17 @@ proc resolveRefreshSolverInputs(projectDir, inputsOverride: string):
         # so the two agree on the inputs digest of an empty solve.
         return (true, @[], @[], "", "recipe-without-solve",
           p.usesSelectors, p.sourceRecipeRoots, p.catalogRoots,
-          p.unreachedSelectors, p.declarationSites)
+          p.unreachedSelectors, p.declarationSites, p.usesEdges)
       return (true, p.variants, p.packages, p.text, "provider",
         p.usesSelectors, p.sourceRecipeRoots, p.catalogRoots,
-        p.unreachedSelectors, p.declarationSites)
+        p.unreachedSelectors, p.declarationSites, p.usesEdges)
   let inputsP =
     if inputsOverride.len > 0: absolutePath(inputsOverride)
     else: solverInputsPath(projectDir)
   if fileExists(extendedPath(inputsP)):
     let loaded = loadSolverInputsFile(inputsP)
     return (true, loaded.variants, loaded.packages, loaded.text, "sidecar",
-      @[], @[], @[], @[], initTable[string, string]())
+      @[], @[], @[], @[], initTable[string, string](), newSeq[UsesEdge]())
   # A recipe that declares nothing to solve (a dev-env-only `repro.nim`) still
   # has a develop set, and its committed lock is where that set's revisions
   # are recorded (Unified-Locking-And-Hooks.md §14.2). Its solve is the empty
@@ -91987,12 +92149,12 @@ proc resolveRefreshSolverInputs(projectDir, inputsOverride: string):
         raise newException(IOError, unreadableRecipeLockRefusal(
           recipe, probeFailure))
       return (true, @[], @[], "", "recipe-without-solve", @[], @[], @[], @[],
-        initTable[string, string]())
+        initTable[string, string](), newSeq[UsesEdge]())
   if probeFailure.len > 0:
     stderr.writeLine("repro lock refresh: could not read the tool uses of " &
       "the recipe in " & projectDir & ": " & probeFailure)
   return (false, @[], @[], "", "", @[], @[], @[], @[],
-    initTable[string, string]())
+    initTable[string, string](), newSeq[UsesEdge]())
 
 proc buildLockGenerationRequest(projectDir, inputsOverride,
                                 platformOverride: string;
@@ -92041,7 +92203,7 @@ proc buildLockGenerationRequest(projectDir, inputsOverride,
     workDir: getTempDir() /
       ("repro-lock-generation-" & $getCurrentProcessId() & "-" & verb),
     extraDeps: lockedDepsForWorkspace(projectDir, resolved.usesSelectors,
-      resolved.sourceRecipeRoots, resolved.catalogRoots),
+      resolved.sourceRecipeRoots, resolved.catalogRoots, resolved.usesEdges),
     entryPoint: entryPoint)
   unreached = resolved.unreachedSelectors
   rootSites = resolved.rootDeclarationSites
@@ -92071,41 +92233,63 @@ type UnreachedDevelopSibling = object
 
 proc declaredDevelopSet(projectDir, lockPath: string):
     seq[tuple[name, checkout: string]] =
-  ## The develop set a lock written for ``projectDir`` is answerable to, as
-  ## (repo name, absolute checkout path) pairs, each name once. It is the
-  ## UNION of every place that set is declared, because each one alone can
-  ## understate it — and an understated set is exactly how a partial solve
-  ## goes unnoticed:
+  ## The repos a ``uses:`` selector the solve could not reach may name, as
+  ## (repo name, absolute checkout path) pairs, each name once. A selector
+  ## naming one of them means a recipe that exists was left out of the solve;
+  ## a selector naming none of them is a plain tool (``cargo``, ``nim``). It
+  ## is the UNION of the places that can say "this name is a repository",
+  ## because each alone can understate it — and an understated set is exactly
+  ## how a partial solve goes unnoticed:
   ##
-  ##   * The workspace MANIFEST's ``depends`` closure over the resolved
-  ##     membership (``developSetClosure``), at the paths the manifest gives.
-  ##   * Every ``depends`` name in that closure the resolved membership does
-  ##     NOT contain (``undeclaredDependEdges``), at the workspace-sibling path
-  ##     ``<workspace>/<name>``. The membership is the ENABLED projects, not
-  ##     every repo the manifest knows: a workspace that enables a project
-  ##     containing ``codetracer`` but not the one containing ``isonim-tui``
-  ##     resolves no ``isonim-tui`` at all, though ``codetracer`` depends on
-  ##     it. Relying on the resolved closure alone missed precisely the
-  ##     sibling that is not checked out — the case this check exists for.
   ##   * The committed lock at ``lockPath``: its non-root VCS ``deps``, at the
-  ##     paths it records. Outside a workspace (a standalone clone, CI) it is
-  ##     the only record; inside one it still names siblings a narrower
-  ##     membership cannot see. An unreadable or absent lock adds nothing.
+  ##     paths it records. A previous refresh recorded each as a repository
+  ##     the recipes depend on, so it is the strongest evidence there is.
+  ##     Outside a workspace (a standalone clone, CI) it is the only record.
+  ##     An unreadable or absent lock adds nothing.
+  ##   * Every repo the workspace DECLARES — its resolved membership and every
+  ##     ``repos/*.toml`` fragment, enabled or not — whose checkout path ends
+  ##     in its own name, at that path. The membership is the ENABLED projects:
+  ##     a workspace that enables a project containing ``codetracer`` but not
+  ##     the one containing ``isonim-tui`` resolves no ``isonim-tui`` at all,
+  ##     though a ``codetracer`` recipe uses it, and that sibling — the one not
+  ##     checked out — is precisely the case this check exists for. The
+  ##     path condition is what keeps a TOOL selector from being mistaken for
+  ##     a repository that shares its name: ``uses:`` discovers a sibling at
+  ##     ``../<selector>``, so a repo declared under the name ``nim`` but kept
+  ##     at ``codetracer-nim`` is not what ``uses: "nim"`` can mean.
   ##
-  ## A manifest path wins over a lock path for the same name.
+  ## These answer an IDENTITY question ("is this name a repository of ours?"),
+  ## not a dependency one: that a recipe depends on the repo is already known,
+  ## because its ``uses:`` names it. A fragment used to contribute its
+  ## ``depends`` closure here instead; that key no longer declares anything
+  ## (owner decision 2026-11-05, Unified-Locking-And-Hooks.md §14.9).
+  ##
+  ## A declared (membership) path wins over a lock path for the same name.
   proc addMember(members: var seq[tuple[name, checkout: string]];
                  name, checkout: string) =
     for member in members:
       if member.name == name: return
     members.add((name, os.normalizedPath(absolutePath(checkout))))
+  proc discoverableAs(name, path: string): bool =
+    ## ``uses: "<name>"`` can reach a checkout kept at ``path`` only when the
+    ## checkout's directory is named ``name``.
+    name.len > 0 and path.len > 0 and
+      extractFilename(path.strip(leading = false, chars = {'/', '\\'})) == name
   let membership = manifestMembershipOf(projectDir)
   if membership.resolved:
-    let closure = developSetClosure(membership.repos, membership.selfName)
     for r in membership.repos:
-      if r.name != membership.selfName and r.name in closure:
+      if r.name != membership.selfName and discoverableAs(r.name, r.path):
         result.addMember(r.name, membership.workspaceRoot / r.path)
-    for edge in undeclaredDependEdges(membership.repos, membership.selfName):
-      result.addMember(edge.dep, membership.workspaceRoot / edge.dep)
+    let fragments = manifestsRoot(membership.workspaceRoot) / "repos"
+    if dirExists(extendedPath(fragments)):
+      for file in walkFiles(fragments / "*.toml"):
+        var fragment: RepoFragment
+        try: fragment = readRepoFragment(file)
+        except CatchableError: continue
+        let name = fragment.repo.name
+        let path = if fragment.repo.path.len > 0: fragment.repo.path else: name
+        if name != membership.selfName and discoverableAs(name, path):
+          result.addMember(name, membership.workspaceRoot / path)
   if lockPath.len == 0 or not fileExists(extendedPath(lockPath)): return
   var existing: seq[LockedDep]
   try:
@@ -92197,6 +92381,151 @@ proc renderUnreachedDevelopSibling(f: UnreachedDevelopSibling): string =
       consequence & ". Check it out where the workspace declares it " &
       "(`repro sync`, or `repro ws enable` the project that declares it) " &
       "and run the command again"
+
+type RecipeDependencySet = object
+  ## The dependencies lock generation derives for a repo from its recipe — the
+  ## set ``repro lock refresh`` would record — computed without solving or
+  ## writing anything (``recipeDependencySet``).
+  hasInputs: bool
+    ## The repo has solver inputs to derive from: a recipe (``repro.nim``) or
+    ## the legacy ``repro.solver`` sidecar.
+  ok: bool
+    ## The derivation ran to completion over every recipe it had to read.
+  diagnostic: string    ## why ``ok`` is false
+  deps: seq[LockedDep]  ## the non-root VCS dependencies, in lock order
+
+proc recipeDependencySet(projectDir: string): RecipeDependencySet =
+  ## The repos ``projectDir``'s ``repro.nim`` depends on, transitively, derived
+  ## through the SAME calls ``repro lock refresh`` makes before it solves
+  ## (``resolveRefreshSolverInputs`` — the provider's ``uses:``, folded through
+  ## every sibling recipe they reach — then ``lockedDepsForWorkspace``), so the
+  ## pre-push gate and the lock writer cannot disagree about the set. Owner
+  ## decision 2026-11-05: "the lock file includes only the transitive set of
+  ## dependencies derived from repro.nim files".
+  ##
+  ## A solve the fold could not complete — a ``uses:`` naming a repository of
+  ## ours whose recipe it did not read (``unreachedDevelopSiblings``, the
+  ## refresh's exit-5 refusal) — is NOT ``ok``: the selectors that recipe
+  ## would have contributed are unknown, so any set reported from it would be
+  ## a guess. Compiling a provider can fail as well; that is reported too,
+  ## rather than read as "no dependencies".
+  let root = absolutePath(projectDir)
+  var inputs: RefreshSolverInputs
+  try:
+    inputs = resolveRefreshSolverInputs(root, "")
+  except CatchableError as err:
+    result.hasInputs = true
+    result.diagnostic = err.msg
+    return
+  if not inputs.found:
+    result.ok = true
+    return
+  result.hasInputs = true
+  try:
+    let incomplete = unreachedDevelopSiblings(root, committedLockPath(root),
+      inputs.unreachedSelectors)
+    if incomplete.len > 0:
+      var lines: seq[string]
+      for f in incomplete: lines.add(renderUnreachedDevelopSibling(f))
+      result.diagnostic = lines.join("; ")
+      return
+    for d in lockedDepsForWorkspace(root, inputs.usesSelectors,
+        inputs.sourceRecipeRoots, inputs.catalogRoots, inputs.usesEdges):
+      if isSelfLockedDep(d) or d.coordinates.kind != ckVcs: continue
+      result.deps.add(d)
+    result.ok = true
+  except CatchableError as err:
+    result.diagnostic = err.msg
+
+proc verifyCommittedLockDependencySet*(repoRoot: string):
+    tuple[examined, stale, unverified: bool;
+          evidence, remediation: string] =
+  ## Unified-Locking-And-Hooks.md §13.5 / §14.9 — does the committed
+  ## ``repro.lock`` at ``repoRoot`` carry exactly the dependencies its
+  ## ``repro.nim`` derives? This is the half of "the lock is up to date" that
+  ## pin currency (``verifyCommittedLockSiblingPins``) cannot see: that stage
+  ## compares each entry with its checkout, and is silent about an entry that
+  ## should not be there or one that is missing.
+  ##
+  ## * ``stale``: the NAMES differ — a repo the recipe derives that the lock
+  ##   does not pin, or a pin no recipe in the closure derives (which is what
+  ##   a lock written while manifest edges were folded in carries).
+  ## * ``unverified``: the set could not be derived (a recipe that does not
+  ##   compile, a solve missing a sibling's recipe), or the lock does not
+  ##   parse. A gate does not report as current a set it did not compute.
+  ##
+  ## A repo with neither ``repro.nim`` nor ``repro.solver`` declares no
+  ## dependency: its lock is current exactly when it pins none.
+  ##
+  ## Not examined: a repo with neither a lock nor a recipe. A recipe without a
+  ## lock is examined: deriving a dependency it does not record is stale.
+  ## Reads only; writes no lock (a provider compile may populate its caches,
+  ## exactly as a refresh would).
+  let root = absolutePath(repoRoot)
+  let lockPath = root / CommittedLockFileName
+  let hasLock = fileExists(extendedPath(lockPath))
+  let hasRecipe =
+    try: resolveProjectFile(root).path.len > 0
+    except CatchableError: true  # ambiguous: still a recipe to derive from
+  if not hasLock and not hasRecipe: return
+  result.examined = true
+  let refresh = "run `repro lock refresh " & root & "`, commit repro.lock, " &
+    "then re-push"
+  var pinned: seq[string] = @[]
+  if hasLock:
+    let read = committedLockDependencyNames(root)
+    if not read.readable:
+      result.unverified = true
+      result.evidence = lockPath & " does not parse as a lock, so the " &
+        "dependencies it records cannot be compared with the recipe's"
+      result.remediation = refresh
+      return
+    pinned = read.names
+  let derived = recipeDependencySet(root)
+  if not derived.hasInputs:
+    # No recipe (nor sidecar): such a repo declares no dependency, so its set
+    # is the EMPTY one. A lock that pins none agrees with it; one that pins a
+    # sibling records a dependency nothing declares, and no refresh can
+    # re-derive it (there is nothing to refresh from), so the remedy is to
+    # declare it.
+    if pinned.len == 0: return
+    result.stale = true
+    result.evidence = lockPath & " pins " & pinned.join(", ") & ", but " &
+      root & " has no repro.nim (nor repro.solver) that declares any " &
+      "dependency [missing= extra=" & pinned.join(",") & "]"
+    result.remediation = "declare each dependency in " & root /
+      CanonicalProjectFileName & " (`uses:`), then " & refresh
+    return
+  if not derived.ok:
+    result.unverified = true
+    result.evidence = "the dependency set " & root / CanonicalProjectFileName &
+      " derives could not be computed: " & derived.diagnostic
+    result.remediation = "make the recipe readable — `repro lock refresh " &
+      root & "` reports the same error — then commit repro.lock and re-push"
+    return
+  var derivedNames: seq[string] = @[]
+  for d in derived.deps:
+    if d.name != "" and d.name notin derivedNames: derivedNames.add(d.name)
+  var missing, extra: seq[string]
+  for name in derivedNames:
+    if name notin pinned: missing.add(name)
+  for name in pinned:
+    if name notin derivedNames: extra.add(name)
+  if missing.len == 0 and extra.len == 0: return
+  result.stale = true
+  var parts: seq[string]
+  if missing.len > 0:
+    parts.add("derived from repro.nim but not pinned by " &
+      (if hasLock: "repro.lock" else: "any repro.lock (there is none)") &
+      ": " & missing.join(", "))
+  if extra.len > 0:
+    parts.add("pinned by repro.lock but declared by no repro.nim in the " &
+      "closure: " & extra.join(", "))
+  result.evidence = parts.join("; ") & " [missing=" & missing.join(",") &
+    " extra=" & extra.join(",") & "]"
+  result.remediation = refresh & " (a lock records only the dependencies " &
+    "repro.nim derives; a dependency it needs is declared there, with " &
+    "`uses:`)"
 
 type
   RefreshPinGate = object
@@ -92719,51 +93048,21 @@ proc inspectSiblingRemovals(projectDir, lockPath: string;
     proposed: seq[LockedDep]): SiblingRemovalReport =
   ## Compare identities, never checkout paths. HEAD remains authoritative even
   ## after an earlier refresh or hand edit narrowed the working-copy lock.
+  ##
+  ## A removal has one possible reason, inside a workspace or outside one:
+  ## the recipe. A pin is dropped when no ``repro.nim`` in the closure derives
+  ## it any more (``lockedDepsForWorkspace``). Manifest checkouts are no longer
+  ## inspected. They were while a manifest's ``depends`` closure decided
+  ## which pins a lock kept, and a STALE manifest checkout could therefore
+  ## drop a pin (the retired exit-6 refusal, `--allow-stale-manifest`); a
+  ## manifest declares no dependencies now (owner decision 2026-11-05), so
+  ## ``behindManifests`` stays empty and is kept only for `--json` consumers.
   result.droppedPins = newJArray()
   result.behindManifests = newJArray()
-  let membership = manifestMembershipOf(projectDir)
-  let workspace =
-    if membership.resolved: membership.workspaceRoot
-    else: enclosingWorkspaceRoot(committedLockPathBase(projectDir))
-  if workspace.len == 0: return
   let identity = ensureGitToolResolvable(tpmPathOnly, getEnv("PATH"))
-  var manifests = newJArray()
-  var descriptions: seq[string]
-  for checkout in manifestCheckoutPaths(workspace):
-    let head = gitRunPlainQuery(identity,
-      ["-C", checkout, "rev-parse", "--verify", "HEAD"])
-    if head.code != 0: continue
-    let revision = head.output.strip()
-    let state = gitRunPlainQuery(identity,
-      ["-C", checkout, "status", "--porcelain", "--untracked-files=no"])
-    let dirty = state.code == 0 and state.output.strip().len > 0
-    manifests.add(%*{"checkout": checkout, "revision": revision,
-      "dirty": dirty})
-    descriptions.add(checkout & " at " & revision &
-      (if dirty: " (with uncommitted changes)" else: ""))
-    let upstream = gitRunPlainQuery(identity,
-      ["-C", checkout, "rev-parse", "--symbolic-full-name", "@{upstream}"])
-    if upstream.code != 0: continue
-    let upstreamRef = upstream.output.strip()
-    if not upstreamRef.startsWith("refs/remotes/"): continue
-    let target = gitRunPlainQuery(identity,
-      ["-C", checkout, "rev-parse", "--verify", upstreamRef])
-    if target.code != 0: continue
-    let upstreamRevision = target.output.strip()
-    let base = gitRunPlainQuery(identity,
-      ["-C", checkout, "merge-base", revision, upstreamRevision])
-    if base.code != 0: continue
-    let missing = gitRunPlainQuery(identity,
-      ["-C", checkout, "rev-list", "--count", revision & ".." & upstreamRevision])
-    if missing.code != 0 or missing.output.strip() == "0": continue
-    result.behindManifests.add(%*{"checkout": checkout,
-      "revision": revision, "upstream": upstreamRef,
-      "upstreamRevision": upstreamRevision})
-  if not membership.resolved: return
-  let reason = "the resolved manifest depends closure no longer names this " &
-    "sibling (manifest checkouts: " &
-    (if descriptions.len > 0: descriptions.join("; ")
-     else: membership.workspaceRoot & " (not a Git checkout)") & ")"
+  let manifests = newJArray()
+  let reason = "no repro.nim in this repo's dependency closure declares " &
+    "this sibling any more"
   var names: seq[string]
   for dep in proposed:
     if not isSelfLockedDep(dep) and dep.coordinates.kind == ckVcs:
@@ -93110,14 +93409,8 @@ proc runLockGenerationVerb(rest: openArray[string]; verb: string;
         "pins: " & err.msg & "; nothing was written")
       return 1
     announceSiblingRemovals(removals)
-    if removals.committedDrops and removals.behindManifests.len > 0 and
-        not gen.allowStaleManifest:
-      stderr.writeLine("repro lock refresh: refusing to remove committed " &
-        "sibling pins using a behind manifest; run `repro sync`, or pass " &
-        "--allow-stale-manifest to proceed explicitly; nothing was written")
-      if asJson:
-        echo $siblingRemovalJson(removals, lockP, "refused-stale-manifest")
-      return 6
+    # No stale-manifest refusal (formerly exit 6): a manifest decides no pin,
+    # so a manifest checkout that is behind cannot be why one disappears.
     0
   if entryPoint == lgeLockRefresh and
       (gen.repin.len == 0 or gen.reselectProvisioning):
@@ -93287,10 +93580,12 @@ proc runReproLockRefresh(rest: openArray[string]): int =
   ## ``--allow-pin-regression`` / ``REPRO_ALLOW_PIN_REGRESSION`` does not
   ## name it. Exits 5 (``IncompleteSolveExitCode``), writing nothing, when a
   ## ``uses:`` names a develop-set sibling whose recipe the solve could not
-  ## read (``unreachedDevelopSiblings``). Exits 6 without writing when a
-  ## locally known-behind manifest would remove HEAD-committed sibling pins;
-  ## ``--allow-stale-manifest`` explicitly permits that removal. ``--json``
-  ## reports ``droppedPins`` and ``behindManifests`` on success or exit 6.
+  ## read (``unreachedDevelopSiblings``). It records only the dependencies
+  ## the recipe derives (owner decision 2026-11-05); a pin no ``repro.nim``
+  ## in the closure derives any more is dropped and named on stderr.
+  ## ``--json`` reports ``droppedPins`` (and ``behindManifests``, always empty
+  ## since the stale-manifest refusal, exit 6, was retired with the manifest
+  ## edges it guarded; ``--allow-stale-manifest`` is accepted and ignored).
   ##
   ## The lock's ``provisioning`` records (ReproOS M7) are CARRIED FORWARD
   ## unchanged: a refresh never re-selects a contributor as a side effect
@@ -101543,7 +101838,7 @@ proc flakeSiblingAwaitsThisPush(view: PushCycleView;
   ## ``row.unpublished`` is only ever set on ahead/diverged rows
   ## (``flakeAnnotatePublication``), so behind/unfetched/unknown rows — whose
   ## remedies move the CHECKOUT, not the remote — are never cyclic here.
-  siblingAwaitsThisPush(view, row.repo, row.unpublished)
+  siblingAwaitsThisPush(view, row.repo, row.unpublished, row.path)
 
 proc flakeRowIsDeferredCycle(view: PushCycleView; row: FlakeOverrideStateRow;
     identity: GitToolIdentity): bool =
