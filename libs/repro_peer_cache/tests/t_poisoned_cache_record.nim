@@ -113,6 +113,18 @@ int main(void) {
   HeartbeatMs = 300
 
 proc ccPath(): string =
+  ## The compiler of the edge whose record crosses hosts. On Linux that is
+  ## GCC when there is one, not whatever `cc` is: the dev shell's `cc` is
+  ## clang, and clang draws `arc4random` to name the temporary files it
+  ## writes its output and depfile through, which the monitor reports as an
+  ## entropy read by an unblessed image. Such an edge's record is withheld
+  ## from publication (`unblessed-entropy`), so a fixture compiled by clang
+  ## never has a record to serve and nothing this case is about happens.
+  ## The same monitored GCC compile reports no entropy read.
+  when defined(linux):
+    result = findExe("gcc")
+    if result.len > 0:
+      return
   result = findExe("cc")
   if result.len == 0:
     result = findExe("clang")

@@ -10571,8 +10571,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_libs_repro_workspace_snapshot_tests_g01",
-    singleReason: ""),
+    group: "",
+    singleReason: "no other source shares its compile options"),
   TestSpec(
     source: "libs/repro_workspace_snapshot/tests/t_workspace_snapshot_export_and_materialize.nim",
     binary: "build/test-bin/t_workspace_snapshot_export_and_materialize",
@@ -10582,8 +10582,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_libs_repro_workspace_snapshot_tests_g01",
-    singleReason: ""),
+    group: "",
+    singleReason: "its binary is named by tools/test-runner/repro_test_runner.nim"),
   TestSpec(
     source: "libs/repro_workspace_vcs/tests/t_shared_bare_refresh_advances_refs_and_wiring_compares_paths.nim",
     binary: "build/test-bin/t_shared_bare_refresh_advances_refs_and_wiring_compares_paths",

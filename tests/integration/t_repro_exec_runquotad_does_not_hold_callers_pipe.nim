@@ -21,12 +21,19 @@
 ## The case requires the pipe to reach EOF within `EofBudgetMs` of `repro`
 ## exiting. Two controls keep that honest:
 ##
-##   * The spawn arm really ran. The inner command is this binary in probe
-##     mode, printing the `RUNQUOTA_SOCKET` it inherited. On POSIX the case
-##     points `RUNQUOTA_SOCKET` at a path that does not exist, so both of
-##     `startAutoRunQuotaIfNeeded`'s reachability early returns fall through,
-##     and the probe must report a DIFFERENT socket: the per-invocation one the
-##     spawned daemon bound. On Windows the case gives the invocation a private
+##   * The spawn arm really ran. On POSIX the case points `RUNQUOTA_SOCKET`
+##     at a path that does not exist, so both of `startAutoRunQuotaIfNeeded`'s
+##     reachability early returns fall through, and it hands the invocation a
+##     `RUNQUOTAD_BIN` that records each start and then `exec`s the real
+##     daemon, so the daemon is the same process, holding the same
+##     descriptors, that the invocation spawned. The record must be there.
+##     (This used to be read off the inner command, which printed the
+##     `RUNQUOTA_SOCKET` it inherited and had to see the spawned daemon's.
+##     Since reprobuild de84de3a an invocation-owned daemon is released and the
+##     caller's RunQuota environment restored once the dev environment is
+##     computed, before the command runs, so the command inherits the
+##     caller's endpoint and that control could no longer tell a spawn from
+##     none.) On Windows the case gives the invocation a private
 ##     `USERNAME`, so the per-user pipe name (`\\.\pipe\runquota-<USERNAME>`)
 ##     is one nothing else serves, and a daemon this case did not start cannot
 ##     be adopted instead.
@@ -235,6 +242,22 @@ suite "repro exec stdio and the auto-started runquotad":
         require pipeServerPid(privatePipe) == 0
       else:
         env["RUNQUOTA_SOCKET"] = bogusSocket
+        # The spawn-arm control (see the header): a `runquotad` that records
+        # its start and becomes the real daemon.
+        let realRunquotad =
+          if env.hasKey("RUNQUOTAD_BIN") and fileExists(env["RUNQUOTAD_BIN"]):
+            env["RUNQUOTAD_BIN"]
+          else:
+            findExe("runquotad")
+        require realRunquotad.len > 0
+        let spawnRecord = scratch / "runquotad-started"
+        let recordingRunquotad = scratch / "runquotad"
+        writeFile(recordingRunquotad, "#!/bin/sh\n" &
+          "echo \"$$\" >> " & quoteShell(spawnRecord) & "\n" &
+          "exec " & quoteShell(realRunquotad) & " \"$@\"\n")
+        setFilePermissions(recordingRunquotad,
+          {fpUserRead, fpUserWrite, fpUserExec})
+        env["RUNQUOTAD_BIN"] = recordingRunquotad
 
       # The `$(...)` role: stdout and stderr on ONE pipe this case reads.
       let invocation = startProcess(cli, workingDir = project,
@@ -277,10 +300,13 @@ suite "repro exec stdio and the auto-started runquotad":
           check daemonPid > 0 and processAlive(daemonPid)
           check probeValue(output, "probe-username") == privateUser
         else:
-          # Control: the spawn arm ran and published the socket it bound.
-          let published = probeValue(output, "probe-runquota-socket")
-          check published.len > 0
-          check published != bogusSocket
+          # Control: the spawn arm ran -- the invocation started a daemon.
+          let spawnRecord = scratch / "runquotad-started"
+          checkpoint("runquotad starts recorded: " &
+            (if fileExists(spawnRecord): readFile(spawnRecord).strip()
+             else: "none"))
+          check fileExists(spawnRecord) and
+            readFile(spawnRecord).strip().len > 0
         check "probe-runquota-socket=" in output
         check state == psEof
       finally:

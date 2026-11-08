@@ -57,6 +57,19 @@ if paramCount() >= 1 and paramStr(1) == FixtureFlag:
   quit(runUserDaemonCommand(args))
 
 when defined(posix):
+  from repro_test_support/process_fixtures import shortSocketDirAtProcessExit
+
+  proc scratchDir(): string =
+    ## A fresh scratch directory whose ``<scratch>/run/d.sock`` endpoints fit
+    ## the Unix-socket path limit WITH the daemon's atomic-publish staging
+    ## name beside them, whatever the suite's TMPDIR is. Under the persistent
+    ## runner's ``/var/lib/github-runner-work/<runner>/.cache/
+    ## reprobuild-test-tmp/<n>`` a scratch endpoint was 106 bytes, so the
+    ## staging bind did not fit, the daemon refused to listen and every case
+    ## timed out waiting for its socket
+    ## (process_fixtures.shortSocketDirAtProcessExit says why).
+    createTempDir("repro-status-", "", shortSocketDirAtProcessExit("rs-"))
+
   type Daemon = object
     process: Process
     endpoint: string
@@ -117,7 +130,7 @@ when defined(posix):
 
   suite "a daemon status record identifies the endpoint, not its basename":
     test "a stale same-basename sibling's cleanup keeps the live daemon's record":
-      let scratch = createTempDir("repro-status-", "")
+      let scratch = scratchDir()
       defer: removeDir(scratch)
       let stateDir = scratch / "state"
       let liveEndpoint = scratch / "a" / "d.sock"
@@ -150,7 +163,7 @@ when defined(posix):
       check recordsNaming(stateDir, liveEndpoint).len == 0
 
     test "under --state-dir the record is where statusFileForEndpoint says":
-      let scratch = createTempDir("repro-status-", "")
+      let scratch = scratchDir()
       defer: removeDir(scratch)
       let stateDir = scratch / "override-state"
       let endpoint = scratch / "run" / "d.sock"
@@ -172,7 +185,7 @@ when defined(posix):
       # `repro daemon status|stop --endpoint b/d.sock` hands the cleanup the
       # flags as typed, while the daemon keyed its record on the ABSOLUTE
       # endpoint it anchored them to. Same flags, same cwd: same record.
-      let scratch = createTempDir("repro-status-", "")
+      let scratch = scratchDir()
       defer: removeDir(scratch)
       let previousDir = getCurrentDir()
       setCurrentDir(scratch)
@@ -189,7 +202,7 @@ when defined(posix):
       check recordsNaming(here / "state", here / "b" / "d.sock").len == 0
 
     test "stale cleanup removes a legacy record that names the stale endpoint":
-      let scratch = createTempDir("repro-status-", "")
+      let scratch = scratchDir()
       defer: removeDir(scratch)
       let stateDir = scratch / "state"
       let endpoint = scratch / "b" / "d.sock"
@@ -201,7 +214,7 @@ when defined(posix):
     test "stale cleanup keeps a legacy record that names another endpoint":
       # The legacy name is shared by every `d.sock`; only its contents say
       # whose it is, and it may belong to a live older-generation daemon.
-      let scratch = createTempDir("repro-status-", "")
+      let scratch = scratchDir()
       defer: removeDir(scratch)
       let stateDir = scratch / "state"
       let endpoint = scratch / "b" / "d.sock"
@@ -211,7 +224,7 @@ when defined(posix):
       check fileExists(legacy)
 
     test "cleanup keeps a legacy record for an endpoint that is live":
-      let scratch = createTempDir("repro-status-", "")
+      let scratch = scratchDir()
       defer: removeDir(scratch)
       let stateDir = scratch / "state"
       let endpoint = scratch / "b" / "d.sock"
@@ -223,7 +236,7 @@ when defined(posix):
 
     test "a second daemon on a live daemon's state dir is refused":
       # The premise of the header's last paragraph.
-      let scratch = createTempDir("repro-status-", "")
+      let scratch = scratchDir()
       defer: removeDir(scratch)
       let stateDir = scratch / "state"
       let liveEndpoint = scratch / "a" / "d.sock"
@@ -248,7 +261,7 @@ when defined(posix):
       # direct mode for the rest of the run. The kernel's record of the
       # descriptor's flags is the statement: O_CLOEXEC (02000000) set.
       when defined(linux):
-        let scratch = createTempDir("repro-status-", "")
+        let scratch = scratchDir()
         defer: removeDir(scratch)
         let stateDir = scratch / "state"
         let endpoint = scratch / "a" / "d.sock"

@@ -10117,7 +10117,8 @@
         "repro_binary_cache_client",
         "repro_binary_cache_server",
         "repro_daemon_core",
-        "repro_peer_cache"
+        "repro_peer_cache",
+        "repro_test_support"
       ],
       "owner": "libs/repro_binary_cache_client",
       "requiresReproBinary": false,
@@ -14761,7 +14762,8 @@
       "defines": [],
       "language": "nim",
       "localDependencyShape": [
-        "repro_daemon_core"
+        "repro_daemon_core",
+        "repro_test_support"
       ],
       "owner": "libs/repro_daemon_core",
       "requiresReproBinary": false,

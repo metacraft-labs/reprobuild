@@ -1200,13 +1200,20 @@ suite "integration_build_engine_api_ready_queue":
       let coldMissing = runOne(missingCacheAction)
       check coldMissing.status == asSucceeded
       check readFile(missingOutputPath) == "seed:changed cache input\n"
+      # ARM 4 -- the declared output is MISSING and the record's payload is
+      # in the local CAS. Owner decision 2026-11-03 (Incremental-Invalidation
+      # .md, "Minimum check set" step 3.3): a payload-backed record whose
+      # inputs match is RESTORED from the CAS, not re-run. So the hit is
+      # served, the restore-only command never launches (no marker), and the
+      # output comes back with the bytes the record describes -- not the
+      # restore-only command's "bad uncached output".
       removeFile(missingOutputPath)
       let warmMissing = runOne(missingRestoreOnlyAction)
-      check warmMissing.status == asSucceeded
-      check warmMissing.cacheDecision == cdMiss
-      check warmMissing.launched
-      check fileExists(missingMarkerPath)
-      check readFile(missingOutputPath) == "bad uncached output\n"
+      check warmMissing.status == asCacheHit
+      check warmMissing.cacheDecision == cdHit
+      check not warmMissing.launched
+      check not fileExists(missingMarkerPath)
+      check readFile(missingOutputPath) == "seed:changed cache input\n"
 
     test "runBuild honors explicit checksum action-cache policy":
       let tempRoot = createTempDir("repro-cache-explicit-checksum", "")

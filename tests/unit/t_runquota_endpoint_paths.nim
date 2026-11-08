@@ -100,9 +100,18 @@ when defined(posix):
     doAssert lstat(path.cstring, info) == 0
     int(info.st_mode) and 0o7777
 
+  proc shortTempRoot(prefix: string): string =
+    ## A temp root directly under ``/tmp``. These cases test what happens
+    ## when the root FITS, so it must fit whatever the suite's TMPDIR is: a
+    ## root under a long TMPDIR (the persistent runner's
+    ## ``/var/lib/github-runner-work/<runner>/.cache/reprobuild-test-tmp/<n>``)
+    ## is itself past the socket-path limit, and the code under test then
+    ## correctly relocates to ``/tmp`` -- which is the case below, not these.
+    createTempDir(prefix, "", "/tmp")
+
   suite "fresh private RunQuota endpoints":
     test "every call creates a new owner-only directory nobody held before":
-      let root = createTempDir("repro-rq-fresh-", "")
+      let root = shortTempRoot("repro-rq-fresh-")
       defer: removeDir(root)
       withTempRoot(root):
         let first = createPrivateRunQuotaEndpoint("caller-")
@@ -120,7 +129,7 @@ when defined(posix):
     test "a directory left at a predictable name is never chosen":
       # The defect a pid-derived name had: a leftover from an earlier holder
       # of the same name. Whatever is already there, the result is new.
-      let root = createTempDir("repro-rq-stale-", "")
+      let root = shortTempRoot("repro-rq-stale-")
       defer: removeDir(root)
       withTempRoot(root):
         createDir(root / "caller-")
@@ -130,7 +139,7 @@ when defined(posix):
           check walkDir(endpoint.parentDir).toSeq.len == 0
 
     test "the umask cannot narrow the exact mode the private policy requires":
-      let root = createTempDir("repro-rq-umask-", "")
+      let root = shortTempRoot("repro-rq-umask-")
       defer: removeDir(root)
       let previous = umask(Mode(0o277))
       defer: discard umask(previous)
@@ -149,7 +158,7 @@ when defined(posix):
         check modeOf(endpoint.parentDir) == 0o700
 
     test "a missing temp root is an error, not a silent relocation":
-      let root = createTempDir("repro-rq-missing-", "")
+      let root = shortTempRoot("repro-rq-missing-")
       removeDir(root)
       withTempRoot(root):
         expect OSError:

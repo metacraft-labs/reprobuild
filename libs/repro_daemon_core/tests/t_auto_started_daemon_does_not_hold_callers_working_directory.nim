@@ -75,6 +75,7 @@ import repro_test_support/reasoned_skip
 
 when defined(linux):
   import std/[posix, strtabs]
+  from repro_test_support/process_fixtures import shortSocketDirAtProcessExit
 
   proc withoutUserBus(): StringTableRef =
     ## This process's environment minus what `systemd-run --user` needs to
@@ -93,7 +94,13 @@ when defined(linux):
       let stateDir = root / "state" / "daemon"
       let pidFile = root / "daemon.pid"
       createDir(scratch)
-      let endpoint = root / "d.sock"
+      # Not `root / "d.sock"`: under the persistent runner's long TMPDIR
+      # (`/var/lib/github-runner-work/<runner>/.cache/reprobuild-test-tmp/<n>`)
+      # the endpoint and its atomic-publish staging name beside it exceed the
+      # Unix-socket path limit, the daemon refuses to listen and the starter
+      # times out before the case checks anything
+      # (process_fixtures.shortSocketDirAtProcessExit says why).
+      let endpoint = shortSocketDirAtProcessExit("adc-") / "d.sock"
       var daemonPid = 0
       try:
         let starter = startProcess(getAppFilename(),
