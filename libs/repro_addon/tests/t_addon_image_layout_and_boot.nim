@@ -179,6 +179,7 @@ suite "the assembly boot's QEMU command line":
     check "root=/dev/mmcblk0p2" in cmdline
     check "systemd.watchdog_sec=off" in cmdline
     check "systemd.default_device_timeout_sec=900" in cmdline
+    check "maxcpus=1" in cmdline   # the sdhost DMA race (image_boot.nim)
     check "console=ttyAMA0,115200" in cmdline
     expect ValueError:
       discard assemblyBootArgv(AssemblyBoot(machine: "raspi2b", image: "i",

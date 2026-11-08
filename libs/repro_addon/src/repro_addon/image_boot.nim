@@ -18,8 +18,19 @@
 ##   timeout for the boot partition's `/dev/disk/by-partuuid` link, and the
 ##   boot then stops in emergency mode (measured on Raspberry Pi OS trixie
 ##   2026-10-06 under QEMU 10.2 TCG on a loaded host), so it also passes
-##   `systemd.default_device_timeout_sec=900`. The SD model needs a
-##   power-of-two card, which `baseOsProblem` requires of `diskSize`.
+##   `systemd.default_device_timeout_sec=900`. With all four emulated cores
+##   up, the Raspberry Pi kernel's `bcm2835-sdhost` driver oopses in
+##   `bcm2835_finish_data` (from `bcm2835_dma_complete_work`) under the
+##   assembly's write load, and the SD card is then lost: every exec
+##   fails with `Exec format error`. That was measured with Raspberry Pi
+##   OS trixie 2026-10-06 (kernel 6.18.50+rpt-rpi-v7) under QEMU 10.2.2 TCG.
+##   With `maxcpus=1`, 900 MB of fsync'ed writes to a grown root completed,
+##   and `e2fsck -fn` found it clean afterwards (reprobuild-pm
+##   issues/2026-11-08-raspi2b-assembly-boot-loses-its-sd-card-under-smp.md).
+##   The assembly boot therefore runs on one CPU. Forcing the controller to
+##   PIO is no alternative, because QEMU's model then stalls. The SD model
+##   needs a power-of-two card, which `baseOsProblem` requires of
+##   `diskSize`.
 
 import std/strutils
 
@@ -68,8 +79,8 @@ proc assemblyBootArgv*(b: AssemblyBoot): seq[string] =
       "-drive", "file=" & b.image & ",format=raw,if=sd",
       "-append", "console=ttyAMA0,115200 root=/dev/mmcblk0p" &
         $b.rootPartition & " rootfstype=ext4 rootwait " &
-        "systemd.watchdog_sec=off systemd.default_device_timeout_sec=900"] &
-        common
+        "systemd.watchdog_sec=off systemd.default_device_timeout_sec=900 " &
+        "maxcpus=1"] & common
   else:
     raise newException(ValueError, "no assembly machine " & b.machine)
 
