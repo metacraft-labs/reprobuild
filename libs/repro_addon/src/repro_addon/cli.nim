@@ -116,14 +116,17 @@ commands:
   preflight [--deploy-signers F] [--cache-publishers F [--cache-url U]]
             [--target T --manifest URL... [--profile-compiler P] [--poll-interval S]]
             [--evidence-sink ADDR:PORT --evidence-sink-ca F [--heartbeat-interval S]]
-            [--json]
+            [--defer-recipient-key] [--json]
       Inventory the host read-only and print the plan and its digest.
   bootstrap --plan <digest> [--deploy-signers F] [--cache-publishers F [--cache-url U]]
             [--target T --manifest URL... [--profile-compiler P] [--poll-interval S]]
             [--evidence-sink ADDR:PORT --evidence-sink-ca F [--heartbeat-interval S]]
+            [--defer-recipient-key]
       Install the add-on on a host whose preflight plan has <digest>. With
       an Evidence sink, also generate the generation-attestation key and
-      the sink write credential (enrol its certificate at the sink).
+      the sink write credential (enrol its certificate at the sink). With
+      --defer-recipient-key, create no recipient key: the host's next boot
+      creates its own (an image's assembly boot uses it).
   evidence-ship [--heartbeat]
       The shipping unit (repro-addon-evidence.service): append every queued
       evidence record to the Evidence sink, then a heartbeat.
@@ -329,6 +332,8 @@ proc parsePreflightArgs*(rest: seq[string]): tuple[inp: PreflightInputs;
         "--heartbeat-interval"))
     elif a == "--json":
       json = true
+    elif a == "--defer-recipient-key":
+      inp.deferRecipientKey = true
     else:
       raise newException(ValueError, "unknown option " & a)
     inc i
@@ -394,6 +399,8 @@ proc parseBootstrapArgs*(rest: seq[string]): BootstrapOptions =
     elif a == "--heartbeat-interval" or a.startsWith("--heartbeat-interval="):
       opts.evidenceHeartbeatSec = parseInt(takeValue(rest, i,
         "--heartbeat-interval"))
+    elif a == "--defer-recipient-key":
+      opts.deferRecipientKey = true
     else:
       raise newException(ValueError, "unknown option " & a)
     inc i
@@ -539,7 +546,10 @@ proc runAddonCli*(args: seq[string]): int =
                      "generation:           " & r.generationId & "\n" &
                      "add-on binary:        " & r.reproExe & "\n" &
                      "binary sha256:        " & r.binarySha256 & "\n" &
-                     "recipient public key: " & r.recipientPublicKeyHex & "\n")
+                     "recipient public key: " &
+                       (if opts.deferRecipientKey:
+                          "deferred: the host creates its own at its next boot"
+                        else: r.recipientPublicKeyHex) & "\n")
         if r.evidenceCredentialHost.len > 0:
           # Evidence ships once the sink knows this host: the operator
           # copies the credential's certificate into the sink's anchor

@@ -630,6 +630,17 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "t_group_libs_repro_addon_tests_g01",
     singleReason: ""),
   TestSpec(
+    source: "libs/repro_addon/tests/t_addon_image_assembly_cleanup.nim",
+    binary: "build/test-bin/t_addon_image_assembly_cleanup",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "",
+    singleReason: "suite-scope statement runs at every start-up: let root = createTempDir(\"repro-a16-cleanup-\", \"\")"),
+  TestSpec(
     source: "libs/repro_addon/tests/t_addon_image_layout_and_boot.nim",
     binary: "build/test-bin/t_addon_image_layout_and_boot",
     defines: @[],

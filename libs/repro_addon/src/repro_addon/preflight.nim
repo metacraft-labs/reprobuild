@@ -64,6 +64,10 @@ type
     evidenceSink*: string          ## "" => no Evidence sink (A11): local records only
     evidenceSinkCaPath*: string    ## the sink's host CA certificate (PEM)
     evidenceHeartbeatSec*: int     ## 0 => the default shipping heartbeat
+    deferRecipientKey*: bool
+      ## Bootstrap creates no recipient key: the host creates its own at its
+      ## next boot (``lcLateKey``; spec §6.2 step 3, §6.5.2). An image's
+      ## assembly boot sets it, so no image ever holds a recipient key.
 
   KeptFile* = object
     ## A file bootstrap keeps as found. A content-pinned input (the signers
@@ -138,6 +142,10 @@ const
   AddonOwnedRoots* = [ReproRoot, "/etc/repro", "/var/lib/repro", "/run/repro"]
 
   AgentDir* = "/var/lib/repro/agent"
+  ImageAssemblyDir* = "/var/lib/addon-image-assembly"
+    ## Present only during the assembly boot of ``repro infra image``
+    ## (``image_assemble.AssemblyPayloadDir``): a host that finds it is an
+    ## image being built, and creates no recipient key.
   RecipientKeyPath* = AgentDir & "/recipient.key"
   RecipientPubPath* = AgentDir & "/recipient.pub"
   AgentStateDir* = AgentDir & "/state"
@@ -904,6 +912,15 @@ proc runPreflight*(inp: PreflightInputs): PreflightReport =
       result.add("evidence-sink", false, p & " already exists; bootstrap " &
         "creates it and never adopts one")
 
+  if inp.deferRecipientKey:
+    # A deferred key is created by the host itself after generation 0; a
+    # key that is already there would be one an image carried.
+    let present = pathPresent(RecipientKeyPath) or pathPresent(RecipientPubPath)
+    result.add("recipient-key", not present,
+      if present: RecipientKeyPath & " already exists; a deferred key is " &
+                  "created by the host itself at its next boot"
+      else: "deferred: the host creates its own recipient key at its next boot")
+
   # Generation 0 must find every one of its paths absent.
   let reproExe = reproExeFor(result.binarySha256)
   result.gen0Inputs = Gen0Inputs(reproExe: reproExe, deploySigners: signers,
@@ -1002,6 +1019,9 @@ proc runPreflight*(inp: PreflightInputs): PreflightReport =
     }
   if agentInputs.pollIntervalSec > 0:
     plan["agent"]["pollSec"] = %agentInputs.pollIntervalSec
+  if inp.deferRecipientKey:
+    # Only when deferred, so every other plan keeps its bytes.
+    plan["recipientKey"] = %"deferred"
   result.planJson = canonical(plan)
   result.digest = sha256Hex(result.planJson)
 

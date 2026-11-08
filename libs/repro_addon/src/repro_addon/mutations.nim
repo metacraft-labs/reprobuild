@@ -46,6 +46,11 @@
 ## ``image-omits-store-closure``              the image assembly deletes
 ##                                            every apt closure's store
 ##                                            prefix before power-off
+## ``image-bakes-recipient-key``              the image assembly creates the
+##                                            recipient key in the image
+## ``image-keeps-first-boot-state``           the image assembly's clean-up
+##                                            keeps the assembly boot's
+##                                            machine id and SSH host keys
 ## ``observer-never-package-owned``           the collision observer reports
 ##                                            no package provenance: no
 ##                                            path is package-owned and no
@@ -872,6 +877,8 @@ const
                           # ledger, or an apt closure's store prefix, out of
                           # the image (image_assemble.runImageAssembly).
                           "image-omits-gen0-ledger", "image-omits-store-closure",
+                          "image-bakes-recipient-key",
+                          "image-keeps-first-boot-state",
                           "apply-skips-kind-check",
                           "uninstall-discards-state-on-drift",
                           "observer-never-package-owned",

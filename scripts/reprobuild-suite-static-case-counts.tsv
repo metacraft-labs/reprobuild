@@ -64,6 +64,7 @@ libs/repro_addon/tests/t_addon_floor_round8.nim	nim	9
 libs/repro_addon/tests/t_addon_floor_round9.nim	nim	20
 libs/repro_addon/tests/t_addon_generation_attestation.nim	nim	6
 libs/repro_addon/tests/t_addon_host_lock_guards_the_switch_and_the_store.nim	nim	8
+libs/repro_addon/tests/t_addon_image_assembly_cleanup.nim	nim	6
 libs/repro_addon/tests/t_addon_image_layout_and_boot.nim	nim	14
 libs/repro_addon/tests/t_addon_import_skeleton.nim	nim	9
 libs/repro_addon/tests/t_addon_key_lists_accept_utf8_comments.nim	nim	5

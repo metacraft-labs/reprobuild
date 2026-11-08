@@ -35,13 +35,15 @@
 ## ``<state dir>/addon/reassert-report``. In ``--boot`` mode nothing here
 ## raises and the exit status is 0, whatever happened.
 
-import std/[os, strutils, times]
+import std/[os, posix, strutils, times]
 
 import repro_core/file_lock
 import repro_core/host_apply_lock
 
 import repro_infra
 import repro_local_store/store
+import repro_peer_cache/auth as peerAuth
+from repro_deploy_agent/secrets import ensureRecipientKeyFile
 
 import ./addon_apply
 import ./collision
@@ -52,6 +54,7 @@ import ./evidence
 import ./ledger
 import ./mutations
 import ./pending_plan
+import ./preflight
 import ./static_tree
 import ./store_root
 import ./seams
@@ -494,6 +497,50 @@ proc recordReassertEvidence*(r: ReassertReport; stateDir: string;
     stderr.write("repro-addon: cannot write the re-assert's evidence " &
       "record: " & e.msg & "\n")
 
+var lateKeyNoFollow {.importc: "O_NOFOLLOW", header: "<fcntl.h>".}: cint
+
+proc createLateRecipientKey*(stateDir: string): seq[string] =
+  ## A host bootstrapped with ``--defer-recipient-key`` (an image's assembly
+  ## boot, spec §6.5.2) creates its own secrets recipient key here, at its
+  ## first real boot, so no image ever carries one: generated on the host,
+  ## ``0400`` from the start and never replacing a key
+  ## (``ensureRecipientKeyFile``), its public half beside it. Not during
+  ## the assembly boot itself (``ImageAssemblyDir`` present). Every later
+  ## boot reports the public half again. Returns the notes for the
+  ## report; raises on a failure, which the caller reports.
+  let ledgerPath = ledgerCopyPath(stateDir)
+  if not fileExists(ledgerPath): return
+  var deferred = false
+  for e in readLedger(ledgerPath).entries:
+    if e.class == lcLateKey and e.path == RecipientKeyPath: deferred = true
+  if not deferred: return
+  if dirExists(ImageAssemblyDir):
+    return @["recipient key: deferred; this is an image's assembly boot, " &
+             "which creates none"]
+  if fileExists(RecipientKeyPath) and fileExists(RecipientPubPath):
+    # Reported at every boot, not only the first: an operator reads the
+    # public half from this unit's journal, which a distribution may keep
+    # in RAM only (Raspberry Pi OS), so the first boot's line can be gone.
+    return @["recipient key: this host's own; public half " &
+             readFile(RecipientPubPath).strip()]
+  let key = ensureRecipientKeyFile(RecipientKeyPath)
+  let pubHex = peerAuth.publicKeyHex(key.publicKey)
+  if not fileExists(RecipientPubPath):
+    let fd = posix.open(RecipientPubPath.cstring,
+                        O_WRONLY or O_CREAT or O_EXCL or lateKeyNoFollow, Mode(0o444))
+    if fd < 0: raiseOSError(osLastError(), RecipientPubPath)
+    let line = pubHex & "\n"
+    if posix.write(fd, unsafeAddr line[0], line.len) != line.len:
+      discard posix.close(fd)
+      raiseOSError(osLastError(), RecipientPubPath)
+    discard fsync(fd)
+    discard posix.close(fd)
+  result.add("recipient key: created this host's own; public half " & pubHex)
+  discard recordEvidence(EvidenceEvent(detector: edBootstrap,
+    category: ecAudit, trigger: "recipient-key", kind: "recipient-key",
+    fields: @[("recipientKey", pubHex), ("path", RecipientKeyPath)]),
+    defaultSite(stateDir))
+
 proc runAddonReassert*(stateDir = DefaultStateDir; atBoot = false;
                        driver: CollisionDriver = nil): ReassertReport =
   ## Recover, check, report. Never raises: every failure is a finding.
@@ -523,6 +570,13 @@ proc runAddonReassert*(stateDir = DefaultStateDir; atBoot = false;
     checkCurrent(stateDir, result)
   except CatchableError as e:
     result.findings.add("degraded: " & e.msg)
+    result.status = "degraded"
+  # A deferred recipient key (spec §6.5.2): the host's own, created once.
+  try:
+    result.notes.add(createLateRecipientKey(stateDir))
+  except CatchableError as e:
+    result.findings.add("degraded: cannot create the deferred recipient " &
+      "key: " & e.msg)
     result.status = "degraded"
   # --- Step 3 (milestone A7): secrets. BEGIN A7 hook -------------------
   let sec = reassertSecrets(stateDir, defaultSecretsLayout())

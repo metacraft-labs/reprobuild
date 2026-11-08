@@ -1,23 +1,27 @@
 ## `repro anywhere --mode addon --host <host> <root@address>`: bootstrap an
-## already-booted distribution host into ReproOS add-on mode over SSH, in
-## one command (ReproOS Add-On Mode §6.5.3).
+## already-booted distribution host into ReproOS add-on mode over SSH
+## (ReproOS Add-On Mode §6.5.3).
 ##
 ## It has no preflight, bootstrap or apply code of its own. It carries the
 ## static add-on `repro` (pinned by digest) and the anchor files to a tmpfs
 ## it mounts at `/run/repro-anywhere` (so nothing the preflight needs is on
-## the host's disk; `/run` itself is `noexec` on Debian 13), runs §6.1's
-## preflight there, bootstraps with the digest it
-## printed (§6.2), applies the profile's canonical text with the store copy
-## of `repro` that bootstrap reports, plans again and requires no change and
-## no drift, writes the recipient public key bootstrap generated on the
-## host to `--recipient-out` (the registration the producer seals to), and
-## removes what it carried.
+## the host's disk; `/run` itself is `noexec` on Debian 13) and runs §6.1's
+## preflight there. Plan and apply are separate, as §6.1 and the Anywhere
+## safety contract require: without `--expect-plan` the command prints the
+## plan digest and applies nothing. With the acknowledged digest it runs
+## the preflight again, refuses any other digest, bootstraps with it (§6.2),
+## applies the profile's canonical text with the store copy of `repro` that
+## bootstrap reports, plans again and requires no change and no drift,
+## writes the recipient public key bootstrap generated on the host to
+## `--recipient-out` (the registration the producer seals to), and removes
+## what it carried.
 ##
-## Every `ssh` / `scp` uses the exact host key in `--known-hosts` and
-## nothing else (`StrictHostKeyChecking=yes`, no global known-hosts file),
-## `BatchMode=yes` and no agent forwarding: the Anywhere safety contract's
-## "exact host key" (reprobuild-pm `spec/ReproOS-Anywhere-Safety-Contract.md`).
-## Remote commands are built from shell-quoted words only.
+## Every `ssh` / `scp` reads no ssh_config (`-F /dev/null`) and uses the
+## exact host key in `--known-hosts` and nothing else
+## (`StrictHostKeyChecking=yes`, no global known-hosts file), `BatchMode=yes`
+## and no agent forwarding: the Anywhere safety contract's "exact host key"
+## (reprobuild-pm `spec/ReproOS-Anywhere-Safety-Contract.md`). Remote
+## commands are built from shell-quoted words only.
 
 import std/[os, osproc, strutils]
 
@@ -48,7 +52,9 @@ type
     agentTarget*: string
     agentSources*: seq[string]
     pollIntervalSec*: int
-    expectPlan*: string         ## "" => the one-command form
+    expectPlan*: string
+      ## The plan digest the operator acknowledged (spec §6.5.3, §6.1). ""
+      ## runs the preflight only, prints the digest and applies nothing.
     recipientOut*: string       ## "" => print only
     appliedProfileOut*: string  ## "" => not kept; else the canonical text
                                 ## applied, for a later `repro infra plan`
@@ -60,6 +66,7 @@ type
     reproExe*: string
     recipientPublicKey*: string
     planReport*: string
+    applied*: bool              ## false: the preflight only (no --expect-plan)
 
 const RemoteDir* = "/run/repro-anywhere"
 
@@ -71,7 +78,11 @@ proc say(o: AnywhereOptions; line: string) =
 
 proc sshOptions*(o: AnywhereOptions): seq[string] =
   ## The options every `ssh` and `scp` call carries.
-  result = @["-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes",
+  # `-F /dev/null`: no ssh_config is read, so nothing in the operator's
+  # configuration (a KnownHostsCommand, a ProxyCommand, another
+  # UserKnownHostsFile) can add trust beyond --known-hosts.
+  result = @["-F", "/dev/null",
+             "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes",
              "-o", "UserKnownHostsFile=" & o.knownHosts,
              "-o", "GlobalKnownHostsFile=/dev/null",
              "-o", "ForwardAgent=no", "-o", "ForwardX11=no",
@@ -182,9 +193,15 @@ proc runAnywhereAddon*(o: AnywhereOptions; work: string): AnywhereResult =
       fail("preflight", "the host is not compatible (exit " & $pre.exitCode &
         "):\n" & pre.output)
     o.say("plan digest: " & result.planDigest)
-    if o.expectPlan.len > 0 and o.expectPlan != result.planDigest:
+    if o.expectPlan.len == 0:
+      # Plan and apply are separate (spec §6.5.3, as approved 2026-11-08):
+      # nothing is applied until the operator acknowledges this digest.
+      o.say("nothing was applied; review the plan and run again with " &
+        "--expect-plan " & result.planDigest)
+      return
+    if o.expectPlan != result.planDigest:
       fail("preflight", "the host's plan is " & result.planDigest &
-        ", not the expected " & o.expectPlan & "; nothing was written")
+        ", not the acknowledged " & o.expectPlan & "; nothing was written")
     # 5. Bootstrap, then the profile through the store copy.
     o.say("bootstrap")
     let boot = mustSsh(o, "bootstrap", remoteCommand(@[remoteRepro, "system",
@@ -194,6 +211,7 @@ proc runAnywhereAddon*(o: AnywhereOptions; work: string): AnywhereResult =
     result.recipientPublicKey = fieldOf(boot, "recipient public key")
     if result.reproExe.len == 0:
       fail("bootstrap", "printed no add-on binary path:\n" & boot)
+    result.applied = true
     o.say("apply")
     let applied = mustSsh(o, "apply", remoteCommand([result.reproExe, "infra",
       "apply", "--profile", RemoteDir / "profile.txt"]))
@@ -236,10 +254,12 @@ const AnywhereUsage* = """usage: repro anywhere --mode addon --host NAME --profi
          [--applied-profile-out FILE]
          [--home-profile-dir DIR] root@ADDRESS
   Bootstrap an already-booted distribution host into ReproOS add-on mode
-  over SSH in one command (ReproOS Add-On Mode §6.5.3): the read-only
-  preflight, bootstrap with the digest it printed, the profile's apply and
-  a plan that must predict nothing. Options a profile's baseOs.bootstrap
-  declares are its defaults.
+  over SSH (ReproOS Add-On Mode §6.5.3). Without --expect-plan it runs the
+  read-only preflight, prints the plan digest and applies nothing (exit 3).
+  With --expect-plan DIGEST, the acknowledged digest, it runs the
+  preflight again, refuses any other digest, then bootstraps, applies the
+  profile and requires a plan that predicts nothing. Options a profile's
+  baseOs.bootstrap declares are its defaults.
 """
 
 proc runAnywhereCli*(args: seq[string]): int =
@@ -332,6 +352,14 @@ proc runAnywhereCli*(args: seq[string]): int =
     "reprobuild" / "anywhere" / (o.host & "-" & $getCurrentProcessId())
   try:
     let r = runAnywhereAddon(o, work)
+    if not r.applied:
+      echo "repro anywhere --mode addon: preflight only"
+      echo "  host       : " & o.host & " (" & o.target & ")"
+      echo "  plan digest: " & r.planDigest
+      stderr.writeLine("repro anywhere: refusing to apply without an " &
+        "acknowledged plan; nothing was written. Review the plan and run " &
+        "again with --expect-plan " & r.planDigest)
+      return 3
     echo "repro anywhere --mode addon"
     echo "  host       : " & o.host & " (" & o.target & ")"
     echo "  plan digest: " & r.planDigest

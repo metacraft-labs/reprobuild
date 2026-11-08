@@ -606,6 +606,15 @@ proc runAddonUninstall*(opts: UninstallOptions): UninstallResult =
   for k in byClass[lcKey]:
     if not k.isPreBootstrapInput:
       removeOwned(k, result)
+  # A key the host created for itself after generation 0 (``lcLateKey``):
+  # the add-on's, whatever its bytes; absent when the first boot never ran.
+  for k in byClass[lcLateKey]:
+    if fileExists(k.path) and not symlinkExists(k.path):
+      try:
+        removeFile(k.path)
+        result.removed.add(k.path)
+      except OSError as ex:
+        result.errors.add(k.path & ": " & ex.msg)
   if dirExists(StoreRoot) and isMountPoint(StoreRoot):
     result.errors.add(StoreRoot & " is still mounted; the store is kept")
   elif not opts.keepStore:
