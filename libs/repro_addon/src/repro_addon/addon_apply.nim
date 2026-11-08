@@ -1554,7 +1554,8 @@ proc recordStartedSince*(stateDir: string;
                          pending: openArray[tuple[path, unit: string]];
                          sinceNs: int64;
                          invocationOf: proc (u: string): tuple[id: string; start: int64];
-                         identityOf: proc (p: string): PathIdentity = identityOfPath) =
+                         identityOf: proc (p: string): PathIdentity = identityOfPath;
+                         resolution = coarseResolutionNs()) =
   ## After the start step: each pending directory of a unit the switch did
   ## not start by name, but which started during it (a template instance a
   ## ``Wants=`` pulled in, an instance its socket started), is recorded for
@@ -1577,7 +1578,9 @@ proc recordStartedSince*(stateDir: string;
       if c.dev == now.dev and c.ino == now.ino and c.btime == now.btime: continue
     let inv = invocationOf(u)
     if inv.id.len == 0 or inv.start <= 0 or inv.start < sinceNs: continue
-    if now.btime < inv.start: continue
+    # The birth time is the coarse clock's (``bornBefore``): a directory
+    # made within a tick of the invocation's start can read as earlier.
+    if bornBefore(now.btime, inv.start, resolution): continue
     t[path] = entryOf(u, now, inv.id)
     changed = true
   if changed: writeCreatedDirs(stateDir, t)
@@ -1748,6 +1751,16 @@ proc unitInvocation*(unit: string): tuple[id: string; start: int64] =
           except ValueError, TimeParseError: discard
   except CatchableError: discard
 
+proc unitRunning*(unit: string): bool =
+  ## systemd reports ``unit`` running: its ``ActiveState`` is ``active``,
+  ## ``activating`` or ``reloading`` (systemd.unit(5)); false when it does
+  ## not say.
+  try:
+    let r = runSystemctl(@["show", "--no-pager", "-p", "ActiveState", "--value", "--", unit])
+    if r.exitCode != 0: return false
+    r.output.strip() in ["active", "activating", "reloading"]
+  except CatchableError: false
+
 proc hostSystemdView*(path, unit: string; show: ShowProps): SystemdView =
   ## systemd's own state of ``path``, a directory of ``unit``, for §13
   ## decisions 71 and 77: the directory's birth time (through systemd's own
@@ -1789,6 +1802,8 @@ proc hostSystemdView*(path, unit: string; show: ShowProps): SystemdView =
   let inv = unitInvocation(unit)
   result.invocationId = inv.id
   result.invocationStart = inv.start
+  result.stopped = not unitRunning(unit)
+  result.clockResolution = coarseResolutionNs()
 
 proc refusalLine*(subject, code, key, msg: string): string =
   ## A refusal line of the effective check that no rule of
@@ -5868,8 +5883,9 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
                 try: recordCreatedDirs(stateDir, u, createdPending,
                                        invocation = unitInvocation(u).id)
                 except IOError, OSError: discard
-          let startStepNs = getTime().toUnix * 1_000_000_000'i64 +
-                            int64(getTime().nanosecond)
+          let stepAt = getTime()
+          let startStepNs = stepAt.toUnix * 1_000_000_000'i64 +
+                            int64(stepAt.nanosecond)
           runStart(stepTransitions, paused, notRunning,
                    noBlock = opts.nonBlockingStarts, reloadedAt = reloadedAt,
                    afterStart = recordAfter)

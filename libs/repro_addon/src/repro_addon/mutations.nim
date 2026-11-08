@@ -1264,6 +1264,11 @@ const
                           # a unit a dependency started during the
                           # switch never recorded.
                           "dependency-starts-unrecorded",
+                          # a directory taken as systemd's while its
+                          # unit is not running; a birth time compared
+                          # with the invocation's start more precisely
+                          # than the file system stamps it.
+                          "recreated-while-stopped", "btime-exact",
                           # A13: a state backup or restore runs while a
                           # unit of the set may run.
                           "state-units-not-checked",

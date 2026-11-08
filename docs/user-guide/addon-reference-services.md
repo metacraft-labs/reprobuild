@@ -121,7 +121,9 @@ The add-on handles this in four ways:
     instances of a template share their directories. When the unit is restarted or activated
     between applies, systemd removes such a directory and makes it again;
     the next apply accepts it only if it is exactly one of the unit's
-    directories and it was born after the unit's current run began, and
+    directories, the unit is running, and the directory was born after
+    the unit's current run began (to within the one clock tick by which
+    the kernel's file timestamps can trail the precise clock), and
     it logs that acceptance in the generation's audit log (if the log
     cannot be written, the directory is refused). On a host upgraded from an add-on version that kept no such
     record, the first apply records, once, the directories the installed

@@ -286,13 +286,14 @@ proc cases(binary, prefix: string): seq[Case] =
     Case(name: "a9e-udev.service", rule: "directories", service: "User=a9e\nRuntimeDirectory=udev/rules.d\n"),
     Case(name: "a9e-rtnested.service", rule: "directories",
          service: "User=a9e\nRuntimeDirectory=systemd/system/zz-a9e.service.d\n"),
-    Case(name: "a9e-rtsys.service", rule: "directories", service: "User=a9e\nRuntimeDirectory=systemd\n"),
     # Round 11 (§13 decision 78): an activator named after a base tree, with
-    # a listener in that tree. Last of all: a build that lets the first
-    # through has the manager unlink udev's control socket and bind its own
-    # (systemd src/shared/socket-label.c), for the rest of the guest's life.
-    # The second listens on a new path inside /run/systemd, so a build that
-    # lets it through breaks nothing else.
+    # a listener in that tree. A build that lets the first through binds a
+    # new socket inside /run/systemd; one that lets the second through has
+    # the manager unlink udev's control socket and bind its own (systemd
+    # src/shared/socket-label.c).
+    # Before a9e-rtsys: under floor-unchecked that case takes /run/systemd
+    # from the manager and leaves the host unusable, so a case after it is
+    # never exercised and the falsifier would not show it starting.
     Case(name: "a9e-sdsock.service", rule: "unit-name+listener", service: "",
          activatorOnly: true, probes: "systemd.socket", owners: "systemd",
          extra: "systemd.systemUnit {\n  name = \"systemd.socket\"\n" &
@@ -304,7 +305,8 @@ proc cases(binary, prefix: string): seq[Case] =
          extra: "systemd.systemUnit {\n  name = \"udev.socket\"\n" &
                 "  content = \"[Socket]\nListenStream=/run/udev/control\n" &
                 "Service=a9e-udsock.service\n\n[Install]\nWantedBy=sockets.target\n\"\n" &
-                "  enabled = true\n}\n")]
+                "  enabled = true\n}\n"),
+    Case(name: "a9e-rtsys.service", rule: "directories", service: "User=a9e\nRuntimeDirectory=systemd\n")]
 
 proc ruleCodesOf*(output, caseName: string): seq[string] =
   ## The rule codes of the refusals bearing on the case's units
@@ -461,8 +463,14 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
           "Wants=a9e-tdir@1.service\n") &
         unitResource("a9e-tdir@.service", "User=a9e\nRuntimeDirectory=a9e-tdir\n", binary)
       let t1 = g.applyProfile(repro, "tdir1", tpl)
+      # systemd's own evidence beside the outcome: the directory's birth
+      # time and the instance's invocation, as the record compares them.
+      let evidence = g.exec("stat -c '%n %i %.9W' /run/a9e-tdir; " &
+        "systemctl show --timestamp=us+utc -p InvocationID -p InactiveExitTimestamp " &
+        "-p ActiveState a9e-tdir@1.service; cat /var/lib/repro/system/addon/floor-created-dirs").stdout
+      record["templateEvidence"] = %evidence
       step("a floored template with a RuntimeDirectory applies", t1.exitCode == 0,
-           t1.stdout & t1.stderr)
+           t1.stdout & t1.stderr & evidence)
       let t2 = g.applyProfile(repro, "tdir2", tpl.replace("Description=A9 round 3",
                                                           "Description=A9 round 11"))
       step("and applies again over the directory its instance created",

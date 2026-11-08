@@ -712,6 +712,16 @@ type
     invocationStart*: int64
       ## when its current invocation began (``InactiveExitTimestamp``),
       ## nanoseconds since the epoch; 0 when unknown
+    stopped*: bool
+      ## the unit is not running (its ``ActiveState`` is none of
+      ## ``active``, ``activating``, ``reloading``), or systemd does not say
+    clockResolution*: int64
+      ## how far, in nanoseconds, a file system's timestamp may lag the
+      ## precise clock systemd stamps an invocation with: the kernel takes
+      ## inode times from the coarse clock (fs/inode.c ``current_time``,
+      ## ``ktime_get_coarse_real_ts64``), so a directory made just after the
+      ## invocation began can carry a birth time up to one tick earlier;
+      ## ``clock_getres(CLOCK_REALTIME_COARSE)``
 
 # statx(2) through the raw system call: glibc and the static musl build
 # both have syscall(2), and the struct is the kernel's own
@@ -759,6 +769,17 @@ proc statxOf(path: string; follow: bool): tuple[ok: bool; buf: StatxBuf] =
     let r = c_syscall(clong(SysStatx), cint(AtFdcwd), path.cstring, cint(flags),
                       cuint(StatxIno or StatxBtime), addr buf)
     (r == 0, buf)
+
+proc coarseResolutionNs*(): int64 =
+  ## The resolution of the coarse real-time clock the kernel stamps inode
+  ## times with (one tick), in nanoseconds; 0 where it cannot be read, so
+  ## comparisons stay exact.
+  when defined(linux):
+    var ts: Timespec
+    # CLOCK_REALTIME_COARSE (include/uapi/linux/time.h).
+    if clock_getres(ClockId(5), ts) == 0:
+      return int64(ts.tv_sec) * 1_000_000_000'i64 + int64(ts.tv_nsec)
+  0
 
 proc identityOfPath*(path: string): PathIdentity =
   ## ``path``'s identity now (not following a final link), or not there.
@@ -844,6 +865,18 @@ proc declaredDirectories*(show: ShowProps): seq[string] =
       let d = t.split(':')[0]
       if d.len > 0: result.add(normalisedPath(root & "/" & d))
 
+proc bornBefore*(btime, start, resolution: int64): bool =
+  ## ``btime``, a file system's birth time, is earlier than ``start``, a
+  ## time systemd took from the precise clock, by more than the coarse
+  ## clock's ``resolution`` the file system stamps with (§13 decision 77:
+  ## "not earlier than" is judged at the resolution the birth time has).
+  when mutated("btime-exact"):
+    # Falsifying build: the precise comparison, which refuses a directory
+    # systemd made within a tick of the invocation's start.
+    btime < start
+  else:
+    btime + max(resolution, 0'i64) < start
+
 proc systemdRecreated*(path, unit: string; declared: openArray[string];
                        created: Table[string, CreatedDir]; dynamic: bool;
                        v: SystemdView): string =
@@ -881,11 +914,17 @@ proc systemdRecreated*(path, unit: string; declared: openArray[string];
       return ""
     return "ctime predates the invocation"
   elif not mutated("recreated-systemd-unchecked"):
+    when not mutated("recreated-while-stopped"):
+      # A unit that is not running has no invocation making its
+      # directories: a tree made at the path after its last start (by a
+      # package, tmpfiles.d, an operator) is not systemd's.
+      if v.stopped:
+        return "the unit is not running, so no invocation of it made it"
     if v.btime == 0:
       return "the file system reports no birth time for it"
     if v.invocationStart <= 0:
       return "systemd reports no start for the unit's current invocation"
-    if v.btime < v.invocationStart:
+    if bornBefore(v.btime, v.invocationStart, v.clockResolution):
       return "it was born before the unit's current invocation began"
   ""
 
