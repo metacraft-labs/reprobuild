@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 34,
-    "nimTestBinaries": 2694,
+    "nimTestBinaries": 2698,
     "pureUnitConsolidationGroups": 79,
-    "pureUnitTests": 741,
-    "staticallyDetectedRuntimeCompilerFlowTests": 139,
-    "testEntries": 2735
+    "pureUnitTests": 742,
+    "staticallyDetectedRuntimeCompilerFlowTests": 141,
+    "testEntries": 2739
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1561,10 +1561,10 @@
   ],
   "static": {
     "classificationCounts": {
-      "graph-fixture": 21,
-      "integration": 1485,
+      "graph-fixture": 22,
+      "integration": 1487,
       "platform/destructive": 173,
-      "pure unit": 741,
+      "pure unit": 742,
       "unclassified": 315
     },
     "graphOwnedTestArtifacts": [
@@ -1773,9 +1773,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2694,
+    "nimTestBinaryCount": 2698,
     "pythonTestFileCount": 41,
-    "testEntryCount": 2735
+    "testEntryCount": 2739
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -2341,6 +2341,28 @@
           "callableReachable": true,
           "commandVariableExecuted": false,
           "directExecutionLine": false,
+          "enclosingCallable": "compileIntent",
+          "executedVariables": [],
+          "line": 89,
+          "path": "libs/repro_profile_compile/tests/t_base_os_section_round_trip.nim",
+          "patterns": [
+            "repro-compile-profile-binary"
+          ],
+          "runtimeCompilerApi": "compileProfileBinary",
+          "runtimeCompilerApiModule": "repro_profile_compile",
+          "snippet": "let res = compileProfileBinary(profileRoot = dir / \"system.nim\","
+        }
+      ],
+      "source": "libs/repro_profile_compile/tests/t_base_os_section_round_trip.nim"
+    },
+    {
+      "class": "graph-fixture",
+      "matches": [
+        {
+          "assignedCommandVariable": "",
+          "callableReachable": true,
+          "commandVariableExecuted": false,
+          "directExecutionLine": false,
           "enclosingCallable": "compileExample",
           "executedVariables": [],
           "line": 66,
@@ -2589,6 +2611,34 @@
         }
       ],
       "source": "tests/e2e/addon/t_e2e_addon_unit_syscall_filters_cover_their_traces.nim"
+    },
+    {
+      "class": "integration",
+      "matches": [
+        {
+          "assignedCommandVariable": "cc",
+          "commandVariableExecuted": true,
+          "directExecutionLine": false,
+          "executedVariables": [
+            "bin",
+            "cc",
+            "cmd",
+            "key",
+            "output",
+            "raw",
+            "src",
+            "upstream"
+          ],
+          "line": 76,
+          "path": "tests/e2e/addon/t_e2e_addon_zero_touch_image_synthesis_boots_converged.nim",
+          "patterns": [
+            "cc",
+            "static-c-compiler"
+          ],
+          "snippet": "let cc = staticCc(debArch)"
+        }
+      ],
+      "source": "tests/e2e/addon/t_e2e_addon_zero_touch_image_synthesis_boots_converged.nim"
     },
     {
       "class": "integration",
@@ -9105,6 +9155,24 @@
       "source": "libs/repro_addon/tests/t_addon_host_lock_guards_the_switch_and_the_store.nim",
       "sourceSuiteCount": 2,
       "staticCaseCount": 8,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_addon_image_layout_and_boot",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_addon",
+        "repro_profile"
+      ],
+      "owner": "libs/repro_addon",
+      "requiresReproBinary": false,
+      "source": "libs/repro_addon/tests/t_addon_image_layout_and_boot.nim",
+      "sourceSuiteCount": 4,
+      "staticCaseCount": 14,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -20970,6 +21038,26 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_base_os_section_round_trip",
+      "class": "graph-fixture",
+      "classificationReason": "test body compiles or links a helper/fixture artifact",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_infra",
+        "repro_profile",
+        "repro_profile_compile",
+        "repro_profile_intent"
+      ],
+      "owner": "libs/repro_profile_compile",
+      "requiresReproBinary": false,
+      "source": "libs/repro_profile_compile/tests/t_base_os_section_round_trip.nim",
+      "sourceSuiteCount": 2,
+      "staticCaseCount": 13,
+      "staticallyDetectedRuntimeCompilerFlow": true,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_build_action_substitute_copies_only_declared_outputs",
       "class": "platform/destructive",
       "classificationReason": "platform path, target OS, VM, privileged, or host mutation signal",
@@ -29727,6 +29815,24 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_e2e_addon_anywhere_remote_bootstrap_converges_clean_guest",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_peer_cache",
+        "repro_test_support"
+      ],
+      "owner": "tests/e2e",
+      "requiresReproBinary": true,
+      "source": "tests/e2e/addon/t_e2e_addon_anywhere_remote_bootstrap_converges_clean_guest.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_e2e_addon_apply_unit_has_no_network",
       "class": "integration",
       "classificationReason": "e2e/integration path or requires the repro binary",
@@ -30901,6 +31007,25 @@
       "sourceSuiteCount": 1,
       "staticCaseCount": 1,
       "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_e2e_addon_zero_touch_image_synthesis_boots_converged",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_dsl_stdlib",
+        "repro_peer_cache",
+        "repro_test_support"
+      ],
+      "owner": "tests/e2e",
+      "requiresReproBinary": true,
+      "source": "tests/e2e/addon/t_e2e_addon_zero_touch_image_synthesis_boots_converged.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": true,
       "targetOs": "soAny"
     },
     {

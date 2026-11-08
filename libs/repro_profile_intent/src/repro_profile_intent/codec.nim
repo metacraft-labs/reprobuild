@@ -17,11 +17,12 @@
 ## bit-pattern. This avoids the cbor lib's lack of major-type-1
 ## (negative) support and round-trips `low(int)` cleanly.
 
-import std/[algorithm, tables]
+import std/[algorithm, json, tables]
 
 import cbor
 import repro_profile/types
 from repro_profile/host_system import hostSystemDeclProblem
+from repro_profile/emit import encodeBaseOs, parseBaseOs
 
 import ./envelope
 import ./errors
@@ -85,6 +86,16 @@ const
     ## profile without the section encodes exactly as before. Envelope
     ## schema 12.
   KeyManagedEtcPrefixes = "managedEtcPrefixes"
+  KeyBaseOs       = "baseOs"
+    ## ReproOS add-on mode A16: the profile's `baseOs:` section
+    ## (`ProfileIntent.baseOs`, spec §6.5.1), as ONE text item holding the
+    ## section's canonical JSON (`repro_profile/emit.encodeBaseOs`: fixed
+    ## key order, the recursive disko layout in the hardware emitter's own
+    ## form). The section is image-time intent read by `repro infra image`
+    ## alone, so it keeps the one encoding the profile binary already
+    ## emits instead of a second, CBOR-native one. Optional; omitted when
+    ## the profile declares none, so a profile without it encodes exactly
+    ## as before. Envelope schema 14.
   KeyConfirmTimeout = "confirmTimeout"
     ## Inside the `addOn` map: the add-on switch's `confirmTimeout` in
     ## seconds (ReproOS-Add-On Mode §7.5), as an unsigned integer. Optional;
@@ -353,6 +364,8 @@ proc encodeProfileIntent(p: ProfileIntent): DynamicValue =
     if p.addOn.confirmTimeoutSec > 0:
       ao.add entry(KeyConfirmTimeout, cborUInt(uint64(p.addOn.confirmTimeoutSec)))
     entries.add entry(KeyAddOn, cborMap(ao))
+  if p.baseOs.declared:
+    entries.add entry(KeyBaseOs, cborText(encodeBaseOs(p.baseOs)))
   if p.hostApplies.len > 0:
     entries.add entry(KeyHostApplies, encodeHosts(p.hostApplies))
   if p.hostSystems.len > 0:
@@ -687,6 +700,16 @@ proc decodeProfileIntentFromBytes*(bytes: openArray[byte]): ProfileIntent =
         raiseRbpiCorrupt("body", "addOn.confirmTimeout must be a positive " &
           "number of seconds")
       result.addOn.confirmTimeoutSec = int(ct.uintValue)
+  # ReproOS add-on mode A16: the `baseOs:` section is OPTIONAL on the wire.
+  # A malformed one is corrupt, never dropped.
+  var boFound = false
+  let boNode = lookupOpt(entries, KeyBaseOs, boFound)
+  if boFound:
+    let text = expectText(boNode, KeyBaseOs)
+    try:
+      result.baseOs = parseBaseOs(parseJson(text))
+    except CatchableError as e:
+      raiseRbpiCorrupt("body", "baseOs: " & e.msg)
   # The per-host concern declaration is OPTIONAL on the wire (absent when
   # no host declares one).
   var haFound = false

@@ -18,6 +18,7 @@
 ##   repro system addon probe <healthCheck>
 ##   repro system addon secret put --service S --name N [--target T] < secret
 ##   repro system addon rotate-recipient-key
+##   repro system addon image-assemble --payload <dir>
 ##   repro system addon agent-tick --source <manifest>... [--target T]
 ##   repro system rollback [<generation>] [--reconcile-drift]
 ##   repro system addon fingerprint [--root R] [--no-live] [--out F]
@@ -55,6 +56,7 @@ import repro_local_store/store as local_store
 
 import ./addon_apply
 import ./adoption_cli
+import ./image_assemble
 import ./addon_rollback
 import ./agent_record
 import ./agent_repin
@@ -188,6 +190,12 @@ commands:
       Generate the next recipient key and print its public half; the
       current key is deleted when the first envelope sealed to the new
       one opens.
+  image-assemble --payload <dir>
+      The assembly boot of `repro infra image` (spec §6.5.2 step 5), run
+      by the image's one-shot assembly unit, never by an operator:
+      preflight, bootstrap and the host profile's apply on this system,
+      a plan that must predict nothing, then the clean-up; writes
+      <dir>/result.json.
   agent-repin [--apply <digest>]
       Resolve the deploy agent's origins again and print the plan for the
       fetch unit's egress allow-list and hosts file (writing nothing), or
@@ -637,6 +645,29 @@ proc runAddonCli*(args: seq[string]): int =
       return (if atBoot or r.ok: 0 else: 1)
     of "secret":
       return runSecretPutCli(rest)
+    of "image-assemble":
+      var payload = ""
+      var i = 0
+      while i < rest.len:
+        let a = rest[i]
+        if a == "--payload" or a.startsWith("--payload="):
+          payload = takeValue(rest, i, "--payload")
+        else:
+          raise newException(ValueError, "unknown option " & a)
+        inc i
+      if payload.len == 0:
+        raise newException(ValueError, "--payload <dir> is required")
+      let spec = parseAssemblySpec(readFile(payload / "assembly.json"))
+      # The payload's binary is this one: refuse a payload staged for
+      # another (the build host pinned it by digest).
+      let self = sha256OfFile(getAppFilename())
+      if self != spec.binarySha256:
+        raise newException(ValueError, "this binary hashes to " & self &
+          ", but the payload was staged for " & spec.binarySha256)
+      let (inp, _) = parsePreflightArgs(spec.preflightFlags)
+      let opts = parseBootstrapArgs(spec.preflightFlags)
+      let r = runImageAssembly(payload, spec, inp, opts)
+      return (if r.ok: 0 else: 1)
     of "rotate-recipient-key":
       return runRotateRecipientKeyCli(rest)
     of "evidence-ship":

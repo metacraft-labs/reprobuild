@@ -40,6 +40,12 @@
 ##                                            key group- and world-readable
 ## ``provisions-publisher-key``               bootstrap also leaves a binary
 ##                                            cache publisher keypair
+## ``image-omits-gen0-ledger``                the image assembly (A16)
+##                                            deletes the add-on's ledger
+##                                            copy before power-off
+## ``image-omits-store-closure``              the image assembly deletes
+##                                            every apt closure's store
+##                                            prefix before power-off
 ## ``observer-never-package-owned``           the collision observer reports
 ##                                            no package provenance: no
 ##                                            path is package-owned and no
@@ -845,6 +851,11 @@ const
                           "switch-fails-before-ledger",
                           "bootstrap-installs-jq", "preflight-writes",
                           "recipient-key-0644", "provisions-publisher-key",
+                          # A16 (e2e_addon_zero_touch_image_synthesis_boots_
+                          # converged): an image assembly that leaves the
+                          # ledger, or an apt closure's store prefix, out of
+                          # the image (image_assemble.runImageAssembly).
+                          "image-omits-gen0-ledger", "image-omits-store-closure",
                           "apply-skips-kind-check",
                           "uninstall-discards-state-on-drift",
                           "observer-never-package-owned",

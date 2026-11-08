@@ -61,6 +61,7 @@ libs/repro_addon/tests/t_addon_floor_round8.nim	nim	9
 libs/repro_addon/tests/t_addon_floor_round9.nim	nim	20
 libs/repro_addon/tests/t_addon_generation_attestation.nim	nim	6
 libs/repro_addon/tests/t_addon_host_lock_guards_the_switch_and_the_store.nim	nim	8
+libs/repro_addon/tests/t_addon_image_layout_and_boot.nim	nim	14
 libs/repro_addon/tests/t_addon_import_skeleton.nim	nim	9
 libs/repro_addon/tests/t_addon_key_lists_accept_utf8_comments.nim	nim	5
 libs/repro_addon/tests/t_addon_ledger_and_plan.nim	nim	46
@@ -699,6 +700,7 @@ libs/repro_profile_compile/tests/t_addon_apt_closure_system_unit.nim	nim	5
 libs/repro_profile_compile/tests/t_addon_debian_realisation_profile_is_exhaustive.nim	nim	8
 libs/repro_profile_compile/tests/t_addon_profile_collision_and_managed_prefixes.nim	nim	6
 libs/repro_profile_compile/tests/t_addon_unit_state_and_tools.nim	nim	9
+libs/repro_profile_compile/tests/t_base_os_section_round_trip.nim	nim	13
 libs/repro_profile_compile/tests/t_build_action_substitute_copies_only_declared_outputs.nim	nim	7
 libs/repro_profile_compile/tests/t_builtin_predicate_fixtures.nim	nim	3
 libs/repro_profile_compile/tests/t_compiled_profile_keeps_secrets_and_credentials.nim	nim	1
@@ -1183,6 +1185,7 @@ tests/e2e/addon/t_e2e_addon_agent_apply_sets_net_sysctl_in_host_namespace.nim	ni
 tests/e2e/addon/t_e2e_addon_agent_end_to_end.nim	nim	1
 tests/e2e/addon/t_e2e_addon_agent_generations_and_rollback.nim	nim	1
 tests/e2e/addon/t_e2e_addon_agent_refuses_management_path_classes.nim	nim	1
+tests/e2e/addon/t_e2e_addon_anywhere_remote_bootstrap_converges_clean_guest.nim	nim	1
 tests/e2e/addon/t_e2e_addon_apply_unit_has_no_network.nim	nim	1
 tests/e2e/addon/t_e2e_addon_apt_hook_never_blocks_dpkg.nim	nim	1
 tests/e2e/addon/t_e2e_addon_audit_bed.nim	nim	1
@@ -1249,6 +1252,7 @@ tests/e2e/addon/t_e2e_addon_unit_syscall_filters_cover_their_traces.nim	nim	1
 tests/e2e/addon/t_e2e_addon_validator_never_double_signs.nim	nim	1
 tests/e2e/addon/t_e2e_addon_write_time_recheck.nim	nim	1
 tests/e2e/addon/t_e2e_addon_writes_never_follow_symlinks.nim	nim	1
+tests/e2e/addon/t_e2e_addon_zero_touch_image_synthesis_boots_converged.nim	nim	1
 tests/e2e/addon/t_system_profile_host_selection.nim	nim	0
 tests/e2e/addon/t_validator_safety_checks.nim	nim	11
 tests/e2e/agent-harbor/t_e2e_agent_harbor_change_to_generation_and_remix.nim	nim	5

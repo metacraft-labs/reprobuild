@@ -107,6 +107,59 @@ type
       ## `confirmTimeout: <seconds>` (§7.5): how long the add-on switch
       ## waits for every unit's `healthCheck`; 0 when not declared.
 
+  BaseOsBootFile* = object
+    ## One boot firmware file of a `baseOs:` section (`config.txt`,
+    ## `cmdline.txt`, ...): written to the root of the partition the layout
+    ## mounts at `BaseOsIntent.bootMountpoint`. `name` is one path component.
+    name*: string
+    content*: string
+
+  BaseOsCloudInit* = object
+    ## The initial cloud-init NoCloud seed of a `baseOs:` section (ReproOS
+    ## Add-On Mode §6.5.1). An empty text is a file the section does not
+    ## give: the image keeps its own.
+    declared*: bool
+    seed*: string
+      ## `rootSeedDir` (`/var/lib/cloud/seed/nocloud/` in the root
+      ## filesystem) or `bootPartition` (the boot partition's root, where
+      ## Raspberry Pi OS reads its seed from trixie on).
+    userData*: string
+    metaData*: string
+    networkConfig*: string
+
+  BaseOsBootstrap* = object
+    ## The bootstrap options of ReproOS Add-On Mode §6.2 as a `baseOs:`
+    ## section declares them for `repro infra image` (and, as defaults, for
+    ## `repro anywhere --mode addon`). Anchor files are paths relative to
+    ## the profile's directory, read on the build host.
+    deploySigners*: string
+    cachePublishers*: string
+    cacheUrl*: string
+    agentTarget*: string
+    agentSources*: seq[string]
+    pollIntervalSec*: int
+
+  BaseOsIntent* = object
+    ## What a profile's `baseOs:` section declares (ReproOS Add-On Mode
+    ## §6.5.1): the digest-pinned upstream image an add-on host is
+    ## installed from, its layout, boot firmware files, initial cloud-init
+    ## seed and bootstrap options. IMAGE-TIME intent: read only by `repro
+    ## infra image`, never rendered into the canonical system-profile text,
+    ## so the switch and the deploy agent never see it. `declared` is false
+    ## for a profile without the section.
+    declared*: bool
+    image*: string          ## `https://` or `file://` URL
+    sha256*: string         ## of the file as fetched (64 lower-case hex)
+    arch*: string           ## amd64 | arm64 | armhf
+    buildBoot*: string      ## pc | raspi2b: the assembly boot's machine
+    diskSize*: string       ## "" (the upstream size) or e.g. "6G"
+    hostname*: string       ## "" (the --host name)
+    bootMountpoint*: string ## "" (the default, `/boot/firmware`)
+    layout*: DiskLayout     ## the upstream image's own layout (one disk)
+    bootFiles*: seq[BaseOsBootFile]
+    cloudInit*: BaseOsCloudInit
+    bootstrap*: BaseOsBootstrap
+
   ProfileIntent* = object
     name*: string
     activities*: seq[ActivityIntent]
@@ -134,6 +187,10 @@ type
       ## (ReproOS-Add-On-Mode §4.4): the `/etc` prefixes the profile's
       ## resources may own on an add-on host. `declared` is false for a
       ## profile without the section.
+    baseOs*: BaseOsIntent
+      ## The profile-wide `baseOs:` section (ReproOS Add-On Mode §6.5.1):
+      ## where an add-on host's base comes from, for `repro infra image`.
+      ## `declared` is false for a profile without the section.
     stowScopes*: seq[StowScope]
       ## GM11: the `stow/` packages an activity claims (a `stow:` block in
       ## `activity <name>:`), one record per claim. A package no record

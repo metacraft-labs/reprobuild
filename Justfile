@@ -78,6 +78,14 @@ addon-static *ARCHES="amd64 arm64 armhf":
 e2e_addon_bootstrap_uninstall_byte_identity:
     bash ./scripts/run_addon_gate.sh t_e2e_addon_bootstrap_uninstall_byte_identity
 
+# A16 (spec §6.5): image synthesis and remote bootstrap. Both run the full
+# engine of this checkout on the build host: `just build` first.
+e2e_addon_zero_touch_image_synthesis_boots_converged:
+    REPRO_ADDON_BASES="${REPRO_ADDON_BASES:-debian-13-amd64}" bash ./scripts/run_addon_gate.sh t_e2e_addon_zero_touch_image_synthesis_boots_converged
+
+e2e_addon_anywhere_remote_bootstrap_converges_clean_guest:
+    REPRO_ADDON_BASES="${REPRO_ADDON_BASES:-debian-13-amd64}" bash ./scripts/run_addon_gate.sh t_e2e_addon_anywhere_remote_bootstrap_converges_clean_guest
+
 e2e_addon_preflight_is_zero_write:
     bash ./scripts/run_addon_gate.sh t_e2e_addon_preflight_is_zero_write
 

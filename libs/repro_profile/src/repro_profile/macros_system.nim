@@ -1225,7 +1225,7 @@ proc parseZfsPoolsBody(body: NimNode; hwVar: NimNode): NimNode =
           layout: `layoutLit`, options: `optsExpr`)
     else: error("pools entry must be `\"<name>\": <subblock>`", entry)
 
-proc parseHardwareDiskoBody(body: NimNode; hwVar: NimNode): NimNode =
+proc parseHardwareDiskoBody*(body: NimNode; hwVar: NimNode): NimNode =
   ## Top-level ``disko:`` body parser. Initialises ``disko = some(...)``
   ## with an empty DiskLayout, then handles ``disks:`` and ``pools:``.
   result = newNimNode(nnkStmtList)

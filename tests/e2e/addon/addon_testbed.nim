@@ -477,6 +477,37 @@ proc newGuest*(b: BaseImage; diskGiB = 8; relayPort = 0; cpus = 0;
     result.qemu = newQemuBootBackend(stateDir = cacheDir() / "qemu-state",
       namePrefix = QemuNamePrefix, sshUser = "root", sshKeyPath = result.keyPath)
 
+proc newImageGuest*(b: BaseImage; image, keyPath: string; diskGiB = 0):
+    Guest =
+  ## Claim a run and prepare (not boot) a guest that boots a SYNTHESISED
+  ## image (`repro infra image`, A16) rather than the cached base: the disk
+  ## is a qcow2 overlay over ``image`` (raw, read-only to QEMU), and there is
+  ## no seed volume -- the image carries its own cloud-init seed, which
+  ## authorises ``keyPath``'s public half for root. ``b`` names the
+  ## architecture and the base the image was built from.
+  when not defined(gostiAvailable):
+    raise newException(TestBedError,
+      "gosti is not available: set GOSTI_SRC to gosti's src directory")
+  else:
+    if useIncus():
+      raise newException(TestBedError, "an image guest boots a disk image; " &
+        "it is QEMU only")
+    let name = QemuNamePrefix & "img-" & $getCurrentProcessId() & "-" &
+      randomHex(6)
+    let (dir, token) = claimRunDir(name)
+    result = Guest(base: b, name: name, runDir: dir, ownerToken: token,
+                   kind: gkQemu, keyPath: keyPath)
+    result.diskPath = dir / "disk.qcow2"
+    var cmd = "qemu-img create -q -f qcow2 -F raw -b " & quoteShell(image) &
+      " " & quoteShell(result.diskPath)
+    if diskGiB > 0: cmd.add " " & $diskGiB & "G"
+    if execCmd(cmd) != 0:
+      raise newException(TestBedError, "qemu-img create over " & image &
+        " failed")
+    result.serialLog = dir / "serial.log"
+    result.qemu = newQemuBootBackend(stateDir = cacheDir() / "qemu-state",
+      namePrefix = QemuNamePrefix, sshUser = "root", sshKeyPath = keyPath)
+
 proc bootTimeout(g: Guest): int =
   case g.base.debArch
   of "amd64": 300

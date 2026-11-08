@@ -47,6 +47,9 @@ when defined(linux):
   import repro_addon/mutations as addon_mutations
   import repro_addon/secrets_ops as addon_secrets_ops
   import repro_addon/switch as addon_switch
+  # `repro infra image` (A16) writes Linux filesystems and runs the add-on's
+  # assembly; the portable engine refuses the subcommand by name.
+  import repro_cli_support/infra_image
 import repro_infra/host_base
 import repro_infra/addon_diagnostics
 from repro_home_intent/host_identity import selectHost, EHostIdentity
@@ -71,7 +74,7 @@ proc compileAndAdaptSystemProfile*(profilePath, stateDir: string;
     declaredInputs: seq[string] = @[]):
     tuple[compiled: bool; text: string; cached: bool; compileError: string;
           adaptError: string; buildActions: seq[ProfileBuildAction];
-          projection: Projection] =
+          projection: Projection; baseOs: BaseOsIntent] =
   ## Run the Phase C build-engine edge against `profilePath`, decode
   ## the RBPI artifact, and render the adapted `SystemProfile` back
   ## into the canonical declarative text the M69 lib's APIs consume.
@@ -141,6 +144,9 @@ proc compileAndAdaptSystemProfile*(profilePath, stateDir: string;
   except CatchableError as err:
     result.compileError = err.msg
     return
+  # The `baseOs:` section is image-time intent (ReproOS Add-On Mode
+  # §6.5.1): handed to `repro infra image`, never rendered into the text.
+  result.baseOs = intent.baseOs
   var adapted: SystemAdaptation
   try:
     adapted = adaptSystemProfile(intent, target)
@@ -1697,15 +1703,159 @@ const InfraSubcommandUsage = [
     "cache publish` flags that publish under it. Nothing is applied."),
   ("install-root", "repro infra install-root ...\n  Install a built root " &
     "image onto a target disk (see the ReproOS installer documentation)."),
+  ("image", "repro infra image --host NAME --profile FILE " &
+    "--addon-binary FILE --addon-sha256 HEX --output FILE " &
+    "[--compress xz|none] [--deb-cache DIR] [--home-profile-dir DIR] " &
+    "[--work-dir DIR] [--keep-work] [--assembly-timeout SECONDS]\n  " &
+    "Synthesise a ready-to-flash disk image of an add-on host from the " &
+    "digest-pinned upstream image its profile's baseOs: section names " &
+    "(ReproOS Add-On Mode §6.5.2). Needs no privilege."),
 ]
   ## What `repro infra <sub> --help` prints. The flag lists are the ones
   ## `parseInfraFlags` accepts; a flag not listed here is one it refuses.
+
+# ---------------------------------------------------------------------------
+# repro infra image (ReproOS Add-On Mode §6.5.2)
+# ---------------------------------------------------------------------------
+
+proc imageCompileStateDir(): string =
+  ## Where `repro infra image` keeps its profile-compile cache: per user, so
+  ## the command needs no privilege (the system state directory is root's).
+  let xdg = getEnv("XDG_CACHE_HOME")
+  (if xdg.len > 0: xdg else: getHomeDir() / ".cache") / "reprobuild" /
+    "infra-image" / "state"
+
+proc compileForTarget*(command, host, profilePath, homeProfileDir,
+                       arch: string; outText: var string;
+                       outBaseOs: var BaseOsIntent): bool =
+  ## Compile `profilePath` for `host` as an add-on target on ANOTHER machine
+  ## (the image's, or the SSH target's): the registry may not say the host
+  ## is managed elsewhere and a declared mode must be `addOn`; the running
+  ## machine's base is not observed. Runtime predicates see the target's
+  ## architecture (`arch`, an add-on arch, or "" for this machine's).
+  let stateDir = imageCompileStateDir()
+  createDir(stateDir)
+  var verdict: HostRegistryVerdict
+  try:
+    verdict = readHostRegistry(resolveHostRegistryPath(homeProfileDir,
+      profilePath), host, stateDir)
+  except EHostRegistry as e:
+    stderr.writeLine(command & ": " & e.msg)
+    return false
+  let refusal = managedElsewhereRefusal(verdict, command)
+  if refusal.len > 0:
+    stderr.writeLine(refusal)
+    return false
+  if verdict.management.declared and verdict.management.spelled and
+      verdict.management.mode != mmAddOn:
+    stderr.writeLine(command & ": the host registry declares " & host &
+      "'s system as " & $verdict.management.mode & ", not addOn; " &
+      "nothing was built")
+    return false
+  var activities = initHashSet[string]()
+  for a in verdict.management.systemActivities: activities.incl a
+  var target = systemPlanTarget(host, activities, srAddOnDebian)
+  target.facts.platform = "linux"
+  case arch
+  of "amd64": target.facts.arch = "x86_64"
+  of "arm64": target.facts.arch = "arm64"
+  of "armhf": target.facts.arch = "arm32"
+  else: discard
+  let outcome = compileAndAdaptSystemProfile(profilePath, stateDir, target)
+  if not outcome.compiled:
+    stderr.writeLine(command & ": " & profilePath & ": " &
+      (if outcome.adaptError.len > 0: outcome.adaptError
+       else: outcome.compileError))
+    return false
+  outText = outcome.text
+  outBaseOs = outcome.baseOs
+  true
+
+when not defined(linux):
+  proc runInfraImageCli(args: seq[string]): int =
+    stderr.writeLine("repro infra image: synthesising an add-on host image " &
+      "runs on Linux only (it writes ext4 and FAT filesystems and runs the " &
+      "add-on's assembly)")
+    2
+else:
+  proc runInfraImageCli(args: seq[string]): int =
+    ## `repro infra image ...` (see `InfraSubcommandUsage`).
+    var o = InfraImageOptions(compress: "none")
+    var host, profile, homeDir: string
+    var hostGiven = false
+    var i = 0
+    while i < args.len:
+      let a = args[i]
+      template value(): string =
+        if "=" in a: a.split('=', 1)[1]
+        elif i + 1 < args.len:
+          inc i
+          args[i]
+        else:
+          raise newException(ValueError, a & " requires a value")
+      let flag = a.split('=', 1)[0]
+      case flag
+      of "--host": host = value(); hostGiven = true
+      of "--profile": profile = value()
+      of "--addon-binary": o.addonBinary = value()
+      of "--addon-sha256": o.addonSha256 = value().toLowerAscii()
+      of "--output": o.output = value()
+      of "--compress": o.compress = value()
+      of "--deb-cache": o.debCache = value()
+      of "--home-profile-dir": homeDir = value()
+      of "--work-dir": o.workDir = value()
+      of "--keep-work": o.keepWork = true
+      of "--assembly-timeout": o.assemblyTimeoutSec = parseInt(value())
+      else: raise newException(ValueError, "unknown flag: " & a)
+      inc i
+    for (name, v) in [("--profile", profile), ("--addon-binary", o.addonBinary),
+                      ("--addon-sha256", o.addonSha256), ("--output", o.output)]:
+      if v.len == 0: raise newException(ValueError, name & " is required")
+    try:
+      o.host = selectHost(host, hostGiven).name
+    except EHostIdentity as e:
+      stderr.writeLine("repro infra image: " & e.msg)
+      return 2
+    if not fileExists(profile):
+      stderr.writeLine("repro infra image: no system profile at " & profile)
+      return 1
+    o.profilePath = profile.absolutePath
+    o.profileDir = o.profilePath.parentDir
+    # The section is read first, without the target's arch (it names it).
+    var probeText: string
+    var baseOs: BaseOsIntent
+    if not compileForTarget("repro infra image", o.host, o.profilePath, homeDir,
+                            "", probeText, baseOs):
+      return 1
+    if not baseOs.declared:
+      stderr.writeLine("repro infra image: EBaseOsUndeclared: " & profile &
+        " declares no baseOs: section; nothing was built")
+      return 1
+    if not compileForTarget("repro infra image", o.host, o.profilePath, homeDir,
+                            baseOs.arch, o.profileText, o.baseOs):
+      return 1
+    o.log = proc(line: string) = stderr.writeLine("repro infra image: " & line)
+    try:
+      let r = synthesiseImage(o)
+      echo "repro infra image"
+      echo "  host     : " & o.host
+      echo "  upstream : " & o.baseOs.image & " (sha256 " & o.baseOs.sha256 & ")"
+      echo "  output   : " & r.output
+      echo "  sha256   : " & r.outputSha256
+      echo "  manifest : " & r.manifestPath
+      echo "  plan     : " & r.assembly.planDigest
+      echo "  current  : " & r.assembly.generationId
+      for p in r.assembly.storePrefixes: echo "  store    : " & p
+      return 0
+    except EInfraImage as e:
+      stderr.writeLine("repro infra image: " & e.msg)
+      return 1
 
 proc runInfraCommand*(args: seq[string]): int =
   ## `repro infra <subcommand>`.
   if args.len == 0:
     stderr.writeLine("usage: repro infra {plan | apply | cache-keys | " &
-      "install-root} ...")
+      "install-root | image} ...")
     return 2
   let sub = args[0]
   let rest = if args.len > 1: args[1 .. ^1] else: @[]
@@ -1724,6 +1874,7 @@ proc runInfraCommand*(args: seq[string]): int =
     of "apply": return runInfraApply(rest)
     of "cache-keys": return runInfraCacheKeys(rest)
     of "install-root": return runInfraInstallRootCli(rest)
+    of "image": return runInfraImageCli(rest)
     else:
       stderr.writeLine("repro infra: unknown subcommand: " & sub)
       return 2

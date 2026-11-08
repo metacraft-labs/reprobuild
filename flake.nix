@@ -2871,6 +2871,15 @@
               pkgs.qemu
               pkgs.grub2_efi
               pkgs.kmod
+              # ReproOS add-on mode A16 (`repro infra image`, spec §6.5.2):
+              # the image command writes filesystems inside an image file
+              # without mounting them -- ext4 with e2fsprogs' `debugfs`,
+              # `e2fsck` and `resize2fs`, FAT with `mtools` -- and decompresses
+              # `.img.xz` upstream images with `xz`. They are build-host
+              # tools of the command and of its gates
+              # (e2e_addon_zero_touch_image_synthesis_boots_converged).
+              pkgs.e2fsprogs
+              pkgs.mtools
               # ReproOS attestation boot gates: they boot a
               # disk image under QEMU through gosti's
               # QemuBootBackend and assert on its serial console.  The

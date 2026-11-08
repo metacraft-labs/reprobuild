@@ -261,6 +261,9 @@ import repro_cli_support/selfhost as cli_selfhost
 import repro_cli_support/project_pins
 import repro_cli_support/infra
 when defined(linux):
+  # `repro anywhere --mode addon` (A16) drives the add-on on a Linux host.
+  import repro_cli_support/anywhere as cli_anywhere
+when defined(linux):
   import repro_addon/static_tree as addon_static_tree
   from repro_dsl_stdlib/packages/apt_closure import AddOnSystemStoreRoot,
     LegacyAptAdoption
@@ -94457,6 +94460,8 @@ const reproTopLevelCommands = [
   # supported subcommands.
   "cas",
   "clean", "daemon", "stats", "graph", "why", "deps", "home", "infra", "system",
+  # ReproOS add-on mode A16 (§6.5.3): `repro anywhere --mode addon`.
+  "anywhere",
   "deploy-agent",
   "hardware", "disk", "launch-plan", "locking",
   # `repro attest <sub>`: expected launch measurements for attested images.
@@ -103810,6 +103815,12 @@ proc runThinAppDispatch(programName: string): int =
       else:
         @[]
     return runInfraCommand(infraArgs)
+  if programName == "repro" and args.len > 0 and args[0] == "anywhere":
+    when defined(linux):
+      return cli_anywhere.runAnywhereCli(if args.len > 1: args[1 .. ^1] else: @[])
+    else:
+      stderr.writeLine("repro anywhere --mode addon runs on Linux only")
+      return 2
   if programName == "repro" and args.len > 0 and args[0] == "system":
     let systemArgs =
       if args.len > 1:
