@@ -1181,7 +1181,7 @@ tests/bundles/bundle_repro_solver_pure_unit.nim	nim	85
 tests/e2e/addon/t_addon_agent_apply_unit_lacks_cap_net_admin.nim	nim	2
 tests/e2e/addon/t_addon_mode_mismatch_is_refused.nim	nim	0
 tests/e2e/addon/t_addon_registry_mode_round_trip.nim	nim	0
-tests/e2e/addon/t_e2e_addon_adopt_hand_configured_service.nim	nim	1
+tests/e2e/addon/t_e2e_addon_adopt_hand_configured_service.nim	nim	2
 tests/e2e/addon/t_e2e_addon_agent_apply_sets_net_sysctl_in_host_namespace.nim	nim	1
 tests/e2e/addon/t_e2e_addon_agent_end_to_end.nim	nim	1
 tests/e2e/addon/t_e2e_addon_agent_generations_and_rollback.nim	nim	1

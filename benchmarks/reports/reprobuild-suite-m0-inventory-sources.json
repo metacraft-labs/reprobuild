@@ -29773,8 +29773,8 @@
       "owner": "tests/e2e",
       "requiresReproBinary": false,
       "source": "tests/e2e/addon/t_e2e_addon_adopt_hand_configured_service.nim",
-      "sourceSuiteCount": 1,
-      "staticCaseCount": 1,
+      "sourceSuiteCount": 2,
+      "staticCaseCount": 2,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

@@ -329,14 +329,16 @@ proc runBase(m: SnapshotMirror; b: BaseImage; record: JsonNode): seq[string] =
   var g: Guest
   let steps = newJArray()
   var fails: seq[string]
-  proc step(name: string; ok: bool; detail: string) =
+  proc stepNoStop(name: string; ok: bool; detail: string) =
     steps.add(%*{"step": name, "ok": ok, "detail": detail})
     if not ok:
       fails.add(b.name & ": " & name & ": " & detail)
-      # Under a falsifying mutation the first red step is the verdict;
-      # the rest of the run would only spend a VM slot.
-      if mutation().len > 0 or gateMutation().len > 0:
-        raise newException(MutationStop, name)
+  proc step(name: string; ok: bool; detail: string) =
+    stepNoStop(name, ok, detail)
+    # Under a falsifying mutation the first red step is the verdict;
+    # the rest of the run would only spend a VM slot.
+    if not ok and (mutation().len > 0 or gateMutation().len > 0):
+      raise newException(MutationStop, name)
   try:
     g = newMirroredGuest(b, m, diskGiB = 10)
     g.boot()
@@ -505,7 +507,11 @@ proc runBase(m: SnapshotMirror; b: BaseImage; record: JsonNode): seq[string] =
            parseSystemProfile(skeleton).resources.len, skeleton2)
     let refusedAdopt = g.adoptResource(repro, "skeleton", skeleton, amAddress)
     let raOut = refusedAdopt.stdout & refusedAdopt.stderr
-    step("`repro system adopt` refuses while the profile declares the old " &
+    # Non-stopping: under adopt-without-profile this step is red, and the
+    # verdict that matters is the next one, the silent revert decision 61
+    # rules out. Stopping here would leave that step unreached, and a cell
+    # judged on the refused adopt alone is no evidence of the revert.
+    stepNoStop("`repro system adopt` refuses while the profile declares the old " &
          "bytes, printing the resource with the edit (decision 61)",
          refusedAdopt.exitCode != 0 and "decision 61" in raOut and
          expectedStanza.len > 0 and expectedStanza in raOut, raOut &
@@ -513,6 +519,7 @@ proc runBase(m: SnapshotMirror; b: BaseImage; record: JsonNode): seq[string] =
     # The silent revert decision 61 rules out: whatever the adopt did, a
     # switch of the old profile now never puts the old bytes back.
     let oldSwitch = g.applyProfile(repro, "skeleton", skeleton)
+    record["revertStepReached"] = %true
     step("a switch of the old profile does not revert the edit",
          g.run("tail -1 /etc/default/alertmanager").strip() ==
            "# edited by the operator",
@@ -683,6 +690,41 @@ proc runBase(m: SnapshotMirror; b: BaseImage; record: JsonNode): seq[string] =
       record["log"] = %g.log
       g.destroy()
   fails
+
+const
+  RefusedAdoptStep = "`repro system adopt` refuses while the profile declares the old"
+  RevertStep = "a switch of the old profile does not revert the edit"
+
+proc stepCallOf(src, title: string): tuple[start, at: int; call: string] =
+  ## Where the step call recording ``title`` starts, where its title is, and
+  ## the proc it is recorded with (``step`` or ``stepNoStop``).
+  let at = src.find("\"" & title)
+  if at < 0: return (-1, -1, "")
+  var i = at
+  while i > 0 and src[i - 1] in {' ', '\n', '('}: dec i
+  var j = i
+  while j > 0 and src[j - 1] in {'a'..'z', 'A'..'Z'}: dec j
+  (j, at, src[j ..< i])
+
+suite "gate source":
+  test "under adopt-without-profile the gate reaches the silent-revert step":
+    # A static control on this gate's own source: the decision-61 refusal
+    # step must not stop the run (under the mutation it is red), and the
+    # silent-revert step must come after it, so the falsifier cell is judged
+    # on the revert itself. A gate that stops before the revert step leaves
+    # the falsifier unjudgeable (review round 6, the coordinator's rule);
+    # the cell's record also carries ``revertStepReached``.
+    const src = staticRead(currentSourcePath())
+    let refused = stepCallOf(src, RefusedAdoptStep)
+    let revert = stepCallOf(src, RevertStep)
+    check refused.at >= 0
+    check revert.at > refused.at
+    check refused.call == "stepNoStop"
+    check revert.call == "step"
+    # Nothing between them may stop the run: every step call in between is
+    # non-stopping.
+    let between = src[refused.at + RefusedAdoptStep.len ..< revert.start]
+    check "step(" notin between.replace("stepNoStop(", "")
 
 suite Gate:
   test "a hand-configured service is adopted with no write and converged " &
