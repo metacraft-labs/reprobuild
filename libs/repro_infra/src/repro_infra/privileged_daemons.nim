@@ -28,6 +28,21 @@
 ## Any string literal in a rules file equal to the account's name, one of
 ## its groups' names, or ``unix-user:``/``unix-group:`` of them, names it.
 ##
+## A guard reading ``subject`` excludes anything only while ``subject`` is
+## the rule's own subject: the second parameter of the function passed to
+## ``polkit.addRule``/``addAdminRule``, which polkit calls with the caller
+## (A13 review round 7, finding 3). JavaScript lets a rule rebind that
+## name, after which the guard compares the rule's own object and is true
+## for every caller. So a rules file names the account, as one this reader
+## cannot judge, when ``subject`` is used other than as that parameter or as
+## ``subject.<member>`` read: declared (``var``/``let``/``const``, a
+## ``catch`` or destructuring binding), assigned (``subject = ...``,
+## ``subject.user = ...``, compound and ``++``/``--`` forms), deleted,
+## passed or aliased whole, bound as another function's parameter, or
+## named by a guard in a function whose parameter it is not; and when the
+## file uses ``with``, ``eval``, ``Function`` or ``arguments``, any of which
+## can rebind it out of sight.
+##
 ## Sources: polkit(8) (https://www.freedesktop.org/software/polkit/docs/latest/polkit.8.html);
 ## pklocalauthority(8) for ``.pkla`` and ``localauthority.conf.d``
 ## (``Identity=``, ``AdminIdentities=``); dbus-daemon(1), "CONFIGURATION
@@ -429,11 +444,147 @@ proc statement(r: var JsReader; guards: seq[seq[Tok]]) =
     r.expression([";", "}"])
     if r.at(";"): inc r.i
 
+const AssignOps = ["=", "+", "-", "*", "/", "%", "&", "|", "^", "<", ">", "?"]
+  ## A punctuation token after ``subject.<member>`` that may begin an
+  ## assignment (``=``, or the first character of ``+=``, ``<<=``, ``??=``
+  ## and the rest, which this lexer splits) or an increment. Comparisons
+  ## (``==``, ``===``, ``!=``, ``!==``) are single tokens and stay reads;
+  ## anything here that is not one of those is refused, which also refuses
+  ## arithmetic on a member -- never needed by a guard this reader takes.
+
+proc paramList(t: seq[Tok]; open: int): seq[seq[Tok]] =
+  ## The comma-separated parameters of the list whose ``(`` is ``t[open]``.
+  var depth = 0
+  var cur: seq[Tok]
+  var j = open
+  while j < t.len:
+    let k = t[j]
+    if k.kind == tkPunct and k.text in ["(", "[", "{"]:
+      inc depth
+      if depth == 1: inc j; continue
+    elif k.kind == tkPunct and k.text in [")", "]", "}"]:
+      dec depth
+      if depth == 0:
+        result.add(cur)
+        return
+    if depth == 1 and k.kind == tkPunct and k.text == ",":
+      result.add(cur)
+      cur = @[]
+    else:
+      cur.add(k)
+    inc j
+
+proc closesAt(t: seq[Tok]; open: int): int =
+  ## The index of the token closing the bracket at ``t[open]``, or -1.
+  var depth = 0
+  for j in open ..< t.len:
+    if t[j].kind == tkPunct and t[j].text in ["(", "[", "{"]: inc depth
+    elif t[j].kind == tkPunct and t[j].text in [")", "]", "}"]:
+      dec depth
+      if depth == 0: return j
+  -1
+
+proc opensAt(t: seq[Tok]; close: int): int =
+  ## The index of the token opening the bracket closed at ``t[close]``.
+  var depth = 0
+  var j = close
+  while j >= 0:
+    if t[j].kind == tkPunct and t[j].text in [")", "]", "}"]: inc depth
+    elif t[j].kind == tkPunct and t[j].text in ["(", "[", "{"]:
+      dec depth
+      if depth == 0: return j
+    dec j
+  -1
+
+proc isRuleCallback(t: seq[Tok]; start: int): bool =
+  ## ``t[start]`` begins a function passed straight to ``polkit.addRule(``
+  ## or ``polkit.addAdminRule(`` as its only argument.
+  start >= 4 and t[start - 1].text == "(" and
+    t[start - 2].text in ["addRule", "addAdminRule"] and
+    t[start - 3].text == "." and t[start - 4].text == "polkit"
+
+proc subjectBindingProblem(t: seq[Tok]): string =
+  ## Why ``subject`` in this rules file may not be the rule's subject, or
+  ## "" (see the module comment, A13 review round 7, finding 3).
+  when DaemonMutation == "polkit-subject-rebind-trusted":
+    # FALSIFYING MUTATION: round 6's reading -- every ``subject`` is the
+    # rule's subject, whatever the rule binds to the name.
+    return ""
+  var params = initHashSet[int]()      # token indices that are parameters
+  var ruleBodies: seq[(int, int)]      # callbacks taking subject: their span
+  for j, k in t:
+    if k.kind != tkIdent: continue
+    if k.text in ["with", "eval", "Function", "arguments"]:
+      return "a rules file using " & k.text
+    var open = -1
+    var start = j
+    if k.text == "function":
+      open = j + 1
+      if open < t.len and t[open].kind == tkIdent: inc open
+      if open >= t.len or t[open].text != "(": continue
+    elif k.kind == tkIdent and j + 1 < t.len and t[j + 1].text == "=>":
+      # ``subject => ...``: a single bare parameter.
+      if k.text == "subject":
+        return "a function whose parameter is subject, not a rule's"
+      continue
+    else:
+      continue
+    let ps = paramList(t, open)
+    let close = closesAt(t, open)
+    for pi, p in ps:
+      for q in p:
+        if q.kind == tkIdent and q.text == "subject":
+          if not (isRuleCallback(t, start) and pi == 1 and p.len == 1):
+            return "a function binds subject other than as its rule's " &
+              "second parameter"
+          ruleBodies.add((start, closesAt(t, start - 1)))
+    for q in open .. max(open, close):
+      params.incl(q)
+  # Arrow functions with a parenthesised list: ``(a, subject) => ...``.
+  for j, k in t:
+    if k.kind == tkPunct and k.text == "=>" and j > 0 and t[j - 1].text == ")":
+      let open = opensAt(t, j - 1)
+      if open < 0: return "an arrow function this check cannot read"
+      let ps = paramList(t, open)
+      for pi, p in ps:
+        for q in p:
+          if q.kind == tkIdent and q.text == "subject":
+            if not (isRuleCallback(t, open) and pi == 1 and p.len == 1):
+              return "a function binds subject other than as its rule's " &
+                "second parameter"
+            ruleBodies.add((open, closesAt(t, open - 1)))
+      for q in open .. j - 1: params.incl(q)
+  for j, k in t:
+    if k.kind != tkIdent or k.text != "subject" or j in params: continue
+    if j > 0 and t[j - 1].text == ".": continue      # x.subject: a property
+    if j > 0 and t[j - 1].text in ["var", "let", "const"]:
+      return "a rule declares subject"
+    if j > 0 and t[j - 1].text == "delete":
+      return "a rule deletes subject"
+    if j > 1 and t[j - 1].text in ["+", "-"] and t[j - 2].text == t[j - 1].text:
+      return "a rule assigns subject"
+    if j + 2 >= t.len or t[j + 1].text != "." or t[j + 2].kind != tkIdent:
+      return "a rule uses subject other than by reading a member"
+    let after = j + 3
+    if after < t.len and t[after].kind == tkPunct and
+        t[after].text in AssignOps:
+      return "a rule assigns subject." & t[j + 2].text
+    # Read inside a rule callback that takes it; elsewhere ``subject`` is
+    # not the caller.
+    var inside = false
+    for (lo, hi) in ruleBodies:
+      if hi >= 0 and j > lo and j < hi: inside = true
+    if not inside:
+      return "a rule reads subject outside a rule that takes it"
+  ""
+
 proc polkitRulesNames*(src: string; a: AccountNames): string =
   ## Why a polkit ``.rules`` file names the account, or "".
   var ok: bool
   let toks = lexJs(src, ok)
   if not ok: return "a rules file this check cannot read"
+  let binding = subjectBindingProblem(toks)
+  if binding.len > 0: return binding
   for k in toks:
     if k.kind == tkString and literalNames(a, k.text):
       return "names \"" & k.text & "\""

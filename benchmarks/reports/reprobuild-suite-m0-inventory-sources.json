@@ -8714,14 +8714,15 @@
       "localDependencyShape": [
         "repro_addon",
         "repro_core",
+        "repro_elevation",
         "repro_infra",
         "repro_test_support"
       ],
       "owner": "libs/repro_addon",
       "requiresReproBinary": false,
       "source": "libs/repro_addon/tests/t_addon_carried_state_fails_closed.nim",
-      "sourceSuiteCount": 21,
-      "staticCaseCount": 83,
+      "sourceSuiteCount": 24,
+      "staticCaseCount": 95,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -29849,7 +29850,7 @@
       "requiresReproBinary": false,
       "source": "tests/e2e/addon/t_e2e_addon_adopt_hand_configured_service.nim",
       "sourceSuiteCount": 2,
-      "staticCaseCount": 2,
+      "staticCaseCount": 3,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

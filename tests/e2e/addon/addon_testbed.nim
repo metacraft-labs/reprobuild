@@ -1152,28 +1152,51 @@ proc journalStarted*(journal, unit: string): bool =
       return true
   false
 
+proc lastStart(lines: seq[string]): int =
+  result = -1
+  for k, l in lines:
+    if ("Started " in l or "Starting " in l) and "skipped" notin l: result = k
+
+proc unitLines(journal, unit: string): seq[string] =
+  for l in journal.splitLines():
+    if unit in l: result.add(l)
+
+proc failedLine(l: string): bool =
+  "Failed with result" in l or "Failed to start" in l or
+    ("Main process exited" in l and "status=0/" notin l) or
+    ("Control process exited" in l and "status=0/" notin l)
+
+proc journalFailedAfterStart*(journal, unit: string): bool =
+  ## Whether the journal of ``unit`` shows a failure after its last start
+  ## ("Failed with result", "Failed to start", a main or control process
+  ## exiting with a status other than 0).
+  let lines = unitLines(journal, unit)
+  let last = lastStart(lines)
+  if last < 0: return false
+  for l in lines[last .. ^1]:
+    if failedLine(l): return true
+  false
+
 proc journalRan*(journal, unit: string): bool =
   ## Whether the journal of ``unit`` (``journalctl -b -u <unit>``, oldest
-  ## first) shows its last start completing: a "Started"/"Starting" line,
-  ## then "Deactivated successfully" or nothing after it that failed. A unit
-  ## only ever "skipped" (a start condition unmet), or one whose last start
-  ## failed ("Failed with result", "Failed to start", a "Main process
-  ## exited" with a status other than 0), did not run. ``systemctl show``
-  ## cannot say this: once a unit that ran is inactive and unreferenced,
-  ## systemd unloads it, and a fresh load reports every runtime property
-  ## zero (measured, debian-13, A13 round 6).
-  var lines: seq[string]
-  for l in journal.splitLines():
-    if (unit) in l: lines.add(l)
-  var last = -1
-  for k, l in lines:
-    if ("Started " in l or "Starting " in l) and "skipped" notin l: last = k
+  ## first) shows its last start run to completion: a "Started"/"Starting"
+  ## line, then "Deactivated successfully", and no failure after the start.
+  ## A "Started" line is not a run: for a ``Type=simple`` unit systemd logs
+  ## it at fork, before an exec or namespace failure (226/NAMESPACE, A13
+  ## round 6) is reported (A13 review round 7, finding 4). A unit that is
+  ## still running has not completed: its evidence is the marker its
+  ## command writes (``unitRan``). A unit only ever "skipped" (a start
+  ## condition unmet) did not run. ``systemctl show`` cannot say this: once
+  ## a unit that ran is inactive and unreferenced, systemd unloads it, and a
+  ## fresh load reports every runtime property zero (measured, debian-13,
+  ## A13 round 6).
+  let lines = unitLines(journal, unit)
+  let last = lastStart(lines)
   if last < 0: return false
   var completed = false
   for l in lines[last .. ^1]:
-    if "Failed with result" in l or "Failed to start" in l or
-        ("Main process exited" in l and "status=0/" notin l): return false
-    if "Deactivated successfully" in l or "Started " in l: completed = true
+    if failedLine(l): return false
+    if "Deactivated successfully" in l: completed = true
   completed
 
 const
@@ -1198,6 +1221,19 @@ const
 """
     ## Captured, debian-13 (A13 round 6): a unit held, then started by the
     ## apply after its check, ran and exited 0.
+  CapturedStartedOnly = """
+[  265.749769] addon-tb systemd[1]: Started eth-r4-host.service - A13 round-4 probe.
+"""
+    ## A ``Type=simple`` unit read right after its fork: "Started" and
+    ## nothing yet (A13 review round 7, finding 4).
+  CapturedStartedThenNamespace = """
+[  281.803476] addon-tb systemd[1]: Started eth-r4-host.service - A13 round-4 probe.
+[  281.837865] addon-tb (sh)[6284]: eth-r4-host.service: Failed to set up mount namespacing: /var/lib/a13-r4: No such file or directory
+[  281.838693] addon-tb systemd[1]: eth-r4-host.service: Main process exited, code=exited, status=226/NAMESPACE
+[  281.838751] addon-tb systemd[1]: eth-r4-host.service: Failed with result 'exit-code'.
+"""
+    ## A ``Type=simple`` unit whose namespace set-up failed after its
+    ## "Started" line.
 
 static:
   # The checks' negative and positive controls, on captured journals: they
@@ -1206,6 +1242,12 @@ static:
   doAssert not journalRan(CapturedNeverStarted, "eth-r4-host.service")
   doAssert not journalRan(CapturedStartedFailed, "eth-r6-exec.service")
   doAssert journalRan(CapturedRan, "eth-r4-host.service")
+  doAssert not journalRan(CapturedStartedOnly, "eth-r4-host.service")
+  doAssert not journalRan(CapturedStartedThenNamespace, "eth-r4-host.service")
+  doAssert journalFailedAfterStart(CapturedStartedThenNamespace, "eth-r4-host.service")
+  doAssert journalFailedAfterStart(CapturedStartedFailed, "eth-r6-exec.service")
+  doAssert not journalFailedAfterStart(CapturedRan, "eth-r4-host.service")
+  doAssert not journalFailedAfterStart(CapturedStartedOnly, "eth-r4-host.service")
   doAssert not journalStarted(CapturedNeverStarted, "eth-r4-host.service")
   doAssert journalStarted(CapturedStartedFailed, "eth-r6-exec.service")
   doAssert journalStarted(CapturedRan, "eth-r4-host.service")

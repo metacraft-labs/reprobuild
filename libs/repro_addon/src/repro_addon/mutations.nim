@@ -562,6 +562,21 @@
 ## ``post-reload-refusal-skipped``           the carried-state refusal is not
 ##                                           decided again after a switch's
 ##                                           reload
+## ``boot-closure-reads-generation-dropins`` the boot closure reads the
+##                                           ``50-repro-*`` drop-ins an
+##                                           earlier generation wrote as the
+##                                           host's (decision 60)
+## ``polkit-subject-rebind-trusted``         a polkit rule that rebinds
+##                                           ``subject`` is judged by its
+##                                           ``subject`` guards (decision 58)
+## ``narrowed-live-set``                     the add-on switch judges and
+##                                           holds no unit in a switch that
+##                                           changes no unit file
+## ``reissue-skips-targets``                 after a full apply's live check,
+##                                           the start jobs of the targets the
+##                                           drivers started are not
+##                                           re-issued (decision 79)
+## ``reissue-skips-sockets``                 the same for sockets
 ## ``adopt-without-profile``                 ``repro system adopt`` takes
 ##                                           drifted bytes the profile does
 ##                                           not declare (decision 61)
@@ -1344,6 +1359,12 @@ const
                           "live-units-chosen-after-writes",
                           "optional-paths-ignored",
                           "post-reload-refusal-skipped",
+                          # A13 review round 7.
+                          "boot-closure-reads-generation-dropins",
+                          "polkit-subject-rebind-trusted",
+                          "narrowed-live-set",
+                          "reissue-skips-targets",
+                          "reissue-skips-sockets",
                           "plan-ignores-profile-digest",
                           "full-apply-keeps-undeclared-dropins",
                           "install-unit-reads-host-manifest",

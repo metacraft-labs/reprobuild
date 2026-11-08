@@ -5412,6 +5412,17 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
     if p.r.kind in {srkSystemdSystemUnit, srkSystemdSystemDropIn} and
         p.verdict != $cvNoOp:
       anyUnitChange = true
+  # The carried-state cross-check runs in every switch (§11.1, §13
+  # decision 59), not only one that writes a unit file: a switch that
+  # changes only a file a confined unit ``depends_on``, or its credentials,
+  # restarts that unit at step 7 (§7.3), on whatever systemd last loaded --
+  # an operator's reload after a host generator changed its output
+  # included. So wherever the check has units to judge, the switch holds
+  # them, reloads, and judges them before step 7, whatever else it changes
+  # (A13 review round 7, finding 1).
+  let liveCheckEverySwitch =
+    when mutated("narrowed-live-set"): false
+    else: preWriteLiveUnits.len > 0
   let sysctlKeys = block:
     var keys: seq[string]
     for p in plans:
@@ -5603,7 +5614,7 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
       # the daemon reload, sysctl through the host's own service, and
       # the kernel values a removed sysctl resource leaves behind.
       try:
-        if anyUnitChange or replaying:
+        if anyUnitChange or replaying or liveCheckEverySwitch:
           # The start holds go in before the reload: from it until the
           # effective-unit check passes, no floored unit can start (a
           # socket, a timer, D-Bus or a Wants= would otherwise start it on
