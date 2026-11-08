@@ -53,7 +53,9 @@ type
 
   InfraImageOptions* = object
     host*: string
-    profilePath*: string      ## the source profile (for the manifest)
+    profilePath*: string      ## the source profile, as the operator named it
+                              ## (for the manifest: an absolute path would
+                              ## publish the build host's directory layout)
     profileDir*: string       ## where `baseOs.bootstrap` files are relative to
     baseOs*: BaseOsIntent
     profileText*: string      ## the host profile's canonical text
@@ -669,7 +671,7 @@ proc synthesiseImage*(o: InfraImageOptions): InfraImageResult =
                          "sectors": p.sectors, "type": p.typeCode}
     let manifest = %*{
       "schema": "reprobuild.infra-image.manifest.v1",
-      "host": o.host, "profile": o.profilePath,
+      "host": o.host, "profile": o.profilePath.extractFilename,
       "upstream": {"url": o.baseOs.image, "sha256": o.baseOs.sha256},
       "arch": o.baseOs.arch, "buildBoot": o.baseOs.buildBoot,
       "diskSize": o.baseOs.diskSize, "table": $t.kind,
