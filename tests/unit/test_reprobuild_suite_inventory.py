@@ -5661,7 +5661,7 @@ test "incomplete name" and:
             ]
             for member in members
         )
-        self.assertEqual(summed, 82)
+        self.assertEqual(summed, 85)
 
         # Follows the imports that are actually there, not a fixed count.
         one_fewer = "\n".join(

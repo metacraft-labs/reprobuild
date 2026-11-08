@@ -5,7 +5,7 @@
 ##
 ## ## The defect this locks out
 ##
-## Substituted on rpi2, the armv7 prefix's `repro exec -- true` ignored the
+## Substituted on rpi2, the armv7 prefix's `repro exec -- true` passed over the
 ## fork it ships under `nim/` and built stock Nim 2.2.10 from source
 ## (2026-11-04). The A15 re-review then found that a recipe's own `uses: nim`
 ## range was never consulted against that compiler (2026-11-05).

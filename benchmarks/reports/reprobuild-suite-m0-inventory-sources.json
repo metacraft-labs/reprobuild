@@ -1915,7 +1915,7 @@
             "dir",
             "probe"
           ],
-          "line": 100,
+          "line": 104,
           "path": "libs/repro_core/tests/t_zig_target_vendored_hash.nim",
           "patterns": [
             "nim-compile-verb"
@@ -6837,7 +6837,7 @@
           "directExecutionLine": true,
           "enclosingCallable": "",
           "executedVariables": [],
-          "line": 334,
+          "line": 333,
           "path": "tests/integration/t_project_interface_artifact_import_modes.nim",
           "patterns": [
             "repro-extract-interface"
@@ -6853,7 +6853,7 @@
           "directExecutionLine": true,
           "enclosingCallable": "",
           "executedVariables": [],
-          "line": 344,
+          "line": 343,
           "path": "tests/integration/t_project_interface_artifact_import_modes.nim",
           "patterns": [
             "repro-compile-provider-binary"
@@ -6869,7 +6869,7 @@
           "directExecutionLine": true,
           "enclosingCallable": "",
           "executedVariables": [],
-          "line": 359,
+          "line": 358,
           "path": "tests/integration/t_project_interface_artifact_import_modes.nim",
           "patterns": [
             "repro-extract-interface"
@@ -6894,7 +6894,7 @@
             "thinConsumer",
             "thinDir"
           ],
-          "line": 374,
+          "line": 373,
           "path": "tests/integration/t_project_interface_artifact_import_modes.nim",
           "patterns": [
             "nim-argv"
@@ -14895,7 +14895,8 @@
       "language": "nim",
       "localDependencyShape": [
         "repro_deploy_agent",
-        "repro_peer_cache"
+        "repro_peer_cache",
+        "repro_test_support"
       ],
       "owner": "libs/repro_deploy_agent",
       "requiresReproBinary": false,
