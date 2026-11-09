@@ -139,6 +139,10 @@ suite "a helper binary is used only when built from the tree under test":
     check ("read " & blob) in list
 
   test "2: a library module edited after the build is refused":
+    # Each case builds the tree itself: the test runner runs every case in
+    # a process of its own, with a fresh tree (createTempDir above).
+    build()
+    check refusal() == ""
     touchAfterBinary(lib)
     let why = refusal()
     checkpoint why
@@ -242,6 +246,8 @@ suite "a helper binary is used only when built from the tree under test":
       check missing.len == 0
 
   test "7: no binary, or no dependency list, is refused":
+    build()
+    check refusal() == ""
     removeFile(tree / "build" / "nimcache" / "foo-helper" / "foo-helper.deps")
     check "has no dependency list" in refusal()
     removeFile(binary)

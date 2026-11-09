@@ -110,7 +110,7 @@ suite "Bootstrap-And-Self-Build B1: repro build apps collection":
     #   * ``executable reproPeerCacheTier2:``, ``executable
     #     reproCacheDaemon:`` and BOTH slice markers
     #     (``var reprobuildAppsActions: seq[BuildActionDef] = @[]``,
-    #     ``collect(… reprobuildAppsActions)``) are CODE spellings — DSL
+    #     ``collect(… reprobuildAppsActions & reprobuildAppsOnlyActions)``) are CODE spellings — DSL
     #     command syntax, a variable declaration, a call. They must be read
     #     off ``projectCode`` (``nimSourceCodeOnly``: comments AND literals
     #     blanked), because over literal-keeping text a ``const`` or a
@@ -172,7 +172,10 @@ suite "Bootstrap-And-Self-Build B1: repro build apps collection":
     # satisfied by any ``const`` elsewhere in the file spelling it, which is
     # the very bypass this case is being hardened against.
     const CollectHead = "discard collect(\"apps\""
-    let appsEnd = projectCode.find(", reprobuildAppsActions)", appsStart)
+    # The collection is the release apps plus the apps-only members
+    # (``reprobuildAppsOnlyActions``: the helper-list edges).
+    let appsEnd = projectCode.find(
+      ", reprobuildAppsActions & reprobuildAppsOnlyActions)", appsStart)
     check appsStart >= 0
     check appsEnd > appsStart
     if appsStart >= 0 and appsEnd > appsStart:

@@ -2566,7 +2566,7 @@
             "outside",
             "tree"
           ],
-          "line": 204,
+          "line": 208,
           "path": "libs/repro_test_support/tests/t_fresh_helper_binary_refuses_a_stale_build.nim",
           "patterns": [
             "nim-argv"

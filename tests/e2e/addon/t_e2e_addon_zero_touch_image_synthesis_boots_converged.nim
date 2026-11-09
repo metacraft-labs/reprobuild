@@ -76,7 +76,7 @@ proc hexKey(k: openArray[byte]): string =
 proc engine(): string =
   ## The full engine of this checkout: `repro infra image` compiles the
   ## profile on the build host.
-  result = reproRoot() / "build" / "bin" / "repro"
+  result = reproRoot() / "build" / "bin" / "repro".addFileExt(ExeExt)
   if not fileExists(result):
     raise newException(TestBedError, "no engine at " & result &
       "; build it with `just build`")

@@ -40,7 +40,15 @@
 ## with hooks on. ``advisory`` is the other way to arrive at them, and has a case
 ## of its own.
 
-import std/[posix, sequtils, streams, strtabs, unittest]
+import std/[os, posix, sequtils, streams, strtabs, tempfiles, unittest]
+
+# A temp root of this process's own, for it and every process it starts.
+# The test runner runs each case in a process of its own, in parallel, under
+# one shared TMPDIR, and cases here check that a push left no
+# ``repro-push-pins-*`` directory behind (``isolatedScratchDirs``): under a
+# shared root a case sees the directories of a push another case is running.
+let caseTempRoot = createTempDir("rpp", "")
+putEnv("TMPDIR", caseTempRoot)
 
 import repro_test_support/reasoned_skip
 from repro_tool_profiles import tpmPathOnly
@@ -1642,3 +1650,5 @@ suite "a member certified against its pins has the submodules it initialized":
       check gitOut(libB.path / "sub", "rev-parse", "HEAD") != committedSub
       fx.checkPublishedThroughGateway(pushed.output, "lib-b", libB.path,
         libB.bare, bTip)
+
+removeDir(caseTempRoot)

@@ -2031,8 +2031,10 @@ test "incomplete name" and:
             "libs/repro_binary_cache_client/tests/"
             "test_publish_in_process.nim": 9,
             # The 13-case catalog includes client-over-daemon precedence,
-            # defaults, namespace coverage and exact restoration of an unset.
-            "libs/repro_cli_support/tests/t_daemon_carried_environment.nim": 13,
+            # defaults, namespace coverage and exact restoration of an unset;
+            # de93be9f adds the 14th: the caller's IN_AGENT_SHELL governs the
+            # progress default, not the daemon's.
+            "libs/repro_cli_support/tests/t_daemon_carried_environment.nim": 14,
             "libs/repro_resources/tests/"
             "t_attr_missing_interface_diagnostic.nim": 1,
             "libs/repro_resources/tests/t_attr_ssz_envelope_roundtrip.nim": 3,
@@ -2108,11 +2110,13 @@ test "incomplete name" and:
                     macho.read_text(encoding="utf-8"),
                 )
             ),
-            50,
+            # 53, not 50: 2af81ac9 adds three cases for the interpreted
+            # Darwin helper principal, so the host file's own count is 18.
+            53,
         )
         self.assertEqual(
             by_source[macho.relative_to(REPO_ROOT).as_posix()]["sourceCaseCount"],
-            15,
+            18,
         )
 
         nim_specs, python_specs = inventory.parse_repro_tests(REPO_ROOT)
