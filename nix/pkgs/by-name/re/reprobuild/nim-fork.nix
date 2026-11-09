@@ -141,13 +141,13 @@ stdenv.mkDerivation {
     runHook preBuild
     export HOME="$TMPDIR"
 
-    echo "[nim-fork] 1/4 bootstrap stage-0 nim from csources_v3"
+    echo "[nim-fork] 1/5 bootstrap stage-0 nim from csources_v3"
     cp -r ${csourcesSrc} csources_v3
     chmod -R u+w csources_v3
     make -C csources_v3 -j"$NIX_BUILD_CORES" CC="$CC"
     test -x bin/nim
 
-    echo "[nim-fork] 2/4 vendor the fork compiler's deps under dist/"
+    echo "[nim-fork] 2/5 vendor the fork compiler's deps under dist/"
     mkdir -p dist
     cp -r ${traceFormatSrc} dist/codetracer-trace-format-nim
     cp -r ${stewSrc}        dist/nim-stew
@@ -188,14 +188,37 @@ stdenv.mkDerivation {
     # `nimpretty/nimpretty.nim.cfg` supplies `--define:nimpretty`, which the
     # source hard-requires ({.error.} without it); `--skipParentCfg` does not
     # suppress a project's own cfg, only parent-directory ones.
-    echo "[nim-fork] 3/4 build nimpretty from the fork (formatter/compiler skew)"
+    echo "[nim-fork] 3/5 build nimpretty from the fork (formatter/compiler skew)"
     ./bin/nim c --parallelBuild:"''${NIX_BUILD_CORES:-0}" -d:release \
       --skipUserCfg --skipParentCfg --noNimblePath \
       --warning:BareExcept:off --warning:UnusedImport:off \
       -o:bin/nimpretty nimpretty/nimpretty.nim
     test -x bin/nimpretty
 
-    echo "[nim-fork] 4/4 compile the fork compiler proper (koch-boot-free)"
+    # `nimsuggest` is the language-server half, and it has to come from the
+    # FORK too: CodeTracer's `traceExpand` / `tracestatic` queries exist only
+    # in the fork's nimsuggest (nixpkgs' 2.2.x one has none), and the real-stack
+    # Nim-tracing suites (PLAT-65) skip with `MISSING-PREREQ SKIP` when
+    # `CODETRACER_NIMSUGGEST` names no such binary. Like nimpretty it links the
+    # fork's compiler modules, so building it from `${forkSrc}` keeps its
+    # analysis in step with the compiler installed next to it.
+    #
+    # `--noNimblePath` is load-bearing: without it nim takes `compiler/...` and
+    # `checksums` from a `~/.nimble/pkgs2/nim-*` install instead of this tree
+    # and the build fails in `checksums/md5.nim`. The dist/ trees the compiler
+    # imports are listed by `nimsuggest/nimsuggest.nim.cfg` itself. Built with
+    # the stage-0 compiler and BEFORE it is replaced, for the same reason as
+    # nimpretty above.
+    echo "[nim-fork] 4/5 build nimsuggest from the fork (trace queries)"
+    ./bin/nim c --parallelBuild:"''${NIX_BUILD_CORES:-0}" -d:release \
+      --skipUserCfg --skipParentCfg --noNimblePath \
+      --warning:BareExcept:off --warning:UnusedImport:off \
+      --passC:-I${zstd.dev}/include \
+      --passL:-L${zstd.out}/lib \
+      -o:bin/nimsuggest nimsuggest/nimsuggest.nim
+    test -x bin/nimsuggest
+
+    echo "[nim-fork] 5/5 compile the fork compiler proper (koch-boot-free)"
     ./bin/nim c --parallelBuild:"''${NIX_BUILD_CORES:-0}" -d:release -d:nimKochBootstrap \
       --skipUserCfg --skipParentCfg --noNimblePath \
       --warning:BareExcept:off --warning:UnusedImport:off \
@@ -229,6 +252,8 @@ stdenv.mkDerivation {
       # Linux, so nothing else will give it a RUNPATH, and it links the same
       # compiler modules `nim` does.
       patchelf --set-rpath "${lib.makeLibraryPath runtimeLibs}" "$out/bin/nimpretty"
+      # nimsuggest dlopens libpcre by soname as well, so it needs the same.
+      patchelf --set-rpath "${lib.makeLibraryPath runtimeLibs}" "$out/bin/nimsuggest"
     ''}
     ${lib.optionalString stdenv.hostPlatform.isDarwin ''
       # Darwin: the Mach-O equivalent — add each dependency's store lib dir as an
@@ -244,6 +269,7 @@ stdenv.mkDerivation {
         ]
       }; do
         install_name_tool -add_rpath "$libdir" "$out/bin/nim" || true
+        install_name_tool -add_rpath "$libdir" "$out/bin/nimsuggest" || true
       done
     ''}
     # Prune dev-only dangling symlinks from the vendored dist/ trees.
