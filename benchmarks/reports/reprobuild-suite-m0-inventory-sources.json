@@ -14251,7 +14251,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_core/tests/t_engine_build_info.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 3,
+      "staticCaseCount": 5,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -33756,7 +33756,7 @@
       "requiresReproBinary": true,
       "source": "tests/e2e/local-build-engine/t_e2e_local_reprobuild_project_build.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 18,
+      "staticCaseCount": 19,
       "staticallyDetectedRuntimeCompilerFlow": true,
       "targetOs": "soAny"
     },
