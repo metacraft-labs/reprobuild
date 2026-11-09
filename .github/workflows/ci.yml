@@ -700,7 +700,18 @@ jobs:
             if [ -n "$repro_ld" ]; then
               # `repro build ct` self-spawns a repro-daemon and other helper
               # binaries; patch every bootstrapped binary, not just `repro`.
+              # Except a test helper with a dependency list
+              # (build/nimcache/<name>/<name>.deps, scripts/write_helper_deps.sh):
+              # the list records the binary's sha256, so rewriting its RPATH
+              # here makes repro_test_support/fresh_binary refuse it in the
+              # Test step. `repro build ct` runs none of them, and the tests
+              # run them inside reprobuild's own dev shell.
               for b in "$repro_root"/build/bin/*; do
+                b_name="$(basename "$b")"
+                if [ -f "$repro_root/build/nimcache/$b_name/$b_name.deps" ]; then
+                  echo "ct-build: not patching $b (a test helper; its dependency list records its digest)"
+                  continue
+                fi
                 [ -f "$b" ] && dev-exec patchelf --print-rpath "$b" >/dev/null 2>&1 || continue
                 cur_rpath="$(dev-exec patchelf --print-rpath "$b" 2>/dev/null || true)"
                 dev-exec patchelf --force-rpath --set-rpath "${cur_rpath:+$cur_rpath:}$repro_ld" "$b" \
