@@ -243,6 +243,15 @@ stdenv.mkDerivation {
     # `$nim/dist/...` path (the fork's `testament/testament.nim.cfg` uses that
     # form) still finds the copies the compiler was built with.
     cp -r bin lib config dist "$out/"
+    # nimsuggest goes in libexec/, NOT bin/: a shell that puts `bin/` on PATH
+    # would otherwise replace its stock nimsuggest by this one, and the fork's
+    # crashes under CodeTracer's root `config.nims` (heap-dependent; see the
+    # header of codetracer's ci/test/nimsuggest-check.sh), which would turn that
+    # lint canary into a quarantine. Consumers that want the trace queries name
+    # the binary (CODETRACER_NIMSUGGEST). `libexec/` is a sibling of `bin/`, so
+    # the exe-relative `../lib` and `../config` lookups still resolve.
+    mkdir -p "$out/libexec"
+    mv "$out/bin/nimsuggest" "$out/libexec/nimsuggest"
     ${lib.optionalString stdenv.hostPlatform.isLinux ''
       # Linux: nim dlopens libpcre/libzstd by soname, so bake the store lib dirs
       # into the compiler's RUNPATH (dontPatchELF above keeps this from being
@@ -253,7 +262,7 @@ stdenv.mkDerivation {
       # compiler modules `nim` does.
       patchelf --set-rpath "${lib.makeLibraryPath runtimeLibs}" "$out/bin/nimpretty"
       # nimsuggest dlopens libpcre by soname as well, so it needs the same.
-      patchelf --set-rpath "${lib.makeLibraryPath runtimeLibs}" "$out/bin/nimsuggest"
+      patchelf --set-rpath "${lib.makeLibraryPath runtimeLibs}" "$out/libexec/nimsuggest"
     ''}
     ${lib.optionalString stdenv.hostPlatform.isDarwin ''
       # Darwin: the Mach-O equivalent — add each dependency's store lib dir as an
@@ -269,7 +278,7 @@ stdenv.mkDerivation {
         ]
       }; do
         install_name_tool -add_rpath "$libdir" "$out/bin/nim" || true
-        install_name_tool -add_rpath "$libdir" "$out/bin/nimsuggest" || true
+        install_name_tool -add_rpath "$libdir" "$out/libexec/nimsuggest" || true
       done
     ''}
     # Prune dev-only dangling symlinks from the vendored dist/ trees.
