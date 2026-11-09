@@ -102430,10 +102430,12 @@ proc runThinAppDispatch(programName: string): int =
       else:
         putEnv("PATH", appDir)
   let publicCliPath = stablePublicCliPath()
-  # A checkout's persistent transport must re-enter the engine configuring
-  # it, even when an older installed repro appears first on PATH. Use the
-  # existing image guard so embedded library callers never persist their
-  # test/provider executable as a CLI. Keep the hint scoped to this dispatch.
+  # When this engine wires or checks a checkout of a shared pool, it records
+  # itself first in the pool's engine list (``<pool>/repro/engines``), which
+  # the pool's transport launcher tries before PATH, so an older installed
+  # repro first on PATH does not serve the transport. Use the existing image
+  # guard so embedded library callers never record their test/provider
+  # executable as a CLI. Keep the hint scoped to this dispatch.
   let previousPoolCli = getEnv("REPRO_SHARED_POOL_CLI")
   let poolCli = internalReproHelperCliPath(publicCliPath)
   if poolCli.len > 0:

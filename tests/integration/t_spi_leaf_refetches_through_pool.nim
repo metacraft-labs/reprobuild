@@ -45,6 +45,28 @@
 ##     subsequent read heals both leaf and pool. Wrong chain keys must also
 ##     be diagnosed, independently of object presence.
 ##
+##   - ``chain_survives_removal_of_the_engine_that_wired_it`` — the leaf's
+##     ``remote.repro-pool.uploadpack`` names the pool's launcher
+##     (``<pool>/repro/shared-pool-upload-pack``), not the executable that
+##     wired it. That executable is deleted (a garbage-collected store path, a
+##     removed throwaway build) and a later read, with ``REPROBUILD_REPRO``
+##     unset and another engine on PATH as ``reprobuild``, still heals leaf
+##     and pool.
+##   - ``rewiring_with_another_engine_leaves_the_leaf_config_unchanged`` — an
+##     on-touch check by a second engine leaves the uploadpack value
+##     byte-identical, reports no refetch-chain finding, and records the
+##     second engine ahead of the first in ``<pool>/repro/engines``. With the
+##     first engine deleted and nothing on PATH, a read is served by the
+##     second engine from that list.
+##   - ``launcher_without_any_engine_fails_without_unrestricted_fallback`` —
+##     no override, an empty engine list and no repro on PATH: the read fails
+##     with the launcher's own diagnostic, and nothing is fetched into the
+##     pool (no fallback to stock lazy upload-pack).
+##
+## The "engines" in those cases are copies of this test executable, which
+## serves ``internal shared-pool-upload-pack`` with the production transport
+## (see the harness below), so they are real transports, not stand-ins.
+##
 ## No mocks. Hermetic: one ``createTempDir`` root, a private
 ## ``GIT_CONFIG_GLOBAL``, ``file://`` URLs throughout (a plain path would make
 ## git hardlink instead of borrow). Skip rule: ``git`` missing on PATH.
@@ -92,11 +114,65 @@ if paramCount() == 2 and paramStr(1) == "refill-orphan-child":
   writeFile(stage / "objects/pack/interrupted.pack", "interrupted tiny transfer")
   while true: sleep(10)
 
-proc expectedPoolUploadPack(): string =
-  when declared(leafPoolUploadPackCommand): leafPoolUploadPackCommand()
-  else: LeafPoolUploadPack
+proc launcherFile(pool: string): string =
+  ## ``<pool>/repro/shared-pool-upload-pack``, spelled out so this file
+  ## still compiles (and its cases fail) against a build without it.
+  when declared(poolUploadPackLauncherPath): poolUploadPackLauncherPath(pool)
+  else: pool / "repro" / "shared-pool-upload-pack"
+
+proc enginesFile(pool: string): string =
+  when declared(poolEnginesPath): poolEnginesPath(pool)
+  else: pool / "repro" / "engines"
+
+proc expectedPoolUploadPack(pool: string): string =
+  ## The launcher's path, quoted for the POSIX shell Git runs it through
+  ## (forward slashes on Windows). Nothing of the wiring executable in it.
+  let launcher = when defined(windows): launcherFile(pool).replace('\\', '/')
+                 else: launcherFile(pool)
+  quoteShellPosix(launcher)
 
 let originalReproOverride = getEnv("REPROBUILD_REPRO")
+let originalPath = getEnv("PATH")
+
+proc copyEngine(dir, name: string): string =
+  ## A separate on-disk engine: a copy of this executable, which serves the
+  ## production transport (see the harness at the top of this file).
+  createDir(dir)
+  result = dir / (name & ExeExt)
+  copyFile(getAppFilename(), result)
+  setFilePermissions(result, getFilePermissions(getAppFilename()))
+
+proc pathWithoutRepro(root: string): string =
+  ## The ambient PATH without ``repro`` or ``reprobuild``, so the launcher's
+  ## PATH fallback finds nothing unless a case adds an engine itself. Git,
+  ## ``env`` and the shell must stay reachable, and a directory holding repro
+  ## often holds them too (a Nix profile's ``bin``, a system ``bin``), so on
+  ## POSIX such a directory is replaced by a shadow under ``root`` that links
+  ## every other entry. On Windows repro is installed in a directory of its
+  ## own, which is dropped whole.
+  var kept: seq[string]
+  let dirs: seq[string] = originalPath.split(PathSep)
+  for i, dir in dirs:
+    if dir.len == 0: continue
+    if not (fileExists(dir / ("repro" & ExeExt)) or
+        fileExists(dir / ("reprobuild" & ExeExt))):
+      kept.add(dir)
+      continue
+    when not defined(windows):
+      let shadow = root / "path-without-repro" / $i
+      if not dirExists(shadow):
+        createDir(shadow)
+        for kind, entry in walkDir(dir):
+          let name = entry.extractFilename
+          if name in ["repro", "reprobuild"]: continue
+          createSymlink(entry, shadow / name)
+      kept.add(shadow)
+  kept.join($PathSep)
+
+proc engineEntries(pool: string): seq[string] =
+  if fileExists(enginesFile(pool)):
+    for line in readFile(enginesFile(pool)).splitLines():
+      if line.strip().len > 0: result.add(line.strip())
 
 proc q(value: string): string = quoteShell(value)
 
@@ -201,6 +277,7 @@ proc setUp(root: string; shallow = false): Fixture =
 proc tearDown() =
   if originalReproOverride.len > 0: putEnv("REPROBUILD_REPRO", originalReproOverride)
   else: delEnv("REPROBUILD_REPRO")
+  putEnv("PATH", originalPath)
   delEnv("GIT_CONFIG_GLOBAL")
   delEnv("GIT_CONFIG_NOSYSTEM")
 
@@ -586,7 +663,9 @@ exit $status
       check must(f.leaf, "config", "--get",
         "remote.repro-pool.partialclonefilter") == "blob:none"
       check must(f.leaf, "config", "--get", "remote.repro-pool.uploadpack") ==
-        expectedPoolUploadPack()
+        expectedPoolUploadPack(f.pool)
+      check fpUserExec in getFilePermissions(launcherFile(f.pool))
+      check engineEntries(f.pool) == @[getEnv("REPROBUILD_REPRO")]
       check must(f.leaf, "config", "--get",
         "remote.repro-pool.skipFetchAll") == "true"
       check gitIn(f.leaf, "config", "--get", "remote.repro-pool.fetch").code != 0
@@ -1087,3 +1166,93 @@ exit $status
     check readFile(unmanaged / "keep") == "user-owned scratch"
     check readFile(unknown / "keep") == "unknown version"
     check has(f.pool, tip) and has(f.leaf, tip)
+
+  test "chain_survives_removal_of_the_engine_that_wired_it":
+    let root = createTempDir("repro-spi2-engine-gone-", "")
+    defer:
+      tearDown()
+      removeDir(root)
+    let f = setUp(root)
+    # setUp wired the leaf with REPROBUILD_REPRO naming a private copy of the
+    # engine. Delete it, as a nix GC or a removed throwaway build would.
+    let wiring = getEnv("REPROBUILD_REPRO")
+    doAssert fileExists(wiring)
+    removeFile(wiring)
+    let tip = loseSideFromPool(f)
+    # A different engine is reachable only as ``reprobuild`` on PATH.
+    let onPath = copyEngine(root / "path-bin", "reprobuild")
+    delEnv("REPROBUILD_REPRO")
+    putEnv("PATH", onPath.parentDir & $PathSep & pathWithoutRepro(root))
+    let read = run(f.leaf, true, "cat-file", "-p", tip & "^{tree}")
+    checkpoint("lazy read after the wiring engine was removed: " & read.output)
+    check read.code == 0
+    check has(f.leaf, tip)
+    check has(f.pool, tip)
+
+  test "rewiring_with_another_engine_leaves_the_leaf_config_unchanged":
+    let root = createTempDir("repro-spi2-two-engines-", "")
+    defer:
+      tearDown()
+      removeDir(root)
+    let f = setUp(root)
+    let engineA = getEnv("REPROBUILD_REPRO")
+    let wired = must(f.leaf, "config", "--get", "remote.repro-pool.uploadpack")
+    let engineB = copyEngine(root / "engine-b", "repro")
+    putEnv("REPROBUILD_REPRO", engineB)
+    # The on-touch path every repro runs over a pool's borrowers.
+    let report = checkLeaf(f.gitBin, f.leaf, lcmReport, root / "cache")
+    checkpoint("on-touch by engine B: " & messages([report]).join("\n"))
+    check report.configured
+    check not report.hasMessages
+    for finding in report.findings:
+      check finding.kind != lfkRefetchChainMissing
+    check "refetch chain" notin messages([report]).join("\n")
+    check ensureLeafPoolConfig(f.gitBin, f.leaf, f.pool) == ""
+    check must(f.leaf, "config", "--get", "remote.repro-pool.uploadpack") ==
+      wired
+    check gitIn(f.leaf, "config", "--get-all",
+      "remote.repro-pool.uploadpack").output == wired
+    let engines = engineEntries(f.pool)
+    checkpoint("engines: " & engines.join(", "))
+    check engines.len == 2
+    check engines.find(engineB) == 0
+    check engines.find(engineA) == 1
+    # A then B again: one entry each, B still first.
+    putEnv("REPROBUILD_REPRO", engineA)
+    check ensureLeafPoolConfig(f.gitBin, f.leaf, f.pool) == ""
+    check engineEntries(f.pool) == @[engineA, engineB]
+    putEnv("REPROBUILD_REPRO", engineB)
+    check ensureLeafPoolConfig(f.gitBin, f.leaf, f.pool) == ""
+    check engineEntries(f.pool) == @[engineB, engineA]
+    # With A gone, no override and nothing on PATH, the recorded B serves.
+    removeFile(engineA)
+    let tip = loseSideFromPool(f)
+    delEnv("REPROBUILD_REPRO")
+    putEnv("PATH", pathWithoutRepro(root))
+    let read = run(f.leaf, true, "cat-file", "-p", tip & "^{tree}")
+    checkpoint("lazy read served from the engine list: " & read.output)
+    check read.code == 0
+    check has(f.leaf, tip) and has(f.pool, tip)
+
+  test "launcher_without_any_engine_fails_without_unrestricted_fallback":
+    let root = createTempDir("repro-spi2-no-engine-", "")
+    defer:
+      tearDown()
+      removeDir(root)
+    let f = setUp(root)
+    removeFile(getEnv("REPROBUILD_REPRO"))
+    writeFile(enginesFile(f.pool), "")
+    let tip = loseSideFromPool(f)
+    let before = packedObjectIds(f.pool)
+    delEnv("REPROBUILD_REPRO")
+    putEnv("PATH", pathWithoutRepro(root))
+    let read = run(f.leaf, true, "cat-file", "-p", tip & "^{tree}")
+    checkpoint("lazy read with no engine: " & read.output)
+    check read.code != 0
+    check "no repro executable found" in read.output
+    check "repro health" in read.output
+    check "REPROBUILD_REPRO" in read.output
+    check f.pool in read.output
+    check not has(f.leaf, tip)
+    check not has(f.pool, tip)
+    check packedObjectIds(f.pool) == before

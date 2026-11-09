@@ -66,6 +66,11 @@
 ## property under test is only that the version the tool REPORTS selects the
 ## fallback; everything the wrapper forwards is real git.
 ##
+## ``concurrent_engine_recordings_keep_every_engine`` covers the pool's other
+## registry, ``<pool>/repro/engines`` (§3.4): eight real child processes of
+## this executable record eight engines at the same moment, and every engine
+## must be in the list afterwards.
+##
 ## Hermetic: everything lives under one ``createTempDir`` root; git config
 ## comes from a private ``GIT_CONFIG_GLOBAL``; probes run with
 ## ``GIT_NO_LAZY_FETCH=1`` so a probe can never heal the fixture by fetching.
@@ -83,6 +88,23 @@ import std/[os, osproc, strutils, tempfiles, times, unittest]
 import repro_test_support/reasoned_skip
 
 import shared_clones
+
+# One of several concurrent recorders of a pool's engine list (§3.4): spin
+# until the start file appears, then record ``engine`` once, as one of many
+# repro processes wiring or checking leaves of one pool at the same moment
+# would. A real separate process, so the contention is real OS locking.
+when declared(recordPoolEngine):
+  if paramCount() == 4 and paramStr(1) == "record-engine-child":
+    # Spin rather than sleep, so the recorders start as close together as
+    # possible; give up if the parent never writes the start file.
+    let deadline = epochTime() + 60.0
+    while not fileExists(paramStr(4)):
+      if epochTime() > deadline: quit(2)
+    let failed = recordPoolEngine(paramStr(2), paramStr(3))
+    if failed.len > 0:
+      stderr.writeLine(failed)
+      quit(1)
+    quit(0)
 
 proc q(value: string): string = quoteShell(value)
 
@@ -719,3 +741,47 @@ suite "SPI-1: the pool retains what registered leaves name":
       check gitSupportsRetentionHook(gitBin)
       check prepareSharedBare(stub, pool) == ""
       check must(pool, "config", "--get", "gc.pruneExpire") == PoolNeverExpire
+
+  test "concurrent_engine_recordings_keep_every_engine":
+    # ``<pool>/repro/engines`` (§3.4) is rewritten whole by each recording.
+    # Repro processes that wire or check leaves of one pool at the same time
+    # (two workspaces syncing, a sweep over another workspace's borrowers)
+    # must each leave their engine in it: a recording that read the list
+    # before another process wrote it must not drop that process's entry.
+    # One round of simultaneous recorders does not always interleave, so the
+    # case runs several rounds; any lost entry fails it. Only the pool's
+    # ``repro`` directory is involved, so no git fixture is needed.
+    let root = createTempDir("repro-spi1-engines-race-", "")
+    defer: removeDir(root)
+    let pool = root / "cache" / "up.git"
+    createDir(poolReproDir(pool))
+    var engines: seq[string]
+    for i in 0 ..< MaxRecordedEngines:
+      let engine = root / "engines" / ("engine " & $i)
+      createDir(engine.parentDir)
+      writeFile(engine, "")
+      engines.add(engine)
+    var lost = 0
+    for round in 1 .. 12:
+      writeFile(poolEnginesPath(pool), "")
+      let start = root / ("start-" & $round)
+      var children: seq[Process]
+      for engine in engines:
+        children.add(startProcess(getAppFilename(), args = @[
+          "record-engine-child", pool, engine, start],
+          options = {poParentStreams}))
+      sleep(200)
+      writeFile(start, "")
+      for child in children:
+        check child.waitForExit() == 0
+        child.close()
+      var recorded: seq[string]
+      for line in readFile(poolEnginesPath(pool)).splitLines():
+        if line.len > 0: recorded.add(line)
+      for engine in engines:
+        if engine notin recorded:
+          checkpoint("round " & $round & " lost " & engine & "; list: " &
+            recorded.join(", "))
+          inc lost
+      check recorded.len == engines.len
+    check lost == 0

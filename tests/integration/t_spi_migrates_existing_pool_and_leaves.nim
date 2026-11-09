@@ -234,7 +234,9 @@ suite "SPI-4: migration of existing pools and leaves":
       for leaf in leaves:
         check cfg(leaf, "remote.repro-pool.url") == poolFileUrl(pool)
         check cfg(leaf, "remote.repro-pool.promisor") == "true"
-        check cfg(leaf, "remote.repro-pool.uploadpack") == leafPoolUploadPackCommand()
+        check cfg(leaf, "remote.repro-pool.uploadpack") ==
+          quoteShellPosix(poolUploadPackLauncherPath(pool).replace('\\', '/'))
+        check fileExists(poolUploadPackLauncherPath(pool))
         check cfg(leaf, "fetch.hideRefs") == LeafHiddenFetchRefs
         check cfg(leaf, "extensions.partialClone") == ""
         check gitIn(leaf, "rev-parse", "-q", "--verify",
