@@ -685,8 +685,22 @@ jobs:
                 fi
                 [ -f "$b" ] && dev-exec patchelf --print-rpath "$b" >/dev/null 2>&1 || continue
                 cur_rpath="$(dev-exec patchelf --print-rpath "$b" 2>/dev/null || true)"
-                dev-exec patchelf --force-rpath --set-rpath "${cur_rpath:+$cur_rpath:}$repro_ld" "$b" \
-                  || echo "ct-build: patchelf failed for $b"
+                # Add only the directories it lacks: on the persistent runner a
+                # binary the bootstrap did not relink still carries the last
+                # job's entries, and appending again grows its RPATH each job.
+                new_rpath="$cur_rpath"
+                IFS=: read -r -a ld_dirs <<< "$repro_ld"
+                for d in "${ld_dirs[@]}"; do
+                  [ -n "$d" ] || continue
+                  case ":$new_rpath:" in
+                    *":$d:"*) ;;
+                    *) new_rpath="${new_rpath:+$new_rpath:}$d" ;;
+                  esac
+                done
+                if [ "$new_rpath" != "$cur_rpath" ]; then
+                  dev-exec patchelf --force-rpath --set-rpath "$new_rpath" "$b" \
+                    || echo "ct-build: patchelf failed for $b"
+                fi
               done
               echo "ct-build: repro RPATH now = $(dev-exec patchelf --print-rpath "$repro_bin" 2>/dev/null)"
             else

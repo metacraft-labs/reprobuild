@@ -2217,12 +2217,13 @@ test "incomplete name" and:
                 "class": "pure unit",
             },
             "libs/repro_cli_support/tests/"
+            # 8, not 7: c7f40491 adds the record-store push case.
             "t_lock_publish_push_race_classification.nim": {
                 "binary": "build/test-bin/"
                 "t_lock_publish_push_race_classification",
                 "language": "nim",
                 "sourceSuiteCount": 1,
-                "sourceCaseCount": 7,
+                "sourceCaseCount": 8,
                 "class": "pure unit",
             },
             # RA-32 — the lock record's repo component is ONE path
@@ -2648,12 +2649,14 @@ test "incomplete name" and:
             # and classification so aggregate movement cannot mask a missing
             # or weakened enrollment.
             "tests/integration/"
+            # 4 suites and 15 cases, not 1 and 7: 3f88aade, fdaf4d3b and
+            # d7b19c32 each add a suite; the static count already records it.
             "t_linked_worktree_pre_push_repository_env.nim": {
                 "binary": "build/test-bin/"
                 "t_linked_worktree_pre_push_repository_env",
                 "language": "nim",
-                "sourceSuiteCount": 1,
-                "sourceCaseCount": 7,
+                "sourceSuiteCount": 4,
+                "sourceCaseCount": 15,
                 "class": "integration",
             },
             # Upstream 19613ab39 adds one graph member for the routed-lock
@@ -2832,8 +2835,10 @@ test "incomplete name" and:
             "libs/repro_project_dsl/tests/dsl_port/"
             "t_dsl_versions_expression_values.nim":
                 ("t_dsl_versions_expression_values", 1, 7, "pure unit"),
+            # a7f14925 adds a fourth suite that runs the emitted stage-copy
+            # script with the host's `sh`: a subprocess, so integration.
             "tests/unit/t_library_stage_alias.nim":
-                ("t_library_stage_alias", 3, 3, "pure unit"),
+                ("t_library_stage_alias", 4, 4, "integration"),
         }
         for source, (binary, suites, cases, classification) in (
             recovered_unregistered.items()
@@ -2853,10 +2858,12 @@ test "incomplete name" and:
         expected_enrollments[
             "tests/unit/t_configure_build_tree_cleanup.nim"
         ] = {
+            # 2 suites and 13 cases: c03f0d0a adds the opt-out of the baked
+            # build LD_LIBRARY_PATH.
             "binary": "build/test-bin/t_configure_build_tree_cleanup",
             "language": "nim",
-            "sourceSuiteCount": 1,
-            "sourceCaseCount": 12,
+            "sourceSuiteCount": 2,
+            "sourceCaseCount": 13,
             "defines": ["reproProviderMode"],
             "class": "integration",
         }
@@ -3423,9 +3430,12 @@ test "incomplete name" and:
         self.assertEqual(
             {spec.source for spec in python_specs},
             {
+                "tests/integration/test_dev_env_local_flake_root.py",
                 "tests/integration/test_nix_daemon_cache.py",
                 "tests/test_dev_env_m9_policy.py",
+                "tests/unit/test_bootstrap_dry_run_outputs.py",
                 "tests/unit/test_build_report_attribution.py",
+                "tests/unit/test_bump_version.py",
                 "tests/unit/test_ci_bootstrap_logs.py",
                 "tests/unit/test_ci_reconcile_lock_credentials.py",
                 "tests/unit/test_ci_suite_coverage.py",
@@ -3434,21 +3444,30 @@ test "incomplete name" and:
                 "tests/unit/test_cmake_prereq_sdk.py",
                 "tests/unit/test_continuous_benchmarking_policy.py",
                 "tests/unit/test_ct_test_surface_addressability.py",
+                "tests/unit/test_daemon_worker_confinement_systemd_analyze.py",
                 "tests/unit/test_dev_shell_hook_scope.py",
                 "tests/unit/test_generated_artifact_merge_policy.py",
                 "tests/unit/test_graph_owned_test_artifacts.py",
                 "tests/unit/test_install_nix_paths.py",
                 "tests/unit/test_lint_gate_ordering.py",
+                "tests/unit/test_nim224_lane_selection.py",
                 "tests/unit/test_nix_daemon_descriptors.py",
+                "tests/unit/test_nix_daemon_expression_file_is_never_cached.py",
+                "tests/unit/test_nix_daemon_request_requires_workspace_root.py",
+                "tests/unit/test_nix_evaluation_policy.py",
                 "tests/unit/test_package_root_anchor.py",
+                "tests/unit/test_profile_daemon_worker_syscalls.py",
                 "tests/unit/test_prune_undeclared_test_binaries.py",
                 "tests/unit/test_publish_surface_routing.py",
                 "tests/unit/test_regenerate_suite_artifacts.py",
+                "tests/unit/test_release_git.py",
                 "tests/unit/test_release_native_packages.py",
                 "tests/unit/test_release_smoke_dev_exec.py",
                 "tests/unit/test_reprobuild_suite_inventory.py",
+                "tests/unit/test_sibling_lock_pins.py",
                 "tests/unit/test_source_revision.py",
                 "tests/unit/test_suite_drift_attribution.py",
+                "tests/unit/test_test_group_fallback.py",
                 "tests/unit/test_wrapper_default_provenance.py",
             },
         )
@@ -4017,8 +4036,8 @@ test "incomplete name" and:
         # Exact API-only consumers at 4f7d8624d7: each reaches an interface
         # artifact or provider compiler through a direct call or wrapper.
         provider_additions = {
-            'tests/e2e/gm4b/t_e2e_home_profile_imports_contribution_catalog.nim',
-            'tests/e2e/gm4b/t_e2e_home_profile_resolves_like_uses.nim',
+            # The two GM4b gates left this list at 903bda12: their recipe
+            # interfaces are extracted by graph edges, not in the test body.
             'tests/e2e/gm4c/t_e2e_home_profile_reaches_catalog_apps.nim',
             'tests/e2e/local-build-engine/t_e2e_repro_run_named_run_edge.nim',
             'tests/integration/t_interface_extraction_follows_the_selected_catalog.nim',
@@ -4035,6 +4054,8 @@ test "incomplete name" and:
             "tests/integration/t_run_consumes_opaque_out_of_tree.nim",
             "tests/integration/t_run_consumes_session_store_out_of_tree.nim",
             "tests/integration/t_run_edge_session_resolver_auto.nim",
+            "libs/repro_interface_artifacts/tests/"
+            "t_extraction_checks_the_prefix_nim.nim",
         }
         profile_additions = {
             'tests/e2e/gm7/t_e2e_home_apply_applies_declared_concerns.nim',
@@ -4047,8 +4068,17 @@ test "incomplete name" and:
             "t_template_in_template_named_args.nim",
             "tests/e2e/m83/t_e2e_profile_modules.nim",
             "tests/e2e/m83/t_e2e_repro_profile_compile_via_action.nim",
+            # The baseOs section's round trip compiles its profiles with
+            # compileProfileBinary; the run-edge case compiles one as an edge.
+            "libs/repro_profile_compile/tests/t_base_os_section_round_trip.nim",
+            "tests/e2e/m83/t_e2e_profile_run_edge_is_unblessed.nim",
+            "tests/e2e/m83/t_e2e_profile_compile_runtime_read_tracked.nim",
+            "tests/e2e/m83/t_e2e_profile_compile_refuses_noexec_state_dir.nim",
         }
         equivalent_api_additions = {
+            # Compiles a home profile in process (repro-compile-home-profile).
+            "libs/repro_cli_support/tests/"
+            "t_in_process_profile_compile_never_spawns_its_caller.nim",
             "libs/repro_interface_artifacts/tests/t_interface_artifact_provenance_is_recorded_by_the_lift.nim",
             "tests/e2e/m76/"
             "t_integration_stow_byte_identical_target_is_cache_hit.nim",
@@ -8130,6 +8160,9 @@ compileProfileBinary()
                     "hash sources compile outside the SDK configuration",
                     "Source bootstrap hash-library runtime paths::real hash "
                     "libraries load without ambient paths; missing RPATH fails",
+                    # 5a542292, under the same Linux gate.
+                    "Source bootstrap hash-library runtime paths::portable "
+                    "release helpers load the clingo staged beside them",
                 },
                 "darwin": set(),
             },
@@ -8744,7 +8777,9 @@ compileProfileBinary()
         exclusive, identical = self.linux_darwin_catalog_ledger()
         self.assertEqual(self.platform_gated_test_sources(data), set(exclusive) | identical)
         self.assertEqual(len(exclusive), 74)
-        self.assertEqual(len(identical), 21)
+        # 20, not 21: c13727dc moved t_e2e_codetracer_in_place_project_file
+        # to CodeTracer's CI, and its ledger entry went with it.
+        self.assertEqual(len(identical), 20)
         # The per-host totals are pure ledger arithmetic, so they are checked
         # here, where no built binary is needed: a ledger entry added without
         # updating them fails the cheap census, not only the post-build one.
@@ -8752,8 +8787,8 @@ compileProfileBinary()
         # never used as a substitute for their exact per-source assertions.
         linux_only = sum(len(item["linux"]) for item in exclusive.values())
         darwin_only = sum(len(item["darwin"]) for item in exclusive.values())
-        self.assertEqual((linux_only, darwin_only), (127, 150))
-        self.assertEqual(linux_only - darwin_only, -23)
+        self.assertEqual((linux_only, darwin_only), (128, 150))
+        self.assertEqual(linux_only - darwin_only, -22)
         specs, _ = inventory.parse_repro_tests(REPO_ROOT)
         defines_by_source = {spec.source: spec.defines for spec in specs}
         for source in sorted(set(exclusive) | identical):
@@ -8836,9 +8871,9 @@ compileProfileBinary()
     def assert_linux_darwin_catalog_delta_is_exact(self, data):
         """Validate the ledger against this host's real catalog and source census.
 
-        The ledger currently covers 74 asymmetric sources and 21 sources
-        whose platform gates select identical names. Its 127 Linux-only and
-        150 Darwin-only identities yield a net 23 extra Darwin cases. Newly
+        The ledger currently covers 74 asymmetric sources and 20 sources
+        whose platform gates select identical names. Its 128 Linux-only and
+        150 Darwin-only identities yield a net 22 extra Darwin cases. Newly
         reconciled Darwin names are measured at 4f7d8624d7; their explicit
         Linux branches supply expectations checked by a Linux run, rather
         than a claim that Linux was measured on m1.
