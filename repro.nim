@@ -328,6 +328,30 @@ const
     "tests/integration/t_reproos_uki_through_the_cvm_path.nim",
   ]
 
+  gm4bLikeUsesRoot* = "build/test-fixtures/gm4b-like-uses"
+  gm4bLikeUsesActionId* = "reprobuild.test_fixtures.gm4b_like_uses"
+  gm4bLikeUsesArtifact* =
+    "build/test-fixtures/gm4b-like-uses/out/project-interface.rbsz"
+    ## The interface of the recipe `t_e2e_home_profile_resolves_like_uses`
+    ## compares a profile with (`tests/fixtures/gm4b/gen_gm4b_like_uses.nim`).
+  gm4bCatalogImportsRoot* = "build/test-fixtures/gm4b-catalog-imports"
+  gm4bCatalogImportsActionId* =
+    "reprobuild.test_fixtures.gm4b_catalog_imports"
+  gm4bCatalogImportsOutputs* = [
+    "build/test-fixtures/gm4b-catalog-imports/payload/gm4bimported",
+    "build/test-fixtures/gm4b-catalog-imports/reprobuild-packages/packages/" &
+      "interfaces/gm4bimported/repro.nim",
+    "build/test-fixtures/gm4b-catalog-imports/gm4b-contribution-catalog/" &
+      "repro.nim",
+    "build/test-fixtures/gm4b-catalog-imports/recipe-with-import/" &
+      "project-interface.rbsz",
+    "build/test-fixtures/gm4b-catalog-imports/recipe-without-import/" &
+      "project-interface.rbsz",
+  ]
+    ## The tree of `t_e2e_home_profile_imports_contribution_catalog`
+    ## (`tests/e2e/gm4b/gm4b_catalog_imports_fixture.nim`, whose
+    ## `CatalogImportsOutputs` names the same files relative to the root).
+
   nixPackageFixtureActionId* = "reprobuild.test_fixtures.nix_package"
   nixPackageOutPathFixture* = "build/test-fixtures/nix-package/out-path"
     ## The store path of `nix build <this checkout>#default`, recorded by edge
@@ -620,7 +644,23 @@ const
         TestGraphArtifact(path: "build/test-bin/m5_stub_repro_image",
           actionId: "reprobuild.test_helpers.m5_stub_repro_image")]),
   ] & profileCompileNimSpyConsumers & binaryCacheHelperConsumers &
-    cvmTestKeysRows &
+    cvmTestKeysRows & @[
+    TestGraphArtifacts(
+      source: "tests/e2e/gm4b/t_e2e_home_profile_resolves_like_uses.nim",
+      artifacts: @[TestGraphArtifact(path: gm4bLikeUsesArtifact,
+        actionId: gm4bLikeUsesActionId)]),
+    TestGraphArtifacts(
+      source: "tests/e2e/gm4b/" &
+        "t_e2e_home_profile_imports_contribution_catalog.nim",
+      artifacts: block:
+        # Not the payload: it has no extension, so on Windows the row
+        # would name `gm4bimported.exe`. The catalog carries its sha256, so
+        # a changed payload re-runs the test through the catalog anyway.
+        var files: seq[TestGraphArtifact]
+        for path in gm4bCatalogImportsOutputs[1 .. ^1]:
+          files.add TestGraphArtifact(path: path,
+            actionId: gm4bCatalogImportsActionId)
+        files)] &
     (when defined(linux) or defined(macosx): @[
     TestGraphArtifacts(
       source: "tests/e2e/codetracer-subset/" &
@@ -3758,6 +3798,27 @@ package reprobuild:
     reprobuildTestFixturesActions.add(cvmKeysGenerator)
     reprobuildTestFixturesActions.add(runFixtureGenerator("cvm_test_keys",
       cvmKeysGenerator, cvmTestKeysRoot, cvmTestKeysActionId, cvmTestKeys))
+
+    # GM4b: the recipe-side interface extractions of the two gates that
+    # compare a home profile with a recipe's `uses:` (each a `nim c` plus
+    # an extract-runner run, minutes cold, that every process of the test
+    # used to repeat at module or suite scope).
+    let gm4bLikeUsesGenerator = fixtureGenerator("gm4b_like_uses",
+      "tests/fixtures/gm4b/gen_gm4b_like_uses.nim",
+      passL = testRuntimePassL)
+    reprobuildTestFixturesActions.add(gm4bLikeUsesGenerator)
+    reprobuildTestFixturesActions.add(runFixtureGenerator("gm4b_like_uses",
+      gm4bLikeUsesGenerator, gm4bLikeUsesRoot, gm4bLikeUsesActionId,
+      [gm4bLikeUsesArtifact]))
+    let gm4bCatalogImportsGenerator = fixtureGenerator(
+      "gm4b_catalog_imports",
+      "tests/fixtures/gm4b/gen_gm4b_catalog_imports.nim",
+      passL = testRuntimePassL)
+    reprobuildTestFixturesActions.add(gm4bCatalogImportsGenerator)
+    reprobuildTestFixturesActions.add(runFixtureGenerator(
+      "gm4b_catalog_imports", gm4bCatalogImportsGenerator,
+      gm4bCatalogImportsRoot, gm4bCatalogImportsActionId,
+      gm4bCatalogImportsOutputs))
 
     # The `ct-mcr` recorder bundle behind `e2e_hcr_linux_replay_of_patched_
     # recording` (`hcrCtMcrBundle`, at file scope, says what is in it and

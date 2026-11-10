@@ -4,7 +4,7 @@
     "nimTestBinaries": 2706,
     "pureUnitConsolidationGroups": 79,
     "pureUnitTests": 743,
-    "staticallyDetectedRuntimeCompilerFlowTests": 141,
+    "staticallyDetectedRuntimeCompilerFlowTests": 139,
     "testEntries": 2747
   },
   "pureUnitConsolidationCandidates": [
@@ -2742,66 +2742,6 @@
         }
       ],
       "source": "tests/e2e/dev-env/t_e2e_provider_dev_env_introspection.nim"
-    },
-    {
-      "class": "integration",
-      "matches": [
-        {
-          "assignedCommandVariable": "",
-          "callableReachable": true,
-          "commandVariableExecuted": false,
-          "directExecutionLine": false,
-          "enclosingCallable": "extractRecipe",
-          "executedVariables": [],
-          "line": 148,
-          "path": "tests/e2e/gm4b/t_e2e_home_profile_imports_contribution_catalog.nim",
-          "patterns": [
-            "repro-extract-interface"
-          ],
-          "runtimeCompilerApi": "extractInterfaceFromModule",
-          "runtimeCompilerApiModule": "repro_interface_artifacts",
-          "snippet": "let artifact = extractInterfaceFromModule(dir / \"repro.nim\","
-        },
-        {
-          "assignedCommandVariable": "",
-          "callableReachable": true,
-          "commandVariableExecuted": false,
-          "directExecutionLine": true,
-          "enclosingCallable": "",
-          "executedVariables": [],
-          "line": 180,
-          "path": "tests/e2e/gm4b/t_e2e_home_profile_imports_contribution_catalog.nim",
-          "patterns": [
-            "repro-extract-interface"
-          ],
-          "runtimeCompilerApi": "extractInterfaceFromModule",
-          "runtimeCompilerApiModule": "repro_interface_artifacts",
-          "snippet": "let artifact = extractInterfaceFromModule(dir / \"repro.nim\","
-        }
-      ],
-      "source": "tests/e2e/gm4b/t_e2e_home_profile_imports_contribution_catalog.nim"
-    },
-    {
-      "class": "integration",
-      "matches": [
-        {
-          "assignedCommandVariable": "",
-          "callableReachable": true,
-          "commandVariableExecuted": false,
-          "directExecutionLine": false,
-          "enclosingCallable": "extractRecipeUses",
-          "executedVariables": [],
-          "line": 132,
-          "path": "tests/e2e/gm4b/t_e2e_home_profile_resolves_like_uses.nim",
-          "patterns": [
-            "repro-extract-interface"
-          ],
-          "runtimeCompilerApi": "extractInterfaceFromModule",
-          "runtimeCompilerApiModule": "repro_interface_artifacts",
-          "snippet": "let artifact = extractInterfaceFromModule(project / \"repro.nim\","
-        }
-      ],
-      "source": "tests/e2e/gm4b/t_e2e_home_profile_resolves_like_uses.nim"
     },
     {
       "class": "integration",
@@ -32265,6 +32205,7 @@
         "repro_home_intent",
         "repro_interface_artifacts",
         "repro_project_dsl",
+        "repro_test_support",
         "repro_tool_profiles"
       ],
       "owner": "tests/e2e",
@@ -32272,7 +32213,7 @@
       "source": "tests/e2e/gm4b/t_e2e_home_profile_imports_contribution_catalog.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 6,
-      "staticallyDetectedRuntimeCompilerFlow": true,
+      "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
     {
@@ -32301,11 +32242,11 @@
       "defines": [],
       "language": "nim",
       "localDependencyShape": [
-        "repro_dsl_stdlib",
         "repro_home_apply",
         "repro_home_intent",
         "repro_interface_artifacts",
         "repro_project_dsl",
+        "repro_test_support",
         "repro_tool_profiles"
       ],
       "owner": "tests/e2e",
@@ -32313,7 +32254,7 @@
       "source": "tests/e2e/gm4b/t_e2e_home_profile_resolves_like_uses.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 6,
-      "staticallyDetectedRuntimeCompilerFlow": true,
+      "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
     {
