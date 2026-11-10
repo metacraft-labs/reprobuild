@@ -34,21 +34,27 @@ proc valueAfter(output, prefix: string): string =
       return line[prefix.len .. ^1].strip()
   ""
 
-proc copySelectedCodeTracerFiles(codeTracerRoot, projectRoot: string) =
-  createDir(projectRoot / "src" / "frontend" / "tests")
-  createDir(projectRoot / "src" / "frontend" / "index")
-  createDir(projectRoot / "src" / "frontend" / "lib")
+proc writeMultiInputProjectSources(projectRoot: string) =
+  ## The first session's inputs: two sources of two languages in nested
+  ## directories, which its action declares as inputs and checks for before it
+  ## parks on the release gate. Synthetic on purpose: this gate is about two
+  ## sessions sharing one RunQuota daemon, and nothing it measures depends on
+  ## whose source the inputs are. They used to be copied out of a CodeTracer
+  ## checkout, which made the case need one beside this repository; the
+  ## CodeTracer-facing tests now live in CodeTracer (2026-11-07).
+  createDir(projectRoot / "src" / "nim" / "tests")
   createDir(projectRoot / "src" / "c")
-  copyFile(codeTracerRoot / "src" / "frontend" / "tests" /
-    "ipc_registry_test.nim",
-    projectRoot / "src" / "frontend" / "tests" / "ipc_registry_test.nim")
-  copyFile(codeTracerRoot / "src" / "frontend" / "index" /
-    "ipc_registry.nim",
-    projectRoot / "src" / "frontend" / "index" / "ipc_registry.nim")
-  copyFile(codeTracerRoot / "src" / "frontend" / "lib" / "jslib.nim",
-    projectRoot / "src" / "frontend" / "lib" / "jslib.nim")
-  copyFile(codeTracerRoot / "test-programs" / "c_sudoku_solver" / "main.c",
-    projectRoot / "src" / "c" / "main.c")
+  writeFile(projectRoot / "src" / "nim" / "tests" / "session_input_test.nim",
+    "import std/unittest\n\n" &
+    "suite \"session input\":\n" &
+    "  test \"is read by the first session\":\n" &
+    "    check 1 + 1 == 2\n")
+  writeFile(projectRoot / "src" / "c" / "main.c",
+    "#include <stdio.h>\n\n" &
+    "int main(void) {\n" &
+    "  puts(\"session input\");\n" &
+    "  return 0;\n" &
+    "}\n")
 
 proc writeTimingHelper(path: string) =
   writeFile(path,
@@ -251,12 +257,6 @@ suite "integration_reprobuild_sessions_share_runquota":
   when isNixSupported:
     test "two repro build sessions serialize default 1000 milliCPU actions through one daemon":
       let repoRoot = getCurrentDir()
-      let codeTracerRoot = requireCodeTracerSourceRoot(repoRoot)
-      check fileExists(codeTracerRoot / "src" / "frontend" / "tests" /
-        "ipc_registry_test.nim")
-      check fileExists(codeTracerRoot / "test-programs" / "c_sudoku_solver" /
-        "main.c")
-
       let tempRoot = createTempDir("repro-m22-shared-runquota", "")
       let previousSocket = getEnv("RUNQUOTA_SOCKET", "")
       defer:
@@ -277,20 +277,23 @@ suite "integration_reprobuild_sessions_share_runquota":
 
       let stampsDir = tempRoot / "stamps"
       let gatePath = tempRoot / "release-gate"
-      let codeProject = tempRoot / "codetracer-project"
+      let multiInputProject = tempRoot / "multi-input-project"
       let fixtureProject = tempRoot / "fixture-project"
-      createDir(codeProject)
+      createDir(multiInputProject)
       createDir(fixtureProject)
-      copySelectedCodeTracerFiles(codeTracerRoot, codeProject)
+      writeMultiInputProjectSources(multiInputProject)
+      check fileExists(multiInputProject / "src" / "nim" / "tests" /
+        "session_input_test.nim")
+      check fileExists(multiInputProject / "src" / "c" / "main.c")
       writeFile(fixtureProject / "input.txt", "fixture\n")
 
-      const CodeAction = "m22-codetracer-sleep"
+      const MultiInputAction = "m22-multi-input-sleep"
       const FixtureAction = "m22-fixture-sleep"
-      writeProject(codeProject / "reprobuild.nim", "codeTracerM22", CodeAction,
-        helperBin, stampsDir / "codetracer.stamp", gatePath, "codetracer",
-        "build/codetracer.done",
-        ["src/frontend/tests/ipc_registry_test.nim", "src/c/main.c"],
-        "test -f src/frontend/tests/ipc_registry_test.nim\n" &
+      writeProject(multiInputProject / "reprobuild.nim", "multiInputM22",
+        MultiInputAction, helperBin, stampsDir / "multi-input.stamp", gatePath,
+        "multi-input", "build/multi-input.done",
+        ["src/nim/tests/session_input_test.nim", "src/c/main.c"],
+        "test -f src/nim/tests/session_input_test.nim\n" &
           "test -f src/c/main.c\n")
       writeProject(fixtureProject / "reprobuild.nim", "fixtureM22", FixtureAction,
         helperBin, stampsDir / "fixture.stamp", gatePath, "fixture",
@@ -318,10 +321,10 @@ suite "integration_reprobuild_sessions_share_runquota":
       # ``t_e2e_repro_build_named_target`` (30a7ce6) and
       # ``t_e2e_repro_build_multiple_named_targets`` (86be3f1).
       let codeBuild = startProcess(reproBin, workingDir = repoRoot,
-        args = ["build", codeProject, "--daemon=off",
+        args = ["build", multiInputProject, "--daemon=off",
           "--tool-provisioning=path", "--log=actions", "--write-report"],
         options = {poUsePath, poStdErrToStdOut})
-      let codeStartStamp = stampsDir / "codetracer.stamp.start"
+      let codeStartStamp = stampsDir / "multi-input.stamp.start"
       # Wait for the first session's action to actually start (its helper
       # writes the .start stamp). On a shared runner the cold provider
       # compile that precedes the action can be slow, so poll against a
@@ -331,8 +334,9 @@ suite "integration_reprobuild_sessions_share_runquota":
       # The wait follows the first session: it ends at once if that build
       # exits, so the cap is only the backstop for one alive and stuck. A
       # 300 s cap was a wall-clock budget on the cold interface extraction and
-      # provider compile of the copied CodeTracer project (each case copies it
-      # to a fresh temp dir, so both always run cold): measured alone at load
+      # provider compile of the first session's project (each case writes it
+      # to a fresh temp dir, so both always run cold). Measured when its
+      # inputs were still copied CodeTracer sources: alone at load
       # ~20 the action started at ~190 s (extraction ~140 s, compile ~40 s);
       # at load 55-68 it missed 300 s while every later assertion -- the
       # action ran, the second session queued behind it, the two intervals
@@ -409,9 +413,9 @@ suite "integration_reprobuild_sessions_share_runquota":
         check output.contains("runquota=posix-fork-exec-poll")
         check output.contains("lease=")
 
-      let codeInterval = readInterval(stampsDir / "codetracer.stamp")
+      let codeInterval = readInterval(stampsDir / "multi-input.stamp")
       let fixtureInterval = readInterval(stampsDir / "fixture.stamp")
-      check codeInterval.label == "codetracer"
+      check codeInterval.label == "multi-input"
       check fixtureInterval.label == "fixture"
       check codeInterval.gateSeen
       check fixtureInterval.gateSeen
@@ -421,7 +425,7 @@ suite "integration_reprobuild_sessions_share_runquota":
 
       let codeReport = valueAfter(codeResult.output, "buildReport:")
       let fixtureReport = valueAfter(fixtureResult.output, "buildReport:")
-      checkRunQuotaReportDiagnostics(reportAction(codeReport, CodeAction),
+      checkRunQuotaReportDiagnostics(reportAction(codeReport, MultiInputAction),
         daemon.socket)
       checkRunQuotaReportDiagnostics(reportAction(fixtureReport, FixtureAction),
         daemon.socket)

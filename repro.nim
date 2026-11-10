@@ -249,62 +249,9 @@ const
     ## The edge ids are `reprobuild.test_fixtures.rp3_provider_<name>` with
     ## `-` folded to `_`.
 
-  codeTracerToolSourceRoot* = "tests/fixtures/codetracer-tools"
-  codeTracerToolFixtureRoot* = "build/test-fixtures/codetracer-tools"
-    ## The tool directories `t_e2e_codetracer_in_place_project_file` puts on
-    ## PATH. The checked-in scripts (version-answering stand-ins, the `nim`
-    ## and `node` wrappers) are used from the source root; the two compiled
-    ## tools (the monitor-visible `gcc` proxy, also built as `clang`, and the
-    ## `stylus` stand-in) are built once by
-    ## `reprobuild.test_fixtures.codetracer_tool_{gcc,clang,stylus}` into the
-    ## fixture root. Both are stable paths, which is the point: interface
-    ## extraction keys on the compiler paths and on PATH itself, so a per-case
-    ## tool directory made every case's extraction of the same recipe a
-    ## (correct) cache miss.
-
   sc7CapstoneFixtureRoot* = "tests/fixtures/sc7-capstone"
     ## The SC-7 capstone's checked-in producer and consumer recipes; see
     ## ``tests/fixtures/sc7-capstone/README.md``.
-
-  hcrReplayGateSource* =
-    "tests/e2e/hcr-linux-direct/t_e2e_hcr_linux_replay_of_patched_recording.nim"
-  hcrCtMcrFixtureRoot* = "build/test-fixtures/hcr-ct-mcr"
-  hcrCtMcrBundleActionId* = "reprobuild.test_fixtures.hcr_ct_mcr_bundle"
-  hcrCtMcrBundle* = [
-    "build/test-fixtures/hcr-ct-mcr/ct_cli",
-    "build/test-fixtures/hcr-ct-mcr/libct_interpose.so",
-    "build/test-fixtures/hcr-ct-mcr/libct_interpose_static.so",
-    "build/test-fixtures/hcr-ct-mcr/libct_license_ffi.so",
-    "build/test-fixtures/hcr-ct-mcr/libct_clr_profiler.so",
-    "build/test-fixtures/hcr-ct-mcr/libgl_passthrough.so",
-    "build/test-fixtures/hcr-ct-mcr/libct_vk_layer.so",
-    "build/test-fixtures/hcr-ct-mcr/vk_layer_manifest.json",
-    "build/test-fixtures/hcr-ct-mcr/ct-dwarf-paths",
-    "build/test-fixtures/hcr-ct-mcr/ct-test-license.dat",
-  ]
-    ## The `ct-mcr` recorder bundle `e2e_hcr_linux_replay_of_patched_recording`
-    ## records and replays with: `ct_cli` and every file the recorder's
-    ## `just build-ct-mcr` places beside it (the binary resolves each of them
-    ## next to its own executable first), plus the recorder's signed test
-    ## licence, which keeps every replay off the free tier's daily cap.
-    ##
-    ## Every path is spelled out under `hcrCtMcrFixtureRoot` so that this one
-    ## list is both the producing edge's `extraOutputs` and the gate's typed
-    ## inputs. Built by edge `hcrCtMcrBundleActionId` (declared in the build block,
-    ## Linux x86-64 only, like the gate) through
-    ## `scripts/build_hcr_ct_mcr_fixture.sh`, which runs the RECORDER'S OWN
-    ## recipe in the RECORDER'S OWN flake dev shell and stages the result
-    ## here. The script's `BUNDLE` list names the same files by their place
-    ## in the recorder checkout; `tests/unit/test_hcr_replay_gate_ct_mcr_
-    ## fixture_edge.py` holds the two lists equal, and holds the gate's
-    ## lookup to `hcrCtMcrFixtureRoot`.
-    ##
-    ## Before this edge the gate read a hand-built `ct_cli` from the
-    ## hard-coded sibling path `../codetracer-native-recorder/ct_cli/ct_cli`
-    ## that nothing in this graph produced, so every run that had not built
-    ## the recorder by hand failed at `fileExists(ctMcr)` for a reason
-    ## unrelated to HCR (reprobuild-pm issue 2026-09-25,
-    ## "hcr-replay-gate-needs-a-ct-mcr-no-edge-builds").
 
   nixPackageFixtureActionId* = "reprobuild.test_fixtures.nix_package"
   nixPackageOutPathFixture* = "build/test-fixtures/nix-package/out-path"
@@ -588,38 +535,13 @@ const
         TestGraphArtifact(path: "build/test-bin/m5_stub_repro_image",
           actionId: "reprobuild.test_helpers.m5_stub_repro_image")]),
   ] & profileCompileNimSpyConsumers & binaryCacheHelperConsumers &
-    (when defined(linux) or defined(macosx): @[
-    TestGraphArtifacts(
-      source: "tests/e2e/codetracer-subset/" &
-        "t_e2e_codetracer_in_place_project_file.nim",
-      artifacts: @[
-        TestGraphArtifact(path: codeTracerToolFixtureRoot & "/bin/gcc",
-          actionId: "reprobuild.test_fixtures.codetracer_tool_gcc"),
-        TestGraphArtifact(path: codeTracerToolFixtureRoot & "/bin/stylus",
-          actionId: "reprobuild.test_fixtures.codetracer_tool_stylus"),
-        TestGraphArtifact(path: codeTracerToolFixtureRoot & "/clang-bin/clang",
-          actionId: "reprobuild.test_fixtures.codetracer_tool_clang")])]
-    else: @[]) & (when defined(linux) and defined(amd64): @[
+    (when defined(linux) and defined(amd64): @[
     TestGraphArtifacts(
       source: "tests/e2e/hcr-linux-threads/" &
         "t_integration_hcr_linux_stack_mapping_changes_do_not_fault.nim",
       artifacts: @[TestGraphArtifact(
         path: "build/test-fixtures/hcr-linux-stack-access/stack-access",
-        actionId: "reprobuild.test_fixtures.hcr_linux_stack_access")]),
-    # Linux x86-64 only, exactly where the gate records (its body is
-    # `when defined(linux) and defined(amd64)`) and where the producing edge
-    # is declared. EVERY bundle file is a typed input, not only `ct_cli`: the
-    # recorder loads its companions from beside itself at run time, so a
-    # rebuilt `libct_interpose.so` must re-run the gate as surely as a
-    # rebuilt `ct_cli` does.
-    TestGraphArtifacts(
-      source: hcrReplayGateSource,
-      artifacts: block:
-        var bundle: seq[TestGraphArtifact]
-        for path in hcrCtMcrBundle:
-          bundle.add TestGraphArtifact(path: path,
-            actionId: hcrCtMcrBundleActionId)
-        bundle)]
+        actionId: "reprobuild.test_fixtures.hcr_linux_stack_access")])]
     else: @[]) & (when defined(linux) or defined(macosx): @[
     # Linux and macOS, where the producing edge is declared (there is no Nix
     # package on Windows; both gates skip there).
@@ -2159,9 +2081,8 @@ package reprobuild:
             when defined(windows): artifact.path & ".exe"
             else: artifact.path
           requiredBinaries.add(artifactPath)
-          # One edge may produce several of a test's artifacts (the
-          # `hcr_ct_mcr_bundle` row lists ten files of one edge); order on
-          # it once.
+          # One edge may produce several of a test's artifacts; order on it
+          # once.
           if artifact.actionId notin executeDeps:
             executeDeps.add(artifact.actionId)
       when defined(linux) or defined(macosx):
@@ -2299,33 +2220,18 @@ package reprobuild:
       # AT RUNTIME. Lifting that compile into its own graph edge (which
       # milestone M3 wants regardless) would make the compiler emit this
       # depfile for free, and the generator call below could be deleted.
-      #
-      # The recorder-backed HCR gate has another structural incompatibility:
-      # injecting the monitor changes executable mappings and maps mutable
-      # shared-memory shards. The recorder correctly refuses those mappings.
-      # Its generated depfile names the test and every graph fixture, but
-      # does not observe its runtime compiler/recorder input closure, so this
-      # execute edge must never cache a verdict. Build edges keep their normal
-      # policy (Sandbox-And-Monitoring.md, "Tests that record their own children").
-      let recordsHcrChild = spec.source ==
-        "tests/e2e/hcr-linux-direct/t_e2e_hcr_linux_replay_of_patched_recording.nim"
       var executeAfter: seq[BuildActionDef] = @[]
       let executePolicy =
         if spec.selfInterposes:
           let testDepfile = reproTestDepfilePath(spec.binary)
-          let incompatibilityReason =
-            if recordsHcrChild:
-              "test records its child; the monitor's modified executable " &
-              "mappings and mutable mapped shards violate recorder invariants"
-            else:
-              "test performs LD_PRELOAD interposition itself; the engine's " &
-              "io-monitor injects a second interposer and the two livelock " &
-              "on the same libc entry points (observed: 19h spin in " &
-              "t_stackable_hooks_extracted_process_tree)"
           let testDepfileEdge = dslfs.unmonitorableActionDepfile(
             output = testDepfile,
             inputs = @[spec.binary] & @(requiredBinaries),
-            reason = incompatibilityReason)
+            reason =
+              "test performs LD_PRELOAD interposition itself; the engine's " &
+              "io-monitor injects a second interposer and the two livelock " &
+              "on the same libc entry points (observed: 19h spin in " &
+              "t_stackable_hooks_extracted_process_tree)")
           reprobuildTestBuildActions.add(testDepfileEdge)
           executeAfter.add(testDepfileEdge)
           makeDepfilePolicy(testDepfile, suppressMonitorShimSeed = true)
@@ -2335,7 +2241,6 @@ package reprobuild:
         deps = executeDeps,
         after = executeAfter,
         requiredBinaries = requiredBinaries,
-        cacheable = not recordsHcrChild,
         actionId = executeActionId,
         registerImplicitName = false,
         extraEnv = optInLayerEnvFor(spec.source, on = false),
@@ -2437,8 +2342,6 @@ package reprobuild:
         source == "tests/unit/test_ci_reconcile_lock_credentials.py"
       let releaseSmokeTest =
         source == "tests/unit/test_release_smoke_dev_exec.py"
-      let hcrFixtureEdgeTest =
-        source == "tests/unit/test_hcr_replay_gate_ct_mcr_fixture_edge.py"
       let confinementSystemdAnalyzeTest =
         source == "tests/unit/test_daemon_worker_confinement_systemd_analyze.py"
       let pyExecute = pythonUnittest.run(
@@ -2468,9 +2371,6 @@ package reprobuild:
             "scripts/release/with_windows_archive_runquota.ps1",
             ".github/workflows/release.yml",
             "scripts/verify_release.sh", "repro.nim"]
-        elif hcrFixtureEdgeTest:
-          # The fixture script its prebuilt-bundle cases run.
-          @["scripts/build_hcr_ct_mcr_fixture.sh"]
         elif confinementSystemdAnalyzeTest:
           # The two CONF-3/CONF-4 scripts it imports, and the real unit,
           # threshold and lease-floor inputs and header they read.
@@ -2502,11 +2402,6 @@ package reprobuild:
       # for the loopback-forge cases.
       if ciLockCredentialsTest:
         appendRegisteredActionToolIdentityRefs(pyExecute.id, ["git"])
-      # The prebuilt-bundle cases run the fixture script, which uses what the
-      # bundle edge declares for it (`git` only for its closing message).
-      if hcrFixtureEdgeTest:
-        appendRegisteredActionToolIdentityRefs(pyExecute.id,
-          ["bash", "git", "mkdir", "cp"])
       if releaseSmokeTest:
         # Bind actual declared child tools into the filtered execute PATH.
         appendRegisteredActionToolIdentityRefs(pyExecute.id, ["bash", "just"])
@@ -3511,41 +3406,6 @@ package reprobuild:
       nimcache = "build/nimcache/rp3_provider_plain",
       actionId = "reprobuild.test_fixtures.rp3_provider_plain"))
 
-    # The compiled half of the CodeTracer project-file test's PATH tools
-    # (``codeTracerToolFixtureRoot``). Every case used to compile its own
-    # copies into ``<tempRoot>/codetracer-tool-bin`` and put that directory on
-    # PATH. Interface extraction records the PATH value it observes and the
-    # compiler files it runs from that directory, so twelve cases extracting
-    # the same CodeTracer recipe were twelve correct misses (six extractions,
-    # ~20 min, per case). Built once here, at one path, the extraction of the
-    # first case serves the rest. The proxy finds the real compiler on PATH at run
-    # time (the next one after its own directory), so its bytes carry no host
-    # path. ``clang`` is the same proxy under the name the native cases call.
-    when defined(linux) or defined(macosx):
-      let codeTracerToolBinDir = dslfs.ensureDir(
-        codeTracerToolFixtureRoot & "/bin",
-        actionId = "reprobuild.test_fixtures.codetracer_tool_bin_dir")
-      let codeTracerToolClangDir = dslfs.ensureDir(
-        codeTracerToolFixtureRoot & "/clang-bin",
-        actionId = "reprobuild.test_fixtures.codetracer_tool_clang_dir")
-      reprobuildTestFixturesActions.add(codeTracerToolBinDir)
-      reprobuildTestFixturesActions.add(codeTracerToolClangDir)
-      reprobuildTestFixturesActions.add(gcc(
-        source = codeTracerToolSourceRoot & "/gcc-proxy.c",
-        output = codeTracerToolFixtureRoot & "/bin/gcc",
-        after = @[codeTracerToolBinDir],
-        actionId = "reprobuild.test_fixtures.codetracer_tool_gcc"))
-      reprobuildTestFixturesActions.add(gcc(
-        source = codeTracerToolSourceRoot & "/gcc-proxy.c",
-        output = codeTracerToolFixtureRoot & "/clang-bin/clang",
-        after = @[codeTracerToolClangDir],
-        actionId = "reprobuild.test_fixtures.codetracer_tool_clang"))
-      reprobuildTestFixturesActions.add(gcc(
-        source = codeTracerToolSourceRoot & "/stylus.c",
-        output = codeTracerToolFixtureRoot & "/bin/stylus",
-        after = @[codeTracerToolBinDir],
-        actionId = "reprobuild.test_fixtures.codetracer_tool_stylus"))
-
     # Graph-Owned-Test-Artifacts M3: the ct_test_unittest_parallel protocol
     # fixtures.
     #
@@ -3678,74 +3538,14 @@ package reprobuild:
       nimcache = "build/nimcache/ct_shim_fixture_m4_parity_suite",
       actionId = "reprobuild.test_fixtures.ct_shim_fixture_m4_parity_suite"))
 
-    # The `ct-mcr` recorder bundle behind `e2e_hcr_linux_replay_of_patched_
-    # recording` (`hcrCtMcrBundle`, at file scope, says what is in it and
-    # why the gate needs each file).
-    #
-    # A CROSS-REPO FIXTURE, and shaped the way
-    # metacraft-dev-guidelines `policies/cross-repo-builds.md` §2.3 says one
-    # is: the recorder checkout is found through
-    # `$CT_CODETRACER_NATIVE_RECORDER_SIBLING`, falling back to the canonical
-    # sibling path, and the bundle is built by THE RECORDER'S OWN recipe
-    # (`just build-ct-mcr`) in THE RECORDER'S OWN flake dev shell — never in
-    # this repository's shell, and never by restating that recipe here (§5,
-    # patterns 2 and 5). The script then stages the bundle under
-    # `hcrCtMcrFixtureRoot`, so this edge declares repo-relative outputs the
-    # gate's execute edge can take as typed inputs. Not `repro build` in the
-    # recorder: its graph stops at `codetracer-native-recorder.ct-cli`, short
-    # of the licence cdylib and the libraries copied beside `ct_cli`, and its
-    # `repro.nim` says why.
-    #
-    # NOT CACHEABLE, deliberately. What this edge reads is a second checkout
-    # this repository's lock does not pin, built in an environment its own
-    # `flake.lock` fetches through the nix daemon, by a recipe that resolves
-    # cargo and nimble dependencies over the network. The monitor sees the
-    # file reads, but not what a daemon-side fetch brought in, so a cached
-    # result could be served after the recorder moved. The recorder's recipe
-    # is incremental itself (cargo, nim's own cache), so re-running it costs
-    # its no-op rebuild, not a cold one. The OUTPUTS are still fingerprinted
-    # as the gate's typed inputs: a bundle that comes back byte-identical does
-    # not re-run the gate.
-    #
-    # Linux x86-64 only: the gate's recording arm is `when defined(linux) and
-    # defined(amd64)`, it is declared `unsupported` elsewhere in
-    # `scripts/hcr-lane-manifest.tsv`, and the bundle's file names are the
-    # Linux ones.
-    #
-    # The tools named below are what the script runs: `nix` enters the
-    # recorder's shell, the coreutils directory (`mkdir`, `cp`, and `uname`,
-    # `mv`, `basename` with them) stages the files, `git` names the recorder
-    # revision in the log. Everything the recipe itself runs comes from the
-    # recorder's shell, which is the point.
-    when defined(linux) and defined(amd64):
-      let hcrCtMcrBundleEdge = shell(
-        command = "bash scripts/build_hcr_ct_mcr_fixture.sh",
-        actionId = hcrCtMcrBundleActionId,
-        extraInputs = @["scripts/build_hcr_ct_mcr_fixture.sh"],
-        extraOutputs = @hcrCtMcrBundle,
-        cacheable = false)
-      appendRegisteredActionToolIdentityRefs(hcrCtMcrBundleEdge.id,
-        ["bash", "nix", "git", "mkdir", "cp"])
-      # Its own collection, NOT `test-fixtures`. `scripts/run_tests.sh`
-      # refuses to run any test when `.#test-fixtures` fails, which is right
-      # for fixtures built from this tree and wrong for one built from a
-      # sibling checkout: a workspace without the recorder (the `reprobuild`
-      # project does not include it), or a host that cannot fetch its private
-      # dependencies, would then run nothing at all instead of failing this
-      # one gate. run_tests.sh builds this collection separately and re-raises
-      # its failure at the end; `repro build test` and a focused build of the
-      # gate still reach the edge through the execute edge's dependency.
-      discard collect("test-cross-repo-fixtures", @[hcrCtMcrBundleEdge])
-
     # The Nix package of THIS checkout (`nixPackageOutPathFixture`, at file
     # scope, says who reads it and why it is an edge): one `nix build
     # <checkout>#default`, before the test phase, instead of one per case.
     #
-    # Its own collection, `test-package-fixtures`, for the reason the
-    # cross-repo bundle has one: the build can fail for reasons that say
-    # nothing about the cases in `.#test-fixtures` (a flake input the host
-    # cannot fetch, a daemon that is down), and run_tests.sh must still run
-    # the suite. It builds this collection separately and re-raises its
+    # Its own collection, `test-package-fixtures`: the build can fail for
+    # reasons that say nothing about the cases in `.#test-fixtures` (a flake
+    # input the host cannot fetch, a daemon that is down), and run_tests.sh
+    # must still run the suite. It builds this collection separately and re-raises its
     # failure at the end; a gate whose fixture did not build falls back to
     # building the package itself and fails on its own.
     #

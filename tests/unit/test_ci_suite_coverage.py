@@ -59,7 +59,7 @@ NOT_AT_END = ("the suite step did not reach its end (Python phase or later "
 
 def marker_document(*, suite_status=1, failed_modules=()) -> dict:
     return {"schema": "reprobuild.suite-finished.v1",
-            "test_builds_status": 0, "cross_repo_fixtures_status": 0,
+            "test_builds_status": 0,
             "package_fixtures_status": 0, "nim_phase_status": suite_status,
             "python_failed_modules": list(failed_modules),
             "suite_status": suite_status}
@@ -319,13 +319,13 @@ class RunTestsMarkerContractTests(unittest.TestCase):
             (base / "test-logs").mkdir()
             script = (
                 "set -euo pipefail\n" + functions + "\n"
-                "test_builds_status=0 cross_repo_fixtures_status=3 "
-                "package_fixtures_status=0 nim_phase_status=1 suite_status=1\n"
+                "test_builds_status=0 "
+                "package_fixtures_status=3 nim_phase_status=1 suite_status=1\n"
                 "python_failed_modules=('tests/unit/test_a.py' "
                 "'tests/odd \"quoted\" \\ name/test_b.py')\n"
                 "write_suite_finished_marker\n"
                 "python_failed_modules=()\n"
-                "suite_status=0 nim_phase_status=0 cross_repo_fixtures_status=0\n"
+                "suite_status=0 nim_phase_status=0 package_fixtures_status=0\n"
                 "cp test-logs/suite-finished.json first.json\n"
                 "write_suite_finished_marker\n")
             result = subprocess.run(["bash", "-c", script], cwd=base,
@@ -334,7 +334,7 @@ class RunTestsMarkerContractTests(unittest.TestCase):
             first, problem = module.load_marker(base / "first.json")
             self.assertIsNone(problem)
             self.assertEqual(first["suite_status"], 1)
-            self.assertEqual(first["cross_repo_fixtures_status"], 3)
+            self.assertEqual(first["package_fixtures_status"], 3)
             self.assertEqual(first["python_failed_modules"],
                              ["tests/unit/test_a.py",
                               'tests/odd "quoted" \\ name/test_b.py'])

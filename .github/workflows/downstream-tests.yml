@@ -1,0 +1,228 @@
+name: Downstream Tests
+
+# The tests whose subject is a DOWNSTREAM repository's use of reprobuild, run
+# against THIS checkout.
+#
+# WHY THIS EXISTS
+#
+# On 2026-11-07 the tests of the recorder's side of the Linux HCR provider
+# moved out of this repository into codetracer-native-recorder
+# (`tests/reprobuild-hcr/`, recorder commit 07f1c8f1): the HCR/MCR claim
+# arbitration test, the claim-map arms of the three HLX-M3 transaction gates,
+# and HX-S-2, the replay of a hot-patched recording
+# (reprobuild-specs issues/2026-11-06-codetracer-in-place-project-file-
+# repeats-its-fixture-and-compiles-in-every-case.md, "Approved migration
+# plan"). Their
+# subject is the recorder, but they link this repository's production HCR
+# agent and import its Nim libraries, so a change HERE can break them. This
+# job keeps that gate: it runs the recorder's copy against this commit, the
+# way the recorder's own `downstream-tests.yml` runs CodeTracer's suites
+# against a recorder commit.
+#
+# WHAT IT RUNS, AND WHAT IT DOES NOT
+#
+# `just test-reprobuild-claims` in the recorder, with REPROBUILD_DIR set to
+# this checkout: the claim-arbitration unit test and the HLX-M3 claim-map
+# arms. Both record nothing, so they run on any Linux x86_64 host.
+#
+# HX-S-2 (`e2e_hcr_linux_replay_of_patched_recording`) is NOT run here. On the
+# recorder's `agents` line the recorder refuses to record on a host without
+# CPUID faulting, so the gate runs only inside a KVM guest with CPUID faulting
+# (`scripts/gate-cpuid.sh` in the recorder; its `cpuid-gates.yml` clones
+# reprobuild and runs it). This repository's CI has no KVM/CPUID runner
+# pattern to run it on, and a step that ran it here would refuse every time.
+# Its coverage against a reprobuild revision is the recorder's CPUID Gates
+# workflow, which clones this repository's `dev`.
+#
+# A MISSING SIBLING IS AN ERROR, NEVER A SKIP (metacraft-dev-guidelines
+# policies/cross-repo-builds.md §5). Every clone below fails the job when it
+# fails, the job checks that the recorder still carries the recipe before it
+# runs it, and the recipe itself dies when REPROBUILD_DIR is not a reprobuild
+# checkout.
+#
+# THE SIBLING'S RECIPE, IN THE SIBLING'S ENVIRONMENT (§2.3, §5 items 2 and 5).
+# Nothing here restates the recorder's build: the job enters the recorder's own
+# flake dev shell and runs the recorder's own recipe. That recipe in turn
+# builds this checkout's `repro` with this checkout's `just bootstrap` in this
+# checkout's dev shell, and compiles the tests that import reprobuild's
+# libraries through that `repro`.
+#
+# WHY ITS OWN WORKFLOW AND NOT A JOB IN ci.yml. `ci.yml` supersedes its own
+# runs on a saturated pool (see its header), and this gate's verdict should not
+# depend on whether a later push arrived first. It also needs neither the Test
+# job's CodeTracer build nor its token preamble.
+
+on:
+  push:
+    branches: [main, dev]
+  pull_request:
+    branches-ignore: [agents]
+  workflow_dispatch:
+
+# Pull-request runs collapse by head ref: a newer push answers for the older
+# one. A mainline push gets a per-commit group nothing can supersede, because
+# the next push does not answer for it.
+concurrency:
+  group: downstream-tests-${{ github.event_name == 'pull_request' && github.head_ref || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  native-recorder-hcr-claims:
+    name: codetracer-native-recorder HCR claim tests
+    runs-on: [self-hosted, linux, x64]  # CIP-5: nix job (setup-dev-env) → eph-linux-x64
+    # Not measured yet: this job has never run. The parts it shares with the
+    # Linux HCR lane were measured there on ephemeral runners with a cold
+    # store (hcr-lanes.yml): dev-shell realisation and `Build repro` 33-44
+    # min, the ct-mcr bundle build ~18 min. The recorder's recipe adds its
+    # own `just bootstrap` of this checkout and two short test binaries.
+    # Replace this with the measured duration once a run is green.
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@v4
+      - name: Mint installation token for cross-repo sibling access
+        id: ci_token
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.CI_TOKEN_PROVIDER_APP_ID }}
+          private-key: ${{ secrets.CI_TOKEN_PROVIDER_PRIVATE_KEY }}
+          owner: metacraft-labs
+          permission-contents: read
+      # This checkout's siblings, from .github/sibling-repos: what this
+      # checkout's own `just bootstrap` (which the recorder's recipe runs)
+      # compiles against, plus codetracer, codetracer-trace-format and
+      # codetracer-trace-format-nim, which the recorder's build reads too.
+      - uses: metacraft-labs/metacraft-github-actions/setup-dev-env@dev
+        with:
+          env-flavor: nix
+          gh-token: ${{ steps.ci_token.outputs.token }}
+          substituters: ${{ vars.SUBSTITUTERS }}
+          trusted-public-keys: ${{ vars.TRUSTED_PUBLIC_KEYS }}
+          attic-token: ${{ secrets.ATTIC_TOKEN }}
+          attic-cache: ${{ vars.ATTIC_CACHE }}
+          attic-endpoint: ${{ vars.ATTIC_ENDPOINT }}
+      # The recorder at its `agents` line, where the tests live. It REPLACES
+      # the `dev` checkout .github/sibling-repos put at the same path
+      # (clone-repo starts by removing its destination), so it must run after
+      # setup-dev-env. Every clone runs here, straight after setup, on the
+      # token minted at the top of the job: an installation token lasts an
+      # hour (hcr-lanes.yml lost a clone to an expired one).
+      - name: Clone codetracer-native-recorder at agents
+        uses: metacraft-labs/metacraft-github-actions/clone-repo@dev
+        with:
+          repo: metacraft-labs/codetracer-native-recorder
+          ref: agents
+          path: ${{ github.workspace }}/../codetracer-native-recorder
+          gh-token: ${{ steps.ci_token.outputs.token }}
+      # Read only by the recorder's `just build-ct-mcr`, which
+      # `test-reprobuild-claims` depends on: its licensing prerequisite builds
+      # `ct_license_ffi` in ../codetracer-native-backend, and ct_cli imports
+      # ../codetracer-visual-replay.
+      - name: Clone codetracer-native-backend sibling
+        uses: metacraft-labs/metacraft-github-actions/clone-repo@dev
+        with:
+          repo: metacraft-labs/codetracer-native-backend
+          ref: dev
+          path: ${{ github.workspace }}/../codetracer-native-backend
+          gh-token: ${{ steps.ci_token.outputs.token }}
+      - name: Clone codetracer-visual-replay sibling
+        uses: metacraft-labs/metacraft-github-actions/clone-repo@dev
+        with:
+          repo: metacraft-labs/codetracer-visual-replay
+          ref: dev
+          path: ${{ github.workspace }}/../codetracer-visual-replay
+          gh-token: ${{ steps.ci_token.outputs.token }}
+      # The recorder builds against four siblings that must agree with it and
+      # with each other, and their `dev` tips do not (hcr-lanes.yml measured
+      # this for the same build). Put those four at the revisions the
+      # recorder's own committed repro.lock names. Only these four: every
+      # other sibling stays where .github/sibling-repos puts it, so this
+      # checkout's `just bootstrap` compiles against the revisions the rest of
+      # this repository's CI uses. Never `reprobuild` itself: the recorder's
+      # lock pins one, and the checkout under test must stay at this commit.
+      - name: Put the recorder's build siblings at the recorder's locked revisions
+        env:
+          GIT_CONFIG_NOSYSTEM: '1'
+          GIT_TERMINAL_PROMPT: '0'
+          # Drop the job-wide process-scoped header setup-nix exports for
+          # github.com/metacraft-labs/: with the scoped file below it would be
+          # a second Authorization header, which GitHub answers with HTTP 400.
+          GIT_CONFIG_COUNT: '0'
+          GH_TOKEN: ${{ steps.ci_token.outputs.token }}
+        run: |
+          set -euo pipefail
+          repro_root="${{ github.workspace }}"
+          siblings_root="$(cd "$repro_root/.." && pwd)"
+          recorder_lock="$siblings_root/codetracer-native-recorder/repro.lock"
+          test -f "$recorder_lock" || { echo "no recorder lock at $recorder_lock" >&2; exit 1; }
+          names='codetracer-trace-format-nim|codetracer-trace-format|codetracer-native-backend|codetracer-visual-replay'
+          for name in ${names//|/ }; do
+            test -d "$siblings_root/$name/.git" \
+              || { echo "the $name sibling is not checked out at $siblings_root/$name" >&2; exit 1; }
+          done
+          work="$(mktemp -d "$RUNNER_TEMP/recorder-siblings.XXXXXX")"
+          trap 'rm -rf "${work:?}"' EXIT
+          # The four entries, as brace groups, in the lock's own syntax.
+          { grep '^schema = ' "$recorder_lock"
+            printf '[lock]\ndeps = ['
+            grep -o '{[^{}]*}' "$recorder_lock" | grep 'coord_kind' \
+              | grep -E "name = \"($names)\"" \
+              | paste -sd, -
+            printf ']\n'; } > "$work/recorder.lock"
+          count="$(grep -o '{[^{}]*}' "$work/recorder.lock" | wc -l)"
+          [ "$count" -eq 4 ] || { echo "the recorder's lock names $count of the 4 build siblings" >&2; exit 1; }
+          dev-exec python3 scripts/ci_lock_source_credentials.py gitconfig \
+            --lock "$work/recorder.lock" --owner metacraft-labs \
+            --out "$work/gitconfig" --emit-actions-mask
+          unset GH_TOKEN
+          GIT_CONFIG_GLOBAL="$work/gitconfig" bash scripts/reconcile_locked_siblings.sh \
+            "$work/recorder.lock" "$siblings_root" "$(basename "$repro_root")" --fetch-only
+          GIT_CONFIG_GLOBAL=/dev/null bash scripts/reconcile_locked_siblings.sh \
+            "$work/recorder.lock" "$siblings_root" "$(basename "$repro_root")" --detach
+      # Fail, by name, when the recorder no longer carries the recipe this job
+      # runs, rather than with a `just` error that reads like a build failure.
+      - name: The recorder carries test-reprobuild-claims
+        run: |
+          set -euo pipefail
+          recorder="$(cd "${{ github.workspace }}/../codetracer-native-recorder" && pwd)"
+          echo "codetracer-native-recorder at $(git -C "$recorder" rev-parse HEAD)"
+          dev-exec just --justfile "$recorder/Justfile" --working-directory "$recorder" --summary \
+            | tr ' ' '\n' | grep -qx 'test-reprobuild-claims' \
+            || { echo "codetracer-native-recorder agents has no 'test-reprobuild-claims' recipe" >&2; exit 1; }
+      # Installation tokens expire after an hour; the recorder's build can
+      # start later than that. Scoped to the private repositories the
+      # recorder's build fetches: the recorder itself, codetracer-rr (a
+      # private flake input of its dev shell) and lldb-sys.rs (a private cargo
+      # git dependency of the backend's `ct_license_ffi`).
+      - name: Refresh installation token for the recorder build
+        id: ci_token_recorder
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.CI_TOKEN_PROVIDER_APP_ID }}
+          private-key: ${{ secrets.CI_TOKEN_PROVIDER_PRIVATE_KEY }}
+          owner: metacraft-labs
+          repositories: |
+            codetracer-native-recorder
+            codetracer-rr
+            lldb-sys.rs
+          permission-contents: read
+      # The recorder's flake has a private input (nix needs the scoped access
+      # token), and its build fetches a private cargo git dependency (cargo
+      # goes through the git CLI, which reads the GIT_CONFIG_* rewrite).
+      - name: Run the recorder's reprobuild HCR claim tests against this checkout
+        env:
+          REPROBUILD_DIR: ${{ github.workspace }}
+          GIT_TERMINAL_PROMPT: '0'
+          CARGO_NET_GIT_FETCH_WITH_CLI: 'true'
+          GIT_CONFIG_COUNT: '1'
+          GIT_CONFIG_KEY_0: url.https://x-access-token:${{ steps.ci_token_recorder.outputs.token }}@github.com/metacraft-labs/lldb-sys.rs.insteadOf
+          GIT_CONFIG_VALUE_0: https://github.com/metacraft-labs/lldb-sys.rs
+          NIX_CONFIG: >-
+            access-tokens = github.com=${{ github.token }}
+            github.com/metacraft-labs/codetracer-native-recorder=${{ steps.ci_token_recorder.outputs.token }}
+            github.com/metacraft-labs/codetracer-rr=${{ steps.ci_token_recorder.outputs.token }}
+        run: |
+          set -euo pipefail
+          recorder="$(cd "${{ github.workspace }}/../codetracer-native-recorder" && pwd)"
+          echo "reprobuild under test: $REPROBUILD_DIR at $(git -C "$REPROBUILD_DIR" rev-parse HEAD)"
+          cd "$recorder"
+          nix develop "$recorder" --command just test-reprobuild-claims
