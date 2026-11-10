@@ -45,6 +45,8 @@ import repro_lock_files
 import repro_project_dsl
 import repro_core/target_object_check
 
+import repro_solver/lock_pins
+
 import ./configurables/variants
 
 type
@@ -115,12 +117,38 @@ proc activeSolvedVariants*(): ToolchainSelection =
   ##      region is under, if one is registered;
   ##   2. otherwise `lastSolverSolution()` — the single-solve path every
   ##      pre-NLF-M7 workspace takes.
+  ##
+  ## Step 2 is skipped when it cannot answer: no lock governs this build and
+  ## no declaration the owed solve would read names `targetTriple` or
+  ## `compiler` (`solvedAnswerMayAssignAny`). The solver assigns only declared
+  ## variants, so the skipped read would have returned neither and the result
+  ## is the same defaults plus `targetTripleFromEnv()`. What the skip saves is
+  ## the solve: a `build:` body runs at module init in every non-provider
+  ## binary, and each one used to pay a full clingo solve over the cumulative
+  ## registry here (`test_kwin_source`: 622 solves, 365 s; reprobuild-pm issue
+  ## `2026-11-07-test-binaries-pay-minutes-of-module-init-before-any-case-runs`,
+  ## option A1).
+  ##
+  ## A governing lock keeps the read even though it cannot assign either
+  ## variant, because the read is where a lock that contradicts a declared
+  ## range is refused (`ELockConflict`) for a build whose body reads nothing
+  ## else; skipping it would let that build proceed on a graph the lock never
+  ## named. An unsatisfiable package-only solve with no lock is not refused
+  ## here any more; it is refused, with the same core-naming message, at the
+  ## first read of the solved answer (`chosenVersion`, `lastSolverSolution`,
+  ## `hasSolverSolution`) — `t_module_init_solve_is_deferred_to_first_read`
+  ## pins both halves.
   let name = activeLockFileName()
   if name.len > 0 and solvedGraphsByLockFile.hasKey(name):
     let assigned = solvedGraphsByLockFile[name]
     result.lockFileName = name
     result.targetTriple = assigned.getOrDefault("targetTriple", "")
     result.compiler = assigned.getOrDefault("compiler", "")
+    return
+  let mayAnswer = name.len > 0 or not currentLockPins().isEmpty or
+    solvedAnswerMayAssignAny(["targetTriple", "compiler"])
+  if not mayAnswer:
+    result.targetTriple = targetTripleFromEnv()
     return
   if hasSolverSolution():
     let sol = lastSolverSolution()

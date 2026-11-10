@@ -28457,7 +28457,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_unit_g03",
+    group: "t_group_tests_unit_g02",
     singleReason: ""),
   TestSpec(
     source: "tests/unit/t_m9r15q_3_kf6_umbrella_config.nim",
@@ -29018,7 +29018,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_unit_g04",
+    group: "t_group_tests_unit_g03",
     singleReason: ""),
   TestSpec(
     source: "tests/unit/t_missing_json_evidence.nim",
@@ -29210,6 +29210,17 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "tests/unit/t_recipe_lock_consistency_check.nim",
     binary: "build/test-bin/t_recipe_lock_consistency_check",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "t_group_tests_unit_g04",
+    singleReason: ""),
+  TestSpec(
+    source: "tests/unit/t_recipe_module_init_solves_only_for_a_toolchain_variant.nim",
+    binary: "build/test-bin/t_recipe_module_init_solves_only_for_a_toolchain_variant",
     defines: @[],
     requiresReproBinary: false,
     extraPassC: @[],

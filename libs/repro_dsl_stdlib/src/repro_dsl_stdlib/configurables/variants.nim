@@ -1164,10 +1164,72 @@ proc emitSolverInputsIfRequested(variants: openArray[VariantDecl];
   except CatchableError:
     discard
 
+var solvedPrograms {.threadvar.}: Table[string, UnifiedSolution]
+  ## In-process memo of ``runUnifiedSolve``: the ASP program clingo was given,
+  ## mapped to the solution it produced. Never persisted and never shared
+  ## between processes.
+  ##
+  ## WHY THE KEY IS THE PROGRAM TEXT. ``solve`` derives every byte of a
+  ## successful ``UnifiedSolution`` from ``encodeUnified(variants, packages)``
+  ## and nothing else: clingo runs with default arguments and no seed
+  ## (`Named-Lock-Files.md` §1.1 measured that), and the parse reads only the
+  ## model. The program is therefore a key that covers everything the solve
+  ## reads by construction. The rendered solver-inputs fixture that
+  ## ``inputs_digest`` is taken over would be the cheaper key, but it is a
+  ## projection: it does not render ``PackageDecl.variants``, so two inputs
+  ## differing only there would collide. A registry that grows between calls
+  ## grows the program, so a grown registry is a miss.
+  ##
+  ## WHAT IT SAVES. Each ``package`` block re-arms the module-init solve, and
+  ## the per-consumer ``include`` shims turn a recipe's dependency DAG into a
+  ## tree of copies, each re-registering edges the registry already holds
+  ## (``registerSolverDependency`` deduplicates them). The re-armed solve then
+  ## runs over a byte-identical program. The 2026-11-07 diagnosis
+  ## (reprobuild-pm issue
+  ## `2026-11-07-test-binaries-pay-minutes-of-module-init-before-any-case-runs`)
+  ## counted 622 solves in `test_kwin_source` over about 110 distinct
+  ## registries.
+  ##
+  ## Only successful solves are memoised. ``EUnsatisfiable`` is raised from a
+  ## fresh solve every time, so its message — which carries the unsat core —
+  ## is built by the path that has always built it.
+
+var unifiedSolveRuns {.threadvar.}: int
+var unifiedSolveMemoHits {.threadvar.}: int
+
+proc unifiedSolveCount*(): int =
+  ## How many times this thread drove clingo for a unified solve. A memo hit
+  ## does not count. Test-facing: it is how a test asserts that a path did NOT
+  ## solve, which a timing cannot show.
+  unifiedSolveRuns
+
+proc unifiedSolveMemoHitCount*(): int =
+  ## How many unified solves this thread answered from the in-process memo.
+  unifiedSolveMemoHits
+
+proc resetUnifiedSolveMemo*() =
+  ## Drop the memo and zero both counters. Test-facing. Correctness never
+  ## needs it — an entry is a pure function of its key — which is why
+  ## ``resetVariantState`` leaves the memo alone.
+  solvedPrograms = initTable[string, UnifiedSolution]()
+  unifiedSolveRuns = 0
+  unifiedSolveMemoHits = 0
+
+proc memoisedSolve(variants: openArray[VariantDecl];
+                   packages: openArray[PackageDecl]): UnifiedSolution =
+  let program = encodeUnified(variants, packages)
+  if program in solvedPrograms:
+    inc unifiedSolveMemoHits
+    return solvedPrograms[program]
+  inc unifiedSolveRuns
+  result = solve(variants, packages)
+  solvedPrograms[program] = result
+
 proc runUnifiedSolve(applyTo: ConfigContext) =
   ## The solve half of ``finalizeVariants`` — build the solver inputs from the
   ## ambient variant context plus the pending dependency registry, drive
-  ## clingo once, and cache the answer.
+  ## clingo once, and cache the answer. An identical earlier solve in this
+  ## process answers from ``solvedPrograms`` instead of clingo.
   ##
   ## Hoisted out of ``finalizeVariants`` so the deferred module-init path
   ## (``finalizeVariantsAtModuleInit`` / ``ensureUnifiedSolution`` below) runs
@@ -1188,7 +1250,7 @@ proc runUnifiedSolve(applyTo: ConfigContext) =
   if variants.len == 0 and packages.len == 0:
     return
   try:
-    let sol = solve(variants, packages)
+    let sol = memoisedSolve(variants, packages)
     lastUnifiedSolution = sol
     hasUnifiedSolution = true
     # MO-12 — surface the EXACT inputs this solve consumed to the lock-
@@ -1318,6 +1380,41 @@ proc ensureUnifiedSolution() =
     return
   moduleInitSolveDeferred = false
   runUnifiedSolve(nil)
+
+proc solvedAnswerMayAssignAny*(names: openArray[string]): bool =
+  ## Whether reading the solved answer (``hasSolverSolution`` /
+  ## ``lastSolverSolution``) could yield an assignment for any variant in
+  ## ``names``. A reader that wants only those variants may skip the read when
+  ## this is false: it would pay a solve whose answer cannot contain them.
+  ##
+  ## True when no module-init solve is owed, because the read is then a cache
+  ## lookup and costs nothing. When one IS owed, the solve would read
+  ## ``solverVariantDecls()`` — the open ambient context plus develop
+  ## siblings' declarations — and the solver assigns only variants some
+  ## declaration names, so the question is whether any of those declarations
+  ## carries one of ``names``. A governing lock pin does not change that:
+  ## ``lockedValueFor`` pins only a declared variant.
+  ##
+  ## The develop half walks names without building declarations, because
+  ## ``developVariantDecls`` resolves lock pins and may raise; a pin cannot add
+  ## a name, so the names alone answer the question.
+  if not moduleInitSolveDeferred:
+    return true
+  if not ambientVariantContext.isNil and
+      ambientVariantContext.state != ccsFinalized:
+    for node in ambientVariantContext.nodes:
+      if node.solverParticipating and node.scopeDerivedName in names:
+        return true
+  var seen: seq[string] = @[]
+  for entry in pendingSolverPackages:
+    if entry.depPackage in seen: continue
+    seen.add(entry.depPackage)
+    let developed = developSourceFor(entry.depPackage)
+    if developed.isNone: continue
+    for declared in developed.get().variants:
+      if qualifiedVariantName(entry.depPackage, declared.name) in names:
+        return true
+  false
 
 proc chosenVersion*(packageName: string): string =
   ## Spec-Implementation M2d: return the solver-chosen version for the

@@ -414,7 +414,7 @@ libs/repro_dsl_stdlib/tests/t_isonim_ssg_render_edge.nim	nim	5
 libs/repro_dsl_stdlib/tests/t_lock_conflict_names_a_cross_repo_producer_and_the_targeted_repin.nim	nim	5
 libs/repro_dsl_stdlib/tests/t_lock_conflict_names_a_recipe_the_writing_solve_never_saw.nim	nim	3
 libs/repro_dsl_stdlib/tests/t_m68_baseline_catalog.nim	nim	7
-libs/repro_dsl_stdlib/tests/t_module_init_solve_is_deferred_to_first_read.nim	nim	12
+libs/repro_dsl_stdlib/tests/t_module_init_solve_is_deferred_to_first_read.nim	nim	25
 libs/repro_dsl_stdlib/tests/t_n48_apt_jammy_tar_operands.nim	nim	2
 libs/repro_dsl_stdlib/tests/t_nde0a_apt_jammy.nim	nim	14
 libs/repro_dsl_stdlib/tests/t_nde0d_dbus_broker.nim	nim	18
@@ -2666,6 +2666,7 @@ tests/unit/t_reasoned_skip_compiles_on_any_unittest.nim	nim	3
 tests/unit/t_recipe_compile_honours_the_reprobuild_libs_override.nim	nim	6
 tests/unit/t_recipe_constraint_reader.nim	nim	33
 tests/unit/t_recipe_lock_consistency_check.nim	nim	23
+tests/unit/t_recipe_module_init_solves_only_for_a_toolchain_variant.nim	nim	3
 tests/unit/t_recipe_pin_edit.nim	nim	19
 tests/unit/t_repo_fragment_role_keys.nim	nim	6
 tests/unit/t_repo_fragment_writer_emits_only_repo_v2.nim	nim	5

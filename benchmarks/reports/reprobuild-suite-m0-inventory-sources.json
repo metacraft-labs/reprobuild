@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 34,
-    "nimTestBinaries": 2706,
+    "nimTestBinaries": 2707,
     "pureUnitConsolidationGroups": 79,
-    "pureUnitTests": 743,
+    "pureUnitTests": 744,
     "staticallyDetectedRuntimeCompilerFlowTests": 141,
-    "testEntries": 2747
+    "testEntries": 2748
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1565,7 +1565,7 @@
       "graph-fixture": 22,
       "integration": 1492,
       "platform/destructive": 173,
-      "pure unit": 743,
+      "pure unit": 744,
       "unclassified": 317
     },
     "graphOwnedTestArtifacts": [
@@ -1774,9 +1774,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2706,
+    "nimTestBinaryCount": 2707,
     "pythonTestFileCount": 41,
-    "testEntryCount": 2747
+    "testEntryCount": 2748
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -15819,8 +15819,8 @@
       "owner": "libs/repro_dsl_stdlib",
       "requiresReproBinary": false,
       "source": "libs/repro_dsl_stdlib/tests/t_module_init_solve_is_deferred_to_first_read.nim",
-      "sourceSuiteCount": 5,
-      "staticCaseCount": 12,
+      "sourceSuiteCount": 8,
+      "staticCaseCount": 25,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -56303,6 +56303,24 @@
       "source": "tests/unit/t_recipe_lock_consistency_check.nim",
       "sourceSuiteCount": 6,
       "staticCaseCount": 23,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_recipe_module_init_solves_only_for_a_toolchain_variant",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "recipes/packages/source",
+        "repro_dsl_stdlib"
+      ],
+      "owner": "tests/unit",
+      "requiresReproBinary": false,
+      "source": "tests/unit/t_recipe_module_init_solves_only_for_a_toolchain_variant.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 3,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
