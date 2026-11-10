@@ -1,6 +1,6 @@
 {
   "observedStructuralFacts": {
-    "graphOwnedHelperArtifacts": 34,
+    "graphOwnedHelperArtifacts": 35,
     "nimTestBinaries": 2706,
     "pureUnitConsolidationGroups": 79,
     "pureUnitTests": 743,
@@ -1598,6 +1598,12 @@
         "kind": "test-fixture",
         "output": "build/test-fixtures/exclusive-phase/exclusive_phase_probe",
         "source": "tests/fixtures/exclusive-phase/probe.nim"
+      },
+      {
+        "actionId": "reprobuild.test_fixtures.gen_",
+        "kind": "test-fixture",
+        "output": "dynamic",
+        "source": "dynamic"
       },
       {
         "actionId": "reprobuild.test_fixtures.inject64_helper",

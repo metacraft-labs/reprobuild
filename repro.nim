@@ -306,6 +306,28 @@ const
     ## unrelated to HCR (reprobuild-pm issue 2026-09-25,
     ## "hcr-replay-gate-needs-a-ct-mcr-no-edge-builds").
 
+  testDataFixtureRoot* = "build/test-fixtures"
+
+  cvmTestKeysRoot* = "build/test-fixtures/cvm-test-keys"
+  cvmTestKeysActionId* = "reprobuild.test_fixtures.cvm_test_rsa_keys"
+  cvmTestKeys* = [
+    "build/test-fixtures/cvm-test-keys/snp-marked-ark.key",
+    "build/test-fixtures/cvm-test-keys/snp-marked-ask.key",
+    "build/test-fixtures/cvm-test-keys/snp-unmarked-ark.key",
+    "build/test-fixtures/cvm-test-keys/snp-unmarked-ask.key",
+  ]
+    ## The RSA-4096 keys of the software-root security-processor test
+    ## hierarchies (`tests/integration/cvm_evidence_emulator.nim`,
+    ## `snpTestRootKeyPath`), generated from fixed seeds by
+    ## `tests/fixtures/cvm-test-keys/gen_cvm_test_keys.nim`. Four key
+    ## generations cost about a CPU-minute, which every process of every test
+    ## that minted a hierarchy paid at start-up.
+  cvmTestKeysConsumers = [
+    "tests/integration/t_genuine_tier_policy_refuses_emulated_cvm_evidence.nim",
+    "tests/integration/t_cvm_evidence_emulator_all_protocol_paths.nim",
+    "tests/integration/t_reproos_uki_through_the_cvm_path.nim",
+  ]
+
   nixPackageFixtureActionId* = "reprobuild.test_fixtures.nix_package"
   nixPackageOutPathFixture* = "build/test-fixtures/nix-package/out-path"
     ## The store path of `nix build <this checkout>#default`, recorded by edge
@@ -468,6 +490,16 @@ const
         actionId: "reprobuild.test_helpers.exec_without_arg")])
     rows
 
+  cvmTestKeysRows = block:
+    var rows: seq[TestGraphArtifacts]
+    for source in cvmTestKeysConsumers:
+      var artifacts: seq[TestGraphArtifact]
+      for path in cvmTestKeys:
+        artifacts.add TestGraphArtifact(path: path,
+          actionId: cvmTestKeysActionId)
+      rows.add TestGraphArtifacts(source: source, artifacts: artifacts)
+    rows
+
   testFixtureArtifacts*: seq[TestGraphArtifacts] = @[
     # Execute the enrolled production CLI, not a test-only compilation.
     TestGraphArtifacts(
@@ -588,6 +620,7 @@ const
         TestGraphArtifact(path: "build/test-bin/m5_stub_repro_image",
           actionId: "reprobuild.test_helpers.m5_stub_repro_image")]),
   ] & profileCompileNimSpyConsumers & binaryCacheHelperConsumers &
+    cvmTestKeysRows &
     (when defined(linux) or defined(macosx): @[
     TestGraphArtifacts(
       source: "tests/e2e/codetracer-subset/" &
@@ -2155,8 +2188,12 @@ package reprobuild:
             # producing edge to order before this one and no ``.exe``.
             requiredBinaries.add(artifact.path)
             continue
+          # A program gains `.exe` on Windows; a data fixture (a path
+          # with an extension, `.key`, `.rbsz`) is spelled as declared.
           let artifactPath =
-            when defined(windows): artifact.path & ".exe"
+            when defined(windows):
+              if splitFile(artifact.path).ext.len == 0: artifact.path & ".exe"
+              else: artifact.path
             else: artifact.path
           requiredBinaries.add(artifactPath)
           # One edge may produce several of a test's artifacts (the
@@ -3677,6 +3714,50 @@ package reprobuild:
       extraEnv = sourceOnlyEnv,
       nimcache = "build/nimcache/ct_shim_fixture_m4_parity_suite",
       actionId = "reprobuild.test_fixtures.ct_shim_fixture_m4_parity_suite"))
+
+    # Test fixtures that are DATA, not programs: the expensive inputs some
+    # tests used to compute at module or suite scope, in every process the
+    # runner started for them (the `--list-json` probe and one per case).
+    # Each is a generator program, compiled by a `nim.c` edge, and a `shell`
+    # edge that runs it into a stable path under `build/test-fixtures`. The
+    # run edge is monitored like any other, so its cache key is the content
+    # the generator read -- its own binary, and whatever it compiles or
+    # reads -- and the engine re-runs it only when that changes. A test
+    # reads the outputs (declared below, and typed inputs of its execute
+    # edge through `testFixtureArtifacts`); nothing heavy runs before its
+    # first case. reprobuild-pm issue 2026-11-07, "test binaries pay
+    # minutes of module init before any case runs", option B1.
+    proc fixtureGenerator(name, source: string;
+                          passL: seq[string] = @[]): BuildActionDef =
+      nim.c(
+        source = source,
+        binary = testDataFixtureRoot & "/generators/" & name,
+        paths = testNimPaths,
+        passL = passL,
+        extraEnv = sourceOnlyEnv,
+        nimcache = "build/nimcache/test_fixture_gen_" & name,
+        actionId = "reprobuild.test_fixtures.gen_" & name)
+
+    proc runFixtureGenerator(name: string; generator: BuildActionDef;
+                             args, actionId: string;
+                             outputs: openArray[string]): BuildActionDef =
+      ## Runs the binary `fixtureGenerator(name, ...)` built; a shell finds
+      ## `<name>.exe` from `<name>` on Windows.
+      shell(
+        command = testDataFixtureRoot & "/generators/" & name & " " & args,
+        actionId = actionId,
+        after = @[generator],
+        extraInputs = generator.outputs,
+        extraOutputs = outputs)
+
+    # The RSA-4096 root and signing-authority keys of the software-root
+    # security-processor hierarchies (`cvmTestKeys`), from fixed seeds.
+    let cvmKeysGenerator = fixtureGenerator("cvm_test_keys",
+      "tests/fixtures/cvm-test-keys/gen_cvm_test_keys.nim",
+      passL = testRuntimePassL)
+    reprobuildTestFixturesActions.add(cvmKeysGenerator)
+    reprobuildTestFixturesActions.add(runFixtureGenerator("cvm_test_keys",
+      cvmKeysGenerator, cvmTestKeysRoot, cvmTestKeysActionId, cvmTestKeys))
 
     # The `ct-mcr` recorder bundle behind `e2e_hcr_linux_replay_of_patched_
     # recording` (`hcrCtMcrBundle`, at file scope, says what is in it and
