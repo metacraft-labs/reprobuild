@@ -34,7 +34,16 @@
 ##
 ## `allowed_mocks: none`. Real process, real GCC with the real patchable
 ## profile, real bodies from a real relocatable object, the production
-## transaction through the no-mock probe shim, the real claim map.
+## transaction through the no-mock probe shim.
+##
+## The claim-map arm of this gate (the claim is released on rollback) moved
+## to codetracer-native-recorder
+## `tests/reprobuild-hcr/t_integration_hcr_linux_txn_claim_map.nim` on
+## 2026-11-07: the claim map is the recorder's, and the recorder runs it
+## against this checkout (`.github/workflows/downstream-tests.yml` runs it
+## against every reprobuild commit). This gate builds without the map
+## (`m3_fixture.nim`), so the provider's claim calls take the bridge's no-map
+## path and every assertion below is about text, values and pages.
 ##
 ## ------------------------------------------------------------------------
 ## DISCRIMINATION, measured by this file:
@@ -58,13 +67,6 @@ when defined(linux) and defined(amd64):
   suite "integration_hcr_linux_repeated_patch_of_same_function":
     setup:
       let repoRoot = getCurrentDir()
-
-    test "the claim map the rollback assertion needs is present":
-      let path = claimMapPath(repoRoot)
-      if not fileExists(path):
-        checkpoint("HLX-M3 gate needs the codetracer-native-recorder " &
-          "checkout beside this repo: " & path & " is not there.")
-      require fileExists(path)
 
     test "three generations, retained bodies, rollback to the ORIGINAL":
       let bodies = buildPatchBodies(repoRoot)
@@ -149,10 +151,9 @@ when defined(linux) and defined(amd64):
       # text is a state this rollback could plausibly have landed on, and did
       # not.
       check run["rolledBackText"].getStr() != gens[1]["text"].getStr()
-      # §4.5: the claim is retained across generations and RELEASED on
-      # rollback, and the site is retired so a later patch re-plans from an
-      # all-NOP window.
-      check run["claimsAfterRollback"].getInt() == 0
+      # §4.5: the site is retired so a later patch re-plans from an all-NOP
+      # window. (That the claim is RELEASED on rollback is the claim map's
+      # half, asserted downstream; see the header.)
       check run["siteLiveAfterRollback"].getInt() == 0
 
     test "a window modified behind the provider's back is REFUSED":

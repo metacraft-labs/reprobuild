@@ -37,7 +37,11 @@
 ## ``exec-first-command-only`` (R7-3), ``alias-chain-first-link-only``
 ## (R7-4), ``dependency-links-unread`` (R7-5, R7-7),
 ## ``requirement-name-not-reserved`` (R7-6), ``privileged-daemons-unread``
-## (decision 58), ``restore-requirement-skips-closure`` (decision 60).
+## (decision 58), ``restore-requirement-skips-closure`` (decision 60);
+## round 7: ``boot-closure-reads-generation-dropins`` (P60-2),
+## ``polkit-subject-rebind-trusted`` (P58-1, P58-2 and the other binding
+## forms), ``reissue-skips-targets`` and ``reissue-skips-sockets``
+## (decision 79, each on its own case).
 ##
 ## *Mocking.* The unit liveness (``AlivenessFn``), as in
 ## ``t_addon_state_sets``: a unit test has no systemd unit whose cgroup the
@@ -53,6 +57,7 @@ import repro_core/host_apply_lock
 import repro_infra
 import repro_infra/systemd_syntax
 from repro_test_support import testCaseScratchSlug
+import repro_elevation
 import repro_addon/[addon_apply, adoption_cli, state_sets, transitions]
 
 const
@@ -1150,6 +1155,147 @@ suite "the requirement follows the distribution's dependency closure (decision 6
       "ProtectSystem=strict\nNoNewPrivileges=yes\nUser=app\n" &
       "ReadWritePaths=/var/lib/other\nExecStart=/bin/true\n")
     check "nofile.service" in carriedRequirementUnits(parseSystemProfile(starter), d, root)
+
+suite "the boot closure leaves the generation's drop-ins out (round 7)":
+  proc bootHost(root: string) =
+    hostFile(root, "/lib/systemd/system/default.target",
+      "[Unit]\nWants=multi-user.target\n")
+    hostFile(root, "/lib/systemd/system/multi-user.target", "[Unit]\n")
+    hostFile(root, "/lib/systemd/system/cronx.service",
+      "[Service]\nExecStart=/bin/true\n")
+    createDir(root / "etc/systemd/system/multi-user.target.wants")
+    createSymlink("/lib/systemd/system/cronx.service",
+      root / "etc/systemd/system/multi-user.target.wants/cronx.service")
+    hostFile(root, "/lib/systemd/system/distb.service",
+      "[Service]\nExecStart=/bin/true\n")
+
+  const DropIn = "systemd.systemDropIn {\n  unit = \"cronx.service\"\n" &
+    "  name = \"x\"\n  content = \"[Unit]\nWants=distb.service\n\"\n}\n"
+
+  test "P60-1 a profile drop-in's Wants= on a boot unit, before it is written":
+    let (root, d) = installedR6("r8-p601")
+    bootHost(root)
+    let units = carriedRequirementUnits(parseSystemProfile(
+      confinedNnp("p60.service", "ReadWritePaths=/var/lib/other\n") & DropIn), d, root)
+    checkpoint $units
+    check units == @["cronx.service", "distb.service"]
+
+  test "P60-2 the same once an earlier generation wrote that drop-in":
+    # The generation's own 50-repro-x.conf is on the host from the first
+    # apply on; distb is still started only through the profile.
+    let (root, d) = installedR6("r8-p602")
+    bootHost(root)
+    hostFile(root, "/etc/systemd/system/cronx.service.d/50-repro-x.conf",
+      "[Unit]\nWants=distb.service\n")
+    let units = carriedRequirementUnits(parseSystemProfile(
+      confinedNnp("p60.service", "ReadWritePaths=/var/lib/other\n") & DropIn), d, root)
+    checkpoint $units
+    check units == @["cronx.service", "distb.service"]
+
+  test "control: a host drop-in on a boot unit is the boot's":
+    # Not the generation's (the profile declares no drop-in named y): the
+    # boot starts distb through it, so distb gets no requirement.
+    let (root, d) = installedR6("r8-p60c")
+    bootHost(root)
+    hostFile(root, "/etc/systemd/system/cronx.service.d/50-repro-y.conf",
+      "[Unit]\nWants=distb.service\n")
+    let units = carriedRequirementUnits(parseSystemProfile(
+      confinedNnp("p60.service", "ReadWritePaths=/var/lib/other\n") & DropIn), d, root)
+    checkpoint $units
+    check "distb.service" notin units
+
+suite "a polkit rule that rebinds subject cannot be judged (round 7)":
+  proc rule(body: string): proc (root: string) =
+    result = proc (root: string) =
+      hostFile(root, "/etc/polkit-1/rules.d/50-x.rules", body)
+
+  test "control: a rule guarded by another account's subject.user":
+    check not pendingRefused(confinedNnp("p58c.service", ""), rule(
+      "polkit.addRule(function(action, subject) {\n" &
+      "  if (subject.user == \"bob\") { return polkit.Result.YES; }\n});\n"))
+    check not pendingRefused(confinedNnp("p58c.service", ""), rule(
+      "polkit.addRule((action, subject) => {\n" &
+      "  if (subject.isInGroup(\"bob\")) { return polkit.Result.YES; }\n});\n"))
+
+  test "P58-1 a var declaration rebinding subject":
+    check pendingRefused(confinedNnp("p581.service", ""), rule(
+      "polkit.addRule(function(action, subject) {\n" &
+      "  var subject = {user: \"bob\"};\n" &
+      "  if (subject.user == \"bob\") { return polkit.Result.YES; }\n});\n"))
+
+  test "P58-2 a plain assignment to subject":
+    check pendingRefused(confinedNnp("p582.service", ""), rule(
+      "polkit.addRule(function(action, subject) {\n" &
+      "  subject = {user: \"bob\"};\n" &
+      "  if (subject.user == \"bob\") { return polkit.Result.YES; }\n});\n"))
+
+  test "let, const, a member assignment, and an increment":
+    for line in ["let subject = {user: \"bob\"};",
+                 "const subject = {user: \"bob\"};",
+                 "subject.user = \"bob\";",
+                 "subject.user += \"\";",
+                 "subject.user++;"]:
+      checkpoint line
+      check pendingRefused(confinedNnp("p58m.service", ""), rule(
+        "polkit.addRule(function(action, subject) {\n  " & line & "\n" &
+        "  if (subject.user == \"bob\") { return polkit.Result.YES; }\n});\n"))
+
+  test "subject bound elsewhere, aliased, or read outside its rule":
+    for body in [
+        # a nested function's own parameter
+        "polkit.addRule(function(action, subject) {\n" &
+          "  function ok(subject) { return subject.user == \"bob\"; }\n" &
+          "  if (subject.user == \"bob\") { return polkit.Result.YES; }\n});\n",
+        # the rule's subject in another position
+        "polkit.addRule(function(subject, action) {\n" &
+          "  if (subject.user == \"bob\") { return polkit.Result.YES; }\n});\n",
+        # a catch binding
+        "polkit.addRule(function(action, subject) {\n" &
+          "  try { x(); } catch (subject) { }\n" &
+          "  if (subject.user == \"bob\") { return polkit.Result.YES; }\n});\n",
+        # passed whole
+        "polkit.addRule(function(action, subject) {\n" &
+          "  Object.assign(subject, {user: \"bob\"});\n" &
+          "  if (subject.user == \"bob\") { return polkit.Result.YES; }\n});\n",
+        # a rule whose parameter is not named subject: the guard reads a global
+        "polkit.addRule(function(action, s) {\n" &
+          "  if (subject.user == \"bob\") { return polkit.Result.YES; }\n});\n",
+        # arguments rebinds a parameter in sloppy mode
+        "polkit.addRule(function(action, subject) {\n" &
+          "  arguments[1] = {user: \"bob\"};\n" &
+          "  if (subject.user == \"bob\") { return polkit.Result.YES; }\n});\n"]:
+      checkpoint body
+      check pendingRefused(confinedNnp("p58o.service", ""), rule(body))
+
+suite "the drivers' start jobs are issued again after the check (decision 79)":
+  proc op(name: string; enabled: bool; held = false): PlannedOperation =
+    PlannedOperation(operation: PrivilegedOperation(kind: pokSystemdSystemUnit,
+      suName: name, suEnabled: enabled, suRestartHeld: held))
+
+  proc activeOnly(units: openArray[string]): proc (u: string): bool =
+    let s = @units
+    result = proc (u: string): bool = u in s
+
+  test "control: a static unit the plan does not enable and that is not running":
+    check driverStartJobs([op("st.service", false)], activeOnly([])).len == 0
+
+  test "an enabled target's job is issued again":
+    let jobs = driverStartJobs([op("t.target", true), op("st.service", false)],
+                               activeOnly([]))
+    checkpoint $jobs
+    check jobs == @["t.target"]
+
+  test "an enabled socket's job is issued again":
+    let jobs = driverStartJobs([op("k.socket", true), op("st.service", false)],
+                               activeOnly([]))
+    checkpoint $jobs
+    check jobs == @["k.socket"]
+
+  test "a running unit's restart is issued again, unless the profile holds it":
+    let jobs = driverStartJobs([op("r.service", false),
+      op("h.service", false, held = true)], activeOnly(["r.service", "h.service"]))
+    checkpoint $jobs
+    check jobs == @["r.service"]
 
 suite "the live cross-check is one shared check (round 6)":
   test "liveReachUnits names the services judged confined, liveReachProblems judges them":

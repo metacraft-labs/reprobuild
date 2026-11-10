@@ -515,6 +515,13 @@ class ReleaseInventoryTests(unittest.TestCase):
         recipe = (ROOT / "repro.nim").read_text(encoding="utf-8")
         native_edges = re.findall(
             r"reprobuildAppsActions\.add\(nim\.c\((.*?)\)\)", recipe, re.S)
+        # An edge bound to a name first (``let x = nim.c(...)``, because a
+        # later edge runs after it) and then added by that name.
+        bound = dict(re.findall(
+            r"let\s+(\w+)\s*=\s*nim\.c\((.*?)\)\s*$", recipe, re.S | re.M))
+        for name in re.findall(r"reprobuildAppsActions\.add\((\w+)\)", recipe):
+            if name in bound:
+                native_edges.append(bound[name])
         apps = [re.search(r'binary\s*=\s*"build/bin/([^"/]+)"', edge).group(1)
                 for edge in native_edges]
         self.assertEqual(len(apps), len(set(apps)), "duplicate release app output")

@@ -39,7 +39,6 @@ import repro_test_support/reasoned_skip
 
 import repro_test_support
 import shared_clones
-from repro_core/cli_images import reprobuildEngineExeName
 
 proc q(value: string): string = quoteShell(value)
 
@@ -157,23 +156,7 @@ suite "SPI-4: migration of existing pools and leaves":
       let reproBin = requireBinary(repoRoot() / "build" / "bin" /
         addFileExt("repro", ExeExt), "reprobuild.apps.repro")
       let root = createTempDir("repro-spi4-", "")
-      # The transport a leaf is configured with re-enters the engine that
-      # configured it: the engine names its own image in
-      # REPRO_SHARED_POOL_CLI for the dispatch, and only REPROBUILD_REPRO
-      # outranks that. With the override unset, as for a user, that image is
-      # ``build/bin/reprobuild`` -- not ``build/bin/repro``, the thin client
-      # in front of it -- and not whichever ``repro`` this process happens
-      # to find on PATH.
-      let previousOverride = getEnv("REPROBUILD_REPRO")
-      let previousPoolCli = getEnv("REPRO_SHARED_POOL_CLI")
-      delEnv("REPROBUILD_REPRO")
-      putEnv("REPRO_SHARED_POOL_CLI",
-        repoRoot() / "build" / "bin" / reprobuildEngineExeName())
-      let expectedUploadPack = leafPoolUploadPackCommand()
-      if previousPoolCli.len > 0: putEnv("REPRO_SHARED_POOL_CLI", previousPoolCli)
-      else: delEnv("REPRO_SHARED_POOL_CLI")
       defer:
-        if previousOverride.len > 0: putEnv("REPROBUILD_REPRO", previousOverride)
         delEnv("GIT_CONFIG_GLOBAL")
         delEnv("GIT_CONFIG_NOSYSTEM")
         removeDir(root)
@@ -251,7 +234,9 @@ suite "SPI-4: migration of existing pools and leaves":
       for leaf in leaves:
         check cfg(leaf, "remote.repro-pool.url") == poolFileUrl(pool)
         check cfg(leaf, "remote.repro-pool.promisor") == "true"
-        check cfg(leaf, "remote.repro-pool.uploadpack") == expectedUploadPack
+        check cfg(leaf, "remote.repro-pool.uploadpack") ==
+          quoteShellPosix(poolUploadPackLauncherPath(pool).replace('\\', '/'))
+        check fileExists(poolUploadPackLauncherPath(pool))
         check cfg(leaf, "fetch.hideRefs") == LeafHiddenFetchRefs
         check cfg(leaf, "extensions.partialClone") == ""
         check gitIn(leaf, "rev-parse", "-q", "--verify",

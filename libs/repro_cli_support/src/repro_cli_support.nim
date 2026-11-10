@@ -1374,6 +1374,16 @@ proc shellCommand(args: openArray[string]): string =
 proc projectRootForModule(modulePath: string): string =
   parentDir(modulePath)
 
+proc writeEngineBuildInfoIfDeclared(projectRoot: string;
+                                    actions: openArray[BuildAction]) =
+  ## Write `<projectRoot>/.repro/build/engine-build-info` when one of
+  ## `actions` declares it as an input, and touch nothing otherwise.
+  for action in actions:
+    for input in action.inputs:
+      if isEngineBuildInfoInput(projectRoot, action.cwd, input):
+        writeEngineBuildInfo(projectRoot)
+        return
+
 type
   CmakeRegenerationMetadata = object
     enabled: bool
@@ -11838,9 +11848,6 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
   let outDir = outputDirForTarget(parsedTarget, workRoot)
   result.modulePath = modulePath
   result.projectRoot = projectRootForModule(modulePath)
-  # The engine names itself to the build: an edge that records which engine
-  # produced it declares this file as an input (repro_core/engine_build_info).
-  writeEngineBuildInfo(result.projectRoot)
   result.outDir = outDir
   # Local copy: the failure-report closure below must not capture ``result``.
   let reportProjectRoot = result.projectRoot
@@ -12344,6 +12351,12 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
     # fold, so the node changes no other action's cache key.
     if graphAugmenter != nil:
       graphAugmenter(scheduledActions)
+    # The engine names itself to an edge that records which engine produced
+    # it: such an edge declares the file as an input
+    # (repro_core/engine_build_info). Written only for a graph that declares
+    # it, so a `--work-root` build of any other project leaves no
+    # `<project>/.repro/build` behind.
+    writeEngineBuildInfoIfDeclared(reportProjectRoot, scheduledActions)
     try:
       progressRenderer.renderPhase("checking graph actions=" &
         $scheduledActions.len)
@@ -14061,6 +14074,12 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
     # fold, so the node changes no other action's cache key.
     if graphAugmenter != nil:
       graphAugmenter(scheduledActions)
+    # The engine names itself to an edge that records which engine produced
+    # it: such an edge declares the file as an input
+    # (repro_core/engine_build_info). Written only for a graph that declares
+    # it, so a `--work-root` build of any other project leaves no
+    # `<project>/.repro/build` behind.
+    writeEngineBuildInfoIfDeclared(reportProjectRoot, scheduledActions)
     try:
       progressRenderer.renderPhase("checking graph actions=" &
         $scheduledActions.len)
@@ -30764,9 +30783,8 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string;
         # surface as a single bekFinished event with severity=error
         # whose message carries "daemon-hosted build failed: <inner>".
         # Without printing those, the CLI exits non-zero with no
-        # diagnostic at all — and tests like
-        # t_e2e_codetracer_build_subset_without_tup that gate on the
-        # error text (`refusing implicit PATH fallback`) can't see it.
+        # diagnostic at all — and a test that gates on the error text
+        # (`refusing implicit PATH fallback`) can't see it.
         let isError = event.kind in {bekFinished, bekCancelled,
             bekUnsupported} and event.severity == "error"
         if (event.kind == bekDiagnostic or isError) and
@@ -102411,10 +102429,12 @@ proc runThinAppDispatch(programName: string): int =
       else:
         putEnv("PATH", appDir)
   let publicCliPath = stablePublicCliPath()
-  # A checkout's persistent transport must re-enter the engine configuring
-  # it, even when an older installed repro appears first on PATH. Use the
-  # existing image guard so embedded library callers never persist their
-  # test/provider executable as a CLI. Keep the hint scoped to this dispatch.
+  # When this engine wires or checks a checkout of a shared pool, it records
+  # itself first in the pool's engine list (``<pool>/repro/engines``), which
+  # the pool's transport launcher tries before PATH, so an older installed
+  # repro first on PATH does not serve the transport. Use the existing image
+  # guard so embedded library callers never record their test/provider
+  # executable as a CLI. Keep the hint scoped to this dispatch.
   let previousPoolCli = getEnv("REPRO_SHARED_POOL_CLI")
   let poolCli = internalReproHelperCliPath(publicCliPath)
   if poolCli.len > 0:

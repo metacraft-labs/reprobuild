@@ -58,16 +58,18 @@
 ##     a failed installation stays a warning, then health --fix recovers it.
 ##
 ## Transport. A lazy refill runs the leaf's ``remote.repro-pool.uploadpack``,
+## the pool's launcher ``<pool>/repro/shared-pool-upload-pack``, which execs
 ## ``<selected repro> internal shared-pool-upload-pack``, and the library
 ## cases call ``checkLeaf`` in-process, so no running CLI names itself. Each
 ## library case therefore selects the checkout's own ``build/bin/repro``
 ## through ``REPROBUILD_REPRO`` (the override every selection honours first)
 ## and, on POSIX hosts, puts a decoy ``repro`` that refuses every request
 ## first on PATH. ``refillable_object_gets_no_message``, the case whose refill
-## must succeed, checks that the leaf names the built transport, and its
-## refill would reach the decoy if the selection fell back to PATH: it fails
-## every time, not only on a machine whose PATH holds an older build, and
-## cannot pass on a different build's transport.
+## must succeed, checks that the leaf names the pool's launcher and that the
+## pool's engine list names the built transport first, and its refill would
+## reach the decoy if the selection fell back to PATH: it fails every time,
+## not only on a machine whose PATH holds an older build, and cannot pass on
+## a different build's transport.
 ##
 ## No mocks: the decoy is never meant to run. Hermetic: one ``createTempDir``
 ## root, a private ``GIT_CONFIG_GLOBAL``, ``file://`` URLs. Skip rule: ``git``
@@ -489,12 +491,18 @@ suite "SPI-3: detector, repair and messages":
         tearDown()
         removeDir(root)
       let f = setUp(root)
-      # The refill below runs this command: the transport of this checkout.
-      # Git runs it through its POSIX shell, on Windows with forward slashes.
+      # The refill below runs the pool's launcher, which selects the
+      # transport of this checkout: REPROBUILD_REPRO, also recorded first in
+      # the pool's engine list. Git runs the launcher through its POSIX
+      # shell, on Windows with forward slashes.
+      let launcher = when defined(windows):
+                       poolUploadPackLauncherPath(f.pool).replace('\\', '/')
+                     else: poolUploadPackLauncherPath(f.pool)
       let transport = when defined(windows): builtRepro().replace('\\', '/')
                       else: builtRepro()
       check must(f.leaf, "config", "--get", "remote.repro-pool.uploadpack") ==
-        quoteShellPosix(transport) & " " & LeafPoolUploadPack
+        quoteShellPosix(launcher)
+      check readFile(poolEnginesPath(f.pool)).splitLines()[0] == transport
       let keepTip = must(f.leaf, "rev-parse", "refs/remotes/origin/keep")
       # The pool loses keep; upstream still has it.
       discard must(f.pool, "update-ref", "-d", "refs/heads/keep")

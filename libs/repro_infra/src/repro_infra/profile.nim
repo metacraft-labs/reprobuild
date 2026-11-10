@@ -1205,7 +1205,8 @@ proc checkFloorActivators*(p: SystemProfile) =
   for r in p.resources:
     if r.kind == srkSystemdSystemUnit and r.suCollision != "dropIn" and
         r.suName in activators:
-      let why = activatorRefusal(r.suName, r.suContent, dropIn = false)
+      let why = activatorRefusal(r.suName, r.suContent, dropIn = false,
+                                 service = activatedService(r.suName, r.suContent))
       if why.len > 0:
         raiseSystemProfileInvalid("systemd.systemUnit '" & r.suName &
           "' activates a floored service: " & why)
@@ -1227,10 +1228,15 @@ proc checkFloorActivators*(p: SystemProfile) =
         target & " carries a command line, which the manager runs as root " &
         "outside every floor")
     var applies = false
+    var service = ""
     for a in activators:
-      if dropInApplies(target, a): applies = true
+      if dropInApplies(target, a):
+        applies = true
+        for r in p.resources:
+          if r.kind == srkSystemdSystemUnit and r.suName == a:
+            service = activatedService(a, r.suContent)
     if applies:
-      let why = activatorRefusal(target, content, dropIn = true)
+      let why = activatorRefusal(target, content, dropIn = true, service = service)
       if why.len > 0:
         raiseSystemProfileInvalid("the drop-in '" & d.address & "' onto " &
           target & ", which activates a floored service: " & why)

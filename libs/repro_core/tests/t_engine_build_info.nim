@@ -6,7 +6,8 @@
 ## part of the action key and not ambient).
 ##
 ## An edge that records the engine (`.#prefix`) declares the file as an input,
-## so another engine is another key. The file is rewritten only when its text
+## so another engine is another key, and only a graph with such an edge gets
+## the file: `isEngineBuildInfoInput` is how the build recognises one. The file is rewritten only when its text
 ## changes: an unchanged engine leaves the edge a cache hit.
 ##
 ## Real files in a temp dir; no mocks.
@@ -44,3 +45,25 @@ suite "engine-build-info":
     writeFile(root / EngineBuildInfoSubpath, "engine=0000\nengine_version=0.0.1\n")
     writeEngineBuildInfo(root)
     check readFile(root / EngineBuildInfoSubpath) == engineBuildInfoText()
+
+  test "recognises the declared input, relative or absolute":
+    let root = "/work/project"
+    check isEngineBuildInfoInput(root, "", ".repro/build/engine-build-info")
+    check isEngineBuildInfoInput(root, root, ".repro/build/engine-build-info")
+    check isEngineBuildInfoInput(root, "",
+      "/work/project/.repro/build/engine-build-info")
+    check isEngineBuildInfoInput(root, "/work/project/sub",
+      "../.repro/build/engine-build-info")
+    check isEngineBuildInfoInput(root, "sub",
+      "../.repro/build/engine-build-info")
+
+  test "ignores every other input":
+    let root = "/work/project"
+    check not isEngineBuildInfoInput(root, "", "")
+    check not isEngineBuildInfoInput(root, "", "flake.lock")
+    check not isEngineBuildInfoInput(root, "", ".repro/build/other")
+    check not isEngineBuildInfoInput(root, "/work/project/sub",
+      ".repro/build/engine-build-info")
+    check not isEngineBuildInfoInput(root, "",
+      "/elsewhere/.repro/build/engine-build-info")
+    check not isEngineBuildInfoInput("", "", ".repro/build/engine-build-info")

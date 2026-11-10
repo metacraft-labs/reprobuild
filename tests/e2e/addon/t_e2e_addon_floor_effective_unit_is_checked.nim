@@ -94,7 +94,9 @@ type Case = object
   rule: string          ## the code of the rule the case targets
                         ## (``[rule:<code>]`` on the effective check's
                         ## refusal of the case's own unit; round 9,
-                        ## finding 3)
+                        ## finding 3); ``a+b``: exactly these rules
+  owners: string        ## more stems whose refusals are the case's (an
+                        ## activator not named after its service; round 11)
 
 proc unitResource(name, service, binary: string; unitLines = "";
                   enabled = true): string =
@@ -284,6 +286,26 @@ proc cases(binary, prefix: string): seq[Case] =
     Case(name: "a9e-udev.service", rule: "directories", service: "User=a9e\nRuntimeDirectory=udev/rules.d\n"),
     Case(name: "a9e-rtnested.service", rule: "directories",
          service: "User=a9e\nRuntimeDirectory=systemd/system/zz-a9e.service.d\n"),
+    # Round 11 (§13 decision 78): an activator named after a base tree, with
+    # a listener in that tree. A build that lets the first through binds a
+    # new socket inside /run/systemd; one that lets the second through has
+    # the manager unlink udev's control socket and bind its own (systemd
+    # src/shared/socket-label.c).
+    # Before a9e-rtsys: under floor-unchecked that case takes /run/systemd
+    # from the manager and leaves the host unusable, so a case after it is
+    # never exercised and the falsifier would not show it starting.
+    Case(name: "a9e-sdsock.service", rule: "unit-name+listener", service: "",
+         activatorOnly: true, probes: "systemd.socket", owners: "systemd",
+         extra: "systemd.systemUnit {\n  name = \"systemd.socket\"\n" &
+                "  content = \"[Socket]\nListenStream=/run/systemd/a9e-sd\n" &
+                "Service=a9e-sdsock.service\n\n[Install]\nWantedBy=sockets.target\n\"\n" &
+                "  enabled = true\n}\n"),
+    Case(name: "a9e-udsock.service", rule: "unit-name+listener", service: "",
+         activatorOnly: true, probes: "udev.socket", owners: "udev",
+         extra: "systemd.systemUnit {\n  name = \"udev.socket\"\n" &
+                "  content = \"[Socket]\nListenStream=/run/udev/control\n" &
+                "Service=a9e-udsock.service\n\n[Install]\nWantedBy=sockets.target\n\"\n" &
+                "  enabled = true\n}\n"),
     Case(name: "a9e-rtsys.service", rule: "directories", service: "User=a9e\nRuntimeDirectory=systemd\n")]
 
 proc ruleCodesOf*(output, caseName: string): seq[string] =
@@ -385,11 +407,17 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
           if t.strip(leading = true, trailing = false, chars = {'-'}) ==
               c.coveredPlace: noexec = true
         held = notRoot and noexec
-      let codes = ruleCodesOf(output, c.name)
+      var codes = ruleCodesOf(output, c.name)
+      for o in c.owners.splitWhitespace():
+        for x in refusalRuleCodes(output, o):
+          if x notin codes: codes.add(x)
+      let wanted = c.rule.split('+')
       var others: seq[string]
       for x in codes:
-        if x != c.rule and x notin others: others.add(x)
-      let ownRule = c.rule in codes and others.len == 0
+        if x notin wanted and x notin others: others.add(x)
+      var ownRule = others.len == 0
+      for w in wanted:
+        if w notin codes: ownRule = false
       results.add(%*{"case": c.name, "exit": r.exitCode, "started": started,
                      "held": held, "ownRule": ownRule, "rules": codes,
                      "output": output[max(0, output.len - 6000) .. ^1]})
@@ -425,6 +453,48 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
         step("after " & c.name & ", the host is back on the control and " &
              "systemd answers", false, back.stdout & back.stderr & sys.stdout)
     record["cases"] = results
+    # Round 11, in the product build only (a falsifying build changes what
+    # the first apply records): what two applies in a row decide.
+    if not effectiveOnly and not unchecked and healthy:
+      # Finding 4: a floored template with a RuntimeDirectory= applies again;
+      # the directory one instance's start created is the template's, so
+      # neither its observation instance nor another instance refuses it.
+      let tpl = head & unitResource("a9e-control.service", "", binary,
+          "Wants=a9e-tdir@1.service\n") &
+        unitResource("a9e-tdir@.service", "User=a9e\nRuntimeDirectory=a9e-tdir\n", binary)
+      let t1 = g.applyProfile(repro, "tdir1", tpl)
+      # systemd's own evidence beside the outcome: the directory's birth
+      # time and the instance's invocation, as the record compares them.
+      let evidence = g.exec("stat -c '%n %i %.9W' /run/a9e-tdir; " &
+        "systemctl show --timestamp=us+utc -p InvocationID -p InactiveExitTimestamp " &
+        "-p ActiveState a9e-tdir@1.service; cat /var/lib/repro/system/addon/floor-created-dirs").stdout
+      record["templateEvidence"] = %evidence
+      step("a floored template with a RuntimeDirectory applies", t1.exitCode == 0,
+           t1.stdout & t1.stderr & evidence)
+      let t2 = g.applyProfile(repro, "tdir2", tpl.replace("Description=A9 round 3",
+                                                          "Description=A9 round 11"))
+      step("and applies again over the directory its instance created",
+           t2.exitCode == 0, t2.stdout & t2.stderr &
+           g.exec("cat /var/lib/repro/system/addon/floor-created-dirs").stdout)
+      # Finding 2 (§13 decision 76), on the guest's own kernel ext4: a
+      # recorded StateDirectory= removed and made again by someone else at
+      # the same path, the inode number reused or not, is refused.
+      let ino = head & unitResource("a9e-control.service", "", binary) &
+        unitResource("a9e-ino.service", "User=a9e\nStateDirectory=a9e-ino\n", binary)
+      let i1 = g.applyProfile(repro, "ino1", ino)
+      step("a floored unit with a StateDirectory applies", i1.exitCode == 0,
+           i1.stdout & i1.stderr)
+      let swap = g.exec("stat -c %i,%W /var/lib/a9e-ino; systemctl stop a9e-ino.service; " &
+        "rm -rf /var/lib/a9e-ino; mkdir /var/lib/a9e-ino; touch /var/lib/a9e-ino/theirs; " &
+        "stat -c %i,%W /var/lib/a9e-ino; stat -f -c %T /var/lib")
+      record["inodeSwap"] = %swap.stdout
+      let i2 = g.applyProfile(repro, "ino2", ino.replace("Description=A9 round 3",
+                                                         "Description=A9 round 11"))
+      step("the tree made in its place is refused at the next apply (§13 decision 76)",
+           i2.exitCode != 0 and "[rule:existing-tree" in i2.stdout & i2.stderr and
+           "/var/lib/a9e-ino" in i2.stdout & i2.stderr, swap.stdout & i2.stdout & i2.stderr)
+      discard g.run("rm -rf /var/lib/a9e-ino; systemctl reset-failed 'a9e-*' 2>/dev/null; true")
+      discard g.applyProfile(repro, "back2", head & unitResource("a9e-control.service", "", binary))
   except CatchableError as e:
     fails.add(b.name & ": " & e.msg)
     steps.add(%*{"step": "exception", "ok": false, "detail": e.msg})

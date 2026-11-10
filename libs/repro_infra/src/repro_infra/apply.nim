@@ -591,21 +591,49 @@ var pendingSwitchGuard*: PendingSwitchGuard = nil
   ## interrupted switch is pending (or it was just recovered), otherwise
   ## why not.
 
+proc driverStartJobs*(planned: openArray[PlannedOperation];
+                      isActive: proc (unit: string): bool): seq[string] =
+  ## The units whose start or restart job the drivers issue in this
+  ## privileged set (§13 decision 79), in plan order: every
+  ## ``systemd.systemUnit`` the plan writes that is enabled (its driver
+  ## runs ``enable --now``, whatever its type: a target, a socket, a timer
+  ## or a service) and every one that is running before the set and whose
+  ## restart the profile does not hold (its driver restarts it after its
+  ## change; ``isActive`` is asked before anything is written). A held unit
+  ## a start pulls in through its dependencies is skipped by its hold;
+  ## after the carried-state check passes, these jobs are issued again so
+  ## systemd brings it up through the same dependencies.
+  for p in planned:
+    let op = p.operation
+    if op.kind != pokSystemdSystemUnit or op.suDestroy: continue
+    if not (op.suEnabled or (not op.suRestartHeld and isActive(op.suName))):
+      continue
+    when ApplyMutation == "reissue-skips-targets":
+      # FALSIFYING MUTATION: a target's job is not issued again.
+      if op.suName.endsWith(".target"): continue
+    when ApplyMutation == "reissue-skips-sockets":
+      # FALSIFYING MUTATION: a socket's job is not issued again.
+      if op.suName.endsWith(".socket"): continue
+    if op.suName notin result: result.add(op.suName)
+
 when defined(posix):
   type LiveCheck = object
     ## The carried-state cross-check of a full apply (spec §11.1, §13
     ## decision 59): the units it judges, held from before the first write
-    ## until they pass, and whether each was running before.
+    ## until they pass, whether each was running before, and the start and
+    ## restart jobs the drivers issue (§13 decision 79).
     units: seq[string]
     holds: seq[string]
     wasActive: seq[string]
+    driverStarts: seq[string]
 
   proc liveCheckHoldText(): string =
     holdText(hmCondition, "Written by repro infra apply: the unit may not " &
       "start until its loaded configuration has been checked against the " &
       "carried-state reach (ReproOS Add-On Mode spec §11.1).")
 
-  proc beginLiveCheck(p: SystemProfile; dir, root: string): LiveCheck =
+  proc beginLiveCheck(p: SystemProfile; dir, root: string;
+                      planned: openArray[PlannedOperation]): LiveCheck =
     ## Hold every unit ``liveReachUnits`` names before the drivers write
     ## and start anything: under the hold their ``enable --now`` and
     ## ``restart`` jobs succeed without running the unit. Holds an earlier
@@ -618,6 +646,9 @@ when defined(posix):
     for u in result.units:
       let r = runSystemctlArgs(["is-active", "--quiet", "--", u])
       if r.exitCode == 0: result.wasActive.add(u)
+    result.driverStarts = driverStartJobs(planned,
+      proc (u: string): bool =
+        runSystemctlArgs(["is-active", "--quiet", "--", u]).exitCode == 0)
     result.holds = writeHolds(result.units, CarriedCheckHoldName,
                               liveCheckHoldText())
     systemctlOrRaise(["daemon-reload"])
@@ -662,13 +693,36 @@ when defined(posix):
     systemctlOrRaise(["daemon-reload"])
     # What the drivers would have started: every unit the profile enables,
     # and every unit that was running before (its restart was skipped).
+    var started: seq[string]
     for r in p.resources:
       if r.kind != srkSystemdSystemUnit or r.suName notin c.units: continue
       if r.suEnabled or r.suName in c.wasActive:
+        started.add(r.suName)
         let s = runSystemctlArgs(["start", "--", r.suName])
         if s.exitCode != 0:
           result.add("systemctl start " & r.suName & " after the " &
             "carried-state check: " & s.output.strip())
+    # And what their jobs pulled in (§13 decision 79, decided 2026-11-08 by
+    # the owner): a held unit another unit's start wants -- a static
+    # service an enabled target or socket pulls in -- was skipped by its
+    # hold. Each start or restart job the drivers issued is issued again,
+    # as a start: systemd adds the jobs of its dependencies as it did for
+    # the driver, so the held units come up as on a host without carried
+    # state, and a unit already running is not restarted a second time
+    # (its restart's stop half ran in the drivers' job).
+    for u in c.driverStarts:
+      if u in started: continue
+      # Not a unit that ran and exited, or failed, in the drivers' job (a
+      # one-shot service): issuing its start again would run it twice.
+      # Its pulled-in units were queued by that job and stay as the hold
+      # left them (spec §11.1, the residual of decision 79).
+      if u notin c.units and
+          runSystemctlArgs(["is-active", "--quiet", "--", u]).exitCode != 0:
+        continue
+      let s = runSystemctlArgs(["start", "--", u])
+      if s.exitCode != 0:
+        result.add("systemctl start " & u & " (re-issued after the " &
+          "carried-state check, §13 decision 79): " & s.output.strip())
 
 proc runInfraApply*(profileText: string; opts: ApplyOptions): ApplyResult =
   ## Drive a full `repro infra apply`. The caller has already loaded
@@ -875,7 +929,7 @@ proc runInfraApply*(profileText: string; opts: ApplyOptions): ApplyResult =
           "carried state is on this host, so the units that can reach it " &
           "are held and checked as systemd loads them before they start " &
           "(spec §11.1); that needs the apply itself to run as root")
-      liveCheck = beginLiveCheck(pLive, liveDir, liveRoot)
+      liveCheck = beginLiveCheck(pLive, liveDir, liveRoot, planned)
 
   # --- 3. Apply the privileged set. ---
   # The privileged set is the longest unbounded stretch of the apply: a

@@ -110,12 +110,27 @@ proc compileFails(dir, text: string): string =
 
 let tmp = createTempDir("repro-a16-baseos-", "")
 
-suite "the baseOs: section, DSL to image command":
-  var withSection, without: ProfileIntent
+# The two compiled profiles, compiled on first use: the test runner runs
+# each case in a process of its own, so a case cannot rely on an earlier
+# case having compiled them.
+var withSectionMemo, withoutMemo: ProfileIntent
+var haveWithSection, haveWithout: bool
 
+proc withSection(): ProfileIntent =
+  if not haveWithSection:
+    withSectionMemo = compileIntentOrShow(tmp / "with", profileText(true))
+    haveWithSection = true
+  withSectionMemo
+
+proc without(): ProfileIntent =
+  if not haveWithout:
+    withoutMemo = compileIntentOrShow(tmp / "without", profileText(false))
+    haveWithout = true
+  withoutMemo
+
+suite "the baseOs: section, DSL to image command":
   test "the macro builds the whole section":
-    withSection = compileIntentOrShow(tmp / "with", profileText(true))
-    let b = withSection.baseOs
+    let b = withSection().baseOs
     check b.declared
     check b.image.endsWith("2026-10-06-raspios-trixie-armhf-lite.img.xz")
     check b.sha256 == Sha
@@ -143,27 +158,29 @@ suite "the baseOs: section, DSL to image command":
     check baseOsProblem(b) == ""
 
   test "RBPI and JSON carry the section unchanged":
-    let viaRbpi = decodeRbpi(encodeRbpi(withSection))
-    check encodeBaseOs(viaRbpi.baseOs) == encodeBaseOs(withSection.baseOs)
-    let viaJson = parseProfileIntentJson(emitProfileIntentJson(withSection))
-    check encodeBaseOs(viaJson.baseOs) == encodeBaseOs(withSection.baseOs)
+    let compiled = withSection()
+    check compiled.baseOs.declared
+    let viaRbpi = decodeRbpi(encodeRbpi(compiled))
+    check encodeBaseOs(viaRbpi.baseOs) == encodeBaseOs(compiled.baseOs)
+    let viaJson = parseProfileIntentJson(emitProfileIntentJson(compiled))
+    check encodeBaseOs(viaJson.baseOs) == encodeBaseOs(compiled.baseOs)
 
   test "a profile without the section encodes without the key":
-    without = compileIntentOrShow(tmp / "without", profileText(false))
-    check not without.baseOs.declared
-    check "baseOs" notin emitProfileIntentJson(without)
-    check not decodeRbpi(encodeRbpi(without)).baseOs.declared
+    check not without().baseOs.declared
+    check "baseOs" notin emitProfileIntentJson(without())
+    check not decodeRbpi(encodeRbpi(without())).baseOs.declared
 
   test "the canonical system-profile text is the same with and without it":
     let target = systemPlanTarget("rpi2", toHashSet(["default"]), srAddOnDebian)
-    let a = renderSystemProfileToText(adaptSystemProfile(withSection, target).profile)
-    let b = renderSystemProfileToText(adaptSystemProfile(without, target).profile)
+    let a = renderSystemProfileToText(adaptSystemProfile(withSection(), target).profile)
+    let b = renderSystemProfileToText(adaptSystemProfile(without(), target).profile)
     check a.len > 0
     check a == b
     check "baseOs" notin a and Sha notin a
 
   test "a corrupt section in an envelope is refused, never dropped":
-    var bad = withSection
+    var bad = withSection()
+    check bad.baseOs.declared
     bad.baseOs.layout = DiskLayout()
     # The JSON parser checks shape; a section with a non-object layout is
     # corrupt.

@@ -1784,6 +1784,46 @@ suite "e2e_local_reprobuild_project_build":
       check not dirExists(projectA / ".repro" / "build")
       check not dirExists(projectB / ".repro" / "build")
 
+    test "an edge that declares engine-build-info gets it under a work root":
+      # The counterpart of the case above. The engine writes
+      # `<project>/.repro/build/engine-build-info` only for a graph with an
+      # edge that declares it (repro_core/engine_build_info), and such an
+      # edge must still find it when `--work-root` moves the engine's own
+      # metadata out of the project.
+      let repoRoot = getCurrentDir()
+      let tempRoot = createTempDir("repro-engine-build-info-work-root", "")
+      defer: removeDirEventually(tempRoot)
+
+      let reproBin = reproBinary(repoRoot)
+      let projectRoot = tempRoot / "project"
+      createDir(projectRoot)
+      writeFile(projectRoot / "reprobuild.nim",
+        "import repro_project_dsl\n\n" &
+        "package engineInfo:\n" &
+        "  build:\n" &
+        "    let outDir = fs.ensureDir(actionId = \"ensure-out\", path = \"out\")\n" &
+        "    let copied = fs.copyFile(actionId = \"copy-engine-info\",\n" &
+        "      source = \".repro/build/engine-build-info\",\n" &
+        "      output = \"out/engine-build-info\",\n" &
+        "      deps = @[outDir.id])\n" &
+        "    defaultBuildAction(copied)\n")
+
+      discard build(reproBin, projectRoot, repoRoot, getEnv("PATH"),
+        extraArgs = ["--work-root=" & tempRoot / "shared-work"])
+
+      let declared = projectRoot / ".repro" / "build" / "engine-build-info"
+      check fileExists(declared)
+      check fileExists(projectRoot / "out" / "engine-build-info")
+      if fileExists(projectRoot / "out" / "engine-build-info"):
+        let copied = readFile(projectRoot / "out" / "engine-build-info")
+        check copied.startsWith("engine=")
+        check "\nengine_version=" in copied
+      # Nothing but the declared input lands under `.repro/build`.
+      var entries: seq[string]
+      for kind, path in walkDir(projectRoot / ".repro" / "build"):
+        entries.add(path.extractFilename)
+      check entries == @["engine-build-info"]
+
     test "relative public CLI keeps RunQuota helper path stable across project cwd":
       let repoRoot = getCurrentDir()
       let tempRoot = createTempDir("repro-m35-relative-public-cli", "")

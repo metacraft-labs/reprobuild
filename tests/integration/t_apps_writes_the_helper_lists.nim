@@ -36,7 +36,7 @@ suite "repro build .#apps writes the helper lists":
       if getEnv("REPRO_RUN_APPS_HELPER_LIST_TEST") != "1":
         skip("opt-in: set REPRO_RUN_APPS_HELPER_LIST_TEST=1 (it builds every app of the tree)")
       else:
-        let engine = RepoRoot / "build" / "bin" / "repro"
+        let engine = RepoRoot / "build" / "bin" / "repro".addFileExt(ExeExt)
         require fileExists(engine)
         let base = createTempDir("apps-helper-lists-", "")
         let copy = base / "reprobuild"

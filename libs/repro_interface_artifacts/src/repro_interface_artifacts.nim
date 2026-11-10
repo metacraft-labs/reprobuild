@@ -6695,6 +6695,80 @@ proc hostRuntimeLinkTarget(): RuntimeLinkTarget =
   else:
     rltOtherPosix
 
+const PortableReleaseDlopenedLibraries* = ["libclingo.so", "libzstd.so.1"]
+  ## The libraries reprobuild dlopens by leaf name on Linux; the same pair
+  ## `runtime_contract`'s Linux dlopen post-condition names.
+
+proc portableReleaseLibDirFor*(imageDir: string;
+                               probe: proc(path: string): bool): string =
+  ## ``imageDir`` when it is the private libdir of a Linux portable release
+  ## archive, else "". See `portableReleaseLibDir`.
+  if imageDir.len > 0 and probe(imageDir / "libc.so.6") and
+     probe(imageDir / "libclingo.so"):
+    imageDir
+  else:
+    ""
+
+proc portableReleaseLibDir*(): string =
+  ## The portable Linux release archive (`scripts/release/
+  ## write_posix_loader_launcher.sh`) runs every `.real` binary through the
+  ## glibc loader it bundles in `<prefix>/lib`, so `/proc/self/exe`, hence
+  ## `getAppFilename()`, is that loader and its directory is the archive's
+  ## private libdir. That launcher publishes no `REPROBUILD_RUNTIME_LIBRARY_PATH`
+  ## and the archive ships no `include/clingo.h`, so neither the runtime RPATH
+  ## nor the clingo prefix probe in `externalHashFlags` finds anything on a
+  ## host without a Nix store, and a helper linked by the host compiler died
+  ## at module init with `could not load: libclingo.so`.
+  ##
+  ## That directory cannot simply go into the helper's RPATH: it also holds
+  ## the bundled `libc.so.6`, which the host loader would then map in place of
+  ## the host libc the helper was linked against. The bundled libc beside
+  ## clingo is what identifies the layout.
+  when defined(linux):
+    portableReleaseLibDirFor(parentDir(getAppFilename()),
+      proc(path: string): bool = fileExists(path))
+  else:
+    ""
+
+proc portableReleaseRpathFlags*(clingoPrefix, releaseLibDir: string):
+    seq[string] =
+  ## `$ORIGIN` in the helper's RUNPATH when only the portable release can
+  ## supply clingo; `stageHostDynlibsBesideBinary` copies the dlopened
+  ## libraries next to the helper. Quoted because Nim splices `passL` text
+  ## into a shell command line, which would otherwise expand `$ORIGIN`.
+  if clingoPrefix.len == 0 and releaseLibDir.len > 0:
+    @["--passL:" & quoteShell("-Wl,-rpath,$ORIGIN")]
+  else:
+    @[]
+
+proc stagePortableReleaseLibraries*(libDir, destDir: string): seq[string]
+    {.discardable.} =
+  ## Copy `PortableReleaseDlopenedLibraries` from the release's ``libDir``
+  ## into ``destDir``, beside a helper linked with `portableReleaseRpathFlags`.
+  ## Only these leaves: the bundled libc must never sit on the helper's path.
+  ## Returns the leaves staged; a failed copy is non-fatal, as on Windows,
+  ## because the helper's own loader error is more specific.
+  if libDir.len == 0 or destDir.len == 0:
+    return @[]
+  if cmpPaths(absolutePath(libDir), absolutePath(destDir)) == 0:
+    return @[]
+  for leaf in PortableReleaseDlopenedLibraries:
+    let source = libDir / leaf
+    if not fileExists(source):
+      continue
+    let dest = destDir / leaf
+    try:
+      # The provider scratch dir persists across builds; skip a current copy.
+      if fileExists(dest) and getFileSize(dest) == getFileSize(source):
+        result.add(leaf)
+        continue
+      # `copyFile` copies a symlinked source's target, so the staged file
+      # stays valid when the release is later moved or removed.
+      copyFile(source, dest)
+      result.add(leaf)
+    except CatchableError:
+      discard
+
 proc stageHostDynlibsBesideBinary*(destDir: string): seq[string]
     {.discardable.} =
   ## Windows: copy the dynlibs sitting next to the RUNNING reprobuild
@@ -6753,9 +6827,14 @@ proc stageHostDynlibsBesideBinary*(destDir: string): seq[string]
         result.add(leaf)
       except CatchableError:
         discard
+  elif defined(linux):
+    # POSIX normally resolves these through DT_RUNPATH / LC_RPATH baked in at
+    # link time (`runtimeRpathCompilerFlags`, the clingo prefix in
+    # `externalHashFlags`). The portable release archive is the exception:
+    # see `portableReleaseLibDir`. There the helper is linked with
+    # `$ORIGIN` in its RUNPATH and the dlopened libraries are copied here.
+    result = stagePortableReleaseLibraries(portableReleaseLibDir(), destDir)
   else:
-    # POSIX resolves these through DT_RUNPATH / LC_RPATH baked in at link time
-    # by `runtimeRpathCompilerFlags`, so there is nothing to stage.
     discard
 
 proc isHostSystemLibDir(dir: string): bool =
@@ -7000,6 +7079,12 @@ proc externalHashFlags(workDir = ""): seq[string] =
   if clingoPrefix.len > 0:
     result.add("--passL:-L" & (clingoPrefix / "lib"))
     result.add("--passL:-Wl,-rpath," & (clingoPrefix / "lib"))
+  # Installed from the portable release archive, with no clingo prefix on
+  # the host: see `portableReleaseLibDir`.
+  when defined(linux):
+    if clingoPrefix.len == 0:
+      result.add(portableReleaseRpathFlags(clingoPrefix,
+        portableReleaseLibDir()))
 
   # sqlite: `config.nims`'s non-Windows/non-macOS block links `-lsqlite3`
   # (pulled in transitively by the cas / lock store deps that
@@ -8225,8 +8310,9 @@ proc extractInterfaceFromModuleBody(modulePath, artifactPath,
         ", compiler reported success but produced no binary): " &
         runnerExe & "\ncompiler output:\n" & compileExecution.output &
         "\ndirectory listing of " & runnerExeDir & ":\n" & listing)
-  # Windows: the runner dlopens clingo/sqlite/zstd/OpenSSL by leaf name and
-  # lives in a temp tree with no DLLs of its own. See the proc's docstring.
+  # Windows, and Linux under the portable release archive: the runner dlopens
+  # clingo (and more) by leaf name and lives in a temp tree with no libraries
+  # of its own. See the proc's docstring and `portableReleaseLibDir`.
   stageHostDynlibsBesideBinary(parentDir(runnerExe))
   ensureExecutable(runnerExe)
   # The runner writes BESIDE the destination, and nothing reaches the
@@ -9732,7 +9818,8 @@ proc compileProviderBinary*(modulePath, outputBinaryPath: string;
     raise newException(IOError,
       "provider compilation did not write binary: " & plan.outputBinaryPath &
         "\n" & execution.output)
-  # Windows: the provider binary links repro's DSL, which pulls in
+  # Windows, and Linux under the portable release archive (see
+  # `portableReleaseLibDir`): the provider binary links repro's DSL, which pulls in
   # `repro_solver` and its module-init clingo dlopen — the same requirement the
   # interface-extract runner has. The provider is spawned directly from its own
   # scratch directory (`repro_provider_runtime/runtime.nim`), so LoadLibrary

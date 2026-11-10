@@ -589,7 +589,10 @@ proc runBase(m: SnapshotMirror; b: BaseImage; record: JsonNode): seq[string] =
     let uid = g.run("cat /run/a13r6-live/uid 2>/dev/null || true").strip()
     record["liveCrossCheck"] = %*{"exit": la.exitCode,
       "started": journalStarted(journal, liveUnit),
-      "ranAsRoot": journalRan(journal, liveUnit) and uid == "0",
+      # Its ExecStartPre's uid marker: written only when the command ran,
+      # and as root only when it ran as root (A13 review round 7, finding 4:
+      # a "Started" line is no evidence; this unit never exits).
+      "ranAsRoot": uid == "0" and not journalFailedAfterStart(journal, liveUnit),
       "uid": uid, "journal": journal,
       "generatorDropIn": g.run("cat /run/systemd/generator/" & liveUnit &
         ".d/10-root.conf 2>&1 || true")}
@@ -605,6 +608,74 @@ proc runBase(m: SnapshotMirror; b: BaseImage; record: JsonNode): seq[string] =
     let after = g.applyProfile(repro, "skeleton2", skeleton2)
     step("after the generator and the manifest are gone, the switch succeeds",
          after.exitCode == 0, after.stdout & after.stderr)
+    if fails.len > 0: return fails
+
+    # --- 2d. The cross-check runs in every switch (spec §11.1; A13 review
+    # round 7, finding 1), not only one that writes a unit file. A confined
+    # service runs from a generation; an operator then gives systemd a
+    # definition that runs it as root (a drop-in and a daemon-reload) and
+    # removes the file without reloading, so what systemd has loaded is root
+    # while every file on the host reads confined. The next switch changes
+    # only a file the service ``depends_on``: no unit file changes, and the
+    # service is restarted (§7.3). The switch must hold the service, reload,
+    # and judge it as systemd then loads it before restarting it -- so it
+    # never runs as root. Falsifier: the add-on build narrowed-live-set (the
+    # set judged, held and reloaded for only in a switch that writes a unit
+    # file), under which the restart runs the loaded root definition.
+    let depUnit = "a13r7-dep.service"
+    let depFile = "/etc/a13r7/dep.conf"
+    proc depProfile(content: string): string =
+      mergeSkeletons([skeleton2,
+        "addOn {\n  managedEtcPrefixes = [\"" & depFile & "\"]\n}\n\n" &
+        "fs.systemFile {\n  path = \"" & depFile & "\"\n  content = \"" &
+          content & "\"\n}\n\n" &
+        "systemd.systemUnit {\n  name = \"" & depUnit & "\"\n" &
+        "  content = \"[Unit]\nDescription=A13 every-switch cross-check probe\n\n" &
+        "[Service]\nDynamicUser=yes\nNoNewPrivileges=yes\n" &
+        "StateDirectory=a13r7-dep\n" &
+        "ExecStartPre=/bin/sh -c 'id -u >> /var/lib/a13r7-dep/uids'\n" &
+        "ExecStart=/bin/sleep infinity\n\n[Install]\n" &
+        "WantedBy=multi-user.target\n\"\n" &
+        "  floorExceptions = [\"serviceFloor: the A13 every-switch cross-check probe\"]\n" &
+        "  depends_on = [\"fs.systemFile:" & depFile & "\"]\n}\n"])
+    discard g.run("mkdir -p /var/lib/repro/system/carried && chmod 700 " &
+      "/var/lib/repro/system/carried && printf '%s' '{\"schema\": " &
+      "\"repro-state-set/1\", \"host\": \"a13r7\", \"createdAt\": " &
+      "\"2026-11-08T00:00:00Z\", \"entries\": []}' > " &
+      "/var/lib/repro/system/carried/state-set.json")
+    let d1 = g.applyProfile(repro, "dep1", depProfile("v1\n"))
+    let uids1 = g.run("cat /var/lib/a13r7-dep/uids 2>/dev/null || true").strip()
+    step("a confined service that depends_on a file is applied and runs " &
+         "confined, carried state on the host",
+         d1.exitCode == 0 and uids1.len > 0 and "0" notin uids1.splitLines(),
+         d1.stdout & d1.stderr & "\nuids: " & uids1)
+    let inv1 = g.invocation(depUnit)
+    discard g.run("mkdir -p /etc/systemd/system/" & depUnit & ".d && printf " &
+      "'[Service]\\nUser=root\\n' > /etc/systemd/system/" & depUnit &
+      ".d/10-root.conf && systemctl daemon-reload && rm -rf " &
+      "/etc/systemd/system/" & depUnit & ".d")
+    let loadedUser = g.run("systemctl show -P User " & depUnit).strip()
+    let d2 = g.applyProfile(repro, "dep2", depProfile("v2\n"))
+    let d2Out = d2.stdout & d2.stderr
+    let uids2 = g.run("cat /var/lib/a13r7-dep/uids 2>/dev/null || true").strip()
+    let inv2 = g.invocation(depUnit)
+    record["everySwitch"] = %*{"exit": d2.exitCode, "loadedUserBefore": loadedUser,
+      "uids": uids2, "invocationBefore": inv1, "invocationAfter": inv2,
+      "restarted": inv1 != inv2, "ranAsRoot": "0" in uids2.splitLines()}
+    step("the operator's reload left systemd's loaded definition running " &
+         "the service as root (the case's premise)", loadedUser == "root",
+         loadedUser)
+    step("a switch that changes only a file the service depends_on judges " &
+         "it as systemd loads it before restarting it: it never runs as root",
+         "0" notin uids2.splitLines() and
+         ((d2.exitCode == 0 and inv1 != inv2) or
+          (d2.exitCode != 0 and "ECarriedStatePending" in d2Out)),
+         d2Out & "\nuids: " & uids2 & "\ninvocation " & inv1 & " -> " & inv2)
+    discard g.run("rm -f /var/lib/repro/system/carried/state-set.json && " &
+      "rmdir /var/lib/repro/system/carried 2>/dev/null; systemctl daemon-reload")
+    let after2 = g.applyProfile(repro, "skeleton2b", skeleton2)
+    step("after the manifest is gone, the switch back to the skeleton succeeds",
+         after2.exitCode == 0, after2.stdout & after2.stderr)
     if fails.len > 0: return fails
 
     # --- 3. Converge: hardened, from the store, state untouched.
@@ -706,14 +777,81 @@ proc stepCallOf(src, title: string): tuple[start, at: int; call: string] =
   while j > 0 and src[j - 1] in {'a'..'z', 'A'..'Z'}: dec j
   (j, at, src[j ..< i])
 
+proc codeOnly(src: string): string =
+  ## ``src`` with its comments and string and character literals blanked
+  ## (each replaced by spaces of the same length), so a word inside a step
+  ## title or a comment is never read as code.
+  result = src
+  var i = 0
+  while i < result.len:
+    let c = result[i]
+    if c == '#':
+      while i < result.len and result[i] != '\n':
+        result[i] = ' '
+        inc i
+    elif c == '"':
+      let triple = i + 2 < result.len and result[i + 1] == '"' and result[i + 2] == '"'
+      if triple:
+        let e = result.find("\"\"\"", i + 3)
+        let stop = if e < 0: result.len else: e + 3
+        for k in i ..< stop: result[k] = ' '
+        i = stop
+      else:
+        result[i] = ' '
+        inc i
+        while i < result.len and result[i] != '"' and result[i] != '\n':
+          if result[i] == '\\' and i + 1 < result.len:
+            result[i] = ' '
+            inc i
+          result[i] = ' '
+          inc i
+        if i < result.len and result[i] == '"':
+          result[i] = ' '
+          inc i
+    elif c == '\'' and i + 2 < result.len and
+        (result[i + 2] == '\'' or (result[i + 1] == '\\' and i + 3 < result.len and
+                                   result[i + 3] == '\'')):
+      let stop = if result[i + 1] == '\\': i + 4 else: i + 3
+      for k in i ..< stop: result[k] = ' '
+      i = stop
+    else:
+      inc i
+
+const StoppingWords = ["return", "raise", "quit", "break", "continue",
+  "doAssert", "assert", "check", "require", "expect", "fails", "step",
+  "MutationStop", "newException", "fail", "skip"]
+  ## Every way this gate's code can end or divert the run of a base, or
+  ## record a stopping verdict: a statement that leaves the proc or a loop,
+  ## an assertion, a ``fails`` test (``if fails.len > 0: return fails``, the
+  ## gate's idiom after each section), and ``step`` itself (``stepNoStop``
+  ## is another identifier). A call of any other helper of this file that
+  ## can stop the run would have to name one of these too.
+
+proc stoppingForms(region: string): seq[string] =
+  ## The stopping forms (``StoppingWords``) the code in ``region`` uses, as
+  ## identifiers, comments and literals left out.
+  let code = codeOnly(region)
+  var i = 0
+  while i < code.len:
+    if code[i] in IdentStartChars and (i == 0 or code[i - 1] notin IdentChars):
+      var j = i
+      while j < code.len and code[j] in IdentChars: inc j
+      let w = code[i ..< j]
+      if w in StoppingWords: result.add(w)
+      i = j
+    else:
+      inc i
+
 suite "gate source":
   test "under adopt-without-profile the gate reaches the silent-revert step":
-    # A static control on this gate's own source: the decision-61 refusal
-    # step must not stop the run (under the mutation it is red), and the
-    # silent-revert step must come after it, so the falsifier cell is judged
-    # on the revert itself. A gate that stops before the revert step leaves
-    # the falsifier unjudgeable (review round 6, the coordinator's rule);
-    # the cell's record also carries ``revertStepReached``.
+    # A structural control on this gate's own source (A13 review round 7,
+    # finding 4): the decision-61 refusal step must not stop the run (under
+    # the mutation it is red), the silent-revert step must come after it,
+    # and nothing between them may end the run in any form: a return, a
+    # raise, a quit, a break or continue, an assertion, a ``fails`` guard, a
+    # stopping step. The cell's record also carries ``revertStepReached``,
+    # set when the gate reaches that step, and the committed classifier
+    # (``scripts/addon_a13_classify.py``) requires it.
     const src = staticRead(currentSourcePath())
     let refused = stepCallOf(src, RefusedAdoptStep)
     let revert = stepCallOf(src, RevertStep)
@@ -721,10 +859,25 @@ suite "gate source":
     check revert.at > refused.at
     check refused.call == "stepNoStop"
     check revert.call == "step"
-    # Nothing between them may stop the run: every step call in between is
-    # non-stopping.
     let between = src[refused.at + RefusedAdoptStep.len ..< revert.start]
-    check "step(" notin between.replace("stepNoStop(", "")
+    let forms = stoppingForms(between)
+    checkpoint $forms
+    check forms.len == 0
+
+  test "the structural check sees every stopping form (negative controls)":
+    check stoppingForms("  let x = g.run(\"echo return raise step\") # quit\n").len == 0
+    for snippet in ["  if fails.len > 0: return fails\n",
+                    "  return\n",
+                    "  if refusedAdopt.exitCode == 0: raise newException(MutationStop, \"x\")\n",
+                    "  quit(1)\n",
+                    "  break\n",
+                    "  continue\n",
+                    "  doAssert x\n",
+                    "  assert x\n",
+                    "  step(\"t\", false, \"\")\n",
+                    "  step \"t\", false, \"\"\n"]:
+      checkpoint snippet
+      check stoppingForms(snippet).len > 0
 
 suite Gate:
   test "a hand-configured service is adopted with no write and converged " &

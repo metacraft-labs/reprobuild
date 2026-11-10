@@ -1168,7 +1168,8 @@ proc activatedUnits(name, suffix: string; texts: seq[string];
       if d notin result: result.add(d)
 
 proc unitTexts(unit, base: string; p: SystemProfile; root: string;
-               why: var string; hostUnit = false): seq[string] =
+               why: var string; hostUnit = false;
+               profileLeftOut = false): seq[string] =
   ## What systemd reads for ``unit``: ``base`` (the profile's file), then
   ## every drop-in that applies to it under any of its names
   ## (``unitNames``) -- the profile's own (written as
@@ -1190,14 +1191,21 @@ proc unitTexts(unit, base: string; p: SystemProfile; root: string;
   ## each only when it holds exactly ``restoreRequirementText``. Any other
   ## ``50-repro-*.conf`` -- one an earlier generation declared, or one
   ## placed by hand -- is loaded by systemd and so is read like any drop-in.
+  ##
+  ## ``profileLeftOut``: the host's files alone (the boot closure, §13
+  ## decision 60). The profile's drop-ins are neither added nor read from
+  ## the host where a previous generation wrote them: their
+  ## ``50-repro-<d>.conf`` files are the generation's, not the host's (A13
+  ## review round 7, finding 2).
   result = @[base]
   var byName = initOrderedTable[string, string]()
   var seen = initTable[string, string]()
   var declared = initHashSet[string]()       # "<dir>.d/<file>"
   var texts0 = @[base]
-  for d in p.resources:
-    if d.kind == srkSystemdSystemDropIn and d.diUnit == unit:
-      texts0.add(d.diContent)
+  if not profileLeftOut:
+    for d in p.resources:
+      if d.kind == srkSystemdSystemDropIn and d.diUnit == unit:
+        texts0.add(d.diContent)
   let names = unitNames(unit, texts0, root)
   for n in names:
     if n.startsWith("<unparsed"):
@@ -1206,8 +1214,9 @@ proc unitTexts(unit, base: string; p: SystemProfile; root: string;
   for d in p.resources:
     if d.kind == srkSystemdSystemDropIn and d.diUnit in names:
       let n = "50-repro-" & d.diName & ".conf"
-      byName[n] = d.diContent
-      seen[n] = d.diContent
+      if not profileLeftOut:
+        byName[n] = d.diContent
+        seen[n] = d.diContent
       declared.incl(d.diUnit & ".d/" & n)
   when CarriedMutation != "reach-host-dropins-ignored":
     var higher = true
@@ -1686,7 +1695,7 @@ proc carriedStateInstalled*(dir = CarriedStateDir): bool =
   fileExists(installedMarkerPath(dir)) and fileExists(dir / ManifestFileName)
 
 proc hostUnitTexts(unit: string; p: SystemProfile; root: string;
-                   why: var string): seq[string] =
+                   why: var string; profileLeftOut = false): seq[string] =
   ## A unit the profile does not define, as systemd reads it on the host:
   ## its file -- the first in the unit search path under its name, or its
   ## template's for an instance, links followed -- then its drop-ins
@@ -1713,11 +1722,13 @@ proc hostUnitTexts(unit: string; p: SystemProfile; root: string;
       except IOError, OSError:
         why = "the unit file " & dir & "/" & c & " cannot be read"
         return
-      return unitTexts(unit, base, p, root, why, hostUnit = true)
+      return unitTexts(unit, base, p, root, why, hostUnit = true,
+                       profileLeftOut = profileLeftOut)
   why = "no unit file for " & unit & " in the unit search path"
 
 proc unitClosure(starts: seq[string]; p: SystemProfile; root: string;
-                 stopAt: HashSet[string]; uncertain: var seq[string]): HashSet[string] =
+                 stopAt: HashSet[string]; uncertain: var seq[string];
+                 profileLeftOut = false): HashSet[string] =
   ## Every unit reachable from ``starts`` through what each one starts
   ## (``activatedUnits`` over the host's unit files and drop-ins, as §13
   ## decision 53 reads them, and its dependency directories), not entering
@@ -1731,7 +1742,7 @@ proc unitClosure(starts: seq[string]; p: SystemProfile; root: string;
     let ext = u.rsplit('.', maxsplit = 1)
     let suffix = if ext.len == 2: ext[1] else: ""
     var why = ""
-    let texts = hostUnitTexts(u, p, root, why)
+    let texts = hostUnitTexts(u, p, root, why, profileLeftOut)
     if why.len > 0:
       uncertain.add(u)
       continue
@@ -1744,9 +1755,13 @@ proc unitClosure(starts: seq[string]; p: SystemProfile; root: string;
 
 proc bootClosure(p: SystemProfile; root: string): HashSet[string] =
   ## The units the host's boot starts whatever the profile does: the
-  ## closure of ``default.target`` over the host's own files (the
-  ## profile's drop-ins left out), not entering a unit the profile
-  ## defines. Empty when the root has no ``default.target``.
+  ## closure of ``default.target`` over the host's own files, not entering
+  ## a unit the profile defines. Empty when the root has no
+  ## ``default.target``. The profile's drop-ins are left out wherever they
+  ## are: in the profile, and on the host as the ``50-repro-<d>.conf`` an
+  ## earlier generation wrote (A13 review round 7, finding 2) -- a unit
+  ## only a profile drop-in starts is not the boot's, from the second
+  ## apply on as on the first.
   var none: seq[string]
   let defined = definedUnits(p)
   var found = false
@@ -1754,7 +1769,13 @@ proc bootClosure(p: SystemProfile; root: string): HashSet[string] =
     let f = under(normalRoot(root), dir) / "default.target"
     if fileExists(f) or symlinkExists(f): found = true
   if not found: return
-  unitClosure(@["default.target"], SystemProfile(), root, defined, none)
+  when CarriedMutation == "boot-closure-reads-generation-dropins":
+    # FALSIFYING MUTATION: round 6's reading -- an empty profile, so the
+    # generation's own drop-ins on the host are read as the host's.
+    unitClosure(@["default.target"], SystemProfile(), root, defined, none)
+  else:
+    unitClosure(@["default.target"], p, root, defined, none,
+                profileLeftOut = true)
 
 proc carriedRequirementUnits*(p: SystemProfile; dir = CarriedStateDir;
                               root = "/"): seq[string] =

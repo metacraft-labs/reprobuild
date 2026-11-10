@@ -562,6 +562,21 @@
 ## ``post-reload-refusal-skipped``           the carried-state refusal is not
 ##                                           decided again after a switch's
 ##                                           reload
+## ``boot-closure-reads-generation-dropins`` the boot closure reads the
+##                                           ``50-repro-*`` drop-ins an
+##                                           earlier generation wrote as the
+##                                           host's (decision 60)
+## ``polkit-subject-rebind-trusted``         a polkit rule that rebinds
+##                                           ``subject`` is judged by its
+##                                           ``subject`` guards (decision 58)
+## ``narrowed-live-set``                     the add-on switch judges and
+##                                           holds no unit in a switch that
+##                                           changes no unit file
+## ``reissue-skips-targets``                 after a full apply's live check,
+##                                           the start jobs of the targets the
+##                                           drivers started are not
+##                                           re-issued (decision 79)
+## ``reissue-skips-sockets``                 the same for sockets
 ## ``adopt-without-profile``                 ``repro system adopt`` takes
 ##                                           drifted bytes the profile does
 ##                                           not declare (decision 61)
@@ -1224,6 +1239,36 @@ const
                           "migration-any-path",
                           "corrupt-record-as-absent",
                           "migration-any-unit",
+                          # A9 review round 11 (§13 decisions 76-78):
+                          # the birth time left out of a directory's
+                          # identity; condition 3 read from ownership or
+                          # ctime; a template's instances not sharing; an
+                          # acceptance or a migration made unlogged; a
+                          # migration over a generation an engine with
+                          # the record wrote; one reading systemd's view;
+                          # a no-op try-restart recorded as a start; an
+                          # activator's listener named for the socket, or
+                          # one named after a base tree, or one on an
+                          # existing path.
+                          "identity-without-btime",
+                          "recreated-by-ctime-or-owner",
+                          "instances-not-shared",
+                          "unlogged-acceptance",
+                          "unlogged-migration",
+                          "migration-ignores-engine",
+                          "migration-reads-systemd",
+                          "record-after-noop-restart",
+                          "listener-named-for-socket",
+                          "base-tree-activators-allowed",
+                          "existing-listeners-allowed",
+                          # a unit a dependency started during the
+                          # switch never recorded.
+                          "dependency-starts-unrecorded",
+                          # a directory taken as systemd's while its
+                          # unit is not running; a birth time compared
+                          # with the invocation's start more precisely
+                          # than the file system stamps it.
+                          "recreated-while-stopped", "btime-exact",
                           # A13: a state backup or restore runs while a
                           # unit of the set may run.
                           "state-units-not-checked",
@@ -1319,6 +1364,12 @@ const
                           "live-units-chosen-after-writes",
                           "optional-paths-ignored",
                           "post-reload-refusal-skipped",
+                          # A13 review round 7.
+                          "boot-closure-reads-generation-dropins",
+                          "polkit-subject-rebind-trusted",
+                          "narrowed-live-set",
+                          "reissue-skips-targets",
+                          "reissue-skips-sockets",
                           "plan-ignores-profile-digest",
                           "full-apply-keeps-undeclared-dropins",
                           "install-unit-reads-host-manifest",

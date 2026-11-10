@@ -233,26 +233,30 @@ proc probeProfile(name, resources: string): string =
     "        address = \"" & name & "User\")\n" & resources
 
 const
+  R4MarkerDir = "/var/lib/a13-r4"
+    ## Where a round-4 probe unit writes its uid (``<unit>.ran``, through
+    ## systemd's ``%n``) when it runs: the evidence that a probe let in ran
+    ## (A13 review round 7, finding 4; the round-5/6 probes' marker).
+  R4Run = "ExecStart=/bin/sh -c 'id -u > " & R4MarkerDir & "/%n.ran'\\n"
   R4Confined = "[Unit]\\nDescription=A13 round-4 probe\\n\\n[Service]\\n" &
     "User=eth-validator\\nGroup=eth-validator\\n" &
-    "ReadWritePaths=/var/lib/a13-r4\\nExecStart=/bin/true\\n"
+    "ReadWritePaths=/var/lib/a13-r4\\n" & R4Run
     ## A confined, non-root service elsewhere (with the floor's
     ## ProtectSystem=strict): let in while the directory is pending.
   R4ConfinedUnfloored = "[Unit]\\nDescription=A13 round-4 probe\\n\\n" &
     "[Service]\\nProtectSystem=strict\\nUser=eth-validator\\n" &
-    "Group=eth-validator\\nReadWritePaths=/var/lib/a13-r4\\n" &
-    "ExecStart=/bin/true\\n"
+    "Group=eth-validator\\nReadWritePaths=/var/lib/a13-r4\\n" & R4Run
     ## The same confinement written out, without the floor: only the
     ## carried-state reach analysis judges what activates it.
   R4Floor = "        hardening = \"serviceFloor\",\n" &
     "        floorExceptions = @[\"NoExecPaths: the conversion gate's " &
-    "round-4 probe runs /bin/true\"],\n"
+    "round-4 probe runs /bin/sh\"],\n"
   R4Probes = [
     ("account", "r4Account",
      "      systemdSystemUnit(name = \"eth-r4-account.service\",\n" &
      "        content = \"[Unit]\\nDescription=A13 round-4 account probe\\n\\n" &
      "[Service]\\nDynamicUser=yes\\nUser=root\\nReadWritePaths=/var/lib/a13-r4\\n" &
-     "ExecStart=/bin/true\\n\",\n        address = \"r4Account\")\n",
+     R4Run & "\",\n        address = \"r4Account\")\n",
      "runs as root", "reach"),
     ("timer", "r4Timer",
      "      systemdSystemUnit(name = \"eth-r4-timed.service\",\n" &
@@ -439,6 +443,39 @@ const
         floorExceptions = @["NoExecPaths: the conversion gate's round-6 " &
           "probe runs /bin/sleep"],
         address = "r6Linked")"""
+  R7MarkerDir = "/var/lib/a13-r7"
+    ## Where the decision-79 probe services write their uid when they run.
+  R7TargetSvc = "eth-r7-tsvc.service"
+  R7SocketSvc = "eth-r7-ssvc.service"
+  R7Resources = """
+      # A13 owner decision 79: confined static services (not enabled, no
+      # [Install]) that only another unit's start pulls in -- an enabled
+      # target's Wants=, an enabled socket's Wants= -- held by the full
+      # apply's carried-state check while the drivers start that unit, and
+      # brought up after the check by the start job issued again.
+      systemdSystemUnit(name = "eth-r7-tgt.target",
+        content = "[Unit]\nDescription=A13 decision-79 probe: a target\n" &
+          "Wants=eth-r7-tsvc.service\n\n[Install]\nWantedBy=multi-user.target\n",
+        address = "r7Target")
+      systemdSystemUnit(name = "eth-r7-tsvc.service",
+        content = "[Unit]\nDescription=A13 decision-79 probe: pulled in by a " &
+          "target\n\n[Service]\nProtectSystem=strict\nNoNewPrivileges=yes\n" &
+          "User=eth-validator\nGroup=eth-validator\nReadWritePaths=/var/lib/a13-r7\n" &
+          "ExecStart=/bin/sh -c 'id -u > /var/lib/a13-r7/%n.ran; exec /bin/sleep infinity'\n",
+        enabled = false,
+        address = "r7TargetSvc")
+      systemdSystemUnit(name = "eth-r7-sock.socket",
+        content = "[Unit]\nDescription=A13 decision-79 probe: a socket\n" &
+          "Wants=eth-r7-ssvc.service\n\n[Socket]\nListenStream=/run/eth-r7.sock\n" &
+          "Service=eth-r7-ssvc.service\n\n[Install]\nWantedBy=sockets.target\n",
+        address = "r7Socket")
+      systemdSystemUnit(name = "eth-r7-ssvc.service",
+        content = "[Unit]\nDescription=A13 decision-79 probe: pulled in by a " &
+          "socket\n\n[Service]\nProtectSystem=strict\nNoNewPrivileges=yes\n" &
+          "User=eth-validator\nGroup=eth-validator\nReadWritePaths=/var/lib/a13-r7\n" &
+          "ExecStart=/bin/sh -c 'id -u > /var/lib/a13-r7/%n.ran; exec /bin/sleep infinity'\n",
+        enabled = false,
+        address = "r7SocketSvc")"""
   R5Plan = r5Unit("eth-r5-plan.service", "ProtectSystem=strict\n" &
     "NoNewPrivileges=yes\nUser=eth-validator\nGroup=eth-validator\n" &
     "ReadWritePaths=/var/lib/ethereum/validator\n", "r5Plan")
@@ -485,7 +522,8 @@ const
           "probe runs /bin/sleep"],
         address = "validatorShadow")"""
 
-const ProbeWritableDirs = ["/var/lib/a13-r4", "/var/lib/a13-r5", "/var/lib/a13-r6"]
+const ProbeWritableDirs = ["/var/lib/a13-r4", "/var/lib/a13-r5", "/var/lib/a13-r6",
+                           "/var/lib/a13-r7"]
   ## The writable directories the probe units name besides the carried one,
   ## created on the converted host before any probe is applied. systemd
   ## refuses to start a unit whose ``ReadWritePaths=`` names a missing path
@@ -513,7 +551,7 @@ static:
   # Every probe unit's writable path is one the gate creates, or the carried
   # directory itself: checked when the gate compiles.
   var all = PathReachProfile & R4Host & R5Plan & R5Resources & R6Resources &
-    ShadowResource
+    R7Resources & ShadowResource
   for (_, _, res, _, _) in R4Probes: all.add(res)
   for (_, _, res, _, _, _) in R5Probes: all.add(res)
   for (_, res, _, _, _) in R6Probes: all.add(res)
@@ -522,22 +560,22 @@ static:
       "a probe unit's ReadWritePaths= names " & p & ", which the gate does " &
       "not create (add it to ProbeWritableDirs)"
 
-proc unitRan(g: Guest; unit: string; marker = ""): (bool, JsonNode) =
-  ## Whether ``unit`` really ran: its journal shows its last start
-  ## completing (``journalRan``) and -- ``marker`` given -- the file its
-  ## command wrote is there. Waits a few seconds for a unit still starting.
+proc unitRan(g: Guest; unit: string; marker: string): (bool, JsonNode) =
+  ## Whether ``unit`` really ran: the file its command writes when it runs
+  ## (``marker``) is there, and its journal shows no failure after its last
+  ## start (``journalFailedAfterStart``). A "Started" line alone is no
+  ## evidence (A13 review round 7, finding 4): every probe that must be
+  ## shown to run writes a marker. Waits a few seconds for the marker of a
+  ## unit still starting.
   var journal = ""
-  for i in 0 ..< 10:
-    journal = g.exec("journalctl -b --no-pager -o short-monotonic -u " & unit &
-      " 2>&1").stdout
-    let state = g.exec("systemctl is-active " & unit & " 2>&1").stdout.strip()
-    if state != "activating": break
-    discard g.exec("sleep 1")
-  let ok = journalRan(journal, unit)
   var m = ""
-  if marker.len > 0:
+  for i in 0 ..< 10:
     m = g.exec("cat " & marker & " 2>/dev/null").stdout.strip()
-  result = (ok and (marker.len == 0 or m.len > 0),
+    if m.len > 0: break
+    discard g.exec("sleep 1")
+  journal = g.exec("journalctl -b --no-pager -o short-monotonic -u " & unit &
+    " 2>&1").stdout
+  result = (m.len > 0 and not journalFailedAfterStart(journal, unit),
             %*{"journal": journal, "marker": marker, "markerContent": m})
   if not result[0]:
     # Why it did not run, while the guest is still there: how systemd sees
@@ -748,10 +786,10 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
       raise newException(CatchableError, "the reference profile's " &
         "validator account is not where the gate adds the shadow unit")
     writeFile(work / "system.nim", src0.replace(anchor, anchor & ShadowResource &
-      R5Resources & R6Resources & R5TuneResource))
+      R5Resources & R6Resources & R7Resources & R5TuneResource))
     # The next generation: the same, without the tune drop-in (finding 3).
     writeFile(work / "system_next.nim", src0.replace(anchor, anchor &
-      ShadowResource & R5Resources & R6Resources))
+      ShadowResource & R5Resources & R6Resources & R7Resources))
     writeFile(work / PinsModule, pinsSource(pins))
     writeFile(work / "home.nim", readFile(FixtureDir / "home.nim"))
     for f in ["system.nim", "system_next.nim", PinsModule, "home.nim"]:
@@ -840,6 +878,7 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
     let probes = newJObject()
     record["roundFourProbes"] = probes
     for (label, address, resources, reason, layer) in R4Probes:
+      discard nw.run("rm -f " & R4MarkerDir & "/*.ran")
       let pf = probeFile(label)
       writeFile(work / pf, probeProfile("r4" & label, resources))
       nw.copyTo(work / pf, RefDir / pf)
@@ -871,7 +910,7 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
             let n = l[i + len("systemdSystemUnit(name = \"") .. ^1]
             let u = n[0 ..< n.find('"')]
             if not u.endsWith(".service"): continue
-            let (ok, e) = nw.unitRan(u)
+            let (ok, e) = nw.unitRan(u, R4MarkerDir & "/" & u & ".ran")
             ranAll = ranAll and ok
             ev[u] = e
         probes[label]["ran"] = %ranAll
@@ -890,13 +929,15 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
     nw.copyTo(work / hf, RefDir / hf)
     let hostApply = env & eng & " infra apply --profile " & RefDir & "/" & hf &
       " --host " & AgentTarget & " --no-preview"
+    discard nw.run("rm -f " & R4MarkerDir & "/*.ran")
     let ctl = nw.exec(hostApply, timeoutSec = 3600)
     probes["hostControl"] = %*{"exit": ctl.exitCode,
       "judged": judged(ctl.stdout & ctl.stderr)}
     step("round 4, host drop-in (control): without it the confined unit is " &
          "let in while the directory is pending",
          ctl.exitCode == 0, ctl.stdout & ctl.stderr)
-    let (ctlRan, ctlEv) = nw.unitRan("eth-r4-host.service")
+    let (ctlRan, ctlEv) = nw.unitRan("eth-r4-host.service",
+      R4MarkerDir & "/eth-r4-host.service.ran")
     probes["hostControl"]["ran"] = %ctlRan
     probes["hostControl"]["runEvidence"] = ctlEv
     step("round 4, host drop-in (control): the unit let in really ran",
@@ -1055,6 +1096,7 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
          ver2.stdout.count("ok ") == 4, ver2.stdout & ver2.stderr)
     # Finding 4: the plan made before install-unit, applied now that the
     # requirement is due, is stale (the text the apply runs has it).
+    discard nw.run("rm -f " & ProbeMarkerDir & "/*.ran")
     let planApply = nw.exec(env & eng & " infra apply --profile " & RefDir & "/" &
       planFile & " --plan " & r5PlanId & " --host " & AgentTarget,
       timeoutSec = 3600)
@@ -1062,6 +1104,12 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
     probes["r5plan"] = %*{"exit": planApply.exitCode, "judged": judged(po),
       "layer": "plan", "refusedForReason": planApply.exitCode != 0 and
         "is stale" in po and "carried-state requirements" in po}
+    if planApply.exitCode == 0:
+      # Let in (the falsifier's cell): evidence that its unit ran.
+      let (ok, e) = nw.unitRan("eth-r5-plan.service",
+        ProbeMarkerDir & "/eth-r5-plan.service.ran")
+      probes["r5plan"]["ran"] = %ok
+      probes["r5plan"]["runEvidence"] = e
     step("round 5, plan: a plan made before install-unit is refused as " &
          "stale once the requirement is due",
          judged(po) and planApply.exitCode != 0 and "is stale" in po and
@@ -1170,6 +1218,25 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
          "unit's dependencies requires the restore",
          nw.exec("test -f " & R6DistB_DropIn).exitCode == 0 and
          dbDeps.count(RestoreUnit) >= 2, dbDeps)
+    # Owner decision 79 (decided 2026-11-08): after the full apply's
+    # carried-state check passes, the start jobs the drivers issued are
+    # issued again, so a held service another unit's start pulled in comes
+    # up as on a host without carried state. Each is shown up and to have
+    # run (its marker, as the probe account), not merely "Started". Red
+    # under the engine builds ``reissue-skips-targets`` and
+    # ``reissue-skips-sockets``, each on its own step.
+    record["decision79"] = newJObject()
+    for (label, svc) in [("target", R7TargetSvc), ("socket", R7SocketSvc)]:
+      let active = nw.exec("systemctl is-active " & svc).stdout.strip()
+      let (ran, ev) = nw.unitRan(svc, R7MarkerDir & "/" & svc & ".ran")
+      ev["active"] = %active
+      record["decision79"][label] = ev
+      record["decision79"][label]["ran"] = %ran
+      step("decision 79, " & label & ": a confined static service an enabled " &
+           label & " pulls in is up after the apply",
+           active == "active" and ran and ev["markerContent"].getStr != "0",
+           $ev & "\n" & nw.exec("systemctl status --no-pager " & svc &
+             " 2>&1 | tail -15").stdout)
     # Finding 3: the next generation no longer declares the tune drop-in;
     # a host realised in full removes it (and keeps the requirement). Red
     # under the engine build ``full-apply-keeps-undeclared-dropins``.

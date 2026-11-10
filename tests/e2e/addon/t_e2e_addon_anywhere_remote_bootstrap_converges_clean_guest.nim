@@ -53,7 +53,7 @@ proc hexKey(k: openArray[byte]): string =
   for b in k: result.add(toHex(int(b), 2).toLowerAscii())
 
 proc engine(): string =
-  result = reproRoot() / "build" / "bin" / "repro"
+  result = reproRoot() / "build" / "bin" / "repro".addFileExt(ExeExt)
   if not fileExists(result):
     raise newException(TestBedError, "no engine at " & result &
       "; build it with `just build`")

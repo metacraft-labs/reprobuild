@@ -1662,6 +1662,17 @@ const
     ## ``<pool>/repro/borrowers``: one absolute leaf path per line.
   RetentionHookFileName* = "retain-borrowed.sh"
     ## ``<pool>/repro/retain-borrowed.sh``: the pool's ``gc.recentObjectsHook``.
+  UploadPackLauncherFileName* = "shared-pool-upload-pack"
+    ## ``<pool>/repro/shared-pool-upload-pack``: the launcher every leaf's
+    ## ``remote.repro-pool.uploadpack`` names (§3.4). It selects an engine
+    ## at run time, so the leaf's config never names one particular repro
+    ## executable that may later be garbage-collected or deleted.
+  EnginesFileName* = "engines"
+    ## ``<pool>/repro/engines``: absolute paths of the repro executables that
+    ## installed or verified a leaf chain of this pool, newest first. The
+    ## launcher tries them in order after ``REPROBUILD_REPRO``.
+  MaxRecordedEngines* = 8
+    ## Cap on ``<pool>/repro/engines`` entries.
   OldGitReportedFileName* = "old-git-reported"
     ## Marker so the below-2.42 condition is reported once per pool (§3.6).
   DroppedRefsLogFileName* = "dropped-refs.log"
@@ -1677,9 +1688,9 @@ const
   LeafPoolRemoteName* = "repro-pool"
     ## The remote every leaf carries for its pool (§3.4).
   LeafPoolUploadPack* = "internal shared-pool-upload-pack"
-    ## Internal transport role. ``leafPoolUploadPackCommand`` binds this to
-    ## the selected repro executable; the old unrestricted lazy upload-pack
-    ## command could refill the same history concurrently without negotiation.
+    ## Internal transport role. The pool's launcher execs the selected repro
+    ## executable with it; the old unrestricted lazy upload-pack command
+    ## could refill the same history concurrently without negotiation.
   LeafHiddenFetchRefs* = "refs/remotes/"
     ## ``fetch.hideRefs`` in every leaf (§3.5).
 
@@ -1689,27 +1700,42 @@ proc quotePoolShell(value: string): string =
   when defined(windows): quoteShellPosix(value.replace('\\', '/'))
   else: quoteShellPosix(value)
 
-proc leafPoolUploadPackCommand*(): string =
-  ## Use the same explicit executable override as managed Git hooks. Library
-  ## callers are not necessarily running in the CLI, so getAppFilename() is
-  ## not a valid way to select the transport service.
+proc selectedPoolEngine*(): string =
+  ## The repro executable this process would serve the transport with, as an
+  ## absolute path, or "" when none can be found. Uses the same explicit
+  ## executable override as managed Git hooks, then the running CLI image
+  ## (``REPRO_SHARED_POOL_CLI``, set by the CLI dispatcher), then ``repro``
+  ## on PATH. Library callers are not necessarily running in the CLI, so
+  ## getAppFilename() is not a valid way to select the transport service.
   let override = getEnv("REPROBUILD_REPRO")
   let hint = getEnv("REPRO_SHARED_POOL_CLI")
   let executable = if override.len > 0: override
     elif hint.len > 0: hint
     else: uncontrolledFindExe("repro")
-  let resolved = if executable.len == 0: "repro"
-    else:
-      let found = uncontrolledFindExe(executable)
-      if found.len > 0: found else: absolutePath(executable)
-  # Git evaluates this configuration through its POSIX shell on Windows too.
-  quotePoolShell(resolved) & " " & LeafPoolUploadPack
+  if executable.len == 0:
+    return ""
+  let found = uncontrolledFindExe(executable)
+  if found.len > 0: absolutePath(found)
+  elif fileExists(executable): absolutePath(executable)
+  else: ""
 
 proc poolReproDir*(pool: string): string = pool / PoolReproDirName
 proc borrowersPath*(pool: string): string =
   poolReproDir(pool) / BorrowersFileName
 proc retentionHookPath*(pool: string): string =
   poolReproDir(pool) / RetentionHookFileName
+proc poolUploadPackLauncherPath*(pool: string): string =
+  poolReproDir(pool) / UploadPackLauncherFileName
+proc poolEnginesPath*(pool: string): string =
+  poolReproDir(pool) / EnginesFileName
+
+proc leafPoolUploadPackCommand*(pool: string): string =
+  ## ``remote.repro-pool.uploadpack`` of every leaf of ``pool``: the pool's
+  ## launcher, which selects the engine when Git runs it. The value depends
+  ## only on the pool, so two repro installs touching the same leaf agree on
+  ## it and neither rewrites the other's configuration. Git evaluates it
+  ## through its POSIX shell, on Windows too, and appends the pool path.
+  quotePoolShell(poolUploadPackLauncherPath(pool))
 
 proc poolTransportShell(gitBin: string): string =
   ## Use an explicit shell for file redirection. poEvalCommand does not
@@ -2617,6 +2643,136 @@ proc ensureRetentionHook*(pool: string): bool =
   except IOError, OSError:
     false
 
+const UploadPackLauncherScript* = """#!/bin/sh
+# shared-pool-upload-pack -- written by reprobuild, and rewritten whenever
+# this shared clone is refreshed or a checkout borrowing from it is wired or
+# checked, so local edits do not survive.
+#
+# Every checkout borrowing from this pool names this script as
+# remote.repro-pool.uploadpack, and git runs it, with the pool path as its
+# argument, to fetch an object the checkout lacks. It runs the repro engine's
+# restricted transport (`repro internal shared-pool-upload-pack`). The engine
+# is chosen here, at run time, so a checkout keeps working after the repro
+# that configured it is garbage-collected or deleted:
+#
+#   1. $REPROBUILD_REPRO, when it is set and executable;
+#   2. each line of repro/engines (repro executables that configured a
+#      checkout of this pool, newest first) that is still executable;
+#   3. `reprobuild`, then `repro`, on PATH.
+#
+# There is deliberately no fallback to git's own upload-pack: an unrestricted
+# lazy upload-pack could refill the same history again without negotiation.
+case $0 in
+  */*) dir=${0%/*} ;;
+  *) dir=. ;;
+esac
+pool=${dir%/*}
+if [ -n "${REPROBUILD_REPRO-}" ]; then
+  # Like repro itself, accept a command name as well as a path.
+  case $REPROBUILD_REPRO in
+    */*) engine=$REPROBUILD_REPRO ;;
+    *) engine=$(command -v "$REPROBUILD_REPRO" 2>/dev/null) || engine= ;;
+  esac
+  if [ -n "$engine" ] && [ -f "$engine" ] && [ -x "$engine" ]; then
+    exec "$engine" internal shared-pool-upload-pack "$@"
+  fi
+fi
+# Read the list on descriptor 3: stdin carries git's protocol request and
+# must reach the engine untouched, so the loop cannot redirect it.
+if [ -f "$dir/engines" ] && [ -r "$dir/engines" ] && exec 3< "$dir/engines"; then
+  while IFS= read -r engine <&3 || [ -n "$engine" ]; do
+    [ -n "$engine" ] || continue
+    if [ -f "$engine" ] && [ -x "$engine" ]; then
+      exec "$engine" internal shared-pool-upload-pack "$@" 3<&-
+    fi
+  done
+  exec 3<&-
+fi
+for name in reprobuild repro; do
+  if engine=$(command -v "$name" 2>/dev/null) && [ -n "$engine" ]; then
+    exec "$engine" internal shared-pool-upload-pack "$@"
+  fi
+done
+echo "repro: shared clone $pool: no repro executable found to serve a lazy fetch" \
+  "(REPROBUILD_REPRO is unset or not executable, no entry of $dir/engines" \
+  "still exists, and neither reprobuild nor repro is on PATH);" \
+  "run \`repro health\` in the workspace, or set REPROBUILD_REPRO to a repro executable" >&2
+exit 1
+"""
+  ## The script ``ensureUploadPackLauncher`` writes. POSIX ``sh`` builtins
+  ## only: it runs before any engine is found, possibly with a sparse PATH.
+
+proc ensureUploadPackLauncher*(pool: string): string =
+  ## Write (or rewrite) the transport launcher into ``pool``, atomically and
+  ## only when its content differs. Returns "" on success, otherwise the
+  ## diagnostic.
+  let path = poolUploadPackLauncherPath(pool)
+  let tmp = path & ".tmp-" & $getCurrentProcessId()
+  try:
+    createDir(poolReproDir(pool))
+    if not fileExists(path) or readFile(path) != UploadPackLauncherScript:
+      writeFile(tmp, UploadPackLauncherScript)
+      setFilePermissions(tmp, {fpUserRead, fpUserWrite, fpUserExec,
+        fpGroupRead, fpGroupExec, fpOthersRead, fpOthersExec})
+      moveFile(tmp, path)
+    let mode = getFilePermissions(path)
+    if fpUserExec notin mode:
+      setFilePermissions(path, mode + {fpUserExec, fpGroupExec, fpOthersExec})
+    ""
+  except IOError, OSError:
+    try: removeFile(tmp)
+    except OSError: discard
+    "could not write " & path & ": " & getCurrentExceptionMsg()
+
+proc enginePathSpelling(path: string): string =
+  ## Git's shell on Windows reads forward-slash drive paths; keep the engine
+  ## list in the spelling the launcher consumes.
+  when defined(windows): path.replace('\\', '/')
+  else: path
+
+proc recordPoolEngine*(pool: string; engine = selectedPoolEngine()): string =
+  ## Put ``engine`` first in ``<pool>/repro/engines``: dedupe, drop entries
+  ## whose file no longer exists, keep at most ``MaxRecordedEngines``, and
+  ## write atomically (only when the list changes). Returns "" on success or
+  ## when there is no engine to record, otherwise the diagnostic.
+  ##
+  ## The update is a read-modify-write of the whole list, so it runs under
+  ## the pool's cache-entry lock, like ``registerBorrower``: repro processes
+  ## wiring or checking leaves of one pool at the same time would otherwise
+  ## each write the list they read, and the last writer would drop the
+  ## engines the others had just recorded.
+  if engine.len == 0:
+    return ""
+  let path = poolEnginesPath(pool)
+  withCacheEntryVcsLock(pool,
+      (block: return "could not write " & path & ": could not lock " &
+        cacheEntryLockPath(pool))):
+    let tmp = path & ".tmp-" & $getCurrentProcessId()
+    try:
+      let first = enginePathSpelling(engine)
+      var entries = @[first]
+      var existing = ""
+      if fileExists(path):
+        existing = readFile(path)
+        for line in existing.splitLines():
+          let entry = line.strip()
+          if entry.len == 0 or entry in entries: continue
+          if not fileExists(entry): continue
+          entries.add(entry)
+      if entries.len > MaxRecordedEngines:
+        entries.setLen(MaxRecordedEngines)
+      let wanted = entries.join("\n") & "\n"
+      if fileExists(path) and existing == wanted:
+        return ""
+      createDir(poolReproDir(pool))
+      writeFile(tmp, wanted)
+      moveFile(tmp, path)
+      return ""
+    except IOError, OSError:
+      try: removeFile(tmp)
+      except OSError: discard
+      return "could not write " & path & ": " & getCurrentExceptionMsg()
+
 proc retentionHookConfigValue*(pool: string): string =
   ## The ``gc.recentObjectsHook`` value: the script's path, quoted for the
   ## shell git runs it through. Forward slashes on every platform, because
@@ -2641,6 +2797,10 @@ proc poolIntegrityConfig*(gitBin, pool: string): seq[(string, string)] =
   ## ``SharedBareSafetyConfig``. ``gc.pruneExpire`` is computed: see
   ## ``poolRetentionReady``.
   let hookWritten = ensureRetentionHook(pool)
+  # Refreshed with the hook, so a pool's leaves keep a current launcher even
+  # when no leaf is touched. A failure is reported again, and acted on, by
+  # ensureLeafPoolConfig when a leaf is wired or checked.
+  discard ensureUploadPackLauncher(pool)
   result = @[
     ("core.repositoryFormatVersion", "1"),
     ("extensions.partialClone", "origin"),
@@ -2763,7 +2923,7 @@ proc leafPoolConfigRows(pool: string): seq[(string, string)] =
     # Git otherwise records this during the first lazy fetch, so concurrent
     # readers of a newly wired leaf would race for its config.lock.
     ("remote." & LeafPoolRemoteName & ".partialclonefilter", "blob:none"),
-    ("remote." & LeafPoolRemoteName & ".uploadpack", leafPoolUploadPackCommand()),
+    ("remote." & LeafPoolRemoteName & ".uploadpack", leafPoolUploadPackCommand(pool)),
     ("maintenance.auto", "false"),
     ("gc.auto", "0"),
     ("remote." & LeafPoolRemoteName & ".skipFetchAll", "true")]
@@ -2832,6 +2992,8 @@ proc needsLeafRefetchChain(gitBin, leaf, pool: string): bool =
   ## Ref-tip presence cannot detect missing blobs below present commits.
   ## Inspect the actual chain before on-touch configuration repairs it.
   if not repoIsPartialClone(gitBin, pool): return false
+  # The uploadpack row names the launcher; without it the chain cannot run.
+  if not fileExists(poolUploadPackLauncherPath(pool)): return true
   for (key, value) in leafPoolConfigRows(pool):
     let current = runGit(gitBin, ["-C", leaf, "config", "--local",
       "--get-all", key])
@@ -2858,6 +3020,14 @@ proc ensureLeafPoolConfig*(gitBin, leaf, pool: string): string =
   if selectedOverride.len > 0 and uncontrolledFindExe(selectedOverride).len == 0:
     return "cannot install refetch chain: REPROBUILD_REPRO is not executable: " &
       selectedOverride
+  # The chain's uploadpack names the pool's launcher (§3.4), which picks its
+  # engine at run time; record this process's engine for it. Neither write
+  # stops the configuration below: both are reported like a failed key.
+  var failedFiles: seq[string]
+  let launcher = ensureUploadPackLauncher(pool)
+  if launcher.len > 0: failedFiles.add(launcher)
+  let engines = recordPoolEngine(pool)
+  if engines.len > 0: failedFiles.add(engines)
   var failedKeys: seq[string]
   for (key, value) in leafPoolConfigRows(pool):
     let current = runGit(gitBin, ["-C", leaf, "config", "--local", "--get-all", key])
@@ -2892,7 +3062,9 @@ proc ensureLeafPoolConfig*(gitBin, leaf, pool: string): string =
     discard runGit(gitBin, ["-C", leaf, "config", "--local", "--unset",
       "extensions.partialClone"])
   if failedKeys.len > 0:
-    return "could not write " & failedKeys.join(", ") & " in " & leaf
+    failedFiles.add("could not write " & failedKeys.join(", ") & " in " & leaf)
+  if failedFiles.len > 0:
+    return failedFiles.join("; ")
   migrateLeafCommitGraph(gitBin, leaf)
 
 proc poolsOfLeaf*(leaf: string; cacheRoot = ""): seq[string] =
