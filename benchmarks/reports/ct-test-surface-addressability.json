@@ -35,16 +35,16 @@
   "counts": {
     "catalogs": 5,
     "itemsByKind": {
-      "case": 17491,
-      "suite": 4050
+      "case": 17814,
+      "suite": 4132
     },
     "itemsByProvider": {
       "assembly-fallback": 3,
-      "nim-unittest": 20951,
+      "nim-unittest": 21369,
       "python-pytest": 7,
-      "python-unittest": 580
+      "python-unittest": 567
     },
-    "itemsTotal": 21541,
+    "itemsTotal": 21946,
     "responseDiagnostics": {
       "info": 1,
       "warning": 33
@@ -79,15 +79,15 @@
       "sites": [
         {
           "file": "libs/repro_daemon_core/tests/t_auto_started_daemon_does_not_hold_callers_working_directory.nim",
-          "startLine": 88
+          "startLine": 89
         },
         {
           "file": "libs/repro_daemon_core/tests/t_auto_started_daemon_does_not_hold_callers_working_directory.nim",
-          "startLine": 154
+          "startLine": 161
         },
         {
           "file": "libs/repro_daemon_core/tests/t_auto_started_daemon_does_not_hold_callers_working_directory.nim",
-          "startLine": 170
+          "startLine": 177
         }
       ]
     },
@@ -243,29 +243,29 @@
     }
   ],
   "reconciliation": {
-    "caseCoveragePercent": 97.62,
-    "caseItemsInCatalog": 17491,
-    "casesAddressableThroughTheSurface": 16558,
+    "caseCoveragePercent": 97.67,
+    "caseItemsInCatalog": 17814,
+    "casesAddressableThroughTheSurface": 16891,
     "collidingIdentities": 12,
-    "distinctCaseIdentities": 17477,
+    "distinctCaseIdentities": 17800,
     "groundTruth": "benchmarks/reports/reprobuild-suite-m0-inventory-sources.json",
     "perSourceCaseCountAgreement": {
-      "agree": 2663,
-      "compared": 2669,
+      "agree": 2689,
+      "compared": 2695,
       "disagree": 6
     },
     "sourceCoveragePercent": 99.7,
-    "sourcesAddressableThroughTheSurface": 2669,
+    "sourcesAddressableThroughTheSurface": 2695,
     "sourcesNotAddressable": 8,
-    "trackedNimSuiteSources": 2677,
-    "trackedStaticCaseCount": 16961
+    "trackedNimSuiteSources": 2703,
+    "trackedStaticCaseCount": 17294
   },
   "schemaVersion": 1,
   "surface": {
     "binary": "ct-test",
     "provenance": "",
     "resolvedBy": "PATH:ct-test",
-    "sha256": "73ab4d42a28647e19943c74a84107f254e62da902f5658f6d3cd62d29fc575ee"
+    "sha256": "bdf2c9b47c5a2a81fdef76fd082d40b324f29fde693b0428b2fa5576f9e160c9"
   },
   "title": "Reprobuild case addressability through the canonical `ct test` surface",
   "unaddressableSources": [

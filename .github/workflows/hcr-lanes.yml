@@ -100,23 +100,21 @@ jobs:
     # match benchmark.yml's Linux leg, which omits `self-hosted` on purpose.
     # The cost is queueing behind the benchmark jobs on that slot.
     runs-on: [linux, x64, benchmark]
-    # 90, up from 60: the lane now also builds the `ct-mcr` recorder bundle
-    # (its dev shell, nimble and cargo) before the replay gate, on a runner
-    # that starts cold.
-    #
-    # 150, up from 90, on measurement. 90 was set before the bundle had ever
-    # built here (until 2026-11-05 the recorder sibling did not compile), and
-    # no run of this job has finished green inside it since. On ephemeral
-    # runners, with a cold store, the steps before the lane took 33-44 min:
-    # dev-shell realisation in the first `dev-exec` (manifest check, 4-14
-    # min) plus `Build repro` (23-29 min); jobs 125018472940, 127073386863
-    # and 127107318850. The lane itself ran 31 min across every gate but the
-    # replay gate (job 125018472940, whose bundle build failed early), and
-    # building the bundle measured 17.5 min on a warm workstation. That sums
-    # to roughly 85-100 min before the replay gate runs at all, and both
-    # attempts at 90 were cancelled with the lane still running (46 and 57
-    # min in). The fix for the setup time is a warm store on this runner
+    # 150 was set on measurement while the lane also built the `ct-mcr`
+    # recorder bundle for the replay gate. On ephemeral runners, with a cold
+    # store, the steps before the lane took 33-44 min: dev-shell realisation
+    # in the first `dev-exec` (manifest check, 4-14 min) plus `Build repro`
+    # (23-29 min); jobs 125018472940, 127073386863 and 127107318850. The lane
+    # itself ran 31 min across every gate but the replay gate (job
+    # 125018472940), and building the bundle measured 17.5 min on a warm
+    # workstation. The fix for the setup time is a warm store on this runner
     # class, which is a fleet change, not a workflow edit.
+    #
+    # The replay gate and the bundle left this lane on 2026-11-07 (they run
+    # from codetracer-native-recorder now; downstream-tests.yml), so the sum
+    # above is roughly 64-75 min. The limit stays at 150 until a run of the
+    # lane without the bundle has been measured: lowering it on arithmetic
+    # alone is how a lane ends up cancelled while still running.
     timeout-minutes: 150
     steps:
       - uses: actions/checkout@v4
@@ -137,92 +135,6 @@ jobs:
           attic-token: ${{ secrets.ATTIC_TOKEN }}
           attic-cache: ${{ vars.ATTIC_CACHE }}
           attic-endpoint: ${{ vars.ATTIC_ENDPOINT }}
-      # The two clones run HERE, straight after setup, because they use the
-      # token minted at the top of the job, and an installation token expires
-      # after an hour. They used to run after `Build repro`; on job
-      # 127318531856 (2026-11-05) that step reached the clone 75 minutes in,
-      # and the clone failed with git exit 128 on the expired token. Every
-      # credentialed step after `Build repro` uses the `ci_token_lane` token
-      # minted just before the lane.
-      # `e2e_hcr_linux_replay_of_patched_recording` records and replays with
-      # the `ct-mcr` bundle its recipe builds through `hcr_ct_mcr_fixture`
-      # (scripts/build_hcr_ct_mcr_fixture.sh): the recorder's own `just
-      # build-ct-mcr` in the recorder's own flake dev shell. The recorder
-      # itself (and codetracer, codetracer-trace-format, nim-stackable-hooks,
-      # codetracer-trace-format-nim) come from .github/sibling-repos; these
-      # two are read only by that recipe -- its licensing prerequisite builds
-      # `ct_license_ffi` in ../codetracer-native-backend, and ct_cli imports
-      # ../codetracer-visual-replay -- so they are cloned for this job alone
-      # rather than for every dev-shell job.
-      - name: Clone codetracer-native-backend sibling
-        uses: metacraft-labs/metacraft-github-actions/clone-repo@dev
-        with:
-          repo: metacraft-labs/codetracer-native-backend
-          ref: dev
-          path: ${{ github.workspace }}/../codetracer-native-backend
-          gh-token: ${{ steps.ci_token.outputs.token }}
-      - name: Clone codetracer-visual-replay sibling
-        uses: metacraft-labs/metacraft-github-actions/clone-repo@dev
-        with:
-          repo: metacraft-labs/codetracer-visual-replay
-          ref: dev
-          path: ${{ github.workspace }}/../codetracer-visual-replay
-          gh-token: ${{ steps.ci_token.outputs.token }}
-      # The recorder bundle is built from FIVE siblings that must agree with
-      # each other: the recorder, the trace-format reader it compiles against,
-      # the backend and visual-replay its recipe reads, and the Rust
-      # trace-format crates the backend builds against. Their `dev` tips
-      # do not: recorder `dev` predates the 2026-10 trace-format revision that
-      # trace-format-nim `dev` carries, and a recorder new enough for this
-      # lane's replay gate (the in-process HCR arm and the emulator's patch
-      # notes) imports trace-format modules that exist only on its `agents`
-      # line. A single pinned recorder therefore either fails to compile or
-      # fails the gate ("direct patch refused: invalid-argument" with
-      # 3936bae1, job on run 42075906445).
-      #
-      # So the five are provisioned the way the Test job provisions them: at
-      # the revisions CodeTracer's committed repro.lock names, which is the
-      # set CodeTracer itself builds and tests together. Only these five
-      # entries are taken from that lock -- every other sibling stays where
-      # .github/sibling-repos puts it, so this lane's own gates still compile
-      # against the revisions the rest of CI uses. Done here, straight after
-      # the clones, while the job's first token is fresh; the credential is
-      # scoped to exactly these repositories (scripts/ci_lock_source_
-      # credentials.py) and the file holding it is removed on exit.
-      - name: Put the recorder bundle's siblings at CodeTracer's locked revisions
-        env:
-          GIT_CONFIG_NOSYSTEM: '1'
-          GIT_TERMINAL_PROMPT: '0'
-          # Drop the job-wide process-scoped header setup-nix exports for
-          # github.com/metacraft-labs/: with the scoped file below it would be
-          # a second Authorization header, which GitHub answers with HTTP 400.
-          GIT_CONFIG_COUNT: '0'
-          GH_TOKEN: ${{ steps.ci_token.outputs.token }}
-        run: |
-          set -euo pipefail
-          repro_root="${{ github.workspace }}"
-          siblings_root="$(cd "$repro_root/.." && pwd)"
-          ct_lock="$siblings_root/codetracer/repro.lock"
-          test -f "$ct_lock" || { echo "no CodeTracer lock at $ct_lock" >&2; exit 1; }
-          work="$(mktemp -d "$RUNNER_TEMP/bundle-siblings.XXXXXX")"
-          trap 'rm -rf "${work:?}"' EXIT
-          # The five entries, as brace groups, in the lock's own syntax.
-          { grep '^schema = ' "$ct_lock"
-            printf '[lock]\ndeps = ['
-            grep -o '{[^{}]*}' "$ct_lock" | grep 'coord_kind' \
-              | grep -E 'name = "(codetracer-native-recorder|codetracer-trace-format-nim|codetracer-trace-format|codetracer-native-backend|codetracer-visual-replay)"' \
-              | paste -sd, -
-            printf ']\n'; } > "$work/bundle.lock"
-          count="$(grep -o '{[^{}]*}' "$work/bundle.lock" | wc -l)"
-          [ "$count" -eq 5 ] || { echo "CodeTracer's lock names $count of the 5 bundle siblings" >&2; exit 1; }
-          dev-exec python3 scripts/ci_lock_source_credentials.py gitconfig \
-            --lock "$work/bundle.lock" --owner metacraft-labs \
-            --out "$work/gitconfig" --emit-actions-mask
-          unset GH_TOKEN
-          GIT_CONFIG_GLOBAL="$work/gitconfig" bash scripts/reconcile_locked_siblings.sh \
-            "$work/bundle.lock" "$siblings_root" "$(basename "$repro_root")" --fetch-only
-          GIT_CONFIG_GLOBAL=/dev/null bash scripts/reconcile_locked_siblings.sh \
-            "$work/bundle.lock" "$siblings_root" "$(basename "$repro_root")" --detach
       # The manifest-vs-tree check first: it is a source scan that answers in
       # seconds, and if the work list disagrees with the tree there is no point
       # compiling 46 gate binaries to find out.
@@ -233,41 +145,7 @@ jobs:
       # refuses to start without it; this is the step that supplies it.
       - name: Build repro
         run: dev-exec just build
-      # Installation tokens expire after an hour; the lane (and the recorder
-      # build at its start) can outlast the one minted above.
-      - name: Refresh installation token for the lane
-        id: ci_token_lane
-        uses: actions/create-github-app-token@v2
-        with:
-          app-id: ${{ secrets.CI_TOKEN_PROVIDER_APP_ID }}
-          private-key: ${{ secrets.CI_TOKEN_PROVIDER_PRIVATE_KEY }}
-          owner: metacraft-labs
-          # Scoped to the private repositories the recorder bundle fetches:
-          # the recorder itself, codetracer-rr (a private flake input of its
-          # dev shell) and lldb-sys.rs (a private cargo git dependency of the
-          # backend's `ct_license_ffi`). The token reaches every gate in the
-          # lane through the environment, so it names nothing else.
-          repositories: |
-            codetracer-native-recorder
-            codetracer-rr
-            lldb-sys.rs
-          permission-contents: read
-      # The recorder's flake has a private input (nix needs the scoped access
-      # token), and its recipe fetches a private cargo git dependency (cargo
-      # goes through the git CLI, which reads the GIT_CONFIG_* rewrite). The
-      # fixture script forwards exactly these GIT_CONFIG_* variables into the
-      # recorder's otherwise cleared shell. Mirrors the Test job in ci.yml.
       - name: Run the HCR lane
-        env:
-          GIT_TERMINAL_PROMPT: '0'
-          CARGO_NET_GIT_FETCH_WITH_CLI: 'true'
-          GIT_CONFIG_COUNT: '1'
-          GIT_CONFIG_KEY_0: url.https://x-access-token:${{ steps.ci_token_lane.outputs.token }}@github.com/metacraft-labs/lldb-sys.rs.insteadOf
-          GIT_CONFIG_VALUE_0: https://github.com/metacraft-labs/lldb-sys.rs
-          NIX_CONFIG: >-
-            access-tokens = github.com=${{ github.token }}
-            github.com/metacraft-labs/codetracer-native-recorder=${{ steps.ci_token_lane.outputs.token }}
-            github.com/metacraft-labs/codetracer-rr=${{ steps.ci_token_lane.outputs.token }}
         run: dev-exec just hcr_lane_linux
       - name: Upload the per-platform census and gate logs
         if: always()

@@ -167,7 +167,6 @@ libs/repro_workspace_vcs/tests/t_workspace_sibling_ignore_set.nim	tracked_direct
 tests/e2e/dev-env/t_e2e_shell_hook_cd_activate_deactivate.nim	bash_hook_short_circuits_repeated_prompts_via_REPRO_PROJECT_ROOT	2
 tests/e2e/dev-env/t_e2e_shell_hook_noop_io_bounded.nim	noop_fast_path_does_not_open_build_engine_artifacts	2
 tests/e2e/dev-env/t_e2e_shell_hook_realistic_workload.nim	fast_path_keeps_40_prompts_under_cumulative_budget	1
-tests/e2e/hcr-linux-direct/t_e2e_hcr_linux_replay_of_patched_recording.nim	linux x86_64 only	1
 tests/e2e/hcr-linux-direct/t_e2e_hcr_linux_x86_64_single_threaded_direct_patch.nim	HLX-M0 direct patch gate is linux-x86_64-only	1
 tests/e2e/hcr-linux-far/t_e2e_hcr_linux_far_target_island_patch.nim	HLX-M2 island gate is linux-x86_64-only	1
 tests/e2e/hcr-linux-far/t_integration_hcr_linux_island_exhaustion_refuses.nim	HLX-M2 island exhaustion gate is linux-x86_64-only	1
@@ -933,7 +932,6 @@ tests/unit/t_runquota_endpoint_paths.nim	long callers are not truncated to the s
 tests/unit/t_runquota_endpoint_paths.nim	long temp roots retain bounded independent private rendezvous paths	1
 tests/unit/t_runquota_endpoint_paths.nim	the terminating NUL counts against the native socket address budget	1
 tests/unit/t_script_launcher.nim	the generated launcher actually runs the script	1
-tests/unit/t_unit_hcr_linux_claim_conflict_with_recorder_refused.nim	linux/amd64 only	1
 tests/unit/t_unit_hcr_linux_x86_64_trampoline_encoding_and_atomicity_preconditions.nim	HLX-M0 x86_64 trampoline gate is linux-x86_64-only	1
 tests/unit/t_workspace_root_for_repo_managed_worktree.nim	ignores an incomplete temp sibling and follows .repo common dir	1
 tools/catalog-harvester/tests/test_n48_msys2_tar_operands.nim	test_n48_msys2_extracts_members_into_dirs_gnu_tar_would_unquote	1
