@@ -224,9 +224,27 @@ proc bindBlob*(s: Statement; idx: int; data: openArray[byte]) =
     raiseSqlite(s.db, rc, "bind_blob")
 
 proc step*(s: Statement): cint =
+  ## A step that fails is RESET before the error is raised. SQLite leaves a
+  ## statement that stopped on SQLITE_BUSY suspended at its transaction
+  ## opcode, so that it can be retried, and still counted as an active
+  ## writer of its connection. While it stays so, an autocommit write on the
+  ## same connection does not commit when it finishes: its transaction, and
+  ## the WAL write lock, stay open until the statement is reset or finalized.
+  ## A caller that drops the error (a use record that does not wait) and
+  ## never finalizes would otherwise hold the store's write lock for the
+  ## life of the process -- `sqlite3_close_v2` only turns such a connection
+  ## into a zombie -- and every other writer fails with "database is locked"
+  ## after its busy timeout. Nothing here retries a step, so the reset loses
+  ## nothing; the error message is read first because the reset may replace
+  ## it.
   let rc = sqlite3_step(s.handle)
   if rc != SqliteRow and rc != SqliteDone and rc != SqliteConstraint:
-    raiseSqlite(s.db, rc, "step")
+    let detail = $sqlite3_errmsg(s.db)
+    discard sqlite3_reset(s.handle)
+    var err = newException(SqliteError,
+      "sqlite3 error code " & $rc & ": " & detail & " (SQL: step)")
+    err.code = rc
+    raise err
   rc
 
 proc columnCount*(s: Statement): int =

@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 34,
-    "nimTestBinaries": 2706,
+    "nimTestBinaries": 2707,
     "pureUnitConsolidationGroups": 79,
-    "pureUnitTests": 743,
+    "pureUnitTests": 744,
     "staticallyDetectedRuntimeCompilerFlowTests": 141,
-    "testEntries": 2747
+    "testEntries": 2748
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -567,7 +567,7 @@
       "targetOs": "soAny"
     },
     {
-      "count": 6,
+      "count": 7,
       "defines": [],
       "dependencyShape": [
         "repro_core",
@@ -579,6 +579,7 @@
         "libs/repro_local_store/tests/t_portable_memo.nim",
         "libs/repro_local_store/tests/t_prefix_owning_path.nim",
         "libs/repro_local_store/tests/t_sqlite_smoke.nim",
+        "libs/repro_local_store/tests/t_store_use_record_lost_to_a_writer_leaves_no_lock.nim",
         "libs/repro_local_store/tests/t_win_store_gc_refuses_referenced_entry.nim",
         "libs/repro_local_store/tests/t_win_store_hardlink_cap_falls_back_per_file.nim"
       ],
@@ -1565,7 +1566,7 @@
       "graph-fixture": 22,
       "integration": 1492,
       "platform/destructive": 173,
-      "pure unit": 743,
+      "pure unit": 744,
       "unclassified": 317
     },
     "graphOwnedTestArtifacts": [
@@ -1774,9 +1775,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2706,
+    "nimTestBinaryCount": 2707,
     "pythonTestFileCount": 41,
-    "testEntryCount": 2747
+    "testEntryCount": 2748
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -19267,6 +19268,24 @@
       "source": "libs/repro_local_store/tests/t_store_optimise_dedup.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 2,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_store_use_record_lost_to_a_writer_leaves_no_lock",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_core",
+        "repro_local_store"
+      ],
+      "owner": "libs/repro_local_store",
+      "requiresReproBinary": false,
+      "source": "libs/repro_local_store/tests/t_store_use_record_lost_to_a_writer_leaves_no_lock.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
