@@ -1268,9 +1268,6 @@ tests/e2e/agent-harbor/t_e2e_agent_harbor_modifies_installed_source_package.nim	
 tests/e2e/agent-harbor/t_e2e_agent_harbor_preview_accept_reject.nim	nim	5
 tests/e2e/cmake-develop/t_e2e_repro_develop_cmake.nim	nim	3
 tests/e2e/cmake-path-hermeticity/t_cmake_actions_declare_their_path.nim	nim	4
-tests/e2e/codetracer-subset/t_e2e_codetracer_build_subset_without_tup.nim	nim	1
-tests/e2e/codetracer-subset/t_e2e_codetracer_dev_environment_slice.nim	nim	1
-tests/e2e/codetracer-subset/t_e2e_codetracer_in_place_project_file.nim	nim	13
 tests/e2e/configurable-system/t_e2e_configurable_system_in_dsl.nim	nim	4
 tests/e2e/dev-env/t_e2e_dev_env_announces_before_working.nim	nim	4
 tests/e2e/dev-env/t_e2e_dev_env_binds_materialized_producer.nim	nim	2
@@ -1331,7 +1328,6 @@ tests/e2e/gm7/t_e2e_home_apply_applies_declared_concerns.nim	nim	4
 tests/e2e/gm7/t_e2e_hosts_applies_declaration_cli.nim	nim	1
 tests/e2e/hcr-debug-unwind/t_e2e_hcr_direct_patch_debug_unwind_replay.nim	nim	2
 tests/e2e/hcr-direct-linker/t_e2e_hcr_in_target_link_and_trampoline.nim	nim	2
-tests/e2e/hcr-linux-direct/t_e2e_hcr_linux_replay_of_patched_recording.nim	nim	2
 tests/e2e/hcr-linux-direct/t_e2e_hcr_linux_x86_64_single_threaded_direct_patch.nim	nim	2
 tests/e2e/hcr-linux-far/t_e2e_hcr_linux_far_target_island_patch.nim	nim	2
 tests/e2e/hcr-linux-far/t_integration_hcr_linux_island_exhaustion_refuses.nim	nim	2
@@ -1353,9 +1349,9 @@ tests/e2e/hcr-linux-threads/t_integration_hcr_linux_on_stack_function_reported_s
 tests/e2e/hcr-linux-threads/t_integration_hcr_linux_quiescence_timeout_aborts_without_writing.nim	nim	2
 tests/e2e/hcr-linux-threads/t_integration_hcr_linux_signal_blocked_thread_refused_by_name.nim	nim	3
 tests/e2e/hcr-linux-threads/t_integration_hcr_linux_stack_mapping_changes_do_not_fault.nim	nim	1
-tests/e2e/hcr-linux-txn/t_integration_hcr_linux_commit_failure_rolls_back_published_sites.nim	nim	5
-tests/e2e/hcr-linux-txn/t_integration_hcr_linux_prepare_failure_leaves_process_byte_identical.nim	nim	4
-tests/e2e/hcr-linux-txn/t_integration_hcr_linux_repeated_patch_of_same_function.nim	nim	5
+tests/e2e/hcr-linux-txn/t_integration_hcr_linux_commit_failure_rolls_back_published_sites.nim	nim	4
+tests/e2e/hcr-linux-txn/t_integration_hcr_linux_prepare_failure_leaves_process_byte_identical.nim	nim	3
+tests/e2e/hcr-linux-txn/t_integration_hcr_linux_repeated_patch_of_same_function.nim	nim	4
 tests/e2e/hcr-linux-unwind/t_e2e_hcr_linux_backtrace_through_patched_function.nim	nim	2
 tests/e2e/hcr-linux-unwind/t_e2e_hcr_linux_registration_payloads_travel_over_the_production_wire.nim	nim	2
 tests/e2e/hcr-linux-unwind/t_integration_hcr_linux_jit_symfile_accepted_by_gdb.nim	nim	2
@@ -1530,7 +1526,7 @@ tests/e2e/sharding/t_e2e_repro_test_shard_lan_peer_cache_not_implemented.nim	nim
 tests/e2e/sharding/t_e2e_repro_test_shard_partition_total_coverage.nim	nim	1
 tests/e2e/sharding/t_e2e_repro_test_shard_workspace_integration.nim	nim	2
 tests/e2e/t_m54_verified_tarball_profile.nim	nim	1
-tests/e2e/watch/t_e2e_repro_watch.nim	nim	8
+tests/e2e/watch/t_e2e_repro_watch.nim	nim	4
 tests/e2e/watch/t_e2e_repro_watch_arms_on_cache_hit_evidence.nim	nim	2
 tests/e2e/watch/t_e2e_repro_watch_multiple_named_targets.nim	nim	2
 tests/e2e/watch/t_repro_watch_infers_tool_provisioning.nim	nim	2
@@ -2703,7 +2699,6 @@ tests/unit/t_test_execution_extension_is_framework_neutral.nim	nim	10
 tests/unit/t_tool_identity_key_resolves_before_it_keys.nim	nim	10
 tests/unit/t_tool_profile_keys_on_resolution_not_search_path.nim	nim	21
 tests/unit/t_tree_sitter_generate.nim	nim	4
-tests/unit/t_unit_hcr_linux_claim_conflict_with_recorder_refused.nim	nim	6
 tests/unit/t_unit_hcr_linux_x86_64_trampoline_encoding_and_atomicity_preconditions.nim	nim	10
 tests/unit/t_unmonitorable_action_depfile_guards.nim	nim	16
 tests/unit/t_vcs_lock_failure_excludes_protected_body.nim	nim	7
@@ -2730,8 +2725,6 @@ tests/unit/test_daemon_worker_confinement_systemd_analyze.py	python	12
 tests/unit/test_dev_shell_hook_scope.py	python	7
 tests/unit/test_generated_artifact_merge_policy.py	python	19
 tests/unit/test_graph_owned_test_artifacts.py	python	26
-tests/unit/test_hcr_replay_gate_ct_mcr_fixture_edge.py	python	13
-tests/unit/test_hcr_replay_gate_monitor_policy.py	python	2
 tests/unit/test_install_nix_paths.py	python	14
 tests/unit/test_lint_gate_ordering.py	python	4
 tests/unit/test_nim224_lane_selection.py	python	5

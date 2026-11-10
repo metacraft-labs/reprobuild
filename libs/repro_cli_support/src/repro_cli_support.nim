@@ -30783,9 +30783,8 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string;
         # surface as a single bekFinished event with severity=error
         # whose message carries "daemon-hosted build failed: <inner>".
         # Without printing those, the CLI exits non-zero with no
-        # diagnostic at all — and tests like
-        # t_e2e_codetracer_build_subset_without_tup that gate on the
-        # error text (`refusing implicit PATH fallback`) can't see it.
+        # diagnostic at all — and a test that gates on the error text
+        # (`refusing implicit PATH fallback`) can't see it.
         let isError = event.kind in {bekFinished, bekCancelled,
             bekUnsupported} and event.severity == "error"
         if (event.kind == bekDiagnostic or isError) and

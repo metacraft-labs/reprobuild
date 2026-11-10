@@ -45,16 +45,13 @@ codetracer-trace-format=dev
 # native-recorder follows `dev` here, and its `dev` does NOT compile against
 # codetracer-trace-format-nim `dev` (trace-format b8db98c6 removed the
 # `paths` parameter recorder `dev` still passes). That does not reach a
-# build: the two jobs that build the recorder put it, and the four siblings
-# its bundle is built from (trace-format-nim, the Rust trace-format crates,
-# native-backend, visual-replay), at the revisions CodeTracer's committed
-# repro.lock names -- the Test job for all of CodeTracer's siblings, the HCR
-# lane for exactly those five (hcr-lanes.yml, "Put the recorder bundle's
-# siblings at CodeTracer's locked revisions"). A pin here was tried and is
-# not enough: a
-# recorder old enough to compile against trace-format-nim `dev` (3936bae1)
-# fails the HCR replay gate, and one new enough for the gate imports
-# trace-format modules that exist only on its `agents` line.
+# build: the Test job puts the recorder and the siblings CodeTracer builds
+# with at the revisions CodeTracer's committed repro.lock names, and the
+# downstream job (downstream-tests.yml) replaces it with the recorder's
+# `agents` line and puts the recorder's build siblings at the revisions the
+# recorder's own lock names, so the recorder's own recipe builds it there.
+# The bundle is no longer a fixture of this repository's suite: the tests
+# that recorded with it moved to the recorder on 2026-11-07.
 codetracer-native-recorder=dev
 
 # codetracer's `ct` binary (built via codetracer/reprobuild.nim's `ct` target so
@@ -69,8 +66,8 @@ codetracer-native-recorder=dev
 # tracks a moving tip) it is force-reset to the locked SHA rather than refused.
 # So these `=dev` entries no longer have to be kept in lock-step with codetracer's
 # lock for the ct build to stay green — the drift is reconciled at build time.
-# They stay because reprobuild's OWN e2e tests (codetracer-subset, watch) still
-# consume the siblings adjacent on the --path. reprobuild only ever execs the
+# They stay because reprobuild's OWN e2e test (watch) still consumes the
+# siblings adjacent on the --path. reprobuild only ever execs the
 # resulting `ct`.
 isonim=dev
 isonim-gpui=dev
@@ -106,11 +103,10 @@ reprobuild-ct-test-runner=dev
 # it. `sqlite3` moved there, then `shellcheck`, `shfmt` and `prek`, and each
 # move is a compile ERROR when no catalog defines the package, so without this
 # checkout every recipe this suite compiles that uses one of them stops: runquota's repro.nim
-# (t_b0_runquota_repro_nim_compiles), CodeTracer's (the e2e codetracer-subset
-# fixture and the `ct` build), and t_uses_resolves_sqlite3_from_real_
+# (t_b0_runquota_repro_nim_compiles), CodeTracer's (the `ct` build), and
+# t_uses_resolves_sqlite3_from_real_
 # reprobuild_packages, which exists to prove the real catalog -- not the
 # fixture under tests/reprobuild-packages -- defines what consumers rely on.
-# The CodeTracer fixture also uses `shellcheck`, and
 # t_import_of_a_moved_stdlib_module_names_the_new_home compiles `uses:` of all
 # three lint tools against the real catalog, so the pin must be a revision
 # that defines them (they arrived in eed38ec). t_e2e_home_profile_reaches_
@@ -285,27 +281,20 @@ nim-shm-lease=22e3100cdb4fbc374689ddac55b4b32c90654140
 # `main` retired in the org branch-rename sweep; mainline is now `dev`.
 repo-workspaces=dev
 
-# The shared-actions repo, declared here as an ordinary sibling because
-# `tests/e2e/codetracer-subset/t_e2e_codetracer_in_place_project_file.nim`
-# READS A FILE OUT OF IT: `reprobuild-provision/provision-reprobuild-siblings.sh`
-# is the oracle for the CodeTracer Nim-gitlink provisioning contract, and
-# `repro_test_support.requireMetacraftGithubActionsRoot` raises rather than
-# skipping when the checkout is absent — per the suite's no-silent-skip rule,
-# a missing prerequisite fails loudly and names itself.
+# The shared-actions repo, declared here as an ordinary sibling (GitHub
+# materialises a `uses: metacraft-labs/metacraft-github-actions/...@dev`
+# composite action under the runner's private `_actions/` tree, not adjacent to
+# the checkout, so no `uses:` line produces this directory).
 #
-# `uses: metacraft-labs/metacraft-github-actions/...@dev` does NOT satisfy that
-# read. GitHub materialises a composite action under the runner's private
-# `_actions/` tree, not adjacent to the checkout, so a job that references ten
-# of these actions still has no sibling directory for the test to open.
-#
-# Until now the only thing that produced one was a bespoke `clone-repo` step in
-# `ci.yml`, which covered exactly the one job that step was written into and
-# nothing else — no other CI job, and no developer workspace. That is the gap
-# these three cases reported: a workspace built from reprobuild's project set
-# alone never gets this repo, and the cases fail on every local run. Declaring
-# it here puts the prerequisite in the blessed clone-list that
-# `docs/repository-requirements.md` designates for exactly this purpose,
-# as data rather than as one workflow's inline step.
+# Its one hard consumer was the CodeTracer in-place project-file e2e test, which
+# read `reprobuild-provision/provision-reprobuild-siblings.sh` out of it; that
+# test was removed on 2026-11-06 (CodeTracer's own CI covers it). What still
+# reads this checkout is leg (5) of
+# tests/integration/t_workspace_lock_partition_resolves_a_sibling_for_ci.nim,
+# which runs the real `clone-siblings/resolve-sibling-rev.sh` when it finds
+# one here (falling back to `../codetracer/scripts/`) and skips that leg
+# otherwise. Kept for that leg; drop it together with ci.yml's clone step if
+# the leg is not worth a clone.
 metacraft-github-actions=dev
 
 # The Test Certificates specification (private; mainline `latest`). Its

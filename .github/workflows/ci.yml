@@ -494,8 +494,6 @@ jobs:
             reprobuild-cmake
             reprobuild-examples
             gosti
-            codetracer-native-backend
-            codetracer-visual-replay
           permission-contents: read
 
       # Sibling clones: setup-dev-env clones the CodeTracer sibling declared in
@@ -545,33 +543,6 @@ jobs:
           path: ${{ github.workspace }}/../reprobuild-examples
           gh-token: ${{ steps.ci_token.outputs.token }}
 
-      # The `ct-mcr` recorder bundle (`.#test-cross-repo-fixtures` edge
-      # `reprobuild.test_fixtures.hcr_ct_mcr_bundle`, which
-      # e2e_hcr_linux_replay_of_patched_recording records and replays with)
-      # is built by the recorder's own `just build-ct-mcr`. Its licensing
-      # prerequisite builds `ct_license_ffi` in ../codetracer-native-backend,
-      # and ct_cli imports ../codetracer-visual-replay; the recorder,
-      # codetracer, codetracer-trace-format and codetracer-trace-format-nim
-      # already come from .github/sibling-repos. Cloned here rather than added
-      # to sibling-repos because only this job builds that collection.
-      - name: Clone codetracer-native-backend sibling
-        timeout-minutes: 10
-        uses: metacraft-labs/metacraft-github-actions/clone-repo@dev
-        with:
-          repo: metacraft-labs/codetracer-native-backend
-          ref: dev
-          path: ${{ github.workspace }}/../codetracer-native-backend
-          gh-token: ${{ steps.ci_token.outputs.token }}
-
-      - name: Clone codetracer-visual-replay sibling
-        timeout-minutes: 10
-        uses: metacraft-labs/metacraft-github-actions/clone-repo@dev
-        with:
-          repo: metacraft-labs/codetracer-visual-replay
-          ref: dev
-          path: ${{ github.workspace }}/../codetracer-visual-replay
-          gh-token: ${{ steps.ci_token.outputs.token }}
-
       # gosti ships the ``gosti`` library that the ReproOS
       # R2 / R9 boot integration tests import unconditionally at the
       # top of the file.  ``addPackagePath("GOSTI_SRC", …)`` in
@@ -605,12 +576,12 @@ jobs:
       # 100-second per-action timeout — which the Windows lane could not
       # sustain and which failed before its first step.
       #
-      # ``tests/e2e/codetracer-subset/`` asserts a contract on
-      # ``reprobuild-provision``'s action.yml (that it provisions the CodeTracer
-      # Nim gitlinks the subset build needs), so it now reads that file from
-      # this sibling. The assertion raises ``MissingTestFixtureError`` rather
-      # than skipping when the checkout is absent, so without this clone the
-      # test fails loudly instead of silently asserting nothing.
+      # The suite reads this sibling in one place: leg (5) of
+      # ``t_workspace_lock_partition_resolves_a_sibling_for_ci`` runs the real
+      # ``clone-siblings/resolve-sibling-rev.sh`` from it (and skips that leg
+      # when neither this clone nor ``../codetracer/scripts/`` carries one).
+      # Its former hard consumer, the CodeTracer e2e project-file test, was
+      # removed on 2026-11-06; CodeTracer's own CI covers it.
       - name: Clone metacraft-github-actions sibling
         timeout-minutes: 10
         uses: metacraft-labs/metacraft-github-actions/clone-repo@dev
@@ -1114,15 +1085,7 @@ jobs:
           app-id: ${{ secrets.CI_TOKEN_PROVIDER_APP_ID }}
           private-key: ${{ secrets.CI_TOKEN_PROVIDER_PRIVATE_KEY }}
           owner: metacraft-labs
-          # codetracer-rr (a private flake input of the recorder's dev shell)
-          # and lldb-sys.rs (a private cargo git dependency of the backend's
-          # `ct_license_ffi`) are fetched while `.#test-cross-repo-fixtures`
-          # builds the `ct-mcr` bundle for
-          # e2e_hcr_linux_replay_of_patched_recording.
-          repositories: |
-            codetracer-native-recorder
-            codetracer-rr
-            lldb-sys.rs
+          repositories: codetracer-native-recorder
           permission-contents: read
 
       # BUDGET NOTE (rewritten 2026-10-18 against runs 38428391026 and
@@ -1250,27 +1213,12 @@ jobs:
           GIT_CONFIG_GLOBAL: /dev/null
           GIT_CONFIG_NOSYSTEM: '1'
           GIT_TERMINAL_PROMPT: '0'
-          # The second rewrite, and cargo fetching through the git CLI so that
-          # it honours these GIT_CONFIG_* rewrites at all, serve the `ct-mcr`
-          # bundle edge (scripts/build_hcr_ct_mcr_fixture.sh forwards exactly
-          # these variables into the recorder's otherwise cleared shell).
-          CARGO_NET_GIT_FETCH_WITH_CLI: 'true'
-          # ...and those credentials are the `ci_token_test` installation
-          # token, which expires one hour after the step above minted it. The
-          # build phase reaches `.#test-cross-repo-fixtures` later than that
-          # (66 minutes on run 41363427228, whose bundle fetch was refused as
-          # "Invalid username or token"), so run_tests.sh builds the bundle
-          # first and the collection stages it (see "Step 0" there).
-          REPROBUILD_PREBUILD_CROSS_REPO_FIXTURES: '1'
-          GIT_CONFIG_COUNT: '2'
+          GIT_CONFIG_COUNT: '1'
           GIT_CONFIG_KEY_0: url.https://x-access-token:${{ steps.ci_token_test.outputs.token }}@github.com/metacraft-labs/codetracer-native-recorder.insteadOf
           GIT_CONFIG_VALUE_0: https://github.com/metacraft-labs/codetracer-native-recorder
-          GIT_CONFIG_KEY_1: url.https://x-access-token:${{ steps.ci_token_test.outputs.token }}@github.com/metacraft-labs/lldb-sys.rs.insteadOf
-          GIT_CONFIG_VALUE_1: https://github.com/metacraft-labs/lldb-sys.rs
           NIX_CONFIG: >-
             access-tokens = github.com=${{ github.token }}
             github.com/metacraft-labs/codetracer-native-recorder=${{ steps.ci_token_test.outputs.token }}
-            github.com/metacraft-labs/codetracer-rr=${{ steps.ci_token_test.outputs.token }}
         run: dev-exec just test
       # Say, where the conclusion is read, whether this run is a VERDICT on the
       # code or a partial run. A `cancelled` or truncated run used to look like
