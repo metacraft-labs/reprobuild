@@ -11565,8 +11565,14 @@ proc extractInterfaceEdge(modulePath, artifactPath, stubPath: string;
       if encoded.len > 0:
         copyMem(addr text[0], unsafeAddr encoded[0], encoded.len)
       publishIfChanged(artifactPath, text)
+      # The stub is regenerated from the REBASED artifact, never copied: the
+      # edge's stub was written by the runner from the artifact at the
+      # location that produced the record, and embeds that location's source
+      # sites and nix `expressionFile`s (reprobuild-pm issue 2026-11-11, "a
+      # relocated interface artifact carries the producing checkout's nix
+      # expression paths").
       if stubPath.len > 0 and fileExists(extendedPath(boundEdgeStub)):
-        publishIfChanged(stubPath, readFile(extendedPath(boundEdgeStub)))
+        publishIfChanged(stubPath, nimInterfaceStubText(result))
     else:
       result = readInterfaceArtifact(artifactPath)
     # Shared-Development-Services §4.3's STALE-LIFT PRECONDITION: record

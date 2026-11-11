@@ -1653,6 +1653,27 @@ var
     ## locations are named relative to.
   locationAnchors {.threadvar.}: seq[string]
   locationsRelative {.threadvar.}: bool
+  skipFingerprintCheck {.threadvar.}: bool
+    ## Set by `readInterfaceArtifactRebased` for its second, rebasing decode
+    ## only: rebasing legitimately changes the location-bearing values the
+    ## stored digest covers, so that decode is verified by the first one.
+
+proc relocatedPathValue(path: string): string =
+  ## A path-valued field that is not a `SourceLocation` (a nix
+  ## `expressionFile`, absolutised against the declaring file by the DSL)
+  ## as the current codec mode writes or reads it: relative to the recipe
+  ## outside the anchors while `writeInterfaceArtifactRecipeRelative` runs,
+  ## rebased onto the consulting recipe while `readInterfaceArtifactRebased`
+  ## runs, unchanged otherwise. It applies in fingerprint mode too, so the
+  ## digest a recipe-relative artifact stores covers the relative form.
+  ## Hermetic-Builds-And-Path-Independence.md §"Engine-internal recipe
+  ## compiles": what the extraction writes is relocatable.
+  if locationBase.len == 0:
+    path
+  elif locationsRelative:
+    relocatableName(path, locationBase, locationAnchors)
+  else:
+    rebasedName(path, locationBase)
 
 proc writeLocation(outp: var seq[byte]; loc: SourceLocation;
                    forFingerprint = false) =
@@ -1939,7 +1960,7 @@ proc writeNixProvisioning(outp: var seq[byte];
     outp.writeString(provisioning.contributor)
   outp.writeString(provisioning.selector)
   outp.writeString(provisioning.executablePath)
-  outp.writeString(provisioning.expressionFile)
+  outp.writeString(relocatedPathValue(provisioning.expressionFile))
   outp.writeString(provisioning.nixpkgsRef)
   outp.writeString(provisioning.nixpkgsRev)
   outp.writeString(provisioning.nixpkgsNarHash)
@@ -1955,7 +1976,7 @@ proc readNixProvisioning(bytes: openArray[byte]; pos: var int;
   result.selector = readString(bytes, pos)
   result.executablePath = readString(bytes, pos)
   if version >= 3'u16:
-    result.expressionFile = readString(bytes, pos)
+    result.expressionFile = relocatedPathValue(readString(bytes, pos))
   if version >= 7'u16:
     result.nixpkgsRef = readString(bytes, pos)
     result.nixpkgsRev = readString(bytes, pos)
@@ -2629,7 +2650,8 @@ proc decodeProjectInterfaceArtifact*(bytes: openArray[
     bytes.toOpenArray(interfacePayloadStart,
       interfacePayloadStart + interfacePayloadLen - 1),
     hdMetadataEnvelope)
-  if result.interfaceFingerprint != semanticFingerprint and
+  if not skipFingerprintCheck and
+      result.interfaceFingerprint != semanticFingerprint and
       result.interfaceFingerprint != legacyWireFingerprint:
     raiseEnvelopeError(eeMalformed, "interface fingerprint mismatch")
   if version >= 8'u16:
@@ -2717,28 +2739,50 @@ proc writeInterfaceArtifactRecipeRelative*(path: string;
   ## relative to `recipeDir` (`repro_core/relocation`). This is the form the
   ## recipe-relative extraction edge produces, so the bytes it caches
   ## describe whichever copy of the recipe restores them; a reader rebases
-  ## them with `readInterfaceArtifactRebased`. The interface fingerprint is
-  ## unaffected: it never contains locations.
+  ## them with `readInterfaceArtifactRebased`.
+  ##
+  ## The stored interface fingerprint is recomputed over the relative form.
+  ## `SourceLocation`s never reach it, but a nix `expressionFile` does (the
+  ## DSL absolutises it against the declaring file), so the digest the
+  ## runner computed names the PRODUCING copy; the relative form's digest is
+  ## the same at every copy and verifies a plain decode of these bytes.
   locationBase = absolutePath(recipeDir)
   locationAnchors = effectiveAnchors(locationBase, anchors)
   locationsRelative = true
   try:
-    writeInterfaceArtifact(path, artifact)
+    var relative = artifact
+    relative.interfaceFingerprint =
+      interfaceFingerprint(artifact.projectInterface)
+    writeInterfaceArtifact(path, relative)
   finally:
     locationBase = ""
     locationAnchors = @[]
+    locationsRelative = false
 
 proc readInterfaceArtifactRebased*(path, recipeDir: string):
     ProjectInterfaceArtifact =
   ## Read an artifact written by `writeInterfaceArtifactRecipeRelative`,
-  ## resolving its relative source locations against `recipeDir` — the
-  ## recipe as it lies at THIS location.
+  ## resolving its relative source locations (and relative nix
+  ## `expressionFile`s) against `recipeDir` — the recipe as it lies at THIS
+  ## location.
+  ##
+  ## The bytes are decoded twice. The first, plain decode verifies the
+  ## stored fingerprint against the form it was computed over (the relative
+  ## one, `writeInterfaceArtifactRecipeRelative`). The second rebases, and
+  ## the result carries the fingerprint of the rebased interface: the one a
+  ## plain extraction at this location computes, and the one a plain decode
+  ## of the caller's re-encoded copy verifies.
+  let bytes = fromByteString(readFile(extendedPath(path)))
+  discard decodeProjectInterfaceArtifact(bytes)
   locationBase = absolutePath(recipeDir)
   locationsRelative = false
+  skipFingerprintCheck = true
   try:
-    result = readInterfaceArtifact(path)
+    result = decodeProjectInterfaceArtifact(bytes)
   finally:
     locationBase = ""
+    skipFingerprintCheck = false
+  result.interfaceFingerprint = interfaceFingerprint(result.projectInterface)
 
 proc writeProviderCompileArtifact*(path: string;
     artifact: ProviderCompileArtifact) =
@@ -4030,7 +4074,11 @@ proc emitLiftedServiceSymbols(code: var string; packageName: string;
       ", contributionPoints: @[" & pointsList & "])\n")
   code.add("\n")
 
-proc writeNimInterfaceStub*(path: string; artifact: ProjectInterfaceArtifact) =
+proc nimInterfaceStubText*(artifact: ProjectInterfaceArtifact): string =
+  ## The Nim stub of `artifact` (see `writeNimInterfaceStub`). It embeds the
+  ## artifact's source sites and nix `expressionFile`s verbatim, so a caller
+  ## that rebased an artifact regenerates the stub from it rather than
+  ## copying one written at another location.
   let pkg = artifact.projectInterface
   var code = "import repro_project_dsl\n\n"
   emitLiftedExtensionTypes(code, pkg.publicResources)
@@ -4095,8 +4143,11 @@ proc writeNimInterfaceStub*(path: string; artifact: ProjectInterfaceArtifact) =
         exe.binaryName &
         "\", \"" & cmd.name & "\", \"" & cmd.providerEntrypointId &
         "\", @[" & argCalls.join(", ") & "])\n\n")
+  code
+
+proc writeNimInterfaceStub*(path: string; artifact: ProjectInterfaceArtifact) =
   createDir(extendedPath(parentDir(path)))
-  writeFile(extendedPath(path), code)
+  writeFile(extendedPath(path), nimInterfaceStubText(artifact))
 
 when compileOption("threads"):
   import std/locks

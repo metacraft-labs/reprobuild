@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 35,
-    "nimTestBinaries": 2703,
+    "nimTestBinaries": 2705,
     "pureUnitConsolidationGroups": 79,
-    "pureUnitTests": 744,
+    "pureUnitTests": 745,
     "staticallyDetectedRuntimeCompilerFlowTests": 137,
-    "testEntries": 2742
+    "testEntries": 2744
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -427,7 +427,7 @@
       "targetOs": "soAny"
     },
     {
-      "count": 3,
+      "count": 4,
       "defines": [],
       "dependencyShape": [
         "repro_interface_artifacts"
@@ -436,7 +436,8 @@
       "sources": [
         "libs/repro_interface_artifacts/tests/t_compiler_crash_is_not_a_compile_error.nim",
         "libs/repro_interface_artifacts/tests/t_contribution_records.nim",
-        "libs/repro_interface_artifacts/tests/t_nix_lib_dir_selects_host_target_arch.nim"
+        "libs/repro_interface_artifacts/tests/t_nix_lib_dir_selects_host_target_arch.nim",
+        "libs/repro_interface_artifacts/tests/t_recipe_relative_artifact_rebases_nix_expression_files.nim"
       ],
       "targetOs": "soAny"
     },
@@ -1564,9 +1565,9 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 21,
-      "integration": 1488,
+      "integration": 1489,
       "platform/destructive": 173,
-      "pure unit": 744,
+      "pure unit": 745,
       "unclassified": 316
     },
     "graphOwnedTestArtifacts": [
@@ -1781,9 +1782,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2703,
+    "nimTestBinaryCount": 2705,
     "pythonTestFileCount": 39,
-    "testEntryCount": 2742
+    "testEntryCount": 2744
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -18317,6 +18318,23 @@
       "sourceSuiteCount": 4,
       "staticCaseCount": 17,
       "staticallyDetectedRuntimeCompilerFlow": true,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_recipe_relative_artifact_rebases_nix_expression_files",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_interface_artifacts"
+      ],
+      "owner": "libs/repro_interface_artifacts",
+      "requiresReproBinary": false,
+      "source": "libs/repro_interface_artifacts/tests/t_recipe_relative_artifact_rebases_nix_expression_files.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 2,
+      "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
     {
@@ -42623,6 +42641,25 @@
       "owner": "tests/integration",
       "requiresReproBinary": true,
       "source": "tests/integration/t_integrity_uses_vcs_native_hash_else_own_file_hash_both_multihash.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_interface_extraction_copy_names_its_own_nix_expression_files",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_dsl_stdlib",
+        "repro_project_dsl",
+        "repro_test_support"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_interface_extraction_copy_names_its_own_nix_expression_files.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 1,
       "staticallyDetectedRuntimeCompilerFlow": false,
