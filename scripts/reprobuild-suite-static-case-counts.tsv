@@ -1604,8 +1604,8 @@ tests/integration/t_attestation_module_census.nim	nim	9
 tests/integration/t_attestation_report.nim	nim	3
 tests/integration/t_attested_image_manifest.nim	nim	4
 tests/integration/t_authenticated_inference_binding_mutations.nim	nim	26
-tests/integration/t_auto_runquota_daemon_ends_with_its_invocation.nim	nim	12
-tests/integration/t_auto_runquota_uses_private_endpoint_policy.nim	nim	12
+tests/integration/t_auto_runquota_daemon_ends_with_its_invocation.nim	nim	13
+tests/integration/t_auto_runquota_uses_private_endpoint_policy.nim	nim	13
 tests/integration/t_autotools_configure_cache.nim	nim	1
 tests/integration/t_autotools_configure_tools.nim	nim	1
 tests/integration/t_b0_develop_mode_uses_local_source.nim	nim	1
