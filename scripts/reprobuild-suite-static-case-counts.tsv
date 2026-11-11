@@ -2707,6 +2707,7 @@ tests/unit/t_runquota_queue_wait_is_loud_and_bounded.nim	nim	15
 tests/unit/t_rx_runquotad_forwards_custom_pools.nim	nim	6
 tests/unit/t_same_project_fragment_selectors.nim	nim	12
 tests/unit/t_script_launcher.nim	nim	3
+tests/unit/t_several_recipe_modules_init_without_a_solve_each.nim	nim	3
 tests/unit/t_shared_mime_info_dev_stub.nim	nim	1
 tests/unit/t_sibling_prefix_clone.nim	nim	4
 tests/unit/t_sibling_source_paths_are_spelled_relative.nim	nim	5

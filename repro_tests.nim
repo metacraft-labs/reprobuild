@@ -28061,7 +28061,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_unit_g02",
+    group: "t_group_tests_unit_g01",
     singleReason: ""),
   TestSpec(
     source: "tests/unit/t_hcr_agent_process_target.nim",
@@ -28699,7 +28699,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_unit_g03",
+    group: "t_group_tests_unit_g02",
     singleReason: ""),
   TestSpec(
     source: "tests/unit/t_m9r15q_2_from_source_custom_registry_population.nim",
@@ -29271,7 +29271,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_unit_g04",
+    group: "t_group_tests_unit_g03",
     singleReason: ""),
   TestSpec(
     source: "tests/unit/t_missing_json_evidence.nim",
@@ -29669,6 +29669,17 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     selfInterposes: false,
     group: "",
     singleReason: "suite-scope statement runs at every start-up: putEnv(\"REPRO_CACHE_DISABLE\", \"1\")"),
+  TestSpec(
+    source: "tests/unit/t_several_recipe_modules_init_without_a_solve_each.nim",
+    binary: "build/test-bin/t_several_recipe_modules_init_without_a_solve_each",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "t_group_tests_unit_g04",
+    singleReason: ""),
   TestSpec(
     source: "tests/unit/t_shared_mime_info_dev_stub.nim",
     binary: "build/test-bin/t_shared_mime_info_dev_stub",
