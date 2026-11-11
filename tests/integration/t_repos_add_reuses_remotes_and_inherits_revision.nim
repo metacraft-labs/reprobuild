@@ -10,7 +10,8 @@
 ## the collection-level default the membership model exists to remove. Every
 ## fragment must now resolve a `mainline` (Workspace-Branch-Roles.md §3.3):
 ## its own, or the one the workspace's `[workspace] default_profile` supplies.
-## So without `--branch`, in a workspace whose default profile supplies none,
+## So without `--mainline` (or its other spelling `--branch`), in a workspace
+## where no profile the fragment can follow supplies one,
 ## the add is rejected at the point of authorship and nothing is written —
 ## and `--revision` alone does not satisfy the rule, because a commit pin sits
 ## BESIDE a mainline rather than being one.
@@ -433,9 +434,9 @@ suite "repro workspace repos add — remote reuse and revision inheritance":
       check refused.code != 0
       # The diagnostic has to carry the fix, because this is the first thing
       # an author hits: the flag, the rule, and a runnable example.
-      check refused.output.contains("--branch is required")
+      check refused.output.contains("--mainline is required")
       check refused.output.contains("declares the branch it tracks")
-      check refused.output.contains("--branch=dev")
+      check refused.output.contains("--mainline=dev")
       check refused.output.contains("Nothing was written")
 
       # "Write nothing" asserted on disk, not inferred from the exit code: the
@@ -461,7 +462,7 @@ suite "repro workspace repos add — remote reuse and revision inheritance":
       # An exact pin with no branch is refused the same way. A commit pin sits
       # BESIDE a mainline, it is not one, so `--revision` alone leaves the
       # fragment with no mainline to resolve — the refusal (exit 2) names
-      # `--branch` and the way to combine the two, and writes nothing.
+      # `--mainline` and the way to combine the two, and writes nothing.
       let pinnedSha = "0123456789abcdef0123456789abcdef01234567"
       # The positive control above minted the `acme` remote, so "nothing
       # written" is measured against the project as it stands now.
@@ -470,8 +471,8 @@ suite "repro workspace repos add — remote reuse and revision inheritance":
         "--remote=https://git.example.invalid/acme/pinned-only-lib.git",
         "--revision=" & pinnedSha])
       check pinnedOnly.code == 2
-      check pinnedOnly.output.contains("--branch is required")
-      check pinnedOnly.output.contains("--revision=<commit> alongside --branch")
+      check pinnedOnly.output.contains("--mainline is required")
+      check pinnedOnly.output.contains("--revision=<commit> alongside --mainline")
       check pinnedOnly.output.contains("Nothing was written")
       check not fileExists(fx.workspaceRoot / "repos" / "pinned-only-lib.toml")
       check not fileExists(fx.workspaceRoot / "repos" / "pinned-only-lib.md")
@@ -562,3 +563,153 @@ suite "repro workspace repos add — remote reuse and revision inheritance":
       check not fragment.contains("mainline")
       check revisionOf(fx.projectFile, "pinned-lib") == "dev"
       check fetchUrlOf(fx.projectFile, "pinned-lib") == url
+
+  test "test_repo_add_writes_mainline_and_profile_into_the_new_fragment":
+    # Workspace-Branch-Roles.md §3.3: `repos add` writes `--mainline=<branch>`
+    # and `--profile=<name>` into the new fragment, and requires `--mainline`
+    # only when no profile it can see supplies one — the profile it names,
+    # else (only when it names none) the workspace default profile.
+    let gitBin = findExe("git")
+    if gitBin.len == 0:
+      skip("git is not on PATH")
+    else:
+      let fx = setupFixture(gitBin, "mainlineprofile")
+      defer: removeDir(fx.scratch)
+
+      # Two profiles and, at first, NO default profile: `product` supplies a
+      # mainline, `edge` declares only a role beside one.
+      const profiles = "[profiles.product]\nmainline = \"dev\"\n\n" &
+        "[profiles.edge]\nunstable = \"agents\"\n"
+      writeFile(fx.workspaceRoot / "repro-workspace.toml",
+        "schema = \"reprobuild.workspace.settings.v1\"\n\n" & profiles)
+      discard requireGit(q(gitBin) & " -C " & q(fx.workspaceRoot) & " add -A")
+      discard requireGit(q(gitBin) & " -C " & q(fx.workspaceRoot) &
+        " commit -m settings")
+
+      # `--mainline=dev` is written as `[repo] mainline`, with no profile key.
+      let byMainline = addRepo(fx, @["reprobuild", "mainline-lib",
+        "--remote=https://git.example.invalid/acme/mainline-lib.git",
+        "--mainline=dev"])
+      checkpoint("--mainline: " & byMainline.output)
+      check byMainline.code == 0
+      let mainlineText = readFile(fx.workspaceRoot / "repos" /
+        "mainline-lib.toml")
+      check mainlineText.contains("mainline = \"dev\"")
+      check not mainlineText.contains("profile")
+      check revisionOf(fx.projectFile, "mainline-lib") == "dev"
+
+      # `--profile=product` alone: the profile supplies the mainline, so
+      # `--mainline` may be omitted. The fragment names the profile, does not
+      # restate the mainline, and resolves to the profile's.
+      let byProfile = addRepo(fx, @["reprobuild", "profiled-lib",
+        "--remote=https://git.example.invalid/acme/profiled-lib.git",
+        "--profile=product"])
+      checkpoint("--profile: " & byProfile.output)
+      check byProfile.code == 0
+      let profiledText = readFile(fx.workspaceRoot / "repos" /
+        "profiled-lib.toml")
+      check profiledText.contains("profile = \"product\"")
+      check not profiledText.contains("mainline")
+      check revisionOf(fx.projectFile, "profiled-lib") == "dev"
+
+      # Both together: the fragment's own mainline is written beside the
+      # profile and wins over it (§3.3 order).
+      let both = addRepo(fx, @["reprobuild", "both-lib",
+        "--remote=https://git.example.invalid/acme/both-lib.git",
+        "--mainline=main", "--profile=product"])
+      checkpoint("both: " & both.output)
+      check both.code == 0
+      let bothText = readFile(fx.workspaceRoot / "repos" / "both-lib.toml")
+      check bothText.contains("mainline = \"main\"")
+      check bothText.contains("profile = \"product\"")
+      check revisionOf(fx.projectFile, "both-lib") == "main"
+
+      # Every refusal below must write nothing; measured against the project
+      # as the accepted adds above left it.
+      let projectBefore = readFile(fx.projectFile)
+      template checkWroteNothing(repo: string) =
+        check not fileExists(fx.workspaceRoot / "repos" / (repo & ".toml"))
+        check not fileExists(fx.workspaceRoot / "repos" / (repo & ".md"))
+        check readFile(fx.projectFile) == projectBefore
+
+      # Neither flag and no default profile: exit 2, nothing written.
+      let neither = addRepo(fx, @["reprobuild", "neither-lib",
+        "--remote=https://git.example.invalid/acme/neither-lib.git"])
+      check neither.code == 2
+      check neither.output.contains("--mainline is required")
+      check neither.output.contains("Nothing was written")
+      checkWroteNothing("neither-lib")
+
+      # A profile that supplies no mainline does not satisfy the rule.
+      let edgeOnly = addRepo(fx, @["reprobuild", "edge-lib",
+        "--remote=https://git.example.invalid/acme/edge-lib.git",
+        "--profile=edge"])
+      check edgeOnly.code == 2
+      check edgeOnly.output.contains("--mainline is required")
+      check edgeOnly.output.contains("profile 'edge' does not")
+      check edgeOnly.output.contains("--mainline=dev --profile=edge")
+      checkWroteNothing("edge-lib")
+
+      # A profile that is not declared is refused before anything is written:
+      # the fragment would fail manifest load (§3.5) on every machine.
+      let undeclared = addRepo(fx, @["reprobuild", "ghost-lib",
+        "--remote=https://git.example.invalid/acme/ghost-lib.git",
+        "--mainline=dev", "--profile=ghost"])
+      check undeclared.code == 2
+      check undeclared.output.contains("profile 'ghost' is not declared")
+      check undeclared.output.contains("[profiles.ghost]")
+      checkWroteNothing("ghost-lib")
+
+      # `--branch` is another spelling of `--mainline`; two values that
+      # disagree are refused rather than one silently winning.
+      let disagree = addRepo(fx, @["reprobuild", "twice-lib",
+        "--remote=https://git.example.invalid/acme/twice-lib.git",
+        "--mainline=dev", "--branch=main"])
+      check disagree.code == 2
+      check disagree.output.contains("different values")
+      checkWroteNothing("twice-lib")
+
+      # An existing fragment is reused, not rewritten: a contradicting
+      # `--profile` is refused (exit 1) and the fragment keeps its bytes.
+      let mainlineBefore = readFile(fx.workspaceRoot / "repos" /
+        "mainline-lib.toml")
+      let reprofile = addRepo(fx, @["reprobuild", "mainline-lib",
+        "--remote=https://git.example.invalid/acme/mainline-lib.git",
+        "--profile=product"])
+      check reprofile.code == 1
+      check reprofile.output.contains("profile ((none) vs product)")
+      check readFile(fx.workspaceRoot / "repos" / "mainline-lib.toml") ==
+        mainlineBefore
+
+      # With a default profile that supplies a mainline, a fragment naming
+      # `edge` is STILL refused: a fragment that names a profile does not fall
+      # back to the default profile (§3.3), so the default cannot rescue it.
+      writeFile(fx.workspaceRoot / "repro-workspace.toml",
+        "schema = \"reprobuild.workspace.settings.v1\"\n\n" &
+        "[workspace]\ndefault_profile = \"product\"\n\n" & profiles)
+      discard requireGit(q(gitBin) & " -C " & q(fx.workspaceRoot) & " add -A")
+      discard requireGit(q(gitBin) & " -C " & q(fx.workspaceRoot) &
+        " commit -m default-profile")
+      let edgeWithDefault = addRepo(fx, @["reprobuild", "edge-lib",
+        "--remote=https://git.example.invalid/acme/edge-lib.git",
+        "--profile=edge"])
+      check edgeWithDefault.code == 2
+      check edgeWithDefault.output.contains("--mainline is required")
+      check not fileExists(fx.workspaceRoot / "repos" / "edge-lib.toml")
+
+      # POSITIVE CONTROLS for the case above: the same `edge` profile with a
+      # mainline of its own is accepted, and an add naming neither flag is now
+      # accepted because the default profile supplies the mainline.
+      let edgeWithMainline = addRepo(fx, @["reprobuild", "edge-lib",
+        "--remote=https://git.example.invalid/acme/edge-lib.git",
+        "--profile=edge", "--mainline=dev"])
+      checkpoint("edge + mainline: " & edgeWithMainline.output)
+      check edgeWithMainline.code == 0
+      check revisionOf(fx.projectFile, "edge-lib") == "dev"
+      let byDefault = addRepo(fx, @["reprobuild", "neither-lib",
+        "--remote=https://git.example.invalid/acme/neither-lib.git"])
+      checkpoint("default profile: " & byDefault.output)
+      check byDefault.code == 0
+      check not readFile(fx.workspaceRoot / "repos" /
+        "neither-lib.toml").contains("mainline")
+      check revisionOf(fx.projectFile, "neither-lib") == "dev"
