@@ -1,0 +1,78 @@
+name: Add-on toolchains
+
+# Keeps the static add-on's cross toolchains in the organisation's binary
+# cache, so the release's `build-addon-static` job substitutes them.
+#
+# scripts/build_addon_static.sh links the add-on against nixpkgs' musl
+# toolchains for amd64, arm64 and armhf. cache.nixos.org does not serve the
+# armhf one (pkgsCross.armv7l-hf-multiplatform.pkgsStatic), so a runner whose
+# store lacks it builds the cross gcc from source: 5 h 37 m in release run
+# 41847213559, and v0.2.20's Linux leg hit its 540-minute cap on it. Every
+# flake.lock change that moves nixpkgs makes those paths new again.
+#
+# This workflow realizes exactly the toolchains the build uses
+# (`build_addon_static.sh --toolchains-only`) whenever flake.lock or the script
+# changes on `agents` or `dev`, and pushes their closures to Attic explicitly.
+# When nothing changed it only substitutes and pushes nothing new, which takes
+# minutes.
+
+on:
+  push:
+    branches: [agents, dev]
+    paths:
+      - flake.lock
+      - scripts/build_addon_static.sh
+      - .github/workflows/addon-toolchains.yml
+  workflow_dispatch:
+
+concurrency:
+  group: addon-toolchains-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  warm:
+    name: Build and cache the add-on toolchains
+    # General Linux x64 capacity, the runner release-platforms.json names for
+    # `addon_static`; the release lane has a single runner.
+    runs-on: [self-hosted, linux, x64]
+    # A cold armhf toolchain took 5 h 37 m on a release runner.
+    timeout-minutes: 480
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Setup Nix
+        uses: metacraft-labs/devops-modules/.github/setup-nix@dev
+        with:
+          trusted-public-keys: ${{ vars.TRUSTED_PUBLIC_KEYS }}
+          substituters: ${{ vars.SUBSTITUTERS }}
+          attic-token: ${{ secrets.ATTIC_TOKEN }}
+          attic-cache: ${{ vars.ATTIC_CACHE }}
+          attic-endpoint: ${{ vars.ATTIC_ENDPOINT }}
+          nix-github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Realize the toolchains
+        run: bash scripts/build_addon_static.sh --toolchains-only amd64 arm64 armhf
+
+      - name: Push their closures to Attic
+        env:
+          ATTIC_TOKEN: ${{ secrets.ATTIC_TOKEN }}
+          ATTIC_CACHE: ${{ vars.ATTIC_CACHE }}
+          ATTIC_ENDPOINT: ${{ vars.ATTIC_ENDPOINT }}
+        run: |
+          set -euo pipefail
+          : "${ATTIC_TOKEN:?ATTIC_TOKEN is required}"
+          : "${ATTIC_CACHE:?ATTIC_CACHE is required}"
+          : "${ATTIC_ENDPOINT:?ATTIC_ENDPOINT is required}"
+          echo "::add-mask::$ATTIC_TOKEN"
+          attic=(nix shell --accept-flake-config nixpkgs#attic-client -c attic)
+          "${attic[@]}" login --set-default addon-toolchains "$ATTIC_ENDPOINT" "$ATTIC_TOKEN"
+          mapfile -t roots < <(find build/addon -maxdepth 1 -name '.gcroot-*' -exec readlink -f {} \;)
+          [ "${#roots[@]}" -gt 0 ] || { echo "::error::no toolchain roots under build/addon"; exit 1; }
+          # `attic push` uploads each path's closure and skips what the
+          # cache already holds.
+          "${attic[@]}" push "$ATTIC_CACHE" "${roots[@]}"
