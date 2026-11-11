@@ -53,19 +53,27 @@ can check it, because it does not make one claim. Split it.
 Templates per kind:
 
 - **Tutorial.** A sentence saying what the reader will have built. "What you
-  need". Numbered steps, each ending in a result the reader can see. "What you
-  learned", with no new facts. "Next".
+  need". "How long", taken from the scenario's measured run, never estimated.
+  Numbered steps, each ending in a result the reader can see. "What you
+  learned", with no new facts, each point linking the concept page behind it.
+  "Next".
 - **How-to.** A sentence naming the goal. "Before you start", linking the
   preconditions. Numbered steps. "Check that it worked". "Related".
 - **Explanation.** A sentence saying what the page explains. Sections of
   prose, no step lists. "Related".
 - **Reference.** An introductory sentence and a generated region.
+- **Domain overview** (`how-to/<domain>/index.md`, kind `explanation`). One
+  screen naming the domain's concepts, linked, and its guides, listed by goal.
 - **Coming from a tool** (`coming-from/`, kind `explanation`). What transfers;
-  a concept map; what works differently and why; what reprobuild does not do;
-  **when the other tool is the better choice** (always present); the how-tos
-  for moving over. Command equivalents are not repeated on these pages: they
-  link [`reference/command-equivalents.md`](../users/reference/command-equivalents.md),
-  which is generated and checked against the CLI.
+  a concept map; the same configuration before and after; what works
+  differently and why; how both tools run side by side while you move over;
+  what reprobuild does not do; **when the other tool is the better choice**
+  (always present); the how-tos for moving over. Command equivalents are not
+  repeated on these pages: they link
+  [`reference/command-equivalents.md`](../users/reference/command-equivalents.md),
+  which is generated from `docs/users/data/command-equivalents.toml` by
+  `scripts/render_command_equivalents.py`. Run it after editing the data file,
+  and run it with `--check` before you commit.
 
 ## Readers
 
@@ -193,6 +201,8 @@ tutorial whose scenario fails is a failing test, not a stale page.
   "…, ensuring seamless …" clause; an opening "In today's world of …".
 - Name no internal plan, milestone or design document. A user page explains
   the concept itself.
+- Promise nothing about a future release, and offer nothing for sale. A user
+  page describes what the version it ships with does.
 
 ## What checks a page
 
@@ -203,7 +213,8 @@ tutorial whose scenario fails is a failing test, not a stale page.
 | Generated-region check | A hand edit inside a generated region | No |
 | Style checker | The words and patterns in [Language and style](#language-and-style), glossary synonyms, American spellings outside code | No |
 | Scenario runner | A tutorial step that fails or whose result differs | No |
-| Link check | A link or anchor that does not resolve | Partly: the repository's markdown link check |
+| Command-equivalents check | A stale `command-equivalents.md`, or a row naming a top-level verb `repro` does not dispatch | Yes: `python3 scripts/render_command_equivalents.py --check` |
+| Link check | A link or anchor that does not resolve | No dedicated check for `docs/users/` yet |
 
 The CLI reference, the command-equivalents table and the `commands` check all
 depend on a machine-readable description of the CLI, which `repro` does not

@@ -10,6 +10,7 @@ verifies:
   commands: [shell hook, allow, deny, dev-env export, dev-env deactivate]
   tests:
     - tests/integration/t_dev_env_allow.nim
+    - tests/e2e/dev-env/t_e2e_shell_hook_noop_latency.nim
 unverified:
   - claim: "The hook looks upwards from the current directory, stopping at your home directory, for repro.nim, reprobuild.nim or .repro/dev-env.lock."
     reason: "From the shell-hook design; no test is cited yet."
@@ -100,6 +101,17 @@ repro deny
 
 The hook no longer activates the environment there. `repro allow` and
 `repro deny` also take a directory as an argument.
+
+## Skip the trust check where no one can answer it
+
+In CI and other non-interactive shells, set `REPRO_DEV_ENV_AUTO_ALLOW=1` to
+activate environments without `repro allow`.
+
+:::danger
+With `REPRO_DEV_ENV_AUTO_ALLOW=1`, every directory with a project file is
+activated, including one you have never inspected. Set it only in a disposable
+environment that runs code you already trust.
+:::
 
 ## Check that it worked
 
