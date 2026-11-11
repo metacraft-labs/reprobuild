@@ -20,8 +20,9 @@
 ##
 ## WHO USES IT. The build engine around io-mon's in-process spawn
 ## (``beginMonitorSpawnContext``), and ``repro_cli_support`` around the spawn of
-## the ``runquotad`` an invocation owns (``startAutoRunQuotaIfNeeded``) and
-## around the detached post-commit cache push (``spawnAsyncCachePush``).
+## the ``runquotad`` an invocation owns (``startAutoRunQuotaIfNeeded``),
+## around the detached post-commit cache push (``spawnAsyncCachePush``) and
+## around the detached dev-session supervisor (``startBackgroundSupervisor``).
 ##
 ## THE WINDOW IS PROCESS-WIDE. Between the mark and the restore, a spawn made
 ## by ANOTHER thread also loses every descriptor above 2 it did not ``dup2``
