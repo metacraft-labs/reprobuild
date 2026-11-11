@@ -174,24 +174,25 @@ jobs:
              git fetch --no-tags --depth=1 origin "${ATTRIBUTION_BASE}"; then
             base="${ATTRIBUTION_BASE}"
           fi
-          dev-exec env "SUITE_CASE_COUNTS_BASE=${base}" bash scripts/check_suite_case_counts.sh
+          bash scripts/ci_nix_builder_logs.sh run test-logs suite-case-counts -- \
+            dev-exec env "SUITE_CASE_COUNTS_BASE=${base}" bash scripts/check_suite_case_counts.sh
       # The vacuous-case gate, for the same reason and at the same point:
       # a source scan that answers in seconds, so it is asked before the
       # multi-minute `nim check` sweep and its failure annotation names
       # this step rather than a lint log. `just lint` runs it too.
       - name: No test case asserts only `check true`
         if: ${{ !cancelled() && steps.suite_baseline.outcome != 'skipped' }}
-        run: dev-exec python3 scripts/check_vacuous_test_cases.py
+        run: bash scripts/ci_nix_builder_logs.sh run test-logs vacuous-cases -- dev-exec python3 scripts/check_vacuous_test_cases.py
       # Graph-Owned-Test-Artifacts M3, same class of gate: a source scan that
       # refuses a new test compiling a helper program at execution time. Named
       # as its own step so the failure annotation says what is wrong instead of
       # pointing at a lint log.
       - name: No test body compiles a helper program
         if: ${{ !cancelled() && steps.suite_baseline.outcome != 'skipped' }}
-        run: dev-exec python3 scripts/check_test_body_helper_compilation.py
+        run: bash scripts/ci_nix_builder_logs.sh run test-logs helper-compilation -- dev-exec python3 scripts/check_test_body_helper_compilation.py
       - name: just lint
         if: ${{ !cancelled() && steps.suite_baseline.outcome != 'skipped' }}
-        run: dev-exec just lint
+        run: bash scripts/ci_nix_builder_logs.sh run test-logs lint -- dev-exec just lint
       # The Nim 2.2.4 lane (owner decision 2026-11-07): the async suites that
       # once awaited inside a `finally`, built and run with the lowest Nim
       # repro.nim's `uses:` range admits. The dev shell's Nim compiles that
@@ -200,7 +201,7 @@ jobs:
       # by its build phase before it reaches a verdict.
       - name: Nim 2.2.4 lane
         if: ${{ !cancelled() && steps.suite_baseline.outcome != 'skipped' }}
-        run: dev-exec just test-nim224
+        run: bash scripts/ci_nix_builder_logs.sh run test-logs nim224 -- dev-exec just test-nim224
       - name: Upload logs
         if: always()
         uses: actions/upload-artifact@v4
@@ -654,7 +655,13 @@ jobs:
           mkdir -p test-logs
           # Keep evidence even when dev-exec fails before just creates its log.
           # Use a separate file: just bootstrap owns test-logs/bootstrap.log.
+          # The group re-enables errexit for itself: a failed bootstrap must
+          # still stop the preparation after it, while the step goes on to
+          # keep the builder log of any derivation that failed (the first
+          # dev-exec of the job is what realises the dev shell).
+          set +e
           {
+            set -e
             repro_root="${{ github.workspace }}"
             repro_bin="$repro_root/build/bin/repro"
             # Materialise reprobuild's own `repro` binary (idempotent bootstrap).
@@ -693,6 +700,14 @@ jobs:
               echo "ct-build: WARNING dev-shell LD_LIBRARY_PATH empty; cannot bake RPATH" >&2
             fi
           } 2>&1 | tee test-logs/ci-bootstrap.log
+          bootstrap_rc=$?
+          set -e
+          if [ "$bootstrap_rc" -ne 0 ]; then
+            # Evidence only: a collector that cannot run must not replace
+            # the bootstrap's own status.
+            bash scripts/ci_nix_builder_logs.sh collect test-logs/ci-bootstrap.log test-logs || true
+            exit "$bootstrap_rc"
+          fi
 
       # Reconcile CodeTracer's lock-pinned source siblings, after preparing
       # the freshly bootstrapped binaries.
@@ -720,7 +735,8 @@ jobs:
           # (an empty `repositories:` would mint an all-repositories token).
           # Deps under other owners are reported on stderr: they are cloned
           # without a credential.
-          repos="$(dev-exec python3 scripts/ci_lock_source_credentials.py repositories \
+          repos="$(bash scripts/ci_nix_builder_logs.sh run test-logs ct-lock-repos -- \
+            dev-exec python3 scripts/ci_lock_source_credentials.py repositories \
             --lock "$ct_root/repro.lock" --owner metacraft-labs)"
           printf '%s\n' "$repos"
           delim="ct_lock_repos_$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')"
@@ -803,7 +819,8 @@ jobs:
           git_auth_dir="$(mktemp -d "$RUNNER_TEMP/ct-lock-git-auth.XXXXXX")"
           trap 'rm -rf "$git_auth_dir"' EXIT
           git_auth_config="$git_auth_dir/gitconfig"
-          dev-exec python3 scripts/ci_lock_source_credentials.py gitconfig \
+          bash scripts/ci_nix_builder_logs.sh run test-logs ct-lock-gitconfig -- \
+            dev-exec python3 scripts/ci_lock_source_credentials.py gitconfig \
             --lock "$ct_root/repro.lock" --owner metacraft-labs \
             --out "$git_auth_config" --emit-actions-mask
           # The file now holds the credential; nothing below needs it in the
@@ -995,7 +1012,8 @@ jobs:
           # the caller instead.
           exit 0
           DUMP_EOS
-            tf_inputs="$(nix develop "$tf_root" \
+            tf_inputs="$(bash "$repro_root/scripts/ci_nix_builder_logs.sh" \
+              run "$repro_root/test-logs" ct-inputs -- nix develop "$tf_root" \
               --command sh "$RUNNER_TEMP/dump-ct-inputs.sh")" || {
               echo "ct-build: could not read declared inputs from $tf_root" >&2
               exit 1
@@ -1020,7 +1038,8 @@ jobs:
           # `error: Cannot build '<drv>'` -- nix buffers the builder's stdout
           # and nothing here asks for it -- so a failure names the derivation
           # and hides the error inside it. Step 15 already tees its output;
-          # this is the same thing one step later.
+          # this is the same thing one step later, and the collector picks
+          # out the derivations whose builder failed (see its header).
           mkdir -p "$repro_root/test-logs"
           ct_build_log="$repro_root/test-logs/ct-build.log"
           set +e
@@ -1044,18 +1063,8 @@ jobs:
           ct_build_rc=${PIPESTATUS[0]}
           set -e
           if [ "$ct_build_rc" -ne 0 ]; then
-            # Match every .drv the output names: `Cannot build '<drv>'`
-            # names only the DEPENDENTS, while nix names the derivation that
-            # actually failed on its own `For full logs, run: nix log <drv>`
-            # line -- excluding spaces from the class picks up both.
-            grep -oE "/nix/store/[a-z0-9]+-[^' ]+\\.drv" "$ct_build_log" \
-              | sort -u \
-              | while read -r drv; do
-                  echo "=== nix log $drv ==="
-                  nix log "$drv" 2>&1 \
-                    | tee "$repro_root/test-logs/drv-$(basename "$drv" .drv).log" \
-                    | tail -80
-                done
+            bash "$repro_root/scripts/ci_nix_builder_logs.sh" \
+              collect "$ct_build_log" "$repro_root/test-logs" || true
             exit "$ct_build_rc"
           fi
           ct_bin="$ct_root/src/build-debug-repro/bin/ct"
@@ -1219,7 +1228,7 @@ jobs:
           NIX_CONFIG: >-
             access-tokens = github.com=${{ github.token }}
             github.com/metacraft-labs/codetracer-native-recorder=${{ steps.ci_token_test.outputs.token }}
-        run: dev-exec just test
+        run: bash scripts/ci_nix_builder_logs.sh run test-logs test -- dev-exec just test
       # Say, where the conclusion is read, whether this run is a VERDICT on the
       # code or a partial run. A `cancelled` or truncated run used to look like
       # a result; scripts/ci_suite_coverage.py reads the runner's summary,
@@ -1245,7 +1254,8 @@ jobs:
                 --outcome "$JUST_TEST_OUTCOME"
                 --step-summary "$GITHUB_STEP_SUMMARY")
           if command -v dev-exec >/dev/null 2>&1; then
-            dev-exec python3 "${args[@]}"
+            bash scripts/ci_nix_builder_logs.sh run test-logs suite-coverage -- \
+              dev-exec python3 "${args[@]}"
           elif command -v python3 >/dev/null 2>&1; then
             python3 "${args[@]}"
           else
@@ -1374,7 +1384,8 @@ jobs:
       - name: Verify committed Nix inputs
         run: |
           git diff --exit-code -- flake.lock
-          dev-exec nix flake metadata --no-update-lock-file --json > /dev/null
+          bash scripts/ci_nix_builder_logs.sh run test-logs flake-metadata -- \
+            dev-exec nix flake metadata --no-update-lock-file --json > /dev/null
       - name: Check the trace-format pin against CodeTracer's lock
         # Decided at evaluation time, so it builds nothing: it fails when
         # ``ct-trace-format-src`` is not the revision the pinned
@@ -1382,8 +1393,10 @@ jobs:
         # flake.nix). Nothing else would run it -- CI builds only
         # ``.#default``, not ``checks.*``.
         run: |
-          system="$(dev-exec nix eval --impure --raw --expr builtins.currentSystem)"
-          dev-exec nix build --no-update-lock-file --no-link \
+          system="$(bash scripts/ci_nix_builder_logs.sh run test-logs current-system -- \
+            dev-exec nix eval --impure --raw --expr builtins.currentSystem)"
+          bash scripts/ci_nix_builder_logs.sh run test-logs trace-format-pin -- \
+            dev-exec nix build --no-update-lock-file --no-link \
             ".#checks.${system}.ct-trace-format-pin-coherence"
       - name: nix build
         # ``--log-lines 200`` widens nix's failure tail from its default 25.
@@ -1395,7 +1408,8 @@ jobs:
         # cannot tell a source regression from a transient builder failure
         # without reproducing the whole derivation by hand. The flag costs
         # nothing on success (nix prints the tail only when a build fails).
-        run: dev-exec nix build --no-update-lock-file --log-lines 200 .#default
+        # The wrapper keeps the WHOLE builder log in test-logs/ besides.
+        run: bash scripts/ci_nix_builder_logs.sh run test-logs nix-build -- dev-exec nix build --no-update-lock-file --log-lines 200 .#default
       - name: Upload logs
         if: always()
         uses: actions/upload-artifact@v4
