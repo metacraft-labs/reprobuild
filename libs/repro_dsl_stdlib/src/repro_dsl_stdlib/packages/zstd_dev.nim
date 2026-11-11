@@ -80,34 +80,92 @@
 ## relying on it would make the recipe correct by coincidence. ``^*`` asks for
 ## what the package needs directly.
 ##
-## ## Windows
+## ## Windows — MSYS2's UCRT64 package, pruned to a static ``libzstd.a``
 ##
-## The same facebook/zstd v1.5.6 win64 release the ``zstd`` package already
-## realizes. It ships ``include/zstd.h`` and ``static/libzstd_static.lib``
-## beside ``zstd.exe``, and ``stripComponents = 1`` puts them at the realized
-## prefix root — which is why the Windows half of ``packages/zstd.nim``
-## already described the shape this module implements on POSIX. The declared
-## executable here is the HEADER, so the two packages realize the same archive
-## and select different files out of it.
+## The contract is the POSIX one: ``zstd.h`` reaches the action through
+## ``CPATH`` and ``libzstd`` through ``LIBRARY_PATH``, so a consumer that
+## compiles ``#include <zstd.h>`` and links ``-lzstd`` with the MinGW gcc the
+## catalog provisions (``packages/gcc.nim``, WinLibs UCRT) needs nothing else.
+## A tarball realization threads exactly ``<prefix>/include`` and
+## ``<prefix>/lib`` into those channels (``repro_tool_profiles``'
+## ``tarballProfileFor``), so the archive has to put the library THERE.
+##
+## The facebook/zstd win64 release the ``zstd`` CLI package realizes does
+## not. Its static archive is ``static/libzstd_static.lib`` and its import
+## library is ``dll/libzstd.dll.a``; neither directory is ``lib/``, and
+## ``libzstd_static.lib`` is not a name ``ld``'s ``-lzstd`` search accepts.
+## That realization therefore supplied the header and silently no library:
+## ``addUniquePath`` drops the missing ``<prefix>/lib`` without a diagnostic,
+## the failure mode the sections above describe for the POSIX ``bin`` output.
+## (Upstream ships no Windows arm64 build at all: the v1.5.6 and v1.5.7
+## releases carry ``win32`` and ``win64`` zips only, checked 2026-11-11.)
+##
+## MSYS2's ``mingw-w64-ucrt-x86_64-zstd`` package has the standard layout
+## under one top-level ``ucrt64/`` directory, beside pacman's ``.BUILDINFO`` /
+## ``.MTREE`` / ``.PKGINFO``; ``stripComponents = 1`` puts ``include/`` and
+## ``lib/`` at the prefix root and drops those three. Its ``libzstd.a`` is a
+## plain COFF archive built by MSYS2's gcc 16.1.0 for the UCRT, without LTO
+## (``.PKGINFO``: ``options = !lto``; no ``.gnu.lto_*`` sections), so the
+## WinLibs gcc links it. It also matches the 1.5.7 the Nix arm realizes.
+##
+## Three paths are pruned, and each prune is load-bearing:
+##
+##   * ``lib/libzstd.dll.a`` — ``ld`` tries ``libzstd.dll.a`` before
+##     ``libzstd.a`` for ``-lzstd``, so with it present every consumer would
+##     link the DLL and then need ``libzstd.dll`` on its ``PATH`` at run time,
+##     which nothing provisions for the programs a build produces. Pruned,
+##     ``-lzstd`` can only bind the static archive.
+##   * ``bin`` — ``libzstd.dll`` and a ``zstd.exe`` that imports it. A
+##     tarball prefix's ``bin`` goes on the consuming action's ``PATH``, where
+##     this ``zstd.exe`` would shadow the ``zstd`` package's self-contained
+##     one and fail to start without its DLL. The CLI is the ``zstd``
+##     package's job.
+##   * ``lib/cmake`` — its ``zstdTargets-release.cmake`` names the pruned
+##     ``libzstd.dll.a`` / ``libzstd.dll`` for ``zstd::libzstd_shared`` and
+##     would fail ``find_package(zstd)`` on the missing files.
+##
+## ``lib/pkgconfig/libzstd.pc`` is kept: it says ``-lzstd``, which the
+## pruned ``lib/`` satisfies statically, and its ``prefix=/ucrt64`` is
+## relocated by pkg-config / pkgconf on Windows, which derive the prefix from
+## the ``.pc`` file's own location there.
+##
+## The ``lib/`` that remains holds ``libzstd.a`` alone, no CRT or pthread
+## archive, so putting it on ``LIBRARY_PATH`` cannot displace the
+## compiler's own runtime libraries, which a whole MSYS2 ``lib/`` would.
+##
+## MSYS2 keeps superseded package files on ``repo.msys2.org`` (``1.5.7-1``,
+## from 2025-02, is still served beside ``1.5.7-2``), so the pinned URL stays
+## fetchable after a rebuild; ``packages/msys2_libevent.nim`` and
+## ``packages/libtool.nim`` rely on the same.
 
 import repro_project_dsl
 import repro_dsl_stdlib/nixpkgs_pin
+
+const ZstdDevMsys2Version* = "1.5.7-2"
+  ## MSYS2's ``pkgver-pkgrel`` of the Windows realization. The record's
+  ## ``version`` is zstd's own, 1.5.7: a ``-2`` suffix would read as a
+  ## pre-release in a ``uses:`` range (``packages/msys2_libevent.nim``).
 
 package `zstd-dev`:
   provisioning:
     nixPackage "nixpkgs#zstd^*", executablePath = "include/zstd.h",
       nixpkgsRev = CanonicalNixpkgsRev,
       nixpkgsNarHash = CanonicalNixpkgsNarHash
-    # Windows: the same archive ``packages/zstd.nim`` pins, selected on its
-    # header instead of its ``zstd.exe``. Keep the url/sha256/packageId in
-    # lockstep with that file — they are two views of one upstream release.
-    tarball url = "https://github.com/facebook/zstd/releases/download/v1.5.6/zstd-v1.5.6-win64.zip",
-      sha256 = "7b4eff6719990e38aca93a4844c2e86a1935090625c4611f7e89675e999c56cc",
-      archiveType = "zip",
+    # Windows: MSYS2's UCRT64 build, pruned so that ``lib/`` holds only the
+    # static ``libzstd.a`` (module doc, "Windows"). Not the facebook/zstd zip
+    # ``packages/zstd.nim`` pins: that one has no ``lib/`` directory.
+    tarball url = "https://repo.msys2.org/mingw/ucrt64/mingw-w64-ucrt-x86_64-zstd-" &
+        ZstdDevMsys2Version & "-any.pkg.tar.zst",
+      sha256 = "dbdb8427280046a2b41697780aa4c52983b708082b0da4755951dc3bea96ca89",
+      archiveType = "tar.zst",
       stripComponents = 1,
+      prune = "bin",
+      prune = "lib/libzstd.dll.a",
+      prune = "lib/cmake",
       executablePath = "include/zstd.h",
-      version = "1.5.6",
-      packageId = "zstd-dev@1.5.6",
+      version = "1.5.7",
+      packageId = "zstd-dev@" & ZstdDevMsys2Version,
       cpu = "x86_64",
       os = "windows",
-      lockIdentity = "tarball:zstd-dev@1.5.6:sha256:7b4eff6719990e38aca93a4844c2e86a1935090625c4611f7e89675e999c56cc"
+      lockIdentity = "tarball:zstd-dev@" & ZstdDevMsys2Version &
+        ":windows-x86_64:sha256:dbdb8427280046a2b41697780aa4c52983b708082b0da4755951dc3bea96ca89"
