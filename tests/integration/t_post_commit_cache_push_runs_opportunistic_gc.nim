@@ -36,6 +36,7 @@
 import std/[json, os, osproc, strutils, tempfiles, unittest]
 
 import repro_test_support
+import repro_test_support/reasoned_skip
 
 proc q(value: string): string = quoteShell(value)
 
@@ -138,7 +139,7 @@ suite "regression — post-commit cache-push runs opportunistic maintenance":
   test "t_post_commit_cache_push_runs_opportunistic_gc":
     let gitBin = findExe("git")
     if gitBin.len == 0:
-      skip()
+      skip("git is not on PATH; this case needs a repository")
     else:
       let scratch = createTempDir("repro-oppgc-", "")
       defer: removeDir(scratch)
@@ -164,7 +165,7 @@ suite "regression — post-commit cache-push runs opportunistic maintenance":
   test "t_post_commit_cache_push_maintains_other_due_bares":
     let gitBin = findExe("git")
     if gitBin.len == 0:
-      skip()
+      skip("git is not on PATH; this case needs a repository")
     else:
       let scratch = createTempDir("repro-oppgc-other-", "")
       defer: removeDir(scratch)
@@ -192,7 +193,7 @@ suite "regression — post-commit cache-push runs opportunistic maintenance":
   test "t_post_commit_cache_push_keeps_refs_of_an_unreadable_sibling":
     let gitBin = findExe("git")
     if gitBin.len == 0:
-      skip()
+      skip("git is not on PATH; this case needs a repository")
     else:
       let scratch = createTempDir("repro-oppgc-sibling-", "")
       defer: removeDir(scratch)

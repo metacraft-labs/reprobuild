@@ -45544,7 +45544,7 @@
       "requiresReproBinary": true,
       "source": "tests/integration/t_post_commit_cache_push_runs_opportunistic_gc.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 1,
+      "staticCaseCount": 3,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -48638,7 +48638,7 @@
       "requiresReproBinary": true,
       "source": "tests/integration/t_shared_clones_sweep_repairs_every_bare_in_the_cache.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 2,
+      "staticCaseCount": 4,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
