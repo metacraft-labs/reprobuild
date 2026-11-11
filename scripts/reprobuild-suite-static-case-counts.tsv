@@ -1411,7 +1411,7 @@ tests/e2e/local-build-engine/t_repro_build_ambiguous_target_diagnostic.nim	nim	1
 tests/e2e/local-build-engine/t_repro_build_qualified_target_resolves.nim	nim	1
 tests/e2e/local-build-engine/t_repro_build_target_matching_project_file_stem.nim	nim	1
 tests/e2e/local-build-engine/t_repro_build_unknown_target_diagnostic.nim	nim	1
-tests/e2e/local-build-engine/t_repro_build_unselected_omits_consumers_of_excluded_members.nim	nim	4
+tests/e2e/local-build-engine/t_repro_build_unselected_omits_consumers_of_excluded_members.nim	nim	5
 tests/e2e/local-build-engine/t_repro_list_targets_lists_implicit_and_explicit.nim	nim	1
 tests/e2e/m68/t_e2e_repro_home_depends_on_topological.nim	nim	5
 tests/e2e/m68/t_e2e_repro_home_fs_user_file.nim	nim	11

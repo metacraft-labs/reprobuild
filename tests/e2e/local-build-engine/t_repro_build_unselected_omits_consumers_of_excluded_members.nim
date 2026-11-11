@@ -12,7 +12,9 @@
 ## ``sdkNative`` (a transitive consumer), and ``product`` is an ordinary
 ## action with no tie to any of them. Every action is a
 ## ``reprobuild.builtin.exec`` call, so lowering needs no tool profiles
-## and the full engine-facing action list is observable.
+## and the full engine-facing action list is observable. A second
+## fixture package puts a consumer, declared before the member it
+## depends on, on a dependency cycle through that member.
 
 import std/[algorithm, sets, unittest]
 
@@ -24,22 +26,24 @@ import repro_tool_profiles
 
 import unselected_exclusion_fixture
 
-proc fixtureSnapshot(): ProviderGraphSnapshot =
+proc fixtureSnapshot(packageName = "unselectedExclusionFixture";
+    build: proc () = buildUnselectedExclusionFixturePackage):
+    ProviderGraphSnapshot =
   var pkg: PackageDef
   for candidate in registeredPackages():
-    if candidate.packageName == "unselectedExclusionFixture":
+    if candidate.packageName == packageName:
       pkg = candidate
-  check pkg.packageName == "unselectedExclusionFixture"
+  check pkg.packageName == packageName
   let request = ProviderGraphRequest(
     kind: prkGraphInvocation,
-    providerArtifactId: "test-provider-unselected-exclusion",
-    entryPointId: "unselectedExclusionFixture.root",
-    entryPointBodyHash: "unselectedExclusionFixture.build.v1",
+    providerArtifactId: "test-provider-" & packageName,
+    entryPointId: packageName & ".root",
+    entryPointBodyHash: packageName & ".build.v1",
     reason: girExplicitUserRequest,
     arguments: "/tmp/test-fixture-root",
-    namespace: "project-unselected-exclusion")
-  let fragment = buildPackageFragment(pkg, request,
-    buildUnselectedExclusionFixturePackage, includeDefault = false)
+    namespace: "project-" & packageName)
+  let fragment = buildPackageFragment(pkg, request, build,
+    includeDefault = false)
   result.fragments.add(StoredGraphFragment(
     providerArtifactId: request.providerArtifactId,
     entryPointId: fragment.entryPointId,
@@ -52,8 +56,9 @@ proc fixtureSnapshot(): ProviderGraphSnapshot =
     childEntryPoints: fragment.childEntryPoints,
     evaluationInputs: fragment.evaluationInputs))
 
-proc lowered(selectors: openArray[string]): seq[BuildAction] =
-  lowerProviderSnapshot(fixtureSnapshot(), PathOnlyBuildIdentity(),
+proc lowered(selectors: openArray[string];
+             snapshot = fixtureSnapshot()): seq[BuildAction] =
+  lowerProviderSnapshot(snapshot, PathOnlyBuildIdentity(),
     "/tmp/test-fixture-root", selectors).actions
 
 proc sortedIds(actions: openArray[BuildAction]): seq[string] =
@@ -94,3 +99,10 @@ suite "t_repro_build_unselected_omits_consumers_of_excluded_members":
     let actions = lowered(["test"])
     check danglingDeps(actions) == newSeq[string]()
     check sortedIds(actions) == @["fixture.sdk_protocol"]
+
+  test "the exclusion reaches every action on a cycle through a member":
+    let actions = lowered([""], fixtureSnapshot(
+      "unselectedExclusionCycleFixture",
+      buildUnselectedExclusionCycleFixturePackage))
+    check danglingDeps(actions) == newSeq[string]()
+    check sortedIds(actions) == @["cycle.kept"]

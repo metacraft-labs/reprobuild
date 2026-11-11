@@ -24,4 +24,26 @@ package unselectedExclusionFixture:
     discard collect("test", [sdkProtocol])
     discard collect("authoring", [sdkNative])
 
+# ``cycle.a`` is declared before the excluded member it depends on, and
+# it sits on a cycle with ``cycle.b``: the exclusion must reach both
+# whatever order the actions are visited in.
+package unselectedExclusionCycleFixture:
+  build:
+    discard buildAction("cycle.a",
+      inlineExecCall(["/bin/true", "a"]),
+      deps = ["cycle.b", "cycle.x"],
+      outputs = ["build/cycle-a.stamp"])
+    discard buildAction("cycle.b",
+      inlineExecCall(["/bin/true", "b"]),
+      deps = ["cycle.a"],
+      outputs = ["build/cycle-b.stamp"])
+    let member = buildAction("cycle.x",
+      inlineExecCall(["/bin/true", "x"]),
+      outputs = ["build/cycle-x.stamp"])
+    discard buildAction("cycle.kept",
+      inlineExecCall(["/bin/true", "kept"]),
+      outputs = ["build/cycle-kept.stamp"])
+    discard collect("test", [member])
+
 export buildUnselectedExclusionFixturePackage
+export buildUnselectedExclusionCycleFixturePackage

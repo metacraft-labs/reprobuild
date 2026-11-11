@@ -4449,10 +4449,6 @@ proc lowerProviderSnapshot*(snapshot: ProviderGraphSnapshot;
       (item.payload.publishToBinaryCache and
         item.payload.cacheEntryIdentity.isSome)
 
-  var byId = initTable[string, BuildActionDef]()
-  for item in actionNodes:
-    byId[item.payload.id] = item.payload
-
   # When no selector is provided, schedule every emitted edge except the
   # members of the ``test``, ``bench`` and ``lint`` collections, which run
   # only when selected by name. An action whose dependency closure reaches
@@ -4472,32 +4468,32 @@ proc lowerProviderSnapshot*(snapshot: ProviderGraphSnapshot;
          name == "lint" or name.endsWith(":lint"):
         for aid in target.actions:
           excludedActionIds.incl(aid)
-    var retainedActionIds = initHashSet[string]()
-    var visitingActionIds = initHashSet[string]()
-
-    proc reachesExcluded(actionId: string): bool =
-      ## A dependency the graph does not declare, and a cycle, are left
-      ## for the engine's graph validation to report.
-      if excludedActionIds.contains(actionId):
-        return true
-      if retainedActionIds.contains(actionId) or
-          visitingActionIds.contains(actionId) or
-          not byId.hasKey(actionId):
-        return false
-      visitingActionIds.incl(actionId)
-      for dep in byId[actionId].deps:
-        if reachesExcluded(dep):
-          excludedActionIds.incl(actionId)
-          visitingActionIds.excl(actionId)
-          return true
-      visitingActionIds.excl(actionId)
-      retainedActionIds.incl(actionId)
-      false
+    # Every consumer of an excluded action is excluded too: walk the
+    # reverse dependency edges from the excluded members. A dependency the
+    # graph does not declare, and a cycle among retained actions, reach the
+    # engine's graph validation unchanged.
+    var consumersByDep = initTable[string, seq[string]]()
+    for item in actionNodes:
+      for dep in item.payload.deps:
+        consumersByDep.mgetOrPut(dep, @[]).add(item.payload.id)
+    var pending: seq[string] = @[]
+    for actionId in excludedActionIds:
+      pending.add(actionId)
+    while pending.len > 0:
+      let actionId = pending.pop()
+      for consumer in consumersByDep.getOrDefault(actionId):
+        if not excludedActionIds.containsOrIncl(consumer):
+          pending.add(consumer)
 
     for item in actionNodes:
-      if not reachesExcluded(item.payload.id) and shouldLower(item):
+      if not excludedActionIds.contains(item.payload.id) and
+          shouldLower(item):
         result.actions.add(lowerItem(item))
     return
+
+  var byId = initTable[string, BuildActionDef]()
+  for item in actionNodes:
+    byId[item.payload.id] = item.payload
 
   # Named-Targets M2: aggregate every fragment's target-export table
   # into one project-scoped view. Cross-package ambiguity is re-derived
