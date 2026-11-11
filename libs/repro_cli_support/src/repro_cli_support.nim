@@ -11,12 +11,13 @@ else:
   from runquota_ipc import rendezvousPolicy, defaultEndpoint,
     directoryResolvesWithin, hostWideEndpointDir, requireTrustedEndpointDir
   from runquota_client import connectDefault, close
-  # Only these names: the pipe-feeding guard in ``runFeedingStdin``, and the
-  # interrupt of an isolated certification (``interruptIsolatedPins``). `from …
-  # import` keeps the rest of `std/posix` out of this module's namespace.
+  # Only these names: the pipe-feeding guard in ``runFeedingStdin``, the
+  # interrupt of an isolated certification (``interruptIsolatedPins``), and
+  # the caller's uid in ``hostPolicyDaemonRemedy``. `from … import` keeps the
+  # rest of `std/posix` out of this module's namespace.
   from std/posix import sigaction, sigemptyset, Sigaction, SIGPIPE, SIG_IGN,
     SIGTERM, Pid,
-    ENOENT
+    ENOENT, geteuid
 from repro_core/target_object_check import objectCheckTripleFromVariants
 import repro_core/engine_build_info
 import repro_core
@@ -26375,6 +26376,37 @@ when defined(windows):
       fThreadHandle: Handle(0), id: Handle(child.pid),
       options: {poParentStreams})
 
+when not defined(windows):
+  const PrivateScopeSelectionRemedy =
+    "\nremedy: RUNQUOTA_ENDPOINT_SCOPE=private names an endpoint its caller " &
+    "owns and gives in RUNQUOTA_SOCKET (an absolute socket in a 0700 " &
+    "directory of yours, outside the host rendezvous directory). repro " &
+    "selects it by itself for the runquotad it starts, so unless you run " &
+    "your own daemon at RUNQUOTA_SOCKET, unset RUNQUOTA_ENDPOINT_SCOPE and " &
+    "RUNQUOTA_SOCKET."
+    ## Appended to a refused hand-made private selection. The refusal itself
+    ## is RunQuota's; what only repro can say is that it chooses the scope
+    ## itself.
+
+  proc hostPolicyDaemonRemedy(runquotad: string; refusedOwner: int64): string =
+    ## The remedy for a spawned daemon that refused its private endpoint
+    ## under the HOST policy, or "" when the startup output shows no such
+    ## refusal. repro hands the daemon `RUNQUOTA_ENDPOINT_SCOPE=private`, and
+    ## a private policy only ever expects the effective caller, so a refusal
+    ## naming another owner uid means this `runquotad` ignored the selection:
+    ## it predates private endpoints (runquota 35b9dfe). The version string
+    ## cannot tell such a build from a current one, so the remedy names the
+    ## binary that was started instead. Without this the operator sees only
+    ## "configured daemon owner uid <n>" and reads it as a host problem.
+    if refusedOwner < 0 or refusedOwner == int64(geteuid()):
+      return ""
+    "\nremedy: " & runquotad & " checked the private endpoint repro " &
+      "created for it against the host policy (daemon owner uid " &
+      $refusedOwner & ") although repro selected RUNQUOTA_ENDPOINT_SCOPE=" &
+      "private, so this runquotad predates private RunQuota endpoints. " &
+      "Point RUNQUOTAD_BIN at a current runquotad (or remove the stale one " &
+      "from PATH), or start the host's RunQuota service."
+
 proc startAutoRunQuotaIfNeeded*(bypassRunQuota: bool): owned(Process) =
   ## Exported for `tests/integration/t_derived_daemon_ipc_trust.nim` and
   ## `tests/integration/t_declared_daemon_ipc_trust.nim`, which grade the
@@ -26397,7 +26429,15 @@ proc startAutoRunQuotaIfNeeded*(bypassRunQuota: bool): owned(Process) =
       raise newException(OSError,
         "RUNQUOTA_SOCKET must name an absolute endpoint without NUL bytes")
     if getEnv("RUNQUOTA_ENDPOINT_SCOPE") == "private":
-      requireTrustedEndpointDir(defaultEndpoint())
+      try:
+        requireTrustedEndpointDir(defaultEndpoint())
+      except CatchableError as error:
+        # The refusal stands (a private selection must never be turned into
+        # a fresh endpoint), but the caller who set the scope by hand -- often
+        # to get past an unrelated auto-start failure -- is told what the
+        # variable means and that repro selects it on its own.
+        error.msg.add(PrivateScopeSelectionRemedy)
+        raise
   # If RUNQUOTA_SOCKET is set, the user (or a parent invocation) is
   # managing the daemon explicitly. On Windows we additionally probe
   # reachability so a stale env var inherited from a previous build —
@@ -26847,7 +26887,10 @@ proc startAutoRunQuotaIfNeeded*(bypassRunQuota: bool): owned(Process) =
     "runquotad did not become reachable at " & endpointHint & fate &
     (when defined(windows): ""
      else: startupDiagnostic(startupStdout, "stdout") &
-       startupDiagnostic(startupStderr, "stderr")))
+       startupDiagnostic(startupStderr, "stderr") &
+       hostPolicyDaemonRemedy(runquotad,
+         max(hostOwnerRefusalUid(startupStdout),
+           hostOwnerRefusalUid(startupStderr)))))
 
 proc releaseAutoRunQuotaProcess*(process: var owned(Process)) =
   ## Release this invocation's handle to an automatically started RunQuota
