@@ -66,6 +66,9 @@
 ##        the reinstall command, because for it the reinstall is the fix
 ##   (R9) the gate's verdict names the build that produced it, a pass
 ##        included
+##   (R10) the status-3 advice leads with refreshing what supplies ``repro``
+##        (a stale dev-shell cache can serve an OLDER build) and offers the
+##        reinstall only after it
 ##
 ## Hermetic: one ``createTempDir``, a local bare remote, no network.
 ## Skip rule: ``git`` missing on PATH — announced, not silent.
@@ -286,6 +289,18 @@ suite "a stale repro's refusal names a remedy that does not disarm the gate":
       let repoTop = requireGit(q(gitBin) & " -C " & q(repoPath) &
         " rev-parse --show-toplevel").strip()
       check (differentStub & " hooks ensure --vcs " & repoTop) in dmsg
+      # (R10) ... but only AFTER refreshing whatever supplies ``repro``.
+      # Status 3 says the builds differ, not which is newer, and the measured
+      # field case was a cached direnv dev shell serving an OLDER build than
+      # the one that wrote the hooks: re-anchoring to it would have rewritten
+      # current bodies with older ones. So the refresh is named, it comes
+      # first, and the message says why a different build may be the older.
+      let reloadAt = dmsg.find("direnv reload")
+      let reanchorAt = dmsg.find(differentStub & " hooks ensure --vcs ")
+      check reloadAt >= 0
+      check reanchorAt > reloadAt
+      check "cached dev shell" in dmsg
+      check "Different is not newer" in dmsg
       # ... and the "it predates the handshake" story must NOT be told about a
       # binary that just proved it does not.
       check "predates this handshake" notin dmsg
