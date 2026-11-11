@@ -45678,6 +45678,11 @@ type
     identity*: GitToolIdentity
     manifestRepoRoot*: string
     pendingExpected*: seq[ExpectedLockRecord]
+    withheldRecords*: seq[string]
+      ## Canonical record paths (``locks/<project>/<repo>/<sha>.toml``) the
+      ## next ``publishPending`` must leave unstaged. An explicit ``repro
+      ## workspace lock`` fills it with every record that pins a revision no
+      ## remote-tracking ref reaches (``withheldLockRecords``).
 
 proc newGitCheckoutLockStore*(identity: GitToolIdentity;
     manifestRepoRoot: string): GitCheckoutLockStore =
@@ -53196,9 +53201,18 @@ type
       ## Sweep probes that failed and therefore left their drafts in place.
     exitCode*: int
 
+  LockPinCheckout = object
+    ## Where a declared repo's pinned revisions are checked for publication:
+    ## the checkout this run observed it at, and the git remote the pre-push
+    ## gate scopes its ``unpublished`` stage to (``gitRemoteNameFor``).
+    checkout: string
+    gitRemote: string
+
   WorkspaceLockOutcome* = object
     report*: WorkspaceLockReport
     deferredParticipation: seq[DeferredParticipationWrite]
+    pinCheckouts: Table[string, LockPinCheckout]
+      ## Declared repo PATH → ``LockPinCheckout``, for every declared repo.
 
 proc toJsonNode*(report: WorkspaceLockReport): JsonNode =
   result = newJObject()
@@ -54034,6 +54048,8 @@ proc executeWorkspaceLock(args: WorkspaceLockArgs;
       else:
         args.workspaceRoot / repo.path
     let inDirtyScope = (not scopeDirty) or repo.name in args.dirtyScopeNames
+    result.pinCheckouts[repo.path] = LockPinCheckout(checkout: repoPath,
+      gitRemote: gitRemoteNameFor(repo))
     if not discoverGitWorktree(identity, repoPath).ok:
       report.unmaterialized.add(WorkspaceLockUnmaterializedReport(
         name: repo.name, path: repo.path,
@@ -55844,7 +55860,8 @@ proc publishVerifiedLockState(identity: GitToolIdentity; repoRoot: string;
 
 proc publishWorkspaceLock*(identity: GitToolIdentity;
                            manifestRepoRoot: string;
-                           exactExpected: seq[ExpectedLockRecord] = @[]):
+                           exactExpected: seq[ExpectedLockRecord] = @[];
+                           withheldRelPaths: seq[string] = @[]):
                            LockPublishResult =
   ## RA-7. Commit the staged-under-``locks/`` subtree and push it to the
   ## manifest repo's upstream. Best-effort: never raises. See the block
@@ -55971,6 +55988,10 @@ proc publishWorkspaceLock*(identity: GitToolIdentity;
       for rel in canonicalToStage:
         if rel in anchored: scoped.add(rel)
       canonicalToStage = scoped
+    # A record the caller withholds stays an untracked draft: it pins a
+    # revision nobody else can obtain, and a published record is immutable.
+    if withheldRelPaths.len > 0:
+      canonicalToStage.keepItIf(it notin withheldRelPaths)
     canonicalToStage.sort()
     vanishedRecords.sort()
 
@@ -56815,7 +56836,7 @@ method publishPending*(s: GitCheckoutLockStore): StorePutResult =
   ## remote and a push failure stays LOUD (Decision 2). The dirty-outside /
   ## refused / failed / published outcomes of the staged path are preserved.
   let pub = publishWorkspaceLock(s.identity, s.manifestRepoRoot,
-    s.pendingExpected)
+    s.pendingExpected, s.withheldRecords)
   if pub.outcome == lpoNothingToPublish and s.pendingExpected.len > 0:
     let pushed = pushCommittedLockCommits(s.identity, s.manifestRepoRoot,
       s.pendingExpected)
@@ -56823,6 +56844,131 @@ method publishPending*(s: GitCheckoutLockStore): StorePutResult =
       diagnostic: pushed.diagnostic)
   StorePutResult(outcome: storePutFromLockPublish(pub.outcome),
     diagnostic: pub.diagnostic)
+
+# ---- An explicit publish pins only revisions others can obtain -------------
+#
+# Workspace-And-Develop-Mode.md §"Reproducibility And `repro check`": "a
+# published project lock must only refer to source states that other people can
+# actually obtain." The pre-push gate enforces that in its ``unpublished``
+# stage. An explicit ``repro workspace lock`` publishes the same kind of record,
+# and CI sibling resolution fetches every revision such a record pins, so a pin
+# no remote has turns into a CI failure on somebody else's machine.
+#
+# So before that publish, every record it would stage is checked pin by pin
+# with the gate's predicate: the revision must be reachable from a
+# remote-tracking ref of the repo's agreed remote. A record that fails is
+# WITHHELD, not refused: it stays in the store as a local draft (the draft
+# readers need records for unpushed commits, and post-commit writes them for
+# exactly that reason), the operator is told which repo and how to publish it,
+# and the next explicit lock publishes it once the commit is pushed. Records
+# whose pins all check out are published as before.
+
+type
+  WithheldLockRecord = object
+    relPath: string    ## The record, relative to the store root.
+    repoName: string   ## The pinned repo whose revision failed the check.
+    revision: string
+    checkout: string   ## Where the check ran.
+    evidence: string   ## Why it failed, as a clause.
+
+proc firstOutputLine(output: string): string =
+  for line in output.splitLines:
+    if line.strip().len > 0:
+      return line.strip()
+  ""
+
+proc pinnedRevisionEvidence(identity: GitToolIdentity;
+    checkout, revision, gitRemote: string): string =
+  ## ``""`` when ``revision`` is reachable from a remote-tracking ref in
+  ## ``checkout``; otherwise a clause saying why it cannot be shown to be.
+  ##
+  ## The scope follows ``git_actions.remoteBranchContainsHead``, which the
+  ## gate's ``unpublished`` stage uses: ``<gitRemote>/*`` when that remote is
+  ## configured in the checkout, every remote-tracking ref when it is not.
+  ## Only refs already fetched are consulted, as in the gate.
+  if not discoverGitWorktree(identity, checkout).ok:
+    return "has no checkout at '" & checkout & "' to check it against"
+  if gitRunPlain(identity, ["-C", checkout, "cat-file", "-e",
+      revision & "^{commit}"]).code != 0:
+    return "is not a commit in the checkout at '" & checkout & "'"
+  var scope = ""
+  if gitRemote.len > 0:
+    let remotes = gitRunPlainQuery(identity, ["-C", checkout, "remote"])
+    if remotes.code == 0:
+      for raw in remotes.output.splitLines:
+        if raw.strip() == gitRemote:
+          scope = gitRemote
+          break
+  let pattern =
+    if scope.len > 0: "refs/remotes/" & scope & "/"
+    else: "refs/remotes/"
+  let contains = gitRunPlainQuery(identity, ["-C", checkout, "for-each-ref",
+    "--format=%(refname)", "--contains", revision, pattern])
+  if contains.code != 0:
+    return "could not be checked (git for-each-ref --contains failed: " &
+      firstOutputLine(contains.diagnostic) & ")"
+  if contains.output.strip().len > 0:
+    return ""
+  if scope.len > 0:
+    "is on no '" & scope & "/*' remote-tracking branch"
+  else:
+    "is on no remote-tracking branch"
+
+proc unpublishedLockRecordCandidates(identity: GitToolIdentity;
+    storeRoot: string): seq[string] =
+  ## The canonical records an unscoped ``publishWorkspaceLock`` would consider
+  ## staging: untracked or modified, under ``locks/``, present on disk. The
+  ## same scan the publisher runs.
+  if not dirExists(extendedPath(storeRoot / "locks")):
+    return
+  let cand = gitRunPlainQuery(identity, ["-C", storeRoot, "ls-files", "-z",
+    "--modified", "--others", "--", "locks"])
+  if cand.code != 0:
+    return
+  for rel in nulSeparatedPaths(cand.output):
+    if rel notin result and parseLockRecordRelPath(rel).ok and
+        fileExists(extendedPath(storeRoot / rel.replace('/', DirSep))):
+      result.add(rel)
+
+proc withheldLockRecords(identity: GitToolIdentity;
+    workspaceRoot, storeRoot: string;
+    pinCheckouts: Table[string, LockPinCheckout]): seq[WithheldLockRecord] =
+  ## Every record the explicit publish would stage that pins a revision no
+  ## remote-tracking ref reaches. One entry per record (its first failing pin).
+  for rel in unpublishedLockRecordCandidates(identity, storeRoot):
+    let abs = storeRoot / rel.replace('/', DirSep)
+    var pins: seq[tuple[name, path, remote, revision: string]]
+    try:
+      for entry in readLock(abs).repo:
+        pins.add((entry.name, entry.path, entry.remote, entry.revision))
+    except CatchableError:
+      # A routed per-repo record has no ``schema``; its pins are path→sha.
+      try:
+        for path, revision in shasFromBody(readFile(extendedPath(abs))):
+          pins.add((path, path, "", revision))
+      except CatchableError:
+        discard
+    for pin in pins:
+      let located =
+        if pin.path in pinCheckouts: pinCheckouts[pin.path]
+        else: LockPinCheckout(
+          checkout: workspaceRoot / pin.path.replace('/', DirSep),
+          gitRemote: pin.remote)
+      let evidence = pinnedRevisionEvidence(identity, located.checkout,
+        pin.revision, located.gitRemote)
+      if evidence.len > 0:
+        result.add(WithheldLockRecord(relPath: rel, repoName: pin.name,
+          revision: pin.revision, checkout: located.checkout,
+          evidence: evidence))
+        break
+
+proc withheldLockRecordLine(item: WithheldLockRecord;
+    workspaceRoot: string): string =
+  "workspace lock: not publishing '" & item.relPath & "': it pins " &
+    item.repoName & " @ " & item.revision & ", which " & item.evidence &
+    ", so nobody else can obtain it. The record stays in the store as a " &
+    "local draft. Publish the commit with `git -C " & item.checkout &
+    " push`, then re-run `" & workspaceLockCommand(workspaceRoot) & "`."
 
 proc runWorkspaceLockCommand*(args: openArray[string]): int =
   ## ``repro workspace lock [<project>] [--workspace-root=PATH]
@@ -56867,8 +57013,16 @@ proc runWorkspaceLockCommand*(args: openArray[string]): int =
     # git-checkout backend's ``publishPending`` delegates to the byte-identical
     # ``publishWorkspaceLock``; the 1:1 outcome mapping recovers the exact
     # ``LockPublishResult`` the branch below acts on.
-    let publishStore: LockStore =
+    let gitStore =
       newGitCheckoutLockStore(identity, outcome.report.recordStoreRoot)
+    # Withhold every record pinning a revision nobody else can obtain (see
+    # ``withheldLockRecords``); the rest publish as usual.
+    for item in withheldLockRecords(identity, outcome.report.workspaceRoot,
+        gitStore.manifestRepoRoot, outcome.pinCheckouts):
+      gitStore.withheldRecords.add(item.relPath)
+      stderr.writeLine(withheldLockRecordLine(item,
+        outcome.report.workspaceRoot))
+    let publishStore: LockStore = gitStore
     let storePub = publishStore.publishPending()
     let pub = LockPublishResult(
       outcome: lockPublishFromStorePut(storePub.outcome),
