@@ -11885,11 +11885,26 @@ proc transientOwnWrites*(evidence: PathSetEvidence): HashSet[string] =
   ## symbolic link the action made counts. A path it only REMOVED does not
   ## (`monitorRemovals`): deleting a file is no evidence of having made it,
   ## and a file the action read and then deleted is an input it consumed.
+  ##
+  ## Both the recorded spelling and its key must be gone. On POSIX
+  ## `stat("main.c/")` fails when `main.c` is a regular file, so the
+  ## recorded spelling alone would call a write to `main.c/` a temporary,
+  ## and its key is the key of the real input `main.c`: that input would
+  ## leave the key, which is a false hit.
+  proc onDisk(path: string): bool =
+    fileExists(extendedPath(path)) or dirExists(extendedPath(path)) or
+      symlinkExists(extendedPath(path))
+  # The key is checked in the host's own spelling. On Windows it uses
+  # forward slashes, and `extendedPath` passes only a `\\` prefix through
+  # as UNC, so `//host/share/main.c` would name no file and a project on a
+  # share would lose this check.
   for path in evidence.monitorWrites:
-    if not fileExists(extendedPath(path)) and
-        not dirExists(extendedPath(path)) and
-        not symlinkExists(extendedPath(path)):
-      result.incl(transientWriteKey(path))
+    let key = transientWriteKey(path)
+    let nativeKey =
+      when defined(windows): key.replace('/', '\\')
+      else: key
+    if not onDisk(path) and not onDisk(nativeKey):
+      result.incl(key)
 
 proc undeclaredSurvivingWrites*(action: BuildAction;
                                 evidence: PathSetEvidence): seq[string] =

@@ -17,7 +17,10 @@
 ## plan is declared. Until then those modes raise ``EGitToolUnresolved``
 ## with a clear message naming the active ``--tool-provisioning=`` mode.
 
-import std/[os, osproc, streams, strtabs, strutils]
+import std/[os, osproc, streams, strtabs, strutils, tempfiles]
+
+when defined(windows):
+  import std/winlean
 
 import repro_core/codec
 import repro_hash
@@ -409,3 +412,138 @@ proc queryGit*(identity: GitToolIdentity; args: openArray[string]):
   child.inputStream.close()
   result.output = child.outputStream.readAll()
   result.code = child.waitForExit()
+
+proc gitRunSeparated*(gitBin: string; args: openArray[string];
+                      env: StringTableRef; exactStdout = false):
+    tuple[code: int; output: string; diagnostic: string] =
+  ## Invoke ``gitBin`` with ``args`` under ``env`` for an answer that will be
+  ## PARSED, keeping git's stderr OUT of ``output``.
+  ##
+  ## Merging the two streams (``poStdErrToStdOut``) is right for a caller
+  ## that only tests the exit code, or that reads the text precisely BECAUSE
+  ## it wants git's diagnostic. It is wrong for a caller that parses git's
+  ## ANSWER: a benign diagnostic then arrives indistinguishable from the
+  ## answer. Measured: a repository whose split commit-graph chain names a
+  ## pruned graph file makes ``git rev-parse HEAD^{commit}``, ``git cat-file
+  ## -t`` and ``git rev-list`` print ``warning: unable to find all
+  ## commit-graph files`` on stderr while still exiting 0 with the right
+  ## answer on stdout; merged, that warning became part of an object id.
+  ##
+  ## ``output`` is stdout ALONE. ``diagnostic`` is the merged, trimmed text
+  ## (stderr first), so a caller reporting a FAILURE still surfaces git's
+  ## message, which lives on stderr.
+  ##
+  ## Both streams are drained without deadlock: reading one pipe to EOF and
+  ## only then the other hangs the moment the unread pipe fills, and git's
+  ## stderr is unbounded in principle.
+  ##
+  ## ``exactStdout`` makes ``output`` git's stdout BYTE FOR BYTE. Without it
+  ## the POSIX path re-assembles stdout line by line (``execCmdEx``), which
+  ## appends a newline the bytes did not end with and turns ``\r\n`` into
+  ## ``\n``; harmless for a parsed answer, wrong for a payload that must be
+  ## exactly what git stores (a certificate note blob, Transport §3.1). The
+  ## Windows path copies the pipe's bytes verbatim either way.
+  when defined(windows):
+    # Structured argv and a PeekNamedPipe drain, for the same reason
+    # ``gitRunPlain`` uses one: Nim 2.2's ``readAll`` stops at the first short
+    # pipe read on Windows, so a blocking read of either stream would also
+    # truncate. Two handles now, drained in the same pass.
+    let process = startProcess(gitBin, args = @args,
+      env = env, options = {poUsePath})
+    defer: process.close()
+    const PollSleepMs = 2
+    let handles = [Handle(process.outputHandle), Handle(process.errorHandle)]
+    var sinks: array[2, string]
+    var buf {.noinit.}: array[16384, char]
+    while true:
+      var moved = false
+      for i in 0 .. 1:
+        var bytesAvail: int32 = 0
+        let peeked = peekNamedPipe(handles[i],
+          lpTotalBytesAvail = addr bytesAvail)
+        if peeked and bytesAvail > 0:
+          var bytesRead: int32 = 0
+          let toRead = min(int(bytesAvail), buf.len).int32
+          let ok = winlean.readFile(handles[i], addr buf[0], toRead,
+            addr bytesRead, nil)
+          if ok != 0 and bytesRead > 0:
+            let previousLen = sinks[i].len
+            sinks[i].setLen(previousLen + bytesRead)
+            copyMem(addr sinks[i][previousLen], addr buf[0], bytesRead)
+            moved = true
+      # Only consult the exit code once BOTH pipes are momentarily empty, so
+      # everything the child buffered before exiting is still collected.
+      if moved: continue
+      result.code = process.peekExitCode()
+      if result.code != -1: break
+      sleep(PollSleepMs)
+    result.output = sinks[0]
+    result.diagnostic = (sinks[1] & sinks[0]).strip()
+  else:
+    # POSIX ``execCmdEx`` implies ``poEvalCommand``, so the command runs
+    # through ``/bin/sh`` and the SHELL can put stderr in a file. One pipe, no
+    # interleaving, no deadlock, and the same subprocess shape as
+    # ``gitRunPlain``.
+    var cmd = quoteShell(gitBin)
+    for arg in args:
+      cmd.add(" ")
+      cmd.add(quoteShell(arg))
+    var errPath = ""
+    var outPath = ""
+    try:
+      try:
+        let created = createTempFile("repro-gitq-", ".stderr")
+        created.cfile.close()
+        errPath = created.path
+      except CatchableError, Defect:
+        errPath = ""
+      if exactStdout:
+        try:
+          let created = createTempFile("repro-gitq-", ".stdout")
+          created.cfile.close()
+          outPath = created.path
+        except CatchableError, Defect:
+          outPath = ""
+        if outPath.len == 0 or errPath.len == 0:
+          # No exact capture is possible, and a line-rebuilt answer must not
+          # pass for one: report a failed run instead.
+          result.code = -1
+          result.diagnostic = "cannot create a temporary file to capture " &
+            "git's output in"
+          return
+        cmd.add(" >" & quoteShell(outPath))
+      if errPath.len > 0:
+        cmd.add(" 2>" & quoteShell(errPath))
+      # Without the redirect the child's stderr would be an unread pipe that
+      # can fill and hang it, so fall back to the MERGED stream instead —
+      # degraded (the caller sees diagnostics in ``output``, exactly
+      # ``gitRunPlain``'s behaviour) but never hung.
+      let options =
+        if errPath.len > 0: {poUsePath}
+        else: {poUsePath, poStdErrToStdOut}
+      let res = execCmdEx(cmd, options = options, env = env)
+      result.code = res.exitCode
+      result.output = res.output
+      if outPath.len > 0:
+        # The shell wrote stdout to the file; read its bytes verbatim.
+        try:
+          result.output = readFile(outPath)
+        except CatchableError as err:
+          result.code = -1
+          result.output = ""
+          result.diagnostic = "cannot read git's captured stdout: " & err.msg
+          return
+      var errText = ""
+      if errPath.len > 0:
+        try:
+          errText = readFile(errPath)
+        except CatchableError:
+          discard
+      result.diagnostic = (errText & result.output).strip()
+    finally:
+      for path in [errPath, outPath]:
+        if path.len > 0:
+          try:
+            removeFile(path)
+          except CatchableError:
+            discard
