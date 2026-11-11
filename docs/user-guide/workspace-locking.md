@@ -666,8 +666,14 @@ nothing and issues no certificate, and its tests still run.
   `repro.lock` dependency name or its workspace repo name. All of them must
   mean one repository, identified by canonical URL (`github:o/r`,
   `git+https://github.com/o/r` and `https://github.com/o/r.git` are one
-  repository). A name that means two repositories is refused with every
-  candidate; name one as `input:<name>`, `dep:<name>` or `repo:<name>`.
+  repository). A sibling repository is also its checkout: an input that
+  reads the checkout as `git+file:../<sibling>` (or the absolute
+  `git+file:///…` spelling) is the same repository as a `repro.lock` entry
+  fetching it by URL. A relative path is read from the directory of the
+  `flake.nix` that declares it. A `path:` input reads a directory's files
+  and records no revision, so it is not a resolution this command moves. A name that means two repositories is
+  refused with every candidate; name one as `input:<name>`, `dep:<name>` or
+  `repo:<name>`.
 - **The target** is `--to <rev>` (a commit id, or a ref resolved in the
   sibling checkout); else the sibling checkout's `HEAD`; else, for a flake
   input that follows a branch, the tip nix resolves. A `repro.lock`
@@ -695,7 +701,11 @@ nothing and issues no certificate, and its tests still run.
 - **A pin never moves backward silently**: a target behind, or diverged
   from, a current resolution is refused (exit 4) unless
   `--allow-pin-regression=<name>` or `REPRO_ALLOW_PIN_REGRESSION=<name>`
-  names the dependency (any of its names).
+  names the dependency (any of its names). A move whose direction cannot be
+  judged — there is no checkout of the repository to judge it in, or git
+  cannot relate the two revisions — is refused the same way, and the
+  refusal says the direction could not be judged rather than calling it
+  backward.
 - **A pin names published content.** A target that exists only in the
   sibling checkout (reachable from no remote-tracking ref, judged locally,
   never over the network) is refused (exit 1) when a `flake.lock`

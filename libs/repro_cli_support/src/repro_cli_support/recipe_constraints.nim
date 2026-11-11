@@ -226,6 +226,50 @@ proc canonicalRepositoryUrl*(url: string): string =
   if base.len == 0: return ""
   canonicalRemoteIdentity(base)
 
+proc localFlakeRefDirectory*(url, flakeDir: string): string =
+  ## The absolute directory a LOCAL flake reference ``url`` names, as the
+  ## flake in ``flakeDir`` reads it, or "" when ``url`` names no local
+  ## directory (a forge, a remote git URL, a registry name, a tarball).
+  ##
+  ## Local means ``git+file:<path>``, ``path:<path>`` and a bare path
+  ## (``./x``, ``../x``, ``/x``). A relative path is resolved against
+  ## ``flakeDir``: Nix itself resolves a relative ``git+file:`` path against
+  ## the directory it runs in (https://github.com/NixOS/nix/issues/12281), and
+  ## the one directory such a reference works from is the declaring flake's
+  ## own, which is where every re-lock of it runs. Written as is, the
+  ## relative spelling is no identity at all: ``git+file:../lib`` in two
+  ## different flakes names two different checkouts.
+  let parts = parseFlakeRef(url)
+  var path = ""
+  case parts.kind
+  of frkGit:
+    let fetch = parts.fetchUrl
+    if fetch.startsWith("file://"): path = fetch["file://".len .. ^1]
+    elif fetch.startsWith("file:"): path = fetch["file:".len .. ^1]
+    else: return ""
+  of frkPath:
+    path = parts.fetchUrl
+  else:
+    return ""
+  path = percentDecode(path)
+  if path.len == 0 or (flakeDir.len == 0 and not isAbsolute(path)): return ""
+  os.normalizedPath(if isAbsolute(path): path
+                    else: absolutePath(path, absolutePath(flakeDir)))
+
+proc canonicalFlakeInputRepository*(url, flakeDir: string): string =
+  ## The canonical identity of the repository the flake input URL ``url``
+  ## names, read as the flake in ``flakeDir`` reads it: a ``git+file:``
+  ## reference, relative or absolute, is the git repository in the directory
+  ## it names, as the ``file://`` URL of that directory — the same identity a
+  ## workspace checkout has as a ``file://`` URL. Every other reference is
+  ## ``canonicalRepositoryUrl`` of it, unchanged: a ``path:`` or bare-path
+  ## input reads a directory's files, not a repository's revision, so it is
+  ## not given a repository's identity here.
+  if parseFlakeRef(url).kind == frkGit:
+    let dir = localFlakeRefDirectory(url, flakeDir)
+    if dir.len > 0: return canonicalRemoteIdentity("file://" & dir)
+  canonicalRepositoryUrl(url)
+
 # ---------------------------------------------------------------------------
 # flake.nix: the inputs a flake declares, with their URLs and lines
 # ---------------------------------------------------------------------------
@@ -598,6 +642,12 @@ type
     lockedRev*: string     ## ``locked.rev``, or ""
     originalRev*: string   ## ``original.rev``, or ""
     canonicalRepo*: string ## the repository ``locked`` names, or ""
+    url*: string
+      ## The flake reference ``canonicalRepo`` was read from (``locked``'s,
+      ## else ``original``'s), or "". Kept so a caller that knows the flake's
+      ## directory can resolve a relative local reference
+      ## (``canonicalFlakeInputRepository``); ``canonicalRepo`` reads it as
+      ## written.
 
 proc flakeLockNodeUrl(attrs: JsonNode): string =
   ## Rebuild a fetch URL from a lock node's ``locked`` / ``original`` object
@@ -655,12 +705,13 @@ proc flakeLockResolutions*(lockText: string): seq[FlakeLockResolution] =
     let original = node{"original"}
     if not locked.isNil and locked.kind == JObject:
       r.lockedRev = locked{"rev"}.getStr()
-      r.canonicalRepo = canonicalFlakeRefRepository(flakeLockNodeUrl(locked))
+      r.url = flakeLockNodeUrl(locked)
+      r.canonicalRepo = canonicalFlakeRefRepository(r.url)
     if not original.isNil and original.kind == JObject:
       r.originalRev = original{"rev"}.getStr()
       if r.canonicalRepo.len == 0:
-        r.canonicalRepo = canonicalFlakeRefRepository(
-          flakeLockNodeUrl(original))
+        r.url = flakeLockNodeUrl(original)
+        r.canonicalRepo = canonicalFlakeRefRepository(r.url)
     result.add(r)
   result.sort(proc (a, b: FlakeLockResolution): int = cmp(a.input, b.input))
 

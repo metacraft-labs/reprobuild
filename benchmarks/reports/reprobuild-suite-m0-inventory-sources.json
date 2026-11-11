@@ -44178,7 +44178,7 @@
       "requiresReproBinary": true,
       "source": "tests/integration/t_lock_update_rewrites_exact_pin_in_both_recipes.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 10,
+      "staticCaseCount": 12,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -56342,7 +56342,7 @@
       "requiresReproBinary": false,
       "source": "tests/unit/t_recipe_constraint_reader.nim",
       "sourceSuiteCount": 7,
-      "staticCaseCount": 33,
+      "staticCaseCount": 34,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
