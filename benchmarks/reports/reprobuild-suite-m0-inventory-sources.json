@@ -8237,7 +8237,7 @@
       "requiresReproBinary": false,
       "source": "libs/ct_test_nim_unittest/tests/t_test_binary_grouping_plan.nim",
       "sourceSuiteCount": 6,
-      "staticCaseCount": 36,
+      "staticCaseCount": 37,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

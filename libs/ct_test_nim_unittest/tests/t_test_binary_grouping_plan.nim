@@ -342,6 +342,22 @@ suite "test binary grouping: source text facts":
     check suiteScopeWork(["let src = " & q, "suite \"x\":", "  doWork()",
       q, ""].join("\n")) == ""
 
+  test "a suite name continued on the next line is header, not body":
+    # The continuation (indented 4) must not fix the body's indentation:
+    # otherwise the tests (indented 2) are skipped and a statement inside a
+    # test (indented 4) is reported as suite-scope work.
+    let continued = ["suite \"envelope lanes, \" &",
+      "    \"and the fingerprint projection\":", "",
+      "  test \"t\":", "    let pi = buildInterface()", "    check pi.ok",
+      ""].join("\n")
+    check suiteScopeWork(continued) == ""
+    # A trailing comment does not hide the header's closing colon, and work
+    # after a continued header is still found.
+    let heavy = ["suite \"a, \" &  # the name is long",
+      "    \"b\":  # so it is split", "  loadGolden()",
+      "  test \"t\":", "    discard", ""].join("\n")
+    check suiteScopeWork(heavy) == "loadGolden()"
+
   test "module-level bare calls are found; declarations and string text are not":
     # t_e2e_home_profile_imports_contribution_catalog's shape: fixture setup
     # at column 0 runs at every process start.
