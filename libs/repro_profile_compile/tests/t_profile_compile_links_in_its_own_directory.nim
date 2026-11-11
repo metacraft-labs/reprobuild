@@ -50,6 +50,10 @@
 ## `compileProfileExecutable` again makes case 1 fail with
 ## `cannot open: home_linkerArgs.txt` and case 2 succeed.
 ##
+## The third case pins the compiler path to an absolute one: with `nim`
+## running in the nimcache, a relative path would no longer resolve against
+## the caller's directory.
+##
 ## Mocks: none. The real `nim` and C toolchain of the dev shell compile a real
 ## profile against reprobuild's real sources.
 
@@ -71,6 +75,15 @@ profile "linksInItsOwnDirectory":
 const ResponseFileName = "home_linkerArgs.txt"
   ## What Nim names the response file for a project called `home`
   ## (`compiler/extccomp.nim`, `linkViaResponseFile`).
+
+template withEnv(name, value: string; body: untyped) =
+  let hadOld = existsEnv(name)
+  let old = getEnv(name)
+  if value.len > 0: putEnv(name, value) else: delEnv(name)
+  try:
+    body
+  finally:
+    if hadOld: putEnv(name, old) else: delEnv(name)
 
 proc symlinkedSourceRoot(dir: string): string =
   ## A directory whose entries are symbolic links to this checkout's
@@ -141,3 +154,23 @@ else:
       checkpoint(failure)
       check ResponseFileName in failure
       check not fileExists(extendedPath(binary))
+
+    test "a nim found through a relative PATH entry is named absolutely":
+      # `nim` runs in the nimcache, so a compiler path relative to the
+      # caller's directory would name nothing there. `findExe` returns one
+      # for a relative `PATH` entry.
+      let dir = createTempDir("repro-profile-relative-nim-", "")
+      let here = getCurrentDir()
+      defer:
+        setCurrentDir(here)
+        removeDir(dir)
+      createDir(dir / "relbin")
+      writeFile(dir / "relbin" / "nim", "#!/bin/sh\n")
+      setFilePermissions(dir / "relbin" / "nim",
+        {fpUserRead, fpUserWrite, fpUserExec})
+      setCurrentDir(dir)
+      withEnv(ProfileNimCompilerEnvVar, ""):
+        withEnv("PATH", "relbin"):
+          let chosen = resolveProfileNimCompiler()
+          check chosen.isAbsolute
+          check chosen == dir / "relbin" / "nim"
