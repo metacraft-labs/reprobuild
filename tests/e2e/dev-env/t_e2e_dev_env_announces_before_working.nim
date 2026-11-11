@@ -158,6 +158,45 @@ when isIoMonitorSupported:
       check second.stderr.strip() == ""
       check second.stdout.contains("no-op")
 
+    test "a_waiting_foreign_producer_is_heard_while_it_waits":
+      # reprobuild-pm issue 2026-10-22: `nix print-dev-env` waited 30 minutes
+      # on the nix daemon's GC lock and `repro exec` printed nothing, because
+      # the line nix wrote about it reached the terminal only after nix
+      # exited -- three processes up, each handing stderr over at exit. This
+      # stand-in for nix says it is waiting, then waits until that line is in
+      # the ACTIVATING COMMAND's stderr file. Only a live forward can make that
+      # true; without one it gives up and the activation fails.
+      let c = prepareCase("repro-devenv-announce-foreign-wait")
+      defer: removeDir(c.tempRoot)
+      let waitingLine = "waiting for the big garbage collector lock..."
+      let cliStderr = c.tempRoot / "export-bash-stderr.txt"
+      let fakeNix = c.tempRoot / "fake-nix"
+      writeFile(fakeNix, "#!/usr/bin/env bash\n" &
+        "printf '%s\\n' " & quoteShell(waitingLine) & " >&2\n" &
+        "for _ in $(seq 1 600); do\n" &
+        "  if grep -qF " & quoteShell(waitingLine) & " " &
+          quoteShell(cliStderr) & " 2>/dev/null; then\n" &
+        "    printf 'export FAKE_FLAKE_SHELL=ready\\n'; exit 0\n" &
+        "  fi\n" &
+        "  sleep 0.05\n" &
+        "done\n" &
+        "echo 'the activating command never printed the waiting line' >&2\n" &
+        "exit 3\n")
+      setFilePermissions(fakeNix, {fpUserRead, fpUserWrite, fpUserExec})
+      writeFile(c.projectRoot / "reprobuild.nim",
+        "import repro_project_dsl\n" &
+        "import repro_dsl_stdlib/foreign_env\n\n" &
+        "package fixture:\n" &
+        "  devEnv:\n" &
+        "    useFlakeDevShell(nixExe = " & escape(fakeNix) &
+          ", workspaceOverrides = false)\n")
+      let outcome = runExportSplit(c, "bash")
+      checkpoint(outcome.stderr)
+      check outcome.exitCode == 0
+      check outcome.stdout.contains("FAKE_FLAKE_SHELL")
+      # Printed once, live -- not again in a failure report.
+      check outcome.stderr.count(waitingLine) == 1
+
     test "progress_quiet_suppresses_the_announcement":
       let c = prepareCase("repro-devenv-announce-quiet")
       defer: removeDir(c.tempRoot)
