@@ -209,6 +209,11 @@ when defined(posix):
       except OSError as error:
         message = error.msg
       check "did not become reachable" in message
+      # The error says how the wait ended: the daemon exited by itself, and
+      # with which status -- not merely that it was not reachable.
+      check "it exited before it listened" in message
+      check "with exit code 23" in message
+      check "still running" notin message
       check "specific startup stdout reason" in message
       check "specific startup stderr refusal" in message
       check "truncated" in message
@@ -219,6 +224,28 @@ when defined(posix):
       let attempted = readFile(root / "socket-arg")
       check attempted.endsWith("/runquota.sock")
       check not dirExists(attempted.parentDir)
+
+    test "a daemon killed by a signal before it listens is reported as such":
+      # A signal is a different fate from an exit code, and the error must
+      # not fold one into the other: `exit 137` and SIGKILL are not the same
+      # report to whoever reads it.
+      let wrapper = root / "signalled-runquotad"
+      writeFile(wrapper, "#!/bin/sh\n" &
+        "printf 'killing myself before I listen\\n' >&2\nkill -9 $$\n")
+      setFilePermissions(wrapper, {fpUserRead, fpUserWrite, fpUserExec})
+      putEnv("RUNQUOTAD_BIN", wrapper)
+      var message = ""
+      try:
+        var daemon = startAutoRunQuotaIfNeeded(false)
+        releaseAutoRunQuotaProcess(daemon)
+      except OSError as error:
+        message = error.msg
+      checkpoint message
+      check "did not become reachable" in message
+      check "it exited before it listened" in message
+      check "with signal 9" in message
+      check "exit code" notin message
+      check "killing myself before I listen" in message
 
     test "existing untrusted endpoint retains refusal and starts no daemon":
       let endpoint = root / "unsafe.sock"

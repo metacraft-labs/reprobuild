@@ -688,7 +688,12 @@ suite "Add-On apt closure: store receipts, index rows and GC (threat model G38)"
       localFetcher(urls, count), hostMachine = "armv7l") == prefix
     check st.lookupPrefix(ids[0]).found
 
-  test "a published prefix whose index row was lost is re-indexed":
+  test "a published prefix whose index row was lost is realised again, not adopted":
+    ## Until 2026-11-05 a lost row was rebuilt from the prefix's own
+    ## ``.repro-receipt``. The receipt is unsigned and a prefix id is a hash
+    ## of the lock, so that is also how a directory planted by anyone who
+    ## can write ``prefixes/`` got adopted (SEC-1 G7). A directory without a
+    ## row is now realised again from the lock-verified archives.
     let root = scratch("g38-reindex")
     let (lock, urls) = buildDebs(root, @[
       fileDeb("svc", @[("usr/bin/svc", "x")])])
@@ -705,10 +710,91 @@ suite "Add-On apt closure: store receipts, index rows and GC (threat model G38)"
     let before = count[]
     check realiseAptClosure(lock, store, root / "cache",
       localFetcher(urls, count), hostMachine = "armv7l") == prefix
-    check count[] == before          # nothing fetched or unpacked again
+    check count[] == before + 1      # the member's archive, verified again
+    check readFile(prefix / "usr/bin/svc") == "x"
     var st = openStore(store)
     defer: st.close()
     for id in aptClosurePrefixIds(lock): check st.lookupPrefix(id).found
+    storeIsClean(store)
+
+suite "Add-On apt closure: a store root other writers can reach (SEC-1 G7)":
+  ## Production-Runners-And-Shared-Store PM3 mounts the store root
+  ## read-write into runner guests. A guest can compute a closure's prefix
+  ## id from its lock, so it can place the prefix -- marker, receipt and
+  ## all -- before the job that needs it, or edit one already realised.
+  ## Neither may reach the next consumer.
+  test "a planted closure prefix with a receipt naming its id is not used":
+    let root = scratch("g7-plant")
+    let (lock, urls) = buildDebs(root, @[
+      fileDeb("svc", @[("usr/bin/svc", "svc-binary")])])
+    let store = root / "store"
+    let planted = aptClosurePrefixPath(store, lock)
+    let id = aptClosurePrefixId(lock)
+    createDir(planted / "usr" / "bin")
+    writeFile(planted / "usr" / "bin" / "svc", "PLANTED")
+    writeFile(planted / ClosurePrefixMarker, closureMarkerText(lock))
+    writeReceiptFile(planted / ReceiptFileName, RealizationReceipt(
+      schemaVersion: 1'u16, adapter: AptClosureStoreAdapter,
+      packageName: "apt-closure-svc", version: "1.0",
+      realizationHash: id,
+      realizedPath: planted.relativePath(store).replace('\\', '/'),
+      writerMode: "direct"))
+    check aptClosureRealised(store, lock)   # the marker alone would say yes
+    var count = new int
+    let prefix = realiseAptClosure(lock, store, root / "cache",
+      localFetcher(urls, count), hostMachine = "armv7l")
+    check prefix == planted
+    check readFile(prefix / "usr" / "bin" / "svc") == "svc-binary"
+    check count[] == 1
+    var st = openStore(store)
+    defer: st.close()
+    check st.lookupPrefix(id).found
+    forgetVerifiedPrefixes()
+    check st.verifyRealizedPrefix(id, prefix).outcome == pvVerified
+    storeIsClean(store)
+
+  test "a file edited inside a realised closure is replaced in the next process":
+    let root = scratch("g7-edit")
+    let (lock, urls) = buildDebs(root, @[
+      fileDeb("svc", @[("usr/bin/svc", "svc-binary")]),
+      fileDeb("libdep", @[("usr/lib/libdep.so.1", "dep")])])
+    let store = root / "store"
+    var count = new int
+    let prefix = realiseAptClosure(lock, store, root / "cache",
+      localFetcher(urls, count), hostMachine = "armv7l")
+    let lib = prefix / "usr" / "lib" / "libdep.so.1"
+    setFilePermissions(lib, {fpUserRead, fpUserWrite})
+    writeFile(lib, "EDITED")      # in place: the member shares this inode
+    forgetVerifiedPrefixes()
+    check realiseAptClosure(lock, store, root / "cache",
+      localFetcher(urls, count), hostMachine = "armv7l") == prefix
+    check readFile(lib) == "dep"
+    check readFile(prefix / "usr" / "bin" / "svc") == "svc-binary"
+    var st = openStore(store)
+    defer: st.close()
+    forgetVerifiedPrefixes()
+    for i, id in aptClosurePrefixIds(lock):
+      let path = if i == 0: prefix else: aptDebPrefixPath(store, lock.debs[i - 1])
+      check st.verifyRealizedPrefix(id, path).outcome == pvVerified
+    storeIsClean(store)
+
+  test "an untouched closure is used as it is, and nothing is fetched":
+    let root = scratch("g7-honest")
+    let (lock, urls) = buildDebs(root, @[
+      fileDeb("svc", @[("usr/bin/svc", "svc-binary")])])
+    let store = root / "store"
+    var count = new int
+    let prefix = realiseAptClosure(lock, store, root / "cache",
+      localFetcher(urls, count), hostMachine = "armv7l")
+    let before = count[]
+    let inode = getFileInfo(prefix / "usr" / "bin" / "svc").id
+    forgetVerifiedPrefixes()
+    check realiseAptClosure(lock, store, root / "cache",
+      localFetcher(urls, count), hostMachine = "armv7l") == prefix
+    check count[] == before
+    check getFileInfo(prefix / "usr" / "bin" / "svc").id == inode
+    check not dirExists(store / "gc" / "pending-deletion") or
+      toSeq(walkDir(store / "gc" / "pending-deletion")).len == 0
 
 when defined(posix):
   suite "Add-On apt closure: concurrent realisers and crash leftovers":

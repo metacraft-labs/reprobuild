@@ -13,7 +13,7 @@
 import std/[json, os, posix, strutils, tempfiles, times]
 import repro_core/ambient_execution
 import repro_local_store/store_bundle
-import repro_bundle/[exec, select, nix_half, sources_half, bootstrap]
+import repro_bundle/[exec, select, nix_half, sources_half, bootstrap, github]
 
 export exec.BundleError, select.BundleMember, select.resolveMembers,
   nix_half.NixHalf, nix_half.NixHalfOptions,
@@ -61,6 +61,7 @@ type
     parallel*: int
     activate*: bool
     activationFile*: string
+    bashrcFile*: string    ## default /etc/bash.bashrc
     afterBootstrap*: bool
     storeRoot*: string
     actionCacheRoot*: string
@@ -75,6 +76,8 @@ type
     primaryEnv*: string
     frozenDevEnv*: string
     activationFile*: string
+    bashrcFile*: string
+    notes*: seq[string]
     native*: ImportReport
     phaseSeconds*: seq[tuple[phase: string, seconds: float]]
 
@@ -214,45 +217,73 @@ proc download(urls: seq[tuple[url, dest: string]]; parallel: int) =
   discard mustRun(requireExe("curl"), ["-fsS", "--retry", "3", "--parallel",
     "--parallel-max", $max(1, parallel), "-K", "-"], stdinData = cfg)
 
-proc fetchHalf(base, staging: string; node: JsonNode; parts: seq[BundlePart];
-               extra: seq[string]; parallel: int): string =
-  ## A directory holding the half's parts: the half itself for a local
-  ## bundle, otherwise a staging directory the parts were downloaded into.
+type
+  SourceKind = enum skDir, skUrl, skGithub
+  Source = object
+    kind: SourceKind
+    base: string          ## directory or URL of the bundle (skDir, skUrl)
+    gh: GithubSource      ## skGithub
+
+proc fetchHalf(src: Source; staging: string; node: JsonNode;
+               manifestName: string; parts: seq[BundlePart];
+               extra: seq[string]; fetchManifest: bool; parallel: int): string =
+  ## A directory holding the half's files: the half itself for a local
+  ## bundle, otherwise a staging directory they were downloaded into.
   let rel = node["dir"].getStr()
-  if not isUrl(base):
-    return base / rel
+  if src.kind == skDir:
+    return src.base / rel
   result = staging / extractFilename(rel)
   createDir(result)
-  var urls: seq[tuple[url, dest: string]]
-  for p in parts:
-    urls.add((base & "/" & rel & "/" & p.file, result / p.file))
-  for f in extra:
-    urls.add((base & "/" & rel & "/" & f, result / f))
-  download(urls, parallel)
+  var wanted: seq[string]
+  for p in parts: wanted.add(p.file)
+  wanted.add(extra)
+  if fetchManifest: wanted.add(manifestName)
+  case src.kind
+  of skUrl:
+    var urls: seq[tuple[url, dest: string]]
+    for f in wanted:
+      urls.add((src.base & "/" & rel & "/" & f, result / f))
+    download(urls, parallel)
+  of skGithub:
+    let files = halfFiles(manifestName, parts, extra)
+    var jobs: seq[tuple[path, gitRef, dest: string]]
+    for f in wanted:
+      jobs.add((f, githubRefOf(src.gh.bundle, rel, files, f), result / f))
+    githubDownload(src.gh.repo, jobs, parallel)
+  of skDir: discard
 
 proc readLatest(source, system: string; staging: string):
-    tuple[base: string; latest: JsonNode] =
-  var base = source.strip(chars = {'/'}, leading = false)
-  var latestRef = base / system / LatestName
-  if base.endsWith(".json"):
-    latestRef = base
-    base = base.parentDir.parentDir
-  if base.startsWith("file://"):
-    base = base["file://".len .. ^1]
-    latestRef = latestRef["file://".len .. ^1]
+    tuple[src: Source; latest: JsonNode] =
   var text = ""
-  if isUrl(base):
+  if isGithubSource(source):
+    let gh = parseGithubSource(source)
+    result.src = Source(kind: skGithub, gh: gh)
     let dest = staging / LatestName
-    download(@[(base & "/" & system & "/" & LatestName, dest)], 1)
+    githubDownload(gh.repo, @[(gh.bundle & "/" & system & "/" & LatestName,
+      gh.gitRef, dest)], 1)
     text = readFile(dest)
   else:
-    if not fileExists(latestRef):
-      bundleFail("no bundle at " & latestRef)
-    text = readFile(latestRef)
-  let node = parseJson(text)
-  if node{"schema"}.getStr() != BundleSchema:
-    bundleFail("unsupported bundle schema " & node{"schema"}.getStr())
-  (base, node)
+    var base = source.strip(chars = {'/'}, leading = false)
+    var latestRef = base / system / LatestName
+    if base.endsWith(".json"):
+      latestRef = base
+      base = base.parentDir.parentDir
+    if base.startsWith("file://"):
+      base = base["file://".len .. ^1]
+      latestRef = latestRef["file://".len .. ^1]
+    if isUrl(base):
+      result.src = Source(kind: skUrl, base: base)
+      let dest = staging / LatestName
+      download(@[(base & "/" & system & "/" & LatestName, dest)], 1)
+      text = readFile(dest)
+    else:
+      result.src = Source(kind: skDir, base: base)
+      if not fileExists(latestRef):
+        bundleFail("no bundle at " & latestRef)
+      text = readFile(latestRef)
+  result.latest = parseJson(text)
+  if result.latest{"schema"}.getStr() != BundleSchema:
+    bundleFail("unsupported bundle schema " & result.latest{"schema"}.getStr())
 
 proc chooseStaging(explicit: string; compressed: int64): string =
   if explicit.len > 0:
@@ -278,7 +309,7 @@ proc restoreBundle*(opts: RestoreOptions): RestoreReport =
   let system = hostSystem()
   let probeDir = createTempDir("repro-bundle-latest-", "")
   defer: removeDir(probeDir)
-  let (base, latest) = readLatest(opts.source, system, probeDir)
+  let (src, latest) = readLatest(opts.source, system, probeDir)
   let halves = latest["halves"]
   let ws = (if opts.workspaceDir.len > 0:
               normalizedPath(absolutePath(opts.workspaceDir))
@@ -323,38 +354,40 @@ proc restoreBundle*(opts: RestoreOptions): RestoreReport =
       $(wsBytes shr 20) & " MiB and " & ws.parentDir & " has " &
       $(freeBytes(ws.parentDir) shr 20) & " MiB free (1 GiB margin required)")
   phase("plan")
-  let staging = (if isUrl(base): chooseStaging(opts.staging, compressed)
-                 else: "")
+  let remote = src.kind != skDir
+  let staging = (if remote: chooseStaging(opts.staging, compressed) else: "")
   defer:
     if staging.len > 0 and opts.staging.len == 0: removeDir(staging)
   let parallel = (if opts.parallel > 0: opts.parallel else: 16)
   if halves.hasKey("nix"):
     ensureZstdOnPath(nixHalf)
   if needNix:
-    let dir = fetchHalf(base, staging, halves["nix"], nixHalf.parts,
-      @[nixHalf.registration.file], parallel)
+    let dir = fetchHalf(src, staging, halves["nix"], NixManifestName,
+      nixHalf.parts, @[nixHalf.registration.file], false, parallel)
     phase("download nix")
     restoreNixHalf(nixHalf, dir, nixRoot)
-    if isUrl(base): removeDir(dir)
+    if remote: removeDir(dir)
     result.restored.add("nix")
     phase("restore nix")
   if needSources:
-    let dir = fetchHalf(base, staging, halves["sources"], sourcesHalf.parts,
-      @[], parallel)
+    let dir = fetchHalf(src, staging, halves["sources"], SourcesManifestName,
+      sourcesHalf.parts, @[], false, parallel)
     phase("download sources")
-    restoreSourcesHalf(sourcesHalf, dir, ws)
-    if isUrl(base): removeDir(dir)
+    let membersOnly = restoreSourcesHalf(sourcesHalf, dir, ws)
+    if membersOnly: result.notes.add("workspace root already checked out; " &
+      "restored the member checkouts only")
+    if remote: removeDir(dir)
     result.restored.add("sources")
     phase("restore sources")
   if needNative:
     if opts.importNative == nil:
       bundleFail("this bundle has a native-store half and no importer")
     let node = halves["native_store"]
-    let dir = fetchHalf(base, staging, node, parsePartsJson(node["parts"]),
-      @[NativeManifestName], parallel)
+    let dir = fetchHalf(src, staging, node, NativeManifestName,
+      parsePartsJson(node["parts"]), @[], true, parallel)
     phase("download native-store")
     result.native = opts.importNative(dir)
-    if isUrl(base): removeDir(dir)
+    if remote: removeDir(dir)
     if result.native.skippedExtraction: result.alreadyPresent.add("native-store")
     else: result.restored.add("native-store")
     phase("restore native-store")
@@ -367,7 +400,11 @@ proc restoreBundle*(opts: RestoreOptions): RestoreReport =
   if opts.activate:
     let file = (if opts.activationFile.len > 0: opts.activationFile
                 else: "/etc/profile.d/zz-repro-bundle.sh")
-    var text = "# Written by `repro bundle restore --activate`.\n"
+    # A login shell may read both the profile file and bash.bashrc; the guard
+    # applies it once.
+    var text = "# Written by `repro bundle restore --activate`.\n" &
+      "[ -n \"${__REPRO_BUNDLE_ACTIVE:-}\" ] && return 0 2>/dev/null\n" &
+      "export __REPRO_BUNDLE_ACTIVE=1\n"
     if result.primaryEnv.len > 0:
       text.add(". " & quoteShell(result.primaryEnv) & "\n")
     if result.frozenDevEnv.len > 0:
@@ -376,6 +413,20 @@ proc restoreBundle*(opts: RestoreOptions): RestoreReport =
     createDir(file.parentDir)
     writeFile(file, text)
     result.activationFile = file
+    # Claude Code's tool shells are not login shells: they never read
+    # /etc/profile.d, but they read /etc/bash.bashrc. One marked line there.
+    let bashrc = (if opts.bashrcFile.len > 0: opts.bashrcFile
+                  else: "/etc/bash.bashrc")
+    let marker = "# repro bundle activation: " & file
+    let current = (if fileExists(bashrc): readFile(bashrc) else: "")
+    if marker notin current:
+      createDir(bashrc.parentDir)
+      var f = open(bashrc, fmAppend)
+      f.write((if current.len > 0 and not current.endsWith("\n"): "\n" else: "") &
+        marker & "\n[ -f " & quoteShell(file) & " ] && . " & quoteShell(file) &
+        "\n")
+      f.close()
+    result.bashrcFile = bashrc
 
 # ---------------------------------------------------------------------------
 # publish (§6)
@@ -475,6 +526,39 @@ proc publishBundle*(opts: PublishOptions): PublishReport =
   ## remote already has it; then each system's latest.json, then its
   ## restore.sh. A reader never sees a manifest naming missing parts.
   let dir = normalizedPath(absolutePath(opts.bundleDir))
+  if not dirExists(dir):
+    bundleFail("no bundle directory " & dir)
+  if opts.target.startsWith("github:"):
+    # §6.1: orphan branches of a GitHub repository, pushed with the caller's
+    # own git credentials.
+    let repo = opts.target["github:".len .. ^1].strip(chars = {'/'})
+    if repo.count('/') != 1:
+      bundleFail("--to must be github:OWNER/REPO, got " & opts.target)
+    let bundle = extractFilename(dir)
+    var halves: seq[tuple[rel, manifest: string]]
+    var latestFiles: seq[tuple[path, rel: string]]
+    for kind, sysDir in walkDir(dir):
+      if kind != pcDir: continue
+      let sysName = extractFilename(sysDir)
+      if sysName == SourcesHalfDir:
+        for k, d in walkDir(sysDir):
+          if k == pcDir and fileExists(d / SourcesManifestName):
+            halves.add((sysName / extractFilename(d), SourcesManifestName))
+        continue
+      for (sub, manifest) in [(NixHalfDir, NixManifestName),
+                              (NativeHalfDir, NativeManifestName)]:
+        if dirExists(sysDir / sub):
+          for k, d in walkDir(sysDir / sub):
+            if k == pcDir and fileExists(d / manifest):
+              halves.add((sysName / sub / extractFilename(d), manifest))
+      for f in [LatestName, RestoreScriptName]:
+        if fileExists(sysDir / f):
+          latestFiles.add((sysDir / f, bundle / sysName / f))
+    let r = publishGithub(dir, bundle, repo, halves, latestFiles)
+    result.uploaded = r.pushed
+    result.skipped = r.skipped
+    result.baseUrl = "github:" & repo & "/" & bundle
+    return
   let (base, _, _) = s3Base(opts)
   let bundleUrl = base & "/" & extractFilename(dir)
   result.baseUrl = bundleUrl

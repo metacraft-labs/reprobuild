@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 176 40" role="img" aria-label="Reprobuild">
+  <rect x="2" y="10" width="20" height="20" rx="4" fill="none" stroke="#111111" stroke-width="2.5"/>
+  <rect x="7.5" y="15.5" width="9" height="9" rx="1.5" fill="#111111"/>
+  <text x="32" y="27" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="18" font-weight="700" fill="#111111" letter-spacing="-0.5">reprobuild</text>
+</svg>

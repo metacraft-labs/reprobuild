@@ -1091,6 +1091,16 @@ proc sharedBareFetchArgs*(barePath: string): seq[string] =
   result = sharedBareSafetyArgs()
   result.add(["-C", barePath, "fetch", "--all", "--prune", "--quiet"])
 
+proc onlyPoolBookkeeping(dir: string): bool =
+  ## Whether ``dir`` holds nothing but a ``repro`` directory, and so no
+  ## object, ref or config of a repository.
+  var sawAny = false
+  for kind, path in walkDir(dir, relative = true):
+    if path != "repro" or kind notin {pcDir, pcLinkToDir}:
+      return false
+    sawAny = true
+  sawAny
+
 proc refreshSharedBare*(gitBin, cacheRoot, fetchUrl: string): SharedCloneResult =
   ## Clone-if-missing / fetch-if-present the shared bare for ``fetchUrl``.
   ## Returns ``ok = true`` with the bare path populated, or ``ok = false``
@@ -1124,7 +1134,16 @@ proc refreshSharedBare*(gitBin, cacheRoot, fetchUrl: string): SharedCloneResult 
             res.output.strip())
       checkLeaves = true
     else:
-      # clone-if-missing: create the parent and a bare mirror clone.
+      # clone-if-missing. A directory holding nothing but ``repro/`` is the
+      # bookkeeping an earlier detector pass wrote into a pool that had been
+      # deleted (§4.5); it is not a repository, and ``git clone`` refuses a
+      # non-empty destination, so it would block the repair for good.
+      if dirExists(bare) and onlyPoolBookkeeping(bare):
+        try:
+          removeDir(bare)
+        except OSError as e:
+          return SharedCloneResult(ok: false, sharedBarePath: bare,
+            diagnostic: "could not remove the leftover " & bare & ": " & e.msg)
       let parent = bare.splitPath.head
       if parent.len > 0:
         try:
@@ -2548,16 +2567,18 @@ discover_leaf() {
     fi
   done < "$alternates"
 }
+# scan_dir DIRECTORY DEPTH. Each call keeps its directory and remaining depth
+# in its own positional parameters, which a recursive call cannot change, so
+# the walk needs no subshell: one per directory would make a large sibling
+# domain cost a fork for every directory in it. The glob list is expanded once,
+# before the loop, so the recursion overwriting `child` does not disturb it.
 scan_dir() {
-  directory=$1
-  depth=$2
-  [ -r "$directory" ] && [ -x "$directory" ] || return 1
-  discover_leaf "$directory" || return 1
-  [ "$depth" -gt 0 ] || return 0
-  for child in "$directory"/* "$directory"/.[!.]* "$directory"/..?*; do
+  [ -r "$1" ] && [ -x "$1" ] || return 1
+  discover_leaf "$1" || return 1
+  [ "$2" -gt 0 ] || return 0
+  for child in "$1"/* "$1"/.[!.]* "$1"/..?*; do
     [ -d "$child" ] || continue
-    # A subshell keeps recursive calls from changing this call's variables.
-    (scan_dir "$child" "$((depth - 1))") || return 1
+    scan_dir "$child" "$(($2 - 1))" || return 1
   done
 }
 poolobjects=$(cd "$pool/objects" && pwd -P) || exit 1
@@ -2567,7 +2588,7 @@ while IFS= read -r parent || [ -n "$parent" ]; do
   [ -r "$parent" ] && [ -x "$parent" ] || exit 1
   for workspace in "$parent"/* "$parent"/.[!.]* "$parent"/..?*; do
     [ -d "$workspace" ] || continue
-    (scan_dir "$workspace" 2) || exit 1
+    scan_dir "$workspace" 2 || exit 1
   done
 done < "$work/parents"
 sort -u "$work/found" > "$work/discovered" || exit 1
@@ -3452,6 +3473,14 @@ proc checkLeaf*(gitBin, leaf: string; mode: LeafCheckMode;
         return                           # not a leaf of any pool: nothing to do
       thePool = pools[0]
     result.pool = thePool
+    if not dirExists(thePool / "objects"):
+      # §4.5: the pool was deleted. Registering, configuring or stamping it
+      # would re-create its directory holding only ``repro/`` bookkeeping,
+      # which is not a repository and which the clone that repairs the leaf
+      # then refuses to clone into. The detection pass changes nothing.
+      result.diagnostic = "the shared cache " & displayPoolPath(thePool) &
+        " no longer exists"
+      return
     let (gitDir, commonDir) = gitDirOf(gitBin, leaf)
     if gitDir.len == 0:
       result.diagnostic = "not a git checkout: " & leaf
@@ -4430,6 +4459,34 @@ proc sweepSharedBares*(gitBin, cacheRoot: string): seq[SharedBareSweepEntry] =
         entry.diagnostic = prepared
     result.add(entry)
 
+proc maintainOtherSharedBares*(gitBin, cacheRoot: string;
+                               maintained: openArray[string];
+                               budget = defaultMaintenanceBudget();
+                               force = false): seq[MaintenanceResult] =
+  ## The maintenance pass for every bare under ``cacheRoot`` that is not in
+  ## ``maintained``. The callers maintain the bares they can name -- the one a
+  ## commit pushed into, the ones the current workspace declares -- and then
+  ## this reaches the rest, so a bare whose checkouts only read or sync, and
+  ## never commit, still gets the age bound's pass.
+  ##
+  ## Each bare is budget-gated (unless ``force``), so a bare that is not due
+  ## costs one ``count-objects`` and no lock. No live-workspace set is passed
+  ## on: which workspaces still use an undeclared bare's ``refs/cache/*`` is
+  ## not known here, and a ref we cannot prove dead is kept. What the gc may
+  ## expire is decided by the pool's own borrower registry, as for every pass.
+  ## Only the bares a pass was attempted on are returned.
+  for bare in findSharedBares(cacheRoot):
+    var known = false
+    for m in maintained:
+      if samePathOnDisk(bare, m):
+        known = true
+        break
+    if known:
+      continue
+    if not force and not maintenanceDue(gitBin, bare, budget):
+      continue
+    result.add(maintainSharedBare(gitBin, bare, @[], budget, force))
+
 type
   SharedCloneRepoInfo* = object
     ## Per-repo wiring view used by ``repro workspace shared-clones list``.
@@ -4467,6 +4524,153 @@ proc foreignAlternates*(leaf, canonicalPool: string): seq[string] =
   for objects in alternateObjectDirs(leaf):
     if not sameObjectDirectory(objects, canonicalPool / "objects"):
       result.add(objects)
+
+proc unquoteAlternateEntry(entry: string): string =
+  ## Git reads an alternates line that starts with ``"`` as a C-quoted path
+  ## (``unquote_c_style`` in ``parse_alt_odb_entry``). Returns the entry
+  ## unchanged when it is not quoted or the quoting is malformed.
+  if entry.len < 2 or entry[0] != '"' or entry[^1] != '"':
+    return entry
+  var i = 1
+  let last = entry.len - 1
+  while i < last:
+    let c = entry[i]
+    if c != '\\':
+      result.add(c)
+      inc i
+      continue
+    if i + 1 >= last:
+      return entry
+    let e = entry[i + 1]
+    case e
+    of '"', '\\': result.add(e); i += 2
+    of 'a': result.add('\a'); i += 2
+    of 'b': result.add('\b'); i += 2
+    of 'f': result.add('\f'); i += 2
+    of 'n': result.add('\l'); i += 2
+    of 'r': result.add('\r'); i += 2
+    of 't': result.add('\t'); i += 2
+    of 'v': result.add('\v'); i += 2
+    of '0'..'3':
+      if i + 3 >= last or entry[i + 2] notin {'0'..'7'} or
+          entry[i + 3] notin {'0'..'7'}:
+        return entry
+      result.add(chr((ord(e) - ord('0')) * 64 +
+        (ord(entry[i + 2]) - ord('0')) * 8 + (ord(entry[i + 3]) - ord('0'))))
+      i += 4
+    else:
+      return entry
+
+proc entryStore(entry, objectDir: string): string =
+  ## The object directory an alternates line names, as git reads it.
+  resolveAlternateEntry(unquoteAlternateEntry(entry), objectDir)
+
+proc missingAlternateStores*(leaf: string): seq[string] =
+  ## Every object store the checkout's own alternates file names that does not
+  ## exist (Shared-Clone-Pool-Integrity §4.5). Git skips such an entry ("unable
+  ## to normalize alternate object path") and carries on, so every object only
+  ## that store held is gone from the checkout: typically ``HEAD``'s tree, and
+  ## then every command that reads it fails. Comment lines are not entries.
+  ## Raises ``IOError`` when the alternates file cannot be read.
+  let objectDir = gitObjectDir(leaf)
+  for entry in readAlternates(leaf):
+    if entry.startsWith("#"):
+      continue
+    let resolved = entryStore(entry, objectDir)
+    if not dirExists(resolved):
+      result.add(resolved)
+
+proc messagePoolMissing*(leaf: string; missing: openArray[string];
+                         remedy: string): string =
+  ## Message C (§4.5, SPI-AREQ-1): the shared cache a checkout reads its
+  ## objects from was deleted. ``remedy`` is the command that repairs it.
+  var stores = ""
+  for store in missing:
+    stores.add("\n      " & displayPoolPath(store))
+  "repro: " & displayPath(leaf) & ": the shared cache this checkout reads " &
+    "its objects from no longer exists:" & stores & "\n" &
+  "  Why:  the checkout stores only what was fetched or committed in it and\n" &
+  "        reads everything else from that cache, so git cannot read the\n" &
+  "        commits and files only the cache held (typically HEAD's own tree).\n" &
+  "  Fix:  " & remedy & "\n" &
+  "        re-creates the shared cache from upstream, makes the checkout read\n" &
+  "        from it and removes the missing entry from its alternates. A ref\n" &
+  "        whose commit upstream no longer has is then reported on its own."
+
+proc poolMissingProbeReason*(leaf, remedy, diagnostic: string): string =
+  ## A readiness probe that failed in ``leaf``, explained when the checkout
+  ## names a deleted shared cache (§4.5) instead of left as git's raw
+  ## complaint. Returns "" when it names no missing store, so the caller
+  ## keeps its own wording for every other failure.
+  var missing: seq[string]
+  try:
+    missing = missingAlternateStores(leaf)
+  except CatchableError:
+    return ""
+  if missing.len == 0:
+    return ""
+  var shown: seq[string]
+  for store in missing:
+    shown.add(displayPoolPath(store))
+  "the shared cache it reads objects from no longer exists (" &
+    shown.join(", ") & "); run `" & remedy & "` to re-create it and " &
+    "re-wire the checkout (git: " & diagnostic.strip() & ")"
+
+proc repairPoolMissing*(gitBin, cacheRoot, leaf,
+                        fetchUrl: string): SharedCloneResult =
+  ## Make a checkout whose shared cache was deleted readable again (§4.5):
+  ## clone or refresh this URL's canonical pool, wire the checkout to it
+  ## (``wireAlternates`` registers it first), then drop the alternates
+  ## entries naming stores that still do not exist. Dropping one loses
+  ## nothing: git already skips it. The detector (§4.1) then runs in repair
+  ## mode against the new pool, so a ref whose commit upstream no longer
+  ## serves gets its usual message.
+  ##
+  ## Nothing is removed from the checkout's own object store, no ref of the
+  ## user's is changed, and no store outside the cache root is created.
+  var missing: seq[string]
+  try:
+    missing = missingAlternateStores(leaf)
+  except CatchableError as error:
+    return SharedCloneResult(ok: false,
+      diagnostic: "cannot read the alternates of " & leaf & ": " & error.msg)
+  if missing.len == 0:
+    return SharedCloneResult(ok: true)
+  let refreshed = refreshSharedBare(gitBin, cacheRoot, fetchUrl)
+  result.leafReports = refreshed.leafReports
+  result.sharedBarePath = refreshed.sharedBarePath
+  if not refreshed.ok:
+    result.diagnostic = "cannot re-create the shared cache for " & fetchUrl &
+      ": " & refreshed.diagnostic
+    return
+  let wired = wireAlternates(leaf, refreshed.sharedBarePath, gitBin)
+  if not wired.ok:
+    result.diagnostic = wired.diagnostic
+    return
+  var rewritten = false
+  withCheckoutVcsLock(leaf,
+      (block: result.diagnostic = "could not lock checkout: " & leaf)):
+    let altPath = alternatesFilePath(leaf)
+    try:
+      let objectDir = gitObjectDir(leaf)
+      var kept: seq[string]
+      for entry in readAlternates(leaf):
+        if entry.startsWith("#") or
+            dirExists(entryStore(entry, objectDir)):
+          kept.add(entry)
+      writeFile(altPath, kept.join("\n") & "\n")
+      rewritten = true
+    except CatchableError as error:
+      result.diagnostic = "could not rewrite " & altPath & ": " & error.msg
+  if not rewritten:
+    return
+  let detected = checkLeaf(gitBin, leaf, lcmRepair,
+    pool = refreshed.sharedBarePath)
+  result.leafReports.add(detected)
+  if detected.diagnostic.len > 0:
+    result.diagnostic = detected.diagnostic
+    return
+  result.ok = true
 
 proc inspectRepoWiring*(workspaceRoot, cacheRoot, repoRelPath,
                         fetchUrl: string): SharedCloneRepoInfo =

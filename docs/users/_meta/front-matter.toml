@@ -1,0 +1,155 @@
+# Front-matter schema for every page under docs/users/.
+#
+# This file is the single source for the values a page may declare. The
+# front-matter validator reads it; docs/contributors/user-documentation.md
+# explains it in prose. A key or value that is not listed here is an error.
+#
+# isonim-docs itself reads only title, description, section, order, slug,
+# draft, layout, hidden and aliases, and ignores every other key, so the keys
+# below that it does not know (kind, persona, domain, platforms, verifies,
+# unverified) need no change to the framework.
+
+schema = "reprobuild.docs.front-matter.v1"
+
+[keys]
+required = ["title", "description", "kind", "persona"]
+optional = [
+  "domain",      # required on how-to and explanation pages outside Start here and Coming from
+  "order",
+  "platforms",   # where the page's steps are verified
+  "verifies",    # the sources that keep the page true
+  "unverified",  # claims no mechanism checks yet: the debt register
+  "draft",
+  "slug",
+  "aliases",     # old URLs kept resolvable after a move
+  "hidden",
+]
+
+[[kinds]]
+id = "tutorial"
+serves = "learning"
+rule = "One path that a scenario runs from a clean state. No alternatives."
+
+[[kinds]]
+id = "how-to"
+serves = "a goal"
+rule = "The title states the goal. Steps to one outcome. May branch with tabs; does not teach."
+
+[[kinds]]
+id = "reference"
+serves = "lookup"
+rule = "Complete and generated wherever a source of truth exists. No narrative, no worked examples."
+
+[[kinds]]
+id = "explanation"
+serves = "understanding"
+rule = "Reasons and trade-offs. Every fact links to reference or names its source in verifies."
+
+[[personas]]
+id = "evaluator"
+who = "An engineer deciding whether to try reprobuild, usually fluent in a tool it replaces."
+knows = "That tool, git, a shell."
+explain = "What reprobuild is, what it does today, what it costs to try, where it differs."
+
+[[personas]]
+id = "developer"
+who = "Works in a codebase that already uses reprobuild and did not set it up."
+knows = "git, a shell, their language's toolchain."
+explain = "Anything about Nim, the project file or the build graph."
+
+[[personas]]
+id = "build-maintainer"
+who = "Owns a project's build and CI and writes its repro.nim."
+knows = "Build systems such as Make, CMake, Ninja, Bazel or Cargo; CI; caching."
+explain = "The Nim used by the project file; dependency evidence; how caching stays correct."
+
+[[personas]]
+id = "workspace-maintainer"
+who = "Maintains a multi-repository workspace: its manifests, branch roles, locks and hooks."
+knows = "git in depth; repo, submodules or monorepo tooling."
+explain = "Manifest files, branch roles, lock tiers, the pre-push check."
+
+[[personas]]
+id = "machine-owner"
+who = "Configures their own machines' tools, dotfiles and services with reprobuild."
+knows = "Home Manager or NixOS, a dotfiles manager, basic Ansible or Terraform."
+explain = "Home and system profiles, activities, generations."
+
+[[domains]]
+id = "build"
+covers = "The project file, conventions and modes, caching, dependency evidence, tool provisioning."
+
+[[domains]]
+id = "test"
+covers = "Running, sharding and certifying tests."
+
+[[domains]]
+id = "environments"
+covers = "Development environments and how they are activated."
+
+[[domains]]
+id = "tasks-and-services"
+covers = "Named tasks, local services and rebuild loops."
+
+[[domains]]
+id = "workspaces"
+covers = "Multi-repository workspaces and develop mode."
+
+[[domains]]
+id = "machines"
+covers = "Home and system profiles, host-local resources, the store."
+
+[[domains]]
+id = "ci-and-caches"
+covers = "CI integration, binary caches, moving store contents between machines."
+
+[[domains]]
+id = "troubleshooting"
+covers = "Diagnosis."
+
+[[platforms]]
+id = "linux"
+
+[[platforms]]
+id = "macos"
+
+[[platforms]]
+id = "windows"
+
+# The six admonitions isonim-docs renders, each with one fixed meaning. Any
+# other use of an admonition is an error.
+[[admonitions]]
+id = "note"
+means = "Background that the next step depends on."
+
+[[admonitions]]
+id = "tip"
+means = "An optional shortcut."
+
+[[admonitions]]
+id = "important"
+means = "A precondition: if it is not met, the step fails."
+
+[[admonitions]]
+id = "warning"
+means = "The step can discard work or data."
+
+[[admonitions]]
+id = "caution"
+means = "Experimental: the feature exists and can change incompatibly."
+
+[[admonitions]]
+id = "danger"
+means = "Security: trust, credentials or exposure."
+
+[verifies]
+# Every entry must resolve: a scenario file under docs/users/scenarios/, a
+# repro command known to the CLI model, a test file in this repository, a
+# benchmark name in the benchmark results.
+keys = ["scenario", "commands", "tests", "benchmarks"]
+
+[unverified]
+# Each entry is one claim the page makes that no mechanism checks yet.
+keys = ["claim", "reason", "owner"]
+# A page whose entries name owner = "unassigned" is not publishable.
+unassigned_owner = "unassigned"

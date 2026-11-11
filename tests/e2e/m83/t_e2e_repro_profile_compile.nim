@@ -464,10 +464,16 @@ suite "M83 Phase A e2e: compile + run user profiles":
       "$ProgressPreference = 'SilentlyContinue'; " &
         "$ErrorActionPreference = 'Stop'; " &
         "Add-Type -AssemblyName System.IO.Compression.FileSystem; " &
-        "$root = [System.IO.Directory]::CreateDirectory(" &
-          "'C:\\actions-runner').FullName; " &
-        "$root = $root.TrimEnd([char[]]'\\/') + " &
+        "Add-Type -AssemblyName System.IO.Compression; " &
+        "function ConvertTo-ExtendedPath([string]$p) { " &
+          "if ($p.StartsWith('\\\\?\\')) { return $p } " &
+          "if ($p.StartsWith('\\\\')) { return '\\\\?\\UNC\\' + $p.Substring(2) } " &
+          "return '\\\\?\\' + $p }; " &
+        "$root = [System.IO.Path]::GetFullPath(" &
+          "'C:\\actions-runner').TrimEnd([char[]]'\\/') + " &
           "[System.IO.Path]::DirectorySeparatorChar; " &
+        "[void][System.IO.Directory]::CreateDirectory(" &
+          "(ConvertTo-ExtendedPath $root)); " &
         "$zip = [System.IO.Compression.ZipFile]::Open(" &
           "'C:\\actions-runner-cache\\runner.zip', " &
           "[System.IO.Compression.ZipArchiveMode]::Read, " &
@@ -479,13 +485,19 @@ suite "M83 Phase A e2e: compile + run user profiles":
             "[System.StringComparison]::OrdinalIgnoreCase)) { " &
             "throw ('zip entry escapes the destination: ' + " &
               "$entry.FullName) } " &
+          "foreach ($segment in $entry.FullName.Split([char[]]'/\\')) { " &
+            "if ($segment -ne '.' -and $segment -ne '..' -and " &
+              "($segment.EndsWith('.') -or $segment.EndsWith(' '))) { " &
+              "throw ('zip entry names a path segment Windows cannot " &
+                "address: ' + $entry.FullName) } } " &
+          "$io = ConvertTo-ExtendedPath $target; " &
           "if ($entry.Name.Length -eq 0) { " &
-            "[void][System.IO.Directory]::CreateDirectory($target) " &
+            "[void][System.IO.Directory]::CreateDirectory($io) " &
           "} else { " &
             "[void][System.IO.Directory]::CreateDirectory(" &
-              "[System.IO.Path]::GetDirectoryName($target)); " &
+              "[System.IO.Path]::GetDirectoryName($io)); " &
             "[System.IO.Compression.ZipFileExtensions]::ExtractToFile(" &
-              "$entry, $target, $true) } " &
+              "$entry, $io, $true) } " &
         "} } finally { $zip.Dispose() }"]
     let zipArgv = zipEdge{"argv"}
     if host == "windows":

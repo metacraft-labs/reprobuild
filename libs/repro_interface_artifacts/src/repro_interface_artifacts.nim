@@ -580,6 +580,9 @@ type
     nixpkgsNarHash*: string
     packageId*: string
     lockIdentity*: string
+    version*: string
+      ## ``NixPackageProvisioningDef.version``: the release the record
+      ## realizes, "" when it names none (v32).
     location*: SourceLocation
 
   InterfaceTarballProvisioning* = object
@@ -1206,8 +1209,16 @@ static:
 
 const
   EnvelopeMagic = [byte(ord('R')), byte(ord('B')), byte(ord('S')), byte(ord('Z'))]
-  EnvelopeVersion = 31'u16
-    ## v31 (current): the wire payload is v30's. The fingerprint projection
+  EnvelopeVersion = 32'u16
+    ## v32 (current): ``InterfaceNixProvisioning`` retains ``version``, the
+    ##                release a ``nixPackage`` record declares, a string
+    ##                after ``lockIdentity``. v31 and older payloads decode
+    ##                with it empty, a record that names no release, which is
+    ##                what every record was before. The fingerprint
+    ##                projection writes it only when non-empty, so no
+    ##                fingerprint or key hashed from one moves for a record
+    ##                that declares none.
+    ## v31: the wire payload is v30's. The fingerprint projection
     ##                of a tool use carries no environment-prefix block at
     ##                all, so every interface fingerprint -- and every key
     ##                hashed from one, the tool-identity cache key among
@@ -1966,6 +1977,14 @@ proc writeNixProvisioning(outp: var seq[byte];
   outp.writeString(provisioning.nixpkgsNarHash)
   outp.writeString(provisioning.packageId)
   outp.writeString(provisioning.lockIdentity)
+  # v32: the declared release. The fingerprint projection carries it only
+  # when a record names one, so every record that names none -- all of them
+  # before v32 -- keeps its projection, and nothing hashed from it (the
+  # interface fingerprint through a contribution record, the tool-use
+  # realization digest) moves.
+  if version >= 32'u16 and
+      (not forFingerprint or provisioning.version.len > 0):
+    outp.writeString(provisioning.version)
   outp.writeLocation(provisioning.location, forFingerprint)
 
 proc readNixProvisioning(bytes: openArray[byte]; pos: var int;
@@ -1983,6 +2002,8 @@ proc readNixProvisioning(bytes: openArray[byte]; pos: var int;
     result.nixpkgsNarHash = readString(bytes, pos)
   result.packageId = readString(bytes, pos)
   result.lockIdentity = readString(bytes, pos)
+  if version >= 32'u16:
+    result.version = readString(bytes, pos)
   result.location = readLocation(bytes, pos)
 
 proc writeTarballArchiveDetail(outp: var seq[byte];
@@ -2916,6 +2937,7 @@ proc toInterfaceNixProvisioning(packageName: string;
     nixpkgsNarHash: provisioning.nixpkgsNarHash,
     packageId: provisioning.packageId,
     lockIdentity: provisioning.lockIdentity,
+    version: provisioning.version,
     location: SourceLocation(file: provisioning.sourceFile,
       line: provisioning.sourceLine))
 
@@ -3843,6 +3865,7 @@ proc emitProvisioningContributionRegistrations(code: var string;
         ", nixpkgsNarHash: " & escForCode(provisioning.nixpkgsNarHash) &
         ", packageId: " & escForCode(provisioning.packageId) &
         ", lockIdentity: " & escForCode(provisioning.lockIdentity) &
+        ", version: " & escForCode(provisioning.version) &
         ", sourceFile: " & escForCode(provisioning.location.file) &
         ", sourceLine: " & $provisioning.location.line & ")")
     code.add("], tarballProvisioning: @[")
@@ -4664,12 +4687,14 @@ proc probeCCompiler*(cc: string; cacheDir = "";
   cachedCCompilerProbes[identity] = result
 
 proc requireUsableCCompiler*(cc, origin: string; cacheDir = "";
-                             extraArgs: seq[string] = @[]) =
+                             extraArgs: seq[string] = @[]; remedy = "") =
   ## Raise ``CCompilerUnusableError`` unless ``cc`` passes ``probeCCompiler``.
+  ## ``remedy`` replaces the host-generic ``cCompilerOverrideRemedy`` when
+  ## the caller knows the bootstrap route the compiler came from.
   let probe = probeCCompiler(cc, cacheDir, extraArgs)
   if not probe.usable:
     raise newException(CCompilerUnusableError,
-      cCompilerUnusableMessage(probe, origin))
+      cCompilerUnusableMessageFor(probe, origin, "recipe", remedy))
 
 when defined(windows):
   var warnedPathCCompiler = false
@@ -6792,6 +6817,26 @@ proc portableReleaseRpathFlags*(clingoPrefix, releaseLibDir: string):
   else:
     @[]
 
+proc releaseClingoRpathFlags*(engineExe: string; target: RuntimeLinkTarget;
+                              probe: proc(path: string): bool): seq[string] =
+  ## The darwin counterpart of `portableReleaseRpathFlags`, for a host with no
+  ## clingo prefix: a darwin release archive ships `libclingo.dylib` in
+  ## `<release>/lib`, beside `<release>/bin/reprobuild`, and the engine reaches
+  ## it through its own `@loader_path/../lib` LC_RPATH. The extract runner is
+  ## linked later from a temporary directory outside that rpath, so its
+  ## module-init dlopen of `@rpath/libclingo.dylib` failed with
+  ## `could not load: @rpath/libclingo.dylib` (reprobuild#505). Recording the
+  ## release's own lib directory as the runner's rpath resolves it. Unlike the
+  ## Linux archive there is no bundled libc to keep out of the rpath, so the
+  ## absolute directory is safe here. `probe` answers whether a path exists;
+  ## it is a parameter so a test can run the darwin argv shape on any host.
+  if target != rltDarwin or engineExe.len == 0:
+    return @[]
+  let libDir = parentDir(parentDir(engineExe)) / "lib"
+  if not probe(libDir / "libclingo.dylib"):
+    return @[]
+  runtimeRpathCompilerFlags(@[libDir], target)
+
 proc stagePortableReleaseLibraries*(libDir, destDir: string): seq[string]
     {.discardable.} =
   ## Copy `PortableReleaseDlopenedLibraries` from the release's ``libDir``
@@ -7136,6 +7181,12 @@ proc externalHashFlags(workDir = ""): seq[string] =
     if clingoPrefix.len == 0:
       result.add(portableReleaseRpathFlags(clingoPrefix,
         portableReleaseLibDir()))
+  # The darwin release archive's own libclingo.dylib, with no clingo prefix on
+  # the host: see `releaseClingoRpathFlags`.
+  if clingoPrefix.len == 0:
+    result.add(releaseClingoRpathFlags(getAppFilename(),
+      hostRuntimeLinkTarget(),
+      proc(path: string): bool = fileExists(extendedPath(path))))
 
   # sqlite: `config.nims`'s non-Windows/non-macOS block links `-lsqlite3`
   # (pulled in transitively by the cas / lock store deps that

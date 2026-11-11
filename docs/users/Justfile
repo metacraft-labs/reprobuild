@@ -1,0 +1,29 @@
+# reprobuild/docs/users -- the documentation site's task entry points.
+#
+# The site is an isonim-docs consumer. Every recipe needs a Nim 2.2 toolchain
+# and the framework's sibling checkouts next to this repository (see
+# README.md). From the reprobuild checkout, the deploy script does both:
+#   bash scripts/build_user_docs.sh
+
+# Static build into public/ (what the deploy publishes).
+build:
+    nim c -r --skipParentCfg --hints:off -o:build/build src/build.nim
+
+# Live-reloading server at http://127.0.0.1:8000 (pass 0.0.0.0 as host only on
+# a trusted network).
+dev-docs port='8000' host='127.0.0.1':
+    nim c -r --skipParentCfg --hints:off src/dev.nim {{port}} {{host}}
+
+# One-shot server-side render of the home page.
+serve-docs:
+    nim c -r --skipParentCfg --hints:off src/ssr.nim
+
+# Fails on an internal link to no page, an anchor that names no heading, or
+# two pages on one route.
+check-links:
+    nim c -r --skipParentCfg --hints:off -o:build/check_links src/check_links.nim
+
+# Every check that does not need a browser: references, then the generated
+# command-equivalents table.
+check: check-links
+    python3 ../../scripts/render_command_equivalents.py --check

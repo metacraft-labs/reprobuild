@@ -527,9 +527,9 @@
       # ``../test-certificates-tools`` sibling); the sandboxed package build
       # has no sibling, so seed it from here. Pinned at an ``agents`` commit
       # (the first that lets the caller name its git, ``PushOptions.gitExe``)
-      # until the v0.1.0 tag carries it; then it moves to the tag. Keep this
-      # URL, flake.lock, package.nix, repro.lock and .github/sibling-repos
-      # aligned.
+      # until the v0.1.0 tag carries it; then it moves to the tag, with
+      # `repro lock update`, which moves this URL, flake.lock and repro.lock
+      # together (CI clones the sibling at repro.lock's revision).
       url = "github:metacraft-labs/test-certificates-tools/4b395de551d86c745d6eb8ebf7c7228df25298f5";
       flake = false;
     };
@@ -2254,29 +2254,10 @@
                   .packages.${system}.default;
                 # argument -> the flake input passed for it (see the
                 # `callPackage` calls of package.nix and nim-fork.nix above).
-                packageArgs = {
-                  nimcryptoSrc = "nimcrypto-src";
-                  bearsslSrc = "bearssl-src";
-                  stackableHooksSrc = "nim-stackable-hooks-src";
-                  ctTraceFormatSrc = "ct-trace-format-src";
-                  ioMonSrc = "io-mon-src";
-                  shmGsetSrc = "nim-shm-gset-src";
-                  shmQueueSrc = "nim-shm-queue-src";
-                  codetracerSrc = "codetracer-src";
-                  ctTestRunnerSrc = "reprobuild-ct-test-runner-src";
-                  testAdaptersSrc = "reprobuild-test-adapters-src";
-                  testCertificatesToolsSrc = "test-certificates-tools-src";
-                  runquotaSrc = "runquota-src";
-                };
-                nimForkArgs = {
-                  forkSrc = "nim-fork-src";
-                  csourcesSrc = "nim-csources-src";
-                  traceFormatSrc = "ct-trace-format-src";
-                  stewSrc = "nim-stew-src";
-                  resultsSrc = "nim-results-src";
-                  checksumsSrc = "nim-checksums-src";
-                  nimonySrc = "nim-nimony-src";
-                };
+                # One table, read here and by scripts/check_package_nix_pending_sources.py.
+                sourceInputs = builtins.fromJSON (builtins.readFile ./nix/package-source-inputs.json);
+                packageArgs = sourceInputs."package.nix";
+                nimForkArgs = sourceInputs."nim-fork.nix";
                 problems =
                   file: sources: args:
                   pkgs.lib.concatLists (
@@ -3017,12 +2998,19 @@
           # deploy job slower and more fragile for no benefit. The self-hosted
           # eph-linux-x64 runners ship no node/npx, which is exactly why the
           # deploy runs wrangler from here rather than via cloudflare/*-action.
+          #
+          # The user-documentation deploy (.github/workflows/deploy-docs.yml)
+          # uses the same shell: wrangler to publish, git and python3 to check
+          # out the isonim-docs framework at the revisions its repro.lock
+          # names (scripts/build_user_docs.sh fetch). The site itself is built
+          # in isonim's own development shell, not here.
           devShells.ci = pkgs.mkShell {
             packages = [
               pkgs.wrangler
               pkgs.bash
               pkgs.coreutils
               pkgs.git
+              pkgs.python3
             ];
           };
         };

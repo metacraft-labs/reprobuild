@@ -1,36 +1,45 @@
-## Unified-Locking-And-Hooks HL-2 (§10 Migration) — a legacy ``.repo/manifests``
-## workspace with NO team route must NEVER silently go public-only. Locking it
-## emits a LOUD one-time migration guidance naming ``repro locking
-## adopt-manifest``, and running that verb scaffolds a WORKING team route that
-## makes the existing manifest the team backend.
+## Unified-Locking-And-Hooks HL-2 (§10 Migration) — a workspace with a
+## record-store directory but NO team route must NEVER silently go public-only.
+## Locking it emits a LOUD one-time migration guidance naming ``repro locking
+## adopt-manifest``, and that verb either scaffolds a WORKING team route or
+## refuses — it never writes a route that records nothing.
 ##
-## Fixture (built ``./build/bin/repro``, black-box) — a full ``.repo/manifests``
-## workspace with two cloned repos and NO ``[locking]`` config at all (the
-## legacy shape), env-silenced system/dotfiles/VCS-private layers.
+## Fixtures (built ``./build/bin/repro``, black-box), each with two cloned repos,
+## NO ``[locking]`` config at all, and env-silenced system/dotfiles/VCS-private
+## layers:
 ##
-## Asserts:
-##   1. ``repro workspace lock`` on the un-routed legacy manifest prints the LOUD
-##      guidance (mentions the missing team route AND ``adopt-manifest``) — it is
-##      NOT silent.
-##   2. ``repro locking adopt-manifest`` writes a team route into the VCS-private
-##      config layer (never pushed) naming every repo → git-checkout at
-##      ``.repo/manifests``.
-##   3. After the scaffold, ``repro locking explain --json`` resolves every repo
-##      to the TEAM tier with the ``git-checkout`` backend (NOT public-only) — a
-##      WORKING team route.
+## * ``t_legacy_manifest_without_team_route_warns_and_scaffolds`` — the legacy
+##   shape: a plain ``.repro/manifests`` directory holding the workspace
+##   metadata, NOT a git checkout.
+##   1. ``repro workspace lock`` prints the LOUD guidance (mentions the missing
+##      team route AND ``adopt-manifest``) — it is NOT silent.
+##   2. ``repro locking adopt-manifest`` REFUSES (non-zero exit, names the
+##      directory as not a git checkout and the remedy) and writes NO config:
+##      a git-checkout route over a plain directory records nothing.
+##   3. ``repro locking explain --json`` still resolves no repo to the team
+##      tier — nothing was routed.
 ##
-## Falsifiability: dropping the migration guard makes (1) silent (no guidance in
-## the lock output) — the assertion on the guidance text trips. Dropping the
-## ``adopt-manifest`` scaffold makes (3) resolve every repo to the public
-## committed-lock default instead of the team git-checkout — that assertion
-## trips. Confirmed by no-op-ing ``maybeWarnLegacyManifestWithoutTeamRoute``: (1)
-## goes silent and fails.
+## * ``t_adopt_manifest_routes_the_record_store_checkout`` — metadata at the
+##   workspace root and the record store a git checkout at ``.repro/records``.
+##   1. ``repro locking adopt-manifest`` writes a team route naming every repo
+##      → git-checkout at ``.repro/records`` (the checkout that exists).
+##   2. ``repro locking explain --json`` resolves every repo to the TEAM tier.
+##   3. ``repro workspace lock`` then WRITES a record under
+##      ``.repro/records/locks/`` — the route works, not merely resolves.
+##
+## Falsifiability: dropping the migration guard makes the first case's (1)
+## silent. Writing the scaffold for a non-checkout makes its (2) exit 0 and
+## create the config. A route path that is not the checkout found (the former
+## hard-coded ``.repro/manifests``) makes the second case's lock record nothing,
+## which its (3) trips on. Dropping the scaffold makes its (2) resolve every
+## repo to the public committed-lock default.
 ##
 ## Hermetic: fresh tempdir; env silences the other config layers. Skip: ``git``
 ## missing or ``./build/bin/repro`` absent.
 
 import std/[json, os, osproc, strutils, tempfiles, unittest]
 from repro_test_support import fileUrl
+import repro_test_support/reasoned_skip
 
 import repro_workspace_manifests
 
@@ -124,12 +133,41 @@ proc repoFragment(name, remote: string): string =
   "remote = \"" & remote & "\"\n" &
   "mainline = \"main\"\n"
 
+proc writeMetadata(root, aOrigin, bOrigin: string) =
+  createDir(root / "projects")
+  createDir(root / "repos")
+  writeFile(root / "projects" / "legacy.toml",
+    projectToml(fileUrl(aOrigin), fileUrl(bOrigin)))
+  writeFile(root / "repos" / "a.toml", repoFragment("a", "a-origin"))
+  writeFile(root / "repos" / "b.toml", repoFragment("b", "b-origin"))
+
+proc silenceConfigLayers(scratch: string): string =
+  ## No ``[locking]`` table anywhere: point every other configuration layer at
+  ## a file that does not exist so there is definitively NO team route.
+  ## Returns the VCS-private layer path ``adopt-manifest`` writes to.
+  putEnv("REPROBUILD_SYSTEM_CONFIG", scratch / "no-system.toml")
+  putEnv("REPROBUILD_USER_CONFIG", scratch / "no-user.toml")
+  result = scratch / "vcs-private.toml"
+  putEnv("REPROBUILD_VCS_PRIVATE_CONFIG", result)
+
+proc restoreConfigLayers() =
+  delEnv("REPROBUILD_SYSTEM_CONFIG")
+  delEnv("REPROBUILD_USER_CONFIG")
+  delEnv("REPROBUILD_VCS_PRIVATE_CONFIG")
+
+proc lockRecordFiles(storeRoot: string): seq[string] =
+  let locks = storeRoot / "locks"
+  if dirExists(locks):
+    for path in walkDirRec(locks):
+      if path.endsWith(".toml"):
+        result.add(path)
+
 suite "HL-2 — legacy manifest without team route warns and scaffolds":
 
   test "t_legacy_manifest_without_team_route_warns_and_scaffolds":
     let gitBin = findExe("git")
     if gitBin.len == 0 or not fileExists(reproBinary):
-      skip()
+      skip("needs git on PATH and a built ./build/bin/repro")
     else:
       let scratch = createTempDir("hl2-legacy-", "")
       defer: removeDir(scratch)
@@ -142,27 +180,14 @@ suite "HL-2 — legacy manifest without team route warns and scaffolds":
       let ws = scratch / "workspace"
       createDir(ws)
       let manifestsRoot = ws / ".repro" / "manifests"
-      createDir(manifestsRoot / "projects")
-      createDir(manifestsRoot / "repos")
-      writeFile(manifestsRoot / "projects" / "legacy.toml",
-        projectToml(fileUrl(aOrigin), fileUrl(bOrigin)))
-      writeFile(manifestsRoot / "repos" / "a.toml", repoFragment("a", "a-origin"))
-      writeFile(manifestsRoot / "repos" / "b.toml", repoFragment("b", "b-origin"))
+      writeMetadata(manifestsRoot, aOrigin, bOrigin)
 
       cloneInto(gitBin, aOrigin, ws / "a")
       cloneInto(gitBin, bOrigin, ws / "b")
       writeWorkspaceBranch(ws, project = "legacy", branch = "main")
 
-      # NO .repro-workspace.toml [locking] table — the legacy shape. Silence the
-      # other config layers so there is definitively NO team route.
-      putEnv("REPROBUILD_SYSTEM_CONFIG", scratch / "no-system.toml")
-      putEnv("REPROBUILD_USER_CONFIG", scratch / "no-user.toml")
-      let vcsPrivate = scratch / "vcs-private.toml"
-      putEnv("REPROBUILD_VCS_PRIVATE_CONFIG", vcsPrivate)
-      defer:
-        delEnv("REPROBUILD_SYSTEM_CONFIG")
-        delEnv("REPROBUILD_USER_CONFIG")
-        delEnv("REPROBUILD_VCS_PRIVATE_CONFIG")
+      let vcsPrivate = silenceConfigLayers(scratch)
+      defer: restoreConfigLayers()
 
       # ---- (1) locking the un-routed legacy manifest WARNS loudly ------
       let lockRes = run(reproBinary & " workspace lock --workspace-root=" & q(ws))
@@ -172,20 +197,67 @@ suite "HL-2 — legacy manifest without team route warns and scaffolds":
         lockRes.output.contains("NO team route")
       check lockRes.output.contains("adopt-manifest")
 
-      # ---- (2) adopt-manifest scaffolds the team route -----------------
+      # ---- (2) adopt-manifest REFUSES a store that is not a checkout ---
       let adoptRes = run(reproBinary & " locking adopt-manifest" &
         " --workspace-root=" & q(ws))
-      if adoptRes.code != 0:
-        checkpoint("adopt-manifest output: " & adoptRes.output)
+      checkpoint("adopt-manifest output: " & adoptRes.output)
+      check adoptRes.code != 0
+      check adoptRes.output.contains("is not a git checkout")
+      check adoptRes.output.contains(manifestsRoot)
+      check adoptRes.output.contains("[records] url")
+      # Nothing was written: no route that would record nothing.
+      check not fileExists(vcsPrivate)
+
+      # ---- (3) explain routes no repo to the team tier -----------------
+      let explainRes = runStdout(reproBinary &
+        " locking explain --workspace-root=" & q(ws) & " --json")
+      check explainRes.code == 0
+      let parsed = parseJson(explainRes.output.strip())
+      check parsed["repos"].len == 2
+      for r in parsed["repos"]:
+        check r["tier"].getStr() != "team"
+
+  test "t_adopt_manifest_routes_the_record_store_checkout":
+    let gitBin = findExe("git")
+    if gitBin.len == 0 or not fileExists(reproBinary):
+      skip("needs git on PATH and a built ./build/bin/repro")
+    else:
+      let scratch = createTempDir("hl2-records-", "")
+      defer: removeDir(scratch)
+
+      let aOrigin = scratch / "origin-a.git"
+      let bOrigin = scratch / "origin-b.git"
+      let recordsOrigin = scratch / "origin-records.git"
+      discard seedGitOrigin(gitBin, aOrigin, scratch / "seed-a")
+      discard seedGitOrigin(gitBin, bOrigin, scratch / "seed-b")
+      discard seedGitOrigin(gitBin, recordsOrigin, scratch / "seed-records")
+
+      let ws = scratch / "workspace"
+      createDir(ws)
+      writeMetadata(ws, aOrigin, bOrigin)
+      let recordsRoot = ws / ".repro" / "records"
+      createDir(ws / ".repro")
+      cloneInto(gitBin, recordsOrigin, recordsRoot)
+
+      cloneInto(gitBin, aOrigin, ws / "a")
+      cloneInto(gitBin, bOrigin, ws / "b")
+      writeWorkspaceBranch(ws, project = "legacy", branch = "main")
+
+      let vcsPrivate = silenceConfigLayers(scratch)
+      defer: restoreConfigLayers()
+
+      # ---- (1) adopt-manifest routes the checkout that exists ----------
+      let adoptRes = run(reproBinary & " locking adopt-manifest" &
+        " --workspace-root=" & q(ws))
+      checkpoint("adopt-manifest output: " & adoptRes.output)
       check adoptRes.code == 0
-      # The route was written into the VCS-private config layer.
       check fileExists(vcsPrivate)
-      let cfgBody = readFile(vcsPrivate)
+      let cfgBody = if fileExists(vcsPrivate): readFile(vcsPrivate) else: ""
       check cfgBody.contains("git-checkout")
-      check cfgBody.contains(".repro/manifests")
+      check cfgBody.contains("path = \".repro/records\"")
       check cfgBody.contains("\"team\"")
 
-      # ---- (3) explain now resolves every repo to the TEAM backend -----
+      # ---- (2) explain resolves every repo to the TEAM backend ---------
       let explainRes = runStdout(reproBinary &
         " locking explain --workspace-root=" & q(ws) & " --json")
       check explainRes.code == 0
@@ -195,3 +267,11 @@ suite "HL-2 — legacy manifest without team route warns and scaffolds":
         check r["tier"].getStr() == "team"
         check r["backend"].getStr() == "git-checkout"
         check r["layer"].getStr() == "vcs-private"
+
+      # ---- (3) the route WORKS: the next lock records into the store ---
+      check lockRecordFiles(recordsRoot).len == 0
+      let lockRes = run(reproBinary & " workspace lock --workspace-root=" & q(ws))
+      checkpoint("workspace lock output: " & lockRes.output)
+      check lockRes.code == 0
+      check not lockRes.output.contains("failed to record")
+      check lockRecordFiles(recordsRoot).len > 0

@@ -434,9 +434,62 @@ suite "envelope lanes -- the environment-prefix block begins at v30":
     expect EnvelopeError:
       discard decodeProjectInterfaceArtifact(envelope)
 
-  test "v31 is the default":
-    # version-literal-ok: a pin that must fail when the envelope moves past v31, so this matrix is extended
-    check interfaceEnvelopeVersion() == 31'u16
+suite "envelope lanes -- a nixPackage record's version begins at v32":
+
+  proc withNixRecords(pi: ProjectInterface; version: string):
+      ProjectInterface =
+    ## `pi` plus a Nix record declaring `version` on a tool use AND on the
+    ## provisioning contribution: the contribution's records are inside the
+    ## fingerprint projection, the tool use's are inside the realization
+    ## digest, so the gate is visible through both.
+    result = withToolUses(pi, envPrefixArm = false)
+    let record = InterfaceNixProvisioning(
+      packageName: "sqlite",
+      selector: "reprobuild-stdlib-sqlite",
+      executablePath: "bin/sqlite3",
+      expressionFile: "nix/sqlite/default.nix",
+      lockIdentity: "nix-expression:sqlite",
+      version: version,
+      location: SourceLocation(file: "repro.nim", line: 32))
+    result.toolUses[0].nixProvisioning = @[record]
+    result.provisioningContributions[0].nixProvisioning = @[record]
+
+  test "v32 carries the version; v21..v31 decode it empty with every " &
+      "other field intact":
+    let pi = withNixRecords(bothLanesInterface(), "1.97.1")
+    for v in 21'u16 .. 31'u16:
+      checkpoint "v" & $v
+      let back = atVersion(pi, v)
+      check back.toolUses[0].nixProvisioning.len == 1
+      check back.toolUses[0].nixProvisioning[0].version == ""
+      check back.toolUses[0].nixProvisioning[0].lockIdentity ==
+        "nix-expression:sqlite"
+      check back.toolUses[0].nixProvisioning[0].location.line == 32
+      check tarballOf(back).closureManifest == ClosureManifest
+    for v in [32'u16, interfaceEnvelopeVersion()]:
+      checkpoint "v" & $v
+      let back = atVersion(pi, v)
+      check back.toolUses[0].nixProvisioning[0].version == "1.97.1"
+      check back.provisioningContributions[0].nixProvisioning[0].version ==
+        "1.97.1"
+      check back.toolUses[0].nixProvisioning[0].location.line == 32
+      check tarballOf(back).closureManifest == ClosureManifest
+
+  test "a record that declares no version keeps its v31 fingerprint and " &
+      "realization digest":
+    let unversioned = withNixRecords(bothLanesInterface(), "")
+    check fingerprintBytes(unversioned, interfaceEnvelopeVersion()) ==
+      fingerprintBytes(unversioned, 31'u16)
+    # The control: a declared version is part of what the record realizes,
+    # so it moves both.
+    let versioned = withNixRecords(bothLanesInterface(), "1.97.1")
+    check interfaceFingerprint(versioned) != interfaceFingerprint(unversioned)
+    check toolUseRealizationDigest(versioned.toolUses[0]) !=
+      toolUseRealizationDigest(unversioned.toolUses[0])
+
+  test "v32 is the default":
+    # version-literal-ok: a pin that must fail when the envelope moves past v32, so this matrix is extended
+    check interfaceEnvelopeVersion() == 32'u16
 
 suite "envelope lanes -- the version is the ONLY thing that varies":
 

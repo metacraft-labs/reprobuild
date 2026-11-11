@@ -58,6 +58,9 @@ import repro_dsl_stdlib/nixpkgs_pin
 # ``toolIdentityRefs`` at fork time.
 import repro_dsl_stdlib/packages/tar as tar_module
 import repro_dsl_stdlib/packages/unzip as unzip_module
+import repro_core/powershell_zip
+
+export powershellSingleQuotedLiteral
 
 export tar_module
 export unzip_module
@@ -143,95 +146,38 @@ proc tarCompressionFlag*(fmt: ExpandArchiveFormat): string =
     raise newException(ValueError,
       "tarCompressionFlag: not a tar-family format: " & $fmt)
 
-proc powershellSingleQuotedLiteral*(value: string): string =
-  ## Serialize an arbitrary path as a PowerShell single-quoted literal.
-  ## PowerShell performs no variable or escape-sequence expansion inside
-  ## single quotes; an embedded apostrophe is represented by two apostrophes.
-  "'" & value.replace("'", "''") & "'"
-
 proc buildZipArgvWindows*(archive, destination: string): seq[string] =
   ## Deterministic Windows PowerShell zip extraction. Action argv is part of
   ## the cache identity, so it depends on nothing but the two paths.
   ##
-  ## The script does not use the ``Expand-Archive`` cmdlet. Windows
-  ## PowerShell 5.1's ``Expand-Archive`` writes a progress record for every
-  ## entry, and when the caller captures output those records are serialized
-  ## onto the pipe: about 90 ms per entry on a 4-vCPU CI machine, so a
-  ## 12,000-entry archive took about 40 minutes. The cmdlet also refused a
-  ## file not named ``.zip``, which is why this action used to copy every
-  ## archive to a scratch ``.zip`` under ``$env:TEMP`` first and clean it up
-  ## afterwards. Both costs, and the scratch copy's cleanup failure mode,
-  ## are gone.
+  ## The script is the shared ``repro_core/powershell_zip`` loop, WITH
+  ## overwrite. The tool store runs the same loop without it, because it
+  ## always extracts into a fresh staging directory; this action extracts
+  ## into a destination that may already hold an earlier extraction (a
+  ## re-run after its marker was removed, or after this argv changed and with
+  ## it the cache key), and its documented behavior is ``Expand-Archive
+  ## -Force``: overwrite the archive's files, leave everything else.
   ##
-  ## It reads the archive with the .NET zip reader that ``Expand-Archive``
-  ## itself uses, entry by entry, rather than calling
-  ## ``ZipFile.ExtractToDirectory`` as the tool store does. The difference is the overwrite contract: the tool store always
-  ## extracts into a fresh staging directory, but this action extracts into
-  ## a destination that may already hold an earlier extraction (a re-run
-  ## after its marker was removed, or after this argv changed and with it
-  ## the cache key), and its documented behavior is ``Expand-Archive
-  ## -Force``: overwrite the archive's files, leave everything else. Under
-  ## Windows PowerShell 5.1, which runs on .NET Framework,
-  ## ``ExtractToDirectory`` has no overwrite overload and fails on the first
-  ## existing file. ``ZipFileExtensions.ExtractToFile(entry, path, $true)``
-  ## is the per-entry call ``ExtractToDirectory`` makes, with overwrite on.
+  ## It does not use the ``Expand-Archive`` cmdlet. Windows PowerShell 5.1's
+  ## ``Expand-Archive`` writes a progress record for every entry, and when
+  ## the caller captures output those records are serialized onto the pipe:
+  ## about 90 ms per entry on a 4-vCPU CI machine, so a 12,000-entry archive
+  ## took about 40 minutes. The cmdlet also refused a file not named
+  ## ``.zip``, which is why this action used to copy every archive to a
+  ## scratch ``.zip`` under ``$env:TEMP`` first and clean it up afterwards.
+  ## Both costs, and the scratch copy's cleanup failure mode, are gone.
   ##
-  ## Because the loop is ours, so is the check ``ExtractToDirectory`` would
-  ## make: every entry's resolved path must lie inside the destination, and
-  ## an entry that escapes it (``../x``, an absolute name) fails the action
-  ## before anything is written for that entry.
+  ## Every write goes through the ``\\?\`` form, so a member deeper than
+  ## ``MAX_PATH`` extracts on a host without the ``LongPathsEnabled`` policy;
+  ## the escape check runs on the ordinary spelling first. See
+  ## ``repro_core/powershell_zip``.
   ##
-  ## ``$ErrorActionPreference = 'Stop'`` turns a .NET exception (missing or
-  ## corrupt archive, an escaping entry, a locked file) into a terminating
-  ## error, and ``-Command`` then exits non-zero. Progress is silenced in
-  ## case a module the host loads writes any. ``-NoProfile`` keeps operator
-  ## profiles out of the execution boundary, and ``-NonInteractive`` makes
-  ## anything that would prompt fail instead of waiting.
-  # Explicit CP437 preserves unflagged ZIP names; flagged UTF-8 still wins.
-  # https://learn.microsoft.com/en-us/dotnet/api/system.io.compression.zipfile.open
-  #
-  # Both assemblies are required: ``ZipFile``/``ZipFileExtensions`` live in
-  # System.IO.Compression.FileSystem, but ``ZipArchiveMode`` (referenced
-  # below) lives in System.IO.Compression itself. Loading only the first
-  # leaves the second type unresolved -- "Unable to find type
-  # [System.IO.Compression.ZipArchiveMode]" -- on a Windows PowerShell 5.1
-  # session that has not already loaded it some other way.
-  let command =
-    "$ProgressPreference = 'SilentlyContinue'; " &
-    "$ErrorActionPreference = 'Stop'; " &
-    "Add-Type -AssemblyName System.IO.Compression.FileSystem; " &
-    "Add-Type -AssemblyName System.IO.Compression; " &
-    "$root = [System.IO.Directory]::CreateDirectory(" &
-      powershellSingleQuotedLiteral(destination) & ").FullName; " &
-    "$root = $root.TrimEnd([char[]]'\\/') + " &
-      "[System.IO.Path]::DirectorySeparatorChar; " &
-    "$zip = [System.IO.Compression.ZipFile]::Open(" &
-      powershellSingleQuotedLiteral(archive) &
-      ", [System.IO.Compression.ZipArchiveMode]::Read, " &
-      "[System.Text.Encoding]::GetEncoding(437)); " &
-    "try { " &
-      "foreach ($entry in $zip.Entries) { " &
-        "$target = [System.IO.Path]::GetFullPath(" &
-          "[System.IO.Path]::Combine($root, $entry.FullName)); " &
-        "if (-not $target.StartsWith($root, " &
-          "[System.StringComparison]::OrdinalIgnoreCase)) { " &
-          "throw ('zip entry escapes the destination: ' + " &
-            "$entry.FullName) " &
-        "} " &
-        "if ($entry.Name.Length -eq 0) { " &
-          "[void][System.IO.Directory]::CreateDirectory($target) " &
-        "} else { " &
-          "[void][System.IO.Directory]::CreateDirectory(" &
-            "[System.IO.Path]::GetDirectoryName($target)); " &
-          "[System.IO.Compression.ZipFileExtensions]::ExtractToFile(" &
-            "$entry, $target, $true) " &
-        "} " &
-      "} " &
-    "} finally { " &
-      "$zip.Dispose() " &
-    "}"
+  ## ``-NoProfile`` keeps operator profiles out of the execution boundary,
+  ## and ``-NonInteractive`` makes anything that would prompt fail instead of
+  ## waiting.
   @["powershell", "-NoProfile", "-NonInteractive", "-ExecutionPolicy",
-    "Bypass", "-Command", command]
+    "Bypass", "-Command",
+    powershellZipExtractScript(archive, destination, overwrite = true)]
 
 proc buildZipArgvPosix*(archive, destination: string): seq[string] =
   ## InfoZIP invocation. ``-q`` quiets the per-file output;

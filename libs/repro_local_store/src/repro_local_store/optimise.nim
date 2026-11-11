@@ -96,26 +96,48 @@ proc alreadyLinked(a, b: string): bool =
   except CatchableError:
     false
 
-proc applyDedup*(links: openArray[DedupLink]): tuple[linked: int; reclaimed: int64] =
+proc linkAtTemp(canonical, tmp: string): bool =
+  try:
+    if fileExists(tmp): removeFile(tmp)
+    createHardlink(canonical, tmp)
+    true
+  except CatchableError:
+    try:
+      if fileExists(tmp): removeFile(tmp)
+    except CatchableError: discard
+    false
+
+proc applyDedup*(links: openArray[DedupLink]; stagingDir = ""):
+    tuple[linked: int; reclaimed: int64] =
   ## Replace each `duplicate` with a hardlink to `canonical`, via a temp name
   ## and atomic rename so an interrupted run never leaves a hole. Skips a pair
   ## already sharing an inode. Returns how many files were linked and the
   ## bytes reclaimed.
+  ##
+  ## The temp link is made in `stagingDir` (the store's `tmp/`, on the same
+  ## filesystem) when one is given, so a published prefix never holds an
+  ## extra name: a concurrent `verifyRealizedPrefix` hashing the tree, or one
+  ## after an interrupted run, would otherwise see it and take an honest
+  ## prefix for a tampered one (SEC-1 G7). Without one (or if linking there
+  ## fails) the temp name sits beside `duplicate`, as before.
+  var serial = 0
   for link in links:
     if alreadyLinked(link.canonical, link.duplicate):
       continue
     var sz: int64 = 0
     try: sz = getFileSize(link.duplicate)
     except CatchableError: continue
-    let tmp = link.duplicate & ".repro-optimise-tmp"
-    try:
-      if fileExists(tmp): removeFile(tmp)
-      createHardlink(link.canonical, tmp)
-    except CatchableError:
-      try:
-        if fileExists(tmp): removeFile(tmp)
-      except CatchableError: discard
-      continue
+    var tmp = ""
+    if stagingDir.len > 0 and dirExists(stagingDir):
+      inc serial
+      tmp = stagingDir / ("optimise-" & $getCurrentProcessId() & "-" &
+        $serial & ".tmp")
+      if not linkAtTemp(link.canonical, tmp):
+        tmp = ""
+    if tmp.len == 0:
+      tmp = link.duplicate & ".repro-optimise-tmp"
+      if not linkAtTemp(link.canonical, tmp):
+        continue
     try:
       moveFile(tmp, link.duplicate)  # atomic replace
       result.linked.inc
@@ -141,4 +163,5 @@ proc optimiseStore*(prefixesRoot: string):
   ## `repro store optimise` command or a maintenance script calls.
   if not dirExists(prefixesRoot):
     return (0, 0'i64)
-  applyDedup(planDedup(collectCandidates(prefixesRoot)))
+  applyDedup(planDedup(collectCandidates(prefixesRoot)),
+    stagingDir = prefixesRoot.parentDir / "tmp")

@@ -1,0 +1,4 @@
+# The static build's output and the per-machine compiler config the deploy
+# script writes before a build.
+/public/
+/nim.cfg

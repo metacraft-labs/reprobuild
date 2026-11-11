@@ -42,8 +42,10 @@ proc cCompilerUnusableMessageFor*(probe: CCompilerProbe; origin,
                                   remedy = ""): string =
   ## The diagnostic for a compiler that failed ``probeCCompiler``.
   ## ``remedy`` replaces the default ``cCompilerOverrideRemedy`` for a
-  ## compile whose fallback differs: that text offers the pinned bootstrap
-  ## compiler, which only the recipe compile provisions.
+  ## compile whose fallback differs: that text offers the recipe compile's
+  ## bootstrap compiler, which the profile compile does not provision, and
+  ## for the recipe compile's bootstrap, whose route knows exactly what an
+  ## unset override selects (``repro_tool_profiles.bootstrapCRemedy``).
   var detail = probe.detail
   const maxDetail = 2000
   if detail.len > maxDetail:

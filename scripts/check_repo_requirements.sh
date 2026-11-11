@@ -233,9 +233,12 @@ done
 # `setup-dev-env` action so the toolchain matches the local nix shell
 # exactly. The literal `nix develop --command` forms enforced before
 # the migration are explicitly forbidden going forward.
+# Each one runs inside scripts/ci_nix_builder_logs.sh, which keeps the
+# builder log of any derivation that fails (reprobuild-pm
+# spec/Testing/CI-Bootstrap-Failure-Evidence.md, "Derivation builder logs").
 require_contains .github/workflows/ci.yml "metacraft-labs/metacraft-github-actions/setup-dev-env"
-require_contains .github/workflows/ci.yml "run: dev-exec just lint"
-require_contains .github/workflows/ci.yml "run: dev-exec just test"
+require_contains .github/workflows/ci.yml "run: bash scripts/ci_nix_builder_logs.sh run test-logs lint -- dev-exec just lint"
+require_contains .github/workflows/ci.yml "run: bash scripts/ci_nix_builder_logs.sh run test-logs test -- dev-exec just test"
 require_contains .github/workflows/ci.yml "git diff --exit-code -- flake.lock"
 require_contains .github/workflows/ci.yml "dev-exec nix flake metadata --no-update-lock-file --json"
 # ``--log-lines 200`` is part of the pinned literal, not incidental: nix's
@@ -244,7 +247,7 @@ require_contains .github/workflows/ci.yml "dev-exec nix flake metadata --no-upda
 # default a failing build shows a LATER entrypoint's successful link and the
 # summary while the actual compiler diagnostic scrolls off. Keeping it in the
 # literal is what stops it being dropped again.
-require_contains .github/workflows/ci.yml "run: dev-exec nix build --no-update-lock-file --log-lines 200 .#default"
+require_contains .github/workflows/ci.yml "run: bash scripts/ci_nix_builder_logs.sh run test-logs nix-build -- dev-exec nix build --no-update-lock-file --log-lines 200 .#default"
 require_contains .github/workflows/ci.yml "if: always()"
 require_contains .github/workflows/ci.yml "actions/upload-artifact@v4"
 require_contains .github/workflows/benchmark.yml 'runner: '\''["linux", "x64", "benchmark"]'\'''

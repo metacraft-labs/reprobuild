@@ -6,7 +6,7 @@
 # bare basenames silently. See the matching note beside `switch("path", ".")`
 # in `config.nims`, and `tests/unit/test_package_root_anchor.py`.
 
-version = "0.2.20"
+version = "0.2.22"
 author = "Metacraft Labs"
 description = "Reprobuild build system"
 license = "Apache-2.0"

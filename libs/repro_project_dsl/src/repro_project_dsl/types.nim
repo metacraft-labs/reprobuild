@@ -867,6 +867,14 @@ type
     nixpkgsNarHash*: string
     packageId*: string
     lockIdentity*: string
+    version*: string
+      ## The upstream release this record realizes, "" when it does not
+      ## name one (a ``nixpkgs#`` attribute builds whatever the pin
+      ## carries). A record that names one is selected only by a ``uses:``
+      ## range or pin it satisfies, so one package can offer several
+      ## releases through Nix, listed default first, as its ``tarball``
+      ## records do. The realized program's reported version is still
+      ## checked against the range after realization.
     sourceFile*: string
     sourceLine*: int
 

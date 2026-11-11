@@ -44,6 +44,33 @@ nix build --no-link --print-out-paths \
   github:NixOS/nixpkgs/<rev>?narHash=<hash>#attr
 ```
 
+An entry may declare the upstream release it realizes with `version`. A
+package can then offer several releases through Nix, one entry each, and the
+`uses:` range chooses among them the way it chooses among `tarball` entries:
+an entry whose `version` the range excludes is not eligible, and the first
+eligible entry in declaration order is taken, so list the default release
+first. An exact version pin (`package(rustc, "1.97.1")` in a home profile)
+selects the entry that declares it. An entry without `version` (an ordinary
+`nixpkgs#` attribute, whose release is whatever the pinned nixpkgs carries)
+stays eligible under any range; the version the realized program reports is
+checked against the range after it is built. The stdlib's `rustc` and `cargo`
+use this to offer more than one Rust release:
+
+```nim
+provisioning:
+  nixPackage "reprobuild-stdlib-rust-1.94.0",
+    executablePath = "bin/cargo",
+    expressionFile = "nix/rust-1.94.0/default.nix",
+    version = "1.94.0"
+  nixPackage "reprobuild-stdlib-rust-1.97.1",
+    executablePath = "bin/cargo",
+    expressionFile = "nix/rust-1.97.1/default.nix",
+    version = "1.97.1"
+```
+
+With these, `uses: "cargo >=1.85"` realizes 1.94.0 and `uses: "cargo >=1.95"`
+realizes 1.97.1.
+
 The resulting tool profile records the effective selector, realized
 `/nix/store` outputs, selected executable, and lock identity. The original
 catalog metadata remains in the project interface so downstream inspection can

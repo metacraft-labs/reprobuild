@@ -2341,7 +2341,8 @@ test "incomplete name" and:
                 # just had cleaned out, a per-source pin like this one is
                 # exactly what SHOULD be updated by hand — it names the file
                 # that moved, so moving it is an attribution, not a bump.
-                "sourceCaseCount": 6,
+                # 6 -> 7: the `--mainline` / `--profile` case.
+                "sourceCaseCount": 7,
                 "class": "integration",
             },
             "tests/integration/"
