@@ -5381,7 +5381,7 @@ proc executeTarballProvisionEdge*(action: BuildAction): ActionResult {.gcsafe.} 
           let receipt = action.outputs[0]
           createDir(extendedPath(parentDir(receipt)))
           let receiptStore = receiptStoreRoot(absolutePath(receipt))
-          writeFile(extendedPath(receipt), $(%*{
+          publishBuiltinFileOutput(receipt, $(%*{
             "schema": TarballProvisionEdgeSchema,
             "digestAlgorithm": plan.digestAlgorithm,
             "digestValue": plan.digestValue,
@@ -6576,7 +6576,7 @@ proc executeNimSourceBuildEdge*(action: BuildAction): ActionResult {.gcsafe.} =
         spec{"url"}.getStr(), spec{"sha256"}.getStr())
       let receipt = action.outputs[0]
       createDir(extendedPath(parentDir(receipt)))
-      writeFile(extendedPath(receipt), $(%*{
+      publishBuiltinFileOutput(receipt, $(%*{
         "schema": NimSourceBuildEdgeSchema,
         "packageSelector": "nim@" & spec{"version"}.getStr(),
         "planIndex": 0,
@@ -8185,11 +8185,11 @@ proc executeScoopProvisionEdge*(action: BuildAction): ActionResult {.gcsafe.} =
       var encodedText = newString(encoded.len)
       for i, b in encoded:
         encodedText[i] = char(b)
-      writeFile(extendedPath(action.outputs[1]), encodedText)
+      publishBuiltinFileOutput(action.outputs[1], encodedText)
       # What a consumer declares: the realization, without the host's Scoop
       # root or version directory, so it reads the same on every host that
       # realizes the same pin.
-      writeFile(extendedPath(receipt), $(%*{
+      publishBuiltinFileOutput(receipt, $(%*{
         "schema": ScoopProvisionEdgeSchema,
         "packageSelector": profile.packageSelector,
         "bucket": profile.scoopBucket,
