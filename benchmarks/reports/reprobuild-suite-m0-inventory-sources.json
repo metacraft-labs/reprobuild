@@ -47227,7 +47227,7 @@
       "requiresReproBinary": true,
       "source": "tests/integration/t_repos_add_reuses_remotes_and_inherits_revision.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 6,
+      "staticCaseCount": 7,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
