@@ -1,5 +1,5 @@
-"""A live Nix helper must not retain its launcher's operation locks, pipes or
-working directory.
+"""A live Nix helper must not retain its launcher's operation locks, pipes,
+working directory or temporary directory.
 
 The helper is shared by every reprobuild process of the user and outlives the
 client that started it, so whatever it inherits from that client stays held
@@ -8,12 +8,20 @@ tree (reading ``<path> (deleted)`` once it is removed) and makes a test reaper
 that attributes processes to a fixture by cwd stop a helper other worktrees
 share (reprobuild-pm
 issues/2026-10-20-the-f1-up-case-leaves-its-dev-session-http-processes-running.md).
+A held ``TMPDIR`` breaks every later ``nix-build`` through the helper, for any
+client, once the launcher removes it (reprobuild-pm
+issues/2026-11-07-reprobuild-nix-daemon-keeps-the-temp-directory-of-the-client-that-started-it.md).
+
+No test double stands in for Nix: the temporary-directory case drives the real
+helper process and the host's real ``nix-build``, because what failed is
+``nix-build`` creating its directory under the inherited ``TMPDIR``.
 """
 
 import json
 import os
 from pathlib import Path
 import select
+import shutil
 import socket
 import subprocess
 import sys
@@ -50,7 +58,7 @@ class DaemonDescriptors(unittest.TestCase):
             process.kill()
             process.communicate(timeout=5)
 
-    def start(self, descriptors=(), lower_limit=False, socket_arg=None):
+    def start(self, descriptors=(), lower_limit=False, socket_arg=None, env=None):
         # ``socket_arg`` is what the launcher passes as ``--socket-path``; the
         # helper is always launched from ``self.root``, so a relative value
         # names a path under it, and ``endpoint`` is where it must bind.
@@ -63,7 +71,7 @@ class DaemonDescriptors(unittest.TestCase):
         if lower_limit:
             args += ["-c", LOWER_LIMIT]
         args += [str(DAEMON), "--socket-path", socket_arg, "--idle-exit-ms=30000"]
-        process = subprocess.Popen(args, cwd=self.root, pass_fds=descriptors,
+        process = subprocess.Popen(args, cwd=self.root, pass_fds=descriptors, env=env,
                                    stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                                    stderr=subprocess.PIPE)
         self.addCleanup(self.stop, process)
@@ -144,6 +152,52 @@ class DaemonDescriptors(unittest.TestCase):
         self.assertEqual(os.readlink(f"/proc/{process.pid}/cwd"), "/",
                          "the helper pins its launcher's directory")
         self.assertIsNone(process.poll(), "the check must not depend on daemon exit")
+
+    def resolve(self, request):
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+            client.settimeout(300)
+            client.connect(str(self.root / "daemon.sock"))
+            client.sendall((json.dumps(request) + "\n").encode())
+            with client.makefile("rb") as response:
+                return json.loads(response.readline())
+
+    @unittest.skipUnless(shutil.which("nix-build"), "needs the host's nix-build")
+    def test_builds_after_the_launchers_temporary_directory_is_removed(self):
+        # The launcher -- a gate runner, a test case -- gives the helper its
+        # private TMPDIR and removes it when it exits; the helper lives on and
+        # serves other clients. ``nix-build`` creates ``nix-build-<pid>-<n>``
+        # under TMPDIR before it evaluates anything, so the helper must hand
+        # it a directory of its own, not the launcher's.
+        launcher_tmp = self.root / "launcher-tmp"
+        launcher_tmp.mkdir()
+        inherited = {name: str(launcher_tmp) for name in ("TMPDIR", "TMP", "TEMP", "TEMPDIR")}
+        process = self.start(env=dict(os.environ, **inherited))
+        launcher_tmp.rmdir()
+
+        workspace = self.root / "ws"
+        workspace.mkdir()
+        # Unique per run, so the store never already holds the output.
+        nonce = f"{os.getpid()}-{time.time_ns()}"
+        expression = workspace / "tool.nix"
+        expression.write_text(
+            'derivation { name = "repro-nix-helper-tmpdir"; system = builtins.currentSystem; '
+            f'builder = "/bin/sh"; args = [ "-c" "echo {nonce} > $out" ]; }}\n')
+        response = self.resolve({"action": "resolve", "selector": "tool",
+                                 "workspaceRoot": str(workspace),
+                                 "expressionFile": str(expression)})
+        self.assertEqual(response.get("status"), "success", response)
+        self.assertEqual(Path(response["paths"][0]).read_text().strip(), nonce)
+        self.assertFalse(launcher_tmp.exists(), "the helper recreated its launcher's directory")
+        self.assertIsNone(process.poll())
+
+        # The directory it uses is its own, beside its socket, and it goes
+        # away with the helper.
+        own = list(self.root.glob("daemon.sock.tmp-*"))
+        self.assertEqual(len(own), 1, own)
+        self.assertTrue(own[0].is_dir())
+        process.terminate()
+        process.communicate(timeout=5)
+        self.assertFalse(own[0].exists(), "the helper left its temporary directory behind")
 
     def test_relative_socket_path_binds_where_the_launcher_meant(self):
         # Relative to the LAUNCHER's cwd, not to wherever the helper moved:
