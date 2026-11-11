@@ -24,11 +24,14 @@ const BundleUsage* = """usage:
       [--check-stable] [--json]
   repro bundle publish <out>/<bundle> --to=s3://BUCKET[/PREFIX]
       [--endpoint=URL] [--region=R] [--parallel=N]
-  repro bundle restore <url-or-dir> [--workspace=DIR] [--activate]
-      [--activation-file=PATH] [--allow-dev-env] [--parallel=N]
+  repro bundle publish <out>/<bundle> --to=github:OWNER/REPO
+  repro bundle restore <url-or-dir | github:OWNER/REPO[@REF]/BUNDLE>
+      [--workspace=DIR] [--activate] [--activation-file=PATH]
+      [--bashrc-file=PATH] [--allow-dev-env] [--parallel=N]
       [--staging=DIR] [--nix-root=DIR] [--after-bootstrap] [--json]
 common: [--store-root=PATH] [--action-cache-root=PATH]
-Publishing reads AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY from the environment.
+Publishing to S3 reads AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY from the
+environment; publishing to GitHub uses your own git credentials.
 See docs/workspace-bundles.md."""
 
 proc mib(n: int64): string = $(n shr 20) & " MiB"
@@ -86,7 +89,8 @@ else:
         "all-shells", "no-nix", "no-sources", "no-native", "freeze-dev-env",
         "check-stable", "json"]
       of "publish": @["to", "endpoint", "region", "parallel"]
-      of "restore": @["workspace", "activation-file", "parallel", "staging",
+      of "restore": @["workspace", "activation-file", "bashrc-file",
+        "parallel", "staging",
         "nix-root", "store-root", "action-cache-root", "activate",
         "allow-dev-env", "after-bootstrap", "json"]
       else: @[]
@@ -182,6 +186,7 @@ else:
           workspaceDir: flag("workspace"), nixRoot: flag("nix-root"),
           staging: flag("staging"), activate: has("activate"),
           activationFile: flag("activation-file"),
+          bashrcFile: flag("bashrc-file"),
           afterBootstrap: has("after-bootstrap"), storeRoot: storeRoot,
           actionCacheRoot: acRoot)
         if flag("parallel").len > 0: ro.parallel = parseInt(flag("parallel"))
@@ -200,7 +205,8 @@ else:
             "alreadyPresent": r.alreadyPresent,
             "workspaceDir": r.workspaceDir, "primaryEnv": r.primaryEnv,
             "frozenDevEnv": r.frozenDevEnv,
-            "activationFile": r.activationFile, "phaseSeconds": phases,
+            "activationFile": r.activationFile, "bashrcFile": r.bashrcFile,
+            "notes": r.notes, "phaseSeconds": phases,
             "native": {"verifiedEntries": r.native.verifiedEntries,
               "rewitnessedRecords": r.native.rewitnessedRecords,
               "restamped": r.native.restamped}})
@@ -211,7 +217,10 @@ else:
             echo "  " & p.alignLeft(22) & formatFloat(s, ffDecimal, 1) & " s"
           if r.primaryEnv.len > 0: echo "dev shell: . " & r.primaryEnv
           if r.frozenDevEnv.len > 0: echo "repro dev env: . " & r.frozenDevEnv
-          if r.activationFile.len > 0: echo "activated via " & r.activationFile
+          for n in r.notes: echo "note: " & n
+          if r.activationFile.len > 0:
+            echo "activated via " & r.activationFile & " (sourced from " &
+              r.bashrcFile & ")"
         return 0
       else:
         return 2

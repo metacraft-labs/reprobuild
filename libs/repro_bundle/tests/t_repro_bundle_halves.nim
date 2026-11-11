@@ -8,7 +8,7 @@
 
 import std/[json, os, osproc, strutils, tempfiles, unittest]
 import repro_bundle
-import repro_bundle/[nix_half, sources_half, select, bootstrap]
+import repro_bundle/[nix_half, sources_half, select, bootstrap, github]
 import repro_local_store/store_bundle
 import repro_test_support/reasoned_skip
 
@@ -113,7 +113,7 @@ suite "selection and the sources half":
       writeFile(ws / "lib" / "src" / "lib.nim", "echo 2\n")
       let target = top / "restored" / "ws"
       let dir = top / "out" / SourcesHalfDir / half.id
-      restoreSourcesHalf(half, dir, target)
+      check not restoreSourcesHalf(half, dir, target)
       check readFile(target / "lib" / "src" / "lib.nim") == "echo 1\n"
       check readFile(target / "tools" / "nested" / "README.md") == "nested\n"
       check sh("git -C " & quoteShell(target / "lib") &
@@ -125,7 +125,8 @@ suite "selection and the sources half":
       check half.sourcesPresent(target)
       # An existing checkout is never overwritten.
       writeFile(target / "lib" / "src" / "lib.nim", "local edit\n")
-      restoreSourcesHalf(half, dir, target)
+      # The root is a checkout now, so this is the members-only path.
+      check restoreSourcesHalf(half, dir, target)
       check readFile(target / "lib" / "src" / "lib.nim") == "local edit\n"
 
 suite "restore.sh":
@@ -143,7 +144,7 @@ suite "restore.sh":
     check "aa  part-0000" in script
     check "cc  registration" in script
     check "'/nix/store/rrr-repro'" in script
-    check "bundle restore \"$BASE\" --after-bootstrap" in script
+    check "bundle restore \"$SRC\" --after-bootstrap" in script
     let path = getTempDir() / ("repro-bundle-restore-" &
       $getCurrentProcessId() & ".sh")
     writeFile(path, script)
@@ -151,3 +152,131 @@ suite "restore.sh":
     check execCmdEx("bash -n " & quoteShell(path)).exitCode == 0
     let bare = renderRestoreScript(latest, false, NixHalf())
     check "install repro first" in bare
+
+suite "github layout":
+  test "files map to deterministic branches of at most 20":
+    var parts: seq[BundlePart]
+    for i in 0 ..< 25:
+      parts.add(BundlePart(file: partName(PartPrefix, i)))
+    let files = halfFiles(NixManifestName, parts, @["registration"])
+    check files.len == 27
+    check githubRefOf("demo", "x86_64-linux/nix/abc", files, "part-0000") ==
+      "demo/x86_64-linux/nix/abc/b00"
+    check githubRefOf("demo", "x86_64-linux/nix/abc", files, "part-0018") ==
+      "demo/x86_64-linux/nix/abc/b00"
+    # nix.json sorts first, so the 20th part opens the second branch.
+    check files[0] == NixManifestName
+    check githubRefOf("demo", "x86_64-linux/nix/abc", files, "part-0019") ==
+      "demo/x86_64-linux/nix/abc/b01"
+    check githubRefOf("demo", "x86_64-linux/nix/abc", files, "part-0020") ==
+      "demo/x86_64-linux/nix/abc/b01"
+    check githubRefOf("demo", "x86_64-linux/nix/abc", files, "registration") ==
+      "demo/x86_64-linux/nix/abc/b01"
+
+  test "an explicit ref is taken as given":
+    let src = parseGithubSource("github:acme/bundles@0123abc/demo")
+    check src.repo == "acme/bundles"
+    check src.gitRef == "0123abc"
+    check src.bundle == "demo"
+
+proc snapshotBranches(bare, rawRoot, repo: string) =
+  ## A file:// stand-in for raw.githubusercontent.com: every branch, and the
+  ## commit `latest` points at, checked out under <raw>/<repo>/<ref>/.
+  for line in sh("git -C " & quoteShell(bare) &
+      " for-each-ref --format='%(refname:short) %(objectname)' refs/heads").splitLines():
+    let f = line.split(' ')
+    if f.len != 2: continue
+    for name in [f[0], f[1]]:
+      let dest = rawRoot / repo / name
+      createDir(dest)
+      discard sh("git -C " & quoteShell(bare) & " archive " & f[1] &
+        " | tar -x -C " & quoteShell(dest))
+
+suite "sources into an existing root, activation, GitHub round trip":
+  test "members only, excluded from the root; activation once; via GitHub":
+    if findExe("git").len == 0 or findExe("zstd").len == 0 or
+        findExe("curl").len == 0:
+      skip("git, zstd and curl are needed for this round trip")
+    else:
+      let top = createTempDir("repro-bundle-gh-", "")
+      defer: removeDir(top)
+      let ws = top / "ws"
+      fixtureWorkspace(ws)
+      let outDir = top / "out"
+      let created = createBundle(CreateOptions(workspaceRoot: ws,
+        selector: "demo", outDir: outDir, sources: true, level: 1))
+      check created.halves.len == 1
+      check fileExists(created.restoreScript)
+
+      # The environment has already cloned the workspace root itself.
+      let target = top / "session" / "ws"
+      discard sh("git clone -q " & quoteShell(ws) & " " & quoteShell(target))
+      writeFile(target / "README.session", "mine\n")
+      let profile = top / "etc" / "profile.d" / "zz-repro-bundle.sh"
+      let bashrc = top / "etc" / "bash.bashrc"
+      createDir(top / "etc")
+      writeFile(bashrc, "# system bashrc")
+      let r = restoreBundle(RestoreOptions(source: outDir / "demo",
+        workspaceDir: target, activate: true, activationFile: profile,
+        bashrcFile: bashrc))
+      check r.restored == @["sources"]
+      check r.notes.len == 1
+      check readFile(target / "lib" / "src" / "lib.nim") == "echo 1\n"
+      check fileExists(target / "tools" / "nested" / "README.md")
+      check readFile(target / "README.session") == "mine\n"
+      let exclude = readFile(target / ".git" / "info" / "exclude")
+      check "/lib/" in exclude
+      check "/tools/nested/" in exclude
+      check sh("git -C " & quoteShell(target) &
+        " status --porcelain").strip() == "?? README.session"
+      check "__REPRO_BUNDLE_ACTIVE" in readFile(profile)
+      check readFile(bashrc).count("# repro bundle activation: " & profile) == 1
+      # Restoring again changes nothing, and adds no second bashrc line.
+      let again = restoreBundle(RestoreOptions(source: outDir / "demo",
+        workspaceDir: target, activate: true, activationFile: profile,
+        bashrcFile: bashrc))
+      check again.alreadyPresent == @["sources"]
+      check readFile(bashrc).count("# repro bundle activation: " & profile) == 1
+      check readFile(target / ".git" / "info" / "exclude").count("/lib/") == 1
+
+      # Publish to a local bare repository standing in for GitHub, then
+      # restore from it through the raw-file route.
+      let remotes = top / "remotes"
+      createDir(remotes / "acme")
+      discard sh("git init -q --bare " & quoteShell(remotes / "acme" / "bundles"))
+      putEnv("REPRO_BUNDLE_GITHUB_REMOTE", "file://" & remotes)
+      putEnv("REPRO_BUNDLE_GITHUB_RAW", "file://" & top / "raw")
+      putEnv("REPRO_BUNDLE_GITHUB_API", "file://" & top / "no-api")
+      defer:
+        delEnv("REPRO_BUNDLE_GITHUB_REMOTE")
+        delEnv("REPRO_BUNDLE_GITHUB_RAW")
+        delEnv("REPRO_BUNDLE_GITHUB_API")
+      let pub = publishBundle(PublishOptions(bundleDir: outDir / "demo",
+        target: "github:acme/bundles"))
+      check pub.uploaded.len == 1
+      check publishBundle(PublishOptions(bundleDir: outDir / "demo",
+        target: "github:acme/bundles")).skipped.len == 1
+      let heads = sh("git -C " & quoteShell(remotes / "acme" / "bundles") &
+        " for-each-ref --format='%(refname:short)' refs/heads")
+      check "latest" in heads
+      check "demo/sources/" in heads
+      snapshotBranches(remotes / "acme" / "bundles", top / "raw", "acme/bundles")
+      let fresh = top / "fresh" / "ws"
+      let viaGh = restoreBundle(RestoreOptions(source: "github:acme/bundles/demo",
+        workspaceDir: fresh))
+      check viaGh.restored == @["sources"]
+      check readFile(fresh / "lib" / "src" / "lib.nim") == "echo 1\n"
+
+suite "restore.sh as a setup script":
+  test "a failure is logged and does not fail the session unless strict":
+    let top = createTempDir("repro-bundle-sh-", "")
+    defer: removeDir(top)
+    let script = top / "restore.sh"
+    writeFile(script, renderRestoreScript(%*{"system": "x86_64-linux",
+      "name": "demo"}, false, NixHalf()))
+    let log = top / "log" / "restore.log"
+    let env = "env -i PATH=/usr/bin:/bin REPRO_BUNDLE_LOG=" & quoteShell(log)
+    check execCmdEx(env & " bash " & quoteShell(script) & " /nowhere").exitCode == 0
+    check "install repro first" in readFile(log)
+    check execCmdEx(env & " REPRO_BUNDLE_STRICT=1 bash " & quoteShell(script) &
+      " /nowhere").exitCode == 1

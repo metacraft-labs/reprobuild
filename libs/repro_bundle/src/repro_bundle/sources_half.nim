@@ -159,26 +159,56 @@ proc sourcesPresent*(h: SourcesHalf; workspaceDir: string): bool =
   let marker = workspaceDir / SourcesMarker
   fileExists(marker) and readFile(marker).strip() == h.id
 
-proc restoreSourcesHalf*(h: SourcesHalf; partsDir, workspaceDir: string) =
+proc restoreSourcesHalf*(h: SourcesHalf; partsDir, workspaceDir: string): bool =
   ## §7 step 4: into the workspace's parent with `--skip-old-files`, so a
-  ## checkout that already exists is never overwritten.
+  ## checkout that already exists is never overwritten. When the workspace
+  ## root is itself a checkout already (the environment cloned it), only the
+  ## member checkouts are unpacked, and they are added to the root's
+  ## `.git/info/exclude`. Returns whether that members-only path was taken.
   let ws = normalizedPath(absolutePath(workspaceDir))
   let parent = ws.parentDir
   createDir(parent)
   let name = extractFilename(h.workspaceDir)
   let errPath = partsDir / ".unpack.stderr"
+  let rootIsCheckout = dirExists(ws / ".git")
+  var members: seq[string]
+  if rootIsCheckout:
+    for r in h.repos:
+      if r.relPath != ".": members.add(name & "/" & r.relPath)
+  result = rootIsCheckout
   # The archive's top directory is the creating workspace's name; a restore
   # under another name renames it on the way.
   let transform = (if extractFilename(ws) != name:
       " --transform=" & quoteShell("s|^" & name & "|" & extractFilename(ws) & "|")
     else: "")
+  var memberArgs = ""
+  for m in members: memberArgs.add(" " & quoteShell(m))
   let command = "set -o pipefail; (" & quoteShell(requireExe("zstd")) &
     " -q -dc --long=" & $ZstdWindowLog & " - | " &
     quoteShell(requireExe("tar")) & " -C " & quoteShell(parent) &
-    " --skip-old-files" & transform & " -xf -) >" & quoteShell(errPath) &
-    " 2>&1"
-  if feedParts(partsDir, h.parts, command, stopEarly = false) != 0:
+    " --skip-old-files" & transform & " -xf -" & memberArgs & ") >" &
+    quoteShell(errPath) & " 2>&1"
+  if rootIsCheckout and members.len == 0:
+    discard
+  elif feedParts(partsDir, h.parts, command, stopEarly = false) != 0:
     bundleFail("unpacking the sources half failed: " &
       (if fileExists(errPath): readFile(errPath).strip() else: ""))
+  if rootIsCheckout:
+    # Local to the checkout and never pushed: hides the members from the
+    # root repository's `git status`, as a repro workspace does.
+    let exclude = ws / ".git" / "info" / "exclude"
+    createDir(exclude.parentDir)
+    let have = (if fileExists(exclude): readFile(exclude) else: "")
+    var lines = have.splitLines()
+    var add = ""
+    for r in h.repos:
+      if r.relPath == ".": continue
+      let line = "/" & r.relPath & "/"
+      if line notin lines:
+        add.add(line & "\n")
+        lines.add(line)
+    if add.len > 0:
+      writeFile(exclude, have & (if have.len > 0 and not have.endsWith("\n"):
+        "\n" else: "") & add)
   createDir((ws / SourcesMarker).parentDir)
   writeFile(ws / SourcesMarker, h.id & "\n")
