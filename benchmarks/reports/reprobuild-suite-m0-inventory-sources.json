@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 35,
-    "nimTestBinaries": 2724,
+    "nimTestBinaries": 2725,
     "pureUnitConsolidationGroups": 79,
     "pureUnitTests": 749,
-    "staticallyDetectedRuntimeCompilerFlowTests": 137,
-    "testEntries": 2766
+    "staticallyDetectedRuntimeCompilerFlowTests": 138,
+    "testEntries": 2767
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1567,7 +1567,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 21,
-      "integration": 1498,
+      "integration": 1499,
       "platform/destructive": 174,
       "pure unit": 749,
       "unclassified": 324
@@ -1784,9 +1784,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2724,
+    "nimTestBinaryCount": 2725,
     "pythonTestFileCount": 42,
-    "testEntryCount": 2766
+    "testEntryCount": 2767
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -3485,6 +3485,32 @@
         }
       ],
       "source": "tests/e2e/io-monitor/t_debug_io_monitor_reads_monitor_depfile.nim"
+    },
+    {
+      "class": "integration",
+      "matches": [
+        {
+          "assignedCommandVariable": "compile",
+          "commandVariableExecuted": false,
+          "directExecutionLine": true,
+          "executedVariables": [
+            "depfile",
+            "hookLibrary",
+            "hookSource",
+            "inputPath",
+            "repoRoot",
+            "reproBin",
+            "shimLibrary"
+          ],
+          "line": 214,
+          "path": "tests/e2e/io-monitor/t_inherited_preload_hook_library_keeps_root_monitored.nim",
+          "patterns": [
+            "cc"
+          ],
+          "snippet": "let compile = execCmdEx(shellCommand([\"cc\", \"-shared\", \"-fPIC\", \"-O1\","
+        }
+      ],
+      "source": "tests/e2e/io-monitor/t_inherited_preload_hook_library_keeps_root_monitored.nim"
     },
     {
       "class": "platform/destructive",
@@ -33678,6 +33704,24 @@
       "owner": "tests/e2e",
       "requiresReproBinary": true,
       "source": "tests/e2e/io-monitor/t_debug_io_monitor_reads_monitor_depfile.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 0,
+      "staticallyDetectedRuntimeCompilerFlow": true,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_inherited_preload_hook_library_keeps_root_monitored",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "io_mon",
+        "repro_test_support"
+      ],
+      "owner": "tests/e2e",
+      "requiresReproBinary": true,
+      "source": "tests/e2e/io-monitor/t_inherited_preload_hook_library_keeps_root_monitored.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 0,
       "staticallyDetectedRuntimeCompilerFlow": true,

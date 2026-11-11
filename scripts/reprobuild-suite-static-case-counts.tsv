@@ -1409,6 +1409,7 @@ tests/e2e/home-rollback/t_e2e_repro_home_rollback_user_edit_protection.nim	nim	1
 tests/e2e/home-set-get/t_e2e_home_get_returns_the_effective_value.nim	nim	1
 tests/e2e/home-set-get/t_e2e_repro_home_set_triggers_focused_rebuild.nim	nim	1
 tests/e2e/io-monitor/t_debug_io_monitor_reads_monitor_depfile.nim	nim	0
+tests/e2e/io-monitor/t_inherited_preload_hook_library_keeps_root_monitored.nim	nim	0
 tests/e2e/launcher-isolation/t_e2e_windows_launcher_isolation.nim	nim	0
 tests/e2e/local-build-engine/t_e2e_create_dmg_reruns_over_its_image.nim	nim	1
 tests/e2e/local-build-engine/t_e2e_local_reprobuild_project_build.nim	nim	20

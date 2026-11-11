@@ -217,7 +217,12 @@ reprobuild-packages
 # answers dlsym(RTLD_NEXT) relative to the caller, so a hook library preloaded
 # after the monitor shim no longer finds itself and recurses. e66e05c9 is an
 # ancestor.
-io-mon=ac06360d15be70aca46202d0ce04c5b17cba5ac1
+# Moved to 7a9b2f33 (2026-11-11), io-mon's `agents` tip, with `io-mon-src` in
+# flake.nix and flake.lock: it classifies raw write syscalls (fe50a98) and
+# answers dlsym(RTLD_DEFAULT) relative to the caller (7a9b2f3), so a hook
+# library preloaded beside the monitor shim no longer makes every monitored
+# root a loss. Needs nim-shm-gset 7bc81ad (below). ac06360d is an ancestor.
+io-mon=7a9b2f331024f4bc0b952bcab89b1dc48525d804
 # `release.yml` overrides `nim-stackable-hooks-src` to THIS clone, so the
 # clone must be the revision the flake pins, or the release compiles the
 # monitor shim from different sources than every other build. Cloned at
@@ -235,7 +240,7 @@ nim-stackable-hooks
 # keep release archives and CI overrides on the same API as the Nix pin.
 runquota=9818dc0c90be8ba7993424a7bbfbb6e009ffa965
 nim-shm-queue
-nim-shm-gset=6333cc915689559b00f81371734783c2e894ca45
+nim-shm-gset=7bc81ad2440860a8a9254eb2757c585df9652438
 
 # nim-shm-lease: runquota's published stats table imports its anchor on
 # WINDOWS now, not only on Linux/macOS, and the Windows release leg builds
