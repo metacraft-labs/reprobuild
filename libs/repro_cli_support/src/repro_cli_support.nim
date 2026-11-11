@@ -59729,7 +59729,7 @@ proc hookDevelopSetOf(repoRoot, workspaceRoot: string;
       if target.len > 0:
         let abs = os.normalizedPath(absolutePath(target, flakeRoot))
         for r in repos:
-          if checkoutOf(r) == abs:
+          if samePathIdentity(checkoutOf(r), abs):
             repo = r
             found = true
             break
@@ -59754,7 +59754,8 @@ proc hookDevelopSetOf(repoRoot, workspaceRoot: string;
     var path = ""
     if found:
       let abs = checkoutOf(repo)
-      if abs.len > 0 and abs != flakeRoot and dirExists(extendedPath(abs)):
+      if abs.len > 0 and not samePathIdentity(abs, flakeRoot) and
+          dirExists(extendedPath(abs)):
         path = abs
     if path.len == 0: continue
     var overridden = false
@@ -100098,7 +100099,10 @@ proc refreshFlakeLockAtCommit*(workspaceRoot, currentRepo: string;
         let abs = absolutePath(workspaceRoot / repo.path)
         pathOf[repo.name] = abs
         memberRepos.add(repo)
-        if abs == flakeRoot: membershipKnowsThisRepo = true
+        # A directory question, not a spelling one: the hook's repo root is
+        # what `git rev-parse --show-toplevel` printed, which need not be
+        # spelled like the membership join (see `flakeRefreshDirtyScope`).
+        if samePathIdentity(abs, flakeRoot): membershipKnowsThisRepo = true
     except CatchableError as err:
       membershipFailure = err.msg
     if membershipFailure.len == 0 and not membershipKnowsThisRepo:
