@@ -5,11 +5,21 @@
 # <build>/nimcache/<name>/<name>.deps:
 #
 #   binary-sha256 <sha256 of <build>/bin/<name>>
-#   module  <path>    every Nim module and included file (nim --genDeps)
-#   csource <path>    every C file compiled with {.compile.} (Nim's record)
-#   header  <path>    every header those C files include
-#   read    <path>    every other file the compiler read: staticRead and
-#                     slurp targets, and what staticExec's commands read
+#   module  <path> sha256:<hex>  every Nim module and included file
+#                                (nim --genDeps)
+#   csource <path> sha256:<hex>  every C file compiled with {.compile.}
+#                                (Nim's record)
+#   header  <path> sha256:<hex>  every header those C files include
+#   read    <path> sha256:<hex>  every other file the compiler read:
+#                                staticRead and slurp targets, and what
+#                                staticExec's commands read
+#
+# Each source carries the sha256 of its bytes as the list is written, right
+# after the build. fresh_binary compares a source's content with it, not its
+# modification time: a checkout that rewrites a sibling with the same bytes
+# (CI moves the shared siblings to another consumer's revisions and back)
+# leaves the binary fresh, and any change to the bytes is refused whatever
+# the file's timestamp says.
 #
 # Paths under /nix/store, /proc, /sys, /dev, /etc and /run, and the build
 # directory, are left out (immutable, or not sources). Of what strace sees,
@@ -194,15 +204,22 @@ if mutation == "list-for-earlier-binary":
     # FALSIFIER: a list written for another build of the binary.
     digest = hashlib.sha256(b"an earlier build").hexdigest()
 lines = ["binary-sha256 " + digest]
-lines += ["module " + p for p in modules]
-lines += ["csource " + p for p in csources]
+def sourceDigest(p):
+    s = hashlib.sha256()
+    with open(p, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            s.update(chunk)
+    return "sha256:" + s.hexdigest()
+
+lines += ["module " + p + " " + sourceDigest(p) for p in modules]
+lines += ["csource " + p + " " + sourceDigest(p) for p in csources]
 seen = set(modules) | set(csources)
 for p in traced:
     if p in seen:
         continue
     seen.add(p)
     kind = "header" if p.endswith((".h", ".hpp", ".hh", ".inc")) else "read"
-    lines.append(kind + " " + p)
+    lines.append(kind + " " + p + " " + sourceDigest(p))
 part = published + ".part"
 with open(part, "w") as fh:
     fh.write("\n".join(lines) + "\n")

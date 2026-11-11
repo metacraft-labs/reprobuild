@@ -894,6 +894,10 @@
 ##                                            and staticExec inputs
 ## ``fresh-ignores-list-binary``              fresh_binary accepts a list
 ##                                            written for another binary
+## ``fresh-trusts-mtime``                     fresh_binary does not compare a
+##                                            source's bytes with its listed
+##                                            sha256 (an edit that keeps an
+##                                            old timestamp is accepted)
 ## ``override-sig-write-error-swallowed``     a failed signature write does
 ##                                            not stop the discard (round 6)
 ## ``override-rollback-removes-sig``         a failed record write removes
@@ -1492,6 +1496,7 @@ const
                           "fresh-skips-c-sources", "fresh-skips-headers",
                           "fresh-skips-static-reads",
                           "fresh-ignores-list-binary",
+                          "fresh-trusts-mtime",
                           "override-sig-write-error-swallowed",
                           "verify-accepts-missing-key", "sim-skips-stop",
                           "override-rollback-removes-sig"]

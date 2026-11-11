@@ -2555,7 +2555,7 @@
             "outside",
             "tree"
           ],
-          "line": 105,
+          "line": 116,
           "path": "libs/repro_test_support/tests/t_fresh_helper_binary_refuses_a_stale_build.nim",
           "patterns": [
             "nim-argv"
@@ -2573,7 +2573,7 @@
             "outside",
             "tree"
           ],
-          "line": 208,
+          "line": 233,
           "path": "libs/repro_test_support/tests/t_fresh_helper_binary_refuses_a_stale_build.nim",
           "patterns": [
             "nim-argv"
@@ -25584,7 +25584,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_test_support/tests/t_fresh_helper_binary_refuses_a_stale_build.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 14,
+      "staticCaseCount": 16,
       "staticallyDetectedRuntimeCompilerFlow": true,
       "targetOs": "soAny"
     },

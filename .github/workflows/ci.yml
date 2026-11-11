@@ -847,6 +847,21 @@ jobs:
           # lock-pinned sources, not the moving `=dev` tips. This is the crux
           # that keeps this step green as the sibling `dev` tips advance.
           siblings_root="$(cd "$ct_root/.." && pwd)"
+          # Record where every sibling checkout is NOW -- the revisions the
+          # Bootstrap step built reprobuild's apps and test helpers from --
+          # so the ct build step can hand them back afterwards (see there).
+          # reprobuild/repro.lock names only some of the siblings this step
+          # moves; the rest are pinned in flake.nix, and without this they
+          # stayed at CodeTracer's revisions for `just test`.
+          heads="$RUNNER_TEMP/reprobuild-sibling-heads.tsv"
+          : > "$heads"
+          for sib in "$siblings_root"/*/; do
+            sib="${sib%/}"
+            rev="$(git -C "$sib" rev-parse --verify -q HEAD 2>/dev/null)" || continue
+            [ "$(git -C "$sib" rev-parse --show-toplevel 2>/dev/null)" = "$sib" ] || continue
+            printf '%s\t%s\n' "$(basename "$sib")" "$rev" >> "$heads"
+          done
+          echo "recorded $(wc -l < "$heads") sibling revision(s) in $heads"
           ( cd "$ct_root" && export GIT_CONFIG_GLOBAL="$git_auth_config" && \
             "$repro_bin" develop --all --reset --into="$siblings_root" )
           # `develop --all` SKIPS a sibling that a recipe pins. Run
@@ -1087,8 +1102,27 @@ jobs:
           # the job limit fire before a step's own. Needs no network: both
           # revision sets were fetched while the credential config was in
           # scope, and the suite step runs with GIT_CONFIG_GLOBAL=/dev/null.
+          # First every sibling the Reconcile step moved goes back to the
+          # revision it had when the Bootstrap step built reprobuild's apps
+          # and test helpers (recorded there): `just test` builds against
+          # these checkouts, and the helpers' dependency lists describe the
+          # bytes they were built from. Then reprobuild's own lock, as
+          # before. Both are local checkouts of revisions already present.
+          siblings_root="$(cd "$repro_root/.." && pwd)"
+          heads="$RUNNER_TEMP/reprobuild-sibling-heads.tsv"
+          test -s "$heads" || { echo "no recorded sibling revisions at $heads" >&2; exit 1; }
+          while IFS="$(printf '\t')" read -r name rev; do
+            case "$name" in "$(basename "$repro_root")"|codetracer) continue ;; esac
+            sib="$siblings_root/$name"
+            [ -d "$sib" ] || continue
+            now="$(git -C "$sib" rev-parse --verify -q HEAD || true)"
+            if [ "$now" != "$rev" ]; then
+              git -C "$sib" -c advice.detachedHead=false checkout -q --detach "$rev"
+              echo "restored $name to $rev (was $now)"
+            fi
+          done < "$heads"
           bash "$repro_root/scripts/reconcile_locked_siblings.sh" \
-            "$repro_root/repro.lock" "$(cd "$repro_root/.." && pwd)" \
+            "$repro_root/repro.lock" "$siblings_root" \
             "$(basename "$repro_root")" --detach
 
       - name: Refresh installation token for tests

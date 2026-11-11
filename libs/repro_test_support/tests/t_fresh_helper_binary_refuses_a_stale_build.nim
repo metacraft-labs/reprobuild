@@ -36,12 +36,23 @@
 ## 14. Eight files a ``staticExec`` command reads concurrently (``cat … &``):
 ##     all eight listed, in each of three runs (the list does not depend on
 ##     scheduling).
+## 15. A source rewritten with the bytes it had, dated after the build (a
+##     checkout that moved a sibling away and back): accepted, because the
+##     list carries each source's sha256 and the bytes are the same.
+## 16. A source edited but dated before the build: refused, naming it.
 ##
-## Falsifying builds: ``stale-helper-accepted`` (cases 2-5 and 8-10 red),
+## An edit in these cases changes a file's bytes; its timestamp alone
+## proves nothing either way (cases 15 and 16).
+##
+## Falsifying builds: ``stale-helper-accepted`` (cases 2-5, 8-10, 13 and 16
+## red),
 ## ``fresh-skips-included`` (case 4), ``fresh-skips-outside-tree`` (case
 ## 5), ``fresh-skips-c-sources`` (case 8), ``fresh-skips-headers`` (case
 ## 9), ``fresh-skips-static-reads`` (case 10), ``fresh-ignores-list-binary``
-## (case 11); and the script's ``WRITE_HELPER_DEPS_MUTATION`` in the
+## (case 11), ``fresh-trusts-mtime`` (cases 15 and 16 red, and the edit
+## cases, which then report a timestamp rather than a content change); and
+## the script's
+## ``WRITE_HELPER_DEPS_MUTATION`` in the
 ## environment: ``keep-old-list`` (case 12), ``relative-to-script-dir``
 ## (case 13), ``single-trace`` (case 14).
 ##
@@ -112,10 +123,24 @@ proc build() =
   doAssert c2 == 0, o2
 
 proc touchAfterBinary(path: string) =
-  ## Mark ``path`` edited ten seconds after the binary was built, without
+  ## Date ``path`` ten seconds after the binary was built, without
   ## depending on the file system's timestamp resolution.
   setLastModificationTime(path,
     getLastModificationTime(binary) + initDuration(seconds = 10))
+
+var edits = 0
+
+proc editAfterBinary(path: string; dated = 10) =
+  ## Edit ``path`` -- a comment line in its own syntax, so the tree still
+  ## compiles -- and date it ``dated`` seconds after the binary was built.
+  inc edits
+  let note =
+    if path.endsWith(".nim"): "\n# edited " & $edits & "\n"
+    elif path.endsWith(".c") or path.endsWith(".h"): "\n/* edited " & $edits & " */\n"
+    else: "edited " & $edits & "\n"
+  writeFile(path, readFile(path) & note)
+  setLastModificationTime(path,
+    getLastModificationTime(binary) + initDuration(seconds = dated))
 
 proc refusal(): string =
   try:
@@ -143,35 +168,35 @@ suite "a helper binary is used only when built from the tree under test":
     # a process of its own, with a fresh tree (createTempDir above).
     build()
     check refusal() == ""
-    touchAfterBinary(lib)
+    editAfterBinary(lib)
     let why = refusal()
     checkpoint why
-    check ("older than " & lib) in why
+    check ("a different " & lib) in why
     check "just build" in why
 
   test "3: the app's module edited after an incremental rebuild is refused":
     build()
     check refusal() == ""
-    touchAfterBinary(app)
+    editAfterBinary(app)
     let why = refusal()
     checkpoint why
-    check ("older than " & app) in why
+    check ("a different " & app) in why
 
   test "4: an included file edited after the build is refused":
     build()
     check refusal() == ""
-    touchAfterBinary(included)
+    editAfterBinary(included)
     let why = refusal()
     checkpoint why
-    check ("older than " & included) in why
+    check ("a different " & included) in why
 
   test "5: a module from outside the tree edited after the build is refused":
     build()
     check refusal() == ""
-    touchAfterBinary(outside)
+    editAfterBinary(outside)
     let why = refusal()
     checkpoint why
-    check ("older than " & outside) in why
+    check ("a different " & outside) in why
 
   test "6: rebuilt, it is accepted again":
     build()
@@ -180,26 +205,26 @@ suite "a helper binary is used only when built from the tree under test":
   test "8: the {.compile.} C file edited after the build is refused":
     build()
     check refusal() == ""
-    touchAfterBinary(csrc)
+    editAfterBinary(csrc)
     let why = refusal()
     checkpoint why
-    check ("older than " & csrc) in why
+    check ("a different " & csrc) in why
 
   test "9: the header that C file includes edited after the build is refused":
     build()
     check refusal() == ""
-    touchAfterBinary(header)
+    editAfterBinary(header)
     let why = refusal()
     checkpoint why
-    check ("older than " & header) in why
+    check ("a different " & header) in why
 
   test "10: the staticRead file edited after the build is refused":
     build()
     check refusal() == ""
-    touchAfterBinary(blob)
+    editAfterBinary(blob)
     let why = refusal()
     checkpoint why
-    check ("older than " & blob) in why
+    check ("a different " & blob) in why
 
   test "11: a binary rebuilt without its list (a list from another build) is refused":
     build()
@@ -230,10 +255,10 @@ suite "a helper binary is used only when built from the tree under test":
     build()
     check relInput in helperDependencies(tree, "foo-helper")
     check refusal() == ""
-    touchAfterBinary(relInput)
+    editAfterBinary(relInput)
     let why = refusal()
     checkpoint why
-    check ("older than " & relInput) in why
+    check ("a different " & relInput) in why
 
   test "14: files a staticExec command reads concurrently are all listed, every run":
     for run in 1 .. 3:
@@ -244,6 +269,24 @@ suite "a helper binary is used only when built from the tree under test":
         if p notin deps: missing.add(p)
       checkpoint "run " & $run & ": missing " & $missing
       check missing.len == 0
+
+  test "15: a source rewritten with its own bytes, dated after the build, is accepted":
+    build()
+    check refusal() == ""
+    for src in [lib, outside, csrc, header, blob]:
+      writeFile(src, readFile(src))
+      touchAfterBinary(src)
+    check getLastModificationTime(lib) > getLastModificationTime(binary)
+    check refusal() == ""
+
+  test "16: a source edited but dated before the build is refused":
+    build()
+    check refusal() == ""
+    editAfterBinary(lib, dated = -30)
+    check getLastModificationTime(lib) < getLastModificationTime(binary)
+    let why = refusal()
+    checkpoint why
+    check ("a different " & lib) in why
 
   test "7: no binary, or no dependency list, is refused":
     build()

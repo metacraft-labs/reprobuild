@@ -26,10 +26,10 @@ REPROBUILD_BENCH_LIVE=1 REPROBUILD_TEST_THREADS=4 direnv exec . python3 scripts/
 
 | Field | Value |
 | --- | --- |
-| HEAD | 5e0ba7dff691720cf4210f9366592a7e85b2328e |
-| HEAD short | 5e0ba7df |
-| Branch | r501d-promo |
-| Source fingerprint | 38b6b6dbc768335b3e909894d658918ff8517bf702b4193300c0c880192adac5 |
+| HEAD | 5437f09835c0fadd4a5444119e4a9ab6323c928b |
+| HEAD short | 5437f098 |
+| Branch | r501d-t4 |
+| Source fingerprint | 8da46ed5495ab7a3c28d78bd662f3eef81ef609ba231466d9d5312a4b241a0f5 |
 | External source revisions | {"io-mon": {"branch": "", "dirty": false, "head": "ac06360d15be70aca46202d0ce04c5b17cba5ac1"}, "nim-shm-gset": {"branch": "", "dirty": false, "head": "6333cc915689559b00f81371734783c2e894ca45"}, "nim-shm-queue": {"branch": "", "dirty": false, "head": "84fd76b174d4868e703ba3d599668ee340e0b6ea"}, "nim-stackable-hooks": {"branch": "", "dirty": false, "head": "c1d55ce33fb2a29e4cf8d8bdbe1713f355370d0a"}, "reprobuild-test-adapters": {"branch": "", "dirty": false, "head": "b0fc1bcb9c2f1cb6a7fc3a558592ae7051782c24"}, "runquota": {"branch": "", "dirty": false, "head": "9818dc0c90be8ba7993424a7bbfbb6e009ffa965"}, "test-certificates-tools": {"branch": "", "dirty": false, "head": "4b395de551d86c745d6eb8ebf7c7228df25298f5"}} |
 | Inventory JSON | benchmarks/reports/reprobuild-suite-m0-inventory.json |
 | Per-case protocol detail | build/reprobuild-suite-case-catalog.json |
@@ -44,7 +44,7 @@ The measurement environment — host kernel and glibc, tool versions, the record
 | Test entries | 2742 |
 | Nim test binaries | 2703 |
 | Python test files | 39 |
-| Case count (catalog-authoritative) | 17854 |
+| Case count (catalog-authoritative) | 17856 |
 | Measured protocol-aware cases | not measured (requires runner summary) |
 | Graph-owned helper/fixture artifacts | 35 |
 | Tests with statically detected runtime compiler flows | 137 |
@@ -159,7 +159,7 @@ This static audit combines explicit compiler-command data flow with trusted Repr
 | libs/repro_profile_compile/tests/t_smoke_module_imports.nim | graph-fixture | 66 | repro-compile-profile-binary | let res = compileProfileBinary(profile, nimcache, bin, ProjectRoot) |
 | libs/repro_profile_compile/tests/t_smoke_repro_profile_compile.nim | integration | 428 | repro-compile-profile-edge | let artifact = compileProfileToRbpi(root, opts) |
 | libs/repro_profile_compile/tests/t_template_in_template_named_args.nim | graph-fixture | 163 | repro-compile-profile-binary | let res = compileProfileBinary( |
-| libs/repro_test_support/tests/t_fresh_helper_binary_refuses_a_stale_build.nim | graph-fixture | 105 | nim-argv | let (o1, c1) = execCmdEx(quoteShellCommand(@["nim", "c", "--hints:off", |
+| libs/repro_test_support/tests/t_fresh_helper_binary_refuses_a_stale_build.nim | graph-fixture | 116 | nim-argv | let (o1, c1) = execCmdEx(quoteShellCommand(@["nim", "c", "--hints:off", |
 | tests/e2e/addon/t_e2e_addon_service_cannot_exec_outside_closure.nim | integration | 87 | static-c-compiler | let (o, c) = execCmdEx(quoteShellCommand([staticCc(debArch), "-static", |
 | tests/e2e/addon/t_e2e_addon_unit_syscall_filters_cover_their_traces.nim | platform/destructive | 146 | static-c-compiler | quoteShell(staticCc(debArch)) & " -E -dM -") |
 | tests/e2e/addon/t_e2e_addon_zero_touch_image_synthesis_boots_converged.nim | integration | 89 | cc,static-c-compiler | let cc = staticCc(debArch) |

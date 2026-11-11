@@ -19,9 +19,15 @@
 ## C files compiled with ``{.compile.}``, the headers they include, and the
 ## other files the compiler read (``staticRead`` targets, what a
 ## ``staticExec`` command read; seen through ``strace``). A list written
-## for another binary is refused. The binary is fresh when every listed
-## file still exists and none is newer than the binary, checked when the
-## test runs. Anything else raises ``StaleHelperBinary``
+## for another binary is refused. Each listed file carries the sha256 of
+## its bytes when the list was written; the binary is fresh when every
+## listed file still exists with those bytes, checked when the test runs.
+## Content, not modification time: CI moves the shared sibling checkouts to
+## another consumer's revisions and back between the build and the tests,
+## which rewrites files with their old bytes and a new timestamp, and an
+## edit that keeps an old timestamp is still an edit. A list written before
+## the digests (no ``sha256:``) is checked by modification time, as it was.
+## Anything else raises ``StaleHelperBinary``
 ## naming the first offending file and the command that rebuilds it: the
 ## test fails, it never silently runs an old build.
 ##
@@ -32,7 +38,9 @@
 ## ``fresh-skips-outside-tree`` (a module from outside the tree is not
 ## checked), ``fresh-skips-c-sources``, ``fresh-skips-headers``,
 ## ``fresh-skips-static-reads`` (that kind of entry is not checked),
-## ``fresh-ignores-list-binary`` (a list from another build is accepted).
+## ``fresh-ignores-list-binary`` (a list from another build is accepted),
+## ``fresh-trusts-mtime`` (a source's bytes are not compared: an edit that
+## keeps an old timestamp is accepted).
 ##
 ## Mocks: none -- this is test support; it reads the real build outputs.
 
@@ -93,8 +101,19 @@ proc fileSha256(path: string): string =
     ctx.update(buf.toOpenArray(0, n - 1))
   toLowerAscii($ctx.finish())
 
+proc splitDigest(value: string): tuple[path, digest: string] =
+  ## ``<path> sha256:<64 hex>`` -> (path, hex); a value without the suffix
+  ## (a list written before the digests) -> (value, "").
+  const Tag = " sha256:"
+  let at = value.rfind(Tag)
+  if at > 0 and value.len - (at + Tag.len) == 64:
+    let hex = value[at + Tag.len .. ^1].toLowerAscii()
+    if hex.allCharsInSet(HexDigits):
+      return (value[0 ..< at], hex)
+  (value, "")
+
 proc readHelperList(repoRoot, name: string):
-    tuple[binarySha: string; deps: seq[tuple[kind, path: string]]] =
+    tuple[binarySha: string; deps: seq[tuple[kind, path, digest: string]]] =
   ## The list ``scripts/write_helper_deps.sh`` wrote for ``name``: the
   ## sha256 of the binary it describes, and every source with its kind
   ## (``module``, ``csource``, ``header``, ``read``). Raises
@@ -115,7 +134,8 @@ proc readHelperList(repoRoot, name: string):
     let value = line[sp + 1 .. ^1]
     if kind == "binary-sha256": result.binarySha = value.toLowerAscii()
     elif kind in ["module", "csource", "header", "read"]:
-      result.deps.add((kind, value))
+      let (path, digest) = splitDigest(value)
+      result.deps.add((kind, path, digest))
     else:
       raise newException(StaleHelperBinary, list & " has an unknown entry " &
         "kind '" & kind & "'; " & helperRebuildHint(name))
@@ -123,17 +143,14 @@ proc readHelperList(repoRoot, name: string):
     raise newException(StaleHelperBinary, list & " names no binary-sha256: " &
       "it is not tied to a build; " & helperRebuildHint(name))
 
-proc helperDependencies*(repoRoot, name: string): seq[string] =
-  ## Every source ``build/bin/<name>`` was compiled from that can change,
-  ## as its dependency list names them: Nim modules and included files, C
-  ## files compiled with ``{.compile.}``, the headers they include, and the
-  ## other files the compiler read (``staticRead`` targets, what a
-  ## ``staticExec`` command read). Raises ``StaleHelperBinary`` when there
-  ## is no list.
+proc helperDependencyEntries(repoRoot, name: string):
+    seq[tuple[path, digest: string]] =
+  ## ``helperDependencies`` with the sha256 each source had when the list
+  ## was written ("" for a list written before the digests).
   let root = absolutePath(repoRoot)
   when FreshMutation == "fresh-skips-included":
     let linked = linkedModules(repoRoot, name)
-  for (kind, dep) in readHelperList(repoRoot, name).deps:
+  for (kind, dep, digest) in readHelperList(repoRoot, name).deps:
     when FreshMutation == "fresh-skips-outside-tree":
       if not dep.startsWith(root & "/"): continue
     when FreshMutation == "fresh-skips-included":
@@ -145,6 +162,16 @@ proc helperDependencies*(repoRoot, name: string): seq[string] =
       if kind == "header": continue
     when FreshMutation == "fresh-skips-static-reads":
       if kind == "read": continue
+    result.add((dep, digest))
+
+proc helperDependencies*(repoRoot, name: string): seq[string] =
+  ## Every source ``build/bin/<name>`` was compiled from that can change,
+  ## as its dependency list names them: Nim modules and included files, C
+  ## files compiled with ``{.compile.}``, the headers they include, and the
+  ## other files the compiler read (``staticRead`` targets, what a
+  ## ``staticExec`` command read). Raises ``StaleHelperBinary`` when there
+  ## is no list.
+  for (dep, _) in helperDependencyEntries(repoRoot, name):
     result.add(dep)
 
 proc freshRepoBinary*(repoRoot, name: string): string =
@@ -166,12 +193,19 @@ proc freshRepoBinary*(repoRoot, name: string): string =
         have & "): it was built by a path that wrote no list, or its list " &
         "is from another build; " & helperRebuildHint(name))
   let built = getLastModificationTime(result)
-  for dep in helperDependencies(repoRoot, name):
+  for (dep, digest) in helperDependencyEntries(repoRoot, name):
     if not fileExists(dep):
       raise newException(StaleHelperBinary, result & " was built from " &
         dep & ", which no longer exists; " & helperRebuildHint(name))
-    if FreshMutation != "stale-helper-accepted" and
-        getLastModificationTime(dep) > built:
+    when FreshMutation == "stale-helper-accepted":
+      continue
+    if digest.len > 0 and FreshMutation != "fresh-trusts-mtime":
+      let now = fileSha256(dep)
+      if now != digest:
+        raise newException(StaleHelperBinary, result & " was built from " &
+          "a different " & dep & " (sha256 then " & digest & ", now " & now &
+          "); the test would run an old build; " & helperRebuildHint(name))
+    elif getLastModificationTime(dep) > built:
       raise newException(StaleHelperBinary, result & " is older than " &
         dep & " (" & $getLastModificationTime(dep) & " > " & $built &
         "); the test would run an old build; " & helperRebuildHint(name))

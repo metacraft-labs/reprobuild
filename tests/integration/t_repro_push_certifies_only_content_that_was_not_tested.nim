@@ -40,15 +40,7 @@
 ## with hooks on. ``advisory`` is the other way to arrive at them, and has a case
 ## of its own.
 
-import std/[os, posix, sequtils, streams, strtabs, tempfiles, unittest]
-
-# A temp root of this process's own, for it and every process it starts.
-# The test runner runs each case in a process of its own, in parallel, under
-# one shared TMPDIR, and cases here check that a push left no
-# ``repro-push-pins-*`` directory behind (``isolatedScratchDirs``): under a
-# shared root a case sees the directories of a push another case is running.
-let caseTempRoot = createTempDir("rpp", "")
-putEnv("TMPDIR", caseTempRoot)
+import std/[posix, sequtils, streams, strtabs, unittest]
 
 import repro_test_support/reasoned_skip
 from repro_tool_profiles import tpmPathOnly
@@ -1037,11 +1029,46 @@ proc checkoutState(path: string): string =
     gitOut(path, "symbolic-ref", "-q", "HEAD") & "\n" &
     gitOut(path, "worktree", "list", "--porcelain")
 
-proc isolatedScratchDirs(): seq[string] =
-  ## Temporary workspaces a push certified in and left behind.
+proc isolatedScratchDirs(fx: PushFixture): seq[string] =
+  ## Temporary workspaces a push of THIS fixture certified in and left
+  ## behind. The test runner runs the cases of this file in parallel under
+  ## one TMPDIR, so a ``repro-push-pins-*`` directory there may be another
+  ## case's push, running now. A workspace is this fixture's when one of its
+  ## members is a ``git clone --shared`` of a repository under the fixture's
+  ## scratch directory (its alternates name that repository's objects).
+  ## A private TMPDIR per case would also separate them, but it leaves each
+  ## push without the temp-dir caches the suite shares (the interface
+  ## extraction cache), and the interrupted case's push then needs longer
+  ## than its two minutes to reach lib-b's test.
   for kind, path in walkDir(getTempDir()):
-    if kind == pcDir and extractFilename(path).startsWith("repro-push-pins-"):
-      result.add(path)
+    if kind != pcDir or not extractFilename(path).startsWith("repro-push-pins-"):
+      continue
+    for mk, member in walkDir(path / "workspace"):
+      let alternates = member / ".git" / "objects" / "info" / "alternates"
+      if fileExists(alternates) and
+          fx.sf.scratch in (try: readFile(alternates) except IOError: ""):
+        result.add(path)
+        break
+
+proc announcedScratchDirs(output: string): seq[string] =
+  ## The temporary workspaces a push said it certified in ("in temporary
+  ## worktrees under <dir> (your checkouts are not touched)").
+  const Head = "in temporary worktrees under "
+  for line in output.splitLines():
+    let at = line.find(Head)
+    if at < 0: continue
+    let rest = line[at + Head.len .. ^1]
+    let stop = rest.find(" (")
+    result.add(if stop < 0: rest.strip() else: rest[0 ..< stop])
+
+template checkScratchRemoved(fx: PushFixture; output: string;
+                             scratchBefore: seq[string]) =
+  ## The push removed every temporary workspace it worked in: none of this
+  ## fixture's is left, and each one it announced is gone.
+  check isolatedScratchDirs(fx) == scratchBefore
+  for dir in announcedScratchDirs(output):
+    checkpoint("announced temporary workspace: " & dir)
+    check not dirExists(dir)
 
 suite "repro push publishes a certified dependency cycle through every member's gateway":
   test "required: one run certifies and publishes a cycle with new commits in " &
@@ -1051,7 +1078,7 @@ suite "repro push publishes a certified dependency cycle through every member's 
       defer: removeDir(fx.sf.scratch)
       let (libB, a0, aTip, bTip) = fx.lagFirstCycle()
       let before = (a: checkoutState(fx.app), b: checkoutState(libB.path))
-      let scratchBefore = isolatedScratchDirs()
+      let scratchBefore = isolatedScratchDirs(fx)
 
       # ---- one repro push from a fully untested state. lib-b's commit names
       # lib-a's published commit while lib-a's checkout is past it, so lib-b is
@@ -1075,7 +1102,7 @@ suite "repro push publishes a certified dependency cycle through every member's 
       check checkoutState(libB.path) == before.b
       check gitOut(libB.path, "status", "--porcelain").len == 0
       check fx.git("status --porcelain").len == 0
-      check isolatedScratchDirs() == scratchBefore
+      fx.checkScratchRemoved(pushed.output, scratchBefore)
       check gitOut(libB.path, "rev-parse", "HEAD") == bTip
       check fx.git("rev-parse HEAD") == aTip
       fx.checkPublishedThroughGateway(pushed.output, "lib-b", libB.path,
@@ -1136,7 +1163,7 @@ suite "repro push publishes a certified dependency cycle through every member's 
       checkpoint("lib-b's lock:\n" & lockOfB)
       doAssert a0 in lockOfB and cTip in lockOfB and aTip notin lockOfB
       let cBefore = checkoutState(libC.path)
-      let scratchBefore = isolatedScratchDirs()
+      let scratchBefore = isolatedScratchDirs(fx)
 
       let pushed = fx.push()
       checkpoint("repro push:\n" & pushed.output)
@@ -1148,7 +1175,7 @@ suite "repro push publishes a certified dependency cycle through every member's 
       check "'lib-c' at" notin pushed.output
       check checkoutState(libC.path) == cBefore
       check gitOut(libC.path, "status", "--porcelain").len == 0
-      check isolatedScratchDirs() == scratchBefore
+      fx.checkScratchRemoved(pushed.output, scratchBefore)
       fx.checkPublishedThroughGateway(pushed.output, "lib-b", libB.path,
         libB.bare, bTip)
       fx.checkPublishedThroughGateway(pushed.output, "lib-a", fx.app,
@@ -1162,7 +1189,7 @@ suite "repro push publishes a certified dependency cycle through every member's 
       let (libB, a0, aTip, bTip) = fx.lagFirstCycle("FAIL on purpose\n")
       let before = (a: checkoutState(fx.app), b: checkoutState(libB.path))
       let bBefore = gitOut(libB.bare, "rev-parse", "refs/heads/main")
-      let scratchBefore = isolatedScratchDirs()
+      let scratchBefore = isolatedScratchDirs(fx)
       let stopped = fx.push()
       checkpoint("repro push:\n" & stopped.output)
       check stopped.code == 2
@@ -1171,7 +1198,7 @@ suite "repro push publishes a certified dependency cycle through every member's 
       check "this run pushed no member of the dependency cycle" in stopped.output
       check checkoutState(fx.app) == before.a
       check checkoutState(libB.path) == before.b
-      check isolatedScratchDirs() == scratchBefore
+      fx.checkScratchRemoved(stopped.output, scratchBefore)
       check gitOut(libB.bare, "rev-parse", "refs/heads/main") == bBefore
       check upstreamTip(fx.sf) == a0
       for (name, commit) in [("lib-b", bTip), ("lib-a", aTip)]:
@@ -1300,7 +1327,7 @@ suite "repro push publishes a certified dependency cycle through every member's 
       let (libB, a0, _, _) = fx.lagFirstCycle("SLOW, then passes\n")
       let before = (a: checkoutState(fx.app), b: checkoutState(libB.path))
       let bBefore = gitOut(libB.bare, "rev-parse", "refs/heads/main")
-      let scratchBefore = isolatedScratchDirs()
+      let scratchBefore = isolatedScratchDirs(fx)
       var env = newStringTable(modeCaseSensitive)
       for name, value in envPairs():
         env[name] = value
@@ -1315,7 +1342,7 @@ suite "repro push publishes a certified dependency cycle through every member's 
       # Interrupt once lib-b's test is running in its temporary checkout.
       var running = false
       for _ in 0 ..< 600:
-        for dir in isolatedScratchDirs():
+        for dir in isolatedScratchDirs(fx):
           if dir notin scratchBefore and
               fileExists(dir / "workspace" / "lib-b" / ".repro" / "runs.log"):
             running = true
@@ -1330,7 +1357,7 @@ suite "repro push publishes a certified dependency cycle through every member's 
       # and removes the temporary workspace before it exits.
       check code == 130
       check "interrupted; the temporary workspace was removed" in transcript
-      check isolatedScratchDirs() == scratchBefore
+      fx.checkScratchRemoved(transcript, scratchBefore)
       check checkoutState(fx.app) == before.a
       check checkoutState(libB.path) == before.b
       check gitOut(libB.path, "status", "--porcelain").len == 0
@@ -1623,7 +1650,7 @@ suite "a member certified against its pins has the submodules it initialized":
         "-c", "user.name=T", "commit", "-q", "-am", "moved on")
       discard gitOut(libB.path, "config", "submodule.sub.ignore", "all")
       check gitOut(libB.path, "status", "--porcelain").len == 0
-      let scratchBefore = isolatedScratchDirs()
+      let scratchBefore = isolatedScratchDirs(fx)
 
       let pushed = fx.push()
       checkpoint("repro push:\n" & pushed.output)
@@ -1646,9 +1673,7 @@ suite "a member certified against its pins has the submodules it initialized":
       check "sub/nested/unit.txt in " in reads and
         ": nested, committed;" in reads
       check "FAIL" notin reads
-      check isolatedScratchDirs() == scratchBefore
+      fx.checkScratchRemoved(pushed.output, scratchBefore)
       check gitOut(libB.path / "sub", "rev-parse", "HEAD") != committedSub
       fx.checkPublishedThroughGateway(pushed.output, "lib-b", libB.path,
         libB.bare, bTip)
-
-removeDir(caseTempRoot)

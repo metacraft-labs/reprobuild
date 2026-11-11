@@ -83,8 +83,14 @@ proc addPrivateStorePath(scratch, tag: string): string =
 
 proc rootLinksOf(storePath: string): seq[string] =
   ## Every GC root Nix itself reports for `storePath`, as the root's own
-  ## path (the left-hand side of `<root> -> <path>`).
+  ## path (the left-hand side of `<root> -> <path>`). A query that fails is
+  ## an error, not "no roots": an empty answer from a failed query would
+  ## read as a missing root.
   let res = nixStore(["--query", "--roots", storePath])
+  checkpoint("nix-store --query --roots " & storePath & " -> exit " &
+    $res.code & "\n" & res.output)
+  doAssert res.code == 0, "nix-store --query --roots " & storePath &
+    " failed (" & $res.code & "): " & res.output
   for line in res.output.splitLines():
     let arrow = line.find(" -> ")
     if arrow > 0 and line[arrow + 4 .. ^1].strip() == storePath:
@@ -375,6 +381,7 @@ suite "Nix GC roots cover working-tree build outputs":
     config.portableLookup = true
 
     let first = runBuild(g, config)
+    checkpoint("first trace:\n" & first.dumpTrace())
     check first.byId("gc/portable").launched
     check rootsUnder(p, f.cacheRoot).len > 0
     # The pre-pass really is the arm that answers a warm build here;

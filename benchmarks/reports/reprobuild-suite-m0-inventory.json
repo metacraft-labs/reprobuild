@@ -145,15 +145,15 @@
     "staleBinaryNote": ""
   },
   "metadata": {
-    "branch": "r501d-promo",
+    "branch": "r501d-t4",
     "catalogHost": {
       "cpu": "x86_64",
       "os": "linux"
     },
     "dirty": true,
     "environmentReportPath": "build/reprobuild-suite-m0-environment.md",
-    "head": "5e0ba7dff691720cf4210f9366592a7e85b2328e",
-    "headShort": "5e0ba7df",
+    "head": "5437f09835c0fadd4a5444119e4a9ab6323c928b",
+    "headShort": "5437f098",
     "repoRoot": ".",
     "runtimeDetailPath": "build/reprobuild-suite-case-catalog.json",
     "runtimeDetailReason": "footprint, host, tool versions, the recorded environment and the sibling-checkout paths are properties of the machine and of the moment, not of the tree; keeping them here made the tracked artifact differ on every build and every host, which is the defect spec \u00a716.4 forbids for an embedded build timestamp",
@@ -195,7 +195,7 @@
         "head": "4b395de551d86c745d6eb8ebf7c7228df25298f5"
       }
     },
-    "sourceFingerprint": "38b6b6dbc768335b3e909894d658918ff8517bf702b4193300c0c880192adac5"
+    "sourceFingerprint": "8da46ed5495ab7a3c28d78bd662f3eef81ef609ba231466d9d5312a4b241a0f5"
   },
   "performanceAssessment": {
     "deferredMeasurementCommand": "REPROBUILD_BENCH_LIVE=1 REPROBUILD_TEST_THREADS=4 direnv exec . python3 scripts/reprobuild_suite_inventory.py --run-suite --clean-first --warm-runs 2 --suite-timeout-seconds 7200",
@@ -219,7 +219,7 @@
       "nimTestBinaries": 2703,
       "pureUnitConsolidationGroups": 79,
       "pureUnitTests": 744,
-      "sourceCases": 17854,
+      "sourceCases": 17856,
       "staticallyDetectedRuntimeCompilerFlowTests": 137,
       "testEntries": 2742
     },
@@ -2098,7 +2098,7 @@
     "measuredProtocolAwareCaseCount": null,
     "nimTestBinaryCount": 2703,
     "pythonTestFileCount": 39,
-    "sourceCaseCount": 17854,
+    "sourceCaseCount": 17856,
     "testEntryCount": 2742
   },
   "staticallyDetectedRuntimeCompilerFlows": [
@@ -2871,7 +2871,7 @@
             "outside",
             "tree"
           ],
-          "line": 105,
+          "line": 116,
           "path": "libs/repro_test_support/tests/t_fresh_helper_binary_refuses_a_stale_build.nim",
           "patterns": [
             "nim-argv"
@@ -2889,7 +2889,7 @@
             "outside",
             "tree"
           ],
-          "line": 208,
+          "line": 233,
           "path": "libs/repro_test_support/tests/t_fresh_helper_binary_refuses_a_stale_build.nim",
           "patterns": [
             "nim-argv"
@@ -29637,10 +29637,10 @@
       "owner": "libs/repro_test_support",
       "requiresReproBinary": false,
       "source": "libs/repro_test_support/tests/t_fresh_helper_binary_refuses_a_stale_build.nim",
-      "sourceCaseCount": 14,
+      "sourceCaseCount": 16,
       "sourceNewerThanBinary": false,
       "sourceSuiteCount": 1,
-      "staticCaseCount": 14,
+      "staticCaseCount": 16,
       "staticallyDetectedRuntimeCompilerFlow": true,
       "targetOs": "soAny"
     },
@@ -68862,7 +68862,7 @@
   ],
   "timing": {
     "complete": false,
-    "currentSourceFingerprint": "38b6b6dbc768335b3e909894d658918ff8517bf702b4193300c0c880192adac5",
+    "currentSourceFingerprint": "8da46ed5495ab7a3c28d78bd662f3eef81ef609ba231466d9d5312a4b241a0f5",
     "notes": [
       "No suite run was requested for this inventory."
     ],
