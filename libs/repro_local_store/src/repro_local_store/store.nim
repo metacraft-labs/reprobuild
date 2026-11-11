@@ -319,7 +319,10 @@ const
     ## writes a hot read path can cause to one per object per day.
   StoreBusyTimeoutMs = 30_000
     ## `sqlite3_binding.open`'s default, restored after a use record that
-    ## ran without waiting (see `recordUseWithoutWaiting`).
+    ## ran without waiting (see `recordUseWithoutWaiting`), and the longest
+    ## a fresh store's WAL switch waits for another opener (`switchToWal`).
+  StoreFirstOpenPollMs = 20
+    ## How often `switchToWal` retries while another opener holds the lock.
   StoreRootEnvVar* = "REPRO_STORE_ROOT"
 
 # ---------------------------------------------------------------------------
@@ -659,14 +662,49 @@ CREATE TABLE IF NOT EXISTS gc_audit (
 );
 """
 
+proc switchToWal(db: Database) =
+  ## `PRAGMA journal_mode = WAL`, waiting for the index lock as long as any
+  ## other statement does.
+  ##
+  ## On an index not yet in WAL mode the switch reads the header and then
+  ## upgrades that read lock to a write lock. SQLite never calls the busy
+  ## handler for that upgrade while another connection holds the write lock,
+  ## because two readers each waiting to upgrade would deadlock; it returns
+  ## SQLITE_BUSY at once instead (https://www.sqlite.org/c3ref/busy_handler.html).
+  ## So every opener of a fresh store but the first would fail with
+  ## "database is locked" without waiting at all. The wait SQLite skips is
+  ## done here: the failed attempt has already let its read lock go, and
+  ## once the holder's switch commits the header says WAL and the pragma has
+  ## nothing left to do. On an index already in WAL mode it takes no lock.
+  let deadline = epochTime() + StoreBusyTimeoutMs / 1000
+  while true:
+    try:
+      db.exec("PRAGMA journal_mode = WAL")
+      return
+    except SqliteError as err:
+      if err.code != SqliteBusy or epochTime() >= deadline:
+        raise
+    sleep(StoreFirstOpenPollMs)
+
 proc initSchema(db: Database) =
+  ## Create the schema of a fresh index. Several processes may find the same
+  ## fresh index at once; each waits for the index lock, and the first to get
+  ## it creates the schema. The rest find `user_version` already set under
+  ## the same lock and leave it as it is.
   db.exec("PRAGMA foreign_keys = ON")
-  db.exec("PRAGMA journal_mode = WAL")
+  db.switchToWal()
   db.exec("PRAGMA synchronous = NORMAL")
   db.exec("BEGIN IMMEDIATE")
   try:
-    db.exec(SchemaSql)
-    setUserVersion(db, StoreSchemaVersion)
+    let onDiskVersion = db.userVersion()
+    if onDiskVersion == 0:
+      db.exec(SchemaSql)
+      setUserVersion(db, StoreSchemaVersion)
+    elif onDiskVersion > StoreSchemaVersion:
+      raise newException(EStoreSchemaTooNew,
+        "store index.db schema version " & $onDiskVersion &
+        " is newer than this Reprobuild build understands (" &
+        $StoreSchemaVersion & ")")
     db.exec("COMMIT")
   except CatchableError:
     try: db.exec("ROLLBACK") except CatchableError: discard
@@ -758,7 +796,7 @@ proc openStore*(root: string): Store =
           "PRAGMA quick_check returned: " & check)
         raise e
       result.db.exec("PRAGMA foreign_keys = ON")
-      result.db.exec("PRAGMA journal_mode = WAL")
+      result.db.switchToWal()
       result.db.exec("PRAGMA synchronous = NORMAL")
     try:
       result.db.ensureUsageColumns()

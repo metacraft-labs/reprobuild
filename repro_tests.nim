@@ -6526,6 +6526,17 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "t_group_libs_repro_local_store_tests_g01",
     singleReason: ""),
   TestSpec(
+    source: "libs/repro_local_store/tests/t_store_concurrent_first_open_waits.nim",
+    binary: "build/test-bin/t_store_concurrent_first_open_waits",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "t_group_libs_repro_local_store_tests_g01",
+    singleReason: ""),
+  TestSpec(
     source: "libs/repro_local_store/tests/t_store_copy.nim",
     binary: "build/test-bin/t_store_copy",
     defines: @[],

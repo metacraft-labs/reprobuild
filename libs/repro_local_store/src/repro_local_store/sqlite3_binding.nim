@@ -176,8 +176,10 @@ proc exec*(db: Database; sql: string) =
     var detail = ""
     if errmsg != nil:
       detail = $errmsg
-    raise newException(SqliteError,
+    var err = newException(SqliteError,
       "sqlite3_exec failed (" & $rc & "): " & detail & " (SQL: " & sql & ")")
+    err.code = rc
+    raise err
 
 proc prepare*(db: Database; sql: string): Statement =
   ## Compile `sql` and return a reusable statement object.
