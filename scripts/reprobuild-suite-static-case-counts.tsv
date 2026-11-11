@@ -1274,7 +1274,7 @@ tests/e2e/agent-harbor/t_e2e_agent_harbor_preview_accept_reject.nim	nim	5
 tests/e2e/cmake-develop/t_e2e_repro_develop_cmake.nim	nim	3
 tests/e2e/cmake-path-hermeticity/t_cmake_actions_declare_their_path.nim	nim	4
 tests/e2e/configurable-system/t_e2e_configurable_system_in_dsl.nim	nim	4
-tests/e2e/dev-env/t_e2e_dev_env_announces_before_working.nim	nim	4
+tests/e2e/dev-env/t_e2e_dev_env_announces_before_working.nim	nim	5
 tests/e2e/dev-env/t_e2e_dev_env_binds_materialized_producer.nim	nim	2
 tests/e2e/dev-env/t_e2e_dev_env_deactivate_per_shell.nim	nim	7
 tests/e2e/dev-env/t_e2e_dev_env_deactivate_round_trip.nim	nim	5
@@ -2047,7 +2047,7 @@ tests/integration/t_negative_chain_fixtures.nim	nim	14
 tests/integration/t_nested_bootstrap_runtime_closure.nim	nim	1
 tests/integration/t_nested_lock_push_capability_security.nim	nim	15
 tests/integration/t_nested_topology_full_pipeline_without_org_root_repo.nim	nim	1
-tests/integration/t_nf4_foreign_env_contract.nim	nim	16
+tests/integration/t_nf4_foreign_env_contract.nim	nim	18
 tests/integration/t_nim_package_path_handling.nim	nim	1
 tests/integration/t_nim_unittest_edge_reaches_declared_c_backend.nim	nim	1
 tests/integration/t_nitro_enclave_attestation_surface.nim	nim	27

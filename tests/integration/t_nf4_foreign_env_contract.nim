@@ -167,6 +167,53 @@ suite "nf4_foreign_env_contract":
     for kind, path in walkDir(root):
       check kind != pcDir # Per-call scratch must be removed.
 
+  test "a_waiting_producer_s_stderr_reaches_the_progress_file_while_it_waits":
+    # reprobuild-pm issue 2026-10-22: `nix print-dev-env` blocked on the nix
+    # daemon's GC lock for 30 minutes, and the line nix printed about it sat
+    # in a scratch file nobody read until the producer exited. This producer
+    # says it is waiting, then keeps waiting until that line is visible in
+    # the progress file -- which only a LIVE forward can make true. Without
+    # one it gives up after its own bounded wait and the capture fails.
+    let root = createTempDir("repro-capture-progress-", "")
+    defer: removeDir(root)
+    let progressPath = root / "protocol" / "foreign-env.progress"
+    var tail = openForeignEnvProgressTail(progressPath)
+    putEnv(ForeignEnvProgressEnvVar, progressPath)
+    defer: delEnv(ForeignEnvProgressEnvVar)
+    let waitingLine = "waiting for the big garbage collector lock..."
+    let producer =
+      "printf '%s\\n' \"$1\" >&2; " &
+      "for _ in $(seq 1 600); do " &
+      "  if grep -qF \"$1\" \"$2\"; then " &
+      "    printf 'export REPRO_PROGRESS_SEEN=yes\\n'; exit 0; fi; " &
+      "  sleep 0.05; " &
+      "done; " &
+      "echo 'progress file never showed the waiting line' >&2; exit 3"
+    let ops = captureForeignEnvOps(@[findExe("bash"), "-c", producer,
+      "capture-progress", waitingLine, progressPath], root,
+      root / "print-dev-env.bash")
+    check opFor(ops, "REPRO_PROGRESS_SEEN", feoSet).value == "yes"
+    check tail.takeLines(final = true) == @[waitingLine]
+
+  test "the_progress_tail_returns_complete_lines_and_restarts_when_emptied":
+    let root = createTempDir("repro-progress-tail-", "")
+    defer: removeDir(root)
+    let path = root / "foreign-env.progress"
+    writeFile(path, "left over from an earlier activation\n")
+    var tail = openForeignEnvProgressTail(path)
+    check tail.takeLines().len == 0
+    writeFile(path, "warning: Git tree is dirty\nwaiting for")
+    check tail.takeLines() == @["warning: Git tree is dirty"]
+    let appended = open(path, fmAppend)
+    appended.write(" the big garbage collector lock...\r\n")
+    appended.close()
+    check tail.takeLines() == @["waiting for the big garbage collector lock..."]
+    writeFile(path, "copying path\n")
+    check tail.takeLines() == @["copying path"]
+    writeFile(path, "copying path\nunterminated")
+    check tail.takeLines().len == 0
+    check tail.takeLines(final = true) == @["unterminated"]
+
   test "non_shell_environment_names_are_not_unset_by_capture":
     let root = createTempDir("repro-cargo-environment-", "")
     defer: removeDir(root)

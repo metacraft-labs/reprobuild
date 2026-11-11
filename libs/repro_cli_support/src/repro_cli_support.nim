@@ -88,6 +88,9 @@ import repro_dsl_stdlib/packages_schema
               # `repro.nim` are stdlib, not CLI. The CLI reads the two flags
               # out of the layered configuration and calls into it.
 import repro_dsl_stdlib/foreign_env/auto_load
+# `ForeignEnvProgressTail`: a capture's producer stderr, forwarded live while
+# the dev-env edge runs.
+import repro_dsl_stdlib/foreign_env/env_capture
 # `flakeSiblingIsGitCheckout` / `flakeSiblingOverrideRef` — the ONE predicate
 # deciding whether a sibling is a checkout, and the ONE spelling naming it to
 # nix. Shared with `flakePrintDevEnvArgv` so the arguments emitted here and the
@@ -14657,6 +14660,17 @@ proc runDevEnvIntrospectionHelper(args: openArray[string]): int =
   try:
     if developOverridesPath.len > 0:
       putEnv(DevelopOverridesEnvVar, developOverridesPath)
+    # This helper's stderr, and the provider's below it, reach the terminal
+    # only after they exit. A foreign capture (`nix print-dev-env`) can wait
+    # for many minutes on something outside Reprobuild, so it forwards what
+    # its producer says to this file, which the activating CLI prints live.
+    # Emptied here as well as by the reader, so it holds one run's lines
+    # even for a caller that never reads it.
+    let foreignProgressPath =
+      absolutePath(devEnvForeignProgressPath(protocolRoot))
+    createDir(extendedPath(protocolRoot))
+    writeFile(extendedPath(foreignProgressPath), "")
+    putEnv(ForeignEnvProgressEnvVar, foreignProgressPath)
     let cwd = if projectRoot.len > 0: projectRoot else: getCurrentDir()
     let manifestResponse = runStableProviderProtocol(providerBinary,
       protocolRoot, "manifest", cwd, ProviderGraphRequest(
@@ -15477,8 +15491,24 @@ proc computePublicDevEnv(selection: DevEnvCliSelection;
       selection.projectRoot)
     stderr.flushFile()
   var progressCallback: BuildProgressCallback = nil
+  # What a foreign dev-env capture's producer (`nix print-dev-env`, `direnv`)
+  # writes to stderr, printed as it is written. The engine re-reports every
+  # running action every 100 ms, so the callback is also the poll.
+  var foreignProgress: ForeignEnvProgressTail
+  proc printForeignProgress(final: bool) =
+    let lines = foreignProgress.takeLines(final)
+    if lines.len == 0:
+      return
+    progress.clearProgressLine()
+    for line in lines:
+      stderr.writeLine(line)
+    stderr.flushFile()
+    progress.lastLen = 0
   if progress.enabled:
+    foreignProgress = openForeignEnvProgressTail(devEnvForeignProgressPath(
+      devEnvProtocolRoot(selection.outDir)))
     progressCallback = proc(event: BuildProgressEvent) =
+      printForeignProgress(final = false)
       progress.renderProgress(event)
   var autoRunQuota = startAutoRunQuotaIfNeeded(runQuotaBypassedByEnv())
   defer: releaseAutoRunQuotaProcess(autoRunQuota)
@@ -15521,9 +15551,11 @@ proc computePublicDevEnv(selection: DevEnvCliSelection;
     # first so that diagnostic starts on a line of its own instead of being
     # appended to a half-drawn one.
     if progress.enabled:
+      printForeignProgress(final = true)
       progress.finishProgress()
     raise
   if progress.enabled:
+    printForeignProgress(final = true)
     progress.finishProgress()
     # What it did, not merely that it finished. `provider compiled` versus
     # `provider reused` is the twenty-second difference on a macOS host whose
