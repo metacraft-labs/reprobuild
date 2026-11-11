@@ -13,6 +13,7 @@ import repro_core
 import repro_core/ambient_execution
 import repro_core/link_target
 import repro_core/host_tar
+import repro_core/powershell_zip as repro_core_powershell_zip
 # GC roots for the store paths a Nix tool realization is recorded under.
 import repro_core/nix_store_roots
 import repro_core/nix_evaluation_policy
@@ -3125,46 +3126,34 @@ proc resolveZipExtractor(): tuple[exe: string; kind: string] =
     (when defined(windows): "powershell + unzip" else: "unzip + powershell") &
     ")")
 
-proc powershellLiteral(value: string): string =
-  ## A PowerShell single-quoted string literal: nothing inside it is
-  ## interpolated, and the only escape is a doubled quote.
-  "'" & value.replace("'", "''") & "'"
-
 proc powershellZipExtractScript*(archivePath, destination: string): string =
-  ## The script the PowerShell zip extractor runs.
+  ## The script the PowerShell zip extractor runs: the shared
+  ## ``repro_core/powershell_zip`` loop without overwrite, because the
+  ## destination is always a fresh staging directory.
   ##
-  ## It calls `System.IO.Compression.ZipFile.ExtractToDirectory` directly
-  ## rather than the `Expand-Archive` cmdlet. Both use the same .NET zip
-  ## reader, so path-separator handling and the refusal of entries that
-  ## escape the destination are unchanged. What differs is the per-entry
-  ## cost. Windows PowerShell 5.1's `Expand-Archive` is a script cmdlet that
-  ## writes a progress record for every entry. When the caller captures
-  ## output, as `execCmdEx` does, those records are serialized onto the
-  ## pipe. On a 4-vCPU CI VM that cost about 90 ms per entry. The
-  ## 12,000-entry MinGW toolchain zip took about 40 minutes there, and the
-  ## Go distribution zip took as long again. `ExtractToDirectory` took
-  ## 199 seconds on the same archive, on the same machine, under the same
-  ## load.
+  ## It reads the archive entry by entry with the .NET zip reader rather than
+  ## through the ``Expand-Archive`` cmdlet. Windows PowerShell 5.1's
+  ## ``Expand-Archive`` is a script cmdlet that writes a progress record for
+  ## every entry. When the caller captures output, as ``execCmdEx`` does,
+  ## those records are serialized onto the pipe. On a 4-vCPU CI VM that cost
+  ## about 90 ms per entry. The 12,000-entry MinGW toolchain zip took about
+  ## 40 minutes there, and the Go distribution zip took as long again;
+  ## ``ZipFile.ExtractToDirectory`` took 199 seconds on the same archive, on
+  ## the same machine, under the same load. The ``repro_core/powershell_zip``
+  ## loop is no slower than that call: on the 5,249-file Nim 2.2.10 zip it
+  ## took 3.6 s at the CI staging depth, against ``ExtractToDirectory``'s
+  ## 6.3 s at a short destination, where that call could still succeed
+  ## (Windows 11 x64, 2026-11-11). The reader
+  ## also does not care about the file extension, so the copy of the archive
+  ## to a temporary ``.zip`` that ``Expand-Archive`` required is gone too.
   ##
-  ## `ExtractToDirectory` also does not care about the file extension, so the
-  ## copy of the archive to a temporary `.zip` that `Expand-Archive` required
-  ## is gone too. That copy was a second full write of every archive.
-  ##
-  ## `$ErrorActionPreference = 'Stop'` turns a .NET exception (corrupt
-  ## archive, an entry outside the destination, a file already present) into
-  ## a terminating error, and `-Command` then exits non-zero. Progress is
-  ## silenced anyway, so no module that the host loads can reintroduce the
-  ## per-record cost. The destination is always a fresh staging directory,
-  ## so `Expand-Archive -Force`'s overwrite behavior is not needed.
-  ## ZIP names without the UTF-8 flag use CP437, not the runtime's current
-  ## code page. The explicit entry-name encoding leaves flagged UTF-8 names
-  ## unchanged: https://learn.microsoft.com/dotnet/api/system.io.compression.zipfile.extracttodirectory
-  "$ProgressPreference = 'SilentlyContinue'; " &
-    "$ErrorActionPreference = 'Stop'; " &
-    "Add-Type -AssemblyName System.IO.Compression.FileSystem; " &
-    "[System.IO.Compression.ZipFile]::ExtractToDirectory(" &
-    powershellLiteral(archivePath) & ", " & powershellLiteral(destination) &
-    ", [System.Text.Encoding]::GetEncoding(437))"
+  ## The loop, rather than ``ZipFile.ExtractToDirectory``, is what lets every
+  ## write go through the ``\\?\`` form: a host without the
+  ## ``LongPathsEnabled`` policy (the Windows ARM64 CI runners) could not
+  ## create the deepest member of the Nim 2.2.10 zip under a CI checkout. See
+  ## ``repro_core/powershell_zip`` for the measurement.
+  repro_core_powershell_zip.powershellZipExtractScript(archivePath,
+    destination, overwrite = false)
 
 proc zipExtractCommand*(extractor: tuple[exe: string; kind: string];
                         archivePath, destination: string): string =
