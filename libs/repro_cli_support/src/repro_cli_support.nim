@@ -18104,17 +18104,25 @@ proc startBackgroundSupervisor(config: DevSessionSupervisorConfig) =
       env = [], inheritEnvironment = true, logPath = logPath,
       workingDir = absolutePath(config.projectRoot))
   else:
-    var fdsToClose: seq[string] = @[]
-    for fd in 3 .. 64:
-      fdsToClose.add($fd)
-    let closeInheritedFds = "for fd in " & fdsToClose.join(" ") &
-      "; do eval \"exec $fd>&-\"; done; "
-    let command = "(cd " & q(config.projectRoot) & " && " &
-      closeInheritedFds &
-      "exec " &
+    # NO DESCRIPTOR ABOVE 2 CROSSES THE LAUNCH: the supervisor outlives this
+    # invocation, so an inherited copy of a caller's pipe would hold that
+    # pipe open for the life of the session. The descriptors are marked
+    # close-on-exec from this side for the one launch, as the detached
+    # cache push does, rather than closed by the shell: a POSIX shell's
+    # redirections name descriptors 0-9 only, so `exec 10>&-` is, to dash,
+    # a command named `10` -- which is not found and ends the subshell
+    # before the supervisor starts. Only the flag moves, and it is put back
+    # afterwards; this runs on the command's main flow, which starts no
+    # other child inside the window.
+    let command = "(cd " & q(config.projectRoot) & " && exec " &
       shellCommand(@[config.publicCliPath] & config.supervisorCliArgs()) &
       ") </dev/null >> " & q(logPath) & " 2>&1 &"
-    let exitCode = execShellCmd(command)
+    let madeCloseOnExec = markInheritableDescriptorsCloseOnExec()
+    var exitCode = 0
+    try:
+      exitCode = execShellCmd(command)
+    finally:
+      restoreInheritableDescriptors(madeCloseOnExec)
     if exitCode != 0:
       raise newException(OSError,
         "failed to launch dev session supervisor: " & command)
