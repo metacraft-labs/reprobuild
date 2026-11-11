@@ -43169,7 +43169,7 @@
       "requiresReproBinary": true,
       "source": "tests/integration/t_legacy_manifest_without_team_route_warns_and_scaffolds.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 1,
+      "staticCaseCount": 2,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -50354,7 +50354,7 @@
       "requiresReproBinary": true,
       "source": "tests/integration/t_the_refresh_finds_the_committed_repo_under_any_spelling.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 1,
+      "staticCaseCount": 2,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
