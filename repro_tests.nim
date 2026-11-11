@@ -4612,6 +4612,17 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "",
     singleReason: "its binary is named by Justfile"),
   TestSpec(
+    source: "libs/repro_dsl_stdlib/tests/t_nim_c_backend_compiler_sub_tools.nim",
+    binary: "build/test-bin/t_nim_c_backend_compiler_sub_tools",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "t_group_libs_repro_dsl_stdlib_tests_g01",
+    singleReason: ""),
+  TestSpec(
     source: "libs/repro_dsl_stdlib/tests/t_nim_c_cpu_flag.nim",
     binary: "build/test-bin/t_nim_c_cpu_flag",
     defines: @[],
@@ -4708,7 +4719,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_libs_repro_dsl_stdlib_tests_g01",
+    group: "t_group_libs_repro_dsl_stdlib_tests_g02",
     singleReason: ""),
   TestSpec(
     source: "libs/repro_dsl_stdlib/tests/t_packaging_arch_authoring.nim",

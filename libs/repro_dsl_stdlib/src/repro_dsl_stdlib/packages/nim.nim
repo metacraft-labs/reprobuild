@@ -154,13 +154,15 @@ package nim:
     cli:
       # ``nim c`` does not emit machine code. It emits C and then runs the
       # backend C compiler by BARE NAME through ``/bin/sh -c``: ``gcc`` by
-      # default on Linux and Windows, ``clang`` on macOS, ``zig`` under
-      # ``--cc:zig``. Those are this tool's sub-tools, so EVERY edge the
-      # wrapper records -- the ``output =`` form a recipe can call directly as
-      # well as the ``binary =`` shorthand below -- gets the directory of the
-      # one the recipe declares in ``uses:`` on its PATH. A name the recipe
-      # does not declare is inert.
-      subTools "gcc", "clang", "zig"
+      # default on Linux and Windows, ``clang`` on macOS. Those are this
+      # tool's sub-tools, so EVERY edge the wrapper records -- the
+      # ``output =`` form a recipe can call directly as well as the
+      # ``binary =`` shorthand below -- gets the directory of the one the
+      # recipe declares in ``uses:`` on its PATH. A name the recipe does not
+      # declare is inert. A recipe that selects another backend with ``cc``
+      # names that compiler at its call site; the ``binary =`` shorthand does
+      # so itself.
+      subTools "gcc", "clang"
 
       # DA-6 — THE CAPTURE-BREADTH DECLARATION, made HERE, on the tool, once.
       #

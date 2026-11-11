@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 35,
-    "nimTestBinaries": 2703,
+    "nimTestBinaries": 2704,
     "pureUnitConsolidationGroups": 79,
-    "pureUnitTests": 744,
+    "pureUnitTests": 745,
     "staticallyDetectedRuntimeCompilerFlowTests": 137,
-    "testEntries": 2742
+    "testEntries": 2743
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -240,7 +240,7 @@
       "targetOs": "soAny"
     },
     {
-      "count": 34,
+      "count": 35,
       "defines": [],
       "dependencyShape": [
         "repro_dsl_stdlib",
@@ -263,6 +263,7 @@
         "libs/repro_dsl_stdlib/tests/t_nde_k1_plasma.nim",
         "libs/repro_dsl_stdlib/tests/t_ndem1_reproos_desktop.nim",
         "libs/repro_dsl_stdlib/tests/t_ndem2_generation_log.nim",
+        "libs/repro_dsl_stdlib/tests/t_nim_c_backend_compiler_sub_tools.nim",
         "libs/repro_dsl_stdlib/tests/t_nim_c_cpu_flag.nim",
         "libs/repro_dsl_stdlib/tests/t_nim_c_ssl_link_path.nim",
         "libs/repro_dsl_stdlib/tests/t_no_catalog_tarball_arm_declares_a_source_build_driver.nim",
@@ -1566,7 +1567,7 @@
       "graph-fixture": 21,
       "integration": 1488,
       "platform/destructive": 173,
-      "pure unit": 744,
+      "pure unit": 745,
       "unclassified": 316
     },
     "graphOwnedTestArtifacts": [
@@ -1781,9 +1782,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2703,
+    "nimTestBinaryCount": 2704,
     "pythonTestFileCount": 39,
-    "testEntryCount": 2742
+    "testEntryCount": 2743
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -15807,6 +15808,24 @@
       "source": "libs/repro_dsl_stdlib/tests/t_ndem2_generation_log.nim",
       "sourceSuiteCount": 2,
       "staticCaseCount": 21,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_nim_c_backend_compiler_sub_tools",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_dsl_stdlib",
+        "repro_project_dsl"
+      ],
+      "owner": "libs/repro_dsl_stdlib",
+      "requiresReproBinary": false,
+      "source": "libs/repro_dsl_stdlib/tests/t_nim_c_backend_compiler_sub_tools.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 2,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
