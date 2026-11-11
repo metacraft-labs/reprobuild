@@ -28163,6 +28163,17 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "t_group_tests_unit_g02",
     singleReason: ""),
   TestSpec(
+    source: "tests/unit/t_libclang_package.nim",
+    binary: "build/test-bin/t_libclang_package",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "t_group_tests_unit_g02",
+    singleReason: ""),
+  TestSpec(
     source: "tests/unit/t_library_stage_alias.nim",
     binary: "build/test-bin/t_library_stage_alias",
     defines: @["reproProviderMode"],
@@ -28633,7 +28644,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_unit_g02",
+    group: "t_group_tests_unit_g03",
     singleReason: ""),
   TestSpec(
     source: "tests/unit/t_m9r15q_2_from_source_custom_registry_population.nim",
@@ -29205,7 +29216,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_unit_g03",
+    group: "t_group_tests_unit_g04",
     singleReason: ""),
   TestSpec(
     source: "tests/unit/t_missing_json_evidence.nim",

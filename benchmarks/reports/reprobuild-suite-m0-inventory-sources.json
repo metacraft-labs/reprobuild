@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 35,
-    "nimTestBinaries": 2723,
+    "nimTestBinaries": 2724,
     "pureUnitConsolidationGroups": 79,
-    "pureUnitTests": 748,
+    "pureUnitTests": 749,
     "staticallyDetectedRuntimeCompilerFlowTests": 137,
-    "testEntries": 2765
+    "testEntries": 2766
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1272,7 +1272,7 @@
       "targetOs": "soAny"
     },
     {
-      "count": 25,
+      "count": 26,
       "defines": [],
       "dependencyShape": [
         "repro_dsl_stdlib",
@@ -1282,6 +1282,7 @@
       "sources": [
         "tests/unit/t_electron_builder_binaries.nim",
         "tests/unit/t_fribidi_dev_stub.nim",
+        "tests/unit/t_libclang_package.nim",
         "tests/unit/t_m9r10b_synthesis_wiring.nim",
         "tests/unit/t_m9r12_4_autotools_emits_fetch.nim",
         "tests/unit/t_m9r14c_4_inline_exec_path_enrichment.nim",
@@ -1568,7 +1569,7 @@
       "graph-fixture": 21,
       "integration": 1498,
       "platform/destructive": 174,
-      "pure unit": 748,
+      "pure unit": 749,
       "unclassified": 324
     },
     "graphOwnedTestArtifacts": [
@@ -1783,9 +1784,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2723,
+    "nimTestBinaryCount": 2724,
     "pythonTestFileCount": 42,
-    "testEntryCount": 2765
+    "testEntryCount": 2766
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -54376,6 +54377,24 @@
       "source": "tests/unit/t_interrupted_fast_forward_inspection.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 16,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_libclang_package",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_dsl_stdlib",
+        "repro_project_dsl"
+      ],
+      "owner": "tests/unit",
+      "requiresReproBinary": false,
+      "source": "tests/unit/t_libclang_package.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 2,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
