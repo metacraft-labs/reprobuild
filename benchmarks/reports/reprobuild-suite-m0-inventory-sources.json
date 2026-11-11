@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 35,
-    "nimTestBinaries": 2709,
+    "nimTestBinaries": 2711,
     "pureUnitConsolidationGroups": 79,
     "pureUnitTests": 746,
     "staticallyDetectedRuntimeCompilerFlowTests": 137,
-    "testEntries": 2749
+    "testEntries": 2751
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1567,7 +1567,7 @@
       "integration": 1491,
       "platform/destructive": 173,
       "pure unit": 746,
-      "unclassified": 318
+      "unclassified": 320
     },
     "graphOwnedTestArtifacts": [
       {
@@ -1781,9 +1781,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2709,
+    "nimTestBinaryCount": 2711,
     "pythonTestFileCount": 40,
-    "testEntryCount": 2749
+    "testEntryCount": 2751
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -2411,7 +2411,7 @@
           "directExecutionLine": true,
           "enclosingCallable": "",
           "executedVariables": [],
-          "line": 428,
+          "line": 431,
           "path": "libs/repro_profile_compile/tests/t_smoke_repro_profile_compile.nim",
           "patterns": [
             "repro-compile-profile-edge"
@@ -2427,7 +2427,7 @@
           "directExecutionLine": true,
           "enclosingCallable": "",
           "executedVariables": [],
-          "line": 444,
+          "line": 447,
           "path": "libs/repro_profile_compile/tests/t_smoke_repro_profile_compile.nim",
           "patterns": [
             "repro-compile-profile-edge"
@@ -2435,22 +2435,6 @@
           "runtimeCompilerApi": "compileProfileToRbpi",
           "runtimeCompilerApiModule": "repro_profile_compile",
           "snippet": "discard compileProfileToRbpi(stateDir / \"does_not_exist.nim\", opts)"
-        },
-        {
-          "assignedCommandVariable": "",
-          "callableReachable": true,
-          "commandVariableExecuted": false,
-          "directExecutionLine": true,
-          "enclosingCallable": "",
-          "executedVariables": [],
-          "line": 449,
-          "path": "libs/repro_profile_compile/tests/t_smoke_repro_profile_compile.nim",
-          "patterns": [
-            "repro-compile-profile-edge"
-          ],
-          "runtimeCompilerApi": "compileProfileToRbpi",
-          "runtimeCompilerApiModule": "repro_profile_compile",
-          "snippet": "discard compileProfileToRbpi(\"<abs>/home.nim\", opts)"
         },
         {
           "assignedCommandVariable": "",
@@ -2475,7 +2459,23 @@
           "directExecutionLine": true,
           "enclosingCallable": "",
           "executedVariables": [],
-          "line": 740,
+          "line": 455,
+          "path": "libs/repro_profile_compile/tests/t_smoke_repro_profile_compile.nim",
+          "patterns": [
+            "repro-compile-profile-edge"
+          ],
+          "runtimeCompilerApi": "compileProfileToRbpi",
+          "runtimeCompilerApiModule": "repro_profile_compile",
+          "snippet": "discard compileProfileToRbpi(\"<abs>/home.nim\", opts)"
+        },
+        {
+          "assignedCommandVariable": "",
+          "callableReachable": true,
+          "commandVariableExecuted": false,
+          "directExecutionLine": true,
+          "enclosingCallable": "",
+          "executedVariables": [],
+          "line": 743,
           "path": "libs/repro_profile_compile/tests/t_smoke_repro_profile_compile.nim",
           "patterns": [
             "repro-compile-profile-binary"
@@ -2491,7 +2491,7 @@
           "directExecutionLine": true,
           "enclosingCallable": "",
           "executedVariables": [],
-          "line": 759,
+          "line": 762,
           "path": "libs/repro_profile_compile/tests/t_smoke_repro_profile_compile.nim",
           "patterns": [
             "repro-compile-profile-binary"
@@ -10576,6 +10576,23 @@
       "source": "libs/repro_build_engine/tests/t_container_output_is_not_restored_from_a_snapshot.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 2,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_create_action_record_keys_its_argv",
+      "class": "unclassified",
+      "classificationReason": "imports `repro_build_engine {.all.}`, which this scan does not recognize; refusing to call it pure rather than assuming it is",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_build_engine"
+      ],
+      "owner": "libs/repro_build_engine",
+      "requiresReproBinary": false,
+      "source": "libs/repro_build_engine/tests/t_create_action_record_keys_its_argv.nim",
+      "sourceSuiteCount": 2,
+      "staticCaseCount": 6,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -53543,6 +53560,29 @@
       "source": "tests/unit/t_electron_builder_binaries.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 5,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_engine_built_actions_key_their_argv",
+      "class": "unclassified",
+      "classificationReason": "imports `repro_cli_support {.all.}`, which this scan does not recognize; refusing to call it pure rather than assuming it is",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_build_engine",
+        "repro_cli_support",
+        "repro_dev_env_engine",
+        "repro_hash",
+        "repro_interface_artifacts",
+        "repro_profile",
+        "repro_profile_compile"
+      ],
+      "owner": "tests/unit",
+      "requiresReproBinary": false,
+      "source": "tests/unit/t_engine_built_actions_key_their_argv.nim",
+      "sourceSuiteCount": 6,
+      "staticCaseCount": 10,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

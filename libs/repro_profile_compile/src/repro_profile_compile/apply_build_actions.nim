@@ -74,7 +74,8 @@ proc weakFingerprintForProfileBuildAction(action: ProfileBuildAction):
   ## Weak fingerprint for a profile-scope action edge. Mixes the
   ## action id + argv + outputs + the elevation flag so a sibling
   ## edge that differs in any input rebuilds. Mirrors the home-style
-  ## fingerprint shape used by ``profileCompileBuildAction``.
+  ## fingerprint shape used by ``profileCompileBuildAction``: the
+  ## declared identity, then the argv through ``keyedOnArgv``.
   ##
   ## We deliberately do NOT include the inputs in the fingerprint
   ## (the engine's input-fingerprint policy reads input mtimes /
@@ -86,13 +87,11 @@ proc weakFingerprintForProfileBuildAction(action: ProfileBuildAction):
     action.cwd,
     (if action.requiresElevation: "elevated" else: "direct"),
     action.commandStatsId]
-  for a in action.argv:
-    parts.add("argv:" & a)
   for o in action.outputs:
     parts.add("out:" & o)
   for t in action.toolIdentityRefs:
     parts.add("tool:" & t)
-  weakFingerprintFromText(parts.join("\n"))
+  keyedOnArgv(weakFingerprintFromText(parts.join("\n")), action.argv)
 
 proc buildActionFingerprintHex*(action: ProfileBuildAction): string =
   ## Hex of the edge's weak (declared-identity) fingerprint — the value
