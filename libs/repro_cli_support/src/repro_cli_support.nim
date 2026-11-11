@@ -58469,21 +58469,44 @@ proc renderPinRegressionRefusal*(refused: openArray[PinRegression];
   ## ``action`` is what was refused: ``"commit"`` (the managed `pre-commit`
   ## hook) or ``"refresh"`` (`repro lock refresh`). For a refresh, ``rerun``
   ## is the command that repeats it with the regressing siblings allowed.
+  ##
+  ## A move whose direction could not be judged (``sprUnknown``) is refused
+  ## too, failing closed, but it is not called backward: the refusal says
+  ## the direction could not be judged, and, when there is no checkout to
+  ## judge it in, prints no `git -C` command for one.
   let isCommit = action == "commit"
+  var backward, unjudged = 0
+  for r in refused:
+    if r.relation == sprUnknown: inc unjudged
+    else: inc backward
+  var moves: seq[string]
+  if backward > 0:
+    moves.add($backward & " pinned sibling revision(s) BACKWARD")
+  if unjudged > 0:
+    moves.add($unjudged & " pinned sibling revision(s) in a direction that " &
+      "could not be judged")
+  let what = moves.join(" and ")
   if isCommit:
-    result.add("REFUSED: this commit would move " & $refused.len &
-      " pinned sibling revision(s) BACKWARD. The commit was not made, and " &
-      "nothing was written or staged.")
+    result.add("REFUSED: this commit would move " & what &
+      ". The commit was not made, and nothing was written or staged.")
   else:
-    result.add("REFUSED: this " & action & " would move " & $refused.len &
-      " pinned sibling revision(s) BACKWARD. The lock was not written.")
+    result.add("REFUSED: this " & action & " would move " & what &
+      ". The lock was not written.")
   var names: seq[string]
+  var anyCheckout = false
   for r in refused:
     if r.sibling notin names: names.add(r.sibling)
+    if r.path.len > 0: anyCheckout = true
     if r.relation == sprUnprovable:
       # The distance already names the pinned commit and the checkout.
       result.add("  " & pinRegressionSubject(r) & ": " &
         pinRegressionDistance(r) & " — observed " & r.observed)
+    elif r.path.len == 0:
+      # Nothing to judge the direction in, and nothing to run a command in.
+      result.add("  " & pinRegressionSubject(r) & ": " &
+        pinRegressionDistance(r) & " — pinned " & r.pinned & ", observed " &
+        r.observed & " (no checkout to judge the direction in)")
+      continue
     else:
       result.add("  " & pinRegressionSubject(r) & ": " &
         pinRegressionDistance(r) & " — pinned " & r.pinned & ", observed " &
@@ -58504,8 +58527,12 @@ proc renderPinRegressionRefusal*(refused: openArray[PinRegression];
     else:
       result.add("      what this " & action & " would drop from the " &
         "published lock: `" & dropped & "`")
-  result.add("The usual case is a stale checkout: bring it forward as above, " &
-    "then " & action & " again.")
+  if anyCheckout:
+    result.add("The usual case is a stale checkout: bring it forward as " &
+      "above, then " & action & " again.")
+  else:
+    result.add("Check the sibling out in the workspace so the direction " &
+      "can be judged, then " & action & " again.")
   if isCommit or rerun.len == 0:
     result.add("If the downgrade is deliberate, re-run the same " & action &
       " with the sibling(s) named in " & PinRegressionAllowEnv &
@@ -98386,15 +98413,40 @@ proc fetchFlakeRevisionFields*(nixExe: string;
   result.ok = true
   result.fields = answer
 
+proc fetchableFromFlakeRoot(attrs: JsonNode; flakeRoot: string): JsonNode =
+  ## ``attrs`` (a lock node's source attributes) as nix must be given them to
+  ## fetch the source from anywhere: a relative local source — `git` with a
+  ## `file:../x` url, `path` with a relative path, which is how a
+  ## `git+file:../x` / `path:../x` input is locked — made absolute against
+  ## ``flakeRoot`` (``localFlakeRefDirectory``). nix resolves the relative
+  ## spelling against its own working directory, which is the flake's only
+  ## when the command happens to run there. The derived fields are properties
+  ## of the content, so the spelling of the url does not change them.
+  result = attrs.copy()
+  case result{"type"}.getStr()
+  of "git":
+    let url = result{"url"}.getStr()
+    if url.startsWith("file:"):
+      let dir = localFlakeRefDirectory("git+" & url, flakeRoot)
+      if dir.len > 0: result["url"] = %("file://" & dir)
+  of "path":
+    let dir = localFlakeRefDirectory("path:" & result{"path"}.getStr(),
+      flakeRoot)
+    if dir.len > 0: result["path"] = %dir
+  else:
+    discard
+
 proc fetchPendingDerivedFields(pending: openArray[FlakeLockRewrite];
-    lockText: string):
+    lockText, flakeRoot: string):
     tuple[derived: Table[string, JsonNode];
           failed: seq[tuple[rewrite: FlakeLockRewrite; error: string]]] =
   ## Ask nix for the derived fields of every pending move
   ## (``FlakeLockRefresh.pending``): the answers keyed by input, ready to hand
   ## back to ``refreshFlakeLockText``, and the moves nix could not answer for
   ## with its reason. Shared by the refresh and `repro lock update`, so the
-  ## two write the same node for the same revision. Never raises.
+  ## two write the same node for the same revision. A relative local source
+  ## is fetched from ``flakeRoot``, the directory of the flake whose lock it
+  ## is (``fetchableFromFlakeRoot``). Never raises.
   result.derived = initTable[string, JsonNode]()
   var nixExe = ""
   var nixMissing = ""
@@ -98408,9 +98460,10 @@ proc fetchPendingDerivedFields(pending: openArray[FlakeLockRewrite];
     let node = nodes[p.node]
     let isFlake = node{"flake"}.isNil or node["flake"].getBool()
     let subdir = node{"locked"}{"dir"}.getStr()
+    let attrs = fetchableFromFlakeRoot(p.fetchAttrs, flakeRoot)
     let fetched =
       if nixMissing.len > 0: FlakeRevisionFields(error: nixMissing)
-      else: fetchFlakeRevisionFields(nixExe, p.fetchAttrs, subdir, isFlake)
+      else: fetchFlakeRevisionFields(nixExe, attrs, subdir, isFlake)
     if not fetched.ok:
       result.failed.add((rewrite: p, error: fetched.error))
       continue
@@ -98418,7 +98471,7 @@ proc fetchPendingDerivedFields(pending: openArray[FlakeLockRewrite];
       # A metadata-only parent move must not retain a dependency graph from
       # another parent revision. Re-locking that graph is an explicit solver
       # operation; withholding keeps both halves intact until that happens.
-      var oldAttrs = p.fetchAttrs.copy()
+      var oldAttrs = attrs.copy()
       oldAttrs["rev"] = %p.oldRev
       let previous = fetchFlakeRevisionFields(nixExe, oldAttrs, subdir, true)
       if not previous.ok:
@@ -98972,7 +99025,8 @@ proc executeFlakeLockRefresh(flakeRoot, workspaceRoot, currentRepo: string;
     # rather than filed weaker: the same shape as every other skip (so the
     # commit hook holds the repository in both locks, §16.3 H3), and NF-3's
     # pre-push gate refuses the lagging lock, so nothing escapes.
-    let fetched = fetchPendingDerivedFields(refreshed.pending, lockText)
+    let fetched = fetchPendingDerivedFields(refreshed.pending, lockText,
+      flakeRoot)
     for f in fetched.failed:
       let notice = flakeUnfetchableNotice(f.rewrite,
         siblingOf.getOrDefault(f.rewrite.input, ""), f.error, flakeRoot,
@@ -99424,9 +99478,24 @@ proc executeLockUpdate*(req: LockUpdateRequest): LockUpdateOutcome =
         flakeNixPath).inputs:
       constraintOf[c.input] = c
     resolutions = flakeLockResolutions(inputs.flakeLock.text)
-  proc flakeIdentity(r: FlakeLockResolution): string =
+  proc writtenIdentity(r: FlakeLockResolution): string =
+    ## The repository the input names as `flake.nix` (else its lock node)
+    ## spells it, read as this flake reads it: a relative `git+file:`
+    ## reference is the checkout it names from ``root``
+    ## (``canonicalFlakeInputRepository``), never the relative text, which
+    ## names a different checkout from every other flake.
     let c = constraintOf.getOrDefault(r.input, FlakeInputConstraint())
-    if c.canonicalRepo.len > 0: c.canonicalRepo else: r.canonicalRepo
+    if c.canonicalRepo.len > 0: canonicalFlakeInputRepository(c.url, root)
+    elif r.url.len > 0: canonicalFlakeInputRepository(r.url, root)
+    else: r.canonicalRepo
+  proc readsATree(r: FlakeLockResolution): bool =
+    ## A `path:` (or bare-path) input: it reads a directory's files and its
+    ## lock node records no revision, so it is not a resolution of a
+    ## repository's revision this command could move, and it is never joined
+    ## with the repository whose checkout it happens to read.
+    let c = constraintOf.getOrDefault(r.input, FlakeInputConstraint())
+    if c.url.len > 0: c.kind == frkPath
+    else: r.url.startsWith("path:")
   var ld: LockedDependencies
   var haveReproLock = false
   if inputs.reproLock.present:
@@ -99454,6 +99523,48 @@ proc executeLockUpdate*(req: LockUpdateRequest): LockUpdateOutcome =
       if u.len == 0: continue
       let id = canonicalRepositoryUrl(u)
       if id.len > 0 and id notin result: result.add(id)
+  # One repository, several spellings (Nix-Flake-Coexistence.md §5b): a
+  # repository is named by its fetch URL and by its sibling checkout as a
+  # `file://` URL, so a `repro.lock` entry fetching it and a `git+file:`
+  # input reading its checkout are resolutions of ONE repository. The
+  # checkout is the workspace repo's, or the one a `repro.lock` entry of the
+  # repository is located at — the same two checkouts, in the same order,
+  # that judge the direction below. Each such pair is joined under the
+  # URL's identity before anything compares identities. A secondary remote
+  # is not joined: a fork's upstream remote does not make an input of the
+  # upstream a resolution of the fork.
+  var joinedIds: seq[seq[string]]
+  proc join(url, checkout: string) =
+    let a = canonicalRepositoryUrl(url)
+    let b =
+      if checkout.len > 0: canonicalRepositoryUrl("file://" & checkout)
+      else: ""
+    if a.len == 0 or b.len == 0 or a == b: return
+    for ids in joinedIds.mitems:
+      if a in ids or b in ids:
+        for id in [a, b]:
+          if id notin ids: ids.add(id)
+        return
+    joinedIds.add(@[a, b])
+  for r in membership.repos:
+    if r.name == membership.selfName: continue
+    join(r.fetchUrl, checkoutOfRepo(r))
+  if haveReproLock:
+    for d in ld.deps:
+      if isSelfLockedDep(d) or d.coordinates.kind != ckVcs or
+          d.path.len == 0: continue
+      let abs = os.normalizedPath(absolutePath(pathBase / d.path))
+      if abs != root and isGitCheckoutDir(abs):
+        join(d.coordinates.url, abs)
+  proc joined(id: string): string =
+    ## ``id``, or the identity of the repository it is a spelling of.
+    for ids in joinedIds:
+      if id in ids: return ids[0]
+    id
+  proc flakeIdentity(r: FlakeLockResolution): string =
+    if readsATree(r): writtenIdentity(r) else: joined(writtenIdentity(r))
+  proc depIdentity(d: LockedDep): string =
+    joined(canonicalRepositoryUrl(d.coordinates.url))
   var candidates: seq[DependencyCandidate]
   for r in resolutions:
     let c = constraintOf.getOrDefault(r.input, FlakeInputConstraint())
@@ -99465,13 +99576,12 @@ proc executeLockUpdate*(req: LockUpdateRequest): LockUpdateOutcome =
     for d in ld.deps:
       if isSelfLockedDep(d) or d.coordinates.kind != ckVcs: continue
       candidates.add(DependencyCandidate(kind: dckReproLockDep, name: d.name,
-        identity: canonicalRepositoryUrl(d.coordinates.url),
-        where: reproLockPath))
+        identity: depIdentity(d), where: reproLockPath))
   for r in membership.repos:
     if r.name == membership.selfName: continue
     let ids = identityOfRepo(r)
     candidates.add(DependencyCandidate(kind: dckWorkspaceRepo, name: r.name,
-      identity: (if ids.len > 0: ids[0] else: ""),
+      identity: (if ids.len > 0: joined(ids[0]) else: ""),
       where: "workspace repo at " & checkoutOfRepo(r)))
   let named = resolveDependencyName(req.dependency, candidates)
   if not named.ok:
@@ -99493,7 +99603,7 @@ proc executeLockUpdate*(req: LockUpdateRequest): LockUpdateOutcome =
   if haveReproLock:
     for i, d in ld.deps:
       if isSelfLockedDep(d) or d.coordinates.kind != ckVcs: continue
-      if canonicalRepositoryUrl(d.coordinates.url) == identity:
+      if depIdentity(d) == identity:
         reproOfRepo.add(i)
   if flakeOfRepo.len == 0 and reproOfRepo.len == 0:
     refuseNow(LockUpdateExitUsage, "repository " & identity & " ('" &
@@ -99927,7 +100037,8 @@ proc executeLockUpdate*(req: LockUpdateRequest): LockUpdateOutcome =
         # `narHash` / `lastModified` / `revCount` the commit-time refresh
         # writes (``fetchPendingDerivedFields``). A target nix cannot fetch
         # is not filed as a weaker node; the whole update is undone.
-        let fetched = fetchPendingDerivedFields(moved.pending, flakeLockText)
+        let fetched = fetchPendingDerivedFields(moved.pending, flakeLockText,
+          root)
         if fetched.failed.len > 0:
           var why: seq[string]
           for f in fetched.failed:
