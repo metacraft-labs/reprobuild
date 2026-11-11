@@ -1950,9 +1950,9 @@ proc emitM4ArtifactBuildLowering*(packageName: string;
 #     as the ident's text.
 #   * Body-setter ``args "a", "b", ...`` → records ``args`` as the
 #     literal string list (in declaration order).
-#   * Everything else inside the body is silently preserved into
-#     ``bodyRepr`` for diagnostic; M6+ may parse more setters (``on:``
-#     triggers, ``hotReload``, ``reloadOnChange``, ``runtimeFile``).
+#   * The full body's ``repr`` is kept in ``bodyRepr`` for diagnostics.
+#     Every statement in it is a setter or is refused by name (see
+#     ``m5RefuseServiceBodyStatement``).
 #
 # ─────────────────────────────────────────────────────────────────────
 # M4 reviewer risks addressed
@@ -2444,6 +2444,15 @@ proc m5ServiceShortFormEmission(stmt: NimNode): NimNode =
   ##   reloadOnChange cfg, "SIGHUP" = on change cfg: sendSignal "SIGHUP"
   ##
   ## ``nil`` when the statement is not one of them.
+  ##
+  ## ``hotReload()`` and ``restartOnCrash()`` are the same atoms in Nim's
+  ## call spelling: they parse as a one-child ``nnkCall`` and are read as
+  ## the bare ident, so the trigger is recorded whichever spelling the
+  ## author chose.
+  if stmt.kind == nnkCall and stmt.len == 1 and
+      stmt[0].kind in {nnkIdent, nnkSym, nnkAccQuoted} and
+      identText(stmt[0]).normalize in ["hotreload", "restartoncrash"]:
+    return m5ServiceShortFormEmission(stmt[0])
   if stmt.kind in {nnkIdent, nnkSym, nnkAccQuoted}:
     case identText(stmt).normalize
     of "hotreload":
@@ -2545,8 +2554,9 @@ const
     "interfacemajor", "majorcompatibility", "compat", "compatmajor"]
     ## Spellings an author plausibly reaches for that `normalize` does
     ## NOT fold onto `compatibility`, so the head matcher would miss them
-    ## and `m5ParseServiceBody`'s closing `else: discard` would drop them
-    ## in silence. Every entry is already in normal form (lowercase, no
+    ## and `m5RefuseServiceBodyStatement` could only call them
+    ## unrecognised; listed here, each is asked whether it meant
+    ## `compatibility`. Every entry is already in normal form (lowercase, no
     ## underscores), which is what the matcher compares against -- the
     ## asymmetry L5's blocking defect was.
   l4IdentityDropRule = "A spelling this setter does not recognise is " &
@@ -2689,12 +2699,10 @@ proc l6CompatibilityNearMiss(stmt: NimNode): string =
   ## `compatibility`, else `""`.
   ##
   ## `compatibilityMajor` normalizes to `compatibilitymajor`, which the
-  ## head matcher does not recognise, so the setter walk's closing
-  ## `else: discard` would drop it with no diagnostic and the service
-  ## would carry major 0 — the undeclared value — while its author
-  ## believed otherwise. That is the silently-dropped family on a surface
-  ## this milestone adds, which the campaign's standing hunt requires be
-  ## probed rather than hoped about.
+  ## head matcher does not recognise. Accepted, the service would carry
+  ## major 0 — the undeclared value — while its author believed
+  ## otherwise; refused generically, the author would be told it is not
+  ## a setter without being pointed at the one they meant.
   var head: NimNode = nil
   if stmt.kind in {nnkIdent, nnkSym, nnkAccQuoted, nnkDotExpr}:
     head = stmt
@@ -2942,8 +2950,8 @@ proc l4ServiceIdentityScope(body: NimNode): L4ServiceIdentityScope =
         "`; did you mean `compatibility`? " & l6RecognisedCompatibility &
         " is the spelling Shared-Development-Services.md §4.3's major " &
         "compatibility field is declared with. This is refused rather " &
-        "than skipped because the setter walk's closing `else: discard` " &
-        "would drop it in silence and leave the service on the " &
+        "than accepted because a service whose `compatibility` is lost " &
+        "is left on the " &
         "UNDECLARED major 0 -- so a service the author believed was " &
         "generation 2 would compare equal to every service that " &
         "declared nothing.", m5ServiceStmtAnchor(stmt))
@@ -2999,13 +3007,12 @@ proc l4ServiceIdentityScope(body: NimNode): L4ServiceIdentityScope =
 # `infra/repro.nim` is the production instance of exactly that shape, and
 # it is what L9's first gate clause ("declared ONCE") is measured on.
 #
-# EVERY NEAR MISS IS REFUSED BY NAME. The setter walk below ends in
-# `else: discard`, so an unrecognised head is dropped in silence: a
-# recipe would compile, the service would carry no readiness, and a
-# consumer that `dependsOn` it would start against an instance that is
-# listening but not seeded. That is the campaign's dominant finding in
-# its worst form -- not a missing value but a race -- so the walker
-# refuses:
+# EVERY NEAR MISS IS REFUSED BY NAME, ahead of the setter walk's generic
+# refusal (`m5RefuseServiceBodyStatement`), because a lost supervision
+# setter costs more than a missing value: the service would carry no
+# readiness, and a consumer that `dependsOn` it would start against an
+# instance that is listening but not seeded -- a race. So the walker
+# refuses, each with the supervision setters' own remedy:
 #
 #   * a bare `readiness` / `instance` / `workingDirectory` /
 #     `stateDirectory` ident, which the Call/Command filter drops;
@@ -3031,8 +3038,8 @@ const
   l9SupervisionSurface = "`readiness <probe>`, " &
     "`workingDirectory \"<dir>\"`, `stateDirectory \"<dir>\"` and " &
     "`instance:`"
-  l9NoSilentDropRule = "Refused rather than dropped: this walker's " &
-    "closing `else: discard` would leave the service with no readiness " &
+  l9NoSilentDropRule = "Refused rather than dropped: a service whose " &
+    "readiness setter is lost has no readiness " &
     "probe at all, and a service with no probe is reported READY as " &
     "soon as it is spawned -- so a consumer that `dependsOn` it would " &
     "start against an instance that is listening and not yet seeded. " &
@@ -3487,6 +3494,193 @@ proc l9ParseStateDirectory(stmt: NimNode;
   for i in 1 ..< stmt.len:
     result.stateDirectoryExprs.add(stmt[i].copyNimTree())
 
+# ---------------------------------------------------------------------------
+# The closing arm of the `service` setter walk: every statement that is not
+# a setter is REFUSED, naming its spelling.
+#
+# `Package-Model.md` §Collections lists what a `service` body holds --
+# "small declarative setters" -- and §"Service Lifecycle And Reactive
+# Triggers" closes with the rule this arm applies to the whole body:
+# "fail ... with a clear error rather than silently dropping it". A
+# service body is declarative, so each of its statements is either a
+# setter or a mistake; a doc comment and a `discard` are the only
+# statements that declare nothing and are not one.
+#
+# "Unrecognised" alone would be the least useful thing to say about the
+# commonest mistake, which is a RECOGNISED spelling in the wrong place:
+# `sendSignal "SIGHUP"` one indent level out of its `on change cfg:`
+# block. So the refusal classifies before it speaks:
+#
+#   * a trigger ACTION is told it belongs inside an `on <trigger>:` block;
+#   * a trigger HEAD written without its `on` is told to add it;
+#   * a trigger MODIFIER gets the specified-but-unimplemented refusal the
+#     trigger surface already gives it;
+#   * a SETTER written in a shape the walk cannot read -- bare, assigned,
+#     dotted, called with no argument or with the wrong arity -- is told
+#     the shape it is written in;
+#   * anything else is told what a `service` body does hold.
+# ---------------------------------------------------------------------------
+
+const
+  # Every head the setter walk in `m5ParseServiceBody` (and the short-form
+  # reader before it) accepts, keyed by its `normalize`d spelling, with the
+  # shape it is written in. It is the walk's case arms written down once,
+  # for the refusal to quote: a head added to the walk without a row here
+  # is still accepted, and only the diagnostic for a malformed spelling of
+  # it is the generic one.
+  m5ServiceSetterShapes = [
+    (name: "executable", shape: "`executable <ident-or-expression>`"),
+    (name: "args", shape: "`args \"...\", ...`"),
+    (name: "runtimefile", shape: "`runtimeFile <buildOutput>`"),
+    (name: "on", shape: "`on <trigger>:` followed by an indented block " &
+      "of actions"),
+    (name: "identity", shape: "`identity derived` or " &
+      "`identity stable \"<id>\"`"),
+    (name: "scope", shape: "`scope project`, `scope workspace`, " &
+      "`scope user` or `scope system`"),
+    (name: "compatibility", shape: "`compatibility <n>`"),
+    (name: "readiness", shape: "`readiness <probe>`"),
+    (name: "workingdirectory", shape: "`workingDirectory \"<dir>\"`"),
+    (name: "statedirectory", shape: "`stateDirectory \"<dir>\"`"),
+    (name: "instance", shape: "`instance:` followed by an indented block"),
+    (name: "converge", shape: "`converge <point>, ...`"),
+    (name: "description", shape: "`description \"<text>\"`"),
+    (name: "type", shape: "`` `type` \"<unit type>\" ``"),
+    (name: "execstart", shape: "`execStart \"<command>\"`"),
+    (name: "wantedby", shape: "`wantedBy \"<unit>\"`"),
+    (name: "wants", shape: "`wants \"<unit>\"`"),
+    (name: "requires", shape: "`requires \"<unit>\"`"),
+    (name: "before", shape: "`before \"<unit>\"`"),
+    (name: "after", shape: "`after \"<unit>\"`"),
+    (name: "env", shape: "`env(\"<KEY>\", \"<VALUE>\")`, two string " &
+      "literals in the call form"),
+    (name: "restart", shape: "`restart \"<policy>\"` -- the systemd " &
+      "restart policy; the supervisor options `backoff = ...`, " &
+      "`maxRetries = ...` and `delay = ...` belong to the `restart` " &
+      "trigger ACTION inside `on crash:`, or to `restartOnCrash`"),
+    (name: "user", shape: "`user \"<name>\"`"),
+    (name: "group", shape: "`group \"<name>\"`"),
+    (name: "hotreload", shape: "`hotReload` on its own -- the " &
+      "`hotReload otherwise <action>` form is a trigger ACTION and " &
+      "belongs inside an `on <trigger>:` block"),
+    (name: "restartoncrash", shape: "`restartOnCrash`, optionally with " &
+      "the supervisor options `backoff = ...`, `maxRetries = ...` and " &
+      "`delay = ...`"),
+    (name: "reloadonchange", shape: "`reloadOnChange <buildOutput>, " &
+      "\"<SIG...>\"`")]
+  m5ServiceTriggerActionHeads = ["sendsignal", "exec", "notify"]
+    ## The trigger actions that are NOT also a service-level spelling.
+    ## `restart` and `hotReload` are both, so they are answered by their
+    ## setter row above, which says where the action form goes.
+  m5ServiceTriggerHeadWords = ["rebuild", "change", "start", "stop",
+    "crash"]
+  m5ServiceBodyNoSilentDropRule = "A statement in a `service` body " &
+    "that is not one of its setters is REFUSED rather than dropped: a " &
+    "recipe that compiles while discarding a line is indistinguishable " &
+    "from one that honours it, and the line it discards may be a " &
+    "signal handler, a restart policy or a data-durability decision."
+
+proc m5ServiceSetterShape(name: string): string =
+  ## The shape of the setter `name` (already `normalize`d) is written in,
+  ## or `""` when `name` is not a setter of the `service` body.
+  for candidate in m5ServiceSetterShapes:
+    if candidate.name == name:
+      return candidate.shape
+  ""
+
+proc m5ServiceBodySurface(): string =
+  ## Every setter shape, for the refusal of a statement that is none.
+  var parts: seq[string] = @[]
+  for candidate in m5ServiceSetterShapes:
+    parts.add(candidate.shape)
+  parts.join("; ")
+
+proc m5ServiceStatementHead(stmt: NimNode): NimNode =
+  ## The node a statement's NAME is read from, or `nil` when it has none:
+  ## the statement itself for a bare ident or a dotted path, its first
+  ## child for a call, a command or an assignment.
+  case stmt.kind
+  of nnkIdent, nnkSym, nnkAccQuoted, nnkDotExpr:
+    stmt
+  of nnkCall, nnkCommand, nnkAsgn, nnkExprEqExpr:
+    if stmt.len > 0: stmt[0] else: nil
+  else:
+    nil
+
+proc m5ServiceDottedSetter(head: NimNode): string =
+  ## The setter a DOTTED head spells, in the author's own spelling, or
+  ## `""`: `description.x` spells `description` (first segment) and
+  ## `cfg.description` spells it too (last segment). Both are a spelling
+  ## of a setter rather than a statement at the wrong level, and both are
+  ## told to write the setter name bare.
+  if head.kind != nnkDotExpr:
+    return ""
+  let first = l4HeadWordOf(head)
+  if first.len > 0 and m5ServiceSetterShape(first.normalize).len > 0:
+    return first
+  var last = head
+  while last.kind == nnkDotExpr and last.len == 2:
+    last = last[1]
+  if last.kind in {nnkIdent, nnkSym, nnkAccQuoted}:
+    let word = identText(last)
+    if m5ServiceSetterShape(word.normalize).len > 0:
+      return word
+  ""
+
+proc m5RefuseServiceBodyStatement(stmt: NimNode) =
+  ## Refuse `stmt`, which the setter walk could not read as a setter.
+  ## Returns only for a statement that declares nothing (a doc comment,
+  ## an empty node, a `discard`); every other statement is a macro
+  ## `error` naming its spelling and, where it is recognised elsewhere,
+  ## where it belongs.
+  if stmt.kind in {nnkCommentStmt, nnkEmpty, nnkDiscardStmt}:
+    return
+  let spelling = stmt.repr.strip()
+  let anchor = m5ServiceStmtAnchor(stmt)
+  let modifier = m5ServiceModifierName(stmt)
+  if modifier.len > 0:
+    m5ServiceUnimplementedModifier(stmt, modifier,
+      "at the top level of a `service` body")
+  let head = m5ServiceStatementHead(stmt)
+  let dotted = if head == nil: "" else: m5ServiceDottedSetter(head)
+  if dotted.len > 0:
+    error("`" & spelling & "` writes the `service` setter `" & dotted &
+      "` behind a dotted head, and a setter is written with its bare " &
+      "name: " & m5ServiceSetterShape(dotted.normalize) & ". " &
+      m5ServiceBodyNoSilentDropRule, anchor)
+  let word =
+    if head != nil and head.kind in {nnkIdent, nnkSym, nnkAccQuoted}:
+      identText(head)
+    else: ""
+  let name = word.normalize
+  if name in m5ServiceTriggerActionHeads:
+    error("`" & spelling & "` is a trigger ACTION, and actions are not " &
+      "written at the top level of a `service` body. Package-Model.md " &
+      "§\"Service Lifecycle And Reactive Triggers\" puts `" & word &
+      "` inside an `on <trigger>:` block, which says WHEN it runs -- " &
+      "for example `on change <buildOutput>:` with `" & spelling &
+      "` indented beneath it. (Reloading on a changed build output has " &
+      "a one-line short form, `reloadOnChange <buildOutput>, " &
+      "\"<SIG...>\"`.) Recognised triggers: " &
+      m5ServiceRecognisedTriggers & "; actions: " &
+      m5ServiceRecognisedActions & ". " & m5ServiceBodyNoSilentDropRule,
+      anchor)
+  if name in m5ServiceTriggerHeadWords:
+    error("`" & spelling & "` reads as a trigger written without its " &
+      "`on`: a reactive block is spelled `on " & word & " ...:`. " &
+      "Recognised triggers: " & m5ServiceRecognisedTriggers & ". " &
+      m5ServiceBodyNoSilentDropRule, anchor)
+  let shape = m5ServiceSetterShape(name)
+  if shape.len > 0:
+    error("`" & spelling & "` is not a shape the `service` setter `" &
+      word & "` is written in, so the setter walk cannot read it. It " &
+      "is written " & shape & ". " & m5ServiceBodyNoSilentDropRule,
+      anchor)
+  error("`service` does not recognise `" & spelling & "`. A `service` " &
+    "body holds its setters (Package-Model.md §Collections, " &
+    "Shared-Development-Services.md §4, §7 and §9) and nothing else: " &
+    m5ServiceBodySurface() & ". " & m5ServiceBodyNoSilentDropRule, anchor)
+
 proc m5ParseServiceBody(body: NimNode): tuple[
     executableRef: string; executableExpr: NimNode;
     argExprs: seq[NimNode]; runtimeFileExprs: seq[NimNode];
@@ -3545,9 +3739,11 @@ proc m5ParseServiceBody(body: NimNode): tuple[
   ## ``wants`` / ``requires`` / ``before`` / ``after`` /
   ## ``env("KEY", "VALUE")`` / ``restart`` / ``user`` / ``group``.
   ##
-  ## Any other statement is still silently preserved as raw body shape;
-  ## the emitter captures the full body's ``repr`` into
-  ## ``DslServiceDef.bodyRepr``.
+  ## Any other statement is refused by ``m5RefuseServiceBodyStatement``,
+  ## which names its spelling and, for a spelling recognised elsewhere (a
+  ## trigger action, a trigger head without its ``on``, a malformed
+  ## setter), says where it belongs. A doc comment and a ``discard`` are
+  ## the only statements that declare nothing and are accepted.
   result.argExprs = @[]
   result.runtimeFileExprs = @[]
   result.reactiveEmissions = @[]
@@ -3580,9 +3776,12 @@ proc m5ParseServiceBody(body: NimNode): tuple[
     # dotted head. Refused HERE, before any filter, because each filter
     # is a `continue` with no diagnostic.
     l9RefuseSupervisionNearMisses(stmt)
-    if stmt.kind notin {nnkCall, nnkCommand}:
-      continue
-    if stmt.len < 2:
+    # Every setter is a call or a command with at least one argument and
+    # a bare name at its head. A statement of any other shape is not
+    # skipped: `m5RefuseServiceBodyStatement` returns for the statements
+    # that declare nothing and refuses the rest by name.
+    if stmt.kind notin {nnkCall, nnkCommand} or stmt.len < 2:
+      m5RefuseServiceBodyStatement(stmt)
       continue
     let head = stmt[0]
     # We accept ``nnkAccQuoted`` for the head because some M9.C setter
@@ -3590,6 +3789,7 @@ proc m5ParseServiceBody(body: NimNode): tuple[
     # write them as ``\`type\` "simple"``. ``identText`` already
     # collapses ``nnkAccQuoted`` to the bare ident string.
     if head.kind notin {nnkIdent, nnkSym, nnkAccQuoted}:
+      m5RefuseServiceBodyStatement(stmt)
       continue
     let headName = identText(head).normalize
     case headName
@@ -3686,36 +3886,44 @@ proc m5ParseServiceBody(body: NimNode): tuple[
         result.convergeAnchor = stmt
     of "description":
       let lit = m5ServiceStringLitArg(stmt)
-      if lit != nil:
-        result.descriptionLit = lit
+      if lit == nil:
+        m5RefuseServiceBodyStatement(stmt)
+      result.descriptionLit = lit
     of "type":
       let lit = m5ServiceStringLitArg(stmt)
-      if lit != nil:
-        result.typeLit = lit
+      if lit == nil:
+        m5RefuseServiceBodyStatement(stmt)
+      result.typeLit = lit
     of "execstart":
       let lit = m5ServiceStringLitArg(stmt)
-      if lit != nil:
-        result.execStartLit = lit
+      if lit == nil:
+        m5RefuseServiceBodyStatement(stmt)
+      result.execStartLit = lit
     of "wantedby":
       let lit = m5ServiceStringLitArg(stmt)
-      if lit != nil:
-        result.wantedByLits.add(lit)
+      if lit == nil:
+        m5RefuseServiceBodyStatement(stmt)
+      result.wantedByLits.add(lit)
     of "wants":
       let lit = m5ServiceStringLitArg(stmt)
-      if lit != nil:
-        result.wantsLits.add(lit)
+      if lit == nil:
+        m5RefuseServiceBodyStatement(stmt)
+      result.wantsLits.add(lit)
     of "requires":
       let lit = m5ServiceStringLitArg(stmt)
-      if lit != nil:
-        result.requiresLits.add(lit)
+      if lit == nil:
+        m5RefuseServiceBodyStatement(stmt)
+      result.requiresLits.add(lit)
     of "before":
       let lit = m5ServiceStringLitArg(stmt)
-      if lit != nil:
-        result.beforeLits.add(lit)
+      if lit == nil:
+        m5RefuseServiceBodyStatement(stmt)
+      result.beforeLits.add(lit)
     of "after":
       let lit = m5ServiceStringLitArg(stmt)
-      if lit != nil:
-        result.afterLits.add(lit)
+      if lit == nil:
+        m5RefuseServiceBodyStatement(stmt)
+      result.afterLits.add(lit)
     of "env":
       # ``env("KEY", "VALUE")`` — call form. Two string-literal args.
       # The alternative ``env "KEY"="VALUE"`` form parses as
@@ -3727,18 +3935,28 @@ proc m5ParseServiceBody(body: NimNode): tuple[
           stmt[2].kind in {nnkStrLit, nnkRStrLit, nnkTripleStrLit}:
         result.envPairs.add((keyLit: stmt[1].copyNimTree(),
                              valueLit: stmt[2].copyNimTree()))
+      else:
+        m5RefuseServiceBodyStatement(stmt)
     of "restart":
+      # `restart backoff = exponential` is the trigger ACTION's supervisor
+      # option, not a systemd restart policy: refused with the setter's
+      # shape, which says where the option belongs, rather than spliced
+      # into `setActiveServiceRestart` as a named argument it does not
+      # have.
       let lit = m5ServiceStringLitArg(stmt)
-      if lit != nil:
-        result.restartLit = lit
+      if lit == nil or lit.kind == nnkExprEqExpr:
+        m5RefuseServiceBodyStatement(stmt)
+      result.restartLit = lit
     of "user":
       let lit = m5ServiceStringLitArg(stmt)
-      if lit != nil:
-        result.userLit = lit
+      if lit == nil:
+        m5RefuseServiceBodyStatement(stmt)
+      result.userLit = lit
     of "group":
       let lit = m5ServiceStringLitArg(stmt)
-      if lit != nil:
-        result.groupLit = lit
+      if lit == nil:
+        m5RefuseServiceBodyStatement(stmt)
+      result.groupLit = lit
     of "identity", "scope", "compatibility":
       # L4 / L6: already read (and validated) by `l4ServiceIdentityScope`
       # above. Named here rather than left to the `else` so the three are
@@ -3755,7 +3973,7 @@ proc m5ParseServiceBody(body: NimNode): tuple[
       # fire for a recipe whether or not it is being lifted.
       discard
     else:
-      discard
+      m5RefuseServiceBodyStatement(stmt)
 
 # ---------------------------------------------------------------------------
 # Shared-Development-Services D-SS10 (spec §7.1) — THE EXPANSION-TIME

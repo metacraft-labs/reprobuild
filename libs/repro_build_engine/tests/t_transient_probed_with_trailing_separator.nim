@@ -9,6 +9,10 @@
 ## entered the determinism-probe key, every run recorded a new candidate,
 ## and the probe never decided.
 ##
+## The other direction matters as much: a name the action wrote and removed
+## must never take a REAL input out of the key. On POSIX a backslash is an
+## ordinary filename character, so a removed `main.c\` is not `main.c`.
+##
 ## Mocks: none. The capture is the record shapes io-mon emits, read by the
 ## engine's own fold; the action runs through `runBuild`, and the
 ## temporary is absent from disk, as it is once the linker has renamed it.
@@ -19,6 +23,7 @@ from repro_test_support import testCaseScratchSlug
 
 import repro_build_engine
 import repro_core
+import repro_local_store
 import io_mon/[capabilities, types, writer]
 
 let TmpDir = absolutePath(
@@ -40,18 +45,24 @@ proc writeCapture(path: string; records: seq[MonitorRecord]) =
     copyMem(addr text[0], unsafeAddr raw[0], raw.len)
   writeFile(path, text)
 
-proc linkGraph(root, project, tempSuffix: string): BuildGraph =
+proc linkGraph(root, project, tempSuffix: string;
+               removedWrite = ""): BuildGraph =
   ## One link edge that read entropy (so only the determinism probe can
-  ## admit it) and went through a temporary named `tempSuffix`.
+  ## admit it) and went through a temporary named `tempSuffix`, probed with
+  ## the host's trailing separator as the linker probes it. `removedWrite`
+  ## is one more path the action wrote and that is gone at the end.
   let capture = root / "link.rdep"
   let temporary = project / "build" / ("out.dll.tmp" & tempSuffix)
-  writeCapture(capture, @[
+  var records = @[
     observed(mrFileRead, moFileRead, project / "src" / "main.c"),
     observed(mrFileWrite, moFileWrite, temporary),
-    observed(mrPathProbe, moPathProbe, temporary & "/"),
+    observed(mrPathProbe, moPathProbe, temporary & DirSep),
     observed(mrFileRead, moFileRead, temporary),
     observed(mrNonDeterministic, moNonDeterministic,
-      "BCryptGenRandom", "entropy source=BCryptGenRandom caller=program")])
+      "BCryptGenRandom", "entropy source=BCryptGenRandom caller=program")]
+  if removedWrite.len > 0:
+    records.add(observed(mrFileWrite, moFileWrite, removedWrite))
+  writeCapture(capture, records)
   var link = builtinAction(bakWriteText, LinkId, cwd = project,
     inputs = [project / "src" / "main.c"],
     outputs = [project / "build" / "out.dll"],
@@ -67,6 +78,18 @@ proc freshRoot(name: string): string =
   result = TmpDir / name
   removeDir(result)
   createDir(result)
+
+proc configFor(root: string): BuildEngineConfig =
+  result = defaultBuildEngineConfig(root / "cache")
+  result.maxParallelism = 1
+  result.actionCacheRoot = root / "shared"
+
+proc accessSidecars(root: string): seq[string] =
+  ## The input accesses stored beside each published record: what the
+  ## portable record of that action is derived from.
+  for path in walkDirRec(root):
+    if path.endsWith(InputAccessFileExt):
+      result.add(readFile(path))
 
 proc probeEvents(run: BuildRunResult): seq[string] =
   for r in run.results:
@@ -90,8 +113,12 @@ suite "a temporary probed with a trailing separator":
     check transientWriteKey(temporary) in transient
     check transientWriteKey(temporary & "/") in transient
     check transientWriteKey(temporary & "//") in transient
-    check transientWriteKey(temporary.replace('/', '\\') & "\\") in
-      transient
+    when defined(windows):
+      check transientWriteKey(temporary.replace('/', '\\') & "\\") in
+        transient
+    else:
+      # A different file on POSIX, so not this temporary.
+      check transientWriteKey(temporary & "\\") notin transient
     check transientWriteKey("/") == "/"
 
   test "does not move the determinism-probe key between runs":
@@ -99,9 +126,7 @@ suite "a temporary probed with a trailing separator":
     let project = root / "proj"
     createDir(project / "src")
     writeFile(project / "src" / "main.c", "int main;\n")
-    var config = defaultBuildEngineConfig(root / "cache")
-    config.maxParallelism = 1
-    config.actionCacheRoot = root / "shared"
+    let config = configFor(root)
     let first = runBuild(linkGraph(root, project, "a6d2958"), config)
     check first.probeEvents() == @["determinism-probe-candidate"]
     # Same inputs, same output bytes; only the temporary's random name
@@ -109,3 +134,30 @@ suite "a temporary probed with a trailing separator":
     removeFile(project / "build" / "out.dll")
     let second = runBuild(linkGraph(root, project, "76f9569"), config)
     check second.probeEvents() == @["determinism-probe-verified"]
+    # The admitted record's input accesses keep the source and drop the
+    # temporary, under either spelling.
+    let sidecars = accessSidecars(root)
+    check sidecars.len == 1
+    for sidecar in sidecars:
+      check "main.c" in sidecar
+      check "out.dll.tmp" notin sidecar
+
+  test "a removed name ending in a backslash does not hide a real input":
+    ## On POSIX `main.c\` is its own file. Folding it into `main.c` took
+    ## the real input out of the probe key, so a changed source was
+    ## admitted as a verified rerun. On Windows the two spellings are one
+    ## file, which exists, so it is no temporary there either.
+    let root = freshRoot("backslash")
+    let project = root / "proj"
+    createDir(project / "src")
+    let source = project / "src" / "main.c"
+    writeFile(source, "int main;\n")
+    let config = configFor(root)
+    let first = runBuild(linkGraph(root, project, "a6d2958",
+      removedWrite = source & "\\"), config)
+    check first.probeEvents() == @["determinism-probe-candidate"]
+    removeFile(project / "build" / "out.dll")
+    writeFile(source, "int main(void) { return 1; }\n")
+    let second = runBuild(linkGraph(root, project, "a6d2958",
+      removedWrite = source & "\\"), config)
+    check second.probeEvents() == @["determinism-probe-candidate"]

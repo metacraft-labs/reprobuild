@@ -164,6 +164,18 @@ package triggerFallbackPkg:
     on rebuild fallbackBin:
       hotReload otherwise sendSignal "SIGHUP"
 
+# The short-form atoms in Nim's CALL spelling. `restartOnCrash()` and
+# `hotReload()` parse as a one-child call, which the setter walk once
+# skipped on its arity filter: they compiled and recorded no trigger.
+package callSpellingPkg:
+  executable callBin:
+    build:
+      discard
+  service call:
+    executable callBin
+    restartOnCrash()
+    hotReload()
+
 proc serviceNamed(packageName, serviceName: string): DslServiceDef =
   for svc in registeredServices(packageName):
     if svc.serviceName == serviceName:
@@ -288,6 +300,16 @@ suite "L1 — runtimeFile and the reactive surface":
     check svc.triggers[3].kind == stkCrash
     check svc.triggers[3].actions.len == 1
     check svc.triggers[3].actions[0].kind == stakRestart
+
+  test "`restartOnCrash()` and `hotReload()` record what the bare atoms do":
+    let svc = serviceNamed("callSpellingPkg", "call")
+    check svc.triggers.len == 2
+    check svc.triggers[0].kind == stkCrash
+    check svc.triggers[0].actions.len == 1
+    check svc.triggers[0].actions[0].kind == stakRestart
+    check svc.triggers[1].kind == stkRebuild
+    check svc.triggers[1].actions.len == 1
+    check svc.triggers[1].actions[0].kind == stakHotReload
 
 suite "L1 — the service's producer edge set":
 

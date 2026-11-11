@@ -1140,27 +1140,21 @@ proc publishPrefix(tmp, final: string) =
 
 proc ensureIndexed(st: var Store; final: string;
                    prefixId: PrefixIdBytes): bool =
-  ## Make sure the index has a row for the prefix at ``final``. A prefix the
-  ## store renamed into place carries a sealed receipt; when its row is
-  ## missing (the realiser died between the rename and the insert) the row
-  ## is rebuilt from that receipt, exactly as the store's recovery does.
-  ## ``false`` when ``final`` is not a prefix the store published for
-  ## ``prefixId`` (no receipt, or one for another hash): the caller then
-  ## realises it again.
-  if st.lookupPrefix(prefixId).found: return true
-  let receiptPath = final / ReceiptFileName
-  if not fileExists(receiptPath): return false
-  var rec: RealizationReceipt
-  try:
-    rec = readReceiptFile(receiptPath)
-  except CatchableError:
-    return false
-  if rec.realizationHash != prefixId: return false
-  discard st.insertPrefixOrIgnore(PrefixRow(prefixId: prefixId,
-    packageName: rec.packageName, version: rec.version,
-    realizedPath: rec.realizedPath, adapter: rec.adapter,
-    receiptDigest: receiptDigest(rec), createdAtUnix: rec.createdAtUnix))
-  true
+  ## Whether the prefix at ``final`` is one the store published for
+  ## ``prefixId`` and may be used as it is: the index has a row for it AND
+  ## the directory verifies against the row's record of its tree
+  ## (``verifyRealizedPrefix``; the first use in a process re-hashes it).
+  ## ``false`` otherwise, and the caller realises it again.
+  ##
+  ## A directory the index has NO row for is never adopted from its
+  ## ``.repro-receipt``, even one naming ``prefixId``: the receipt is
+  ## unsigned, and a prefix id is a hash of inputs anyone can compute, so
+  ## whoever can write ``prefixes/`` could plant one (SEC-1 G7). That
+  ## includes the honest case this used to cover -- a realiser that died
+  ## between the rename and the insert -- which now costs one
+  ## re-realisation instead of an unverified adoption.
+  let check = st.verifyRealizedPrefix(prefixId, final)
+  check.outcome in {pvVerified, pvCached, pvRecordedFirst, pvUnrecorded}
 
 const ReusedLegacyProvenance* = "reused-from-realiser-2:"
   ## The ``provenanceUrl`` scheme of a member published from an older
@@ -1188,9 +1182,9 @@ proc publishThroughStore(st: var Store; tmp, final: string;
     publishPrefix(tmp, final)
     return
   # A directory at ``final`` that the store did not publish for this hash
-  # (no receipt) cannot be trusted or indexed; it is replaced.
-  if dirExists(final) and not ensureIndexed(st, final, prefixId):
-    removeDir(final)
+  # (no index row, or one whose tree does not verify) cannot be trusted;
+  # ``realizePrefix`` moves it to ``gc/pending-deletion/`` and publishes
+  # this one in its place.
   let res = st.realizePrefix(prefixId, hint,
     proc (stage: string; mech: var string) =
       removeDir(stage)
@@ -1202,7 +1196,8 @@ proc publishThroughStore(st: var Store; tmp, final: string;
       res.absolutePath & ", not the planned " & final)
   if not ensureIndexed(st, final, prefixId):
     raise newException(IOError, "apt closure: " & final &
-      " was published without a receipt for its realization hash")
+      " is not a prefix the store index records and verifies for its " &
+      "realization hash")
   if log != nil:
     log.published.add((final, stagedDigest))
 

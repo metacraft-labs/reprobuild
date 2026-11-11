@@ -22029,9 +22029,11 @@ proc vcsManagedHookBody(hookName, hookContract: string;
   # branches on the probe's exit status rather than guessing:
   #
   #   status 3 — the binary understands the handshake and simply generates a
-  #     different hook (a NEWER build meeting an older installed body is the
-  #     common case). Re-anchoring the repository's hooks to it is exactly
-  #     right, so the message hands over that command, ready to run.
+  #     different hook. That says the builds differ, not which is newer: a
+  #     newer build meeting an older body wants re-anchoring, and an older
+  #     build served by a stale dev-shell cache wants refreshing. The message
+  #     leads with the refresh, which is harmless when the shell is current,
+  #     and then hands over the re-anchoring command, ready to run.
   #
   #   anything else — the binary PREDATES the handshake: it rejected a flag it
   #     has never heard of. Here ``hooks ensure`` is the one thing the operator
@@ -22076,10 +22078,29 @@ proc vcsManagedHookBody(hookName, hookContract: string;
   result.add("    printf '%s\\n' \"$REPRO_PROBE_DIAGNOSTIC\" | " &
     "sed -e 's/^/repro hooks:     | /' >&2\n")
   result.add("  fi\n")
+  # Status 3 says the two builds DIFFER, not which is newer. A cached direnv
+  # dev shell that was never rebuilt serves an OLDER build than the one that
+  # wrote these hooks, even while the workspace's lock already names a
+  # servicing build, and re-anchoring to it would rewrite current bodies with
+  # older ones. So refreshing the supplier comes first in this branch too --
+  # it is harmless when the shell is current -- and re-anchoring is offered
+  # only once that survives.
   result.add("  if [ \"${REPRO_PROBE_STATUS:-1}\" = \"3\" ]; then\n")
   result.add("    echo \"repro hooks: That build speaks this handshake and " &
     "simply builds a different\" >&2\n")
-  result.add("    echo \"repro hooks: hook. Re-anchor this repository to it " &
+  result.add("    echo \"repro hooks: hook. Different is not newer: the " &
+    "likelier cause on a long-lived\" >&2\n")
+  result.add("    echo \"repro hooks: checkout is a cached dev shell still " &
+    "serving an OLDER repro than\" >&2\n")
+  result.add("    echo \"repro hooks: the workspace pins. Rule that out " &
+    "before moving any pin:\" >&2\n")
+  result.add("    echo \"repro hooks:   1. Refresh whatever supplies repro " &
+    "here, then retry:\" >&2\n")
+  result.add("    echo \"repro hooks:        direnv reload    " &
+    "(or just open a new shell)\" >&2\n")
+  result.add("    echo \"repro hooks:   2. If it survives that, this is the " &
+    "build this workspace runs:\" >&2\n")
+  result.add("    echo \"repro hooks:      re-anchor this repository to it " &
     "and retry:\" >&2\n")
   result.add("    echo \"repro hooks:      $REPRO_CMD hooks ensure --vcs " &
     "$REPO_ROOT\" >&2\n")
@@ -44930,9 +44951,19 @@ proc samePathIdentity(a, b: string): bool =
   ## different directory. ``sameFile`` is not used because it raises when
   ## either side does not exist, and callers ask this question about paths Git
   ## merely *reported*.
+  ##
+  ## On Windows the comparison ignores case: NTFS names are case-insensitive,
+  ## and the real-path call there unifies separators but keeps each side's
+  ## letter case, so `m:/x` and `M:\x` would otherwise read as different
+  ## directories.
   if a.len == 0 or b.len == 0:
     return false
-  canonicalDiscoveredGitPath(a, a) == canonicalDiscoveredGitPath(b, b)
+  let left = canonicalDiscoveredGitPath(a, a)
+  let right = canonicalDiscoveredGitPath(b, b)
+  when defined(windows):
+    cmpIgnoreCase(left, right) == 0
+  else:
+    left == right
 
 proc discoverGitWorktree(identity: GitToolIdentity;
     candidate: string): GitWorktreeDiscovery =
@@ -51909,6 +51940,9 @@ proc runMainlineSyncCommand(parsed: WorkspaceSyncArgs): int =
   if not parsed.dryRun:
     writeMainlineSyncReport(report,
       reportDestination(parsed.report, report.workspaceRoot, "sync"))
+    # This path clones missing checkouts just as the ordinary sync does, so it
+    # refreshes the sibling set the same way. Skipped under `--dry-run`.
+    refreshWorkspaceSiblingIgnoresBestEffort(report.workspaceRoot)
   if parsed.json:
     stdout.writeLine(pretty(report.toJsonNode(), indent = 2))
   else:
@@ -77327,6 +77361,16 @@ proc gatherHealthChecksOverSettings(parsed: HealthArgs):
   #     worktree, "since the failure mode is silence" — no hook runs there, so
   #     no hook can say so, and before this arm the row read the five bodies
   #     through the main worktree and answered ``ok``.
+  #
+  #     The ``hook-interpreter`` row (8c) is computed HERE, ahead of this one,
+  #     because this row's ``ok`` depends on it. "Every body demands the
+  #     contract this build generates" is a statement about the INVOKED build,
+  #     and that build need not be the one a hook resolves when it fires. A
+  #     cached dev shell of the same workspace can resolve an older build that
+  #     refuses every body this row counts as current, so this row is not
+  #     ``ok`` while 8c reports such a resolution. Computing 8c once and
+  #     sharing it keeps the probe from running twice.
+  let interpreterCheck = hookInterpreterSkewCheck(parsed.workspaceRoot)
   block hooksCheck:
     var missing: seq[string]
     var shadowed: seq[string]
@@ -77619,12 +77663,44 @@ proc gatherHealthChecksOverSettings(parsed: HealthArgs):
         remedy: remedy,
         fixKind: hfEnsureVcsHooks))
     else:
-      checks.add(HealthCheck(
-        name: "vcs-hooks",
-        status: hsOk,
-        detail: census &
-          ", every body demanding the contract this build generates",
-        remedy: "", fixKind: hfNone))
+      # Name the build the bodies were judged against. "This build" is the
+      # invoked one, and the reader's next question is whether that is the
+      # build their hooks will actually run.
+      var judge = reproBuildIdentity(
+        try: publicCliImagePath() except CatchableError: "",
+        withVersion = false)
+      judge.version = "version " & ReprobuildVersion
+      let judged = census &
+        ", every body demanding the contract this build generates (judged " &
+        "against the invoked build, " & describeReproBuild(judge) & ")"
+      if okCount > 0 and interpreterCheck.status != hsOk:
+        # With no body counted there is nothing for a resolution to refuse;
+        # the interpreter row's softer "would the hooks about to be installed
+        # be serviceable" grade is its own to report.
+        #
+        # The files are right for the invoked build and the hooks still refuse
+        # in some shell of this host. That is not ``ok``; it is not a second
+        # ``fail`` either, because the failing fact is about binaries and the
+        # ``hook-interpreter`` row owns it. The remedy is that row's: nothing
+        # here is wrong with the files, so ``hooks ensure`` is not offered.
+        checks.add(HealthCheck(
+          name: "vcs-hooks",
+          status: hsWarn,
+          detail: judged & ". NOT ok: the hook-interpreter row reports that " &
+            "this host's 'repro' resolutions do not all service these " &
+            "bodies, so a hook firing in another shell (a cached direnv dev " &
+            "shell is the common one) refuses although every body is " &
+            "current for the invoked build. See the hook-interpreter row " &
+            "for which resolution refuses",
+          remedy: "direnv reload   # then: re-run repro health and read the " &
+            "hook-interpreter row",
+          fixKind: hfNone))
+      else:
+        checks.add(HealthCheck(
+          name: "vcs-hooks",
+          status: hsOk,
+          detail: judged,
+          remedy: "", fixKind: hfNone))
     # The chained bodies the dispatcher runs first. One whose interpreter is
     # gone cannot start, so every commit (pre-commit) or push (pre-push) of
     # that repo fails in it, whatever the managed hook beside it says: a
@@ -77679,7 +77755,7 @@ proc gatherHealthChecksOverSettings(parsed: HealthArgs):
   #     what the resolved `repro` generates. (Teaching 8b to compare contracts
   #     per repo is PG-16's; this row is the machine-wide skew and the
   #     disagreement between shells, which is PG-14's.)
-  checks.add(hookInterpreterSkewCheck(parsed.workspaceRoot))
+  checks.add(interpreterCheck)
 
   # 8c'. The configuration the managed pre-push hook's propagation reads.
   #      Warnings, never failures: a push goes through regardless (Tooling
@@ -98194,6 +98270,13 @@ proc flakeRefreshDirtyScope(workspaceRoot, currentRepo: string;
       "of the committed repo is UNKNOWN and the dirty-sibling check covers " &
       "only the repos whose pins this refresh would move")
     return
+  # Which member is being committed is a question about a DIRECTORY, not about
+  # a spelling. The managed hook passes `git rev-parse --show-toplevel`, which
+  # on Windows uses `/` where the membership join uses `\`, and any caller may
+  # pass a trailing separator, a `.`/`..` segment or a symlinked alias. A
+  # string comparison would declare the closure UNKNOWN for each of those and
+  # narrow the check without cause, so the pre-push gate's own path-identity
+  # test (`samePathIdentity`) decides.
   var currentName = ""
   let currentAbs = absolutePath(currentRepo)
   var pathOf = initTable[string, string]()
@@ -98201,7 +98284,7 @@ proc flakeRefreshDirtyScope(workspaceRoot, currentRepo: string;
     if repo.path.len == 0 or repo.path == ".": continue
     let abs = absolutePath(workspaceRoot / repo.path)
     pathOf[repo.name] = abs
-    if abs == currentAbs and currentName.len == 0:
+    if currentName.len == 0 and samePathIdentity(abs, currentAbs):
       currentName = repo.name
   if currentName.len == 0:
     notices.add("no repo of the workspace membership at " & workspaceRoot &
