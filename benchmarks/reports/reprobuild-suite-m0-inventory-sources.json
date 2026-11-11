@@ -44406,13 +44406,14 @@
       "defines": [],
       "language": "nim",
       "localDependencyShape": [
-        "repro_project_dsl"
+        "repro_project_dsl",
+        "repro_test_support"
       ],
       "owner": "tests/integration",
       "requiresReproBinary": true,
       "source": "tests/integration/t_measurement_flags_cli.nim",
       "sourceSuiteCount": 3,
-      "staticCaseCount": 11,
+      "staticCaseCount": 12,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

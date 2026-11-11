@@ -1031,6 +1031,16 @@ type
     selectorName*: string
     suggestions*: seq[string]
 
+  InterfaceExtractionEdgeFailure* = object of OSError
+    ## Raised by ``extractInterfaceEdge`` when its engine pass ends with a
+    ## failed or blocked edge. The edge runs in a pass of its own, outside
+    ## the graph whose result ``repro build`` writes its failure report
+    ## from, so the run and the action travel with the error: the caller
+    ## that owns the out dir writes the report (CLI/build.md §"The failure
+    ## report") from them instead of leaving only this message behind.
+    run*: BuildRunResult
+    actions*: seq[BuildAction]
+
 proc renderAmbiguousTargetDiagnostic*(err: BuildTargetAmbiguousError): string =
   ## Named-Targets M2 ``target_ambiguous`` stderr diagnostic. Shared by
   ## the top-level CLI dispatch arm and the daemon-side
@@ -11518,8 +11528,19 @@ proc extractInterfaceEdge(modulePath, artifactPath, stubPath: string;
       var detail = ""
       for item in edgeResult.results:
         if item.status in {asFailed, asBlocked}:
-          var parts = @["interface extraction edge " & $item.status &
-            " for " & modulePath]
+          # The status alone says nothing about why: a child the monitor
+          # could not start, one the scheduler refused and a compile that
+          # exited 1 all read ``asFailed``. The exit code and the engine's
+          # reason are what tell them apart when no stream was captured.
+          var headline = "interface extraction edge " & $item.status &
+            " for " & modulePath
+          if item.status == asFailed:
+            headline.add(" (exit code " & $item.exitCode & ")")
+          var parts = @[headline]
+          if item.reason.len > 0:
+            parts.add("reason: " & item.reason)
+          if item.blockedBy.len > 0:
+            parts.add("blocked by: " & item.blockedBy)
           if item.stderr.len > 0:
             parts.add(item.stderr)
           if item.stdout.len > 0:
@@ -11528,7 +11549,10 @@ proc extractInterfaceEdge(modulePath, artifactPath, stubPath: string;
           break
       if detail.len == 0:
         detail = "interface extraction edge failed for " & modulePath
-      raise newException(OSError, detail)
+      var failure = newException(InterfaceExtractionEdgeFailure, detail)
+      failure.run = edgeResult
+      failure.actions = @[extractAction]
+      raise failure
     if validateExistingOnly:
       var validated = false
       var validationDetails: seq[string] = @[]
@@ -11945,6 +11969,17 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
       logSummary("buildFailureReport: " & path)
     except CatchableError:
       discard
+
+  template persistingExtractionFailure(body: untyped): untyped =
+    ## An interface-extraction edge fails in an engine pass of its own, so
+    ## none of the build results below ever sees it. Its failure report is
+    ## written here, from the run the error carries, before the error goes
+    ## on to end the build.
+    try:
+      body
+    except InterfaceExtractionEdgeFailure as failure:
+      persistFailureReport(failure.run, failure.actions)
+      raise
 
   proc userTargetSelectors(): seq[string] =
     ## The selectors the USER named on this invocation (the ``#action``
@@ -12723,23 +12758,24 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
   # for the rationale. Bootstrap toolchain is cached in the per-user
   # tool-store (shared across projects), not the per-build outDir.
   ensureBootstrapToolchainEnv(mode, resolveStoreRoot() / "tool-store")
-  let artifact = extractInterfaceEdge(modulePath, interfacePath, stubPath,
-    compileWorkDir, compileScratchDir, result.projectRoot, publicCliPath,
-    outDir / "build-engine-cache", buildStats,
-    requireStub = false,
-    bypassRunQuota = bypassRunQuota,
-    # THE ONE EDGE the unspecified-mode fallback covers. Every other
-    # edge below reads ``fallbackToRunQuotaBypass``, which is unchanged
-    # by the mode being unknown.
-    fallbackToRunQuotaBypass = interfaceEdgeRunQuotaBypass,
-    forceRebuild = forceRebuild,
-    suppressTrace = mcTrace notin measureSet,
-    skipCacheHitEvidence = mcCacheEvidence notin measureSet,
-    statsEnabled = statsEnabled,
-    cancelCheck = cancelCheck,
-    observeRunResult = proc(r: BuildRunResult) =
-      warnRunQuotaBypassIfUsed(r, enabled = interfaceEdgeRunQuotaBypass,
-        scope = "the project-interface extraction edge"))
+  let artifact = persistingExtractionFailure:
+    extractInterfaceEdge(modulePath, interfacePath, stubPath,
+      compileWorkDir, compileScratchDir, result.projectRoot, publicCliPath,
+      outDir / "build-engine-cache", buildStats,
+      requireStub = false,
+      bypassRunQuota = bypassRunQuota,
+      # THE ONE EDGE the unspecified-mode fallback covers. Every other
+      # edge below reads ``fallbackToRunQuotaBypass``, which is unchanged
+      # by the mode being unknown.
+      fallbackToRunQuotaBypass = interfaceEdgeRunQuotaBypass,
+      forceRebuild = forceRebuild,
+      suppressTrace = mcTrace notin measureSet,
+      skipCacheHitEvidence = mcCacheEvidence notin measureSet,
+      statsEnabled = statsEnabled,
+      cancelCheck = cancelCheck,
+      observeRunResult = proc(r: BuildRunResult) =
+        warnRunQuotaBypassIfUsed(r, enabled = interfaceEdgeRunQuotaBypass,
+          scope = "the project-interface extraction edge"))
   finishStat(buildStats, statsEnabled, "repro interface extract",
     interfaceStart)
   recordInterfaceArtifactWarmStats(buildStats, statsEnabled)
@@ -12856,18 +12892,19 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
         createDir(extendedPath(producerOutDir))
         # Match preparation so the existing keyed session cache can reuse the
         # producer's extraction after a build or binary-cache restoration.
-        let producerArtifact = extractInterfaceEdge(recipeDir / "repro.nim",
-          producerOutDir / "project-interface.rbsz",
-          producerOutDir / "project-interface.nim",
-          reprobuildLibraryWorkDir(), producerOutDir / "provider-work",
-          recipeDir, publicCliPath, producerOutDir / "build-engine-cache",
-          buildStats, requireStub = false,
-          bypassRunQuota = bypassRunQuota,
-          fallbackToRunQuotaBypass = fallbackToRunQuotaBypass,
-          forceRebuild = forceRebuild,
-          suppressTrace = mcTrace notin measureSet,
-          skipCacheHitEvidence = mcCacheEvidence notin measureSet,
-          statsEnabled = statsEnabled, cancelCheck = cancelCheck)
+        let producerArtifact = persistingExtractionFailure:
+          extractInterfaceEdge(recipeDir / "repro.nim",
+            producerOutDir / "project-interface.rbsz",
+            producerOutDir / "project-interface.nim",
+            reprobuildLibraryWorkDir(), producerOutDir / "provider-work",
+            recipeDir, publicCliPath, producerOutDir / "build-engine-cache",
+            buildStats, requireStub = false,
+            bypassRunQuota = bypassRunQuota,
+            fallbackToRunQuotaBypass = fallbackToRunQuotaBypass,
+            forceRebuild = forceRebuild,
+            suppressTrace = mcTrace notin measureSet,
+            skipCacheHitEvidence = mcCacheEvidence notin measureSet,
+            statsEnabled = statsEnabled, cancelCheck = cancelCheck)
         # Existing closure readers use recipe-local metadata, even when the
         # validated extraction and its evidence live under a custom work root.
         let projectionPath = recipeDir / ".repro/build/repro/project-interface.rbsz"
@@ -13243,19 +13280,20 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
             # resolving their declared dependencies against each other's
             # workspace; an ambient ``getCurrentDir()`` would hand both the
             # same (wrong) root.
-            extractInterfaceEdge(producerProjectFile, producerIface,
-              producerStub, reprobuildLibraryWorkDir(),
-              producerOutDirBase / "producer-iface-work",
-              projectRootForModule(producerProjectFile), publicCliPath,
-              producerOutDirBase / "build-engine-cache", buildStats,
-              requireStub = false,
-              bypassRunQuota = bypassRunQuota,
-              fallbackToRunQuotaBypass = fallbackToRunQuotaBypass,
-              forceRebuild = forceRebuild,
-              suppressTrace = mcTrace notin measureSet,
-              skipCacheHitEvidence = mcCacheEvidence notin measureSet,
-              statsEnabled = statsEnabled,
-              cancelCheck = cancelCheck)
+            persistingExtractionFailure:
+              extractInterfaceEdge(producerProjectFile, producerIface,
+                producerStub, reprobuildLibraryWorkDir(),
+                producerOutDirBase / "producer-iface-work",
+                projectRootForModule(producerProjectFile), publicCliPath,
+                producerOutDirBase / "build-engine-cache", buildStats,
+                requireStub = false,
+                bypassRunQuota = bypassRunQuota,
+                fallbackToRunQuotaBypass = fallbackToRunQuotaBypass,
+                forceRebuild = forceRebuild,
+                suppressTrace = mcTrace notin measureSet,
+                skipCacheHitEvidence = mcCacheEvidence notin measureSet,
+                statsEnabled = statsEnabled,
+                cancelCheck = cancelCheck)
           except CatchableError:
             raise newException(OSError,
               "cross-repo producer \"" & selector & "\" at " &
