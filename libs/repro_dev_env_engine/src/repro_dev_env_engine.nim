@@ -163,15 +163,11 @@ proc actionById(run: BuildRunResult; id: string): ActionResult =
       return item
   ActionResult(id: id)
 
-proc providerCompileFailure(run: BuildRunResult): string =
+proc providerCompileFailure*(run: BuildRunResult): string =
+  ## The first failed or blocked action of a provider-compile run.
   for item in run.results:
     if item.status in {asFailed, asBlocked}:
-      var parts = @[item.id & " " & $item.status]
-      if item.stderr.len > 0:
-        parts.add(item.stderr)
-      if item.stdout.len > 0:
-        parts.add(item.stdout)
-      return parts.join("\n")
+      return describeFailedAction(item)
   "provider compile failed"
 
 proc providerCompileBuildAction(plan: ProviderCompilePlan;
@@ -1065,7 +1061,7 @@ proc computeDevEnvEdge*(config: DevEnvEdgeConfig): DevEnvEdgeResult =
   if result.devEnvResult.hasFailedActions():
     for item in result.devEnvResult.results:
       if item.status in {asFailed, asBlocked}:
-        raiseDevEnvEdge(item.id & " " & $item.status & ": " & item.stderr)
+        raiseDevEnvEdge(describeFailedAction(item))
     raiseDevEnvEdge("dev-env edge failed")
   if not fileExists(extendedPath(result.artifactPath)):
     raiseDevEnvEdge("dev-env edge did not write artifact: " &

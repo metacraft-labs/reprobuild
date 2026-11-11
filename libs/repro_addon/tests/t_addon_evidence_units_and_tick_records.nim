@@ -68,7 +68,7 @@ suite "generation 0 with an Evidence sink":
     check "PrivateNetwork=yes\n" in u
     check "OnBootSec=2min\n" in storeVerifyTimer()
   test "the path unit watches the outbox; the timer heartbeats":
-    check ("PathChanged=" & EvidenceOutboxPath) in evidenceShipPathUnit()
+    check ("DirectoryNotEmpty=" & EvidenceOutboxPath) in evidenceShipPathUnit()
     check ("Unit=" & EvidenceShipUnit) in evidenceShipPathUnit()
     check "OnUnitActiveSec=60s\n" in evidenceShipTimer(ev)
   test "evidence.conf names the sink and the intervals the check expects":

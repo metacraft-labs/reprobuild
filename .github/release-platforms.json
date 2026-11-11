@@ -84,13 +84,21 @@
   "addon_static": {
     "$comment": [
       "The musl-static add-on `repro` (apps/repro-addon), one per Debian",
-      "architecture, built by scripts/build_addon_static.sh on the `from` leg",
-      "(which cross-compiles arm64 and armhf with the flake's pinned",
-      "toolchains). An add-on host fetches one and pins its digest from",
-      "SHA256SUMS on the command line that runs it. `asset` is a template;",
-      "{version} is the reprobuild.nimble version, {arch} the architecture."
+      "architecture, built by scripts/build_addon_static.sh in release.yml's",
+      "`build-addon-static` job, which runs beside the legs in the dev",
+      "environment of the `from` platform and cross-compiles arm64 and armhf",
+      "with the flake's pinned toolchains. An add-on host fetches one and pins",
+      "its digest from SHA256SUMS on the command line that runs it. `asset` is",
+      "a template; {version} is the reprobuild.nimble version, {arch} the",
+      "architecture.",
+      "",
+      "`runner` is general Linux x64 capacity, not the `from` platform's",
+      "release lane: eph-linux-x64-release has one runner (infra",
+      "docs/CI-Runner-Fleet-Status.md), so a job there would wait for the",
+      "Linux leg to finish and its duration would add to the release's again."
     ],
     "from": "linux-x86_64",
+    "runner": ["self-hosted", "linux", "x64"],
     "arches": ["amd64", "arm64", "armhf"],
     "asset": "repro-addon-{version}-linux-{arch}"
   },

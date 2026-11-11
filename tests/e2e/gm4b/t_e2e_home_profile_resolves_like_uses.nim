@@ -10,7 +10,10 @@
 ##
 ## * RECIPE: a real recipe module `uses:` the fixture packages and is
 ##   compiled through the real interface extractor
-##   (`extractInterfaceFromModule`); its `InterfaceToolUse` records go through
+##   (`extractInterfaceFromModule`) by the build-graph edge
+##   `reprobuild.test_fixtures.gm4b_like_uses`
+##   (`tests/fixtures/gm4b/gen_gm4b_like_uses.nim`), whose artifact the test
+##   reads; its `InterfaceToolUse` records go through
 ##   the `uses:` selection entry points (`selectTarballProvisioning`,
 ##   `selectNixProvisioning`, `selectScoopProvisioning`) and, where the `uses:`
 ##   provisioning edge realizes the record, the real acquisition plans
@@ -53,10 +56,8 @@ import repro_tool_profiles
 import repro_home_apply
 import repro_home_intent
 from repro_project_dsl/selector_names import isNimIdentifier
+import repro_test_support
 import ./gm4b_contribution_fixture
-
-const FixtureModule = currentSourcePath().parentDir() /
-  "gm4b_contribution_fixture"
 
 const FixturePackages = ["just", "gh", "jdk", "python3", "7zip",
   "gm4bcontrib"]
@@ -109,28 +110,19 @@ proc sameOutcome(a, b: Outcome): bool =
 # Recipe side: real interface extraction + the `uses:` entry points
 # ---------------------------------------------------------------------------
 
-proc extractRecipeUses(scratch: string): Table[string, InterfaceToolUse] =
-  let project = scratch / "recipe"
-  createDir(project)
-  var uses = ""
-  for p in FixturePackages:
-    uses.add("    \"" & p & "\"\n")
-  writeFile(project / "repro.nim", """
-import repro_project_dsl
-import repro_dsl_stdlib/packages/jdk
-import repro_dsl_stdlib/packages/pkg_7zip
-import """ & "\"" & FixtureModule & "\"" & """
+const
+  RecipeInterfaceFixture = "build/test-fixtures/gm4b-like-uses/out/" &
+    "project-interface.rbsz"
+  RecipeInterfaceActionId = "reprobuild.test_fixtures.gm4b_like_uses"
 
-
-package gm4bResolvesLikeUses:
-  defaultToolProvisioning "tarball"
-  uses:
-""" & uses)
-  let artifactPath = scratch / "out" / "project-interface.rbsz"
-  let stubPath = scratch / "out" / "project-interface.nim"
-  createDir(artifactPath.parentDir)
-  let artifact = extractInterfaceFromModule(project / "repro.nim",
-    artifactPath, stubPath, getCurrentDir(), useExtractionCache = false)
+proc readRecipeUses(): Table[string, InterfaceToolUse] =
+  ## The recipe's projected `uses:`, as the real extractor wrote it. The
+  ## recipe (`tests/fixtures/gm4b/gen_gm4b_like_uses.nim`) is extracted once
+  ## by edge ``RecipeInterfaceActionId``, which re-runs when anything it
+  ## read changes; every case reads the artifact instead of compiling the
+  ## recipe at suite scope.
+  let artifact = readInterfaceArtifact(requireBinary(
+    graphArtifactPath(RecipeInterfaceFixture), RecipeInterfaceActionId))
   for use in artifact.projectInterface.toolUses:
     result[use.packageSelector] = use
 
@@ -237,7 +229,7 @@ suite "GM4b: e2e_home_profile_resolves_like_uses":
   let savedContributor = getEnv("REPRO_PROVISIONING_CONTRIBUTOR")
   let hadContributor = existsEnv("REPRO_PROVISIONING_CONTRIBUTOR")
   delEnv("REPRO_PROVISIONING_CONTRIBUTOR")
-  let recipe = extractRecipeUses(scratch)
+  let recipe = readRecipeUses()
 
   test "the recipe projects every fixture package (precondition)":
     for p in FixturePackages:

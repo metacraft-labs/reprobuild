@@ -136,6 +136,34 @@ proc runPublishing(p: string; actions: seq[BuildAction];
 var allowedRecord: ActionResultRecord
 var allowedMemo: PortableMemoRecord
 
+proc produceAllowed(): tuple[p: string; offered: Offered;
+                             run: tuple[results: seq[ActionResult];
+                                        trace: seq[SchedulerTraceEvent]]] =
+  ## Runs the allowed builtins through the real engine and keeps what they
+  ## published in `allowedMemo` / `allowedRecord`. Every case runs in its own
+  ## process under the suite runner, so a CONSUMER case cannot rely on the
+  ## "allowed builtin" case having run first in the same process: it calls
+  ## `requireAllowedRecord`, which produces the record itself when needed.
+  result.p = project("allowed")
+  result.offered = Offered()
+  result.run = runPublishing(result.p,
+    @[actionOf(bakWriteText, result.p), actionOf(bakStamp, result.p)],
+    result.offered)
+  for record in result.offered.portable:
+    if record.evidenceSource.builtinKind == "write-text":
+      allowedMemo = record
+  let evidence = dependencyEvidencePath(result.p / "cache", "t-kind-write-text")
+  if fileExists(evidence):
+    let raw = readFile(evidence)
+    var bytes = newSeq[byte](raw.len)
+    if raw.len > 0:
+      copyMem(addr bytes[0], unsafeAddr raw[0], raw.len)
+    allowedRecord = decodeActionResultRecord(bytes)
+
+proc requireAllowedRecord() =
+  if allowedMemo.weakHex.len == 0:
+    discard produceAllowed()
+
 suite "owner decision 2026-10-31: the builtin-kind allowlist":
 
   setup:
@@ -159,10 +187,7 @@ suite "owner decision 2026-10-31: the builtin-kind allowlist":
       check $source == "builtin:" & builtinKindName(kind)
 
   test "an allowed builtin publishes to both publishers, stating its kind":
-    let p = project("allowed")
-    let offered = Offered()
-    let run = runPublishing(p,
-      @[actionOf(bakWriteText, p), actionOf(bakStamp, p)], offered)
+    let (p, offered, run) = produceAllowed()
     for item in run.results:
       require item.status == asSucceeded
     check offered.peer.len == 2
@@ -172,15 +197,11 @@ suite "owner decision 2026-10-31: the builtin-kind allowlist":
     for record in offered.portable:
       check record.evidenceSource.builtinKind in ["write-text", "stamp"]
       check portableRecordRefusal(record) == ""
-      if record.evidenceSource.builtinKind == "write-text":
-        allowedMemo = record
+    check allowedMemo.weakHex.len > 0
     for event in run.trace:
       check event.event notin ["peer-cache-publish-refused",
         "portable-memo-publish-refused"]
-    let raw = readFile(dependencyEvidencePath(p / "cache", "t-kind-write-text"))
-    var bytes = newSeq[byte](raw.len)
-    copyMem(addr bytes[0], unsafeAddr raw[0], raw.len)
-    allowedRecord = decodeActionResultRecord(bytes)
+    require fileExists(dependencyEvidencePath(p / "cache", "t-kind-write-text"))
     check publicationRefusal(allowedRecord, elComplete,
       builtinEvidence("write-text")) == ""
     # `ensure-dir` passes the kind rule too (it is usually refused for
@@ -209,6 +230,7 @@ suite "owner decision 2026-10-31: the builtin-kind allowlist":
       check portableRefusals == 1
 
     test "CONSUMER: a record another host published as a '" & name & "' builtin is refused":
+      requireAllowedRecord()
       require allowedMemo.weakHex.len > 0
       # rbpm-v2: the kind survives the wire format and the consumer's rule
       # refuses it by name.

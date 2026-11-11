@@ -797,7 +797,8 @@ type
   BuildEngineConfig* = object
     # Project-local scratch root: holds `runquota-results/*.json`,
     # `monitor-depfiles/*.iomon`, `dependency-evidence/*.rbar`, and per-build
-    # transient state. Cleaned by `repro clean`. Per-project by design.
+    # transient state. Per-project by design. It holds no declared output,
+    # so `repro clean` leaves it in place.
     cacheRoot*: string
     # User-level shared action cache + CAS root. When empty, defaults to
     # `cacheRoot` for backwards compatibility (callers that haven't been
@@ -1896,6 +1897,13 @@ type
     id*: string
     status*: ActionStatus
     exitCode*: int
+    termSignal*: int
+      ## The signal that killed the action's process, or 0 when it exited (or
+      ## the launch path cannot tell). A direct or inline RunQuota launch
+      ## reports a signal death as ``exitCode = -1``, so without this field a
+      ## crash read as an exit status of -1. The in-process monitor host does
+      ## not set it: its root exit status already follows the shell's
+      ## ``128 + signal`` convention.
     launched*: bool
     rewrittenSources*: seq[string]
       ## HL-10 ``bakLockUpdate`` only: the tracked source files (absolute
@@ -3720,6 +3728,12 @@ proc runQuotaPoolDeclaration*(pools: openArray[BuildPool];
 proc graph*(actions: openArray[BuildAction];
             pools: openArray[BuildPool] = []): BuildGraph =
   BuildGraph(actions: @actions, pools: @pools)
+
+let explainCacheMisses = getEnv("REPRO_EXPLAIN_CACHE_MISSES") == "1"
+  ## `REPRO_EXPLAIN_CACHE_MISSES=1`: every cacheable action whose lookup does
+  ## not hit writes the lookup's status and message (for an input change,
+  ## the first input that differs) to stderr. For diagnosing a warm path
+  ## that keeps re-running; off by default.
 
 proc trace(result: var BuildRunResult; actionId, event, detail: string) =
   if not result.traceEnabled:
@@ -12163,6 +12177,28 @@ proc evidenceDiagnosticCount*(item: ActionResult): int =
   if item.evidencePathCounts.elided: item.evidencePathCounts.diagnostics
   else: item.evidence.diagnostics.len
 
+proc describeFailedAction*(item: ActionResult): string =
+  ## A failed or blocked action as a caller reports it to the user: the
+  ## action, how it ended, and what it wrote. The output alone is not enough.
+  ## A process killed by a signal (a crash, a stack overflow) writes nothing,
+  ## and a report built only from its output read `<id> asFailed` with no hint
+  ## of why. A blocked action names the action that blocked it.
+  var head = item.id & " " & $item.status
+  if item.status == asBlocked and item.blockedBy.len > 0:
+    head.add(" (blocked by " & item.blockedBy & ")")
+  elif item.termSignal > 0:
+    head.add(" (killed by signal " & $item.termSignal & ")")
+  elif item.launched:
+    head.add(" (exit code " & $item.exitCode & ")")
+  var parts = @[head]
+  if item.stderr.len > 0:
+    parts.add(item.stderr)
+  if item.stdout.len > 0:
+    parts.add(item.stdout)
+  if item.launched and item.stderr.len == 0 and item.stdout.len == 0:
+    parts.add("the action wrote nothing to stdout or stderr")
+  parts.join("\n")
+
 proc processCwd(action: BuildAction; process: ProcessSpec): string =
   let cwd = $process.cwd
   if cwd.len > 0:
@@ -14555,9 +14591,8 @@ proc bypassActionLogDir(cacheRoot: string): string =
   ## **M1 milestone** (Windows-bypass-stdio-capture). Per-action log
   ## files live under ``<cacheRoot>/actions/`` so the same scratch dir
   ## that already holds ``runquota-results/`` and ``monitor-depfiles/``
-  ## also owns the bypass-path stdio captures. ``repro clean`` (which
-  ## wipes ``cacheRoot``) reclaims them with the rest of the per-build
-  ## transient state.
+  ## also owns the bypass-path stdio captures, beside the rest of the
+  ## per-build transient state.
   cacheRoot / "actions"
 
 when defined(macosx):
@@ -16479,6 +16514,8 @@ proc finishBypassRunQuotaProcess(id: string;
     except CatchableError:
       discard
     result.exitCode = execution.exitCode
+    if execution.signaled:
+      result.termSignal = execution.signal
     result.stdout = stdoutPayload
     result.stderr = stderrPayload
     result.status =
@@ -16582,6 +16619,8 @@ proc finishInlineRunQuotaProcess(id: string;
     let execution = process.finishCompleted()
     result.leaseId = execution.leaseId
     result.exitCode = execution.exitCode
+    if execution.signaled:
+      result.termSignal = execution.signal
     result.stdout = execution.stdout
     result.stderr = stripMonitorBanner(execution.stderr)
     result.runQuotaBackend = execution.backendName
@@ -22022,6 +22061,12 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
             buildEpoch = config.buildEpoch,
             containerOutputs = action.containerDirectoryOutputs())
           finishStat("repro cache lookup", lookupStart)
+          if lookup.status != aclHit and explainCacheMisses:
+            # Diagnostic only: name why the lookup did not hit. A caller
+            # that suppresses the trace (the lock-refresh compile probes
+            # do) otherwise leaves no record of the reason at all.
+            stderr.writeLine("repro: cache " & $lookup.status & " for " &
+              id & ": " & lookup.message)
           # OWNER DECISION 2026-11-03 (Incremental-Invalidation.md §"Minimum
           # check set" Step 3.3; Peer-Cache.md §"Lookup (consumer)"; it
           # reverses agents 5427fcd2f8 / specs 55b39ef1, which made this a

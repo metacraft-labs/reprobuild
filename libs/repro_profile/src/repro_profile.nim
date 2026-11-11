@@ -25,6 +25,7 @@ import repro_profile/data_refs
 import repro_profile/catalog_refs
 import repro_profile/host_system
 import repro_profile/stow_scopes
+import repro_profile/base_os
 
 export types
 export predicates
@@ -43,3 +44,4 @@ export data_refs
 export catalog_refs
 export host_system
 export stow_scopes
+export base_os

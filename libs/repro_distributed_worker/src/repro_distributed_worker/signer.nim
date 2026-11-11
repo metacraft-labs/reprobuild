@@ -62,6 +62,9 @@ type
 
   CertSignerServer* = ref object
     identity*: HostIdentity
+    failedConnections*: int
+      ## Connections whose handler ended with an error (counted; the
+      ## signer keeps serving).
     leaf*: LeafCredential
     anchorsDir*: string
       ## The workers' host CAs; re-read for every connection.
@@ -82,6 +85,10 @@ type
       ## Unix milliseconds; nil = the system clock (a test seam).
 
   SignerError* = object of CatchableError
+
+const SignerMutation {.strdefine: "reproAddonMutation".} = ""
+  ## A falsifying build's name (``repro_addon/mutations``); "" in every
+  ## product build.
 
 proc nowMs(s: CertSignerServer): int64 =
   if s.clock.isNil: int64(epochTime() * 1000.0) else: s.clock()
@@ -241,6 +248,87 @@ proc register(s: CertSignerServer; line: string) =
   except CatchableError:
     discard
 
+proc serveSignerRequests(s: CertSignerServer; conn: TlsConn;
+                         who: VerifiedLeaf) {.async.} =
+  ## A verified worker's requests, until the connection ends.
+  while s.running:
+    let frame = await readFrame(conn)
+    if not frame.ok:
+      break
+    let nowSec = s.nowMs() div 1000
+    proc refuse(reason: string) {.async.} =
+      inc s.refusedCount
+      s.register($nowSec & " refused " & $who.hostId & " " &
+        reason.replace("\n", " "))
+      await sendFrame(conn, vRefused, toBytes(reason))
+    if nowSec - LeafClockSkewSeconds >= who.notAfter:
+      await refuse("the worker's leaf expired; reconnect with a current one")
+      break
+    if frame.verb != vSign:
+      await refuse("not in the signer's vocabulary")
+      break
+    if hostListed(s.revokedPath, who.hostId, failClosed = true):
+      await refuse("worker " & $who.hostId & " is revoked")
+      continue
+    if not hostListed(s.authorizedPath, who.hostId, failClosed = false):
+      await refuse("worker " & $who.hostId &
+        " is not authorized to obtain certificates")
+      continue
+    if not s.takeToken(who.hostId):
+      await refuse("rate limit")
+      continue
+    var req: CertificateRequest
+    try:
+      req = decodeSignRequest(frame.body)
+    except CatchableError as err:
+      await refuse("malformed request: " & err.msg)
+      break
+    let issuedAt = fromUnix(nowSec)
+    let signed =
+      try: s.signOp(who.hostId, req, issuedAt)
+      except CatchableError as err: (false, "", "", err.msg)
+    if not signed.ok:
+      await refuse("signing failed: " & signed.reason)
+      continue
+    inc s.issuedCount
+    s.register($nowSec & " issued " & $who.hostId & " serial=" &
+      signed.serial & " content=" & req.content & " target=" & req.target)
+    await sendFrame(conn, vSigned, toBytes(signed.certificate))
+
+proc serveSignerConnection(s: CertSignerServer; conn: TlsConn;
+                           anchors: TrustAnchorSet) {.async.} =
+  ## One connection's proof exchange and requests. Raises on a broken
+  ## frame; the caller closes the connection.
+  when SignerMutation == "signer-close-in-finally":
+    # FALSIFYING BUILD: the body returns through a ``finally`` that awaits
+    # the close, as before the fix (``handleConnection`` then does not
+    # close). Under Nim 2.2.4 the first early return raises
+    # ``AssertionDefect`` ("yielded nil"), counted in ``failedConnections``.
+    try:
+      await sendFrame(conn, vProof, s.leaf.cert.certDer)
+      let proof = await readFrame(conn)
+      if not proof.ok or proof.verb != vProof:
+        return
+      let who = verifyLeaf(proof.body, anchors, s.nowMs() div 1000,
+        expectedPublicKey = remotePublicKey(conn))
+      if not who.ok or who.role != lrDaemon:
+        inc s.refusedCount
+        return
+      await serveSignerRequests(s, conn, who)
+    finally:
+      try: await tls.close(conn) except CatchableError: discard
+  else:
+    await sendFrame(conn, vProof, s.leaf.cert.certDer)
+    let proof = await readFrame(conn)
+    if not proof.ok or proof.verb != vProof:
+      return
+    let who = verifyLeaf(proof.body, anchors, s.nowMs() div 1000,
+      expectedPublicKey = remotePublicKey(conn))
+    if not who.ok or who.role != lrDaemon:
+      inc s.refusedCount
+      return
+    await serveSignerRequests(s, conn, who)
+
 proc handleConnection(s: CertSignerServer; sock: AsyncSocket) {.async.} =
   if s.leaf.needsRenewal:
     s.leaf = mintLeaf(s.identity, lrDaemon)
@@ -256,62 +344,16 @@ proc handleConnection(s: CertSignerServer; sock: AsyncSocket) {.async.} =
     try: sock.close() except CatchableError: discard
     return
   let conn = connOpt.get()
+  # No ``await`` in a ``finally`` the body returns through: Nim 2.2.4's
+  # async transform resumes such a ``finally`` with a nil future and
+  # raises ``AssertionDefect`` ("yielded nil"). The serving body is its own
+  # proc, and the close follows it in sequence (as the Evidence sink's
+  # handler, A11 review rounds 3 and 4).
   try:
-    await sendFrame(conn, vProof, s.leaf.cert.certDer)
-    let proof = await readFrame(conn)
-    if not proof.ok or proof.verb != vProof:
-      return
-    let who = verifyLeaf(proof.body, anchors, s.nowMs() div 1000,
-      expectedPublicKey = remotePublicKey(conn))
-    if not who.ok or who.role != lrDaemon:
-      inc s.refusedCount
-      return
-    while s.running:
-      let frame = await readFrame(conn)
-      if not frame.ok:
-        break
-      let nowSec = s.nowMs() div 1000
-      proc refuse(reason: string) {.async.} =
-        inc s.refusedCount
-        s.register($nowSec & " refused " & $who.hostId & " " &
-          reason.replace("\n", " "))
-        await sendFrame(conn, vRefused, toBytes(reason))
-      if nowSec - LeafClockSkewSeconds >= who.notAfter:
-        await refuse("the worker's leaf expired; reconnect with a current one")
-        break
-      if frame.verb != vSign:
-        await refuse("not in the signer's vocabulary")
-        break
-      if hostListed(s.revokedPath, who.hostId, failClosed = true):
-        await refuse("worker " & $who.hostId & " is revoked")
-        continue
-      if not hostListed(s.authorizedPath, who.hostId, failClosed = false):
-        await refuse("worker " & $who.hostId &
-          " is not authorized to obtain certificates")
-        continue
-      if not s.takeToken(who.hostId):
-        await refuse("rate limit")
-        continue
-      var req: CertificateRequest
-      try:
-        req = decodeSignRequest(frame.body)
-      except CatchableError as err:
-        await refuse("malformed request: " & err.msg)
-        break
-      let issuedAt = fromUnix(nowSec)
-      let signed =
-        try: s.signOp(who.hostId, req, issuedAt)
-        except CatchableError as err: (false, "", "", err.msg)
-      if not signed.ok:
-        await refuse("signing failed: " & signed.reason)
-        continue
-      inc s.issuedCount
-      s.register($nowSec & " issued " & $who.hostId & " serial=" &
-        signed.serial & " content=" & req.content & " target=" & req.target)
-      await sendFrame(conn, vSigned, toBytes(signed.certificate))
+    await serveSignerConnection(s, conn, anchors)
   except CatchableError:
     discard
-  finally:
+  when SignerMutation != "signer-close-in-finally":
     try: await tls.close(conn) except CatchableError: discard
 
 proc acceptLoop(s: CertSignerServer) {.async.} =
@@ -321,7 +363,11 @@ proc acceptLoop(s: CertSignerServer) {.async.} =
       client = await s.listener.accept()
     except CatchableError:
       break
-    asyncCheck handleConnection(s, client)
+    # One connection's failure never stops the signer: its error is
+    # counted, never re-raised into the dispatcher (``asyncCheck`` would).
+    let f = handleConnection(s, client)
+    f.addCallback(proc (x: Future[void]) =
+      if x.failed: inc s.failedConnections)
 
 proc start*(s: CertSignerServer) =
   s.listener = newAsyncSocket()
@@ -342,6 +388,51 @@ proc stop*(s: CertSignerServer) =
 # Client (the worker side).
 # ---------------------------------------------------------------------------
 
+type SignerAnswer = tuple[ok: bool; certificate, reason: string]
+
+proc notIssued(reason: string): SignerAnswer =
+  ## A refusal, built at run time. An ``{.async.}`` proc must not return
+  ## a tuple *literal* with two or more constant strings, e.g.
+  ## ``return (false, "", "the signer refused")``: Nim 2.2.4 and 2.2.10
+  ## place that constant in read-only data, and the future's ``complete``
+  ## (which takes its value as ``sink``) then writes to it and the
+  ## process dies with SIGSEGV. Building the answer in a proc gives a
+  ## temporary the future can take. (Reprobuild-pm issue
+  ## 2026-11-07-async-procs-returning-a-constant-tuple-of-strings-segfault-under-nim-2-2.)
+  (false, "", reason)
+
+proc exchangeWithSigner(conn: TlsConn; signerAnchors: TrustAnchorSet;
+                        expectedSigner: PeerId; leaf: LeafCredential;
+                        req: CertificateRequest; timeoutMs: int):
+    Future[SignerAnswer] {.async.} =
+  ## The client's half of one request on an open connection; the caller
+  ## closes it.
+  let proof = await readFrame(conn)
+  if not proof.ok or proof.verb != vProof:
+    return notIssued("the signer sent no identity proof")
+  let signer = verifyLeaf(proof.body, signerAnchors, getTime().toUnix,
+    expectedPublicKey = remotePublicKey(conn))
+  if not signer.ok or signer.hostId != expectedSigner:
+    return notIssued("the certificate signer is not the pinned host: " &
+      signer.reason)
+  await sendFrame(conn, vProof, leaf.cert.certDer)
+  await sendFrame(conn, vSign, encodeSignRequest(req))
+  let replyFut = readFrame(conn)
+  if not await withTimeout(replyFut, timeoutMs):
+    return notIssued("the certificate signer did not answer")
+  let reply = replyFut.read()
+  if not reply.ok:
+    when SignerMutation == "signer-constant-tuple-return":
+      # FALSIFYING BUILD: the refusal as a constant tuple literal, as
+      # before; SIGSEGV under Nim 2.2.4 (see ``notIssued``).
+      return (false, "", "the certificate signer closed the connection")
+    else:
+      return notIssued("the certificate signer closed the connection")
+  case reply.verb
+  of vSigned: return (true, toStr(reply.body), "")
+  of vRefused: return notIssued("the signer refused: " & toStr(reply.body))
+  else: return notIssued("unexpected answer from the certificate signer")
+
 proc requestCertificate*(endpoint: Endpoint; leafProvider: LeafProvider;
                          signerAnchors: TrustAnchorSet; expectedSigner: PeerId;
                          req: CertificateRequest;
@@ -355,39 +446,22 @@ proc requestCertificate*(endpoint: Endpoint; leafProvider: LeafProvider;
     await sock.connect(endpoint.host, endpoint.port)
   except CatchableError as err:
     try: sock.close() except CatchableError: discard
-    return (false, "", "the certificate signer is unreachable: " & err.msg)
+    return notIssued("the certificate signer is unreachable: " & err.msg)
   let leaf = leafProvider()
   if leaf.key.isNil or not leaf.key.available:
     try: sock.close() except CatchableError: discard
-    return (false, "", "this worker holds no usable leaf")
+    return notIssued("this worker holds no usable leaf")
   let connOpt = await wrapClientSocket(sock, endpoint.host, leaf.cert.certDer,
     leaf.key, signerAnchors)
   if connOpt.isNone:
     try: sock.close() except CatchableError: discard
-    return (false, "", "TLS handshake with the certificate signer failed")
+    return notIssued("TLS handshake with the certificate signer failed")
   let conn = connOpt.get()
+  # The close follows the exchange in sequence, never in a ``finally`` the
+  # exchange returns through (Nim 2.2.4: "yielded nil", see the server).
   try:
-    let proof = await readFrame(conn)
-    if not proof.ok or proof.verb != vProof:
-      return (false, "", "the signer sent no identity proof")
-    let signer = verifyLeaf(proof.body, signerAnchors, getTime().toUnix,
-      expectedPublicKey = remotePublicKey(conn))
-    if not signer.ok or signer.hostId != expectedSigner:
-      return (false, "", "the certificate signer is not the pinned host: " &
-        signer.reason)
-    await sendFrame(conn, vProof, leaf.cert.certDer)
-    await sendFrame(conn, vSign, encodeSignRequest(req))
-    let replyFut = readFrame(conn)
-    if not await withTimeout(replyFut, timeoutMs):
-      return (false, "", "the certificate signer did not answer")
-    let reply = replyFut.read()
-    if not reply.ok:
-      return (false, "", "the certificate signer closed the connection")
-    case reply.verb
-    of vSigned: return (true, toStr(reply.body), "")
-    of vRefused: return (false, "", "the signer refused: " & toStr(reply.body))
-    else: return (false, "", "unexpected answer from the certificate signer")
+    result = await exchangeWithSigner(conn, signerAnchors, expectedSigner,
+                                      leaf, req, timeoutMs)
   except CatchableError as err:
-    return (false, "", "certificate signer exchange failed: " & err.msg)
-  finally:
-    try: await tls.close(conn) except CatchableError: discard
+    result = notIssued("certificate signer exchange failed: " & err.msg)
+  try: await tls.close(conn) except CatchableError: discard

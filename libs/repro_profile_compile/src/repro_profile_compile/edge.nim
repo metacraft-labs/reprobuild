@@ -247,14 +247,6 @@ proc hasFailedActions(run: BuildRunResult): bool =
     if item.status in {asFailed, asBlocked}:
       return true
 
-proc describeActionFailure(item: ActionResult): string =
-  var parts = @[item.id & " " & $item.status]
-  if item.stderr.len > 0:
-    parts.add(item.stderr)
-  if item.stdout.len > 0:
-    parts.add(item.stdout)
-  parts.join("\n")
-
 proc actionFailureDiagnostic(run: BuildRunResult): string =
   ## The diagnostic of the edge that FAILED, in preference to one that was
   ## merely blocked by it: with two edges, a failed compile leaves the run
@@ -262,10 +254,10 @@ proc actionFailureDiagnostic(run: BuildRunResult): string =
   ## diagnostics) is what the user needs to see.
   for item in run.results:
     if item.status == asFailed:
-      return describeActionFailure(item)
+      return describeFailedAction(item)
   for item in run.results:
     if item.status == asBlocked:
-      return describeActionFailure(item)
+      return describeFailedAction(item)
   "profile compile failed"
 
 const

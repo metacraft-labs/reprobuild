@@ -249,62 +249,55 @@ const
     ## The edge ids are `reprobuild.test_fixtures.rp3_provider_<name>` with
     ## `-` folded to `_`.
 
-  codeTracerToolSourceRoot* = "tests/fixtures/codetracer-tools"
-  codeTracerToolFixtureRoot* = "build/test-fixtures/codetracer-tools"
-    ## The tool directories `t_e2e_codetracer_in_place_project_file` puts on
-    ## PATH. The checked-in scripts (version-answering stand-ins, the `nim`
-    ## and `node` wrappers) are used from the source root; the two compiled
-    ## tools (the monitor-visible `gcc` proxy, also built as `clang`, and the
-    ## `stylus` stand-in) are built once by
-    ## `reprobuild.test_fixtures.codetracer_tool_{gcc,clang,stylus}` into the
-    ## fixture root. Both are stable paths, which is the point: interface
-    ## extraction keys on the compiler paths and on PATH itself, so a per-case
-    ## tool directory made every case's extraction of the same recipe a
-    ## (correct) cache miss.
-
   sc7CapstoneFixtureRoot* = "tests/fixtures/sc7-capstone"
     ## The SC-7 capstone's checked-in producer and consumer recipes; see
     ## ``tests/fixtures/sc7-capstone/README.md``.
 
-  hcrReplayGateSource* =
-    "tests/e2e/hcr-linux-direct/t_e2e_hcr_linux_replay_of_patched_recording.nim"
-  hcrCtMcrFixtureRoot* = "build/test-fixtures/hcr-ct-mcr"
-  hcrCtMcrBundleActionId* = "reprobuild.test_fixtures.hcr_ct_mcr_bundle"
-  hcrCtMcrBundle* = [
-    "build/test-fixtures/hcr-ct-mcr/ct_cli",
-    "build/test-fixtures/hcr-ct-mcr/libct_interpose.so",
-    "build/test-fixtures/hcr-ct-mcr/libct_interpose_static.so",
-    "build/test-fixtures/hcr-ct-mcr/libct_license_ffi.so",
-    "build/test-fixtures/hcr-ct-mcr/libct_clr_profiler.so",
-    "build/test-fixtures/hcr-ct-mcr/libgl_passthrough.so",
-    "build/test-fixtures/hcr-ct-mcr/libct_vk_layer.so",
-    "build/test-fixtures/hcr-ct-mcr/vk_layer_manifest.json",
-    "build/test-fixtures/hcr-ct-mcr/ct-dwarf-paths",
-    "build/test-fixtures/hcr-ct-mcr/ct-test-license.dat",
+  testDataFixtureRoot* = "build/test-fixtures"
+
+  cvmTestKeysRoot* = "build/test-fixtures/cvm-test-keys"
+  cvmTestKeysActionId* = "reprobuild.test_fixtures.cvm_test_rsa_keys"
+  cvmTestKeys* = [
+    "build/test-fixtures/cvm-test-keys/snp-marked-ark.key",
+    "build/test-fixtures/cvm-test-keys/snp-marked-ask.key",
+    "build/test-fixtures/cvm-test-keys/snp-unmarked-ark.key",
+    "build/test-fixtures/cvm-test-keys/snp-unmarked-ask.key",
   ]
-    ## The `ct-mcr` recorder bundle `e2e_hcr_linux_replay_of_patched_recording`
-    ## records and replays with: `ct_cli` and every file the recorder's
-    ## `just build-ct-mcr` places beside it (the binary resolves each of them
-    ## next to its own executable first), plus the recorder's signed test
-    ## licence, which keeps every replay off the free tier's daily cap.
-    ##
-    ## Every path is spelled out under `hcrCtMcrFixtureRoot` so that this one
-    ## list is both the producing edge's `extraOutputs` and the gate's typed
-    ## inputs. Built by edge `hcrCtMcrBundleActionId` (declared in the build block,
-    ## Linux x86-64 only, like the gate) through
-    ## `scripts/build_hcr_ct_mcr_fixture.sh`, which runs the RECORDER'S OWN
-    ## recipe in the RECORDER'S OWN flake dev shell and stages the result
-    ## here. The script's `BUNDLE` list names the same files by their place
-    ## in the recorder checkout; `tests/unit/test_hcr_replay_gate_ct_mcr_
-    ## fixture_edge.py` holds the two lists equal, and holds the gate's
-    ## lookup to `hcrCtMcrFixtureRoot`.
-    ##
-    ## Before this edge the gate read a hand-built `ct_cli` from the
-    ## hard-coded sibling path `../codetracer-native-recorder/ct_cli/ct_cli`
-    ## that nothing in this graph produced, so every run that had not built
-    ## the recorder by hand failed at `fileExists(ctMcr)` for a reason
-    ## unrelated to HCR (reprobuild-pm issue 2026-09-25,
-    ## "hcr-replay-gate-needs-a-ct-mcr-no-edge-builds").
+    ## The RSA-4096 keys of the software-root security-processor test
+    ## hierarchies (`tests/integration/cvm_evidence_emulator.nim`,
+    ## `snpTestRootKeyPath`), generated from fixed seeds by
+    ## `tests/fixtures/cvm-test-keys/gen_cvm_test_keys.nim`. Four key
+    ## generations cost about a CPU-minute, which every process of every test
+    ## that minted a hierarchy paid at start-up.
+  cvmTestKeysConsumers = [
+    "tests/integration/t_genuine_tier_policy_refuses_emulated_cvm_evidence.nim",
+    "tests/integration/t_cvm_evidence_emulator_all_protocol_paths.nim",
+    "tests/integration/t_reproos_uki_through_the_cvm_path.nim",
+  ]
+
+  gm4bLikeUsesRoot* = "build/test-fixtures/gm4b-like-uses"
+  gm4bLikeUsesActionId* = "reprobuild.test_fixtures.gm4b_like_uses"
+  gm4bLikeUsesArtifact* =
+    "build/test-fixtures/gm4b-like-uses/out/project-interface.rbsz"
+    ## The interface of the recipe `t_e2e_home_profile_resolves_like_uses`
+    ## compares a profile with (`tests/fixtures/gm4b/gen_gm4b_like_uses.nim`).
+  gm4bCatalogImportsRoot* = "build/test-fixtures/gm4b-catalog-imports"
+  gm4bCatalogImportsActionId* =
+    "reprobuild.test_fixtures.gm4b_catalog_imports"
+  gm4bCatalogImportsOutputs* = [
+    "build/test-fixtures/gm4b-catalog-imports/payload/gm4bimported",
+    "build/test-fixtures/gm4b-catalog-imports/reprobuild-packages/packages/" &
+      "interfaces/gm4bimported/repro.nim",
+    "build/test-fixtures/gm4b-catalog-imports/gm4b-contribution-catalog/" &
+      "repro.nim",
+    "build/test-fixtures/gm4b-catalog-imports/recipe-with-import/" &
+      "project-interface.rbsz",
+    "build/test-fixtures/gm4b-catalog-imports/recipe-without-import/" &
+      "project-interface.rbsz",
+  ]
+    ## The tree of `t_e2e_home_profile_imports_contribution_catalog`
+    ## (`tests/e2e/gm4b/gm4b_catalog_imports_fixture.nim`, whose
+    ## `CatalogImportsOutputs` names the same files relative to the root).
 
   nixPackageFixtureActionId* = "reprobuild.test_fixtures.nix_package"
   nixPackageOutPathFixture* = "build/test-fixtures/nix-package/out-path"
@@ -468,6 +461,16 @@ const
         actionId: "reprobuild.test_helpers.exec_without_arg")])
     rows
 
+  cvmTestKeysRows = block:
+    var rows: seq[TestGraphArtifacts]
+    for source in cvmTestKeysConsumers:
+      var artifacts: seq[TestGraphArtifact]
+      for path in cvmTestKeys:
+        artifacts.add TestGraphArtifact(path: path,
+          actionId: cvmTestKeysActionId)
+      rows.add TestGraphArtifacts(source: source, artifacts: artifacts)
+    rows
+
   testFixtureArtifacts*: seq[TestGraphArtifacts] = @[
     # Execute the enrolled production CLI, not a test-only compilation.
     TestGraphArtifacts(
@@ -588,38 +591,30 @@ const
         TestGraphArtifact(path: "build/test-bin/m5_stub_repro_image",
           actionId: "reprobuild.test_helpers.m5_stub_repro_image")]),
   ] & profileCompileNimSpyConsumers & binaryCacheHelperConsumers &
-    (when defined(linux) or defined(macosx): @[
+    cvmTestKeysRows & @[
     TestGraphArtifacts(
-      source: "tests/e2e/codetracer-subset/" &
-        "t_e2e_codetracer_in_place_project_file.nim",
-      artifacts: @[
-        TestGraphArtifact(path: codeTracerToolFixtureRoot & "/bin/gcc",
-          actionId: "reprobuild.test_fixtures.codetracer_tool_gcc"),
-        TestGraphArtifact(path: codeTracerToolFixtureRoot & "/bin/stylus",
-          actionId: "reprobuild.test_fixtures.codetracer_tool_stylus"),
-        TestGraphArtifact(path: codeTracerToolFixtureRoot & "/clang-bin/clang",
-          actionId: "reprobuild.test_fixtures.codetracer_tool_clang")])]
-    else: @[]) & (when defined(linux) and defined(amd64): @[
+      source: "tests/e2e/gm4b/t_e2e_home_profile_resolves_like_uses.nim",
+      artifacts: @[TestGraphArtifact(path: gm4bLikeUsesArtifact,
+        actionId: gm4bLikeUsesActionId)]),
+    TestGraphArtifacts(
+      source: "tests/e2e/gm4b/" &
+        "t_e2e_home_profile_imports_contribution_catalog.nim",
+      artifacts: block:
+        # Not the payload: it has no extension, so on Windows the row
+        # would name `gm4bimported.exe`. The catalog carries its sha256, so
+        # a changed payload re-runs the test through the catalog anyway.
+        var files: seq[TestGraphArtifact]
+        for path in gm4bCatalogImportsOutputs[1 .. ^1]:
+          files.add TestGraphArtifact(path: path,
+            actionId: gm4bCatalogImportsActionId)
+        files)] &
+    (when defined(linux) and defined(amd64): @[
     TestGraphArtifacts(
       source: "tests/e2e/hcr-linux-threads/" &
         "t_integration_hcr_linux_stack_mapping_changes_do_not_fault.nim",
       artifacts: @[TestGraphArtifact(
         path: "build/test-fixtures/hcr-linux-stack-access/stack-access",
-        actionId: "reprobuild.test_fixtures.hcr_linux_stack_access")]),
-    # Linux x86-64 only, exactly where the gate records (its body is
-    # `when defined(linux) and defined(amd64)`) and where the producing edge
-    # is declared. EVERY bundle file is a typed input, not only `ct_cli`: the
-    # recorder loads its companions from beside itself at run time, so a
-    # rebuilt `libct_interpose.so` must re-run the gate as surely as a
-    # rebuilt `ct_cli` does.
-    TestGraphArtifacts(
-      source: hcrReplayGateSource,
-      artifacts: block:
-        var bundle: seq[TestGraphArtifact]
-        for path in hcrCtMcrBundle:
-          bundle.add TestGraphArtifact(path: path,
-            actionId: hcrCtMcrBundleActionId)
-        bundle)]
+        actionId: "reprobuild.test_fixtures.hcr_linux_stack_access")])]
     else: @[]) & (when defined(linux) or defined(macosx): @[
     # Linux and macOS, where the producing edge is declared (there is no Nix
     # package on Windows; both gates skip there).
@@ -1049,6 +1044,11 @@ package reprobuild:
       "sqlite"
       "libblake3"
       "xxhash"
+      # scripts/write_helper_deps.sh traces the Nim compiler's front end
+      # with strace (staticRead targets, what staticExec commands read);
+      # the edge `reprobuild.helper-deps.repro-binary-cache` names it, and
+      # the graph provisions it from reprobuild-packages like any tool.
+      "strace"
     # The shipped CLI is compiled with ``-d:ssl``. Model the corresponding
     # link/runtime closure explicitly so graph-built binaries receive
     # OpenSSL's library channels instead of depending on ambient
@@ -2150,13 +2150,16 @@ package reprobuild:
             # producing edge to order before this one and no ``.exe``.
             requiredBinaries.add(artifact.path)
             continue
+          # A program gains `.exe` on Windows; a data fixture (a path
+          # with an extension, `.key`, `.rbsz`) is spelled as declared.
           let artifactPath =
-            when defined(windows): artifact.path & ".exe"
+            when defined(windows):
+              if splitFile(artifact.path).ext.len == 0: artifact.path & ".exe"
+              else: artifact.path
             else: artifact.path
           requiredBinaries.add(artifactPath)
-          # One edge may produce several of a test's artifacts (the
-          # `hcr_ct_mcr_bundle` row lists ten files of one edge); order on
-          # it once.
+          # One edge may produce several of a test's artifacts; order on it
+          # once.
           if artifact.actionId notin executeDeps:
             executeDeps.add(artifact.actionId)
       when defined(linux) or defined(macosx):
@@ -2294,33 +2297,18 @@ package reprobuild:
       # AT RUNTIME. Lifting that compile into its own graph edge (which
       # milestone M3 wants regardless) would make the compiler emit this
       # depfile for free, and the generator call below could be deleted.
-      #
-      # The recorder-backed HCR gate has another structural incompatibility:
-      # injecting the monitor changes executable mappings and maps mutable
-      # shared-memory shards. The recorder correctly refuses those mappings.
-      # Its generated depfile names the test and every graph fixture, but
-      # does not observe its runtime compiler/recorder input closure, so this
-      # execute edge must never cache a verdict. Build edges keep their normal
-      # policy (Sandbox-And-Monitoring.md, "Tests that record their own children").
-      let recordsHcrChild = spec.source ==
-        "tests/e2e/hcr-linux-direct/t_e2e_hcr_linux_replay_of_patched_recording.nim"
       var executeAfter: seq[BuildActionDef] = @[]
       let executePolicy =
         if spec.selfInterposes:
           let testDepfile = reproTestDepfilePath(spec.binary)
-          let incompatibilityReason =
-            if recordsHcrChild:
-              "test records its child; the monitor's modified executable " &
-              "mappings and mutable mapped shards violate recorder invariants"
-            else:
-              "test performs LD_PRELOAD interposition itself; the engine's " &
-              "io-monitor injects a second interposer and the two livelock " &
-              "on the same libc entry points (observed: 19h spin in " &
-              "t_stackable_hooks_extracted_process_tree)"
           let testDepfileEdge = dslfs.unmonitorableActionDepfile(
             output = testDepfile,
             inputs = @[spec.binary] & @(requiredBinaries),
-            reason = incompatibilityReason)
+            reason =
+              "test performs LD_PRELOAD interposition itself; the engine's " &
+              "io-monitor injects a second interposer and the two livelock " &
+              "on the same libc entry points (observed: 19h spin in " &
+              "t_stackable_hooks_extracted_process_tree)")
           reprobuildTestBuildActions.add(testDepfileEdge)
           executeAfter.add(testDepfileEdge)
           makeDepfilePolicy(testDepfile, suppressMonitorShimSeed = true)
@@ -2330,7 +2318,6 @@ package reprobuild:
         deps = executeDeps,
         after = executeAfter,
         requiredBinaries = requiredBinaries,
-        cacheable = not recordsHcrChild,
         actionId = executeActionId,
         registerImplicitName = false,
         extraEnv = optInLayerEnvFor(spec.source, on = false),
@@ -2432,8 +2419,6 @@ package reprobuild:
         source == "tests/unit/test_ci_reconcile_lock_credentials.py"
       let releaseSmokeTest =
         source == "tests/unit/test_release_smoke_dev_exec.py"
-      let hcrFixtureEdgeTest =
-        source == "tests/unit/test_hcr_replay_gate_ct_mcr_fixture_edge.py"
       let confinementSystemdAnalyzeTest =
         source == "tests/unit/test_daemon_worker_confinement_systemd_analyze.py"
       let pyExecute = pythonUnittest.run(
@@ -2463,9 +2448,6 @@ package reprobuild:
             "scripts/release/with_windows_archive_runquota.ps1",
             ".github/workflows/release.yml",
             "scripts/verify_release.sh", "repro.nim"]
-        elif hcrFixtureEdgeTest:
-          # The fixture script its prebuilt-bundle cases run.
-          @["scripts/build_hcr_ct_mcr_fixture.sh"]
         elif confinementSystemdAnalyzeTest:
           # The two CONF-3/CONF-4 scripts it imports, and the real unit,
           # threshold and lease-floor inputs and header they read.
@@ -2497,11 +2479,6 @@ package reprobuild:
       # for the loopback-forge cases.
       if ciLockCredentialsTest:
         appendRegisteredActionToolIdentityRefs(pyExecute.id, ["git"])
-      # The prebuilt-bundle cases run the fixture script, which uses what the
-      # bundle edge declares for it (`git` only for its closing message).
-      if hcrFixtureEdgeTest:
-        appendRegisteredActionToolIdentityRefs(pyExecute.id,
-          ["bash", "git", "mkdir", "cp"])
       if releaseSmokeTest:
         # Bind actual declared child tools into the filtered execute PATH.
         appendRegisteredActionToolIdentityRefs(pyExecute.id, ["bash", "just"])
@@ -2606,6 +2583,8 @@ package reprobuild:
     # compiles record, and they missed on the next build. The paths below
     # stay spelled from the root; ``nim.c`` re-spells them for the argv.
     var reprobuildAppsActions: seq[BuildActionDef] = @[]
+    # Members of ``apps`` that are not part of ``release``.
+    var reprobuildAppsOnlyActions: seq[BuildActionDef] = @[]
 
     # The FULL CLI / build engine. Named `reprobuild`, not `repro`: `repro`
     # is the thin daemon client (the edge near the bottom of this collection),
@@ -2823,7 +2802,7 @@ package reprobuild:
     # ``--define:ssl``. The ``nim.c`` alias adds portable OpenSSL linker names
     # and records the ``openssl`` tool identity ref, whose resolved library
     # channels supply the platform-specific search path.
-    reprobuildAppsActions.add(nim.c(
+    let binaryCacheBuild = nim.c(
       source = "apps/repro-binary-cache/repro_binary_cache.nim",
       binary = "build/bin/repro-binary-cache",
       defines = @["release", "ssl"],
@@ -2831,7 +2810,54 @@ package reprobuild:
       extraEnv = sourceOnlyEnv,
       nimcache = "build/nimcache/repro-binary-cache",
       runInSourceDir = true,
-      actionId = "reprobuild.apps.repro-binary-cache"))
+      actionId = "reprobuild.apps.repro-binary-cache")
+    reprobuildAppsActions.add(binaryCacheBuild)
+    # The binary cache is a helper tests run from build/bin
+    # (tests/e2e/addon/cache_e2e_support.nim), checked by
+    # repro_test_support/fresh_binary against the dependency list
+    # scripts/write_helper_deps.sh writes. Every path that builds it writes
+    # that list (ReproOS Add-On Mode spec §13 decision 65, amended round 6):
+    # scripts/build_apps.sh does, and this edge does for `repro build
+    # .#apps`. It runs the compiler's front end with the binary's defines
+    # and paths, under strace, and records the binary's sha256, so the list
+    # is tied to the binary this graph produced. Not cacheable: its output
+    # describes a file it reads (the binary) by digest, and it must run
+    # whenever that binary was rebuilt. Its id is outside
+    # ``reprobuild.apps.*`` on purpose: those are the compile edges a warm
+    # rebuild must serve from cache (t_b1_apps_action_cache_hit), and this
+    # edge always runs.
+    # Linux only (the writer traces the compiler with strace), and in the
+    # ``apps`` collection only, not in ``release``: a release build runs no
+    # test and needs no list, and a build without one leaves the binary
+    # refused by the tests, never accepted (the guard is fail-closed).
+    #
+    # strace comes from this package's `uses:` (Linux), so the graph
+    # provisions it into the edge's PATH. The edge always exists on Linux;
+    # when strace cannot run (no ptrace: Yama ptrace_scope 2 or 3, a seccomp
+    # profile without it) the writer fails and so does the build, loudly --
+    # it never vanishes. Such a host builds with scripts/build_apps.sh in
+    # REPRO_BUILD_APPS_HELPER_DEPS=none mode (CONTRIBUTING.md), and its
+    # helpers are then refused by the tests.
+    when defined(linux):
+      var binaryCacheDepsArgs = @["bash", "scripts/write_helper_deps.sh",
+        "repro-binary-cache", "apps/repro-binary-cache/repro_binary_cache.nim",
+        "--define:release", "--define:ssl"]
+      for p in sourceOnlyNimPaths: binaryCacheDepsArgs.add("--path:" & p)
+      let binaryCacheDeps = shell(
+        command = quoteShellCommand(binaryCacheDepsArgs),
+        actionId = "reprobuild.helper-deps.repro-binary-cache",
+        after = @[binaryCacheBuild],
+        extraInputs = @["scripts/write_helper_deps.sh",
+                        "build/bin/repro-binary-cache"],
+        extraOutputs = @[
+          "build/nimcache/repro-binary-cache/repro-binary-cache.deps"],
+        extraEnv = sourceOnlyEnv,
+        cacheable = false)
+      appendRegisteredActionToolIdentityRefs(binaryCacheDeps.id,
+        ["bash", "nim", "strace", "python3", "gcc", "rm", "mkdir", "cp",
+         "basename", "uname", "cat"])
+      reprobuildAppsOnlyActions.add(binaryCacheDeps)
+      discard target("repro-binary-cache-deps", binaryCacheDeps)
 
     reprobuildAppsActions.add(nim.c(
       source =
@@ -3057,7 +3083,7 @@ package reprobuild:
           appendRegisteredActionToolIdentityRefs(appEdge.id,
             ["sqlite", "libblake3", "xxhash"])
 
-    discard collect("apps", reprobuildAppsActions)
+    discard collect("apps", reprobuildAppsActions & reprobuildAppsOnlyActions)
 
     # Bootstrap-And-Self-Build B2: per-helper typed-tool build edges +
     # the ``test-helpers`` build graph collection.
@@ -3457,41 +3483,6 @@ package reprobuild:
       nimcache = "build/nimcache/rp3_provider_plain",
       actionId = "reprobuild.test_fixtures.rp3_provider_plain"))
 
-    # The compiled half of the CodeTracer project-file test's PATH tools
-    # (``codeTracerToolFixtureRoot``). Every case used to compile its own
-    # copies into ``<tempRoot>/codetracer-tool-bin`` and put that directory on
-    # PATH. Interface extraction records the PATH value it observes and the
-    # compiler files it runs from that directory, so twelve cases extracting
-    # the same CodeTracer recipe were twelve correct misses (six extractions,
-    # ~20 min, per case). Built once here, at one path, the extraction of the
-    # first case serves the rest. The proxy finds the real compiler on PATH at run
-    # time (the next one after its own directory), so its bytes carry no host
-    # path. ``clang`` is the same proxy under the name the native cases call.
-    when defined(linux) or defined(macosx):
-      let codeTracerToolBinDir = dslfs.ensureDir(
-        codeTracerToolFixtureRoot & "/bin",
-        actionId = "reprobuild.test_fixtures.codetracer_tool_bin_dir")
-      let codeTracerToolClangDir = dslfs.ensureDir(
-        codeTracerToolFixtureRoot & "/clang-bin",
-        actionId = "reprobuild.test_fixtures.codetracer_tool_clang_dir")
-      reprobuildTestFixturesActions.add(codeTracerToolBinDir)
-      reprobuildTestFixturesActions.add(codeTracerToolClangDir)
-      reprobuildTestFixturesActions.add(gcc(
-        source = codeTracerToolSourceRoot & "/gcc-proxy.c",
-        output = codeTracerToolFixtureRoot & "/bin/gcc",
-        after = @[codeTracerToolBinDir],
-        actionId = "reprobuild.test_fixtures.codetracer_tool_gcc"))
-      reprobuildTestFixturesActions.add(gcc(
-        source = codeTracerToolSourceRoot & "/gcc-proxy.c",
-        output = codeTracerToolFixtureRoot & "/clang-bin/clang",
-        after = @[codeTracerToolClangDir],
-        actionId = "reprobuild.test_fixtures.codetracer_tool_clang"))
-      reprobuildTestFixturesActions.add(gcc(
-        source = codeTracerToolSourceRoot & "/stylus.c",
-        output = codeTracerToolFixtureRoot & "/bin/stylus",
-        after = @[codeTracerToolBinDir],
-        actionId = "reprobuild.test_fixtures.codetracer_tool_stylus"))
-
     # Graph-Owned-Test-Artifacts M3: the ct_test_unittest_parallel protocol
     # fixtures.
     #
@@ -3624,74 +3615,79 @@ package reprobuild:
       nimcache = "build/nimcache/ct_shim_fixture_m4_parity_suite",
       actionId = "reprobuild.test_fixtures.ct_shim_fixture_m4_parity_suite"))
 
-    # The `ct-mcr` recorder bundle behind `e2e_hcr_linux_replay_of_patched_
-    # recording` (`hcrCtMcrBundle`, at file scope, says what is in it and
-    # why the gate needs each file).
-    #
-    # A CROSS-REPO FIXTURE, and shaped the way
-    # metacraft-dev-guidelines `policies/cross-repo-builds.md` §2.3 says one
-    # is: the recorder checkout is found through
-    # `$CT_CODETRACER_NATIVE_RECORDER_SIBLING`, falling back to the canonical
-    # sibling path, and the bundle is built by THE RECORDER'S OWN recipe
-    # (`just build-ct-mcr`) in THE RECORDER'S OWN flake dev shell — never in
-    # this repository's shell, and never by restating that recipe here (§5,
-    # patterns 2 and 5). The script then stages the bundle under
-    # `hcrCtMcrFixtureRoot`, so this edge declares repo-relative outputs the
-    # gate's execute edge can take as typed inputs. Not `repro build` in the
-    # recorder: its graph stops at `codetracer-native-recorder.ct-cli`, short
-    # of the licence cdylib and the libraries copied beside `ct_cli`, and its
-    # `repro.nim` says why.
-    #
-    # NOT CACHEABLE, deliberately. What this edge reads is a second checkout
-    # this repository's lock does not pin, built in an environment its own
-    # `flake.lock` fetches through the nix daemon, by a recipe that resolves
-    # cargo and nimble dependencies over the network. The monitor sees the
-    # file reads, but not what a daemon-side fetch brought in, so a cached
-    # result could be served after the recorder moved. The recorder's recipe
-    # is incremental itself (cargo, nim's own cache), so re-running it costs
-    # its no-op rebuild, not a cold one. The OUTPUTS are still fingerprinted
-    # as the gate's typed inputs: a bundle that comes back byte-identical does
-    # not re-run the gate.
-    #
-    # Linux x86-64 only: the gate's recording arm is `when defined(linux) and
-    # defined(amd64)`, it is declared `unsupported` elsewhere in
-    # `scripts/hcr-lane-manifest.tsv`, and the bundle's file names are the
-    # Linux ones.
-    #
-    # The tools named below are what the script runs: `nix` enters the
-    # recorder's shell, the coreutils directory (`mkdir`, `cp`, and `uname`,
-    # `mv`, `basename` with them) stages the files, `git` names the recorder
-    # revision in the log. Everything the recipe itself runs comes from the
-    # recorder's shell, which is the point.
-    when defined(linux) and defined(amd64):
-      let hcrCtMcrBundleEdge = shell(
-        command = "bash scripts/build_hcr_ct_mcr_fixture.sh",
-        actionId = hcrCtMcrBundleActionId,
-        extraInputs = @["scripts/build_hcr_ct_mcr_fixture.sh"],
-        extraOutputs = @hcrCtMcrBundle,
-        cacheable = false)
-      appendRegisteredActionToolIdentityRefs(hcrCtMcrBundleEdge.id,
-        ["bash", "nix", "git", "mkdir", "cp"])
-      # Its own collection, NOT `test-fixtures`. `scripts/run_tests.sh`
-      # refuses to run any test when `.#test-fixtures` fails, which is right
-      # for fixtures built from this tree and wrong for one built from a
-      # sibling checkout: a workspace without the recorder (the `reprobuild`
-      # project does not include it), or a host that cannot fetch its private
-      # dependencies, would then run nothing at all instead of failing this
-      # one gate. run_tests.sh builds this collection separately and re-raises
-      # its failure at the end; `repro build test` and a focused build of the
-      # gate still reach the edge through the execute edge's dependency.
-      discard collect("test-cross-repo-fixtures", @[hcrCtMcrBundleEdge])
+    # Test fixtures that are DATA, not programs: the expensive inputs some
+    # tests used to compute at module or suite scope, in every process the
+    # runner started for them (the `--list-json` probe and one per case).
+    # Each is a generator program, compiled by a `nim.c` edge, and a `shell`
+    # edge that runs it into a stable path under `build/test-fixtures`. The
+    # run edge is monitored like any other, so its cache key is the content
+    # the generator read -- its own binary, and whatever it compiles or
+    # reads -- and the engine re-runs it only when that changes. A test
+    # reads the outputs (declared below, and typed inputs of its execute
+    # edge through `testFixtureArtifacts`); nothing heavy runs before its
+    # first case. reprobuild-pm issue 2026-11-07, "test binaries pay
+    # minutes of module init before any case runs", option B1.
+    proc fixtureGenerator(name, source: string;
+                          passL: seq[string] = @[]): BuildActionDef =
+      nim.c(
+        source = source,
+        binary = testDataFixtureRoot & "/generators/" & name,
+        paths = testNimPaths,
+        passL = passL,
+        extraEnv = sourceOnlyEnv,
+        nimcache = "build/nimcache/test_fixture_gen_" & name,
+        actionId = "reprobuild.test_fixtures.gen_" & name)
+
+    proc runFixtureGenerator(name: string; generator: BuildActionDef;
+                             args, actionId: string;
+                             outputs: openArray[string]): BuildActionDef =
+      ## Runs the binary `fixtureGenerator(name, ...)` built; a shell finds
+      ## `<name>.exe` from `<name>` on Windows.
+      shell(
+        command = testDataFixtureRoot & "/generators/" & name & " " & args,
+        actionId = actionId,
+        after = @[generator],
+        extraInputs = generator.outputs,
+        extraOutputs = outputs)
+
+    # The RSA-4096 root and signing-authority keys of the software-root
+    # security-processor hierarchies (`cvmTestKeys`), from fixed seeds.
+    let cvmKeysGenerator = fixtureGenerator("cvm_test_keys",
+      "tests/fixtures/cvm-test-keys/gen_cvm_test_keys.nim",
+      passL = testRuntimePassL)
+    reprobuildTestFixturesActions.add(cvmKeysGenerator)
+    reprobuildTestFixturesActions.add(runFixtureGenerator("cvm_test_keys",
+      cvmKeysGenerator, cvmTestKeysRoot, cvmTestKeysActionId, cvmTestKeys))
+
+    # GM4b: the recipe-side interface extractions of the two gates that
+    # compare a home profile with a recipe's `uses:` (each a `nim c` plus
+    # an extract-runner run, minutes cold, that every process of the test
+    # used to repeat at module or suite scope).
+    let gm4bLikeUsesGenerator = fixtureGenerator("gm4b_like_uses",
+      "tests/fixtures/gm4b/gen_gm4b_like_uses.nim",
+      passL = testRuntimePassL)
+    reprobuildTestFixturesActions.add(gm4bLikeUsesGenerator)
+    reprobuildTestFixturesActions.add(runFixtureGenerator("gm4b_like_uses",
+      gm4bLikeUsesGenerator, gm4bLikeUsesRoot, gm4bLikeUsesActionId,
+      [gm4bLikeUsesArtifact]))
+    let gm4bCatalogImportsGenerator = fixtureGenerator(
+      "gm4b_catalog_imports",
+      "tests/fixtures/gm4b/gen_gm4b_catalog_imports.nim",
+      passL = testRuntimePassL)
+    reprobuildTestFixturesActions.add(gm4bCatalogImportsGenerator)
+    reprobuildTestFixturesActions.add(runFixtureGenerator(
+      "gm4b_catalog_imports", gm4bCatalogImportsGenerator,
+      gm4bCatalogImportsRoot, gm4bCatalogImportsActionId,
+      gm4bCatalogImportsOutputs))
 
     # The Nix package of THIS checkout (`nixPackageOutPathFixture`, at file
     # scope, says who reads it and why it is an edge): one `nix build
     # <checkout>#default`, before the test phase, instead of one per case.
     #
-    # Its own collection, `test-package-fixtures`, for the reason the
-    # cross-repo bundle has one: the build can fail for reasons that say
-    # nothing about the cases in `.#test-fixtures` (a flake input the host
-    # cannot fetch, a daemon that is down), and run_tests.sh must still run
-    # the suite. It builds this collection separately and re-raises its
+    # Its own collection, `test-package-fixtures`: the build can fail for
+    # reasons that say nothing about the cases in `.#test-fixtures` (a flake
+    # input the host cannot fetch, a daemon that is down), and run_tests.sh
+    # must still run the suite. It builds this collection separately and re-raises its
     # failure at the end; a gate whose fixture did not build falls back to
     # building the package itself and fails on its own.
     #
@@ -4331,7 +4327,7 @@ package reprobuild:
           # directories. LLVM's objcopy reads every target; the host's GNU
           # objcopy and zig 0.13's do not read an armv7 library
           # (packages/llvm_objcopy).
-          debugStripCommand: "llvm-objcopy --strip-debug",
+          debugStripCommand: LlvmObjcopyDebugStrip,
           preChecks: @[
             # The catalog builds the prefix takes, built for this target.
             "for r in nim-fork pcre clingo; do [ -d " &

@@ -70,6 +70,13 @@
 ## motivated asserting the kernel's answer rather than the return code.
 
 import std/[json, os, osproc, streams, strtabs, strutils, unittest]
+# Agent sockets go in a short directory under /tmp, not under the scratch
+# tree: on a runner whose work directory is long (the persistent benchmark
+# runner's `/var/lib/github-runner-work/mcl-bench-001/...`) a socket under
+# `build/` exceeds the 107-byte sun_path limit and the gate fails before it
+# asserts anything (process_fixtures.shortSocketDirAtProcessExit says why).
+when defined(posix):
+  from repro_test_support/process_fixtures import shortSocketDirAtProcessExit
 from repro_test_support import testScratchSlug
 
 when defined(linux) and defined(amd64):
@@ -288,9 +295,9 @@ int main(int argc, char **argv) {
       let patchBytes = parseElfRelObject(prepared).functionBytes(VictimSymbol)
       check patchBytes.len > 0
 
-      let dual = patchArm(repoRoot, target, workDir / "dual.sock",
+      let dual = patchArm(repoRoot, target, shortSocketDirAtProcessExit("hcr-") / "dual.sock",
         anonymous = false, patchBytes = patchBytes)
-      let anon = patchArm(repoRoot, target, workDir / "anon.sock",
+      let anon = patchArm(repoRoot, target, shortSocketDirAtProcessExit("hcr-") / "anon.sock",
         anonymous = true, patchBytes = patchBytes)
 
       # ---- BOTH ARMS PATCHED, so the difference below is about the page's

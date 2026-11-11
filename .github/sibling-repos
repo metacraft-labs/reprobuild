@@ -42,25 +42,17 @@ codetracer-trace-format-nim=dev
 # codetracer-trace-format input, so `dev` is the same source under a live ref.
 codetracer-trace-format=dev
 #
-# native-recorder is PINNED, temporarily, because its `dev` and
-# codetracer-trace-format-nim's `dev` stopped compiling together: trace-format
-# b8db98c6 (the 2026-10 format revision, on trace-format-nim `dev` since its
-# promotion on 2026-10-31) removed `writeMetaDatToBuffer`'s `paths` parameter,
-# and recorder `dev` (a18db9bd, 2026-10-09) still passes it, so the HCR lane's
-# ct-mcr bundle failed with "unknown named parameter: paths". The recorder's
-# port to the new API (c9d2126c) is on its `agents` line and reaches its `dev`
-# only by promotion.
-#
-# The pin is 3936bae1, the tip of the recorder's own agents-to-dev-2026-10-03
-# stabilization -- the counterpart of the trace-format-nim promotion that is
-# now its `dev`. Measured 2026-11-05: `just build-ct-mcr` at 3936bae1 builds
-# the complete bundle against trace-format-nim `dev` 9e27afc,
-# native-backend `dev` b0b1056f and visual-replay `dev` 4428479, and recorder
-# `dev` a18db9bd fails against the same siblings.
-#
-# REMOVE THIS PIN (back to `=dev`) once codetracer-native-recorder `dev`
-# contains c9d2126c.
-codetracer-native-recorder=3936bae14841c19ab826fce038cb949d19f4d422
+# native-recorder follows `dev` here, and its `dev` does NOT compile against
+# codetracer-trace-format-nim `dev` (trace-format b8db98c6 removed the
+# `paths` parameter recorder `dev` still passes). That does not reach a
+# build: the Test job puts the recorder and the siblings CodeTracer builds
+# with at the revisions CodeTracer's committed repro.lock names, and the
+# downstream job (downstream-tests.yml) replaces it with the recorder's
+# `agents` line and puts the recorder's build siblings at the revisions the
+# recorder's own lock names, so the recorder's own recipe builds it there.
+# The bundle is no longer a fixture of this repository's suite: the tests
+# that recorded with it moved to the recorder on 2026-11-07.
+codetracer-native-recorder=dev
 
 # codetracer's `ct` binary (built via codetracer/reprobuild.nim's `ct` target so
 # ct_incremental_adapter can exec `ct test --incremental`) imports the IsoNim UI
@@ -74,8 +66,8 @@ codetracer-native-recorder=3936bae14841c19ab826fce038cb949d19f4d422
 # tracks a moving tip) it is force-reset to the locked SHA rather than refused.
 # So these `=dev` entries no longer have to be kept in lock-step with codetracer's
 # lock for the ct build to stay green — the drift is reconciled at build time.
-# They stay because reprobuild's OWN e2e tests (codetracer-subset, watch) still
-# consume the siblings adjacent on the --path. reprobuild only ever execs the
+# They stay because reprobuild's OWN e2e test (watch) still consumes the
+# siblings adjacent on the --path. reprobuild only ever execs the
 # resulting `ct`.
 isonim=dev
 isonim-gpui=dev
@@ -111,11 +103,10 @@ reprobuild-ct-test-runner=dev
 # it. `sqlite3` moved there, then `shellcheck`, `shfmt` and `prek`, and each
 # move is a compile ERROR when no catalog defines the package, so without this
 # checkout every recipe this suite compiles that uses one of them stops: runquota's repro.nim
-# (t_b0_runquota_repro_nim_compiles), CodeTracer's (the e2e codetracer-subset
-# fixture and the `ct` build), and t_uses_resolves_sqlite3_from_real_
+# (t_b0_runquota_repro_nim_compiles), CodeTracer's (the `ct` build), and
+# t_uses_resolves_sqlite3_from_real_
 # reprobuild_packages, which exists to prove the real catalog -- not the
 # fixture under tests/reprobuild-packages -- defines what consumers rely on.
-# The CodeTracer fixture also uses `shellcheck`, and
 # t_import_of_a_moved_stdlib_module_names_the_new_home compiles `uses:` of all
 # three lint tools against the real catalog, so the pin must be a revision
 # that defines them (they arrived in eed38ec). t_e2e_home_profile_reaches_
@@ -216,7 +207,17 @@ reprobuild-packages=b68b01d3a775709869b1f2ba5f7f70f01873f20c
 # capture + preallocated shm segments), matching `io-mon-src` in flake.nix.
 # Moved to 7a3e4c89 (2026-10-30): Thumb-capable images fail closed on ARM.
 # Moved to e05beda0 (2026-10-30): patch-status global static again (re-review blocker).
-io-mon=e05beda08343b04b3d53f008ebcd0fe7bd27d8b1
+# Moved to e66e05c9 (2026-11-05), io-mon's `agents` tip: it carries 3d47bb1
+# (G42), the macOS tree-lifetime guard. Before it every macOS capture graded
+# incomplete with "macos backend has no complete tree-lifetime guard", so no
+# monitored edge was ever published on macOS and the M23 benchmark's warm
+# no-op workload re-executed every action. Needs nim-stackable-hooks c1d55ce
+# (below). e05beda0 is an ancestor.
+# Moved to ac06360d (2026-11-08), io-mon's `agents` tip: it carries 23556a3, which
+# answers dlsym(RTLD_NEXT) relative to the caller, so a hook library preloaded
+# after the monitor shim no longer finds itself and recurses. e66e05c9 is an
+# ancestor.
+io-mon=ac06360d15be70aca46202d0ce04c5b17cba5ac1
 # Must match `nim-stackable-hooks-src` in flake.nix. `release.yml` overrides
 # that input to THIS clone, so a divergent revision here silently substitutes a
 # different stackable_hooks for the one the flake pins. c6cf6ad, which stood
@@ -250,7 +251,9 @@ io-mon=e05beda08343b04b3d53f008ebcd0fe7bd27d8b1
 # Moved 059c549 -> 3af8a4e (2026-10-30) with `nim-stackable-hooks-src`: the armhf
 # raw-syscall substrate.
 # Moved 3af8a4e -> 7533478 (2026-10-30) with `nim-stackable-hooks-src`.
-nim-stackable-hooks=75334780682e70b1adb58bf813d869e7f5df63f5
+# Moved 7533478 -> c1d55ce (2026-11-05) with `nim-stackable-hooks-src`, for
+# io-mon e66e05c9 (`platform/linux_image_code_ranges`).
+nim-stackable-hooks=c1d55ce33fb2a29e4cf8d8bdbe1713f355370d0a
 # Must match `runquota-src` in flake.lock, for the reason the
 # nim-stackable-hooks note above gives: `release.yml` overrides that input to
 # THIS clone. The release also builds the `runquotad` and `runquota` every
@@ -278,27 +281,20 @@ nim-shm-lease=22e3100cdb4fbc374689ddac55b4b32c90654140
 # `main` retired in the org branch-rename sweep; mainline is now `dev`.
 repo-workspaces=dev
 
-# The shared-actions repo, declared here as an ordinary sibling because
-# `tests/e2e/codetracer-subset/t_e2e_codetracer_in_place_project_file.nim`
-# READS A FILE OUT OF IT: `reprobuild-provision/provision-reprobuild-siblings.sh`
-# is the oracle for the CodeTracer Nim-gitlink provisioning contract, and
-# `repro_test_support.requireMetacraftGithubActionsRoot` raises rather than
-# skipping when the checkout is absent — per the suite's no-silent-skip rule,
-# a missing prerequisite fails loudly and names itself.
+# The shared-actions repo, declared here as an ordinary sibling (GitHub
+# materialises a `uses: metacraft-labs/metacraft-github-actions/...@dev`
+# composite action under the runner's private `_actions/` tree, not adjacent to
+# the checkout, so no `uses:` line produces this directory).
 #
-# `uses: metacraft-labs/metacraft-github-actions/...@dev` does NOT satisfy that
-# read. GitHub materialises a composite action under the runner's private
-# `_actions/` tree, not adjacent to the checkout, so a job that references ten
-# of these actions still has no sibling directory for the test to open.
-#
-# Until now the only thing that produced one was a bespoke `clone-repo` step in
-# `ci.yml`, which covered exactly the one job that step was written into and
-# nothing else — no other CI job, and no developer workspace. That is the gap
-# these three cases reported: a workspace built from reprobuild's project set
-# alone never gets this repo, and the cases fail on every local run. Declaring
-# it here puts the prerequisite in the blessed clone-list that
-# `docs/repository-requirements.md` designates for exactly this purpose,
-# as data rather than as one workflow's inline step.
+# Its one hard consumer was the CodeTracer in-place project-file e2e test, which
+# read `reprobuild-provision/provision-reprobuild-siblings.sh` out of it; that
+# test was removed on 2026-11-06 (CodeTracer's own CI covers it). What still
+# reads this checkout is leg (5) of
+# tests/integration/t_workspace_lock_partition_resolves_a_sibling_for_ci.nim,
+# which runs the real `clone-siblings/resolve-sibling-rev.sh` when it finds
+# one here (falling back to `../codetracer/scripts/`) and skips that leg
+# otherwise. Kept for that leg; drop it together with ci.yml's clone step if
+# the leg is not worth a clone.
 metacraft-github-actions=dev
 
 # The Test Certificates specification (private; mainline `latest`). Its

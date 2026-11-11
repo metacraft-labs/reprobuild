@@ -84,10 +84,22 @@ proc goodShow(): ShowProps =
 proc goodInput(): EffectiveInput =
   result = EffectiveInput(unit: "a.service", rendered: ru,
     version: FloorVersion, show: goodShow(), fragment: fragment,
-    denied: toHashSet(["memfd_create", "mount"]))
+    denied: toHashSet(["memfd_create", "mount"]), partialShow: true)
   result.uidOf = proc (n: string): int = (if n == "root": 0 else: 1000)
   result.groupsOf = proc (n: string): seq[string] = @[n]
-  result.readableByAll = proc (p: string): bool = not p.startsWith("/etc/shadow")
+  result.inspectFile = proc (p: string): string =
+    (if p.startsWith("/etc/shadow"): "it is not readable by every user" else: "")
+  result.gidOf = proc (g: string): int =
+    case g
+    of "root", "toor": 0
+    of "adm": 4
+    of "disk": 6
+    of "shadow": 42
+    of "ssl-cert": 110
+    of "a": 1000
+    else: -1
+  result.limitCeilings = {"DefaultLimitNOFILE": "524288",
+    "DefaultLimitNOFILESoft": "1024"}.toTable
   result.lines["ExecStartEx"] = @["{ path=" & Prefix & "/bin/svc ; argv[]=" &
     Prefix & "/bin/svc ; flags= ; start_time=[n/a] }"]
   result.loaded = @[(path: fragment, content: ru)]
@@ -113,6 +125,7 @@ suite "round 4: the effective-unit check is the authority":
     # A dynamic user is in no group /etc/group names.
     e = goodInput()
     e.show["DynamicUser"] = "yes"
+    e.uidOf = proc (n: string): int = -1   # "a" is not a static account here
     e.groupsOf = proc (n: string): seq[string] = @["shadow"]
     check problemsOf(e) == ""
 
@@ -154,12 +167,16 @@ suite "round 4: the effective-unit check is the authority":
       check (k & "=" & v & " opens a file or terminal") in problemsOf(e)
     e = goodInput()
     e.show["EnvironmentFiles"] = "/etc/shadow (ignore_errors=no)"
-    check "is read as root and is not readable by every user" in problemsOf(e)
+    # Superseded by §13 decision 50 (round 7): default-deny, not readability.
+    check "EnvironmentFile /etc/shadow: /etc/shadow is neither in the add-on's store" in problemsOf(e)
+    # LoadCredential= is [unprintable] in systemctl show: judged from the
+    # files systemd loaded (round 6).
     e = goodInput()
-    e.show["LoadCredential"] = "x:/etc/shadow"
+    e.loaded = @[(path: fragment, content: ru.replace("[Install]", "LoadCredential=x:/etc/shadow\n\n[Install]"))]
     check "outside the service's own credentials" in problemsOf(e)
     e = goodInput()
-    e.show["LoadCredential"] = "x:" & CredentialRoot & "/a/x"
+    e.loaded = @[(path: fragment, content: ru.replace("[Install]",
+                  "LoadCredential=x:" & CredentialRoot & "/a/x\n\n[Install]"))]
     check problemsOf(e) == ""
 
   test "finding 3: a setting systemd does not report (PermissionsStartOnly=)":
@@ -209,16 +226,17 @@ suite "round 4: every property systemd reports is classified":
                    "systemd_properties" / "service-unit-properties.tsv"):
       if l.len == 0 or l[0] == '#': continue
       let k = l.split('\t')[0]
-      if k notin ComparedProps and not isExecProp(k) and not isInertProp(k):
+      if k notin ComparedProps and k notin LimitProps and
+          k notin FileJudgedProps and not isExecProp(k) and not isInertProp(k):
         unclassified.add(k)
     check unclassified.len == 0
     checkpoint unclassified.join(" ")
 
   test "directory symlinks stay inside the directory root":
     var e = goodInput()
-    e.show["StateDirectorySymlink"] = "a9-st:"
+    e.show["StateDirectorySymlink"] = "a/st:"
     check problemsOf(e) == ""
-    e.show["StateDirectorySymlink"] = "a9-st:../../etc/x"
+    e.show["StateDirectorySymlink"] = "a/st:../../etc/x"
     check "a link outside the directory root" in problemsOf(e)
     e = goodInput()
     e.show["MountFlags"] = "shared"

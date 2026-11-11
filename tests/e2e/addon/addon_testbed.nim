@@ -477,6 +477,37 @@ proc newGuest*(b: BaseImage; diskGiB = 8; relayPort = 0; cpus = 0;
     result.qemu = newQemuBootBackend(stateDir = cacheDir() / "qemu-state",
       namePrefix = QemuNamePrefix, sshUser = "root", sshKeyPath = result.keyPath)
 
+proc newImageGuest*(b: BaseImage; image, keyPath: string; diskGiB = 0):
+    Guest =
+  ## Claim a run and prepare (not boot) a guest that boots a SYNTHESISED
+  ## image (`repro infra image`, A16) rather than the cached base: the disk
+  ## is a qcow2 overlay over ``image`` (raw, read-only to QEMU), and there is
+  ## no seed volume -- the image carries its own cloud-init seed, which
+  ## authorises ``keyPath``'s public half for root. ``b`` names the
+  ## architecture and the base the image was built from.
+  when not defined(gostiAvailable):
+    raise newException(TestBedError,
+      "gosti is not available: set GOSTI_SRC to gosti's src directory")
+  else:
+    if useIncus():
+      raise newException(TestBedError, "an image guest boots a disk image; " &
+        "it is QEMU only")
+    let name = QemuNamePrefix & "img-" & $getCurrentProcessId() & "-" &
+      randomHex(6)
+    let (dir, token) = claimRunDir(name)
+    result = Guest(base: b, name: name, runDir: dir, ownerToken: token,
+                   kind: gkQemu, keyPath: keyPath)
+    result.diskPath = dir / "disk.qcow2"
+    var cmd = "qemu-img create -q -f qcow2 -F raw -b " & quoteShell(image) &
+      " " & quoteShell(result.diskPath)
+    if diskGiB > 0: cmd.add " " & $diskGiB & "G"
+    if execCmd(cmd) != 0:
+      raise newException(TestBedError, "qemu-img create over " & image &
+        " failed")
+    result.serialLog = dir / "serial.log"
+    result.qemu = newQemuBootBackend(stateDir = cacheDir() / "qemu-state",
+      namePrefix = QemuNamePrefix, sshUser = "root", sshKeyPath = keyPath)
+
 proc bootTimeout(g: Guest): int =
   case g.base.debArch
   of "amd64": 300
@@ -634,6 +665,20 @@ proc destroy*(g: Guest) =
         g.qemu.stopAndCleanup(g.vm, deleteVm = true)
     except CatchableError as e:
       g.note("teardown: " & e.msg)
+  # The guest's serial console is the one record of what happened inside
+  # it -- a reboot, the OOM killer, sshd or the network -- and the run
+  # directory goes below. Kept beside the gate records under the guest's
+  # name, so a failed cell can be explained after its teardown (A13 round
+  # 6: an `scp` failure whose cause could not be found, its serial log
+  # removed with the run).
+  try:
+    if g.serialLog.len > 0 and fileExists(g.serialLog):
+      let kept = recordsDir() / "serial" / (g.name & ".serial.log")
+      createDir(parentDir(kept))
+      copyFile(g.serialLog, kept)
+      g.note("serial console kept at " & kept)
+  except CatchableError as e:
+    g.note("teardown: keeping the serial console: " & e.msg)
   try:
     releaseRunDir(g.runDir, g.ownerToken)
   except CatchableError as e:
@@ -965,21 +1010,21 @@ proc holdWriteback*(g: Guest) =
     raise newException(TestBedError, "could not hold writeback back: " &
       r.stdout & r.stderr)
 
-proc startSwitchPausedAt*(g: Guest; repro, name, text, point: string;
-                          timeoutSec = 900): ExecOut =
-  ## Start ``repro infra apply --profile <text>`` in the background with the
-  ## seam build's pause at ``point``, and wait until the switch reports it
-  ## has stopped there. Returns the paused-at check (exit 0 when reached);
-  ## a switch that ended without reaching the point is a non-zero result
-  ## carrying its log.
+proc startPausedAt*(g: Guest; command, point: string;
+                    timeoutSec = 900): ExecOut =
+  ## Start ``command`` (a guest shell command line running the seam build)
+  ## in the background with the seam build's pause at ``point``, and wait
+  ## until it reports it has stopped there. Returns the paused-at check
+  ## (exit 0 when reached); a command that ended without reaching the
+  ## point is a non-zero result carrying its log. ``resumeSwitch`` lets it
+  ## continue.
   if not testSeams():
-    raise newException(TestBedError, "a paused switch needs the seam build " &
-      "(REPRO_ADDON_TEST_SEAMS=1)")
-  let p = g.putProfile(name, text)
+    raise newException(TestBedError, "a paused command needs the seam " &
+      "build (REPRO_ADDON_TEST_SEAMS=1)")
   discard g.run("rm -f " & SeamDir & "/test-paused-at " & SeamDir &
     "/test-resume /root/addon/bg-apply.log /root/addon/bg-apply.rc; printf '%s\\n' " &
     point & " > " & SeamDir & "/test-pause-at; sync")
-  discard g.run("setsid nohup sh -c '" & repro & " infra apply --profile " & p &
+  discard g.run("setsid nohup sh -c '" & command &
     " > /root/addon/bg-apply.log 2>&1; echo $? > /root/addon/bg-apply.rc' " &
     "> /dev/null 2>&1 < /dev/null &")
   let deadline = epochTime() + timeoutSec.float
@@ -989,13 +1034,37 @@ proc startSwitchPausedAt*(g: Guest; repro, name, text, point: string;
     if r.stdout.strip() == point:
       return ExecOut(exitCode: 0, stdout: point)
     if r.stdout.strip().len > 0 and r.stdout.strip() != point:
-      # The apply ended (its exit code is there) without pausing.
+      # The command ended (its exit code is there) without pausing.
       return ExecOut(exitCode: 1, stdout: r.stdout,
         stderr: g.exec("cat /root/addon/bg-apply.log").stdout)
     sleep(500)
-  ExecOut(exitCode: 1, stderr: "the switch did not reach " & point &
+  ExecOut(exitCode: 1, stderr: "the command did not reach " & point &
     " within " & $timeoutSec & " s: " &
     g.exec("cat /root/addon/bg-apply.log").stdout)
+
+proc startSwitchPausedAt*(g: Guest; repro, name, text, point: string;
+                          timeoutSec = 900): ExecOut =
+  ## Start ``repro infra apply --profile <text>`` in the background with the
+  ## seam build's pause at ``point``, and wait until the switch reports it
+  ## has stopped there (``startPausedAt``).
+  let p = g.putProfile(name, text)
+  g.startPausedAt(repro & " infra apply --profile " & p, point, timeoutSec)
+
+proc commitJournalOnly*(g: Guest) =
+  ## Make ext4 commit its running journal transaction -- every rename and
+  ## metadata change made so far -- without writing anyone else's file
+  ## data: one fsync of a file of the gate's own. Under ``holdWriteback``
+  ## nothing else commits the journal, so this is the moment a real host
+  ## reaches on its own within ``commit=`` seconds (5 by default): a
+  ## rename made before it is on the disk, and the renamed file's data is
+  ## there only if someone fsync'd it (delayed allocation, no
+  ## ``auto_da_alloc``). ``sync`` would write every dirty page and hide a
+  ## missing fsync; this does not.
+  let r = g.exec("dd if=/dev/zero of=/root/addon/journal-commit bs=4096 " &
+    "count=1 conv=fsync status=none")
+  if r.exitCode != 0:
+    raise newException(TestBedError, "could not commit the journal: " &
+      r.stdout & r.stderr)
 
 proc resumeSwitch*(g: Guest; timeoutSec = 900): ExecOut =
   ## Let a paused switch continue and wait for it to end; its exit code and
@@ -1069,3 +1138,117 @@ proc rebootGuest*(g: Guest; timeoutSec = 600) =
   discard g.exec("systemctl reboot", timeoutSec = 30)
   discard g.waitPoweredOff(timeoutSec)
   g.boot()
+
+# ---------------------------------------------------------------------------
+# Whether a unit ran, from its journal (A13 round 6).
+# ---------------------------------------------------------------------------
+
+proc journalStarted*(journal, unit: string): bool =
+  ## Whether the journal of ``unit`` shows any start of it (a "Starting" or
+  ## "Started" line that is not a skipped start): what a gate asserts was
+  ## never there for a unit that must not start.
+  for l in journal.splitLines():
+    if unit in l and ("Started " in l or "Starting " in l) and "skipped" notin l:
+      return true
+  false
+
+proc lastStart(lines: seq[string]): int =
+  result = -1
+  for k, l in lines:
+    if ("Started " in l or "Starting " in l) and "skipped" notin l: result = k
+
+proc unitLines(journal, unit: string): seq[string] =
+  for l in journal.splitLines():
+    if unit in l: result.add(l)
+
+proc failedLine(l: string): bool =
+  "Failed with result" in l or "Failed to start" in l or
+    ("Main process exited" in l and "status=0/" notin l) or
+    ("Control process exited" in l and "status=0/" notin l)
+
+proc journalFailedAfterStart*(journal, unit: string): bool =
+  ## Whether the journal of ``unit`` shows a failure after its last start
+  ## ("Failed with result", "Failed to start", a main or control process
+  ## exiting with a status other than 0).
+  let lines = unitLines(journal, unit)
+  let last = lastStart(lines)
+  if last < 0: return false
+  for l in lines[last .. ^1]:
+    if failedLine(l): return true
+  false
+
+proc journalRan*(journal, unit: string): bool =
+  ## Whether the journal of ``unit`` (``journalctl -b -u <unit>``, oldest
+  ## first) shows its last start run to completion: a "Started"/"Starting"
+  ## line, then "Deactivated successfully", and no failure after the start.
+  ## A "Started" line is not a run: for a ``Type=simple`` unit systemd logs
+  ## it at fork, before an exec or namespace failure (226/NAMESPACE, A13
+  ## round 6) is reported (A13 review round 7, finding 4). A unit that is
+  ## still running has not completed: its evidence is the marker its
+  ## command writes (``unitRan``). A unit only ever "skipped" (a start
+  ## condition unmet) did not run. ``systemctl show`` cannot say this: once
+  ## a unit that ran is inactive and unreferenced, systemd unloads it, and a
+  ## fresh load reports every runtime property zero (measured, debian-13,
+  ## A13 round 6).
+  let lines = unitLines(journal, unit)
+  let last = lastStart(lines)
+  if last < 0: return false
+  var completed = false
+  for l in lines[last .. ^1]:
+    if failedLine(l): return false
+    if "Deactivated successfully" in l: completed = true
+  completed
+
+const
+  CapturedNeverStarted = """
+[  248.692251] addon-tb systemd[1]: eth-r4-host.service - A13 round-4 probe skipped, unmet condition check ConditionPathExists=!/
+"""
+    ## Captured, debian-13 (A13 round 6): a unit held, never started.
+  CapturedStartedFailed = """
+[  281.483513] addon-tb systemd[1]: eth-r6-exec.service - A13 round-5 probe skipped, unmet condition check ConditionPathExists=!/
+[  281.803476] addon-tb systemd[1]: Starting eth-r6-exec.service - A13 round-5 probe...
+[  281.837865] addon-tb (true)[6284]: eth-r6-exec.service: Failed to set up mount namespacing: /var/lib/a13-r5: No such file or directory
+[  281.837893] addon-tb (true)[6284]: eth-r6-exec.service: Failed at step NAMESPACE spawning /bin/true: No such file or directory
+[  281.838693] addon-tb systemd[1]: eth-r6-exec.service: Control process exited, code=exited, status=226/NAMESPACE
+[  281.838751] addon-tb systemd[1]: eth-r6-exec.service: Failed with result 'exit-code'.
+[  281.838875] addon-tb systemd[1]: Failed to start eth-r6-exec.service - A13 round-5 probe.
+"""
+    ## Captured, debian-13 (A13 round 6): a unit started that failed.
+  CapturedRan = """
+[  265.228332] addon-tb systemd[1]: eth-r4-host.service - A13 round-4 probe skipped, unmet condition check ConditionPathExists=!/
+[  265.749769] addon-tb systemd[1]: Started eth-r4-host.service - A13 round-4 probe.
+[  265.821244] addon-tb systemd[1]: eth-r4-host.service: Deactivated successfully.
+"""
+    ## Captured, debian-13 (A13 round 6): a unit held, then started by the
+    ## apply after its check, ran and exited 0.
+  CapturedStartedOnly = """
+[  265.749769] addon-tb systemd[1]: Started eth-r4-host.service - A13 round-4 probe.
+"""
+    ## A ``Type=simple`` unit read right after its fork: "Started" and
+    ## nothing yet (A13 review round 7, finding 4).
+  CapturedStartedThenNamespace = """
+[  281.803476] addon-tb systemd[1]: Started eth-r4-host.service - A13 round-4 probe.
+[  281.837865] addon-tb (sh)[6284]: eth-r4-host.service: Failed to set up mount namespacing: /var/lib/a13-r4: No such file or directory
+[  281.838693] addon-tb systemd[1]: eth-r4-host.service: Main process exited, code=exited, status=226/NAMESPACE
+[  281.838751] addon-tb systemd[1]: eth-r4-host.service: Failed with result 'exit-code'.
+"""
+    ## A ``Type=simple`` unit whose namespace set-up failed after its
+    ## "Started" line.
+
+static:
+  # The checks' negative and positive controls, on captured journals: they
+  # cannot pass a unit that never started or one that failed, nor miss a
+  # start.
+  doAssert not journalRan(CapturedNeverStarted, "eth-r4-host.service")
+  doAssert not journalRan(CapturedStartedFailed, "eth-r6-exec.service")
+  doAssert journalRan(CapturedRan, "eth-r4-host.service")
+  doAssert not journalRan(CapturedStartedOnly, "eth-r4-host.service")
+  doAssert not journalRan(CapturedStartedThenNamespace, "eth-r4-host.service")
+  doAssert journalFailedAfterStart(CapturedStartedThenNamespace, "eth-r4-host.service")
+  doAssert journalFailedAfterStart(CapturedStartedFailed, "eth-r6-exec.service")
+  doAssert not journalFailedAfterStart(CapturedRan, "eth-r4-host.service")
+  doAssert not journalFailedAfterStart(CapturedStartedOnly, "eth-r4-host.service")
+  doAssert not journalStarted(CapturedNeverStarted, "eth-r4-host.service")
+  doAssert journalStarted(CapturedStartedFailed, "eth-r6-exec.service")
+  doAssert journalStarted(CapturedRan, "eth-r4-host.service")
+

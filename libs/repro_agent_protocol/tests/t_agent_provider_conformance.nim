@@ -3,7 +3,7 @@
 ## proves the interface is implementable without privileged shortcuts".
 ##
 ## The harness (`conformance.runConformance`) runs a real host on real
-## sockets and starts the provider as a separate process: this test binary
+## sockets (named pipes on Windows) and starts the provider as a separate process: this test binary
 ## re-executed with `REPROOS_CONFORMANCE_ROLE` set, so no helper binary is
 ## compiled. The provider uses only the socket client and the public
 ## record encoders. The two negative controls show the harness fails a
@@ -17,7 +17,7 @@ import repro_agent_protocol/[conformance, fixture_provider, transport]
 
 proc reachForConsent(): int =
   ## A provider that tries the consent socket before behaving.
-  let consentPath = getEnv("REPROOS_AGENT_SOCKET").parentDir / "consent.sock"
+  let consentPath = consentPathBeside(getEnv("REPROOS_AGENT_SOCKET"))
   try:
     let c = waitFor connectHost(consentPath)
     discard waitFor c.request(encodeDeterministic(cMap([

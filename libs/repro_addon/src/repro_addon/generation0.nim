@@ -186,6 +186,23 @@ const
     ## next run's first work (a rotating cursor).
   EvidenceShipUnit* = "repro-addon-evidence.service"
   EvidenceShipPathUnit* = "repro-addon-evidence.path"
+  ShipBackoffMaxSec* = 240
+    ## The longest a shipping run waits before it exits (the backoff's
+    ## ceiling).
+  ShipLockWaitSec* = 120
+    ## The longest a shipping run waits for another one to finish.
+  ShipDrainTimeoutSec* = 20
+    ## The longest one pass of a shipping run waits for the sink.
+  ShipPassesMaxN* = 20
+    ## Re-listings of the outbox one run makes (``ShipPassesMax``).
+  EvidenceShipTimeoutStartSec* = 900
+    ## ``TimeoutStartSec=`` of the shipping unit (a oneshot: it covers the
+    ## whole run, the backoff's wait included). Strictly above the longest
+    ## run its own bounds allow, so systemd never kills a run that is
+    ## waiting by design (A11 review round 2: the 300 s ceiling equalled
+    ## the 5 min timeout, and every run past five minutes of an
+    ## unreachable sink ended killed).
+
   EvidenceShipTimer* = "repro-addon-evidence.timer"
   AgentSlice* = "system-reproagent.slice"
     ## The fetch unit's slice when the egress observer is present: a slice
@@ -356,6 +373,11 @@ proc unitPath*(name: string): string =
   ## derivation (``systemUnitPath``), so what the collision pass observes
   ## and what the write lands on are one string by construction.
   systemUnitPath(name)
+
+static:
+  doAssert ShipBackoffMaxSec + ShipLockWaitSec +
+           ShipPassesMaxN * ShipDrainTimeoutSec < EvidenceShipTimeoutStartSec,
+    "the shipping unit's timeout must exceed its longest run"
 
 proc assertInlineSafe*(what, text: string) =
   ## The canonical profile text has no escapes: a double quote ends the
@@ -706,6 +728,9 @@ proc agentCompileBounds*(): string =
   "IOWeight=" & $AgentCompileWeight & "\n" &
   "OOMScoreAdjust=" & $AgentCompileOomScoreAdjust & "\n"
 
+const EgressSetSize* = 4096
+  ## Elements each refused-destination set holds.
+
 proc renderEgressNft*(allowed: seq[string]): string =
   ## ``/etc/repro/egress.nft``: the add-on's table, replaced as a whole on
   ## every load (declare, delete, define: one transaction), so loading it
@@ -727,17 +752,25 @@ proc renderEgressNft*(allowed: seq[string]): string =
   "table inet repro_addon_egress {\n" &
   "\tset allowed4 {\n\t\ttype ipv4_addr\n" & elements(v4) & "\t}\n" &
   "\tset allowed6 {\n\t\ttype ipv6_addr\n" & elements(v6) & "\t}\n" &
-  "\tset refused4 {\n\t\ttype ipv4_addr\n\t\tsize 4096\n" &
+  "\tset refused4 {\n\t\ttype ipv4_addr\n\t\tsize " & $EgressSetSize & "\n" &
     "\t\tflags dynamic\n\t\tcounter\n\t}\n" &
-  "\tset refused6 {\n\t\ttype ipv6_addr\n\t\tsize 4096\n" &
+  "\tset refused6 {\n\t\ttype ipv6_addr\n\t\tsize " & $EgressSetSize & "\n" &
     "\t\tflags dynamic\n\t\tcounter\n\t}\n" &
   "\tcounter refused {\n\t}\n" &
   "\tchain output {\n" &
   "\t\ttype filter hook output priority filter - 10; policy accept;\n" &
+  # The named counter has a rule of its own, before the set update: when a
+  # dynamic set is full, ``update`` stops its rule (NFT_BREAK), and a
+  # counter on that rule would stop counting with it (A11 review finding
+  # 13). The check compares the two to see packets the sets no longer hold.
   "\t\t" & match & " meta nfproto ipv4 ip daddr != @allowed4 " &
-    "update @refused4 { ip daddr } counter name \"refused\"\n" &
+    "counter name \"refused\"\n" &
   "\t\t" & match & " meta nfproto ipv6 ip6 daddr != @allowed6 " &
-    "update @refused6 { ip6 daddr } counter name \"refused\"\n" &
+    "counter name \"refused\"\n" &
+  "\t\t" & match & " meta nfproto ipv4 ip daddr != @allowed4 " &
+    "update @refused4 { ip daddr }\n" &
+  "\t\t" & match & " meta nfproto ipv6 ip6 daddr != @allowed6 " &
+    "update @refused6 { ip6 daddr }\n" &
   "\t\t" & match & " meta nfproto ipv4 ip daddr != @allowed4 " &
     "limit rate 10/second log prefix \"repro-addon-egress-refused \" level warn\n" &
   "\t\t" & match & " meta nfproto ipv6 ip6 daddr != @allowed6 " &
@@ -751,15 +784,29 @@ proc agentSliceUnit*(): string =
   "[Install]\n" &
   "WantedBy=repro-addon.target\n"
 
-proc egressUnit*(nft: string): string =
+proc egressUnit*(nft: string; tableSha256 = ""): string =
   ## ``repro-addon-egress.service``: loads the table and deletes it when
   ## stopped (uninstall stops it). Root with ``CAP_NET_ADMIN`` alone and no
   ## IP socket; ordered before the fetch unit, which requires it, and the
   ## re-assert unit, which checks the table.
+  ##
+  ## ``tableSha256`` is the SHA-256 of the ``egress.nft`` it loads, carried
+  ## in an ``X-`` key, which systemd ignores (systemd.unit(5), "Unit files
+  ## may include ... options prefixed with X-"; the canonical profile text
+  ## cannot carry a ``#`` comment): a new table (``agent-repin``) is then a changed unit, and
+  ## the switch restarts a changed unit, which loads the new table into the
+  ## kernel. Without it the unit's bytes stayed the same and the old sets
+  ## stayed loaded until a reboot (A11 review round 2).
   let load = when mutated("egress-observer-not-installed"): "/bin/true"
              else: nft & " -f " & EgressNftPath
+  let table = when mutated("egress-unit-ignores-table"): ""
+              else:
+                if tableSha256.len > 0:
+                  "X-Repro-Egress-Table-Sha256=" & tableSha256 & "\n"
+                else: ""
   "[Unit]\n" &
   "Description=Reprobuild add-on: egress observer (its own nftables table)\n" &
+  table &
   "Requires=" & AgentSlice & "\n" &
   "After=" & AgentSlice & "\n" &
   "Before=" & AgentFetchUnit & " " & ReassertUnit & "\n" &
@@ -923,9 +970,31 @@ proc agentPollSec*(a: AgentUnitsInputs): int =
 proc agentFetchUnit*(reproExe: string; a: AgentUnitsInputs;
                      observed = false): string =
   ## ``repro-agent-fetch.service``; ``observed``: under the egress observer
-  ## (``observeFetchUnit``).
+  ## (``observeFetchUnit``). THE one renderer of the fetch unit: bootstrap,
+  ## ``evidence-enrol``, ``agent-repin`` and the own-object migration all
+  ## call it, with the inputs ``fetchUnitInputsOf`` reads back from an
+  ## installed unit when they have no fresh ones (A11 review finding 2).
   let u = unobservedFetchUnit(reproExe, a)
   if observed: observeFetchUnit(u) else: u
+
+proc fetchUnitInputsOf*(unit: string): AgentUnitsInputs =
+  ## What an installed fetch unit was rendered from, as far as its bytes
+  ## say: the allow-list, and whether it binds the agent's hosts file (its
+  ## entries are in that file, not in the unit: one placeholder stands for
+  ## them).
+  for l in unit.splitLines():
+    if l.startsWith("IPAddressAllow="):
+      for a in l["IPAddressAllow=".len .. ^1].splitWhitespace():
+        result.allowedAddresses.add(a)
+    elif l.startsWith("BindReadOnlyPaths=" & AgentHostsPath & ":"):
+      result.hosts = @[("0.0.0.0", "hosts-file")]
+
+proc fetchUnitExe*(unit: string): string =
+  ## The add-on binary an installed fetch unit runs.
+  for l in unit.splitLines():
+    if l.startsWith("ExecStart="):
+      return l["ExecStart=".len .. ^1].splitWhitespace()[0]
+  ""
 
 proc agentFetchTimer*(a: AgentUnitsInputs = AgentUnitsInputs()): string =
   # The default renders as it always did (``5min``), so a host bootstrapped
@@ -1026,7 +1095,8 @@ proc evidenceShipUnit*(reproExe: string; e: EvidenceUnitsInputs): string =
   "[Service]\n" &
   "Type=oneshot\n" &
   "ExecStart=" & reproExe & " system addon evidence-ship\n" &
-  "TimeoutStartSec=5min\n" &
+  "TimeoutStartSec=" & (when mutated("ship-backoff-reaches-timeout"): "300"
+                         else: $EvidenceShipTimeoutStartSec) & "\n" &
   "CapabilityBoundingSet=\n" &
   "AmbientCapabilities=\n" &
   "NoNewPrivileges=yes\n" &
@@ -1089,12 +1159,23 @@ proc storeVerifyTimer*(): string =
 
 proc evidenceShipPathUnit*(): string =
   ## Starts the shipping unit whenever a record lands in the outbox (DET-6:
-  ## it leaves at once, not at the next timer).
+  ## it leaves at once, not at the next timer). ``DirectoryNotEmpty=``, not
+  ## ``PathChanged=``: systemd drops a ``PathChanged=`` event that arrives
+  ## while the unit it starts is still active, so a record that landed
+  ## during a shipping run waited for the timer (A11 drill D1). A
+  ## ``DirectoryNotEmpty=`` condition is checked again whenever the shipping
+  ## unit stops, so such a record starts the next run at once
+  ## (systemd.path(5)). The shipping run waits before it exits while
+  ## entries stay queued (the sink unreachable), which bounds how often the
+  ## condition restarts it.
   "[Unit]\n" &
   "Description=Reprobuild add-on: ship each evidence record as it is written\n" &
   "\n" &
   "[Path]\n" &
-  "PathChanged=" & EvidenceOutboxPath & "\n" &
+  (when mutated("evidence-path-changed-only"):
+     "PathChanged=" & EvidenceOutboxPath & "\n"
+   else:
+     "DirectoryNotEmpty=" & EvidenceOutboxPath & "\n") &
   # No trigger limit either: a path unit that hits one fails and stays
   # failed (A11 audit F2).
   (when mutated("evidence-path-rate-limited"): "" else:
@@ -1185,7 +1266,9 @@ proc egressObjects*(inp: Gen0Inputs): seq[OwnObject] =
     OwnObject(kind: ookUnit, unit: AgentSlice, path: unitPath(AgentSlice),
               content: agentSliceUnit(), enabled: true),
     OwnObject(kind: ookUnit, unit: EgressUnit, path: unitPath(EgressUnit),
-              content: egressUnit(inp.egress.nft), enabled: true),
+              content: egressUnit(inp.egress.nft,
+                sha256Hex(renderEgressNft(inp.egress.allowedAddresses))),
+              enabled: true),
     OwnObject(kind: ookUnit, unit: EgressCheckUnit,
               path: unitPath(EgressCheckUnit),
               content: egressCheckUnit(inp.reproExe), enabled: false),

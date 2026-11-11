@@ -1096,75 +1096,6 @@ proc workspaceRootForRepo*(repoRoot: string): string =
 
   normalizedPath(direct)
 
-proc codeTracerSourceRoot*(repoRoot: string): string =
-  ## Locate a Codetracer checkout for integration tests that copy a small,
-  ## real source subset. Tests may run from a temporary reprobuild worktree, so
-  ## the normal sibling checkout is not always adjacent to ``repoRoot``.
-  var candidates: seq[string]
-
-  let envRoot = getEnv("CODETRACER_ROOT")
-  if envRoot.len > 0:
-    candidates.add(absoluteCandidate(repoRoot, envRoot))
-
-  let envSrc = getEnv("CODETRACER_SRC")
-  if envSrc.len > 0:
-    let sourcePath = absoluteCandidate(repoRoot, envSrc)
-    candidates.add(sourcePath)
-    candidates.add(sourcePath.parentDir)
-
-  candidates.add(repoRoot.parentDir / "codetracer")
-  candidates.add(workspaceRootForRepo(repoRoot) / "codetracer")
-
-  let commonDir = gitCommonDir(repoRoot)
-  if commonDir.len > 0:
-    candidates.add(commonDir.parentDir.parentDir / "codetracer")
-
-  for candidate in candidates:
-    if isCodeTracerSourceRoot(candidate):
-      return normalizedPath(candidate)
-
-proc requireCodeTracerSourceRoot*(repoRoot: string): string =
-  result = codeTracerSourceRoot(repoRoot)
-  if result.len == 0:
-    raise newException(OSError,
-      "Codetracer checkout missing; set CODETRACER_ROOT to the checkout " &
-      "root or CODETRACER_SRC to its src directory")
-
-proc metacraftGithubActionsRoot*(repoRoot: string): string =
-  ## Locate the ``metacraft-github-actions`` sibling checkout.
-  ##
-  ## The shared CI composite actions used to live in this repository under
-  ## ``.github/actions/``. They were moved out because GitHub materialises a
-  ## composite action by downloading its WHOLE repository: a consumer that
-  ## merely referenced one of them had to pull this repo's ~546 MB archive
-  ## during ``Set up job``, against the runner's fixed 100-second per-action
-  ## timeout, which the Windows lane could not sustain. They now ship from the
-  ## small shared-actions repo, so the contract tests that assert on their
-  ## content have to read them from there.
-  ##
-  ## Resolution mirrors ``codeTracerSourceRoot``: tests may run from a
-  ## temporary reprobuild worktree, so the sibling is not always adjacent.
-  var candidates: seq[string]
-
-  let envRoot = getEnv("METACRAFT_GITHUB_ACTIONS_ROOT")
-  if envRoot.len > 0:
-    candidates.add(absoluteCandidate(repoRoot, envRoot))
-
-  candidates.add(repoRoot.parentDir / "metacraft-github-actions")
-  candidates.add(workspaceRootForRepo(repoRoot) / "metacraft-github-actions")
-
-  let commonDir = gitCommonDir(repoRoot)
-  if commonDir.len > 0:
-    candidates.add(commonDir.parentDir.parentDir / "metacraft-github-actions")
-
-  for candidate in candidates:
-    # `setup-dev-env` is the entry point every consumer references, so its
-    # presence is what makes a directory the shared-actions checkout rather
-    # than a same-named directory that happens to exist.
-    if dirExists(candidate) and
-        fileExists(candidate / "setup-dev-env" / "action.yml"):
-      return normalizedPath(candidate)
-
 proc resolveRunQuotaExecutable*(repoRoot, envName, exeName: string): string =
   ## Resolve runquota tools from env/PATH first, then a built source checkout.
   let executableName = addFileExt(exeName, ExeExt)
@@ -1237,18 +1168,6 @@ proc ctInterposeSrcPath*(repoRoot: string): string =
   ""
 
 type MissingTestFixtureError* = object of CatchableError
-
-proc requireMetacraftGithubActionsRoot*(repoRoot: string): string =
-  ## ``metacraftGithubActionsRoot`` (above), but a missing sibling is a loud
-  ## fixture failure rather than an empty string, so a contract test can never
-  ## silently degrade into asserting nothing.
-  result = metacraftGithubActionsRoot(repoRoot)
-  if result.len == 0:
-    raise newException(MissingTestFixtureError,
-      "metacraft-github-actions checkout missing; it is a sibling of this " &
-      "repo in the workspace. Set METACRAFT_GITHUB_ACTIONS_ROOT to its " &
-      "checkout root, or check it out next to reprobuild. The shared CI " &
-      "composite actions moved there out of this repo's .github/actions/.")
 
 proc requireBinary*(path, edgeName: string): string {.discardable.} =
   ## Test-Fixtures-In-Build-Graph: assert that a graph-built fixture binary

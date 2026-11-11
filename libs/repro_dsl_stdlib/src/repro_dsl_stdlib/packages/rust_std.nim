@@ -114,14 +114,18 @@ package `rust-std`:
   platforms [linux], msg = "rust-std arms are catalogued for Linux targets only; add an arm for another OS's target component."
   provisioning:
     # ``executablePath``: a standard library has no executable, and the
-    # realizer requires a file to resolve the prefix on. ``install.sh`` is
-    # the rust-installer script every component archive carries at its root
-    # (``stripComponents = 1``); it is never run.
+    # realizer requires a file to resolve the prefix on. It is the target's
+    # own self-contained ``libc.a``, which every musl component carries and
+    # the realizer accepts as data (no execute permission needed). Not the
+    # archive's ``install.sh``: the realizer replays the rust-installer
+    # merge itself and deletes that script, so a prefix declared on it was
+    # refused as "lacks executable install.sh" (t_stdlib_catalog_tarball_
+    # arms_realize).
     tarball url = RustStdDistBase & "armv7-unknown-linux-musleabihf.tar.gz",
       sha256 = Armv7Sha256,
       archiveType = "tar.gz",
       stripComponents = 1,
-      executablePath = "install.sh",
+      executablePath = "lib/rustlib/armv7-unknown-linux-musleabihf/lib/self-contained/libc.a",
       packageId = "rust-std@" & RustStdVersion,
       cpu = "armv7",
       os = "linux",
@@ -132,7 +136,7 @@ package `rust-std`:
       sha256 = Aarch64Sha256,
       archiveType = "tar.gz",
       stripComponents = 1,
-      executablePath = "install.sh",
+      executablePath = "lib/rustlib/aarch64-unknown-linux-musl/lib/self-contained/libc.a",
       packageId = "rust-std@" & RustStdVersion,
       cpu = "aarch64",
       os = "linux",
@@ -143,7 +147,7 @@ package `rust-std`:
       sha256 = X86_64Sha256,
       archiveType = "tar.gz",
       stripComponents = 1,
-      executablePath = "install.sh",
+      executablePath = "lib/rustlib/x86_64-unknown-linux-musl/lib/self-contained/libc.a",
       packageId = "rust-std@" & RustStdVersion,
       cpu = "x86_64",
       os = "linux",

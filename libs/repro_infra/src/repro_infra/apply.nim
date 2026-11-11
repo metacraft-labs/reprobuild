@@ -38,7 +38,9 @@ import ./planner
 import ./profile
 import ./state_dir
 when defined(posix):
+  import std/tables
   import ./carried_state
+  import ./start_holds
 
 export apply_lock
 
@@ -336,6 +338,46 @@ proc allocateGenerationId(stateDir, profileDigestHex, hostIdentity: string;
 # (typed op + plan baseline digest).
 # ---------------------------------------------------------------------------
 
+const ApplyMutation {.strdefine: "reproAddonMutation".} = ""
+  ## ``plan-ignores-profile-digest``, ``full-apply-keeps-undeclared-dropins``
+  ## (falsifying builds, ``repro_addon/mutations``).
+
+proc undeclaredDropIns*(stateDir, profileText: string): seq[SystemResource] =
+  ## The ``systemd.systemDropIn`` resources the active generation declares
+  ## and ``profileText`` does not: a host realised in full removes them
+  ## (A13 review round 5, finding 3), as the add-on's switch removes what
+  ## its ledger no longer owns. Otherwise a drop-in written by an earlier
+  ## generation -- the carried-state requirement among them -- would stay
+  ## loaded by systemd though no profile declares it. Empty when there is
+  ## no active generation.
+  when ApplyMutation == "full-apply-keeps-undeclared-dropins":
+    return
+  if stateDir.len == 0: return
+  let activeId = readCurrentGenerationId(stateDir)
+  if activeId.len == 0: return
+  let active = readGenerationEnvelope(pointerPath(stateDir, activeId))
+  var wanted: seq[string]
+  for r in parseSystemProfile(profileText).resources: wanted.add(r.address)
+  var old: SystemProfile
+  try:
+    old = parseSystemProfile(active.profileText)
+  except CatchableError:
+    # A generation this build cannot read: nothing is removed for it. The
+    # carried-state reach analysis still reads every such file on the host
+    # (``carried_state.unitTexts``), so a stale drop-in is judged, not
+    # trusted.
+    return
+  for r in old.resources:
+    if r.kind == srkSystemdSystemDropIn and r.address notin wanted:
+      # The carried-state requirement goes only with its unit: a host
+      # realised in full keeps a unit file the profile no longer declares,
+      # and that unit must still not start at a boot whose restore failed.
+      when defined(posix):
+        if r.diName == RequirementDropInName and
+            fileExists("/etc/systemd/system" / r.diUnit):
+          continue
+      result.add(r)
+
 proc plannedOperationsFor*(profileText: string;
                            env: PlanEnvelope): seq[PlannedOperation] =
   ## Build the typed `PlannedOperation` list for the EFFECTIVE
@@ -549,6 +591,139 @@ var pendingSwitchGuard*: PendingSwitchGuard = nil
   ## interrupted switch is pending (or it was just recovered), otherwise
   ## why not.
 
+proc driverStartJobs*(planned: openArray[PlannedOperation];
+                      isActive: proc (unit: string): bool): seq[string] =
+  ## The units whose start or restart job the drivers issue in this
+  ## privileged set (§13 decision 79), in plan order: every
+  ## ``systemd.systemUnit`` the plan writes that is enabled (its driver
+  ## runs ``enable --now``, whatever its type: a target, a socket, a timer
+  ## or a service) and every one that is running before the set and whose
+  ## restart the profile does not hold (its driver restarts it after its
+  ## change; ``isActive`` is asked before anything is written). A held unit
+  ## a start pulls in through its dependencies is skipped by its hold;
+  ## after the carried-state check passes, these jobs are issued again so
+  ## systemd brings it up through the same dependencies.
+  for p in planned:
+    let op = p.operation
+    if op.kind != pokSystemdSystemUnit or op.suDestroy: continue
+    if not (op.suEnabled or (not op.suRestartHeld and isActive(op.suName))):
+      continue
+    when ApplyMutation == "reissue-skips-targets":
+      # FALSIFYING MUTATION: a target's job is not issued again.
+      if op.suName.endsWith(".target"): continue
+    when ApplyMutation == "reissue-skips-sockets":
+      # FALSIFYING MUTATION: a socket's job is not issued again.
+      if op.suName.endsWith(".socket"): continue
+    if op.suName notin result: result.add(op.suName)
+
+when defined(posix):
+  type LiveCheck = object
+    ## The carried-state cross-check of a full apply (spec §11.1, §13
+    ## decision 59): the units it judges, held from before the first write
+    ## until they pass, whether each was running before, and the start and
+    ## restart jobs the drivers issue (§13 decision 79).
+    units: seq[string]
+    holds: seq[string]
+    wasActive: seq[string]
+    driverStarts: seq[string]
+
+  proc liveCheckHoldText(): string =
+    holdText(hmCondition, "Written by repro infra apply: the unit may not " &
+      "start until its loaded configuration has been checked against the " &
+      "carried-state reach (ReproOS Add-On Mode spec §11.1).")
+
+  proc beginLiveCheck(p: SystemProfile; dir, root: string;
+                      planned: openArray[PlannedOperation]): LiveCheck =
+    ## Hold every unit ``liveReachUnits`` names before the drivers write
+    ## and start anything: under the hold their ``enable --now`` and
+    ## ``restart`` jobs succeed without running the unit. Holds an earlier
+    ## apply left are cleared first; a refused unit's persistent hold stays
+    ## until this check passes for it.
+    try: discard clearStaleHolds(CarriedCheckHoldName)
+    except OSError: discard          # not root: nothing of ours to clear
+    result.units = liveReachUnits(p, dir, root)
+    if result.units.len == 0: return
+    for u in result.units:
+      let r = runSystemctlArgs(["is-active", "--quiet", "--", u])
+      if r.exitCode == 0: result.wasActive.add(u)
+    result.driverStarts = driverStartJobs(planned,
+      proc (u: string): bool =
+        runSystemctlArgs(["is-active", "--quiet", "--", u]).exitCode == 0)
+    result.holds = writeHolds(result.units, CarriedCheckHoldName,
+                              liveCheckHoldText())
+    systemctlOrRaise(["daemon-reload"])
+
+  proc finishLiveCheck(c: LiveCheck; p: SystemProfile; dir, root: string): seq[string] =
+    ## After the privileged set: reload, judge each held unit as systemd
+    ## loaded it (``liveReachProblems``, the add-on switch's own check), and
+    ## either release and start what should run, or keep the refused units
+    ## held -- in ``/etc`` too, so a reboot does not start them -- and
+    ## report each as a problem of this apply.
+    if c.units.len == 0: return
+    systemctlOrRaise(["daemon-reload"])
+    var problems: seq[string]
+    when ApplyMutation != "infra-live-reach-skipped":
+      problems = liveReachProblems(c.units, p,
+        proc (u: string): Table[string, string] = systemctlShow(u), root)
+      # And the refusal again over the host as the reload left it: a
+      # drop-in a generator made at a reload of this apply is read now.
+      when ApplyMutation != "post-reload-refusal-skipped":
+        let why = carriedStateRefusal(p, dir, root)
+        if why.len > 0: problems.add(why & " (decided again after the reload)")
+    if problems.len > 0:
+      var refused: seq[string]
+      for u in c.units:
+        for pr in problems:
+          if (": " & u & " ") in pr or (": " & u & ":") in pr:
+            if u notin refused: refused.add(u)
+      if refused.len == 0: refused = c.units
+      discard writeHolds(refused, CarriedCheckHoldName, liveCheckHoldText(),
+                         PersistentUnitDir)
+      systemctlOrRaise(["daemon-reload"])
+      for pr in problems:
+        result.add(pr & "; the unit is held (not started) until an apply " &
+          "whose check it passes")
+      return
+    removeHolds(c.holds)
+    var persistent: seq[string]
+    for u in c.units:
+      let h = holdPath(u, CarriedCheckHoldName, PersistentUnitDir)
+      if fileExists(h): persistent.add(h)
+    removeHolds(persistent)
+    systemctlOrRaise(["daemon-reload"])
+    # What the drivers would have started: every unit the profile enables,
+    # and every unit that was running before (its restart was skipped).
+    var started: seq[string]
+    for r in p.resources:
+      if r.kind != srkSystemdSystemUnit or r.suName notin c.units: continue
+      if r.suEnabled or r.suName in c.wasActive:
+        started.add(r.suName)
+        let s = runSystemctlArgs(["start", "--", r.suName])
+        if s.exitCode != 0:
+          result.add("systemctl start " & r.suName & " after the " &
+            "carried-state check: " & s.output.strip())
+    # And what their jobs pulled in (§13 decision 79, decided 2026-11-08 by
+    # the owner): a held unit another unit's start wants -- a static
+    # service an enabled target or socket pulls in -- was skipped by its
+    # hold. Each start or restart job the drivers issued is issued again,
+    # as a start: systemd adds the jobs of its dependencies as it did for
+    # the driver, so the held units come up as on a host without carried
+    # state, and a unit already running is not restarted a second time
+    # (its restart's stop half ran in the drivers' job).
+    for u in c.driverStarts:
+      if u in started: continue
+      # Not a unit that ran and exited, or failed, in the drivers' job (a
+      # one-shot service): issuing its start again would run it twice.
+      # Its pulled-in units were queued by that job and stay as the hold
+      # left them (spec §11.1, the residual of decision 79).
+      if u notin c.units and
+          runSystemctlArgs(["is-active", "--quiet", "--", u]).exitCode != 0:
+        continue
+      let s = runSystemctlArgs(["start", "--", u])
+      if s.exitCode != 0:
+        result.add("systemctl start " & u & " (re-issued after the " &
+          "carried-state check, §13 decision 79): " & s.output.strip())
+
 proc runInfraApply*(profileText: string; opts: ApplyOptions): ApplyResult =
   ## Drive a full `repro infra apply`. The caller has already loaded
   ## the `system.nim` text and resolved `opts`.
@@ -609,6 +784,18 @@ proc runInfraApply*(profileText: string; opts: ApplyOptions): ApplyResult =
         (if opts.carriedStateDir.len > 0: opts.carriedStateDir
          else: CarriedStateDir),
         (if opts.carriedStateRoot.len > 0: opts.carriedStateRoot else: "/"))
+  # While carried state is installed, every unit that reaches it requires
+  # the first-boot restore through a drop-in this generation writes
+  # (spec §11.1; A13 review round 4, finding 4). An add-on apply has added
+  # them to its own profile already (``carriedStateChecked``).
+  let profileText =
+    when defined(posix):
+      if opts.carriedStateChecked: profileText
+      else: withCarriedRequirements(profileText,
+        (if opts.carriedStateDir.len > 0: opts.carriedStateDir
+         else: CarriedStateDir),
+        (if opts.carriedStateRoot.len > 0: opts.carriedStateRoot else: "/"))
+    else: profileText
   resetBrokerLaunchCount()
   refreshApplyLock(opts.stateDir)
 
@@ -621,6 +808,12 @@ proc runInfraApply*(profileText: string; opts: ApplyOptions): ApplyResult =
   dispatchBuildActions(opts, result)
   refreshApplyLock(opts.stateDir)
 
+  # Drop-ins an earlier generation declared and this profile does not: the
+  # apply removes them (planned as destroys, dispatched below).
+  # An add-on apply (``carriedStateChecked``) removes what its ledger no
+  # longer owns in its own switch, so it is not asked here.
+  let undeclared = if opts.carriedStateChecked: newSeq[SystemResource]()
+                   else: undeclaredDropIns(opts.stateDir, profileText)
   # --- 1. Resolve the plan. ---
   var env: PlanEnvelope
   if opts.planId.len > 0:
@@ -632,6 +825,16 @@ proc runInfraApply*(profileText: string; opts: ApplyOptions): ApplyResult =
     # is touched; a fresh plan is cheap.
     if env.hostIdentity != opts.hostIdentity:
       raisePlanHostMismatch(opts.planId, env.hostIdentity, opts.hostIdentity)
+    # The plan must be of the very text this apply runs: the carried-state
+    # requirements are added at apply time (``withCarriedRequirements``),
+    # so a host whose reach changed since the plan -- install-unit, a host
+    # drop-in -- applies a different text, which a stored plan would
+    # silently not write (A13 review round 5, finding 4).
+    when ApplyMutation != "plan-ignores-profile-digest":
+      if env.profileDigestHex != digestProfileText(profileText):
+        raisePlanProfileChanged(opts.planId, "the profile text this apply " &
+          "runs (with the carried-state requirements this host needs now) " &
+          "is not the text the plan was made from")
     # Stale-detection: the live world must still be consistent with
     # the plan's recorded observations.
     let stale = detectStaleResources(env.operations, profileText)
@@ -645,6 +848,7 @@ proc runInfraApply*(profileText: string; opts: ApplyOptions): ApplyResult =
     # is the integrity check.
     let fresh = producePlan(profileText, opts.hostIdentity,
       opts = PlannerOptions(stateDir: opts.stateDir,
+                            destroyResources: undeclared,
                             acceptDrift: false))
     env = fresh.envelope
     # Persist the fresh plan so the apply is auditable by id.
@@ -684,7 +888,10 @@ proc runInfraApply*(profileText: string; opts: ApplyOptions): ApplyResult =
   # drift gate treats it uniformly. An already-reverted resource
   # (observe says absent) is dispatched as a destroy no-op.
   var destroys: seq[PlannedOperation]
-  for r in opts.extraDestroyResources:
+  var destroyed: seq[string]
+  for r in opts.extraDestroyResources & undeclared:
+    if r.address in destroyed: continue
+    destroyed.add(r.address)
     let obs = observeResource(r)
     destroys.add(PlannedOperation(
       operation: toPrivilegedOperation(r, destroy = true),
@@ -701,6 +908,28 @@ proc runInfraApply*(profileText: string; opts: ApplyOptions): ApplyResult =
       ops,
     nonPrivilegedOperationCount = 0)
   refreshApplyLock(opts.stateDir)
+
+  # The carried-state cross-check (§13 decision 59): the units it judges
+  # are held from here until they pass it, as in the add-on's switch.
+  # An add-on apply runs it in its own switch (``carriedStateChecked``).
+  when defined(posix):
+    let liveDir = if opts.carriedStateDir.len > 0: opts.carriedStateDir
+                  else: CarriedStateDir
+    let liveRoot = if opts.carriedStateRoot.len > 0: opts.carriedStateRoot
+                   else: "/"
+    var liveCheck: LiveCheck
+    # Only on the live host: a scratch root (a library test) has no systemd
+    # of its own to ask.
+    if not opts.carriedStateChecked and opts.elevationMode != emNoElevate and
+        liveRoot == "/":
+      let pLive = parseSystemProfile(profileText)
+      if not isProcessElevated() and
+          liveReachUnits(pLive, liveDir, liveRoot).len > 0:
+        raise newException(ECarriedStatePending, "ECarriedStatePending: " &
+          "carried state is on this host, so the units that can reach it " &
+          "are held and checked as systemd loads them before they start " &
+          "(spec §11.1); that needs the apply itself to run as root")
+      liveCheck = beginLiveCheck(pLive, liveDir, liveRoot, planned)
 
   # --- 3. Apply the privileged set. ---
   # The privileged set is the longest unbounded stretch of the apply: a
@@ -765,6 +994,12 @@ proc runInfraApply*(profileText: string; opts: ApplyOptions): ApplyResult =
     if d.driftDetected or (not d.ok and "requires elevation" notin
         d.diagnostic):
       result.diagnostics.add(d.operationAddress & ": " & d.diagnostic)
+
+  when defined(posix):
+    for pr in finishLiveCheck(liveCheck, parseSystemProfile(profileText),
+                              liveDir, liveRoot):
+      inc result.errorCount
+      result.diagnostics.add(pr)
 
   # --- 4. Commit the generation + write the audit log. ---
   var commitTs = getTime().toUnix()

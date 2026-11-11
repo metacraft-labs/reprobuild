@@ -5,7 +5,12 @@
 # green and then
 # under a falsifying mutation, and require red under the mutation.
 #
-#   scripts/run_addon_unit_mutation.sh <test-basename> <mutation>
+#   scripts/run_addon_unit_mutation.sh <test-basename> <mutation> [<case>...]
+#
+# Each <case> named after the mutation is a case the mutation targets: it
+# must exist and pass on its own without the mutation, and fail on its own
+# with it. Without them the mutation need only turn some case red, which a
+# sibling case can do while the targeted one stays green.
 #
 # The mutation is compiled in with -d:reproAddonMutation=<mutation>
 # (libs/repro_addon/src/repro_addon/mutations.nim); it never exists in a
@@ -55,3 +60,21 @@ if "build/test-bin/${test}-${mutation}"; then
   exit 1
 fi
 echo "run_addon_unit_mutation: ${test} red under ${mutation}, as required"
+shift 2
+for case in "$@"; do
+  # std/unittest runs only the cases its arguments name
+  # (https://nim-lang.org/docs/unittest.html, "Running a single test").
+  green_out="$("build/test-bin/${test}" "$case" 2>&1)" || {
+    echo "run_addon_unit_mutation: ${test}: '${case}' is RED alone without the mutation" >&2
+    exit 1; }
+  if ! grep -qF "[OK] ${case}" <<< "$green_out"; then
+    echo "run_addon_unit_mutation: ${test}: no case named '${case}'" >&2
+    exit 1
+  fi
+  if red_out="$("build/test-bin/${test}-${mutation}" "$case" 2>&1)" ||
+      ! grep -qF "[FAILED] ${case}" <<< "$red_out"; then
+    echo "run_addon_unit_mutation: ${test}: '${case}' stayed GREEN alone under ${mutation}" >&2
+    exit 1
+  fi
+  echo "run_addon_unit_mutation: ${test}: '${case}' red alone under ${mutation}, as required"
+done

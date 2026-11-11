@@ -91,8 +91,9 @@ const
     ## however many emitters ask for it.
 
   GoScratchSubdir* = ".repro/build/go"
-    ## Scratch root for the module cache and the staged output. Under
-    ## `.repro/` so a `repro clean` takes both.
+    ## Scratch root for the module cache and the staged output, under the
+    ## gitignored `.repro/` tree. `repro clean` removes the declared outputs
+    ## under it, not the whole tree.
 
 proc goModCacheDir*(projectRoot: string): string =
   ## `GOMODCACHE` for this recipe.
@@ -113,8 +114,8 @@ proc goModDownloadStampPath*(projectRoot: string): string =
 
 proc goZigCacheDir*(projectRoot: string): string =
   ## Root of zig's global and local caches for a `staticCgo` build. Under
-  ## the recipe's scratch tree, so `repro clean` takes it and the build
-  ## never touches `$HOME/.cache/zig`.
+  ## the recipe's scratch tree, so the build never touches
+  ## `$HOME/.cache/zig`.
   projectRoot / GoScratchSubdir / "zig-cache"
 
 proc goStaticCgoTriple*(cpu = hostCPU): string =

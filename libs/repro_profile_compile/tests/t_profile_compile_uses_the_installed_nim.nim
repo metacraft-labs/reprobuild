@@ -87,3 +87,62 @@ suite "the profile compile finds the installed prefix's Nim":
     except CompileFailure as err:
       checkpoint(err.msg)
       check "no build record" in err.msg
+
+template withProfileEnv(body: untyped) =
+  ## The variables `resolveProfileNimCompiler` reads, restored afterwards.
+  let names = ["REPRO_NIM_COMPILER", "REPRO_PUBLIC_CLI_PATH", "PATH"]
+  var saved: seq[(string, bool, string)]
+  for n in names: saved.add((n, existsEnv(n), getEnv(n)))
+  try:
+    body
+  finally:
+    for (n, present, value) in saved:
+      if present: putEnv(n, value) else: delEnv(n)
+
+proc decoyOnPath(dir: string): string =
+  ## A `nim` first on `PATH`, which the prefix route must win over.
+  createDir(dir)
+  result = dir / "nim"
+  writeFile(result, "#!/bin/sh\nexit 0\n")
+  setFilePermissions(result, {fpUserRead, fpUserWrite, fpUserExec})
+  putEnv("PATH", dir & $PathSep & getEnv("PATH"))
+
+suite "the profile compile's resolver takes the running image's prefix":
+  # Through `resolveProfileNimCompiler`, the entry `deploy_agent`'s
+  # compile-profile and `__repro-compile-profile` use, anchored on
+  # `$REPRO_PUBLIC_CLI_PATH` (`runningImagePrefixCandidates`), with a decoy
+  # `nim` first on `PATH`. A resolver that skipped the prefix arm returns the
+  # decoy; one that took the prefix's nim unchecked returns it despite the
+  # bad revision.
+  test "the checked prefix nim wins over PATH":
+    let tmp = createTempDir("installed-nim-resolve-", "")
+    defer: removeDir(tmp)
+    let prefix = tmp / "repro"
+    shippedNim(prefix)
+    record(prefix)
+    writeFile(prefix / "bin" / "reprobuild", "")
+    withProfileEnv:
+      delEnv("REPRO_NIM_COMPILER")
+      putEnv("REPRO_PUBLIC_CLI_PATH", prefix / "bin" / "reprobuild")
+      let decoy = decoyOnPath(tmp / "path")
+      require findExe("nim") == decoy
+      check resolveProfileNimCompiler() == prefix / "nim" / "bin" / "nim"
+
+  test "a prefix nim that is not the recorded fork is refused, not PATH's":
+    let tmp = createTempDir("installed-nim-resolve-rev-", "")
+    defer: removeDir(tmp)
+    let prefix = tmp / "repro"
+    shippedNim(prefix, rev = repeat('b', 40))
+    record(prefix)
+    writeFile(prefix / "bin" / "reprobuild", "")
+    withProfileEnv:
+      delEnv("REPRO_NIM_COMPILER")
+      putEnv("REPRO_PUBLIC_CLI_PATH", prefix / "bin" / "reprobuild")
+      discard decoyOnPath(tmp / "path")
+      try:
+        let chosen = resolveProfileNimCompiler()
+        checkpoint("resolved " & chosen)
+        check false
+      except CompileFailure as err:
+        checkpoint(err.msg)
+        check "not the fork it records" in err.msg

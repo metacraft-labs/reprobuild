@@ -229,6 +229,18 @@ when defined(windows):
     quit(runBuildTool(paramStr(2), paramStr(3)))
 
 proc ccPath(): string =
+  ## The compiler of the edge whose record crosses hosts. On Linux that is
+  ## GCC when there is one, not whatever `cc` is: the dev shell's `cc` is
+  ## clang, and clang draws `arc4random` to name the temporary files it
+  ## writes its output and depfile through, which the monitor reports as an
+  ## entropy read by an unblessed image. Such an edge's record is withheld
+  ## from publication (`unblessed-entropy`), so a fixture compiled by clang
+  ## never has a record to serve and nothing this case is about happens.
+  ## The same monitored GCC compile reports no entropy read.
+  when defined(linux):
+    result = findExe("gcc")
+    if result.len > 0:
+      return
   result = findExe("cc")
   if result.len == 0:
     result = findExe("clang")
@@ -861,6 +873,11 @@ proc runTwoPhaseRoundtrip(profile: TrustProfile): bool =
     writeWorkspace(wsBD, ConfigV1)
     let publishesBeforeD = hooksB.stats.publishes
     let skipsBeforeD = hooksB.stats.publishSkips
+    # What B's memo store held before: since step (6) that is two keys, the
+    # hello edge's and the one B executed (and, under ffpChecksum, published)
+    # after refusing A's timestamp-policy entry for it. The depfile build
+    # must add none.
+    let memoBeforeD = storageB.memo.weakFingerprints()
     let depBuilt = runBuild(helloGraph(wsBD, ffpChecksum,
       "-depfile-producer", depfileEvidence = true),
       nodeEngineConfig(cacheB, wsBD, hooksB))
@@ -877,7 +894,7 @@ proc runTwoPhaseRoundtrip(profile: TrustProfile): bool =
           "make-depfile" in event.detail:
         inc depRefusals
     check depRefusals == 1
-    check storageB.memo.weakFingerprints() == @[weak]
+    check storageB.memo.weakFingerprints() == memoBeforeD
     # (7b) A serves an entry for a depfile record (Level 0, ffpChecksum,
     # attested by A, as a producer that does not apply the rule publishes
     # it); B, from a checkout with no record of the edge, refuses it, names

@@ -12,7 +12,7 @@
 ##
 ## *Mocking.* None: a real sink process, real TLS, the guest's real units.
 
-import std/[json, os, osproc, strutils, times]
+import std/[json, options, os, osproc, strutils, times]
 
 import repro_peer_cache/auth as peerAuth
 import repro_peer_cache/evidence
@@ -22,12 +22,18 @@ import repro_peer_cache/types
 import repro_deploy_agent/manifest
 
 import repro_addon/evidence_check
+import repro_addon/evidence_sink_cli
 
 import ./addon_testbed
 import ./agent_e2e_support
 
 const
-  SinkMutations* = ["sink-credential-has-read-scope"]
+  SinkMutations* = ["sink-credential-has-read-scope",
+    # The sink's command line and the off-host check it runs (A11 drill).
+    "sink-cli-equals-only", "sink-payload-unescaped", "check-ignores-acks",
+    "check-ignores-containment", "check-ignores-probe-announcement",
+    # A11 code review rounds 1 and 2: acknowledgements by kind, of any record.
+    "ack-by-sequence-only", "ack-detections-only"]
     ## Falsifying builds that live in the sink, not in the add-on binary.
   GuestSinkCa* = "/root/addon/evidence-sink.crt"
   GuestCredentialCert* = "/var/lib/repro/evidence/host-ca.crt"
@@ -41,6 +47,9 @@ type
     identityDir*: string
     anchorsDir*: string
     keyDir*: string
+    revokedPath*: string
+      ## The sink's revocation list (``--revoked``): absent, nobody is
+      ## revoked; ``revoke`` writes a host into it.
     port*: int
     hostId*: string
     process: Process
@@ -73,6 +82,7 @@ proc startGateSink*(g: Guest): GateSink =
   result.identityDir = result.root / "identity"
   result.anchorsDir = result.root / "anchors"
   result.keyDir = result.root / "checkpoint-key"
+  result.revokedPath = result.root / "revoked"
   result.published = result.root / "published"
   result.log = result.root / "sink.log"
   for d in [result.storeDir, result.anchorsDir, result.published]: createDir(d)
@@ -85,6 +95,7 @@ proc startGateSink*(g: Guest): GateSink =
     " --identity=" & quoteShell(result.identityDir) &
     " --anchors=" & quoteShell(result.anchorsDir) &
     " --checkpoint-key=" & quoteShell(result.keyDir) &
+    " --revoked=" & quoteShell(result.revokedPath) &
     " --bind=127.0.0.1 --port=0 --ready-file=" & quoteShell(ready) &
     " >> " & quoteShell(result.log) & " 2>&1"])
   while true:
@@ -137,6 +148,12 @@ proc enrol*(g: Guest; s: GateSink): string =
   result = $derivePeerIdFromPublicKey(certPublicKey(certPemToDer(readFile(local))))
   copyFile(local, s.anchorsDir / (result & ".crt"))
 
+proc revoke*(s: GateSink; host: string) =
+  ## Revoke ``host``'s credential at the sink: it still proves and is
+  ## enrolled, so the sink reads its frames, records each as refused and
+  ## acknowledges none (re-read at every frame, G17).
+  writeFile(s.revokedPath, host & "\n")
+
 proc entries*(s: GateSink): seq[EvidenceEntry] =
   ## Read locally, as an investigator on the sink host would (EVID-3).
   try: readEvidenceStore(s.storeDir) except CatchableError: @[]
@@ -163,11 +180,16 @@ proc archive*(s: GateSink; m: seq[byte]; sequence: uint64) =
   ## with the producer's whole history, not only its latest).
   var bytes = newString(m.len)
   for i, b in m: bytes[i] = char(b)
-  # One file per copy: a re-signed copy of a sequence must not replace the
-  # first (the lag check counts from the first publication).
-  let t = getTime()
-  writeFile(s.published / ($sequence & "-" & $t.toUnix() & "-" &
-    $t.nanosecond & ".rdm"), bytes)
+  # One file per sequence, a re-signed copy replacing the first, as a
+  # producer that keeps only its latest copies does: the lag check must
+  # count from the first publication it saw by itself (its own state,
+  # ``checkState``), not from an archive only a gate keeps (A11 review
+  # finding 7).
+  writeFile(s.published / ($sequence & ".rdm"), bytes)
+
+proc checkState*(s: GateSink): string =
+  ## The off-host check's own state file, kept between the gate's checks.
+  s.published & ".check-state"
 
 proc check*(s: GateSink; host: string; signersPath: string;
             nowMs = 0'i64): CheckReport =
@@ -177,13 +199,19 @@ proc check*(s: GateSink; host: string; signersPath: string;
     manifests: loadPublishedManifests(s.published,
       peerAuth.loadTrustAnchors(signersPath)),
     nowMs: (if nowMs > 0: nowMs else: int64(epochTime() * 1000)),
-    silenceFactor: 3))
+    silenceFactor: 3, sinkHostId: sinkHostOf(s.storeDir),
+    statePath: s.checkState))
+
+proc sinkCli*(s: GateSink; args: string): tuple[code: int; output: string] =
+  ## The sink's own command line, as an operator on the sink host runs it.
+  let (o, c) = execCmdEx(quoteShell(sinkBinary()) & " " & args)
+  (c, o)
 
 proc toJson*(r: CheckReport): JsonNode =
   result = %*{"alerts": newJArray(), "statuses": newJArray()}
   for a in r.alerts:
     result["alerts"].add(%*{"detector": a.detector, "trigger": a.trigger,
-      "sinkSeq": a.sinkSeq, "detail": a.detail})
+      "sinkSeq": (if a.sinkSeq.isSome: %a.sinkSeq.get else: newJNull()), "detail": a.detail})
   for st in r.statuses:
     result["statuses"].add(%*{"detector": st.detector, "status": st.status,
       "detections": st.detections})

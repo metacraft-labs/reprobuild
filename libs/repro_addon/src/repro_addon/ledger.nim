@@ -30,6 +30,7 @@ import std/[algorithm, os, posix, sets, strutils, tables]
 import ./etc_write
 import ./fingerprint
 import ./host_exec
+import ./mutations
 import ./nft_tables
 
 type
@@ -64,6 +65,14 @@ type
       ## package's file, now at ``<path>.distrib``.
     lcKey = "key"
       ## Key material bootstrap created (the recipient key pair).
+    lcLateKey = "lateKey"
+      ## Key material the host creates for itself AFTER generation 0: the
+      ## secrets recipient key pair of a host bootstrapped with
+      ## ``--defer-recipient-key`` (an image's assembly boot, spec §6.5.2),
+      ## which its first real boot's re-assert generates. Content UNPINNED
+      ## (every device has its own key) and absent until then; when present
+      ## it must be a root-owned regular file with the entry's mode. Not a
+      ## pre-bootstrap input: uninstall removes it.
     lcStorePrefix = "storePrefix"
       ## A store prefix the add-on realised into ``/repro/store``.
     lcKept = "kept"
@@ -142,7 +151,13 @@ type
                            ## generation's static tree, ``linkTarget`` its
                            ## target; spec §7.2); "" reads as ``copy``
     value*: string         ## sysctl: the value applied; account: the
-                           ## fingerprint value of the account
+                           ## fingerprint value of the account;
+                           ## storePrefix: its realisation digest
+                           ## (``tree-v2:<hex>``, spec §10.2), the digest
+                           ## store verification expects -- kept here,
+                           ## outside the store, so the path cannot vouch
+                           ## for itself; "" for a prefix realised before
+                           ## the ledger carried one
     displaced*: string     ## where the bytes the MOST RECENT reconcile of
                            ## this object displaced are kept; ``preserved``
                            ## keeps the first-touch bytes removal restores.
@@ -370,8 +385,22 @@ proc observeDrift*(e: LedgerEntry): string =
     # Content unpinned by definition: the agent owns the bytes. Even a
     # missing record is not drift -- the agent may rotate its files.
     ""
+  of lcLateKey:
+    # Absent until the host's first real boot creates it; then only its
+    # shape is the ledger's (each device has its own bytes).
+    if symlinkExists(e.path) or dirExists(e.path):
+      return "not a regular file"
+    if not fileExists(e.path): return ""
+    let st = statOwner(e.path)
+    if st.mode != e.mode or st.owner != e.owner:
+      return "mode " & st.mode & " owner " & st.owner & ", ledger " &
+             e.mode & " " & e.owner
+    ""
   of lcNftTable:
-    let l = listTableNames()
+    # Through PID 1, in the host's network namespace: the units that walk
+    # the ledger run with a private one (A11 audit session 2, G4).
+    let l = when mutated("reassert-nft-in-own-netns"): listTableNames()
+            else: listTableNames(hostNamespaces = true)
     if not l.ok: return "unreadable: " & l.why
     if e.path notin l.tables: return "missing"
     ""
@@ -547,7 +576,7 @@ proc expectedRecords*(l: Ledger): seq[ExpectedRecord] =
       # load) is not undone when it is deleted.
       result.add(ExpectedRecord(component: fcSysctl,
         key: "net.netfilter.nf_log.*", value: "*", coupled: true))
-    of lcKey, lcStorePrefix, lcKept:
+    of lcKey, lcStorePrefix, lcKept, lcLateKey:
       discard  # under /var/lib/repro and /repro: not fingerprinted
 
 proc expectedDelta*(before, after: Ledger): seq[Expectation] =

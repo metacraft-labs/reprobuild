@@ -13,7 +13,8 @@
 ## | DET-AO-3  | a connect to a third address from inside the fetch unit     |
 ## | DET-AO-4  | ``/etc/repro/static`` retargeted, then a reboot             |
 ## | DET-AO-5  | a store file corrupted between realise and flip (A9's), and |
-## |           | a store byte changed after the switch, found after a boot   |
+## |           | a store byte changed after the switch and its receipt       |
+## |           | deleted, found after a boot (session 2, G2)                 |
 ## | DET-AO-6  | an ``equivs`` package shipping a ledger path (A10's)         |
 ## | DET-AO-7  | a unit whose health check fails (A5's)                       |
 ## | DET-AO-8  | the timers stopped: silence past three intervals            |
@@ -29,13 +30,21 @@
 ##
 ## The seam build is required (DET-AO-5's pause at step 2).
 ##
+## Falsifying mutation for the DET-AO-5 boot control:
+## ``store-verify-trusts-receipt`` (the expectation read from the altered
+## path's own receipt, which the control deleted: the mismatch and
+## quarantine steps go red; A11 audit session 2, G2). For the DET-AO-10
+## control: ``lag-ignores-check-state`` (the check forgets when it first
+## saw the sequence, and the manifest directory holds only the re-signed
+## copy: no lag alert; A11 review finding 7).
+##
 ## Opt-in: ``REPRO_ADDON_VM_GATES=1``.
 ##
 ## *Mocking.* The profile compiler is a shell script standing for a
 ## compromised compiler, as in A8's ``e2e_addon_compromised_fetch_cannot_
 ## write_etc``: the threat under test. Nothing else.
 
-import std/[json, os, sequtils, strutils, times, unittest]
+import std/[json, options, os, sequtils, strutils, times, unittest]
 
 import repro_test_support/reasoned_skip
 import repro_deploy_agent/manifest
@@ -89,7 +98,7 @@ proc body(g: Guest; repro: string; step: StepFn; record: JsonNode;
   proc alerted(det, trig: string; since: uint64): bool =
     sink.check(host, signers).alerts.anyIt(it.detector == det and
       (trig.len == 0 or it.trigger == trig) and
-      (it.sinkSeq == 0 or it.sinkSeq > since))
+      (it.sinkSeq.isNone or it.sinkSeq.get > since))
   proc control(det, detector, trigger: string; since: uint64;
                alertTrigger = ""; timeoutSec = 180) =
     ship()
@@ -118,9 +127,17 @@ proc body(g: Guest; repro: string; step: StepFn; record: JsonNode;
   let base = sink.check(host, signers)
   record["baseline"] = toJson(base)
   step("baseline: nothing detected, every detector live-idle, no alert",
-       base.alerts.len == 0 and base.statuses.allIt(it.status == "live-idle"),
+       base.alerts.len == 0 and
+         base.statuses.filterIt(it.detector != "check-state").allIt(
+           it.status == "live-idle") and
+         # The check's own state: new at its first run, nothing else.
+         base.statuses.filterIt(it.detector == "check-state").allIt(
+           it.status == "new"),
        render(base))
-  discard g.exec("systemctl stop repro-agent-fetch.timer")
+  # Stopped, settled and recorded as the tick helper's baseline: a cycle
+  # the timer ran before this point cannot have applied what the gate
+  # publishes next (A9 review round 7, finding 7).
+  g.recordTimerBaseline()
 
   # DET-AO-1: a manifest signed by a key the host does not anchor.
   var since = sink.headSeq()
@@ -215,10 +232,17 @@ proc body(g: Guest; repro: string; step: StepFn; record: JsonNode;
   since = sink.headSeq()
   let tree = g.exec("readlink /etc/repro/static").stdout.strip()
   let victim = g.exec("find " & tree & " -type f | head -1").stdout.strip()
+  # The tree's receipt goes with the change (A11 audit session 2, G2): the
+  # expected digest is the ledger's, so a deleted receipt cannot demote the
+  # mismatch to "unverifiable".
   let tampered = g.exec("unshare --mount --propagation private /bin/sh -c " &
-    quoteShell("mount -o remount,bind,rw /repro/store && printf X >> " & victim))
-  step("DET-AO-5 (boot): a byte of the current store path was changed",
-       tampered.exitCode == 0 and victim.len > 0, victim & tampered.stderr)
+    quoteShell("mount -o remount,bind,rw /repro/store && printf X >> " &
+               victim & " && rm -f " & tree & "/.repro-receipt"))
+  step("DET-AO-5 (boot): a byte of the current store path was changed, " &
+       "its receipt deleted",
+       tampered.exitCode == 0 and victim.len > 0 and
+         g.exec("test -e " & tree & "/.repro-receipt").exitCode != 0,
+       victim & tampered.stderr)
   g.rebootGuest()
   discard g.waitReasserted()
   step("DET-AO-5 (boot): the boot did not wait for the verification",
@@ -239,10 +263,14 @@ proc body(g: Guest; repro: string; step: StepFn; record: JsonNode;
   discard publish(PublishSpec(sequence: sequence,
     profileText: canonicalFile(Managed, "ten\n"), maxAgeSeconds: 60))
   writeFile(producer.dir / AgentTarget / "latest.rdm", oldBytes)
+  # The check runs while the first copy is published, as a deployment's
+  # periodic check would, and keeps when it saw it in its own state.
+  discard sink.check(host, signers)
   sleep(75_000)
   # The producer re-signs the sequence the host is frozen below (spec §9.2
-  # expects it to): the lag still counts from its first publication (A11
-  # audit F1).
+  # expects it to), and the manifest directory keeps only the re-signed
+  # copy: the lag still counts from the first publication, which the
+  # check's own state holds (A11 audit F1, A11 review finding 7).
   let resigned = prod.publish(PublishSpec(sequence: sequence,
     profileText: canonicalFile(Managed, "ten\n"), maxAgeSeconds: 60))
   sink.archive(resigned, sequence)
@@ -266,7 +294,17 @@ proc body(g: Guest; repro: string; step: StepFn; record: JsonNode;
   discard g.exec("DEBIAN_FRONTEND=noninteractive apt-get purge -y -q " &
                  "repro-a11-fixture", timeoutSec = 900)
 
-  # DET-AO-8: silence. Every timer stopped; three intervals pass.
+  # DET-AO-8: silence. The gate drives the ticks itself (the fetch timer
+  # has been stopped since the baseline), so the tick's last heartbeat is
+  # as old as the controls above took -- DET-AO-6's package build alone can
+  # exceed its two-interval grace on a loaded host (measured at
+  # b79ceba86c, debian-13: 206 s). One tick, shipped, makes "live before
+  # the silence" a statement about the host rather than about the gate's
+  # pace. Then every timer stops and three intervals pass.
+  let pre8 = sink.headSeq()
+  discard g.tickUnits()
+  ship()
+  discard sink.waitFor(host, "addon-agent-tick", "", 120, since = pre8)
   discard g.exec("systemctl stop repro-agent-fetch.timer " &
                  "repro-addon-evidence.timer repro-addon-evidence.path")
   let quiet = sink.check(host, signers)

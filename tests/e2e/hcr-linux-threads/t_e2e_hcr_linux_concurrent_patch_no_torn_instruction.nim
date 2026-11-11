@@ -53,6 +53,13 @@
 ## re-exports it. The patch bodies come out of a real `ET_REL` object.
 
 import std/[json, options, os, osproc, streams, strtabs, strutils, unittest]
+# Agent sockets go in a short directory under /tmp, not under the scratch
+# tree: on a runner whose work directory is long (the persistent benchmark
+# runner's `/var/lib/github-runner-work/mcl-bench-001/...`) a socket under
+# `build/` exceeds the 107-byte sun_path limit and the gate fails before it
+# asserts anything (process_fixtures.shortSocketDirAtProcessExit says why).
+when defined(posix):
+  from repro_test_support/process_fixtures import shortSocketDirAtProcessExit
 import repro_test_support/reasoned_skip
 
 when defined(linux) and defined(amd64):
@@ -285,7 +292,7 @@ when defined(linux) and defined(amd64):
         "-lpthread"]), repoRoot)
       ck "the wire target was built", fileExists(targetBin)
 
-      let socketPath = workDir / "hcr-lx-m4.sock"
+      let socketPath = shortSocketDirAtProcessExit("hcr-") / "hcr-lx-m4.sock"
       removeFile(socketPath)
       var listener = listenHcrAgentUnixSocket(socketPath)
       defer: listener.close()

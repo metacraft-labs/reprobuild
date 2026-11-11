@@ -19,6 +19,7 @@ import repro_deploy_agent/tick_record
 import repro_deploy_agent/tick_status
 
 import ./agent_checks
+import ./contain_marker
 import ./agent_record
 import ./evidence
 import ./evidence_ship
@@ -33,6 +34,12 @@ type
     payload*: string
     recorded*: bool          ## the refusal already left its own record
     manifestPayload*: string ## the staged envelope, for a manifest refusal
+    stagingCopy*: string     ## where the refused staging is preserved
+                             ## (named before the record is written, D6)
+    compiler*: string        ## the profile compiler the apply unit's
+    compilerSha256*: string  ## configuration names, and its SHA-256 as the
+                             ## apply unit read it (not the compiler's own
+                             ## claim, which is attacker-chosen)
 
 proc tickIntervalMs*(confPath = EvidenceConfPath): int64 =
   ## The longest a tick may take to follow the previous one, from the
@@ -95,6 +102,11 @@ proc recordTickEvidence*(t: RecordedTick; r: TickRefusal;
     elif d.trigger == "addon-staging-refused":
       payload = r.payload
       extra.add(("reason", r.refusal))
+      when not mutated("refusal-names-no-copy"):
+        if r.stagingCopy.len > 0: extra.add(("stagingCopy", r.stagingCopy))
+        if r.compiler.len > 0:
+          extra.add(("compiler", r.compiler))
+          extra.add(("compilerSha256", r.compilerSha256))
     try:
       discard recordEvidence(EvidenceEvent(detector: d.detector,
         category: ecDetection, trigger: d.trigger, kind: kind,
@@ -122,6 +134,14 @@ proc engineAgentTick*(cfg: AgentConfig; deps: AgentDeps;
   ## One tick of the full engine's ``repro deploy-agent`` on an add-on host
   ## (decision 29: held to every A8 rule), recorded as the add-on agent's
   ## ticks are. ``site`` is the add-on's (``defaultSite(<add-on state>)``).
+  # A contained host (decision 51): the engine's agent neither fetches nor
+  # applies, and records nothing -- the containment record speaks for the
+  # silence that follows (A11 review finding 6).
+  if isContained(site.stateDir) and not mutated("contained-agent-applies"):
+    result.outcome = AgentOutcome(kind: aoPaused, target: cfg.target,
+      message: "contained by an operator (" &
+        containedMarkerPath(site.stateDir) & "); nothing was fetched or applied")
+    return
   result = runAgentTickRecorded(cfg, deps)
   when not mutated("engine-tick-unrecorded"):
     recordTickEvidence(result, TickRefusal(), site)

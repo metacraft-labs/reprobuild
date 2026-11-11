@@ -27,6 +27,18 @@
 # land in build/addon-gates/records/. Missing KVM, QEMU or gosti is a failure
 # with the reason, never a skip: a gate the operator invoked must run.
 set -euo pipefail
+# A library another tool preloaded into this shell (an agent harness's
+# command-trace shim) is inherited by every engine action the gate starts,
+# where it sits beside the monitor shim: a monitor loss on every monitored
+# edge, and agent-harbor 0.6.16's shim deadlocks in its constructor under
+# the monitor (its ld_preload::later_copy_original waits without bound), so
+# the profile compile a gate runs hangs. The shared guard removes it and
+# re-executes this script once without it, as run_tests.sh and
+# run_addon_unit_mutation.sh do. It runs before the `cd`, so the re-exec
+# finds this script by the path it was given.
+# shellcheck source=scripts/lib/foreign_preload.sh
+source "$(dirname "$0")/lib/foreign_preload.sh"
+foreign_preload_guard "$@"
 cd "$(dirname "$0")/.."
 
 test="${1:?usage: run_addon_gate.sh <test-basename>}"
@@ -83,7 +95,7 @@ mutation_args=()
 [ -n "${REPRO_ADDON_MUTATION:-}" ] && mutation_args=(--mutation "$REPRO_ADDON_MUTATION")
 # Gates that pause a switch at a step need the seam build.
 case "$test" in
-  t_e2e_addon_hard_reset_at_every_step|t_e2e_addon_recovery_never_holds_up_boot|t_e2e_addon_refused_recovery_keeps_its_record|t_e2e_addon_confirm_or_revert|t_e2e_addon_exclusive_never_overlaps|t_e2e_addon_no_plaintext_secret_on_disk|t_e2e_addon_secrets_follow_generations|t_e2e_addon_secrets_without_memory_controller|t_e2e_addon_apply_unit_has_no_network|t_e2e_addon_fetch_unit_reaches_only_its_origins|t_e2e_addon_sequence_floor_survives_and_is_root_only|t_e2e_addon_tick_observes_a_fresh_cycle|t_e2e_addon_staging_swap_after_verify_is_refused|t_e2e_addon_store_is_read_only_to_everything_else|t_addon_agent_apply_unit_lacks_cap_net_admin|t_e2e_addon_unit_syscall_filters_cover_their_traces|t_e2e_addon_detectors_positive_controls|t_e2e_addon_egress_observer|t_e2e_addon_audit_bed)
+  t_e2e_addon_hard_reset_at_every_step|t_e2e_addon_recovery_never_holds_up_boot|t_e2e_addon_refused_recovery_keeps_its_record|t_e2e_addon_confirm_or_revert|t_e2e_addon_exclusive_never_overlaps|t_e2e_addon_no_plaintext_secret_on_disk|t_e2e_addon_secrets_follow_generations|t_e2e_addon_secrets_without_memory_controller|t_e2e_addon_apply_unit_has_no_network|t_e2e_addon_fetch_unit_reaches_only_its_origins|t_e2e_addon_sequence_floor_survives_and_is_root_only|t_e2e_addon_tick_observes_a_fresh_cycle|t_e2e_addon_staging_swap_after_verify_is_refused|t_e2e_addon_store_is_read_only_to_everything_else|t_addon_agent_apply_unit_lacks_cap_net_admin|t_e2e_addon_unit_syscall_filters_cover_their_traces|t_e2e_addon_detectors_positive_controls|t_e2e_addon_egress_observer|t_e2e_addon_audit_bed|t_e2e_addon_custody_crash_points)
     export REPRO_ADDON_TEST_SEAMS=1 ;;
 esac
 [ "${REPRO_ADDON_TEST_SEAMS:-}" = "1" ] && mutation_args+=(--test-seams)
@@ -98,7 +110,7 @@ mkdir -p build/test-bin
 gate_defines=()
 gate_tag=""
 case "${REPRO_ADDON_MUTATION:-}" in
-  check-silence-as-idle|check-skips-attestation|lag-detector-disabled|lag-from-newest-copy|check-ignores-ship-delay|check-status-ignores-silence|check-forgets-enrolled-key)
+  check-silence-as-idle|check-skips-attestation|lag-detector-disabled|lag-from-newest-copy|check-ignores-ship-delay|check-status-ignores-silence|check-forgets-enrolled-key|lag-ignores-check-state)
     gate_defines=(--define:reproAddonMutation="$REPRO_ADDON_MUTATION")
     gate_tag="-$REPRO_ADDON_MUTATION" ;;
 esac
@@ -114,4 +126,11 @@ bin="build/test-bin/${test}${gate_tag}.run-$$"
   cp "build/test-bin/${test}${gate_tag}" "$bin"
 ) 8>"build/nimcache/${test}${gate_tag}.lock"
 trap 'rm -f "$bin"' EXIT
-REPRO_ADDON_VM_GATES=1 REPRO_ADDON_BASES="$bases" "$bin"
+# The gate and every helper it starts (cache, HTTP origins, sink, QEMU) run
+# as one process group, ended together however the gate ends, and with no
+# descriptor of this script's caller (scripts/lib/process_group.sh).
+# shellcheck source=scripts/lib/process_group.sh
+source scripts/lib/process_group.sh
+gate_rc=0
+run_in_own_group env REPRO_ADDON_VM_GATES=1 REPRO_ADDON_BASES="$bases" "$bin" || gate_rc=$?
+exit "$gate_rc"

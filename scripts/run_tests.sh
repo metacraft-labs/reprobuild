@@ -13,6 +13,12 @@ mkdir -p build build/nimcache test-logs
 rm -rf test-logs/results test-logs/parallel-run.json test-logs/suite-finished.json
 mkdir -p test-logs/results
 repo_root="$(pwd -P)"
+# Two variables an agent or operator shell may carry, and which the suite must
+# not inherit. GIT_OPTIONAL_LOCKS=0 stops a plain `git status` writing the
+# index, which tests rely on it doing. REPROBUILD_PACKAGES_ROOT replaces the
+# whole catalog search, at recipe compile time too, so a test's fixture catalog
+# is never reached; a test that needs one sets it for itself.
+unset GIT_OPTIONAL_LOCKS REPROBUILD_PACKAGES_ROOT
 # Keep large suite scratch off /tmp and outside the checkout; some tests build
 # "outside workspace" fixtures and scan ancestors for repo markers.
 cache_home="${XDG_CACHE_HOME:-${HOME:-}/.cache}"
@@ -293,44 +299,6 @@ _repro_test_daemon_cleanup() {
   bash "${repo_root}/scripts/list_standalone_shell_gates.sh" --notice || true
 }
 trap _repro_test_daemon_cleanup EXIT
-
-# Step 0 (opt-in): build the `ct-mcr` recorder bundle FIRST, while the
-# caller's credentials are still valid, and let `.#test-cross-repo-fixtures`
-# stage that bundle instead of building it again.
-#
-# WHY. That bundle's recipe fetches private repositories (a cargo git
-# dependency, a private flake input of the recorder's dev shell), and CI hands
-# it credentials that are GitHub App installation tokens. An installation
-# token lasts one hour. The collection that builds the bundle runs after the
-# prerequisite siblings, `.#apps`, `.#test-helpers` and `.#test-fixtures`,
-# and that is more than an hour on a CI host. Measured on run 41363427228
-# (Test job 125864626907, gpu-server-002): the token was minted at 11:38:55Z,
-# the collection started at 12:26:41Z, and cargo's fetch of the backend's
-# private git dependency was refused at 12:45:07Z with "Invalid username or
-# token" -- 66 minutes after the mint, by a token that had expired six minutes
-# earlier. Moving the build to here puts it a few minutes after the mint.
-#
-# The collection still runs, and still owns the outputs: with
-# CT_CODETRACER_NATIVE_RECORDER_PREBUILT=1 its edge stages the bundle this
-# build just produced (and fails on a missing file, as after any build). That
-# variable is exported ONLY when this build succeeded. A failed build leaves
-# it unset, so the edge builds the bundle itself and its failure is reported
-# and re-raised exactly as before -- a stale bundle a previous run left in the
-# recorder checkout is never staged as if this run had built it.
-#
-# Opt-in (REPROBUILD_PREBUILD_CROSS_REPO_FIXTURES=1, set by the CI Test job),
-# because a run without the recorder checkout would otherwise print its
-# refusal twice, once here and once from the edge.
-if [[ "${REPROBUILD_PREBUILD_CROSS_REPO_FIXTURES:-0}" == "1" &&
-      "$(uname -s)" == "Linux" && "$(uname -m)" =~ ^(x86_64|amd64)$ ]]; then
-  printf 'Building the ct-mcr recorder bundle before the build phase (REPROBUILD_PREBUILD_CROSS_REPO_FIXTURES=1)\n' >&2
-  if (unset CT_CODETRACER_NATIVE_RECORDER_PREBUILT
-      bash ./scripts/build_hcr_ct_mcr_fixture.sh); then
-    export CT_CODETRACER_NATIVE_RECORDER_PREBUILT=1
-  else
-    printf '::warning:: the early ct-mcr bundle build failed; .#test-cross-repo-fixtures will build it again and report the failure\n' >&2
-  fi
-fi
 
 # Step 1 (B5): bootstrap ./build/bin/repro from nim when missing.
 # Idempotent — the recipe no-ops when the binary already exists.
@@ -657,31 +625,14 @@ repro_build_collection ".#apps" || exit 1
 repro_build_collection ".#test-helpers" || exit 1
 # M2: build canonical test fixtures, including the io-monitor shim.
 repro_build_collection ".#test-fixtures" || exit 1
-# Fixtures built from SIBLING checkouts: today only the `ct-mcr` recorder
-# bundle that e2e_hcr_linux_replay_of_patched_recording records and replays
-# with (Linux x86-64 only, the one platform repro.nim declares the collection
-# on). They are a separate collection because they can fail for reasons that
-# say nothing about this tree -- a sibling that is not checked out, a private
-# dependency the host cannot fetch -- and that must not stop every other case
-# from running. Each test that needs one depends on its edge and fails on its
-# own when it is missing, naming that edge; the collection's failure is
-# re-raised at the end like the other phases'.
-cross_repo_fixtures_status=0
-if [[ "$(uname -s)" == "Linux" && "$(uname -m)" =~ ^(x86_64|amd64)$ ]]; then
-  repro_build_collection ".#test-cross-repo-fixtures" || cross_repo_fixtures_status=$?
-  if (( cross_repo_fixtures_status != 0 )); then
-    printf '::error:: .#test-cross-repo-fixtures failed (exit %d); running the suite, failure re-raised at the end\n' \
-      "${cross_repo_fixtures_status}" >&2
-  fi
-fi
 # The Nix package of THIS tree (`nix build .#default`), which the
 # installed-package gates (tests/e2e/m83/t_e2e_nix_package_compiles_profile*)
 # run. Built once here instead of once per case: the build runs in the nix
 # daemon, outside every case's process group, and concurrent cases waiting on
 # it printed nothing until the runner killed them on its idle timeout. A
-# separate collection for the cross-repo one's reason -- it can fail for
-# reasons that say nothing about the rest of the suite -- with its failure
-# re-raised at the end. Linux and macOS, where repro.nim declares it.
+# separate collection because it can fail for reasons that say nothing about
+# the rest of the suite, with its failure re-raised at the end. Linux and
+# macOS, where repro.nim declares it.
 package_fixtures_status=0
 if [[ "$(uname -s)" == "Linux" || "$(uname -s)" == "Darwin" ]]; then
   repro_build_collection ".#test-package-fixtures" || package_fixtures_status=$?
@@ -990,11 +941,6 @@ if (( group_fallback_status != 0 )); then
     "${group_fallback_status}" >&2
   (( suite_status != 0 )) || suite_status="${group_fallback_status}"
 fi
-if (( cross_repo_fixtures_status != 0 )); then
-  printf '\n.#test-cross-repo-fixtures failed (exit %d); see its build report above\n' \
-    "${cross_repo_fixtures_status}" >&2
-  (( suite_status != 0 )) || suite_status="${cross_repo_fixtures_status}"
-fi
 if (( package_fixtures_status != 0 )); then
   printf '\n.#test-package-fixtures failed (exit %d); see its build report above\n' \
     "${package_fixtures_status}" >&2
@@ -1027,7 +973,6 @@ write_suite_finished_marker() {
     printf '{\n'
     printf '  "schema": "reprobuild.suite-finished.v1",\n'
     printf '  "test_builds_status": %d,\n' "${test_builds_status}"
-    printf '  "cross_repo_fixtures_status": %d,\n' "${cross_repo_fixtures_status}"
     printf '  "package_fixtures_status": %d,\n' "${package_fixtures_status}"
     printf '  "nim_phase_status": %d,\n' "${nim_phase_status}"
     printf '  "python_failed_modules": [%s],\n' "${modules}"

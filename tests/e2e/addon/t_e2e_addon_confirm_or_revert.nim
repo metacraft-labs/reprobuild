@@ -80,11 +80,11 @@ proc service(page: string): string =
   # for the base's python3): a dynamic user, a read-only system, a runtime
   # directory for its page.
   "[Unit]\nDescription=confirm fixture\n[Service]\n" &
-    "RuntimeDirectory=repro-fixture-www\n" &
+    "RuntimeDirectory=repro-fixture-web\n" &
     "ExecStartPre=/bin/sh -c 'echo " & page &
-    " > /run/repro-fixture-www/index.html'\n" &
+    " > /run/repro-fixture-web/index.html'\n" &
     "ExecStart=/usr/bin/python3 -m http.server " & $Port &
-    " --bind 127.0.0.1 --directory /run/repro-fixture-www\n\n" &
+    " --bind 127.0.0.1 --directory /run/repro-fixture-web\n\n" &
     "[Install]\nWantedBy=multi-user.target\n"
 
 proc profile(page, check: string; timeout = 0): string =
@@ -205,9 +205,26 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
          r.exitCode == 0 and "rolled back" notin r.stdout & r.stderr,
          r.stdout & r.stderr)
     step("positive control: A' serves its page", g.served() == "page-A2", "")
+    # An operator restarts the service between two applies (§13 decision
+    # 67; A9 review round 10): systemd removes its RuntimeDirectory and
+    # makes it again, with a new inode, for a new invocation. The next
+    # apply must still take it as the unit's, and say so in its log.
+    let rs = g.exec("systemctl restart repro-fixture-web.service; sleep 2; " &
+                    "systemctl is-active repro-fixture-web.service")
+    step("an operator restarts the service between applies",
+         rs.stdout.strip() == "active", rs.stdout & rs.stderr)
     # 2. Back to A, and its fingerprint.
     r = g.applyProfile(repro, "a", profile("page-A", good))
     step("back to A", r.exitCode == 0, r.stdout & r.stderr)
+    # The audit log is a binary, checksummed record stream (RBSL): read
+    # its text with -a, as the rolled-back step below does.
+    let audit = g.exec("grep -rah 'recreated-accepted' " &
+                       "/var/lib/repro/system/generations/*/log/apply.log " &
+                       "2>/dev/null | tr -c '[:print:]\\n' ' ' | head -3")
+    record["recreatedAudit"] = %audit.stdout
+    step("the apply after the restart logs the directory systemd made " &
+         "again as accepted", "/run/repro-fixture-web" in audit.stdout and
+         "recreated-accepted" in audit.stdout, audit.stdout & audit.stderr)
     let currentA = g.run("readlink /var/lib/repro/system/current").strip()
     let fpA = g.takeFingerprint(repro)
     # 3. B: the check probes a port nothing listens on.

@@ -171,6 +171,56 @@ suite "the decision table, file rows":
     # unlike a plain no-op. At 59c075685f it was indistinguishable from one.
     check same.acceptedOutOfBand and not n.acceptedOutOfBand
 
+  test "owned and changed out of band: EDrift names both remedies":
+    # §13 decision 50, amended 2026-11-06 by the owner; spec §4.3.
+    writeFile(at("/etc/app/edited.conf"), "edited\n")
+    let ledger = sha256Hex("adopted\n")
+    try:
+      discard d.decide(fileInputs("f", "adopted\n", ledgerSha = ledger), at("/etc/app/edited.conf"))
+      check false
+    except AddonDriftError as e:
+      check "repro system adopt f --profile <file>" in e.msg
+      check "--reconcile-drift" in e.msg
+
+  test "adopt refuses an edit the profile does not declare, printing the resource":
+    # §13 decision 61 (decided 2026-11-07 by the owner): the profile is the
+    # source of truth, so no later switch writes the old bytes back over an
+    # adopted edit. Falsifiers: adopt-without-profile (the edit is taken
+    # while the profile still declares the old bytes) and
+    # owned-drift-not-adoptable.
+    writeFile(at("/etc/app/edited.conf"), "edited\n")
+    let ledger = sha256Hex("adopted\n")
+    var inp = fileInputs("f", "adopted\n", ledgerSha = ledger, adopt = true)
+    inp.stanza = proc (bytes: string): string = "STANZA<" & bytes & ">"
+    try:
+      discard d.decide(inp, at("/etc/app/edited.conf"))
+      check false
+    except AddonDriftError as e:
+      check "decision 61" in e.msg
+      check "STANZA<edited\n>" in e.msg
+      check "repro system adopt f" in e.msg
+    # Adopt does not win over the profile even with --reconcile-drift set.
+    var withReconcile = inp
+    withReconcile.reconcileDrift = true
+    try:
+      discard d.decide(withReconcile, at("/etc/app/edited.conf"))
+      check false
+    except AddonDriftError as e:
+      check "decision 61" in e.msg
+
+  test "adopt keeps an edit the profile declares, and the ledger records it":
+    # §13 decision 61: once the profile declares the edited bytes, the
+    # adopt (and any switch) takes them as they are; nothing is written.
+    writeFile(at("/etc/app/edited.conf"), "edited\n")
+    let ledger = sha256Hex("adopted\n")
+    let (a, _) = d.decide(fileInputs("f", "edited\n", ledgerSha = ledger, adopt = true),
+                          at("/etc/app/edited.conf"))
+    check a.verdict == cvNoOp and a.acceptedOutOfBand
+    # The next switch, the ledger now at the edit: a plain no-op.
+    let (n, _) = d.decide(fileInputs("f", "edited\n", ledgerSha = sha256Hex("edited\n")),
+                          at("/etc/app/edited.conf"))
+    check n.verdict == cvNoOp
+
   test "package-owned conffile: EAddOnPackageOwned naming the package and the drop-in":
     # The fixture's dpkg index lists the dpkg-side path; the driver is
     # asked about that path and the file need not exist for the row.

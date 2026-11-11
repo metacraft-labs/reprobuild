@@ -19,12 +19,15 @@
 ##
 ## ## No key is ever committed
 ##
-## Every private scalar is drawn from the operating system's random
-## source at the moment a hierarchy is minted, lives in memory for the
-## lifetime of one test process, and is written nowhere. There is no
-## fixture file, no PEM in the tree, and no key material in this
-## repository — so there is nothing here for a future reader to mistake
-## for a credential, and nothing to rotate.
+## Every private scalar this module mints is drawn from the operating
+## system's random source at the moment a hierarchy is minted, lives in
+## memory for the lifetime of one test process, and is written nowhere.
+## The one exception is the RSA-4096 pair of the confidential-computing
+## emulator (``cvm_evidence_emulator``), which costs seconds to generate:
+## ``newTestRsa4096KeyFromSeed`` derives it from a fixed seed in a
+## build-graph edge, under ``build/``. There is no PEM in the tree and no
+## key material in this repository — so there is nothing here for a
+## future reader to mistake for a credential, and nothing to rotate.
 ##
 ## ## The marker, and why it is critical
 ##
@@ -926,21 +929,15 @@ proc spkiOfP384*(key: TestP384Key): seq[byte] =
   derSeq(derSeq(derOid(OidEcPublicKey), derOid(OidSecp384r1Curve)),
          derBitString(point))
 
-proc newTestRsa4096Key*(): TestRsaKey =
-  ## A fresh 4096-bit RSA keypair, seeded from the operating system's
-  ## random source.
-  ##
-  ## Expensive — seconds, not milliseconds — which is why every caller
-  ## here mints one per PROCESS rather than per call. That is a cost
-  ## decision and not a weakening: a key reused inside one test process
-  ## is still a key that exists nowhere else and is written nowhere.
-  var seed: array[32, byte]
-  if randomBytes(addr seed[0], 32) != 32:
-    raise newException(ValueError,
-      "the OS random source returned short for an RSA seed")
+proc newTestRsa4096KeyFromSeed*(seed: array[32, byte]): TestRsaKey =
+  ## The 4096-bit RSA keypair BearSSL's default key generator derives from
+  ## an HMAC-DRBG seeded with ``seed``. The same seed gives the same key,
+  ## which is what lets a build-graph edge generate a key once and every
+  ## test process read it (``encodeTestRsaKey`` / ``decodeTestRsaKey``).
+  var seedBytes = seed
   var rng: bsslRandAbi.HmacDrbgContext
   bsslRandAbi.hmacDrbgInit(rng, addr bsslHashAbi.sha256Vtable,
-                           addr seed[0], 32)
+                           addr seedBytes[0], 32)
   result.privBuf = newSeq[byte](bsslRsaAbi.rsaKbufPrivSize(Rsa4096Bits))
   var pubBuf = newSeq[byte](bsslRsaAbi.rsaKbufPubSize(Rsa4096Bits))
   var pk: bsslRsaAbi.RsaPublicKey
@@ -956,6 +953,83 @@ proc newTestRsa4096Key*(): TestRsaKey =
   if result.modulus.len != Rsa4096ModulusLen:
     raise newException(ValueError,
       "br_rsa_keygen produced a " & $(result.modulus.len * 8) & "-bit key")
+
+proc newTestRsa4096Key*(): TestRsaKey =
+  ## A fresh 4096-bit RSA keypair, seeded from the operating system's
+  ## random source.
+  ##
+  ## Expensive — seconds, not milliseconds. A test that needs these keys
+  ## at start-up reads a graph-built pair instead (``decodeTestRsaKey``);
+  ## this one is for a case that wants a key no other process has.
+  var seed: array[32, byte]
+  if randomBytes(addr seed[0], 32) != 32:
+    raise newException(ValueError,
+      "the OS random source returned short for an RSA seed")
+  newTestRsa4096KeyFromSeed(seed)
+
+proc encodeTestRsaKey*(key: TestRsaKey): string =
+  ## A line per component, ``<name> <lower-case hex>``: the public pair and
+  ## the CRT form BearSSL signs with.
+  proc hexOf(p: ptr byte; n: uint): string =
+    let a = cast[ptr UncheckedArray[byte]](p)
+    for i in 0 ..< int(n): result.add toHex(int(a[i]), 2).toLowerAscii
+  proc hexOf(b: seq[byte]): string =
+    for x in b: result.add toHex(int(x), 2).toLowerAscii
+  result.add "bits " & $key.priv.nBitlen & "\n"
+  result.add "n " & hexOf(key.modulus) & "\n"
+  result.add "e " & hexOf(key.exponent) & "\n"
+  result.add "p " & hexOf(key.priv.p, key.priv.plen) & "\n"
+  result.add "q " & hexOf(key.priv.q, key.priv.qlen) & "\n"
+  result.add "dp " & hexOf(key.priv.dp, key.priv.dplen) & "\n"
+  result.add "dq " & hexOf(key.priv.dq, key.priv.dqlen) & "\n"
+  result.add "iq " & hexOf(key.priv.iq, key.priv.iqlen) & "\n"
+
+proc decodeTestRsaKey*(text: string): TestRsaKey =
+  ## The inverse of ``encodeTestRsaKey``. The CRT components are laid out
+  ## back to back in ``privBuf`` and the private key points into it, as
+  ## after key generation.
+  var fields: seq[(string, seq[byte])]
+  var bits = 0'u32
+  for line in text.splitLines:
+    let parts = line.strip.split(' ')
+    if parts.len != 2: continue
+    if parts[0] == "bits":
+      bits = uint32(parseUInt(parts[1]))
+      continue
+    var bytes = newSeq[byte](parts[1].len div 2)
+    for i in 0 ..< bytes.len:
+      bytes[i] = byte(parseHexInt(parts[1][2 * i .. 2 * i + 1]))
+    fields.add (parts[0], bytes)
+  proc field(name: string): seq[byte] =
+    for (n, b) in fields:
+      if n == name: return b
+    raise newException(ValueError, "an encoded RSA key has no " & name)
+  result.modulus = field("n")
+  result.exponent = field("e")
+  if bits != uint32(Rsa4096Bits) or result.modulus.len != Rsa4096ModulusLen:
+    raise newException(ValueError, "an encoded RSA key is not 4096-bit")
+  let parts = [field("p"), field("q"), field("dp"), field("dq"), field("iq")]
+  for part in parts:
+    if part.len == 0:
+      raise newException(ValueError, "an encoded RSA key has an empty part")
+    for b in part: result.privBuf.add b
+  var at = 0
+  var starts: array[5, int]
+  for i, part in parts:
+    starts[i] = at
+    at += part.len
+  let base = cast[ptr UncheckedArray[byte]](addr result.privBuf[0])
+  result.priv.nBitlen = bits
+  result.priv.p = addr base[starts[0]]
+  result.priv.plen = uint(parts[0].len)
+  result.priv.q = addr base[starts[1]]
+  result.priv.qlen = uint(parts[1].len)
+  result.priv.dp = addr base[starts[2]]
+  result.priv.dplen = uint(parts[2].len)
+  result.priv.dq = addr base[starts[3]]
+  result.priv.dqlen = uint(parts[3].len)
+  result.priv.iq = addr base[starts[4]]
+  result.priv.iqlen = uint(parts[4].len)
 
 proc signRsaPssSha384*(key: var TestRsaKey;
                        message: openArray[byte]): seq[byte] =

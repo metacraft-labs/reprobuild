@@ -21,6 +21,12 @@
 ## ledger file) must fail, keep the object and the ledger copy, and
 ## complete once the object is restored.
 ##
+## Then the same guest is bootstrapped again with ``--defer-recipient-key``
+## (spec §6.5.2: how an image's assembly boot bootstraps): no recipient key
+## at bootstrap, the host's own created by the next re-assert (a ``lateKey``
+## ledger entry), and an uninstall that again restores the first
+## fingerprint byte for byte.
+##
 ## Negative control: with ``REPRO_ADDON_MUTATION=uninstall-skips-diversion-removal``
 ## the run uses the add-on binary built with that mutation; this gate must
 ## then FAIL, with a diff naming the diversion of ``/etc/issue.net``. Two
@@ -201,7 +207,35 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
     let ident = identityReport(f0, f4)
     step("base fingerprint after uninstall == before bootstrap", ident.ok,
          ident.text)
+
+    # A deferred recipient key (spec §6.5.2, what an image's assembly boot
+    # bootstraps with): none at bootstrap, the host's own created by the
+    # next re-assert, and still nothing left after uninstall.
+    let preD = g.exec(repro & " system addon preflight --defer-recipient-key" &
+                      anchors.flags)
+    let bootD = g.exec(repro & " system addon bootstrap --defer-recipient-key" &
+      " --plan " & planDigestOf(preD.stdout) & anchors.flags)
+    let noKey = g.exec("ls -A /var/lib/repro/agent")
+    step("a deferred-key bootstrap creates no recipient key",
+         bootD.exitCode == 0 and "recipient.key" notin noKey.stdout and
+           "deferred" in bootD.stdout,
+         bootD.stdout & bootD.stderr & "\nagent dir: " & noKey.stdout)
+    let reD = g.exec(repro & " system addon reassert")
+    let keyD = g.exec("stat -c '%a %U' /var/lib/repro/agent/recipient.key; " &
+                      "cat /var/lib/repro/agent/recipient.pub")
+    step("the next re-assert creates the host's own key, 0400 root",
+         reD.exitCode == 0 and "recipient key: created" in reD.stdout and
+           keyD.stdout.startsWith("400 root\n"),
+         reD.stdout & reD.stderr & "\n" & keyD.stdout & keyD.stderr)
+    let unD = g.exec(repro & " system addon uninstall")
+    step("uninstall after a deferred key", unD.exitCode == 0,
+         unD.stdout & unD.stderr)
+    let f5 = g.takeFingerprint(repro)
+    let identD = identityReport(f0, f5)
+    step("base fingerprint after the deferred-key uninstall == before " &
+         "bootstrap", identD.ok, identD.text)
     for (n, t) in [("f0", f0), ("f1", f1), ("f2", f2), ("f3", f3), ("f4", f4),
+                   ("f5", f5),
                    ("l0", l0), ("l1", l1), ("l2", l2)]:
       writeFile(g.runDir / (n & ".txt"), t)
   except CatchableError as e:

@@ -23,7 +23,8 @@
 ## * the shipped compiler must be the recorded fork: a revision mismatch, a
 ##   missing revision file, a missing build record are each refused with
 ##   their own sentence;
-## * a release outside the required range is refused, not replaced;
+## * a release outside the required range is refused, not replaced, and the
+##   range is read by the `uses:` grammar, each of its forms both ways;
 ## * an image with no `nim/` keeps the per-host routes;
 ## * a prefix written by the script's record function passes, and one in the
 ##   script's old shape is refused.
@@ -39,6 +40,7 @@
 import std/[os, osproc, strutils, tempfiles, unittest]
 
 import repro_core/installed_prefix_nim
+import repro_test_support/reasoned_skip
 import repro_interface_artifacts
 import repro_tool_profiles
 
@@ -58,12 +60,18 @@ template withEnv(names: openArray[string]; body: untyped) =
       else: delEnv(entry.name)
 
 template requireGcc(gcc: untyped; body: untyped) =
-  ## The bootstrap probes the C compiler it is given; a gate run must have
-  ## one, so a missing gcc fails the case there rather than skipping it.
+  ## The bootstrap probes the C compiler it is given. A gate run
+  ## (`REPROBUILD_GATE_RUN=1`, exported by `scripts/run_tests.sh`) must have
+  ## one, so a missing gcc fails the case there; anywhere else the case is
+  ## reported SKIPPED, never passed on a checkpoint alone.
   let gcc = findExe("gcc")
   if gcc.len == 0:
-    checkpoint("gcc is not on PATH; the bootstrap probes its C compiler")
-    check getEnv("REPROBUILD_GATE_RUN") != "1"
+    if getEnv("REPROBUILD_GATE_RUN") == "1":
+      checkpoint("gcc is not on PATH in a gate run; the bootstrap probes " &
+        "its C compiler")
+      check false
+    else:
+      skip("gcc is not on PATH; the bootstrap probes its C compiler")
   else:
     body
 
@@ -146,11 +154,32 @@ suite "an installed prefix compiles providers with the Nim it ships":
     check "ships Nim 3.0.0, outside the range" in msg
     check ">=2.2" in msg
 
+  test "the release is read by the uses: grammar, every form both ways":
+    # Each form the `uses:` grammar (`repro_solver/uses_constraints`) reads,
+    # once admitting 2.3.1 and once excluding it. A private parser that read
+    # only `>=`/`<`/`==` refused the caret, tilde, spaced and `v` forms
+    # (A15 round-3 verification, 2026-11-06).
+    for c in ["nim >=2.2 <3.0", "nim >=2.2,<3", "nim >= 2.2", "nim ^2.2",
+              "nim ~2.3", "nim v2.3.1", "nim 2.3.1", "nim ==2.3.1",
+              "nim =2.3.1", "nim >2.3.0", "nim <=2.3.1", "nim"]:
+      checkpoint(c)
+      check nimReleaseAdmitted("2.3.1", c)
+    for c in ["nim >=2.0 <2.3", "nim >=2.4,<3", "nim >= 2.4", "nim ^2.4",
+              "nim ~2.2", "nim v2.3.0", "nim 2.2.10", "nim ==2.2.10",
+              "nim >2.3.1", "nim <2.3.1", "nim >=3.0", "nim >=two"]:
+      checkpoint(c)
+      check not nimReleaseAdmitted("2.3.1", c)
+
+  test "the prefix route's range is read by the same grammar":
+    let root = createTempDir("prefix-nim-caret-", "")
+    defer: removeDir(root)
+    let prefix = installedPrefix(root)
+    check findInstalledPrefixNim([prefix], "nim ^2.2").exe ==
+      prefix / "nim" / "bin" / addFileExt("nim", ExeExt)
+    expect InstalledPrefixNimError:
+      discard findInstalledPrefixNim([prefix], "nim ~2.2")
+
   test "a project's own uses: range is checked against the prefix's release":
-    check nimReleaseAdmitted("2.3.1", "nim >=2.2 <3.0")
-    check not nimReleaseAdmitted("2.3.1", "nim >=2.0 <2.3")
-    check not nimReleaseAdmitted("2.3.1", "nim ==2.2.10")
-    check nimReleaseAdmitted("2.3.1", "nim")
     withEnv([InstalledPrefixNimEnvVar]):
       putEnv(InstalledPrefixNimEnvVar, "2.3.1")
       let uses = @[InterfaceToolUse(rawConstraint: "nim >=2.0 <2.3",
@@ -160,6 +189,14 @@ suite "an installed prefix compiles providers with the Nim it ships":
       requireProjectNimAdmitsInstalledPrefixNim(@[InterfaceToolUse(
         rawConstraint: "nim >=2.2 <3.0", packageSelector: "nim",
         executableName: "nim")])
+      for c in ["nim ^2.2", "nim ~2.3", "nim >= 2.2", "nim v2.3.1"]:
+        checkpoint(c)
+        requireProjectNimAdmitsInstalledPrefixNim(@[InterfaceToolUse(
+          rawConstraint: c, packageSelector: "nim", executableName: "nim")])
+      expect BootstrapNimError:
+        requireProjectNimAdmitsInstalledPrefixNim(@[InterfaceToolUse(
+          rawConstraint: "nim ^2.4", packageSelector: "nim",
+          executableName: "nim")])
       # A tool that is not the compiler is not its business.
       requireProjectNimAdmitsInstalledPrefixNim(@[InterfaceToolUse(
         rawConstraint: "nimble >=0.1 <0.2", packageSelector: "nimble",

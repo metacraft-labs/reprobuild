@@ -509,9 +509,17 @@ proc startedSince*(unit: string; since: float): bool =
   except ValueError:
     false
 
+proc restartRecords*(wasActive: bool): bool =
+  ## Whether a ``try-restart`` started the unit, so that what exists after
+  ## it may be recorded as the unit's own start's (§13 decision 68): only
+  ## when the unit was running; ``try-restart`` of a stopped unit is a
+  ## no-op (systemctl(1)).
+  when mutated("record-after-noop-restart"): true
+  else: wasActive
+
 proc runStart*(ts: seq[Transition]; paused: openArray[string] = [];
                notRunning: openArray[string] = []; noBlock = false;
-               reloadedAt = 0.0) =
+               reloadedAt = 0.0; afterStart: proc (unit: string) = nil) =
   ## Step 7: start, restart or reload in the order given. A
   ## ``stop-start`` unit was stopped in step 2 and is started here. Every
   ## start of an exclusive unit first confirms the unit and its
@@ -531,7 +539,13 @@ proc runStart*(ts: seq[Transition]; paused: openArray[string] = [];
   ## enabled (§7.3 Upheld units). It is left running and only its
   ## predecessors are confirmed exited: stopping it would have the upholder
   ## start it again at once, and the confirmation could never succeed.
+  ##
+  ## ``afterStart`` runs right after each unit's own start or restart, before
+  ## the next unit's: what that start created is the unit's (§13 decision 68,
+  ## the floor's record of the directories a start made).
   let pausedSet = @paused
+  proc started(u: string) =
+    if afterStart != nil: afterStart(u)
   var restored: seq[string]
   proc restoreTriggers(units: openArray[string]) =
     for trig in units:
@@ -539,6 +553,9 @@ proc runStart*(ts: seq[Transition]; paused: openArray[string] = [];
           unitProperty(trig, "LoadState") == "loaded":
         startUnit(trig, noBlock)
         restored.add(trig)
+        # The activator's own start: its listener is its own (§13
+        # decision 78).
+        started(trig)
   for t in startEntries(ts):
     case t.verb
     of tvStart, tvStopStart:
@@ -568,9 +585,15 @@ proc runStart*(ts: seq[Transition]; paused: openArray[string] = [];
         # activation from here on runs the new definition.
         restoreTriggers(t.triggers)
         startUnit(t.unit, noBlock)
+        started(t.unit)
     of tvRestart:
+      # A try-restart of a unit that is not running starts nothing, so
+      # nothing it finds is the unit's to record (A9 review round 11,
+      # finding 6).
+      let wasActive = unitIsActive(t.unit)
       if t.secretsChanged: discard restartForChangedSecrets(t.unit, noBlock)
       else: tryRestartUnit(t.unit, noBlock)
+      if restartRecords(wasActive): started(t.unit)
     of tvReload: reloadUnit(t.unit, noBlock)
     else: discard
   when mutated("exclusive-as-plain-restart"):

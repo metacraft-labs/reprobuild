@@ -50,6 +50,10 @@ const
     ## backpressure (`evidence.nim`). The Boundary gates are sized to fit
     ## inside it (`boundary.auditBudgetIsConsistent`, threat model G18).
 
+  RecordMutation {.strdefine: "reproAddonMutation".} = ""
+    ## The add-on's falsifying-build switch (``repro_addon/mutations``):
+    ## ``allow-source-field`` lets ``source`` through, as the A11 drill
+    ## fixes once did (a test-only build).
   EvidenceFieldAllowList* = [
     "peer", "peerAddress", "leafRole", "messageKind", "refusal", "reason",
     "digest", "observedDigest", "size", "weakFingerprint",
@@ -68,7 +72,23 @@ const
     "finding", "status", "errorCode", "message", "bootId", "purpose",
     "attestation", "attestationSignature", "attestationKey",
     "appliedSequence", "dpkgLastRun", "pending", "planDigest",
-    "recipientKey", "credentialHost", "previousGeneration", "shipDelayMs"]
+    "recipientKey", "credentialHost", "previousGeneration", "shipDelayMs",
+    # Store custody (decisions 47, 48): where an altered object's bytes are
+    # kept and what it was recovered from (``recoveredFrom``: a name for
+    # the trusted source, never ``source``, which could carry a body and is
+    # kept off this list, threat model I3), the unverifiable paths' digests.
+    "evidence", "recoveredFrom", "paths",
+    # A refusal's preserved staging copy and the compiler the apply unit
+    # ran (RESP-1, A11 drill D6).
+    "stagingCopy", "compiler", "compilerSha256",
+    # The sink operator's acknowledgement of a handled detection (D4), an
+    # operator's containment and release of a host (D5), and the hand-over
+    # of a host's evidence keys to new ones (D7).
+    "acknowledges", "operator", "containment", "containmentSignature",
+    "handover",
+    "handoverSignature", "newAttestationKey", "newCredentialHost",
+    # A truncated egress check's summary names the destinations it owes.
+    "destinations", "truncated"]
     ## The only field names a record may carry (EVID-6). Deliberately no
     ## free-form "data"/"body"/"env" field: an environment can hold
     ## credentials, a body can hold source.
@@ -157,7 +177,9 @@ proc redact*(record: EvidenceRecord): EvidenceRecord =
   result.trigger = truncateUtf8(record.trigger, MaxNameBytes)
   result.fields = @[]
   for (k, v) in record.fields:
-    if k in EvidenceFieldAllowList and result.fields.len < MaxFields:
+    let allowed = k in EvidenceFieldAllowList or
+                  (RecordMutation == "allow-source-field" and k == "source")
+    if allowed and result.fields.len < MaxFields:
       result.fields.add((k, truncateUtf8(v, MaxFieldValueBytes)))
   if record.trigger in PayloadCaptureTriggers:
     if record.payload.len > MaxCapturedPayloadBytes:

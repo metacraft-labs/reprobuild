@@ -64,6 +64,11 @@ import nimcrypto/[hash, sha2]
 
 import ./errors
 import ./profile
+import ./service_account
+import ./service_floor
+import ./systemd_values
+import ./systemd_syntax
+import ./privileged_daemons
 
 const CarriedMutation {.strdefine: "reproAddonMutation".} = ""
   ## A falsifying build (``repro_addon/mutations``); never a product build.
@@ -127,6 +132,30 @@ const
     ## The drop-in that holds a unit of a backed-up state set, in
     ## ``/etc/systemd/system/<unit>.d/`` (persistent across reboots).
   HoldUnitDir* = "/etc/systemd/system"
+  CarriedRestoreUnit* = "repro-state-restore.service"
+    ## The first-boot unit that restores carried state (``repro_addon/
+    ## adoption_cli.installRestoreUnit`` installs it).
+  RestoreRequiredDropIn* = "80-repro-state-restore.conf"
+    ## The drop-in ``install-unit`` writes for each unit its manifest names.
+  RequirementDropInName* = "state-restore"
+    ## The generation's drop-in (``50-repro-<name>.conf``) that makes a
+    ## unit reaching carried state require the restore
+    ## (``withCarriedRequirements``).
+
+proc restoreRequirementText*(): string =
+  ## The ``[Unit]`` drop-in that makes a unit require the restore and start
+  ## after it. Owned by the unit, not by the restore unit's ``[Install]``: a
+  ## ``systemctl disable`` or ``preset`` of the restore unit removes links,
+  ## and this drop-in is not a link, so the requirement stays and pulls the
+  ## restore in at boot (systemd.unit(5)). ``Requires=`` fails the unit's
+  ## start job when the restore failed; ``After=`` orders it behind the
+  ## restore whatever its own default dependencies are.
+  "[Unit]\n" &
+    "# Carried state (ReproOS Add-On Mode §11.1): starts only after the\n" &
+    "# first-boot restore of it succeeded.\n" &
+    "Requires=" & CarriedRestoreUnit & "\n" &
+    (when CarriedMutation == "restore-unordered": ""
+     else: "After=" & CarriedRestoreUnit & "\n")
 
 proc under*(root, path: string): string =
   ## ``path`` (absolute) as seen below ``root``.
@@ -330,7 +359,25 @@ proc readReceipt*(dir: string): Table[string, ReceiptEntry] =
     result[k] = ReceiptEntry(digest: v{"digest"}.getStr(),
       root: v{"root"}.getStr(), id: id)
 
-proc writeReceipt*(dir: string; r: Table[string, ReceiptEntry]) =
+type ReceiptPause* = proc (point: string) {.closure.}
+  ## Called at the two points of ``writeReceipt`` a crash-consistency gate
+  ## resets the host at; the add-on passes its test seam
+  ## (``repro_addon/seams``), which is empty outside the seam build.
+
+proc writeReceipt*(dir: string; r: Table[string, ReceiptEntry];
+                   pause: ReceiptPause = nil) =
+  ## Replace the receipt in ``dir`` so that a crash at any moment leaves
+  ## either the old receipt or the new one, each whole: the new bytes are
+  ## written to a temporary file and fsync'd, renamed over the old receipt,
+  ## and the directory fsync'd (https://man7.org/linux/man-pages/man2/fsync.2.html:
+  ## the rename is durable once the directory is). Without the first fsync
+  ## ext4 with delayed allocation can commit the rename before the data,
+  ## leaving an empty receipt (https://docs.kernel.org/admin-guide/ext4.html,
+  ## ``auto_da_alloc``, which papers over this only for some renames).
+  ##
+  ## ``pause`` points: ``receipt-before-rename`` (the temporary file
+  ## written and fsync'd) and ``receipt-before-dir-fsync`` (renamed into
+  ## place, the directory not yet fsync'd).
   var o = newJObject()
   var keys: seq[string]
   for k in r.keys: keys.add(k)
@@ -342,9 +389,7 @@ proc writeReceipt*(dir: string; r: Table[string, ReceiptEntry]) =
     if id.haveBtime: e["btime"] = %*[id.btimeSec, id.btimeNsec]
     if id.haveGen: e["generation"] = %id.gen
     o[k] = e
-  # Durable before it is relied on: the file's bytes, then the rename in
-  # its directory (https://man7.org/linux/man-pages/man2/fsync.2.html: a
-  # rename is durable once the directory is fsync'd).
+  const NoFsync = CarriedMutation == "receipt-no-fsync"
   let tmp = receiptPath(dir) & ".tmp"
   let data = $(%*{"restored": o}) & "\n"
   let fd = posix.open(tmp.cstring, O_WRONLY or O_CREAT or O_TRUNC, 0o600)
@@ -359,15 +404,26 @@ proc writeReceipt*(dir: string; r: Table[string, ReceiptEntry]) =
         raise newException(StateSetError, "cannot write " & tmp & ": " &
           $strerror(errno))
       off += n
-    if fsync(fd) != 0:
-      raise newException(StateSetError, "fsync " & tmp & ": " & $strerror(errno))
+    when not NoFsync:
+      if fsync(fd) != 0:
+        raise newException(StateSetError, "fsync " & tmp & ": " &
+          $strerror(errno))
   finally:
     discard posix.close(fd)
+  if pause != nil: pause("receipt-before-rename")
   moveFile(tmp, receiptPath(dir))
-  let dfd = posix.open(dir.cstring, O_RDONLY)
-  if dfd >= 0:
-    discard fsync(dfd)
-    discard posix.close(dfd)
+  if pause != nil: pause("receipt-before-dir-fsync")
+  when not NoFsync:
+    let dfd = posix.open(dir.cstring, O_RDONLY)
+    if dfd < 0:
+      raise newException(StateSetError, "cannot open " & dir & ": " &
+        $strerror(errno))
+    try:
+      if fsync(dfd) != 0:
+        raise newException(StateSetError, "fsync " & dir & ": " &
+          $strerror(errno))
+    finally:
+      discard posix.close(dfd)
 
 proc installedMarkerPath*(dir: string): string =
   ## Beside the carried directory (so removing the directory leaves it):
@@ -501,20 +557,14 @@ type UnitReach* = object
 proc allReach(why: string): UnitReach = UnitReach(all: true, why: why)
 
 proc unitDirectivesOf(text: string): seq[(string, string, string)] =
-  ## ``(section, key, value)`` in file order, as systemd reads a unit file
-  ## (systemd.syntax(7): ``#``/``;`` comments, ``\`` continuation lines).
+  ## ``(section, key, value)`` in file order, as systemd reads a unit file:
+  ## the logical lines of ``config_parse`` (``systemd_syntax``: comments,
+  ## continuations only after an unescaped final backslash; A13 review
+  ## round 6, finding 1), each stripped and split as ``parse_line`` does.
   var section = ""
-  var pending = ""
-  for raw in text.splitLines():
-    var line = raw
-    if pending.len > 0:
-      line = pending & " " & line.strip()
-      pending = ""
+  for line in systemdLogicalLines(text):
     let t = line.strip()
     if t.len == 0 or t[0] in {'#', ';'}: continue
-    if t.endsWith("\\"):
-      pending = t[0 ..< t.len - 1].strip(leading = false)
-      continue
     if t.startsWith("[") and t.endsWith("]"):
       section = t[1 ..< t.len - 1]
       continue
@@ -524,8 +574,54 @@ proc unitDirectivesOf(text: string): seq[(string, string, string)] =
       continue
     result.add((section, t[0 ..< eq].strip(), t[eq + 1 .. ^1].strip()))
 
-proc truthy(v: string): bool =
-  v.toLowerAscii() in ["yes", "true", "1", "on"]
+proc confinementProblem*(protect: ProtectSystemMode; dynamic, noNewPrivileges: bool;
+                         user, group, supplementaryGroups, unit: string;
+                         lookup: AccountLookup; root = "/"): string =
+  ## Why a service with these (effective) settings is not confined to the
+  ## paths its unit names, or "" (spec §11.1; §13 decision 54). Confined
+  ## only when all hold: its account (``service_account``: the one systemd
+  ## will use) resolves, is not root and holds neither the root group nor
+  ## any group on the floor's ``PrivilegedGroups`` list (the floor's own
+  ## definition, matched by gid on this host); ``NoNewPrivileges=yes``, so
+  ## no setuid program, file capability or ``sudo`` grant lifts it; and it
+  ## runs as a dynamic user or under ``ProtectSystem=strict``. Shared by the
+  ## static analysis (``serviceReach``) and the live cross-check
+  ## (``liveConfinementProblem``). And no host polkit rule or D-Bus system
+  ## policy under ``root`` names its account or any of its groups
+  ## (``privileged_daemons``; §13 decision 58): a privileged daemon could
+  ## act for it outside its sandbox.
+  when CarriedMutation == "reach-default-allow":
+    if dynamic or protect == psStrict: return ""
+    return "not confined"
+  let a = resolveServiceAccount(user, group, supplementaryGroups, dynamic,
+                                unit, lookup)
+  if not a.known:
+    return "its account does not resolve: " & a.unknown.join("; ")
+  if a.userIsRoot:
+    return "runs as root (" & a.user & "): ProtectSystem=strict does not " &
+      "hold root back (/proc/1/root)"
+  if a.groupIsRoot:
+    return "holds the root group (" & a.group & ")"
+  when CarriedMutation != "confined-without-nnp-or-groups":
+    var privileged: seq[(string, int)]
+    for g in PrivilegedGroups:
+      let gid = if g.allCharsInSet(Digits): parseInt(g) else: lookup.gidOf(g)
+      if gid >= 0: privileged.add((g, gid))
+    for gid in a.allGids:
+      for (g, pg) in privileged:
+        if gid == pg:
+          return "holds the privileged group " & g & " (gid " & $gid & ")"
+    if not noNewPrivileges:
+      return "NoNewPrivileges= is not yes: a setuid program, a file " &
+        "capability or a sudo grant lifts it out of its account"
+  let daemon = privilegedDaemonGrant(AccountNames(user: a.user, uid: a.uid,
+    gids: a.allGids, lookup: lookup), normalRoot(root))
+  if daemon.len > 0:
+    return "a privileged daemon may act for its account: " & daemon
+  if not a.dynamicUser and protect != psStrict:
+    return "not confined (no ProtectSystem=strict, and no dynamic user): " &
+      "it can write anywhere"
+  ""
 
 proc unitWords*(value: string; ok: var bool): seq[string] =
   ## A unit value split into words the way systemd splits a list setting
@@ -692,27 +788,38 @@ const
     "RandomizedOffsetSec", "FixedRandomDelay", "OnClockChange",
     "OnTimezoneChange", "Persistent", "WakeSystem", "RemainAfterElapse",
     "DeferReactivation"]
+  PathWatchKeys = ["PathExists", "PathExistsGlob", "PathChanged",
+    "PathModified", "DirectoryNotEmpty"]
+    ## A path unit's watched paths (systemd.path(5)): each reached.
   PathSafe = ["PathExists", "PathExistsGlob", "PathChanged", "PathModified",
     "DirectoryNotEmpty", "MakeDirectory", "DirectoryMode", "TriggerLimitIntervalSec",
     "TriggerLimitBurst"]
 
-proc isRootAccount(v: string): bool = v.len == 0 or v in ["root", "0"]
 
 proc execReach(key, value: string): string =
-  ## Why a command line runs outside the unit's sandbox, or "". Its prefix
-  ## characters, in any order (systemd.service(5), "Command lines"): ``@``,
-  ## ``-``, ``:``, ``+`` (full privileges, no namespacing), ``!``/``!!``
-  ## (no ``User=``), ``|`` (through the shell, systemd ≥ 258).
-  var i = 0
-  while i < value.len and value[i] notin {'/'} and
-      value[i] notin {'a'..'z', 'A'..'Z', '0'..'9', '_', '.', '"', '\''}:
-    let c = value[i]
-    if c in {'+', '!'}:
-      when CarriedMutation != "reach-ignores-privileged-commands":
-        return key & "=" & value & " (a privileged command, outside the sandbox)"
-    elif c notin {'@', '-', ':', '|'}:
-      return key & "=" & value & " (an unknown command prefix " & $c & ")"
-    inc i
+  ## Why a command line runs outside the unit's sandbox, or "". Every
+  ## command of the line (``systemd_syntax.execCommands``: several commands
+  ## separated by a lone ``;``, each word unquoted and unescaped; A13 review
+  ## round 6, finding 2) and each one's prefix characters, in any order
+  ## (systemd.service(5), "Command lines"): ``@``, ``-``, ``:``, ``+`` (full
+  ## privileges, no namespacing), ``!``/``!!`` (no ``User=``), ``|``
+  ## (through the shell, systemd ≥ 258). A line systemd would not read as
+  ## written reaches everything.
+  var ok: bool
+  let cmds = execCommands(value, ok)
+  if not ok:
+    return key & "=" & value & " (a command line not read here)"
+  for cmd in cmds:
+    for c in cmd.prefix:
+      if c in {'+', '!'}:
+        when CarriedMutation != "reach-ignores-privileged-commands":
+          return key & "=" & value & " (a privileged command, outside the sandbox)"
+      elif c notin {'@', '-', ':', '|'}:
+        return key & "=" & value & " (an unknown command prefix " & $c & ")"
+    if cmd.path.len > 0 and cmd.path[0] notin {'/', 'a'..'z', 'A'..'Z',
+        '0'..'9', '_', '.', '%', '$'}:
+      return key & "=" & value & " (an unknown command prefix " &
+        $cmd.path[0] & ")"
   ""
 
 proc pathsOf(key, value: string; r: var UnitReach) =
@@ -726,6 +833,11 @@ proc pathsOf(key, value: string; r: var UnitReach) =
   for w0 in words:
     var w = w0
     if key in BindKeys or key == "TemporaryFileSystem" or key in WritePathKeys:
+      # ``-`` makes a missing path not an error (systemd.exec(5),
+      # "ReadWritePaths="); the path is granted all the same when it exists,
+      # so it reaches exactly as the plain form does.
+      when CarriedMutation == "optional-paths-ignored":
+        if w.startsWith("-"): continue
       while w.len > 0 and w[0] in ListPathPrefixes: w = w[1 .. ^1]
     var ends: seq[string]
     if key in BindKeys:
@@ -744,14 +856,17 @@ proc pathsOf(key, value: string; r: var UnitReach) =
         return
       r.paths.add(n)
 
-proc serviceReach*(name: string; texts: seq[string]): UnitReach =
+proc serviceReach*(name: string; texts: seq[string];
+                   lookup: AccountLookup; root = "/"): UnitReach =
   ## The paths a service can touch, from its unit file and its drop-ins in
   ## the order systemd applies them (``texts``: the file, then drop-ins by
   ## file name). Later assignments of a single-valued setting win, as in
   ## systemd; a list setting's paths only accumulate (an empty assignment
-  ## that resets a list can only take reach away).
-  var strict = false
+  ## that resets a list can only take reach away). The account is the one
+  ## systemd will use (``service_account``), resolved through ``lookup``.
+  var protect = psNo
   var dynamic = false
+  var nnp = false
   var user = ""
   var group = ""
   var collected = UnitReach()
@@ -785,8 +900,16 @@ proc serviceReach*(name: string; texts: seq[string]): UnitReach =
         if key in ReachAllServiceKeys and value.len > 0:
           return allReach(key & "=" & value)
         case key
-        of "ProtectSystem": strict = value.toLowerAscii() == "strict"
-        of "DynamicUser": dynamic = truthy(value)
+        # Read with systemd's grammar (``systemd_values``): a value systemd
+        # ignores leaves the earlier assignment in place (A13 review round
+        # 5, finding 1).
+        of "ProtectSystem": discard parseProtectSystem(value, protect)
+        of "DynamicUser":
+          var b: bool
+          if parseSystemdBoolean(value, b) == srValid: dynamic = b
+        of "NoNewPrivileges":
+          var b: bool
+          if parseSystemdBoolean(value, b) == srValid: nnp = b
         of "User": user = value
         of "Group": group = value
         of "SupplementaryGroups":
@@ -798,9 +921,10 @@ proc serviceReach*(name: string; texts: seq[string]): UnitReach =
             return allReach("AmbientCapabilities=" & value)
         of "PermissionsStartOnly":
           when CarriedMutation != "reach-ignores-privileged-commands":
-            if truthy(value):
-              return allReach("PermissionsStartOnly=yes (its other " &
-                "commands run outside the sandbox)")
+            var b: bool
+            if parseSystemdBoolean(value, b) == srValid and b:
+              return allReach("PermissionsStartOnly=" & value & " (its " &
+                "other commands run outside the sandbox)")
         of "WorkingDirectory":
           var w = value
           if w.startsWith("-"): w = w[1 .. ^1]
@@ -846,21 +970,178 @@ proc serviceReach*(name: string; texts: seq[string]): UnitReach =
         discard                     # judged by unitReach for those types
       else:
         return allReach("[" & section & "] (a section not understood here)")
-  if not dynamic:
-    if not strict:
-      return allReach("not confined (no ProtectSystem=strict or " &
-        "DynamicUser=yes): it can write anywhere")
-    if isRootAccount(user) and CarriedMutation != "reach-default-allow":
-      return allReach("runs as root (no User=, or User=root): " &
-        "ProtectSystem=strict does not hold root back (/proc/1/root)")
-    if group in ["root", "0"]:
-      return allReach("Group=" & group)
+  # The account systemd will use (A13 review round 4, finding 1): its
+  # specifiers expanded, a static account of the name winning over
+  # DynamicUser=yes, uid aliases and group memberships resolved. What does
+  # not resolve reaches everything.
+  let why = confinementProblem(protect, dynamic, nnp, user, group, "", name,
+                               lookup, root)
+  if why.len > 0: return allReach(why)
   collected
 
-proc activatedUnits(name, suffix: string; texts: seq[string]): seq[string] =
+const
+  UnitSearchPath = ["/etc/systemd/system.control",
+    "/run/systemd/system.control", "/run/systemd/transient",
+    "/run/systemd/generator.early", "/etc/systemd/system",
+    "/etc/systemd/system.attached", "/run/systemd/system",
+    "/run/systemd/system.attached", "/run/systemd/generator",
+    "/usr/local/lib/systemd/system", "/usr/lib/systemd/system",
+    "/lib/systemd/system", "/run/systemd/generator.late"]
+    ## The system manager's unit search path, highest priority first
+    ## (systemd.unit(5), "Unit File Load Path"; ``systemd-analyze
+    ## unit-paths``). ``/lib`` is a link to ``/usr/lib`` on a merged-/usr
+    ## base and a directory of its own elsewhere; both are read.
+  GenerationUnitDir = "/etc/systemd/system"
+    ## Where a generation writes a profile's units and drop-ins.
+
+proc dropInDirApplies(d, unit: string; dirSuffix = ".d"): bool =
+  ## Whether systemd reads directory ``d`` (``<name><dirSuffix>``: ``.d``
+  ## for drop-ins, ``.wants``/``.requires``/``.upholds`` for dependency
+  ## links) for ``unit``, or -- ``unit`` a template ``foo@.service`` -- for
+  ## any of its instances: the unit's own name, an instance's, the
+  ## template's, a dashed prefix (``foo-.service``) and the type-wide
+  ## ``service.d`` (systemd.unit(5), "Description"; ``unit_file_find_dirs()``
+  ## and ``unit_file_find_dropin_paths()`` in ``src/shared/dropin.c``,
+  ## https://github.com/systemd/systemd/blob/v257/src/shared/dropin.c, the
+  ## same for every suffix).
+  if not d.endsWith(dirSuffix): return false
+  let n = d[0 ..< d.len - dirSuffix.len]
+  let dot = unit.rfind('.')
+  if dot <= 0: return false
+  let typ = unit[dot + 1 .. ^1]
+  if n == unit or n == typ: return true
+  if not n.endsWith("." & typ): return false
+  let nstem = n[0 ..< n.len - typ.len - 1]
+  let ustem = unit[0 ..< dot]
+  let at = ustem.find('@')
+  let prefix = if at >= 0: ustem[0 ..< at] else: ustem
+  if at >= 0:
+    # The template's directory, and for a template any instance's.
+    if nstem == prefix & "@": return true
+    if ustem.len == at + 1 and nstem.startsWith(prefix & "@"): return true
+  # Dashed prefixes: "a-b-c" reads "a-b-" and "a-".
+  if nstem.endsWith("-") and nstem.len > 1 and prefix.startsWith(nstem):
+    return true
+  false
+
+const AliasFollowMax = 32
+  ## systemd's ``FOLLOW_MAX``: how deep ``unit_ids_map_get()`` follows an
+  ## alias chain before it gives up.
+
+proc unitNames(unit: string; texts: seq[string]; root: string): seq[string] =
+  ## Every name systemd loads ``unit`` under (A13 review round 5, finding
+  ## 2; round 6, finding 3): its own; each ``[Install] Alias=`` in
+  ## ``texts`` (a link once the unit is enabled); and every link in the
+  ## unit search path whose chain of links ends at the unit -- a link to
+  ## the unit, a link to such a link, and so on, as
+  ## ``unit_file_build_name_map()`` and ``unit_ids_map_get()`` resolve
+  ## them (https://github.com/systemd/systemd/blob/v257/src/shared/unit-file.c;
+  ## ``unit_find_dropin_paths()`` then reads the drop-ins of each name).
+  ## The first directory of the search path that holds a name decides it.
+  ## A chain of this unit's type that loops, or is longer than systemd
+  ## follows, is reported as ``<unparsed ...>``: the unit reaches
+  ## everything.
+  result = @[unit]
+  when CarriedMutation == "reach-alias-dropins-unread":
+    return
+  for t in texts:
+    for (section, key, value) in unitDirectivesOf(t):
+      if section == "Install" and key == "Alias":
+        var ok: bool
+        for w in unitWords(value, ok):
+          if w notin result: result.add(w)
+        if not ok: result.add("<unparsed Alias=" & value & ">")
+  # name -> the file name its link points at, first directory first.
+  var links = initOrderedTable[string, string]()
+  var files = initHashSet[string]()
+  for dir in UnitSearchPath:
+    let full = under(normalRoot(root), dir)
+    if not dirExists(full): continue
+    for kind, e in walkDir(full, relative = true):
+      if e in links or e in files: continue
+      if kind == pcLinkToFile or kind == pcLinkToDir or
+          (kind == pcFile and symlinkExists(full / e)):
+        var target = ""
+        try: target = expandSymlink(full / e)
+        except OSError: continue
+        links[e] = target.extractFilename
+      elif kind == pcFile:
+        files.incl(e)
+      elif symlinkExists(full / e):
+        # A dangling link: systemd records it too.
+        var target = ""
+        try: target = expandSymlink(full / e)
+        except OSError: continue
+        links[e] = target.extractFilename
+  let dot = unit.rfind('.')
+  let typ = if dot >= 0: unit[dot .. ^1] else: ""
+  for name in links.keys:
+    if name in result: continue
+    var cur = name
+    var hops = 0
+    var seen = initHashSet[string]()
+    when CarriedMutation == "alias-chain-first-link-only":
+      if links[cur] == unit: result.add(name)
+      continue
+    while true:
+      if cur in seen or hops > AliasFollowMax:
+        if name.endsWith(typ):
+          result.add("<unparsed alias chain from " & name & ">")
+        break
+      seen.incl(cur)
+      let nxt = links.getOrDefault(cur, "")
+      if nxt.len == 0: break
+      if nxt == unit:
+        result.add(name)
+        break
+      cur = nxt
+      inc hops
+
+const DependencyDirs* = [(".wants", "Wants"), (".requires", "Requires"),
+                         (".upholds", "Upholds")]
+  ## The dependency directories systemd reads for a unit
+  ## (``unit_load_dropin()`` in ``src/core/load-dropin.c``,
+  ## https://github.com/systemd/systemd/blob/v257/src/core/load-dropin.c):
+  ## every link in ``<name>.wants/`` is a ``Wants=``, and so on.
+
+proc dependencyLinks*(names: seq[string]; root: string): seq[string] =
+  ## The units the host's dependency directories add to a unit known under
+  ## ``names`` (``unitNames``): every link in a ``.wants/``, ``.requires/``
+  ## or ``.upholds/`` directory of the unit search path that applies to one
+  ## of them (its own, an alias's, the template's, a dashed prefix's, the
+  ## type's), by the link's name, as ``process_deps()`` adds it. A link to
+  ## ``/dev/null`` (masked) and an entry that is not a link are ignored, as
+  ## systemd ignores them. One reader for every caller: the reach analysis
+  ## (``triggersOutside``), the restore requirement and its closure (A13
+  ## review round 6, finding 4).
+  when CarriedMutation == "dependency-links-unread":
+    return
+  for dir in UnitSearchPath:
+    let full = under(normalRoot(root), dir)
+    if not dirExists(full): continue
+    for kind, e in walkDir(full, relative = true):
+      if kind notin {pcDir, pcLinkToDir}: continue
+      for (suffix, _) in DependencyDirs:
+        var applies = false
+        for n in names:
+          if dropInDirApplies(e, n, suffix): applies = true
+        if not applies: continue
+        for k2, f in walkDir(full / e, relative = true):
+          if not symlinkExists(full / e / f): continue
+          var target = ""
+          try: target = expandSymlink(full / e / f)
+          except OSError: continue
+          if target == "/dev/null": continue
+          if f notin result: result.add(f)
+
+proc activatedUnits(name, suffix: string; texts: seq[string];
+                    root = ""): seq[string] =
   ## The units starting this one also starts (``UnitActivating``, a
-  ## service's ``Sockets=``, ``[Install] Also=``), and for a timer or a path
-  ## unit the unit it triggers (``Unit=``, else the service of its name).
+  ## service's ``Sockets=``, ``[Install] Also=``), for a timer or a path
+  ## unit the unit it triggers (``Unit=``, else the service of its name),
+  ## and -- ``root`` given -- the links of its dependency directories on
+  ## the host under any of its names (``dependencyLinks``). The one
+  ## dependency reader.
   var trigger = ""
   for t in texts:
     for (section, key, value) in unitDirectivesOf(t):
@@ -877,6 +1158,116 @@ proc activatedUnits(name, suffix: string; texts: seq[string]): seq[string] =
     if trigger.len == 0:
       trigger = name[0 ..< name.len - suffix.len] & "service"
     if trigger notin result: result.add(trigger)
+  if root.len > 0:
+    let names = unitNames(name, texts, root)
+    for n in names:
+      if n.startsWith("<unparsed"):
+        result.add(n)
+        return
+    for d in dependencyLinks(names, root):
+      if d notin result: result.add(d)
+
+proc unitTexts(unit, base: string; p: SystemProfile; root: string;
+               why: var string; hostUnit = false;
+               profileLeftOut = false): seq[string] =
+  ## What systemd reads for ``unit``: ``base`` (the profile's file), then
+  ## every drop-in that applies to it under any of its names
+  ## (``unitNames``) -- the profile's own (written as
+  ## ``50-repro-<name>.conf``) and the host's, from every directory of the
+  ## unit search path (unit-specific, alias, template, dashed-prefix and
+  ## type-wide directories, generators', ``/run`` and ``/usr/lib`` alike) --
+  ## in one order by file name, a name in a higher-priority directory
+  ## replacing the same name below it. Default-deny where the order is not
+  ## certain: ``why`` is set (the unit reaches everything) when a unit file
+  ## of the same name sits in a directory systemd reads before the
+  ## generation's, when one drop-in name holds different bytes in two
+  ## directories, or when an alias cannot be read.
+  ##
+  ## Left out, as the generation's own (A13 review round 5, finding 3), only
+  ## what the generation being applied writes there: a host
+  ## ``/etc/systemd/system/<name>.d/50-repro-<d>.conf`` the profile declares
+  ## (its bytes are the profile's, judged above), the generation's restore
+  ## requirement (``50-repro-state-restore.conf``) and ``install-unit``'s,
+  ## each only when it holds exactly ``restoreRequirementText``. Any other
+  ## ``50-repro-*.conf`` -- one an earlier generation declared, or one
+  ## placed by hand -- is loaded by systemd and so is read like any drop-in.
+  ##
+  ## ``profileLeftOut``: the host's files alone (the boot closure, §13
+  ## decision 60). The profile's drop-ins are neither added nor read from
+  ## the host where a previous generation wrote them: their
+  ## ``50-repro-<d>.conf`` files are the generation's, not the host's (A13
+  ## review round 7, finding 2).
+  result = @[base]
+  var byName = initOrderedTable[string, string]()
+  var seen = initTable[string, string]()
+  var declared = initHashSet[string]()       # "<dir>.d/<file>"
+  var texts0 = @[base]
+  if not profileLeftOut:
+    for d in p.resources:
+      if d.kind == srkSystemdSystemDropIn and d.diUnit == unit:
+        texts0.add(d.diContent)
+  let names = unitNames(unit, texts0, root)
+  for n in names:
+    if n.startsWith("<unparsed"):
+      why = "an alias that cannot be read (" & n & ")"
+      return
+  for d in p.resources:
+    if d.kind == srkSystemdSystemDropIn and d.diUnit in names:
+      let n = "50-repro-" & d.diName & ".conf"
+      if not profileLeftOut:
+        byName[n] = d.diContent
+        seen[n] = d.diContent
+      declared.incl(d.diUnit & ".d/" & n)
+  when CarriedMutation != "reach-host-dropins-ignored":
+    var higher = true
+    for dir in UnitSearchPath:
+      let full = under(normalRoot(root), dir)
+      if dir == GenerationUnitDir: higher = false
+      if not dirExists(full): continue
+      if higher and not hostUnit and
+          (fileExists(full / unit) or symlinkExists(full / unit)):
+        why = "a unit file " & dir & "/" & unit & " takes precedence over " &
+          "the generation's"
+        return
+      for kind, e in walkDir(full, relative = true):
+        if kind notin {pcDir, pcLinkToDir}: continue
+        var applies = false
+        for n in names:
+          if dropInDirApplies(e, n): applies = true
+        if not applies: continue
+        var files: seq[string]
+        for k2, f in walkDir(full / e, relative = true):
+          if f.endsWith(".conf"): files.add(f)
+        files.sort()
+        for f in files:
+          let own = dir == GenerationUnitDir and f.startsWith("50-repro-")
+          when CarriedMutation == "reach-stale-generation-dropins-skipped":
+            # FALSIFYING MUTATION: round 4's reading -- every 50-repro-*.conf
+            # in the unit's own directory is the generation's.
+            if own and e == unit & ".d": continue
+          else:
+            if own and (e & "/" & f) in declared: continue
+          var c = ""
+          try: c = readFile(full / e / f)
+          except IOError, OSError:
+            why = "the drop-in " & dir & "/" & e & "/" & f & " cannot be read"
+            return
+          if c == restoreRequirementText() and (f == RestoreRequiredDropIn or
+              (own and f == "50-repro-" & RequirementDropInName & ".conf")):
+            continue
+          if f in seen:
+            if seen[f] != c:
+              why = "the drop-in name " & f & " holds different bytes in " &
+                "two directories (" & dir & "/" & e & ")"
+              return
+            continue
+          seen[f] = c
+          byName[f] = c
+  var ordered: seq[string]
+  for n in byName.keys: ordered.add(n)
+  when CarriedMutation != "reach-default-allow":
+    ordered.sort()
+  for n in ordered: result.add(byName[n])
 
 proc definedUnits(p: SystemProfile): HashSet[string] =
   ## The units whose whole definition is in the profile.
@@ -888,18 +1279,22 @@ proc definedUnits(p: SystemProfile): HashSet[string] =
     else: discard
 
 proc triggersOutside(name, suffix: string; texts: seq[string];
-                     p: SystemProfile): string =
+                     p: SystemProfile; root: string): string =
   ## A unit it starts that the profile does not define, or "".
   when CarriedMutation == "reach-trigger-units-reach-nothing":
     return ""
   let defined = definedUnits(p)
-  for u in activatedUnits(name, suffix, texts):
+  for u in activatedUnits(name, suffix, texts, normalRoot(root)):
     if u notin defined and not u.endsWith(".slice"):
       return "it starts " & u & ", which the profile does not define"
   ""
 
 proc timerOrPathReach(name, suffix: string; texts: seq[string];
-                      p: SystemProfile): UnitReach =
+                      p: SystemProfile; root: string): UnitReach =
+  ## A timer reaches no path itself. A path unit reaches every path it
+  ## watches: with ``MakeDirectory=yes`` the manager creates them, as root,
+  ## outside any sandbox (systemd.path(5)), and a list is cheaper to judge
+  ## than that rule. A glob reaches the directory it is anchored in.
   for t in texts:
     for (section, key, value) in unitDirectivesOf(t):
       let ok = case section
@@ -911,9 +1306,19 @@ proc timerOrPathReach(name, suffix: string; texts: seq[string];
         else: false
       if not ok or value == "\0":
         return allReach("[" & section & "] " & key & "= (not understood here)")
-  let why = triggersOutside(name, suffix, texts, p)
+      when CarriedMutation != "reach-path-unit-paths-ignored":
+        if section == "Path" and key in PathWatchKeys and value.len > 0:
+          var v = value
+          let g = v.find({'*', '?', '['})
+          if g >= 0:
+            let slash = v.rfind('/', 0, g)
+            v = if slash > 0: v[0 ..< slash] else: "/"
+          var okP: bool
+          let n = normalizeUnitPath(v, okP)
+          if not okP: return allReach(key & "=" & value)
+          result.paths.add(n)
+  let why = triggersOutside(name, suffix, texts, p, root)
   if why.len > 0: return allReach(why)
-  UnitReach()
 
 proc tmpfilesReach(content: string): UnitReach =
   ## Every path a tmpfiles.d line names (its path column and, for ``L``,
@@ -936,8 +1341,11 @@ proc tmpfilesReach(content: string): UnitReach =
       if not okP: return allReach("tmpfiles path not resolved here: " & t)
       result.paths.add(n)
 
-proc unitReach*(r: SystemResource; p: SystemProfile): UnitReach =
-  ## What a resource of the profile can reach (see the module header).
+proc unitReach*(r: SystemResource; p: SystemProfile; lookup: AccountLookup;
+                root = "/"): UnitReach =
+  ## What a resource of the profile can reach (see the module header),
+  ## reading the host under ``root`` for the drop-ins systemd will apply
+  ## and resolving accounts through ``lookup`` (``hostAccountLookup``).
   ## Exhaustive over ``SystemResourceKind``, with no ``else``: a kind added
   ## later does not compile here until it is classified.
   when CarriedMutation == "reach-default-allow":
@@ -952,27 +1360,22 @@ proc unitReach*(r: SystemResource; p: SystemProfile): UnitReach =
     when CarriedMutation != "reach-dropin-judged-alone":
       if r.suCollision == "dropIn":
         return allReach("a drop-in over the distribution unit " & r.suName)
-    var texts: seq[string]
-    try: texts.add(renderedSystemUnitContent(r))
+    var base = ""
+    try: base = renderedSystemUnitContent(r)
     except CatchableError as e:
       return allReach("unit cannot be rendered: " & e.msg)
-    # The profile's drop-ins for it, in the order systemd applies them:
-    # by file name (systemd.unit(5), "drop-in"), not by profile order.
-    var dropIns: seq[(string, string)]
-    for d in p.resources:
-      if d.kind == srkSystemdSystemDropIn and d.diUnit == r.suName:
-        dropIns.add(("50-repro-" & d.diName & ".conf", d.diContent))
-    when CarriedMutation != "reach-default-allow":
-      dropIns.sort(proc (a, b: (string, string)): int = cmp(a[0], b[0]))
-    for (_, c) in dropIns: texts.add(c)
-    let why = triggersOutside(r.suName, suffix, texts, p)
+    # Every drop-in systemd will apply, in its order (``unitTexts``).
+    var why0 = ""
+    let texts = unitTexts(r.suName, base, p, root, why0)
+    if why0.len > 0: return allReach(why0)
+    let why = triggersOutside(r.suName, suffix, texts, p, root)
     if why.len > 0: return allReach(why)
     case suffix
     of "service":
-      result = serviceReach(r.suName, texts)
+      result = serviceReach(r.suName, texts, lookup, root)
       if not result.all:
         for sd in r.suStateDirectories: result.paths.add(sd.path)
-    of "timer", "path": result = timerOrPathReach(r.suName, suffix, texts, p)
+    of "timer", "path": result = timerOrPathReach(r.suName, suffix, texts, p, root)
     else:
       # A target or a slice runs nothing; what it starts was judged above,
       # and any setting beyond [Unit]/[Install] is not understood.
@@ -982,7 +1385,14 @@ proc unitReach*(r: SystemResource; p: SystemProfile): UnitReach =
             return allReach("[" & section & "] " & key & "=")
       result = UnitReach()
   of srkSystemdSystemTimer:
-    result = timerOrPathReach(r.stName, "timer", @[r.stContent], p)
+    # Read like any other unit file: its drop-ins too (A13 review round 4,
+    # finding 2).
+    var why0 = ""
+    let texts = when CarriedMutation == "reach-timer-dropins-unread":
+                  @[r.stContent]
+                else: unitTexts(r.stName, r.stContent, p, root, why0)
+    if why0.len > 0: return allReach(why0)
+    result = timerOrPathReach(r.stName, "timer", texts, p, root)
   of srkSystemdSystemDropIn:
     # A drop-in for a unit the profile defines is judged with that unit;
     # one over a unit it does not define changes a file it cannot see.
@@ -1125,12 +1535,33 @@ proc heldUnits*(root = "/"): seq[string] =
 # The refusal.
 # ---------------------------------------------------------------------------
 
+proc reservedNameProblem*(p: SystemProfile): string =
+  ## Why ``p`` declares the reserved requirement drop-in, or "" (A13 review
+  ## round 6, finding 5): ``RequirementDropInName`` is the generation's own
+  ## (``50-repro-state-restore.conf``, written by ``withCarriedRequirements``
+  ## for every unit that reaches carried state), so a profile drop-in of that
+  ## name holding anything else would take the requirement's place. The one
+  ## form let through is the requirement itself, byte for byte: the text a
+  ## generation was applied with, applied again (a rollback, a replay).
+  when CarriedMutation == "requirement-name-not-reserved":
+    return ""
+  for r in p.resources:
+    if r.kind == srkSystemdSystemDropIn and r.diName == RequirementDropInName and
+        r.diContent != restoreRequirementText():
+      return "ECarriedStatePending: " & r.address & " is a drop-in named " &
+        RequirementDropInName & " for " & r.diUnit & "; the name is " &
+        "reserved for the carried-state restore requirement (spec §11.1), " &
+        "so rename it"
+  ""
+
 proc carriedStateRefusal*(p: SystemProfile; dir = CarriedStateDir;
                           root = "/"): string =
   ## Why an apply of ``p`` must not run here, or "" (see the module
   ## header). Fails closed: carried state that cannot be read refuses.
   when CarriedMutation == "apply-ignores-carried-state":
     return ""
+  let reserved = reservedNameProblem(p)
+  if reserved.len > 0: return reserved
   when CarriedMutation != "apply-ignores-hold":
     let held = heldUnits(root)
     if held.len > 0:
@@ -1154,8 +1585,9 @@ proc carriedStateRefusal*(p: SystemProfile; dir = CarriedStateDir;
       " cannot be read: " & e.msg
   var hits: seq[string]
   var reached = initHashSet[string]()
+  let lookup = hostAccountLookup(root, p)
   for r in p.resources:
-    let reach = unitReach(r, p)
+    let reach = unitReach(r, p, lookup, root)
     let label = r.address
     for e in m.entries:
       if e.disposition != sdCarry: continue
@@ -1191,6 +1623,292 @@ proc carriedStateRefusal*(p: SystemProfile; dir = CarriedStateDir;
     return "ECarriedStatePending: the carried state's owners would not " &
       "match: " & owners.join("; ")
   ""
+
+proc liveConfinementProblem*(unit: string;
+                             prop: proc (key: string): string {.closure.};
+                             lookup: AccountLookup; root = "/"): string =
+  ## ``confinementProblem`` over the unit as systemd loaded it, from its
+  ## ``systemctl show`` properties (``prop``): what a switch on a live host
+  ## checks after daemon-reload and before any start, so that a value the
+  ## static reading took one way and systemd another is decided by systemd
+  ## (A13 review round 5, finding 1). ``systemctl show`` prints the
+  ## effective values: ``ProtectSystem=no|yes|full|strict``,
+  ## ``DynamicUser=``/``NoNewPrivileges=`` as ``yes``/``no``, and the
+  ## account settings with specifiers expanded.
+  when CarriedMutation == "live-reach-unchecked":
+    return ""
+  var protect = psNo
+  if parseProtectSystem(prop("ProtectSystem"), protect) == srIgnored:
+    return "systemd reports ProtectSystem=" & prop("ProtectSystem") &
+      ", which this check does not read"
+  var dynamic, nnp: bool
+  if parseSystemdBoolean(prop("DynamicUser"), dynamic) != srValid:
+    return "systemd reports DynamicUser=" & prop("DynamicUser")
+  if parseSystemdBoolean(prop("NoNewPrivileges"), nnp) != srValid:
+    return "systemd reports NoNewPrivileges=" & prop("NoNewPrivileges")
+  confinementProblem(protect, dynamic, nnp, prop("User"), prop("Group"),
+                     prop("SupplementaryGroups"), unit, lookup, root)
+
+proc liveReachUnits*(p: SystemProfile; dir = CarriedStateDir;
+                     root = "/"): seq[string] =
+  ## The services of ``p`` the live cross-check judges again: each one the
+  ## static analysis takes as confined (its reach is not everything), while
+  ## carried state is on this host (a manifest at ``dir``, pending or
+  ## restored), where a unit that is not confined reaches it. Shared by the
+  ## add-on's switch and ``runInfraApply`` (§13 decision 59): both hold
+  ## these units' starts, reload, and judge them with
+  ## ``liveReachProblems`` before any of them runs.
+  if not fileExists(dir / ManifestFileName): return
+  let lookup = hostAccountLookup(root, p)
+  for r in p.resources:
+    if r.kind != srkSystemdSystemUnit or r.suCollision == "dropIn" or
+        not r.suName.endsWith(".service"):
+      continue
+    if unitReach(r, p, lookup, root).all: continue   # refused or required
+    result.add(r.suName)
+
+proc liveReachProblems*(units: openArray[string]; p: SystemProfile;
+                        show: proc (unit: string): Table[string, string] {.closure.};
+                        root = "/"): seq[string] =
+  ## ``liveConfinementProblem`` for each of ``units`` as systemd loaded
+  ## it (``show``: its ``systemctl show`` properties, read after the
+  ## switch's daemon-reload and before any start): one problem per unit
+  ## that systemd loaded unconfined, or whose properties cannot be read.
+  let lookup = hostAccountLookup(root, p)
+  for u in units:
+    var props: Table[string, string]
+    try: props = show(u)
+    except CatchableError as e:
+      result.add("ECarriedStatePending: " & u & ": its loaded unit cannot " &
+        "be read (" & e.msg & ")")
+      continue
+    let why = liveConfinementProblem(u,
+      proc (k: string): string = props.getOrDefault(k), lookup, root)
+    if why.len > 0:
+      result.add("ECarriedStatePending: " & u & " as systemd loaded it is " &
+        "not confined (" & why & "), though its unit text reads as confined")
+
+proc carriedStateInstalled*(dir = CarriedStateDir): bool =
+  ## Whether ``install-unit`` installed carried state at ``dir`` (its
+  ## marker) and the manifest is there: when the generation's restore
+  ## requirements apply.
+  fileExists(installedMarkerPath(dir)) and fileExists(dir / ManifestFileName)
+
+proc hostUnitTexts(unit: string; p: SystemProfile; root: string;
+                   why: var string; profileLeftOut = false): seq[string] =
+  ## A unit the profile does not define, as systemd reads it on the host:
+  ## its file -- the first in the unit search path under its name, or its
+  ## template's for an instance, links followed -- then its drop-ins
+  ## (``unitTexts``, §13 decision 53), the profile's onto it included.
+  ## ``why`` set when no file is found or one cannot be read. A masked
+  ## unit (a link to ``/dev/null``, or an empty file) is empty: it starts
+  ## nothing.
+  var candidates = @[unit]
+  let at = unit.find('@')
+  let dot = unit.rfind('.')
+  if at > 0 and dot > at + 1:
+    candidates.add(unit[0 .. at] & unit[dot .. ^1])
+  for c in candidates:
+    for dir in UnitSearchPath:
+      let f = under(normalRoot(root), dir) / c
+      if not (fileExists(f) or symlinkExists(f)): continue
+      if symlinkExists(f):
+        var target = ""
+        try: target = expandSymlink(f)
+        except OSError: discard
+        if target == "/dev/null": return @[]
+      var base = ""
+      try: base = readFile(f)
+      except IOError, OSError:
+        why = "the unit file " & dir & "/" & c & " cannot be read"
+        return
+      return unitTexts(unit, base, p, root, why, hostUnit = true,
+                       profileLeftOut = profileLeftOut)
+  why = "no unit file for " & unit & " in the unit search path"
+
+proc unitClosure(starts: seq[string]; p: SystemProfile; root: string;
+                 stopAt: HashSet[string]; uncertain: var seq[string];
+                 profileLeftOut = false): HashSet[string] =
+  ## Every unit reachable from ``starts`` through what each one starts
+  ## (``activatedUnits`` over the host's unit files and drop-ins, as §13
+  ## decision 53 reads them, and its dependency directories), not entering
+  ## a unit in ``stopAt``. ``uncertain`` gets each unit whose own
+  ## dependencies could not be read.
+  var queue = starts
+  while queue.len > 0:
+    let u = queue.pop()
+    if u in result or u in stopAt: continue
+    result.incl(u)
+    let ext = u.rsplit('.', maxsplit = 1)
+    let suffix = if ext.len == 2: ext[1] else: ""
+    var why = ""
+    let texts = hostUnitTexts(u, p, root, why, profileLeftOut)
+    if why.len > 0:
+      uncertain.add(u)
+      continue
+    for a in activatedUnits(u, suffix, texts, normalRoot(root)):
+      if a.startsWith("<unparsed"):
+        uncertain.add(u)
+        continue
+      if a notin result and a notin stopAt and not a.endsWith(".slice"):
+        queue.add(a)
+
+proc bootClosure(p: SystemProfile; root: string): HashSet[string] =
+  ## The units the host's boot starts whatever the profile does: the
+  ## closure of ``default.target`` over the host's own files, not entering
+  ## a unit the profile defines. Empty when the root has no
+  ## ``default.target``. The profile's drop-ins are left out wherever they
+  ## are: in the profile, and on the host as the ``50-repro-<d>.conf`` an
+  ## earlier generation wrote (A13 review round 7, finding 2) -- a unit
+  ## only a profile drop-in starts is not the boot's, from the second
+  ## apply on as on the first.
+  var none: seq[string]
+  let defined = definedUnits(p)
+  var found = false
+  for dir in UnitSearchPath:
+    let f = under(normalRoot(root), dir) / "default.target"
+    if fileExists(f) or symlinkExists(f): found = true
+  if not found: return
+  when CarriedMutation == "boot-closure-reads-generation-dropins":
+    # FALSIFYING MUTATION: round 6's reading -- an empty profile, so the
+    # generation's own drop-ins on the host are read as the host's.
+    unitClosure(@["default.target"], SystemProfile(), root, defined, none)
+  else:
+    unitClosure(@["default.target"], p, root, defined, none,
+                profileLeftOut = true)
+
+proc carriedRequirementUnits*(p: SystemProfile; dir = CarriedStateDir;
+                              root = "/"): seq[string] =
+  ## The units of ``p`` that must require the first-boot restore: while
+  ## carried state is installed at ``dir`` (``install-unit`` left its marker
+  ## and the manifest is there), every unit whose reach includes a carried
+  ## directory -- by path or because it reaches everything -- whatever its
+  ## name and whether or not the manifest names it (A13 review round 4,
+  ## finding 4). Sorted; empty when no carried state is installed.
+  when CarriedMutation == "restore-requirement-by-manifest-only":
+    return
+  if not carriedStateInstalled(dir):
+    return
+  let m = readStateManifest(dir)
+  let lookup = hostAccountLookup(root, p)
+  var units = initHashSet[string]()
+  var dropInTargets: seq[string]
+  for r in p.resources:
+    let u = case r.kind
+      of srkSystemdSystemUnit: r.suName
+      of srkSystemdSystemTimer: r.stName
+      of srkSystemdSystemDropIn:
+        # A drop-in for a unit the profile does not define reaches
+        # everything: that unit requires the restore through it.
+        when CarriedMutation == "restore-requirement-skips-dropin-targets": ""
+        else: r.diUnit
+      else: ""
+    if u.len == 0 or u == CarriedRestoreUnit: continue
+    let reach = unitReach(r, p, lookup, root)
+    for e in m.entries:
+      if e.disposition != sdCarry: continue
+      var hit = reach.all
+      for q in reach.paths:
+        if reaches(q, e.path): hit = true
+      if hit:
+        units.incl(u)
+        if r.kind == srkSystemdSystemDropIn: dropInTargets.add(u)
+  # What a profile unit starts that the profile does not define reaches
+  # everything (``triggersOutside``), and a requirement on the starting
+  # unit does not hold it back: ``Wants=`` and the rest -- written in its
+  # file or a drop-in, or linked from a host dependency directory -- queue
+  # it as a job of its own, which runs when the restore failed (A13 review
+  # round 5, finding 5; round 6, finding 4). So each such unit gets the
+  # requirement itself.
+  var direct: seq[string]
+  let defined = definedUnits(p)
+  when CarriedMutation != "restore-requirement-skips-activated":
+    for r in p.resources:
+      var name, suffix, base: string
+      case r.kind
+      of srkSystemdSystemUnit:
+        if r.suCollision == "dropIn": continue
+        name = r.suName
+        try: base = renderedSystemUnitContent(r)
+        except CatchableError: continue      # reaches everything; above
+      of srkSystemdSystemTimer:
+        name = r.stName
+        base = r.stContent
+      else: continue
+      let ext = name.rsplit('.', maxsplit = 1)
+      suffix = if ext.len == 2: ext[1] else: ""
+      var why = ""
+      let texts = unitTexts(name, base, p, root, why)
+      for a in activatedUnits(name, suffix, texts, normalRoot(root)):
+        if a notin defined and not a.endsWith(".slice") and
+            a != CarriedRestoreUnit and not a.startsWith("<unparsed"):
+          units.incl(a)
+          direct.add(a)
+  # And what those start in turn (§13 decision 60): the closure through
+  # the host's unit files and drop-ins, as decision 53 reads them, of every
+  # unit above the profile does not define. A unit the host's boot starts
+  # anyway (``bootClosure``) is the distribution's, not started through
+  # the profile, and is neither given the requirement nor entered; a unit
+  # whose own dependencies cannot be read keeps the requirement it has.
+  when CarriedMutation != "restore-requirement-skips-closure":
+    let boot = bootClosure(p, root)
+    var stop = boot
+    for d in defined: stop.incl(d)
+    stop.incl(CarriedRestoreUnit)
+    var uncertain: seq[string]
+    var roots: seq[string]
+    for u in direct & dropInTargets:
+      if u notin roots: roots.add(u)
+    # The roots are given the requirement above whatever ``boot`` says;
+    # their own dependencies are followed from here.
+    var next: seq[string]
+    for u in roots:
+      let ext = u.rsplit('.', maxsplit = 1)
+      let suffix = if ext.len == 2: ext[1] else: ""
+      var why = ""
+      let texts = hostUnitTexts(u, p, root, why)
+      if why.len > 0: continue
+      for a in activatedUnits(u, suffix, texts, normalRoot(root)):
+        if not a.startsWith("<unparsed") and not a.endsWith(".slice") and
+            a notin stop:
+          next.add(a)
+    for u in unitClosure(next, p, root, stop, uncertain):
+      units.incl(u)
+  for u in units: result.add(u)
+  result.sort()
+
+proc carriedRequirementText*(p: SystemProfile; dir = CarriedStateDir;
+                             root = "/"): string =
+  ## The ``systemd.systemDropIn`` resources (profile text) a generation adds
+  ## for ``carriedRequirementUnits``: ``RequirementDropInName``, holding
+  ## ``restoreRequirementText``. Generation content like any other drop-in:
+  ## written, recorded and removed by the switch, and judged by the add-on's
+  ## effective-unit check. The name is reserved (``reservedNameProblem``):
+  ## a unit whose profile already holds exactly this drop-in -- a stored
+  ## generation's text, applied again -- is not given a second one.
+  var declared = initHashSet[string]()
+  for r in p.resources:
+    if r.kind == srkSystemdSystemDropIn and r.diName == RequirementDropInName:
+      let why = reservedNameProblem(p)
+      if why.len > 0:
+        raise newException(ECarriedStatePending, why)
+      declared.incl(r.diUnit)
+  for u in carriedRequirementUnits(p, dir, root):
+    if u in declared: continue
+    result.add("\nsystemd.systemDropIn {\n  unit = \"" & u & "\"\n" &
+      "  name = \"" & RequirementDropInName & "\"\n" &
+      "  content = \"" & restoreRequirementText() & "\"\n}\n")
+
+proc withCarriedRequirements*(profileText: string; dir = CarriedStateDir;
+                              root = "/"): string =
+  ## ``profileText`` with ``carriedRequirementText`` appended: what every
+  ## apply (``runInfraApply``, ``runAddonApply``) and ``repro infra plan``
+  ## apply instead of the text they were given, so the boot guarantee of
+  ## spec §11.1 follows reach at every apply rather than the names
+  ## ``install-unit`` wrote once.
+  if not carriedStateInstalled(dir): return profileText
+  profileText & carriedRequirementText(parseSystemProfile(profileText), dir,
+                                       root)
 
 proc requireCarriedStateReady*(p: SystemProfile; dir = CarriedStateDir;
                                root = "/") =

@@ -15,6 +15,39 @@ covers the behavior you touched.
 - `just test` runs the local Nim test suite.
 - `just lint` runs repository requirement and Nim source checks.
 
+## Test-helper dependency lists, and hosts that deny ptrace
+
+Some tests run helper binaries from `build/bin` (the Evidence sink
+`repro-evidence-sink` and the binary cache `repro-binary-cache`). They
+use a helper only when a dependency list written for that very binary
+says no source changed since it was built
+(`libs/repro_test_support/src/repro_test_support/fresh_binary.nim`).
+`scripts/write_helper_deps.sh` writes the list. To see the files the Nim
+compiler reads at compile time (`staticRead`, and what a `staticExec`
+command reads), it traces the compiler with `strace`, which needs ptrace.
+
+`just build` (`scripts/build_apps.sh`) has two modes:
+
+- `REPRO_BUILD_APPS_HELPER_DEPS=write`, the default on Linux, writes
+  each list. If a list cannot be written, the build fails. It names the
+  helper and this variable.
+- `REPRO_BUILD_APPS_HELPER_DEPS=none` writes no list and removes old
+  ones. It is the default on other systems, and the Nix package uses it.
+
+On a host or container that denies ptrace (Yama
+`kernel.yama.ptrace_scope` 2 or 3, or a seccomp profile without
+`ptrace`), strace cannot run, so `write` mode fails. Build with:
+
+```sh
+REPRO_BUILD_APPS_HELPER_DEPS=none just build
+```
+
+The tests that run those helpers then refuse them ("has no dependency
+list"), because nothing proves they were built from the tree. Run those
+tests on a host that allows ptrace. `repro build .#apps` writes the
+binary cache's list through a graph edge, and on such a host that edge
+fails too.
+
 ## Windows OpenSSL Download Checks
 
 Run `windows/tests/test-openssl-mirrors.ps1` with PowerShell to exercise

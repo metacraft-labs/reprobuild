@@ -39,6 +39,8 @@ import std/[json, options, os, osproc, strutils, tables, tempfiles,
 import repro_test_support
 import repro_test_support/reasoned_skip
 import repro_resources          # the lease-reaper row's fixture store
+import repro_cli_support        # verifiedCertificateShape() — the clause the
+                                # certificate-policy row must carry (PG-16)
 
 proc q(value: string): string = quoteShell(value)
 
@@ -243,6 +245,46 @@ suite "RA-30 — repro health reports each layer status with remedy":
           "push-gateway", "toolchain", "certificate-policy",
           "workspace-ergonomics"]:
         check not findCheck(report, name).isNil
+
+  test "test_pg16_certificate_policy_row_names_the_shape_this_build_verifies":
+    ## PG-16: the row reports WHICH CERTIFICATE RECORDS THIS BUILD ACCEPTS,
+    ## not only which policy a push would be judged against.
+    ##
+    ## Two builds can resolve the identical policy and still disagree about
+    ## every certificate in front of them — one requiring ``vcs.content``, an
+    ## earlier one accepting a commit binding — so a row that reports only the
+    ## policy cannot tell an operator which build answered.
+    ##
+    ## WHAT MAKES THIS FALSIFIABLE, and what it deliberately does not test.
+    ## The assertion is that the row EMITTED BY THE BINARY carries the clause
+    ## ``verifiedCertificateShape()`` builds, so an arm of the
+    ## ``certificate-policy`` check that stops appending it fails here — which
+    ## is the regression worth catching, since the row is assembled in five
+    ## separate arms and four of them were written before the clause existed.
+    ## It does NOT test the sentence's wording: comparing the binary's output
+    ## against this process's own copy of the same function could not fail on
+    ## that, and a hand-written expected sentence would drift from the
+    ## constants the reader enforces. The wording is pinned instead by the two
+    ## content checks below, which name the accepted schema distinguishably
+    ## from the retired one (``retiredReprobuildCertificateSchema`` CONTAINS
+    ## ``testCertificateSchemaV1`` as a substring, so a bare ``contains`` on
+    ## the latter would pass on the retired name alone).
+    let gitBin = findExe("git")
+    if gitBin.len == 0:
+      skip("git not on PATH; this case needs a fixture workspace with a " &
+        "resolvable manifest for `health` to enumerate")
+    else:
+      let fx = setupFixture(gitBin, "certshape", withManifest = true)
+      defer: removeDir(fx.scratch)
+
+      let report = parseJson(invokeHealth(fx, ["--json"]).output)
+      let row = findCheck(report, "certificate-policy")
+      check not row.isNil
+      let detail = row["detail"].getStr()
+      check detail.contains("This build " & verifiedCertificateShape())
+      check detail.contains("verifies " & testCertificateSchemaV1 &
+        " bound to content")
+      check detail.contains(retiredReprobuildCertificateSchema)
 
   test "test_ra30_workspace_marker_drives_ok_vs_fail":
     let gitBin = findExe("git")

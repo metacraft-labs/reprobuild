@@ -82,17 +82,26 @@
 ## evaluator refuses any other key type at those positions *before* it
 ## looks at the root — so a test chain carrying P-256 keys there would
 ## be refused as the wrong shape, which says nothing about whether the
-## root is the vendor's. Generating two 4096-bit keys costs seconds, so
-## the hierarchy is minted once per process and handed to every driver
-## that asks for one. The Intel side is P-256 throughout and costs
-## nothing.
+## root is the vendor's. Generating a 4096-bit key costs about 15
+## CPU-seconds, and every process that minted a hierarchy paid for two or
+## four of them at start-up. So those keys are not generated here: the
+## build graph generates them once, from fixed seeds
+## (``tests/fixtures/cvm-test-keys``, edge
+## ``reprobuild.test_fixtures.cvm_test_rsa_keys``), and a hierarchy reads
+## them. Everything else -- the endorsement key, the serials, the
+## signatures -- is still minted per process, and the hierarchy is still
+## minted once per process and handed to every driver that asks for one.
+## The Intel side is P-256 throughout and costs nothing.
 ##
 ## ## Mocking
 ##
 ## None. Real ECDSA P-384 and P-256 signatures, real RSASSA-PSS over
-## SHA-384, real DER, real PEM, and the vendors' own byte layouts. Every
-## key is drawn from the operating system's random source per process
-## and written nowhere.
+## SHA-384, real DER, real PEM, and the vendors' own byte layouts. The
+## security-processor root and signing-authority keys are the graph-built
+## fixed-seed keys above; every other key is drawn from the operating
+## system's random source per process and written nowhere. A fixed root
+## key weakens nothing here: both refusals are structural, and neither
+## depends on the key being secret.
 
 import std/[base64, options, strutils]
 
@@ -101,6 +110,8 @@ import repro_attest/snp_launch
 import repro_attest_verify
 import repro_attest_verify/tdx_chain
 import repro_attest_verify/tdx_quote
+
+import repro_test_support
 
 import ./software_root_test_pki
 
@@ -308,6 +319,19 @@ proc mintAmdCrl(issuerKey: var TestRsaKey; issuerName: seq[byte];
   let sig = signRsaPssSha384(issuerKey, tbs)
   cvmStringOf(derSeq(tbs, pssCrlAlgBlock(), derBitString(sig)))
 
+const SnpTestRootKeysActionId* = "reprobuild.test_fixtures.cvm_test_rsa_keys"
+
+proc snpTestRootKeyPath*(name: string): string =
+  ## Where edge ``SnpTestRootKeysActionId`` writes one of the RSA-4096 root
+  ## and signing-authority keys of the marked and the unmarked hierarchy,
+  ## ``snp-{marked,unmarked}-{ark,ask}`` (``tests/fixtures/cvm-test-keys``).
+  ## A read-only input every process shares.
+  graphArtifactPath("build/test-fixtures/cvm-test-keys/" & name & ".key")
+
+proc snpTestRootKey(name: string): TestRsaKey =
+  decodeTestRsaKey(readFile(requireBinary(snpTestRootKeyPath(name),
+    SnpTestRootKeysActionId)))
+
 proc mintSnpTestHierarchy*(now: int64; marked: bool;
                            chipId: seq[byte] = @[]): SnpTestHierarchy =
   ## A root, a signing authority and an endorsement key, in AMD's own
@@ -318,8 +342,9 @@ proc mintSnpTestHierarchy*(now: int64; marked: bool;
   ## with ``false``.
   result.marked = marked
   result.now = now
-  result.arkKey = newTestRsa4096Key()
-  result.askKey = newTestRsa4096Key()
+  let keySet = if marked: "snp-marked" else: "snp-unmarked"
+  result.arkKey = snpTestRootKey(keySet & "-ark")
+  result.askKey = snpTestRootKey(keySet & "-ask")
   result.vcekKey = newTestP384Key()
 
   var marker: seq[seq[byte]] = @[]

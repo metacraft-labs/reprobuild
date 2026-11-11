@@ -639,6 +639,13 @@ const
     "t_e2e_shell_hook_noop_latency",
     "t_repro_https_cache_end_to_end",
     "t_sc_capstone_reprobuild_runquota_and_library_edge_both_modes",
+    # Both of its materialization cases assert a 200 ms median for a warm
+    # lease (in-process and through the shipped worker daemon), after one
+    # retry of the series. In the parallel phase of a full run on the
+    # persistent runner (job 128443677010) the medians were 375 ms and
+    # over budget, while every content assertion of both cases passed, so
+    # the latency claim is measured on a quiet host. The budget is unchanged.
+    "t_workspace_snapshot_export_and_materialize",
   ]
 
 type
@@ -4256,6 +4263,42 @@ proc missingDocumentDiagnostic(resultFile: string; exitCode: int;
       "directly to see\n" &
     "               what the child was doing.\n"
 
+const ResultDocumentNameMax = 255
+  ## ``NAME_MAX`` on every file system the suite runs on (ext4, ZFS, APFS,
+  ## NTFS): a longer file name cannot be created at all.
+
+proc resultDocumentName(sourceStem, qualifiedName: string): string =
+  ## The file name of a case's result document: its source stem and its
+  ## qualified name, made path-safe -- bounded to ``ResultDocumentNameMax``
+  ## bytes.
+  ##
+  ## Unbounded, a long suite name plus a long case name made a name the
+  ## file system refuses: the child's ``writeFile`` raised from
+  ## ``testEnded`` after the case had run, no document was written, and the
+  ## runner reported a FAIL "with no result document" for a case that had
+  ## passed (t_gateway_accepts_a_lock_pinning_other_repositories_and_names_
+  ## them_unverified, whose names are 280 bytes and more, on every host).
+  ## A name that fits is unchanged. One that does not keeps as much of its
+  ## readable prefix as fits, cut on a UTF-8 character boundary, followed by
+  ## a 64-bit FNV-1a digest of the whole name, so two long names that share
+  ## the prefix still name two documents.
+  const Ext = ".json"
+  let full = sourceStem & "__" & qualifiedName.multiReplace([
+    ("::", "__"), ("/", "_"), (" ", "_"), ("\t", "_")])
+  if full.len + Ext.len <= ResultDocumentNameMax:
+    return full & Ext
+  var digest = 0xcbf29ce484222325'u64
+  for ch in full:
+    digest = (digest xor uint64(ord(ch))) * 0x100000001b3'u64
+  let suffix = "-" & toHex(digest, 16).toLowerAscii()
+  var keep = ResultDocumentNameMax - Ext.len - suffix.len
+  # Do not end inside a multi-byte UTF-8 sequence: back up over continuation
+  # bytes (10xxxxxx) to the start of the character, and drop that too.
+  if keep < full.len and (ord(full[keep]) and 0xC0) == 0x80:
+    while keep > 0 and (ord(full[keep]) and 0xC0) == 0x80:
+      dec keep
+  full[0 ..< keep] & suffix & Ext
+
 proc runOneProtocol(tc: TestCase; resultsDir: string;
                     baseEnv: seq[tuple[key, value: string]];
                     testTimeoutSec: int;
@@ -4272,9 +4315,8 @@ proc runOneProtocol(tc: TestCase; resultsDir: string;
     return
   # Keyed on the case's SOURCE, not on the binary: a case writes the same
   # result file whether its file is compiled alone or into a group binary.
-  let resultFile = resultsDir / (tc.sourceStem & "__" &
-    tc.qualifiedName.multiReplace([
-      ("::", "__"), ("/", "_"), (" ", "_"), ("\t", "_")]) & ".json")
+  let resultFile = resultsDir / resultDocumentName(tc.sourceStem,
+    tc.qualifiedName)
   result.resultFile = resultFile
   # Build a per-child env table that inherits the parent snapshot and
   # overrides only ``NIMTEST_RESULT_FILE``. Doing this per-call keeps

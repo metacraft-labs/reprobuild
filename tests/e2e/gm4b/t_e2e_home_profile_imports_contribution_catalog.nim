@@ -8,8 +8,11 @@
 ## that identity in `home.lock` when it applies
 ## (Provisioning-Contributions.md §"Profile Package References").
 ##
-## Fixtures, all written at test time into one scratch directory, laid out
-## the way a workspace lays out sibling checkouts:
+## Fixtures, built by the build-graph edge
+## `reprobuild.test_fixtures.gm4b_catalog_imports`
+## (`gm4b_catalog_imports_fixture.nim`) into one directory, laid out the way
+## a workspace lays out sibling checkouts; each case writes its profiles
+## into directories of its own beside them:
 ##
 ## * `reprobuild-packages/packages/interfaces/gm4bimported/repro.nim` -- the
 ##   canonical definition, reached by the catalog lookup from the profile
@@ -23,7 +26,8 @@
 ## * `profile-*/home.nim` -- the profiles, `catalogs:
 ##   "../gm4b-contribution-catalog/repro"`;
 ## * `recipe-*/repro.nim` -- `import "../gm4b-contribution-catalog/repro"`
-##   and `uses: "gm4bimported"`.
+##   and `uses: "gm4bimported"`, with the interface artifact the real
+##   extractor wrote for each.
 ##
 ## Routes, all production code:
 ##
@@ -65,129 +69,51 @@
 import std/[options, os, osproc, sequtils, streams, strtabs, strutils,
   tempfiles, unittest]
 from repro_core/paths import extendedPath
-import nimcrypto/sha2 as fixtureSha2
 
 import repro_project_dsl
 import repro_interface_artifacts
 import repro_tool_profiles
 import repro_home_apply
 import repro_home_intent
+import repro_test_support
+
+import ./gm4b_catalog_imports_fixture
 
 const ProjectRoot = currentSourcePath().parentDir().parentDir().parentDir()
   .parentDir()
 
-const
-  Contributor = "github:example/gm4b-contribution-catalog"
-  PackageName = "gm4bimported"
-  ImportEntry = "../gm4b-contribution-catalog/repro"
-
-let hostOs =
-  when defined(windows): "windows"
-  elif defined(macosx): "macos"
-  else: "linux"
-let otherOs = if hostOs == "windows": "linux" else: "windows"
 let here = currentHostContext()
 
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
 
-let root = createTempDir("repro-gm4b-catalog-imports-", "")
-let payload = root / "payload" / PackageName
-createDir(payload.parentDir)
-writeFile(payload, "#!/bin/sh\necho gm4bimported\n")
-setFilePermissions(payload, {fpUserRead, fpUserWrite, fpUserExec})
-let payloadUrl = "file://" & payload
-let payloadSha = ($fixtureSha2.sha256.digest(readFile(payload))).toLowerAscii()
+# The tree is built by edge `CatalogImportsActionId` (see
+# `gm4b_catalog_imports_fixture`); every file a case reads is one of its
+# declared outputs.
+for rel in CatalogImportsOutputs:
+  discard requireBinary(catalogImportsFixturePath(rel),
+    CatalogImportsActionId)
+let root = catalogImportsFixturePath()
+let payloadUrl = payloadUrl(root)
 
-let definitionDir = root / "reprobuild-packages" / "packages" / "interfaces" /
-  PackageName
-createDir(definitionDir)
-writeFile(definitionDir / "repro.nim", """
-import repro_project_dsl
+var caseDirs: seq[string]
+proc caseDir(label: string): string =
+  ## A directory of this process's own beside the catalog, so its profile
+  ## names the catalog as `../gm4b-contribution-catalog/repro` and the
+  ## definition lookup reaches the fixture's `reprobuild-packages`. Removed
+  ## when the process ends; the fixture's own files are never written.
+  result = createTempDir(label & "-", "", root)
+  caseDirs.add result
 
-package gm4bimported:
-  provisioning:
-    tarball url = "https://example.invalid/gm4bimported-1.0-""" & otherOs &
-      """.tar.gz",
-      sha256 = "6666666666666666666666666666666666666666666666666666666666666666",
-      archiveType = "tar.gz",
-      executablePath = "bin/gm4bimported",
-      packageId = "gm4bimported@1.0",
-      version = "1.0",
-      cpu = "x86_64",
-      os = """ & "\"" & otherOs & "\"\n")
-
-proc contributionCatalogText(fingerprintLine: string): string =
-  "import repro_project_dsl\n\n" &
-    "provisioningFor \"" & PackageName & "\":\n" &
-    "  " & fingerprintLine & "\n" &
-    "  contributor \"" & Contributor & "\"\n" &
-    "  tarball url = \"" & payloadUrl & "\",\n" &
-    "    sha256 = \"" & payloadSha & "\",\n" &
-    "    archiveType = \"raw\",\n" &
-    "    executablePath = \"" & PackageName & "\",\n" &
-    "    packageId = \"" & PackageName & "@1.0\",\n" &
-    "    version = \"1.0\",\n" &
-    "    cpu = \"any\",\n" &
-    "    os = \"" & hostOs & "\"\n"
-
-let catalogDir = root / "gm4b-contribution-catalog"
-createDir(catalogDir)
-
-proc extractRecipe(label: string; withImport: bool): InterfaceToolUse =
-  ## A recipe beside the profile, compiled through the real extractor; its
-  ## projected ``uses: "gm4bimported"``.
-  let dir = root / ("recipe-" & label)
-  createDir(dir)
-  writeFile(dir / "repro.nim", "import repro_project_dsl\n" &
-    (if withImport: "import \"" & ImportEntry & "\"\n" else: "") &
-    "\npackage gm4bImportsRecipe:\n  defaultToolProvisioning \"tarball\"\n" &
-    "  uses:\n    \"" & PackageName & "\"\n" &
-    "    \"just\"\n")
-  let artifact = extractInterfaceFromModule(dir / "repro.nim",
-    dir / "project-interface.rbsz", dir / "project-interface.nim",
-    workDir = ProjectRoot, scratchDir = dir / "work", consumerRoot = dir,
-    useExtractionCache = false)
+proc recipeUse(label: string): InterfaceToolUse =
+  ## The recipe's projected ``uses: "gm4bimported"``, as the real extractor
+  ## wrote it into the fixture.
+  let artifact = readInterfaceArtifact(recipeArtifactPath(root, label))
   for use in artifact.projectInterface.toolUses:
     if use.packageSelector == PackageName:
       return use
   doAssert false, "the recipe projects no use of " & PackageName
-
-# The catalog is published PINNED to the definition's interface
-# fingerprint: a first extraction binds a development contribution to the
-# active definition, and the catalog is rewritten with that fingerprint.
-template withNoCatalogRoot(body: untyped) =
-  ## The lookup walks to the `reprobuild-packages` beside the recipe and the
-  ## profile, as in a workspace; an exported root would replace it.
-  let hadRoot = existsEnv(ReprobuildPackagesRootEnv)
-  let savedRoot = getEnv(ReprobuildPackagesRootEnv)
-  delEnv(ReprobuildPackagesRootEnv)
-  try:
-    body
-  finally:
-    if hadRoot: putEnv(ReprobuildPackagesRootEnv, savedRoot)
-
-var pinnedFingerprint = ""
-withNoCatalogRoot:
-  writeFile(catalogDir / "repro.nim",
-    contributionCatalogText("developInterface"))
-  let dir = root / "recipe-pin"
-  createDir(dir)
-  writeFile(dir / "repro.nim", "import repro_project_dsl\nimport \"" &
-    ImportEntry & "\"\n\npackage gm4bPin:\n  uses:\n    \"" & PackageName &
-    "\"\n")
-  let artifact = extractInterfaceFromModule(dir / "repro.nim",
-    dir / "project-interface.rbsz", dir / "project-interface.nim",
-    workDir = ProjectRoot, scratchDir = dir / "work", consumerRoot = dir,
-    useExtractionCache = false)
-  for c in artifact.projectInterface.provisioningContributions:
-    if c.targetPackage == PackageName:
-      pinnedFingerprint = c.targetInterfaceFingerprint
-doAssert pinnedFingerprint.len == 64,
-  "could not read the definition's interface fingerprint"
-writeFile(catalogDir / "repro.nim", contributionCatalogText(
-  "interfaceFingerprint \"" & pinnedFingerprint & "\""))
 
 proc profileText(withCatalogs: bool; textForm: bool;
                  entry = ImportEntry): string =
@@ -207,7 +133,7 @@ proc librarySelections(label: string; withCatalogs: bool;
                        entry = ImportEntry): ProfileSelections =
   ## The profile lives in ``<root>/<label>`` so the catalog lookup and the
   ## `catalogs:` entry resolve against the scratch root, as for the recipe.
-  let dir = root / label
+  let dir = caseDir(label)
   writeProfile(dir, withCatalogs, textForm = true, entry)
   var opts: ApplyOptions
   opts.profileDir = dir
@@ -237,7 +163,7 @@ proc reproBinary(): string =
 
 proc runPlan(label: string; withCatalogs: bool):
     tuple[exitCode: int; output: string] =
-  let dir = root / label
+  let dir = caseDir(label)
   writeProfile(dir, withCatalogs, textForm = false)
   let homeDir = dir / "home"
   for d in [homeDir, dir / "state", dir / "store"]:
@@ -276,10 +202,8 @@ proc packageLine(output, packageId: string): string =
 
 let hostTarget = profileRealizationTarget(here.platform, here.arch,
   isHost = false)
-var recipeWith, recipeWithout: InterfaceToolUse
-withNoCatalogRoot:
-  recipeWith = extractRecipe("with-import", withImport = true)
-  recipeWithout = extractRecipe("without-import", withImport = false)
+let recipeWith = recipeUse("with-import")
+let recipeWithout = recipeUse("without-import")
 
 suite "GM4b: e2e_home_profile_imports_contribution_catalog":
 
@@ -342,7 +266,7 @@ suite "GM4b: e2e_home_profile_imports_contribution_catalog":
   test "a real apply realizes the contribution and records the recipe's " &
       "contributor and lock identity in home.lock":
     withNoCatalogRoot:
-      let dir = root / "profile-apply"
+      let dir = caseDir("profile-apply")
       writeProfile(dir, withCatalogs = true, textForm = true)
       for d in ["state", "store", "home"]:
         createDir(dir / d)
@@ -413,4 +337,5 @@ suite "GM4b: e2e_home_profile_imports_contribution_catalog":
         check "does not exist" in err.msg
       check refused
 
-removeDir(root)
+for dir in caseDirs:
+  removeDir(dir)

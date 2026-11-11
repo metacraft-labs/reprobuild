@@ -40,6 +40,17 @@
 ##                                            key group- and world-readable
 ## ``provisions-publisher-key``               bootstrap also leaves a binary
 ##                                            cache publisher keypair
+## ``image-omits-gen0-ledger``                the image assembly (A16)
+##                                            deletes the add-on's ledger
+##                                            copy before power-off
+## ``image-omits-store-closure``              the image assembly deletes
+##                                            every apt closure's store
+##                                            prefix before power-off
+## ``image-bakes-recipient-key``              the image assembly creates the
+##                                            recipient key in the image
+## ``image-keeps-first-boot-state``           the image assembly's clean-up
+##                                            keeps the assembly boot's
+##                                            machine id and SSH host keys
 ## ``observer-never-package-owned``           the collision observer reports
 ##                                            no package provenance: no
 ##                                            path is package-owned and no
@@ -479,6 +490,111 @@
 ## ``receipt-trusts-inode``                   the restore receipt counts a
 ##                                            directory as restored on its
 ##                                            device and inode alone
+## ``account-as-written``                     a service's account is taken
+##                                            as written (no specifiers,
+##                                            no static account under
+##                                            DynamicUser=yes, no uid
+##                                            alias, no memberships)
+## ``reach-host-dropins-ignored``             reach reads the profile's
+##                                            drop-ins only, not the host's
+## ``reach-timer-dropins-unread``             a profile timer is read
+##                                            without its drop-ins
+## ``reach-path-unit-paths-ignored``          a path unit's watched paths
+##                                            reach nothing
+## ``restore-requirement-by-manifest-only``   no apply adds the restore
+##                                            requirement; only install-
+##                                            unit's manifest units have it
+## ``reach-values-as-text``                  setting values read as round 4
+##                                           did: booleans from
+##                                           yes/true/1/on only,
+##                                           ProtectSystem= lower-cased
+## ``confined-without-nnp-or-groups``        a confined service need not
+##                                           have NoNewPrivileges=yes, and
+##                                           may hold a privileged group
+## ``account-dynamic-name-from-stem``        DynamicUser=yes without User=
+##                                           names the account after the
+##                                           unit's prefix and instance
+## ``account-nss-unread``                    the account lookup reads no
+##                                           userdb records and is always
+##                                           authoritative
+## ``reach-alias-dropins-unread``            reach reads the drop-ins of
+##                                           the unit's own name only, not
+##                                           of its aliases
+## ``reach-stale-generation-dropins-skipped``reach skips every
+##                                           50-repro-*.conf in the unit's
+##                                           directory, declared or not
+## ``restore-requirement-skips-activated``   the restore requirement is not
+##                                           given to units the profile
+##                                           starts but does not define
+## ``restore-requirement-skips-dropin-targets`` the restore requirement is
+##                                            not given to a unit only a
+##                                            profile drop-in reaches
+## ``unit-lines-continue-as-text``           round 5's line reading: a line
+##                                           ending in ``\\`` or ``\ `` joins
+##                                           the next (A13 review round 6)
+## ``exec-first-command-only``               only the first command of an
+##                                           ``Exec*=`` line is read
+## ``alias-chain-first-link-only``           only a link straight to the unit
+##                                           is an alias; a link to a link
+##                                           is not followed
+## ``dependency-links-unread``               host ``.wants/``, ``.requires/``
+##                                           and ``.upholds/`` links are not
+##                                           read
+## ``requirement-name-not-reserved``         a profile drop-in named
+##                                           ``state-restore`` replaces the
+##                                           restore requirement
+## ``privileged-daemons-unread``             polkit rules and D-Bus policy
+##                                           are not read (§13 decision 58)
+## ``restore-requirement-skips-closure``     a unit started only through a
+##                                           distribution unit's dependencies
+##                                           gets no requirement (decision 60)
+## ``addon-live-reach-skipped``              the add-on switch does not run
+##                                           the carried-state cross-check
+## ``infra-live-reach-skipped``              a full apply does not run the
+##                                           carried-state cross-check
+##                                           (decision 59)
+## ``optional-paths-ignored``              a ``-``-prefixed (optional) path
+##                                           is taken as granting nothing
+## ``live-units-chosen-after-writes``      the add-on switch chooses the
+##                                           units it re-checks at step 6,
+##                                           after its own reloads ran the
+##                                           host's generators
+## ``post-reload-refusal-skipped``           the carried-state refusal is not
+##                                           decided again after a switch's
+##                                           reload
+## ``boot-closure-reads-generation-dropins`` the boot closure reads the
+##                                           ``50-repro-*`` drop-ins an
+##                                           earlier generation wrote as the
+##                                           host's (decision 60)
+## ``polkit-subject-rebind-trusted``         a polkit rule that rebinds
+##                                           ``subject`` is judged by its
+##                                           ``subject`` guards (decision 58)
+## ``narrowed-live-set``                     the add-on switch judges and
+##                                           holds no unit in a switch that
+##                                           changes no unit file
+## ``reissue-skips-targets``                 after a full apply's live check,
+##                                           the start jobs of the targets the
+##                                           drivers started are not
+##                                           re-issued (decision 79)
+## ``reissue-skips-sockets``                 the same for sockets
+## ``adopt-without-profile``                 ``repro system adopt`` takes
+##                                           drifted bytes the profile does
+##                                           not declare (decision 61)
+## ``plan-ignores-profile-digest``           an apply of a stored plan does
+##                                           not compare the plan's profile
+##                                           digest with the text it runs
+## ``full-apply-keeps-undeclared-dropins``   a full apply leaves the
+##                                           drop-ins an earlier generation
+##                                           declared and this one does not
+## ``install-unit-reads-host-manifest``      install-unit and restore
+##                                           --root read the running host's
+##                                           carried directory
+## ``live-reach-unchecked``                  the switch does not re-judge
+##                                           reach from systemctl show
+## ``receipt-no-fsync``                       the restore receipt is
+##                                            renamed into place with
+##                                            neither its file nor its
+##                                            directory fsync'd
 ## ``reach-ignores-privileged-commands``      a "+"/"!" Exec*= command and
 ##                                            PermissionsStartOnly= do not
 ##                                            widen a unit's reach
@@ -529,6 +645,9 @@
 ##                                            shipping unit as live
 ## ``egress-state-survives-reload``           egress counts are compared
 ##                                            across a table reload
+## ``egress-instance-ignores-boot``           a table loaded at another
+##                                            boot, with the same handle,
+##                                            is the same instance
 ## ``check-status-ignores-silence``           a detector's status is
 ##                                            live-idle beside its silence
 ##                                            alert
@@ -536,6 +655,259 @@
 ##                                            file's enrolled key
 ## ``uninstall-keeps-fetch-state``            uninstall leaves the fetch
 ##                                            unit's state directory
+## ``store-verify-trusts-receipt``           store verification expects
+##                                            the digest the verified
+##                                            path's own receipt names
+## ``reassert-nft-in-own-netns``              the re-assert lists nftables
+##                                            tables in its own private
+##                                            network namespace
+## ``reassert-store-trigger-missing``         a quarantined store object
+##                                            in use is reported as
+##                                            ``store-object-missing``
+## ``custody-skips-file-sources``            the switch's store custody
+##                                            leaves out the store files
+##                                            an ``fs.systemFile`` copies
+## ``custody-skips-closures``                 ... and the apt closures
+## ``custody-admits-undigested``              an object with no recorded
+##                                            digest is admitted on a host
+##                                            under custody
+## ``custody-cache-ignores-signature``        the digest cache answers for
+##                                            a path whatever changed in it
+## ``recovery-discards-evidence``             a recovered object's altered
+##                                            bytes are deleted, not kept
+## ``recovery-trusts-store-bytes``            a files prefix is recovered
+##                                            from its own altered copy
+## ``evidence-path-changed-only``            the shipping path unit uses
+##                                            ``PathChanged=`` and a run
+##                                            lists the outbox once (D1)
+## ``sink-cli-equals-only``                   the sink's options parse
+##                                            only as ``--name=value`` (D2)
+## ``check-ignores-acks``                     an acknowledged detection
+##                                            still alerts (D4)
+## ``check-ignores-containment``              a contained host's agent
+##                                            reads as silent (D5)
+## ``contain-unsigned``                       the containment record is
+##                                            not attested (D5)
+## ``refusal-names-no-copy``                  the refusal record names no
+##                                            staging copy or compiler (D6)
+## ``handover-unverified``                    a key hand-over is followed
+##                                            unverified (D7)
+## ``check-ignores-probe-announcement``       the announced credential
+##                                            self-test alerts (D9)
+## ``sink-payload-unescaped``                 the sink prints a payload's
+##                                            bytes raw (D3)
+## ``apt-closure-member-stays-missing``       a closure whose union is
+##                                            realised leaves a missing
+##                                            member unrealised (review 1)
+## ``fetch-skips-missing-member``             the fetch stages a member's
+##                                            archive only when the union is
+##                                            missing (review 1)
+## ``fetch-unit-paths-diverge``               re-pinning renders the fetch
+##                                            unit without its observed-unit
+##                                            directives (review 2)
+## ``containment-unbound``                    any attested containment
+##                                            record counts, whatever its
+##                                            statement (review 3)
+## ``handover-to-enrolled-id``                a hand-over to an enrolled id,
+##                                            or the sender's own, is
+##                                            followed (review 4)
+## ``retired-without-successor-ok``           a retired id without an
+##                                            enrolled successor raises
+##                                            nothing (review 4)
+## ``tree-tear-by-shape``                     any static tree missing a file
+##                                            is repaired as a crash tear
+##                                            (review 5)
+## ``contained-agent-applies``                the engine agent ticks and
+##                                            applies on a contained host
+##                                            (review 6)
+## ``lag-ignores-check-state``                lag counts from the archive's
+##                                            re-signed copy, not the
+##                                            check's own first-seen state
+##                                            (review 7)
+## ``path-unit-not-migrated``                 the own-object migration
+##                                            leaves a stale shipping path
+##                                            unit (review 8)
+## ``ack-by-sequence-only``                   an acknowledgement handles
+##                                            every alert of its record
+##                                            (review 9)
+## ``custody-forgets-before-rebuild``         custody drops the expected
+##                                            digest before the rebuild is
+##                                            verified (review 10)
+## ``evidence-copy-unbounded``                an altered object's cross-
+##                                            filesystem copy has no size
+##                                            bound (review 10)
+## ``ship-no-backoff``                        the shipping unit retries a
+##                                            failing upload with no backoff
+##                                            (review 11)
+## ``outbox-temporary-inside``                an outbox entry's temporary
+##                                            file is written inside the
+##                                            outbox (review 11)
+## ``custody-prefixes-only``                  a store path outside every
+##                                            prefix is not named to custody
+##                                            (review 12)
+## ``egress-ignores-counter``                 refused packets the full sets
+##                                            do not attribute raise nothing
+##                                            (review 13)
+## ``evidence-aged-by-mtime``                 store evidence ages by its
+##                                            mtime, not its name's stamp
+##                                            (review 14)
+## ``uninstall-discards-evidence-silently``   uninstall removes kept store
+##                                            evidence without being told to
+##                                            (review 14)
+## ``self-test-any-verb``                     a self-test window absorbs any
+##                                            verb, any number of times
+##                                            (review 15)
+## ``hosts-retired-fifth-only``               the hosts file's retired@ is
+##                                            read only in the fifth field
+##                                            (review 16)
+## ``custody-ignores-leftovers``             an object a crashed recovery
+##                                            renamed aside is never filed
+##                                            as evidence (review 10)
+## ``custody-skips-unrecorded``               an evidence entry a crash left
+##                                            without its record is never
+##                                            recorded (review 10)
+## ``custody-rebuild-unsynced``              a recovered object is recorded
+##                                            before its rebuilt bytes are
+##                                            synced (review 10)
+## ``ship-runs-concurrently``                two shipping runs ship the
+##                                            same entry at once (review 3,
+##                                            found by the drill gate)
+## ``containment-duplicate-is-replay``        a containment statement
+##                                            delivered twice reads as a
+##                                            replay (review 3)
+## ``probe-shares-connection``                the credential self-test's
+##                                            probes use the appender's
+##                                            connection (round 2)
+## ``lag-state-fails-open``                   an unreadable check state
+##                                            reads as empty and an
+##                                            unwritable one is ignored
+##                                            (round 2)
+## ``ack-detections-only``                    only a detection or a refused
+##                                            verb can be acknowledged
+##                                            (round 2)
+## ``successor-chain-one-step``               a retired id's successor must
+##                                            itself be live; the chain is
+##                                            not followed (round 2)
+## ``ship-backoff-reaches-timeout``           the backoff ceiling and the
+##                                            shipping unit's timeout are
+##                                            both 300 s (round 2)
+## ``egress-cap-advances-all``                destinations past the per-
+##                                            check cap advance in the
+##                                            state, unrecorded (round 2)
+## ``uninstall-ignores-asides``               uninstall does not file an
+##                                            object left aside (round 2)
+## ``tree-marker-on-reuse``                   the tree marker is written for
+##                                            every realisation and kept on
+##                                            failure (round 2)
+## ``containment-sequence-unsynced``          the containment sequence is a
+##                                            bare counter, written without
+##                                            fsync (round 2)
+## ``egress-unit-ignores-table``              the egress observer unit does
+##                                            not name the table it loads
+##                                            (round 2)
+## ``sink-close-in-finally``                  the sink's connection handler
+##                                            awaits its close in a finally,
+##                                            as before; red under Nim 2.2.4
+##                                            (round 3)
+## ``egress-owed-by-listing``                 owed egress destinations are
+##                                            taken in the set's listing
+##                                            order (round 3)
+## ``egress-owed-dropped-at-reload``          owed egress destinations are
+##                                            forgotten at a table reload
+##                                            (round 3)
+## ``egress-state-empty-is-valid``            an empty or headerless egress
+##                                            state reads as a first check
+##                                            (round 3)
+## ``check-state-empty-is-valid``             an empty check state reads as
+##                                            a valid empty state (round 3)
+## ``probe-undelivered-is-refused``           a forbidden-verb probe with no
+##                                            reply counts as refused (round
+##                                            3)
+## ``ack-rules-cli-only``                     the sink appends, and the
+##                                            check honours, any
+##                                            acknowledgement (round 3)
+## ``uninstall-discards-unrecorded``          uninstall records nothing it
+##                                            discards, and does not wait
+##                                            for the sink (round 3)
+## ``alert-seq-zero-is-none``                an alert on the sink store's
+##                                            first entry (sequence 0)
+##                                            prints and matches as one
+##                                            without a sequence
+## ``allow-source-field``                     the record redaction lets a
+##                                            ``source`` field through
+##                                            (round 4)
+## ``uninstall-skips-ack-refusal``            uninstall discards when the
+##                                            sink received the records but
+##                                            did not acknowledge them
+##                                            (round 4, decision 56)
+## ``override-unrecorded``                    the explicit override
+##                                            discards without writing its
+##                                            signed record (decision 62)
+## ``seq-zero-sentinel``                      sequence 0 reads as "no
+##                                            sequence" in the sink's
+##                                            commands, a retirement and a
+##                                            beat before a containment
+##                                            (round 4)
+## ``containment-skew-ignored``               a containment stated more
+##                                            than 10 minutes from its
+##                                            receipt is honoured (round 4)
+## ``signer-close-in-finally``                the Distributed Execution
+##                                            signer awaits its close in a
+##                                            finally, as before; red under
+##                                            Nim 2.2.4 (round 4; the
+##                                            signer's own switch,
+##                                            ``repro_distributed_worker/
+##                                            signer``)
+## ``signer-constant-tuple-return``          the signer's client returns a
+##                                            refusal as a constant tuple
+##                                            literal, as before; SIGSEGV
+##                                            under Nim 2.2.4 (round 4)
+## ``override-signs-other-bytes``            the override record's signature
+##                                            is over other bytes than the
+##                                            file holds (decision 64)
+## ``override-empty-signature``               the override record's signature
+##                                            file is empty (decision 64)
+## ``override-keyless-unsigned``              without the attestation key the
+##                                            override writes an unsigned
+##                                            record and discards (decision
+##                                            63)
+## ``override-write-error-swallowed``         an override record that cannot
+##                                            be written does not stop the
+##                                            discard (decision 62)
+## ``sim-stop-in-finally``                    a CONTROL, not a falsifier: the
+##                                            simulator's TLS smoke pass as
+##                                            before round 4 (peers stopped
+##                                            in a finally no return leaves
+##                                            through); green under Nim
+##                                            2.2.4 too (round 5)
+## ``fresh-skips-included``                   fresh_binary ignores files a
+##                                            module includes (decision 65)
+## ``fresh-skips-outside-tree``               fresh_binary ignores modules
+##                                            from outside the tree
+##                                            (decision 65)
+## ``fresh-skips-c-sources``                  fresh_binary ignores the C files
+##                                            compiled with {.compile.}
+##                                            (decision 65, round 6)
+## ``fresh-skips-headers``                    fresh_binary ignores the headers
+##                                            those C files include
+## ``fresh-skips-static-reads``               fresh_binary ignores staticRead
+##                                            and staticExec inputs
+## ``fresh-ignores-list-binary``              fresh_binary accepts a list
+##                                            written for another binary
+## ``override-sig-write-error-swallowed``     a failed signature write does
+##                                            not stop the discard (round 6)
+## ``override-rollback-removes-sig``         a failed record write removes
+##                                            the signature even when the
+##                                            record is in place (round 7)
+## ``verify-accepts-missing-key``             verify-discard-record verifies
+##                                            without --key (round 6)
+## ``sim-skips-stop``                         the simulator's TLS smoke pass
+##                                            never stops its peers
+##                                            (round 6)
+## ``stale-helper-accepted``                  a test's helper binary is used
+##                                            however old it is
+##                                            (``repro_test_support/
+##                                            fresh_binary``; round 4)
 ## =========================================  ==============================
 
 # The deploy agent's own mutations (``repro_deploy_agent/agent_mutations``)
@@ -554,6 +926,13 @@ const
                           "switch-fails-before-ledger",
                           "bootstrap-installs-jq", "preflight-writes",
                           "recipient-key-0644", "provisions-publisher-key",
+                          # A16 (e2e_addon_zero_touch_image_synthesis_boots_
+                          # converged): an image assembly that leaves the
+                          # ledger, or an apt closure's store prefix, out of
+                          # the image (image_assemble.runImageAssembly).
+                          "image-omits-gen0-ledger", "image-omits-store-closure",
+                          "image-bakes-recipient-key",
+                          "image-keeps-first-boot-state",
                           "apply-skips-kind-check",
                           "uninstall-discards-state-on-drift",
                           "observer-never-package-owned",
@@ -742,6 +1121,154 @@ const
                           "properties-not-default-denied",
                           "unnamed-instances-unchecked",
                           "floor-start-unheld",
+                          # A9 review round 5.
+                          "floor-round5-static-off",
+                          "inert-families-by-pattern",
+                          "privileged-groups-by-name",
+                          "environment-files-trusted",
+                          "activators-unchecked",
+                          "start-hold-removes-directory",
+                          "stale-start-holds-kept",
+                          # A9 review round 6.
+                          "dynamic-user-trusted",
+                          "show-last-line-only",
+                          "absent-property-passes",
+                          "file-only-settings-unread",
+                          "read-only-binds-unjudged",
+                          "state-targets-allowed",
+                          "activator-options-unchecked",
+                          "environment-file-links-unchecked",
+                          "environment-file-links-refused",
+                          # A9 review round 7: the start hold a unit can
+                          # satisfy; manager-created paths in the add-on's
+                          # trees; a unix listener anywhere under /run;
+                          # round 5's socket key list; the round-6
+                          # direct-only state rule; EnvironmentFile= by
+                          # owner and mode; a bind source by string prefix;
+                          # the effective half without the parse-time rules;
+                          # the profile's own memberships ignored; an
+                          # activator's reported properties unjudged; a
+                          # printed file-judged setting trusted.
+                          "hold-path-creatable",
+                          "manager-paths-unchecked",
+                          "listeners-anywhere-under-run",
+                          "socket-options-by-list",
+                          "state-routes-direct-only",
+                          "environment-files-by-mode",
+                          "bind-sources-by-prefix",
+                          "effective-skips-parse-rules",
+                          "profile-memberships-ignored",
+                          "activator-show-unjudged",
+                          "printed-file-settings-trusted",
+                          # §13 decision 50 (amended): an adopted
+                          # EnvironmentFile= accepted whatever its bytes.
+                          "adopted-files-unverified",
+                          # spec §4.3: an owned file that drifted cannot be
+                          # adopted again (the row before decision 50's
+                          # amendment).
+                          "owned-drift-not-adoptable",
+                          # getent errors read as "no such account".
+                          "getent-errors-as-absent",
+                          # §13 decision 55: Conflicts= naming a unit the
+                          # profile does not define, accepted.
+                          "conflicts-unchecked",
+                          # A9 review round 8: a *Directory= by its leaf
+                          # only; owned store objects falling back to the
+                          # unit's own references; a reached profile unit's
+                          # Conflicts= unjudged.
+                          "directory-names-unchecked",
+                          "owned-objects-fall-back",
+                          "reached-conflicts-unchecked",
+                          # A9 review round 9 (§13 decision 57): a unit
+                          # named after a base tree; an existing tree not
+                          # created for the unit; the record of the unit's
+                          # own directories ignored.
+                          "base-tree-names-allowed",
+                          "existing-trees-allowed",
+                          "created-dirs-ignored",
+                          # the effective reach ending at units the
+                          # generation does not install; the parse-rule
+                          # rerun reported beside the dedicated rule.
+                          "reach-stops-at-base-units",
+                          "rerun-not-suppressed",
+                          # an own secret EnvironmentFile= read in the
+                          # switch's own mount namespace, not PID 1's.
+                          "secrets-read-in-own-namespace",
+                          # shutdown.target and umount.target, which
+                          # systemd adds itself, judged as the unit's own.
+                          "implicit-conflicts-refused",
+                          # an EnvironmentFile= in a writable place judged
+                          # again by where it resolves (two rules, one
+                          # refusal).
+                          "writable-env-judged-twice",
+                          # A9 review round 10 (§13 decisions 67-70):
+                          # ownership as provenance; the record keyed by
+                          # path alone; the record taken after the whole
+                          # start step; a unit named after a base tree
+                          # refused only through a directory; a longer
+                          # name taken as the unit's own; the activator's
+                          # reached units unchecked; refusal lines with no
+                          # rule tag, and a gate that skips them.
+                          "ownership-as-provenance",
+                          "created-dirs-by-path",
+                          "created-dirs-per-step",
+                          "base-tree-units-by-directory",
+                          "own-names-by-prefix",
+                          "activator-reach-unchecked",
+                          "refusal-lines-untagged",
+                          "untagged-lines-skipped",
+                          # a directory the unit's own restart made
+                          # again not recorded again.
+                          "created-dirs-not-rerecorded",
+                          # §13 decision 71, one per condition: a
+                          # directory not recorded for the unit, one not
+                          # exactly declared, one systemd's state does not
+                          # show it made, each taken as made again.
+                          "recreated-unrecorded-accepted",
+                          "recreated-any-path",
+                          "recreated-systemd-unchecked",
+                          # a directory decision 71 accepted, then made
+                          # again by the same switch, not recorded again.
+                          "accepted-not-rerecorded",
+                          # §13 decision 72, the one-time migration:
+                          # it runs again over an existing record; it
+                          # takes a directory not exactly declared; a
+                          # corrupt record counts as absent; it takes a
+                          # unit the committed generation did not install.
+                          "migration-reruns",
+                          "migration-any-path",
+                          "corrupt-record-as-absent",
+                          "migration-any-unit",
+                          # A9 review round 11 (§13 decisions 76-78):
+                          # the birth time left out of a directory's
+                          # identity; condition 3 read from ownership or
+                          # ctime; a template's instances not sharing; an
+                          # acceptance or a migration made unlogged; a
+                          # migration over a generation an engine with
+                          # the record wrote; one reading systemd's view;
+                          # a no-op try-restart recorded as a start; an
+                          # activator's listener named for the socket, or
+                          # one named after a base tree, or one on an
+                          # existing path.
+                          "identity-without-btime",
+                          "recreated-by-ctime-or-owner",
+                          "instances-not-shared",
+                          "unlogged-acceptance",
+                          "unlogged-migration",
+                          "migration-ignores-engine",
+                          "migration-reads-systemd",
+                          "record-after-noop-restart",
+                          "listener-named-for-socket",
+                          "base-tree-activators-allowed",
+                          "existing-listeners-allowed",
+                          # a unit a dependency started during the
+                          # switch never recorded.
+                          "dependency-starts-unrecorded",
+                          # a directory taken as systemd's while its
+                          # unit is not running; a birth time compared
+                          # with the invocation's start more precisely
+                          # than the file system stamps it.
+                          "recreated-while-stopped", "btime-exact",
                           # A13: a state backup or restore runs while a
                           # unit of the set may run.
                           "state-units-not-checked",
@@ -802,6 +1329,51 @@ const
                           "evidence-ship-sees-agent-keys",
                           # A13 review round 2.
                           "receipt-trusts-inode",
+                          # A13 review round 3 item 11: the receipt
+                          # written without its fsyncs (the hard-reset
+                          # gate's receipt points).
+                          "receipt-no-fsync",
+                          # A13 review round 4 finding 1: the shared
+                          # service-account resolver (repro_infra/
+                          # service_account) takes the account as written.
+                          "account-as-written",
+                          # A13 review round 4, findings 2-5.
+                          "reach-host-dropins-ignored",
+                          "reach-timer-dropins-unread",
+                          "reach-path-unit-paths-ignored",
+                          "restore-requirement-by-manifest-only",
+                          # A13 review round 5.
+                          "reach-values-as-text",
+                          "confined-without-nnp-or-groups",
+                          "account-dynamic-name-from-stem",
+                          "account-nss-unread",
+                          "reach-alias-dropins-unread",
+                          "reach-stale-generation-dropins-skipped",
+                          "restore-requirement-skips-activated",
+                          "restore-requirement-skips-dropin-targets",
+                          "unit-lines-continue-as-text",
+                          "exec-first-command-only",
+                          "alias-chain-first-link-only",
+                          "dependency-links-unread",
+                          "requirement-name-not-reserved",
+                          "privileged-daemons-unread",
+                          "restore-requirement-skips-closure",
+                          "addon-live-reach-skipped",
+                          "infra-live-reach-skipped",
+                          "adopt-without-profile",
+                          "live-units-chosen-after-writes",
+                          "optional-paths-ignored",
+                          "post-reload-refusal-skipped",
+                          # A13 review round 7.
+                          "boot-closure-reads-generation-dropins",
+                          "polkit-subject-rebind-trusted",
+                          "narrowed-live-set",
+                          "reissue-skips-targets",
+                          "reissue-skips-sockets",
+                          "plan-ignores-profile-digest",
+                          "full-apply-keeps-undeclared-dropins",
+                          "install-unit-reads-host-manifest",
+                          "live-reach-unchecked",
                           "reach-ignores-privileged-commands",
                           "reach-dropin-judged-alone",
                           "reach-trigger-units-reach-nothing",
@@ -834,6 +1406,8 @@ const
                           "check-ignores-ship-delay",
                           # A11 audit F3: egress counts kept across a reload.
                           "egress-state-survives-reload",
+                          # The handle repeats at the next boot.
+                          "egress-instance-ignores-boot",
                           # A11 audit F4: statuses beside their own alert.
                           "check-status-ignores-silence",
                           # A11 audit F6: the hosts file's enrolled key and
@@ -841,7 +1415,86 @@ const
                           "check-forgets-enrolled-key",
                           # A11 audit F5: uninstall keeps the fetch unit's
                           # state directory.
-                          "uninstall-keeps-fetch-state"]
+                          "uninstall-keeps-fetch-state",
+                          # A11 audit session 2, G2: the expected digest
+                          # read from the path being verified.
+                          "store-verify-trusts-receipt",
+                          # G4: the egress table listed in the re-assert
+                          # unit's own (empty) network namespace.
+                          "reassert-nft-in-own-netns",
+                          # Session 2, low: one trigger for a missing and a
+                          # quarantined store object.
+                          "reassert-store-trigger-missing",
+                          # Owner decisions 2026-11-05 (G1 / G42): store
+                          # custody and recovery.
+                          "custody-skips-file-sources",
+                          "custody-skips-closures",
+                          "custody-admits-undigested",
+                          "custody-cache-ignores-signature",
+                          "recovery-discards-evidence",
+                          "recovery-trusts-store-bytes",
+                          # The A11 drill's findings D1-D9.
+                          "evidence-path-changed-only",
+                          "sink-cli-equals-only", "check-ignores-acks",
+                          "check-ignores-containment", "contain-unsigned",
+                          "refusal-names-no-copy", "handover-unverified",
+                          "check-ignores-probe-announcement",
+                          "sink-payload-unescaped",
+                          # The A11 code review's findings 1-16.
+                          "apt-closure-member-stays-missing",
+                          "fetch-skips-missing-member",
+                          "fetch-unit-paths-diverge",
+                          "containment-unbound", "handover-to-enrolled-id",
+                          "retired-without-successor-ok",
+                          "tree-tear-by-shape", "contained-agent-applies",
+                          "lag-ignores-check-state", "path-unit-not-migrated",
+                          "ack-by-sequence-only",
+                          "custody-forgets-before-rebuild",
+                          "evidence-copy-unbounded", "ship-no-backoff",
+                          "outbox-temporary-inside", "custody-prefixes-only",
+                          "egress-ignores-counter", "evidence-aged-by-mtime",
+                          "uninstall-discards-evidence-silently",
+                          "self-test-any-verb", "hosts-retired-fifth-only",
+                          "custody-ignores-leftovers",
+                          "custody-skips-unrecorded",
+                          "custody-rebuild-unsynced",
+                          "ship-runs-concurrently",
+                          "containment-duplicate-is-replay",
+                          # The A11 code review, round 2.
+                          "probe-shares-connection", "lag-state-fails-open",
+                          "ack-detections-only", "successor-chain-one-step",
+                          "ship-backoff-reaches-timeout",
+                          "egress-cap-advances-all", "uninstall-ignores-asides",
+                          "tree-marker-on-reuse", "containment-sequence-unsynced",
+                          "egress-unit-ignores-table",
+                          # The A11 code review, round 3.
+                          "sink-close-in-finally", "egress-owed-by-listing",
+                          "egress-owed-dropped-at-reload",
+                          "check-state-empty-is-valid",
+                          "probe-undelivered-is-refused",
+                          "ack-rules-cli-only",
+                          "uninstall-discards-unrecorded",
+                          "egress-state-empty-is-valid",
+                          "alert-seq-zero-is-none",
+                          # The A11 code review, round 4.
+                          "allow-source-field", "uninstall-skips-ack-refusal",
+                          "override-unrecorded", "seq-zero-sentinel",
+                          "containment-skew-ignored",
+                          "signer-close-in-finally",
+                          "signer-constant-tuple-return",
+                          "stale-helper-accepted",
+                          "override-signs-other-bytes",
+                          "override-empty-signature",
+                          "override-keyless-unsigned",
+                          "override-write-error-swallowed",
+                          "sim-stop-in-finally", "fresh-skips-included",
+                          "fresh-skips-outside-tree",
+                          "fresh-skips-c-sources", "fresh-skips-headers",
+                          "fresh-skips-static-reads",
+                          "fresh-ignores-list-binary",
+                          "override-sig-write-error-swallowed",
+                          "verify-accepts-missing-key", "sim-skips-stop",
+                          "override-rollback-removes-sig"]
 
 when AddonMutation.len > 0 and AddonMutation notin KnownAddonMutations and
     AddonMutation notin KnownAgentMutations:

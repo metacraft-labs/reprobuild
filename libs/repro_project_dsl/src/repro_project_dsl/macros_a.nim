@@ -4297,6 +4297,14 @@ proc producerSourceStamp(producerReproPath: string;
 
 const ResourceAccessorCacheVersion = "2"
 
+const SiblingShimDirEnv* = "REPRO_SIBLING_SHIM_DIR"
+  ## A directory the engine owns exclusively for one recipe compile, where
+  ## ``usesImportCode`` writes its per-sibling shims
+  ## (``repro_sib_<selector>.nim``) with no consumer-keyed subdirectory. Set
+  ## by the recipe-relative interface extraction to a directory under its
+  ## per-computation scratch; unset, the shims go to a consumer-keyed
+  ## directory under the temporary directory.
+
 const DslScratchRootEnv* = "REPRO_DSL_SCRATCH_ROOT"
   ## Operator override for `dslScratchRootFor`. Names a directory the DSL's
   ## macro-expansion machinery may create subdirectories under. It exists so
@@ -4809,7 +4817,7 @@ proc usesImportCode(pkg: PackageDef; consumerSourceFile = ""): string =
   #
   # Give each consumed sibling a DISTINCT compiled-object identity: instead
   # of importing ``../<sib>/repro`` directly, materialise a per-sibling shim
-  # module ``repro_sib_<selector>.nim`` in a consumer-keyed scratch dir whose
+  # module ``repro_sib_<selector>.nim`` in a scratch dir (see below) whose
   # ONLY statement ``include``s the sibling's real ``repro.nim`` by absolute
   # path. The shim's uniquely-named basename mangles to a distinct object
   # (``@…@srepro_sib_<selector>.nim.c.o``) that cannot collapse against any
@@ -4821,35 +4829,60 @@ proc usesImportCode(pkg: PackageDef; consumerSourceFile = ""): string =
   if producerModules.len > 0:
     # ``usesImportCode`` runs only at macro-expansion time (compile time), so
     # the shim materialisation below uses the Nim VM's ``std/os`` file ops.
-    # Consumer-keyed scratch dir under the system temp so concurrent
-    # extractions for different consumers never share shim files and the
-    # consumer's own source tree stays clean. The key is a filesystem-safe
-    # rendering of the consumer's absolute source path (unique per consumer
-    # ``repro.nim``) plus its length as a light collision guard.
-    var h = 2166136261u32
-    for c in consumerSourceFile:
-      h = h xor ord(c).uint32
-      h = h * 16777619u32
-    var baseName = ""
-    for i in countdown(consumerSourceFile.len - 1, 0):
-      let ch = consumerSourceFile[i]
-      if ch.isAlphaNumeric():
-        baseName.add(ch)
-      elif baseName.len > 0 and baseName[^1] != '_':
-        baseName.add('_')
-      if baseName.len >= 30:
-        break
-    var revBase = ""
-    for i in countdown(baseName.len - 1, 0):
-      revBase.add(baseName[i])
-    let consumerKey = "c_" & $h & "_" & revBase
-    let shimDir = getTempDir() / "repro-sibling-shims" / consumerKey
+    #
+    # WHERE THE SHIMS LIVE. A compile the engine runs on its own behalf names
+    # a directory it owns exclusively through ``SiblingShimDirEnv``: the
+    # interface extraction's per-computation scratch
+    # (Hermetic-Builds-And-Path-Independence.md §"Per-computation output
+    # directories"). The shims are then named by selector alone, so the same
+    # recipe at another absolute location, or after the temporary directory
+    # was wiped, writes the same files, and the directory is derived scratch
+    # the edge does not record. Every other compile (a direct ``nim c`` of a
+    # recipe, the provider compile under its private ``TMPDIR``) shares the
+    # temporary directory with unrelated consumers and keeps a consumer-keyed
+    # subdirectory there, so concurrent compiles of different consumers never
+    # share shim files. The key is a filesystem-safe rendering of the
+    # consumer's absolute source path plus its FNV hash as a collision guard.
+    var shimDir = getEnv(SiblingShimDirEnv)
+    let ownedShimDir = shimDir.len > 0
+    if not ownedShimDir:
+      var h = 2166136261u32
+      for c in consumerSourceFile:
+        h = h xor ord(c).uint32
+        h = h * 16777619u32
+      var baseName = ""
+      for i in countdown(consumerSourceFile.len - 1, 0):
+        let ch = consumerSourceFile[i]
+        if ch.isAlphaNumeric():
+          baseName.add(ch)
+        elif baseName.len > 0 and baseName[^1] != '_':
+          baseName.add('_')
+        if baseName.len >= 30:
+          break
+      var revBase = ""
+      for i in countdown(baseName.len - 1, 0):
+        revBase.add(baseName[i])
+      let consumerKey = "c_" & $h & "_" & revBase
+      shimDir = getTempDir() / "repro-sibling-shims" / consumerKey
     if not dirExists(shimDir):
       createDir(shimDir)
     for (moduleAlias, selector, siblingReproPath) in producerModules:
-      let shimStem = "repro_sib_" & selectorModuleName(selector)
-      let shimPath = shimDir / (shimStem & ".nim")
       let shimContent = "include \"" & siblingReproPath.replace('\\', '/') & "\"\n"
+      var shimStem = "repro_sib_" & selectorModuleName(selector)
+      if ownedShimDir:
+        # The owned directory is emptied before every compile, so a shim
+        # already there was written by this compile -- by a sibling's own
+        # ``uses:`` expansion, which shares the directory. One that names a
+        # DIFFERENT file (the sibling resolved the selector from its own
+        # location) keeps its name, and this one takes the next free suffix,
+        # in the order macro expansion reached them.
+        let baseStem = shimStem
+        var n = 1
+        while fileExists(shimDir / (shimStem & ".nim")) and
+            readFile(shimDir / (shimStem & ".nim")) != shimContent:
+          inc n
+          shimStem = baseStem & "_" & $n
+      let shimPath = shimDir / (shimStem & ".nim")
       # Rewrite only when content differs so an unchanged sibling set does
       # not needlessly invalidate the shim's incremental-compile stamp.
       if (not fileExists(shimPath)) or readFile(shimPath) != shimContent:

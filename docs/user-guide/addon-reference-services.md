@@ -68,12 +68,17 @@ The add-on handles this in four ways:
 - **Before anything starts, systemd's own view is checked.** From just
   before the switch reloads systemd until this check passes, the switch
   holds every floored unit, so no socket, timer or other start request can
-  run it. The add-on then reads everything `systemctl show` reports for
+  run it. The hold is an assertion that `/` does not exist, so nothing a
+  unit creates or removes can lift it. The add-on then reads everything `systemctl show` reports for
   each floored unit and compares it with the floor the unit was written
   under, minus its named exceptions. A property the floor neither checks
   nor lists as harmless is refused, so a setting from a newer systemd is
   refused until it is reviewed. If anything differs, the switch starts
-  nothing and reverts. The check also refuses:
+  nothing and reverts. It prints one refusal per line, each ending with
+  the rule that refused it and the setting it judged, for example
+  `[rule:existing-tree key:RuntimeDirectory]`. This check applies every rule the profile was
+  checked against once more, to the unit files systemd actually loaded, so
+  it does not rely on the earlier check. It also refuses:
   - any drop-in the add-on did not write, wherever systemd would read it
     for the unit or for any instance of a templated unit. This includes a
     package's drop-in under `/usr/lib/systemd` and a type-wide
@@ -82,7 +87,84 @@ The add-on handles this in four ways:
   - a file the service manager would open as root (`OpenFile=`,
     `StandardOutput=file:`);
   - a privileged group, including one the service's account belongs to in
-    `/etc/group`.
+    `/etc/group`, or a second group name for the same gid;
+  - an `EnvironmentFile=` that is neither a file the generation installs
+    from the add-on's store nor a file in the service's own secrets
+    directory, after every link in its path is followed. The manager reads
+    the file as root and passes its contents to the service, so a file
+    the service could not read itself, such as another service's secret
+    or a host file under `/etc`, is refused whatever its owner or mode.
+    A store file counts only when the add-on has recorded its digest; on
+    a host whose store predates that record, review the store and run
+    `repro system addon store-verify --adopt-unverified`;
+  - a socket, timer or path unit that starts a floored service and does
+    more than listen on a network address or on a unix socket named after
+    the unit under `/run`, or watch a path. Examples are a socket that
+    opens a device or a FIFO, one that runs a command, and one that sets
+    an option needing a capability the service does not have
+    (`Mark=`, `Transparent=`, `BindToDevice=`, a `Priority=` above 6);
+  - a directory or link that the service manager would create for the
+    unit and that is not the unit's own: each `RuntimeDirectory=`,
+    `StateDirectory=`, `CacheDirectory=`, `LogsDirectory=` and
+    `ConfigurationDirectory=` must be named exactly after the unit (`foo`
+    for `foo.service`, with anything more below it: `foo/data`), never
+    inside another program's tree (`systemd/system/...`, `udev/rules.d`)
+    or the add-on's own directories. A directory's link must have the
+    same name, so in practice a floored unit sets none. A unit may not be
+    named after a directory the base system already has
+    (`systemd.service`, `udev.service`, `ssh.service`), whatever
+    directories it sets. A directory that already exists on the host is
+    refused unless the add-on recorded it when the unit's own start, in an
+    earlier apply, created it, and it is still that same directory (the
+    same device, inode and birth time; on a file system that reports no
+    birth time it is always refused); who owns it does not matter. The
+    instances of a template share their directories. When the unit is restarted or activated
+    between applies, systemd removes such a directory and makes it again;
+    the next apply accepts it only if it is exactly one of the unit's
+    directories, the unit is running, and the directory was born after
+    the unit's current run began (to within the one clock tick by which
+    the kernel's file timestamps can trail the precise clock), and
+    it logs that acceptance in the generation's audit log (if the log
+    cannot be written, the directory is refused). On a host upgraded from an add-on version that kept no such
+    record, the first apply records, once, the directories the installed
+    services exactly declare and logs each one. A directory first created outside an apply (the unit's first
+    start by its socket or timer, or by hand) is refused at the next
+    apply, and so is one another package installs.
+    The list of base-system directory names was measured on the amd64
+    Debian 12 and 13 and Ubuntu 24.04 and 26.04 test images; on other
+    bases, such as Raspberry Pi OS, only the existence check applies;
+  - a unix socket of such a unit must be `/run/foo` or below `/run/foo/`,
+    named after the service the socket starts (`foo.service`) whatever
+    the socket is called; a socket or timer named after a directory the
+    base system has (`udev.socket`, `systemd.socket`) is refused, and so
+    is a socket path that already exists and that this socket did not
+    create;
+  - realtime scheduling, a reboot `FailureAction=`, or a resource limit
+    above the service manager's default;
+  - a dependency such as `OnFailure=` or `Wants=` that starts a unit
+    which changes the whole system's state, such as `reboot.target`,
+    `poweroff.target`, `shutdown.target`, `suspend.target` or
+    `emergency.target`, whether directly or through other units. An
+    `OnFailureJobMode=` other than `replace` or `fail`, and
+    `AllowIsolate=yes`, are refused too;
+  - a `Conflicts=` naming a unit the profile does not define, on the
+    unit or on any unit of the profile it starts. Starting it would stop
+    the named unit, whether a base target such as `multi-user.target` or
+    another package's service. An exclusive successor that must stop a
+    predecessor the profile does not define needs the whole-floor waiver;
+  - a credential (`LoadCredential=`) read from outside the add-on's own
+    secrets directory for the service, and any `ImportCredential=`,
+    `NFTSet=` or `RootImageOptions=`. `systemctl show` does not print
+    these settings, so the add-on reads them from the unit files systemd
+    loaded;
+  - a property that is missing from `systemctl show`. Every entry of a
+    property that systemd prints on several lines is checked.
+
+  The service's account is the one systemd will use. Specifiers such as
+  `%u` and `%i` are expanded first. With `DynamicUser=yes`, an existing
+  account of the configured name is used, along with its groups. A second
+  account name for uid 0 counts as root. An account or group that cannot
+  be resolved is refused.
 
   This check runs on every switch: an apply, an agent tick, a revert, a
   rollback and a crash recovery. It does not run between switches. A

@@ -5,7 +5,7 @@
 ##
 ## ## The defect this locks out
 ##
-## Substituted on rpi2, the armv7 prefix's `repro exec -- true` ignored the
+## Substituted on rpi2, the armv7 prefix's `repro exec -- true` passed over the
 ## fork it ships under `nim/` and built stock Nim 2.2.10 from source
 ## (2026-11-04). The A15 re-review then found that a recipe's own `uses: nim`
 ## range was never consulted against that compiler (2026-11-05).
@@ -20,7 +20,11 @@
 ## 2. a range that excludes it: refused before the command, naming the
 ##    release, the range and the prefix's compiler;
 ## 3. a prefix whose revision file disagrees with its record: refused,
-##    naming both -- the prefix route really was taken.
+##    naming both -- the prefix route really was taken;
+## 4. `repro build`, whose interface edge is cached: an edge recorded while
+##    the compiler was named explicitly (no prefix route, nothing checked)
+##    does not answer a later run that reaches the compiler by the prefix
+##    route; that run is refused.
 ##
 ## Mocking: none. The layout is links to real files; the compiler that runs
 ## is the real fork the dev shell provides.
@@ -69,7 +73,13 @@ package fixture:
     setEnv "FIXTURE_MODE", "dev"
 """)
 
-proc runExec(c: M74Case; prefix, name: string): CmdResult =
+proc runRepro(c: M74Case; prefix, name: string; args: seq[string];
+               explicitNim = ""): CmdResult =
+  ## The prefix's `bin/repro` (a link to this checkout's thin client) with
+  ## `args`, from a clean toolchain environment, the engine image named as
+  ## the portable launcher names it. `explicitNim`, when set, is the
+  ## caller's own `REPRO_NIM_COMPILER`, which takes the provider compiler
+  ## off the prefix route (the bootstrap keeps an explicit choice).
   var env = c.envFor()
   for drop in ["REPRO_NIM_COMPILER", "REPRO_BOOTSTRAP_CC", "CC",
                "REPRO_INSTALLED_PREFIX_NIM"]:
@@ -80,6 +90,8 @@ proc runExec(c: M74Case; prefix, name: string): CmdResult =
   # The engine image, as the portable launcher names it.
   env["REPRO_PUBLIC_CLI_PATH"] =
     prefix / "bin" / addFileExt("reprobuild", ExeExt)
+  if explicitNim.len > 0:
+    env["REPRO_NIM_COMPILER"] = explicitNim
   var overlay: seq[tuple[name, value: string]]
   for key, value in env:
     overlay.add((name: key, value: value))
@@ -89,8 +101,8 @@ proc runExec(c: M74Case; prefix, name: string): CmdResult =
       saved.add((name: name, value: getEnv(name)))
       delEnv(name)
   try:
-    result = runShell(shellCommand(@[c.reproBin, "exec", c.projectRoot, "--",
-      "true"], overlay), c.repoRoot, timeoutMs = 15 * 60 * 1000)
+    result = runShell(shellCommand(@[c.reproBin] & args, overlay),
+      c.repoRoot, timeoutMs = 15 * 60 * 1000)
   finally:
     for entry in saved:
       putEnv(entry.name, entry.value)
@@ -98,6 +110,15 @@ proc runExec(c: M74Case; prefix, name: string): CmdResult =
     name & "-" & $getCurrentProcessId() & ".log")
   writeFile(logPath, result.output)
   checkpoint name & ": exit " & $result.code & "; full output: " & logPath
+
+proc runExec(c: M74Case; prefix, name: string): CmdResult =
+  runRepro(c, prefix, name, @["exec", c.projectRoot, "--", "true"])
+
+proc runBuild(c: M74Case; prefix, name, actionCacheRoot: string;
+              explicitNim = ""): CmdResult =
+  runRepro(c, prefix, name, @["build", "--daemon=off",
+    "--tool-provisioning=path", "--action-cache-root=" & actionCacheRoot,
+    "--progress=quiet", "--log=actions", c.projectRoot], explicitNim)
 
 when isIoMonitorSupported and not defined(windows):
   suite "repro exec from an installed prefix uses the Nim it ships":
@@ -132,3 +153,26 @@ when isIoMonitorSupported and not defined(windows):
       check res.code != 0
       check "not the fork it records" in res.output
       check repeat('b', 40) in res.output
+
+    test "a recorded interface edge does not answer a prefix-route run":
+      # The build engine's interface edge is cached. Run 1 names the
+      # prefix's compiler explicitly, which takes it off the prefix route:
+      # no `REPRO_INSTALLED_PREFIX_NIM`, nothing checked, the edge recorded.
+      # Run 2 reaches the same compiler by the prefix route. The record from
+      # run 1 must not answer it: the extraction reads the variable, so the
+      # monitor keyed the record on it, the edge re-runs, and the
+      # extractor's check refuses the recipe.
+      let c = prepareCase("prefix-nim-build-hit")
+      defer: removeDir(c.tempRoot)
+      require forkTree().len > 0
+      recipe(c, "nim >=2.0 <2.3")
+      let prefix = installedPrefix(c)
+      let cache = c.tempRoot / "action-cache"
+      createDir(cache)
+      let first = runBuild(c, prefix, "build-explicit", cache,
+        explicitNim = prefix / "nim" / "bin" / addFileExt("nim", ExeExt))
+      check "excludes Nim" notin first.output
+      let second = runBuild(c, prefix, "build-prefix-route", cache)
+      check second.code != 0
+      check "nim >=2.0 <2.3" in second.output
+      check "excludes Nim 2.3.1" in second.output

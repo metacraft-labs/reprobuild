@@ -28,6 +28,10 @@
 ##       per (host, detector) DET-5 status; `--expect` lists the
 ##       detectors that must exist (`never-reported` otherwise)
 ##   repro-evidence-sink read     --dir D     one line per entry (operator use)
+##   repro-evidence-sink payload  --dir D --seq N [--out FILE]
+##       a record's captured payload, escaped, between markers (hostile data)
+##   repro-evidence-sink ack      --dir D --seq N --operator NAME --reason TEXT
+##       record that the detection at sequence N was handled
 ##   repro-evidence-sink addon-check --dir D --hosts FILE
 ##                                [--manifests DIR --deploy-signers FILE]
 ##                                [--published-artefacts SHA256SUMS]
@@ -41,153 +45,16 @@
 ##       first time its bootstrap record shows them, so they outlive the
 ##       store's retention.
 ##
-## The three read-side commands open the store directory directly: reading
-## is local to the sink host by design (EVID-3). There is no network read.
+## Every option takes its value as `--name=value` or `--name value`
+## (``repro_addon/evidence_sink_cli``, where the command line lives so that
+## a test can hold the published user guide's lines to it).
+##
+## The read-side commands open the store directory directly: reading is
+## local to the sink host by design (EVID-3). There is no network read.
 
-import std/[asyncdispatch, os, parseopt, strutils, times]
+import std/os
 
-import repro_peer_cache
-import repro_peer_cache/auth as peerAuth
-import repro_addon/evidence_check
-
-proc usage(): int =
-  stderr.writeLine("usage: repro-evidence-sink serve|verify|liveness|read|addon-check " &
-    "--dir DIR [options]  (see the module documentation)")
-  2
-
-proc main(): int =
-  var cmd = ""
-  var dir, identityDir, anchorsDir, readyFile = ""
-  var hostsPath, manifestsDir, signersPath, artefactsPath = ""
-  var nowMs = 0'i64
-  var updateHosts = false
-  var keyDir, checkpointPub, revokedPath, expectPath = ""
-  var receipts: seq[string] = @[]
-  var live = false
-  var bindAddr = "127.0.0.1"
-  var port = 0
-  var retention = int64(DefaultRetentionSeconds)
-  var silenceFactor = 3
-  var segmentMaxEntries = DefaultSegmentMaxEntries
-  var p = initOptParser(commandLineParams())
-  for kind, key, val in p.getopt():
-    case kind
-    of cmdArgument:
-      if cmd.len == 0: cmd = key else: return usage()
-    of cmdLongOption, cmdShortOption:
-      case key
-      of "dir": dir = val
-      of "identity": identityDir = val
-      of "anchors": anchorsDir = val
-      of "bind": bindAddr = val
-      of "port": port = parseInt(val)
-      of "retention-seconds": retention = parseBiggestInt(val)
-      of "ready-file": readyFile = val
-      of "silence-factor": silenceFactor = parseInt(val)
-      of "segment-max-entries": segmentMaxEntries = parseInt(val)
-      of "checkpoint-key": keyDir = val
-      of "checkpoint-pub": checkpointPub = val
-      of "receipt": receipts.add(val)
-      of "revoked": revokedPath = val
-      of "expect": expectPath = val
-      of "live": live = true
-      of "hosts": hostsPath = val
-      of "manifests": manifestsDir = val
-      of "deploy-signers": signersPath = val
-      of "published-artefacts": artefactsPath = val
-      of "now-ms": nowMs = parseBiggestInt(val)
-      of "update-hosts": updateHosts = true
-      else: return usage()
-    of cmdEnd: discard
-  if dir.len == 0:
-    return usage()
-  case cmd
-  of "serve":
-    if identityDir.len == 0 or anchorsDir.len == 0 or keyDir.len == 0:
-      return usage()
-    if isWildcard(bindAddr):
-      stderr.writeLine("repro-evidence-sink: refusing wildcard bind " &
-        bindAddr & " (FLOW-6)")
-      return 2
-    let identity = loadOrCreateHostIdentity(identityDir / "host-ca.crt",
-      identityDir / "host-ca.key")
-    let anchors = loadTrustAnchorDir(anchorsDir)
-    let store = openEvidenceStore(dir, keyDir, retention, segmentMaxEntries)
-    let sink = newEvidenceSinkServer(store, identity, anchors, bindAddr,
-      Port(port), anchorsDir = anchorsDir, revokedPath = revokedPath)
-    sink.start()
-    if readyFile.len > 0:
-      writeFile(readyFile & ".tmp", bindAddr & ":" & $int(sink.listenPort) &
-        "\n" & $identity.hostId & "\n")
-      moveFile(readyFile & ".tmp", readyFile)
-    stdout.writeLine("evidence sink listening on " & bindAddr & ":" &
-      $int(sink.listenPort) & " host=" & $identity.hostId)
-    stdout.flushFile()
-    let retentionCheck = int(min(60_000'i64, max(1_000'i64, retention * 250)))
-    while true:
-      try: poll(200) except ValueError: sleep(200)
-      sink.tick(retentionCheck)
-  of "verify":
-    if checkpointPub.len == 0:
-      stderr.writeLine("repro-evidence-sink verify: --checkpoint-pub CERT " &
-        "is required (the checkpoint key's certificate, pinned out of band; " &
-        "never read from the store)")
-      return 2
-    var parsed: seq[SinkReceipt] = @[]
-    for path in receipts:
-      for line in readFile(path).splitLines:
-        if line.strip().len > 0:
-          parsed.add(decodeReceipt(line))
-    let report = verifyEvidenceStore(dir,
-      checkpointPublicKeyFromCert(checkpointPub), parsed,
-      allowUnanchoredTail = live)
-    stdout.writeLine("entries=" & $report.entries & " checkpoints=" &
-      $report.checkpoints & " unanchored_tail=" & $report.unanchoredTail &
-      " receipts=" & $report.receiptsChecked &
-      " ok=" & $report.ok & (if report.ok: "" else: " reason=" & report.reason))
-    return (if report.ok: 0 else: 1)
-  of "liveness":
-    let expected =
-      if expectPath.len > 0: loadExpectedDetectors(expectPath)
-      else: @[]
-    for row in livenessReport(dir, int64(epochTime() * 1000), silenceFactor,
-        expected):
-      stdout.writeLine($row.hostId & " " & row.detector & " " & $row.status &
-        " detections=" & $row.detections & " interval_ms=" & $row.intervalMs &
-        " last_heartbeat_ms=" & $row.lastHeartbeatMs)
-    return 0
-  of "addon-check":
-    if hostsPath.len == 0 or (manifestsDir.len > 0) != (signersPath.len > 0):
-      stderr.writeLine("repro-evidence-sink addon-check: --hosts FILE is " &
-        "required, and --manifests DIR needs --deploy-signers FILE")
-      return 2
-    var inp = CheckInputs(storeDir: dir, silenceFactor: silenceFactor,
-      nowMs: (if nowMs > 0: nowMs else: int64(epochTime() * 1000)))
-    inp.hosts = parseHosts(readFile(hostsPath))
-    if updateHosts:
-      let enrolled = enrolFromStore(inp.hosts, dir)
-      inp.hosts = enrolled.hosts
-      if enrolled.changed:
-        writeFile(hostsPath & ".tmp", renderHosts(inp.hosts))
-        moveFile(hostsPath & ".tmp", hostsPath)
-    if manifestsDir.len > 0:
-      inp.manifests = loadPublishedManifests(manifestsDir,
-        peerAuth.loadTrustAnchors(signersPath))
-    if artefactsPath.len > 0:
-      inp.publishedArtefacts = loadPublishedArtefacts(artefactsPath)
-    let report = runEvidenceCheck(inp)
-    stdout.write(render(report))
-    return (if report.alerts.len > 0: 1 else: 0)
-  of "read":
-    for e in readEvidenceStore(dir):
-      var line = $e.seq & " " & $e.receivedAtMs & " " & $e.kind & " " &
-        $e.senderHostId & "/" & $e.senderRole
-      if e.kind == ekRecord:
-        line.add(" " & describe(e.record))
-      stdout.writeLine(line)
-    return 0
-  else:
-    return usage()
+import repro_addon/evidence_sink_cli
 
 when isMainModule:
-  quit(main())
+  quit(runSinkCli(commandLineParams()))

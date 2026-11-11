@@ -10,6 +10,7 @@
 ##   repro system addon evidence-ship [--heartbeat]
 ##   repro system addon evidence-credential-check
 ##   repro system addon uninstall [--keep-store]
+##   repro system addon verify-discard-record RECORD --key HEX
 ##   repro system addon verify [--boot | --after-dpkg]
 ##   repro system addon reassert [--boot]
 ##   repro system addon recover
@@ -17,6 +18,7 @@
 ##   repro system addon probe <healthCheck>
 ##   repro system addon secret put --service S --name N [--target T] < secret
 ##   repro system addon rotate-recipient-key
+##   repro system addon image-assemble --payload <dir>
 ##   repro system addon agent-tick --source <manifest>... [--target T]
 ##   repro system rollback [<generation>] [--reconcile-drift]
 ##   repro system addon fingerprint [--root R] [--no-live] [--out F]
@@ -54,6 +56,7 @@ import repro_local_store/store as local_store
 
 import ./addon_apply
 import ./adoption_cli
+import ./image_assemble
 import ./addon_rollback
 import ./agent_record
 import ./agent_repin
@@ -62,9 +65,13 @@ import ./apt_hook
 import ./base_identity
 import ./bootstrap
 import ./collision
+import ./own_profile
+import ./containment
+import ./mutations
 import ./evidence_ship
 import ./evidence_enrol
 import ./egress_observer
+import ./store_custody
 import ./store_verify
 import ./fingerprint
 import ./generation0
@@ -83,6 +90,25 @@ import ./transitions
 import ./uninstall
 import ./verify
 
+proc migrateStaleOwnObjects*(stateDir: string; atBoot = false): string =
+  ## One switch to the migrated own profile when it differs (``own_profile.
+  ## migrateOwnProfile``); "" when there is nothing to migrate. At boot it
+  ## runs only for a stale evidence path unit.
+  let p = ownProfilePath(stateDir)
+  if not fileExists(p): return ""
+  let own = readFile(p)
+  if atBoot:
+    let path = unitContentOf(own, EvidenceShipPathUnit)
+    if path.len == 0 or path == evidenceShipPathUnit(): return ""
+  let migrated = migrateOwnProfile(own)
+  if migrated == own: return ""
+  let userText = if fileExists(userProfilePath(stateDir)):
+                   readFile(userProfilePath(stateDir)) else: ""
+  let r = runAddonApply(AddonApplyOptions(stateDir: stateDir,
+    hostIdentity: readHostname(), userProfileText: userText,
+    storedTarget: true, ownProfileText: migrated, purpose: "own-migration"))
+  "migrated generation 0's objects: add-on generation " & r.generationId
+
 const
   AddonUsage* = """usage: repro system addon <command> [options]
 
@@ -90,14 +116,17 @@ commands:
   preflight [--deploy-signers F] [--cache-publishers F [--cache-url U]]
             [--target T --manifest URL... [--profile-compiler P] [--poll-interval S]]
             [--evidence-sink ADDR:PORT --evidence-sink-ca F [--heartbeat-interval S]]
-            [--json]
+            [--defer-recipient-key] [--json]
       Inventory the host read-only and print the plan and its digest.
   bootstrap --plan <digest> [--deploy-signers F] [--cache-publishers F [--cache-url U]]
             [--target T --manifest URL... [--profile-compiler P] [--poll-interval S]]
             [--evidence-sink ADDR:PORT --evidence-sink-ca F [--heartbeat-interval S]]
+            [--defer-recipient-key]
       Install the add-on on a host whose preflight plan has <digest>. With
       an Evidence sink, also generate the generation-attestation key and
-      the sink write credential (enrol its certificate at the sink).
+      the sink write credential (enrol its certificate at the sink). With
+      --defer-recipient-key, create no recipient key: the host's next boot
+      creates its own (an image's assembly boot uses it).
   evidence-ship [--heartbeat]
       The shipping unit (repro-addon-evidence.service): append every queued
       evidence record to the Evidence sink, then a heartbeat.
@@ -106,6 +135,12 @@ commands:
       the attestation key and the sink write credential (never adopting or
       replacing a key), and apply generation 0's evidence objects -- and,
       with the deploy agent, its egress observer -- as one switch.
+  evidence-enrol --rekey [--no-handover]
+      Replace an enrolled host's attestation key and sink credential (spec
+      §13 decision 52): the old key signs a hand-over to the new ones, which
+      is shipped with the old credential before anything is replaced; then
+      one switch names the new keys. --no-handover, when the old key may be
+      compromised: no hand-over; enrol the new key at the sink by hand.
   store-verify [--background] [--adopt-unverified]
       Hash every store path the current generation uses and compare it with
       the digest it was realised with; quarantine an altered one (DET-AO-5).
@@ -118,9 +153,20 @@ commands:
   evidence-credential-check
       Test this host's sink write credential: an append must succeed and a
       list, a read, an overwrite and a delete must each be refused. Exit 0
-      only then.
-  uninstall [--keep-store]
+      only then. It announces itself first, so the sink's check reads it as
+      a self-test, not as a probe (G34).
+  uninstall [--keep-store] [--discard-store-evidence]
+            [--discard-unacknowledged-store-evidence]
       Reverse everything the ownership ledger records.
+      --discard-unacknowledged-store-evidence discards store evidence the
+      Evidence sink has not acknowledged, after writing a record of it to
+      /var/log/repro-addon signed by the host's attestation key; without
+      that key it refuses.
+  verify-discard-record RECORD --key HEX
+      Check such a record: its signature (RECORD.sig) must be over exactly
+      the bytes of RECORD, by HEX, the host's enrolled attestation key
+      (required; without it this is a usage error, exit 2). Exit 0 only
+      then. Runs on any machine; the files may be copied off the host.
   verify [--boot | --after-dpkg]
       Compare every ledger object with the host (report only). --after-dpkg
       (the apt hook): also report packages that now own ledger paths and
@@ -148,6 +194,12 @@ commands:
       Generate the next recipient key and print its public half; the
       current key is deleted when the first envelope sealed to the new
       one opens.
+  image-assemble --payload <dir>
+      The assembly boot of `repro infra image` (spec §6.5.2 step 5), run
+      by the image's one-shot assembly unit, never by an operator:
+      preflight, bootstrap and the host profile's apply on this system,
+      a plan that must predict nothing, then the clean-up; writes
+      <dir>/result.json.
   agent-repin [--apply <digest>]
       Resolve the deploy agent's origins again and print the plan for the
       fetch unit's egress allow-list and hosts file (writing nothing), or
@@ -176,6 +228,18 @@ commands:
       Let the deploy agent converge again after a local rollback paused it
       (spec §9.3): removes the pause marker of every agent the rollback
       paused. Exits 0 whether or not one was there.
+  migrate
+      Re-render generation 0's objects this build renders differently (the
+      evidence path unit, the fetch unit) by one switch; the re-assert unit
+      runs it at boot when the evidence path unit is stale. Exit 0.
+  contain --operator NAME --reason TEXT
+      Contain the host (spec §13 decision 51): record and ship a signed
+      operator-contained record, then stop and mask the deploy agent's
+      fetch and apply units (re-masked at every boot until release). The
+      off-host check then reports the agent "contained", not silent.
+  release --operator NAME --reason TEXT
+      Record and ship operator-released, unmask the agent's units and start
+      its fetch timer again.
   fingerprint [--root R] [--no-live] [--out F]
   fingerprint diff <before> <after> [--except C:GLOB]... [--expect F]
       Record the base fingerprint, or compare two.
@@ -235,6 +299,112 @@ proc takeValue(args: seq[string]; i: var int; flag: string): string =
     raise newException(ValueError, flag & " needs a value")
   inc i
   args[i]
+
+proc parsePreflightArgs*(rest: seq[string]): tuple[inp: PreflightInputs;
+                                                   json: bool] =
+  ## ``preflight``'s options (also the docs test's parser, A11 review
+  ## finding 16). Raises ``ValueError``.
+  var inp: PreflightInputs
+  var json = false
+  var i = 0
+  while i < rest.len:
+    let a = rest[i]
+    if a == "--deploy-signers" or a.startsWith("--deploy-signers="):
+      inp.deploySignersPath = takeValue(rest, i, "--deploy-signers")
+    elif a == "--cache-publishers" or a.startsWith("--cache-publishers="):
+      inp.cachePublishersPath = takeValue(rest, i, "--cache-publishers")
+    elif a == "--cache-url" or a.startsWith("--cache-url="):
+      inp.cacheUrl = takeValue(rest, i, "--cache-url")
+    elif a == "--target" or a.startsWith("--target="):
+      inp.agentTarget = takeValue(rest, i, "--target")
+    elif a == "--manifest" or a.startsWith("--manifest="):
+      inp.agentSources.add(takeValue(rest, i, "--manifest"))
+    elif a == "--profile-compiler" or a.startsWith("--profile-compiler="):
+      inp.profileCompiler = takeValue(rest, i, "--profile-compiler")
+    elif a == "--poll-interval" or a.startsWith("--poll-interval="):
+      inp.agentPollSec = parseInt(takeValue(rest, i, "--poll-interval"))
+    elif a == "--evidence-sink" or a.startsWith("--evidence-sink="):
+      inp.evidenceSink = takeValue(rest, i, "--evidence-sink")
+    elif a == "--evidence-sink-ca" or a.startsWith("--evidence-sink-ca="):
+      inp.evidenceSinkCaPath = takeValue(rest, i, "--evidence-sink-ca")
+    elif a == "--heartbeat-interval" or a.startsWith("--heartbeat-interval="):
+      inp.evidenceHeartbeatSec = parseInt(takeValue(rest, i,
+        "--heartbeat-interval"))
+    elif a == "--json":
+      json = true
+    elif a == "--defer-recipient-key":
+      inp.deferRecipientKey = true
+    else:
+      raise newException(ValueError, "unknown option " & a)
+    inc i
+  (inp, json)
+
+proc parseVerifyDiscardRecordArgs*(rest: seq[string]):
+    tuple[path, key: string] =
+  ## ``RECORD --key HEX`` of ``verify-discard-record``. Raises
+  ## ``ValueError`` on anything else, and when ``--key`` is missing.
+  var i = 0
+  while i < rest.len:
+    if rest[i] == "--key" and i + 1 < rest.len:
+      result.key = rest[i + 1]; inc i
+    elif rest[i].startsWith("--key="): result.key = rest[i][6 .. ^1]
+    elif result.path.len == 0 and not rest[i].startsWith("-"):
+      result.path = rest[i]
+    else:
+      raise newException(ValueError, "unexpected " & rest[i])
+    inc i
+  # The key is required (§13 decision 64, amended round 6): a record
+  # checked only against the key it names itself is not authenticated.
+  if result.path.len == 0 or
+      (result.key.len == 0 and not mutated("verify-accepts-missing-key")):
+    raise newException(ValueError, "usage: repro system addon " &
+      "verify-discard-record RECORD --key HEX (HEX: the host's enrolled " &
+      "attestation key)")
+
+proc parseUninstallArgs*(rest: seq[string]): UninstallOptions =
+  ## ``uninstall``'s options. Raises ``ValueError``.
+  for a in rest:
+    if a == "--keep-store": result.keepStore = true
+    elif a == "--discard-store-evidence": result.discardStoreEvidence = true
+    elif a == "--discard-unacknowledged-store-evidence":
+      result.discardUnacknowledgedStoreEvidence = true
+    else: raise newException(ValueError, "unknown option " & a)
+
+proc parseBootstrapArgs*(rest: seq[string]): BootstrapOptions =
+  ## ``bootstrap``'s options. Raises ``ValueError``.
+  var opts: BootstrapOptions
+  var i = 0
+  while i < rest.len:
+    let a = rest[i]
+    if a == "--plan" or a.startsWith("--plan="):
+      opts.planDigest = takeValue(rest, i, "--plan")
+    elif a == "--deploy-signers" or a.startsWith("--deploy-signers="):
+      opts.deploySignersPath = takeValue(rest, i, "--deploy-signers")
+    elif a == "--cache-publishers" or a.startsWith("--cache-publishers="):
+      opts.cachePublishersPath = takeValue(rest, i, "--cache-publishers")
+    elif a == "--cache-url" or a.startsWith("--cache-url="):
+      opts.cacheUrl = takeValue(rest, i, "--cache-url")
+    elif a == "--target" or a.startsWith("--target="):
+      opts.agentTarget = takeValue(rest, i, "--target")
+    elif a == "--manifest" or a.startsWith("--manifest="):
+      opts.agentSources.add(takeValue(rest, i, "--manifest"))
+    elif a == "--profile-compiler" or a.startsWith("--profile-compiler="):
+      opts.profileCompiler = takeValue(rest, i, "--profile-compiler")
+    elif a == "--poll-interval" or a.startsWith("--poll-interval="):
+      opts.agentPollSec = parseInt(takeValue(rest, i, "--poll-interval"))
+    elif a == "--evidence-sink" or a.startsWith("--evidence-sink="):
+      opts.evidenceSink = takeValue(rest, i, "--evidence-sink")
+    elif a == "--evidence-sink-ca" or a.startsWith("--evidence-sink-ca="):
+      opts.evidenceSinkCaPath = takeValue(rest, i, "--evidence-sink-ca")
+    elif a == "--heartbeat-interval" or a.startsWith("--heartbeat-interval="):
+      opts.evidenceHeartbeatSec = parseInt(takeValue(rest, i,
+        "--heartbeat-interval"))
+    elif a == "--defer-recipient-key":
+      opts.deferRecipientKey = true
+    else:
+      raise newException(ValueError, "unknown option " & a)
+    inc i
+  opts
 
 proc runFingerprintCli*(args: seq[string]): int =
   try:
@@ -361,37 +531,7 @@ proc runAddonCli*(args: seq[string]): int =
     of "state":
       return runStateCli(rest)
     of "preflight":
-      var inp: PreflightInputs
-      var json = false
-      var i = 0
-      while i < rest.len:
-        let a = rest[i]
-        if a == "--deploy-signers" or a.startsWith("--deploy-signers="):
-          inp.deploySignersPath = takeValue(rest, i, "--deploy-signers")
-        elif a == "--cache-publishers" or a.startsWith("--cache-publishers="):
-          inp.cachePublishersPath = takeValue(rest, i, "--cache-publishers")
-        elif a == "--cache-url" or a.startsWith("--cache-url="):
-          inp.cacheUrl = takeValue(rest, i, "--cache-url")
-        elif a == "--target" or a.startsWith("--target="):
-          inp.agentTarget = takeValue(rest, i, "--target")
-        elif a == "--manifest" or a.startsWith("--manifest="):
-          inp.agentSources.add(takeValue(rest, i, "--manifest"))
-        elif a == "--profile-compiler" or a.startsWith("--profile-compiler="):
-          inp.profileCompiler = takeValue(rest, i, "--profile-compiler")
-        elif a == "--poll-interval" or a.startsWith("--poll-interval="):
-          inp.agentPollSec = parseInt(takeValue(rest, i, "--poll-interval"))
-        elif a == "--evidence-sink" or a.startsWith("--evidence-sink="):
-          inp.evidenceSink = takeValue(rest, i, "--evidence-sink")
-        elif a == "--evidence-sink-ca" or a.startsWith("--evidence-sink-ca="):
-          inp.evidenceSinkCaPath = takeValue(rest, i, "--evidence-sink-ca")
-        elif a == "--heartbeat-interval" or a.startsWith("--heartbeat-interval="):
-          inp.evidenceHeartbeatSec = parseInt(takeValue(rest, i,
-            "--heartbeat-interval"))
-        elif a == "--json":
-          json = true
-        else:
-          raise newException(ValueError, "unknown option " & a)
-        inc i
+      let (inp, json) = parsePreflightArgs(rest)
       let r = runPreflight(inp)
       if json:
         stdout.write(r.planJson & "\n")
@@ -399,43 +539,17 @@ proc runAddonCli*(args: seq[string]): int =
         stdout.write(renderPreflightHuman(r))
       return (if r.compatible: 0 else: 2)
     of "bootstrap":
-      var opts: BootstrapOptions
-      var i = 0
-      while i < rest.len:
-        let a = rest[i]
-        if a == "--plan" or a.startsWith("--plan="):
-          opts.planDigest = takeValue(rest, i, "--plan")
-        elif a == "--deploy-signers" or a.startsWith("--deploy-signers="):
-          opts.deploySignersPath = takeValue(rest, i, "--deploy-signers")
-        elif a == "--cache-publishers" or a.startsWith("--cache-publishers="):
-          opts.cachePublishersPath = takeValue(rest, i, "--cache-publishers")
-        elif a == "--cache-url" or a.startsWith("--cache-url="):
-          opts.cacheUrl = takeValue(rest, i, "--cache-url")
-        elif a == "--target" or a.startsWith("--target="):
-          opts.agentTarget = takeValue(rest, i, "--target")
-        elif a == "--manifest" or a.startsWith("--manifest="):
-          opts.agentSources.add(takeValue(rest, i, "--manifest"))
-        elif a == "--profile-compiler" or a.startsWith("--profile-compiler="):
-          opts.profileCompiler = takeValue(rest, i, "--profile-compiler")
-        elif a == "--poll-interval" or a.startsWith("--poll-interval="):
-          opts.agentPollSec = parseInt(takeValue(rest, i, "--poll-interval"))
-        elif a == "--evidence-sink" or a.startsWith("--evidence-sink="):
-          opts.evidenceSink = takeValue(rest, i, "--evidence-sink")
-        elif a == "--evidence-sink-ca" or a.startsWith("--evidence-sink-ca="):
-          opts.evidenceSinkCaPath = takeValue(rest, i, "--evidence-sink-ca")
-        elif a == "--heartbeat-interval" or a.startsWith("--heartbeat-interval="):
-          opts.evidenceHeartbeatSec = parseInt(takeValue(rest, i,
-            "--heartbeat-interval"))
-        else:
-          raise newException(ValueError, "unknown option " & a)
-        inc i
+      let opts = parseBootstrapArgs(rest)
       try:
         let r = runAddonBootstrap(opts)
         stdout.write("plan digest:          " & r.planDigest & "\n" &
                      "generation:           " & r.generationId & "\n" &
                      "add-on binary:        " & r.reproExe & "\n" &
                      "binary sha256:        " & r.binarySha256 & "\n" &
-                     "recipient public key: " & r.recipientPublicKeyHex & "\n")
+                     "recipient public key: " &
+                       (if opts.deferRecipientKey:
+                          "deferred: the host creates its own at its next boot"
+                        else: r.recipientPublicKeyHex) & "\n")
         if r.evidenceCredentialHost.len > 0:
           # Evidence ships once the sink knows this host: the operator
           # copies the credential's certificate into the sink's anchor
@@ -447,14 +561,40 @@ proc runAddonCli*(args: seq[string]): int =
       except AddonPlanMismatch as e:
         stderr.write("repro system addon bootstrap: " & e.msg & "\n")
         return 2
+    of "verify-discard-record":
+      var path, key: string
+      try:
+        (path, key) = parseVerifyDiscardRecordArgs(rest)
+      except ValueError as e:
+        stderr.write("repro system addon verify-discard-record: " & e.msg &
+                     "\n")
+        return 2
+      let v = verifyDiscardRecord(path, key)
+      if not v.ok:
+        stderr.write("repro system addon verify-discard-record: " & path &
+                     " does not verify: " & v.why & "\n")
+        return 1
+      stdout.write("verified: " & path & " is signed by " & v.keyHex &
+                   " over exactly its bytes; " & $v.objects.len &
+                   " object(s) discarded unshipped:\n")
+      for o in v.objects: stdout.write("  " & o & "\n")
+      return 0
     of "uninstall":
-      var opts: UninstallOptions
-      for a in rest:
-        if a == "--keep-store": opts.keepStore = true
-        else: raise newException(ValueError, "unknown option " & a)
-      let r = runAddonUninstall(opts)
+      let r = runAddonUninstall(parseUninstallArgs(rest))
+      if r.overrideRecord.len > 0:
+        # §13 decisions 62 and 64: the record of what was discarded
+        # unshipped, its signature beside it.
+        stdout.write("store evidence discarded before the Evidence sink " &
+          "acknowledged it; the signed record is " & r.overrideRecord &
+          " (signature " & r.overrideRecord & DiscardRecordSigExt &
+          "; check it with `repro system addon verify-discard-record " &
+          r.overrideRecord & " --key <enrolled key>`):\n" &
+          r.overrideRecordText)
       for p in r.removed: stdout.write("removed " & p & "\n")
       for d in r.drift: stdout.write("left in place (drift): " & d & "\n")
+      for k in r.keptEvidence:
+        stdout.write("kept with the store (store evidence left aside): " &
+                     k & "\n")
       for e in r.errors: stderr.write("error: " & e & "\n")
       stdout.write("accounts kept: " &
         (if r.keptAccounts.len == 0: "none" else: r.keptAccounts.join(", ")) &
@@ -486,12 +626,24 @@ proc runAddonCli*(args: seq[string]): int =
         if a == "--boot" and cmd == "reassert": atBoot = true
         else: raise newException(ValueError, "unknown option " & a)
       if atBoot:
+        # A contained host stays contained across the reboot (decision 51):
+        # the runtime masks are gone, so they are put back first.
+        try: discard reapplyContainment()
+        except CatchableError: discard
         # The boot unit: never fails the boot transaction, whatever it finds.
         try:
           stdout.write(renderReassert(runAddonReassert(DefaultStateDir,
             atBoot = true)))
         except CatchableError as e:
           stdout.write("repro-addon reassert: degraded\n  " & e.msg & "\n")
+        # A host bootstrapped before the shipping path unit's fix (the drill's
+        # D1) is migrated here, by one switch, rather than waiting for its
+        # next generation (A11 review finding 8).
+        try:
+          let m = migrateStaleOwnObjects(DefaultStateDir, atBoot = true)
+          if m.len > 0: stdout.write(m & "\n")
+        except CatchableError as e:
+          stdout.write("repro-addon migration: " & e.msg & "\n")
         return 0
       let r = runAddonReassert(DefaultStateDir, atBoot = false)
       stdout.write(renderReassert(r))
@@ -508,6 +660,29 @@ proc runAddonCli*(args: seq[string]): int =
       return (if atBoot or r.ok: 0 else: 1)
     of "secret":
       return runSecretPutCli(rest)
+    of "image-assemble":
+      var payload = ""
+      var i = 0
+      while i < rest.len:
+        let a = rest[i]
+        if a == "--payload" or a.startsWith("--payload="):
+          payload = takeValue(rest, i, "--payload")
+        else:
+          raise newException(ValueError, "unknown option " & a)
+        inc i
+      if payload.len == 0:
+        raise newException(ValueError, "--payload <dir> is required")
+      let spec = parseAssemblySpec(readFile(payload / "assembly.json"))
+      # The payload's binary is this one: refuse a payload staged for
+      # another (the build host pinned it by digest).
+      let self = sha256OfFile(getAppFilename())
+      if self != spec.binarySha256:
+        raise newException(ValueError, "this binary hashes to " & self &
+          ", but the payload was staged for " & spec.binarySha256)
+      let (inp, _) = parsePreflightArgs(spec.preflightFlags)
+      let opts = parseBootstrapArgs(spec.preflightFlags)
+      let r = runImageAssembly(payload, spec, inp, opts)
+      return (if r.ok: 0 else: 1)
     of "rotate-recipient-key":
       return runRotateRecipientKeyCli(rest)
     of "evidence-ship":
@@ -528,6 +703,16 @@ proc runAddonCli*(args: seq[string]): int =
       return runAgentApplyCli(rest)
     of "resume":
       return runResumeCli(rest)
+    of "migrate":
+      if rest.len != 0: raise newException(ValueError, "migrate takes no option")
+      let m = migrateStaleOwnObjects(DefaultStateDir)
+      stdout.write((if m.len > 0: m else: "generation 0 is current; nothing " &
+        "to migrate") & "\n")
+      return 0
+    of "contain":
+      return runContainCli(rest)
+    of "release":
+      return runContainCli(rest, release = true)
     of "agent-repin":
       return runAgentRepinCli(rest)
     of "migration-plan":
@@ -718,6 +903,11 @@ proc runAddonStoreCli*(args: seq[string]): int =
       # index from its receipt, an unreadable index rebuilt.
       if args.len > 1:
         raise newException(ValueError, "unknown option " & args[1])
+      # The sweep removes everything under the store's tmp/, where a
+      # custody recovery a crash interrupted left the altered object it
+      # renamed aside: it is filed as evidence first (A11 review finding
+      # 10), never swept with the staging debris.
+      fileLeftoverAsides(custodySite("/var/lib/repro/system"))
       let report = recoverStoreRoot(StoreRoot)
       stdout.write("repro store recover: store-root=" & StoreRoot & "\n")
       stdout.write("index rebuilt: " &

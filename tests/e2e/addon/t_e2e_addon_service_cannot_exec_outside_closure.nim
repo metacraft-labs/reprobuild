@@ -130,10 +130,11 @@ proc body(g: Guest; repro: string; step: StepFn; record: JsonNode;
   producer = bs.producer
   if not bs.ok: return
   # The unit names no hardening: the add-on's default puts it under the
-  # floor (no User=, so a dynamic user too).
+  # floor (no User=, so a dynamic user too). Its directories are named for
+  # it exactly, with what it needs below (§13 decision 67).
   let profile = unitProfile(ProbeUnit, ProbeBin, health = "active",
-    extra = "RuntimeDirectory=a9-rt\nStateDirectory=a9-st\n" &
-            "CacheDirectory=a9-ca\nLogsDirectory=a9-lg\n", floorWaiver = false)
+    extra = "RuntimeDirectory=a9-exec-probe/rt\nStateDirectory=a9-exec-probe/st\n" &
+            "CacheDirectory=a9-exec-probe/ca\nLogsDirectory=a9-exec-probe/lg\n", floorWaiver = false)
   discard producer.publish(PublishSpec(sequence: 1, profileText: profile,
     buildActions: @[a],
     closureDigests: @[ClosureDigest(actionId: a.id, digest: digest)]))

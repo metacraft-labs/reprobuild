@@ -54,6 +54,7 @@ import ./linux_fs
 import ./mutations
 import ./nft_tables
 import ./preflight
+import ./store_custody
 import ./store_root
 
 type
@@ -74,6 +75,9 @@ type
     evidenceSink*: string         ## the Evidence sink, ``address:port`` (A11)
     evidenceSinkCaPath*: string   ## its host CA certificate
     evidenceHeartbeatSec*: int    ## the shipping heartbeat (0: default)
+    deferRecipientKey*: bool
+      ## Create no recipient key: the host creates its own at its next boot
+      ## (``lcLateKey``; spec §6.2 step 3). An image's assembly boot sets it.
 
   BootstrapResult* = object
     planDigest*: string
@@ -207,7 +211,8 @@ proc runAddonBootstrap*(opts: BootstrapOptions): BootstrapResult =
     agentSources: opts.agentSources, profileCompiler: opts.profileCompiler,
     agentPollSec: opts.agentPollSec, evidenceSink: opts.evidenceSink,
     evidenceSinkCaPath: opts.evidenceSinkCaPath,
-    evidenceHeartbeatSec: opts.evidenceHeartbeatSec)
+    evidenceHeartbeatSec: opts.evidenceHeartbeatSec,
+    deferRecipientKey: opts.deferRecipientKey)
   let plan = runPreflight(inputs)
   if plan.digest != opts.planDigest:
     raise newException(AddonPlanMismatch,
@@ -293,7 +298,19 @@ proc runAddonBootstrap*(opts: BootstrapOptions): BootstrapResult =
   var pubKept = false
   for k in plan.preBootstrap.keptFiles:
     if k.path == RecipientPubPath: pubKept = true
-  result.recipientPublicKeyHex = generateRecipientKey(keyKept)
+  if opts.deferRecipientKey:
+    if keyKept:
+      raise newException(AddonBootstrapError, "a deferred recipient key " &
+        "cannot be combined with a kept one (" & RecipientKeyPath & ")")
+    # No key now: the host's next boot creates its own (re-assert,
+    # ``createLateRecipientKey``). The ledger owns the paths by shape only.
+    let owner = statOwner(AgentDir).owner
+    entries.add(LedgerEntry(class: lcLateKey, path: RecipientKeyPath,
+                            mode: "0400", owner: owner))
+    entries.add(LedgerEntry(class: lcLateKey, path: RecipientPubPath,
+                            mode: "0444", owner: owner))
+  else:
+    result.recipientPublicKeyHex = generateRecipientKey(keyKept)
   if keyKept and result.recipientPublicKeyHex != plan.preBootstrap.recipientPublicKey:
     raise newException(AddonBootstrapError, RecipientKeyPath & " is not the " &
       "key the acknowledged plan saw (public half " &
@@ -306,6 +323,7 @@ proc runAddonBootstrap*(opts: BootstrapOptions): BootstrapResult =
     createExclusive(AgentDir / "cache-publisher.key",
                     peerAuth.privateKeyFileText(pub.privateKey), 0o400)
   for (k, kept) in [(RecipientKeyPath, keyKept), (RecipientPubPath, pubKept)]:
+    if opts.deferRecipientKey: break
     if kept:
       # No preserved copy of key material: uninstall captures the bytes
       # from the path itself before the state goes.
@@ -362,10 +380,22 @@ proc runAddonBootstrap*(opts: BootstrapOptions): BootstrapResult =
     raise newException(AddonBootstrapError, "the store copy of the add-on " &
       "binary hashes to " & storeCopy & ", not the planned " &
       plan.binarySha256)
-  for (path, id) in [(prefixes.binaryPrefixPath, prefixes.binaryPrefixId),
-                     (prefixes.filesPrefixPath, prefixes.filesPrefixId)]:
+  # Each prefix's realisation digest is recorded here, in the ledger
+  # (root-only, outside the store, attested by the generation's statement):
+  # store verification takes the expected digest from it, never from the
+  # path it verifies (spec §10.2).
+  for (path, id, digest) in [
+      (prefixes.binaryPrefixPath, prefixes.binaryPrefixId,
+       prefixes.binaryDigest),
+      (prefixes.filesPrefixPath, prefixes.filesPrefixId,
+       prefixes.filesDigest)]:
     entries.add(LedgerEntry(class: lcStorePrefix, path: path,
-      sha256: hexOf(id)))
+      sha256: hexOf(id), value: digest))
+    recordRealised(custodySite(stateDir), path, digest)
+  # The host is under store custody from its first generation (§13
+  # decision 48): an object with no recorded digest is refused, never
+  # reported "unverifiable" as on a host realised before custody.
+  markCustody(custodySite(stateDir))
 
   # 5. Generation 0, through repro infra apply. The ledger copy exists
   # BEFORE the apply, holding what bootstrap created so far: generation 0

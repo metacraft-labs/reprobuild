@@ -26,7 +26,7 @@
 ## `macos.systemDefault` are deferred — the parser rejects them with a
 ## clear "deferred to a later phase" diagnostic.
 
-import std/[strutils, tables]
+import std/[sets, strutils, tables]
 
 import repro_elevation
 import repro_dsl_stdlib/packages/apt_closure
@@ -40,7 +40,8 @@ from ./service_floor_v3 as floorV3 import nil
 export service_floor.EServiceFloor, service_floor.ServiceFloorHardening,
   service_floor.FloorVersion, service_floor.WholeFloorException,
   service_floor.commandStoreObjects, service_floor.referencedStoreObjects,
-  service_floor.storeObjectOf
+  service_floor.storeObjectOf, service_floor.isSafeSecretComponent,
+  service_floor.credentialServiceOf
 
 const InfraAddonMutation {.strdefine: "reproAddonMutation".} = ""
   ## A falsifying build of the add-on's gates (``repro_addon/mutations``);
@@ -806,32 +807,11 @@ const
     ## On a host without it (full ReproOS) `Wants=`/`After=` on a unit
     ## that does not exist pull in and order nothing.
 
-proc isSafeSecretComponent*(s: string): bool =
-  ## One path segment of `[A-Za-z0-9._-]`, at most 64 bytes, not starting
-  ## with `.` (so never `.`, `..`, or the materialiser's hidden temporary
-  ## names): a secret's service and name both become a path component
-  ## under `/run/repro/secrets` and part of a `LoadCredential=` line.
-  if s.len == 0 or s.len > 64 or s[0] == '.':
-    return false
-  for c in s:
-    if c notin {'A'..'Z', 'a'..'z', '0'..'9', '.', '-', '_'}:
-      return false
-  true
-
 proc secretEntryPath*(service, name: string): string =
   ## The sealed entry a `secrets.secretFile` names: `<service>/<name>`, the
   ## same relative path it is materialised at under `SecretsRunRoot`. The
   ## entry itself names the one service that may load it (CRED-3).
   service & "/" & name
-
-proc credentialServiceOf*(unitName: string): string =
-  ## The secrets service of a unit: its name without `.service`, or "" when
-  ## the unit cannot load credentials (not a `.service`, a template
-  ## instance, or a name that is not a safe component).
-  if not unitName.endsWith(".service"):
-    return ""
-  let stem = unitName[0 ..< unitName.len - ".service".len]
-  if isSafeSecretComponent(stem): stem else: ""
 
 proc credentialLines*(unitName: string; credentials: openArray[string]):
     seq[string] =
@@ -1137,6 +1117,285 @@ proc checkFloorDropIns*(p: SystemProfile) =
       except EServiceFloor as e:
         raiseSystemProfileInvalid(e.msg)
 
+proc unitContentDeclaresExclusive*(content: string): bool =
+  ## `X-Repro-Exclusive=true|yes|1` in the `[Unit]` section (ReproOS Add-On
+  ## Mode §7.3: "a unit whose X- metadata says exclusive = true"). systemd
+  ## ignores `X-` keys, so the marker travels in the unit file itself and
+  ## an adopted hand-written unit can carry it.
+  var inUnit = false
+  for raw in content.splitLines():
+    let line = raw.strip()
+    if line.startsWith("["):
+      inUnit = line == "[Unit]"
+      continue
+    if not inUnit or line.len == 0 or line[0] in {'#', ';'}:
+      continue
+    let eq = line.find('=')
+    if eq < 0: continue
+    if line[0 ..< eq].strip() == "X-Repro-Exclusive":
+      return line[eq + 1 .. ^1].strip().toLowerAscii() in ["true", "yes", "1", "on"]
+  false
+
+proc isExclusiveUnit*(r: SystemResource): bool =
+  ## The resource's `exclusive` field, or the marker in its content.
+  r.kind == srkSystemdSystemUnit and
+    (r.suExclusive or unitContentDeclaresExclusive(r.suContent))
+
+
+proc floorWaivedWhole*(r: SystemResource): bool =
+  ## The unit names the whole-floor waiver (``serviceFloor: <why>``): it has
+  ## no floor, and no floor rule applies to it.
+  for e in r.suFloorExceptions:
+    if e.strip().startsWith(WholeFloorException & ":"): return true
+
+proc activatedService(name, content: string): string =
+  ## The service a socket, timer or path unit starts: its ``Service=`` /
+  ## ``Unit=``, else the unit of the same name (``foo@.service`` for a
+  ## socket with ``Accept=yes``).
+  let dot = name.rfind('.')
+  if dot <= 0: return ""
+  let stem = name[0 ..< dot]
+  var explicit, accept = ""
+  for d in sectionDirectives(content):
+    if d.key in ["Service", "Unit"] and d.section in ["Socket", "Timer", "Path"]:
+      explicit = d.value.strip()
+    if d.key == "Accept" and d.section == "Socket": accept = d.value.strip()
+  if explicit.len > 0: return explicit
+  if accept.toLowerAscii() in ["yes", "true", "1", "on"]: return stem & "@.service"
+  stem & ".service"
+
+proc checkFloorActivators*(p: SystemProfile) =
+  ## The units that activate a floored service, and the drop-ins onto them,
+  ## under the floor's rules for activators (A9 review round 5, finding 2;
+  ## `service_floor.activatorRefusal`); a service's `Sockets=` names only the
+  ## profile's own sockets; no drop-in onto any socket, timer or path unit
+  ## carries a command line; and no floored unit's `EnvironmentFile=` lies
+  ## in another floored unit's writable place (finding 1).
+  when InfraAddonMutation in ["floor-round5-static-off",
+      "floor-static-r3-disabled", "floor-unchecked"]:
+    return
+  var floored = initHashSet[string]()
+  var sockets = initHashSet[string]()
+  for r in p.resources:
+    if r.kind != srkSystemdSystemUnit or r.suCollision == "dropIn": continue
+    if r.suHardening == ServiceFloorHardening: floored.incl(r.suName)
+    if r.suName.endsWith(".socket"): sockets.incl(r.suName)
+  proc isFloored(target: string): bool =
+    if target in floored: return true
+    let at = target.find('@')
+    let dot = target.rfind('.')
+    at > 0 and dot > at and (target[0 .. at] & target[dot .. ^1]) in floored
+  var activators = initHashSet[string]()
+  for r in p.resources:
+    if r.kind != srkSystemdSystemUnit or r.suCollision == "dropIn": continue
+    if r.suHardening == ServiceFloorHardening:
+      for d in sectionDirectives(r.suContent, ["Service"]):
+        if d.key == "Sockets":
+          for t in d.value.splitWhitespace():
+            if t notin sockets:
+              raiseSystemProfileInvalid("systemd.systemUnit '" & r.suName &
+                "': Sockets=" & t & " is not a socket unit of this profile; " &
+                "a socket the base defines hands the service what it opens " &
+                "as root")
+            activators.incl(t)
+    if r.suName.endsWith(".socket") or r.suName.endsWith(".timer") or
+        r.suName.endsWith(".path"):
+      if isFloored(activatedService(r.suName, r.suContent)):
+        activators.incl(r.suName)
+  for r in p.resources:
+    if r.kind == srkSystemdSystemUnit and r.suCollision != "dropIn" and
+        r.suName in activators:
+      let why = activatorRefusal(r.suName, r.suContent, dropIn = false,
+                                 service = activatedService(r.suName, r.suContent))
+      if why.len > 0:
+        raiseSystemProfileInvalid("systemd.systemUnit '" & r.suName &
+          "' activates a floored service: " & why)
+  for d in p.resources:
+    var target, content = ""
+    if d.kind == srkSystemdSystemDropIn:
+      target = d.diUnit
+      content = d.diContent
+    elif d.kind == srkSystemdSystemUnit and d.suCollision == "dropIn":
+      target = d.suName
+      content = d.suContent
+    else:
+      continue
+    if not (target.endsWith(".socket") or target.endsWith(".timer") or
+            target.endsWith(".path")):
+      continue
+    if hasExecLines(content):
+      raiseSystemProfileInvalid("the drop-in '" & d.address & "' onto " &
+        target & " carries a command line, which the manager runs as root " &
+        "outside every floor")
+    var applies = false
+    var service = ""
+    for a in activators:
+      if dropInApplies(target, a):
+        applies = true
+        for r in p.resources:
+          if r.kind == srkSystemdSystemUnit and r.suName == a:
+            service = activatedService(a, r.suContent)
+    if applies:
+      let why = activatorRefusal(target, content, dropIn = true, service = service)
+      if why.len > 0:
+        raiseSystemProfileInvalid("the drop-in '" & d.address & "' onto " &
+          target & ", which activates a floored service: " & why)
+  # EnvironmentFile= is default-deny (§13 decision 50): a store path, a file
+  # the profile installs, or the service's own secrets.
+  var ownFiles: seq[string]
+  for f in p.resources:
+    if f.kind == srkFsSystemFile: ownFiles.add(f.sfPath)
+  for r in p.resources:
+    if r.kind != srkSystemdSystemUnit or r.suHardening != ServiceFloorHardening or
+        floorWaivedWhole(r):
+      continue
+    for d in sectionDirectives(r.suContent, ["Service"]):
+      if d.key != "EnvironmentFile": continue
+      for t in d.value.splitWhitespace():
+        let why = environmentFileRefusal(r.suName, t, ownFiles)
+        if why.len > 0:
+          raiseSystemProfileInvalid("systemd.systemUnit '" & r.suName &
+            "': EnvironmentFile=" & t & ": " & why)
+  # EnvironmentFile= against every other floored unit's writable places.
+  for r in p.resources:
+    if r.kind != srkSystemdSystemUnit or r.suHardening != ServiceFloorHardening:
+      continue
+    for d in sectionDirectives(r.suContent, ["Service"]):
+      if d.key != "EnvironmentFile": continue
+      for t in d.value.splitWhitespace():
+        let np = normalisedPath(t.strip(leading = true, trailing = false,
+                                        chars = {'-'}))
+        for o in p.resources:
+          if o.kind != srkSystemdSystemUnit or
+              o.suHardening != ServiceFloorHardening or o.suName == r.suName:
+            continue
+          for w in floorWritablePlaces(serviceDirectives(o.suContent)):
+            if np == w or np.startsWith(w & "/"):
+              raiseSystemProfileInvalid("systemd.systemUnit '" & r.suName &
+                "': EnvironmentFile=" & np & " lies in " & o.suName &
+                "'s writable place " & w & "; the manager reads it as root")
+
+proc profileUnitOf(p: SystemProfile; name: string): int =
+  ## The index of the profile's own unit ``name`` (or of the template an
+  ## instance ``name`` is of), -1 when the profile does not define it.
+  for i, r in p.resources:
+    if r.kind == srkSystemdSystemUnit and r.suCollision != "dropIn" and
+        r.suName == name: return i
+  let at = name.find('@')
+  let dot = name.rfind('.')
+  if at > 0 and dot > at:
+    let tmpl = name[0 .. at] & name[dot .. ^1]
+    for i, r in p.resources:
+      if r.kind == srkSystemdSystemUnit and r.suCollision != "dropIn" and
+          r.suName == tmpl: return i
+  -1
+
+proc unitFilesOf(p: SystemProfile; name: string): seq[string] =
+  ## The profile's bytes systemd reads for ``name``: its unit and every
+  ## drop-in of the profile that applies to it.
+  let i = profileUnitOf(p, name)
+  if i >= 0: result.add(p.resources[i].suContent)
+  for d in p.resources:
+    if d.kind == srkSystemdSystemDropIn and dropInApplies(d.diUnit, name):
+      result.add(d.diContent)
+    elif d.kind == srkSystemdSystemUnit and d.suCollision == "dropIn" and
+        dropInApplies(d.suName, name):
+      result.add(d.suContent)
+
+proc profileStartsOf*(p: SystemProfile; name: string): seq[string] =
+  ## The units starting ``name`` starts, as far as the profile says: its
+  ## ``[Unit]`` starting dependencies (``StartingDependencyKeys``) in its
+  ## files, the units of the profile its ``[Install]`` names pull in when
+  ## enabled (``WantedBy=``, ``RequiredBy=``, ``UpheldBy=`` naming it), and
+  ## for a socket, timer or path unit the unit it activates. A unit the
+  ## profile does not define starts nothing the profile can see; the
+  ## effective-unit check follows it on the host.
+  let files = unitFilesOf(p, name)
+  for c in files:
+    for d in sectionDirectives(c, ["Unit"]):
+      if d.key in StartingDependencyKeys:
+        for t in d.value.splitWhitespace(): result.add(t)
+  for r in p.resources:
+    if r.kind != srkSystemdSystemUnit or r.suCollision == "dropIn" or
+        not r.suEnabled: continue
+    for d in sectionDirectives(r.suContent, ["Install"]):
+      if d.key in ["WantedBy", "RequiredBy", "UpheldBy"] and
+          name in d.value.splitWhitespace():
+        result.add(r.suName)
+  if files.len > 0 and (name.endsWith(".socket") or name.endsWith(".timer") or
+                        name.endsWith(".path")):
+    result.add(activatedService(name, files[0]))
+
+proc checkFloorReach*(p: SystemProfile) =
+  ## No floored unit, and no unit that activates one, reaches a system-state
+  ## unit (``SystemStateTargets``) by any route the profile defines (§13
+  ## decision 49; A9 review round 7, finding 4), and every unit of the
+  ## profile on such a route queues its ``OnFailure=``/``OnSuccess=`` units
+  ## only with ``replace`` or ``fail`` and allows no isolation.
+  when InfraAddonMutation in ["floor-static-r3-disabled", "floor-unchecked",
+                              "floor-round5-static-off"]:
+    return
+  var roots: seq[string]
+  for r in p.resources:
+    if r.kind == srkSystemdSystemUnit and r.suCollision != "dropIn" and
+        r.suHardening == ServiceFloorHardening and not floorWaivedWhole(r):
+      roots.add(r.suName)
+  if roots.len == 0: return
+  let floored = roots
+  for r in p.resources:
+    if r.kind == srkSystemdSystemUnit and r.suCollision != "dropIn" and
+        (r.suName.endsWith(".socket") or r.suName.endsWith(".timer") or
+         r.suName.endsWith(".path")):
+      let svc = activatedService(r.suName, r.suContent)
+      for f in floored:
+        if (svc == f or dropInApplies(svc, f)) and r.suName notin roots:
+          roots.add(r.suName)
+  for root in roots:
+    # Conflicts= may name only the profile's own units (§13 decision 55).
+    for c in unitFilesOf(p, root):
+      let why = conflictsRefusal(root, c,
+        proc (u: string): bool = profileUnitOf(p, u) >= 0)
+      if why.len > 0:
+        raiseSystemProfileInvalid("systemd.systemUnit '" & root & "': " & why)
+    let route = systemStateRoute([root],
+      proc (u: string): seq[string] = profileStartsOf(p, u))
+    if route.len > 0:
+      raiseSystemProfileInvalid("systemd.systemUnit '" & root & "' starts " &
+        route[^1] & " (" & route.join(" -> ") & "), which changes the " &
+        "whole system's state; a floored unit, and a unit that activates " &
+        "one, may not reach it by any route")
+    # The job modes and isolation of every profile unit it reaches.
+    # Over the floor's one reach (``walkReach``, shared with the effective
+    # check: A9 review round 9, finding 2).
+    let reach = reachedUnits([root],
+      proc (u: string): seq[string] = profileStartsOf(p, u))
+    if not reach.complete:
+      raiseSystemProfileInvalid("systemd.systemUnit '" & root & "': it " &
+        "reaches more than " & $RouteLimit & " units; not judged, refused")
+    for u in @[root] & reach.units:
+      for c in unitFilesOf(p, u):
+        # A profile unit the floored unit reaches stops what its own
+        # Conflicts= names when it starts, too (A9 review round 8, the
+        # reviewer's open question; §13 decision 55).
+        when InfraAddonMutation != "reached-conflicts-unchecked":
+          if u != root:
+            let why = conflictsRefusal(u, c,
+              proc (x: string): bool = profileUnitOf(p, x) >= 0)
+            if why.len > 0:
+              raiseSystemProfileInvalid("systemd.systemUnit '" & u & "' (" &
+                "reached from " & root & "): " & why)
+        for d in sectionDirectives(c, ["Unit"]):
+          if d.key in JobModeKeys and d.value.strip() notin SafeJobModes:
+            raiseSystemProfileInvalid("systemd.systemUnit '" & u & "' (" &
+              "reached from " & root & "): " & d.key & "=" & d.value &
+              " changes the system's state beyond the unit (only " &
+              SafeJobModes.join(" or ") & ")")
+          if d.key == "AllowIsolate" and d.value.strip().toLowerAscii() in
+              ["yes", "true", "1", "on"]:
+            raiseSystemProfileInvalid("systemd.systemUnit '" & u & "' (" &
+              "reached from " & root & "): AllowIsolate=yes lets a job " &
+              "stop every unit the target does not want")
+
 proc applyAddOnServiceFloor*(p: var SystemProfile) =
   ## The add-on realisation's default (ReproOS-Add-On-Mode §10.1): every
   ## unit `floorAppliesByDefault` selects gets `hardening = "serviceFloor"`.
@@ -1146,6 +1405,8 @@ proc applyAddOnServiceFloor*(p: var SystemProfile) =
       r.suHardening = ServiceFloorHardening
       discard renderedSystemUnitContent(r)
   checkFloorDropIns(p)
+  checkFloorActivators(p)
+  checkFloorReach(p)
 
 proc floorExceptionPlanLines*(p: SystemProfile): seq[string] =
   ## Every floor exception of the profile's units under the floor, one
@@ -1255,30 +1516,6 @@ proc sysusersEntryContent*(r: SystemResource): string =
   doAssert r.kind == srkLinuxSysusersEntry
   sysusersFragmentContent(r.seKind, r.seName, r.seId, r.seDescription,
                           r.seHome, r.seShell)
-
-proc unitContentDeclaresExclusive*(content: string): bool =
-  ## `X-Repro-Exclusive=true|yes|1` in the `[Unit]` section (ReproOS Add-On
-  ## Mode §7.3: "a unit whose X- metadata says exclusive = true"). systemd
-  ## ignores `X-` keys, so the marker travels in the unit file itself and
-  ## an adopted hand-written unit can carry it.
-  var inUnit = false
-  for raw in content.splitLines():
-    let line = raw.strip()
-    if line.startsWith("["):
-      inUnit = line == "[Unit]"
-      continue
-    if not inUnit or line.len == 0 or line[0] in {'#', ';'}:
-      continue
-    let eq = line.find('=')
-    if eq < 0: continue
-    if line[0 ..< eq].strip() == "X-Repro-Exclusive":
-      return line[eq + 1 .. ^1].strip().toLowerAscii() in ["true", "yes", "1", "on"]
-  false
-
-proc isExclusiveUnit*(r: SystemResource): bool =
-  ## The resource's `exclusive` field, or the marker in its content.
-  r.kind == srkSystemdSystemUnit and
-    (r.suExclusive or unitContentDeclaresExclusive(r.suContent))
 
 proc checkUnitStateConflicts*(resources: openArray[SystemResource]) =
   ## A unit name may not be declared both as a `systemd.unitState` (a unit
@@ -2652,6 +2889,8 @@ proc parseSystemProfile*(text: string; addOnDefaults = false;
   checkSecretDeclarations(result)
   if not stored:
     checkFloorDropIns(result)
+    checkFloorActivators(result)
+    checkFloorReach(result)
   checkStateDirectories(result)
 
 # ---------------------------------------------------------------------------

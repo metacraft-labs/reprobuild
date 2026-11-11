@@ -108,6 +108,12 @@ const
   vDelete* = 19'u8
   vListing = 20'u8
     ## Only the falsifying build below ever sends it.
+  vRefused* = 21'u8
+    ## The sink's only reply to a verb outside its vocabulary: the refusal
+    ## is chained, at the sequence the body names (u64), and the connection
+    ## closes. It carries nothing of the store. A client that gets it knows
+    ## the sink RECORDED the refusal (A11 review round 3: a probe that
+    ## never reached the sink used to read as refused).
 
   SinkMutation {.strdefine: "reproAddonMutation".} = ""
     ## The ReproOS add-on's falsifying builds (``repro_addon/mutations``)
@@ -168,6 +174,9 @@ type
     appendedCount*: int
     refusedVerbCount*: int
     rejectedHandshakes*: int
+    failedConnections*: int
+      ## Connections whose handler ended with an error: counted, and the
+      ## sink keeps serving.
     expiredConnections*: int
     revokedConnections*: int
     backpressureWaits*: int
@@ -781,30 +790,18 @@ proc currentAnchors(sink: EvidenceSinkServer): TrustAnchorSet =
   except CatchableError:
     result = TrustAnchorSet()
 
-proc recordRefusal(sink: EvidenceSinkServer; who: VerifiedLeaf; verb: uint8) =
+proc recordRefusal(sink: EvidenceSinkServer; who: VerifiedLeaf;
+                   verb: uint8): uint64 {.discardable.} =
   ## A refused frame is itself evidence, signed into the chain at once (no
-  ## entry is ever left after the last checkpoint).
-  discard sink.store.appendEntry(ekRefusedVerb, who.hostId, who.role, @[verb])
+  ## entry is ever left after the last checkpoint). Returns its sequence.
+  result = sink.store.appendEntry(ekRefusedVerb, who.hostId, who.role, @[verb])
   discard sink.store.appendCheckpointReceipt()
 
-proc handleSinkConnection(sink: EvidenceSinkServer;
-                          sock: AsyncSocket) {.async.} =
-  if sink.leaf.needsRenewal:
-    sink.leaf = mintLeaf(sink.identity, lrDaemon)
-  let anchors = sink.currentAnchors()
-  let connOpt = await wrapServerSocket(sock, sink.leaf.cert.certDer,
-    sink.leaf.key, anchors)
-  if connOpt.isNone:
-    inc sink.rejectedHandshakes
-    try: sock.close() except CatchableError: discard
-    return
-  let conn = connOpt.get()
-  try:
-    let who = await exchangeProofs(conn, sink.leaf, anchors,
-      sink.nowMsS() div 1000)
-    if not who.ok:
-      inc sink.rejectedHandshakes
-      return
+proc serveSinkFrames(sink: EvidenceSinkServer; conn: TlsConn;
+                     who: VerifiedLeaf) {.async.} =
+  ## One verified connection's frames, until it ends. Raises on a broken
+  ## frame; the caller closes the connection.
+  block serve:
     let key = bucketKey(who.hostId, who.role)
     while sink.running:
       let frame = await readSinkFrame(conn, idle = true)
@@ -883,13 +880,64 @@ proc handleSinkConnection(sink: EvidenceSinkServer;
         # Read / list / overwrite / delete / anything else: not in the
         # vocabulary.
         inc sink.refusedVerbCount
-        sink.recordRefusal(who, frame.verb)
+        let refusedAt = sink.recordRefusal(who, frame.verb)
+        var receipt: seq[byte] = @[]
+        receipt.putU64(refusedAt)
+        try: await sendSinkFrame(conn, vRefused, receipt)
+        except CatchableError: discard
         break
+
+proc serveSinkConnection(sink: EvidenceSinkServer; conn: TlsConn;
+                         anchors: TrustAnchorSet) {.async.} =
+  ## The proof exchange, then the frames.
+  when SinkMutation == "sink-close-in-finally":
+    # FALSIFYING BUILD: the same body, with the close awaited in a
+    # ``finally`` the early return leaves through instead of after it in
+    # ``handleSinkConnection`` -- the one construct the fix removed. Red
+    # under Nim 2.2.4 only ("yielded nil", counted in failedConnections).
+    try:
+      let who = await exchangeProofs(conn, sink.leaf, anchors,
+        sink.nowMsS() div 1000)
+      if not who.ok:
+        inc sink.rejectedHandshakes
+        return
+      await serveSinkFrames(sink, conn, who)
+    finally:
+      try: await tls.close(conn) except CatchableError: discard
+  else:
+    let who = await exchangeProofs(conn, sink.leaf, anchors,
+      sink.nowMsS() div 1000)
+    if not who.ok:
+      inc sink.rejectedHandshakes
+      return
+    await serveSinkFrames(sink, conn, who)
+
+proc handleSinkConnection(sink: EvidenceSinkServer;
+                          sock: AsyncSocket) {.async.} =
+  ## The handshake, the frames (``serveSinkConnection``), then the close.
+  ##
+  ## No ``await`` sits in a ``finally`` that a ``return`` leaves through:
+  ## the async transform of Nim 2.2.4 resumed such a ``finally`` with a nil
+  ## future ("handleSinkConnection yielded nil", an ``AssertionDefect``
+  ## that stopped the sink at the first connection from an unenrolled
+  ## credential). The serving body is its own proc, which may return
+  ## anywhere; the close here is reached by plain sequence.
+  if sink.leaf.needsRenewal:
+    sink.leaf = mintLeaf(sink.identity, lrDaemon)
+  let anchors = sink.currentAnchors()
+  let connOpt = await wrapServerSocket(sock, sink.leaf.cert.certDer,
+    sink.leaf.key, anchors)
+  if connOpt.isNone:
+    inc sink.rejectedHandshakes
+    try: sock.close() except CatchableError: discard
+    return
+  let conn = connOpt.get()
+  try:
+    await serveSinkConnection(sink, conn, anchors)
   except CatchableError:
     discard
-  finally:
+  when SinkMutation != "sink-close-in-finally":
     try: await tls.close(conn) except CatchableError: discard
-
 proc acceptLoop(sink: EvidenceSinkServer) {.async.} =
   while sink.running:
     var client: AsyncSocket
@@ -897,7 +945,12 @@ proc acceptLoop(sink: EvidenceSinkServer) {.async.} =
       client = await sink.listener.accept()
     except CatchableError:
       break
-    asyncCheck handleSinkConnection(sink, client)
+    # One connection's failure never stops the sink: its future's error is
+    # counted, never re-raised into the dispatcher (``asyncCheck`` would).
+    let f = handleSinkConnection(sink, client)
+    f.addCallback(proc (x: Future[void]) =
+      if x.failed:
+        inc sink.failedConnections)
 
 proc start*(sink: EvidenceSinkServer) =
   sink.listener = newAsyncSocket()
@@ -1018,7 +1071,10 @@ proc markDown(a: EvidenceAppender) =
   if a.connDownSinceMs == 0:
     a.connDownSinceMs = nowMsE()
 
-proc connect(a: EvidenceAppender): Future[bool] {.async.} =
+proc openConnection(a: EvidenceAppender):
+    Future[tuple[ok: bool; conn: TlsConn; leafNotAfter: int64]] {.async.} =
+  ## A new, verified connection to the sink, owned by the caller: nothing
+  ## here reads or writes ``a.conn``. ``lastError`` says why when not ok.
   a.lastConnectAttemptMs = nowMsE()
   let sock = newAsyncSocket()
   try:
@@ -1026,32 +1082,49 @@ proc connect(a: EvidenceAppender): Future[bool] {.async.} =
   except CatchableError as err:
     a.lastError = "connect: " & err.msg
     try: sock.close() except CatchableError: discard
-    return false
+    return
   let leaf = a.leafProvider()
   if leaf.key.isNil or not leaf.key.available:
     a.lastError = "this process holds no usable leaf for the evidence sink"
     try: sock.close() except CatchableError: discard
-    return false
+    return
   let connOpt = await wrapClientSocket(sock, a.endpoint.host,
     leaf.cert.certDer, leaf.key, a.anchors)
   if connOpt.isNone:
     a.lastError = "TLS handshake with the evidence sink failed"
     try: sock.close() except CatchableError: discard
-    return false
+    return
   let who = await exchangeProofs(connOpt.get(), leaf, a.anchors,
     getTime().toUnix)
   if not who.ok:
     a.lastError = "evidence sink identity: " & who.reason
     try: await tls.close(connOpt.get()) except CatchableError: discard
-    return false
+    return
   var zero: PeerId
   if a.expectedSink != zero and who.hostId != a.expectedSink:
     a.lastError = "the evidence sink is host " & $who.hostId &
       ", not the pinned sink " & $a.expectedSink
     try: await tls.close(connOpt.get()) except CatchableError: discard
+    return
+  return (true, connOpt.get(), leaf.cert.notAfter)
+
+proc connect(a: EvidenceAppender): Future[bool] {.async.} =
+  ## The appender's own connection (``a.conn``). Only the flush (one at a
+  ## time, ``kick``) calls it; anything else that needs to talk to the sink
+  ## opens a connection of its own (``openConnection``), so two coroutines
+  ## never share one TLS stream and nothing finds ``a.conn`` cleared under
+  ## it (the credential self-test crashed so, reprobuild-pm issue
+  ## 2026-11-06-evidence-sink-raw-verb-test-client-segfaults-in-tls-recv).
+  let c = await a.openConnection()
+  if not c.ok:
     return false
-  a.conn = connOpt.get()
-  a.connLeafNotAfter = leaf.cert.notAfter
+  if a.closed:
+    # ``close`` ran while this connection was being opened: it must not
+    # outlive the appender.
+    try: await tls.close(c.conn) except CatchableError: discard
+    return false
+  a.conn = c.conn
+  a.connLeafNotAfter = c.leafNotAfter
   a.everConnected = true
   a.connDownSinceMs = 0
   return true
@@ -1109,6 +1182,9 @@ proc flushOnce(a: EvidenceAppender) {.async.} =
     # flush is suspended, and the error path below must never close a nil
     # connection (that crashed the process with SIGSEGV).
     let conn = a.conn
+    if conn.isNil:
+      # ``close`` cleared it between the connect and here.
+      return
     try:
       await sendSinkFrame(conn, vAppendBatch, body)
       let ack = await readSinkFrame(conn)
@@ -1186,6 +1262,22 @@ proc drain*(a: EvidenceAppender; timeoutMs = 5_000): bool =
     a.kick()
     try: poll(20) except ValueError: sleep(20)
   a.queue.len == 0
+
+proc dropConnectionForTesting*(a: EvidenceAppender) {.async.} =
+  ## Test seam: the appender's connection goes away as when the sink ends
+  ## it (closed, marked down), nothing else changes. Before the A11 round-2
+  ## fix a forbidden-verb probe had this effect as a side effect; probes
+  ## now use connections of their own.
+  if a.isNil or a.conn.isNil: return
+  let conn = a.conn
+  a.conn = nil
+  a.markDown()
+  try: await tls.close(conn) except CatchableError: discard
+
+proc connected*(a: EvidenceAppender): bool =
+  ## Whether the appender holds its connection to the sink now (for tests
+  ## and status: a probe of the sink must leave it as it found it).
+  not a.isNil and not a.conn.isNil
 
 proc pending*(a: EvidenceAppender): int =
   ## Records queued but not yet acknowledged by the sink.
@@ -1299,32 +1391,74 @@ proc forbiddenOperationBody*(op: ForbiddenOperation): seq[byte] =
     result.add(encodeEvidenceRecord(newEvidenceRecord(ecAudit,
       "credential-probe", "overwrite")))
 
+type
+  ProbeOutcome* = enum
+    poAnswered      ## the sink answered with something other than a refusal
+    poRefused       ## the sink recorded the refusal and said so (``vRefused``)
+    poUndelivered   ## no connection or no reply: the sink said neither
+
+proc probeVerb*(a: EvidenceAppender; verb: uint8; body: seq[byte]):
+    Future[tuple[outcome: ProbeOutcome; refusedAt: uint64]] {.async.} =
+  ## Sends one verb with the appender's credential, on a connection of its
+  ## own, never the appender's: a flush may be in flight on ``a.conn`` (a
+  ## ``drain`` that timed out leaves one), and on a shared stream the flush
+  ## and this request would read each other's frames, and the flush's error
+  ## path clears ``a.conn`` under it (A11 review round 2). Only the sink's
+  ## ``vRefused`` reply counts as refused. A request that never reached the
+  ## sink, or got no reply, is ``poUndelivered``, and ``lastError`` says why
+  ## (A11 review round 3).
+  result = (poUndelivered, 0'u64)
+  when SinkMutation == "probe-shares-connection":
+    # FALSIFYING BUILD: the old shared-connection probe.
+    if a.conn.isNil:
+      if not await a.connect():
+        return
+    try:
+      await sendSinkFrame(a.conn, verb, body)
+      let reply = await readSinkFrame(a.conn)
+      if reply.ok:
+        let o = if reply.verb == vRefused: poRefused else: poAnswered
+        result = (o, 0'u64)
+    except CatchableError:
+      discard
+    try: await tls.close(a.conn) except CatchableError: discard
+    a.conn = nil
+    a.markDown()
+  else:
+    let c = await a.openConnection()
+    if not c.ok:
+      return
+    let conn = c.conn
+    try:
+      await sendSinkFrame(conn, verb, body)
+      let reply = await readSinkFrame(conn)
+      if reply.ok and reply.verb == vRefused and reply.body.len == 8:
+        var p = 0
+        result = (poRefused, getU64(reply.body, p))
+      elif reply.ok:
+        result = (poAnswered, 0'u64)
+      else:
+        a.lastError = "the sink closed without saying it refused verb " & $verb
+    except CatchableError as e:
+      a.lastError = "probe of verb " & $verb & ": " & e.msg
+    try: await tls.close(conn) except CatchableError: discard
+
 proc sendRawVerbForTesting*(a: EvidenceAppender; verb: uint8;
                             body: seq[byte]): Future[bool] {.async.} =
-  ## Test seam for the write-only property: sends an arbitrary verb (a
-  ## "read", "list" or "delete" attempt) with the worker's real credential
-  ## and reports whether the sink answered anything. The sink's contract is
-  ## that it never does.
-  if a.conn.isNil:
-    if not await a.connect():
-      return false
-  try:
-    await sendSinkFrame(a.conn, verb, body)
-    let reply = await readSinkFrame(a.conn)
-    result = reply.ok
-  except CatchableError:
-    result = false
-  try: await tls.close(a.conn) except CatchableError: discard
-  a.conn = nil
-  a.markDown()
+  ## Whether the sink ANSWERED ``verb`` with anything but a refusal (the
+  ## write-only property's test seam).
+  result = (await a.probeVerb(verb, body)).outcome == poAnswered
 
 proc probeForbiddenOperation*(a: EvidenceAppender;
-                              op: ForbiddenOperation): Future[bool]
+                              op: ForbiddenOperation): Future[ProbeOutcome]
                               {.async.} =
-  ## Attempts ``op`` with the appender's real credential and reports
-  ## whether the sink ANSWERED it (true: the credential can do more than
-  ## append, which EVID-2 forbids). The sink's contract is to answer
-  ## nothing, record the attempt and close the connection. Used by a host's
-  ## own self-test of its credential (the ReproOS add-on's
+  ## Attempts ``op`` with the appender's real credential: ``poAnswered``
+  ## (the credential can do more than append, which EVID-2 forbids),
+  ## ``poRefused`` (the sink recorded the refusal and said so) or
+  ## ``poUndelivered`` (the attempt tells nothing). Used by a host's own
+  ## self-test of its credential (the ReproOS add-on's
   ## ``evidence-credential-check``) and by the tests.
-  result = await a.sendRawVerbForTesting(verbOf(op), forbiddenOperationBody(op))
+  result = (await a.probeVerb(verbOf(op), forbiddenOperationBody(op))).outcome
+  when SinkMutation == "probe-undelivered-is-refused":
+    # FALSIFYING BUILD: no reply reads as refused, as before round 3.
+    if result == poUndelivered: result = poRefused

@@ -696,8 +696,9 @@ const
     ## when no git crate in the closure inherits from a workspace.
 
   CargoVendorSubdir* = ".repro/cargo-vendor"
-    ## Scratch root for the unpacked tree and the download cache. Under
-    ## `.repro/` so `repro clean` takes it with everything else.
+    ## Scratch root for the unpacked tree and the download cache, under the
+    ## gitignored `.repro/` tree. Only the vendor stamp is a declared
+    ## output, so `repro clean` removes the stamp and keeps the download.
 
 proc cargoVendorManifestPath*(projectRoot: string): string =
   projectRoot / CargoVendorManifestName

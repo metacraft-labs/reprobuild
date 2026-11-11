@@ -35,13 +35,15 @@
 ## ``<state dir>/addon/reassert-report``. In ``--boot`` mode nothing here
 ## raises and the exit status is 0, whatever happened.
 
-import std/[os, strutils, times]
+import std/[os, posix, strutils, times]
 
 import repro_core/file_lock
 import repro_core/host_apply_lock
 
 import repro_infra
 import repro_local_store/store
+import repro_peer_cache/auth as peerAuth
+from repro_deploy_agent/secrets import ensureRecipientKeyFile
 
 import ./addon_apply
 import ./collision
@@ -52,6 +54,7 @@ import ./evidence
 import ./ledger
 import ./mutations
 import ./pending_plan
+import ./preflight
 import ./static_tree
 import ./store_root
 import ./seams
@@ -139,7 +142,7 @@ proc finishCommittedSwitch(stateDir: string; m: PendingMarker): seq[string] =
   let lp = generationLedgerPath(stateDir, current)
   if fileExists(lp):
     for e in readLedger(lp).entries:
-      if e.class == lcStorePrefix:
+      if e.class == lcStorePrefix and e.sha256.len > 0:
         prefixIds.add(parsePrefixIdHex(e.sha256))
   promotePendingRoot(current, prefixIds)
   var previous = ""
@@ -443,6 +446,27 @@ proc renderReassert*(r: ReassertReport): string =
   for f in r.findings: result.add("  " & f & "\n")
   for n in r.notes: result.add("  note: " & n & "\n")
 
+const QuarantinedFinding = " is quarantined "
+  ## How ``checkCurrent`` words a store object in use that verification
+  ## quarantined.
+
+proc storeFindings*(findings: openArray[string]):
+    seq[tuple[trigger: string; found: seq[string]]] =
+  ## The re-assert's store findings grouped under the DET-AO-5 trigger that
+  ## names what happened (spec §10.4): a quarantined object -- present, its
+  ## bytes other than at realisation -- is ``store-digest-mismatch``; an
+  ## absent object or store is ``store-object-missing``. Empty groups are
+  ## left out.
+  var missing, altered: seq[string]
+  for f in findings:
+    if not ("store object" in f or ("the store " & StoreRoot) in f): continue
+    when mutated("reassert-store-trigger-missing"):
+      missing.add(f)    # FALSIFYING BUILD: session 1's single trigger
+    else:
+      if QuarantinedFinding in f: altered.add(f) else: missing.add(f)
+  if missing.len > 0: result.add(("store-object-missing", missing))
+  if altered.len > 0: result.add(("store-digest-mismatch", altered))
+
 proc recordReassertEvidence*(r: ReassertReport; stateDir: string;
                              atBoot: bool; site = defaultSite(DefaultStateDir);
                              bootIdPath = "/proc/sys/kernel/random/boot_id") =
@@ -464,17 +488,58 @@ proc recordReassertEvidence*(r: ReassertReport; stateDir: string;
                  else: ecAudit),
       trigger: r.status, kind: "reassert-" & r.status, fields: fields,
       attest: true), site)
-    var missing: seq[string]
-    for f in r.findings:
-      if "store object" in f or ("the store " & StoreRoot) in f: missing.add(f)
-    if missing.len > 0:
+    for (trigger, found) in storeFindings(r.findings):
       discard recordEvidence(EvidenceEvent(detector: edStore,
-        category: ecDetection, trigger: "store-object-missing",
-        fields: @[("bootId", boot), ("message", missing.join("; "))],
+        category: ecDetection, trigger: trigger,
+        fields: @[("bootId", boot), ("message", found.join("; "))],
         attest: true), site)
   except CatchableError as e:
     stderr.write("repro-addon: cannot write the re-assert's evidence " &
       "record: " & e.msg & "\n")
+
+var lateKeyNoFollow {.importc: "O_NOFOLLOW", header: "<fcntl.h>".}: cint
+
+proc createLateRecipientKey*(stateDir: string): seq[string] =
+  ## A host bootstrapped with ``--defer-recipient-key`` (an image's assembly
+  ## boot, spec §6.5.2) creates its own secrets recipient key here, at its
+  ## first real boot, so no image ever carries one: generated on the host,
+  ## ``0400`` from the start and never replacing a key
+  ## (``ensureRecipientKeyFile``), its public half beside it. Not during
+  ## the assembly boot itself (``ImageAssemblyDir`` present). Every later
+  ## boot reports the public half again. Returns the notes for the
+  ## report; raises on a failure, which the caller reports.
+  let ledgerPath = ledgerCopyPath(stateDir)
+  if not fileExists(ledgerPath): return
+  var deferred = false
+  for e in readLedger(ledgerPath).entries:
+    if e.class == lcLateKey and e.path == RecipientKeyPath: deferred = true
+  if not deferred: return
+  if dirExists(ImageAssemblyDir):
+    return @["recipient key: deferred; this is an image's assembly boot, " &
+             "which creates none"]
+  if fileExists(RecipientKeyPath) and fileExists(RecipientPubPath):
+    # Reported at every boot, not only the first: an operator reads the
+    # public half from this unit's journal, which a distribution may keep
+    # in RAM only (Raspberry Pi OS), so the first boot's line can be gone.
+    return @["recipient key: this host's own; public half " &
+             readFile(RecipientPubPath).strip()]
+  let key = ensureRecipientKeyFile(RecipientKeyPath)
+  let pubHex = peerAuth.publicKeyHex(key.publicKey)
+  if not fileExists(RecipientPubPath):
+    let fd = posix.open(RecipientPubPath.cstring,
+                        O_WRONLY or O_CREAT or O_EXCL or lateKeyNoFollow, Mode(0o444))
+    if fd < 0: raiseOSError(osLastError(), RecipientPubPath)
+    let line = pubHex & "\n"
+    if posix.write(fd, unsafeAddr line[0], line.len) != line.len:
+      discard posix.close(fd)
+      raiseOSError(osLastError(), RecipientPubPath)
+    discard fsync(fd)
+    discard posix.close(fd)
+  result.add("recipient key: created this host's own; public half " & pubHex)
+  discard recordEvidence(EvidenceEvent(detector: edBootstrap,
+    category: ecAudit, trigger: "recipient-key", kind: "recipient-key",
+    fields: @[("recipientKey", pubHex), ("path", RecipientKeyPath)]),
+    defaultSite(stateDir))
 
 proc runAddonReassert*(stateDir = DefaultStateDir; atBoot = false;
                        driver: CollisionDriver = nil): ReassertReport =
@@ -505,6 +570,13 @@ proc runAddonReassert*(stateDir = DefaultStateDir; atBoot = false;
     checkCurrent(stateDir, result)
   except CatchableError as e:
     result.findings.add("degraded: " & e.msg)
+    result.status = "degraded"
+  # A deferred recipient key (spec §6.5.2): the host's own, created once.
+  try:
+    result.notes.add(createLateRecipientKey(stateDir))
+  except CatchableError as e:
+    result.findings.add("degraded: cannot create the deferred recipient " &
+      "key: " & e.msg)
     result.status = "degraded"
   # --- Step 3 (milestone A7): secrets. BEGIN A7 hook -------------------
   let sec = reassertSecrets(stateDir, defaultSecretsLayout())

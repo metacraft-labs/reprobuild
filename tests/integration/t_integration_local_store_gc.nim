@@ -185,8 +185,14 @@ suite "integration_local_store_gc":
       setLastModificationTime(real.absolutePath,
         getTime() - initDuration(days = 30))
 
-    let retained = execCmdEx(shellCommand([reproBin, "store", "gc",
-      "--store-root=" & storeRoot]))
+    # `repro store gc` also sweeps the recipe-compile directories of the
+    # action cache it resolves. Inherited from the suite runner, that is the
+    # suite's shared cache: the sweep then decodes every record of the run
+    # (hours), and the zero-grace pass below could move directories other
+    # cases still use into this store. Give the CLI a cache of its own.
+    let gcEnv = "REPROBUILD_ACTION_CACHE_ROOT=" & root / "action-cache"
+    let retained = execCmdEx(shellCommand(["env", gcEnv, reproBin, "store",
+      "gc", "--store-root=" & storeRoot]))
     check retained.exitCode == 0
     check retained.output.contains("quarantined: 1")
     check retained.output.contains("reclaimed: 0")
@@ -201,7 +207,7 @@ suite "integration_local_store_gc":
       require pending.len == 1
       check readFile(pending[0] / "bin" / "tool") == "delta-body\n"
 
-    let res = execCmdEx(shellCommand([reproBin, "store", "gc",
+    let res = execCmdEx(shellCommand(["env", gcEnv, reproBin, "store", "gc",
       "--store-root=" & storeRoot, "--grace-seconds=0"]))
     check res.exitCode == 0
     check res.output.contains("quarantined: 0")

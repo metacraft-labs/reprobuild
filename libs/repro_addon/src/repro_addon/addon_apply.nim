@@ -62,7 +62,9 @@
 
 import std/[algorithm, json, monotimes, options, os, sets, strutils, tables,
             times]
-from std/posix import Statvfs, statvfs, Stat, lstat
+from std/posix import Statvfs, statvfs, Stat, lstat, stat, rmdir, S_ISLNK, ENOENT, O_WRONLY, O_CREAT,
+  O_TRUNC, O_RDONLY, O_CLOEXEC, fsync
+import std/posix as posix
 import std/uri
 import repro_binary_cache_client/http_pool
 
@@ -73,11 +75,18 @@ import repro_elevation/posix_system_driver
 import repro_infra
 import repro_infra/addon_diagnostics
 import repro_infra/planner
+import repro_infra/start_holds
+from repro_infra/service_floor import floorWritablePlaces, serviceDirectives,
+  StartingDependencyKeys, BaseReachKeys, normalisedPath,
+  PrivilegedGroups
+import repro_infra/service_floor as serviceFloor
 from repro_profile import ProfileBuildAction
 import repro_local_store/store
 
 import ./agent_record
 import ./collision
+import ./own_profile
+import ./contain_marker
 import ./tmpfiles_scope
 import ./addon_secrets
 import ./base_identity
@@ -93,6 +102,7 @@ import ./mutations
 import ./pending_plan
 import ./seams
 import ./static_tree
+import ./store_custody
 import ./store_root
 import ./switch
 import ./evidence
@@ -420,36 +430,12 @@ proc readHostname*(): string =
   try: readFile("/proc/sys/kernel/hostname").strip()
   except IOError, OSError: "localhost"
 
-proc storeSignature*(dir: string): string =
-  ## A cheap signature of the store object at ``dir``: every entry below it
-  ## (links not followed) with its type, permissions, size, inode,
-  ## modification time and change time, in path order, hashed. No file
-  ## content is read. Any write, truncation, rename, mode or owner change
-  ## moves the change time (stat(2) ``st_ctime``), which no unprivileged
-  ## call sets and root sets only by moving the system clock; an object
-  ## replaced by another gets a new inode. Used between the switch's
-  ## realise step, which verified the object's content, and its start.
-  var lines: seq[string]
-  proc one(rel, path: string) =
-    let i = getFileInfo(path, followSymlink = false)
-    lines.add(rel & "\t" & $i.kind & "\t" & $i.permissions & "\t" & $i.size &
-      "\t" & $i.id.device & ":" & $i.id.file & "\t" &
-      $i.lastWriteTime.toUnix & "." & $i.lastWriteTime.nanosecond & "\t" &
-      $i.creationTime.toUnix & "." & $i.creationTime.nanosecond)
-  one(".", dir)
-  for rel in walkDirRec(dir, yieldFilter = {pcFile, pcDir, pcLinkToFile,
-                                             pcLinkToDir},
-                        followFilter = {pcDir}, relative = true):
-    one(rel, dir / rel)
-  lines.sort()
-  sha256Hex(lines.join("\n"))
-
-proc storeChangedSince*(realised: openArray[tuple[path, signature: string]]):
-    seq[string] =
+proc storeChangedSince*(realised: openArray[tuple[path, signature: string]];
+                        quarantinePath = StoreQuarantinePath): seq[string] =
   ## The store objects whose ``storeSignature`` differs from the one
   ## recorded, or that are gone -- or that store verification quarantined
   ## (spec §13 decision 46: no switch uses an altered path again).
-  let quarantined = readStoreQuarantine()
+  let quarantined = readStoreQuarantine(quarantinePath)
   for (path, sig) in realised:
     let now = if dirExists(path): storeSignature(path) else: "(gone)"
     if now != sig: result.add(path)
@@ -549,6 +535,107 @@ proc parseStoredUserProfile*(text: string; stateDir = ""): SystemProfile =
         r.suFloorVersion = unrecordedFloorVersion(r,
           knownUnitDigests(stateDir, unitPath(r.suName)))
 
+proc effectiveFloor*(r: SystemResource): string =
+  ## The floor a unit renders with: "" for none (no ``hardening``, or the
+  ## whole floor waived), else its floor version (``FloorVersion`` when the
+  ## unit names none: a new profile's).
+  if r.kind != srkSystemdSystemUnit or
+      r.suHardening != ServiceFloorHardening:
+    return ""
+  for e in r.suFloorExceptions:
+    if e.strip().startsWith(WholeFloorException & ":"): return ""
+  if r.suFloorVersion.len > 0: r.suFloorVersion else: FloorVersion
+
+proc floorAccountRefusal*(p: SystemProfile; r: SystemResource): string =
+  ## Why the account the floored unit ``r`` of ``p`` runs as breaks the
+  ## floor, as far as the profile alone says (A9 review round 6, finding
+  ## 1), or "". The values are the last ``User=``, ``Group=`` and
+  ## ``DynamicUser=`` and the accumulated ``SupplementaryGroups=`` of the
+  ## unit and the profile's drop-ins onto it, resolved the way systemd
+  ## resolves them (``resolveServiceAccount``): a specifier that names root
+  ## (``%U``, ``%u``, ``%G``, ``%g``) or an instance whose name is root is
+  ## root; a specifier that does not resolve (``%i`` in a template's own
+  ## file, which any instance may start) is refused, since it may be root.
+  ## Exceptions lift the spelling rules (``service_floor``), never these. An
+  ## account neither root nor the profile's is left to the effective-unit
+  ## check, which reads the host's databases. The parse-time lookup is the
+  ## profile's alone (``profileAccountLookup``), so a profile parses the same
+  ## on every host.
+  when mutated("floor-static-r3-disabled") or mutated("floor-unchecked"):
+    return ""
+  # The unit as the floor renders it: a unit without an account gets the
+  # floor's DynamicUser=yes.
+  var files = @[renderedSystemUnitContent(r)]
+  for d in p.resources:
+    if d.kind == srkSystemdSystemDropIn and dropInApplies(d.diUnit, r.suName):
+      files.add(d.diContent)
+    elif d.kind == srkSystemdSystemUnit and d.suCollision == "dropIn" and
+        dropInApplies(d.suName, r.suName):
+      files.add(d.suContent)
+  var user, group, dynamic = ""
+  var supplementary: seq[string]
+  for f in files:
+    for (k, v) in serviceDirectives(f):
+      case k
+      of "User": user = v.strip()
+      of "Group": group = v.strip()
+      of "DynamicUser": dynamic = v.strip().toLowerAscii()
+      of "SupplementaryGroups":
+        if v.strip().len == 0: supplementary.setLen(0)
+        else: supplementary.add(v.splitWhitespace())
+      else: discard
+  for (k, v) in [("User", user), ("Group", group)]:
+    var ok: bool
+    discard expandSpecifiers(v, r.suName, ok)
+    if not ok:
+      return k & "=" & v & " names a specifier systemd cannot resolve " &
+        "for " & r.suName & " (in a template's own file an instance " &
+        "specifier names whichever instance is started), so the service " &
+        "may run as root; a floored unit may not"
+  for w in supplementary:
+    var ok: bool
+    discard expandSpecifiers(w, r.suName, ok)
+    if not ok:
+      return "SupplementaryGroups=" & w & " names a specifier systemd " &
+        "cannot resolve for " & r.suName & "; a floored unit may not"
+  let a = resolveServiceAccount(user, group, supplementary.join(" "),
+    dynamic in ["yes", "true", "1", "on"], r.suName,
+    profileAccountLookup(p))
+  if a.uid == 0:
+    return "User=" & user & " runs the service as root (uid 0, the " &
+      "account systemd resolves it to); a floored unit may not (only " &
+      "\"serviceFloor: <why>\" allows it)"
+  if 0 in a.allGids:
+    return "the service runs with gid 0 (Group=" & group & "); a floored " &
+      "unit may not (only \"serviceFloor: <why>\" allows it)"
+  var names = @[a.group]
+  for w in supplementary:
+    var ok: bool
+    names.add(expandSpecifiers(w, r.suName, ok))
+  for n in names:
+    if n in PrivilegedGroups and not (n == a.group and a.dynamicGroup):
+      return "the service runs in the privileged group " & n & "; a " &
+        "floored unit may not (only \"serviceFloor: <why>\" allows it)"
+  # The memberships the profile itself gives the account (A9 review round
+  # 7, finding 6): `passwd.user` `groups` and `passwd.group` `members`.
+  # The resolver knows their gids only for groups the profile creates, so
+  # they are judged by name here; the effective half judges them by gid.
+  when not mutated("profile-memberships-ignored"):
+    if not a.dynamicUser:
+      for o in p.resources:
+        var g = ""
+        if o.kind == srkPasswdUser and o.puName == a.user:
+          for gn in o.puGroups:
+            if gn in PrivilegedGroups or gn == "root": g = gn
+        elif o.kind == srkPasswdGroup and a.user in o.pgMembers and
+            (o.pgName in PrivilegedGroups or o.pgName == "root"):
+          g = o.pgName
+        if g.len > 0:
+          return "the profile puts the service's account " & a.user &
+            " in the privileged group " & g & " (" & o.address & "); a " &
+            "floored unit may not (only \"serviceFloor: <why>\" allows it)"
+  ""
+
 proc parseAddOnUserProfile*(text: string): SystemProfile =
   ## A user profile as the add-on realises it: parsed with the add-on's
   ## defaults (``parseSystemProfile(..., addOnDefaults = true)``), so every
@@ -570,17 +657,13 @@ proc parseAddOnUserProfile*(text: string): SystemProfile =
         "' names floorVersion " & r.suFloorVersion & ": a new profile " &
         "renders with today's floor (version " & FloorVersion & "); only " &
         "a stored generation keeps an older one")
-
-proc effectiveFloor*(r: SystemResource): string =
-  ## The floor a unit renders with: "" for none (no ``hardening``, or the
-  ## whole floor waived), else its floor version (``FloorVersion`` when the
-  ## unit names none: a new profile's).
-  if r.kind != srkSystemdSystemUnit or
-      r.suHardening != ServiceFloorHardening:
-    return ""
-  for e in r.suFloorExceptions:
-    if e.strip().startsWith(WholeFloorException & ":"): return ""
-  if r.suFloorVersion.len > 0: r.suFloorVersion else: FloorVersion
+  for r in result.resources:
+    if r.kind == srkSystemdSystemUnit and r.suCollision != "dropIn" and
+        effectiveFloor(r).len > 0:
+      let why = floorAccountRefusal(result, r)
+      if why.len > 0:
+        raiseSystemProfileInvalid("systemd.systemUnit '" & r.suName &
+          "': " & why)
 
 proc exceptionHeads(r: SystemResource): HashSet[string] =
   ## A unit's exceptions by what they name (``Setting`` or
@@ -1258,9 +1341,9 @@ proc floorTemplateOf(name: string): string =
 
 proc startHoldPath*(unit: string): string =
   ## Where the switch's start hold for ``unit`` (a template's, for an
-  ## instance: one hold covers every instance) is written.
-  let t = floorTemplateOf(unit)
-  "/run/systemd/system" / ((if t.len > 0: t else: unit) & ".d") / StartHoldName
+  ## instance: one hold covers every instance) is written
+  ## (``start_holds.holdPath``, shared with the full apply).
+  holdPath(unit, StartHoldName)
 
 proc flooredUnitNames(resources: openArray[SystemResource]): seq[string] =
   for r in resources:
@@ -1268,23 +1351,31 @@ proc flooredUnitNames(resources: openArray[SystemResource]): seq[string] =
         effectiveFloor(r).len > 0:
       result.add(r.suName)
 
-proc writeStartHolds*(resources: openArray[SystemResource]): seq[string] =
-  ## A start hold for every floored unit of the generation, written before
-  ## step 6's reload (spec §10.1, A9 review round 4, finding 7). Returns
-  ## the holds written.
+proc writeStartHolds*(resources: openArray[SystemResource];
+                      extra: openArray[string] = []): seq[string] =
+  ## A start hold for every floored unit of the generation, and for each
+  ## unit of ``extra`` (the services the carried-state cross-check judges;
+  ## A13 review round 6, finding 6), written before step 6's reload (spec
+  ## §10.1, A9 review round 4, finding 7). Returns the holds written.
   when mutated("floor-start-unheld"):
     return
-  for u in flooredUnitNames(resources):
-    let p = startHoldPath(u)
-    createDir(parentDir(p))
-    writeFile(p, StartHoldText)
-    result.add(p)
+  var units = flooredUnitNames(resources)
+  for u in extra:
+    if u notin units: units.add(u)
+  writeHolds(units, StartHoldName, StartHoldText)
 
 proc removeStartHolds*(holds: openArray[string]) =
-  for p in holds:
-    if fileExists(p): removeFile(p)
-    try: removeDir(parentDir(p), checkDir = false)
-    except OSError: discard   # another drop-in is there: kept
+  ## Remove each hold file, and its directory only when the hold was the
+  ## last thing in it (``start_holds.removeHolds``; A9 review round 5,
+  ## finding 5).
+  removeHolds(holds)
+
+proc clearStaleStartHolds*(root = "/run/systemd/system"): seq[string] =
+  ## Every start hold under ``root`` that an earlier switch left behind --
+  ## one whose check refused, before a revert to a generation with no
+  ## floored unit, or a switch that died -- removed (A9 review round 5,
+  ## finding 5). Returns the holds removed.
+  clearStaleHolds(StartHoldName, root)
 
 proc unitSearchPaths*(): seq[string] =
   ## systemd's unit search path (``systemd-analyze unit-paths``): every
@@ -1340,11 +1431,402 @@ proc foreignDropInsFor*(units: openArray[string]; own: HashSet[string];
         if f.endsWith(".conf") and f notin own:
           result.add(f)
 
-proc readableByAll(path: string): bool =
-  try: fpOthersRead in getFilePermissions(path)
-  except OSError: true    # missing: systemd reads nothing (or fails the unit)
+proc unitStartsReported*(unit: string; own: HashSet[string];
+                         cache: var Table[string, seq[string]]): seq[string] =
+  ## What starting ``unit`` starts, as systemd reports it: for a unit of the
+  ## generation (``own``, a template's instances included) every starting
+  ## dependency and what it triggers; for a unit the base defines what it
+  ## pulls in (``BaseReachKeys``), not its own ``OnFailure=`` (A9 review
+  ## round 7, finding 4). Cached per check. A unit systemd cannot show
+  ## starts nothing it could report.
+  if unit in cache: return cache[unit]
+  let mine = declaredByProfile(unit, own)
+  var keys = if mine: @StartingDependencyKeys & @["Triggers"] else: @BaseReachKeys
+  try:
+    let r = runSystemctl(@["show", "--no-pager", "-p", keys.join(","), "--", unit])
+    if r.exitCode == 0:
+      for k, v in parseShow(r.output):
+        for t in v.splitWhitespace(): result.add(t)
+  except CatchableError:
+    discard
+  cache[unit] = result
 
-proc effectiveFloorCheck*(resources: openArray[SystemResource]): seq[string] =
+proc createdDirsPath*(stateDir: string): string =
+  ## The directories the add-on recorded as created for a floored unit by
+  ## its own start (§13 decisions 57, 67, 68, 71 and 76): one
+  ## ``<path>\t<unit>\t<st_dev>\t<st_ino>\t<birth ns>\t<InvocationID>``
+  ## line each.
+  addonDir(stateDir) / "floor-created-dirs"
+
+proc recordKeptMarker*(stateDir, generationId: string): string =
+  ## The marker an engine that keeps ``floor-created-dirs`` writes into
+  ## every generation it sets (§13 decision 72): a committed generation
+  ## without it was written by an older engine.
+  generationDir(stateDir, generationId) / "floor-record-kept"
+
+proc readCreatedDirs*(stateDir: string): Table[string, CreatedDir] =
+  ## ``createdDirsPath``. An unreadable file, or a line without the full
+  ## identity (round 9's and round 10's shorter forms), records nothing:
+  ## every existing tree is then refused until the unit's next start
+  ## records it (fail closed).
+  try:
+    for l in readFile(createdDirsPath(stateDir)).splitLines():
+      let f = l.split('\t')
+      if f.len == 6 and f[0].startsWith("/") and f[1].len > 0:
+        try:
+          result[f[0]] = CreatedDir(unit: f[1], dev: parseBiggestUInt(f[2]),
+                                    ino: parseBiggestUInt(f[3]),
+                                    btime: parseBiggestInt(f[4]), invocation: f[5])
+        except ValueError: discard
+  except IOError, OSError: discard
+
+proc writeDurably(path, text: string) =
+  ## ``text`` at ``path``, atomically and durably: a temporary file in the
+  ## same directory, ``fsync``-ed, renamed over ``path``, then the
+  ## directory ``fsync``-ed, so a crash leaves the old record or the new one
+  ## (rename(2), fsync(2)).
+  let tmp = path & ".tmp"
+  let fd = posix.open(tmp.cstring, O_WRONLY or O_CREAT or O_TRUNC or O_CLOEXEC, 0o600)
+  if fd < 0: raiseOSError(osLastError(), tmp)
+  try:
+    var off = 0
+    while off < text.len:
+      let n = posix.write(fd, unsafeAddr text[off], text.len - off)
+      if n < 0: raiseOSError(osLastError(), tmp)
+      off += n
+    if fsync(fd) != 0: raiseOSError(osLastError(), tmp)
+  finally:
+    discard posix.close(fd)
+  moveFile(tmp, path)
+  let dfd = posix.open(parentDir(path).cstring, O_RDONLY or O_CLOEXEC)
+  if dfd >= 0:
+    discard fsync(dfd)
+    discard posix.close(dfd)
+
+proc writeCreatedDirs(stateDir: string; t: Table[string, CreatedDir]) =
+  var text = ""
+  for k, v in t:
+    text.add(k & "\t" & v.unit & "\t" & $v.dev & "\t" & $v.ino & "\t" &
+             $v.btime & "\t" & v.invocation & "\n")
+  writeDurably(createdDirsPath(stateDir), text)
+
+proc entryOf(unit: string; now: PathIdentity; invocation: string): CreatedDir =
+  CreatedDir(unit: unit, dev: now.dev, ino: now.ino, btime: now.btime,
+             invocation: invocation)
+
+proc recordCreatedDirs*(stateDir, unit: string;
+                        pending: openArray[tuple[path, unit: string]];
+                        identityOf: proc (p: string): PathIdentity = identityOfPath;
+                        invocation = "") =
+  ## Called right after ``unit``'s own start (§13 decision 68): record, for
+  ## it, each of its directories the check found absent that exists now, so
+  ## its start created it (systemd.exec(5)), with the identity it has (§13
+  ## decision 76: device, inode and birth time; a path whose file system
+  ## reports no birth time is not recorded, so it stays refused). Only
+  ## ``unit``'s own pending paths: another unit's start, later in the same
+  ## step, records its own. Every entry already there is kept only while its
+  ## path still has the recorded identity; one whose directory is gone (a
+  ## ``RuntimeDirectory=`` at stop, ``/run`` at reboot) or was replaced is
+  ## dropped, so a later tree at that path is judged afresh. Written
+  ## atomically and durably (``writeDurably``).
+  when mutated("created-dirs-ignored"): return
+  let before = readCreatedDirs(stateDir)
+  var t = initTable[string, CreatedDir]()
+  for path, c in before:
+    let now = identityOf(path)
+    when mutated("created-dirs-by-path"):
+      t[path] = c
+    else:
+      if now.exists and now.btime != 0 and now.dev == c.dev and now.ino == c.ino and
+          now.btime == c.btime:
+        t[path] = c
+  for (path, u) in pending:
+    when not mutated("created-dirs-per-step"):
+      if u != unit: continue
+    if path in t: continue
+    let now = identityOf(path)
+    if now.exists and now.btime != 0:
+      t[path] = entryOf(u, now, invocation)
+  if t == before: return
+  writeCreatedDirs(stateDir, t)
+
+proc recordStartedSince*(stateDir: string;
+                         pending: openArray[tuple[path, unit: string]];
+                         sinceNs: int64;
+                         invocationOf: proc (u: string): tuple[id: string; start: int64];
+                         identityOf: proc (p: string): PathIdentity = identityOfPath;
+                         resolution = coarseResolutionNs()) =
+  ## After the start step: each pending directory of a unit the switch did
+  ## not start by name, but which started during it (a template instance a
+  ## ``Wants=`` pulled in, an instance its socket started), is recorded for
+  ## that unit when systemd's state shows the unit's own start made it:
+  ## the unit's current invocation began at or after ``sinceNs`` (this
+  ## switch's start step), and the directory was born at or after that
+  ## invocation began (§13 decisions 68 and 77; A9 review round 11, finding
+  ## 4). Anything else stays unrecorded, so it is refused at the next apply.
+  when mutated("dependency-starts-unrecorded"): return
+  when mutated("created-dirs-ignored"): return
+  var t = readCreatedDirs(stateDir)
+  var changed = false
+  for (path, u) in pending:
+    let now = identityOf(path)
+    if not now.exists or now.btime == 0: continue
+    if path in t:
+      let c = t[path]
+      # Kept while it is still that directory; a stale entry (the unit's
+      # restart made it again) is replaced by the same evidence.
+      if c.dev == now.dev and c.ino == now.ino and c.btime == now.btime: continue
+    let inv = invocationOf(u)
+    if inv.id.len == 0 or inv.start <= 0 or inv.start < sinceNs: continue
+    # The birth time is the coarse clock's (``bornBefore``): a directory
+    # made within a tick of the invocation's start can read as earlier.
+    if bornBefore(now.btime, inv.start, resolution): continue
+    t[path] = entryOf(u, now, inv.id)
+    changed = true
+  if changed: writeCreatedDirs(stateDir, t)
+
+proc acceptRecreated*(stateDir, path, unit, invocation: string;
+                      identityOf: proc (p: string): PathIdentity = identityOfPath) =
+  ## Record ``path`` again for ``unit`` under the identity it has now and
+  ## the invocation systemd made it for, once the effective check accepted
+  ## it by §13 decision 71. Raises when it cannot be written, so the
+  ## acceptance is not made.
+  var t = readCreatedDirs(stateDir)
+  let now = identityOf(path)
+  if not now.exists or now.btime == 0:
+    raise newException(IOError, path & ": no identity to record")
+  t[path] = entryOf(unit, now, invocation)
+  writeCreatedDirs(stateDir, t)
+
+proc createdDirsAbsent*(stateDir: string): bool =
+  ## The record file does not exist at all (``lstat`` says ENOENT). A file
+  ## that exists but cannot be read, or holds nothing valid, is present: it
+  ## fails closed in the effective check (every existing tree refused) and
+  ## never counts as absent, so it cannot start the migration again (§13
+  ## decision 72).
+  when mutated("corrupt-record-as-absent"):
+    # Falsifying build: an unreadable or empty record taken as absent.
+    return not fileExists(createdDirsPath(stateDir)) or
+      readCreatedDirs(stateDir).len == 0
+  var st: Stat
+  if lstat(createdDirsPath(stateDir).cstring, st) == 0: return false
+  osLastError().int32 == ENOENT
+
+proc installedDirectories*(unitFile: string; dropIns: openArray[string]): seq[string] =
+  ## The directories a unit the add-on installed declares, read from the
+  ## files the add-on wrote for it (its unit file, then its own drop-ins in
+  ## order), not from systemd's view, which a drop-in the add-on did not
+  ## write could add to (A9 review round 11, finding 5). Each
+  ## ``*Directory=`` value under its root; an empty assignment resets.
+  var vals = initTable[string, seq[string]]()
+  for f in @[unitFile] & @dropIns:
+    var text = ""
+    try: text = readFile(f)
+    except IOError, OSError: continue
+    for (k, v) in serviceDirectives(text):
+      for (dk, _) in DirectoryRoots:
+        if k != dk: continue
+        if v.strip().len == 0: vals[k] = @[]
+        else: vals.mgetOrPut(k, @[]).add(v.splitWhitespace())
+  for (k, root) in DirectoryRoots:
+    for v in vals.getOrDefault(k):
+      let d = v.split(':')[0]
+      if d.len > 0 and '/' notin d: result.add(normalisedPath(root & "/" & d))
+
+proc migrateCreatedDirs*(stateDir, committed: string; previous: Ledger;
+                         invocationOf: proc (unit: string): string;
+                         audit: proc (path: string; c: CreatedDir): bool;
+                         identityOf: proc (p: string): PathIdentity = identityOfPath;
+                         showOf: proc (unit: string): ShowProps = nil;
+                         alsoUnits: openArray[string] = []):
+                         seq[tuple[path: string; entry: CreatedDir]] =
+  ## §13 decision 72, the one-time migration of a host whose committed
+  ## generation an engine without the record wrote. It runs only when the
+  ## record file is absent (``createdDirsAbsent``) and the committed
+  ## generation carries no ``recordKeptMarker``, which every engine that
+  ## keeps the record writes into each generation it sets. It records, with
+  ## its identity (device, inode, birth time) and the unit's invocation,
+  ## each existing directory exactly declared by a floored unit the
+  ## committed generation's ledger installed (``lcUnit``, its unit file
+  ## carrying the floor's block), as that generation's own files declare it
+  ## (``installedDirectories``, never systemd's view), whose name is no
+  ## base tree and whose directory passes the shape rule. Each entry is
+  ## audit-logged first (``audit``); one that cannot be logged is not
+  ## recorded, so it stays refused. Then it writes the record file,
+  ## atomically and durably, even empty, so it never runs again; with no
+  ## committed generation, or one an engine with the record wrote, it only
+  ## writes the empty file. After it, only provenance counts (decision 71).
+  ## ``showOf`` serves only the falsifying build ``migration-reads-systemd``.
+  when not mutated("migration-reruns"):
+    if not createdDirsAbsent(stateDir): return
+  var t = initTable[string, CreatedDir]()
+  var olderEngine = committed.len > 0 and
+    not fileExists(recordKeptMarker(stateDir, committed))
+  when mutated("migration-ignores-engine"):
+    olderEngine = committed.len > 0
+  if olderEngine:
+    var units: seq[tuple[name, file: string]]
+    var dropIns = initTable[string, seq[string]]()
+    for e in previous.entries:
+      if e.class == lcUnit:
+        let name = if e.unit.len > 0: e.unit else: extractFilename(e.path)
+        units.add((name, e.path))
+      elif e.class == lcDropIn and e.unit.len > 0:
+        dropIns.mgetOrPut(e.unit, @[]).add(e.path)
+    when mutated("migration-any-unit"):
+      for u in alsoUnits: units.add((u, ""))
+    for (unit, file) in units:
+      if '@' in unit: continue                  # a template: no one instance
+      if baseTreeUnitRefusal(unit).len > 0: continue
+      when not mutated("migration-any-unit"):
+        var text = ""
+        try: text = readFile(file)
+        except IOError, OSError: continue
+        if FloorMarker notin text: continue     # not a floored unit
+      var candidates: seq[string]
+      when mutated("migration-any-unit"):
+        # Falsifying build: a unit the committed generation did not install
+        # (no file of its own) taken from systemd's view.
+        if file.len == 0 and showOf != nil:
+          let sh = showOf(unit)
+          for (k, root) in DirectoryRoots:
+            for v in sh.getOrDefault(k).splitWhitespace():
+              let d = v.split(':')[0]
+              if d.len > 0 and '/' notin d: candidates.add(normalisedPath(root & "/" & d))
+      when mutated("migration-any-path"):
+        if showOf != nil:
+          for fp in firstComponentPaths(showOf(unit)): candidates.add(fp.path)
+      elif mutated("migration-reads-systemd"):
+        # Falsifying build: round 10's reading, systemd's view (foreign
+        # drop-ins included).
+        if showOf != nil:
+          let sh = showOf(unit)
+          for (k, root) in DirectoryRoots:
+            for v in sh.getOrDefault(k).splitWhitespace():
+              let d = v.split(':')[0]
+              if d.len > 0 and '/' notin d: candidates.add(normalisedPath(root & "/" & d))
+      else:
+        for d in installedDirectories(file, dropIns.getOrDefault(unit)):
+          let first = d.split('/')[^1]
+          var shapeOk = true
+          for (k, root) in DirectoryRoots:
+            if d == normalisedPath(root & "/" & first) and
+                managerDirectoryRefusal(unit, k, first).len > 0:
+              shapeOk = false
+          if shapeOk: candidates.add(d)
+      for path in candidates:
+        if inAddOnTree(path) or path in t: continue
+        let now = identityOf(path)
+        if now.exists and now.btime != 0:
+          let c = entryOf(unit, now, invocationOf(unit))
+          when mutated("unlogged-migration"):
+            discard audit(path, c)
+            t[path] = c
+          else:
+            if audit(path, c): t[path] = c
+  writeCreatedDirs(stateDir, t)
+  for k, v in t: result.add((k, v))
+
+proc unitInvocation*(unit: string): tuple[id: string; start: int64] =
+  ## The unit's current ``InvocationID`` and when that invocation began
+  ## (``InactiveExitTimestamp``, nanoseconds since the epoch, read with
+  ## microseconds in UTC: systemctl(1) ``--timestamp=us+utc``), or empty
+  ## when systemd does not say.
+  try:
+    let r = runSystemctl(@["show", "--no-pager", "--timestamp=us+utc", "-p",
+                           "InvocationID", "-p", "InactiveExitTimestamp", "--", unit])
+    if r.exitCode != 0: return
+    for l in r.output.splitLines():
+      if l.startsWith("InvocationID="): result.id = l["InvocationID=".len .. ^1].strip()
+      elif l.startsWith("InactiveExitTimestamp="):
+        let v = l["InactiveExitTimestamp=".len .. ^1].strip()
+        # "Sun 2026-11-08 10:00:00.123456 UTC"
+        let parts = v.splitWhitespace()
+        if parts.len == 4 and parts[3] == "UTC":
+          try:
+            let dt = parse(parts[1] & " " & parts[2].split('.')[0], "yyyy-MM-dd HH:mm:ss", utc())
+            var us = 0'i64
+            if '.' in parts[2]: us = parseBiggestInt(parts[2].split('.')[1])
+            result.start = dt.toTime.toUnix * 1_000_000_000'i64 + us * 1000
+          except ValueError, TimeParseError: discard
+  except CatchableError: discard
+
+proc unitRunning*(unit: string): bool =
+  ## systemd reports ``unit`` running: its ``ActiveState`` is ``active``,
+  ## ``activating`` or ``reloading`` (systemd.unit(5)); false when it does
+  ## not say.
+  try:
+    let r = runSystemctl(@["show", "--no-pager", "-p", "ActiveState", "--value", "--", unit])
+    if r.exitCode != 0: return false
+    r.output.strip() in ["active", "activating", "reloading"]
+  except CatchableError: false
+
+proc hostSystemdView*(path, unit: string; show: ShowProps): SystemdView =
+  ## systemd's own state of ``path``, a directory of ``unit``, for §13
+  ## decisions 71 and 77: the directory's birth time (through systemd's own
+  ## ``private/<name>`` link of a dynamic user and no other link) and the
+  ## start of the unit's current invocation. The dynamic-uid record, the
+  ## owner and the ctime are read for the audit log only.
+  result.dynamicUid = -1
+  result.owner = -1
+  if show.getOrDefault("DynamicUser") == "yes":
+    # With no User=, systemd names the dynamic user after the unit, its
+    # name without the type suffix (systemd.exec(5), DynamicUser=).
+    var user = show.getOrDefault("User")
+    if user.len == 0:
+      let dot = unit.rfind('.')
+      user = if dot > 0: unit[0 ..< dot] else: unit
+    if user.len > 0:
+      try:
+        for kind, f in walkDir("/run/systemd/dynamic-uid"):
+          if kind != pcFile: continue
+          try:
+            if readFile(f).strip(chars = {'\0', '\n', ' '}) == user:
+              result.dynamicUid = parseInt(extractFilename(f))
+          except IOError, OSError, ValueError: discard
+      except OSError: discard
+  var target = path
+  var st: Stat
+  if lstat(path.cstring, st) == 0 and S_ISLNK(st.st_mode):
+    try:
+      let l = expandSymlink(path)
+      if l == "private/" & extractFilename(path):
+        target = parentDir(path) / l
+      else:
+        return
+    except OSError: return
+  if stat(target.cstring, st) == 0:
+    result.owner = int(st.st_uid)
+    result.ctime = int64(st.st_ctim.tv_sec)
+  result.btime = birthTimeOf(target)
+  let inv = unitInvocation(unit)
+  result.invocationId = inv.id
+  result.invocationStart = inv.start
+  result.stopped = not unitRunning(unit)
+  result.clockResolution = coarseResolutionNs()
+
+proc refusalLine*(subject, code, key, msg: string): string =
+  ## A refusal line of the effective check that no rule of
+  ## ``effective_floor`` produced (a report systemd did not give, a file it
+  ## loaded that cannot be read): tagged like every other (A9 review round
+  ## 10, finding 4), so the gate cannot take it for no reason.
+  when mutated("refusal-lines-untagged"):
+    subject & ": " & msg
+  else:
+    subject & ": " & msg & " [rule:" & code & " key:" & key & "]"
+
+proc effectiveFloorCheck*(resources: openArray[SystemResource];
+                          owned: seq[string] = @[];
+                          adopted = initTable[string, string]();
+                          created = initTable[string, CreatedDir]();
+                          pending: ptr seq[tuple[path, unit: string]] = nil;
+                          ledgerDirs = initHashSet[string]();
+                          recreated: ptr seq[tuple[path, unit: string; v: SystemdView]] = nil;
+                          acceptRecreatedLogged: proc (path, unit: string; v: SystemdView): bool = nil):
+                          seq[string] =
+  ## ``owned``: the store objects the generation owns with a recorded
+  ## digest; an ``EnvironmentFile=`` or a read-only bind source must lie in
+  ## one (A9 review round 7, findings 1 and 5).
   ## Every floored unit of the generation as systemd now reads it, against
   ## the floor it is rendered under (``effective_floor``; spec §10.1, A9
   ## review rounds 3 and 4): one problem line per difference. For a
@@ -1359,14 +1841,43 @@ proc effectiveFloorCheck*(resources: openArray[SystemResource]): seq[string] =
   for d in resources:
     if d.kind == srkSystemdSystemDropIn: own.incl(targetPathOf(d))
   for u in flooredUnitNames(resources): own.incl(startHoldPath(u))
+  var ownUnits = initHashSet[string]()
+  for d in resources:
+    if d.kind == srkSystemdSystemUnit: ownUnits.incl(d.suName)
+  var ownFiles: seq[string]
+  for d in resources:
+    if d.kind == srkFsSystemFile: ownFiles.add(d.sfPath)
+  var startsCache = initTable[string, seq[string]]()
+  let startsOf = proc (u: string): seq[string] =
+    unitStartsReported(u, ownUnits, startsCache)
+  var conflictsCache = initTable[string, seq[string]]()
+  let conflictsOf = proc (u: string): seq[string] =
+    if u in conflictsCache: return conflictsCache[u]
+    try:
+      let r = runSystemctl(@["show", "--no-pager", "-p", "Conflicts", "--value", "--", u])
+      if r.exitCode == 0: result = r.output.splitWhitespace()
+    except CatchableError: discard
+    conflictsCache[u] = result
+  var limits = initTable[string, string]()
+  if flooredUnitNames(resources).len > 0:
+    try: limits = managerLimits()
+    except CatchableError as ex:
+      result.add(refusalLine("the service manager", "manager-limits", "-",
+                             "its limits cannot be read: " & ex.msg))
   when not mutated("unnamed-instances-unchecked"):
     try:
       for f in foreignDropInsFor(flooredUnitNames(resources), own,
                                  unitSearchPaths()):
-        result.add(f & ": a drop-in the add-on did not install, read for a " &
-                   "floored unit (or an instance of a floored template)")
+        # Named by the unit its directory is for (<unit>.d), and tagged with
+        # its rule like every other refusal (A9 review round 9, finding 3).
+        let dir = extractFilename(parentDir(f))
+        let unit = if dir.endsWith(".d"): dir[0 ..< dir.len - 2] else: dir
+        result.add(unit & ": " & f & ": a drop-in the add-on did not install, " &
+                   "read for a floored unit (or an instance of a floored " &
+                   "template) [rule:foreign-drop-in key:DropInPaths]")
     except CatchableError as e:
-      result.add("the unit search path: " & e.msg)
+      result.add(refusalLine("the unit search path", "search-path", "DropInPaths",
+                             e.msg))
   for r in resources:
     if effectiveFloor(r).len == 0 or r.suCollision == "dropIn": continue
     let rendered = renderedSystemUnitContent(r)
@@ -1385,7 +1896,25 @@ proc effectiveFloorCheck*(resources: openArray[SystemResource]): seq[string] =
       var e = EffectiveInput(unit: name, rendered: rendered,
         version: r.suFloorVersion, exceptions: r.suFloorExceptions,
         fragment: unitPath(r.suName), denied: denied, uidOf: systemUid,
-        groupsOf: systemGroups, readableByAll: readableByAll)
+        groupsOf: systemGroups, gidOf: systemGid, ownUnits: ownUnits,
+        limitCeilings: limits, storeObjects: owned, ownFiles: ownFiles,
+        adoptedFiles: adopted, startsOf: startsOf, conflictsOf: conflictsOf,
+        createdDirs: created, ledgerDirs: ledgerDirs,
+        systemdView: hostSystemdView)
+      var acceptedNow: seq[string]
+      e.onRecreated = proc (path, unit: string; v: SystemdView): bool =
+        # Recorded again and logged, or not accepted (§13 decision 71; A9
+        # review round 11, finding 6).
+        if acceptRecreatedLogged == nil or not acceptRecreatedLogged(path, unit, v):
+          return false
+        acceptedNow.add(path)
+        if recreated != nil: recreated[].add((path, unit, v))
+        true
+      for o in resources:
+        if o.kind == srkSystemdSystemUnit and o.suName != r.suName and
+            effectiveFloor(o).len > 0 and o.suCollision != "dropIn":
+          e.otherWritable.add(floorWritablePlaces(serviceDirectives(
+            renderedSystemUnitContent(o))))
       for d in resources:
         if d.kind == srkSystemdSystemDropIn and dropInApplies(d.diUnit, name):
           e.ownDropIns.add((path: targetPathOf(d), content: d.diContent))
@@ -1395,15 +1924,63 @@ proc effectiveFloorCheck*(resources: openArray[SystemResource]): seq[string] =
         e.show = parseShow(text)
         e.lines = parseShowLines(text)
       except CatchableError as ex:
-        result.add(name & ": " & ex.msg)
+        result.add(refusalLine(name, "show", "-", ex.msg))
         continue
       for f in @[e.show.getOrDefault("FragmentPath")] &
                e.show.getOrDefault("DropInPaths").splitWhitespace():
         if f.len == 0: continue
         try: e.loaded.add((path: f, content: readFile(f)))
         except IOError, OSError:
-          result.add(name & ": cannot read " & f & ", which systemd loaded")
+          result.add(refusalLine(name, "unreadable", "FragmentPath,DropInPaths",
+                                 "cannot read " & f & ", which systemd loaded"))
       result.add(effectiveFloorProblems(e))
+      # The first components the unit's start may create, or make again on
+      # a restart (§13 decisions 57 and 68; ``startMayCreate``).
+      if pending != nil:
+        for fp in firstComponentPaths(e.show):
+          # A directory decision 71 accepted just now is the unit's too:
+          # this switch's restart of the unit makes it again.
+          if startMayCreate(fp.path, name, identityOfPath(fp.path), created,
+                            acceptedNow):
+            pending[].add((fp.path, name))
+      # The units that trigger it: sockets, timers, path units (A9 review
+      # round 5, finding 2), whoever defines them.
+      when not mutated("activators-unchecked"):
+        for a in e.show.getOrDefault("TriggeredBy").splitWhitespace():
+          var aown: seq[string]
+          for d in resources:
+            if d.kind == srkSystemdSystemDropIn and dropInApplies(d.diUnit, a):
+              aown.add(targetPathOf(d))
+          try:
+            let at = showUnitText(a)
+            let ash = parseShow(at)
+            var aloaded: seq[tuple[path, content: string]]
+            for f in @[ash.getOrDefault("FragmentPath")] &
+                     ash.getOrDefault("DropInPaths").splitWhitespace():
+              if f.len == 0: continue
+              try: aloaded.add((path: f, content: readFile(f)))
+              except IOError, OSError:
+                result.add(refusalLine(a, "unreadable", "FragmentPath,DropInPaths",
+                                       "cannot read " & f & ", which systemd loaded"))
+            # §13 decision 78: a unix listener is the activator's when its
+            # path is absent now (its start creates it, and that start
+            # records it) or the record names it for the activator, still
+            # the same inode and birth time.
+            let act = a
+            let listenerProvenance = proc (path: string): string =
+              let now = identityOfPath(path)
+              if not now.exists:
+                if pending != nil: pending[].add((path, act))
+                return ""
+              if createdForUnit(path, act, now, created, ledgerDirs): return ""
+              if pending != nil and startMayCreate(path, act, now, created):
+                pending[].add((path, act))
+              "it exists"
+            result.add(activatorProblems(a, ash, parseShowLines(at),
+                                         unitPath(a), aown, aloaded, startsOf,
+                                         ownUnits, conflictsOf, listenerProvenance))
+          except CatchableError as ex:
+            result.add(refusalLine(a, "show", "-", ex.msg))
 
 proc retargetedAddresses*(previous, wanted: openArray[SystemResource]):
     seq[tuple[address, was, now: string]] =
@@ -2802,6 +3379,39 @@ proc revertOverwritesRestored*(purpose: string; ledgerOwns, regularFile: bool;
   purpose == "revert" and ledgerOwns and regularFile and
     preservedPath.len > 0 and currentSha == extractFilename(preservedPath)
 
+proc liveReachProfile(resources: openArray[SystemResource]): SystemProfile =
+  for r in resources: result.resources.add(r)
+
+proc liveReachUnitsFor(opts: AddonApplyOptions;
+                       resources: openArray[SystemResource]): seq[string] =
+  ## The services the carried-state cross-check judges for this switch
+  ## (``carried_state.liveReachUnits``): held with the floored units from
+  ## step 6's reload until the check passes.
+  let carriedAt = if opts.carriedStateDir.len > 0: opts.carriedStateDir
+                  else: CarriedStateDir
+  let root = if opts.carriedStateRoot.len > 0: opts.carriedStateRoot else: "/"
+  liveReachUnits(liveReachProfile(resources), carriedAt, root)
+
+proc carriedRefusalFor(opts: AddonApplyOptions; stateDir: string): string
+
+proc liveReachProblemsFor(opts: AddonApplyOptions; units: seq[string];
+                          resources: openArray[SystemResource];
+                          stateDir: string): seq[string] =
+  ## After step 6's reload, before any start: each of ``units`` re-judged
+  ## from ``systemctl show`` (``carried_state.liveReachProblems``, shared
+  ## with ``runInfraApply``), and the carried-state refusal decided again
+  ## over the host as the reload left it -- a drop-in a host generator made
+  ## at the switch's own reloads is read now, so a path or a command it
+  ## adds is judged too, not only the account (A13 round 6).
+  when mutated("addon-live-reach-skipped"):
+    return
+  let root = if opts.carriedStateRoot.len > 0: opts.carriedStateRoot else: "/"
+  result = liveReachProblems(units, liveReachProfile(resources),
+    proc (u: string): Table[string, string] = showUnit(u), root)
+  when not mutated("post-reload-refusal-skipped"):
+    let why = carriedRefusalFor(opts, stateDir)
+    if why.len > 0: result.add(why & " (decided again after the reload)")
+
 proc carriedRefusalFor(opts: AddonApplyOptions; stateDir: string): string =
   ## The carried-state refusal for this apply (``carried_state``), "" when
   ## it may go ahead. A stored generation (a revert, a rollback, a replay)
@@ -2833,6 +3443,173 @@ proc hostLockWithCarriedRecheck*(opts: AddonApplyOptions;
       result.release()
       raise newException(AddonApplyError, why)
 
+# ---------------------------------------------------------------------------
+# Store custody inside the switch (spec §13 decisions 47 and 48).
+# ---------------------------------------------------------------------------
+
+proc fileSourceObject*(r: SystemResource): StoreObjectRef =
+  ## The store object an ``fs.systemFile`` copies its bytes from; ``path``
+  ## "" when its source is not in the store.
+  if r.kind == srkFsSystemFile and r.sfSourceLocal.startsWith(StoreRoot & "/"):
+    let o = storeObjectFor(r.sfSourceLocal)
+    if o.len > 0:
+      return StoreObjectRef(path: o, kind: classifyStoreObject(o),
+                            referrer: r.address)
+
+proc storeObjectsNamedIn*(text: string): seq[string] =
+  ## Every store object any ``/repro/store`` path in ``text`` names, read as
+  ## systemd reads paths (``normalisedPath``) and placed by
+  ## ``storeObjectFor``: a prefix, or the top-level store entry a path
+  ## outside every prefix lies in (``/repro/store/tmp``, a loose directory),
+  ## which custody then refuses as having no realiser (default deny, A11
+  ## review finding 12). The store itself and its prefixes directory name no
+  ## object.
+  when mutated("custody-prefixes-only"):
+    return       # FALSIFYING BUILD: only prefixes are seen, as before
+  var tok = ""
+  proc take(tok: var string; acc: var seq[string]) =
+    let i = tok.find("/repro")
+    if i >= 0:
+      let p = serviceFloor.normalisedPath(tok[i .. ^1])
+      if p.startsWith(StoreRoot & "/"):
+        let obj = storeObjectFor(p)
+        if obj.len > 0 and obj != StoreRoot / "prefixes" and obj notin acc:
+          acc.add(obj)
+    tok = ""
+  for c in text & " ":
+    if c in {' ', '\t', '\n', '\r', '\'', '"', ';', ':', '=', ',', '(', ')'}:
+      take(tok, result)
+    else:
+      tok.add(c)
+
+proc isSha256Name(s: string): bool =
+  s.len == 64 and s.allCharsInSet(HexDigits)
+
+proc filesRecovery*(prefix: string; resources: openArray[SystemResource];
+                    stateDir: string; storeRoot = StoreRoot): Recovery =
+  ## Generation 0's files prefix (and ``evidence-enrol``'s) holds one file
+  ## per body, named by the SHA-256 of its bytes; the names are in the
+  ## generation's own profile text (state directory, outside the store).
+  ## The trusted bytes are any copy outside the store whose SHA-256 is its
+  ## name: the installed ``/etc`` copy, or the preserved bytes. Every name
+  ## must have one, and together they must name exactly this prefix (its
+  ## path is a function of the names and its version); otherwise there is
+  ## no trusted source and the switch refuses.
+  var names: seq[string]
+  var targets = initTable[string, seq[string]]()
+  for r in resources:
+    if r.kind == srkFsSystemFile and parentDir(r.sfSourceLocal) == prefix:
+      let n = extractFilename(r.sfSourceLocal)
+      if not isSha256Name(n):
+        return Recovery(why: r.sfSourceLocal & " is not named by its digest")
+      if n notin names: names.add(n)
+      targets.mgetOrPut(n, @[]).add(r.sfPath)
+  if names.len == 0:
+    return Recovery(why: "no resource of this generation copies from it")
+  let version = prefixVersionOf(prefix)
+  if version.len == 0 or filesPrefixPath(names, version, storeRoot) != prefix:
+    return Recovery(why: "the generation's own files do not name this " &
+      "prefix's whole content")
+  var files: seq[tuple[name, content: string]]
+  for n in names:
+    var found = false
+    var candidates = targets.getOrDefault(n, @[])
+    candidates.add(preservedDir(stateDir) / n)
+    when mutated("recovery-trusts-store-bytes"):
+      # FALSIFYING BUILD: the altered prefix's own copy is a source too.
+      candidates.insert(prefix / n, 0)
+    for c in candidates:
+      if fileExists(c) and not symlinkExists(c):
+        let bytes = try: readFile(c) except IOError, OSError: ""
+        when mutated("recovery-trusts-store-bytes"):
+          let good = true
+        else:
+          let good = sha256Hex(bytes) == n
+        if good:
+          files.add((n, bytes))
+          found = true
+          break
+    if not found:
+      return Recovery(why: "no copy of " & n & " outside the store holds " &
+        "the bytes its name is the digest of")
+  Recovery(ok: true, source: "generation 0's bodies (installed copies " &
+    "whose SHA-256 is their name)",
+    realise: proc (): string =
+      realiseFilesPrefix(files, version).digest)
+
+proc closureRecovery*(o: StoreObjectRef; locks: openArray[AptClosureLock];
+                      site: CustodySite; fetch: AptDebFetcher;
+                      storeRoot = AddOnSystemStoreRoot;
+                      cacheDir = AddOnAptDebCacheDir): Recovery =
+  ## An apt closure's union or member is realised again from the lock's
+  ## ``.deb`` archives (SHA-256 pinned by the lock in the signed manifest),
+  ## which the apply reads from what the fetch unit staged. A member is
+  ## rebuilt whenever it is gone, whatever the union's state (an altered
+  ## member's union may be intact: it holds hard links, and a file added to
+  ## or removed from the member's directory is not in it; A11 review finding
+  ## 1). The union, when its own bytes are altered too, is moved aside and
+  ## rebuilt with the member. A member whose archive the apply has no copy
+  ## of is not realised: the switch refuses, and the next fetch, finding the
+  ## member gone, stages its archive.
+  for lock in locks:
+    var paths = @[aptClosurePrefixPath(storeRoot, lock)]
+    for d in lock.debs: paths.add(aptDebPrefixPath(storeRoot, d))
+    if o.path notin paths: continue
+    let l = lock
+    let union = paths[0]
+    return Recovery(ok: true, source: "the lock's .deb archives (pinned " &
+      "by SHA-256 in the signed manifest)",
+      realise: proc (): string =
+        var unionAside, unionExp, unionNow = ""
+        if dirExists(union) and union != o.path:
+          unionExp = expectedDigests(site).getOrDefault(union, "")
+          unionNow = storeTreeDigest(union)
+          if unionExp.len > 0 and unionNow != unionExp:
+            unionAside = moveAside(site, union)
+        let log = AptRealisationLog(verifyReuse: proc (p: string): string =
+          let exp = expectedDigests(site).getOrDefault(p, "")
+          if exp.len == 0:
+            return (if custodyHost(site): "it has no recorded digest" else: "")
+          let c = verifiedDigest(site, p, exp)
+          if c.verdict == cvVerified: "" else: "its bytes are altered")
+        discard realiseAptClosure(l, storeRoot, cacheDir, fetch,
+          log = log, rebuildMissingMembers = true)
+        result = ""
+        for (p, d) in log.published:
+          recordRealised(site, p, d)
+          if p == o.path: result = d
+        if unionAside.len > 0 and dirExists(union) and
+            storeTreeDigest(union) == unionExp:
+          # The union is back: only now is its alteration filed and recorded.
+          let entry = fileEvidence(site, unionAside, union, unionExp, unionNow,
+            "built from the altered member " & o.path)
+          recordRecovered(site, StoreObjectRef(path: union,
+            kind: sokAptClosure, referrer: o.referrer), unionExp, unionNow,
+            entry, "rebuilt with the recovered member")
+          markRecorded(entry))
+  Recovery(why: "no closure of this generation consists of it")
+
+proc storeRecovery*(o: StoreObjectRef; resources: openArray[SystemResource];
+                    locks: openArray[AptClosureLock]; site: CustodySite;
+                    stateDir: string; fetch: AptDebFetcher): Recovery =
+  ## Where an altered object's trusted bytes come from, by kind (§13
+  ## decision 47). No trusted source: no recovery.
+  case o.kind
+  of sokFiles: filesRecovery(o.path, resources, stateDir)
+  of sokAptClosure: closureRecovery(o, locks, site, fetch)
+  of sokStaticTree:
+    Recovery(why: "the static tree is realised again by the switch that " &
+      "plans it, from the plan's bytes")
+  of sokBinary:
+    Recovery(why: "it is the add-on's own binary, which is running this " &
+      "switch; only a new bootstrap of a verified binary replaces it")
+  of sokPrefix:
+    Recovery(why: "a prefix the agent installs from the signed manifest's " &
+      "pinned build outputs is re-installed by the agent's next tick, not " &
+      "by a switch")
+  of sokOther:
+    Recovery(why: "nothing realises it")
+
 proc runAddonApply*(opts: AddonApplyOptions): AddonApplyResult
   ## Defined below, after the switch it wraps with its evidence record.
 
@@ -2842,7 +3619,34 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
   ## collision pass refuses, and ``AddonApplyError`` when the infra apply
   ## reports an error -- after recording, in the ledger, every object that
   ## apply did create, so uninstall still finds them.
+  # While carried state is installed, every unit of the generation that
+  # reaches it requires the first-boot restore, through a drop-in the
+  # generation itself writes (spec §11.1; A13 review round 4, finding 4):
+  # added to the user profile, so the scope and collision passes, the
+  # ledger and the effective-unit check see it like any other drop-in. A
+  # stored generation (a revert, a rollback, a replay) is applied as it was
+  # installed, with the requirements it was given then.
+  var opts = opts
+  let carriedAt = if opts.carriedStateDir.len > 0: opts.carriedStateDir
+                  else: CarriedStateDir
+  if not opts.storedTarget and not opts.replay and
+      carriedStateInstalled(carriedAt):
+    # Parsed as an add-on user profile (the floor's defaults included),
+    # as the reach analysis of the refusal below reads it.
+    opts.userProfileText &= carriedRequirementText(
+      parseAddOnUserProfile(opts.userProfileText), carriedAt,
+      (if opts.carriedStateRoot.len > 0: opts.carriedStateRoot else: "/"))
   let stateDir = if opts.stateDir.len > 0: opts.stateDir else: DefaultStateDir
+  # An operator contained the host (decision 51): no deploy agent applies,
+  # whichever agent it is -- the add-on's own units or the full engine's
+  # ``repro deploy-agent`` (A11 review finding 6). Enforced here, in the
+  # switch every agent apply goes through, not only in the units.
+  if opts.agentSequence > 0'u64 and isContained(stateDir) and
+      not mutated("contained-agent-applies"):
+    raise newException(AddonApplyError, "EAddOnContained: the host is " &
+      "contained by an operator (" & containedMarkerPath(stateDir) & "); " &
+      "a deploy-agent apply is refused until `repro system addon release`; " &
+      "nothing was written")
   if opts.agentRecord.present and opts.agentSequence > 0'u64 and
       opts.agentRecord.sequence != opts.agentSequence:
     # The generation would carry two different sequences, and the floor
@@ -2930,10 +3734,15 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
   let seamPrefix = if replaying: "replay:"
                    elif purpose == "revert": "revert:"
                    else: ""
+  # Generation 0's objects this build renders differently are re-rendered
+  # by every switch (A11 review findings 2 and 8: a host bootstrapped
+  # before a fix gets it with its next switch; ``own_profile``). A replay
+  # applies exactly what the interrupted switch planned.
   let ownText =
     if replaying: replayPlan.targetOwnText
-    elif opts.ownProfileText.len > 0: opts.ownProfileText
-    elif fileExists(ownProfilePath(stateDir)): readFile(ownProfilePath(stateDir))
+    elif opts.ownProfileText.len > 0: migrateOwnProfile(opts.ownProfileText)
+    elif fileExists(ownProfilePath(stateDir)):
+      migrateOwnProfile(readFile(ownProfilePath(stateDir)))
     else: raise newException(AddonApplyError,
       "not an add-on host: " & ownProfilePath(stateDir) & " is missing")
   let previous =
@@ -2947,6 +3756,31 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
   # and the pending marker speak of committed generations only.
   let committedPrevious = readCurrentGenerationId(stateDir)
   result.previousGenerationId = committedPrevious
+  # §13 decision 72: a host whose committed generation an engine without
+  # the record of floored units' directories wrote is migrated once, from
+  # what systemd runs now, before this apply changes anything. A plan
+  # writes nothing; a replay or a revert finishes a switch an engine with
+  # the record started.
+  if not opts.planOnly and purpose notin ["replay", "revert"]:
+    # Each entry is logged before it is recorded; one whose audit record
+    # cannot be written is not recorded, so it stays refused (A9 review
+    # round 11, finding 6).
+    discard migrateCreatedDirs(stateDir, committedPrevious, previous,
+      proc (u: string): string = unitInvocation(u).id,
+      proc (path: string; c: CreatedDir): bool =
+        try:
+          appendAuditRecord(applyLogPath(stateDir, committedPrevious), AuditRecord(
+            timestamp: getTime().toUnix(), operationKind: "addon.floor",
+            resourceAddress: "directory:" & path, outcome: "migrated",
+            diagnostic: c.unit & ": recorded once from the committed generation " &
+              committedPrevious & " (st_dev " & $c.dev & ", st_ino " & $c.ino &
+              ", birth " & $c.btime & " ns, invocation " & c.invocation &
+              "; §13 decision 72)",
+            recordClass: AuditClassLiveState))
+          true
+        except CatchableError: false,
+      showOf = proc (u: string): ShowProps =
+        try: parseShow(showUnitText(u)) except CatchableError: initTable[string, string]())
   let previousUserText =
     if replaying: replayPlan.fromUserText
     elif fileExists(userProfilePath(stateDir)): readFile(userProfilePath(stateDir))
@@ -3132,6 +3966,40 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
       prevOwned.incl(e.path)
     elif e.class == lcDiversion:
       prevOwned.incl("diversion:" & e.path)
+
+  # --- Store custody of the bytes the plan reads (§13 decisions 47, 48). ---
+  # An ``fs.systemFile`` copies its bytes from the store, and the plan below
+  # reads them (its content, the static tree's link-form files): every such
+  # source object is checked against its recorded digest FIRST, and one
+  # altered is recovered from its trusted bytes before anything reads it
+  # (audit session 2, G1: generation 0's altered files were installed into
+  # /etc and owned). A plan only reports what the switch would recover.
+  var custody = custodySite(stateDir)
+  custody.noWrites = opts.planOnly
+  let custodyFetch = if opts.aptFetch != nil: opts.aptFetch
+                     else: httpDebFetcher()
+  var allResources = own.resources
+  allResources.add(user.resources)
+  # A files prefix is recovered from ALL of generation 0's bodies, those a
+  # profile superseded too: the prefix's path is a function of every name.
+  var recoveryResources = parseSystemProfile(ownText).resources
+  recoveryResources.add(user.resources)
+  var sourceObjects: seq[StoreObjectRef]
+  when not mutated("custody-skips-file-sources"):
+    for r in allResources:
+      let o = fileSourceObject(r)
+      if o.path.len > 0: sourceObjects.add(o)
+  block:
+    if sourceObjects.len > 0 and not opts.planOnly: enterWritableStoreView()
+    let c = custodyPass(custody, sourceObjects,
+      proc (o: StoreObjectRef): Recovery =
+        storeRecovery(o, recoveryResources, [], custody, stateDir,
+                      custodyFetch),
+      mayRecover = not opts.planOnly)
+    if c.refusals.len > 0:
+      raise newAddOnError(adStoreChanged, "the generation copies files " &
+        "from store objects that do not hold their realisation bytes: " &
+        c.refusals.join("; ") & "; nothing was switched")
 
   # --- The collision pass (plan time). ---
   # Preserved bytes are only named here: nothing is written under the
@@ -3378,6 +4246,12 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
         inp.kind = tkFile
         inp.collision = r.sfCollision
         inp.divertedByProfile = hasDiversionFor(userResources, r.sfPath)
+        let declared = r
+        inp.stanza = proc (bytes: string): string =
+          var x = declared
+          x.sfContent = bytes
+          x.sfSourceLocal = ""
+          renderStanza(x).join("\n")
         if r.sfSourceLocal.len > 0:
           inp.desiredContent = readFile(r.sfSourceLocal)
         else:
@@ -3652,6 +4526,18 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
     x.dependsOn = deps
     infraProfile.resources.add(x)
   let composedText = renderProfileText(infraProfile)
+  # The services the carried-state cross-check judges at step 6, chosen
+  # now, as the refusal judged them, before anything of this switch is
+  # written: each write of a unit reloads systemd, which runs the host's
+  # generators, and a drop-in a generator makes from then on can turn a
+  # unit the refusal let in into one the analysis would read as reaching
+  # everything -- so a set chosen at step 6 left it out of the check
+  # altogether (A13 round 6, the adopt gate's live probe on ubuntu-24.04).
+  let preWriteLiveUnits =
+    when mutated("live-units-chosen-after-writes"): newSeq[string]()
+    else:
+      if opts.recordOnly: newSeq[string]()
+      else: liveReachUnitsFor(opts, composed.resources)
   var wanted = initHashSet[string]()
   for r in composed.resources: wanted.incl(r.address)
 
@@ -4291,8 +5177,20 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
   let previousStatic =
     if replaying and priorMarker.previousStatic.len > 0: priorMarker.previousStatic
     else: readStaticTarget()
-  let (treePath, treePrefixId) = realiseStaticTree(treeFiles)
+  let (treePath, treePrefixId, treeDigest) =
+    realiseStaticTree(treeFiles, custody)
   var closureLocks: seq[AptClosureLock]
+  # The realiser reports what it publishes (each prefix's digest from the
+  # bytes it staged, into the realisation index) and reuses an existing
+  # member only when its bytes are the recorded ones (§13 decision 48): an
+  # altered member is not linked into a new union, it is left for the
+  # custody pass below to recover.
+  let closureLog = AptRealisationLog(verifyReuse: proc (p: string): string =
+    let exp = expectedDigests(custody).getOrDefault(p, "")
+    if exp.len == 0:
+      return (if custodyHost(custody): "it has no recorded digest" else: "")
+    if verifiedDigest(custody, p, exp).verdict == cvVerified: ""
+    else: "its bytes are altered")
   for p in plans:
     # A unit's closure, and a tool's (its driver would otherwise realise it
     # itself, from the network, which the apply unit does not have).
@@ -4302,10 +5200,14 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
       else: ""
     if lockText.len > 0:
       let lock = parseAptClosureLock(lockText)
-      discard realiseAptClosure(lock, AddOnSystemStoreRoot,
-        AddOnAptDebCacheDir,
-        (if opts.aptFetch != nil: opts.aptFetch else: httpDebFetcher()))
+      try:
+        discard realiseAptClosure(lock, AddOnSystemStoreRoot,
+          AddOnAptDebCacheDir, custodyFetch, log = closureLog)
+      except IOError as e:
+        if "is not reused" notin e.msg: raise
       closureLocks.add(lock)
+  for (path, digest) in closureLog.published:
+    recordRealised(custody, path, digest)
   # The whole closure is rooted from here on, not only the tree: a
   # `repro store gc` between this step and the commit -- or after a crash,
   # before recovery -- must not collect what the switch is about to run.
@@ -4342,29 +5244,78 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
   # changed in between, by anything that got write access to the store,
   # is never flipped to or started. A store object that is missing is a
   # refusal, not a skip.
+  #
+  # Since §13 decision 48 that set is EVERY store object the generation
+  # references, of any kind: the static tree; each closure's union and
+  # members; every object a unit or drop-in names; every object any
+  # resource names in its declaration or in the bytes it installs (a file's
+  # content, a tmpfiles rule, an account's shell); every ``fs.systemFile``
+  # source; each ``exec:`` health check's program; and the prefixes
+  # bootstrap realised. Before its signature is taken, each is checked
+  # against its recorded digest (``custodyPass``): altered ones are
+  # recovered from trusted bytes or the switch refuses; one with no digest
+  # refuses on a host under custody; one that is not a store prefix
+  # refuses (default deny).
   var realisedStore: seq[tuple[path, signature: string]]
+  var custodyObjects: seq[StoreObjectRef]
   block:
-    var objs = @[treePath]
+    proc add(path, referrer: string) =
+      if path.len == 0: return
+      # Falsifying builds: a kind of object left out of custody.
+      when mutated("custody-skips-file-sources"):
+        if classifyStoreObject(path) == sokFiles: return
+      when mutated("custody-skips-closures"):
+        if classifyStoreObject(path) == sokAptClosure: return
+      for o in custodyObjects:
+        if o.path == path: return
+      custodyObjects.add(StoreObjectRef(path: path,
+        kind: classifyStoreObject(path), referrer: referrer))
+    add(treePath, "static-tree")
     for lock in closureLocks:
-      let p = aptClosurePrefixPath(AddOnSystemStoreRoot, lock)
-      if p notin objs: objs.add(p)
+      add(aptClosurePrefixPath(AddOnSystemStoreRoot, lock), "apt-closure")
+      for d in lock.debs:
+        add(aptDebPrefixPath(AddOnSystemStoreRoot, d), "apt-closure")
     for p in plans:
       for o in switchStoreObjects(p.r):
-        if o notin objs: objs.add(o)
+        add(o, p.r.address)
+      when not mutated("recheck-skips-dropin-prefixes"):
+        # Any kind's declaration and installed bytes (default deny: a kind
+        # whose store references nothing collects is still covered).
+        let named = renderStanza(p.r).join("\n") & "\n" & p.content
+        for o in referencedStoreObjects(named):
+          add(o, p.r.address)
+        for o in storeObjectsNamedIn(named):
+          add(o, p.r.address)
+      add(fileSourceObject(p.r).path, p.r.address)
       if p.r.kind == srkSystemdSystemUnit:
         if p.r.suHealthCheck.len > 0:
           let hc = parseHealthCheck(p.r.suHealthCheck)
           if hc.kind == hcExec:
-            let o = storeObjectFor(hc.argv[0])
-            if o.len > 0 and o notin objs: objs.add(o)
+            add(storeObjectFor(hc.argv[0]), p.r.address)
+    for e in previous.entries:
+      if e.class == lcStorePrefix and e.resource.len == 0:
+        add(e.path, "generation-0")
     var missing: seq[string]
-    for o in objs:
-      if not dirExists(o): missing.add(o)
-      else: realisedStore.add((path: o, signature: storeSignature(o)))
+    for o in custodyObjects:
+      # A missing closure member is recovered like an altered one (its
+      # archive staged by the fetch unit); any other missing object is a
+      # refusal, as before.
+      if not dirExists(o.path) and o.kind != sokAptClosure: missing.add(o.path)
     if missing.len > 0:
       raise newAddOnError(adStoreChanged, "the generation runs from store " &
         "paths that do not exist after its realise step: " &
         missing.join(", ") & "; nothing was switched")
+    let c = custodyPass(custody, custodyObjects,
+      proc (o: StoreObjectRef): Recovery =
+        storeRecovery(o, recoveryResources, closureLocks, custody, stateDir,
+                      custodyFetch),
+      mayRecover = true)
+    if c.refusals.len > 0:
+      raise newAddOnError(adStoreChanged, "the generation runs from store " &
+        "objects that do not hold their realisation bytes: " &
+        c.refusals.join("; ") & "; nothing was switched")
+    for o in custodyObjects:
+      realisedStore.add((path: o.path, signature: storeSignature(o.path)))
 
   # The confirm step's checks (§7.5): every unit's declared healthCheck.
   var healthChecks: seq[UnitHealthCheck]
@@ -4476,6 +5427,17 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
     if p.r.kind in {srkSystemdSystemUnit, srkSystemdSystemDropIn} and
         p.verdict != $cvNoOp:
       anyUnitChange = true
+  # The carried-state cross-check runs in every switch (§11.1, §13
+  # decision 59), not only one that writes a unit file: a switch that
+  # changes only a file a confined unit ``depends_on``, or its credentials,
+  # restarts that unit at step 7 (§7.3), on whatever systemd last loaded --
+  # an operator's reload after a host generator changed its output
+  # included. So wherever the check has units to judge, the switch holds
+  # them, reloads, and judges them before step 7, whatever else it changes
+  # (A13 review round 7, finding 1).
+  let liveCheckEverySwitch =
+    when mutated("narrowed-live-set"): false
+    else: preWriteLiveUnits.len > 0
   let sysctlKeys = block:
     var keys: seq[string]
     for p in plans:
@@ -4637,9 +5599,22 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
       var problems: seq[string]
       var reloadedAt = 0.0
       var startHolds: seq[string]   # spec §10.1: kept until the check passes
+      var createdPending: seq[tuple[path, unit: string]]  # §13 decision 57
+      var liveUnits: seq[string]    # §11.1: the carried-state cross-check's
         ## CLOCK_MONOTONIC seconds just after step 6's daemon-reload; 0
         ## when there was none.
       hookGeneration = generationId
+      # §13 decision 72: this engine keeps the record of floored units'
+      # directories, and says so in every generation it sets, so a later
+      # migration can tell its generations from an older engine's.
+      when not mutated("migration-ignores-engine"):
+        try:
+          createDir(generationDir(stateDir, generationId))
+          writeFile(recordKeptMarker(stateDir, generationId), "")
+        except IOError, OSError:
+          problems.add("cannot mark generation " & generationId & " as written " &
+                       "by an engine that keeps the record of floored units' " &
+                       "directories (§13 decision 72)")
       # Steps 4 and 5 are the drivers' writes, in the profile's apply
       # order (links and copies interleave); both are complete here.
       marker.attempt = generationId
@@ -4654,13 +5629,17 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
       # the daemon reload, sysctl through the host's own service, and
       # the kernel values a removed sysctl resource leaves behind.
       try:
-        if anyUnitChange or replaying:
+        if anyUnitChange or replaying or liveCheckEverySwitch:
           # The start holds go in before the reload: from it until the
           # effective-unit check passes, no floored unit can start (a
           # socket, a timer, D-Bus or a Wants= would otherwise start it on
           # definitions nothing has checked yet; spec §10.1, round 4).
           if not opts.recordOnly:
-            startHolds = writeStartHolds(composed.resources)
+            liveUnits =
+              when mutated("live-units-chosen-after-writes"):
+                liveReachUnitsFor(opts, composed.resources)
+              else: preWriteLiveUnits
+            startHolds = writeStartHolds(composed.resources, liveUnits)
           daemonReload()
           # From here on every start runs the generation's definitions:
           # step 7 accepts an exclusive instance started after this point
@@ -4802,16 +5781,85 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
       when not mutated("effective-check-skipped") and
           not mutated("floor-unchecked"):
         if not opts.recordOnly and clean and problems.len == 0:
-          let notHeld = effectiveFloorCheck(composed.resources)
+          var ownedObjects: seq[string]
+          block:
+            let expected = expectedDigests(custody)
+            for o in custodyObjects:
+              if expected.getOrDefault(o.path, "").len > 0:
+                ownedObjects.add(o.path)
+          # The files the generation adopts, with the digest its ledger
+          # records (§13 decision 50, amended): this switch's adoption
+          # (the preserved copy is named by its sha256), or the previous
+          # generation's ledger entry for an object it already owns.
+          var adoptedFiles = initTable[string, string]()
+          for p in plans:
+            if p.r.kind != srkFsSystemFile or p.r.sfCollision != "adopt": continue
+            var digest = ""
+            if p.collision == "adopt" and p.preserved.len > 0:
+              digest = extractFilename(p.preserved)
+            else:
+              for e in previous.entries:
+                if e.class == lcEtcFile and e.path == p.targetPath: digest = e.sha256
+            if digest.len == 64:
+              adoptedFiles[normalisedPath(p.targetPath)] = digest
+          # The directories the ledger records as the add-on's (§13 decision
+          # 67): created for the profile, so for its units.
+          var ledgerDirs = initHashSet[string]()
+          for le in previous.entries:
+            if le.class == lcDir: ledgerDirs.incl(normalisedPath(le.path))
+          var recreated: seq[tuple[path, unit: string; v: SystemdView]]
+          let notHeld = effectiveFloorCheck(composed.resources, ownedObjects,
+                                            adoptedFiles, readCreatedDirs(stateDir),
+                                            addr createdPending, ledgerDirs,
+                                            addr recreated,
+            # §13 decision 71: each directory systemd made again for its unit
+            # outside a switch is recorded under its new identity and the
+            # acceptance written to the generation's audit log, both before
+            # it counts; either failing refuses it.
+            proc (path, unit: string; v: SystemdView): bool =
+              try:
+                appendAuditRecord(applyLogPath(stateDir, generationId), AuditRecord(
+                  timestamp: getTime().toUnix(), operationKind: "addon.floor",
+                  resourceAddress: "directory:" & path,
+                  outcome: "recreated-accepted",
+                  diagnostic: unit & ": made again by systemd for invocation " &
+                    v.invocationId & ", born " & $v.btime & " ns >= invocation " &
+                    "start " & $v.invocationStart & " ns (§13 decisions 71, 77)",
+                  recordClass: AuditClassLiveState))
+                acceptRecreated(stateDir, path, unit, v.invocationId)
+                true
+              except CatchableError: false)
+          # The carried-state reach, cross-checked against the units as
+          # systemd loaded them (A13 review round 5, finding 1): wherever
+          # carried state is on this host, a unit the static analysis took
+          # as confined must be confined as systemd reads it too, or nothing
+          # starts (a problem stops step 7, and the switch reverts).
+          let reachLive = liveReachProblemsFor(opts, liveUnits,
+                                               composed.resources, stateDir)
+          if reachLive.len > 0:
+            problems.add(reachLive.join("; ") & "; nothing was started")
           if notHeld.len > 0:
-            problems.add($adFloorNotEffective & ": " & notHeld.join("; ") &
-              "; nothing was started")
-          elif startHolds.len > 0:
-            # Checked: the holds go, and step 7 starts on these definitions.
+            # One refusal per line: each ends with its rule tag, and the
+            # gate reads them line by line (A9 review round 9, finding 3).
+            problems.add($adFloorNotEffective & ":\n  " & notHeld.join("\n  ") &
+              "\n  nothing was started")
+          if reachLive.len > 0 or notHeld.len > 0:
+            # Refused: the holds stay until the revert's own switch has
+            # checked its generation and cleared them (A13 review round 6,
+            # finding 6), so no socket, timer or dependency starts a unit
+            # systemd loaded unconfined in between.
+            discard
+          else:
+            # Checked: the holds go -- this switch's, and any an earlier
+            # switch left (a refused check before a revert to a generation
+            # with no floored unit) -- and step 7 starts on these
+            # definitions.
+            let stale = clearStaleStartHolds()
             removeStartHolds(startHolds)
+            if startHolds.len > 0 or stale.len > 0:
+              try: daemonReload()
+              except CatchableError as ex: problems.add(ex.msg)
             startHolds.setLen(0)
-            try: daemonReload()
-            except CatchableError as ex: problems.add(ex.msg)
       if startHolds.len > 0 and clean and problems.len == 0:
         # The check did not run (a record-only replay, a falsifying build):
         # the holds must not outlive the switch that wrote them.
@@ -4821,8 +5869,29 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
         except CatchableError as ex: problems.add(ex.msg)
       if clean and problems.len == 0:
         try:
+          # What a floored unit's own start created is that unit's (§13
+          # decisions 57 and 68), recorded right after its start and before
+          # the next unit's. A queued start (--no-block, the boot-time
+          # recovery of a generation an earlier switch already started)
+          # records nothing. A record that cannot be written leaves the
+          # directory unrecorded, so the next switch refuses it: fail closed.
+          let recordAfter =
+            if opts.nonBlockingStarts or createdPending.len == 0:
+              (proc (u: string) {.closure.})(nil)
+            else:
+              proc (u: string) =
+                try: recordCreatedDirs(stateDir, u, createdPending,
+                                       invocation = unitInvocation(u).id)
+                except IOError, OSError: discard
+          let stepAt = getTime()
+          let startStepNs = stepAt.toUnix * 1_000_000_000'i64 +
+                            int64(stepAt.nanosecond)
           runStart(stepTransitions, paused, notRunning,
-                   noBlock = opts.nonBlockingStarts, reloadedAt = reloadedAt)
+                   noBlock = opts.nonBlockingStarts, reloadedAt = reloadedAt,
+                   afterStart = recordAfter)
+          if not opts.nonBlockingStarts and createdPending.len > 0:
+            try: recordStartedSince(stateDir, createdPending, startStepNs, unitInvocation)
+            except IOError, OSError: discard
           # A replay or a revert plans the units the interrupted switch had
           # running as running, but `try-restart` leaves a unit the crash
           # (or step 2) stopped stopped: start every such unit of this
@@ -4870,8 +5939,14 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
       for p in plans:
         if p.accountKey.len > 0 and p.r.kind in {srkPasswdUser, srkPasswdGroup}:
           declaredAccounts.incl(p.accountKey)
+      # An object a bootstrap entry of this switch names again (the keys an
+      # ``evidence-enrol --rekey`` replaced, decision 52) takes the new
+      # entry; the previous one is not carried.
+      var restated = initHashSet[string]()
+      for e in opts.bootstrapEntries: restated.incl($e.class & " " & e.path)
       for e in previous.entries:
         if e.resource.len > 0 or e.class == lcStaticLink: continue
+        if ($e.class & " " & e.path) in restated: continue
         if e.class == lcAccount and e.path in declaredAccounts:
           continue      # a passwd resource holds it now (its entry below)
         if e.class == lcUnitState and e.unitState.len == 0 and
@@ -4885,7 +5960,18 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
         linkTarget: readStaticTarget(), resource: "static-tree",
         mode: "0777", owner: "0:0"))
       put(LedgerEntry(class: lcStorePrefix, path: treePath,
-        sha256: prefixIdHex(treePrefixId), resource: "static-tree"))
+        sha256: prefixIdHex(treePrefixId), value: treeDigest,
+        resource: "static-tree"))
+      # Every other store object the generation references, with the
+      # digest it is expected to hold (§13 decision 48): the record store
+      # verification and the next switch check it against, attested with
+      # the ledger. Rebuilt every generation, never carried forward.
+      block:
+        let expected = expectedDigests(custody)
+        for o in custodyObjects:
+          put(LedgerEntry(class: lcStorePrefix, path: o.path,
+            value: expected.getOrDefault(o.path, ""),
+            resource: "store-object"))
       for p in plans:
         if p.r.address in hookRefused:
           # The write-time re-check refused this resource's operation: what
@@ -5202,7 +6288,9 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
   # the marker goes. ---
   var prefixIds: seq[PrefixIdBytes]
   for e in newLedger.entries:
-    if e.class == lcStorePrefix:
+    if e.class == lcStorePrefix and e.sha256.len > 0:
+      # (A referenced object's entry names no prefix id: its root is the
+      # closure's or the bootstrap prefix's, held already.)
       prefixIds.add(parsePrefixIdHex(e.sha256))
   promotePendingRoot(result.generationId, prefixIds)
   # The current generation is this one; the previous is what `current`

@@ -28,8 +28,14 @@ import ./addon_apply
 import ./agent_split
 import ./fingerprint
 import ./generation0
+import ./own_profile
+import ./ledger
+import ./store_custody
+import ./store_root
 import ./mutations
 import ./preflight
+
+export own_profile
 
 type
   RepinPlan* = object
@@ -37,30 +43,10 @@ type
     changed*: bool
     diff*: seq[string]        ## "-" / "+" lines of the two objects
     digest*: string           ## what ``--apply`` must name
+    newFiles*: seq[tuple[name, content: string]]
+      ## generation-0 bodies the plan points at, realised by the apply
 
   RepinError* = object of CatchableError
-
-const UnitBlockHead* = "systemd.systemUnit {\n  name = \""
-
-proc blockBounds*(own, head: string): tuple[a, b: int] =
-  ## The ``[a, b)`` span of the canonical block that starts with ``head``
-  ## (``renderOwnProfile``'s layout: a block ends at the first "\n}\n").
-  let a = own.find(head)
-  if a < 0: return (-1, -1)
-  let e = own.find("\n}\n", a)
-  if e < 0:
-    raise newException(RepinError, "the own profile's block at byte " & $a &
-      " is not terminated")
-  (a, e + 3)
-
-proc unitContentOf*(own, unit: string): string =
-  let (a, b) = blockBounds(own, UnitBlockHead & unit & "\"\n")
-  if a < 0: return ""
-  let block0 = own[a ..< b]
-  let k = block0.find("  content = \"")
-  let e = block0.rfind("\"\n  enabled = ")
-  if k < 0 or e < 0: return ""
-  block0[k + "  content = \"".len ..< e]
 
 proc lineDiff(what, old, new: string): seq[string] =
   let o = old.splitLines()
@@ -76,11 +62,7 @@ proc hostsLines(text: string): string =
     if l.strip().len > 0 and not l.strip().startsWith("#"):
       result.add(l & "\n")
 
-proc execStartExe*(unitContent: string): string =
-  for l in unitContent.splitLines():
-    if l.startsWith("ExecStart="):
-      return l["ExecStart=".len .. ^1].splitWhitespace()[0]
-  ""
+proc execStartExe*(unitContent: string): string = fetchUnitExe(unitContent)
 
 proc repinOwnProfile*(own: string; fresh: AgentUnitsInputs;
                       currentHosts: string): RepinPlan =
@@ -96,8 +78,10 @@ proc repinOwnProfile*(own: string; fresh: AgentUnitsInputs;
     raise newException(RepinError, AgentFetchUnit & " names no ExecStart")
   # The falsifying build re-pins the hosts file only, leaving the fetch
   # unit's allow-list on the old addresses.
+  let observed = when mutated("fetch-unit-paths-diverge"): false
+                 else: ownObserved(own)
   let newUnit = when mutated("agent-repin-keeps-allow-list"): oldUnit
-                else: agentFetchUnit(reproExe, fresh)
+                else: agentFetchUnit(reproExe, fresh, observed)
   # Without its comment lines: a '#' cannot be carried inline in the
   # canonical text, and the hosts file is carried inline from now on.
   let newHosts = hostsLines(renderAgentHosts(fresh))
@@ -123,6 +107,23 @@ proc repinOwnProfile*(own: string; fresh: AgentUnitsInputs;
     result.ownText.add("\n" & hostsBlock)
   result.diff = lineDiff(AgentFetchUnit, oldUnit, newUnit) &
                 lineDiff(AgentHostsPath, hostsLines(currentHosts), newHosts)
+  # The egress observer's allow-list is the fetch unit's: re-rendered with
+  # it, as a new generation-0 body (a files prefix of its own, realised by
+  # the apply before it switches; finding 2).
+  if observed and not mutated("fetch-unit-paths-diverge"):
+    let nft = renderEgressNft(fresh.allowedAddresses)
+    let name = sha256Hex(nft)
+    let oldSource = fileBlockSourceOf(result.ownText, EgressNftPath)
+    if oldSource.len > 0 and extractFilename(oldSource) != name:
+      let prefix = filesPrefixPath([name])
+      result.ownText = replaceFileSource(result.ownText, EgressNftPath,
+                                         prefix / name)
+      result.newFiles.add((name, nft))
+      # The observer unit names the table it loads, so the switch restarts
+      # it and the kernel's sets are the new ones.
+      result.ownText = refreshEgressUnit(result.ownText)
+      result.diff.add(EgressNftPath & ": allow-list " &
+        fresh.allowedAddresses.join(" "))
   result.changed = result.diff.len > 0
   result.digest = sha256Hex(result.ownText)
 
@@ -177,9 +178,16 @@ proc runAgentRepinCli*(args: seq[string]): int =
     return 1
   let userText = if fileExists(userProfilePath(DefaultStateDir)):
                    readFile(userProfilePath(DefaultStateDir)) else: ""
+  var entries: seq[LedgerEntry]
+  if plan.newFiles.len > 0:
+    let fp = realiseFilesPrefix(plan.newFiles)
+    recordRealised(custodySite(DefaultStateDir), fp.path, fp.digest)
+    entries.add(LedgerEntry(class: lcStorePrefix, path: fp.path,
+                            sha256: prefixIdHex(fp.id), value: fp.digest))
   let r = runAddonApply(AddonApplyOptions(stateDir: DefaultStateDir,
     hostIdentity: readHostname(), userProfileText: userText,
-    storedTarget: true, ownProfileText: plan.ownText))
+    storedTarget: true, ownProfileText: plan.ownText,
+    bootstrapEntries: entries))
   stdout.write("re-pinned the deploy agent's origins: add-on generation " &
     r.generationId & "\n")
   0

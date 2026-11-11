@@ -81,6 +81,7 @@ import ./catalog_refs
 import ./concerns
 import ./host_system
 import ./stow_scopes
+import ./macros_base_os
 
 const ProfileIntentVar* = "profileIntentBuilder"
 const ActivityBodyVar* = "activityBodyBuilder"
@@ -1405,6 +1406,7 @@ macro profile*(name: static[string]; body: untyped): untyped =
   var sawData = false
   var sawCatalogs = false
   var sawAddOn = false
+  var sawBaseOs = false
   for stmt in body:
     case stmt.kind
     of nnkCommand:
@@ -1456,6 +1458,14 @@ macro profile*(name: static[string]; body: untyped): untyped =
             error("exactly one `addOn:` section per profile", stmt)
           sawAddOn = true
           stmts.add parseAddOnSection(stmt[1], profSym)
+        of "baseOs":
+          # ReproOS add-on mode A16 (spec §6.5.1): image-time intent.
+          if stmt.len < 2 or stmt[1].kind != nnkStmtList:
+            error("baseOs must be `baseOs: <body>`", stmt)
+          if sawBaseOs:
+            error("exactly one `baseOs:` section per profile", stmt)
+          sawBaseOs = true
+          stmts.add parseBaseOsSection(stmt[1], profSym)
         else:
           error("unrecognised profile body form: " & $head, stmt)
       else:

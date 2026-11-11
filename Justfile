@@ -78,6 +78,14 @@ addon-static *ARCHES="amd64 arm64 armhf":
 e2e_addon_bootstrap_uninstall_byte_identity:
     bash ./scripts/run_addon_gate.sh t_e2e_addon_bootstrap_uninstall_byte_identity
 
+# A16 (spec §6.5): image synthesis and remote bootstrap. Both run the full
+# engine of this checkout on the build host: `just build` first.
+e2e_addon_zero_touch_image_synthesis_boots_converged:
+    REPRO_ADDON_BASES="${REPRO_ADDON_BASES:-debian-13-amd64}" bash ./scripts/run_addon_gate.sh t_e2e_addon_zero_touch_image_synthesis_boots_converged
+
+e2e_addon_anywhere_remote_bootstrap_converges_clean_guest:
+    REPRO_ADDON_BASES="${REPRO_ADDON_BASES:-debian-13-amd64}" bash ./scripts/run_addon_gate.sh t_e2e_addon_anywhere_remote_bootstrap_converges_clean_guest
+
 e2e_addon_preflight_is_zero_write:
     bash ./scripts/run_addon_gate.sh t_e2e_addon_preflight_is_zero_write
 
@@ -593,24 +601,6 @@ e2e_local_reprobuild_project_build:
         tests/e2e/local-build-engine/t_e2e_local_reprobuild_project_build.nim \
         2>&1 | tee test-logs/e2e_local_reprobuild_project_build.log
 
-e2e_codetracer_build_subset_without_tup:
-    mkdir -p test-logs build/test-bin build/nimcache
-    nim c -r \
-        --threads:on \
-        --nimcache:build/nimcache/e2e_codetracer_build_subset_without_tup \
-        --out:build/test-bin/e2e_codetracer_build_subset_without_tup \
-        tests/e2e/codetracer-subset/t_e2e_codetracer_build_subset_without_tup.nim \
-        2>&1 | tee test-logs/e2e_codetracer_build_subset_without_tup.log
-
-e2e_codetracer_in_place_project_file:
-    mkdir -p test-logs build/test-bin build/nimcache
-    nim c -r \
-        --threads:on \
-        --nimcache:build/nimcache/e2e_codetracer_in_place_project_file \
-        --out:build/test-bin/e2e_codetracer_in_place_project_file \
-        tests/e2e/codetracer-subset/t_e2e_codetracer_in_place_project_file.nim \
-        2>&1 | tee test-logs/e2e_codetracer_in_place_project_file.log
-
 e2e_repro_watch:
     mkdir -p test-logs build/test-bin build/nimcache
     nim c -r \
@@ -619,15 +609,6 @@ e2e_repro_watch:
         --out:build/test-bin/e2e_repro_watch \
         tests/e2e/watch/t_e2e_repro_watch.nim \
         2>&1 | tee test-logs/e2e_repro_watch.log
-
-e2e_codetracer_dev_environment_slice:
-    mkdir -p test-logs build/test-bin build/nimcache
-    nim c -r \
-        --threads:on \
-        --nimcache:build/nimcache/e2e_codetracer_dev_environment_slice \
-        --out:build/test-bin/e2e_codetracer_dev_environment_slice \
-        tests/e2e/codetracer-subset/t_e2e_codetracer_dev_environment_slice.nim \
-        2>&1 | tee test-logs/e2e_codetracer_dev_environment_slice.log
 
 e2e_repro_develop_cmake_configure_and_build:
     mkdir -p test-logs build/test-bin build/nimcache
@@ -828,6 +809,14 @@ lint:
     # ignore a real defect, so each shape is probed with an instance that
     # must be caught and each allowance with one that must not be.
     python3 ./scripts/check_version_literals.py --self-test 2>&1 | tee -a test-logs/lint.log
+    # A gitRunPlain result's `.output` is git's stdout and stderr merged, so a
+    # caller that parses it reads a stderr warning (`unable to find all
+    # commit-graph files`, printed while git still exits 0 with the right
+    # answer) as part of the answer. Parse sites read through
+    # gitRunPlainQuery instead; this refuses a new parse of the merged
+    # stream, and its self-test proves each refused shape is still caught.
+    python3 ./scripts/check_git_run_plain_parses.py 2>&1 | tee -a test-logs/lint.log
+    python3 ./scripts/check_git_run_plain_parses.py --self-test 2>&1 | tee -a test-logs/lint.log
     # package.nix's version literal against reprobuild.nimble. The flake check
     # nixpkgs-package-version-sync runs the same script, but `agents` has no CI
     # and nobody runs the whole flake check per commit: twice a version moved
@@ -1203,15 +1192,6 @@ integration_hcr_linux_cf_protection_sled_layout:
         tests/integration/t_integration_hcr_linux_cf_protection_sled_layout.nim \
         2>&1 | tee test-logs/integration_hcr_linux_cf_protection_sled_layout.log
 
-integration_hcr_linux_claim_conflict_with_recorder_refused:
-    mkdir -p test-logs build/test-bin build/nimcache
-    nim c -r \
-        --threads:on \
-        --nimcache:build/nimcache/integration_hcr_linux_claim_conflict_with_recorder_refused \
-        --out:build/test-bin/integration_hcr_linux_claim_conflict_with_recorder_refused \
-        tests/unit/t_unit_hcr_linux_claim_conflict_with_recorder_refused.nim \
-        2>&1 | tee test-logs/integration_hcr_linux_claim_conflict_with_recorder_refused.log
-
 unit_hcr_linux_x86_64_trampoline_encoding_and_atomicity_preconditions:
     mkdir -p test-logs build/test-bin build/nimcache
     nim c -r \
@@ -1297,34 +1277,6 @@ e2e_hcr_linux_x86_64_single_threaded_direct_patch:
         --out:build/test-bin/e2e_hcr_linux_x86_64_single_threaded_direct_patch \
         tests/e2e/hcr-linux-direct/t_e2e_hcr_linux_x86_64_single_threaded_direct_patch.nim \
         2>&1 | tee test-logs/e2e_hcr_linux_x86_64_single_threaded_direct_patch.log
-
-# HLX-M7 third entry / HX-S-2 — a recorded patch bundle is applied AGAIN, at
-# its recorded geid, by the recorded program's own in-process HCR agent, and
-# the events either side of the boundary reproduce the body that produced them.
-# Campaigns: reprobuild-specs/HCR-Linux-ELF-Provider.milestones.org HLX-M7;
-#            reprobuild-specs/HCR-Per-Platform-Handoff.milestones.org HX-S-2.
-# Records and replays with the `ct-mcr` bundle that `hcr_ct_mcr_fixture`
-# (below) builds -- the same script the graph edge
-# `reprobuild.test_fixtures.hcr_ct_mcr_bundle` runs -- so the HCR lane, which
-# runs this recipe, has the recorder without anyone building it by hand.
-e2e_hcr_linux_replay_of_patched_recording: hcr_ct_mcr_fixture
-    mkdir -p test-logs build/test-bin build/nimcache
-    nim c -r \
-        --threads:on \
-        --path:tests/e2e/hcr-linux-direct \
-        --nimcache:build/nimcache/e2e_hcr_linux_replay_of_patched_recording \
-        --out:build/test-bin/e2e_hcr_linux_replay_of_patched_recording \
-        tests/e2e/hcr-linux-direct/t_e2e_hcr_linux_replay_of_patched_recording.nim \
-        2>&1 | tee test-logs/e2e_hcr_linux_replay_of_patched_recording.log
-
-# The `ct-mcr` recorder bundle `e2e_hcr_linux_replay_of_patched_recording`
-# needs, staged into build/test-fixtures/hcr-ct-mcr: the recorder's own
-# `just build-ct-mcr`, run in the recorder's own flake dev shell (sibling from
-# $CT_CODETRACER_NATIVE_RECORDER_SIBLING, else ../codetracer-native-recorder).
-# The graph edge `reprobuild.test_fixtures.hcr_ct_mcr_bundle` runs this same
-# script; see its header. A no-op that says so off Linux x86_64.
-hcr_ct_mcr_fixture:
-    bash ./scripts/build_hcr_ct_mcr_fixture.sh
 
 # HLX-M2 — a function inside a `dlopen`ed shared library is patched.
 # Campaign: reprobuild-specs/HCR-Linux-ELF-Provider.milestones.org, HLX-M2.
@@ -3276,6 +3228,12 @@ e2e_hcr_linux_registration_payloads_travel_over_the_production_wire:
         --out:build/test-bin/e2e_hcr_linux_registration_payloads_travel_over_the_production_wire \
         tests/e2e/hcr-linux-unwind/t_e2e_hcr_linux_registration_payloads_travel_over_the_production_wire.nim \
         2>&1 | tee test-logs/e2e_hcr_linux_registration_payloads_travel_over_the_production_wire.log
+
+# The Nim 2.2.4 lane: the async suites that once awaited inside a `finally`,
+# built and run with the lowest Nim repro.nim's `uses:` range admits (owner
+# decision 2026-11-07). Needs the dev shell.
+test-nim224 *tests:
+    bash scripts/run_nim224_lane.sh {{tests}}
 
 # Exercise the actual fork parser and independent script publication guard.
 test-format:

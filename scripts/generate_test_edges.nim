@@ -445,8 +445,12 @@ proc needsSslDefine(path: string): bool =
   ##     deploy-agent's ssl ``defaultHttpGet`` (M5 over TLS), so it too must
   ##     compile with ``-d:ssl`` (the same mechanism the packaged ``repro``
   ##     binary now uses via ``apps/entrypoints.txt``).
+  ##   * The binary-cache client's post-connect deadlines: it bounds a TLS
+  ##     handshake against a peer that accepts and never answers, which
+  ##     only an ssl-enabled http_pool performs.
   path.endsWith("/t_repro_binary_cache_https_publish_authz.nim") or
-    path.endsWith("/t_repro_https_cache_end_to_end.nim")
+    path.endsWith("/t_repro_https_cache_end_to_end.nim") or
+    path.endsWith("/t_cache_reads_are_bounded.nim")
 
 proc needsSoftwareRootTestTrustDefine(path: string): bool =
   ## Five attestation gates are compiled with
@@ -745,15 +749,11 @@ proc legacySingleFileScan(repoRoot, rel: string): bool =
 const SelfInterposingTestStems = [
   "t_stackable_hooks_extracted_process_tree",
   "t_m9r40_1_probe_clean_env",
-  "test_monitor_finish_is_pooled",
-  "t_e2e_hcr_linux_replay_of_patched_recording"
+  "test_monitor_finish_is_pooled"
 ]
   ## Tests that perform ``LD_PRELOAD`` interposition THEMSELVES, and so cannot
   ## be observed by the engine's io-monitor: two interposers on the same libc
-  ## entry points re-enter each other and livelock. The recorder-backed HCR
-  ## gate also refuses the monitor's modified executable mappings and mutable
-  ## mapped shards. Its execute edge must additionally be non-cacheable because
-  ## the depfile does not observe its runtime input closure. These edges get a
+  ## entry points re-enter each other and livelock. Their execute edges get a
   ## GENERATED DEPFILE (``fs.unmonitorableActionDepfile`` feeding
   ## ``makeDepfilePolicy``) as their dependency evidence instead of monitoring.
   ## See the long note at the execute-edge call site in ``repro.nim`` for the
