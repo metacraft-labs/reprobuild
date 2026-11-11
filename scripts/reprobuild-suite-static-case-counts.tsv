@@ -2053,7 +2053,7 @@ tests/integration/t_nf4_foreign_env_contract.nim	nim	16
 tests/integration/t_nim_package_path_handling.nim	nim	1
 tests/integration/t_nim_unittest_edge_reaches_declared_c_backend.nim	nim	1
 tests/integration/t_nitro_enclave_attestation_surface.nim	nim	27
-tests/integration/t_nix_daemon_ipc.nim	nim	7
+tests/integration/t_nix_daemon_ipc.nim	nim	8
 tests/integration/t_nix_daemon_provisioner.nim	nim	12
 tests/integration/t_nix_expression_closure_keys.nim	nim	7
 tests/integration/t_nix_tool_realizations_are_gc_rooted.nim	nim	1
