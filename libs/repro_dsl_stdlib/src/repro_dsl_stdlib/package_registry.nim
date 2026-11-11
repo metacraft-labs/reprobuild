@@ -137,6 +137,10 @@ const PartialCatalogCoverage* = {
   "clingo": "Windows conda archive only; POSIX hosts use the nixPackage.",
   "nsis": "makensis runs on POSIX too; Windows archive only.",
   "curl": "Windows archive only; POSIX hosts use the nixPackage.",
+  "llvm-objdump": "Windows llvm-mingw archives only; POSIX hosts use the " &
+    "nixPackage.",
+  "llvm-strip": "Windows llvm-mingw archives only; POSIX hosts use the " &
+    "nixPackage.",
   "make": "Windows archive only; POSIX hosts use the nixPackage.",
   "bash": "Windows archive only; POSIX hosts use the nixPackage.",
   "clang": "Windows archive only; POSIX hosts use the nixPackage.",

@@ -50,7 +50,7 @@ const CatalogTarballModules* = [
     "elixir", "emcc", "ergo", "erlang", "forc", "foundry", "fpc", "gcc",
     "gcc_winlibs", "gh", "ghc", "git", "go", "gradle", "gzip",
     "host_system_tools", "innounp", "jdk", "jq", "just", "lessmsi",
-    "libtool", "llvm_mingw", "mailpit", "make", "maven", "mdbook", "meson",
+    "libtool", "llvm_mingw", "llvm_objdump", "llvm_strip", "mailpit", "make", "maven", "mdbook", "meson",
     "mingw_gcc", "mktemp", "msys2_libevent", "msys2_ncurses", "neovim",
     "nim", "nimble", "ninja", "node", "npm", "npx", "nsis", "ocaml",
     "openssl", "perl", "php", "piper", "piper_voice_lessac_medium",

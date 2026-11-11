@@ -3,7 +3,7 @@
     "graphOwnedHelperArtifacts": 35,
     "nimTestBinaries": 2713,
     "pureUnitConsolidationGroups": 79,
-    "pureUnitTests": 746,
+    "pureUnitTests": 745,
     "staticallyDetectedRuntimeCompilerFlowTests": 137,
     "testEntries": 2753
   },
@@ -1567,8 +1567,8 @@
       "graph-fixture": 21,
       "integration": 1493,
       "platform/destructive": 173,
-      "pure unit": 746,
-      "unclassified": 320
+      "pure unit": 745,
+      "unclassified": 321
     },
     "graphOwnedTestArtifacts": [
       {
@@ -29637,8 +29637,8 @@
     },
     {
       "binary": "build/test-bin/bundle_repro_dsl_stdlib_catalogs_pure_unit",
-      "class": "pure unit",
-      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "class": "unclassified",
+      "classificationReason": "imports `elixir`, which this scan does not recognize; refusing to call it pure rather than assuming it is (through `libs/repro_dsl_stdlib/tests/t_catalog_launcher_toolchain.nim`)",
       "defines": [],
       "language": "nim",
       "localDependencyShape": [
@@ -29647,8 +29647,8 @@
       "owner": "tests/bundles",
       "requiresReproBinary": false,
       "source": "tests/bundles/bundle_repro_dsl_stdlib_catalogs_pure_unit.nim",
-      "sourceSuiteCount": 15,
-      "staticCaseCount": 110,
+      "sourceSuiteCount": 16,
+      "staticCaseCount": 115,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
