@@ -1543,6 +1543,17 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "",
     singleReason: "suite-scope statement runs at every start-up: for mode in [\"in-place, payload-backed\", \"restore mode\"]:"),
   TestSpec(
+    source: "libs/repro_build_engine/tests/t_create_action_record_keys_its_argv.nim",
+    binary: "build/test-bin/t_create_action_record_keys_its_argv",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "t_group_libs_repro_build_engine_tests_g01",
+    singleReason: ""),
+  TestSpec(
     source: "libs/repro_build_engine/tests/t_da1i_evidence_scope.nim",
     binary: "build/test-bin/t_da1i_evidence_scope",
     defines: @[],
@@ -2013,7 +2024,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_libs_repro_build_engine_tests_g01",
+    group: "t_group_libs_repro_build_engine_tests_g02",
     singleReason: ""),
   TestSpec(
     source: "libs/repro_build_engine/tests/t_portable_memo_hybrid_hit_publishes_only_recorded_content.nim",
@@ -27789,6 +27800,17 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "t_group_tests_unit_g01",
     singleReason: ""),
   TestSpec(
+    source: "tests/unit/t_engine_built_actions_key_their_argv.nim",
+    binary: "build/test-bin/t_engine_built_actions_key_their_argv",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "t_group_tests_unit_g01",
+    singleReason: ""),
+  TestSpec(
     source: "tests/unit/t_every_tool_profile_is_sealed.nim",
     binary: "build/test-bin/t_every_tool_profile_is_sealed",
     defines: @[],
@@ -27973,7 +27995,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_unit_g01",
+    group: "t_group_tests_unit_g02",
     singleReason: ""),
   TestSpec(
     source: "tests/unit/t_hcr_agent_process_target.nim",
@@ -28611,7 +28633,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_unit_g02",
+    group: "t_group_tests_unit_g03",
     singleReason: ""),
   TestSpec(
     source: "tests/unit/t_m9r15q_3_kf6_umbrella_config.nim",

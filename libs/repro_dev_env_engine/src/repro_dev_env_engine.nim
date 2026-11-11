@@ -209,7 +209,11 @@ proc providerCompileBuildAction(plan: ProviderCompilePlan;
     # compiler cannot be LD_PRELOAD-injected, so its evidence is incomplete and
     # the edge must not publish. This was hard-coded ``true`` here.
     cacheable = providerCompileCacheable(plan),
-    weakFingerprint = plan.compileEdge.actionFingerprint,
+    # `actionFingerprint` covers the inner `nim c`; the helper's own command
+    # line (where it writes, which libraries it compiles against) is keyed
+    # here, exactly as the CLI's edge keys it.
+    weakFingerprint = keyedOnArgv(plan.compileEdge.actionFingerprint,
+      command, compilerCwd),
     # THE SAME EDGE, SO THE SAME DECLARATION. This runs byte-for-byte the
     # argv the CLI's own provider-compile edge runs — the ``repro`` helper
     # invoking ``nim c`` on the recipe's provider — so it must carry the same
@@ -737,7 +741,7 @@ proc devEnvIntrospectionAction(config: DevEnvEdgeConfig;
     env = config.commonMonitorEnv(),
     commandStatsId = "repro dev-env introspection edge",
     cacheable = true,
-    weakFingerprint = weak,
+    weakFingerprint = keyedOnArgv(weak, argv, config.workDir),
     # Dev-Env-Warm-Entry.md §4. Scoped to this edge AND to the `nix` image:
     # entropy from anything else in the tree (recipe code in the provider
     # included) still withholds the entry.
@@ -754,13 +758,14 @@ proc shellRenderAction(config: DevEnvEdgeConfig; artifactPath,
     "reprobuild.dev-env.shell-render.v2",
     artifactPath
   ])
-  action("__repro_dev_env_shell_render", @[
+  let argv = @[
     config.publicCliPath,
     "__repro-render-dev-env-shell",
     "--artifact", artifactPath,
     "--out", shellFragmentPath,
     "--navigator-stats", navigatorStatsPath
-  ],
+  ]
+  action("__repro_dev_env_shell_render", argv,
     # Named-Lock-Files §7.2 — see `lockIdentityOutsideSolvedGraph`.
     governingLockIdentity = lockIdentityOutsideSolvedGraph(),
     cwd = config.workDir,
@@ -768,7 +773,7 @@ proc shellRenderAction(config: DevEnvEdgeConfig; artifactPath,
     outputs = @[shellFragmentPath, navigatorStatsPath],
     commandStatsId = "repro dev-env shell render edge",
     cacheable = true,
-    weakFingerprint = weak,
+    weakFingerprint = keyedOnArgv(weak, argv, config.workDir),
     dependencyPolicy = automaticMonitorGatheringPolicy())
 
 proc devEnvNixProvisioningActions*(toolUses: openArray[InterfaceToolUse];
