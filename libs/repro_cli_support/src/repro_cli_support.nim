@@ -57525,6 +57525,11 @@ proc runCachePushCommand*(args: openArray[string]): int =
     if maintenanceDue(gitBin, bare, defaultMaintenanceBudget()):
       let live = liveWorkspaceNamesForCache(workspaceRoot)
       discard maintainSharedBare(gitBin, bare, live, defaultMaintenanceBudget())
+    # Then every other due bare in the cache. A bare whose checkouts never
+    # commit is never pushed into, so without this its age bound would never
+    # fire. Each is budget-gated, and this process is already detached.
+    discard maintainOtherSharedBares(gitBin, absolutePath(cacheRoot), [bare],
+      defaultMaintenanceBudget())
   except CatchableError:
     discard
   0
@@ -79210,6 +79215,12 @@ type
     sweep*: seq[SharedBareSweepEntry]
       ## ``gc`` and ``rewire``: every bare in the cache root, with the state
       ## found before the eager sweep repaired it.
+    otherBares*: seq[MaintenanceResult]
+      ## ``gc`` only: the passes over bares no repo of the resolved project
+      ## names, each one due (or forced). Their ``refs/cache/*`` are kept.
+    warnings*: seq[string]
+      ## Conditions that did not stop the verb, such as a sibling workspace
+      ## whose state cannot be read and is therefore counted live.
     diagnostics*: seq[string]
     exitCode*: int
 
@@ -79261,6 +79272,13 @@ proc toJsonNode*(report: SharedClonesReport): JsonNode =
     sweep.add(%*{"bare": e.path, "before": e.before, "after": e.after,
       "repaired": e.repaired, "diagnostic": e.diagnostic})
   result["sweep"] = sweep
+  var others = newJArray()
+  for m in report.otherBares:
+    others.add(%*{"bare": m.sharedBarePath, "ok": m.ok,
+      "maintenanceRan": m.ran, "looseBefore": m.looseBefore,
+      "looseAfter": m.looseAfter, "diagnostic": m.diagnostic})
+  result["otherBares"] = others
+  result["warnings"] = %report.warnings
   result["diagnostics"] = %report.diagnostics
   result["exitCode"] = %report.exitCode
 
@@ -79281,6 +79299,8 @@ proc renderSharedClonesTextLines*(report: SharedClonesReport): seq[string] =
       if lr.diagnostic.len > 0:
         line.add(" diagnostic=" & lr.diagnostic)
       result.add(line)
+    for w in report.warnings:
+      result.add("workspace shared-clones: warning: " & w)
     for d in report.diagnostics:
       result.add("workspace shared-clones: error: " & d)
     return
@@ -79320,6 +79340,21 @@ proc renderSharedClonesTextLines*(report: SharedClonesReport): seq[string] =
           " carried the fetch refspec WITHOUT the borrower-safety config, a " &
           "state this build never writes; another tool is writing this " &
           "cache" & (if e.repaired: " (repaired)" else: ""))
+  if report.verb == "gc":
+    var ran = 0
+    for m in report.otherBares:
+      if m.ran: inc ran
+    result.add("workspace shared-clones: other bares due=" &
+      $report.otherBares.len & " maintained=" & $ran)
+    for m in report.otherBares:
+      var line = "workspace shared-clones: other bare " & m.sharedBarePath &
+        " maintenanceRan=" & $m.ran &
+        " loose=" & $m.looseBefore & "->" & $m.looseAfter
+      if m.diagnostic.len > 0:
+        line.add(" diagnostic=" & m.diagnostic)
+      result.add(line)
+  for w in report.warnings:
+    result.add("workspace shared-clones: warning: " & w)
   for d in report.diagnostics:
     result.add("workspace shared-clones: error: " & d)
 
@@ -79365,10 +79400,16 @@ proc parseSharedClonesArgs(args: openArray[string]): SharedClonesArgs =
     result.workspaceRoot = getCurrentDir()
   result.workspaceRoot = absolutePath(result.workspaceRoot)
 
-proc liveWorkspaceRootsForCache(workspaceRoot: string): seq[string] =
+proc liveWorkspaceRootsForCache(workspaceRoot: string;
+                                warnings: var seq[string]): seq[string] =
   ## This workspace plus every initialized sibling workspace under the same
   ## parent directory: the workspaces that share this machine's shared
   ## clones in the usual side-by-side layout.
+  ##
+  ## A sibling whose state cannot be read (its state file is refused or
+  ## malformed) counts as live, and a warning names it: this set exists to
+  ## KEEP refs, so a sibling we cannot classify keeps its refs, and one
+  ## unreadable sibling does not stop maintenance of the whole cache.
   result.add(workspaceRoot)
   let parent = workspaceRoot.parentDir
   if parent.len > 0 and dirExists(parent):
@@ -79377,10 +79418,23 @@ proc liveWorkspaceRootsForCache(workspaceRoot: string): seq[string] =
         continue
       if entry == workspaceRoot:
         continue
-      if isInitializedWorkspace(entry):
+      var live = false
+      try:
+        live = isInitializedWorkspace(entry)
+      except CatchableError as error:
+        live = true
+        warnings.add("sibling workspace " & entry & " is counted live and " &
+          "its cache refs are kept, because its state cannot be read: " &
+          error.msg)
+      if live:
         result.add(entry)
 
-proc liveWorkspaceNamesForCache(workspaceRoot: string): seq[string] =
+proc liveWorkspaceRootsForCache(workspaceRoot: string): seq[string] =
+  var ignored: seq[string]
+  liveWorkspaceRootsForCache(workspaceRoot, ignored)
+
+proc liveWorkspaceNamesForCache(workspaceRoot: string;
+                                warnings: var seq[string]): seq[string] =
   ## RA-15 liveness predicate for dead-workspace ref pruning. The cache-ref
   ## namespace (``refs/cache/<workspace>/<branch>``) uses each workspace
   ## directory's basename (see RA-4 ``spawnAsyncCachePush``). A shared bare is
@@ -79390,7 +79444,12 @@ proc liveWorkspaceNamesForCache(workspaceRoot: string): seq[string] =
   ## not in this set belongs to a workspace that no longer exists on disk and
   ## is safe to prune. We err on the side of KEEPING a ref: only directories
   ## that fail the initialized-workspace check are treated as dead.
-  discoverLiveWorkspaceNames(liveWorkspaceRootsForCache(workspaceRoot))
+  discoverLiveWorkspaceNames(liveWorkspaceRootsForCache(workspaceRoot,
+    warnings))
+
+proc liveWorkspaceNamesForCache(workspaceRoot: string): seq[string] =
+  var ignored: seq[string]
+  liveWorkspaceNamesForCache(workspaceRoot, ignored)
 
 proc executeSharedClones(parsed: SharedClonesArgs): SharedClonesReport =
   result.verb = parsed.verb
@@ -79423,7 +79482,7 @@ proc executeSharedClones(parsed: SharedClonesArgs): SharedClonesReport =
     for repo in resolved.repos:
       candidates.add(parsed.workspaceRoot / repo.path)
     for found in findCheckoutsUnder(
-        liveWorkspaceRootsForCache(parsed.workspaceRoot)):
+        liveWorkspaceRootsForCache(parsed.workspaceRoot, result.warnings)):
       if found notin candidates:
         candidates.add(found)
     let migration = migrateSharedClones(identity.binaryPath,
@@ -79439,7 +79498,8 @@ proc executeSharedClones(parsed: SharedClonesArgs): SharedClonesReport =
   # once for the whole pass (it is the same for every bare in this run).
   var liveWorkspaces: seq[string]
   if parsed.verb == "gc":
-    liveWorkspaces = liveWorkspaceNamesForCache(parsed.workspaceRoot)
+    liveWorkspaces = liveWorkspaceNamesForCache(parsed.workspaceRoot,
+      result.warnings)
 
   # The eager sweep: every bare in the cache, not only the ones this
   # project declares, gets the refspec and the safety config. Run before the
@@ -79580,6 +79640,20 @@ proc executeSharedClones(parsed: SharedClonesArgs): SharedClonesReport =
       except CatchableError as error:
         entry.diagnostic.add("; cannot inspect alternates: " & error.msg)
     result.repos.add(entry)
+
+  # Every other bare in the cache: one whose checkouts only read or sync, or
+  # that only a workspace elsewhere declares, is maintained from here too,
+  # budget-gated like the rest. Its ``refs/cache/*`` are left alone: this
+  # workspace cannot tell which workspaces still own them.
+  if parsed.verb == "gc":
+    result.otherBares = maintainOtherSharedBares(identity.binaryPath,
+      result.cacheRoot, maintainedBares.toSeq, defaultMaintenanceBudget(),
+      parsed.force)
+    for m in result.otherBares:
+      if not m.ok:
+        result.diagnostics.add(m.sharedBarePath & ": maintenance failed: " &
+          m.diagnostic)
+        result.exitCode = 1
 
 proc writeSharedClonesReport(report: SharedClonesReport;
                              destination: string) =
