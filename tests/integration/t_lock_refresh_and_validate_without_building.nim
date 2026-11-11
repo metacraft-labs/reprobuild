@@ -19,6 +19,7 @@
 ## assertion 3 (exit 2 on tamper) would FAIL.
 
 import std/[os, osproc, strutils, unittest]
+import repro_test_support/reasoned_skip
 
 const ReprobuildRepoRoot = currentSourcePath().parentDir().parentDir().parentDir()
   ## The reprobuild checkout root, resolved from THIS SOURCE FILE's path
