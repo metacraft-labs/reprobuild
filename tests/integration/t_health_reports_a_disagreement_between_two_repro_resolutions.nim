@@ -270,3 +270,65 @@ suite "PG-14 — health reports a disagreement between two repro resolutions":
       let controlRow = findCheck(parseJson(control.output), "hook-interpreter")
       check not controlRow.isNil
       check controlRow["status"].getStr() == "ok"
+
+  test "t_vcs_hooks_is_not_ok_while_a_resolution_refuses_the_bodies_it_counted":
+    ## The ``vcs-hooks`` row judges each installed body against the INVOKED
+    ## build. Measured in the field: a ``repro health`` from a current build
+    ## reported ``vcs-hooks ok`` over 985 bodies while ``hook-interpreter``, in
+    ## the same table, reported that the workspace's cached direnv dev shell
+    ## resolves a build that refuses them — so every hook refused in the shell
+    ## the operator commits from, under a green row. This fixture is that
+    ## state: every body is current for the invoked build, and a dev shell
+    ## supplies one that refuses them.
+    ##
+    ##   (V1) ``vcs-hooks`` is not ``ok`` while ``hook-interpreter`` is not
+    ##   (V2) its detail names the build it judged against, by path, and points
+    ##        at the ``hook-interpreter`` row
+    ##   (V3) its remedy reconciles the supply and never offers ``hooks ensure``
+    ##        (the files are right; re-authoring them fixes nothing)
+    ##   (V4) CONTROL — with the refusing resolution gone, ``vcs-hooks`` is
+    ##        ``ok`` again and still names the build it judged against
+    let gitBin = findExe("git")
+    if gitBin.len == 0:
+      skip("git not on PATH; this case needs real repositories carrying " &
+        "installed managed hooks for a resolution to refuse")
+    else:
+      let fx = setupFixture(gitBin)
+      defer: removeDir(fx.scratch)
+
+      let res = invokeHealth(fx, fx.reproBin)
+      checkpoint("health --json output:\n" & res.output)
+      let report = parseJson(res.output)
+      let interpreter = findCheck(report, "hook-interpreter")
+      let row = findCheck(report, "vcs-hooks")
+      check not interpreter.isNil
+      check not row.isNil
+      # Precondition: the fixture really is the disagreeing state.
+      check interpreter["status"].getStr() != "ok"
+      let status = row["status"].getStr()
+      let detail = row["detail"].getStr()
+      let remedy = row["remedy"].getStr()
+      checkpoint("vcs-hooks: status=" & status & "\ndetail=" & detail &
+        "\nremedy=" & remedy)
+
+      # (V1)
+      check status == "warn"
+      # (V2)
+      check "judged against the invoked build" in detail
+      check engineBinary() in detail
+      check "hook-interpreter" in detail
+      # (V3)
+      check remedy.len > 0
+      check "direnv reload" in remedy
+      check "hooks ensure" notin remedy
+
+      # (V4) CONTROL
+      removeFile(fx.rcPath)
+      let control = invokeHealth(fx, fx.reproBin)
+      checkpoint("control health output:\n" & control.output)
+      let controlRow = findCheck(parseJson(control.output), "vcs-hooks")
+      check not controlRow.isNil
+      check controlRow["status"].getStr() == "ok"
+      check "judged against the invoked build" in
+        controlRow["detail"].getStr()
+      check engineBinary() in controlRow["detail"].getStr()
