@@ -26653,6 +26653,7 @@ proc startAutoRunQuotaIfNeeded*(bypassRunQuota: bool): owned(Process) =
   # terminating signal is forwarded to it, and the daemon itself stops when
   # it is re-parented (the SIGKILL case) -- and it inherits none of this
   # invocation's descriptors above 2. `spawnOwnedRunQuotaDaemon` says how.
+  let spawnedAt = getMonoTime()
   when defined(windows):
     result = spawnDetachedRunQuotaDaemon(runquotad, args)
   else:
@@ -26768,19 +26769,68 @@ proc startAutoRunQuotaIfNeeded*(bypassRunQuota: bool): owned(Process) =
       readinessError = error.msg
       break
     sleep(50)
+  # WHICH WAY THE WAIT ENDED, recorded BEFORE the cleanup below touches the
+  # daemon. A daemon that exited by itself and one that was alive at the
+  # ceiling and is terminated next leave the same refused socket behind, and
+  # they send an investigator to opposite halves of the system: the first to
+  # the daemon's own output, the second to the client's reachability probe.
+  # Once the cleanup has terminated and reaped the child nothing can tell
+  # them apart, so the error states its fate, read without reaping it.
+  let waitedMillis = (getMonoTime() - spawnedAt).inMilliseconds
+  var daemonFate = ""
+  if readinessError.len == 0:
+    try:
+      daemonFate = ownedDaemonExitDescription(result)
+    except OSError as error:
+      readinessError = error.msg
   # THE SPAWN FAILED, so the daemon is no longer ours to forward signals to.
   # Unregistered BEFORE it is terminated and reaped, so the forwarder can never
   # signal its pid after the kernel has handed it to another process.
   when not defined(windows):
     unregisterOwnedDaemon(processID(result))
-  try:
-    # Only inspect/reap after unregistering. ECHILD means ownership was lost;
-    # running then raises, so no signal is sent to a possibly reused pid.
-    if result.running:
-      result.terminate()
-      discard result.waitForExit()
-  except CatchableError:
-    discard
+  var terminatedByUs = false
+  if readinessError.len > 0:
+    try:
+      # Only inspect/reap after unregistering. ECHILD means ownership was
+      # lost; running then raises, so no signal is sent to a possibly
+      # reused pid.
+      if result.running:
+        result.terminate()
+        discard result.waitForExit()
+    except CatchableError:
+      discard
+  else:
+    # Read the fate again, still without reaping, now that the pid is
+    # unregistered: the daemon may have ended in between. A fate found here
+    # is reported as such -- an exit code or a signal, never folded into one
+    # -- and an error (ECHILD: ownership lost) sends no signal and is
+    # reported as unobservable rather than as an invented exit.
+    if daemonFate.len == 0:
+      try:
+        daemonFate = ownedDaemonExitDescription(result)
+        terminatedByUs = daemonFate.len == 0
+      except OSError as error:
+        readinessError = error.msg
+    if readinessError.len == 0:
+      try:
+        if terminatedByUs:
+          result.terminate()
+        discard result.waitForExit()
+      except CatchableError:
+        discard
+  let fate =
+    if readinessError.len > 0:
+      ": " & readinessError & " (" & $waitedMillis &
+        " ms after it was started)"
+    elif terminatedByUs:
+      ": it was still running " & $waitedMillis &
+        " ms after it was started, at the " &
+        $RunQuotaDaemonReadinessTimeout.inSeconds &
+        " s readiness ceiling, but never answered the reachability " &
+        "probe; repro terminated it"
+    else:
+      ": it exited before it listened, " & $waitedMillis &
+        " ms after it was started, with " & daemonFate
   when not defined(windows):
     drainStartupOutput(startupStdout, cint(result.outputHandle))
     drainStartupOutput(startupStderr, cint(result.errorHandle))
@@ -26794,8 +26844,7 @@ proc startAutoRunQuotaIfNeeded*(bypassRunQuota: bool): owned(Process) =
     when defined(windows): "default per-user named pipe"
     else: socket
   raise newException(OSError,
-    "runquotad did not become reachable at " & endpointHint &
-    (if readinessError.len > 0: ": " & readinessError else: "") &
+    "runquotad did not become reachable at " & endpointHint & fate &
     (when defined(windows): ""
      else: startupDiagnostic(startupStdout, "stdout") &
        startupDiagnostic(startupStderr, "stderr")))
