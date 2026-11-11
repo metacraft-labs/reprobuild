@@ -194,6 +194,7 @@ libs/repro_build_engine/tests/t_portable_fingerprint_engine.nim	nim	10
 libs/repro_build_engine/tests/t_portable_memo_hybrid_hit_publishes_only_recorded_content.nim	nim	2
 libs/repro_build_engine/tests/t_portable_record_from_local_hit.nim	nim	5
 libs/repro_build_engine/tests/t_preserve_tree_rerun_never_writes_through_links.nim	nim	10
+libs/repro_build_engine/tests/t_provision_receipt_publish_is_atomic.nim	nim	3
 libs/repro_build_engine/tests/t_published_record_states_evidence_source.nim	nim	3
 libs/repro_build_engine/tests/t_publishers_refuse_level1_records.nim	nim	4
 libs/repro_build_engine/tests/t_publishers_refuse_zero_evidence_records.nim	nim	3
