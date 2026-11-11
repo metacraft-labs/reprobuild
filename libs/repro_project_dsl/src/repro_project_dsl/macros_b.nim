@@ -2637,13 +2637,10 @@ proc l4HeadWordOf(node: NimNode): string =
   ## for `identity.stable` and for `identity.stable.v2` alike — or `""`
   ## when the node is not an ident-or-dot path.
   ##
-  ## The dotted case is why this is a separate proc. It is the open
-  ## escalation on
-  ## `issues/2026-10-08-service-body-setters-are-silently-dropped.md`:
-  ## `identity.stable "com.example.sso"` and `scope.workspace` compile
-  ## with ZERO errors and leave the service on the DEFAULT identity,
-  ## because the previous matcher covered ident, sym, accent-quoted,
-  ## assignment and single-child-call shapes and not `nnkDotExpr`.
+  ## The dotted case is why this is a separate proc:
+  ## `identity.stable "com.example.sso"` and `scope.workspace` name their
+  ## setter in the FIRST segment of a dotted head, and are refused with
+  ## the §4 remedy rather than the generic one.
   case node.kind
   of nnkIdent, nnkSym, nnkAccQuoted: identText(node)
   of nnkDotExpr:
@@ -2653,28 +2650,14 @@ proc l4HeadWordOf(node: NimNode): string =
 proc l4IdentityScopeHeadName(stmt: NimNode): string =
   ## `"identity"` / `"scope"` / `"compatibility"` when `stmt` spells one
   ## of the three instance-declaration setters in a shape the setter walk
-  ## would otherwise SKIP, else `""`.
+  ## cannot read, else `""`.
   ##
-  ## Which shapes those are is not hypothetical. `m5ParseServiceBody`
-  ## continues past anything that is not an `nnkCall`/`nnkCommand` with
-  ## at least two children, so a bare `identity` and an `identity =
-  ## derived` both compiled clean and recorded nothing at all. This is
-  ## the same family as the nineteen dropped constructs this campaign has
-  ## found, caught before it shipped rather than after.
-  ##
-  ## L6 adds two shapes to the list, and one of them was already a filed
-  ## defect:
-  ##
-  ##   * `compatibility` in any of those shapes, for the new setter; and
-  ##   * a DOTTED head for ANY of the three — `identity.stable "x"`,
-  ##     `scope.workspace`, `compatibility.major 2`. A dotted head is not
-  ##     a statement at the wrong level, it is a *spelling* of the right
-  ##     one, and the three setters §4 owns are the ones whose silent
-  ##     loss costs a durable-state decision. The issue's GENERAL case
-  ##     (`description.x "..."`, `totallyMadeUp = 3`) is untouched and
-  ##     stays open: what a blanket refusing `else` arm should say about a
-  ##     statement recognised at a DIFFERENT level is the judgement that
-  ##     issue was filed to defer.
+  ## Those shapes are a bare `identity`, an assigned `identity =
+  ## derived`, an argument-less call, and a DOTTED head for any of the
+  ## three — `identity.stable "x"`, `scope.workspace`,
+  ## `compatibility.major 2`. They are refused here, ahead of the setter
+  ## walk's generic refusal, so the message spells all three setters §4
+  ## owns: they are the ones whose loss costs a durable-state decision.
   var head: NimNode = nil
   if stmt.kind in {nnkIdent, nnkSym, nnkAccQuoted, nnkDotExpr}:
     head = stmt
@@ -2684,8 +2667,7 @@ proc l4IdentityScopeHeadName(stmt: NimNode): string =
     head = stmt[0]
   elif stmt.kind in {nnkCall, nnkCommand} and stmt.len >= 2 and
       stmt[0].kind == nnkDotExpr:
-    # `identity.stable "x"` — a CALL with arguments, which the walk below
-    # skips on `stmt[0].kind notin {nnkIdent, nnkSym, nnkAccQuoted}`.
+    # `identity.stable "x"` — a CALL with arguments behind a dotted head.
     head = stmt[0]
   if head == nil:
     return ""
@@ -2958,9 +2940,7 @@ proc l4ServiceIdentityScope(body: NimNode): L4ServiceIdentityScope =
     let dropped = l4IdentityScopeHeadName(stmt)
     if dropped.len > 0:
       error("`" & stmt.repr.strip() & "` is not a shape `" & dropped &
-        "` is written in, and this walker would otherwise SKIP it " &
-        "entirely -- no diagnostic, no record, the service left on the " &
-        "default. Shared-Development-Services.md §4 spells the three " &
+        "` is written in. Shared-Development-Services.md §4 spells the three " &
         "setters as commands: " & l4RecognisedIdentityModes & ", " &
         l4RecognisedScopes & ", and " & l6RecognisedCompatibility & ". " &
         l4IdentityDropRule,
@@ -3015,9 +2995,8 @@ proc l4ServiceIdentityScope(body: NimNode): L4ServiceIdentityScope =
 # refuses, each with the supervision setters' own remedy:
 #
 #   * a bare `readiness` / `instance` / `workingDirectory` /
-#     `stateDirectory` ident, which the Call/Command filter drops;
-#   * a DOTTED head (`cfg.readiness fileExists(...)`), which the
-#     ident-kind filter drops;
+#     `stateDirectory` ident;
+#   * a DOTTED head (`cfg.readiness fileExists(...)`);
 #   * a readiness kind that is not one of the three the SUPERVISOR
 #     implements;
 #   * `environment`, `identity`, `scope` and `ttlSeconds` inside the
@@ -3075,12 +3054,10 @@ proc l9DottedSetterHead(stmt: NimNode): string =
   ## The supervision setter name a DOTTED head spells, or "".
   ##
   ## `cfg.readiness fileExists(...)` parses as
-  ## `Command(DotExpr(cfg, readiness), Call(...))`, and the setter
-  ## walk's `if stmt[0].kind notin {nnkIdent, nnkSym, nnkAccQuoted}:
-  ## continue` drops it with no diagnostic. The shape is plausible
-  ## enough to be written -- the `args cfg.path` setter beside it takes
-  ## exactly that kind of expression -- and the consequence is the
-  ## silent no-probe race above.
+  ## `Command(DotExpr(cfg, readiness), Call(...))`. The shape is
+  ## plausible enough to be written -- the `args cfg.path` setter beside
+  ## it takes exactly that kind of expression -- so it is refused with
+  ## the supervision setters' own remedy.
   if stmt.kind notin {nnkCall, nnkCommand}:
     return ""
   if stmt.len < 1 or stmt[0].kind != nnkDotExpr:
@@ -3099,9 +3076,8 @@ proc l9BareSetterHead(stmt: NimNode): string =
   ## The supervision setter name a BARE IDENT spells, or "".
   ##
   ## `readiness` on its own, or `instance` with no body, reaches the
-  ## setter walk as an `nnkIdent`, is not one of the short-form reactive
-  ## atoms, and is then dropped by `if stmt.kind notin {nnkCall,
-  ## nnkCommand}: continue`.
+  ## setter walk as an `nnkIdent` and is not one of the short-form
+  ## reactive atoms.
   if stmt.kind notin {nnkIdent, nnkSym, nnkAccQuoted}:
     return ""
   let word = identText(stmt).normalize
@@ -3114,10 +3090,7 @@ proc l9EmptyCallSetterHead(stmt: NimNode): string =
   ##
   ## `readiness()` / `instance()` / `workingDirectory()` /
   ## `stateDirectory()` reach the setter walk as an `nnkCall` of length
-  ## ONE, so they survive the statement-kind filter and are then dropped
-  ## by `if stmt.len < 2: continue` -- the ARITY filter, which is the
-  ## third of this walker's three `continue`s and was the one left
-  ## uncovered when the other two were closed.
+  ## ONE.
   ##
   ## This matches ONLY the four supervision names, deliberately. A
   ## one-child `nnkCall` is a legal spelling elsewhere in this DSL --
@@ -3143,9 +3116,8 @@ proc l9RefuseSupervisionNearMisses(stmt: NimNode) =
   let empty = l9EmptyCallSetterHead(stmt)
   if empty.len > 0:
     error("`" & stmt.repr.strip() & "` calls the setter `" & empty &
-      "` with NO ARGUMENTS, and the setter walk drops a statement with " &
-      "fewer than two children before it ever reads the head -- so " &
-      "this would be skipped entirely. None of the supervision " &
+      "` with NO ARGUMENTS, which is not a shape any supervision " &
+      "setter is written in. None of the supervision " &
       "setters has a zero-argument meaning: " & l9SupervisionSurface &
       ". (An EMPTY `instance:` block is spelled `instance:` with a " &
       "`discard` body, not `instance()`.) " & l9NoSilentDropRule,
@@ -3153,16 +3125,16 @@ proc l9RefuseSupervisionNearMisses(stmt: NimNode) =
   let bare = l9BareSetterHead(stmt)
   if bare.len > 0:
     error("`" & stmt.repr.strip() & "` is a bare identifier, and `" &
-      bare & "` is a SETTER that takes an argument. The setter walk " &
-      "would skip it entirely. The supervision setters are " &
+      bare & "` is a SETTER that takes an argument. The supervision " &
+      "setters are " &
       l9SupervisionSurface & "; the readiness probes are " &
       l9RecognisedReadiness & ". " & l9NoSilentDropRule,
       m5ServiceStmtAnchor(stmt))
   let dotted = l9DottedSetterHead(stmt)
   if dotted.len > 0:
     error("`" & stmt.repr.strip() & "` writes the setter `" & dotted &
-      "` behind a dotted head, and the setter walk accepts only a bare " &
-      "setter name -- so it would be skipped entirely. Write `" &
+      "` behind a dotted head, and a setter is written with a bare " &
+      "setter name. Write `" &
       dotted & " ...` at the top level of the `service` body. " &
       l9NoSilentDropRule,
       m5ServiceStmtAnchor(stmt))
@@ -3766,15 +3738,15 @@ proc m5ParseServiceBody(body: NimNode): tuple[
   for stmt in body:
     # The short-form reactive atoms are bare idents (``hotReload``,
     # ``restartOnCrash``) as well as calls, so they are tried before the
-    # Call/Command filter below — which is why M5 dropped them.
+    # Call/Command shape check below.
     let shortForm = m5ServiceShortFormEmission(stmt)
     if shortForm != nil:
       result.reactiveEmissions.add(shortForm)
       continue
-    # Shared-Development-Services L9: the two shapes the three filters
-    # below drop in silence -- a bare supervision setter name and a
-    # dotted head. Refused HERE, before any filter, because each filter
-    # is a `continue` with no diagnostic.
+    # Shared-Development-Services L9: a bare supervision setter name, a
+    # dotted head and an argument-less call are refused HERE, with the
+    # supervision setters' own remedy, ahead of the generic refusal
+    # below.
     l9RefuseSupervisionNearMisses(stmt)
     # Every setter is a call or a command with at least one argument and
     # a bare name at its head. A statement of any other shape is not
@@ -3811,8 +3783,12 @@ proc m5ParseServiceBody(body: NimNode): tuple[
       result.reactiveEmissions.add(m5ServiceTriggerEmission(stmt))
     of "executable":
       # ``executable <ident>`` — record the ident's text, unevaluated.
-      # Any other expression is kept as a node and spliced.
-      if stmt.len >= 2 and stmt[1].kind in
+      # Any other expression is kept as a node and spliced. It names ONE
+      # executable, so a second value or a named argument is refused
+      # rather than read as its first value alone.
+      if stmt.len != 2 or stmt[1].kind == nnkExprEqExpr:
+        m5RefuseServiceBodyStatement(stmt)
+      if stmt[1].kind in
           {nnkIdent, nnkSym, nnkAccQuoted}:
         result.executableRef = identText(stmt[1])
         result.executableExpr = nil

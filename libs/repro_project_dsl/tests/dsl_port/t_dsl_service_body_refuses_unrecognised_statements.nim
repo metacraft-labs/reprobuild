@@ -18,13 +18,13 @@
 ## ``service_block_compile_probe.nim`` for why ``compiles(...)`` cannot
 ## be used for a ``package`` block.
 ##
-## WHICH DISCRIMINATOR EACH CASE RESTS ON. Before the setter walk refused
-## by name, every edited statement below compiled with EXIT 0 and was
-## discarded — the walk skipped any statement it could not read as a
-## setter. So the exit status discriminates (0 before, non-zero after)
-## and is asserted, and the DIAGNOSTIC TEXT is asserted beside it,
-## because the requirement is that the author is told where the
-## statement belongs, not merely that the build stops.
+## WHICH DISCRIMINATOR EACH CASE RESTS ON. A walk that skips a statement
+## it cannot read as a setter compiles every edited recipe below with
+## EXIT 0, except `restart backoff = ...`, which then fails only with a
+## type mismatch on a parameter name. So the exit status is asserted,
+## and the DIAGNOSTIC TEXT is asserted beside it, because the
+## requirement is that the author is told where the statement belongs,
+## not merely that the build stops.
 ##
 ## Every refusal is a one-line edit to ONE well-formed recipe, whose own
 ## compile is the first test: if the control goes red, the refusals stop
@@ -161,6 +161,28 @@ suite "service body — a setter in a shape the walk cannot read":
     check not probe.ok
     check probe.mentions(
       "is not a shape the `service` setter `description`")
+
+  test "`executable` given two values is refused, not halved":
+    let probe = edited("    executable probeBin",
+      "    executable probeBin, otherBin", "body-two-executables")
+    checkpoint(probe.output)
+    check not probe.ok
+    check probe.mentions(
+      "is not a shape the `service` setter `executable`")
+
+  test "a refused setter shape is not described as skipped":
+    # The L4 and L9 near-miss refusals run ahead of the generic one; the
+    # walk refuses every statement, so none of them may tell the author
+    # that the statement would have been skipped.
+    for (spelling, tag) in [("readiness()", "body-l9-empty"),
+                            ("readiness", "body-l9-bare"),
+                            ("cfg.readiness none", "body-l9-dotted"),
+                            ("identity = derived", "body-l4-assigned")]:
+      let probe = added("    " & spelling, tag)
+      checkpoint(probe.output)
+      check not probe.ok
+      check probe.mentions(spelling)
+      check not probe.output.toLowerAscii.contains("skip")
 
   test "`env` in the command form is told the call form":
     let probe = added("    env \"KEY\", \"VALUE\"", "body-env-command")
