@@ -39,6 +39,7 @@ import repro_core/relocation
 # repo's way of saying so out loud rather than tripping the ambient-execution
 # lint at every probe site.
 import repro_core/ambient_execution
+import repro_core/process_exec
 import repro_core/cli_images
 import repro_core/source_root
 from repro_core/workspace_root import firstMembershipManifestPath,
@@ -44626,7 +44627,7 @@ proc scopeRepoPathSet(workspaceRoot: string;
 
 proc gitRunPlain(identity: GitToolIdentity;
                  args: openArray[string]): tuple[code: int; output: string] =
-  ## Tiny ``execCmdEx`` wrapper used by the sync observation gatherer.
+  ## Tiny ``execCmdExCloseOnce`` wrapper used by the sync observation gatherer.
   ## Shares the same shape as ``revParse`` above but takes an argv so
   ## callers don't have to quoteShell every arg.
   ##
@@ -44673,7 +44674,7 @@ proc gitRunPlain(identity: GitToolIdentity;
     for arg in args:
       cmd.add(" ")
       cmd.add(quoteShell(arg))
-    let res = execCmdEx(cmd, options = {poStdErrToStdOut, poUsePath},
+    let res = execCmdExCloseOnce(cmd, options = {poStdErrToStdOut, poUsePath},
       env = scrubbedGitRepositoryEnv())
     (code: res.exitCode, output: res.output)
 
@@ -44788,7 +44789,7 @@ proc gitRunPlainEnv(identity: GitToolIdentity; args: openArray[string];
     var cmd = quoteShell(identity.binaryPath)
     for arg in args:
       cmd.add(" " & quoteShell(arg))
-    let res = execCmdEx(cmd, options = {poStdErrToStdOut, poUsePath},
+    let res = execCmdExCloseOnce(cmd, options = {poStdErrToStdOut, poUsePath},
       env = scrubbedGitChildEnv(capability, internalContext))
     (res.exitCode, res.output)
 

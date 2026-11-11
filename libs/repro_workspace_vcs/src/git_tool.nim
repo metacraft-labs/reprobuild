@@ -23,6 +23,7 @@ when defined(windows):
   import std/winlean
 
 import repro_core/codec
+import repro_core/process_exec
 import repro_hash
 import repro_hash/text as hashText
 import repro_interface_artifacts
@@ -521,7 +522,7 @@ proc gitRunSeparated*(gitBin: string; args: openArray[string];
       let options =
         if errPath.len > 0: {poUsePath}
         else: {poUsePath, poStdErrToStdOut}
-      let res = execCmdEx(cmd, options = options, env = env)
+      let res = execCmdExCloseOnce(cmd, options = options, env = env)
       result.code = res.exitCode
       result.output = res.output
       if outPath.len > 0:
