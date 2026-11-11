@@ -239,6 +239,22 @@ fi
 echo "ok: all ${found_refs} shared-action reference(s) name @dev or a SHA"
 
 # =============================================================================
+# flake.lock: every revision-pinned node carries its derived fields
+#
+# A `github`/`gitlab`/`sourcehut`/`git` node in flake.lock that names a `rev`
+# without the `narHash` and `lastModified` (and, for an unshallow git input,
+# `revCount`) nix derives from it is unverifiable, and a store path already
+# holding that tree cannot satisfy it: every `nix develop`, the pre-commit
+# hook's included, has to fetch the input from its forge again, and fails
+# wherever that forge is unreachable. nix treats such a node as fully locked
+# and never adds the fields back, so nothing else notices. Offline; the unit
+# test runs first so a gate that has stopped refusing is seen.
+# =============================================================================
+echo "== flake.lock derived fields =="
+python3 tests/unit/test_flake_lock_derived_fields.py
+python3 scripts/check_flake_lock_derived_fields.py
+
+# =============================================================================
 # GATE 3 -- explicit sibling pins agree with locks and named refs EXIST.
 #
 # WHY THIS EXISTS
