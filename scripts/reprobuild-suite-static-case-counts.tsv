@@ -2446,6 +2446,7 @@ tests/integration/t_workspace_lock_latest_resolves_via_git_history_per_repo.nim	
 tests/integration/t_workspace_lock_partition_resolves_a_sibling_for_ci.nim	nim	1
 tests/integration/t_workspace_lock_public_only_reports_it_recorded_nothing.nim	nim	1
 tests/integration/t_workspace_lock_round_trips_through_resolver.nim	nim	5
+tests/integration/t_workspace_lock_withholds_unobtainable_pins.nim	nim	3
 tests/integration/t_workspace_manifest_refresh_after_post_merge.nim	nim	1
 tests/integration/t_workspace_manifest_refresh_skips_when_divergent.nim	nim	1
 tests/integration/t_workspace_manifest_refresh_skips_when_locally_dirty.nim	nim	1
