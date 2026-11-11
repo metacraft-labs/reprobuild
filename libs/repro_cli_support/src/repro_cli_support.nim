@@ -94887,14 +94887,22 @@ proc runReproLockingExplain(args: openArray[string]): int =
 
 proc runReproLockingAdoptManifest(args: openArray[string]): int =
   ## HL-2 (Unified-Locking-And-Hooks §10 Migration) — ``repro locking
-  ## adopt-manifest``. Scaffold an explicit TEAM route mapping the existing
-  ## ``.repo/manifests`` git-checkout backend to the team tier, so a legacy
-  ## manifest workspace keeps writing its team manifest lock instead of
-  ## silently going public-only. The route names every resolved repo (tier-by-
-  ## layer) and is written into the VCS-PRIVATE configuration layer (layer 5,
+  ## adopt-manifest``. Scaffold an explicit TEAM route mapping the workspace's
+  ## record-store checkout (``existingRecordStoreRoot``: ``.repro/records``,
+  ## else ``.repro/manifests``) to the team tier as a git-checkout backend. The
+  ## route names every resolved repo (tier-by-layer) and is written into the
+  ## VCS-PRIVATE configuration layer (layer 5,
   ## ``<git-common-dir>/repro/config.toml``) — workspace-local, never pushed —
   ## so the scaffold does not touch any committed or shared config. Idempotent:
   ## re-running refreshes the same file.
+  ##
+  ## Refuses, writing nothing, when no conventional location is a git
+  ## checkout. A git-checkout route over a plain directory records nothing:
+  ## the backend refuses every write to a non-checkout, so the scaffold would
+  ## report success and leave a route that cannot lock. The store has to be a
+  ## checkout of the record repository first (``repro init`` clones
+  ## ``[records] url``), and a checkout at its conventional location already
+  ## declares the route by its presence (§10).
   var workspaceRoot = ""
   var projectName = ""
   var mode = tpmUnspecified
@@ -94917,13 +94925,24 @@ proc runReproLockingAdoptManifest(args: openArray[string]): int =
     workspaceRoot = getCurrentDir()
   workspaceRoot = absolutePath(workspaceRoot)
 
-  let manifestsDir = firstExistingRecordStoreDir(workspaceRoot)
-  if manifestsDir.len == 0:
+  let presentDir = firstExistingRecordStoreDir(workspaceRoot)
+  if presentDir.len == 0:
     stderr.writeLine("repro locking adopt-manifest: no record store at " &
       recordStoreCandidates(workspaceRoot).join(" or ") &
       " — nothing to adopt (this verb makes an EXISTING store the team " &
       "backend).")
     return 2
+  let storeDir = existingRecordStoreRoot(workspaceRoot)
+  if storeDir.len == 0:
+    stderr.writeLine("repro locking adopt-manifest: `" & presentDir &
+      "` is not a git checkout, so a git-checkout route to it would record " &
+      "nothing; no route written.")
+    stderr.writeLine("  Make it a checkout of the record repository (for " &
+      "example `repro init` with the workspace's `[records] url`). A " &
+      "checkout at that location is itself the team route; nothing then " &
+      "needs adopting.")
+    return 2
+  let storeRel = relativePath(storeDir, workspaceRoot).replace('\\', '/')
 
   let effectiveMode = if mode == tpmUnspecified: tpmPathOnly else: mode
   let identity = ensureGitToolResolvable(effectiveMode, getEnv("PATH"))
@@ -94945,15 +94964,15 @@ proc runReproLockingAdoptManifest(args: openArray[string]): int =
   for n in repoNames:
     quoted.add("\"" & n & "\"")
   let reposList = quoted.join(", ")
-  # The git-checkout backend path is workspace-relative (``.repro/manifests``),
-  # resolved against the workspace root by ``constructRoutedBackend``.
+  # The git-checkout backend path is workspace-relative, resolved against the
+  # workspace root by ``constructRoutedBackend``.
   let configBody =
     "schema = \"reprobuild.config.v1\"\n\n" &
-    "# HL-2 adopt-manifest: keep the existing `.repro/manifests` checkout as the\n" &
+    "# HL-2 adopt-manifest: keep the existing `" & storeRel & "` checkout as the\n" &
     "# TEAM locking backend (VCS-private layer 5 — never tracked, never pushed).\n" &
     "[locking]\n" &
     "route = [{ visibility = \"team\", backend = \"git-checkout\", " &
-    "path = \".repro/manifests\", repos = [" & reposList & "] }]\n"
+    "path = \"" & storeRel & "\", repos = [" & reposList & "] }]\n"
 
   let configPath = vcsPrivateConfigPath(workspaceRoot, identity.binaryPath)
   try:
@@ -94965,7 +94984,7 @@ proc runReproLockingAdoptManifest(args: openArray[string]): int =
     return 1
 
   stderr.writeLine("repro locking adopt-manifest: wrote team route for " &
-    $repoNames.len & " repo(s) → git-checkout at `.repro/manifests`")
+    $repoNames.len & " repo(s) → git-checkout at `" & storeRel & "`")
   stderr.writeLine("  config layer (VCS-private, never pushed): " & configPath)
   stderr.writeLine("  run `repro locking explain` to verify the resolved " &
     "(tier, backend) for each repo.")
