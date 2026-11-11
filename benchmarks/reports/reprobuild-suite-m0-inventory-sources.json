@@ -14294,7 +14294,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_core/tests/t_process_close_once.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 4,
+      "staticCaseCount": 6,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
