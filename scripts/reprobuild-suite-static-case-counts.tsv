@@ -2734,6 +2734,7 @@ tests/unit/test_nix_daemon_descriptors.py	python	7
 tests/unit/test_nix_daemon_expression_file_is_never_cached.py	python	4
 tests/unit/test_nix_daemon_request_requires_workspace_root.py	python	4
 tests/unit/test_nix_evaluation_policy.py	python	1
+tests/unit/test_package_nix_pending_sources.py	python	9
 tests/unit/test_package_root_anchor.py	python	3
 tests/unit/test_profile_daemon_worker_syscalls.py	python	6
 tests/unit/test_prune_undeclared_test_binaries.py	python	7
@@ -2743,7 +2744,7 @@ tests/unit/test_release_git.py	python	6
 tests/unit/test_release_native_packages.py	python	8
 tests/unit/test_release_smoke_dev_exec.py	python	17
 tests/unit/test_reprobuild_suite_inventory.py	python	110
-tests/unit/test_sibling_lock_pins.py	python	10
+tests/unit/test_sibling_lock_pins.py	python	9
 tests/unit/test_source_revision.py	python	18
 tests/unit/test_suite_drift_attribution.py	python	12
 tests/unit/test_test_group_fallback.py	python	6

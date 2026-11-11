@@ -847,10 +847,27 @@ addPackagePath("STACKABLE_HOOKS_SRC", [
 # These libraries retain their own sibling-first policy, then the env pin
 # ($SHM_QUEUE_SRC / $SHM_GSET_SRC), then the devshell fallback.
 proc pinnedSiblingRevision(sibling: string): string =
-  ## The revision `.github/sibling-repos` pins for `sibling` (a `name=<sha>` or
-  ## `name!=<sha>` line keyed by the sibling directory's name), or "" when the
-  ## file does not pin it. Comments and bare names resolve to "".
+  ## The revision this repository pins for `sibling`, keyed by the sibling
+  ## directory's name: its `deps` entry in the committed `repro.lock`, else a
+  ## `name=<sha>` / `name!=<sha>` line of `.github/sibling-repos` (which lists
+  ## a sibling repro.lock pins by its bare name only). "" when neither pins it.
   let name = sibling.parentDir().extractFilename()   # ../nim-shm-gset/src -> nim-shm-gset
+  let lockPath = repoPath("repro.lock")
+  if fileExists(lockPath):
+    # One inline table per `deps` entry, with no nested braces.
+    # A name also heads its `packages` entry, which has no revision.
+    let lockText = readFile(lockPath)
+    let key = "{ name = \"" & name & "\","
+    let field = "revision = \""
+    var at = lockText.find(key)
+    while at >= 0:
+      let stop = lockText.find('}', at)
+      let revAt = lockText.find(field, at)
+      if stop > at and revAt > at and revAt < stop:
+        let start = revAt + field.len
+        let close = lockText.find('"', start)
+        if close > start: return lockText[start ..< close]
+      at = lockText.find(key, at + key.len)
   let pinsPath = repoPath(".github" / "sibling-repos")
   if not fileExists(pinsPath): return ""
   for raw in readFile(pinsPath).splitLines():
@@ -872,7 +889,7 @@ proc addSiblingFirstPackagePath(sibling, envName, marker: string) =
   ##
   ## A workspace checkout at `../<name>/src` is what a developer edits, so it
   ## wins -- EXCEPT when `$<envName>` names another tree and the sibling is
-  ## BEHIND the revision this repository pins for it in `.github/sibling-repos`
+  ## BEHIND the revision this repository pins for it (`pinnedSiblingRevision`)
   ## (neither at that revision, nor ahead of it, nor carrying local changes).
   ## Such a sibling is stale, not a work in progress, and letting it win
   ## discards the pin without a trace: at b761df51f a cross build whose
@@ -909,8 +926,8 @@ proc addSiblingFirstPackagePath(sibling, envName, marker: string) =
             if not atOrAhead and dirty.output.strip().len == 0:
               preferPin = true
               why = "the sibling is at " & headRev[0 ..< 12] &
-                ", which is not at or ahead of the pinned " & pin[0 ..< 12] &
-                " in .github/sibling-repos, and carries no local changes"
+                ", which is not at or ahead of the revision " & pin[0 ..< 12] &
+                " this repository pins, and carries no local changes"
       if preferPin:
         echo "config.nims: using $" & envName & "=" & envPath &
           " instead of the sibling " & sibling & " (" & why &
