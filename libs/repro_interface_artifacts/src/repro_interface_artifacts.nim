@@ -2020,6 +2020,37 @@ proc readTarballArchiveDetail(bytes: openArray[byte]; pos: var int;
   if version >= 28'u16:
     result.installerApp = readString(bytes, pos)
 
+const FirstEnvelopeVersionWithTarballDetail = 21'u16
+  ## The envelope version that introduced ``TarballArchiveDetail`` (GM4b).
+
+proc writeTaggedTarballArchiveDetail*(outp: var seq[byte];
+                                      detail: TarballArchiveDetail) =
+  ## Write ``detail`` for a message other than the interface artifact -- the
+  ## store daemon's tarball realize frame -- so a tarball record crosses that
+  ## boundary through the one codec that already writes it as a unit and
+  ## cannot drift from it field by field.
+  ##
+  ## The bytes start with the envelope version they were written at. That
+  ## version moves whenever a detail field is added, and the message carrying
+  ## these bytes has its own version that a contributor can forget to bump
+  ## alongside; the tag lets the reader refuse a detail newer than it knows
+  ## instead of reading the new field's bytes as the next one.
+  outp.writeU16Le(EnvelopeVersion)
+  outp.writeTarballArchiveDetail(detail, EnvelopeVersion)
+
+proc readTaggedTarballArchiveDetail*(bytes: openArray[byte];
+                                     pos: var int): TarballArchiveDetail =
+  ## Read what ``writeTaggedTarballArchiveDetail`` wrote, at any envelope
+  ## version from the one that introduced the detail up to this build's.
+  let version = readU16Le(bytes, pos)
+  if version < FirstEnvelopeVersionWithTarballDetail or
+      version > EnvelopeVersion:
+    raise newException(ValueError,
+      "unsupported tarball archive detail version " & $version &
+      " (this build reads " & $FirstEnvelopeVersionWithTarballDetail &
+      " through " & $EnvelopeVersion & ")")
+  readTarballArchiveDetail(bytes, pos, version)
+
 proc writeTarballProvisioning(outp: var seq[byte];
                               provisioning: InterfaceTarballProvisioning;
                               version = EnvelopeVersion;
