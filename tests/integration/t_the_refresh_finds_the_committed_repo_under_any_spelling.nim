@@ -120,10 +120,19 @@ suite "NF-2: the refresh finds the committed repo under any spelling":
           fx.ws & $DirSep & "alpha" & $DirSep & ".." & $DirSep & "app"),
         ("symlinked workspace", alias / "app"),
       ]
+      # The log is append-only, so its last line alone does not prove THIS
+      # dispatch wrote it: a hook that stood down silently for an alias would
+      # leave the previous spelling's line in place. Each dispatch must add
+      # exactly one `flake-lock` line.
+      proc flakeLogLines(fx: Nf2Fixture): int =
+        for line in preCommitLog(fx).splitLines():
+          if line.contains(" flake-lock "): inc result
       for (label, spelling) in spellings:
         checkpoint("spelling (" & label & "): " & spelling)
+        let linesBefore = flakeLogLines(fx)
         let res = run(q(fx.repro) & " hooks dispatch pre-commit --repo-root " &
           q(spelling) & " --", cwd = fx.app)
+        check flakeLogLines(fx) == linesBefore + 1
         let log = lastFlakeLogLine(fx)
         if res.code != 0 or not log.contains("skipped-dirty-sibling"):
           checkpoint("hook output for the " & label & " spelling:\n" &
