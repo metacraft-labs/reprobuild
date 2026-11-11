@@ -318,6 +318,86 @@ suite "SPI-1: the pool retains what registered leaves name":
     check nested in readBorrowers(f.pool)
     check linked in readBorrowers(f.pool)
 
+  test "discovery_walk_spawns_no_process_per_directory":
+    # Every directory of every sibling workspace is visited on every gc, so
+    # a subshell, command substitution or pipeline in the walk costs a fork
+    # per directory. `discover_leaf` may still run git, but only where a
+    # `.git` exists; the recursion itself must stay inside the one shell.
+    const header = "\nscan_dir() {\n"
+    let start = RetentionHookScript.find(header)
+    doAssert start >= 0, "scan_dir not found in the hook"
+    let stop = RetentionHookScript.find("\n}\n", start + 1)
+    doAssert stop > start
+    let body = RetentionHookScript[start + header.len ..< stop]
+      .replace("$((", "").replace("))", "").replace("||", "")
+    checkpoint(body)
+    check '(' notin body
+    check '`' notin body
+    check '|' notin body
+    check "(scan_dir" notin RetentionHookScript
+    check "scan_dir \"$workspace\" 2 || exit 1" in RetentionHookScript
+
+  test "discovery_restores_depth_after_each_recursive_call":
+    let root = createTempDir("repro-spi1-discovery-depth-", "")
+    defer:
+      tearDown()
+      removeDir(root)
+    let f = setUp(root, siblingBorrower = true)
+    let url = "file://" & f.up
+    # `a` sorts before `z` and is walked to the depth limit first. If its
+    # recursion leaked its directory or depth into the caller, `z` would be
+    # scanned with the exhausted depth and `z/q`, two levels down, missed.
+    let edge = root / "ws-d" / "a" / "x"
+    let beyond = edge / "y" / "deep"
+    let later = root / "ws-d" / "z" / "q"
+    for leaf in [edge, beyond, later]:
+      createDir(leaf.parentDir)
+      discard must(root, "clone", "-q", "--reference", f.pool, url, leaf)
+    writeFile(borrowersPath(f.pool), f.a & "\n")
+    let hook = execCmdEx("sh " & q(retentionHookPath(f.pool)) & " --discover")
+    checkpoint(hook.output)
+    check hook.exitCode == 2
+    let found = readBorrowers(f.pool)
+    check f.b in found
+    check edge in found
+    check later in found
+    # Three directories below the workspace is outside the declared domain.
+    check beyond notin found
+
+  test "mutation_scan_dir_shared_variables_miss_later_sibling":
+    # The same walk without a subshell, keeping its directory and depth in
+    # shell globals: the recursion into `a` leaves depth exhausted for `z`.
+    let root = createTempDir("repro-spi1-discovery-depth-mut-", "")
+    defer:
+      tearDown()
+      removeDir(root)
+    let f = setUp(root, siblingBorrower = true)
+    let url = "file://" & f.up
+    let edge = root / "ws-d" / "a" / "x"
+    let later = root / "ws-d" / "z" / "q"
+    for leaf in [edge, later]:
+      createDir(leaf.parentDir)
+      discard must(root, "clone", "-q", "--reference", f.pool, url, leaf)
+    writeFile(borrowersPath(f.pool), f.a & "\n")
+    var script = readFile(retentionHookPath(f.pool))
+    for (fromText, toText) in [
+        ("  [ -r \"$1\" ] && [ -x \"$1\" ] || return 1\n",
+         "  directory=$1\n  depth=$2\n" &
+         "  [ -r \"$directory\" ] && [ -x \"$directory\" ] || return 1\n"),
+        ("discover_leaf \"$1\" || return 1", "discover_leaf \"$directory\" || return 1"),
+        ("[ \"$2\" -gt 0 ]", "[ \"$depth\" -gt 0 ]"),
+        ("\"$1\"/* \"$1\"/.[!.]* \"$1\"/..?*",
+         "\"$directory\"/* \"$directory\"/.[!.]* \"$directory\"/..?*"),
+        ("\"$(($2 - 1))\"", "\"$((depth - 1))\"")]:
+      doAssert script.count(fromText) == 1, "mutation anchor not found: " & fromText
+      script = script.replace(fromText, toText)
+    writeFile(retentionHookPath(f.pool), script)
+    let hook = execCmdEx("sh " & q(retentionHookPath(f.pool)) & " --discover")
+    checkpoint(hook.output)
+    let found = readBorrowers(f.pool)
+    check edge in found
+    check later notin found
+
   test "unreadable_discovered_sibling_refuses_expiry_and_gc":
     let root = createTempDir("repro-spi1-discovery-unreadable-", "")
     defer:
