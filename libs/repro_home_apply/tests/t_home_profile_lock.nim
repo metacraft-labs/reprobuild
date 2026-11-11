@@ -387,8 +387,10 @@ suite "home-profile lock: pins the selected realization":
       check ("sha256:" & fixtureSha) in gone.detail
       check "no longer offered" in gone.detail
       check "--relock" in gone.detail
+      # The plan fails on it as the apply does: unrealizable, not drift.
       let plan = runApplyPlan(opts)
-      check plan.driftCount >= 1
+      check plan.unrealizable == @["gm4block"]
+      check plan.driftCount == 0
       expect CatchableError:
         discard runApply(opts)
       check readFile(lockPath) == first

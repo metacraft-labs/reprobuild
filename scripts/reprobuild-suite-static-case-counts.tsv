@@ -1372,6 +1372,7 @@ tests/e2e/hcr-watch/t_e2e_hcr_watch_inference.nim	nim	1
 tests/e2e/hcr-watch/t_e2e_repro_watch_hcr_multi_target_independent_patches.nim	nim	1
 tests/e2e/hcr-watch/t_e2e_repro_watch_hcr_one_target_agent_inject_failure.nim	nim	1
 tests/e2e/hcr-watch/t_repro_watch_refuses_an_over_long_hcr_agent_socket.nim	nim	1
+tests/e2e/home-apply/t_e2e_home_apply_plan_unrealizable_package_is_not_drift.nim	nim	2
 tests/e2e/home-apply/t_e2e_repro_home_add_remove_immediate.nim	nim	1
 tests/e2e/home-apply/t_e2e_repro_home_apply_fresh_install.nim	nim	2
 tests/e2e/home-apply/t_e2e_repro_home_apply_noop.nim	nim	2
@@ -2749,7 +2750,7 @@ tests/unit/test_nix_daemon_descriptors.py	python	7
 tests/unit/test_nix_daemon_expression_file_is_never_cached.py	python	4
 tests/unit/test_nix_daemon_request_requires_workspace_root.py	python	4
 tests/unit/test_nix_evaluation_policy.py	python	1
-tests/unit/test_package_nix_pending_sources.py	python	9
+tests/unit/test_package_nix_pending_sources.py	python	10
 tests/unit/test_package_root_anchor.py	python	3
 tests/unit/test_profile_daemon_worker_syscalls.py	python	6
 tests/unit/test_prune_undeclared_test_binaries.py	python	7

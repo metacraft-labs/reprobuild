@@ -12,7 +12,7 @@ the flake and fetches the `src` tree, and nothing runs it before a push.
 
 This script is the pending half, which needs neither: it reads the `src`
 commit's `flake.lock` from git (fetching that one commit when the clone lacks
-it), and for every argument whose input that lock does not have, requires the
+it, shallowly only in a clone that is shallow already), and for every argument whose input that lock does not have, requires the
 default's `rev` and hash to equal this tree's lock node (`rev`, `narHash`).
 `repro lock update` moves both locks and no package default, so this is where
 a pending default left behind is reported.
@@ -62,8 +62,13 @@ def src_lock_text(root: Path, rev: str, git: str) -> tuple[str, str]:
                               capture_output=True, text=True)
     shown = show()
     if shown.returncode != 0:
-        subprocess.run([git, '-C', str(root), 'fetch', '--quiet', '--depth', '1',
-                        'origin', rev], capture_output=True, text=True)
+        # Only a clone that is shallow already is fetched shallow: `--depth`
+        # in a full clone would make it shallow, which a lint must not do.
+        shallow = subprocess.run([git, '-C', str(root), 'rev-parse', '--is-shallow-repository'],
+                                 capture_output=True, text=True).stdout.strip() == 'true'
+        subprocess.run([git, '-C', str(root), 'fetch', '--quiet',
+                        *(['--depth', '1'] if shallow else []), 'origin', rev],
+                       capture_output=True, text=True)
         shown = show()
     if shown.returncode != 0:
         return '', (shown.stderr.strip().splitlines() or ['git show failed'])[-1]

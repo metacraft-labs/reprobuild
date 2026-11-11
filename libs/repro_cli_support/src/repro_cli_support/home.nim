@@ -1476,7 +1476,9 @@ proc runHomeApplyPlan(allowDrift, reconcileDrift: bool;
   ## the pipeline through `runApplyPlan`, which executes NO mutating
   ## step (no realize, no stage, no rotate, no commit, no `scoop
   ## install`). Exit 0 on a clean / no-op plan; non-zero when drift is
-  ## detected unless `--allow-drift` was passed.
+  ## detected unless `--allow-drift` was passed, and non-zero whenever a
+  ## package of an applied concern has no realization: the apply fails on
+  ## it, and neither `--allow-drift` nor `--reconcile-drift` changes that.
   try:
     var opts: ApplyOptions
     opts.reconcileStowDrift = reconcileDrift
@@ -1505,12 +1507,19 @@ proc runHomeApplyPlan(allowDrift, reconcileDrift: bool;
     opts.preLoadedProfile = outcomeCompile.profile
     let preview = runApplyPlan(opts)
     stdout.write(renderPlanPreview(preview))
+    var failed = false
+    if preview.unrealizable.len > 0:
+      stderr.writeLine("repro home apply --plan: " &
+        $preview.unrealizable.len & " package(s) of an applied concern " &
+        "have no realization on this host, so the apply would fail: " &
+        preview.unrealizable.join(", "))
+      failed = true
     if preview.driftCount > 0 and not allowDrift and not reconcileDrift:
       stderr.writeLine("repro home apply --plan: " & $preview.driftCount &
         " drift item(s) detected. Pass --allow-drift to exit 0 anyway, " &
         "or --reconcile-drift to plan the reconciling apply.")
-      return 1
-    return 0
+      failed = true
+    return (if failed: 1 else: 0)
   except EApplyIntentLoad as err:
     stderr.writeLine("repro home apply --plan: step 1 (load intent) " &
       "failed: " & err.msg)
@@ -1569,7 +1578,8 @@ proc runHomeApply(args: openArray[string]): int =
       echo "                     values is refused. Default: $REPRO_HOST,"
       echo "                     then the OS host name."
       echo "  --allow-drift      With --plan: exit 0 even when drift is"
-      echo "                     detected."
+      echo "                     detected (never when a package of an"
+      echo "                     applied concern has no realization)."
       echo "  --reconcile-drift  Replace a drifted stow target / resource"
       echo "  --accept-overwrite (alias of --reconcile-drift) instead of"
       echo "                     failing closed; records the prior"

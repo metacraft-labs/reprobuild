@@ -167,7 +167,13 @@ suite "GM4b: e2e_home_profile_resolves_just_for_darwin":
       try: removeDir(root) except OSError: discard
     let res = runPlan(root, ["just", "`dotnet-sdk`", "`gm4b-no-such-package`"])
     checkpoint(res.output)
-    check res.exitCode == 0  # --allow-drift: drift is the subject here
+    # Neither package realizes for the target, so the plan fails, and
+    # `--allow-drift` does not accept it: an unrealizable package is not
+    # drift. The plan is still printed.
+    check res.exitCode == 1
+    check ("2 package(s) of an applied concern have no realization on " &
+      "this host, so the apply would fail: ") in res.output
+    check "0 drift(s), 2 unrealizable package(s)" in res.output
     # The positive case still holds in the same plan.
     check ("tarball " & JustDarwinUrl) in packageLine(res.output, "just")
     let dotnet = packageLine(res.output, "dotnet-sdk")
