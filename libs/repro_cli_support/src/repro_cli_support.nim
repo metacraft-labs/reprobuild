@@ -58157,21 +58157,44 @@ proc renderPinRegressionRefusal*(refused: openArray[PinRegression];
   ## ``action`` is what was refused: ``"commit"`` (the managed `pre-commit`
   ## hook) or ``"refresh"`` (`repro lock refresh`). For a refresh, ``rerun``
   ## is the command that repeats it with the regressing siblings allowed.
+  ##
+  ## A move whose direction could not be judged (``sprUnknown``) is refused
+  ## too, failing closed, but it is not called backward: the refusal says
+  ## the direction could not be judged, and, when there is no checkout to
+  ## judge it in, prints no `git -C` command for one.
   let isCommit = action == "commit"
+  var backward, unjudged = 0
+  for r in refused:
+    if r.relation == sprUnknown: inc unjudged
+    else: inc backward
+  var moves: seq[string]
+  if backward > 0:
+    moves.add($backward & " pinned sibling revision(s) BACKWARD")
+  if unjudged > 0:
+    moves.add($unjudged & " pinned sibling revision(s) in a direction that " &
+      "could not be judged")
+  let what = moves.join(" and ")
   if isCommit:
-    result.add("REFUSED: this commit would move " & $refused.len &
-      " pinned sibling revision(s) BACKWARD. The commit was not made, and " &
-      "nothing was written or staged.")
+    result.add("REFUSED: this commit would move " & what &
+      ". The commit was not made, and nothing was written or staged.")
   else:
-    result.add("REFUSED: this " & action & " would move " & $refused.len &
-      " pinned sibling revision(s) BACKWARD. The lock was not written.")
+    result.add("REFUSED: this " & action & " would move " & what &
+      ". The lock was not written.")
   var names: seq[string]
+  var anyCheckout = false
   for r in refused:
     if r.sibling notin names: names.add(r.sibling)
+    if r.path.len > 0: anyCheckout = true
     if r.relation == sprUnprovable:
       # The distance already names the pinned commit and the checkout.
       result.add("  " & pinRegressionSubject(r) & ": " &
         pinRegressionDistance(r) & " — observed " & r.observed)
+    elif r.path.len == 0:
+      # Nothing to judge the direction in, and nothing to run a command in.
+      result.add("  " & pinRegressionSubject(r) & ": " &
+        pinRegressionDistance(r) & " — pinned " & r.pinned & ", observed " &
+        r.observed & " (no checkout to judge the direction in)")
+      continue
     else:
       result.add("  " & pinRegressionSubject(r) & ": " &
         pinRegressionDistance(r) & " — pinned " & r.pinned & ", observed " &
@@ -58192,8 +58215,12 @@ proc renderPinRegressionRefusal*(refused: openArray[PinRegression];
     else:
       result.add("      what this " & action & " would drop from the " &
         "published lock: `" & dropped & "`")
-  result.add("The usual case is a stale checkout: bring it forward as above, " &
-    "then " & action & " again.")
+  if anyCheckout:
+    result.add("The usual case is a stale checkout: bring it forward as " &
+      "above, then " & action & " again.")
+  else:
+    result.add("Check the sibling out in the workspace so the direction " &
+      "can be judged, then " & action & " again.")
   if isCommit or rerun.len == 0:
     result.add("If the downgrade is deliberate, re-run the same " & action &
       " with the sibling(s) named in " & PinRegressionAllowEnv &
@@ -98745,9 +98772,16 @@ proc executeLockUpdate*(req: LockUpdateRequest): LockUpdateOutcome =
         flakeNixPath).inputs:
       constraintOf[c.input] = c
     resolutions = flakeLockResolutions(inputs.flakeLock.text)
-  proc flakeIdentity(r: FlakeLockResolution): string =
+  proc writtenIdentity(r: FlakeLockResolution): string =
+    ## The repository the input names as `flake.nix` (else its lock node)
+    ## spells it, read as this flake reads it: a relative `git+file:` /
+    ## `path:` reference is the directory it names from ``root``
+    ## (``canonicalFlakeInputRepository``), never the relative text, which
+    ## names a different checkout from every other flake.
     let c = constraintOf.getOrDefault(r.input, FlakeInputConstraint())
-    if c.canonicalRepo.len > 0: c.canonicalRepo else: r.canonicalRepo
+    if c.canonicalRepo.len > 0: canonicalFlakeInputRepository(c.url, root)
+    elif r.url.len > 0: canonicalFlakeInputRepository(r.url, root)
+    else: r.canonicalRepo
   var ld: LockedDependencies
   var haveReproLock = false
   if inputs.reproLock.present:
@@ -98775,6 +98809,32 @@ proc executeLockUpdate*(req: LockUpdateRequest): LockUpdateOutcome =
       if u.len == 0: continue
       let id = canonicalRepositoryUrl(u)
       if id.len > 0 and id notin result: result.add(id)
+  # One repository, several spellings (Nix-Flake-Coexistence.md §5b): a
+  # workspace repo is named by its fetch URL and by its checkout as a
+  # `file://` URL, so a `repro.lock` entry fetching it and a `git+file:`
+  # input reading its checkout are resolutions of ONE repository. Each such
+  # pair is joined under the repo's first identity before anything compares
+  # identities. A secondary remote is not joined: a fork's upstream remote
+  # does not make an input of the upstream a resolution of the fork.
+  var joinedIds: seq[seq[string]]
+  for r in membership.repos:
+    if r.name == membership.selfName: continue
+    let co = checkoutOfRepo(r)
+    var ids: seq[string]
+    for u in [r.fetchUrl, (if co.len > 0: "file://" & co else: "")]:
+      if u.len == 0: continue
+      let id = canonicalRepositoryUrl(u)
+      if id.len > 0 and id notin ids: ids.add(id)
+    if ids.len > 1: joinedIds.add(ids)
+  proc joined(id: string): string =
+    ## ``id``, or the identity of the workspace repo it is a spelling of.
+    for ids in joinedIds:
+      if id in ids: return ids[0]
+    id
+  proc flakeIdentity(r: FlakeLockResolution): string =
+    joined(writtenIdentity(r))
+  proc depIdentity(d: LockedDep): string =
+    joined(canonicalRepositoryUrl(d.coordinates.url))
   var candidates: seq[DependencyCandidate]
   for r in resolutions:
     let c = constraintOf.getOrDefault(r.input, FlakeInputConstraint())
@@ -98786,13 +98846,12 @@ proc executeLockUpdate*(req: LockUpdateRequest): LockUpdateOutcome =
     for d in ld.deps:
       if isSelfLockedDep(d) or d.coordinates.kind != ckVcs: continue
       candidates.add(DependencyCandidate(kind: dckReproLockDep, name: d.name,
-        identity: canonicalRepositoryUrl(d.coordinates.url),
-        where: reproLockPath))
+        identity: depIdentity(d), where: reproLockPath))
   for r in membership.repos:
     if r.name == membership.selfName: continue
     let ids = identityOfRepo(r)
     candidates.add(DependencyCandidate(kind: dckWorkspaceRepo, name: r.name,
-      identity: (if ids.len > 0: ids[0] else: ""),
+      identity: (if ids.len > 0: joined(ids[0]) else: ""),
       where: "workspace repo at " & checkoutOfRepo(r)))
   let named = resolveDependencyName(req.dependency, candidates)
   if not named.ok:
@@ -98814,7 +98873,7 @@ proc executeLockUpdate*(req: LockUpdateRequest): LockUpdateOutcome =
   if haveReproLock:
     for i, d in ld.deps:
       if isSelfLockedDep(d) or d.coordinates.kind != ckVcs: continue
-      if canonicalRepositoryUrl(d.coordinates.url) == identity:
+      if depIdentity(d) == identity:
         reproOfRepo.add(i)
   if flakeOfRepo.len == 0 and reproOfRepo.len == 0:
     refuseNow(LockUpdateExitUsage, "repository " & identity & " ('" &

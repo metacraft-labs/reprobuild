@@ -31,6 +31,20 @@
 ##     repositories (a flake input and a `repro.lock` dependency) is refused
 ##     with both candidates and nothing written; the qualified spelling moves
 ##     only the repository it names.
+##   * `t_lock_update_names_a_relative_git_file_input_with_its_sibling` —
+##     `flake.nix` reads the sibling checkout as `git+file:../beta`, and
+##     `repro.lock` fetches the same repository by its origin URL, the input,
+##     the dependency and the workspace repo all called `beta`, the two locks
+##     drifted (`repro.lock` already at the target, `flake.lock` behind).
+##     `repro lock update beta --to <target>` names ONE repository (the
+##     relative path is the directory it names from `app`, which is the
+##     workspace repo's checkout, and the checkout joins its fetch URL),
+##     judges the direction in the checkout and moves the `flake.lock` node
+##     to the target, leaving `flake.nix` and `repro.lock` alone. With the
+##     checkout moved away the same command is refused, failing closed, as a
+##     move "in a direction that could not be judged": not as a BACKWARD
+##     move, and with no `git -C ''` command for a checkout that is not
+##     there; every file is byte-identical afterwards.
 ##   * `t_lock_update_leaves_every_file_when_the_relock_fails` — with no nix
 ##     on PATH, and with a real nix that cannot fetch the input's url (the
 ##     origin is moved away after the target was pushed), `flake.nix`, both
@@ -495,6 +509,96 @@ suite "HL-11 M4: repro lock update":
         nodeText(before.flakeLock, "gamma-src")
       check nodeText(after.flakeLock, "nixpkgs") ==
         nodeText(before.flakeLock, "nixpkgs")
+
+  test "t_lock_update_names_a_relative_git_file_input_with_its_sibling":
+    if not nf3Prerequisites(
+        "t_lock_update_names_a_relative_git_file_input_with_its_sibling"):
+      skip("needs git on PATH and a built ./build/bin/repro (named above)")
+    else:
+      # The workspace layout of a consumer that reads a sibling checkout
+      # through a RELATIVE `git+file:` input while its `repro.lock` fetches
+      # the same repository by URL. One name, `beta`, is the flake input,
+      # the `repro.lock` dependency and the workspace repo: three spellings
+      # of one repository (Nix-Flake-Coexistence.md §5b: a `git+file`
+      # input matches the workspace repo's checkout as a `file://` URL), so
+      # the name is not ambiguous (§16.3 H2, §16.4).
+      discard requireNix()
+      let fx = setupNf2Fixture("lu-git-file")
+      defer: removeDir(fx.scratch)
+      isolateNf2Config(fx)
+      defer: releaseNf2Config()
+      publishAll(fx)
+      let betaSeed = fx.seedSha[1]
+      let flakeText =
+        "{\n" &
+        "  inputs = {\n" &
+        "    alpha-src.url = \"git+" & originUrl(fx, "alpha") &
+          "?ref=main\";\n" &
+        "    beta.url = \"git+file:../beta?ref=main\";\n" &
+        "  };\n" &
+        "\n" &
+        "  outputs = _: { };\n" &
+        "}\n"
+      writeFile(fx.app / "flake.nix", flakeText)
+      removeFile(lockPath(fx))
+      # nix resolves the relative path from the directory it runs in, which
+      # is the flake's own directory here, as it is for every re-lock.
+      let locked = nixIn(fx.app, "flake lock")
+      checkpoint(locked.output)
+      check locked.code == 0
+      let next = moveAndPublishSibling(fx, "beta", "revision 2")
+      # The drift: repro.lock already names the target, flake.lock does not.
+      writeFile(fx.app / "repro.lock", reproLockText(fx, "app",
+        headOf(fx, fx.app),
+        [lockDepEntry(fx, "beta", "../beta", "beta", next)]).replace(
+          ", groups = \"\" }", ", tags = \"\" }"))
+      commitWithoutHook(fx, "beta through a relative git+file input")
+      let before = appFiles(fx)
+      check nodeRev(before.flakeLock, "beta", "locked") == betaSeed
+      check parseJson(before.flakeLock)["nodes"]["beta"]["locked"][
+        "url"].getStr() == "file:../beta"
+
+      # ---- no checkout: refused as undecidable, not as BACKWARD ----------
+      let betaDir = siblingDir(fx, "beta")
+      let aside = fx.scratch / "beta-aside"
+      moveDir(betaDir, aside)
+      let u = lockUpdate(fx, "beta --to " & next & " --repo-root=" &
+        q(fx.app))
+      moveDir(aside, betaDir)
+      checkpoint("lock update without a checkout -> " & $u.code & "\n" &
+        u.output)
+      check u.code == 4
+      check (UpdateLabel & "REFUSED: this update would move 1 pinned " &
+        "sibling revision(s) in a direction that could not be judged. The " &
+        "lock was not written.") in u.output.splitLines()
+      check (UpdateLabel & "  flake.lock input 'beta': relation unknown — " &
+        "pinned " & betaSeed & ", observed " & next & " (no checkout to " &
+        "judge the direction in)") in u.output.splitLines()
+      check "BACKWARD" notin u.output
+      check "git -C ''" notin u.output
+      check "AMBIGUOUS" notin u.output
+      checkUnchanged(fx, before)
+
+      # ---- with the checkout: one repository, judged forward, moved -------
+      let r = lockUpdate(fx, "beta --to " & next & " --repo-root=" &
+        q(fx.app))
+      checkpoint("lock update -> " & $r.code & "\n" & r.output)
+      check r.code == 0
+      check (UpdateLabel & "'beta' is repository _local_" &
+        fx.scratch / "origin-beta" & "; target " & next & " (--to)") in
+        r.output.splitLines()
+      let after = appFiles(fx)
+      check nodeRev(after.flakeLock, "beta", "locked") == next
+      check nodeNarHash(after.flakeLock, "beta") !=
+        nodeNarHash(before.flakeLock, "beta")
+      check parseJson(after.flakeLock)["nodes"]["beta"]["original"] ==
+        parseJson(before.flakeLock)["nodes"]["beta"]["original"]
+      check nodeText(after.flakeLock, "alpha-src") ==
+        nodeText(before.flakeLock, "alpha-src")
+      check after.flakeNix == before.flakeNix
+      check after.reproLock == before.reproLock
+      check after.reproNim == before.reproNim
+      check nothingStaged(fx)
 
   test "t_lock_update_leaves_every_file_when_the_relock_fails":
     if not nf3Prerequisites(
