@@ -51519,7 +51519,12 @@ proc executeMainlineSync(args: WorkspaceSyncArgs): MainlineSyncReport =
       remoteName = gitRemoteNameFor(repo),
       repoPath = repo.path,
       receiptPath = ".repro" / "workspace" / "receipts" /
-        ("mainline-sync-fetch-" & idSeg & ".receipt"))
+        ("mainline-sync-fetch-" & idSeg & ".receipt"),
+      # The fetch is what observes the remote, and live remote state cannot be
+      # cached: a receipt from an earlier sync would answer for a remote that
+      # has since moved, and the role tip read below would be stale. Like the
+      # ordinary sync's fetch (``syncFetchActionFor``), it always runs.
+      cacheable = false)
     action.cwd = args.workspaceRoot
     fetchActions.add(action)
     fetchIdByPath[repo.path] = actionId
