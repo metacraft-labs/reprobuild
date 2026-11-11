@@ -41265,7 +41265,7 @@
       "requiresReproBinary": true,
       "source": "tests/integration/t_health_reports_a_disagreement_between_two_repro_resolutions.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 1,
+      "staticCaseCount": 2,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
