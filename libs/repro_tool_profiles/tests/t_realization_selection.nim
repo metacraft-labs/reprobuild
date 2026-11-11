@@ -29,9 +29,10 @@ proc tarball(url: string; cpu = ""; os = ""; version = "";
   result.detail.cpuLevel = cpuLevel
   result.detail.cpuFeatures = cpuFeatures
 
-proc nixRecord(selector: string; contributor = ""): InterfaceNixProvisioning =
+proc nixRecord(selector: string; contributor = ""; version = ""):
+    InterfaceNixProvisioning =
   InterfaceNixProvisioning(packageName: "demo", contributor: contributor,
-    selector: selector, executablePath: "bin/demo")
+    selector: selector, executablePath: "bin/demo", version: version)
 
 proc scoopRecord(app: string; version = "1.0"; contributor = ""):
     InterfaceScoopProvisioning =
@@ -236,6 +237,44 @@ suite "realization_selection: nix, scoop, path":
       nixProvisioning: @[nixRecord("nixpkgs#demo")])
     let choice = selectNixRecord(use.nixProvisioning, linux, "1.0")
     check choice.status == kcVersionNotOffered
+
+  test "an unversioned nix record stays eligible under a range (checked " &
+      "after realization)":
+    # Falsified by filtering unversioned records out under a range, which is
+    # the tarball rule: a nixpkgs attribute's release is known only once it
+    # is built, and ``enforceUsesVersionRange`` holds it to the range then.
+    let records = @[nixRecord("nixpkgs#demo")]
+    check selectNixRecord(records, linux, versionRange = ">=99").status ==
+      kcSelected
+
+  test "a range selects among versioned nix records, first eligible in " &
+      "declaration order":
+    # Falsified by ignoring ``versionRange`` (the 1.0 record would win every
+    # range) or by preferring the highest version (">=1" would take 2.0).
+    let records = @[nixRecord("expr-1", version = "1.0.0"),
+                    nixRecord("expr-2", version = "2.0.0")]
+    check selectNixRecord(records, linux).index == 0
+    check selectNixRecord(records, linux, versionRange = ">=1").index == 0
+    check selectNixRecord(records, linux, versionRange = ">=1.5").index == 1
+    let miss = selectNixRecord(records, linux, versionRange = ">=3")
+    check miss.status == kcVersionNotOffered
+    check "1.0.0, 2.0.0" in miss.detail
+    check "'>=3'" in miss.detail
+
+  test "a versioned nix record satisfies an exact pin, and selection " &
+      "reports its version":
+    let records = @[nixRecord("expr-1", version = "1.0.0"),
+                    nixRecord("expr-2", version = "2.0.0")]
+    check selectNixRecord(records, linux, "2.0.0").index == 1
+    check selectNixRecord(records, linux, "3.0.0").status ==
+      kcVersionNotOffered
+    let use = InterfaceToolUse(packageSelector: "demo",
+      nixProvisioning: records)
+    let sel = selectRealization(use, request(linux, @[rkNix],
+      version = "2.0.0"))
+    check sel.kind == rkNix
+    check sel.nix.selector == "expr-2"
+    check sel.version == "2.0.0"
 
   test "scoop serves windows only and honours an exact version":
     let use = InterfaceToolUse(packageSelector: "demo",

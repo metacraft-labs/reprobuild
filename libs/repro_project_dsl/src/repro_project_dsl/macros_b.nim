@@ -9936,6 +9936,7 @@ proc provisioningContributionLiteral(
       ", nixpkgsNarHash: " & codeOrEmpty(provisioning.nixpkgsNarHash) &
       ", packageId: " & codeOrEmpty(provisioning.packageId) &
       ", lockIdentity: " & codeOrEmpty(provisioning.lockIdentity) &
+      ", version: " & codeOrEmpty(provisioning.version) &
       ", sourceFile: " & escForCode(provisioning.sourceFile) &
       ", sourceLine: " & $provisioning.sourceLine & ")")
   result.add("], tarballProvisioning: @[")

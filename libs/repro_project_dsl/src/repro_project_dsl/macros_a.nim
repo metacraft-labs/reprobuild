@@ -1546,6 +1546,9 @@ proc parseNixPackageProvisioning(node: NimNode): NixPackageProvisioningDef =
     if not lockIdentityValue.isNil:
       lockIdentityNode = lockIdentityValue
       result.lockIdentity = exprCode(lockIdentityValue)
+    let versionValue = namedValue(node[i], "version")
+    if not versionValue.isNil:
+      result.version = exprCode(versionValue)
   if selectorText.len == 0:
     error("nixPackage selector must not be empty", node)
   # Presence is a property of the NODE now: an expression-valued nixpkgsRev is
@@ -3221,6 +3224,7 @@ proc packageLiteral(pkg: PackageDef): string =
       ", nixpkgsNarHash: " & codeOrEmpty(provisioning.nixpkgsNarHash) &
       ", packageId: " & codeOrEmpty(provisioning.packageId) &
       ", lockIdentity: " & codeOrEmpty(provisioning.lockIdentity) &
+      ", version: " & codeOrEmpty(provisioning.version) &
       ", sourceFile: " & escForCode(provisioning.sourceFile) &
       ", sourceLine: " & $provisioning.sourceLine & ")")
   result.add("], tarballProvisioning: @[")

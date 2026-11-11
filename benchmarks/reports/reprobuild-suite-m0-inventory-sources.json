@@ -18141,8 +18141,8 @@
       "owner": "libs/repro_interface_artifacts",
       "requiresReproBinary": false,
       "source": "libs/repro_interface_artifacts/tests/t_envelope_versions_do_not_collide.nim",
-      "sourceSuiteCount": 7,
-      "staticCaseCount": 14,
+      "sourceSuiteCount": 8,
+      "staticCaseCount": 16,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -26074,7 +26074,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_tool_profiles/tests/t_realization_selection.nim",
       "sourceSuiteCount": 5,
-      "staticCaseCount": 27,
+      "staticCaseCount": 30,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

@@ -522,7 +522,18 @@ proc nixServesTarget*(target: RealizationTarget): bool =
 
 proc selectNixRecord*(records: openArray[InterfaceNixProvisioning];
                       target: RealizationTarget; version = "";
-                      contributor = none(string)): KindChoice =
+                      contributor = none(string); versionRange = ""):
+    KindChoice =
+  ## Select among ``nixPackage`` records: filter by contributor pin and by
+  ## the version a record declares, then take the first in declaration
+  ## order (so authors list the default release first, as for ``tarball``).
+  ##
+  ## A record that declares no ``version`` names an attribute of a pinned
+  ## nixpkgs, whose release is known only once it is built: it cannot be
+  ## shown to satisfy an exact pin, and it stays eligible under a range,
+  ## which the realized program's reported version is then held to
+  ## (``enforceUsesVersionRange``). A record that declares one is eligible
+  ## only when the pin equals it and the range admits it.
   result.index = -1
   if records.len == 0:
     result.status = kcNoRecords
@@ -533,20 +544,34 @@ proc selectNixRecord*(records: openArray[InterfaceNixProvisioning];
     result.detail = "nix does not realize packages for " &
       describeTarget(target)
     return
-  if version.len > 0:
-    # A ``nixPackage`` record names an attribute of a pinned nixpkgs, not a
-    # version; it cannot be shown to satisfy an exact pin.
-    result.status = kcVersionNotOffered
-    result.detail = "nixPackage realizations name no version, so none " &
-      "satisfies the pin '" & version & "'"
-    return
+  let range = parsedVersionRange(versionRange)
+  var versions: seq[string] = @[]
+  var contributorMatched = false
   for i, record in records:
     if not contributorAllowed(record.contributor, contributor):
+      continue
+    contributorMatched = true
+    let offered = if record.version.len > 0: record.version
+                  else: "unversioned"
+    if offered notin versions: versions.add(offered)
+    if version.len > 0 and record.version != version:
+      continue
+    if record.version.len > 0 and not matchesVersionRange(record.version,
+        range):
       continue
     if record.contributor notin result.contributors:
       result.contributors.add(record.contributor)
     if result.index < 0:
       result.index = i
+  if result.index < 0 and contributorMatched:
+    result.status = kcVersionNotOffered
+    result.detail = "no nixPackage realization satisfies " &
+      (if version.len > 0: "the pin '" & version & "'"
+       else: "range '" & versionRange & "'") &
+      " (offered: " & versions.join(", ") & ")" &
+      (if version.len > 0 and "unversioned" in versions:
+         "; a record that names no version cannot satisfy a pin" else: "")
+    return
   if result.index < 0:
     result.status = kcContributorNotOffered
     result.detail = "contributor " & contributorLabel(contributor.get) &
@@ -717,6 +742,7 @@ proc selectRealization*(useDef: InterfaceToolUse;
         result.kind = rkNix
         result.contributor = record.contributor
         result.nix = record
+        result.version = record.version
         result.realizationLockIdentity = nixRealizationLockIdentity(record)
     of rkScoop:
       let records = withLockedIdentity(useDef.scoopProvisioning,
