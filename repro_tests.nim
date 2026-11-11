@@ -26114,7 +26114,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g14",
+    group: "t_group_tests_integration_g13",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_undeclared_role_is_a_usage_error_before_any_fetch.nim",
@@ -26614,6 +26614,17 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "tests/integration/t_workspace_lock_round_trips_through_resolver.nim",
     binary: "build/test-bin/t_workspace_lock_round_trips_through_resolver",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "t_group_tests_integration_g14",
+    singleReason: ""),
+  TestSpec(
+    source: "tests/integration/t_workspace_lock_withholds_unobtainable_pins.nim",
+    binary: "build/test-bin/t_workspace_lock_withholds_unobtainable_pins",
     defines: @[],
     requiresReproBinary: true,
     extraPassC: @[],
