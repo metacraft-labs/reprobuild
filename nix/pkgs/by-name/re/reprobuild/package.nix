@@ -179,8 +179,8 @@
   runquotaSrc ? fetchFromGitHub {
     owner = "metacraft-labs";
     repo = "runquota";
-    rev = "9818dc0c90be8ba7993424a7bbfbb6e009ffa965";
-    hash = "sha256-A9b+rJTlp/pz6MgmZot/WDfvozmOYzBpPFOhRbxUUAM=";
+    rev = "d828b6c238c4cd7faf531ed9fcb18b647b94ecdf";
+    hash = "sha256-k4QPJCnkmTy3MuQxVlSGqT4paPVAjt18a5eTfWYTeTk=";
   },
 }:
 let

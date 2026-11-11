@@ -1268,6 +1268,27 @@ proc holdAdoptedDaemon(client: var RunQuotaClient) =
   adoptedDaemonHold = client
   adoptedDaemonHeld = true
 
+proc holdRunQuotaDaemon*(): bool =
+  ## Connect to the daemon at the default endpoint and HOLD the connection
+  ## until ``releaseAdoptedDaemonHold``; ``false`` when nothing answers.
+  ##
+  ## The hold of an arm ``decideRunQuotaHandover`` does not cover: on POSIX
+  ## every invocation that adopts OR STARTS the shared per-user daemon keeps
+  ## one connection to it until it ends (reprobuild-pm
+  ## ``spec/RunQuota-Host-Configuration.md``, "The shared per-user daemon
+  ## (POSIX)") -- a daemon that could not be asked to retire, and the one
+  ## this invocation has just started, included. Without it the daemon could
+  ## idle out, or be retired by another install's ``repro``, in the gap
+  ## before the build opens its first session. The launcher uses it as its
+  ## readiness probe too: the first connection that answers is the one kept.
+  var client: RunQuotaClient
+  try:
+    client = connectDefault()
+  except CatchableError:
+    return false
+  holdAdoptedDaemon(client)
+  true
+
 proc decideRunQuotaHandover*(candidate: string;
                              vacateWaitMs = 5_000): RunQuotaHandoverReport =
   ## Ask the ``runquotad`` at the default endpoint to make way for
@@ -1280,6 +1301,10 @@ proc decideRunQuotaHandover*(candidate: string;
   ## replaced the bundle it kept serving the new ``repro`` from the old image
   ## for as long as its user stayed logged on (reprobuild-pm issue
   ## 2026-10-26-windows-runquotad-from-a-replaced-bundle-keeps-serving-the-new-repro).
+  ## Since 2026-11-11 the shared per-user daemon on POSIX outlives every
+  ## build too, and its adopt-or-start asks the same question of it
+  ## (reprobuild-specs/RunQuota-Host-Configuration.md, "The shared per-user
+  ## daemon (POSIX)").
   ##
   ## WHAT IT NEVER DOES is end work in flight. A daemon that retires keeps
   ## serving every client it has and exits once none is connected. When it

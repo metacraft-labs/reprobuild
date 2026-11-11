@@ -207,8 +207,8 @@ proc runquotaEndpointPath*(name: string): string =
   ## owns its name for its whole life, such as a test fixture. It does NOT
   ## suit one that derives the name from its pid: a pid is reused, and a
   ## socket left behind by an earlier holder of it makes the private bind
-  ## refuse. A daemon started for an invocation gets its rendezvous from
-  ## ``createPrivateRunQuotaEndpoint`` instead.
+  ## refuse. The daemon ``repro`` itself starts uses neither: it serves the
+  ## shared per-user endpoint, ``runquota_ipc.userEndpoint``.
   ##
   ## Windows has neither directory nor mode here: named pipes live in the
   ## kernel object namespace and carry their own ACL, so the name is used
@@ -227,80 +227,6 @@ proc runquotaEndpointPath*(name: string): string =
         let identity = $secureHash(os.normalizedPath(absolutePath(result)))
         result = "/tmp" / ("repro-rq-" & $getuid() & "-" & identity) /
           "runquota.sock"
-
-when defined(posix):
-  from std/os import osLastError, raiseOSError
-  from std/sysrand import urandom
-
-  var endpointOpenNoFollow {.importc: "O_NOFOLLOW", header: "<fcntl.h>".}: cint
-  var endpointOpenDirectory {.importc: "O_DIRECTORY", header: "<fcntl.h>".}: cint
-
-  proc createPrivateRunQuotaEndpoint*(prefix: string): string =
-    ## Creates a FRESH rendezvous directory for an invocation-owned
-    ## ``runquotad`` and returns the socket path inside it
-    ## (``<directory>/runquota.sock``). The caller owns the directory: it is
-    ## the caller's to remove once the daemon it started has exited.
-    ##
-    ## WHY NOT ``runquotaEndpointPath(<pid>)``. A pid is unique among the
-    ## processes alive NOW, not among every process that ever ran. A daemon
-    ## that did not reach its orderly shutdown (killed, or its invocation
-    ## killed) leaves its socket behind, and when the kernel later hands the
-    ## same pid to another invocation, a pid-named directory leads it straight
-    ## to that socket. RunQuota's private policy then refuses the bind
-    ## (``private RunQuota endpoint already exists``), as it must: a private
-    ## bind never deletes an endpoint it did not create. So the uniqueness has
-    ## to come from the caller, and the only uniqueness that does not depend
-    ## on the history of the temp directory is a name nobody held before
-    ## this call, created by this call.
-    ##
-    ## It is ``mkdtemp``'s contract, written out: an unpredictable suffix
-    ## (12 hex digits from the OS CSPRNG) appended to ``prefix``, created by
-    ## ``mkdir(2)`` with mode 0700 and a fresh name on ``EEXIST``, so the
-    ## directory is owner-only from the instant it exists and is never one
-    ## somebody else made. (Not ``mkdtemp`` itself: Nim's binding names
-    ## ``<stdlib.h>``, where Darwin does not declare it under the feature set
-    ## these binaries compile with.) The mode is then set explicitly, because
-    ## the umask may have narrowed it below the exact 0700 the private policy
-    ## requires -- through a descriptor opened with ``O_NOFOLLOW |
-    ## O_DIRECTORY``, never by path, so a temp root that lets another user
-    ## swap the fresh directory for a symlink cannot redirect the ``chmod``.
-    ##
-    ## WHERE: in ``getTempDir()``, like ``runquotaEndpointPath``; and, when
-    ## the socket path would not fit ``unixSocketPathMaxLen`` there, directly
-    ## under ``/tmp`` as ``repro-rq-<uid>-<suffix>``. Creating the directory
-    ## here rather than leaving it to ``runquotad`` relaxes nothing: the
-    ## daemon verifies an existing rendezvous directory (owner, exact mode,
-    ## no symlink) exactly as it verifies one it made.
-    const Hex = "0123456789abcdef"
-    const SocketName = "runquota.sock"
-    const SuffixLen = 12
-    # Every candidate has the same length, so one probe decides the parent.
-    let probe = getTempDir() / (prefix & repeat('x', SuffixLen)) / SocketName
-    let (parent, namePrefix) =
-      if unixSocketPathFits(probe): (getTempDir(), prefix)
-      else: ("/tmp", "repro-rq-" & $getuid() & "-")
-    for _ in 0 ..< 64:
-      var suffix = newStringOfCap(SuffixLen)
-      for b in urandom(SuffixLen div 2):
-        suffix.add Hex[int(b) shr 4]
-        suffix.add Hex[int(b) and 0xf]
-      let candidate = parent / (namePrefix & suffix)
-      if posix.mkdir(candidate.cstring, Mode(0o700)) == 0:
-        # Ours by construction: mkdir(2) created it, so nobody can have
-        # planted it, and in a sticky ``/tmp`` nobody else can rename it.
-        let fd = posix.open(candidate.cstring, O_RDONLY or O_CLOEXEC or
-          endpointOpenNoFollow or endpointOpenDirectory)
-        if fd < 0 or posix.fchmod(fd, Mode(0o700)) != 0:
-          let error = osLastError()
-          if fd >= 0: discard posix.close(fd)
-          discard posix.rmdir(candidate.cstring)
-          raiseOSError(error, "set mode 0700 on " & candidate)
-        discard posix.close(fd)
-        return candidate / SocketName
-      if errno != EEXIST:
-        raiseOSError(osLastError(), "mkdir " & candidate)
-    raise newException(OSError, "could not create a fresh RunQuota " &
-      "endpoint directory " & parent / namePrefix & "* in 64 attempts")
 
 proc extendedPath*(path: string): string =
   ## On Windows, rewrites a path into the `\\?\` extended-length form so

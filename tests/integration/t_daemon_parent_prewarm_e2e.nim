@@ -103,10 +103,12 @@ proc startSharedRunQuota(tempRoot: string): SharedRunQuota =
   ##      where that edge is actually LAUNCHED (`usesRunQuotaBypass` reads
   ##      `item.launched`), and whether it launches is not stable run to run.
   ##      Two runs failed on that line alone, once on each arm.
-  ##   2. With no REACHABLE coordinator at `$RUNQUOTA_SOCKET`, each build
-  ##      spawns its own in a fresh `reprobuild-runquota-<pid>-<random>`
-  ##      directory and prints that path on the `runQuotaSocket:` line, so
-  ##      the two arms differ by that path.
+  ##   2. With no REACHABLE coordinator at `$RUNQUOTA_SOCKET`, a build
+  ##      adopts or starts the user's shared per-user daemon and prints its
+  ##      socket on the `runQuotaSocket:` line; until 2026-11-11 each build
+  ##      spawned its own in a fresh `reprobuild-runquota-<pid>-<random>`
+  ##      directory, so the two arms differed by that path. Either way the
+  ##      line would name a daemon this test does not control.
   ##
   ## Starting one and pointing both arms at it removes both branches instead
   ## of tolerating them, and it is the configuration the milestone's

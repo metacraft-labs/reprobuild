@@ -256,6 +256,7 @@ import repro_core
 import repro_hash
 import repro_local_store
 import repro_test_support
+import repro_test_support/per_user_runquota
 
 const RepoRootMarker = "repro.nim"
 
@@ -2041,6 +2042,9 @@ suite "declared IPC trust: the check is what makes it a claim":
         let scratch = createTempDir("repro-declwire-", "",
           dir = nonVolatileTempBase())
         defer: removeDir(scratch)
+        # A scratch per-user endpoint: the real one of this uid is shared with
+        # every other process of the user (`per_user_runquota`).
+        let isolated = isolateUserRunQuota()
         let priorSocket = getEnv("RUNQUOTA_SOCKET", "")
         putEnv("RUNQUOTA_SOCKET", scratch / "no-such-runquota.sock")
         putEnv("REPROBUILD_AUTO_RUNQUOTA", "1")
@@ -2050,6 +2054,7 @@ suite "declared IPC trust: the check is what makes it a claim":
         var spawned = startAutoRunQuotaIfNeeded(false)
         defer:
           releaseAutoRunQuotaProcess(spawned)
+          isolated.release()
           putEnv("RUNQUOTA_SOCKET", priorSocket)
           reset()
         check spawned != nil
@@ -2099,6 +2104,9 @@ suite "declared IPC trust: the check is what makes it a claim":
         let scratch = createTempDir("repro-declwire-", "",
           dir = nonVolatileTempBase())
         defer: removeDir(scratch)
+        # A scratch per-user endpoint: the real one of this uid is shared with
+        # every other process of the user (`per_user_runquota`).
+        let isolated = isolateUserRunQuota()
         let priorSocket = getEnv("RUNQUOTA_SOCKET", "")
         putEnv("RUNQUOTA_SOCKET", scratch / "no-such-runquota.sock")
         putEnv("REPROBUILD_AUTO_RUNQUOTA", "1")
@@ -2108,6 +2116,7 @@ suite "declared IPC trust: the check is what makes it a claim":
         var spawned = startAutoRunQuotaIfNeeded(false)
         defer:
           releaseAutoRunQuotaProcess(spawned)
+          isolated.release()
           putEnv("RUNQUOTA_SOCKET", priorSocket)
           reset()
         check spawned != nil

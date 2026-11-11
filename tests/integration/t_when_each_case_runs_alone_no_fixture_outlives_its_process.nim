@@ -94,7 +94,7 @@ const Subjects = [
   "libs/repro_cas_store/tests/t_cas_link_mutation_safety.nim",
   "libs/repro_cas_store/tests/t_link_capability_facts.nim",
   "libs/repro_cas_store/tests/t_cas_ingest_link.nim",
-  "tests/integration/t_auto_runquota_daemon_ends_with_its_invocation.nim",
+  "tests/integration/t_auto_runquota_shared_per_user_daemon.nim",
   "tests/integration/t_auto_runquota_uses_private_endpoint_policy.nim",
   "tests/integration/t_runquota_long_temp_rendezvous.nim",
   "tests/integration/t_runquota_auto_spawned_daemon_follows_host_config.nim",
@@ -327,8 +327,8 @@ suite "no subject's fixture outlives the process that acquired it":
     checkSubject("libs/repro_cas_store/tests/t_link_capability_facts.nim")
   test "t_cas_ingest_link":
     checkSubject("libs/repro_cas_store/tests/t_cas_ingest_link.nim")
-  test "t_auto_runquota_daemon_ends_with_its_invocation":
-    checkSubject("tests/integration/t_auto_runquota_daemon_ends_with_its_invocation.nim")
+  test "t_auto_runquota_shared_per_user_daemon":
+    checkSubject("tests/integration/t_auto_runquota_shared_per_user_daemon.nim")
   test "t_auto_runquota_uses_private_endpoint_policy":
     require fileExists(binaryOf("tests/integration/t_auto_runquota_uses_private_endpoint_policy.nim"))
     checkSubject("tests/integration/t_auto_runquota_uses_private_endpoint_policy.nim")

@@ -1,4 +1,4 @@
-import std/[os, sequtils, strutils, tempfiles, unittest]
+import std/[os, strutils, unittest]
 import repro_core/paths
 
 when defined(posix):
@@ -91,75 +91,3 @@ suite "RunQuota endpoint paths":
         check runquotaEndpointPath("caller").len <= PathLimit
     else:
       skip()
-
-when defined(posix):
-  # POSIX only: `createPrivateRunQuotaEndpoint` makes a filesystem
-  # rendezvous directory, which a Windows named pipe has no equivalent of.
-  proc modeOf(path: string): int =
-    var info: Stat
-    doAssert lstat(path.cstring, info) == 0
-    int(info.st_mode) and 0o7777
-
-  proc shortTempRoot(prefix: string): string =
-    ## A temp root directly under ``/tmp``. These cases test what happens
-    ## when the root FITS, so it must fit whatever the suite's TMPDIR is: a
-    ## root under a long TMPDIR (the persistent runner's
-    ## ``/var/lib/github-runner-work/<runner>/.cache/reprobuild-test-tmp/<n>``)
-    ## is itself past the socket-path limit, and the code under test then
-    ## correctly relocates to ``/tmp`` -- which is the case below, not these.
-    createTempDir(prefix, "", "/tmp")
-
-  suite "fresh private RunQuota endpoints":
-    test "every call creates a new owner-only directory nobody held before":
-      let root = shortTempRoot("repro-rq-fresh-")
-      defer: removeDir(root)
-      withTempRoot(root):
-        let first = createPrivateRunQuotaEndpoint("caller-")
-        let second = createPrivateRunQuotaEndpoint("caller-")
-        checkpoint(first & " / " & second)
-        check first.parentDir != second.parentDir
-        check first.parentDir.parentDir == root
-        check first.extractFilename == "runquota.sock"
-        check first.parentDir.extractFilename.startsWith("caller-")
-        check dirExists(first.parentDir)
-        check modeOf(first.parentDir) == 0o700
-        # The socket itself is the daemon's to bind.
-        check not fileExists(first) and not symlinkExists(first)
-
-    test "a directory left at a predictable name is never chosen":
-      # The defect a pid-derived name had: a leftover from an earlier holder
-      # of the same name. Whatever is already there, the result is new.
-      let root = shortTempRoot("repro-rq-stale-")
-      defer: removeDir(root)
-      withTempRoot(root):
-        createDir(root / "caller-")
-        for _ in 0 ..< 32:
-          let endpoint = createPrivateRunQuotaEndpoint("caller-")
-          check endpoint.parentDir != root / "caller-"
-          check walkDir(endpoint.parentDir).toSeq.len == 0
-
-    test "the umask cannot narrow the exact mode the private policy requires":
-      let root = shortTempRoot("repro-rq-umask-")
-      defer: removeDir(root)
-      let previous = umask(Mode(0o277))
-      defer: discard umask(previous)
-      withTempRoot(root):
-        check modeOf(createPrivateRunQuotaEndpoint("caller-").parentDir) == 0o700
-
-    test "a temp root too long for a socket moves the directory under /tmp":
-      withTempRoot("/tmp/" & repeat('x', 180)):
-        let endpoint = createPrivateRunQuotaEndpoint("caller-")
-        defer: removeDir(endpoint.parentDir)
-        checkpoint(endpoint)
-        check endpoint.len <= PathLimit
-        check endpoint.parentDir.parentDir == "/tmp"
-        check endpoint.parentDir.extractFilename.startsWith(
-          "repro-rq-" & $getuid() & "-")
-        check modeOf(endpoint.parentDir) == 0o700
-
-    test "a missing temp root is an error, not a silent relocation":
-      let root = shortTempRoot("repro-rq-missing-")
-      removeDir(root)
-      withTempRoot(root):
-        expect OSError:
-          discard createPrivateRunQuotaEndpoint("caller-")

@@ -38,6 +38,12 @@
 ##     shipped daemon and on a bare one alike. Without it both cases would be
 ##     decided by whatever daemon happens to be listening on the host-wide
 ##     endpoint.
+##   * ``RUNQUOTA_USER_ENDPOINT_DIR`` names a scratch directory, so the
+##     per-user endpoint the invocation recovers to (reprobuild-pm
+##     ``spec/RunQuota-Host-Configuration.md``, "The shared per-user daemon
+##     (POSIX)") is one nothing serves. Without it the control case would
+##     ADOPT whatever per-user daemon this uid already runs, and pass
+##     vacuously, exactly as a host-wide daemon would have.
 ##
 ## Nothing inside reprobuild is stubbed, and no diagnostic text is classified
 ## to decide an outcome.
@@ -68,6 +74,8 @@
 import std/[json, os, osproc, strutils, unittest]
 import repro_test_support/process_fixtures
 import repro_test_support/reasoned_skip
+when defined(posix):
+  import repro_test_support/per_user_runquota
 
 proc repoRoot(): string =
   currentSourcePath().parentDir.parentDir.parentDir
@@ -134,6 +142,9 @@ type BuildRun = object
   exitCode: int
   output: string
 
+var userEndpointDir = ""
+  ## The scratch per-user endpoint directory, created lazily like the project.
+
 proc unmeetableRunQuota() =
   ## Point the product's own two environment hooks at an endpoint that cannot
   ## be served, and clear the two switches that would pre-empt the fault. Set
@@ -141,6 +152,10 @@ proc unmeetableRunQuota() =
   ## happened to set it.
   putEnv("RUNQUOTAD_BIN", findExe("false"))
   putEnv("RUNQUOTA_SOCKET", project() / "nothing-serves-this.sock")
+  when defined(posix):
+    if userEndpointDir.len == 0:
+      userEndpointDir = scratchUserEndpointDir()
+    putEnv("RUNQUOTA_USER_ENDPOINT_DIR", userEndpointDir)
   # THE AMBIENT ENVIRONMENT CAN DISABLE WHAT THIS TEST MEASURES, so it is
   # removed rather than hoped about. Both of these make `repro build` skip the
   # handshake for EVERY build, which would leave the control case green

@@ -17548,10 +17548,10 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "t_group_tests_integration_o3c608958_g01",
     singleReason: ""),
   TestSpec(
-    source: "tests/integration/t_auto_runquota_daemon_ends_with_its_invocation.nim",
-    binary: "build/test-bin/t_auto_runquota_daemon_ends_with_its_invocation",
+    source: "tests/integration/t_auto_runquota_shared_per_user_daemon.nim",
+    binary: "build/test-bin/t_auto_runquota_shared_per_user_daemon",
     defines: @[],
-    requiresReproBinary: false,
+    requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
     targetOs: soAny,

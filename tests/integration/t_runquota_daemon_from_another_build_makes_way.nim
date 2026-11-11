@@ -12,20 +12,25 @@
 ## build makes way").
 ##
 ## WHAT THIS RUNS. ``decideRunQuotaHandover`` -- the decision the adoption
-## arm of ``startAutoRunQuotaIfNeeded`` makes on Windows -- against a real
+## arm of ``startAutoRunQuotaIfNeeded`` makes on Windows, and since 2026-11-11
+## for the shared per-user daemon on POSIX too -- against a real
 ## ``runquotad`` on a private endpoint, with a real ``runquotad`` image as the
 ## candidate. "Another build" is a byte-for-byte copy of that image with
 ## bytes appended: a file whose content digest differs, which is the whole of
 ## what distinguishes two builds to this check.
-## POSIX endpoints are invocation-owned: each case selects the official
-## private policy for daemon and clients, independently of NSS service
-## accounts, then restores the caller's socket and scope. Windows keeps its
-## existing named-pipe policy. Endpoint modes remain owner-only.
+## On POSIX each case selects the official private policy for daemon and
+## clients, independently of NSS service accounts, then restores the caller's
+## socket and scope. Windows keeps its existing named-pipe policy. Endpoint
+## modes remain owner-only.
 ##
-## WHY NOT ``startAutoRunQuotaIfNeeded`` ITSELF. On Windows it reaches the
-## fixed host-wide pipe the host's own daemon serves; driving it would retire
-## that daemon. The decision is the only new behaviour on that arm -- the
-## spawn it falls through to on ``rhVacated`` is the existing spawn path.
+## WHY NOT ``startAutoRunQuotaIfNeeded`` ITSELF, ON WINDOWS. There it reaches
+## the fixed host-wide pipe the host's own daemon serves; driving it would
+## retire that daemon. On POSIX it reaches the per-user endpoint, which a test
+## can isolate (``RUNQUOTA_USER_ENDPOINT_DIR``), so the last case drives it
+## end to end: a daemon of another build on that endpoint retires, and this
+## install's starts in its place (reprobuild-pm
+## ``spec/RunQuota-Host-Configuration.md``, "The shared per-user daemon
+## (POSIX)").
 ##
 ## FALSIFIABILITY. Make the daemon retire regardless of digest and the first
 ## case fails (the daemon exits); make it exit while a client is connected
@@ -38,8 +43,11 @@
 
 import std/[os, osproc, strutils, unittest]
 
+import repro_cli_support
 import repro_runquota
 import repro_test_support
+when defined(posix):
+  import repro_test_support/per_user_runquota
 import repro_test_support/process_fixtures
 import runquota_client
 import runquota_core
@@ -236,3 +244,60 @@ suite "a runquotad from another build makes way":
       rhAdopt
     sleep(300)
     check fixture.daemon.running
+
+  when defined(posix):
+    test "the per-user daemon of another build makes way for this install's":
+      let isolated = isolateUserRunQuota()
+      var startedPid = 0
+      let savedBin = getEnv("RUNQUOTAD_BIN")
+      let savedAuto = getEnv("REPROBUILD_AUTO_RUNQUOTA")
+      defer:
+        releaseAdoptedDaemonHold()
+        isolated.release(startedPid)
+        putEnv("RUNQUOTAD_BIN", savedBin)
+        putEnv("REPROBUILD_AUTO_RUNQUOTA", savedAuto)
+      let root = getTempDir() / ("repro-rq-makeway-user-" &
+        $getCurrentProcessId())
+      releaseDirAtProcessExit(root)
+      removeDir(root)
+      createDir(root)
+      createDir(isolated.dir)
+      setFilePermissions(isolated.dir, {fpUserRead, fpUserWrite, fpUserExec})
+      # The OTHER build's daemon, already serving the per-user endpoint, idle.
+      let other = anotherBuild(image, root)
+      setFilePermissions(other, {fpUserRead, fpUserWrite, fpUserExec})
+      putEnv("RUNQUOTA_SOCKET", isolated.socket)
+      var old = startProcess(other,
+        args = @["--socket", isolated.socket,
+          "--host-config", root / "runquotad.toml",
+          "--host-identity-file", root / "host-id",
+          "--no-write-stats", "--ambient-sample-interval-millis", "0",
+          "--memory-pressure-source", "unavailable"],
+        options = {poParentStreams})
+      terminateAtProcessExit(processID(old))
+      var up = false
+      for _ in 0 ..< 400:
+        if isRunQuotaDaemonReachable():
+          up = true
+          break
+        sleep(25)
+      require up
+      let oldPid = processID(old)
+      putEnv("RUNQUOTAD_BIN", image)
+      putEnv("REPROBUILD_AUTO_RUNQUOTA", "1")
+      # The invocation inherits the per-user socket an earlier `repro`
+      # published, and runs adopt-or-start on it.
+      var daemon = startAutoRunQuotaIfNeeded(false)
+      defer: releaseAutoRunQuotaProcess(daemon)
+      # Asked to retire with no other client, the old daemon exits 0 and this
+      # install's daemon is started in its place, and held.
+      check old.waitForExit(15_000) == 0
+      old.close()
+      require daemon != nil
+      startedPid = processID(daemon)
+      check startedPid != oldPid
+      check holdsAdoptedDaemon()
+      check getEnv("RUNQUOTA_SOCKET") == isolated.socket
+      check getEnv("RUNQUOTA_ENDPOINT_SCOPE") == "private"
+      when defined(linux):
+        check lifetimeLockHolderPid(isolated.socket) == startedPid

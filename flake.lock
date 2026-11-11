@@ -2123,11 +2123,11 @@
         "vscode-server": "vscode-server"
       },
       "locked": {
-        "lastModified": 1794250995,
-        "narHash": "sha256-ojuh7gPkaxGy2Qo6jZTg+GbMIQ8G7RP4Ib7mS/jrYCE=",
+        "lastModified": 1794413371,
+        "narHash": "sha256-Qr+ZlZV/p44Y1Cjli2ix35coaQJWQ/CfPm2Ro0zOmhE=",
         "owner": "metacraft-labs",
         "repo": "devops-modules",
-        "rev": "d551a83206980ef7772d073c59259a3f5dfa2848",
+        "rev": "050212b557379c085ffca16de24891808b7936eb",
         "type": "github"
       },
       "original": {
@@ -2523,11 +2523,11 @@
     "reprobuild-test-adapters-src": {
       "flake": false,
       "locked": {
-        "lastModified": 1791824054,
-        "narHash": "sha256-bDuj7DYj2nZtvG0em05EMy6/hK/RWIE917GHHZPq62Y=",
+        "lastModified": 1793979373,
+        "narHash": "sha256-PAdbebvNCYTKb17tavTWGjBKduf8fNUFTrtxJ8DMgi0=",
         "owner": "metacraft-labs",
         "repo": "reprobuild-test-adapters",
-        "rev": "b0fc1bcb9c2f1cb6a7fc3a558592ae7051782c24",
+        "rev": "504ce5c8dbddd150ead5b9bc2cddfdda21b55789",
         "type": "github"
       },
       "original": {
@@ -2578,17 +2578,17 @@
     "runquota-package-catalog": {
       "flake": false,
       "locked": {
-        "lastModified": 1791021809,
-        "narHash": "sha256-U6iZFGwIW9UKtLoBTiA53J2uIEsIP/k9PxZl65/9n5k=",
+        "lastModified": 1793844707,
+        "narHash": "sha256-q0An22Sv8dcVxcdXroB+3d0f8/LGSBh479WPge1uEwE=",
         "owner": "metacraft-labs",
         "repo": "reprobuild-packages",
-        "rev": "4e2fd1dcabf8ae8eac28a2d27c3160233589c1e6",
+        "rev": "15ceea674d3e83b8fd1a3032e4f01569c04a8fa5",
         "type": "github"
       },
       "original": {
         "owner": "metacraft-labs",
         "repo": "reprobuild-packages",
-        "rev": "4e2fd1dcabf8ae8eac28a2d27c3160233589c1e6",
+        "rev": "15ceea674d3e83b8fd1a3032e4f01569c04a8fa5",
         "type": "github"
       }
     },
@@ -2619,11 +2619,11 @@
         "runquota-package-catalog": "runquota-package-catalog"
       },
       "locked": {
-        "lastModified": 1793267528,
-        "narHash": "sha256-A9b+rJTlp/pz6MgmZot/WDfvozmOYzBpPFOhRbxUUAM=",
+        "lastModified": 1794428419,
+        "narHash": "sha256-k4QPJCnkmTy3MuQxVlSGqT4paPVAjt18a5eTfWYTeTk=",
         "owner": "metacraft-labs",
         "repo": "runquota",
-        "rev": "9818dc0c90be8ba7993424a7bbfbb6e009ffa965",
+        "rev": "d828b6c238c4cd7faf531ed9fcb18b647b94ecdf",
         "type": "github"
       },
       "original": {
