@@ -645,9 +645,17 @@ proc suiteScopeWork*(text: string): string =
   ## run 41 measured minutes per case in ``t_group_tests_integration_g05``,
   ## whose member ``t_federated_catalog_diagnostics_are_actionable`` builds
   ## and publishes fixture catalogs (spawning ``nim c``) at suite scope.
+  ##
+  ## A ``suite`` header whose name expression is continued on further lines
+  ## (``suite "a, " &`` / ``    "b":``) ends at the line that ends in ``:``;
+  ## its continuation lines are the header, not the body, and do not fix the
+  ## body's indentation.
   var suiteIndent = -1
   var bodyIndent = -1
+  var inHeader = false
   var inTripleQuote = false
+  proc endsHeader(t: string): bool =
+    withoutComments(t).strip(leading = false).endsWith(":")
   for line in text.splitLines:
     if line.count("\"\"\"") mod 2 == 1:
       inTripleQuote = not inTripleQuote
@@ -659,11 +667,15 @@ proc suiteScopeWork*(text: string): string =
     if t.startsWith("suite ") or t.startsWith("suite("):
       suiteIndent = indent
       bodyIndent = -1
+      inHeader = not endsHeader(t)
       continue
     if suiteIndent < 0: continue
     if indent <= suiteIndent:
       if not t.startsWith("#"):
         suiteIndent = -1
+      continue
+    if inHeader:
+      if endsHeader(t): inHeader = false
       continue
     if bodyIndent < 0: bodyIndent = indent
     if indent != bodyIndent: continue
