@@ -26,7 +26,7 @@
 ## on a machine without the release job's checkout. The prefix's catalog is
 ## staged by `scripts/release/stage_release_catalog.sh`, the script the release
 ## legs run (through `stage_release_sources.sh`), from a git repository pinned
-## by a fixture `.github/sibling-repos`. Every `REPROBUILD_*` variable and
+## by a fixture `repro.lock`. Every `REPROBUILD_*` variable and
 ## `$REPRO_PUBLIC_CLI_PATH` are removed from the child's environment and its
 ## working directory is outside any reprobuild tree or catalog.
 ##
@@ -193,9 +193,13 @@ suite "an installed engine reaches the catalog its release ships":
 
   # The release checkout the staging script runs in: it pins the catalog.
   let releaseCheckout = scratch / "release-checkout"
-  createDir(releaseCheckout / ".github")
-  writeFile(releaseCheckout / ".github" / "sibling-repos",
-    "reprobuild-packages=" & pinned & "\n")
+  createDir(releaseCheckout)
+  writeFile(releaseCheckout / "repro.lock",
+    "schema = \"reprobuild.solved-graph-lock.v3\"\n\n[lock]\n" &
+    "deps = [{ name = \"reprobuild-packages\", coord_kind = \"vcs\", " &
+    "url = \"https://github.com/metacraft-labs/reprobuild-packages\", " &
+    "ref = \"agents\", revision = \"" & pinned & "\", integrity = " &
+    "\"git-sha1:" & pinned & "\" }]\n")
 
   # Where the child runs and what it anchors on: no reprobuild tree and no
   # `reprobuild-packages` above it.

@@ -30025,6 +30025,7 @@ const pythonTestPaths*: seq[string] = @[
   "tests/unit/test_nix_daemon_expression_file_is_never_cached.py",
   "tests/unit/test_nix_daemon_request_requires_workspace_root.py",
   "tests/unit/test_nix_evaluation_policy.py",
+  "tests/unit/test_package_nix_pending_sources.py",
   "tests/unit/test_package_root_anchor.py",
   "tests/unit/test_profile_daemon_worker_syscalls.py",
   "tests/unit/test_prune_undeclared_test_binaries.py",

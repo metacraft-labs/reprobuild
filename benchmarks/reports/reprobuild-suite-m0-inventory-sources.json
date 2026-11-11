@@ -5,7 +5,7 @@
     "pureUnitConsolidationGroups": 79,
     "pureUnitTests": 749,
     "staticallyDetectedRuntimeCompilerFlowTests": 137,
-    "testEntries": 2758
+    "testEntries": 2759
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1570,7 +1570,7 @@
       "integration": 1494,
       "platform/destructive": 174,
       "pure unit": 749,
-      "unclassified": 320
+      "unclassified": 321
     },
     "graphOwnedTestArtifacts": [
       {
@@ -1785,8 +1785,8 @@
       }
     ],
     "nimTestBinaryCount": 2718,
-    "pythonTestFileCount": 40,
-    "testEntryCount": 2758
+    "pythonTestFileCount": 41,
+    "testEntryCount": 2759
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -57528,6 +57528,21 @@
     {
       "binary": "",
       "class": "unclassified",
+      "classificationReason": "imports `pathlib`, which this scan does not recognize; refusing to call it pure rather than assuming it is",
+      "defines": [],
+      "language": "python",
+      "localDependencyShape": [],
+      "owner": "tests/unit",
+      "requiresReproBinary": false,
+      "source": "tests/unit/test_package_nix_pending_sources.py",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 9,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "",
+      "class": "unclassified",
       "classificationReason": "imports `shutil`, which this scan does not recognize; refusing to call it pure rather than assuming it is",
       "defines": [],
       "language": "python",
@@ -57671,7 +57686,7 @@
       "requiresReproBinary": false,
       "source": "tests/unit/test_sibling_lock_pins.py",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 10,
+      "staticCaseCount": 9,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
