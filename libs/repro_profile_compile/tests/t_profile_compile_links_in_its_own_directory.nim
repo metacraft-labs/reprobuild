@@ -169,8 +169,16 @@ else:
       setFilePermissions(dir / "relbin" / "nim",
         {fpUserRead, fpUserWrite, fpUserExec})
       setCurrentDir(dir)
-      withEnv(ProfileNimCompilerEnvVar, ""):
+      # An installed prefix would answer before PATH is searched.
+      withEnv("REPRO_PUBLIC_CLI_PATH", ""):
         withEnv("PATH", "relbin"):
-          let chosen = resolveProfileNimCompiler()
-          check chosen.isAbsolute
-          check chosen == dir / "relbin" / "nim"
+          # Both lookups through PATH: the default one, and a bare
+          # command name in `$REPRO_NIM_COMPILER`.
+          for explicit in ["", "nim"]:
+            withEnv(ProfileNimCompilerEnvVar, explicit):
+              let chosen = resolveProfileNimCompiler()
+              checkpoint("REPRO_NIM_COMPILER=" & explicit & " chose " & chosen)
+              check chosen.isAbsolute
+              # `sameFile`, not a string comparison: the temporary
+              # directory may be reached through a symbolic link.
+              check sameFile(chosen, dir / "relbin" / "nim")
