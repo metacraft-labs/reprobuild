@@ -32,12 +32,19 @@
 ##
 ## ## The version must equal the host rustc's
 ##
-## A standard library built by one rustc is not loadable by another, so
-## ``RustStdVersion`` follows ``rustc.nim``'s pin and the sysroot edge
-## refuses a host ``rustc --version`` that differs.
+## A standard library built by one rustc is not loadable by another, so the
+## table carries one row per target for each release ``rustc.nim`` offers
+## (``rust_toolchain_pins.RustReleases``), and the sysroot edge refuses a
+## host ``rustc --version`` that differs from the component it merges.
+## ``RustStdVersion`` is the default release, the one the sysroot edge
+## merges: ``cargo_package`` emits that edge before any ``uses:`` range is
+## resolved, so it cannot follow a recipe onto another release yet, and a
+## cross build whose ``rustc`` resolves to one is refused by the merge,
+## naming both versions.
 
 import repro_project_dsl
 import repro_dsl_stdlib/packages_schema
+import repro_dsl_stdlib/rust_toolchain_pins
 export packages_schema
 
 type
@@ -51,8 +58,9 @@ type
     sha256*: string
 
 const
-  RustStdVersion* = "1.94.0"
-    ## Follows ``rustc.nim``'s pin (see the header).
+  RustStdVersion* = RustDefaultRelease.version
+    ## The default release of ``rustc.nim`` (see the header).
+  RustStdVersion1971 = RustRelease1971.version
 
   RustStdComponents* = [
     RustStdComponent(version: RustStdVersion,
@@ -67,8 +75,22 @@ const
                      triple: "x86_64-unknown-linux-musl",
                      cpu: "x86_64", os: "linux",
                      sha256: "74a0e509ada9e9dd8e40a987abfdc677c6aa3487506bd6afaf9ede9466e3b189"),
+    RustStdComponent(version: RustStdVersion1971,
+                     triple: "armv7-unknown-linux-musleabihf",
+                     cpu: "armv7", os: "linux",
+                     sha256: "ba78ca65d7a90119b002dfac50c02aa8dd47d2a059b72cdec9b067b723c75bde"),
+    RustStdComponent(version: RustStdVersion1971,
+                     triple: "aarch64-unknown-linux-musl",
+                     cpu: "aarch64", os: "linux",
+                     sha256: "996597f66ec22cd0401e1f171545cd87267d2efb5519d8119b747467053f438c"),
+    RustStdComponent(version: RustStdVersion1971,
+                     triple: "x86_64-unknown-linux-musl",
+                     cpu: "x86_64", os: "linux",
+                     sha256: "d160dfc81d21fdc72534859fae249fecf6ab70640375f64fc4e77005a48c18d0"),
   ]
-    ## The digests are upstream's ``<archive>.sha256`` files, read 2026-10-30.
+    ## The digests are upstream's ``<archive>.sha256`` files, read 2026-10-30
+    ## (1.94.0) and 2026-11-11 (1.97.1; equal to the ``hash`` rows of
+    ## channel-rust-1.97.toml). The default release's rows come first.
     ## The ``.tar.gz`` archive rather than the ``.tar.xz`` one: tar execs the
     ## decompressor, and ``gzip`` is a catalog package every from-source
     ## recipe already declares, where ``xz`` is not one at all.
@@ -77,17 +99,19 @@ proc rustStdUrl*(c: RustStdComponent): string =
   "https://static.rust-lang.org/dist/rust-std-" & c.version & "-" & c.triple &
     ".tar.gz"
 
-proc rustStdComponent*(triple: string): RustStdComponent =
-  ## The component for `triple`, or a `ValueError` naming the triple and
-  ## the triples the table has.
+proc rustStdComponent*(triple: string; version = RustStdVersion):
+    RustStdComponent =
+  ## The component of release `version` for `triple`, or a `ValueError`
+  ## naming the triple and the triples the table has.
   for c in RustStdComponents:
-    if c.triple == triple:
+    if c.triple == triple and c.version == version:
       return c
   var known: seq[string] = @[]
   for c in RustStdComponents:
-    known.add(c.triple)
-  var msg = "rust-std: no standard library component is catalogued for the " &
-    "target '" & triple & "'; known: "
+    if c.version == version and c.triple notin known:
+      known.add(c.triple)
+  var msg = "rust-std: no standard library component of Rust " & version &
+    " is catalogued for the target '" & triple & "'; known: "
   for i, k in known:
     if i > 0: msg.add(", ")
     msg.add(k)
@@ -107,6 +131,11 @@ const
   Armv7Sha256 = RustStdComponents[0].sha256
   Aarch64Sha256 = RustStdComponents[1].sha256
   X86_64Sha256 = RustStdComponents[2].sha256
+  RustStdDistBase1971 = "https://static.rust-lang.org/dist/rust-std-" &
+    RustStdVersion1971 & "-"
+  Armv7Sha256V1971 = RustStdComponents[3].sha256
+  Aarch64Sha256V1971 = RustStdComponents[4].sha256
+  X86_64Sha256V1971 = RustStdComponents[5].sha256
 
 package `rust-std`:
   ## Linux targets only, so far: the arms are the components the add-on
@@ -154,3 +183,38 @@ package `rust-std`:
       lockIdentity = "tarball:rust-std@" & RustStdVersion &
         ":linux-x86_64:sha256:" & X86_64Sha256,
       version = RustStdVersion
+    # Rust 1.97.1's components, after the default release's so an unranged
+    # reference keeps selecting those.
+    tarball url = RustStdDistBase1971 & "armv7-unknown-linux-musleabihf.tar.gz",
+      sha256 = Armv7Sha256V1971,
+      archiveType = "tar.gz",
+      stripComponents = 1,
+      executablePath = "lib/rustlib/armv7-unknown-linux-musleabihf/lib/self-contained/libc.a",
+      packageId = "rust-std@" & RustStdVersion1971,
+      cpu = "armv7",
+      os = "linux",
+      lockIdentity = "tarball:rust-std@" & RustStdVersion1971 &
+        ":linux-armv7:sha256:" & Armv7Sha256V1971,
+      version = RustStdVersion1971
+    tarball url = RustStdDistBase1971 & "aarch64-unknown-linux-musl.tar.gz",
+      sha256 = Aarch64Sha256V1971,
+      archiveType = "tar.gz",
+      stripComponents = 1,
+      executablePath = "lib/rustlib/aarch64-unknown-linux-musl/lib/self-contained/libc.a",
+      packageId = "rust-std@" & RustStdVersion1971,
+      cpu = "aarch64",
+      os = "linux",
+      lockIdentity = "tarball:rust-std@" & RustStdVersion1971 &
+        ":linux-aarch64:sha256:" & Aarch64Sha256V1971,
+      version = RustStdVersion1971
+    tarball url = RustStdDistBase1971 & "x86_64-unknown-linux-musl.tar.gz",
+      sha256 = X86_64Sha256V1971,
+      archiveType = "tar.gz",
+      stripComponents = 1,
+      executablePath = "lib/rustlib/x86_64-unknown-linux-musl/lib/self-contained/libc.a",
+      packageId = "rust-std@" & RustStdVersion1971,
+      cpu = "x86_64",
+      os = "linux",
+      lockIdentity = "tarball:rust-std@" & RustStdVersion1971 &
+        ":linux-x86_64:sha256:" & X86_64Sha256V1971,
+      version = RustStdVersion1971
