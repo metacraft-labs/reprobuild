@@ -22082,9 +22082,9 @@ proc vcsManagedHookBody(hookName, hookContract: string;
   # dev shell that was never rebuilt serves an OLDER build than the one that
   # wrote these hooks, even while the workspace's lock already names a
   # servicing build, and re-anchoring to it would rewrite current bodies with
-  # older ones. So refreshing
-  # the supplier comes first in this branch too -- it is harmless when the
-  # shell is current -- and re-anchoring is offered only once that survives.
+  # older ones. So refreshing the supplier comes first in this branch too --
+  # it is harmless when the shell is current -- and re-anchoring is offered
+  # only once that survives.
   result.add("  if [ \"${REPRO_PROBE_STATUS:-1}\" = \"3\" ]; then\n")
   result.add("    echo \"repro hooks: That build speaks this handshake and " &
     "simply builds a different\" >&2\n")
