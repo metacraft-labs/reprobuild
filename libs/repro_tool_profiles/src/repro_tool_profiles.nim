@@ -10244,10 +10244,20 @@ proc toolBuildIdentity*(artifact: ProjectInterfaceArtifact;
   result.interfaceFingerprint = artifact.interfaceFingerprint
   let pathLookup = SidecarPathLookup()
   for useDef in applyProvisioningPins(artifact.projectInterface, pins):
-    var profile = toolProfileFor(useDef, mode, pathValue, storeRoot,
-      producerExecutableSelectors, producerAuxSelectors, pathLookup)
-    if mode == tpmFromSource:
-      resolveSourceDependencyClosure(profile, useDef, storeRoot)
+    var profile: PathOnlyToolProfile
+    # A `nativeBuildDeps:` tool runs on the build host, so under `--target`
+    # every sibling mirror it is resolved from -- its own and its recipe's
+    # dependency closure -- is the native one, in every mode. `repro
+    # build`'s from-source pass builds it natively; a library entry keeps
+    # the build's target.
+    let mirrorTarget =
+      if useDef.depKind == DepKindNative: ""
+      else: effectiveInstallMirrorTarget()
+    withInstallMirrorTarget(mirrorTarget):
+      profile = toolProfileFor(useDef, mode, pathValue, storeRoot,
+        producerExecutableSelectors, producerAuxSelectors, pathLookup)
+      if mode == tpmFromSource:
+        resolveSourceDependencyClosure(profile, useDef, storeRoot)
     result.profiles.add(profile)
     result.actionIdentities.add(actionIdentityFor(useDef, profile))
 

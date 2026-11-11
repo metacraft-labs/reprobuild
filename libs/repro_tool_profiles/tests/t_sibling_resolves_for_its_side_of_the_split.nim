@@ -11,8 +11,12 @@
 ## target mirror without its keyed `.realization-info@<triple>` sidecar is
 ## not a build. Without `--target` PATH answers every side.
 ##
-## Every case goes through the dispatcher (`pathOnlyBuildIdentity`, the
-## path-mode entry the CLI uses) with uses spelled by the DSL's own
+## The same split holds in from-source mode and in tarball mode's
+## from-source fall-through: a `nativeBuildDeps:` entry reads the sibling's
+## native build under `--target`, a library entry the target's.
+##
+## Every case goes through the dispatcher (`toolBuildIdentity`, the entry
+## the CLI uses, or its path-mode wrapper) with uses spelled by the DSL's own
 ## `DepKind*` constants, not string literals: the round-2 resolver compared
 ## `depKind` against "build", which the DSL never emits, so every library
 ## dependency silently went PATH-first under `--target`.
@@ -188,6 +192,52 @@ suite "path-mode dispatch resolves a sibling for its side of the split":
     let (recipes, _) = layOut(tmp, false, false)
     withEnv(FromSourceRootEnvVar, "", proc() =
       check fromSourceRecipeRoot(tmp) == recipes)
+
+proc resolveIn(mode: ToolProvisioningMode; kind, recipes: string): string =
+  ## The executable `mode`'s dispatch picks for one `openssl` use.
+  var resolved = ""
+  withEnv(FromSourceRootEnvVar, recipes, proc() =
+    let identity = toolBuildIdentity(ProjectInterfaceArtifact(
+      projectInterface: ProjectInterface(projectName: "consumer",
+        toolUses: @[use(kind)])), mode, pathValue = "")
+    resolved = identity.profiles[0].resolvedExecutablePath)
+  resolved
+
+suite "from-source and tarball dispatch resolve a sibling for its side of the split":
+  # `--tool-provisioning=from-source`, and tarball mode's fall-through for a
+  # package with no host tarball, read the sibling recipe itself. A
+  # `nativeBuildDeps:` tool runs on the build host, so under `--target` it is
+  # the sibling's NATIVE build -- the one `repro build`'s from-source pass
+  # builds for it -- and a `buildDeps:` / `runtimeDeps:` library is the
+  # target's.
+  test "under --target a nativeBuildDeps tool reads the native mirror":
+    let tmp = freshTmp()
+    defer: removeDir(tmp)
+    let (recipes, _) = layOut(tmp, true, true)
+    withTarget(Triple, proc() =
+      for mode in [tpmFromSource, tpmTarball]:
+        let resolved = resolveIn(mode, DepKindNative, recipes)
+        check "/.repro/output/install/usr/bin/openssl" in resolved
+        check "@" & Triple notin resolved)
+
+  test "under --target a nativeBuildDeps tool with only a native build resolves":
+    let tmp = freshTmp()
+    defer: removeDir(tmp)
+    let (recipes, _) = layOut(tmp, false, false)
+    withTarget(Triple, proc() =
+      for mode in [tpmFromSource, tpmTarball]:
+        check "/.repro/output/install/usr/bin/openssl" in
+          resolveIn(mode, DepKindNative, recipes))
+
+  test "under --target a buildDeps / runtimeDeps library reads the target mirror":
+    let tmp = freshTmp()
+    defer: removeDir(tmp)
+    let (recipes, _) = layOut(tmp, true, true)
+    withTarget(Triple, proc() =
+      for mode in [tpmFromSource, tpmTarball]:
+        for kind in [DepKindTarget, DepKindRuntime]:
+          check ("/.repro/output/install@" & Triple & "/usr/bin/openssl") in
+            resolveIn(mode, kind, recipes))
 
 const ObjectFixtures = currentSourcePath().parentDir.parentDir.parentDir /
   "repro_core" / "tests" / "fixtures" / "target_object_check"
