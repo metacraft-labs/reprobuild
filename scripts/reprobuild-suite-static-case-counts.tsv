@@ -567,6 +567,7 @@ libs/repro_interface_artifacts/tests/t_provider_link_flags_bake_no_host_rpath.ni
 libs/repro_interface_artifacts/tests/t_provider_nimcache_key_tracks_external_libs.nim	nim	5
 libs/repro_interface_artifacts/tests/t_provider_source_discovery.nim	nim	3
 libs/repro_interface_artifacts/tests/t_recipe_c_compiler_selection_is_loud.nim	nim	17
+libs/repro_interface_artifacts/tests/t_recipe_relative_artifact_rebases_nix_expression_files.nim	nim	2
 libs/repro_interface_artifacts/tests/t_release_clingo_rpath_darwin.nim	nim	4
 libs/repro_interface_artifacts/tests/t_repro_lib_fingerprint_memo.nim	nim	4
 libs/repro_interface_artifacts/tests/t_reprobuild_source_root_from_binary_location.nim	nim	8
@@ -1191,7 +1192,7 @@ recipes/packages/source/zlib/test_zlib_source.nim	nim	8
 recipes/sandbox-tools/test_sandbox_tools.nim	nim	12
 tests/bundles/bundle_repro_core_dep_scanners_pure_unit.nim	nim	35
 tests/bundles/bundle_repro_core_pure_unit.nim	nim	69
-tests/bundles/bundle_repro_dsl_stdlib_catalogs_pure_unit.nim	nim	110
+tests/bundles/bundle_repro_dsl_stdlib_catalogs_pure_unit.nim	nim	115
 tests/bundles/bundle_repro_lock_files_cli_pure_unit.nim	nim	24
 tests/bundles/bundle_repro_lock_files_pure_unit.nim	nim	42
 tests/bundles/bundle_repro_peer_cache_pure_unit.nim	nim	29
@@ -1607,7 +1608,7 @@ tests/integration/t_attestation_report.nim	nim	3
 tests/integration/t_attested_image_manifest.nim	nim	4
 tests/integration/t_authenticated_inference_binding_mutations.nim	nim	26
 tests/integration/t_auto_runquota_daemon_ends_with_its_invocation.nim	nim	13
-tests/integration/t_auto_runquota_uses_private_endpoint_policy.nim	nim	16
+tests/integration/t_auto_runquota_uses_private_endpoint_policy.nim	nim	17
 tests/integration/t_autotools_configure_cache.nim	nim	1
 tests/integration/t_autotools_configure_tools.nim	nim	1
 tests/integration/t_b0_develop_mode_uses_local_source.nim	nim	1
@@ -1928,6 +1929,7 @@ tests/integration/t_integration_variant_override_priorities.nim	nim	6
 tests/integration/t_integration_variant_value_accessor.nim	nim	4
 tests/integration/t_integrity_mismatch_surfaces_per_tier.nim	nim	1
 tests/integration/t_integrity_uses_vcs_native_hash_else_own_file_hash_both_multihash.nim	nim	1
+tests/integration/t_interface_extraction_copy_names_its_own_nix_expression_files.nim	nim	1
 tests/integration/t_interface_extraction_follows_the_selected_catalog.nim	nim	1
 tests/integration/t_interface_extraction_is_served_to_a_copy_at_another_path.nim	nim	1
 tests/integration/t_interface_extraction_reuses_library_objects.nim	nim	1
