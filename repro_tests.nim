@@ -3622,6 +3622,17 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "t_group_libs_repro_core_tests_g01",
     singleReason: ""),
   TestSpec(
+    source: "libs/repro_core/tests/t_nix_store_roots_large_closure.nim",
+    binary: "build/test-bin/t_nix_store_roots_large_closure",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "t_group_libs_repro_core_tests_g01",
+    singleReason: ""),
+  TestSpec(
     source: "libs/repro_core/tests/t_normalized_path_folds_absolute_dotdot.nim",
     binary: "build/test-bin/t_normalized_path_folds_absolute_dotdot",
     defines: @[],

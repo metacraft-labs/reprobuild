@@ -74,14 +74,15 @@
 ##
 ## On a host with no Nix store directory every operation here is a no-op.
 
-import std/[algorithm, monotimes, os, osproc, sets, strtabs, strutils, tables,
-            times]
+import std/[algorithm, monotimes, os, osproc, sets, streams, strtabs, strutils,
+            tables, times]
 when defined(posix):
   import std/posix
 
 import ./ambient_execution
 import ./link_target
 import ./paths
+import ./process_close
 
 const
   NixBase32Alphabet* = "0123456789abcdfghijklmnpqrsvwxyz"
@@ -113,6 +114,21 @@ const
     ## `actions/` stamp before giving up on writing an index this time.
   LedgerClockSettlePollMs = 2
     ## Sleep between two readings of the probe and the stamp.
+  NixStoreArgvBudget* = 64 * 1024
+    ## The most bytes of store-path arguments one `nix-store --realise
+    ## --add-root` call carries, counting each path's bytes, its terminating
+    ## NUL and its `argv` pointer, the way the kernel charges them.
+    ##
+    ## `execve` fails with `E2BIG` ("Argument list too long") once `argv` and
+    ## `envp` together exceed `ARG_MAX`. On Linux that is a quarter of the
+    ## stack limit but never less than 32 pages (128 KiB), and every argument
+    ## is in addition capped at `MAX_ARG_STRLEN` (128 KiB); see execve(2),
+    ## "Limits on size of arguments and environment",
+    ## https://man7.org/linux/man-pages/man2/execve.2.html. macOS's
+    ## `ARG_MAX` is 1 MiB. 64 KiB stays under the smallest of those with
+    ## room for the environment the call inherits, and still carries ~800
+    ## paths per call, so a lease closure of a few thousand paths costs a
+    ## handful of round trips rather than one per path.
 
 type
   NixStoreRootError* = object of CatchableError
@@ -427,29 +443,79 @@ proc freshRootName(dir: string): string =
     inc rootNameCounter
     result = result & "y" & $rootNameCounter
 
+proc storePathBatches*(storePaths: openArray[string];
+                       budget = NixStoreArgvBudget): seq[seq[string]] =
+  ## `storePaths` split, in order, into the fewest consecutive batches whose
+  ## argument bytes (path, NUL, `argv` pointer each) fit in `budget`. A path
+  ## that alone exceeds the budget gets a batch of its own: no store path
+  ## comes near it (`NixStoreNameMaxLen`), and dropping one would leave it
+  ## silently unrooted.
+  var used = 0
+  for p in storePaths:
+    let cost = p.len + 1 + sizeof(pointer)
+    if result.len == 0 or used + cost > budget:
+      result.add(@[])
+      used = 0
+    result[^1].add(p)
+    used += cost
+
+proc runNixStore(exe: string; args: openArray[string]):
+    tuple[output: string; exitCode: int] =
+  ## Run `exe args…` directly, with `args` as its `argv` and no shell between
+  ## them, and return its merged stdout/stderr and exit code. Through a shell
+  ## the whole command would be ONE argument of `sh -c`, capped by Linux at
+  ## `MAX_ARG_STRLEN` (128 KiB) whatever the batch size; see
+  ## `NixStoreArgvBudget`.
+  ##
+  ## Released with `closeProcessOnce`: the build engine roots outputs from
+  ## its scheduler thread while the worker pool is live, where
+  ## `osproc.close`'s second close of the merged descriptor can close another
+  ## thread's file (see `process_close`).
+  var p = uncontrolledStartProcess(exe, args = args,
+    env = hostNixEnvironment(), options = {poStdErrToStdOut, poUsePath})
+  try:
+    result.output = p.outputStream.readAll()
+    result.exitCode = p.waitForExit()
+  finally:
+    closeProcessOnce(p)
+
 proc registerRoots(dir: string; storePaths: openArray[string];
-                   nixStore: string): int =
-  ## Register indirect roots in `dir` for `storePaths` with ONE `nix-store`
-  ## call. Returns the number of calls made (0 or 1).
+                   nixStore: string; calls: var int) =
+  ## Register indirect roots in `dir` for `storePaths`, with one
+  ## `nix-store --realise --add-root <link> <path>…` call per
+  ## `storePathBatches` batch. Adds every call it makes to `calls`, the
+  ## failing one included, before it raises.
+  ##
+  ## Each call gets a link base of its own (`freshRootName`), because
+  ## `nix-store` names a call's roots `<link>`, `<link>-2`, … from that base.
+  ## A failing call raises at once; the batches before it stay registered,
+  ## and the caller's retry registers only what is still unrooted.
   if storePaths.len == 0:
-    return 0
+    return
   let exe = resolveNixStoreExe(nixStore)
   if exe.len == 0:
     raise newException(NixStoreRootError,
       "cannot register Nix GC roots for " & $storePaths.len &
       " store path(s): no nix-store next to nix and none on PATH")
   createDir(extendedPath(dir))
-  var cmd = quoteShell(exe) & " --realise --add-root " &
-    quoteShell(absolutePath(dir) / freshRootName(dir))
-  for p in storePaths:
-    cmd.add(" " & quoteShell(p))
-  let res = uncontrolledExecCmdEx(cmd, options = {poStdErrToStdOut},
-    env = hostNixEnvironment())
-  if res.exitCode != 0:
-    raise newException(NixStoreRootError,
-      "nix-store --realise --add-root exited " & $res.exitCode &
-      " registering GC roots under " & dir & ": " & res.output.strip())
-  1
+  for batch in storePathBatches(storePaths):
+    var args = @["--realise", "--add-root",
+      absolutePath(dir) / freshRootName(dir)]
+    args.add(batch)
+    let res =
+      try:
+        runNixStore(exe, args)
+      except OSError as e:
+        raise newException(NixStoreRootError,
+          "cannot run " & exe & " to register GC roots under " & dir & ": " &
+          e.msg)
+    inc calls
+    if res.exitCode != 0:
+      raise newException(NixStoreRootError,
+        "nix-store --realise --add-root exited " & $res.exitCode &
+        " registering GC roots for " & $batch.len & " of " &
+        $storePaths.len & " store path(s) under " & dir & ": " &
+        res.output.strip())
 
 # ---------------------------------------------------------------------------
 # A directory of root links
@@ -509,20 +575,30 @@ proc addRoots(dir: string; storePaths: openArray[string]; nixStore: string;
     return
   if missing.len > 0:
     try:
-      result.nixStoreCalls += registerRoots(dir, missing, nixStore)
+      registerRoots(dir, missing, nixStore, result.nixStoreCalls)
     except NixStoreRootError:
       # A path can vanish between the `lstat` above and the call, and
       # `--realise` then tries to (re)build it. Retry once with what still
       # exists, so one collected path does not cost the others their roots.
+      # The batches registered before the failing one already have their
+      # links, so only what is still unrooted is registered again: a second
+      # link to one target would be a duplicate root for the prune to drop.
       var still: seq[string] = @[]
+      var vanished = false
       for p in missing:
         if storePathExists(p):
           still.add(p)
         else:
           result.absent.add(p)
-      if still.len == missing.len:
+          vanished = true
+      if not vanished:
         raise
-      result.nixStoreCalls += registerRoots(dir, still, nixStore)
+      let rootedSoFar = readRootLinks(dir, storeDir).targets()
+      var retry: seq[string] = @[]
+      for p in still:
+        if p notin rootedSoFar:
+          retry.add(p)
+      registerRoots(dir, retry, nixStore, result.nixStoreCalls)
       missing = still
     result.registered = missing.len
   let now = readRootLinks(dir, storeDir).targets()
@@ -636,7 +712,8 @@ proc rootStorePaths*(rootDir: string; storePaths: openArray[string];
   ##
   ## WARM CALLS RUN NO SUBPROCESS: when every wanted path already has a link
   ## in `rootDir`, the only cost is one directory listing. New paths are
-  ## registered with one `nix-store` call. Stale links are removed only
+  ## registered with as few `nix-store` calls as `NixStoreArgvBudget`
+  ## allows (one for up to ~800 paths). Stale links are removed only
   ## AFTER the new ones are registered, so a path in both the old and the new
   ## set is never unrooted in between. Raises `NixStoreRootError` when the
   ## registration fails; a no-op on a host without a store directory.
