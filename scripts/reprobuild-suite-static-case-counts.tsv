@@ -466,7 +466,7 @@ libs/repro_dsl_stdlib/tests/t_rust_nix_arm_realizes_release_archive.nim	nim	6
 libs/repro_dsl_stdlib/tests/t_s7_nim_c_declares_its_nimcache_as_derived.nim	nim	5
 libs/repro_dsl_stdlib/tests/t_sevenzip_bootstrap_matches_stdlib_catalog.nim	nim	2
 libs/repro_dsl_stdlib/tests/t_shell_entropy_is_not_blessed.nim	nim	5
-libs/repro_dsl_stdlib/tests/t_shell_extra_env.nim	nim	3
+libs/repro_dsl_stdlib/tests/t_shell_extra_env.nim	nim	4
 libs/repro_dsl_stdlib/tests/t_smoke_expand_archive.nim	nim	39
 libs/repro_dsl_stdlib/tests/t_smoke_generated_config.nim	nim	15
 libs/repro_dsl_stdlib/tests/t_smoke_phase_e_requires_elevation.nim	nim	7
@@ -2399,6 +2399,7 @@ tests/integration/t_vcs_private_metadata_dir_resolves_worktree_safe.nim	nim	1
 tests/integration/t_verdict_enumerates_checks.nim	nim	29
 tests/integration/t_verify_e2e_mock.nim	nim	14
 tests/integration/t_when_each_case_runs_alone_no_fixture_outlives_its_process.nim	nim	32
+tests/integration/t_windows_sh_leaves_path_unchanged.nim	nim	4
 tests/integration/t_worker_evidence_liveness_and_fail_closed.nim	nim	1
 tests/integration/t_worker_executes_only_the_hydrated_graph.nim	nim	3
 tests/integration/t_worker_hydrates_over_the_callers_connection.nim	nim	2
@@ -2593,7 +2594,7 @@ tests/unit/t_m9r13a_provider_compile_sharing.nim	nim	20
 tests/unit/t_m9r13b_1_toolchain_pin.nim	nim	5
 tests/unit/t_m9r13c_1_runquota_stale_pipe_recovery.nim	nim	9
 tests/unit/t_m9r13c_2_shim_lib_resolution.nim	nim	4
-tests/unit/t_m9r14c_1_autotools_parallel_make.nim	nim	12
+tests/unit/t_m9r14c_1_autotools_parallel_make.nim	nim	13
 tests/unit/t_m9r14c_2_binutils_cycle_break.nim	nim	5
 tests/unit/t_m9r14c_4_inline_exec_path_enrichment.nim	nim	3
 tests/unit/t_m9r14c_5_autotools_stage_copy.nim	nim	4

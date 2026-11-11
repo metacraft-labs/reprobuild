@@ -347,7 +347,10 @@ proc autotools_package*(srcDir: string;
   # share (and wipe) one tree (CLI/build.md §"Cross Targets: `--target`").
   let buildDir = targetKeyedDir(buildDir)
   # The recipe's own entries win over the cross toolchain's (explicit wins).
-  var effectiveEnv = crossEnv
+  # `ShellHostSystemEnv` (Windows: `MSYSTEM=MINGW64`) keeps `config.guess`
+  # on a MinGW host for the configure, make and install actions below; see
+  # its note in `packages/sh.nim`.
+  var effectiveEnv = crossEnv & sh_module.ShellHostSystemEnv
   for (name, value) in extraEnv:
     var replaced = false
     for i in 0 ..< effectiveEnv.len:

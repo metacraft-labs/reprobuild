@@ -26315,6 +26315,17 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "",
     singleReason: "special-cased by repro.nim: it executes its subjects' own binaries by path"),
   TestSpec(
+    source: "tests/integration/t_windows_sh_leaves_path_unchanged.nim",
+    binary: "build/test-bin/t_windows_sh_leaves_path_unchanged",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "",
+    singleReason: "suite-scope statement runs at every start-up: putEnv(\"REPRO_CACHE_DISABLE\", \"1\")"),
+  TestSpec(
     source: "tests/integration/t_worker_evidence_liveness_and_fail_closed.nim",
     binary: "build/test-bin/t_worker_evidence_liveness_and_fail_closed",
     defines: @[],
