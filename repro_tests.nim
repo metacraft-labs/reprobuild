@@ -24214,6 +24214,17 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "",
     singleReason: "self-spawn marker getAppFilename"),
   TestSpec(
+    source: "tests/integration/t_repro_test_selects_the_collection_beside_a_test_directory.nim",
+    binary: "build/test-bin/t_repro_test_selects_the_collection_beside_a_test_directory",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "t_group_tests_integration_g11",
+    singleReason: ""),
+  TestSpec(
     source: "tests/integration/t_repro_test_workspace_mode_issues_a_content_bound_certificate.nim",
     binary: "build/test-bin/t_repro_test_workspace_mode_issues_a_content_bound_certificate",
     defines: @[],

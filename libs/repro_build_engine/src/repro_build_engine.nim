@@ -11894,9 +11894,16 @@ proc transientOwnWrites*(evidence: PathSetEvidence): HashSet[string] =
   proc onDisk(path: string): bool =
     fileExists(extendedPath(path)) or dirExists(extendedPath(path)) or
       symlinkExists(extendedPath(path))
+  # The key is checked in the host's own spelling. On Windows it uses
+  # forward slashes, and `extendedPath` passes only a `\\` prefix through
+  # as UNC, so `//host/share/main.c` would name no file and a project on a
+  # share would lose this check.
   for path in evidence.monitorWrites:
     let key = transientWriteKey(path)
-    if not onDisk(path) and not onDisk(key):
+    let nativeKey =
+      when defined(windows): key.replace('/', '\\')
+      else: key
+    if not onDisk(path) and not onDisk(nativeKey):
       result.incl(key)
 
 proc undeclaredSurvivingWrites*(action: BuildAction;

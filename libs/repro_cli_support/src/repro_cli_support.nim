@@ -1066,6 +1066,16 @@ proc renderUnknownTargetDiagnostic*(err: BuildTargetUnknownError): string =
       result.add(cand)
       result.add('\n')
 
+const TestCollectionSelector* = ".#test"
+  ## The selector ``repro test`` (and ``repro certificates plan``) uses when
+  ## the user names none: the current project's ``test`` collection
+  ## ([CLI/test.md §"Alias Semantics"]). It is spelled as a fragment
+  ## selector, not the bare name ``test``, because ``classifyBuildSelector``
+  ## takes a bare name that also names an existing path as a path, and most
+  ## projects keep their tests in a ``test/`` directory. ``.#test`` is what
+  ## ``parseAndResolveSelectors`` makes of a bare ``test`` when no such path
+  ## exists, so the resolution is otherwise unchanged.
+
 proc classifyBuildSelector*(raw: string): ClassifiedBuildSelector =
   ## Named-Targets M2 / [CLI/build.md §"Target Selection"] discriminator.
   ## A selector is a *path / fragment* selector when ANY of these holds:
@@ -32607,7 +32617,7 @@ proc runCertificatesCommand*(args: openArray[string];
     # ``plan``: resolve the selectors the way ``repro build`` does, so a
     # ``<sibling>:<name>`` selector plans the sibling project.
     if selectors.len == 0:
-      selectors = @["test"]
+      selectors = @[TestCollectionSelector]
     let resolved = parseAndResolveSelectors(selectors,
       "repro certificates plan")
     # The anchor carries the first name as its fragment: ``.#<name>`` for
@@ -87334,7 +87344,7 @@ proc buildClosureForShard(assignedSelectors: seq[string];
     if publicCliPath.len > 0 and fileExists(publicCliPath): publicCliPath
     else: stablePublicCliPath()
   doAssert fileExists(bin), "repro binary missing at " & bin
-  var buildArgs = @["build", "test"]
+  var buildArgs = @["build", TestCollectionSelector]
   if mode != tpmUnspecified:
     buildArgs.add("--tool-provisioning=" & modeName(mode))
   if lockFlag.len > 0:
@@ -88165,9 +88175,10 @@ proc issueForCertificateNode(pre: IssuancePreconditions; name: string;
 
 proc plainTestBuild(buildArgs, selectors: seq[string];
                     publicCliPath: string): int =
-  ## ``repro build`` of ``selectors`` (``test`` when none) with no issuance.
+  ## ``repro build`` of ``selectors`` (``.#test`` when none) with no issuance.
   var args = buildArgs
-  for sel in (if selectors.len == 0: @["test"] else: selectors):
+  for sel in (if selectors.len == 0: @[TestCollectionSelector]
+              else: selectors):
     args.add(sel)
   runBuildCommand(args, publicCliPath)
 
@@ -88386,6 +88397,12 @@ proc runCertifyingTestBuild(opts: ReproTestShardOpts; buildArgs: seq[string];
   var info: BuildGraphInspection
   var part: CertificatePlanPart
   var names: seq[string]
+  # The selectors the certifying build is given: the resolved anchor
+  # (``.#<name>`` for this project) and the extra names, exactly as the
+  # resolution above produced them. Not ``names``: a bare anchor name that
+  # also names a directory (``test`` beside a ``test/`` directory) would be
+  # classified as a path again by the build.
+  var buildSelectors: seq[string]
   try:
     # ``--no-runquota`` reaches the plan's own edges too, not only the build.
     let bypassRunQuota = "--no-runquota" in opts.buildFlags
@@ -88444,13 +88461,15 @@ proc runCertifyingTestBuild(opts: ReproTestShardOpts; buildArgs: seq[string];
           "nothing to certify")
         return 2
     let resolved = parseAndResolveSelectors(
-      (if selectors.len == 0: @["test"] else: selectors), "repro test")
+      (if selectors.len == 0: @[TestCollectionSelector] else: selectors),
+      "repro test")
     let anchorName = splitTarget(resolved.target).fragment
     if anchorName.len > 0:
       names.add(anchorName)
     for name in resolved.extraNameSelectors:
       if names.find(name) < 0:
         names.add(name)
+    buildSelectors = @[resolved.target] & resolved.extraNameSelectors
     info = prepareBuildGraphInspection(resolved.target, mode, publicCliPath,
       selectDefaultAction = false, workRoot = workRoot, lowerGraph = false,
       bypassRunQuotaExplicit = bypassRunQuota)
@@ -88610,9 +88629,7 @@ proc runCertifyingTestBuild(opts: ReproTestShardOpts; buildArgs: seq[string];
   proc certifyingBuild(extra: seq[string]):
       tuple[code: int; delivered: bool;
             records: Table[string, ExecutedActionRecord]] =
-    var args = buildArgs & extra
-    for name in names:
-      args.add(name)
+    let args = buildArgs & extra & buildSelectors
     let collector = ActionOutcomeCollector()
     # HL-10: the lock-update node joins the graph, and every test command
     # of every node this run judges depends on it.
@@ -88792,7 +88809,7 @@ proc runReproTestCommand*(args: openArray[string];
     if executesTests:
       return runCertifyingTestBuild(opts, buildArgs, publicCliPath)
     if opts.selectors.len == 0:
-      buildArgs.add("test")
+      buildArgs.add(TestCollectionSelector)
     else:
       for sel in opts.selectors:
         buildArgs.add(sel)

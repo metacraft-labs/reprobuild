@@ -5121,10 +5121,24 @@ proc usesImportCode(pkg: PackageDef; consumerSourceFile = ""): string =
         # carrying the producer's InterfaceFingerprint (from TI1's cached lift),
         # then the driver-free accessor source. The VM reads the fingerprint to
         # decide reuse-in-place vs regenerate WITHOUT a second lift.
+        #
+        # The generator crosses a process boundary, and the producer extraction
+        # it runs compiles the producer's recipe against reprobuild's libs. It
+        # finds them through ``$REPROBUILD_REPO_ROOT``, the running binary's
+        # checkout, or a sibling ``../reprobuild``. The generator is a scratch
+        # binary and the producer need not sit beside a checkout, so the last
+        # two find nothing for an out-of-tree project. Hand it the checkout
+        # this generator is compiled against, the way the compiler is handed
+        # over, so the extraction cannot reach for a different (or no) copy.
+        let repoRootHandoff =
+          if repoRoot.len > 0:
+            "putEnv(\"REPROBUILD_REPO_ROOT\", " & escape(repoRoot) & ")\n"
+          else: ""
         let genSrc =
           "import std/os\n" &
           "import repro_cli_support\n" &
           "putEnv(\"REPRO_NIM_COMPILER\", " & escape(compilerExe) & ")\n" &
+          repoRootHandoff &
           "let c = resolveProducerTypedContract(" & escape(selector) & ", " &
           escape(workspaceRoot) & ")\n" &
           "stdout.write(\"IFP:\" & c.interfaceFingerprint & \"\\n\")\n" &
