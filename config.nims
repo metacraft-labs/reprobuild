@@ -57,11 +57,13 @@ when defined(reproZigTarget):
   switch("define", "reproBuiltCCompiler=")
 
 # Every existence probe below goes through these, never through a bare
-# `fileExists` / `dirExists`. Those resolve a relative path against the
-# compiler's WORKING DIRECTORY, while a relative `switch("path", ...)` is
-# resolved against the directory of this file -- so a probe and the switch it
-# guards agreed only for as long as nim happened to be started in the repo
-# root. Compiles do not have to be: the `apps` edges run in their module's own
+# `fileExists` / `dirExists`, and every path a probe admits is handed to
+# `switch("path", ...)` through `repoPath` too. A bare `fileExists` resolves a
+# relative path against the compiler's WORKING DIRECTORY, and a bare relative
+# `switch("path", ...)` against the directory of the outermost config file:
+# this one, or during a profile compile the wrapper beside the profile (see
+# the top of this file) -- so a probe and the switch it guards agreed only for as long as nim
+# happened to be started in the repo root, on this repository's own config. Compiles do not have to be: the `apps` edges run in their module's own
 # directory (`nim.c(runInSourceDir = true)` in `repro.nim`), and from there a
 # cwd-relative probe of `../io-mon/src` looks inside `apps/` and finds
 # nothing. Anchoring a relative probe here makes it test exactly the
@@ -158,7 +160,7 @@ for libName in [
   "runquota_cli_support",
   "runquota_partition",
 ]:
-  switch("path", runquotaRoot / "libs" / libName / "src")
+  switch("path", repoPath(runquotaRoot / "libs" / libName / "src"))
 
 # Project-DSL-Composition M6: ``repro.nim`` ``import``s the generated
 # ``repro_tests.nim`` (data table of declared test edges) that lives
@@ -228,7 +230,7 @@ let ctTestRunnerRoot = block:
 let ctTestRunnerAdapterSrc = ctTestRunnerRoot / "libs" /
   "ct_test_runner_adapter" / "src"
 if repoDirExists(ctTestRunnerAdapterSrc):
-  switch("path", ctTestRunnerAdapterSrc)
+  switch("path", repoPath(ctTestRunnerAdapterSrc))
 
 # Incremental-Test-Runner: ``ct_incremental_adapter`` is hosted by CodeTracer
 # as the std-only process seam for codetracer's canonical incremental engine.
@@ -274,7 +276,7 @@ let ctIncrementalSrc = block:
       break
   found
 if ctIncrementalSrc.len > 0:
-  switch("path", ctIncrementalSrc)
+  switch("path", repoPath(ctIncrementalSrc))
 else:
   # Last resort: the standalone copy that ships in the pinned
   # ``reprobuild-ct-test-runner`` source input, for a build that has neither an
@@ -319,7 +321,7 @@ else:
   let ctIncrementalFallbackSrc = ctTestRunnerRoot / "libs" /
     "ct_incremental_adapter" / "src"
   if repoDirExists(ctIncrementalFallbackSrc):
-    switch("path", ctIncrementalFallbackSrc)
+    switch("path", repoPath(ctIncrementalFallbackSrc))
 
 # The ``TestRunner`` cross-cutting contract lives in the standalone
 # ``reprobuild-test-adapters`` package (Nim package ``repro_test_adapters``)
@@ -334,7 +336,7 @@ let reproTestAdaptersSrc = block:
   else:
     ".." / "reprobuild-test-adapters" / "src"
 if repoDirExists(reproTestAdaptersSrc):
-  switch("path", reproTestAdaptersSrc)
+  switch("path", repoPath(reproTestAdaptersSrc))
 
 # The test-certificate standard's store, note-framing and two-note merge rules
 # live in the standalone ``test-certificates-tools`` package (Nim package
@@ -350,7 +352,7 @@ let testCertificatesToolsSrc = block:
   else:
     ".." / "test-certificates-tools" / "src"
 if repoFileExists(testCertificatesToolsSrc / "test_certificates.nim"):
-  switch("path", testCertificatesToolsSrc)
+  switch("path", repoPath(testCertificatesToolsSrc))
 
 for libName in [
   # Build-side test typed-tool, moved in-tree (see the ctTestRoot note
@@ -638,7 +640,7 @@ let ioMonSrc = block:
   else:
     ".." / "io-mon" / "src"
 if repoFileExists(ioMonSrc / "io_mon.nim"):
-  switch("path", ioMonSrc)
+  switch("path", repoPath(ioMonSrc))
 
 proc nixDevShellSourcePath(envName, marker: string): string =
   when defined(windows):
