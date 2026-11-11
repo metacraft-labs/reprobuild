@@ -89,6 +89,22 @@ when defined(posix):
     return info.si_pid == 0;
   }
 
+  /* How an exited child ended, read without reaping it: 0 while it runs,
+     1 exited (*value is its exit code), 2 ended by a signal (*value is the
+     signal), -errno on failure. */
+  static int rb_od_child_fate(int pid, int *value) {
+    siginfo_t info;
+    int result;
+    do {
+      memset(&info, 0, sizeof(info));
+      result = waitid(P_PID, (id_t)pid, &info, WEXITED | WNOHANG | WNOWAIT);
+    } while (result < 0 && errno == EINTR);
+    if (result < 0) return -errno;
+    if (info.si_pid == 0) return 0;
+    *value = info.si_status;
+    return info.si_code == CLD_EXITED ? 1 : 2;
+  }
+
   #define RB_OD_MAX_PIDS 16
   #define RB_OD_SIGNAL_COUNT 4
 
@@ -219,6 +235,8 @@ when defined(posix):
 
   proc rbOdReapingError(): cint {.importc: "rb_od_reaping_error", nodecl.}
   proc rbOdChildRunning(pid: cint): cint {.importc: "rb_od_child_running", nodecl.}
+  proc rbOdChildFate(pid: cint; value: ptr cint): cint
+    {.importc: "rb_od_child_fate", nodecl.}
   proc rbOdRegister(pid: cint): cint {.importc: "rb_od_register", nodecl.}
   proc rbOdUnregister(pid: cint) {.importc: "rb_od_unregister", nodecl.}
   proc rbOdOwnedCount(): cint {.importc: "rb_od_owned_count", nodecl.}
@@ -290,3 +308,25 @@ proc ownedDaemonStillRunning*(process: Process): bool =
     result = state != 0
   else:
     result = process.running
+
+proc ownedDaemonExitDescription*(process: Process): string =
+  ## How an owned child that is no longer running ended -- `exit code 23`,
+  ## `signal 9` -- or "" while it still runs. Like `ownedDaemonStillRunning`
+  ## it does not reap the child, so it may be called while the pid is still
+  ## registered: the launcher records the fate BEFORE its cleanup reaps the
+  ## child, after which nothing could tell an exit of its own from the
+  ## cleanup's terminate. Errors (including ECHILD) are raised.
+  when defined(posix):
+    var value: cint = 0
+    let fate = rbOdChildFate(cint(processID(process)), addr value)
+    if fate < 0:
+      raiseOSError(OSErrorCode(-fate))
+    result =
+      case fate
+      of 0: ""
+      of 1: "exit code " & $value
+      else: "signal " & $value
+  else:
+    result =
+      if process.running: ""
+      else: "exit code " & $process.peekExitCode()
