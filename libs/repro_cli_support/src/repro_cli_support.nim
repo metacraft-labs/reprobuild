@@ -102221,14 +102221,17 @@ proc runWorkspaceReposCommand*(args: openArray[string]): int =
       revision = a["--revision=".len .. ^1]
     elif a.startsWith("--mainline=") or a.startsWith("--branch="):
       # `--branch=` is a second spelling of `--mainline=`. Two values that
-      # disagree are a contradiction, not a precedence question.
+      # disagree are a contradiction, not a precedence question. An empty
+      # value names no mainline, as an empty value does for every other flag
+      # here, so it neither conflicts with nor clears one given elsewhere.
       let value = a[a.find('=') + 1 .. ^1]
-      if mainline.len > 0 and mainline != value:
-        stderr.writeLine("repro workspace repos " & sub & ": --mainline " &
-          "given twice with different values ('" & mainline & "' and '" &
-          value & "')")
-        return 2
-      mainline = value
+      if value.len > 0:
+        if mainline.len > 0 and mainline != value:
+          stderr.writeLine("repro workspace repos " & sub & ": --mainline " &
+            "given twice with different values ('" & mainline & "' and '" &
+            value & "')")
+          return 2
+        mainline = value
     elif a.startsWith("--profile="):
       profile = a["--profile=".len .. ^1]
     elif a.startsWith("--path="):
@@ -102619,9 +102622,9 @@ proc runWorkspaceReposCommand*(args: openArray[string]): int =
       projects.join(", ") & " — path " & effectivePath & ", remote " &
       remoteNames.join(" ") & ", " &
       (if mainline.len > 0: "mainline " & mainline
+       elif not fragmentWasNew: "mainline as the existing fragment declares it"
        elif profile.len > 0: "mainline from profile " & profile
-       elif fragmentWasNew: "mainline from the default profile"
-       else: "mainline as the existing fragment declares it") &
+       else: "mainline from the default profile") &
       (if revision.len > 0: ", revision " & revision & " (pinned)" else: "") &
       " — " & res.diagnostic)
     return res.code

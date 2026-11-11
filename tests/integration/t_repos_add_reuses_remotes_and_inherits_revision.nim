@@ -670,6 +670,16 @@ suite "repro workspace repos add — remote reuse and revision inheritance":
       check disagree.output.contains("different values")
       checkWroteNothing("twice-lib")
 
+      # An empty `--branch=` names no mainline, so it neither contradicts the
+      # `--mainline` given before it nor clears it.
+      let emptyAlias = addRepo(fx, @["reprobuild", "empty-alias-lib",
+        "--remote=https://git.example.invalid/acme/empty-alias-lib.git",
+        "--mainline=dev", "--branch="])
+      checkpoint("empty --branch: " & emptyAlias.output)
+      check emptyAlias.code == 0
+      check readFile(fx.workspaceRoot / "repos" /
+        "empty-alias-lib.toml").contains("mainline = \"dev\"")
+
       # An existing fragment is reused, not rewritten: a contradicting
       # `--profile` is refused (exit 1) and the fragment keeps its bytes.
       let mainlineBefore = readFile(fx.workspaceRoot / "repos" /
