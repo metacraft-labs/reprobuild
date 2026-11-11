@@ -1,0 +1,75 @@
+# Scenario for tutorials/first-build.md.
+#
+# A scenario runs a tutorial's steps in order, from an empty directory, and
+# checks the result of each. Its steps and the page's steps come from one
+# source: the runner checks that every command block on the page appears here,
+# in the same order, and fills the page's `capture` regions from these runs.
+#
+# Format: reprobuild.docs.scenario.v1 (proposed in
+# docs/contributors/user-documentation.md). No runner exists yet.
+
+schema = "reprobuild.docs.scenario.v1"
+page = "tutorials/first-build.md"
+platforms = ["linux", "macos"]
+
+# Values the page interpolates. This file is their only source.
+[values]
+"fixtures.reprobuild_examples.rev" = "6387d33bdaed57da72867f99fd6108f19c45a233"
+
+[preflight]
+# The runner stops before step 1, and reports which requirement failed, when
+# one of these is missing.
+commands = ["repro", "git", "nim"]
+
+[[step]]
+id = "get-the-example"
+run = [
+  "git clone https://github.com/metacraft-labs/reprobuild-examples",
+  "git -C reprobuild-examples checkout {{ fixtures.reprobuild_examples.rev }}",
+  "cd reprobuild-examples/nim/mode3-pilot",
+]
+expect.exit = 0
+expect.exists = ["repro.nim", "repro.scanned-deps.nim", "src/greet.nim", "src/hello.nim"]
+
+[[step]]
+id = "build"
+capture = "build"
+run = ["repro build --tool-provisioning=path"]
+expect.exit = 0
+expect.exists = [".repro/build/hello/hello"]
+
+[[step]]
+id = "run"
+capture = "run"
+run = [".repro/build/hello/hello"]
+expect.exit = 0
+expect.stdout = "hello from mode3-pilot, mode3-pilot\n"
+
+[[step]]
+id = "rebuild-unchanged"
+capture = "rebuild-unchanged"
+run = ["repro build --tool-provisioning=path"]
+expect.exit = 0
+# Every action is a cache hit: the run executes no compiler.
+expect.report = { executed = 0 }
+
+[[step]]
+id = "rebuild-changed"
+capture = "rebuild-changed"
+edit = { file = "src/greet.nim", replace = '"hello from mode3-pilot, " & name', with = '"hi there, " & name' }
+run = ["repro build --tool-provisioning=path", ".repro/build/hello/hello"]
+expect.exit = 0
+expect.stdout_contains = "hi there, mode3-pilot"
+
+[[step]]
+id = "add-library"
+capture = "add-library"
+write = [
+  { file = "src/logger.nim", from_page_block = "src/logger.nim" },
+  { file = "src/hello.nim", from_page_block = "src/hello.nim" },
+]
+insert = { file = "repro.nim", before = 'include "repro.scanned-deps.nim"', from_page_block = "package mode3PilotLogger" }
+run = ["repro deps refresh", "repro build --tool-provisioning=path", ".repro/build/hello/hello"]
+expect.exit = 0
+expect.file_contains = { "repro.scanned-deps.nim" = "mode3PilotLogger" }
+expect.stdout_contains = "[log] hi there, mode3-pilot"
