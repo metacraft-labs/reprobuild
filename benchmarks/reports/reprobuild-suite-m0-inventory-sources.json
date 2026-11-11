@@ -11665,13 +11665,14 @@
         "io_mon",
         "repro_build_engine",
         "repro_core",
+        "repro_local_store",
         "repro_test_support"
       ],
       "owner": "libs/repro_build_engine",
       "requiresReproBinary": true,
       "source": "libs/repro_build_engine/tests/t_transient_probed_with_trailing_separator.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 2,
+      "staticCaseCount": 3,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
