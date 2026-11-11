@@ -5346,13 +5346,15 @@ proc verifyLockPinnedProducerSource(dep: LockedDep;
   proc gitRev(args: openArray[string]): tuple[code: int; output: string] =
     if gitBin.len == 0:
       return (1, "git is not available")
-    var command = quoteShell(gitBin) & " -C " & quoteShell(sourceRoot)
-    for arg in args: command.add(" " & quoteShell(arg))
     # These observations deliberately inspect the real checkout. Repository
     # environment variables must not redirect them to an unrelated Git tree.
-    let execution = uncontrolledExecCmdEx(command,
-      env = scrubbedGitRepositoryEnv())
-    (execution.exitCode, execution.output.strip())
+    # A success's answer is git's stdout alone, so a stderr warning cannot
+    # become part of a SHA compared against the pin; a failure carries git's
+    # merged message, which the refusal below quotes.
+    let execution = gitRunSeparated(gitBin, @["-C", sourceRoot] & @args,
+      scrubbedGitRepositoryEnv())
+    if execution.code == 0: (execution.code, execution.output.strip())
+    else: (execution.code, execution.diagnostic)
   let top = gitRev(["rev-parse", "--show-toplevel"])
   let head = gitRev(["rev-parse", "--verify", "--quiet", "--end-of-options", "HEAD^{commit}"])
   let pinned = gitRev(["rev-parse", "--verify", "--quiet", "--end-of-options", revision & "^{commit}"])
@@ -20685,10 +20687,19 @@ proc uninstallNativeShellHook(shell: NativeShellKind) =
   echo "repro hooks: removed native " & shell.nativeShellName() &
     " shell block from " & rcPath
 
+proc hooksGitQuery(args: openArray[string]):
+    tuple[code: int; output: string; diagnostic: string] =
+  ## The ``git`` on PATH, asked a question about a hook target. ``output`` is
+  ## git's stdout ALONE and ``diagnostic`` the merged text for a failure
+  ## message (``gitRunSeparated``): every answer below is a path or a config
+  ## value, and a stderr line (a warning, a ``safe.directory`` notice) glued
+  ## onto one names a hooks directory that does not exist.
+  gitRunSeparated("git", args, scrubbedGitRepositoryEnv())
+
 proc gitTopLevel(targetPath: string): string =
-  let res = execCmdEx(shellCommand(@["git", "-C", resolveHooksTarget(targetPath),
-    "rev-parse", "--show-toplevel"]), env = scrubbedGitRepositoryEnv())
-  if res.exitCode == 0:
+  let res = hooksGitQuery(["-C", resolveHooksTarget(targetPath),
+    "rev-parse", "--show-toplevel"])
+  if res.code == 0:
     result = os.normalizedPath(res.output.strip())
 
 proc gitCommonDir(targetPath: string): string =
@@ -20704,15 +20715,14 @@ proc gitCommonDir(targetPath: string): string =
   let anchorDir = block:
     let top = gitTopLevel(targetPath)
     if top.len > 0: top else: resolveHooksTarget(targetPath)
-  var res = execCmdEx(shellCommand(@["git", "-C", anchorDir, "rev-parse",
-    "--path-format=absolute", "--git-common-dir"]),
-    env = scrubbedGitRepositoryEnv())
-  if res.exitCode == 0 and res.output.strip().len > 0 and
+  var res = hooksGitQuery(["-C", anchorDir, "rev-parse",
+    "--path-format=absolute", "--git-common-dir"])
+  if res.code == 0 and res.output.strip().len > 0 and
       res.output.strip().isAbsolute:
     return os.normalizedPath(res.output.strip())
-  res = execCmdEx(shellCommand(@["git", "-C", anchorDir, "rev-parse",
-    "--git-common-dir"]), env = scrubbedGitRepositoryEnv())
-  if res.exitCode != 0 or res.output.strip().len == 0:
+  res = hooksGitQuery(["-C", anchorDir, "rev-parse",
+    "--git-common-dir"])
+  if res.code != 0 or res.output.strip().len == 0:
     return ""
   let raw = res.output.strip()
   result = if raw.isAbsolute: os.normalizedPath(raw)
@@ -20726,9 +20736,9 @@ proc gitMainWorktreeTop(targetPath: string): string =
   let anchorDir = block:
     let top = gitTopLevel(targetPath)
     if top.len > 0: top else: resolveHooksTarget(targetPath)
-  let res = execCmdEx(shellCommand(@["git", "-C", anchorDir, "worktree",
-    "list", "--porcelain"]), env = scrubbedGitRepositoryEnv())
-  if res.exitCode == 0:
+  let res = hooksGitQuery(["-C", anchorDir, "worktree",
+    "list", "--porcelain"])
+  if res.code == 0:
     for line in res.output.splitLines():
       if line.startsWith("worktree "):
         let path = line["worktree ".len .. ^1].strip()
@@ -20798,9 +20808,9 @@ proc ensureWorktreeSafeHooksPath*(repoRoot: string): HooksPathRepair =
   let top = gitTopLevel(repoRoot)
   if top.len == 0:
     return
-  let read = execCmdEx(shellCommand(@["git", "-C", top, "config", "--get",
-    "core.hooksPath"]), env = scrubbedGitRepositoryEnv())
-  if read.exitCode != 0:
+  let read = hooksGitQuery(["-C", top, "config", "--get",
+    "core.hooksPath"])
+  if read.code != 0:
     return
   let current = read.output.strip()
   if current.len == 0 or current.isAbsolute:
@@ -20812,14 +20822,14 @@ proc ensureWorktreeSafeHooksPath*(repoRoot: string): HooksPathRepair =
     result.diagnostic = "could not determine the main worktree of " & top
     return
   result.resolved = os.normalizedPath(mainTop / current)
-  let wrote = execCmdEx(shellCommand(@["git", "-C", top, "config", "--local",
-    "core.hooksPath", result.resolved]), env = scrubbedGitRepositoryEnv())
-  if wrote.exitCode != 0:
+  let wrote = hooksGitQuery(["-C", top, "config", "--local",
+    "core.hooksPath", result.resolved])
+  if wrote.code != 0:
     result.ok = false
-    let said = wrote.output.strip()
+    let said = wrote.diagnostic
     result.diagnostic =
       if said.len > 0: said
-      else: "git config --local core.hooksPath exited " & $wrote.exitCode
+      else: "git config --local core.hooksPath exited " & $wrote.code
     return
   # THE WRITE IS NOT THE OUTCOME, so verify the outcome.
   #
@@ -20855,13 +20865,13 @@ proc ensureWorktreeSafeHooksPath*(repoRoot: string): HooksPathRepair =
   # scope, extension or future precedence rule that leaves the effective value
   # somewhere other than where this repair put it is caught by the same check,
   # because the check asks about the outcome rather than about a mechanism.
-  let after = execCmdEx(shellCommand(@["git", "-C", top, "config", "--get",
-    "core.hooksPath"]), env = scrubbedGitRepositoryEnv())
-  if after.exitCode != 0:
+  let after = hooksGitQuery(["-C", top, "config", "--get",
+    "core.hooksPath"])
+  if after.code != 0:
     result.ok = false
     result.diagnostic = "the value was written at --local scope, but reading " &
       "it back failed (git config --get core.hooksPath exited " &
-      $after.exitCode & "), so it cannot be confirmed to be in force"
+      $after.code & "), so it cannot be confirmed to be in force"
     return
   let effective = after.output.strip()
   if effective != result.resolved:
@@ -20870,11 +20880,10 @@ proc ensureWorktreeSafeHooksPath*(repoRoot: string): HooksPathRepair =
     # told only "it did not take" has to rediscover the scope themselves, and
     # the remedy in `hooksPathRefusalLines` — a ``--local`` write — is the one
     # thing already known not to work here.
-    let origin = execCmdEx(shellCommand(@["git", "-C", top, "config",
-      "--show-origin", "--get", "core.hooksPath"]),
-      env = scrubbedGitRepositoryEnv())
+    let origin = hooksGitQuery(["-C", top, "config",
+      "--show-origin", "--get", "core.hooksPath"])
     let where =
-      if origin.exitCode == 0 and origin.output.strip().len > 0:
+      if origin.code == 0 and origin.output.strip().len > 0:
         "; git reads it from " & origin.output.strip().splitWhitespace()[0]
       else: ""
     result.diagnostic = "the absolute path was written at --local scope, but " &
@@ -20917,9 +20926,9 @@ proc inspectWorktreeSafeHooksPath*(repoRoot: string): HooksPathRepair =
   let top = gitTopLevel(repoRoot)
   if top.len == 0:
     return
-  let read = execCmdEx(shellCommand(@["git", "-C", top, "config", "--get",
-    "core.hooksPath"]), env = scrubbedGitRepositoryEnv())
-  if read.exitCode != 0:
+  let read = hooksGitQuery(["-C", top, "config", "--get",
+    "core.hooksPath"])
+  if read.code != 0:
     return
   let current = read.output.strip()
   if current.len == 0 or current.isAbsolute:
@@ -21023,18 +21032,17 @@ proc gitHooksDir(targetPath: string): string =
   # Asking Git for its effective hook path is the only source of truth; simply
   # appending `hooks` to --absolute-git-dir silently installs an unused bundle
   # when core.hooksPath is configured.
-  var res = execCmdEx(shellCommand(@["git", "-C", repoRoot, "rev-parse",
-    "--path-format=absolute", "--git-path", "hooks"]),
-    env = scrubbedGitRepositoryEnv())
-  if res.exitCode == 0 and res.output.strip().len > 0:
+  var res = hooksGitQuery(["-C", repoRoot, "rev-parse",
+    "--path-format=absolute", "--git-path", "hooks"])
+  if res.code == 0 and res.output.strip().len > 0:
     return os.normalizedPath(res.output.strip())
   # Compatibility fallback for Git versions predating --path-format.
-  res = execCmdEx(shellCommand(@["git", "-C", repoRoot, "rev-parse",
-    "--git-path", "hooks"]), env = scrubbedGitRepositoryEnv())
-  if res.exitCode != 0 or res.output.strip().len == 0:
+  res = hooksGitQuery(["-C", repoRoot, "rev-parse",
+    "--git-path", "hooks"])
+  if res.code != 0 or res.output.strip().len == 0:
     raise newException(ValueError,
       "could not locate Git hooks directory for " & repoRoot & ": " &
-        res.output.strip())
+        res.diagnostic)
   let raw = res.output.strip()
   # A relative answer is `core.hooksPath` verbatim, and Git resolves it against
   # THIS worktree's top level — so in a linked worktree it names a path under a
@@ -41858,6 +41866,13 @@ proc localHeadOrEmpty(identity: GitToolIdentity; repoPath: string): string =
   else:
     ""
 
+proc gitRunPlain(identity: GitToolIdentity;
+                 args: openArray[string]): tuple[code: int; output: string]
+
+proc gitRunPlainQuery(identity: GitToolIdentity;
+                      args: openArray[string]):
+    tuple[code: int; output: string; diagnostic: string]
+
 proc revParse(identity: GitToolIdentity;
               repoPath, refSpec: string): string =
   ## Run ``git -C <repo> rev-parse <ref>`` and return the resolved SHA.
@@ -41865,14 +41880,15 @@ proc revParse(identity: GitToolIdentity;
   ## this both for the local branch tip AND the remote-tracking branch
   ## (typically ``origin/<branch>``) so a local checkout that has
   ## diverged from the manifest's pinned remote tip surfaces correctly.
+  ##
+  ## The SHA is read from git's stdout ALONE (``gitRunPlainQuery``). git
+  ## answers a name that is both a branch and a tag with ``warning: refname
+  ## '<name>' is ambiguous.`` on stderr and the SHA on stdout, exit 0; merged,
+  ## the warning became part of the "SHA" the divergence check compared.
   if refSpec.len == 0:
     return ""
-  let res = execCmdEx(
-    quoteShell(identity.binaryPath) & " -C " & quoteShell(repoPath) &
-      " rev-parse " & quoteShell(refSpec),
-    options = {poStdErrToStdOut, poUsePath},
-    env = scrubbedGitRepositoryEnv())
-  if res.exitCode == 0:
+  let res = gitRunPlainQuery(identity, ["-C", repoPath, "rev-parse", refSpec])
+  if res.code == 0:
     res.output.strip()
   else:
     ""
@@ -41987,23 +42003,27 @@ proc probeGitOperationInProgress*(identity: GitToolIdentity;
     result.state = gosIndeterminate
     result.diagnostic = "no repository path was supplied"
     return
-  var command = quoteShell(identity.binaryPath) & " -C " &
-    quoteShell(repoPath) & " rev-parse"
+  ##
+  ## The paths are read from git's stdout ALONE: a line git writes to stderr
+  ## (a warning, a ``safe.directory`` notice) would otherwise be counted as
+  ## one of the answers and shift every name onto the wrong path. The merged
+  ## text is still what a FAILURE quotes, because git's reason is on stderr.
+  var args = @["-C", repoPath, "rev-parse"]
   for name in InFlightGitStatePaths:
-    command.add(" --git-path " & quoteShell(name))
-  var res: tuple[output: string; exitCode: int]
+    args.add("--git-path")
+    args.add(name)
+  var res: tuple[code: int; output: string; diagnostic: string]
   try:
-    res = execCmdEx(command, options = {poStdErrToStdOut, poUsePath},
-      env = scrubbedGitRepositoryEnv())
+    res = gitRunPlainQuery(identity, args)
   except CatchableError as err:
     result.state = gosIndeterminate
     result.diagnostic = "`git rev-parse --git-path` could not be run in " &
       repoPath & ": " & err.msg
     return
-  if res.exitCode != 0:
+  if res.code != 0:
     result.state = gosIndeterminate
     result.diagnostic = "`git rev-parse --git-path` failed in " & repoPath &
-      " (exit " & $res.exitCode & "): " & res.output.strip()
+      " (exit " & $res.code & "): " & res.diagnostic
     return
   var lines: seq[string]
   for raw in res.output.splitLines():
@@ -42204,14 +42224,12 @@ proc gitRemoteOriginUrl(identity: GitToolIdentity; repoPath: string): string =
   ## Returns the empty string when the directory is not a git repo or has no
   ## ``origin`` remote; the resolution order treats that as "origin did not
   ## resolve" and continues to fail-loud rather than guessing.
+  ## The URL is git's stdout alone; a stderr diagnostic is not part of it.
   if not dirExists(repoPath):
     return ""
-  let res = execCmdEx(
-    quoteShell(identity.binaryPath) & " -C " & quoteShell(repoPath) &
-      " config --get remote.origin.url",
-    options = {poStdErrToStdOut, poUsePath},
-    env = scrubbedGitRepositoryEnv())
-  if res.exitCode == 0:
+  let res = gitRunPlainQuery(identity,
+    ["-C", repoPath, "config", "--get", "remote.origin.url"])
+  if res.code == 0:
     res.output.strip()
   else:
     ""
@@ -42410,13 +42428,6 @@ proc existingRecordStoreRoot*(workspaceRoot: string): string =
     if dirExists(candidate / ".git") or fileExists(candidate / ".git"):
       return candidate
   ""
-
-proc gitRunPlain(identity: GitToolIdentity;
-                 args: openArray[string]): tuple[code: int; output: string]
-
-proc gitRunPlainQuery(identity: GitToolIdentity;
-                      args: openArray[string]):
-    tuple[code: int; output: string; diagnostic: string]
 
 proc bootstrapManifestCache(args: WorkspaceInitArgs): seq[
     WorkspaceInitClonedEntry] =
@@ -43543,7 +43554,7 @@ proc cloneOrgRootRepo(identity: GitToolIdentity;
   let res = execCmdEx(cmd, options = {poStdErrToStdOut, poUsePath},
     env = scrubbedGitRepositoryEnv())
   if res.exitCode != 0:
-    return (ok: false, diagnostic: res.output.strip())
+    return (ok: false, diagnostic: res.output.strip())  # git-merged-text: clone's reason is on stderr
   if independentObjects:
     # Git does not propagate the parent's --no-local into submodule clones.
     # A local submodule source can borrow too. Copy borrowed objects before
@@ -44843,9 +44854,9 @@ proc scopeRepoPathSet(workspaceRoot: string;
 
 proc gitRunPlain(identity: GitToolIdentity;
                  args: openArray[string]): tuple[code: int; output: string] =
-  ## Tiny ``execCmdExCloseOnce`` wrapper used by the sync observation gatherer.
-  ## Shares the same shape as ``revParse`` above but takes an argv so
-  ## callers don't have to quoteShell every arg.
+  # git-merged-reader: exit status and quoted diagnostics only
+  ## Tiny ``execCmdExCloseOnce`` wrapper used by the sync observation
+  ## gatherer. Takes an argv so callers don't have to quoteShell every arg.
   ##
   ## ``output`` is git's stdout AND stderr, merged. Use this only where the
   ## exit status is the answer, or where the text is quoted back as a
@@ -44853,7 +44864,12 @@ proc gitRunPlain(identity: GitToolIdentity;
   ## below: git prints warnings on stderr while still exiting 0 with the right
   ## answer, and the merged stream would put the warning in front of it.
   ## ``scripts/check_git_run_plain_parses.py`` (part of ``just lint``) refuses
-  ## a ``gitRunPlain`` result whose ``output`` is parsed.
+  ## a ``gitRunPlain`` result whose ``output`` is parsed; the
+  ## ``git-merged-reader`` marker above is what tells it this proc's callers
+  ## receive the merged stream. The same gate refuses a parse of any OTHER
+  ## merged run of git: a direct ``execCmdEx`` / ``startProcess`` of the git
+  ## binary with ``poStdErrToStdOut`` (or no ``options``, which defaults to
+  ## it), and an undeclared wrapper that forwards one.
   when defined(windows):
     # Keep argv structured. Besides avoiding Windows command-line quoting
     # ambiguities, drain the pipe with PeekNamedPipe: Nim 2.2's readAll stops
@@ -44971,6 +44987,16 @@ proc scrubbedGitChildEnv(capability = ""; internalContext = ""):
 proc gitRunPlainEnv(identity: GitToolIdentity; args: openArray[string];
     capability = ""; internalContext = ""):
     tuple[code: int; output: string] =
+  # git-merged-reader: push transcripts, read as diagnostics
+  ## ``gitRunPlain`` under ``scrubbedGitChildEnv(capability, internalContext)``,
+  ## for the pushes and driven operations that must carry a hook capability.
+  ##
+  ## ``output`` is git's stdout AND stderr, merged, which is what the push
+  ## classifiers (``pushOutputIsNonFastForward``, ``pushOutputOneLine``) read:
+  ## git's push report is on stderr. A caller that parses git's ANSWER uses
+  ## ``gitRunPlainEnvQuery`` below instead, for the reason ``gitRunPlain``
+  ## gives; ``scripts/check_git_run_plain_parses.py`` (``just lint``) refuses a
+  ## parse of this proc's ``output`` the same way.
   when defined(windows):
     # Keep the capability-bearing push on the same structured Windows process
     # boundary as ``gitRunPlain``. Command-string execution can lose or mangle
@@ -45008,6 +45034,17 @@ proc gitRunPlainEnv(identity: GitToolIdentity; args: openArray[string];
     let res = execCmdExCloseOnce(cmd, options = {poStdErrToStdOut, poUsePath},
       env = scrubbedGitChildEnv(capability, internalContext))
     (res.exitCode, res.output)
+
+proc gitRunPlainEnvQuery(identity: GitToolIdentity; args: openArray[string];
+    capability = ""; internalContext = ""):
+    tuple[code: int; output: string; diagnostic: string] =
+  ## ``gitRunPlainEnv``'s environment with ``gitRunPlainQuery``'s streams:
+  ## ``output`` is git's stdout ALONE, ``diagnostic`` the merged, trimmed text
+  ## for a failure message. For a command whose stdout is PARSED
+  ## (``remote get-url --push --all``, ``ls-remote --heads``), where a stderr
+  ## line counted as one more URL or one malformed advertisement.
+  gitRunSeparated(identity.binaryPath, args,
+    scrubbedGitChildEnv(capability, internalContext))
 
 proc advertisedRemoteHeadBranch(identity: GitToolIdentity;
                                 remoteUrl: string): string =
@@ -46723,11 +46760,11 @@ proc vcsPrivateMetadataDir*(repoRoot: string; gitBin = ""): string =
   if dirExists(dotGit) or fileExists(dotGit):
     let git = if gitBin.len > 0: gitBin else: findExe("git")
     if git.len > 0:
-      let res = execCmdEx(quoteShell(git) & " -C " & quoteShell(root) &
-        " rev-parse --git-common-dir",
-        options = {poStdErrToStdOut, poUsePath},
-        env = scrubbedGitRepositoryEnv())
-      if res.exitCode == 0:
+      # stdout alone: a stderr line would otherwise be glued onto the path.
+      let res = gitRunSeparated(git,
+        ["-C", root, "rev-parse", "--git-common-dir"],
+        scrubbedGitRepositoryEnv())
+      if res.code == 0:
         var common = res.output.strip()
         if common.len > 0:
           if not isAbsolute(common): common = root / common
@@ -46938,10 +46975,9 @@ proc isRecordStoreBackendCheckout*(repoRoot: string): bool =
   let top = gitTopLevel(repoRoot)
   if top.len == 0: return false
   for key in ["reprobuild.recordStore", "reprobuild.recordStoreBackend"]:
-    let registered = execCmdEx(shellCommand(@["git", "-C", top, "config",
-      "--local", "--bool", "--get", key]),
-      env = scrubbedGitRepositoryEnv())
-    if registered.exitCode == 0 and registered.output.strip() == "true":
+    let registered = hooksGitQuery(["-C", top, "config",
+      "--local", "--bool", "--get", key])
+    if registered.code == 0 and registered.output.strip() == "true":
       return true
   # Backend identity belongs to the repository, so an external linked
   # worktree inherits the main checkout's declaration even before ensure has
@@ -51988,7 +52024,7 @@ proc executeMainlineSync(args: WorkspaceSyncArgs): MainlineSyncReport =
             else:
               let answer = gitRunPlainEnv(identity, cmd,
                 internalContext = InternalDrivenOperationContext)
-              (answer.code, answer.output, answer.output))
+              (answer.code, answer.output, answer.output))  # git-merged-text: a mutation; atomicFastForward parses only query answers
         if not ff.ok:
           entry.outcome = if ff.refused: "fast_forward_refused" else: "fast_forward_failed"
           entry.diagnostic = ff.diagnostic
@@ -55195,6 +55231,7 @@ proc configuredPushLocation(identity: GitToolIdentity; repoRoot,
 proc pushLockRef(identity: GitToolIdentity; repoRoot: string;
     target: LockUpstream; remoteOldOid: string):
     tuple[code: int; output: string] =
+  # git-merged-reader: the push transcript, quoted on failure
   # The publisher selects this checkout explicitly. Persist that declaration
   # for custom paths; the hook still validates every record update normally.
   # Register backend identity even when a legacy checkout shares workspace
@@ -57083,12 +57120,11 @@ proc mainWorktreeRootFor(startPath: string; gitBin = ""): string =
     ## ``git -C start rev-parse <flag>``, resolved to an absolute, normalized
     ## path. Relative output is joined against ``start`` (git answers relative
     ## to its own ``-C`` directory) rather than requiring ``--path-format``,
-    ## which predates the git versions this still has to run on.
-    let res = execCmdEx(quoteShell(git) & " -C " & quoteShell(start) &
-      " rev-parse " & flag,
-      options = {poStdErrToStdOut, poUsePath},
-      env = scrubbedGitRepositoryEnv())
-    if res.exitCode != 0:
+    ## which predates the git versions this still has to run on. The path is
+    ## git's stdout alone, so a stderr line cannot become part of it.
+    let res = gitRunSeparated(git, ["-C", start, "rev-parse", flag],
+      scrubbedGitRepositoryEnv())
+    if res.code != 0:
       return ""
     var value = res.output.strip()
     if value.len == 0:
@@ -66041,6 +66077,7 @@ proc gitNoteRun(gitBin: string;
                 args: openArray[string];
                 received = ReceivedObjectStore()):
     tuple[code: int; output: string] =
+  # git-merged-reader: exit status and quoted diagnostics; reads use gitNoteQuery
   ## Free-standing argv runner for the notes commands (same shape as
   ## ``gitRunPlain`` but takes a bare git binary path so the transport layer
   ## does not require a resolved ``GitToolIdentity``).
@@ -67458,7 +67495,7 @@ proc gatewayVerifyReceivedLockIntegrity(gitBin, gatewayBareDir: string;
     # ``preserveObjectStore`` keeps the push quarantine visible: without it the
     # objects this push delivered are unreachable and EVERY locked revision
     # would look "not present", turning a clean push into a false refusal.
-    let rp = gitNoteRun(gitBin,
+    let rp = gitNoteQuery(gitBin,
       ["-C", gatewayBareDir, "rev-parse", "--verify", "--quiet",
        d.coordinates.revision & "^{commit}"], received)
     if rp.code != 0 or rp.output.strip().len == 0:
@@ -67979,6 +68016,7 @@ proc gatewayForwardToUpstream*(gitBin, gatewayBareDir, upstreamUrl: string;
     return (ok: true, diagnostic: "no refs to forward")
   let env = forwardingObjectStoreEnv(received)
   proc push(atomic: bool): tuple[code: int; output: string] =
+    # git-merged-reader: push's report and refusal reason are on stderr
     var cmd = quoteShell(gitBin) & " -C " & quoteShell(gatewayBareDir) &
       " push"
     if atomic:
@@ -67991,7 +68029,7 @@ proc gatewayForwardToUpstream*(gitBin, gatewayBareDir, upstreamUrl: string;
     (code: res.exitCode, output: res.output)
   var res = push(atomic = true)
   var note = ""
-  if res.code != 0 and AtomicPushUnsupportedMarker in res.output:
+  if res.code != 0 and AtomicPushUnsupportedMarker in res.output:  # git-merged-text: the refusal reason is on push's stderr
     note = " (upstream does not support atomic push; forwarded " &
       "non-atomically, so a partial update is possible)"
     res = push(atomic = false)
@@ -68234,10 +68272,10 @@ proc seedGatewayRefsFromPool*(gitBin, gatewayDir, pool: string): string =
   ## shell and no stdin redirect, so it behaves the same on every platform --
   ## and the empty old value makes git refuse to move a ref that appeared in
   ## the meantime, which is the same rule enforced atomically.
-  let listed = gitNoteRun(gitBin, ["--git-dir=" & pool, "for-each-ref",
+  let listed = gitNoteQuery(gitBin, ["--git-dir=" & pool, "for-each-ref",
     "--format=%(objectname) %(refname)", "refs/heads/"])
   if listed.code != 0:
-    return "could not list the pool's branches: " & listed.output.strip()
+    return "could not list the pool's branches: " & listed.diagnostic
   var failures: seq[string]
   for line in listed.output.splitLines():
     let parts = line.strip().split(' ')
@@ -68324,7 +68362,7 @@ proc ensureGatewayForRepo*(gitBin, workspaceRoot, repoName, repoPath: string;
     result.outcome = gwoSkewRefused
     result.diagnostic = "refused: binary skew (spec §7.6.5)"
     return
-  let upstream = gitNoteRun(gitBin,
+  let upstream = gitNoteQuery(gitBin,
     ["-C", repoPath, "config", "--get", "remote." & remoteName & ".url"])
   if upstream.code != 0 or upstream.output.strip().len == 0:
     result.outcome = gwoNoUpstream
@@ -68336,7 +68374,7 @@ proc ensureGatewayForRepo*(gitBin, workspaceRoot, repoName, repoPath: string;
     else: defaultCacheRoot(workspaceRoot)
   result.gatewayDir = gatewayBarePathFor(root, lastPathPart(workspaceRoot),
     result.upstreamUrl)
-  let existing = gitNoteRun(gitBin,
+  let existing = gitNoteQuery(gitBin,
     ["-C", repoPath, "config", "--get", "remote." & remoteName & ".pushurl"])
   var alreadyWired = false
   if existing.code == 0 and existing.output.strip().len > 0:
@@ -68403,7 +68441,7 @@ proc unwireGatewayForRepo*(gitBin, workspaceRoot, repoPath: string;
   ## touches the pool. A ``pushurl`` that does not name this workspace's
   ## gateway is not ours and is left exactly as found. A second call is a
   ## no-op.
-  let upstream = gitNoteRun(gitBin,
+  let upstream = gitNoteQuery(gitBin,
     ["-C", repoPath, "config", "--get", "remote." & remoteName & ".url"])
   if upstream.code != 0 or upstream.output.strip().len == 0:
     return (guoNotWired, "", "no remote." & remoteName & ".url")
@@ -68412,7 +68450,7 @@ proc unwireGatewayForRepo*(gitBin, workspaceRoot, repoPath: string;
     else: defaultCacheRoot(workspaceRoot)
   let gatewayDir = gatewayBarePathFor(root, lastPathPart(workspaceRoot),
     upstream.output.strip())
-  let existing = gitNoteRun(gitBin,
+  let existing = gitNoteQuery(gitBin,
     ["-C", repoPath, "config", "--get", "remote." & remoteName & ".pushurl"])
   let current = if existing.code == 0: existing.output.strip() else: ""
   var changed = false
@@ -73102,7 +73140,7 @@ proc configuredPushLocationValues(identity: GitToolIdentity; repoRoot,
   ## Return configured push destinations only to in-memory callers. URLs may
   ## contain embedded credentials, so neither this helper nor its callers
   ## include Git's output or an individual URL in a diagnostic.
-  let locations = gitRunPlainEnv(identity,
+  let locations = gitRunPlainEnvQuery(identity,
     ["-C", repoRoot, "remote", "get-url", "--push", "--all", remoteName])
   if locations.code != 0: return
   var digests: seq[string]
@@ -73122,7 +73160,7 @@ proc advertisedPushHeads(identity: GitToolIdentity; probeGitDir,
   ## Read the actual advertised branch tips at one push destination. The
   ## location is passed as structured argv after `--` and never rendered in a
   ## command, log, or error. Malformed advertisements fail closed.
-  let advertised = gitRunPlainEnv(identity,
+  let advertised = gitRunPlainEnvQuery(identity,
     ["--git-dir=" & probeGitDir, "ls-remote", "--heads", "--", pushLocation])
   if advertised.code != 0: return
   for raw in advertised.output.splitLines():
@@ -73138,6 +73176,35 @@ proc advertisedPushHeads(identity: GitToolIdentity; probeGitDir,
     result = cmp(a.refName, b.refName)
     if result == 0: result = cmp(a.oid, b.oid))
   result.ok = true
+
+when defined(reproGitStdoutReaderTest):
+  # The private git readers whose answer must come from git's stdout alone,
+  # for ``tests/integration/t_direct_git_readers_read_stdout_not_warnings``.
+  # Each forwards to the reader unchanged.
+  proc revParseForTest*(identity: GitToolIdentity;
+                        repoPath, refSpec: string): string =
+    revParse(identity, repoPath, refSpec)
+
+  proc gitRemoteOriginUrlForTest*(identity: GitToolIdentity;
+                                  repoPath: string): string =
+    gitRemoteOriginUrl(identity, repoPath)
+
+  proc mainWorktreeRootForTest*(startPath, gitBin: string): string =
+    mainWorktreeRootFor(startPath, gitBin)
+
+  proc configuredPushLocationValuesForTest*(identity: GitToolIdentity;
+      repoRoot, remoteName: string): tuple[ok: bool; values: seq[string]] =
+    let found = configuredPushLocationValues(identity, repoRoot, remoteName)
+    (found.ok, found.values)
+
+  proc advertisedPushHeadsForTest*(identity: GitToolIdentity; probeGitDir,
+      pushLocation: string; oidLength: int):
+      tuple[ok: bool; heads: seq[tuple[oid, refName: string]]] =
+    let found = advertisedPushHeads(identity, probeGitDir, pushLocation,
+      oidLength)
+    result.ok = found.ok
+    for head in found.heads:
+      result.heads.add((head.oid, head.refName))
 
 proc remoteTrackingContainmentHints(identity: GitToolIdentity; repoRoot,
     headOid: string): HashSet[string] =
@@ -75100,7 +75167,7 @@ proc executePush(args: PushArgs): PushReport =
       result.exitCode = 1
       return
     entry.outcome = proPushed
-    for line in pushRes.output.splitLines():
+    for line in pushRes.output.splitLines():  # git-merged-text: the gateway's `remote:` report is on push's stderr
       if line.startsWith(certificatePropagationReportPrefix):
         entry.notices.add(redactUrlUserinfo(line))
       else:
@@ -89607,8 +89674,9 @@ proc runCertifyCheckSet*(args: openArray[string];
     stderr.writeLine("repro certify: git not found on PATH")
     return 1
   if currentRepo.len == 0:
-    let top = execCmdEx(quoteShell(gitBin) & " rev-parse --show-toplevel")
-    if top.exitCode != 0:
+    # stdout alone: a stderr warning is not part of the top-level path.
+    let top = gitRunSeparated(gitBin, ["rev-parse", "--show-toplevel"], nil)
+    if top.code != 0:
       stderr.writeLine("repro certify --check-set: not inside a git " &
         "repository; pass --current-repo=PATH")
       return 1
@@ -101733,7 +101801,10 @@ proc runCompletionCommand*(programName: string; args: openArray[string];
 
 proc gitOutput(gitBin, repoRoot: string; sub: openArray[string]): tuple[
     code: int; output: string] =
+  # git-merged-reader: add/commit/push, whose output is only quoted on failure
   ## Run one `git -C <repoRoot> …` against the membership manifest repo.
+  ## ``output`` is stdout and stderr MERGED, for a failure message; a command
+  ## whose answer is read goes through ``gitRunSeparated`` instead.
   ##
   ## The child MUST NOT inherit Git's repository-local bindings. Git exports an
   ## absolute `GIT_DIR` (plus `GIT_INDEX_FILE`, `GIT_WORK_TREE`, …) to every
@@ -101787,11 +101858,11 @@ proc remoteRevisionState(gitBin, remoteUrl, revision: string): tuple[
   # inherited `GIT_DIR` / `GIT_CONFIG*` cannot redirect the query.
   var lsRemoteEnv = scrubbedGitRepositoryEnv()
   lsRemoteEnv["GIT_TERMINAL_PROMPT"] = "0"
-  let res = execCmdEx(quoteShellCommand(
-    [gitBin, "ls-remote", "--heads", "--tags", remoteUrl, revision]),
-    env = lsRemoteEnv)
-  if res.exitCode != 0:
-    return (rrsUnknown, res.output.strip())
+  # The advertisement is git's stdout alone; the failure reason is on stderr.
+  let res = gitRunSeparated(gitBin,
+    ["ls-remote", "--heads", "--tags", remoteUrl, revision], lsRemoteEnv)
+  if res.code != 0:
+    return (rrsUnknown, res.diagnostic)
   for line in res.output.splitLines():
     let trimmed = line.strip()
     if trimmed.len == 0: continue
@@ -101844,8 +101915,10 @@ proc commitAndPushManifest(identity: GitToolIdentity;
   if ci.code != 0:
     return (code: ci.code, diagnostic: "git commit failed: " & ci.output)
   # Resolve the upstream from @{u}; push only when configured.
-  let up = gitOutput(gitBin, manifestRoot,
-    ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"])
+  # The upstream's NAME is parsed, so it is read from stdout alone.
+  let up = gitRunSeparated(gitBin, ["-C", manifestRoot,
+    "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"],
+    scrubbedGitRepositoryEnv())
   if up.code != 0:
     return (code: 0, diagnostic: "committed locally; no upstream configured " &
       "for the manifest repo (skipped push)")

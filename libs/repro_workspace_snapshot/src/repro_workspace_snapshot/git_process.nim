@@ -11,14 +11,18 @@
 ##
 ## stdout and stderr are read from separate pipes for commands whose output is
 ## parsed (an object id parsed out of a stream with a warning interleaved
-## would be wrong rather than noisy). The commands parsed here (`rev-parse`,
-## `ls-files`, `diff-index`, `write-tree`, `cat-file blob`)
-## write next to nothing to stderr; commands that may warn per file (`add`)
-## run with the streams merged.
+## would be wrong rather than noisy): `rev-parse`, `ls-files`, `ls-tree`,
+## `diff-index`, `write-tree`, `cat-file blob`. Both pipes are drained
+## together (`repro_core/git_separated.runSeparated`), so a command that
+## writes a lot to stderr cannot hang on the unread pipe. Commands whose
+## output is only quoted on failure (`add`, which may warn per file) run with
+## the streams merged.
 
 import std/[os, osproc, streams, strtabs, strutils, tables]
 
 import repro_core/ambient_execution
+import repro_core/git_separated
+import repro_core/process_close
 
 type
   GitRun* = object
@@ -46,22 +50,33 @@ proc gitEnvironment*(extraEnv: openArray[(string, string)]): StringTableRef =
 proc runGit*(gitExe: string; args: openArray[string];
              extraEnv: openArray[(string, string)] = [];
              input = ""; cwd = ""; mergeStderr = true): GitRun =
+  # git-merged-reader: by default; parse sites pass mergeStderr = false
   ## Runs `gitExe args` and waits for it. `input` is written to its stdin
   ## (then closed) before any output is read; keep it to what the command
   ## consumes without answering line by line (`--stdin` path lists).
-  var options = {poUsePath}
-  if mergeStderr: options.incl(poStdErrToStdOut)
-  let p = uncontrolledStartProcess(gitExe, workingDir = cwd, args = @args,
-    env = gitEnvironment(extraEnv), options = options)
-  defer: p.close()
-  let stdinStream = p.inputStream
-  if input.len > 0:
-    stdinStream.write(input)
-  stdinStream.close()
-  result.output = p.outputStream.readAll()
+  ##
+  ## `mergeStderr = false` keeps stderr in `errors`, apart from the answer in
+  ## `output`. Both pipes are then drained together (`runSeparated`): reading
+  ## stdout to EOF before stderr hangs once git writes more than a pipe's
+  ## worth to stderr.
   if not mergeStderr:
-    result.errors = p.errorStream.readAll()
-  result.code = p.waitForExit()
+    let run = runSeparated(gitExe, args, gitEnvironment(extraEnv),
+      workingDir = cwd, input = input)
+    return GitRun(code: run.code, output: run.stdoutText,
+      errors: run.stderrText)
+  let p = uncontrolledStartProcess(gitExe, workingDir = cwd, args = @args,
+    env = gitEnvironment(extraEnv), options = {poUsePath, poStdErrToStdOut})
+  try:
+    let stdinStream = p.inputStream
+    if input.len > 0:
+      stdinStream.write(input)
+    stdinStream.close()
+    result.output = p.outputStream.readAll()
+    result.code = p.waitForExit()
+  finally:
+    # The merged stderr shares stdout's descriptor; `osproc.close` would
+    # close it twice on POSIX (`repro_core/process_close`).
+    closeProcessOnce(p)
 
 proc runGitBounded*(gitExe: string; args: openArray[string];
                     maxBytes: int; input = ""; cwd = ""):
@@ -69,30 +84,11 @@ proc runGitBounded*(gitExe: string; args: openArray[string];
   ## Like `runGit` (stderr kept apart), but stops reading stdout after
   ## `maxBytes + 1` bytes: the process is then killed and `truncated` is
   ## set, so an oversized output is never buffered whole.
-  let p = uncontrolledStartProcess(gitExe, workingDir = cwd, args = @args,
-    env = gitEnvironment([]), options = {poUsePath})
-  defer: p.close()
-  let stdinStream = p.inputStream
-  if input.len > 0:
-    stdinStream.write(input)
-  stdinStream.close()
-  let outStream = p.outputStream
-  var buf = newString(64 * 1024)
-  while true:
-    let n = outStream.readData(addr buf[0], buf.len)
-    if n <= 0:
-      break
-    result.run.output.add(buf[0 ..< n])
-    if result.run.output.len > maxBytes:
-      result.truncated = true
-      p.kill()
-      break
-  if result.truncated:
-    discard p.waitForExit()
-    result.run.code = -1
-  else:
-    result.run.errors = p.errorStream.readAll()
-    result.run.code = p.waitForExit()
+  let run = runSeparated(gitExe, args, gitEnvironment([]), workingDir = cwd,
+    input = input, maxStdoutBytes = maxBytes)
+  result.truncated = run.truncated
+  result.run = GitRun(code: run.code, output: run.stdoutText,
+    errors: run.stderrText)
 
 proc describe*(run: GitRun): string =
   ## The diagnostic of a failed command, one line.

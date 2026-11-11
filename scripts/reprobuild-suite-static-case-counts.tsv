@@ -1772,6 +1772,7 @@ tests/integration/t_develop_reports_committed_lock_read_failures.nim	nim	7
 tests/integration/t_develop_selectors_compose_in_fixed_order.nim	nim	1
 tests/integration/t_develop_set_is_union_of_all_backends.nim	nim	1
 tests/integration/t_develop_warns_and_names_omitted_personal_repos.nim	nim	1
+tests/integration/t_direct_git_readers_read_stdout_not_warnings.nim	nim	3
 tests/integration/t_docs_hooks_reflect_public_tier_only_server_gate.nim	nim	2
 tests/integration/t_docs_test_certificates_describe_the_content_binding.nim	nim	7
 tests/integration/t_dry_run_plans_without_a_reachable_runquotad.nim	nim	3
@@ -2556,6 +2557,7 @@ tests/unit/t_from_source_cargo_recognition.nim	nim	8
 tests/unit/t_from_source_go_recognition.nim	nim	8
 tests/unit/t_from_source_npm_recognition.nim	nim	7
 tests/unit/t_from_source_realization_platform.nim	nim	2
+tests/unit/t_git_separated_drains_both_streams.nim	nim	8
 tests/unit/t_hackage_vendor_manifest.nim	nim	10
 tests/unit/t_hash_policy_frame_bytes.nim	nim	7
 tests/unit/t_hcr_agent_coordinator.nim	nim	1

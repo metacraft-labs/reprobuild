@@ -136,6 +136,7 @@ from ct_test_nim_unittest/grouping import CaseSourceIndex,
 # descriptor on POSIX; see the module. Shared with the build engine, whose
 # scheduler thread has the same hazard while its worker pool is live.
 from repro_core/process_close import closeProcessOnce
+from repro_core/git_separated import gitRunSeparated
 
 when defined(posix):
   import std/posix
@@ -5595,21 +5596,24 @@ proc gitRevisionOf*(directory: string): tuple[commit, branch: string] =
   ## placeholder here would make ``last-pass`` report a revision that no
   ## execution ever ran at, which is worse than reporting none.
   ##
-  ## ``stderr`` IS FOLDED INTO THE CAPTURE rather than left to the
-  ## console: the ordinary "not a git repository" case is not an error
-  ## worth telling a test-runner user about, and OS-4's rule that a
-  ## degraded capture is not an error is the same rule one level down.
-  for probe in [(command: "rev-parse HEAD", slot: 0),
-                (command: "rev-parse --abbrev-ref HEAD", slot: 1)]:
-    let command = probe.command
+  ## ``stderr`` IS CAPTURED rather than left to the console: the ordinary
+  ## "not a git repository" case is not an error worth telling a
+  ## test-runner user about, and OS-4's rule that a degraded capture is not
+  ## an error is the same rule one level down. It is captured APART from
+  ## the answer (``gitRunSeparated``): git warns on stderr while still
+  ## answering on stdout (a pruned commit-graph file, an ambiguous refname),
+  ## and folded into the capture that warning made the revision read as
+  ## absent.
+  for probe in [(args: @["rev-parse", "HEAD"], slot: 0),
+                (args: @["rev-parse", "--abbrev-ref", "HEAD"], slot: 1)]:
     let slot = probe.slot
     var text = ""
     var code = 1
     try:
-      let answer = execCmdEx("git " & command,
-        options = {poStdErrToStdOut, poUsePath}, workingDir = directory)
+      let answer = gitRunSeparated("git", @["-C", directory] & probe.args,
+        nil)
       text = answer.output.strip()
-      code = answer.exitCode
+      code = answer.code
     except CatchableError:
       code = 1
     if code != 0 or text.len == 0 or '\n' in text:

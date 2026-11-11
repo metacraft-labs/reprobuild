@@ -40,13 +40,16 @@ when defined(posix):
         copyMem(addr sink[previousLen], addr buf[0], n)
       return n
 
-  proc drainUntilChildExits(p: Process; fd: cint): tuple[raw: string,
-      exitCode: int] {.raises: [OSError].} =
-    ## Read ``fd`` until EOF OR until ``p`` itself has exited, whichever
-    ## comes first, and return the bytes with the child's exit code.
+  proc drainPipesUntilChildExits*(p: Process; fds: openArray[cint];
+      sinks: var openArray[string]; maxFirstBytes = -1):
+      tuple[exitCode: int; truncated: bool] {.raises: [OSError].} =
+    ## Read every pipe in ``fds`` (``sinks[i]`` collects ``fds[i]``) until
+    ## each is at EOF OR ``p`` itself has exited, whichever comes first, and
+    ## return the child's exit code. The pipes are polled together, so a
+    ## child that fills one while another is unread never blocks.
     ##
     ## EOF alone is not the end of the child. Every process that inherited
-    ## the write end holds the pipe open. ``startProcess`` leaves the child
+    ## a write end holds the pipe open. ``startProcess`` leaves the child
     ## a second copy of it under its original descriptor number besides
     ## stdout/stderr, so even a daemon that closes its standard streams
     ## keeps it, and git hands it to the automatic maintenance it detaches
@@ -55,43 +58,79 @@ when defined(posix):
     ## ``pack-objects`` under it). Waiting for EOF then waits for a
     ## repack of the whole repository, long after git has answered and
     ## exited. Once the direct child is gone, everything it wrote is
-    ## already in the pipe: take exactly the bytes queued there at that
+    ## already in the pipes: take exactly the bytes queued there at that
     ## moment, without blocking, and stop. Bytes a grandchild writes
     ## later are not the child's output.
+    ##
+    ## ``maxFirstBytes`` >= 0 stops as soon as ``sinks[0]`` holds more than
+    ## that many bytes: ``truncated`` is set and ``exitCode`` is -1, and the
+    ## caller decides what to do with the still-running child (kill it).
+    ##
+    ## References: poll(2) https://man7.org/linux/man-pages/man2/poll.2.html,
+    ## FIONREAD https://man7.org/linux/man-pages/man2/FIONREAD.2const.html.
     const PollIntervalMs = 50
-    var pfd = TPollfd(fd: fd, events: POLLIN)
+    var pfds = newSeq[TPollfd](fds.len)
+    var open = newSeq[bool](fds.len)
+    for i in 0 ..< fds.len:
+      open[i] = true
+    result.exitCode = -1
     while true:
-      pfd.revents = 0
-      let ready = posix.poll(addr pfd, 1, PollIntervalMs)
+      var anyOpen = false
+      for i in 0 ..< fds.len:
+        # poll(2) ignores an entry whose descriptor is negative.
+        pfds[i] = TPollfd(fd: (if open[i]: fds[i] else: -1), events: POLLIN)
+        anyOpen = anyOpen or open[i]
+      if not anyOpen:
+        # EOF everywhere: every writer is gone; the child's status is all
+        # that is left to collect. (Polled rather than ``waitForExit``,
+        # whose signature carries a ``ValueError`` for its timeout.) A pipe
+        # usually reports EOF a moment before the exited child can be
+        # reaped, so the wait is short and polled finely: every git command
+        # the caller runs pays it.
+        while true:
+          result.exitCode = peekExitCode(p)
+          if result.exitCode != -1: return
+          sleep(1)
+      let ready = posix.poll(addr pfds[0], Tnfds(pfds.len), PollIntervalMs)
       if ready < 0:
         if errno == EINTR: continue
         raiseOSError(osLastError())
       if ready > 0:
-        if appendRead(fd, result.raw, high(int)) == 0:
-          # EOF: every writer is gone; the child's status is all that is
-          # left to collect. (Polled rather than ``waitForExit``, whose
-          # signature carries a ``ValueError`` for its timeout.) The pipe
-          # usually reports EOF a moment before the exited child can be
-          # reaped, so the wait is short and polled finely: every git
-          # command the caller runs pays it.
-          while true:
-            result.exitCode = peekExitCode(p)
-            if result.exitCode != -1: return
-            sleep(1)
-      # Asked after every read too, not only when the pipe is quiet: a
+        for i in 0 ..< fds.len:
+          if open[i] and pfds[i].revents != 0:
+            # POLLIN, POLLHUP or POLLERR: the read returns data, EOF or the
+            # error without blocking.
+            if appendRead(fds[i], sinks[i], high(int)) == 0:
+              open[i] = false
+      if maxFirstBytes >= 0 and sinks.len > 0 and
+          sinks[0].len > maxFirstBytes:
+        result.truncated = true
+        result.exitCode = -1
+        return
+      # Asked after every read too, not only when the pipes are quiet: a
       # grandchild that keeps writing would otherwise keep this loop
       # reading for as long as it runs.
-      result.exitCode = peekExitCode(p)
-      if result.exitCode != -1:
-        var queued: cint = 0
-        if ioctl(fd, FIONREAD, addr queued) < 0:
-          raiseOSError(osLastError())
-        var remaining = int(queued)
-        while remaining > 0:
-          let n = appendRead(fd, result.raw, remaining)
-          if n == 0: return
-          remaining -= n
+      let code = peekExitCode(p)
+      if code != -1:
+        for i in 0 ..< fds.len:
+          if not open[i]: continue
+          var queued: cint = 0
+          if ioctl(fds[i], FIONREAD, addr queued) < 0:
+            raiseOSError(osLastError())
+          var remaining = int(queued)
+          while remaining > 0:
+            let n = appendRead(fds[i], sinks[i], remaining)
+            if n == 0: break
+            remaining -= n
+        result.exitCode = code
         return
+
+  proc drainUntilChildExits(p: Process; fd: cint): tuple[raw: string,
+      exitCode: int] {.raises: [OSError].} =
+    ## ``drainPipesUntilChildExits`` over one pipe.
+    var sinks = [""]
+    result.exitCode = drainPipesUntilChildExits(p, [fd], sinks).exitCode
+    result.raw = move sinks[0]
 
 proc execCmdExCloseOnce*(command: string;
                          options: set[ProcessOption] = {poStdErrToStdOut,

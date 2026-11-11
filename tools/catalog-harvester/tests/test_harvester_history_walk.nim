@@ -166,11 +166,11 @@ suite "M2 — end-to-end git history walk":
     check rc == 0
     # 201 commits each emitting a >70-byte subject → the captured
     # output is well above one pipe buffer.
-    check output.len > 8 * 1024
+    check output.len > 8 * 1024  # git-merged-text: measures runGit's own drain
     # And every commit's subject must be present (would have been
     # truncated mid-stream under the pre-M2 bug).
-    check ("commit-1-" & payload) in output
-    check ("commit-200-" & payload) in output
+    check ("commit-1-" & payload) in output  # git-merged-text: measures runGit's own drain
+    check ("commit-200-" & payload) in output  # git-merged-text: measures runGit's own drain
 
     try: removeDir(tmpRoot)
     except: discard

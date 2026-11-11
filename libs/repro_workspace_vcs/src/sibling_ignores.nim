@@ -97,6 +97,7 @@ type
 
 proc runGit(gitBin: string; args: openArray[string];
             workingDir = ""): tuple[code: int; output: string] =
+  # git-merged-reader: exit status only (`ls-files --error-unmatch`)
   var cmd = quoteShell(gitBin)
   for arg in args:
     cmd.add(" ")
@@ -230,8 +231,9 @@ proc refreshWorkspaceSiblingIgnores*(gitBin, workspaceRoot: string;
     result.diagnostic = "workspace root does not exist: " & workspaceRoot
     return
 
-  let gitDir = runGit(gitBin, ["-C", workspaceRoot, "rev-parse",
-    "--absolute-git-dir"])
+  # The path is git's stdout alone; a stderr line would otherwise lead it.
+  let gitDir = gitRunSeparated(gitBin, ["-C", workspaceRoot, "rev-parse",
+    "--absolute-git-dir"], scrubbedGitRepositoryEnv())
   let gitDirPath = gitDir.output.strip()
   if gitDir.code != 0 or gitDirPath.len == 0:
     result.diagnostic = "workspace root is not a git checkout: " & workspaceRoot

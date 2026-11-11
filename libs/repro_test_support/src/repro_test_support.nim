@@ -32,7 +32,7 @@
 import std/[os, osproc, streams, strtabs, strutils, times, unittest]
 
 from repro_core/paths import extendedPath, runquotaEndpointPath
-from repro_core/process_streams import drainStream
+from repro_core/git_separated import gitRunSeparated
 
 # The fake-registry-hive seam (`registryRootEnv`), kept in its own module so
 # `home_apply_guard` shares it without importing this one.
@@ -1045,16 +1045,15 @@ proc isCodeTracerSourceRoot(path: string): bool =
 
 proc gitCommonDir(repoRoot: string): string =
   try:
-    let process = startProcess("git", workingDir = repoRoot,
-      args = ["rev-parse", "--path-format=absolute", "--git-common-dir"],
-      options = {poUsePath, poStdErrToStdOut})
-    defer: process.close()
-    # N51: `git rev-parse --git-common-dir` prints ONE path and the result is
-    # used as a path. A short read yields a prefix of a directory name, which
-    # is a plausible-looking wrong answer rather than a visible failure.
-    let output = drainStream(process.outputStream)
-    if process.waitForExit() == 0:
-      result = output.strip()
+    # `git rev-parse --git-common-dir` prints ONE path and the result is used
+    # as a path, so it is read from stdout ALONE: a stderr warning glued onto
+    # it names a directory that does not exist. `gitRunSeparated` also drains
+    # to EOF (N51: a short read yields a prefix of a directory name, which is
+    # a plausible-looking wrong answer rather than a visible failure).
+    let res = gitRunSeparated("git", ["-C", repoRoot, "rev-parse",
+      "--path-format=absolute", "--git-common-dir"], nil)
+    if res.code == 0:
+      result = res.output.strip()
   except OSError:
     discard
 
