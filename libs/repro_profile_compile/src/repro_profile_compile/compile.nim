@@ -103,7 +103,9 @@ proc resolveProfileNimCompiler*(): string =
         "repro profile compile: $" & ProfileNimCompilerEnvVar & "=" & explicit &
         " does not name an existing file. Point it at a Nim compiler, or " &
         "unset it to use the `nim` on PATH.")
-    return explicit
+    # Absolute: `nim` is started in the compile's own directory, not in
+    # this process's (`startProfileNim`).
+    return absolutePath(explicit)
   let shipped = installedNimCompiler(runningImagePrefixCandidates())
   if shipped.len > 0:
     return shipped
@@ -591,18 +593,30 @@ proc stageProfileFiles*(profileRoot, repoRootAbs: string): seq[string] =
     unstageProfileFiles(result)
     raise
 
-proc startProfileNim*(argv: seq[string]; repoRootAbs: string;
+proc startProfileNim*(argv: seq[string]; workingDir: string;
                       additions: StringTableRef;
                       unset: openArray[string] = []): Process =
   ## Start one `nim` invocation over a profile -- the compile's `nim c`, the
   ## platform probe's `nim dump` / `nim check` -- with stderr merged into
-  ## stdout, from the reprobuild root. `nim` INHERITS this process's
+  ## stdout, in `workingDir`. `nim` INHERITS this process's
   ## environment with `additions` (`profileCompileEnvAdditions`) laid over
   ## it. `argv[0]` is the compiler `resolveProfileNimCompiler` chose. The one
   ## place a profile's compiler is launched; finish it with
   ## `finishProfileNim`. The Windows profile C capability probe reuses this
   ## same argv/capture executor before Nim. Each name in `unset` is removed
   ## from the environment for the spawn the same way, and restored after.
+  ##
+  ## `workingDir` must be private to this invocation -- the nimcache it
+  ## writes, or a scratch directory under it -- and never the reprobuild
+  ## source root. When the link command is long, Nim writes
+  ## `<project>_linkerArgs.txt` into its current directory, links with
+  ## `@<that file>` and deletes it. Every profile is named `home` or
+  ## `system`, so two compiles sharing a directory share that file: one
+  ## deletes or rewrites the file the other is linking with, and the link
+  ## fails or links the other compile's objects. A shared directory is also
+  ## one that may not be writable (an installed source root). Every path in
+  ## `argv` is therefore absolute; a relative one would resolve against
+  ## `workingDir`, not against the caller's directory.
   ##
   ## The additions are set in this process's environment only for the
   ## duration of the spawn and restored as they were before it returns (the
@@ -621,7 +635,7 @@ proc startProfileNim*(argv: seq[string]; repoRootAbs: string;
       restore.add((name: name, existed: existsEnv(name), value: getEnv(name)))
       putEnv(name, value)
   try:
-    result = startProcess(argv[0], workingDir = repoRootAbs,
+    result = startProcess(argv[0], workingDir = workingDir,
       args = argv[1 .. ^1], env = nil, options = {poUsePath, poStdErrToStdOut})
   finally:
     for i in countdown(restore.high, 0):
@@ -723,7 +737,7 @@ proc requireProfileCCompiler*(cc, nimcacheDir, repoRootAbs: string): string =
       # variables removed for the spawn only: removing them by name keeps
       # the environment un-enumerated (`startProfileNim`).
       let res = finishProfileNim(startProfileNim(
-        cCompilerProbeArgv(result, source, output), repoRootAbs,
+        cCompilerProbeArgv(result, source, output), scratch,
         profileCompileEnvAdditions(repoRootAbs),
         unset = ["SDKROOT", "DEVELOPER_DIR", "CPATH", "C_INCLUDE_PATH",
                  "CPLUS_INCLUDE_PATH", "OBJC_INCLUDE_PATH", "INCLUDE",
@@ -765,6 +779,13 @@ proc compileProfileExecutable*(profileRoot, nimcacheDir, outBinary: string;
   var cCompiler = resolveProfileCCompiler()
   let repoRootAbs = absolutePath(repoRoot)
   requireReprobuildSources(repoRootAbs)
+  # Absolute before anything uses them: `nim` runs in the nimcache, not in
+  # this process's directory (`startProfileNim`).
+  let profileRoot = absolutePath(profileRoot)
+  let nimcacheDir = absolutePath(nimcacheDir)
+  let outBinary = absolutePath(outBinary)
+  if cCompiler.len > 0 and cCompiler.extractFilename != cCompiler:
+    cCompiler = absolutePath(cCompiler)
   createDir(extendedPath(nimcacheDir))
   createDir(extendedPath(outBinary.parentDir))
   when defined(windows):
@@ -782,8 +803,11 @@ proc compileProfileExecutable*(profileRoot, nimcacheDir, outBinary: string;
     let childEnv = profileCompileEnvAdditions(repoRootAbs)
     # `err.stderrText` below is the ONLY thing a user sees when a profile
     # fails to compile; `finishProfileNim` drains the whole transcript.
+    # The nimcache is this compile's own directory and the edge's ignored
+    # input prefix, so the linker response file Nim writes into its working
+    # directory is neither shared with another compile nor an input.
     let compileRes = finishProfileNim(
-      startProfileNim(nimArgv, repoRootAbs, childEnv))
+      startProfileNim(nimArgv, nimcacheDir, childEnv))
     if compileRes.exitCode != 0:
       var err = new CompileFailure
       err.msg = "nim compile failed for " & profileRoot &

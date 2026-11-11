@@ -112,10 +112,13 @@ type
       ## The explicit search paths (`nim dump`'s `lib_paths`), never the
       ## lazy Nimble package paths.
 
-proc resolveProfileNimConfig*(nimExe, profileRoot, repoRootAbs: string;
+proc resolveProfileNimConfig*(nimExe, profileRoot, repoRootAbs,
+                              workingDir: string;
                               env: StringTableRef): ProfileNimConfig =
   ## Run `nim dump` over the profile for the compiling platform with the
   ## compile's own arguments and return the search paths it resolved.
+  ## `nim` runs in `workingDir`, a directory private to the probe
+  ## (`startProfileNim`).
   ##
   ## WHY THE PROBES NEED THE HOST'S SEARCH PATHS. Nim runs `config.nims`
   ## under the TARGET's definitions: checked with `--os:windows`,
@@ -138,7 +141,7 @@ proc resolveProfileNimConfig*(nimExe, profileRoot, repoRootAbs: string;
     argv.add "--path:" & path
   argv.add profileRoot
   let (output, exitCode) = finishProfileNim(
-    startProfileNim(argv, repoRootAbs, env))
+    startProfileNim(argv, workingDir, env))
   # NimScript's `echo` shares stdout with the document; the document is the
   # one line that is a JSON object with the dump's `version` key.
   var doc: JsonNode = nil
@@ -233,13 +236,18 @@ proc runProfilePlatformProbes*(profileRoot, nimcacheDir, repoRoot: string):
   let nimExe = resolveProfileNimCompiler()
   let repoRootAbs = absolutePath(repoRoot)
   requireReprobuildSources(repoRootAbs)
+  # Absolute, because every `nim` below runs in a directory under the
+  # nimcache rather than in this process's directory (`startProfileNim`).
+  let profileRoot = absolutePath(profileRoot)
+  let nimcacheDir = absolutePath(nimcacheDir)
+  createDir(extendedPath(nimcacheDir))
   let childEnv = profileCompileEnvAdditions(repoRootAbs)
   let staged = stageProfileFiles(profileRoot, repoRootAbs)
   try:
     var config: ProfileNimConfig
     try:
       config = resolveProfileNimConfig(nimExe, profileRoot, repoRootAbs,
-        childEnv)
+        nimcacheDir, childEnv)
     except CompileFailure as err:
       # Nothing can be checked without the configuration; every platform is
       # unevaluated, with the reason.
@@ -256,7 +264,7 @@ proc runProfilePlatformProbes*(profileRoot, nimcacheDir, repoRoot: string):
         let dir = nimcacheDir / t.system
         createDir(extendedPath(dir))
         let argv = profileProbeArgv(nimExe, profileRoot, dir, config, t)
-        batch.add (next, startProfileNim(argv, repoRootAbs, childEnv))
+        batch.add (next, startProfileNim(argv, dir, childEnv))
         inc next
       # Drain in start order. A check whose output does not fit its pipe
       # waits until its turn; none waits on another, so this cannot

@@ -717,6 +717,7 @@ libs/repro_profile_compile/tests/t_compiled_profile_keeps_secrets_and_credential
 libs/repro_profile_compile/tests/t_guarded_intent_plans_per_host.nim	nim	5
 libs/repro_profile_compile/tests/t_infra_apply_audits_build_action_edges.nim	nim	5
 libs/repro_profile_compile/tests/t_infra_apply_substitutes_from_cache.nim	nim	13
+libs/repro_profile_compile/tests/t_profile_compile_links_in_its_own_directory.nim	nim	3
 libs/repro_profile_compile/tests/t_profile_compile_relative_dirs_are_anchored.nim	nim	2
 libs/repro_profile_compile/tests/t_profile_compile_uses_the_installed_nim.nim	nim	6
 libs/repro_profile_compile/tests/t_profile_runtime_stderr.nim	nim	8
@@ -2729,6 +2730,7 @@ tests/unit/test_continuous_benchmarking_policy.py	python	7
 tests/unit/test_ct_test_surface_addressability.py	python	14
 tests/unit/test_daemon_worker_confinement_systemd_analyze.py	python	12
 tests/unit/test_dev_shell_hook_scope.py	python	7
+tests/unit/test_flake_lock_derived_fields.py	python	11
 tests/unit/test_generated_artifact_merge_policy.py	python	19
 tests/unit/test_graph_owned_test_artifacts.py	python	26
 tests/unit/test_install_nix_paths.py	python	14
