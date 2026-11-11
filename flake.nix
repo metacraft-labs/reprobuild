@@ -334,7 +334,17 @@
       # an LD_PRELOAD hook library loaded after the monitor shim (an agent session's
       # command-trace shim) got its own export back as the "next" definition and
       # recursed until it crashed, so every monitored action failed silently.
-      url = "github:metacraft-labs/io-mon/ac06360d15be70aca46202d0ce04c5b17cba5ac1";
+      # Bumped ac06360d -> 7a9b2f33 (2026-11-11, io-mon `agents`): brings fe50a98,
+      # which classifies raw write/pwrite64/writev/pwritev syscalls, and 7a9b2f3,
+      # which answers dlsym(RTLD_DEFAULT) relative to the caller too. A hook library
+      # preloaded beside the monitor shim that writes through syscall(SYS_write)
+      # (an agent session's command-trace shim) made every monitored root report
+      # `libc raw syscall unsupported nr=1`, so the engine withheld every record
+      # (reprobuild-pm issue 2026-11-01-monitored-root-reports-no-process-start).
+      # Guarded by tests/e2e/io-monitor/
+      # t_inherited_preload_hook_library_keeps_root_monitored.nim. Needs
+      # nim-shm-gset 7bc81ad (below) for `emitNoGrow`.
+      url = "github:metacraft-labs/io-mon/7a9b2f331024f4bc0b952bcab89b1dc48525d804";
       flake = false;
     };
     nim-shm-gset-src = {
@@ -357,7 +367,10 @@
       # ftruncate-only sizing let the first header store through the MAP_SHARED
       # mapping fault with SIGBUS inside `reprobuild internal io monitor` (rpi2,
       # about one cold `repro infra plan` in five); it is ENOSPC at creation now.
-      url = "github:metacraft-labs/nim-shm-gset/6333cc915689559b00f81371734783c2e894ca45";
+      # Bumped 6333cc9 -> 7bc81ad (2026-11-11, `agents`) with io-mon-src 7a9b2f33:
+      # io-mon's writer (c8bc874) calls `emitNoGrow`, an async-signal-safe
+      # insert that never grows the set, which 6333cc9 does not have.
+      url = "github:metacraft-labs/nim-shm-gset/7bc81ad2440860a8a9254eb2757c585df9652438";
       flake = false;
     };
     nim-shm-queue-src = {

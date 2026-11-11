@@ -1702,18 +1702,29 @@ package reprobuild:
     # a new ``-d:ssl`` edge is covered the moment it is written.
     #
     # What is left here is a PREFIX, not a flag. This repository provisions
-    # MSYS2's ``mingw-w64-x86_64-openssl`` into its Windows dev-deps tree
-    # (``windows/`` + ``repro home apply``) — a location only this recipe
+    # its pinned OpenSSL out of band (below) — a location only this recipe
     # knows — and Git-for-Windows' library-free ``openssl.exe`` is on nearly
     # every Windows host's PATH ahead of it. Offering the prefix keeps that
     # host working without giving the consumer a say in the flags: the package
     # decides whether the prefix satisfies its declared layout, which
     # directory to name, and that PATH resolution is consulted first (see
     # ``windowsOpensslLinkSearchDir``'s stated precedence). A prefix with no
-    # OpenSSL in it contributes nothing.
+    # OpenSSL in it contributes nothing; so does an unset variable.
+    #
+    # The prefix offered is the PINNED UCRT OpenSSL that
+    # ``windows/ensure-openssl.ps1`` installs (MSYS2's ``ucrt64`` build,
+    # version and sha256 in ``windows/toolchain-versions.env``) and ``env.ps1``
+    # exports as ``REPRO_WINDOWS_OPENSSL_DIR``. It used to be the dev-deps
+    # tree's MSYS2 ``mingw64`` prefix. That is the MSVCRT build, which the
+    # pinned WinLibs UCRT gcc must not link against, and its ``lib`` directory
+    # also holds MSYS2's own C runtime (``libmingw32.a``, ``libmingwex.a``).
+    # Once a ``pacman -Syu`` on win-ci-bare-001 (2026-11-06) installed
+    # OpenSSL there, the layout check accepted it, ``-L`` put that runtime
+    # ahead of the toolchain's, and every ``-d:ssl`` link on Windows failed in
+    # ``crt2.o`` (``undefined reference to `_gnu_exception_handler'``;
+    # Release run 43048067202).
     when defined(windows):
-      registerOpensslPrefixCandidate(
-        windowsDiyInstallRoot() / "msys2" / "msys64" / "mingw64")
+      registerOpensslPrefixCandidate(getEnv("REPRO_WINDOWS_OPENSSL_DIR"))
 
     let reproRuntimePassL = nixRuntimePassLForLibraries(@[
       "libclingo.so", "libclingo.dylib"])

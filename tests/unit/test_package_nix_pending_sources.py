@@ -19,6 +19,7 @@ the real formats. The last cases run against the REAL committed files: the
 tree passes, and the issue's situation rebuilt from them is refused.
 """
 import json
+import os
 from pathlib import Path
 import re
 import shutil
@@ -29,6 +30,15 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / 'scripts'))
+
+# `just lint` runs this file from the pre-commit hook, and git exports
+# GIT_INDEX_FILE to every hook (and GIT_DIR / GIT_WORK_TREE to a linked
+# worktree's). Inherited, they point every `git -C <temp repo>` below -- this
+# file's and the script's under test -- at the repository being committed to,
+# so the fixture commits fail, or land in the wrong index. Scrubbed for the
+# whole process, the way the suite's other git-fixture tests scrub them.
+for _leaked in ('GIT_DIR', 'GIT_WORK_TREE', 'GIT_INDEX_FILE'):
+    os.environ.pop(_leaked, None)
 from check_package_nix_pending_sources import (  # noqa: E402
     NIM_FORK_NIX, PACKAGE_NIX, TABLE, check, src_lock_text)
 

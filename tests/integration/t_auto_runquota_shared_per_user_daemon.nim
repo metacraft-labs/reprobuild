@@ -121,6 +121,12 @@ when defined(linux):
         env[name] = value
     env["REPROBUILD_ACTION_CACHE_ROOT"] = result.scratch / "action-cache"
     env["XDG_CACHE_HOME"] = result.scratch / "user-cache"
+    # `repro exec` compiles the recipe and keeps that compile's nimcache under
+    # TMPDIR; inside the scratch it goes with the case instead of outliving
+    # it. The endpoint directory is named explicitly below, so its socket
+    # path does not depend on this.
+    createDir(result.scratch / "tmp")
+    env["TMPDIR"] = result.scratch / "tmp"
     env["REPRO_ACTION_CACHE_SHM"] = "0"
     env["REPRO_DAEMON"] = "off"
     env["REPROBUILD_AUTO_RUNQUOTA"] = "1"
@@ -270,6 +276,14 @@ when defined(linux):
       # ... and gone, with its socket, once nobody has connected for the
       # period. 60 s is the budget for a 3 s period on a loaded host.
       check waitLifetimeLockFree(fixture.socket, 60_000)
+      # The daemon releases its lifetime lock as the last step of its
+      # orderly shutdown, a moment BEFORE the process is gone; and once gone
+      # it is reaped by whoever it was re-parented to. So the pid is waited
+      # for, within the same budget, rather than read once.
+      var waitedForExit = 0
+      while pidAlive(pid) and waitedForExit < 60_000:
+        sleep(50)
+        waitedForExit += 50
       check not pidAlive(pid)
       check not socketPresent(fixture.socket)
 

@@ -1,6 +1,6 @@
-import std/[algorithm, json, locks, monotimes, options, os, osproc, net,
-    nativesockets, parsecfg, sequtils, sets, streams, strtabs, strutils, tables,
-    tempfiles, times]
+import std/[algorithm, atomics, json, locks, monotimes, options, os, osproc,
+    net, nativesockets, parsecfg, sequtils, sets, streams, strtabs, strutils,
+    tables, tempfiles, times]
 
 # The OS is reached through a named symbol list on both platforms, never
 # wholesale. ``std/posix`` exports ``fork`` / ``execvp`` / ``posix_spawn``
@@ -3300,6 +3300,35 @@ proc keyedOnRelocation*(fingerprint: ContentDigest; relocatable: bool;
   framed.add($base.len & "\x1f" & base & "\x1e")
   blake3DomainDigest(framed.textBytes(), hdActionFingerprint)
 
+proc keyedOnArgv*(fingerprint: ContentDigest; argv: openArray[string];
+                  cwd = ""): ContentDigest =
+  ## `fingerprint` with every element of `argv`, and `cwd`, mixed in.
+  ##
+  ## `action()` keys `argv[0]` only when it lies under a content-addressed
+  ## root, and the rest of the command line not at all: an edge whose
+  ## constructor computes its fingerprint over less than what it spawns
+  ## shares one local record across command lines that compute different
+  ## things. A constructor calls this over the argv it hands to `action()`,
+  ## after every rewrite it applies, so the key covers the command by
+  ## construction rather than by a list of the arguments its author thought
+  ## could matter.
+  ##
+  ## A relocatable edge passes its argv with each path named the way its
+  ## record names inputs (`relocatableName`), and no `cwd`: its key must be
+  ## the same wherever the tree lies, and `keyedOnRelocation` keys the depth
+  ## of its cwd.
+  ##
+  ## Length-framed, element count first, so no two distinct argv vectors
+  ## collide by concatenation (`["a b"]` against `["a", "b"]`).
+  var framed = "action-argv\x1e"
+  let base = toHex(fingerprint.bytes)
+  framed.add($base.len & "\x1f" & base & "\x1e")
+  framed.add($argv.len & "\x1e")
+  for arg in argv:
+    framed.add($arg.len & "\x1f" & arg & "\x1e")
+  framed.add($cwd.len & "\x1f" & cwd & "\x1e")
+  blake3DomainDigest(framed.textBytes(), hdActionFingerprint)
+
 proc recordedInputNames*(action: BuildAction;
                          paths: openArray[string]): seq[string] =
   ## The names a record gives `paths` (absolute observed inputs). Unchanged
@@ -5307,7 +5336,9 @@ proc parseCreateActionRecord(payload, path: string; lineNo: int;
   let cpuMilli = uintField("cpuMilli", 1000'u32)
   let commandStatsId = stringField("commandStatsId", required = false)
   let cacheable = boolField("cacheable", default = false)
-  let weakFingerprint = weakFingerprintFromText(id)
+  # The record's id names the action, not the command: two records with one
+  # id and different command lines must not share a cache record.
+  let weakFingerprint = keyedOnArgv(weakFingerprintFromText(id), argv, cwd)
   result = action(id, argv, cwd = cwd, deps = deps, inputs = inputs,
     outputs = outputs, optionalOutputs = stringSeqField("optionalOutputs"),
     pool = pool, poolUnits = poolUnits, cpuMilli = cpuMilli,
@@ -16871,6 +16902,37 @@ proc prepareBuiltinFileOutput(path: string) =
   if symlinkExists(expanded):
     removeFile(expanded)
 
+var builtinOutputPublishes: Atomic[int]
+  ## Numbers the temporary files of ``publishBuiltinFileOutput``, so two
+  ## publishes of one path in one process never share a temporary file.
+
+proc publishBuiltinFileOutput*(path, text: string) =
+  ## Publishes ``text`` as a built-in action's output at ``path``.
+  ##
+  ## Several ``repro`` processes provisioning one tool into one tool store
+  ## publish the same receipt. Rewriting it in place truncates it under a
+  ## reader: the output capture hashes the file after measuring its size, so
+  ## a read that meets the truncated file fails with "file changed while
+  ## hashing" (reprobuild-pm issue 2026-11-08). So the file is left alone when
+  ## it already holds ``text``, and otherwise ``text`` goes to a temporary file
+  ## beside it that is renamed over the path. A reader that opened the old
+  ## file keeps reading its bytes, and a reader that opens the path afterwards
+  ## sees the whole new file, never a partial one.
+  createDir(extendedPath(path.splitPath.head))
+  let expanded = extendedPath(path)
+  if not symlinkExists(expanded) and fileExists(expanded) and
+      readFile(expanded) == text:
+    return
+  prepareBuiltinFileOutput(path)
+  let temp = path & ".tmp-" & $getCurrentProcessId() & "-" &
+    $builtinOutputPublishes.fetchAdd(1)
+  try:
+    writeFile(extendedPath(temp), text)
+    moveFile(extendedPath(temp), extendedPath(path))
+  except CatchableError:
+    try: removeFile(extendedPath(temp)) except OSError: discard
+    raise
+
 proc builtinCopyDestinationMatches(source, destination: string): bool =
   let sourcePath = extendedPath(source)
   let destinationPath = extendedPath(destination)
@@ -18137,9 +18199,7 @@ proc executeBuiltinAction*(action: BuildAction): ActionResult =
         if outPaths.len == 0:
           raiseEngine("Daemon returned no materialized paths for selector: " &
             selector)
-        createDir(extendedPath(receiptPath.splitPath.head))
-        prepareBuiltinFileOutput(receiptPath)
-        writeFile(extendedPath(receiptPath), outPaths.join("\n"))
+        publishBuiltinFileOutput(receiptPath, outPaths.join("\n"))
         
         # DA-1f — THE DAEMON'S REPORT IS KEPT AND IS NAMED. It used to be
         # assigned to `monitorReads`, the MONITOR's channel, which is the

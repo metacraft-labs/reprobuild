@@ -1546,6 +1546,9 @@ proc parseNixPackageProvisioning(node: NimNode): NixPackageProvisioningDef =
     if not lockIdentityValue.isNil:
       lockIdentityNode = lockIdentityValue
       result.lockIdentity = exprCode(lockIdentityValue)
+    let versionValue = namedValue(node[i], "version")
+    if not versionValue.isNil:
+      result.version = exprCode(versionValue)
   if selectorText.len == 0:
     error("nixPackage selector must not be empty", node)
   # Presence is a property of the NODE now: an expression-valued nixpkgsRev is
@@ -3221,6 +3224,7 @@ proc packageLiteral(pkg: PackageDef): string =
       ", nixpkgsNarHash: " & codeOrEmpty(provisioning.nixpkgsNarHash) &
       ", packageId: " & codeOrEmpty(provisioning.packageId) &
       ", lockIdentity: " & codeOrEmpty(provisioning.lockIdentity) &
+      ", version: " & codeOrEmpty(provisioning.version) &
       ", sourceFile: " & escForCode(provisioning.sourceFile) &
       ", sourceLine: " & $provisioning.sourceLine & ")")
   result.add("], tarballProvisioning: @[")
@@ -4571,6 +4575,7 @@ const BundledStdlibSelectors* = [
   "installer",
   "just",
   "libblake3",
+  "libclang",
   "llvm-config",
   "make",
   "maturin",
@@ -4655,6 +4660,14 @@ const NativeImportExcluded = "shell"
   ## adb067c, `shell` was the only such name, and 10 recipes that list `sh`
   ## in `nativeBuildDeps:` and call the DSL's `shell(...)` failed with
   ## "ambiguous call" without this.
+
+const
+  reproBin* {.strdefine.} = ""
+    ## Absolute path to the engine binary, handed in by the recipe compile.
+    ## Empty outside that compile (a plain `nim c` of a recipe), which is
+    ## exactly when the `dslDeps:` import emission must stay silent. Defined
+    ## here rather than beside its other user in ``macros_b`` because the
+    ## resource-accessor generator below hands it on as well.
 
 proc usesImportCode(pkg: PackageDef; consumerSourceFile = ""): string =
   # `uses:` AND `nativeBuildDeps:` import a package's typed command surface;
@@ -5166,22 +5179,38 @@ proc usesImportCode(pkg: PackageDef; consumerSourceFile = ""): string =
         # decide reuse-in-place vs regenerate WITHOUT a second lift.
         #
         # The generator crosses a process boundary, and the producer extraction
-        # it runs compiles the producer's recipe against reprobuild's libs. It
-        # finds them through ``$REPROBUILD_REPO_ROOT``, the running binary's
-        # checkout, or a sibling ``../reprobuild``. The generator is a scratch
-        # binary and the producer need not sit beside a checkout, so the last
-        # two find nothing for an out-of-tree project. Hand it the checkout
-        # this generator is compiled against, the way the compiler is handed
-        # over, so the extraction cannot reach for a different (or no) copy.
-        let repoRootHandoff =
-          if repoRoot.len > 0:
-            "putEnv(\"REPROBUILD_REPO_ROOT\", " & escape(repoRoot) & ")\n"
-          else: ""
+        # it runs must compile against the same reprobuild sources, and name
+        # the same engine, as the compile expanding this macro. In the
+        # extraction both answers come from the running image
+        # (``resolveReprobuildSourceRoot``, ``publicCliImagePath``), and the
+        # generator's image is a scratch binary: the arms that look beside the
+        # image or at the checkout it was built in find nothing, and it would
+        # name ITSELF as the engine. So hand it, as a launcher would:
+        #   * the engine (``$REPRO_PUBLIC_CLI_PATH``), when this compile was
+        #     given one and the variable does not already carry it;
+        #   * the sources this macro was compiled from
+        #     (``$REPROBUILD_SOURCE_ROOT``), which are by construction the
+        #     libraries the consuming compile used -- but only when no
+        #     operator override names a tree, so a stated choice still wins.
+        var engineHandoff = ""
+        if reproBin.len > 0:
+          engineHandoff.add(
+            "if getEnv(\"REPRO_PUBLIC_CLI_PATH\").len == 0:\n" &
+            "  putEnv(\"REPRO_PUBLIC_CLI_PATH\", " & escape(reproBin) & ")\n")
+        let dslSourceRoot = currentSourcePath().parentDir.parentDir.parentDir.
+          parentDir.parentDir
+        if dirExists(dslSourceRoot / "libs" / "repro_project_dsl" / "src"):
+          engineHandoff.add(
+            "if getEnv(\"REPROBUILD_LIBS_DIR\").len == 0 and\n" &
+            "    getEnv(\"REPROBUILD_REPO_ROOT\").len == 0 and\n" &
+            "    getEnv(\"REPROBUILD_SOURCE_ROOT\").len == 0:\n" &
+            "  putEnv(\"REPROBUILD_SOURCE_ROOT\", " & escape(dslSourceRoot) &
+            ")\n")
         let genSrc =
           "import std/os\n" &
           "import repro_cli_support\n" &
           "putEnv(\"REPRO_NIM_COMPILER\", " & escape(compilerExe) & ")\n" &
-          repoRootHandoff &
+          engineHandoff &
           "let c = resolveProducerTypedContract(" & escape(selector) & ", " &
           escape(workspaceRoot) & ")\n" &
           "stdout.write(\"IFP:\" & c.interfaceFingerprint & \"\\n\")\n" &

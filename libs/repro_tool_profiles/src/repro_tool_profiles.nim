@@ -26,7 +26,8 @@ import repro_core/paths as corepaths
 import repro_core/source_root
 import repro_core/installed_prefix_nim
 export installed_prefix_nim
-from repro_core/c_compiler import BuiltCCompilerPath
+from repro_core/c_compiler import BuiltCCompilerPath,
+  cCompilerOverrideInstruction
 import repro_domain_types
 import repro_dsl_stdlib/nixpkgs_pin
 import repro_hash
@@ -1125,8 +1126,20 @@ proc applySidecarProfile(profile: var PathOnlyToolProfile;
     else:
       discard
 
+proc enforcePathToolVersionRange(profile: PathOnlyToolProfile;
+                                 useDef: InterfaceToolUse)
+  ## Defined beside `enforceUsesVersionRange`.
+
 proc resolvePathOnlyTool(useDef: InterfaceToolUse; pathValue: string;
-                         lookup: SidecarPathLookup): PathOnlyToolProfile =
+                         lookup: SidecarPathLookup;
+                         holdToDeclaredRange = true): PathOnlyToolProfile =
+  ## ``holdToDeclaredRange``: refuse, with ``UsesVersionOutOfRange``, an
+  ## executable whose version probe reports a version outside the recipe's
+  ## declared ``uses:`` range (``enforcePathToolVersionRange``). Every host
+  ## ``$PATH`` lookup holds to it; only ``toolProfileFor``'s cross-repo
+  ## producer arm passes ``false``, because that search list is a sibling
+  ## recipe's realized bin dirs, not the host's ``$PATH``, and a sibling's
+  ## realization is not range-checked on any other route either.
   let searchList = splitPathList(pathValue)
 
   # Sidecar-first lookup: when a generator already knows the tool's
@@ -1153,6 +1166,8 @@ proc resolvePathOnlyTool(useDef: InterfaceToolUse; pathValue: string;
       result.applySidecarProfile(sidecar)
       result.probes = collectConfiguredProbes(result.resolvedExecutablePath,
         useDef.packageSelector, useDef.executableName)
+      if holdToDeclaredRange:
+        enforcePathToolVersionRange(result, useDef)
       refreshProfileIdentity(result)
       return
 
@@ -1177,6 +1192,8 @@ proc resolvePathOnlyTool(useDef: InterfaceToolUse; pathValue: string;
 
   result.probes = collectConfiguredProbes(resolved,
     useDef.packageSelector, useDef.executableName)
+  if holdToDeclaredRange:
+    enforcePathToolVersionRange(result, useDef)
 
   refreshProfileIdentity(result)
 
@@ -1419,15 +1436,21 @@ proc selectNixProvisioning*(useDef: InterfaceToolUse;
   ## is never relaxed to another, and a committed-lock pin provisions
   ## exactly the realization it names or refuses. An entry whose selector is
   ## empty is still an ELIGIBLE entry with incomplete metadata;
-  ## ``nixAcquisitionPlan`` owns the completeness diagnostic.
+  ## ``nixAcquisitionPlan`` owns the completeness diagnostic. The ``uses:``
+  ## version range filters the entries that declare a ``version``, as it
+  ## filters ``tarball`` entries; one that declares none is held to the
+  ## range after realization instead.
   let pin = contributorPin(useDef)
   let locked = lockedCandidates(useDef, useDef.nixProvisioning)
+  let versionRange = requestedUsesVersionRange(useDef)
   if locked.records.len == 0:
     refuseLockedRealizationMissing(useDef, "nix", "")
-  let choice = selectNixRecord(locked.records, target, "", pin)
+  let choice = selectNixRecord(locked.records, target, "", pin,
+    versionRange = versionRange)
   if choice.status != kcSelected:
     raise selectionFailure(useDef, rkNix, choice,
-      selectNixRecord(useDef.nixProvisioning, target, "", none(string)),
+      selectNixRecord(useDef.nixProvisioning, target, "", none(string),
+        versionRange = versionRange),
       pin, target)
   useDef.nixProvisioning[locked.positions[choice.index]]
 
@@ -2159,6 +2182,9 @@ proc nixStorePathVersion*(path: string): string =
   ## ``nixStorePathNameVersion``.
   nixStorePathNameVersion(path).version
 
+proc versionRangeRefusal(useDef: InterfaceToolUse;
+                         realizedVersion, realization, remedy: string): string
+
 proc usesVersionRangeRefusal*(useDef: InterfaceToolUse;
                               realizedVersion, realization: string): string =
   ## The refusal, or "", for a realization that reports `realizedVersion`
@@ -2172,6 +2198,17 @@ proc usesVersionRangeRefusal*(useDef: InterfaceToolUse;
   ## version could not be verified" is not "the version is in range"
   ## (reprobuild-pm issue 2026-10-30-path-mode-realizes-a-nix-rustc-outside-
   ## the-declared-version-range).
+  versionRangeRefusal(useDef, realizedVersion, realization,
+    "The pinned nixpkgs does not carry a version in range: pin a " &
+    "realization that does (a tarball arm, or `" & useDef.executableName &
+    "` on PATH), or widen the range")
+
+proc versionRangeRefusal(useDef: InterfaceToolUse;
+                         realizedVersion, realization, remedy: string):
+    string =
+  ## ``usesVersionRangeRefusal`` with the out-of-range remedy supplied by the
+  ## route: what the operator can do differs between a nix arm (pin another
+  ## realization) and an executable on PATH (put another one ahead of it).
   let range = requestedUsesVersionRange(useDef)
   if range.len == 0:
     return ""
@@ -2187,10 +2224,7 @@ proc usesVersionRangeRefusal*(useDef: InterfaceToolUse;
   "tool-resolution failed: `" & useDef.packageSelector &
     "` requested by uses \"" & useDef.rawConstraint & "\" was realized by " &
     realization & ", which reports version " & realizedVersion &
-    ", outside the declared range '" & range & "'. The pinned nixpkgs " &
-    "does not carry a version in range: pin a realization that does " &
-    "(a tarball arm, or `" & useDef.executableName &
-    "` on PATH), or widen the range"
+    ", outside the declared range '" & range & "'. " & remedy
 
 proc storePathNamesRequestedPackage(pname: string; useDef: InterfaceToolUse;
                                     profile: PathOnlyToolProfile): bool =
@@ -2218,11 +2252,12 @@ proc storePathNamesRequestedPackage(pname: string; useDef: InterfaceToolUse;
 
 type
   UsesVersionOutOfRange* = object of OSError
-    ## A ``nixPackage`` realization whose reported version the recipe's
-    ## ``uses:`` range refuses (``usesVersionRangeRefusal``). A subtype of
-    ## ``OSError`` so every existing handler still catches it, and distinct
-    ## so ``tpmNix`` can tell "nixpkgs builds the wrong version" from a
-    ## realization that failed.
+    ## A ``nixPackage`` realization, or an executable path mode found on
+    ## ``$PATH``, whose reported version the recipe's ``uses:`` range
+    ## refuses (``usesVersionRangeRefusal``, ``pathToolVersionRangeRefusal``).
+    ## A subtype of ``OSError`` so every existing handler still catches it,
+    ## and distinct so ``tpmNix`` and ``tpmPathOnly`` can tell "this
+    ## realization is the wrong version" from one that failed.
 
 proc enforceUsesVersionRange*(profile: PathOnlyToolProfile;
                               useDef: InterfaceToolUse) =
@@ -2246,6 +2281,37 @@ proc enforceUsesVersionRange*(profile: PathOnlyToolProfile;
       version = named.version
   let refusal = usesVersionRangeRefusal(useDef, version,
     "nix://" & profile.nixSelector & " (" & profile.resolvedExecutablePath & ")")
+  if refusal.len > 0:
+    raise newException(UsesVersionOutOfRange, refusal)
+
+proc pathToolVersionRangeRefusal*(profile: PathOnlyToolProfile;
+                                  useDef: InterfaceToolUse): string =
+  ## The refusal, or "", for an executable path mode found on ``$PATH``
+  ## (reprobuild-pm issue 2026-10-27-path-provisioned-gcc-is-not-probed-so-
+  ## fpc-gcc-2-95-fails-c-builds-cryptically). Path mode took the first
+  ## match unchecked, so a host whose ``$PATH`` lists Free Pascal's bundled
+  ## gcc 2.95 ahead of a current one built every ``uses "gcc >=12"`` recipe
+  ## with gcc 2.95 and failed inside the compile.
+  ##
+  ## Unlike the nix arm, a probe that reports NO version is accepted: path
+  ## mode has always taken such a tool weakly, and refusing it would change
+  ## every recipe whose tool has no answering version probe (decision of
+  ## 2026-11-11 on that issue). Only a version that is reported and outside
+  ## the range is refused.
+  let version = realizedVersionOf(profile)
+  if version.len == 0:
+    return ""
+  versionRangeRefusal(useDef, version,
+    "the executable on PATH at " & profile.resolvedExecutablePath,
+    "Put an in-range `" & useDef.executableName & "` ahead of it on PATH, " &
+    "declare an archive inside the range for this host, or widen the range")
+
+proc enforcePathToolVersionRange(profile: PathOnlyToolProfile;
+                                 useDef: InterfaceToolUse) =
+  ## Raise ``UsesVersionOutOfRange`` for ``pathToolVersionRangeRefusal``.
+  ## ``toolProfileFor``'s ``tpmPathOnly`` arm treats it like an absent tool
+  ## and falls through to the sibling recipe, the host archive and Nix.
+  let refusal = pathToolVersionRangeRefusal(profile, useDef)
   if refusal.len > 0:
     raise newException(UsesVersionOutOfRange, refusal)
 
@@ -2534,6 +2600,26 @@ proc nixRangeRefusalFallsBackToTarball*(useDef: InterfaceToolUse;
   let range = requestedUsesVersionRange(useDef)
   range.len > 0 and selectTarballRecord(useDef.tarballProvisioning, target,
     "", none(string), versionRange = range).status == kcSelected
+
+proc nixSelectionRangeRefusal*(useDef: InterfaceToolUse;
+    target = hostRealizationTarget()): string =
+  ## The refusal, or "", when the recipe's range admits none of the
+  ## ``nixPackage`` entries that declare a release. That is the same answer
+  ## a realized out-of-range version gives (``UsesVersionOutOfRange``), made
+  ## before anything is built, so ``tpmNix`` treats it the same way: an
+  ## in-range archive is taken (``nixRangeRefusalFallsBackToTarball``), and
+  ## otherwise the refusal stands.
+  let range = requestedUsesVersionRange(useDef)
+  if range.len == 0 or useDef.nixProvisioning.len == 0:
+    return ""
+  let locked = lockedCandidates(useDef, useDef.nixProvisioning)
+  let choice = selectNixRecord(locked.records, target, "",
+    contributorPin(useDef), versionRange = range)
+  if choice.status == kcVersionNotOffered:
+    "tool-resolution failed: package \"" & useDef.packageSelector &
+      "\" requested by uses \"" & useDef.rawConstraint & "\": " &
+      choice.detail
+  else: ""
 
 proc pathModeCanRealize*(useDef: InterfaceToolUse): bool =
   ## Whether the path-mode resolver has anything to realize `useDef` from
@@ -5295,7 +5381,7 @@ proc executeTarballProvisionEdge*(action: BuildAction): ActionResult {.gcsafe.} 
           let receipt = action.outputs[0]
           createDir(extendedPath(parentDir(receipt)))
           let receiptStore = receiptStoreRoot(absolutePath(receipt))
-          writeFile(extendedPath(receipt), $(%*{
+          publishBuiltinFileOutput(receipt, $(%*{
             "schema": TarballProvisionEdgeSchema,
             "digestAlgorithm": plan.digestAlgorithm,
             "digestValue": plan.digestValue,
@@ -6123,6 +6209,53 @@ proc describeBootstrapCRoute*(route: BootstrapCRoute;
     "the Xcode Command Line Tools clang (`xcrun -f clang`), the " &
       "platform's own C toolchain"
 
+proc bootstrapCUnsetSelects*(route: BootstrapCRoute): string =
+  ## What an unset ``REPRO_BOOTSTRAP_CC`` selects on ``route``, for the
+  ## "or unset it to use ..." half of a remedy. Only the archive and Nix
+  ## routes provision a compiler into the tool store; the Xcode and system
+  ## routes take the host's own toolchain, and saying otherwise sent a
+  ## Nix-less Linux host without ``/usr/bin/cc`` looking for a tool-store
+  ## compiler its route never tries.
+  case route
+  of bcrArchive, bcrNix:
+    "the pinned bootstrap compiler reprobuild provisions into its tool store"
+  of bcrXcode:
+    "the Xcode Command Line Tools clang"
+  of bcrSystem:
+    # The route's own description, so the remedy names exactly the
+    # candidates it tries, the build compiler included.
+    describeBootstrapCRoute(bcrSystem, bootstrapSystemCCompilers)
+
+proc bootstrapCRemedy*(route: BootstrapCRoute;
+                       systemCandidates: openArray[string] =
+                         bootstrapSystemCCompilers): string =
+  ## The remedy for a C compiler that ``route`` could not provision.
+  ##
+  ## ``bcrSystem`` provisions nothing: on a Linux host without Nix (and on
+  ## other POSIX hosts) the system C compiler and its C library headers are
+  ## a precondition, as the deb and rpm packages state with their ``gcc`` /
+  ## ``libc6-dev`` and ``gcc`` / ``glibc-devel`` dependencies. So the remedy
+  ## says to install them, or to name a compiler explicitly; offering to
+  ## unset ``REPRO_BOOTSTRAP_CC`` would point at nothing, since the failure
+  ## is what an unset override reaches. Every other route keeps the override
+  ## remedy, with its own account of what an unset override selects.
+  case route
+  of bcrSystem:
+    "Install the host's C compiler and C library headers, so that one of " &
+      systemCandidates.join(", ") & " exists and compiles (Debian and " &
+      "Ubuntu: " &
+      "`apt-get install gcc libc6-dev`; Fedora: `dnf install gcc " &
+      "glibc-devel`; Alpine: `apk add build-base`). Or name one " &
+      "explicitly: " & cCompilerOverrideInstruction() & ". " &
+      (when defined(linux):
+         "On a Linux host without Nix reprobuild does not provision a C " &
+           "compiler of its own: the system compiler is a precondition."
+       else:
+         "On this host reprobuild does not provision a C compiler of its " &
+           "own: the system compiler is a precondition.")
+  of bcrArchive, bcrNix, bcrXcode:
+    cCompilerOverrideRemedy(bootstrapCUnsetSelects(route))
+
 proc bootstrapNimRemedy(): string =
   "Set " & bootstrapNimCompilerEnv & " to the Nim 2.2 compiler to use " &
     "instead (an absolute path, or a bare `nim` to use the one on PATH on " &
@@ -6203,6 +6336,11 @@ proc provisionBootstrapCCompiler*(storeRoot: string;
   ##
   ## Successful probes are cached under ``<storeRoot>/compiler-probes``, so
   ## the steady-state cost is a file-existence check.
+  ##
+  ## Both refusals -- nothing found, or a compiler that fails the probe (a
+  ## system ``gcc`` without the C library headers, say) -- carry
+  ## ``bootstrapCRemedy(route)``, which names only what this route can
+  ## reach.
   let origin = describeBootstrapCRoute(route, systemCandidates, builtCompiler)
   var cc = ""
   var sdk = ""
@@ -6228,9 +6366,7 @@ proc provisionBootstrapCCompiler*(storeRoot: string;
           (if builtCompiler.len > 0:
              ", nor does the C compiler this repro was built with (" &
                builtCompiler & ")"
-           else: "") &
-          "; install the system C compiler (e.g. the distribution's " &
-          "gcc or build-essential package)")
+           else: ""))
     of bcrXcode:
       (cc, sdk) = resolveXcodeClang()
     if cc.len == 0:
@@ -6241,9 +6377,10 @@ proc provisionBootstrapCCompiler*(storeRoot: string;
       "\n  route: " & origin &
       "\n  tool store: " & storeRoot &
       "\n  failure: " & indentDetail(err.msg) &
-      "\n  remedy: " & cCompilerOverrideRemedy())
+      "\n  remedy: " & bootstrapCRemedy(route, systemCandidates))
   let sysroot = if sdk.len > 0: @["-isysroot", sdk] else: @[]
-  requireUsableCCompiler(cc, origin, storeRoot / "compiler-probes", sysroot)
+  requireUsableCCompiler(cc, origin, storeRoot / "compiler-probes", sysroot,
+    bootstrapCRemedy(route, systemCandidates))
   BootstrapCCompiler(path: cc, sdkRoot: sdk)
 
 proc buildNimFromSource(sourcePrefix, storeRoot, cc, sdkRoot, version,
@@ -6439,7 +6576,7 @@ proc executeNimSourceBuildEdge*(action: BuildAction): ActionResult {.gcsafe.} =
         spec{"url"}.getStr(), spec{"sha256"}.getStr())
       let receipt = action.outputs[0]
       createDir(extendedPath(parentDir(receipt)))
-      writeFile(extendedPath(receipt), $(%*{
+      publishBuiltinFileOutput(receipt, $(%*{
         "schema": NimSourceBuildEdgeSchema,
         "packageSelector": "nim@" & spec{"version"}.getStr(),
         "planIndex": 0,
@@ -6602,9 +6739,11 @@ proc ensureBootstrapToolchainEnv*(mode: ToolProvisioningMode;
     if not cc.isAbsolute or not fileExists(extendedPath(cc)):
       raise newException(BootstrapToolchainError,
         bootstrapCCompilerEnv & "=" & cc & " does not name an " &
-        "existing file by absolute path. " & cCompilerOverrideRemedy())
+        "existing file by absolute path. " &
+        cCompilerOverrideRemedy(bootstrapCUnsetSelects(bootstrapCRoute())))
     requireUsableCCompiler(cc, bootstrapCCompilerEnv &
-      " (set in the environment)", probeCache, bootstrapSysrootArgs())
+      " (set in the environment)", probeCache, bootstrapSysrootArgs(),
+      cCompilerOverrideRemedy(bootstrapCUnsetSelects(bootstrapCRoute())))
   else:
     let provisioned = provisionBootstrapCCompiler(effectiveStoreRoot)
     cc = provisioned.path
@@ -8046,11 +8185,11 @@ proc executeScoopProvisionEdge*(action: BuildAction): ActionResult {.gcsafe.} =
       var encodedText = newString(encoded.len)
       for i, b in encoded:
         encodedText[i] = char(b)
-      writeFile(extendedPath(action.outputs[1]), encodedText)
+      publishBuiltinFileOutput(action.outputs[1], encodedText)
       # What a consumer declares: the realization, without the host's Scoop
       # root or version directory, so it reads the same on every host that
       # realizes the same pin.
-      writeFile(extendedPath(receipt), $(%*{
+      publishBuiltinFileOutput(receipt, $(%*{
         "schema": ScoopProvisionEdgeSchema,
         "packageSelector": profile.packageSelector,
         "bucket": profile.scoopBucket,
@@ -9925,6 +10064,44 @@ proc resolveEnvironmentPrefixTool*(useDef: InterfaceToolUse):
     cachePortability: cpLocalOnly)
   refreshProfileIdentity(result)
 
+proc pathModeFallThrough(useDef: InterfaceToolUse; storeRoot: string;
+                         profile: var PathOnlyToolProfile): bool =
+  ## What ``toolProfileFor``'s ``tpmPathOnly`` arm realizes when ``$PATH``
+  ## does not answer for ``useDef``: the sibling source recipe's realized
+  ## artefact, then the host archive (range-filtered by
+  ## ``selectTarballRecord``), then the pinned Nix channel on Nix-capable
+  ## hosts. False when the use declares none of them, so the caller's own
+  ## PATH failure stands; an arm that is declared but fails raises.
+  result = true
+  let sibling = tryResolveFromSourceTool(useDef,
+    hostSide = useDef.depKind == DepKindNative)
+  if sibling.kind == rrResolved:
+    profile = sibling.profile
+    return
+  if hasHostTarballProvisioning(useDef):
+    try:
+      profile = resolveTarballTool(useDef, storeRoot)
+    except TarballHostLoaderMissing:
+      # The host cannot run the generic-Linux build (NixOS). The
+      # package's pinned Nix channel builds for this host, so prefer it
+      # over a binary that would only fail with exit 127 later.
+      if (defined(linux) or defined(macosx)) and
+          useDef.nixProvisioning.len > 0:
+        profile = resolveNixTool(useDef, storeRoot)
+      else:
+        raise
+  elif (defined(linux) or defined(macosx)) and
+      useDef.nixProvisioning.len > 0:
+    # Some upstreams, such as Cap'n Proto, do not publish direct
+    # Linux/macOS binary tarballs. In path mode, let Nix-capable
+    # hosts use the package's pinned Nix channel instead of failing
+    # on a tarball entry that only targets another OS.
+    profile = resolveNixTool(useDef, storeRoot)
+  elif useDef.tarballProvisioning.len > 0:
+    profile = resolveTarballTool(useDef, storeRoot)
+  else:
+    result = false
+
 proc toolProfileFor(useDef: InterfaceToolUse; mode: ToolProvisioningMode;
                     pathValue, storeRoot: string;
                     producerExecutableSelectors:
@@ -9939,7 +10116,8 @@ proc toolProfileFor(useDef: InterfaceToolUse; mode: ToolProvisioningMode;
     let producerPath =
       producerExecutableSelectors[useDef.packageSelector].binDirs.
         join($PathSep)
-    return resolvePathOnlyTool(useDef, producerPath, pathLookup)
+    return resolvePathOnlyTool(useDef, producerPath, pathLookup,
+      holdToDeclaredRange = false)
   # SC-3: a selector materialized as a library-channel producer is consumed
   # through the aux channels, not PATH — skip path-mode executable resolution
   # for it and hand back a profile carrying the producer's realized library
@@ -10011,36 +10189,35 @@ proc toolProfileFor(useDef: InterfaceToolUse; mode: ToolProvisioningMode;
       # (Package-Model.md §"Environment-provided library prefixes"). It is
       # never reached under --target: the branch above has answered.
       return resolveEnvironmentPrefixTool(useDef)
+    # The fall-through below serves two cases alike: PATH has no such
+    # executable (`OSError`), or the one it has reports a version outside
+    # the declared range (`UsesVersionOutOfRange`, reprobuild-pm issue
+    # 2026-10-27-path-provisioned-gcc-is-not-probed-so-fpc-gcc-2-95-fails-
+    # c-builds-cryptically; the same fall-through decision 35(b) of
+    # CLI/build.md §Notes makes for the nix arm). An out-of-range PATH tool
+    # is never used: when nothing below realizes the tool inside the range,
+    # the range refusal is what the operator sees, not the fallback's own
+    # failure.
+    var pathRefusal = ""
     try:
       result = resolvePathOnlyTool(useDef, pathValue, pathLookup)
-    except OSError:
-      let sibling = tryResolveFromSourceTool(useDef,
-        hostSide = useDef.depKind == DepKindNative)
-      if sibling.kind == rrResolved:
-        return sibling.profile
-      if hasHostTarballProvisioning(useDef):
-        try:
-          result = resolveTarballTool(useDef, storeRoot)
-        except TarballHostLoaderMissing:
-          # The host cannot run the generic-Linux build (NixOS). The
-          # package's pinned Nix channel builds for this host, so prefer it
-          # over a binary that would only fail with exit 127 later.
-          if (defined(linux) or defined(macosx)) and
-              useDef.nixProvisioning.len > 0:
-            result = resolveNixTool(useDef, storeRoot)
-          else:
-            raise
-      elif (defined(linux) or defined(macosx)) and
-          useDef.nixProvisioning.len > 0:
-        # Some upstreams, such as Cap'n Proto, do not publish direct
-        # Linux/macOS binary tarballs. In path mode, let Nix-capable
-        # hosts use the package's pinned Nix channel instead of failing
-        # on a tarball entry that only targets another OS.
-        result = resolveNixTool(useDef, storeRoot)
-      elif useDef.tarballProvisioning.len > 0:
-        result = resolveTarballTool(useDef, storeRoot)
-      else:
-        raise
+    except UsesVersionOutOfRange as refusal:
+      pathRefusal = refusal.msg
+    except OSError as absent:
+      # The arms may catch exceptions of their own; name the PATH failure
+      # rather than re-raise whatever is current by then.
+      if not pathModeFallThrough(useDef, storeRoot, result):
+        raise absent
+    if pathRefusal.len > 0:
+      var fellThrough = false
+      try:
+        fellThrough = pathModeFallThrough(useDef, storeRoot, result)
+      except CatchableError as fallback:
+        raise newException(UsesVersionOutOfRange, pathRefusal &
+          ". No other realization inside the range was available: " &
+          fallback.msg)
+      if not fellThrough:
+        raise newException(UsesVersionOutOfRange, pathRefusal)
   of tpmNix:
     if nixModeTakesTarballArm(useDef):
       # The catalog declares no ``nixPackage`` arm for this tool (zig ships
@@ -10048,6 +10225,9 @@ proc toolProfileFor(useDef: InterfaceToolUse; mode: ToolProvisioningMode;
       # is its realization in every mode, as it already is in path mode.
       return resolveTarballTool(useDef, storeRoot)
     try:
+      let rangeRefusal = nixSelectionRangeRefusal(useDef)
+      if rangeRefusal.len > 0:
+        raise newException(UsesVersionOutOfRange, rangeRefusal)
       result = resolveNixTool(useDef, storeRoot)
     except UsesVersionOutOfRange as refusal:
       # nixpkgs builds a version the recipe's range refuses. An archive the

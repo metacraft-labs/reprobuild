@@ -17,7 +17,8 @@
 ##     revision, `path:`, a registry name and a tarball;
 ##   * canonical identity: the three spellings §16.3 names as one repository
 ##     agree, a different repository does not, and identity never comes from
-##     an input name;
+##     an input name; a relative `git+file:` input is the checkout it names
+##     from its own flake's directory;
 ##   * the `flake.nix` scan: both spellings of an input, the attribute-set form,
 ##     a `follows`, an interpolated URL (no constraint is invented for it), and
 ##     the line of each URL literal;
@@ -130,6 +131,35 @@ suite "canonical repository identity":
   test "a local origin is one repository however it is spelled":
     check canonicalRepositoryUrl("git+file:///tmp/origin-a.git?ref=main") ==
       canonicalRepositoryUrl("file:///tmp/origin-a.git")
+
+  test "a relative git+file input is the checkout it names from its flake":
+    # `git+file:../lib` is read from the declaring flake's directory, the one
+    # directory nix reads it correctly from; the relative text alone would
+    # name a different checkout from every other flake.
+    let fromApp = canonicalFlakeInputRepository("git+file:../lib?ref=main",
+      "/ws/app")
+    check fromApp == canonicalRepositoryUrl("file:///ws/lib")
+    check fromApp == canonicalFlakeInputRepository("git+file:///ws/lib",
+      "/elsewhere")
+    # A `path:` or bare-path input reads a directory's files, not a
+    # repository's revision: its identity stays what canonicalRepositoryUrl
+    # gives, and only its fetch location is resolved.
+    check canonicalFlakeInputRepository("path:../lib", "/ws/app") ==
+      canonicalRepositoryUrl("path:../lib")
+    check canonicalFlakeInputRepository("../lib", "/ws/app") ==
+      canonicalRepositoryUrl("../lib")
+    check localFlakeRefDirectory("path:../lib", "/ws/app") == "/ws/lib"
+    check localFlakeRefDirectory("../lib", "/ws/app") == "/ws/lib"
+    check fromApp == canonicalFlakeInputRepository("git+file:./../lib",
+      "/ws/app/")
+    check canonicalFlakeInputRepository("git+file:../lib", "/ws/other/app") !=
+      fromApp
+    check localFlakeRefDirectory("git+file:../lib", "/ws/app") == "/ws/lib"
+    # A remote reference is unaffected by the flake's directory.
+    check canonicalFlakeInputRepository("github:o/r", "/ws/app") ==
+      "github.com/o/r"
+    check localFlakeRefDirectory("git+https://h/o/r", "/ws/app") == ""
+    check localFlakeRefDirectory("nixpkgs", "/ws/app") == ""
 
   test "a registry name or tarball input names no repository":
     check canonicalFlakeRefRepository("nixpkgs") == ""

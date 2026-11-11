@@ -487,7 +487,10 @@ proc profileCompileBuildAction*(profileRoot, binaryPath, nimcacheDir,
     outputs = @[binaryPath],
     commandStatsId = "repro profile compile edge",
     cacheable = true,
-    weakFingerprint = weak,
+    # `weak` covers the compilers, the helper and the binary; the rest of
+    # the command line (the profile, the nimcache, the libraries under
+    # `--repo-root`) is keyed here.
+    weakFingerprint = keyedOnArgv(weak, argv, cwd),
     envPassthrough = ProfileCompileEnvPassthrough,
     nonDeterminism = ndpEntropyBlessed,
     nonDeterminismJustification = ProviderCompilerEntropyJustification,
@@ -852,6 +855,48 @@ proc profilePlatformProbeWeakFingerprint*(nimExe, publicCliPath,
     "probe-version=" & $ProfilePlatformProbeVersion & "\n" &
     "platforms=" & targetSystemNames().join(",") & "\n")
 
+proc profilePlatformProbeBuildAction*(absProfile, outPath, scratch,
+                                      publicCliPath, workDir,
+                                      repoRoot: string;
+                                      weak: ContentDigest): BuildAction =
+  ## Build the platform-probe edge's `BuildAction`: the internal
+  ## `__repro-probe-profile-platforms` helper, writing `outPath`.
+  let argv = @[
+    publicCliPath,
+    "__repro-probe-profile-platforms",
+    "--profile", absProfile,
+    "--out", outPath,
+    "--nimcache", scratch,
+    "--repo-root", repoRoot
+  ]
+  let cwd =
+    if workDir.len > 0: workDir
+    else: absProfile.parentDir
+  action(ProfilePlatformProbeActionId, argv,
+    # Named-Lock-Files §7.2: no solved package instance reaches this edge.
+    governingLockIdentity = lockIdentityOutsideSolvedGraph(),
+    cwd = cwd,
+    outputs = @[outPath],
+    commandStatsId = "repro profile platform probe edge",
+    cacheable = true,
+    weakFingerprint = keyedOnArgv(weak, argv, cwd),
+    envPassthrough = ProfileCompileEnvPassthrough,
+    # The compile edge's blessing, for the compile edge's reason: this
+    # edge's tree is the helper and `nim dump` / `nim check` -- a compiler
+    # that links nothing and runs nothing it produced. The profile's intent
+    # proc is evaluated in Nim's compile-time VM, which has no access to an
+    # OS entropy source (only `staticExec` reaches outside it, the residual
+    # the provider compile and the compile edge share). The one draw
+    # measured in this edge on Windows is the helper's own: the engine's
+    # OpenSSL DLLs seed a stack-protector canary at start-up, so without the
+    # blessing the probe never published on its first run and every export
+    # re-ran six `nim check`s (reprobuild-pm
+    # `spec/Profile-Compilation-Model.md` §2.1).
+    nonDeterminism = ndpEntropyBlessed,
+    nonDeterminismJustification = ProviderCompilerEntropyJustification,
+    dependencyPolicy = automaticMonitorGatheringPolicy(
+      @[absolutePath(scratch)]))
+
 proc probeProfilePlatforms*(profileRoot: string;
                             opts: ProfileCompileOptions):
     ProfilePlatformProbeArtifact =
@@ -884,41 +929,8 @@ proc probeProfilePlatforms*(profileRoot: string;
     removeFile(extendedPath(outPath))
   let weak = profilePlatformProbeWeakFingerprint(nimExe, opts.publicCliPath,
     outPath)
-  let argv = @[
-    opts.publicCliPath,
-    "__repro-probe-profile-platforms",
-    "--profile", absProfile,
-    "--out", outPath,
-    "--nimcache", scratch,
-    "--repo-root", repoRoot
-  ]
-  let cwd =
-    if opts.workDir.len > 0: opts.workDir
-    else: absProfile.parentDir
-  let buildAction = action(ProfilePlatformProbeActionId, argv,
-    # Named-Lock-Files §7.2: no solved package instance reaches this edge.
-    governingLockIdentity = lockIdentityOutsideSolvedGraph(),
-    cwd = cwd,
-    outputs = @[outPath],
-    commandStatsId = "repro profile platform probe edge",
-    cacheable = true,
-    weakFingerprint = weak,
-    envPassthrough = ProfileCompileEnvPassthrough,
-    # The compile edge's blessing, for the compile edge's reason: this
-    # edge's tree is the helper and `nim dump` / `nim check` -- a compiler
-    # that links nothing and runs nothing it produced. The profile's intent
-    # proc is evaluated in Nim's compile-time VM, which has no access to an
-    # OS entropy source (only `staticExec` reaches outside it, the residual
-    # the provider compile and the compile edge share). The one draw
-    # measured in this edge on Windows is the helper's own: the engine's
-    # OpenSSL DLLs seed a stack-protector canary at start-up, so without the
-    # blessing the probe never published on its first run and every export
-    # re-ran six `nim check`s (reprobuild-pm
-    # `spec/Profile-Compilation-Model.md` §2.1).
-    nonDeterminism = ndpEntropyBlessed,
-    nonDeterminismJustification = ProviderCompilerEntropyJustification,
-    dependencyPolicy = automaticMonitorGatheringPolicy(
-      @[absolutePath(scratch)]))
+  let buildAction = profilePlatformProbeBuildAction(absProfile, outPath,
+    scratch, opts.publicCliPath, opts.workDir, repoRoot, weak)
   let config = profileCompileEngineConfig(opts.stateDir, opts.publicCliPath)
   let runResult = runBuild(graph(@[buildAction]), config)
   if runResult.hasFailedActions():

@@ -52,6 +52,10 @@ class BootstrapEvidenceTests(unittest.TestCase):
         self.bin.mkdir()
         self.bash = shutil.which("bash")
         self.assertIsNotNone(self.bash, "Bash is required to execute the CI step")
+        # The step hands a failure's output to the real builder-log
+        # collector, by a path relative to the workspace.
+        (self.root / "scripts").mkdir()
+        shutil.copy(ROOT / "scripts" / "ci_nix_builder_logs.sh", self.root / "scripts")
         fake = self.bin / "dev-exec"
         fake.write_text(textwrap.dedent(r"""
             #!/bin/sh

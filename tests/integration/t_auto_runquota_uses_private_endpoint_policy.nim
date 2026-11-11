@@ -29,7 +29,13 @@
 ## test's own host file, identity and store; it starts once and adopts
 ## nothing, so the wrapper's image digest is never compared with the
 ## daemon's.
-import std/[json, os, osproc, strutils, tempfiles, unittest]
+## Two more shell fixtures grade the readiness report: a daemon killed by a
+## signal, and one that never listens and is terminated at the ceiling.
+## Another prints a refusal naming the caller's own uid, which a current daemon
+## gives only for faults this suite cannot provoke through the auto-start (it
+## creates the endpoint itself); it grades that such a refusal gets no
+## stale-daemon remedy.
+import std/[json, monotimes, os, osproc, strutils, tempfiles, times, unittest]
 import repro_cli_support
 import repro_runquota
 import repro_test_support
@@ -252,6 +258,11 @@ when defined(posix):
       checkpoint(message)
       check "did not become reachable" in message
       check "runquotad.log" in message
+      # The error says how the wait ended: the daemon exited by itself, and
+      # with which status -- not merely that it was not reachable.
+      check "it exited before it listened" in message
+      check "with exit code 23" in message
+      check "still running" notin message
       check "specific startup stdout reason" in message
       check "specific startup stderr refusal" in message
       check "truncated" in message
@@ -283,6 +294,132 @@ when defined(posix):
         check not fileExists(marker)
         check not dirExists(userDir)
       delEnv("REPROBUILD_RUNQUOTA_IDLE_EXIT_SECONDS")
+
+    test "a daemon killed by a signal before it listens is reported as such":
+      # A signal is a different fate from an exit code, and the error must
+      # not fold one into the other: `exit 137` and SIGKILL are not the same
+      # report to whoever reads it.
+      let wrapper = root / "signalled-runquotad"
+      writeFile(wrapper, "#!/bin/sh\n" &
+        "printf 'killing myself before I listen\\n' >&2\nkill -9 $$\n")
+      setFilePermissions(wrapper, {fpUserRead, fpUserWrite, fpUserExec})
+      putEnv("RUNQUOTAD_BIN", wrapper)
+      var message = ""
+      try:
+        var daemon = startAutoRunQuotaIfNeeded(false)
+        releaseAutoRunQuotaProcess(daemon)
+      except OSError as error:
+        message = error.msg
+      checkpoint message
+      check "did not become reachable" in message
+      check "it exited before it listened" in message
+      check "with signal 9" in message
+      check "exit code" notin message
+      check "killing myself before I listen" in message
+
+    test "a daemon alive at the ceiling is reported as wedged, not as exited":
+      # THE OTHER HALF of the readiness report (reprobuild-pm issue
+      # `2026-09-30-runquota-auto-start-terminates-the-daemon-it-is-diagnosing`).
+      # A daemon that is alive throughout but never answers is terminated by
+      # the failure path, which leaves the same refused socket as a daemon
+      # that died by itself. The error must record which happened before
+      # that cleanup: alive at the ceiling, and terminated by repro rather
+      # than by itself. Takes the whole 120 s ceiling.
+      let wrapper = root / "wedged-runquotad"
+      # `exec` keeps the pid the launcher watches, so its terminate reaches
+      # the process that hangs and nothing is left behind.
+      writeFile(wrapper, "#!/bin/sh\nexec sleep 3600\n")
+      setFilePermissions(wrapper, {fpUserRead, fpUserWrite, fpUserExec})
+      putEnv("RUNQUOTAD_BIN", wrapper)
+      let started = getMonoTime()
+      var message = ""
+      try:
+        var daemon = startAutoRunQuotaIfNeeded(false)
+        releaseAutoRunQuotaProcess(daemon)
+      except OSError as error:
+        message = error.msg
+      let waited = getMonoTime() - started
+      checkpoint message
+      check "did not become reachable" in message
+      check "it was still running" in message
+      check "s readiness ceiling" in message
+      check "repro terminated it" in message
+      check "it exited" notin message
+      # The wait really ran to the ceiling rather than ending early.
+      check waited >= initDuration(seconds = 120)
+
+    test "a daemon that ignores the private selection is named with a remedy":
+      # reprobuild-pm issue 2026-10-31-repro-exec-fails-when-a-runquota-
+      # account-exists-but-no-daemon-runs.md: a runquotad built before
+      # private endpoints (runquota 35b9dfe) never reads
+      # RUNQUOTA_ENDPOINT_SCOPE, so on a host with a `runquota` account it
+      # checks repro's own 0700 directory against that account and exits.
+      # The REAL daemon reproduces that exactly once the selection is
+      # withheld from it; the host owner selector set up above (uid 0, or 1
+      # under root) stands in for the account, as everywhere in this suite.
+      let stale = root / "pre-private-runquotad"
+      let inner = writeRealDaemonWrapper(root, daemonBin)
+      writeFile(stale, "#!/bin/sh\nexec env -u RUNQUOTA_ENDPOINT_SCOPE " &
+        quoteShell(inner) & " \"$@\"\n")
+      setFilePermissions(stale, {fpUserRead, fpUserWrite, fpUserExec})
+      putEnv("RUNQUOTAD_BIN", stale)
+      var message = ""
+      try:
+        var daemon = startAutoRunQuotaIfNeeded(false)
+        releaseAutoRunQuotaProcess(daemon)
+      except OSError as error:
+        message = error.msg
+      check "did not become reachable" in message
+      # The daemon's own refusal is still carried ...
+      check ("configured daemon owner uid " &
+        getEnv("RUNQUOTA_ENDPOINT_OWNER_UID")) in message
+      # ... and followed by what it means and what to do.
+      check ("remedy: " & stale) in message
+      check "predates private RunQuota endpoints" in message
+      check "RUNQUOTAD_BIN" in message
+      check getEnv("RUNQUOTA_SOCKET") == root / "absent.sock"
+      check not existsEnv("RUNQUOTA_ENDPOINT_SCOPE")
+
+    test "a refusal that is not the host policy's gets no stale-daemon remedy":
+      # A private policy names the caller as the daemon owner, so a refusal
+      # naming the caller's own uid came from a daemon that honoured the
+      # selection and must not be blamed on its age.
+      let wrapper = root / "refusing-runquotad"
+      writeFile(wrapper, "#!/bin/sh\nprintf 'refusing for its own " &
+        "reasons; configured daemon owner uid " & $geteuid() &
+        ", and more\\n' >&2\nexit 3\n")
+      setFilePermissions(wrapper, {fpUserRead, fpUserWrite, fpUserExec})
+      putEnv("RUNQUOTAD_BIN", wrapper)
+      var message = ""
+      try:
+        var daemon = startAutoRunQuotaIfNeeded(false)
+        releaseAutoRunQuotaProcess(daemon)
+      except OSError as error:
+        message = error.msg
+      check "refusing for its own reasons" in message
+      check "remedy:" notin message
+
+    test "a hand-set private scope without a socket is refused with a remedy":
+      # The issue's operator tried RUNQUOTA_ENDPOINT_SCOPE=private to get past
+      # the failure; the refusal must keep starting nothing, and say why.
+      let marker = root / "unexpected-start"
+      let wrapper = root / "must-not-start"
+      writeFile(wrapper, "#!/bin/sh\nprintf executed > " &
+        quoteShell(marker) & "\nexit 23\n")
+      setFilePermissions(wrapper, {fpUserRead, fpUserWrite, fpUserExec})
+      putEnv("RUNQUOTAD_BIN", wrapper)
+      delEnv("RUNQUOTA_SOCKET")
+      putEnv("RUNQUOTA_ENDPOINT_SCOPE", "private")
+      var message = ""
+      try:
+        var daemon = startAutoRunQuotaIfNeeded(false)
+        releaseAutoRunQuotaProcess(daemon)
+      except CatchableError as error:
+        message = error.msg
+      check "private RunQuota policy requires" in message
+      check "remedy:" in message
+      check "unset RUNQUOTA_ENDPOINT_SCOPE" in message
+      check not fileExists(marker)
 
     test "existing untrusted endpoint retains refusal and starts no daemon":
       let endpoint = root / "unsafe.sock"

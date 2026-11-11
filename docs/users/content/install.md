@@ -22,6 +22,9 @@ unverified:
   - claim: "On macOS and on Linux without apt or dnf, the piped installer stops because its release verifier is not bundled."
     reason: "Read from the installer's detect_method and locate_verifier; no test runs the piped installer on those platforms."
     owner: unassigned
+  - claim: "The Fedora and Alpine package lists for the release archive's C compiler precondition."
+    reason: "Only the Debian list was run (a stock debian:12 container, 2026-11-11); the Fedora and Alpine lists are read from the deb/rpm dependency declarations and the distributions' package names."
+    owner: unassigned
   - claim: "The version number shown in the archive commands."
     reason: "Written as {{ repro.version }}; isonim-docs has no version interpolation yet."
     owner: unassigned
@@ -192,6 +195,23 @@ export PATH="${PWD}/reprobuild-${VERSION}-${PLATFORM}/bin:${PATH}"
 Keep `bin/` and `lib/` together. `repro` loads its libraries from a path
 relative to its own location, so a `repro` copied out of the unpacked directory
 on its own does not start.
+:::
+
+:::important
+`repro` compiles each project's recipe with a C compiler. On Linux without
+Nix it uses the system C compiler at `/usr/bin/cc`, `/usr/bin/gcc` or
+`/usr/bin/clang`, and does not install one of its own. The archive does not
+carry one either, so install the compiler and the C library headers first,
+together with `curl`, which fetches the Nim sources `repro` builds on first
+use:
+
+- Debian, Ubuntu: `apt-get install gcc libc6-dev curl xz-utils`
+- Fedora: `dnf install gcc glibc-devel curl xz`
+- Alpine: `apk add build-base curl xz`
+
+Or name a compiler with `REPRO_BOOTSTRAP_CC=/absolute/path/to/cc`. The apt
+and dnf packages declare the compiler as a dependency, so the installer
+brings it in for you.
 :::
 
 :::danger

@@ -223,41 +223,118 @@ when defined(posix):
         $strerror(forkError) & ")")
     int(pid)
 
+  const hostOwnerRefusalMarker* = "configured daemon owner uid "
+    ## The words `runquota_ipc.inspectPath` puts in front of the uid the HOST
+    ## endpoint policy expects (`rendezvousPolicy`: `RUNQUOTA_ENDPOINT_OWNER_UID`,
+    ## else the `runquota` account). A private policy never names an owner
+    ## other than the effective caller, so a refusal that names a different
+    ## one was produced by the host policy. Matching a sibling's wording is
+    ## held honest by `t_auto_runquota_uses_private_endpoint_policy.nim`, which
+    ## provokes the refusal from the real daemon rather than from a copy of
+    ## this string.
+
+  proc hostOwnerRefusalUid*(text: string): int64 =
+    ## The daemon owner uid a host-policy endpoint refusal named in `text`
+    ## (the daemon's log), or -1 when it carries no such refusal. The last
+    ## occurrence wins: the refusal is the last thing a daemon says before it
+    ## exits.
+    let at = text.rfind(hostOwnerRefusalMarker)
+    if at < 0:
+      return -1
+    var digits = ""
+    for ch in text[at + hostOwnerRefusalMarker.len .. ^1]:
+      if ch notin Digits:
+        break
+      digits.add ch
+    if digits.len == 0 or digits.len > 18:
+      return -1
+    int64(parseBiggestInt(digits))
+
+  proc hostPolicyDaemonRemedy*(runquotad, logText: string): string =
+    ## The remedy for a started daemon that refused its private endpoint
+    ## under the HOST policy, or "" when its log shows no such refusal.
+    ## repro hands the daemon `RUNQUOTA_ENDPOINT_SCOPE=private`, and a private
+    ## policy only ever expects the effective caller, so a refusal naming
+    ## another owner uid means this `runquotad` ignored the selection: it
+    ## predates private endpoints (runquota 35b9dfe). The version string
+    ## cannot tell such a build from a current one, so the remedy names the
+    ## binary that was started instead. Without this the operator sees only
+    ## "configured daemon owner uid <n>" and reads it as a host problem.
+    let refusedOwner = hostOwnerRefusalUid(logText)
+    if refusedOwner < 0 or refusedOwner == int64(geteuid()):
+      return ""
+    "\nremedy: " & runquotad & " checked the private endpoint repro " &
+      "created for it against the host policy (daemon owner uid " &
+      $refusedOwner & ") although repro selected RUNQUOTA_ENDPOINT_SCOPE=" &
+      "private, so this runquotad predates private RunQuota endpoints. " &
+      "Point RUNQUOTAD_BIN at a current runquotad (or remove the stale one " &
+      "from PATH), or start the host's RunQuota service."
+
   proc exitText(status: cint): string =
-    if WIFEXITED(status): "exited with status " & $WEXITSTATUS(status)
-    elif WIFSIGNALED(status): "was killed by signal " & $WTERMSIG(status)
-    else: "ended (wait status " & $status & ")"
+    ## The fate of a reaped child, in the words the readiness error uses:
+    ## an exit code and a signal are different reports and never folded into
+    ## one another.
+    if WIFEXITED(status): "exit code " & $WEXITSTATUS(status)
+    elif WIFSIGNALED(status): "signal " & $WTERMSIG(status)
+    else: "wait status " & $status
 
   proc waitForUserDaemon*(pid: int; exe, socket, logPath: string;
                           answered: proc (): bool) =
     ## Waits for the daemon ``pid`` just started until ``answered()`` (it is
     ## reachable, and the caller now holds it) or it has exited -- not for a
     ## fixed number of polls. Raises ``OSError`` otherwise, with the tail of
-    ## its log:
+    ## its log, and the error says WHICH WAY THE WAIT ENDED and how long after
+    ## the start (reprobuild-pm ``spec/RunQuota-Host-Configuration.md``, "The
+    ## shared per-user daemon (POSIX)"):
     ##
-    ## * it EXITED before it listened: at once, with its exit status;
-    ## * it is alive and still not listening at the ceiling (120 s on the
-    ##   monotonic clock): it is wedged, so it is terminated and reaped
-    ##   (``SIGTERM``, then ``SIGKILL`` after 5 s), and the error says it did
-    ##   not become reachable.
+    ## * it EXITED before it listened: at once, with its exit code or the
+    ##   signal that ended it;
+    ## * it was STILL RUNNING at the ceiling (120 s on the monotonic clock):
+    ##   it is wedged, so it is terminated and reaped (``SIGTERM``, then
+    ##   ``SIGKILL`` after 5 s), and the error says repro terminated it;
+    ## * its state COULD NOT BE OBSERVED (``waitpid`` failed, e.g. ``ECHILD``
+    ##   because something else reaped it), with the reason. No signal is
+    ##   sent then: the pid may no longer be the daemon's.
     ##
-    ## Either way the child has been reaped when this raises. On success it
-    ## has not: it is the caller's to reap later, without blocking.
-    let deadline = getMonoTime() + userDaemonReadinessCeiling
-    let prefix = "runquotad did not become reachable at " & socket
+    ## The fate is read before anything here signals or reaps the daemon, so
+    ## a daemon that died on its own and one this launcher killed -- which
+    ## leave the same refused socket behind and send an investigator to
+    ## opposite halves of the system -- are never reported alike.
+    ##
+    ## Either way the child has been reaped (or is not ours to reap) when this
+    ## raises. On success it has not: it is the caller's to reap later,
+    ## without blocking.
+    let started = getMonoTime()
+    let deadline = started + userDaemonReadinessCeiling
+    let prefix = "runquotad did not become reachable at " & socket & " (" &
+      exe & ")"
+    proc since(): string =
+      $(getMonoTime() - started).inMilliseconds & " ms after it was started"
+    proc diagnostics(): string =
+      # The log's tail, then -- when the log shows the daemon refused its
+      # private endpoint under the HOST policy -- what that means and what
+      # to do (`hostPolicyDaemonRemedy`).
+      let tail = userDaemonLogTail(logPath)
+      tail & hostPolicyDaemonRemedy(exe, tail)
+    var lastError: cint = 0
     while true:
       if answered():
         return
       var status: cint = 0
       let reaped = waitpid(Pid(pid), status, WNOHANG)
       if reaped == Pid(pid):
-        raise newException(OSError, prefix & ": " & exe & " " &
-          exitText(status) & " before it listened" & userDaemonLogTail(logPath))
-      if reaped < 0 and errno == ECHILD and posix.kill(Pid(pid), 0) != 0:
-        # Reaped by somebody else (a SIGCHLD set to SIG_IGN reaps children
-        # by itself), and gone: the exit status is lost, not the log.
-        raise newException(OSError, prefix & ": " & exe &
-          " exited before it listened" & userDaemonLogTail(logPath))
+        raise newException(OSError, prefix & ": it exited before it " &
+          "listened, " & since() & ", with " & exitText(status) &
+          diagnostics())
+      if reaped < 0:
+        let code = errno
+        lastError = code
+        if code != EINTR and posix.kill(Pid(pid), 0) != 0:
+          # Reaped by somebody else (a SIGCHLD set to SIG_IGN reaps children
+          # by itself), and gone: the exit status is lost, not the log.
+          raise newException(OSError, prefix & ": its state could not be " &
+            "observed (" & $strerror(code) & "), " & since() & "; it is " &
+            "gone" & diagnostics())
       if getMonoTime() >= deadline:
         if reaped == 0:
           # Still our unreaped child, so the pid is still its: signalling
@@ -272,9 +349,14 @@ when defined(posix):
           if not gone:
             discard posix.kill(Pid(pid), SIGKILL)
             discard waitpid(Pid(pid), status, 0)
-        raise newException(OSError, prefix & ": " & exe & " was still not " &
-          "listening after " & $userDaemonReadinessCeiling.inSeconds &
-          " s, so it was stopped" & userDaemonLogTail(logPath))
+          raise newException(OSError, prefix & ": it was still running " &
+            since() & ", at the " & $userDaemonReadinessCeiling.inSeconds &
+            " s readiness ceiling, but never answered the reachability " &
+            "probe; repro terminated it" & diagnostics())
+        raise newException(OSError, prefix & ": its state could not be " &
+          "observed (" & $strerror(lastError) & "), " & since() & ", at the " &
+          $userDaemonReadinessCeiling.inSeconds & " s readiness ceiling; " &
+          "no signal was sent" & diagnostics())
       sleep(50)
 
   # ---------------------------------------------------------------------------
