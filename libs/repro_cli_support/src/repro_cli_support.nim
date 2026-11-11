@@ -44667,127 +44667,6 @@ proc gitRunPlain(identity: GitToolIdentity;
       env = scrubbedGitRepositoryEnv())
     (code: res.exitCode, output: res.output)
 
-proc gitRunSeparated(gitBin: string; args: openArray[string];
-                     env: StringTableRef; exactStdout = false):
-    tuple[code: int; output: string; diagnostic: string] =
-  ## Invoke ``gitBin`` with ``args`` under ``env``, keeping git's stderr OUT
-  ## of ``output``. This is the body of ``gitRunPlainQuery`` (whose comment
-  ## below gives the reasons) parameterized on the binary and the
-  ## environment, so a caller that has a bare git path and its own
-  ## environment — the certificate-note reader, which must keep the
-  ## receive-pack object-store bindings — reads git's answer the same way.
-  ##
-  ## ``exactStdout`` makes ``output`` git's stdout BYTE FOR BYTE. Without it
-  ## the POSIX path re-assembles stdout line by line (``execCmdEx``), which
-  ## appends a newline the bytes did not end with and turns ``\r\n`` into
-  ## ``\n``; harmless for a parsed answer, wrong for a payload that must be
-  ## exactly what git stores (a certificate note blob, Transport §3.1). The
-  ## Windows path copies the pipe's bytes verbatim either way.
-  when defined(windows):
-    # Structured argv and a PeekNamedPipe drain, for the same reason
-    # ``gitRunPlain`` uses one: Nim 2.2's ``readAll`` stops at the first short
-    # pipe read on Windows, so a blocking read of either stream would also
-    # truncate. Two handles now, drained in the same pass.
-    let process = startProcess(gitBin, args = @args,
-      env = env, options = {poUsePath})
-    defer: process.close()
-    const PollSleepMs = 2
-    let handles = [Handle(process.outputHandle), Handle(process.errorHandle)]
-    var sinks: array[2, string]
-    var buf {.noinit.}: array[16384, char]
-    while true:
-      var moved = false
-      for i in 0 .. 1:
-        var bytesAvail: int32 = 0
-        let peeked = peekNamedPipe(handles[i],
-          lpTotalBytesAvail = addr bytesAvail)
-        if peeked and bytesAvail > 0:
-          var bytesRead: int32 = 0
-          let toRead = min(int(bytesAvail), buf.len).int32
-          let ok = winlean.readFile(handles[i], addr buf[0], toRead,
-            addr bytesRead, nil)
-          if ok != 0 and bytesRead > 0:
-            let previousLen = sinks[i].len
-            sinks[i].setLen(previousLen + bytesRead)
-            copyMem(addr sinks[i][previousLen], addr buf[0], bytesRead)
-            moved = true
-      # Only consult the exit code once BOTH pipes are momentarily empty, so
-      # everything the child buffered before exiting is still collected.
-      if moved: continue
-      result.code = process.peekExitCode()
-      if result.code != -1: break
-      sleep(PollSleepMs)
-    result.output = sinks[0]
-    result.diagnostic = (sinks[1] & sinks[0]).strip()
-  else:
-    # POSIX ``execCmdEx`` implies ``poEvalCommand``, so the command runs
-    # through ``/bin/sh`` and the SHELL can put stderr in a file. One pipe, no
-    # interleaving, no deadlock, and the same subprocess shape as
-    # ``gitRunPlain``.
-    var cmd = quoteShell(gitBin)
-    for arg in args:
-      cmd.add(" ")
-      cmd.add(quoteShell(arg))
-    var errPath = ""
-    var outPath = ""
-    try:
-      try:
-        let created = createTempFile("repro-gitq-", ".stderr")
-        created.cfile.close()
-        errPath = created.path
-      except CatchableError, Defect:
-        errPath = ""
-      if exactStdout:
-        try:
-          let created = createTempFile("repro-gitq-", ".stdout")
-          created.cfile.close()
-          outPath = created.path
-        except CatchableError, Defect:
-          outPath = ""
-        if outPath.len == 0 or errPath.len == 0:
-          # No exact capture is possible, and a line-rebuilt answer must not
-          # pass for one: report a failed run instead.
-          result.code = -1
-          result.diagnostic = "cannot create a temporary file to capture " &
-            "git's output in"
-          return
-        cmd.add(" >" & quoteShell(outPath))
-      if errPath.len > 0:
-        cmd.add(" 2>" & quoteShell(errPath))
-      # Without the redirect the child's stderr would be an unread pipe that
-      # can fill and hang it, so fall back to the MERGED stream instead —
-      # degraded (the caller sees diagnostics in ``output``, exactly
-      # ``gitRunPlain``'s behaviour) but never hung.
-      let options =
-        if errPath.len > 0: {poUsePath}
-        else: {poUsePath, poStdErrToStdOut}
-      let res = execCmdEx(cmd, options = options, env = env)
-      result.code = res.exitCode
-      result.output = res.output
-      if outPath.len > 0:
-        # The shell wrote stdout to the file; read its bytes verbatim.
-        try:
-          result.output = readFile(outPath)
-        except CatchableError as err:
-          result.code = -1
-          result.output = ""
-          result.diagnostic = "cannot read git's captured stdout: " & err.msg
-          return
-      var errText = ""
-      if errPath.len > 0:
-        try:
-          errText = readFile(errPath)
-        except CatchableError:
-          discard
-      result.diagnostic = (errText & result.output).strip()
-    finally:
-      for path in [errPath, outPath]:
-        if path.len > 0:
-          try:
-            removeFile(path)
-          except CatchableError:
-            discard
-
 proc gitRunPlainQuery(identity: GitToolIdentity;
                       args: openArray[string]):
     tuple[code: int; output: string; diagnostic: string] =
@@ -70049,9 +69928,10 @@ proc executeCheckPrePush(parsed: CheckArgs;
     result.failures.add(CheckFailure(
       repo: currentRepoPath,
       property: "pre-push-protocol",
-      remediation: "reinstall the managed hooks with 'repro hooks ensure --vcs " &
-        protocolRepoRoot & "' and retry the push",
-      evidence: outgoing.diagnostic))
+      remediation: prePushProtocolRemediation(outgoing.cause,
+        protocolRepoRoot, outgoing.failedObservation),
+      evidence: prePushProtocolEvidence(outgoing.diagnostic, outgoing.cause,
+        outgoing.observationEvidence)))
     result.exitCode = 2
     return
 
@@ -72196,8 +72076,19 @@ proc runCheckCommand*(args: openArray[string]; hookRemoteName = "";
         else: parsed.workspaceRoot,
         parsed.pushedRefsPath)
       if not refs.ok:
-        stderr.writeLine("repro check: malformed pre-push protocol: " &
-          refs.diagnostic)
+        if refs.cause == ppcRepositoryObservation:
+          # Not a malformed stream: the gate's own read of the repository
+          # failed. Say so, with git's words and the step that can help.
+          stderr.writeLine("repro check: pre-push protocol: " &
+            prePushProtocolEvidence(refs.diagnostic, refs.cause,
+              refs.observationEvidence) & " — " &
+            prePushProtocolRemediation(refs.cause,
+              if parsed.currentRepo.len > 0: parsed.currentRepo
+              else: parsed.workspaceRoot,
+              refs.failedObservation))
+        else:
+          stderr.writeLine("repro check: malformed pre-push protocol: " &
+            refs.diagnostic)
         return 2
     if isRecordStoreCheckout(if parsed.currentRepo.len > 0:
         parsed.currentRepo else: getCurrentDir()):

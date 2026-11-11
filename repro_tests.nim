@@ -23114,6 +23114,17 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "t_group_tests_integration_g10",
     singleReason: ""),
   TestSpec(
+    source: "tests/integration/t_pre_push_protocol_reads_stdout_not_git_warnings.nim",
+    binary: "build/test-bin/t_pre_push_protocol_reads_stdout_not_git_warnings",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "t_group_tests_integration_g10",
+    singleReason: ""),
+  TestSpec(
     source: "tests/integration/t_pre_push_protocol_v2_policy_regressions.nim",
     binary: "build/test-bin/t_pre_push_protocol_v2_policy_regressions",
     defines: @[],

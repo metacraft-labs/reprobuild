@@ -2108,6 +2108,7 @@ tests/integration/t_pre_push_gate_enforces_inside_a_linked_worktree.nim	nim	1
 tests/integration/t_pre_push_lock_records_unmaterialized_declared_repo.nim	nim	3
 tests/integration/t_pre_push_membership_repo_scopes_to_touched_fragments.nim	nim	2
 tests/integration/t_pre_push_passes_on_heterogeneous_branches.nim	nim	2
+tests/integration/t_pre_push_protocol_reads_stdout_not_git_warnings.nim	nim	5
 tests/integration/t_pre_push_protocol_v2_policy_regressions.nim	nim	5
 tests/integration/t_pre_push_protocol_v2_ref_validation.nim	nim	3
 tests/integration/t_pre_push_public_only_writes_no_manifest_lock.nim	nim	1
