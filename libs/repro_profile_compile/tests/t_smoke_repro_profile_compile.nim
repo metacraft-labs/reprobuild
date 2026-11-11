@@ -235,10 +235,13 @@ suite "M83 Phase C: profileCompileBuildAction":
     # only; keyed by value they missed in every new `nix develop` shell) as
     # environment passthrough, and `action()` mixes the declared environment
     # in INSIDE the lock mix -- so the expectation composes the two in that
-    # order.
+    # order. Innermost, the edge keys its own command line on the seed
+    # (`keyedOnArgv`): `weak` names the compilers, the helper and the binary,
+    # and the profile, nimcache and `--repo-root` are only in argv.
     check act.weakFingerprint ==
       keyedOnGoverningLock(
-        keyedOnActionEnvironment(weak, [], ProfileCompileEnvPassthrough),
+        keyedOnActionEnvironment(keyedOnArgv(weak, act.argv, act.cwd), [],
+          ProfileCompileEnvPassthrough),
         lockIdentityOutsideSolvedGraph())
     check act.envPassthrough == @[ProfileNimCompilerEnvVar, "TMPDIR", "TMP",
       "TEMP", "TEMPDIR"]

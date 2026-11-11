@@ -2138,13 +2138,14 @@ proc cmakeRegenerationBuildAction(meta: CmakeRegenerationMetadata;
     envPassthrough.add("REPROBUILD_SOURCE_ROOT")
   let depfilePath = cmakeRegenerationDepfile(meta)
   let hasGlobVerification = meta.cmakeRegenerationHasGlobVerification()
-  action("__repro_cmake_regenerate", @[
+  let argv = @[
     publicCliPath,
     "__repro-cmake-regenerate",
     "--metadata", meta.metadataFile,
     "--public-cli", publicCliPath,
     "--depfile", depfilePath
-  ],
+  ]
+  action("__repro_cmake_regenerate", argv,
     # Named-Lock-Files §7.2. CMake regeneration re-runs the generator over
     # recorded metadata; no solved package instance reaches it. See
     # `lockIdentityOutsideSolvedGraph`.
@@ -2154,7 +2155,8 @@ proc cmakeRegenerationBuildAction(meta: CmakeRegenerationMetadata;
     outputs = cmakeRegenerationOutputs(meta),
     commandStatsId = "repro cmake regeneration edge",
     cacheable = not hasGlobVerification,
-    weakFingerprint = cmakeRegenerationFingerprint(meta, publicCliPath),
+    weakFingerprint = keyedOnArgv(
+      cmakeRegenerationFingerprint(meta, publicCliPath), argv, meta.binaryDir),
     depfile = depfilePath,
     dependencyPolicy = requiredMakeDepfilePolicy(depfilePath),
     env = env,
@@ -3237,36 +3239,18 @@ proc resolveCanonicalExecRoot*(cwdKind: ActionCwdKind; cwdCustomPath: string;
   else:
     raw
 
-proc spawnedArgvKeyText(argv: openArray[string]): string =
-  ## The argv a lowered process action SPAWNS, as text for its weak
-  ## fingerprint.
-  ##
-  ## The local action cache files a record under the weak fingerprint and
-  ## serves it to any later action with the same one whose recorded inputs
-  ## still check out. `repro_build_engine.action()` mixes the environment,
-  ## the lock and the content-addressed root of `argv[0]` into the
-  ## fingerprint its caller passes, and nothing else of argv. So the caller
-  ## has to key argv, and keying the graph node's payload is not the same
-  ## thing: the payload is what the recipe wrote, and three branches of
-  ## `lowerGraphAction` spawn something it does not spell out. Inline exec
-  ## substitutes each `@FILE:<path>` element with the file's contents; the
-  ## nim-unittest site resolves the test binary against the project root;
-  ## the typed-tool site takes `argv[0]` and any invocation prefix from the
-  ## resolved tool profile. Two actions that differ only there used to share
-  ## one record, and the second was served the first one's result.
-  ##
-  ## Keyed here, after every rewrite, rather than reconstructed from the
-  ## payload and the inputs to each rewrite, so that a rewrite added later
-  ## is keyed without anyone remembering to.
-  ##
-  ## Each element is length-framed: `["a b"]` and `["a", "b"]` must not
-  ## collide. A substituted `@FILE:` value enters the key only as part of
-  ## this digest; the plaintext spawned argv is already what the lowered
-  ## graph cache stores for the action.
-  result = "\nspawnedArgv\n" & $argv.len
-  for arg in argv:
-    result.add("\x1f" & $arg.len & ":" & arg)
-
+## Every process action `lowerGraphAction` builds keys the argv it SPAWNS
+## (`keyedOnArgv`), not only the graph node's payload. The payload is what
+## the recipe wrote, and three branches spawn something it does not spell
+## out: inline exec substitutes each `@FILE:<path>` element with the file's
+## contents; the nim-unittest site resolves the test binary against the
+## project root; the typed-tool site takes `argv[0]` and any invocation
+## prefix from the resolved tool profile. Keyed after every rewrite, rather
+## than reconstructed from the payload and the inputs to each rewrite, so
+## that a rewrite added later is keyed without anyone remembering to. A
+## substituted `@FILE:` value enters the key only as part of the digest; the
+## plaintext spawned argv is already what the lowered graph cache stores for
+## the action.
 proc lowerGraphAction(node: GraphNode; profiles: Table[string, PathOnlyToolProfile];
                       projectRoot: string): BuildAction =
   # `BuildAction.governingLockIdentity` is required. Give `result` a complete
@@ -3466,8 +3450,8 @@ proc lowerGraphAction(node: GraphNode; profiles: Table[string, PathOnlyToolProfi
       depfile = payload.depfile,
       dynamicDepsFile = payload.dynamicDepsFile,
       cacheable = payload.cacheable,
-      weakFingerprint = weakFingerprintFromText(fingerprintText &
-        spawnedArgvKeyText(argv)),
+      weakFingerprint = keyedOnArgv(weakFingerprintFromText(fingerprintText),
+        argv),
       actionCachePolicy = actionCachePolicy,
       dependencyPolicy = lowerDependencyPolicy(payload.id, payload.depfile,
         payload.dependencyPolicy),
@@ -3589,8 +3573,8 @@ proc lowerGraphAction(node: GraphNode; profiles: Table[string, PathOnlyToolProfi
       depfile = payload.depfile,
       dynamicDepsFile = payload.dynamicDepsFile,
       cacheable = payload.cacheable,
-      weakFingerprint = weakFingerprintFromText(fingerprintText &
-        spawnedArgvKeyText(argv)),
+      weakFingerprint = keyedOnArgv(weakFingerprintFromText(fingerprintText),
+        argv),
       actionCachePolicy = actionCachePolicy,
       dependencyPolicy = lowerDependencyPolicy(payload.id, payload.depfile,
         payload.dependencyPolicy),
@@ -3770,8 +3754,8 @@ proc lowerGraphAction(node: GraphNode; profiles: Table[string, PathOnlyToolProfi
       depfile = payload.depfile,
       dynamicDepsFile = payload.dynamicDepsFile,
       cacheable = payload.cacheable,
-      weakFingerprint = weakFingerprintFromText(fingerprintText &
-        spawnedArgvKeyText(argv)),
+      weakFingerprint = keyedOnArgv(weakFingerprintFromText(fingerprintText),
+        argv),
       actionCachePolicy = actionCachePolicy,
       dependencyPolicy = lowerDependencyPolicy(payload.id, payload.depfile,
         payload.dependencyPolicy),
@@ -3877,8 +3861,8 @@ proc lowerGraphAction(node: GraphNode; profiles: Table[string, PathOnlyToolProfi
     depfile = depfile,
     dynamicDepsFile = payload.dynamicDepsFile,
     cacheable = payload.cacheable,
-    weakFingerprint = weakFingerprintFromText(fingerprintText &
-      spawnedArgvKeyText(invocationArgv)),
+    weakFingerprint = keyedOnArgv(weakFingerprintFromText(fingerprintText),
+      invocationArgv),
     actionCachePolicy = actionCachePolicy,
     dependencyPolicy = lowerDependencyPolicy(payload.id, depfile,
       payload.dependencyPolicy),
@@ -7101,7 +7085,11 @@ proc providerCompileBuildAction(plan: ProviderCompilePlan;
     outputs = providerCompileOutputs(artifactPath, plan.outputBinaryPath),
     commandStatsId = "repro provider compile edge",
     cacheable = providerCompileCacheable(plan),
-    weakFingerprint = plan.compileEdge.actionFingerprint,
+    # `actionFingerprint` covers the inner `nim c`; the helper's own command
+    # line (where it writes, which libraries it compiles against) is keyed
+    # here.
+    weakFingerprint = keyedOnArgv(plan.compileEdge.actionFingerprint,
+      command, compilerCwd),
     envPassthrough = @ProviderCompileEnvironmentPassthrough &
       @ProviderCompileIsolatedPassthrough,
     # The same edge as the dev-env engine's, so the same declared environment
@@ -11039,6 +11027,13 @@ proc recipeRelativeProviderCompileAction(edge: RecipeRelativeProviderCompile;
   var inputs: seq[string] = @[]
   for source in edge.edgePlan.inputSources:
     inputs.add(relocatableName(source, edge.recipeDir, edge.anchors))
+  # The command line in the names the record uses: a path under an anchor
+  # (the helper, the work dir, the action-cache root holding the outputs)
+  # absolute, anything else relative to the recipe, so a byte-identical
+  # recipe elsewhere keys the same.
+  var keyedCommand: seq[string] = @[]
+  for arg in command:
+    keyedCommand.add(relocatableName(arg, edge.recipeDir, edge.anchors))
   action(ProviderCompileActionId, command,
     governingLockIdentity = lockIdentityOutsideSolvedGraph(),
     cwd = edge.recipeDir,
@@ -11051,7 +11046,8 @@ proc recipeRelativeProviderCompileAction(edge: RecipeRelativeProviderCompile;
       recipeRelativeProviderVerdictPath(edge.edgeArtifactPath)],
     commandStatsId = "repro provider compile edge",
     cacheable = true,
-    weakFingerprint = edge.edgePlan.providerCompileActionKey,
+    weakFingerprint = keyedOnArgv(edge.edgePlan.providerCompileActionKey,
+      keyedCommand),
     # A copy of the recipe carries new mtimes; HYBRID compares its content
     # when the metadata moved, which is what lets that copy be served.
     actionCachePolicy = ffpHybrid,
@@ -11421,13 +11417,13 @@ proc extractInterfaceEdge(modulePath, artifactPath, stubPath: string;
   # ``action()``'s default weak fingerprint is derived from the action ID
   # alone, so a fixed ID would give every project in a shared action-cache
   # root the SAME key — one consumer's interface restored into another's
-  # build. The fingerprint is taken from the ARGV instead, which names the
-  # module, the outputs, the reprobuild libraries and the consumer root —
-  # relative to the recipe when the edge is recipe-relative, so it names the
-  # same edge wherever the recipe lies. That is the property the spec is
-  # after: the command line is an input by construction, not a list somebody
-  # maintains. Content changes are caught by the engine's recorded-input
-  # revalidation on top of it.
+  # build. The fingerprint is taken from the ARGV instead (`keyedOnArgv`),
+  # which names the module, the outputs, the reprobuild libraries and the
+  # consumer root — relative to the recipe when the edge is recipe-relative,
+  # so it names the same edge wherever the recipe lies. That is the property
+  # the spec is after: the command line is an input by construction, not a
+  # list somebody maintains. Content changes are caught by the engine's
+  # recorded-input revalidation on top of it.
   # Every recipe-relative extraction of the same variant has the same argv
   # (`--module repro.nim`), so the recipe's own bytes partition the key: the
   # engine keeps a bounded number of records per weak fingerprint, and
@@ -11437,8 +11433,8 @@ proc extractInterfaceEdge(modulePath, artifactPath, stubPath: string;
       "\x00recipe\x00" & digestHex(blake3DomainDigest(
         readFile(extendedPath(modulePath)).bytesOf(), hdActionFingerprint))
     else: ""
-  let edgeIdentity = weakFingerprintFromText(command.join("\x00") & keySuffix &
-    recipeContent)
+  let edgeIdentity = keyedOnArgv(weakFingerprintFromText(
+    "reprobuild.interface-extract" & keySuffix & recipeContent), command)
   let sessionKey = toHex(edgeIdentity.bytes) & "\x00" & artifactPath
   if not forceRebuild and not validateExistingOnly and
       interfaceEdgeSessionResults.hasKey(sessionKey) and
@@ -18104,17 +18100,25 @@ proc startBackgroundSupervisor(config: DevSessionSupervisorConfig) =
       env = [], inheritEnvironment = true, logPath = logPath,
       workingDir = absolutePath(config.projectRoot))
   else:
-    var fdsToClose: seq[string] = @[]
-    for fd in 3 .. 64:
-      fdsToClose.add($fd)
-    let closeInheritedFds = "for fd in " & fdsToClose.join(" ") &
-      "; do eval \"exec $fd>&-\"; done; "
-    let command = "(cd " & q(config.projectRoot) & " && " &
-      closeInheritedFds &
-      "exec " &
+    # NO DESCRIPTOR ABOVE 2 CROSSES THE LAUNCH: the supervisor outlives this
+    # invocation, so an inherited copy of a caller's pipe would hold that
+    # pipe open for the life of the session. The descriptors are marked
+    # close-on-exec from this side for the one launch, as the detached
+    # cache push does, rather than closed by the shell: a POSIX shell's
+    # redirections name descriptors 0-9 only, so `exec 10>&-` is, to dash,
+    # a command named `10` -- which is not found and ends the subshell
+    # before the supervisor starts. Only the flag moves, and it is put back
+    # afterwards; this runs on the command's main flow, which starts no
+    # other child inside the window.
+    let command = "(cd " & q(config.projectRoot) & " && exec " &
       shellCommand(@[config.publicCliPath] & config.supervisorCliArgs()) &
       ") </dev/null >> " & q(logPath) & " 2>&1 &"
-    let exitCode = execShellCmd(command)
+    let madeCloseOnExec = markInheritableDescriptorsCloseOnExec()
+    var exitCode = 0
+    try:
+      exitCode = execShellCmd(command)
+    finally:
+      restoreInheritableDescriptors(madeCloseOnExec)
     if exitCode != 0:
       raise newException(OSError,
         "failed to launch dev session supervisor: " & command)
@@ -24674,6 +24678,16 @@ proc runPreCommitCertificateGate*(repoRoot: string; displaced: bool): int
 proc runCachePushCommand*(args: openArray[string]): int
 proc liveWorkspaceNamesForCache(workspaceRoot: string): seq[string]
 
+proc probeFailureReason(probe, repoPath, diagnostic: string): string =
+  ## The reason a readiness probe failed in ``repoPath``. When the checkout
+  ## reads its objects from a shared cache that was deleted
+  ## (Shared-Clone-Pool-Integrity §4.5), git only says it cannot read a tree;
+  ## the reason then names the missing cache and the command that repairs it.
+  let explained = poolMissingProbeReason(repoPath, "repro health --fix",
+    diagnostic)
+  probe & " probe failed: " &
+    (if explained.len > 0: explained else: diagnostic)
+
 proc emitLeafReports(reports: openArray[LeafCheckReport]) =
   ## Print the shared-clone detector's messages
   ## (Shared-Clone-Pool-Integrity §4.4) on stderr. Every caller that refreshes
@@ -26639,6 +26653,7 @@ proc startAutoRunQuotaIfNeeded*(bypassRunQuota: bool): owned(Process) =
   # terminating signal is forwarded to it, and the daemon itself stops when
   # it is re-parented (the SIGKILL case) -- and it inherits none of this
   # invocation's descriptors above 2. `spawnOwnedRunQuotaDaemon` says how.
+  let spawnedAt = getMonoTime()
   when defined(windows):
     result = spawnDetachedRunQuotaDaemon(runquotad, args)
   else:
@@ -26754,19 +26769,68 @@ proc startAutoRunQuotaIfNeeded*(bypassRunQuota: bool): owned(Process) =
       readinessError = error.msg
       break
     sleep(50)
+  # WHICH WAY THE WAIT ENDED, recorded BEFORE the cleanup below touches the
+  # daemon. A daemon that exited by itself and one that was alive at the
+  # ceiling and is terminated next leave the same refused socket behind, and
+  # they send an investigator to opposite halves of the system: the first to
+  # the daemon's own output, the second to the client's reachability probe.
+  # Once the cleanup has terminated and reaped the child nothing can tell
+  # them apart, so the error states its fate, read without reaping it.
+  let waitedMillis = (getMonoTime() - spawnedAt).inMilliseconds
+  var daemonFate = ""
+  if readinessError.len == 0:
+    try:
+      daemonFate = ownedDaemonExitDescription(result)
+    except OSError as error:
+      readinessError = error.msg
   # THE SPAWN FAILED, so the daemon is no longer ours to forward signals to.
   # Unregistered BEFORE it is terminated and reaped, so the forwarder can never
   # signal its pid after the kernel has handed it to another process.
   when not defined(windows):
     unregisterOwnedDaemon(processID(result))
-  try:
-    # Only inspect/reap after unregistering. ECHILD means ownership was lost;
-    # running then raises, so no signal is sent to a possibly reused pid.
-    if result.running:
-      result.terminate()
-      discard result.waitForExit()
-  except CatchableError:
-    discard
+  var terminatedByUs = false
+  if readinessError.len > 0:
+    try:
+      # Only inspect/reap after unregistering. ECHILD means ownership was
+      # lost; running then raises, so no signal is sent to a possibly
+      # reused pid.
+      if result.running:
+        result.terminate()
+        discard result.waitForExit()
+    except CatchableError:
+      discard
+  else:
+    # Read the fate again, still without reaping, now that the pid is
+    # unregistered: the daemon may have ended in between. A fate found here
+    # is reported as such -- an exit code or a signal, never folded into one
+    # -- and an error (ECHILD: ownership lost) sends no signal and is
+    # reported as unobservable rather than as an invented exit.
+    if daemonFate.len == 0:
+      try:
+        daemonFate = ownedDaemonExitDescription(result)
+        terminatedByUs = daemonFate.len == 0
+      except OSError as error:
+        readinessError = error.msg
+    if readinessError.len == 0:
+      try:
+        if terminatedByUs:
+          result.terminate()
+        discard result.waitForExit()
+      except CatchableError:
+        discard
+  let fate =
+    if readinessError.len > 0:
+      ": " & readinessError & " (" & $waitedMillis &
+        " ms after it was started)"
+    elif terminatedByUs:
+      ": it was still running " & $waitedMillis &
+        " ms after it was started, at the " &
+        $RunQuotaDaemonReadinessTimeout.inSeconds &
+        " s readiness ceiling, but never answered the reachability " &
+        "probe; repro terminated it"
+    else:
+      ": it exited before it listened, " & $waitedMillis &
+        " ms after it was started, with " & daemonFate
   when not defined(windows):
     drainStartupOutput(startupStdout, cint(result.outputHandle))
     drainStartupOutput(startupStderr, cint(result.errorHandle))
@@ -26780,8 +26844,7 @@ proc startAutoRunQuotaIfNeeded*(bypassRunQuota: bool): owned(Process) =
     when defined(windows): "default per-user named pipe"
     else: socket
   raise newException(OSError,
-    "runquotad did not become reachable at " & endpointHint &
-    (if readinessError.len > 0: ": " & readinessError else: "") &
+    "runquotad did not become reachable at " & endpointHint & fate &
     (when defined(windows): ""
      else: startupDiagnostic(startupStdout, "stdout") &
        startupDiagnostic(startupStderr, "stderr")))
@@ -31628,17 +31691,29 @@ proc prepareBuildGraphInspection(target: string; mode: ToolProvisioningMode;
   # ReproOS M7 deliverable 3: inspection lowers the SAME graph a build
   # would, so it resolves the same lock-selected provisioning pins (and
   # refuses the same way). Only needed when a tool identity is resolved.
-  let provisioningPins =
-    if lowerGraph and shouldEnterBuildPipeline(effectiveMode):
-      buildProvisioningPins(artifact, projectRoot)
-    else: newSeq[ProvisioningPin]()
-  if lowerGraph and shouldEnterBuildPipeline(effectiveMode):
-    recordMaterializedProducersForInspection(artifact, projectRoot, outDir,
-      publicCliPath, effectiveMode)
-    let keyedResolution = warmResolveAndWriteIdentityKeyed(artifact, outDir,
-      effectiveMode, pins = provisioningPins)
+  #
+  # The identity is resolved over the tool uses the lowered graph actually
+  # references, exactly as ``executeBuildTarget`` scopes it with
+  # ``scopedToolArtifact``. That scoping needs the provider snapshot and the
+  # selection, so for a recipe with a build block resolution waits until
+  # both are known (below). Resolving the whole declared interface first
+  # would make inspection provision a declaration-only tool that no action
+  # of the inspected graph runs, and fail where the build it inspects
+  # succeeds.
+  let resolvesIdentity = lowerGraph and shouldEnterBuildPipeline(effectiveMode)
+  var provisioningPins: seq[ProvisioningPin] = @[]
+  var resolvedArtifact = artifact
+
+  proc resolveInspectionIdentity(inspection: var BuildGraphInspection;
+                                 toolArtifact: ProjectInterfaceArtifact) =
+    provisioningPins = buildProvisioningPins(toolArtifact, projectRoot)
+    recordMaterializedProducersForInspection(toolArtifact, projectRoot,
+      outDir, publicCliPath, effectiveMode)
+    let keyedResolution = warmResolveAndWriteIdentityKeyed(toolArtifact,
+      outDir, effectiveMode, pins = provisioningPins)
     let resolved = keyedResolution.resolved
     identity = resolved.identity
+    resolvedArtifact = toolArtifact
     # Report the KEYED memo entry, not the stable files: those are rewritten
     # by every later invocation in this outDir with another key (a narrower
     # target, another $PATH), so the path this payload names would describe
@@ -31654,13 +31729,17 @@ proc prepareBuildGraphInspection(target: string; mode: ToolProvisioningMode;
       if not fileExists(extendedPath(keyed.identityPath)) or
           not fileExists(extendedPath(keyed.inspectionPath)):
         writeKeyedToolIdentity(outDir, key, identity)
-      result.toolIdentityPath = keyed.identityPath
-      result.toolInspectionPath = keyed.inspectionPath
+      inspection.toolIdentityPath = keyed.identityPath
+      inspection.toolInspectionPath = keyed.inspectionPath
     else:
-      result.toolIdentityPath = resolved.identityPath
-      result.toolInspectionPath = resolved.inspectionPath
+      inspection.toolIdentityPath = resolved.identityPath
+      inspection.toolInspectionPath = resolved.inspectionPath
 
   let hasBuildBlock = moduleHasBuildBlock(modulePath)
+  if not hasBuildBlock and resolvesIdentity:
+    # No build block, so no action graph to scope by: like the build, which
+    # scopes only a recipe with a build block, resolve the declared uses.
+    resolveInspectionIdentity(result, artifact)
   if not hasBuildBlock and
       (not includeDevEnvOnlyProvider or not moduleHasDevEnvBlock(modulePath)):
     return
@@ -31824,8 +31903,21 @@ proc prepareBuildGraphInspection(target: string; mode: ToolProvisioningMode;
     selectedActionId = result.defaultActionId
   result.selectedActionId = selectedActionId
 
+  if resolvesIdentity:
+    # The selection and the (extension-merged) snapshot are known now, so
+    # scope the identity to the tools this graph's actions reference -- the
+    # same helper and selector the build uses. An empty selection lowers the
+    # whole graph, so every tool any action runs stays in scope.
+    let toolArtifact =
+      if artifact.projectInterface.toolUses.len > 0:
+        scopedToolArtifact(artifact, refresh.snapshot, projectRoot,
+          [selectedActionId])
+      else:
+        artifact
+    resolveInspectionIdentity(result, toolArtifact)
+
   let pathEnv = getEnv("PATH")
-  let graphCacheKey = loweredGraphCacheKey(artifact, effectiveMode,
+  let graphCacheKey = loweredGraphCacheKey(resolvedArtifact, effectiveMode,
     result.providerArtifactId, refresh.persistedSnapshotPath, pathEnv,
     extensionSignature, pins = provisioningPins,
     resolvedIdentity = identity)
@@ -54088,7 +54180,7 @@ proc executeWorkspaceLock(args: WorkspaceLockArgs;
     if not isClean and inDirtyScope:
       let reason =
         if cleanRes.status != gqsOk:
-          "clean/dirty probe failed: " & cleanRes.diagnostic
+          probeFailureReason("clean/dirty", repoPath, cleanRes.diagnostic)
         else:
           "working tree has uncommitted changes"
       dirtyEntries.add(WorkspaceLockDirtyEntry(
@@ -75631,6 +75723,17 @@ proc executeWorkspaceStatus(args: WorkspaceStatusArgs): WorkspaceStatusReport =
       report.repos.add(entry)
       continue
 
+    # Shared-Clone-Pool-Integrity §4.5: with ``--fix``, re-create a deleted
+    # shared cache and re-wire the checkout BEFORE probing it, so the row
+    # reports the repaired checkout rather than the error the repair cured.
+    var poolRepairFailure = ""
+    if args.fix:
+      let repaired = repairPoolMissing(identity.binaryPath,
+        defaultCacheRoot(args.workspaceRoot), repoAbsPath, cloneUrlFor(repo))
+      report.leafReports.add(repaired.leafReports)
+      if not repaired.ok:
+        poolRepairFailure = repaired.diagnostic
+
     let mainlineBranch = declaredMainlineBranch(resolved, repo.name)
     # `--file-details` implies file querying (it reads the same porcelain).
     let extQuery = extendedStatusQuery(repoAbsPath, mainlineBranch,
@@ -75688,6 +75791,19 @@ proc executeWorkspaceStatus(args: WorkspaceStatusArgs): WorkspaceStatusReport =
       ["-C", repoAbsPath, "symbolic-ref", "--short", "-q", "HEAD"])
     if branchRes.code == 0:
       entry.branch = branchRes.output.strip()
+
+    # Shared-Clone-Pool-Integrity §4.5: a checkout whose shared cache was
+    # deleted cannot be read at all; say so instead of git's tree error.
+    # (With ``--fix`` the repair ran before the probes above.)
+    if entry.diagnostic.len > 0:
+      let explained = poolMissingProbeReason(repoAbsPath,
+        "repro workspace status --fix", entry.diagnostic)
+      if explained.len > 0:
+        entry.diagnostic = explained
+    if poolRepairFailure.len > 0:
+      if entry.diagnostic.len > 0: entry.diagnostic.add("; ")
+      entry.diagnostic.add("could not re-wire to a re-created shared " &
+        "cache: " & poolRepairFailure)
 
     # Shared-Clone-Pool-Integrity §4.2: is anything this checkout names gone
     # from it and from its shared clone? Report-only unless ``--fix``.
@@ -76024,6 +76140,10 @@ type
     gitOk: bool
     leafReports: seq[LeafCheckReport]
       ## ``shared-clone-leaves``: the detector's report-only pass.
+    poolMissing: seq[tuple[leaf, fetchUrl, message: string]]
+      ## ``shared-clone-leaves``: checkouts whose alternates name a shared
+      ## cache that no longer exists (Shared-Clone-Pool-Integrity §4.5),
+      ## each with the URL ``--fix`` re-creates its pool from.
 
 proc parseHealthArgs(args: openArray[string]): HealthArgs =
   result.forgeCache = newRepositoryIdentityCache()
@@ -78455,6 +78575,7 @@ proc gatherHealthChecksOverSettings(parsed: HealthArgs):
     var leaves = 0
     var total = 0
     var foreignPools: seq[string]
+    var missingPools: seq[string]
     var stale: seq[string]
     var broken: seq[string]
     var chains: seq[string]
@@ -78464,12 +78585,25 @@ proc gatherHealthChecksOverSettings(parsed: HealthArgs):
       if not dirExists(abs / ".git") and not fileExists(abs / ".git"):
         continue
       inc total
+      var poolDeleted = false
       try:
         let entries = alternateObjectDirs(abs)
         if entries.len == 0: continue
         inc leaves
         let canonical = sharedBarePath(cacheRoot, cloneUrlFor(repo))
-        let foreign = foreignAlternates(abs, canonical)
+        # §4.5: a deleted cache is its own finding, with its own repair;
+        # `consolidate` cannot migrate a checkout it cannot read.
+        let missing = missingAlternateStores(abs)
+        poolDeleted = missing.len > 0
+        if missing.len > 0:
+          missingPools.add(repo.path & " reads objects from shared cache(s) " &
+            "that no longer exist: " & missing.join(", "))
+          ctx.poolMissing.add((leaf: abs, fetchUrl: cloneUrlFor(repo),
+            message: messagePoolMissing(abs, missing, self & " health --fix")))
+        var foreign: seq[string]
+        for store in foreignAlternates(abs, canonical):
+          if store notin missing:
+            foreign.add(store)
         if foreign.len > 0:
           foreignPools.add(repo.path & " borrows from foreign pool(s): " &
             foreign.join(", "))
@@ -78478,6 +78612,11 @@ proc gatherHealthChecksOverSettings(parsed: HealthArgs):
           diagnostics.add(repo.path & ": " & connectivity)
       except CatchableError as error:
         diagnostics.add(repo.path & ": cannot inspect alternates: " & error.msg)
+        continue
+      # A checkout that names a deleted store gets the detector after its
+      # repair (`repairPoolMissing`), not now: the detector registers the
+      # checkout with its pool, and that pool may be the deleted one.
+      if poolDeleted:
         continue
       if not borrowsFromPool(abs, sharedBarePath(cacheRoot, cloneUrlFor(repo))):
         continue
@@ -78499,7 +78638,8 @@ proc gatherHealthChecksOverSettings(parsed: HealthArgs):
         else:
           discard
     if stale.len == 0 and broken.len == 0 and chains.len == 0 and
-        diagnostics.len == 0 and foreignPools.len == 0:
+        diagnostics.len == 0 and foreignPools.len == 0 and
+        missingPools.len == 0:
       checks.add(HealthCheck(
         name: "shared-clone-leaves",
         status: hsOk,
@@ -78508,6 +78648,9 @@ proc gatherHealthChecksOverSettings(parsed: HealthArgs):
         remedy: "", fixKind: hfNone))
     else:
       var detail = @["examined " & $leaves & " of " & $total & " checkout(s)"]
+      if missingPools.len > 0:
+        detail.add(missingPools.join("; ") &
+          "; re-create and re-wire with `" & self & " health --fix`")
       if foreignPools.len > 0:
         detail.add(foreignPools.join("; ") &
           "; migrate with `repro ws shared-clones consolidate`")
@@ -78516,7 +78659,8 @@ proc gatherHealthChecksOverSettings(parsed: HealthArgs):
           "to a partial shared clone: " & chains.join(", "))
       if diagnostics.len > 0:
         detail.add(diagnostics.join("; "))
-      let canRepair = stale.len > 0 or chains.len > 0 or diagnostics.len > 0
+      let canRepair = stale.len > 0 or chains.len > 0 or
+        diagnostics.len > 0 or missingPools.len > 0
       if stale.len > 0:
         detail.add($stale.len & " stale remote-tracking ref(s) whose " &
           "commit no longer exists upstream or in the shared clone: " &
@@ -78805,6 +78949,28 @@ proc applyHealthFixes(parsed: HealthArgs; checks: seq[HealthCheck];
         continue
       result.add("fix: repairing refetch chains and stale remote-tracking refs " &
         "in checkouts that borrow from shared clones")
+      for missing in ctx.poolMissing:
+        let repaired = repairPoolMissing(ctx.gitIdentity.binaryPath,
+          defaultCacheRoot(parsed.workspaceRoot), missing.leaf,
+          missing.fetchUrl)
+        emitLeafReports(repaired.leafReports)
+        var rewired = repaired.ok
+        if not rewired and repaired.sharedBarePath.len > 0:
+          try:
+            rewired = missingAlternateStores(missing.leaf).len == 0 and
+              borrowsFromPool(missing.leaf, repaired.sharedBarePath)
+          except CatchableError:
+            rewired = false
+        if repaired.ok:
+          result.add("fix: re-created the shared cache " &
+            repaired.sharedBarePath & " and re-wired " & missing.leaf)
+        elif rewired:
+          result.add("fix: re-created the shared cache " &
+            repaired.sharedBarePath & " and re-wired " & missing.leaf &
+            ", but the check that followed reported: " & repaired.diagnostic)
+        else:
+          result.add("fix: could NOT re-wire " & missing.leaf &
+            " to a re-created shared cache: " & repaired.diagnostic)
       for lr in ctx.leafReports:
         let repaired = checkLeaf(ctx.gitIdentity.binaryPath, lr.leaf,
           lcmRepair, pool = lr.pool)
@@ -78919,6 +79085,10 @@ proc runHealthCommand*(args: openArray[string]): int =
   # The shared-clone detector's messages (report-only here): what is wrong
   # in each checkout, in words, with the exact commands that fix it.
   emitLeafReports(ctx.leafReports)
+  if ctx.poolMissing.len > 0:
+    stdout.flushFile()
+    for missing in ctx.poolMissing:
+      stderr.writeLine(missing.message)
 
   if healthHasFailure(checks): 1 else: 0
 
@@ -80715,14 +80885,16 @@ proc executeBranchCreate(parsed: BranchArgs): BranchReport =
     let headRes = queryGitState(headShaQuery(state.repoPath), identity)
     if headRes.status != gqsOk:
       state.kind = rsProbeFailed
-      state.reason = "head-sha probe failed: " & headRes.diagnostic
+      state.reason = probeFailureReason("head-sha", state.repoPath,
+        headRes.diagnostic)
       states.add(state)
       continue
     state.headSha = headRes.headSha
     let cleanRes = queryGitState(isCleanQuery(state.repoPath), identity)
     if cleanRes.status != gqsOk:
       state.kind = rsProbeFailed
-      state.reason = "clean/dirty probe failed: " & cleanRes.diagnostic
+      state.reason = probeFailureReason("clean/dirty", state.repoPath,
+        cleanRes.diagnostic)
       states.add(state)
       continue
     if not cleanRes.isClean:
@@ -81658,7 +81830,8 @@ proc executeWorkspaceSwitch(parsed: SwitchArgs): SwitchReport =
     let headRes = queryGitState(headShaQuery(state.repoPath), identity)
     if headRes.status != gqsOk:
       state.kind = rsProbeFailed
-      state.reason = "head-sha probe failed: " & headRes.diagnostic
+      state.reason = probeFailureReason("head-sha", state.repoPath,
+        headRes.diagnostic)
       states.add(state)
       continue
     state.headSha = headRes.headSha
@@ -81672,7 +81845,8 @@ proc executeWorkspaceSwitch(parsed: SwitchArgs): SwitchReport =
     let cleanRes = queryGitState(isCleanQuery(state.repoPath), identity)
     if cleanRes.status != gqsOk:
       state.kind = rsProbeFailed
-      state.reason = "clean/dirty probe failed: " & cleanRes.diagnostic
+      state.reason = probeFailureReason("clean/dirty", state.repoPath,
+        cleanRes.diagnostic)
       states.add(state)
       continue
     if not cleanRes.isClean:
@@ -83154,7 +83328,8 @@ proc executeRemove(parsed: RemoveArgs): RemoveReport =
       let cleanRes = queryGitState(isCleanQuery(repoPath), gitIdentity())
       if cleanRes.status != gqsOk:
         dirty = true
-        dirtyDiag = "clean/dirty probe failed: " & cleanRes.diagnostic
+        dirtyDiag = probeFailureReason("clean/dirty", repoPath,
+          cleanRes.diagnostic)
       elif not cleanRes.isClean:
         dirty = true
         dirtyDiag = "working tree has uncommitted changes"
@@ -83721,7 +83896,8 @@ proc executeBranchFork(parsed: BranchArgs): BranchReport =
     let headRes = queryGitState(headShaQuery(state.srcPath), identity)
     if headRes.status != gqsOk:
       state.probeFailed = true
-      state.probeReason = "head-sha probe failed: " & headRes.diagnostic
+      state.probeReason = probeFailureReason("head-sha", state.srcPath,
+        headRes.diagnostic)
       anyProbeFailed = true
       states.add(state)
       continue
@@ -83729,7 +83905,8 @@ proc executeBranchFork(parsed: BranchArgs): BranchReport =
     let cleanRes = queryGitState(isCleanQuery(state.srcPath), identity)
     if cleanRes.status != gqsOk:
       state.probeFailed = true
-      state.probeReason = "clean/dirty probe failed: " & cleanRes.diagnostic
+      state.probeReason = probeFailureReason("clean/dirty", state.srcPath,
+        cleanRes.diagnostic)
       anyProbeFailed = true
       states.add(state)
       continue
@@ -92039,6 +92216,19 @@ proc runLockGenerationVerb(rest: openArray[string]; verb: string;
   let rc = parseLockVerbArgs(rest, verb, projectDir, inputsOverride,
                              lockOverride, platformOverride, asJson, gen)
   if rc != 0: return rc
+  # A workspace root that keeps its state file or its settings file only
+  # under the retired name is refused, with the remedy, by every command.
+  # The lock verbs make that refusal here, before anything else: the
+  # provider probe below compiles the project's recipe and every sibling
+  # recipe its `uses:` reach, needs nothing from these files, and in a large
+  # develop set takes minutes. Each check raises the reader's diagnostic,
+  # which the `repro lock` dispatcher reports.
+  let workspaceRoot = enclosingWorkspaceRoot(projectDir)
+  if workspaceRoot.len > 0:
+    discard refuseRetiredStateFile(workspaceRoot)
+    # Walks the root and its ancestors, and raises at a directory that holds
+    # the settings file only under its retired name.
+    discard findWorkspaceSettingsPath(workspaceRoot)
   let lockP =
     if lockOverride.len > 0: absolutePath(lockOverride)
     else: committedLockPath(projectDir)

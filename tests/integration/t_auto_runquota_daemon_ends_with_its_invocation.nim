@@ -60,8 +60,13 @@
 ## than such a bound -- before it becomes the real daemon, and the invocation
 ## must still adopt it.
 ## The paired control has the wrapper exit after its delay instead: the wait
-## must end on that exit, with the daemon's own stderr in the error, rather
-## than run on to its ceiling.
+## must end on that exit, with the daemon's own stderr and exit status in the
+## error, rather than run on to its ceiling. A third case has the wrapper hang
+## without ever listening: the wait runs to the ceiling, and the error must say
+## the daemon was still running then and that repro terminated it -- recorded
+## before the cleanup, which would otherwise make it look like an exit
+## (reprobuild-pm issue
+## `2026-09-30-runquota-auto-start-terminates-the-daemon-it-is-diagnosing`).
 ##
 ## SIGNAL CONTROLS check that ignored SIGHUP leaves both processes alive,
 ## ordinary and SA_SIGINFO callbacks retain their exit behavior, and a
@@ -209,6 +214,13 @@ const
   SlowDaemonDelayVar = "REPRO_TEST_SLOW_RUNQUOTAD_DELAY_SECONDS"
   SlowDaemonExitsVar = "REPRO_TEST_SLOW_RUNQUOTAD_EXITS"
   SlowDaemonExitNotice = "slow-runquotad: exiting before it ever listened"
+  SlowDaemonHangsVar = "REPRO_TEST_SLOW_RUNQUOTAD_HANGS"
+    ## `1`: after its delay the wrapper becomes a process that never listens
+    ## and never exits, so the wait runs to the readiness ceiling.
+  WedgedDaemonVerdictMillis = 240_000
+    ## Upper bound on how long the wedged-daemon case may take to report: the
+    ## 120 s readiness ceiling plus a terminate and reap, with room for a
+    ## loaded host.
   ReadinessFailureMarker = "auto-runquota-child: readiness failed: "
   DaemonExitBudgetMillis = 90_000
     ## The daemon's orderly shutdown joins a worker pool and drains its
@@ -313,6 +325,10 @@ proc childArm() =
       let afterDelay =
         if getEnv(SlowDaemonExitsVar) == "1":
           "echo " & quoteShell(SlowDaemonExitNotice) & " >&2\nexit 9\n"
+        elif getEnv(SlowDaemonHangsVar) == "1":
+          # `exec` keeps the pid the invocation watches, so its terminate
+          # reaches the process that hangs and nothing is left behind.
+          "exec sleep 3600\n"
         else:
           "exec " & quoteShell(realDaemon) & " \"$@\"\n"
       writeFile(wrapper, "#!/bin/sh\nsleep " & $parseInt(slowDelay) & "\n" &
@@ -689,9 +705,52 @@ suite "an auto-started runquotad ends with its invocation":
         # The daemon's own last words reach the error, so the wait saw ITS
         # exit rather than giving up on a clock.
         check SlowDaemonExitNotice in inv.childOutput
+        # And the error says so in its own words: the daemon exited by
+        # itself, with the status it exited with.
+        check "it exited before it listened" in inv.childOutput
+        check "with exit code 9" in inv.childOutput
+        check "repro terminated it" notin inv.childOutput
         # The failed start removed the rendezvous directory it created.
         # Checked where the directory is made when the temp root is short
         # enough to hold the socket, as on every runner.
+        check toSeq(walkDirs(getTempDir() / ("reprobuild-runquota-" &
+          $processID(inv.child) & "-*"))).len == 0
+      finally:
+        cleanUp(inv)
+    else:
+      skip("Linux only: the verdicts read /proc")
+
+  test "a daemon alive at the ceiling is reported as wedged, not as exited":
+    # THE OTHER HALF of the readiness report (reprobuild-pm issue
+    # `2026-09-30-runquota-auto-start-terminates-the-daemon-it-is-diagnosing`).
+    # A daemon that is alive throughout but never answers is terminated by the
+    # failure path, which leaves the same refused socket as a daemon that died
+    # by itself. The error must record which happened before that cleanup:
+    # alive at the ceiling, and terminated by repro rather than by itself.
+    when defined(linux):
+      doAssert runquotadAvailable()
+      var inv = Invocation(sentinelFd: -1)
+      try:
+        let started = getMonoTime()
+        startInvocation(inv, "wedged", extraEnv = [
+          (SlowDaemonDelayVar, "0"), (SlowDaemonHangsVar, "1")],
+          expectDaemon = false)
+        let eof = drainsToEofWithin(inv.child, WedgedDaemonVerdictMillis,
+          inv.childOutput)
+        let waitedMillis = (getMonoTime() - started).inMilliseconds
+        note("invocation output closed=" & $eof & " after " & $waitedMillis &
+          " ms; it said:\n" & inv.childOutput)
+        check eof
+        if eof:
+          check inv.child.waitForExit() == 4
+        check ReadinessFailureMarker & "runquotad did not become reachable" in
+          inv.childOutput
+        check "it was still running" in inv.childOutput
+        check "s readiness ceiling" in inv.childOutput
+        check "repro terminated it" in inv.childOutput
+        check "it exited" notin inv.childOutput
+        # The wait really ran to the ceiling rather than ending early.
+        check waitedMillis >= 120_000
         check toSeq(walkDirs(getTempDir() / ("reprobuild-runquota-" &
           $processID(inv.child) & "-*"))).len == 0
       finally:
