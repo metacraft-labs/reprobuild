@@ -29040,7 +29040,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_unit_g04",
+    group: "t_group_tests_unit_g03",
     singleReason: ""),
   TestSpec(
     source: "tests/unit/t_nonredistributable_publish_gate.nim",
@@ -29430,6 +29430,17 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "tests/unit/t_stale_artifact_names_what_changed.nim",
     binary: "build/test-bin/t_stale_artifact_names_what_changed",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "t_group_tests_unit_g04",
+    singleReason: ""),
+  TestSpec(
+    source: "tests/unit/t_store_daemon_tarball_archive_detail_frame.nim",
+    binary: "build/test-bin/t_store_daemon_tarball_archive_detail_frame",
     defines: @[],
     requiresReproBinary: false,
     extraPassC: @[],
