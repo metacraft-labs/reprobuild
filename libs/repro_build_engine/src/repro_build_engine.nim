@@ -19811,10 +19811,14 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
           break
     if fp.portable:
       # P3.2: a record is only shareable if its RESULT can be named too.
+      # The optional-output set is named before the filter: an inline `notin`
+      # over a `mapIt` inside `filterIt` fails to type-check under the nim fork
+      # the lint runs (undeclared `s2` in sequtils), which broke every lint run
+      # on this branch.
+      let optionalPaths = action.optionalOutputs.mapIt(materialPath(action.cwd, it))
       let outs = portableOutputs(config.portableRoots,
         portablePhysicalOutputsOf(action).filterIt(
-          it notin action.optionalOutputs.mapIt(materialPath(action.cwd, it)) or
-          pathExists(it)))
+          it notin optionalPaths or pathExists(it)))
       if outs.portable:
         runResult.results[idx].portableOutputs = outs.outputs
         # P3.3: persist the memo record beside the shared action cache so
