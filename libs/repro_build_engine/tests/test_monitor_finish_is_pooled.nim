@@ -287,6 +287,29 @@ else:
       if token.startsWith(prefix): return true
     false
 
+  proc isPidSegment(segment: string): bool =
+    segment.len > 0 and segment.allCharsInSet(Digits)
+
+  proc blankProcPids(tail: string): string =
+    ## ``tail`` is what follows ``/proc/``: ``<pid>[/task/<tid>][/...]``. The
+    ## leading pid and a ``task/<tid>`` pair are blanked; every other segment
+    ## (``self``, ``exe``, ``maps``, ...) is kept verbatim.
+    var segments = tail.split('/')
+    if segments.len > 0 and isPidSegment(segments[0]):
+      segments[0] = PidPlaceholder
+      if segments.len > 2 and segments[1] == "task" and
+         isPidSegment(segments[2]):
+        segments[2] = PidPlaceholder
+    segments.join("/")
+
+  proc isProcPidTail(value: string): bool =
+    ## Whether ``value`` is exactly ``<pid>`` or ``<pid>/task/<tid>`` — the
+    ## targets of the ``/proc/self`` and ``/proc/thread-self`` symlinks.
+    let segments = value.split('/')
+    (segments.len == 1 and isPidSegment(segments[0])) or
+      (segments.len == 3 and isPidSegment(segments[0]) and
+       segments[1] == "task" and isPidSegment(segments[2]))
+
   type Normaliser = object
     runs: Table[string, string]
 
@@ -316,6 +339,12 @@ else:
           except ValueError:
             mapped.add entry
         parts.add "pids=" & mapped.join(",")
+      elif token.startsWith("target=") and
+           isProcPidTail(token["target=".len .. ^1]):
+        # A probe of the ``/proc/self`` (or ``/proc/thread-self``) symlink
+        # records its target, which is the probing process's own pid (and
+        # tid): blanked like any other pid (see ``normalisePath``).
+        parts.add "target=" & blankProcPids(token["target=".len .. ^1])
       else:
         parts.add token
     parts.join(" ")
@@ -348,6 +377,15 @@ else:
       let tail = value[KernProcPidMib.len .. ^1]
       if tail.len > 0 and tail.allCharsInSet(Digits):
         value = KernProcPidMib & PidPlaceholder
+    # The Linux form of the same question: a process reading its own
+    # ``/proc/<pid>`` entry (a hook library resolving its executable through
+    # ``/proc/self`` -> ``/proc/<pid>/exe`` does this in every process it is
+    # loaded into). The pid segment names a process that is new in each arm,
+    # so it is blanked like any other pid; the rest of the path — which
+    # ``/proc`` file was read — is compared verbatim.
+    const ProcPrefix = "/proc/"
+    if value.startsWith(ProcPrefix):
+      value = ProcPrefix & blankProcPids(value[ProcPrefix.len .. ^1])
     value
 
   proc renderOneRecord(n: var Normaliser; record: MonitorRecord;
