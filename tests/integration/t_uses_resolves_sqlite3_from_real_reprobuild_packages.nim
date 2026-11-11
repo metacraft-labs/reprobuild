@@ -6,7 +6,7 @@
 ## Provisioning"). `t_uses_resolves_reprobuild_packages_interface` proves the
 ## lookup against a fixture catalog; this file proves that the catalog CI
 ## actually provides -- the `reprobuild-packages` checkout that
-## `.github/sibling-repos` pins and `setup-dev-env` clones beside this one --
+## `setup-dev-env` clones beside this one, at the revision `repro.lock` pins --
 ## defines the package every consumer of it relies on, and that the walk from a
 ## consumer inside this repository steps PAST the fixture catalog
 ## (`tests/reprobuild-packages`, which does not define `sqlite3`) to reach it.

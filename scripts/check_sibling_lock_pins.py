@@ -1,19 +1,23 @@
 #!/usr/bin/env python3
-"""Check explicit sibling commit pins against both committed lock formats.
+"""Check the sibling clone list against both committed lock formats.
 
 No network is needed: a commit's sibling bill of materials must be consistent
 before any clone or build starts. Acknowledging an override with != does not
 make a checkout usable by a consumer whose lock requires another revision.
 
-Rules, for every explicit entry (`name=ref` or `name!=ref`):
+Rules, for every entry with a ref (`name=ref` or `name!=ref`):
 
-  * a 40-hex `ref` must equal every revision repro.lock and flake.lock (direct
-    root inputs only) pin for `name`;
-  * a branch or tag `ref` is refused when repro.lock pins `name`. The engine
-    refuses a cross-repo producer at any commit other than the locked one, so
-    such a clone works only while the branch happens to sit on the lock and
-    breaks CI the moment it moves. A repo only flake.lock names may follow a
-    branch: several entries do so on purpose, and their comments say why.
+  * a sibling repro.lock pins is refused whatever the ref: it is listed as the
+    bare `name`. `clone-siblings` resolves a bare name from the committed
+    repro.lock, which is the source of truth for that revision, so a ref here
+    is a second record of it -- one that `repro lock update` does not move and
+    that therefore drifts. A branch or tag is wrong for another reason too: the
+    engine refuses a cross-repo producer at any commit but the locked one, so
+    such a clone works only while the branch happens to sit on the lock;
+  * a 40-hex `ref` for a sibling only flake.lock pins (direct root inputs
+    only) must equal that lock's revision;
+  * a branch or tag of a sibling only flake.lock names may follow a branch:
+    several entries do so on purpose, and their comments say why.
 
 A bare `name` entry carries no ref and is resolved by the clone action, so it
 is not checked here.
@@ -56,14 +60,15 @@ def check(root: Path) -> list[str]:
         if '=' not in entry:
             continue
         name, revision = entry.split('=', 1)
-        name = name.strip().removesuffix('!')
+        name = name.strip().removesuffix('!').strip()
         revision = revision.strip()
+        pinned = [expected for source, expected in locked.get(name, []) if source == 'repro.lock']
+        if pinned:
+            errors.append(f'.github/sibling-repos:{number}: {name}={revision}: repro.lock pins '
+                          f'{name} at revision {pinned[0]}, and clone-siblings resolves a bare '
+                          f'name from repro.lock, so list it as the bare name `{name}`')
+            continue
         if not SHA.fullmatch(revision):
-            for source, expected in locked.get(name, []):
-                if source == 'repro.lock':
-                    errors.append(f'.github/sibling-repos:{number}: {name}={revision} is a branch/ref, '
-                                  f'but repro.lock pins {name} at revision {expected}; the engine '
-                                  f'refuses any other commit, so pin {name}={expected}')
             continue
         for source, expected in locked.get(name, []):
             if revision.lower() != expected.lower():
@@ -84,7 +89,7 @@ def main() -> int:
     if errors:
         print('\n'.join(f'FAIL: {error}' for error in errors), file=sys.stderr)
         return 1
-    print('ok: explicit sibling commit pins match repro.lock and flake.lock')
+    print('ok: repro.lock siblings are listed bare, and explicit commit pins match flake.lock')
     return 0
 
 

@@ -77,6 +77,8 @@
   # An entry for a source input added AFTER the `src` commit (its lock has no
   # such node yet) mirrors this tree's `flake.lock` instead, and the check
   # holds it to that until the next release snapshot moves `src` past it.
+  # `repro lock update` moves that lock and not this file, so `just lint`
+  # holds such an entry to it as well (scripts/check_package_nix_pending_sources.py).
   # The metacraft-labs/nixpkgs fork must map such an input in its `pins.json`
   # when it syncs the first release that carries it (nix/README.md).
   #

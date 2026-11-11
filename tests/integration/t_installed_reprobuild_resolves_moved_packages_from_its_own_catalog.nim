@@ -105,9 +105,15 @@ suite "an installed reprobuild carries the catalog it was released with":
 
   # The release checkout the staging script runs in: it pins the catalog.
   let checkout = scratch / "release-checkout"
-  createDir(checkout / ".github")
-  writeFile(checkout / ".github" / "sibling-repos",
-    "# the catalog\r\nreprobuild-packages=" & pinned & "\r\n")
+  createDir(checkout)
+  # CRLF line ends, and the catalog's `packages` entry (no revision) ahead of
+  # its `deps` entry: only the entry that carries a revision pins it.
+  writeFile(checkout / "repro.lock",
+    "# the catalog\r\n[lock]\r\npackages = [{ name = \"reprobuild-packages\", " &
+    "version = \"1.0.0\", source = \"reprobuild-packages\", selection = " &
+    "\"selected\" }]\r\ndeps = [{ name = \"reprobuild-packages\", " &
+    "coord_kind = \"vcs\", revision = \"" & pinned & "\", integrity = " &
+    "\"git-sha1:" & pinned & "\" }]\r\n")
 
   # The install prefix, holding the catalog lookup module where an installed
   # reprobuild's DSL lives.

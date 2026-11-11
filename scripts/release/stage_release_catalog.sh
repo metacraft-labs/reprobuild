@@ -19,7 +19,8 @@
 # so that is where the catalog goes, and the lookup needs no special case.
 #
 # WHAT. The package interfaces (packages/interfaces) of the revision this
-# repository PINS in .github/sibling-repos, read out of git at that commit --
+# repository PINS in its committed repro.lock (the `reprobuild-packages` deps
+# entry, the revision CI clones the sibling at), read out of git at that commit --
 # not the sibling's working tree, which may have moved -- plus a
 # `catalog-revision` marker naming the url and commit
 # (reprobuild_packages_catalog.CatalogRevisionMarkerFile). A lock refreshed by
@@ -28,7 +29,7 @@
 # The checkout holding the pinned commit is $REPROBUILD_PACKAGES_ROOT when it is
 # set, else ../reprobuild-packages (where setup-dev-env clones the sibling list).
 #
-# Run from the reprobuild checkout root (it reads .github/sibling-repos there).
+# Run from the reprobuild checkout root (it reads repro.lock there).
 set -euo pipefail
 
 if [[ $# -ne 1 ]]; then
@@ -39,12 +40,17 @@ pkg=$1
 dest="$pkg/share/repro/reprobuild-packages"
 fail() { echo "stage_release_catalog: ERROR: $*" >&2; exit 1; }
 
-[[ -f .github/sibling-repos ]] ||
-  fail "no .github/sibling-repos here; run from the reprobuild checkout root"
-pin=$(tr -d '\r' < .github/sibling-repos |
-  sed -n 's/^reprobuild-packages=\([0-9a-f]\{40\}\)[[:space:]]*$/\1/p' | head -n 1)
-[[ -n "$pin" ]] ||
-  fail ".github/sibling-repos pins no 40-hex reprobuild-packages revision"
+[[ -f repro.lock ]] ||
+  fail "no repro.lock here; run from the reprobuild checkout root"
+# Each `deps` entry is one inline table without nested braces. The same name
+# also heads a `packages` entry, which carries no revision, so only the entry
+# that has one counts, and there must be exactly one.
+pins=$(tr -d '\r' < repro.lock |
+  grep -o '{ name = "reprobuild-packages",[^}]*}' |
+  sed -n 's/.*[{ ,]revision = "\([0-9a-f]\{40\}\)".*/\1/p' || true)
+[[ $(printf '%s' "$pins" | grep -c .) -eq 1 ]] ||
+  fail "repro.lock does not pin exactly one 40-hex reprobuild-packages revision (found: ${pins:-none})"
+pin=$pins
 
 # Every git call on the catalog checkout goes through pkg_git: git resolved
 # where Git for Windows' bash hides it, with the ownership check lifted for
