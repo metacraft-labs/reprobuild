@@ -40,7 +40,10 @@
 ## that are trustworthy and cannot be erased (G34).
 
 import std/[algorithm, options, os, sequtils, sets, strutils, tables]
-from std/posix import nil
+when defined(windows):
+  import std/winlean
+else:
+  from std/posix import nil
 
 import repro_peer_cache/auth as peerAuth
 import repro_peer_cache/evidence
@@ -391,13 +394,38 @@ proc readFirstSeen*(path: string): Table[string, uint64] =
         path & " holds a line that is not <target> <sequence> <issuedAt>: " & l)
     result[p[0] & " " & p[1]] = v
 
-proc fsyncPathOrRaise(path: string) =
-  let fd = posix.open(path.cstring, posix.O_RDONLY or posix.O_CLOEXEC)
-  if fd < 0: raiseOSError(osLastError(), "open " & path & " to sync it")
-  try:
-    if posix.fsync(fd) != 0: raiseOSError(osLastError(), "fsync " & path)
-  finally:
-    discard posix.close(fd)
+proc fsyncFileOrRaise(path: string) =
+  ## Push a written file's bytes to the disk before it is renamed into place.
+  when defined(windows):
+    # FlushFileBuffers needs a handle with write access:
+    # https://learn.microsoft.com/windows/win32/api/fileapi/nf-fileapi-flushfilebuffers
+    var f: File
+    if not open(f, path, fmReadWriteExisting):
+      raiseOSError(osLastError(), "open " & path & " to sync it")
+    try:
+      if flushFileBuffers(Handle(getOsFileHandle(f))) == 0:
+        raiseOSError(osLastError(), "FlushFileBuffers " & path)
+    finally:
+      close(f)
+  else:
+    let fd = posix.open(path.cstring, posix.O_RDONLY or posix.O_CLOEXEC)
+    if fd < 0: raiseOSError(osLastError(), "open " & path & " to sync it")
+    try:
+      if posix.fsync(fd) != 0: raiseOSError(osLastError(), "fsync " & path)
+    finally:
+      discard posix.close(fd)
+
+proc fsyncDirOrRaise(dir: string) =
+  ## Make a rename into ``dir`` durable. On POSIX a rename is a change to
+  ## the directory, persisted only once the directory is synced. Windows has
+  ## no directory sync; NTFS journals the rename itself.
+  when not defined(windows):
+    let fd = posix.open(dir.cstring, posix.O_RDONLY or posix.O_CLOEXEC)
+    if fd < 0: raiseOSError(osLastError(), "open " & dir & " to sync it")
+    try:
+      if posix.fsync(fd) != 0: raiseOSError(osLastError(), "fsync " & dir)
+    finally:
+      discard posix.close(fd)
 
 proc writeFirstSeen*(path: string; t: Table[string, uint64]) =
   ## Durably: a temporary file in the same directory, fsync'd, renamed over
@@ -411,9 +439,9 @@ proc writeFirstSeen*(path: string; t: Table[string, uint64]) =
   try:
     createDir(parentDir(path))
     writeFile(tmp, lines.join("\n") & "\n")
-    fsyncPathOrRaise(tmp)
+    fsyncFileOrRaise(tmp)
     moveFile(tmp, path)
-    fsyncPathOrRaise(parentDir(path))
+    fsyncDirOrRaise(parentDir(path))
   except CatchableError as e:
     try: removeFile(tmp) except CatchableError: discard
     raise newException(EvidenceCheckError, "the check's state file " &

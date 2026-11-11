@@ -80,3 +80,56 @@ suite "NF-2: the refresh finds the committed repo under any spelling":
         check res.output.contains("dirt-scope: ")
         check "epsilon" in
           res.output.split("dirt-scope: ")[^1].strip().split(",")
+
+  test "t_the_commit_hook_finds_the_committed_repo_under_any_spelling":
+    # The commit-path refresh reaches the same scope through the managed
+    # `pre-commit` dispatch, whose `--repo-root` is what `git rev-parse
+    # --show-toplevel` printed — the spelling Windows gives with `/` where
+    # the membership join gives `\`. Before the dirty-sibling scope is ever
+    # computed, the hook's pre-filter checks that the membership contains
+    # the repo being committed, and a spelling mismatch there refuses the
+    # whole refresh as an "unresolvable workspace".
+    #
+    # A sibling has moved (so the pre-filter cannot short-circuit to
+    # `up-to-date`) and `epsilon` — in `app`'s closure, named by no flake
+    # input — is dirty. The refresh must find the closure and be held back
+    # by `epsilon`, under every spelling of the same checkout.
+    if not nf2Prerequisites(
+        "t_the_commit_hook_finds_the_committed_repo_under_any_spelling"):
+      skip("needs git on PATH and a built ./build/bin/repro (named above)")
+    else:
+      let fx = setupNf2Fixture("hook-spelling")
+      defer: removeDir(fx.scratch)
+      isolateNf2Config(fx)
+      defer: releaseNf2Config()
+
+      let alias = fx.scratch / "ws-alias"
+      createSymlink(fx.ws, alias)
+      discard moveAndPublishSibling(fx, "alpha", "revision 2")
+      dirtySibling(fx, "epsilon")
+      check gitIn(fx, siblingDir(fx, "epsilon"),
+        "status --porcelain").strip().len > 0
+      let before = readFile(lockPath(fx))
+
+      # Joined by hand, not with `/`, for the reason the case above gives.
+      let spellings = [
+        ("canonical", fx.app),
+        ("trailing separator", fx.app & $DirSep),
+        ("dot segment", fx.ws & $DirSep & "." & $DirSep & "app"),
+        ("parent detour",
+          fx.ws & $DirSep & "alpha" & $DirSep & ".." & $DirSep & "app"),
+        ("symlinked workspace", alias / "app"),
+      ]
+      for (label, spelling) in spellings:
+        checkpoint("spelling (" & label & "): " & spelling)
+        let res = run(q(fx.repro) & " hooks dispatch pre-commit --repo-root " &
+          q(spelling) & " --", cwd = fx.app)
+        let log = lastFlakeLogLine(fx)
+        if res.code != 0 or not log.contains("skipped-dirty-sibling"):
+          checkpoint("hook output for the " & label & " spelling:\n" &
+            res.output & "\nlast flake-lock log line: " & log)
+        check res.code == 0
+        check log.contains("skipped-dirty-sibling")
+        check not log.contains("refused-unresolvable-workspace")
+        check "epsilon" in log.split("dirt-scope: ")[^1].strip().split(",")
+        check readFile(lockPath(fx)) == before
