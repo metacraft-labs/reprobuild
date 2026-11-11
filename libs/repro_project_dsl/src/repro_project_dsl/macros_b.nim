@@ -908,10 +908,6 @@ proc emitLockFileDesignations(pkg: PackageDef; site: NimNode): NimNode =
   discard site
 
 const
-  reproBin* {.strdefine.} = ""
-    ## Absolute path to the engine binary, handed in by the recipe compile.
-    ## Empty outside that compile (a plain `nim c` of a recipe), which is
-    ## exactly when the `dslDeps:` import emission must stay silent.
   reproConsumerRoot* {.strdefine.} = ""
     ## The consumer repo the recipe belongs to. The macro cannot derive it:
     ## it expands in the extraction scratch directory, so `getProjectPath()`
