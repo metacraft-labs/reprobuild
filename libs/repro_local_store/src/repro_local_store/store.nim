@@ -21,7 +21,10 @@
 ## requested key before returning to the caller — the hash-on-read
 ## contract from the spec is enforced by `readCasBlob` / `materializeBlob`.
 
-import std/[algorithm, os, strutils, tables, times]
+import std/[algorithm, os, sets, strutils, tables, times]
+
+when defined(posix):
+  from std/posix import nil
 
 import blake3
 import repro_core
@@ -727,7 +730,13 @@ proc ensureUsageColumns(db: Database) =
   while info.step() == SqliteRow:
     have.add(info.columnText(1))
   info.finalize()
-  for (column, decl) in [("last_used_at", "INTEGER"), ("size_bytes", "INTEGER")]:
+  #
+  # `content_digest` (G7) is the same kind of addition: the BLAKE3 tree
+  # digest of a prefix as its writer published it (`prefixTreeDigest`). A
+  # row an older build inserts carries NULL, read as "not yet recorded",
+  # and the first verifying use records it (`verifyRealizedPrefix`).
+  for (column, decl) in [("last_used_at", "INTEGER"), ("size_bytes", "INTEGER"),
+                         ("content_digest", "BLOB")]:
     if column notin have:
       try:
         db.exec("ALTER TABLE prefixes ADD COLUMN " & column & " " & decl)
@@ -961,27 +970,247 @@ proc textOf(bytes: openArray[byte]): string =
   for i, b in bytes:
     result[i] = char(b)
 
+# ---------------------------------------------------------------------------
+# Existing-entry integrity (G7: a store root other writers can reach)
+# ---------------------------------------------------------------------------
+#
+# A CAS name is the digest of its bytes, so a reader can always tell a wrong
+# blob from the right one (``readCasBlob`` refuses it). A WRITER used to take
+# "the digest path exists" as "the blob is there", which is true only when
+# nothing but this store's own writers can create files under ``cas/``. Where
+# the root is shared with writers the store does not trust (a runner guest on
+# a read-write mount of the root, Production-Runners-And-Shared-Store PM3,
+# SEC-1 G7/T6), a file planted at a FUTURE digest's path turned the
+# legitimate insert into a silent no-op, and the entry stayed unreadable
+# until someone deleted it by hand.
+#
+# So a writer that finds the digest path occupied now checks it: size first
+# (free), then BLAKE3 over the existing bytes. A match is the honest dedupe
+# and nothing is written. A mismatch -- other bytes, a symlink, a directory,
+# a FIFO -- is REPLACED: the correct bytes go to a stage file in ``tmp/``
+# (same filesystem), are flushed and fsync'd, and are renamed over the
+# squatted name, so a concurrent reader sees either the old name (and
+# refuses it, as before) or the right blob, never a torn one. The caller is
+# told (``repaired``), and is never told "present" for an entry that did not
+# verify. The price on an honest store is one read of the existing blob per
+# dedupe hit; no extra write.
+
+type
+  ExistingCasEntry = enum
+    ceAbsent       ## nothing at the digest path
+    ceMatches      ## a regular file whose bytes hash to the digest
+    ceMismatch     ## anything else: other bytes, a link, a dir, a special file
+
+when defined(posix):
+  var oNoFollow {.importc: "O_NOFOLLOW", header: "<fcntl.h>".}: cint
+
+type
+  NoFollowHash = object
+    ## What ``hashRegularNoFollow`` found at a path, without following a
+    ## final symlink and without opening anything but a regular file.
+    kind: char           ## 'f' regular, 'l' symlink, 'd' directory,
+                         ## 's' special (FIFO, socket, device), 'm' missing
+    size: uint64
+    digest: PrefixIdBytes
+
+proc hashRegularNoFollow(path: string): NoFollowHash =
+  ## BLAKE3-256 over the regular file at ``path``, read in bounded chunks.
+  ## Never follows a final-component symlink and never blocks on a FIFO
+  ## (``O_NOFOLLOW | O_NONBLOCK`` on POSIX, then ``fstat`` decides), so a
+  ## name another writer swapped for a link to ``/dev/zero`` or for a pipe
+  ## cannot hang the verifier or make it hash somebody else's file.
+  when defined(posix):
+    let fd = posix.open(path.cstring, posix.O_RDONLY or oNoFollow or
+      posix.O_NONBLOCK or posix.O_CLOEXEC)
+    if fd < 0:
+      let err = posix.errno
+      if err == posix.ENOENT or err == posix.ENOTDIR:
+        result.kind = 'm'
+        return
+      if err == posix.ELOOP:
+        result.kind = 'l'
+        return
+      # Anything else (EACCES on a planted unreadable file, ENXIO on a
+      # socket) is still "not a blob this store can vouch for".
+      result.kind = 's'
+      return
+    defer: discard posix.close(fd)
+    var st: posix.Stat
+    if posix.fstat(fd, st) != 0:
+      result.kind = 's'
+      return
+    if posix.S_ISDIR(st.st_mode):
+      result.kind = 'd'
+      return
+    if not posix.S_ISREG(st.st_mode):
+      result.kind = 's'
+      return
+    result.kind = 'f'
+    var hasher = blake3.initHasher()
+    try:
+      var buffer = newSeq[byte](1024 * 1024)
+      while true:
+        let n = posix.read(fd, addr buffer[0], buffer.len)
+        if n < 0:
+          if posix.errno == posix.EINTR: continue
+          raise newException(OSError, "read failed while verifying " & path &
+            ": " & osErrorMsg(osLastError()))
+        if n == 0: break
+        result.size += uint64(n)
+        hasher.update(addr buffer[0], n)
+      result.digest = hasher.finalize()
+    finally:
+      hasher.close()
+  else:
+    var info: FileInfo
+    try:
+      info = getFileInfo(extendedPath(path), followSymlink = false)
+    except OSError:
+      result.kind = 'm'
+      return
+    case info.kind
+    of pcLinkToFile, pcLinkToDir:
+      result.kind = 'l'
+      return
+    of pcDir:
+      result.kind = 'd'
+      return
+    of pcFile:
+      discard
+    result.kind = 'f'
+    var f: File
+    if not open(f, extendedPath(path), fmRead):
+      result.kind = 's'
+      return
+    var hasher = blake3.initHasher()
+    try:
+      var buffer = newSeq[byte](1024 * 1024)
+      while true:
+        let n = f.readBuffer(addr buffer[0], buffer.len)
+        if n <= 0: break
+        result.size += uint64(n)
+        hasher.update(addr buffer[0], n)
+      result.digest = hasher.finalize()
+    finally:
+      hasher.close()
+      f.close()
+
+proc existingCasEntry(path: string; digest: PrefixIdBytes;
+                      expectedSize: int64): ExistingCasEntry =
+  ## Classify what is at the digest path ``path``. ``expectedSize`` (or -1)
+  ## lets a wrong-size squatter be rejected without reading it.
+  var info: FileInfo
+  try:
+    info = getFileInfo(extendedPath(path), followSymlink = false)
+  except OSError:
+    return ceAbsent
+  if info.kind != pcFile:
+    return ceMismatch
+  if expectedSize >= 0 and info.size != expectedSize:
+    return ceMismatch
+  let h = hashRegularNoFollow(path)
+  case h.kind
+  of 'm': ceAbsent
+  of 'f':
+    if h.digest == digest and
+        (expectedSize < 0 or h.size == uint64(expectedSize)): ceMatches
+    else: ceMismatch
+  else: ceMismatch
+
+proc fsyncFile(path: string) =
+  ## Flush ``path``'s bytes to stable storage before it is renamed over a
+  ## name readers already resolve. Best effort on non-POSIX hosts, where
+  ## ``moveFile`` is the replace primitive.
+  when defined(posix):
+    let fd = posix.open(path.cstring, posix.O_RDONLY or posix.O_CLOEXEC)
+    if fd < 0:
+      raiseOSError(osLastError(), "open for fsync: " & path)
+    defer: discard posix.close(fd)
+    if posix.fsync(fd) != 0:
+      raiseOSError(osLastError(), "fsync: " & path)
+  else:
+    discard path
+
+proc fsyncDir(path: string) =
+  when defined(posix):
+    let fd = posix.open(path.cstring, posix.O_RDONLY or posix.O_CLOEXEC)
+    if fd < 0: return
+    discard posix.fsync(fd)
+    discard posix.close(fd)
+  else:
+    discard path
+
+proc casDiagnostic(digest: PrefixIdBytes; finalPath: string): string =
+  "repro store: CAS entry " & hexOf(digest) & " at " & finalPath &
+    " did not verify (its bytes are not the ones its name is the digest " &
+    "of); replaced it with the verified blob"
+
+proc replaceSquattedCasEntry(s: var Store; stagePath, finalPath: string) =
+  ## Rename the verified ``stagePath`` over whatever occupies
+  ## ``finalPath``. A file or symlink is replaced in one rename; a
+  ## directory cannot be renamed over, so it is first moved aside into
+  ## ``tmp/`` (where ``sweepStaging`` reaps it) and the rename follows.
+  fsyncFile(stagePath)
+  var info: FileInfo
+  var occupied = true
+  try:
+    info = getFileInfo(extendedPath(finalPath), followSymlink = false)
+  except OSError:
+    occupied = false
+  if occupied and info.kind == pcDir:
+    let aside = s.tmpRoot / ("cas-squat." & s.uniqueStoreToken())
+    moveDir(extendedPath(finalPath), extendedPath(aside))
+  moveFile(extendedPath(stagePath), extendedPath(finalPath))
+  fsyncDir(parentDir(finalPath))
+
+var casRepairLogHook* {.threadvar.}: proc (message: string) {.closure, gcsafe.}
+  ## Where a CAS repair is reported, besides the caller's status. ``nil``
+  ## (the default) writes one line to stderr. Tests set it to capture the
+  ## line instead. Per thread, so the write path stays GC-safe.
+
+proc reportCasRepair(message: string) =
+  if casRepairLogHook != nil:
+    casRepairLogHook(message)
+  else:
+    try: stderr.writeLine(message) except IOError: discard
+
 proc storeCasBlobWithStatus*(s: var Store; payload: openArray[byte]):
-    tuple[digest: PrefixIdBytes, inserted: bool] =
+    tuple[digest: PrefixIdBytes, inserted: bool, repaired: bool] =
   ## Inserts `payload` and reports whether this call created the CAS blob.
   ## The digest is computed once, and concurrent deduplication is reflected in
   ## `inserted`, so callers can maintain byte accounting without a racy
   ## pre-insert filesystem probe.
+  ##
+  ## An occupied digest path counts as present only when its bytes verify
+  ## (see "Existing-entry integrity" above). Otherwise this call replaces it
+  ## atomically and reports `inserted` AND `repaired`.
   result.digest = blake3.digest(payload)
   let finalPath = s.casPath(result.digest)
-  if fileExists(extendedPath(finalPath)):
+  let existing = existingCasEntry(finalPath, result.digest, int64(payload.len))
+  if existing == ceMatches:
     discard s.touchCasBlob(result.digest)
     return
   createDir(extendedPath(parentDir(finalPath)))
   let stagePath = s.casStageDir() & ".blob"
   createDir(extendedPath(parentDir(stagePath)))
   writeFile(extendedPath(stagePath), textOf(payload))
+  if existing == ceMismatch:
+    try:
+      s.replaceSquattedCasEntry(stagePath, finalPath)
+    except CatchableError:
+      if fileExists(extendedPath(stagePath)): removeFile(extendedPath(stagePath))
+      raise
+    result.inserted = true
+    result.repaired = true
+    reportCasRepair(casDiagnostic(result.digest, finalPath))
+    return
   try:
     moveFile(extendedPath(stagePath), extendedPath(finalPath))
     result.inserted = true
   except OSError:
     if fileExists(extendedPath(stagePath)): removeFile(extendedPath(stagePath))
-    if not fileExists(extendedPath(finalPath)):
+    if existingCasEntry(finalPath, result.digest, int64(payload.len)) !=
+        ceMatches:
       raise
 
 proc storeCasBlob*(s: var Store; payload: openArray[byte]): PrefixIdBytes =
@@ -1092,6 +1321,11 @@ type
       ## an error.
     alreadyPresent*: bool
       ## The digest was already in the store, so nothing was committed.
+      ## Only ever set for an existing entry whose bytes verified.
+    repaired*: bool
+      ## The digest path was occupied by something that did NOT verify
+      ## (other bytes, a link, a directory); this call replaced it with
+      ## the verified blob. ``diagnostic`` says so.
     sourceChanged*: bool
       ## A link arm declined because the source moved under it between
       ## the hash and the link. The blob is still stored — by the copy
@@ -1179,18 +1413,38 @@ proc allocateCasStagePath(s: var Store): string =
 proc commitCasStage(s: var Store; stagePath: string; digest: PrefixIdBytes;
                     outcome: var CasIngestOutcome) =
   ## Publish a staged blob under its digest, or discard the stage if some
-  ## other writer got there first. Byte-for-byte the pre-M2 commit.
+  ## other writer got there first. An occupied digest path counts as "got
+  ## there first" only when its bytes verify; anything else is replaced by
+  ## the stage (see "Existing-entry integrity") and reported as
+  ## ``repaired``, never as ``alreadyPresent``.
   let finalPath = s.casPath(digest)
-  if fileExists(extendedPath(finalPath)):
+  let stageSize =
+    try: getFileSize(extendedPath(stagePath))
+    except OSError: -1'i64
+  let existing = existingCasEntry(finalPath, digest, stageSize)
+  if existing == ceMatches:
     casIngestQuietRemove(stagePath)
     outcome.alreadyPresent = true
     discard s.touchCasBlob(digest)
     return
   createDir(extendedPath(parentDir(finalPath)))
+  if existing == ceMismatch:
+    try:
+      s.replaceSquattedCasEntry(stagePath, finalPath)
+    except CatchableError:
+      casIngestQuietRemove(stagePath)
+      raise
+    outcome.repaired = true
+    let message = casDiagnostic(digest, finalPath)
+    outcome.diagnostic =
+      if outcome.diagnostic.len > 0: outcome.diagnostic & "; " & message
+      else: message
+    reportCasRepair(message)
+    return
   try:
     moveFile(extendedPath(stagePath), extendedPath(finalPath))
   except OSError:
-    if fileExists(extendedPath(finalPath)):
+    if existingCasEntry(finalPath, digest, stageSize) == ceMatches:
       casIngestQuietRemove(stagePath)
       outcome.alreadyPresent = true
     else:
@@ -1551,12 +1805,42 @@ type
     roLoserOfRace
     roAlreadyPresent
 
+  PrefixVerifyOutcome* = enum
+    ## What ``verifyRealizedPrefix`` concluded about an indexed prefix.
+    pvNotChecked     ## not asked (a prefix this call published itself)
+    pvVerified       ## its tree hashed to the index's recorded digest
+    pvCached         ## verified earlier in this thread; not re-hashed
+    pvRecordedFirst  ## the row had no digest (an older build or the
+                     ## index rebuild wrote it); this use recorded one
+    pvUnrecorded     ## no digest recorded and the index is not writable
+                     ## here (a read-only view): accepted as before
+    pvMismatch       ## its tree does NOT match the recorded digest
+    pvUnindexed      ## the index has no row for the prefix id
+    pvMissing        ## the directory is not there
+
+  PrefixVerification* = object
+    outcome*: PrefixVerifyOutcome
+    recorded*: PrefixIdBytes   ## the index's digest (when there was one)
+    actual*: PrefixIdBytes     ## the tree's digest (when it was computed)
+    diagnostic*: string
+
   RealizeResult* = object
     outcome*: RealizeOutcome
     prefixId*: PrefixIdBytes
     relativePath*: string
     absolutePath*: string
     row*: PrefixRow
+    verification*: PrefixVerifyOutcome
+      ## For ``roAlreadyPresent`` / ``roLoserOfRace``: how the existing
+      ## prefix was accepted (``verifyRealizedPrefix``). ``pvNotChecked``
+      ## for a prefix this call published itself.
+    replacedUntrusted*: bool
+      ## A directory was found at the prefix path that did not verify (its
+      ## tree does not match the index's record, or the index has no row
+      ## for it); it was moved to ``gc/pending-deletion/`` and this call
+      ## published a fresh realisation in its place. ``integrityDiagnostic``
+      ## says what was found.
+    integrityDiagnostic*: string
 
   PerOutputRealize* = object
     ## Recipe-Val M8: one entry per Nix-style package output that a
@@ -1867,6 +2151,393 @@ proc materializeViaHardlinkOrCopy*(srcDir, dstDir: string;
   materializeDirectory(srcDir, dstDir, report)
   mechanism = report.describeMechanism()
 
+# ---------------------------------------------------------------------------
+# Prefix content integrity (G7)
+# ---------------------------------------------------------------------------
+#
+# A prefix id is a realisation hash of the INPUTS, not of the bytes, so the
+# name alone cannot tell a reader whether the directory holds what the
+# realisation produced, and anyone who can write `prefixes/` can compute a
+# future id and pre-place a directory (with a `.repro-receipt` naming it:
+# the receipt is unsigned). Two rules close what the store itself can close:
+#
+#   1. A directory is a realised prefix only if the INDEX has a row for it.
+#      The receipt is never authority for adoption: an unindexed directory
+#      at a prefix path is displaced, not adopted, and the writer publishes
+#      its own realisation there (`realizePrefix`'s rename-loser path, and
+#      `apt_closure.ensureIndexed`).
+#   2. The row records the tree digest its writer published
+#      (`content_digest`, `prefixTreeDigest`), and a use of an existing
+#      prefix checks the directory against it. A mismatch is "absent": the
+#      directory goes to `gc/pending-deletion/`, the prefix is realised
+#      again in place, and the row is updated (not deleted, which would
+#      cascade away every root's hold on it).
+#
+# Cost and policy. Hashing a tree on EVERY hit would put a full read of
+# every prefix on every `realize` call. The check is therefore made on the
+# FIRST use of a (store, prefix, recorded digest) in a thread and
+# remembered for that thread's life (`forgetVerifiedPrefixes` drops it).
+# What that leaves: an edit made after a process verified a prefix is
+# caught by the NEXT process, not by this one.
+#
+# What this cannot close. `index.db` lives in the same root. A writer that
+# can edit it can record any digest it likes, or insert a row (a NULL
+# digest is recorded on first use -- trust on first use -- so rows written
+# by an older `repro`, or rebuilt from receipts by `recover`, keep
+# working). Against such a writer only the deployment can help: the store
+# root must not be writable by it (Store-Daemon-And-Multi-User-Coordination
+# §"Security Properties"; Production-Runners-And-Shared-Store PM3).
+#
+# The digest covers every entry's relative path and kind, a regular file's
+# size and BLAKE3, a symlink's target, and the `.repro-receipt` bytes. It
+# deliberately does NOT cover permission bits: `repro store optimise`
+# collapses byte-identical files onto one inode whatever their modes, so a
+# mode is not stable for the life of an honest prefix.
+
+const PrefixTreeDigestDomain = "reprobuild.prefix-tree.v1"
+
+proc hashPrefixTree(hasher: Blake3Hasher; root, rel: string) =
+  let dir = if rel.len == 0: root else: root / rel
+  var names: seq[string] = @[]
+  for kind, name in walkDir(extendedPath(dir), relative = true,
+                            checkDir = true):
+    names.add(name)
+  names.sort(system.cmp[string])
+  for name in names:
+    let childRel = if rel.len == 0: name else: rel & "/" & name
+    let abs = root / childRel
+    let h = hashRegularNoFollow(abs)
+    var rec: seq[byte] = @[]
+    rec.writeString(toForwardSlash(childRel))
+    rec.add(byte(ord(h.kind)))
+    case h.kind
+    of 'f':
+      rec.writeU64Le(h.size)
+      for b in h.digest: rec.add(b)
+    of 'l':
+      var target = ""
+      try: target = expandSymlink(extendedPath(abs))
+      except OSError: target = "\0unreadable"
+      rec.writeString(target)
+    else:
+      discard
+    hasher.update(rec)
+    if h.kind == 'd':
+      hashPrefixTree(hasher, root, childRel)
+
+proc prefixTreeDigest*(dir: string): PrefixIdBytes =
+  ## BLAKE3-256 over a deterministic walk of the prefix tree at ``dir``
+  ## (byte-wise sorted names, depth first), never following a symlink and
+  ## never opening anything but a regular file. See "Prefix content
+  ## integrity" for what it covers. Raises ``OSError`` when ``dir`` is not
+  ## a readable directory.
+  var hasher = blake3.initHasher()
+  try:
+    hasher.update(PrefixTreeDigestDomain)
+    hashPrefixTree(hasher, dir, "")
+    result = hasher.finalize()
+  finally:
+    hasher.close()
+
+proc prefixContentRecord(s: Store; prefixId: PrefixIdBytes):
+    tuple[found, recorded: bool; digest: PrefixIdBytes] =
+  var q: Statement
+  try:
+    q = s.db.prepare("SELECT content_digest FROM prefixes WHERE prefix_id = ?")
+  except SqliteError:
+    # An index without the column (a read-only view an older build
+    # created): the row's existence is all there is to go on.
+    let lookup = s.lookupPrefix(prefixId)
+    return (lookup.found, false, default(PrefixIdBytes))
+  defer: q.finalize()
+  q.bindBlob(1, prefixId)
+  if q.step() != SqliteRow:
+    return (false, false, default(PrefixIdBytes))
+  result.found = true
+  if not q.columnIsNull(0):
+    let raw = q.columnBlob(0)
+    if raw.len == 32:
+      result.recorded = true
+      for i in 0 ..< 32: result.digest[i] = raw[i]
+
+proc recordPrefixContentDigest(s: Store; prefixId, digest: PrefixIdBytes;
+                               onlyIfUnrecorded: bool): bool =
+  ## Store ``digest`` on the row. ``false`` when nothing changed (no row,
+  ## already recorded and ``onlyIfUnrecorded``, or the index refused the
+  ## write).
+  try:
+    var u = s.db.prepare(
+      if onlyIfUnrecorded:
+        "UPDATE prefixes SET content_digest = ? WHERE prefix_id = ? " &
+        "AND content_digest IS NULL"
+      else:
+        "UPDATE prefixes SET content_digest = ? WHERE prefix_id = ?")
+    defer: u.finalize()
+    u.bindBlob(1, digest)
+    u.bindBlob(2, prefixId)
+    discard u.step()
+    s.db.changes() > 0
+  except SqliteError:
+    false
+
+var verifiedPrefixes {.threadvar.}: HashSet[string]
+  ## (store root, prefix id, recorded digest) triples this thread has
+  ## already checked. See "Prefix content integrity" for why first use.
+
+proc verifiedKey(s: Store; prefixId, digest: PrefixIdBytes;
+                 absolutePath: string): string =
+  s.root & "\0" & hexOf(prefixId) & "\0" & hexOf(digest) & "\0" & absolutePath
+
+proc forgetVerifiedPrefixes*() =
+  ## Drop this thread's memo of verified prefixes, so the next use of each
+  ## re-hashes it. For tests and for a long-lived process that wants to
+  ## re-check what it already uses.
+  verifiedPrefixes.clear()
+
+proc verifyRealizedPrefix*(s: var Store; prefixId: PrefixIdBytes;
+                           absolutePath: string;
+                           useMemo = true): PrefixVerification =
+  ## Check the directory at ``absolutePath`` against the index's record
+  ## for ``prefixId``. Never modifies the directory. Records a digest on a
+  ## row that has none (``pvRecordedFirst``). Callers treat ``pvMismatch``,
+  ## ``pvUnindexed`` and ``pvMissing`` as "not realised".
+  let rec = s.prefixContentRecord(prefixId)
+  if not rec.found:
+    result.outcome = pvUnindexed
+    result.diagnostic = "the store index has no row for prefix " &
+      hexOf(prefixId)
+    return
+  var rootKind: PathComponent
+  try:
+    rootKind = getFileInfo(extendedPath(absolutePath),
+                           followSymlink = false).kind
+  except OSError:
+    result.outcome = pvMissing
+    return
+  if rootKind != pcDir:
+    # The store only ever renames a directory into place. A symlink (or a
+    # file) at the prefix path is someone else's redirect, whatever the
+    # tree it points at hashes to today.
+    result.outcome = pvMismatch
+    result.recorded = rec.digest
+    result.diagnostic = "prefix path " & absolutePath & " is not a " &
+      "directory the store published (found " & $rootKind & ")"
+    return
+  result.recorded = rec.digest
+  if rec.recorded and useMemo and
+      s.verifiedKey(prefixId, rec.digest, absolutePath) in verifiedPrefixes:
+    result.outcome = pvCached
+    result.actual = rec.digest
+    return
+  try:
+    result.actual = prefixTreeDigest(absolutePath)
+  except OSError as err:
+    result.outcome = pvMismatch
+    result.diagnostic = "prefix " & absolutePath & " could not be read " &
+      "for verification: " & err.msg
+    return
+  if rec.recorded:
+    if result.actual == rec.digest:
+      result.outcome = pvVerified
+      verifiedPrefixes.incl(s.verifiedKey(prefixId, rec.digest, absolutePath))
+    else:
+      result.outcome = pvMismatch
+      result.diagnostic = "prefix " & absolutePath & " does not match " &
+        "the store index's record of it (recorded tree " &
+        hexOf(rec.digest) & ", found " & hexOf(result.actual) & ")"
+    return
+  if s.recordPrefixContentDigest(prefixId, result.actual,
+                                 onlyIfUnrecorded = true):
+    result.outcome = pvRecordedFirst
+    result.recorded = result.actual
+    verifiedPrefixes.incl(s.verifiedKey(prefixId, result.actual, absolutePath))
+    return
+  # Nothing was written: either another writer recorded one first (check
+  # against it) or this index is not writable here.
+  let again = s.prefixContentRecord(prefixId)
+  if again.found and again.recorded:
+    result.recorded = again.digest
+    if again.digest == result.actual:
+      result.outcome = pvVerified
+      verifiedPrefixes.incl(s.verifiedKey(prefixId, again.digest,
+                                          absolutePath))
+    else:
+      result.outcome = pvMismatch
+      result.diagnostic = "prefix " & absolutePath & " does not match " &
+        "the store index's record of it (recorded tree " &
+        hexOf(again.digest) & ", found " & hexOf(result.actual) & ")"
+    return
+  result.outcome = pvUnrecorded
+
+proc quarantineUnique(s: var Store; absolutePath: string): string
+proc appendAudit(s: var Store; action: GcAction; prefixId: PrefixIdBytes;
+                 reason: string)
+
+var prefixIntegrityLogHook* {.threadvar.}: proc (message: string) {.closure, gcsafe.}
+  ## Where a displaced prefix is reported, besides ``RealizeResult``.
+  ## ``nil`` (the default) writes one line to stderr. Per thread, like
+  ## ``casRepairLogHook``.
+
+proc reportPrefixIntegrity(message: string) =
+  if prefixIntegrityLogHook != nil:
+    prefixIntegrityLogHook(message)
+  else:
+    try: stderr.writeLine(message) except IOError: discard
+
+proc displaceUntrustedPrefix(s: var Store; prefixId: PrefixIdBytes;
+                             absolutePath, why: string): string =
+  ## Move whatever is at ``absolutePath`` out of the way of a fresh
+  ## realisation: a directory to ``gc/pending-deletion/`` (kept for the GC
+  ## grace, so the evidence survives), anything else (a symlink, a file)
+  ## unlinked. Records it in ``gc_audit`` and reports it. Returns the
+  ## diagnostic.
+  var movedTo = ""
+  var info: FileInfo
+  var present = true
+  try:
+    info = getFileInfo(extendedPath(absolutePath), followSymlink = false)
+  except OSError:
+    present = false
+  if present:
+    if info.kind == pcDir:
+      movedTo = s.quarantineUnique(absolutePath)
+    else:
+      removeFile(extendedPath(absolutePath))
+  result = "repro store: " & why & "; " &
+    (if movedTo.len > 0: "moved it to " & movedTo
+     elif present: "removed it"
+     else: "it was already gone") &
+    " and realised the prefix again"
+  try:
+    s.appendAudit(gaQuarantine, prefixId, result)
+  except CatchableError:
+    discard
+  reportPrefixIntegrity(result)
+
+proc publishRowLocked(s: var Store; row: PrefixRow;
+                      contentDigest: PrefixIdBytes; replacing: bool): bool =
+  ## The index step of the write protocol plus the content record, inside
+  ## the caller's write transaction, after this writer's rename put a
+  ## fresh directory at the prefix path. With ``replacing`` (the row
+  ## exists but described a directory that was missing or did not verify)
+  ## the row is UPDATED to describe the new directory -- not deleted,
+  ## which would cascade away every root's hold. Returns whether this call
+  ## created or replaced the row; ``false`` is the pre-existing
+  ## ``INSERT OR IGNORE`` loser, which leaves the row alone.
+  result = s.insertPrefixOrIgnore(row)
+  if result:
+    discard s.recordPrefixContentDigest(row.prefixId, contentDigest,
+                                        onlyIfUnrecorded = false)
+  elif replacing:
+    var u = s.db.prepare(
+      "UPDATE prefixes SET receipt_digest = ?, created_at = ? " &
+      "WHERE prefix_id = ?")
+    defer: u.finalize()
+    u.bindBlob(1, row.receiptDigest)
+    u.bindInt(2, row.createdAtUnix)
+    u.bindBlob(3, row.prefixId)
+    discard u.step()
+    discard s.recordPrefixContentDigest(row.prefixId, contentDigest,
+                                        onlyIfUnrecorded = false)
+    result = true
+
+proc publishStagedPrefix(s: var Store; stage: string; row: PrefixRow;
+                         contentDigest: PrefixIdBytes; replacing: var bool;
+                         res: var RealizeResult) =
+  ## Steps 5-6 of the write protocol for a sealed ``stage``: rename it to
+  ## ``res.absolutePath`` and index it, or settle as the loser of the
+  ## rename against a VERIFIED existing prefix. Fills ``res``'s
+  ## ``outcome``, ``row``, ``verification`` and integrity fields. The
+  ## caller removes ``stage`` if this raises.
+  createDir(extendedPath(parentDir(res.absolutePath)))
+  # Publish (atomic rename) and index in ONE write transaction, so a
+  # writer whose rename loses reads the winner's row, not the gap
+  # between the winner's rename and its insert (which would otherwise
+  # look exactly like an unindexed, planted directory).
+  var attempt = 0
+  while true:
+    inc attempt
+    var renameError = ""
+    s.db.exec("BEGIN IMMEDIATE")
+    var committed = false
+    try:
+      # Never rename onto an occupied path. On Windows `moveDir` cannot
+      # replace a directory and falls back to COPYING the stage into it,
+      # which would merge this realisation into whatever is there (a
+      # planted tree's extra files survive) and index the merge under the
+      # stage's digest. On POSIX an empty directory would be replaced
+      # silently. Either way the occupant is settled below instead. Under
+      # this transaction no other store writer can publish here between
+      # the check and the rename.
+      var occupied = true
+      try:
+        discard getFileInfo(extendedPath(res.absolutePath),
+                            followSymlink = false)
+      except OSError:
+        occupied = false
+      if occupied:
+        renameError = "the prefix path is already occupied"
+      else:
+        try:
+          moveDir(extendedPath(stage), extendedPath(res.absolutePath))
+        except OSError as err:
+          renameError = err.msg
+      if renameError.len == 0:
+        let wrote = s.publishRowLocked(row, contentDigest, replacing)
+        s.db.exec("COMMIT")
+        committed = true
+        if wrote:
+          verifiedPrefixes.incl(s.verifiedKey(row.prefixId, contentDigest,
+                                              res.absolutePath))
+        res.outcome = if wrote: roPublished else: roLoserOfRace
+        res.verification = pvNotChecked
+        res.row = row
+        return
+      s.db.exec("COMMIT")
+      committed = true
+    finally:
+      if not committed:
+        try: s.db.exec("ROLLBACK") except CatchableError: discard
+    # The rename was refused.
+    var occupant = true
+    try:
+      discard getFileInfo(extendedPath(res.absolutePath),
+                          followSymlink = false)
+    except OSError:
+      occupant = false
+    if not occupant:
+      raise newException(OSError, "could not publish prefix " &
+        res.absolutePath & ": " & renameError)
+    if attempt > 1:
+      raise newException(StoreError, "prefix path " &
+        res.absolutePath & " was occupied again after an untrusted " &
+        "directory was displaced from it: " & renameError)
+    # Something already occupies the prefix path. It is the loser-of-
+    # rename case only if the index vouches for it and it verifies; a
+    # directory the index has no row for (a crashed writer's, or one
+    # planted with a receipt naming this id) is never adopted.
+    let check = s.verifyRealizedPrefix(row.prefixId, res.absolutePath)
+    if check.outcome in {pvVerified, pvCached, pvRecordedFirst,
+                         pvUnrecorded}:
+      if dirExists(extendedPath(stage)):
+        try: removeDir(extendedPath(stage)) except OSError: discard
+      res.outcome = roLoserOfRace
+      res.verification = check.outcome
+      let existing = s.lookupPrefix(row.prefixId)
+      if existing.found:
+        res.row = existing.row
+      return
+    let why =
+      if check.outcome == pvUnindexed:
+        "a directory at " & res.absolutePath & " has no row in the " &
+          "store index (its receipt is not authority for adopting it)"
+      else: check.diagnostic
+    res.replacedUntrusted = true
+    res.integrityDiagnostic = s.displaceUntrustedPrefix(row.prefixId,
+      res.absolutePath, why)
+    if check.outcome != pvUnindexed:
+      replacing = true
+
 proc realizePrefix*(s: var Store; prefixId: PrefixIdBytes;
                     hint: StoreReceiptHint;
                     populate: proc (stagingDir: string;
@@ -1887,14 +2558,28 @@ proc realizePrefix*(s: var Store; prefixId: PrefixIdBytes;
   result.absolutePath = s.absolutePrefixPath(result.relativePath)
 
   let lookup = s.lookupPrefix(prefixId)
+  # ``replacing``: the index has a row, but the directory it describes is
+  # gone or did not verify; the fresh realisation below updates the row
+  # instead of inserting one.
+  var replacing = false
   if lookup.found:
     result.outcome = roAlreadyPresent
     result.row = lookup.row
     if dirExists(extendedPath(result.absolutePath)):
-      discard s.touchPrefix(prefixId)
-      return result
-    # Index says we have it but the directory was wiped externally; fall
-    # through and re-materialize.
+      let check = s.verifyRealizedPrefix(prefixId, result.absolutePath)
+      result.verification = check.outcome
+      if check.outcome in {pvVerified, pvCached, pvRecordedFirst,
+                           pvUnrecorded}:
+        discard s.touchPrefix(prefixId)
+        return result
+      if check.outcome == pvMismatch:
+        # The directory is not what was published: treat it as absent.
+        result.replacedUntrusted = true
+        result.integrityDiagnostic = s.displaceUntrustedPrefix(prefixId,
+          result.absolutePath, check.diagnostic)
+    # Index says we have it but the directory was wiped externally (or was
+    # just displaced); fall through and re-materialize.
+    replacing = true
   # Stage:
   let stage = s.allocateStagingDir()
   var mechanism = "copy"
@@ -1925,24 +2610,9 @@ proc realizePrefix*(s: var Store; prefixId: PrefixIdBytes;
       contentDigest: storeTreeDigest(stage))
     writeReceiptFile(stage / ReceiptFileName, receipt)
     let digest = receiptDigest(receipt)
-    # Publish (atomic rename):
-    createDir(extendedPath(parentDir(result.absolutePath)))
-    var publishedSelf = true
-    try:
-      moveDir(extendedPath(stage), extendedPath(result.absolutePath))
-    except OSError:
-      publishedSelf = false
-    if not publishedSelf:
-      if dirExists(extendedPath(stage)):
-        try: removeDir(extendedPath(stage)) except OSError: discard
-      if not dirExists(extendedPath(result.absolutePath)):
-        raise
-      result.outcome = roLoserOfRace
-      let row = s.lookupPrefix(prefixId)
-      if row.found:
-        result.row = row.row
-      return result
-    # Index (winner of rename):
+    # The record a later use is checked against: the tree exactly as it is
+    # about to be published, receipt included.
+    let contentDigest = prefixTreeDigest(stage)
     var row = PrefixRow(
       prefixId: prefixId,
       packageName: hint.packageName,
@@ -1951,20 +2621,7 @@ proc realizePrefix*(s: var Store; prefixId: PrefixIdBytes;
       adapter: hint.adapter,
       receiptDigest: digest,
       createdAtUnix: receipt.createdAtUnix)
-    s.db.exec("BEGIN IMMEDIATE")
-    var committed = false
-    try:
-      let inserted = s.insertPrefixOrIgnore(row)
-      s.db.exec("COMMIT")
-      committed = true
-      if inserted:
-        result.outcome = roPublished
-      else:
-        result.outcome = roLoserOfRace
-      result.row = row
-    finally:
-      if not committed:
-        try: s.db.exec("ROLLBACK") except CatchableError: discard
+    s.publishStagedPrefix(stage, row, contentDigest, replacing, result)
     return result
   except CatchableError:
     if dirExists(extendedPath(stage)):
@@ -2714,13 +3371,22 @@ proc realizeMultiOutput*(s: var Store; hint: StoreReceiptHint;
     var entry = PerOutputRealize(name: p.spec.outputName,
       prefixId: p.prefixId, relativePath: p.relativePath,
       absolutePath: p.absolutePath)
-    # Cache hit (already-present prefix): skip staging entirely.
+    # Cache hit (already-present prefix): skip staging entirely -- if the
+    # directory verifies against the index's record (G7, see
+    # ``realizePrefix``); otherwise it is displaced and realised again.
     let lookup = s.lookupPrefix(p.prefixId)
+    var replacing = lookup.found
     if lookup.found and dirExists(extendedPath(p.absolutePath)):
-      entry.outcome = roAlreadyPresent
-      discard s.touchPrefix(p.prefixId)
-      result.perOutput.add(entry)
-      continue
+      let check = s.verifyRealizedPrefix(p.prefixId, p.absolutePath)
+      if check.outcome in {pvVerified, pvCached, pvRecordedFirst,
+                           pvUnrecorded}:
+        entry.outcome = roAlreadyPresent
+        discard s.touchPrefix(p.prefixId)
+        result.perOutput.add(entry)
+        continue
+      if check.outcome == pvMismatch:
+        discard s.displaceUntrustedPrefix(p.prefixId, p.absolutePath,
+          check.diagnostic)
     var perHint = hint
     perHint.outputName = p.spec.outputName
     let stage = s.allocateStagingDir()
@@ -2751,20 +3417,7 @@ proc realizeMultiOutput*(s: var Store; hint: StoreReceiptHint;
         contentDigest: storeTreeDigest(stage))
       writeReceiptFile(stage / ReceiptFileName, receipt)
       let digest = receiptDigest(receipt)
-      createDir(extendedPath(parentDir(p.absolutePath)))
-      var publishedSelf = true
-      try:
-        moveDir(extendedPath(stage), extendedPath(p.absolutePath))
-      except OSError:
-        publishedSelf = false
-      if not publishedSelf:
-        if dirExists(extendedPath(stage)):
-          try: removeDir(extendedPath(stage)) except OSError: discard
-        if not dirExists(extendedPath(p.absolutePath)):
-          raise
-        entry.outcome = roLoserOfRace
-        result.perOutput.add(entry)
-        continue
+      let contentDigest = prefixTreeDigest(stage)
       var row = PrefixRow(
         prefixId: p.prefixId,
         packageName: perHint.packageName,
@@ -2773,18 +3426,10 @@ proc realizeMultiOutput*(s: var Store; hint: StoreReceiptHint;
         adapter: perHint.adapter,
         receiptDigest: digest,
         createdAtUnix: receipt.createdAtUnix)
-      s.db.exec("BEGIN IMMEDIATE")
-      var committed = false
-      try:
-        let inserted = s.insertPrefixOrIgnore(row)
-        s.db.exec("COMMIT")
-        committed = true
-        entry.outcome =
-          if inserted: roPublished
-          else: roLoserOfRace
-      finally:
-        if not committed:
-          try: s.db.exec("ROLLBACK") except CatchableError: discard
+      var published = RealizeResult(prefixId: p.prefixId,
+        relativePath: p.relativePath, absolutePath: p.absolutePath)
+      s.publishStagedPrefix(stage, row, contentDigest, replacing, published)
+      entry.outcome = published.outcome
       result.perOutput.add(entry)
     except CatchableError:
       if dirExists(extendedPath(stage)):

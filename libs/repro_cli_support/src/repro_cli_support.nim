@@ -51919,6 +51919,9 @@ proc runMainlineSyncCommand(parsed: WorkspaceSyncArgs): int =
   if not parsed.dryRun:
     writeMainlineSyncReport(report,
       reportDestination(parsed.report, report.workspaceRoot, "sync"))
+    # This path clones missing checkouts just as the ordinary sync does, so it
+    # refreshes the sibling set the same way. Skipped under `--dry-run`.
+    refreshWorkspaceSiblingIgnoresBestEffort(report.workspaceRoot)
   if parsed.json:
     stdout.writeLine(pretty(report.toJsonNode(), indent = 2))
   else:

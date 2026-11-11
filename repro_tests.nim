@@ -6570,6 +6570,17 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "t_group_libs_repro_local_store_tests_g01",
     singleReason: ""),
   TestSpec(
+    source: "libs/repro_local_store/tests/t_store_refuses_squatted_cas_and_planted_prefixes.nim",
+    binary: "build/test-bin/t_store_refuses_squatted_cas_and_planted_prefixes",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "",
+    singleReason: "suite-scope statement runs at every start-up: var sources = 0"),
+  TestSpec(
     source: "libs/repro_local_store/tests/t_store_use_record_lost_to_a_writer_leaves_no_lock.nim",
     binary: "build/test-bin/t_store_use_record_lost_to_a_writer_leaves_no_lock",
     defines: @[],
@@ -19943,8 +19954,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "",
-    singleReason: "suite-scope statement runs at every start-up: let fx = setupSiblingFixture(\"gateway-siblings\")"),
+    group: "t_group_tests_integration_g05",
+    singleReason: ""),
   TestSpec(
     source: "tests/integration/t_gateway_accepts_one_ref_push_certified_before_push.nim",
     binary: "build/test-bin/t_gateway_accepts_one_ref_push_certified_before_push",
@@ -20350,7 +20361,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g05",
+    group: "t_group_tests_integration_g06",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_hooks_noop_outside_initialized_workspace.nim",
@@ -21428,8 +21439,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "",
-    singleReason: "suite-scope statement runs at every start-up: let gitBin = findExe(\"git\")"),
+    group: "t_group_tests_integration_g07",
+    singleReason: ""),
   TestSpec(
     source: "tests/integration/t_local_store_prune_keeps_newest_and_head_tree.nim",
     binary: "build/test-bin/t_local_store_prune_keeps_newest_and_head_tree",
@@ -22319,7 +22330,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g09",
+    group: "t_group_tests_integration_g08",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_monitor_fault_fails_the_action_not_the_daemon.nim",
@@ -23012,7 +23023,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g10",
+    group: "t_group_tests_integration_g09",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_pre_push_consumes_evidence_and_applies_tier_unreachable_policy.nim",
@@ -23023,7 +23034,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g10",
+    group: "t_group_tests_integration_g09",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_pre_push_currency_read_routes_per_backend.nim",
@@ -23243,8 +23254,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "",
-    singleReason: "suite-scope statement runs at every start-up: let gitBin = findExe(\"git\")"),
+    group: "t_group_tests_integration_g10",
+    singleReason: ""),
   TestSpec(
     source: "tests/integration/t_pre_receive_rejects_public_lock_with_private_ref_and_integrity_mismatch.nim",
     binary: "build/test-bin/t_pre_receive_rejects_public_lock_with_private_ref_and_integrity_mismatch",
@@ -23254,8 +23265,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "",
-    singleReason: "suite-scope statement runs at every start-up: let gitBin = findExe(\"git\")"),
+    group: "t_group_tests_integration_g10",
+    singleReason: ""),
   TestSpec(
     source: "tests/integration/t_preloaded_monitor_shim_is_loader_inert.nim",
     binary: "build/test-bin/t_preloaded_monitor_shim_is_loader_inert",
