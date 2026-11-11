@@ -439,7 +439,7 @@ libs/repro_dsl_stdlib/tests/t_nim_entropy_blessing.nim	nim	11
 libs/repro_dsl_stdlib/tests/t_nim_ssl_dependency.nim	nim	3
 libs/repro_dsl_stdlib/tests/t_no_catalog_tarball_arm_declares_a_source_build_driver.nim	nim	1
 libs/repro_dsl_stdlib/tests/t_one_toolchain_resolution_path.nim	nim	5
-libs/repro_dsl_stdlib/tests/t_openssl_windows_link_channel.nim	nim	12
+libs/repro_dsl_stdlib/tests/t_openssl_windows_link_channel.nim	nim	13
 libs/repro_dsl_stdlib/tests/t_packaging_appimage_authoring.nim	nim	19
 libs/repro_dsl_stdlib/tests/t_packaging_arch_authoring.nim	nim	19
 libs/repro_dsl_stdlib/tests/t_packaging_content_addressed.nim	nim	11
@@ -2758,7 +2758,7 @@ tests/unit/test_graph_owned_test_artifacts.py	python	26
 tests/unit/test_install_nix_paths.py	python	14
 tests/unit/test_lint_gate_ordering.py	python	4
 tests/unit/test_nim224_lane_selection.py	python	5
-tests/unit/test_nix_daemon_descriptors.py	python	7
+tests/unit/test_nix_daemon_descriptors.py	python	8
 tests/unit/test_nix_daemon_expression_file_is_never_cached.py	python	4
 tests/unit/test_nix_daemon_request_requires_workspace_root.py	python	4
 tests/unit/test_nix_evaluation_policy.py	python	1

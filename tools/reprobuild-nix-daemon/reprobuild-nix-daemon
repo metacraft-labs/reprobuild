@@ -6,9 +6,11 @@ import json
 import signal
 import os
 from pathlib import Path
+import shutil
 import socket
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 
@@ -67,6 +69,12 @@ def close_inherited_descriptors() -> None:
         except OSError as error:
             if error.errno != errno.EBADF:
                 raise
+
+
+# The names a Nix command, and the tools it starts (git, curl, the fetchers),
+# read for "the temporary directory". ``nix-build`` creates its
+# ``nix-build-<pid>-<n>`` directory under ``TMPDIR`` before it evaluates.
+TEMPORARY_DIRECTORY_ENV = ("TMPDIR", "TMP", "TEMP", "TEMPDIR")
 
 
 def host_tool_environment() -> dict[str, str]:
@@ -604,19 +612,53 @@ def on_terminate(signum, _frame):
     raise Terminated(signum)
 
 
+def use_own_temporary_directory(socket_path: str) -> str:
+    """Point every temporary-directory variable at a directory this helper
+    creates, and answer it.
+
+    THE LAUNCHER'S TEMPORARY DIRECTORY IS NOT THE HELPER'S. The helper inherits
+    ``TMPDIR`` from whichever client spawned it and outlives that client, while
+    every other client of the user shares it. A client that made a private
+    ``TMPDIR`` and removed it at exit (a gate runner, a test case) left the
+    helper naming a directory that no longer exists, and every later
+    ``nix-build`` through it -- for any client -- failed with ``creating
+    directory "<removed>/nix-build-...": No such file or directory``
+    (reprobuild-pm issue
+    ``2026-11-07-reprobuild-nix-daemon-keeps-the-temp-directory-of-the-client-that-started-it.md``).
+
+    The directory is created beside the socket, the helper's own state
+    directory, and never under the inherited ``TMPDIR``: ``tempfile``'s
+    default location is read from that very variable. ``mkdtemp`` makes it
+    private (mode 0700) and unique, so a helper that lost a start race or one
+    still draining after idle exit never shares or removes another's."""
+    directory = tempfile.mkdtemp(
+        prefix=os.path.basename(socket_path) + ".tmp-",
+        dir=os.path.dirname(socket_path))
+    for name in TEMPORARY_DIRECTORY_ENV:
+        os.environ[name] = directory
+    tempfile.tempdir = directory
+    return directory
+
+
 def serve(socket_path: str, idle_exit_ms: int) -> int:
     server = Server(socket_path, idle_exit_ms)
     if not server.take_over():
         log(f"a live helper already serves {socket_path}; not starting another")
         return 0
-    log(f"serving {socket_path}")
+    temporary = None
     try:
+        # Created only once this helper serves, so a helper that exits above
+        # leaves nothing behind; removed on every exit below.
+        temporary = use_own_temporary_directory(socket_path)
+        log(f"serving {socket_path} (temporary directory {temporary})")
         return server.run()
     except Terminated as exc:
         log(f"signal {exc.args[0]}; released {socket_path}")
         return 0
     finally:
         server.give_up_path()
+        if temporary is not None:
+            shutil.rmtree(temporary, ignore_errors=True)
 
 def main(argv: list[str]) -> int:
     close_inherited_descriptors()
