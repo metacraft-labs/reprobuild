@@ -303,7 +303,8 @@ proc reprobuildPackagesSearch*(selector, consumerSourceFile: string):
   ##    so an explicitly chosen catalog is never silently replaced by another;
   ## 2. a ``reprobuild-packages`` directory beside the consumer's project or
   ##    any ancestor of it -- the workspace-sibling convention, and where
-  ##    `setup-dev-env` clones a `.github/sibling-repos` entry in CI;
+  ##    `setup-dev-env` clones a `.github/sibling-repos` entry in CI (a bare
+  ##    name, at the revision `repro.lock` pins);
   ## 3. the lock-pinned catalog, under
   ##    ``<consumerRoot>/.repro/cross-repo-producers/reprobuild-packages/<rev>``;
   ## 4. a ``reprobuild-packages`` directory beside the reprobuild source tree
@@ -458,7 +459,8 @@ proc reprobuildPackagesRemedy*(): string =
     "  - set " & ReprobuildPackagesRootEnv & " to a reprobuild-packages" &
     " checkout (a Nix dev shell exports it from a flake input);\n" &
     "  - in CI, list `reprobuild-packages` in .github/sibling-repos, which" &
-    " setup-dev-env clones beside the checkout."
+    " setup-dev-env clones beside the checkout (at the revision repro.lock" &
+    " pins, when it pins one)."
 
 proc describeReprobuildPackagesSearch*(search: ReprobuildPackagesSearch):
     string =

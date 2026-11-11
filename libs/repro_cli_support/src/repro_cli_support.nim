@@ -4504,9 +4504,12 @@ proc lowerProviderSnapshot*(snapshot: ProviderGraphSnapshot;
       (item.payload.publishToBinaryCache and
         item.payload.cacheEntryIdentity.isSome)
 
-  # When no selector is provided, schedule every emitted edge — the
-  # legacy "build everything" behavior preserved from the single-target
-  # entry point.
+  # When no selector is provided, schedule every emitted edge except the
+  # members of the ``test``, ``bench`` and ``lint`` collections, which run
+  # only when selected by name. An action whose dependency closure reaches
+  # such a member cannot run without it, so it is left out as well:
+  # emitting it would hand the engine a dependency on an action that is
+  # not in the graph.
   var hasSelector = false
   for s in selectedActionIds:
     if s.len > 0:
@@ -4520,6 +4523,23 @@ proc lowerProviderSnapshot*(snapshot: ProviderGraphSnapshot;
          name == "lint" or name.endsWith(":lint"):
         for aid in target.actions:
           excludedActionIds.incl(aid)
+    # Every consumer of an excluded action is excluded too: walk the
+    # reverse dependency edges from the excluded members. A dependency the
+    # graph does not declare, and a cycle among retained actions, reach the
+    # engine's graph validation unchanged.
+    var consumersByDep = initTable[string, seq[string]]()
+    for item in actionNodes:
+      for dep in item.payload.deps:
+        consumersByDep.mgetOrPut(dep, @[]).add(item.payload.id)
+    var pending: seq[string] = @[]
+    for actionId in excludedActionIds:
+      pending.add(actionId)
+    while pending.len > 0:
+      let actionId = pending.pop()
+      for consumer in consumersByDep.getOrDefault(actionId):
+        if not excludedActionIds.containsOrIncl(consumer):
+          pending.add(consumer)
+
     for item in actionNodes:
       if not excludedActionIds.contains(item.payload.id) and
           shouldLower(item):
@@ -51557,7 +51577,12 @@ proc executeMainlineSync(args: WorkspaceSyncArgs): MainlineSyncReport =
       remoteName = gitRemoteNameFor(repo),
       repoPath = repo.path,
       receiptPath = ".repro" / "workspace" / "receipts" /
-        ("mainline-sync-fetch-" & idSeg & ".receipt"))
+        ("mainline-sync-fetch-" & idSeg & ".receipt"),
+      # The fetch is what observes the remote, and live remote state cannot be
+      # cached: a receipt from an earlier sync would answer for a remote that
+      # has since moved, and the role tip read below would be stale. Like the
+      # ordinary sync's fetch (``syncFetchActionFor``), it always runs.
+      cacheable = false)
     action.cwd = args.workspaceRoot
     fetchActions.add(action)
     fetchIdByPath[repo.path] = actionId

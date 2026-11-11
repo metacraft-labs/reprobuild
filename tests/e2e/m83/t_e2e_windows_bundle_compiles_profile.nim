@@ -366,7 +366,6 @@ else:
       defer:
         try: removeDir(s.root) except OSError: discard
       checkpoint(s.res.output)
-      check s.res.exitCode == 0
       # Vacuity: the profile compiled and a stdlib package was planned.
       check packageLine(s.res.output, "just").startsWith("realize  just  ")
       let line = packageLine(s.res.output, CatalogOnlyPackage)
@@ -374,6 +373,8 @@ else:
       check line.len > 0
       check "unknown-package" notin line
       check line.startsWith("realize  ") or "missing-realization" in line
+      # A missing realization fails the plan even under `--allow-drift`.
+      check s.res.exitCode == (if line.startsWith("realize  "): 0 else: 1)
       # The projection's recorded inputs name the shipped catalog, not this
       # workspace's sibling.
       let projection = s.stateDir / "catalog-projection"
@@ -398,10 +399,13 @@ else:
       defer:
         try: removeDir(s.root) except OSError: discard
       checkpoint(s.res.output)
-      check s.res.exitCode == 0
+      # The unknown package fails the plan even under `--allow-drift`.
+      check s.res.exitCode == 1
       check packageLine(s.res.output, "just").startsWith("realize  just  ")
       check packageLine(s.res.output, CatalogOnlyPackage).startsWith(
         "missing  " & CatalogOnlyPackage & "  (unknown-package: ")
+      check ("so the apply would fail: " & CatalogOnlyPackage) in
+        s.res.output
       check not dirExists(s.stateDir / "catalog-projection")
 
     test "e2e_windows_bundle_compiles_profile: negative control - without " &

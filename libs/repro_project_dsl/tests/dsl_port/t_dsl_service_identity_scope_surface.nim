@@ -218,7 +218,7 @@ suite "L4 — the shapes the setter walk used to SKIP are refused":
     checkpoint(probe.output)
     check not probe.ok
     check probe.mentions("is not a shape `identity` is written in")
-    check probe.mentions("would otherwise SKIP it")
+    check probe.mentions("`identity stable \"<id>\"`")
 
   test "a bare `scope` is refused":
     let probe = edited(ScopeLine, "    scope", "l4-bare-scope")

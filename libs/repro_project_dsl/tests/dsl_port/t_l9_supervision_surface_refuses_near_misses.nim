@@ -95,7 +95,7 @@ const AllProbes* = [
   Probe(tag: "bare-readiness", honoured: false,
     replacement: """        readiness
 """,
-    mentions: @["bare identifier", "`readiness`", "skip it entirely"]),
+    mentions: @["bare identifier", "`readiness`", "is a SETTER that takes an argument"]),
 
   Probe(tag: "bare-instance", honoured: false,
     replacement: """        instance
@@ -118,7 +118,7 @@ const AllProbes* = [
   Probe(tag: "empty-call-readiness", honoured: false,
     replacement: """        readiness()
 """,
-    mentions: @["NO ARGUMENTS", "`readiness`", "skipped entirely"]),
+    mentions: @["NO ARGUMENTS", "`readiness`", "not a shape any supervision setter is written in"]),
 
   Probe(tag: "empty-call-instance", honoured: false,
     replacement: """        instance()
@@ -150,7 +150,7 @@ const AllProbes* = [
   Probe(tag: "dotted-readiness-head", honoured: false,
     replacement: """        probe.readiness fileExists(".repro/l9-probe/ready")
 """,
-    mentions: @["dotted head", "skipped entirely"]),
+    mentions: @["dotted head", "written with a bare setter name"]),
 
   Probe(tag: "dotted-state-directory-head", honoured: false,
     replacement: """        probe.stateDirectory ".repro/l9-probe"

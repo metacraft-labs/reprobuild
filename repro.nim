@@ -4211,7 +4211,7 @@ package reprobuild:
           inputs = @["scripts/release/stage_release_sources.sh",
             "scripts/release/stage_release_catalog.sh",
             "scripts/lib/stage_source_root.sh", "config.nims",
-            ".github/sibling-repos"],
+            ".github/sibling-repos", "repro.lock"],
           outputs = @[sourcesStage, sourcesManifest],
           cacheable = false,
           dependencyPolicy = automaticMonitorPolicy(),

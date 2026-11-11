@@ -158,7 +158,8 @@ package app:
   ## Development database — provisioned from the catalog like any
   ## other dependency and supervised by `repro up`.
   service db:
-    postgres(dataDir = "data/db", port = port)
+    executable postgres.executable("postgres")
+    args "-D", "data/db"
 
   # Rust library compiled from source
   library "rust_lib":
