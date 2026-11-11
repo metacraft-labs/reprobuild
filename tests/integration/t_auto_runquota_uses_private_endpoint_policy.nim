@@ -4,6 +4,10 @@
 ## Explicit foreign host selectors reproduce the account shape without NSS
 ## changes. A shell fixture grades only startup output transport: a real daemon
 ## cannot deterministically produce large independent stdout/stderr refusals.
+## Another prints a refusal naming the caller's own uid, which a current daemon
+## gives only for faults this suite cannot provoke through the auto-start (it
+## creates the endpoint itself); it grades that such a refusal gets no
+## stale-daemon remedy.
 import std/[json, os, osproc, strutils, tempfiles, unittest]
 import repro_cli_support
 import repro_runquota
@@ -19,7 +23,9 @@ when defined(posix):
   from repro_core/paths import runquotaEndpointPath
   from runquota_ipc import hostWideEndpointDir
 
-  proc checkRefusesWithoutSpawn(root, endpoint, scope: string) =
+  proc checkRefusesWithoutSpawn(root, endpoint, scope: string): string
+      {.discardable.} =
+    ## Returns the refusal so a caller can grade what it says.
     let marker = root / "unexpected-start"
     let wrapper = root / "must-not-start"
     writeFile(wrapper, "#!/bin/sh\nprintf executed > " & quoteShell(marker) &
@@ -39,6 +45,7 @@ when defined(posix):
     check not fileExists(marker)
     check getEnv("RUNQUOTA_SOCKET") == endpoint
     check getEnv("RUNQUOTA_ENDPOINT_SCOPE") == scope
+    message
 
   proc writeRealDaemonWrapper(root, daemonBin: string): string =
     ## A `RUNQUOTAD_BIN` that execs the real daemon with this test's own
@@ -246,6 +253,104 @@ when defined(posix):
       check "with signal 9" in message
       check "exit code" notin message
       check "killing myself before I listen" in message
+
+    test "a daemon that ignores the private selection is named with a remedy":
+      # reprobuild-pm issue 2026-10-31-repro-exec-fails-when-a-runquota-
+      # account-exists-but-no-daemon-runs.md: a runquotad built before
+      # private endpoints (runquota 35b9dfe) never reads
+      # RUNQUOTA_ENDPOINT_SCOPE, so on a host with a `runquota` account it
+      # checks repro's own 0700 directory against that account and exits.
+      # The REAL daemon reproduces that exactly once the selection is
+      # withheld from it; the host owner selector set up above (uid 0, or 1
+      # under root) stands in for the account, as everywhere in this suite.
+      let stale = root / "pre-private-runquotad"
+      let inner = writeRealDaemonWrapper(root, daemonBin)
+      writeFile(stale, "#!/bin/sh\nexec env -u RUNQUOTA_ENDPOINT_SCOPE " &
+        quoteShell(inner) & " \"$@\"\n")
+      setFilePermissions(stale, {fpUserRead, fpUserWrite, fpUserExec})
+      putEnv("RUNQUOTAD_BIN", stale)
+      var message = ""
+      try:
+        var daemon = startAutoRunQuotaIfNeeded(false)
+        releaseAutoRunQuotaProcess(daemon)
+      except OSError as error:
+        message = error.msg
+      check "did not become reachable" in message
+      # The daemon's own refusal is still carried ...
+      check ("configured daemon owner uid " &
+        getEnv("RUNQUOTA_ENDPOINT_OWNER_UID")) in message
+      # ... and followed by what it means and what to do.
+      check ("remedy: " & stale) in message
+      check "predates private RunQuota endpoints" in message
+      check "RUNQUOTAD_BIN" in message
+      check getEnv("RUNQUOTA_SOCKET") == root / "absent.sock"
+      check not existsEnv("RUNQUOTA_ENDPOINT_SCOPE")
+
+    test "a refusal that is not the host policy's gets no stale-daemon remedy":
+      # A private policy names the caller as the daemon owner, so a refusal
+      # naming the caller's own uid came from a daemon that honoured the
+      # selection and must not be blamed on its age.
+      let wrapper = root / "refusing-runquotad"
+      writeFile(wrapper, "#!/bin/sh\nprintf 'refusing for its own " &
+        "reasons; configured daemon owner uid " & $geteuid() &
+        ", and more\\n' >&2\nexit 3\n")
+      setFilePermissions(wrapper, {fpUserRead, fpUserWrite, fpUserExec})
+      putEnv("RUNQUOTAD_BIN", wrapper)
+      var message = ""
+      try:
+        var daemon = startAutoRunQuotaIfNeeded(false)
+        releaseAutoRunQuotaProcess(daemon)
+      except OSError as error:
+        message = error.msg
+      check "refusing for its own reasons" in message
+      check "remedy:" notin message
+
+    test "a hand-set private scope without a socket is refused with a remedy":
+      # The issue's operator tried RUNQUOTA_ENDPOINT_SCOPE=private to get past
+      # the failure; the refusal must keep starting nothing, and say why.
+      let marker = root / "unexpected-start"
+      let wrapper = root / "must-not-start"
+      writeFile(wrapper, "#!/bin/sh\nprintf executed > " &
+        quoteShell(marker) & "\nexit 23\n")
+      setFilePermissions(wrapper, {fpUserRead, fpUserWrite, fpUserExec})
+      putEnv("RUNQUOTAD_BIN", wrapper)
+      delEnv("RUNQUOTA_SOCKET")
+      putEnv("RUNQUOTA_ENDPOINT_SCOPE", "private")
+      var message = ""
+      try:
+        var daemon = startAutoRunQuotaIfNeeded(false)
+        releaseAutoRunQuotaProcess(daemon)
+      except CatchableError as error:
+        message = error.msg
+      check "private RunQuota policy requires" in message
+      check "remedy:" in message
+      check "unset RUNQUOTA_ENDPOINT_SCOPE" in message
+      check not fileExists(marker)
+
+    test "every refusal of a hand-set private scope names the remedy":
+      # Not only the missing socket: a relative RUNQUOTA_SOCKET, and an
+      # existing endpoint in a trusted private directory that does not
+      # answer, are refused under the same selection and get the same
+      # remedy (RunQuota-Host-Configuration.md, explicit private policy).
+      let relative = checkRefusesWithoutSpawn(root, "relative.sock", "private")
+      check "must name an absolute endpoint" in relative
+      check "unset RUNQUOTA_ENDPOINT_SCOPE" in relative
+      let privateDir = root / "private-endpoint"
+      createDir(privateDir)
+      setFilePermissions(privateDir, {fpUserRead, fpUserWrite, fpUserExec})
+      let silent = privateDir / "runquota.sock"
+      writeFile(silent, "not a listening socket")
+      setFilePermissions(silent, {fpUserRead, fpUserWrite})
+      let unanswered = checkRefusesWithoutSpawn(root, silent, "private")
+      check "unset RUNQUOTA_ENDPOINT_SCOPE" in unanswered
+      # The same endpoints under the host scope are not a private selection,
+      # so neither refusal carries that remedy.
+      let hostRelative = checkRefusesWithoutSpawn(root, "relative.sock", "")
+      check "must name an absolute endpoint" in hostRelative
+      check "remedy:" notin hostRelative
+      let hostUnanswered = checkRefusesWithoutSpawn(root, silent, "")
+      check "unset RUNQUOTA_ENDPOINT_SCOPE" notin hostUnanswered
+      check not fileExists(root / "unexpected-start")
 
     test "existing untrusted endpoint retains refusal and starts no daemon":
       let endpoint = root / "unsafe.sock"

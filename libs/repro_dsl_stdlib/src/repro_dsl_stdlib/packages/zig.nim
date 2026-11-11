@@ -2,7 +2,7 @@
 ## harvester emits ``tarball`` statements, which live in the hand-maintained
 ## ``package`` block below; merge a re-harvest into it.
 ## Harvested from bucket: ScoopInstaller/Main
-## Versions (newest-first): 0.16.0, 0.13.0
+## Versions (newest-first): 0.16.0, 0.14.1, 0.13.0
 ##
 ## M2 (hand-edited, 2026-05-31): the 0.13.0 version below is
 ## hand-merged to preserve the M44 zig-mode3 fixture pin (zig fixtures
@@ -33,6 +33,7 @@
 
 import repro_project_dsl
 import repro_dsl_stdlib/packages_schema
+import repro_dsl_stdlib/nixpkgs_pin
 export packages_schema
 
 package zig:
@@ -91,6 +92,73 @@ package zig:
       extractPath = "zig-x86_64-linux-0.16.0",
       cpu = "x86_64",
       os = "linux"
+    # 0.14.1: the compiler family codetracer-launcher's release size gates
+    # are measured with (its 51200-byte windows-x86_64 cap holds with 0.14.1
+    # and not with the newer default). Every (cpu, os) upstream publishes for
+    # it; URLs and sha256s are upstream's
+    # https://ziglang.org/download/index.json `0.14.1` entries (fetched
+    # 2026-11-05). Selected by pinning, e.g. `uses: "zig >=0.14 <0.15"`.
+    tarball url = "https://ziglang.org/download/0.14.1/zig-x86_64-windows-0.14.1.zip",
+      sha256 = "554f5378228923ffd558eac35e21af020c73789d87afeabf4bfd16f2e6feed2c",
+      archiveType = "zip",
+      executablePath = "zig.exe",
+      version = "0.14.1",
+      packageId = "zig@0.14.1",
+      extractPath = "zig-x86_64-windows-0.14.1",
+      cpu = "x86_64",
+      os = "windows"
+    tarball url = "https://ziglang.org/download/0.14.1/zig-aarch64-windows-0.14.1.zip",
+      sha256 = "b5aac0ccc40dd91e8311b1f257717d8e3903b5fefb8f659de6d65a840ad1d0e7",
+      archiveType = "zip",
+      executablePath = "zig.exe",
+      version = "0.14.1",
+      packageId = "zig@0.14.1",
+      extractPath = "zig-aarch64-windows-0.14.1",
+      cpu = "aarch64",
+      os = "windows"
+    tarball url = "https://ziglang.org/download/0.14.1/zig-x86_64-linux-0.14.1.tar.xz",
+      sha256 = "24aeeec8af16c381934a6cd7d95c807a8cb2cf7df9fa40d359aa884195c4716c",
+      archiveType = "tar.xz",
+      executablePath = "zig",
+      version = "0.14.1",
+      packageId = "zig@0.14.1",
+      extractPath = "zig-x86_64-linux-0.14.1",
+      cpu = "x86_64",
+      os = "linux"
+    tarball url = "https://ziglang.org/download/0.14.1/zig-aarch64-linux-0.14.1.tar.xz",
+      sha256 = "f7a654acc967864f7a050ddacfaa778c7504a0eca8d2b678839c21eea47c992b",
+      archiveType = "tar.xz",
+      executablePath = "zig",
+      version = "0.14.1",
+      packageId = "zig@0.14.1",
+      extractPath = "zig-aarch64-linux-0.14.1",
+      cpu = "aarch64",
+      os = "linux"
+    tarball url = "https://ziglang.org/download/0.14.1/zig-aarch64-macos-0.14.1.tar.xz",
+      sha256 = "39f3dc5e79c22088ce878edc821dedb4ca5a1cd9f5ef915e9b3cc3053e8faefa",
+      archiveType = "tar.xz",
+      executablePath = "zig",
+      version = "0.14.1",
+      packageId = "zig@0.14.1",
+      extractPath = "zig-aarch64-macos-0.14.1",
+      cpu = "aarch64",
+      os = "macos"
+    tarball url = "https://ziglang.org/download/0.14.1/zig-x86_64-macos-0.14.1.tar.xz",
+      sha256 = "b0f8bdfb9035783db58dd6c19d7dea89892acc3814421853e5752fe4573e5f43",
+      archiveType = "tar.xz",
+      executablePath = "zig",
+      version = "0.14.1",
+      packageId = "zig@0.14.1",
+      extractPath = "zig-x86_64-macos-0.14.1",
+      cpu = "x86_64",
+      os = "macos"
+    # Nix-capable hosts (`--tool-provisioning=nix`): nixpkgs' `zig_0_14`,
+    # which is 0.14.1 at the canonical pin. This is the only nix arm, so nix
+    # mode always realizes 0.14.1; the archive arms above carry 0.13.0 and
+    # 0.16.0 for consumers that pin those.
+    nixPackage "nixpkgs#zig_0_14", executablePath = "bin/zig",
+      nixpkgsRev = CanonicalNixpkgsRev,
+      nixpkgsNarHash = CanonicalNixpkgsNarHash
 
   # zig as the C toolchain of a `cross_zig` target (Reprobuild-Standard-
   # Library.md §"`CrossTarget`" and step 4 of §"Worked Example:

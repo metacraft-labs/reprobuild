@@ -4575,6 +4575,7 @@ const BundledStdlibSelectors* = [
   "installer",
   "just",
   "libblake3",
+  "libclang",
   "llvm-config",
   "make",
   "maturin",

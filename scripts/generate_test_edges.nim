@@ -356,6 +356,7 @@ const PureUnitBundles: seq[PureUnitBundle] = @[
       "libs/repro_dsl_stdlib/tests/t_c2_apt_index.nim",
       "libs/repro_dsl_stdlib/tests/t_c2_recursive_identity.nim",
       "libs/repro_dsl_stdlib/tests/t_catalog_claude_code.nim",
+      "libs/repro_dsl_stdlib/tests/t_catalog_launcher_toolchain.nim",
       "libs/repro_dsl_stdlib/tests/t_d2_dnf_index.nim",
       "libs/repro_dsl_stdlib/tests/t_d2_pacman_index.nim",
       "libs/repro_dsl_stdlib/tests/t_m67_bulk_catalog.nim",

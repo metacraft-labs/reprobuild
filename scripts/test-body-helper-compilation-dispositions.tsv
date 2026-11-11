@@ -95,6 +95,9 @@
 # C-edge blocker list below is one shorter.
 # GM7 added two migrate-pending rows, both blocked on the C edge:
 # t_macos_app_vendor_updates and t_e2e_app_vendor_update_and_running_app.
+# 2026-11-11 added one migrate-pending row, blocked on the C edge:
+# t_inherited_preload_hook_library_keeps_root_monitored (a stand-in LD_PRELOAD
+# hook library compiled from a fixed const, the io-mon pin's regression gate).
 #
 # THE CLASS LABEL DOES NOT PARTITION MIGRATE FROM KEEP.  Reviewing only the 12
 # graph-fixture entries would have missed t_ct_test_runner_full_suite_parity,
@@ -154,14 +157,15 @@
 # STANDING BLOCKER, counted rather than estimated: repro.nim has no C-compiler
 # build edge at all -- every nim.c(...) edge is Nim-only -- so a fixture built
 # with cc/gcc/clang cannot be lifted into the graph today no matter how static
-# its source is. That blocks TEN of the migrate-pending rows (eleven of the 34
-# before 2026-11-07):
+# its source is. That blocks ELEVEN of the migrate-pending rows (eleven of the 34
+# before 2026-11-07, ten after it, eleven again from 2026-11-11):
 #
 #   tests/e2e/hcr-debug-unwind/t_e2e_hcr_direct_patch_debug_unwind_replay.nim
 #   tests/e2e/hcr-watch/t_e2e_hcr_watch_inference.nim
 #   tests/e2e/hcr-watch/t_e2e_repro_watch_hcr_multi_target_independent_patches.nim
 #   tests/e2e/hcr-watch/t_e2e_repro_watch_hcr_one_target_agent_inject_failure.nim
 #   tests/e2e/io-monitor/t_debug_io_monitor_reads_monitor_depfile.nim
+#   tests/e2e/io-monitor/t_inherited_preload_hook_library_keeps_root_monitored.nim
 #   tests/e2e/macos-monitor/t_macos_monitor_shim_event_taxonomy.nim
 #   tests/integration/t_every_launch_path_is_monitored.nim
 #   tests/integration/t_integration_scheduler_dependency_gathering_policies.nim
@@ -241,6 +245,7 @@ tests/e2e/hcr-watch/t_e2e_hcr_watch_inference.nim	migrate-pending	MIGRATABLE: pr
 tests/e2e/hcr-watch/t_e2e_repro_watch_hcr_multi_target_independent_patches.nim	migrate-pending	MIGRATABLE: same shape -- fixed const GccProxySource (:42) written verbatim (:169) then cc; no substitution in the file. Everything else resolves through requireBinary. BLOCKED ON THE C EDGE: repro.nim has no C-compiler edge at all, so this cannot be lifted today no matter how static the source is.
 tests/e2e/hcr-watch/t_e2e_repro_watch_hcr_one_target_agent_inject_failure.nim	migrate-pending	MIGRATABLE: same shape -- fixed const GccProxySource (:35) written verbatim (:158) then cc; no substitution in the file. BLOCKED ON THE C EDGE: repro.nim has no C-compiler edge at all, so this cannot be lifted today no matter how static the source is.
 tests/e2e/io-monitor/t_debug_io_monitor_reads_monitor_depfile.nim	migrate-pending	MIGRATABLE: FixtureSource is a fixed const (:21) written verbatim (:260) then cc -pthread (:200) -- no substitution anywhere. The shim and CLI are already requireBinary'd. BLOCKED ON THE C EDGE: repro.nim has no C-compiler edge at all, so this cannot be lifted today no matter how static the source is.
+tests/e2e/io-monitor/t_inherited_preload_hook_library_keeps_root_monitored.nim	migrate-pending	MIGRATABLE: HookLibrarySource is a fixed const (:73) written verbatim (:211) then cc -shared (:214) -- no substitution anywhere. The shim and CLI are already requireBinary'd. BLOCKED ON THE C EDGE: repro.nim has no C-compiler edge at all, so this cannot be lifted today no matter how static the source is.
 tests/e2e/launcher-isolation/t_e2e_windows_launcher_isolation.nim	dynamic-source	The DLL fixtures are per-package: FixtureDllSourceTemplate.replace('$VERSION', version) then gcc -shared. NOTE the migratable half: compileWindowsLauncher nim c's the tracked apps/repro-launcher/repro_launcher.nim at four call sites; that source is absent from apps/entrypoints.txt and has no graph edge.
 tests/e2e/local-build-engine/t_e2e_local_reprobuild_project_build.nim	dynamic-source	writeMonitorFixtureTool / writeM52StdlibFixtureTools cc const C strings into a per-test bin dir, and one nim check deliberately asserts a compile FAILURE on a run-time-written reprobuild.nim.
 tests/e2e/local-build-engine/t_e2e_repro_run_named_run_edge.nim	product-api	The live-provider mode compiles a provider with the RP1 pair (extractInterfaceFromModule plus compileProviderBinary) and interpolates its absolute path and CONTENT-ADDRESSED artifact id into the recipe it generates, so `repro run` harvests them and the state record it writes carries them -- which is exactly what the assertion reads back out of the record bytes. The id is the one providerCompilePlan computes for that binary; a checked-in fixture built by a graph edge has no plan id, so the subject (a harvested ref reaching the record) could not be stated at all. The three negative modes in the same test compile nothing.

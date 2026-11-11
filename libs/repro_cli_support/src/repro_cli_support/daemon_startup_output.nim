@@ -41,3 +41,28 @@ proc startupDiagnostic*(output: StartupOutput; label: string): string =
     result = "\nrunquotad " & label & ":\n" &
       (if output.truncated: "[truncated; last 65536 bytes]\n" else: "") &
       output.text.strip(leading = false)
+
+const hostOwnerRefusalMarker* = "configured daemon owner uid "
+  ## The words `runquota_ipc.inspectPath` puts in front of the uid the HOST
+  ## endpoint policy expects (`rendezvousPolicy`: `RUNQUOTA_ENDPOINT_OWNER_UID`,
+  ## else the `runquota` account). A private policy never names an owner other
+  ## than the effective caller, so a refusal that names a different one was
+  ## produced by the host policy. Matching a sibling's wording is held honest
+  ## by `t_auto_runquota_uses_private_endpoint_policy.nim`, which provokes the
+  ## refusal from the real daemon rather than from a copy of this string.
+
+proc hostOwnerRefusalUid*(output: StartupOutput): int64 =
+  ## The daemon owner uid a host-policy endpoint refusal named in `output`,
+  ## or -1 when the output carries no such refusal. The last occurrence wins:
+  ## the refusal is the last thing a daemon says before it exits.
+  let at = output.text.rfind(hostOwnerRefusalMarker)
+  if at < 0:
+    return -1
+  var digits = ""
+  for ch in output.text[at + hostOwnerRefusalMarker.len .. ^1]:
+    if ch notin Digits:
+      break
+    digits.add ch
+  if digits.len == 0 or digits.len > 18:
+    return -1
+  int64(parseBiggestInt(digits))
