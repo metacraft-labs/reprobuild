@@ -11672,7 +11672,7 @@
       "requiresReproBinary": true,
       "source": "libs/repro_build_engine/tests/t_transient_probed_with_trailing_separator.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 3,
+      "staticCaseCount": 4,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
