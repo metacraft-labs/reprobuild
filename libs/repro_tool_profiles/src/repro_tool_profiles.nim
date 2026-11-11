@@ -1913,11 +1913,106 @@ proc expandNixPropagatedStorePaths*(paths: var seq[string]) =
         paths.add(candidate)
     inc index
 
+const NixDarwinSdkSetupScript* = "darwin-sdk-setup.bash"
+  ## The ``nix-support`` script in which a nixpkgs cc-wrapper for Darwin
+  ## names the Apple SDK it compiles and links against when the caller sets
+  ## no ``DEVELOPER_DIR``. Only Darwin wrappers carry it.
+
+proc nixDarwinWrapperDefaultSdk*(storePath: string): string =
+  ## The Apple SDK a nixpkgs Darwin cc-wrapper falls back to, or "" when
+  ## ``storePath`` is not such a wrapper or names no SDK that exists.
+  ##
+  ## The wrapper's setup script ends in
+  ##
+  ##   export DEVELOPER_DIR=${DEVELOPER_DIR_<role suffix>:-/nix/store/…-apple-sdk-<ver>}
+  ##
+  ## nixpkgs comments it "Allow wrapped compilers to do something useful when
+  ## no `DEVELOPER_DIR` is set, which can happen when the compiler is run
+  ## outside of a stdenv". A Reprobuild action is that case: the engine
+  ## composes its environment instead of inheriting one, so the wrapper uses
+  ## this default. Only the default after ``:-`` is read. The variable part
+  ## is the caller's override, and the action does not see the caller's
+  ## environment either.
+  let script = storePath / "nix-support" / NixDarwinSdkSetupScript
+  if not fileExists(extendedPath(script)):
+    return ""
+  let text =
+    try: readFile(extendedPath(script))
+    except IOError, OSError: return ""
+  for rawLine in text.splitLines:
+    var line = rawLine.strip
+    if line.startsWith("export "):
+      line = line["export ".len .. ^1].strip
+    if not line.startsWith("DEVELOPER_DIR=${"):
+      continue
+    let defaultStart = line.find(":-")
+    let defaultEnd = line.rfind('}')
+    if defaultStart < 0 or defaultEnd <= defaultStart + 2:
+      continue
+    let candidate = line[defaultStart + 2 ..< defaultEnd].strip
+    if candidate.isAbsolute and dirExists(extendedPath(candidate)):
+      return candidate
+  ""
+
+proc nixDarwinWrapperSdkLibraries*(paths: openArray[string]): seq[string] =
+  ## The host libraries that the Apple SDK of each Darwin cc-wrapper in
+  ## ``paths`` propagates: the closure of the SDK's
+  ## ``nix-support/propagated-build-inputs``, in discovery order, without the
+  ## SDK itself.
+  ##
+  ## WHY. nixpkgs removes ``libiconv`` (and libresolv, libsbuf, libutil) from
+  ## its Apple SDK and propagates them as packages of their own. Its Darwin
+  ## stdenv puts the SDK into every build's inputs (``stdenv.extraBuildInputs``
+  ## is ``[ apple-sdk ]``), so a nixpkgs build gets ``-L`` for them from the
+  ## setup hooks. A Reprobuild action runs no setup hooks. Without this
+  ## closure, the SDK a Nix clang links against lacks libraries that Apple's
+  ## SDK has. Rust's standard library links ``-liconv`` on every Apple target,
+  ## so every cargo build script failed with
+  ## ``ld: library not found for -liconv``.
+  ##
+  ## WHY ONLY ``propagated-build-inputs``. Those are the SDK's host libraries.
+  ## Its ``propagated-native-build-inputs`` hold build-machine tools for
+  ## stdenv (``xcrun`` from xcbuild), which are not part of what the compiler
+  ## links. The caller hands these paths to the compile and link channels only
+  ## (``addNixDarwinSdkLibraryChannels``). They never join the realized store
+  ## paths, whose ``bin/`` directories reach the action's ``PATH``. Measured
+  ## 2026-11-11 on aarch64-darwin: with the SDK's closure among the realized
+  ## paths, xcbuild's ``xcrun`` reached ``PATH`` and failed to load
+  ## (``dyld: Symbol not found: …libutil6FSUtil13NormalizePath…``), because
+  ## the SDK's ``libutil`` shadowed xcbuild's own.
+  var queue: seq[string]
+  for path in paths:
+    let sdk = nixDarwinWrapperDefaultSdk(path)
+    if sdk.len > 0 and sdk notin queue:
+      queue.add(sdk)
+  let sdkCount = queue.len
+  var index = 0
+  while index < queue.len:
+    let manifest = queue[index] / "nix-support" / "propagated-build-inputs"
+    if fileExists(extendedPath(manifest)):
+      for candidate in readFile(extendedPath(manifest)).splitWhitespace:
+        if dirExists(extendedPath(candidate)) and candidate notin queue:
+          queue.add(candidate)
+    inc index
+  result = queue[sdkCount .. ^1]
+
+proc addNixDarwinSdkLibraryChannels*(profile: var PathOnlyToolProfile) =
+  ## Hand the Darwin SDK's host libraries (``nixDarwinWrapperSdkLibraries``)
+  ## to the compiler's consumers on the header and library search paths: the
+  ## two channels through which Apple's own SDK provides them. No-op for every
+  ## profile without a Darwin cc-wrapper among its realized store paths, and so
+  ## for every Linux profile.
+  for library in nixDarwinWrapperSdkLibraries(profile.realizedStorePaths):
+    addUniquePath(profile.cpathList, library / "include")
+    addUniquePath(profile.libraryPathList, library / "lib")
+
 proc expandNixProfilePropagatedPaths*(profile: var PathOnlyToolProfile) =
   ## Repair cached Nix profiles as well as fresh resolutions. Split
   ## development outputs commonly propagate the runtime output that
   ## owns their shared libraries; omitting it leaves LD_LIBRARY_PATH
   ## and embedded RPATHs pointed at an empty ``-dev/lib`` directory.
+  ## A Darwin compiler wrapper also gets its SDK's host libraries
+  ## (``addNixDarwinSdkLibraryChannels``).
   expandNixPropagatedStorePaths(profile.realizedStorePaths)
   for storePath in profile.realizedStorePaths:
     addUniquePath(profile.cmakePrefixList, storePath)
@@ -1930,6 +2025,7 @@ proc expandNixProfilePropagatedPaths*(profile: var PathOnlyToolProfile) =
     addUniquePath(profile.cpathList, storePath / "include")
     addUniquePath(profile.libraryPathList, storePath / "lib")
     addUniquePath(profile.libraryPathList, storePath / "lib64")
+  addNixDarwinSdkLibraryChannels(profile)
   refreshProfileIdentity(profile)
 
 proc readNixReceiptPaths*(receipt: string): seq[string] =
@@ -2316,6 +2412,7 @@ else:
       addUniquePath(result.cpathList, storePath / "include")
       addUniquePath(result.libraryPathList, storePath / "lib")
       addUniquePath(result.libraryPathList, storePath / "lib64")
+    addNixDarwinSdkLibraryChannels(result)
 
     # Only collect probes if the output directory exists
     if dirExists(extendedPath(selectedStorePath)):

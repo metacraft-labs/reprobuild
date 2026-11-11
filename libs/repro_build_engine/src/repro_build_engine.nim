@@ -13440,10 +13440,28 @@ proc isUnsafeRuntimeLibDir(path: string): bool =
   if hashSeparator < 0 or hashSeparator + 1 >= storeEntry.len:
     return false
   let packageName = storeEntry[hashSeparator + 1 .. ^1]
-  packageName == "glibc" or packageName.startsWith("glibc-") or
-    packageName == "readline" or packageName.startsWith("readline-") or
-    packageName == "perl" or packageName.startsWith("perl-") or
-    packageName == "python3" or packageName.startsWith("python3-")
+  template isPackage(name: string): bool =
+    packageName == name or packageName.startsWith(name & "-")
+  if isPackage("glibc") or isPackage("readline") or isPackage("perl") or
+      isPackage("python3"):
+    return true
+  when defined(macosx):
+    # The host libraries nixpkgs splits out of its Apple SDK and that the
+    # tool profiles hand a Darwin cc-wrapper's consumers for linking
+    # (`nixDarwinWrapperSdkLibraries` in repro_tool_profiles). macOS itself
+    # provides each of them at run time, in /usr/lib, and a binary linked
+    # against the Nix copy records that copy's absolute install name, so a
+    # run-time search path adds nothing. It does harm: dyld searches
+    # DYLD_LIBRARY_PATH by leaf name for EVERY dependent library, whatever
+    # its install name, so `libutil.dylib` there replaces the same-named
+    # library of any program the action runs. Measured 2026-11-11 on
+    # aarch64-darwin: xcbuild's `xcrun` loaded the SDK's libutil instead of
+    # its own and died with `dyld: Symbol not found`.
+    # https://developer.apple.com/library/archive/documentation/DeveloperTools/Conceptual/DynamicLibraries/100-Articles/DynamicLibraryUsageGuidelines.html
+    if isPackage("libiconv") or isPackage("libresolv") or
+        isPackage("libsbuf") or isPackage("libutil"):
+      return true
+  false
 
 proc runtimeSafeLibDirs(paths: ResolvedAuxPaths): seq[string] =
   for path in paths.libDirs:

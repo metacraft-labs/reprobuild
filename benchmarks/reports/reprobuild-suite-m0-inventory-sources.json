@@ -12276,7 +12276,7 @@
       "requiresReproBinary": true,
       "source": "libs/repro_build_engine/tests/test_tool_identity_env_plumbing.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 11,
+      "staticCaseCount": 12,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -55847,8 +55847,8 @@
       "owner": "tests/unit",
       "requiresReproBinary": false,
       "source": "tests/unit/t_nix_propagated_store_paths.nim",
-      "sourceSuiteCount": 1,
-      "staticCaseCount": 5,
+      "sourceSuiteCount": 2,
+      "staticCaseCount": 8,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

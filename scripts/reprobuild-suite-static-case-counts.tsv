@@ -233,7 +233,7 @@ libs/repro_build_engine/tests/test_monitor_finish_is_pooled.nim	nim	5
 libs/repro_build_engine/tests/test_no_progress_diagnostic.nim	nim	1
 libs/repro_build_engine/tests/test_s5_own_output_is_not_a_cache_input.nim	nim	6
 libs/repro_build_engine/tests/test_s7_cached_output_restore_mode.nim	nim	15
-libs/repro_build_engine/tests/test_tool_identity_env_plumbing.nim	nim	11
+libs/repro_build_engine/tests/test_tool_identity_env_plumbing.nim	nim	12
 libs/repro_build_engine/tests/test_umask_wrap_both_spawn_paths.nim	nim	8
 libs/repro_build_engine/tests/test_wrapped_monitor_evidence_ownership.nim	nim	3
 libs/repro_bundle/tests/t_repro_bundle_halves.nim	nim	9
@@ -2652,7 +2652,7 @@ tests/unit/t_missing_json_evidence.nim	nim	6
 tests/unit/t_msi_archive_type.nim	nim	2
 tests/unit/t_nimcache_is_worktree_local.nim	nim	4
 tests/unit/t_nix_daemon_spawn_wait.nim	nim	3
-tests/unit/t_nix_propagated_store_paths.nim	nim	5
+tests/unit/t_nix_propagated_store_paths.nim	nim	8
 tests/unit/t_nonredistributable_publish_gate.nim	nim	3
 tests/unit/t_npm_vendor_action.nim	nim	2
 tests/unit/t_prefix_env_ops.nim	nim	4
