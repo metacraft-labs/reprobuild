@@ -8128,6 +8128,8 @@ compileProfileBinary()
                 "linux": {
                     "Source bootstrap hash-library runtime paths::portable "
                     "hash sources compile outside the SDK configuration",
+                    "Source bootstrap hash-library runtime paths::portable "
+                    "release helpers load the clingo staged beside them",
                     "Source bootstrap hash-library runtime paths::real hash "
                     "libraries load without ambient paths; missing RPATH fails",
                 },
@@ -8744,7 +8746,7 @@ compileProfileBinary()
         exclusive, identical = self.linux_darwin_catalog_ledger()
         self.assertEqual(self.platform_gated_test_sources(data), set(exclusive) | identical)
         self.assertEqual(len(exclusive), 74)
-        self.assertEqual(len(identical), 21)
+        self.assertEqual(len(identical), 20)
         # The per-host totals are pure ledger arithmetic, so they are checked
         # here, where no built binary is needed: a ledger entry added without
         # updating them fails the cheap census, not only the post-build one.
@@ -8752,8 +8754,8 @@ compileProfileBinary()
         # never used as a substitute for their exact per-source assertions.
         linux_only = sum(len(item["linux"]) for item in exclusive.values())
         darwin_only = sum(len(item["darwin"]) for item in exclusive.values())
-        self.assertEqual((linux_only, darwin_only), (127, 150))
-        self.assertEqual(linux_only - darwin_only, -23)
+        self.assertEqual((linux_only, darwin_only), (128, 150))
+        self.assertEqual(linux_only - darwin_only, -22)
         specs, _ = inventory.parse_repro_tests(REPO_ROOT)
         defines_by_source = {spec.source: spec.defines for spec in specs}
         for source in sorted(set(exclusive) | identical):
@@ -8836,9 +8838,9 @@ compileProfileBinary()
     def assert_linux_darwin_catalog_delta_is_exact(self, data):
         """Validate the ledger against this host's real catalog and source census.
 
-        The ledger currently covers 74 asymmetric sources and 21 sources
-        whose platform gates select identical names. Its 127 Linux-only and
-        150 Darwin-only identities yield a net 23 extra Darwin cases. Newly
+        The ledger currently covers 74 asymmetric sources and 20 sources
+        whose platform gates select identical names. Its 128 Linux-only and
+        150 Darwin-only identities yield a net 22 extra Darwin cases. Newly
         reconciled Darwin names are measured at 4f7d8624d7; their explicit
         Linux branches supply expectations checked by a Linux run, rather
         than a claim that Linux was measured on m1.
