@@ -273,13 +273,12 @@ suite "PG-14 — health reports a disagreement between two repro resolutions":
 
   test "t_vcs_hooks_is_not_ok_while_a_resolution_refuses_the_bodies_it_counted":
     ## The ``vcs-hooks`` row judges each installed body against the INVOKED
-    ## build. Measured in the field: a ``repro health`` from a current build
-    ## reported ``vcs-hooks ok`` over 985 bodies while ``hook-interpreter``, in
-    ## the same table, reported that the workspace's cached direnv dev shell
-    ## resolves a build that refuses them — so every hook refused in the shell
-    ## the operator commits from, under a green row. This fixture is that
-    ## state: every body is current for the invoked build, and a dev shell
-    ## supplies one that refuses them.
+    ## build. When the workspace's cached direnv dev shell resolves a build
+    ## that refuses those bodies, ``hook-interpreter`` reports it in the same
+    ## table, and every hook refuses in the shell the operator commits from;
+    ## a green ``vcs-hooks`` row beside that would be false. This fixture is
+    ## that state: every body is current for the invoked build, and a dev
+    ## shell supplies one that refuses them.
     ##
     ##   (V1) ``vcs-hooks`` is not ``ok`` while ``hook-interpreter`` is not
     ##   (V2) its detail names the build it judged against, by path, and points
