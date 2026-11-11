@@ -8393,7 +8393,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_libs_repro_project_dsl_tests_dsl_port_g02",
+    group: "t_group_libs_repro_project_dsl_tests_dsl_port_g01",
     singleReason: ""),
   TestSpec(
     source: "libs/repro_project_dsl/tests/dsl_port/t_dsl_lifted_exports_refuse_nim_magics.nim",
@@ -8541,6 +8541,17 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "libs/repro_project_dsl/tests/dsl_port/t_dsl_service_basic.nim",
     binary: "build/test-bin/t_dsl_service_basic",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "t_group_libs_repro_project_dsl_tests_dsl_port_g02",
+    singleReason: ""),
+  TestSpec(
+    source: "libs/repro_project_dsl/tests/dsl_port/t_dsl_service_body_refuses_unrecognised_statements.nim",
+    binary: "build/test-bin/t_dsl_service_body_refuses_unrecognised_statements",
     defines: @[],
     requiresReproBinary: false,
     extraPassC: @[],
