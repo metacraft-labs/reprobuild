@@ -15447,6 +15447,17 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "t_group_tests_e2e_local_build_engine_g01",
     singleReason: ""),
   TestSpec(
+    source: "tests/e2e/local-build-engine/t_repro_build_unselected_omits_consumers_of_excluded_members.nim",
+    binary: "build/test-bin/t_repro_build_unselected_omits_consumers_of_excluded_members",
+    defines: @["reproProviderMode"],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "t_group_tests_e2e_local_build_engine_o757f6dd4_g01",
+    singleReason: ""),
+  TestSpec(
     source: "tests/e2e/local-build-engine/t_repro_list_targets_lists_implicit_and_explicit.nim",
     binary: "build/test-bin/t_repro_list_targets_lists_implicit_and_explicit",
     defines: @[],

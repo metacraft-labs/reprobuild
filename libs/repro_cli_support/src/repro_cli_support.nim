@@ -4449,9 +4449,16 @@ proc lowerProviderSnapshot*(snapshot: ProviderGraphSnapshot;
       (item.payload.publishToBinaryCache and
         item.payload.cacheEntryIdentity.isSome)
 
-  # When no selector is provided, schedule every emitted edge — the
-  # legacy "build everything" behavior preserved from the single-target
-  # entry point.
+  var byId = initTable[string, BuildActionDef]()
+  for item in actionNodes:
+    byId[item.payload.id] = item.payload
+
+  # When no selector is provided, schedule every emitted edge except the
+  # members of the ``test``, ``bench`` and ``lint`` collections, which run
+  # only when selected by name. An action whose dependency closure reaches
+  # such a member cannot run without it, so it is left out as well:
+  # emitting it would hand the engine a dependency on an action that is
+  # not in the graph.
   var hasSelector = false
   for s in selectedActionIds:
     if s.len > 0:
@@ -4465,15 +4472,32 @@ proc lowerProviderSnapshot*(snapshot: ProviderGraphSnapshot;
          name == "lint" or name.endsWith(":lint"):
         for aid in target.actions:
           excludedActionIds.incl(aid)
+    var retainedActionIds = initHashSet[string]()
+    var visitingActionIds = initHashSet[string]()
+
+    proc reachesExcluded(actionId: string): bool =
+      ## A dependency the graph does not declare, and a cycle, are left
+      ## for the engine's graph validation to report.
+      if excludedActionIds.contains(actionId):
+        return true
+      if retainedActionIds.contains(actionId) or
+          visitingActionIds.contains(actionId) or
+          not byId.hasKey(actionId):
+        return false
+      visitingActionIds.incl(actionId)
+      for dep in byId[actionId].deps:
+        if reachesExcluded(dep):
+          excludedActionIds.incl(actionId)
+          visitingActionIds.excl(actionId)
+          return true
+      visitingActionIds.excl(actionId)
+      retainedActionIds.incl(actionId)
+      false
+
     for item in actionNodes:
-      if not excludedActionIds.contains(item.payload.id) and
-          shouldLower(item):
+      if not reachesExcluded(item.payload.id) and shouldLower(item):
         result.actions.add(lowerItem(item))
     return
-
-  var byId = initTable[string, BuildActionDef]()
-  for item in actionNodes:
-    byId[item.payload.id] = item.payload
 
   # Named-Targets M2: aggregate every fragment's target-export table
   # into one project-scoped view. Cross-package ambiguity is re-derived
