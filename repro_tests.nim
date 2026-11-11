@@ -26821,6 +26821,17 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "t_group_tests_integration_g15",
     singleReason: ""),
   TestSpec(
+    source: "tests/integration/t_workspace_lock_withholds_unobtainable_pins.nim",
+    binary: "build/test-bin/t_workspace_lock_withholds_unobtainable_pins",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "t_group_tests_integration_g15",
+    singleReason: ""),
+  TestSpec(
     source: "tests/integration/t_workspace_manifest_refresh_after_post_merge.nim",
     binary: "build/test-bin/t_workspace_manifest_refresh_after_post_merge",
     defines: @[],
@@ -27005,7 +27016,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g15",
+    group: "t_group_tests_integration_g16",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_workspace_membership_enable_disable.nim",
