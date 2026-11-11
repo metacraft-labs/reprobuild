@@ -1,0 +1,65 @@
+name: Deploy user documentation
+
+# Builds the user documentation site (docs/users/, an isonim-docs consumer)
+# and publishes it to the `reprobuild-docs` Cloudflare Pages project.
+#
+# PUBLICATION BRANCH. Runs on a push to `live-docs`, the repository's
+# documentation publication branch: content lands on `agents` (or `dev`) first
+# and is then fast-forward pushed with `git push origin agents:live-docs`
+# (metacraft-dev-guidelines branching policy, "Dedicated Online-Resource
+# Publication Branches"). This job builds and deploys only the documentation;
+# it never runs the engine build or the test suite.
+#
+# HERMETIC TOOLS. Nothing is installed on the runner. The framework checkouts
+# are fetched in the flake's `.#ci` shell (git, python3); the site is built in
+# isonim's own development shell, which is the toolchain the isonim-docs
+# framework is developed with; wrangler comes from `.#ci`, pinned by
+# flake.lock, as in deploy-get.yml.
+
+on:
+  push:
+    branches: [live-docs]
+  workflow_dispatch:
+
+# A deploy that holds the slot keeps it; a newer push waits. Each deploy
+# publishes the whole site at its commit, so the order is harmless.
+concurrency:
+  group: deploy-docs-${{ github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Build and deploy the documentation
+    runs-on: [self-hosted, linux, x64]
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      deployments: write
+    environment:
+      name: reprobuild-docs
+      url: ${{ steps.deploy.outputs.url }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Nix
+        uses: metacraft-labs/devops-modules/.github/setup-nix@dev
+        with:
+          trusted-public-keys: ${{ vars.TRUSTED_PUBLIC_KEYS }}
+          substituters: ${{ vars.SUBSTITUTERS }}
+          nix-github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Check out the documentation framework at its locked revisions
+        run: nix develop .#ci --command bash scripts/build_user_docs.sh fetch
+
+      - name: Build and check the site (isonim development shell)
+        run: |
+          set -euo pipefail
+          sibling_root="$(dirname "${GITHUB_WORKSPACE}")"
+          nix develop "path:${sibling_root}/isonim" --command bash scripts/build_user_docs.sh build
+
+      - name: Publish to Cloudflare Pages (reprobuild-docs)
+        id: deploy
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: nix develop .#ci --command bash scripts/deploy_user_docs.sh

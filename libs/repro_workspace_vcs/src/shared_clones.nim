@@ -2548,16 +2548,18 @@ discover_leaf() {
     fi
   done < "$alternates"
 }
+# scan_dir DIRECTORY DEPTH. Each call keeps its directory and remaining depth
+# in its own positional parameters, which a recursive call cannot change, so
+# the walk needs no subshell: one per directory would make a large sibling
+# domain cost a fork for every directory in it. The glob list is expanded once,
+# before the loop, so the recursion overwriting `child` does not disturb it.
 scan_dir() {
-  directory=$1
-  depth=$2
-  [ -r "$directory" ] && [ -x "$directory" ] || return 1
-  discover_leaf "$directory" || return 1
-  [ "$depth" -gt 0 ] || return 0
-  for child in "$directory"/* "$directory"/.[!.]* "$directory"/..?*; do
+  [ -r "$1" ] && [ -x "$1" ] || return 1
+  discover_leaf "$1" || return 1
+  [ "$2" -gt 0 ] || return 0
+  for child in "$1"/* "$1"/.[!.]* "$1"/..?*; do
     [ -d "$child" ] || continue
-    # A subshell keeps recursive calls from changing this call's variables.
-    (scan_dir "$child" "$((depth - 1))") || return 1
+    scan_dir "$child" "$(($2 - 1))" || return 1
   done
 }
 poolobjects=$(cd "$pool/objects" && pwd -P) || exit 1
@@ -2567,7 +2569,7 @@ while IFS= read -r parent || [ -n "$parent" ]; do
   [ -r "$parent" ] && [ -x "$parent" ] || exit 1
   for workspace in "$parent"/* "$parent"/.[!.]* "$parent"/..?*; do
     [ -d "$workspace" ] || continue
-    (scan_dir "$workspace" 2) || exit 1
+    scan_dir "$workspace" 2 || exit 1
   done
 done < "$work/parents"
 sort -u "$work/found" > "$work/discovered" || exit 1
