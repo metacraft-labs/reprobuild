@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 35,
-    "nimTestBinaries": 2703,
+    "nimTestBinaries": 2704,
     "pureUnitConsolidationGroups": 79,
     "pureUnitTests": 744,
     "staticallyDetectedRuntimeCompilerFlowTests": 137,
-    "testEntries": 2742
+    "testEntries": 2743
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1567,7 +1567,7 @@
       "integration": 1488,
       "platform/destructive": 173,
       "pure unit": 744,
-      "unclassified": 316
+      "unclassified": 317
     },
     "graphOwnedTestArtifacts": [
       {
@@ -1781,9 +1781,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2703,
+    "nimTestBinaryCount": 2704,
     "pythonTestFileCount": 39,
-    "testEntryCount": 2742
+    "testEntryCount": 2743
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -19019,6 +19019,24 @@
       "source": "libs/repro_local_store/tests/t_store_bundle_roundtrip.nim",
       "sourceSuiteCount": 2,
       "staticCaseCount": 5,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_store_concurrent_first_open_waits",
+      "class": "unclassified",
+      "classificationReason": "creates threads",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_core",
+        "repro_local_store"
+      ],
+      "owner": "libs/repro_local_store",
+      "requiresReproBinary": false,
+      "source": "libs/repro_local_store/tests/t_store_concurrent_first_open_waits.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 2,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
