@@ -52574,7 +52574,7 @@
       "requiresReproBinary": true,
       "source": "tests/integration/t_workspace_shared_clones_list_and_rewire.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 8,
+      "staticCaseCount": 11,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
