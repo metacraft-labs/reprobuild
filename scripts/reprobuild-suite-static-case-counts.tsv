@@ -460,7 +460,7 @@ libs/repro_dsl_stdlib/tests/t_packaging_windows_loader_closure.nim	nim	8
 libs/repro_dsl_stdlib/tests/t_pinned_fetch.nim	nim	5
 libs/repro_dsl_stdlib/tests/t_prefix_layout.nim	nim	7
 libs/repro_dsl_stdlib/tests/t_reprobuild_nim_fork_guard.nim	nim	5
-libs/repro_dsl_stdlib/tests/t_rust_nix_arm_realizes_release_archive.nim	nim	3
+libs/repro_dsl_stdlib/tests/t_rust_nix_arm_realizes_release_archive.nim	nim	6
 libs/repro_dsl_stdlib/tests/t_s7_nim_c_declares_its_nimcache_as_derived.nim	nim	5
 libs/repro_dsl_stdlib/tests/t_sevenzip_bootstrap_matches_stdlib_catalog.nim	nim	2
 libs/repro_dsl_stdlib/tests/t_shell_entropy_is_not_blessed.nim	nim	5
@@ -549,7 +549,7 @@ libs/repro_infra/tests/t_two_applies_with_different_state_dirs_never_overlap.nim
 libs/repro_interface_artifacts/tests/t_compiler_crash_is_not_a_compile_error.nim	nim	12
 libs/repro_interface_artifacts/tests/t_consumer_compile_paths_carry_the_shm_packages.nim	nim	2
 libs/repro_interface_artifacts/tests/t_contribution_records.nim	nim	3
-libs/repro_interface_artifacts/tests/t_envelope_versions_do_not_collide.nim	nim	14
+libs/repro_interface_artifacts/tests/t_envelope_versions_do_not_collide.nim	nim	16
 libs/repro_interface_artifacts/tests/t_extraction_checks_the_prefix_nim.nim	nim	8
 libs/repro_interface_artifacts/tests/t_installed_layout_source_roots.nim	nim	5
 libs/repro_interface_artifacts/tests/t_interface_artifact_provenance_is_recorded_by_the_lift.nim	nim	3
@@ -975,7 +975,7 @@ libs/repro_tool_profiles/tests/t_native_and_target_outputs_are_disjoint.nim	nim	
 libs/repro_tool_profiles/tests/t_one_tarball_realizer.nim	nim	4
 libs/repro_tool_profiles/tests/t_path_sidecar_batches.nim	nim	12
 libs/repro_tool_profiles/tests/t_provisioning_pin_selects_and_keys.nim	nim	8
-libs/repro_tool_profiles/tests/t_realization_selection.nim	nim	27
+libs/repro_tool_profiles/tests/t_realization_selection.nim	nim	30
 libs/repro_tool_profiles/tests/t_sibling_resolves_for_its_side_of_the_split.nim	nim	14
 libs/repro_tool_profiles/tests/t_tar_listing_ignores_tar_warnings.nim	nim	3
 libs/repro_tool_profiles/tests/t_tool_archive_missing_decompressor_is_named.nim	nim	3
@@ -1410,7 +1410,7 @@ tests/e2e/home-set-get/t_e2e_repro_home_set_triggers_focused_rebuild.nim	nim	1
 tests/e2e/io-monitor/t_debug_io_monitor_reads_monitor_depfile.nim	nim	0
 tests/e2e/launcher-isolation/t_e2e_windows_launcher_isolation.nim	nim	0
 tests/e2e/local-build-engine/t_e2e_create_dmg_reruns_over_its_image.nim	nim	1
-tests/e2e/local-build-engine/t_e2e_local_reprobuild_project_build.nim	nim	19
+tests/e2e/local-build-engine/t_e2e_local_reprobuild_project_build.nim	nim	20
 tests/e2e/local-build-engine/t_e2e_m51_dsl_stdlib_file_ops.nim	nim	6
 tests/e2e/local-build-engine/t_e2e_provider_graph_tracks_binary.nim	nim	1
 tests/e2e/local-build-engine/t_e2e_repro_build_multiple_named_targets.nim	nim	2

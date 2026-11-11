@@ -571,7 +571,7 @@ type
       ## field map.
 
 proc nixFieldView*(p: InterfaceNixProvisioning): RealizationFieldView =
-  RealizationFieldView(family: "nix", lockIdentity: p.lockIdentity,
+  result = RealizationFieldView(family: "nix", lockIdentity: p.lockIdentity,
     fields: @[
       ("packageName", p.packageName),
       ("contributor", p.contributor),
@@ -583,6 +583,11 @@ proc nixFieldView*(p: InterfaceNixProvisioning): RealizationFieldView =
       ("nixpkgsNarHash", p.nixpkgsNarHash),
       ("packageId", p.packageId),
       ("lockIdentity", p.lockIdentity)])
+  # A declared release selects the record, so it is part of what the
+  # record realizes. Named only when present: a record that declares none
+  # keeps the fingerprint it had before the field existed.
+  if p.version.len > 0:
+    result.fields.add(("version", p.version))
 
 proc tarballFieldView*(p: InterfaceTarballProvisioning):
     RealizationFieldView =

@@ -3553,6 +3553,7 @@
             "entries",
             "invalidRoot",
             "loweredGraphCachePath",
+            "missingEnv",
             "missingRoot",
             "pathValue",
             "projectEnv",
@@ -3584,6 +3585,7 @@
             "entries",
             "invalidRoot",
             "loweredGraphCachePath",
+            "missingEnv",
             "missingRoot",
             "pathValue",
             "projectEnv",
@@ -3615,6 +3617,7 @@
             "entries",
             "invalidRoot",
             "loweredGraphCachePath",
+            "missingEnv",
             "missingRoot",
             "pathValue",
             "projectEnv",
@@ -3628,7 +3631,7 @@
             "toolPath",
             "traceEnv"
           ],
-          "line": 1302,
+          "line": 1310,
           "path": "tests/e2e/local-build-engine/t_e2e_local_reprobuild_project_build.nim",
           "patterns": [
             "nim-argv"
@@ -16443,7 +16446,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_dsl_stdlib/tests/t_rust_nix_arm_realizes_release_archive.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 3,
+      "staticCaseCount": 6,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -18140,8 +18143,8 @@
       "owner": "libs/repro_interface_artifacts",
       "requiresReproBinary": false,
       "source": "libs/repro_interface_artifacts/tests/t_envelope_versions_do_not_collide.nim",
-      "sourceSuiteCount": 7,
-      "staticCaseCount": 14,
+      "sourceSuiteCount": 8,
+      "staticCaseCount": 16,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -26073,7 +26076,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_tool_profiles/tests/t_realization_selection.nim",
       "sourceSuiteCount": 5,
-      "staticCaseCount": 27,
+      "staticCaseCount": 30,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -33713,7 +33716,7 @@
       "requiresReproBinary": true,
       "source": "tests/e2e/local-build-engine/t_e2e_local_reprobuild_project_build.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 19,
+      "staticCaseCount": 20,
       "staticallyDetectedRuntimeCompilerFlow": true,
       "targetOs": "soAny"
     },

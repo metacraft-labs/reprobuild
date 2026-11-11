@@ -18104,17 +18104,25 @@ proc startBackgroundSupervisor(config: DevSessionSupervisorConfig) =
       env = [], inheritEnvironment = true, logPath = logPath,
       workingDir = absolutePath(config.projectRoot))
   else:
-    var fdsToClose: seq[string] = @[]
-    for fd in 3 .. 64:
-      fdsToClose.add($fd)
-    let closeInheritedFds = "for fd in " & fdsToClose.join(" ") &
-      "; do eval \"exec $fd>&-\"; done; "
-    let command = "(cd " & q(config.projectRoot) & " && " &
-      closeInheritedFds &
-      "exec " &
+    # NO DESCRIPTOR ABOVE 2 CROSSES THE LAUNCH: the supervisor outlives this
+    # invocation, so an inherited copy of a caller's pipe would hold that
+    # pipe open for the life of the session. The descriptors are marked
+    # close-on-exec from this side for the one launch, as the detached
+    # cache push does, rather than closed by the shell: a POSIX shell's
+    # redirections name descriptors 0-9 only, so `exec 10>&-` is, to dash,
+    # a command named `10` -- which is not found and ends the subshell
+    # before the supervisor starts. Only the flag moves, and it is put back
+    # afterwards; this runs on the command's main flow, which starts no
+    # other child inside the window.
+    let command = "(cd " & q(config.projectRoot) & " && exec " &
       shellCommand(@[config.publicCliPath] & config.supervisorCliArgs()) &
       ") </dev/null >> " & q(logPath) & " 2>&1 &"
-    let exitCode = execShellCmd(command)
+    let madeCloseOnExec = markInheritableDescriptorsCloseOnExec()
+    var exitCode = 0
+    try:
+      exitCode = execShellCmd(command)
+    finally:
+      restoreInheritableDescriptors(madeCloseOnExec)
     if exitCode != 0:
       raise newException(OSError,
         "failed to launch dev session supervisor: " & command)
@@ -31628,17 +31636,29 @@ proc prepareBuildGraphInspection(target: string; mode: ToolProvisioningMode;
   # ReproOS M7 deliverable 3: inspection lowers the SAME graph a build
   # would, so it resolves the same lock-selected provisioning pins (and
   # refuses the same way). Only needed when a tool identity is resolved.
-  let provisioningPins =
-    if lowerGraph and shouldEnterBuildPipeline(effectiveMode):
-      buildProvisioningPins(artifact, projectRoot)
-    else: newSeq[ProvisioningPin]()
-  if lowerGraph and shouldEnterBuildPipeline(effectiveMode):
-    recordMaterializedProducersForInspection(artifact, projectRoot, outDir,
-      publicCliPath, effectiveMode)
-    let keyedResolution = warmResolveAndWriteIdentityKeyed(artifact, outDir,
-      effectiveMode, pins = provisioningPins)
+  #
+  # The identity is resolved over the tool uses the lowered graph actually
+  # references, exactly as ``executeBuildTarget`` scopes it with
+  # ``scopedToolArtifact``. That scoping needs the provider snapshot and the
+  # selection, so for a recipe with a build block resolution waits until
+  # both are known (below). Resolving the whole declared interface first
+  # would make inspection provision a declaration-only tool that no action
+  # of the inspected graph runs, and fail where the build it inspects
+  # succeeds.
+  let resolvesIdentity = lowerGraph and shouldEnterBuildPipeline(effectiveMode)
+  var provisioningPins: seq[ProvisioningPin] = @[]
+  var resolvedArtifact = artifact
+
+  proc resolveInspectionIdentity(inspection: var BuildGraphInspection;
+                                 toolArtifact: ProjectInterfaceArtifact) =
+    provisioningPins = buildProvisioningPins(toolArtifact, projectRoot)
+    recordMaterializedProducersForInspection(toolArtifact, projectRoot,
+      outDir, publicCliPath, effectiveMode)
+    let keyedResolution = warmResolveAndWriteIdentityKeyed(toolArtifact,
+      outDir, effectiveMode, pins = provisioningPins)
     let resolved = keyedResolution.resolved
     identity = resolved.identity
+    resolvedArtifact = toolArtifact
     # Report the KEYED memo entry, not the stable files: those are rewritten
     # by every later invocation in this outDir with another key (a narrower
     # target, another $PATH), so the path this payload names would describe
@@ -31654,13 +31674,17 @@ proc prepareBuildGraphInspection(target: string; mode: ToolProvisioningMode;
       if not fileExists(extendedPath(keyed.identityPath)) or
           not fileExists(extendedPath(keyed.inspectionPath)):
         writeKeyedToolIdentity(outDir, key, identity)
-      result.toolIdentityPath = keyed.identityPath
-      result.toolInspectionPath = keyed.inspectionPath
+      inspection.toolIdentityPath = keyed.identityPath
+      inspection.toolInspectionPath = keyed.inspectionPath
     else:
-      result.toolIdentityPath = resolved.identityPath
-      result.toolInspectionPath = resolved.inspectionPath
+      inspection.toolIdentityPath = resolved.identityPath
+      inspection.toolInspectionPath = resolved.inspectionPath
 
   let hasBuildBlock = moduleHasBuildBlock(modulePath)
+  if not hasBuildBlock and resolvesIdentity:
+    # No build block, so no action graph to scope by: like the build, which
+    # scopes only a recipe with a build block, resolve the declared uses.
+    resolveInspectionIdentity(result, artifact)
   if not hasBuildBlock and
       (not includeDevEnvOnlyProvider or not moduleHasDevEnvBlock(modulePath)):
     return
@@ -31824,8 +31848,21 @@ proc prepareBuildGraphInspection(target: string; mode: ToolProvisioningMode;
     selectedActionId = result.defaultActionId
   result.selectedActionId = selectedActionId
 
+  if resolvesIdentity:
+    # The selection and the (extension-merged) snapshot are known now, so
+    # scope the identity to the tools this graph's actions reference -- the
+    # same helper and selector the build uses. An empty selection lowers the
+    # whole graph, so every tool any action runs stays in scope.
+    let toolArtifact =
+      if artifact.projectInterface.toolUses.len > 0:
+        scopedToolArtifact(artifact, refresh.snapshot, projectRoot,
+          [selectedActionId])
+      else:
+        artifact
+    resolveInspectionIdentity(result, toolArtifact)
+
   let pathEnv = getEnv("PATH")
-  let graphCacheKey = loweredGraphCacheKey(artifact, effectiveMode,
+  let graphCacheKey = loweredGraphCacheKey(resolvedArtifact, effectiveMode,
     result.providerArtifactId, refresh.persistedSnapshotPath, pathEnv,
     extensionSignature, pins = provisioningPins,
     resolvedIdentity = identity)
