@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 35,
-    "nimTestBinaries": 2704,
+    "nimTestBinaries": 2705,
     "pureUnitConsolidationGroups": 79,
-    "pureUnitTests": 744,
+    "pureUnitTests": 745,
     "staticallyDetectedRuntimeCompilerFlowTests": 137,
-    "testEntries": 2743
+    "testEntries": 2744
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1566,7 +1566,7 @@
       "graph-fixture": 21,
       "integration": 1489,
       "platform/destructive": 173,
-      "pure unit": 744,
+      "pure unit": 745,
       "unclassified": 316
     },
     "graphOwnedTestArtifacts": [
@@ -1781,9 +1781,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2704,
+    "nimTestBinaryCount": 2705,
     "pythonTestFileCount": 39,
-    "testEntryCount": 2743
+    "testEntryCount": 2744
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -13354,6 +13354,27 @@
       "source": "libs/repro_cli_support/tests/t_loopback_node_admits_only_its_owner.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 2,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_lowered_action_key_covers_its_argv",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_build_engine",
+        "repro_cli_support",
+        "repro_project_dsl",
+        "repro_provider_runtime",
+        "repro_tool_profiles"
+      ],
+      "owner": "libs/repro_cli_support",
+      "requiresReproBinary": false,
+      "source": "libs/repro_cli_support/tests/t_lowered_action_key_covers_its_argv.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 4,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
