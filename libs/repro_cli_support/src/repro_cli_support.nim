@@ -3216,6 +3216,36 @@ proc resolveCanonicalExecRoot*(cwdKind: ActionCwdKind; cwdCustomPath: string;
   else:
     raw
 
+proc spawnedArgvKeyText(argv: openArray[string]): string =
+  ## The argv a lowered process action SPAWNS, as text for its weak
+  ## fingerprint.
+  ##
+  ## The local action cache files a record under the weak fingerprint and
+  ## serves it to any later action with the same one whose recorded inputs
+  ## still check out. `repro_build_engine.action()` mixes the environment,
+  ## the lock and the content-addressed root of `argv[0]` into the
+  ## fingerprint its caller passes, and nothing else of argv. So the caller
+  ## has to key argv, and keying the graph node's payload is not the same
+  ## thing: the payload is what the recipe wrote, and three branches of
+  ## `lowerGraphAction` spawn something it does not spell out. Inline exec
+  ## substitutes each `@FILE:<path>` element with the file's contents; the
+  ## nim-unittest site resolves the test binary against the project root;
+  ## the typed-tool site takes `argv[0]` and any invocation prefix from the
+  ## resolved tool profile. Two actions that differ only there used to share
+  ## one record, and the second was served the first one's result.
+  ##
+  ## Keyed here, after every rewrite, rather than reconstructed from the
+  ## payload and the inputs to each rewrite, so that a rewrite added later
+  ## is keyed without anyone remembering to.
+  ##
+  ## Each element is length-framed: `["a b"]` and `["a", "b"]` must not
+  ## collide. A substituted `@FILE:` value enters the key only as part of
+  ## this digest; the plaintext spawned argv is already what the lowered
+  ## graph cache stores for the action.
+  result = "\nspawnedArgv\n" & $argv.len
+  for arg in argv:
+    result.add("\x1f" & $arg.len & ":" & arg)
+
 proc lowerGraphAction(node: GraphNode; profiles: Table[string, PathOnlyToolProfile];
                       projectRoot: string): BuildAction =
   # `BuildAction.governingLockIdentity` is required. Give `result` a complete
@@ -3415,7 +3445,8 @@ proc lowerGraphAction(node: GraphNode; profiles: Table[string, PathOnlyToolProfi
       depfile = payload.depfile,
       dynamicDepsFile = payload.dynamicDepsFile,
       cacheable = payload.cacheable,
-      weakFingerprint = weakFingerprintFromText(fingerprintText),
+      weakFingerprint = weakFingerprintFromText(fingerprintText &
+        spawnedArgvKeyText(argv)),
       actionCachePolicy = actionCachePolicy,
       dependencyPolicy = lowerDependencyPolicy(payload.id, payload.depfile,
         payload.dependencyPolicy),
@@ -3537,7 +3568,8 @@ proc lowerGraphAction(node: GraphNode; profiles: Table[string, PathOnlyToolProfi
       depfile = payload.depfile,
       dynamicDepsFile = payload.dynamicDepsFile,
       cacheable = payload.cacheable,
-      weakFingerprint = weakFingerprintFromText(fingerprintText),
+      weakFingerprint = weakFingerprintFromText(fingerprintText &
+        spawnedArgvKeyText(argv)),
       actionCachePolicy = actionCachePolicy,
       dependencyPolicy = lowerDependencyPolicy(payload.id, payload.depfile,
         payload.dependencyPolicy),
@@ -3717,7 +3749,8 @@ proc lowerGraphAction(node: GraphNode; profiles: Table[string, PathOnlyToolProfi
       depfile = payload.depfile,
       dynamicDepsFile = payload.dynamicDepsFile,
       cacheable = payload.cacheable,
-      weakFingerprint = weakFingerprintFromText(fingerprintText),
+      weakFingerprint = weakFingerprintFromText(fingerprintText &
+        spawnedArgvKeyText(argv)),
       actionCachePolicy = actionCachePolicy,
       dependencyPolicy = lowerDependencyPolicy(payload.id, payload.depfile,
         payload.dependencyPolicy),
@@ -3823,7 +3856,8 @@ proc lowerGraphAction(node: GraphNode; profiles: Table[string, PathOnlyToolProfi
     depfile = depfile,
     dynamicDepsFile = payload.dynamicDepsFile,
     cacheable = payload.cacheable,
-    weakFingerprint = weakFingerprintFromText(fingerprintText),
+    weakFingerprint = weakFingerprintFromText(fingerprintText &
+      spawnedArgvKeyText(invocationArgv)),
     actionCachePolicy = actionCachePolicy,
     dependencyPolicy = lowerDependencyPolicy(payload.id, depfile,
       payload.dependencyPolicy),
@@ -21131,6 +21165,161 @@ proc moveFileReplacing(source, dest: string) =
     removeFile(extendedPath(dest))
   moveFile(extendedPath(source), extendedPath(dest))
 
+const ChainedHookMissingProgramShell = """
+local_hook_missing_program() {
+  { sed -n -E '1s/^#![[:space:]]*(\/[^[:space:]]*).*$/interpreter \1/p' "$LOCAL_HOOK"
+    sed -n -E 's/^exec[[:space:]]+"(\/[^"$`\\]*)"([[:space:];&|<>)]|$).*$/exec \1/p' "$LOCAL_HOOK"
+    sed -n -E 's/^exec[[:space:]]+(\/[^][[:space:];&|<>()"'"'"'$`\\*?{}~]*)([[:space:];&|<>)]|$).*$/exec \1/p' "$LOCAL_HOOK"
+  } 2>/dev/null | while IFS=' ' read -r LOCAL_HOOK_KIND LOCAL_HOOK_PROGRAM; do
+    [ ! -x "$LOCAL_HOOK_PROGRAM" ] || continue
+    if [ "$LOCAL_HOOK_KIND" = exec ] &&
+        [ "$(grep -o -F -- "$LOCAL_HOOK_PROGRAM" "$LOCAL_HOOK" | wc -l | tr -d ' ')" != 1 ]; then
+      continue
+    fi
+    printf '%s %s\n' "$LOCAL_HOOK_KIND" "$LOCAL_HOOK_PROGRAM"
+    break
+  done
+}
+
+"""
+  ## Safeguard 6 of ``vcsDispatcherContent``: prints ``interpreter <path>``
+  ## or ``exec <path>`` for the first program the chained
+  ## ``<hook>.repro-local`` body names that does not exist, or nothing. An
+  ## ``exec`` target counts only when its path occurs once in the body, so a
+  ## path the body tests first is never blamed. The dispatcher asks only AFTER the body has failed the way a
+  ## program that cannot be found fails (status 126 or 127), to say why.
+  ## ``chainedHookMissingPrograms`` reads the same lines in Nim, for
+  ## ``repro health``.
+  ##
+  ## The bodies dev-shell installers chain there (the pre-commit framework's
+  ## shim, and scripts that ``exec`` it) name the tool by absolute Nix store
+  ## path, and nothing roots that path, so a garbage collection deletes it
+  ## and every commit or push then fails inside the hook with a bare
+  ## interpreter error that names neither the cause nor the repair.
+  ##
+  ## Two lines are read: an absolute interpreter on the ``#!`` line, and a
+  ## line that starts with ``exec`` followed by a literal absolute path (one
+  ## that ends at a shell separator and holds no expansion, glob, escape or
+  ## open quote; a double-quoted path is read to its closing quote). A path
+  ## held in a variable is not read. The rule decides nothing on its own: it
+  ## runs only once the body has already failed, and what it prints is the
+  ## likely cause, not a verdict: a body that guards the path keeps working
+  ## and is never blamed.
+
+type ChainedHookMissingProgram* = object
+  ## A program a chained hook body names that does not exist.
+  program*: string
+  interpreter*: bool
+    ## The ``#!`` interpreter: the body cannot start at all. Otherwise the
+    ## target of an ``exec`` line, which fails only when that line runs.
+  namedOnce*: bool
+    ## The path occurs once in the body, so nothing in it tests or replaces
+    ## it before the ``exec``.
+
+proc chainedHookMissingPrograms*(body: string): seq[ChainedHookMissingProgram] =
+  ## Every program ``body`` names that does not exist, by the lines
+  ## ``ChainedHookMissingProgramShell`` reads. Empty on Windows, where the
+  ## dispatcher's POSIX paths are resolved by Git's shell, not by this
+  ## process.
+  when defined(windows):
+    return @[]
+  const
+    unquotedStop = {'[', ']', ';', '&', '|', '<', '>', '(', ')', '"', '\'',
+      '$', '`', '\\', '*', '?', '{', '}', '~'} + Whitespace
+    separators = {';', '&', '|', '<', '>', ')'} + Whitespace
+  proc execTarget(line: string): string =
+    if line.len < 6 or not line.startsWith("exec") or line[4] notin Whitespace:
+      return ""
+    var i = 4
+    while i < line.len and line[i] in Whitespace:
+      inc i
+    if i < line.len and line[i] == '"':
+      let close = line.find('"', i + 1)
+      if close < 0 or i + 1 >= line.len or line[i + 1] != '/':
+        return ""
+      let token = line[i + 1 ..< close]
+      if token.contains({'$', '`', '\\'}):
+        return ""
+      if close + 1 < line.len and line[close + 1] notin separators:
+        return ""
+      return token
+    if i >= line.len or line[i] != '/':
+      return ""
+    var stop = i
+    while stop < line.len and line[stop] notin unquotedStop:
+      inc stop
+    if stop < line.len and line[stop] notin separators:
+      return ""
+    line[i ..< stop]
+  proc missing(path: string): bool =
+    if dirExists(path):
+      return false
+    if not fileExists(path):
+      return true
+    try:
+      getFilePermissions(path) * {fpUserExec, fpGroupExec, fpOthersExec} == {}
+    except OSError:
+      true
+  let lines = body.splitLines()
+  if lines.len > 0 and lines[0].startsWith("#!"):
+    var i = 2
+    while i < lines[0].len and lines[0][i] in Whitespace:
+      inc i
+    var stop = i
+    while stop < lines[0].len and lines[0][stop] notin Whitespace:
+      inc stop
+    let interpreter = lines[0][i ..< stop]
+    if interpreter.startsWith("/") and missing(interpreter):
+      result.add(ChainedHookMissingProgram(program: interpreter,
+        interpreter: true, namedOnce: body.count(interpreter) == 1))
+  for line in lines:
+    let target = execTarget(line)
+    if target.len > 0 and missing(target):
+      result.add(ChainedHookMissingProgram(program: target,
+        interpreter: false, namedOnce: body.count(target) == 1))
+
+proc chainedHookStartFinding(repoName, hooksDir, hookName: string):
+    tuple[finding: string; certain: bool] =
+  ## ``repro health``'s ``chained-hooks`` finding for one hook, or ``""``.
+  ## ``certain`` when the body's ``#!`` interpreter is missing, so it cannot
+  ## start at all; otherwise the finding is an ``exec`` target the body names
+  ## once, which fails the hook only when that line runs. Only a body the
+  ## dispatcher runs is read: executable, beside a dispatcher at the canonical
+  ## path, or beside one displaced to ``<hook>.legacy`` when it is not that
+  ## framework's generated shim.
+  let local = localHookPath(hooksDir, hookName)
+  if not fileExists(extendedPath(local)):
+    return ("", false)
+  if not isReprobuildVcsHook(hookPath(hooksDir, hookName), hookName) and
+      not isReprobuildVcsHook(hooksDir / (hookName & ".legacy"), hookName):
+    return ("", false)
+  try:
+    if getFilePermissions(extendedPath(local)) *
+        {fpUserExec, fpGroupExec, fpOthersExec} == {}:
+      return ("", false)
+    let body = readFile(extendedPath(local))
+    # Displaced: the framework that moved the dispatcher to `.legacy` runs it,
+    # and it skips that framework's own generated shim (safeguard 4 of
+    # ``vcsDispatcherContent``), so such a body is not run.
+    if not isReprobuildVcsHook(hookPath(hooksDir, hookName), hookName):
+      for line in body.splitLines():
+        if line.startsWith("# File generated by pre-commit:") or
+            line.startsWith("# File generated by prek:"):
+          return ("", false)
+    for found in chainedHookMissingPrograms(body):
+      if found.interpreter:
+        return (repoName & "/" & hookName & " (" & hookName &
+          ".repro-local's interpreter " & found.program &
+          " does not exist or is not executable, so it cannot start)", true)
+    for found in chainedHookMissingPrograms(body):
+      if found.namedOnce:
+        return (repoName & "/" & hookName & " (" & hookName &
+          ".repro-local execs " & found.program &
+          ", which does not exist or is not executable)", false)
+  except CatchableError:
+    discard
+  ("", false)
+
 const PreCommitProtectedStashPrefix* =
   "reprobuild pre-commit: unstaged work protected while hooks ran"
   ## The message every stash entry the ``pre-commit`` dispatcher records
@@ -21344,6 +21533,16 @@ proc vcsDispatcherContent(hookName: string; certificatePhase = false): string =
   ##      dispatcher is signalled, and names any entry a SIGKILL left behind
   ##      on the next commit. See ``PreCommitUnstagedWorkProtection``.
   ##      Signal traps exit 128+n, so an interrupted commit still fails.
+  ##   6. A chained hook that fails to start says why. When the
+  ##      ``.repro-local`` body's ``#!`` interpreter, or the absolute program a
+  ##      line of it ``exec``s, is gone (typically a Nix store path a garbage
+  ##      collection deleted), the body fails with a bare interpreter error
+  ##      from inside ``.git/hooks``. After such a failure (status 126 or 127)
+  ##      the dispatcher names the file, the missing program and the repair.
+  ##      The failure itself is the body's: the dispatcher still runs it first
+  ##      and never skips or refuses it on its own reading, so a body that
+  ##      guards or never reaches the line keeps working. See
+  ##      ``ChainedHookMissingProgramShell``.
   result = "#!/usr/bin/env sh\n"
   result.add("# " & VcsDispatcherMarker & "\n")
   result.add("# Dispatches preserved user hooks and Reprobuild-managed " &
@@ -21389,14 +21588,44 @@ proc vcsDispatcherContent(hookName: string; certificatePhase = false): string =
   # (1)+(3) Chained hooks run with both frameworks' migration guards unset.
   # (4) A generated framework shim is skipped when that framework is our
   # caller: it has run its checks already.
+  # (6) A chained body that fails because a program it names is gone says
+  # so. See ``ChainedHookMissingProgramShell``.
+  result.add(ChainedHookMissingProgramShell)
   result.add("run_local_hook() {\n")
   result.add("  [ -x \"$LOCAL_HOOK\" ] || return 0\n")
   result.add("  if [ \"$RUNNING_AS_LEGACY\" = 1 ] && grep -Eq " &
     "'^# File generated by (pre-commit|prek):' \"$LOCAL_HOOK\" 2>/dev/null; then\n")
   result.add("    return 0\n")
   result.add("  fi\n")
+  result.add("  LOCAL_HOOK_RC=0\n")
   result.add("  (unset PRE_COMMIT_RUNNING_LEGACY PREK_RUNNING_LEGACY; " &
-    "exec \"$LOCAL_HOOK\" \"$@\")\n")
+    "exec \"$LOCAL_HOOK\" \"$@\") || LOCAL_HOOK_RC=$?\n")
+  result.add("  case \"$LOCAL_HOOK_RC\" in\n")
+  result.add("    126|127) LOCAL_HOOK_MISSING=$(local_hook_missing_program) ;;\n")
+  result.add("    *) LOCAL_HOOK_MISSING= ;;\n")
+  result.add("  esac\n")
+  result.add("  if [ -n \"$LOCAL_HOOK_MISSING\" ]; then\n")
+  result.add("    LOCAL_HOOK_KIND=${LOCAL_HOOK_MISSING%% *}\n")
+  result.add("    LOCAL_HOOK_MISSING=${LOCAL_HOOK_MISSING#* }\n")
+  result.add("    if [ \"$LOCAL_HOOK_KIND\" = interpreter ]; then\n")
+  result.add("      echo \"repro hooks: " & hookName & ": the chained hook " &
+    "$LOCAL_HOOK cannot start: its interpreter, $LOCAL_HOOK_MISSING, " &
+    "does not exist or is not executable.\" >&2\n")
+  result.add("    else\n")
+  result.add("      echo \"repro hooks: " & hookName & ": the chained hook " &
+    "$LOCAL_HOOK failed, likely because the program it execs, " &
+    "$LOCAL_HOOK_MISSING, does not exist or is not executable.\" >&2\n")
+  result.add("    fi\n")
+  result.add("    case \"$LOCAL_HOOK_MISSING\" in\n")
+  result.add("      /nix/store/*) echo \"repro hooks: it is a Nix store path, " &
+    "and garbage collection deletes a store path that no GC root holds.\" >&2 ;;\n")
+  result.add("    esac\n")
+  result.add("    echo \"repro hooks: re-enter this repository's dev shell so " &
+    "its hook installer writes " & hookName & ".repro-local again, or delete " &
+    "$LOCAL_HOOK if nothing installs the " & hookName & " stage any more. " &
+    "'$REPRO_REMEDY_CMD health' lists every such hook.\" >&2\n")
+  result.add("  fi\n")
+  result.add("  return \"$LOCAL_HOOK_RC\"\n")
   result.add("}\n\n")
   if hookName == "pre-push":
     result.add("TMP_FILE=$(mktemp \"${TMPDIR:-/tmp}/reprobuild-pre-push.XXXXXX\")\n")
@@ -21444,8 +21673,7 @@ proc vcsDispatcherContent(hookName: string; certificatePhase = false): string =
       # in effect: its `repro.lock` carries `[certificate_policy]` (TC-9d: the
       # only place a policy can be). Elsewhere the
       # dispatcher has no third phase at all, so a commit there pays nothing
-      # for a gate that has nothing to require, and its bytes are the
-      # dispatcher's from before the gate existed. The phase embeds no rule:
+      # for a gate that has nothing to require. The phase embeds no rule:
       # `repro` reads the snapshot and the branch every time it fires.
       #
       # TC-8g — the THIRD phase: the certificate gate. It runs after every
@@ -77105,6 +77333,10 @@ proc gatherHealthChecksOverSettings(parsed: HealthArgs):
     var stale: seq[string]
     var pathUnsafe: seq[string]
     var retired: seq[string]
+    # Chained ``<hook>.repro-local`` bodies that cannot start, swept beside
+    # the managed hooks and reported in their own ``chained-hooks`` row.
+    var unstartable: seq[string]
+    var possiblyUnstartable: seq[string]
     var okCount = 0
     var reposInspected = 0
     let enumerated = enumerateParticipatingRepos(parsed.workspaceRoot)
@@ -77114,6 +77346,8 @@ proc gatherHealthChecksOverSettings(parsed: HealthArgs):
       # 0 repos" would be an ``ok`` over a population nobody looked at, on the
       # one row an operator consults to learn whether the hooks are there.
       checks.add(skippedForUnresolvedManifest("vcs-hooks",
+        ctx.manifestRemedy))
+      checks.add(skippedForUnresolvedManifest("chained-hooks",
         ctx.manifestRemedy))
       break hooksCheck
     # Rendered ONCE for the whole sweep (see
@@ -77134,6 +77368,10 @@ proc gatherHealthChecksOverSettings(parsed: HealthArgs):
       for hookName in applicableVcsHookNames(repo.repoPath):
         let standard = hookPath(hooksDir, hookName)
         let managed = managedHookPath(hooksDir, hookName)
+        let chained = chainedHookStartFinding(repo.name, hooksDir, hookName)
+        if chained.finding.len > 0:
+          if chained.certain: unstartable.add(chained.finding)
+          else: possiblyUnstartable.add(chained.finding)
         # RETIRED: every place `ensureVcsHookDetailed` removes a retired
         # repo-workspaces file from, named file by file.
         var retiredFiles: seq[string]
@@ -77239,6 +77477,16 @@ proc gatherHealthChecksOverSettings(parsed: HealthArgs):
       # about the one repo in front of us, and answering ``ok`` "not
       # applicable" for it hid a gate that is off in every linked worktree.
       let target = gitTopLevel(parsed.workspaceRoot)
+      # So are its chained hooks: one that cannot start refuses every commit
+      # or push in this very repo.
+      if target.len > 0:
+        let targetHooksDir = gitHooksDir(target)
+        for hookName in applicableVcsHookNames(target):
+          let chained = chainedHookStartFinding(lastPathPart(target),
+            targetHooksDir, hookName)
+          if chained.finding.len > 0:
+            if chained.certain: unstartable.add(chained.finding)
+            else: possiblyUnstartable.add(chained.finding)
       let entry =
         if target.len == 0: ""
         else: hooksPathFindingLabel(target,
@@ -77376,6 +77624,48 @@ proc gatherHealthChecksOverSettings(parsed: HealthArgs):
         status: hsOk,
         detail: census &
           ", every body demanding the contract this build generates",
+        remedy: "", fixKind: hfNone))
+    # The chained bodies the dispatcher runs first. One whose interpreter is
+    # gone cannot start, so every commit (pre-commit) or push (pre-push) of
+    # that repo fails in it, whatever the managed hook beside it says: a
+    # ``fail``. One that ``exec``s a missing program it names only once fails
+    # when that line runs, which a static read cannot promise: a ``warn``.
+    # Not ``--fix``-able: ``hooks ensure`` keeps the body as it finds it, and
+    # the program it names comes from whatever installed it.
+    const chainedRemedy = "re-enter each repository's dev shell so its hook " &
+      "installer rewrites <hook>.repro-local, or delete a <hook>.repro-local " &
+      "that nothing installs any more"
+    if unstartable.len > 0 or possiblyUnstartable.len > 0:
+      proc chainedDetailFor(full: bool): string =
+        proc listed(items: seq[string]): string =
+          if full: items.join(", ") else: formatFindingList(items, parsed.verbose)
+        var parts: seq[string]
+        if unstartable.len > 0:
+          parts.add($unstartable.len & " chained hook(s) CANNOT START, so " &
+            "that hook fails on every fire: " & listed(unstartable))
+        if possiblyUnstartable.len > 0:
+          parts.add($possiblyUnstartable.len & " chained hook(s) exec a " &
+            "program that does not exist, so that hook fails whenever the " &
+            "line runs: " & listed(possiblyUnstartable))
+        parts.join(". ")
+      let fullChainedDetail = chainedDetailFor(full = true)
+      let chainedDetail = chainedDetailFor(full = false)
+      checks.add(HealthCheck(
+        name: "chained-hooks",
+        status: if unstartable.len > 0: hsFail else: hsWarn,
+        detail: chainedDetail,
+        fullDetail: if chainedDetail != fullChainedDetail: fullChainedDetail
+          else: "",
+        remedy: chainedRemedy,
+        fixKind: hfNone))
+    else:
+      checks.add(HealthCheck(
+        name: "chained-hooks",
+        status: hsOk,
+        detail: (when defined(windows):
+            "not checked on Windows: Git's own shell resolves the paths a " &
+              "chained <hook>.repro-local names"
+          else: "every chained <hook>.repro-local names programs that exist"),
         remedy: "", fixKind: hfNone))
 
   # 8c. PG-14 — WHICH `repro` services those hooks, and whether the answer is
@@ -92069,8 +92359,13 @@ proc runReproLockValidate(rest: openArray[string]): int =
       if lock.inputsDigest != inputsDigestOf(resolved.text):
         problems.add("inputs_digest mismatch (the solver inputs changed " &
           "since the lock was written)")
-    except EUnsatisfiable:
-      problems.add("current solver inputs are UNSAT")
+    except EUnsatisfiable as e:
+      # The message carries the rendered unsat core (the constraints that
+      # cannot hold together), so it is the part of the problem that tells
+      # the operator what to change. Keep all of it; the trailing newline
+      # the core renderer ends with would only leave an empty line behind.
+      problems.add("current solver inputs are UNSAT: " &
+        e.msg.strip(leading = false))
     except CatchableError as e:
       stderr.writeLine("repro lock validate: failed to re-solve inputs: " &
         e.msg)
@@ -92185,7 +92480,10 @@ proc runReproLockValidate(rest: openArray[string]): int =
     if not asJson:
       stderr.writeLine("repro lock validate: INVALID (" & lockP & ")")
       for p in problems:
-        stderr.writeLine("  - " & p)
+        # A problem may span several lines (an unsat core lists one
+        # constraint per line). Indent the continuation lines under their
+        # bullet so they read as part of it, not as problems of their own.
+        stderr.writeLine("  - " & p.replace("\n", "\n    "))
     return 2
   if not asJson:
     stdout.writeLine("repro lock validate: OK (" & lockP & ")")

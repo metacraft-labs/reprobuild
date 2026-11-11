@@ -328,6 +328,54 @@ suite "M9.N Batch B — engine tool-identity env plumbing":
     check tableEnv["LD_LIBRARY_PATH"].split(pathSeparator()) ==
       @[dependencyLib, "/existing/runtime"]
 
+  test "a Darwin SDK's host libraries are linked, never searched at run time":
+    # A Nix Darwin cc-wrapper's consumers get the libraries nixpkgs splits
+    # out of the Apple SDK (libiconv, libresolv, libsbuf, libutil) for
+    # linking. On macOS they must stay off DYLD_LIBRARY_PATH: dyld searches
+    # it by leaf name for every dependent library, so the SDK's
+    # `libutil.dylib` there replaced xcbuild's own and `xcrun` died. Other
+    # hosts keep their run-time search path exactly as before.
+    resetTmp()
+    let sdkLibs = @[
+      "/nix/store/9kffgbvhza212ishsam4p8wklh92ih9v-libiconv-109.100.2/lib",
+      "/nix/store/08s2qyzrg9hpdivryzanp4hc6cv9llg6-libresolv-91/lib",
+      "/nix/store/sh5cg0v3wrkwsvmzsyxdckalqnddlw83-libsbuf-14.1.0/lib",
+      "/nix/store/g49d7x8j9h3n3n1l49x6355421v8iz6w-libutil-72/lib"]
+    # A name that merely starts with one of them is a different package.
+    let lookalikeLib =
+      "/nix/store/vutsrqponmlkjihgfedcba9876543210-libutilities-1.0/lib"
+    let dependencyLib =
+      "/nix/store/vutsrqponmlkjihgfedcba9876543210-libfoo-1.0/lib"
+    let paths = ResolvedAuxPaths(
+      libDirs: sdkLibs & @[lookalikeLib, dependencyLib])
+    let expectedRuntime =
+      when defined(macosx): @[lookalikeLib, dependencyLib]
+      else: sdkLibs & @[lookalikeLib, dependencyLib]
+
+    # Every variable starts empty, so the host's own values (a dev shell
+    # sets LIBRARY_PATH) cannot reach the comparison.
+    const loaderVars = ["LIBRARY_PATH", "LD_LIBRARY_PATH", "DYLD_LIBRARY_PATH"]
+    var startEnv: seq[string]
+    for name in loaderVars:
+      startEnv.add(name & "=")
+    let argvEnv = applyResolvedAuxPathsArgv(startEnv, paths)
+    check envValue(argvEnv, "LIBRARY_PATH").split(pathSeparator()) ==
+      paths.libDirs
+    check envValue(argvEnv, "LD_LIBRARY_PATH").split(pathSeparator()) ==
+      expectedRuntime
+    let tableEnv = newStringTable(modeCaseSensitive)
+    for name in loaderVars:
+      tableEnv[name] = ""
+    applyResolvedAuxPathsTable(tableEnv, paths)
+    check tableEnv["LIBRARY_PATH"].split(pathSeparator()) == paths.libDirs
+    check tableEnv["LD_LIBRARY_PATH"].split(pathSeparator()) ==
+      expectedRuntime
+    when defined(macosx):
+      check envValue(argvEnv, "DYLD_LIBRARY_PATH").split(pathSeparator()) ==
+        expectedRuntime
+      check tableEnv["DYLD_LIBRARY_PATH"].split(pathSeparator()) ==
+        expectedRuntime
+
   when defined(posix):
     test "source fetch overrides loader paths without removing tool or monitor channels":
       resetTmp()

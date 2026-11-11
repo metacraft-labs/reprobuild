@@ -238,13 +238,25 @@ function Expand-ZipArchive {
   ## Extract a zip archive into $Destination, which must not already hold any
   ## of the archive's files.
   ##
-  ## Calls System.IO.Compression.ZipFile.ExtractToDirectory rather than the
-  ## Expand-Archive cmdlet. Both use the same .NET zip reader, but Windows
-  ## PowerShell 5.1's Expand-Archive writes a progress record for every entry,
-  ## and on a 4-vCPU CI machine that cost reached about 90 ms per entry when
-  ## output was captured: a 12,000-entry toolchain zip took about 40 minutes
-  ## against about 3 with this call. ExtractToDirectory also reads an archive
-  ## whatever its file name, where Expand-Archive insisted on `.zip`.
+  ## Reads the archive entry by entry with the .NET zip reader rather than
+  ## through the Expand-Archive cmdlet. Windows PowerShell 5.1's
+  ## Expand-Archive writes a progress record for every entry, and on a 4-vCPU
+  ## CI machine that cost reached about 90 ms per entry when output was
+  ## captured: a 12,000-entry toolchain zip took about 40 minutes. The reader
+  ## also opens an archive whatever its file name, where Expand-Archive
+  ## insisted on `.zip`.
+  ##
+  ## The loop is ZipFile.ExtractToDirectory's own, written out so that every
+  ## write goes through the `\\?\` extended-length form: without the
+  ## LongPathsEnabled policy (the Windows ARM64 CI runners do not set it) a
+  ## member deeper than MAX_PATH cannot be created otherwise, and the Nim
+  ## 2.2.10 zip has one. ExtractToDirectory cannot take a `\\?\` destination,
+  ## because the extended namespace does not normalize the `/` in entry names.
+  ## The escape check runs on the ordinary spelling, where GetFullPath
+  ## resolves `..`; it leaves `..` literal in an extended path. This is the
+  ## script repro_core/powershell_zip.nim generates for the tool store; keep
+  ## the two in step.
+  ## https://learn.microsoft.com/windows/win32/fileio/maximum-file-path-limitation
   ##
   ## Relative paths are resolved against the PowerShell location, not the
   ## process directory .NET would use.
@@ -256,11 +268,49 @@ function Expand-ZipArchive {
   $archive = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($ArchivePath)
   $target = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Destination)
   Add-Type -AssemblyName System.IO.Compression.FileSystem
-  New-Item -ItemType Directory -Force -Path $target | Out-Null
+  Add-Type -AssemblyName System.IO.Compression
+  function ConvertTo-ExtendedPath([string]$p) {
+    if ($p.StartsWith('\\?\')) { return $p }
+    if ($p.StartsWith('\\')) { return '\\?\UNC\' + $p.Substring(2) }
+    return '\\?\' + $p
+  }
+  $root = [System.IO.Path]::GetFullPath($target).TrimEnd([char[]]'\/') +
+    [System.IO.Path]::DirectorySeparatorChar
+  [void][System.IO.Directory]::CreateDirectory((ConvertTo-ExtendedPath $root))
   # ZIP unflagged names use CP437; the encoding overload preserves flagged UTF-8.
-  # https://learn.microsoft.com/en-us/dotnet/api/system.io.compression.zipfile.extracttodirectory
-  [System.IO.Compression.ZipFile]::ExtractToDirectory(
-    $archive, $target, [System.Text.Encoding]::GetEncoding(437))
+  # https://learn.microsoft.com/en-us/dotnet/api/system.io.compression.zipfile.open
+  $zip = [System.IO.Compression.ZipFile]::Open($archive,
+    [System.IO.Compression.ZipArchiveMode]::Read,
+    [System.Text.Encoding]::GetEncoding(437))
+  try {
+    foreach ($entry in $zip.Entries) {
+      $path = [System.IO.Path]::GetFullPath(
+        [System.IO.Path]::Combine($root, $entry.FullName))
+      if (-not $path.StartsWith($root, [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw ('zip entry escapes the destination: ' + $entry.FullName)
+      }
+      # `\\?\` keeps a trailing `.` or space that an ordinary path drops, so
+      # such a segment would land as a directory ordinary paths (Remove-Item
+      # in Ensure-CleanDirectory included) cannot address. Refuse it, as the
+      # ordinary-path extractors always failed on it.
+      foreach ($segment in $entry.FullName.Split([char[]]'/\')) {
+        if ($segment -ne '.' -and $segment -ne '..' -and
+            ($segment.EndsWith('.') -or $segment.EndsWith(' '))) {
+          throw ('zip entry names a path segment Windows cannot address: ' + $entry.FullName)
+        }
+      }
+      $io = ConvertTo-ExtendedPath $path
+      if ($entry.Name.Length -eq 0) {
+        [void][System.IO.Directory]::CreateDirectory($io)
+      } else {
+        [void][System.IO.Directory]::CreateDirectory(
+          [System.IO.Path]::GetDirectoryName($io))
+        [System.IO.Compression.ZipFileExtensions]::ExtractToFile($entry, $io, $false)
+      }
+    }
+  } finally {
+    $zip.Dispose()
+  }
 }
 
 function Test-BootstrapStepEnabled {
