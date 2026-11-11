@@ -61,7 +61,11 @@ jobs:
       matrix:
         include:
           - arch: x64
-            runner: [self-hosted, windows, x64]    # CIP-5: DIY-Windows (env.ps1) -> eph-win-x64
+            # `ephemeral` keeps this off the persistent Windows runners, which
+            # run as NETWORK SERVICE and cannot create the second local account
+            # the refusal cases need (runs 42071498684, 42077596422). The
+            # disposable guests run as an Administrators member.
+            runner: [self-hosted, windows, x64, ephemeral]  # CIP-5: DIY-Windows (env.ps1) -> eph-win-x64
           - arch: arm64
             runner: [self-hosted, windows, arm64]  # CIP-5: DIY-Windows (env.ps1) -> eph-win-arm64
     runs-on: ${{ matrix.runner }}
