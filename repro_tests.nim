@@ -6130,6 +6130,17 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "t_group_libs_repro_interface_artifacts_tests_g01",
     singleReason: ""),
   TestSpec(
+    source: "libs/repro_interface_artifacts/tests/t_release_clingo_rpath_darwin.nim",
+    binary: "build/test-bin/t_release_clingo_rpath_darwin",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "t_group_libs_repro_interface_artifacts_tests_g01",
+    singleReason: ""),
+  TestSpec(
     source: "libs/repro_interface_artifacts/tests/t_repro_lib_fingerprint_memo.nim",
     binary: "build/test-bin/t_repro_lib_fingerprint_memo",
     defines: @[],

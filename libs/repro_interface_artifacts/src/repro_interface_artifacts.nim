@@ -6741,6 +6741,26 @@ proc portableReleaseRpathFlags*(clingoPrefix, releaseLibDir: string):
   else:
     @[]
 
+proc releaseClingoRpathFlags*(engineExe: string; target: RuntimeLinkTarget;
+                              probe: proc(path: string): bool): seq[string] =
+  ## The darwin counterpart of `portableReleaseRpathFlags`, for a host with no
+  ## clingo prefix: a darwin release archive ships `libclingo.dylib` in
+  ## `<release>/lib`, beside `<release>/bin/reprobuild`, and the engine reaches
+  ## it through its own `@loader_path/../lib` LC_RPATH. The extract runner is
+  ## linked later from a temporary directory outside that rpath, so its
+  ## module-init dlopen of `@rpath/libclingo.dylib` failed with
+  ## `could not load: @rpath/libclingo.dylib` (reprobuild#505). Recording the
+  ## release's own lib directory as the runner's rpath resolves it. Unlike the
+  ## Linux archive there is no bundled libc to keep out of the rpath, so the
+  ## absolute directory is safe here. `probe` answers whether a path exists;
+  ## it is a parameter so a test can run the darwin argv shape on any host.
+  if target != rltDarwin or engineExe.len == 0:
+    return @[]
+  let libDir = parentDir(parentDir(engineExe)) / "lib"
+  if not probe(libDir / "libclingo.dylib"):
+    return @[]
+  runtimeRpathCompilerFlags(@[libDir], target)
+
 proc stagePortableReleaseLibraries*(libDir, destDir: string): seq[string]
     {.discardable.} =
   ## Copy `PortableReleaseDlopenedLibraries` from the release's ``libDir``
@@ -7085,6 +7105,12 @@ proc externalHashFlags(workDir = ""): seq[string] =
     if clingoPrefix.len == 0:
       result.add(portableReleaseRpathFlags(clingoPrefix,
         portableReleaseLibDir()))
+  # The darwin release archive's own libclingo.dylib, with no clingo prefix on
+  # the host: see `releaseClingoRpathFlags`.
+  if clingoPrefix.len == 0:
+    result.add(releaseClingoRpathFlags(getAppFilename(),
+      hostRuntimeLinkTarget(),
+      proc(path: string): bool = fileExists(extendedPath(path))))
 
   # sqlite: `config.nims`'s non-Windows/non-macOS block links `-lsqlite3`
   # (pulled in transitively by the cas / lock store deps that
