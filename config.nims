@@ -891,7 +891,8 @@ proc addSiblingFirstPackagePath(sibling, envName, marker: string) =
     let policy = getEnv("REPRO_SIBLING_POLICY")
     if policy != "sibling" and envPath.len > 0 and
         repoFileExists(envPath / marker) and
-        absolutePath(envPath) != absolutePath(sibling):
+        normalizedPath(absolutePath(envPath)) !=
+          normalizedPath(repoPath(sibling)):
       var preferPin = policy == "pin"
       var why = "REPRO_SIBLING_POLICY=pin"
       if not preferPin:

@@ -97,7 +97,7 @@ proc resolveProfileNimCompiler*(): string =
     if explicit.extractFilename == explicit:
       let resolved = findExe(explicit)
       if resolved.len > 0:
-        return resolved
+        return absolutePath(resolved)
     if not fileExists(extendedPath(explicit)):
       raise newException(CompileFailure,
         "repro profile compile: $" & ProfileNimCompilerEnvVar & "=" & explicit &
@@ -108,14 +108,17 @@ proc resolveProfileNimCompiler*(): string =
     return absolutePath(explicit)
   let shipped = installedNimCompiler(runningImagePrefixCandidates())
   if shipped.len > 0:
-    return shipped
-  let nimExe = findExe("nim")
-  if nimExe.len == 0:
+    return absolutePath(shipped)
+  # Every answer is absolute: `nim` is started in the compile's own
+  # directory (`startProfileNim`), and `findExe` returns a relative path for
+  # a relative `PATH` entry.
+  let found = findExe("nim")
+  if found.len == 0:
     raise newException(CompileFailure,
       "repro profile compile: no Nim compiler. Set $" & ProfileNimCompilerEnvVar &
       " (an installed `repro` package sets it), or put Nim >= 2.0 " &
       "(https://nim-lang.org/install.html) on PATH, and retry.")
-  nimExe
+  absolutePath(found)
 
 const NimDefaultCCompilerExe* =
   when defined(macosx): "clang" else: "gcc"
@@ -338,24 +341,14 @@ proc profileCompileEnvAdditions*(repoRoot: string): StringTableRef =
   ## those. The edge stops depending on the others because nothing reads
   ## them any more, not because the engine is told to ignore a read.
   let repoRootAbs = absolutePath(repoRoot)
-  # NimScript's relative path resolution from a config.nims runs in
-  # the PROJECT (profile) directory's CWD — not nim's process CWD.
-  # So even with ``workingDir = repoRoot`` (which sets the OS
-  # cwd), the upstream config.nims's ``addPackagePath`` calls like
-  #
-  #   addPackagePath("NIMCRYPTO_SRC", [
-  #     "libs" / "nimcrypto",
-  #     ".." / "codetracer" / "libs" / "nimcrypto",
-  #     ".." / "nimcrypto"], "nimcrypto" / "hash.nim")
-  #
-  # check ``fileExists(candidate / marker)`` relative to the profile
-  # dir — where none of the candidates exist — and the package path
-  # never gets added. The transitive ``import nimcrypto/sha2`` from
-  # ``repro_project_dsl`` then fails.
-  #
-  # Pass the env-var-keyed paths the upstream config.nims expects
-  # so its FIRST lookup (``getEnv(envName)``) hits before the
-  # relative-path candidates run.
+  # Reprobuild's config.nims resolves each source-only input (nimcrypto,
+  # bearssl, the shm libraries, ...) from `$<NAME>_SRC` first and only then
+  # probes sibling checkouts beside the source tree, which an installed
+  # layout or a release bundle does not have. The variables are set here to
+  # absolute paths so that the first lookup answers, whatever directory
+  # `nim` runs in (the compile's nimcache, `startProfileNim`) and wherever
+  # the profile lives. Without them the transitive `import nimcrypto/sha2`
+  # from `repro_project_dsl` fails.
   # A local, not `result`: the probing helpers below are closures, and a
   # closure cannot capture `result`.
   var env = newStringTable(modeStyleInsensitive)

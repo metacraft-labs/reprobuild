@@ -3,7 +3,7 @@
     "graphOwnedHelperArtifacts": 35,
     "nimTestBinaries": 2710,
     "pureUnitConsolidationGroups": 79,
-    "pureUnitTests": 747,
+    "pureUnitTests": 746,
     "staticallyDetectedRuntimeCompilerFlowTests": 137,
     "testEntries": 2750
   },
@@ -1567,8 +1567,8 @@
       "graph-fixture": 21,
       "integration": 1491,
       "platform/destructive": 173,
-      "pure unit": 747,
-      "unclassified": 318
+      "pure unit": 746,
+      "unclassified": 319
     },
     "graphOwnedTestArtifacts": [
       {
@@ -21195,8 +21195,8 @@
     },
     {
       "binary": "build/test-bin/t_profile_compile_links_in_its_own_directory",
-      "class": "pure unit",
-      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "class": "unclassified",
+      "classificationReason": "mutates the process environment",
       "defines": [],
       "language": "nim",
       "localDependencyShape": [
@@ -21209,7 +21209,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_profile_compile/tests/t_profile_compile_links_in_its_own_directory.nim",
       "sourceSuiteCount": 2,
-      "staticCaseCount": 3,
+      "staticCaseCount": 4,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
