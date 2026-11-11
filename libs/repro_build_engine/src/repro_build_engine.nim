@@ -11854,13 +11854,22 @@ proc honouredDerivedPrefixes*(action: BuildAction): seq[string] =
 
 proc transientWriteKey*(path: string): string =
   ## The spelling `transientOwnWrites` stores and every caller looks up:
-  ## forward slashes, with no trailing separator. The monitor records the
-  ## same temporary under more than one spelling. lld-link on Windows WRITES
-  ## `noexp.dll.tmpa6d2958` and PROBES `noexp.dll.tmpa6d2958\`, so a lookup
-  ## of the probed spelling missed. The temporary's random name then entered
-  ## the determinism-probe key and the portable record, and no two runs
-  ## agreed on either. A root (`/`) keeps its separator.
-  result = path.replace('\\', '/')
+  ## no trailing separator and, on Windows, forward slashes. The monitor
+  ## records the same temporary under more than one spelling. lld-link on
+  ## Windows WRITES `noexp.dll.tmpa6d2958` and PROBES
+  ## `noexp.dll.tmpa6d2958\`, so a lookup of the probed spelling missed. The
+  ## temporary's random name then entered the determinism-probe key and the
+  ## portable record, and no two runs agreed on either. A root (`/`) keeps
+  ## its separator.
+  ##
+  ## Only the host's separators are folded. On POSIX a backslash is an
+  ## ordinary filename character, so `main.c\` is a different file from
+  ## `main.c`: folding it would let a removed `main.c\` take the real input
+  ## `main.c` out of the key, which is a false hit, not a missed one.
+  when defined(windows):
+    result = path.replace('\\', '/')
+  else:
+    result = path
   while result.len > 1 and result.endsWith("/"):
     result.setLen(result.len - 1)
 
