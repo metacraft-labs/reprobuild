@@ -252,7 +252,7 @@ def main(argv: list[str]) -> int:
                     help="the directory holding the ledger tables")
     ap.add_argument("--now", default=None,
                     help="evaluate at this instant instead of the wall "
-                         "clock, written " + ISO)
+                         "clock, written " + ISO.replace("%", "%%"))
     ap.add_argument("--horizon-days", type=int, default=DEFAULT_HORIZON_DAYS)
     ap.add_argument("--offline", action="store_true",
                     help="skip every fetch; report expiry only")
