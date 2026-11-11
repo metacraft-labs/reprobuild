@@ -10709,7 +10709,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     source: "libs/repro_tool_profiles/tests/t_uses_realization_version_range.nim",
     binary: "build/test-bin/t_uses_realization_version_range",
     defines: @[],
-    requiresReproBinary: false,
+    requiresReproBinary: true,
     extraPassC: @[],
     extraPassL: @[],
     targetOs: soAny,
