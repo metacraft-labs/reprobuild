@@ -21,6 +21,15 @@
 ##     ``repro workspace shared-clones gc`` repairs a bare no project declares
 ##     and names the refspec-without-safety one as such, and ``list`` reports
 ##     the declared pool's verdict and when it last fetched.
+##   - ``gc_maintains_a_due_bare_no_project_declares`` -- a bare no project
+##     declares and that has never been maintained (no ``reprobuild-last-gc``
+##     stamp) is past due. ``gc`` without ``--force`` runs its pass and stamps
+##     it, and leaves its ``refs/cache/*`` alone, since this workspace cannot
+##     tell which workspaces own them.
+##   - ``gc_counts_a_sibling_whose_state_cannot_be_read_as_live`` -- a sibling
+##     directory records its state only under the retired file name, which
+##     cannot be read. ``gc`` does not fail: it warns, names the sibling, keeps
+##     that sibling's cache refs, and still prunes a dead workspace's.
 ##
 ## Test doubles: none. Every case drives the real ``git`` (and, in the CLI
 ## case, the real ``repro`` binary) against real repositories.
@@ -81,6 +90,29 @@ proc plainBare(gitBin, upstream, dest: string) =
   ## A bare exactly as ``git clone --bare`` leaves it: no refspec, no safety.
   createDir(dest.parentDir)
   discard must(q(gitBin) & " clone -q --bare " & q(upstream) & " " & q(dest))
+
+proc declaredWorkspace(gitBin, scratch, url: string): string =
+  ## A workspace at ``scratch/ws`` whose project ``pg0proj`` declares one repo,
+  ## ``lib``, cloned from ``url``.
+  result = scratch / "ws"
+  createDir(result / "projects")
+  createDir(result / "repos")
+  writeFile(result / "projects" / "pg0proj.toml",
+    "schema = \"reprobuild.workspace.project.v1\"\n\n" &
+    "[project]\nname = \"pg0proj\"\n" &
+    "\n" &
+    "[[remote]]\nname = \"lib-origin\"\nfetch = \"" & url & "\"\n\n" &
+    "includes = [\n  \"repos/lib.toml\",\n]\n")
+  writeFile(result / "repos" / "lib.toml",
+    "schema = \"reprobuild.workspace.repo.v2\"\n\n[repo]\n" &
+    "name = \"lib\"\npath = \"lib\"\nremote = \"lib-origin\"\n" &
+    "mainline = \"main\"\n")
+  discard must(q(gitBin) & " clone -q --branch main " & q(url) & " " &
+    q(result / "lib"))
+
+proc hasRef(gitBin, repo, refName: string): bool =
+  sh(q(gitBin) & " -C " & q(repo) & " show-ref --verify --quiet " &
+    q(refName)).code == 0
 
 proc reproBinary(): string =
   let root = currentSourcePath().parentDir.parentDir.parentDir
@@ -215,3 +247,86 @@ suite "shared clone cache sweep":
       check lr["repos"].len == 1
       check lr["repos"][0]["verdict"].getStr() == "ok"
       check lr["repos"][0]["lastFetch"].getStr().len > 0
+
+  test "gc_maintains_a_due_bare_no_project_declares":
+    let gitBin = findExe("git")
+    if gitBin.len == 0:
+      skip("git is not on PATH")
+    else:
+      let scratch = createTempDir("repro-sweep-other-", "")
+      defer: removeDir(scratch)
+      let reproBin = reproBinary()
+      let up = seedUpstream(gitBin, scratch)
+      let cache = scratch / "clones-cache"
+      let env = @[("REPRO_WORKSPACE_CLONES", cache)]
+      let ws = declaredWorkspace(gitBin, scratch, fileUrl(up.bare))
+      # Borrowed only by checkouts that never commit: nothing has ever
+      # maintained it, so it carries no stamp and is past due.
+      let stray = cache / "example.invalid" / "org" / "stray.git"
+      plainBare(gitBin, up.bare, stray)
+      let head = must(q(gitBin) & " -C " & q(stray) & " rev-parse main")
+      discard must(q(gitBin) & " -C " & q(stray) &
+        " update-ref refs/cache/elsewhere/main " & head)
+      check not fileExists(stray / MaintenanceStampRelPath)
+
+      let gc = runShell(shellCommand(@[reproBin, "workspace", "shared-clones",
+        "gc", "pg0proj", "--workspace-root=" & ws, "--json"], env))
+      checkpoint("gc output: " & gc.output)
+      check gc.code == 0
+      check fileExists(stray / MaintenanceStampRelPath)
+      check hasRef(gitBin, stray, "refs/cache/elsewhere/main")
+      let report = parseJson(gc.output)
+      var found = false
+      for m in report["otherBares"]:
+        if m["bare"].getStr() == stray:
+          found = true
+          check m["maintenanceRan"].getBool()
+          check m["ok"].getBool()
+      check found
+
+      # Now stamped and quiet, so a second pass leaves it alone.
+      let again = runShell(shellCommand(@[reproBin, "workspace",
+        "shared-clones", "gc", "pg0proj", "--workspace-root=" & ws, "--json"],
+        env))
+      check again.code == 0
+      check parseJson(again.output)["otherBares"].len == 0
+
+  test "gc_counts_a_sibling_whose_state_cannot_be_read_as_live":
+    let gitBin = findExe("git")
+    if gitBin.len == 0:
+      skip("git is not on PATH")
+    else:
+      let scratch = createTempDir("repro-sweep-sibling-", "")
+      defer: removeDir(scratch)
+      let reproBin = reproBinary()
+      let up = seedUpstream(gitBin, scratch)
+      let cache = scratch / "clones-cache"
+      let env = @[("REPRO_WORKSPACE_CLONES", cache)]
+      let ws = declaredWorkspace(gitBin, scratch, fileUrl(up.bare))
+      let rewire = runShell(shellCommand(@[reproBin, "workspace",
+        "shared-clones", "rewire", "pg0proj", "--workspace-root=" & ws,
+        "--json"], env))
+      checkpoint("rewire output: " & rewire.output)
+      check rewire.code == 0
+      let pool = parseJson(rewire.output)["repos"][0]["sharedBarePath"].getStr()
+      check dirExists(pool / "objects")
+
+      # A sibling that records its state only under the retired file name.
+      let old = scratch / "oldws"
+      createDir(old / ".repro")
+      writeFile(old / ".repro" / "workspace.toml",
+        "schema = \"reprobuild.workspace.state.v1\"\n\n[workspace]\n" &
+        "project = \"pg0proj\"\n")
+      let head = must(q(gitBin) & " -C " & q(pool) & " rev-parse main")
+      for owner in ["oldws", "deadws"]:
+        discard must(q(gitBin) & " -C " & q(pool) & " update-ref refs/cache/" &
+          owner & "/main " & head)
+
+      let gc = runShell(shellCommand(@[reproBin, "workspace", "shared-clones",
+        "gc", "pg0proj", "--workspace-root=" & ws, "--force"], env))
+      checkpoint("gc output: " & gc.output)
+      check gc.code == 0
+      check "warning: sibling workspace " & old in gc.output
+      check hasRef(gitBin, pool, "refs/cache/oldws/main")
+      check not hasRef(gitBin, pool, "refs/cache/deadws/main")
+      check fileExists(pool / MaintenanceStampRelPath)

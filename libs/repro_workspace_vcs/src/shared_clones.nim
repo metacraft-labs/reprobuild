@@ -4430,6 +4430,34 @@ proc sweepSharedBares*(gitBin, cacheRoot: string): seq[SharedBareSweepEntry] =
         entry.diagnostic = prepared
     result.add(entry)
 
+proc maintainOtherSharedBares*(gitBin, cacheRoot: string;
+                               maintained: openArray[string];
+                               budget = defaultMaintenanceBudget();
+                               force = false): seq[MaintenanceResult] =
+  ## The maintenance pass for every bare under ``cacheRoot`` that is not in
+  ## ``maintained``. The callers maintain the bares they can name -- the one a
+  ## commit pushed into, the ones the current workspace declares -- and then
+  ## this reaches the rest, so a bare whose checkouts only read or sync, and
+  ## never commit, still gets the age bound's pass.
+  ##
+  ## Each bare is budget-gated (unless ``force``), so a bare that is not due
+  ## costs one ``count-objects`` and no lock. No live-workspace set is passed
+  ## on: which workspaces still use an undeclared bare's ``refs/cache/*`` is
+  ## not known here, and a ref we cannot prove dead is kept. What the gc may
+  ## expire is decided by the pool's own borrower registry, as for every pass.
+  ## Only the bares a pass was attempted on are returned.
+  for bare in findSharedBares(cacheRoot):
+    var known = false
+    for m in maintained:
+      if samePathOnDisk(bare, m):
+        known = true
+        break
+    if known:
+      continue
+    if not force and not maintenanceDue(gitBin, bare, budget):
+      continue
+    result.add(maintainSharedBare(gitBin, bare, @[], budget, force))
+
 type
   SharedCloneRepoInfo* = object
     ## Per-repo wiring view used by ``repro workspace shared-clones list``.
