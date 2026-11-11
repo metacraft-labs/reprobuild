@@ -159,12 +159,23 @@ proc prefixProvidesLinkLibraries*(prefix: string; layout: PrefixLayout): bool =
       return false
   true
 
+proc carriesMingwRuntime*(dir: string): bool =
+  ## True when `dir` holds a MinGW C runtime (libmingw32 or libmingwex). Such a
+  ## directory is a compiler sysroot, not an OpenSSL link channel: a `-L` on it
+  ## is searched before the compiler's own runtime directory, so an older
+  ## runtime there supplies `_gnu_exception_handler`-style symbols and crt2.o
+  ## from the provisioned gcc goes undefined (reprobuild #507).
+  fileExists(dir / "libmingw32.a") or fileExists(dir / "libmingwex.a")
+
 proc opensslLinkDirForExecutable*(executablePath: string): string =
   ## The `-L` directory for a resolved `openssl.exe`, or `""` when none of its
-  ## candidate prefixes actually provides the link channel.
+  ## candidate prefixes actually provides the link channel, or the only one
+  ## that does carries a MinGW C runtime and would shadow the compiler's own.
   for candidate in opensslPrefixCandidates(executablePath):
     if prefixProvidesLinkLibraries(candidate.prefix, candidate.layout):
-      return opensslLinkDir(candidate.prefix, candidate.layout)
+      let dir = opensslLinkDir(candidate.prefix, candidate.layout)
+      if not carriesMingwRuntime(dir):
+        return dir
   ""
 
 proc resolvedOpensslExecutable*(): string =
@@ -226,11 +237,14 @@ proc resetOpensslPrefixCandidates*() =
   opensslPrefixCandidateRegistry = @[]
 
 proc opensslLinkDirFromCandidates*(): string =
-  ## The first offered prefix that satisfies the declared layout, or `""`.
+  ## The first offered prefix that satisfies the declared layout and does not
+  ## carry a MinGW C runtime, or `""`.
   for prefix in registeredOpensslPrefixCandidates():
     for layout in OpensslLayouts:
       if prefixProvidesLinkLibraries(prefix, layout):
-        return opensslLinkDir(prefix, layout)
+        let dir = opensslLinkDir(prefix, layout)
+        if not carriesMingwRuntime(dir):
+          return dir
   ""
 
 proc windowsOpensslLinkSearchDir*(): string =

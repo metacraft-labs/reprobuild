@@ -144,6 +144,24 @@ suite "a prefix yields the link directory only if it really provides one":
     registerOpensslPrefixCandidate(root)
     check opensslLinkDirFromCandidates() == root / linkLibDir(plConda)
 
+  test "a prefix whose link dir carries a MinGW runtime is refused":
+    # The MSYS2 tree on the Windows release runner holds OpenSSL and an older
+    # mingw runtime in the same lib dir. Put on -L, that runtime shadows the
+    # provisioned gcc's (reprobuild #507), so the candidate must not resolve.
+    let root = getTempDir() / "m8-openssl-msys-runtime"
+    removeDir(root)
+    discard makePrefix(root, plWindowsTree,
+      ["libssl.dll.a", "libcrypto.dll.a", "libmingw32.a"])
+    defer: removeDir(root)
+
+    check prefixProvidesLinkLibraries(root, plWindowsTree)
+    check opensslLinkDirForExecutable(
+      root / binDir(plWindowsTree) / "openssl.exe") == ""
+    resetOpensslPrefixCandidates()
+    registerOpensslPrefixCandidate(root)
+    check opensslLinkDirFromCandidates() == ""
+    resetOpensslPrefixCandidates()
+
   test "a mingw-shaped prefix with both import libraries is accepted":
     let root = getTempDir() / "m8-openssl-mingw"
     removeDir(root)
