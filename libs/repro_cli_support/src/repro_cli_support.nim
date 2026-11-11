@@ -92216,6 +92216,19 @@ proc runLockGenerationVerb(rest: openArray[string]; verb: string;
   let rc = parseLockVerbArgs(rest, verb, projectDir, inputsOverride,
                              lockOverride, platformOverride, asJson, gen)
   if rc != 0: return rc
+  # A workspace root that keeps its state file or its settings file only
+  # under the retired name is refused, with the remedy, by every command.
+  # The lock verbs make that refusal here, before anything else: the
+  # provider probe below compiles the project's recipe and every sibling
+  # recipe its `uses:` reach, needs nothing from these files, and in a large
+  # develop set takes minutes. Each check raises the reader's diagnostic,
+  # which the `repro lock` dispatcher reports.
+  let workspaceRoot = enclosingWorkspaceRoot(projectDir)
+  if workspaceRoot.len > 0:
+    discard refuseRetiredStateFile(workspaceRoot)
+    # Walks the root and its ancestors, and raises at a directory that holds
+    # the settings file only under its retired name.
+    discard findWorkspaceSettingsPath(workspaceRoot)
   let lockP =
     if lockOverride.len > 0: absolutePath(lockOverride)
     else: committedLockPath(projectDir)
