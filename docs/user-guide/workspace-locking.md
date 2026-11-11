@@ -860,30 +860,33 @@ it into the public lock. Remedy: add a `[locking] route` (or an
 `apply_if`-referenced routes file) naming the repo under the right tier —
 then re-run `repro locking explain` to confirm it resolved.
 
-## Migrating a legacy `.repo/manifests` workspace
+## Migrating a workspace with a record store but no team route
 
-If your workspace already has a `.repo/manifests` checkout but no
-explicit team route, reprobuild will **not** silently drop its team
-lock. It warns once:
+If your workspace has a record store at `.repro/records` (or the older
+`.repro/manifests`) but no explicit team route, reprobuild will **not**
+silently drop its team lock. It warns once, and names `repro locking
+adopt-manifest` as the remedy.
 
-> `repro: WARNING — this workspace has a \`.repo/manifests\` checkout but
-> NO team route declared in any configuration layer.`
-> `To keep \`.repo/manifests\` as the TEAM backend, run:  repro locking
-> adopt-manifest --workspace-root=<path>`
-
-Run the scaffold to keep the manifest as your team backend:
+Run the scaffold to keep the record store as your team backend:
 
 ```console
 $ repro locking adopt-manifest
-repro locking adopt-manifest: wrote team route for 4 repo(s) → git-checkout at `.repo/manifests`
+repro locking adopt-manifest: wrote team route for 4 repo(s) → git-checkout at `.repro/records`
   config layer (VCS-private, never pushed): <git-common-dir>/repro/config.toml
   run `repro locking explain` to verify the resolved (tier, backend) for each repo.
 ```
 
-This writes a team `[locking] route` for the existing manifest into the
-**VCS-private config layer** (layer 5, never pushed), so your workspace
-keeps `.repo/manifests` as its team backend instead of going public-only.
+This writes a team `[locking] route` for the existing record-store checkout
+into the **VCS-private config layer** (layer 5, never pushed), so your
+workspace keeps it as its team backend instead of going public-only.
 Verify with `repro locking explain`.
+
+The store must be a git checkout of the record repository. If the directory
+is a plain directory, `adopt-manifest` refuses and writes nothing, because a
+git-checkout route to it could not record anything. Make it a checkout first,
+for example with `repro init` and the workspace's `[records] url`. A checkout
+at its conventional location already serves as the team route, so nothing
+then needs adopting.
 
 ## The hook boundary
 
