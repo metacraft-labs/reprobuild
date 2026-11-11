@@ -22,7 +22,7 @@
 ##      commit A in ``lib-a``; the post-commit lock writer drafts A; the
 ##      upstream moves and A is rebased onto it as B (A is now reachable only
 ##      from the reflog, and post-commit stood down for the whole rebase, so
-##      A's draft is still there); run
+##      A's draft is still there); B is pushed; run
 ##      ``repro workspace lock``, which publishes. Assert the store's upstream
 ##      history holds NO record for A, DOES hold B's, and A's draft is gone
 ##      from the store's working tree.
@@ -251,6 +251,16 @@ suite "orphaned lock drafts are swept, never published":
       check shaB != shaA
       assertProvablyOrphaned(gitBin, fx.libA, shaA)
       check fileExists(draftPath(fx, shaA))
+
+      # Publish B in lib-a: the explicit lock publishes only records whose pins
+      # a remote-tracking ref reaches, and B's record pins B. Hooks are bypassed
+      # for THIS push only: it stands in for a push that has already happened.
+      let noHooks = fx.scratch / "no-hooks"
+      createDir(noHooks)
+      discard requireGit(q(gitBin) & " -C " & q(fx.libA) &
+        " -c core.hooksPath=" & q(noHooks) & " push origin main")
+      # Pushing moved no ref back to A: it is still provably orphaned.
+      assertProvablyOrphaned(gitBin, fx.libA, shaA)
 
       # The explicit lock writes B and PUBLISHES (unscoped).
       let lockRes = runShell(shellCommand(@[
