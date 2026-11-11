@@ -5,7 +5,7 @@
     "pureUnitConsolidationGroups": 79,
     "pureUnitTests": 744,
     "staticallyDetectedRuntimeCompilerFlowTests": 137,
-    "testEntries": 2742
+    "testEntries": 2743
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1567,7 +1567,7 @@
       "integration": 1488,
       "platform/destructive": 173,
       "pure unit": 744,
-      "unclassified": 316
+      "unclassified": 317
     },
     "graphOwnedTestArtifacts": [
       {
@@ -1782,8 +1782,8 @@
       }
     ],
     "nimTestBinaryCount": 2703,
-    "pythonTestFileCount": 39,
-    "testEntryCount": 2742
+    "pythonTestFileCount": 40,
+    "testEntryCount": 2743
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -57090,6 +57090,21 @@
       "source": "tests/unit/test_dev_shell_hook_scope.py",
       "sourceSuiteCount": 1,
       "staticCaseCount": 7,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "",
+      "class": "unclassified",
+      "classificationReason": "imports `copy`, which this scan does not recognize; refusing to call it pure rather than assuming it is",
+      "defines": [],
+      "language": "python",
+      "localDependencyShape": [],
+      "owner": "tests/unit",
+      "requiresReproBinary": false,
+      "source": "tests/unit/test_flake_lock_derived_fields.py",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 11,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
