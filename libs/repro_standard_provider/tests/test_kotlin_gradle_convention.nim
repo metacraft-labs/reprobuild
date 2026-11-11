@@ -439,6 +439,16 @@ suite "kotlin-gradle convention M41":
     check withDaemonJdk != jdk17
     writeFile(daemonJdk / "release", "JAVA_VERSION=\"23\"\n")
     check token() != withDaemonJdk
+    # The daemon JVM criteria (Gradle 8.8+) select the daemon's toolchain.
+    let beforeCriteria = token()
+    createDir(root / "gradle")
+    writeFile(root / "gradle" / "gradle-daemon-jvm.properties",
+      "toolchainVersion=21\n")
+    let withCriteria = token()
+    check withCriteria != beforeCriteria
+    writeFile(root / "gradle" / "gradle-daemon-jvm.properties",
+      "toolchainVersion=17\n")
+    check token() != withCriteria
     # An init script added to the installation the launcher runs.
     let beforeInitD = token()
     createDir(installation / "init.d")

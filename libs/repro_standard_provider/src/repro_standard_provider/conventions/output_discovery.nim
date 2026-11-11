@@ -508,17 +508,20 @@ proc gradleConfigurationInputs*(projectRoot: string): seq[string] =
   ## configured: the root build scripts and ``gradle.properties``; every
   ## version catalog under ``gradle/`` (``libs.versions.toml`` is the
   ## default one); the dependency lockfiles; and the dependency
-  ## verification metadata and keyrings.
+  ## verification metadata and keyrings; and the daemon JVM criteria
+  ## (Gradle 8.8+), which choose the JDK the daemon runs on.
   ## https://docs.gradle.org/current/userguide/version_catalogs.html
   ## https://docs.gradle.org/current/userguide/dependency_locking.html
   ## https://docs.gradle.org/current/userguide/dependency_verification.html
+  ## https://docs.gradle.org/current/userguide/gradle_daemon.html#sec:daemon_jvm_criteria
   for candidate in ["build.gradle.kts", "build.gradle",
                     "settings.gradle.kts", "settings.gradle",
                     "gradle.properties", "gradle.lockfile",
                     "settings-gradle.lockfile", "buildscript-gradle.lockfile",
                     "gradle" / "verification-metadata.xml",
                     "gradle" / "verification-keyring.keys",
-                    "gradle" / "verification-keyring.gpg"]:
+                    "gradle" / "verification-keyring.gpg",
+                    "gradle" / "gradle-daemon-jvm.properties"]:
     let path = projectRoot / candidate
     if fileExists(extendedPath(path)):
       result.add(path)
