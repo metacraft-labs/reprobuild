@@ -7396,6 +7396,30 @@ compileProfileBinary()
                 },
                 "darwin": set(),
             },
+            # Linux runs the four link cases; every other host registers the
+            # one skipping placeholder that names why. ADDED when the source
+            # was enrolled (66e10bc1a) without a ledger row: it moves the
+            # census from 74 to 75 sources and the totals from (128, 150) to
+            # (132, 151), a net -22 -> -19.
+            "libs/repro_profile_compile/tests/"
+            "t_profile_compile_links_in_its_own_directory.nim": {
+                "linux": {
+                    "the profile compile links in its own directory::an "
+                    "occupied response-file path in the source root does not "
+                    "stop the link",
+                    "the profile compile links in its own directory::the "
+                    "response file is written in the compile's own nimcache",
+                    "the profile compile links in its own directory::"
+                    "workspace siblings beside the source root do not break "
+                    "the compile",
+                    "the profile compile links in its own directory::a nim "
+                    "found through a relative PATH entry is named absolutely",
+                },
+                "darwin": {
+                    "the profile compile links in its own directory::Linux "
+                    "only",
+                },
+            },
             "libs/repro_build_engine/tests/"
             "t_engine_macos_sip_safe_launch.nim": {
                 "linux": set(),
@@ -8746,7 +8770,7 @@ compileProfileBinary()
     def assert_platform_catalog_ledger_census(self, data):
         exclusive, identical = self.linux_darwin_catalog_ledger()
         self.assertEqual(self.platform_gated_test_sources(data), set(exclusive) | identical)
-        self.assertEqual(len(exclusive), 74)
+        self.assertEqual(len(exclusive), 75)
         self.assertEqual(len(identical), 20)
         # The per-host totals are pure ledger arithmetic, so they are checked
         # here, where no built binary is needed: a ledger entry added without
@@ -8755,8 +8779,8 @@ compileProfileBinary()
         # never used as a substitute for their exact per-source assertions.
         linux_only = sum(len(item["linux"]) for item in exclusive.values())
         darwin_only = sum(len(item["darwin"]) for item in exclusive.values())
-        self.assertEqual((linux_only, darwin_only), (128, 150))
-        self.assertEqual(linux_only - darwin_only, -22)
+        self.assertEqual((linux_only, darwin_only), (132, 151))
+        self.assertEqual(linux_only - darwin_only, -19)
         specs, _ = inventory.parse_repro_tests(REPO_ROOT)
         defines_by_source = {spec.source: spec.defines for spec in specs}
         for source in sorted(set(exclusive) | identical):
@@ -8839,9 +8863,9 @@ compileProfileBinary()
     def assert_linux_darwin_catalog_delta_is_exact(self, data):
         """Validate the ledger against this host's real catalog and source census.
 
-        The ledger currently covers 74 asymmetric sources and 20 sources
-        whose platform gates select identical names. Its 128 Linux-only and
-        150 Darwin-only identities yield a net 22 extra Darwin cases. Newly
+        The ledger currently covers 75 asymmetric sources and 20 sources
+        whose platform gates select identical names. Its 132 Linux-only and
+        151 Darwin-only identities yield a net 19 extra Darwin cases. Newly
         reconciled Darwin names are measured at 4f7d8624d7; their explicit
         Linux branches supply expectations checked by a Linux run, rather
         than a claim that Linux was measured on m1.
