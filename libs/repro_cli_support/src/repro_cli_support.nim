@@ -92359,8 +92359,13 @@ proc runReproLockValidate(rest: openArray[string]): int =
       if lock.inputsDigest != inputsDigestOf(resolved.text):
         problems.add("inputs_digest mismatch (the solver inputs changed " &
           "since the lock was written)")
-    except EUnsatisfiable:
-      problems.add("current solver inputs are UNSAT")
+    except EUnsatisfiable as e:
+      # The message carries the rendered unsat core (the constraints that
+      # cannot hold together), so it is the part of the problem that tells
+      # the operator what to change. Keep all of it; the trailing newline
+      # the core renderer ends with would only leave an empty line behind.
+      problems.add("current solver inputs are UNSAT: " &
+        e.msg.strip(leading = false))
     except CatchableError as e:
       stderr.writeLine("repro lock validate: failed to re-solve inputs: " &
         e.msg)
@@ -92475,7 +92480,10 @@ proc runReproLockValidate(rest: openArray[string]): int =
     if not asJson:
       stderr.writeLine("repro lock validate: INVALID (" & lockP & ")")
       for p in problems:
-        stderr.writeLine("  - " & p)
+        # A problem may span several lines (an unsat core lists one
+        # constraint per line). Indent the continuation lines under their
+        # bullet so they read as part of it, not as problems of their own.
+        stderr.writeLine("  - " & p.replace("\n", "\n    "))
     return 2
   if not asJson:
     stdout.writeLine("repro lock validate: OK (" & lockP & ")")
