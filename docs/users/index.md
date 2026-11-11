@@ -63,6 +63,15 @@ repositories in step, from one description of each project.
 To learn reprobuild step by step instead, follow
 [Build your first project](tutorials/first-build.md).
 
+## Start from what you do
+
+| You | Start with |
+|---|---|
+| Work in a codebase that already uses reprobuild | [Enter a project's environment](how-to/environments/enter-a-project-environment.md), then [Join a workspace](how-to/workspaces/join-a-workspace.md) |
+| Own a project's build and CI | [Conventions and the three modes](concepts/conventions-and-modes.md), then [Build an existing project](how-to/build/build-an-existing-project.md) |
+| Maintain a workspace of many repositories | [Coming from repo and git submodules](coming-from/repo-and-git-submodules.md) |
+| Already know a tool reprobuild replaces | [Coming from another tool](coming-from/index.md) |
+
 ## Where to find what
 
 | Section | Read it when you want to |
@@ -71,5 +80,5 @@ To learn reprobuild step by step instead, follow
 | [Tutorials](tutorials/first-build.md) | Learn by doing, one guided path at a time |
 | Guides | Reach one goal: build, test, environments, tasks and services, workspaces, machines, CI and caches, troubleshooting |
 | [Concepts](concepts/how-reprobuild-works.md) | Understand how reprobuild works and why |
-| [Coming from…](coming-from/index.md) | Map what you know from Nix, Bazel, direnv, just, `repo` or Terraform onto reprobuild |
+| [Coming from…](coming-from/index.md) | Map what you know from Nix, Bazel, direnv, `just`, `repo` or Terraform onto reprobuild |
 | [Reference](reference/index.md) | Look up a command, a file format or a term |

@@ -1,0 +1,245 @@
+# Source for reference/command-equivalents.md.
+#
+# One [[tool]] table per family of tools, one [[tool.row]] per command. The
+# generator renders the page from this file; the check parses every `repro`
+# value against the CLI model and fails on a command repro does not have.
+# A row whose `repro` is empty states that reprobuild has no equivalent; its
+# `note` says so in the reader's terms.
+#
+# Measured against the repro dispatcher at reprobuild d0469cdda (2026-11-11).
+
+schema = "reprobuild.docs.command-equivalents.v1"
+
+[[tool]]
+id = "nix"
+title = "Nix"
+
+  [[tool.row]]
+  theirs = "nix build"
+  repro = "repro build"
+
+  [[tool.row]]
+  theirs = "nix develop"
+  repro = "repro shell"
+
+  [[tool.row]]
+  theirs = "nix develop --command <command>"
+  repro = "repro exec -- <command>"
+
+  [[tool.row]]
+  theirs = "nix run"
+  repro = "repro run <task>"
+  note = "Runs a task the project declares, not a package from a registry."
+
+  [[tool.row]]
+  theirs = "nix why-depends"
+  repro = "repro why <package-or-action>"
+
+  [[tool.row]]
+  theirs = "nix store gc, nix-collect-garbage"
+  repro = "repro store gc"
+
+  [[tool.row]]
+  theirs = "nix copy"
+  repro = "repro store copy --to=<store-root>"
+  note = "Copies to another local store root."
+
+  [[tool.row]]
+  theirs = "nix profile history"
+  repro = "repro home history"
+
+  [[tool.row]]
+  theirs = "nix profile rollback"
+  repro = "repro home rollback"
+
+  [[tool.row]]
+  theirs = "nix search"
+  repro = ""
+  note = "No package search."
+
+  [[tool.row]]
+  theirs = "nix repl, nix eval"
+  repro = ""
+  note = "No evaluation console."
+
+[[tool]]
+id = "home-manager"
+title = "Home Manager"
+
+  [[tool.row]]
+  theirs = "home-manager switch"
+  repro = "repro home apply"
+
+  [[tool.row]]
+  theirs = "home-manager build"
+  repro = "repro home plan"
+  note = "Shows what an apply would change, without applying it."
+
+  [[tool.row]]
+  theirs = "home-manager generations"
+  repro = "repro home history"
+
+  [[tool.row]]
+  theirs = "activating an earlier generation"
+  repro = "repro home rollback"
+
+[[tool]]
+id = "bazel-and-buck2"
+title = "Bazel and Buck2"
+
+  [[tool.row]]
+  theirs = "bazel build <target>, buck2 build <target>"
+  repro = "repro build <target>"
+
+  [[tool.row]]
+  theirs = "bazel test, buck2 test"
+  repro = "repro test"
+
+  [[tool.row]]
+  theirs = "bazel run, buck2 run"
+  repro = "repro run <task>"
+
+  [[tool.row]]
+  theirs = "bazel query, bazel aquery, buck2 uquery"
+  repro = "repro graph --view=<view>"
+  note = "Fixed views instead of a query language."
+
+  [[tool.row]]
+  theirs = "bazel clean"
+  repro = "repro clean"
+  note = "Removes the outputs the build owns and keeps the action cache, so the next build restores them from it."
+
+  [[tool.row]]
+  theirs = "bazel shutdown, buck2 kill"
+  repro = "repro daemon stop"
+
+  [[tool.row]]
+  theirs = "bazel coverage"
+  repro = ""
+  note = "No coverage command."
+
+[[tool]]
+id = "direnv"
+title = "direnv"
+
+  [[tool.row]]
+  theirs = "eval \"$(direnv hook <shell>)\""
+  repro = "eval \"$(repro shell hook <shell>)\""
+
+  [[tool.row]]
+  theirs = "direnv allow"
+  repro = "repro allow"
+
+  [[tool.row]]
+  theirs = "direnv deny"
+  repro = "repro deny"
+
+  [[tool.row]]
+  theirs = "direnv exec <directory> <command>"
+  repro = "repro exec -- <command>"
+  note = "Run from inside the directory."
+
+  [[tool.row]]
+  theirs = "direnv export <shell>"
+  repro = "repro dev-env export <shell>"
+
+[[tool]]
+id = "mise"
+title = "mise"
+
+  [[tool.row]]
+  theirs = "mise exec -- <command>"
+  repro = "repro exec -- <command>"
+
+  [[tool.row]]
+  theirs = "mise tasks"
+  repro = "repro tasks"
+
+  [[tool.row]]
+  theirs = "mise run <task>"
+  repro = "repro run <task>"
+
+[[tool]]
+id = "just"
+title = "`just`"
+
+  [[tool.row]]
+  theirs = "just --list"
+  repro = "repro tasks"
+
+  [[tool.row]]
+  theirs = "just <recipe>"
+  repro = "repro run <task>"
+
+  [[tool.row]]
+  theirs = "just <recipe> <arguments>"
+  repro = "repro run <task> -- <arguments>"
+
+[[tool]]
+id = "compose"
+title = "Docker Compose and process-compose"
+
+  [[tool.row]]
+  theirs = "docker compose up, process-compose up"
+  repro = "repro up"
+
+  [[tool.row]]
+  theirs = "docker compose down, process-compose down"
+  repro = "repro down"
+
+[[tool]]
+id = "repo-and-git-submodules"
+title = "repo and git submodules"
+
+  [[tool.row]]
+  theirs = "repo init"
+  repro = "repro workspace init <organisation-or-url>"
+
+  [[tool.row]]
+  theirs = "repo sync"
+  repro = "repro sync"
+
+  [[tool.row]]
+  theirs = "git submodule update"
+  repro = "repro workspace pull"
+  note = "Moves every repository to the revision the manifests declare."
+
+  [[tool.row]]
+  theirs = "repo status"
+  repro = "repro workspace status"
+
+  [[tool.row]]
+  theirs = "repo forall -c <command>"
+  repro = "repro workspace forall -c <command>"
+
+  [[tool.row]]
+  theirs = "repo start <branch>"
+  repro = "repro switch -b <branch>"
+
+  [[tool.row]]
+  theirs = "repo upload"
+  repro = ""
+  note = "No code-review upload."
+
+[[tool]]
+id = "terraform-and-opentofu"
+title = "Terraform and OpenTofu"
+
+  [[tool.row]]
+  theirs = "terraform plan, tofu plan"
+  repro = "repro infra plan"
+  note = "Resources on the machine that runs repro only."
+
+  [[tool.row]]
+  theirs = "terraform apply, tofu apply"
+  repro = "repro infra apply"
+  note = "Resources on the machine that runs repro only."
+
+  [[tool.row]]
+  theirs = "terraform graph"
+  repro = "repro graph"
+
+  [[tool.row]]
+  theirs = "terraform import, terraform state, terraform output"
+  repro = ""
+  note = "No equivalent."
