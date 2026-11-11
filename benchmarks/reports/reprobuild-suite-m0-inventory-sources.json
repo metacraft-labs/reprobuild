@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 35,
-    "nimTestBinaries": 2719,
+    "nimTestBinaries": 2720,
     "pureUnitConsolidationGroups": 79,
     "pureUnitTests": 748,
     "staticallyDetectedRuntimeCompilerFlowTests": 137,
-    "testEntries": 2760
+    "testEntries": 2761
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1566,7 +1566,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 21,
-      "integration": 1496,
+      "integration": 1497,
       "platform/destructive": 174,
       "pure unit": 748,
       "unclassified": 321
@@ -1783,9 +1783,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2719,
+    "nimTestBinaryCount": 2720,
     "pythonTestFileCount": 41,
-    "testEntryCount": 2760
+    "testEntryCount": 2761
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -33942,6 +33942,29 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_repro_build_unselected_omits_consumers_of_excluded_members",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [
+        "reproProviderMode"
+      ],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_build_engine",
+        "repro_cli_support",
+        "repro_project_dsl",
+        "repro_provider_runtime",
+        "repro_tool_profiles"
+      ],
+      "owner": "tests/e2e",
+      "requiresReproBinary": false,
+      "source": "tests/e2e/local-build-engine/t_repro_build_unselected_omits_consumers_of_excluded_members.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 5,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_repro_list_targets_lists_implicit_and_explicit",
       "class": "integration",
       "classificationReason": "e2e/integration path or requires the repro binary",
@@ -49894,7 +49917,7 @@
       "requiresReproBinary": true,
       "source": "tests/integration/t_sync_mainline_reconcile.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 15,
+      "staticCaseCount": 16,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
