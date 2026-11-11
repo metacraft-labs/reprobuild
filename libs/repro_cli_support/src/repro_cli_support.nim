@@ -44961,9 +44961,19 @@ proc samePathIdentity(a, b: string): bool =
   ## different directory. ``sameFile`` is not used because it raises when
   ## either side does not exist, and callers ask this question about paths Git
   ## merely *reported*.
+  ##
+  ## On Windows the comparison ignores case: NTFS names are case-insensitive,
+  ## and the real-path call there unifies separators but keeps each side's
+  ## letter case, so `m:/x` and `M:\x` would otherwise read as different
+  ## directories.
   if a.len == 0 or b.len == 0:
     return false
-  canonicalDiscoveredGitPath(a, a) == canonicalDiscoveredGitPath(b, b)
+  let left = canonicalDiscoveredGitPath(a, a)
+  let right = canonicalDiscoveredGitPath(b, b)
+  when defined(windows):
+    cmpIgnoreCase(left, right) == 0
+  else:
+    left == right
 
 proc discoverGitWorktree(identity: GitToolIdentity;
     candidate: string): GitWorktreeDiscovery =
@@ -98277,6 +98287,13 @@ proc flakeRefreshDirtyScope(workspaceRoot, currentRepo: string;
       "of the committed repo is UNKNOWN and the dirty-sibling check covers " &
       "only the repos whose pins this refresh would move")
     return
+  # Which member is being committed is a question about a DIRECTORY, not about
+  # a spelling. The managed hook passes `git rev-parse --show-toplevel`, which
+  # on Windows uses `/` where the membership join uses `\`, and any caller may
+  # pass a trailing separator, a `.`/`..` segment or a symlinked alias. A
+  # string comparison would declare the closure UNKNOWN for each of those and
+  # narrow the check without cause, so the pre-push gate's own path-identity
+  # test (`samePathIdentity`) decides.
   var currentName = ""
   let currentAbs = absolutePath(currentRepo)
   var pathOf = initTable[string, string]()
@@ -98284,7 +98301,7 @@ proc flakeRefreshDirtyScope(workspaceRoot, currentRepo: string;
     if repo.path.len == 0 or repo.path == ".": continue
     let abs = absolutePath(workspaceRoot / repo.path)
     pathOf[repo.name] = abs
-    if abs == currentAbs and currentName.len == 0:
+    if currentName.len == 0 and samePathIdentity(abs, currentAbs):
       currentName = repo.name
   if currentName.len == 0:
     notices.add("no repo of the workspace membership at " & workspaceRoot &

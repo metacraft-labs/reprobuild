@@ -342,9 +342,9 @@ proc profileCompileEnvAdditions*(repoRoot: string): StringTableRef =
   ## them any more, not because the engine is told to ignore a read.
   let repoRootAbs = absolutePath(repoRoot)
   # Reprobuild's config.nims resolves each source-only input (nimcrypto,
-  # bearssl, the shm libraries, ...) from `$<NAME>_SRC` first and only then
-  # probes sibling checkouts beside the source tree, which an installed
-  # layout or a release bundle does not have. The variables are set here to
+  # bearssl, io-mon, ...) from `$<NAME>_SRC` and otherwise probes sibling
+  # checkouts beside the source tree, which an installed layout or a
+  # release bundle does not have. The variables are set here to
   # absolute paths so that the first lookup answers, whatever directory
   # `nim` runs in (the compile's nimcache, `startProfileNim`) and wherever
   # the profile lives. Without them the transitive `import nimcrypto/sha2`
@@ -403,11 +403,11 @@ proc profileCompileEnvAdditions*(repoRoot: string): StringTableRef =
   # sibling (the action cache's Tier-2 index), and io-mon pulls
   # ``shm_queue/...`` from ``nim-shm-queue``. Neither package lives under
   # ``libs/*/src``, so ``profileNimPaths`` cannot supply them.
-  # config.nims resolves both through ``$SHM_QUEUE_SRC`` / ``$SHM_GSET_SRC``
-  # first, then a relative sibling probe, then a nix-devshell fallback —
-  # but the relative probe runs from the PROFILE directory (see the
-  # NimScript note above), and the devshell fallback is compiled out on
-  # Windows (``when defined(windows): ""``). Without the env pin the
+  # config.nims resolves both from a sibling checkout beside the source
+  # tree (preferred over ``$SHM_QUEUE_SRC`` / ``$SHM_GSET_SRC`` unless it is
+  # behind the pin), then from those variables, then a nix-devshell
+  # fallback -- but an installed layout has no siblings, and the devshell
+  # fallback is compiled out on Windows (``when defined(windows): ""``). Without the env pin the
   # profile compile therefore fails on Windows with
   # ``cannot open file: shm_queue/segment``; on Linux the devshell
   # fallback happens to mask it. Pin the env vars like every other
