@@ -12,7 +12,7 @@ the format are in [`docs/workspace-bundles.md`](../../docs/workspace-bundles.md)
 | `repro_bundle/select.nim` | resolves a selector through the workspace manifests |
 | `repro_bundle/nix_half.nim` | dev-shell closure, `--dump-db` registration, normalised `print-dev-env` |
 | `repro_bundle/sources_half.nim` | shallow clones at their workspace paths, checkout state |
-| `repro_bundle/github.nim` | the GitHub layout (orphan branches of 20 files), push and raw download |
+| `repro_bundle/github.nim` | GitHub layout, push, raw download |
 | `repro_bundle/bootstrap.nim` | renders `restore.sh` |
 | `repro_bundle/exec.nim` | runs the host tools (`nix`, `git`, `tar`, `zstd`, `curl`) |
 
