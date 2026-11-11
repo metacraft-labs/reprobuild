@@ -17,7 +17,7 @@
 ## engine's own fold; the action runs through `runBuild`, and the
 ## temporary is absent from disk, as it is once the linker has renamed it.
 
-import std/[os, sets, strutils, unittest]
+import std/[options, os, sets, strutils, unittest]
 
 from repro_test_support import testCaseScratchSlug
 
@@ -84,12 +84,16 @@ proc configFor(root: string): BuildEngineConfig =
   result.maxParallelism = 1
   result.actionCacheRoot = root / "shared"
 
-proc accessSidecars(root: string): seq[string] =
-  ## The input accesses stored beside each published record: what the
-  ## portable record of that action is derived from.
+proc accessSidecars(root: string): seq[InputAccesses] =
+  ## The input accesses stored beside each published record, decoded: what
+  ## the portable record of that action is derived from.
   for path in walkDirRec(root):
     if path.endsWith(InputAccessFileExt):
-      result.add(readFile(path))
+      let raw = readFile(path)
+      let decoded = decodeInputAccesses(raw.toOpenArrayByte(0, raw.high),
+        path.extractFilename[0 ..< ^InputAccessFileExt.len])
+      require decoded.isSome
+      result.add(decoded.get)
 
 proc probeEvents(run: BuildRunResult): seq[string] =
   for r in run.results:
@@ -121,6 +125,19 @@ suite "a temporary probed with a trailing separator":
       check transientWriteKey(temporary & "\\") notin transient
     check transientWriteKey("/") == "/"
 
+  test "a write whose key names a file on disk is not a temporary":
+    ## `main.c/` cannot be stat'ed when `main.c` is a regular file, but
+    ## its key is `main.c`, which exists.
+    let root = freshRoot("existing")
+    let source = root / "main.c"
+    writeFile(source, "int main;\n")
+    var evidence: PathSetEvidence
+    var seen: EvidenceSeenSets
+    discard foldMonitorRecordsEvidence(
+      [observed(mrFileWrite, moFileWrite, source & "/")], root, evidence,
+      seen)
+    check transientWriteKey(source) notin transientOwnWrites(evidence)
+
   test "does not move the determinism-probe key between runs":
     let root = freshRoot("probe")
     let project = root / "proj"
@@ -138,26 +155,31 @@ suite "a temporary probed with a trailing separator":
     # temporary, under either spelling.
     let sidecars = accessSidecars(root)
     check sidecars.len == 1
-    for sidecar in sidecars:
-      check "main.c" in sidecar
-      check "out.dll.tmp" notin sidecar
+    for accesses in sidecars:
+      check project / "src" / "main.c" in accesses.reads
+      for path in accesses.reads & accesses.probes & accesses.enumerations:
+        check "out.dll.tmp" notin path
 
-  test "a removed name ending in a backslash does not hide a real input":
-    ## On POSIX `main.c\` is its own file. Folding it into `main.c` took
-    ## the real input out of the probe key, so a changed source was
-    ## admitted as a verified rerun. On Windows the two spellings are one
-    ## file, which exists, so it is no temporary there either.
-    let root = freshRoot("backslash")
-    let project = root / "proj"
-    createDir(project / "src")
-    let source = project / "src" / "main.c"
-    writeFile(source, "int main;\n")
-    let config = configFor(root)
-    let first = runBuild(linkGraph(root, project, "a6d2958",
-      removedWrite = source & "\\"), config)
-    check first.probeEvents() == @["determinism-probe-candidate"]
-    removeFile(project / "build" / "out.dll")
-    writeFile(source, "int main(void) { return 1; }\n")
-    let second = runBuild(linkGraph(root, project, "a6d2958",
-      removedWrite = source & "\\"), config)
-    check second.probeEvents() == @["determinism-probe-candidate"]
+  test "a removed name ending in a separator does not hide a real input":
+    ## A write recorded as `main.c\` or `main.c/` folds to the key of the
+    ## real input `main.c`. On POSIX `main.c\` is its own file, and
+    ## `stat("main.c/")` fails because `main.c` is not a directory, so
+    ## either spelling looks written-and-gone. Taking its key as a
+    ## temporary took the real input out of the probe key, and a changed
+    ## source was admitted as a verified rerun.
+    for i, suffix in ["\\", "/"]:
+      let root = freshRoot("separator" & $i)
+      let project = root / "proj"
+      createDir(project / "src")
+      let source = project / "src" / "main.c"
+      writeFile(source, "int main;\n")
+      let config = configFor(root)
+      let first = runBuild(linkGraph(root, project, "a6d2958",
+        removedWrite = source & suffix), config)
+      check first.probeEvents() == @["determinism-probe-candidate"]
+      removeFile(project / "build" / "out.dll")
+      writeFile(source, "int main(void) { return 1; }\n")
+      let second = runBuild(linkGraph(root, project, "a6d2958",
+        removedWrite = source & suffix), config)
+      checkpoint("removed write: main.c" & suffix)
+      check second.probeEvents() == @["determinism-probe-candidate"]

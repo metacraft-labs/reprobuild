@@ -85,14 +85,21 @@ template withEnv(name, value: string; body: untyped) =
   finally:
     if hadOld: putEnv(name, old) else: delEnv(name)
 
-proc symlinkedSourceRoot(dir: string): string =
+proc symlinkedSourceRoot(dir: string; copyConfig = false): string =
   ## A directory whose entries are symbolic links to this checkout's
   ## top-level entries: a reprobuild source root the test may write into.
+  ## With `copyConfig`, `config.nims` is a copy instead: it locates the
+  ## source root by its own path (`currentSourcePath()`), which a symbolic
+  ## link would resolve back to this checkout.
   result = dir / "source-root"
   createDir(result)
   for _, path in walkDir(CompiledRepoRoot):
     let name = path.extractFilename
-    if name notin [".git", "build", "test-logs"]:
+    if name in [".git", "build", "test-logs"]:
+      continue
+    if copyConfig and name == "config.nims":
+      copyFile(path, result / name)
+    else:
       createSymlink(path, result / name)
 
 proc longNimcache(dir: string): string =
@@ -154,6 +161,39 @@ else:
       checkpoint(failure)
       check ResponseFileName in failure
       check not fileExists(extendedPath(binary))
+
+    test "workspace siblings beside the source root do not break the " &
+        "compile":
+      # A workspace checks out nim-shm-gset and nim-shm-queue beside the
+      # reprobuild source root, and config.nims prefers those siblings. It
+      # is included from a wrapper beside the profile, so a sibling path it
+      # adds must be anchored at the source root, not resolved against the
+      # profile's directory or `nim`'s working directory.
+      let dir = createTempDir("repro-profile-siblings-", "")
+      defer: removeDir(dir)
+      let root = symlinkedSourceRoot(dir, copyConfig = true)
+      for (name, envName) in [("nim-shm-gset", "SHM_GSET_SRC"),
+                              ("nim-shm-queue", "SHM_QUEUE_SRC")]:
+        let src = getEnv(envName)
+        doAssert src.len > 0, envName & " is unset: enter reprobuild's dev shell"
+        createDir(dir / name)
+        createSymlink(src, dir / name / "src")
+      check root.parentDir == dir
+      # Two levels down, so that the profile's parent is not the source
+      # root's parent: a sibling resolved against the profile's directory
+      # then names a directory that does not exist. The profile imports
+      # shm_gset itself, so the compile needs the path config.nims adds.
+      let profile = dir / "profiles" / "deep" / "home.nim"
+      createDir(profile.parentDir)
+      writeFile(profile, "import shm_gset\n" & ProfileBody)
+      let binary = dir / "out" / addFileExt("profile-build", ExeExt)
+      try:
+        discard compileProfileExecutable(profile, dir / "nimcache", binary,
+          root)
+      except CompileFailure as err:
+        checkpoint(err.msg & "\n" & err.stderrText)
+        check false
+      check fileExists(extendedPath(binary))
 
     test "a nim found through a relative PATH entry is named absolutely":
       # `nim` runs in the nimcache, so a compiler path relative to the

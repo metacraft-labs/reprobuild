@@ -737,12 +737,15 @@ proc addPackagePath(envName: string; candidates: openArray[string];
   ## about whether the build proceeds: see ``reportUnresolvedPackagePath``
   ## for why nothing here refuses.
   let envPath = getEnv(envName)
+  # The switch takes the path its probe tested (`repoPath`): included from a
+  # profile's wrapper config, a bare relative switch resolves against the
+  # profile's directory (see the top of this file), not this repository.
   if envPath.len > 0 and repoFileExists(envPath / marker):
-    switch("path", envPath)
+    switch("path", repoPath(envPath))
     return
   for candidate in candidates:
     if repoFileExists(candidate / marker):
-      switch("path", candidate)
+      switch("path", repoPath(candidate))
       return
   if useDevShellFallback:
     let flakePath = nixDevShellSourcePath(envName, marker)
@@ -916,9 +919,10 @@ proc addSiblingFirstPackagePath(sibling, envName, marker: string) =
         echo "config.nims: using $" & envName & "=" & envPath &
           " instead of the sibling " & sibling & " (" & why &
           "); set REPRO_SIBLING_POLICY=sibling to force the sibling"
-        switch("path", envPath)
+        switch("path", repoPath(envPath))
         return
-    switch("path", sibling)
+    # Anchored as in `addPackagePath`: the probe above tested this path.
+    switch("path", repoPath(sibling))
     return
   addPackagePath(envName, [], marker, useDevShellFallback = true)
 

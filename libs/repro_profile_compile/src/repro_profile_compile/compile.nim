@@ -341,10 +341,11 @@ proc profileCompileEnvAdditions*(repoRoot: string): StringTableRef =
   ## those. The edge stops depending on the others because nothing reads
   ## them any more, not because the engine is told to ignore a read.
   let repoRootAbs = absolutePath(repoRoot)
-  # Reprobuild's config.nims resolves each source-only input (nimcrypto,
+  # Reprobuild's config.nims resolves most source-only inputs (nimcrypto,
   # bearssl, io-mon, ...) from `$<NAME>_SRC` and otherwise probes sibling
   # checkouts beside the source tree, which an installed layout or a
-  # release bundle does not have. The variables are set here to
+  # release bundle does not have (the shm libraries, below, prefer the
+  # sibling). The variables are set here to
   # absolute paths so that the first lookup answers, whatever directory
   # `nim` runs in (the compile's nimcache, `startProfileNim`) and wherever
   # the profile lives. Without them the transitive `import nimcrypto/sha2`
@@ -405,7 +406,8 @@ proc profileCompileEnvAdditions*(repoRoot: string): StringTableRef =
   # ``libs/*/src``, so ``profileNimPaths`` cannot supply them.
   # config.nims resolves both from a sibling checkout beside the source
   # tree (preferred over ``$SHM_QUEUE_SRC`` / ``$SHM_GSET_SRC`` unless it is
-  # behind the pin), then from those variables, then a nix-devshell
+  # behind the pin or ``$REPRO_SIBLING_POLICY`` says otherwise), then from
+  # those variables, then a nix-devshell
   # fallback -- but an installed layout has no siblings, and the devshell
   # fallback is compiled out on Windows (``when defined(windows): ""``). Without the env pin the
   # profile compile therefore fails on Windows with

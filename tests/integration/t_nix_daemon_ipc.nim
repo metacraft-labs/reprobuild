@@ -310,9 +310,10 @@ printf '%s\n' /tmp/reprobuild-nix-daemon-fake-store
     # selector is a local flake, which the helper must never answer from its
     # cache, so a repeated request here re-evaluates by design.
 
-    # Cache invalidation: the daemon cache key must include the observed input
-    # hashes, otherwise this second response would reuse the first dependency
-    # hash for the same selector/root after flake.nix changes.
+    # Dependency reporting: after flake.nix changes, the response reports the
+    # file's new hash. This selector is a local flake, which the helper never
+    # caches, so this checks what the helper reports, not its cache key; the
+    # key's invalidation is checked with a cacheable selector in scenario 1.3.
     let mutableFixture = prepareFixtureRoot(repoRoot)
     defer: removeDir(mutableFixture)
     let mutableReq = %*{
@@ -390,9 +391,11 @@ printf '%s\n' /tmp/reprobuild-nix-daemon-fake-store
         try:
           let probe = newSocket(domain = AF_UNIX, sockType = SOCK_STREAM,
             protocol = IPPROTO_IP)
-          probe.connectUnix(socketPath)
-          probe.close()
-          connected = true
+          try:
+            probe.connectUnix(socketPath)
+            connected = true
+          finally:
+            probe.close()
           break
         except CatchableError:
           discard
@@ -406,16 +409,19 @@ printf '%s\n' /tmp/reprobuild-nix-daemon-fake-store
         }
         let sock = newSocket(domain = AF_UNIX, sockType = SOCK_STREAM,
           protocol = IPPROTO_IP)
-        sock.connectUnix(socketPath)
-        let startTime = epochTime()
-        sock.send($req & "\n")
         var respLine = ""
-        sock.readLine(respLine)
-        let durationMs = (epochTime() - startTime) * 1000.0
-        sock.close()
+        var durationMs = 0.0
+        try:
+          sock.connectUnix(socketPath)
+          let startTime = epochTime()
+          sock.send($req & "\n")
+          sock.readLine(respLine)
+          durationMs = (epochTime() - startTime) * 1000.0
+        finally:
+          sock.close()
         (parseJson(respLine), durationMs)
 
-      # An immutable remote selector: the first request evaluates, and the
+      # A remote (non-local) selector: the first request evaluates, and the
       # identical second one is answered from the helper's cache.
       let (cold, _) = resolve("nixpkgs#hello")
       check cold["status"].getStr() == "success"
@@ -430,8 +436,18 @@ printf '%s\n' /tmp/reprobuild-nix-daemon-fake-store
       # leaves a wide margin for a loaded host.
       check warmMs < 50.0
 
+      # The key binds the recorded dependency files: once flake.nix changes,
+      # the same request evaluates again and is cached under the new key.
+      writeFile(fixtureRoot / "flake.nix",
+        readFile(fixtureRoot / "flake.nix") & "# dependency changed\n")
+      let (changed, _) = resolve("nixpkgs#hello")
+      check changed["status"].getStr() == "success"
+      check evaluations() == 2
+      discard resolve("nixpkgs#hello")
+      check evaluations() == 2
+
       # A local flake is mutable source: every request evaluates again.
-      for expected in [2, 3]:
+      for expected in [3, 4]:
         let (local, _) = resolve(".#hello-sh")
         check local["status"].getStr() == "success"
         check evaluations() == expected
