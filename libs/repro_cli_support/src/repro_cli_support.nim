@@ -24678,6 +24678,16 @@ proc runPreCommitCertificateGate*(repoRoot: string; displaced: bool): int
 proc runCachePushCommand*(args: openArray[string]): int
 proc liveWorkspaceNamesForCache(workspaceRoot: string): seq[string]
 
+proc probeFailureReason(probe, repoPath, diagnostic: string): string =
+  ## The reason a readiness probe failed in ``repoPath``. When the checkout
+  ## reads its objects from a shared cache that was deleted
+  ## (Shared-Clone-Pool-Integrity §4.5), git only says it cannot read a tree;
+  ## the reason then names the missing cache and the command that repairs it.
+  let explained = poolMissingProbeReason(repoPath, "repro health --fix",
+    diagnostic)
+  probe & " probe failed: " &
+    (if explained.len > 0: explained else: diagnostic)
+
 proc emitLeafReports(reports: openArray[LeafCheckReport]) =
   ## Print the shared-clone detector's messages
   ## (Shared-Clone-Pool-Integrity §4.4) on stderr. Every caller that refreshes
@@ -54121,7 +54131,7 @@ proc executeWorkspaceLock(args: WorkspaceLockArgs;
     if not isClean and inDirtyScope:
       let reason =
         if cleanRes.status != gqsOk:
-          "clean/dirty probe failed: " & cleanRes.diagnostic
+          probeFailureReason("clean/dirty", repoPath, cleanRes.diagnostic)
         else:
           "working tree has uncommitted changes"
       dirtyEntries.add(WorkspaceLockDirtyEntry(
@@ -75664,6 +75674,17 @@ proc executeWorkspaceStatus(args: WorkspaceStatusArgs): WorkspaceStatusReport =
       report.repos.add(entry)
       continue
 
+    # Shared-Clone-Pool-Integrity §4.5: with ``--fix``, re-create a deleted
+    # shared cache and re-wire the checkout BEFORE probing it, so the row
+    # reports the repaired checkout rather than the error the repair cured.
+    var poolRepairFailure = ""
+    if args.fix:
+      let repaired = repairPoolMissing(identity.binaryPath,
+        defaultCacheRoot(args.workspaceRoot), repoAbsPath, cloneUrlFor(repo))
+      report.leafReports.add(repaired.leafReports)
+      if not repaired.ok:
+        poolRepairFailure = repaired.diagnostic
+
     let mainlineBranch = declaredMainlineBranch(resolved, repo.name)
     # `--file-details` implies file querying (it reads the same porcelain).
     let extQuery = extendedStatusQuery(repoAbsPath, mainlineBranch,
@@ -75721,6 +75742,19 @@ proc executeWorkspaceStatus(args: WorkspaceStatusArgs): WorkspaceStatusReport =
       ["-C", repoAbsPath, "symbolic-ref", "--short", "-q", "HEAD"])
     if branchRes.code == 0:
       entry.branch = branchRes.output.strip()
+
+    # Shared-Clone-Pool-Integrity §4.5: a checkout whose shared cache was
+    # deleted cannot be read at all; say so instead of git's tree error.
+    # (With ``--fix`` the repair ran before the probes above.)
+    if entry.diagnostic.len > 0:
+      let explained = poolMissingProbeReason(repoAbsPath,
+        "repro workspace status --fix", entry.diagnostic)
+      if explained.len > 0:
+        entry.diagnostic = explained
+    if poolRepairFailure.len > 0:
+      if entry.diagnostic.len > 0: entry.diagnostic.add("; ")
+      entry.diagnostic.add("could not re-wire to a re-created shared " &
+        "cache: " & poolRepairFailure)
 
     # Shared-Clone-Pool-Integrity §4.2: is anything this checkout names gone
     # from it and from its shared clone? Report-only unless ``--fix``.
@@ -76057,6 +76091,10 @@ type
     gitOk: bool
     leafReports: seq[LeafCheckReport]
       ## ``shared-clone-leaves``: the detector's report-only pass.
+    poolMissing: seq[tuple[leaf, fetchUrl, message: string]]
+      ## ``shared-clone-leaves``: checkouts whose alternates name a shared
+      ## cache that no longer exists (Shared-Clone-Pool-Integrity §4.5),
+      ## each with the URL ``--fix`` re-creates its pool from.
 
 proc parseHealthArgs(args: openArray[string]): HealthArgs =
   result.forgeCache = newRepositoryIdentityCache()
@@ -78488,6 +78526,7 @@ proc gatherHealthChecksOverSettings(parsed: HealthArgs):
     var leaves = 0
     var total = 0
     var foreignPools: seq[string]
+    var missingPools: seq[string]
     var stale: seq[string]
     var broken: seq[string]
     var chains: seq[string]
@@ -78497,12 +78536,25 @@ proc gatherHealthChecksOverSettings(parsed: HealthArgs):
       if not dirExists(abs / ".git") and not fileExists(abs / ".git"):
         continue
       inc total
+      var poolDeleted = false
       try:
         let entries = alternateObjectDirs(abs)
         if entries.len == 0: continue
         inc leaves
         let canonical = sharedBarePath(cacheRoot, cloneUrlFor(repo))
-        let foreign = foreignAlternates(abs, canonical)
+        # §4.5: a deleted cache is its own finding, with its own repair;
+        # `consolidate` cannot migrate a checkout it cannot read.
+        let missing = missingAlternateStores(abs)
+        poolDeleted = missing.len > 0
+        if missing.len > 0:
+          missingPools.add(repo.path & " reads objects from shared cache(s) " &
+            "that no longer exist: " & missing.join(", "))
+          ctx.poolMissing.add((leaf: abs, fetchUrl: cloneUrlFor(repo),
+            message: messagePoolMissing(abs, missing, self & " health --fix")))
+        var foreign: seq[string]
+        for store in foreignAlternates(abs, canonical):
+          if store notin missing:
+            foreign.add(store)
         if foreign.len > 0:
           foreignPools.add(repo.path & " borrows from foreign pool(s): " &
             foreign.join(", "))
@@ -78511,6 +78563,11 @@ proc gatherHealthChecksOverSettings(parsed: HealthArgs):
           diagnostics.add(repo.path & ": " & connectivity)
       except CatchableError as error:
         diagnostics.add(repo.path & ": cannot inspect alternates: " & error.msg)
+        continue
+      # A checkout that names a deleted store gets the detector after its
+      # repair (`repairPoolMissing`), not now: the detector registers the
+      # checkout with its pool, and that pool may be the deleted one.
+      if poolDeleted:
         continue
       if not borrowsFromPool(abs, sharedBarePath(cacheRoot, cloneUrlFor(repo))):
         continue
@@ -78532,7 +78589,8 @@ proc gatherHealthChecksOverSettings(parsed: HealthArgs):
         else:
           discard
     if stale.len == 0 and broken.len == 0 and chains.len == 0 and
-        diagnostics.len == 0 and foreignPools.len == 0:
+        diagnostics.len == 0 and foreignPools.len == 0 and
+        missingPools.len == 0:
       checks.add(HealthCheck(
         name: "shared-clone-leaves",
         status: hsOk,
@@ -78541,6 +78599,9 @@ proc gatherHealthChecksOverSettings(parsed: HealthArgs):
         remedy: "", fixKind: hfNone))
     else:
       var detail = @["examined " & $leaves & " of " & $total & " checkout(s)"]
+      if missingPools.len > 0:
+        detail.add(missingPools.join("; ") &
+          "; re-create and re-wire with `" & self & " health --fix`")
       if foreignPools.len > 0:
         detail.add(foreignPools.join("; ") &
           "; migrate with `repro ws shared-clones consolidate`")
@@ -78549,7 +78610,8 @@ proc gatherHealthChecksOverSettings(parsed: HealthArgs):
           "to a partial shared clone: " & chains.join(", "))
       if diagnostics.len > 0:
         detail.add(diagnostics.join("; "))
-      let canRepair = stale.len > 0 or chains.len > 0 or diagnostics.len > 0
+      let canRepair = stale.len > 0 or chains.len > 0 or
+        diagnostics.len > 0 or missingPools.len > 0
       if stale.len > 0:
         detail.add($stale.len & " stale remote-tracking ref(s) whose " &
           "commit no longer exists upstream or in the shared clone: " &
@@ -78838,6 +78900,28 @@ proc applyHealthFixes(parsed: HealthArgs; checks: seq[HealthCheck];
         continue
       result.add("fix: repairing refetch chains and stale remote-tracking refs " &
         "in checkouts that borrow from shared clones")
+      for missing in ctx.poolMissing:
+        let repaired = repairPoolMissing(ctx.gitIdentity.binaryPath,
+          defaultCacheRoot(parsed.workspaceRoot), missing.leaf,
+          missing.fetchUrl)
+        emitLeafReports(repaired.leafReports)
+        var rewired = repaired.ok
+        if not rewired and repaired.sharedBarePath.len > 0:
+          try:
+            rewired = missingAlternateStores(missing.leaf).len == 0 and
+              borrowsFromPool(missing.leaf, repaired.sharedBarePath)
+          except CatchableError:
+            rewired = false
+        if repaired.ok:
+          result.add("fix: re-created the shared cache " &
+            repaired.sharedBarePath & " and re-wired " & missing.leaf)
+        elif rewired:
+          result.add("fix: re-created the shared cache " &
+            repaired.sharedBarePath & " and re-wired " & missing.leaf &
+            ", but the check that followed reported: " & repaired.diagnostic)
+        else:
+          result.add("fix: could NOT re-wire " & missing.leaf &
+            " to a re-created shared cache: " & repaired.diagnostic)
       for lr in ctx.leafReports:
         let repaired = checkLeaf(ctx.gitIdentity.binaryPath, lr.leaf,
           lcmRepair, pool = lr.pool)
@@ -78952,6 +79036,10 @@ proc runHealthCommand*(args: openArray[string]): int =
   # The shared-clone detector's messages (report-only here): what is wrong
   # in each checkout, in words, with the exact commands that fix it.
   emitLeafReports(ctx.leafReports)
+  if ctx.poolMissing.len > 0:
+    stdout.flushFile()
+    for missing in ctx.poolMissing:
+      stderr.writeLine(missing.message)
 
   if healthHasFailure(checks): 1 else: 0
 
@@ -80748,14 +80836,16 @@ proc executeBranchCreate(parsed: BranchArgs): BranchReport =
     let headRes = queryGitState(headShaQuery(state.repoPath), identity)
     if headRes.status != gqsOk:
       state.kind = rsProbeFailed
-      state.reason = "head-sha probe failed: " & headRes.diagnostic
+      state.reason = probeFailureReason("head-sha", state.repoPath,
+        headRes.diagnostic)
       states.add(state)
       continue
     state.headSha = headRes.headSha
     let cleanRes = queryGitState(isCleanQuery(state.repoPath), identity)
     if cleanRes.status != gqsOk:
       state.kind = rsProbeFailed
-      state.reason = "clean/dirty probe failed: " & cleanRes.diagnostic
+      state.reason = probeFailureReason("clean/dirty", state.repoPath,
+        cleanRes.diagnostic)
       states.add(state)
       continue
     if not cleanRes.isClean:
@@ -81691,7 +81781,8 @@ proc executeWorkspaceSwitch(parsed: SwitchArgs): SwitchReport =
     let headRes = queryGitState(headShaQuery(state.repoPath), identity)
     if headRes.status != gqsOk:
       state.kind = rsProbeFailed
-      state.reason = "head-sha probe failed: " & headRes.diagnostic
+      state.reason = probeFailureReason("head-sha", state.repoPath,
+        headRes.diagnostic)
       states.add(state)
       continue
     state.headSha = headRes.headSha
@@ -81705,7 +81796,8 @@ proc executeWorkspaceSwitch(parsed: SwitchArgs): SwitchReport =
     let cleanRes = queryGitState(isCleanQuery(state.repoPath), identity)
     if cleanRes.status != gqsOk:
       state.kind = rsProbeFailed
-      state.reason = "clean/dirty probe failed: " & cleanRes.diagnostic
+      state.reason = probeFailureReason("clean/dirty", state.repoPath,
+        cleanRes.diagnostic)
       states.add(state)
       continue
     if not cleanRes.isClean:
@@ -83187,7 +83279,8 @@ proc executeRemove(parsed: RemoveArgs): RemoveReport =
       let cleanRes = queryGitState(isCleanQuery(repoPath), gitIdentity())
       if cleanRes.status != gqsOk:
         dirty = true
-        dirtyDiag = "clean/dirty probe failed: " & cleanRes.diagnostic
+        dirtyDiag = probeFailureReason("clean/dirty", repoPath,
+          cleanRes.diagnostic)
       elif not cleanRes.isClean:
         dirty = true
         dirtyDiag = "working tree has uncommitted changes"
@@ -83754,7 +83847,8 @@ proc executeBranchFork(parsed: BranchArgs): BranchReport =
     let headRes = queryGitState(headShaQuery(state.srcPath), identity)
     if headRes.status != gqsOk:
       state.probeFailed = true
-      state.probeReason = "head-sha probe failed: " & headRes.diagnostic
+      state.probeReason = probeFailureReason("head-sha", state.srcPath,
+        headRes.diagnostic)
       anyProbeFailed = true
       states.add(state)
       continue
@@ -83762,7 +83856,8 @@ proc executeBranchFork(parsed: BranchArgs): BranchReport =
     let cleanRes = queryGitState(isCleanQuery(state.srcPath), identity)
     if cleanRes.status != gqsOk:
       state.probeFailed = true
-      state.probeReason = "clean/dirty probe failed: " & cleanRes.diagnostic
+      state.probeReason = probeFailureReason("clean/dirty", state.srcPath,
+        cleanRes.diagnostic)
       anyProbeFailed = true
       states.add(state)
       continue

@@ -54,6 +54,13 @@ proc requireGit(command: string; cwd = ""): string =
     quit 1
   res.output
 
+proc deadAlternates(leaf: string): seq[string] =
+  ## The leaf's alternates entries naming a directory that does not exist,
+  ## observed directly rather than through the code under test.
+  for store in alternateObjectDirs(leaf):
+    if not dirExists(store):
+      result.add(store)
+
 proc repoRoot(): string =
   currentSourcePath().parentDir.parentDir.parentDir
 
@@ -606,3 +613,223 @@ suite "RA-5 — repro workspace shared-clones":
         row = line
     check " ok " in row
     check "examined 1 of 1" in row
+
+  test "health names a deleted shared cache and fix re-creates and re-wires it":
+    # Shared-Clone-Pool-Integrity §4.5. The checkout borrows from a legacy
+    # cache outside the cache root, then BOTH that cache and the whole cache
+    # root are deleted, as a disk clean-up of ~/.cache does. Git can no longer
+    # read HEAD's tree; health must name the missing cache and the remedy,
+    # `repro branch` must say the same instead of a bare probe failure, and
+    # `health --fix` must leave the checkout readable through a re-created
+    # canonical pool, with the dead entry gone and the leaf registered.
+    let git = findExe("git")
+    require git.len > 0
+    let scratch = createTempDir("repro-pool-missing-", "")
+    defer: removeDir(scratch)
+    let origin = scratch / "origin.git"
+    let head = seedGitOrigin(git, origin, scratch / "seed")
+    let ws = seedWorkspace(scratch, fileUrl(origin))
+    let cache = scratch / "canonical"
+    let env = @[("REPRO_WORKSPACE_CLONES", cache)]
+    let bin = reproBinary()
+    require runShell(shellCommand(@[bin, "ws", "init", "ra5proj",
+      "--workspace-root=" & ws], env)).code == 0
+    let listing = runShell(shellCommand(@[bin, "ws", "shared-clones", "list",
+      "ra5proj", "--workspace-root=" & ws, "--json"], env))
+    require listing.code == 0
+    let canonical = parseJson(listing.output)["repos"][0]["sharedBarePath"].getStr()
+    removeDir(ws / "lib")
+    let legacy = scratch / "legacy-clones" / "lib.git"
+    createDir(legacy.parentDir)
+    discard requireGit(q(git) & " clone --bare " & q(origin) & " " & q(legacy))
+    let leaf = ws / "lib"
+    discard requireGit(q(git) & " clone --shared " & q(legacy) & " " & q(leaf))
+    discard requireGit(q(git) & " -C " & q(leaf) & " remote set-url origin " &
+      q(fileUrl(origin)))
+    removeDir(cache)
+    removeDir(legacy)
+    # Precondition: git itself cannot read the checkout any more.
+    let broken = runCmd(q(git) & " -C " & q(leaf) & " status --porcelain")
+    checkpoint broken.output
+    require broken.code != 0
+    let dead = deadAlternates(leaf)
+    require dead.len == 1
+    check dead[0].endsWith("legacy-clones" / "lib.git" / "objects")
+
+    let observed = runShell(shellCommand(@[bin, "health",
+      "--workspace-root=" & ws], env))
+    checkpoint observed.output
+    var row = ""
+    for line in observed.output.splitLines():
+      if line.startsWith("shared-clone-leaves"):
+        row = line
+    check "examined 1 of 1" in row
+    check "lib reads objects from shared cache(s) that no longer exist: " &
+      dead[0] in row
+    check "health --fix" in row
+    check "foreign pool(s)" notin row
+    check ("repro: " & displayPath(leaf) & ": the shared cache this checkout " &
+      "reads its objects from no longer exists:\n      " &
+      displayPoolPath(dead[0])) in observed.output
+    # Report-only: nothing was re-created or rewritten.
+    check not dirExists(cache)
+    check readAlternates(leaf).len == 1
+    check deadAlternates(leaf) == dead
+
+    # `repro branch` forks the workspace root from its origin before it
+    # probes the member checkouts, so the root needs one.
+    writeFile(ws / ".gitignore", "/lib/\n/.repro/\n")
+    discard requireGit(q(git) & " -C " & q(ws) & " init -b main")
+    discard requireGit(q(git) & " -C " & q(ws) &
+      " -c user.name=Tester -c user.email=tester@example.invalid" &
+      " add -A")
+    discard requireGit(q(git) & " -C " & q(ws) &
+      " -c user.name=Tester -c user.email=tester@example.invalid" &
+      " commit -m manifests")
+    let wsOrigin = scratch / "ws-origin.git"
+    discard requireGit(q(git) & " clone --bare " & q(ws) & " " & q(wsOrigin))
+    discard requireGit(q(git) & " -C " & q(ws) & " remote add origin " &
+      q(fileUrl(wsOrigin)))
+    let forked = runShell(shellCommand(@[bin, "branch", scratch / "fork",
+      "--workspace-root=" & ws], env))
+    checkpoint forked.output
+    check forked.code != 0
+    check ("clean/dirty probe failed: the shared cache it reads objects " &
+      "from no longer exists (" & displayPoolPath(dead[0]) &
+      "); run `repro health --fix`") in forked.output
+
+    let fixed = runShell(shellCommand(@[bin, "health", "--fix",
+      "--workspace-root=" & ws], env))
+    checkpoint fixed.output
+    check "fix: re-created the shared cache " & canonical & " and re-wired " &
+      leaf in fixed.output
+    let readable = runCmd(q(git) & " -C " & q(leaf) & " status --porcelain")
+    checkpoint readable.output
+    check readable.code == 0
+    check readable.output.strip() == ""
+    check requireGit(q(git) & " -C " & q(leaf) & " rev-parse HEAD").strip() == head
+    discard requireGit(q(git) & " -C " & q(leaf) & " fsck --connectivity-only")
+    check deadAlternates(leaf).len == 0
+    check readAlternates(leaf) == @[canonical / "objects"]
+    check readBorrowers(canonical).len == 1
+    check sameFile(readBorrowers(canonical)[0], leaf)
+    var after = ""
+    for line in fixed.output.splitLines():
+      if line.startsWith("shared-clone-leaves"):
+        after = line
+    check " ok " in after
+
+  test "a deleted canonical cache is diagnosed without writes and repaired by status --fix":
+    # Shared-Clone-Pool-Integrity §4.5, the common case: the checkout borrows
+    # only from its own canonical pool and the whole cache root is deleted.
+    # The detection pass must not write into the deleted pool's path (it
+    # used to re-create it holding only `repro/` bookkeeping, which then
+    # made the repair's clone refuse a non-empty destination), and the
+    # repair must still succeed when such a leftover is already there, as an
+    # earlier repro leaves it. `workspace status --fix` must report the
+    # repaired checkout, not the error the repair cured.
+    let git = findExe("git")
+    require git.len > 0
+    let scratch = createTempDir("repro-canonical-missing-", "")
+    defer: removeDir(scratch)
+    let origin = scratch / "origin.git"
+    let head = seedGitOrigin(git, origin, scratch / "seed")
+    let ws = seedWorkspace(scratch, fileUrl(origin))
+    let cache = scratch / "canonical"
+    let env = @[("REPRO_WORKSPACE_CLONES", cache)]
+    let bin = reproBinary()
+    require runShell(shellCommand(@[bin, "ws", "init", "ra5proj",
+      "--workspace-root=" & ws], env)).code == 0
+    let listing = runShell(shellCommand(@[bin, "ws", "shared-clones", "list",
+      "ra5proj", "--workspace-root=" & ws, "--json"], env))
+    require listing.code == 0
+    let canonical = parseJson(listing.output)["repos"][0]["sharedBarePath"].getStr()
+    let leaf = ws / "lib"
+    require readAlternates(leaf) == @[canonical / "objects"]
+    removeDir(cache)
+    let broken = runCmd(q(git) & " -C " & q(leaf) & " status --porcelain")
+    checkpoint broken.output
+    require broken.code != 0
+
+    let observed = runShell(shellCommand(@[bin, "health",
+      "--workspace-root=" & ws], env))
+    checkpoint observed.output
+    var row = ""
+    for line in observed.output.splitLines():
+      if line.startsWith("shared-clone-leaves"):
+        row = line
+    check "lib reads objects from shared cache(s) that no longer exist: " &
+      canonical / "objects" in row
+    check "health --fix" in row
+    # Report-only: the deleted pool's path is not re-created, not even as
+    # a bookkeeping directory, and the alternates are untouched.
+    check not dirExists(canonical)
+    check not dirExists(cache)
+    check readAlternates(leaf) == @[canonical / "objects"]
+
+    let reported = runShell(shellCommand(@[bin, "workspace", "status",
+      "--json", "--workspace-root=" & ws], env))
+    checkpoint reported.output
+    check "the shared cache it reads objects from no longer exists" in
+      reported.output
+    check "repro workspace status --fix" in reported.output
+    check not dirExists(canonical)
+
+    # What an earlier detector pass left in the deleted pool's place.
+    createDir(canonical / "repro")
+    writeFile(canonical / "repro" / "borrowers", leaf & "\n")
+
+    let fixed = runShell(shellCommand(@[bin, "workspace", "status", "--fix",
+      "--json", "--workspace-root=" & ws], env))
+    checkpoint fixed.output
+    check "no longer exists" notin fixed.output
+    check "could not re-wire" notin fixed.output
+    check "unable to normalize" notin fixed.output
+    let readable = runCmd(q(git) & " -C " & q(leaf) & " status --porcelain")
+    checkpoint readable.output
+    check readable.code == 0
+    check readable.output.strip() == ""
+    check requireGit(q(git) & " -C " & q(leaf) & " rev-parse HEAD").strip() == head
+    discard requireGit(q(git) & " -C " & q(leaf) & " fsck --connectivity-only")
+    check readAlternates(leaf) == @[canonical / "objects"]
+    check readBorrowers(canonical).len == 1
+    check sameFile(readBorrowers(canonical)[0], leaf)
+    let json = parseJson(fixed.output)
+    for repo in json["repos"]:
+      if repo["path"].getStr() == "lib":
+        check repo["checkoutState"].getStr() == "clean"
+
+    let healthy = runShell(shellCommand(@[bin, "health",
+      "--workspace-root=" & ws], env))
+    checkpoint healthy.output
+    var after = ""
+    for line in healthy.output.splitLines():
+      if line.startsWith("shared-clone-leaves"):
+        after = line
+    check " ok " in after
+
+  test "a C-quoted live alternates entry is not reported as a deleted cache":
+    # Git reads an alternates line that starts with `"` as a C-quoted path.
+    # Such an entry naming a live store is neither missing nor dropped.
+    let git = findExe("git")
+    require git.len > 0
+    let scratch = createTempDir("repro-quoted-alt-", "")
+    defer: removeDir(scratch)
+    let origin = scratch / "origin.git"
+    discard seedGitOrigin(git, origin, scratch / "seed")
+    let ws = seedWorkspace(scratch, fileUrl(origin))
+    let cache = scratch / "canonical"
+    let env = @[("REPRO_WORKSPACE_CLONES", cache)]
+    let bin = reproBinary()
+    require runShell(shellCommand(@[bin, "ws", "init", "ra5proj",
+      "--workspace-root=" & ws], env)).code == 0
+    let leaf = ws / "lib"
+    let entries = readAlternates(leaf)
+    require entries.len == 1
+    writeFile(alternatesFilePath(leaf), "\"" & entries[0] & "\"\n")
+    require runCmd(q(git) & " -C " & q(leaf) & " status --porcelain").code == 0
+    check missingAlternateStores(leaf).len == 0
+    let observed = runShell(shellCommand(@[bin, "health",
+      "--workspace-root=" & ws], env))
+    checkpoint observed.output
+    check "no longer exist" notin observed.output
