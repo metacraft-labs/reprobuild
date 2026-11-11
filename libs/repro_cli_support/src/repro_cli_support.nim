@@ -2138,13 +2138,14 @@ proc cmakeRegenerationBuildAction(meta: CmakeRegenerationMetadata;
     envPassthrough.add("REPROBUILD_SOURCE_ROOT")
   let depfilePath = cmakeRegenerationDepfile(meta)
   let hasGlobVerification = meta.cmakeRegenerationHasGlobVerification()
-  action("__repro_cmake_regenerate", @[
+  let argv = @[
     publicCliPath,
     "__repro-cmake-regenerate",
     "--metadata", meta.metadataFile,
     "--public-cli", publicCliPath,
     "--depfile", depfilePath
-  ],
+  ]
+  action("__repro_cmake_regenerate", argv,
     # Named-Lock-Files §7.2. CMake regeneration re-runs the generator over
     # recorded metadata; no solved package instance reaches it. See
     # `lockIdentityOutsideSolvedGraph`.
@@ -2154,7 +2155,8 @@ proc cmakeRegenerationBuildAction(meta: CmakeRegenerationMetadata;
     outputs = cmakeRegenerationOutputs(meta),
     commandStatsId = "repro cmake regeneration edge",
     cacheable = not hasGlobVerification,
-    weakFingerprint = cmakeRegenerationFingerprint(meta, publicCliPath),
+    weakFingerprint = keyedOnArgv(
+      cmakeRegenerationFingerprint(meta, publicCliPath), argv, meta.binaryDir),
     depfile = depfilePath,
     dependencyPolicy = requiredMakeDepfilePolicy(depfilePath),
     env = env,
@@ -3237,36 +3239,18 @@ proc resolveCanonicalExecRoot*(cwdKind: ActionCwdKind; cwdCustomPath: string;
   else:
     raw
 
-proc spawnedArgvKeyText(argv: openArray[string]): string =
-  ## The argv a lowered process action SPAWNS, as text for its weak
-  ## fingerprint.
-  ##
-  ## The local action cache files a record under the weak fingerprint and
-  ## serves it to any later action with the same one whose recorded inputs
-  ## still check out. `repro_build_engine.action()` mixes the environment,
-  ## the lock and the content-addressed root of `argv[0]` into the
-  ## fingerprint its caller passes, and nothing else of argv. So the caller
-  ## has to key argv, and keying the graph node's payload is not the same
-  ## thing: the payload is what the recipe wrote, and three branches of
-  ## `lowerGraphAction` spawn something it does not spell out. Inline exec
-  ## substitutes each `@FILE:<path>` element with the file's contents; the
-  ## nim-unittest site resolves the test binary against the project root;
-  ## the typed-tool site takes `argv[0]` and any invocation prefix from the
-  ## resolved tool profile. Two actions that differ only there used to share
-  ## one record, and the second was served the first one's result.
-  ##
-  ## Keyed here, after every rewrite, rather than reconstructed from the
-  ## payload and the inputs to each rewrite, so that a rewrite added later
-  ## is keyed without anyone remembering to.
-  ##
-  ## Each element is length-framed: `["a b"]` and `["a", "b"]` must not
-  ## collide. A substituted `@FILE:` value enters the key only as part of
-  ## this digest; the plaintext spawned argv is already what the lowered
-  ## graph cache stores for the action.
-  result = "\nspawnedArgv\n" & $argv.len
-  for arg in argv:
-    result.add("\x1f" & $arg.len & ":" & arg)
-
+## Every process action `lowerGraphAction` builds keys the argv it SPAWNS
+## (`keyedOnArgv`), not only the graph node's payload. The payload is what
+## the recipe wrote, and three branches spawn something it does not spell
+## out: inline exec substitutes each `@FILE:<path>` element with the file's
+## contents; the nim-unittest site resolves the test binary against the
+## project root; the typed-tool site takes `argv[0]` and any invocation
+## prefix from the resolved tool profile. Keyed after every rewrite, rather
+## than reconstructed from the payload and the inputs to each rewrite, so
+## that a rewrite added later is keyed without anyone remembering to. A
+## substituted `@FILE:` value enters the key only as part of the digest; the
+## plaintext spawned argv is already what the lowered graph cache stores for
+## the action.
 proc lowerGraphAction(node: GraphNode; profiles: Table[string, PathOnlyToolProfile];
                       projectRoot: string): BuildAction =
   # `BuildAction.governingLockIdentity` is required. Give `result` a complete
@@ -3466,8 +3450,8 @@ proc lowerGraphAction(node: GraphNode; profiles: Table[string, PathOnlyToolProfi
       depfile = payload.depfile,
       dynamicDepsFile = payload.dynamicDepsFile,
       cacheable = payload.cacheable,
-      weakFingerprint = weakFingerprintFromText(fingerprintText &
-        spawnedArgvKeyText(argv)),
+      weakFingerprint = keyedOnArgv(weakFingerprintFromText(fingerprintText),
+        argv),
       actionCachePolicy = actionCachePolicy,
       dependencyPolicy = lowerDependencyPolicy(payload.id, payload.depfile,
         payload.dependencyPolicy),
@@ -3589,8 +3573,8 @@ proc lowerGraphAction(node: GraphNode; profiles: Table[string, PathOnlyToolProfi
       depfile = payload.depfile,
       dynamicDepsFile = payload.dynamicDepsFile,
       cacheable = payload.cacheable,
-      weakFingerprint = weakFingerprintFromText(fingerprintText &
-        spawnedArgvKeyText(argv)),
+      weakFingerprint = keyedOnArgv(weakFingerprintFromText(fingerprintText),
+        argv),
       actionCachePolicy = actionCachePolicy,
       dependencyPolicy = lowerDependencyPolicy(payload.id, payload.depfile,
         payload.dependencyPolicy),
@@ -3770,8 +3754,8 @@ proc lowerGraphAction(node: GraphNode; profiles: Table[string, PathOnlyToolProfi
       depfile = payload.depfile,
       dynamicDepsFile = payload.dynamicDepsFile,
       cacheable = payload.cacheable,
-      weakFingerprint = weakFingerprintFromText(fingerprintText &
-        spawnedArgvKeyText(argv)),
+      weakFingerprint = keyedOnArgv(weakFingerprintFromText(fingerprintText),
+        argv),
       actionCachePolicy = actionCachePolicy,
       dependencyPolicy = lowerDependencyPolicy(payload.id, payload.depfile,
         payload.dependencyPolicy),
@@ -3877,8 +3861,8 @@ proc lowerGraphAction(node: GraphNode; profiles: Table[string, PathOnlyToolProfi
     depfile = depfile,
     dynamicDepsFile = payload.dynamicDepsFile,
     cacheable = payload.cacheable,
-    weakFingerprint = weakFingerprintFromText(fingerprintText &
-      spawnedArgvKeyText(invocationArgv)),
+    weakFingerprint = keyedOnArgv(weakFingerprintFromText(fingerprintText),
+      invocationArgv),
     actionCachePolicy = actionCachePolicy,
     dependencyPolicy = lowerDependencyPolicy(payload.id, depfile,
       payload.dependencyPolicy),
@@ -7101,7 +7085,11 @@ proc providerCompileBuildAction(plan: ProviderCompilePlan;
     outputs = providerCompileOutputs(artifactPath, plan.outputBinaryPath),
     commandStatsId = "repro provider compile edge",
     cacheable = providerCompileCacheable(plan),
-    weakFingerprint = plan.compileEdge.actionFingerprint,
+    # `actionFingerprint` covers the inner `nim c`; the helper's own command
+    # line (where it writes, which libraries it compiles against) is keyed
+    # here.
+    weakFingerprint = keyedOnArgv(plan.compileEdge.actionFingerprint,
+      command, compilerCwd),
     envPassthrough = @ProviderCompileEnvironmentPassthrough &
       @ProviderCompileIsolatedPassthrough,
     # The same edge as the dev-env engine's, so the same declared environment
@@ -11039,6 +11027,13 @@ proc recipeRelativeProviderCompileAction(edge: RecipeRelativeProviderCompile;
   var inputs: seq[string] = @[]
   for source in edge.edgePlan.inputSources:
     inputs.add(relocatableName(source, edge.recipeDir, edge.anchors))
+  # The command line in the names the record uses: a path under an anchor
+  # (the helper, the work dir, the action-cache root holding the outputs)
+  # absolute, anything else relative to the recipe, so a byte-identical
+  # recipe elsewhere keys the same.
+  var keyedCommand: seq[string] = @[]
+  for arg in command:
+    keyedCommand.add(relocatableName(arg, edge.recipeDir, edge.anchors))
   action(ProviderCompileActionId, command,
     governingLockIdentity = lockIdentityOutsideSolvedGraph(),
     cwd = edge.recipeDir,
@@ -11051,7 +11046,8 @@ proc recipeRelativeProviderCompileAction(edge: RecipeRelativeProviderCompile;
       recipeRelativeProviderVerdictPath(edge.edgeArtifactPath)],
     commandStatsId = "repro provider compile edge",
     cacheable = true,
-    weakFingerprint = edge.edgePlan.providerCompileActionKey,
+    weakFingerprint = keyedOnArgv(edge.edgePlan.providerCompileActionKey,
+      keyedCommand),
     # A copy of the recipe carries new mtimes; HYBRID compares its content
     # when the metadata moved, which is what lets that copy be served.
     actionCachePolicy = ffpHybrid,
@@ -11421,13 +11417,13 @@ proc extractInterfaceEdge(modulePath, artifactPath, stubPath: string;
   # ``action()``'s default weak fingerprint is derived from the action ID
   # alone, so a fixed ID would give every project in a shared action-cache
   # root the SAME key — one consumer's interface restored into another's
-  # build. The fingerprint is taken from the ARGV instead, which names the
-  # module, the outputs, the reprobuild libraries and the consumer root —
-  # relative to the recipe when the edge is recipe-relative, so it names the
-  # same edge wherever the recipe lies. That is the property the spec is
-  # after: the command line is an input by construction, not a list somebody
-  # maintains. Content changes are caught by the engine's recorded-input
-  # revalidation on top of it.
+  # build. The fingerprint is taken from the ARGV instead (`keyedOnArgv`),
+  # which names the module, the outputs, the reprobuild libraries and the
+  # consumer root — relative to the recipe when the edge is recipe-relative,
+  # so it names the same edge wherever the recipe lies. That is the property
+  # the spec is after: the command line is an input by construction, not a
+  # list somebody maintains. Content changes are caught by the engine's
+  # recorded-input revalidation on top of it.
   # Every recipe-relative extraction of the same variant has the same argv
   # (`--module repro.nim`), so the recipe's own bytes partition the key: the
   # engine keeps a bounded number of records per weak fingerprint, and
@@ -11437,8 +11433,8 @@ proc extractInterfaceEdge(modulePath, artifactPath, stubPath: string;
       "\x00recipe\x00" & digestHex(blake3DomainDigest(
         readFile(extendedPath(modulePath)).bytesOf(), hdActionFingerprint))
     else: ""
-  let edgeIdentity = weakFingerprintFromText(command.join("\x00") & keySuffix &
-    recipeContent)
+  let edgeIdentity = keyedOnArgv(weakFingerprintFromText(
+    "reprobuild.interface-extract" & keySuffix & recipeContent), command)
   let sessionKey = toHex(edgeIdentity.bytes) & "\x00" & artifactPath
   if not forceRebuild and not validateExistingOnly and
       interfaceEdgeSessionResults.hasKey(sessionKey) and
