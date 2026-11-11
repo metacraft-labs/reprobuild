@@ -49346,7 +49346,7 @@
       "requiresReproBinary": true,
       "source": "tests/integration/t_state_file_carries_no_layers.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 4,
+      "staticCaseCount": 5,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

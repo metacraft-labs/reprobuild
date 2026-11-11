@@ -115,7 +115,7 @@ proc refuseRetiredSettingsFile*(dir: string): bool =
     raiseManifestError(retired, "", schemaWorkspaceSettingsV1,
       retiredSettingsSchema, retiredSettingsFileMessage())
   except WorkspaceManifestParseError as err:
-    if not setAsideMalformedWorkspaceFile(err, mwkSettings):
+    if not setAsideMalformedWorkspaceFile(err, mwkSettings, retired = true):
       raise
   true
 
@@ -134,6 +134,6 @@ proc refuseRetiredStateFile*(workspaceRoot: string): bool =
     raiseManifestError(retired, "", schemaWorkspaceStateV1, "",
       retiredStateFileMessage())
   except WorkspaceManifestParseError as err:
-    if not setAsideMalformedWorkspaceFile(err, mwkState):
+    if not setAsideMalformedWorkspaceFile(err, mwkState, retired = true):
       raise
   true

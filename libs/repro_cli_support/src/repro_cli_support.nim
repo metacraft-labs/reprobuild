@@ -41,7 +41,8 @@ import repro_core/relocation
 import repro_core/ambient_execution
 import repro_core/cli_images
 import repro_core/source_root
-from repro_core/workspace_root import firstMembershipManifestPath
+from repro_core/workspace_root import firstMembershipManifestPath,
+  SettingsFileName
 # The self-spawn image guard. `{.all.}` is how `runThinApp` (below) reaches
 # the module-private ``markRunningImageAsReproCli``: no ordinary import can
 # name the setter, so no embedded caller can grant itself the mark. See
@@ -24635,7 +24636,7 @@ proc runManifestRefreshHookCommand*(hookName: string;
 # the implementation needs ``repoRemovalBlockers``, which lives beside the
 # membership verbs far below.
 proc reconcileLocalStateForHook(workspaceRoot: string):
-  tuple[loud, quiet: seq[string]]
+  tuple[loud, quiet: seq[string]; skipped: bool]
 
 proc runRecordStorePrePushGuard(repoRoot, refsFile, remoteLocation: string): int
 
@@ -62121,8 +62122,13 @@ proc reconcileLocalStateAfterHook(hookName, workspaceRoot,
     stderr.writeLine("  " & line)
     appendManifestRefreshLog(timestamp & " " & hookName &
       " local-state " & line)
-  stderr.writeLine("  `repro workspace migrate --dry-run` re-reports this " &
-    "at any time")
+  # Only a reconciliation that RAN can be re-reported: when the workspace
+  # could not be resolved, `repro workspace migrate` resolves it the same
+  # way and is refused with the same diagnostic, whose own remedy is the
+  # one to follow.
+  if not lines.skipped:
+    stderr.writeLine("  `repro workspace migrate --dry-run` re-reports this " &
+      "at any time")
 
 proc runManifestRefreshHookCommand*(hookName: string;
                                     args: openArray[string]): int =
@@ -77158,16 +77164,33 @@ proc gatherHealthChecksOverSettings(parsed: HealthArgs):
       # is what records it. ``diagnosis`` keeps the detail column free of the
       # remedy the error's own message carries, which the ``remedy:`` row
       # states instead.
+      #
+      # Unless the project set IS recorded, in the state file under its
+      # retired name: then `workspace enable` refuses too, naming `health
+      # --fix` (Workspace-Settings-Files.md §8), and naming it here would
+      # send the operator round in a circle. `--fix` migrates the file before
+      # the diagnosis, so the row is fixable through the state file's.
       ctx.resolvedOk = false
-      ctx.manifestRemedy = self & " workspace enable <project>   (records " &
-        "the active project set; `" & self & " workspace projects list` " &
-        "names them)"
+      let retiredState = inspectWorkspaceStateFiles(parsed.workspaceRoot).
+        anyIt(it.kind == sffOldNameOnly)
+      ctx.manifestRemedy =
+        if retiredState: self & " health --fix"
+        else: self & " workspace enable <project>   (records " &
+          "the active project set; `" & self & " workspace projects list` " &
+          "names them)"
       checks.add(HealthCheck(
         name: "manifest",
         status: hsFail,
-        detail: "manifest unresolved: " & err.diagnosis,
+        detail:
+          (if retiredState:
+             "manifest unresolved: the workspace state file is under its " &
+               "retired name " &
+               retiredWorkspaceStatePath(parsed.workspaceRoot) & ", which " &
+               "only `repro health --fix` reads, so no project could be " &
+               "read from it"
+           else: "manifest unresolved: " & err.diagnosis),
         remedy: ctx.manifestRemedy,
-        fixKind: hfNone))
+        fixKind: (if retiredState: hfMigrateStateFile else: hfNone)))
     except WorkspaceManifestParseError as err:
       ctx.resolvedOk = false
       # TC-9d: a manifest refused for the retired `[certificates]` table has
@@ -78610,6 +78633,12 @@ proc gatherHealthChecks(parsed: HealthArgs):
             row.detail.add(sweptNone)
       if reported:
         continue
+    if failure.kind == mwkState and failure.retired:
+      # The manifest row already names the retired file and `health --fix`,
+      # and the `workspace-state-file` row fails with the same remedy; a
+      # third row telling the operator to fix a file's syntax is false
+      # about a file that was never parsed.
+      continue
     if failure.kind == mwkState:
       # The ladder behind the manifest row read the set-aside state as
       # recording nothing and said so ("neither was present"), which is false
@@ -78621,22 +78650,33 @@ proc gatherHealthChecks(parsed: HealthArgs):
             "`workspace-state` row names the file and the key)"
     let what =
       case failure.kind
-      of mwkSettings: "settings file does not parse, so its `[[manifest]]` " &
-        "layers were NOT applied to the rows above: "
+      of mwkSettings:
+        (if failure.retired: "settings file is under its retired name, "
+         else: "settings file does not parse, ") &
+          "so its `[[manifest]]` layers were NOT applied to the rows above: "
       of mwkState: "state file does not parse, so the rows above read the " &
         "workspace as recording no state: "
       of mwkManifest: "manifest unresolved, so the rows above that sweep " &
         "the workspace's repos swept none: "
     let fix =
-      if failure.keyPath.len > 0: "fix the named key in " & failure.path
-      else: "fix the TOML syntax at the line and column named in " &
-        failure.path
+      if failure.retired:
+        "migrate " & failure.path & " to " & SettingsFileName & " as the " &
+          "detail says — or, when the workspace repository's remote " &
+          "already carries " & SettingsFileName & ", bring the workspace " &
+          "repository up to date with it; every other `repro` verb " &
+          "refuses this workspace until then"
+      elif failure.keyPath.len > 0:
+        "fix the named key in " & failure.path & "; every other `repro` " &
+          "verb refuses this workspace until it parses"
+      else:
+        "fix the TOML syntax at the line and column named in " &
+          failure.path & "; every other `repro` verb refuses this " &
+          "workspace until it parses"
     result.checks.add(HealthCheck(
       name: $failure.kind,
       status: hsFail,
       detail: what & failure.message,
-      remedy: fix & "; every other `repro` verb refuses this workspace " &
-        "until it parses",
+      remedy: fix,
       fixKind: hfNone))
 
 proc healthHasFailure(checks: seq[HealthCheck]): bool =
@@ -94607,7 +94647,7 @@ proc runWorkspaceMigrateCommand*(args: openArray[string]): int =
   report.exitCode
 
 proc reconcileLocalStateForHook(workspaceRoot: string):
-    tuple[loud, quiet: seq[string]] =
+    tuple[loud, quiet: seq[string]; skipped: bool] =
   ## The `post-merge` arm. Best-effort by construction: every failure path
   ## becomes a log line and NOTHING propagates, because a checkout that could
   ## not be reconciled is a thing to fix later, never a reason for somebody's
@@ -94617,6 +94657,8 @@ proc reconcileLocalStateForHook(workspaceRoot: string):
   ## happened, and failures. ``quiet`` is recorded in the cache log only.
   ## Both are empty when there is nothing at all to record, which is what
   ## lets the hook stay silent without a second "did anything happen" test.
+  ## ``skipped`` says the workspace could not be resolved, so nothing was
+  ## reconciled and ``loud`` carries only the reason.
   ##
   ## ``attachDetachedHead = false``: the remote realignment stays (that is the
   ## whole point of doing this on `git pull`), the ref-moving step does not.
@@ -94644,6 +94686,7 @@ proc reconcileLocalStateForHook(workspaceRoot: string):
         "repo-set, project or variant (remedy: `repro ws sets list`)")
   except CatchableError as err:
     result.loud.add("local-state reconciliation skipped: " & err.msg)
+    result.skipped = true
 
 proc runWorkspaceDisableCommand*(args: openArray[string]): int =
   ## ``repro workspace disable <project>... [--keep-checkouts] [--force]`` —
