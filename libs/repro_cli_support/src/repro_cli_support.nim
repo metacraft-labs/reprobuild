@@ -1032,6 +1032,16 @@ type
     selectorName*: string
     suggestions*: seq[string]
 
+  InterfaceExtractionEdgeFailure* = object of OSError
+    ## Raised by ``extractInterfaceEdge`` when its engine pass ends with a
+    ## failed or blocked edge. The edge runs in a pass of its own, outside
+    ## the graph whose result ``repro build`` writes its failure report
+    ## from, so the run and the action travel with the error: the caller
+    ## that owns the out dir writes the report (CLI/build.md §"The failure
+    ## report") from them instead of leaving only this message behind.
+    run*: BuildRunResult
+    actions*: seq[BuildAction]
+
 proc renderAmbiguousTargetDiagnostic*(err: BuildTargetAmbiguousError): string =
   ## Named-Targets M2 ``target_ambiguous`` stderr diagnostic. Shared by
   ## the top-level CLI dispatch arm and the daemon-side
@@ -1065,6 +1075,16 @@ proc renderUnknownTargetDiagnostic*(err: BuildTargetUnknownError): string =
       result.add("  ")
       result.add(cand)
       result.add('\n')
+
+const TestCollectionSelector* = ".#test"
+  ## The selector ``repro test`` (and ``repro certificates plan``) uses when
+  ## the user names none: the current project's ``test`` collection
+  ## ([CLI/test.md §"Alias Semantics"]). It is spelled as a fragment
+  ## selector, not the bare name ``test``, because ``classifyBuildSelector``
+  ## takes a bare name that also names an existing path as a path, and most
+  ## projects keep their tests in a ``test/`` directory. ``.#test`` is what
+  ## ``parseAndResolveSelectors`` makes of a bare ``test`` when no such path
+  ## exists, so the resolution is otherwise unchanged.
 
 proc classifyBuildSelector*(raw: string): ClassifiedBuildSelector =
   ## Named-Targets M2 / [CLI/build.md §"Target Selection"] discriminator.
@@ -4484,9 +4504,12 @@ proc lowerProviderSnapshot*(snapshot: ProviderGraphSnapshot;
       (item.payload.publishToBinaryCache and
         item.payload.cacheEntryIdentity.isSome)
 
-  # When no selector is provided, schedule every emitted edge — the
-  # legacy "build everything" behavior preserved from the single-target
-  # entry point.
+  # When no selector is provided, schedule every emitted edge except the
+  # members of the ``test``, ``bench`` and ``lint`` collections, which run
+  # only when selected by name. An action whose dependency closure reaches
+  # such a member cannot run without it, so it is left out as well:
+  # emitting it would hand the engine a dependency on an action that is
+  # not in the graph.
   var hasSelector = false
   for s in selectedActionIds:
     if s.len > 0:
@@ -4500,6 +4523,23 @@ proc lowerProviderSnapshot*(snapshot: ProviderGraphSnapshot;
          name == "lint" or name.endsWith(":lint"):
         for aid in target.actions:
           excludedActionIds.incl(aid)
+    # Every consumer of an excluded action is excluded too: walk the
+    # reverse dependency edges from the excluded members. A dependency the
+    # graph does not declare, and a cycle among retained actions, reach the
+    # engine's graph validation unchanged.
+    var consumersByDep = initTable[string, seq[string]]()
+    for item in actionNodes:
+      for dep in item.payload.deps:
+        consumersByDep.mgetOrPut(dep, @[]).add(item.payload.id)
+    var pending: seq[string] = @[]
+    for actionId in excludedActionIds:
+      pending.add(actionId)
+    while pending.len > 0:
+      let actionId = pending.pop()
+      for consumer in consumersByDep.getOrDefault(actionId):
+        if not excludedActionIds.containsOrIncl(consumer):
+          pending.add(consumer)
+
     for item in actionNodes:
       if not excludedActionIds.contains(item.payload.id) and
           shouldLower(item):
@@ -11553,8 +11593,19 @@ proc extractInterfaceEdge(modulePath, artifactPath, stubPath: string;
       var detail = ""
       for item in edgeResult.results:
         if item.status in {asFailed, asBlocked}:
-          var parts = @["interface extraction edge " & $item.status &
-            " for " & modulePath]
+          # The status alone says nothing about why: a child the monitor
+          # could not start, one the scheduler refused and a compile that
+          # exited 1 all read ``asFailed``. The exit code and the engine's
+          # reason are what tell them apart when no stream was captured.
+          var headline = "interface extraction edge " & $item.status &
+            " for " & modulePath
+          if item.status == asFailed:
+            headline.add(" (exit code " & $item.exitCode & ")")
+          var parts = @[headline]
+          if item.reason.len > 0:
+            parts.add("reason: " & item.reason)
+          if item.blockedBy.len > 0:
+            parts.add("blocked by: " & item.blockedBy)
           if item.stderr.len > 0:
             parts.add(item.stderr)
           if item.stdout.len > 0:
@@ -11563,7 +11614,10 @@ proc extractInterfaceEdge(modulePath, artifactPath, stubPath: string;
           break
       if detail.len == 0:
         detail = "interface extraction edge failed for " & modulePath
-      raise newException(OSError, detail)
+      var failure = newException(InterfaceExtractionEdgeFailure, detail)
+      failure.run = edgeResult
+      failure.actions = @[extractAction]
+      raise failure
     if validateExistingOnly:
       var validated = false
       var validationDetails: seq[string] = @[]
@@ -11980,6 +12034,17 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
       logSummary("buildFailureReport: " & path)
     except CatchableError:
       discard
+
+  template persistingExtractionFailure(body: untyped): untyped =
+    ## An interface-extraction edge fails in an engine pass of its own, so
+    ## none of the build results below ever sees it. Its failure report is
+    ## written here, from the run the error carries, before the error goes
+    ## on to end the build.
+    try:
+      body
+    except InterfaceExtractionEdgeFailure as failure:
+      persistFailureReport(failure.run, failure.actions)
+      raise
 
   proc userTargetSelectors(): seq[string] =
     ## The selectors the USER named on this invocation (the ``#action``
@@ -12758,23 +12823,24 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
   # for the rationale. Bootstrap toolchain is cached in the per-user
   # tool-store (shared across projects), not the per-build outDir.
   ensureBootstrapToolchainEnv(mode, resolveStoreRoot() / "tool-store")
-  let artifact = extractInterfaceEdge(modulePath, interfacePath, stubPath,
-    compileWorkDir, compileScratchDir, result.projectRoot, publicCliPath,
-    outDir / "build-engine-cache", buildStats,
-    requireStub = false,
-    bypassRunQuota = bypassRunQuota,
-    # THE ONE EDGE the unspecified-mode fallback covers. Every other
-    # edge below reads ``fallbackToRunQuotaBypass``, which is unchanged
-    # by the mode being unknown.
-    fallbackToRunQuotaBypass = interfaceEdgeRunQuotaBypass,
-    forceRebuild = forceRebuild,
-    suppressTrace = mcTrace notin measureSet,
-    skipCacheHitEvidence = mcCacheEvidence notin measureSet,
-    statsEnabled = statsEnabled,
-    cancelCheck = cancelCheck,
-    observeRunResult = proc(r: BuildRunResult) =
-      warnRunQuotaBypassIfUsed(r, enabled = interfaceEdgeRunQuotaBypass,
-        scope = "the project-interface extraction edge"))
+  let artifact = persistingExtractionFailure:
+    extractInterfaceEdge(modulePath, interfacePath, stubPath,
+      compileWorkDir, compileScratchDir, result.projectRoot, publicCliPath,
+      outDir / "build-engine-cache", buildStats,
+      requireStub = false,
+      bypassRunQuota = bypassRunQuota,
+      # THE ONE EDGE the unspecified-mode fallback covers. Every other
+      # edge below reads ``fallbackToRunQuotaBypass``, which is unchanged
+      # by the mode being unknown.
+      fallbackToRunQuotaBypass = interfaceEdgeRunQuotaBypass,
+      forceRebuild = forceRebuild,
+      suppressTrace = mcTrace notin measureSet,
+      skipCacheHitEvidence = mcCacheEvidence notin measureSet,
+      statsEnabled = statsEnabled,
+      cancelCheck = cancelCheck,
+      observeRunResult = proc(r: BuildRunResult) =
+        warnRunQuotaBypassIfUsed(r, enabled = interfaceEdgeRunQuotaBypass,
+          scope = "the project-interface extraction edge"))
   finishStat(buildStats, statsEnabled, "repro interface extract",
     interfaceStart)
   recordInterfaceArtifactWarmStats(buildStats, statsEnabled)
@@ -12891,18 +12957,19 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
         createDir(extendedPath(producerOutDir))
         # Match preparation so the existing keyed session cache can reuse the
         # producer's extraction after a build or binary-cache restoration.
-        let producerArtifact = extractInterfaceEdge(recipeDir / "repro.nim",
-          producerOutDir / "project-interface.rbsz",
-          producerOutDir / "project-interface.nim",
-          reprobuildLibraryWorkDir(), producerOutDir / "provider-work",
-          recipeDir, publicCliPath, producerOutDir / "build-engine-cache",
-          buildStats, requireStub = false,
-          bypassRunQuota = bypassRunQuota,
-          fallbackToRunQuotaBypass = fallbackToRunQuotaBypass,
-          forceRebuild = forceRebuild,
-          suppressTrace = mcTrace notin measureSet,
-          skipCacheHitEvidence = mcCacheEvidence notin measureSet,
-          statsEnabled = statsEnabled, cancelCheck = cancelCheck)
+        let producerArtifact = persistingExtractionFailure:
+          extractInterfaceEdge(recipeDir / "repro.nim",
+            producerOutDir / "project-interface.rbsz",
+            producerOutDir / "project-interface.nim",
+            reprobuildLibraryWorkDir(), producerOutDir / "provider-work",
+            recipeDir, publicCliPath, producerOutDir / "build-engine-cache",
+            buildStats, requireStub = false,
+            bypassRunQuota = bypassRunQuota,
+            fallbackToRunQuotaBypass = fallbackToRunQuotaBypass,
+            forceRebuild = forceRebuild,
+            suppressTrace = mcTrace notin measureSet,
+            skipCacheHitEvidence = mcCacheEvidence notin measureSet,
+            statsEnabled = statsEnabled, cancelCheck = cancelCheck)
         # Existing closure readers use recipe-local metadata, even when the
         # validated extraction and its evidence live under a custom work root.
         let projectionPath = recipeDir / ".repro/build/repro/project-interface.rbsz"
@@ -13278,19 +13345,20 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
             # resolving their declared dependencies against each other's
             # workspace; an ambient ``getCurrentDir()`` would hand both the
             # same (wrong) root.
-            extractInterfaceEdge(producerProjectFile, producerIface,
-              producerStub, reprobuildLibraryWorkDir(),
-              producerOutDirBase / "producer-iface-work",
-              projectRootForModule(producerProjectFile), publicCliPath,
-              producerOutDirBase / "build-engine-cache", buildStats,
-              requireStub = false,
-              bypassRunQuota = bypassRunQuota,
-              fallbackToRunQuotaBypass = fallbackToRunQuotaBypass,
-              forceRebuild = forceRebuild,
-              suppressTrace = mcTrace notin measureSet,
-              skipCacheHitEvidence = mcCacheEvidence notin measureSet,
-              statsEnabled = statsEnabled,
-              cancelCheck = cancelCheck)
+            persistingExtractionFailure:
+              extractInterfaceEdge(producerProjectFile, producerIface,
+                producerStub, reprobuildLibraryWorkDir(),
+                producerOutDirBase / "producer-iface-work",
+                projectRootForModule(producerProjectFile), publicCliPath,
+                producerOutDirBase / "build-engine-cache", buildStats,
+                requireStub = false,
+                bypassRunQuota = bypassRunQuota,
+                fallbackToRunQuotaBypass = fallbackToRunQuotaBypass,
+                forceRebuild = forceRebuild,
+                suppressTrace = mcTrace notin measureSet,
+                skipCacheHitEvidence = mcCacheEvidence notin measureSet,
+                statsEnabled = statsEnabled,
+                cancelCheck = cancelCheck)
           except CatchableError:
             raise newException(OSError,
               "cross-repo producer \"" & selector & "\" at " &
@@ -32607,7 +32675,7 @@ proc runCertificatesCommand*(args: openArray[string];
     # ``plan``: resolve the selectors the way ``repro build`` does, so a
     # ``<sibling>:<name>`` selector plans the sibling project.
     if selectors.len == 0:
-      selectors = @["test"]
+      selectors = @[TestCollectionSelector]
     let resolved = parseAndResolveSelectors(selectors,
       "repro certificates plan")
     # The anchor carries the first name as its fragment: ``.#<name>`` for
@@ -51509,7 +51577,12 @@ proc executeMainlineSync(args: WorkspaceSyncArgs): MainlineSyncReport =
       remoteName = gitRemoteNameFor(repo),
       repoPath = repo.path,
       receiptPath = ".repro" / "workspace" / "receipts" /
-        ("mainline-sync-fetch-" & idSeg & ".receipt"))
+        ("mainline-sync-fetch-" & idSeg & ".receipt"),
+      # The fetch is what observes the remote, and live remote state cannot be
+      # cached: a receipt from an earlier sync would answer for a remote that
+      # has since moved, and the role tip read below would be stale. Like the
+      # ordinary sync's fetch (``syncFetchActionFor``), it always runs.
+      cacheable = false)
     action.cwd = args.workspaceRoot
     fetchActions.add(action)
     fetchIdByPath[repo.path] = actionId
@@ -57515,6 +57588,11 @@ proc runCachePushCommand*(args: openArray[string]): int =
     if maintenanceDue(gitBin, bare, defaultMaintenanceBudget()):
       let live = liveWorkspaceNamesForCache(workspaceRoot)
       discard maintainSharedBare(gitBin, bare, live, defaultMaintenanceBudget())
+    # Then every other due bare in the cache. A bare whose checkouts never
+    # commit is never pushed into, so without this its age bound would never
+    # fire. Each is budget-gated, and this process is already detached.
+    discard maintainOtherSharedBares(gitBin, absolutePath(cacheRoot), [bare],
+      defaultMaintenanceBudget())
   except CatchableError:
     discard
   0
@@ -59719,7 +59797,7 @@ proc hookDevelopSetOf(repoRoot, workspaceRoot: string;
       if target.len > 0:
         let abs = os.normalizedPath(absolutePath(target, flakeRoot))
         for r in repos:
-          if checkoutOf(r) == abs:
+          if samePathIdentity(checkoutOf(r), abs):
             repo = r
             found = true
             break
@@ -59744,7 +59822,8 @@ proc hookDevelopSetOf(repoRoot, workspaceRoot: string;
     var path = ""
     if found:
       let abs = checkoutOf(repo)
-      if abs.len > 0 and abs != flakeRoot and dirExists(extendedPath(abs)):
+      if abs.len > 0 and not samePathIdentity(abs, flakeRoot) and
+          dirExists(extendedPath(abs)):
         path = abs
     if path.len == 0: continue
     var overridden = false
@@ -79199,6 +79278,12 @@ type
     sweep*: seq[SharedBareSweepEntry]
       ## ``gc`` and ``rewire``: every bare in the cache root, with the state
       ## found before the eager sweep repaired it.
+    otherBares*: seq[MaintenanceResult]
+      ## ``gc`` only: the passes over bares no repo of the resolved project
+      ## names, each one due (or forced). Their ``refs/cache/*`` are kept.
+    warnings*: seq[string]
+      ## Conditions that did not stop the verb, such as a sibling workspace
+      ## whose state cannot be read and is therefore counted live.
     diagnostics*: seq[string]
     exitCode*: int
 
@@ -79250,6 +79335,13 @@ proc toJsonNode*(report: SharedClonesReport): JsonNode =
     sweep.add(%*{"bare": e.path, "before": e.before, "after": e.after,
       "repaired": e.repaired, "diagnostic": e.diagnostic})
   result["sweep"] = sweep
+  var others = newJArray()
+  for m in report.otherBares:
+    others.add(%*{"bare": m.sharedBarePath, "ok": m.ok,
+      "maintenanceRan": m.ran, "looseBefore": m.looseBefore,
+      "looseAfter": m.looseAfter, "diagnostic": m.diagnostic})
+  result["otherBares"] = others
+  result["warnings"] = %report.warnings
   result["diagnostics"] = %report.diagnostics
   result["exitCode"] = %report.exitCode
 
@@ -79270,6 +79362,8 @@ proc renderSharedClonesTextLines*(report: SharedClonesReport): seq[string] =
       if lr.diagnostic.len > 0:
         line.add(" diagnostic=" & lr.diagnostic)
       result.add(line)
+    for w in report.warnings:
+      result.add("workspace shared-clones: warning: " & w)
     for d in report.diagnostics:
       result.add("workspace shared-clones: error: " & d)
     return
@@ -79309,6 +79403,21 @@ proc renderSharedClonesTextLines*(report: SharedClonesReport): seq[string] =
           " carried the fetch refspec WITHOUT the borrower-safety config, a " &
           "state this build never writes; another tool is writing this " &
           "cache" & (if e.repaired: " (repaired)" else: ""))
+  if report.verb == "gc":
+    var ran = 0
+    for m in report.otherBares:
+      if m.ran: inc ran
+    result.add("workspace shared-clones: other bares due=" &
+      $report.otherBares.len & " maintained=" & $ran)
+    for m in report.otherBares:
+      var line = "workspace shared-clones: other bare " & m.sharedBarePath &
+        " maintenanceRan=" & $m.ran &
+        " loose=" & $m.looseBefore & "->" & $m.looseAfter
+      if m.diagnostic.len > 0:
+        line.add(" diagnostic=" & m.diagnostic)
+      result.add(line)
+  for w in report.warnings:
+    result.add("workspace shared-clones: warning: " & w)
   for d in report.diagnostics:
     result.add("workspace shared-clones: error: " & d)
 
@@ -79354,10 +79463,16 @@ proc parseSharedClonesArgs(args: openArray[string]): SharedClonesArgs =
     result.workspaceRoot = getCurrentDir()
   result.workspaceRoot = absolutePath(result.workspaceRoot)
 
-proc liveWorkspaceRootsForCache(workspaceRoot: string): seq[string] =
+proc liveWorkspaceRootsForCache(workspaceRoot: string;
+                                warnings: var seq[string]): seq[string] =
   ## This workspace plus every initialized sibling workspace under the same
   ## parent directory: the workspaces that share this machine's shared
   ## clones in the usual side-by-side layout.
+  ##
+  ## A sibling whose state cannot be read (its state file is refused or
+  ## malformed) counts as live, and a warning names it: this set exists to
+  ## KEEP refs, so a sibling we cannot classify keeps its refs, and one
+  ## unreadable sibling does not stop maintenance of the whole cache.
   result.add(workspaceRoot)
   let parent = workspaceRoot.parentDir
   if parent.len > 0 and dirExists(parent):
@@ -79366,10 +79481,23 @@ proc liveWorkspaceRootsForCache(workspaceRoot: string): seq[string] =
         continue
       if entry == workspaceRoot:
         continue
-      if isInitializedWorkspace(entry):
+      var live = false
+      try:
+        live = isInitializedWorkspace(entry)
+      except CatchableError as error:
+        live = true
+        warnings.add("sibling workspace " & entry & " is counted live and " &
+          "its cache refs are kept, because its state cannot be read: " &
+          error.msg)
+      if live:
         result.add(entry)
 
-proc liveWorkspaceNamesForCache(workspaceRoot: string): seq[string] =
+proc liveWorkspaceRootsForCache(workspaceRoot: string): seq[string] =
+  var ignored: seq[string]
+  liveWorkspaceRootsForCache(workspaceRoot, ignored)
+
+proc liveWorkspaceNamesForCache(workspaceRoot: string;
+                                warnings: var seq[string]): seq[string] =
   ## RA-15 liveness predicate for dead-workspace ref pruning. The cache-ref
   ## namespace (``refs/cache/<workspace>/<branch>``) uses each workspace
   ## directory's basename (see RA-4 ``spawnAsyncCachePush``). A shared bare is
@@ -79379,7 +79507,12 @@ proc liveWorkspaceNamesForCache(workspaceRoot: string): seq[string] =
   ## not in this set belongs to a workspace that no longer exists on disk and
   ## is safe to prune. We err on the side of KEEPING a ref: only directories
   ## that fail the initialized-workspace check are treated as dead.
-  discoverLiveWorkspaceNames(liveWorkspaceRootsForCache(workspaceRoot))
+  discoverLiveWorkspaceNames(liveWorkspaceRootsForCache(workspaceRoot,
+    warnings))
+
+proc liveWorkspaceNamesForCache(workspaceRoot: string): seq[string] =
+  var ignored: seq[string]
+  liveWorkspaceNamesForCache(workspaceRoot, ignored)
 
 proc executeSharedClones(parsed: SharedClonesArgs): SharedClonesReport =
   result.verb = parsed.verb
@@ -79412,7 +79545,7 @@ proc executeSharedClones(parsed: SharedClonesArgs): SharedClonesReport =
     for repo in resolved.repos:
       candidates.add(parsed.workspaceRoot / repo.path)
     for found in findCheckoutsUnder(
-        liveWorkspaceRootsForCache(parsed.workspaceRoot)):
+        liveWorkspaceRootsForCache(parsed.workspaceRoot, result.warnings)):
       if found notin candidates:
         candidates.add(found)
     let migration = migrateSharedClones(identity.binaryPath,
@@ -79428,7 +79561,8 @@ proc executeSharedClones(parsed: SharedClonesArgs): SharedClonesReport =
   # once for the whole pass (it is the same for every bare in this run).
   var liveWorkspaces: seq[string]
   if parsed.verb == "gc":
-    liveWorkspaces = liveWorkspaceNamesForCache(parsed.workspaceRoot)
+    liveWorkspaces = liveWorkspaceNamesForCache(parsed.workspaceRoot,
+      result.warnings)
 
   # The eager sweep: every bare in the cache, not only the ones this
   # project declares, gets the refspec and the safety config. Run before the
@@ -79569,6 +79703,20 @@ proc executeSharedClones(parsed: SharedClonesArgs): SharedClonesReport =
       except CatchableError as error:
         entry.diagnostic.add("; cannot inspect alternates: " & error.msg)
     result.repos.add(entry)
+
+  # Every other bare in the cache: one whose checkouts only read or sync, or
+  # that only a workspace elsewhere declares, is maintained from here too,
+  # budget-gated like the rest. Its ``refs/cache/*`` are left alone: this
+  # workspace cannot tell which workspaces still own them.
+  if parsed.verb == "gc":
+    result.otherBares = maintainOtherSharedBares(identity.binaryPath,
+      result.cacheRoot, maintainedBares.toSeq, defaultMaintenanceBudget(),
+      parsed.force)
+    for m in result.otherBares:
+      if not m.ok:
+        result.diagnostics.add(m.sharedBarePath & ": maintenance failed: " &
+          m.diagnostic)
+        result.exitCode = 1
 
 proc writeSharedClonesReport(report: SharedClonesReport;
                              destination: string) =
@@ -87334,7 +87482,7 @@ proc buildClosureForShard(assignedSelectors: seq[string];
     if publicCliPath.len > 0 and fileExists(publicCliPath): publicCliPath
     else: stablePublicCliPath()
   doAssert fileExists(bin), "repro binary missing at " & bin
-  var buildArgs = @["build", "test"]
+  var buildArgs = @["build", TestCollectionSelector]
   if mode != tpmUnspecified:
     buildArgs.add("--tool-provisioning=" & modeName(mode))
   if lockFlag.len > 0:
@@ -88165,9 +88313,10 @@ proc issueForCertificateNode(pre: IssuancePreconditions; name: string;
 
 proc plainTestBuild(buildArgs, selectors: seq[string];
                     publicCliPath: string): int =
-  ## ``repro build`` of ``selectors`` (``test`` when none) with no issuance.
+  ## ``repro build`` of ``selectors`` (``.#test`` when none) with no issuance.
   var args = buildArgs
-  for sel in (if selectors.len == 0: @["test"] else: selectors):
+  for sel in (if selectors.len == 0: @[TestCollectionSelector]
+              else: selectors):
     args.add(sel)
   runBuildCommand(args, publicCliPath)
 
@@ -88386,6 +88535,12 @@ proc runCertifyingTestBuild(opts: ReproTestShardOpts; buildArgs: seq[string];
   var info: BuildGraphInspection
   var part: CertificatePlanPart
   var names: seq[string]
+  # The selectors the certifying build is given: the resolved anchor
+  # (``.#<name>`` for this project) and the extra names, exactly as the
+  # resolution above produced them. Not ``names``: a bare anchor name that
+  # also names a directory (``test`` beside a ``test/`` directory) would be
+  # classified as a path again by the build.
+  var buildSelectors: seq[string]
   try:
     # ``--no-runquota`` reaches the plan's own edges too, not only the build.
     let bypassRunQuota = "--no-runquota" in opts.buildFlags
@@ -88444,13 +88599,15 @@ proc runCertifyingTestBuild(opts: ReproTestShardOpts; buildArgs: seq[string];
           "nothing to certify")
         return 2
     let resolved = parseAndResolveSelectors(
-      (if selectors.len == 0: @["test"] else: selectors), "repro test")
+      (if selectors.len == 0: @[TestCollectionSelector] else: selectors),
+      "repro test")
     let anchorName = splitTarget(resolved.target).fragment
     if anchorName.len > 0:
       names.add(anchorName)
     for name in resolved.extraNameSelectors:
       if names.find(name) < 0:
         names.add(name)
+    buildSelectors = @[resolved.target] & resolved.extraNameSelectors
     info = prepareBuildGraphInspection(resolved.target, mode, publicCliPath,
       selectDefaultAction = false, workRoot = workRoot, lowerGraph = false,
       bypassRunQuotaExplicit = bypassRunQuota)
@@ -88610,9 +88767,7 @@ proc runCertifyingTestBuild(opts: ReproTestShardOpts; buildArgs: seq[string];
   proc certifyingBuild(extra: seq[string]):
       tuple[code: int; delivered: bool;
             records: Table[string, ExecutedActionRecord]] =
-    var args = buildArgs & extra
-    for name in names:
-      args.add(name)
+    let args = buildArgs & extra & buildSelectors
     let collector = ActionOutcomeCollector()
     # HL-10: the lock-update node joins the graph, and every test command
     # of every node this run judges depends on it.
@@ -88792,7 +88947,7 @@ proc runReproTestCommand*(args: openArray[string];
     if executesTests:
       return runCertifyingTestBuild(opts, buildArgs, publicCliPath)
     if opts.selectors.len == 0:
-      buildArgs.add("test")
+      buildArgs.add(TestCollectionSelector)
     else:
       for sel in opts.selectors:
         buildArgs.add(sel)
@@ -94870,14 +95025,22 @@ proc runReproLockingExplain(args: openArray[string]): int =
 
 proc runReproLockingAdoptManifest(args: openArray[string]): int =
   ## HL-2 (Unified-Locking-And-Hooks §10 Migration) — ``repro locking
-  ## adopt-manifest``. Scaffold an explicit TEAM route mapping the existing
-  ## ``.repo/manifests`` git-checkout backend to the team tier, so a legacy
-  ## manifest workspace keeps writing its team manifest lock instead of
-  ## silently going public-only. The route names every resolved repo (tier-by-
-  ## layer) and is written into the VCS-PRIVATE configuration layer (layer 5,
+  ## adopt-manifest``. Scaffold an explicit TEAM route mapping the workspace's
+  ## record-store checkout (``existingRecordStoreRoot``: ``.repro/records``,
+  ## else ``.repro/manifests``) to the team tier as a git-checkout backend. The
+  ## route names every resolved repo (tier-by-layer) and is written into the
+  ## VCS-PRIVATE configuration layer (layer 5,
   ## ``<git-common-dir>/repro/config.toml``) — workspace-local, never pushed —
   ## so the scaffold does not touch any committed or shared config. Idempotent:
   ## re-running refreshes the same file.
+  ##
+  ## Refuses, writing nothing, when no conventional location is a git
+  ## checkout. A git-checkout route over a plain directory records nothing:
+  ## the backend refuses every write to a non-checkout, so the scaffold would
+  ## report success and leave a route that cannot lock. The store has to be a
+  ## checkout of the record repository first (``repro init`` clones
+  ## ``[records] url``), and a checkout at its conventional location already
+  ## declares the route by its presence (§10).
   var workspaceRoot = ""
   var projectName = ""
   var mode = tpmUnspecified
@@ -94900,13 +95063,24 @@ proc runReproLockingAdoptManifest(args: openArray[string]): int =
     workspaceRoot = getCurrentDir()
   workspaceRoot = absolutePath(workspaceRoot)
 
-  let manifestsDir = firstExistingRecordStoreDir(workspaceRoot)
-  if manifestsDir.len == 0:
+  let presentDir = firstExistingRecordStoreDir(workspaceRoot)
+  if presentDir.len == 0:
     stderr.writeLine("repro locking adopt-manifest: no record store at " &
       recordStoreCandidates(workspaceRoot).join(" or ") &
       " — nothing to adopt (this verb makes an EXISTING store the team " &
       "backend).")
     return 2
+  let storeDir = existingRecordStoreRoot(workspaceRoot)
+  if storeDir.len == 0:
+    stderr.writeLine("repro locking adopt-manifest: `" & presentDir &
+      "` is not a git checkout, so a git-checkout route to it would record " &
+      "nothing; no route written.")
+    stderr.writeLine("  Make it a checkout of the record repository (for " &
+      "example `repro init` with the workspace's `[records] url`). A " &
+      "checkout at that location is itself the team route; nothing then " &
+      "needs adopting.")
+    return 2
+  let storeRel = relativePath(storeDir, workspaceRoot).replace('\\', '/')
 
   let effectiveMode = if mode == tpmUnspecified: tpmPathOnly else: mode
   let identity = ensureGitToolResolvable(effectiveMode, getEnv("PATH"))
@@ -94928,15 +95102,15 @@ proc runReproLockingAdoptManifest(args: openArray[string]): int =
   for n in repoNames:
     quoted.add("\"" & n & "\"")
   let reposList = quoted.join(", ")
-  # The git-checkout backend path is workspace-relative (``.repro/manifests``),
-  # resolved against the workspace root by ``constructRoutedBackend``.
+  # The git-checkout backend path is workspace-relative, resolved against the
+  # workspace root by ``constructRoutedBackend``.
   let configBody =
     "schema = \"reprobuild.config.v1\"\n\n" &
-    "# HL-2 adopt-manifest: keep the existing `.repro/manifests` checkout as the\n" &
+    "# HL-2 adopt-manifest: keep the existing `" & storeRel & "` checkout as the\n" &
     "# TEAM locking backend (VCS-private layer 5 — never tracked, never pushed).\n" &
     "[locking]\n" &
     "route = [{ visibility = \"team\", backend = \"git-checkout\", " &
-    "path = \".repro/manifests\", repos = [" & reposList & "] }]\n"
+    "path = \"" & storeRel & "\", repos = [" & reposList & "] }]\n"
 
   let configPath = vcsPrivateConfigPath(workspaceRoot, identity.binaryPath)
   try:
@@ -94948,7 +95122,7 @@ proc runReproLockingAdoptManifest(args: openArray[string]): int =
     return 1
 
   stderr.writeLine("repro locking adopt-manifest: wrote team route for " &
-    $repoNames.len & " repo(s) → git-checkout at `.repro/manifests`")
+    $repoNames.len & " repo(s) → git-checkout at `" & storeRel & "`")
   stderr.writeLine("  config layer (VCS-private, never pushed): " & configPath)
   stderr.writeLine("  run `repro locking explain` to verify the resolved " &
     "(tier, backend) for each repo.")
@@ -100062,7 +100236,10 @@ proc refreshFlakeLockAtCommit*(workspaceRoot, currentRepo: string;
         let abs = absolutePath(workspaceRoot / repo.path)
         pathOf[repo.name] = abs
         memberRepos.add(repo)
-        if abs == flakeRoot: membershipKnowsThisRepo = true
+        # A directory question, not a spelling one: the hook's repo root is
+        # what `git rev-parse --show-toplevel` printed, which need not be
+        # spelled like the membership join (see `flakeRefreshDirtyScope`).
+        if samePathIdentity(abs, flakeRoot): membershipKnowsThisRepo = true
     except CatchableError as err:
       membershipFailure = err.msg
     if membershipFailure.len == 0 and not membershipKnowsThisRepo:
@@ -102073,8 +102250,8 @@ proc runWorkspaceReposCommand*(args: openArray[string]): int =
   if args.len > 0 and args[0] in ["--help", "-h", "help"]:
     echo "repro workspace repos list [--set=NAME|--project=NAME] " &
       "[--enabled|--disabled|--all] [--json]"
-    echo "repro workspace repos add <repo> --remote=URL --branch=B " &
-      "[--set=NAME|--project=NAME]... [--revision=REV] " &
+    echo "repro workspace repos add <repo> --remote=URL --mainline=B " &
+      "[--profile=NAME] [--set=NAME|--project=NAME]... [--revision=REV] " &
       "[--path=DIR] [-m DESC]"
     echo "repro workspace repos remove <repo> " &
       "[--set=NAME|--project=NAME]... [--delete-fragment]"
@@ -102085,14 +102262,17 @@ proc runWorkspaceReposCommand*(args: openArray[string]): int =
     echo "  --remote=URL   reuses the matching url-prefix (or, for a project " &
       "target, the matching [[remote]]) when one already serves that URL; " &
       "otherwise adds one org-named prefix."
-    echo "  --branch=B     REQUIRED when declaring a new repo: the branch " &
-      "the fragment follows. Every fragment declares its own — there is no " &
-      "workspace default and none is inferred, so nothing else determines " &
-      "its checkout. Optional only when the fragment already exists, or " &
-      "when --revision pins an exact commit instead."
+    echo "  --mainline=B   the repo's mainline, written as `[repo] " &
+      "mainline`. REQUIRED when declaring a new repo, unless the profile " &
+      "it follows supplies one: the --profile given, else the workspace's " &
+      "`[workspace] default_profile`. None is inferred. --branch=B is " &
+      "another spelling of the same flag."
+    echo "  --profile=NAME the `[profiles.NAME]` of the workspace settings " &
+      "file the repo follows, written as `[repo] profile`. The profile " &
+      "must be declared."
     echo "  --revision=REV an exact commit this fragment sits at, validated " &
-      "against the remote. Use alongside --branch (\"tracks B, sits at " &
-      "REV\") for a vendored source tree. Ordinary repos take --branch " &
+      "against the remote. Use alongside --mainline (\"tracks B, sits at " &
+      "REV\") for a vendored source tree. Ordinary repos take --mainline " &
       "alone and let a lock record the commit."
     echo "  --path=DIR     checkout directory; defaults to <repo>."
     echo "  -m DESC        writes repos/<repo>.md, the source of the " &
@@ -102216,7 +102396,8 @@ proc runWorkspaceReposCommand*(args: openArray[string]): int =
   var projects: seq[string]
   var remote = ""
   var revision = ""
-  var branch = ""
+  var mainline = ""
+  var profile = ""
   var checkoutPath = ""
   var desc = ""
   var deleteFragment = false
@@ -102232,8 +102413,21 @@ proc runWorkspaceReposCommand*(args: openArray[string]): int =
       remote = a["--remote=".len .. ^1]
     elif a.startsWith("--revision="):
       revision = a["--revision=".len .. ^1]
-    elif a.startsWith("--branch="):
-      branch = a["--branch=".len .. ^1]
+    elif a.startsWith("--mainline=") or a.startsWith("--branch="):
+      # `--branch=` is a second spelling of `--mainline=`. Two values that
+      # disagree are a contradiction, not a precedence question. An empty
+      # value names no mainline, as an empty value does for every other flag
+      # here, so it neither conflicts with nor clears one given elsewhere.
+      let value = a[a.find('=') + 1 .. ^1]
+      if value.len > 0:
+        if mainline.len > 0 and mainline != value:
+          stderr.writeLine("repro workspace repos " & sub & ": --mainline " &
+            "given twice with different values ('" & mainline & "' and '" &
+            value & "')")
+          return 2
+        mainline = value
+    elif a.startsWith("--profile="):
+      profile = a["--profile=".len .. ^1]
     elif a.startsWith("--path="):
       checkoutPath = a["--path=".len .. ^1]
     elif a == "--delete-fragment":
@@ -102313,6 +102507,7 @@ proc runWorkspaceReposCommand*(args: openArray[string]): int =
     # command that reads like "add" is exactly the class of surprise the axis
     # split exists to remove.
     var fragmentExisted = fileExists(fragmentAbs)
+    let fragmentWasNew = not fragmentExisted
     if fragmentExisted:
       var existing: RepoFragment
       try:
@@ -102327,9 +102522,12 @@ proc runWorkspaceReposCommand*(args: openArray[string]): int =
       if revision.len > 0 and existing.repo.revision.get("") != revision:
         conflicts.add("revision (" & existing.repo.revision.get("(inherited)") &
           " vs " & revision & ")")
-      if branch.len > 0 and existing.repo.mainline.get("") != branch:
+      if mainline.len > 0 and existing.repo.mainline.get("") != mainline:
         conflicts.add("mainline (" & existing.repo.mainline.get("(none)") &
-          " vs " & branch & ")")
+          " vs " & mainline & ")")
+      if profile.len > 0 and existing.repo.profile.get("") != profile:
+        conflicts.add("profile (" & existing.repo.profile.get("(none)") &
+          " vs " & profile & ")")
       if conflicts.len > 0:
         stderr.writeLine("repro workspace repos add: '" & repo &
           "' is already declared with different " & conflicts.join(", "))
@@ -102337,12 +102535,38 @@ proc runWorkspaceReposCommand*(args: openArray[string]): int =
           " directly if the declaration itself should change")
         return 1
 
+    # A named profile must exist (Workspace-Branch-Roles.md §3.5): a fragment
+    # naming an undeclared one fails manifest load on every machine, so it is
+    # refused here, before anything is written. Only a NEW fragment is
+    # checked; an existing one keeps its declaration (the conflict check
+    # above refuses a different `--profile`). The settings file is read only
+    # when this add needs it, so an add that does not consult a profile does
+    # not start depending on that file parsing.
+    var profileMainline = ""
+    if profile.len > 0 and not fragmentExisted:
+      let roleSettings = workspaceRoleSettings(workspaceRoot)
+      let decls = roleSettings.findProfile(profile)
+      if decls.isNone:
+        stderr.writeLine("repro workspace repos add: " & repo &
+          ": profile '" & profile & "' is not declared: " &
+          (if roleSettings.path.len > 0:
+            roleSettings.path & " has no `[profiles." & profile & "]`"
+           else:
+            "the workspace has no settings file (repro-workspace.toml) " &
+              "to declare profiles in"))
+        stderr.writeLine("  Nothing was written.")
+        return 2
+      profileMainline = decls.get().mainline.get("")
+    elif profile.len == 0 and not fragmentExisted and mainline.len == 0:
+      profileMainline = defaultProfileMainline(
+        workspaceRoleSettings(workspaceRoot))
+
     # Workspace-Branch-Roles.md §3.3 — every repo resolves a `mainline`: its
-    # fragment's own, or the one the workspace default profile supplies. A NEW
-    # fragment without `--branch` (written as `mainline`) in a workspace whose
-    # default profile supplies none would not load, and this is where that
-    # has to be caught. `--revision` alone does not fill it: a commit pin sits
-    # BESIDE a mainline, it is not one.
+    # fragment's own, else the one the profile it names supplies, else — only
+    # when it names none — the one the workspace default profile supplies. A
+    # NEW fragment for which none of the three supplies one would not load,
+    # and this is where that has to be caught. `--revision` alone does not
+    # fill it: a commit pin sits BESIDE a mainline, it is not one.
     #
     # The branch is NOT inferred to fill the gap. Deriving it from the remote's
     # default was considered and rejected: measured across this workspace the
@@ -102354,29 +102578,37 @@ proc runWorkspaceReposCommand*(args: openArray[string]): int =
     # Placed before the first write of ANY file — ahead of the url-prefix
     # minting in the loop below — so a refused `add` leaves nothing behind, and
     # ahead of the remote probe so it costs no network round trip.
-    if not fragmentExisted and branch.len == 0 and
-        defaultProfileMainline(workspaceRoleSettings(workspaceRoot)).len == 0:
+    if not fragmentExisted and mainline.len == 0 and profileMainline.len == 0:
       stderr.writeLine("repro workspace repos add: " & repo &
-        ": --branch is required when declaring a new repo")
-      stderr.writeLine("  Every repo fragment declares the branch it tracks " &
-        "as its `mainline`, unless the workspace's `[workspace] " &
-        "default_profile` supplies one, which this workspace's does not. " &
-        "None is inferred, so a fragment that names no branch has no " &
-        "checkout to resolve to.")
+        ": --mainline is required when declaring a new repo")
+      if profile.len > 0:
+        stderr.writeLine("  Every repo fragment declares the branch it " &
+          "tracks as its `mainline`, unless the profile it follows supplies " &
+          "one, which profile '" & profile & "' does not. A fragment that " &
+          "names a profile does not fall back to the workspace's " &
+          "`[workspace] default_profile`.")
+      else:
+        stderr.writeLine("  Every repo fragment declares the branch it " &
+          "tracks as its `mainline`, unless the profile it follows supplies " &
+          "one: a --profile, or the workspace's `[workspace] " &
+          "default_profile`, which this workspace's does not.")
+      stderr.writeLine("  None is inferred, so a fragment that names no " &
+        "branch has no checkout to resolve to.")
       stderr.writeLine("  Add the branch this repo's mainline lives on, e.g.:")
       stderr.writeLine("    repro workspace repos add " & repo &
-        " --remote=" & remote & " --branch=dev")
-      stderr.writeLine("  Add --revision=<commit> alongside --branch to " &
+        " --remote=" & remote & " --mainline=dev" &
+        (if profile.len > 0: " --profile=" & profile else: ""))
+      stderr.writeLine("  Add --revision=<commit> alongside --mainline to " &
         "say \"tracks <branch>, sits at <commit>\".")
       stderr.writeLine("  Nothing was written.")
       return 2
 
-    # `--branch` and `--revision` are each validated against the remote, for
+    # `--mainline` and `--revision` are each validated against the remote, for
     # the same reason: a manifest naming a branch or a pin that does not exist
     # authors fine and fails at sync time on everyone else's machine. Both are
     # checked when both are given — "tracks <branch>, sits at <commit>" is the
     # pinned form now that a pin always sits beside a mainline.
-    for requestedRef in [branch, revision]:
+    for requestedRef in [mainline, revision]:
       if requestedRef.len == 0 or fragmentExisted:
         continue
       let check = remoteRevisionState(gitBin, remote, requestedRef)
@@ -102415,9 +102647,10 @@ proc runWorkspaceReposCommand*(args: openArray[string]): int =
         if not fragmentExisted:
           createDir(manifestRoot / "repos")
           writeWorkspaceManifestFile(fragmentAbs, repoFragmentText(RepoFragment(
-            # `--branch` is the mainline (Branch-Roles §3.1).
             repo: RepoBody(name: repo, path: effectivePath,
-              mainline: (if branch.len > 0: some(branch) else: none(string)),
+              mainline: (if mainline.len > 0: some(mainline)
+                         else: none(string)),
+              profile: (if profile.len > 0: some(profile) else: none(string)),
               # A pin sits beside the mainline: written whenever given, as
               # the project path below writes it.
               revision: (if revision.len > 0: some(revision)
@@ -102468,7 +102701,9 @@ proc runWorkspaceReposCommand*(args: openArray[string]): int =
           writeWorkspaceManifestFile(fragmentAbs, repoFragmentText(RepoFragment(
             repo: RepoBody(name: plan.repoName, path: effectivePath,
               remote: some(plan.remoteName),
-              mainline: (if branch.len > 0: some(branch) else: none(string)),
+              mainline: (if mainline.len > 0: some(mainline)
+                         else: none(string)),
+              profile: (if profile.len > 0: some(profile) else: none(string)),
               revision: (if revision.len > 0: some(revision)
                          else: none(string))))))
           paths.add(fragmentRel)
@@ -102557,12 +102792,6 @@ proc runWorkspaceReposCommand*(args: openArray[string]): int =
         remoteNames.add(target.name & "=" & plan.remoteName &
           (if plan.mintedFetch.len > 0: " (new, fetch " & plan.mintedFetch & ")"
            else: " (reused)"))
-    if branch.len == 0 and revision.len == 0 and hasSet:
-      # Reported, not silent. A repo fragment fully determines its own
-      # checkout, and one that declares no branch determines it incompletely.
-      stderr.writeLine("repro workspace repos add: note: " & fragmentRel &
-        " declares no `branch`; nothing else determines which branch this " &
-        "repo lands on. Pass --branch=<name>.")
 
     let docRel = "repos/" & repo & ".md"
     let docAbs = manifestRoot / "repos" / (repo & ".md")
@@ -102586,9 +102815,11 @@ proc runWorkspaceReposCommand*(args: openArray[string]): int =
     stdout.writeLine("repro workspace repos add: " & repo & " -> " &
       projects.join(", ") & " — path " & effectivePath & ", remote " &
       remoteNames.join(" ") & ", " &
-      (if branch.len > 0: "branch " & branch
-       elif revision.len > 0: "revision " & revision & " (pinned)"
-       else: "revision (inherited)") &
+      (if mainline.len > 0: "mainline " & mainline
+       elif not fragmentWasNew: "mainline as the existing fragment declares it"
+       elif profile.len > 0: "mainline from profile " & profile
+       else: "mainline from the default profile") &
+      (if revision.len > 0: ", revision " & revision & " (pinned)" else: "") &
       " — " & res.diagnostic)
     return res.code
   of "remove":

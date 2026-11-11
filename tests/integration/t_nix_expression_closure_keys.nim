@@ -272,11 +272,12 @@ suite "every workspace expressionFile is uncacheable":
 
   test "every stdlib expression is never served from a cache":
     let exprs = stdlibExpressionFiles()
-    # `rustc` and `cargo` declare the same expression, so it appears twice.
+    # `rustc` and `cargo` declare the same expression per release, so each
+    # appears twice.
     check exprs.mapIt(it.parentDir.extractFilename) == @[
       "appimage-runtime-20251108", "appimagetool-1.9.1", "go-1.25.4",
       "python3-with-modules-1.0.0", "rust-1.94.0", "rust-1.94.0",
-      "stylus-0.64.0"]
+      "rust-1.97.1", "rust-1.97.1", "stylus-0.64.0"]
     for expr in exprs:
       checkpoint(expr)
       check fileExists(expr)

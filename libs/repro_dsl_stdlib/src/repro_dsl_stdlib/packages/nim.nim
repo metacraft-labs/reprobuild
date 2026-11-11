@@ -152,6 +152,27 @@ package nim:
 
   executable nim:
     cli:
+      # ``nim c`` does not emit machine code. It emits C and then runs the
+      # backend C compiler by BARE NAME through ``/bin/sh -c``: ``clang`` by
+      # default on macOS, ``gcc`` everywhere else. That compiler is this
+      # tool's sub-tool, so EVERY edge the wrapper records -- the
+      # ``output =`` form a recipe can call directly as well as the
+      # ``binary =`` shorthand below -- gets its directory on PATH when the
+      # recipe declares it in ``uses:``. A name the recipe does not declare
+      # is inert.
+      #
+      # Only the platform's default is declared. Sub-tools come BEFORE an
+      # edge's own references on its PATH, so declaring the other compiler
+      # would let it shadow the one the edge names: on macOS a declared
+      # ``gcc`` is Apple's ``/usr/bin`` shim, and its directory ahead of the
+      # declared ``clang`` hands nim ``/usr/bin/clang``. A recipe that picks
+      # another backend with ``cc`` names that compiler at its call site; the
+      # ``binary =`` shorthand does so itself.
+      when defined(macosx):
+        subTools "clang"
+      else:
+        subTools "gcc"
+
       # DA-6 — THE CAPTURE-BREADTH DECLARATION, made HERE, on the tool, once.
       #
       # THE CLAIM: a `nim` action asks io-mon for every event category EXCEPT
@@ -837,12 +858,14 @@ proc c*(pkg: NimPackage; source: string; binary: string;
   # undeclared sub-tool simply is not on the ``PATH``, and this edge
   # fails with ``gcc: command not found``.
   #
-  # Naming it here is the declaration, and it does two things, both
-  # needed. It puts the resolved compiler's directory on this edge's
-  # ``PATH``; and it keeps the compiler's ``uses:`` entry alive through
-  # ``scopedToolArtifact``, which realizes only the tool identities the
-  # SELECTED actions reference -- so a fragment build such as
-  # ``repro build .#apps`` still resolves it.
+  # For the platform's default compiler, the tool's ``subTools`` (the
+  # ``cli:`` block above) already put its directory on every nim edge's
+  # ``PATH`` and keep it resolvable for a fragment build such as
+  # ``repro build .#apps``. Naming the compiler here as well makes this
+  # alias's edge reference the one compiler it runs, whichever ``cc``
+  # selected, and a reference is what gives the edge a hermetic ``PATH``: a
+  # sub-tool vouches only for what the tool runs, a reference for what the
+  # edge runs.
   #
   # This covers edges lowered by nim.c. The in-tree shared
   # ct_test_nim_unittest adapter records the native backend on its own

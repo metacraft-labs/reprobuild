@@ -1419,15 +1419,21 @@ proc selectNixProvisioning*(useDef: InterfaceToolUse;
   ## is never relaxed to another, and a committed-lock pin provisions
   ## exactly the realization it names or refuses. An entry whose selector is
   ## empty is still an ELIGIBLE entry with incomplete metadata;
-  ## ``nixAcquisitionPlan`` owns the completeness diagnostic.
+  ## ``nixAcquisitionPlan`` owns the completeness diagnostic. The ``uses:``
+  ## version range filters the entries that declare a ``version``, as it
+  ## filters ``tarball`` entries; one that declares none is held to the
+  ## range after realization instead.
   let pin = contributorPin(useDef)
   let locked = lockedCandidates(useDef, useDef.nixProvisioning)
+  let versionRange = requestedUsesVersionRange(useDef)
   if locked.records.len == 0:
     refuseLockedRealizationMissing(useDef, "nix", "")
-  let choice = selectNixRecord(locked.records, target, "", pin)
+  let choice = selectNixRecord(locked.records, target, "", pin,
+    versionRange = versionRange)
   if choice.status != kcSelected:
     raise selectionFailure(useDef, rkNix, choice,
-      selectNixRecord(useDef.nixProvisioning, target, "", none(string)),
+      selectNixRecord(useDef.nixProvisioning, target, "", none(string),
+        versionRange = versionRange),
       pin, target)
   useDef.nixProvisioning[locked.positions[choice.index]]
 
@@ -2534,6 +2540,26 @@ proc nixRangeRefusalFallsBackToTarball*(useDef: InterfaceToolUse;
   let range = requestedUsesVersionRange(useDef)
   range.len > 0 and selectTarballRecord(useDef.tarballProvisioning, target,
     "", none(string), versionRange = range).status == kcSelected
+
+proc nixSelectionRangeRefusal*(useDef: InterfaceToolUse;
+    target = hostRealizationTarget()): string =
+  ## The refusal, or "", when the recipe's range admits none of the
+  ## ``nixPackage`` entries that declare a release. That is the same answer
+  ## a realized out-of-range version gives (``UsesVersionOutOfRange``), made
+  ## before anything is built, so ``tpmNix`` treats it the same way: an
+  ## in-range archive is taken (``nixRangeRefusalFallsBackToTarball``), and
+  ## otherwise the refusal stands.
+  let range = requestedUsesVersionRange(useDef)
+  if range.len == 0 or useDef.nixProvisioning.len == 0:
+    return ""
+  let locked = lockedCandidates(useDef, useDef.nixProvisioning)
+  let choice = selectNixRecord(locked.records, target, "",
+    contributorPin(useDef), versionRange = range)
+  if choice.status == kcVersionNotOffered:
+    "tool-resolution failed: package \"" & useDef.packageSelector &
+      "\" requested by uses \"" & useDef.rawConstraint & "\": " &
+      choice.detail
+  else: ""
 
 proc pathModeCanRealize*(useDef: InterfaceToolUse): bool =
   ## Whether the path-mode resolver has anything to realize `useDef` from
@@ -10048,6 +10074,9 @@ proc toolProfileFor(useDef: InterfaceToolUse; mode: ToolProvisioningMode;
       # is its realization in every mode, as it already is in path mode.
       return resolveTarballTool(useDef, storeRoot)
     try:
+      let rangeRefusal = nixSelectionRangeRefusal(useDef)
+      if rangeRefusal.len > 0:
+        raise newException(UsesVersionOutOfRange, rangeRefusal)
       result = resolveNixTool(useDef, storeRoot)
     except UsesVersionOutOfRange as refusal:
       # nixpkgs builds a version the recipe's range refuses. An archive the

@@ -77,6 +77,8 @@
   # An entry for a source input added AFTER the `src` commit (its lock has no
   # such node yet) mirrors this tree's `flake.lock` instead, and the check
   # holds it to that until the next release snapshot moves `src` past it.
+  # `repro lock update` moves that lock and not this file, so `just lint`
+  # holds such an entry to it as well (scripts/check_package_nix_pending_sources.py).
   # The metacraft-labs/nixpkgs fork must map such an input in its `pins.json`
   # when it syncs the first release that carries it (nix/README.md).
   #
@@ -230,7 +232,7 @@ stdenv.mkDerivation (finalAttrs: {
   # forbids. reprobuild's flake overrides it with the value it parses from the
   # nimble manifest, and `checks.nixpkgs-package-version-sync` fails the build
   # if this literal and the manifest disagree, so the two cannot drift silently.
-  version = "0.2.21";
+  version = "0.2.22";
 
   # The default source: a published commit whose `reprobuild.nimble` carries
   # `version` above and whose `flake.lock` pins the `*Src` defaults above

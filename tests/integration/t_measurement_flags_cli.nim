@@ -44,6 +44,7 @@
 ## Persist" and ``reprobuild-specs/CLI/build.md`` §"Measurement Flags".
 
 import std/[json, os, osproc, strutils, tempfiles, unittest]
+import repro_test_support/reasoned_skip
 
 const RepoMarker = "repro.nim"
 
@@ -353,6 +354,41 @@ suite "measurement flags: collection, presentation and persistence":
         check node["failedActions"].len > 0
         check node["counts"]["failed"].getInt > 0
         # The full document was NOT requested, so it must not appear.
+        check not fileExists(outDirOf(project) / "build-report.json")
+
+  test "a FAILED interface extraction writes its failure report unasked":
+    # The recipe itself does not compile, so the build fails in the
+    # project-interface extraction edge -- an engine pass of its own, before
+    # the graph whose result the other failure case reports from exists.
+    # That failure is no less a failed build: the report must name the
+    # failed edge with its exit code and captured streams, and the error
+    # line must carry the exit code rather than the bare status.
+    if not fileExists(reproBin):
+      skip("needs " & reproBin & " (run `just build`)")
+    else:
+      let project = scratch / "broken-recipe"
+      materializeProject(project, OkProject &
+        "\nlet notAnInt: int = \"this recipe does not compile\"\n",
+        "measTool.nim", "echo \"measurement fixture\"\n")
+      let res = buildIn(project, [])
+      checkpoint(res.output)
+      check res.exitCode != 0
+      check res.output.contains("interface extraction edge asFailed")
+      check res.output.contains("(exit code ")
+      let failurePath = outDirOf(project) / "build-failure-report.json"
+      check fileExists(failurePath)
+      if fileExists(failurePath):
+        let node = parseJson(readFile(failurePath))
+        check node["schemaId"].getStr == "reprobuild.build.failure-report.v1"
+        check node["counts"]["failed"].getInt == 1
+        check node["failedActions"].len == 1
+        if node["failedActions"].len == 1:
+          let failed = node["failedActions"][0]
+          check failed["id"].getStr.startsWith("__repro_interface_extract-")
+          check failed["status"].getStr == "asFailed"
+          check failed["exitCode"].getInt != 0
+          check (failed["stderr"].getStr & failed["stdout"].getStr).contains(
+            "this recipe does not compile")
         check not fileExists(outDirOf(project) / "build-report.json")
 
   test "--no-write-report suppresses the failure report too":

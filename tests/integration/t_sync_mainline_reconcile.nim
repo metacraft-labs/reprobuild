@@ -78,11 +78,21 @@
 ##      sibling) in the managed block, keeps the operator's entry, leaves the
 ##      root with nothing untracked, and a second run rewrites nothing.
 ##
-## No mocks: real git repositories, real filesystem, the real binary.
-## Existing cases skip when git is absent; the scope and sibling-ignore
-## regressions require git.
+##  16. ``test_sync_mainline_refetches_an_advanced_tcp_upstream_after_a_warm_sync``
+##      A real mainline sync fetches every time, exactly as a plain ``sync``
+##      does: the fetch is what observes the remote, so it is never cached.
+##      The origin is served by ``git daemon`` over TCP, so nothing on the
+##      local filesystem that the sync could observe changes when the remote
+##      advances. A first sync leaves its fetch receipt behind (``up_to_date``);
+##      trunk then moves, and the second sync must fetch it and fast-forward
+##      rather than let that receipt stand in for the fetch.
+##
+## No mocks: real git repositories, real filesystem, the real binary, and a
+## real ``git daemon`` on a loopback port for the network case.
+## Existing cases skip when git is absent; the scope, sibling-ignore and network
+## regressions require git (and, for the last, ``git daemon``).
 
-import std/[json, os, osproc, strutils, tempfiles, unittest]
+import std/[json, net, os, osproc, strutils, tempfiles, unittest]
 import repro_test_support/reasoned_skip
 
 import repro_test_support
@@ -886,3 +896,74 @@ suite "repro sync --mainline":
     checkpoint("second output: " & again.output)
     require again.code == 0
     check readFile(excludeFile) == written
+
+  test "test_sync_mainline_refetches_an_advanced_tcp_upstream_after_a_warm_sync":
+    # The upstream is a ``git daemon`` on loopback, not a ``file://`` origin,
+    # so the remote advancing changes nothing on the local filesystem the
+    # sync could notice: only actually running ``git fetch`` sees the new tip.
+    let gitBin = findExe("git")
+    require gitBin.len > 0
+    let execPath = requireGit(q(gitBin) & " --exec-path").strip()
+    require fileExists(execPath / "git-daemon")
+    let fx = setupFixture(gitBin, "tcp-refetch", oneRepo)
+    defer: removeDirEventually(fx.scratch)
+
+    let port = block:
+      let s = newSocket()
+      s.bindAddr(Port(0), "127.0.0.1")
+      let p = int(s.getLocalAddr()[1])
+      s.close()
+      p
+    let daemon = startProcess(gitBin, args = @["daemon", "--reuseaddr",
+      "--export-all", "--listen=127.0.0.1", "--port=" & $port,
+      "--base-path=" & fx.scratch, fx.scratch],
+      options = {poStdErrToStdOut})
+    defer:
+      daemon.terminate()
+      discard daemon.waitForExit()
+      daemon.close()
+    let url = "git://127.0.0.1:" & $port & "/origin-prod.git"
+    var listening = false
+    for attempt in 0 ..< 100:
+      if runCmd(q(gitBin) & " ls-remote " & q(url)).code == 0:
+        listening = true
+        break
+      sleep(100)
+    require listening
+
+    # The manifest and the checkout both name the TCP remote.
+    let manifest = fx.workspaceRoot / "projects" / "mainline-sync-fixture.toml"
+    writeFile(manifest,
+      readFile(manifest).replace(fileUrl(fx.originOf("prod")), url))
+    let repoPath = fx.workspaceRoot / "prod"
+    discard requireGit(q(gitBin) & " clone " & q(url) & " " & q(repoPath))
+    startFeatureBranch(gitBin, repoPath, "feature-x")
+    let base = headSha(gitBin, repoPath)
+
+    # Warm sync: nothing to do, and its fetch leaves a receipt behind.
+    let warm = invokeSync(fx, @["--json"])
+    checkpoint("warm sync output: " & warm.output)
+    require warm.code == 0
+    check entryByName(readReport(fx), "prod")["outcome"].getStr() ==
+      "up_to_date"
+    var receipts: seq[string]
+    for path in walkFiles(fx.workspaceRoot / ".repro" / "workspace" /
+        "receipts" / "mainline-sync-fetch-*.receipt"):
+      receipts.add(path)
+    require receipts.len == 1
+
+    let trunkTip = advanceTrunk(gitBin, fx.seedOf("prod"), "dev", "moved\n")
+    require trunkTip != base
+    # The checkout has not seen the advance: only a fetch can show it.
+    require gitRev(gitBin, repoPath, "refs/remotes/origin/dev") == base
+
+    let res = invokeSync(fx, @["--json"])
+    checkpoint("second sync output: " & res.output)
+    check res.code == 0
+    let report = readReport(fx)
+    let e = entryByName(report, "prod")
+    checkRoleEntry(report, e, "dev")
+    check e["outcome"].getStr() == "fast_forwarded"
+    check gitRev(gitBin, repoPath, "refs/remotes/origin/dev") == trunkTip
+    check headSha(gitBin, repoPath) == trunkTip
+    check currentBranch(gitBin, repoPath) == "feature-x"

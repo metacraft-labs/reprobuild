@@ -50,9 +50,14 @@
 ## `compileProfileExecutable` again makes case 1 fail with
 ## `cannot open: home_linkerArgs.txt` and case 2 succeed.
 ##
-## The third case pins the compiler path to an absolute one: with `nim`
-## running in the nimcache, a relative path would no longer resolve against
-## the caller's directory.
+## Two more cases follow from the same move. The third: reprobuild's
+## config.nims, which the profile compile includes from a wrapper beside the
+## profile, must add the package paths it finds beside the source root as
+## absolute paths, not ones that resolve against the profile's directory; it
+## covers the shm sibling and an io-mon sibling standing in for a stale
+## `$IO_MON_SRC`. The fourth pins the compiler path to an absolute one: with
+## `nim` running in the nimcache, a relative path would no longer resolve
+## against the caller's directory.
 ##
 ## Mocks: none. The real `nim` and C toolchain of the dev shell compile a real
 ## profile against reprobuild's real sources.
@@ -173,7 +178,8 @@ else:
       defer: removeDir(dir)
       let root = symlinkedSourceRoot(dir, copyConfig = true)
       for (name, envName) in [("nim-shm-gset", "SHM_GSET_SRC"),
-                              ("nim-shm-queue", "SHM_QUEUE_SRC")]:
+                              ("nim-shm-queue", "SHM_QUEUE_SRC"),
+                              ("io-mon", "IO_MON_SRC")]:
         let src = getEnv(envName)
         doAssert src.len > 0, envName & " is unset: enter reprobuild's dev shell"
         createDir(dir / name)
@@ -185,14 +191,21 @@ else:
       # shm_gset itself, so the compile needs the path config.nims adds.
       let profile = dir / "profiles" / "deep" / "home.nim"
       createDir(profile.parentDir)
-      writeFile(profile, "import shm_gset\n" & ProfileBody)
+      writeFile(profile, "import shm_gset, io_mon\n" & ProfileBody)
       let binary = dir / "out" / addFileExt("profile-build", ExeExt)
-      try:
-        discard compileProfileExecutable(profile, dir / "nimcache", binary,
-          root)
-      except CompileFailure as err:
-        checkpoint(err.msg & "\n" & err.stderrText)
-        check false
+      # The sibling must be the one chosen: `pin` would take the absolute
+      # `$SHM_GSET_SRC` instead and hide the sibling's path. A stale
+      # `$IO_MON_SRC` (naming nothing) makes config.nims fall back to the
+      # io-mon sibling, which the profile compile's own absolute
+      # `$IO_MON_SRC` cannot cover: it fills only unset variables.
+      withEnv("REPRO_SIBLING_POLICY", "sibling"):
+        withEnv("IO_MON_SRC", dir / "no-such-io-mon"):
+          try:
+            discard compileProfileExecutable(profile, dir / "nimcache",
+              binary, root)
+          except CompileFailure as err:
+            checkpoint(err.msg & "\n" & err.stderrText)
+            check false
       check fileExists(extendedPath(binary))
 
     test "a nim found through a relative PATH entry is named absolutely":

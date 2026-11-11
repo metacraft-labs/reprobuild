@@ -65,6 +65,13 @@ import repro_peer_cache/evidence_record
 import ./evidence_check
 import ./mutations
 
+when defined(windows):
+  # The CRT's spelling of O_CLOEXEC: the descriptor is not inherited by a
+  # child process. https://learn.microsoft.com/cpp/c-runtime-library/reference/open-wopen
+  var ONoInherit {.importc: "_O_NOINHERIT", header: "<fcntl.h>".}: cint
+else:
+  let ONoInherit = O_CLOEXEC
+
 type
   SinkCommand* = object
     verb*: string
@@ -406,7 +413,7 @@ proc runSinkCli*(args: openArray[string]): int =
       return 1
     if c.outPath.len > 0:
       let fd = posix.open(c.outPath.cstring, O_WRONLY or O_CREAT or O_EXCL or
-        O_CLOEXEC, Mode(0o600))
+        ONoInherit, Mode(0o600))
       if fd < 0:
         stderr.writeLine("repro-evidence-sink payload: cannot create " &
           c.outPath & " (it must not exist)")
