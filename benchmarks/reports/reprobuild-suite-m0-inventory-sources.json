@@ -1,7 +1,7 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 35,
-    "nimTestBinaries": 2707,
+    "nimTestBinaries": 2708,
     "pureUnitConsolidationGroups": 79,
     "pureUnitTests": 745,
     "staticallyDetectedRuntimeCompilerFlowTests": 137,
@@ -1564,10 +1564,10 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 21,
-      "integration": 1490,
+      "integration": 1491,
       "platform/destructive": 173,
       "pure unit": 745,
-      "unclassified": 318
+      "unclassified": 317
     },
     "graphOwnedTestArtifacts": [
       {
@@ -1781,8 +1781,8 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2707,
-    "pythonTestFileCount": 40,
+    "nimTestBinaryCount": 2708,
+    "pythonTestFileCount": 39,
     "testEntryCount": 2747
   },
   "staticallyDetectedRuntimeCompilerFlows": [
@@ -11651,6 +11651,26 @@
       "source": "libs/repro_build_engine/tests/t_soft_rebuild_and_retention.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 6,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_transient_probed_with_trailing_separator",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "io_mon",
+        "repro_build_engine",
+        "repro_core",
+        "repro_test_support"
+      ],
+      "owner": "libs/repro_build_engine",
+      "requiresReproBinary": true,
+      "source": "libs/repro_build_engine/tests/t_transient_probed_with_trailing_separator.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 2,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -57165,21 +57185,6 @@
       "source": "tests/unit/test_dev_shell_hook_scope.py",
       "sourceSuiteCount": 1,
       "staticCaseCount": 7,
-      "staticallyDetectedRuntimeCompilerFlow": false,
-      "targetOs": "soAny"
-    },
-    {
-      "binary": "",
-      "class": "unclassified",
-      "classificationReason": "imports `copy`, which this scan does not recognize; refusing to call it pure rather than assuming it is",
-      "defines": [],
-      "language": "python",
-      "localDependencyShape": [],
-      "owner": "tests/unit",
-      "requiresReproBinary": false,
-      "source": "tests/unit/test_flake_lock_derived_fields.py",
-      "sourceSuiteCount": 1,
-      "staticCaseCount": 11,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

@@ -11852,6 +11852,18 @@ proc honouredDerivedPrefixes*(action: BuildAction): seq[string] =
       continue
     result.addUnique(seenPrefixes, materialized)
 
+proc transientWriteKey*(path: string): string =
+  ## The spelling `transientOwnWrites` stores and every caller looks up:
+  ## forward slashes, with no trailing separator. The monitor records the
+  ## same temporary under more than one spelling. lld-link on Windows WRITES
+  ## `noexp.dll.tmpa6d2958` and PROBES `noexp.dll.tmpa6d2958\`, so a lookup
+  ## of the probed spelling missed. The temporary's random name then entered
+  ## the determinism-probe key and the portable record, and no two runs
+  ## agreed on either. A root (`/`) keeps its separator.
+  result = path.replace('\\', '/')
+  while result.len > 1 and result.endsWith("/"):
+    result.setLen(result.len - 1)
+
 proc transientOwnWrites*(evidence: PathSetEvidence): HashSet[string] =
   ## Paths the action itself WROTE that no longer exist once it finished:
   ## its temporaries. npm's delete-by-rename (`x.js.DELETE.<random>`) is
@@ -11868,7 +11880,7 @@ proc transientOwnWrites*(evidence: PathSetEvidence): HashSet[string] =
     if not fileExists(extendedPath(path)) and
         not dirExists(extendedPath(path)) and
         not symlinkExists(extendedPath(path)):
-      result.incl(path.replace('\\', '/'))
+      result.incl(transientWriteKey(path))
 
 proc undeclaredSurvivingWrites*(action: BuildAction;
                                 evidence: PathSetEvidence): seq[string] =
@@ -19469,7 +19481,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     # so a cold first run and every later one keyed it differently.
     let ancestors = graphAncestorsOf(action.id)
     for path in inputs:
-      if isLaunchMachinery(path) or path.replace('\\', '/') in transient or
+      if isLaunchMachinery(path) or transientWriteKey(path) in transient or
           isOwnOutput(action, path):
         continue
       var pathKey = path.replace('\\', '/')
@@ -19822,7 +19834,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     let transient = transientOwnWrites(evidence)
     for path in action.cacheInputPaths(evidence):
       if path in enumerated or isHostTempListing(path) or
-          path.replace('\\', '/') in transient or isOwnOutput(action, path):
+          transientWriteKey(path) in transient or isOwnOutput(action, path):
         continue
       elif path in probed:
         result.probes.add(path)
