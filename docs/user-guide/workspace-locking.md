@@ -409,7 +409,22 @@ fine — and you spend the afternoon on the wrong suspect. `pre-push` refuses; a
 commit hook prints the same block and still exits 0, because a hook has no
 business failing a commit after the fact.
 
-Two ways out. Point the hooks at the binary you mean:
+First rule out a stale dev shell. A direnv dev shell keeps serving the `repro`
+it was built with until it is rebuilt, however current the workspace's pins
+are now, so on a long-lived checkout the resolved binary is often *older* than
+the one that wrote the hooks. Moving a pin is not the fix for that; rebuilding
+the shell is:
+
+```console
+$ direnv reload    # or open a new shell
+```
+
+`repro health` shows this directly: its `hook-interpreter` row lists every
+`repro` the workspace's shells resolve, by store path, and says which of them
+refuse the installed hooks.
+
+If the refusal survives that, there are two ways out. Point the hooks at the
+binary you mean:
 
 ```console
 $ REPROBUILD_REPRO=/path/to/current/repro git push
