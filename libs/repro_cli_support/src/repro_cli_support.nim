@@ -44367,7 +44367,7 @@ proc scopeRepoPathSet(workspaceRoot: string;
 
 proc gitRunPlain(identity: GitToolIdentity;
                  args: openArray[string]): tuple[code: int; output: string] =
-  ## Tiny ``execCmdEx`` wrapper used by the sync observation gatherer.
+  ## Tiny ``execCmdExCloseOnce`` wrapper used by the sync observation gatherer.
   ## Shares the same shape as ``revParse`` above but takes an argv so
   ## callers don't have to quoteShell every arg.
   ##
