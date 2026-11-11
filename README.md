@@ -53,7 +53,7 @@ putting its `bin/` on your `PATH`:
 
 ```bash
 # Linux x86_64 — adjust the version and platform to taste
-VERSION=0.2.20
+VERSION=0.2.22
 PLATFORM=linux-x86_64   # or darwin-aarch64; Windows ships a .zip
 curl -fsSLO "https://github.com/metacraft-labs/reprobuild/releases/download/v${VERSION}/reprobuild-${VERSION}-${PLATFORM}.tar.gz"
 tar -xzf "reprobuild-${VERSION}-${PLATFORM}.tar.gz"
@@ -158,7 +158,8 @@ package app:
   ## Development database — provisioned from the catalog like any
   ## other dependency and supervised by `repro up`.
   service db:
-    postgres(dataDir = "data/db", port = port)
+    executable postgres.executable("postgres")
+    args "-D", "data/db"
 
   # Rust library compiled from source
   library "rust_lib":

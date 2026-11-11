@@ -71,8 +71,16 @@
 ##      selectors; sync reconciles the scoped active union without enabling
 ##      inactive projects or touching other active projects.
 ##
+##  15. ``test_sync_mainline_refreshes_managed_sibling_ignores``
+##      The workspace root is itself a git checkout carrying an operator's own
+##      ``info/exclude`` entry. A dry run leaves that file byte-identical; a
+##      real run that clones a missing sibling lists it (and every other
+##      sibling) in the managed block, keeps the operator's entry, leaves the
+##      root with nothing untracked, and a second run rewrites nothing.
+##
 ## No mocks: real git repositories, real filesystem, the real binary.
-## Existing cases skip when git is absent; the scope regression requires git.
+## Existing cases skip when git is absent; the scope and sibling-ignore
+## regressions require git.
 
 import std/[json, os, osproc, strutils, tempfiles, unittest]
 import repro_test_support/reasoned_skip
@@ -818,3 +826,63 @@ suite "repro sync --mainline":
     require readReport(fx)["repos"].len == 1
     check headSha(gitBin, fx.workspaceRoot / "infra") == tips[2]
     check headSha(gitBin, fx.workspaceRoot / "inactive") == before[3]
+
+  test "test_sync_mainline_refreshes_managed_sibling_ignores":
+    # Workspace-Sibling-Ignore-Set.md: `ws sync` regenerates the per-clone
+    # managed block. `--mainline` is a sync, so a sibling it clones must not
+    # surface as untracked in the workspace root.
+    let gitBin = findExe("git")
+    require gitBin.len > 0
+    let fx = setupFixture(gitBin, "sibling-ignores", @[
+      RepoSpec(name: "prod", mainline: "dev"),
+      RepoSpec(name: "specs", mainline: "latest")])
+    defer: removeDirEventually(fx.scratch)
+    let root = fx.workspaceRoot
+    let rootGit = q(gitBin) & " -C " & q(root)
+    discard requireGit(rootGit & " init -b main")
+    discard requireGit(rootGit & " add projects repos")
+    discard requireGit(rootGit & " -c user.email=tester@example.invalid" &
+      " -c user.name=Tester commit -m manifests")
+    let excludeFile = root / ".git" / "info" / "exclude"
+    const operatorEntry = "/operator-scratch/"
+    writeFile(excludeFile, "# operator's own entry\n" & operatorEntry & "\n")
+    cloneInto(gitBin, fx.originOf("prod"), root / "prod")
+    # `specs` is declared but has no checkout: the sync clones it.
+
+    let preview = invokeSync(fx, @["--dry-run"])
+    checkpoint("dry-run output: " & preview.output)
+    require preview.code == 0
+    check not dirExists(root / "specs")
+    check readFile(excludeFile) ==
+      "# operator's own entry\n" & operatorEntry & "\n"
+
+    let res = invokeSync(fx, @[])
+    checkpoint("output: " & res.output)
+    require res.code == 0
+    require dirExists(root / "specs" / ".git")
+
+    let written = readFile(excludeFile)
+    checkpoint("info/exclude:\n" & written)
+    let lines = written.splitLines()
+    let beginAt = lines.find("# BEGIN managed workspace ignores")
+    let endAt = lines.find("# END managed workspace ignores")
+    require beginAt >= 0 and endAt > beginAt
+    let managed = lines[beginAt + 1 ..< endAt]
+    check "/specs/" in managed
+    check "/prod/" in managed
+    check "/projects/" notin managed  # tracked: never ignored
+    let outside = lines[0 ..< beginAt] & lines[endAt + 1 .. ^1]
+    check operatorEntry in outside
+    check operatorEntry notin managed
+
+    # The root's own status is what a source-preservation guard reads.
+    let status = requireGit(rootGit & " status --porcelain")
+    checkpoint("root status:\n" & status)
+    check status.strip().len == 0
+    check isClean(gitBin, root / "specs")
+
+    # A repeat run rewrites nothing.
+    let again = invokeSync(fx, @[])
+    checkpoint("second output: " & again.output)
+    require again.code == 0
+    check readFile(excludeFile) == written

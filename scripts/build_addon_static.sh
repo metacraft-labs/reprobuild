@@ -2,6 +2,7 @@
 # Build the statically linked add-on `repro` and write its SHA-256.
 #
 #   scripts/build_addon_static.sh [--mutation NAME] [--test-seams] [--out DIR] ARCH...
+#   scripts/build_addon_static.sh --toolchains-only ARCH...
 #
 # ARCH is one of x86_64 / amd64, aarch64 / arm64, armv7l / armhf. Each
 # artefact lands at <out>/<debian-arch>/repro (default out: build/addon),
@@ -36,6 +37,14 @@
 # to build/addon-seams/<arch>/ (build/addon-seams-mutations/NAME/<arch>/
 # together with --mutation) and is never published either.
 #
+# --toolchains-only realizes each architecture's toolchain (the musl cross
+# gcc and the static sqlite and zstd below) and stops there, compiling
+# nothing. .github/workflows/addon-toolchains.yml runs it whenever flake.lock
+# changes, with Attic uploading what it built, so the release's add-on job
+# substitutes the toolchains instead of building the armhf cross gcc from
+# source (not on cache.nixos.org; hours on a release runner). This mode keeps
+# the toolchain list in one place: the same `nix build` the real build runs.
+#
 # VERIFICATION. Every artefact is checked to be statically linked before
 # its digest is written: `file` must say "statically linked", the ELF must
 # have no PT_INTERP program header, and `ldd` must refuse it. A failure
@@ -46,6 +55,7 @@ cd "$(dirname "$0")/.."
 
 mutation=""
 seams=""
+toolchains_only=""
 out=""
 arches=()
 while [ $# -gt 0 ]; do
@@ -53,6 +63,7 @@ while [ $# -gt 0 ]; do
     --mutation) mutation="$2"; shift 2 ;;
     --mutation=*) mutation="${1#--mutation=}"; shift ;;
     --test-seams) seams=1; shift ;;
+    --toolchains-only) toolchains_only=1; shift ;;
     --out) out="$2"; shift 2 ;;
     --out=*) out="${1#--out=}"; shift ;;
     -h|--help) sed -n '2,40p' "$0"; exit 0 ;;
@@ -95,7 +106,7 @@ typehash_maps=(--typeHashPathMap:"$checkout_dir/=/reprobuild/"
 # The negative control of scripts/check_addon_static_reproducible.sh only.
 [ "${REPRO_ADDON_NO_TYPEHASH_MAP:-}" = 1 ] && typehash_maps=()
 
-command -v nim >/dev/null || {
+[ -n "$toolchains_only" ] || command -v nim >/dev/null || {
   echo "build_addon_static: nim is not on PATH; run inside the reprobuild dev shell (nix develop)" >&2
   exit 2
 }
@@ -150,6 +161,10 @@ for raw in "${arches[@]}"; do
   [ -n "$cc" ] || { echo "build_addon_static: no gcc among ${paths[*]}" >&2; exit 1; }
   [ -n "$sqlite_root" ] || { echo "build_addon_static: no static sqlite among ${paths[*]}" >&2; exit 1; }
   [ -n "$zstd_root" ] || { echo "build_addon_static: no static zstd among ${paths[*]}" >&2; exit 1; }
+  if [ -n "$toolchains_only" ]; then
+    echo "build_addon_static: $arch toolchain ready: $cc, $sqlite_root, $zstd_root"
+    continue
+  fi
   dest="$out/$arch"
   mkdir -p "$dest"
   tmp="$dest/repro.tmp.$$"
@@ -232,6 +247,7 @@ for raw in "${arches[@]}"; do
   echo "build_addon_static: $arch/reprobuild-sandbox-launcher $ldigest"
 done
 # Keep entries for architectures this run did not rebuild.
+[ -z "$toolchains_only" ] || { rm -f "$sums.tmp"; exit 0; }
 if [ -f "$sums" ]; then
   while read -r d p; do
     grep -q "  $p\$" "$sums.tmp" || echo "$d  $p" >> "$sums.tmp"

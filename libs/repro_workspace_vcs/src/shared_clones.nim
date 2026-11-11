@@ -2548,16 +2548,18 @@ discover_leaf() {
     fi
   done < "$alternates"
 }
+# scan_dir DIRECTORY DEPTH. Each call keeps its directory and remaining depth
+# in its own positional parameters, which a recursive call cannot change, so
+# the walk needs no subshell: one per directory would make a large sibling
+# domain cost a fork for every directory in it. The glob list is expanded once,
+# before the loop, so the recursion overwriting `child` does not disturb it.
 scan_dir() {
-  directory=$1
-  depth=$2
-  [ -r "$directory" ] && [ -x "$directory" ] || return 1
-  discover_leaf "$directory" || return 1
-  [ "$depth" -gt 0 ] || return 0
-  for child in "$directory"/* "$directory"/.[!.]* "$directory"/..?*; do
+  [ -r "$1" ] && [ -x "$1" ] || return 1
+  discover_leaf "$1" || return 1
+  [ "$2" -gt 0 ] || return 0
+  for child in "$1"/* "$1"/.[!.]* "$1"/..?*; do
     [ -d "$child" ] || continue
-    # A subshell keeps recursive calls from changing this call's variables.
-    (scan_dir "$child" "$((depth - 1))") || return 1
+    scan_dir "$child" "$(($2 - 1))" || return 1
   done
 }
 poolobjects=$(cd "$pool/objects" && pwd -P) || exit 1
@@ -2567,7 +2569,7 @@ while IFS= read -r parent || [ -n "$parent" ]; do
   [ -r "$parent" ] && [ -x "$parent" ] || exit 1
   for workspace in "$parent"/* "$parent"/.[!.]* "$parent"/..?*; do
     [ -d "$workspace" ] || continue
-    (scan_dir "$workspace" 2) || exit 1
+    scan_dir "$workspace" 2 || exit 1
   done
 done < "$work/parents"
 sort -u "$work/found" > "$work/discovered" || exit 1
@@ -4429,6 +4431,34 @@ proc sweepSharedBares*(gitBin, cacheRoot: string): seq[SharedBareSweepEntry] =
       if prepared.len > 0:
         entry.diagnostic = prepared
     result.add(entry)
+
+proc maintainOtherSharedBares*(gitBin, cacheRoot: string;
+                               maintained: openArray[string];
+                               budget = defaultMaintenanceBudget();
+                               force = false): seq[MaintenanceResult] =
+  ## The maintenance pass for every bare under ``cacheRoot`` that is not in
+  ## ``maintained``. The callers maintain the bares they can name -- the one a
+  ## commit pushed into, the ones the current workspace declares -- and then
+  ## this reaches the rest, so a bare whose checkouts only read or sync, and
+  ## never commit, still gets the age bound's pass.
+  ##
+  ## Each bare is budget-gated (unless ``force``), so a bare that is not due
+  ## costs one ``count-objects`` and no lock. No live-workspace set is passed
+  ## on: which workspaces still use an undeclared bare's ``refs/cache/*`` is
+  ## not known here, and a ref we cannot prove dead is kept. What the gc may
+  ## expire is decided by the pool's own borrower registry, as for every pass.
+  ## Only the bares a pass was attempted on are returned.
+  for bare in findSharedBares(cacheRoot):
+    var known = false
+    for m in maintained:
+      if samePathOnDisk(bare, m):
+        known = true
+        break
+    if known:
+      continue
+    if not force and not maintenanceDue(gitBin, bare, budget):
+      continue
+    result.add(maintainSharedBare(gitBin, bare, @[], budget, force))
 
 type
   SharedCloneRepoInfo* = object

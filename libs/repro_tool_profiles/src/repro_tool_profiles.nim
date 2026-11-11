@@ -13,6 +13,7 @@ import repro_core
 import repro_core/ambient_execution
 import repro_core/link_target
 import repro_core/host_tar
+import repro_core/powershell_zip as repro_core_powershell_zip
 # GC roots for the store paths a Nix tool realization is recorded under.
 import repro_core/nix_store_roots
 import repro_core/nix_evaluation_policy
@@ -1929,11 +1930,106 @@ proc expandNixPropagatedStorePaths*(paths: var seq[string]) =
         paths.add(candidate)
     inc index
 
+const NixDarwinSdkSetupScript* = "darwin-sdk-setup.bash"
+  ## The ``nix-support`` script in which a nixpkgs cc-wrapper for Darwin
+  ## names the Apple SDK it compiles and links against when the caller sets
+  ## no ``DEVELOPER_DIR``. Only Darwin wrappers carry it.
+
+proc nixDarwinWrapperDefaultSdk*(storePath: string): string =
+  ## The Apple SDK a nixpkgs Darwin cc-wrapper falls back to, or "" when
+  ## ``storePath`` is not such a wrapper or names no SDK that exists.
+  ##
+  ## The wrapper's setup script ends in
+  ##
+  ##   export DEVELOPER_DIR=${DEVELOPER_DIR_<role suffix>:-/nix/store/…-apple-sdk-<ver>}
+  ##
+  ## nixpkgs comments it "Allow wrapped compilers to do something useful when
+  ## no `DEVELOPER_DIR` is set, which can happen when the compiler is run
+  ## outside of a stdenv". A Reprobuild action is that case: the engine
+  ## composes its environment instead of inheriting one, so the wrapper uses
+  ## this default. Only the default after ``:-`` is read. The variable part
+  ## is the caller's override, and the action does not see the caller's
+  ## environment either.
+  let script = storePath / "nix-support" / NixDarwinSdkSetupScript
+  if not fileExists(extendedPath(script)):
+    return ""
+  let text =
+    try: readFile(extendedPath(script))
+    except IOError, OSError: return ""
+  for rawLine in text.splitLines:
+    var line = rawLine.strip
+    if line.startsWith("export "):
+      line = line["export ".len .. ^1].strip
+    if not line.startsWith("DEVELOPER_DIR=${"):
+      continue
+    let defaultStart = line.find(":-")
+    let defaultEnd = line.rfind('}')
+    if defaultStart < 0 or defaultEnd <= defaultStart + 2:
+      continue
+    let candidate = line[defaultStart + 2 ..< defaultEnd].strip
+    if candidate.isAbsolute and dirExists(extendedPath(candidate)):
+      return candidate
+  ""
+
+proc nixDarwinWrapperSdkLibraries*(paths: openArray[string]): seq[string] =
+  ## The host libraries that the Apple SDK of each Darwin cc-wrapper in
+  ## ``paths`` propagates: the closure of the SDK's
+  ## ``nix-support/propagated-build-inputs``, in discovery order, without the
+  ## SDK itself.
+  ##
+  ## WHY. nixpkgs removes ``libiconv`` (and libresolv, libsbuf, libutil) from
+  ## its Apple SDK and propagates them as packages of their own. Its Darwin
+  ## stdenv puts the SDK into every build's inputs (``stdenv.extraBuildInputs``
+  ## is ``[ apple-sdk ]``), so a nixpkgs build gets ``-L`` for them from the
+  ## setup hooks. A Reprobuild action runs no setup hooks. Without this
+  ## closure, the SDK a Nix clang links against lacks libraries that Apple's
+  ## SDK has. Rust's standard library links ``-liconv`` on every Apple target,
+  ## so every cargo build script failed with
+  ## ``ld: library not found for -liconv``.
+  ##
+  ## WHY ONLY ``propagated-build-inputs``. Those are the SDK's host libraries.
+  ## Its ``propagated-native-build-inputs`` hold build-machine tools for
+  ## stdenv (``xcrun`` from xcbuild), which are not part of what the compiler
+  ## links. The caller hands these paths to the compile and link channels only
+  ## (``addNixDarwinSdkLibraryChannels``). They never join the realized store
+  ## paths, whose ``bin/`` directories reach the action's ``PATH``. Measured
+  ## 2026-11-11 on aarch64-darwin: with the SDK's closure among the realized
+  ## paths, xcbuild's ``xcrun`` reached ``PATH`` and failed to load
+  ## (``dyld: Symbol not found: …libutil6FSUtil13NormalizePath…``), because
+  ## the SDK's ``libutil`` shadowed xcbuild's own.
+  var queue: seq[string]
+  for path in paths:
+    let sdk = nixDarwinWrapperDefaultSdk(path)
+    if sdk.len > 0 and sdk notin queue:
+      queue.add(sdk)
+  let sdkCount = queue.len
+  var index = 0
+  while index < queue.len:
+    let manifest = queue[index] / "nix-support" / "propagated-build-inputs"
+    if fileExists(extendedPath(manifest)):
+      for candidate in readFile(extendedPath(manifest)).splitWhitespace:
+        if dirExists(extendedPath(candidate)) and candidate notin queue:
+          queue.add(candidate)
+    inc index
+  result = queue[sdkCount .. ^1]
+
+proc addNixDarwinSdkLibraryChannels*(profile: var PathOnlyToolProfile) =
+  ## Hand the Darwin SDK's host libraries (``nixDarwinWrapperSdkLibraries``)
+  ## to the compiler's consumers on the header and library search paths: the
+  ## two channels through which Apple's own SDK provides them. No-op for every
+  ## profile without a Darwin cc-wrapper among its realized store paths, and so
+  ## for every Linux profile.
+  for library in nixDarwinWrapperSdkLibraries(profile.realizedStorePaths):
+    addUniquePath(profile.cpathList, library / "include")
+    addUniquePath(profile.libraryPathList, library / "lib")
+
 proc expandNixProfilePropagatedPaths*(profile: var PathOnlyToolProfile) =
   ## Repair cached Nix profiles as well as fresh resolutions. Split
   ## development outputs commonly propagate the runtime output that
   ## owns their shared libraries; omitting it leaves LD_LIBRARY_PATH
   ## and embedded RPATHs pointed at an empty ``-dev/lib`` directory.
+  ## A Darwin compiler wrapper also gets its SDK's host libraries
+  ## (``addNixDarwinSdkLibraryChannels``).
   expandNixPropagatedStorePaths(profile.realizedStorePaths)
   for storePath in profile.realizedStorePaths:
     addUniquePath(profile.cmakePrefixList, storePath)
@@ -1946,6 +2042,7 @@ proc expandNixProfilePropagatedPaths*(profile: var PathOnlyToolProfile) =
     addUniquePath(profile.cpathList, storePath / "include")
     addUniquePath(profile.libraryPathList, storePath / "lib")
     addUniquePath(profile.libraryPathList, storePath / "lib64")
+  addNixDarwinSdkLibraryChannels(profile)
   refreshProfileIdentity(profile)
 
 proc readNixReceiptPaths*(receipt: string): seq[string] =
@@ -2375,6 +2472,7 @@ else:
       addUniquePath(result.cpathList, storePath / "include")
       addUniquePath(result.libraryPathList, storePath / "lib")
       addUniquePath(result.libraryPathList, storePath / "lib64")
+    addNixDarwinSdkLibraryChannels(result)
 
     # Only collect probes if the output directory exists
     if dirExists(extendedPath(selectedStorePath)):
@@ -3087,46 +3185,34 @@ proc resolveZipExtractor(): tuple[exe: string; kind: string] =
     (when defined(windows): "powershell + unzip" else: "unzip + powershell") &
     ")")
 
-proc powershellLiteral(value: string): string =
-  ## A PowerShell single-quoted string literal: nothing inside it is
-  ## interpolated, and the only escape is a doubled quote.
-  "'" & value.replace("'", "''") & "'"
-
 proc powershellZipExtractScript*(archivePath, destination: string): string =
-  ## The script the PowerShell zip extractor runs.
+  ## The script the PowerShell zip extractor runs: the shared
+  ## ``repro_core/powershell_zip`` loop without overwrite, because the
+  ## destination is always a fresh staging directory.
   ##
-  ## It calls `System.IO.Compression.ZipFile.ExtractToDirectory` directly
-  ## rather than the `Expand-Archive` cmdlet. Both use the same .NET zip
-  ## reader, so path-separator handling and the refusal of entries that
-  ## escape the destination are unchanged. What differs is the per-entry
-  ## cost. Windows PowerShell 5.1's `Expand-Archive` is a script cmdlet that
-  ## writes a progress record for every entry. When the caller captures
-  ## output, as `execCmdEx` does, those records are serialized onto the
-  ## pipe. On a 4-vCPU CI VM that cost about 90 ms per entry. The
-  ## 12,000-entry MinGW toolchain zip took about 40 minutes there, and the
-  ## Go distribution zip took as long again. `ExtractToDirectory` took
-  ## 199 seconds on the same archive, on the same machine, under the same
-  ## load.
+  ## It reads the archive entry by entry with the .NET zip reader rather than
+  ## through the ``Expand-Archive`` cmdlet. Windows PowerShell 5.1's
+  ## ``Expand-Archive`` is a script cmdlet that writes a progress record for
+  ## every entry. When the caller captures output, as ``execCmdEx`` does,
+  ## those records are serialized onto the pipe. On a 4-vCPU CI VM that cost
+  ## about 90 ms per entry. The 12,000-entry MinGW toolchain zip took about
+  ## 40 minutes there, and the Go distribution zip took as long again;
+  ## ``ZipFile.ExtractToDirectory`` took 199 seconds on the same archive, on
+  ## the same machine, under the same load. The ``repro_core/powershell_zip``
+  ## loop is no slower than that call: on the 5,249-file Nim 2.2.10 zip it
+  ## took 3.6 s at the CI staging depth, against ``ExtractToDirectory``'s
+  ## 6.3 s at a short destination, where that call could still succeed
+  ## (Windows 11 x64, 2026-11-11). The reader
+  ## also does not care about the file extension, so the copy of the archive
+  ## to a temporary ``.zip`` that ``Expand-Archive`` required is gone too.
   ##
-  ## `ExtractToDirectory` also does not care about the file extension, so the
-  ## copy of the archive to a temporary `.zip` that `Expand-Archive` required
-  ## is gone too. That copy was a second full write of every archive.
-  ##
-  ## `$ErrorActionPreference = 'Stop'` turns a .NET exception (corrupt
-  ## archive, an entry outside the destination, a file already present) into
-  ## a terminating error, and `-Command` then exits non-zero. Progress is
-  ## silenced anyway, so no module that the host loads can reintroduce the
-  ## per-record cost. The destination is always a fresh staging directory,
-  ## so `Expand-Archive -Force`'s overwrite behavior is not needed.
-  ## ZIP names without the UTF-8 flag use CP437, not the runtime's current
-  ## code page. The explicit entry-name encoding leaves flagged UTF-8 names
-  ## unchanged: https://learn.microsoft.com/dotnet/api/system.io.compression.zipfile.extracttodirectory
-  "$ProgressPreference = 'SilentlyContinue'; " &
-    "$ErrorActionPreference = 'Stop'; " &
-    "Add-Type -AssemblyName System.IO.Compression.FileSystem; " &
-    "[System.IO.Compression.ZipFile]::ExtractToDirectory(" &
-    powershellLiteral(archivePath) & ", " & powershellLiteral(destination) &
-    ", [System.Text.Encoding]::GetEncoding(437))"
+  ## The loop, rather than ``ZipFile.ExtractToDirectory``, is what lets every
+  ## write go through the ``\\?\`` form: a host without the
+  ## ``LongPathsEnabled`` policy (the Windows ARM64 CI runners) could not
+  ## create the deepest member of the Nim 2.2.10 zip under a CI checkout. See
+  ## ``repro_core/powershell_zip`` for the measurement.
+  repro_core_powershell_zip.powershellZipExtractScript(archivePath,
+    destination, overwrite = false)
 
 proc zipExtractCommand*(extractor: tuple[exe: string; kind: string];
                         archivePath, destination: string): string =
@@ -10341,10 +10427,20 @@ proc toolBuildIdentity*(artifact: ProjectInterfaceArtifact;
   result.interfaceFingerprint = artifact.interfaceFingerprint
   let pathLookup = SidecarPathLookup()
   for useDef in applyProvisioningPins(artifact.projectInterface, pins):
-    var profile = toolProfileFor(useDef, mode, pathValue, storeRoot,
-      producerExecutableSelectors, producerAuxSelectors, pathLookup)
-    if mode == tpmFromSource:
-      resolveSourceDependencyClosure(profile, useDef, storeRoot)
+    var profile: PathOnlyToolProfile
+    # A `nativeBuildDeps:` tool runs on the build host, so under `--target`
+    # every sibling mirror it is resolved from -- its own and its recipe's
+    # dependency closure -- is the native one, in every mode. `repro
+    # build`'s from-source pass builds it natively; a library entry keeps
+    # the build's target.
+    let mirrorTarget =
+      if useDef.depKind == DepKindNative: ""
+      else: effectiveInstallMirrorTarget()
+    withInstallMirrorTarget(mirrorTarget):
+      profile = toolProfileFor(useDef, mode, pathValue, storeRoot,
+        producerExecutableSelectors, producerAuxSelectors, pathLookup)
+      if mode == tpmFromSource:
+        resolveSourceDependencyClosure(profile, useDef, storeRoot)
     result.profiles.add(profile)
     result.actionIdentities.add(actionIdentityFor(useDef, profile))
 

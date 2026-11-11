@@ -52,7 +52,7 @@
 ## No mocks: real directories, a real git repository for the member, and the
 ## real `repro` binary.
 
-import std/[os, osproc, streams, strtabs, strutils, tempfiles, unittest]
+import std/[json, os, osproc, streams, strtabs, strutils, tempfiles, unittest]
 
 import repro_test_support
 import repro_test_support/reasoned_skip
@@ -203,6 +203,45 @@ suite "workspace root discovery keys on the settings file":
       check (legacy / ".repro-workspace.toml") in legacyRun.stderr
       check "retired name of the workspace settings file" in legacyRun.stderr
       check "Rename it to `repro-workspace.toml`" in legacyRun.stderr
+
+      # The post-merge hook on that root reports the refusal it hit and
+      # points at no verb that is refused the same way: `repro workspace
+      # migrate --dry-run` resolves through the same settings discovery, so
+      # naming it as the place to re-read the report would be a remedy that
+      # re-reports only the refusal.
+      let savedCache = getEnv("XDG_CACHE_HOME")
+      putEnv("XDG_CACHE_HOME", scratch / "cache")
+      let merged = runRepro(["hooks", "dispatch", "post-merge",
+        "--repo-root", legacyMember, "--", "0"], legacyMember)
+      if savedCache.len > 0: putEnv("XDG_CACHE_HOME", savedCache)
+      else: delEnv("XDG_CACHE_HOME")
+      checkpoint("post-merge from " & legacyMember & " -> " & $merged.code &
+        "\nstderr: " & merged.stderr)
+      check merged.code == 0
+      check "local-state reconciliation skipped" in merged.stderr
+      check "retired name of the workspace settings file" in merged.stderr
+      check "workspace migrate" notin merged.stderr
+      let migrated = runRepro(["workspace", "migrate", "--dry-run"], legacy)
+      checkpoint("migrate --dry-run -> " & $migrated.code & "\nstderr: " &
+        migrated.stderr)
+      check migrated.code != 0
+      check "retired name of the workspace settings file" in migrated.stderr
+
+      # `repro health` reports the retired file as what it is — not a file
+      # whose TOML syntax or keys need fixing.
+      let legacyHealth = runRepro(["health", "--json", "--offline"], legacy)
+      checkpoint("health --json in " & legacy & " -> " & $legacyHealth.code &
+        "\nstdout: " & legacyHealth.stdout)
+      var settingsRow = newJNull()
+      for row in parseJson(legacyHealth.stdout)["checks"]:
+        if row["name"].getStr() == "workspace-settings":
+          settingsRow = row
+      require settingsRow.kind == JObject
+      check settingsRow["status"].getStr() == "fail"
+      check "does not parse" notin settingsRow["detail"].getStr()
+      check "TOML syntax" notin settingsRow["remedy"].getStr()
+      check "fix the named key" notin settingsRow["remedy"].getStr()
+      check "repro-workspace.toml" in settingsRow["remedy"].getStr()
 
       let stateOnly = scratch / "state-only"
       let stateMember = seedWorkspace(stateOnly, "kept",

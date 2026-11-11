@@ -3433,8 +3433,8 @@ proc keyedOnContentAddressedToolRoot*(fingerprint: ContentDigest;
   ## in the tree is a caller who computed a fingerprint over what its edge
   ## does; some of them (`weakFingerprintForProfileBuildAction`, the typed-tool
   ## DSL site's `profile.profileFingerprint`) already cover the tool and some
-  ## (`weakFingerprintFromText(id)`, the inline-exec site's id + payload) do
-  ## not. A subtraction whose soundness depends on which caller you came
+  ## (`weakFingerprintFromText(id)`, the constructor's own default) do not.
+  ## A subtraction whose soundness depends on which caller you came
   ## through is a subtraction that is unsound somewhere, and the engine cannot
   ## tell the two apart by inspecting an opaque digest.
   ##
@@ -11852,6 +11852,27 @@ proc honouredDerivedPrefixes*(action: BuildAction): seq[string] =
       continue
     result.addUnique(seenPrefixes, materialized)
 
+proc transientWriteKey*(path: string): string =
+  ## The spelling `transientOwnWrites` stores and every caller looks up:
+  ## no trailing separator and, on Windows, forward slashes. The monitor
+  ## records the same temporary under more than one spelling. lld-link on
+  ## Windows WRITES `noexp.dll.tmpa6d2958` and PROBES
+  ## `noexp.dll.tmpa6d2958\`, so a lookup of the probed spelling missed. The
+  ## temporary's random name then entered the determinism-probe key and the
+  ## portable record, and no two runs agreed on either. A root (`/`) keeps
+  ## its separator.
+  ##
+  ## Only the host's separators are folded. On POSIX a backslash is an
+  ## ordinary filename character, so `main.c\` is a different file from
+  ## `main.c`: folding it would let a removed `main.c\` take the real input
+  ## `main.c` out of the key, which is a false hit, not a missed one.
+  when defined(windows):
+    result = path.replace('\\', '/')
+  else:
+    result = path
+  while result.len > 1 and result.endsWith("/"):
+    result.setLen(result.len - 1)
+
 proc transientOwnWrites*(evidence: PathSetEvidence): HashSet[string] =
   ## Paths the action itself WROTE that no longer exist once it finished:
   ## its temporaries. npm's delete-by-rename (`x.js.DELETE.<random>`) is
@@ -11864,11 +11885,26 @@ proc transientOwnWrites*(evidence: PathSetEvidence): HashSet[string] =
   ## symbolic link the action made counts. A path it only REMOVED does not
   ## (`monitorRemovals`): deleting a file is no evidence of having made it,
   ## and a file the action read and then deleted is an input it consumed.
+  ##
+  ## Both the recorded spelling and its key must be gone. On POSIX
+  ## `stat("main.c/")` fails when `main.c` is a regular file, so the
+  ## recorded spelling alone would call a write to `main.c/` a temporary,
+  ## and its key is the key of the real input `main.c`: that input would
+  ## leave the key, which is a false hit.
+  proc onDisk(path: string): bool =
+    fileExists(extendedPath(path)) or dirExists(extendedPath(path)) or
+      symlinkExists(extendedPath(path))
+  # The key is checked in the host's own spelling. On Windows it uses
+  # forward slashes, and `extendedPath` passes only a `\\` prefix through
+  # as UNC, so `//host/share/main.c` would name no file and a project on a
+  # share would lose this check.
   for path in evidence.monitorWrites:
-    if not fileExists(extendedPath(path)) and
-        not dirExists(extendedPath(path)) and
-        not symlinkExists(extendedPath(path)):
-      result.incl(path.replace('\\', '/'))
+    let key = transientWriteKey(path)
+    let nativeKey =
+      when defined(windows): key.replace('/', '\\')
+      else: key
+    if not onDisk(path) and not onDisk(nativeKey):
+      result.incl(key)
 
 proc undeclaredSurvivingWrites*(action: BuildAction;
                                 evidence: PathSetEvidence): seq[string] =
@@ -13440,10 +13476,28 @@ proc isUnsafeRuntimeLibDir(path: string): bool =
   if hashSeparator < 0 or hashSeparator + 1 >= storeEntry.len:
     return false
   let packageName = storeEntry[hashSeparator + 1 .. ^1]
-  packageName == "glibc" or packageName.startsWith("glibc-") or
-    packageName == "readline" or packageName.startsWith("readline-") or
-    packageName == "perl" or packageName.startsWith("perl-") or
-    packageName == "python3" or packageName.startsWith("python3-")
+  template isPackage(name: string): bool =
+    packageName == name or packageName.startsWith(name & "-")
+  if isPackage("glibc") or isPackage("readline") or isPackage("perl") or
+      isPackage("python3"):
+    return true
+  when defined(macosx):
+    # The host libraries nixpkgs splits out of its Apple SDK and that the
+    # tool profiles hand a Darwin cc-wrapper's consumers for linking
+    # (`nixDarwinWrapperSdkLibraries` in repro_tool_profiles). macOS itself
+    # provides each of them at run time, in /usr/lib, and a binary linked
+    # against the Nix copy records that copy's absolute install name, so a
+    # run-time search path adds nothing. It does harm: dyld searches
+    # DYLD_LIBRARY_PATH by leaf name for EVERY dependent library, whatever
+    # its install name, so `libutil.dylib` there replaces the same-named
+    # library of any program the action runs. Measured 2026-11-11 on
+    # aarch64-darwin: xcbuild's `xcrun` loaded the SDK's libutil instead of
+    # its own and died with `dyld: Symbol not found`.
+    # https://developer.apple.com/library/archive/documentation/DeveloperTools/Conceptual/DynamicLibraries/100-Articles/DynamicLibraryUsageGuidelines.html
+    if isPackage("libiconv") or isPackage("libresolv") or
+        isPackage("libsbuf") or isPackage("libutil"):
+      return true
+  false
 
 proc runtimeSafeLibDirs(paths: ResolvedAuxPaths): seq[string] =
   for path in paths.libDirs:
@@ -19451,7 +19505,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     # so a cold first run and every later one keyed it differently.
     let ancestors = graphAncestorsOf(action.id)
     for path in inputs:
-      if isLaunchMachinery(path) or path.replace('\\', '/') in transient or
+      if isLaunchMachinery(path) or transientWriteKey(path) in transient or
           isOwnOutput(action, path):
         continue
       var pathKey = path.replace('\\', '/')
@@ -19804,7 +19858,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     let transient = transientOwnWrites(evidence)
     for path in action.cacheInputPaths(evidence):
       if path in enumerated or isHostTempListing(path) or
-          path.replace('\\', '/') in transient or isOwnOutput(action, path):
+          transientWriteKey(path) in transient or isOwnOutput(action, path):
         continue
       elif path in probed:
         result.probes.add(path)

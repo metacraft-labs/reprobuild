@@ -33,7 +33,7 @@
 ##
 ## Expected values are written out below, copied from
 ## `reprobuild-packages/packages/interfaces/{ghostty,iterm2}/repro.nim` at the
-## revision `.github/sibling-repos` pins; they are not derived from the
+## revision `repro.lock` pins; they are not derived from the
 ## resolver.
 ##
 ## Vacuity guard: both applications must resolve to a `tarball` selection

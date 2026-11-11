@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""`.github/sibling-repos` pins must agree with `repro.lock` and `flake.lock`.
+"""`.github/sibling-repos` must not pin what `repro.lock` pins, and must agree
+with `flake.lock`.
 
 Under test: ``scripts/check_sibling_lock_pins.py``, the gate for reprobuild-pm
 issue
@@ -8,6 +9,13 @@ issue
 while both locks pinned b0fc1bcb; the engine refused the clone with
 ``cross-repo producer "reprobuild-test-adapters" source revision mismatch`` and
 the v0.2.13 release (run 39574741678) failed before compiling anything.
+
+A sibling `repro.lock` pins is listed as a bare `name`: `clone-siblings`
+resolves it from the committed `repro.lock`, so an explicit ref is a second
+source of truth, the one that drifted in reprobuild-pm issue
+``2026-10-31-lock-update-does-not-move-the-package-default-or-the-ci-sibling-pin``
+(`repro lock update` moved both locks and left the clone pin behind). A ref
+for a sibling only `flake.lock` pins must equal that lock's revision.
 
 No mocks. The rule-by-rule cases need lock files that are wrong in exactly one
 way, which the real ones are not, so they write minimal ``repro.lock`` /
@@ -67,33 +75,33 @@ class SiblingLockPinFixtures(unittest.TestCase):
         write_tree(self.root, siblings, self.repro, self.flake)
         return check(self.root)
 
-    def test_stale_sha_is_refused_against_each_lock_in_both_forms(self):
-        for operator in ('=', '!='):
-            with self.subTest(operator=operator):
-                errors = self.errors_for(f'  adapter{operator}{self.old} # drift\n')
-                self.assertEqual(len(errors), 2, errors)
-                self.assertIn('repro.lock', errors[0])
-                self.assertIn('flake.lock', errors[1])
-                for error in errors:
-                    self.assertIn('adapter', error)
-                    self.assertIn(self.old, error)
-                    self.assertIn(self.current, error)
-                    self.assertIn('.github/sibling-repos:1', error)
-
-    def test_matching_sha_passes_in_any_case(self):
-        for operator in ('=', '!='):
-            with self.subTest(operator=operator):
-                self.assertEqual(self.errors_for(f'adapter{operator}{self.current.upper()}\n'), [])
-
-    def test_branch_ref_of_a_repro_lock_pinned_repo_is_refused(self):
-        # The engine refuses any commit but the locked one, so a branch clone
-        # breaks CI as soon as the branch moves past the lock.
-        for entry in ('adapter=agents', 'adapter!=dev', ' adapter = agents  # why'):
+    def test_any_ref_of_a_repro_lock_pinned_repo_is_refused_naming_the_bare_form(self):
+        # A stale commit, the locked commit itself, and a branch (which the
+        # engine refuses as soon as it moves past the lock) are all a second
+        # source of truth for a revision repro.lock already records.
+        for entry, ref in ((f'  adapter={self.old} # drift', self.old),
+                           (f'adapter!={self.old}', self.old),
+                           (f'adapter={self.current.upper()}', self.current.upper()),
+                           (f'adapter!={self.current}', self.current),
+                           ('adapter=agents', 'agents'),
+                           (' adapter != dev  # why', 'dev')):
             with self.subTest(entry=entry):
                 errors = self.errors_for(entry + '\n')
                 self.assertEqual(len(errors), 1, errors)
-                self.assertIn('adapter=agents' if 'agents' in entry else 'adapter=dev', errors[0])
+                self.assertIn('.github/sibling-repos:1', errors[0])
+                self.assertIn(f'adapter={ref}', errors[0])
                 self.assertIn(f'repro.lock pins adapter at revision {self.current}', errors[0])
+                self.assertIn('list it as the bare name `adapter`', errors[0])
+
+    def test_sha_of_a_flake_only_repo_must_match_in_both_forms(self):
+        for operator in ('=', '!='):
+            with self.subTest(operator=operator):
+                self.assertEqual(self.errors_for(f'queue{operator}{self.current.upper()}\n'), [])
+                errors = self.errors_for(f'queue{operator}{self.old}\n')
+                self.assertEqual(len(errors), 1, errors)
+                self.assertIn('flake.lock', errors[0])
+                self.assertIn(self.old, errors[0])
+                self.assertIn(self.current, errors[0])
 
     def test_branch_ref_of_a_flake_only_repo_is_allowed(self):
         self.assertEqual(self.errors_for('queue=dev\n'), [])
@@ -104,17 +112,19 @@ class SiblingLockPinFixtures(unittest.TestCase):
     def test_bare_and_unlocked_entries_are_not_checked(self):
         self.assertEqual(self.errors_for(f'adapter\nunlocked={self.old}\nunlocked2=dev\n'), [])
 
-    def test_each_lock_detects_drift_alone(self):
+    def test_each_lock_is_read_alone(self):
+        # Without repro.lock the sibling is flake-only: its ref is compared.
         write_tree(self.root, f'adapter={self.old}\n', self.repro, self.flake)
         (self.root / 'repro.lock').unlink()
         errors = check(self.root)
         self.assertEqual(len(errors), 1, errors)
         self.assertIn('flake.lock', errors[0])
-        write_tree(self.root, f'adapter={self.old}\n', self.repro, self.flake)
+        # Without flake.lock repro.lock alone makes any ref redundant.
+        write_tree(self.root, f'adapter={self.current}\n', self.repro, self.flake)
         (self.root / 'flake.lock').unlink()
         errors = check(self.root)
         self.assertEqual(len(errors), 1, errors)
-        self.assertIn('repro.lock', errors[0])
+        self.assertIn('repro.lock pins adapter', errors[0])
 
     def test_unreadable_lock_is_an_error_not_a_pass(self):
         write_tree(self.root, f'adapter={self.old}\n', self.repro, '{bad json')
@@ -128,34 +138,42 @@ class SiblingLockPinsRealTree(unittest.TestCase):
         self.repro = (ROOT / 'repro.lock').read_text()
         self.flake = (ROOT / 'flake.lock').read_text()
         deps = tomllib.loads(self.repro)['lock']['deps']
-        self.locked_adapters = next(d['revision'] for d in deps if d['name'] == ADAPTERS)
+        self.locked = {d['name']: d['revision'] for d in deps
+                       if d.get('coord_kind') == 'vcs' and d.get('self') != 'true'}
+        self.locked_adapters = self.locked[ADAPTERS]
 
-    def test_committed_tree_agrees_and_the_comparison_is_not_vacuous(self):
+    def entries(self) -> dict[str, str]:
+        """Each listed sibling and its ref ('' for a bare name)."""
+        result = {}
+        for raw in self.siblings.splitlines():
+            entry = raw.split('#', 1)[0].strip()
+            if entry:
+                name, _, ref = entry.partition('=')
+                result[name.strip().removesuffix('!')] = ref.strip()
+        return result
+
+    def test_committed_tree_lists_every_repro_lock_sibling_bare(self):
         self.assertEqual(check(ROOT), [])
-        # Positive control: the entry that broke v0.2.13 is present as an
-        # explicit SHA, and both locks pin that repo, so "no errors" above
-        # came from a real comparison.
-        entry = re.search(rf'^{re.escape(ADAPTERS)}=(\S+)', self.siblings, re.M)
-        self.assertIsNotNone(entry)
-        self.assertEqual(entry.group(1), self.locked_adapters)
-        self.assertIn(f'"repo": "{ADAPTERS}"', self.flake)
+        # Positive control: repro.lock pins siblings that CI clones, so "no
+        # errors" above came from a real comparison, not an empty one.
+        listed = self.entries()
+        cloned = sorted(name for name in self.locked if name in listed)
+        self.assertGreaterEqual(len(cloned), 5, cloned)
+        for name in cloned:
+            self.assertEqual(listed[name], '', f'{name} carries a ref: {listed[name]}')
 
     def test_committed_tree_with_the_v0_2_13_defect_put_back_is_refused(self):
         self.assertNotEqual(self.locked_adapters, STALE_ADAPTERS_PIN)
-        stale, count = re.subn(rf'^{re.escape(ADAPTERS)}=\S+',
+        stale, count = re.subn(rf'^{re.escape(ADAPTERS)}[ \t]*$',
                                f'{ADAPTERS}={STALE_ADAPTERS_PIN}', self.siblings, flags=re.M)
         self.assertEqual(count, 1)
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             write_tree(root, stale, self.repro, self.flake)
             errors = check(root)
-        self.assertEqual(len(errors), 2, errors)
-        self.assertTrue(any('repro.lock' in e for e in errors))
-        self.assertTrue(any('flake.lock' in e for e in errors))
-        for error in errors:
-            self.assertIn(ADAPTERS, error)
-            self.assertIn(STALE_ADAPTERS_PIN, error)
-            self.assertIn(self.locked_adapters, error)
+        self.assertEqual(len(errors), 1, errors)
+        self.assertIn(f'{ADAPTERS}={STALE_ADAPTERS_PIN}', errors[0])
+        self.assertIn(f'repro.lock pins {ADAPTERS} at revision {self.locked_adapters}', errors[0])
 
     def test_lint_runs_the_gate_and_this_test(self):
         workflows = (ROOT / 'scripts/check_workflows.sh').read_text()

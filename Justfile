@@ -824,6 +824,16 @@ lint:
     # and the literal sat stale until a full flake check happened to look
     # (reprobuild-pm issue 2026-10-17). Reads two files, under a second.
     bash ./scripts/check_package_nix_version.sh 2>&1 | tee -a test-logs/lint.log
+    # package.nix's source defaults mirror the flake.lock of the commit its
+    # `src` names, except an input that commit's lock does not have yet: that
+    # default mirrors THIS tree's flake.lock until the next release moves `src`.
+    # `repro lock update` moves both locks and no default, so a pending one is
+    # left behind with nothing to say so but the flake check
+    # nixpkgs-package-src-sync, which nobody runs per commit (reprobuild-pm
+    # issue 2026-10-31). Reads git and three files, no evaluation; the test
+    # first, so a check that has lost its power cannot pass the tree.
+    python3 ./tests/unit/test_package_nix_pending_sources.py 2>&1 | tee -a test-logs/lint.log
+    python3 ./scripts/check_package_nix_pending_sources.py 2>&1 | tee -a test-logs/lint.log
     # Every attestation mutation row must still be able to NAME ITS SITE in
     # the tree. Same class as its neighbours -- a source scan, no compiler,
     # under a second -- and here because of what it catches, which nothing

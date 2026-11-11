@@ -57,11 +57,13 @@ when defined(reproZigTarget):
   switch("define", "reproBuiltCCompiler=")
 
 # Every existence probe below goes through these, never through a bare
-# `fileExists` / `dirExists`. Those resolve a relative path against the
-# compiler's WORKING DIRECTORY, while a relative `switch("path", ...)` is
-# resolved against the directory of this file -- so a probe and the switch it
-# guards agreed only for as long as nim happened to be started in the repo
-# root. Compiles do not have to be: the `apps` edges run in their module's own
+# `fileExists` / `dirExists`, and every path a probe admits is handed to
+# `switch("path", ...)` through `repoPath` too. A bare `fileExists` resolves a
+# relative path against the compiler's WORKING DIRECTORY, and a bare relative
+# `switch("path", ...)` against the directory of the outermost config file:
+# this one, or during a profile compile the wrapper beside the profile (see
+# the top of this file) -- so a probe and the switch it guards agreed only for as long as nim
+# happened to be started in the repo root, on this repository's own config. Compiles do not have to be: the `apps` edges run in their module's own
 # directory (`nim.c(runInSourceDir = true)` in `repro.nim`), and from there a
 # cwd-relative probe of `../io-mon/src` looks inside `apps/` and finds
 # nothing. Anchoring a relative probe here makes it test exactly the
@@ -158,7 +160,7 @@ for libName in [
   "runquota_cli_support",
   "runquota_partition",
 ]:
-  switch("path", runquotaRoot / "libs" / libName / "src")
+  switch("path", repoPath(runquotaRoot / "libs" / libName / "src"))
 
 # Project-DSL-Composition M6: ``repro.nim`` ``import``s the generated
 # ``repro_tests.nim`` (data table of declared test edges) that lives
@@ -228,7 +230,7 @@ let ctTestRunnerRoot = block:
 let ctTestRunnerAdapterSrc = ctTestRunnerRoot / "libs" /
   "ct_test_runner_adapter" / "src"
 if repoDirExists(ctTestRunnerAdapterSrc):
-  switch("path", ctTestRunnerAdapterSrc)
+  switch("path", repoPath(ctTestRunnerAdapterSrc))
 
 # Incremental-Test-Runner: ``ct_incremental_adapter`` is hosted by CodeTracer
 # as the std-only process seam for codetracer's canonical incremental engine.
@@ -274,7 +276,7 @@ let ctIncrementalSrc = block:
       break
   found
 if ctIncrementalSrc.len > 0:
-  switch("path", ctIncrementalSrc)
+  switch("path", repoPath(ctIncrementalSrc))
 else:
   # Last resort: the standalone copy that ships in the pinned
   # ``reprobuild-ct-test-runner`` source input, for a build that has neither an
@@ -319,7 +321,7 @@ else:
   let ctIncrementalFallbackSrc = ctTestRunnerRoot / "libs" /
     "ct_incremental_adapter" / "src"
   if repoDirExists(ctIncrementalFallbackSrc):
-    switch("path", ctIncrementalFallbackSrc)
+    switch("path", repoPath(ctIncrementalFallbackSrc))
 
 # The ``TestRunner`` cross-cutting contract lives in the standalone
 # ``reprobuild-test-adapters`` package (Nim package ``repro_test_adapters``)
@@ -334,7 +336,7 @@ let reproTestAdaptersSrc = block:
   else:
     ".." / "reprobuild-test-adapters" / "src"
 if repoDirExists(reproTestAdaptersSrc):
-  switch("path", reproTestAdaptersSrc)
+  switch("path", repoPath(reproTestAdaptersSrc))
 
 # The test-certificate standard's store, note-framing and two-note merge rules
 # live in the standalone ``test-certificates-tools`` package (Nim package
@@ -350,7 +352,7 @@ let testCertificatesToolsSrc = block:
   else:
     ".." / "test-certificates-tools" / "src"
 if repoFileExists(testCertificatesToolsSrc / "test_certificates.nim"):
-  switch("path", testCertificatesToolsSrc)
+  switch("path", repoPath(testCertificatesToolsSrc))
 
 for libName in [
   # Build-side test typed-tool, moved in-tree (see the ctTestRoot note
@@ -638,7 +640,7 @@ let ioMonSrc = block:
   else:
     ".." / "io-mon" / "src"
 if repoFileExists(ioMonSrc / "io_mon.nim"):
-  switch("path", ioMonSrc)
+  switch("path", repoPath(ioMonSrc))
 
 proc nixDevShellSourcePath(envName, marker: string): string =
   when defined(windows):
@@ -737,12 +739,15 @@ proc addPackagePath(envName: string; candidates: openArray[string];
   ## about whether the build proceeds: see ``reportUnresolvedPackagePath``
   ## for why nothing here refuses.
   let envPath = getEnv(envName)
+  # The switch takes the path its probe tested (`repoPath`): included from a
+  # profile's wrapper config, a bare relative switch resolves against the
+  # profile's directory (see the top of this file), not this repository.
   if envPath.len > 0 and repoFileExists(envPath / marker):
-    switch("path", envPath)
+    switch("path", repoPath(envPath))
     return
   for candidate in candidates:
     if repoFileExists(candidate / marker):
-      switch("path", candidate)
+      switch("path", repoPath(candidate))
       return
   if useDevShellFallback:
     let flakePath = nixDevShellSourcePath(envName, marker)
@@ -847,10 +852,27 @@ addPackagePath("STACKABLE_HOOKS_SRC", [
 # These libraries retain their own sibling-first policy, then the env pin
 # ($SHM_QUEUE_SRC / $SHM_GSET_SRC), then the devshell fallback.
 proc pinnedSiblingRevision(sibling: string): string =
-  ## The revision `.github/sibling-repos` pins for `sibling` (a `name=<sha>` or
-  ## `name!=<sha>` line keyed by the sibling directory's name), or "" when the
-  ## file does not pin it. Comments and bare names resolve to "".
+  ## The revision this repository pins for `sibling`, keyed by the sibling
+  ## directory's name: its `deps` entry in the committed `repro.lock`, else a
+  ## `name=<sha>` / `name!=<sha>` line of `.github/sibling-repos` (which lists
+  ## a sibling repro.lock pins by its bare name only). "" when neither pins it.
   let name = sibling.parentDir().extractFilename()   # ../nim-shm-gset/src -> nim-shm-gset
+  let lockPath = repoPath("repro.lock")
+  if fileExists(lockPath):
+    # One inline table per `deps` entry, with no nested braces.
+    # A name also heads its `packages` entry, which has no revision.
+    let lockText = readFile(lockPath)
+    let key = "{ name = \"" & name & "\","
+    let field = "revision = \""
+    var at = lockText.find(key)
+    while at >= 0:
+      let stop = lockText.find('}', at)
+      let revAt = lockText.find(field, at)
+      if stop > at and revAt > at and revAt < stop:
+        let start = revAt + field.len
+        let close = lockText.find('"', start)
+        if close > start: return lockText[start ..< close]
+      at = lockText.find(key, at + key.len)
   let pinsPath = repoPath(".github" / "sibling-repos")
   if not fileExists(pinsPath): return ""
   for raw in readFile(pinsPath).splitLines():
@@ -872,7 +894,7 @@ proc addSiblingFirstPackagePath(sibling, envName, marker: string) =
   ##
   ## A workspace checkout at `../<name>/src` is what a developer edits, so it
   ## wins -- EXCEPT when `$<envName>` names another tree and the sibling is
-  ## BEHIND the revision this repository pins for it in `.github/sibling-repos`
+  ## BEHIND the revision this repository pins for it (`pinnedSiblingRevision`)
   ## (neither at that revision, nor ahead of it, nor carrying local changes).
   ## Such a sibling is stale, not a work in progress, and letting it win
   ## discards the pin without a trace: at b761df51f a cross build whose
@@ -891,7 +913,8 @@ proc addSiblingFirstPackagePath(sibling, envName, marker: string) =
     let policy = getEnv("REPRO_SIBLING_POLICY")
     if policy != "sibling" and envPath.len > 0 and
         repoFileExists(envPath / marker) and
-        absolutePath(envPath) != absolutePath(sibling):
+        normalizedPath(repoPath(envPath)) !=
+          normalizedPath(repoPath(sibling)):
       var preferPin = policy == "pin"
       var why = "REPRO_SIBLING_POLICY=pin"
       if not preferPin:
@@ -909,15 +932,16 @@ proc addSiblingFirstPackagePath(sibling, envName, marker: string) =
             if not atOrAhead and dirty.output.strip().len == 0:
               preferPin = true
               why = "the sibling is at " & headRev[0 ..< 12] &
-                ", which is not at or ahead of the pinned " & pin[0 ..< 12] &
-                " in .github/sibling-repos, and carries no local changes"
+                ", which is not at or ahead of the revision " & pin[0 ..< 12] &
+                " this repository pins, and carries no local changes"
       if preferPin:
         echo "config.nims: using $" & envName & "=" & envPath &
           " instead of the sibling " & sibling & " (" & why &
           "); set REPRO_SIBLING_POLICY=sibling to force the sibling"
-        switch("path", envPath)
+        switch("path", repoPath(envPath))
         return
-    switch("path", sibling)
+    # Anchored as in `addPackagePath`: the probe above tested this path.
+    switch("path", repoPath(sibling))
     return
   addPackagePath(envName, [], marker, useDevShellFallback = true)
 

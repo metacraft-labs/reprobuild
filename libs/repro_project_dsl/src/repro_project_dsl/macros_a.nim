@@ -792,6 +792,50 @@ proc parseLockFileDesignation(stmt: NimNode; owner: string): string =
       "not " & $nameNode.kind & " (" & owner & ")", nameNode)
   identText(nameNode)
 
+proc platformConditionHolds(cond: NimNode): bool =
+  ## The value of a ``when`` condition guarding ``subTools`` under ``cli:``.
+  ## Only ``defined(<platform>)`` and its negation are accepted: the answer
+  ## is the platform the recipe is compiled for, the same one a
+  ## ``when defined(macosx)`` in the package's own code sees.
+  if cond.kind == nnkPrefix and identText(cond[0]) == "not":
+    return not platformConditionHolds(cond[1])
+  if cond.kind in {nnkCall, nnkCommand} and cond.len == 2 and
+      identText(cond[0]) == "defined":
+    case identText(cond[1]).normalize
+    of "macosx": return defined(macosx)
+    of "linux": return defined(linux)
+    of "windows": return defined(windows)
+    of "posix": return defined(posix)
+    else: discard
+  error("a `when` under cli: may only test defined(macosx), " &
+    "defined(linux), defined(windows) or defined(posix), or their negation",
+    cond)
+
+proc platformSubToolsStmts(stmt: NimNode): seq[NimNode] =
+  ## The ``subTools`` statements a root ``cli:`` statement contributes on
+  ## this platform: the statement itself, or the ``subTools`` statements of
+  ## the ``when`` branch that holds. A tool's sub-tools can differ by
+  ## platform -- the C compiler ``nim c`` runs is ``gcc`` on Linux and
+  ## ``clang`` on macOS -- and a sub-tool another platform needs must not be
+  ## declared here, because sub-tools precede the edge's own references on
+  ## its ``PATH`` and would shadow them. A branch may hold nothing but
+  ## ``subTools``: the rest of the ``cli:`` grammar is not platform-scoped,
+  ## and the scope walk would drop it without a word.
+  if stmt.kind == nnkWhenStmt:
+    proc branchBody(branch: NimNode): NimNode =
+      if branch.kind == nnkElifBranch: branch[1] else: branch[0]
+    for branch in stmt:
+      for inner in branchBody(branch):
+        if calleeName(inner).normalize != "subtools":
+          error("only subTools may appear inside a `when` under cli:", inner)
+    for branch in stmt:
+      if branch.kind == nnkElse or platformConditionHolds(branch[0]):
+        for inner in branchBody(branch):
+          result.add(inner)
+        return
+  elif calleeName(stmt).normalize == "subtools":
+    result.add(stmt)
+
 proc parseExecutable(packageName: string; node: NimNode): ExecutableDef =
   ## Accepts the same two shapes ``parseLibrary`` does — and says so here
   ## because ``parseLibrary``'s own docstring already claims to "mirror
@@ -865,16 +909,15 @@ proc parseExecutable(packageName: string; node: NimNode): ExecutableDef =
       # is read from the root scope only and copied onto every command.
       var subTools: seq[string] = @[]
       for rootStmt in cliBody:
-        if calleeName(rootStmt).normalize != "subtools":
-          continue
-        if rootStmt.len < 2:
-          error("subTools expects one or more tool names", rootStmt)
-        for i in 1 ..< rootStmt.len:
-          let name = stringLiteral(rootStmt[i])
-          if name.len == 0:
-            error("subTools expects string tool names", rootStmt[i])
-          if name notin subTools:
-            subTools.add(name)
+        for subToolsStmt in platformSubToolsStmts(rootStmt):
+          if subToolsStmt.len < 2:
+            error("subTools expects one or more tool names", subToolsStmt)
+          for i in 1 ..< subToolsStmt.len:
+            let name = stringLiteral(subToolsStmt[i])
+            if name.len == 0:
+              error("subTools expects string tool names", subToolsStmt[i])
+            if name notin subTools:
+              subTools.add(name)
       for command in commands.mitems:
         command.subTools = subTools
       # ``parseCliScope`` only emits non-root commands into ``commands``.
@@ -4613,6 +4656,14 @@ const NativeImportExcluded = "shell"
   ## in `nativeBuildDeps:` and call the DSL's `shell(...)` failed with
   ## "ambiguous call" without this.
 
+const
+  reproBin* {.strdefine.} = ""
+    ## Absolute path to the engine binary, handed in by the recipe compile.
+    ## Empty outside that compile (a plain `nim c` of a recipe), which is
+    ## exactly when the `dslDeps:` import emission must stay silent. Defined
+    ## here rather than beside its other user in ``macros_b`` because the
+    ## resource-accessor generator below hands it on as well.
+
 proc usesImportCode(pkg: PackageDef; consumerSourceFile = ""): string =
   # `uses:` AND `nativeBuildDeps:` import a package's typed command surface;
   # `runtimeDeps:` imports its marker alone (Provisioning-Contributions.md
@@ -5121,10 +5172,40 @@ proc usesImportCode(pkg: PackageDef; consumerSourceFile = ""): string =
         # carrying the producer's InterfaceFingerprint (from TI1's cached lift),
         # then the driver-free accessor source. The VM reads the fingerprint to
         # decide reuse-in-place vs regenerate WITHOUT a second lift.
+        #
+        # The generator crosses a process boundary, and the producer extraction
+        # it runs must compile against the same reprobuild sources, and name
+        # the same engine, as the compile expanding this macro. In the
+        # extraction both answers come from the running image
+        # (``resolveReprobuildSourceRoot``, ``publicCliImagePath``), and the
+        # generator's image is a scratch binary: the arms that look beside the
+        # image or at the checkout it was built in find nothing, and it would
+        # name ITSELF as the engine. So hand it, as a launcher would:
+        #   * the engine (``$REPRO_PUBLIC_CLI_PATH``), when this compile was
+        #     given one and the variable does not already carry it;
+        #   * the sources this macro was compiled from
+        #     (``$REPROBUILD_SOURCE_ROOT``), which are by construction the
+        #     libraries the consuming compile used -- but only when no
+        #     operator override names a tree, so a stated choice still wins.
+        var engineHandoff = ""
+        if reproBin.len > 0:
+          engineHandoff.add(
+            "if getEnv(\"REPRO_PUBLIC_CLI_PATH\").len == 0:\n" &
+            "  putEnv(\"REPRO_PUBLIC_CLI_PATH\", " & escape(reproBin) & ")\n")
+        let dslSourceRoot = currentSourcePath().parentDir.parentDir.parentDir.
+          parentDir.parentDir
+        if dirExists(dslSourceRoot / "libs" / "repro_project_dsl" / "src"):
+          engineHandoff.add(
+            "if getEnv(\"REPROBUILD_LIBS_DIR\").len == 0 and\n" &
+            "    getEnv(\"REPROBUILD_REPO_ROOT\").len == 0 and\n" &
+            "    getEnv(\"REPROBUILD_SOURCE_ROOT\").len == 0:\n" &
+            "  putEnv(\"REPROBUILD_SOURCE_ROOT\", " & escape(dslSourceRoot) &
+            ")\n")
         let genSrc =
           "import std/os\n" &
           "import repro_cli_support\n" &
           "putEnv(\"REPRO_NIM_COMPILER\", " & escape(compilerExe) & ")\n" &
+          engineHandoff &
           "let c = resolveProducerTypedContract(" & escape(selector) & ", " &
           escape(workspaceRoot) & ")\n" &
           "stdout.write(\"IFP:\" & c.interfaceFingerprint & \"\\n\")\n" &

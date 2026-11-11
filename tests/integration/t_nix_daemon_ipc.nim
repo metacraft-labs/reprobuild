@@ -200,7 +200,7 @@ printf '%s\n' /tmp/reprobuild-nix-daemon-fake-store
       check resp["paths"][0].getStr() ==
         "/tmp/reprobuild-nix-daemon-fake-store"
 
-  test "Scenario 1.1, 1.2, 1.3, 1.4, 1.5: Cold Start, IPC Exchange, Warm Cache, and Dependencies":
+  test "Scenario 1.1, 1.2, 1.4, 1.5: Cold Start, IPC Exchange, and Dependencies":
     let repoRoot = findRepoRoot()
     let fixtureRoot = prepareFixtureRoot(repoRoot)
     defer: removeDir(fixtureRoot)
@@ -306,27 +306,14 @@ printf '%s\n' /tmp/reprobuild-nix-daemon-fake-store
     check fileExists(expressionResp["paths"][0].getStr() / FixtureExecutable)
     check fixtureDependencyHash(expressionResp, expressionFile).len > 0
     
-    # Scenario 1.3: Warm In-Memory Cache Performance
-    # Measure duration of the second identical request
-    sock = newSocket(domain = AF_UNIX, sockType = SOCK_STREAM, protocol = IPPROTO_IP)
-    sock.connectUnix(socketPath)
-    
-    let startTime = epochTime()
-    sock.send($req & "\n")
-    respLine = ""
-    sock.readLine(respLine)
-    sock.close()
-    let durationMs = (epochTime() - startTime) * 1000.0
-    
-    check respLine.len > 0
-    let resp2 = parseJson(respLine)
-    check resp2["status"].getStr() == "success"
-    checkpoint("Cache hit resolution completed in: " & $durationMs & " ms")
-    check durationMs < 50.0 # Warm cache hit should easily resolve within <50ms
+    # Scenario 1.3 (the warm cache) is its own case below. This fixture's
+    # selector is a local flake, which the helper must never answer from its
+    # cache, so a repeated request here re-evaluates by design.
 
-    # Cache invalidation: the daemon cache key must include the observed input
-    # hashes, otherwise this second response would reuse the first dependency
-    # hash for the same selector/root after flake.nix changes.
+    # Dependency reporting: after flake.nix changes, the response reports the
+    # file's new hash. This selector is a local flake, which the helper never
+    # caches, so this checks what the helper reports, not its cache key; the
+    # key's invalidation is checked with a cacheable selector in scenario 1.3.
     let mutableFixture = prepareFixtureRoot(repoRoot)
     defer: removeDir(mutableFixture)
     let mutableReq = %*{
@@ -358,6 +345,112 @@ printf '%s\n' /tmp/reprobuild-nix-daemon-fake-store
     let mutatedHash = fixtureDependencyHash(mutatedResp,
       mutableFixture / "flake.nix")
     check mutatedHash != originalMutableHash
+
+  when defined(posix):
+    test "Scenario 1.3: a warm request skips evaluation; a local flake never does":
+      # A ``nix`` on PATH that counts its invocations stands in for the host
+      # Nix, so the case observes the helper's cache decision directly: a
+      # warm answer is one that ran no evaluation. Timing a real ``nix build``
+      # could not tell a cache hit from a fast evaluation, and a local-flake
+      # selector is not cacheable at all.
+      let repoRoot = findRepoRoot()
+      let daemonPath = findNixDaemon(repoRoot)
+      let fixtureRoot = createTempDir("repro-nix-daemon-warm-", "")
+      defer: removeDir(fixtureRoot)
+      writeFile(fixtureRoot / "flake.nix", "{ outputs = _: {}; }\n")
+      let fakeStorePath = fixtureRoot / "fake-store-output"
+      createDir(fakeStorePath)
+      let invocationLog = fixtureRoot / "nix-invocations"
+      let fakeBin = fixtureRoot / "bin"
+      createDir(fakeBin)
+      let fakeNix = fakeBin / "nix"
+      writeFile(fakeNix, "#!/bin/sh\n" &
+        "echo invoked >> " & quoteShell(invocationLog) & "\n" &
+        "printf '%s\\n' " & quoteShell(fakeStorePath) & "\n")
+      setFilePermissions(fakeNix, {fpUserRead, fpUserWrite, fpUserExec})
+
+      proc evaluations(): int =
+        if fileExists(invocationLog):
+          result = readFile(invocationLog).count("invoked")
+
+      let socketPath = fixtureRoot / "nix-daemon.sock"
+      var childEnv = newStringTable(modeCaseSensitive)
+      for key, value in envPairs():
+        childEnv[key] = value
+      childEnv["PATH"] = fakeBin & PathSep & childEnv.getOrDefault("PATH")
+      let daemonProcess = startProcess(daemonPath,
+        args = ["--idle-exit-ms=30000", "--socket-path=" & socketPath],
+        env = childEnv, options = {})
+      defer:
+        stopHelperAndWait(daemonProcess)
+        removeFile(socketPath)
+
+      var connected = false
+      for i in 0 .. 40:
+        sleep(50)
+        try:
+          let probe = newSocket(domain = AF_UNIX, sockType = SOCK_STREAM,
+            protocol = IPPROTO_IP)
+          try:
+            probe.connectUnix(socketPath)
+            connected = true
+          finally:
+            probe.close()
+          break
+        except CatchableError:
+          discard
+      require connected
+
+      proc resolve(selector: string): (JsonNode, float) =
+        let req = %*{
+          "action": "resolve",
+          "selector": selector,
+          "workspaceRoot": fixtureRoot
+        }
+        let sock = newSocket(domain = AF_UNIX, sockType = SOCK_STREAM,
+          protocol = IPPROTO_IP)
+        var respLine = ""
+        var durationMs = 0.0
+        try:
+          sock.connectUnix(socketPath)
+          let startTime = epochTime()
+          sock.send($req & "\n")
+          sock.readLine(respLine)
+          durationMs = (epochTime() - startTime) * 1000.0
+        finally:
+          sock.close()
+        (parseJson(respLine), durationMs)
+
+      # A remote (non-local) selector: the first request evaluates, and the
+      # identical second one is answered from the helper's cache.
+      let (cold, _) = resolve("nixpkgs#hello")
+      check cold["status"].getStr() == "success"
+      check cold["paths"][0].getStr() == fakeStorePath
+      check evaluations() == 1
+      let (warm, warmMs) = resolve("nixpkgs#hello")
+      checkpoint("warm request answered in " & $warmMs & " ms")
+      check warm["status"].getStr() == "success"
+      check warm["paths"] == cold["paths"]
+      check evaluations() == 1
+      # A cache hit is a dictionary lookup on the accepting thread; this bound
+      # leaves a wide margin for a loaded host.
+      check warmMs < 50.0
+
+      # The key binds the recorded dependency files: once flake.nix changes,
+      # the same request evaluates again and is cached under the new key.
+      writeFile(fixtureRoot / "flake.nix",
+        readFile(fixtureRoot / "flake.nix") & "# dependency changed\n")
+      let (changed, _) = resolve("nixpkgs#hello")
+      check changed["status"].getStr() == "success"
+      check evaluations() == 2
+      discard resolve("nixpkgs#hello")
+      check evaluations() == 2
+
+      # A local flake is mutable source: every request evaluates again.
+      for expected in [3, 4]:
+        let (local, _) = resolve(".#hello-sh")
+        check local["status"].getStr() == "success"
+        check evaluations() == expected
 
   test "Scenario 1.6: Self-Reaping Timeout":
     let repoRoot = findRepoRoot()
