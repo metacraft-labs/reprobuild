@@ -41,7 +41,8 @@ import repro_core/relocation
 import repro_core/ambient_execution
 import repro_core/cli_images
 import repro_core/source_root
-from repro_core/workspace_root import firstMembershipManifestPath
+from repro_core/workspace_root import firstMembershipManifestPath,
+  SettingsFileName
 # The self-spawn image guard. `{.all.}` is how `runThinApp` (below) reaches
 # the module-private ``markRunningImageAsReproCli``: no ordinary import can
 # name the setter, so no embedded caller can grant itself the mark. See
@@ -24645,7 +24646,7 @@ proc runManifestRefreshHookCommand*(hookName: string;
 # the implementation needs ``repoRemovalBlockers``, which lives beside the
 # membership verbs far below.
 proc reconcileLocalStateForHook(workspaceRoot: string):
-  tuple[loud, quiet: seq[string]]
+  tuple[loud, quiet: seq[string]; skipped: bool]
 
 proc runRecordStorePrePushGuard(repoRoot, refsFile, remoteLocation: string): int
 
@@ -44676,127 +44677,6 @@ proc gitRunPlain(identity: GitToolIdentity;
       env = scrubbedGitRepositoryEnv())
     (code: res.exitCode, output: res.output)
 
-proc gitRunSeparated(gitBin: string; args: openArray[string];
-                     env: StringTableRef; exactStdout = false):
-    tuple[code: int; output: string; diagnostic: string] =
-  ## Invoke ``gitBin`` with ``args`` under ``env``, keeping git's stderr OUT
-  ## of ``output``. This is the body of ``gitRunPlainQuery`` (whose comment
-  ## below gives the reasons) parameterized on the binary and the
-  ## environment, so a caller that has a bare git path and its own
-  ## environment — the certificate-note reader, which must keep the
-  ## receive-pack object-store bindings — reads git's answer the same way.
-  ##
-  ## ``exactStdout`` makes ``output`` git's stdout BYTE FOR BYTE. Without it
-  ## the POSIX path re-assembles stdout line by line (``execCmdEx``), which
-  ## appends a newline the bytes did not end with and turns ``\r\n`` into
-  ## ``\n``; harmless for a parsed answer, wrong for a payload that must be
-  ## exactly what git stores (a certificate note blob, Transport §3.1). The
-  ## Windows path copies the pipe's bytes verbatim either way.
-  when defined(windows):
-    # Structured argv and a PeekNamedPipe drain, for the same reason
-    # ``gitRunPlain`` uses one: Nim 2.2's ``readAll`` stops at the first short
-    # pipe read on Windows, so a blocking read of either stream would also
-    # truncate. Two handles now, drained in the same pass.
-    let process = startProcess(gitBin, args = @args,
-      env = env, options = {poUsePath})
-    defer: process.close()
-    const PollSleepMs = 2
-    let handles = [Handle(process.outputHandle), Handle(process.errorHandle)]
-    var sinks: array[2, string]
-    var buf {.noinit.}: array[16384, char]
-    while true:
-      var moved = false
-      for i in 0 .. 1:
-        var bytesAvail: int32 = 0
-        let peeked = peekNamedPipe(handles[i],
-          lpTotalBytesAvail = addr bytesAvail)
-        if peeked and bytesAvail > 0:
-          var bytesRead: int32 = 0
-          let toRead = min(int(bytesAvail), buf.len).int32
-          let ok = winlean.readFile(handles[i], addr buf[0], toRead,
-            addr bytesRead, nil)
-          if ok != 0 and bytesRead > 0:
-            let previousLen = sinks[i].len
-            sinks[i].setLen(previousLen + bytesRead)
-            copyMem(addr sinks[i][previousLen], addr buf[0], bytesRead)
-            moved = true
-      # Only consult the exit code once BOTH pipes are momentarily empty, so
-      # everything the child buffered before exiting is still collected.
-      if moved: continue
-      result.code = process.peekExitCode()
-      if result.code != -1: break
-      sleep(PollSleepMs)
-    result.output = sinks[0]
-    result.diagnostic = (sinks[1] & sinks[0]).strip()
-  else:
-    # POSIX ``execCmdEx`` implies ``poEvalCommand``, so the command runs
-    # through ``/bin/sh`` and the SHELL can put stderr in a file. One pipe, no
-    # interleaving, no deadlock, and the same subprocess shape as
-    # ``gitRunPlain``.
-    var cmd = quoteShell(gitBin)
-    for arg in args:
-      cmd.add(" ")
-      cmd.add(quoteShell(arg))
-    var errPath = ""
-    var outPath = ""
-    try:
-      try:
-        let created = createTempFile("repro-gitq-", ".stderr")
-        created.cfile.close()
-        errPath = created.path
-      except CatchableError, Defect:
-        errPath = ""
-      if exactStdout:
-        try:
-          let created = createTempFile("repro-gitq-", ".stdout")
-          created.cfile.close()
-          outPath = created.path
-        except CatchableError, Defect:
-          outPath = ""
-        if outPath.len == 0 or errPath.len == 0:
-          # No exact capture is possible, and a line-rebuilt answer must not
-          # pass for one: report a failed run instead.
-          result.code = -1
-          result.diagnostic = "cannot create a temporary file to capture " &
-            "git's output in"
-          return
-        cmd.add(" >" & quoteShell(outPath))
-      if errPath.len > 0:
-        cmd.add(" 2>" & quoteShell(errPath))
-      # Without the redirect the child's stderr would be an unread pipe that
-      # can fill and hang it, so fall back to the MERGED stream instead —
-      # degraded (the caller sees diagnostics in ``output``, exactly
-      # ``gitRunPlain``'s behaviour) but never hung.
-      let options =
-        if errPath.len > 0: {poUsePath}
-        else: {poUsePath, poStdErrToStdOut}
-      let res = execCmdEx(cmd, options = options, env = env)
-      result.code = res.exitCode
-      result.output = res.output
-      if outPath.len > 0:
-        # The shell wrote stdout to the file; read its bytes verbatim.
-        try:
-          result.output = readFile(outPath)
-        except CatchableError as err:
-          result.code = -1
-          result.output = ""
-          result.diagnostic = "cannot read git's captured stdout: " & err.msg
-          return
-      var errText = ""
-      if errPath.len > 0:
-        try:
-          errText = readFile(errPath)
-        except CatchableError:
-          discard
-      result.diagnostic = (errText & result.output).strip()
-    finally:
-      for path in [errPath, outPath]:
-        if path.len > 0:
-          try:
-            removeFile(path)
-          except CatchableError:
-            discard
-
 proc gitRunPlainQuery(identity: GitToolIdentity;
                       args: openArray[string]):
     tuple[code: int; output: string; diagnostic: string] =
@@ -62131,8 +62011,13 @@ proc reconcileLocalStateAfterHook(hookName, workspaceRoot,
     stderr.writeLine("  " & line)
     appendManifestRefreshLog(timestamp & " " & hookName &
       " local-state " & line)
-  stderr.writeLine("  `repro workspace migrate --dry-run` re-reports this " &
-    "at any time")
+  # Only a reconciliation that RAN can be re-reported: when the workspace
+  # could not be resolved, `repro workspace migrate` resolves it the same
+  # way and is refused with the same diagnostic, whose own remedy is the
+  # one to follow.
+  if not lines.skipped:
+    stderr.writeLine("  `repro workspace migrate --dry-run` re-reports this " &
+      "at any time")
 
 proc runManifestRefreshHookCommand*(hookName: string;
                                     args: openArray[string]): int =
@@ -70053,9 +69938,10 @@ proc executeCheckPrePush(parsed: CheckArgs;
     result.failures.add(CheckFailure(
       repo: currentRepoPath,
       property: "pre-push-protocol",
-      remediation: "reinstall the managed hooks with 'repro hooks ensure --vcs " &
-        protocolRepoRoot & "' and retry the push",
-      evidence: outgoing.diagnostic))
+      remediation: prePushProtocolRemediation(outgoing.cause,
+        protocolRepoRoot, outgoing.failedObservation),
+      evidence: prePushProtocolEvidence(outgoing.diagnostic, outgoing.cause,
+        outgoing.observationEvidence)))
     result.exitCode = 2
     return
 
@@ -72200,8 +72086,19 @@ proc runCheckCommand*(args: openArray[string]; hookRemoteName = "";
         else: parsed.workspaceRoot,
         parsed.pushedRefsPath)
       if not refs.ok:
-        stderr.writeLine("repro check: malformed pre-push protocol: " &
-          refs.diagnostic)
+        if refs.cause == ppcRepositoryObservation:
+          # Not a malformed stream: the gate's own read of the repository
+          # failed. Say so, with git's words and the step that can help.
+          stderr.writeLine("repro check: pre-push protocol: " &
+            prePushProtocolEvidence(refs.diagnostic, refs.cause,
+              refs.observationEvidence) & " — " &
+            prePushProtocolRemediation(refs.cause,
+              if parsed.currentRepo.len > 0: parsed.currentRepo
+              else: parsed.workspaceRoot,
+              refs.failedObservation))
+        else:
+          stderr.writeLine("repro check: malformed pre-push protocol: " &
+            refs.diagnostic)
         return 2
     if isRecordStoreCheckout(if parsed.currentRepo.len > 0:
         parsed.currentRepo else: getCurrentDir()):
@@ -77168,16 +77065,33 @@ proc gatherHealthChecksOverSettings(parsed: HealthArgs):
       # is what records it. ``diagnosis`` keeps the detail column free of the
       # remedy the error's own message carries, which the ``remedy:`` row
       # states instead.
+      #
+      # Unless the project set IS recorded, in the state file under its
+      # retired name: then `workspace enable` refuses too, naming `health
+      # --fix` (Workspace-Settings-Files.md §8), and naming it here would
+      # send the operator round in a circle. `--fix` migrates the file before
+      # the diagnosis, so the row is fixable through the state file's.
       ctx.resolvedOk = false
-      ctx.manifestRemedy = self & " workspace enable <project>   (records " &
-        "the active project set; `" & self & " workspace projects list` " &
-        "names them)"
+      let retiredState = inspectWorkspaceStateFiles(parsed.workspaceRoot).
+        anyIt(it.kind == sffOldNameOnly)
+      ctx.manifestRemedy =
+        if retiredState: self & " health --fix"
+        else: self & " workspace enable <project>   (records " &
+          "the active project set; `" & self & " workspace projects list` " &
+          "names them)"
       checks.add(HealthCheck(
         name: "manifest",
         status: hsFail,
-        detail: "manifest unresolved: " & err.diagnosis,
+        detail:
+          (if retiredState:
+             "manifest unresolved: the workspace state file is under its " &
+               "retired name " &
+               retiredWorkspaceStatePath(parsed.workspaceRoot) & ", which " &
+               "only `repro health --fix` reads, so no project could be " &
+               "read from it"
+           else: "manifest unresolved: " & err.diagnosis),
         remedy: ctx.manifestRemedy,
-        fixKind: hfNone))
+        fixKind: (if retiredState: hfMigrateStateFile else: hfNone)))
     except WorkspaceManifestParseError as err:
       ctx.resolvedOk = false
       # TC-9d: a manifest refused for the retired `[certificates]` table has
@@ -78620,6 +78534,12 @@ proc gatherHealthChecks(parsed: HealthArgs):
             row.detail.add(sweptNone)
       if reported:
         continue
+    if failure.kind == mwkState and failure.retired:
+      # The manifest row already names the retired file and `health --fix`,
+      # and the `workspace-state-file` row fails with the same remedy; a
+      # third row telling the operator to fix a file's syntax is false
+      # about a file that was never parsed.
+      continue
     if failure.kind == mwkState:
       # The ladder behind the manifest row read the set-aside state as
       # recording nothing and said so ("neither was present"), which is false
@@ -78631,22 +78551,33 @@ proc gatherHealthChecks(parsed: HealthArgs):
             "`workspace-state` row names the file and the key)"
     let what =
       case failure.kind
-      of mwkSettings: "settings file does not parse, so its `[[manifest]]` " &
-        "layers were NOT applied to the rows above: "
+      of mwkSettings:
+        (if failure.retired: "settings file is under its retired name, "
+         else: "settings file does not parse, ") &
+          "so its `[[manifest]]` layers were NOT applied to the rows above: "
       of mwkState: "state file does not parse, so the rows above read the " &
         "workspace as recording no state: "
       of mwkManifest: "manifest unresolved, so the rows above that sweep " &
         "the workspace's repos swept none: "
     let fix =
-      if failure.keyPath.len > 0: "fix the named key in " & failure.path
-      else: "fix the TOML syntax at the line and column named in " &
-        failure.path
+      if failure.retired:
+        "migrate " & failure.path & " to " & SettingsFileName & " as the " &
+          "detail says — or, when the workspace repository's remote " &
+          "already carries " & SettingsFileName & ", bring the workspace " &
+          "repository up to date with it; every other `repro` verb " &
+          "refuses this workspace until then"
+      elif failure.keyPath.len > 0:
+        "fix the named key in " & failure.path & "; every other `repro` " &
+          "verb refuses this workspace until it parses"
+      else:
+        "fix the TOML syntax at the line and column named in " &
+          failure.path & "; every other `repro` verb refuses this " &
+          "workspace until it parses"
     result.checks.add(HealthCheck(
       name: $failure.kind,
       status: hsFail,
       detail: what & failure.message,
-      remedy: fix & "; every other `repro` verb refuses this workspace " &
-        "until it parses",
+      remedy: fix,
       fixKind: hfNone))
 
 proc healthHasFailure(checks: seq[HealthCheck]): bool =
@@ -94624,7 +94555,7 @@ proc runWorkspaceMigrateCommand*(args: openArray[string]): int =
   report.exitCode
 
 proc reconcileLocalStateForHook(workspaceRoot: string):
-    tuple[loud, quiet: seq[string]] =
+    tuple[loud, quiet: seq[string]; skipped: bool] =
   ## The `post-merge` arm. Best-effort by construction: every failure path
   ## becomes a log line and NOTHING propagates, because a checkout that could
   ## not be reconciled is a thing to fix later, never a reason for somebody's
@@ -94634,6 +94565,8 @@ proc reconcileLocalStateForHook(workspaceRoot: string):
   ## happened, and failures. ``quiet`` is recorded in the cache log only.
   ## Both are empty when there is nothing at all to record, which is what
   ## lets the hook stay silent without a second "did anything happen" test.
+  ## ``skipped`` says the workspace could not be resolved, so nothing was
+  ## reconciled and ``loud`` carries only the reason.
   ##
   ## ``attachDetachedHead = false``: the remote realignment stays (that is the
   ## whole point of doing this on `git pull`), the ref-moving step does not.
@@ -94661,6 +94594,7 @@ proc reconcileLocalStateForHook(workspaceRoot: string):
         "repo-set, project or variant (remedy: `repro ws sets list`)")
   except CatchableError as err:
     result.loud.add("local-state reconciliation skipped: " & err.msg)
+    result.skipped = true
 
 proc runWorkspaceDisableCommand*(args: openArray[string]): int =
   ## ``repro workspace disable <project>... [--keep-checkouts] [--force]`` —

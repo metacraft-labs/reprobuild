@@ -413,6 +413,20 @@ const
   CapabilityFutureSkewMilliseconds* = CapabilityFutureSkewSeconds * 1000'i64
 
 type
+  PrePushProtocolCause* = enum
+    ## WHY a pre-push protocol check failed, so the refusal can name the
+    ## remedy for that cause. The two have nothing in common but the stage
+    ## that detects them: reinstalling the hooks repairs a bad refs stream
+    ## and does nothing for a repository Git cannot read, and an operator
+    ## told to reinstall them for the second runs a command that succeeds,
+    ## changes nothing, and sees the same refusal again.
+    ppcNone = "none"
+    ppcRefsStream = "refs-stream"
+      ## The refs stream the hook handed over is missing or malformed.
+    ppcRepositoryObservation = "repository-observation"
+      ## The gate's own read of the repository (its object format, its HEAD)
+      ## failed: Git exited non-zero or did not answer with a valid value.
+
   PrePushRefUpdate* = object
     localRef*: string
     localOid*: string
@@ -422,6 +436,13 @@ type
   PrePushRefStream* = object
     ok*: bool
     diagnostic*: string
+    cause*: PrePushProtocolCause
+    failedObservation*: string
+      ## For ``ppcRepositoryObservation``: the git command whose answer was
+      ## unusable, ready to paste (``git -C <repo> …``).
+    observationEvidence*: string
+      ## For ``ppcRepositoryObservation``: that command's exit status and
+      ## what git said.
     objectFormat*: string
     oidLength*: int
     updates*: seq[PrePushRefUpdate]
@@ -463,6 +484,11 @@ type
     protocolOk*: bool
     outgoingCurrent*: bool
     diagnostic*: string
+    cause*: PrePushProtocolCause
+      ## Set whenever ``protocolOk`` is false; see ``PrePushProtocolCause``.
+    failedObservation*: string
+    observationEvidence*: string
+      ## As in ``PrePushRefStream``.
     headOid*: string
     branchRef*: string
     remoteName*: string
@@ -537,23 +563,50 @@ type
     diagnostic*: string
 
 proc runGit(gitBin, repoRoot: string; args: openArray[string]):
-    tuple[code: int; output: string] =
-  var cmd = quoteShell(gitBin)
+    tuple[code: int; output: string; diagnostic: string] =
+  ## Every probe in this module either tests an exit status or PARSES git's
+  ## answer (an object id, an object type, an object format, a path, a URL
+  ## list, a commit list). ``output`` is therefore stdout ALONE: a warning git
+  ## writes to stderr while still answering correctly — ``warning: unable to
+  ## find all commit-graph files`` from a stale split commit-graph chain is
+  ## the measured one — must not become part of the answer. ``diagnostic``
+  ## keeps git's stderr (and stdout) so a FAILED observation can say what git
+  ## said (see ``gitRunSeparated``).
+  var argv: seq[string]
   if repoRoot.len > 0:
-    cmd.add(" -C " & quoteShell(repoRoot))
+    argv.add("-C")
+    argv.add(repoRoot)
   for arg in args:
-    cmd.add(" " & quoteShell(arg))
+    argv.add(arg)
   # Git exports repository-local bindings to hooks. A nested publication from
   # a linked source worktree must let `-C <backend>` select the backend instead
   # of silently inheriting the source's absolute GIT_DIR.
-  let res = execCmdEx(cmd, options = {poStdErrToStdOut, poUsePath},
-    env = scrubbedGitRepositoryEnv())
-  (res.exitCode, res.output)
+  gitRunSeparated(gitBin, argv, scrubbedGitRepositoryEnv())
 
 proc gitValue(gitBin, repoRoot: string; args: openArray[string]): string =
+  ## Git's trimmed stdout for a successful query, or "" when it failed.
   let res = runGit(gitBin, repoRoot, args)
   if res.code == 0:
     result = res.output.strip()
+
+proc gitObservation(gitBin, repoRoot: string; args: openArray[string]):
+    tuple[value: string; command: string; evidence: string] =
+  ## ``gitValue`` plus what git said when the observation is unusable, for
+  ## the refusal's evidence. ``evidence`` names the command and its exit
+  ## status, then git's own text, so an operator can tell a repository that
+  ## Git cannot read from a hook that sent bad input.
+  let res = runGit(gitBin, repoRoot, args)
+  if res.code == 0:
+    result.value = res.output.strip()
+  var shown = "git"
+  if repoRoot.len > 0:
+    shown.add(" -C " & quoteShell(repoRoot))
+  for arg in args:
+    shown.add(" " & quoteShell(arg))
+  result.command = shown
+  result.evidence = "'" & shown & "' exited " & $res.code
+  if res.diagnostic.len > 0:
+    result.evidence.add(": " & res.diagnostic)
 
 proc canonicalPath(path: string): string =
   if path.len == 0: return ""
@@ -696,12 +749,15 @@ when defined(windows):
     discard winCloseHandle(handle)
     true
 
-proc storageObjectFormat*(gitBin, repoRoot: string): string =
-  let value = gitValue(gitBin, repoRoot,
-    ["rev-parse", "--show-object-format=storage"])
+const StorageObjectFormatQuery = ["rev-parse", "--show-object-format=storage"]
+
+proc knownObjectFormat(value: string): string =
   case value
   of "sha1", "sha256": value
   else: ""
+
+proc storageObjectFormat*(gitBin, repoRoot: string): string =
+  knownObjectFormat(gitValue(gitBin, repoRoot, StorageObjectFormatQuery))
 
 proc oidLengthFor(format: string): int =
   case format
@@ -744,11 +800,17 @@ proc validLocalSource(gitBin, repoRoot, value, oid: string): bool =
 
 proc parsePrePushRefStream*(gitBin, repoRoot, refsPath: string):
     PrePushRefStream =
-  result.objectFormat = storageObjectFormat(gitBin, repoRoot)
+  let format = gitObservation(gitBin, repoRoot, StorageObjectFormatQuery)
+  result.objectFormat = knownObjectFormat(format.value)
   result.oidLength = oidLengthFor(result.objectFormat)
   if result.oidLength == 0:
     result.diagnostic = "unsupported or unreadable Git object format"
+    result.cause = ppcRepositoryObservation
+    result.failedObservation = format.command
+    result.observationEvidence = format.evidence
     return
+  # From here on every refusal is about the stream the hook handed over.
+  result.cause = ppcRefsStream
   if refsPath.len == 0 or not fileExists(refsPath):
     result.diagnostic = "pre-push refs stream is missing"
     return
@@ -759,6 +821,7 @@ proc parsePrePushRefStream*(gitBin, repoRoot, refsPath: string):
     # grant outgoing-current status, but an already-published repository may
     # legitimately have no candidate source update to classify.
     result.ok = true
+    result.cause = ppcNone
     return
   if '\r' in content or '\0' in content or '\t' in content:
     result.diagnostic = "pre-push refs stream contains forbidden control bytes"
@@ -798,6 +861,7 @@ proc parsePrePushRefStream*(gitBin, repoRoot, refsPath: string):
       localRef: fields[0], localOid: fields[1].toLowerAscii(),
       remoteRef: fields[2], remoteOid: fields[3].toLowerAscii()))
   result.ok = true
+  result.cause = ppcNone
 
 proc normalizedRemoteLocation*(value: string): string =
   ## Normalize without retaining or returning URL credentials.  Git may hand
@@ -871,6 +935,29 @@ proc remoteLocationMatches*(gitBin, repoRoot, remoteName,
   for configured in configuredPushLocations(gitBin, repoRoot, remoteName):
     if configured == candidate: return true
 
+proc prePushProtocolRemediation*(cause: PrePushProtocolCause;
+    repoRoot, failedObservation: string): string =
+  ## The next step a ``pre-push-protocol`` refusal names, chosen by CAUSE.
+  ## Each must be a command that can change the outcome when run from where
+  ## the message is printed: reinstalling the hooks repairs a bad refs
+  ## stream, and only repairing the repository helps when Git itself cannot
+  ## answer the gate's question about it.
+  case cause
+  of ppcRepositoryObservation:
+    "Git could not answer '" & failedObservation & "' for this repository; " &
+      "run it to see Git's error, repair the repository, and retry the push"
+  of ppcRefsStream, ppcNone:
+    "reinstall the managed hooks with 'repro hooks ensure --vcs " &
+      repoRoot & "' and retry the push"
+
+proc prePushProtocolEvidence*(diagnostic: string;
+    cause: PrePushProtocolCause; observationEvidence: string): string =
+  ## The refusal's evidence: the stage's own diagnostic plus, for a failed
+  ## repository observation, the command's exit status and what git said.
+  result = diagnostic
+  if cause == ppcRepositoryObservation and observationEvidence.len > 0:
+    result.add("; " & observationEvidence)
+
 proc evaluateOutgoingCurrent*(gitBin, repoRoot, refsPath, hookRemoteName,
     hookRemoteLocation, agreedRemoteName, agreedRemoteLocation: string):
     OutgoingCurrentDecision =
@@ -879,13 +966,23 @@ proc evaluateOutgoingCurrent*(gitBin, repoRoot, refsPath, hookRemoteName,
   result.objectFormat = parsed.objectFormat
   if not parsed.ok:
     result.diagnostic = parsed.diagnostic
+    result.cause = parsed.cause
+    result.failedObservation = parsed.failedObservation
+    result.observationEvidence = parsed.observationEvidence
     return
   result.updates = parsed.updates
-  result.headOid = gitValue(gitBin, repoRoot, ["rev-parse", "HEAD^{commit}"])
-    .toLowerAscii()
+  # Strict validation is unchanged: the value must be exactly one full-length
+  # hex object id. What changed is what it is validated AGAINST — git's
+  # stdout, not stdout with whatever git also wrote to stderr in front of it.
+  let head = gitObservation(gitBin, repoRoot,
+    ["rev-parse", "--verify", "HEAD^{commit}"])
+  result.headOid = head.value.toLowerAscii()
   if not isHexOid(result.headOid, parsed.oidLength):
     result.protocolOk = false
     result.diagnostic = "could not independently observe HEAD as a commit"
+    result.cause = ppcRepositoryObservation
+    result.failedObservation = head.command
+    result.observationEvidence = head.evidence
     return
   result.remoteName = hookRemoteName
   if hookRemoteName.len == 0 or agreedRemoteName.len == 0 or
@@ -1004,8 +1101,7 @@ proc pushedCommitRange*(gitBin, repoRoot: string;
     return
   # Only the exit status is read: the oids are already validated hex from the
   # strict stream parser, and ``<oid>^{commit}`` is itself a revision Git peels
-  # wherever it is used, so no git output is parsed (and no stray diagnostic
-  # on the merged stream can be mistaken for an object name).
+  # wherever it is used, so no git output is parsed here at all.
   let newCommit = update.localOid & "^{commit}"
   if runGit(gitBin, repoRoot,
       ["rev-parse", "--verify", "--quiet", newCommit]).code != 0:

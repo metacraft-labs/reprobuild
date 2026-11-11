@@ -279,3 +279,46 @@ suite "the state file carries no manifest layers":
     let row = stateRow(root)
     require row.kind == JObject
     check row["status"].getStr() == "fail"
+
+  test "health_names_its_own_fix_not_a_verb_that_refuses":
+    # With the state file under its retired name, every verb but
+    # `repro health --fix` refuses (Workspace-Settings-Files.md §8), so no
+    # row of `repro health` may name one of those verbs as the remedy: the
+    # `manifest` row read the set-aside state as recording no project, and
+    # its usual remedy — `repro workspace enable <project>` — is refused in
+    # this checkout with the very diagnostic that sent the operator to
+    # health. The file is not malformed either, so no row may tell the
+    # operator to fix its TOML syntax or a key.
+    let scratch = createTempDir("repro-state-layers-remedy-", "")
+    defer: removeDir(scratch)
+    let root = fixture(scratch)
+    let health = runRepro(["health", "--json", "--offline",
+      "--workspace-root=" & root])
+    checkpoint("health --json exit=" & $health.code & "\nstdout: " &
+      health.stdout & "\nstderr: " & health.stderr)
+    check health.code != 0
+    var manifestRow = newJNull()
+    for row in parseJson(health.stdout)["checks"]:
+      let name = row["name"].getStr()
+      let remedy = row["remedy"].getStr()
+      checkpoint(name & ": " & row["status"].getStr() & " — " &
+        row["detail"].getStr() & " — remedy: " & remedy)
+      if name == "manifest":
+        manifestRow = row
+      # Every row, the `skipped: manifest unresolved` warnings included:
+      # they repeat the manifest row's remedy.
+      check "workspace enable" notin remedy
+      if row["status"].getStr() == "fail":
+        check "TOML syntax" notin remedy
+        check "fix the named key" notin remedy
+    require manifestRow.kind == JObject
+    check manifestRow["status"].getStr() == "fail"
+    check "health --fix" in manifestRow["remedy"].getStr()
+    check "does not parse" notin manifestRow["detail"].getStr()
+    check "retired name" in manifestRow["detail"].getStr()
+
+    # The verb the old remedy named is indeed refused here, naming `--fix`.
+    let enabled = runRepro(["ws", "enable", "demo", "--no-sync",
+      "--workspace-root=" & root])
+    check enabled.code != 0
+    check "repro health --fix" in enabled.stderr

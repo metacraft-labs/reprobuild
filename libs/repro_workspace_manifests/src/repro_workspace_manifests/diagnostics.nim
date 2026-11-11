@@ -155,6 +155,8 @@ type
     message*: string  ## the strict reader's diagnostic: file, key, problem
     path*: string     ## the file the diagnostic is about
     keyPath*: string  ## the offending key; "" for a TOML syntax error
+    retired*: bool    ## the file is under its retired name: it was not
+                      ## read at all, so it has no syntax or key to fix
 
 var malformedWorkspaceFilesTolerated {.threadvar.}: bool
 var setAsideWorkspaceFiles {.threadvar.}: seq[SetAsideWorkspaceFile]
@@ -180,7 +182,8 @@ template toleratingMalformedWorkspaceFiles*(failures, body: untyped) =
     setAsideWorkspaceFiles = previousFailures
 
 proc setAsideMalformedWorkspaceFile*(err: ref WorkspaceManifestParseError;
-                                     kind: MalformedWorkspaceFileKind): bool =
+                                     kind: MalformedWorkspaceFileKind;
+                                     retired = false): bool =
   ## Inside ``toleratingMalformedWorkspaceFiles``: record ``err`` for the
   ## caller to report and answer ``true`` (the reader then proceeds as if the
   ## file recorded / declared nothing). Outside it: answer ``false``, and the
@@ -191,5 +194,6 @@ proc setAsideMalformedWorkspaceFile*(err: ref WorkspaceManifestParseError;
     if seen.message == err.msg:
       return true
   setAsideWorkspaceFiles.add(SetAsideWorkspaceFile(kind: kind,
-    message: err.msg, path: err.path, keyPath: err.keyPath))
+    message: err.msg, path: err.path, keyPath: err.keyPath,
+    retired: retired))
   true
