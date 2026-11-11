@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 35,
-    "nimTestBinaries": 2705,
+    "nimTestBinaries": 2706,
     "pureUnitConsolidationGroups": 79,
     "pureUnitTests": 745,
     "staticallyDetectedRuntimeCompilerFlowTests": 137,
-    "testEntries": 2744
+    "testEntries": 2745
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1564,7 +1564,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 21,
-      "integration": 1489,
+      "integration": 1490,
       "platform/destructive": 173,
       "pure unit": 745,
       "unclassified": 316
@@ -1781,9 +1781,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2705,
+    "nimTestBinaryCount": 2706,
     "pythonTestFileCount": 39,
-    "testEntryCount": 2744
+    "testEntryCount": 2745
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -38110,6 +38110,23 @@
       "owner": "tests/integration",
       "requiresReproBinary": true,
       "source": "tests/integration/t_certifying_run_refreshes_the_lock_before_testing.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_chained_hook_that_cannot_start_names_its_cause",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_test_support"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_chained_hook_that_cannot_start_names_its_cause.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 1,
       "staticallyDetectedRuntimeCompilerFlow": false,

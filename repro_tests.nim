@@ -18164,6 +18164,17 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "t_group_tests_integration_g02",
     singleReason: ""),
   TestSpec(
+    source: "tests/integration/t_chained_hook_that_cannot_start_names_its_cause.nim",
+    binary: "build/test-bin/t_chained_hook_that_cannot_start_names_its_cause",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "t_group_tests_integration_g02",
+    singleReason: ""),
+  TestSpec(
     source: "tests/integration/t_checkout_path_cannot_escape_the_workspace_root.nim",
     binary: "build/test-bin/t_checkout_path_cannot_escape_the_workspace_root",
     defines: @[],
@@ -18183,7 +18194,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g02",
+    group: "t_group_tests_integration_g03",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_ci_plan_v2_binds_the_checked_out_content.nim",
@@ -18920,7 +18931,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g03",
+    group: "t_group_tests_integration_g04",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_dev_shell_one_glibc_reaches_subprocesses.nim",
