@@ -143,11 +143,59 @@ func opensslPrefixCandidates*(executablePath: string):
       result.add((prefix: binPath[0 ..< binPath.len - rel.len - 1],
         layout: layout))
 
+const
+  CompilerRuntimeLibraries* = ["libmingw32.a", "libmingwex.a", "libmsvcrt.a",
+    "libucrt.a", "libucrtbase.a", "libkernel32.a"]
+    ## Import libraries and archives that only a C toolchain's own runtime
+    ## directory holds. gcc links every executable against them implicitly
+    ## (its specs add `-lmingw32 ... -lmingwex -lmsvcrt -lkernel32`), and an
+    ## explicit `-L` is searched BEFORE the compiler's own library directory.
+
+proc linkDirShadowsCompilerRuntime*(dir: string): string =
+  ## The first `CompilerRuntimeLibraries` entry present in `dir`, or `""`.
+  ##
+  ## A non-empty answer means `-L<dir>` would replace the compiler's C runtime
+  ## with whichever one `dir` belongs to. That is what an MSYS2 `mingw64`
+  ## prefix is: a whole toolchain prefix whose `lib/` holds OpenSSL next to
+  ## MSYS2's own mingw-w64 runtime. Measured on win-ci-bare-001 (reprobuild
+  ## v0.2.22, release run 43051280688): once that prefix carried OpenSSL, the
+  ## WinLibs gcc 16.1.0 (mingw-w64 14.0.0) `crt2.o` was linked against
+  ## MSYS2's newer `libmingw32.a`, which no longer defines
+  ## `_gnu_exception_handler` or the `__mingw_initlts*_force` symbols, and
+  ## every `-d:ssl` link failed with undefined references from `crt2.o`.
+  if dir.len == 0:
+    return ""
+  for name in CompilerRuntimeLibraries:
+    if fileExists(dir / name):
+      return name
+  ""
+
+var reportedShadowingDirs: seq[string] = @[]
+
 proc prefixProvidesLinkLibraries*(prefix: string; layout: PrefixLayout): bool =
   ## True when `prefix` really holds an import library for every stem in
-  ## `OpensslLinkStems` under `layout`'s link directory.
+  ## `OpensslLinkStems` under `layout`'s link directory, and that directory
+  ## does not also hold a C runtime (`linkDirShadowsCompilerRuntime`).
+  ##
+  ## The second condition rejects a shared toolchain prefix even when it does
+  ## carry OpenSSL. Linking against it would need `-L` on its whole `lib/`,
+  ## and that hands the link a different C runtime from the compiler's: the
+  ## failure then surfaces as undefined references from `crt2.o`, far from
+  ## its cause. Rejecting it leaves `cannot find -lssl`, which names the
+  ## missing piece, and the stderr note says why this prefix was passed over.
   let dir = opensslLinkDir(prefix, layout)
   if dir.len == 0:
+    return false
+  let shadowing = linkDirShadowsCompilerRuntime(dir)
+  if shadowing.len > 0:
+    if dir notin reportedShadowingDirs:
+      reportedShadowingDirs.add(dir)
+      try:
+        stderr.writeLine("openssl: not linking against '" & dir &
+          "': it also holds a C runtime (" & shadowing & "), and -L there " &
+          "would replace the compiler's own")
+      except IOError:
+        discard
     return false
   for stem in OpensslLinkStems:
     var found = false

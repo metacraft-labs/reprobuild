@@ -203,6 +203,54 @@ suite "a prefix yields the link directory only if it really provides one":
     registerOpensslPrefixCandidate(root)
     check opensslLinkDirFromCandidates() == ""
 
+  test "a toolchain prefix that also carries OpenSSL is passed over":
+    # MSYS2's `mingw64` prefix on win-ci-bare-001 (release run 43051280688):
+    # `lib/` held `libssl.dll.a` and `libcrypto.dll.a` next to MSYS2's own
+    # mingw-w64 runtime. `-L` there made the WinLibs gcc link its `crt2.o`
+    # against MSYS2's `libmingw32.a`, and every `-d:ssl` link failed with
+    # `undefined reference to '_gnu_exception_handler'`. Neither arm may
+    # name such a directory, and a dedicated prefix offered after it must
+    # still answer.
+    let shared = getTempDir() / "m8-openssl-shared-toolchain"
+    let dedicated = getTempDir() / "m8-openssl-dedicated"
+    removeDir(shared)
+    removeDir(dedicated)
+    discard makePrefix(shared, plWindowsTree,
+      ["libssl.dll.a", "libcrypto.dll.a", "libmingw32.a", "libmingwex.a"])
+    discard makePrefix(dedicated, plWindowsTree,
+      ["libssl.dll.a", "libcrypto.dll.a"])
+    defer:
+      removeDir(shared)
+      removeDir(dedicated)
+
+    let sharedLib = shared / linkLibDir(plWindowsTree)
+    check linkDirShadowsCompilerRuntime(sharedLib) == "libmingw32.a"
+    check linkDirShadowsCompilerRuntime(
+      dedicated / linkLibDir(plWindowsTree)) == ""
+    check not prefixProvidesLinkLibraries(shared, plWindowsTree)
+    check opensslLinkDirForExecutable(
+      shared / binDir(plWindowsTree) / "openssl.exe") == ""
+
+    registerOpensslPrefixCandidate(shared)
+    check opensslLinkDirFromCandidates() == ""
+    registerOpensslPrefixCandidate(dedicated)
+    check opensslLinkDirFromCandidates() ==
+      dedicated / linkLibDir(plWindowsTree)
+
+  test "every C runtime library name disqualifies a link directory":
+    # One file is enough: gcc's specs link all of them, so any one found
+    # first through `-L` replaces the compiler's copy.
+    for name in CompilerRuntimeLibraries:
+      let root = getTempDir() / "m8-openssl-crt-" & name.changeFileExt("")
+      removeDir(root)
+      discard makePrefix(root, plWindowsTree,
+        ["libssl.dll.a", "libcrypto.dll.a", name])
+      checkpoint("runtime library: " & name)
+      check linkDirShadowsCompilerRuntime(
+        root / linkLibDir(plWindowsTree)) == name
+      check not prefixProvidesLinkLibraries(root, plWindowsTree)
+      removeDir(root)
+
   test "a prefix offered at the wrong level matches no declared layout":
     # `msys64` rather than `msys64/mingw64` — a plausible off-by-one for a
     # consumer offering a prefix. It has no `lib` of its own, so it is
