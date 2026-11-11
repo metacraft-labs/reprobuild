@@ -39,6 +39,7 @@ import repro_core/relocation
 # repo's way of saying so out loud rather than tripping the ambient-execution
 # lint at every probe site.
 import repro_core/ambient_execution
+import repro_core/process_exec
 import repro_core/cli_images
 import repro_core/source_root
 from repro_core/workspace_root import firstMembershipManifestPath
@@ -44413,7 +44414,7 @@ proc gitRunPlain(identity: GitToolIdentity;
     for arg in args:
       cmd.add(" ")
       cmd.add(quoteShell(arg))
-    let res = execCmdEx(cmd, options = {poStdErrToStdOut, poUsePath},
+    let res = execCmdExCloseOnce(cmd, options = {poStdErrToStdOut, poUsePath},
       env = scrubbedGitRepositoryEnv())
     (code: res.exitCode, output: res.output)
 
@@ -44511,7 +44512,7 @@ proc gitRunSeparated(gitBin: string; args: openArray[string];
       let options =
         if errPath.len > 0: {poUsePath}
         else: {poUsePath, poStdErrToStdOut}
-      let res = execCmdEx(cmd, options = options, env = env)
+      let res = execCmdExCloseOnce(cmd, options = options, env = env)
       result.code = res.exitCode
       result.output = res.output
       if outPath.len > 0:
@@ -44649,7 +44650,7 @@ proc gitRunPlainEnv(identity: GitToolIdentity; args: openArray[string];
     var cmd = quoteShell(identity.binaryPath)
     for arg in args:
       cmd.add(" " & quoteShell(arg))
-    let res = execCmdEx(cmd, options = {poStdErrToStdOut, poUsePath},
+    let res = execCmdExCloseOnce(cmd, options = {poStdErrToStdOut, poUsePath},
       env = scrubbedGitChildEnv(capability, internalContext))
     (res.exitCode, res.output)
 
