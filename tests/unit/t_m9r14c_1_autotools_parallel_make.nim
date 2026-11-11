@@ -285,6 +285,29 @@ suite "DSL-port M9.R.14c.1 — autotools_package parallel-make wiring":
     finally:
       clearCurrentOwningPackageOverride()
 
+  test "configure, make and install declare the shell's host system":
+    # On Windows `config.guess` reads the host from `uname -s`, which the
+    # MSYS shell answers from MSYSTEM (`ShellHostSystemEnv` in
+    # `packages/sh.nim`). Elsewhere nothing is declared.
+    resetDslPortFetchState()
+    setCurrentOwningPackageOverride("autotoolsHostSystemPkg")
+    try:
+      let pkg = autotools_package(srcDir = "./src")
+      for edge in [pkg.buildEdge, pkg.compileEdge, pkg.installMakeEdge]:
+        checkpoint(edge.id)
+        when defined(windows):
+          check ("MSYSTEM", "MINGW64") in edge.env
+        else:
+          for (name, _) in edge.env:
+            check name != "MSYSTEM"
+      # A recipe that declares its own value keeps it.
+      let own = autotools_package(srcDir = "./src", buildDir = "own",
+        extraEnv = @[("MSYSTEM", "MSYS")])
+      check ("MSYSTEM", "MSYS") in own.buildEdge.env
+      check ("MSYSTEM", "MINGW64") notin own.buildEdge.env
+    finally:
+      clearCurrentOwningPackageOverride()
+
   test "configure resets only out-of-tree build outputs":
     resetDslPortFetchState()
     setCurrentOwningPackageOverride("autotoolsCleanBuildPkg")
