@@ -21,7 +21,8 @@
 import std/[algorithm, json, os, osproc, sets, streams, strtabs, strutils]
 import blake3
 from repro_core/paths import extendedPath
-from repro_core/ambient_execution import uncontrolledStartProcess
+from repro_core/ambient_execution import uncontrolledFindExe,
+  uncontrolledStartProcess
 import repro_project_dsl
 
 type DiscoveredOutputs* = object
@@ -502,29 +503,280 @@ proc gradleVerificationPinsChecksums*(projectRoot: string): bool =
       return false
   "<components>" in compact
 
+proc gradleConfigurationInputs*(projectRoot: string): seq[string] =
+  ## The root's files that decide what the build resolves and how it is
+  ## configured: the root build scripts and ``gradle.properties``; every
+  ## version catalog under ``gradle/`` (``libs.versions.toml`` is the
+  ## default one); the dependency lockfiles; and the dependency
+  ## verification metadata and keyrings.
+  ## https://docs.gradle.org/current/userguide/version_catalogs.html
+  ## https://docs.gradle.org/current/userguide/dependency_locking.html
+  ## https://docs.gradle.org/current/userguide/dependency_verification.html
+  for candidate in ["build.gradle.kts", "build.gradle",
+                    "settings.gradle.kts", "settings.gradle",
+                    "gradle.properties", "gradle.lockfile",
+                    "settings-gradle.lockfile", "buildscript-gradle.lockfile",
+                    "gradle" / "verification-metadata.xml",
+                    "gradle" / "verification-keyring.keys",
+                    "gradle" / "verification-keyring.gpg"]:
+    let path = projectRoot / candidate
+    if fileExists(extendedPath(path)):
+      result.add(path)
+  let catalogDir = projectRoot / "gradle"
+  if dirExists(extendedPath(catalogDir)):
+    var catalogs: seq[string] = @[]
+    for entry in walkDir(catalogDir):
+      if entry.kind == pcFile and entry.path.endsWith(".versions.toml"):
+        catalogs.add(entry.path)
+    catalogs.sort(system.cmp[string])
+    result.add(catalogs)
+
+proc gradleWrapperInputs*(projectRoot: string): seq[string] =
+  ## A wrapper project's wrapper: the scripts, the jar and the properties
+  ## naming (and, with ``distributionSha256Sum``, pinning) the distribution.
+  ## https://docs.gradle.org/current/userguide/gradle_wrapper.html
+  for candidate in ["gradlew", "gradlew.bat",
+                    "gradle" / "wrapper" / "gradle-wrapper.jar",
+                    "gradle" / "wrapper" / "gradle-wrapper.properties"]:
+    let path = projectRoot / candidate
+    if fileExists(extendedPath(path)):
+      result.add(path)
+
+proc isGradleBuildLogicFile(name: string): bool =
+  ## A file that configures some project of a build wherever it sits: a
+  ## build or settings script, a ``gradle.properties``, a version catalog
+  ## or a dependency lockfile (``gradle.lockfile`` per project,
+  ## ``settings-gradle.lockfile``, ``buildscript-gradle.lockfile``).
+  name == "gradle.properties" or name.endsWith(".gradle") or
+    name.endsWith(".gradle.kts") or name.endsWith(".versions.toml") or
+    name.endsWith(".lockfile")
+
+proc prunedFromBuildLogicWalk(name: string): bool =
+  ## Directories no build logic lives in: Gradle's default build directory
+  ## and every hidden directory (``.gradle``, ``.kotlin``, ``.git``, and
+  ## ``.repro``, where this convention keeps its own state).
+  name.len == 0 or name[0] == '.' or name == "build"
+
+proc collectBuildLogic(dir: string; everyFile: bool;
+                       skip: HashSet[string]; found: var seq[string]) =
+  ## Appends the files under `dir` that are build logic (every file, when
+  ## `everyFile`), pruning `prunedFromBuildLogicWalk` and the directories in
+  ## `skip`, which are walked on their own. A symbolic link to a directory is
+  ## not followed, so a link cycle cannot make the walk endless.
+  var pending = @[dir]
+  while pending.len > 0:
+    let current = pending.pop()
+    for entry in walkDir(extendedPath(current), relative = true):
+      let path = current / entry.path
+      case entry.kind
+      of pcDir:
+        if not prunedFromBuildLogicWalk(entry.path) and
+            normalizedPath(path) notin skip:
+          pending.add(path)
+      of pcFile, pcLinkToFile:
+        if everyFile or isGradleBuildLogicFile(entry.path):
+          found.add(path)
+      of pcLinkToDir:
+        discard
+
+proc gradleIncludedBuilds*(buildRoot: string): seq[string] =
+  ## The directories the settings script of the build at `buildRoot` names in
+  ## ``includeBuild``, at the top level or in ``pluginManagement``, as a
+  ## string literal (``includeBuild("build-logic")``,
+  ## ``includeBuild 'build-logic'``, ``includeBuild(file("../logic"))``),
+  ## resolved against `buildRoot`. A path the script computes is not seen.
+  ## https://docs.gradle.org/current/userguide/composite_builds.html
+  const Keyword = "includeBuild"
+  for name in ["settings.gradle.kts", "settings.gradle"]:
+    let settings = buildRoot / name
+    if not fileExists(extendedPath(settings)):
+      continue
+    var text = ""
+    try:
+      text = readFile(extendedPath(settings))
+    except IOError, OSError:
+      continue
+    var at = text.find(Keyword)
+    while at >= 0:
+      var i = at + Keyword.len
+      template skipBlanks() =
+        while i < text.len and text[i] in Whitespace: inc i
+      skipBlanks()
+      if i < text.len and text[i] == '(':
+        inc i
+        skipBlanks()
+      if text.continuesWith("file", i):
+        inc i, 4
+        skipBlanks()
+        if i < text.len and text[i] == '(':
+          inc i
+          skipBlanks()
+      if i < text.len and text[i] in {'"', '\''}:
+        let close = text.find(text[i], i + 1)
+        if close > i + 1:
+          let named = text[i + 1 ..< close]
+          let dir = normalizedPath(
+            if named.isAbsolute: named else: buildRoot / named)
+          if dir notin result:
+            result.add(dir)
+      at = text.find(Keyword, at + Keyword.len)
+
+proc gradleFetchInputs*(projectRoot: string; wrapper: bool): seq[string] =
+  ## Every file that can decide what the fetch resolves, sorted: the input
+  ## set of the ``kotlin-gradle-dependencies`` edge and of its token
+  ## (`gradleDependenciesToken`). Language-Conventions/Kotlin.md
+  ## §"The three edges", item 1.
+  ##
+  ## * The root's configuration files (`gradleConfigurationInputs`) and, for
+  ##   a wrapper project, the wrapper (`gradleWrapperInputs`).
+  ## * Every build script, settings script, ``gradle.properties``, version
+  ##   catalog and lockfile anywhere under the project root
+  ##   (`isGradleBuildLogicFile`), less `prunedFromBuildLogicWalk`: a
+  ##   subproject's build script declares its dependencies, and the
+  ##   resolving task resolves every project.
+  ## * Every file of ``buildSrc/`` and of each build ``includeBuild`` names
+  ##   (`gradleIncludedBuilds`), followed transitively and also outside the
+  ##   project root: their build scripts declare plugin dependencies, and a
+  ##   convention plugin compiled from their sources (a precompiled script
+  ##   plugin, or a ``Plugin`` class) adds dependencies to every project that
+  ##   applies it.
+  ## https://docs.gradle.org/current/userguide/sharing_build_logic_between_subprojects.html
+  result = gradleConfigurationInputs(projectRoot)
+  if wrapper:
+    result.add(gradleWrapperInputs(projectRoot))
+  # The builds whose every file counts, found from the root outward. Each
+  # one's ``buildSrc`` is a build of its own, and so is each directory its
+  # settings include.
+  var wholeBuilds: seq[string] = @[]
+  var visited = initHashSet[string]()
+  var pending = @[normalizedPath(projectRoot)]
+  while pending.len > 0:
+    let build = pending.pop()
+    if build in visited:
+      continue
+    visited.incl(build)
+    if build != normalizedPath(projectRoot):
+      wholeBuilds.add(build)
+    let buildSrc = build / "buildSrc"
+    if dirExists(extendedPath(buildSrc)):
+      pending.add(normalizedPath(buildSrc))
+    for included in gradleIncludedBuilds(build):
+      if dirExists(extendedPath(included)):
+        pending.add(included)
+  var skip = initHashSet[string]()
+  for build in wholeBuilds:
+    skip.incl(build)
+  collectBuildLogic(projectRoot, everyFile = false, skip, result)
+  for build in wholeBuilds:
+    var nested = skip
+    nested.excl(build)
+    collectBuildLogic(build, everyFile = true, nested, result)
+  var unique = initHashSet[string]()
+  var deduplicated: seq[string] = @[]
+  for path in result:
+    let key = normalizedPath(path)
+    if key notin unique:
+      unique.incl(key)
+      deduplicated.add(path)
+  deduplicated.sort(system.cmp[string])
+  result = deduplicated
+
+proc resolvedExecutable(path: string): string =
+  ## `path` with every symbolic link in its last component followed, as a
+  ## launcher script that locates its installation from its own path does.
+  result = path
+  var hops = 0
+  while hops < 40 and symlinkExists(result):
+    let target = expandSymlink(result)
+    result = if target.isAbsolute: target else: result.parentDir / target
+    inc hops
+
+proc gradleJdkHomes(projectRoot, javaHome: string): seq[(string, string)] =
+  ## The JDKs a fetch's Gradle runs on, labelled by what named them: the
+  ## launcher's (``JAVA_HOME``, else the ``java`` on PATH, as the ``gradle``
+  ## scripts choose it) and the daemon's ``org.gradle.java.home`` from the
+  ## project's ``gradle.properties``. `javaHome` is the fetch's
+  ## ``JAVA_HOME``.
+  ## https://docs.gradle.org/current/userguide/build_environment.html#sec:gradle_configuration_properties
+  if javaHome.len > 0:
+    result.add(("JAVA_HOME", javaHome))
+  else:
+    let java = uncontrolledFindExe("java")
+    if java.len > 0:
+      result.add(("PATH", resolvedExecutable(java).parentDir.parentDir))
+  let daemonHome = readJavaProperty(projectRoot / "gradle.properties",
+    "org.gradle.java.home")
+  if daemonHome.len > 0:
+    result.add(("org.gradle.java.home", daemonHome))
+
+proc gradleInstallationInitScripts(launcher: string): seq[string] =
+  ## The init scripts of the Gradle installation `launcher` runs, which
+  ## every build it starts applies: ``<GRADLE_HOME>/init.d/*``. The home is
+  ## the launcher's directory's parent, as in a distribution, or the
+  ## ``libexec/gradle`` / ``lib/gradle`` beside it, where nixpkgs and
+  ## Homebrew keep the distribution behind a wrapper script.
+  ## https://docs.gradle.org/current/userguide/init_scripts.html#sec:using_an_init_script
+  var exe = launcher
+  if not exe.isAbsolute:
+    exe = uncontrolledFindExe(exe)
+  if exe.len == 0:
+    return
+  let base = resolvedExecutable(exe).parentDir.parentDir
+  for home in [base, base / "libexec" / "gradle", base / "lib" / "gradle"]:
+    let initD = home / "init.d"
+    if dirExists(extendedPath(initD)):
+      var scripts: seq[string] = @[]
+      for entry in walkDir(initD):
+        if entry.kind in {pcFile, pcLinkToFile}:
+          scripts.add(entry.path)
+      scripts.sort(system.cmp[string])
+      result.add(scripts)
+
 proc gradleDependenciesToken*(projectRoot, launcher: string; wrapper: bool;
-                              inputs: openArray[string]): string =
-  ## What a fetch is for: the resolving script, the launcher, and the bytes
-  ## of every declared input (build scripts, version catalogs, lockfiles,
-  ## verification metadata, wrapper properties). Equal tokens mean the fetch
-  ## would ask for the same modules.
+                              inputs: openArray[string];
+                              javaHome = getEnv("JAVA_HOME")): string =
+  ## What a fetch is for: the resolving script, the launcher, the bytes of
+  ## every input (`gradleFetchInputs`: build scripts anywhere in the build,
+  ## ``buildSrc/`` and included builds, version catalogs, lockfiles,
+  ## verification metadata, wrapper properties), the JDK Gradle runs on
+  ## and, without a wrapper, the init scripts of the installation the
+  ## launcher runs. Equal tokens mean the fetch would ask for the same
+  ## modules.
+  ##
+  ## The JDK is named by its home and keyed by its ``release`` file, which
+  ## names its version and vendor: variant selection follows the JVM
+  ## version (``org.gradle.jvm.version``). A wrapper's distribution, init
+  ## scripts included, is named by the wrapper properties, which are inputs.
   # v2: the fetch passes ``--gradle-user-home``, and its flags are part of
   # the token. A v1 export fetched under a host ``gradle.user.home`` override
   # may be empty, so it is fetched again.
-  var text = "repro-gradle-dependencies-v2\n" & GradleDependenciesInitScript &
+  # v3: the inputs reach beyond the root's scripts, and the JDK and the
+  # installation's init scripts are part of the token.
+  var text = "repro-gradle-dependencies-v3\n" & GradleDependenciesInitScript &
     "\nflags=" & GradleFetchFlags.join(" ") &
     "\nlauncher=" & launcher & "\nwrapper=" & $wrapper & "\n"
+  proc addFile(text: var string; label, path: string) =
+    text.add(label & "\n")
+    try:
+      text.add(readFile(extendedPath(path)))
+    except IOError, OSError:
+      text.add("<absent>")
+    text.add("\n")
+  for (source, home) in gradleJdkHomes(projectRoot, javaHome):
+    let release = home / "release"
+    let java = home / "bin" / (when defined(windows): "java.exe" else: "java")
+    # A JDK without a ``release`` file is keyed by its launcher's bytes.
+    text.addFile("--jdk " & source & "=" & home,
+      if fileExists(extendedPath(release)): release else: java)
+  if not wrapper:
+    for script in gradleInstallationInitScripts(launcher):
+      text.addFile("--init.d " & script, script)
   var sorted = @inputs
   sorted.sort()
   for input in sorted:
     # Relative to the project, so two checkouts of it agree on the token.
     let name = relativePath(input, projectRoot).replace('\\', '/')
-    text.add("--input " & name & "\n")
-    if fileExists(extendedPath(input)):
-      text.add(readFile(extendedPath(input)))
-    else:
-      text.add("<absent>")
-    text.add("\n")
+    text.addFile("--input " & name, input)
   "blake3:" & blake3.toHex(blake3.digest(text))
 
 proc sameFileContent(a, b: string): bool =
@@ -601,8 +853,7 @@ proc unpackedWrapperDistribution(fetchHome, projectRoot: string): string =
     "distribution under " & dists)
 
 proc gradleDependencies*(launcher: string; wrapper: bool;
-                         projectRoot, dependenciesRoot, scratch: string;
-                         inputs: openArray[string]): bool =
+                         projectRoot, dependenciesRoot, scratch: string): bool =
   ## The dependency fetch: resolves every module the build can ask for into
   ## a private user home, online, and exports that home's dependency cache
   ## as the read-only cache the offline edges read
@@ -615,14 +866,17 @@ proc gradleDependencies*(launcher: string; wrapper: bool;
   ## Returns false, having run nothing, when the stamp already names this
   ## fetch's token and the export is in place: the edge reaches the network,
   ## so it is never cached and runs on every build (like the vendor steps,
-  ## `npm_vendor`), and the token keeps that run from starting a JVM.
+  ## `npm_vendor`), and the token keeps that run from starting a JVM. The
+  ## inputs are enumerated here (`gradleFetchInputs`), not taken from the
+  ## graph, so a build script added since the graph was emitted counts too.
   ##
   ## Determinism is Gradle's own: a committed ``gradle/verification-
   ## metadata.xml`` makes the resolution fail on any module whose checksum
   ## it does not list, and lockfiles make it fail on any version they do not
   ## list. https://docs.gradle.org/current/userguide/dependency_verification.html
   ## https://docs.gradle.org/current/userguide/dependency_locking.html
-  let token = gradleDependenciesToken(projectRoot, launcher, wrapper, inputs)
+  let token = gradleDependenciesToken(projectRoot, launcher, wrapper,
+    gradleFetchInputs(projectRoot, wrapper))
   let stamp = gradleDependenciesStamp(dependenciesRoot)
   let readOnly = gradleReadOnlyCache(dependenciesRoot)
   let exported = dirExists(extendedPath(readOnly / "modules-2")) and
@@ -953,14 +1207,15 @@ proc runDelegatedOutputsCommand(args: seq[string]) =
   writeOutputFragment(fragment, consumerId, discovered)
 
 proc gradleDependenciesCommand*(projectRoot, launcher: string; wrapper: bool;
-                                dependenciesRoot, scratch: string;
-                                inputs: openArray[string]): seq[string] =
+                                dependenciesRoot, scratch: string): seq[string] =
   ## The argv of the Gradle dependency-fetch edge: this standard-provider
-  ## binary, asked to run `gradleDependencies`. The inputs travel in the argv
-  ## so the fetch's token covers exactly the files the edge declares.
+  ## binary, asked to run `gradleDependencies`. The inputs do not travel in
+  ## the argv: the fetch enumerates them itself (`gradleFetchInputs`), the
+  ## same function the edge's declared inputs come from, and a build with
+  ## ``buildSrc/`` and included builds names more files than a Windows
+  ## command line holds.
   @[getAppFilename(), "--gradle-dependencies", projectRoot, launcher,
-    (if wrapper: "wrapper" else: "gradle"), dependenciesRoot, scratch] &
-    @inputs
+    (if wrapper: "wrapper" else: "gradle"), dependenciesRoot, scratch]
 
 proc runOutputDiscoveryCommand*(args: seq[string]): bool =
   ## Internal standard-provider operation, invoked by a discovery action.
@@ -968,10 +1223,10 @@ proc runOutputDiscoveryCommand*(args: seq[string]): bool =
     runDelegatedOutputsCommand(args)
     return true
   if args.len > 0 and args[0] == "--gradle-dependencies":
-    if args.len < 6 or args[3] notin ["wrapper", "gradle"]:
+    if args.len != 6 or args[3] notin ["wrapper", "gradle"]:
       raise newException(ValueError, "invalid Gradle dependency fetch arguments")
     let fetched = gradleDependencies(args[2], args[3] == "wrapper", args[1],
-      args[4], args[5], args[6 .. ^1])
+      args[4], args[5])
     echo(if fetched: "gradle dependencies: fetched and exported"
          else: "gradle dependencies: up to date")
     return true

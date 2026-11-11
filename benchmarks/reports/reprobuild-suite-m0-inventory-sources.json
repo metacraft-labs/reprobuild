@@ -25014,7 +25014,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_standard_provider/tests/test_delegated_build_outputs.nim",
       "sourceSuiteCount": 2,
-      "staticCaseCount": 21,
+      "staticCaseCount": 24,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -25438,7 +25438,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_standard_provider/tests/test_kotlin_gradle_convention.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 9,
+      "staticCaseCount": 11,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

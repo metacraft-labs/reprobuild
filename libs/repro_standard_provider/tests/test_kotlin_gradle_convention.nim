@@ -29,11 +29,16 @@
 ##       ``GRADLE_USER_HOME`` lies in its own scratch directory, with the
 ##       fetch's export as ``GRADLE_RO_DEP_CACHE`` (Kotlin.md
 ##       §"Dependencies: a fetch edge and an isolated user home").
+##   * The fetch's inputs and token (no Gradle run): subproject scripts,
+##     every file of ``buildSrc/`` and of each included build (also outside
+##     the project root) change the token; build directories, hidden
+##     directories and the root project's sources do not. The JDK's
+##     ``release`` and the Gradle installation's ``init.d/`` change it too.
 ##   * Where Gradle puts the jar (default layout, ``archiveBaseName`` /
 ##     ``archiveVersion``, the build directory) is checked by real builds
 ##     in ``test_delegated_build_outputs.nim``.
 
-import std/[os, strutils, tempfiles, unittest]
+import std/[algorithm, os, sequtils, strutils, tempfiles, unittest]
 import repro_test_support/reasoned_skip
 import repro_test_support
 
@@ -43,7 +48,7 @@ import repro_project_dsl
 import repro_standard_provider/convention
 import repro_standard_provider/conventions/kotlin_gradle as gradle_convention
 from repro_standard_provider/conventions/output_discovery import
-  gradleVerificationPinsChecksums
+  gradleVerificationPinsChecksums, gradleFetchInputs, gradleDependenciesToken
 
 let
   ## parentDir four times from
@@ -313,6 +318,141 @@ suite "kotlin-gradle convention M41":
     # No components element: nothing is listed.
     writeFile(file, "<verification-metadata/>\n")
     check not gradleVerificationPinsChecksums(root)
+
+  test "fetch inputs: build logic outside the root's scripts is covered":
+    # Issue 2026-10-29: the fetch's token covered only the root's scripts.
+    # Kotlin.md §"The three edges", item 1, "Inputs": every build script
+    # anywhere in the build, and every file of ``buildSrc/`` and of each
+    # included build, inside the project root or outside it.
+    let workspace = createTempDir("repro-gradle-fetch-inputs-", "")
+    defer: removeDir(workspace)
+    let root = workspace / "app"
+    proc put(path, content: string) =
+      createDir(path.parentDir)
+      writeFile(path, content)
+    put(root / "settings.gradle.kts",
+      "pluginManagement { includeBuild(\"build-logic\") }\n" &
+      "includeBuild(file(\"../shared\"))\n" &
+      "rootProject.name = \"hello\"\ninclude(\"lib\")\n")
+    put(root / "build.gradle.kts", "plugins { java }\n")
+    put(root / "lib" / "build.gradle.kts", "plugins { `java-library` }\n")
+    put(root / "lib" / "gradle.lockfile", "# lock\n")
+    put(root / "lib" / "src" / "main" / "java" / "Lib.java", "class Lib {}\n")
+    put(root / "buildSrc" / "build.gradle", "plugins { id 'groovy' }\n")
+    put(root / "buildSrc" / "src" / "main" / "groovy" / "Plugin.groovy", "//\n")
+    put(root / "buildSrc" / "build" / "classes" / "Plugin.class", "x")
+    put(root / "build-logic" / "settings.gradle",
+      "rootProject.name = 'build-logic'\nincludeBuild 'nested'\n")
+    put(root / "build-logic" / "src" / "main" / "kotlin" / "Conv.kt", "//\n")
+    put(root / "build-logic" / "nested" / "Nested.kt", "//\n")
+    put(root / "build-logic" / ".gradle" / "state.bin", "x")
+    put(workspace / "shared" / "build.gradle.kts", "\n")
+    put(workspace / "shared" / "src" / "main" / "java" / "Shared.java", "//\n")
+    put(workspace / "shared" / "build" / "libs" / "shared.jar", "x")
+    put(root / "src" / "main" / "java" / "Hello.java", "class Hello {}\n")
+    put(root / "build" / "generated.gradle.kts", "\n")
+    put(root / ".gradle" / "x.gradle", "\n")
+    put(root / ".repro" / "build" / "y.gradle.kts", "\n")
+    let inputs = gradleFetchInputs(root, wrapper = false)
+    for covered in [root / "settings.gradle.kts", root / "build.gradle.kts",
+                    root / "lib" / "build.gradle.kts",
+                    root / "lib" / "gradle.lockfile",
+                    root / "buildSrc" / "build.gradle",
+                    root / "buildSrc" / "src" / "main" / "groovy" / "Plugin.groovy",
+                    root / "build-logic" / "settings.gradle",
+                    root / "build-logic" / "src" / "main" / "kotlin" / "Conv.kt",
+                    root / "build-logic" / "nested" / "Nested.kt",
+                    workspace / "shared" / "build.gradle.kts",
+                    workspace / "shared" / "src" / "main" / "java" / "Shared.java"]:
+      checkpoint covered
+      check os.normalizedPath(covered) in inputs.mapIt(os.normalizedPath(it))
+    for ignored in [root / "lib" / "src" / "main" / "java" / "Lib.java",
+                    root / "buildSrc" / "build" / "classes" / "Plugin.class",
+                    root / "build-logic" / ".gradle" / "state.bin",
+                    workspace / "shared" / "build" / "libs" / "shared.jar",
+                    root / "src" / "main" / "java" / "Hello.java",
+                    root / "build" / "generated.gradle.kts",
+                    root / ".gradle" / "x.gradle",
+                    root / ".repro" / "build" / "y.gradle.kts"]:
+      checkpoint ignored
+      check os.normalizedPath(ignored) notin inputs.mapIt(os.normalizedPath(it))
+    # Each input once, in a stable order.
+    check inputs.deduplicate().len == inputs.len
+    check inputs == sorted(inputs)
+    # An edit to any of them changes the token; an edit to a source of the
+    # root project or to a build directory does not.
+    let launcher = workspace / "no-such-gradle"
+    proc token(): string =
+      gradleDependenciesToken(root, launcher, false,
+        gradleFetchInputs(root, wrapper = false))
+    var previous = token()
+    for edited in [root / "lib" / "build.gradle.kts",
+                   root / "buildSrc" / "src" / "main" / "groovy" / "Plugin.groovy",
+                   root / "build-logic" / "nested" / "Nested.kt",
+                   workspace / "shared" / "src" / "main" / "java" / "Shared.java"]:
+      checkpoint edited
+      writeFile(edited, readFile(edited) & "// edited\n")
+      let current = token()
+      check current != previous
+      previous = current
+    for unrelated in [root / "src" / "main" / "java" / "Hello.java",
+                      root / "buildSrc" / "build" / "classes" / "Plugin.class"]:
+      checkpoint unrelated
+      writeFile(unrelated, readFile(unrelated) & "// edited\n")
+      check token() == previous
+    # A new subproject build script counts as soon as it exists: the fetch
+    # enumerates its inputs when it runs, not when the graph was emitted.
+    put(root / "app2" / "build.gradle.kts", "\n")
+    check token() != previous
+
+  test "fetch token: the JDK and the installation's init scripts":
+    # Kotlin.md §"The three edges", item 1, "Network and caching".
+    let workspace = createTempDir("repro-gradle-fetch-jdk-", "")
+    defer: removeDir(workspace)
+    let root = workspace / "app"
+    createDir(root)
+    writeFile(root / "build.gradle.kts", "plugins { java }\n")
+    let jdk = workspace / "jdk"
+    createDir(jdk / "bin")
+    writeFile(jdk / "release", "JAVA_VERSION=\"21.0.9\"\n")
+    let installation = workspace / "gradle-8"
+    createDir(installation / "bin")
+    let launcher = installation / "bin" / "gradle"
+    writeFile(launcher, "#!/bin/sh\n")
+    # The fetch's ``JAVA_HOME`` is passed rather than set, so the test
+    # leaves the process environment alone.
+    proc token(wrapper = false): string =
+      gradleDependenciesToken(root, launcher, wrapper,
+        gradleFetchInputs(root, wrapper), javaHome = jdk)
+    let initial = token()
+    # Another JDK release at the same home.
+    writeFile(jdk / "release", "JAVA_VERSION=\"17.0.12\"\n")
+    let jdk17 = token()
+    check jdk17 != initial
+    # The daemon's JDK, named in gradle.properties.
+    let daemonJdk = workspace / "daemon-jdk"
+    createDir(daemonJdk)
+    writeFile(daemonJdk / "release", "JAVA_VERSION=\"21.0.9\"\n")
+    writeFile(root / "gradle.properties",
+      "org.gradle.java.home=" & daemonJdk.replace("\\", "\\\\") & "\n")
+    let withDaemonJdk = token()
+    check withDaemonJdk != jdk17
+    writeFile(daemonJdk / "release", "JAVA_VERSION=\"23\"\n")
+    check token() != withDaemonJdk
+    # An init script added to the installation the launcher runs.
+    let beforeInitD = token()
+    createDir(installation / "init.d")
+    writeFile(installation / "init.d" / "mirror.gradle",
+      "allprojects { repositories { mavenCentral() } }\n")
+    let withInitD = token()
+    check withInitD != beforeInitD
+    writeFile(installation / "init.d" / "mirror.gradle", "// changed\n")
+    check token() != withInitD
+    # A wrapper's distribution is named by the wrapper's properties, an
+    # input; the init scripts of a ``gradle`` launcher are not its own.
+    let wrapped = token(wrapper = true)
+    writeFile(installation / "init.d" / "mirror.gradle", "// again\n")
+    check token(wrapper = true) == wrapped
 
   test "emitFragment: hello-binary fixture produces a single build action":
     if not gradleToolchainReady(HelloBinaryFixture):
