@@ -683,7 +683,7 @@ proc runProfileBinary*(outBinary: string): tuple[
 proc profileCCompilerRemedy*(): string =
   ## The remedy the profile compile's capability refusal prints. It differs
   ## from the recipe compile's `cCompilerOverrideRemedy`, which offers to
-  ## unset the override and use the pinned bootstrap compiler: the profile
+  ## unset the override and use the recipe bootstrap's compiler: the profile
   ## compile provisions none, so unsetting `REPRO_BOOTSTRAP_CC` only selects
   ## the first `NimDefaultCCompilerExe` on `PATH` (`resolveProfileCCompiler`).
   "Set " & bootstrapCCompilerEnv & " to the absolute path of a working " &

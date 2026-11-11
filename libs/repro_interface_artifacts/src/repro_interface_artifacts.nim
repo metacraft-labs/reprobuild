@@ -4636,12 +4636,14 @@ proc probeCCompiler*(cc: string; cacheDir = "";
   cachedCCompilerProbes[identity] = result
 
 proc requireUsableCCompiler*(cc, origin: string; cacheDir = "";
-                             extraArgs: seq[string] = @[]) =
+                             extraArgs: seq[string] = @[]; remedy = "") =
   ## Raise ``CCompilerUnusableError`` unless ``cc`` passes ``probeCCompiler``.
+  ## ``remedy`` replaces the host-generic ``cCompilerOverrideRemedy`` when
+  ## the caller knows the bootstrap route the compiler came from.
   let probe = probeCCompiler(cc, cacheDir, extraArgs)
   if not probe.usable:
     raise newException(CCompilerUnusableError,
-      cCompilerUnusableMessage(probe, origin))
+      cCompilerUnusableMessageFor(probe, origin, "recipe", remedy))
 
 when defined(windows):
   var warnedPathCCompiler = false

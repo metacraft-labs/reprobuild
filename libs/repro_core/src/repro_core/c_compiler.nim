@@ -99,13 +99,46 @@ proc bootstrapSysrootArgs*(): seq[string] =
     if sdk.len > 0:
       result = @["-isysroot", sdk]
 
-proc cCompilerOverrideRemedy*(): string =
-  ## How to point reprobuild at a different C compiler for its own compiles.
+# What an unset `REPRO_BOOTSTRAP_CC` selects on this host, for a remedy
+# printed where the bootstrap route is not known. It must match
+# `repro_tool_profiles.bootstrapCRoute`: only Windows and Linux hosts
+# WITH Nix get a compiler reprobuild provisions into its tool store.
+# macOS uses the Xcode Command Line Tools clang, and a Linux host
+# without Nix uses the system compiler, which reprobuild does not
+# provision. (The remedy used to promise a tool-store compiler on every
+# host, so a Linux host with neither Nix nor `/usr/bin/cc` was told to
+# unset a variable that was not set, to reach a compiler its route
+# never tries.)
+const hostBootstrapCCompilerSummary* =
+  when defined(windows):
+    "the pinned bootstrap compiler reprobuild provisions into its tool store"
+  elif defined(macosx):
+    "the Xcode Command Line Tools clang"
+  elif defined(linux):
+    "the bootstrap C compiler for this host: the pinned nixpkgs gcc " &
+      "reprobuild provisions into its tool store when the host has Nix, " &
+      "else the system C compiler at /usr/bin/cc, /usr/bin/gcc or " &
+      "/usr/bin/clang, which reprobuild does not provision"
+  else:
+    "the system C compiler at /usr/bin/cc, /usr/bin/gcc or " &
+      "/usr/bin/clang, which reprobuild does not provision"
+
+proc cCompilerOverrideInstruction*(): string =
+  ## The first half of every C compiler remedy: how to name a compiler
+  ## explicitly through `REPRO_BOOTSTRAP_CC`.
   "Set " & bootstrapCCompilerEnv & " to the absolute path of a working " &
     (when defined(windows): "64-bit MinGW-w64 gcc.exe"
-     else: "C compiler for this host (under Nix, a wrapped `clang-wrapper-*` or `gcc-wrapper-*` store path, not an unwrapped `clang-*` or `gcc-*` binary)") &
-    ", or unset it to use the pinned bootstrap compiler reprobuild " &
-    "provisions into its tool store."
+     else: "C compiler for this host (under Nix, a wrapped `clang-wrapper-*` or `gcc-wrapper-*` store path, not an unwrapped `clang-*` or `gcc-*` binary)")
+
+proc cCompilerOverrideRemedy*(
+    unsetSelects = hostBootstrapCCompilerSummary): string =
+  ## How to point reprobuild at a different C compiler for its own compiles.
+  ## `unsetSelects` names what an unset `REPRO_BOOTSTRAP_CC` falls back to;
+  ## a caller that knows the bootstrap route passes that route's own text
+  ## (`repro_tool_profiles.bootstrapCRemedy`), so the remedy never offers a
+  ## compiler the route does not try.
+  cCompilerOverrideInstruction() & ", or unset it to use " & unsetSelects &
+    "."
 
 proc cCompilerFamily*(cc: string): string
 

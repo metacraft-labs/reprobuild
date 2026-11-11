@@ -103,7 +103,17 @@ suite "a bootstrap provisioning failure is a hard failure":
       check "could not provision the C compiler" in err.msg
       check missing in err.msg
       check missingBuilt in err.msg
-      check "remedy: " in err.msg
+      # The remedy names only what this route can reach. It used to offer
+      # "the pinned bootstrap compiler reprobuild provisions into its tool
+      # store", which the system route never tries: a Nix-less Linux host
+      # without `/usr/bin/cc` was told to unset a variable that was unset.
+      check err.msg.endsWith("\n  remedy: " &
+        bootstrapCRemedy(bcrSystem, @[missing]))
+      check "tool store." notin err.msg
+      check "unset it" notin err.msg
+      check "libc6-dev" in err.msg
+      check (missing & " exists and compiles") in err.msg
+      check "the system compiler is a precondition" in err.msg
     check raised
     # The pinned-archive route, against a store it cannot write (or, off
     # Windows, a host with no such archive): refused the same way.
@@ -136,6 +146,41 @@ suite "a bootstrap provisioning failure is a hard failure":
       check raised
       # Refused BEFORE anything was fetched in its place.
       check not dirExists(dir / "store" / "prefixes")
+
+suite "the C compiler remedy names what the route reaches":
+
+  test "only the archive and Nix routes promise a tool-store compiler":
+    for route in [bcrArchive, bcrNix]:
+      check "provisions into its tool store" in bootstrapCUnsetSelects(route)
+      check "provisions into its tool store" in bootstrapCRemedy(route)
+    for route in [bcrSystem, bcrXcode]:
+      checkpoint $route
+      check "tool store" notin bootstrapCUnsetSelects(route)
+      check "tool store" notin bootstrapCRemedy(route)
+    check "/usr/bin/cc" in bootstrapCUnsetSelects(bcrSystem)
+    check "Xcode" in bootstrapCUnsetSelects(bcrXcode)
+
+  test "a system compiler that fails the probe gets the system remedy":
+    # A `/usr/bin/cc` that exists but cannot compile -- a distribution gcc
+    # without its libc headers, say -- must be told to install them, not to
+    # unset an override that was never set.
+    when not defined(windows):
+      let dir = createTempDir("repro-bootstrap-cc-system-broken-", "")
+      defer: removeDir(dir)
+      let fake = dir / "cc"
+      writeFile(fake, "this is not a compiler\n")
+      setFilePermissions(fake, {fpUserRead, fpUserWrite, fpUserExec})
+      var raised = false
+      try:
+        discard provisionBootstrapCCompiler(dir / "store", bcrSystem, @[fake])
+      except CCompilerUnusableError as err:
+        raised = true
+        checkpoint err.msg
+        check fake in err.msg
+        check err.msg.endsWith("\n  remedy: " &
+          bootstrapCRemedy(bcrSystem, @[fake]))
+        check "tool store." notin err.msg
+      check raised
 
 suite "the no-Nix C compiler route":
 
