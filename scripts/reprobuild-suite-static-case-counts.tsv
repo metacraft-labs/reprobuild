@@ -1410,7 +1410,7 @@ tests/e2e/home-set-get/t_e2e_repro_home_set_triggers_focused_rebuild.nim	nim	1
 tests/e2e/io-monitor/t_debug_io_monitor_reads_monitor_depfile.nim	nim	0
 tests/e2e/launcher-isolation/t_e2e_windows_launcher_isolation.nim	nim	0
 tests/e2e/local-build-engine/t_e2e_create_dmg_reruns_over_its_image.nim	nim	1
-tests/e2e/local-build-engine/t_e2e_local_reprobuild_project_build.nim	nim	19
+tests/e2e/local-build-engine/t_e2e_local_reprobuild_project_build.nim	nim	20
 tests/e2e/local-build-engine/t_e2e_m51_dsl_stdlib_file_ops.nim	nim	6
 tests/e2e/local-build-engine/t_e2e_provider_graph_tracks_binary.nim	nim	1
 tests/e2e/local-build-engine/t_e2e_repro_build_multiple_named_targets.nim	nim	2

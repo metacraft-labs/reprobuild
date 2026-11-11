@@ -3554,6 +3554,7 @@
             "entries",
             "invalidRoot",
             "loweredGraphCachePath",
+            "missingEnv",
             "missingRoot",
             "pathValue",
             "projectEnv",
@@ -3585,6 +3586,7 @@
             "entries",
             "invalidRoot",
             "loweredGraphCachePath",
+            "missingEnv",
             "missingRoot",
             "pathValue",
             "projectEnv",
@@ -3616,6 +3618,7 @@
             "entries",
             "invalidRoot",
             "loweredGraphCachePath",
+            "missingEnv",
             "missingRoot",
             "pathValue",
             "projectEnv",
@@ -3629,7 +3632,7 @@
             "toolPath",
             "traceEnv"
           ],
-          "line": 1302,
+          "line": 1310,
           "path": "tests/e2e/local-build-engine/t_e2e_local_reprobuild_project_build.nim",
           "patterns": [
             "nim-argv"
@@ -33714,7 +33717,7 @@
       "requiresReproBinary": true,
       "source": "tests/e2e/local-build-engine/t_e2e_local_reprobuild_project_build.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 19,
+      "staticCaseCount": 20,
       "staticallyDetectedRuntimeCompilerFlow": true,
       "targetOs": "soAny"
     },
