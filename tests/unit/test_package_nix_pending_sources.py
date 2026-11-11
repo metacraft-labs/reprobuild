@@ -30,7 +30,7 @@ import unittest
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / 'scripts'))
 from check_package_nix_pending_sources import (  # noqa: E402
-    NIM_FORK_NIX, PACKAGE_NIX, TABLE, check)
+    NIM_FORK_NIX, PACKAGE_NIX, TABLE, check, src_lock_text)
 
 A1, A2 = 'a1' * 20, 'a2' * 20
 B_OLD, B_NEW = 'b1' * 20, 'b2' * 20
@@ -153,6 +153,38 @@ class PendingSourceFixtures(unittest.TestCase):
         self.assertEqual(pending, [])
         self.assertEqual(len(errors), 1, errors)
         self.assertIn('d' * 40, errors[0])
+
+
+class SrcCommitFetch(unittest.TestCase):
+    """A clone that lacks the `src` commit fetches it without becoming shallow."""
+
+    def test_a_full_clone_fetches_the_missing_src_commit_and_stays_full(self):
+        with tempfile.TemporaryDirectory() as temp:
+            origin, clone = Path(temp) / 'origin', Path(temp) / 'clone'
+            origin.mkdir()
+            git(origin, 'init', '-q', '-b', 'main')
+            git(origin, 'config', 'user.email', 't@example.invalid')
+            git(origin, 'config', 'user.name', 'Tester')
+            git(origin, 'config', 'commit.gpgsign', 'false')
+            (origin / 'flake.lock').write_text(flake_lock({'a-src': github(A1, 'sha256-a1=')}))
+            git(origin, 'add', '.')
+            git(origin, 'commit', '-q', '-m', 'main')
+            # The `src` commit is reachable only from a ref a clone does not fetch.
+            git(origin, 'checkout', '-q', '-b', 'release')
+            (origin / 'flake.lock').write_text(flake_lock({'a-src': github(A2, 'sha256-a2=')}))
+            git(origin, 'commit', '-q', '-am', 'the src commit')
+            src = git(origin, 'rev-parse', 'HEAD')
+            git(origin, 'update-ref', 'refs/keep/src', src)
+            git(origin, 'checkout', '-q', 'main')
+            git(origin, 'branch', '-q', '-D', 'release')
+            subprocess.run(['git', 'clone', '-q', '--no-local', origin.as_uri(), str(clone)],
+                           check=True)
+            self.assertNotEqual(subprocess.run(['git', '-C', str(clone), 'cat-file', '-e',
+                                                f'{src}^{{commit}}']).returncode, 0)
+            text, why = src_lock_text(clone, src, 'git')
+            self.assertEqual(why, '')
+            self.assertIn(A2, text)
+            self.assertEqual(git(clone, 'rev-parse', '--is-shallow-repository'), 'false')
 
 
 class PendingSourcesRealTree(unittest.TestCase):

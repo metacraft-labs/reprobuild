@@ -57554,7 +57554,7 @@
       "requiresReproBinary": false,
       "source": "tests/unit/test_package_nix_pending_sources.py",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 9,
+      "staticCaseCount": 10,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

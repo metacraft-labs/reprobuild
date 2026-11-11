@@ -315,7 +315,9 @@ python3 scripts/check_flake_lock_derived_fields.py
 # ACCEPTED
 #
 #   name                -- lock-resolved; no explicit ref to verify.
-#   name=<40-hex sha>   -- must agree with applicable repro/flake lock pins.
+#   name=<any ref>      -- refused when repro.lock pins `name`: list it bare
+#                          (scripts/check_sibling_lock_pins.py).
+#   name=<40-hex sha>   -- must agree with flake.lock's pin, when it has one.
 #   name=<ref>          -- must exist as a branch or tag in that repo, now;
 #                          and if <ref> is `main`, that repo's default branch
 #                          must still be `main`.
