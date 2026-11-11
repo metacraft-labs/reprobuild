@@ -388,7 +388,7 @@ libs/repro_deploy_agent/tests/t_repro_deploy_agent_unsupported_base_is_operator_
 libs/repro_deploy_agent/tests/t_repro_https_cache_end_to_end.nim	nim	1
 libs/repro_distributed_worker/tests/t_reach_goal_derivation_and_lease_plumbing.nim	nim	10
 libs/repro_distributed_worker/tests/t_signer_closes_after_its_early_returns.nim	nim	1
-libs/repro_dsl_stdlib/tests/t_addon_apt_closure.nim	nim	38
+libs/repro_dsl_stdlib/tests/t_addon_apt_closure.nim	nim	41
 libs/repro_dsl_stdlib/tests/t_addon_apt_closure_trixie_armhf.nim	nim	2
 libs/repro_dsl_stdlib/tests/t_apt_deb_reader_streams.nim	nim	4
 libs/repro_dsl_stdlib/tests/t_c1_dsl_parse.nim	nim	12
@@ -604,6 +604,7 @@ libs/repro_local_store/tests/t_store_bundle_roundtrip.nim	nim	5
 libs/repro_local_store/tests/t_store_concurrent_first_open_waits.nim	nim	2
 libs/repro_local_store/tests/t_store_copy.nim	nim	22
 libs/repro_local_store/tests/t_store_optimise_dedup.nim	nim	2
+libs/repro_local_store/tests/t_store_refuses_squatted_cas_and_planted_prefixes.nim	nim	12
 libs/repro_local_store/tests/t_store_use_record_lost_to_a_writer_leaves_no_lock.nim	nim	1
 libs/repro_local_store/tests/t_win_store_gc_refuses_referenced_entry.nim	nim	9
 libs/repro_local_store/tests/t_win_store_hardlink_cap_falls_back_per_file.nim	nim	7

@@ -180,6 +180,9 @@ type
     mechanism*: LinkMechanism
     perFileFallback*: bool
     alreadyPresent*: bool
+    repaired*: bool
+      ## The digest path held bytes that did not verify and this call
+      ## replaced them (``storeCasFileBlobDetailed``).
     sourceChanged*: bool
     diagnostic*: string
 
@@ -214,6 +217,7 @@ proc casPutPathDetailed*(cas: var CasStore; path: string;
     mechanism: outcome.mechanism,
     perFileFallback: outcome.perFileFallback,
     alreadyPresent: outcome.alreadyPresent,
+    repaired: outcome.repaired,
     sourceChanged: outcome.sourceChanged,
     diagnostic: outcome.diagnostic)
 

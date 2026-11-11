@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 35,
-    "nimTestBinaries": 2709,
+    "nimTestBinaries": 2710,
     "pureUnitConsolidationGroups": 79,
-    "pureUnitTests": 746,
+    "pureUnitTests": 747,
     "staticallyDetectedRuntimeCompilerFlowTests": 137,
-    "testEntries": 2749
+    "testEntries": 2750
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -567,7 +567,7 @@
       "targetOs": "soAny"
     },
     {
-      "count": 7,
+      "count": 8,
       "defines": [],
       "dependencyShape": [
         "repro_core",
@@ -579,6 +579,7 @@
         "libs/repro_local_store/tests/t_portable_memo.nim",
         "libs/repro_local_store/tests/t_prefix_owning_path.nim",
         "libs/repro_local_store/tests/t_sqlite_smoke.nim",
+        "libs/repro_local_store/tests/t_store_refuses_squatted_cas_and_planted_prefixes.nim",
         "libs/repro_local_store/tests/t_store_use_record_lost_to_a_writer_leaves_no_lock.nim",
         "libs/repro_local_store/tests/t_win_store_gc_refuses_referenced_entry.nim",
         "libs/repro_local_store/tests/t_win_store_hardlink_cap_falls_back_per_file.nim"
@@ -1566,7 +1567,7 @@
       "graph-fixture": 21,
       "integration": 1491,
       "platform/destructive": 173,
-      "pure unit": 746,
+      "pure unit": 747,
       "unclassified": 318
     },
     "graphOwnedTestArtifacts": [
@@ -1781,9 +1782,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2709,
+    "nimTestBinaryCount": 2710,
     "pythonTestFileCount": 40,
-    "testEntryCount": 2749
+    "testEntryCount": 2750
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -15142,8 +15143,8 @@
       "owner": "libs/repro_dsl_stdlib",
       "requiresReproBinary": false,
       "source": "libs/repro_dsl_stdlib/tests/t_addon_apt_closure.nim",
-      "sourceSuiteCount": 9,
-      "staticCaseCount": 38,
+      "sourceSuiteCount": 10,
+      "staticCaseCount": 41,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -19130,6 +19131,24 @@
       "source": "libs/repro_local_store/tests/t_store_optimise_dedup.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 2,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_store_refuses_squatted_cas_and_planted_prefixes",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_core",
+        "repro_local_store"
+      ],
+      "owner": "libs/repro_local_store",
+      "requiresReproBinary": false,
+      "source": "libs/repro_local_store/tests/t_store_refuses_squatted_cas_and_planted_prefixes.nim",
+      "sourceSuiteCount": 2,
+      "staticCaseCount": 12,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
