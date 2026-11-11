@@ -1,4 +1,4 @@
-import std/[compilesettings, json, os, osproc, sequtils, strutils, tempfiles, unittest]
+import std/[algorithm, compilesettings, json, os, osproc, sequtils, strutils, tempfiles, unittest]
 import repro_test_support/reasoned_skip
 
 import repro_tool_profiles
@@ -852,7 +852,8 @@ when defined(macosx) or defined(linux):
       "      inputs = @[\"public/main.css\"])\n" &
       "    defaultBuildAction(aggregate)\n")
 
-proc writeM53BuiltinFsProject(path: string; runSalt = "") =
+proc writeM53BuiltinFsProject(path: string; runSalt = "";
+                              declaredOnlyUse = "") =
   ## `runSalt`: a case that asserts the provider is COMPILED on its first
   ## build passes a value unique to the run (its temp root). The provider
   ## compile is shared by every copy of identical recipe bytes that shares
@@ -860,11 +861,18 @@ proc writeM53BuiltinFsProject(path: string; runSalt = "") =
   ## §"Engine-internal recipe compiles"), and the suite's action cache
   ## outlives a run, so without it the recipe this case wrote last time - or
   ## another case's identical one - would serve that compile.
+  ##
+  ## `declaredOnlyUse`: a `uses:` requirement the package declares but that
+  ## none of its built-in actions runs. Every action here is built-in, so
+  ## such a tool is outside every action closure of the graph.
   createDir(path.splitPath.head)
   writeFile(path,
     (if runSalt.len > 0: "# fixture run: " & runSalt & "\n" else: "") &
     "import repro_project_dsl\n\n" &
     "package m53Fs:\n" &
+    (if declaredOnlyUse.len > 0:
+      "  uses:\n    \"" & declaredOnlyUse & "\"\n\n"
+    else: "") &
     "  build:\n" &
     "    fs.writeText(actionId = \"write-source\",\n" &
     "      output = \"src/input.txt\",\n" &
@@ -1696,6 +1704,72 @@ suite "e2e_local_reprobuild_project_build":
         "reprobuild.debug.lowered-graph-cache.v1"
       check artifactJson{"actions"}.getElems().anyIt(
         it{"id"}.getStr() == "stamp")
+
+    test "graph inspection resolves only the tools its lowered graph runs":
+      # `repro graph` lowers the same graph `repro build` does, so it must
+      # provision the same tools: those an action of the inspected closure
+      # runs. A declared tool that no action runs must not be resolved -- it
+      # is unavailable here, and the build of this project succeeds without
+      # it. A tool an action DOES run must still refuse inspection when it
+      # cannot be resolved.
+      let repoRoot = getCurrentDir()
+      let tempRoot = createTempDir("repro-graph-declared-only-tool", "")
+      defer: removeDirEventually(tempRoot)
+
+      var daemon = ensureRunQuotaDaemon(repoRoot)
+      defer:
+        daemon.process.terminate()
+        discard daemon.process.waitForExit()
+        daemon.process.close()
+        if pathExists(daemon.socket):
+          removeFile(daemon.socket)
+
+      let reproBin = reproBinary(repoRoot)
+      let projectRoot = tempRoot / "project"
+      writeM53BuiltinFsProject(projectRoot / "reprobuild.nim",
+        declaredOnlyUse = "m19-missing-tool >=1.0 <2.0")
+      let projectEnv = testEnvForProject(projectRoot, getEnv("PATH"))
+      # The tool really is unresolvable here: the declared-only arm below
+      # would prove nothing if it were on PATH.
+      check findExe("m19-missing-tool").len == 0
+
+      # Normal planning: the build scopes tool identities to the selected
+      # closure, so it succeeds without the declared-only tool and names the
+      # topology inspection must reproduce.
+      let built = buildCurrentProject(reproBin, projectRoot, getEnv("PATH"))
+      check built.contains("selected tool identities: 0/1")
+      check built.contains("scheduler: actions=4")
+      let expectedActions = @["copy-file", "ensure-out", "stamp",
+        "write-source"]
+
+      # Omitted target: the default action's closure.
+      let defaultGraph = parseJson(requireSuccess(shellCommand([
+        reproBin, "graph", "--tool-provisioning=path", "--json"
+      ], projectEnv), projectRoot))
+      check defaultGraph{"selectedActionId"}.getStr() == "stamp"
+      check defaultGraph{"actions"}.getElems().mapIt(
+        it{"id"}.getStr()).sorted() == expectedActions
+
+      # Explicit `.`: no selection, so the whole action graph is lowered and
+      # still no action runs the declared-only tool.
+      let wholeGraph = parseJson(requireSuccess(shellCommand([
+        reproBin, "graph", ".", "--format=json", "--tool-provisioning=path"
+      ], projectEnv), projectRoot))
+      check wholeGraph{"selectedActionId"}.getStr() == ""
+      check wholeGraph{"actions"}.getElems().mapIt(
+        it{"id"}.getStr()).sorted() == expectedActions
+
+      # An action that runs the unresolvable tool keeps inspection refused,
+      # exactly as its build is refused.
+      let missingRoot = tempRoot / "missing-project"
+      writeMissingProject(missingRoot / "reprobuild.nim")
+      let missingEnv = testEnvForProject(missingRoot, getEnv("PATH"))
+      let missing = requireFailure(shellCommand([
+        reproBin, "graph", "--tool-provisioning=path", "--json"
+      ], missingEnv), missingRoot)
+      check missing.contains("tool-resolution failed")
+      check missing.contains("m19-missing-tool")
+      check not fileExists(missingRoot / ".repro" / "missing-ran.log")
 
     test "provider compile fast path skips no-op and invalidates provider sources":
       let repoRoot = getCurrentDir()
