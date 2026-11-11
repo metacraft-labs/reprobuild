@@ -1124,8 +1124,20 @@ proc applySidecarProfile(profile: var PathOnlyToolProfile;
     else:
       discard
 
+proc enforcePathToolVersionRange(profile: PathOnlyToolProfile;
+                                 useDef: InterfaceToolUse)
+  ## Defined beside `enforceUsesVersionRange`.
+
 proc resolvePathOnlyTool(useDef: InterfaceToolUse; pathValue: string;
-                         lookup: SidecarPathLookup): PathOnlyToolProfile =
+                         lookup: SidecarPathLookup;
+                         holdToDeclaredRange = true): PathOnlyToolProfile =
+  ## ``holdToDeclaredRange``: refuse, with ``UsesVersionOutOfRange``, an
+  ## executable whose version probe reports a version outside the recipe's
+  ## declared ``uses:`` range (``enforcePathToolVersionRange``). Every host
+  ## ``$PATH`` lookup holds to it; only ``toolProfileFor``'s cross-repo
+  ## producer arm passes ``false``, because that search list is a sibling
+  ## recipe's realized bin dirs, not the host's ``$PATH``, and a sibling's
+  ## realization is not range-checked on any other route either.
   let searchList = splitPathList(pathValue)
 
   # Sidecar-first lookup: when a generator already knows the tool's
@@ -1152,6 +1164,8 @@ proc resolvePathOnlyTool(useDef: InterfaceToolUse; pathValue: string;
       result.applySidecarProfile(sidecar)
       result.probes = collectConfiguredProbes(result.resolvedExecutablePath,
         useDef.packageSelector, useDef.executableName)
+      if holdToDeclaredRange:
+        enforcePathToolVersionRange(result, useDef)
       refreshProfileIdentity(result)
       return
 
@@ -1176,6 +1190,8 @@ proc resolvePathOnlyTool(useDef: InterfaceToolUse; pathValue: string;
 
   result.probes = collectConfiguredProbes(resolved,
     useDef.packageSelector, useDef.executableName)
+  if holdToDeclaredRange:
+    enforcePathToolVersionRange(result, useDef)
 
   refreshProfileIdentity(result)
 
@@ -2062,6 +2078,9 @@ proc nixStorePathVersion*(path: string): string =
   ## ``nixStorePathNameVersion``.
   nixStorePathNameVersion(path).version
 
+proc versionRangeRefusal(useDef: InterfaceToolUse;
+                         realizedVersion, realization, remedy: string): string
+
 proc usesVersionRangeRefusal*(useDef: InterfaceToolUse;
                               realizedVersion, realization: string): string =
   ## The refusal, or "", for a realization that reports `realizedVersion`
@@ -2075,6 +2094,17 @@ proc usesVersionRangeRefusal*(useDef: InterfaceToolUse;
   ## version could not be verified" is not "the version is in range"
   ## (reprobuild-pm issue 2026-10-30-path-mode-realizes-a-nix-rustc-outside-
   ## the-declared-version-range).
+  versionRangeRefusal(useDef, realizedVersion, realization,
+    "The pinned nixpkgs does not carry a version in range: pin a " &
+    "realization that does (a tarball arm, or `" & useDef.executableName &
+    "` on PATH), or widen the range")
+
+proc versionRangeRefusal(useDef: InterfaceToolUse;
+                         realizedVersion, realization, remedy: string):
+    string =
+  ## ``usesVersionRangeRefusal`` with the out-of-range remedy supplied by the
+  ## route: what the operator can do differs between a nix arm (pin another
+  ## realization) and an executable on PATH (put another one ahead of it).
   let range = requestedUsesVersionRange(useDef)
   if range.len == 0:
     return ""
@@ -2090,10 +2120,7 @@ proc usesVersionRangeRefusal*(useDef: InterfaceToolUse;
   "tool-resolution failed: `" & useDef.packageSelector &
     "` requested by uses \"" & useDef.rawConstraint & "\" was realized by " &
     realization & ", which reports version " & realizedVersion &
-    ", outside the declared range '" & range & "'. The pinned nixpkgs " &
-    "does not carry a version in range: pin a realization that does " &
-    "(a tarball arm, or `" & useDef.executableName &
-    "` on PATH), or widen the range"
+    ", outside the declared range '" & range & "'. " & remedy
 
 proc storePathNamesRequestedPackage(pname: string; useDef: InterfaceToolUse;
                                     profile: PathOnlyToolProfile): bool =
@@ -2121,11 +2148,12 @@ proc storePathNamesRequestedPackage(pname: string; useDef: InterfaceToolUse;
 
 type
   UsesVersionOutOfRange* = object of OSError
-    ## A ``nixPackage`` realization whose reported version the recipe's
-    ## ``uses:`` range refuses (``usesVersionRangeRefusal``). A subtype of
-    ## ``OSError`` so every existing handler still catches it, and distinct
-    ## so ``tpmNix`` can tell "nixpkgs builds the wrong version" from a
-    ## realization that failed.
+    ## A ``nixPackage`` realization, or an executable path mode found on
+    ## ``$PATH``, whose reported version the recipe's ``uses:`` range
+    ## refuses (``usesVersionRangeRefusal``, ``pathToolVersionRangeRefusal``).
+    ## A subtype of ``OSError`` so every existing handler still catches it,
+    ## and distinct so ``tpmNix`` and ``tpmPathOnly`` can tell "this
+    ## realization is the wrong version" from one that failed.
 
 proc enforceUsesVersionRange*(profile: PathOnlyToolProfile;
                               useDef: InterfaceToolUse) =
@@ -2149,6 +2177,37 @@ proc enforceUsesVersionRange*(profile: PathOnlyToolProfile;
       version = named.version
   let refusal = usesVersionRangeRefusal(useDef, version,
     "nix://" & profile.nixSelector & " (" & profile.resolvedExecutablePath & ")")
+  if refusal.len > 0:
+    raise newException(UsesVersionOutOfRange, refusal)
+
+proc pathToolVersionRangeRefusal*(profile: PathOnlyToolProfile;
+                                  useDef: InterfaceToolUse): string =
+  ## The refusal, or "", for an executable path mode found on ``$PATH``
+  ## (reprobuild-pm issue 2026-10-27-path-provisioned-gcc-is-not-probed-so-
+  ## fpc-gcc-2-95-fails-c-builds-cryptically). Path mode took the first
+  ## match unchecked, so a host whose ``$PATH`` lists Free Pascal's bundled
+  ## gcc 2.95 ahead of a current one built every ``uses "gcc >=12"`` recipe
+  ## with gcc 2.95 and failed inside the compile.
+  ##
+  ## Unlike the nix arm, a probe that reports NO version is accepted: path
+  ## mode has always taken such a tool weakly, and refusing it would change
+  ## every recipe whose tool has no answering version probe (decision of
+  ## 2026-11-11 on that issue). Only a version that is reported and outside
+  ## the range is refused.
+  let version = realizedVersionOf(profile)
+  if version.len == 0:
+    return ""
+  versionRangeRefusal(useDef, version,
+    "the executable on PATH at " & profile.resolvedExecutablePath,
+    "Put an in-range `" & useDef.executableName & "` ahead of it on PATH, " &
+    "declare an archive inside the range for this host, or widen the range")
+
+proc enforcePathToolVersionRange(profile: PathOnlyToolProfile;
+                                 useDef: InterfaceToolUse) =
+  ## Raise ``UsesVersionOutOfRange`` for ``pathToolVersionRangeRefusal``.
+  ## ``toolProfileFor``'s ``tpmPathOnly`` arm treats it like an absent tool
+  ## and falls through to the sibling recipe, the host archive and Nix.
+  let refusal = pathToolVersionRangeRefusal(profile, useDef)
   if refusal.len > 0:
     raise newException(UsesVersionOutOfRange, refusal)
 
@@ -9839,6 +9898,44 @@ proc resolveEnvironmentPrefixTool*(useDef: InterfaceToolUse):
     cachePortability: cpLocalOnly)
   refreshProfileIdentity(result)
 
+proc pathModeFallThrough(useDef: InterfaceToolUse; storeRoot: string;
+                         profile: var PathOnlyToolProfile): bool =
+  ## What ``toolProfileFor``'s ``tpmPathOnly`` arm realizes when ``$PATH``
+  ## does not answer for ``useDef``: the sibling source recipe's realized
+  ## artefact, then the host archive (range-filtered by
+  ## ``selectTarballRecord``), then the pinned Nix channel on Nix-capable
+  ## hosts. False when the use declares none of them, so the caller's own
+  ## PATH failure stands; an arm that is declared but fails raises.
+  result = true
+  let sibling = tryResolveFromSourceTool(useDef,
+    hostSide = useDef.depKind == DepKindNative)
+  if sibling.kind == rrResolved:
+    profile = sibling.profile
+    return
+  if hasHostTarballProvisioning(useDef):
+    try:
+      profile = resolveTarballTool(useDef, storeRoot)
+    except TarballHostLoaderMissing:
+      # The host cannot run the generic-Linux build (NixOS). The
+      # package's pinned Nix channel builds for this host, so prefer it
+      # over a binary that would only fail with exit 127 later.
+      if (defined(linux) or defined(macosx)) and
+          useDef.nixProvisioning.len > 0:
+        profile = resolveNixTool(useDef, storeRoot)
+      else:
+        raise
+  elif (defined(linux) or defined(macosx)) and
+      useDef.nixProvisioning.len > 0:
+    # Some upstreams, such as Cap'n Proto, do not publish direct
+    # Linux/macOS binary tarballs. In path mode, let Nix-capable
+    # hosts use the package's pinned Nix channel instead of failing
+    # on a tarball entry that only targets another OS.
+    profile = resolveNixTool(useDef, storeRoot)
+  elif useDef.tarballProvisioning.len > 0:
+    profile = resolveTarballTool(useDef, storeRoot)
+  else:
+    result = false
+
 proc toolProfileFor(useDef: InterfaceToolUse; mode: ToolProvisioningMode;
                     pathValue, storeRoot: string;
                     producerExecutableSelectors:
@@ -9853,7 +9950,8 @@ proc toolProfileFor(useDef: InterfaceToolUse; mode: ToolProvisioningMode;
     let producerPath =
       producerExecutableSelectors[useDef.packageSelector].binDirs.
         join($PathSep)
-    return resolvePathOnlyTool(useDef, producerPath, pathLookup)
+    return resolvePathOnlyTool(useDef, producerPath, pathLookup,
+      holdToDeclaredRange = false)
   # SC-3: a selector materialized as a library-channel producer is consumed
   # through the aux channels, not PATH — skip path-mode executable resolution
   # for it and hand back a profile carrying the producer's realized library
@@ -9925,36 +10023,35 @@ proc toolProfileFor(useDef: InterfaceToolUse; mode: ToolProvisioningMode;
       # (Package-Model.md §"Environment-provided library prefixes"). It is
       # never reached under --target: the branch above has answered.
       return resolveEnvironmentPrefixTool(useDef)
+    # The fall-through below serves two cases alike: PATH has no such
+    # executable (`OSError`), or the one it has reports a version outside
+    # the declared range (`UsesVersionOutOfRange`, reprobuild-pm issue
+    # 2026-10-27-path-provisioned-gcc-is-not-probed-so-fpc-gcc-2-95-fails-
+    # c-builds-cryptically; the same fall-through decision 35(b) of
+    # CLI/build.md §Notes makes for the nix arm). An out-of-range PATH tool
+    # is never used: when nothing below realizes the tool inside the range,
+    # the range refusal is what the operator sees, not the fallback's own
+    # failure.
+    var pathRefusal = ""
     try:
       result = resolvePathOnlyTool(useDef, pathValue, pathLookup)
-    except OSError:
-      let sibling = tryResolveFromSourceTool(useDef,
-        hostSide = useDef.depKind == DepKindNative)
-      if sibling.kind == rrResolved:
-        return sibling.profile
-      if hasHostTarballProvisioning(useDef):
-        try:
-          result = resolveTarballTool(useDef, storeRoot)
-        except TarballHostLoaderMissing:
-          # The host cannot run the generic-Linux build (NixOS). The
-          # package's pinned Nix channel builds for this host, so prefer it
-          # over a binary that would only fail with exit 127 later.
-          if (defined(linux) or defined(macosx)) and
-              useDef.nixProvisioning.len > 0:
-            result = resolveNixTool(useDef, storeRoot)
-          else:
-            raise
-      elif (defined(linux) or defined(macosx)) and
-          useDef.nixProvisioning.len > 0:
-        # Some upstreams, such as Cap'n Proto, do not publish direct
-        # Linux/macOS binary tarballs. In path mode, let Nix-capable
-        # hosts use the package's pinned Nix channel instead of failing
-        # on a tarball entry that only targets another OS.
-        result = resolveNixTool(useDef, storeRoot)
-      elif useDef.tarballProvisioning.len > 0:
-        result = resolveTarballTool(useDef, storeRoot)
-      else:
-        raise
+    except UsesVersionOutOfRange as refusal:
+      pathRefusal = refusal.msg
+    except OSError as absent:
+      # The arms may catch exceptions of their own; name the PATH failure
+      # rather than re-raise whatever is current by then.
+      if not pathModeFallThrough(useDef, storeRoot, result):
+        raise absent
+    if pathRefusal.len > 0:
+      var fellThrough = false
+      try:
+        fellThrough = pathModeFallThrough(useDef, storeRoot, result)
+      except CatchableError as fallback:
+        raise newException(UsesVersionOutOfRange, pathRefusal &
+          ". No other realization inside the range was available: " &
+          fallback.msg)
+      if not fellThrough:
+        raise newException(UsesVersionOutOfRange, pathRefusal)
   of tpmNix:
     if nixModeTakesTarballArm(useDef):
       # The catalog declares no ``nixPackage`` arm for this tool (zig ships

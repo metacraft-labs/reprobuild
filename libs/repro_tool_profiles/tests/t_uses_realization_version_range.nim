@@ -1,6 +1,9 @@
 ## Acquisition plans must select only realizations satisfying a recipe's range.
-## No mocks: pure production planning over declared interface records; no download.
-import std/[options, strutils, unittest]
+## No mocks: pure production planning over declared interface records; no
+## download. The last suite drives path mode end to end against real
+## executables on a temporary ``$PATH`` and a real archive realized through the
+## realizer's own ``file://`` arm into a temporary store.
+import std/[options, os, osproc, strutils, tempfiles, unittest]
 import repro_interface_artifacts
 import repro_tool_profiles
 
@@ -409,3 +412,171 @@ suite "tool-provisioning=nix falls back to an in-range archive":
     withNix.nixProvisioning.add(InterfaceNixProvisioning(
       selector: "nixpkgs#go", executablePath: "bin/go"))
     check not nixModeTakesTarballArm(withNix, linuxX86)
+
+# ---------------------------------------------------------------------------
+# Path mode holds the first match on $PATH to the declared range (reprobuild-pm
+# issue 2026-10-27-path-provisioned-gcc-is-not-probed-so-fpc-gcc-2-95-fails-c-
+# builds-cryptically). On a Windows CI runner Free Pascal's bundled gcc 2.95
+# sat on PATH ahead of every usable gcc, and `uses "gcc >=12"` recipes were
+# compiled with it. The fixture below is that host in miniature: a tool on
+# PATH whose `--version` prints `2.95`, against `>=12`.
+#
+# No mocks: the tool is a real executable run by the real version probe, the
+# resolution goes through `toolBuildIdentity` -- the entry point the build
+# uses -- and the in-range archive is a real tar.gz this test builds, realized
+# through the `file://` arm into a temporary store with the shared cache
+# switched off, so nothing is downloaded or published.
+# ---------------------------------------------------------------------------
+
+const PathFixtureTool = "pathrange-fixture-cc"
+  ## Not `gcc`: a real `gcc` name would let a sibling source recipe or the
+  ## stdlib's own `gcc` provisioning answer, and the point is to see which
+  ## arm path mode takes for exactly the arms this fixture declares.
+
+proc toolFileName(name: string): string =
+  when defined(windows): name & ".cmd" else: name
+
+proc writeTool(dir, name, versionOutput: string) =
+  ## A tool whose version probe prints ``versionOutput``.
+  createDir(dir)
+  let path = dir / toolFileName(name)
+  when defined(windows):
+    writeFile(path, "@echo off\r\necho " & versionOutput & "\r\n")
+  else:
+    writeFile(path, "#!/bin/sh\necho '" & versionOutput & "'\n")
+    setFilePermissions(path, {fpUserRead, fpUserWrite, fpUserExec,
+      fpGroupRead, fpGroupExec, fpOthersRead, fpOthersExec})
+
+proc pathFixtureUse(constraint: string): InterfaceToolUse =
+  InterfaceToolUse(packageSelector: PathFixtureTool,
+    executableName: PathFixtureTool,
+    rawConstraint: PathFixtureTool & " " & constraint)
+
+proc withArchive(useDef: InterfaceToolUse; archive, version: string):
+    InterfaceToolUse =
+  ## ``useDef`` with one host-agnostic archive arm declaring ``version``.
+  result = useDef
+  result.tarballProvisioning.add(InterfaceTarballProvisioning(
+    url: "file://" & archive, sha256: fileSha256Hex(archive),
+    archiveType: "tar.gz",
+    executablePath: "bin/" & toolFileName(PathFixtureTool),
+    packageId: PathFixtureTool & "@" & version, cpu: "any", os: "any",
+    lockIdentity: "fixture:" & PathFixtureTool & "@" & version))
+  result.tarballProvisioning[^1].detail.version = version
+
+proc pathModeProfile(useDef: InterfaceToolUse;
+                     pathValue, store: string): PathOnlyToolProfile =
+  let artifact = ProjectInterfaceArtifact(projectInterface: ProjectInterface(
+    projectName: "pathrange-fixture", packageName: "pathrange-fixture",
+    toolUses: @[useDef]))
+  let identity = toolBuildIdentity(artifact, tpmPathOnly,
+    pathValue = pathValue, storeRoot = store)
+  require identity.profiles.len == 1
+  identity.profiles[0]
+
+suite "path mode holds the tool on PATH to the declared range":
+  setup:
+    let root = createTempDir("repro-path-range-", "")
+    let savedCacheDisable = getEnv("REPRO_CACHE_DISABLE")
+    putEnv("REPRO_CACHE_DISABLE", "1")
+    let store = root / "store"
+    let oldBin = root / "fpc" / "bin"         # gcc 2.95, first on PATH
+    writeTool(oldBin, PathFixtureTool, "2.95")
+    let unversionedBin = root / "plain" / "bin"
+    writeTool(unversionedBin, PathFixtureTool, "usage: tool [options]")
+    let currentBin = root / "current" / "bin"
+    writeTool(currentBin, PathFixtureTool,
+      PathFixtureTool & " (GCC) 13.2.0")
+    # The in-range archive: the same tool, reporting 13.2.0.
+    let tree = root / "tree"
+    writeTool(tree / "bin", PathFixtureTool, PathFixtureTool & " 13.2.0")
+    let archive = root / "fixture-13.2.0.tar.gz"
+    # `tar` is one of the host tools the realizer itself requires
+    # (Dependency-Provisioning-In-Build-Graph.md §4.1).
+    let packed = execCmdEx("tar -czf " & quoteShell(archive) &
+      " -C " & quoteShell(tree) & " bin")
+
+  teardown:
+    if savedCacheDisable.len > 0:
+      putEnv("REPRO_CACHE_DISABLE", savedCacheDisable)
+    else:
+      delEnv("REPRO_CACHE_DISABLE")
+    removeDir(root)
+
+  test "an out-of-range version on PATH is refused by name":
+    let useDef = pathFixtureUse(">=12")
+    var message = ""
+    try:
+      discard resolvePathOnlyTool(useDef, oldBin)
+      checkpoint("expected a refusal, got a realization")
+      check false
+    except UsesVersionOutOfRange as err:
+      message = err.msg
+    checkpoint("message: " & message)
+    check (PathFixtureTool & " >=12") in message          # selector + range
+    check "'>=12'" in message                              # the range
+    check (oldBin / toolFileName(PathFixtureTool)) in message  # the path
+    check "reports version 2.95" in message                # what it said
+    check "ahead of it on PATH" in message                 # the PATH remedy
+    check "nixpkgs" notin message
+
+  test "with no archive declared, path mode's answer is the refusal":
+    var message = ""
+    try:
+      discard pathModeProfile(pathFixtureUse(">=12"), oldBin, store)
+      checkpoint("expected a refusal, got a realization")
+      check false
+    except UsesVersionOutOfRange as err:
+      message = err.msg
+    checkpoint("message: " & message)
+    check "reports version 2.95" in message
+    check (oldBin / toolFileName(PathFixtureTool)) in message
+
+  test "with an in-range archive declared, path mode realizes the archive":
+    require packed.exitCode == 0
+    let useDef = pathFixtureUse(">=12").withArchive(archive, "13.2.0")
+    let profile = pathModeProfile(useDef, oldBin, store)
+    checkpoint("realized: " & profile.resolvedExecutablePath)
+    check profile.installMethod == "tarball"
+    check profile.resolvedExecutablePath.startsWith(absolutePath(store))
+    check not profile.resolvedExecutablePath.startsWith(oldBin)
+    check realizedVersionOf(profile) == "13.2.0"
+
+  test "an archive outside the range does not replace it: the refusal stands":
+    require packed.exitCode == 0
+    # The archive is declared at 11.0.0 (its bytes do not matter: the range
+    # filter refuses the record before acquisition).
+    let useDef = pathFixtureUse(">=12").withArchive(archive, "11.0.0")
+    var message = ""
+    try:
+      discard pathModeProfile(useDef, oldBin, store)
+      checkpoint("expected a refusal, got a realization")
+      check false
+    except UsesVersionOutOfRange as err:
+      message = err.msg
+    checkpoint("message: " & message)
+    check "reports version 2.95" in message
+    check "No other realization inside the range" in message
+
+  test "controls: an in-range PATH tool, no range, and no reported version":
+    # In range on PATH: taken from PATH, as before.
+    let inRange = pathModeProfile(pathFixtureUse(">=12"), currentBin, store)
+    check inRange.installMethod == "path"
+    check inRange.resolvedExecutablePath ==
+      currentBin / toolFileName(PathFixtureTool)
+    # No declared range: 2.95 is accepted, as before.
+    let noRange = InterfaceToolUse(packageSelector: PathFixtureTool,
+      executableName: PathFixtureTool, rawConstraint: PathFixtureTool)
+    check pathModeProfile(noRange, oldBin, store).resolvedExecutablePath ==
+      oldBin / toolFileName(PathFixtureTool)
+    # A probe that reports no version keeps today's weak acceptance (the
+    # nix arm refuses it; path mode does not).
+    let unversioned = pathModeProfile(pathFixtureUse(">=12"), unversionedBin,
+      store)
+    check unversioned.installMethod == "path"
+    check unversioned.resolvedExecutablePath ==
+      unversionedBin / toolFileName(PathFixtureTool)
+    # Later PATH entries are not tried: the first match is the one refused.
+    expect UsesVersionOutOfRange:
+      discard pathModeProfile(pathFixtureUse(">=12"),
+        oldBin & $PathSep & currentBin, store)
