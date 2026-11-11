@@ -92,11 +92,14 @@ type
       ## connection instead of blocking.
     receiveTimeoutMs*: int
       ## Deadline for the peer to answer once connected; surfaced as
-      ## ``HttpError`` if it stalls. The status line and headers together
-      ## must arrive within it, as must each chunk-size line; each body
-      ## read, and each socket read or write of the TLS handshake, waits
-      ## at most this long. 30s default — large payloads on slow links
-      ## still fit, because the body as a whole has no deadline.
+      ## ``HttpError`` if it stalls. The TLS handshake must complete
+      ## within it, the request must be sent within it, the status line
+      ## and headers together must arrive within it, as must each
+      ## chunk-size line, and each body read returns within it. Over TLS
+      ## these hold against a peer that sends a TLS record a byte at a
+      ## time, not only against a silent one. 30s default — large
+      ## payloads on slow links still fit, because the body as a whole
+      ## has no deadline.
     connectTimeoutMs: int
       ## Deadline for opening a TCP connection, covering every address
       ## the host name resolves to. It applies to every user of the pool,
@@ -136,12 +139,16 @@ const
 proc newHttpPool*(maxConnections = DefaultMaxConnections;
                   receiveTimeoutMs = DefaultReceiveTimeoutMs;
                   connectTimeoutMs = DefaultConnectTimeoutMs): HttpPool =
-  ## ``connectTimeoutMs`` must be positive: there is deliberately no
-  ## "wait as long as the operating system does" setting, because that
-  ## is the unbounded stall the deadline exists to prevent.
+  ## ``connectTimeoutMs`` and ``receiveTimeoutMs`` must be positive:
+  ## there is deliberately no "wait as long as the operating system does"
+  ## setting, because that is the unbounded stall the deadlines exist to
+  ## prevent.
   if connectTimeoutMs <= 0:
     raise newException(ValueError,
       "connectTimeoutMs must be positive, got " & $connectTimeoutMs)
+  if receiveTimeoutMs <= 0:
+    raise newException(ValueError,
+      "receiveTimeoutMs must be positive, got " & $receiveTimeoutMs)
   HttpPool(
     connections: @[],
     maxConnections: maxConnections,
@@ -300,33 +307,202 @@ proc connectWithDeadline(sock: Socket; domain: Domain; host: string;
     raise newException(OSError, "no address found for " & host)
   raiseOSError(lastError)
 
-when defined(windows):
-  const
-    WinSoSndTimeo = cint(0x1005)
-    WinSoRcvTimeo = cint(0x1006)
+proc awaitIo(fd: SocketHandle; forWrite: bool; deadline: MonoTime): bool =
+  ## Waits until ``fd`` is readable (or, with ``forWrite``, writable), or
+  ## has an error or hang-up to report, for at most the time left before
+  ## ``deadline`` on the monotonic clock. Returns false when the deadline
+  ## passes first. A wait interrupted by a signal is resumed. Raises
+  ## ``OSError`` for a failure of the wait itself.
+  while true:
+    let remainingMs = (deadline - getMonoTime()).inMilliseconds
+    if remainingMs <= 0:
+      return false
+    let waitMs = cint(min(remainingMs, int64(high(cint))))
+    when defined(windows):
+      # A closed or reset connection is reported in the read set, and a
+      # failed one in the except set.
+      # https://learn.microsoft.com/en-us/windows/win32/api/winsock2/nf-winsock2-select
+      var rw, ex: TFdSet
+      FD_ZERO(rw); FD_ZERO(ex)
+      FD_SET(fd, rw); FD_SET(fd, ex)
+      var tv = Timeval(tv_sec: int32(waitMs div 1000),
+                       tv_usec: int32((waitMs mod 1000) * 1000))
+      let rc =
+        if forWrite: winlean.select(0, nil, addr rw, addr ex, addr tv)
+        else: winlean.select(0, addr rw, nil, addr ex, addr tv)
+      if rc > 0: return true
+      if rc < 0: raiseOSError(osLastError())
+    else:
+      # POLLERR and POLLHUP are reported whatever ``events`` asked for; the
+      # read or write that follows then reports what happened.
+      # https://pubs.opengroup.org/onlinepubs/9799919799/functions/poll.html
+      var pfd = TPollfd(fd: fd.cint,
+                        events: (if forWrite: POLLOUT else: POLLIN),
+                        revents: 0)
+      let rc = poll(addr pfd, 1, waitMs)
+      if rc > 0: return true
+      if rc < 0:
+        let err = osLastError()
+        if err.cint != EINTR:
+          raiseOSError(err)
 
-proc setIoTimeouts(fd: SocketHandle; timeoutMs: int) =
-  ## Bounds every blocking read and write on ``fd`` at ``timeoutMs``
-  ## (``SO_RCVTIMEO`` / ``SO_SNDTIMEO``). The pool's own reads wait for
-  ## data before reading, under their own deadlines; this bound covers
-  ## the blocking calls it does not control, which are OpenSSL's reads
-  ## and writes during the TLS handshake and inside a TLS record, and
-  ## ``send`` to a peer that has stopped reading. Raises ``OSError``.
-  ## https://pubs.opengroup.org/onlinepubs/9799919799/functions/setsockopt.html
+proc wouldBlock(err: OSErrorCode): bool =
+  ## Whether a failed non-blocking ``send`` or ``recv`` only means "not
+  ## now" (no buffer space, or no data yet, or a signal arrived).
   when defined(windows):
-    # Winsock takes the timeout as a DWORD of milliseconds.
-    var ms = int32(min(timeoutMs, int(high(int32))))
-    for opt in [WinSoRcvTimeo, WinSoSndTimeo]:
-      if winlean.setsockopt(fd, SOL_SOCKET, opt, addr ms,
-                            SockLen(sizeof(ms))) != 0:
-        raiseOSError(osLastError())
+    err.int32 == WSAEWOULDBLOCK or err.int32 == WSAEINTR
   else:
-    var tv = Timeval(tv_sec: posix.Time(timeoutMs div 1000),
-                     tv_usec: Suseconds((timeoutMs mod 1000) * 1000))
-    for opt in [SO_RCVTIMEO, SO_SNDTIMEO]:
-      if posix.setsockopt(fd, SOL_SOCKET, opt, addr tv,
-                          SockLen(sizeof(tv))) != 0:
-        raiseOSError(osLastError())
+    err.cint == EAGAIN or err.cint == EWOULDBLOCK or err.cint == EINTR
+
+when defined(ssl):
+  type TlsStep = enum
+    tsRetry   ## OpenSSL can make progress now: call it again
+    tsClosed  ## the peer closed the connection
+
+  proc openSslErrorText(): string =
+    ## The oldest queued OpenSSL error, as OpenSSL words it, and clears
+    ## the queue.
+    let code = ERR_get_error()
+    ErrClearError()
+    if code == 0: "an unspecified TLS error"
+    else: $ERR_error_string(code, nil)
+
+  proc awaitTls(sock: Socket; ret: cint; deadline: MonoTime): TlsStep =
+    ## Handles a non-positive result ``ret`` of ``SSL_connect``,
+    ## ``SSL_read`` or ``SSL_write`` on the non-blocking ``sock``: waits,
+    ## until ``deadline``, for the socket condition OpenSSL asked for, and
+    ## then says to retry. Raises ``TimeoutError`` once the deadline
+    ## passes and ``OSError`` for a TLS or socket failure. Driving OpenSSL
+    ## this way is what makes the deadline total: a blocking ``SSL_read``
+    ## keeps reading until it has a whole TLS record, so a peer sending a
+    ## byte at a time would hold it however each wait was bounded.
+    ## https://docs.openssl.org/3.0/man3/SSL_get_error/
+    let err = SSL_get_error(sock.sslHandle, ret)
+    case err
+    of SSL_ERROR_WANT_READ, SSL_ERROR_WANT_WRITE:
+      if not awaitIo(sock.getFd(), err == SSL_ERROR_WANT_WRITE, deadline):
+        raise newException(TimeoutError, "TLS wait timed out")
+      return tsRetry
+    of SSL_ERROR_ZERO_RETURN:
+      return tsClosed
+    of SSL_ERROR_SYSCALL:
+      let osErr = osLastError()
+      if ERR_peek_last_error() != 0:
+        raise newException(OSError, openSslErrorText())
+      if ret == 0 or osErr.int == 0:
+        # End of file without a close_notify (OpenSSL 1.1 reports it
+        # this way; 3.x reports it as SSL_ERROR_SSL).
+        return tsClosed
+      if wouldBlock(osErr):
+        return tsRetry
+      raiseOSError(osErr)
+    of SSL_ERROR_SSL:
+      raise newException(OSError, openSslErrorText())
+    else:
+      raise newException(OSError, "unexpected SSL_get_error result " & $err)
+
+  proc tlsHandshakeBefore(sock: Socket; host: string; deadline: MonoTime) =
+    ## Performs the client TLS handshake on the connected, non-blocking
+    ## ``sock``, completing it before ``deadline``. Raises ``TimeoutError``
+    ## when the deadline passes and ``OSError`` or ``SslError`` when the
+    ## handshake fails.
+    ##
+    ## Does what ``net.wrapConnectedSocket`` does for ``handshakeAsClient``
+    ## (SNI for a host name, then the same host-name check, under the same
+    ## conditions), except that the handshake is driven by ``awaitTls``
+    ## rather than one blocking ``SSL_connect``.
+    tlsContext().wrapSocket(sock)
+    if host.len > 0 and not isIpAddress(host):
+      discard SSL_set_tlsext_host_name(sock.sslHandle, host)
+    while true:
+      ErrClearError()
+      let ret = SSL_connect(sock.sslHandle)
+      if ret == 1:
+        break
+      if awaitTls(sock, ret, deadline) == tsClosed:
+        raise newException(OSError,
+          "the peer closed the connection during the handshake")
+    when not defined(nimDisableCertificateValidation) and not defined(windows):
+      # ``net.checkCertName`` is private; this is its body.
+      # https://docs.openssl.org/3.0/man3/X509_check_host/
+      if host.len > 0 and not isIpAddress(host):
+        let certificate = SSL_get_peer_certificate(sock.sslHandle)
+        if certificate.isNil:
+          raiseSSLError("No SSL certificate found.")
+        const X509_CHECK_FLAG_ALWAYS_CHECK_SUBJECT = 0x1.cuint
+        let match = certificate.X509_check_host(host.cstring, host.len.cint,
+          X509_CHECK_FLAG_ALWAYS_CHECK_SUBJECT, nil)
+        X509_free(certificate)
+        if match != 1:
+          raiseSSLError("SSL Certificate check failed.")
+
+proc sendBefore(sock: Socket; data: string; deadline: MonoTime) =
+  ## Sends all of ``data`` on the non-blocking ``sock`` before
+  ## ``deadline``. Raises ``TimeoutError`` when the deadline passes (a
+  ## peer that has stopped reading) and ``OSError`` for any other failure.
+  ## Not ``net.send``: that retries a send that would block up to 100
+  ## times, so its bound is a multiple of any per-call timeout.
+  var written = 0
+  while written < data.len:
+    when defined(ssl):
+      if sock.isSsl:
+        ErrClearError()
+        let ret = SSL_write(sock.sslHandle,
+                            cast[cstring](unsafeAddr data[written]),
+                            data.len - written)
+        if ret > 0:
+          written += ret
+        elif awaitTls(sock, ret, deadline) == tsClosed:
+          raise newException(OSError, "the peer closed the connection")
+        continue
+    let fd = sock.getFd()
+    let sent =
+      when defined(windows):
+        int(winlean.send(fd, unsafeAddr data[written],
+                         cint(data.len - written), 0))
+      elif defined(macosx):
+        # No MSG_NOSIGNAL on macOS; ``net`` sets SO_NOSIGPIPE instead.
+        int(posix.send(fd, unsafeAddr data[written], data.len - written, 0))
+      else:
+        int(posix.send(fd, unsafeAddr data[written], data.len - written,
+                       MSG_NOSIGNAL))
+    if sent >= 0:
+      written += sent
+      continue
+    let err = osLastError()
+    if not wouldBlock(err):
+      raiseOSError(err)
+    if not awaitIo(fd, forWrite = true, deadline):
+      raise newException(TimeoutError, "send timed out")
+
+proc recvBefore(sock: Socket; data: pointer; size: int;
+                deadline: MonoTime): int =
+  ## Reads from the non-blocking ``sock`` into ``data``, returning before
+  ## ``deadline``. Returns the number of bytes read, 0 when the peer has
+  ## closed the connection, or (plain HTTP only) a negative value for a
+  ## failed read. Raises ``TimeoutError`` when the deadline passes and
+  ## ``OSError`` for a TLS failure.
+  ##
+  ## Over TLS it returns as soon as some bytes are available. Plain HTTP
+  ## goes through ``net``'s timed ``recv``, which waits for data before
+  ## each read and so never blocks, and fills ``size`` bytes unless the
+  ## peer closes first.
+  when defined(ssl):
+    if sock.isSsl:
+      while true:
+        ErrClearError()
+        let ret = SSL_read(sock.sslHandle, data, size)
+        if ret > 0:
+          return int(ret)
+        if awaitTls(sock, ret, deadline) == tsClosed:
+          return 0
+  let remainingMs = (deadline - getMonoTime()).inMilliseconds
+  if remainingMs <= 0:
+    raise newException(TimeoutError, "recv timed out")
+  sock.recv(data, size, timeout = int(remainingMs))
+
+proc millisFromNow(ms: int): MonoTime =
+  getMonoTime() + initDuration(milliseconds = ms)
 
 proc leaseConnection(pool: HttpPool; host: string; port: Port;
                      secure: bool): PooledConnection =
@@ -341,6 +517,10 @@ proc leaseConnection(pool: HttpPool; host: string; port: Port;
   let sock = newSocket(AF_INET)
   try:
     connectWithDeadline(sock, AF_INET, host, port, pool.connectTimeoutMs)
+    # Every socket the pool uses is non-blocking from here on: each read
+    # and write waits in ``awaitIo`` for at most the time its deadline
+    # leaves, and nothing else can block.
+    sock.getFd().setBlocking(false)
   except TimeoutError:
     try: sock.close() except CatchableError: discard
     raise newException(HttpError,
@@ -350,29 +530,17 @@ proc leaseConnection(pool: HttpPool; host: string; port: Port;
     try: sock.close() except CatchableError: discard
     raise newException(HttpError,
       "connect to " & host & ":" & $int(port) & " failed: " & e.msg)
-  if pool.receiveTimeoutMs > 0:
-    try:
-      setIoTimeouts(sock.getFd(), pool.receiveTimeoutMs)
-    except OSError as e:
-      try: sock.close() except CatchableError: discard
-      raise newException(HttpError,
-        "connect to " & host & ":" & $int(port) & " failed: " & e.msg)
   if secure:
     when defined(ssl):
-      let handshakeStart = getMonoTime()
       try:
-        tlsContext().wrapConnectedSocket(sock, handshakeAsClient, host)
+        tlsHandshakeBefore(sock, host, millisFromNow(pool.receiveTimeoutMs))
+      except TimeoutError:
+        try: sock.close() except CatchableError: discard
+        raise newException(HttpError,
+          "TLS handshake to " & host & ":" & $int(port) &
+          " timed out after " & $pool.receiveTimeoutMs & "ms")
       except CatchableError as e:
         try: sock.close() except CatchableError: discard
-        # A blocking handshake read or write that hits the socket's
-        # timeout surfaces from OpenSSL as a generic error, so the elapsed
-        # time is what tells a silent peer from a refused handshake.
-        if pool.receiveTimeoutMs > 0 and
-            (getMonoTime() - handshakeStart).inMilliseconds >=
-              pool.receiveTimeoutMs:
-          raise newException(HttpError,
-            "TLS handshake to " & host & ":" & $int(port) &
-            " timed out after " & $pool.receiveTimeoutMs & "ms")
         raise newException(HttpError,
           "TLS handshake to " & host & ":" & $int(port) & " failed: " & e.msg)
     else:
@@ -418,10 +586,8 @@ proc readLineBefore(sock: Socket; deadline: MonoTime; timeoutMs: int;
   ## ``\n``-only line terminators (some HTTP/1.0 servers emit them after
   ## a ``Connection: close``).
   ##
-  ## Each byte is read with the timed ``recv``, which waits for data for
-  ## at most the time left before ``deadline``: the untimed one blocks
-  ## until the peer sends or closes, so a peer that stays silent would
-  ## never reach the deadline check.
+  ## Each byte is read with ``recvBefore``, which returns before
+  ## ``deadline`` however the peer spaces out its bytes, over TLS as well.
   result = ""
   var c: char
   while true:
@@ -431,7 +597,7 @@ proc readLineBefore(sock: Socket; deadline: MonoTime; timeoutMs: int;
         $timeoutMs & "ms")
     var n = 0
     try:
-      n = sock.recv(addr c, 1, timeout = int(remainingMs))
+      n = recvBefore(sock, addr c, 1, deadline)
     except TimeoutError:
       raise newException(HttpError, what & " timed out after " &
         $timeoutMs & "ms")
@@ -455,8 +621,8 @@ proc readLineBefore(sock: Socket; deadline: MonoTime; timeoutMs: int;
 proc readLineWithTimeout(sock: Socket; timeoutMs: int): string =
   ## A line of chunked framing (a chunk-size line, a trailer, the CRLF
   ## after a chunk), which must arrive within ``timeoutMs``.
-  readLineBefore(sock, getMonoTime() + initDuration(milliseconds = timeoutMs),
-                 timeoutMs, "chunk framing read")
+  readLineBefore(sock, millisFromNow(timeoutMs), timeoutMs,
+                 "chunk framing read")
 
 proc readHeaders(sock: Socket; timeoutMs: int):
     tuple[statusCode: int; headers: seq[(string, string)]] =
@@ -464,7 +630,7 @@ proc readHeaders(sock: Socket; timeoutMs: int):
   ## ``timeoutMs``: one deadline for the block, so a peer that sends a
   ## header line now and then cannot hold the caller longer than a peer
   ## that sends nothing.
-  let deadline = getMonoTime() + initDuration(milliseconds = timeoutMs)
+  let deadline = millisFromNow(timeoutMs)
   let statusLine = readLineBefore(sock, deadline, timeoutMs, "header read")
   if not statusLine.startsWith("HTTP/"):
     raise newException(HttpError,
@@ -515,7 +681,7 @@ proc drainContentLength(sock: Socket; total: int64;
     let want = int(min(int64(chunkSize), total - result))
     var bytesRead = 0
     try:
-      bytesRead = sock.recv(buf[0].addr, want, timeout = timeoutMs)
+      bytesRead = recvBefore(sock, buf[0].addr, want, millisFromNow(timeoutMs))
     except TimeoutError:
       raise newException(HttpError, "body read timed out")
     except OSError as e:
@@ -557,7 +723,7 @@ proc drainChunked(sock: Socket;
       let want = min(buf.len, remaining)
       var bytesRead = 0
       try:
-        bytesRead = sock.recv(buf[0].addr, want, timeout = timeoutMs)
+        bytesRead = recvBefore(sock, buf[0].addr, want, millisFromNow(timeoutMs))
       except TimeoutError:
         raise newException(HttpError, "chunk body read timed out")
       except OSError as e:
@@ -588,7 +754,7 @@ proc drainUntilClose(sock: Socket;
   while true:
     var bytesRead = 0
     try:
-      bytesRead = sock.recv(buf[0].addr, buf.len, timeout = timeoutMs)
+      bytesRead = recvBefore(sock, buf[0].addr, buf.len, millisFromNow(timeoutMs))
     except TimeoutError:
       raise newException(HttpError, "body read timed out")
     except OSError:
@@ -601,6 +767,16 @@ proc drainUntilClose(sock: Socket;
 # ---------------------------------------------------------------------------
 # Public GET — the streaming entry point
 # ---------------------------------------------------------------------------
+
+proc sendRequest(sock: Socket; req: string; timeoutMs: int) =
+  ## Sends a request, which must be on its way within ``timeoutMs``.
+  try:
+    sendBefore(sock, req, millisFromNow(timeoutMs))
+  except TimeoutError:
+    raise newException(HttpError,
+      "send request timed out after " & $timeoutMs & "ms")
+  except OSError as e:
+    raise newException(HttpError, "send request failed: " & e.msg)
 
 proc requestStatusOnly*(pool: HttpPool; meth, url: string;
                         extraHeaders: seq[(string, string)] = @[]):
@@ -622,10 +798,7 @@ proc requestStatusOnly*(pool: HttpPool; meth, url: string;
     for (name, value) in extraHeaders:
       req.add(name & ": " & value & "\r\n")
     req.add("\r\n")
-    try:
-      conn.sock.send(req)
-    except OSError as e:
-      raise newException(HttpError, "send request failed: " & e.msg)
+    conn.sock.sendRequest(req, pool.receiveTimeoutMs)
     let (statusCode, headers) = readHeaders(conn.sock, pool.receiveTimeoutMs)
     result = (statusCode, headerValue(headers, "location"))
   finally:
@@ -667,10 +840,7 @@ proc streamGet*(pool: HttpPool; url: string;
     for (name, value) in extraHeaders:
       req.add(name & ": " & value & "\r\n")
     req.add("\r\n")
-    try:
-      conn.sock.send(req)
-    except OSError as e:
-      raise newException(HttpError, "send request failed: " & e.msg)
+    conn.sock.sendRequest(req, pool.receiveTimeoutMs)
 
     # ---- Response headers ----
     let (statusCode, headers) =
