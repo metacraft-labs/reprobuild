@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 35,
-    "nimTestBinaries": 2722,
+    "nimTestBinaries": 2723,
     "pureUnitConsolidationGroups": 79,
     "pureUnitTests": 749,
     "staticallyDetectedRuntimeCompilerFlowTests": 137,
-    "testEntries": 2763
+    "testEntries": 2764
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1567,7 +1567,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 21,
-      "integration": 1496,
+      "integration": 1497,
       "platform/destructive": 174,
       "pure unit": 749,
       "unclassified": 323
@@ -1784,9 +1784,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2722,
+    "nimTestBinaryCount": 2723,
     "pythonTestFileCount": 41,
-    "testEntryCount": 2763
+    "testEntryCount": 2764
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -51795,6 +51795,23 @@
       "source": "tests/integration/t_workspace_lock_round_trips_through_resolver.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 5,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_workspace_lock_withholds_unobtainable_pins",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_test_support"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_workspace_lock_withholds_unobtainable_pins.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 3,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
