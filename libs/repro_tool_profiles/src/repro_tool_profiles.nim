@@ -26,7 +26,8 @@ import repro_core/paths as corepaths
 import repro_core/source_root
 import repro_core/installed_prefix_nim
 export installed_prefix_nim
-from repro_core/c_compiler import BuiltCCompilerPath
+from repro_core/c_compiler import BuiltCCompilerPath,
+  cCompilerOverrideInstruction
 import repro_domain_types
 import repro_dsl_stdlib/nixpkgs_pin
 import repro_hash
@@ -5380,7 +5381,7 @@ proc executeTarballProvisionEdge*(action: BuildAction): ActionResult {.gcsafe.} 
           let receipt = action.outputs[0]
           createDir(extendedPath(parentDir(receipt)))
           let receiptStore = receiptStoreRoot(absolutePath(receipt))
-          writeFile(extendedPath(receipt), $(%*{
+          publishBuiltinFileOutput(receipt, $(%*{
             "schema": TarballProvisionEdgeSchema,
             "digestAlgorithm": plan.digestAlgorithm,
             "digestValue": plan.digestValue,
@@ -6208,6 +6209,53 @@ proc describeBootstrapCRoute*(route: BootstrapCRoute;
     "the Xcode Command Line Tools clang (`xcrun -f clang`), the " &
       "platform's own C toolchain"
 
+proc bootstrapCUnsetSelects*(route: BootstrapCRoute): string =
+  ## What an unset ``REPRO_BOOTSTRAP_CC`` selects on ``route``, for the
+  ## "or unset it to use ..." half of a remedy. Only the archive and Nix
+  ## routes provision a compiler into the tool store; the Xcode and system
+  ## routes take the host's own toolchain, and saying otherwise sent a
+  ## Nix-less Linux host without ``/usr/bin/cc`` looking for a tool-store
+  ## compiler its route never tries.
+  case route
+  of bcrArchive, bcrNix:
+    "the pinned bootstrap compiler reprobuild provisions into its tool store"
+  of bcrXcode:
+    "the Xcode Command Line Tools clang"
+  of bcrSystem:
+    # The route's own description, so the remedy names exactly the
+    # candidates it tries, the build compiler included.
+    describeBootstrapCRoute(bcrSystem, bootstrapSystemCCompilers)
+
+proc bootstrapCRemedy*(route: BootstrapCRoute;
+                       systemCandidates: openArray[string] =
+                         bootstrapSystemCCompilers): string =
+  ## The remedy for a C compiler that ``route`` could not provision.
+  ##
+  ## ``bcrSystem`` provisions nothing: on a Linux host without Nix (and on
+  ## other POSIX hosts) the system C compiler and its C library headers are
+  ## a precondition, as the deb and rpm packages state with their ``gcc`` /
+  ## ``libc6-dev`` and ``gcc`` / ``glibc-devel`` dependencies. So the remedy
+  ## says to install them, or to name a compiler explicitly; offering to
+  ## unset ``REPRO_BOOTSTRAP_CC`` would point at nothing, since the failure
+  ## is what an unset override reaches. Every other route keeps the override
+  ## remedy, with its own account of what an unset override selects.
+  case route
+  of bcrSystem:
+    "Install the host's C compiler and C library headers, so that one of " &
+      systemCandidates.join(", ") & " exists and compiles (Debian and " &
+      "Ubuntu: " &
+      "`apt-get install gcc libc6-dev`; Fedora: `dnf install gcc " &
+      "glibc-devel`; Alpine: `apk add build-base`). Or name one " &
+      "explicitly: " & cCompilerOverrideInstruction() & ". " &
+      (when defined(linux):
+         "On a Linux host without Nix reprobuild does not provision a C " &
+           "compiler of its own: the system compiler is a precondition."
+       else:
+         "On this host reprobuild does not provision a C compiler of its " &
+           "own: the system compiler is a precondition.")
+  of bcrArchive, bcrNix, bcrXcode:
+    cCompilerOverrideRemedy(bootstrapCUnsetSelects(route))
+
 proc bootstrapNimRemedy(): string =
   "Set " & bootstrapNimCompilerEnv & " to the Nim 2.2 compiler to use " &
     "instead (an absolute path, or a bare `nim` to use the one on PATH on " &
@@ -6288,6 +6336,11 @@ proc provisionBootstrapCCompiler*(storeRoot: string;
   ##
   ## Successful probes are cached under ``<storeRoot>/compiler-probes``, so
   ## the steady-state cost is a file-existence check.
+  ##
+  ## Both refusals -- nothing found, or a compiler that fails the probe (a
+  ## system ``gcc`` without the C library headers, say) -- carry
+  ## ``bootstrapCRemedy(route)``, which names only what this route can
+  ## reach.
   let origin = describeBootstrapCRoute(route, systemCandidates, builtCompiler)
   var cc = ""
   var sdk = ""
@@ -6313,9 +6366,7 @@ proc provisionBootstrapCCompiler*(storeRoot: string;
           (if builtCompiler.len > 0:
              ", nor does the C compiler this repro was built with (" &
                builtCompiler & ")"
-           else: "") &
-          "; install the system C compiler (e.g. the distribution's " &
-          "gcc or build-essential package)")
+           else: ""))
     of bcrXcode:
       (cc, sdk) = resolveXcodeClang()
     if cc.len == 0:
@@ -6326,9 +6377,10 @@ proc provisionBootstrapCCompiler*(storeRoot: string;
       "\n  route: " & origin &
       "\n  tool store: " & storeRoot &
       "\n  failure: " & indentDetail(err.msg) &
-      "\n  remedy: " & cCompilerOverrideRemedy())
+      "\n  remedy: " & bootstrapCRemedy(route, systemCandidates))
   let sysroot = if sdk.len > 0: @["-isysroot", sdk] else: @[]
-  requireUsableCCompiler(cc, origin, storeRoot / "compiler-probes", sysroot)
+  requireUsableCCompiler(cc, origin, storeRoot / "compiler-probes", sysroot,
+    bootstrapCRemedy(route, systemCandidates))
   BootstrapCCompiler(path: cc, sdkRoot: sdk)
 
 proc buildNimFromSource(sourcePrefix, storeRoot, cc, sdkRoot, version,
@@ -6524,7 +6576,7 @@ proc executeNimSourceBuildEdge*(action: BuildAction): ActionResult {.gcsafe.} =
         spec{"url"}.getStr(), spec{"sha256"}.getStr())
       let receipt = action.outputs[0]
       createDir(extendedPath(parentDir(receipt)))
-      writeFile(extendedPath(receipt), $(%*{
+      publishBuiltinFileOutput(receipt, $(%*{
         "schema": NimSourceBuildEdgeSchema,
         "packageSelector": "nim@" & spec{"version"}.getStr(),
         "planIndex": 0,
@@ -6687,9 +6739,11 @@ proc ensureBootstrapToolchainEnv*(mode: ToolProvisioningMode;
     if not cc.isAbsolute or not fileExists(extendedPath(cc)):
       raise newException(BootstrapToolchainError,
         bootstrapCCompilerEnv & "=" & cc & " does not name an " &
-        "existing file by absolute path. " & cCompilerOverrideRemedy())
+        "existing file by absolute path. " &
+        cCompilerOverrideRemedy(bootstrapCUnsetSelects(bootstrapCRoute())))
     requireUsableCCompiler(cc, bootstrapCCompilerEnv &
-      " (set in the environment)", probeCache, bootstrapSysrootArgs())
+      " (set in the environment)", probeCache, bootstrapSysrootArgs(),
+      cCompilerOverrideRemedy(bootstrapCUnsetSelects(bootstrapCRoute())))
   else:
     let provisioned = provisionBootstrapCCompiler(effectiveStoreRoot)
     cc = provisioned.path
@@ -8131,11 +8185,11 @@ proc executeScoopProvisionEdge*(action: BuildAction): ActionResult {.gcsafe.} =
       var encodedText = newString(encoded.len)
       for i, b in encoded:
         encodedText[i] = char(b)
-      writeFile(extendedPath(action.outputs[1]), encodedText)
+      publishBuiltinFileOutput(action.outputs[1], encodedText)
       # What a consumer declares: the realization, without the host's Scoop
       # root or version directory, so it reads the same on every host that
       # realizes the same pin.
-      writeFile(extendedPath(receipt), $(%*{
+      publishBuiltinFileOutput(receipt, $(%*{
         "schema": ScoopProvisionEdgeSchema,
         "packageSelector": profile.packageSelector,
         "bucket": profile.scoopBucket,

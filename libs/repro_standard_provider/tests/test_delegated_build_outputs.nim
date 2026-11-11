@@ -6,7 +6,10 @@
 ## ``layout.buildDirectory``; Cabal's ``optimization``; MSBuild's
 ## ``OutputPath``, ``AssemblyName``, ``RuntimeIdentifier`` and
 ## ``TargetFrameworks``. A Gradle build that enables the configuration cache
-## must answer discovery too.
+## must answer discovery too. A Gradle dependency added by build logic
+## outside the root's scripts (a ``buildSrc/`` plugin, an included build's
+## plugin, a subproject's build script) must be fetched before the offline
+## build needs it.
 ## Build-Engine-And-Scheduler.md §"Outputs a delegated build decides".
 ##
 ## Nothing is mocked. The emitted graph is run the way the engine runs it:
@@ -264,17 +267,22 @@ proc emittedActions(conv: LanguageConvention; root: string): seq[BuildActionDef]
       result.add(decodeBuildActionPayload(toBytes(node.payload)))
 
 proc fetchAgain(conv: LanguageConvention; root: string): bool =
-  ## Runs the emitted dependency-fetch edge's own command again; true when
-  ## it fetched, false when its stamp said the export was current.
+  ## Runs the emitted dependency-fetch edge's own command again, as the
+  ## engine does; true when it fetched, false when its stamp said the export
+  ## was current. A fetch rewrites the stamp with its new token, and a
+  ## current one leaves it alone, so the stamp's text tells them apart.
   for action in emittedActions(conv, root):
     if action.id == "kotlin-gradle-dependencies":
       let argv = inlineArgvOf(action)
       doAssert argv.len >= 7 and argv[1] == "--gradle-dependencies",
         "unexpected fetch argv: " & argv.quoteShellCommand()
+      doAssert action.outputs.len == 1, $action.outputs
+      let stamp = action.outputs[0]
+      let before = if fileExists(stamp): readFile(stamp) else: ""
       for dir in action.scratchDirs:
         removeTreeEventually(dir)
-      return gradleDependencies(argv[3], argv[4] == "wrapper", argv[2],
-        argv[5], argv[6], argv[7 .. ^1])
+      doAssert runOutputDiscoveryCommand(argv[1 .. ^1])
+      return readFile(stamp) != before
   doAssert false, "no kotlin-gradle-dependencies edge for " & root
 
 # --- fixtures ---------------------------------------------------------------
@@ -372,6 +380,57 @@ proc checkGradleEdgesOwnTheirUserHome(variable: string;
                 state / "dependencies" / "read-only-cache" / "modules-2"]:
     doAssert dirExists(owned), "no Gradle state where the edge owns it: " &
       owned
+
+const GsonCoordinates = "com.google.code.gson:gson:2.10.1"
+
+proc groovyConventionPlugin(addsGson: bool): string =
+  ## A binary convention plugin, compiled from Groovy with nothing but
+  ## Gradle's own API: it applies ``java`` and Maven Central and, when
+  ## `addsGson`, adds Gson to every project that applies it. Its source is
+  ## not a build script, so only a token that covers every file of the
+  ## build that compiles it sees the edit.
+  "import org.gradle.api.Plugin\nimport org.gradle.api.Project\n" &
+    "class HelloConventions implements Plugin<Project> {\n" &
+    "  void apply(Project project) {\n" &
+    "    project.pluginManager.apply('java')\n" &
+    "    project.repositories.mavenCentral()\n" &
+    (if addsGson: "    project.dependencies.add('implementation', '" &
+       GsonCoordinates & "')\n" else: "") &
+    "  }\n}\n"
+
+const ConventionPluginBuild = "plugins { id 'groovy'; id 'java-gradle-plugin' }\n" &
+  "gradlePlugin { plugins { hello { id = 'hello.conventions'; " &
+  "implementationClass = 'HelloConventions' } } }\n"
+
+proc checkBuildLogicEditRefetches(prefix: string;
+                                  files, edits: openArray[(string, string)]) =
+  ## Issue 2026-10-29 (the fetch's token missed build logic outside the
+  ## root scripts). Builds a project whose dependencies are declared by
+  ## `files` outside the root's scripts, then applies `edits`, which add
+  ## Gson there and make ``Hello`` use it. The build after the edit must
+  ## compile: the fetch has to see the edit and download Gson, because the
+  ## offline build cannot (Kotlin.md §"The three edges", item 1).
+  let root = createTempDir(prefix, "")
+  defer: removeTreeEventually(root)
+  writeProject(root, files)
+  writeProject(root, [
+    ("src/main/java/com/example/Hello.java", JavaHello),
+    ("reprobuild.nim", reproNim("gradleBuildLogic", GradleUses, "hello"))])
+  let conv = gradle_convention.kotlinGradleConvention()
+  discard buildAsTheEngineDoes(conv, root)
+  let gson = root / ".repro" / "build" / "kotlin-gradle" / "dependencies" /
+    "read-only-cache" / "modules-2" / "files-2.1" / "com.google.code.gson" /
+    "gson" / "2.10.1"
+  doAssert not dirExists(gson), "Gson fetched before any build logic named it"
+  writeProject(root, edits)
+  writeProject(root, [("src/main/java/com/example/Hello.java", GsonHello)])
+  # Before the fix the fetch reported its export current, and this offline
+  # build failed with "No cached version of com.google.code.gson:gson:2.10.1
+  # available for offline mode".
+  discard buildAsTheEngineDoes(conv, root)
+  doAssert dirExists(gson), "the fetch did not download Gson: " & gson
+  # And the edit is now part of the token: nothing changed, nothing fetched.
+  doAssert not fetchAgain(conv, root), "an unchanged project fetched again"
 
 suite "delegated builds declare the outputs the tool writes":
 
@@ -560,6 +619,56 @@ suite "delegated builds declare the outputs the tool writes":
       check fetchAgain(conv, root)
       check dirExists(gson / "2.11.0")
       discard buildAsTheEngineDoes(conv, root)
+
+  test "Gradle dependencies: an edit to a buildSrc plugin's source re-fetches":
+    let why = gradleNetworkReady()
+    if why.len > 0:
+      skip(why)
+    else:
+      checkBuildLogicEditRefetches("repro-gradle-buildsrc-", [
+        ("settings.gradle.kts", "rootProject.name = \"hello\"\n"),
+        ("build.gradle.kts", "plugins { id(\"hello.conventions\") }\n" &
+          "version = \"1.0\"\n"),
+        ("buildSrc/build.gradle", ConventionPluginBuild),
+        ("buildSrc/src/main/groovy/HelloConventions.groovy",
+          groovyConventionPlugin(addsGson = false))],
+        [("buildSrc/src/main/groovy/HelloConventions.groovy",
+          groovyConventionPlugin(addsGson = true))])
+
+  test "Gradle dependencies: an edit to an included build's plugin re-fetches":
+    # ``build-logic/``, named by ``includeBuild`` in ``pluginManagement``:
+    # the layout Gradle recommends for sharing build logic.
+    let why = gradleNetworkReady()
+    if why.len > 0:
+      skip(why)
+    else:
+      checkBuildLogicEditRefetches("repro-gradle-included-build-", [
+        ("settings.gradle.kts", "pluginManagement { " &
+          "includeBuild(\"build-logic\") }\nrootProject.name = \"hello\"\n"),
+        ("build.gradle.kts", "plugins { id(\"hello.conventions\") }\n" &
+          "version = \"1.0\"\n"),
+        ("build-logic/settings.gradle", "rootProject.name = 'build-logic'\n"),
+        ("build-logic/build.gradle", ConventionPluginBuild),
+        ("build-logic/src/main/groovy/HelloConventions.groovy",
+          groovyConventionPlugin(addsGson = false))],
+        [("build-logic/src/main/groovy/HelloConventions.groovy",
+          groovyConventionPlugin(addsGson = true))])
+
+  test "Gradle dependencies: an edit to a subproject's build script re-fetches":
+    let why = gradleNetworkReady()
+    if why.len > 0:
+      skip(why)
+    else:
+      const Lib = "plugins { `java-library` }\nrepositories { mavenCentral() }\n"
+      checkBuildLogicEditRefetches("repro-gradle-subproject-", [
+        ("settings.gradle.kts", "rootProject.name = \"hello\"\n" &
+          "include(\"lib\")\n"),
+        ("build.gradle.kts", "plugins { java }\nversion = \"1.0\"\n" &
+          "repositories { mavenCentral() }\n" &
+          "dependencies { implementation(project(\":lib\")) }\n"),
+        ("lib/build.gradle.kts", Lib)],
+        [("lib/build.gradle.kts", Lib &
+          "dependencies { api(\"" & GsonCoordinates & "\") }\n")])
 
   test "Gradle with the Kotlin plugin from the plugin portal (hello-binary)":
     # The reprobuild-examples fixture: `kotlin("jvm")` from the plugin

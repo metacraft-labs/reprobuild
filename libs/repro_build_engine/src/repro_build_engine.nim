@@ -1,6 +1,6 @@
-import std/[algorithm, json, locks, monotimes, options, os, osproc, net,
-    nativesockets, parsecfg, sequtils, sets, streams, strtabs, strutils, tables,
-    tempfiles, times]
+import std/[algorithm, atomics, json, locks, monotimes, options, os, osproc,
+    net, nativesockets, parsecfg, sequtils, sets, streams, strtabs, strutils,
+    tables, tempfiles, times]
 
 # The OS is reached through a named symbol list on both platforms, never
 # wholesale. ``std/posix`` exports ``fork`` / ``execvp`` / ``posix_spawn``
@@ -16902,6 +16902,37 @@ proc prepareBuiltinFileOutput(path: string) =
   if symlinkExists(expanded):
     removeFile(expanded)
 
+var builtinOutputPublishes: Atomic[int]
+  ## Numbers the temporary files of ``publishBuiltinFileOutput``, so two
+  ## publishes of one path in one process never share a temporary file.
+
+proc publishBuiltinFileOutput*(path, text: string) =
+  ## Publishes ``text`` as a built-in action's output at ``path``.
+  ##
+  ## Several ``repro`` processes provisioning one tool into one tool store
+  ## publish the same receipt. Rewriting it in place truncates it under a
+  ## reader: the output capture hashes the file after measuring its size, so
+  ## a read that meets the truncated file fails with "file changed while
+  ## hashing" (reprobuild-pm issue 2026-11-08). So the file is left alone when
+  ## it already holds ``text``, and otherwise ``text`` goes to a temporary file
+  ## beside it that is renamed over the path. A reader that opened the old
+  ## file keeps reading its bytes, and a reader that opens the path afterwards
+  ## sees the whole new file, never a partial one.
+  createDir(extendedPath(path.splitPath.head))
+  let expanded = extendedPath(path)
+  if not symlinkExists(expanded) and fileExists(expanded) and
+      readFile(expanded) == text:
+    return
+  prepareBuiltinFileOutput(path)
+  let temp = path & ".tmp-" & $getCurrentProcessId() & "-" &
+    $builtinOutputPublishes.fetchAdd(1)
+  try:
+    writeFile(extendedPath(temp), text)
+    moveFile(extendedPath(temp), extendedPath(path))
+  except CatchableError:
+    try: removeFile(extendedPath(temp)) except OSError: discard
+    raise
+
 proc builtinCopyDestinationMatches(source, destination: string): bool =
   let sourcePath = extendedPath(source)
   let destinationPath = extendedPath(destination)
@@ -18168,9 +18199,7 @@ proc executeBuiltinAction*(action: BuildAction): ActionResult =
         if outPaths.len == 0:
           raiseEngine("Daemon returned no materialized paths for selector: " &
             selector)
-        createDir(extendedPath(receiptPath.splitPath.head))
-        prepareBuiltinFileOutput(receiptPath)
-        writeFile(extendedPath(receiptPath), outPaths.join("\n"))
+        publishBuiltinFileOutput(receiptPath, outPaths.join("\n"))
         
         # DA-1f — THE DAEMON'S REPORT IS KEPT AND IS NAMED. It used to be
         # assigned to `monitorReads`, the MONITOR's channel, which is the

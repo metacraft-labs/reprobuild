@@ -6,18 +6,33 @@ package sh:
     nixPackage "nixpkgs#bash", executablePath = "bin/sh",
       nixpkgsRev = CanonicalNixpkgsRev,
       nixpkgsNarHash = CanonicalNixpkgsNarHash
-    # Windows: `sh` ships with Git for Windows (PortableGit) at
-    # `bin/sh.exe`. Resolving the `sh` selector via Scoop installs
-    # `main/git` and exposes the same bin tree on PATH.
+    # Windows: `sh` is the MSYS shell Git for Windows ships at
+    # `usr/bin/sh.exe`, through Scoop's `main/git` or the pinned PortableGit
+    # archive.
+    #
+    # NOT `bin/sh.exe`. That is Git for Windows' launcher, and it rewrites
+    # PATH to `/mingw64/bin:/usr/bin:$HOME/bin:<incoming>` before starting
+    # the shell, so every action run through `sh` searched the user's
+    # `%USERPROFILE%\bin` ahead of its declared tools. The action's PATH is
+    # then not the one its tool graph composed, and its portable fingerprint
+    # is refused because the probes land outside every logical root
+    # (reprobuild-pm issues/
+    # 2026-11-11-windows-sh-and-bash-arms-run-the-git-wrapper-which-puts-home-bin-on-path.md).
+    # `usr/bin/sh.exe` leaves PATH as given. Its directory still puts the
+    # MSYS userland on PATH, as the launcher did. The launcher's
+    # `mingw64/bin` is gone, so a script that runs `curl` or `xz` must
+    # declare them. The launcher also set `MSYSTEM=MINGW64`, which the stdlib
+    # now declares on the actions instead; see `ShellHostSystemEnv` below.
+    # `tests/integration/t_windows_sh_leaves_path_unchanged.nim` guards both.
     scoopApp(bucket = "main", app = "git",
-      preferredVersion = ">=2", executablePath = "bin/sh.exe",
+      preferredVersion = ">=2", executablePath = "usr/bin/sh.exe",
       requiresExecutionProfileChecksum = false)
-    # Direct-download: PortableGit ships sh.exe at `bin/sh.exe`. `version`
-    # is the shell's, not Git's: `bin/sh.exe --version` reports bash 5.3.9.
+    # `version` is the shell's, not Git's: `usr/bin/sh.exe --version`
+    # reports bash 5.3.9.
     tarball url = "https://github.com/git-for-windows/git/releases/download/v2.54.0.windows.1/PortableGit-2.54.0-64-bit.7z.exe",
       sha256 = "bea006a6cc69673f27b1647e84ab3a68e912fbc175ab6320c5987e012897f311",
       archiveType = "7z.exe",
-      executablePath = "bin/sh.exe",
+      executablePath = "usr/bin/sh.exe",
       version = "5.3.9",
       packageId = "git@2.54.0",
       cpu = "x86_64",
@@ -151,6 +166,49 @@ package sh:
           position = 0,
           required = false
 
+const ShellHostSystemEnv*: seq[(string, string)] =
+  when defined(windows): @[("MSYSTEM", "MINGW64")]
+  else: @[]
+  ## The environment the Windows `sh` needs to report a MinGW host. It is
+  ## declared ON THE ACTION at the stdlib's shell launch points: `shell()`
+  ## below, and `autotools_package`'s configure, make and install. Being a
+  ## declared variable, it enters the action's key by value.
+  ##
+  ## WHY. The arms above used to name Git's `bin/sh.exe` launcher, which set
+  ## `MSYSTEM=MINGW64` along with the PATH rewrite the arms now avoid. The
+  ## MSYS runtime reads it for `uname -s`: `MINGW64_NT-...` with it,
+  ## `MSYS_NT-...` without. `config.guess` keys on that, so an autotools
+  ## build without an explicit `--host` (pcre2) would configure for
+  ## `x86_64-pc-msys` instead of `x86_64-w64-mingw32`.
+  ##
+  ## WHY HERE AND NOT ON THE ARM. An arm's `env =` reaches only the
+  ## home-profile realizer, so it would never reach a build action, and it
+  ## would set `MSYSTEM` in the user's global environment. No channel yet
+  ## lets a realization state the environment its executable needs in the
+  ## actions that use it (reprobuild-pm issues/
+  ## 2026-11-11-a-tool-realization-cannot-declare-the-environment-its-executable-needs.md).
+  ##
+  ## THE GAP. An edge that runs `inlineExecCall(["sh", "-c", ...])` itself
+  ## gets an MSYS host: `node_package`, `cmake_package`, `meson_package` and
+  ## the other constructors that do so, and any recipe that does. Nothing in
+  ## them depends on the host triplet today. So is the generated
+  ## `sh(command = ...)` wrapper, which has no environment slot. A path-mode
+  ## `sh` (MSYS2's, from PATH) reports MSYS whatever is declared here.
+
+proc withShellHostSystemEnv*(env: openArray[(string, string)]):
+    seq[(string, string)] =
+  ## ``env`` plus ``ShellHostSystemEnv``. A name ``env`` already declares
+  ## keeps the caller's value.
+  result = @env
+  for (name, value) in ShellHostSystemEnv:
+    var declared = false
+    for entry in env:
+      if entry[0] == name:
+        declared = true
+        break
+    if not declared:
+      result.add((name, value))
+
 proc shell*(command: string; args: seq[string] = @[]; actionId = "";
             deps: openArray[string] = [];
             after: openArray[BuildActionDef] = [];
@@ -255,4 +313,4 @@ proc shell*(command: string; args: seq[string] = @[]; actionId = "";
     commandStatsId = commandStatsId,
     dependencyPolicy = resolvedPolicy,
     actionCachePolicy = actionCachePolicy,
-    extraEnv = extraEnv)
+    extraEnv = withShellHostSystemEnv(extraEnv))

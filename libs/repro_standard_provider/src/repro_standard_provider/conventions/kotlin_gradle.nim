@@ -363,45 +363,6 @@ proc sanitizeNamePart(value: string): string =
   if result.len == 0:
     result = "x"
 
-proc gradleConfigurationInputs(projectRoot: string): seq[string] =
-  ## The files that decide what the build resolves and how it is
-  ## configured: the root build scripts and ``gradle.properties``; every
-  ## version catalog under ``gradle/`` (``libs.versions.toml`` is the
-  ## default one); the dependency lockfiles; and the dependency
-  ## verification metadata and keyrings.
-  ## https://docs.gradle.org/current/userguide/version_catalogs.html
-  ## https://docs.gradle.org/current/userguide/dependency_locking.html
-  ## https://docs.gradle.org/current/userguide/dependency_verification.html
-  for candidate in ["build.gradle.kts", "build.gradle",
-                    "settings.gradle.kts", "settings.gradle",
-                    "gradle.properties", "gradle.lockfile",
-                    "settings-gradle.lockfile", "buildscript-gradle.lockfile",
-                    "gradle" / "verification-metadata.xml",
-                    "gradle" / "verification-keyring.keys",
-                    "gradle" / "verification-keyring.gpg"]:
-    let path = projectRoot / candidate
-    if fileExists(extendedPath(path)):
-      result.add(path)
-  let catalogDir = projectRoot / "gradle"
-  if dirExists(extendedPath(catalogDir)):
-    var catalogs: seq[string] = @[]
-    for entry in walkDir(catalogDir):
-      if entry.kind == pcFile and entry.path.endsWith(".versions.toml"):
-        catalogs.add(entry.path)
-    catalogs.sort(system.cmp[string])
-    result.add(catalogs)
-
-proc gradleWrapperInputs(projectRoot: string): seq[string] =
-  ## A wrapper project's wrapper: the scripts, the jar and the properties
-  ## naming (and, with ``distributionSha256Sum``, pinning) the distribution.
-  ## https://docs.gradle.org/current/userguide/gradle_wrapper.html
-  for candidate in ["gradlew", "gradlew.bat",
-                    "gradle" / "wrapper" / "gradle-wrapper.jar",
-                    "gradle" / "wrapper" / "gradle-wrapper.properties"]:
-    let path = projectRoot / candidate
-    if fileExists(extendedPath(path)):
-      result.add(path)
-
 proc collectGradleInputs(projectRoot: string): seq[string] =
   ## Conservative input enumeration for the build action: every
   ## file `gradleConfigurationInputs` names plus every ``.kt`` /
@@ -481,15 +442,18 @@ proc emitDependenciesAction(projectRoot: string; launcher: GradleLauncher):
   ## verifies, so it is a fixed-output action (Cache-Scope P3.4).
   let root = dependenciesDir(projectRoot)
   let scratch = edgeScratchDir(projectRoot, "dependencies-fetch")
-  var inputs = gradleConfigurationInputs(projectRoot)
-  if launcher.wrapper:
-    inputs.add(gradleWrapperInputs(projectRoot))
+  # Every file that can decide what the build resolves, beyond the root's
+  # scripts: subproject scripts, ``buildSrc/`` and the included builds
+  # (`output_discovery.gradleFetchInputs`). The fetch enumerates the same
+  # set again when it runs, so a file added since the graph was emitted
+  # still changes its token.
+  let inputs = gradleFetchInputs(projectRoot, launcher.wrapper)
   let verified = gradleVerificationPinsChecksums(projectRoot) and
     (not launcher.wrapper or gradleWrapperIsVerified(projectRoot))
   buildAction(
     id = DependenciesActionId,
     call = inlineExecCall(gradleDependenciesCommand(projectRoot,
-      launcher.fetchExe, launcher.wrapper, root, scratch, inputs), projectRoot),
+      launcher.fetchExe, launcher.wrapper, root, scratch), projectRoot),
     inputs = inputs,
     outputs = @[gradleDependenciesStamp(root)],
     declaredOutputs = @[root],
