@@ -3017,12 +3017,19 @@
           # deploy job slower and more fragile for no benefit. The self-hosted
           # eph-linux-x64 runners ship no node/npx, which is exactly why the
           # deploy runs wrangler from here rather than via cloudflare/*-action.
+          #
+          # The user-documentation deploy (.github/workflows/deploy-docs.yml)
+          # uses the same shell: wrangler to publish, git and python3 to check
+          # out the isonim-docs framework at the revisions its repro.lock
+          # names (scripts/build_user_docs.sh fetch). The site itself is built
+          # in isonim's own development shell, not here.
           devShells.ci = pkgs.mkShell {
             packages = [
               pkgs.wrangler
               pkgs.bash
               pkgs.coreutils
               pkgs.git
+              pkgs.python3
             ];
           };
         };
