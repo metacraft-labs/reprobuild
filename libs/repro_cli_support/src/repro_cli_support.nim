@@ -22078,11 +22078,11 @@ proc vcsManagedHookBody(hookName, hookContract: string;
   result.add("    printf '%s\\n' \"$REPRO_PROBE_DIAGNOSTIC\" | " &
     "sed -e 's/^/repro hooks:     | /' >&2\n")
   result.add("  fi\n")
-  # Status 3 says the two builds DIFFER, not which is newer. Measured in the
-  # field: a cached direnv dev shell, never rebuilt since it was created,
-  # served an OLDER build than the one that wrote these hooks, while the
-  # workspace's lock already named a servicing build. Re-anchoring to that
-  # build would have rewritten current bodies with older ones. So refreshing
+  # Status 3 says the two builds DIFFER, not which is newer. A cached direnv
+  # dev shell that was never rebuilt serves an OLDER build than the one that
+  # wrote these hooks, even while the workspace's lock already names a
+  # servicing build, and re-anchoring to it would rewrite current bodies with
+  # older ones. So refreshing
   # the supplier comes first in this branch too -- it is harmless when the
   # shell is current -- and re-anchoring is offered only once that survives.
   result.add("  if [ \"${REPRO_PROBE_STATUS:-1}\" = \"3\" ]; then\n")
@@ -77352,12 +77352,11 @@ proc gatherHealthChecksOverSettings(parsed: HealthArgs):
   #     The ``hook-interpreter`` row (8c) is computed HERE, ahead of this one,
   #     because this row's ``ok`` depends on it. "Every body demands the
   #     contract this build generates" is a statement about the INVOKED build,
-  #     and that build need not be the one a hook resolves when it fires: a
-  #     ``repro health`` run from a current build reported ``ok`` over 985
-  #     bodies while 8c, in the same table, reported that a cached dev shell
-  #     of the same workspace resolves a build refusing them. A row that is
-  #     green because of what it did not look at is the defect this replaces;
-  #     the probe is not run twice.
+  #     and that build need not be the one a hook resolves when it fires. A
+  #     cached dev shell of the same workspace can resolve an older build that
+  #     refuses every body this row counts as current, so this row is not
+  #     ``ok`` while 8c reports such a resolution. Computing 8c once and
+  #     sharing it keeps the probe from running twice.
   let interpreterCheck = hookInterpreterSkewCheck(parsed.workspaceRoot)
   block hooksCheck:
     var missing: seq[string]
