@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Render docs/users/reference/command-equivalents.md from its data file.
+"""Render docs/users/content/reference/command-equivalents.md from its data file.
 
 The page's table is a generated region: everything between
 
@@ -30,7 +30,7 @@ import tomllib
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 DATA = ROOT / "docs/users/data/command-equivalents.toml"
-PAGE = ROOT / "docs/users/reference/command-equivalents.md"
+PAGE = ROOT / "docs/users/content/reference/command-equivalents.md"
 DISPATCHER = ROOT / "libs/repro_cli_support/src/repro_cli_support.nim"
 
 BEGIN = "<!-- generated:begin command-equivalents -->"

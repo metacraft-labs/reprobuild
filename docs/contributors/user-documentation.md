@@ -1,6 +1,6 @@
 # Writing the user documentation
 
-This guide explains how the pages under [`docs/users/`](../users/index.md) are
+This guide explains how the pages under [`docs/users/content/`](../users/content/index.md) are
 organised, what each kind of page may contain, and how a page proves what it
 says. Read it before you add or change a user page.
 
@@ -8,30 +8,39 @@ The rules here follow Metacraft Labs' documentation policy for every product
 it publishes. Where that policy leaves a choice to the project (who the
 readers are, which words mean what), this guide records reprobuild's choice.
 
-> **Status:** draft. The layout, the front-matter schema and the first pages
-> exist on this branch. The checks described in
-> [What checks a page](#what-checks-a-page) are not built yet; until they are,
-> a reviewer applies them by hand, and every page stays `draft: true`.
+> **Status:** the site is published as a preview. The layout, the front-matter
+> schema, the reference gate and the command-equivalents check exist; the other
+> checks in [What checks a page](#what-checks-a-page) do not yet, so a reviewer
+> applies them by hand. How to build and publish the site is in
+> [`docs/users/README.md`](../users/README.md).
 
 ## Where pages live
 
 ```text
 docs/users/
-├── index.md              # the documentation home
-├── install.md            # every installation channel
-├── tutorials/            # one guided path each
-├── how-to/<domain>/      # one goal per page
-├── concepts/             # explanation
-├── coming-from/          # one page per family of tools reprobuild replaces
-├── reference/            # generated wherever a source of truth exists
-├── scenarios/            # the scripts that run each tutorial
+├── content/
+│   ├── index.md          # the documentation home
+│   ├── install.md        # every installation channel
+│   ├── tutorials/        # one guided path each
+│   ├── guides/<area>/    # one goal per page: building, environments, workspaces, troubleshooting
+│   ├── concepts/         # explanation
+│   ├── coming-from/      # one page per family of tools reprobuild replaces
+│   └── reference/        # generated wherever a source of truth exists
+├── scenarios/            # the scripts that run each tutorial, and interpolated values
 ├── data/                 # the sources generated pages are built from
-└── _meta/front-matter.toml
+├── _meta/front-matter.toml
+└── src/, static/         # the site itself (see docs/users/README.md)
 ```
 
 The site is built with [isonim-docs](https://github.com/metacraft-labs/isonim-docs).
 It takes a page's section from its directory and its URL slug from its file
-name, so a page does not repeat either in its front matter.
+name, so a page does not repeat either in its front matter. Each directory has
+an `index.md`: the section's own page, which the breadcrumbs link to.
+
+Name directories in the reader's words, because the sidebar shows them: the
+framework turns `coming-from` into "Coming From". Never name one `build`: the
+repository's `.gitignore` ignores every `build/` directory, so its pages would
+silently never be committed.
 
 These pages are for people who use reprobuild. How to build, test and change
 reprobuild itself belongs in `docs/contributors/`.
@@ -70,7 +79,7 @@ Templates per kind:
   what reprobuild does not do; **when the other tool is the better choice**
   (always present); the how-tos for moving over. Command equivalents are not
   repeated on these pages: they link
-  [`reference/command-equivalents.md`](../users/reference/command-equivalents.md),
+  [`reference/command-equivalents.md`](../users/content/reference/command-equivalents.md),
   which is generated from `docs/users/data/command-equivalents.toml` by
   `scripts/render_command_equivalents.py`. Run it after editing the data file,
   and run it with `--check` before you commit.
@@ -124,9 +133,10 @@ draft: true
   tutorial, the `commands` the page shows, the `tests` behind its behavioural
   claims, the `benchmarks` behind its numbers.
 - `unverified` lists each claim that nothing checks yet, with the reason and
-  an owner. It is a debt register, not a loophole: the count is published, and
-  a page whose owner is `unassigned` is not ready to publish.
-- `draft: true` keeps a page out of the published site.
+  an owner. It is a debt register, not a loophole: the build counts the entries
+  and the footer of every page publishes the total. An owner of `unassigned`
+  is a debt in itself.
+- `draft: true` keeps a page out of the built site.
 
 ## Admonitions
 
@@ -158,6 +168,12 @@ a sentence is not "is this true?" but "what keeps this true?".
 | A number | A benchmark result, with its conditions |
 | A screenshot or recording | A named scenario, captured deterministically |
 
+**Placeholders.** Write a value that has a source of its own as
+`{{ name }}`; the build replaces it, and a placeholder with no value stops the
+build. `{{ repro.version }}` is the version in `reprobuild.nimble`; any other
+name comes from the `[values]` table of a scenario in `docs/users/scenarios/`,
+which is where the scenario that checks the page pins it.
+
 **Generated regions** sit between two markers, and the check fails if anyone
 edits inside them:
 
@@ -170,6 +186,22 @@ edits inside them:
 **Tutorial scenarios** live in `docs/users/scenarios/<tutorial>.toml`. Each step
 lists the command, the directory it runs in and what must hold afterwards. A
 tutorial whose scenario fails is a failing test, not a stale page.
+
+## The Markdown the framework renders
+
+isonim-docs renders a subset of Markdown. Write within it, or the page shows
+stray characters:
+
+- No bold or italic. `**word**` and `*word*` appear with their asterisks. Make a
+  lead-in a sentence of its own, or a heading.
+- A list item is one line of source. A line break ends the item and starts a
+  new paragraph, so keep each item on one line, however long.
+- A list item holds text only. A code block, tabs or an admonition after an
+  item ends the list, and the next item starts again at 1. Write steps that
+  contain code as numbered headings, `### 1. Load the hook`, each followed by
+  its text and its blocks.
+- Code fences, tables, `:::tabs` with `@tab` panels, and the six admonitions
+  render as expected.
 
 ## Language and style
 
@@ -187,7 +219,7 @@ tutorial whose scenario fails is a failing test, not a stale page.
 - Write British English (behaviour, organise, licence as a noun). Code,
   commands, flags, file names and environment variables keep their exact
   spelling: `--color`, `repro allow`.
-- Use the words in the [glossary](../users/reference/glossary.md), and never
+- Use the words in the [glossary](../users/content/reference/glossary.md), and never
   their "Do not use" synonyms. Where the CLI's own label differs from the
   natural word, the CLI's label wins.
 - Do not use: "simply", "just", "easy", "obvious", "of course", "note that",
@@ -208,13 +240,14 @@ tutorial whose scenario fails is a failing test, not a stale page.
 
 | Check | What it rejects | Built? |
 |---|---|---|
+| Reference gate | An internal link to no page, an anchor to no heading, two pages on one route | Yes: `just check-links` in `docs/users/` |
+| Placeholder check | A `{{ name }}` with no value | Yes: the build stops |
 | Front-matter validator | An unknown key, a missing required key, a value outside the schema | No |
 | Provenance gate | A `verifies` entry that does not resolve; a `repro` command shown on the page but missing from `verifies.commands` | No |
 | Generated-region check | A hand edit inside a generated region | No |
 | Style checker | The words and patterns in [Language and style](#language-and-style), glossary synonyms, American spellings outside code | No |
 | Scenario runner | A tutorial step that fails or whose result differs | No |
 | Command-equivalents check | A stale `command-equivalents.md`, or a row naming a top-level verb `repro` does not dispatch | Yes: `python3 scripts/render_command_equivalents.py --check` |
-| Link check | A link or anchor that does not resolve | No dedicated check for `docs/users/` yet |
 
 The CLI reference, the command-equivalents table and the `commands` check all
 depend on a machine-readable description of the CLI, which `repro` does not
