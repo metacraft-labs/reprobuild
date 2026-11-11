@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 35,
-    "nimTestBinaries": 2704,
+    "nimTestBinaries": 2705,
     "pureUnitConsolidationGroups": 79,
-    "pureUnitTests": 745,
+    "pureUnitTests": 746,
     "staticallyDetectedRuntimeCompilerFlowTests": 137,
-    "testEntries": 2743
+    "testEntries": 2744
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -240,7 +240,7 @@
       "targetOs": "soAny"
     },
     {
-      "count": 35,
+      "count": 34,
       "defines": [],
       "dependencyShape": [
         "repro_dsl_stdlib",
@@ -263,7 +263,6 @@
         "libs/repro_dsl_stdlib/tests/t_nde_k1_plasma.nim",
         "libs/repro_dsl_stdlib/tests/t_ndem1_reproos_desktop.nim",
         "libs/repro_dsl_stdlib/tests/t_ndem2_generation_log.nim",
-        "libs/repro_dsl_stdlib/tests/t_nim_c_backend_compiler_sub_tools.nim",
         "libs/repro_dsl_stdlib/tests/t_nim_c_cpu_flag.nim",
         "libs/repro_dsl_stdlib/tests/t_nim_c_ssl_link_path.nim",
         "libs/repro_dsl_stdlib/tests/t_no_catalog_tarball_arm_declares_a_source_build_driver.nim",
@@ -691,7 +690,7 @@
       "targetOs": "soAny"
     },
     {
-      "count": 42,
+      "count": 43,
       "defines": [],
       "dependencyShape": [
         "repro_project_dsl"
@@ -739,6 +738,7 @@
         "libs/repro_project_dsl/tests/t_m9r75_declared_outputs_codec.nim",
         "libs/repro_project_dsl/tests/t_m9r79_registry_mutators.nim",
         "libs/repro_project_dsl/tests/t_sub_tool_refs_codec.nim",
+        "libs/repro_project_dsl/tests/t_sub_tools_per_platform.nim",
         "libs/repro_project_dsl/tests/t_tool_identity_ref_kind_codec.nim"
       ],
       "targetOs": "soAny"
@@ -1567,7 +1567,7 @@
       "graph-fixture": 21,
       "integration": 1488,
       "platform/destructive": 173,
-      "pure unit": 745,
+      "pure unit": 746,
       "unclassified": 316
     },
     "graphOwnedTestArtifacts": [
@@ -1782,9 +1782,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2704,
+    "nimTestBinaryCount": 2705,
     "pythonTestFileCount": 39,
-    "testEntryCount": 2743
+    "testEntryCount": 2744
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -15818,14 +15818,16 @@
       "defines": [],
       "language": "nim",
       "localDependencyShape": [
+        "repro_cli_support",
         "repro_dsl_stdlib",
-        "repro_project_dsl"
+        "repro_project_dsl",
+        "repro_tool_profiles"
       ],
       "owner": "libs/repro_dsl_stdlib",
       "requiresReproBinary": false,
       "source": "libs/repro_dsl_stdlib/tests/t_nim_c_backend_compiler_sub_tools.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 2,
+      "staticCaseCount": 4,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -23599,6 +23601,23 @@
       "owner": "libs/repro_project_dsl",
       "requiresReproBinary": false,
       "source": "libs/repro_project_dsl/tests/t_sub_tool_refs_codec.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 2,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_sub_tools_per_platform",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_project_dsl"
+      ],
+      "owner": "libs/repro_project_dsl",
+      "requiresReproBinary": false,
+      "source": "libs/repro_project_dsl/tests/t_sub_tools_per_platform.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 2,
       "staticallyDetectedRuntimeCompilerFlow": false,
