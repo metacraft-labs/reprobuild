@@ -18,7 +18,7 @@
 ## unrelated descriptor onto it — what another thread's ``pipe()``/``open()``
 ## does — and check that releasing again leaves it open.
 
-import std/[os, osproc, streams, strtabs, strutils, unittest]
+import std/[os, osproc, streams, strtabs, strutils, times, unittest]
 import repro_test_support/reasoned_skip
 import repro_core/process_close
 import repro_core/process_exec
@@ -128,3 +128,55 @@ suite "closeProcessOnce and execCmdExCloseOnce release each descriptor once":
       check lowestFreeDescriptor() == before
     else:
       skip("not POSIX — osproc's Windows close(Process) is correct")
+
+  test "execCmdExCloseOnce returns when the child exits, not when a grandchild holding its pipe does":
+    # git detaches its automatic maintenance (`git maintenance run --auto
+    # --detach`, then `repack` / `pack-objects`) with the command's stdout
+    # and stderr still inherited. The command has answered and exited, but
+    # the pipe stays open until the repack of the whole repository ends, and
+    # a reader that waits for EOF waits for that. The background `sleep`
+    # here stands in for the detached maintenance.
+    when defined(posix):
+      let before = lowestFreeDescriptor()
+      let started = epochTime()
+      let res = execCmdExCloseOnce(
+        "echo answered; sleep 60 & echo $!; echo done >&2; exit 4")
+      let elapsed = epochTime() - started
+      let lines = res.output.splitLines()
+      check lines.len >= 3
+      if lines.len >= 2:
+        # Stop the stand-in for the detached maintenance before checking
+        # anything else, so a failure here does not leave it running.
+        try: discard posix.kill(Pid(parseInt(lines[1])), SIGKILL)
+        except ValueError: discard
+      check elapsed < 30.0
+      check res.exitCode == 4
+      check lines[0] == "answered"
+      check "done" in res.output
+      check lowestFreeDescriptor() == before
+    else:
+      skip("not POSIX — the drain that stops at the child's exit is POSIX-only")
+
+  test "execCmdExCloseOnce returns when the child exits, even while a grandchild keeps writing to its pipe":
+    # The detached maintenance runs with `--no-quiet`, so it may write while
+    # it holds the pipe. A reader that asks whether the child has exited
+    # only when the pipe falls quiet never asks: a writer faster than the
+    # reader's poll interval keeps it reading until that writer ends.
+    when defined(posix):
+      let before = lowestFreeDescriptor()
+      let started = epochTime()
+      let res = execCmdExCloseOnce("echo answered; " &
+        "(i=0; while [ $i -lt 6000 ]; do echo noise; sleep 0.01; " &
+        "i=$((i+1)); done) & echo pid=$!; exit 5")
+      let elapsed = epochTime() - started
+      for line in res.output.splitLines():
+        if line.startsWith("pid="):
+          try: discard posix.kill(Pid(parseInt(line[4 .. ^1])), SIGKILL)
+          except ValueError: discard
+      check elapsed < 30.0
+      check res.exitCode == 5
+      check res.output.startsWith("answered\n")
+      check "pid=" in res.output
+      check lowestFreeDescriptor() == before
+    else:
+      skip("not POSIX — the drain that stops at the child's exit is POSIX-only")
