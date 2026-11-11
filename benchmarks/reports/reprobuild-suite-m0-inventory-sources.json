@@ -3,7 +3,7 @@
     "graphOwnedHelperArtifacts": 35,
     "nimTestBinaries": 2723,
     "pureUnitConsolidationGroups": 79,
-    "pureUnitTests": 748,
+    "pureUnitTests": 747,
     "staticallyDetectedRuntimeCompilerFlowTests": 137,
     "testEntries": 2764
   },
@@ -985,7 +985,7 @@
       "targetOs": "soAny"
     },
     {
-      "count": 3,
+      "count": 2,
       "defines": [],
       "dependencyShape": [
         "repro_interface_artifacts",
@@ -994,8 +994,7 @@
       "owner": "libs/repro_tool_profiles",
       "sources": [
         "libs/repro_tool_profiles/tests/t_path_sidecar_batches.nim",
-        "libs/repro_tool_profiles/tests/t_realization_selection.nim",
-        "libs/repro_tool_profiles/tests/t_uses_realization_version_range.nim"
+        "libs/repro_tool_profiles/tests/t_realization_selection.nim"
       ],
       "targetOs": "soAny"
     },
@@ -1567,9 +1566,9 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 21,
-      "integration": 1497,
+      "integration": 1498,
       "platform/destructive": 174,
-      "pure unit": 748,
+      "pure unit": 747,
       "unclassified": 324
     },
     "graphOwnedTestArtifacts": [
@@ -26156,8 +26155,8 @@
     },
     {
       "binary": "build/test-bin/t_uses_realization_version_range",
-      "class": "pure unit",
-      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "class": "integration",
+      "classificationReason": "subprocess or repro CLI invocation in test body",
       "defines": [],
       "language": "nim",
       "localDependencyShape": [
@@ -26167,8 +26166,8 @@
       "owner": "libs/repro_tool_profiles",
       "requiresReproBinary": false,
       "source": "libs/repro_tool_profiles/tests/t_uses_realization_version_range.nim",
-      "sourceSuiteCount": 4,
-      "staticCaseCount": 28,
+      "sourceSuiteCount": 5,
+      "staticCaseCount": 33,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
