@@ -170,6 +170,17 @@ suite "cargo edges own their target directory":
     check act.globsOf == @["../out/cargo/debug/deps/*.d",
                            "../out/cargo/release/deps/*.d"]
 
+  test "cargo.build and cargo.test: a Windows-spelled manifest path is split alike":
+    resetBuildActionRegistry()
+    discard cargoTool.build(manifestPath = "rust\\Cargo.toml")
+    check targetDirOf(argvOf(lastRecorded())) == "rust/target"
+    resetBuildActionRegistry()
+    discard cargoTool.test(manifestPath = "rust\\Cargo.toml", noRun = true)
+    let act = lastRecorded()
+    check act.cwdCustomPath == "rust"
+    check argvOf(act).containsPair("--manifest-path", "Cargo.toml")
+    check "rust\\Cargo.toml" in act.inputs
+
   test "cargo.test: an absolute target dir is kept":
     resetBuildActionRegistry()
     discard cargoTool.test(manifestPath = "rust/Cargo.toml", noRun = true,
