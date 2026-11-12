@@ -986,6 +986,7 @@ libs/repro_tool_profiles/tests/t_installed_prefix_nim_route.nim	nim	12
 libs/repro_tool_profiles/tests/t_n48_tool_profiles_tar_operands.nim	nim	3
 libs/repro_tool_profiles/tests/t_native_and_target_outputs_are_disjoint.nim	nim	12
 libs/repro_tool_profiles/tests/t_one_tarball_realizer.nim	nim	4
+libs/repro_tool_profiles/tests/t_path_mode_library_selection_is_not_a_host_program.nim	nim	3
 libs/repro_tool_profiles/tests/t_path_sidecar_batches.nim	nim	12
 libs/repro_tool_profiles/tests/t_provisioning_pin_selects_and_keys.nim	nim	8
 libs/repro_tool_profiles/tests/t_realization_selection.nim	nim	30
