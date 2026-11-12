@@ -73898,7 +73898,9 @@ proc exitInterrupted() {.noreturn.} =
   ## that exits 127, the status of a command that was not found.
   stderr.flushFile()
   when defined(posix):
-    discard posix.signal(posix.SIGINT, posix.SIG_DFL)
+    # No ``discard``: Nim 2.2.4's ``posix.signal`` returns nothing (discarding
+    # it does not compile), the dev shell's returns a discardable handler.
+    posix.signal(posix.SIGINT, posix.SIG_DFL)
     discard posix.kill(posix.getpid(), posix.SIGINT)
   quit(130)
 

@@ -61,6 +61,9 @@ class LaneSelection(unittest.TestCase):
         selected = [l for l in r.stdout.splitlines() if l.startswith("selected: ")]
         self.assertIn("selected: t_sim_tls_smoke_pass_stops_its_peers", selected)
         self.assertIn("selected: t_signer_closes_after_its_early_returns", selected)
+        # The engine's signer suite links repro_cli_support (reprobuild-pm
+        # issue 2026-11-07-repro-cli-support-does-not-build-under-nim-2-2-4).
+        self.assertIn("selected: t_worker_signing_certificates_are_time_bound", selected)
 
 
 if __name__ == "__main__":

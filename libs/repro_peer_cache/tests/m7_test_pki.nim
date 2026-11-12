@@ -91,8 +91,9 @@ proc engineBin*(): string =
   ## Mode spec scopes that guard to the add-on's and the Evidence sink's
   ## test helpers; converting the others is a milestone of its own
   ## (reprobuild-pm issue 2026-11-07-tests-run-build-bin-helpers-without-
-  ## checking-they-are-built-from-the-tree).
-  repoRootDir() / "build" / "bin" / addFileExt("reprobuild", ExeExt)
+  ## checking-they-are-built-from-the-tree). Under ``$REPRO_TEST_BUILD_DIR``
+  ## when set, like the sink: the Nim 2.2.4 lane builds its own engine there.
+  helperBuildDir(repoRootDir()) / "bin" / addFileExt("reprobuild", ExeExt)
 
 proc newTestNode*(base, name: string): TestNode =
   ## A node with a freshly minted host CA under

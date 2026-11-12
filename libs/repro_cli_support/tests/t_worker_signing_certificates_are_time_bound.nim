@@ -37,6 +37,12 @@ proc keygen(args: varargs[string]) =
   let res = execCmdEx(quoteShellCommand(@["ssh-keygen"] & @args))
   doAssert res.exitCode == 0, res.output
 
+proc providing(leaf: LeafCredential): LeafProvider =
+  ## The worker's leaf, captured from a parameter: a test body's locals are
+  ## globals under Nim 2.2.4's ``unittest``, and a ``{.gcsafe.}`` closure
+  ## over one does not compile there.
+  result = proc(): LeafCredential {.gcsafe, closure.} = leaf
+
 proc record(issuedAt: DateTime): TestCertificate =
   TestCertificate(schema: testCertificateSchemaV1,
     framework: reprobuildFrameworkId, project: "m7-signing",
@@ -103,7 +109,7 @@ suite "Distributed-Execution M7: worker signing certificates are time-bound":
         stopSigner(signer)
         removeDir(base)
       let leaf = mintLeaf(w.identity, lrDaemon)
-      let provider = proc(): LeafCredential {.gcsafe, closure.} = leaf
+      let provider = providing(leaf)
       let anchors = loadTrustAnchorFile(w.tlsDir / "cert-signer.crt")
       let colon = signer.endpoint.rfind(':')
       let endpoint = initEndpoint(signer.endpoint[0 ..< colon],
