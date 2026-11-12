@@ -309,11 +309,11 @@ beside its finding (the publishers table).
 | 16 `genuine-capture` (go-sev-guest, go-tdx-guest, virtee-sev, aws-samples, opengradient, operators, syndicate, trustee, zkverify) | Each is a quote or report minted by a machine for one request. Asking again yields a different, equally valid document (`expected-to-differ`), so a byte comparison can never refute the pin. They are refreshed by checking out the pinned upstream commit. |
 | 3 `historical-vintage` (go-tdx-guest) | Pinned old on purpose; a fetch would replace them with current documents and delete the property they exist for. The monitor refuses to run if one is given a route. |
 | 4 `protocol-vector` (aws-docs: `AwsDocumentedPcr3/4Input/Output`) | Values read from vendor documentation, not served as a document. A person re-reads the page. |
-| `NitroRootG1DerHex`, `GsgMilanVlekChainPem` (`trust-root`) | Trust roots arrive from a package or a repository checkout, and a change to one is an incident (see below), not a routine refresh; they must not be refreshed by an unattended job. |
-| `IntelSampleRootDerHex`, `IntelSampleCaDerHex`, `IntelSampleLeafDerHex`, `IntelSampleQuoteHex` (intel-published) | Members of a published sample archive; the member, not a URL, is the artifact. |
-| `fixtures/tdx/ovmf-dstack-0.5.9.fd`, `fixtures/tdx/ovmf-ubuntu-2025.02-3ubuntu2.fd` | Firmware images taken out of a pinned distribution package or release archive. |
+| `NitroRootG1DerHex`, `GsgMilanVlekChainPem` (`trust-root`) | A trust root is confirmed against the vendor's published fingerprint and independent republishers (`NitroRootG1DerHex`), or copied from a pinned commit's committed test data (`GsgMilanVlekChainPem`). A change to one is an incident (see below), not a routine refresh, so it must not be refreshed by an unattended job. |
+| `IntelSampleRootDerHex`, `IntelSampleCaDerHex`, `IntelSampleLeafDerHex`, `IntelSampleQuoteHex` (intel-published) | The publisher row requires the download's digest to be confirmed against at least one publisher that does not derive it from this one, which is a human comparison and not a GET. |
+| `fixtures/tdx/ovmf-dstack-0.5.9.fd`, `fixtures/tdx/ovmf-ubuntu-2025.02-3ubuntu2.fd` | Firmware extracted from a distribution package (Ubuntu) or a published guest image (dstack), then checked by size and digest. |
 | 7 Intel PCS documents (`PcsTcbInfoSprJson`, `PcsTcbInfoEmrJson`, `PcsTdxQeIdentityJson`, `PcsSgxQeIdentityJson`, `PcsSgxTcbInfoJson`, `PcsPckCrlPlatformDerHex`, `PcsPckCrlProcessorDerHex`) | The service re-signs every three hours; see the previous section. A byte-drift route would be red for ever. Their **expiry** is watched, and a substance-digest route is the specified follow-on. |
-| `IntelTcbSigningCertDerHex` | The signing certificate is taken from the chain that accompanies those same documents, so it moves with them. |
+| `IntelTcbSigningCertDerHex` | Its refresh command is the same Intel PCS procedure as the documents it signs (the new body is verified under it before anything is replaced), so it is refreshed together with them, by a person, and not by a byte-drift route. |
 
 ### What "needs attention" does not include
 
