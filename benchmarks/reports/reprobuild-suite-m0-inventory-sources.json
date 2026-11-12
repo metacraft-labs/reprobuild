@@ -44037,6 +44037,7 @@
       "language": "nim",
       "localDependencyShape": [
         "repro_lock",
+        "repro_project_dsl",
         "repro_test_support"
       ],
       "owner": "tests/integration",
