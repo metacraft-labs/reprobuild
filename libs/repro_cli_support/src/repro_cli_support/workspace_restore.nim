@@ -31,7 +31,7 @@ proc git(identity: GitToolIdentity; args: openArray[string]): string =
   let response = queryGit(identity, args)
   if response.code != 0:
     raise newException(ValueError, "git " & (@args).join(" ") & ": " &
-        response.output.strip)
+        response.diagnostic)
   response.output.strip
 
 proc fullCommit(value: string): bool =

@@ -161,20 +161,19 @@ proc manifestCheckoutPaths*(workspaceRoot: string): seq[string] =
     if path.len > 0 and dirExists(path) and path notin result:
       result.add(path)
 
-proc q(value: string): string = quoteShell(value)
-
 proc runGit(identity: GitToolIdentity;
             args: openArray[string]): tuple[code: int; output: string] =
-  ## Same pattern M9 uses (``revParse`` in repro_cli_support):
-  ## ``execCmdEx`` with the identity-bound git binary. We thread
-  ## ``poStdErrToStdOut`` so the diagnostic captures both streams.
-  var cmd = q(identity.binaryPath)
-  for arg in args:
-    cmd.add(" ")
-    cmd.add(q(arg))
-  let res = execCmdEx(cmd, options = {poStdErrToStdOut, poUsePath},
-    env = scrubbedGitRepositoryEnv())
-  (code: res.exitCode, output: res.output)
+  ## Run the identity-bound git binary. On success ``output`` is git's
+  ## stdout ALONE (``gitRunSeparated``): the callers parse it (a HEAD sha, a
+  ## branch name, an emptiness verdict over ``status --porcelain``), and git
+  ## writes warnings to stderr while still exiting 0 with the right answer --
+  ## merged, a pristine checkout read as dirty and a warning as a sha. On
+  ## failure ``output`` is git's merged message, so the diagnostic still
+  ## carries git's reason, which is on stderr.
+  let res = gitRunSeparated(identity.binaryPath, args,
+    scrubbedGitRepositoryEnv())
+  (code: res.code,
+   output: (if res.code == 0: res.output else: res.diagnostic))
 
 proc headSha(identity: GitToolIdentity; repoPath: string): string =
   let res = runGit(identity, ["-C", repoPath, "rev-parse", "HEAD"])

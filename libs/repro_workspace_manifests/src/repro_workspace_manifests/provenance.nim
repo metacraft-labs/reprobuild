@@ -96,21 +96,21 @@ proc pinnedRevisionSpec*(revision: string): ManifestVerifySpec =
   ## `revision` asks for.
   ManifestVerifySpec(pinnedRevision: revision)
 
-proc q(value: string): string = quoteShell(value)
-
 proc runGit(gitBin: string; args: openArray[string]):
     tuple[code: int; output: string] =
-  ## `execCmdEx` with stderr folded into stdout (signature diagnostics land on
-  ## stderr). The allowed-signers file + format are threaded via `-c key=val`
-  ## flags in `args`, so the call is self-contained and leaves no global git
-  ## state behind.
-  var cmd = q(gitBin)
-  for a in args:
-    cmd.add(" ")
-    cmd.add(q(a))
-  let res = execCmdEx(cmd, options = {poStdErrToStdOut, poUsePath},
-    env = scrubbedGitRepositoryEnv())
-  (code: res.exitCode, output: res.output)
+  ## Run git for a provenance check. The allowed-signers file + format are
+  ## threaded via `-c key=val` flags in `args`, so the call is self-contained
+  ## and leaves no global git state behind.
+  ##
+  ## On success ``output`` is git's stdout ALONE (``gitRunSeparated``); on
+  ## failure it is git's merged message, because signature diagnostics and
+  ## every other reason git gives are on stderr. A success's output is parsed
+  ## (a resolved commit id, an object type), and git writes warnings to
+  ## stderr while still exiting 0 with the right answer, so a merged stream
+  ## put the warning inside the id the pin was compared against.
+  let res = gitRunSeparated(gitBin, args, scrubbedGitRepositoryEnv())
+  (code: res.code,
+   output: (if res.code == 0: res.output else: res.diagnostic))
 
 proc resolveRev(gitBin, manifestPath, rev: string): string =
   let res = runGit(gitBin, ["-C", manifestPath, "rev-parse", "--verify",
