@@ -360,6 +360,13 @@ class ResolveCache:
         return cached if self._valid(cached) else None
 
     def get_or_resolve(self, key, resolve) -> dict:
+        """The cached response for ``key``, resolving it when none is valid.
+        Not a duplicate of ``peek``: a request reaches this when ``peek``
+        could not answer it on the accepting thread (nothing valid cached
+        then, or a client slower to send its line than the inline read
+        waits), and the cache is looked at again under the key's lock, so
+        two requests that both missed ``peek`` cause one resolution and a
+        slow client's request is still answered from the cache."""
         with self._lock:
             key_lock = self._key_locks.setdefault(key, threading.Lock())
         with key_lock:
@@ -472,13 +479,17 @@ class Server:
         self.identity = None
 
     @staticmethod
-    def read_request(conn: socket.socket, data: bytes) -> bytes:
+    def read_request(conn: socket.socket, data: bytearray) -> bytes:
+        """Read up to the end of the request line into ``data``, in place: a
+        read that times out keeps what it read, so the thread the request is
+        handed to (``dispatch``) continues the same line rather than reading
+        its tail as a request of its own."""
         while not data.endswith(b"\n") and len(data) < MAX_REQUEST_BYTES:
             chunk = conn.recv(65536)
             if not chunk:
                 break
             data += chunk
-        return data
+        return bytes(data)
 
     @staticmethod
     def reply(conn: socket.socket, resp: dict) -> None:
@@ -489,17 +500,17 @@ class Server:
             self.active -= 1
             self.last_activity = time.monotonic()
 
-    def finish(self, conn: socket.socket, data: bytes) -> None:
+    def finish(self, conn: socket.socket, data: bytearray) -> None:
         """Read the rest of a request and answer it, resolving if needed.
         Runs on its own thread."""
         try:
             with conn:
                 conn.settimeout(CONNECTION_READ_TIMEOUT_S)
-                data = self.read_request(conn, data)
-                if not data.strip():
+                request = self.read_request(conn, data)
+                if not request.strip():
                     return
                 try:
-                    resp = response_for(data.strip(), self.cache)
+                    resp = response_for(request.strip(), self.cache)
                 except Exception as exc:
                     resp = {"status": "error", "error": str(exc)}
                 self.reply(conn, resp)
@@ -518,16 +529,16 @@ class Server:
         with self.state_lock:
             self.active += 1
             self.last_activity = time.monotonic()
-        data = b""
+        data = bytearray()
         try:
             conn.settimeout(INLINE_READ_TIMEOUT_S)
-            data = self.read_request(conn, data)
-            if not data.strip():
+            request = self.read_request(conn, data)
+            if not request.strip():
                 conn.close()
                 self.finished()
                 return
             try:
-                resp = response_for(data.strip(), self.cache, cached_only=True)
+                resp = response_for(request.strip(), self.cache, cached_only=True)
             except Exception as exc:
                 resp = {"status": "error", "error": str(exc)}
             if resp is not None:

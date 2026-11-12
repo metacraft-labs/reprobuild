@@ -16,6 +16,7 @@
 ## library under test. Nothing is mocked.
 
 import std/[json, os, osproc, strutils, tempfiles, unittest]
+import repro_test_support/scoped_env
 
 import repro_test_support
 import repro_cli_support
@@ -32,6 +33,7 @@ const certifyKeyId* = "tc8d-daemon-key"
 
 type
   CertifyFixture* = object
+    storeEnv: ScopedEnv
     sib*: SiblingFixture
     daemonKey*: string
     certStore*: string
@@ -61,7 +63,7 @@ proc offPolicySection*(untrackedInputs = puiReadSet; name = "app"): string =
 
 proc setupCertifyFixture*(label: string): CertifyFixture =
   result.sib = setupSiblingFixture(label)
-  result.certStore = isolateCertificateStore(result.sib.scratch)
+  result.certStore = isolateCertificateStore(result.sib.scratch, result.storeEnv)
   result.counter = result.sib.scratch / "run-counter.txt"
   let key = genEd25519Key(result.sib.scratch / "daemon-keys", "tc8d-key",
     certifyKeyId)

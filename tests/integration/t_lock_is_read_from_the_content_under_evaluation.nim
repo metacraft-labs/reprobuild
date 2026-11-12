@@ -122,6 +122,7 @@ suite "TC-8b — the lock comes from the content":
 
   test "t_lock_is_read_from_the_content_under_evaluation":
     let scratch = enterHermeticGit()
+    defer: leaveHermeticGit(scratch)
     let repo = newRepo(scratch, "lib-a")
     writeEntryFile(repo, "src/lib.nim", "proc f*() = discard\n")
     writeEntryFile(repo, "repro.lock", committedLock("1".repeat(40)))
@@ -275,4 +276,3 @@ suite "TC-8b — the lock comes from the content":
     check "unknown key or table 'certificate.vcs.lock'" in stray.detail
 
     check libraryTempLeftovers(scratch).len == 0
-    removeDir(scratch)

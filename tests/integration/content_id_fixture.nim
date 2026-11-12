@@ -2,7 +2,8 @@
 ## real repositories, and the entry lists the content-id vectors use.
 ##
 ## Every repository here is a real one made by the real ``git``; nothing is
-## mocked. The process environment is made hermetic once (``enterHermeticGit``):
+## mocked. Each case makes the process environment hermetic (``enterHermeticGit``,
+## undone by ``leaveHermeticGit``):
 ## no system or user git configuration, no inherited repository variables, a
 ## private ``TMPDIR`` (so a test can assert the library left no temporary
 ## directory behind), fixed identities and dates.
@@ -52,15 +53,31 @@ proc gitLine*(dir: string; args: varargs[string]): string =
   result = git(dir, args)
   result.stripLineEnd()
 
+const hermeticGitEnv = ["GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE",
+  "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_CONFIG",
+  "GIT_CONFIG_PARAMETERS", "GIT_CONFIG_COUNT", "GIT_LITERAL_PATHSPECS",
+  "GIT_GLOB_PATHSPECS", "GIT_NOGLOB_PATHSPECS", "GIT_ICASE_PATHSPECS",
+  "GIT_CEILING_DIRECTORIES", "GIT_CONFIG_NOSYSTEM", "GIT_CONFIG_GLOBAL",
+  "HOME", "XDG_CONFIG_HOME", "GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL",
+  "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL", "GIT_AUTHOR_DATE",
+  "GIT_COMMITTER_DATE", "TMPDIR", "GIT_OPTIONAL_LOCKS"]
+  ## Every variable ``enterHermeticGit`` sets or removes.
+
+var savedHermeticGitEnv: seq[seq[(string, bool, string)]]
+  ## The environment each open ``enterHermeticGit`` replaced, innermost last.
+
 proc enterHermeticGit*(): string =
   ## Make this process's git hermetic and return a fresh scratch directory.
-  ## Called once per test case; each case runs in its own process.
-  # The private TMPDIR set below must not become the parent of the next
-  # case's scratch, so the outer one is remembered on first use.
-  if not existsEnv("REPRO_T_CONTENT_ID_OUTER_TMPDIR"):
-    putEnv("REPRO_T_CONTENT_ID_OUTER_TMPDIR", getTempDir())
-  result = createTempDir("repro-t-content-id-", "",
-                         getEnv("REPRO_T_CONTENT_ID_OUTER_TMPDIR"))
+  ## Every caller pairs it with ``defer: leaveHermeticGit(scratch)``: the
+  ## environment set here names directories inside the scratch, and a grouped
+  ## test binary runs many cases in one process, so a case that removed its
+  ## scratch and kept the environment left ``TMPDIR`` and ``HOME`` naming a
+  ## deleted directory for every case after it.
+  var saved: seq[(string, bool, string)]
+  for key in hermeticGitEnv:
+    saved.add (key, existsEnv(key), getEnv(key))
+  savedHermeticGitEnv.add saved
+  result = createTempDir("repro-t-content-id-", "")
   let config = result / "gitconfig"
   writeFile(config, "[init]\n\tdefaultBranch = main\n" &
     "[core]\n\tprecomposeUnicode = false\n\tautocrlf = false\n" &
@@ -88,6 +105,14 @@ proc enterHermeticGit*(): string =
   let tmp = result / "tmp"
   createDir(tmp)
   putEnv("TMPDIR", tmp)
+
+proc leaveHermeticGit*(scratch: string) =
+  ## Undo the innermost ``enterHermeticGit``: restore every variable it set or
+  ## removed (unset ones stay unset), then remove ``scratch``.
+  if savedHermeticGitEnv.len > 0:
+    for (key, existed, value) in savedHermeticGitEnv.pop():
+      if existed: putEnv(key, value) else: delEnv(key)
+  removeDir(scratch)
 
 proc libraryTempLeftovers*(scratch: string): seq[string] =
   ## Temporary directories the library left in the private ``TMPDIR``.

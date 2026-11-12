@@ -1095,6 +1095,24 @@ type
       ## and is why no caller has to be updated to stay correct: an engine
       ## configuration that declares no roots keeps membership on every
       ## enumerated directory, exactly as before this field existed.
+    sourceTrees*: seq[string]
+      ## The trees OUTSIDE `filesystemRoots` that this invocation reads as
+      ## source: the workspace root (every member repository is checked out
+      ## beneath it) and each link beneath it, each dependency the project's
+      ## committed lock pins, at the checkout this machine has for it, and
+      ## each develop override's checkout. Absolute paths. Consumed by the
+      ## volatile-path fold alone (`actionVolatileScope`): a read at or under
+      ## one of them is never dropped as runtime state, whatever its prefix,
+      ## and one that cannot be told apart from runtime state refuses the
+      ## build (`volatileRootRefusals`).
+      ##
+      ## NOT A ROOT CLASSIFICATION, and deliberately not merged into
+      ## `filesystemRoots`: those feed the membership exemption and the
+      ## portable naming, and a sibling repository is neither the project's
+      ## tracked scope nor a root a portable key is named against. Empty
+      ## leaves the scope to the declared roots (or the working directory),
+      ## as before this field existed. The CLI fills it in
+      ## `wireFilesystemRoots` and for the dev-env activation.
     portableRoots*: seq[LogicalRoot]
       ## Cache-Scope P3.1: the logical roots against which each recorded
       ## action's PORTABLE fingerprint is computed
@@ -9845,36 +9863,51 @@ proc refuseForeignTargetOutputs(action: BuildAction; triple: string;
 
 proc trackedFilesystemRootPaths*(roots: openArray[LogicalRoot]): seq[string]
 
+proc sourceTreePaths*(sourceTrees: openArray[string]): seq[string] =
+  ## `BuildEngineConfig.sourceTrees` in both spellings, declared and
+  ## symlink-resolved, for the reason `trackedFilesystemRootPaths` gives: the
+  ## monitor reports the resolved one.
+  ##
+  ## A path resolution per tree, and a workspace has hundreds of them, so a
+  ## build derives this ONCE (`runBuild`) and hands the result to every
+  ## action's `actionVolatileScope`, as it does `membershipTrackedRoots`.
+  trackedFilesystemRootPaths(sourceTrees.mapIt(
+    LogicalRoot(label: "source", path: it, kind: lrkTracked)))
+
 proc actionVolatileScope*(action: BuildAction;
-                          filesystemRoots: openArray[LogicalRoot]):
+                          filesystemRoots: openArray[LogicalRoot];
+                          sourceTreeSpellings: openArray[string] = []):
                           VolatileScope =
   ## The trees whose reads are this action's own even under a volatile
   ## runtime prefix (`repro_core/paths.dropsAsVolatileRuntimeState`).
   ##
   ## The DECLARED roots when the invocation declares any: the project, its
   ## repository, the work, store and output roots, in both of their spellings
-  ## (`trackedFilesystemRootPaths`). They are the roots the portable
-  ## fingerprint names paths against, so a path kept here is a tracked path
-  ## there too and is never left out of the portable key as untracked.
+  ## (`trackedFilesystemRootPaths`). The action's WORKING DIRECTORY
+  ## otherwise. Not every engine configuration declares roots
+  ## (`wireFilesystemRoots` lists the ones that do not), and each of those
+  ## still runs its actions in the project it works on; with no scope at
+  ## all, a project under `/dev/shm/<name>` would lose every read on those
+  ## edges, silently.
   ##
-  ## The action's WORKING DIRECTORY otherwise. Not every engine configuration
-  ## declares roots (`wireFilesystemRoots` lists the ones that do not), and
-  ## each of those still runs its actions in the project it works on; with
-  ## no scope at all, a project under `/dev/shm/<name>` would lose every read
-  ## on those edges, silently.
+  ## PLUS, either way, the SOURCE TREES (`BuildEngineConfig.sourceTrees`):
+  ## the workspace root and every dependency checkout the build reads
+  ## outside its own roots. Without them a sibling repository on a mount at
+  ## `/run/<dir>` was under no root, and an edit there was a cache hit.
+  ## `sourceTreeSpellings` is `sourceTreePaths` of them, already resolved:
+  ## this runs for every recorded action.
   ##
   ## A refused root (`volatileRootRefusal`) is left out of the scope; the
   ## build has already been refused for it (`volatileRootRefusals`).
-  let tracked = trackedFilesystemRootPaths(filesystemRoots)
-  if tracked.len > 0:
-    volatileScope(tracked)
-  elif action.cwd.len > 0:
-    volatileScope([absolutePath(action.cwd)])
-  else:
-    VolatileScope()
+  var roots = trackedFilesystemRootPaths(filesystemRoots)
+  if roots.len == 0 and action.cwd.len > 0:
+    roots.add(absolutePath(action.cwd))
+  roots.add(sourceTreeSpellings)
+  volatileScope(roots)
 
 proc volatileRootRefusals*(g: BuildGraph;
-                           filesystemRoots: openArray[LogicalRoot]):
+                           filesystemRoots: openArray[LogicalRoot];
+                           sourceTrees: openArray[string] = []):
                            seq[string] =
   ## One diagnostic per root this build would have to read as its own while
   ## the volatile-path fold drops it (`volatileRootRefusal`): a project at
@@ -9884,9 +9917,21 @@ proc volatileRootRefusals*(g: BuildGraph;
   ##
   ## The roots judged are the ones `actionVolatileScope` would use: the
   ## declared ones, or each action's working directory when none are
-  ## declared. A working directory is judged only when it is under a
-  ## volatile prefix, so an action run from `/` is not refused for
-  ## containing `/dev`; a DECLARED root of `/` is.
+  ## declared, and the source trees either way (a workspace whose root is
+  ## `/dev/shm` itself). A working directory or a source tree is judged only
+  ## when it is under a volatile prefix, so an action run from `/` is not
+  ## refused for containing `/dev`; a DECLARED root of `/` is.
+  for spelling in sourceTreePaths(sourceTrees):
+    if not spelling.isVolatileRuntimeStatePath():
+      continue
+    let reason = volatileRootRefusal(spelling)
+    if reason.len > 0:
+      let message = "refusing to build: the source tree " & spelling &
+        " (the workspace root, a workspace repository or a dependency " &
+        "checkout this build reads) is not a place a project's files can " &
+        "be fingerprinted: " & reason
+      if message notin result:
+        result.add(message)
   var declared = false
   for root in filesystemRoots:
     if root.kind != lrkTracked or root.path.len == 0:
@@ -9919,7 +9964,8 @@ proc volatileRootRefusals*(g: BuildGraph;
 
 proc collectEvidence(action: BuildAction; strict: bool;
                      hostedRecords: ptr seq[MonitorRecord] = nil;
-                     config: ptr BuildEngineConfig = nil):
+                     config: ptr BuildEngineConfig = nil;
+                     sourceTreeSpellings: ptr seq[string] = nil):
                      EvidenceCollection =
   ## ``hostedRecords`` (HM-5) is the in-memory record set for an action the
   ## engine hosted the monitor for. When it is non-nil the monitor evidence is
@@ -9936,7 +9982,12 @@ proc collectEvidence(action: BuildAction; strict: bool;
   result.evidence.declaredOutputs = action.outputs
   # Before anything is folded: every channel below is judged against it.
   result.evidence.volatileScope =
-    if config != nil: actionVolatileScope(action, config[].filesystemRoots)
+    if config != nil and sourceTreeSpellings != nil:
+      actionVolatileScope(action, config[].filesystemRoots,
+        sourceTreeSpellings[])
+    elif config != nil:
+      actionVolatileScope(action, config[].filesystemRoots,
+        sourceTreePaths(config[].sourceTrees))
     else: actionVolatileScope(action, [])
   # S5 — an action that declares the same path as BOTH an input and an
   # output consumes its own output: an incremental tool reading the state
@@ -18559,7 +18610,11 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
   # project dropped: a stale result served, a certificate for content nobody
   # tested. Refused here, before any action runs or is served from the
   # cache, naming the root and the reason. See `volatileRootRefusals`.
-  let volatileRefusals = volatileRootRefusals(g, config.filesystemRoots)
+  let volatileRefusals = volatileRootRefusals(g, config.filesystemRoots,
+    config.sourceTrees)
+  # The source trees' spellings, resolved once per build rather than once per
+  # recorded action (`sourceTreePaths`): a workspace has hundreds.
+  var sourceTreeSpellings = sourceTreePaths(config.sourceTrees)
   if volatileRefusals.len > 0:
     raiseEngine(volatileRefusals.join("\n"))
   var stats: BuildStats
@@ -19863,7 +19918,8 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
       # (portable roots carry the declared spelling only), or a dependency
       # checkout there. Such a record is not portable, as an input outside
       # every root is not.
-      let scope = actionVolatileScope(action, config.filesystemRoots)
+      let scope = actionVolatileScope(action, config.filesystemRoots,
+        sourceTreeSpellings)
       let roots = portableRecordRoots()
       for path in reads & probes & enumerations:
         if path.isVolatileRuntimeStatePath() and
@@ -22648,7 +22704,8 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
             not action.needsExecutionForPolicy():
           let evidenceStart = statStart()
           let evidence = collectEvidence(action, strict = true,
-            config = addr config)
+            config = addr config,
+            sourceTreeSpellings = addr sourceTreeSpellings)
           finishStat("repro evidence collect", evidenceStart)
           runResult.results[idToIndex.resultIndex(id)].evidence = evidence.evidence
           # M9.R.73.2 — the FOURTH evidence-collection site, and it was the
@@ -22786,7 +22843,8 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
               continue
             let evidenceStart = statStart()
             let evidence = collectEvidence(action, strict = true,
-              config = addr config)
+              config = addr config,
+              sourceTreeSpellings = addr sourceTreeSpellings)
             finishStat("repro evidence collect", evidenceStart)
             runResult.results[idx].evidence = evidence.evidence
             if not evidence.publishable:
@@ -23016,7 +23074,8 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
               continue
             let evidenceStart = statStart()
             var evidence = collectEvidence(plan.action, strict = true,
-              config = addr config)
+              config = addr config,
+              sourceTreeSpellings = addr sourceTreeSpellings)
             finishStat("repro evidence collect", evidenceStart)
             # DA-1f — the one thing the BUILT-IN knew that `collectEvidence`
             # cannot re-derive: what a foreign provisioner daemon reported
@@ -23637,10 +23696,12 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
             # for this action may not exist yet; that is the point.
             collectEvidence(action, strict = true,
               hostedRecords = addr hostedMonitorRecords,
-              config = addr config)
+              config = addr config,
+              sourceTreeSpellings = addr sourceTreeSpellings)
           else:
             collectEvidence(evidenceAction, strict = true,
-              config = addr config)
+              config = addr config,
+              sourceTreeSpellings = addr sourceTreeSpellings)
         hostedMonitorRecords = @[]
         finishStat("repro evidence collect", evidenceStart)
         if wrappedCapture.len > 0:

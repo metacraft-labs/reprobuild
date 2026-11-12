@@ -12,6 +12,7 @@
 ## ``signCertificateOnIssuance`` (ssh-keygen ed25519) internally.
 
 import std/[algorithm, os, osproc, strutils]
+import repro_test_support/scoped_env
 import repro_cli_support
 
 proc sshKeygenExe(): string = findExe("ssh-keygen")
@@ -87,15 +88,19 @@ proc seedManifestLockStore*(gitBin, workspaceRoot: string;
 
 # ---- TC-8c: the standard local certificate store ---------------------------
 
-proc isolateCertificateStore*(scratch: string): string =
+proc isolateCertificateStore*(scratch: string; env: var ScopedEnv): string =
   ## Point this test process — and every child it starts (``repro test``, a
   ## hook run by ``git push``) — at a scratch local certificate store, so a
   ## test never reads or writes the user's own (Transport §2.1). Returns the
-  ## user root. Each test case runs as its own process, so the setting does
-  ## not leak into another case.
+  ## user root.
+  ##
+  ## ``env`` (a field of the caller's fixture) restores both variables when
+  ## the fixture goes out of scope. A grouped test binary runs many cases in
+  ## one process, and without it every later case inherited a store root
+  ## inside a scratch directory its case had already removed.
   result = scratch / "certificate-store"
-  putEnv("TEST_CERTIFICATES_DIR", result)
-  putEnv("TEST_CERTIFICATES_SYSTEM_DIR", scratch / "certificate-system-store")
+  env = scopedEnv([("TEST_CERTIFICATES_DIR", result),
+    ("TEST_CERTIFICATES_SYSTEM_DIR", scratch / "certificate-system-store")])
 
 proc treeContentId*(gitBin, repo, rev: string): string =
   ## ``git-tree-sha1:<rev^{tree}>``, computed by git rather than by the library.

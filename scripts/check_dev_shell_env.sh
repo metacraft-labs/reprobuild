@@ -438,9 +438,33 @@ cache_remedy="Refreshing this cache requires trusted direnv: review .envrc,
       nix develop does not refresh these .direnv artifacts; neither does
       Reprobuild's flake activation."
 
+# .envrc records the override fingerprint BEFORE `use flake` evaluates, because
+# the fingerprint has to be in the watch set that evaluation consults. So a
+# fingerprint with no profile beside it is what an .envrc run leaves when the
+# evaluation never produced a shell: it records the overrides of a shell that
+# was never built. Not a freshness failure (there is no cache to be stale), but
+# it changes which remedies can work — 'direnv reload' re-runs the same .envrc,
+# rewrites the same fingerprint and fails the same evaluation — so check 5's
+# vacuity guard, whose remedy would otherwise be a bare reload, says this
+# instead. The checkout failures keep their remedies: each changes a sibling
+# first, and a reload after that is not a repeat of the failed evaluation.
+never_evaluated_remedy=""
+if [[ ${#profiles[@]} -eq 0 && -f "$fingerprint" ]]; then
+  never_evaluated_remedy="No cached dev shell exists beside
+      $(basename "$fingerprint"), so the shell those overrides describe has not
+      evaluated on this machine; 'direnv reload' would re-run the same .envrc
+      and fail the same way. Run 'direnv exec . true' to see the evaluation
+      error, and fix the override or input it names."
+fi
+
 if [[ ${#profiles[@]} -eq 0 ]]; then
-  printf 'dev-shell: no .direnv/flake-profile-*.rc on this machine; %s\n' \
-    'cache-freshness check has nothing to compare (fresh checkout / CI).'
+  if [[ -n "$never_evaluated_remedy" ]]; then
+    printf 'dev-shell: %s\n' \
+      "a $(basename "$fingerprint") exists but no .direnv/flake-profile-*.rc does: .envrc recorded overrides for a shell that has not evaluated here (its 'use flake' failed or never ran), so the cache-freshness check has nothing to compare. Run 'direnv exec . true' to see why."
+  else
+    printf 'dev-shell: no .direnv/flake-profile-*.rc on this machine; %s\n' \
+      'cache-freshness check has nothing to compare (fresh checkout / CI).'
+  fi
 else
   # The half of the staleness problem that needs no overrides at all.
   # nix-direnv DOES watch flake.lock — but only compares it against the
@@ -607,8 +631,9 @@ else
       accept the empty parse."
   fi
 
-  examined=0 at=0 ahead=0 unpinned=0 bad=0
+  examined=0 at=0 ahead=0 unpinned=0 followed=0 bad=0
   unpinned_names=()
+  follows_names=()
   ahead_names=()
   while IFS=$'\t' read -r f_input f_dir f_state; do
     [[ -n "$f_input" ]] || continue
@@ -635,6 +660,18 @@ else
       continue
     fi
     f_state="$live_state"
+    if [[ "${lock_pin[$f_input]}" == "follows" ]]; then
+      # The lock routes this input to another input's node: it has no lock
+      # node of its own, so there is no pin for it to be behind, and automatic
+      # override derivation leaves such an input pinned. Unlike `-` below this
+      # is a positive reading of the lock — the parser recognised the
+      # `follows` array — so it counts as classified for the vacuity guard,
+      # and a fingerprint whose every row is a `follows` is stated, not
+      # misdiagnosed as an empty or mismatched fingerprint.
+      followed=$((followed + 1))
+      follows_names+=("$f_input")
+      continue
+    fi
     if [[ "$f_state" != git:* ]]; then
       # A non-git override source (`dev_shell_source_state` falls back to an
       # mtime for those). It has no revision, so "behind a pin" is not a
@@ -647,11 +684,11 @@ else
     f_head="${f_head%%+*}"
 
     if [[ "${lock_pin[$f_input]}" == "-" ]]; then
-      # A `follows`, or an input locked to something with no revision. It
-      # carries no pin of its own, so there is nothing for it to be behind —
-      # the same disposition `repro flake override-status` gives it. Counted
-      # and named separately: "no drift" and "nothing here could be checked"
-      # must not look alike.
+      # An input locked to something with no revision. It carries no pin of
+      # its own, so there is nothing for it to be behind — the same
+      # disposition `repro flake override-status` gives it. Counted and named
+      # separately: "no drift" and "nothing here could be checked" must not
+      # look alike.
       unpinned=$((unpinned + 1))
       unpinned_names+=("$f_input (no revision pinned for it in flake.lock)")
       continue
@@ -712,23 +749,40 @@ else
     esac
   done < <(printf '%s\n' "${fingerprint_rows[@]}")
 
-  if [[ "$pin_rows" -gt 0 && "$examined" -eq 0 ]]; then
+  if [[ "$pin_rows" -gt 0 && "$examined" -eq 0 && "$unpinned" -gt 0 ]]; then
     # The vacuity guard. Everything above can report zero failures by never
-    # having classified anything — an empty fingerprint, a state format that
-    # stopped matching, an input set that stopped resolving — and zero
-    # failures is what a clean run also looks like.
+    # having compared anything — a state format that stopped matching, a
+    # lock node whose revision stopped parsing — and zero failures is what a
+    # clean run also looks like. A row recognised as a `follows` is not that
+    # shape (the lock says, positively, that it has no pin of its own), so a
+    # set of nothing but `follows` rows is stated below instead; but one
+    # beside a row that carries no comparable revision does not excuse it.
+    # Nor does a row refused above: its refusal names that row, not the one
+    # that went uncompared.
+    if [[ -n "$never_evaluated_remedy" ]]; then
+      vacuity_remedy="$never_evaluated_remedy If that shell does evaluate,
+      re-run this check; if it still classifies nothing, the fingerprint and
+      the lock are describing different flakes."
+    else
+      vacuity_remedy="Remedy: 'direnv reload' and re-run; if it persists,
+      the fingerprint and the lock are describing different flakes."
+    fi
     fail "no overridden source was classified against a flake.lock pin, so
       this check asserted nothing while reporting no failures. $lock has
       $pin_rows root input(s) and $(basename "$fingerprint") records
-      $unpinned source(s) that carry no comparable revision. Either the
-      fingerprint is empty — in which case the dev shell overrides nothing and
-      .envrc's auto arm has gone inert — or the two files stopped agreeing on
-      input names. Remedy: 'direnv reload' and re-run; if it persists, the
-      fingerprint and the lock are describing different flakes."
+      $unpinned source(s) that carry no comparable revision: a non-git
+      source, or a lock node with no locked revision. Either a parser stopped
+      reading one of the two files (dev_shell_source_state for the
+      fingerprint, dev_shell_flake_lock_pins for the lock), or the two
+      stopped agreeing on input names. $vacuity_remedy"
   fi
 
-  printf 'dev-shell: %d overridden source(s) compared against %s: %d at pin, %d ahead, %d behind-or-worse, %d with no pin to compare.\n' \
-    "$examined" "${lock#"$REPO_ROOT"/}" "$at" "$ahead" "$bad" "$unpinned"
+  if [[ "$examined" -eq 0 && "$followed" -gt 0 && "$bad" -eq 0 && "$unpinned" -eq 0 ]]; then
+    printf 'dev-shell: %s\n' \
+      'every overridden source is a `follows` input, which has no lock node of its own, so no overridden source can be behind a flake.lock pin.'
+  fi
+  printf 'dev-shell: %d overridden source(s) compared against %s: %d at pin, %d ahead, %d behind-or-worse, %d follows, %d with no pin to compare.\n' \
+    "$examined" "${lock#"$REPO_ROOT"/}" "$at" "$ahead" "$bad" "$followed" "$unpinned"
   if [[ ${#ahead_names[@]} -gt 0 ]]; then
     # Printed, never failed. See the direction rationale above: ahead is the
     # ordinary state of a workspace under development, and the line exists so
@@ -736,6 +790,11 @@ else
     printf 'dev-shell: %s %s\n' \
       'ahead of their pins (ordinary; `repro flake refresh-lock` records them at commit time):' \
       "${ahead_names[*]}"
+  fi
+  if [[ ${#follows_names[@]} -gt 0 ]]; then
+    printf 'dev-shell: %s %s\n' \
+      'overridden `follows` input(s), which automatic derivation leaves pinned; an override of one was applied explicitly or by a binder that ignored the follows:' \
+      "${follows_names[*]}"
   fi
   if [[ ${#unpinned_names[@]} -gt 0 ]]; then
     printf 'dev-shell: %s %s\n' \

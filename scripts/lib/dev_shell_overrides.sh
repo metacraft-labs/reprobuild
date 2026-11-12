@@ -812,14 +812,17 @@ dev_shell_fingerprint_drift() {
 # calls, so the gate asks it itself and FAILS on the answer.
 
 # Print `input<TAB>rev` for every input of the lock's ROOT node, where `rev` is
-# the revision that input's node is locked to, or `-` when it has none — a
-# `follows` (whose entry is an array, not a node name), or a node with no
-# `locked.rev` at all (a `path:`/`file:` input).
+# the revision that input's node is locked to, `follows` when the root entry
+# is a `follows` path (an array, not a node name), or `-` when it names a node
+# with no `locked.rev` at all (a `path:`/`file:` input).
 #
-# `-` rows are emitted rather than dropped for the same reason
+# `follows` and `-` rows are emitted rather than dropped for the same reason
 # `dev_shell_flake_input_repos` emits them: "this input carries no pin" and
 # "this input is not in the file" are different answers and the caller treats
-# them differently. Dropping the first would turn it into the second.
+# them differently. Dropping the first would turn it into the second. The two
+# no-pin answers are kept apart because only the first is a positive reading
+# of the lock: a `follows` is recognised by its shape, while `-` is also what
+# a node whose `locked` block stopped parsing would produce.
 #
 # nix writes `flake.lock` as deterministically indented JSON — two spaces per
 # level, one key per line — so the nesting depth of a line identifies what it
@@ -855,7 +858,7 @@ dev_shell_flake_lock_pins() {
     # carries no revision of its own.
     inrootinputs && /^        "[^"]+": \[$/ {
       n = $0; sub(/^        "/, "", n); sub(/": \[$/, "", n)
-      rootnode[n] = "-"; order[++cnt] = n; infollows = 1; next
+      isfollows[n] = 1; order[++cnt] = n; infollows = 1; next
     }
 
     # Every other node`s `locked.rev`. `original.rev` is deliberately NOT read:
@@ -870,7 +873,8 @@ dev_shell_flake_lock_pins() {
     END {
       for (i = 1; i <= cnt; i++) {
         n = order[i]; k = rootnode[n]
-        if (k == "-" || !(k in noderev)) printf "%s\t-\n", n
+        if (n in isfollows) printf "%s\tfollows\n", n
+        else if (!(k in noderev)) printf "%s\t-\n", n
         else printf "%s\t%s\n", n, noderev[k]
       }
     }

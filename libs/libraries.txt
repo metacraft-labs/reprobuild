@@ -39,3 +39,4 @@ repro_distributed_worker
 repro_selfhost
 repro_bundle
 repro_addon
+repro_cargo_gc

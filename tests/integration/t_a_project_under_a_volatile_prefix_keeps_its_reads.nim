@@ -1,20 +1,26 @@
 ## A project whose tree is under a prefix that otherwise holds runtime state
-## (`/dev/shm`, `/run`) gets the same answer as anywhere else, and one whose
-## root cannot be told apart from that state is refused.
+## (`/dev/shm`, `/run`) gets the same answer as anywhere else, and so does a
+## tree it reads as source there; a root that cannot be told apart from that
+## state is refused.
 ##
 ## The fold that keeps runtime state out of cache keys used to decide by path
 ## prefix alone, with carve-outs for the places projects had been found
 ## (a directory under `/dev/shm`, `/run/media`). Every other layout lost its
 ## reads silently: the listing of a project at `/dev/shm/<name>` was dropped,
 ## so a file added there was a cache hit, and a project on a mount at
-## `/run/<dir>` had no inputs at all, so an edit was a hit too. Now the
-## invocation's own roots decide: a read inside them is kept whatever the
-## prefix, and a root such as `/dev/shm` itself, where a project file and a
-## shared-memory object are the same shape of path, is refused before anything
-## runs. Outside the roots, the places that hold only ordinary files (a
-## directory under `/dev/shm`, `/run/media`) stay inputs: a dependency
-## checkout or a sibling repository there is under none of the build's roots.
-## The rest of the volatile prefixes is still dropped there.
+## `/run/<dir>` had no inputs at all, so an edit was a hit too. Now a read is
+## kept whatever its prefix when it is inside the invocation's own roots or
+## inside a SOURCE TREE: the workspace root, the repositories its membership
+## declares, the checkouts the committed lock pins, the develop overrides. A
+## workspace sibling, a lock-pinned dependency or a declared member linked
+## from inside another checkout, on a mount at `/run/<dir>`, is therefore an
+## input too. A root such as `/dev/shm` itself, where a project file and a
+## shared-memory object are the same shape of path, is refused before
+## anything runs. The places that hold only ordinary files (a
+## directory under `/dev/shm`, `/run/media`) stay inputs wherever they are: a
+## file there that no tree of the build contains, read by absolute path, is
+## still a file. The rest of the volatile prefixes is dropped outside those
+## trees.
 ##
 ## NO MOCKS: the built `repro`, a real provider compile, the real monitor and
 ## action cache. The edge's tool is a shell script on `PATH`, the ordinary
@@ -23,14 +29,19 @@
 ## unprivileged user gets in a user and mount namespace of its own
 ## (`unshare -rm`, then a nested user namespace mapping back to the real uid
 ## so the build does not run as root); a host that does not allow one skips
-## those two cases with the reason.
+## those cases with the reason.
 ##
 ## Falsifiability: making `dropsAsVolatileRuntimeState` ignore the scope (the
-## prefix-only fold) fails the added-file case on `/dev/shm` and both
+## prefix-only fold) fails the added-file case on `/dev/shm` and the
 ## `/run/<dir>` checks; making it drop nothing fails the shared-memory-object
 ## case; removing the `volatileRootRefusals` call from `runBuild` fails the
-## refusal case; dropping the ordinary-file places outside the scope fails the
-## dependency-checkout case (an edit there is a stale hit).
+## refusal case; dropping the ordinary-file places fails the case that reads
+## a file under `/dev/shm/<dir>` by absolute path (an edit there is a stale
+## hit). Measured on this change: declaring no source trees fails the
+## sibling and lock-pinned cases; leaving out the workspace root fails the
+## sibling case; leaving out the lock's checkouts fails the lock-pinned case
+## only; leaving out the declared members (the workspace root alone) fails
+## the linked-member case only.
 
 import std/[os, osproc, strutils, tempfiles, unittest]
 
@@ -39,6 +50,7 @@ when defined(posix):
 
 import repro_test_support
 import repro_test_support/reasoned_skip
+import repro_lock
 
 proc reproBinary(): string =
   requireBinary(currentSourcePath().parentDir.parentDir.parentDir / "build" /
@@ -243,10 +255,11 @@ suite "a project under a volatile runtime prefix":
       check "input v2" in readFile(fx.output)
 
   test "a file the build reads from a dependency checkout under /dev/shm/<dir>, outside every root of the build, is an input":
-    # A sibling repository of the workspace, or a dependency checkout, is
-    # under none of THIS build's roots (project, repository, work, store,
-    # output). It is still a directory of ordinary files: dropping its reads
-    # made an edit there a cache hit.
+    # Read by absolute path: the checkout is under none of THIS build's
+    # roots (project, repository, work, store, output) and in none of its
+    # source trees (no workspace, no lock names it). Only the place keeps it:
+    # a directory under `/dev/shm` cannot be a shared-memory object, so it
+    # holds ordinary files. Dropping its reads made an edit there a cache hit.
     if not defined(linux) or not devShmUsable():
       skip("needs a writable /dev/shm; this case reads a dependency " &
         "checkout on that tmpfs")
@@ -306,6 +319,173 @@ suite "a project under a volatile runtime prefix":
         fx.buildInNamespace(mounts, seen))
       check fx.runs == 3
 
+
+  test "a workspace sibling on a mount at /run/<dir>, outside every root of the build, is an input":
+    # The workspace root and its member repositories are the trees a build
+    # reads as source beside its own roots. Here the whole workspace is seen
+    # at `/run/lock/<name>`; the project's edge reads a file of a SIBLING
+    # repository, which is under none of the project's roots.
+    let reason = namespaceReason()
+    if reason.len > 0:
+      skip(reason)
+    else:
+      let backing = createTempDir("repro-volatile-ws-", "")
+      let project = backing / "app"
+      createDir(backing / ".repro")
+      writeFile(backing / ".repro" / "workspace-state.toml",
+        "schema = \"reprobuild.workspace.state.v1\"\n\n" &
+        "[workspace]\nproject = \"app\"\n")
+      let sibling = backing / "sibling" / "lib" / "input.txt"
+      createDir(sibling.parentDir)
+      writeFile(sibling, "sibling v1\n")
+      let fx = newFixture(project, read = "../sibling/lib/input.txt")
+      defer:
+        removeDir(fx.scratch)
+        removeDir(backing)
+      let seen = "/run/lock/repro-volatile-workspace"
+      let mounts = "mount -t tmpfs tmpfs /run/lock && mkdir " &
+        quoteShell(seen) & " && mount --bind " & quoteShell(backing) & " " &
+        quoteShell(seen)
+
+      fx.requireBuilt("first build", fx.buildInNamespace(mounts, seen / "app"))
+      check fx.runs == 1
+      fx.requireBuilt("nothing changed",
+        fx.buildInNamespace(mounts, seen / "app"))
+      check fx.runs == 1
+
+      # An edit of the same length in the sibling repository.
+      writeFile(sibling, "sibling v2\n")
+      fx.requireBuilt("sibling input edited",
+        fx.buildInNamespace(mounts, seen / "app"))
+      check fx.runs == 2
+      check "sibling v2" in readFile(fx.output)
+
+  test "a dependency checkout the committed lock pins, on a mount at /run/<dir> beside the project, is an input":
+    # A project with a committed `repro.lock` and no workspace around it: the
+    # lock pins `dep`, whose checkout is the sibling `../dep`, outside the
+    # project and outside its workspace (the project itself). Only the lock
+    # says that `dep` is read as source.
+    let reason = namespaceReason()
+    if reason.len > 0:
+      skip(reason)
+    elif findExe("git").len == 0:
+      skip("needs git; the dependency checkout is a real repository at the " &
+        "pinned commit")
+    else:
+      let backing = createTempDir("repro-volatile-lock-", "")
+      let project = backing / "app"
+      let checkout = backing / "dep"
+      let depInput = checkout / "lib" / "input.txt"
+      createDir(depInput.parentDir)
+      writeFile(depInput, "dep v1\n")
+      let git = "git -c user.email=fixture@example.invalid " &
+        "-c user.name=Fixture -c commit.gpgsign=false -C " & quoteShell(checkout)
+      for args in ["init -q -b main", "add -A", "commit -q -m seed"]:
+        let res = execCmdEx(git & " " & args)
+        checkpoint(res.output)
+        doAssert res.exitCode == 0
+      let revision = execCmdEx(git & " rev-parse HEAD").output.strip()
+      let fx = newFixture(project, read = "../dep/lib/input.txt")
+      writeFile(project / "repro.lock", serializeLockedDependencies(
+        LockedDependencies(platform: "amd64-linux",
+          inputsDigest: "fnv1a64:0000000000000000",
+          deps: @[LockedDep(name: "dep",
+            coordinates: Coordinates(kind: ckVcs,
+              url: "https://example.invalid/dep.git", revision: revision),
+            integrity: "git-sha1:" & revision, visibility: "public")])))
+      defer:
+        removeDir(fx.scratch)
+        removeDir(backing)
+      let seen = "/run/lock/repro-volatile-locked"
+      let mounts = "mount -t tmpfs tmpfs /run/lock && mkdir " &
+        quoteShell(seen) & " && mount --bind " & quoteShell(backing) & " " &
+        quoteShell(seen)
+
+      fx.requireBuilt("first build", fx.buildInNamespace(mounts, seen / "app"))
+      check fx.runs == 1
+      fx.requireBuilt("nothing changed",
+        fx.buildInNamespace(mounts, seen / "app"))
+      check fx.runs == 1
+
+      # An edit of the same length in the pinned checkout's working tree.
+      writeFile(depInput, "dep v2\n")
+      fx.requireBuilt("dependency input edited",
+        fx.buildInNamespace(mounts, seen / "app"))
+      check fx.runs == 2
+      check "dep v2" in readFile(fx.output)
+
+  test "a workspace member linked from inside another checkout to a mount at /run/<dir> is an input":
+    # The member `inner` is declared at `outer/refs/inner`, inside the
+    # checkout of `outer`, and that path is a link to a mount at
+    # `/run/lock/<name>`. The tool changes into the directory it reads and
+    # reads it by a relative name, so the read is reported where the kernel
+    # has it: under `/run/lock`, which no root of the build and not the
+    # workspace root contains. Only the declared membership names it.
+    let reason = namespaceReason()
+    if reason.len > 0:
+      skip(reason)
+    elif findExe("git").len == 0:
+      skip("needs git; `outer` is a real checkout")
+    else:
+      let backing = createTempDir("repro-volatile-nested-", "")
+      let ws = backing / "workspace"
+      let innerData = backing / "inner-data"
+      let innerInput = innerData / "lib" / "input.txt"
+      createDir(innerInput.parentDir)
+      writeFile(innerInput, "inner v1\n")
+      createDir(ws / ".repro")
+      createDir(ws / "projects")
+      createDir(ws / "repos")
+      writeFile(ws / "projects" / "app.toml",
+        "schema = \"reprobuild.workspace.project.v1\"\n\n" &
+        "[project]\nname = \"app\"\n\n" &
+        "[[remote]]\nname = \"origin\"\nfetch = \"https://example.invalid/\"\n\n" &
+        "includes = [\n  \"repos/app.toml\",\n  \"repos/outer.toml\",\n" &
+        "  \"repos/inner.toml\",\n]\n")
+      for (name, path) in [("app", "app"), ("outer", "outer"),
+                           ("inner", "outer/refs/inner")]:
+        writeFile(ws / "repos" / (name & ".toml"),
+          "schema = \"reprobuild.workspace.repo.v2\"\n\n[repo]\n" &
+          "name = \"" & name & "\"\npath = \"" & path & "\"\n" &
+          "remote = \"origin\"\nmainline = \"main\"\n")
+      writeFile(ws / ".repro" / "workspace-state.toml",
+        "schema = \"reprobuild.workspace.state.v1\"\n\n" &
+        "[workspace]\nproject = \"app\"\nbranch = \"main\"\n")
+      createDir(ws / "outer" / "refs")
+      let init = execCmdEx("git init -q -b main " & quoteShell(ws / "outer"))
+      checkpoint(init.output)
+      doAssert init.exitCode == 0
+      let seen = "/run/lock/repro-volatile-inner"
+      createSymlink(seen, ws / "outer" / "refs" / "inner")
+      let fx = newFixture(ws / "app",
+        read = "../outer/refs/inner/lib/input.txt")
+      # Read from inside the linked directory, by a relative name.
+      let tool = fx.binDir / "shm-lister"
+      writeExecutable(tool, readFile(tool).replace(
+        "cat \"$read\" >> \"$output\"\n",
+        "out=$(cd \"$(dirname \"$output\")\" && pwd)/$(basename \"$output\")\n" &
+        "(cd \"$(dirname \"$read\")\" && cat \"$(basename \"$read\")\") >> " &
+        "\"$out\"\n"))
+      defer:
+        removeDir(fx.scratch)
+        removeDir(backing)
+      let mounts = "mount -t tmpfs tmpfs /run/lock && mkdir " &
+        quoteShell(seen) & " && mount --bind " & quoteShell(innerData) & " " &
+        quoteShell(seen)
+
+      fx.requireBuilt("first build", fx.buildInNamespace(mounts, fx.project))
+      check fx.runs == 1
+      check "inner v1" in readFile(fx.output)
+      fx.requireBuilt("nothing changed",
+        fx.buildInNamespace(mounts, fx.project))
+      check fx.runs == 1
+
+      # An edit of the same length behind the link.
+      writeFile(innerInput, "inner v2\n")
+      fx.requireBuilt("linked member input edited",
+        fx.buildInNamespace(mounts, fx.project))
+      check fx.runs == 2
+      check "inner v2" in readFile(fx.output)
   test "a project whose root is /dev/shm itself is refused, naming the root and why, and nothing runs":
     let reason = namespaceReason()
     if reason.len > 0:
