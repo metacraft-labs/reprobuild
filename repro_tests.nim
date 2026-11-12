@@ -16624,6 +16624,17 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "t_group_tests_e2e_m83_g01",
     singleReason: ""),
   TestSpec(
+    source: "tests/e2e/m83/t_e2e_profile_compiles_of_one_profile_are_serialised.nim",
+    binary: "build/test-bin/t_e2e_profile_compiles_of_one_profile_are_serialised",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "t_group_tests_e2e_m83_g01",
+    singleReason: ""),
+  TestSpec(
     source: "tests/e2e/m83/t_e2e_profile_modules.nim",
     binary: "build/test-bin/t_e2e_profile_modules",
     defines: @[],

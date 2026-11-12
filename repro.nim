@@ -459,7 +459,8 @@ const
                  "t_e2e_profile_compile_clang_first_run_published",
                  "t_e2e_profile_compile_ignores_ancestor_membership",
                  "t_e2e_home_facts_from_isolated_plan",
-                 "t_e2e_activity_scoped_resource_follows_host_selection"]:
+                 "t_e2e_activity_scoped_resource_follows_host_selection",
+                 "t_e2e_profile_compiles_of_one_profile_are_serialised"]:
       rows.add TestGraphArtifacts(source: "tests/e2e/m83/" & name & ".nim",
         artifacts: @[profileCompileNimSpy])
     # ReproOS add-on mode gates (`tests/e2e/addon/`), on the same harness.
