@@ -252,6 +252,7 @@ libs/repro_cli_support/tests/t_action_cache_root_resolution.nim	nim	3
 libs/repro_cli_support/tests/t_addon_platform_dispatch.nim	nim	7
 libs/repro_cli_support/tests/t_audit_holds_at_the_gate_rate.nim	nim	3
 libs/repro_cli_support/tests/t_build_report_is_streamed_not_held_in_memory.nim	nim	6
+libs/repro_cli_support/tests/t_build_source_trees_follow_a_membership_edit.nim	nim	2
 libs/repro_cli_support/tests/t_build_worker_holds_no_daemon_key.nim	nim	1
 libs/repro_cli_support/tests/t_catalog_preparation_anchor.nim	nim	7
 libs/repro_cli_support/tests/t_catalog_publication.nim	nim	9
@@ -970,6 +971,7 @@ libs/repro_system_apply/tests/t_b2_pipeline.nim	nim	15
 libs/repro_system_rollback/tests/t_b3_rollback_unit.nim	nim	14
 libs/repro_test_support/tests/t_fresh_helper_binary_refuses_a_stale_build.nim	nim	14
 libs/repro_test_support/tests/t_home_apply_guard.nim	nim	9
+libs/repro_test_support/tests/t_scoped_env_restores_in_any_order.nim	nim	4
 libs/repro_tool_profiles/tests/t_a_declared_alias_is_never_served_from_a_prefix_without_it.nim	nim	1
 libs/repro_tool_profiles/tests/t_a_symlinked_declared_executable_is_not_reported_missing.nim	nim	4
 libs/repro_tool_profiles/tests/t_a_tool_probe_writes_no_state_outside_its_scratch.nim	nim	3
@@ -1571,10 +1573,10 @@ tests/integration/t_a_mixed_direction_refusal_clears_in_one_pass.nim	nim	1
 tests/integration/t_a_mixed_workspace_records_only_the_ahead_inputs.nim	nim	1
 tests/integration/t_a_mixed_workspace_records_only_the_publishable_inputs.nim	nim	1
 tests/integration/t_a_pinned_nim_is_provisioned_from_a_cold_store.nim	nim	3
-tests/integration/t_a_project_under_a_volatile_prefix_keeps_its_reads.nim	nim	4
+tests/integration/t_a_project_under_a_volatile_prefix_keeps_its_reads.nim	nim	7
 tests/integration/t_a_pushed_sibling_is_still_recorded.nim	nim	1
 tests/integration/t_a_refreshed_flake_pin_carries_what_nix_would_write.nim	nim	2
-tests/integration/t_a_refused_volatile_root_is_never_certified.nim	nim	1
+tests/integration/t_a_refused_volatile_root_is_never_certified.nim	nim	2
 tests/integration/t_a_repo_not_in_develop_mode_is_not_substituted.nim	nim	1
 tests/integration/t_a_root_repo_flake_is_reported_not_refused.nim	nim	1
 tests/integration/t_a_sibling_override_excludes_gitignored_build_output.nim	nim	1
