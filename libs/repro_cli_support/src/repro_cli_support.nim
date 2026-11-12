@@ -3356,20 +3356,21 @@ proc lowerGraphAction(node: GraphNode; profiles: Table[string, PathOnlyToolProfi
       raise newException(ValueError,
         "reprobuild.builtin.exec action " & payload.id &
           " has empty argv")
-    # Windows-System-Resources Phase E — the `@FILE:<path>` argv
-    # preprocessor. Every argv entry of the form `@FILE:<path>` is
-    # replaced with the trimmed contents of `<path>` at the moment of
-    # execution. The hook lives in the `reprobuild.builtin.exec`
-    # lowering so BOTH elevated and non-elevated edges run the same
-    # expansion semantics (spec §2.1). The build-graph payload keeps
-    # the literal `@FILE:...` (no secret in the plan); the substituted
-    # bytes only ride in the spawned process's argv. The audit-log
-    # rendering uses the literal `@FILE:<path>` form via the engine's
-    # log path — `auditArgvWithRedaction` is wired through the
-    # elevated-broker dispatch; the non-elevated direct-fork path is
-    # logged through the engine's own command-stats record which
-    # already redacts via this same engine boundary.
-    let argv = expandArgFiles(literalArgv, defaultArgFileReader)
+    # Windows-System-Resources §"`@FILE:<path>` argv substitution": every
+    # argv entry of the form `@FILE:<path>` is replaced with the trimmed
+    # contents of `<path>` at the moment of execution. The lowering does NOT
+    # substitute: the action keeps the literal `@FILE:...` and is flagged
+    # `expandsArgFiles`, and the engine substitutes when the build run
+    # starts (`withArgFilesExpanded`), keying the expanded argv there. The
+    # lowered graph is cached on disk and reused while
+    # `loweredGraphCacheKey` holds, and no field of that key covers a token
+    # file's contents, so a value substituted here would be replayed — and
+    # looked up under its old key — after the file changed. Keeping the
+    # literal also keeps the secret out of the cached graph, which is part
+    # of the plan the spec says carries no secret. The key computed below
+    # covers the literal argv, so the token's path is in it either way.
+    let argv = literalArgv
+    let expandsArgFiles = literalArgv.anyIt(isArgFileToken(it))
     let cwdValue = argValue("cwd")
     # M9.R.74 — canonical execution root (R2) resolution. The DSL
     # ``BuildActionDef.cwdKind`` declaration wins; when it is
@@ -3437,7 +3438,7 @@ proc lowerGraphAction(node: GraphNode; profiles: Table[string, PathOnlyToolProfi
       inlineEnv.add(entry)
     for entry in inlineDeclaredEnv.rest:
       inlineEnv.add(entry)
-    return repro_build_engine.action(
+    var lowered = repro_build_engine.action(
       payload.id,
       argv,
       # Named-Lock-Files §3.1/§7.2: every edge in a workspace that declares
@@ -3469,6 +3470,8 @@ proc lowerGraphAction(node: GraphNode; profiles: Table[string, PathOnlyToolProfi
       env = inlineEnv,
       envPassthrough = inlineEnvPassthrough,
       requiresElevation = payload.requiresElevation)
+    lowered.expandsArgFiles = expandsArgFiles
+    return lowered
 
   if payload.call.packageName == "reprobuild.builtin" and
       payload.call.executableName == "fs":
@@ -4864,7 +4867,12 @@ const
   # passthrough resolution and the stage-2 census both read this field,
   # and a census that answers differently cold and warm is not a
   # measurement.
-  LoweredGraphCacheVersion = 14'u16
+  LoweredGraphCacheVersion = 15'u16
+    # v15: ``BuildAction.expandsArgFiles``, one byte after the optional
+    # outputs. A v14 record holds an inline-exec argv whose `@FILE:` tokens
+    # were already substituted when the graph was lowered, and a key mixed
+    # from that value; decoding it would keep replaying the old contents,
+    # which is the defect the bump retires.
     # v14: optional output candidates, appended after removeBeforeRun.
     # v13: ``BuildAction.removeBeforeRun``, a string list after
     # ``scratchDirs``. A v12 cache would decode every action with nothing to
@@ -5933,6 +5941,7 @@ proc writeBuildAction(outp: var seq[byte]; action: BuildAction) =
   outp.writeStringSeq(action.scratchDirs)
   outp.writeStringSeq(action.removeBeforeRun)
   outp.writeStringSeq(action.optionalOutputs)
+  outp.add(if action.expandsArgFiles: 1'u8 else: 0'u8)
 
 proc readBuildAction(bytes: openArray[byte]; pos: var int): BuildAction =
   result = BuildAction(
@@ -6015,6 +6024,11 @@ proc readBuildAction(bytes: openArray[byte]; pos: var int): BuildAction =
   result.scratchDirs = readStringSeq(bytes, pos)
   result.removeBeforeRun = readStringSeq(bytes, pos)
   result.optionalOutputs = readStringSeq(bytes, pos)
+  let argFilesByte = readByteValue(bytes, pos)
+  if argFilesByte > 1'u8:
+    raiseEnvelopeError(eeMalformed,
+      "invalid lowered action @FILE: expansion sentinel")
+  result.expandsArgFiles = argFilesByte == 1'u8
 
 proc encodeLoweredGraphCache(record: LoweredGraphCacheRecord): seq[byte] =
   result.writeString(LoweredGraphCacheMagic)

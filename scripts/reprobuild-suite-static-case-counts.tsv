@@ -294,7 +294,7 @@ libs/repro_cli_support/tests/t_lock_publish_hook_refusal_classification.nim	nim	
 libs/repro_cli_support/tests/t_lock_publish_push_race_classification.nim	nim	8
 libs/repro_cli_support/tests/t_lock_record_repo_component_is_one_path_segment.nim	nim	17
 libs/repro_cli_support/tests/t_loopback_node_admits_only_its_owner.nim	nim	2
-libs/repro_cli_support/tests/t_lowered_action_key_covers_its_argv.nim	nim	4
+libs/repro_cli_support/tests/t_lowered_action_key_covers_its_argv.nim	nim	6
 libs/repro_cli_support/tests/t_m5_peer_cache_build_wiring.nim	nim	4
 libs/repro_cli_support/tests/t_m9r41_infra_install_root.nim	nim	19
 libs/repro_cli_support/tests/t_m9r74_resolve_canonical_execroot.nim	nim	11
@@ -1605,6 +1605,7 @@ tests/integration/t_an_unresolvable_membership_is_not_read_as_no_overrides.nim	n
 tests/integration/t_apply_if_binds_config_by_workspace_path.nim	nim	1
 tests/integration/t_apps_writes_the_helper_lists.nim	nim	1
 tests/integration/t_arm_outside_declared_platforms_is_a_lint_error.nim	nim	1
+tests/integration/t_at_file_argument_reaches_a_warm_build.nim	nim	1
 tests/integration/t_attestation_fixture_lifecycle.nim	nim	62
 tests/integration/t_attestation_module_census.nim	nim	9
 tests/integration/t_attestation_report.nim	nim	3
