@@ -21149,13 +21149,39 @@ proc moveFileReplacing(source, dest: string) =
 
 const ChainedHookMissingProgramShell = """
 local_hook_missing_program() {
-  { sed -n -E '1s/^#![[:space:]]*(\/[^[:space:]]*).*$/interpreter \1/p' "$LOCAL_HOOK"
-    sed -n -E 's/^exec[[:space:]]+"(\/[^"$`\\]*)"([[:space:];&|<>)]|$).*$/exec \1/p' "$LOCAL_HOOK"
-    sed -n -E 's/^exec[[:space:]]+(\/[^][[:space:];&|<>()"'"'"'$`\\*?{}~]*)([[:space:];&|<>)]|$).*$/exec \1/p' "$LOCAL_HOOK"
-  } 2>/dev/null | while IFS=' ' read -r LOCAL_HOOK_KIND LOCAL_HOOK_PROGRAM; do
+  # One pass, so the candidates come in line order: the `#!` interpreter, then
+  # each `exec` line (a double-quoted path, or a bare one). The two `exec`
+  # patterns cannot match the same line.
+  sed -n -E \
+    -e '1s/^#![[:space:]]*(\/[^[:space:]]*).*$/interpreter \1/p' \
+    -e 's/^exec[[:space:]]+"(\/[^"$`\\]*)"([[:space:];&|<>)]|$).*$/exec \1/p' \
+    -e 's/^exec[[:space:]]+(\/[^][[:space:];&|<>()"'"'"'$`\\*?{}~]*)([[:space:];&|<>)]|$).*$/exec \1/p' \
+    "$LOCAL_HOOK" 2>/dev/null |
+  while IFS=' ' read -r LOCAL_HOOK_KIND LOCAL_HOOK_PROGRAM; do
     [ ! -x "$LOCAL_HOOK_PROGRAM" ] || continue
+    # An `exec` target counts only when exactly one non-comment line names it
+    # as a whole path (not as a prefix of a longer one), so a path the body
+    # tests first, or an `exec` line that repeats its own path, is judged by
+    # lines and not by substrings.
     if [ "$LOCAL_HOOK_KIND" = exec ] &&
-        [ "$(grep -o -F -- "$LOCAL_HOOK_PROGRAM" "$LOCAL_HOOK" | wc -l | tr -d ' ')" != 1 ]; then
+        [ "$(LOCAL_HOOK_PROGRAM=$LOCAL_HOOK_PROGRAM awk '
+          BEGIN { p = ENVIRON["LOCAL_HOOK_PROGRAM"]; n = 0 }
+          /^[ \t]*#/ { next }
+          {
+            for (pos = 1; (i = index(substr($0, pos), p)) > 0; pos = st + 1) {
+              st = pos + i - 1
+              pre = (st > 1) ? substr($0, st - 1, 1) : ""
+              post = substr($0, st + length(p), 1)
+              # Plain index() against literal sets, not bracket expressions:
+              # ranges and escapes in brackets differ between awks and locales.
+              if ((pre == "" || index("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_./+-", pre) == 0) &&
+                  (post == "" || index(" \t\r;&|<>()\"`\047", post) > 0)) {
+                n++
+                break
+              }
+            }
+          }
+          END { print n }' "$LOCAL_HOOK")" != 1 ]; then
       continue
     fi
     printf '%s %s\n' "$LOCAL_HOOK_KIND" "$LOCAL_HOOK_PROGRAM"
@@ -21167,8 +21193,9 @@ local_hook_missing_program() {
   ## Safeguard 6 of ``vcsDispatcherContent``: prints ``interpreter <path>``
   ## or ``exec <path>`` for the first program the chained
   ## ``<hook>.repro-local`` body names that does not exist, or nothing. An
-  ## ``exec`` target counts only when its path occurs once in the body, so a
-  ## path the body tests first is never blamed. The dispatcher asks only AFTER the body has failed the way a
+  ## ``exec`` target counts only when exactly one non-comment line names its
+  ## path as a whole path (``pathNamedOnce``), so a path the body tests first
+  ## is never blamed. The dispatcher asks only AFTER the body has failed the way a
   ## program that cannot be found fails (status 126 or 127), to say why.
   ## ``chainedHookMissingPrograms`` reads the same lines in Nim, for
   ## ``repro health``.
@@ -21195,8 +21222,34 @@ type ChainedHookMissingProgram* = object
     ## The ``#!`` interpreter: the body cannot start at all. Otherwise the
     ## target of an ``exec`` line, which fails only when that line runs.
   namedOnce*: bool
-    ## The path occurs once in the body, so nothing in it tests or replaces
-    ## it before the ``exec``.
+    ## Exactly one non-comment line of the body names the path as a whole
+    ## path, so nothing in it tests or replaces it before the ``exec``.
+
+proc pathNamedOnce*(body, path: string): bool =
+  ## Whether exactly one non-comment line of ``body`` holds ``path`` as a whole
+  ## path: not preceded by a path character and followed by the end of the line
+  ## or a shell separator, so ``/p/bin/x`` is not found inside
+  ## ``/p/bin/x-wrapped`` and a repeat on one line counts once. The awk in
+  ## ``ChainedHookMissingProgramShell`` applies the same rule.
+  const
+    pathChars = Letters + Digits + {'_', '.', '/', '+', '-'}
+    after = {' ', '\t', '\r', ';', '&', '|', '<', '>', '(', ')', '"', '`', '\''}
+  var lines = 0
+  for line in body.split('\n'):
+    if line.strip(trailing = false, chars = {' ', '\t'}).startsWith("#"):
+      continue
+    var pos = 0
+    while true:
+      let at = line.find(path, pos)
+      if at < 0:
+        break
+      let endAt = at + path.len
+      if (at == 0 or line[at - 1] notin pathChars) and
+          (endAt >= line.len or line[endAt] in after):
+        inc lines
+        break
+      pos = at + 1
+  lines == 1
 
 proc chainedHookMissingPrograms*(body: string): seq[ChainedHookMissingProgram] =
   ## Every program ``body`` names that does not exist, by the lines
@@ -21242,7 +21295,7 @@ proc chainedHookMissingPrograms*(body: string): seq[ChainedHookMissingProgram] =
       getFilePermissions(path) * {fpUserExec, fpGroupExec, fpOthersExec} == {}
     except OSError:
       true
-  let lines = body.splitLines()
+  let lines = body.split('\n')  # sed reads lines split on LF only
   if lines.len > 0 and lines[0].startsWith("#!"):
     var i = 2
     while i < lines[0].len and lines[0][i] in Whitespace:
@@ -21253,12 +21306,12 @@ proc chainedHookMissingPrograms*(body: string): seq[ChainedHookMissingProgram] =
     let interpreter = lines[0][i ..< stop]
     if interpreter.startsWith("/") and missing(interpreter):
       result.add(ChainedHookMissingProgram(program: interpreter,
-        interpreter: true, namedOnce: body.count(interpreter) == 1))
+        interpreter: true, namedOnce: pathNamedOnce(body, interpreter)))
   for line in lines:
     let target = execTarget(line)
     if target.len > 0 and missing(target):
       result.add(ChainedHookMissingProgram(program: target,
-        interpreter: false, namedOnce: body.count(target) == 1))
+        interpreter: false, namedOnce: pathNamedOnce(body, target)))
 
 proc chainedHookStartFinding(repoName, hooksDir, hookName: string):
     tuple[finding: string; certain: bool] =
@@ -21288,12 +21341,12 @@ proc chainedHookStartFinding(repoName, hooksDir, hookName: string):
         if line.startsWith("# File generated by pre-commit:") or
             line.startsWith("# File generated by prek:"):
           return ("", false)
+    # The first candidate in line order, the one the dispatcher names.
     for found in chainedHookMissingPrograms(body):
       if found.interpreter:
         return (repoName & "/" & hookName & " (" & hookName &
           ".repro-local's interpreter " & found.program &
           " does not exist or is not executable, so it cannot start)", true)
-    for found in chainedHookMissingPrograms(body):
       if found.namedOnce:
         return (repoName & "/" & hookName & " (" & hookName &
           ".repro-local execs " & found.program &
