@@ -2490,11 +2490,11 @@
     "reprobuild-ct-test-runner-src": {
       "flake": false,
       "locked": {
-        "lastModified": 1791376944,
-        "narHash": "sha256-n2acAPw0rBma3KsdKagKpoMKOa2baq5F7xMLVaofIFQ=",
+        "lastModified": 1793861985,
+        "narHash": "sha256-VCxi/1lCozg2kHdXm6ZMfFa+66RpODDB8Pj0xH3onkg=",
         "owner": "metacraft-labs",
         "repo": "reprobuild-ct-test-runner",
-        "rev": "69167f4226e0faca4fb64cb0e913c7b49eddf853",
+        "rev": "bb7a4b6ed4466f39292da4b819ed35a4ceb938ef",
         "type": "github"
       },
       "original": {
@@ -2523,11 +2523,11 @@
     "reprobuild-test-adapters-src": {
       "flake": false,
       "locked": {
-        "lastModified": 1793979373,
-        "narHash": "sha256-PAdbebvNCYTKb17tavTWGjBKduf8fNUFTrtxJ8DMgi0=",
+        "lastModified": 1794397981,
+        "narHash": "sha256-kV6ckitv5SFNBd5RIKGfu30aIHgjkQpsnCo/hno05ac=",
         "owner": "metacraft-labs",
         "repo": "reprobuild-test-adapters",
-        "rev": "504ce5c8dbddd150ead5b9bc2cddfdda21b55789",
+        "rev": "b756151259068db452a85253141afad2b5840f64",
         "type": "github"
       },
       "original": {
