@@ -3649,6 +3649,18 @@ proc m5RefuseServiceBodyStatement(stmt: NimNode) =
     "Shared-Development-Services.md §4, §7 and §9) and nothing else: " &
     m5ServiceBodySurface() & ". " & m5ServiceBodyNoSilentDropRule, anchor)
 
+const m5ServiceSingleValueSetters = [
+  "executable", "description", "type", "execstart", "restart", "user",
+  "group"]
+  ## The setters that hold ONE value. The others (`args`, `runtimeFile`,
+  ## `wantedBy`, `wants`, `requires`, `before`, `after`, `env`,
+  ## `stateDirectory`, `converge`, `on`) accumulate and may repeat.
+
+proc m5ServiceStmtLine(stmt: NimNode): int =
+  ## The source line the statement starts on (the anchor's, so an
+  ## assignment reports its left-hand side).
+  m5ServiceStmtAnchor(stmt).lineInfoObj.line
+
 proc m5ParseServiceBody(body: NimNode): tuple[
     executableRef: string; executableExpr: NimNode;
     argExprs: seq[NimNode]; runtimeFileExprs: seq[NimNode];
@@ -3731,6 +3743,9 @@ proc m5ParseServiceBody(body: NimNode): tuple[
   # unrecognised identity is reported at the `identity` statement rather
   # than at whatever the loop reaches first.
   result.identityScope = l4ServiceIdentityScope(body)
+  # Single-value setter -> line of its first declaration, so a second one
+  # is refused naming both lines instead of overwriting the first.
+  var singleValueLines: Table[string, int]
   for stmt in body:
     # The short-form reactive atoms are bare idents (``hotReload``,
     # ``restartOnCrash``) as well as calls, so they are tried before the
@@ -3760,6 +3775,15 @@ proc m5ParseServiceBody(body: NimNode): tuple[
       m5RefuseServiceBodyStatement(stmt)
       continue
     let headName = identText(head).normalize
+    if headName in m5ServiceSingleValueSetters:
+      let line = m5ServiceStmtLine(stmt)
+      if headName in singleValueLines:
+        error("`" & identText(head) & "` is declared twice in one `service` " &
+          "body (lines " & $singleValueLines[headName] & " and " & $line &
+          "). It takes one value, so the second would overwrite the " &
+          "first; keep one. " & m5ServiceBodyNoSilentDropRule,
+          m5ServiceStmtAnchor(stmt))
+      singleValueLines[headName] = line
     case headName
     of "config":
       error("`service` has no `config:` setter. Package-Model.md " &

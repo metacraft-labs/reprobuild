@@ -105,6 +105,7 @@ else:
 
 import repro_core
 import repro_core/relocation
+import repro_core/arg_files
 import repro_core/target_object_check
 from repro_core/path_identity import resolveExistingTraversal, prsResolved
 # Nix GC roots for the store paths working-tree outputs name; see the ledger
@@ -706,6 +707,16 @@ type
       ## direct fork. The DSL's ``BuildActionDef.requiresElevation``
       ## field propagates here through ``lowerGraphAction`` so the
       ## engine consumes the same flag the build-graph author set.
+    expandsArgFiles*: bool
+      ## Windows-System-Resources §"`@FILE:<path>` argv substitution". Set
+      ## by the ``reprobuild.builtin.exec`` lowering: ``argv`` still holds
+      ## the literal ``@FILE:<path>`` tokens, and the engine replaces each
+      ## with the file's trimmed contents when a build run starts
+      ## (``withArgFilesExpanded``), mixing the expanded argv into
+      ## ``weakFingerprint`` there. The lowered graph, and the on-disk
+      ## lowered-graph cache that persists it, therefore never hold a
+      ## substituted value, and a warm graph cannot replay the value a
+      ## file held when the graph was lowered.
     networkMode*: NetworkMode
       ## Sandbox-And-Monitoring.md §"The Network Dimension" — this
       ## action's network mode. The zero value is ``netDenied``, so every
@@ -3838,6 +3849,45 @@ proc traceUnreadableInput(result: var BuildRunResult; actionId: string;
 
 proc raiseEngine(message: string) {.noreturn.} =
   raise newException(BuildEngineError, message)
+
+proc withArgFilesExpanded*(action: BuildAction;
+                           readPath: proc (path: string): string =
+                             readArgFile): BuildAction =
+  ## The action as it executes in THIS build run: every ``@FILE:<path>``
+  ## element of ``argv`` replaced by the file's trimmed contents, and the
+  ## weak fingerprint keyed on the argv that results. The identity for an
+  ## action that does not set ``expandsArgFiles``.
+  ##
+  ## Windows-System-Resources §"`@FILE:<path>` argv substitution" says the
+  ## substitution happens "at the moment of execution", and
+  ## Build-Engine-And-Scheduler §"Skippability and Invalidation" requires
+  ## the edge's key to follow its command line. Lowering used to do the
+  ## substitution, so the lowered-graph cache stored the expanded value and
+  ## the key mixed from it: a warm build that reused the graph spawned, and
+  ## looked its result up under, whatever the file held when the graph was
+  ## lowered. Here it runs on every build, before anything reads a
+  ## fingerprint, and the cached graph keeps the literal token.
+  ##
+  ## The fingerprint the lowering computed already covers the literal argv
+  ## (so the token's PATH is in the key); this mixes the expanded argv on
+  ## top, and re-applies the content-addressed-root mix ``action()`` gave
+  ## the literal ``argv[0]`` in case that element was itself a token.
+  result = action
+  if not action.expandsArgFiles:
+    return
+  var expanded: seq[string]
+  try:
+    expanded = expandArgFileValues(action.argv, readPath)
+  except ArgFileError as e:
+    raiseEngine("action '" & action.id & "': " & e.msg)
+  var fingerprint = keyedOnArgv(action.weakFingerprint, expanded)
+  if action.argv.len > 0 and isArgFileToken(action.argv[0]):
+    fingerprint = keyedOnContentAddressedToolRoot(fingerprint, expanded)
+  result.argv = expanded
+  result.weakFingerprint = fingerprint
+  # Expanded once: a second application (a dyndep re-derivation of the
+  # same action) must not read the files again or re-mix the key.
+  result.expandsArgFiles = false
 
 proc normalizeWriteRoot(p: string): string =
   ## M9.R.75 — canonical form for a declared write root path used by
@@ -18758,7 +18808,10 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
   # gates below consult.
   var preservingIds = initHashSet[string]()
   for i in 0 ..< buildGraph.actions.len:
-    buildGraph.actions[i] = withOptionalOutputIdentity(buildGraph.actions[i])
+    # `@FILE:` expansion first: the optional-output mix below wraps the
+    # weak fingerprint, so it has to wrap the one keyed on the expanded argv.
+    buildGraph.actions[i] = withOptionalOutputIdentity(
+      withArgFilesExpanded(buildGraph.actions[i]))
     buildGraph.actions[i].applyUnsafePreserveOutputs(
       config.unsafePreserveOutputs)
     if buildGraph.actions[i].unsafePreserveOutputs:
@@ -21395,7 +21448,8 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     ## before threading the new action through every scheduler bookkeeping
     ## structure. The producer id participates only in the trace message
     ## so the materialisation can be attributed back to its source.
-    var newAction = withOptionalOutputIdentity(incomingAction)
+    var newAction = withOptionalOutputIdentity(
+      withArgFilesExpanded(incomingAction))
     # A dynamically created step is selected by the preserve-outputs
     # selector exactly as a declared one (see `preservingIds`).
     newAction.applyUnsafePreserveOutputs(config.unsafePreserveOutputs)

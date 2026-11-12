@@ -49,6 +49,39 @@ proc installMirrorToolIdentityRefs*(packageName: string;
     if dep.len > 0 and dep notin result:
       result.add(dep)
 
+proc forEachSiblingPath(paths: seq[string]; recipesRoot, loopVar, body: string): string =
+  ## Emit POSIX shell that runs ``body`` once per entry of ``paths`` with the
+  ## entry's absolute path in ``$<loopVar>``.
+  ##
+  ## The paths are written as ONE list, with ``recipesRoot`` stated once, not
+  ## as one test per path with the root spelled out each time. The script is
+  ## an ``sh -c`` argument, and Linux refuses a single argument over
+  ## ``MAX_ARG_STRLEN`` (131072 bytes): a catalog of N sibling recipes checked
+  ## out under a root of length L used to cost several times N * L bytes, so a
+  ## recipe built from one checkout path and failed to launch from a longer one.
+  ## Now the root costs L once and each sibling only its own relative part.
+  ##
+  ## An entry under ``recipesRoot`` is written ``@<relative part>`` and
+  ## expanded against the root; any other entry (a federated dependency) keeps
+  ## its absolute spelling. One list keeps the caller's order, which is the
+  ## RPATH order.
+  if paths.len == 0:
+    return ""
+  let prefix = if recipesRoot.len > 0: recipesRoot & "/" else: ""
+  var entries = ""
+  for path in paths:
+    let spelled =
+      if prefix.len > 0 and path.startsWith(prefix):
+        "@" & path[recipesRoot.len .. ^1]
+      else:
+        path
+    entries.add(" \"" & spelled.replace("\"", "\\\"") & "\"")
+  "m9r14f_root=\"" & recipesRoot.replace("\"", "\\\"") & "\"; " &
+    "for m9r14f_sibling in" & entries & "; do " &
+    "case \"$m9r14f_sibling\" in @*) " & loopVar &
+    "=\"$m9r14f_root${m9r14f_sibling#@}\";; *) " & loopVar &
+    "=\"$m9r14f_sibling\";; esac; " & body & "done; "
+
 proc m9r14fEmitRpathPatchScript*(escapedDstUsr: string;
                                  depMirrorLibDirs: seq[string];
                                  depManifestPaths: seq[string] = @[];
@@ -150,11 +183,9 @@ proc m9r14fEmitRpathPatchScript*(escapedDstUsr: string;
   # Append every existing sibling-recipe install-mirror lib dir. The
   # ``[ -d ... ]`` guard skips nix-stub deps whose mirror path doesn't
   # exist (M9.R.15q.5.1).
-  for libDir in depMirrorLibDirs:
-    let escapedLibDir = libDir.replace("\"", "\\\"")
-    script.add("if [ -d \"" & escapedLibDir & "\" ]; then ")
-    script.add("rpath=\"$rpath:" & escapedLibDir & "\"; ")
-    script.add("fi; ")
+  script.add(forEachSiblingPath(depMirrorLibDirs, recipesRoot, "m9r14f_libdir",
+    "if [ -d \"$m9r14f_libdir\" ]; then " &
+    "rpath=\"$rpath:$m9r14f_libdir\"; fi; "))
   # DSL-port M9.R.30.2 — read each direct dep's propagated-libdirs
   # manifest (if it exists) and append every line to rpath. Each
   # recipe's install-mirror writes its own manifest at
@@ -170,34 +201,34 @@ proc m9r14fEmitRpathPatchScript*(escapedDstUsr: string;
   # esac`` — so a dep already on rpath from the direct-walk doesn't
   # duplicate. This keeps the final RPATH bounded by the total number
   # of distinct lib dirs in the build closure.
-  for manifestPath in depManifestPaths:
-    let escapedManifest = manifestPath.replace("\"", "\\\"")
-    script.add("if [ -f \"" & escapedManifest & "\" ]; then ")
-    script.add("while IFS= read -r line || [ -n \"$line\" ]; do ")
-    script.add("if [ -z \"$line\" ]; then continue; fi; ")
-    if recipesRoot.len > 0:
-      let escapedRecipesRoot = recipesRoot.replace("\"", "\\\"")
-      # The mirror of the build being staged: ``install@<triple>`` under
-      # ``--target``, so a cross build remaps to the target mirror and
-      # never to the native one beside it.
-      let mirror = "/" & installMirrorSubpath().replace("\\", "/") & "/"
-      script.add("case \"$line\" in *" & mirror & "*) ")
-      script.add("m9r14f_old_recipe=${line%%" & mirror & "*}; ")
-      script.add("m9r14f_dep=${m9r14f_old_recipe##*/}; ")
-      script.add("m9r14f_rel=${line#*" & mirror & "}; ")
-      script.add("m9r14f_active=\"" & escapedRecipesRoot &
-        "/$m9r14f_dep" & mirror & "$m9r14f_rel\"; ")
-      script.add("if [ -d \"$m9r14f_active\" ]; then line=$m9r14f_active; fi;; ")
-      script.add("esac; ")
-    script.add("if ! [ -d \"$line\" ]; then continue; fi; ")
-    # A dependency's Nix runtime dirs belong on that dependency's ELFs, not
-    # on every downstream consumer. The stage closure walks every ELF, so
-    # propagating these paths only multiplies unrelated store outputs.
-    script.add("case \"$line\" in /nix/store/*|/repro/store/*) continue;; esac; ")
-    script.add("case \":$rpath:\" in *\":$line:\"*) ;; ")
-    script.add("*) rpath=\"$rpath:$line\";; esac; ")
-    script.add("done < \"" & escapedManifest & "\"; ")
-    script.add("fi; ")
+  var manifestBody = "if [ -f \"$m9r14f_manifest\" ]; then "
+  manifestBody.add("while IFS= read -r line || [ -n \"$line\" ]; do ")
+  manifestBody.add("if [ -z \"$line\" ]; then continue; fi; ")
+  if recipesRoot.len > 0:
+    let escapedRecipesRoot = recipesRoot.replace("\"", "\\\"")
+    # The mirror of the build being staged: ``install@<triple>`` under
+    # ``--target``, so a cross build remaps to the target mirror and
+    # never to the native one beside it.
+    let mirror = "/" & installMirrorSubpath().replace("\\", "/") & "/"
+    manifestBody.add("case \"$line\" in *" & mirror & "*) ")
+    manifestBody.add("m9r14f_old_recipe=${line%%" & mirror & "*}; ")
+    manifestBody.add("m9r14f_dep=${m9r14f_old_recipe##*/}; ")
+    manifestBody.add("m9r14f_rel=${line#*" & mirror & "}; ")
+    manifestBody.add("m9r14f_active=\"" & escapedRecipesRoot &
+      "/$m9r14f_dep" & mirror & "$m9r14f_rel\"; ")
+    manifestBody.add("if [ -d \"$m9r14f_active\" ]; then line=$m9r14f_active; fi;; ")
+    manifestBody.add("esac; ")
+  manifestBody.add("if ! [ -d \"$line\" ]; then continue; fi; ")
+  # A dependency's Nix runtime dirs belong on that dependency's ELFs, not
+  # on every downstream consumer. The stage closure walks every ELF, so
+  # propagating these paths only multiplies unrelated store outputs.
+  manifestBody.add("case \"$line\" in /nix/store/*|/repro/store/*) continue;; esac; ")
+  manifestBody.add("case \":$rpath:\" in *\":$line:\"*) ;; ")
+  manifestBody.add("*) rpath=\"$rpath:$line\";; esac; ")
+  manifestBody.add("done < \"$m9r14f_manifest\"; ")
+  manifestBody.add("fi; ")
+  script.add(forEachSiblingPath(depManifestPaths, recipesRoot,
+    "m9r14f_manifest", manifestBody))
   # Collect the SONAMEs actually needed by this package's output. Tool
   # provisioning can put hundreds of build-only directories on
   # LD_LIBRARY_PATH; only a directory that resolves an otherwise missing

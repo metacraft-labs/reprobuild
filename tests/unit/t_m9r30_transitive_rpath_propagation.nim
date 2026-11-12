@@ -86,8 +86,19 @@ suite "DSL-port M9.R.30.2 — transitive RPATH propagation":
       depManifestPaths = manifests,
       ownManifestPath = "/tmp/mirror/.m9r30_propagated_libdirs.txt",
       packageName = "sway")
+    # Without a recipes root each manifest keeps its absolute spelling.
     for m in manifests:
-      check script.contains(m)
+      check script.contains("\"" & m & "\"")
+    # With one, the root is stated once and each manifest is relative to it.
+    let rooted = m9r14fEmitRpathPatchScript(
+      "/tmp/mirror/usr", @[],
+      depManifestPaths = manifests,
+      ownManifestPath = "/tmp/mirror/.m9r30_propagated_libdirs.txt",
+      packageName = "sway",
+      recipesRoot = "/recipes")
+    check rooted.count("/recipes/wlroots") == 0
+    check rooted.contains("\"@/wlroots/.repro/output/install/" &
+      m9r30PropagatedManifestName & "\"")
     # The walker reads each manifest with [-f] guard so unbuilt deps
     # contribute nothing.
     check script.contains("[ -f ")
@@ -233,3 +244,109 @@ suite "DSL-port M9.R.30.2 — transitive RPATH propagation":
       ownManifestPath = "/tmp/mirror/.m9r30_propagated_libdirs.txt",
       packageName = "sway")
     check first == second
+
+suite "RPATH patch script size does not scale with the checkout path":
+  ## An install-mirror edge is `sh -c <script>`, and Linux refuses one
+  ## argument over 131072 bytes (`MAX_ARG_STRLEN`): `execve` fails E2BIG and
+  ## the edge used to die as a silent exit 127. The script used to repeat the
+  ## recipe root once per sibling catalog recipe several times over, so a
+  ## recipe built fine from a short checkout path and not from a longer one.
+  ## The root is now stated once, whatever the number of siblings.
+
+  proc scriptFor(recipesRoot: string; siblings: int): string =
+    var libDirs, manifests: seq[string]
+    for i in 0 ..< siblings:
+      let recipe = recipesRoot / ("sibling-recipe-" & $i)
+      libDirs.add(recipe / ".repro" / "output" / "install" / "usr" / "lib")
+      manifests.add(recipe / ".repro" / "output" / "install" /
+        m9r30PropagatedManifestName)
+    m9r14fEmitRpathPatchScript(
+      recipesRoot / "current" / ".repro" / "output" / "install" / "usr",
+      libDirs,
+      depManifestPaths = manifests,
+      ownManifestPath = recipesRoot / "current" / ".repro" / "output" /
+        "install" / m9r30PropagatedManifestName,
+      packageName = "current",
+      recipesRoot = recipesRoot)
+
+  test "a longer recipes root costs the same however many siblings there are":
+    let shortRoot = "/scratch/a/" & repeat('s', 20)
+    let longRoot = "/scratch/a/" & repeat('s', 120)
+    proc growth(siblings: int): int =
+      scriptFor(longRoot, siblings).len - scriptFor(shortRoot, siblings).len
+    # The root appears a fixed number of times in the rest of the script (the
+    # mirror's own paths); the siblings must add none.
+    check growth(76) == growth(1)
+
+  test "the script for a large catalog stays far below MAX_ARG_STRLEN":
+    check scriptFor("/scratch/a/" & repeat('s', 140), 76).len < 40_000
+
+  when defined(linux):
+    proc foldedRpath(rootName: string): tuple[present, outside: string,
+                                                 manifest: string] =
+      ## Runs the emitted script under /bin/sh with a stand-in ``patchelf``
+      ## and returns what it wrote to the consumer's own manifest. The root
+      ## directory is named ``rootName`` so a name with shell-significant
+      ## characters goes through the same code path as a plain one.
+      let scratch = createTempDir("repro-rpath-size-", "")
+      defer: removeDir(scratch)
+      let recipesRoot = scratch / rootName
+      let present = recipesRoot / "present" / ".repro" / "output" /
+        "install" / "usr" / "lib"
+      let absent = recipesRoot / "absent" / ".repro" / "output" /
+        "install" / "usr" / "lib"
+      let outside = scratch / "elsewhere" / "usr" / "lib"
+      let currentRoot = recipesRoot / "current" / ".repro" / "output" /
+        "install"
+      let ownManifest = currentRoot / m9r30PropagatedManifestName
+      createDir(present)
+      createDir(outside)
+      createDir(currentRoot / "usr")
+      # A dependency's manifest: a blank line (skipped), a stale path under
+      # another checkout's root that must be remapped onto this root, a path
+      # that does not exist (skipped) and a nix-store path (skipped). Only the
+      # remapped one may reach the RPATH, after the direct lib dirs.
+      let depLib = recipesRoot / "dep" / ".repro" / "output" / "install" /
+        "usr" / "lib"
+      createDir(depLib)
+      let depManifest = recipesRoot / "dep" / ".repro" / "output" /
+        "install" / m9r30PropagatedManifestName
+      writeFile(depManifest, "\n/old/checkout/dep/.repro/output/install/usr/" &
+        "lib\n/old/checkout/gone/.repro/output/install/usr/lib\n" &
+        "/nix/store/abc-x/lib\n" & present & "\n")
+      let fakeBin = scratch / "bin"
+      createDir(fakeBin)
+      writeFile(fakeBin / "patchelf", "#!/bin/sh\nexit 0\n")
+      setFilePermissions(fakeBin / "patchelf",
+        {fpUserRead, fpUserWrite, fpUserExec})
+      let emitted = scratch / "rpath.sh"
+      writeFile(emitted, m9r14fEmitRpathPatchScript(
+        currentRoot / "usr", @[present, absent, outside],
+        depManifestPaths = @[depManifest, recipesRoot / "unbuilt" / "m.txt"],
+        ownManifestPath = ownManifest,
+        packageName = "current",
+        recipesRoot = recipesRoot))
+      let priorPath = getEnv("PATH")
+      putEnv("PATH", fakeBin & ":" & priorPath)
+      try:
+        let run = startProcess("/bin/sh", args = @[emitted],
+          options = {poUsePath, poParentStreams})
+        check waitForExit(run) == 0
+      finally:
+        putEnv("PATH", priorPath)
+      # The result is read back with the scratch root stripped, so the same
+      # expectation holds for every ``rootName``.
+      (present: present.replace(scratch, ""), outside: outside.replace(scratch, ""),
+       manifest: readFile(ownManifest).replace(scratch, "").strip())
+
+    for rootName in ["active", "ac tive's root"]:
+      test "sibling lib dirs are folded into the RPATH only when they exist, " &
+           "in order, under a root named " & rootName:
+        let got = foldedRpath(rootName)
+        let depLib = "/" & rootName / "dep" / ".repro" / "output" / "install" /
+          "usr" / "lib"
+        # Direct lib dirs keep their order and drop the absent one; the
+        # manifest's stale path is remapped to this root, deduplicated against
+        # the direct ones, and the missing and nix-store paths are skipped.
+        check got.manifest.splitLines() ==
+          @[got.present, got.outside, depLib]
