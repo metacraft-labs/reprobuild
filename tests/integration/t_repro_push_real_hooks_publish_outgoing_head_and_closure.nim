@@ -9,7 +9,11 @@
 ## dependency-first; exact source refs and exact remote lock paths are present;
 ## an already-published closure with no records fails twice without synthesizing
 ## locks; and a later lib receive failure retains/reports the already-published
-## core prefix before a retry completes. A shared backend's preflight accepts
+## core prefix before a retry completes. A record store whose checkout went
+## stale while other workspaces published disjoint records replays its verified
+## lock-only commit onto the advanced tip, from a raw push and from a retry,
+## and refuses before any source transport when the other workspace published
+## a different record at the same key. A shared backend's preflight accepts
 ## untracked output under its ``.repro/build/`` and nothing else uncommitted.
 ## A dependency parked on a local-only ``reprobuild/pinned/<short-sha>`` branch
 ## at a commit its upstream already carries is classified already-published,
@@ -481,6 +485,23 @@ proc replaceWithLinkedWorktree(gitBin, path, primary: string) =
     " checkout --detach")
   discard require(q(gitBin) & " -C " & q(primary) &
     " worktree add " & q(path) & " main")
+
+proc publishFromAnotherStore(gitBin: string; fx: Fixture; label, repoName,
+    oid: string; body = "") =
+  ## Another workspace publishes one record straight to the manifest bare.
+  ## This workspace's ``.repro/manifests`` checkout is not told: it is the
+  ## stale record-store checkout of reprobuild-pm issue 2026-11-05 ("pre-push
+  ## gate refuses a lock commit made on a stale record store").
+  let other = fx.scratch / ("other-store-" & label)
+  discard require(q(gitBin) & " clone " & q(fx.manifestBare) & " " & q(other))
+  discard require(q(gitBin) & " -C " & q(other) &
+    " config user.email tester@example.invalid")
+  discard require(q(gitBin) & " -C " & q(other) &
+    " config user.name 'Other Workspace Publisher'")
+  writeLockRecord(other, repoName, repoName, oid, body)
+  discard require(q(gitBin) & " -C " & q(other) & " add locks")
+  discard require(q(gitBin) & " -C " & q(other) & " commit -m " & q(label))
+  discard require(q(gitBin) & " -C " & q(other) & " push origin main")
 
 proc report(fx: Fixture): JsonNode =
   parseFile(fx.workspace / ".repro" / "build" / "reports" / "push-report.json")
@@ -1102,6 +1123,130 @@ suite "protocol v2 real-hook repro push closure":
       check run(q(gitBin) & " -C " & q(fx.manifestBare) &
         " merge-base --is-ancestor " & q(retained) & " " &
         q(completedBackend)).code == 0
+
+  test "a raw push from a stale record store replays its lock onto the tip":
+    # The issue's field shape: the store checkout was last fetched before two
+    # other workspaces published disjoint records, so the gate's own lock
+    # commit lands on a stale tip. The push must publish, not refuse.
+    let gitBin = findExe("git")
+    doAssert gitBin.len > 0, "Git is required for stale-store replay regression"
+    let fx = setup(gitBin, "stale-store-raw")
+    defer: removeDir(fx.scratch)
+    let coreSha = commit(fx, gitBin, fx.core, "core-stale-store")
+    installHooks(fx)
+    let staleTip = require(q(gitBin) & " -C " & q(fx.manifests) &
+      " rev-parse HEAD").strip()
+    let firstOther = repeat('1', 40)
+    let secondOther = repeat('2', 40)
+    publishFromAnotherStore(gitBin, fx, "first-other", "other", firstOther)
+    publishFromAnotherStore(gitBin, fx, "second-other", "other", secondOther)
+    let advancedTip = remoteHead(gitBin, fx.manifestBare)
+    check advancedTip != staleTip
+    let pushed = fx.withHookCli(q(gitBin) & " -C " & q(fx.core) &
+      " push origin HEAD:main")
+    checkpoint(pushed.output)
+    check pushed.code == 0
+    check "not a fast-forward of fetched upstream" notin pushed.output
+    check remoteHead(gitBin, fx.coreBare) == coreSha
+    check remoteHasLock(gitBin, fx, "core", coreSha)
+    check remoteHasLock(gitBin, fx, "other", firstOther)
+    check remoteHasLock(gitBin, fx, "other", secondOther)
+    let published = remoteHead(gitBin, fx.manifestBare)
+    check published == require(q(gitBin) & " -C " & q(fx.manifests) &
+      " rev-parse HEAD").strip()
+    # The other publishers' history is kept as it was: the gate's commit was
+    # replayed onto it, never merged with or force-pushed over it.
+    check run(q(gitBin) & " -C " & q(fx.manifestBare) &
+      " merge-base --is-ancestor " & q(advancedTip) & " " &
+      q(published)).code == 0
+    check require(q(gitBin) & " -C " & q(fx.manifestBare) &
+      " rev-list --count " & q(advancedTip & ".." & published)).strip() == "1"
+
+  test "a retained lock commit on a stale record store is replayed on retry":
+    # ``repro push`` is the remedy the refusal names. Its preflight must accept
+    # the retained, verified lock-only chain although the tip moved under it.
+    let gitBin = findExe("git")
+    doAssert gitBin.len > 0, "Git is required for stale-store replay regression"
+    let fx = setup(gitBin, "stale-store-retry")
+    defer: removeDir(fx.scratch)
+    let coreSha = commit(fx, gitBin, fx.core, "core-stale-retry")
+    let libSha = commit(fx, gitBin, fx.lib, "lib-stale-retry")
+    let appSha = commit(fx, gitBin, fx.app, "app-stale-retry")
+    installHooks(fx)
+    let reject = fx.manifestBare / "hooks" / "pre-receive"
+    executable(reject, "#!/usr/bin/env sh\ncat >/dev/null\nexit 73\n")
+    let failed = invokePush(fx)
+    check failed.code != 0
+    let retained = require(q(gitBin) & " -C " & q(fx.manifests) &
+      " rev-parse HEAD").strip()
+    check run(q(gitBin) & " -C " & q(fx.manifests) & " cat-file -e " &
+      q(retained & ":locks/app/core/" & coreSha & ".toml")).code == 0
+    removeFile(reject)
+    let otherOid = repeat('3', 40)
+    publishFromAnotherStore(gitBin, fx, "retry-other", "other", otherOid)
+    let advancedTip = remoteHead(gitBin, fx.manifestBare)
+    check run(q(gitBin) & " -C " & q(fx.manifests) &
+      " merge-base --is-ancestor " & q(retained) & " " &
+      q(advancedTip)).code != 0
+
+    let retried = invokePush(fx)
+    if retried.code != 0: checkpoint(retried.output)
+    check retried.code == 0
+    check remoteHead(gitBin, fx.coreBare) == coreSha
+    check remoteHead(gitBin, fx.libBare) == libSha
+    check remoteHead(gitBin, fx.appBare) == appSha
+    check remoteHasLock(gitBin, fx, "core", coreSha)
+    check remoteHasLock(gitBin, fx, "lib", libSha)
+    check remoteHasLock(gitBin, fx, "app", appSha)
+    check remoteHasLock(gitBin, fx, "other", otherOid)
+    check run(q(gitBin) & " -C " & q(fx.manifestBare) &
+      " merge-base --is-ancestor " & q(advancedTip) & " refs/heads/main").code == 0
+
+  test "a stale record store whose key was published differently stops first":
+    # Invariant 14 on the replay path: the other workspace published a
+    # DIFFERENT record at the retained commit's key. The preflight refuses
+    # before any source ref is transmitted and the published bytes survive.
+    let gitBin = findExe("git")
+    doAssert gitBin.len > 0, "Git is required for stale-store replay regression"
+    let fx = setup(gitBin, "stale-store-collision")
+    defer: removeDir(fx.scratch)
+    let coreSha = commit(fx, gitBin, fx.core, "core-stale-collision")
+    discard commit(fx, gitBin, fx.lib, "lib-stale-collision")
+    discard commit(fx, gitBin, fx.app, "app-stale-collision")
+    installHooks(fx)
+    let reject = fx.manifestBare / "hooks" / "pre-receive"
+    executable(reject, "#!/usr/bin/env sh\ncat >/dev/null\nexit 73\n")
+    let sourceBefore = @[
+      remoteHead(gitBin, fx.coreBare),
+      remoteHead(gitBin, fx.libBare),
+      remoteHead(gitBin, fx.appBare)]
+    check invokePush(fx).code != 0
+    removeFile(reject)
+    let retained = require(q(gitBin) & " -C " & q(fx.manifests) &
+      " rev-parse HEAD").strip()
+    let rel = "locks/app/core/" & coreSha & ".toml"
+    publishFromAnotherStore(gitBin, fx, "colliding", "core", coreSha,
+      validLockRecord("core", "core", coreSha) & "\n# another answer\n")
+    let publishedTip = remoteHead(gitBin, fx.manifestBare)
+    let publishedBlob = require(q(gitBin) & " -C " & q(fx.manifestBare) &
+      " rev-parse " & q("refs/heads/main:" & rel)).strip()
+
+    let stopped = invokePush(fx)
+    check stopped.code != 0
+    let r = report(fx)
+    check r["stoppedStage"].getStr() == "lock-backend-preflight"
+    let diagnostic = r["lockDiagnostic"].getStr()
+    checkpoint(diagnostic)
+    check "already published at" in diagnostic
+    check rel in diagnostic
+    check remoteHead(gitBin, fx.manifestBare) == publishedTip
+    check require(q(gitBin) & " -C " & q(fx.manifestBare) &
+      " rev-parse " & q("refs/heads/main:" & rel)).strip() == publishedBlob
+    check require(q(gitBin) & " -C " & q(fx.manifests) &
+      " rev-parse HEAD").strip() == retained
+    check remoteHead(gitBin, fx.coreBare) == sourceBefore[0]
+    check remoteHead(gitBin, fx.libBare) == sourceBefore[1]
+    check remoteHead(gitBin, fx.appBare) == sourceBefore[2]
 
   test "ordinary backend ahead commit names offender rather than upstream record":
     let gitBin = findExe("git")

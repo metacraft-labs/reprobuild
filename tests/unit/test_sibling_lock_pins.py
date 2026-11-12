@@ -175,6 +175,19 @@ class SiblingLockPinsRealTree(unittest.TestCase):
         self.assertIn(f'{ADAPTERS}={STALE_ADAPTERS_PIN}', errors[0])
         self.assertIn(f'repro.lock pins {ADAPTERS} at revision {self.locked_adapters}', errors[0])
 
+    def test_trace_format_nim_is_pinned_to_flake_lock_revision_not_a_branch(self):
+        # reprobuild-pm issue
+        # 2026-11-01-reprobuild-pins-codetracer-trace-format-nim-to-dev-while-its-work-accumulates-on-agents:
+        # `=dev` named a branch that lagged the repository's `agents` line by
+        # 131 commits and jumped when a promotion landed. The entry is an exact
+        # revision, the one flake.lock's `ct-trace-format-src` pins.
+        name = 'codetracer-trace-format-nim'
+        flake = json.loads(self.flake)
+        nodes = flake['nodes']
+        flake_rev = nodes[nodes[flake['root']]['inputs']['ct-trace-format-src']]['locked']['rev']
+        self.assertRegex(flake_rev, r'^[0-9a-f]{40}$')
+        self.assertEqual(self.entries().get(name), flake_rev)
+
     def test_lint_runs_the_gate_and_this_test(self):
         workflows = (ROOT / 'scripts/check_workflows.sh').read_text()
         self.assertRegex(workflows, r'(?m)^python3 tests/unit/test_sibling_lock_pins\.py$')

@@ -21109,116 +21109,6 @@ proc isReprobuildVcsHook(path, hookName: string): bool =
     fileContains(path, "reprobuild hook dispatcher") or
     fileContains(path, "reprobuild managed " & hookName & " hook")
 
-# --- The retired `repo-workspaces` hook generator ---------------------------
-#
-# `repo-workspaces` is the multi-repo tool Reprobuild replaced (the workspace
-# repository retired it in `967e0f8`). Its `workspace hooks ensure` installed,
-# for `pre-push` and `post-commit`:
-#
-#   <hook>                          a dispatcher, header marker
-#                                   `# repo-workspaces hook dispatcher`
-#                                   (its first release, `hooks/install.sh`,
-#                                   wrote a self-contained WRAPPER marked
-#                                   `# repo-workspaces <hook> wrapper` instead,
-#                                   for `pre-commit` and `post-commit`)
-#   <hook>.repo-workspaces-managed  the dispatcher's body, marker
-#                                   `# repo-workspaces managed <hook> hook`;
-#                                   the pre-push one publishes locks by
-#                                   committing and pushing into the manifest
-#                                   repository
-#   <hook>.repo-workspaces-local    the USER's previous hook, which the
-#                                   DISPATCHER ran first
-#   <hook>.original                 the USER's previous hook as the WRAPPER
-#                                   preserved it; the wrapper ran it first
-#                                   (`"$REPO_HOOKS_DIR/<hook>.original" "$@"`,
-#                                   when executable). A dispatcher does not
-#                                   run it: the later release moved it into
-#                                   `<hook>.repo-workspaces-local` when it
-#                                   replaced a wrapper
-#                                   (`migrateLegacyBackupIfSafe`), and a copy
-#                                   it could not move stayed behind, unrun.
-#
-# None of it carries a Reprobuild marker, so without this recogniser `ensure`
-# classified the dispatcher as a foreign user hook and chained it to
-# `<hook>.repro-local`, which Reprobuild's own dispatcher runs FIRST: every
-# push kept running the retired tool's lock publication (reprobuild-pm issue
-# 2026-09-30). It is not a user's hook; it is a previous generation of the
-# managed one, and `ensureVcsHookDetailed` removes it.
-#
-# Deliberately a hard-coded recogniser for one retired tool, and deliberately
-# separate from `isReprobuildVcsHook`: a retired file must never be mistaken
-# for a current managed one (that predicate decides what `uninstall` removes
-# and what `health` counts as wired). The alternative, a one-off migration
-# command, would leave every workspace that never runs it in the broken state.
-
-const
-  RetiredRepoWorkspacesDispatcherMarker = "repo-workspaces hook dispatcher"
-    ## Header marker of the retired tool's dispatcher (its `DispatcherMarker`).
-
-proc retiredRepoWorkspacesWrapperMarker(hookName: string): string =
-  ## Header marker of the retired tool's first-release wrapper
-  ## (`hooks/<hook>-wrapper`, installed by its `hooks/install.sh`).
-  "repo-workspaces " & hookName & " wrapper"
-
-proc retiredRepoWorkspacesMarkers(hookName: string): array[3, string] =
-  ## Every header marker the retired tool wrote into a file it owned — the
-  ## same three its own `isRepoWorkspacesOwned` tested for.
-  [RetiredRepoWorkspacesDispatcherMarker,
-   "repo-workspaces managed " & hookName & " hook",
-   retiredRepoWorkspacesWrapperMarker(hookName)]
-
-proc headerCarriesRetiredMarker(path: string;
-                                markers: openArray[string]): bool =
-  ## True when one of ``markers`` opens a comment line of the leading header
-  ## of the file at ``path`` (the shebang and the comment block under it).
-  ##
-  ## Stricter than the retired tool's own substring test, because what it
-  ## decides leads to a DELETE: every generated file carries its marker in
-  ## that header — line 2. A user's hook that merely mentions the marker
-  ## further down (the retired dispatcher itself greps for it in its body) is
-  ## not matched by its mention.
-  if not fileExists(extendedPath(path)):
-    return false
-  var content = ""
-  try:
-    content = readFile(extendedPath(path))
-  except CatchableError:
-    return false
-  for line in content.splitLines():
-    let trimmed = line.strip()
-    if trimmed.startsWith("#!"):
-      continue
-    if not trimmed.startsWith("#"):
-      # End of the header: blank line or first command.
-      break
-    let comment = trimmed.strip(chars = {'#', ' ', '\t'}, trailing = false)
-    for marker in markers:
-      if comment.startsWith(marker):
-        return true
-  false
-
-proc isRetiredRepoWorkspacesHook(path, hookName: string): bool =
-  ## True when ``path`` is a file the retired `repo-workspaces` tool GENERATED
-  ## (dispatcher, managed body, or the older wrapper), and so may be deleted.
-  headerCarriesRetiredMarker(path, retiredRepoWorkspacesMarkers(hookName))
-
-proc isRetiredRepoWorkspacesWrapper(path, hookName: string): bool =
-  ## True when ``path`` is specifically the retired tool's first-release
-  ## WRAPPER — the one generation that ran ``<hook>.original`` first — and
-  ## not its later dispatcher or that dispatcher's body.
-  headerCarriesRetiredMarker(path,
-    [retiredRepoWorkspacesWrapperMarker(hookName)])
-
-proc retiredRepoWorkspacesManagedPath(hooksDir, hookName: string): string =
-  hooksDir / (hookName & ".repo-workspaces-managed")
-
-proc retiredRepoWorkspacesLocalPath(hooksDir, hookName: string): string =
-  hooksDir / (hookName & ".repo-workspaces-local")
-
-proc retiredRepoWorkspacesOriginalPath(hooksDir, hookName: string): string =
-  ## Where the retired tool's first-release wrapper preserved the user's hook.
-  hooksDir / (hookName & ".original")
-
 proc ensureExecutable(path: string) =
   if not fileExists(extendedPath(path)):
     return
@@ -21580,8 +21470,7 @@ protect_finish() {
 
 proc vcsDispatcherContent(hookName: string; certificatePhase = false): string =
   ## RA-4: the dispatcher coexists with the pre-commit framework's
-  ## ``hook-impl`` shim. Two safeguards (modelled on repo-workspaces
-  ## ``9ee9141``):
+  ## ``hook-impl`` shim. Two safeguards:
   ##
   ##   1. A preserved local hook may be pre-commit's ``hook-impl`` shim.
   ##      pre-commit self-checks for migration mode via
@@ -23136,20 +23025,6 @@ type
       ## installer rewrote the same bytes and the case where it REGENERATED
       ## its shim against new tool paths, which is the same shadowing with a
       ## different-looking file.
-    vheoRemovedRetiredDispatcher
-      ## Files generated by the retired ``repo-workspaces`` tool were found —
-      ## its dispatcher (or older wrapper) at the canonical path, already
-      ## chained at ``<hook>.repro-local``, or displaced to ``<hook>.legacy``,
-      ## and/or its ``<hook>.repo-workspaces-managed`` body — and DELETED. The
-      ## user hook it had preserved and run first —
-      ## ``<hook>.repo-workspaces-local`` for the dispatcher,
-      ## ``<hook>.original`` for the wrapper — was moved to
-      ## ``<hook>.repro-local`` (see ``isRetiredRepoWorkspacesHook``).
-      ##
-      ## Its own state, and not ``chained-user-hook``, because chaining is
-      ## exactly the wrong repair that used to be reported under that name:
-      ## the retired dispatcher kept running, ahead of the managed body, and
-      ## its ``pre-push`` published locks into the manifest repository.
 
 proc sanitizePreCommitLegacyHook(hooksDir, hookName: string): bool =
   ## RA-4: pre-commit's ``hook-impl`` shim chains into
@@ -23342,296 +23217,15 @@ type
 proc certificateGatePlan*(repoRoot: string): CertificateGatePlan
   ## Defined after the workspace resolution it needs.
 
-type
-  RetiredPreservedHook = tuple[path, runner: string]
-    ## A user hook a retired `repo-workspaces` generation preserved and ran
-    ## first, and the generation that ran it (``dispatcher`` / ``wrapper``),
-    ## named in a refusal.
-
-proc retiredPreservedHooks(hooksDir, hookName: string;
-                           dispatcherRuns, wrapperRuns: bool):
-                             seq[RetiredPreservedHook] =
-  ## The user hooks the retired generations preserved that a retired file
-  ## still present would run, and so must keep running once it is gone:
-  ##
-  ##   * ``<hook>.repo-workspaces-local`` when ``dispatcherRuns`` (a retired
-  ##     file is present) and it is not itself a generated file;
-  ##   * ``<hook>.original`` when ``wrapperRuns`` (the WRAPPER specifically is
-  ##     present: no dispatcher ever ran it) and it is neither a retired
-  ##     generated file nor a Reprobuild hook.
-  ##
-  ## An orphaned preserved hook — its runner already gone — runs in no chain
-  ## today, and nothing here starts running it. Order is the preference when
-  ## two copies are the same hook: the dispatcher's is the newer one.
-  let retiredLocal = retiredRepoWorkspacesLocalPath(hooksDir, hookName)
-  let retiredOriginal = retiredRepoWorkspacesOriginalPath(hooksDir, hookName)
-  if dispatcherRuns and fileExists(extendedPath(retiredLocal)) and
-      not isRetiredRepoWorkspacesHook(retiredLocal, hookName):
-    result.add((retiredLocal, "dispatcher"))
-  if wrapperRuns and fileExists(extendedPath(retiredOriginal)) and
-      not isRetiredRepoWorkspacesHook(retiredOriginal, hookName) and
-      not isReprobuildVcsHook(retiredOriginal, hookName):
-    result.add((retiredOriginal, "wrapper"))
-
-proc sameHookBody(a, b: string): bool =
-  ## Byte-identical, or the same generated shim regenerated against new tool
-  ## paths (`regeneratedShimIdentity`): the two equivalences the chaining in
-  ## ``ensureVcsHookDetailed`` also accepts as "one hook, keep one copy".
-  let identity = regeneratedShimIdentity(a)
-  a == b or (identity.len > 0 and identity == regeneratedShimIdentity(b))
-
-proc refuseCompetingRetiredPreserved(hooksDir, hookName, verb, command,
-                                     destination: string;
-                                     preserved: openArray[RetiredPreservedHook];
-                                     occupants: seq[tuple[path, what: string]]) =
-  ## Raises "cannot <verb>", naming both files and the `repro hooks
-  ## <command>` to re-run, when any two of ``preserved`` and
-  ## ``occupants`` are DIFFERENT hooks: all of them are headed for the one
-  ## slot ``destination``, so keeping one would silently drop the other
-  ## user's checks. Reads only — callers run it before deleting anything, so
-  ## a refusal leaves the retired file still running the preserved hook.
-  var competing = occupants
-  for item in preserved:
-    let preservedBody = readFile(extendedPath(item.path))
-    for occupant in competing:
-      if sameHookBody(readFile(extendedPath(occupant.path)), preservedBody):
-        continue
-      raise newException(ValueError,
-        "cannot " & verb & " " & hookName & ": " & item.path &
-          " holds the hook the retired repo-workspaces " & item.runner &
-          " preserved and ran first, and " & occupant.path & " " &
-          occupant.what & ". Reconcile them by hand: merge the checks you " &
-          "want into " & occupant.path & ", delete " & item.path &
-          ", then re-run 'repro hooks " & command & " --vcs " &
-          parentDir(parentDir(hooksDir)) & "'.")
-    # A later preserved hook is checked against this one exactly as against
-    # an occupant: both are headed for the same slot.
-    competing.add((item.path, "holds the different hook the retired " &
-      "repo-workspaces " & item.runner & " preserved and ran first; both " &
-      "would be run from " & destination))
-
-proc moveRetiredPreservedInto(preserved: openArray[RetiredPreservedHook];
-                              destination: string) =
-  ## Moves ONE of ``preserved`` (proved the same hook by
-  ## ``refuseCompetingRetiredPreserved``) to ``destination`` and deletes the
-  ## rest. An executable copy is preferred, so a hook the retired generations
-  ## ran keeps running. Mode preserved, deliberately not `ensureExecutable`:
-  ## every generation skips a non-executable preserved hook (`[[ -x ]]` /
-  ## `[ -x ]`), so a hook that did not run under the retired tool must not
-  ## start running now.
-  if preserved.len == 0:
-    return
-  var keeper = 0
-  for i, item in preserved:
-    if fpUserExec in getFilePermissions(extendedPath(item.path)):
-      keeper = i
-      break
-  for i, item in preserved:
-    if i == keeper:
-      moveFileReplacing(item.path, destination)
-    else:
-      discard removeFileIfExists(item.path)
-
-proc migrateRetiredVcsHook(hooksDir, hookName: string;
-    verb = "install"; command = "ensure"; preserveCanonicalUser = false):
-    tuple[changed, removedRetired, preserveLocalMode: bool] =
-  ## Normalize the retired generator's chain before either installation or
-  ## removal. In particular, a separate store removes workspace dispatchers
-  ## entirely, but must still restore the user hook the retired one ran.
-  let standard = hookPath(hooksDir, hookName)
+proc removeStaleManagedLocalHook(hooksDir, hookName: string): bool =
+  ## A ``<hook>.repro-local`` carrying Reprobuild's own markers is a managed
+  ## file an earlier ``uninstall`` left in the user's slot, never a user's
+  ## hook: the dispatcher would run itself first. Removed before installing
+  ## or removing anything else.
   let local = localHookPath(hooksDir, hookName)
-  var anyChange = false
-  var removedRetired = false
-
-  # ---- The retired `repo-workspaces` generator (see
-  #      `isRetiredRepoWorkspacesHook`). Its files are a previous generation of
-  #      the managed hook, not a user's hook, so they are REMOVED rather than
-  #      chained — wherever they are found:
-  #
-  #        * at the canonical path (the retired install, never touched since);
-  #        * at `<hook>.repro-local`, where an `ensure` predating this rule
-  #          chained it — the state the issue found, in which Reprobuild's own
-  #          dispatcher ran the retired one first on every fire;
-  #        * at `<hook>.legacy`, where pre-commit or prek moved it when they
-  #          were installed over it, and from where their shim still runs it.
-  #
-  #      Its body `<hook>.repo-workspaces-managed` goes with it. The user's
-  #      files in that layout are the hooks the retired generations PRESERVED
-  #      and ran first, and each is moved to `<hook>.repro-local`, which
-  #      Reprobuild's dispatcher runs first, so the user's checks keep running:
-  #
-  #        * `<hook>.repo-workspaces-local`, which the dispatcher ran;
-  #        * `<hook>.original`, which the first release's wrapper ran (its
-  #          `hooks/install.sh` renamed the user's hook there and the wrapper
-  #          executed `.git/hooks/<hook>.original`). Removing the wrapper
-  #          without moving it would silently stop the user's hook.
-  #
-  #      Each is moved only when a retired file that would run it is present:
-  #      an orphaned one (its runner already deleted by hand) runs today in no
-  #      chain, and `ensure` does not start running something nobody runs.
-  #      For `<hook>.original` that runner is the WRAPPER specifically: a
-  #      dispatcher never ran it (the later release moved it into
-  #      `<hook>.repo-workspaces-local` when it replaced a wrapper, and a copy
-  #      it could not move stayed behind unrun), so with only a dispatcher
-  #      present `<hook>.original` is the user's and is left alone.
-  let retiredLegacy = hooksDir / (hookName & ".legacy")
-  let retiredManaged = retiredRepoWorkspacesManagedPath(hooksDir, hookName)
-  let retiredLocal = retiredRepoWorkspacesLocalPath(hooksDir, hookName)
-  let retiredAtStandard = isRetiredRepoWorkspacesHook(standard, hookName)
-  let retiredAtLocal = isRetiredRepoWorkspacesHook(local, hookName)
-  let retiredAtLegacy = isRetiredRepoWorkspacesHook(retiredLegacy, hookName)
-  let retiredDispatcherRuns =
-    retiredAtStandard or retiredAtLocal or retiredAtLegacy
-  let retiredWrapperRuns =
-    isRetiredRepoWorkspacesWrapper(standard, hookName) or
-    isRetiredRepoWorkspacesWrapper(local, hookName) or
-    isRetiredRepoWorkspacesWrapper(retiredLegacy, hookName)
-  let retiredLocalIsGenerated =
-    isRetiredRepoWorkspacesHook(retiredLocal, hookName)
-  let preserved = retiredPreservedHooks(hooksDir, hookName,
-    retiredDispatcherRuns, retiredWrapperRuns)
-  var canonicalPreserved = ""
-  if preserveCanonicalUser:
-    # Only a canonical retired runner establishes this execution authority.
-    # A wrapper ran .original; a dispatcher ran .repo-workspaces-local.
-    # An equal current-local copy outside that chain must not change whether
-    # the qualified user's checks execute when a store removes the runner.
-    let canonicalSource =
-      if isRetiredRepoWorkspacesWrapper(standard, hookName):
-        retiredRepoWorkspacesOriginalPath(hooksDir, hookName)
-      elif headerCarriesRetiredMarker(standard,
-          [RetiredRepoWorkspacesDispatcherMarker]):
-        retiredLocal
-      else:
-        ""
-    for item in preserved:
-      if item.path == canonicalSource:
-        canonicalPreserved = item.path
-        break
-  if preserved.len > 0:
-    # Decide BEFORE deleting anything. Every preserved hook is headed for
-    # `<hook>.repro-local`, and so is whatever foreign hook already sits there
-    # or at the canonical path (which the chaining below moves there). If any
-    # two of them are DIFFERENT hooks, two users' checks compete for one slot
-    # — the same conflict as two foreign hooks below, refused the same way.
-    # The refusal comes first so that it leaves the hooks directory exactly as
-    # it found it: the retired file is, at that point, the only thing still
-    # running the user's preserved hook.
-    var occupants: seq[tuple[path, what: string]]
-    for occupant in [local, standard]:
-      if not fileExists(extendedPath(occupant)) or
-          isReprobuildVcsHook(occupant, hookName) or
-          isRetiredRepoWorkspacesHook(occupant, hookName):
-        continue
-      occupants.add((occupant, "holds a different hook that Reprobuild's " &
-        "dispatcher would run in the same place (" & local & ")"))
-    refuseCompetingRetiredPreserved(hooksDir, hookName, verb, command,
-      local, preserved, occupants)
-  var canonicalKeeper = canonicalPreserved
-  if canonicalPreserved.len > 0:
-    # Resolve the directory, but not the final entry: directory aliases must
-    # identify the same cleanup slot without dereferencing its user symlink.
-    proc hookEntryIdentity(path: string): string =
-      let absolute = absolutePath(path)
-      expandFilename(parentDir(absolute)) / extractFilename(absolute)
-
-    var cleanupSlots = @[standard, local, managedHookPath(hooksDir, hookName)]
-    if retiredAtLegacy:
-      cleanupSlots.add(retiredLegacy)
-    if isRetiredRepoWorkspacesHook(retiredManaged, hookName):
-      cleanupSlots.add(retiredManaged)
-    if retiredLocalIsGenerated:
-      cleanupSlots.add(retiredLocal)
-    for item in preserved:
-      cleanupSlots.add(item.path)
-    var cleanupIdentities: seq[string]
-    for slot in cleanupSlots:
-      cleanupIdentities.add(hookEntryIdentity(slot))
-    var cursor = canonicalPreserved
-    var visited: seq[string]
-    while true:
-      # Complete this read-only preflight before any removal or move. Keep
-      # original slot paths for the later rename, not an alias of that slot.
-      let identity = hookEntryIdentity(cursor)
-      var recognized = ""
-      for i, slot in cleanupSlots:
-        if cmpPaths(identity, cleanupIdentities[i]) == 0:
-          recognized = slot
-          break
-      if recognized.len > 0:
-        var qualified = false
-        for item in preserved:
-          if item.path == recognized:
-            qualified = true
-            break
-        if recognized == local and fileExists(extendedPath(local)) and
-            not isReprobuildVcsHook(local, hookName) and
-            not isRetiredRepoWorkspacesHook(local, hookName):
-          qualified = true
-        if not qualified:
-          raise newException(ValueError,
-            "refusing to uninstall " & hookName &
-              ": preserved user hook symlink targets an unqualified cleanup " &
-              "slot " & recognized & "; reconcile the user hook before retrying")
-        canonicalKeeper = recognized
-      if not symlinkExists(extendedPath(cursor)):
-        break
-      for prior in visited:
-        if cmpPaths(prior, identity) == 0:
-          raise newException(ValueError,
-            "refusing to uninstall " & hookName &
-              ": cyclic preserved user hook symlink at " & cursor)
-      visited.add(identity)
-      let target = readSymlinkTarget(extendedPath(cursor))
-      cursor = absolutePath(target, parentDir(cursor))
-  # Stale sentinel-marked local file from an earlier `uninstall` run.
   if fileExists(extendedPath(local)) and isReprobuildVcsHook(local, hookName):
-    anyChange = removeFileIfExists(local) or anyChange
-
-  if retiredAtStandard:
-    removedRetired = removeFileIfExists(standard) or removedRetired
-  if retiredAtLocal:
-    removedRetired = removeFileIfExists(local) or removedRetired
-  if retiredAtLegacy:
-    removedRetired = removeFileIfExists(retiredLegacy) or removedRetired
-  if isRetiredRepoWorkspacesHook(retiredManaged, hookName):
-    removedRetired = removeFileIfExists(retiredManaged) or removedRetired
-  if retiredLocalIsGenerated:
-    # The retired tool's own files never belong in the user's slot (its
-    # `sanitizePreservedLocalHook` removed them too).
-    removedRetired = removeFileIfExists(retiredLocal) or removedRetired
-  if preserved.len > 0:
-    # The check above proved every preserved copy, and any foreign occupant,
-    # the same hook: keep exactly one.
-    if canonicalPreserved.len > 0:
-      # The collision preflight proved every other copy equivalent. Move the
-      # actual qualified hook (including a symlink) rather than chmodding a
-      # duplicate or its target: both active and inactive users keep their
-      # execution state. Ordinary workspace installation keeps its own chain.
-      if canonicalKeeper != local:
-        moveFileReplacing(canonicalKeeper, local)
-      for item in preserved:
-        if item.path != canonicalKeeper:
-          if symlinkExists(extendedPath(item.path)):
-            # Moving the target may have made this duplicate link dangling.
-            removeFile(extendedPath(item.path))
-          else:
-            discard removeFileIfExists(item.path)
-    elif fileExists(extendedPath(local)) or
-        (fileExists(extendedPath(standard)) and
-          not isReprobuildVcsHook(standard, hookName)):
-      # The same hook is already chained, or is at the canonical path and is
-      # chained below: keep that one copy and drop the retired tool's.
-      for item in preserved:
-        discard removeFileIfExists(item.path)
-    else:
-      # Nothing is chained yet and nothing at the canonical path will be.
-      moveRetiredPreservedInto(preserved, local)
-    removedRetired = true
-  anyChange = anyChange or removedRetired
-
-  (changed: anyChange, removedRetired: removedRetired,
-    preserveLocalMode: preserved.len > 0)
+    return removeFileIfExists(local)
+  false
 
 proc ensureVcsHookDetailed(hooksDir, hookName: string;
                            guard: HookWriteGuard = nil;
@@ -23646,19 +23240,8 @@ proc ensureVcsHookDetailed(hooksDir, hookName: string;
   ## (``certificateGatePlan``).
   ##
   ## Outcome priority (the higher-impact change wins when several apply):
-  ##   removed-retired-dispatcher  >  reclaimed-shadowed  >  chained-user-hook
-  ##   >  rewrote-contractless-body  >  refreshed-drifted  >  installed
-  ##   >  already-up-to-date
-  ##
-  ## ``removed-retired-dispatcher`` ranks first because it is the one repair
-  ## that DELETES executables and leaves nothing behind to show it happened.
-  ## A chain or a reclaim it co-occurs with (a foreign hook in the slot and the
-  ## retired dispatcher chained behind it) stays visible afterwards as the
-  ## ``<hook>.repro-local`` file; the removal is visible only in this report.
-  ## It also outranks ``reclaimed-shadowed`` on impact: a retired dispatcher at
-  ## the canonical path shadowed the managed hook just as a re-installed
-  ## pre-commit shim does, and in addition kept running the retired tool's
-  ## lock publication.
+  ##   reclaimed-shadowed  >  chained-user-hook  >  rewrote-contractless-body
+  ##   >  refreshed-drifted  >  installed  >  already-up-to-date
   ##
   ## ``guard`` memoises the PG-14 contract probe across the repos of one
   ## ``ensure`` run; pass ``nil`` and one is created for this call alone.
@@ -23669,13 +23252,10 @@ proc ensureVcsHookDetailed(hooksDir, hookName: string;
 
   var chainedUser = false
   var reclaimedShadowed = false
-  var removedRetired = false
   var anyChange = false
   var refreshedDrift = false
 
-  let retiredRepair = migrateRetiredVcsHook(hooksDir, hookName)
-  anyChange = retiredRepair.changed
-  removedRetired = retiredRepair.removedRetired
+  anyChange = removeStaleManagedLocalHook(hooksDir, hookName)
 
   # Pre-existing user-owned hook at the canonical path: chain it.
   if fileExists(extendedPath(standard)) and
@@ -23848,9 +23428,6 @@ proc ensureVcsHookDetailed(hooksDir, hookName: string;
   let dispatcherChanged = writeExecutableIfChanged(standard, canonicalDispatcher)
   anyChange = anyChange or managedChanged or dispatcherChanged
 
-  if removedRetired:
-    # First: see the ranking in the doc comment.
-    return vheoRemovedRetiredDispatcher
   if reclaimedShadowed:
     return vheoReclaimedShadowed
   if chainedUser:
@@ -24010,12 +23587,6 @@ proc selfHealManagedHooks*(repoRoot: string): seq[string] =
       of vheoReclaimedShadowed:
         result.add("repro hooks: repaired " & hookName & " in " & top &
           " (reclaimed-shadowed)")
-      of vheoRemovedRetiredDispatcher:
-        result.add("repro hooks: repaired " & hookName & " in " & top &
-          " (removed-retired-dispatcher: the retired repo-workspaces hook " &
-          "dispatcher (or its older wrapper) and its body were removed; any " &
-          "user hook it had preserved now runs as " & hookName &
-          ".repro-local)")
     except CatchableError as err:
       result.add("repro hooks: could NOT repair " & hookName & " in " & top &
         ": " & err.msg)
@@ -24025,9 +23596,9 @@ type
     ## One per (repo, hookName) pair in the M17 JSON report. ``outcome``
     ## is the ``vcsHookOutcomeTag`` of the ``vheo*`` outcome (``installed`` /
     ## ``already-up-to-date`` / ``chained-user-hook`` / ``refreshed-drifted``
-    ## / ``rewrote-contractless-body`` / ``reclaimed-shadowed`` /
-    ## ``removed-retired-dispatcher``); ``hookPath`` and ``managedPath`` are the
-    ## absolute paths the installer touched (or would touch).
+    ## / ``rewrote-contractless-body`` / ``reclaimed-shadowed``);
+    ## ``hookPath`` and ``managedPath`` are the absolute paths the installer
+    ## touched (or would touch).
     repo*: string
     repoPath*: string
     hook*: string
@@ -24066,7 +23637,6 @@ proc vcsHookOutcomeTag(outcome: VcsHookEnsureOutcome): string =
   of vheoRefreshedDrifted: "refreshed-drifted"
   of vheoRewroteContractlessBody: "rewrote-contractless-body"
   of vheoReclaimedShadowed: "reclaimed-shadowed"
-  of vheoRemovedRetiredDispatcher: "removed-retired-dispatcher"
 
 proc toJsonNode*(report: HooksEnsureReport): JsonNode =
   result = newJObject()
@@ -24293,9 +23863,8 @@ proc ensureRepoVcsHooks(repoName, repoPath: string;
   ## — and must not be counted as a success by any caller.
   result.ok = true
   if gitTopLevel(repoPath).len == 0:
-    # Not materialized yet. Same rule the legacy repo-workspaces installer
-    # used, and the reason the sweep can run against a partially-synced
-    # workspace without failing.
+    # Not materialized yet: skipped rather than failed, which is what lets
+    # the sweep run against a partially-synced workspace.
     result.skippedUnmaterialized = true
     return
   # Make the hook PATH worktree-safe before writing hooks into it; see
@@ -24336,13 +23905,6 @@ proc ensureRepoVcsHooks(repoName, repoPath: string;
         "the handshake wrote it. Rewritten with a contract-bearing body; " &
         "reconcile what supplies 'repro' (direnv reload, then the pin) or " &
         "it will be stripped again.")
-    elif outcome == vheoRemovedRetiredDispatcher:
-      # Said out loud for the same reason: this repair DELETED files, and the
-      # operator should not have to find that out from a count.
-      stderr.writeLine("repro hooks: " & repoName & "/" & hookName &
-        ": removed the retired repo-workspaces hook dispatcher and its body; " &
-        "any user hook it had preserved now runs as " & hookName &
-        ".repro-local.")
     result.entries.add(VcsHookEntry(
       repo: repoName,
       repoPath: repoPath,
@@ -24357,8 +23919,7 @@ proc ensureWorkspaceHooks(workspaceRoot: string): HooksEnsureReport =
   ## a structured report. Exit code follows: 0 when every entry is
   ## ``installed`` / ``already-up-to-date`` / ``refreshed-drifted`` /
   ## ``chained-user-hook`` / ``rewrote-contractless-body`` /
-  ## ``reclaimed-shadowed`` / ``removed-retired-dispatcher`` (all "success"
-  ## outcomes — no failure
+  ## ``reclaimed-shadowed`` (all "success" outcomes — no failure
   ## classification exists for ensure on M17 since the installer either
   ## writes the bytes or raises).
   result.workspaceRoot = workspaceRoot
@@ -24394,38 +23955,23 @@ proc uninstallVcsHook(hooksDir, hookName: string;
   let standard = hookPath(hooksDir, hookName)
   let local = localHookPath(hooksDir, hookName)
   let managed = managedHookPath(hooksDir, hookName)
-  let restoreShadowedCurrentLocal =
-    isRetiredRepoWorkspacesHook(standard, hookName) and
-    isReprobuildVcsHook(managed, hookName)
   if fileExists(extendedPath(standard)) and
       fileExists(extendedPath(managed)) and
-      not isReprobuildVcsHook(standard, hookName) and
-      not isRetiredRepoWorkspacesHook(standard, hookName):
-    # Refuse an unrelated canonical hook before migrating or deleting any
-    # retired files. Its checks must not be displaced by uninstallation.
+      not isReprobuildVcsHook(standard, hookName):
+    # Refuse an unrelated canonical hook before deleting anything. Its checks
+    # must not be displaced by uninstallation.
     raise newException(ValueError,
       "refusing to uninstall " & hookName & ": " & standard &
         " is not Reprobuild-managed")
-  let retiredRepair = migrateRetiredVcsHook(hooksDir, hookName,
-    verb = "uninstall", command = "uninstall",
-    preserveCanonicalUser = preserveCanonicalUser)
-  result = retiredRepair.changed
+  result = removeStaleManagedLocalHook(hooksDir, hookName)
   if fileExists(extendedPath(standard)) and
       isReprobuildVcsHook(standard, hookName):
     result = removeFileIfExists(standard) or result
     if fileExists(extendedPath(local)):
       moveFileReplacing(local, standard)
-      if not retiredRepair.preserveLocalMode and not preserveCanonicalUser:
+      if not preserveCanonicalUser:
         ensureExecutable(standard)
       result = true
-  elif not fileExists(extendedPath(standard)) and
-      (retiredRepair.preserveLocalMode or restoreShadowedCurrentLocal) and
-      fileExists(extendedPath(local)):
-    # The retired dispatcher was canonical, either with its own preserved
-    # user or shadowing our recognized managed chain. Restore that user hook
-    # directly, retaining a non-executable hook's deliberate inactivity.
-    moveFileReplacing(local, standard)
-    result = true
   result = removeFileIfExists(managed) or result
   if fileExists(extendedPath(local)) and isReprobuildVcsHook(local, hookName):
     result = removeFileIfExists(local) or result
@@ -24477,7 +24023,6 @@ proc runVcsHooksCommand(action: HookActionKind; parsed: ParsedHooksCommand) =
     of hakUninstall: "uninstall"
   var changed = false
   var contractless: seq[string]
-  var retired: seq[string]
   if action == hakReinstall:
     for hookName in VcsHookNames:
       changed = uninstallVcsHook(hooksDir, hookName,
@@ -24498,8 +24043,6 @@ proc runVcsHooksCommand(action: HookActionKind; parsed: ParsedHooksCommand) =
         changed = true
       if outcome == vheoRewroteContractlessBody:
         contractless.add(hookName)
-      if outcome == vheoRemovedRetiredDispatcher:
-        retired.add(hookName)
   of hakUninstall:
     for hookName in VcsHookNames:
       changed = uninstallVcsHook(hooksDir, hookName,
@@ -24516,11 +24059,6 @@ proc runVcsHooksCommand(action: HookActionKind; parsed: ParsedHooksCommand) =
       " — written by a build that predates the handshake, and rewritten now. " &
       "Reconcile what supplies 'repro' (direnv reload, then the pin); " &
       "otherwise the next run of that build strips it again.")
-  # A repair that DELETED files is named too (see `ensureRepoVcsHooks`).
-  if retired.len > 0:
-    stderr.writeLine("repro hooks: " & retired.join(", ") & " at " & hooksDir &
-      ": removed the retired repo-workspaces hook dispatcher and its body; " &
-      "any user hook it had preserved now runs as <hook>.repro-local.")
   let status = if changed: "updated" else: "already current"
   echo "repro hooks: VCS hooks " & actionName & " " & status & " at " &
     hooksDir
@@ -25834,7 +25372,7 @@ const
     "CAIRO_CORELIB_DIR",
     # PyO3 interpreter pin used by the codetracer-python-recorder
     # cargo build. Without this, PyO3's build script picks the first
-    # ``python3`` on PATH (which is the repo-workspaces embeddable
+    # ``python3`` on PATH (on the Windows hosts that is an embeddable
     # Python — no ``libs/python<ver>.lib``) and the link step fails
     # with ``LNK1181: cannot open input file 'python312.lib'``.
     # ``env.ps1`` points this at the python-build-standalone install
@@ -43504,7 +43042,7 @@ proc pathIsCwdOrAncestor*(candidate, fromDir: string): bool =
   ## RA-31 ``workspace init <url>`` and M27 ``branch <name> <path>``:
   ## both materialize into a fresh NAMED directory and must refuse to operate
   ## on the current or an enclosing checkout (the destructive upward-walk trap
-  ## that made the repo-workspaces pilot drop its own ``init``/``start``).
+  ## an in-place ``init``/``start`` would fall into).
   let wanted = canonicalPathForCompare(candidate)
   var dir = canonicalPathForCompare(fromDir)
   while true:
@@ -43530,9 +43068,8 @@ proc cloneOrgRootRepo(identity: GitToolIdentity;
   ## nothing about the root repo's own git dependencies. Cloning it plainly
   ## left every such path an empty directory in a forked or freshly-joined
   ## workspace: present enough that nothing reported it missing, empty enough
-  ## that whatever needed it failed later and elsewhere. (On Windows the
-  ## visible symptom was `reprobuild/env.ps1` aborting on a missing
-  ## `../repo-workspaces/env.ps1`, so a brand-new workspace could not build.)
+  ## that whatever needed it failed later and elsewhere, so a brand-new
+  ## workspace could not build.
   ##
   ## A repo with no submodules is unaffected — the flag is a no-op there.
   var cmd = quoteShell(identity.binaryPath) &
@@ -44481,19 +44018,19 @@ proc parseWorkspaceSyncArgs(args: openArray[string]): WorkspaceSyncArgs =
 
 const
   LegacyRepoMigrationMarkerBody = "reprobuild migration complete\n"
-    ## Exact sentinel written by repo-workspaces v2.10 after its one-time
-    ## Reprobuild hook/cache migration. It is deliberately narrower than a
-    ## generic ``.repo`` compatibility switch: only an already-migrated
-    ## workspace may use the legacy location as a read-only project-selection
-    ## artifact.
+    ## Exact body of ``.repo/.repro-migration-complete``, the sentinel that
+    ## marks a workspace migrated in place from the ``.repo/`` layout. It is
+    ## deliberately narrower than a generic ``.repo`` compatibility switch:
+    ## only an already-migrated workspace may use that location as a
+    ## read-only project-selection artifact.
 
 proc legacyMigratedWorkspaceProjectName(workspaceRoot: string): string =
-  ## Compatibility seam for workspaces migrated by repo-workspaces v2.10
-  ## before Reprobuild's native-layout cutover. That migration recorded the
-  ## active project set in ``.repo/workspace.toml`` and its completion marker
-  ## in ``.repo/.repro-migration-complete``; the later native layout moved
-  ## canonical metadata to ``.repro/workspace-state.toml`` and membership to the
-  ## workspace root.
+  ## Recognises a workspace migrated in place from the ``.repo/`` layout. Such
+  ## a workspace records its active project in ``.repo/workspace.toml`` and
+  ## carries the completion sentinel ``.repo/.repro-migration-complete``
+  ## (body ``LegacyRepoMigrationMarkerBody``); the native layout keeps
+  ## canonical metadata in ``.repro/workspace-state.toml`` and membership at
+  ## the workspace root.
   ##
   ## Keep native layout authoritative. This helper supplies ONLY the primary
   ## project name, and only when:
@@ -44501,7 +44038,7 @@ proc legacyMigratedWorkspaceProjectName(workspaceRoot: string): string =
   ##   * both legacy artifacts are regular, non-symlink files;
   ##   * the completion marker has the exact producer-written body;
   ##   * the legacy metadata passes the strict state reader in its migration
-  ##     form (``readStateFileForMigration``: that tool wrote ``local.v1``); and
+  ##     form (``readStateFileForMigration``: it is ``local.v1``); and
   ##   * that project exists in native root-level membership.
   ##
   ## It never composes or resolves content from ``.repo/manifests``. A stray
@@ -44520,9 +44057,9 @@ proc legacyMigratedWorkspaceProjectName(workspaceRoot: string): string =
       return ""
     if getFileInfo(metadata, followSymlink = false).kind != pcFile:
       return ""
-    # repo-workspaces v2.10 wrote this file in the state file's earliest
-    # schema (`local.v1`), which only the migration reader still accepts; it
-    # is read here for its project name and nothing else.
+    # This file is in the state file's earliest schema (`local.v1`), which
+    # only the migration reader still accepts; it is read here for its
+    # project name and nothing else.
     let recorded =
       readStateFileForMigration(absolutePath(metadata)).workspace.project
     if recorded.len == 0:
@@ -44677,9 +44214,9 @@ proc resolveWorkspaceProjectShared*(workspaceRoot, projectName, opLabel: string)
         readWorkspaceLocal(absolutePath(workspaceToml)).workspace.project
       if recorded.len > 0: name = recorded
     else:
-      # repo-workspaces v2.10 wrote its metadata immediately before the
-      # native-layout cutover. Read that known migration artifact narrowly;
-      # never treat arbitrary legacy `.repo` state as canonical metadata.
+      # A workspace migrated in place from the `.repo/` layout keeps its
+      # metadata there. Read that known migration artifact narrowly; never
+      # treat arbitrary legacy `.repo` state as canonical metadata.
       name = legacyMigratedWorkspaceProjectName(workspaceRoot)
   if name.len == 0:
     raise noNameableProjectError(workspaceRoot, opLabel)
@@ -52534,8 +52071,7 @@ proc runWorkspaceBranchRolesCommand*(args: openArray[string]): int =
 #     manifest-declared revisions.
 #   - ``pull`` converges the workspace TO the manifest-declared revisions:
 #     refresh the manifest, then put every repo on a LOCAL TRACKING
-#     BRANCH matching its manifest revision (the repo-workspaces
-#     ``ensureRepoTrackingBranches`` behavior). HEAD ends at the manifest
+#     BRANCH matching its manifest revision. HEAD ends at the manifest
 #     revision AND attached to a branch — never detached.
 #
 # No-rollback partial-sync policy: ``pull`` refreshes the manifest FIRST
@@ -54729,8 +54265,7 @@ proc writeWorkspaceLockReport(report: WorkspaceLockReport;
 # ``publishWorkspaceLock`` then commits and pushes that subtree to the
 # manifest repo's upstream so the lock actually reaches teammates.
 #
-# Contract (models repo-workspaces ``publishWorkspaceLock``, commits
-# ``8c60ca7`` + ``24252a0`` + ``5884c31``):
+# Contract:
 #
 #   - Stage everything under ``locks/`` (``git add -- locks``).
 #   - REFUSE if the manifest repo is dirty OUTSIDE ``locks/`` — a publish
@@ -55630,6 +55165,115 @@ proc rebaseVerifiedLockChain(identity: GitToolIdentity; repoRoot, oldBase,
   verifyLockOnlyAheadChain(identity, repoRoot, newBase,
     newHead.output.strip(), expected)
 
+proc lockChainBase(identity: GitToolIdentity; repoRoot, head,
+    fetchedTip: string): tuple[ok: bool; base: string; divergent: bool;
+    diagnostic: string] =
+  ## The commit a local backend chain is verified from (push-hook-publication-
+  ## protocol.md §"Stale record-store checkout replay"). When the fetched tip is
+  ## an ancestor of ``head`` the chain starts at the tip, as it always has.
+  ## Otherwise the local side diverged because this checkout committed on a
+  ## tip that other publishers have since advanced, and the local side of that
+  ## divergence starts at the merge-base: that is the only stretch of history
+  ## this checkout owns, and the only one a replay may move.
+  if gitRunPlain(identity, ["-C", repoRoot, "merge-base", "--is-ancestor",
+      fetchedTip, head]).code == 0:
+    return (true, fetchedTip, false, "")
+  let mergeBase = gitRunPlainQuery(identity,
+    ["-C", repoRoot, "merge-base", head, fetchedTip])
+  if mergeBase.code != 0 or mergeBase.output.strip().len == 0:
+    # Unrelated histories: the store was rewritten or this is not a clone of
+    # it. Nothing here is a lock-only divergence, so nothing may be replayed.
+    return (false, "", true, "local backend HEAD shares no history with " &
+      "the fetched upstream")
+  let base = mergeBase.output.strip().toLowerAscii()
+  # A shared merge-base does not by itself make ``base..head`` this checkout's
+  # unpublished work. A partial rewrite of the store (``git filter-repo`` keeps
+  # the unchanged prefix) also leaves a merge-base, and then ``base..head``
+  # holds commits this checkout once saw PUBLISHED, which the rewrite removed.
+  # Replaying those would put the removed history back. Every value the
+  # upstream tracking ref has held is something this checkout saw on the
+  # remote: its fetches, pulls and pushes all record one in the ref's reflog.
+  # The ref itself has already moved to the tip this operation fetched, so
+  # its current value alone cannot answer the question. A local-side commit
+  # reachable from any of those values was published, and the divergence is
+  # refused. Without a reflog there is no such proof, so nothing is replayed.
+  let tracking = gitRunPlainQuery(identity,
+    ["-C", repoRoot, "rev-parse", "--symbolic-full-name", "@{u}"])
+  if tracking.code != 0 or tracking.output.strip().len == 0:
+    return (false, "", true, "local backend HEAD diverged from the fetched " &
+      "upstream and has no upstream tracking ref to prove which local " &
+      "commits were never published")
+  let trackingRef = tracking.output.strip()
+  if gitRunPlain(identity, ["-C", repoRoot, "reflog", "exists",
+      trackingRef]).code != 0:
+    return (false, "", true, "local backend HEAD diverged from the fetched " &
+      "upstream and " & trackingRef & " keeps no reflog, so nothing proves " &
+      "which local commits were never published")
+  let seen = gitRunPlainQuery(identity,
+    ["-C", repoRoot, "reflog", "show", "--format=%H", trackingRef])
+  if seen.code != 0:
+    return (false, "", true, "could not read the reflog of " & trackingRef)
+  var excluded = @[head, "^" & base]
+  for raw in seen.output.splitLines():
+    let oid = raw.strip()
+    if oid.len > 0 and ("^" & oid) notin excluded:
+      excluded.add("^" & oid)
+  let localSide = gitRunPlainQuery(identity,
+    ["-C", repoRoot, "rev-list", "--reverse", head, "^" & base])
+  let unpublished = gitRunPlainQuery(identity,
+    @["-C", repoRoot, "rev-list", "--ignore-missing"] & excluded)
+  if localSide.code != 0 or unpublished.code != 0:
+    return (false, "", true, "could not enumerate the divergent local side")
+  let neverPublished = unpublished.output.splitLines().mapIt(
+    it.strip().toLowerAscii()).filterIt(it.len > 0)
+  for raw in localSide.output.splitLines():
+    let commit = raw.strip().toLowerAscii()
+    if commit.len > 0 and commit notin neverPublished:
+      return (false, "", true, "local backend commit " & commit &
+        " was already published to " & trackingRef & " and is no longer " &
+        "on the fetched upstream, whose history was rewritten; it is not " &
+        "replayed. Bring the store onto the rewritten history before " &
+        "publishing")
+  (true, base, true, "")
+
+proc publishedLockKeyCollision(identity: GitToolIdentity; repoRoot,
+    tip: string; paths: openArray[string]; display: string): string =
+  ## INVARIANT 14 (push-hook-publication-protocol.md): a record already
+  ## published at one of ``paths`` with a DIFFERENT blob than local ``HEAD``
+  ## holds is never rewritten. Returns the refusal, or "" when every path is
+  ## either absent at ``tip`` or holds the identical blob (the replay then drops
+  ## the commit as already applied). The comparison is over blob object ids —
+  ## a hash over the exact bytes — so it is decided by the records themselves
+  ## and not by how Git happens to merge an add/add.
+  for path in paths:
+    let remoteBlob = gitRunPlainQuery(identity,
+      ["-C", repoRoot, "rev-parse", "--verify", "--quiet", tip & ":" & path])
+    if remoteBlob.code != 0 or remoteBlob.output.strip().len == 0:
+      continue
+    let localBlob = gitRunPlainQuery(identity,
+      ["-C", repoRoot, "rev-parse", "--verify", "--quiet", "HEAD:" & path])
+    if localBlob.code != 0 or localBlob.output.strip().len == 0:
+      continue
+    if remoteBlob.output.strip().toLowerAscii() !=
+        localBlob.output.strip().toLowerAscii():
+      return "a DIFFERENT lock record is already published at '" & path &
+        "' on " & display & " (published blob " &
+        remoteBlob.output.strip() & ", this operation generated " &
+        localBlob.output.strip() & "); published records are immutable and " &
+        "this one is not rewritten. Two sources disagree about the " &
+        "workspace state at that commit — bring this store up to date " &
+        "('git -C " & repoRoot & " pull --ff-only') and re-read the " &
+        "published record before deciding which answer is right"
+  ""
+
+proc lockChainAddedPaths(identity: GitToolIdentity; repoRoot, base,
+    head: string): tuple[ok: bool; paths: seq[string]] =
+  ## Paths a VERIFIED additions-only chain adds between ``base`` and ``head``.
+  let diff = gitRunPlainQuery(identity,
+    ["-C", repoRoot, "diff", "--name-only", "--no-renames", "-z", base, head])
+  if diff.code != 0: return (false, @[])
+  (true, diff.output.split('\0').filterIt(it.len > 0))
+
 proc publishVerifiedLockState(identity: GitToolIdentity; repoRoot: string;
     target: LockUpstream;
     expected: openArray[ExpectedLockRecord]): LockPublishResult =
@@ -55749,15 +55393,55 @@ proc publishVerifiedLockState(identity: GitToolIdentity; repoRoot: string;
     result.diagnostic = "no exact operation lock records were supplied"
     return
 
-  var verified = verifyLockOnlyAheadChain(identity, repoRoot, base,
+  # A divergence at the first fetch is the stale-checkout form of the race the
+  # loop below handles after a rejected push: this checkout committed its
+  # record on a tip other publishers have since advanced. The local side of it
+  # (merge-base..HEAD) is held to exactly the proof a strictly-ahead chain is
+  # held to, and then replayed with the same bounded procedure. Anything that
+  # is not a verified lock-only local chain is still refused unchanged.
+  let chainBase = lockChainBase(identity, repoRoot, initialHead, base)
+  if not chainBase.ok:
+    result.diagnostic = "unverified local backend state: " &
+      chainBase.diagnostic
+    return
+  var verified = verifyLockOnlyAheadChain(identity, repoRoot, chainBase.base,
     initialHead, operationExpected)
   if not verified.ok:
-    # Recovery begins from one immutable fetch. If local and remote history
-    # were already divergent at that point, this invocation did not observe a
-    # push race and must not mutate either branch. Bounded rebase is permitted
-    # only after our own later push returns a non-fast-forward rejection.
-    result.diagnostic = "unverified local backend state: " & verified.diagnostic
+    result.diagnostic = "unverified local backend state" &
+      (if chainBase.divergent: " (diverged from " & target.display &
+        " at " & chainBase.base & ")" else: "") & ": " & verified.diagnostic
     return
+  if chainBase.divergent:
+    let added = lockChainAddedPaths(identity, repoRoot, chainBase.base,
+      initialHead)
+    if not added.ok:
+      result.diagnostic = "could not enumerate the divergent local lock chain"
+      return
+    let collision = publishedLockKeyCollision(identity, repoRoot, base,
+      added.paths, target.display)
+    if collision.len > 0:
+      result.diagnostic = collision
+      return
+    let replayed = rebaseVerifiedLockChain(identity, repoRoot, chainBase.base,
+      base, operationExpected)
+    if not replayed.ok:
+      # Every replayed commit may have been dropped as already applied: other
+      # publishers filed the identical records. That is completion, proven the
+      # same way the behind/equal case above proves it.
+      let afterHead = gitRunPlainQuery(identity,
+        ["-C", repoRoot, "rev-parse", "HEAD^{commit}"])
+      if afterHead.code == 0 and gitRunPlain(identity,
+          ["-C", repoRoot, "merge-base", "--is-ancestor",
+           afterHead.output.strip(), base]).code == 0 and
+          verifyExpectedLocksAt(identity, repoRoot, base,
+            operationExpected).ok:
+        result.outcome = lpoNothingToPublish
+        result.diagnostic = "expected lock records are already reachable " &
+          "from " & target.display
+        return
+      result.diagnostic = "stale record-store replay refused: " &
+        replayed.diagnostic
+      return
   let verifiedHead = gitRunPlainQuery(identity,
     ["-C", repoRoot, "rev-parse", "HEAD^{commit}"])
   if verifiedHead.code == 0:
@@ -55856,6 +55540,8 @@ proc publishVerifiedLockState(identity: GitToolIdentity; repoRoot: string;
 
     # INVARIANT 14 (push-hook-publication-protocol.md) — IMMUTABILITY BINDS
     # PUBLISHED RECORDS, AND THIS IS THE LAST PLACE IT CAN BE CHECKED.
+    # (The stale-checkout replay before this loop applies the same
+    # ``publishedLockKeyCollision`` check to the tip its first fetch saw.)
     #
     # The push was rejected because the remote moved, and the remote may have
     # moved ONTO one of the very keys this operation is publishing. Until this
@@ -55888,29 +55574,20 @@ proc publishVerifiedLockState(identity: GitToolIdentity; repoRoot: string;
     # here: another publisher (or a retry of this one) filed the same record,
     # the rebase drops the replayed commit as already applied, and the loop
     # settles on its own.
-    for item in operationExpected:
-      let remoteBlob = gitRunPlainQuery(identity,
-        ["-C", repoRoot, "rev-parse", "--verify", "--quiet",
-         advanced.oid & ":" & item.relPath])
-      if remoteBlob.code != 0 or remoteBlob.output.strip().len == 0:
-        continue
-      let localBlob = gitRunPlainQuery(identity,
-        ["-C", repoRoot, "rev-parse", "--verify", "--quiet",
-         "HEAD:" & item.relPath])
-      if localBlob.code != 0 or localBlob.output.strip().len == 0:
-        continue
-      if remoteBlob.output.strip().toLowerAscii() !=
-          localBlob.output.strip().toLowerAscii():
-        result.diagnostic =
-          "a DIFFERENT lock record is already published at '" & item.relPath &
-          "' on " & target.display & " (published blob " &
-          remoteBlob.output.strip() & ", this operation generated " &
-          localBlob.output.strip() & "); published records are immutable and " &
-          "this one is not rewritten. Two sources disagree about the " &
-          "workspace state at that commit — bring this store up to date " &
-          "('git -C " & repoRoot & " pull --ff-only') and re-read the " &
-          "published record before deciding which answer is right"
-        return
+    #
+    # The comparison covers every path the local chain adds, not only this
+    # operation's own records: a stale store can carry an earlier operation's
+    # unpublished record, and its key is just as immutable.
+    let racedPaths = lockChainAddedPaths(identity, repoRoot, base, "HEAD")
+    if not racedPaths.ok:
+      result.diagnostic = "could not enumerate the local lock chain for " &
+        "non-fast-forward recovery"
+      return
+    let collision = publishedLockKeyCollision(identity, repoRoot,
+      advanced.oid, racedPaths.paths, target.display)
+    if collision.len > 0:
+      result.diagnostic = collision
+      return
 
     let rebased = rebaseVerifiedLockChain(identity, repoRoot, base,
       advanced.oid, operationExpected)
@@ -60712,6 +60389,26 @@ proc mutualPinBlockedSentence(sibling, selfName: string): string =
     "pushing it first is not a remedy, and neither is recording that " &
     "unpublished revision here"
 
+proc flakeLockResolvedRepositories(repoRoot: string):
+    seq[tuple[identity, input, lockedRev: string]] =
+  ## Every repository the worktree ``flake.lock`` resolves, by canonical
+  ## repository URL (never by name, §16.3), with the input that resolves it
+  ## and the revision it locks. The identity is the one ``flake.nix`` declares
+  ## when it declares one, as the commit-time coordination reads it. Empty
+  ## when the repo carries no ``flake.lock`` or the document is unreadable.
+  let inputs = gatherConsistencyInputs(repoRoot, csWorktree)
+  if not inputs.flakeLock.present: return
+  var declared = initTable[string, string]()
+  if inputs.flakeNix.present:
+    for c in flakeRecipeConstraintsOf(inputs.flakeNix.text,
+        inputs.flakeNix.path).inputs:
+      if c.canonicalRepo.len > 0: declared[c.input] = c.canonicalRepo
+  for r in flakeLockResolutions(inputs.flakeLock.text):
+    let identity = declared.getOrDefault(r.input, r.canonicalRepo)
+    if identity.len > 0:
+      result.add((identity: identity, input: r.input,
+        lockedRev: r.lockedRev.toLowerAscii()))
+
 proc verifyCommittedLockSiblingPins*(repoRoot: string;
     workspaceRoot = ""):
     tuple[examined, stale: bool; evidence, remediation, summary: string;
@@ -60745,6 +60442,15 @@ proc verifyCommittedLockSiblingPins*(repoRoot: string;
   var bad: seq[string] = @[]
   var blocked: seq[string] = @[]
   var refreshable = 0
+  var updatable: seq[string]   ## refreshable rows `flake.lock` also resolves
+  let flakeResolved = flakeLockResolvedRepositories(root)
+  proc flakeResolves(name: string): bool =
+    for d in ld.deps:
+      if d.name == name and not isSelfLockedDep(d) and
+          d.coordinates.kind == ckVcs:
+        let id = canonicalRepositoryUrl(d.coordinates.url)
+        for r in flakeResolved:
+          if id.len > 0 and r.identity == id: return true
   # Resolved lazily — only a disagreeing row needs the membership or a
   # publication probe, so a clean push pays nothing for the cycle rule.
   var cycle: PushCycleView
@@ -60784,6 +60490,7 @@ proc verifyCommittedLockSiblingPins*(repoRoot: string;
         (if headUnpublished: "; HEAD unpublished" else: ""))
       if not siblingAwaitsThisPush(cycle, o.name, headUnpublished):
         inc refreshable
+        if flakeResolves(o.name): updatable.add(o.name)
       else:
         # The refresh named below would record that unpublished HEAD, which
         # is exactly the unobtainable pin this rule exists not to publish.
@@ -60806,11 +60513,29 @@ proc verifyCommittedLockSiblingPins*(repoRoot: string;
   var remedyParts: seq[string] = @[]
   if blocked.len > 0: remedyParts.add(blocked.join(". ") & ".")
   if refreshable > 0:
-    remedyParts.add("run `repro lock refresh " & remedyPathWord(root) &
-      "`, commit " &
-      "repro.lock, then re-push (the managed pre-commit hook re-pins " &
-      "siblings on every commit once it is installed: " &
-      "`repro hooks ensure --vcs`)")
+    if updatable.len > 0:
+      # §16.3 H2: a repository both locks resolve must be named at one
+      # revision, and a refresh writes `repro.lock` alone, so it leaves the
+      # entry where it was (and the pin this stage refuses stays). The one
+      # writer that moves both is `repro lock update`; it re-locks the
+      # input's closure through nix, nixpkgs included, hence the warning.
+      var commands: seq[string]
+      for n in updatable:
+        commands.add("`repro lock update " & n & " --repo-root=" &
+          remedyPathWord(root) & "`")
+      remedyParts.add("flake.lock resolves the same repository as " &
+        "repro.lock's " & updatable.mapIt("'" & it & "'").join(", ") &
+        ", and `repro lock refresh` moves repro.lock alone (it holds that " &
+        "pin so the two locks keep agreeing, §16.3 H3): run " &
+        commands.join(", ") & " to move both locks, which re-locks the " &
+        "flake input's closure through nix (nixpkgs included, so flake.lock " &
+        "changes beyond the one input), commit both locks, then re-push")
+    if updatable.len < refreshable:
+      remedyParts.add("run `repro lock refresh " & remedyPathWord(root) &
+        "`, commit " &
+        "repro.lock, then re-push (the managed pre-commit hook re-pins " &
+        "siblings on every commit once it is installed: " &
+        "`repro hooks ensure --vcs`)")
   result.remediation = remedyParts.join(" ")
   result.summary = "the committed repro.lock does not pin the sibling " &
     "revisions this repo is being pushed against: " & result.evidence
@@ -62448,9 +62173,8 @@ proc runManifestRefreshHookCommand*(hookName: string;
 # --pushed-refs=FILE``. The gate runs five checks in order; the first
 # failure short-circuits with a structured ``CheckFailure`` record:
 #
-# RA-3 removed the former first stage, ``branch-mismatch`` (pushed local
-# branch != active workspace branch). repo-workspaces deleted that check
-# (`b5a823a`, `ff76825`): heterogeneous per-class branch policies are
+# The gate does not compare the pushed local branch with the active
+# workspace branch: heterogeneous per-class branch policies are
 # first-class (product repos on ``dev``, spec repos on ``latest``, infra
 # on ``live``) and the lock pins SHAs, so the published state is
 # reproducible regardless of which branch each repo is on. The
@@ -73818,22 +73542,40 @@ proc preflightLockBackendPlan(identity: GitToolIdentity;
     # contain this operation's expected records during preflight.
     result.ok = true
     return
-  let remoteInLocal = gitRunPlain(identity,
-    ["-C", plan.root, "merge-base", "--is-ancestor", fetched.oid, localOid])
-  if remoteInLocal.code != 0:
+  # A local chain that diverged from the fetched tip is the stale-checkout
+  # case: its unpublished side starts at the merge-base, and it is held to the
+  # same proof as a strictly-ahead chain. The member gates later replay it
+  # onto the advanced tip (push-hook-publication-protocol.md §"Stale
+  # record-store checkout replay"); here it is only verified, never moved.
+  let chainBase = lockChainBase(identity, plan.root, localOid, fetched.oid)
+  if not chainBase.ok:
     result.diagnostic = "lock backend is divergent from " &
-      upstream.target.display & "; refusing before source publication"
+      upstream.target.display & " (" & chainBase.diagnostic &
+      "); refusing before source publication"
     return
   # Inspect the actual unpublished changes before interpreting HEAD's record
   # prefix. Otherwise an ordinary backend commit can be blamed on an unrelated
   # record already present upstream, or hidden by the absence of any prefix.
-  let ahead = verifyLockOnlyAheadChain(identity, plan.root, fetched.oid,
+  let ahead = verifyLockOnlyAheadChain(identity, plan.root, chainBase.base,
     localOid, plan.expected, requireAllExpected = false,
     restrictToExpectedCoordinates = true)
   if not ahead.ok:
     result.diagnostic = "unverified lock backend ahead chain: " &
       ahead.diagnostic
     return
+  if chainBase.divergent:
+    # Refuse an Invariant 14 collision here, before any source ref leaves,
+    # rather than in the member gate after earlier members have landed.
+    let added = lockChainAddedPaths(identity, plan.root, chainBase.base,
+      localOid)
+    if not added.ok:
+      result.diagnostic = "could not enumerate the divergent lock backend chain"
+      return
+    let collision = publishedLockKeyCollision(identity, plan.root,
+      fetched.oid, added.paths, upstream.target.display)
+    if collision.len > 0:
+      result.diagnostic = collision
+      return
   let prefix = verifiedExpectedPrefixAt(identity, plan, localOid)
   if not prefix.ok:
     result.diagnostic = "unverified lock backend ahead chain: " &
@@ -73843,7 +73585,7 @@ proc preflightLockBackendPlan(identity: GitToolIdentity;
     # A partial recovery remains operation-scoped: it may contain only this
     # operation's exact prefix. Fully materialized operations may also include
     # earlier canonical refresh records for the same backend coordinates.
-    let scoped = verifyLockOnlyAheadChain(identity, plan.root, fetched.oid,
+    let scoped = verifyLockOnlyAheadChain(identity, plan.root, chainBase.base,
       localOid, plan.expected, requireAllExpected = false,
       rejectUnexpected = true, restrictToExpectedCoordinates = true)
     if not scoped.ok:
@@ -77587,22 +77329,6 @@ proc gatherHealthChecksOverSettings(parsed: HealthArgs):
   #         hook is a refusal (``pre-push``) or a silent fail-open (the four
   #         observational hooks).
   #
-  #     And a fifth state that is not a way the gate stops but a way something
-  #     ELSE keeps running:
-  #
-  #       * RETIRED — a file the retired ``repo-workspaces`` tool generated
-  #         (``isRetiredRepoWorkspacesHook``) is still in the hooks directory:
-  #         its dispatcher at the canonical path (the managed hook is then not
-  #         installed at all), at ``<hook>.repro-local`` (chained by an
-  #         ``ensure`` that predates the recogniser, and run FIRST by the
-  #         managed dispatcher — the hook counts as wired and the row used to
-  #         say ``ok``), at ``<hook>.legacy`` (run by a pre-commit/prek shim),
-  #         or its ``<hook>.repo-workspaces-managed`` body left behind. The
-  #         retired ``pre-push`` body publishes locks by committing and
-  #         pushing into the manifest repository. ``hooks ensure --vcs``
-  #         removes all of it (keeping the user hook it had preserved), so the
-  #         arm is ``--fix``-able.
-  #
   #     Shadowed is more dangerous than missing precisely because it LOOKS
   #     installed: ``.git/hooks/pre-push`` exists and is executable. STALE is
   #     more dangerous still, and spec §1.6c measured this check scoring it
@@ -77627,17 +77353,14 @@ proc gatherHealthChecksOverSettings(parsed: HealthArgs):
   #     entry in this very repo, so a doctor that offered to re-author would be
   #     racing it to delete its own evidence.
   #
-  #     ARM ORDER: stale, path-unsafe, retired, shadowed, missing. Stale first
+  #     ARM ORDER: stale, path-unsafe, shadowed, missing. Stale first
   #     is the safety property above. Path-unsafe next because its consequence
   #     reaches every worktree of the repo and because its repair — the same
   #     ``hooks ensure --vcs``, which rewrites the value to the absolute path it
   #     was written to mean (``ensureWorktreeSafeHooksPath``) — is what makes
-  #     the other arms' repairs reach linked worktrees at all. Retired ahead of
-  #     shadowed and missing because it is the one finding where something is
-  #     actively RUNNING that must not (a shadowed or missing hook is a gate
-  #     that is off; a retired one also writes into the manifest repository).
-  #     Each arm NAMES the findings of the arms below it in the same detail, so
-  #     taking one arm never drops another's finding.
+  #     the other arms' repairs reach linked worktrees at all. Each arm NAMES
+  #     the findings of the arms below it in the same detail, so taking one
+  #     arm never drops another's finding.
   #
   #     The issue that added path-unsafe (reprobuild-pm 2026-09-27) put it this
   #     way: this row must report a hooks path that cannot resolve from a
@@ -77659,7 +77382,6 @@ proc gatherHealthChecksOverSettings(parsed: HealthArgs):
     var shadowed: seq[string]
     var stale: seq[string]
     var pathUnsafe: seq[string]
-    var retired: seq[string]
     # Chained ``<hook>.repro-local`` bodies that cannot start, swept beside
     # the managed hooks and reported in their own ``chained-hooks`` row.
     var unstartable: seq[string]
@@ -77699,23 +77421,6 @@ proc gatherHealthChecksOverSettings(parsed: HealthArgs):
         if chained.finding.len > 0:
           if chained.certain: unstartable.add(chained.finding)
           else: possiblyUnstartable.add(chained.finding)
-        # RETIRED: every place `ensureVcsHookDetailed` removes a retired
-        # repo-workspaces file from, named file by file.
-        var retiredFiles: seq[string]
-        for candidate in [standard, localHookPath(hooksDir, hookName),
-            hooksDir / (hookName & ".legacy"),
-            retiredRepoWorkspacesManagedPath(hooksDir, hookName),
-            retiredRepoWorkspacesLocalPath(hooksDir, hookName)]:
-          if isRetiredRepoWorkspacesHook(candidate, hookName):
-            retiredFiles.add(extractFilename(candidate))
-        if retiredFiles.len > 0:
-          retired.add(repo.name & "/" & hookName & " (" &
-            retiredFiles.join(", ") & ")")
-        if retiredFiles.len > 0 and retiredFiles[0] == hookName:
-          # The retired dispatcher holds the canonical path, so this hook's
-          # state IS the retired finding; also listing it as ``missing`` would
-          # name one file twice under two remedies that are the same command.
-          continue
         let wired = fileExists(extendedPath(standard)) and
           isReprobuildVcsHook(standard, hookName)
         # A dispatcher moved to ``<hook>.legacy`` is the signature of
@@ -77783,14 +77488,6 @@ proc gatherHealthChecksOverSettings(parsed: HealthArgs):
     const pathUnsafeAlsoLabel = "repo(s) PATH-UNSAFE (a relative " &
       "core.hooksPath, so NO managed hook runs in any of their linked " &
       "worktrees)"
-    const retiredAlsoLabel = "hook(s) still carrying RETIRED repo-workspaces " &
-      "files"
-    # What a retired file costs, said once for the arm (the other arms name the
-    # finding with ``retiredAlsoLabel``).
-    const retiredConsequence = " — the retired tool's dispatcher, chained " &
-      "behind or in place of the managed one, still runs its hooks, and its " &
-      "pre-push publishes locks by committing and pushing into the manifest " &
-      "repository: "
     # What a path-unsafe repo costs, said once for both the workspace arm and
     # the single-repo arm.
     const pathUnsafeConsequence = " — core.hooksPath is a RELATIVE path, " &
@@ -77856,7 +77553,6 @@ proc gatherHealthChecksOverSettings(parsed: HealthArgs):
               " — compare STORE PATHS, not versions"
           else: "") &
           alsoClause(pathUnsafeAlsoLabel, pathUnsafe, full, parsed.verbose) &
-          alsoClause(retiredAlsoLabel, retired, full, parsed.verbose) &
           alsoClause("SHADOWED", shadowed, full, parsed.verbose) &
           alsoClause("missing", missing, full, parsed.verbose) &
           ". See the hook-interpreter row for whether this host's shells " &
@@ -77881,7 +77577,6 @@ proc gatherHealthChecksOverSettings(parsed: HealthArgs):
           (if full: pathUnsafe.join(", ")
            else: formatFindingList(pathUnsafe, parsed.verbose)) & ". " &
           census &
-          alsoClause(retiredAlsoLabel, retired, full, parsed.verbose) &
           alsoClause("SHADOWED", shadowed, full, parsed.verbose) &
           alsoClause("missing", missing, full, parsed.verbose)
       let fullPathUnsafeDetail = pathUnsafeDetailFor(full = true)
@@ -77895,28 +77590,6 @@ proc gatherHealthChecksOverSettings(parsed: HealthArgs):
           else: "",
         # ``ensureWorkspaceHooks`` rewrites each relative value to the
         # absolute path it was written to mean before installing anything.
-        remedy: remedy,
-        fixKind: hfEnsureVcsHooks))
-    elif retired.len > 0:
-      # THIRD. ``--fix``-able: ``ensureVcsHookDetailed`` removes every file
-      # named here and moves the user hook the retired dispatcher preserved to
-      # ``<hook>.repro-local``. A retired dispatcher at the canonical path is
-      # listed here only, not also under ``missing`` (see the sweep).
-      proc retiredDetailFor(full: bool): string =
-        $retired.len & " " & retiredAlsoLabel & retiredConsequence &
-          (if full: retired.join(", ")
-           else: formatFindingList(retired, parsed.verbose)) & ". " &
-          census &
-          alsoClause("SHADOWED", shadowed, full, parsed.verbose) &
-          alsoClause("missing", missing, full, parsed.verbose)
-      let fullRetiredDetail = retiredDetailFor(full = true)
-      let retiredDetail = retiredDetailFor(full = false)
-      checks.add(HealthCheck(
-        name: "vcs-hooks",
-        status: hsFail,
-        detail: retiredDetail,
-        fullDetail: if retiredDetail != fullRetiredDetail: fullRetiredDetail
-          else: "",
         remedy: remedy,
         fixKind: hfEnsureVcsHooks))
     elif shadowed.len > 0:
@@ -79075,10 +78748,7 @@ proc applyHealthFixes(parsed: HealthArgs; checks: seq[HealthCheck];
       # Reinstalling a managed hook is additive and reversible: a foreign
       # hook found at the canonical path is preserved as
       # ``<hook>.repro-local`` and still runs first. Nothing of the user's is
-      # discarded, so this is a safe auto-fix. The one thing it deletes is the
-      # retired repo-workspaces generator's own files, which the ``retired``
-      # finding names and which no user wrote (``isRetiredRepoWorkspacesHook``);
-      # the user hook that generator had preserved is moved, not dropped.
+      # discarded, so this is a safe auto-fix.
       result.add("fix: reinstalling managed VCS hooks across the workspace")
       try:
         let report = ensureWorkspaceHooks(parsed.workspaceRoot)
@@ -83222,8 +82892,8 @@ proc reachableExcluding(repos: seq[ResolvedRepo];
   ## node: it is never entered and never traversed through. A repo that is
   ## still reachable from a remaining root WITHOUT routing through the
   ## removed repo is kept; anything only the removed repo brought in is
-  ## eligible for GC. This mirrors the pilot's ``projects remove``, which
-  ## deletes only repos unique to the removed project and keeps shared ones.
+  ## eligible for GC: only repos unique to the removed project are deleted,
+  ## and shared ones are kept.
   result = initHashSet[string]()
   var byName = initTable[string, ResolvedRepo]()
   for repo in repos:
@@ -91726,6 +91396,63 @@ proc gateRefreshedSiblingPins(projectDir, lockPath: string;
         "), so the existing pin was kept")
       deps[i] = pinned
 
+proc holdFlakeResolvedPins(projectDir, lockPath: string;
+    deps: var seq[LockedDep]): seq[string] =
+  ## Unified-Locking-And-Hooks.md §16.3 H3, applied to the explicit door: a
+  ## repository both `repro.lock` and `flake.lock` resolve is moved in both or
+  ## in neither. `repro lock refresh` writes `repro.lock` alone, so a freshly
+  ## observed sibling entry that would move such a repository to a revision
+  ## `flake.lock` does not name keeps the pin the lock at ``lockPath``
+  ## carries (as the commit-time re-pin holds it), and one sentence per
+  ## held repository is returned. A repository that moves onto the revision
+  ## `flake.lock` already names is left to move: the two then agree.
+  ## `repro lock update <name>` is the writer that moves both.
+  ##
+  ## An entry the committed lock does not carry has no pin to hold and is
+  ## not touched; neither is a repository `flake.lock` does not resolve.
+  if lockPath.len == 0 or not fileExists(extendedPath(lockPath)): return
+  let resolved = flakeLockResolvedRepositories(projectDir)
+  if resolved.len == 0: return
+  var existing: seq[LockedDep]
+  try:
+    existing = parseLockedDepsAt(readFile(extendedPath(lockPath)),
+      projectDir).deps
+  except CatchableError:
+    # An unreadable lock has no pins to hold; the refresh replaces it.
+    return
+  for i in 0 ..< deps.len:
+    let d = deps[i]
+    if isSelfLockedDep(d) or d.coordinates.kind != ckVcs or
+        d.coordinates.revision.len == 0:
+      continue
+    let identity = canonicalRepositoryUrl(d.coordinates.url)
+    if identity.len == 0: continue
+    var pinned: LockedDep
+    var found = false
+    for e in existing:
+      if not isSelfLockedDep(e) and e.coordinates.kind == ckVcs and
+          e.coordinates.revision.len > 0 and e.name == d.name:
+        pinned = e
+        found = true
+        break
+    if not found: continue
+    let newRev = d.coordinates.revision.toLowerAscii()
+    let oldRev = pinned.coordinates.revision.toLowerAscii()
+    if newRev == oldRev: continue
+    for r in resolved:
+      if r.identity != identity or r.lockedRev == newRev: continue
+      deps[i] = pinned
+      result.add("repository " & identity & " is resolved by both locks and " &
+        "was moved in NEITHER: repro.lock would move '" & d.name & "' " &
+        oldRev & " -> " & newRev & ", but this verb never writes " &
+        "flake.lock, which leaves input '" & r.input & "' at " &
+        r.lockedRev & ". Moving one alone would leave the two locks naming " &
+        "different revisions of it (§16.3 H3), so repro.lock keeps '" &
+        d.name & "' at " & oldRev & ". To move both, run `repro lock " &
+        "update " & d.name & " --repo-root=" & remedyPathWord(projectDir) &
+        "` (it re-locks the input's closure through nix, nixpkgs included)")
+      break
+
 proc reportGeneratedLock(verb, lockP: string;
                          generated: LockGenerationResult): int =
   ## Sandbox-And-Monitoring.md §"The Network Dimension" rule 4: the network
@@ -92578,6 +92305,11 @@ proc runLockGenerationVerb(rest: openArray[string]; verb: string;
     for r in gate.allowed:
       stderr.writeLine("repro lock " & verb & ": " &
         pinRegressionAllowedLine(r, via = "--allow-pin-regression"))
+    # §16.3 H3: after the regression gate, which judges the observation as
+    # made; a pin it allowed that `flake.lock` would not follow is held too.
+    for note in holdFlakeResolvedPins(projectDir, writeTo,
+        request.extraDeps):
+      stderr.writeLine("repro lock " & verb & ": WARNING: " & note)
   if gen.repin.len > 0:
     # Every committed version and variant value except the named packages'
     # becomes a hard pin. A held pin that contradicts a declared range is
@@ -93852,8 +93584,7 @@ proc normalizeWorkspaceNamespaceAlias*(args: seq[string]): seq[string] =
 
 # ---- RA-6: host-ergonomics verbs -------------------------------------------
 #
-# RA-6 adopts the host-ergonomics surface the repo-workspaces pilot grew that
-# reprobuild lacked:
+# RA-6's host-ergonomics surface:
 #
 #   * ``repro workspace bootstrap`` — scaffold an empty host with the
 #     direnv/agent/project-index files a workspace checkout expects
@@ -93982,9 +93713,8 @@ proc runWorkspaceBootstrapCommand*(args: openArray[string]): int =
 #
 # On Linux/macOS the Nix devShell (``repro shell hook`` / the scaffolded
 # ``.envrc``) supplies the workspace toolchain. Windows has no such flake,
-# so — mirroring the repo-workspaces pilot (``env.ps1`` +
-# ``windows/ensure-{gcc,gh,gpg,just,nim,python,repo}.ps1``) — reprobuild
-# ensures each required tool itself and activates a PowerShell env.
+# so reprobuild ensures each required tool itself (one ensure-step per tool)
+# and activates a PowerShell env.
 #
 # The DECISION (which ensure-steps, in what order, with which check /
 # install commands, under which skip toggle, and the env activation) is
@@ -94000,8 +93730,7 @@ type
     ## the tool; ``checkCommand`` is the idempotent "already installed?"
     ## probe (skip the install when it succeeds with the wanted version);
     ## ``installCommand`` is the ensure/install action; ``skipEnvVar`` is the
-    ## operator toggle that bypasses this step (parity with the pilot's
-    ## ``WINDOWS_DIY_SKIP_*`` knobs).
+    ## operator toggle that bypasses this step (``WINDOWS_DIY_SKIP_<TOOL>``).
     tool*: string
     checkCommand*: string
     installCommand*: string
@@ -94028,14 +93757,12 @@ const
   ## + ``gcc`` come first (needed to build/run the native workspace tools),
   ## then the per-workspace dev tools (``just``/``gh``/``python``), then the
   ## ``repo`` launcher, then native ``gpg`` (used to verify the repo release
-  ## tag without msys2 gpg's path-mangling). Mirrors the pilot ``env.ps1``
-  ## ``$frameworkScripts`` order.
+  ## tag without msys2 gpg's path-mangling).
   windowsProvisionTools* = [
     "nim", "gcc", "just", "gh", "python", "repo", "gpg"]
 
 proc windowsToolSkipEnvVar(tool: string): string =
-  ## The ``WINDOWS_DIY_SKIP_<TOOL>`` operator toggle for a given tool —
-  ## parity with the pilot env.ps1 skip knobs.
+  ## The ``WINDOWS_DIY_SKIP_<TOOL>`` operator toggle for a given tool.
   "WINDOWS_DIY_SKIP_" & tool.toUpperAscii()
 
 proc windowsProvisioningPlan*(installRoot: string;

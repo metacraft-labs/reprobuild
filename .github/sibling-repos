@@ -15,7 +15,14 @@
 # reached through ct_incremental_adapter (the engine-free seam). One-way
 # dependency: reprobuild -> codetracer.
 codetracer=dev
-codetracer-trace-format-nim=dev
+# Pinned to the revision flake.lock's `ct-trace-format-src` names, not to a
+# branch: the repository develops on `agents` and reaches `dev` only through a
+# promotion, so `=dev` lagged by 131 commits and then jumped by 52 when one
+# landed. The ct build re-detaches this clone to the revision codetracer's own
+# repro.lock names (scripts/reconcile_locked_siblings.sh); this entry is what
+# every other job sees. scripts/check_sibling_lock_pins.py holds it equal to
+# flake.lock. Move it together with `ct-trace-format-src`.
+codetracer-trace-format-nim=31be9a10007c007af429951616c13bc275587c76
 
 # The two siblings CodeTracer's own build REQUIRES, as opposed to the ones its
 # Nim `--path` merely prefers. `scripts/build-once.sh` refuses to start without
@@ -253,8 +260,6 @@ nim-shm-gset=7bc81ad2440860a8a9254eb2757c585df9652438
 # Moved e3254b7 -> 22e3100 (2026-10-20) with the runquota pin above, whose
 # flake.lock names it; e3254b7 is an ancestor.
 nim-shm-lease=22e3100cdb4fbc374689ddac55b4b32c90654140
-# `main` retired in the org branch-rename sweep; mainline is now `dev`.
-repo-workspaces=dev
 
 # The shared-actions repo, declared here as an ordinary sibling (GitHub
 # materialises a `uses: metacraft-labs/metacraft-github-actions/...@dev`

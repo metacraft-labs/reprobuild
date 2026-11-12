@@ -7,11 +7,9 @@
 ## tree has to work around a list that grows with the project set.
 ##
 ## This module maintains a marker-delimited block inside the workspace
-## root's ``.git/info/exclude`` naming those siblings. It is a port of the
-## routine that shipped in the retired ``repo-workspaces`` tool
-## (``bin/workspace.nim``'s ``updateManagedGitExclude``); see
+## root's ``.git/info/exclude`` naming those siblings; see
 ## ``reprobuild-specs/Workspace-Sibling-Ignore-Set.md``. Five properties
-## are load-bearing and are preserved verbatim:
+## are load-bearing:
 ##
 ## 1. **Only what git is not already tracking is ignored.** Each candidate
 ##    is probed with ``git ls-files --error-unmatch`` and skipped when the

@@ -120,8 +120,22 @@ const PartialCatalogCoverage* = {
   "ruby": "harvested Windows archives only.",
   "php": "harvested Windows archives only.",
   "composer": "harvested Windows archives only.",
-  "erlang": "harvested Windows archives only.",
-  "elixir": "harvested Windows archives only.",
+  "erlang": "nixPackage covers Nix-capable hosts; the harvested archive " &
+    "is the Windows half only.",
+  "elixir": "nixPackage covers Nix-capable hosts; the harvested archive " &
+    "is the Windows half only.",
+  # One package per BEAM executable, each realised from its distribution's
+  # nixPackage and Windows archive exactly as 'erlang' / 'elixir' are.
+  "erl": "nixPackage covers Nix-capable hosts; erlang's archive is the " &
+    "Windows half only.",
+  "erlc": "nixPackage covers Nix-capable hosts; erlang's archive is the " &
+    "Windows half only.",
+  "escript": "nixPackage covers Nix-capable hosts; erlang's archive is the " &
+    "Windows half only.",
+  "mix": "nixPackage covers Nix-capable hosts; elixir's archive is the " &
+    "Windows half only.",
+  "iex": "nixPackage covers Nix-capable hosts; elixir's archive is the " &
+    "Windows half only.",
   "meson": "harvested Windows archives only.",
   "ocaml": "harvested Windows archives only.",
   "swift": "harvested Windows archives only.",

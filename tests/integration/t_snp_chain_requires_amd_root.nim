@@ -260,7 +260,7 @@ proc assertOnlyRefusal(v: AmdChainVerdict; want: AmdChainRejection) =
   reachedChainKinds.incl want
 
 const
-  Now = 1_790_121_600'i64   ## 2026-09-23T00:00:00Z; see `snp_vectors`'s
+  Now = 1_793_145_600'i64   ## 2026-09-23T00:00:00Z; see `snp_vectors`'s
                             ## clock rule. Derived, not chosen.
 
 let milan = pemCertificates(KdsMilanChainPem)

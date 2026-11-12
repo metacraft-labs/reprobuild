@@ -89,12 +89,12 @@ include ./snp_vectors
 include ./tdx_vectors
 
 const
-  SnpInstant = 1_790_121_600'i64
+  SnpInstant = 1_793_145_600'i64
     ## 2026-09-23T00:00:00Z — the instant at which every genuine
     ## security-processor artifact this gate judges is in force. Fixed
     ## rather than read from the host, by the clock rule `snp_vectors`
     ## states.
-  TdxInstant = 1_790_985_600'i64
+  TdxInstant = 1_794_528_000'i64
     ## 2026-10-03T00:00:00Z — the same rule for the trust domain's
     ## corpus, whose withdrawal lists came into force later.
 

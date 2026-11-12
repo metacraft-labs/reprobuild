@@ -1,9 +1,7 @@
 ## Workspace sibling ignore set — the four properties that make the managed
 ## ``.git/info/exclude`` block safe to regenerate on every workspace command.
 ##
-## Spec: ``reprobuild-specs/Workspace-Sibling-Ignore-Set.md``. Ported from the
-## retired ``repo-workspaces`` routine (``bin/workspace.nim``'s
-## ``updateManagedGitExclude``).
+## Spec: ``reprobuild-specs/Workspace-Sibling-Ignore-Set.md``.
 ##
 ## No mocks. Each case builds a REAL git checkout in a temp directory, creates
 ## real sibling directories and real symlinks, and drives the real
