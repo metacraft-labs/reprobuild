@@ -149,7 +149,8 @@ proc oneAction(actionId: string;
                refs: seq[string];
                fingerprintToken = "default";
                actionEnv: seq[string] = @[];
-               argvOverride: seq[string] = @[]): BuildGraph =
+               argvOverride: seq[string] = @[];
+               subTools: seq[string] = @[]): BuildGraph =
   let argv = if argvOverride.len > 0: argvOverride else: stubArgv()
   var act = BuildAction(
     governingLockIdentity: lockIdentityOutsideSolvedGraph(),
@@ -174,7 +175,8 @@ proc oneAction(actionId: string;
     dependencyPolicy: DependencyGatheringPolicy(
       kind: dgAutomaticMonitor,
       completeness: decComplete),
-    toolIdentityRefs: refs)
+    toolIdentityRefs: refs,
+    subToolIdentityRefs: subTools)
   graph(@[act], newSeq[BuildPool]())
 
 proc passthroughMonitorCli(cacheRoot: string): string =
@@ -448,6 +450,49 @@ suite "M9.N Batch B — engine tool-identity env plumbing":
       check res.results.len == 1
       check res.results[0].status == asSucceeded
       check readBypassStdout(cacheRoot, "loader-override") == ""
+
+  when defined(posix):
+    test "a sub-tool's include and library dirs reach the launched action, and nothing else":
+      # A sub-tool (``BuildAction.subToolIdentityRefs``) is the TOOL's
+      # statement about what it runs, e.g. the C compiler rustc links with
+      # under cargo. The launched action gets that compiler's headers on
+      # ``CPATH`` and its link libraries on ``LIBRARY_PATH`` -- without
+      # them a Nix clang on macOS cannot find the SDK's ``libiconv`` --
+      # but none of what a ref brings: no PATH entry from the resolver (the
+      # lowering already put the directory there), no run-time loader path,
+      # no ``PKG_CONFIG_PATH``.
+      resetTmp()
+      let cacheRoot = TmpDir / "cache-sub-tool-channels"
+      createDir(cacheRoot)
+      let suspectBin = absolutePath(TmpDir / "sub-tool-bin")
+      let subLib = "/synthetic/sub-tool/libiconv/lib"
+      let subInclude = "/synthetic/sub-tool/libiconv/include"
+      let subPkgConfig = "/synthetic/sub-tool/libiconv/lib/pkgconfig"
+      let refLib = "/synthetic/ref/libfoo/lib"
+      var table = initTable[string, ResolvedToolIdentity]()
+      var clang = mockedIdentity(@[suspectBin], libDirs = @[subLib])
+      clang.includeDirs = @[subInclude]
+      clang.pkgConfigDirs = @[subPkgConfig]
+      table["clang"] = clang
+      table["libfoo"] = mockedIdentity(@[], libDirs = @[refLib])
+      let probe = "printf '%s|%s|%s|%s|%s' \"$LIBRARY_PATH\" \"$CPATH\" " &
+        "\"$LD_LIBRARY_PATH\" \"$PKG_CONFIG_PATH\" \"$PATH\""
+      let g = oneAction("sub-tool-channels", @["libfoo"],
+        fingerprintToken = "sub-tool-channels",
+        actionEnv = @["LIBRARY_PATH=", "CPATH="],
+        argvOverride = @["sh", "-c", probe], subTools = @["clang"])
+      let res = runBuild(g, runnerCfg(cacheRoot, makeResolver(table)))
+      require res.results.len == 1
+      check res.results[0].status == asSucceeded
+      let fields = readBypassStdout(cacheRoot, "sub-tool-channels").split('|')
+      require fields.len == 5
+      # The edge's own ref first, then the sub-tool's.
+      check fields[0] == refLib & ":" & subLib
+      check fields[1] == subInclude
+      check subLib notin fields[2]
+      check refLib in fields[2]
+      check subPkgConfig notin fields[3]
+      check suspectBin notin fields[4]
 
   test "PATH is prepended with the resolved bin dir when ref + resolver are set":
     resetTmp()
