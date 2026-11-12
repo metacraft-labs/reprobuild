@@ -49,6 +49,21 @@
 ## POSIX daemon was owned by the invocation and stopped with it, and the
 ## command inherited the caller's endpoint.
 ##
+## AND THE DAEMON IS NOT THE COMMAND'S CHILD (POSIX). `repro exec` replaces
+## itself with the command it runs (`execve`, same pid), so a daemon that was
+## `repro`'s child became the COMMAND's child: a zombie the command never
+## reaped once the daemon idled out, and an extra child that a command waiting
+## for all of its children (`sh -c '... & wait'`, any `wait()` loop run to
+## `ECHILD`) waited for until the idle period ended. A third case runs this
+## binary as a command that does exactly that -- it reads the daemon's parent
+## from `/proc/<pid>/stat`, then calls `waitpid(-1)` until `ECHILD` -- under
+## a 60 s idle period, and requires the daemon's parent not to be the
+## command, the wait to return well inside the idle period without reaping
+## the daemon, and the daemon to hold no pipe that leads to another process:
+## none of the channels its launcher used to watch it
+## (reprobuild-pm `spec/RunQuota-Host-Configuration.md`, "The shared
+## per-user daemon (POSIX)": the daemon is never a child of the invocation).
+##
 ## MOCK POLICY -- NO MOCKS. The real `repro` CLI, a real recipe compiled by
 ## the real provider compile, the real `runquotad`, real OS pipes, real lock
 ## files and the kernel's own pipe-server identity. Arranged rather than
@@ -63,9 +78,19 @@ import repro_test_support/reasoned_skip
 when defined(posix):
   import repro_test_support/per_user_runquota
   import runquota_client
+  import std/posix
 
 const
   ProbeFlag = "--print-runquota-endpoint"
+  WaitProbeFlag = "--wait-for-every-child"
+    ## The inner command of the parentage case: report the daemon's parent,
+    ## then wait for every child this process has until `ECHILD`.
+  ParentageIdleSeconds = 60
+    ## The idle period of the parentage case's daemon. A command that has
+    ## the daemon for a child waits about this long; ...
+  ChildWaitBudgetMs = 20_000
+    ## ... one that does not returns at once. The gap between the two is
+    ## what makes the case unambiguous on a loaded host.
   ExecDeadlineMs = 600_000
     ## A cold provider compile is tens of seconds; past this the case kills
     ## `repro` and fails rather than wedging the suite.
@@ -89,6 +114,42 @@ if paramCount() == 1 and paramStr(1) == ProbeFlag:
       except CatchableError as error:
         reached = "no: " & error.msg
     echo "probe-runquota-reached=" & reached
+  quit(0)
+
+when defined(linux):
+  proc parentPidOf(pid: int): int =
+    ## Field 4 of `/proc/<pid>/stat`, read after the LAST `)` so that a
+    ## command name containing one cannot shift the fields. -1 when it cannot
+    ## be read.
+    try:
+      let stat = readFile("/proc/" & $pid & "/stat")
+      let fields = stat[stat.rfind(')') + 2 .. ^1].splitWhitespace()
+      parseInt(fields[1])
+    except CatchableError:
+      -1
+
+if paramCount() == 1 and paramStr(1) == WaitProbeFlag:
+  # The inner command of the parentage case. `repro exec` `execve`d into
+  # this process, so its pid is the one `repro` had, and a daemon `repro`
+  # forked directly would be this process's child now.
+  when defined(linux):
+    let daemonPid = lifetimeLockHolderPid(getEnv("RUNQUOTA_SOCKET", ""))
+    echo "probe-pid=" & $getCurrentProcessId()
+    echo "probe-daemon-pid=" & $daemonPid
+    echo "probe-daemon-ppid=" & $parentPidOf(daemonPid)
+    # What `wait` with no operand does in a shell, and any reaping loop:
+    # wait for children until there are none.
+    let waitStarted = getMonoTime()
+    var reaped: seq[int]
+    while true:
+      var status: cint = 0
+      let child = posix.waitpid(Pid(-1), status, 0)
+      if child > 0:
+        reaped.add(int(child))
+      elif errno != EINTR:
+        break
+    echo "probe-wait-ms=" & $(getMonoTime() - waitStarted).inMilliseconds
+    echo "probe-reaped=" & reaped.join(",")
   quit(0)
 
 proc nowMs(): int64 = getMonoTime().ticks div 1_000_000
@@ -339,6 +400,110 @@ proc runExecAndGradeEof(inheritedSocket: string) =
       killProcessTree(invocation.processID)
     invocation.close()
 
+when defined(linux):
+  proc daemonDescriptorFindings(daemonPid: int; socket: string): seq[string] =
+    ## Every descriptor of the daemon that is NOT its own: anything on 0-2
+    ## but `/dev/null` and its log, and any pipe it holds ONE end of.
+    ##
+    ## Why that rule for pipes. `runquotad` keeps two self-pipes of its own
+    ## and holds BOTH ends of each (measured on a `runquotad` started by
+    ## hand: fds 6/7 and 8/9 name one pipe inode per pair). A channel to
+    ## another process is a pipe of which the daemon holds one end only --
+    ## which is what a launcher's status or control pipe would be had it
+    ## leaked across the start. Sockets are not graded: the daemon's own
+    ## include an unnamed one (fd 1000 on that same daemon) next to its
+    ## endpoint, and the launcher uses none.
+    ##
+    ## A daemon that is gone has nothing to read, and that is a finding too.
+    var pipeEnds: seq[(string, string)] # (pipe inode, "fd N -> target")
+    var listed = false
+    for kind, entry in walkDir("/proc/" & $daemonPid & "/fd"):
+      listed = true
+      let fd = entry.extractFilename
+      var target = ""
+      try:
+        target = expandSymlink(entry)
+      except OSError:
+        continue # closed between the listing and the read
+      let named = "fd " & fd & " -> " & target
+      case fd
+      of "0":
+        if target != "/dev/null": result.add(named)
+      of "1", "2":
+        if target != socket.parentDir / "runquotad.log": result.add(named)
+      else:
+        if target.startsWith("pipe:"):
+          pipeEnds.add((target, named))
+    if not listed:
+      return @["its descriptors cannot be read: /proc/" & $daemonPid &
+        "/fd lists nothing"]
+    for (inode, named) in pipeEnds:
+      var ends = 0
+      for (other, _) in pipeEnds:
+        if other == inode: inc ends
+      if ends < 2:
+        result.add(named & " (one end only: a channel to another process)")
+
+  proc runExecAndGradeParentage() =
+    ## One `repro exec` that STARTS the daemon and runs the wait-for-every-
+    ## child probe, graded as the module header describes.
+    let cli = getEnv("REPROBUILD_REPRO", reproBinaryPath(stem = "reprobuild"))
+    requireHostBinary(cli)
+    let scratch = createTempDir("repro-exec-rq-parent-", "")
+    defer: removeDirEventually(scratch, attempts = 50, sleepMs = 100)
+    let project = scratch / "project"
+    createDir(project)
+    writeFile(project / "repro.nim", "import repro_project_dsl\n" &
+      "package fixture:\n  devEnv:\n    setEnv \"EXEC_PARENT_CASE\", \"1\"\n")
+    var env = execEnvironment(scratch)
+    let endpointDir = scratchUserEndpointDir()
+    let userSocket = userSocketIn(endpointDir)
+    env["RUNQUOTA_USER_ENDPOINT_DIR"] = endpointDir
+    env["RUNQUOTAD_BIN"] = requireRunQuotaDaemonBin(getCurrentDir())
+    env["REPROBUILD_RUNQUOTA_IDLE_EXIT_SECONDS"] = $ParentageIdleSeconds
+    env.del("RUNQUOTA_ENDPOINT_SCOPE")
+    env.del("RUNQUOTA_SOCKET")
+    let invocation = startProcess(cli, workingDir = project,
+      args = ["exec", project, "--", getAppFilename(), WaitProbeFlag],
+      env = env, options = {poStdErrToStdOut})
+    var daemonPid = 0
+    try:
+      var output = ""
+      discard drainUntilEof(invocation.outputHandle, ExecDeadlineMs, output)
+      let exitCode = invocation.waitForExit(5_000)
+      checkpoint("repro exec exit=" & $exitCode & ", output:\n" & output)
+      require exitCode == 0
+      daemonPid = parseInt(probeValue(output, "probe-daemon-pid"))
+      let commandPid = parseInt(probeValue(output, "probe-pid"))
+      let daemonParent = parseInt(probeValue(output, "probe-daemon-ppid"))
+      let waitedMs = parseInt(probeValue(output, "probe-wait-ms"))
+      let reaped = probeValue(output, "probe-reaped").split(',')
+      checkpoint("command pid " & $commandPid & ", daemon pid " & $daemonPid &
+        " with parent " & $daemonParent & ", the command's wait took " &
+        $waitedMs & " ms")
+      # Control: the command really saw the daemon this invocation started.
+      require daemonPid > 0
+      check daemonParent > 0
+      # THE PROPERTY: not the command's child, so its wait does not wait
+      # for it -- and does not reap it either.
+      check daemonParent != commandPid
+      check waitedMs < ChildWaitBudgetMs
+      check $daemonPid notin reaped
+      # And alive afterwards: the wait ended because the daemon was not the
+      # command's child, not because it had already exited.
+      check lifetimeLockHolderPid(userSocket) == daemonPid
+      check pidAlive(daemonPid)
+      # It holds nothing of the processes that launched it.
+      let findings = daemonDescriptorFindings(daemonPid, userSocket)
+      checkpoint("descriptors that are not the daemon's own: " &
+        findings.join("; "))
+      check findings.len == 0
+    finally:
+      stopUserDaemon(userSocket, daemonPid)
+      if invocation.running:
+        killProcessTree(invocation.processID)
+      invocation.close()
+
 suite "repro exec stdio and the auto-started runquotad":
   test "repro exec's caller sees EOF once repro exits":
     if not runquotadAvailable():
@@ -357,3 +522,13 @@ suite "repro exec stdio and the auto-started runquotad":
       else:
         runExecAndGradeEof(getTempDir() / ("no-such-runquota-" &
           $getCurrentProcessId() & ".sock"))
+
+  test "the daemon is not the command's child, which does not wait for it":
+    when not defined(linux):
+      skip("reads the daemon's parent and descriptors from /proc (Linux)")
+    else:
+      if not runquotadAvailable():
+        skip("no runquotad: set RUNQUOTAD_BIN or put runquotad on PATH " &
+          "(the dev shell provides it)")
+      else:
+        runExecAndGradeParentage()

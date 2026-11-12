@@ -1,8 +1,8 @@
 ## The process mechanics of the SHARED PER-USER ``runquotad`` a POSIX
 ## ``repro`` starts when no RunQuota service is provisioned (reprobuild-pm
 ## ``spec/RunQuota-Host-Configuration.md``, "The shared per-user daemon
-## (POSIX)"): the idle period, the stale-socket removal, the detached start,
-## the readiness wait and the non-blocking reaping.
+## (POSIX)"): the idle period, the stale-socket removal, the detached start
+## through an intermediate process, and the readiness wait.
 ##
 ## The DECISIONS -- which endpoint, adopt or start, the handover to a daemon
 ## from another build, the hold -- are made in ``startAutoRunQuotaIfNeeded``
@@ -23,7 +23,7 @@
 ## watch, the startup-output pipes -- is gone, and what replaces it is below.
 
 when defined(posix):
-  import std/[locks, monotimes, os, osproc, strutils, times]
+  import std/[monotimes, os, osproc, strutils, times]
   import std/importutils
   import std/posix
   from repro_core/descriptor_inheritance import
@@ -152,13 +152,245 @@ when defined(posix):
       result = "\n(the runquotad log " & path & " could not be read: " &
         error.msg & ")"
 
-  proc spawnDetachedUserDaemon*(exe: string; args: seq[string];
-                                logFd: cint): int =
-    ## Starts ``exe args`` as the per-user daemon and returns its pid. The
-    ## daemon OUTLIVES this invocation, so it must hold nothing of it:
+  # ---------------------------------------------------------------------------
+  # The detached start, through an INTERMEDIATE process.
+  #
+  # The daemon is NEVER A CHILD OF THE INVOCATION (reprobuild-pm
+  # `spec/RunQuota-Host-Configuration.md`, "The shared per-user daemon
+  # (POSIX)"). Until 2026-11-12 it was forked directly, and `repro exec` then
+  # replaced itself with the command it runs: the daemon became THAT command's
+  # child, a zombie the command never reaped once the daemon idled out, and an
+  # extra child that a command waiting for all of its children
+  # (`sh -c '... & wait'`, any `wait()` loop run to `ECHILD`) waited for until
+  # the idle period ended -- 600 s by default.
+  #
+  #   repro (launcher) ── fork ──> intermediate ── setsid, fork ──> runquotad
+  #        <── status pipe: daemon pid, later its exit ──
+  #        ── control pipe: SIGTERM / SIGKILL requests, EOF = release ──>
+  #
+  # The intermediate is the daemon's parent for exactly as long as the
+  # launcher waits for readiness, and that is what keeps every readiness
+  # diagnostic intact: it alone can `waitpid` the daemon, it reports the raw
+  # wait status (exit code or signal) over the STATUS pipe, and because it
+  # does not reap the daemon until it has exited, the daemon's pid cannot be
+  # recycled while the launcher may still ask for it to be signalled. The
+  # launcher never signals the daemon itself: it writes the request on the
+  # CONTROL pipe and the intermediate, which has just seen its child alive
+  # and not reaped, sends it. Once the launcher is done -- the daemon
+  # answered, or its fate has been read -- it closes the control pipe; the
+  # intermediate `_exit`s WITHOUT touching the daemon, the launcher reaps it
+  # synchronously, and the daemon is reparented to the system's reaper (init,
+  # or the nearest `PR_SET_CHILD_SUBREAPER` ancestor). A launcher that dies
+  # mid-wait closes the control pipe by dying, with the same result.
+  #
+  # The intermediate stays alive until that release even after it has
+  # reported the daemon's exit. So the only way a launcher write can meet a
+  # pipe with no reader is the intermediate having been killed from outside,
+  # and that write is made with SIGPIPE blocked (`writeControl`) so it is an
+  # `EPIPE`, not this invocation's death.
+  #
+  # Both pipes are close-on-exec, so the daemon -- which `execve`s -- holds
+  # neither, and `markInheritableDescriptorsCloseOnExec` is held across the
+  # first `fork` so that neither child inherits any other descriptor above 2.
+  # Between `fork` and `exec`/`_exit` both children make ONLY async-signal-
+  # safe calls (`fork`, `setsid`, `sigaction`, `chdir`, `dup2`, `execve`,
+  # `read`, `write`, `poll`, `waitpid`, `kill`, `close`, `_exit`) on values
+  # prepared before the first `fork`: this process is multi-threaded, and the
+  # children are copies of one thread of it.
+  # ---------------------------------------------------------------------------
+
+  type
+    LaunchRecord {.packed.} = object
+      ## One message from the intermediate on the status pipe. A fixed-size
+      ## record far below `PIPE_BUF`, so each `write` is atomic and a `read`
+      ## of `sizeof(LaunchRecord)` bytes returns a whole one or nothing.
+      tag: char
+        ## `P` the daemon's pid; `F` its `fork` failed (errno); `X` it exited
+        ## and was reaped (raw wait status); `E` it can no longer be waited
+        ## for (errno of the failed `waitpid`).
+      value: int32
+
+    UserDaemonLaunch* = object
+      ## A daemon started by `spawnDetachedUserDaemon` and the intermediate
+      ## process watching it. `waitForUserDaemon` consumes it: on every path
+      ## out of it the intermediate has been released and reaped and both
+      ## descriptors are closed.
+      daemon*: int
+        ## The daemon's pid. It is NOT this process's child.
+      intermediate: Pid
+      status: cint
+        ## Read end of the status pipe; -1 once closed.
+      control: cint
+        ## Write end of the control pipe; -1 once closed (= released).
+
+  const
+    commandTerminate = 'T'
+    commandKill = 'K'
+
+  when defined(linux):
+    proc pipe2(fds: var array[0..1, cint]; flags: cint): cint {.
+      importc, header: "<unistd.h>".}
+
+  proc closeOnExecPipe(what: string): array[0..1, cint] =
+    ## A pipe whose both ends are close-on-exec. `pipe2(O_CLOEXEC)` where it
+    ## exists, so no other thread's `fork`+`exec` can catch the ends without
+    ## the flag; elsewhere (macOS has no `pipe2`) the flag is set at once.
+    when defined(linux):
+      if pipe2(result, O_CLOEXEC) != 0:
+        raise newException(OSError, "cannot start runquotad: cannot create " &
+          "the " & what & " pipe (" & $strerror(errno) & ")")
+    else:
+      if posix.pipe(result) != 0:
+        raise newException(OSError, "cannot start runquotad: cannot create " &
+          "the " & what & " pipe (" & $strerror(errno) & ")")
+      for fd in result:
+        discard fcntl(fd, F_SETFD, fcntl(fd, F_GETFD) or FD_CLOEXEC)
+
+  proc writeRecord(fd: cint; tag: char; value: cint) {.inline.} =
+    ## Used by the intermediate only, between `fork` and `_exit`: a stack
+    ## value and one `write`, nothing that allocates or locks. A launcher that
+    ## has gone makes the write fail (or the default `SIGPIPE` end the
+    ## intermediate), and either way there is nobody left to tell.
+    var record = LaunchRecord(tag: tag, value: int32(value))
+    discard posix.write(fd, addr record, sizeof(record))
+
+  proc exitText(status: cint): string =
+    ## The fate of a reaped child, in the words the readiness error uses:
+    ## an exit code and a signal are different reports and never folded into
+    ## one another.
+    if WIFEXITED(status): "exit code " & $WEXITSTATUS(status)
+    elif WIFSIGNALED(status): "signal " & $WTERMSIG(status)
+    else: "wait status " & $status
+
+  type
+    LaunchReadKind = enum
+      lrRecord   ## a whole record arrived
+      lrNothing  ## none within the time given
+      lrClosed   ## the intermediate's end is closed: it has exited
+      lrFailed   ## the pipe could not be read (`error`)
+    LaunchRead = object
+      kind: LaunchReadKind
+      record: LaunchRecord
+      error: cint
+
+  proc readLaunchRecord(launch: UserDaemonLaunch; timeoutMs: int): LaunchRead =
+    ## The next record on the status pipe, waiting at most ``timeoutMs`` on
+    ## the monotonic clock. Never raises: its answers feed the readiness
+    ## report, which says itself what could not be observed.
+    let deadline = getMonoTime() + initDuration(milliseconds = timeoutMs)
+    while true:
+      let remaining = clamp((deadline - getMonoTime()).inMilliseconds,
+        0'i64, int64(high(int32)))
+      var ready = TPollfd(fd: launch.status, events: POLLIN)
+      let polled = posix.poll(addr ready, 1, cint(remaining))
+      if polled < 0:
+        let code = errno
+        if code == EINTR and remaining > 0:
+          continue
+        if code == EINTR:
+          return LaunchRead(kind: lrNothing)
+        return LaunchRead(kind: lrFailed, error: code)
+      if polled == 0:
+        return LaunchRead(kind: lrNothing)
+      var record: LaunchRecord
+      let got = posix.read(launch.status, addr record, sizeof(record))
+      if got == sizeof(record):
+        return LaunchRead(kind: lrRecord, record: record)
+      if got == 0:
+        return LaunchRead(kind: lrClosed)
+      if got < 0:
+        let code = errno
+        if code == EINTR or code == EAGAIN:
+          continue
+        return LaunchRead(kind: lrFailed, error: code)
+      # A short read cannot happen to a record written in one `write` below
+      # `PIPE_BUF`; if it does, the stream is no longer in step.
+      return LaunchRead(kind: lrFailed, error: EIO)
+
+  proc writeControl(launch: UserDaemonLaunch; command: char): bool =
+    ## Asks the intermediate to signal the daemon. ``SIGPIPE`` is blocked on
+    ## this thread for the ``write``: the intermediate keeps its end open
+    ## until it is released, so the pipe has no reader only if it was killed
+    ## from outside, and that must be an ``EPIPE`` here rather than the end
+    ## of this invocation. A ``SIGPIPE`` the write raised is consumed before
+    ## the mask is restored.
+    if launch.control < 0:
+      return false
+    var blocked, previous: Sigset
+    discard sigemptyset(blocked)
+    discard sigaddset(blocked, SIGPIPE)
+    discard pthread_sigmask(SIG_BLOCK, blocked, previous)
+    var message = command
+    let wrote = posix.write(launch.control, addr message, 1)
+    let code = errno
+    if wrote < 0 and code == EPIPE and sigismember(previous, SIGPIPE) == 0:
+      var pending: Sigset
+      if sigpending(pending) == 0 and sigismember(pending, SIGPIPE) == 1:
+        var received: cint = 0
+        discard sigwait(blocked, received)
+    discard pthread_sigmask(SIG_SETMASK, previous, blocked)
+    wrote == 1
+
+  proc releaseIntermediate(launch: var UserDaemonLaunch;
+                           forceful = false): string =
+    ## RELEASES the intermediate (closes the control pipe: it exits without
+    ## touching the daemon), closes the status pipe and REAPS the
+    ## intermediate before returning, so no process of the launch is left a
+    ## child of this one. Idempotent. ``forceful`` (no pid was reported, so
+    ## the intermediate is not doing its job) kills it first.
     ##
-    ## * a NEW SESSION (``setsid``): a terminal's ``SIGINT`` / ``SIGHUP``
-    ##   addressed to the invocation's process group does not reach it;
+    ## Returns " (the intermediate process ended with ...)" when it ended
+    ## other than by a clean release, for an error to carry; "" otherwise.
+    if launch.control >= 0:
+      discard posix.close(launch.control)
+      launch.control = -1
+    if launch.status >= 0:
+      discard posix.close(launch.status)
+      launch.status = -1
+    if launch.intermediate <= 0:
+      return ""
+    let intermediate = launch.intermediate
+    launch.intermediate = 0
+    if forceful:
+      discard posix.kill(intermediate, SIGKILL)
+    # A released intermediate exits at once. One that does not within 5 s
+    # (stopped, say) is killed rather than waited for without bound; it is
+    # our unreaped child, so the pid is still its.
+    var raw: cint = 0
+    var reaped = Pid(0)
+    for _ in 0 ..< 100:
+      reaped = waitpid(intermediate, raw, WNOHANG)
+      if reaped != 0 and not (reaped < 0 and errno == EINTR):
+        break
+      sleep(50)
+    if reaped == 0:
+      discard posix.kill(intermediate, SIGKILL)
+      while true:
+        reaped = waitpid(intermediate, raw, 0)
+        if not (reaped < 0 and errno == EINTR):
+          break
+    if reaped == intermediate and not forceful and WIFEXITED(raw) and
+        WEXITSTATUS(raw) == 0:
+      return ""
+    if reaped == intermediate:
+      return " (the intermediate process ended with " & exitText(raw) & ")"
+    # `ECHILD`: something else reaped it (this process ignores SIGCHLD).
+    ""
+
+  proc spawnDetachedUserDaemon*(exe: string; args: seq[string];
+                                logFd: cint): UserDaemonLaunch =
+    ## Starts ``exe args`` as the per-user daemon, through an intermediate
+    ## process (see the block above), and returns once the intermediate has
+    ## reported the daemon's pid. The caller must hand the result to
+    ## ``waitForUserDaemon``, which releases and reaps the intermediate.
+    ##
+    ## The daemon OUTLIVES this invocation, so it must hold nothing of it:
+    ##
+    ## * NOT A CHILD of this process: its parent is the intermediate, and
+    ##   then the system's reaper;
+    ## * a NEW SESSION (the intermediate's ``setsid``): a terminal's
+    ##   ``SIGINT`` / ``SIGHUP`` addressed to the invocation's process group
+    ##   does not reach it;
     ## * working directory ``/``: it pins no caller directory;
     ## * stdin ``/dev/null``, stdout and stderr appended to ``logFd``
     ##   (``runquotad.log``);
@@ -167,22 +399,25 @@ when defined(posix):
     ##   the write end of the pipe a caller reads ``repro``'s output from kept
     ##   ``$(repro exec ...)`` waiting for as long as the daemon lived
     ##   (reprobuild-pm issue 2026-10-23). Every descriptor above 2 is made
-    ##   close-on-exec for the duration of the ``fork``
+    ##   close-on-exec for the duration of the first ``fork``
     ##   (``markInheritableDescriptorsCloseOnExec``, the rule RunQuota's
     ##   process backend applies with ``closeInheritedChildFds``) and restored
-    ##   afterwards. A spawn another thread makes in that window loses only
+    ##   afterwards; the two pipes to the intermediate are close-on-exec from
+    ##   birth. A spawn another thread makes in that window loses only
     ##   descriptors above 2 it did not ``dup2`` into place, and the build's
     ##   launch paths give every child 0, 1 and 2 and nothing else;
+    ## * ``SIGCHLD`` at its default disposition, so that the intermediate can
+    ##   wait for it even when this process ignores ``SIGCHLD`` (an ignored
+    ##   ``SIGCHLD`` makes the kernel reap children unasked, and their exit
+    ##   status is lost) -- and so that the daemon does not inherit that
+    ##   setting across ``execve`` either;
     ## * the invocation's environment without ``RUNQUOTA_EXIT_WITH_PARENT*``.
     ##   The caller has already published ``RUNQUOTA_SOCKET`` and
     ##   ``RUNQUOTA_ENDPOINT_SCOPE=private`` into it.
     ##
     ## WHY ``fork`` AND NOT ``osproc``. ``startProcess`` can give the child
-    ## pipes or this process's own streams, never a file, and has no new-
-    ## session option. The child here makes only async-signal-safe calls
-    ## (``setsid``, ``chdir``, ``dup2``, ``execve``, ``write``, ``_exit``)
-    ## on values prepared before the ``fork``, which is what a multi-threaded
-    ## process may do between ``fork`` and ``exec``.
+    ## pipes or this process's own streams, never a file, has no new-session
+    ## option, and always makes the process it starts this process's child.
     # `exe` is `findRunQuotaDaemonBin`'s answer: already resolved (an
     # executable `RUNQUOTAD_BIN`, a `PATH` hit, the sibling build), so it is
     # only made absolute here -- the child changes to `/` before `execve` --
@@ -206,22 +441,124 @@ when defined(posix):
     let devNull = atLeastThree(devNullOpened, "/dev/null")
     defer: discard posix.close(devNull)
     let root = "/".cstring
+    var defaultChild: Sigaction
+    defaultChild.sa_handler = SIG_DFL
+    discard sigemptyset(defaultChild.sa_mask)
+    # [0] read end, [1] write end. STATUS: intermediate -> launcher.
+    # CONTROL: launcher -> intermediate.
+    let statusPipe = closeOnExecPipe("status")
+    var controlPipe: array[0..1, cint]
+    try:
+      controlPipe = closeOnExecPipe("control")
+    except OSError:
+      discard posix.close(statusPipe[0])
+      discard posix.close(statusPipe[1])
+      raise
     let madeCloseOnExec = markInheritableDescriptorsCloseOnExec()
-    let pid = fork()
-    if pid == 0:
+    let intermediate = fork()
+    if intermediate == 0:
+      # THE INTERMEDIATE. Async-signal-safe calls only, from here to every
+      # `exitnow`.
+      #
+      # Its copies of the launcher's ends go first: a control pipe whose
+      # write end it held itself would never report the launcher's release.
+      discard posix.close(statusPipe[0])
+      discard posix.close(controlPipe[1])
+      let status = statusPipe[1]
+      let control = controlPipe[0]
+      discard sigaction(SIGCHLD, defaultChild, nil)
       discard setsid()
-      discard posix.chdir(root)
-      if dup2(devNull, 0) < 0 or dup2(logFd, 1) < 0 or dup2(logFd, 2) < 0:
+      let daemon = fork()
+      if daemon == 0:
+        # THE DAEMON. Both pipes are close-on-exec and vanish at `execve`.
+        discard posix.chdir(root)
+        if dup2(devNull, 0) < 0 or dup2(logFd, 1) < 0 or dup2(logFd, 2) < 0:
+          exitnow(127)
+        discard execve(cargv[0], cargv, cenv)
+        discard posix.write(2, execFailure.cstring, execFailure.len)
         exitnow(127)
-      discard execve(cargv[0], cargv, cenv)
-      discard posix.write(2, execFailure.cstring, execFailure.len)
-      exitnow(127)
+      if daemon < 0:
+        writeRecord(status, 'F', errno)
+        exitnow(1)
+      writeRecord(status, 'P', cint(daemon))
+      # Watch the daemon until the launcher releases us. After the daemon's
+      # exit has been reported, or once it can no longer be waited for, only
+      # the release is waited for: the launcher's `writeControl` relies on
+      # this end staying open until then.
+      var watching = true
+      while true:
+        if watching:
+          var raw: cint = 0
+          let reaped = waitpid(daemon, raw, WNOHANG)
+          if reaped == daemon:
+            writeRecord(status, 'X', raw)
+            watching = false
+          elif reaped < 0 and errno != EINTR:
+            writeRecord(status, 'E', errno)
+            watching = false
+        var ready = TPollfd(fd: control, events: POLLIN)
+        let polled = posix.poll(addr ready, 1, cint(if watching: 50 else: -1))
+        if polled < 0:
+          if errno == EINTR:
+            continue
+          # The release can no longer be observed; leave the daemon to the
+          # reaper rather than spin.
+          exitnow(0)
+        if polled == 0:
+          continue
+        var command: char
+        let got = posix.read(control, addr command, 1)
+        if got == 0:
+          # THE RELEASE: the launcher closed the control pipe (or died).
+          # The daemon is not touched; it is reparented when we exit.
+          exitnow(0)
+        if got < 0:
+          if errno == EINTR or errno == EAGAIN:
+            continue
+          exitnow(0)
+        # Signalled only while still watching: the daemon has not been
+        # reaped, so its pid is still its own and cannot reach a recycled
+        # one.
+        if watching:
+          if command == commandTerminate:
+            discard posix.kill(daemon, SIGTERM)
+          elif command == commandKill:
+            discard posix.kill(daemon, SIGKILL)
     let forkError = errno
     restoreInheritableDescriptors(madeCloseOnExec)
-    if pid < 0:
+    # The intermediate's ends are its own now.
+    discard posix.close(statusPipe[1])
+    discard posix.close(controlPipe[0])
+    if intermediate < 0:
+      discard posix.close(statusPipe[0])
+      discard posix.close(controlPipe[1])
       raise newException(OSError, "cannot start runquotad: fork failed (" &
         $strerror(forkError) & ")")
-    int(pid)
+    result = UserDaemonLaunch(daemon: 0, intermediate: intermediate,
+      status: statusPipe[0], control: controlPipe[1])
+    # The pid, or why there is none. The intermediate writes it as soon as
+    # its `fork` returns, so this waits for two `fork`s, not for the daemon.
+    let reported = readLaunchRecord(result,
+      int(userDaemonReadinessCeiling.inMilliseconds))
+    if reported.kind == lrRecord and reported.record.tag == 'P' and
+        reported.record.value > 0:
+      result.daemon = int(reported.record.value)
+      return
+    let why =
+      case reported.kind
+      of lrRecord:
+        if reported.record.tag == 'F':
+          "fork failed (" & $strerror(cint(reported.record.value)) & ")"
+        else:
+          "the intermediate process sent an unexpected record"
+      of lrClosed: "the intermediate process ended before it reported " &
+        "the daemon's pid"
+      of lrNothing: "the intermediate process did not report the " &
+        "daemon's pid within " & $userDaemonReadinessCeiling.inSeconds & " s"
+      of lrFailed: "the status pipe could not be read (" &
+        $strerror(cint(reported.error)) & ")"
+    let ended = releaseIntermediate(result, forceful = true)
+    raise newException(OSError, "cannot start runquotad: " & why & ended)
 
   const hostOwnerRefusalMarker* = "configured daemon owner uid "
     ## The words `runquota_ipc.inspectPath` puts in front of the uid the HOST
@@ -270,40 +607,36 @@ when defined(posix):
       "Point RUNQUOTAD_BIN at a current runquotad (or remove the stale one " &
       "from PATH), or start the host's RunQuota service."
 
-  proc exitText(status: cint): string =
-    ## The fate of a reaped child, in the words the readiness error uses:
-    ## an exit code and a signal are different reports and never folded into
-    ## one another.
-    if WIFEXITED(status): "exit code " & $WEXITSTATUS(status)
-    elif WIFSIGNALED(status): "signal " & $WTERMSIG(status)
-    else: "wait status " & $status
-
-  proc waitForUserDaemon*(pid: int; exe, socket, logPath: string;
-                          answered: proc (): bool) =
-    ## Waits for the daemon ``pid`` just started until ``answered()`` (it is
-    ## reachable, and the caller now holds it) or it has exited -- not for a
-    ## fixed number of polls. Raises ``OSError`` otherwise, with the tail of
-    ## its log, and the error says WHICH WAY THE WAIT ENDED and how long after
-    ## the start (reprobuild-pm ``spec/RunQuota-Host-Configuration.md``, "The
-    ## shared per-user daemon (POSIX)"):
+  proc waitForUserDaemon*(launch: var UserDaemonLaunch;
+                          exe, socket, logPath: string;
+                          answered: proc (): bool): int =
+    ## Waits for the daemon ``launch`` just started until ``answered()`` (it
+    ## is reachable, and the caller now holds it) or it has exited -- not for
+    ## a fixed number of polls -- and returns its pid. Raises ``OSError``
+    ## otherwise, with the tail of its log, and the error says WHICH WAY THE
+    ## WAIT ENDED and how long after the start (reprobuild-pm
+    ## ``spec/RunQuota-Host-Configuration.md``, "The shared per-user daemon
+    ## (POSIX)"):
     ##
     ## * it EXITED before it listened: at once, with its exit code or the
-    ##   signal that ended it;
+    ##   signal that ended it, as the intermediate read them;
     ## * it was STILL RUNNING at the ceiling (120 s on the monotonic clock):
-    ##   it is wedged, so it is terminated and reaped (``SIGTERM``, then
-    ##   ``SIGKILL`` after 5 s), and the error says repro terminated it;
-    ## * its state COULD NOT BE OBSERVED (``waitpid`` failed, e.g. ``ECHILD``
-    ##   because something else reaped it), with the reason. No signal is
-    ##   sent then: the pid may no longer be the daemon's.
+    ##   it is wedged, so the intermediate is asked to terminate it
+    ##   (``SIGTERM``, then ``SIGKILL`` after 5 s), and the error says repro
+    ##   terminated it;
+    ## * its state COULD NOT BE OBSERVED (the intermediate could not wait for
+    ##   it, ended unexpectedly, or the status pipe failed), with the reason.
+    ##   No signal is sent then: nothing that still holds the daemon unreaped
+    ##   vouches for its pid.
     ##
-    ## The fate is read before anything here signals or reaps the daemon, so
-    ## a daemon that died on its own and one this launcher killed -- which
-    ## leave the same refused socket behind and send an investigator to
-    ## opposite halves of the system -- are never reported alike.
+    ## The fate is read before anything signals the daemon, so a daemon that
+    ## died on its own and one this launcher killed -- which leave the same
+    ## refused socket behind and send an investigator to opposite halves of
+    ## the system -- are never reported alike.
     ##
-    ## Either way the child has been reaped (or is not ours to reap) when this
-    ## raises. On success it has not: it is the caller's to reap later,
-    ## without blocking.
+    ## On EVERY path out, returned or raised, the intermediate has been
+    ## released and reaped (``releaseIntermediate``): the daemon is then no
+    ## process's child of this invocation, and nothing is left to reap later.
     let started = getMonoTime()
     let deadline = started + userDaemonReadinessCeiling
     let prefix = "runquotad did not become reachable at " & socket & " (" &
@@ -316,96 +649,74 @@ when defined(posix):
       # to do (`hostPolicyDaemonRemedy`).
       let tail = userDaemonLogTail(logPath)
       tail & hostPolicyDaemonRemedy(exe, tail)
-    var lastError: cint = 0
-    while true:
-      if answered():
-        return
-      var status: cint = 0
-      let reaped = waitpid(Pid(pid), status, WNOHANG)
-      if reaped == Pid(pid):
-        raise newException(OSError, prefix & ": it exited before it " &
-          "listened, " & since() & ", with " & exitText(status) &
-          diagnostics())
-      if reaped < 0:
-        let code = errno
-        lastError = code
-        if code != EINTR and posix.kill(Pid(pid), 0) != 0:
-          # Reaped by somebody else (a SIGCHLD set to SIG_IGN reaps children
-          # by itself), and gone: the exit status is lost, not the log.
+    # Why the daemon's state can no longer be read, once it cannot. From
+    # then on only `answered()` and the ceiling end the wait.
+    var unobservable = ""
+    try:
+      while true:
+        if answered():
+          return launch.daemon
+        if unobservable.len == 0:
+          # Doubles as the 50 ms pause, and wakes at once when the
+          # intermediate reports an exit.
+          let got = readLaunchRecord(launch, 50)
+          case got.kind
+          of lrNothing:
+            discard
+          of lrRecord:
+            if got.record.tag == 'X':
+              raise newException(OSError, prefix & ": it exited before it " &
+                "listened, " & since() & ", with " &
+                exitText(cint(got.record.value)) & diagnostics())
+            elif got.record.tag == 'E':
+              unobservable = "the process watching it could not wait for " &
+                "it: " & $strerror(cint(got.record.value))
+            else:
+              unobservable = "the process watching it sent an unexpected " &
+                "record"
+          of lrClosed:
+            unobservable = "the process watching it ended unexpectedly" &
+              releaseIntermediate(launch)
+          of lrFailed:
+            unobservable = "its status pipe could not be read: " &
+              $strerror(got.error)
+          if unobservable.len > 0 and posix.kill(Pid(launch.daemon), 0) != 0:
+            # Gone, and its exit status with the watcher: the log is all
+            # that is left.
+            raise newException(OSError, prefix & ": its state could not be " &
+              "observed (" & unobservable & "), " & since() & "; it is " &
+              "gone" & diagnostics())
+        else:
+          sleep(50)
+        if getMonoTime() >= deadline:
+          if unobservable.len == 0:
+            # The intermediate last saw it alive and has not reaped it, so
+            # the signal it sends on our behalf cannot reach a recycled pid.
+            # Its exit is waited for (5 s after each signal), so the daemon
+            # is gone before the error is raised; what it reports is not
+            # needed -- the fate was read above.
+            discard writeControl(launch, commandTerminate)
+            if readLaunchRecord(launch, 5_000).kind == lrNothing:
+              discard writeControl(launch, commandKill)
+              discard readLaunchRecord(launch, 5_000)
+            raise newException(OSError, prefix & ": it was still running " &
+              since() & ", at the " & $userDaemonReadinessCeiling.inSeconds &
+              " s readiness ceiling, but never answered the reachability " &
+              "probe; repro terminated it" & diagnostics())
           raise newException(OSError, prefix & ": its state could not be " &
-            "observed (" & $strerror(code) & "), " & since() & "; it is " &
-            "gone" & diagnostics())
-      if getMonoTime() >= deadline:
-        if reaped == 0:
-          # Still our unreaped child, so the pid is still its: signalling
-          # it cannot reach a recycled pid.
-          discard posix.kill(Pid(pid), SIGTERM)
-          var gone = false
-          for _ in 0 ..< 100:
-            if waitpid(Pid(pid), status, WNOHANG) != 0:
-              gone = true
-              break
-            sleep(50)
-          if not gone:
-            discard posix.kill(Pid(pid), SIGKILL)
-            discard waitpid(Pid(pid), status, 0)
-          raise newException(OSError, prefix & ": it was still running " &
-            since() & ", at the " & $userDaemonReadinessCeiling.inSeconds &
-            " s readiness ceiling, but never answered the reachability " &
-            "probe; repro terminated it" & diagnostics())
-        raise newException(OSError, prefix & ": its state could not be " &
-          "observed (" & $strerror(lastError) & "), " & since() & ", at the " &
-          $userDaemonReadinessCeiling.inSeconds & " s readiness ceiling; " &
-          "no signal was sent" & diagnostics())
-      sleep(50)
-
-  # ---------------------------------------------------------------------------
-  # Reaping, without blocking.
-  #
-  # The daemon stays a child of the invocation that started it until that
-  # invocation exits. A short-lived `repro` exits soon and the daemon is
-  # re-parented; a LONG-LIVED one -- the user build daemon, which runs builds
-  # on threads of one process -- would collect a zombie for every daemon that
-  # idled out under it. So every pid started here is recorded, and
-  # `reapSpawnedUserDaemons` collects the ones that have exited, never
-  # waiting: at release, and at every later start.
-  #
-  # A plain array of pids under a lock, not a `seq`: it is shared by the
-  # build threads, and holds nothing the garbage collector owns.
-  # ---------------------------------------------------------------------------
-
-  var
-    spawnedLock: Lock
-    spawnedPids: array[32, int32]
-  initLock(spawnedLock)
-
-  proc recordSpawnedUserDaemon*(pid: int) =
-    ## Remember ``pid`` for ``reapSpawnedUserDaemons``. With the table full
-    ## (32 daemons started by one process, none exited yet) the pid is not
-    ## recorded; it costs at most one zombie until this process exits.
-    withLock spawnedLock:
-      for slot in spawnedPids.mitems:
-        if slot == 0:
-          slot = int32(pid)
-          return
-
-  proc reapSpawnedUserDaemons*() =
-    ## Collect every recorded daemon that has exited, without blocking. A pid
-    ## that is no longer this process's child (``ECHILD``: reaped elsewhere)
-    ## is forgotten too.
-    withLock spawnedLock:
-      for slot in spawnedPids.mitems:
-        if slot != 0:
-          var status: cint = 0
-          let reaped = waitpid(Pid(slot), status, WNOHANG)
-          if reaped == Pid(slot) or (reaped < 0 and errno == ECHILD):
-            slot = 0
+            "observed (" & unobservable & "), " & since() & ", at the " &
+            $userDaemonReadinessCeiling.inSeconds & " s readiness ceiling; " &
+            "no signal was sent" & diagnostics())
+    finally:
+      discard releaseIntermediate(launch)
 
   proc spawnedDaemonProcess*(pid: int): owned(Process) =
     ## An ``osproc.Process`` naming the daemon just started, for the callers
     ## that take one -- ``trustDaemonWeSpawned`` above all, whose argument
-    ## type is its soundness argument (only the process that started a child
-    ## can hold one). It owns no stream (``poParentStreams``), so ``close``
-    ## releases nothing and never waits.
+    ## type is its soundness argument (only the code that started a daemon
+    ## can hold one). The daemon is not this process's child (its parent was
+    ## the intermediate, and is now the system's reaper), so nothing may wait
+    ## for it through this value: it owns no stream (``poParentStreams``),
+    ## and ``close`` releases nothing and never waits.
     privateAccess(Process)
     Process(id: Pid(pid), options: {poParentStreams})

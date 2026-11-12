@@ -6192,10 +6192,14 @@ proc trustDaemonWeSpawned*(process: Process; name: string;
   ## The parameter is the live `Process` and not a bare pid, because that is the
   ## whole soundness argument in one type: a caller can only hold this value by
   ## having started the process, so "trust a daemon of the right name that
-  ## someone else started" is not a call that can be written. Holding it also
-  ## means the child has not been reaped, so the kernel will not hand its pid to
-  ## anyone else while the registration is live — and `revalidatedTrustedDaemons`
-  ## re-checks the identity anyway for the case where it has been.
+  ## someone else started" is not a call that can be written. When the daemon
+  ## is this process's own child, holding it also means it has not been
+  ## reaped, so the kernel will not hand its pid to anyone else while the
+  ## registration is live. That is not true of every spawn: the shared
+  ## per-user `runquotad` is started through an intermediate process and is
+  ## never this process's child (`user_runquota_daemon`), so it is reaped by
+  ## the system's reaper when it idles out. `revalidatedTrustedDaemons`
+  ## re-checks the identity for exactly that case.
   let pid = processID(process)
   if pid <= 0:
     return
