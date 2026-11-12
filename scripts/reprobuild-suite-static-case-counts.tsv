@@ -2757,7 +2757,7 @@ tests/unit/test_graph_owned_test_artifacts.py	python	26
 tests/unit/test_install_nix_paths.py	python	14
 tests/unit/test_lint_gate_ordering.py	python	4
 tests/unit/test_nim224_lane_selection.py	python	5
-tests/unit/test_nix_daemon_descriptors.py	python	7
+tests/unit/test_nix_daemon_descriptors.py	python	8
 tests/unit/test_nix_daemon_expression_file_is_never_cached.py	python	4
 tests/unit/test_nix_daemon_request_requires_workspace_root.py	python	4
 tests/unit/test_nix_evaluation_policy.py	python	1
