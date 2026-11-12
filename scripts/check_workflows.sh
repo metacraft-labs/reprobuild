@@ -837,6 +837,7 @@ else
   sibling_violations=""
   abandoned_violations=""
   unresolvable=""
+  agent_line_pins=""
   checked=0
   # Which arm answered, per entry. Reported at the end so a run SAYS which
   # credential state actually resolved what. Without this the gate could pass
@@ -887,6 +888,23 @@ else
       default_ref="$(sibling_default_branch "${name}" || true)"
       if [ -n "${default_ref}" ] && [ "${default_ref}" != "main" ]; then
         abandoned_violations="${abandoned_violations}${name}=main (default branch is '${default_ref}')"$'\n'
+      fi
+    fi
+    # Staleness advisory (reprobuild-pm issue
+    # 2026-11-01-reprobuild-pins-codetracer-trace-format-nim-to-dev-while-its-
+    # work-accumulates-on-agents). A repo that develops on `agents` reaches its
+    # mainline only through a promotion, so a branch pin on anything but
+    # `agents` follows a ref that stalls and then jumps. That is sometimes
+    # deliberate (the comments in the file say so), so this NAMES the pins at
+    # risk and never fails: a failing gate would force every deliberate
+    # mainline pin to be rewritten.
+    if [ "${ref}" != "agents" ]; then
+      agent_tip="$(sibling_ls_remote --heads \
+        "https://github.com/metacraft-labs/${name}" agents 2>/dev/null || true)"
+      pinned_tip="$(sibling_ls_remote --heads \
+        "https://github.com/metacraft-labs/${name}" "${ref}" 2>/dev/null || true)"
+      if [ -n "${agent_tip}" ] && [ "${agent_tip%%[[:space:]]*}" != "${pinned_tip%%[[:space:]]*}" ]; then
+        agent_line_pins="${agent_line_pins}${name}=${ref}"$'\n'
       fi
     fi
   done < <(sibling_repo_branch_pins "${sibling_repos_file}")
@@ -956,6 +974,13 @@ else
     printf '%s' "${unresolvable}" | sed 's/^/        /'
     echo "      They are NOT reported as dead pins, because nothing here can"
     echo "      tell. CI holds a token for them and checks them on every push."
+  fi
+  if [ -n "${agent_line_pins}" ]; then
+    echo "NOTE: these branch pins trail an \`agents\` branch their repo develops on;"
+    echo "      their ref moves only when a promotion lands, so a regression"
+    echo "      arrives as the whole promotion. Deliberate where the comments in"
+    echo "      ${sibling_repos_file} say so; otherwise pin the revision:"
+    printf '%s' "${agent_line_pins}" | sed 's/^/        /'
   fi
   echo "ok: ${resolved_count} of ${checked} explicit sibling-repo pin(s) resolve on the remote" \
     "(${unresolvable_count} unresolvable here)"

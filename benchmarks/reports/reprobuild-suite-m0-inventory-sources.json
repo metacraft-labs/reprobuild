@@ -58044,7 +58044,7 @@
       "requiresReproBinary": false,
       "source": "tests/unit/test_sibling_lock_pins.py",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 9,
+      "staticCaseCount": 10,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
