@@ -228,12 +228,17 @@ title = "Terraform and OpenTofu"
   [[tool.row]]
   theirs = "terraform plan, tofu plan"
   repro = "repro infra plan"
-  note = "Resources on the machine that runs repro only."
+  note = "Plans the machine that runs repro."
 
   [[tool.row]]
   theirs = "terraform apply, tofu apply"
   repro = "repro infra apply"
-  note = "Resources on the machine that runs repro only."
+  note = "Applies to the machine that runs repro; each machine in a fleet applies its own state with repro deploy-agent."
+
+  [[tool.row]]
+  theirs = "terraform apply <plan-file>, tofu apply <plan-file>"
+  repro = "repro infra apply --plan <plan-id>"
+  note = "Refused when the machine changed since the plan was made."
 
   [[tool.row]]
   theirs = "terraform graph"

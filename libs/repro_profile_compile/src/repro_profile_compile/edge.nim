@@ -66,6 +66,7 @@ from repro_core/paths import extendedPath
 import blake3
 import repro_core
 from repro_core/source_root import resolveReprobuildSourceRoot
+import repro_core/file_lock
 import repro_hash
 import repro_build_engine
 from repro_local_store import FileFingerprintPolicy, ffpHybrid
@@ -621,6 +622,42 @@ proc publishEnvelope(rbpiPath: string; bytes: seq[byte]) =
       discard
   writeBytesAtomic(rbpiPath, bytes)
 
+proc acquireProfileLock(stateDir, profileKey: string): ReproFileLock =
+  ## Take the lock that serialises the compiles and platform probes of ONE
+  ## profile in ONE state directory (`cachedProfileLockPath`), waiting for
+  ## as long as the holder keeps it.
+  ##
+  ## WHY. Everything such a run writes is named by the profile key, not by
+  ## the run: the nimcache (and with it the linker response file Nim writes
+  ## in its working directory, the generated `.c` and the `.o` files), the
+  ## probe's scratch, the binary, the intent document, the envelope -- and,
+  ## beside the profile, the staged `config.nims` and `.nimble`, which the
+  ## first run to finish removes while the other may still need them. Two
+  ## shells running `repro home plan` at once on the default state directory
+  ## used to do all of that concurrently (reprobuild-pm issue
+  ## 2026-11-11-two-compiles-of-one-profile-in-one-state-dir-share-its-nimcache-unserialised).
+  ##
+  ## WHY WAIT, AND NOT A PRIVATE DIRECTORY PER RUN. The waiter loses
+  ## nothing: when it gets the lock, the action cache answers both edges
+  ## from the record the holder just published, so the second compile costs
+  ## a lookup, not a compile. A private nimcache per run would throw the
+  ## incremental nimcache away and give the run edge a binary path the
+  ## cache had never seen.
+  ##
+  ## The wait is unbounded on purpose: a compile legitimately takes minutes,
+  ## and a deadline would fail a run that only had to wait. A holder that
+  ## dies releases the lock with its process (the descriptor is close-on-exec
+  ## and never inherited by the edges' processes, so a daemon a profile
+  ## starts cannot keep it). Taken BEFORE `runBuild` and released after the
+  ## envelope is published, so the edges' monitors never see the lock file.
+  let lockPath = cachedProfileLockPath(stateDir, profileKey)
+  try:
+    acquireExclusiveFileLock(lockPath)
+  except IOError, OSError:
+    raiseProfileCompile("repro profile compile: cannot lock " & lockPath &
+      " against another compile of the same profile: " &
+      getCurrentExceptionMsg())
+
 # ---------------------------------------------------------------------------
 # Public entry point.
 # ---------------------------------------------------------------------------
@@ -688,6 +725,10 @@ proc compileProfileToRbpi*(profileRoot: string;
   discard pruneStaleProfileCache(opts.stateDir)
 
   let key = profileCompileKey(absProfile)
+  # Held until this call returns: across both edges AND the envelope's
+  # publication, which reads the intent document the run edge wrote.
+  var profileLock = acquireProfileLock(opts.stateDir, key)
+  defer: releaseExclusiveFileLock(profileLock)
   let rbpiPath = cachedRbpiPath(opts.stateDir, key)
   let binaryPath = cachedProfileBinaryPath(opts.stateDir, key)
   let intentPath = cachedIntentDocumentPath(opts.stateDir, key)
@@ -918,6 +959,10 @@ proc probeProfilePlatforms*(profileRoot: string;
     else: reprobuildRepoRoot()
   createDir(extendedPath(profileCacheDir(opts.stateDir)))
   let key = profileCompileKey(absProfile)
+  # The compile's lock: the probe stages the same files beside the profile,
+  # and two probes would share the scratch and the document below.
+  var profileLock = acquireProfileLock(opts.stateDir, key)
+  defer: releaseExclusiveFileLock(profileLock)
   let outPath = cachedPlatformProbePath(opts.stateDir, key)
   let scratch = cachedPlatformProbeScratch(opts.stateDir, key)
   let nimExe =

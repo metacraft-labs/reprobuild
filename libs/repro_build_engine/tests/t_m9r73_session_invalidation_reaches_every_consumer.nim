@@ -43,9 +43,12 @@
 ## fixture built to isolate `cacheInvalidatedByPolicy` through a cached
 ## intermediate edge measured `dependencyLaunched = true` anyway and
 ## graded nothing; it was removed rather than kept as a case whose
-## comment described a state it never reached. Case 2 is where the flag
-## is actually load-bearing, because there the invalidating action is
-## itself the one that did not launch.
+## comment described a state it never reached. Case 2 was where the flag
+## was load-bearing, because there the invalidating action was itself the
+## one that did not launch. Since reprobuild-pm issue 2026-11-12 ("an
+## action with no cache record is declared up to date because its outputs
+## exist") that record-less producer executes instead, so case 2 now grades
+## the outcome (the consumer is not served) rather than the shortcut's fold.
 ##
 ## MOCK POLICY — one stand-in, the same one `t_zero_evidence_edge_is_not_
 ## cacheable` justifies at length: the `.iomon` capture is written with
@@ -274,7 +277,7 @@ suite "M9.R.73.2 session invalidation reaches every consumer":
     check second.byId("consumer").cacheDecision in ReuseDecisions
     check not second.byId("consumer").launched
 
-  test "a loss seen on an up-to-date-by-outputs action still invalidates downstream":
+  test "a loss seen on a record-less producer whose output is present still invalidates downstream":
     ## ESCAPE 2, and the one with the widest blast radius: the
     ## outputs-present shortcut COLLECTS evidence and did not fold it into
     ## the session accumulator, so the loss recorded in that capture
@@ -282,12 +285,20 @@ suite "M9.R.73.2 session invalidation reaches every consumer":
     ## narrowed path set; Level 2 loses the session-wide hit disable
     ## entirely.
     ##
-    ## The producer reaches the shortcut because its run-1 capture
-    ## observed NOTHING, so the zero-evidence guard withheld its publish:
-    ## in run 2 it has no record to hit, its output is present, and
-    ## nothing it depends on launched. That is not a contrived state — it
-    ## is what any edge whose capture the engine declines to trust looks
-    ## like on the next build.
+    ## The producer's run-1 capture observed NOTHING, so the zero-evidence
+    ## guard withheld its publish: in run 2 it has no record to hit, its
+    ## output is present, and nothing it depends on launched. That is not a
+    ## contrived state — it is what any edge whose capture the engine
+    ## declines to trust looks like on the next build.
+    ##
+    ## That state used to reach the shortcut and be declared up to date.
+    ## Present outputs with no record behind them no longer make a
+    ## cacheable action up to date (Incremental-Invalidation.md §"Rebuild
+    ## Decision Model"; reprobuild-pm issue 2026-11-12, "an action with no
+    ## cache record is declared up to date because its outputs exist"), so
+    ## the producer now EXECUTES and its Level 1 capture is folded at the
+    ## launch site. What this case still guards is the outcome: the loss
+    ## seen on that producer invalidates its downstream consumer.
     let f = makeFixture("loss-on-uptodate")
     var config = f.testConfig()
 
@@ -301,15 +312,16 @@ suite "M9.R.73.2 session invalidation reaches every consumer":
     writeRmdf(f.producerReport(2), @[killBeforeFlush()])
     let second = runBuild(graph([f.producer(2),
       f.consumer(["producer"], declaresProducedPath = true)]), config)
-    # The producer was NOT launched — it was declared up to date because
-    # its outputs are present — and its capture still said Level 1.
-    check not second.byId("producer").launched
-    check second.byId("producer").status == asUpToDate
+    # The producer has no record, so it ran, and its capture said Level 1.
+    check second.byId("producer").launched
+    check second.byId("producer").status == asSucceeded
     check second.byId("consumer").cacheDecision notin ReuseDecisions
     check second.byId("consumer").launched
 
   test "and nothing is invalidated when that action's capture is clean":
-    ## Narrowness control for escape 2.
+    ## Narrowness control for escape 2: the same record-less producer
+    ## executes, its clean capture invalidates nothing, and the consumer is
+    ## served.
     let f = makeFixture("noloss-on-uptodate")
     var config = f.testConfig()
 
@@ -322,5 +334,6 @@ suite "M9.R.73.2 session invalidation reaches every consumer":
     writeRmdf(f.producerReport(2), @[])
     let second = runBuild(graph([f.producer(2),
       f.consumer(["producer"], declaresProducedPath = true)]), config)
-    check not second.byId("producer").launched
+    check second.byId("producer").launched
+    check second.byId("consumer").cacheDecision in ReuseDecisions
     check not second.byId("consumer").launched

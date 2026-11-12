@@ -266,10 +266,103 @@ proc readAndRemove(path: string): string =
   except CatchableError:
     discard
 
+const
+  ForeignEnvProgressEnvVar* = "REPRO_FOREIGN_ENV_PROGRESS_FILE"
+    ## Names the file a capture appends its producer's stderr to WHILE the
+    ## producer runs. The capture runs three processes below the terminal
+    ## (CLI -> introspection edge -> provider), and each level hands its
+    ## child's stderr upward only after the child exits, so this file is the
+    ## one route by which `nix`'s own `waiting for the big garbage collector
+    ## lock...` reaches the person who is waiting. The introspection helper
+    ## sets it; the activating CLI reads it with `ForeignEnvProgressTail`.
+  ForeignEnvProgressPollMs = 100
+    ## How often a running producer's stderr is copied to the progress file.
+    ## The CLI redraws on the engine's 100 ms tick, so polling faster would
+    ## only add wake-ups nobody sees.
+
+proc appendNewBytes(source, sink: string; offset: var int64) =
+  ## Append what `source` gained since `offset` to `sink`. Read by position
+  ## rather than by line: a producer's status line is often unterminated
+  ## while it waits, and it is exactly the line that must not be held back.
+  var input: File
+  if not open(input, extendedPath(source), fmRead):
+    return
+  var chunk = ""
+  try:
+    let size = getFileSize(input)
+    if size <= offset:
+      return
+    input.setFilePos(offset)
+    chunk = newString(int(size - offset))
+    let got = input.readBuffer(addr chunk[0], chunk.len)
+    chunk.setLen(got)
+  finally:
+    input.close()
+  if chunk.len == 0:
+    return
+  var output: File
+  if not open(output, extendedPath(sink), fmAppend):
+    return
+  try:
+    output.write(chunk)
+  finally:
+    output.close()
+  offset += chunk.len
+
+type
+  ForeignEnvProgressTail* = object
+    ## The reading end of `ForeignEnvProgressEnvVar`'s file: hands out the
+    ## complete lines a capture has forwarded since the last call.
+    path*: string
+    offset: int64
+    pending: string
+
+proc openForeignEnvProgressTail*(path: string): ForeignEnvProgressTail =
+  ## Start an empty progress file at `path` and follow it. Emptied here, by
+  ## the reader, so lines from an earlier activation are never replayed as
+  ## this one's.
+  result.path = path
+  createDir(extendedPath(parentDir(path)))
+  writeFile(extendedPath(path), "")
+
+proc takeLines*(tail: var ForeignEnvProgressTail; final = false): seq[string] =
+  ## The complete lines appended since the previous call. With `final`, an
+  ## unterminated last line is returned too: the producer has finished, so it
+  ## will never be completed.
+  var input: File
+  if open(input, extendedPath(tail.path), fmRead):
+    try:
+      let size = getFileSize(input)
+      if size < tail.offset:
+        # Emptied by a concurrent activation's reader: follow from the start.
+        tail.offset = 0
+      if size > tail.offset:
+        input.setFilePos(tail.offset)
+        var chunk = newString(int(size - tail.offset))
+        let got = input.readBuffer(addr chunk[0], chunk.len)
+        chunk.setLen(got)
+        tail.offset += got
+        tail.pending.add(chunk)
+    finally:
+      input.close()
+  var start = 0
+  while true:
+    let newline = tail.pending.find('\n', start)
+    if newline < 0:
+      break
+    result.add(tail.pending[start ..< newline].strip(leading = false,
+      chars = {'\r'}))
+    start = newline + 1
+  tail.pending = tail.pending[start .. ^1]
+  if final and tail.pending.len > 0:
+    result.add(tail.pending)
+    tail.pending = ""
+
 proc runCaptureCommand*(argv: openArray[string]; workingDir: string;
                         stdoutPath, stderrPath: string;
                         env: StringTableRef = nil;
-                        captureShell = ""):
+                        captureShell = "";
+                        progressPath = ""):
     tuple[output, error: string, exitCode: int] =
   ## Run a foreign command with its stdout and stderr redirected to FILES, and
   ## return what it wrote to each.
@@ -288,6 +381,10 @@ proc runCaptureCommand*(argv: openArray[string]; workingDir: string;
   ## reaches for before any engine-provisioned prefix exists, which is exactly
   ## the case `uncontrolledStartProcess` exists to make visible at the call
   ## site.
+  ##
+  ## With `progressPath`, stderr is also copied there while the command runs
+  ## (see `ForeignEnvProgressEnvVar`). The file stays the source of the
+  ## returned `error`; the copy is what makes a long wait visible.
   if argv.len == 0:
     raise newException(ForeignEnvCaptureError, "empty foreign command")
   createDir(extendedPath(parentDir(stdoutPath)))
@@ -302,7 +399,15 @@ proc runCaptureCommand*(argv: openArray[string]; workingDir: string;
     ["--noprofile", "--norc", "-c", redirected], env, {})
   var code = 0
   try:
-    code = process.waitForExit()
+    if progressPath.len > 0:
+      var forwarded = 0'i64
+      while process.peekExitCode() == -1:
+        appendNewBytes(stderrPath, progressPath, forwarded)
+        sleep(ForeignEnvProgressPollMs)
+      code = process.waitForExit()
+      appendNewBytes(stderrPath, progressPath, forwarded)
+    else:
+      code = process.waitForExit()
   finally:
     process.close()
   (readAndRemove(stdoutPath), readAndRemove(stderrPath), code)
@@ -363,9 +468,11 @@ proc captureForeignEnvOps*(argv: openArray[string]; workingDir, scriptPath: stri
   let scratch = claimCaptureScratch(parentDir(scriptPath))
   defer: removeDir(extendedPath(scratch))
   let privateScript = scratch / "environment.bash"
+  # Only the producer is forwarded: it is the step that waits on something
+  # outside Reprobuild (`nix`'s store and its locks, `direnv`'s evaluation).
   let produced = runCaptureCommand(argv, workingDir,
     scratch / "producer.stdout", scratch / "producer.stderr", baselineEnv,
-    captureShell)
+    captureShell, progressPath = getEnv(ForeignEnvProgressEnvVar))
   if produced.exitCode != 0:
     raise newException(ForeignEnvCaptureError,
       argv.join(" ") & " failed with exit code " & $produced.exitCode &

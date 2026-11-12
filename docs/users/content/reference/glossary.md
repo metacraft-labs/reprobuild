@@ -5,10 +5,14 @@ kind: reference
 persona: developer
 order: 90
 verifies:
-  commands: [build, graph, show-conventions, shell, exec, shell hook, allow, deny, dev-env export, up, down, run, tasks, develop, workspace, home, system, store gc, daemon, test, certify]
+  commands: [build, graph, show-conventions, cache publish, cache substitute, deploy-agent, infra plan, shell, exec, shell hook, allow, deny, dev-env export, up, down, run, tasks, develop, workspace, home, system, store gc, daemon, test, certify]
   tests:
     - tests/integration/t_dev_env_allow.nim
     - tests/integration/t_integration_local_store_gc.nim
+    - libs/repro_binary_cache_client/tests/t_a3_p2_cli_substitute.nim
+    - tests/integration/t_uses_resolves_sqlite3_from_real_reprobuild_packages.nim
+    - libs/repro_deploy_agent/tests/t_repro_deploy_agent_converges_from_signed_manifest.nim
+    - tests/e2e/m69/t_e2e_repro_infra_plan_time_external_drift.nim
 unverified:
   - claim: "The project-file names `repro.nim` and `reprobuild.nim` are both read."
     reason: "Read from the loader constants (LegacyProjectFileName); no test is cited yet."
@@ -50,6 +54,15 @@ or [system profile](#system-profile) can switch on. Commands select one with
 
 Do not use: role, feature, profile (for an activity).
 
+## Binary cache
+
+A server that holds results reprobuild built, so another machine can fetch a
+result instead of building it again. `repro cache publish` puts a result in one
+and `repro cache substitute` fetches it; `repro-binary-cache` is a server you can
+run yourself.
+
+Do not use: remote cache, substituter (for reprobuild's binary cache).
+
 ## Branch role
 
 A named purpose for a branch, which each repository in a [workspace](#workspace)
@@ -65,6 +78,16 @@ The graph of [actions](#action) reprobuild derives from a [project](#project),
 with an edge wherever one action uses another's output. `repro graph` prints it.
 
 Do not use: action graph, DAG (in prose).
+
+## Catalog
+
+A collection of package definitions, each listing the versions of one package it
+can provide and how to obtain or build each. A name in a project file's
+dependency list refers to a package in a catalog; the public catalog is
+`reprobuild-packages`. The documentation spells the word as `repro` does in its
+messages.
+
+Do not use: registry, package index, package set (for a catalog).
 
 ## Convention
 
@@ -90,6 +113,15 @@ action has to run again, so an input you did not declare still counts.
 
 Do not use: observations, monitor data, traces (for dependency evidence).
 
+## Deploy agent
+
+The loop that `repro deploy-agent` runs on each machine of a fleet: it fetches
+the signed manifest published for that machine, checks the signature against
+the keys the machine trusts, and applies the system profile the manifest
+carries.
+
+Do not use: deploy daemon, push agent, controller (for the deploy agent).
+
 ## Develop mode
 
 The state in which a [workspace](#workspace) builds a dependency from a local
@@ -106,6 +138,14 @@ command inside it, and the [shell hook](#shell-hook) activates it when you enter
 the project's directory.
 
 Do not use: dev shell, devEnv (outside code), sandbox.
+
+## Drift
+
+A change made to a resource outside reprobuild since the last apply, which
+`repro infra plan` reports and the next apply replaces with the profile's
+state.
+
+Do not use: configuration drift, divergence (for drift).
 
 ## Fingerprint
 
@@ -249,8 +289,10 @@ Do not use: cache directory, Nix store (for reprobuild's store).
 
 ## System profile
 
-The machine-wide counterpart of a [home profile](#home-profile), managed with
-`repro system`.
+The machine-wide counterpart of a [home profile](#home-profile): the desired
+state of a machine's operating system, such as its services, users, files and
+settings, written in `system.nim`. `repro infra` plans and applies it, and
+`repro system` manages its generations.
 
 Do not use: machine config, host profile.
 

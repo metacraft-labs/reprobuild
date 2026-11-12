@@ -216,6 +216,15 @@ proc cachedNimcacheDir*(stateDir, profileKey: string): string =
   ## recorded inputs.
   profileCacheDir(stateDir) / "nimcache" / profileKey
 
+proc cachedProfileLockPath*(stateDir, profileKey: string): string =
+  ## The lock file that serialises every compile and platform probe of the
+  ## profile `profileKey` in this state directory (`edge.acquireProfileLock`).
+  ## Those share the nimcache, the probe's scratch, the declared outputs
+  ## above and the files staged beside the profile, so two of them at once
+  ## would overwrite each other's. Under its own directory, so the walk in
+  ## `pruneStaleProfileCache` never meets it.
+  profileCacheDir(stateDir) / "locks" / (profileKey & ".lock")
+
 proc pruneStaleProfileCache*(stateDir: string): int =
   ## Walk `<stateDir>/profile-cache/` and delete every `.rbpi` file
   ## whose envelope header does NOT match the current

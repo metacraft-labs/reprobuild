@@ -14,8 +14,9 @@
 ## payload. Three branches spawn an argv that the payload does not spell out:
 ##
 ## * inline exec replaces every `@FILE:<path>` element with the file's
-##   contents at lowering time, while the payload keeps the literal
-##   `@FILE:<path>`;
+##   contents when the engine starts the build run (`withArgFilesExpanded`),
+##   while the payload -- and the lowered action, which the lowered-graph
+##   cache persists -- keeps the literal `@FILE:<path>`;
 ## * the nim-unittest execute site resolves the test binary against the
 ##   project root, while the payload keeps the path as the recipe wrote it;
 ## * the typed-tool site takes `argv[0]` from the resolved tool profile.
@@ -34,7 +35,7 @@
 ## stale hit it prevents follows from the local cache's documented lookup by
 ## weak fingerprint.
 
-import std/[os, tempfiles, unittest]
+import std/[os, strutils, tempfiles, unittest]
 
 import repro_build_engine
 import repro_cli_support
@@ -65,13 +66,22 @@ suite "a lowered action's weak fingerprint covers its spawned argv":
     let declared = buildAction("argv-key.argfile",
       inlineExecCall(@["/bin/echo", "--token", "@FILE:" & argFile]),
       cacheable = true)
+    # ONE lowering, as a warm build reuses one cached graph: the action
+    # keeps the literal token and its key cannot know the contents yet.
+    let lowered = lowerOne(declared, root)
+    check lowered.argv == @["/bin/echo", "--token", "@FILE:" & argFile]
+    check lowered.expandsArgFiles
     writeFile(argFile, "first-value\n")
-    let first = lowerOne(declared, root)
+    let first = withArgFilesExpanded(lowered)
     writeFile(argFile, "second-value\n")
-    let second = lowerOne(declared, root)
+    let second = withArgFilesExpanded(lowered)
     check first.argv == @["/bin/echo", "--token", "first-value"]
     check second.argv == @["/bin/echo", "--token", "second-value"]
     check first.weakFingerprint != second.weakFingerprint
+    # Expanded once: a re-application reads nothing and keeps the key.
+    check not first.expandsArgFiles
+    removeFile(argFile)
+    check withArgFilesExpanded(first).weakFingerprint == first.weakFingerprint
 
   test "a nim-unittest binary resolved to another path is in the key":
     let rootA = createTempDir("repro-argv-key-unittest-a-", "")
@@ -131,3 +141,34 @@ suite "a lowered action's weak fingerprint covers its spawned argv":
       cacheable = true)
     check lowerOne(declared, root).weakFingerprint ==
       lowerOne(declared, root).weakFingerprint
+    let lowered = lowerOne(declared, root)
+    check withArgFilesExpanded(lowered).weakFingerprint ==
+      withArgFilesExpanded(lowered).weakFingerprint
+
+  test "an action without an @FILE: argument is not flagged":
+    let root = createTempDir("repro-argv-key-plain-", "")
+    defer: removeDir(root)
+    resetBuildActionRegistry()
+    let declared = buildAction("argv-key.plain",
+      inlineExecCall(@["/bin/echo", "plain"]), cacheable = true)
+    let lowered = lowerOne(declared, root)
+    check not lowered.expandsArgFiles
+    check withArgFilesExpanded(lowered).weakFingerprint ==
+      lowered.weakFingerprint
+
+  test "a missing @FILE: file fails the run, naming the action and path":
+    let root = createTempDir("repro-argv-key-missing-", "")
+    defer: removeDir(root)
+    resetBuildActionRegistry()
+    let missing = root / "absent.txt"
+    let declared = buildAction("argv-key.missing",
+      inlineExecCall(@["/bin/echo", "@FILE:" & missing]), cacheable = true)
+    # Lowering no longer reads the file, so a graph lowers (and caches)
+    # before the file exists; the run is where it must be present.
+    let lowered = lowerOne(declared, root)
+    try:
+      discard withArgFilesExpanded(lowered)
+      check false
+    except BuildEngineError as e:
+      check "argv-key.missing" in e.msg
+      check ("@FILE: not found at '" & missing & "'") in e.msg
