@@ -17,6 +17,8 @@
 
 import std/[algorithm, os, osproc, streams, strutils]
 
+import repro_core/git_separated
+
 type
   BucketKind* = enum
     bkLocalDirectory
@@ -80,8 +82,12 @@ proc slugFor(spec: string): string =
 
 proc runGit*(args: openArray[string]; cwd = ""):
     tuple[exitCode: int; output: string] =
-  ## Run ``git`` and capture combined stdout+stderr. The harvester
-  ## never needs git's stdout/stderr split — it's all advisory.
+  # git-merged-reader: clone/pull/fetch, whose text is only quoted on failure
+  ## Run ``git`` and capture combined stdout+stderr: right for a command
+  ## whose text is only quoted back when it fails. A command whose stdout
+  ## IS the answer (``git log``, ``git show``) goes through ``runGitQuery``
+  ## below, because git prints warnings on stderr while still exiting 0 with
+  ## the right answer, and merged they land inside the answer.
   ##
   ## M2 fix: previously this read from the child's stdout via
   ## ``startProcess(...).outputStream.readAll()`` *before* calling
@@ -112,6 +118,24 @@ proc runGit*(args: openArray[string]; cwd = ""):
   let rc = p.waitForExit()
   p.close()
   (rc, outp)
+
+proc runGitQuery*(args: openArray[string]; cwd = ""):
+    tuple[exitCode: int; output: string; diagnostic: string] =
+  ## Run ``git`` for an answer that is PARSED: ``output`` is git's stdout
+  ## alone, byte for byte (a manifest body read with ``git show`` must be the
+  ## blob's bytes), and ``diagnostic`` is the merged text for a failure
+  ## message. Measured: a checkout whose split commit-graph chain names a
+  ## pruned graph file makes ``git log`` print ``warning: unable to find all
+  ## commit-graph files`` on stderr while still exiting 0, and merged, that
+  ## line was read as one more commit SHA. ``gitRunSeparated`` drains both
+  ## streams without deadlock and without the Windows short-read truncation
+  ## ``runGit`` above works around.
+  var argv: seq[string]
+  if cwd.len > 0:
+    argv.add(["-C", cwd])
+  argv.add(args)
+  let res = gitRunSeparated("git", argv, nil, exactStdout = true)
+  (res.code, res.output, res.diagnostic)
 
 # ---------------------------------------------------------------------------
 # Public entry point
@@ -236,14 +260,14 @@ proc commitVersionsFor*(bucket: BucketRef; app: string):
     .replace('\\', '/')
   # ``--first-parent`` keeps the log linear across merges; we want
   # one entry per shipped version, not per merge fan-out.
-  let (rc, output) = runGit(@["log", "--first-parent",
+  let (rc, output, _) = runGitQuery(@["log", "--first-parent",
     "--pretty=format:%H", "--", relPath], cwd = bucket.localRoot)
   if rc != 0: return @[]
   var seenVersions: seq[string] = @[]
   for line in output.splitLines:
     let sha = line.strip()
     if sha.len == 0: continue
-    let (rcShow, body) = runGit(@["show", sha & ":" & relPath],
+    let (rcShow, body, _) = runGitQuery(@["show", sha & ":" & relPath],
       cwd = bucket.localRoot)
     if rcShow != 0: continue
     # Cheap version-field extraction (avoids re-parsing the whole
@@ -274,7 +298,7 @@ proc manifestAtCommit*(bucket: BucketRef; app: string; sha: string): string =
   # ``commitVersionsFor``).
   let relPath = relativePath(dir / (app & ".json"), bucket.localRoot)
     .replace('\\', '/')
-  let (rc, body) = runGit(@["show", sha & ":" & relPath],
+  let (rc, body, _) = runGitQuery(@["show", sha & ":" & relPath],
     cwd = bucket.localRoot)
   if rc != 0: return ""
   body

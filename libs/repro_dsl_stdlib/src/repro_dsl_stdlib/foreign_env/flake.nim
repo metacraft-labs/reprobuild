@@ -51,6 +51,7 @@
 import std/[json, os, strutils]
 
 import repro_core/ambient_execution
+import repro_core/git_separated
 import repro_core/paths
 import repro_core/workspace_root
 import repro_project_dsl
@@ -128,9 +129,12 @@ proc flakeSiblingKind*(dir: string; gitExe = ""): FlakeSiblingKind =
   # Uncontrolled deliberately, and for the same reason `resolveNixExe` resolves
   # `nix` that way: this asks the developer's own git about the developer's own
   # checkout, before any execution profile exists to run it under.
-  let probe = uncontrolledExecCmdEx(quoteShell(git) & " -C " &
-    quoteShell(dir) & " submodule status --recursive")
-  if probe.exitCode != 0:
+  #
+  # The status lines are git's stdout alone: a line it writes to stderr is not
+  # a submodule entry, whatever it starts with.
+  let probe = gitRunSeparated(git,
+    ["-C", dir, "submodule", "status", "--recursive"], nil)
+  if probe.code != 0:
     return fskGitSubmodulesUninitialised
   # `git submodule status` marks an uninitialised entry with a leading `-`.
   for line in probe.output.splitLines():
