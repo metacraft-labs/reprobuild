@@ -47005,17 +47005,18 @@ proc manifestOwnedRepos*(composed: ComposedRouting;
       result.add(repo)
 
 # ---------------------------------------------------------------------------
-# HL-2 (§10 Migration) — legacy ``.repo/manifests`` migration guard.
+# HL-2 (§10 Migration) — record-store migration guard.
 #
-# "No implicit team route" (spec §10) means a legacy ``.repo/manifests``
-# workspace with no team route declared would silently become public-only and
-# stop writing its team manifest lock. That is a BREAKING change we must never
-# make silently. When a manifest checkout is present but the composed
-# configuration plane declares NO explicit route (so no team tier points at the
-# manifest), we emit a LOUD, ONE-TIME guidance naming the exact
-# ``repro locking adopt-manifest`` remedy that keeps the manifest as the team
-# backend. The guidance is throttled by a sentinel under ``.repro/`` so it does
-# not spam every lock/gate run.
+# "No implicit team route" (spec §10) means a workspace whose record-store
+# directory declares no route is public-only and writes no team lock. That
+# must never happen silently. A route is declared by a configuration layer, or
+# by the store existing as a CHECKOUT at its conventional location
+# (``existingRecordStoreRoot``). When a conventional store directory is present
+# but neither holds, we emit a LOUD, ONE-TIME guidance naming the directory and
+# the remedy: make it a checkout of the record repository. A store checkout
+# gets no guidance: it is already the team backend, and ``workspace lock``
+# writes into it. The guidance is throttled by a sentinel under ``.repro/`` so
+# it does not spam every lock/gate run.
 # ---------------------------------------------------------------------------
 
 proc legacyManifestMigrationSentinelPath(workspaceRoot: string): string =
@@ -47023,28 +47024,36 @@ proc legacyManifestMigrationSentinelPath(workspaceRoot: string): string =
 
 proc maybeWarnLegacyManifestWithoutTeamRoute*(workspaceRoot: string;
     composed: ComposedRouting) =
-  ## HL-2 (§10) — emit the one-time guidance when a ``.repro/manifests`` DB
-  ## checkout exists but no explicit route is declared (the workspace that WOULD
-  ## silently go public-only). Best-effort: never raises, never blocks the caller.
-  let manifestsDir = firstExistingRecordStoreDir(workspaceRoot)
-  if not dirExists(manifestsDir): return
+  ## HL-2 (§10) — emit the one-time guidance for the workspace that IS
+  ## silently public-only: a directory exists at a conventional record-store
+  ## location, but nothing declares a route. Nothing declares one when no
+  ## configuration layer names a route AND no conventional location holds a
+  ## checkout. A store CHECKOUT is itself the declaration
+  ## (``existingRecordStoreRoot``) and ``workspace lock`` writes into it, so
+  ## telling that workspace it is public-only would be false. Best-effort:
+  ## never raises, never blocks the caller.
+  let storeDir = firstExistingRecordStoreDir(workspaceRoot)
+  if storeDir.len == 0: return
   if composed.hasExplicitRoutes: return
+  if existingRecordStoreRoot(workspaceRoot).len > 0: return
   let sentinel = legacyManifestMigrationSentinelPath(workspaceRoot)
   if fileExists(sentinel): return
+  let storeRel = relativePath(storeDir, workspaceRoot).replace('\\', '/')
   stderr.writeLine(
-    "repro: WARNING — this workspace has a `.repro/manifests` checkout but NO " &
-    "team route declared in any configuration layer.")
+    "repro: WARNING — this workspace has a `" & storeRel & "` directory " &
+    "that is not a record-store checkout, and NO team route declared in any " &
+    "configuration layer.")
   stderr.writeLine(
     "  Under the tier-isolated locking model there is NO implicit team route: " &
-    "without an explicit route this workspace is PUBLIC-ONLY and will stop " &
-    "writing its team manifest lock (`" & manifestsDir & "/locks/...`).")
+    "this workspace is PUBLIC-ONLY and writes no team lock record (`" &
+    storeDir & "/locks/...`).")
   stderr.writeLine(
-    "  To keep `.repro/manifests` as the TEAM backend, run:  " &
-    "repro locking adopt-manifest --workspace-root=" & workspaceRoot)
+    "  To make `" & storeRel & "` the TEAM backend, make it a git checkout " &
+    "of the workspace's record repository (`[records] url`): a store " &
+    "checkout at that location is itself the route declaration.")
   stderr.writeLine(
-    "  That scaffolds a `[locking] route = [{ visibility = \"team\", " &
-    "backend = \"git-checkout\", path = \".repro/manifests\", repos = [...] }]` " &
-    "route mapping the team tier to the existing manifest checkout.")
+    "  `repro locking adopt-manifest` declares the route explicitly, but only " &
+    "over a checkout; it refuses a plain directory.")
   try:
     createDir(sentinel.parentDir)
     writeFile(sentinel, "warned\n")
@@ -54135,9 +54144,10 @@ proc executeWorkspaceLock(args: WorkspaceLockArgs;
   # ``recordRoutedParticipation`` below. The tier→backend binding comes from the
   # HL-1 composed configuration plane.
   let composed = composeLockingRouting(args.workspaceRoot, identity.binaryPath)
-  # HL-2 (§10) — a legacy ``.repo/manifests`` workspace with no team route must
-  # never silently go public-only; warn (once) and name the ``adopt-manifest``
-  # remedy. Best-effort — never blocks the lock.
+  # HL-2 (§10) — a workspace with a record-store directory but no declared
+  # route (no configured route, and no store checkout) must never silently go
+  # public-only; warn (once) and name the remedy. Best-effort — never blocks
+  # the lock.
   maybeWarnLegacyManifestWithoutTeamRoute(args.workspaceRoot, composed)
   # Carried into the report so every surface can tell a public-only workspace
   # (no route, no store, nothing to record — §10) apart from a routed one whose
