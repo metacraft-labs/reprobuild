@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 35,
-    "nimTestBinaries": 2738,
+    "nimTestBinaries": 2740,
     "pureUnitConsolidationGroups": 80,
     "pureUnitTests": 753,
     "staticallyDetectedRuntimeCompilerFlowTests": 138,
-    "testEntries": 2781
+    "testEntries": 2783
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1582,10 +1582,10 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 21,
-      "integration": 1506,
+      "integration": 1507,
       "platform/destructive": 175,
       "pure unit": 753,
-      "unclassified": 326
+      "unclassified": 327
     },
     "graphOwnedTestArtifacts": [
       {
@@ -1799,9 +1799,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2738,
+    "nimTestBinaryCount": 2740,
     "pythonTestFileCount": 43,
-    "testEntryCount": 2781
+    "testEntryCount": 2783
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -15281,6 +15281,24 @@
       "source": "libs/repro_dsl_stdlib/tests/t_c1_dsl_parse.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 12,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_cargo_edge_owns_its_target_dir",
+      "class": "unclassified",
+      "classificationReason": "mutates the process environment",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_dsl_stdlib",
+        "repro_project_dsl"
+      ],
+      "owner": "libs/repro_dsl_stdlib",
+      "requiresReproBinary": false,
+      "source": "libs/repro_dsl_stdlib/tests/t_cargo_edge_owns_its_target_dir.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 11,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -38187,6 +38205,23 @@
       "owner": "tests/integration",
       "requiresReproBinary": true,
       "source": "tests/integration/t_cargo_edge_reaches_declared_linker.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_cargo_target_dir_ownership_rebuild",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_test_support"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_cargo_target_dir_ownership_rebuild.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 1,
       "staticallyDetectedRuntimeCompilerFlow": false,
