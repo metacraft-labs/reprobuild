@@ -103,10 +103,11 @@ the substitution show up in a diff of the file.
 which is the organisation key
 `22F8 0A4A 65B0 8E36 AEA8 9F57 E127 BF3A C4CE 1719`
 (`REPRO_KEYRING_SHA256` in `scripts/install/repro-install.sh`,
-`$KeyringSha256` in `scripts/install/repro-install.ps1`). On every run
-`install_trust_anchor()` (`Install-TrustAnchor` in PowerShell) hashes the
-fetched keyring — or the `REPRO_KEYRING_LOCAL` file, which gets the same
-check — and **refuses on a mismatch** before the keyring is installed or
+`$KeyringSha256` in `scripts/install/repro-install.ps1`). Before a native
+repository is registered (apt, dnf, pacman) and before a tarball or archive
+is verified, `install_trust_anchor()` (`Install-TrustAnchor` in PowerShell,
+which only the archive method calls) hashes the fetched keyring — or the
+`REPRO_KEYRING_LOCAL` file, which gets the same check — and **refuses on a mismatch** before the keyring is installed or
 any repository is registered. Changing the pinned value is a key rotation.
 
 Only an **empty** `REPRO_KEYRING_SHA256`, which a mirror or a test has to
@@ -118,13 +119,16 @@ consulted. The anchor is never fetched from the release page — verifying a
 release against a key published beside it is circular.
 
 This pin is a separate control from M2's release-key allowlist,
-`scripts/release-signing/trusted-release-keys.txt`, which still lists zero
+`scripts/release-signing/trusted-release-keys.txt`, which lists zero
 fingerprints because reprobuild has no release key yet. That allowlist
 governs **signing**: `repro-sign-release.sh` refuses any key it does not
 list, so release-mode signing fails closed. It does not govern installs.
 The tarball fallback verifies `SHA256SUMS.asc` and the artefact's own
 signature with `repro-verify-release.sh` against the pinned organisation
-keyring, and refuses unless both carry a valid signature by that key.
+keyring, and refuses unless both carry a valid signature by that key. No
+published release carries those signatures, because release-mode signing
+has no key, and `/sh` does not bundle the verifier (`locate_verifier()`),
+so the tarball fallback refuses rather than installs.
 
 ### Where the configurable base URL lives
 
@@ -699,7 +703,15 @@ decision for a human**, not something this work should quietly settle.
 `scripts/install/repro-install.sh`, at **`/sh`** (`REPRO_GET_SH_SOURCE`
 defaults to `repo`) and again at **`/repo-sh`** as an alias, and `/pwsh`
 is `scripts/install/repro-install.ps1`. Both carry the pinned anchor
-digest, so a default run verifies the organisation key and proceeds.
+digest. On apt and dnf systems a default `/sh` run verifies the
+organisation key, registers the repository and proceeds. Elsewhere
+(Arch, whose `REPRO_ARCH_URL` is empty by default, macOS, an unrecognised
+distribution) `/sh` falls back to the tarball method and refuses, as
+described in "The trust anchor, and why it is pinned by digest". On NixOS
+it uses the `nixos` method, which does not read the anchor. `/pwsh`
+defaults to Scoop when Scoop is installed, which checks archive hashes
+against the bucket manifest, and uses the anchor only for the archive
+method.
 `REPRO_GET_SH_SOURCE=legacy` puts the nix/local-prefix
 `install-on-distributions.sh` back at `/sh`, as a rollback that needs no
 code change.
