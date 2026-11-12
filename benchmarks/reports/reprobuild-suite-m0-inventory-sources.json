@@ -41808,7 +41808,7 @@
       "requiresReproBinary": true,
       "source": "tests/integration/t_hcr_native_library_prerequisite.nim",
       "sourceSuiteCount": 2,
-      "staticCaseCount": 5,
+      "staticCaseCount": 6,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
