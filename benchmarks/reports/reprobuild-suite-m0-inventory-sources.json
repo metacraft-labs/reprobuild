@@ -12061,7 +12061,7 @@
       "requiresReproBinary": true,
       "source": "libs/repro_build_engine/tests/test_elevated_inline_exec_hook.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 5,
+      "staticCaseCount": 6,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
