@@ -278,6 +278,7 @@ when defined(linux):
 import repro_cli_support/deploy_agent as cli_deploy_agent
 import repro_cli_support/hardware as cli_hardware
 import repro_cli_support/disk as cli_disk
+import repro_cli_support/cargo_gc as cli_cargo_gc
 import repro_cli_support/attest as cli_attest
 import repro_cli_support/mode1_loader
 import repro_cli_support/post_commit_trace
@@ -585,6 +586,10 @@ proc renderUsage*(programName: string): string =
       " deploy-agent keygen --secrets-key <FILE>\n       " &
           programName &
       " hardware {probe} [--dry-run | --output PATH | --regenerate]\n       " &
+          programName &
+      " cargo gc [--target-dir DIR] [--keep-sets N] [--min-age DURATION] [--dry-run] [--cargo-home[=DIR]]\n       " &
+          programName &
+      " cargo record-live [--target-dir DIR] [--from FILE|-] [--tee] [--keep-sets N]\n       " &
           programName &
       " attest expect --image PATH [--out PATH | --check PATH]\n       " &
           programName &
@@ -14751,10 +14756,13 @@ proc runStableProviderProtocol(binaryPath, protocolRoot, stem, cwd: string;
   writeProviderRequestFile(requestPath, request)
   if fileExists(extendedPath(responsePath)):
     removeFile(extendedPath(responsePath))
-  let argv = @[
+  # Under the portable Linux release a provider it compiled starts through
+  # the bundled loader (`portableReleaseHelperArgv`), or it cannot load the
+  # release's clingo on a host glibc older than the release's.
+  let argv = portableReleaseHelperArgv(@[
     binaryPath,
     "--repro-provider-request", requestPath,
-    "--repro-provider-response", responsePath]
+    "--repro-provider-response", responsePath], cwd = cwd)
   # M8 stderr-truncation fix: previously used
   # ``startProcess + outputStream.readAll + waitForExit`` to drive the
   # provider here too, with the same symptom — diagnostics from the
@@ -95535,6 +95543,9 @@ const reproTopLevelCommands = [
   "anywhere",
   "deploy-agent",
   "hardware", "disk", "launch-plan", "locking",
+  # `repro cargo gc|record-live`: the cargo target-directory janitor
+  # (docs/cargo-gc.md).
+  "cargo",
   # `repro attest <sub>`: expected launch measurements for attested images.
   "attest",
   # Nix-Flake-Coexistence NF-1 — ``repro flake <sub>``: the override
@@ -105127,6 +105138,16 @@ proc runThinAppDispatch(programName: string): int =
       else:
         @[]
     return runDiskCommand(diskArgs)
+  if programName == "repro" and args.len > 0 and args[0] == "cargo":
+    # `repro cargo gc|record-live`: the cargo target-directory janitor. The
+    # dispatcher lives in `repro_cli_support/cargo_gc.nim`; the logic in the
+    # `repro_cargo_gc` library.
+    let cargoArgs =
+      if args.len > 1:
+        args[1 .. ^1]
+      else:
+        @[]
+    return cli_cargo_gc.runCargoCommand(cargoArgs)
   if programName == "repro" and args.len > 0 and args[0] == "attest":
     # `repro attest` — expected launch measurements for attested images.
     # The dispatcher lives in `repro_cli_support/attest.nim`; the CLI

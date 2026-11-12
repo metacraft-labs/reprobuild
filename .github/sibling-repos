@@ -306,3 +306,24 @@ test-certificates-spec=9ebbcb3c9e539f294dbe125dea87c445b270523e
 # scripts/run_addon_gate.sh resolves and every gate record carries; move
 # both together.
 gosti=24d481f29b2d350dcb95f702c55190823642d52a
+
+# The deployment repository (private; mainline `live`), cloned for ONE file:
+# `services/repro-deploy-manifest/render-deploy-manifest.py`, the independent
+# Python producer of the RDMF manifest format. It is the oracle of
+# libs/repro_deploy_agent/tests/t_rdmf_v3_cross_implementation_conformance.nim,
+# which finds it at ../infra/services/repro-deploy-manifest/ (findProducer),
+# runs it with the dev shell's RDMF_PYTHON, and -- with
+# RDMF_CONFORMANCE_REQUIRED=1, which the Test job sets -- fails rather than
+# skips when it is absent. Without this clone the cross-implementation half
+# never ran on CI.
+#
+# Cloned rather than vendored: reprobuild is public and the producer is not,
+# and a vendored copy would be a second record of it that the deployment's
+# own changes do not move. Pinned to an exact revision rather than `live`
+# because `live` moves with every deployment merge, and an encoder change
+# there would turn this suite red (or green) under a commit that changed
+# nothing here; moving the pin is how a new producer revision is adopted.
+# The test's mutations patch the producer's source text, so check them
+# (RDMF_CONFORMANCE_MUTATION=python-omits-closure-digests and
+# python-lists-default must each go red) when you move it.
+infra=037e029d66f1fb577928e61a29e22e4ae399cece

@@ -717,6 +717,14 @@ type
       ## lowered-graph cache that persists it, therefore never hold a
       ## substituted value, and a warm graph cannot replay the value a
       ## file held when the graph was lowered.
+    argFileLiteralArgv*: seq[string]
+      ## The argv as lowered, with its literal ``@FILE:<path>`` tokens,
+      ## kept by ``withArgFilesExpanded`` once ``argv`` holds the
+      ## substituted values. Empty for an action that carried no token.
+      ## An elevated edge hands this, not ``argv``, to the broker: the
+      ## broker re-expands the tokens under elevation and records each
+      ## substitution redacted in its audit log, so the values never
+      ## cross into the request.
     networkMode*: NetworkMode
       ## Sandbox-And-Monitoring.md §"The Network Dimension" — this
       ## action's network mode. The zero value is ``netDenied``, so every
@@ -3901,6 +3909,7 @@ proc withArgFilesExpanded*(action: BuildAction;
   var fingerprint = keyedOnArgv(action.weakFingerprint, expanded)
   if action.argv.len > 0 and isArgFileToken(action.argv[0]):
     fingerprint = keyedOnContentAddressedToolRoot(fingerprint, expanded)
+  result.argFileLiteralArgv = action.argv
   result.argv = expanded
   result.weakFingerprint = fingerprint
   # Expanded once: a second application (a dyndep re-derivation of the
@@ -22770,9 +22779,14 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
                 "broker can fork it; the standalone `repro build` " &
                 "driver leaves the broker hook unset by design)")
           let elevatedStart = statStart()
+          # The literal ``@FILE:`` tokens, not the values the run
+          # substituted to key the edge: the broker expands them itself.
           let req = ElevatedExecRequest(
             actionId: action.id,
-            argv: action.argv,
+            argv: (if action.argFileLiteralArgv.len > 0:
+                     action.argFileLiteralArgv
+                   else:
+                     action.argv),
             cwd: action.cwd,
             env: action.env)
           var brokerOutcome: ElevatedExecResult

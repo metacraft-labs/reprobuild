@@ -5,7 +5,7 @@ kind: reference
 persona: developer
 order: 90
 verifies:
-  commands: [build, graph, show-conventions, cache publish, cache substitute, deploy-agent, infra plan, shell, exec, shell hook, allow, deny, dev-env export, up, down, run, tasks, develop, workspace, home, system, store gc, daemon, test, certify]
+  commands: [build, graph, show-conventions, cache publish, cache substitute, deploy-agent, infra plan, reap, shell, exec, shell hook, allow, deny, dev-env export, up, down, run, tasks, develop, workspace, home, system, store gc, daemon, test, certify]
   tests:
     - tests/integration/t_dev_env_allow.nim
     - tests/integration/t_integration_local_store_gc.nim
@@ -13,6 +13,8 @@ verifies:
     - tests/integration/t_uses_resolves_sqlite3_from_real_reprobuild_packages.nim
     - libs/repro_deploy_agent/tests/t_repro_deploy_agent_converges_from_signed_manifest.nim
     - tests/e2e/m69/t_e2e_repro_infra_plan_time_external_drift.nim
+    - libs/repro_resources/tests/t_resource_provider_lane.nim
+    - libs/repro_resources/tests/t_l2_lease_edge.nim
 unverified:
   - claim: "The project-file names `repro.nim` and `reprobuild.nim` are both read."
     reason: "Read from the loader constants (LegacyProjectFileName); no test is cited yet."
@@ -181,6 +183,15 @@ A description of the tools, files and services on your own account, written in
 
 Do not use: dotfiles config, home config, home manifest.
 
+## Lease
+
+A consumer's hold on a [state group](#resource): a test or a run target lists
+the groups it consumes, each with a policy that says when the state may be
+destroyed after use (`immediate()`, `delayed(...)` or `keep()`). The reaper
+destroys state whose lease has run out.
+
+Do not use: reservation, lock (for a lease).
+
 ## Lock file
 
 The file `repro.lock`, which a repository commits to pin the exact revisions and
@@ -255,6 +266,16 @@ A file under a workspace's `repos/` directory that declares one repository: its
 name, its checkout path, its remote and its [branch roles](#branch-role).
 
 Do not use: repo manifest, repo entry.
+
+## Resource
+
+Something reprobuild creates and keeps in a declared state, such as a
+container, a database or a systemd unit. Its resource type, defined with
+`resourceType` in any repository, plays the part of a Terraform provider. A
+named set of resources that tests consume together is a state group,
+declared with `stateGroup`.
+
+Do not use: infrastructure object, managed object (for a resource).
 
 ## Service
 

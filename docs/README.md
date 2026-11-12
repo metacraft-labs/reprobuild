@@ -9,5 +9,6 @@ Reprobuild repository.
 - [Bootstrap Build Graph](bootstrap-build-graph.md)
 - [Dependency Collection](dependency-collection.md)
 - [Build Stats](stats.md)
+- [Cleaning a cargo target directory](cargo-gc.md)
 - [Nix Provisioning Catalog](nix-provisioning.md)
 - [Package Cache Identity Safety](package-cache-identity.md)

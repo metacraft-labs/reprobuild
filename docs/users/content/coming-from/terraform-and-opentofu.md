@@ -17,6 +17,8 @@ verifies:
     - tests/e2e/gm10/t_e2e_infra_apply_refuses_externally_managed_host.nim
     - libs/repro_deploy_agent/tests/t_repro_deploy_agent_converges_from_signed_manifest.nim
     - libs/repro_deploy_agent/tests/t_repro_deploy_agent_rejects_wrong_signer.nim
+    - libs/repro_resources/tests/t_rp4_resource_type_macro.nim
+    - libs/repro_resources/tests/t_resource_provider_lane.nim
 unverified:
   - claim: "A profile is Nim, checked by the compiler, and uses the same packages and store as your builds."
     reason: "The home-profile tests compile real profiles; no test is cited for a compile error in a system profile."
@@ -33,6 +35,7 @@ tool for cloud resources.
 
 - You declare the state you want, not the steps. A system profile lists resources: a systemd unit, a user, a firewall rule, a registry value.
 - Plan, then apply. `repro infra plan` shows the changes; `repro infra apply` makes them, and a new plan afterwards is empty.
+- Providers. Any repository can define a resource type, the counterpart of a provider, and projects declare resources of it.
 - Resources can depend on each other, and reprobuild applies them in dependency order.
 - State is recorded. Each apply records what it manages, so a later apply knows what to change or remove, and what has drifted.
 
@@ -41,7 +44,8 @@ tool for cloud resources.
 | Terraform or OpenTofu | reprobuild |
 |---|---|
 | `.tf` configuration | a [system profile](../reference/glossary.md#system-profile), `system.nim`, or a [home profile](../reference/glossary.md#home-profile) |
-| resource | a resource in a profile, such as `systemd.systemUnit` or `windows.registryValue` |
+| provider | a [resource](../reference/glossary.md#resource) type, declared with `resourceType` in any repository |
+| resource | a resource in a profile, or one a project declares with `resource(...)` |
 | `depends_on` | `depends_on` |
 | `terraform plan` | `repro infra plan` |
 | a saved plan file | a plan id, applied with `repro infra apply --plan <id>` |
@@ -76,7 +80,8 @@ engine as a build, so a step whose result is already in place is not repeated.
 
 ## What reprobuild does not do
 
-- It does not manage cloud resources or create machines, and it does not run Terraform or OpenTofu providers.
+- It does not run Terraform or OpenTofu provider binaries; a provider is written as a reprobuild resource type.
+- No resource type that ships with reprobuild manages cloud resources or creates machines.
 - It has no remote state, and no `import` or `state` commands.
 
 ## When Terraform or OpenTofu remains the better choice
@@ -90,4 +95,5 @@ its operating system in the declared state with reprobuild.
 
 - [Machines and profiles](../concepts/machines-and-profiles.md)
 - [Fleets and the deploy agent](../concepts/fleets-and-the-deploy-agent.md)
+- [Resources and state](../concepts/resources-and-state.md)
 - [Command equivalents](../reference/command-equivalents.md#terraform-and-opentofu)

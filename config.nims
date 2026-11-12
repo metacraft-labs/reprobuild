@@ -562,6 +562,10 @@ for libName in [
   # Nix closure, sources and native store (docs/workspace-bundles.md).
   # ``repro_cli_support`` imports it for `repro bundle`.
   "repro_bundle",
+  # Cargo target-directory janitor: records each cargo invocation's live set
+  # and deletes stale build units (docs/cargo-gc.md). ``repro_cli_support``
+  # imports it for `repro cargo`.
+  "repro_cargo_gc",
   # Incremental-Test-Runner M0b-3: the former vendored ``repro_ct_incremental``
   # engine copy was DELETED. The ``repro watch --ct-incremental`` decision seam
   # now flows through the engine-free ``ct_incremental_adapter`` (resolved from

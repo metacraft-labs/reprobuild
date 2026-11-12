@@ -118,6 +118,7 @@ jobs:
             tree-sitter-sway
             tree-sitter-tolk
             codetracer-native-recorder
+            infra
           permission-contents: read
       - uses: metacraft-labs/metacraft-github-actions/setup-dev-env@dev
         with:
@@ -493,6 +494,7 @@ jobs:
             reprobuild-cmake
             reprobuild-examples
             gosti
+            infra
           permission-contents: read
 
       # Sibling clones: setup-dev-env clones the CodeTracer sibling declared in
@@ -1217,6 +1219,11 @@ jobs:
           REPROBUILD_BUILD_TIMEOUT: "5h"
           REPROBUILD_RUNNER_TIMEOUT: "330m"
           CT_BIN: ${{ env.CT_BIN }}
+          # The RDMF cross-implementation cases need the Python producer (the
+          # `infra` sibling) and an interpreter with `cryptography` (the dev
+          # shell's RDMF_PYTHON). Both are provided here, so their absence is
+          # a failure, not the reasoned skip a workstation without them gets.
+          RDMF_CONFORMANCE_REQUIRED: '1'
           GIT_CONFIG_GLOBAL: /dev/null
           GIT_CONFIG_NOSYSTEM: '1'
           GIT_TERMINAL_PROMPT: '0'
@@ -1368,6 +1375,7 @@ jobs:
             tree-sitter-sway
             tree-sitter-tolk
             codetracer-native-recorder
+            infra
           permission-contents: read
       - uses: metacraft-labs/metacraft-github-actions/setup-dev-env@dev
         with:
