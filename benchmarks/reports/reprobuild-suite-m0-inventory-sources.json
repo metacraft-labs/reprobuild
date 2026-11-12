@@ -1582,10 +1582,10 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 21,
-      "integration": 1503,
+      "integration": 1504,
       "platform/destructive": 175,
       "pure unit": 752,
-      "unclassified": 326
+      "unclassified": 325
     },
     "graphOwnedTestArtifacts": [
       {
@@ -10151,8 +10151,8 @@
     },
     {
       "binary": "build/test-bin/t_cache_reads_are_bounded",
-      "class": "unclassified",
-      "classificationReason": "mutates the process environment",
+      "class": "integration",
+      "classificationReason": "subprocess or repro CLI invocation in test body",
       "defines": [
         "ssl"
       ],
@@ -10164,7 +10164,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_binary_cache_client/tests/t_cache_reads_are_bounded.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 5,
+      "staticCaseCount": 12,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
