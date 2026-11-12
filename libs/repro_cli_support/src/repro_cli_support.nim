@@ -2334,6 +2334,16 @@ proc moduleHasDevEnvBlock(modulePath: string): bool =
     if line.strip() == "devEnv:":
       return true
 
+proc moduleDeclaresPackage(modulePath: string): bool =
+  ## Whether the module itself declares a ``package``. Compiled as a
+  ## provider's main module, every package it declares emits the provider
+  ## dispatcher, with or without a ``build:`` body; a module that declares
+  ## none (only ``lockFile`` or other declarations) has no dispatcher.
+  for line in readFile(extendedPath(modulePath)).splitLines:
+    let stripped = line.strip()
+    if stripped.startsWith("package ") and ':' in stripped:
+      return true
+
 proc materialProjectPath(projectRoot, path: string): string =
   if path.len == 0 or path.isAbsolute:
     path
@@ -91336,15 +91346,15 @@ proc solverInputsFromCompiledProvider(projectDir: string;
       # emitted at top-level module scope), BEFORE any request is dispatched —
       # so the emission happens regardless of the request kind, and a manifest
       # request provisions no tools and builds nothing (no-build semantics).
-      if moduleHasBuildBlock(modulePath) or moduleHasDevEnvBlock(modulePath):
+      if moduleDeclaresPackage(modulePath):
         discard runStableProviderProtocol(provider.outputBinaryPath, protocolRoot,
           "solver-inputs", cwd, ProviderGraphRequest(
             kind: prkManifest,
             providerArtifactId: digestHex(provider.providerFingerprint),
             reason: girExplicitUserRequest))
       else:
-        # Declaration-only modules emit solver inputs during initialization,
-        # but buildCode generates no request/response dispatcher for them.
+        # A module that declares no package emits its solver inputs during
+        # initialization and has no request/response dispatcher to ask.
         let initialized = runFeedingStdin(provider.outputBinaryPath, [], "", cwd)
         if initialized.code != 0:
           raise newException(OSError,
@@ -93446,13 +93456,12 @@ proc siblingVariantDeclarations(checkout: string):
   ##
   ## A RECIPE WITH NO `build:` OR `devEnv:` BODY IS ASKED TOO. `buildCode`
   ## (`macros_b.nim`) emits the provider's `runPackageProvider` dispatcher
-  ## only for a recipe with one of those bodies, so such a binary cannot
-  ## answer a protocol request. It does not need to: its module init emits
-  ## the solver inputs, and since 0e7146a92 the probe runs a declaration-only
-  ## module's initialiser directly instead of sending it a request. This was
-  ## recorded here as a known limitation until then; it is now pinned the
-  ## other way round by `a recipe with no build: block is asked through its
-  ## initialiser` in `t_develop_override_records_the_identity_it_replaced`.
+  ## for every package the recipe declares, so the probe sends such a binary
+  ## the same manifest request as any other; its module init has emitted the
+  ## solver inputs by then. Only a module that declares no package has no
+  ## dispatcher, and the probe runs its initialiser alone. Pinned by `a
+  ## recipe with no build: block is asked through its initialiser` in
+  ## `t_develop_override_records_the_identity_it_replaced`.
   result = @[]
   if checkout.len == 0:
     return

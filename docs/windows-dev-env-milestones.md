@@ -85,17 +85,17 @@ Files changed:
   re-keys when the floor changes (the engine cross-checks the request/result
   body hash against the manifest).
 
-Note: the DSL only emits a provider serve loop (`runPackageProvider`) when a
-package has a `build:` OR `devEnv:` body (`buildCode` in `macros_b.nim`
-early-returns otherwise). All real uses:-only leaf recipes (nim-acp,
-reprobuild's own) carry a `build:` block, so they get the serve loop; a recipe
-with neither block produces no provider binary at all (unchanged, out of scope).
+Note: the DSL emits the provider dispatcher (`runPackageProvider`) for every
+package compiled as a provider's main module, whatever bodies it has
+(`buildCode` in `macros_b.nim`). A package with neither a `build:` nor a
+`devEnv:` body answers dev-env introspection with its implicit environment and
+refuses a graph request, since nothing in the binary can produce its graph.
 
 Tests added:
 - `tests/e2e/dev-env/t_e2e_provider_dev_env_implicit_floor.nim` (modeled on the
   existing `t_e2e_provider_dev_env_introspection.nim`; compiles a real provider
-  binary from a `uses:`-only fixture — floor `nim`/`gcc`, a `library`, and a
-  minimal `build: discard`, no `devEnv:` block):
+  binary from a `uses:`-only fixture — floor `nim`/`gcc` and a `library`, no
+  `build:` and no `devEnv:` block):
   1. `uses_only_manifest_exposes_dev_env_introspection` — asserts the compiled
      provider manifest exposes exactly one `gpkDevEnvIntrospection` entry with
      id `floorfixture.dev-env` and a non-empty (floor-derived) body hash.
@@ -105,6 +105,12 @@ Tests added:
      `services` / `declaredActivities` are empty (no extra `devEnv:` body), and
      the provider source is still recorded as an evaluation input / source
      fingerprint.
+  3. `build_and_explicit_dev_env_controls_return_the_same_floor` — the same
+     fixture with an empty `build:` body, and with an empty `devEnv:` body,
+     yields the same floor-derived environment.
+  4. `bodiless_recipe_exposes_base_environment_and_refuses_a_graph` — a
+     recipe with no floor and no body answers introspection with the base
+     environment and refuses a graph request, naming the package.
 
 Validation observed (Windows, `build/bin` + Nim on PATH,
 `REPRO_DEV_ENV_AUTO_ALLOW=1`):

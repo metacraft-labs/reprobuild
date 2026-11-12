@@ -603,17 +603,11 @@ suite "the engine records the sibling's variant declarations":
     check entry.len == 2
 
   test "a recipe with no build: block is asked through its initialiser":
-    # THIS CASE USED TO PIN THE OPPOSITE, as a known limitation: `buildCode`
-    # emits the provider's protocol dispatcher only for a recipe with a
-    # `build:` (or `devEnv:`) body, and the probe used to send such a binary a
-    # manifest request it could not answer, discarding the solver inputs its
-    # module init had already written. 0e7146a92 ("Include resource-provider
-    # constraints in refreshed locks") closed that: for a declaration-only
-    # module `solverInputsFromCompiledProvider` now runs the binary's
-    # initialiser alone and reads the emission — the fix the writer's own
-    # doc-comment named ("teaching that probe to keep inputs the provider
-    # demonstrably wrote"). The limitation is gone, so the case asserts the
-    # declaration ARRIVES rather than that it is missing.
+    # A recipe with no `build:` body still declares a package, so its
+    # provider binary carries the `runPackageProvider` dispatcher and answers
+    # the probe's manifest request; its module init has written the solver
+    # inputs by then, and `solverInputsFromCompiledProvider` reads them. The
+    # declaration must ARRIVE.
     #
     # The premise first, so this cannot silently become a test of something
     # else: the recipe really does declare a variant, and has no `build:`.
