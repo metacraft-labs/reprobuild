@@ -32,7 +32,7 @@
 ## flag added to the `cli:` spec has to be added here too, or it is not
 ## reachable from a recipe.
 
-import std/os
+import std/[os, sequtils, strutils]
 
 import repro_project_dsl
 import cargo_cli
@@ -57,6 +57,7 @@ proc cargoTargetDir*(targetDir, crateDir: string): string =
   ## named one, else `<crateDir>/target`. An empty `crateDir` is the action's
   ## working directory.
   if targetDir.len > 0: targetDir
+  elif crateDir == ".": DefaultTargetDirName
   else: slashJoin(crateDir, DefaultTargetDirName)
 
 proc cargoBuildDepfileGlobs*(targetDir, target: string): seq[string] =
@@ -79,8 +80,8 @@ proc cargoTestDepfileGlobs*(targetDir: string): seq[string] =
   ## The depfile globs of a `cargo test --no-run` whose target directory is
   ## `targetDir`. cargo does not link test executables into the profile
   ## directory, so only the per-crate `deps/` files exist for them. Their
-  ## paths are relative to the cargo workspace root, so they resolve to the
-  ## sources only when the crate is in the action's working directory.
+  ## paths are relative to the cargo workspace root, so `test` runs the edge in
+  ## the manifest's directory (see there) to make them resolve.
   @[slashJoin(targetDir, "debug/deps/*.d"),
     slashJoin(targetDir, "release/deps/*.d")]
 
@@ -198,16 +199,59 @@ proc test*(pkg: CargoTool;
     {.discardable.} =
   ## `cargo test`. The target directory is `targetDir`, else the `target`
   ## directory beside `manifestPath` (the working directory's, without one).
-  let effectiveTargetDir = cargoTargetDir(targetDir, parentDir(manifestPath))
-  cargo_cli.test(pkg, locked = locked, release = release, noRun = noRun,
-    noDefaultFeatures = noDefaultFeatures, manifestPath = manifestPath,
+  ##
+  ## A manifest below the recipe root (`rust/Cargo.toml`) makes the edge run
+  ## IN that directory, as `cargo test` itself does. cargo does not link test
+  ## executables, so the only dependency evidence of the edge is rustc's
+  ## per-crate `deps/*.d`, whose source paths are relative to the cargo
+  ## workspace root, the manifest's directory; the engine resolves them against
+  ## the action's working directory, so they name the crate's sources only
+  ## when the two are the same. Every path of the call that cargo resolves
+  ## against its working directory (`--manifest-path`, `--target-dir`, the
+  ## extra outputs, the depfile globs) is re-spelled relative to it; declared
+  ## inputs (the manifest among them) keep the recipe-root spelling, because
+  ## the lowering materializes them against the recipe root.
+  let crateDir = parentDir(manifestPath).replace('\\', '/')
+  let inCrateDir = crateDir notin ["", "."] and not manifestPath.isAbsolute and
+    not crateDir.startsWith("..")
+  proc fromCrateDir(path: string): string =
+    if not inCrateDir or path.len == 0 or path.isAbsolute: path
+    else: relativePath(path, crateDir, '/')
+  let effectiveTargetDir =
+    if inCrateDir:
+      cargoTargetDir(fromCrateDir(targetDir), "")
+    else:
+      cargoTargetDir(targetDir, crateDir)
+  result = cargo_cli.test(pkg, locked = locked, release = release,
+    noRun = noRun, noDefaultFeatures = noDefaultFeatures,
+    manifestPath = (if inCrateDir: extractFilename(manifestPath)
+                    else: manifestPath),
     targetDir = effectiveTargetDir, package = package, bin = bin,
-    testBinaryPath = testBinaryPath, actionId = actionId, deps = deps,
-    after = after, extraInputs = extraInputs, extraOutputs = extraOutputs,
+    testBinaryPath = fromCrateDir(testBinaryPath), actionId = actionId,
+    deps = deps, after = after, extraInputs = extraInputs,
+    extraOutputs = (if inCrateDir: extraOutputs.mapIt(fromCrateDir(it))
+                    else: @extraOutputs),
     extraEnv = extraEnv, depfile = depfile, cacheable = cacheable,
     actionCachePolicy = actionCachePolicy, commandStatsId = commandStatsId,
     dependencyPolicy = cargoDepfilePolicy(dependencyPolicy,
       cargoTestDepfileGlobs(effectiveTargetDir)))
+  if inCrateDir:
+    setRegisteredActionCwd(result.action.id, acwdCustom, crateDir)
+    result.action.cwdKind = acwdCustom
+    result.action.cwdCustomPath = crateDir
+    # The manifest is an input, and inputs are materialized against the
+    # recipe root: put back the spelling the caller used, in the position the
+    # re-spelled flag held.
+    var inputs = result.action.inputs
+    for i in 0 ..< inputs.len:
+      if inputs[i] == extractFilename(manifestPath):
+        inputs[i] = manifestPath
+    setRegisteredActionInputs(result.action.id, inputs)
+    result.action.inputs = inputs
+    # The handle keeps the recipe-root spelling too: `.run()` takes its path
+    # as an input of its own edge, which runs in the recipe root.
+    if testBinaryPath.len > 0:
+      result.testBinary = CargoTestBinary(path: testBinaryPath)
 
 # ---------------------------------------------------------------------------
 # Manual wrapper on the `CargoTestBinary` typed output — emits one
@@ -268,6 +312,11 @@ proc run*(self: CargoTestBinary; filter = "";
   # the build put its target directory. Otherwise both profile directories
   # are declared, as in the build subcommand: at most one exists per
   # workspace and the other glob legitimately expands to zero matches.
+  #
+  # The sources those files list are relative to the crate's directory and
+  # this edge runs in the recipe root, so they are not resolved here. That
+  # loses nothing: the binary is a declared input, and a changed source
+  # changes the binary, which invalidates this edge.
   let binaryDir = parentDir(self.path)
   let depfileGlobs =
     if binaryDir.len > 0: @[slashJoin(binaryDir, "*.d")]

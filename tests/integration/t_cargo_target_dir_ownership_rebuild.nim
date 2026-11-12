@@ -93,3 +93,51 @@ suite "cargo edges own their target directory":
           projectRoot).strip == "cargo-target-dir-v2"
     else:
       skip("POSIX only: the fixture links through a C compiler driver")
+
+  test "a cargo.test edge for a crate below the root rebuilds after a source edit":
+    # cargo links no test executable into the profile directory, so the only
+    # evidence of this edge is rustc's per-crate deps/*.d, whose sources are
+    # relative to the crate's directory (`src/lib.rs`, not `rust/src/lib.rs`).
+    # The edge therefore runs in `rust/`; run in the recipe root it resolved
+    # them to nothing and reported up-to-date after the edit.
+    when defined(posix):
+      if findExe("cargo").len == 0 or findExe("rustc").len == 0 or
+          findExe("gcc").len == 0:
+        skip("cargo, rustc and gcc must all be on PATH to build the fixture")
+      else:
+        let repoRoot = currentSourcePath().parentDir.parentDir.parentDir
+        let reproBin = requireBinary(reproBinaryPath(repoRoot),
+          "reprobuild.apps.repro")
+        let scratch = createTempDir("cargo-test-crate-dir-", "")
+        defer: removeDir(scratch)
+        let projectRoot = scratch / "recipe"
+        copyDir(repoRoot / "tests/fixtures/cargo-test-crate-dir", projectRoot)
+        let source = projectRoot / "rust/src/lib.rs"
+        let depsDir = projectRoot / "rust/target/debug/deps"
+
+        proc build() =
+          let args = @[reproBin, "build", projectRoot,
+            "--daemon=off", "--tool-provisioning=path",
+            "--work-root=" & (scratch / "work"),
+            "--action-cache-root=" & (scratch / "cache"),
+            "--progress=quiet"]
+          discard requireSuccess(shellCommand(args), repoRoot)
+
+        proc newestArtefact(): Time =
+          for kind, path in walkDir(depsDir):
+            if kind == pcFile:
+              result = max(result, getLastModificationTime(path))
+
+        build()
+        let builtAt = newestArtefact()
+        require builtAt != Time()
+
+        build()
+        check newestArtefact() == builtAt
+
+        writeFile(source, readFile(source).replace("        assert_eq!(super::answer(), 1);",
+          "        assert_eq!(super::answer(), 1); // edited"))
+        build()
+        check newestArtefact() > builtAt
+    else:
+      skip("POSIX only: the fixture links through a C compiler driver")
