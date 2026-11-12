@@ -60,7 +60,7 @@ class ExpressionFileIsNeverCached(unittest.TestCase):
             "{ version = \"1\"; }\n", encoding="utf-8")
         self.evaluations = []
 
-        def evaluate(argv, cwd):
+        def evaluate(argv, cwd, nix_env=None):
             # ``nix-build --no-out-link <file>`` or ``nix build ... <selector>``:
             # the output path is a function of the expression AND of every
             # ``.nix`` file beside it it may import -- what Nix reads.

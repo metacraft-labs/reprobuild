@@ -363,3 +363,29 @@ suite "daemon request environment authority":
       check not existsEnv(Key)
       restoreDaemonRequestEnvironment(saved)
       check getEnv(Key) == "1"
+
+  test "the caller's Nix configuration governs a hosted build, not the daemon's":
+    # Reprobuild reads NIX_CONFIG and the variables that locate Nix's
+    # configuration files to compose every request to the shared Nix helper,
+    # which runs that request's `nix` with them. A daemon started by an
+    # earlier caller -- an earlier CI job on a persistent runner -- must not
+    # lend its credential to a later caller that set none (reprobuild-pm issue
+    # 2026-11-10-repro-daemon-nix-fetch-gets-http-401-on-a-persistent-macos-runner).
+    const Key = "NIX_CONFIG"
+    let current = @[Key & "=access-tokens = github.com=earlier-job",
+      "XDG_CONFIG_HOME=/daemon-xdg", "PATH=/daemon-path"]
+    let unsets = daemonWorkerEnvUnsets(@["PATH=/client-path"], current)
+    check Key in unsets
+    check "XDG_CONFIG_HOME" in unsets
+    # A caller with its own value carries it; the overlay installs it.
+    check Key notin daemonWorkerEnvUnsets(
+      @[Key & "=!include /job/nix-access-tokens.conf"], current)
+    withEnv({Key: "access-tokens = github.com=earlier-job"}):
+      let saved = applyDaemonRequestEnvironment(@["PATH=" & getEnv("PATH")])
+      check not existsEnv(Key)
+      restoreDaemonRequestEnvironment(saved)
+      check getEnv(Key) == "access-tokens = github.com=earlier-job"
+      let carried = applyDaemonRequestEnvironment(
+        @[Key & "=!include /job/nix-access-tokens.conf"])
+      check getEnv(Key) == "!include /job/nix-access-tokens.conf"
+      restoreDaemonRequestEnvironment(carried)

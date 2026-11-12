@@ -77,11 +77,83 @@ def close_inherited_descriptors() -> None:
 TEMPORARY_DIRECTORY_ENV = ("TMPDIR", "TMP", "TEMP", "TEMPDIR")
 
 
-def host_tool_environment() -> dict[str, str]:
-    """Keep provisioned target libraries out of the host Nix process."""
+# The variables Nix reads to find its configuration, ``access-tokens`` (the
+# credential a fetch presents to GitHub) among it:
+# https://nix.dev/manual/nix/latest/command-ref/conf-file.html. Keep in step
+# with ``NixConfigurationEnvNames`` in ``repro_core/nix_configuration_env``.
+NIX_CONFIGURATION_ENV = (
+    "NIX_CONFIG",
+    "NIX_USER_CONF_FILES",
+    "NIX_CONF_DIR",
+    "XDG_CONFIG_HOME",
+    "XDG_CONFIG_DIRS",
+)
+NIX_ENVIRONMENT_KEY = "nixEnvironment"
+
+
+class RequestError(ValueError):
+    """A request the helper refuses; its message is the error answered."""
+
+
+def request_nix_environment(req: dict) -> dict[str, str]:
+    """The Nix configuration one request's Nix commands run with: the
+    variables of ``NIX_CONFIGURATION_ENV`` the request sets. A variable the
+    request names as ``null``, or does not name, is unset.
+
+    THE REQUEST IS AUTHORITATIVE, AND THE HELPER'S OWN VALUES ARE NEVER USED.
+    The helper is shared by every client of the user and outlives the one
+    that started it, so its environment holds the configuration of whichever
+    client that was -- on a CI runner, a job whose credential has since been
+    re-minted or revoked, or an earlier job altogether. Running a client's
+    ``nix`` with it answered HTTP 401 from GitHub (reprobuild-pm issue
+    ``2026-11-10-repro-daemon-nix-fetch-gets-http-401-on-a-persistent-macos-runner.md``).
+
+    The values are credentials or name the files that hold them: they are
+    used for this request's commands and nowhere else, never cached with an
+    answer, logged or quoted in an error."""
+    value = req.get(NIX_ENVIRONMENT_KEY)
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise RequestError(f"{NIX_ENVIRONMENT_KEY} is not an object")
+    result = {}
+    for name, setting in value.items():
+        if name not in NIX_CONFIGURATION_ENV:
+            raise RequestError(
+                f"{NIX_ENVIRONMENT_KEY} names {name!r}, which is not a Nix "
+                f"configuration variable ({', '.join(NIX_CONFIGURATION_ENV)})")
+        if setting is None:
+            continue
+        if not isinstance(setting, str):
+            raise RequestError(
+                f"{NIX_ENVIRONMENT_KEY}.{name} is neither a string nor null")
+        result[name] = setting
+    return result
+
+
+def describe_nix_environment(nix_env: dict[str, str]) -> str:
+    """Where a failed Nix command's configuration came from, naming the
+    variables and never their values (which may hold a credential)."""
+    given = [name for name in NIX_CONFIGURATION_ENV if name in nix_env]
+    unset = [name for name in NIX_CONFIGURATION_ENV if name not in nix_env]
+    parts = []
+    if given:
+        parts.append("the requesting client's " + ", ".join(given))
+    if unset:
+        parts.append("unset (the client sets none of them): " + ", ".join(unset))
+    return "Nix configuration: " + "; ".join(parts)
+
+
+def host_tool_environment(nix_env: dict[str, str] | None = None) -> dict[str, str]:
+    """The environment of one request's Nix command: the helper's own,
+    without provisioned target libraries, and with the request's Nix
+    configuration in place of the helper's (``request_nix_environment``)."""
     env = os.environ.copy()
     for name in HOST_DYNAMIC_LOADER_ENV:
         env.pop(name, None)
+    for name in NIX_CONFIGURATION_ENV:
+        env.pop(name, None)
+    env.update(nix_env or {})
     return env
 
 
@@ -121,11 +193,12 @@ def dependency_cache_key(dependencies: list[dict]) -> tuple[tuple[str, str], ...
     )
 
 
-def run_command(argv, cwd: Path) -> list[str]:
+def run_command(argv, cwd: Path, nix_env: dict[str, str] | None = None) -> list[str]:
+    nix_env = nix_env or {}
     proc = subprocess.run(
         argv,
         cwd=str(cwd),
-        env=host_tool_environment(),
+        env=host_tool_environment(nix_env),
         text=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -133,7 +206,8 @@ def run_command(argv, cwd: Path) -> list[str]:
     )
     if proc.returncode != 0:
         detail = proc.stderr.strip() or proc.stdout.strip()
-        raise RuntimeError(f"{argv[0]} exited {proc.returncode}: {detail}")
+        raise RuntimeError(f"{argv[0]} exited {proc.returncode}: {detail}\n"
+                           f"({describe_nix_environment(nix_env)})")
     paths = [line.strip() for line in proc.stdout.splitlines() if line.strip()]
     if not paths:
         raise RuntimeError(f"{argv[0]} produced no output paths")
@@ -186,10 +260,12 @@ def resolve_selector(
     workspace_root: Path,
     dependencies: list[dict],
     expression_file: Path | None,
+    nix_env: dict[str, str] | None = None,
 ) -> dict:
     if expression_file is not None:
         paths = run_command(
-            ["nix-build", "--no-out-link", str(expression_file)], workspace_root
+            ["nix-build", "--no-out-link", str(expression_file)], workspace_root,
+            nix_env,
         )
     else:
         paths = run_command(
@@ -203,6 +279,7 @@ def resolve_selector(
                 selector,
             ],
             workspace_root,
+            nix_env,
         )
     paths = put_executable_output_first(selector, paths)
     return {
@@ -233,6 +310,11 @@ def response_for(line: bytes, cache: "ResolveCache", cached_only: bool = False):
     # which answered for whichever client happened to start the helper; a
     # relative one resolved against the same accident. Both are refused, the
     # way a missing selector is, rather than silently resolved against ``/``.
+    try:
+        nix_env = request_nix_environment(req)
+    except RequestError as exc:
+        return {"status": "error", "error": str(exc)}
+
     workspace_value = str(req.get("workspaceRoot") or "")
     if not workspace_value:
         return {"status": "error", "error": "missing workspaceRoot"}
@@ -270,7 +352,7 @@ def response_for(line: bytes, cache: "ResolveCache", cached_only: bool = False):
         if cached_only:
             return None
         return resolve_selector(selector, workspace_root, dependencies,
-                                expression_file)
+                                expression_file, nix_env)
     key = (
         selector,
         str(workspace_root),
@@ -281,12 +363,18 @@ def response_for(line: bytes, cache: "ResolveCache", cached_only: bool = False):
     # Nix owns these outputs independently of this process's response cache.
     # A surviving evaluation key does not keep its realized paths alive after
     # store removal. Reacquire through Nix instead of returning stale success.
+    #
+    # The Nix configuration is not part of the key, and the cache holds only
+    # the answer (store paths already in the local store), never the
+    # configuration it was resolved with. A resolution that fails caches
+    # nothing, so a client waiting on the same key then resolves with its
+    # own configuration (``resolve`` below is this request's).
     if cached_only:
         return cache.peek(key)
     return cache.get_or_resolve(
         key,
         lambda: resolve_selector(
-            selector, workspace_root, dependencies, expression_file
+            selector, workspace_root, dependencies, expression_file, nix_env
         ),
     )
 

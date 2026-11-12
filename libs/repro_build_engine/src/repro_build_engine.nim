@@ -111,6 +111,7 @@ from repro_core/path_identity import resolveExistingTraversal, prsResolved
 # Nix GC roots for the store paths working-tree outputs name; see the ledger
 # note in `runBuild`.
 import repro_core/nix_store_roots
+import repro_core/nix_configuration_env
 from repro_core/process_streams import drainStream
 # ``osproc.close`` closes a ``poStdErrToStdOut`` child's merged descriptor a
 # second time on POSIX. This scheduler thread is not alone once the worker
@@ -17751,6 +17752,19 @@ when not defined(windows):
         result.connected = false
         result.diagnostic = diagnostic
         return
+      # THE REQUEST CARRIES THIS PROCESS'S NIX CONFIGURATION, credentials
+      # included (``requestNixDaemon``), and the socket sits at a
+      # predictable path in a shared directory. A socket bound there by
+      # another user must not receive it, so the peer's user is checked
+      # before anything is sent.
+      if not nixHelperPeerIsThisUser(sock.getFd()):
+        sock.close()
+        result.connected = false
+        result.diagnostic = "the process listening at " & socketPath &
+          " does not run as this user (or its user could not be " &
+          "determined); the request, which carries this process's Nix " &
+          "configuration, was not sent"
+        return
       result.connected = true
       var line = ""
       try:
@@ -17792,10 +17806,22 @@ when not defined(windows):
       envBin = getEnv("REPROBUILD_NIX_DAEMON_BIN"))
     let socketPath = nixDaemonSocketPath(nixDaemonHelperKey(daemonExe))
     createDir(socketPath.parentDir)
+    # THE HELPER IS SHARED, SO EACH REQUEST NAMES ITS OWN NIX CONFIGURATION
+    # (``repro_core/nix_configuration_env``). The helper runs the request's
+    # Nix commands with exactly these values, so the credential a fetch
+    # presents is the one this process holds now -- not the one held by
+    # whichever process started the helper, possibly a job that has since
+    # ended. Inside the user daemon's build worker this process's
+    # environment is the requesting client's (``applyDaemonRequestEnvironment``).
+    let sent = withNixHelperRequestEnvironment(request)
+    # Nor is the configuration of the process that starts the helper left in
+    # the helper's own environment for its lifetime.
+    let helperEnv = environmentWithoutNixConfiguration()
     proc spawnDaemon(): Process =
       startProcess(daemonExe, args = ["--idle-exit-ms=300000",
-        "--socket-path=" & socketPath], options = {poDaemon, poUsePath})
-    let exchange = exchangeWithNixDaemon(socketPath, request, spawnDaemon)
+        "--socket-path=" & socketPath], env = helperEnv,
+        options = {poDaemon, poUsePath})
+    let exchange = exchangeWithNixDaemon(socketPath, sent, spawnDaemon)
     (socketPath: socketPath, connected: exchange.connected,
      response: exchange.response, attempts: exchange.attempts,
      diagnostic: exchange.diagnostic)

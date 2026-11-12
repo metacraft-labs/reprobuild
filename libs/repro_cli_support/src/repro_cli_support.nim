@@ -48,6 +48,7 @@ import repro_core/relocation
 import repro_core/ambient_execution
 import repro_core/process_exec
 import repro_core/cli_images
+import repro_core/nix_configuration_env
 import repro_core/source_root
 from repro_core/workspace_root import firstMembershipManifestPath,
   SettingsFileName
@@ -25724,7 +25725,8 @@ const DaemonRequestAuthoritativeEnvPrefixes* = ["REPROBUILD_", "REPRO_"]
   ## Reprobuild's own control namespace, over which a build REQUEST is
   ## authoritative and the daemon's start environment is not.
 
-const DaemonRequestAuthoritativeEnvNames* = ["IN_AGENT_SHELL"]
+const DaemonRequestAuthoritativeEnvNames* =
+  @["IN_AGENT_SHELL"] & @NixConfigurationEnvNames
   ## Variables OUTSIDE that namespace that reprobuild nevertheless reads to
   ## pick a user-facing default, so the caller's value must govern a hosted
   ## build exactly as a ``REPROBUILD_`` knob does. ``IN_AGENT_SHELL`` selects
@@ -25732,9 +25734,19 @@ const DaemonRequestAuthoritativeEnvNames* = ["IN_AGENT_SHELL"]
   ## makes the ``--log`` default quiet; spec/CLI/build.md §"Daemon Mode"
   ## requires the client's own selection to apply on both routes. Without the
   ## entry, a daemon auto-started from an agent shell silenced the status
-  ## lines of every later caller that was not in one. Exact names only: list
-  ## a variable here only when reprobuild itself consults it, never one a
-  ## project merely passes through to its actions.
+  ## lines of every later caller that was not in one.
+  ##
+  ## ``NixConfigurationEnvNames`` (``NIX_CONFIG`` and the variables that
+  ## locate Nix's configuration files) are read by reprobuild to compose
+  ## every request to the shared Nix helper, which runs that request's Nix
+  ## commands with them. They carry the caller's Nix credentials, so a
+  ## daemon started by an earlier caller -- a previous CI job on a
+  ## persistent runner -- must not lend its own to a later caller that set
+  ## none (reprobuild-pm issue
+  ## 2026-11-10-repro-daemon-nix-fetch-gets-http-401-on-a-persistent-macos-runner).
+  ##
+  ## Exact names only: list a variable here only when reprobuild itself
+  ## consults it, never one a project merely passes through to its actions.
 
 proc daemonWorkerEnvUnsets*(requestEnv: openArray[string];
                             currentEnv: openArray[string]): seq[string] =
