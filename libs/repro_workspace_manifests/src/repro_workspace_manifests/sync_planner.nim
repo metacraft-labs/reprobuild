@@ -68,7 +68,7 @@ type
     scRelocationRefused
       ## Declared-Repository-Renames.md §4 — the repo declares a prior
       ## identity, something was found at a prior path, and the tool DECLINED
-      ## to move it (one of the eight pre-flight refusals). The repo must not
+      ## to move it (one of the ten pre-flight refusals). The repo must not
       ## be cloned either: cloning fresh at the new path after concluding
       ## something is wrong reproduces the orphan-beside-empty-clone outcome
       ## the mechanism exists to prevent, and does it KNOWINGLY. Exit 2 — a

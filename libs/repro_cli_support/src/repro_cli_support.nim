@@ -49733,7 +49733,7 @@ type
     rokSkipped                ## Something was at a prior path, not a candidate.
     rokOrphaned               ## Checkouts at BOTH the prior and declared paths.
     rokRelocated              ## Moved.
-    rokRefused                ## One of the eight pre-flight refusals.
+    rokRefused                ## One of the ten pre-flight refusals.
     rokFailed                 ## The move was attempted and failed.
 
   RepoRelocationOutcome = object
@@ -49749,6 +49749,12 @@ type
       ## (§3.4 step 1 + §5): the copy fallback's verification needs it, and so
       ## does the rewritten-history detection, which tests whether the recorded
       ## pre-fetch tip is still an ancestor of the fetched tip.
+    linkedWorktreesBroken: bool
+      ## The move HAPPENED, but at least one linked worktree it cut off could
+      ## not be reconnected (`linked_worktree_repair_failed`). Not a
+      ## `rokFailed`: the checkout is at its declared path and must be synced
+      ## like any other, yet a worktree that stopped being a checkout is a
+      ## broken mutating action, so the run exits 1.
 
 proc relocationRefusal(tag, message: string): RepoRelocationOutcome =
   RepoRelocationOutcome(kind: rokRefused, tag: tag, message: message)
@@ -49994,6 +50000,44 @@ proc relocateDeclaredRenames(identity: GitToolIdentity;
           " submodule absorbgitdirs` and re-run. Nothing was moved.")
       continue
 
+    # §4 `linked_worktree_unrepairable`. A linked worktree's `.git` file names
+    # this checkout's location, so the move cuts every one of them off; §3.5
+    # repairs them after the move. What is refused here is the subset the
+    # repair cannot reach: a worktree that is missing, or one git has been
+    # told to leave alone (`locked`). A probe that cannot be run is itself a
+    # blocker — moving without knowing what the move strands is the failure
+    # this check exists for.
+    let worktrees = linkedWorktreeInventory(probe, candidateAbs)
+    if not worktrees.ok:
+      result[repoIdx] = relocationRefusal("linked_worktree_unrepairable",
+        "could not enumerate the linked worktrees of the checkout at '" &
+          prior.path & "' (" & worktrees.diagnostic & "), so a move could " &
+          "strand them. Nothing was moved.")
+      continue
+    # §4 `candidate_is_linked_worktree`. A checkout whose `.git` is a FILE
+    # is not something the rest of this sync can hold at the declared path:
+    # the observation step classifies it `missing_checkout`, and the clone
+    # that follows deletes it as a half-finished clone — uncommitted work
+    # included — and clones fresh. Moving it would therefore destroy it.
+    # Refused until sync handles linked-worktree checkouts.
+    if worktrees.selfLinked:
+      result[repoIdx] = relocationRefusal("candidate_is_linked_worktree",
+        "the checkout at '" & prior.path & "' is a linked worktree of " &
+          worktrees.commonDir & " (its `.git` is a file), and `repro sync` " &
+          "cannot keep a linked-worktree checkout at '" & repo.path & "'. " &
+          "Publish or move its work to a branch of the main worktree, " &
+          "remove it with `git worktree remove`, and re-run: `repro sync` " &
+          "then clones '" & repo.path & "'. Nothing was moved.")
+      continue
+    let unrepairable = unrepairableLinkedWorktrees(worktrees, prior.path)
+    if unrepairable.len > 0:
+      result[repoIdx] = relocationRefusal("linked_worktree_unrepairable",
+        "the checkout at '" & prior.path & "' has linked worktree(s) that " &
+          "moving it to '" & repo.path & "' would leave unable to find " &
+          "their repository, and that cannot be repaired afterwards: " &
+          unrepairable.join("; ") & ". Nothing was moved.")
+      continue
+
     # §3.3a — remote agreement. This is what excludes a FORK: a fork shares
     # every object with its upstream, so a history test alone cannot tell one
     # from the other, but a fork sits under a different org and its URL
@@ -50217,6 +50261,26 @@ proc relocateDeclaredRenames(identity: GitToolIdentity;
       evidence: identityEvidence, preMoveHeadSha: before.headSha)
     if moved.diagnostic.len > 0:
       outcome.message = moved.diagnostic
+
+    # §3.5 LINKED WORKTREES, first of the repairs because it is the one whose
+    # absence breaks checkouts rather than records: every linked worktree's
+    # `.git` file still names the prior path. Repaired and then verified from
+    # each worktree's own side; each one is reported, and one that still does
+    # not resolve fails the run (exit 1) with the command that fixes it.
+    let worktreeRepair = repairLinkedWorktrees(probe, candidateAbs,
+      destination, worktrees)
+    for item in worktreeRepair.repaired:
+      outcome.rekeyed.add(item)
+    if worktreeRepair.failures.len > 0:
+      outcome.tag = "linked_worktree_repair_failed"
+      outcome.linkedWorktreesBroken = true
+      let failureText = "moved '" & prior.path & "' to '" & repo.path &
+        "', but linked worktree(s) still cannot find their repository: " &
+        worktreeRepair.failures.join("; ")
+      outcome.message =
+        if outcome.message.len > 0: outcome.message & "; " & failureText
+        else: failureText
+      stderr.writeLine("workspace sync: ERROR: " & failureText)
 
     # §3.5 repairs. Four things live outside the moved directory.
     #
@@ -51356,6 +51420,8 @@ proc executeWorkspaceSync(args: WorkspaceSyncArgs;
           forceResetTarget.getOrDefault(repoIdx)
       else: decision.message
     let relocation = relocations.getOrDefault(repoIdx)
+    if relocation.linkedWorktreesBroken:
+      anyFailure = true
     report.repos.add(WorkspaceSyncRepoEntry(
       name: decision.name,
       path: decision.path,
