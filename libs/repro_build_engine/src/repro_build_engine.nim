@@ -18513,6 +18513,14 @@ when not defined(windows):
     ## being touched by -- the helper every other reprobuild process of the
     ## user shares.
 
+  const NixHelperEnvironment* = [
+    "HOME", "XDG_CACHE_HOME", "XDG_CONFIG_HOME", "XDG_CONFIG_DIRS",
+    "XDG_DATA_HOME", "XDG_STATE_HOME", "TMPDIR", "NIX_CONFIG",
+    "NIX_CONF_DIR", "NIX_USER_CONF_FILES", "NIX_REMOTE", "NIX_PATH",
+    "NIX_STORE_DIR", "NIX_STATE_DIR"]
+    ## The variables that decide where the helper's ``nix`` reads its
+    ## configuration and keeps its caches and temporary files.
+
   proc nixDaemonHelperKey*(daemonExe: string): string =
     ## The identity of the helper this process would START: a digest of the
     ## resolved helper file's bytes, or ``""`` when only a bare name (a PATH
@@ -18529,10 +18537,22 @@ when not defined(windows):
     ## it. Keying by content keeps the sharing that matters (every process of
     ## one build, and every build whose helper is byte-identical) and never
     ## lets two different helpers answer for each other.
+    ##
+    ## THE ENVIRONMENT IS PART OF THE IDENTITY. The helper inherits the
+    ## whole environment of the process that happened to start it, and the
+    ## ``nix`` it runs keeps its fetcher cache, configuration and temporary
+    ## files where ``NixHelperEnvironment`` says. A caller with a private
+    ## ``XDG_CACHE_HOME`` (28 integration tests set one) used to start the
+    ## helper every other process then shared; once that caller deleted its
+    ## directory, every fetch through the helper failed with ``could not find
+    ## repository at '<deleted>/nix/tarball-cache-v2'`` until it idled out.
     if daemonExe.len == 0 or not fileExists(daemonExe):
       return ""
     try:
-      toHex(weakFingerprintFromText(readFile(daemonExe)).bytes)[0 ..< 16]
+      var identity = readFile(daemonExe)
+      for name in NixHelperEnvironment:
+        identity.add("\0" & name & "=" & getEnv(name))
+      toHex(weakFingerprintFromText(identity).bytes)[0 ..< 16]
     except IOError, OSError:
       ""
 
