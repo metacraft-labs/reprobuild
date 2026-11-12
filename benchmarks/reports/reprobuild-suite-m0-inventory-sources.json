@@ -5,7 +5,7 @@
     "pureUnitConsolidationGroups": 80,
     "pureUnitTests": 753,
     "staticallyDetectedRuntimeCompilerFlowTests": 138,
-    "testEntries": 2784
+    "testEntries": 2785
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1585,7 +1585,7 @@
       "integration": 1508,
       "platform/destructive": 175,
       "pure unit": 753,
-      "unclassified": 327
+      "unclassified": 328
     },
     "graphOwnedTestArtifacts": [
       {
@@ -1800,8 +1800,8 @@
       }
     ],
     "nimTestBinaryCount": 2741,
-    "pythonTestFileCount": 43,
-    "testEntryCount": 2784
+    "pythonTestFileCount": 44,
+    "testEntryCount": 2785
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -49717,7 +49717,7 @@
       "requiresReproBinary": true,
       "source": "tests/integration/t_spi_leaf_fetches_thin_pack_over_partial_pool.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 8,
+      "staticCaseCount": 9,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -58104,6 +58104,21 @@
       "source": "tests/unit/test_publish_surface_routing.py",
       "sourceSuiteCount": 1,
       "staticCaseCount": 32,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "",
+      "class": "unclassified",
+      "classificationReason": "imports `pathlib`, which this scan does not recognize; refusing to call it pure rather than assuming it is",
+      "defines": [],
+      "language": "python",
+      "localDependencyShape": [],
+      "owner": "tests/unit",
+      "requiresReproBinary": false,
+      "source": "tests/unit/test_readme_documents_only_dispatched_verbs.py",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 3,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

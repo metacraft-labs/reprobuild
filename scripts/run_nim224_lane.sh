@@ -23,10 +23,12 @@
 # selection check (a name that matches nothing is then dropped silently, as
 # before round 5).
 #
-# The signer's suite is an in-process one: the engine's own signer test
-# (t_worker_signing_certificates_are_time_bound) needs repro_cli_support,
-# which does not build under Nim 2.2.4 (reprobuild-pm issue
-# 2026-11-07-repro-cli-support-does-not-build-under-nim-2-2-4).
+# The signer has two suites: an in-process one, and the engine's own
+# (t_worker_signing_certificates_are_time_bound), which links
+# repro_cli_support and runs the engine's `cert-signer`. The lane builds
+# that engine with Nim 2.2.4 too, when the suite is selected. It held only
+# the first until repro_cli_support compiled under Nim 2.2.4 (reprobuild-pm
+# issue 2026-11-07-repro-cli-support-does-not-build-under-nim-2-2-4).
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -46,6 +48,7 @@ suites=(
   libs/repro_peer_cache/tests/t_evidence_store_receipts_and_key_separation.nim
   libs/repro_peer_cache/tests/t_sim_tls_smoke_pass_stops_its_peers.nim
   libs/repro_distributed_worker/tests/t_signer_closes_after_its_early_returns.nim
+  libs/repro_cli_support/tests/t_worker_signing_certificates_are_time_bound.nim
 )
 if [ "$#" -gt 0 ]; then
   selected=()
@@ -102,6 +105,17 @@ nim c --hints:off --warnings:off \
   apps/repro-evidence-sink/repro_evidence_sink.nim
 bash scripts/write_helper_deps.sh repro-evidence-sink \
   apps/repro-evidence-sink/repro_evidence_sink.nim
+
+# The engine, for the suites that spawn it (m7_test_pki.engineBin), with
+# the flags apps/entrypoints.txt gives it. Only when one is selected: it is
+# by far the largest build of the lane.
+case " ${suites[*]} " in
+  *"/t_worker_signing_certificates_are_time_bound.nim "*)
+    nim c --hints:off --warnings:off --define:ssl --define:reproVendoredHash \
+      --nimcache:"$lane/nimcache/reprobuild" \
+      --out:"$lane/bin/reprobuild" \
+      apps/repro/repro.nim ;;
+esac
 
 failed=()
 for src in "${suites[@]}"; do

@@ -1108,7 +1108,15 @@ proc executeClone(payload: GitVcsPayload; cwd, receiptPath: string): ActionResul
     # still fails means the leaf borrows with no way to resolve what the pool
     # only promises (registration failed and the objects could not be copied),
     # so clone again without the reference rather than fail the repo.
-    var populated = runGit(payload, ["-C", target, "reset", "--hard", "-q", "HEAD"])
+    #
+    # An empty upstream leaves HEAD unborn: there is nothing to check out, and
+    # a failing ``reset`` there is not a reason to give up the borrow.
+    let headBorn = runGit(payload,
+      ["-C", target, "rev-parse", "--verify", "-q", "HEAD"]).exitCode == 0
+    var populated = (exitCode: 0, output: "")
+    if headBorn:
+      populated = runGit(payload,
+        ["-C", target, "reset", "--hard", "-q", "HEAD"])
     if populated.exitCode != 0:
       notice = "the checkout of " & target & " borrowing from " &
         payload.referencePath & " failed (" & $populated.exitCode & ": " &
