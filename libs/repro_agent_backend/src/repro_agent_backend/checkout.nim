@@ -17,6 +17,7 @@
 import std/[os, osproc, streams, strtabs, strutils]
 
 import repro_core/ambient_execution
+import repro_core/git_separated
 import repro_core/link_target
 
 import ./ownership
@@ -50,8 +51,15 @@ proc gitEnv(): StringTableRef =
   result["GIT_COMMITTER_DATE"] = FixedDate
 
 proc git*(root: string; args: openArray[string]): string =
-  ## Run git in `root` without a shell; raise `CheckoutError` with its
-  ## output on a non-zero exit.
+  ## Run git in `root` and return its stdout; raise `CheckoutError` with
+  ## git's message on a non-zero exit.
+  ##
+  ## The answer is stdout ALONE, byte for byte (`gitRunSeparated`): it is a
+  ## commit id or the workspace's unified diff, and git writes warnings to
+  ## stderr while still exiting 0 (`warning: in the working copy of '<path>',
+  ## LF will be replaced by CRLF`, a pruned commit-graph file) -- merged, they
+  ## became lines of the diff the agent's change is judged by. The failure
+  ## message is the merged text, because git's reason is on stderr.
   ##
   ## Ambient by necessity for now: the host runs the git of the active
   ## generation from PATH, with its configuration neutralised above. A
@@ -60,13 +68,12 @@ proc git*(root: string; args: openArray[string]): string =
   let exe = uncontrolledFindExe("git")
   if exe.len == 0:
     raise newException(CheckoutError, "git is not on PATH")
-  let p = uncontrolledStartProcess(exe, workingDir = root, args = @args,
-                                   env = gitEnv(),
-                                   options = {poStdErrToStdOut})
-  defer: p.close()
-  result = p.outputStream.readAll()
-  if p.waitForExit() != 0:
-    raise newException(CheckoutError, "git " & args.join(" ") & ": " & result)
+  let res = gitRunSeparated(exe, @["-C", root] & @args, gitEnv(),
+    exactStdout = true)
+  if res.code != 0:
+    raise newException(CheckoutError, "git " & args.join(" ") & ": " &
+      res.diagnostic)
+  res.output
 
 proc copyDefinition(src, dst: string) =
   ## Copy the recipe's definition files, keeping symlinks as symlinks and

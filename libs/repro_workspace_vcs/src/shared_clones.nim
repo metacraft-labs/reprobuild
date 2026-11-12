@@ -890,17 +890,31 @@ proc isTransientGitLockContention*(output: string): bool {.gcsafe.} =
 
 # ---- git plumbing ----------------------------------------------------------
 
+proc gitAnswer(res: tuple[code: int; output: string; diagnostic: string]):
+    tuple[code: int; output: string] =
+  ## The shape every caller here reads: a SUCCESS's ``output`` is git's stdout
+  ## alone, a FAILURE's is git's merged message.
+  ##
+  ## Callers parse a success's output (object ids, ref listings, config
+  ## values, ``rev-list --missing=print`` rows), and git writes warnings to
+  ## stderr while still exiting 0 with the right answer (``warning: unable to
+  ## find all commit-graph files`` in a leaf whose split chain names a pruned
+  ## graph file -- a state this module's own pool maintenance can produce).
+  ## Merged, the warning was read as one more id, ref or row. A failure's text
+  ## is only ever quoted or classified (``isTransientGitLockContention``), and
+  ## git's reason is on stderr, so it stays merged.
+  (code: res.code,
+   output: (if res.code == 0: res.output else: res.diagnostic))
+
 proc runGit(gitBin: string; args: openArray[string];
             workingDir = ""): tuple[code: int; output: string] =
-  var cmd = quoteShell(gitBin)
-  for arg in args:
-    cmd.add(" ")
-    cmd.add(quoteShell(arg))
+  ## Run git, retrying a transient ref/config lock contention. See
+  ## ``gitAnswer`` for what ``output`` holds.
   const MaxLockRetries = 5
   for attempt in 0 .. MaxLockRetries:
-    let res = execCmdExCloseOnce(cmd, workingDir = workingDir,
-      env = scrubbedGitRepositoryEnv())
-    result = (code: res.exitCode, output: res.output)
+    result = gitAnswer(gitRunSeparated(gitBin, args,
+      scrubbedGitRepositoryEnv(), exactStdout = true,
+      workingDir = workingDir))
     if result.code == 0 or attempt == MaxLockRetries or
         not isTransientGitLockContention(result.output):
       return
@@ -1247,11 +1261,11 @@ proc inspectManifestCacheEntry*(gitBin, entryPath, manifestUrl: string):
     return
   let res = runGit(gitBin,
     ["-C", entryPath, "config", "--local", "--get", "remote.origin.url"])
-  # ``runGit`` merges stderr into stdout, so a git advisory (``warning:`` /
-  # ``hint:`` on a host with an odd global config) would otherwise be read AS
-  # the URL and turn every entry foreign. Take the first line that is a value
-  # rather than a diagnostic; git prints exactly one value line for
-  # ``--get``.
+  # A FAILED ``runGit`` hands back git's merged message, so a git advisory
+  # (``warning:`` / ``hint:`` on a host with an odd global config) can lead
+  # the text even when a value line follows it. Take the first line that is
+  # a value rather than a diagnostic; git prints exactly one value line for
+  # ``--get``. (A success's output is stdout alone, which is that line.)
   var observed = ""
   for line in res.output.splitLines:
     let trimmed = line.strip()
@@ -1779,23 +1793,28 @@ proc poolTransportShell(gitBin: string): string =
 proc runGitEnv(gitBin: string; args: openArray[string];
                lazyFetch: bool; input = "";
                workingDir = ""; inputFile = "";
-               objectDirectory = ""; alternateObjectDirectory = ""):
+               objectDirectory = ""; alternateObjectDirectory = "";
+               mergeStderr = false):
                tuple[code: int; output: string] =
   ## ``runGit`` with lazy fetching pinned on or off, and optional stdin.
+  ## ``output`` is what ``gitAnswer`` says, unless ``mergeStderr`` asks for
+  ## git's stdout and stderr merged regardless of the exit code -- for a
+  ## caller whose verdict IS what git printed on stderr (``fsck`` warnings).
   ## Lazy fetching is decided explicitly in BOTH directions so an ambient
   ## ``GIT_NO_LAZY_FETCH`` cannot decide whether a probe touches the network:
   ## a presence probe that lazily fetches would heal what it is measuring and
   ## report nothing, and a refill that cannot fetch would report a loss that
   ## upstream could still have repaired.
-  var cmd = quoteShell(gitBin)
-  for arg in args:
-    cmd.add(" ")
-    cmd.add(quoteShell(arg))
+  # ``inputFile`` runs git under the pool's POSIX shell so the shell, not
+  # this process, feeds it the file; that shell's stderr is git's.
+  var program = gitBin
+  var argv = @args
   if inputFile.len > 0:
     var script = quotePoolShell(gitBin)
     for arg in args: script.add(" " & quotePoolShell(arg))
     script.add(" < " & quotePoolShell(inputFile))
-    cmd = quoteShellCommand(@[poolTransportShell(gitBin), "-c", script])
+    program = poolTransportShell(gitBin)
+    argv = @["-c", script]
   let env = scrubbedGitRepositoryEnv()
   if objectDirectory.len > 0:
     # These are our explicit ingestion store and read-only pool, never the
@@ -1820,9 +1839,12 @@ proc runGitEnv(gitBin: string; args: openArray[string];
     env.del("GIT_NO_LAZY_FETCH")
   else:
     env["GIT_NO_LAZY_FETCH"] = "1"
-  let res = execCmdExCloseOnce(cmd, workingDir = workingDir, env = env,
-    input = input)
-  (code: res.exitCode, output: res.output)
+  let res = gitRunSeparated(program, argv, env, exactStdout = true,
+    workingDir = workingDir, input = input)
+  if mergeStderr:
+    (code: res.code, output: res.diagnostic)
+  else:
+    gitAnswer(res)
 
 proc isObjectId(text: string): bool =
   (text.len == 40 or text.len == 64) and
@@ -4688,8 +4710,11 @@ proc inspectRepoWiring*(workspaceRoot, cacheRoot, repoRelPath,
 proc leafConnectivityDiagnostic*(gitBin, leaf: string; full = false): string =
   ## Observation only: no registration, configuration, lazy fetch or repair.
   ## fsck includes dangling symbolic refs, which for-each-ref silently omits.
+  # Merged: fsck reports dangling and broken objects as `warning:` /
+  # `error:` lines on stderr while exiting 0, and those lines are the verdict.
   let checked = runGitEnv(gitBin, ["-C", leaf, "fsck",
-    (if full: "--full" else: "--connectivity-only")], lazyFetch = false)
+    (if full: "--full" else: "--connectivity-only")], lazyFetch = false,
+    mergeStderr = true)
   if checked.code != 0 or "warning:" in checked.output or
       "error:" in checked.output:
     return checked.output.strip()
