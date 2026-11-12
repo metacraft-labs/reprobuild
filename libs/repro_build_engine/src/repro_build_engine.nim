@@ -22036,6 +22036,18 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
         # `cacheMissInputChanged` for this would have worked mechanically and
         # then lied in every diagnostic that reads it.
         var cacheInvalidatedByPolicy = false
+        # Set when a cacheable action's lookup found no record that can vouch
+        # for the outputs on disk: none for its weak fingerprint, one that was
+        # refused (`unservableCacheRecordReason`), or a payloadless record
+        # whose outputs are not the recorded ones (`aclMissNoOutputPayload`).
+        # It suppresses the same shortcut as the three flags above, because
+        # that shortcut asks only whether the declared output paths EXIST and
+        # here nothing says what produced them: a plain `cargo build`, an
+        # older engine whose records were evicted, a different cache root.
+        # Incremental-Invalidation.md §"Rebuild Decision Model": "action-cache
+        # records are present" is a condition of "up to date", and a
+        # condition that cannot be checked MUST fail closed by re-executing.
+        var cacheMissNoUsableRecord = false
         # Filled by the Nix-reference arm of the decision chain below, which
         # is reached only when no earlier arm already forces execution.
         var nixLostPaths: seq[string] = @[]
@@ -22045,8 +22057,8 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
         # "May a cache record for this action be reused where its result
         # already is?" — see `cachedResultReusableInPlace`. Distinct from
         # `outputsPresentBeforeLookup`, which stays a pure statement about
-        # DECLARED outputs so the no-record "outputs-present" shortcut below
-        # cannot fire for an edge that declares none.
+        # DECLARED outputs so the "outputs-present" shortcut below cannot
+        # fire for an edge that declares none.
         var reusableInPlace = false
         if action.cacheable and (config.peerCacheActionPublisher != nil or
             config.peerCacheActionFetcher != nil):
@@ -22155,8 +22167,8 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
             if not action.declaresNoOutputs():
               # Skipped entirely when nothing is declared: no declared output
               # can be missing, and `outputsPresentBeforeLookup` must stay
-              # false so the no-record "outputs-present" shortcut below
-              # cannot fire for such an edge.
+              # false so the "outputs-present" shortcut below cannot fire
+              # for such an edge.
               let outputStatStart = statStart()
               # Per-computation outputs: the declared (staging) paths say
               # nothing about a record's outputs, which lie in its own
@@ -22351,13 +22363,11 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
               # nothing else.
               #
               # ``aclMissInputChanged`` rather than ``aclMissNoRecord``
-              # because of what the arm below it does with each: the
-              # input-changed arm sets ``cacheMissInputChanged``, which is
-              # what stops the outputs-present shortcut from re-declaring
-              # this action up to date and skipping the re-execution the
-              # refusal exists to force. It is also the honest diagnosis —
-              # an input this record is keyed on can no longer be trusted
-              # to be what the record says it was.
+              # because it is the honest diagnosis: an input this record is
+              # keyed on can no longer be trusted to be what the record says
+              # it was. Either status stops the outputs-present shortcut from
+              # re-declaring this action up to date (``cacheMissInputChanged``
+              # / ``cacheMissNoUsableRecord``).
               let blocked = action.monitorLossBlockedRecordPath(lookup.record)
               if blocked.len > 0:
                 let reason = "monitor-loss-narrow-invalidation: " & blocked &
@@ -22531,10 +22541,15 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
             recordCacheLookupFacts(id, lookup)
             cacheInvalidatedByPolicy = true
           else:
+            # `aclMissNoRecord` (none, or a refused one) and
+            # `aclMissNoOutputPayload` (a payloadless record whose outputs are
+            # not in place as recorded). No record vouches for whatever is at
+            # the declared paths, so the action executes.
             runResult.results[idToIndex.resultIndex(id)].cacheDecision = cdMiss
             runResult.results[idToIndex.resultIndex(id)].reason =
               if lookup.message.len > 0: lookup.message else: $lookup.status
             recordCacheLookupFacts(id, lookup)
+            cacheMissNoUsableRecord = true
         elif not action.cacheable:
           runResult.results[idToIndex.resultIndex(id)].reason = "not-cacheable"
 
@@ -22545,6 +22560,16 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
           let outputStatStart = statStart()
           outputsPresent = action.allOutputsExist()
           finishStat("repro output stat", outputStatStart)
+        # Make's rule, "the outputs exist, so the edge is up to date". After
+        # the cache arms above it is reached by a non-cacheable action, which
+        # never has a record (Build-Engine-And-Scheduler.md: an absent
+        # declared output keeps such an edge out of date). A cacheable action
+        # reaches it only through a lookup outcome none of the flags below
+        # names, so every miss arm that can find the outputs in place sets
+        # one (the `missing-output` arms find them absent): present files
+        # with no record behind them are never "up to date"
+        # (`cacheMissNoUsableRecord`).
+        #
         # Not for per-computation outputs: their declared paths are the
         # staging ones, and only a record binds them to a computation, so
         # "present without a hit" says nothing about which computation they
@@ -22554,6 +22579,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
             not cacheMissInputChanged and
             not cacheRejectedOutput and
             not cacheInvalidatedByPolicy and
+            not cacheMissNoUsableRecord and
             not dependencyLaunched and
             not config.forceRebuild and
             not action.needsExecutionForPolicy():

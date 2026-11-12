@@ -2049,6 +2049,17 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "",
     singleReason: "module-level statement runs at every start-up: let TmpDir = absolutePath(\"build/test-tmp/t_portable_record_..."),
   TestSpec(
+    source: "libs/repro_build_engine/tests/t_present_outputs_without_a_record_do_not_make_an_action_up_to_date.nim",
+    binary: "build/test-bin/t_present_outputs_without_a_record_do_not_make_an_action_up_to_date",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "t_group_libs_repro_build_engine_tests_g02",
+    singleReason: ""),
+  TestSpec(
     source: "libs/repro_build_engine/tests/t_preserve_tree_rerun_never_writes_through_links.nim",
     binary: "build/test-bin/t_preserve_tree_rerun_never_writes_through_links",
     defines: @[],
