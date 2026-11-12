@@ -18,4 +18,5 @@ which links each stage to the page that covers it.
 | [Dependencies and the store](dependencies-and-the-store.md) | How version ranges become exact versions, and where reprobuild keeps what it obtains |
 | [How caching stays correct](how-caching-stays-correct.md) | What reprobuild checks before it reuses a result |
 | [Tests and certificates](tests-and-certificates.md) | How tests run in the build graph, split across machines, and record what passed |
-| [Machines and profiles](machines-and-profiles.md) | How a profile sets up your account or your machine, and how a change is rolled back |
+| [Machines and profiles](machines-and-profiles.md) | How a profile describes your account or an operating system, how it is planned and applied, and how a change is rolled back |
+| [Fleets and the deploy agent](fleets-and-the-deploy-agent.md) | How every machine in a fleet applies the signed state published for it |

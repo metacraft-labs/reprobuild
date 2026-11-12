@@ -1,11 +1,11 @@
 ---
 title: Reprobuild documentation
-description: What reprobuild does, from dependencies and builds to tests, environments, workspaces and machines, how one graph covers all of it, and where each kind of help lives.
+description: Reprobuild is a build system whose graph also describes operating systems and fleets of machines; what it does in each area, how one graph covers all of it, and where each kind of help lives.
 kind: explanation
 persona: evaluator
 order: 0
 verifies:
-  commands: [build, lock update, test, test --shard, shell, exec, run, up, workspace init, develop, home apply, home rollback, cache publish, cache substitute]
+  commands: [build, lock update, test, test --shard, shell, exec, run, up, workspace init, develop, home apply, home rollback, infra plan, infra apply, infra apply --accept-passwd-destroy, system, deploy-agent, cache publish, cache substitute]
   tests:
     - tests/integration/t_monitored_zero_output_edge_input_completeness.nim
     - tests/integration/t_uses_resolves_sqlite3_from_real_reprobuild_packages.nim
@@ -19,6 +19,14 @@ verifies:
     - tests/e2e/home-rollback/t_e2e_repro_home_rollback_round_trip.nim
     - tests/e2e/home-rollback/t_e2e_repro_home_rollback_user_edit_protection.nim
     - libs/repro_binary_cache_client/tests/t_a3_p2_cli_substitute.nim
+    - tests/e2e/m69/t_e2e_repro_infra_plan_apply_convergent.nim
+    - tests/e2e/m69/t_e2e_repro_infra_systemd_system_unit.nim
+    - tests/e2e/m69/t_e2e_windows_registry_system_scope.nim
+    - tests/e2e/home-resources/t_integration_prevent_destroy.nim
+    - tests/e2e/m69/t_e2e_repro_infra_passwd_user_safe_destroy.nim
+    - tests/integration/t_infra_apply_cache_hit_preserves_present_outputs.nim
+    - libs/repro_deploy_agent/tests/t_repro_deploy_agent_converges_from_signed_manifest.nim
+    - libs/repro_deploy_agent/tests/t_repro_deploy_agent_rejects_wrong_signer.nim
 unverified:
   - claim: "One project file drives the build, the development environment, tasks and services."
     reason: "No single test exercises all four from one repro.nim; the claim rests on four separate features."
@@ -27,29 +35,37 @@ unverified:
 
 # Reprobuild documentation
 
-Reprobuild (`repro`) is one tool for everything between a project's source code
-and a working setup for developing it. It obtains the tools and libraries the
-project depends on, builds and tests it, gives you the environment to work on it
-in, and runs its tasks and services. It keeps the repositories of a workspace in
-step, puts a dependency's source in your workspace when you need to change it,
-and configures your own account and machine.
+Reprobuild (`repro`) is a build system whose graph describes more than
+software. In one typed language, and with one engine, it builds your programs
+and the tools and libraries they depend on, configures the operating system
+they run on, and keeps a fleet of computers in the state you declared.
 
-All of it runs through one build graph. Its nodes are files and also states,
-such as a running service or a file your profile manages, so one set of rules
-for caching and for recording dependencies covers everything reprobuild does.
-[How reprobuild works](concepts/how-reprobuild-works.md) explains the idea.
+Its graph connects files, as any build system's does, and also states: a
+running service, a user account, a systemd unit, a registry value. As Terraform
+does, reprobuild compares the state you declare with the state that exists,
+shows you the plan, applies the difference and removes what you no longer
+declare. Each applied state is a generation you can roll back to, and applying
+runs through the same engine as a build, so a step whose result is already in
+place is not repeated. [How reprobuild works](concepts/how-reprobuild-works.md)
+explains the idea.
+
+For a project, one tool obtains its dependencies, builds and tests it, gives you
+the environment to work on it in, runs its tasks and services, and keeps the
+repositories it is made from in step.
 
 ## What reprobuild does
 
 | Area | What reprobuild does | Commands |
 |---|---|---|
-| [Dependencies](concepts/dependencies-and-the-store.md) | Resolves each tool and library a project names with a version range to one exact version, records it in the lock file, and keeps it in its store | `repro lock`, `repro why`, `repro store` |
 | [Building](guides/building/index.md) | Derives a build graph from the project's layout or project file, and re-runs only the actions whose recorded inputs changed | `repro build`, `repro graph`, `repro watch` |
+| [Dependencies](concepts/dependencies-and-the-store.md) | Resolves each tool and library a project names with a version range to one exact version, records it in the lock file, and keeps it in its store | `repro lock`, `repro why`, `repro store` |
 | [Testing](concepts/tests-and-certificates.md) | Runs tests as actions in the same graph, splits a suite across machines, and issues test certificates that travel with the commit | `repro test`, `repro certify` |
 | [Environments](guides/environments/index.md) | Puts the project's tools on your `PATH`: in a shell, for one command, or whenever you enter its directory | `repro shell`, `repro exec`, `repro allow` |
 | [Tasks and services](guides/environments/enter-a-project-environment.md) | Runs the project's named commands, and starts its services, such as a database, with the same tools | `repro run`, `repro up`, `repro down` |
 | [Workspaces](guides/workspaces/index.md) | Keeps many repositories side by side at the revisions they declare, and builds a dependency from your checkout of it | `repro workspace`, `repro sync`, `repro develop` |
-| [Machines](concepts/machines-and-profiles.md) | Applies a profile of your account's or your machine's tools and files, as a generation you can roll back | `repro home`, `repro system`, `repro infra` |
+| [Operating systems](concepts/machines-and-profiles.md) | Plans and applies a system profile: services and timers, users and groups, files, kernel settings and firewall rules, or registry values, services and features on Windows | `repro infra plan`, `repro infra apply`, `repro system` |
+| [Your account](concepts/machines-and-profiles.md#applying-a-home-profile) | Applies a home profile: the tools, files and shell settings of your own account | `repro home` |
+| [Fleets](concepts/fleets-and-the-deploy-agent.md) | Keeps each machine at the state a signed manifest declares for it: the machine fetches the manifest, checks the signature and applies it | `repro deploy-agent` |
 | [Sharing results](concepts/how-reprobuild-works.md#5-a-fingerprint-decides-whether-to-run-an-action-again) | Publishes what it built to a binary cache, from which another machine fetches it instead of building it again | `repro cache` |
 
 ## What it guarantees, and how
@@ -62,6 +78,8 @@ for caching and for recording dependencies covers everything reprobuild does.
 | Your shell, your tasks and your services come from the same file as your build | The project file, `repro.nim`, declares the development environment, tasks and services next to the packages | [Enter a project's environment](guides/environments/enter-a-project-environment.md) |
 | A change in one repository is built against the others without publishing anything | Repositories sit side by side in a workspace; develop mode builds a dependency from its local checkout | [Work on a dependency's source](guides/workspaces/develop-a-dependency.md) |
 | A change to your account's setup can be undone | Each apply records a generation, and a rollback restores an earlier one without overwriting a file you edited | [Machines and profiles](concepts/machines-and-profiles.md) |
+| A resource you stop declaring is removed, and a change that loses data needs your consent | Each apply compares the profile with the state the last generation recorded and removes what left it; deleting a user account needs a flag that confirms it, and a protected resource is never removed | [Machines and profiles](concepts/machines-and-profiles.md#plan-then-apply) |
+| A machine applies only state that a key it trusts signed | The deploy agent checks each manifest's signature, ignores manifests for other machines, and never applies an older one | [Fleets and the deploy agent](concepts/fleets-and-the-deploy-agent.md) |
 
 ## Three ways to start
 
@@ -106,7 +124,7 @@ To learn reprobuild step by step instead, follow
 | Work in a codebase that already uses reprobuild | [Enter a project's environment](guides/environments/enter-a-project-environment.md), then [Join a workspace](guides/workspaces/join-a-workspace.md) |
 | Own a project's build, tests and CI | [Conventions and the three modes](concepts/conventions-and-modes.md), [Build an existing project](guides/building/build-an-existing-project.md), then [Tests and certificates](concepts/tests-and-certificates.md) |
 | Maintain a workspace of many repositories | [Coming from repo and git submodules](coming-from/repo-and-git-submodules.md) |
-| Configure your own account or machine | [Machines and profiles](concepts/machines-and-profiles.md), then [Coming from Nix](coming-from/nix.md) |
+| Configure your own account, a machine's operating system or a fleet | [Machines and profiles](concepts/machines-and-profiles.md), [Fleets and the deploy agent](concepts/fleets-and-the-deploy-agent.md), then [Coming from Terraform and OpenTofu](coming-from/terraform-and-opentofu.md) |
 | Already know a tool reprobuild replaces | [Coming from another tool](coming-from/index.md) |
 
 ## Where to find what

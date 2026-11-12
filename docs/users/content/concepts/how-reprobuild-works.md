@@ -1,11 +1,11 @@
 ---
 title: How reprobuild works
-description: The one graph behind everything reprobuild does, followed from a project file to built, tested and running software and a configured machine, with a link to the page that explains each stage.
+description: The one graph behind everything reprobuild does, followed from a project file to built, tested and running software, a configured operating system and a fleet of machines, with a link to the page that explains each stage.
 kind: explanation
 persona: evaluator
 order: 1
 verifies:
-  commands: [build, graph, show-conventions, lock update, test, cache publish, cache substitute, shell, exec, run, up, develop, workspace, home apply, infra apply]
+  commands: [build, graph, show-conventions, lock update, test, cache publish, cache substitute, shell, exec, run, up, develop, workspace, home apply, home rollback, infra plan, infra apply, system rollback, deploy-agent]
   tests:
     - tests/integration/t_monitored_zero_output_edge_input_completeness.nim
     - tests/integration/t_uses_resolves_sqlite3_from_real_reprobuild_packages.nim
@@ -19,6 +19,13 @@ verifies:
     - tests/e2e/home-apply/t_e2e_repro_home_apply_noop.nim
     - tests/e2e/home-rollback/t_e2e_repro_home_rollback_round_trip.nim
     - tests/integration/t_infra_apply_cache_hit_preserves_present_outputs.nim
+    - tests/e2e/m69/t_e2e_repro_infra_plan_apply_convergent.nim
+    - tests/e2e/m69/t_e2e_repro_infra_depends_on_topological.nim
+    - tests/e2e/m69/t_e2e_repro_infra_plan_time_external_drift.nim
+    - tests/e2e/home-resources/t_integration_prevent_destroy.nim
+    - tests/e2e/m69/t_e2e_repro_system_command_family.nim
+    - libs/repro_deploy_agent/tests/t_repro_deploy_agent_converges_from_signed_manifest.nim
+    - libs/repro_deploy_agent/tests/t_repro_deploy_agent_rejects_wrong_signer.nim
 unverified:
   - claim: "Paths below a provisioned tool's root are left out of an action's observed inputs because the tool's identity already covers them."
     reason: "Stated in docs/dependency-collection.md; no test is cited yet."
@@ -33,17 +40,19 @@ unverified:
 
 # How reprobuild works
 
-This page explains the idea that lets one tool build, test, run and configure
-software, then follows a project through each stage, with a link to the page that
-covers each one in depth.
+This page explains the idea that lets one build system build and test software,
+configure the operating system it runs on and keep a fleet of machines in a
+declared state. It then follows a project through each stage, with a link to the
+page that covers each one in depth.
 
 ## One graph, of files and of states
 
 A build tool keeps a graph whose nodes are files: an object file depends on a
 source file, and a program on its objects. reprobuild's graph has the same edges,
 but a node can also be a state: a tool in the store, a service that is running, a
-file that a profile manages in your home directory, a setting applied to a
-machine. An action produces each one.
+user account, a file that a profile manages, a setting applied to a machine. An
+action produces each one, and before it acts reprobuild compares the state it
+would produce with the state that exists, as Terraform does.
 
 Every stage below is made of actions in that graph, so they share one set of
 rules. What an action depended on is recorded, not assumed, and an action whose
@@ -53,7 +62,8 @@ compiles a file, starts a database or edits your `~/.bashrc`:
 - `repro build` reuses an action whose fingerprint matches the recorded one.
 - `repro up`, run in several projects that declare one shared service, starts one instance of it and leaves it running for the others.
 - `repro home apply` changes nothing when your account already matches your profile.
-- `repro infra apply` leaves a step's result alone when the result is already in place.
+- `repro infra plan` shows what applying a system profile would change, and `repro infra apply` leaves a step's result alone when the result is already in place.
+- `repro deploy-agent`, run on each machine of a fleet, applies the signed state published for that machine, through the same steps.
 
 ## 1. A project file describes the project
 
@@ -147,14 +157,27 @@ was built against.
 [Work on a dependency's source](../guides/workspaces/develop-a-dependency.md)
 shows the workflow.
 
-## 9. Profiles configure your account and your machine
+## 9. Profiles configure your account and the operating system
 
-A home profile describes the tools and configuration files on your own account,
-and a system profile describes the machine. `repro home apply` and
-`repro infra apply` make the account or the machine match its profile, with tools
-resolved the same way as a project's dependencies. Each change is recorded as a
-generation, and `repro home rollback` returns to an earlier one.
+A home profile describes the tools and configuration files on your own account.
+A system profile describes the operating system: its services, users and groups,
+files, kernel settings and firewall rules, or on Windows its registry values,
+services and features. `repro infra plan` shows what an apply would change,
+including anything that drifted since the last apply; `repro infra apply` makes
+the machine match, in dependency order, and removes what you no longer declare.
+`repro home apply` does the same for your account, with tools resolved the same
+way as a project's dependencies. Each change is recorded as a generation, and
+`repro system rollback` and `repro home rollback` return to an earlier one.
 [Machines and profiles](machines-and-profiles.md) explains how.
+
+## 10. A fleet converges on signed state
+
+Every machine in a fleet runs `repro deploy-agent` on a timer. Each run fetches
+the manifest published for that machine, checks its signature against the keys
+the machine trusts, and applies the system profile it carries with the same
+steps as `repro infra apply`. A manifest from an untrusted key or for another
+machine changes nothing, and an older one never replaces a newer one.
+[Fleets and the deploy agent](fleets-and-the-deploy-agent.md) explains the model.
 
 ## Related
 
