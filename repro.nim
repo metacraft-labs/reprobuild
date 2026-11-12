@@ -2442,9 +2442,8 @@ package reprobuild:
         extraInputs = if hookScopeTest:
           @["scripts/is_reprobuild_checkout.sh", "flake.nix"]
         elif nixCacheTest:
-          @["tools/reprobuild-nix-daemon/reprobuild-nix-daemon",
-            "tests/fixtures/nix-daemon-local-flake/flake.nix",
-            "tests/fixtures/nix-daemon-local-flake/flake.lock"]
+          # It runs the helper against a fake `nix` it writes itself.
+          @["tools/reprobuild-nix-daemon/reprobuild-nix-daemon"]
         elif bumpVersionTest:
           @["scripts/bump_version.sh", "scripts/check_package_nix_version.sh",
             "reprobuild.nimble", "nix/pkgs/by-name/re/reprobuild/package.nix",
@@ -2477,8 +2476,6 @@ package reprobuild:
       when not defined(windows):
         if hookScopeTest:
           appendRegisteredActionToolIdentityRefs(pyExecute.id, ["bash", "git"])
-        if nixCacheTest:
-          appendRegisteredActionToolIdentityRefs(pyExecute.id, ["nix"])
       if bumpVersionTest:
         appendRegisteredActionToolIdentityRefs(pyExecute.id,
           ["bash", "perl", "sed", "grep"])
