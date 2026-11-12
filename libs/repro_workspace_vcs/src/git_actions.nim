@@ -1043,6 +1043,12 @@ proc executeClone(payload: GitVcsPayload; cwd, receiptPath: string): ActionResul
   if useReference:
     args.add("--reference")
     args.add(payload.referencePath)
+    # Check out only after the §3.4 chain is installed (below). A partial
+    # (``blob:none``) pool names commits whose blobs it only promises, and
+    # upstream withholds what the pool names; the clone's own checkout would
+    # then read blobs that nothing can fetch, because the new clone has no
+    # promisor remote yet.
+    args.add("--no-checkout")
   for f in accelFlags():
     args.add(f)
   args.add(payload.remoteUrl)
@@ -1053,8 +1059,12 @@ proc executeClone(payload: GitVcsPayload; cwd, receiptPath: string): ActionResul
   var cloneRes = runGit(payload, args)
   # Whether the clone that landed borrows from the shared bare (the fallback
   # below does not).
-  let borrowsFromPool = useReference and cloneRes.exitCode == 0
-  if cloneRes.exitCode != 0 and useReference:
+  var borrowsFromPool = useReference and cloneRes.exitCode == 0
+  # What the operator must be told when the clone did not end up borrowing
+  # from the pool it was given: it works, but a second copy of the objects is
+  # on disk and the pool does not know it.
+  var notice = ""
+  proc cloneWithoutReference(): tuple[exitCode: int; output: string] =
     # Best-effort fallback: drop the reference and clone standalone so a
     # broken/locked shared bare never breaks init. The RA-14 accelerators
     # are kept — they are independent of the shared bare.
@@ -1067,7 +1077,52 @@ proc executeClone(payload: GitVcsPayload; cwd, receiptPath: string): ActionResul
     if payload.revision.len > 0 and not pinnedCommit:
       plain.add("--branch")
       plain.add(cloneBranchRef(payload.revision))
-    cloneRes = runGit(payload, plain)
+    borrowsFromPool = false
+    let cloned = runGit(payload, plain)
+    cloned
+  if cloneRes.exitCode != 0 and useReference:
+    notice = "git clone --reference " & payload.referencePath & " failed (" &
+      $cloneRes.exitCode & "), so " & target & " was cloned without " &
+      "borrowing from that pool: " & cloneRes.output.trimmed
+    cloneRes = cloneWithoutReference()
+  if borrowsFromPool and cloneRes.exitCode == 0:
+    # Shared-Clone-Pool-Integrity §3.2/§3.4/§3.5: a checkout that borrows
+    # from the pool is registered with it (so a gc there keeps what this
+    # checkout names) and gets the refetch chain and ``fetch.hideRefs``. A
+    # borrower the pool cannot know about is one its gc can break, so if
+    # registration fails the clone stops borrowing instead: it copies the
+    # objects it uses into its own store and drops the alternates entry.
+    let registered = registerLeafWithPool(payload.binaryPath, target,
+      payload.referencePath)
+    if registered.len > 0 and not registered.startsWith("could not write"):
+      let copied = runGit(payload, ["-C", target, "repack", "-a", "-d", "-q"])
+      if copied.exitCode == 0:
+        try: removeFile(target / ".git" / "objects" / "info" / "alternates")
+        except OSError: discard
+        borrowsFromPool = false
+        notice = target & " does not borrow from " & payload.referencePath &
+          ": it could not be registered with that pool (" & registered &
+          "), so the clone copied the objects it uses."
+    # The clone was made with ``--no-checkout``; populate the working tree now
+    # that missing blobs can be fetched through the chain. A checkout that
+    # still fails means the leaf borrows with no way to resolve what the pool
+    # only promises (registration failed and the objects could not be copied),
+    # so clone again without the reference rather than fail the repo.
+    #
+    # An empty upstream leaves HEAD unborn: there is nothing to check out, and
+    # a failing ``reset`` there is not a reason to give up the borrow.
+    let headBorn = runGit(payload,
+      ["-C", target, "rev-parse", "--verify", "-q", "HEAD"]).exitCode == 0
+    var populated = (exitCode: 0, output: "")
+    if headBorn:
+      populated = runGit(payload,
+        ["-C", target, "reset", "--hard", "-q", "HEAD"])
+    if populated.exitCode != 0:
+      notice = "the checkout of " & target & " borrowing from " &
+        payload.referencePath & " failed (" & $populated.exitCode & ": " &
+        populated.output.trimmed & "), so it was cloned without borrowing " &
+        "from that pool."
+      cloneRes = cloneWithoutReference()
   if cloneRes.exitCode != 0:
     # A clone can fail in two shapes, and only one of them leaves nothing
     # behind. "Could not read from remote" fails before anything is created;
@@ -1108,20 +1163,6 @@ proc executeClone(payload: GitVcsPayload; cwd, receiptPath: string): ActionResul
         "  git output: " & cloneOut)
     return failed("clone-failed",
       "git clone exited " & $cloneRes.exitCode & ": " & cloneOut)
-  if borrowsFromPool:
-    # Shared-Clone-Pool-Integrity §3.2/§3.4/§3.5: a checkout that borrows
-    # from the pool is registered with it (so a gc there keeps what this
-    # checkout names) and gets the refetch chain and ``fetch.hideRefs``. A
-    # borrower the pool cannot know about is one its gc can break, so if
-    # registration fails the clone stops borrowing instead: it copies the
-    # objects it uses into its own store and drops the alternates entry.
-    let registered = registerLeafWithPool(payload.binaryPath, target,
-      payload.referencePath)
-    if registered.len > 0 and not registered.startsWith("could not write"):
-      let copied = runGit(payload, ["-C", target, "repack", "-a", "-d", "-q"])
-      if copied.exitCode == 0:
-        try: removeFile(target / ".git" / "objects" / "info" / "alternates")
-        except OSError: discard
   if pinnedCommit:
     # The clone landed on the remote's default branch; move to the pinned
     # commit. Fetch it explicitly first — it need not be a branch tip, and
@@ -1170,6 +1211,13 @@ proc executeClone(payload: GitVcsPayload; cwd, receiptPath: string): ActionResul
     return failed("clone-head-probe-failed", headRes.diagnostic)
   let receipt = renderCloneReceipt(payload, headRes.sha)
   writeReceipt(receiptPath, receipt)
+  if notice.len > 0:
+    # A success that did not do what was asked of it says so on the row the
+    # operator reads: the leaf works but shares nothing with the pool.
+    var partial = succeeded()
+    partial.reason = "clone-reference-not-borrowed"
+    partial.stderr = notice
+    return partial
   succeeded()
 
 proc executeFetch(payload: GitVcsPayload; cwd, receiptPath: string): ActionResult =

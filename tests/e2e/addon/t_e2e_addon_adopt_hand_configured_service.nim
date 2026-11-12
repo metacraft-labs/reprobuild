@@ -83,6 +83,7 @@ import ./deb_fixture_support
 import ./reference_services
 import ./snapshot_mirror
 import ./upgrade_support
+import ./adopt_gate_source
 
 const
   Gate = "e2e_addon_adopt_hand_configured_service"
@@ -762,122 +763,22 @@ proc runBase(m: SnapshotMirror; b: BaseImage; record: JsonNode): seq[string] =
       g.destroy()
   fails
 
-const
-  RefusedAdoptStep = "`repro system adopt` refuses while the profile declares the old"
-  RevertStep = "a switch of the old profile does not revert the edit"
-
-proc stepCallOf(src, title: string): tuple[start, at: int; call: string] =
-  ## Where the step call recording ``title`` starts, where its title is, and
-  ## the proc it is recorded with (``step`` or ``stepNoStop``).
-  let at = src.find("\"" & title)
-  if at < 0: return (-1, -1, "")
-  var i = at
-  while i > 0 and src[i - 1] in {' ', '\n', '('}: dec i
-  var j = i
-  while j > 0 and src[j - 1] in {'a'..'z', 'A'..'Z'}: dec j
-  (j, at, src[j ..< i])
-
-proc codeOnly(src: string): string =
-  ## ``src`` with its comments and string and character literals blanked
-  ## (each replaced by spaces of the same length), so a word inside a step
-  ## title or a comment is never read as code.
-  result = src
-  var i = 0
-  while i < result.len:
-    let c = result[i]
-    if c == '#':
-      while i < result.len and result[i] != '\n':
-        result[i] = ' '
-        inc i
-    elif c == '"':
-      let triple = i + 2 < result.len and result[i + 1] == '"' and result[i + 2] == '"'
-      if triple:
-        let e = result.find("\"\"\"", i + 3)
-        let stop = if e < 0: result.len else: e + 3
-        for k in i ..< stop: result[k] = ' '
-        i = stop
-      else:
-        result[i] = ' '
-        inc i
-        while i < result.len and result[i] != '"' and result[i] != '\n':
-          if result[i] == '\\' and i + 1 < result.len:
-            result[i] = ' '
-            inc i
-          result[i] = ' '
-          inc i
-        if i < result.len and result[i] == '"':
-          result[i] = ' '
-          inc i
-    elif c == '\'' and i + 2 < result.len and
-        (result[i + 2] == '\'' or (result[i + 1] == '\\' and i + 3 < result.len and
-                                   result[i + 3] == '\'')):
-      let stop = if result[i + 1] == '\\': i + 4 else: i + 3
-      for k in i ..< stop: result[k] = ' '
-      i = stop
-    else:
-      inc i
-
-const StoppingWords = ["return", "raise", "quit", "break", "continue",
-  "doAssert", "assert", "check", "require", "expect", "fails", "step",
-  "MutationStop", "newException", "fail", "skip"]
-  ## Every way this gate's code can end or divert the run of a base, or
-  ## record a stopping verdict: a statement that leaves the proc or a loop,
-  ## an assertion, a ``fails`` test (``if fails.len > 0: return fails``, the
-  ## gate's idiom after each section), and ``step`` itself (``stepNoStop``
-  ## is another identifier). A call of any other helper of this file that
-  ## can stop the run would have to name one of these too.
-
-proc stoppingForms(region: string): seq[string] =
-  ## The stopping forms (``StoppingWords``) the code in ``region`` uses, as
-  ## identifiers, comments and literals left out.
-  let code = codeOnly(region)
-  var i = 0
-  while i < code.len:
-    if code[i] in IdentStartChars and (i == 0 or code[i - 1] notin IdentChars):
-      var j = i
-      while j < code.len and code[j] in IdentChars: inc j
-      let w = code[i ..< j]
-      if w in StoppingWords: result.add(w)
-      i = j
-    else:
-      inc i
-
 suite "gate source":
   test "under adopt-without-profile the gate reaches the silent-revert step":
     # A structural control on this gate's own source (A13 review round 7,
-    # finding 4): the decision-61 refusal step must not stop the run (under
-    # the mutation it is red), the silent-revert step must come after it,
-    # and nothing between them may end the run in any form: a return, a
-    # raise, a quit, a break or continue, an assertion, a ``fails`` guard, a
-    # stopping step. The cell's record also carries ``revertStepReached``,
-    # set when the gate reaches that step, and the committed classifier
+    # finding 4; the review of 2026-11-12), made by ``adopt_gate_source``
+    # while this file compiles: the decision-61 refusal step must not stop
+    # the run (under the mutation it is red), the silent-revert step must
+    # come after it, and nothing from one to the other can end the run. The
+    # cell's record also carries ``revertStepReached``, set when the gate
+    # reaches that step, and the committed classifier
     # (``scripts/addon_a13_classify.py``) requires it.
-    const src = staticRead(currentSourcePath())
-    let refused = stepCallOf(src, RefusedAdoptStep)
-    let revert = stepCallOf(src, RevertStep)
-    check refused.at >= 0
-    check revert.at > refused.at
-    check refused.call == "stepNoStop"
-    check revert.call == "step"
-    let between = src[refused.at + RefusedAdoptStep.len ..< revert.start]
-    let forms = stoppingForms(between)
-    checkpoint $forms
-    check forms.len == 0
+    checkpoint $GateFindings
+    check GateFindings.len == 0
 
-  test "the structural check sees every stopping form (negative controls)":
-    check stoppingForms("  let x = g.run(\"echo return raise step\") # quit\n").len == 0
-    for snippet in ["  if fails.len > 0: return fails\n",
-                    "  return\n",
-                    "  if refusedAdopt.exitCode == 0: raise newException(MutationStop, \"x\")\n",
-                    "  quit(1)\n",
-                    "  break\n",
-                    "  continue\n",
-                    "  doAssert x\n",
-                    "  assert x\n",
-                    "  step(\"t\", false, \"\")\n",
-                    "  step \"t\", false, \"\"\n"]:
-      checkpoint snippet
-      check stoppingForms(snippet).len > 0
+  test "the structural check finds every way to stop (negative controls)":
+    checkpoint $ControlFailures
+    check ControlFailures.len == 0
 
 suite Gate:
   test "a hand-configured service is adopted with no write and converged " &
