@@ -41,7 +41,12 @@ work=$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/repro-release-smoke-XXXXXX")
 # project directory open for a moment ("Device or resource busy"), and a
 # leftover temp dir must not turn a passed check into a failed step.
 quota_runtime=''
-trap 'rm -rf "$work" 2>/dev/null || true; if [[ -n "$quota_runtime" ]]; then rm -rf "$quota_runtime" 2>/dev/null || true; fi' EXIT
+# The private socket root goes FIRST. isolate_archive_runquota puts shadow
+# copies of PATH entries under $work, and on a host whose `rm` lives in such an
+# entry (a Nix profile that also carries runquotad) deleting $work removes the
+# `rm` the next command would resolve, so the socket root was silently left in
+# /tmp on every run.
+trap 'if [[ -n "$quota_runtime" ]]; then rm -rf "$quota_runtime" 2>/dev/null || true; fi; rm -rf "$work" 2>/dev/null || true' EXIT
 
 # Where the sources come from. The engine resolves the tree it compiles a
 # recipe against from, in order: the REPROBUILD_LIBS_DIR / REPROBUILD_REPO_ROOT
