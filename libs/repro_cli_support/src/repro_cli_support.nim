@@ -7,17 +7,23 @@ when defined(windows):
   import std/[importutils, winlean]
   import repro_daemon_core/windows_detached_spawn
 else:
-  import repro_cli_support/daemon_startup_output
+  # The shared per-user runquotad (POSIX): the endpoint and its lock files are
+  # RunQuota's, the process mechanics are `user_runquota_daemon`'s.
+  import repro_cli_support/user_runquota_daemon
   from runquota_ipc import rendezvousPolicy, defaultEndpoint,
-    directoryResolvesWithin, hostWideEndpointDir, requireTrustedEndpointDir
+    directoryResolvesWithin, hostWideEndpointDir, requireTrustedEndpointDir,
+    userEndpoint, userEndpointDir, ensureUserEndpointDir, endpointSocketName,
+    userEndpointLogName, lifetimeLockPath, lifetimeLockHeld, acquireStartLock,
+    releaseEndpointLock
   from runquota_client import connectDefault, close
-  # Only these names: the pipe-feeding guard in ``runFeedingStdin``, the
-  # interrupt of an isolated certification (``interruptIsolatedPins``), and
-  # the caller's uid in ``hostPolicyDaemonRemedy``. `from … import` keeps the
-  # rest of `std/posix` out of this module's namespace.
+  # Only these names: the pipe-feeding guard in ``runFeedingStdin``, and the
+  # interrupt of an isolated certification (``interruptIsolatedPins``). `from …
+  # import` keeps the rest of `std/posix` out of this module's namespace.
+  # (The caller's uid of the stale-daemon remedy is
+  # `user_runquota_daemon.hostPolicyDaemonRemedy`'s.)
   from std/posix import sigaction, sigemptyset, Sigaction, SIGPIPE, SIG_IGN,
     SIGTERM, Pid,
-    ENOENT, geteuid
+    ENOENT
 from repro_core/target_object_check import objectCheckTripleFromVariants
 import repro_core/engine_build_info
 import repro_core
@@ -171,14 +177,9 @@ import repro_cli_support/cross_target_flag
 import repro_cli_support/dev_session
 from repro_cli_support/session_process_owner import sessionProcessAlive
 import repro_cli_support/push_hook_protocol
-# The `runquotad` an invocation owns must not outlive it, however it ends:
-# terminating signals are forwarded to it, and it holds no descriptor of ours
-# above 2. See `spawnOwnedRunQuotaDaemon`.
-import repro_cli_support/owned_daemon_signals
 when not defined(windows):
   from repro_core/descriptor_inheritance import
-    markInheritableDescriptorsCloseOnExec, restoreInheritableDescriptors,
-    setCloseOnExec
+    markInheritableDescriptorsCloseOnExec, restoreInheritableDescriptors
 import repro_cli_support/cmake_direct
 import repro_cli_support/daemon_working_directory
 # TC-8b: the certificate verifier matches by CONTENT (Verification §4.1.1), so
@@ -17210,7 +17211,9 @@ proc runReproRunCommand(args: openArray[string];
         buildArgs.add("--")
         for a in actionArgs:
           buildArgs.add(a)
-      # The build path owns recipe pool discovery and its own auto-daemon.
+      # The build path declares its own pools and adopts (or starts) the
+      # daemon itself; the hold this command took is let go first. On POSIX
+      # that is the shared per-user daemon, which outlives both.
       releaseAutoRunQuotaProcess(autoRunQuota)
       return runBuildCommand(buildArgs, publicCliPath)
     else:
@@ -26110,8 +26113,10 @@ proc autoRunQuotaBudgetArgs*(host: HostConfig):
         "build, so this budget applies to every workspace on it until " &
         "runquotad stops"
     else:
-      "The daemon being started serves this build and the builds it runs, " &
-        "and stops with it"
+      "The daemon being started is this user's shared per-user daemon: it " &
+        "serves every invocation of this user and outlives this build, so " &
+        "this budget applies to all of them until runquotad has been idle " &
+        "for its idle-exit period and exits"
   result.warnings.add("REPROBUILD_RUNQUOTA_MEMORY_BYTES=" & $memory &
     " starts runquotad with --memory-bytes " & $memory & ", overriding " &
     replaced & ". " & reach & ", and `runquota config set " &
@@ -26193,8 +26198,6 @@ when not defined(windows):
     socket, scope: string
     hadSocket, hadScope: bool
 
-  var ownedRunQuotaEnvironments {.threadvar.}: Table[int, AutoRunQuotaEnvironment]
-
   proc saveRunQuotaEnvironment(): AutoRunQuotaEnvironment =
     AutoRunQuotaEnvironment(socket: getEnv("RUNQUOTA_SOCKET"),
       scope: getEnv("RUNQUOTA_ENDPOINT_SCOPE"),
@@ -26207,140 +26210,217 @@ when not defined(windows):
     if previous.hadScope: putEnv("RUNQUOTA_ENDPOINT_SCOPE", previous.scope)
     else: delEnv("RUNQUOTA_ENDPOINT_SCOPE")
 
-  proc restoreOwnedRunQuotaEnvironment(pid: int) =
-    if ownedRunQuotaEnvironments.hasKey(pid):
-      restoreRunQuotaEnvironment(ownedRunQuotaEnvironments[pid])
-      ownedRunQuotaEnvironments.del(pid)
-
-  var ownedRunQuotaEndpointDirs {.threadvar.}: Table[int, string]
-    ## The rendezvous directory `createPrivateRunQuotaEndpoint` made for each
-    ## owned daemon, keyed by the daemon's pid. This invocation created it, so
-    ## this invocation removes it -- once the daemon has been reaped, never
-    ## while it may still be listening there.
-
-  proc removeRunQuotaEndpointDir(directory: string) =
-    ## Remove a rendezvous directory this invocation created. The daemon
-    ## unlinks its socket on an orderly shutdown and leaves its published
-    ## stats table beside it, so the removal is recursive. A failure is
-    ## reported and does not fail the build: the directory's name is unique,
-    ## so a leftover one can never be chosen by a later invocation.
+  proc startUserRunQuotaDaemon(runquotad, socket: string;
+                               idleSeconds: int): owned(Process) =
+    ## Starts THIS INSTALL'S `runquotad` on the per-user endpoint and waits
+    ## until it answers. The caller holds the start lock and has seen the
+    ## lifetime lock free, so no daemon is alive at `socket` and nobody else
+    ## is starting one.
+    ##
+    ## THE ARGV IS THE ENDPOINT AND THE IDLE PERIOD, AND NO BUDGET. No CPU,
+    ## memory or pool flag is passed (`autoRunQuotaBudgetArgs`): the daemon
+    ## reads the host file and its own defaults exactly as the installed
+    ## service does, and a later `runquota config set` + reload reaches it.
+    ## Named pools are declared by each build on its own session
+    ## (`declareRunQuotaPools`), which is also what lets a daemon some other
+    ## invocation started admit them.
+    ##
+    ## THE DAEMON OUTLIVES THIS INVOCATION and is shared by every invocation
+    ## of the user, so it is started detached from it (a new session, `/`,
+    ## `/dev/null` and its log, no descriptor above 2;
+    ## `spawnDetachedUserDaemon`), and nothing here ever stops it once it has
+    ## answered: it exits by itself after `idleSeconds` with no client.
+    ##
+    ## On success this invocation HOLDS a connection to it (the readiness
+    ## probe is the hold itself, `holdRunQuotaDaemon`), so it cannot idle out
+    ## or be retired by another install's `repro` in the gap before the
+    ## build's first session.
+    let budget = autoRunQuotaBudgetArgs(readHostConfig())
+    for warning in budget.warnings:
+      stderr.writeLine("repro: warning: " & warning)
+    var args = @["--socket", socket, "--idle-exit-after", $idleSeconds]
+    args.add(budget.args)
+    let logPath = socket.parentDir / userEndpointLogName
+    let logFd = openUserDaemonLog(logPath)
+    var pid = 0
     try:
-      # A real directory, or nothing. `removeDir` follows a symlink at the top,
-      # so a path that has become one is reported and left alone rather than
-      # emptying whatever it points at.
-      let info = getFileInfo(directory, followSymlink = false)
-      if info.kind != pcDir:
-        stderr.writeLine("repro: warning: RunQuota endpoint directory " &
-          directory & " is no longer a directory; not removing it")
-        return
-      removeDir(directory)
-    except OSError as error:
-      if not (symlinkExists(directory) or dirExists(directory) or
-          fileExists(directory)):
-        return # already gone: nothing of ours is left there
-      stderr.writeLine("repro: warning: could not remove RunQuota endpoint " &
-        "directory " & directory & ": " & error.msg)
-
-  proc removeOwnedRunQuotaEndpointDir(pid: int) =
-    ## Called only after the daemon `pid` names has been reaped.
-    if ownedRunQuotaEndpointDirs.hasKey(pid):
-      removeRunQuotaEndpointDir(ownedRunQuotaEndpointDirs[pid])
-      ownedRunQuotaEndpointDirs.del(pid)
-
-  const runQuotaExitWithParentEnvVar = "RUNQUOTA_EXIT_WITH_PARENT"
-    ## Read by `runquotad` (runquota `runquota_daemon/parent_watch`): `1`
-    ## makes the daemon stop, through its orderly SIGTERM shutdown, when its
-    ## parent is gone. Spelled here rather than imported so reprobuild does
-    ## not need a runquota new enough to define it -- an older `runquotad`
-    ## ignores the variable, which costs the SIGKILL half of the lifetime
-    ## rule and nothing else.
-
-  proc spawnOwnedRunQuotaDaemon(runquotad: string;
-                                args: seq[string]): owned(Process) =
-    ## Starts the `runquotad` this invocation OWNS, so that it cannot outlive
-    ## the invocation however the invocation ends and holds nothing of the
-    ## invocation's but its own 0, 1 and 2 (reprobuild-pm
-    ## `spec/RunQuota-Host-Configuration.md`, "\"Terminated when the
-    ## top-level build ends\" means however it ends"). Three things, each
-    ## covering what the others cannot:
-    ##
-    ## 1. NO DESCRIPTOR ABOVE 2 CROSSES THE SPAWN. `osproc` creates its pipes
-    ##    without `O_CLOEXEC` and leaves the originals open in the child after
-    ##    `dup2`ing them onto 0/1/2, and offers no hook between `fork` and
-    ##    `exec` to close them. So an invocation started that way -- as
-    ##    `e2e_repro_dev_watch_and_service_events` started `repro dev` --
-    ##    holds copies of its own stdout pipe above 2, and a daemon spawned
-    ##    with them open kept that pipe alive after the invocation died: the
-    ##    caller's `readAll()` waited 30 minutes for an end of file. Every
-    ##    descriptor above 2 is therefore close-on-exec for the duration of
-    ##    the spawn (`markInheritableDescriptorsCloseOnExec`, the rule
-    ##    RunQuota's process backend applies with `closeInheritedChildFds`),
-    ##    and the flags are restored afterwards. The window is one
-    ##    `startProcess`. A spawn another thread makes inside it loses only
-    ##    descriptors above 2 that it did not `dup2` into place -- and the
-    ##    build's own launch paths already give every child 0, 1 and 2 and
-    ##    nothing else (RunQuota's `closeInheritedChildFds`, the engine's
-    ##    `beginMonitorSpawnContext`), so none of them relies on one.
-    ##
-    ##    And afterwards OUR ends of the daemon's own stdio pipes are marked
-    ##    close-on-exec for good, so that no later child of this invocation
-    ##    -- a build action, a provider, a nested `repro` -- holds a copy of a
-    ##    pipe to the daemon it did not create.
-    ##
-    ## 2. A TERMINATING SIGNAL IS FORWARDED. The pid is registered with
-    ##    `owned_daemon_signals` right after the spawn and before the
-    ##    readiness wait, so a SIGTERM/SIGINT/SIGHUP/SIGQUIT that ends this
-    ##    invocation at any point from here on sends the daemon SIGTERM first.
-    ##    `releaseAutoRunQuotaProcess`, and the failure path of
-    ##    `startAutoRunQuotaIfNeeded`, unregister it.
-    ##
-    ## 3. THE DAEMON WATCHES ITS PARENT. `RUNQUOTA_EXIT_WITH_PARENT=1` is put
-    ##    in the DAEMON's environment only -- never into ours, where every
-    ##    later child would inherit a request addressed to one process. It is
-    ##    the only half that covers SIGKILL and the OOM killer, which no
-    ##    handler here can see.
-    # SIGCHLD auto-reaping can recycle a child pid while the signal registry
-    # still owns it. Refuse BEFORE fork or descriptor/environment mutation;
-    # changing the caller's disposition would change unrelated child behavior.
-    ensureOwnedDaemonReaping()
-    let env = newStringTable(modeCaseSensitive)
-    for key, value in envPairs():
-      env[key] = value
-    env[runQuotaExitWithParentEnvVar] = "1"
-    # Recorded before the spawn: a SIGKILL before the daemon reaches main
-    # must not let it adopt a subreaper as its apparent owner.
-    env["RUNQUOTA_EXIT_WITH_PARENT_PID"] = $getCurrentProcessId()
-    let madeCloseOnExec = markInheritableDescriptorsCloseOnExec()
-    try:
-      result = startProcess(runquotad, args = args, env = env,
-        options = {poUsePath})
+      pid = spawnDetachedUserDaemon(runquotad, args, logFd)
     finally:
-      restoreInheritableDescriptors(madeCloseOnExec)
-    setCloseOnExec(cint(result.inputHandle))
-    setCloseOnExec(cint(result.outputHandle))
-    setCloseOnExec(cint(result.errorHandle))
-    if not registerOwnedDaemon(processID(result)):
-      let registrationError = osLastError()
-      var stillOurChild = false
-      var live = false
-      try:
-        live = ownedDaemonStillRunning(result)
-        stillOurChild = true
-      except OSError:
-        # In particular ECHILD: an externally reaped pid is no longer ours
-        # to terminate, even if another process now has the same number.
-        discard
-      if stillOurChild:
-        if live:
-          try: result.terminate()
-          except CatchableError: discard
-        try: discard result.waitForExit()
-        except CatchableError: discard
-      try: result.close()
-      except CatchableError: discard
-      result = nil
-      raiseOSError(registrationError,
-        "cannot own auto-started runquotad: signal-forwarding registration failed")
+      closeUserDaemonLog(logFd)
+    # Raises, with the log, when the daemon exits before it listens or is
+    # still not listening at the ceiling; it has been reaped then.
+    waitForUserDaemon(pid, runquotad, socket, logPath,
+      proc (): bool = holdRunQuotaDaemon())
+    recordSpawnedUserDaemon(pid)
+    result = spawnedDaemonProcess(pid)
+    # DA-2 -- DERIVED class-3 IPC trust. We spawned this daemon, so its pid is
+    # a fact this process holds rather than a claim anyone made, and
+    # `trustDaemonWeSpawned` takes the `Process` precisely so that stays true
+    # (Dependency-Observation-Attribution.md §"Derived beats declared").
+    #
+    # WHICH BRANCH OF §Class 3, and it is branch (a): `runquotad` CONTRIBUTES
+    # NO CONTENT to any action. Its protocol is Hello / Acquire / Grant /
+    # Release plus the stats-extension rows -- lease decisions and telemetry.
+    # It opens no file on a client's behalf and returns no bytes that can
+    # reach an action's output, so a monitored process talking to it has
+    # consumed nothing the monitor failed to see. It is NOT branch (b): it
+    # serves no content at all, keyed or otherwise.
+    #
+    # Registered only on the arm that STARTED it. Every arm that ADOPTS a
+    # daemon -- an inherited `RUNQUOTA_SOCKET` that answers, the provisioned
+    # host endpoint, and the per-user daemon some earlier invocation started
+    # -- reuses a daemon this process did not start, and DERIVED trust covers
+    # nothing it did not spawn.
+    #
+    # DA-4 COVERS THOSE ARMS, AND DERIVED IS STILL THE PREFERRED ROUTE WHERE
+    # IT IS AVAILABLE. `applyMachineDeclaredDaemonTrust`, called at the top of
+    # `startAutoRunQuotaIfNeeded` and therefore above every adoption, trusts
+    # an ADOPTED daemon when the machine declares it and the declaration's
+    # check passes. That is strictly weaker than this line: holding the
+    # `Process` proves the spawn, while a check establishes an identity from
+    # what the kernel will vouch for (see `checkDeclaredDaemon`). So the
+    # start arm keeps registering derivedly even on a host that also
+    # declares this daemon; the two facts coexist in the registry and the
+    # diagnostic says which one forgave.
+    #
+    # WHAT THAT COSTS, STATED HERE BECAUSE HERE IS WHERE AN OPERATOR MEETS
+    # IT. DA-2's reach on a given host is exactly the set of invocations that
+    # take THIS arm:
+    #
+    #   * LINUX, unprovisioned host: ONLY the invocation that STARTS the
+    #     shared per-user daemon. Since 2026-11-11 that daemon outlives the
+    #     invocation and every later invocation of the user adopts it until
+    #     it idles out (reprobuild-pm `spec/RunQuota-Host-Configuration.md`,
+    #     "The shared per-user daemon (POSIX)"), so DA-2 is live on the first
+    #     build after an idle period and inert on the builds that follow --
+    #     exactly as on Windows after the first build. Before that date the
+    #     daemon was private to each invocation and every build took this arm.
+    #   * macOS: INERT, start arm or not. Reaching this line is not the same
+    #     as registering: `trustDaemonWeSpawned` refuses a peer it cannot
+    #     re-validate, and `processStartIdentity` is `when defined(linux)`
+    #     with `""` on every other host. So the call below runs and stores
+    #     nothing. That is the conservative direction -- an unre-validatable
+    #     pid must not exempt anything (see `TrustedDaemonPeer.identity`) --
+    #     but it means "POSIX" is the wrong granularity for DA-2's reach.
+    #   * POSIX, provisioned host: `runquota_ipc.defaultEndpoint` resolves to
+    #     the FIXED host-wide socket (`/run/runquota/runquotad.sock` on Linux,
+    #     `/var/run/...` on macOS), which answers before any start, so DA-2 is
+    #     ENTIRELY INERT -- on precisely the topology a shared lease
+    #     coordinator exists for. So is a nested `repro` that inherited a
+    #     reachable `RUNQUOTA_SOCKET` from its parent. **This row is DA-4's,
+    #     and it is covered when `/etc/repro/daemons.conf` declares that
+    #     endpoint and the declaration's check passes; it is still uncovered
+    #     on a host that declares nothing, which is the untrusting default.**
+    #   * Windows: INERT AFTER THE FIRST BUILD. The daemon binds the per-user
+    #     default pipe and `releaseAutoRunQuotaProcess` deliberately does not
+    #     terminate it, so build #2 onward finds it reachable and registers
+    #     nothing.
+    #
+    # None of that is a defect in this arm; adopting a daemon this process
+    # did not spawn is declared attribution, and the check it needs is DA-4.
+    # It is written down so nobody reads "reprobuild trusts runquotad" as a
+    # claim about every build on every host.
+    #
+    # `t_derived_daemon_ipc_trust.nim` grades both halves of this: that the
+    # start arm registers, and that the adopting arm provably does not.
+    trustDaemonWeSpawned(result, "runquotad", tdcNoContent)
+
+  proc adoptOrStartUserRunQuota(runquotad: string): owned(Process) =
+    ## THE SHARED PER-USER DAEMON (reprobuild-pm
+    ## `spec/RunQuota-Host-Configuration.md`, "The shared per-user daemon
+    ## (POSIX)"). On a host with no provisioned service, every invocation of
+    ## a user ADOPTS the one `runquotad` on that user's well-known endpoint
+    ## (`runquota_ipc.userEndpoint`), and STARTS it when none is alive. It
+    ## replaced, on 2026-11-11, a private daemon per invocation that saw only
+    ## its own build: two concurrent builds each admitted against the whole
+    ## budget, which is the one thing RunQuota exists to prevent.
+    ##
+    ## Returns the started daemon (`nil` when one was adopted, or when there
+    ## is nothing to adopt and no `runquotad` to start). Either way this
+    ## invocation HOLDS one connection to the daemon until
+    ## `releaseAutoRunQuotaProcess`, and `RUNQUOTA_SOCKET` /
+    ## `RUNQUOTA_ENDPOINT_SCOPE=private` are PUBLISHED in this process's
+    ## environment and NOT restored at release: they name a daemon that
+    ## outlives the invocation, so every command `repro` runs -- `repro exec`'s
+    ## included -- inherits the shared endpoint, and a nested `repro` that
+    ## inherits it runs this same adopt-or-start, which recovers from a daemon
+    ## that idled out since.
+    ##
+    ## UNDER THE START LOCK (`<socket>.start`), so concurrent invocations never
+    ## start two daemons, it repeats until a deadline 120 s away:
+    ##
+    ## 1. A daemon answers: ADOPT it, subject to the handover of "A daemon
+    ##    from another build makes way" (`decideRunQuotaHandover`), which now
+    ##    applies to this endpoint exactly as to the Windows pipe -- a daemon
+    ##    of another image that has no other client retires, and the loop
+    ##    goes round to start this install's.
+    ## 2. No daemon holds the LIFETIME LOCK (`<socket>.lock`): nobody is
+    ##    alive there, whatever the socket file says -- a daemon killed with
+    ##    SIGKILL leaves its socket behind and the kernel releases its lock.
+    ##    The stale socket is removed and this install's daemon started.
+    ## 3. A daemon holds the lock and does not answer: it is shutting down
+    ##    (idle exit, retirement), or was started by hand and is not yet
+    ##    listening. Wait 50 ms and repeat.
+    let idleSeconds = autoRunQuotaIdleExitSeconds()
+    let directory = userEndpointDir()
+    ensureUserEndpointDir(directory)
+    let socket = directory / endpointSocketName
+    reapSpawnedUserDaemons()
+    let previous = saveRunQuotaEnvironment()
+    # PUBLISHED BEFORE THE LOOP, so every probe below -- the reachability
+    # check, the handover, the hold -- addresses this endpoint under the
+    # private policy, through the same `connectDefault` the build will use.
+    # Restored only when this fails or finds nothing: then nothing was
+    # adopted or started that the publication could name.
+    putEnv("RUNQUOTA_SOCKET", socket)
+    putEnv("RUNQUOTA_ENDPOINT_SCOPE", "private")
+    var published = false
+    try:
+      let startLock = acquireStartLock(socket)
+      defer: releaseEndpointLock(startLock)
+      let deadline = getMonoTime() + userDaemonReadinessCeiling
+      while true:
+        var present = false
+        try:
+          discard getFileInfo(socket, followSymlink = false)
+          present = true
+        except OSError:
+          present = false
+        if present and isRunQuotaDaemonReachable():
+          let report = decideRunQuotaHandover(runquotad)
+          if report.note.len > 0:
+            stderr.writeLine("repro: note: " & report.note)
+          # THE HOLD, on every adopting arm: `decideRunQuotaHandover` holds a
+          # daemon it could ask to retire; one it could not ask (no candidate
+          # to digest, a daemon below RQSP minor 2) is held here. A daemon
+          # that went between the probe and the hold is case 3 next round.
+          if report.handover == rhAdopt and
+              (holdsAdoptedDaemon() or holdRunQuotaDaemon()):
+            warnRunQuotaMemoryOverrideNotApplied()
+            published = true
+            return nil
+        elif not lifetimeLockHeld(socket):
+          if runquotad.len == 0:
+            # Nothing to adopt and nothing to start: the caller's bypass or
+            # the engine's diagnostic takes over, as before this daemon was
+            # shared (see `startAutoRunQuotaIfNeeded`).
+            return nil
+          removeStaleUserEndpointSocket(socket)
+          result = startUserRunQuotaDaemon(runquotad, socket, idleSeconds)
+          published = true
+          return
+        if getMonoTime() >= deadline:
+          raise newException(OSError, "runquotad at " & socket &
+            " neither answered nor exited within " &
+            $userDaemonReadinessCeiling.inSeconds & " s: a process holds " &
+            "its lifetime lock " & lifetimeLockPath(socket) & " and does " &
+            "not answer. If its socket was removed under it, stop it with " &
+            "`RUNQUOTA_SOCKET=<its socket> RUNQUOTA_ENDPOINT_SCOPE=private " &
+            "runquota daemon stop`, or end that process")
+        sleep(50)
+    finally:
+      if not published:
+        restoreRunQuotaEnvironment(previous)
 
 when defined(windows):
   proc spawnDetachedRunQuotaDaemon(runquotad: string;
@@ -26391,111 +26471,35 @@ when defined(windows):
       fThreadHandle: Handle(0), id: Handle(child.pid),
       options: {poParentStreams})
 
-when not defined(windows):
-  const PrivateScopeSelectionRemedy =
-    "\nremedy: RUNQUOTA_ENDPOINT_SCOPE=private names an endpoint its caller " &
-    "owns and gives in RUNQUOTA_SOCKET (an absolute socket in a 0700 " &
-    "directory of yours, outside the host rendezvous directory). repro " &
-    "selects it by itself for the runquotad it starts, so unless you run " &
-    "your own daemon at RUNQUOTA_SOCKET, unset RUNQUOTA_ENDPOINT_SCOPE and " &
-    "RUNQUOTA_SOCKET."
-    ## Appended to a refused hand-made private selection. The refusal itself
-    ## is RunQuota's; what only repro can say is that it chooses the scope
-    ## itself.
-
-  proc addPrivateScopeRemedy(error: ref Exception) =
-    ## Append ``PrivateScopeSelectionRemedy`` to an auto-start refusal when
-    ## the private scope is selected. Every such refusal gets it -- a missing,
-    ## relative or unreachable RUNQUOTA_SOCKET alike -- because each one is
-    ## answered by the same question: did the caller mean to run its own
-    ## daemon at all?
-    if getEnv("RUNQUOTA_ENDPOINT_SCOPE") == "private":
-      error.msg.add(PrivateScopeSelectionRemedy)
-
-  proc hostPolicyDaemonRemedy(runquotad: string; refusedOwner: int64): string =
-    ## The remedy for a spawned daemon that refused its private endpoint
-    ## under the HOST policy, or "" when the startup output shows no such
-    ## refusal. repro hands the daemon `RUNQUOTA_ENDPOINT_SCOPE=private`, and
-    ## a private policy only ever expects the effective caller, so a refusal
-    ## naming another owner uid means this `runquotad` ignored the selection:
-    ## it predates private endpoints (runquota 35b9dfe). The version string
-    ## cannot tell such a build from a current one, so the remedy names the
-    ## binary that was started instead. Without this the operator sees only
-    ## "configured daemon owner uid <n>" and reads it as a host problem.
-    if refusedOwner < 0 or refusedOwner == int64(geteuid()):
-      return ""
-    "\nremedy: " & runquotad & " checked the private endpoint repro " &
-      "created for it against the host policy (daemon owner uid " &
-      $refusedOwner & ") although repro selected RUNQUOTA_ENDPOINT_SCOPE=" &
-      "private, so this runquotad predates private RunQuota endpoints. " &
-      "Point RUNQUOTAD_BIN at a current runquotad (or remove the stale one " &
-      "from PATH), or start the host's RunQuota service."
-
-proc startAutoRunQuotaIfNeeded*(bypassRunQuota: bool): owned(Process) =
-  ## Exported for `tests/integration/t_derived_daemon_ipc_trust.nim` and
-  ## `tests/integration/t_declared_daemon_ipc_trust.nim`, which grade the
-  ## PRODUCTION WIRING of DA-2 and DA-4 rather than their mechanisms: this is
-  ## the one call site that registers a trusted daemon of either kind, and a
-  ## suite that registers by hand proves the mechanism and never the wire.
-  # DA-4 — first, and above every early return below, because the declared
-  # peers are the ones the spawn arm can never reach. See
-  # `applyMachineDeclaredDaemonTrust`.
-  applyMachineDeclaredDaemonTrust()
-  if bypassRunQuota or not autoRunQuotaEnabled():
-    return nil
-  when not defined(windows):
-    # Probing reachability intentionally folds failures to false. Invalid
-    # policy is a configuration error, never permission to replace it.
-    discard rendezvousPolicy()
-    let inheritedSocket = getEnv("RUNQUOTA_SOCKET")
-    if inheritedSocket.len > 0 and
-        (not isAbsolute(inheritedSocket) or '\0' in inheritedSocket):
-      let error = newException(OSError,
-        "RUNQUOTA_SOCKET must name an absolute endpoint without NUL bytes")
-      addPrivateScopeRemedy(error)
-      raise error
-    if getEnv("RUNQUOTA_ENDPOINT_SCOPE") == "private":
-      try:
-        requireTrustedEndpointDir(defaultEndpoint())
-      except CatchableError as error:
-        # The refusal stands (a private selection must never be turned into
-        # a fresh endpoint), but the caller who set the scope by hand -- often
-        # to get past an unrelated auto-start failure -- is told what the
-        # variable means and that repro selects it on its own.
-        addPrivateScopeRemedy(error)
-        raise
-  # If RUNQUOTA_SOCKET is set, the user (or a parent invocation) is
-  # managing the daemon explicitly. On Windows we additionally probe
-  # reachability so a stale env var inherited from a previous build —
-  # which the daemon-hosted executor restores via ``putEnv`` even after
-  # the prior runquotad was terminated — does not cause us to skip
-  # spawning a fresh one for this build. On POSIX the per-PID socket
-  # path is unique so a stale value would point at a missing file; the
-  # subsequent runquota client connect would fail. Probing here makes
-  # both platforms self-healing.
-  if getEnv("RUNQUOTA_SOCKET", "").len > 0 and isRunQuotaDaemonReachable():
-    warnRunQuotaMemoryOverrideNotApplied()
-    return nil
-  # M9.R.11 — also bypass a fresh spawn when the default per-user pipe
-  # is already serviced by a healthy daemon (the common case: a previous
-  # ``repro build`` left its daemon running and we just need to reuse
-  # it). ``isRunQuotaDaemonReachable`` already does the cheap
-  # WaitNamedPipeW probe + Hello/HelloOk round-trip via
-  # ``connectDefault`` on Windows, so when it returns true the daemon
-  # is genuinely accepting connections.
-  if isRunQuotaDaemonReachable():
-    # A DAEMON FROM ANOTHER BUILD MAKES WAY (Windows). It outlives every
-    # build there, so one an installer replaced would otherwise keep serving
-    # this install's `repro` from the old image until its user logged off.
-    # Asked to retire, it exits once no client is connected; when that is
-    # already true the endpoint is free and this invocation falls through
-    # to start its own `runquotad` below. Otherwise this build adopts it as
-    # before, and is told why. POSIX is not asked: its auto-started daemon
-    # ends with its invocation, and the service there is the package
-    # manager's to restart. See `decideRunQuotaHandover` and
-    # reprobuild-specs/RunQuota-Host-Configuration.md, "A daemon from
-    # another build makes way".
-    when defined(windows):
+when defined(windows):
+  proc startAutoRunQuotaWindows(): owned(Process) =
+    ## The Windows arm of `startAutoRunQuotaIfNeeded`, unchanged by the
+    ## POSIX per-user decision of 2026-11-11: the daemon binds the fixed
+    ## per-user pipe and is deliberately left running for invocations that
+    ## adopt it.
+    # If RUNQUOTA_SOCKET is set, the user (or a parent invocation) is
+    # managing the daemon explicitly. Probe reachability so a stale env var
+    # inherited from a previous build does not make us skip spawning.
+    if getEnv("RUNQUOTA_SOCKET", "").len > 0 and isRunQuotaDaemonReachable():
+      warnRunQuotaMemoryOverrideNotApplied()
+      return nil
+    # M9.R.11 — also bypass a fresh spawn when the default per-user pipe
+    # is already serviced by a healthy daemon (the common case: a previous
+    # ``repro build`` left its daemon running and we just need to reuse
+    # it). ``isRunQuotaDaemonReachable`` already does the cheap
+    # WaitNamedPipeW probe + Hello/HelloOk round-trip via
+    # ``connectDefault`` on Windows, so when it returns true the daemon
+    # is genuinely accepting connections.
+    if isRunQuotaDaemonReachable():
+      # A DAEMON FROM ANOTHER BUILD MAKES WAY. It outlives every build here,
+      # so one an installer replaced would otherwise keep serving this
+      # install's `repro` from the old image until its user logged off.
+      # Asked to retire, it exits once no client is connected; when that is
+      # already true the endpoint is free and this invocation falls through
+      # to start its own `runquotad` below. Otherwise this build adopts it as
+      # before, and is told why. See `decideRunQuotaHandover` and
+      # reprobuild-specs/RunQuota-Host-Configuration.md, "A daemon from
+      # another build makes way".
       let candidate =
         try: findRunQuotaDaemonBin()
         except OSError: ""
@@ -26505,44 +26509,40 @@ proc startAutoRunQuotaIfNeeded*(bypassRunQuota: bool): owned(Process) =
       if report.handover == rhAdopt:
         warnRunQuotaMemoryOverrideNotApplied()
         return nil
-    else:
-      warnRunQuotaMemoryOverrideNotApplied()
-      return nil
-  # M9.R.13c.1 — **deterministic stale-pipe recovery**. The wedge that
-  # blocked every M9.R.13b iter past iter 11 (and forced the operator
-  # to manually ``Stop-Process`` ``runquotad.exe`` between every build)
-  # is closed at the client side: when the pipe exists in NPFS and
-  # ``probeWindowsPipeOwner`` has IDENTIFIED its owner and PROVED that
-  # owner dead, we drop it so the kernel reclaims the NPFS object and
-  # then fall through to the fresh-spawn block below.
-  #
-  # "Identified AND proved dead" is the whole of it, and it used to be
-  # neither. The probe folded every ``CreateFileW`` failure into
-  # ``wpsStale``, so a pipe this process merely lacked the rights to
-  # OPEN — the MSI-installed service's, whose DACL gives Everyone
-  # read-only and full access to SYSTEM and Administrators — was read as
-  # "nobody is home". This block then terminated the owner it had never
-  # identified (PID zero, a call that can only ever be a bug) and
-  # spawned a competing daemon onto a name a live service was serving.
-  # The classifier now separates present-and-unusable from absent, and
-  # ``terminateStalePipeOwner`` takes a value only the stale branch can
-  # construct, so an UNIDENTIFIED owner cannot reach the kill: a zero
-  # PID is refused by the type's only constructor and again by the proc
-  # itself, and ``doAssert`` -- unlike ``assert`` -- is not compiled out
-  # by ``-d:release``, ``-d:danger`` or ``--assertions:off`` (measured on
-  # all three, plus ``--panics:on``).
-  #
-  # What the type does NOT do is vouch for WHICH process is named.
-  # ``WindowsPipeProbe``'s fields are all exported, so ordinary safe Nim
-  # outside this module can hand ``stalePipeOwner`` a forged
-  # ``WindowsPipeProbe(status: wpsStale, serverPid: <any live pid>)``
-  # and terminate an unrelated process -- demonstrated against a
-  # sacrificial child. The guarantee is therefore "never an unidentified
-  # owner", not "never the wrong one"; the latter still rests on this
-  # being the only call site and on the probe it passes coming from
-  # ``probeWindowsPipeOwner``. Sealing it would mean un-exporting
-  # ``serverPid`` or giving the probe a type callers cannot spell.
-  when defined(windows):
+    # M9.R.13c.1 — **deterministic stale-pipe recovery**. The wedge that
+    # blocked every M9.R.13b iter past iter 11 (and forced the operator
+    # to manually ``Stop-Process`` ``runquotad.exe`` between every build)
+    # is closed at the client side: when the pipe exists in NPFS and
+    # ``probeWindowsPipeOwner`` has IDENTIFIED its owner and PROVED that
+    # owner dead, we drop it so the kernel reclaims the NPFS object and
+    # then fall through to the fresh-spawn block below.
+    #
+    # "Identified AND proved dead" is the whole of it, and it used to be
+    # neither. The probe folded every ``CreateFileW`` failure into
+    # ``wpsStale``, so a pipe this process merely lacked the rights to
+    # OPEN — the MSI-installed service's, whose DACL gives Everyone
+    # read-only and full access to SYSTEM and Administrators — was read as
+    # "nobody is home". This block then terminated the owner it had never
+    # identified (PID zero, a call that can only ever be a bug) and
+    # spawned a competing daemon onto a name a live service was serving.
+    # The classifier now separates present-and-unusable from absent, and
+    # ``terminateStalePipeOwner`` takes a value only the stale branch can
+    # construct, so an UNIDENTIFIED owner cannot reach the kill: a zero
+    # PID is refused by the type's only constructor and again by the proc
+    # itself, and ``doAssert`` -- unlike ``assert`` -- is not compiled out
+    # by ``-d:release``, ``-d:danger`` or ``--assertions:off`` (measured on
+    # all three, plus ``--panics:on``).
+    #
+    # What the type does NOT do is vouch for WHICH process is named.
+    # ``WindowsPipeProbe``'s fields are all exported, so ordinary safe Nim
+    # outside this module can hand ``stalePipeOwner`` a forged
+    # ``WindowsPipeProbe(status: wpsStale, serverPid: <any live pid>)``
+    # and terminate an unrelated process -- demonstrated against a
+    # sacrificial child. The guarantee is therefore "never an unidentified
+    # owner", not "never the wrong one"; the latter still rests on this
+    # being the only call site and on the probe it passes coming from
+    # ``probeWindowsPipeOwner``. Sealing it would mean un-exporting
+    # ``serverPid`` or giving the probe a type callers cannot spell.
     let canonicalPipe = defaultRunQuotaWindowsPipePath()
     if canonicalPipe.len > 0:
       let probe = probeWindowsPipeOwner(canonicalPipe)
@@ -26590,21 +26590,213 @@ proc startAutoRunQuotaIfNeeded*(bypassRunQuota: bool): owned(Process) =
         # (``isRunQuotaDaemonReachable`` already returned false to get
         # us here); unchanged from before this fix.
         discard
-  let runquotad = findRunQuotaDaemonBin()
-  if runquotad.len == 0:
-    # No daemon binary discovered. Return nil silently — downstream
-    # ``tryEnsureInlineRunQuotaSession`` will probe ``connectDefault``,
-    # and ``config.fallbackToRunQuotaBypass`` (set true for
-    # ``tpmPathOnly`` / ``tpmScoop``) routes to the bypass path. For
-    # modes with ``fallbackToRunQuotaBypass=false`` (e.g.
-    # ``tpmFromSource``) the build engine surfaces the diagnostic
-    # through the rewritten exception in ``tryEnsureInlineRunQuotaSession``
-    # (M9.R.11 — see ``repro_build_engine.runQuotaUnreachableHint``).
+    let runquotad = findRunQuotaDaemonBin()
+    if runquotad.len == 0:
+      # No daemon binary discovered. Return nil silently — downstream
+      # ``tryEnsureInlineRunQuotaSession`` will probe ``connectDefault``,
+      # and ``config.fallbackToRunQuotaBypass`` (set true for
+      # ``tpmPathOnly`` / ``tpmScoop``) routes to the bypass path. For
+      # modes with ``fallbackToRunQuotaBypass=false`` (e.g.
+      # ``tpmFromSource``) the build engine surfaces the diagnostic
+      # through the rewritten exception in ``tryEnsureInlineRunQuotaSession``
+      # (M9.R.11 — see ``repro_build_engine.runQuotaUnreachableHint``).
+      return nil
+    # THE BUDGET IS THE HOST'S, NOT THIS COMMAND'S: see
+    # `autoRunQuotaBudgetArgs`.
+    let budget = autoRunQuotaBudgetArgs(readHostConfig())
+    for warning in budget.warnings:
+      stderr.writeLine("repro: warning: " & warning)
+    # Omit ``--socket`` so runquotad binds to its built-in per-user default
+    # endpoint (``\\.\pipe\runquota-<USERNAME>``, see
+    # ``runquota_ipc.defaultEndpoint``). The client side also falls through
+    # to ``defaultEndpoint`` when ``RUNQUOTA_SOCKET`` is unset, so both
+    # halves of the IPC always meet on the same pipe regardless of which
+    # process spawned the daemon, which PID it has, or whether the env var
+    # was forwarded across the daemon protocol. This is the fix for the M1
+    # regression where a ``getTempDir()/reprobuild-runquota-<PID>.sock``
+    # derivation produced a different ``windowsPipeToken`` hash on every
+    # invocation, so a runquotad spawned by one ``repro build`` was
+    # invisible to the next one. RUNQUOTA_SOCKET is deliberately cleared so
+    # child actions (which inherit the daemon's env) likewise hit the
+    # default endpoint.
+    let args = budget.args
+    putEnv("RUNQUOTA_SOCKET", "")
+    # THE DAEMON'S LIFETIME. It binds the shared per-user pipe and is
+    # deliberately left running for invocations that adopt it (see
+    # `releaseAutoRunQuotaProcess`), so it must hold nothing of this
+    # invocation: `spawnDetachedRunQuotaDaemon` gives it NUL stdio and no
+    # other handle.
+    let spawnedAt = getMonoTime()
+    result = spawnDetachedRunQuotaDaemon(runquotad, args)
+    var readinessError = ""
+    # A DEADLINE ON THE MONOTONIC CLOCK, NOT AN ITERATION COUNT; the bound
+    # only ever applies to a daemon that is ALIVE but slow: the liveness
+    # check below still ends the wait at once when it has exited.
+    const RunQuotaDaemonReadinessTimeout = initDuration(seconds = 120)
+    let readinessDeadline = getMonoTime() + RunQuotaDaemonReadinessTimeout
+    while getMonoTime() < readinessDeadline:
+      if isRunQuotaDaemonReachable():
+        # DA-2, derived trust for the daemon this process spawned. See the
+        # POSIX start arm (`startUserRunQuotaDaemon`) for the full argument
+        # and for its reach on every host.
+        trustDaemonWeSpawned(result, "runquotad", tdcNoContent)
+        return
+      try:
+        if not result.running:
+          break
+      except OSError as error:
+        readinessError = error.msg
+        break
+      sleep(50)
+    # WHICH WAY THE WAIT ENDED, recorded BEFORE the cleanup below touches the
+    # daemon: one that exited by itself and one that was alive at the ceiling
+    # and is terminated next send an investigator to opposite halves of the
+    # system -- the daemon's own output, or the client's reachability probe
+    # (reprobuild-pm `spec/RunQuota-Host-Configuration.md`, "The shared
+    # per-user daemon (POSIX)", which states the same report for POSIX).
+    let waitedMillis = (getMonoTime() - spawnedAt).inMilliseconds
+    var fate = ""
+    if readinessError.len > 0:
+      fate = ": " & readinessError & " (" & $waitedMillis &
+        " ms after it was started)"
+    else:
+      var running = false
+      try:
+        running = result.running
+      except CatchableError as error:
+        fate = ": its state could not be observed (" & error.msg & "), " &
+          $waitedMillis & " ms after it was started"
+      if fate.len == 0:
+        if running:
+          try:
+            result.terminate()
+            discard result.waitForExit()
+          except CatchableError:
+            discard
+          fate = ": it was still running " & $waitedMillis &
+            " ms after it was started, at the " &
+            $RunQuotaDaemonReadinessTimeout.inSeconds &
+            " s readiness ceiling, but never answered the reachability " &
+            "probe; repro terminated it"
+        else:
+          fate = ": it exited before it listened, " & $waitedMillis &
+            " ms after it was started, with exit code " &
+            $result.peekExitCode()
+    try:
+      result.close()
+    except CatchableError:
+      discard
+    raise newException(OSError,
+      "runquotad did not become reachable at default per-user named pipe" &
+      fate)
+
+
+when not defined(windows):
+  const PrivateScopeSelectionRemedy =
+    "\nremedy: RUNQUOTA_ENDPOINT_SCOPE=private names an endpoint its caller " &
+    "owns and gives in RUNQUOTA_SOCKET (an absolute socket in a 0700 " &
+    "directory of yours, outside the host rendezvous directory). repro " &
+    "selects it by itself for the runquotad it starts, so unless you run " &
+    "your own daemon at RUNQUOTA_SOCKET, unset RUNQUOTA_ENDPOINT_SCOPE and " &
+    "RUNQUOTA_SOCKET."
+    ## Appended to a refused hand-made private selection. The refusal itself
+    ## is RunQuota's; what only repro can say is that it chooses the scope
+    ## itself.
+
+  proc addPrivateScopeRemedy(error: ref Exception) =
+    ## Append ``PrivateScopeSelectionRemedy`` to an auto-start refusal when
+    ## the private scope is selected. Every such refusal gets it -- a missing,
+    ## relative or unreachable RUNQUOTA_SOCKET alike -- because each one is
+    ## answered by the same question: did the caller mean to run its own
+    ## daemon at all?
+    if getEnv("RUNQUOTA_ENDPOINT_SCOPE") == "private":
+      error.msg.add(PrivateScopeSelectionRemedy)
+
+proc startAutoRunQuotaIfNeeded*(bypassRunQuota: bool): owned(Process) =
+  ## Make sure a `runquotad` serves this invocation: adopt one, or start one.
+  ## Returns the daemon when THIS call started it, `nil` when it adopted one
+  ## or there is none to start. Pair every call with
+  ## `releaseAutoRunQuotaProcess`, which lets go of the hold this call may
+  ## have taken; it never stops the daemon.
+  ##
+  ## Exported for `tests/integration/t_derived_daemon_ipc_trust.nim` and
+  ## `tests/integration/t_declared_daemon_ipc_trust.nim`, which grade the
+  ## PRODUCTION WIRING of DA-2 and DA-4 rather than their mechanisms: this is
+  ## the one call site that registers a trusted daemon of either kind, and a
+  ## suite that registers by hand proves the mechanism and never the wire.
+  # DA-4 — first, and above every early return below, because the declared
+  # peers are the ones the start arm can never reach. See
+  # `applyMachineDeclaredDaemonTrust`.
+  applyMachineDeclaredDaemonTrust()
+  if bypassRunQuota or not autoRunQuotaEnabled():
     return nil
   when not defined(windows):
+    # THE PREFERENCE ORDER ON POSIX (reprobuild-pm
+    # `spec/RunQuota-Host-Configuration.md`, "Lifetime and endpoint of a
+    # daemon reprobuild starts" and "Explicit private endpoint policy"):
+    #
+    #   1. an inherited `RUNQUOTA_SOCKET` that is the PER-USER socket -- one an
+    #      earlier `repro` published -- runs the per-user adopt-or-start, so a
+    #      nested `repro` recovers from a daemon that idled out since;
+    #   2. an inherited `RUNQUOTA_SOCKET` naming anything else that answers is
+    #      adopted as it is: whoever set it manages that daemon;
+    #   3. the provisioned host endpoint, when it answers, is adopted;
+    #   4. no `runquotad` binary to start: nil, silently, before any refusal
+    #      below (unchanged from before the per-user daemon);
+    #   5. an endpoint that EXISTS but does not answer, a selected host
+    #      endpoint, or a machine-declared one, keeps its refusal: a failed
+    #      probe never converts an existing authority into a per-user one;
+    #   6. otherwise -- nothing selected, or an inherited socket naming an
+    #      absent path (the stale-environment recovery) -- the per-user
+    #      adopt-or-start.
+    #
+    # Probing reachability intentionally folds failures to false. Invalid
+    # policy is a configuration error, never permission to replace it.
+    discard rendezvousPolicy()
+    let inheritedSocket = getEnv("RUNQUOTA_SOCKET")
+    if inheritedSocket.len > 0 and
+        (not isAbsolute(inheritedSocket) or '\0' in inheritedSocket):
+      let error = newException(OSError,
+        "RUNQUOTA_SOCKET must name an absolute endpoint without NUL bytes")
+      addPrivateScopeRemedy(error)
+      raise error
+    # Computed the same way by every process of this user, from the
+    # filesystem and the effective uid; a malformed
+    # `RUNQUOTA_USER_ENDPOINT_DIR` raises here.
+    let userSocket = userEndpoint().path
+    # Found once, used as the handover's candidate and as what is started.
+    let runquotad =
+      try: findRunQuotaDaemonBin()
+      except OSError: ""
+    if inheritedSocket.len > 0 and inheritedSocket == userSocket:
+      return adoptOrStartUserRunQuota(runquotad)
+    if getEnv("RUNQUOTA_ENDPOINT_SCOPE") == "private":
+      try:
+        requireTrustedEndpointDir(defaultEndpoint())
+      except CatchableError as error:
+        # The refusal stands (a private selection must never be turned into
+        # a fresh endpoint), but the caller who set the scope by hand -- often
+        # to get past an unrelated auto-start failure -- is told what the
+        # variable means and that repro selects it on its own.
+        addPrivateScopeRemedy(error)
+        raise
+    if isRunQuotaDaemonReachable():
+      warnRunQuotaMemoryOverrideNotApplied()
+      return nil
+    if runquotad.len == 0:
+      # No daemon binary discovered, and nothing answered above. Return nil
+      # silently, BEFORE the refusal checks below, exactly as before the
+      # per-user daemon existed: a host without a `runquotad` must not newly
+      # fail. Downstream ``tryEnsureInlineRunQuotaSession`` probes
+      # ``connectDefault``, and ``config.fallbackToRunQuotaBypass`` (set true
+      # for ``tpmPathOnly`` / ``tpmScoop``) routes to the bypass path; for
+      # modes with ``fallbackToRunQuotaBypass=false`` the build engine
+      # surfaces the diagnostic (M9.R.11 — see
+      # ``repro_build_engine.runQuotaUnreachableHint``).
+      return nil
     # A failed probe must not convert an existing untrusted/inaccessible
-    # authority into an invocation-owned one. Missing inherited invocation
-    # sockets retain the established stale-environment recovery above.
+    # authority into the per-user one. Missing inherited invocation sockets
+    # retain the established stale-environment recovery below.
     let configuredEndpoint = defaultEndpoint()
     let explicitSocket = getEnv("RUNQUOTA_SOCKET")
     # Strip only the socket name; parentDir would lexically fold alias/..
@@ -26632,7 +26824,7 @@ proc startAutoRunQuotaIfNeeded*(bypassRunQuota: bool): owned(Process) =
     if explicitSocket.len > 0 and directoryResolvesWithin(
         selectedDirectory, hostWideEndpointDir):
       raise newException(OSError, "configured RunQuota host endpoint is unavailable at " &
-        configuredEndpoint.path & "; refusing private auto-start")
+        configuredEndpoint.path & "; refusing per-user auto-start")
     let declarations =
       try: loadDeclaredDaemons()
       except CatchableError: @[] # Trust-file syntax remains non-fatal.
@@ -26650,316 +26842,43 @@ proc startAutoRunQuotaIfNeeded*(bypassRunQuota: bool): owned(Process) =
             declaration.endpoint[0 .. declaredSlash]):
         raise newException(OSError,
           "declared RunQuota endpoint is unavailable at " & configuredEndpoint.path &
-          "; refusing private auto-start")
+          "; refusing per-user auto-start")
     if explicitSocket.len == 0:
       requireTrustedEndpointDir(configuredEndpoint)
-  # Pipe-name / socket-path derivation.
-  #
-  # Windows: omit ``--socket`` so runquotad binds to its built-in
-  # per-user default endpoint (``\\.\pipe\runquota-<USERNAME>`` —
-  # see ``runquota_ipc.defaultEndpoint``). The client side also
-  # falls through to ``defaultEndpoint`` when ``RUNQUOTA_SOCKET``
-  # is unset, so both halves of the IPC always meet on the same
-  # pipe regardless of which process spawned the daemon, which
-  # PID it has, or whether the env var was forwarded across the
-  # daemon protocol. This is the fix for the M1 regression where a
-  # ``getTempDir()/reprobuild-runquota-<PID>.sock`` derivation
-  # produced a different ``windowsPipeToken`` hash on every
-  # invocation, so a runquotad spawned by one ``repro build`` was
-  # invisible to the next one. We deliberately leave RUNQUOTA_SOCKET
-  # unset on Windows so child actions (which inherit the daemon's
-  # env) likewise hit the default endpoint.
-  #
-  # POSIX: a Unix socket inside a DIRECTORY OF ITS OWN rather than loose
-  # in ``$TMPDIR``. The socket's parent directory is the rendezvous point
-  # that ``runquotad`` verifies before binding and every client verifies
-  # before connecting, and a shared ``/tmp`` is root-owned ``1777``, which
-  # fails both halves — the daemon exits before it listens and the build
-  # dies with the refusal in its log. ``runquotaEndpointPath`` owns that
-  # rule; see its docs for why the answer is a private directory and not a
-  # laxer check.
-  #
-  # The directory is CREATED FRESH for this invocation
-  # (``createPrivateRunQuotaEndpoint``), never derived from our pid: a
-  # daemon that was killed leaves its socket behind, a later invocation
-  # that is handed the same pid would be led to it, and the private bind
-  # refuses an endpoint that already exists. The pid stays in the name only
-  # so an operator can tell which invocation a directory belonged to. It is
-  # removed once the daemon has been reaped (``releaseAutoRunQuotaProcess``
-  # and the failed-startup path below).
-  # THE BUDGET IS THE HOST'S, NOT THIS COMMAND'S. No CPU, memory or pool
-  # flag is passed (``autoRunQuotaBudgetArgs``): the daemon reads the host
-  # file and its own defaults exactly as the installed service does, and a
-  # later ``runquota config set`` + reload reaches it. Named pools -- the
-  # convention ``compile`` / ``fetch`` and every recipe ``buildPool`` -- are
-  # declared by each build on its own session (``declareRunQuotaPools``),
-  # which is also what lets a daemon this process did NOT start admit them.
-  let budget = autoRunQuotaBudgetArgs(readHostConfig())
-  for warning in budget.warnings:
-    stderr.writeLine("repro: warning: " & warning)
-  when defined(windows):
-    var args = budget.args
-    # Clear any stale value so the client side falls through to
-    # ``defaultEndpoint`` and meets the daemon on the per-user pipe.
-    putEnv("RUNQUOTA_SOCKET", "")
-    let socket = ""
+    return adoptOrStartUserRunQuota(runquotad)
   else:
-    let previousRunQuotaEnvironment = saveRunQuotaEnvironment()
-    let socket = createPrivateRunQuotaEndpoint(
-      "reprobuild-runquota-" & $getCurrentProcessId() & "-")
-    let endpointDir = socket.parentDir
-    var args = @["--socket", socket]
-    args.add(budget.args)
-    putEnv("RUNQUOTA_SOCKET", socket)
-    # Both halves verify the same invocation-owned endpoint. Export to OUR
-    # environment too: the connecting parent, helper and managed actions must
-    # not fall back to host NSS ownership while the daemon selects private.
-    putEnv("RUNQUOTA_ENDPOINT_SCOPE", "private")
-  # THE DAEMON'S LIFETIME. On Windows it binds the shared per-user pipe and is
-  # deliberately left running for invocations that adopt it (see
-  # `releaseAutoRunQuotaProcess`), so it must hold nothing of this invocation:
-  # `spawnDetachedRunQuotaDaemon` gives it NUL stdio and no other handle. On
-  # POSIX it is
-  # OWNED by this invocation and ends with it however the invocation ends:
-  # `releaseAutoRunQuotaProcess` stops it on a normal return or a raise, a
-  # terminating signal is forwarded to it, and the daemon itself stops when
-  # it is re-parented (the SIGKILL case) -- and it inherits none of this
-  # invocation's descriptors above 2. `spawnOwnedRunQuotaDaemon` says how.
-  let spawnedAt = getMonoTime()
-  when defined(windows):
-    result = spawnDetachedRunQuotaDaemon(runquotad, args)
-  else:
-    try:
-      result = spawnOwnedRunQuotaDaemon(runquotad, args)
-      ownedRunQuotaEnvironments[processID(result)] = previousRunQuotaEnvironment
-      ownedRunQuotaEndpointDirs[processID(result)] = endpointDir
-      prepareStartupOutput(cint(result.outputHandle))
-      prepareStartupOutput(cint(result.errorHandle))
-    except CatchableError:
-      if result != nil:
-        releaseAutoRunQuotaProcess(result)
-      restoreRunQuotaEnvironment(previousRunQuotaEnvironment)
-      # No daemon of ours is left that could be listening there: either none
-      # was spawned, or the release above reaped it.
-      removeRunQuotaEndpointDir(endpointDir)
-      raise
-    var startupStdout, startupStderr: StartupOutput
-  var readinessError = ""
-  # A DEADLINE ON THE MONOTONIC CLOCK, NOT AN ITERATION COUNT. 300 polls of
-  # 50 ms gave a live daemon ~15 s to bind, and on a host under heavy load
-  # (~200) a healthy runquotad routinely took longer, so builds failed with
-  # "did not become reachable" against a daemon that was about to answer.
-  # The longer bound only ever applies to a daemon that is ALIVE but slow: the
-  # liveness check below still ends the wait at once when it has exited.
-  const RunQuotaDaemonReadinessTimeout = initDuration(seconds = 120)
-  let readinessDeadline = getMonoTime() + RunQuotaDaemonReadinessTimeout
-  while getMonoTime() < readinessDeadline:
-    when not defined(windows):
-      drainStartupOutput(startupStdout, cint(result.outputHandle))
-      drainStartupOutput(startupStderr, cint(result.errorHandle))
-    if isRunQuotaDaemonReachable():
-      # DA-2 — DERIVED class-3 IPC trust. We spawned this daemon, so its pid is
-      # a fact this process holds rather than a claim anyone made, and
-      # `trustDaemonWeSpawned` takes the live `Process` precisely so that stays
-      # true (Dependency-Observation-Attribution.md §"Derived beats declared").
-      #
-      # WHICH BRANCH OF §Class 3, and it is branch (a): `runquotad` CONTRIBUTES
-      # NO CONTENT to any action. Its protocol is Hello / Acquire / Grant /
-      # Release plus the stats-extension rows — lease decisions and telemetry.
-      # It opens no file on a client's behalf and returns no bytes that can
-      # reach an action's output, so a monitored process talking to it has
-      # consumed nothing the monitor failed to see. It is NOT branch (b): it
-      # serves no content at all, keyed or otherwise.
-      #
-      # Registered only on the arm that SPAWNED it. The two early returns above
-      # — `RUNQUOTA_SOCKET` already serviced, and a daemon a previous build left
-      # running — reuse a daemon this process did not start, and DERIVED trust
-      # covers nothing it did not spawn.
-      #
-      # DA-4 NOW COVERS THOSE ARMS, AND DERIVED IS STILL THE PREFERRED ROUTE
-      # WHERE IT IS AVAILABLE. `applyMachineDeclaredDaemonTrust`, called at the
-      # top of this proc and therefore above every early return, trusts an
-      # ADOPTED daemon when the machine declares it and the declaration's check
-      # passes. That is strictly weaker than this line: holding the `Process`
-      # proves the spawn, while a check establishes an identity from what the
-      # kernel will vouch for and is bounded by what the kernel will vouch for
-      # (see `checkDeclaredDaemon`). So the spawn arm keeps registering
-      # derivedly even on a host that also declares this daemon; the two facts
-      # coexist in the registry and the diagnostic says which one forgave.
-      #
-      # WHAT THAT COSTS, STATED HERE BECAUSE HERE IS WHERE AN OPERATOR MEETS
-      # IT. Spawn-only is a real constraint and not a formality; DA-2's reach
-      # on a given host is exactly the set of builds that take THIS branch:
-      #
-      #   * LINUX, unprovisioned host: every top-level `repro build` spawns,
-      #     because the socket is per-invocation (a fresh
-      #     `reprobuild-runquota-<pid>-<random>` directory) and the daemon
-      #     ends with the invocation that started it, however that
-      #     invocation ends (`releaseAutoRunQuotaProcess` on a return or a
-      #     raise, signal forwarding and the daemon's own parent watch
-      #     otherwise; see `spawnOwnedRunQuotaDaemon`), so no daemon survives
-      #     for the next build to adopt. DA-2 is live on every such build — and
-      #     this is the ONLY topology on which it is.
-      #   * macOS: INERT, spawn arm or not. Reaching this line is not the same
-      #     as registering: `trustDaemonWeSpawned` refuses a peer it cannot
-      #     re-validate, and `processStartIdentity` is `when defined(linux)`
-      #     with `""` on every other host. So the call below runs and stores
-      #     nothing. That is the conservative direction — an unre-validatable
-      #     pid must not exempt anything (see `TrustedDaemonPeer.identity`) —
-      #     but it means "POSIX" is the wrong granularity for DA-2's reach and
-      #     macOS gets today's behaviour until it grows an identity source.
-      #   * POSIX, provisioned host: `runquota_ipc.defaultEndpoint` resolves to
-      #     the FIXED host-wide socket (`/run/runquota/runquotad.sock` on
-      #     Linux, `/var/run/...` on macOS), so a host running the shipped unit
-      #     is reachable before we get here, the second early return fires, and
-      #     DA-2 is ENTIRELY INERT — on precisely the topology a shared lease
-      #     coordinator exists for. So is a nested `repro` that inherited
-      #     `RUNQUOTA_SOCKET` from its parent. **This row is DA-4's, and it is
-      #     covered when `/etc/repro/daemons.conf` declares that endpoint and
-      #     the declaration's check passes; it is still uncovered on a host
-      #     that declares nothing, which is the untrusting default.**
-      #   * Windows: INERT AFTER THE FIRST BUILD. The daemon binds the per-user
-      #     default pipe and `releaseAutoRunQuotaProcess` deliberately does not
-      #     terminate it (a concurrent invocation may have adopted it), so
-      #     build #2 onward finds it reachable and registers nothing.
-      #
-      # None of that is a defect in this branch; adopting a daemon this process
-      # did not spawn is declared attribution, and the check it needs is DA-4.
-      # It is written down so nobody reads "reprobuild trusts runquotad" as a
-      # claim about every build on every host.
-      #
-      # `t_derived_daemon_ipc_trust.nim` grades both halves of this: that the
-      # spawn arm registers, and that the warm arm provably does not.
-      trustDaemonWeSpawned(result, "runquotad", tdcNoContent)
-      return
-    try:
-      if not ownedDaemonStillRunning(result):
-        break
-    except OSError as error:
-      when defined(posix):
-        unregisterOwnedDaemon(processID(result))
-      readinessError = error.msg
-      break
-    sleep(50)
-  # WHICH WAY THE WAIT ENDED, recorded BEFORE the cleanup below touches the
-  # daemon. A daemon that exited by itself and one that was alive at the
-  # ceiling and is terminated next leave the same refused socket behind, and
-  # they send an investigator to opposite halves of the system: the first to
-  # the daemon's own output, the second to the client's reachability probe.
-  # Once the cleanup has terminated and reaped the child nothing can tell
-  # them apart, so the error states its fate, read without reaping it.
-  let waitedMillis = (getMonoTime() - spawnedAt).inMilliseconds
-  var daemonFate = ""
-  if readinessError.len == 0:
-    try:
-      daemonFate = ownedDaemonExitDescription(result)
-    except OSError as error:
-      readinessError = error.msg
-  # THE SPAWN FAILED, so the daemon is no longer ours to forward signals to.
-  # Unregistered BEFORE it is terminated and reaped, so the forwarder can never
-  # signal its pid after the kernel has handed it to another process.
-  when not defined(windows):
-    unregisterOwnedDaemon(processID(result))
-  var terminatedByUs = false
-  if readinessError.len > 0:
-    try:
-      # Only inspect/reap after unregistering. ECHILD means ownership was
-      # lost; running then raises, so no signal is sent to a possibly
-      # reused pid.
-      if result.running:
-        result.terminate()
-        discard result.waitForExit()
-    except CatchableError:
-      discard
-  else:
-    # Read the fate again, still without reaping, now that the pid is
-    # unregistered: the daemon may have ended in between. A fate found here
-    # is reported as such -- an exit code or a signal, never folded into one
-    # -- and an error (ECHILD: ownership lost) sends no signal and is
-    # reported as unobservable rather than as an invented exit.
-    if daemonFate.len == 0:
-      try:
-        daemonFate = ownedDaemonExitDescription(result)
-        terminatedByUs = daemonFate.len == 0
-      except OSError as error:
-        readinessError = error.msg
-    if readinessError.len == 0:
-      try:
-        if terminatedByUs:
-          result.terminate()
-        discard result.waitForExit()
-      except CatchableError:
-        discard
-  let fate =
-    if readinessError.len > 0:
-      ": " & readinessError & " (" & $waitedMillis &
-        " ms after it was started)"
-    elif terminatedByUs:
-      ": it was still running " & $waitedMillis &
-        " ms after it was started, at the " &
-        $RunQuotaDaemonReadinessTimeout.inSeconds &
-        " s readiness ceiling, but never answered the reachability " &
-        "probe; repro terminated it"
-    else:
-      ": it exited before it listened, " & $waitedMillis &
-        " ms after it was started, with " & daemonFate
-  when not defined(windows):
-    drainStartupOutput(startupStdout, cint(result.outputHandle))
-    drainStartupOutput(startupStderr, cint(result.errorHandle))
-    restoreOwnedRunQuotaEnvironment(processID(result))
-    removeOwnedRunQuotaEndpointDir(processID(result))
-  try:
-    result.close()
-  except CatchableError:
-    discard
-  let endpointHint =
-    when defined(windows): "default per-user named pipe"
-    else: socket
-  raise newException(OSError,
-    "runquotad did not become reachable at " & endpointHint & fate &
-    (when defined(windows): ""
-     else: startupDiagnostic(startupStdout, "stdout") &
-       startupDiagnostic(startupStderr, "stderr") &
-       hostPolicyDaemonRemedy(runquotad,
-         max(hostOwnerRefusalUid(startupStdout),
-           hostOwnerRefusalUid(startupStderr)))))
+    startAutoRunQuotaWindows()
+
 
 proc releaseAutoRunQuotaProcess*(process: var owned(Process)) =
-  ## Release this invocation's handle to an automatically started RunQuota
-  ## daemon. Windows uses a shared per-user named pipe, so another concurrent
-  ## invocation may already have adopted the daemon; terminating it here would
-  ## break that client's live session. POSIX auto-daemons use invocation-local
-  ## socket paths and remain owned by their spawning process.
+  ## Release this invocation's hold on its RunQuota daemon. It NEVER stops
+  ## the daemon, on any platform: on Windows it serves the shared per-user
+  ## pipe, and on POSIX the shared per-user socket (reprobuild-pm
+  ## `spec/RunQuota-Host-Configuration.md`, "The shared per-user daemon
+  ## (POSIX)"); either way another invocation may already have adopted it,
+  ## and on POSIX it exits by itself once it has been idle for its period.
   ##
-  ## On POSIX this is the NORMAL end of the daemon -- a return or a raise
-  ## through the caller's `defer`. It is no longer the only one: a terminating
-  ## signal is forwarded to the daemon, and the daemon stops by itself when
-  ## this process is gone (`spawnOwnedRunQuotaDaemon`). The forwarding is
-  ## withdrawn FIRST, before the terminate and the reap, so the handler can
-  ## never signal the pid once it may belong to another process; the last
-  ## release restores the signal dispositions the invocation had before.
+  ## What is released is the connection that kept the daemon from idling out
+  ## or retiring under this invocation (`releaseAdoptedDaemonHold`), taken on
+  ## every arm that adopted or started it. On POSIX the published
+  ## `RUNQUOTA_SOCKET` / `RUNQUOTA_ENDPOINT_SCOPE` are deliberately NOT
+  ## restored: they name a daemon that outlives the invocation, so the
+  ## command `repro exec` runs next inherits them.
   ##
-  ## An ADOPTED retiring daemon (Windows) is let go here too: the connection
-  ## that kept it alive for this invocation is closed, so it can exit once
-  ## its other clients are gone (`decideRunQuotaHandover`).
+  ## Daemons this process started and that have exited since are reaped here
+  ## without blocking (`reapSpawnedUserDaemons`), so a long-lived process
+  ## such as the user build daemon collects no zombies.
   releaseAdoptedDaemonHold()
+  when not defined(windows):
+    reapSpawnedUserDaemons()
   if process == nil:
     return
-  when not defined(windows):
-    let pid = processID(process)
-    unregisterOwnedDaemon(pid)
-    restoreOwnedRunQuotaEnvironment(pid)
   try:
-    when not defined(windows):
-      process.terminate()
-      discard process.waitForExit()
+    # Owns no stream on either platform (POSIX: `spawnedDaemonProcess`;
+    # Windows: `poParentStreams`), so this frees the handle and nothing else.
     process.close()
   except CatchableError:
     discard
-  when not defined(windows):
-    # After the reap, so the daemon is never left listening in a directory
-    # that has been removed from under it.
-    removeOwnedRunQuotaEndpointDir(pid)
   process = nil
 
 proc runDepsRefreshCommand(args: openArray[string]): int =

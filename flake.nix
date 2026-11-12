@@ -26,10 +26,12 @@
       inputs.nixpkgs.follows = "nixpkgs";
     };
     runquota-src = {
-      # Invocation-owned POSIX daemons and their clients require RunQuota's
-      # explicit private endpoint policy, currently published on ``agents``.
-      # Keep standalone builds on that API too: a newer sibling must not mask
-      # an older packaged daemon that ignores RUNQUOTA_ENDPOINT_SCOPE.
+      # The shared per-user POSIX daemon and its clients require RunQuota's
+      # explicit private endpoint policy, ``--idle-exit-after`` and the
+      # lifetime lock, currently published on ``agents``. Keep standalone
+      # builds on that API too: a newer sibling must not mask an older
+      # packaged daemon that ignores RUNQUOTA_ENDPOINT_SCOPE or refuses
+      # ``--idle-exit-after``.
       url = "github:metacraft-labs/runquota/agents";
       # A FLAKE INPUT, NOT A BARE SOURCE TREE. Both uses are served by the one
       # pin: ``${runquota-src}`` still coerces to the fetched source root (so

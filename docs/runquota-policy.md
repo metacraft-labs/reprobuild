@@ -58,7 +58,7 @@ in pools it does not size are then refused as described below.
 is passed as `--memory-bytes` to a daemon reprobuild spawns, and reprobuild
 warns every time that it overrides the host file (or the 75% default), how far
 that daemon reaches (Windows: every workspace on the host until `runquotad`
-stops), and that `runquota config set machine.memory_bytes` will not change it
+stops; POSIX: every invocation of the user until it idles out), and that `runquota config set machine.memory_bytes` will not change it
 because the key is pinned. It passes nothing when the value equals the file's.
 When a daemon is already running the variable cannot apply, and reprobuild
 says so, naming the budget in force, unless the two agree. The setting is
@@ -66,22 +66,57 @@ forwarded into daemon-hosted and nested builds so they use the same capacity.
 See `reprobuild-specs/RunQuota-Host-Configuration.md`, *What the auto-spawn
 passes* and *Pools a build declares*.
 
-On an unprovisioned POSIX host, reprobuild owns the private daemon it starts
-for its invocation. That daemon stops when the invocation returns, fails, or
-is killed, including by SIGKILL. Terminating signals are forwarded to it,
-and the daemon watches the expected parent PID supplied before spawn. It
-does not inherit the invocation's descriptors above 2, so a caller reading
-reprobuild's output reaches EOF when the invocation exits. SIGKILL cleanup
-requires a daemon supporting `RUNQUOTA_EXIT_WITH_PARENT`. The Nix package
-defaults `RUNQUOTAD_BIN` and `RUNQUOTA_BIN` to its pinned runtime dependency,
-which includes that support; explicit environment values override these
-defaults. A provisioned host's existing service
-and Windows' shared daemon keep their own lifetimes.
+On an unprovisioned POSIX host (no `runquotad` service running), reprobuild
+uses **one shared daemon per user**. The first invocation that needs RunQuota
+starts it on the user's well-known socket, `runquotad.sock` in
+`/run/user/<uid>/runquota` on Linux when that directory exists and belongs to
+the user, otherwise in `/tmp/runquota-<uid>`. Every later invocation of that
+user, concurrent ones included, adopts the same daemon, so it sees all of
+that user's builds at once. Set `RUNQUOTA_USER_ENDPOINT_DIR` to an absolute
+directory to use a separate one (tests do this to stay isolated).
 
-Starting a private POSIX daemon requires waitable child status. If `SIGCHLD`
-is inherited as ignored or with `SA_NOCLDWAIT`, reprobuild reports an error
-before spawning it and preserves that signal disposition. Embedding callers
-must retain child-wait ownership until they release the daemon.
+- **It outlives the invocation that started it** and stops by itself after a
+  period with no client connection: `REPROBUILD_RUNQUOTA_IDLE_EXIT_SECONDS`,
+  default 600, a positive whole number of seconds (anything else is an error
+  before anything is started). The period is fixed when the daemon starts;
+  an adopted daemon keeps its own. A running build holds a connection, so it
+  is never stopped under one.
+- **The endpoint is published.** reprobuild exports `RUNQUOTA_SOCKET` and
+  `RUNQUOTA_ENDPOINT_SCOPE=private` and keeps them, so every command it runs
+  — including the command `repro exec` runs — reaches the same daemon, with
+  `runquota status`, `runquota config reload` and the rest of the CLI. A
+  nested `repro` that inherits them starts the daemon again if it has idled
+  out meanwhile; another client can start one with `runquota daemon start
+  --socket "$RUNQUOTA_SOCKET" --idle-exit-after N`.
+- **The directory is owner-only.** It is created with mode `0700`; one owned
+  by the user with another mode is repaired, and one owned by anybody else is
+  refused with an error naming it (remove it, or set
+  `RUNQUOTA_USER_ENDPOINT_DIR`).
+- **Two lock files sit beside the socket.** `runquotad.sock.lock` is held by
+  the live daemon for its whole life, so a daemon killed with SIGKILL is
+  recognised as gone although its socket is left behind; that socket is then
+  removed and a new daemon started. `runquotad.sock.start` serialises
+  concurrent invocations, so two of them never start two daemons.
+- **It is detached from the invocation.** It runs in a session of its own,
+  in `/`, with standard input from `/dev/null` and its output appended to
+  `runquotad.log` in the same directory, and it inherits none of the
+  invocation's descriptors above 2, so a caller reading reprobuild's output
+  reaches end of file when reprobuild exits although the daemon lives on. If
+  it exits before it listens, the error shows the end of that log.
+- **A daemon from another reprobuild install makes way**, as on Windows: an
+  idle one is asked to exit and this install's is started instead; a busy one
+  serves on until its clients are gone.
+
+The Nix package defaults `RUNQUOTAD_BIN` and `RUNQUOTA_BIN` to its pinned
+runtime dependency, which supports `--idle-exit-after`; explicit environment
+values override these defaults. A provisioned host's existing service and
+Windows' shared daemon keep their own lifetimes.
+
+The shared daemon stays a child of the invocation that started it until that
+invocation exits, and reprobuild reaps it without blocking. A caller that
+inherits `SIGCHLD` as ignored (or with `SA_NOCLDWAIT`) still gets a working
+daemon; only the exit status of one that dies before it listens is lost, and
+the error says its state could not be observed instead of naming a status.
 
 Denials happen for one of two distinct reasons:
 

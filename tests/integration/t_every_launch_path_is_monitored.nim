@@ -929,7 +929,12 @@ proc capabilitySurfaces(): seq[CapabilitySurface] =
                # or report the connection held to an adopted daemon. None
                # starts a process.
                "decideRunQuotaHandover", "holdsAdoptedDaemon",
-               "releaseAdoptedDaemonHold"]),
+               "releaseAdoptedDaemonHold",
+               # The hold every POSIX adopter and starter of the shared
+               # per-user daemon keeps: one `connectDefault` client, kept
+               # open. It starts nothing; the start itself is
+               # `repro_cli_support/user_runquota_daemon`'s.
+               "holdRunQuotaDaemon"]),
     # THE MODULE THE ENGINE NOW HOSTS FROM. Before HM-4 this surface was six
     # names and the engine called none of them; the decomposed host API
     # (IoMon-Decomposed-Host-API DH-2) added seven more, and THIS AUDIT IS

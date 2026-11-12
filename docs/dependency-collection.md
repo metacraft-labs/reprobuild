@@ -250,7 +250,9 @@ strong.
 
 **Derived** — the build started the daemon itself, so its pid is a fact the
 build holds rather than a claim anyone made. Nothing is configured and nothing
-can be got wrong. This is what happens on a host with no host-wide `runquotad`.
+can be got wrong. On a host with no host-wide `runquotad` this covers the
+invocation that starts the user's shared daemon; the invocations that adopt it
+afterwards need the declared route below, as on a provisioned host.
 
 **Declared and checked** — the daemon was already running, so the build has to
 be *told* about it and has to *verify* what it was told. Declare it in

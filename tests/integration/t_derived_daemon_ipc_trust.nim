@@ -167,6 +167,7 @@ import repro_core
 import repro_hash
 import repro_local_store
 import repro_test_support
+import repro_test_support/per_user_runquota
 
 const RepoRootMarker = "repro.nim"
 
@@ -1179,8 +1180,10 @@ suite "derived IPC trust: the daemons this process spawned":
     ## `RUNQUOTA_SOCKET` is pointed at a path that does not exist so the branch
     ## is DETERMINISTIC rather than a property of how the host happens to be
     ## provisioned: both early returns test reachability, an absent socket is
-    ## unreachable, and the spawn arm is taken. The function then overwrites
-    ## `RUNQUOTA_SOCKET` with the per-PID socket it actually bound.
+    ## unreachable, and the invocation recovers to the per-user endpoint --
+    ## here a scratch one (`RUNQUOTA_USER_ENDPOINT_DIR`), where nothing runs,
+    ## so the start arm is taken. The function then publishes
+    ## `RUNQUOTA_SOCKET` as the per-user socket it started the daemon on.
     ##
     ## NON-LINUX: the spawn arm is taken exactly as on Linux — the daemon is
     ## started and live — and its registration is REFUSED, because the pid has
@@ -1193,12 +1196,16 @@ suite "derived IPC trust: the daemons this process spawned":
       forgetDerivedTrustedDaemons()
       let scratch = createTempDir("repro-ipcwire-", "", dir = nonVolatileTempBase())
       defer: removeDir(scratch)
+      # A scratch per-user endpoint: the real one of this uid is shared with
+      # every other process of the user (`per_user_runquota`).
+      let isolated = isolateUserRunQuota()
       let priorSocket = getEnv("RUNQUOTA_SOCKET", "")
       putEnv("RUNQUOTA_SOCKET", scratch / "no-such-runquota.sock")
       putEnv("REPROBUILD_AUTO_RUNQUOTA", "1")
       var daemon = startAutoRunQuotaIfNeeded(false)
       defer:
         releaseAutoRunQuotaProcess(daemon)
+        isolated.release()
         putEnv("RUNQUOTA_SOCKET", priorSocket)
         forgetDerivedTrustedDaemons()
       check daemon != nil
@@ -1221,12 +1228,16 @@ suite "derived IPC trust: the daemons this process spawned":
       forgetDerivedTrustedDaemons()
       let scratch = createTempDir("repro-ipcwire-", "", dir = nonVolatileTempBase())
       defer: removeDir(scratch)
+      # A scratch per-user endpoint: the real one of this uid is shared with
+      # every other process of the user (`per_user_runquota`).
+      let isolated = isolateUserRunQuota()
       let priorSocket = getEnv("RUNQUOTA_SOCKET", "")
       putEnv("RUNQUOTA_SOCKET", scratch / "no-such-runquota.sock")
       putEnv("REPROBUILD_AUTO_RUNQUOTA", "1")
       var daemon = startAutoRunQuotaIfNeeded(false)
       defer:
         releaseAutoRunQuotaProcess(daemon)
+        isolated.release()
         putEnv("RUNQUOTA_SOCKET", priorSocket)
         forgetDerivedTrustedDaemons()
       check daemon != nil
@@ -1251,18 +1262,20 @@ suite "derived IPC trust: the daemons this process spawned":
       # return, and registers NOTHING — this milestone trusts only what it
       # spawned, and adopting a running daemon is declared attribution (DA-4).
       #
-      # WHICH EARLY RETURN, STATED EXACTLY AND THEN ASSERTED, because there
-      # are two and this drives ONE of them. `startAutoRunQuotaIfNeeded`
-      # returns nil when (1) `RUNQUOTA_SOCKET` is set AND reachable, or (2) the
-      # daemon is reachable on `runquota_ipc.defaultEndpoint`. The first call
-      # left `RUNQUOTA_SOCKET` pointing at the per-PID socket it bound, so what
-      # runs below is (1) — and the preconditions of (1) are checked here
+      # WHICH ADOPTING ARM, STATED EXACTLY AND THEN ASSERTED, because there
+      # are several and this drives ONE of them. `startAutoRunQuotaIfNeeded`
+      # adopts (1) the per-user daemon, when `RUNQUOTA_SOCKET` is the per-user
+      # socket and a daemon answers there, (2) a daemon answering an inherited
+      # `RUNQUOTA_SOCKET` that names anything else, or (3) the provisioned
+      # host endpoint. The first call published the per-user socket, so what
+      # runs below is (1) -- and the preconditions of (1) are checked here
       # rather than narrated, because the sentence naming the arm was the only
       # thing saying which arm this case reaches.
       let publishedSocket = getEnv("RUNQUOTA_SOCKET", "")
       checkpoint("RUNQUOTA_SOCKET after the spawn=" & publishedSocket)
       check publishedSocket.len > 0
       check publishedSocket != scratch / "no-such-runquota.sock"
+      check publishedSocket == isolated.socket
       # Arm (1) needs the variable set AND the path answering, so the path has
       # to exist. NOT `fileExists`, which is `S_ISREG` and answers false for
       # every socket there is; `getFileInfo` stats whatever is there and
@@ -1278,12 +1291,12 @@ suite "derived IPC trust: the daemons this process spawned":
       # The two topologies the registration site calls out — a provisioned
       # POSIX host (`/run/runquota/runquotad.sock`) and Windows from build #2
       # (the per-user pipe, `RUNQUOTA_SOCKET` deliberately cleared) — take
-      # (2) instead, and this case does NOT drive (2): reaching it needs a
+      # (3) instead, and this case does NOT drive (3): reaching it needs a
       # daemon listening on the host-wide endpoint, i.e. a provisioned host,
       # which a test may not manufacture. What is graded here is the PROPERTY
       # both share — an adopted daemon is not registered — on the one early
       # return a test can reach deterministically. Do not read this case as
-      # evidence about branch (2); read it as evidence that adoption and
+      # evidence about branch (3); read it as evidence that adoption and
       # registration are separate, which is what makes the reach claim at the
       # registration site checkable at all.
       var adopted = startAutoRunQuotaIfNeeded(false)

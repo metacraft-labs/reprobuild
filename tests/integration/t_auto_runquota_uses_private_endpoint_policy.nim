@@ -1,14 +1,41 @@
-## Production auto-start selects owner-only policy for daemon, parent and
-## managed actions, independently of installed service accounts. No success
-## mocks: real runquotad, sockets, parent/client connections and leased child.
-## Explicit foreign host selectors reproduce the account shape without NSS
-## changes. A shell fixture grades only startup output transport: a real daemon
-## cannot deterministically produce large independent stdout/stderr refusals.
+## Production auto-start selects the owner-only PRIVATE policy for the
+## daemon, the parent and the managed actions, on the shared per-user
+## endpoint, independently of installed service accounts (reprobuild-pm
+## `spec/RunQuota-Host-Configuration.md`, "Explicit private endpoint policy
+## (POSIX)" and "The shared per-user daemon (POSIX)").
+##
+## Until 2026-11-11 the endpoint was a fresh directory per invocation and the
+## daemon ended with the invocation; the cases that graded that lifetime now
+## grade its replacement, driving `startAutoRunQuotaIfNeeded` in process:
+## the endpoint is the per-user one, the publication of `RUNQUOTA_SOCKET` /
+## `RUNQUOTA_ENDPOINT_SCOPE` survives the release, a stale socket nobody
+## holds the lifetime lock of is replaced, a second invocation ADOPTS the
+## daemon, a failed start says why with the daemon's log, and an invalid
+## idle period is refused before anything starts. The CLI-level coverage of
+## the same rule is `t_auto_runquota_shared_per_user_daemon`.
+##
+## Every case names a scratch endpoint directory through
+## `RUNQUOTA_USER_ENDPOINT_DIR` and stops the daemon it started, so the real
+## per-user daemon of this uid is never touched.
+##
+## No success mocks: real runquotad, sockets, parent/client connections and
+## leased child. Explicit foreign host selectors reproduce the account shape
+## without NSS changes. Two shell fixtures stand in for a daemon where a real
+## one cannot produce the outcome: a refusing script grades only startup
+## output transport (a real daemon cannot deterministically produce large
+## independent stdout/stderr refusals), and a `RUNQUOTAD_BIN` that records
+## that it ran and exits proves a refusal happened BEFORE anything started.
+## The first case starts the real daemon through a wrapper that adds this
+## test's own host file, identity and store; it starts once and adopts
+## nothing, so the wrapper's image digest is never compared with the
+## daemon's.
+## Two more shell fixtures grade the readiness report: a daemon killed by a
+## signal, and one that never listens and is terminated at the ceiling.
 ## Another prints a refusal naming the caller's own uid, which a current daemon
 ## gives only for faults this suite cannot provoke through the auto-start (it
 ## creates the endpoint itself); it grades that such a refusal gets no
 ## stale-daemon remedy.
-import std/[json, os, osproc, strutils, tempfiles, unittest]
+import std/[json, monotimes, os, osproc, strutils, tempfiles, times, unittest]
 import repro_cli_support
 import repro_runquota
 import repro_test_support
@@ -20,8 +47,8 @@ when defined(posix):
   import std/posix
   from std/net import nil
   from std/nativesockets import Domain, SockType, Protocol
-  from repro_core/paths import runquotaEndpointPath
   from runquota_ipc import hostWideEndpointDir
+  import repro_test_support/per_user_runquota
 
   proc checkRefusesWithoutSpawn(root, endpoint, scope: string): string
       {.discardable.} =
@@ -65,17 +92,23 @@ when defined(posix):
     lstat(path.cstring, info) == 0 and S_ISSOCK(info.st_mode)
 
   proc plantStaleSocket(directory: string): string =
-    ## What a killed daemon leaves behind: an owner-only rendezvous directory
-    ## holding a socket inode nothing listens on any more. Closing a bound
-    ## socket does not unlink its path.
+    ## What a daemon killed with SIGKILL leaves behind: an owner-only
+    ## endpoint directory holding a socket inode nothing listens on any
+    ## more, and a lifetime lock nobody holds. Closing a bound socket does
+    ## not unlink its path.
     if posix.mkdir(directory.cstring, Mode(0o700)) != 0:
       raiseOSError(osLastError(), "mkdir " & directory)
-    result = directory / "runquota.sock"
+    result = userSocketIn(directory)
     var listener = net.newSocket(Domain.AF_UNIX, SockType.SOCK_STREAM,
       Protocol.IPPROTO_IP) # protocol 0, the only one AF_UNIX has
     net.bindUnix(listener, result)
     net.close(listener)
     doAssert isSocketInode(result)
+
+  proc inodeOf(path: string): uint64 =
+    var info: Stat
+    doAssert lstat(path.cstring, info) == 0
+    uint64(info.st_ino)
 
   if paramCount() == 1 and paramStr(1) == "--private-action-client":
     doAssert getEnv("RUNQUOTA_ENDPOINT_SCOPE") == "private"
@@ -84,18 +117,22 @@ when defined(posix):
     stdout.write("private-action-connected\n")
     quit(0)
 
-  suite "auto-started RunQuota owns a private endpoint":
+  suite "auto-started RunQuota uses the private policy on the per-user endpoint":
     setup:
       let root = createTempDir("repro-private-policy-", "")
       releaseDirAtProcessExit(root)
-      releaseDirAtProcessExit(parentDir(runquotaEndpointPath(
-        "reprobuild-runquota-" & $getCurrentProcessId())))
       var saved: seq[tuple[key: string, present: bool, value: string]]
       for key in ["RUNQUOTA_SOCKET", "RUNQUOTA_ENDPOINT_SCOPE",
           "RUNQUOTA_ENDPOINT_OWNER_UID", "RUNQUOTA_ENDPOINT_GROUP",
-          "RUNQUOTAD_BIN", "REPROBUILD_AUTO_RUNQUOTA", "REPRO_DAEMONS_CONFIG"]:
+          "RUNQUOTAD_BIN", "REPROBUILD_AUTO_RUNQUOTA", "REPRO_DAEMONS_CONFIG",
+          "RUNQUOTA_USER_ENDPOINT_DIR",
+          "REPROBUILD_RUNQUOTA_IDLE_EXIT_SECONDS"]:
         saved.add((key, existsEnv(key), getEnv(key)))
       let daemonBin = requireRunQuotaDaemonBin(getCurrentDir())
+      let userDir = scratchUserEndpointDir()
+      let userSocket = userSocketIn(userDir)
+      putEnv("RUNQUOTA_USER_ENDPOINT_DIR", userDir)
+      delEnv("REPROBUILD_RUNQUOTA_IDLE_EXIT_SECONDS")
       putEnv("REPROBUILD_AUTO_RUNQUOTA", "1")
       putEnv("RUNQUOTA_SOCKET", root / "absent.sock")
       delEnv("RUNQUOTA_ENDPOINT_SCOPE")
@@ -103,20 +140,28 @@ when defined(posix):
       putEnv("RUNQUOTA_ENDPOINT_GROUP", "0")
       writeFile(root / "daemons.conf", "")
       putEnv("REPRO_DAEMONS_CONFIG", root / "daemons.conf")
+      putEnv("RUNQUOTAD_BIN", daemonBin)
       forgetMachineDeclaredDaemonTrust()
+      var startedPid = 0
     teardown:
+      releaseAdoptedDaemonHold()
+      stopUserDaemon(userSocket, startedPid)
       for entry in saved:
         if entry.present: putEnv(entry.key, entry.value)
         else: delEnv(entry.key)
       removeDir(root)
       forgetMachineDeclaredDaemonTrust()
 
-    test "daemon parent and leased action use invocation ownership":
+    test "daemon parent and leased action use the per-user private endpoint":
       putEnv("RUNQUOTAD_BIN", writeRealDaemonWrapper(root, daemonBin))
       var daemon = startAutoRunQuotaIfNeeded(false)
       defer: releaseAutoRunQuotaProcess(daemon)
       require daemon != nil
+      startedPid = processID(daemon)
       let socket = getEnv("RUNQUOTA_SOCKET")
+      # The inherited socket named nothing, so the invocation recovered to
+      # the per-user endpoint rather than a directory of its own.
+      check socket == userSocket
       check getEnv("RUNQUOTA_ENDPOINT_SCOPE") == "private"
       check getFilePermissions(socket.parentDir) == {fpUserRead, fpUserWrite, fpUserExec}
       check getFilePermissions(socket) == {fpUserRead, fpUserWrite}
@@ -151,58 +196,56 @@ when defined(posix):
       check row["exit_status"].getInt() == 0
       client.close()
       releaseAutoRunQuotaProcess(daemon)
-      check getEnv("RUNQUOTA_SOCKET") == root / "absent.sock"
-      check not existsEnv("RUNQUOTA_ENDPOINT_SCOPE")
-      # The invocation created the rendezvous directory, so it removes it.
-      check not dirExists(socket.parentDir)
+      # PUBLISHED, NOT RESTORED: the endpoint names a daemon that outlives
+      # the invocation, and every later command must find it.
+      check getEnv("RUNQUOTA_SOCKET") == userSocket
+      check getEnv("RUNQUOTA_ENDPOINT_SCOPE") == "private"
+      # And the daemon is still there: releasing it does not stop it.
+      check lifetimeLockHeld(userSocket)
+      check dirExists(userDir)
 
-    test "a stale endpoint left at an earlier process's pid does not block start":
-      # The kernel reuses pids. A daemon killed before its orderly shutdown
-      # leaves `reprobuild-runquota-<pid>/runquota.sock` behind, and a later
-      # invocation holding the same pid must neither be refused by it nor
-      # delete it: a private bind refuses an existing endpoint, so the
-      # invocation's endpoint must not be derivable from its pid.
-      let staleDir = parentDir(runquotaEndpointPath(
-        "reprobuild-runquota-" & $getCurrentProcessId()))
-      removeDir(staleDir)
-      let stale = plantStaleSocket(staleDir)
-      putEnv("RUNQUOTAD_BIN", writeRealDaemonWrapper(root, daemonBin))
+    test "a stale per-user socket nobody holds the lock of is replaced":
+      let stale = plantStaleSocket(userDir)
+      let staleInode = inodeOf(stale)
+      check not lifetimeLockHeld(stale)
       var daemon = startAutoRunQuotaIfNeeded(false)
       defer: releaseAutoRunQuotaProcess(daemon)
       require daemon != nil
-      let socket = getEnv("RUNQUOTA_SOCKET")
-      check socket != stale
-      check socket.parentDir != staleDir
-      check getFilePermissions(socket.parentDir) ==
-        {fpUserRead, fpUserWrite, fpUserExec}
+      startedPid = processID(daemon)
+      check getEnv("RUNQUOTA_SOCKET") == stale
+      check isSocketInode(stale)
+      check inodeOf(stale) != staleInode
+      check lifetimeLockHeld(stale)
       var client = runquota_client.connectDefault()
       client.close()
-      releaseAutoRunQuotaProcess(daemon)
-      check not dirExists(socket.parentDir)
-      # Not ours, so not touched.
-      check isSocketInode(stale)
-      removeDir(staleDir)
 
-    test "two invocations in one process never share a rendezvous directory":
-      putEnv("RUNQUOTAD_BIN", writeRealDaemonWrapper(root, daemonBin))
+    test "a second invocation in one process adopts the first one's daemon":
       var first = startAutoRunQuotaIfNeeded(false)
       defer: releaseAutoRunQuotaProcess(first)
       require first != nil
-      let firstSocket = getEnv("RUNQUOTA_SOCKET")
+      startedPid = processID(first)
+      check getEnv("RUNQUOTA_SOCKET") == userSocket
       releaseAutoRunQuotaProcess(first)
-      check not dirExists(firstSocket.parentDir)
+      check not holdsAdoptedDaemon()
+      # The inherited socket is now the per-user one: adopt-or-start, which
+      # finds the daemon alive and adopts it.
       var second = startAutoRunQuotaIfNeeded(false)
       defer: releaseAutoRunQuotaProcess(second)
-      require second != nil
-      let secondSocket = getEnv("RUNQUOTA_SOCKET")
-      check secondSocket.parentDir != firstSocket.parentDir
+      check second == nil
+      # Adopted AND HELD, so it cannot idle out or retire under this
+      # invocation before its first session.
+      check holdsAdoptedDaemon()
+      check getEnv("RUNQUOTA_SOCKET") == userSocket
+      when defined(linux):
+        check lifetimeLockHolderPid(userSocket) == startedPid
       releaseAutoRunQuotaProcess(second)
-      check not dirExists(secondSocket.parentDir)
+      check not holdsAdoptedDaemon()
+      check lifetimeLockHeld(userSocket)
 
-    test "startup error retains both streams without filling a pipe":
+    test "startup error retains both streams through the daemon's log":
       let wrapper = root / "refusing-runquotad"
       writeFile(wrapper, "#!/bin/sh\n" &
-        "printf '%s' \"$2\" > " & quoteShell(root / "socket-arg") & "\n" &
+        "printf '%s\\n' \"$@\" > " & quoteShell(root / "daemon-args") & "\n" &
         "i=0; while [ $i -lt 4096 ]; do printf 'stdout-padding-0123456789\\n'; " &
         "printf 'stderr-padding-0123456789\\n' >&2; i=$((i+1)); done\n" &
         "printf 'specific startup stdout reason\\n'\n" &
@@ -215,7 +258,9 @@ when defined(posix):
         releaseAutoRunQuotaProcess(daemon)
       except OSError as error:
         message = error.msg
+      checkpoint(message)
       check "did not become reachable" in message
+      check "runquotad.log" in message
       # The error says how the wait ended: the daemon exited by itself, and
       # with which status -- not merely that it was not reachable.
       check "it exited before it listened" in message
@@ -224,13 +269,34 @@ when defined(posix):
       check "specific startup stdout reason" in message
       check "specific startup stderr refusal" in message
       check "truncated" in message
+      # Nothing was started, so nothing was published.
       check getEnv("RUNQUOTA_SOCKET") == root / "absent.sock"
       check not existsEnv("RUNQUOTA_ENDPOINT_SCOPE")
-      # The refused daemon was handed `--socket <path>` first; the directory
-      # the invocation created for it must not outlive the failed start.
-      let attempted = readFile(root / "socket-arg")
-      check attempted.endsWith("/runquota.sock")
-      check not dirExists(attempted.parentDir)
+      # The daemon was handed the per-user socket and the idle period, and
+      # no budget flag.
+      let args = readFile(root / "daemon-args").splitLines()
+      check args[0 .. 3] == @["--socket", userSocket, "--idle-exit-after", "600"]
+
+    test "an invalid idle period is an error before anything starts":
+      for value in ["0", "-5", "abc", "1.5", " 7"]:
+        putEnv("REPROBUILD_RUNQUOTA_IDLE_EXIT_SECONDS", value)
+        let marker = root / "unexpected-start"
+        let wrapper = root / "must-not-start"
+        writeFile(wrapper, "#!/bin/sh\nprintf executed > " &
+          quoteShell(marker) & "\nexit 23\n")
+        setFilePermissions(wrapper, {fpUserRead, fpUserWrite, fpUserExec})
+        putEnv("RUNQUOTAD_BIN", wrapper)
+        var message = ""
+        try:
+          var daemon = startAutoRunQuotaIfNeeded(false)
+          releaseAutoRunQuotaProcess(daemon)
+        except CatchableError as error:
+          message = error.msg
+        checkpoint(value & ": " & message)
+        check "REPROBUILD_RUNQUOTA_IDLE_EXIT_SECONDS" in message
+        check not fileExists(marker)
+        check not dirExists(userDir)
+      delEnv("REPROBUILD_RUNQUOTA_IDLE_EXIT_SECONDS")
 
     test "a daemon killed by a signal before it listens is reported as such":
       # A signal is a different fate from an exit code, and the error must
@@ -253,6 +319,37 @@ when defined(posix):
       check "with signal 9" in message
       check "exit code" notin message
       check "killing myself before I listen" in message
+
+    test "a daemon alive at the ceiling is reported as wedged, not as exited":
+      # THE OTHER HALF of the readiness report (reprobuild-pm issue
+      # `2026-09-30-runquota-auto-start-terminates-the-daemon-it-is-diagnosing`).
+      # A daemon that is alive throughout but never answers is terminated by
+      # the failure path, which leaves the same refused socket as a daemon
+      # that died by itself. The error must record which happened before
+      # that cleanup: alive at the ceiling, and terminated by repro rather
+      # than by itself. Takes the whole 120 s ceiling.
+      let wrapper = root / "wedged-runquotad"
+      # `exec` keeps the pid the launcher watches, so its terminate reaches
+      # the process that hangs and nothing is left behind.
+      writeFile(wrapper, "#!/bin/sh\nexec sleep 3600\n")
+      setFilePermissions(wrapper, {fpUserRead, fpUserWrite, fpUserExec})
+      putEnv("RUNQUOTAD_BIN", wrapper)
+      let started = getMonoTime()
+      var message = ""
+      try:
+        var daemon = startAutoRunQuotaIfNeeded(false)
+        releaseAutoRunQuotaProcess(daemon)
+      except OSError as error:
+        message = error.msg
+      let waited = getMonoTime() - started
+      checkpoint message
+      check "did not become reachable" in message
+      check "it was still running" in message
+      check "s readiness ceiling" in message
+      check "repro terminated it" in message
+      check "it exited" notin message
+      # The wait really ran to the ceiling rather than ending early.
+      check waited >= initDuration(seconds = 120)
 
     test "a daemon that ignores the private selection is named with a remedy":
       # reprobuild-pm issue 2026-10-31-repro-exec-fails-when-a-runquota-

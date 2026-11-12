@@ -283,11 +283,40 @@ case "$(uname -s)" in
     export REPRO_DAEMON_ENDPOINT="${REPRO_TEST_DAEMON_DIR}/d.sock"
     ;;
 esac
+# THE SHARED PER-USER runquotad, likewise (POSIX). On a host with no RunQuota
+# service every `repro` adopts or starts ONE runquotad per user, on a
+# well-known socket, and that daemon outlives the invocation (reprobuild-pm
+# spec/RunQuota-Host-Configuration.md, "The shared per-user daemon (POSIX)").
+# Left alone, the suite's builds would start, adopt -- and, being another
+# build, ask to make way -- the developer's own daemon, and every other process
+# of the user would lease against the suite's. A directory of the run's own
+# keeps the suite on a daemon of its own; tests that need a separate one still
+# name theirs. Under /tmp, not TMPDIR: the socket path must fit sun_path.
+REPRO_TEST_RUNQUOTA_DIR=""
+case "$(uname -s)" in
+  MINGW*|MSYS*|CYGWIN*|Windows_NT)
+    ;;
+  *)
+    REPRO_TEST_RUNQUOTA_DIR="$(mktemp -d /tmp/repro-test-rq.XXXXXX)"
+    export RUNQUOTA_USER_ENDPOINT_DIR="${REPRO_TEST_RUNQUOTA_DIR}/u"
+    ;;
+esac
 _repro_test_daemon_cleanup() {
   if [[ -x "build/bin/repro${exe_ext}" ]]; then
     "build/bin/repro${exe_ext}" daemon stop >/dev/null 2>&1 || true
   fi
   rm -rf "${REPRO_TEST_DAEMON_DIR}" 2>/dev/null || true
+  # The run's per-user runquotad, if a test started one: stopped rather than
+  # left to idle out with its directory gone.
+  if [[ -n "${REPRO_TEST_RUNQUOTA_DIR}" ]]; then
+    local runquota_cli="${RUNQUOTA_BIN:-$(command -v runquota || true)}"
+    if [[ -n "${runquota_cli}" && -S "${RUNQUOTA_USER_ENDPOINT_DIR}/runquotad.sock" ]]; then
+      RUNQUOTA_SOCKET="${RUNQUOTA_USER_ENDPOINT_DIR}/runquotad.sock" \
+        RUNQUOTA_ENDPOINT_SCOPE=private "${runquota_cli}" daemon stop \
+        >/dev/null 2>&1 || true
+    fi
+    rm -rf "${REPRO_TEST_RUNQUOTA_DIR}" 2>/dev/null || true
+  fi
   # N55. This suite runs `.nim` test binaries and nothing else, so every
   # shell gate under tests/integration/ is outside it. Printed from the
   # EXIT trap so it lands whether the run passed, failed or died, and

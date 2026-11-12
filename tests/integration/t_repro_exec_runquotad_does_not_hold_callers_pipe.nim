@@ -19,46 +19,50 @@
 ##          └─ runquotad (auto-started; on Windows, left running)
 ##
 ## The case requires the pipe to reach EOF within `EofBudgetMs` of `repro`
-## exiting. Two controls keep that honest:
+## exiting. EOF because the daemon had died would prove nothing, so on every
+## platform the daemon this invocation started must still be running when EOF
+## is seen:
 ##
-##   * The spawn arm really ran. On POSIX the case points `RUNQUOTA_SOCKET`
-##     at a path that does not exist, so both of `startAutoRunQuotaIfNeeded`'s
-##     reachability early returns fall through, and it hands the invocation a
-##     `RUNQUOTAD_BIN` that records each start and then `exec`s the real
-##     daemon, so the daemon is the same process, holding the same
-##     descriptors, that the invocation spawned. The record must be there.
-##     (This used to be read off the inner command, which printed the
-##     `RUNQUOTA_SOCKET` it inherited and had to see the spawned daemon's.
-##     Since reprobuild de84de3a an invocation-owned daemon is released and the
-##     caller's RunQuota environment restored once the dev environment is
-##     computed, before the command runs, so the command inherits the
-##     caller's endpoint and that control could no longer tell a spawn from
-##     none.) On Windows the case gives the invocation a private
-##     `USERNAME`, so the per-user pipe name (`\\.\pipe\runquota-<USERNAME>`)
-##     is one nothing else serves, and a daemon this case did not start cannot
-##     be adopted instead.
-##   * WINDOWS: the daemon is still running when EOF is seen. EOF because the
-##     daemon had died would prove nothing. The case finds the daemon as the
-##     server of that private pipe (`GetNamedPipeServerProcessId`), requires it
-##     to be alive after EOF, and then terminates it.
+##   * POSIX: the daemon is the SHARED PER-USER one (reprobuild-pm
+##     `spec/RunQuota-Host-Configuration.md`, "The shared per-user daemon
+##     (POSIX)"), and it outlives the invocation by design. The case names a
+##     scratch endpoint directory through `RUNQUOTA_USER_ENDPOINT_DIR`, so the
+##     invocation must START a daemon there (nothing else serves it), and after
+##     EOF it requires that daemon to hold the endpoint's lifetime lock and be
+##     alive. The daemon is then stopped the way an operator would
+##     (`RetireDaemon`), never left behind.
+##   * WINDOWS: the case gives the invocation a private `USERNAME`, so the
+##     per-user pipe name (`\\.\pipe\runquota-<USERNAME>`) is one nothing
+##     else serves, and a daemon this case did not start cannot be adopted
+##     instead. It finds the daemon as the server of that private pipe
+##     (`GetNamedPipeServerProcessId`), requires it to be alive after EOF, and
+##     then terminates it.
 ##
-## POSIX keeps a different lifetime rule: the daemon is OWNED by the
-## invocation and stops with it (`t_auto_runquota_daemon_ends_with_its_invocation`
-## grades that, and that its descriptors above 2 are not inherited). So on
-## POSIX the daemon is gone by the time `repro` exits, and this case grades
-## the property a caller observes -- prompt EOF on `repro exec`'s own output
-## -- through the real CLI, without the "still running" control.
+## AND THE COMMAND SEES THE SHARED ENDPOINT (POSIX). `repro exec` no longer
+## stops its daemon before `execve` or restores the caller's
+## `RUNQUOTA_SOCKET`: the command it runs inherits the per-user socket and
+## `RUNQUOTA_ENDPOINT_SCOPE=private`, and reaches a serving daemon through
+## them. The command is this binary in probe mode, which reports both. A
+## second case passes a BOGUS inherited `RUNQUOTA_SOCKET` (a path nothing
+## serves): the invocation recovers to the per-user daemon, and the command
+## sees the per-user socket rather than the bogus one. Until 2026-11-11 the
+## POSIX daemon was owned by the invocation and stopped with it, and the
+## command inherited the caller's endpoint.
 ##
 ## MOCK POLICY -- NO MOCKS. The real `repro` CLI, a real recipe compiled by
-## the real provider compile, the real `runquotad`, real OS pipes and the
-## kernel's own pipe-server identity. Arranged rather than produced: the
-## endpoint that forces the spawn arm, as described above.
+## the real provider compile, the real `runquotad`, real OS pipes, real lock
+## files and the kernel's own pipe-server identity. Arranged rather than
+## produced: the private endpoint (directory or pipe name) that forces a
+## start, as described above.
 
 import std/[monotimes, os, osproc, strtabs, strutils, tempfiles, times,
   unittest]
 
 import repro_test_support
 import repro_test_support/reasoned_skip
+when defined(posix):
+  import repro_test_support/per_user_runquota
+  import runquota_client
 
 const
   ProbeFlag = "--print-runquota-endpoint"
@@ -70,9 +74,21 @@ const
     ## reaches EOF as `repro` exits.
 
 if paramCount() == 1 and paramStr(1) == ProbeFlag:
-  # The inner command: report the endpoint the invocation published.
+  # The inner command: report the endpoint the invocation published, and
+  # (POSIX) whether a daemon answers there.
   echo "probe-runquota-socket=" & getEnv("RUNQUOTA_SOCKET", "")
+  echo "probe-runquota-scope=" & getEnv("RUNQUOTA_ENDPOINT_SCOPE", "")
   echo "probe-username=" & getEnv("USERNAME", "")
+  when defined(posix):
+    var reached = "no"
+    if getEnv("RUNQUOTA_SOCKET", "").len > 0:
+      try:
+        var client = runquota_client.connectDefault()
+        client.close()
+        reached = "yes"
+      except CatchableError as error:
+        reached = "no: " & error.msg
+    echo "probe-runquota-reached=" & reached
   quit(0)
 
 proc nowMs(): int64 = getMonoTime().ticks div 1_000_000
@@ -199,122 +215,145 @@ proc probeValue(output, key: string): string =
       return stripped[key.len + 1 .. ^1]
   ""
 
+proc execEnvironment(scratch: string): StringTableRef =
+  result = newStringTable(modeCaseSensitive)
+  for name, value in envPairs():
+    if not name.startsWith("__REPRO_"):
+      result[name] = value
+  result["REPROBUILD_ACTION_CACHE_ROOT"] = scratch / "action-cache"
+  result["XDG_CACHE_HOME"] = scratch / "user-cache"
+  result["LOCALAPPDATA"] = scratch / "user-cache"
+  result["REPRO_ACTION_CACHE_SHM"] = "0"
+  result["REPRO_DAEMON"] = "off"
+  result["REPROBUILD_AUTO_RUNQUOTA"] = "1"
+  if not result.hasKey("REPRO_NIM_COMPILER") or
+      result["REPRO_NIM_COMPILER"].len == 0:
+    result["REPRO_NIM_COMPILER"] = findExe("nim", followSymlinks = false)
+  if not result.hasKey("REPRO_BOOTSTRAP_CC") or
+      result["REPRO_BOOTSTRAP_CC"].len == 0:
+    let cc = when defined(windows): "gcc" else: "cc"
+    result["REPRO_BOOTSTRAP_CC"] = findExe(cc, followSymlinks = false)
+
+proc runExecAndGradeEof(inheritedSocket: string) =
+  ## One `repro exec` with this case as its `$(...)` caller. On POSIX
+  ## `inheritedSocket` is the `RUNQUOTA_SOCKET` the caller passes ("" for
+  ## none); Windows ignores it and uses its private pipe.
+  # exec is handled by the engine; the thin client delegates this verb to it
+  # (on POSIX by `execv`, so the process is the same one). `REPROBUILD_REPRO`
+  # points the case at another build of the same pair.
+  let cli = getEnv("REPROBUILD_REPRO", reproBinaryPath(stem = "reprobuild"))
+  requireHostBinary(cli)
+  let scratch = createTempDir("repro-exec-rq-pipe-", "")
+  defer: removeDirEventually(scratch, attempts = 50, sleepMs = 100)
+  let project = scratch / "project"
+  createDir(project)
+  writeFile(project / "repro.nim", "import repro_project_dsl\n" &
+    "package fixture:\n  devEnv:\n    setEnv \"EXEC_PIPE_CASE\", \"1\"\n")
+  var env = execEnvironment(scratch)
+  when defined(windows):
+    discard inheritedSocket
+    # Alphanumeric, so runquota's pipe-name sanitising leaves it as is.
+    let privateUser = "reproexecpipe" & $getCurrentProcessId()
+    let privatePipe = r"\\.\pipe\runquota-" & privateUser
+    env["USERNAME"] = privateUser
+    env["RUNQUOTA_SOCKET"] = ""
+    require pipeServerPid(privatePipe) == 0
+  else:
+    # A scratch per-user endpoint: nothing serves it, so the invocation has
+    # to START the daemon there, and the real per-user daemon of this uid
+    # (which other processes may be using) is never touched.
+    let endpointDir = scratchUserEndpointDir()
+    let userSocket = userSocketIn(endpointDir)
+    env["RUNQUOTA_USER_ENDPOINT_DIR"] = endpointDir
+    env["RUNQUOTAD_BIN"] = requireRunQuotaDaemonBin(getCurrentDir())
+    env.del("RUNQUOTA_ENDPOINT_SCOPE")
+    if inheritedSocket.len > 0:
+      env["RUNQUOTA_SOCKET"] = inheritedSocket
+    else:
+      env.del("RUNQUOTA_SOCKET")
+
+  # The `$(...)` role: stdout and stderr on ONE pipe this case reads.
+  let invocation = startProcess(cli, workingDir = project,
+    args = ["exec", project, "--", getAppFilename(), ProbeFlag],
+    env = env, options = {poStdErrToStdOut})
+  var daemonPid = 0
+  try:
+    let pipe = invocation.outputHandle
+    var output = ""
+    var state = psOpen
+    let execDeadline = nowMs() + ExecDeadlineMs
+    while invocation.running and nowMs() < execDeadline:
+      state = drainUntilEof(pipe, 200, output)
+      if state == psEof:
+        break
+    # EOF can be seen a moment before the exit is observable.
+    while invocation.running and nowMs() < execDeadline:
+      sleep(20)
+    let execExit = invocation.peekExitCode()
+    if execExit == -1:
+      killProcessTree(invocation.processID)
+    checkpoint("repro exec exit=" & $execExit & ", output:\n" & output)
+    require execExit == 0
+
+    # THE PROPERTY. `repro` is gone; only a process it left behind could
+    # still hold the write end.
+    let eofWait = nowMs()
+    if state != psEof:
+      state = drainUntilEof(pipe, EofBudgetMs, output)
+    checkpoint("pipe " & $state & " " & $(nowMs() - eofWait) &
+      " ms after repro exec exited; output:\n" & output)
+
+    when defined(windows):
+      daemonPid = pipeServerPid(privatePipe)
+      checkpoint("runquotad serving " & privatePipe & ": pid " &
+        $daemonPid)
+      # Control: the daemon this invocation started is still running, so
+      # the EOF is not the daemon having died.
+      check daemonPid > 0
+      check daemonPid > 0 and processAlive(daemonPid)
+      check probeValue(output, "probe-username") == privateUser
+    else:
+      # Control: the daemon this invocation started at the scratch endpoint
+      # is still running, so the EOF is not the daemon having died.
+      check lifetimeLockHeld(userSocket)
+      daemonPid = lifetimeLockHolderPid(userSocket)
+      checkpoint("runquotad holding " & userSocket & ": pid " & $daemonPid)
+      when defined(linux):
+        check daemonPid > 0 and pidAlive(daemonPid)
+      # The command inherited the SHARED endpoint -- not the caller's bogus
+      # one, not nothing -- and a daemon answers there.
+      check probeValue(output, "probe-runquota-socket") == userSocket
+      check probeValue(output, "probe-runquota-scope") == "private"
+      check probeValue(output, "probe-runquota-reached") == "yes"
+    check "probe-runquota-socket=" in output
+    check state == psEof
+  finally:
+    when defined(windows):
+      if daemonPid == 0:
+        daemonPid = pipeServerPid(privatePipe)
+      if daemonPid > 0:
+        terminatePid(daemonPid)
+    else:
+      stopUserDaemon(userSocket, daemonPid)
+    if invocation.running:
+      killProcessTree(invocation.processID)
+    invocation.close()
+
 suite "repro exec stdio and the auto-started runquotad":
   test "repro exec's caller sees EOF once repro exits":
     if not runquotadAvailable():
       skip("no runquotad: set RUNQUOTAD_BIN or put runquotad on PATH " &
         "(the dev shell provides it)")
     else:
-      # exec is handled by the engine; the thin client delegates this verb
-      # to it (on POSIX by `execv`, so the process is the same one).
-      let cli = requireHostBinary(reproBinaryPath(stem = "reprobuild"))
-      let scratch = createTempDir("repro-exec-rq-pipe-", "")
-      defer: removeDirEventually(scratch, attempts = 50, sleepMs = 100)
-      let project = scratch / "project"
-      createDir(project)
-      writeFile(project / "repro.nim", "import repro_project_dsl\n" &
-        "package fixture:\n  devEnv:\n    setEnv \"EXEC_PIPE_CASE\", \"1\"\n")
+      runExecAndGradeEof("")
 
-      var env = newStringTable(modeCaseSensitive)
-      for name, value in envPairs():
-        if not name.startsWith("__REPRO_"):
-          env[name] = value
-      env["REPROBUILD_ACTION_CACHE_ROOT"] = scratch / "action-cache"
-      env["XDG_CACHE_HOME"] = scratch / "user-cache"
-      env["LOCALAPPDATA"] = scratch / "user-cache"
-      env["REPRO_ACTION_CACHE_SHM"] = "0"
-      env["REPRO_DAEMON"] = "off"
-      env["REPROBUILD_AUTO_RUNQUOTA"] = "1"
-      if not env.hasKey("REPRO_NIM_COMPILER") or
-          env["REPRO_NIM_COMPILER"].len == 0:
-        env["REPRO_NIM_COMPILER"] = findExe("nim", followSymlinks = false)
-      if not env.hasKey("REPRO_BOOTSTRAP_CC") or
-          env["REPRO_BOOTSTRAP_CC"].len == 0:
-        let cc = when defined(windows): "gcc" else: "cc"
-        env["REPRO_BOOTSTRAP_CC"] = findExe(cc, followSymlinks = false)
-      let bogusSocket = scratch / "no-such-runquota.sock"
-      when defined(windows):
-        # Alphanumeric, so runquota's pipe-name sanitising leaves it as is.
-        let privateUser = "reproexecpipe" & $getCurrentProcessId()
-        let privatePipe = r"\\.\pipe\runquota-" & privateUser
-        env["USERNAME"] = privateUser
-        env["RUNQUOTA_SOCKET"] = ""
-        require pipeServerPid(privatePipe) == 0
+  test "the command reaches the shared daemon although the caller passed a bogus socket":
+    when defined(windows):
+      skip("the per-user POSIX endpoint only; Windows clears RUNQUOTA_SOCKET")
+    else:
+      if not runquotadAvailable():
+        skip("no runquotad: set RUNQUOTAD_BIN or put runquotad on PATH " &
+          "(the dev shell provides it)")
       else:
-        env["RUNQUOTA_SOCKET"] = bogusSocket
-        # The spawn-arm control (see the header): a `runquotad` that records
-        # its start and becomes the real daemon.
-        let realRunquotad =
-          if env.hasKey("RUNQUOTAD_BIN") and fileExists(env["RUNQUOTAD_BIN"]):
-            env["RUNQUOTAD_BIN"]
-          else:
-            findExe("runquotad")
-        require realRunquotad.len > 0
-        let spawnRecord = scratch / "runquotad-started"
-        let recordingRunquotad = scratch / "runquotad"
-        writeFile(recordingRunquotad, "#!/bin/sh\n" &
-          "echo \"$$\" >> " & quoteShell(spawnRecord) & "\n" &
-          "exec " & quoteShell(realRunquotad) & " \"$@\"\n")
-        setFilePermissions(recordingRunquotad,
-          {fpUserRead, fpUserWrite, fpUserExec})
-        env["RUNQUOTAD_BIN"] = recordingRunquotad
-
-      # The `$(...)` role: stdout and stderr on ONE pipe this case reads.
-      let invocation = startProcess(cli, workingDir = project,
-        args = ["exec", project, "--", getAppFilename(), ProbeFlag],
-        env = env, options = {poStdErrToStdOut})
-      var daemonPid = 0
-      try:
-        let pipe = invocation.outputHandle
-        var output = ""
-        var state = psOpen
-        let execDeadline = nowMs() + ExecDeadlineMs
-        while invocation.running and nowMs() < execDeadline:
-          state = drainUntilEof(pipe, 200, output)
-          if state == psEof:
-            break
-        # EOF can be seen a moment before the exit is observable.
-        while invocation.running and nowMs() < execDeadline:
-          sleep(20)
-        let execExit = invocation.peekExitCode()
-        if execExit == -1:
-          killProcessTree(invocation.processID)
-        checkpoint("repro exec exit=" & $execExit & ", output:\n" & output)
-        require execExit == 0
-
-        # THE PROPERTY. `repro` is gone; only a process it left behind could
-        # still hold the write end.
-        let eofWait = nowMs()
-        if state != psEof:
-          state = drainUntilEof(pipe, EofBudgetMs, output)
-        checkpoint("pipe " & $state & " " & $(nowMs() - eofWait) &
-          " ms after repro exec exited; output:\n" & output)
-
-        when defined(windows):
-          daemonPid = pipeServerPid(privatePipe)
-          checkpoint("runquotad serving " & privatePipe & ": pid " &
-            $daemonPid)
-          # Control: the daemon this invocation started is still running, so
-          # the EOF is not the daemon having died.
-          check daemonPid > 0
-          check daemonPid > 0 and processAlive(daemonPid)
-          check probeValue(output, "probe-username") == privateUser
-        else:
-          # Control: the spawn arm ran -- the invocation started a daemon.
-          let spawnRecord = scratch / "runquotad-started"
-          checkpoint("runquotad starts recorded: " &
-            (if fileExists(spawnRecord): readFile(spawnRecord).strip()
-             else: "none"))
-          check fileExists(spawnRecord) and
-            readFile(spawnRecord).strip().len > 0
-        check "probe-runquota-socket=" in output
-        check state == psEof
-      finally:
-        when defined(windows):
-          if daemonPid == 0:
-            daemonPid = pipeServerPid(privatePipe)
-          if daemonPid > 0:
-            terminatePid(daemonPid)
-        if invocation.running:
-          killProcessTree(invocation.processID)
-        invocation.close()
+        runExecAndGradeEof(getTempDir() / ("no-such-runquota-" &
+          $getCurrentProcessId() & ".sock"))

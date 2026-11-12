@@ -347,7 +347,7 @@ const
     "libs/repro_fs_facts/tests/t_fs_facts_conformance.nim",
     "libs/repro_resources/tests/t_l4_service_instance_identity_and_state.nim",
     "libs/repro_resources/tests/t_l5_environment_is_in_the_instance_key.nim",
-    "tests/integration/t_auto_runquota_daemon_ends_with_its_invocation.nim",
+    "tests/integration/t_auto_runquota_shared_per_user_daemon.nim",
     "tests/integration/t_auto_runquota_uses_private_endpoint_policy.nim",
     "tests/integration/t_runquota_long_temp_rendezvous.nim",
     "tests/integration/t_runquota_auto_spawned_daemon_follows_host_config.nim",

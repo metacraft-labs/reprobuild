@@ -166,9 +166,12 @@ invalidates a fixture's warm state, and the first run after a rebuild
 re-executes actions. Run the workload two or three times and confirm the timing
 table shows **no `process wait` row** before reading anything.
 
-**A no-op needs a reachable `runquotad`.** Without one, every invocation spawns
-its own and the measurement is dominated by daemon startup — roughly an order of
-magnitude. Point `RUNQUOTA_SOCKET` at a running daemon on a short path.
+**A no-op needs a reachable `runquotad`.** Without one, the invocation starts
+the shared per-user daemon and the measurement is dominated by daemon startup —
+roughly an order of magnitude. That daemon stays up for
+`REPROBUILD_RUNQUOTA_IDLE_EXIT_SECONDS` (600 s by default) after its last
+client, so discard the first run, or point `RUNQUOTA_SOCKET` at a running
+daemon on a short path.
 
 **Prefer `--show=timing` rows to wall clock.** They decompose the total and stay
 stable when wall clock does not.
