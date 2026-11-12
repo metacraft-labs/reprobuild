@@ -706,7 +706,7 @@ suite "e2e_repro_dev_sessions":
         writeFile(session / "http-ready.json", $(%*{
           "sessionId": "current-launch", "httpBind": "http://127.0.0.1:1"}))
       var diagnostic = ""
-      try: discard waitForDevSessionReady(config, budget)
+      try: discard waitForDevSessionReady(config, budget, DevSessionLaunch())
       except IOError as err: diagnostic = err.msg
       check diagnostic.contains("dev session cannot start")
       check diagnostic.contains("controlled startup failure")
@@ -715,7 +715,7 @@ suite "e2e_repro_dev_sessions":
       "sessionId": "previous-launch", "status": "failed",
       "failure": "stale startup failure"}))
     expect DevSessionStillStartingError:
-      discard waitForDevSessionReady(config, budget)
+      discard waitForDevSessionReady(config, budget, DevSessionLaunch())
 
   test "e2e_session_http_exits_without_another_connection":
     let dir = createTempDir("repro-http-owner-", "")
@@ -1268,6 +1268,145 @@ suite "e2e_repro_dev_sessions":
       check "service.failed" in kinds
       check "session.up" notin kinds
 
+    test "e2e_repro_up_reports_a_supervisor_that_died_on_launch":
+      # reprobuild-pm issue
+      # 2026-11-11-repro-up-cannot-see-a-supervisor-launch-that-died. The
+      # supervisor is detached through a shell whose last token is `&`, so
+      # the shell's exit code is 0 whether the supervisor lives or dies. A
+      # supervisor that died in its first millisecond used to be waited on
+      # for the whole control-API phase and then reported as STILL
+      # STARTING, exit 75 -- the code that tells a caller to keep waiting
+      # -- while the reason sat in `supervisor.log`, named only as a place
+      # to look. A launch that produced no running supervisor is a failure
+      # to start: exit 1, promptly, quoting what the supervisor wrote.
+      #
+      # THE DEATH IS REAL, staged with no fake: a real control-API helper
+      # (`__repro-dev-session-http`, the same binary the supervisor would
+      # spawn), started without `--supervised`, holds the session's
+      # `supervisor.lock` and `http.lock` -- an unsupervised helper takes
+      # both. The supervisor that `repro up` launches refuses at its
+      # ownership lock ("session already has an owner") and exits 1 before
+      # it writes any session record. The helper publishes an
+      # `http-ready.json` with no session id, which the parent rightly
+      # does not accept as its launch's, so without a liveness witness the
+      # parent has nothing to go on but the clock.
+      #
+      # The fixture declares 2000 ms, so the derived budget is 12000 ms --
+      # under the 30000 ms control-API phase. Before the fix this case
+      # waited all 12000 ms and exited 75 with "is still starting".
+      let c = prepareCase("repro-m8-dead-launch", writeFixture =
+        proc (dir: string) = writeReadinessFixture(dir, sleepSeconds = 0,
+          readinessTimeoutMs = 2000))
+      let sessionDir = c.projectRoot / ".repro" / "dev-env" / "default" /
+        "session"
+      createDir(sessionDir)
+      # A previous launch's output. The log is opened for APPEND, so the
+      # diagnostic must quote only what THIS launch wrote.
+      const previousLaunchLine = "previous launch: an unrelated old line"
+      writeFile(sessionDir / "supervisor.log", previousLaunchLine & "\n")
+      let holder = startProcess(reproBinary(), args = @[
+        "__repro-dev-session-http", "--session-dir", sessionDir,
+        "--host", "127.0.0.1", "--port", "0",
+        "--parent-pid", $getCurrentProcessId()],
+        options = {poParentStreams})
+      defer:
+        if holder.running(): holder.kill()
+        discard holder.waitForExit()
+        holder.close()
+        reapSession(c.projectRoot)
+        removeDir(c.tempRoot)
+      waitForHttpReady(sessionDir / "http-ready.json", holder)
+      # POSITIVE CONTROL: the holder is alive and published a bind that is
+      # not any launch's, so the supervisor's refusal below is caused by the
+      # held lock and the parent cannot have been satisfied by the file.
+      require holder.running()
+      require fileExists(sessionDir / "http-ready.json")
+      check parseJson(readFile(sessionDir / "http-ready.json")){
+        "sessionId"}.getStr() == ""
+
+      let res = runRepro(c, @["up", c.projectRoot, "--http=127.0.0.1:0"])
+      checkpoint("repro up output:\n" & res.output)
+      check res.exitCode == 1
+      check res.output.contains("dev session cannot start")
+      check res.output.contains("its supervisor (pid ")
+      check res.output.contains("exited before its control API published")
+      check not res.output.contains("is still starting")
+      # The supervisor's own words, quoted from its log -- and only this
+      # launch's.
+      check res.output.contains("session already has an owner")
+      check res.output.contains("supervisor.lock")
+      check res.output.contains(sessionDir / "supervisor.log")
+      check not res.output.contains(previousLaunchLine)
+      # Within a few polls of the death, not at the end of the budget.
+      check res.output.contains("of the 12000 ms allowed")
+      checkpoint("reported wait: " & $reportedWaitMs(res.output) & " ms")
+      check reportedWaitMs(res.output) >= 0
+      check reportedWaitMs(res.output) < 6_000
+      # The dead launch wrote no session record, and the holder it collided
+      # with is untouched.
+      check not fileExists(sessionMetadataPath(c.projectRoot))
+      check holder.running()
+
+    when defined(linux):
+      test "e2e_repro_up_reports_a_supervisor_that_died_after_its_control_api":
+        # The second phase of the same defect. Once the control API has
+        # published its bind, a supervisor killed before `session.up` takes
+        # its control-API child with it (that child exits with its owner),
+        # so every status poll fails -- and the parent used to report that
+        # as "still starting", exit 75, at the end of the budget. The
+        # supervisor is gone, nothing will publish `up` for this launch,
+        # and the answer is exit 1 when the death is seen.
+        #
+        # Staged with a real SIGKILL on the real supervisor, read from the
+        # real `session.json` while its one service is still sleeping
+        # through a 30 s startup. `--ready-timeout=20000` bounds the
+        # unfixed direction, which waited all of it. Linux only because the
+        # pid is checked against `/proc` before it is signalled
+        # (`belongsToSession`).
+        let c = prepareCase("repro-m8-dead-after-api", writeFixture =
+          proc (dir: string) = writeReadinessFixture(dir, sleepSeconds = 30,
+            readinessTimeoutMs = 60000))
+        defer:
+          reapSession(c.projectRoot)
+          removeDir(c.tempRoot)
+        let up = startProcess(c.reproBin,
+          args = @["up", c.projectRoot, "--http=127.0.0.1:0",
+            "--ready-timeout=20000"],
+          workingDir = c.repoRoot, env = c.envFor(),
+          options = {poStdErrToStdOut})
+        discard waitForStatus(sessionMetadataPath(c.projectRoot),
+          "starting", timeoutMs = 120_000)
+        let sessionDir = sessionMetadataPath(c.projectRoot).parentDir
+        # Wait for the control API AND the service, so the kill lands in
+        # phase two, while the session is genuinely still coming up.
+        let orderLog = c.projectRoot / "state" / "order.log"
+        for _ in 0 ..< 1200:
+          if fileExists(sessionDir / "http-ready.json") and
+              fileExists(orderLog): break
+          sleep(50)
+        require fileExists(sessionDir / "http-ready.json")
+        require fileExists(orderLog)
+        let starting = parseJson(readFile(sessionMetadataPath(c.projectRoot)))
+        check starting{"status"}.getStr() == "starting"
+        let supervisorPid = starting{"supervisorPid"}.getInt()
+        require supervisorPid > 0
+        require belongsToSession(supervisorPid, c.projectRoot)
+        discard runShell(shellCommand(@["kill", "-KILL", $supervisorPid]))
+        let output = up.outputStream.readAll()
+        let exitCode = up.waitForExit()
+        up.close()
+        checkpoint("repro up output:\n" & output)
+        check exitCode == 1
+        check output.contains("dev session cannot start")
+        check output.contains("its supervisor (pid " & $supervisorPid & ")")
+        check output.contains("exited before the session reported " &
+          "`session.up`")
+        check not output.contains("is still starting")
+        check reportedWaitMs(output) >= 0
+        check reportedWaitMs(output) < 18_000
+        # The killed supervisor could not stop its service; the deferred
+        # `reapSession` kills it by the pid `session.json` recorded.
+
     test "e2e_readiness_child_exit_reports_exit_status_and_reaps_started_services":
       for exitCode in [0, 69]:
         # Real HTTP readiness against a closed port, and real early exits. A
@@ -1650,7 +1789,7 @@ suite "e2e_repro_dev_sessions":
       var message = ""
       var raised = false
       try:
-        discard waitForDevSessionReady(config, budget)
+        discard waitForDevSessionReady(config, budget, DevSessionLaunch())
       except DevSessionStillStartingError as err:
         raised = true
         message = err.msg
@@ -1713,7 +1852,7 @@ suite "e2e_repro_dev_sessions":
       var message = ""
       var raised = false
       try:
-        discard waitForDevSessionReady(config, budget)
+        discard waitForDevSessionReady(config, budget, DevSessionLaunch())
       except DevSessionStillStartingError as err:
         raised = true
         message = err.msg
@@ -1779,7 +1918,7 @@ suite "e2e_repro_dev_sessions":
       var message = ""
       var raised = false
       try:
-        discard waitForDevSessionReady(config, budget)
+        discard waitForDevSessionReady(config, budget, DevSessionLaunch())
       except DevSessionStillStartingError as err:
         raised = true
         message = err.msg

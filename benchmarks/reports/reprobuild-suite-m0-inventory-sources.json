@@ -31979,7 +31979,7 @@
       "requiresReproBinary": true,
       "source": "tests/e2e/dev-env/t_e2e_repro_dev_sessions.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 26,
+      "staticCaseCount": 28,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
