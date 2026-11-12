@@ -511,7 +511,16 @@ proc buildCode(pkg: PackageDef; body: NimNode): NimNode =
   # untouched to the proc that has always handled it.
   let devEnvBody = l2LowerDevEnvActivities(pkg.packageName,
     collectDevEnvStatements(body))
-  if buildBody.len == 0 and devEnvBody.len == 0:
+  # A package with neither body still needs the provider dispatcher below
+  # when it exposes dev-env introspection: a ``uses:`` toolchain floor
+  # advertises a ``gpkDevEnvIntrospection`` entry point in the provider
+  # manifest, and only ``runPackageProvider`` answers it. Without the
+  # dispatcher the provider binary exits without writing a response. The
+  # package gets an empty build proc and no ``devEnv<Package>`` proc, and
+  # ``buildPackageDevEnv`` treats the nil ``devEnvProc`` as the implicit
+  # floor-derived environment.
+  if buildBody.len == 0 and devEnvBody.len == 0 and
+      not exposesDevEnvIntrospection(pkg):
     return newStmtList()
   let lifted = liftForeachStatements(pkg, buildBody)
   let procName = ident("build" & titleIdent(pkg.packageName))

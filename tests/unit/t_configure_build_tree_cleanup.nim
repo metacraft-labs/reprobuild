@@ -7,21 +7,7 @@ when defined(reproProviderMode):
   import repro_project_dsl
   import repro_dsl_stdlib/constructors
 
-  package cmakeCleanupTest:
-    nativeBuildDeps:
-      "chmod"
-    config:
-      discard
-
-  package mesonCleanupTest:
-    nativeBuildDeps:
-      "chmod"
-    config:
-      discard
-
-  package autotoolsCleanupTest:
-    config:
-      discard
+  import ./configure_build_tree_cleanup_fixtures
 
   proc dummyRequest(projectRoot, packageName: string): ProviderGraphRequest =
     ProviderGraphRequest(
