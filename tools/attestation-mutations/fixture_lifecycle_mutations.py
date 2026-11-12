@@ -380,7 +380,7 @@ ROWS: list[Row] = [
         [(LIFECYCLE, "      if w.notAfter < soonest:", "      if w.notAfter > soonest:")]),
     Row("N15", "the scheduled run loses the trigger it can reach",
         LIFECYCLE,
-        [(WORKFLOW, "  push:\n    branches: [dev, agents]\n", "")]),
+        [(WORKFLOW, "  push:\n    branches: [dev]\n", "")]),
     Row("N16", "the per-landing arm starts going to the network",
         LIFECYCLE,
         [(WORKFLOW, "monitor.py --offline", "monitor.py")]),
@@ -389,6 +389,9 @@ ROWS: list[Row] = [
         [(LIFEMOD, "  ## Half, specifically, because half is the largest fraction that",
           "  ## Half, precisely, because half is the largest fraction that")],
         expect="GREEN"),
+    Row("N18", "the per-landing arm also runs on the agents branch",
+        LIFECYCLE,
+        [(WORKFLOW, "    branches: [dev]\n", "    branches: [dev, agents]\n")]),
     # ---- the refresh of the trust-domain vendor's seven documents, and
     # ---- the mechanical tie that replaced the hand-kept clock lists --
     #

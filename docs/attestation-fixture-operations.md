@@ -354,10 +354,22 @@ first expiry it was written to announce, the API recorded exactly one
 run of it, from the `push` that introduced it. The one Monday in between
 fell before the file existed; the next fell after the documents expired.
 
-The job therefore runs its **offline expiry half on every push** to the
-branches work lands on, and keeps the schedule for the network half. If
-you are wondering whether the weekly run is working, do not read the
-workflow file — ask for its runs:
+The job therefore runs its **offline expiry half on every push to
+`dev`**, and keeps the schedule for the network half. It does not run on
+`agents`: no workflow runs on that integration branch, which is gated
+locally. Whoever lands collateral-relevant work there runs the same
+per-landing verdict by hand —
+
+```
+python3 tools/attestation_collateral_monitor.py --offline --landing
+```
+
+— reads exit 1 as the refusal it is, and acts on the `~` notices it
+prints; without `--landing` the same command gives the scheduled
+verdict, exit 1 for a refresh that is due. Until the workflow reaches the
+default branch the weekly run is **absent**, and nothing on `agents`
+stands in for it. If you are wondering whether the weekly run is
+working, do not read the workflow file — ask for its runs:
 
 ```
 gh api repos/<owner>/<repo>/actions/workflows/attestation-collateral.yml/runs \

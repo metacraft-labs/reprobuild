@@ -1670,6 +1670,7 @@ suite "the lifecycle decision":
     check wf.len > 0
     var inOn = false
     var triggers: seq[string] = @[]
+    var onBlock: seq[string] = @[]
     var body: seq[string] = @[]
     for raw in wf.splitLines():
       if raw.len == 0: continue
@@ -1680,6 +1681,7 @@ suite "the lifecycle decision":
         inOn = bare.startsWith("on:")
         continue
       if inOn:
+        onBlock.add bare
         # One indent level under `on:` is an event name.
         if raw.startsWith("  ") and not raw.startsWith("   "):
           triggers.add bare.split(':')[0]
@@ -1692,6 +1694,14 @@ suite "the lifecycle decision":
     check "schedule" in triggers
     check "push" in triggers
     check triggers.len == 3
+    # The per-landing trigger is a push to `dev`, and to nothing that is
+    # or matches `agents`: no workflow runs on the `agents` integration
+    # branch, however cheap. Read from the `on:` block with comments
+    # stripped, so the prose explaining why cannot satisfy or trip it.
+    check "branches: [dev]" in onBlock
+    for line in onBlock:
+      checkpoint(line)
+      check "agents" notin line
     # And the per-landing arm must be the OFFLINE one. Asking a
     # vendor's service once a week is courteous; asking it on every
     # landing is not, and a per-push run that reached the network would
