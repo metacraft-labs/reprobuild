@@ -6,6 +6,7 @@ import repro_local_store
 import repro_store_daemon
 import repro_test_support
 import repro_tool_profiles
+import repro_tool_profiles/archive_digest
 
 # ---------------------------------------------------------------------------
 # Spec-layout invariants — see reprobuild-specs/Local-Content-Addressed-Store.md
@@ -141,7 +142,8 @@ proc waitForBarrier(path: string) =
   while epochTime() < deadline and not fileExists(path):
     sleep(5)
 
-proc buildTarballFixture(tempRoot: string): tuple[url: string; sha256: string] =
+proc buildTarballFixture(tempRoot: string):
+    tuple[url: string; sha256: string; sha512: string] =
   let payloadRoot = tempRoot / "tarball-payload"
   let packageRoot = payloadRoot / "m67tarball-1.0.0"
   let binDir = packageRoot / "bin"
@@ -168,7 +170,8 @@ proc buildTarballFixture(tempRoot: string): tuple[url: string; sha256: string] =
     payloadRoot, "m67tarball-1.0.0"]))
   doAssert tar.exitCode == 0, "tar failed: " & tar.output
   (url: "file://" & archivePath.replace('\\', '/'),
-   sha256: fileSha256Hex(archivePath))
+   sha256: fileSha256Hex(archivePath),
+   sha512: fileShaHex(archivePath, "sha512"))
 
 const
   ## The ranged ``uses:`` constraint and the version the fixture record
@@ -198,6 +201,24 @@ proc tarballUse(url, sha256: string; constraint = "m67-tarball";
     location: SourceLocation(file: "fixture", line: 2))]
   result.tarballProvisioning[0].detail.version = version
 
+proc sha512OnlyTarballUse(url, sha512: string): InterfaceToolUse =
+  ## The fixture archive pinned only by SHA-512, as an upstream that
+  ## publishes no SHA-256 is. The digest lives in the record's archive
+  ## detail, and the client's plan carries an empty ``sha256`` for it.
+  result = tarballUse(url, "")
+  result.tarballProvisioning[0].sha256 = ""
+  result.tarballProvisioning[0].lockIdentity = ""
+  result.tarballProvisioning[0].detail.sha512 = "sha512:" & sha512
+
+proc extractPathTarballUse(url, sha256: string): InterfaceToolUse =
+  ## The fixture archive realized through an installer feature: instead of
+  ## ``stripComponents``, the record names the inner directory to flatten to
+  ## the prefix root (``extractPath``, part of the archive detail). Extracted
+  ## as a plain archive, the executable would sit one directory down.
+  result = tarballUse(url, sha256)
+  result.tarballProvisioning[0].stripComponents = 0
+  result.tarballProvisioning[0].detail.extractPath = "m67tarball-1.0.0"
+
 proc nixUse(): InterfaceToolUse =
   result = InterfaceToolUse(
     rawConstraint: "m67-nix",
@@ -213,8 +234,12 @@ proc nixUse(): InterfaceToolUse =
     location: SourceLocation(file: "fixture", line: 2))]
 
 proc runClientWorker(args: seq[string]): int =
-  ## --client <tarball|tarball-ranged|nix> <endpoint> <storeRoot> <holder>
-  ##          <rootId> <statusFile> <barrier> [tarballUrl tarballSha256]
+  ## --client <tarball|tarball-ranged|tarball-sha512|tarball-extract-path|nix>
+  ##          <endpoint> <storeRoot> <holder> <rootId> <statusFile> <barrier>
+  ##          [tarballUrl tarballDigest]
+  ##
+  ## ``tarballDigest`` is the archive's SHA-512 for ``tarball-sha512`` and
+  ## its SHA-256 for every other tarball mode.
   doAssert args.len >= 8
   let mode = args[1]
   let endpoint = args[2]
@@ -234,6 +259,16 @@ proc runClientWorker(args: seq[string]): int =
       doAssert args.len >= 10
       let req = requestFromTarballUse(tarballUse(args[8], args[9],
         RangedTarballConstraint, FixtureTarballVersion),
+        storeRoot, holder, rootId)
+      realizeTarballViaDaemon(req, endpoint)
+    elif mode == "tarball-sha512":
+      doAssert args.len >= 10
+      let req = requestFromTarballUse(sha512OnlyTarballUse(args[8], args[9]),
+        storeRoot, holder, rootId)
+      realizeTarballViaDaemon(req, endpoint)
+    elif mode == "tarball-extract-path":
+      doAssert args.len >= 10
+      let req = requestFromTarballUse(extractPathTarballUse(args[8], args[9]),
         storeRoot, holder, rootId)
       realizeTarballViaDaemon(req, endpoint)
     elif mode == "nix":
@@ -324,6 +359,45 @@ proc startDaemon(endpoint, storeRoot, runtimeRoot: string): Process =
       raise newException(OSError, detail)
   check status.daemonProfile == StoreDaemonProfileDev
 
+proc checkDaemonRealizesLikeInProcess(mode, prefixName, digest: string;
+    inProcessUse: proc (url, digest: string): InterfaceToolUse) =
+  ## Realize one fixture record through the daemon (two concurrent holders,
+  ## as every case here does) and in-process into a second store, and
+  ## require the same prefix from both: the same store-relative path, the
+  ## same realization hash, the executable at the declared path. The daemon
+  ## rebuilds the record from the request, so any part of the record the
+  ## request drops shows up here as a refusal or as a different prefix.
+  let root = createTempDir("repro-m67-daemon-" & prefixName & "-", "")
+  defer:
+    try: removeDir(root) except OSError: discard
+  let runtimeRoot = root / "run"
+  createDir(runtimeRoot)
+  let endpoint = shortEndpoint(prefixName)
+  let storeRoot = root / "store"
+  defer: stopIfRunning(endpoint)
+
+  let daemon = startDaemon(endpoint, storeRoot, runtimeRoot)
+  defer: daemon.close()
+
+  let fixture = buildTarballFixture(root)
+  let fixtureDigest = if digest == "sha512": fixture.sha512 else: fixture.sha256
+  let pair = runPair(mode, endpoint, storeRoot, root,
+    @[fixture.url, fixtureDigest])
+  verifyPairResult(pair, "tarball", storeRoot)
+  let daemonPrefix = pair.a["path"].getStr()
+  assertSpecLayoutAfterRealize(storeRoot, daemonPrefix)
+
+  let directStore = root / "direct-store"
+  let direct = resolveTarballTool(inProcessUse(fixture.url, fixtureDigest),
+    directStore)
+  check relativePath(daemonPrefix, storeRoot) ==
+    relativePath(direct.selectedStorePath, directStore)
+  check readReceiptFile(daemonPrefix / ReceiptFileName).realizationHash ==
+    readReceiptFile(direct.selectedStorePath / ReceiptFileName).realizationHash
+  let executable =
+    when defined(windows): "bin" / "m67tarball.cmd" else: "bin" / "m67tarball"
+  check fileExists(daemonPrefix / executable)
+
 suite "M67 daemon-mediated Nix and tarball realization":
   test "integration_daemon_nix_and_tarball_realize":
     when not defined(posix):
@@ -406,3 +480,23 @@ suite "M67 daemon-mediated Nix and tarball realization":
         @[fixture.url, fixture.sha256])
       verifyPairResult(pair, "tarball", storeRoot)
       assertSpecLayoutAfterRealize(storeRoot, pair.a["path"].getStr())
+
+  test "integration_daemon_tarball_realize_sha512_only_record":
+    # A record pinned only by SHA-512. The digest is part of the record's
+    # archive detail; the daemon must verify against it, as the same realize
+    # does in-process, rather than find no digest at all.
+    when not defined(posix):
+      echo "[platform N/A] dev store-daemon IPC is POSIX-only in M66/M67."
+    else:
+      checkDaemonRealizesLikeInProcess("tarball-sha512", "sha512", "sha512",
+        sha512OnlyTarballUse)
+
+  test "integration_daemon_tarball_realize_installer_feature_record":
+    # A record realized through an installer feature (``extractPath``). The
+    # daemon must lay out the prefix the in-process realize does, rather than
+    # extract the archive as a plain one.
+    when not defined(posix):
+      echo "[platform N/A] dev store-daemon IPC is POSIX-only in M66/M67."
+    else:
+      checkDaemonRealizesLikeInProcess("tarball-extract-path", "extract",
+        "sha256", extractPathTarballUse)

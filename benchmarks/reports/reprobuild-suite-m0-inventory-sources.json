@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 35,
-    "nimTestBinaries": 2744,
-    "pureUnitConsolidationGroups": 80,
-    "pureUnitTests": 753,
+    "nimTestBinaries": 2745,
+    "pureUnitConsolidationGroups": 81,
+    "pureUnitTests": 754,
     "staticallyDetectedRuntimeCompilerFlowTests": 138,
-    "testEntries": 2788
+    "testEntries": 2789
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1564,6 +1564,20 @@
       "targetOs": "soAny"
     },
     {
+      "count": 2,
+      "defines": [],
+      "dependencyShape": [
+        "repro_interface_artifacts",
+        "repro_store_daemon"
+      ],
+      "owner": "tests/unit",
+      "sources": [
+        "tests/unit/t_store_daemon_tarball_archive_detail_frame.nim",
+        "tests/unit/t_tarball_non_redistributable.nim"
+      ],
+      "targetOs": "soAny"
+    },
+    {
       "count": 4,
       "defines": [],
       "dependencyShape": [
@@ -1584,7 +1598,7 @@
       "graph-fixture": 21,
       "integration": 1511,
       "platform/destructive": 175,
-      "pure unit": 753,
+      "pure unit": 754,
       "unclassified": 328
     },
     "graphOwnedTestArtifacts": [
@@ -1799,9 +1813,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2744,
+    "nimTestBinaryCount": 2745,
     "pythonTestFileCount": 44,
-    "testEntryCount": 2788
+    "testEntryCount": 2789
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -42686,7 +42700,7 @@
       "requiresReproBinary": true,
       "source": "tests/integration/t_integration_daemon_nix_and_tarball_realize.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 2,
+      "staticCaseCount": 4,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -57252,6 +57266,24 @@
       "source": "tests/unit/t_stale_artifact_names_what_changed.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 5,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_store_daemon_tarball_archive_detail_frame",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_interface_artifacts",
+        "repro_store_daemon"
+      ],
+      "owner": "tests/unit",
+      "requiresReproBinary": false,
+      "source": "tests/unit/t_store_daemon_tarball_archive_detail_frame.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 6,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
