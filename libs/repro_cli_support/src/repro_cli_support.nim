@@ -73887,16 +73887,16 @@ proc planPushCertification(identity: GitToolIdentity; repoAbs: string;
           "--no-certify' leaves the decision to the pre-push and receiving gates"
 
 type
-  PinnedSibling = object
+  PinnedSibling* = object
     ## A sibling a member's committed ``repro.lock`` pins at a commit other than
     ## the one its checkout is at.
-    name, relPath, checkout, pin, head: string
+    name*, relPath*, checkout*, pin*, head*: string
 
-  IsolatedPinsWorkspace = object
+  IsolatedPinsWorkspace* = object
     ## A temporary workspace whose checkouts are the member's commit and its
     ## siblings' pinned commits (standalone clones under ``root``); every other
     ## entry mirrors the user's workspace by symlink.
-    root, scratch: string
+    root*, scratch*: string
 
 
 proc siblingsOffTheirPins(workspaceRoot: string;
@@ -73947,7 +73947,7 @@ proc removeMirrorTree(dir: string) =
       removeFile(path)
   removeDir(dir)
 
-proc removeIsolatedPinsWorkspace(ws: IsolatedPinsWorkspace): string =
+proc removeIsolatedPinsWorkspace*(ws: IsolatedPinsWorkspace): string =
   ## Remove the scratch tree: the clones, which only borrow the user's objects,
   ## and the mirror entries, which are links and are removed, never followed.
   ## Returns what could not be removed, or "".
@@ -74071,7 +74071,7 @@ proc populateSubmodules(identity: GitToolIdentity;
     if nested.len > 0:
       return nested
 
-proc prepareIsolatedPinsWorkspace(identity: GitToolIdentity;
+proc prepareIsolatedPinsWorkspace*(identity: GitToolIdentity;
     workspaceRoot, memberRel, memberCheckout, memberCommit: string;
     pinned: seq[PinnedSibling]):
     tuple[ok: bool; ws: IsolatedPinsWorkspace; diagnostic: string] =
@@ -74109,10 +74109,21 @@ proc prepareIsolatedPinsWorkspace(identity: GitToolIdentity;
     if step.ok:
       step = run(["-C", p.path, "remote", "remove", "repro-push-source"])
     if step.ok:
+      # Before any read: the clone reaches the user's pool only through nested
+      # alternates, and without the chain a blob the pool only promises is
+      # unreadable here although the user's checkout reads it.
+      let chain = ensureBorrowedPoolChain(identity.binaryPath, p.path, p.repo)
+      if chain.len > 0:
+        step = (ok: false, diagnostic: "could not give " & p.path &
+          " the refetch chain to the shared cache " & p.repo & " borrows " &
+          "from: " & chain)
+    if step.ok:
       let remotes = gitRunPlainQuery(identity, ["-C", p.repo, "remote"])
       for remote in remotes.output.splitLines():
         let r = remote.strip()
-        if r.len == 0 or not step.ok: continue
+        # The pool's remote serves missing objects and has no refs; the chain
+        # above wrote it with the rows it needs, which a copy would lack.
+        if r.len == 0 or r == LeafPoolRemoteName or not step.ok: continue
         let url = gitRunPlainQuery(identity,
           ["-C", p.repo, "remote", "get-url", r]).output.strip()
         step = run(["-C", p.path, "remote", "add", r, url])
@@ -74122,6 +74133,32 @@ proc prepareIsolatedPinsWorkspace(identity: GitToolIdentity;
     if step.ok:
       step = run(["-C", p.path, "-c", "advice.detachedHead=false", "checkout",
         "--quiet", "--detach", p.commit])
+    if step.ok:
+      # git checkout exits 0 when it cannot read a blob: it reports the file
+      # on stderr and leaves it out of the work tree (``write_entry`` reads
+      # the blob before it creates the file). Certifying such a tree would
+      # bind the commit to a test run that never saw those files. Only
+      # absent paths are that symptom: a content comparison (``git status``)
+      # would also flag a file whose committed bytes do not survive the
+      # checkout's own conversion (CRLF committed under a ``text``
+      # attribute), and refuse a commit the user's checkout shows clean. An
+      # unpopulated submodule's empty directory is present, so it is not
+      # listed.
+      let missing = gitRunPlainQuery(identity, ["-C", p.path, "ls-files",
+        "--deleted"])
+      if missing.code != 0:
+        step = (ok: false, diagnostic: "git ls-files --deleted failed in " &
+          p.path & " after checking out " & p.commit & ": " &
+          missing.diagnostic)
+      elif missing.output.strip().len > 0:
+        var listed = ""
+        for line in missing.output.strip().splitLines():
+          listed.add("\n  " & line)
+        step = (ok: false, diagnostic: "the checkout of " & p.commit &
+          " from " & p.repo & " is incomplete: git could not read the " &
+          "content of these tracked files and left them out:" & listed &
+          "\nRun 'repro health' in the workspace to check " & p.repo &
+          "'s refetch chain to its shared cache, then retry")
     if step.ok:
       let populated = populateSubmodules(identity, p.path, p.repo)
       if populated.len > 0:

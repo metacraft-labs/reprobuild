@@ -21321,6 +21321,17 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "",
     singleReason: "its binary is named by tests/integration/t_dev_shell_one_glibc_reaches_subprocesses.nim"),
   TestSpec(
+    source: "tests/integration/t_isolated_pins_workspace_reads_through_the_pool.nim",
+    binary: "build/test-bin/t_isolated_pins_workspace_reads_through_the_pool",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "",
+    singleReason: "self-spawn marker getAppFilename"),
+  TestSpec(
     source: "tests/integration/t_issuance_leaves_the_user_index_untouched.nim",
     binary: "build/test-bin/t_issuance_leaves_the_user_index_untouched",
     defines: @[],
