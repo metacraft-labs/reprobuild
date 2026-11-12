@@ -1565,8 +1565,8 @@ suite "dev-shell override guards":
     checkpoint("retained pure follows declarations:\n" & follows.output)
     check follows.code != 0
     check follows.output.contains("cached shell is stale")
-    check follows.output.contains("alias (no revision pinned")
-    check follows.output.contains("quoted-alias (no revision pinned")
+    check follows.output.contains("2 follows")
+    check follows.output.contains("ignored the follows: alias quoted-alias")
     check not follows.output.contains("ignoring obsolete fingerprint input")
     writeFile(root / "flake.nix", flake)
 
@@ -1609,3 +1609,134 @@ suite "dev-shell override guards":
     checkpoint("unknown live checkout:\n" & unknown.output)
     check unknown.code != 0
     check unknown.output.contains("source state is absent (unknown)")
+
+  test "t_dev_shell_lint_gate_states_a_follows_only_override_set":
+    # A fingerprint whose only row overrides a `follows` input. The lock gives
+    # that input no node of its own, so check 5 has nothing to compare and the
+    # row is classified, not missing: the gate must state that, not diagnose an
+    # empty or mismatched fingerprint. With no profile beside the fingerprint,
+    # the shell it describes never evaluated, so `direnv reload` (which re-runs
+    # the same .envrc) is not a remedy the gate may print. The gate, git and
+    # the fingerprint renderer are real; the profile is a provenance fixture.
+    let scratch = createTempDir("repro-devshell-follows-only-", "")
+    defer: removeDirEventually(scratch)
+    let gitBin = findExe("git")
+    let bash = findExe("bash")
+    require gitBin.len > 0
+    require bash.len > 0
+    let sibling = scratch / "nixpkgs"
+    seedGitTree(gitBin, sibling, "nixpkgs\n")
+
+    let root = scratch / "repo"
+    createDir(root / "scripts" / "lib")
+    copyFile(libPath(), root / "scripts" / "lib" / "dev_shell_overrides.sh")
+    copyFile(repoRoot() / "scripts" / "lib" / "preloaded_shim_loader.sh",
+      root / "scripts" / "lib" / "preloaded_shim_loader.sh")
+    copyFile(checkScript(), root / "scripts" / "check_dev_shell_env.sh")
+    copyFile(repoRoot() / ".envrc", root / ".envrc")
+    writeFile(root / "flake.nix", "{\n  inputs = {\n" &
+      "    base-src.url = \"github:example/base\";\n" &
+      "    nixpkgs.follows = \"base-src\";\n  };\n}\n")
+    let followsLock = "{\n  \"nodes\": {\n" &
+      "    \"base-src\": {\n      \"locked\": {\n" &
+      "        \"rev\": \"" & repeat('1', 40) & "\"\n      }\n    },\n" &
+      "    \"root\": {\n      \"inputs\": {\n" &
+      "        \"base-src\": \"base-src\",\n" &
+      "        \"nixpkgs\": [\n          \"base-src\"\n        ]\n" &
+      "      }\n    }\n  },\n  \"root\": \"root\",\n  \"version\": 7\n}\n"
+    writeFile(root / "flake.lock", followsLock)
+    createDir(root / ".direnv")
+    let fp = root / ".direnv" / "flake-override-sources.fingerprint"
+    let profile = root / ".direnv" / "flake-profile-test.rc"
+    let rendered = runBash("source " & quoteShell(libPath()) & "\n" &
+      "printf 'nixpkgs\\t%s\\n' " & quoteShell(sibling) &
+      " | dev_shell_render_fingerprint > " & quoteShell(fp), root)
+    require rendered.code == 0
+    require readFile(fp).contains("nixpkgs\t" & sibling & "\tgit:")
+    proc gate(): CmdResult =
+      runShell(hermeticBash(@[bash,
+        root / "scripts" / "check_dev_shell_env.sh"]), cwd = root)
+
+    # The observed state: the fingerprint of a shell that never evaluated.
+    let neverBuilt = gate()
+    checkpoint("follows-only fingerprint, no profile:\n" & neverBuilt.output)
+    check neverBuilt.code == 0
+    check not neverBuilt.output.contains("asserted nothing")
+    check neverBuilt.output.contains("every overridden source is a `follows` input")
+    check neverBuilt.output.contains("1 follows, 0 with no pin to compare")
+    check neverBuilt.output.contains("ignored the follows: nixpkgs")
+    check neverBuilt.output.contains("has not evaluated here")
+
+    # The same fingerprint beside a profile newer than the flake files.
+    let flakeTime = getLastModificationTime(root / "flake.lock")
+    writeFile(profile, "profile\n")
+    setLastModificationTime(profile, flakeTime + initDuration(seconds = 5))
+    let built = gate()
+    checkpoint("follows-only fingerprint, current profile:\n" & built.output)
+    check built.code == 0
+    check built.output.contains("cached shell matches all 1 overridden source(s)")
+    check not built.output.contains("asserted nothing")
+    check not built.output.contains("has not evaluated here")
+    removeFile(profile)
+
+    # The vacuity guard still fires on what it exists for: a row the lock
+    # describes with no recognisable revision. Here the input is a node whose
+    # `locked` block carries no `rev`, which is also what a `locked` block that
+    # stopped parsing would look like.
+    writeFile(root / "flake.lock", followsLock.replace(
+      "        \"nixpkgs\": [\n          \"base-src\"\n        ]\n",
+      "        \"nixpkgs\": \"nixpkgs\"\n").replace(
+      "    \"root\": {",
+      "    \"nixpkgs\": {\n      \"locked\": {\n" &
+      "        \"path\": \"/somewhere\"\n      }\n    },\n    \"root\": {"))
+    # A `follows` row beside the revisionless one does not excuse it.
+    writeFile(root / "flake.nix", "{\n  inputs = {\n" &
+      "    base-src.url = \"github:example/base\";\n" &
+      "    nixpkgs.url = \"path:/somewhere\";\n" &
+      "    alias.follows = \"base-src\";\n  };\n}\n")
+    let revisionlessLock = readFile(root / "flake.lock")
+    writeFile(root / "flake.lock", revisionlessLock.replace(
+      "        \"nixpkgs\": \"nixpkgs\"\n",
+      "        \"nixpkgs\": \"nixpkgs\",\n" &
+      "        \"alias\": [\n          \"base-src\"\n        ]\n"))
+    let fpBody = readFile(fp)
+    writeFile(fp, fpBody & "alias\t" & sibling & "\t" &
+      fpBody.split("\t")[^1].strip() & "\n")
+    let mixed = gate()
+    checkpoint("follows row beside a revisionless lock node:\n" & mixed.output)
+    check mixed.code != 0
+    check mixed.output.contains("asserted nothing")
+    check mixed.output.contains("ignored the follows: alias")
+    writeFile(fp, fpBody)
+    writeFile(root / "flake.lock", revisionlessLock)
+
+    let vacuous = gate()
+    checkpoint("revisionless lock node, no profile:\n" & vacuous.output)
+    check vacuous.code != 0
+    check vacuous.output.contains("asserted nothing")
+    check vacuous.output.contains("nixpkgs (no revision pinned for it in flake.lock)")
+    # No profile: the remedy names the evaluation, not a reload that repeats it.
+    check vacuous.output.contains("direnv exec . true")
+    check not vacuous.output.contains("Remedy: 'direnv reload'")
+
+    # A row refused for its own reason does not excuse the uncompared one
+    # either. `alias` is still declared in flake.nix but is absent from this
+    # lock's root node, so its row is refused as a lock that cannot describe
+    # the shell; the revisionless `nixpkgs` row must still draw the refusal.
+    writeFile(fp, fpBody & "alias\t" & sibling & "\t" &
+      fpBody.split("\t")[^1].strip() & "\n")
+    let refusedBeside = gate()
+    checkpoint("refused row beside a revisionless lock node:\n" &
+      refusedBeside.output)
+    check refusedBeside.code != 0
+    check refusedBeside.output.contains("overrides flake input 'alias'")
+    check refusedBeside.output.contains("asserted nothing")
+    writeFile(fp, fpBody)
+
+    writeFile(profile, "profile\n")
+    setLastModificationTime(profile, flakeTime + initDuration(seconds = 3600))
+    let vacuousBuilt = gate()
+    checkpoint("revisionless lock node, current profile:\n" & vacuousBuilt.output)
+    check vacuousBuilt.code != 0
+    check vacuousBuilt.output.contains("asserted nothing")
+    check vacuousBuilt.output.contains("Remedy: 'direnv reload'")
