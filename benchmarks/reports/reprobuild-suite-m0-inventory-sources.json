@@ -49605,7 +49605,7 @@
       "requiresReproBinary": true,
       "source": "tests/integration/t_spi_leaf_detector_messages.nim",
       "sourceSuiteCount": 2,
-      "staticCaseCount": 6,
+      "staticCaseCount": 7,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
