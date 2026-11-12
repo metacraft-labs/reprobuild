@@ -770,6 +770,24 @@ proc remoteBranchContainsHead(payload: GitVcsPayload; repoPath, remote: string):
     if matches(normalized):
       return (ok: true, published: true, scopedRemote: answeredScope,
         diagnostic: "")
+  # A checkout materialized by fetching ONE commit by SHA (``git fetch origin
+  # <sha>``) has no remote-tracking ref, so the lookup above is empty even when
+  # that commit is the tip of a branch on the remote. Ask the remote directly:
+  # HEAD is published when it is exactly the tip of one of the remote's branches.
+  # Only tips are matched, so the check needs no objects beyond HEAD itself.
+  let queryRemote = if answeredScope.len > 0: answeredScope else: "origin"
+  let head = runGitQuery(payload, ["-C", repoPath, "rev-parse", "HEAD"])
+  if head.exitCode == 0:
+    let headSha = head.output.strip()
+    let tips = runGitQuery(payload,
+      ["-C", repoPath, "ls-remote", "--heads", queryRemote])
+    if tips.exitCode == 0:
+      for raw in tips.output.splitLines:
+        # ``ls-remote`` lines are ``<sha>\trefs/heads/<branch>``.
+        let fields = raw.splitWhitespace()
+        if fields.len > 0 and fields[0] == headSha:
+          return (ok: true, published: true, scopedRemote: answeredScope,
+            diagnostic: "")
   (ok: true, published: false, scopedRemote: answeredScope, diagnostic: "")
 
 proc writeReceipt(receiptPath, content: string) =
