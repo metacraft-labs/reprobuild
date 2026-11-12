@@ -1,3 +1,11 @@
+# The suite enrolls this test with ``-d:reproInterfaceMode`` (repro_tests.nim),
+# and its first case asserts exactly what that mode guarantees: ``build:``
+# bodies are not executed at module init. Built without the define, the
+# bodies DO run, so that case fails for a reason unrelated to install-mirror
+# metadata. Refuse the build instead of reporting a misleading failure.
+when not defined(reproInterfaceMode):
+  {.error: "This test requires reproInterfaceMode".}
+
 import std/[sequtils, unittest]
 import repro_project_dsl
 import repro_interface_artifacts
