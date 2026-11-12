@@ -5,7 +5,7 @@ kind: explanation
 persona: evaluator
 order: 0
 verifies:
-  commands: [build, lock update, test, test --shard, shell, exec, run, up, workspace init, develop, home apply, home rollback, infra plan, infra apply, infra apply --accept-passwd-destroy, system, deploy-agent, cache publish, cache substitute]
+  commands: [build, reap, lock update, test, test --shard, shell, exec, run, up, workspace init, develop, home apply, home rollback, infra plan, infra apply, infra apply --accept-passwd-destroy, system, deploy-agent, cache publish, cache substitute]
   tests:
     - tests/integration/t_monitored_zero_output_edge_input_completeness.nim
     - tests/integration/t_uses_resolves_sqlite3_from_real_reprobuild_packages.nim
@@ -27,6 +27,9 @@ verifies:
     - tests/integration/t_infra_apply_cache_hit_preserves_present_outputs.nim
     - libs/repro_deploy_agent/tests/t_repro_deploy_agent_converges_from_signed_manifest.nim
     - libs/repro_deploy_agent/tests/t_repro_deploy_agent_rejects_wrong_signer.nim
+    - libs/repro_resources/tests/t_resource_provider_lane.nim
+    - libs/repro_resources/tests/t_rp4_resource_type_macro.nim
+    - libs/repro_resources/tests/t_l2_lease_edge.nim
 unverified:
   - claim: "One project file drives the build, the development environment, tasks and services."
     reason: "No single test exercises all four from one repro.nim; the claim rests on four separate features."
@@ -46,7 +49,9 @@ does, reprobuild compares the state you declare with the state that exists,
 shows you the plan, applies the difference and removes what you no longer
 declare. Each applied state is a generation you can roll back to, and applying
 runs through the same engine as a build, so a step whose result is already in
-place is not repeated. [How reprobuild works](concepts/how-reprobuild-works.md)
+place is not repeated. Any repository can define resource types, as a Terraform
+provider does, and a project can declare resources of them and lease them to
+the tests that use them. [How reprobuild works](concepts/how-reprobuild-works.md)
 explains the idea.
 
 For a project, one tool obtains its dependencies, builds and tests it, gives you
@@ -63,6 +68,7 @@ repositories it is made from in step.
 | [Environments](guides/environments/index.md) | Puts the project's tools on your `PATH`: in a shell, for one command, or whenever you enter its directory | `repro shell`, `repro exec`, `repro allow` |
 | [Tasks and services](guides/environments/enter-a-project-environment.md) | Runs the project's named commands, and starts its services, such as a database, with the same tools | `repro run`, `repro up`, `repro down` |
 | [Workspaces](guides/workspaces/index.md) | Keeps many repositories side by side at the revisions they declare, and builds a dependency from your checkout of it | `repro workspace`, `repro sync`, `repro develop` |
+| [Resources](concepts/resources-and-state.md) | Declares resources of types any repository defines, such as a container or a database, reconciles them in dependency order, and leases them to tests | `repro run`, `repro reap` |
 | [Operating systems](concepts/machines-and-profiles.md) | Plans and applies a system profile: services and timers, users and groups, files, kernel settings and firewall rules, or registry values, services and features on Windows | `repro infra plan`, `repro infra apply`, `repro system` |
 | [Your account](concepts/machines-and-profiles.md#applying-a-home-profile) | Applies a home profile: the tools, files and shell settings of your own account | `repro home` |
 | [Fleets](concepts/fleets-and-the-deploy-agent.md) | Keeps each machine at the state a signed manifest declares for it: the machine fetches the manifest, checks the signature and applies it | `repro deploy-agent` |

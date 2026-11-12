@@ -3008,6 +3008,19 @@
               # happened to leave behind. Respects an operator override.
               export GOSTI_OVMF_CODE="''${GOSTI_OVMF_CODE:-${pkgs.OVMF.fd}/FV/OVMF_CODE.fd}"
               export GOSTI_OVMF_VARS="''${GOSTI_OVMF_VARS:-${pkgs.OVMF.fd}/FV/OVMF_VARS.fd}"
+              # RDMF cross-implementation conformance
+              # (libs/repro_deploy_agent/tests/
+              # t_rdmf_v3_cross_implementation_conformance.nim): the Python
+              # producer it runs imports `cryptography` at load, and the
+              # test's default interpreter, the ambient `python3`, has no
+              # such package on a CI runner, so every case skipped there.
+              # Name an interpreter that has it. Exported by path rather than
+              # added to `packages`: a second `python3` ahead on PATH would
+              # change the interpreter of every other script this shell runs.
+              # Respects an operator override.
+              export RDMF_PYTHON="''${RDMF_PYTHON:-${
+                pkgs.python3.withPackages (p: [ p.cryptography ])
+              }/bin/python3}"
             '';
           };
 

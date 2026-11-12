@@ -5,7 +5,7 @@ kind: explanation
 persona: evaluator
 order: 1
 verifies:
-  commands: [build, graph, show-conventions, lock update, test, cache publish, cache substitute, shell, exec, run, up, develop, workspace, home apply, home rollback, infra plan, infra apply, system rollback, deploy-agent]
+  commands: [build, reap, graph, show-conventions, lock update, test, cache publish, cache substitute, shell, exec, run, up, develop, workspace, home apply, home rollback, infra plan, infra apply, system rollback, deploy-agent]
   tests:
     - tests/integration/t_monitored_zero_output_edge_input_completeness.nim
     - tests/integration/t_uses_resolves_sqlite3_from_real_reprobuild_packages.nim
@@ -26,6 +26,9 @@ verifies:
     - tests/e2e/m69/t_e2e_repro_system_command_family.nim
     - libs/repro_deploy_agent/tests/t_repro_deploy_agent_converges_from_signed_manifest.nim
     - libs/repro_deploy_agent/tests/t_repro_deploy_agent_rejects_wrong_signer.nim
+    - libs/repro_resources/tests/t_resource_provider_lane.nim
+    - libs/repro_resources/tests/t_l1_state_store.nim
+    - libs/repro_resources/tests/t_l3_reaper.nim
 unverified:
   - claim: "Paths below a provisioned tool's root are left out of an action's observed inputs because the tool's identity already covers them."
     reason: "Stated in docs/dependency-collection.md; no test is cited yet."
@@ -132,7 +135,17 @@ working tree issues a test certificate, which records which content passed which
 tests on which platform and travels with the commit when you push it.
 [Tests and certificates](tests-and-certificates.md) explains both.
 
-## 7. The same file describes how you work on the project
+## 7. Resources are declared, reconciled and leased
+
+A resource is a state the graph creates and keeps, such as a container or a
+database. Any repository can define a resource type, which plays the part of a
+Terraform provider, and a project file declares resources of it with
+`dependsOn` between them. reprobuild reconciles them in dependency order and
+records each one's state on disk. A test can consume a named group of resources
+under a lease, and a reaper destroys the state once no lease holds it.
+[Resources and state](resources-and-state.md) explains the model.
+
+## 8. The same file describes how you work on the project
 
 The project file also declares the project's development environment (the tools
 and variables you work with), its named tasks and its services, such as a
@@ -142,7 +155,7 @@ the build, the tools in your shell are the tools the build uses.
 [Enter a project's environment](../guides/environments/enter-a-project-environment.md)
 shows how.
 
-## 8. Workspaces put repositories side by side
+## 9. Workspaces put repositories side by side
 
 A workspace holds several repositories next to each other, with a workspace root
 that declares which belong together. Develop mode builds a dependency from its
@@ -157,7 +170,7 @@ was built against.
 [Work on a dependency's source](../guides/workspaces/develop-a-dependency.md)
 shows the workflow.
 
-## 9. Profiles configure your account and the operating system
+## 10. Profiles configure your account and the operating system
 
 A home profile describes the tools and configuration files on your own account.
 A system profile describes the operating system: its services, users and groups,
@@ -170,7 +183,7 @@ way as a project's dependencies. Each change is recorded as a generation, and
 `repro system rollback` and `repro home rollback` return to an earlier one.
 [Machines and profiles](machines-and-profiles.md) explains how.
 
-## 10. A fleet converges on signed state
+## 11. A fleet converges on signed state
 
 Every machine in a fleet runs `repro deploy-agent` on a timer. Each run fetches
 the manifest published for that machine, checks its signature against the keys
