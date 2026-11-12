@@ -26695,6 +26695,15 @@ when not defined(windows):
     ## is RunQuota's; what only repro can say is that it chooses the scope
     ## itself.
 
+  proc addPrivateScopeRemedy(error: ref Exception) =
+    ## Append ``PrivateScopeSelectionRemedy`` to an auto-start refusal when
+    ## the private scope is selected. Every such refusal gets it -- a missing,
+    ## relative or unreachable RUNQUOTA_SOCKET alike -- because each one is
+    ## answered by the same question: did the caller mean to run its own
+    ## daemon at all?
+    if getEnv("RUNQUOTA_ENDPOINT_SCOPE") == "private":
+      error.msg.add(PrivateScopeSelectionRemedy)
+
 proc startAutoRunQuotaIfNeeded*(bypassRunQuota: bool): owned(Process) =
   ## Make sure a `runquotad` serves this invocation: adopt one, or start one.
   ## Returns the daemon when THIS call started it, `nil` when it adopted one
@@ -26739,8 +26748,10 @@ proc startAutoRunQuotaIfNeeded*(bypassRunQuota: bool): owned(Process) =
     let inheritedSocket = getEnv("RUNQUOTA_SOCKET")
     if inheritedSocket.len > 0 and
         (not isAbsolute(inheritedSocket) or '\0' in inheritedSocket):
-      raise newException(OSError,
+      let error = newException(OSError,
         "RUNQUOTA_SOCKET must name an absolute endpoint without NUL bytes")
+      addPrivateScopeRemedy(error)
+      raise error
     # Computed the same way by every process of this user, from the
     # filesystem and the effective uid; a malformed
     # `RUNQUOTA_USER_ENDPOINT_DIR` raises here.
@@ -26759,7 +26770,7 @@ proc startAutoRunQuotaIfNeeded*(bypassRunQuota: bool): owned(Process) =
         # a fresh endpoint), but the caller who set the scope by hand -- often
         # to get past an unrelated auto-start failure -- is told what the
         # variable means and that repro selects it on its own.
-        error.msg.add(PrivateScopeSelectionRemedy)
+        addPrivateScopeRemedy(error)
         raise
     if isRunQuotaDaemonReachable():
       warnRunQuotaMemoryOverrideNotApplied()
@@ -26792,7 +26803,13 @@ proc startAutoRunQuotaIfNeeded*(bypassRunQuota: bool): owned(Process) =
       if error.errorCode != ENOENT:
         raise
     if endpointExists:
-      var client = runquota_client.connectDefault()
+      var client =
+        try: runquota_client.connectDefault()
+        except CatchableError as error:
+          # An existing private endpoint that does not answer is refused like
+          # the other private-selection failures, and says so the same way.
+          addPrivateScopeRemedy(error)
+          raise
       client.close()
       warnRunQuotaMemoryOverrideNotApplied()
       return nil

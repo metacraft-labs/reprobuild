@@ -50,7 +50,9 @@ when defined(posix):
   from runquota_ipc import hostWideEndpointDir
   import repro_test_support/per_user_runquota
 
-  proc checkRefusesWithoutSpawn(root, endpoint, scope: string) =
+  proc checkRefusesWithoutSpawn(root, endpoint, scope: string): string
+      {.discardable.} =
+    ## Returns the refusal so a caller can grade what it says.
     let marker = root / "unexpected-start"
     let wrapper = root / "must-not-start"
     writeFile(wrapper, "#!/bin/sh\nprintf executed > " & quoteShell(marker) &
@@ -70,6 +72,7 @@ when defined(posix):
     check not fileExists(marker)
     check getEnv("RUNQUOTA_SOCKET") == endpoint
     check getEnv("RUNQUOTA_ENDPOINT_SCOPE") == scope
+    message
 
   proc writeRealDaemonWrapper(root, daemonBin: string): string =
     ## A `RUNQUOTAD_BIN` that execs the real daemon with this test's own
@@ -420,6 +423,31 @@ when defined(posix):
       check "remedy:" in message
       check "unset RUNQUOTA_ENDPOINT_SCOPE" in message
       check not fileExists(marker)
+
+    test "every refusal of a hand-set private scope names the remedy":
+      # Not only the missing socket: a relative RUNQUOTA_SOCKET, and an
+      # existing endpoint in a trusted private directory that does not
+      # answer, are refused under the same selection and get the same
+      # remedy (RunQuota-Host-Configuration.md, explicit private policy).
+      let relative = checkRefusesWithoutSpawn(root, "relative.sock", "private")
+      check "must name an absolute endpoint" in relative
+      check "unset RUNQUOTA_ENDPOINT_SCOPE" in relative
+      let privateDir = root / "private-endpoint"
+      createDir(privateDir)
+      setFilePermissions(privateDir, {fpUserRead, fpUserWrite, fpUserExec})
+      let silent = privateDir / "runquota.sock"
+      writeFile(silent, "not a listening socket")
+      setFilePermissions(silent, {fpUserRead, fpUserWrite})
+      let unanswered = checkRefusesWithoutSpawn(root, silent, "private")
+      check "unset RUNQUOTA_ENDPOINT_SCOPE" in unanswered
+      # The same endpoints under the host scope are not a private selection,
+      # so neither refusal carries that remedy.
+      let hostRelative = checkRefusesWithoutSpawn(root, "relative.sock", "")
+      check "must name an absolute endpoint" in hostRelative
+      check "remedy:" notin hostRelative
+      let hostUnanswered = checkRefusesWithoutSpawn(root, silent, "")
+      check "unset RUNQUOTA_ENDPOINT_SCOPE" notin hostUnanswered
+      check not fileExists(root / "unexpected-start")
 
     test "existing untrusted endpoint retains refusal and starts no daemon":
       let endpoint = root / "unsafe.sock"

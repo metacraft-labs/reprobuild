@@ -6,10 +6,15 @@
 
 import repro_project_dsl
 import repro_dsl_stdlib/packages_schema
+import repro_dsl_stdlib/nixpkgs_pin
 export packages_schema
 
 package elixir:
   provisioning:
+    # Nix-capable hosts: nixpkgs' elixir at the canonical pin (1.18.4 there).
+    nixPackage "nixpkgs#elixir", executablePath = "bin/elixir",
+      nixpkgsRev = CanonicalNixpkgsRev,
+      nixpkgsNarHash = CanonicalNixpkgsNarHash
     tarball url = "https://builds.hex.pm/builds/elixir/v1.19.5.zip",
       sha256 = "db6701f2232be899190ecb8dbf280104fe2434675093c2b5935e563a08052afb",
       archiveType = "zip",

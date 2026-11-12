@@ -439,7 +439,7 @@ libs/repro_dsl_stdlib/tests/t_nim_entropy_blessing.nim	nim	11
 libs/repro_dsl_stdlib/tests/t_nim_ssl_dependency.nim	nim	3
 libs/repro_dsl_stdlib/tests/t_no_catalog_tarball_arm_declares_a_source_build_driver.nim	nim	1
 libs/repro_dsl_stdlib/tests/t_one_toolchain_resolution_path.nim	nim	5
-libs/repro_dsl_stdlib/tests/t_openssl_windows_link_channel.nim	nim	12
+libs/repro_dsl_stdlib/tests/t_openssl_windows_link_channel.nim	nim	13
 libs/repro_dsl_stdlib/tests/t_packaging_appimage_authoring.nim	nim	19
 libs/repro_dsl_stdlib/tests/t_packaging_arch_authoring.nim	nim	19
 libs/repro_dsl_stdlib/tests/t_packaging_content_addressed.nim	nim	11
@@ -1192,7 +1192,7 @@ recipes/packages/source/zlib/test_zlib_source.nim	nim	8
 recipes/sandbox-tools/test_sandbox_tools.nim	nim	12
 tests/bundles/bundle_repro_core_dep_scanners_pure_unit.nim	nim	35
 tests/bundles/bundle_repro_core_pure_unit.nim	nim	69
-tests/bundles/bundle_repro_dsl_stdlib_catalogs_pure_unit.nim	nim	110
+tests/bundles/bundle_repro_dsl_stdlib_catalogs_pure_unit.nim	nim	115
 tests/bundles/bundle_repro_lock_files_cli_pure_unit.nim	nim	24
 tests/bundles/bundle_repro_lock_files_pure_unit.nim	nim	42
 tests/bundles/bundle_repro_peer_cache_pure_unit.nim	nim	29
@@ -1608,7 +1608,7 @@ tests/integration/t_attestation_report.nim	nim	3
 tests/integration/t_attested_image_manifest.nim	nim	4
 tests/integration/t_authenticated_inference_binding_mutations.nim	nim	26
 tests/integration/t_auto_runquota_shared_per_user_daemon.nim	nim	8
-tests/integration/t_auto_runquota_uses_private_endpoint_policy.nim	nim	18
+tests/integration/t_auto_runquota_uses_private_endpoint_policy.nim	nim	19
 tests/integration/t_autotools_configure_cache.nim	nim	1
 tests/integration/t_autotools_configure_tools.nim	nim	1
 tests/integration/t_b0_develop_mode_uses_local_source.nim	nim	1
@@ -2757,7 +2757,7 @@ tests/unit/test_graph_owned_test_artifacts.py	python	26
 tests/unit/test_install_nix_paths.py	python	14
 tests/unit/test_lint_gate_ordering.py	python	4
 tests/unit/test_nim224_lane_selection.py	python	5
-tests/unit/test_nix_daemon_descriptors.py	python	7
+tests/unit/test_nix_daemon_descriptors.py	python	8
 tests/unit/test_nix_daemon_expression_file_is_never_cached.py	python	4
 tests/unit/test_nix_daemon_request_requires_workspace_root.py	python	4
 tests/unit/test_nix_evaluation_policy.py	python	1
