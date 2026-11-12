@@ -72,6 +72,9 @@ type
     root*: string
       ## The candidate catalog checkout.
     rootExists*: bool
+    isCatalog*: bool
+      ## ``root`` is a package catalog (`isReprobuildPackagesCatalog`), not
+      ## merely a directory of that name.
     module*: string
       ## The interface module found under ``root``, WITHOUT ``.nim``; "" when
       ## ``root`` has none for the selector.
@@ -343,6 +346,15 @@ proc reprobuildSourceTree(): string =
   else:
     resolveReprobuildSourceRoot()
 
+proc isReprobuildPackagesCatalog*(root: string): bool =
+  ## Whether ``root`` is a package catalog: it has the
+  ## ``packages/interfaces`` tree every catalog lookup reads. A directory
+  ## that only shares the catalog's name -- a scratch or cache directory
+  ## called ``reprobuild-packages`` above the consumer -- can define no
+  ## package, so it is neither reachable nor a develop sibling that takes
+  ## precedence over the lock-pinned catalog.
+  root.len > 0 and dirExists(root / "packages" / "interfaces")
+
 proc probeCatalogRoot(search: var ReprobuildPackagesSearch;
                       origin, root: string) =
   ## Record one place `reprobuildPackagesSearch` consults.
@@ -357,9 +369,10 @@ proc probeCatalogRoot(search: var ReprobuildPackagesSearch;
   var entry = ReprobuildPackagesProbe(origin: origin, root: root)
   if root.len > 0:
     entry.rootExists = dirExists(root)
+    entry.isCatalog = entry.rootExists and isReprobuildPackagesCatalog(root)
     let candidate = root / "packages" / "interfaces" / search.selector /
       "repro.nim"
-    if entry.rootExists and fileExists(candidate):
+    if entry.isCatalog and fileExists(candidate):
       entry.module = candidate.changeFileExt("")
   search.probes.add(entry)
   if search.module.len == 0 and entry.module.len > 0:
@@ -877,7 +890,7 @@ proc reachableReprobuildPackagesRoots*(consumerSourceFile: string):
   const probeSelector = "reprobuild-catalog-reachability-probe"
   for probe in reprobuildPackagesSearch(probeSelector,
       consumerSourceFile).probes:
-    if probe.rootExists and probe.root notin result:
+    if probe.isCatalog and probe.root notin result:
       result.add probe.root
 
 proc reprobuildPackagesInterfaceModule*(selector, consumerSourceFile: string):
@@ -1064,9 +1077,12 @@ proc describeReprobuildPackagesSearch*(search: ReprobuildPackagesSearch):
     let finding =
       if probe.module.len > 0:
         "defines it"
-      elif probe.rootExists:
+      elif probe.isCatalog:
         "checkout present, but it has no packages/interfaces/" &
           search.selector & "/repro.nim"
+      elif probe.rootExists:
+        "directory present, but it is not a package catalog (no" &
+          " packages/interfaces)"
       else:
         "no such directory"
     var line = "  - " & probe.root & " (" & probe.origin & "): " & finding
