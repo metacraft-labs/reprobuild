@@ -80,7 +80,8 @@ from repro_dsl_stdlib/packaging/types import toLinux
 from repro_dsl_stdlib/packaging/runtime_contract import
   reprobuildDlopenLeafNames
 from repro_dsl_stdlib/packaging/reprobuild_dist import
-  reprobuildNimDlopenLeafNames, nimForkGuardScript, NimForkGuardTools
+  reprobuildNimDlopenLeafNames, nimForkGuardScript, NimForkGuardTools,
+  PrefixSourcesTools
 from repro_tool_profiles import fromSourceRecipeRoot
 from repro_project_dsl/install_mirror_resolver import installMirrorSubpathFor
 
@@ -4231,8 +4232,7 @@ package reprobuild:
           cacheable = false,
           dependencyPolicy = automaticMonitorPolicy(),
           commandStatsId = "reprobuild.prefix.sources",
-          toolIdentityRefs = @["bash", "git", "tar", "find", "cp", "mkdir",
-            "rm", "chmod", "sed", "tr", "head", "wc", "dirname"])
+          toolIdentityRefs = @PrefixSourcesTools)
 
         # Decision C: the runtime libraries the target distribution ships,
         # pinned to the `SHA256` of its `Packages` index, and the catalog's
