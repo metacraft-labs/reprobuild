@@ -879,6 +879,15 @@ when defined(reproProviderMode):
       manifestResponse(manifest)
     of prkGraphInvocation:
       if request.entryPointId == rootEntryPointId(pkg):
+        if buildProc == nil:
+          # A package with no ``build:`` and no ``devEnv:`` body is
+          # served only so its dev-env introspection entry point has an
+          # answer. Its graph comes from no code in this binary, so an
+          # empty fragment here would report a successful build of
+          # nothing.
+          raise newException(ValueError, "package " & pkg.packageName &
+            " declares no build: body, so a provider compiled from it" &
+            " cannot produce its build graph")
         graphResponse(manifest, buildPackageFragment(pkg, request, buildProc))
       elif foreachDispatch != nil:
         graphResponse(manifest, foreachDispatch(request))
