@@ -5,11 +5,14 @@ cache answers a repeated request without evaluating, but a cached answer whose
 store paths no longer exist must be re-acquired through Nix instead of being
 returned as a stale success.
 
-The request uses a REMOTE selector (``nixpkgs#…``) on purpose. The helper never
-answers a local-flake selector (``.#…``, ``path:``, …) from its cache
-(``is_mutable_local_nix_selector``), so a case built on one evaluates on every
-request and passes whether or not the cache checks its paths: this case used to
-do exactly that, and could not fail.
+The request uses a REMOTE, CONTENT-LOCKED selector (a pinned revision and NAR
+hash) on purpose. The helper never answers a local-flake selector (``.#…``,
+``path:``, …) from its cache (``is_mutable_local_nix_selector``), so a case
+built on one evaluates on every request and passes whether or not the cache
+checks its paths: this case used to do exactly that, and could not fail.
+Edge-Derived-Identities.md §7 keeps content-locked remote selectors cacheable;
+whether an UNLOCKED one (``nixpkgs#…`` resolved through the registry) may be
+cached is still undecided, so this case does not depend on it.
 
 Mock justification: the one thing replaced is the host ``nix`` executable,
 with a script on ``PATH`` that records each invocation and "realises" two
@@ -37,7 +40,9 @@ import unittest
 
 REPO = Path(__file__).resolve().parents[2]
 DAEMON = REPO / "tools/reprobuild-nix-daemon/reprobuild-nix-daemon"
-SELECTOR = "nixpkgs#repro-two-output-tool^*"
+SELECTOR = ("github:NixOS/nixpkgs/0123456789abcdef0123456789abcdef01234567"
+            "?narHash=sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+            "#repro-two-output-tool^*")
 
 
 @unittest.skipUnless(os.name == "posix", "the Nix helper serves only on POSIX hosts")
