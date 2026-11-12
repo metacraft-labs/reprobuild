@@ -394,7 +394,7 @@ libs/repro_dsl_stdlib/tests/t_addon_apt_closure.nim	nim	41
 libs/repro_dsl_stdlib/tests/t_addon_apt_closure_trixie_armhf.nim	nim	2
 libs/repro_dsl_stdlib/tests/t_apt_deb_reader_streams.nim	nim	4
 libs/repro_dsl_stdlib/tests/t_c1_dsl_parse.nim	nim	12
-libs/repro_dsl_stdlib/tests/t_cargo_edge_owns_its_target_dir.nim	nim	11
+libs/repro_dsl_stdlib/tests/t_cargo_edge_owns_its_target_dir.nim	nim	15
 libs/repro_dsl_stdlib/tests/t_cargo_package_bin_selectors.nim	nim	4
 libs/repro_dsl_stdlib/tests/t_cargo_package_cross_target.nim	nim	31
 libs/repro_dsl_stdlib/tests/t_cargo_test_no_default_features.nim	nim	2
@@ -1661,7 +1661,7 @@ tests/integration/t_cache_refuses_to_serve_an_unsatisfiable_floor.nim	nim	1
 tests/integration/t_cached_provider_graph_with_newer_action_payload_is_a_miss.nim	nim	3
 tests/integration/t_cached_source_closure_preparation.nim	nim	2
 tests/integration/t_cargo_edge_reaches_declared_linker.nim	nim	1
-tests/integration/t_cargo_target_dir_ownership_rebuild.nim	nim	1
+tests/integration/t_cargo_target_dir_ownership_rebuild.nim	nim	2
 tests/integration/t_cas_restore_outputs_cleans_temp_on_failure.nim	nim	3
 tests/integration/t_cbor_rfc8949_malformed.nim	nim	14
 tests/integration/t_cbor_rfc8949_vectors.nim	nim	12
@@ -2304,7 +2304,7 @@ tests/integration/t_spec_6_2_matches_implementation.nim	nim	14
 tests/integration/t_spec_example_fixtures_compile.nim	nim	2
 tests/integration/t_spec_example_fixtures_present.nim	nim	16
 tests/integration/t_spi_leaf_detector_messages.nim	nim	7
-tests/integration/t_spi_leaf_fetches_thin_pack_over_partial_pool.nim	nim	8
+tests/integration/t_spi_leaf_fetches_thin_pack_over_partial_pool.nim	nim	9
 tests/integration/t_spi_leaf_refetches_through_pool.nim	nim	24
 tests/integration/t_spi_migrates_existing_pool_and_leaves.nim	nim	1
 tests/integration/t_spi_pool_retains_registered_leaf_objects.nim	nim	26
@@ -2779,6 +2779,7 @@ tests/unit/test_package_root_anchor.py	python	3
 tests/unit/test_profile_daemon_worker_syscalls.py	python	6
 tests/unit/test_prune_undeclared_test_binaries.py	python	7
 tests/unit/test_publish_surface_routing.py	python	32
+tests/unit/test_readme_documents_only_dispatched_verbs.py	python	3
 tests/unit/test_regenerate_suite_artifacts.py	python	25
 tests/unit/test_release_git.py	python	6
 tests/unit/test_release_native_packages.py	python	8

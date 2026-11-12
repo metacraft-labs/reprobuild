@@ -113,11 +113,11 @@ drops you into a ready development environment for any package in the catalog
 
 ## 3. Starting a New Project
 
-For your own software, initialize a project from a template and step into its
-environment:
+For your own software, create a directory containing a `repro.nim` (described
+below) and step into its environment:
 
 ```bash
-repro init app my-app && cd my-app
+mkdir my-app && cd my-app   # then write repro.nim
 
 # Enter the project environment — every tool pinned by repro.nim
 repro shell
@@ -299,10 +299,10 @@ Reprobuild wraps all development workflows under one CLI.
 
 ### Package Management
 
-- `repro add [package]` / `repro remove [package]` — manage dependencies.
-- `repro search [query]` / `repro why [package]` — explore the catalog and
-  explain why a dependency is present.
-- `repro upgrade` — update dependencies within their declared constraints.
+- `repro add <repo> --remote=URL` / `repro remove <repo>` — add a repository
+  to, or remove it from, the workspace (develop-mode policy and workspace
+  membership; these do not manage package dependencies).
+- `repro why [package]` — explain why a dependency is present.
 
 ### Task Running
 
@@ -351,8 +351,8 @@ for this invocation. Existing checkouts keep their current object storage.
 
 - `repro infra plan` / `repro infra apply` — plan or apply declarative local
   machine profiles.
-- `repro infra rollback` — roll back the local system to a previous
-  generation.
+- `repro home rollback` / `repro system rollback` — roll back the user
+  environment or the system to a previous generation.
 
 ---
 

@@ -249,7 +249,7 @@ nim-stackable-hooks
 # commits behind the pin.
 # Private auto-start requires the explicit endpoint policy in this revision;
 # keep release archives and CI overrides on the same API as the Nix pin.
-runquota=060f123a54db5a3c42ffd19bd6bce7085d6ed41a
+runquota=371920744e0b94f580fcb0e511e284b99f99e80c
 nim-shm-queue
 nim-shm-gset=7bc81ad2440860a8a9254eb2757c585df9652438
 
