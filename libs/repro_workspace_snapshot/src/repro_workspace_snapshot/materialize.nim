@@ -109,10 +109,12 @@ proc treeEntriesAt*(repoCache, commit: string;
   ## `.git` component is refused in any letter case, as git's `verify_path`
   ## does on every platform: on a case-insensitive filesystem `.GIT/config`
   ## IS a `.git/config` to any git run inside the worktree.
+  # stderr kept apart: `ls-tree` warns there (a pruned commit-graph file)
+  # while still listing the tree, and merged, the warning led the first record.
   let res = runGit(gitExe, ["--git-dir=" & gitDirOf(repoCache), "ls-tree",
-    "-r", "-z", "--full-tree", commit])
+    "-r", "-z", "--full-tree", commit], mergeStderr = false)
   if res.code != 0:
-    return (false, @[], @[], "git ls-tree failed: " & res.output.strip())
+    return (false, @[], @[], "git ls-tree failed: " & describe(res))
   for rec in res.output.split('\0'):
     if rec.len == 0: continue
     let tab = rec.find('\t')

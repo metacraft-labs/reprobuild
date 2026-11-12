@@ -335,23 +335,24 @@ proc storeSubtreeDiagnostic*(root, label: string): string =
 proc runGit(gitBin: string; args: openArray[string];
             extraEnv: openArray[(string, string)] = []):
     tuple[code: int; output: string] =
-  ## Run git with stderr folded into stdout. ``extraEnv`` overlays the
+  ## Run git for this module's reads and writes. ``extraEnv`` overlays the
   ## inherited environment (used by the separate-branch backend to point
   ## ``GIT_INDEX_FILE`` at a scratch index).
+  ##
+  ## On success ``output`` is git's stdout ALONE, byte for byte; on failure it
+  ## is git's merged message, which every caller quotes. Callers here PARSE a
+  ## success's output (`git rev-parse`, `git notes show`, `git write-tree`,
+  ## `git commit-tree`), and git writes warnings to stderr while still exiting
+  ## 0 with the right answer (`warning: unable to find all commit-graph
+  ## files`): merged, that line became part of a commit id or of a record
+  ## body. ``gitRunSeparated`` also drains to EOF (N51: a short read of a
+  ## record is a wrong answer that looks like a right one, not a shabby
+  ## diagnostic).
   var env = scrubbedGitRepositoryEnv()
   for (k, v) in extraEnv: env[k] = v
-  var p = startProcess(gitBin, args = @args, env = env,
-    options = {poStdErrToStdOut, poUsePath})
-  # N51: drained to EOF. `readAll` returns at the first read that does not
-  # fill its 1 KiB buffer, which on Windows is one `ReadFile` on a pipe — so
-  # a `git` whose output arrives in more than one burst was captured short.
-  # Callers here PARSE this output (`git rev-parse`, `git notes list`,
-  # `git ls-tree`), so a short read is not a shabby diagnostic, it is a wrong
-  # answer that looks like a right one.
-  let output = drainStream(p.outputStream)
-  let code = p.waitForExit()
-  p.close()
-  (code: code, output: output)
+  let res = gitRunSeparated(gitBin, args, env, exactStdout = true)
+  (code: res.code,
+   output: (if res.code == 0: res.output else: res.diagnostic))
 
 # ---------------------------------------------------------------------------
 # Backend 1 — committed-file

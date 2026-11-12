@@ -81,12 +81,8 @@ libs/repro_test_support/src/repro_test_support.nim
 libs/repro_test_support/src/repro_test_support/per_case_runs.nim
 libs/repro_tool_profiles/src/repro_tool_profiles.nim
 libs/repro_tool_profiles/src/repro_tool_profiles/archive_steps.nim
-libs/repro_workspace_manifests/src/repro_workspace_manifests/manifest_refresh.nim
-libs/repro_workspace_manifests/src/repro_workspace_manifests/provenance.nim
 libs/repro_workspace_vcs/src/git_actions.nim
-libs/repro_workspace_vcs/src/git_tool.nim
 libs/repro_workspace_vcs/src/hg_actions.nim
 libs/repro_workspace_vcs/src/hg_tool.nim
-libs/repro_workspace_vcs/src/repo_relocation.nim
 libs/repro_workspace_vcs/src/shared_clones.nim
 libs/repro_workspace_vcs/src/sibling_ignores.nim

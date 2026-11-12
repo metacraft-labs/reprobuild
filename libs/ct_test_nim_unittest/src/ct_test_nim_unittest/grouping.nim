@@ -63,15 +63,26 @@ const
     ## keeps it single before the planner sees it (the generator's
     ## ``directoryConfigReason``), so a prefix group never loses one.
     ##
-    ## NOT ``recipes/packages/source``, although its 195 one-per-directory
-    ## recipe tests were the first candidates. Measured 2026-10-31 at
-    ## ``agents`` 3cfae787b7 (module initialisation: an unknown ``--run``
-    ## name, user CPU): one recipe test alone 0.01 s; 5 recipe tests in one
-    ## binary 23 s, 10 in one binary 28 s, 25 in one binary 43 s, with
-    ## 147 clingo solves over a growing program logged at start-up for the
-    ## 25. Every case of such a group would pay that, so grouping them costs
-    ## far more at run time than it saves at compile time. Revisit once
-    ## several ``package`` blocks in one program initialise as cheaply as one.
+    ## NOT ``recipes/packages/source``, although its one-per-directory recipe
+    ## tests were the first candidates. Start-up is no longer the reason:
+    ## measured 2026-10-31 at ``agents`` 3cfae787b7, 25 recipe tests in one
+    ## binary spent 43 s of user CPU initialising (147 clingo solves over a
+    ## program that grew with each recipe), but since reprobuild aa127fd53
+    ## a ``package`` block's registration runs no solve
+    ## (``t_several_recipe_modules_init_without_a_solve_each``). Measured
+    ## 2026-11-11 at ``agents`` a2eb4cfed, all 201 recipe tests in sorted
+    ## groups of 25: 0 solves and 0.13-3.87 s user at start-up per group.
+    ## The slowest group holds plasma-workspace, which alone takes 3.37 s,
+    ## so a group costs about its slowest member plus well under a second.
+    ##
+    ## The reason now is the cases themselves. The same groups fail 94 of
+    ## 1090 cases, almost all ``registeredArtifacts(p).len`` /
+    ## ``registeredVersions(p).len`` checks: they count every registration
+    ## of ``p`` in the program, and in a group other members' recipes
+    ## register ``p`` again, which the registry keeps by design
+    ## (``registerArtifact`` / ``registerVersion`` do not collapse
+    ## duplicates). Grouping this root needs those cases to stop assuming
+    ## they are alone in the program.
 
   PrefixGroupTagSuffix* = "_prefix"
     ## Appended to a prefix group's directory tag, so that its stems

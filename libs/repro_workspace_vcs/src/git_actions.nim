@@ -37,10 +37,6 @@
 ## fixtures can call ``installGitVcsExecutor(identity)`` explicitly.
 
 import std/[os, osproc, strutils]
-when defined(windows):
-  import std/winlean
-else:
-  import std/tempfiles
 
 import repro_build_engine
 import repro_core/codec
@@ -592,6 +588,7 @@ proc gitVersionStringMatches(identityVersion: string;
 
 proc runGit(payload: GitVcsPayload; args: openArray[string];
             workingDir = ""): tuple[exitCode: int; output: string] =
+  # git-merged-reader: clone/fetch/checkout, whose stderr IS the payload
   ## Invoke the identity-bound git binary with the requested arguments.
   ## We use ``execCmdEx`` to mirror M1's subprocess shape (no new
   ## third-party dependency, per the M2 hard constraint).
@@ -618,118 +615,25 @@ proc runGit(payload: GitVcsPayload; args: openArray[string];
 proc runGitSeparated(payload: GitVcsPayload; args: openArray[string];
                      workingDir = ""; exactStdout = false):
     tuple[exitCode: int; stdoutText, stderrText: string] =
-  ## Invoke git capturing stdout and stderr as SEPARATE strings.
+  ## Invoke git capturing stdout and stderr as SEPARATE strings, byte for
+  ## byte (``exactStdout`` is therefore always satisfied).
   ##
-  ## Both streams are drained CONCURRENTLY, and that is not a stylistic
-  ## choice. Reading one to EOF and only then the other deadlocks the
-  ## moment the unread pipe fills: measured on Windows, a child that writes
-  ## 60 KiB to stderr while stdout is still open never exits and the read
-  ## never returns. git's stderr is unbounded in principle (per-ref fetch
-  ## lines, per-object lfs lines), so the drain has to be interleaved.
-  when defined(windows):
-    # Structured argv, and a PeekNamedPipe drain: Nim 2.2's ``readAll``
-    # stops at the first short pipe read on Windows, so a blocking read of
-    # either stream would also truncate. Same technique the sync
-    # observation gatherer already uses for its single stream.
-    let process = startProcess(payload.binaryPath, workingDir = workingDir,
-      args = @args, env = scrubbedGitRepositoryEnv(),
-      options = {poUsePath})
-    defer: process.close()
-    const PollSleepMs = 2
-    let handles = [Handle(process.outputHandle), Handle(process.errorHandle)]
-    var sinks: array[2, string]
-    var buf {.noinit.}: array[16384, char]
-    while true:
-      var moved = false
-      for i in 0 .. 1:
-        var bytesAvail: int32 = 0
-        let peeked = peekNamedPipe(handles[i],
-          lpTotalBytesAvail = addr bytesAvail)
-        if peeked and bytesAvail > 0:
-          var bytesRead: int32 = 0
-          let toRead = min(int(bytesAvail), buf.len).int32
-          let ok = winlean.readFile(handles[i], addr buf[0], toRead,
-            addr bytesRead, nil)
-          if ok != 0 and bytesRead > 0:
-            let previousLen = sinks[i].len
-            sinks[i].setLen(previousLen + bytesRead)
-            copyMem(addr sinks[i][previousLen], addr buf[0], bytesRead)
-            moved = true
-      # Only consult the exit code once BOTH pipes are momentarily empty, so
-      # everything the child buffered before exiting is still collected.
-      if moved: continue
-      result.exitCode = process.peekExitCode()
-      if result.exitCode != -1: break
-      sleep(PollSleepMs)
-    result.stdoutText = sinks[0]
-    result.stderrText = sinks[1]
-  else:
-    # POSIX ``poEvalCommand`` runs the command through ``/bin/sh``, so the
-    # SHELL can put stderr in a file. One pipe, no interleaving, no
-    # deadlock, and the same ``execCmdEx`` subprocess shape as ``runGit``.
-    var cmd = quoteShell(payload.binaryPath)
-    for arg in args:
-      cmd.add(" ")
-      cmd.add(quoteShell(arg))
-    var errPath = ""
-    var outPath = ""
-    defer:
-      for path in [errPath, outPath]:
-        if path.len > 0 and fileExists(path):
-          try: removeFile(path)
-          except OSError: discard
-    try:
-      let created = createTempFile("repro-git-", ".stderr")
-      created.cfile.close()
-      errPath = created.path
-    except CatchableError, Defect:
-      errPath = ""
-    if exactStdout:
-      try:
-        let created = createTempFile("repro-git-", ".stdout")
-        created.cfile.close()
-        outPath = created.path
-      except CatchableError, Defect:
-        outPath = ""
-      if outPath.len == 0 or errPath.len == 0:
-        if outPath.len > 0: removeFile(outPath)
-        if errPath.len > 0: removeFile(errPath)
-        return (exitCode: -1, stdoutText: "", stderrText:
-          "cannot capture exact Git query output")
-      # NUL-delimited paths cannot pass through execCmdEx's line rebuilding,
-      # which appends a newline and normalizes embedded CRLF bytes.
-      cmd.add(" >" & quoteShell(outPath))
-    if errPath.len > 0:
-      cmd.add(" 2>" & quoteShell(errPath))
-    # Without the redirect the child's stderr would be an unread pipe that
-    # can fill and hang it, so fall back to the MERGED stream instead —
-    # degraded (the caller sees diagnostics in ``stdoutText``, exactly
-    # today's behaviour) but never hung.
-    let options =
-      if errPath.len > 0: {poUsePath}
-      else: {poUsePath, poStdErrToStdOut}
-    let res = execCmdExCloseOnce(cmd, options = options, workingDir = workingDir,
-      env = scrubbedGitRepositoryEnv())
-    result.exitCode = res.exitCode
-    result.stdoutText = res.output
-    if outPath.len > 0:
-      try:
-        result.stdoutText = readFile(outPath)
-      except CatchableError as err:
-        result.exitCode = -1
-        result.stdoutText = ""
-        result.stderrText = "cannot read exact Git query output: " & err.msg
-      finally:
-        removeFile(outPath)
-    if errPath.len > 0:
-      try:
-        result.stderrText.add(readFile(errPath))
-      except CatchableError:
-        discard
-      try:
-        removeFile(errPath)
-      except CatchableError:
-        discard
+  ## Both streams are drained CONCURRENTLY (``runSeparated``), and that is
+  ## not a stylistic choice. Reading one to EOF and only then the other
+  ## deadlocks the moment the unread pipe fills: measured on Windows, a child
+  ## that writes 60 KiB to stderr while stdout is still open never exits and
+  ## the read never returns. git's stderr is unbounded in principle (per-ref
+  ## fetch lines, per-object lfs lines), so the drain has to be interleaved.
+  ## A git that cannot be started is a failed run, as it is for ``runGit``.
+  discard exactStdout
+  try:
+    let run = runSeparated(payload.binaryPath, args,
+      scrubbedGitRepositoryEnv(), workingDir = workingDir)
+    (exitCode: run.code, stdoutText: run.stdoutText,
+     stderrText: run.stderrText)
+  except CatchableError as err:
+    (exitCode: -1, stdoutText: "",
+     stderrText: "cannot run " & payload.binaryPath & ": " & err.msg)
 
 proc runGitQuery(payload: GitVcsPayload; args: openArray[string];
                  workingDir = ""; exactStdout = false):
@@ -1177,7 +1081,7 @@ proc executeClone(payload: GitVcsPayload; cwd, receiptPath: string): ActionResul
     # git-lfs is the common cause of a checkout-stage failure, and its own
     # error names a filter rather than the repo, so the raw output reads as a
     # reprobuild bug. Say what actually happened and what can be done about it.
-    let cloneOut = cloneRes.output.trimmed
+    let cloneOut = cloneRes.output.trimmed  # git-merged-text: the clone classifier reads git's stderr
     # Git reports an absent requested branch only as free-form process output.
     # Preserve it as a STRUCTURED action reason so higher-level commands can
     # distinguish a bad manifest declaration from authentication, network, or
@@ -1306,7 +1210,7 @@ proc executeFetch(payload: GitVcsPayload; cwd, receiptPath: string): ActionResul
     let headRes = resolveHeadSha(payload, target)
     if not headRes.ok:
       return failed("fetch-head-probe-failed", headRes.diagnostic)
-    let receipt = renderFetchReceipt(payload, headRes.sha, res.output)
+    let receipt = renderFetchReceipt(payload, headRes.sha, res.output)  # git-merged-text: the receipt is content-addressed on fetch's report
     writeReceipt(receiptPath, receipt)
     return succeeded()
 
@@ -1666,7 +1570,7 @@ proc executeMergeFf(payload: GitVcsPayload;
         (answer.exitCode, answer.output, answer.diagnostic)
       else:
         let answer = runGit(payload, args)
-        (answer.exitCode, answer.output, answer.output))
+        (answer.exitCode, answer.output, answer.output))  # git-merged-text: a mutation; atomicFastForward parses only query answers
   if not res.ok:
     return failed((if res.refused: "merge-ff-refused" else: "merge-ff-failed"),
       res.diagnostic)

@@ -9,7 +9,7 @@ type Fixture = object
 
 proc git(f: Fixture; args: varargs[string]): string =
   let res = queryGit(f.identity, @["-C", f.root] & @args)
-  if res.code != 0: raise newException(IOError, res.output)
+  if res.code != 0: raise newException(IOError, res.diagnostic)
   res.output.strip()
 
 proc fixture(): Fixture =

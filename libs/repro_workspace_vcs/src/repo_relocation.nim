@@ -144,8 +144,16 @@ proc runGit(probe: RelocationGitProbe; args: openArray[string]):
   ## sync invoked from inside a git hook would ask its questions of the
   ## INVOKING repository and answer them about the candidate. Every other git
   ## caller in this library scrubs for the same reason.
+  ##
+  ## A success's ``output`` is git's stdout alone (``queryGit``): the callers
+  ## compare refs, stashes and porcelain lines, and a stderr warning counted
+  ## as one of them made two identical checkouts compare different. A
+  ## failure's ``output`` is git's merged message, which is what the callers
+  ## quote, and git's reason is on stderr.
   try:
-    queryGit(probe.identity, args)
+    let res = queryGit(probe.identity, args)
+    (code: res.code,
+     output: (if res.code == 0: res.output else: res.diagnostic))
   except CatchableError as err:
     (code: 127, output: "could not run git: " & err.msg)
   except Exception as err:
