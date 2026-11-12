@@ -2660,7 +2660,7 @@ tests/unit/t_m9r23_1_installer_state_install_sequence.nim	nim	6
 tests/unit/t_m9r2_typed_cli_surfaces.nim	nim	19
 tests/unit/t_m9r2b_typed_value_layer.nim	nim	15
 tests/unit/t_m9r2c_artifact_slot_typed.nim	nim	8
-tests/unit/t_m9r30_transitive_rpath_propagation.nim	nim	13
+tests/unit/t_m9r30_transitive_rpath_propagation.nim	nim	16
 tests/unit/t_m9r33_2_qt6_module_path_walker.nim	nim	11
 tests/unit/t_m9r34_recipe_edit_invalidates_local_cache.nim	nim	8
 tests/unit/t_m9r3_library_api_block.nim	nim	8
