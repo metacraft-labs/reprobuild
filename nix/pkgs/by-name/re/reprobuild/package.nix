@@ -317,6 +317,12 @@ stdenv.mkDerivation (finalAttrs: {
     TEST_CERTIFICATES_TOOLS_SRC = "${testCertificatesToolsSrc}/src";
     REPROBUILD_USE_SYSTEM_HASH_LIBS = "1";
     RUNQUOTA_SRC = "${runquotaSrc}";
+    # config.nims's `-L`/rpath for the `-d:ssl` edges. Without it, a macOS
+    # build (no sandbox) fell through to the `/nix/store/*-openssl-*` glob
+    # and linked whichever OpenSSL sorted first -- one this derivation never
+    # named, so the reference scan missed it and the cached package failed
+    # on every other machine (`dyld: Library not loaded: …-openssl-3.4.3`).
+    OPENSSL_LIBDIR = "${openssl.out}/lib";
     SQLITE_PREFIX = "${sqlite.out}";
     XXHASH_PREFIX = "${xxhash}";
   };

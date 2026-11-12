@@ -4,11 +4,15 @@
 # Builds the canonical reprobuild HCR agent shared library:
 #   macOS:   librepro_hcr_agent.dylib
 #   Linux:   librepro_hcr_agent.so
-#   Windows: repro_hcr_agent.dll
+# and names, without building, the Windows one: repro_hcr_agent.dll
 #
 # Usage:
 #   ./build_lib.sh [OUTPUT_DIR] [--target-os=darwin|linux|windows] [--print-name]
 #                  [--define=NAME]...
+#
+# `--target-os=windows` answers `--print-name` and refuses to build: the
+# Windows agent is a separate translation unit built by
+# `build_windows_agent.py`.
 #
 # `--define` exists for FALSIFIER builds: the agent carries three
 # `#ifdef`-guarded arms (`REPRO_HCR_FALSIFY_BEFORE_RELOAD_AFTER_SWAP`,
@@ -33,6 +37,7 @@ C_DIR="$SCRIPT_DIR/c"
 SRC_C="$C_DIR/repro_hcr_agent.c"
 
 TARGET_OS=""
+BUILD_REFUSAL=""
 PRINT_NAME=0
 OUT_DIR=""
 EXTRA_DEFINES=()
@@ -115,11 +120,13 @@ case "$TARGET_OS" in
     DEFINES=""
     ;;
   windows|win*|mingw*)
+    # The name is answered so that every platform's artifact name comes from
+    # this one table. The build is refused: this script compiles only the
+    # POSIX translation unit. The Windows agent is
+    # `c/repro_hcr_agent_windows.c`, whose SEH blocks gcc cannot compile; it is
+    # built with MSVC by `build_windows_agent.py`.
     LIB_NAME="repro_hcr_agent.dll"
-    CC_DEFAULT="gcc"
-    SHARED_FLAGS="-shared"
-    EXTRA_LIBS=""
-    DEFINES="-DREPRO_HCR_AGENT_BUILD_DLL"
+    BUILD_REFUSAL="this script builds only the POSIX agent; build the Windows agent with build_windows_agent.py beside it"
     ;;
   *)
     echo "Unsupported target OS: $TARGET_OS" >&2
@@ -130,6 +137,11 @@ esac
 if [[ "$PRINT_NAME" -eq 1 ]]; then
   echo "$LIB_NAME"
   exit 0
+fi
+
+if [[ -n "$BUILD_REFUSAL" ]]; then
+  echo "[repro_hcr_agent] Refusing to build $LIB_NAME for $TARGET_OS: $BUILD_REFUSAL" >&2
+  exit 1
 fi
 
 OUT_DIR_GIVEN=1

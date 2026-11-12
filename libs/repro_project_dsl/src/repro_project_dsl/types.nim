@@ -159,10 +159,16 @@ type
       ## with ``subTools "rustc", "gcc"`` directly under ``cli:``. A
       ## ``uses:`` entry of the calling recipe that matches one of these
       ## names has its resolved directory PREPENDED to every edge of this
-      ## tool; an unmatched name is inert. Unlike an edge's
-      ## ``toolIdentityRefs`` this is not a statement about the edge's
-      ## complete tool set, so it does not make the edge's ``PATH``
-      ## hermetic.
+      ## tool, and its profile's compile and link channels
+      ## (``cpathList`` on ``CPATH``, ``libraryPathList`` on
+      ## ``LIBRARY_PATH``) added after the edge's own; the profile's
+      ## fingerprint keys the edge when either channel is non-empty. An
+      ## unmatched name is inert. Unlike an edge's ``toolIdentityRefs``
+      ## this is not a statement about the edge's complete tool set, so
+      ## it does not make the edge's ``PATH`` hermetic, and a sub-tool
+      ## gets none of a ref's other channels: no run-time library path,
+      ## ``PKG_CONFIG_PATH``, ``CMAKE_PREFIX_PATH`` or provisioning
+      ## receipt.
     nonDeterminismJustification*: string
       ## Why the blessing above is sound. Required when the policy is
       ## ``ndpEntropyBlessed`` (the macro rejects a bare blessing), carried
@@ -1706,7 +1712,9 @@ type
       ## The typed tool's own ``subTools`` (see ``CliCommandDef.subTools``),
       ## copied onto each edge the tool's wrapper records. Each name that
       ## matches a resolved ``uses:`` tool contributes that tool's
-      ## directory to the edge's ``PATH`` ahead of everything else, and
+      ## directory to the edge's ``PATH`` ahead of everything else and its
+      ## include and library directories to ``CPATH`` / ``LIBRARY_PATH``
+      ## (lowered to the engine's ``BuildAction.subToolIdentityRefs``), and
       ## keeps the tool resolvable for a fragment build that selects only
       ## this edge. Unlike ``toolIdentityRefs`` these do NOT opt the edge
       ## into a hermetic ``PATH``: the tool vouches for what IT runs, not
