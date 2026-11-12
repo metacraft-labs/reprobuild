@@ -13,7 +13,9 @@ No mocks. The rule-by-rule cases need locks that are wrong in exactly one way,
 which the committed one is not, so they check minimal lock documents in nix's
 format. The remaining cases run against the REAL committed `flake.lock`: it
 passes (with a positive control that the check covered the nodes the defect
-was in), and it is refused once either node's hash is taken out again.
+was in), and it is refused once either node's hash is taken out again. Neither
+case names the revision a node holds: the pre-commit hook moves both inputs
+forward whenever their sibling checkouts move, which is routine.
 """
 import copy
 import json
@@ -28,11 +30,8 @@ from check_flake_lock_derived_fields import check, check_lock  # noqa: E402
 
 REV = 'a' * 40
 HASH = 'sha256-' + 'A' * 43 + '='
-# The two nodes the defect was observed in, at the revisions they must keep.
-FORMERLY_HASHLESS = {
-    'reprobuild-ct-test-runner-src': '69167f4226e0faca4fb64cb0e913c7b49eddf853',
-    'reprobuild-test-adapters-src': '504ce5c8dbddd150ead5b9bc2cddfdda21b55789',
-}
+# The two nodes the defect was observed in.
+FORMERLY_HASHLESS = ('reprobuild-ct-test-runner-src', 'reprobuild-test-adapters-src')
 
 
 def lock_with(locked: dict) -> dict:
@@ -111,20 +110,22 @@ class CommittedFlakeLock(unittest.TestCase):
     def test_the_committed_lock_passes(self):
         self.assertEqual(check(ROOT), [])
 
-    def test_the_formerly_hashless_nodes_are_checked_and_kept_at_their_revisions(self):
+    def test_the_formerly_hashless_nodes_are_checked(self):
         # Positive control: the clean result above is about these two nodes,
-        # which must still be revision-addressed (or the check would skip
-        # them) and must not have moved when their hashes were recorded.
-        for node_id, rev in FORMERLY_HASHLESS.items():
+        # which must still be revision-addressed, or the check would skip
+        # them. Which revision they hold is the lock's business, not this
+        # test's.
+        for node_id in FORMERLY_HASHLESS:
             with self.subTest(node=node_id):
                 locked = self.data['nodes'][node_id]['locked']
                 self.assertEqual(locked['type'], 'github')
-                self.assertEqual(locked['rev'], rev)
+                self.assertRegex(locked['rev'], r'^[0-9a-f]{40}$')
                 self.assertRegex(locked['narHash'], r'^sha256-[A-Za-z0-9+/]{43}=$')
 
     def test_the_committed_lock_is_refused_with_either_hash_taken_out(self):
-        for node_id, rev in FORMERLY_HASHLESS.items():
+        for node_id in FORMERLY_HASHLESS:
             with self.subTest(node=node_id):
+                rev = self.data['nodes'][node_id]['locked']['rev']
                 data = copy.deepcopy(self.data)
                 del data['nodes'][node_id]['locked']['narHash']
                 del data['nodes'][node_id]['locked']['lastModified']
