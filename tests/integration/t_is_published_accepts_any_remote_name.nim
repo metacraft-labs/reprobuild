@@ -36,6 +36,7 @@ import std/[os, osproc, strutils, tempfiles, unittest]
 
 import git_actions
 import git_tool
+import repro_test_support/reasoned_skip
 
 proc whichGit(): string = findExe("git")
 
@@ -142,3 +143,53 @@ suite "isPublishedQuery — remote naming":
       let afterLocal = queryGitState(isPublishedQuery(clonePath, ""), identity)
       check afterLocal.status == gqsOk
       check not afterLocal.isPublished
+
+  test "a commit fetched by SHA alone is published when it is a remote branch tip":
+    # A sibling materialized by `git fetch --depth=1 origin <sha>` has no
+    # remote-tracking ref, so `branch -r --contains HEAD` is empty even though
+    # the commit is public. The publication check must ask the remote directly.
+    let ambient = whichGit()
+    if ambient.len == 0:
+      skip("git not on PATH; this case needs a repository")
+    else:
+      let scratch = createTempDir("repro-ispublished-sha-", "")
+      defer: removeDir(scratch)
+
+      let seedWork = scratch / "seed"
+      createDir(seedWork)
+      requireSuccess("git init -q -b main " & quoteShell(seedWork))
+      requireSuccess("git config user.email t@example.com", seedWork)
+      requireSuccess("git config user.name Test", seedWork)
+      writeFile(seedWork / "file.txt", "seed\n")
+      requireSuccess("git add file.txt", seedWork)
+      requireSuccess("git commit -q -m seed", seedWork)
+      let originPath = scratch / "upstream.git"
+      requireSuccess("git clone -q --bare " & quoteShell(seedWork) & " " &
+        quoteShell(originPath))
+      let tip = run("git rev-parse HEAD", seedWork).output.strip()
+
+      let clonePath = scratch / "checkout"
+      requireSuccess("git init -q " & quoteShell(clonePath))
+      requireSuccess("git remote add origin " & quoteShell(fileUrl(originPath)),
+        clonePath)
+      requireSuccess("git fetch -q --depth=1 origin " & tip, clonePath)
+      requireSuccess("git checkout -q FETCH_HEAD", clonePath)
+
+      # Precondition: no remote-tracking ref contains HEAD, so the answer
+      # below can only come from asking the remote.
+      check run("git branch -r --contains HEAD", clonePath).output.strip() == ""
+
+      let identity = ensureGitToolResolvable(tpmPathOnly, ambient.parentDir)
+      let tipRes = queryGitState(isPublishedQuery(clonePath, "origin"), identity)
+      check tipRes.status == gqsOk
+      check tipRes.isPublished
+
+      # A commit made after the fetch is not a branch tip on the remote.
+      requireSuccess("git config user.email t@example.com", clonePath)
+      requireSuccess("git config user.name Test", clonePath)
+      writeFile(clonePath / "local.txt", "local\n")
+      requireSuccess("git add local.txt", clonePath)
+      requireSuccess("git commit -q -m local", clonePath)
+      let localRes = queryGitState(isPublishedQuery(clonePath, "origin"), identity)
+      check localRes.status == gqsOk
+      check not localRes.isPublished
