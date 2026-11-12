@@ -33,6 +33,16 @@ proc writeUsesOnlyFixture(dir: string) =
     "  build:\n" &
     "    discard\n")
 
+proc writeBuildOnlyFixture(dir: string) =
+  ## A build-only recipe: no ``uses:`` and no ``devEnv:`` (the shape of
+  ## reprobuild-pm issue 2026-11-12-repro-exec-on-a-recipe-without-devenv).
+  createDir(dir)
+  writeFile(dir / "floor_provider.nim",
+    "import repro_project_dsl\n\n" &
+    "package floorfixture:\n" &
+    "  build:\n" &
+    "    discard\n")
+
 proc compileFloorProvider(projectRoot, outDir: string): ProviderCompileArtifact =
   let modulePath = projectRoot / "floor_provider.nim"
   let interfacePath = outDir / "floor-interface.rbsz"
@@ -123,3 +133,31 @@ suite "e2e_provider_dev_env_implicit_floor":
       it.identity.endsWith("floor_provider.nim"))
     check result.sourceFingerprints.anyIt(it.kind == "provider-source" and
       it.identity.endsWith("floor_provider.nim") and it.digest.len > 0)
+
+  test "build_only_recipe_exposes_base_environment":
+    ## A recipe with neither ``uses:`` nor ``devEnv:`` still exposes
+    ## dev-env introspection, and it resolves to the base environment:
+    ## no tool requirements, tasks, services or activities.
+    let tempRoot = createTempDir("repro-build-only-dev-env", "")
+    defer: removeDir(tempRoot)
+    let projectRoot = tempRoot / "project"
+    let outDir = tempRoot / "out"
+    writeBuildOnlyFixture(projectRoot)
+    createDir(outDir)
+
+    let provider = compileFloorProvider(projectRoot, outDir)
+    let config = providerConfig(provider, tempRoot, getCurrentDir())
+    let manifest = readProviderManifest(config, provider.providerArtifactId)
+    let entries = manifest.entryPoints.filterIt(
+      it.kind == gpkDevEnvIntrospection)
+    check entries.len == 1
+    check entries[0].bodyHash.len > 0
+
+    let result = invokeProviderDevEnvIntrospection(config,
+      provider.providerArtifactId, projectRoot,
+      activity = "default", lockSliceId = "lock-build-only")
+    check result.providerEntryPointId == "floorfixture.dev-env"
+    check result.selectedActivities == @["default"]
+    check result.toolRequirements.len == 0
+    check result.tasks.len == 0
+    check result.services.len == 0

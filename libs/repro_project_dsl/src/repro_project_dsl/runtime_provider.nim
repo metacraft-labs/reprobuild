@@ -48,20 +48,21 @@ when defined(reproProviderMode):
           argumentSchemaId: "reprobuild.project-root.v1",
           outputSchemaId: "reprobuild.graph-fragment.v1")
       ])
-    if exposesDevEnvIntrospection(pkg):
-      # Windows-dev-env M1: exposed for explicit ``devEnv:`` packages AND
-      # for ``uses:``-only packages (implicit floor-derived dev-env). The
-      # ``devEnvBodyHash`` is content-derived for both cases (an explicit
-      # block hashes its body; a ``uses:``-only floor hashes the floor —
-      # see ``parsePackageDef``), so the entry has a stable, deterministic
-      # id in either case.
-      result.entryPoints.add(GraphEntryPointDescriptor(
-        id: devEnvEntryPointId(pkg),
-        kind: gpkDevEnvIntrospection,
-        stableName: pkg.packageName & ":dev-env",
-        bodyHash: effectiveDevEnvBodyHash(pkg),
-        argumentSchemaId: "reprobuild.dev-env-request.v1",
-        outputSchemaId: "reprobuild.dev-env-result.v1"))
+    # Every provider exposes dev-env introspection, so ``repro exec`` /
+    # ``repro shell`` / the direnv hook can always resolve an environment.
+    # An explicit ``devEnv:`` block contributes shell ops / tasks / services
+    # on top of the ``uses:`` toolchain floor; a ``uses:``-only recipe gets
+    # the floor alone; a build-only recipe with neither gets the base
+    # environment (no activity, no tools). ``effectiveDevEnvBodyHash`` is
+    # content-derived in all three cases, so the entry has a stable id and
+    # body hash.
+    result.entryPoints.add(GraphEntryPointDescriptor(
+      id: devEnvEntryPointId(pkg),
+      kind: gpkDevEnvIntrospection,
+      stableName: pkg.packageName & ":dev-env",
+      bodyHash: effectiveDevEnvBodyHash(pkg),
+      argumentSchemaId: "reprobuild.dev-env-request.v1",
+      outputSchemaId: "reprobuild.dev-env-result.v1"))
     for def in foreachDefs:
       result.entryPoints.add(GraphEntryPointDescriptor(
         id: def.id,
