@@ -261,6 +261,7 @@ proc gitRemoteNameFor*(repo: ResolvedRepo): string =
   # one of the two branches above.
   return "origin"
 import repro_cli_support/dev_env_shell_export
+import repro_cli_support/dev_env_run_edges
 import repro_cli_support/dev_env_rollback_manifest
 import repro_cli_support/dev_env_shell_hook_templates
 import repro_cli_support/home
@@ -11898,6 +11899,12 @@ proc restoreCachedOutputsEnvDefault(): bool =
   getEnv("REPRO_RESTORE_CACHED_OUTPUTS").normalize in
     ["1", "true", "yes", "on"]
 
+proc applyRunEdgeDevEnv(actions: var seq[BuildAction];
+                        snapshot: ProviderGraphSnapshot;
+                        projectRoot, workRoot, publicCliPath: string;
+                        announce: bool)
+  ## Defined beside ``computePublicDevEnv``, which it needs; see there.
+
 proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
                         publicCliPath: string;
                         selectDefaultAction = false;
@@ -14368,6 +14375,11 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
     appendForwardedArgs(scheduledActions, forwardedActionId)
     attachProducerAuxRefs(scheduledActions)
     foldProducerActionHashes(scheduledActions)
+    # A package that declares ``devEnv:`` gets it on its run-edges (the
+    # members of its ``test`` / ``bench`` collections), keyed by the
+    # contribution's identity. A no-op unless the plan holds such an edge.
+    applyRunEdgeDevEnv(scheduledActions, refresh.snapshot, projectRoot,
+      workRoot, publicCliPath, announce = progressMode != bpmQuiet)
     # Cross-Repo-Source-Consumption SC-4 (§4.3): a producer SOURCE change
     # rebuilds the consumer actions that READ it. Actions whose reads are
     # keyed (monitored, or built-in) get only the producer's realized
@@ -15849,6 +15861,86 @@ proc computePublicDevEnv(selection: DevEnvCliSelection;
       formatDuration(epochTime() - activationStart) & " (" & providerWord &
       ", " & envWord & ")")
     stderr.flushFile()
+
+proc emitDevEnvDiagnostics(artifact: DevEnvArtifact): bool
+
+proc applyRunEdgeDevEnv(actions: var seq[BuildAction];
+                        snapshot: ProviderGraphSnapshot;
+                        projectRoot, workRoot, publicCliPath: string;
+                        announce: bool) =
+  ## Give the run-edges of a package that declares ``devEnv:`` that
+  ## environment. ``repro_cli_support/dev_env_run_edges`` states which
+  ## edges, how the values merge and how they are keyed.
+  ##
+  ## The environment is realized exactly as ``repro exec`` realizes it, by
+  ## the tracked introspection edge (``computePublicDevEnv``), so a warm
+  ## run costs a cache hit. Only the recipe's own contribution is applied
+  ## (``artifact.shellOps``): the ``uses:`` tools are resolved per action
+  ## by the engine already, and the activation metadata variables describe
+  ## a shell, not an edge.
+  ##
+  ## FAILS CLOSED. A dev environment that cannot be realized, or that
+  ## reports an error diagnostic, stops the build before any action runs:
+  ## running the edge without it would be the very defect this exists to
+  ## remove, a verdict that depends on the shell ``repro`` came from.
+  var aliases = DirectTargetAliases(
+    byAction: initTable[string, string](),
+    rankByAction: initTable[string, int]())
+  for fragment in snapshot.fragments:
+    for node in fragment.nodes:
+      if node.kind == gnkMetadata and
+          node.stableName == "reprobuild.build-target.v1":
+        considerDirectAlias(aliases,
+          decodeBuildTargetPayload(toBytes(node.payload)))
+  let runEdgeIds = devEnvRunEdgeActionIds(snapshot, aliases.byAction)
+  if runEdgeIds.len == 0:
+    return
+  var receivers: seq[int] = @[]
+  for i, action in actions:
+    if action.kind == bakProcess and runEdgeIds.contains(action.id):
+      receivers.add(i)
+  if receivers.len == 0:
+    return
+  var selection = DevEnvCliSelection(selector: projectRoot,
+    workRoot: workRoot)
+  selection.resolveDevEnvSelection()
+  # Realizing the environment may publish the bootstrap toolchain into
+  # this process's environment; the run-edges must inherit what they would
+  # have inherited without it, as `repro exec`'s command does.
+  let toolchainEnv = snapshotBootstrapToolchainEnv()
+  var edge: DevEnvEdgeResult
+  try:
+    # Announced like any activation (a cold one evaluates a flake), unless
+    # this build was asked to be quiet.
+    edge = computePublicDevEnv(selection, publicCliPath, announce = announce)
+  except CatchableError as error:
+    restoreBootstrapToolchainEnv(toolchainEnv)
+    raise newException(ValueError,
+      "repro: " & $receivers.len & " run-edge(s) of " & projectRoot &
+      " need the dev environment its recipe declares (devEnv:), and it " &
+      "could not be realized: " & error.msg & "\nThe same environment is " &
+      "what `repro exec` activates; `repro exec -- true` reproduces this " &
+      "failure on its own.")
+  restoreBootstrapToolchainEnv(toolchainEnv)
+  if emitDevEnvDiagnostics(edge.artifact):
+    raise newException(ValueError,
+      "repro: the dev environment of " & projectRoot & " reported an " &
+      "error (above); its " & $receivers.len & " run-edge(s) cannot run " &
+      "without it.")
+  let ops = edge.artifact.shellOps
+  if ops.len == 0:
+    return
+  let identity = devEnvRunEdgeIdentity(ops)
+  var unremovable = initOrderedSet[string]()
+  proc inherited(name: string): string = getEnv(name)
+  for i in receivers:
+    for name in applyDevEnvToRunEdge(actions[i], ops, identity, inherited):
+      unremovable.incl(name)
+  for name in unremovable:
+    stderr.writeLine("repro: warning: the dev environment unsets " & name &
+      ", but run-edges inherit it from the environment repro was started " &
+      "in and an action's environment has no way to remove it; unset it " &
+      "before running repro if a test depends on its absence")
 
 proc devEnvPerformanceEvidenceJson(edge: DevEnvEdgeResult): JsonNode =
   let devStats = edge.devEnvResult.stats

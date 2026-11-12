@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 35,
-    "nimTestBinaries": 2762,
+    "nimTestBinaries": 2764,
     "pureUnitConsolidationGroups": 81,
-    "pureUnitTests": 756,
+    "pureUnitTests": 757,
     "staticallyDetectedRuntimeCompilerFlowTests": 138,
-    "testEntries": 2806
+    "testEntries": 2808
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1598,9 +1598,9 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 21,
-      "integration": 1523,
+      "integration": 1524,
       "platform/destructive": 177,
-      "pure unit": 756,
+      "pure unit": 757,
       "unclassified": 329
     },
     "graphOwnedTestArtifacts": [
@@ -1815,9 +1815,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2762,
+    "nimTestBinaryCount": 2764,
     "pythonTestFileCount": 44,
-    "testEntryCount": 2806
+    "testEntryCount": 2808
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -13873,6 +13873,28 @@
       "source": "libs/repro_cli_support/tests/t_revocation_takes_effect_on_the_next_frame.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_run_edge_dev_env_merge_and_key",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_build_engine",
+        "repro_cli_support",
+        "repro_core",
+        "repro_hash",
+        "repro_project_dsl",
+        "repro_provider_runtime"
+      ],
+      "owner": "libs/repro_cli_support",
+      "requiresReproBinary": false,
+      "source": "libs/repro_cli_support/tests/t_run_edge_dev_env_merge_and_key.nim",
+      "sourceSuiteCount": 3,
+      "staticCaseCount": 15,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -32196,6 +32218,23 @@
       "source": "tests/e2e/dev-env/t_e2e_repro_exec_shell.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 5,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_e2e_repro_test_run_edges_get_the_dev_env",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_test_support"
+      ],
+      "owner": "tests/e2e",
+      "requiresReproBinary": true,
+      "source": "tests/e2e/dev-env/t_e2e_repro_test_run_edges_get_the_dev_env.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

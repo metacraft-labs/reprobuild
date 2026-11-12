@@ -315,6 +315,7 @@ libs/repro_cli_support/tests/t_publish_refuses_a_dirty_prefix.nim	nim	2
 libs/repro_cli_support/tests/t_refresh_flake_lock_text_writes_the_fields_nix_reports.nim	nim	11
 libs/repro_cli_support/tests/t_reused_result_refused_when_key_does_not_cover_reads.nim	nim	1
 libs/repro_cli_support/tests/t_revocation_takes_effect_on_the_next_frame.nim	nim	1
+libs/repro_cli_support/tests/t_run_edge_dev_env_merge_and_key.nim	nim	15
 libs/repro_cli_support/tests/t_runquota_auto_spawn_defers_to_host_config.nim	nim	8
 libs/repro_cli_support/tests/t_s7_build_paths_reach_the_restore_config.nim	nim	6
 libs/repro_cli_support/tests/t_strategy_unknown_name_refused.nim	nim	8
@@ -1324,6 +1325,7 @@ tests/e2e/dev-env/t_e2e_repro_exec_does_not_leak_engine_source_root.nim	nim	3
 tests/e2e/dev-env/t_e2e_repro_exec_installed_prefix_nim.nim	nim	4
 tests/e2e/dev-env/t_e2e_repro_exec_recipe_compiler.nim	nim	2
 tests/e2e/dev-env/t_e2e_repro_exec_shell.nim	nim	5
+tests/e2e/dev-env/t_e2e_repro_test_run_edges_get_the_dev_env.nim	nim	1
 tests/e2e/dev-env/t_e2e_shell_hook_cd_activate_deactivate.nim	nim	1
 tests/e2e/dev-env/t_e2e_shell_hook_noop_io_bounded.nim	nim	1
 tests/e2e/dev-env/t_e2e_shell_hook_noop_latency.nim	nim	2
