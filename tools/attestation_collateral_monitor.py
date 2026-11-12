@@ -40,9 +40,27 @@ here is the same one ``repro_attest_verify/lifecycle`` implements for
 the Nim side, and ``t_attestation_fixture_lifecycle`` checks that side
 against its boundaries.
 
+TWO VERDICTS, AND THE LANDING ARM MAY GIVE ONLY ONE
+
+"This pin is inside its refresh horizon, or past its end" is a
+maintenance notice: it moves with the calendar, not with anyone's
+change, and no gate in the suite reads the wall clock, so a landing
+cannot have caused it or made it worse. Delivered as a refusal it makes
+the per-landing run red for the thirty days before every expiry --
+measured: no successful run in its last 300 -- and a gate that has never
+passed is not a gate. ``--landing`` therefore prints calendar findings
+(``due-for-refresh``, and ``expired`` for every class but the vintage
+one, whose expiry is already quiet) as notices, prefixed ``~``, and does
+not count them. What still refuses a landing is a contradiction in the
+corpus itself: a document from the future, a revocation list with no
+end, a vintage that is not expired, a publisher serving other bytes. The
+scheduled and manual runs omit the flag and keep exit 1 for the notice,
+which is the signal that someone has to refresh.
+
 EXIT CODES
 
-  0  nothing needs attention
+  0  nothing needs attention (with --landing: nothing a landing could
+     have broken; notices are printed and do not count)
   1  something does, and every line of stdout says which and what to do
   2  the tool could not do its job (a table it could not read, a fetch
      it could not complete). Deliberately distinct from 1: "I looked and
@@ -162,6 +180,11 @@ def classify(not_before: int, not_after: int | None, now: int,
     return "current"
 
 
+# The statuses that only the passage of time produces. The others are
+# facts about the pinned bytes, and a landing can be the thing that
+# introduced them.
+CALENDAR_STATUSES = {"due-for-refresh", "expired"}
+
 NEEDS_ATTENTION = {
     "not-yet-in-force", "due-for-refresh", "expired", "no-stated-end",
 }
@@ -256,6 +279,10 @@ def main(argv: list[str]) -> int:
     ap.add_argument("--horizon-days", type=int, default=DEFAULT_HORIZON_DAYS)
     ap.add_argument("--offline", action="store_true",
                     help="skip every fetch; report expiry only")
+    ap.add_argument("--landing", action="store_true",
+                    help="the per-landing verdict: report calendar "
+                         "findings (refresh horizon, expiry) as notices "
+                         "that do not fail the run; see the module docstring")
     ap.add_argument("--observed-digests", default=None,
                     help="a two-column table of name and sha256 to use "
                          "INSTEAD of fetching, so the drift decision and "
@@ -311,6 +338,7 @@ def main(argv: list[str]) -> int:
             observed[fields[0]] = fields[1]
 
     findings: list[str] = []
+    notices: list[str] = []
     quiet: list[str] = []
     unreachable: list[str] = []
     next_deadline: list[tuple[int, str]] = []
@@ -336,7 +364,11 @@ def main(argv: list[str]) -> int:
         # that runs out is a real failure with a real remedy.
         if status == "no-stated-end" and row["class"] == "minted-negative":
             loud = False
-        (findings if loud else quiet).append(line)
+        if (loud and args.landing and row["class"] != "historical-vintage"
+                and status in CALENDAR_STATUSES):
+            notices.append(line)
+        else:
+            (findings if loud else quiet).append(line)
 
     if not args.offline:
         for row in ledger:
@@ -375,6 +407,8 @@ def main(argv: list[str]) -> int:
           f"unattended refresh route, {routeless} without one")
     for line in findings:
         print("  ! " + line)
+    for line in notices:
+        print("  ~ " + line)
     for line in unreachable:
         print("  ? " + line)
     for line in quiet:
@@ -389,6 +423,9 @@ def main(argv: list[str]) -> int:
         print(f"  next expiry: {who} on "
               f"{datetime.datetime.fromtimestamp(when, datetime.timezone.utc).strftime(ISO)}"
               f" (in {days(now, when)} days)")
+    if notices:
+        print(f"  {len(notices)} artifact(s) due for refresh or expired "
+              "(notices; they do not fail a landing run)")
     if findings:
         print(f"  {len(findings)} artifact(s) need attention")
     if unreachable:
@@ -400,7 +437,8 @@ def main(argv: list[str]) -> int:
         return 2
     if findings:
         return 1
-    print("  nothing needs attention")
+    print("  nothing a landing could have broken" if notices
+          else "  nothing needs attention")
     return 0
 
 

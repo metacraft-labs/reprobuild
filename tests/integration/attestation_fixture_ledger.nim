@@ -84,7 +84,7 @@ const
   CensusText* = staticRead("attestation-corpus-census.tsv")
   FetchText* = staticRead("attestation-fixture-fetch.tsv")
 
-  LedgerReferenceInstant* = 1_790_985_600'i64
+  LedgerReferenceInstant* = 1_794_528_000'i64
     ## 2026-10-03T00:00:00Z. The instant the corpus census cases judge
     ## the pinned material at.
     ##

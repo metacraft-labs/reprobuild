@@ -1805,6 +1805,23 @@ proc runGitEnv(gitBin: string; args: openArray[string];
   ## a presence probe that lazily fetches would heal what it is measuring and
   ## report nothing, and a refill that cannot fetch would report a loss that
   ## upstream could still have repaired.
+  if input.len > 0 and inputFile.len == 0:
+    # Stdin comes from a file, never a pipe. Nim creates a child's pipes
+    # without close-on-exec, so a child another thread starts while this
+    # pipe is open keeps its write end after we close ours. Git then never
+    # sees end of input and waits as long as that child lives: the
+    # ``repro branch`` hang on ``cat-file --batch-check`` in another
+    # workspace (issues/2026-11-05-repro-branch-hangs-on-a-cat-file-in-another-workspace.md).
+    let temporary = createTempFile("git-input-", ".txt")
+    defer: removeFile(temporary.path)
+    try:
+      temporary.cfile.write(input)
+    finally:
+      temporary.cfile.close()
+    return runGitEnv(gitBin, args, lazyFetch, workingDir = workingDir,
+      inputFile = temporary.path, objectDirectory = objectDirectory,
+      alternateObjectDirectory = alternateObjectDirectory,
+      mergeStderr = mergeStderr)
   # ``inputFile`` runs git under the pool's POSIX shell so the shell, not
   # this process, feeds it the file; that shell's stderr is git's.
   var program = gitBin

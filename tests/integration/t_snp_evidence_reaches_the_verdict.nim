@@ -206,7 +206,7 @@ const
     vcKdsMilanChain: VerdictCorpusRow(name: "KdsMilanChainPem", bytes: 4602,
       sha256: "22e62f8d2c21a156470145fc75f7b5a377cb053ced3e97f0bd3f8d8ca5941ce6"),
     vcKdsMilanCrl: VerdictCorpusRow(name: "KdsMilanCrlDerHex", bytes: 866,
-      sha256: "dd68e9e3feb97dd0e95135feeae47d9cc193c73239a6281ec9884c00d5e6a525")]
+      sha256: "c06e868462a1954b6cbf07e19b55e87a0305933a81ad837138934be1f8c23b27")]
 
 proc verdictCorpusBytes(c: VerdictCorpus): string =
   case c
@@ -264,7 +264,7 @@ require_challenge = true
    .replace("@BL@", $bootloader).replace("@TEE@", $tee)
    .replace("@SNP@", $snp).replace("@UC@", $microcode)
 
-const Now = 1_790_121_600'i64
+const Now = 1_793_145_600'i64
   ## 2026-09-23T00:00:00Z. A fixed instant, so nothing below can move
   ## because the clock did — and the particular instant is derived
   ## rather than chosen, by the rule `snp_vectors` states: the first UTC

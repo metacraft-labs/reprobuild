@@ -43,6 +43,9 @@
 ##     detector reports nothing and the ref stays.
 ##   - ``report_mode_changes_nothing`` — the same purged ref in report mode is
 ##     reported with its removal command and left in place.
+##   - ``presence_probe_reads_its_ids_from_a_file_not_a_pipe`` — every git
+##     that reads ids on stdin (the ``repro branch`` hang) reads them from a
+##     file, observed through a logging stand-in for git (see its comment).
 ##
 ## CLI case, driving the built ``repro`` against a workspace made by
 ## ``repro workspace init`` with ``REPRO_WORKSPACE_CLONES`` in the temp root:
@@ -305,6 +308,20 @@ proc recoverMain(f: Fixture; w: LocalWork) =
   discard must(f.leaf, "checkout", "-q", "--", ".")
   discard must(f.leaf, "clean", "-fdq")
 
+# Stands in for ``git`` in the stdin regression below. It records whether its
+# own stdin is a pipe, then runs the real git. Justified: whether a git
+# process reads its ids from a pipe is not observable from outside the
+# process, and a timing test cannot show it deterministically (a child must
+# happen to start while the probe's pipe is open).
+proc writeStdinSpy(root, realGit: string): tuple[spy, log: string] =
+  result.log = root / "stdin-spy.log"
+  result.spy = root / "git-spy"
+  writeFile(result.spy, "#!/bin/sh\n" &
+    "if [ -p /dev/stdin ]; then pipe=pipe; else pipe=file; fi\n" &
+    "printf '%s %s\\n' \"$pipe\" \"$*\" >> " & quoteShell(result.log) & "\n" &
+    "exec " & quoteShell(realGit) & " \"$@\"\n")
+  setFilePermissions(result.spy, {fpUserExec, fpUserRead, fpUserWrite})
+
 suite "SPI-3: detector, repair and messages":
 
   test "purged_remote_ref_is_removed_with_message_a":
@@ -542,6 +559,36 @@ suite "SPI-3: detector, repair and messages":
       check stale == 1
       check refExists(f.leaf, "refs/remotes/origin/feat")
       check not fileExists(f.leaf / ".git" / "repro" / "dropped-refs.log")
+
+  test "presence_probe_reads_its_ids_from_a_file_not_a_pipe":
+    ## Regression for the ``repro branch`` hang on ``git -C <leaf> cat-file
+    ## --batch-check`` (issues/2026-11-05-repro-branch-hangs-on-a-cat-file-in-another-workspace.md).
+    ## Nim creates a child's pipes without close-on-exec, so a child another
+    ## thread starts while the probe's stdin pipe is open keeps its write end;
+    ## git then never sees end of input and waits for that child. Stdin of
+    ## every git that reads input (``--batch-check``, ``--stdin``) must be a
+    ## file, so no other process can hold it open.
+    if findExe("git").len == 0:
+      skip("needs git on PATH")
+    else:
+      let root = createTempDir("repro-spi3-stdin-", "")
+      defer:
+        tearDown()
+        removeDir(root)
+      let f = setUp(root)
+      let (spy, log) = writeStdinSpy(root, f.gitBin)
+      discard checkLeaf(spy, f.leaf, lcmReport, f.cache)
+      var probes, piped = 0
+      for line in readFile(log).splitLines():
+        let fields = line.split(' ', maxsplit = 1)
+        if fields.len < 2: continue
+        if "--batch-check" in fields[1] or "--stdin" in fields[1]:
+          inc probes
+          if fields[0] == "pipe":
+            inc piped
+      # Without the probe running at all, "no pipe" would hold vacuously.
+      check probes > 0
+      check piped == 0
 
 # ---- CLI --------------------------------------------------------------------
 

@@ -30200,6 +30200,7 @@ const pythonTestPaths*: seq[string] = @[
   "tests/integration/test_dev_env_local_flake_root.py",
   "tests/integration/test_nix_daemon_cache.py",
   "tests/test_dev_env_m9_policy.py",
+  "tests/unit/test_attestation_collateral_monitor_landing.py",
   "tests/unit/test_bootstrap_dry_run_outputs.py",
   "tests/unit/test_build_report_attribution.py",
   "tests/unit/test_bump_version.py",

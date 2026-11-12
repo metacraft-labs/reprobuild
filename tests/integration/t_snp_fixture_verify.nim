@@ -223,7 +223,7 @@ let milanArk = milanChain[1]
 let milanCrl = @[bytesOfHex(KdsMilanCrlDerHex)]
 
 const
-  Now = 1_790_121_600'i64
+  Now = 1_793_145_600'i64
     ## 2026-09-23T00:00:00Z. NOT chosen — derived, by the clock rule
     ## `snp_vectors` states: the first UTC midnight at which every
     ## artifact this gate judges is in force. The latest of them is the

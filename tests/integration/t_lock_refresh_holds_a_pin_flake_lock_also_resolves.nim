@@ -50,21 +50,62 @@ suite "repro lock refresh holds a pin flake.lock also resolves":
     if not nf3Prerequisites("t_lock_refresh_holds_a_pin_flake_lock_also_resolves"):
       skip("needs git on PATH and a built ./build/bin/repro (named above)")
     else:
+      let catalog = getEnv("REPROBUILD_PACKAGES_ROOT",
+        parentDir(getCurrentDir()) / "reprobuild-packages")
+      if not dirExists(catalog) or findExe("nim").len == 0:
+        echo "SKIPPED (loudly): needs nim on PATH and a reprobuild-packages " &
+          "checkout (REPROBUILD_PACKAGES_ROOT); catalog=" & catalog
+        skip("nim or the reprobuild-packages catalog is missing (named above)")
+      putEnv("REPROBUILD_PACKAGES_ROOT", catalog)
       let fx = setupNf2Fixture("refresh-holds")
       defer: removeDir(fx.scratch)
       isolateNf2Config(fx)
       defer: releaseNf2Config()
       let betaSeed = fx.seedSha[1]
       let epsilonSeed = fx.seedSha[4]
-      writeFile(fx.app / "repro.nim",
-        "import repro_project_dsl\n\npackage app:\n  version \"1.0.0\"\n")
+      # A package with a real `nim.c` edge, so the solve has a package for the
+      # targeted re-pin below to name (an empty solve has none). The plain
+      # `nim` use resolves against the reprobuild-packages checkout.
+      writeFile(fx.app / "repro.nim", """
+import repro_project_dsl
+
+package app:
+  defaultToolProvisioning "path"
+  uses:
+    "nim >=1.6 <3.0"
+  build:
+    let main = nim.c(
+      source = "src/app.nim",
+      output = "build/app",
+      actionId = "app.build.main",
+      extraInputs = @["src"])
+    discard collect("default", @[main])
+""")
+      createDir(fx.app / "src")
+      writeFile(fx.app / "src" / "app.nim", "echo \"app\"\n")
       # Solved for THIS host's platform id, so the refresh is a full re-solve
       # and not the foreign-platform sibling re-pin (which already holds).
       writeFile(fx.app / "repro.lock", appLock(fx, betaSeed, epsilonSeed)
         .replace("platform = \"x86_64-linux\"",
                  "platform = \"" & currentPlatformId() & "\""))
+      # One refresh at the seed moves no sibling and records the `nim` package
+      # the targeted re-pin below names.
+      let seedRefresh = run(q(fx.repro) & " lock refresh " & q(fx.app),
+        cwd = fx.app)
+      checkpoint(seedRefresh.output)
+      check seedRefresh.code == 0
       publishAll(fx)
       commitLockAndPublish(fx, "app: locks at the seed")
+
+      # Identity is the canonical repository URL, never the spelling: the lock
+      # records `beta`'s origin as a plain URL and `flake.nix` declares the
+      # same repository as `git+<url>?ref=main`, and the hold below only
+      # happens because the two are recognised as one repository.
+      let lockUrl = originUrl(fx, "beta")
+      let flakeNix = readFile(fx.app / "flake.nix")
+      check lockUrl in readFile(fx.app / "repro.lock")
+      check ("git+" & lockUrl & "?ref=main") in flakeNix
+      check ("url = \"" & lockUrl & "\"") notin flakeNix
 
       let betaNext = moveAndPublishSibling(fx, "beta", "beta moves")
       let epsilonNext = moveAndPublishSibling(fx, "epsilon", "epsilon moves")
@@ -82,6 +123,30 @@ suite "repro lock refresh holds a pin flake.lock also resolves":
       check readFile(fx.app / "flake.lock") == flakeBefore
       check "moved in NEITHER" in refresh.output
       check "repro lock update beta" in refresh.output
+
+      # A targeted re-pin carries sibling pins forward from the committed
+      # lock, so `beta` stays too and `flake.lock` is untouched.
+      let repin = run(q(fx.repro) & " lock refresh " & q(fx.app) &
+        " --repin=nim", cwd = fx.app)
+      checkpoint(repin.output)
+      check repin.code == 0
+      check reproLockRevisionOf(readFile(fx.app / "repro.lock"), "beta") ==
+        betaSeed
+      check readFile(fx.app / "flake.lock") == flakeBefore
+
+      # The hold follows the lock the refresh writes, not only the committed
+      # one: a refresh into another path (`--lock`) of a lock at the seed holds
+      # `beta` as well.
+      let otherLock = fx.scratch / "other.lock"
+      writeFile(otherLock, appLock(fx, betaSeed, epsilonSeed)
+        .replace("platform = \"x86_64-linux\"",
+                 "platform = \"" & currentPlatformId() & "\""))
+      let viaLock = run(q(fx.repro) & " lock refresh " & q(fx.app) &
+        " --lock=" & q(otherLock), cwd = fx.app)
+      checkpoint(viaLock.output)
+      check viaLock.code == 0
+      check reproLockRevisionOf(readFile(otherLock), "beta") == betaSeed
+      check reproLockRevisionOf(readFile(otherLock), "epsilon") == epsilonNext
 
       # The gate still refuses the stale `beta` pin (the checkout is ahead of
       # it), but no longer through an H2 disagreement, and its remedy is the
