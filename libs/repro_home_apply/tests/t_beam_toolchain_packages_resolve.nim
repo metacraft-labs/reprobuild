@@ -25,13 +25,22 @@
 ##   * on x86_64-windows every executable but ``rebar3`` (upstream ships only
 ##     an escript there) selects a tarball whose executable is ``<name>.exe``
 ##     or ``<name>.bat``;
+##   * the name a path-mode ``uses:`` probes PATH for (the projected use's
+##     ``executableName``) is the executable itself — for ``erlang`` too,
+##     whose ``executable erlang: name: "erl"`` clause points the probe at
+##     ``erl`` — and a path-mode ``uses: "erlang"`` resolves a real ``erl``
+##     dropped on a scratch PATH;
 ##   * ``erlang``, the OTP distribution, still resolves, to ``bin/erl``.
 ##
 ## Nothing is realised and nothing is mocked: the linked definitions and the
-## real selector run against synthetic targets (``realizationTargetFor``), so
-## the suite behaves the same on any host.
+## real selector run against synthetic targets (``realizationTargetFor``),
+## and the PATH case runs the real path-mode resolver over a scratch
+## directory holding a stub ``erl`` script, the only host fact used. The
+## suite behaves the same on any host.
 
-import std/[strutils, unittest]
+import std/[os, strutils, unittest]
+from repro_core/paths import extendedPath
+from repro_test_support import testCaseScratchSlug
 
 import repro_project_dsl
 import repro_dsl_stdlib/package_registry
@@ -58,6 +67,24 @@ proc macosArm(): RealizationTarget =
 
 proc windowsX64(): RealizationTarget =
   realizationTargetFor(pcX86_64, poWindows, mlX86_64_v1)
+
+let ScratchRoot = "build/test-tmp/t-beam-toolchain-" & testCaseScratchSlug()
+
+proc stubOnScratchPath(name: string): tuple[dir, exe: string] =
+  ## A runnable stub named ``name`` in a fresh scratch directory, which is
+  ## then the WHOLE search list handed to the resolver, so nothing on the
+  ## host's own PATH (a dev shell's real ``erl``) can satisfy the probe.
+  result.dir = absolutePath(ScratchRoot / "stub-bin")
+  if dirExists(extendedPath(result.dir)):
+    removeDir(extendedPath(result.dir))
+  createDir(extendedPath(result.dir))
+  result.exe =
+    when defined(windows): result.dir / (name & ".cmd")
+    else: result.dir / name
+  writeFile(extendedPath(result.exe),
+    when defined(windows): "@echo stub\n" else: "#!/bin/sh\necho stub\n")
+  when not defined(windows):
+    setFilePermissions(result.exe, {fpUserRead, fpUserWrite, fpUserExec})
 
 proc pathBasename(path: string): string =
   ## The last component of ``path`` under either separator: the Windows arms
@@ -95,6 +122,21 @@ suite "BEAM toolchain executables resolve by their own names":
       check r.selection.tarball.os == "windows"
       check pathBasename(r.selection.tarball.executablePath) in
         [name & ".exe", name & ".bat"]
+
+  test "a path-mode uses: probes for the executable itself":
+    for (name, _) in BeamExecutables:
+      checkpoint name
+      check profileToolUse(name).useDef.executableName == name
+    # OTP ships no ``erlang``; the package's ``executable`` clause renames
+    # the probe to the binary its arms realise.
+    check profileToolUse("erlang").useDef.executableName == "erl"
+
+  test "a path-mode uses: \"erlang\" resolves erl from PATH":
+    let stub = stubOnScratchPath("erl")
+    let profile = resolvePathOnlyTool(profileToolUse("erlang").useDef,
+      pathValue = stub.dir)
+    check profile.executableName == "erl"
+    check profile.resolvedExecutablePath == stub.exe
 
   test "erlang, the OTP distribution, resolves to erl on Linux":
     let r = resolveProfilePackage("erlang", linuxX64(), DefaultSelectionPolicy)

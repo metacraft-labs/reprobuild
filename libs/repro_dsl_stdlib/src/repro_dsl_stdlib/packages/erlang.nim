@@ -1,15 +1,17 @@
 ## ``erlang`` — the Erlang/OTP distribution. Its default executable is
 ## ``erl``.
 ##
-## OTP ships no executable named ``erlang``, and a path-mode ``uses:`` probes
-## PATH for the selector's own name. So a recipe declares the executables it
-## runs by their own names — ``erl``, ``erlc`` and ``escript``, each its own
-## package (``erl.nim``, ``erlc.nim``, ``escript.nim``) realised from this
-## same distribution: nixpkgs' ``erlang`` on Nix-capable hosts and the OTP
-## installer below on Windows, the way ``npm`` and ``npx`` share ``node``'s
+## OTP ships no executable named ``erlang``. The ``executable erlang: name:
+## "erl"`` clause at the bottom therefore makes a path-mode ``uses:
+## "erlang"`` probe PATH for ``erl``, the binary the nix and Windows arms
+## realise, the way ``foundry`` probes for ``forge``. A recipe that runs
+## more of the distribution declares each executable by its own name:
+## ``erl``, ``erlc`` and ``escript``. Each is its own package (``erl.nim``,
+## ``erlc.nim``, ``escript.nim``) realised from this same distribution:
+## nixpkgs' ``erlang`` on Nix-capable hosts and the OTP installer below on
+## Windows, the way ``npm`` and ``npx`` share ``node``'s
 ## (reprobuild-pm/issues/2026-11-07-the-stdlib-beam-packages-cannot-provision-erl-mix-or-rebar3.md).
-## This package stays for a profile or recipe that names the distribution;
-## keep its arms and theirs in step.
+## Keep this package's arms and theirs in step.
 ##
 ## Archive realizations harvested by tools/catalog-harvester. GM4b: the
 ## harvester emits ``tarball`` statements, which live in the hand-maintained
@@ -121,3 +123,9 @@ package erlang:
       env = "ERLANG_HOME=${prefix}",
       cpu = "x86_64",
       os = "windows"
+
+  # OTP ships ``erl``, not ``erlang``: point the path-mode probe of a
+  # ``uses: "erlang"`` at the binary the arms above realise, so the two
+  # provisioning modes agree on which executable the package is.
+  executable erlang:
+    name: "erl"
