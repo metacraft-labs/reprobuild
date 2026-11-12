@@ -706,16 +706,16 @@ decision for a human**, not something this work should quietly settle.
 `scripts/install/repro-install.sh`, at **`/sh`** (`REPRO_GET_SH_SOURCE`
 defaults to `repo`) and again at **`/repo-sh`** as an alias, and `/pwsh`
 is `scripts/install/repro-install.ps1`. Both carry the pinned anchor
-digest. On apt and dnf systems a default `/sh` run verifies the
-organisation key, registers the repository and proceeds. Elsewhere
-(Arch, whose `REPRO_ARCH_URL` is empty by default, macOS, or a distribution
-it does not recognise that has neither `apt-get` nor `dnf`) `/sh` falls back to the tarball method and refuses, as
-described in "The trust anchor, and why it is pinned by digest". On NixOS
-it uses the `nixos` method, which does not read the anchor. `/pwsh`
-defaults to Scoop when Scoop is installed, which checks archive hashes
-against the bucket manifest, and uses the anchor only for the archive
-method (`Install-FromArchive`), which refuses for the same reasons as the
-tarball fallback.
+digest. On apt and dnf systems a `/sh` run as root verifies the
+organisation key, registers the repository and proceeds. Elsewhere (Arch,
+whose `REPRO_ARCH_URL` is empty by default, macOS, or a distribution it
+does not recognise that has neither `apt-get` nor `dnf`) `/sh` falls back
+to the tarball method and refuses, as described in "The trust anchor, and
+why it is pinned by digest". On NixOS it uses the `nixos` method, which
+does not read the anchor. `/pwsh` defaults to Scoop when Scoop is
+installed, which checks archive hashes against the bucket manifest, and
+uses the anchor only for the archive method (`Install-FromArchive`), which
+refuses for the same reasons as the tarball fallback.
 `REPRO_GET_SH_SOURCE=legacy` puts the nix/local-prefix
 `install-on-distributions.sh` back at `/sh`, as a rollback that needs no
 code change.

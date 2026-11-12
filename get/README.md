@@ -29,8 +29,8 @@ It exposes four surfaces:
   only if neither does.
 
 `_headers` forces `Content-Type: text/plain; charset=utf-8` + a short cache TTL on
-`/sh` and `/pwsh`, so `curl … | less` shows the source and a fixed URL always
-yields the current bootstrapper.
+`/sh`, `/repo-sh` and `/pwsh`, so `curl … | less` shows the source and a fixed
+URL always yields the current bootstrapper.
 
 The artifact **store** remains GitHub Releases / `downloads.reprobuild.com`;
 `get.reprobuild.com` is only the advertised UX.
