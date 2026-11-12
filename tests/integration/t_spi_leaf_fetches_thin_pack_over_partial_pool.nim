@@ -81,6 +81,11 @@
 ##     unwritable pool: registration and the dissociating repack both fail,
 ##     the checkout cannot be read, so the clone falls back to one that
 ##     borrows nothing, and the action's result says so.
+##   - ``clone_reference_of_empty_upstream_keeps_the_borrow`` — an upstream
+##     with no commits leaves the new clone's HEAD unborn, so there is no tree
+##     to check out. The clone must still borrow from the pool (alternates
+##     kept), not be redone without the reference because ``reset --hard
+##     HEAD`` failed.
 ##
 ## No mocks: real ``git``, real repositories, and the real fetch and clone
 ## actions driven through the build engine (``runBuild``), as ``repro`` runs
@@ -638,3 +643,32 @@ suite "SPI: leaves of a partial-clone pool fetch thin packs":
         check res.results[0].stderr.contains("without borrowing from that pool")
       check readFile(clone / "big.txt") == bigFile("extra\n")
       check readAlternates(clone).len == 0
+
+  test "clone_reference_of_empty_upstream_keeps_the_borrow":
+    if findExe("git").len == 0:
+      skip("needs git on PATH")
+    else:
+      let root = createTempDir("repro-spi-clone-empty-upstream-", "")
+      defer:
+        tearDown()
+        removeDir(root)
+      let f = setUp(root, root / "repo-workspaces" / "clones" / "up.git",
+        owned = false, leafCount = 0)
+      # A second, empty upstream and a pool cloned from it.
+      let emptyUp = root / "empty-up"
+      createDir(emptyUp)
+      discard must(emptyUp, "init", "-q")
+      let emptyPool = root / "empty-pool.git"
+      discard must(root, "clone", "-q", "--bare", "--no-local",
+        "file://" & emptyUp, emptyPool)
+      var e = f
+      e.url = "file://" & emptyUp
+      let (res, clone) = cloneThroughEngine(e, "", emptyPool,
+        singleBranch = false)
+      # An empty clone has no HEAD to record, so the action itself fails at
+      # its HEAD probe; what is under test is that the borrow survived.
+      check res.results.len == 1
+      let alternates = readAlternates(clone)
+      check alternates.len == 1
+      if alternates.len == 1:
+        check samePathOnDisk(alternates[0], emptyPool / "objects")

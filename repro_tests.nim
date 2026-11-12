@@ -30274,6 +30274,7 @@ const pythonTestPaths*: seq[string] = @[
   "tests/unit/test_profile_daemon_worker_syscalls.py",
   "tests/unit/test_prune_undeclared_test_binaries.py",
   "tests/unit/test_publish_surface_routing.py",
+  "tests/unit/test_readme_documents_only_dispatched_verbs.py",
   "tests/unit/test_regenerate_suite_artifacts.py",
   "tests/unit/test_release_git.py",
   "tests/unit/test_release_native_packages.py",
