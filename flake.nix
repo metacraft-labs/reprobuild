@@ -352,7 +352,13 @@
       # 2026-11-12-io-mon-macos-shim-deadlocks-a-fork-child-on-its-own-fd-lock).
       # Such a child now skips the shim's tables until exec and reports the skip
       # as event-loss.
-      url = "github:metacraft-labs/io-mon/8fd53d43f0a4c25d54c9c49494ac7dac4f02d63f";
+      # Bumped 8fd53d43 -> 35829647 (2026-11-12, io-mon `agents`): the preload
+      # runtime's trap handler reaches the shim's signal-death flush through a
+      # weak reference again. c8bc874 made it a strong one, so a hook library
+      # built on the runtime without the shim failed to load ("undefined symbol:
+      # repro_linux_sig_safe_flush_at_signal_death") and
+      # t_stackable_hooks_extracted_process_tree's extracted runtime exited 127.
+      url = "github:metacraft-labs/io-mon/35829647d603b481276d2632b39ec2a9ce3625b2";
       flake = false;
     };
     nim-shm-gset-src = {
