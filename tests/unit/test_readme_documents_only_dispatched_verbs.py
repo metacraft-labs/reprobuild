@@ -54,6 +54,16 @@ class ReadmeMatchesDispatcher(unittest.TestCase):
                 self.assertNotIn("dependenc", line)
                 self.assertIn("repositor", line)
 
+    def test_user_guide_does_not_show_the_undispatched_verbs(self):
+        # `init`, `search` and `upgrade` have no dispatch arm; the user-guide
+        # pages once showed `repro init` as a working command too.
+        offenders = []
+        for page in sorted((ROOT / "docs" / "user-guide").glob("*.md")):
+            for v in sorted(set(documented_verbs(page.read_text(encoding="utf-8")))):
+                if v in ("init", "search", "upgrade"):
+                    offenders.append(f"{page.name}: repro {v}")
+        self.assertEqual(offenders, [])
+
 
 if __name__ == "__main__":
     unittest.main()
