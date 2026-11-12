@@ -241,6 +241,7 @@ libs/repro_build_engine/tests/test_tool_identity_env_plumbing.nim	nim	12
 libs/repro_build_engine/tests/test_umask_wrap_both_spawn_paths.nim	nim	8
 libs/repro_build_engine/tests/test_wrapped_monitor_evidence_ownership.nim	nim	3
 libs/repro_bundle/tests/t_repro_bundle_halves.nim	nim	9
+libs/repro_cargo_gc/tests/t_rqe_cg2_cargo_gc.nim	nim	14
 libs/repro_cas_store/tests/t_cas_ingest_link.nim	nim	25
 libs/repro_cas_store/tests/t_cas_link_mutation_safety.nim	nim	16
 libs/repro_cas_store/tests/t_cas_materialize_link.nim	nim	23

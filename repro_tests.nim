@@ -2577,6 +2577,17 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "",
     singleReason: "no other source shares its compile options"),
   TestSpec(
+    source: "libs/repro_cargo_gc/tests/t_rqe_cg2_cargo_gc.nim",
+    binary: "build/test-bin/t_rqe_cg2_cargo_gc",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "",
+    singleReason: "no other source shares its compile options"),
+  TestSpec(
     source: "libs/repro_cas_store/tests/t_cas_ingest_link.nim",
     binary: "build/test-bin/t_cas_ingest_link",
     defines: @[],
