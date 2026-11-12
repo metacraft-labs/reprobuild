@@ -165,21 +165,21 @@ proc replaceFirst(data: seq[byte]; needle, replacement: string): seq[byte] =
 # ---------------------------------------------------------------------
 
 const
-  Now = 1_790_985_600'i64
+  Now = 1_794_441_600'i64
     ## 2026-10-03T00:00:00Z. Derived by the clock rule `snp_vectors`
     ## states and `t_attestation_fixture_lifecycle` enforces: the first
     ## UTC midnight at which every artifact this gate judges is in
     ## force. The latest of them is the vendor's platform withdrawal
-    ## list, which states a this-update of 2026-10-02T17:26:12Z and a
-    ## next-update of 2026-11-01T17:26:12Z; every certificate here is
+    ## list, which states a this-update of 2026-11-11T23:50:11Z and a
+    ## next-update of 2026-12-11T23:50:11Z; every certificate here is
     ## inside its own window at that midnight too.
     ##
     ## Fixed rather than read from the host: a gate that consulted the
-    ## real clock would pass today and start failing on 2026-11-01,
+    ## real clock would pass today and start failing on 2026-12-11,
     ## which is a date nobody chose and a failure nobody would connect
     ## to this file.
   BeforeTheListIsInForce = 1_789_000_000'i64   ## 2026-09-10T02:26:40Z
-  AfterTheListExpires = 1_794_000_000'i64      ## 2026-11-06T21:20:00Z
+  AfterTheListExpires = 1_797_033_600'i64      ## 2026-12-12T00:00:00Z
   BeforeTheLeafIsValid = 1_609_459_200'i64     ## 2021-01-01T00:00:00Z
   AfterTheV4LeafExpires = 1_900_000_000'i64    ## 2030-03-17T16:26:40Z
 

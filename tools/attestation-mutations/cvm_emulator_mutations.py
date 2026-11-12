@@ -215,7 +215,7 @@ ROWS: list[Row] = [
           "proc describeMockChain*(inputs: AuthoritativeInputs): CheckFinding =")]),
     Row("R10", "the positive control's clock is moved past its collateral",
         REFUSE,
-        [(REFUSE, "  SnpInstant = 1_790_121_600'i64",
+        [(REFUSE, "  SnpInstant = 1_793_145_600'i64",
           "  SnpInstant = 1_800_000_000'i64")]),
     Row("R11", "the security processor's evaluator gains a sixth argument",
         REFUSE,

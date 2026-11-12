@@ -133,24 +133,24 @@ type
 const
   PinnedClockGates: array[6, PinnedClockGate] = [
     PinnedClockGate(
-      source: "t_snp_fixture_verify.nim", now: 1_790_121_600'i64,
+      source: "t_snp_fixture_verify.nim", now: 1_793_145_600'i64,
       mustBeCurrent: @["GsgMilanVcekDerHex", "KdsMilanCrlDerHex",
                        "VirteeMilanVcekDerHex"],
       notRequiredCurrent: @[]),
     PinnedClockGate(
-      source: "t_snp_chain_requires_amd_root.nim", now: 1_790_121_600'i64,
+      source: "t_snp_chain_requires_amd_root.nim", now: 1_793_145_600'i64,
       mustBeCurrent: @["KdsGenoaCrlDerHex", "KdsMilanCrlDerHex",
                        "KdsTurinCrlDerHex", "VirteeMilanVcekDerHex",
                        "VirteeTurinVcekDerHex"],
       notRequiredCurrent: @["ImpostorArkHex", "ImpostorAskHex",
                             "ImpostorVcekHex"]),
     PinnedClockGate(
-      source: "t_snp_tcb_policy.nim", now: 1_790_121_600'i64,
+      source: "t_snp_tcb_policy.nim", now: 1_793_145_600'i64,
       mustBeCurrent: @["GsgMilanVcekDerHex", "KdsMilanCrlDerHex",
                        "VirteeMilanVcekDerHex"],
       notRequiredCurrent: @[]),
     PinnedClockGate(
-      source: "t_tdx_chain_requires_intel_root.nim", now: 1_790_985_600'i64,
+      source: "t_tdx_chain_requires_intel_root.nim", now: 1_794_441_600'i64,
       mustBeCurrent: @["IntelRootCrlDerHex", "IntelSgxRootCaDerHex",
                        "PcsPckCrlPlatformDerHex",
                        "PcsPckCrlProcessorDerHex"],
@@ -166,7 +166,7 @@ const
                             "IntelSampleLeafDerHex", "IntelSampleRootDerHex",
                             "PcsPckCrlPlatformWithoutNextUpdateDerHex"]),
     PinnedClockGate(
-      source: "t_tdx_collateral_and_verifier_arm.nim", now: 1_790_985_600'i64,
+      source: "t_tdx_collateral_and_verifier_arm.nim", now: 1_794_528_000'i64,
       mustBeCurrent: @["IntelSgxRootCaDerHex", "IntelTcbSigningCertDerHex",
                        "PcsPckCrlPlatformDerHex", "PcsSgxQeIdentityJson",
                        "PcsSgxTcbInfoJson", "PcsTcbInfoEmrJson",
@@ -184,7 +184,7 @@ const
       # the other three do, and the one refreshing that list will break
       # without the ledger naming it. The scan now reads both spellings.
       source: "t_snp_evidence_reaches_the_verdict.nim",
-      now: 1_790_121_600'i64,
+      now: 1_793_145_600'i64,
       mustBeCurrent: @["GsgMilanVcekDerHex", "KdsMilanCrlDerHex",
                        "VirteeMilanVcekDerHex"],
       notRequiredCurrent: @[])]
@@ -304,7 +304,7 @@ proc codeOnly(text: string): string =
   ##
   ## Nim's character literal IS tracked, and the thing that makes that
   ## delicate is that `'` is also the numeric-suffix sigil — a reader
-  ## that treated `1_790_985_600'i64` as an opening quote would swallow
+  ## that treated `1_794_528_000'i64` as an opening quote would swallow
   ## the rest of the line, including any reference on it. The two are
   ## told apart the way the compiler tells them apart: a `'` directly
   ## after an identifier or a number character is a suffix, and anywhere
@@ -517,7 +517,11 @@ suite "every date is read out of the artifact, not out of the table":
     # And its sibling, which differs only by carrying the field, does.
     let sib = windowOfRow(rowNamed("PcsPckCrlPlatformDerHex"))
     check sib.hasNotAfter
-    check sib.notBefore == w.notBefore
+    # The negative is minted FROM the platform list of 2026-10-02 and is pinned
+    # to it on purpose (a refresh would re-mint it under a key this repository
+    # does not hold), so its window stays at that list's thisUpdate while the
+    # sibling moves on.
+    check w.notBefore == parseIsoInstant("2026-10-02T17:26:12Z", "the negative's source list")
 
   test "the unreadable row is unreadable AT THE RULE it names":
     # A pinned trust root this build's certificate reader refuses,
@@ -803,7 +807,7 @@ suite "pinned clocks agree with the material they judge":
     # other half, and both shapes are in the gates this scans: the
     # trust-domain collateral gate writes `'"'` and every gate writes
     # `'i64`.
-    check Name in codeOnly("check now == 1_790_985_600'i64 and " & Name)
+    check Name in codeOnly("check now == 1_794_528_000'i64 and " & Name)
     check Name in codeOnly("if c == '\"': discard " & Name)
     check Name in codeOnly("for x in s.split('\\t'): discard " & Name)
     check Name in codeOnly("if c == '#': discard " & Name)
@@ -897,15 +901,19 @@ suite "pinned clocks agree with the material they judge":
       checkpoint(g.source & ": states " & iso(g.now) & ", rule gives " &
                  iso(openingMidnight(g)))
       check g.now == openingMidnight(g)
-    # And the rule is not a constant function: the two vendors' material
-    # came into force on different days, so the six gates carry two
-    # distinct clocks and not one. Without this a derivation that
-    # returned the same midnight for every input would satisfy the loop.
+    # And the rule is not a constant function: the gates' material came into
+    # force on different days, so the gates carry DISTINCT clocks and not one.
+    # After the 2026-11 Intel refresh there are three: the AMD gates
+    # (2026-10-28), the TDX chain gate, whose judged material is all issued by
+    # 2026-11-11 (2026-11-12), and the TDX collateral gate (2026-11-13).
+    # Without this a derivation that returned the same midnight for every
+    # input would satisfy the loop.
     var clocks = initCountTable[int64]()
     for g in PinnedClockGates: clocks.inc g.now
-    check clocks.len == 2
-    check iso(1_790_121_600'i64) == "2026-09-23T00:00:00Z"
-    check iso(1_790_985_600'i64) == "2026-10-03T00:00:00Z"
+    check clocks.len == 3
+    check iso(1_793_145_600'i64) == "2026-10-28T00:00:00Z"
+    check iso(1_794_441_600'i64) == "2026-11-12T00:00:00Z"
+    check iso(1_794_528_000'i64) == "2026-11-13T00:00:00Z"
 
   test "the rule rounds UP to a midnight, and is exact when it lands on one":
     # `firstMidnightAtOrAfter` is the whole of the "pick one instant"
@@ -921,8 +929,8 @@ suite "pinned clocks agree with the material they judge":
     # chain gates judge is the Turin list, and it is NOT a midnight.
     let turin = windowOfRow(rowNamed("KdsTurinCrlDerHex"))
     check turin.notBefore mod Day != 0
-    check firstMidnightAtOrAfter(turin.notBefore) == 1_790_121_600'i64
-    check turin.notBefore < 1_790_121_600'i64
+    check firstMidnightAtOrAfter(turin.notBefore) == 1_793_145_600'i64
+    check turin.notBefore < 1_793_145_600'i64
 
   test "the scan reads BOTH spellings a gate can declare its clock in":
     # The repair above, with its own case. Without this the scan could
@@ -988,10 +996,10 @@ suite "the corpus as it stands, at a pinned instant":
       inc observed
       if row.observed > latest: latest = row.observed
     check observed == 22
-    check latest == "2026-10-02"
+    check latest == "2026-11-12"
     check LedgerReferenceInstant ==
       parseIsoInstant(latest & "T00:00:00Z", "the latest observation") + Day
-    check iso(LedgerReferenceInstant) == "2026-10-03T00:00:00Z"
+    check iso(LedgerReferenceInstant) == "2026-11-13T00:00:00Z"
 
   test "the instant the corpus was last looked at is one every observation reaches":
     # WHY THE CLOSING MIDNIGHT AND NOT THE OPENING ONE, as the property
@@ -1020,7 +1028,7 @@ suite "the corpus as it stands, at a pinned instant":
     # And the opening midnight is NOT equivalent, which is what makes this
     # a repair. A corpus in which no observation started late would leave
     # this at zero and the case would be a tautology.
-    check notReachedAtOpen == 7
+    check notReachedAtOpen == 4
 
   test "an observation date overlaps the window the artifact states":
     # What stops the column above being free. You cannot have fetched,
@@ -1049,7 +1057,7 @@ suite "the corpus as it stands, at a pinned instant":
       let w = windowOfRow(rowNamed(name))
       check classify(w, LedgerReferenceInstant) == lsCurrent
       check isUsable(classify(w, LedgerReferenceInstant))
-      check iso(w.notAfter) == "2026-11-09T01:00:00Z"
+      check iso(w.notAfter) == "2026-12-09T01:00:00Z"
       # And they came into force AFTER the clocks the gates used to
       # pin, which is the whole reason the clocks moved in the same
       # change. 1_788_220_800 is 2026-09-01T00:00:00Z, what the three
@@ -1149,8 +1157,8 @@ suite "the corpus as it stands, at a pinned instant":
       if w.notAfter < soonest:
         soonest = w.notAfter
         who = row.name
-    check who == "PcsTcbInfoSprJson"
-    check iso(soonest) == "2026-11-01T17:13:18Z"
+    check who == "KdsMilanCrlDerHex"
+    check iso(soonest) == "2026-12-09T01:00:00Z"
     check soonest > LedgerReferenceInstant
 
   test "everything expired here is pinned for being expired":
