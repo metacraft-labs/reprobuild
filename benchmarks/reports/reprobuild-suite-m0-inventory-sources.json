@@ -2710,7 +2710,7 @@
           "directExecutionLine": false,
           "enclosingCallable": "compileFloorProvider",
           "executedVariables": [],
-          "line": 40,
+          "line": 50,
           "path": "tests/e2e/dev-env/t_e2e_provider_dev_env_implicit_floor.nim",
           "patterns": [
             "repro-extract-interface"
@@ -2726,7 +2726,7 @@
           "directExecutionLine": false,
           "enclosingCallable": "compileFloorProvider",
           "executedVariables": [],
-          "line": 42,
+          "line": 52,
           "path": "tests/e2e/dev-env/t_e2e_provider_dev_env_implicit_floor.nim",
           "patterns": [
             "repro-compile-provider-binary"
@@ -21584,8 +21584,8 @@
       "owner": "libs/repro_profile_compile",
       "requiresReproBinary": false,
       "source": "libs/repro_profile_compile/tests/t_profile_compile_relative_dirs_are_anchored.nim",
-      "sourceSuiteCount": 1,
-      "staticCaseCount": 2,
+      "sourceSuiteCount": 2,
+      "staticCaseCount": 4,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -32011,7 +32011,7 @@
       "requiresReproBinary": false,
       "source": "tests/e2e/dev-env/t_e2e_provider_dev_env_implicit_floor.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 2,
+      "staticCaseCount": 3,
       "staticallyDetectedRuntimeCompilerFlow": true,
       "targetOs": "soAny"
     },

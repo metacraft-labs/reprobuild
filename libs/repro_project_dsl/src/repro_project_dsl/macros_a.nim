@@ -3002,8 +3002,7 @@ proc parsePackageDef(name: NimNode; body: NimNode;
   zigCrossAutoInjectShellTools(result)
   # Windows-dev-env M1: a recipe with a non-empty ``uses:`` toolchain
   # floor but NO explicit ``devEnv:`` block still exposes dev-env
-  # introspection (see ``exposesDevEnvIntrospection`` /
-  # ``runtime_provider.providerManifest``). Give that implicit entry a
+  # introspection (see ``runtime_provider.providerManifest``). Give that implicit entry a
   # deterministic, content-derived ``devEnvBodyHash`` computed from the
   # floor itself so the manifest entry has a stable, floor-derived body
   # hash that re-keys when the floor changes. Explicit ``devEnv:`` blocks

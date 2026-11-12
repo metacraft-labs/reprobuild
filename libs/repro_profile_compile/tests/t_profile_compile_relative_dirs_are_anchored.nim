@@ -29,3 +29,25 @@ suite "the profile compile anchors relative directories at its caller":
     check o.stateDir == "/s"
     check o.workDir == ""
     check o.repoRoot == ""
+
+suite "the profile-directory lock is keyed on the directory itself":
+  ## Real directories and a real symlink under a scratch directory; no
+  ## mocks.
+  test "two spellings of one directory through a symlink share a key":
+    let scratch = getTempDir() / "repro-dir-lock-key-" & $getCurrentProcessId()
+    createDir(scratch / "real")
+    defer: removeDir(scratch)
+    createSymlink(scratch / "real", scratch / "link")
+    check profileDirLockKey(scratch / "real" / "home.nim") ==
+      profileDirLockKey(scratch / "link" / "home.nim")
+
+  test "two profile roots in one directory share a key, two directories " &
+      "do not":
+    let scratch = getTempDir() / "repro-dir-lock-key2-" & $getCurrentProcessId()
+    createDir(scratch / "a")
+    createDir(scratch / "b")
+    defer: removeDir(scratch)
+    check profileDirLockKey(scratch / "a" / "home.nim") ==
+      profileDirLockKey(scratch / "a" / "other.nim")
+    check profileDirLockKey(scratch / "a" / "home.nim") !=
+      profileDirLockKey(scratch / "b" / "home.nim")

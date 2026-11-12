@@ -101,6 +101,7 @@ export edge.ProfileCompileOptions
 export edge.ProfileCompileError
 export edge.ProfileCompileActionId
 export edge.ProfileRunActionId
+export edge.profileDirLockKey
 export edge.ProfileEdgeOutcome
 export edge.profileCompileKey
 export edge.profileCompileWeakFingerprint
