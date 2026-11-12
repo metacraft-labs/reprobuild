@@ -253,7 +253,11 @@ and `<record>.sig` beside it holds that key's signature over exactly the
 bytes of the record file. Uninstall prints the record's path and text.
 Both files stay after uninstall: keep them with the entries you copied
 off the host. If the attestation key is missing, or the record cannot be
-written, uninstall refuses and removes nothing.
+written, uninstall refuses and removes nothing. A record states a discard
+that happened: if the record cannot be made durable, or the uninstall
+ends incomplete (drift or an error) before any of those objects was
+removed, the record and its signature are withdrawn and not printed, and
+the next uninstall writes its own.
 
 To check a record, on the host or on any machine you copied both files
 to, give as `<key>` the attestation key the sink has enrolled for the

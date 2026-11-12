@@ -9423,7 +9423,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_addon/tests/t_addon_review_round5.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 4,
+      "staticCaseCount": 5,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
