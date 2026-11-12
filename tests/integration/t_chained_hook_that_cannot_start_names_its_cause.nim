@@ -230,6 +230,37 @@ suite "chained hook that cannot start":
       check guardedOwn.code != 0
       check not guardedOwn.output.contains("the chained hook")
 
+      # Two missing `exec` targets, the unquoted one first: the dispatcher and
+      # health both name the first in line order, not the quoted one the
+      # shell used to scan first.
+      let firstOf = MissingPreCommit
+      let secondOf = MissingPrek
+      writeExecutable(localPreCommit,
+        "#!/usr/bin/env sh\n" &
+        "exec " & firstOf & " \"$@\"\n" &
+        "exec \"" & secondOf & "\" \"$@\"\n")
+      let ordered = commit("g")
+      checkpoint("ordered commit output: " & ordered.output)
+      check ordered.code != 0
+      check ordered.output.contains("the program it execs, " & firstOf & ",")
+      check not ordered.output.contains(secondOf)
+      check ($chainedHooksRow(reproBin, repo)).contains("execs " & firstOf)
+
+      # An unguarded `exec` of a missing path is still explained when the path
+      # also appears in a comment, twice on the `exec` line, or as the prefix
+      # of a longer path.
+      for body in [
+        "#!/usr/bin/env sh\n# was " & firstOf & "\nexec " & firstOf & " \"$@\"\n",
+        "#!/usr/bin/env sh\nexec " & firstOf & " -- " & firstOf & "\n",
+        "#!/usr/bin/env sh\necho " & firstOf & "-wrapped >/dev/null\n" &
+          "exec " & firstOf & " \"$@\"\n"]:
+        writeExecutable(localPreCommit, body)
+        let repeated = commit("h")
+        checkpoint("repeated-path commit output: " & repeated.output)
+        check repeated.code != 0
+        check repeated.output.contains("the program it execs, " & firstOf)
+        check ($chainedHooksRow(reproBin, repo)).contains("execs " & firstOf)
+
       removeFile(localPrePush)
 
       # Displaced: a framework moved the dispatcher to `.legacy` and runs it;
