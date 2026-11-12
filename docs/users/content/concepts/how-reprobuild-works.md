@@ -13,7 +13,7 @@ verifies:
     - tests/e2e/sharding/t_e2e_repro_test_shard_partition_total_coverage.nim
     - tests/integration/t_certificates_travel_with_pushed_commit.nim
     - libs/repro_binary_cache_client/tests/t_a3_p2_cli_substitute.nim
-    - tests/integration/t_workspace_develop_clones_and_registers_override.nim
+    - tests/integration/t_b0_develop_mode_uses_local_source.nim
     - tests/integration/t_bulk_develop_skips_exact_recipe_pins.nim
     - tests/integration/t_l7_repro_up_converges_on_one_shared_instance.nim
     - tests/e2e/home-apply/t_e2e_repro_home_apply_noop.nim
@@ -22,6 +22,9 @@ verifies:
 unverified:
   - claim: "Paths below a provisioned tool's root are left out of an action's observed inputs because the tool's identity already covers them."
     reason: "Stated in docs/dependency-collection.md; no test is cited yet."
+    owner: unassigned
+  - claim: "repro develop --only=<dependency> checks one dependency out at its locked revision and switches the build to it."
+    reason: "From the develop command design; the cited test covers --all, not --only with a single dependency."
     owner: unassigned
   - claim: "The release archive includes repro-binary-cache, a cache server you can run yourself."
     reason: "Checked by scripts/verify_release.sh when a release is cut, not by a test this page can cite."
@@ -135,12 +138,12 @@ A workspace holds several repositories next to each other, with a workspace root
 that declares which belong together. Develop mode builds a dependency from its
 checkout in the workspace instead of from its locked revision, so a change in a
 library reaches the program that uses it at the next build, without publishing
-the library first. `repro develop <dependency>` clones a repository the
-workspace declares and switches the build to it. `repro develop --all` does the
-same, at the locked revision, for every dependency in the lock that no project
-file pins to an exact revision. The source of
-a library your program uses is then one command away. Each repository commits
-its own lock file, which records the revisions it was built against.
+the library first. `repro develop --all` checks out every dependency in the lock
+that no project file pins to an exact revision, at its locked revision, and
+switches the build to those checkouts; `repro develop --only=<dependency>` does
+the same for one. The source of a library your program uses is then one command
+away. Each repository commits its own lock file, which records the revisions it
+was built against.
 [Work on a dependency's source](../guides/workspaces/develop-a-dependency.md)
 shows the workflow.
 

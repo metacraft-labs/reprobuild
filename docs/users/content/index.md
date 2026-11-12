@@ -15,7 +15,7 @@ verifies:
     - tests/e2e/local-build-engine/t_e2e_repro_run_lists_tasks_and_edges.nim
     - tests/integration/t_l7_repro_up_converges_on_one_shared_instance.nim
     - tests/integration/t_workspace_init_clones_missing_and_reports_existing.nim
-    - tests/integration/t_workspace_develop_clones_and_registers_override.nim
+    - tests/integration/t_b0_develop_mode_uses_local_source.nim
     - tests/e2e/home-rollback/t_e2e_repro_home_rollback_round_trip.nim
     - tests/e2e/home-rollback/t_e2e_repro_home_rollback_user_edit_protection.nim
     - libs/repro_binary_cache_client/tests/t_a3_p2_cli_substitute.nim
