@@ -107,8 +107,9 @@ which is the organisation key
 repository is registered (apt, dnf, pacman) and before a tarball or archive
 is verified, `install_trust_anchor()` (`Install-TrustAnchor` in PowerShell,
 which only the archive method calls) hashes the fetched keyring — or the
-`REPRO_KEYRING_LOCAL` file, which gets the same check — and **refuses on a mismatch** before the keyring is installed or
-any repository is registered. Changing the pinned value is a key rotation.
+`REPRO_KEYRING_LOCAL` file, which gets the same check — and **refuses on a
+mismatch** before the keyring is used, installed or registered with any
+repository. Changing the pinned value is a key rotation.
 
 Only an **empty** `REPRO_KEYRING_SHA256`, which a mirror or a test has to
 set explicitly, makes the installer **fail closed** with
@@ -126,9 +127,11 @@ list, so release-mode signing fails closed. It does not govern installs.
 The tarball fallback verifies `SHA256SUMS.asc` and the artefact's own
 signature with `repro-verify-release.sh` against the pinned organisation
 keyring, and refuses unless both carry a valid signature by that key. No
-published release carries those signatures, because release-mode signing
-has no key, and `/sh` does not bundle the verifier (`locate_verifier()`),
-so the tarball fallback refuses rather than installs.
+published release carries those signatures: `release.yml`'s signing step
+publishes unsigned while no release key is configured, and
+`repro-sign-release.sh` refuses any key `trusted-release-keys.txt` does not
+list. `/sh` does not bundle the verifier either (`locate_verifier()`), so
+the tarball fallback refuses rather than installs.
 
 ### Where the configurable base URL lives
 
@@ -705,13 +708,14 @@ defaults to `repo`) and again at **`/repo-sh`** as an alias, and `/pwsh`
 is `scripts/install/repro-install.ps1`. Both carry the pinned anchor
 digest. On apt and dnf systems a default `/sh` run verifies the
 organisation key, registers the repository and proceeds. Elsewhere
-(Arch, whose `REPRO_ARCH_URL` is empty by default, macOS, an unrecognised
-distribution) `/sh` falls back to the tarball method and refuses, as
+(Arch, whose `REPRO_ARCH_URL` is empty by default, macOS, or a distribution
+it does not recognise that has neither `apt-get` nor `dnf`) `/sh` falls back to the tarball method and refuses, as
 described in "The trust anchor, and why it is pinned by digest". On NixOS
 it uses the `nixos` method, which does not read the anchor. `/pwsh`
 defaults to Scoop when Scoop is installed, which checks archive hashes
 against the bucket manifest, and uses the anchor only for the archive
-method.
+method (`Install-FromArchive`), which refuses for the same reasons as the
+tarball fallback.
 `REPRO_GET_SH_SOURCE=legacy` puts the nix/local-prefix
 `install-on-distributions.sh` back at `/sh`, as a rollback that needs no
 code change.
