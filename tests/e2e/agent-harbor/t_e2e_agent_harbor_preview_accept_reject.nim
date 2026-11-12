@@ -41,20 +41,33 @@ if not fixtureRunnable():
     reproBinary & " and cc"
 else:
   suite "M4 — preview, accept, reject":
-    let f = newFixture("m4", @["workspace.create:greeter",
+    # Acquired on first use from inside a case, so the runner's
+    # `--list-json` probe installs nothing and a failed install fails the
+    # case that needed it; released at the end of this suite by the process
+    # that acquired it (see `agent_harbor_fixture`).
+    var fixture = lazyFixture("m4", @["workspace.create:greeter",
       "source.read:greeter", "source.write:greeter", "build.run:greeter",
-      "test.run:greeter", "preview.run:greeter"], withGenerations = true)
-    let g1 = f.backend.activeGeneration()
-    let intent = f.host.captureIntent(f.consent, f.sid, "make greeter say v2")
-    let ws = f.checkoutGreeter(intent)
+      "test.run:greeter", "preview.run:greeter"], "make greeter say v2",
+      withGenerations = true)
+    template f: Fixture = fixture.acquire()
+    template g1: string = f.initialGeneration
+    template intent: Intent = f.sessionIntent
+    var checkedOut = ""
     var evidence: seq[Digest32]
     var previewed: seq[OpResult]
 
     # The suite runner runs every case in a process of its own, so a case
     # must not rely on evidence an earlier case produced
     # (Test-Suite-Architecture-Guidelines, "Every case MUST pass when run
-    # alone"). The edit, its test, both previews and the diff run at most once
-    # per process, on first use.
+    # alone"). The checkout, the edit, its test, both previews and the diff
+    # run at most once per process, on first use.
+    proc workspace(): string =
+      if checkedOut.len == 0:
+        checkedOut = f.checkoutGreeter(intent)
+      checkedOut
+
+    template ws: string = workspace()
+
     proc previewBeforeAndAfter(): seq[OpResult] =
       if previewed.len > 0: return previewed
       previewed = f.runPlan(intent,
@@ -154,4 +167,4 @@ else:
       check exeOutput(f.backend.driver.launcherDir / "greeter") ==
         "hello from greeter v1"
 
-    cleanup(f.tmp)
+    fixture.release()
