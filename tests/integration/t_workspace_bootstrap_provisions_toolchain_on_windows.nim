@@ -1,9 +1,9 @@
 ## RA-19 — Windows workspace bootstrap parity (decision/plan layer).
 ##
-## The repo-workspaces pilot provisions the host toolchain on Windows
-## (``env.ps1`` + ``windows/ensure-{gcc,gh,gpg,just,nim,python,repo}.ps1``)
-## and activates a PowerShell env; the async post-commit cache push is
-## POSIX-only (``setsid … &``). RA-19 adds the reprobuild equivalents:
+## A Windows workspace needs its host toolchain provisioned (one ensure-step
+## per tool, as ``windows/ensure-<tool>.ps1`` scripts do) and a PowerShell env
+## activated, and the async post-commit cache push must not depend on the
+## POSIX-only ``setsid … &``. RA-19 covers both:
 ##
 ##   * ``windowsProvisioningPlan`` — the ordered toolchain ensure-steps
 ##     (gcc/gh/gpg/just/nim/python/repo) + a PowerShell env activation.
@@ -63,8 +63,8 @@ suite "RA-19 — Windows workspace bootstrap parity (plan/decision layer)":
           # The check is an idempotent --version probe.
           check step.checkCommand.contains("--version")
           check step.installCommand.len > 0
-          # The install/ensure command names the tool (parity with the
-          # pilot ``ensure-<tool>.ps1``).
+          # The install/ensure command names the tool (as the
+          # ``windows/ensure-<tool>.ps1`` scripts do).
           check step.installCommand.contains("ensure-" & tool)
           # An operator skip toggle exists for the tool.
           check step.skipEnvVar.len > 0

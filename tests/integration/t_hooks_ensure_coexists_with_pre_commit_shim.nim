@@ -1,6 +1,6 @@
 ## RA-4 — `repro hooks ensure` coexists with pre-commit's `hook-impl` shim.
 ##
-## Models repo-workspaces `9ee9141`. The pre-commit framework, when it
+## The pre-commit framework, when it
 ## takes over a Git hook, installs a `hook-impl` shim at the standard hook
 ## path. That shim:
 ##
