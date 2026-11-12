@@ -97,6 +97,16 @@ package app:
       publishAll(fx)
       commitLockAndPublish(fx, "app: locks at the seed")
 
+      # Identity is the canonical repository URL, never the spelling: the lock
+      # records `beta`'s origin as a plain URL and `flake.nix` declares the
+      # same repository as `git+<url>?ref=main`, and the hold below only
+      # happens because the two are recognised as one repository.
+      let lockUrl = originUrl(fx, "beta")
+      let flakeNix = readFile(fx.app / "flake.nix")
+      check lockUrl in readFile(fx.app / "repro.lock")
+      check ("git+" & lockUrl & "?ref=main") in flakeNix
+      check ("url = \"" & lockUrl & "\"") notin flakeNix
+
       let betaNext = moveAndPublishSibling(fx, "beta", "beta moves")
       let epsilonNext = moveAndPublishSibling(fx, "epsilon", "epsilon moves")
       let flakeBefore = readFile(fx.app / "flake.lock")
