@@ -85,9 +85,13 @@ jobs:
       # It fired only when the ledger itself moved, which answers "did
       # this edit break the tool" and cannot answer "has the calendar
       # moved" -- and the calendar moves on days nobody edits a table.
+      # --landing: a pin inside its refresh horizon, or past its end, is a
+      # maintenance notice printed here and not a refusal -- no landing
+      # causes it, and the weekly run below keeps it a failure. What
+      # still fails a landing is a contradiction in the corpus itself.
       - name: Expiry, offline, on every landing
         if: github.event_name == 'push'
-        run: python3 tools/attestation_collateral_monitor.py --offline
+        run: python3 tools/attestation_collateral_monitor.py --offline --landing
       - name: Expiry and drift, against the wall clock and the publishers
         if: github.event_name != 'push'
         run: python3 tools/attestation_collateral_monitor.py

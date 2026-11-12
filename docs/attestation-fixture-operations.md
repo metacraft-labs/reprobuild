@@ -186,6 +186,24 @@ python3 tools/attestation_collateral_monitor.py --ledger-root tests/integration
 It exits non-zero when anything needs attention and prints one line per
 artifact. It never edits the tree.
 
+### Two verdicts: the landing run and the scheduled run
+
+A pin inside its refresh horizon, or past its end, is a maintenance
+notice. It moves with the calendar and not with anyone's change, and no
+gate in the suite reads the wall clock, so a landing cannot cause it. The
+per-landing run (`--offline --landing`) therefore prints those findings
+with a `~` prefix and exits 0; it still exits 1 for what a landing can
+break or reveal: a `not-yet-in-force` document, a `no-stated-end`
+revocation list, a `historical-vintage` row that is not expired, and
+(online) `drifted`. The scheduled and manual runs omit `--landing` and
+keep exit 1 for the notice, so a refresh that is due still turns a run
+red where somebody is expected to act on it. The 59 artifacts without an
+unattended route have no fetch row because their source is a human step
+(a checkout at a pinned commit, an unpacked package, an archive member),
+which `attestation-fixture-fetch.tsv` states in general terms; the seven
+Intel documents are explained individually in the section on re-signing
+below. The refresh command for each artifact is printed with its finding.
+
 ### Reading its output
 
 Four statuses, and what each asks of you. `current` is the fifth

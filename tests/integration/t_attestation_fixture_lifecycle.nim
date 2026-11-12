@@ -1696,6 +1696,10 @@ suite "the lifecycle decision":
       if "--offline" in line: inc offlineRuns else: inc onlineRuns
     check offlineRuns == 1
     check onlineRuns == 1
+    # And that arm must be the LANDING verdict: a pin inside its refresh
+    # horizon is a calendar notice, and delivered as a refusal it keeps
+    # the per-landing run red for the month before every expiry.
+    check ("run: python3 tools/attestation_collateral_monitor.py --offline --landing") in body
     check ("if: github.event_name == 'push'") in body
     check ("if: github.event_name != 'push'") in body
 
