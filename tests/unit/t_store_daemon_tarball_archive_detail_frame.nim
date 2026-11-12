@@ -14,7 +14,7 @@
 ## No mocks: the frame codec and the client's request builder are the real
 ## ones.
 
-import std/[strutils, unittest]
+import std/[os, strutils, unittest]
 
 import repro_interface_artifacts
 import repro_store_daemon/client as daemonClient
@@ -131,3 +131,34 @@ suite "the store daemon tarball frame carries the archive detail":
     let request = requestFromTarballUse(toolUse(record), "/store", "holder",
       "root")
     check request.archiveDetail == record.detail
+
+  test "the client sends a relative closure manifest resolved":
+    # The daemon rebuilds the record without its declaring file and runs in a
+    # working directory of its own, so a manifest declared relative to that
+    # file must cross the socket already resolved against it.
+    var record = plainRecord()
+    record.closureManifest = "closure.manifest"
+    record.location = SourceLocation(file: "/work/pkg/repro.nim", line: 2)
+    let request = requestFromTarballUse(toolUse(record), "/store", "holder",
+      "root")
+    check request.closureManifest == "/work/pkg" / "closure.manifest"
+    let restored = parseExternalRealizeBody(externalRealizeBody(request))
+    check restored.closureManifest == request.closureManifest
+
+  test "with no declaring file it resolves against the client's directory":
+    # As the in-process realize opens it: relative to this process's
+    # working directory, never the daemon's.
+    var record = plainRecord()
+    record.closureManifest = "closure.manifest"
+    record.location = SourceLocation()
+    let request = requestFromTarballUse(toolUse(record), "/store", "holder",
+      "root")
+    check request.closureManifest == getCurrentDir() / "closure.manifest"
+
+  test "an absolute closure manifest and an absent one cross unchanged":
+    var record = plainRecord()
+    record.closureManifest = "/elsewhere/closure.manifest"
+    check requestFromTarballUse(toolUse(record), "/store", "holder",
+      "root").closureManifest == "/elsewhere/closure.manifest"
+    check requestFromTarballUse(toolUse(plainRecord()), "/store", "holder",
+      "root").closureManifest == ""
