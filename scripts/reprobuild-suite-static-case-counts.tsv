@@ -2271,6 +2271,7 @@ tests/integration/t_sc_engine_routes_producer_selector_through_override_and_lock
 tests/integration/t_sc_executable_producer_edge_spliced_and_on_path.nim	nim	1
 tests/integration/t_sc_library_producer_edge_spliced_through_aux_channels.nim	nim	1
 tests/integration/t_sc_lock_pinned_fetches_and_builds_sibling_from_source.nim	nim	1
+tests/integration/t_sc_native_library_beside_nim_source_is_a_declared_input.nim	nim	1
 tests/integration/t_sc_producer_exports_typed_cli_contract_across_workspace.nim	nim	1
 tests/integration/t_sc_producer_source_change_invalidates_consumer.nim	nim	1
 tests/integration/t_sc_typed_cross_project_consumption_both_modes.nim	nim	1
@@ -2659,7 +2660,7 @@ tests/unit/t_m9r23_1_installer_state_install_sequence.nim	nim	6
 tests/unit/t_m9r2_typed_cli_surfaces.nim	nim	19
 tests/unit/t_m9r2b_typed_value_layer.nim	nim	15
 tests/unit/t_m9r2c_artifact_slot_typed.nim	nim	8
-tests/unit/t_m9r30_transitive_rpath_propagation.nim	nim	13
+tests/unit/t_m9r30_transitive_rpath_propagation.nim	nim	16
 tests/unit/t_m9r33_2_qt6_module_path_walker.nim	nim	11
 tests/unit/t_m9r34_recipe_edit_invalidates_local_cache.nim	nim	8
 tests/unit/t_m9r3_library_api_block.nim	nim	8

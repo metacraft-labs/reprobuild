@@ -10703,18 +10703,46 @@ proc canReuseMaterializedProducer(selector: string; binding: ProducerBinding;
       ". Restart the build to rematerialize the producer.")
   verifyLockPinnedProducerSource(binding.lockedDep, cachedRoot, consumerRoot)
 
+proc producerNativeLibraryNeedsBuild(lib: InterfaceLibrary;
+                                     producerRootAbs: string): bool =
+  ## Cross-Repo-Source-Consumption §4.2c: whether a declared ``library`` is a
+  ## NATIVE library, one whose consumed artifact is a compiled
+  ## ``.so``/``.a``/``.dylib`` under ``build/lib``, so it has to be built even
+  ## when the producer also exports a Nim source root.
+  ##
+  ## ``kind: shared`` / ``kind: both`` say so outright. ``kind: static`` is the
+  ## default of a bare ``library foo``, which is also how every pure-Nim source
+  ## library is declared, so it is native only when no importable source root
+  ## exists at its ``exportedPath``.
+  if lib.name.len == 0 or lib.kind == lkHeaderOnly:
+    return false
+  if lib.kind in {lkShared, lkBoth}:
+    return true
+  let exported =
+    if lib.exportedPath.len > 0: lib.exportedPath else: "src"
+  not dirExists(extendedPath(producerRootAbs / exported))
+
 proc recordProducerMaterialization(selector, producerRootAbs: string;
                                    producerArtifact: ProjectInterfaceArtifact;
                                    producerRuntimeIdentity: PathOnlyBuildIdentity;
-                                   binding: ProducerBinding): bool =
+                                   binding: ProducerBinding;
+                                   includeCompiledOutputs = true): bool =
   ## Discover a producer's already-materialized public outputs and project
   ## them onto the consumer's executable/library channels. The build path
   ## calls this after the producer sub-build; graph inspection calls it while
   ## loading an existing graph. Keeping this projection shared prevents the
   ## two surfaces from resolving different producer identities.
+  ##
+  ## ``includeCompiledOutputs = false`` projects only the Nim source root: a
+  ## producer admitted for its source channel alone (see
+  ## ``producerNativeLibraryNeedsBuild``) must not have a stale ``build/lib``
+  ## left by an earlier build spliced in, or the same consumer action would
+  ## carry a different identity depending on what happened to be on disk.
   var binDirs: seq[string] = @[]
   var realizedBinaries: seq[string] = @[]
   for exe in producerArtifact.projectInterface.publicExecutables:
+    if not includeCompiledOutputs:
+      break
     let binName =
       if exe.binaryName.len > 0: exe.binaryName else: exe.exportName
     if binName.len == 0:
@@ -10732,6 +10760,8 @@ proc recordProducerMaterialization(selector, producerRootAbs: string;
   mergeProducerRuntimeIdentity(producerRuntimeIdentity, binDirs, aux)
   var realizedLibraries: seq[string] = @[]
   block libraryChannel:
+    if not includeCompiledOutputs:
+      break libraryChannel
     let libOutDir = producerRootAbs / "build" / "lib"
     let includeOutDir = producerRootAbs / "build" / "include"
     let pkgConfigOutDir = libOutDir / "pkgconfig"
@@ -13457,19 +13487,25 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
           if binName.len > 0:
             needsProducerBuild = true
             break
-        if not needsProducerBuild:
-          for lib in producerArtifact.projectInterface.publicLibraries:
-            if lib.name.len == 0 or lib.kind == lkHeaderOnly:
-              continue
-            let exported =
-              if lib.exportedPath.len > 0: lib.exportedPath else: "src"
-            let nimSrcDir = producerRootAbs / exported
-            if not dirExists(extendedPath(nimSrcDir)):
-              # No importable Nim source root — the consumed artifact is a
-              # compiled ``.so``/``.a`` that must be built + discovered under
-              # ``build/lib``.
-              needsProducerBuild = true
-              break
+        # A native library declared beside a Nim source root (§4.2c): the
+        # producer is source-only for every consumer that merely imports it,
+        # and compiled for one that names it. Kept apart from
+        # ``needsProducerBuild`` so the out-of-closure gate below can still
+        # admit the source channel of such a producer, as it always has.
+        var producerHasNativeLibraryBesideSource = false
+        for lib in producerArtifact.projectInterface.publicLibraries:
+          if lib.name.len == 0 or lib.kind == lkHeaderOnly:
+            continue
+          let exported =
+            if lib.exportedPath.len > 0: lib.exportedPath else: "src"
+          let nimSrcDir = producerRootAbs / exported
+          if not dirExists(extendedPath(nimSrcDir)):
+            # No importable Nim source root — the consumed artifact is a
+            # compiled ``.so``/``.a`` that must be built + discovered under
+            # ``build/lib``.
+            needsProducerBuild = true
+          elif producerNativeLibraryNeedsBuild(lib, producerRootAbs):
+            producerHasNativeLibraryBesideSource = true
         # THE NARROWING (§4.2a admission gate; see the loop header).
         #
         # ``needsProducerBuild`` is now exactly "this producer exports a
@@ -13493,7 +13529,15 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
           if dirExists(extendedPath(producerRootAbs / exported)):
             producerExportsNimSourceRoot = true
             break
-        if not selectorInSelectedClosure and
+        # §4.2c: a producer whose only compiled artifact is a native library
+        # beside its Nim source root keeps the source channel for every
+        # consumer; the build and the compiled splice need the selected
+        # closure to name it.
+        let sourceChannelOnly = not selectorInSelectedClosure and
+          not needsProducerBuild and producerHasNativeLibraryBesideSource
+        if not sourceChannelOnly and producerHasNativeLibraryBesideSource:
+          needsProducerBuild = true
+        if not selectorInSelectedClosure and not sourceChannelOnly and
             (needsProducerBuild or not producerExportsNimSourceRoot):
           # Out of closure and not the Nim library-source channel: this is the
           # SC-2 / SC-3 scoping contract. Building it here is what made
@@ -13539,7 +13583,8 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
             "\" as a pure-Nim-source library — skipping producer sub-build " &
             "(no compiled artifact; src threaded via nimPathDirs).")
         if not recordProducerMaterialization(selector, producerRootAbs,
-            producerArtifact, producerRuntimeIdentity, producer):
+            producerArtifact, producerRuntimeIdentity, producer,
+            includeCompiledOutputs = not sourceChannelOnly):
           raise newException(OSError,
             "cross-repo producer \"" & selector & "\" at " & producerRootAbs &
             " declares no materialized executable, library, or Nim source " &
