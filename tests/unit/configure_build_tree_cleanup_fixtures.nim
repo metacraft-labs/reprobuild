@@ -6,6 +6,11 @@
 ## on ``isMainModule``, and a package with a ``nativeBuildDeps:`` floor
 ## exposes dev-env introspection and so gets that dispatcher. Imported from
 ## here, ``isMainModule`` is false and the test binary runs its suite.
+##
+## The test imports this module only for the registrations its ``package``
+## declarations make at module init, and names none of its symbols.
+
+{.used.}
 
 import repro_project_dsl
 
