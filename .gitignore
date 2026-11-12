@@ -52,6 +52,10 @@ libs/*/src/**/*
 !libs/repro_dsl_stdlib/src/repro_dsl_stdlib/packages/nix/**/*.nix
 !libs/repro_dsl_stdlib/src/repro_dsl_stdlib/packages/nix/**/*.json
 !libs/repro_dsl_stdlib/src/repro_dsl_stdlib/packages/nix/**/*.lock
+# Closure manifests (`closureManifest = "closures/<name>.manifest"`): the
+# pinned archives a tarball realization unpacks beside its primary archive,
+# resolved against the declaring package module's own directory.
+!libs/repro_dsl_stdlib/src/repro_dsl_stdlib/packages/closures/*.manifest
 
 # Same pattern for app entry points compiled in-place during local
 # iteration (e.g. `nim c apps/repro-peer-cache-sim/repro_peer_cache_sim.nim`).
