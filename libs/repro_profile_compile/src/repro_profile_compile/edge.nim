@@ -679,7 +679,12 @@ proc acquireProfileDirLock(absProfile: string): ReproFileLock =
   ## nimcache, as it would have anyway, but not at the same time as the
   ## other run. The wait is unbounded for the reason given on
   ## `acquireProfileLock`, and the lock file is outside the edges' view.
-  let lockPath = profileDirLockPath(profileCompileKey(absProfile.parentDir))
+  # Keyed on the directory's REAL path: two spellings of one directory
+  # through a symlink stage the same files, so they must take one lock.
+  let profileDir =
+    try: expandFilename(absProfile.parentDir)
+    except OSError: absProfile.parentDir
+  let lockPath = profileDirLockPath(profileCompileKey(profileDir))
   try:
     when not defined(windows):
       # The lock lives in a world-writable directory: refuse a lock

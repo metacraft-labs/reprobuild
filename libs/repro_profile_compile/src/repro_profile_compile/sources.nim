@@ -246,6 +246,11 @@ proc profileDirLockPath*(profileDirKey: string): string =
   ## again. On Windows the user's temporary directory is per user already.
   ## Named for the owning user (`repro-profile-dir-locks-<uid>`), and
   ## `acquireProfileDirLock` refuses a directory another user owns.
+  ##
+  ## The file is never deleted: removing a lock file another process has
+  ## already opened lets a third process lock a fresh file of the same name
+  ## while the second still waits on the old one, so two holders overlap. It
+  ## is empty and there is one per profile directory.
   when defined(windows):
     getTempDir() / "repro-profile-dir-locks" / (profileDirKey & ".lock")
   else:
