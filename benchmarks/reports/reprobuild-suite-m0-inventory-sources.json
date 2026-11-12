@@ -35852,7 +35852,7 @@
       "requiresReproBinary": true,
       "source": "tests/e2e/m83/t_e2e_profile_compiles_of_one_profile_are_serialised.nim",
       "sourceSuiteCount": 2,
-      "staticCaseCount": 3,
+      "staticCaseCount": 5,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

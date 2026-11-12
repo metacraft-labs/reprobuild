@@ -52,13 +52,29 @@
 ## happened to exit 0. That is why the case asserts the overlap itself and
 ## not only the exit codes.
 ##
+## Two state directories
+## ----------------------
+## The lock above is per state directory. Every Nim invocation over a
+## profile also stages `config.nims` and a `.nimble` in the PROFILE's
+## directory, which the first run to finish deletes, and two runs with
+## different state directories (`repro home plan` beside a
+## `deploy-agent compile-profile --state-dir ...`) share them
+## (reprobuild-pm issue
+## 2026-11-12-compiles-of-one-profile-in-two-state-dirs-share-the-files-staged-beside-it).
+## The cases with a second state directory run the same experiment, with the
+## second run's `$REPRO_HOME_STATE_DIR` pointing elsewhere; the wait it must
+## show is on the lock of the profile DIRECTORY (`profileDirLockPath`). A
+## second profile root in the same directory is held to the same lock.
+## Unlike the one-state-directory cases, the second run is not answered from
+## the first's record: its nimcache and binary are its own.
+##
 ## Linux only: the waiter is read from `/proc/locks`, and the gate is a POSIX
 ## shell script. The lock is the same code on every platform.
 ##
 ## Mocks: none. Real `build/bin/repro`, real Nim and C toolchain, real io-mon.
 ## The gate only delays the real compiler; it changes none of its arguments.
 
-import std/[os, osproc, strutils, times, unittest]
+import std/[os, osproc, strtabs, strutils, times, unittest]
 when not defined(windows):
   import std/posix
 from repro_core/paths import extendedPath
@@ -110,10 +126,14 @@ proc writeGate(sb: ProfileSandbox; command: string): string =
   release
 
 proc startRepro(sb: ProfileSandbox; args: openArray[string];
-                transcript: string): Process =
+                transcript: string; stateDir = ""): Process =
   ## Start `repro <args>` against the sandbox with its output in
-  ## `transcript` (a file, so an unread pipe can never stall it).
-  startProcess("/bin/sh", workingDir = sb.root, env = sb.sandboxEnv(),
+  ## `transcript` (a file, so an unread pipe can never stall it). A
+  ## non-empty `stateDir` replaces the sandbox's state directory.
+  let env = sb.sandboxEnv()
+  if stateDir.len > 0:
+    env["REPRO_HOME_STATE_DIR"] = stateDir
+  startProcess("/bin/sh", workingDir = sb.root, env = env,
     args = @["-c", "exec \"$0\" \"$@\" >" & quoteShell(transcript) & " 2>&1",
       reproBinary()] & @args,
     options = {})
@@ -141,13 +161,11 @@ proc blockedOnFlock(pid: int; lockPath: string): bool =
 type Overlap = enum
   secondWaited, secondReachedNim, secondExited, timedOut
 
-proc watchSecond(sb: ProfileSandbox; command: string; second: Process):
-    Overlap =
+proc watchSecond(sb: ProfileSandbox; command: string; second: Process;
+                 lockPath: string): Overlap =
   ## Watch the second run until it reaches `nim <command>` or has waited in
   ## a `flock` on the profile's lock for `BlockedFor` seconds (see the
   ## header).
-  let lockPath = cachedProfileLockPath(sb.stateDir,
-    profileCompileKey(sb.profilePath))
   let start = epochTime()
   var blockedSince = -1.0
   while epochTime() - start < Ceiling:
@@ -182,7 +200,7 @@ proc finish(p: Process; transcript: string): tuple[code: int; text: string] =
   result.text = readFile(transcript)
 
 proc runTwoAtOnce(sb: ProfileSandbox; args: openArray[string];
-                  command: string): tuple[overlap: Overlap;
+                  command: string; secondStateDir = ""): tuple[overlap: Overlap;
                   first, second: tuple[code: int; text: string];
                   spawnsAtRelease: int] =
   ## The case body: hold the first run in `nim <command>`, start the second,
@@ -200,8 +218,15 @@ proc runTwoAtOnce(sb: ProfileSandbox; args: openArray[string];
         result.first.text)
       check false
       return
-    second = startRepro(sb, args, secondOut)
-    result.overlap = watchSecond(sb, command, second)
+    second = startRepro(sb, args, secondOut, secondStateDir)
+    # Two state directories: the per-state-directory lock cannot be what
+    # the second run waits on.
+    let lockPath =
+      if secondStateDir.len > 0:
+        profileDirLockPath(profileCompileKey(sb.profilePath.parentDir))
+      else:
+        cachedProfileLockPath(sb.stateDir, profileCompileKey(sb.profilePath))
+    result.overlap = watchSecond(sb, command, second, lockPath)
     result.spawnsAtRelease = sb.nimSpawnCount(command)
   finally:
     writeFile(release, "")
@@ -253,3 +278,39 @@ else:
         check "serialised-compiles.txt" in run.text
       check cacheAnswered(sb.nimSpawnCount("dump") - 1, 1,
         "the second run's platform-probe edge")
+
+    test "a `repro home plan` in another state directory waits for the " &
+        "compile in flight over the same profile directory":
+      let sb = newProfileSandbox("serialised-plan-two-states", ProfileBody)
+      defer: sb.dispose()
+      let r = runTwoAtOnce(sb, ["home", "plan"], "c",
+        secondStateDir = sb.root / "second-state")
+      checkpoint("first run:\n" & r.first.text)
+      checkpoint("second run:\n" & r.second.text)
+      if r.overlap == secondReachedNim:
+        checkpoint("the second run reached `nim c` while the first was " &
+          "still compiling in the same profile directory")
+      check r.overlap == secondWaited
+      check r.spawnsAtRelease == 1
+      check r.first.code == 0
+      check r.second.code == 0
+      for run in [r.first, r.second]:
+        check "serialised-compiles.txt" in run.text
+
+    test "a `repro home export` in another state directory waits for the " &
+        "platform probe in flight over the same profile directory":
+      let sb = newProfileSandbox("serialised-export-two-states", ProfileBody)
+      defer: sb.dispose()
+      let r = runTwoAtOnce(sb, ["home", "export"], "dump",
+        secondStateDir = sb.root / "second-state")
+      checkpoint("first run:\n" & r.first.text)
+      checkpoint("second run:\n" & r.second.text)
+      if r.overlap == secondReachedNim:
+        checkpoint("the second run reached `nim dump` while the first was " &
+          "still probing in the same profile directory")
+      check r.overlap == secondWaited
+      check r.spawnsAtRelease == 1
+      check r.first.code == 0
+      check r.second.code == 0
+      for run in [r.first, r.second]:
+        check "serialised-compiles.txt" in run.text

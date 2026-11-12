@@ -50,6 +50,7 @@ export sources.cachedNimcacheDir
 export sources.cachedProfileBinaryPath
 export sources.cachedIntentDocumentPath
 export sources.cachedProfileLockPath
+export sources.profileDirLockPath
 export sources.pruneStaleProfileCache
 
 # Direct nim invocation + JSON->RBPI bridge.

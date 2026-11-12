@@ -16,6 +16,8 @@
 ## key, a depfile or an output name: see Compiles-Are-Normal-Edges.
 
 import std/[algorithm, os, strutils]
+when not defined(windows):
+  from std/posix import getuid
 from repro_core/paths import extendedPath
 from repro_core/source_root import resolveReprobuildSourceRoot,
   describeReprobuildSourceRootSearch, InstalledSourceRootSubdir,
@@ -224,6 +226,31 @@ proc cachedProfileLockPath*(stateDir, profileKey: string): string =
   ## would overwrite each other's. Under its own directory, so the walk in
   ## `pruneStaleProfileCache` never meets it.
   profileCacheDir(stateDir) / "locks" / (profileKey & ".lock")
+
+proc profileDirLockPath*(profileDirKey: string): string =
+  ## The lock file that serialises every compile and platform probe of the
+  ## profiles in one directory ACROSS state directories
+  ## (`edge.acquireProfileDirLock`). `profileDirKey` is the BLAKE3 of the
+  ## profile DIRECTORY's path (`edge.profileCompileKey` of it), the
+  ## directory every run stages `config.nims` and the `.nimble` stop in --
+  ## so two profile roots in one directory share it.
+  ##
+  ## WHERE. Neither in a state directory (two runs with different state
+  ## directories would take different files, which is the defect) nor in the
+  ## profile directory (a file there joins the directory listing the edge
+  ## records as an input, and the staged files are removed from it). In a
+  ## directory both runs resolve identically: on POSIX the fixed `/tmp`, NOT
+  ## `getTempDir()` -- `nix develop` gives every shell its own `$TMPDIR`
+  ## (see the `ProfileCompileScratchEnvNames` passthrough), and a service
+  ## has another, so two runs over one profile would take different locks
+  ## again. On Windows the user's temporary directory is per user already.
+  ## Named for the owning user (`repro-profile-dir-locks-<uid>`), and
+  ## `acquireProfileDirLock` refuses a directory another user owns.
+  when defined(windows):
+    getTempDir() / "repro-profile-dir-locks" / (profileDirKey & ".lock")
+  else:
+    "/tmp" / ("repro-profile-dir-locks-" & $getuid()) /
+      (profileDirKey & ".lock")
 
 proc pruneStaleProfileCache*(stateDir: string): int =
   ## Walk `<stateDir>/profile-cache/` and delete every `.rbpi` file
