@@ -95,7 +95,7 @@ they know, explain what they do not.
 | `developer` | Works in a codebase that already uses reprobuild | git, a shell, their language's toolchain | Nim, the project file, the build graph |
 | `build-maintainer` | Owns a project's build and CI; writes `repro.nim` | Make, CMake, Ninja, Bazel or Cargo; CI; caching | The Nim the project file uses; dependency evidence; how caching stays correct |
 | `workspace-maintainer` | Maintains a multi-repository workspace | git in depth; `repo`, submodules or monorepo tooling | Manifest files, branch roles, lock tiers, the pre-push check |
-| `machine-owner` | Configures their own machines with reprobuild | Home Manager or NixOS, a dotfiles manager | Home and system profiles, activities, generations |
+| `machine-owner` | Configures the operating system of their machines, or of a fleet, and their own account | Home Manager or NixOS, a dotfiles manager, Terraform or a configuration-management tool | Home and system profiles, plan and apply, drift, generations, the deploy agent |
 
 AI coding agents read the same material through `llms.txt`, `llms-full.txt`
 and `repro --help`, which are generated from the same sources as the pages.
