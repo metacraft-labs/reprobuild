@@ -3135,7 +3135,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_libs_repro_cli_support_tests_g02",
+    group: "t_group_libs_repro_cli_support_tests_g01",
     singleReason: ""),
   TestSpec(
     source: "libs/repro_cli_support/tests/t_lock_list_without_a_build_block.nim",
@@ -3415,6 +3415,17 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "libs/repro_cli_support/tests/t_strategy_unknown_name_refused.nim",
     binary: "build/test-bin/t_strategy_unknown_name_refused",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "t_group_libs_repro_cli_support_tests_g02",
+    singleReason: ""),
+  TestSpec(
+    source: "libs/repro_cli_support/tests/t_sub_tool_link_channels.nim",
+    binary: "build/test-bin/t_sub_tool_link_channels",
     defines: @[],
     requiresReproBinary: true,
     extraPassC: @[],

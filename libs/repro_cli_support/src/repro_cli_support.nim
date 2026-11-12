@@ -2683,6 +2683,61 @@ proc environmentPrefixKeyText*(profiles: Table[string, PathOnlyToolProfile];
   lines.sort()
   lines.join("\n")
 
+proc channelSubToolRefs*(subToolRefs, toolIdentityRefs: openArray[string]):
+    seq[string] =
+  ## The sub-tools that reach the engine as
+  ## ``BuildAction.subToolIdentityRefs``: the tool's ``subTools`` that the
+  ## edge does not already name in ``toolIdentityRefs``. A sub-tool the
+  ## edge names is a ref, and as a ref it already contributes every
+  ## channel; listing it twice would add nothing.
+  for refName in subToolRefs:
+    if refName.len > 0 and refName notin toolIdentityRefs and
+        refName notin result:
+      result.add(refName)
+
+proc subToolChannelKeyText*(profiles: Table[string, PathOnlyToolProfile];
+                            subToolRefs, toolIdentityRefs: openArray[string]):
+    string =
+  ## The identity of the compile and link channels an action's sub-tools
+  ## hand it, as text for the action's cache key.
+  ##
+  ## A sub-tool's directory reaches the action's ``PATH`` here, at lowering
+  ## time, so the declared ``PATH`` value keys it. Its ``cpathList`` and
+  ## ``libraryPathList`` do not: the engine applies them as ``CPATH`` and
+  ## ``LIBRARY_PATH`` at launch (``collectResolvedAuxPaths``), and those
+  ## channels can change while the tool's directory stays put. That
+  ## happened: a release that added the Darwin SDK's split-out libraries
+  ## to a Nix clang's library path left the clang wrapper's store path
+  ## unchanged. So each sub-tool that resolves to a profile with either
+  ## channel contributes ``<name>=<profileFingerprint>``; the fingerprint
+  ## covers both lists and the realization behind them.
+  ##
+  ## A sub-tool whose profile carries neither channel contributes nothing,
+  ## and nor does one the edge also names as a ref (``channelSubToolRefs``),
+  ## so the key of an action whose environment this does not change is
+  ## the key it had before. The same name match as ``toolPathPrefix``.
+  var lines: seq[string] = @[]
+  for refName in channelSubToolRefs(subToolRefs, toolIdentityRefs):
+    for profile in profiles.values:
+      if profile.executableName != refName and
+          bareToolSelector(profile.packageSelector) != refName:
+        continue
+      if profile.cpathList.len == 0 and profile.libraryPathList.len == 0:
+        continue
+      let line = refName & "=" & digestHex(profile.profileFingerprint)
+      if line notin lines:
+        lines.add(line)
+  lines.sort()
+  lines.join("\n")
+
+proc subToolChannelKeySuffix(profiles: Table[string, PathOnlyToolProfile];
+                             payload: BuildActionDef): string =
+  ## ``subToolChannelKeyText`` framed for appending to a lowering site's
+  ## fingerprint text; empty when it is empty.
+  let text = subToolChannelKeyText(profiles, payload.subToolRefs,
+    payload.toolIdentityRefs)
+  if text.len > 0: "\nsubToolChannels\n" & text else: ""
+
 proc actionPathEnvEntry*(profiles: openArray[PathOnlyToolProfile];
                          packageName = ""; executableName = "";
                          refs: openArray[string] = []): string =
@@ -3314,6 +3369,12 @@ proc lowerGraphAction(node: GraphNode; profiles: Table[string, PathOnlyToolProfi
     # action's bare-name argv (``meson`` / ``ninja`` / ``gcc`` / ...)
     # finds the right binaries.
     result.toolIdentityRefs = payload.toolIdentityRefs
+    # The tool's own sub-tools reach the engine apart from the refs: the
+    # engine takes only their compile and link channels, and none of what a
+    # ref selects (see ``BuildAction.subToolIdentityRefs``). Each site above
+    # keys those channels (``subToolChannelKeySuffix``).
+    result.subToolIdentityRefs = channelSubToolRefs(payload.subToolRefs,
+      payload.toolIdentityRefs)
     result.toolIdentityRefKinds = @[]
     for kind in payload.toolIdentityRefKinds:
       result.toolIdentityRefKinds.add(
@@ -3405,7 +3466,8 @@ proc lowerGraphAction(node: GraphNode; profiles: Table[string, PathOnlyToolProfi
     ].join("\n") & (block:
       let libraries = environmentPrefixKeyText(profiles,
         payload.toolIdentityRefs)
-      if libraries.len > 0: "\nenvironmentPrefix\n" & libraries else: "")
+      if libraries.len > 0: "\nenvironmentPrefix\n" & libraries else: "") &
+      subToolChannelKeySuffix(profiles, payload)
     # M9.R.14c.4 — inline-exec actions (autotools configure scripts,
     # from-source-custom shell rows, ...) need the same PATH +
     # extraEnv enrichment as typed-tool actions. Without this, an
@@ -3714,7 +3776,7 @@ proc lowerGraphAction(node: GraphNode; profiles: Table[string, PathOnlyToolProfi
       NimUnittestToolId,
       payload.call.subcommand,
       node.payload
-    ].join("\n")
+    ].join("\n") & subToolChannelKeySuffix(profiles, payload)
     var mergedEnv: seq[string] = @[]
     # THE NIM-UNITTEST EXECUTE SITE — `run` / `runTest` / `list` on an
     # already-built test binary — and therefore the site EVERY
@@ -3837,7 +3899,8 @@ proc lowerGraphAction(node: GraphNode; profiles: Table[string, PathOnlyToolProfi
   ].join("\n") & (block:
     let libraries = environmentPrefixKeyText(profiles,
       payload.subToolRefs & payload.toolIdentityRefs)
-    if libraries.len > 0: "\nenvironmentPrefix\n" & libraries else: "")
+    if libraries.len > 0: "\nenvironmentPrefix\n" & libraries else: "") &
+    subToolChannelKeySuffix(profiles, payload)
   var mergedEnv: seq[string] = @[]
   # The general typed-tool site — the one every `reprobuild.test_execute.*`
   # and `reprobuild.python_test.*` edge goes through, and so the one the
@@ -4906,7 +4969,11 @@ const
   # passthrough resolution and the stage-2 census both read this field,
   # and a census that answers differently cold and warm is not a
   # measurement.
-  LoweredGraphCacheVersion = 15'u16
+  LoweredGraphCacheVersion = 16'u16
+    # v16: ``BuildAction.subToolIdentityRefs``, a string list after the
+    # ``@FILE:`` expansion byte. A v15 record decoded without it would hand
+    # the engine no sub-tools, so a warm build would launch a sub-tool
+    # compiler without the compile and link channels a cold build gives it.
     # v15: ``BuildAction.expandsArgFiles``, one byte after the optional
     # outputs. A v14 record holds an inline-exec argv whose `@FILE:` tokens
     # were already substituted when the graph was lowered, and a key mixed
@@ -5981,6 +6048,7 @@ proc writeBuildAction(outp: var seq[byte]; action: BuildAction) =
   outp.writeStringSeq(action.removeBeforeRun)
   outp.writeStringSeq(action.optionalOutputs)
   outp.add(if action.expandsArgFiles: 1'u8 else: 0'u8)
+  outp.writeStringSeq(action.subToolIdentityRefs)
 
 proc readBuildAction(bytes: openArray[byte]; pos: var int): BuildAction =
   result = BuildAction(
@@ -6068,6 +6136,7 @@ proc readBuildAction(bytes: openArray[byte]; pos: var int): BuildAction =
     raiseEnvelopeError(eeMalformed,
       "invalid lowered action @FILE: expansion sentinel")
   result.expandsArgFiles = argFilesByte == 1'u8
+  result.subToolIdentityRefs = readStringSeq(bytes, pos)
 
 proc encodeLoweredGraphCache(record: LoweredGraphCacheRecord): seq[byte] =
   result.writeString(LoweredGraphCacheMagic)

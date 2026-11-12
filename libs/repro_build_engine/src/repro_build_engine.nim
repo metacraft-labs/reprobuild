@@ -647,6 +647,26 @@ type
       ## both routes collapse to the same key, so existing recipes
       ## get byte-identical materialization cache behaviour to
       ## pre-M9.R.7.
+    subToolIdentityRefs*: seq[string]
+      ## The sub-tools of this action's own tool (``cli: subTools`` in
+      ## the DSL) that are NOT also in ``toolIdentityRefs``. The engine
+      ## resolves each through ``BuildEngineConfig.toolIdentityResolver``
+      ## like a ref, but takes only the two channels a compiler driver
+      ## the tool runs needs to compile and link: the ref's
+      ## ``includeDirs`` (``CPATH``) and ``libDirs`` (``LIBRARY_PATH``
+      ## only, never a run-time loader path). See
+      ## ``collectResolvedAuxPaths``.
+      ##
+      ## Kept apart from ``toolIdentityRefs`` on purpose. A ref is the
+      ## edge's statement about everything it runs: it selects the
+      ## hermetic ``PATH`` shape (``classifyActionPath``), contributes
+      ## bin dirs, every aux channel and its provisioning receipt, and
+      ## names the edge an MSVC consumer. A sub-tool is the TOOL's
+      ## statement about what it runs, and none of that follows from
+      ## it. Its directory already reaches the action's declared
+      ## ``PATH`` at lowering time, and its profile fingerprint enters
+      ## the weak fingerprint there (``subToolChannelKeyText`` in
+      ## repro_cli_support), so the channels this adds are keyed.
     cachePlatformTag*: string
       ## DSL-port M9.R.7. Cache-platform namespace tag folded into
       ## ``cacheEntryIdentity`` derivation via the
@@ -13505,6 +13525,12 @@ type
     cmakePrefixDirs*: seq[string]
     includeDirs*: seq[string]
     libDirs*: seq[string]
+    linkOnlyLibDirs*: seq[string]
+      ## Library directories for the LINK channel alone: ``LIBRARY_PATH``,
+      ## never ``LD_LIBRARY_PATH`` / ``DYLD_LIBRARY_PATH``. They come from
+      ## the action's sub-tools (``BuildAction.subToolIdentityRefs``),
+      ## which vouch for what the tool's compiler driver links against,
+      ## not for what every process of the action loads at run time.
     nimPathDirs*: seq[string]
     prefixVars*: seq[(string, string)]
       ## `DEP_<NAME>_PREFIX` = the realized prefix of a library ref
@@ -13525,7 +13551,20 @@ proc collectResolvedAuxPaths*(action: BuildAction;
   ## accumulate the in-order union of each ref's aux-path lists. Same
   ## semantics as ``resolvedToolBinDirs`` but for the four extra search-
   ## path channels.
-  if action.toolIdentityRefs.len == 0 or resolver == nil:
+  ##
+  ## Then the action's sub-tools (``subToolIdentityRefs``): each adds its
+  ## ``includeDirs`` and its ``libDirs``, after every ref's, so a channel
+  ## the edge declared keeps its precedence. Only those two: a sub-tool is
+  ## a compiler driver or another program the tool runs, and what that
+  ## program needs from its own profile is where its headers and its link
+  ## libraries are. The stdlib ``cargo`` reaches the C compiler rustc
+  ## links with only this way; without the channels a Nix clang on macOS
+  ## could not find the SDK's split-out ``libiconv`` that Rust's standard
+  ## library links. The library dirs go to ``linkOnlyLibDirs``: a run-time
+  ## loader path would reach every process the action runs.
+  if resolver == nil or
+      (action.toolIdentityRefs.len == 0 and
+       action.subToolIdentityRefs.len == 0):
     return
   # M9.R.15q.3.3 — dedup at union time to keep the rendered env vars
   # from exploding to E2BIG.  Without dedup, plasma-framework (25
@@ -13584,6 +13623,28 @@ proc collectResolvedAuxPaths*(action: BuildAction;
       for kv in r.prefixVars:
         if kv[0].len > 0 and kv notin result.prefixVars:
           result.prefixVars.add(kv)
+  # Sub-tools resolve as ``dkBuild``, the kind a ref without an explicit
+  # kind gets (``kindForRef``); on a native build every kind is the same.
+  for refName in action.subToolIdentityRefs:
+    if refName.len == 0 or refName in action.toolIdentityRefs:
+      continue
+    let resolved = resolver(refName, dkBuild)
+    if resolved.isNone:
+      continue
+    let r = resolved.get()
+    for d in r.includeDirs:
+      if d.len > 0 and d notin seenInclude:
+        seenInclude.incl(d)
+        result.includeDirs.add(d)
+    for d in r.libDirs:
+      if d.len > 0 and d notin seenLib:
+        seenLib.incl(d)
+        result.linkOnlyLibDirs.add(d)
+
+proc linkLibDirs(paths: ResolvedAuxPaths): seq[string] =
+  ## Everything ``LIBRARY_PATH`` carries: the refs' library dirs, then the
+  ## sub-tools' link-only ones.
+  paths.libDirs & paths.linkOnlyLibDirs
 
 proc isUnsafeRuntimeLibDir(path: string): bool =
   ## Dependency profiles may propagate libc or language-runtime libraries
@@ -13817,7 +13878,7 @@ proc applyResolvedAuxPathsTable*(env: StringTableRef;
                   "CPPFLAGS_FOR_BUILD", "CFLAGS_FOR_BUILD",
                   "CXXFLAGS_FOR_BUILD"]:
     prependEnvFlags(env, varName, systemFlags)
-  prependEnvDirs(env, "LIBRARY_PATH", paths.libDirs)
+  prependEnvDirs(env, "LIBRARY_PATH", linkLibDirs(paths))
   # LD_LIBRARY_PATH covers run-time test execution; LIBRARY_PATH covers
   # link-time. Glibc outputs are link-only: loading an arbitrary dependency's
   # libc into the action process can cross GLIBC_PRIVATE ABIs.
@@ -13868,7 +13929,7 @@ proc applyResolvedAuxPathsArgv*(env: seq[string];
                   "CPPFLAGS_FOR_BUILD", "CFLAGS_FOR_BUILD",
                   "CXXFLAGS_FOR_BUILD"]:
     result = prependEnvFlagsToArgvEnv(result, varName, systemFlags)
-  result = prependEnvDirsToArgvEnv(result, "LIBRARY_PATH", paths.libDirs)
+  result = prependEnvDirsToArgvEnv(result, "LIBRARY_PATH", linkLibDirs(paths))
   let runtimeLibDirs = runtimeSafeLibDirs(paths)
   result = prependEnvDirsToArgvEnv(result, "LD_LIBRARY_PATH", runtimeLibDirs)
   result = prependEnvDirsToArgvEnv(result, "REPRO_NIM_PATH_DIRS", paths.nimPathDirs)
