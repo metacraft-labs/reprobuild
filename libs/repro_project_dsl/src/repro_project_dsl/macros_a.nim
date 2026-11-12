@@ -4563,8 +4563,13 @@ const BundledStdlibSelectors* = [
   "dpkg",
   "dsymutil",
   "electron",
+  "elixir",
   "emcc",
+  "erl",
+  "erlang",
+  "erlc",
   "esbuild",
+  "escript",
   "flake8",
   "forc",
   "foundry",
@@ -4572,6 +4577,7 @@ const BundledStdlibSelectors* = [
   "gh",
   "git",
   "go",
+  "iex",
   "installer",
   "just",
   "libblake3",
@@ -4581,6 +4587,7 @@ const BundledStdlibSelectors* = [
   "maturin",
   "mdbook",
   "meson",
+  "mix",
   "nim",
   "nimble",
   "ninja",
@@ -4599,6 +4606,7 @@ const BundledStdlibSelectors* = [
   "pytest",
   "python-dev",
   "python3",
+  "rebar3",
   "rg",
   "ruby",
   "runquotad",
@@ -4643,6 +4651,11 @@ const BundledStdlibSelectors* = [
   ## npm, pnpm, pyproject-hooks added so every catalog entry under
   ## repro_dsl_stdlib/packages/ is discoverable via a plain ``uses:`` line in
   ## reprobuild.nim.
+  ##
+  ## The BEAM toolchain (``erlang``, ``erl``, ``erlc``, ``escript``,
+  ## ``elixir``, ``mix``, ``iex``, ``rebar3``) is listed so a recipe can
+  ## declare each executable its actions run
+  ## (reprobuild-pm/issues/2026-11-07-the-stdlib-beam-packages-cannot-provision-erl-mix-or-rebar3.md).
 
 proc isBundledStdlibSelector*(selector: string): bool =
   selector in BundledStdlibSelectors

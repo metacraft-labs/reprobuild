@@ -492,6 +492,7 @@ libs/repro_fs_facts/tests/t_fs_facts_conformance.nim	nim	35
 libs/repro_home_apply/tests/t_adapter_chain.nim	nim	13
 libs/repro_home_apply/tests/t_app_bundle_records_route.nim	nim	12
 libs/repro_home_apply/tests/t_archive_conformance_shared.nim	nim	3
+libs/repro_home_apply/tests/t_beam_toolchain_packages_resolve.nim	nim	4
 libs/repro_home_apply/tests/t_builtin_adapter.nim	nim	10
 libs/repro_home_apply/tests/t_builtin_adapter_7z_nested.nim	nim	2
 libs/repro_home_apply/tests/t_builtin_adapter_7z_sfx_flatten.nim	nim	6

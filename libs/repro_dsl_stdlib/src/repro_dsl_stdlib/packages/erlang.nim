@@ -1,3 +1,16 @@
+## ``erlang`` — the Erlang/OTP distribution. Its default executable is
+## ``erl``.
+##
+## OTP ships no executable named ``erlang``, and a path-mode ``uses:`` probes
+## PATH for the selector's own name. So a recipe declares the executables it
+## runs by their own names — ``erl``, ``erlc`` and ``escript``, each its own
+## package (``erl.nim``, ``erlc.nim``, ``escript.nim``) realised from this
+## same distribution: nixpkgs' ``erlang`` on Nix-capable hosts and the OTP
+## installer below on Windows, the way ``npm`` and ``npx`` share ``node``'s
+## (reprobuild-pm/issues/2026-11-07-the-stdlib-beam-packages-cannot-provision-erl-mix-or-rebar3.md).
+## This package stays for a profile or recipe that names the distribution;
+## keep its arms and theirs in step.
+##
 ## Archive realizations harvested by tools/catalog-harvester. GM4b: the
 ## harvester emits ``tarball`` statements, which live in the hand-maintained
 ## ``package`` block below; merge a re-harvest into it.
@@ -86,10 +99,16 @@
 
 import repro_project_dsl
 import repro_dsl_stdlib/packages_schema
+import repro_dsl_stdlib/nixpkgs_pin
 export packages_schema
 
 package erlang:
   provisioning:
+    # Nix-capable hosts: nixpkgs' erlang at the canonical pin (28.2 there);
+    # its bin/ carries erl, erlc and escript.
+    nixPackage "nixpkgs#erlang", executablePath = "bin/erl",
+      nixpkgsRev = CanonicalNixpkgsRev,
+      nixpkgsNarHash = CanonicalNixpkgsNarHash
     tarball url = "https://github.com/erlang/otp/releases/download/OTP-28.5/otp_win64_28.5.exe",
       sha256 = "46f56351e2e67865c6aaff83bcd0a7d97d73bea643a0531774dd9ba8fbee7dc0",
       archiveType = "installer-nsis",

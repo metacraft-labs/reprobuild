@@ -5338,6 +5338,17 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "",
     singleReason: "suite-scope statement runs at every start-up: let savedCache = getEnv(\"REPRO_CACHE_DISABLE\")"),
   TestSpec(
+    source: "libs/repro_home_apply/tests/t_beam_toolchain_packages_resolve.nim",
+    binary: "build/test-bin/t_beam_toolchain_packages_resolve",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "t_group_libs_repro_home_apply_tests_g01",
+    singleReason: ""),
+  TestSpec(
     source: "libs/repro_home_apply/tests/t_builtin_adapter.nim",
     binary: "build/test-bin/t_builtin_adapter",
     defines: @[],
