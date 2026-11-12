@@ -466,6 +466,7 @@ suite "M83 Phase A e2e: compile + run user profiles":
         "Add-Type -AssemblyName System.IO.Compression.FileSystem; " &
         "Add-Type -AssemblyName System.IO.Compression; " &
         "function ConvertTo-ExtendedPath([string]$p) { " &
+          "if ([System.IO.Path]::DirectorySeparatorChar -ne '\\') { return $p } " &
           "if ($p.StartsWith('\\\\?\\')) { return $p } " &
           "if ($p.StartsWith('\\\\')) { return '\\\\?\\UNC\\' + $p.Substring(2) } " &
           "return '\\\\?\\' + $p }; " &

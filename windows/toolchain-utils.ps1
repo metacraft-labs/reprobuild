@@ -270,6 +270,9 @@ function Expand-ZipArchive {
   Add-Type -AssemblyName System.IO.Compression.FileSystem
   Add-Type -AssemblyName System.IO.Compression
   function ConvertTo-ExtendedPath([string]$p) {
+    # Only Windows has the extended-length namespace; elsewhere pwsh reads the
+    # prefix as a relative directory literally named `\\?\`.
+    if ([System.IO.Path]::DirectorySeparatorChar -ne '\') { return $p }
     if ($p.StartsWith('\\?\')) { return $p }
     if ($p.StartsWith('\\')) { return '\\?\UNC\' + $p.Substring(2) }
     return '\\?\' + $p
