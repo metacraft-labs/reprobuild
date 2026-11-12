@@ -623,6 +623,7 @@ libs/repro_local_store/tests/t_store_refuses_squatted_cas_and_planted_prefixes.n
 libs/repro_local_store/tests/t_store_use_record_lost_to_a_writer_leaves_no_lock.nim	nim	1
 libs/repro_local_store/tests/t_win_store_gc_refuses_referenced_entry.nim	nim	9
 libs/repro_local_store/tests/t_win_store_hardlink_cap_falls_back_per_file.nim	nim	7
+libs/repro_lock/tests/t_a_lock_value_spread_over_lines_reads_whole.nim	nim	7
 libs/repro_lock/tests/t_a_store_pin_carries_its_archive_through_the_lock.nim	nim	5
 libs/repro_lock/tests/t_catalog_import_pins.nim	nim	5
 libs/repro_lock/tests/t_lock_identity_feature_change_differs.nim	nim	3
@@ -1705,7 +1706,7 @@ tests/integration/t_commit_gate_defaults_to_gate_mode.nim	nim	1
 tests/integration/t_commit_records_the_sibling_revision_the_shell_actually_used.nim	nim	3
 tests/integration/t_commit_refuses_a_backward_sibling_pin.nim	nim	10
 tests/integration/t_commit_repin_plans_both_locks.nim	nim	7
-tests/integration/t_commit_repins_committed_lock_siblings.nim	nim	2
+tests/integration/t_commit_repins_committed_lock_siblings.nim	nim	3
 tests/integration/t_committed_lock_carries_coordinates_and_self_describing_integrity_per_dep.nim	nim	1
 tests/integration/t_committed_lock_folds_sibling_develop_deps.nim	nim	1
 tests/integration/t_committed_lock_paths_do_not_depend_on_the_invoking_worktree.nim	nim	5

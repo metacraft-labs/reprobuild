@@ -592,6 +592,42 @@ proc sameSolution*(a, b: UnifiedSolution): bool =
 # ---------------------------------------------------------------------------
 
 
+proc lockStatementsOf(content: string): seq[TomlStatement] =
+  ## Every statement of a lock document (``toml_subset.tomlStatements``), a
+  ## value spread over several physical lines being ONE statement. A layout
+  ## the subset cannot follow fails the read as a lock parse error naming the
+  ## line, rather than being read as a lock that pins less than it says
+  ## (Unified-Locking-And-Hooks.md §13.3, "A lock is read as TOML
+  ## statements").
+  try:
+    for stmt in tomlStatements(content): result.add(stmt)
+  except TomlSubsetLayoutError as err:
+    raise newException(SolvedGraphLockParseError,
+      "lock is not laid out as TOML this reader can follow: " & err.msg)
+
+proc lockStatementSource*(content, key: string): string =
+  ## The exact source bytes of the lock's top-level ``key = value``
+  ## statement — every physical line of it, the last line's terminator
+  ## excluded — or "" when the lock has none. A statement inside the
+  ## certificate-policy snapshot is not the lock's and is never returned.
+  ##
+  ## This is what a partial writer replaces: replacing the statement's FIRST
+  ## LINE instead leaves the rest of a multi-line value behind, a document
+  ## that no longer parses (reprobuild-pm issue 2026-11-12-the-pre-commit-
+  ## lock-rewrite-misreads-a-multi-line-deps-entry-and-writes-invalid-toml).
+  ## Raises ``SolvedGraphLockParseError`` on a layout the reader cannot
+  ## follow.
+  var inPolicy = false
+  for stmt in lockStatementsOf(content):
+    if stmt.text.startsWith("["):
+      inPolicy = isPolicyHeader(stmt.text)
+      continue
+    if inPolicy: continue
+    let eq = stmt.text.find('=')
+    if eq > 0 and stmt.text[0 ..< eq].strip() == key:
+      return content[stmt.first ..< stmt.last]
+  ""
+
 proc parseSolvedGraphLock*(content: string): SolvedGraphLock =
   ## Parse a committed solved-graph lock. Round-trips
   ## ``serializeSolvedGraphLock`` (and reads the ``deps``-carrying documents
@@ -603,10 +639,8 @@ proc parseSolvedGraphLock*(content: string): SolvedGraphLock =
   var sawSchema = false
   # The policy snapshot's keys (``schema``, ``name``, ...) are not lock keys,
   # so only the lines outside it are read.
-  for rawLine in splitCertificatePolicySection(content).lockPart.splitLines():
-    let line = rawLine.strip()
-    if line.len == 0 or line.startsWith("#"):
-      continue
+  for stmt in lockStatementsOf(splitCertificatePolicySection(content).lockPart):
+    let line = stmt.text
     if line.startsWith("["):
       continue
     let eq = line.find('=')
@@ -1145,9 +1179,9 @@ proc parseLockedDependencies*(content: string): LockedDependencies =
   # part; the certificate-policy section after it is carried verbatim.
   var sawProvisioning = false
   var sawCatalogImports = false
-  for rawLine in split.lockPart.splitLines():
-    let line = rawLine.strip()
-    if line.len == 0 or line.startsWith("#") or line.startsWith("["):
+  for stmt in lockStatementsOf(split.lockPart):
+    let line = stmt.text
+    if line.startsWith("["):
       continue
     let eq = line.find('=')
     if eq <= 0:
