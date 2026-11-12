@@ -22686,7 +22686,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_project_dsl/tests/dsl_port/t_dsl_service_body_refuses_unrecognised_statements.nim",
       "sourceSuiteCount": 4,
-      "staticCaseCount": 17,
+      "staticCaseCount": 19,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

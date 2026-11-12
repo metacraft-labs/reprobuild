@@ -796,7 +796,7 @@ libs/repro_project_dsl/tests/dsl_port/t_dsl_runtime_library_resolution.nim	nim	1
 libs/repro_project_dsl/tests/dsl_port/t_dsl_self_hosting_tool_dep_name_collision.nim	nim	5
 libs/repro_project_dsl/tests/dsl_port/t_dsl_service_args.nim	nim	2
 libs/repro_project_dsl/tests/dsl_port/t_dsl_service_basic.nim	nim	2
-libs/repro_project_dsl/tests/dsl_port/t_dsl_service_body_refuses_unrecognised_statements.nim	nim	17
+libs/repro_project_dsl/tests/dsl_port/t_dsl_service_body_refuses_unrecognised_statements.nim	nim	19
 libs/repro_project_dsl/tests/dsl_port/t_dsl_service_dependencies.nim	nim	2
 libs/repro_project_dsl/tests/dsl_port/t_dsl_service_description.nim	nim	2
 libs/repro_project_dsl/tests/dsl_port/t_dsl_service_executable_ref.nim	nim	1
