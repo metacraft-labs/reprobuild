@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 35,
-    "nimTestBinaries": 2757,
+    "nimTestBinaries": 2758,
     "pureUnitConsolidationGroups": 81,
     "pureUnitTests": 754,
     "staticallyDetectedRuntimeCompilerFlowTests": 138,
-    "testEntries": 2801
+    "testEntries": 2802
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1597,7 +1597,7 @@
     "classificationCounts": {
       "graph-fixture": 21,
       "integration": 1521,
-      "platform/destructive": 176,
+      "platform/destructive": 177,
       "pure unit": 754,
       "unclassified": 329
     },
@@ -1813,9 +1813,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2757,
+    "nimTestBinaryCount": 2758,
     "pythonTestFileCount": 44,
-    "testEntryCount": 2801
+    "testEntryCount": 2802
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -48010,6 +48010,23 @@
       "source": "tests/integration/t_rename_relocation_failure_is_clean.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_rename_relocation_repairs_linked_worktrees",
+      "class": "platform/destructive",
+      "classificationReason": "platform path, target OS, VM, privileged, or host mutation signal",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_test_support"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_rename_relocation_repairs_linked_worktrees.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 7,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

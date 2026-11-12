@@ -115,6 +115,36 @@ type
     csSubstantial     ## A git repo carrying commits, branches, stashes or
                       ## uncommitted work.
 
+  LinkedWorktree* = object
+    ## One entry of `git worktree list --porcelain`.
+    path*: string            ## As git records it (symlink-resolved, absolute).
+    locked*: bool
+    lockReason*: string
+    prunable*: bool          ## Git's verdict that the worktree is gone.
+    prunableReason*: string
+
+  LinkedWorktreeInventory* = object
+    ## The worktree links a move of one checkout would cut. See
+    ## `linkedWorktreeInventory`.
+    ok*: bool
+    diagnostic*: string
+    commonDir*: string       ## Absolute Git common directory of the checkout.
+    canonicalCheckout*: string
+      ## The checkout's symlink-resolved path, taken BEFORE the move. Git
+      ## records linked-worktree paths resolved, and after the move the prior
+      ## path no longer exists to be resolved, so mapping a worktree inside
+      ## the moved checkout to its new location needs this spelling captured
+      ## while it still can be.
+    linked*: seq[LinkedWorktree]
+      ## Linked worktrees sharing the checkout's common directory, when the
+      ## checkout OWNS it (is the main worktree). Each `.git` file names the
+      ## checkout's location, so each is cut off by the move.
+    selfLinked*: bool
+      ## The checkout is itself a linked worktree of a common directory that
+      ## lives elsewhere (its `.git` is a file). The caller refuses to move
+      ## such a checkout; see `candidate_is_linked_worktree` in
+      ## `relocateDeclaredRenames`.
+
   RelocationMoveResult* = object
     ## Outcome of the move. `verificationFailed` is distinguished from a plain
     ## failure because the two carry different promises about the disk: a plain
@@ -370,6 +400,230 @@ proc absoluteSubmoduleGitdirs*(dir: string): seq[string] =
           result.add(subPath & " -> " & target)
     except CatchableError:
       continue
+
+proc resolveGitPath(dir, answer: string): string =
+  ## `rev-parse --git-common-dir` answers RELATIVE to the directory it ran in
+  ## for a main worktree (`.git`) and absolute for a linked one. Resolved here
+  ## rather than with `--path-format=absolute`, which needs git 2.31: nothing
+  ## else in this module asks for a git newer than `worktree repair` (2.29).
+  let trimmed = answer.strip()
+  if trimmed.len == 0:
+    return ""
+  let joined = if isAbsolute(trimmed): trimmed else: dir / trimmed
+  try:
+    normalizedPath(absolutePath(joined))
+  except CatchableError:
+    joined
+
+proc canonicalDir(path: string): string =
+  ## The symlink-resolved spelling of `path`, or `path` itself when it cannot
+  ## be resolved. Git records a linked worktree's location through
+  ## `strbuf_realpath`, so a prefix comparison against a candidate path that
+  ## goes through a symlink (macOS `/tmp`, a workspace reached through a
+  ## linked home directory) has to compare canonical spellings.
+  try:
+    expandFilename(path)
+  except CatchableError:
+    path
+
+proc isAtOrUnder(path, root: string): bool =
+  path == root or path.startsWith(root & DirSep) or
+    (DirSep != '/' and path.startsWith(root & "/"))
+
+proc linkedWorktreeInventory*(probe: RelocationGitProbe;
+                              dir: string): LinkedWorktreeInventory =
+  ## The linked worktrees a move of `dir` would cut off
+  ## (Declared-Repository-Renames.md §3.5 "Linked worktrees", §4
+  ## `linked_worktree_unrepairable`).
+  ##
+  ## A linked worktree's `.git` is a FILE holding `gitdir: <main>/.git/
+  ## worktrees/<name>` — an absolute path by default, and a path relative to
+  ## the linked worktree under `worktree.useRelativePaths`. Either way it
+  ## names the main checkout's location, so renaming the main checkout leaves
+  ## every linked worktree answering "not a git repository" until someone runs
+  ## `git worktree repair`. Every agent and verifier in a workspace typically
+  ## works in linked worktrees, often OUTSIDE the workspace, which is why this
+  ## is not an edge case.
+  ##
+  ## Read from `git worktree list --porcelain`, the documented machine format
+  ## (https://git-scm.com/docs/git-worktree#_porcelain_format), not by walking
+  ## `<common dir>/worktrees/*`: git decides which entries are `locked` and
+  ## `prunable`, and restating its rules here is how they would drift.
+  ##
+  ## A candidate that is ITSELF a linked worktree of some other common
+  ## directory is reported as `selfLinked`, with no `linked` entries: its
+  ## sibling worktrees belong to that other common directory and would not
+  ## move.
+  result.ok = true
+  let gitDirRes = runGit(probe, ["-C", dir, "rev-parse", "--absolute-git-dir"])
+  let commonRes = runGit(probe, ["-C", dir, "rev-parse", "--git-common-dir"])
+  if gitDirRes.code != 0 or commonRes.code != 0:
+    result.ok = false
+    result.diagnostic = "could not resolve the git directories: " &
+      (if gitDirRes.code != 0: gitDirRes.output.strip()
+       else: commonRes.output.strip())
+    return
+  let gitDir = resolveGitPath(dir, gitDirRes.output)
+  result.commonDir = resolveGitPath(dir, commonRes.output)
+  result.canonicalCheckout = canonicalDir(dir)
+  let owns =
+    try: sameFile(gitDir, result.commonDir)
+    except CatchableError: gitDir == result.commonDir
+  result.selfLinked = not owns
+  let listing = runGit(probe, ["-C", dir, "worktree", "list", "--porcelain"])
+  if listing.code != 0:
+    result.ok = false
+    result.diagnostic = "could not list worktrees: " & listing.output.strip()
+    return
+  var records: seq[LinkedWorktree]
+  var current: LinkedWorktree
+  var inRecord = false
+  for rawLine in listing.output.splitLines():
+    let line = rawLine.strip(leading = false, trailing = true)
+    if line.len == 0:
+      if inRecord:
+        records.add(current)
+      current = LinkedWorktree()
+      inRecord = false
+      continue
+    if line.startsWith("worktree "):
+      if inRecord:
+        records.add(current)
+      current = LinkedWorktree(path: line["worktree ".len .. ^1])
+      inRecord = true
+    elif line == "locked" or line.startsWith("locked "):
+      current.locked = true
+      if line.len > "locked ".len:
+        current.lockReason = line["locked ".len .. ^1]
+    elif line == "prunable" or line.startsWith("prunable "):
+      current.prunable = true
+      if line.len > "prunable ".len:
+        current.prunableReason = line["prunable ".len .. ^1]
+  if inRecord:
+    records.add(current)
+  let canonicalSelf = result.canonicalCheckout
+  for record in records:
+    let isSelf =
+      try: sameFile(record.path, dir)
+      except CatchableError: canonicalDir(record.path) == canonicalSelf
+    if isSelf:
+      continue
+    # The first record is always the main worktree (or the bare repository).
+    # For an owning candidate that IS `dir`, handled above. For a self-linked
+    # candidate the other records are not this checkout's to move.
+    if owns:
+      result.linked.add(record)
+
+proc unrepairableLinkedWorktrees*(inventory: LinkedWorktreeInventory;
+                                  priorPath: string): seq[string] =
+  ## The linked worktrees `git worktree repair` could not reconnect after the
+  ## move, each named with its remedy (§4 `linked_worktree_unrepairable`).
+  ## Empty when every one of them can be repaired.
+  ##
+  ## MISSING: git marks it `prunable` (its directory or `.git` file is gone).
+  ## There is nothing on disk to repoint, and it may be on an unmounted volume
+  ## that will come back expecting the old location; either the operator
+  ## restores it or discards the administrative entry.
+  ##
+  ## LOCKED: a lock is git's own "do not touch this worktree's administrative
+  ## files" marker (`git worktree move` and `remove` refuse a locked worktree
+  ## too), most often set for one on removable media. An unattended sync does
+  ## not override it.
+  for wt in inventory.linked:
+    var missing = wt.prunable
+    if not missing:
+      try:
+        missing = not dirExists(wt.path) or
+          not (fileExists(wt.path / ".git") or dirExists(wt.path / ".git"))
+      except CatchableError:
+        missing = true
+    if missing:
+      result.add("'" & wt.path & "' is MISSING" &
+        (if wt.prunableReason.len > 0: " (" & wt.prunableReason & ")"
+         else: "") &
+        " — restore it, or discard its entry with `git -C " & priorPath &
+        " worktree prune`" &
+        (if wt.locked: " after `git -C " & priorPath & " worktree unlock " &
+           quoteShell(wt.path) & "`"
+         else: ""))
+    elif wt.locked:
+      result.add("'" & wt.path & "' is LOCKED" &
+        (if wt.lockReason.len > 0: " (" & wt.lockReason & ")" else: "") &
+        " — `git -C " & priorPath & " worktree unlock " & quoteShell(wt.path) &
+        "` once it is safe to repoint, or `git -C " & priorPath &
+        " worktree remove " & quoteShell(wt.path) & "`")
+
+proc relocatedWorktreePath*(path, source, destination: string;
+                            canonicalSource = ""): string =
+  ## Where linked worktree `path` lives after `source` moved to `destination`.
+  ## A linked worktree INSIDE the moved checkout travelled with it; one
+  ## outside did not move at all. `canonicalSource` is `source`'s
+  ## symlink-resolved spelling captured before the move (git records worktree
+  ## paths resolved); it cannot be computed here because `source` is gone.
+  for root in [source, canonicalSource]:
+    if root.len > 0 and isAtOrUnder(path, root):
+      return destination & path[root.len .. ^1]
+  path
+
+proc repairLinkedWorktrees*(probe: RelocationGitProbe;
+                            source, destination: string;
+                            inventory: LinkedWorktreeInventory):
+    tuple[repaired: seq[string]; failures: seq[string]] =
+  ## MUTATING. After `source` moved to `destination`, reconnect every link the
+  ## move cut: run `git worktree repair` from the moved checkout with each
+  ## linked worktree's (post-move) path, then VERIFY each one from its own
+  ## side — `git -C <linked> rev-parse --git-common-dir` must resolve and name
+  ## the moved checkout's common directory. Repair reporting success is not
+  ## taken as the proof, because the failure being prevented is a worktree
+  ## that silently stops being a checkout.
+  ##
+  ## `git worktree repair` is git's own remedy for exactly this case: "if the
+  ## main worktree is moved, linked worktrees will be unable to locate it.
+  ## Running repair in the main worktree will reestablish the connection"
+  ## (https://git-scm.com/docs/git-worktree#Documentation/git-worktree.txt-repair).
+  ## It rewrites only the `.git` file of a linked worktree and the matching
+  ## `gitdir` file under the common directory; it touches no working-tree
+  ## content, index or ref.
+  ##
+  ## ONE `git worktree repair` PER WORKTREE, not one invocation naming them
+  ## all: git dies on the first path it cannot use ("Invalid path"), which
+  ## would leave every worktree after it unrepaired, and the per-worktree
+  ## failure text would then blame the wrong one.
+  if inventory.linked.len == 0:
+    return
+  var expected: seq[tuple[path, note: string]]
+  for wt in inventory.linked:
+    let moved = relocatedWorktreePath(wt.path, source, destination,
+      inventory.canonicalCheckout)
+    let repair = runGit(probe,
+      ["-C", destination, "worktree", "repair", moved])
+    expected.add((moved,
+      if repair.code != 0: " (`git worktree repair` exited " & $repair.code &
+        ": " & repair.output.strip() & ")"
+      else: ""))
+  let newCommon = runGit(probe,
+    ["-C", destination, "rev-parse", "--git-common-dir"])
+  let commonDir =
+    if newCommon.code == 0: resolveGitPath(destination, newCommon.output)
+    else: ""
+  for (moved, repairNote) in expected:
+    let answer = runGit(probe, ["-C", moved, "rev-parse", "--git-common-dir"])
+    let resolved =
+      if answer.code == 0: resolveGitPath(moved, answer.output) else: ""
+    let same =
+      if resolved.len == 0 or commonDir.len == 0: false
+      else:
+        try: sameFile(resolved, commonDir)
+        except CatchableError: false
+    if same:
+      result.repaired.add("linked worktree '" & moved &
+        "' repointed at " & commonDir)
+    else:
+      result.failures.add("'" & moved & "' does not resolve to " &
+        (if commonDir.len > 0: commonDir else: destination / ".git") &
+        (if answer.code != 0: " (" & answer.output.strip() & ")" else: "") &
+        repairNote & "; run `git -C " & destination & " worktree repair " &
+        quoteShell(moved) & "`")
 
 proc objectPresent*(probe: RelocationGitProbe; dir, oid: string): bool =
   ## Whether `oid` exists in `dir`'s object store.
