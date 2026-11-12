@@ -7,6 +7,7 @@ import std/[json, os, osproc, strutils, times]
 import nimcrypto/sysrand
 import blake3
 import git_tool
+from shared_clones import canonicalRemoteIdentity
 
 when defined(posix):
   import std/posix
@@ -915,6 +916,64 @@ proc normalizedRemoteLocation*(value: string): string =
 proc remoteLocationDigest*(value: string): string =
   let normalized = normalizedRemoteLocation(value)
   let digest = blake3.digest(normalized)
+  result = newStringOfCap(64)
+  for b in digest:
+    result.add(toHex(int(b), 2).toLowerAscii())
+
+proc isLocalRemoteLocation(normalized: string): bool =
+  ## ``normalized`` is ``normalizedRemoteLocation`` output: a resolved local
+  ## path, an authority-less ``file://`` URL, or a Windows drive path.
+  normalized.startsWith("file:///") or normalized.startsWith("/") or
+    (normalized.len >= 3 and normalized[0].isAlphaAscii and
+     normalized[1] == ':' and normalized[2] == '/')
+
+proc remoteRepositoryIdentityDigest*(value: string): string =
+  ## Digest of the REPOSITORY a remote URL names, for deciding which declared
+  ## repository a checkout is (Unified-Locking-And-Hooks.md §16.3 H2: identity
+  ## is the canonical repository URL, the normalisation ``repro sync`` uses).
+  ## So ``https://h/o/r``, ``https://h/o/r.git``, ``git@h:o/r`` and their
+  ## credentialed spellings are one repository; ``canonicalRemoteIdentity``
+  ## documents each fold and each deliberate non-fold (path case, a
+  ## non-default port).
+  ##
+  ## The literal transport form stays with ``remoteLocationDigest``: whether a
+  ## hook's push location is the configured one is a different question, and
+  ## the protocol answers it exactly.
+  ##
+  ## A local remote is a directory, and ``x`` and ``x.git`` are two
+  ## directories, so it keeps the resolved-path identity of
+  ## ``normalizedRemoteLocation`` instead of the ``.git`` fold. Either way the
+  ## input is first reduced to ``normalizedRemoteLocation``, so credentials,
+  ## queries and fragments never reach the digested text. "" means the value
+  ## names no repository and must match nothing.
+  let normalized = normalizedRemoteLocation(value)
+  if normalized.len == 0: return ""
+  var identity = ""
+  if isLocalRemoteLocation(normalized):
+    # `file:///x` and the path `/x` are one directory.
+    let path =
+      if normalized.startsWith("file://"): normalized["file://".len .. ^1]
+      else: normalized
+    identity = "local:" & path
+  elif normalized.contains("://"):
+    identity = canonicalRemoteIdentity(normalized)
+  else:
+    let colon = normalized.find(':')
+    let slash = normalized.find('/')
+    if colon > 0 and (slash < 0 or colon < slash):
+      # An scp-style `host:path`, whose userinfo normalization already
+      # removed; spell it as the ssh URL it means so it reads as a host and a
+      # path. Git reads a colon as scp syntax only before the first slash
+      # (git-clone(1) "GIT URLS"), so `a/b:c` is a local path, not host `a/b`.
+      identity = canonicalRemoteIdentity("ssh://" & normalized[0 ..< colon] &
+        "/" & normalized[colon + 1 .. ^1])
+    else:
+      # A relative local path, which Git resolves against the repository. It
+      # is a directory like any other local remote: keep it literal, so `x`
+      # and `x.git` stay two and it can never equal a network identity.
+      identity = "local:" & normalized
+  if identity.len == 0: return ""
+  let digest = blake3.digest(identity)
   result = newStringOfCap(64)
   for b in digest:
     result.add(toHex(int(b), 2).toLowerAscii())

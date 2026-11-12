@@ -44852,6 +44852,13 @@ type
     worktree: GitWorktreeDiscovery
     diagnostic: string
     previousIdentityNotice: string
+    declaredCheckoutIndex: int
+      ## When not found: the declared repo whose checkout EXISTS and whose
+      ## remote identity the pushed worktree shares, or -1. The pushed
+      ## worktree is then another clone of that repo (typically a nested
+      ## submodule checkout), and the refusal names the checkout to push from.
+    superproject: string
+      ## The superproject worktree when the pushed worktree is a submodule.
 
 proc canonicalDiscoveredGitPath(repoRoot, value: string): string =
   let candidate =
@@ -44936,8 +44943,9 @@ proc discoverGitWorktree(identity: GitToolIdentity;
 proc configuredRemoteDigests(identity: GitToolIdentity;
     repoRoot: string): HashSet[string] =
   ## Repository identity may need a remote fallback when the workspace's
-  ## canonical checkout is absent. Keep URLs out of diagnostics and compare the
-  ## same credential-insensitive canonical digests used by protocol v2.
+  ## canonical checkout is absent. Keep URLs out of diagnostics and compare
+  ## credential-free canonical REPOSITORY identities (H2), so a submodule's
+  ## `…/r.git` is the declared `…/r`.
   result = initHashSet[string]()
   let remotes = gitRunPlainQuery(identity, ["-C", repoRoot, "remote"])
   if remotes.code != 0:
@@ -44951,18 +44959,20 @@ proc configuredRemoteDigests(identity: GitToolIdentity;
     if urls.code != 0:
       continue
     for rawUrl in urls.output.splitLines():
-      let value = rawUrl.strip()
-      if value.len > 0:
-        result.incl(remoteLocationDigest(value))
+      let digest = remoteRepositoryIdentityDigest(rawUrl.strip())
+      if digest.len > 0:
+        result.incl(digest)
 
 proc expectedRemoteDigests(repo: ResolvedRepo): HashSet[string] =
   result = initHashSet[string]()
   for value in [repo.fetchUrl, cloneUrlFor(repo)]:
-    if value.len > 0:
-      result.incl(remoteLocationDigest(value))
+    let digest = remoteRepositoryIdentityDigest(value)
+    if digest.len > 0:
+      result.incl(digest)
   for remote in repo.remotes:
-    if remote.fetchUrl.len > 0:
-      result.incl(remoteLocationDigest(remote.fetchUrl))
+    let digest = remoteRepositoryIdentityDigest(remote.fetchUrl)
+    if digest.len > 0:
+      result.incl(digest)
 
 proc sharesRemoteIdentity(actual, expected: HashSet[string]): bool =
   for digest in actual:
@@ -44978,6 +44988,7 @@ proc resolveRepoWorktreeMatch(identity: GitToolIdentity;
   ## identity. A unique manifest-remote match is the conservative fallback for
   ## a valid checkout whose canonical workspace worktree is absent.
   result.repoIndex = -1
+  result.declaredCheckoutIndex = -1
   result.worktree = discoverGitWorktree(identity, currentRepo)
   if not result.worktree.ok:
     result.diagnostic = result.worktree.diagnostic
@@ -44986,6 +44997,7 @@ proc resolveRepoWorktreeMatch(identity: GitToolIdentity;
   var pathMatches: seq[int]
   var commonMatches: seq[int]
   var missingDeclaredWorktrees = initHashSet[int]()
+  var presentDeclaredWorktrees: seq[int]
   for index, repo in repos:
     let declaredPath = workspaceRoot / repo.path
     if samePathIdentity(result.worktree.worktreeRoot, declaredPath):
@@ -44995,6 +45007,8 @@ proc resolveRepoWorktreeMatch(identity: GitToolIdentity;
     if declaredWorktree.ok:
       if samePathIdentity(result.worktree.commonDir, declaredWorktree.commonDir):
         commonMatches.add(index)
+      else:
+        presentDeclaredWorktrees.add(index)
     elif not dirExists(declaredPath) and not fileExists(declaredPath) and
         not symlinkExists(declaredPath):
       # Remote identity is a recovery path for an ABSENT declared checkout,
@@ -45067,14 +45081,13 @@ proc resolveRepoWorktreeMatch(identity: GitToolIdentity;
       remoteMatches.add(index)
       continue
     for prior in repo.previously:
-      if prior.fetchUrl.len > 0 and
-          remoteLocationDigest(prior.fetchUrl) in actualRemotes:
+      let priorDigest = remoteRepositoryIdentityDigest(prior.fetchUrl)
+      if priorDigest.len > 0 and priorDigest in actualRemotes:
         remoteMatches.add(index)
         # Identify the declaration without printing a URL that could contain
         # embedded credentials. The canonical digest is credential-insensitive.
         previousNotices[index] = "recognized '" & repo.name & "' via " &
-          "declared previous URL (identity " &
-          remoteLocationDigest(prior.fetchUrl) &
+          "declared previous URL (identity " & priorDigest &
           "); run 'repro ws sync' to complete relocation"
         break
   if remoteMatches.len == 1:
@@ -45088,6 +45101,33 @@ proc resolveRepoWorktreeMatch(identity: GitToolIdentity;
   else:
     result.diagnostic = "the pushed worktree does not match a declared repo " &
       "by path, Git common directory, or configured remote"
+    # Still a refusal, but a different one when the worktree is another clone
+    # of a declared repo whose checkout exists — in practice a nested
+    # submodule checkout (`parent/r` of a repo declared at `r`). Its object
+    # store is not the declared checkout's, and the workspace gates, locks and
+    # publishes its declared checkouts, so the remedy is to push from that
+    # checkout; `repro hooks ensure` cannot make this one declared.
+    # CLI/check.md § "A second checkout of a declared repository".
+    var sameRepository: seq[int]
+    for index in presentDeclaredWorktrees:
+      if sharesRemoteIdentity(actualRemotes, expectedRemoteDigests(repos[index])):
+        sameRepository.add(index)
+    if sameRepository.len == 1:
+      result.declaredCheckoutIndex = sameRepository[0]
+      let superproject = gitRunPlainQuery(identity,
+        ["-C", result.worktree.worktreeRoot, "rev-parse",
+         "--show-superproject-working-tree"])
+      if superproject.code == 0 and superproject.output.strip().len > 0:
+        result.superproject = canonicalDiscoveredGitPath(
+          result.worktree.worktreeRoot, superproject.output.strip())
+      let repo = repos[result.declaredCheckoutIndex]
+      result.diagnostic = result.diagnostic & "; it is " &
+        (if result.superproject.len > 0:
+          "a submodule of " & result.superproject
+         else: "a separate clone") &
+        " with its own object store, whose configured remote names " &
+        "declared repo '" & repo.name & "', checked out at " &
+        canonicalDiscoveredGitPath(workspaceRoot, workspaceRoot / repo.path)
 
 # ---- RA-1: per-repo lock resolution via Git history ------------------------
 #
@@ -70339,12 +70379,23 @@ proc executeCheckPrePush(parsed: CheckArgs;
     # membership repo, or the workspace-framework repo at the root, do not
     # widen to the ambient workspace. That fallback audits an unrelated project
     # and can turn an invalid green hook into the push authorization result.
+    let remediation =
+      if currentRepoMatch.declaredCheckoutIndex >= 0:
+        let declared = resolved.repos[currentRepoMatch.declaredCheckoutIndex]
+        "push from the declared checkout of '" & declared.name & "' at " &
+          canonicalDiscoveredGitPath(parsed.workspaceRoot,
+            parsed.workspaceRoot / declared.path) &
+          " (bring the commit there first, for example by fetching it " &
+          "from this checkout); this checkout is not one the workspace " &
+          "gates or locks"
+      else:
+        "run 'repro hooks ensure --vcs " & parsed.currentRepo &
+          "' from a checkout declared by this workspace, or repair the " &
+          "workspace membership before retrying the push"
     result.failures.add(CheckFailure(
       repo: "",
       property: "current-repo-identity",
-      remediation: "run 'repro hooks ensure --vcs " & parsed.currentRepo &
-        "' from a checkout declared by this workspace, or repair the " &
-        "workspace membership before retrying the push",
+      remediation: remediation,
       evidence: currentRepoMatch.diagnostic))
     result.exitCode = 2
     return
