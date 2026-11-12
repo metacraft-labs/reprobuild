@@ -15579,6 +15579,17 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "t_group_tests_e2e_local_build_engine_g01",
     singleReason: ""),
   TestSpec(
+    source: "tests/e2e/local-build-engine/t_e2e_tree_sitter_generate_orders_c_consumer.nim",
+    binary: "build/test-bin/t_e2e_tree_sitter_generate_orders_c_consumer",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "t_group_tests_e2e_local_build_engine_g01",
+    singleReason: ""),
+  TestSpec(
     source: "tests/e2e/local-build-engine/t_repro_build_ambiguous_target_diagnostic.nim",
     binary: "build/test-bin/t_repro_build_ambiguous_target_diagnostic",
     defines: @["reproProviderMode"],
