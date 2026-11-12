@@ -154,7 +154,7 @@ suite "a prefix yields the link directory only if it really provides one":
       ["libssl.dll.a", "libcrypto.dll.a", "libmingw32.a"])
     defer: removeDir(root)
 
-    check prefixProvidesLinkLibraries(root, plWindowsTree)
+    check not prefixProvidesLinkLibraries(root, plWindowsTree)
     check opensslLinkDirForExecutable(
       root / binDir(plWindowsTree) / "openssl.exe") == ""
     resetOpensslPrefixCandidates()

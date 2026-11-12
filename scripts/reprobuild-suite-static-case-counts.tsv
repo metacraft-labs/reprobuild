@@ -1423,6 +1423,7 @@ tests/e2e/local-build-engine/t_e2e_repro_run_lists_tasks_and_edges.nim	nim	3
 tests/e2e/local-build-engine/t_e2e_repro_run_named_run_edge.nim	nim	3
 tests/e2e/local-build-engine/t_e2e_repro_run_qualified_and_ambiguous.nim	nim	1
 tests/e2e/local-build-engine/t_e2e_repro_run_unknown_and_nonrunnable.nim	nim	1
+tests/e2e/local-build-engine/t_e2e_tree_sitter_generate_orders_c_consumer.nim	nim	2
 tests/e2e/local-build-engine/t_repro_build_ambiguous_target_diagnostic.nim	nim	1
 tests/e2e/local-build-engine/t_repro_build_qualified_target_resolves.nim	nim	1
 tests/e2e/local-build-engine/t_repro_build_target_matching_project_file_stem.nim	nim	1
