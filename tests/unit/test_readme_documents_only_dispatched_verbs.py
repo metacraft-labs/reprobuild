@@ -42,6 +42,14 @@ class ReadmeMatchesDispatcher(unittest.TestCase):
         ]
         self.assertEqual(missing, [], f"README documents undispatched verbs: {missing}")
 
+    def test_user_manual_documents_only_dispatched_verbs(self):
+        manual = (ROOT / "docs" / "user-manual.md").read_text(encoding="utf-8")
+        missing = [
+            v for v in documented_verbs(manual)
+            if f'args[0] == "{v}"' not in DISPATCH
+        ]
+        self.assertEqual(missing, [], f"user manual documents undispatched verbs: {missing}")
+
     def test_every_documented_infra_subcommand_is_dispatched(self):
         arms = set(re.findall(r'^\s+of "([a-z-]+)": return runInfra', INFRA, re.M))
         self.assertIn("plan", arms)

@@ -58100,7 +58100,7 @@
       "requiresReproBinary": false,
       "source": "tests/unit/test_readme_documents_only_dispatched_verbs.py",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 4,
+      "staticCaseCount": 5,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
