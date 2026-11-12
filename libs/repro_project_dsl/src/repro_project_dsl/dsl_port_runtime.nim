@@ -1804,6 +1804,11 @@ type
       ## lets a ``build:`` body call those helpers (e.g.
       ## ``currentBuildContext().toolchain.compile(...)``) without
       ## tripping "build DSL operation used outside an active build".
+    previousOwningPackage*: string
+      ## The owning-package override that was active when this frame was
+      ## pushed. ``beginBuildContext`` points the override at
+      ## ``packageName`` for the frame's lifetime and ``endBuildContext``
+      ## restores this value, so a nested frame cannot strand its parent.
 
 var dslPortBuildActions: seq[DslBuildAction]
   ## Append-only registry. ``registerBuildAction`` adds one row per
@@ -1882,10 +1887,24 @@ proc beginBuildContext*(packageName, artifactName: string) =
   # read ``currentBuildState()`` / ``currentBuildContext()`` resolve the
   # active package when invoked from inside the M4-driven build body.
   let legacy = beginBuildBlock(packageName, ownerName = artifactName)
+  # Package-Model.md §"Scope and Ambiguity": implicit target names are
+  # scoped to the package that owns the CALL SITE. A typed-tool wrapper
+  # attributes its implicit-target rows to the active owning-package
+  # override and falls back to the TOOL's package when none is set.
+  # ``buildPackageFragment`` and the provider-mode startup pass set the
+  # override, but outside provider mode the ``package`` macro runs every
+  # ``build:`` body at module init through this frame alone. Without the
+  # override here, two recipes that each configure into ``build`` with the
+  # stdlib ``cmake`` tool registered two different actions under
+  # ``cmake:build`` and the within-package collision rule raised before
+  # any test ran.
+  let previousOwner = currentOwningPackage()
+  setCurrentOwningPackageOverride(packageName)
   dslPortActiveBuildContext.add(DslBuildContextFrame(
     packageName: packageName,
     artifactName: artifactName,
-    legacyBuildState: legacy))
+    legacyBuildState: legacy,
+    previousOwningPackage: previousOwner))
 
 proc endBuildContext*() =
   ## Pop the top frame. Safe to call on an empty stack (no-op) — the
@@ -1898,6 +1917,10 @@ proc endBuildContext*() =
     # Pop the paired ``activeBuilds`` frame pushed in ``beginBuildContext``.
     if frame.legacyBuildState != nil:
       endBuildBlock(frame.legacyBuildState)
+    if frame.previousOwningPackage.len > 0:
+      setCurrentOwningPackageOverride(frame.previousOwningPackage)
+    else:
+      clearCurrentOwningPackageOverride()
 
 proc currentBuildContextFrame*(): DslBuildContextFrame =
   ## Return the top frame, or a zero-value frame (both fields empty)

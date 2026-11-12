@@ -9441,6 +9441,17 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "t_group_libs_repro_project_dsl_tests_g01",
     singleReason: ""),
   TestSpec(
+    source: "libs/repro_project_dsl/tests/t_module_init_build_bodies_own_their_implicit_targets.nim",
+    binary: "build/test-bin/t_module_init_build_bodies_own_their_implicit_targets",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "t_group_libs_repro_project_dsl_tests_g01",
+    singleReason: ""),
+  TestSpec(
     source: "libs/repro_project_dsl/tests/t_multi_package_macro.nim",
     binary: "build/test-bin/t_multi_package_macro",
     defines: @[],

@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 35,
-    "nimTestBinaries": 2753,
+    "nimTestBinaries": 2754,
     "pureUnitConsolidationGroups": 81,
-    "pureUnitTests": 754,
+    "pureUnitTests": 755,
     "staticallyDetectedRuntimeCompilerFlowTests": 138,
-    "testEntries": 2797
+    "testEntries": 2798
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -693,7 +693,7 @@
       "targetOs": "soAny"
     },
     {
-      "count": 43,
+      "count": 44,
       "defines": [],
       "dependencyShape": [
         "repro_project_dsl"
@@ -740,6 +740,7 @@
         "libs/repro_project_dsl/tests/t_m9r74_action_cwd_kind_codec.nim",
         "libs/repro_project_dsl/tests/t_m9r75_declared_outputs_codec.nim",
         "libs/repro_project_dsl/tests/t_m9r79_registry_mutators.nim",
+        "libs/repro_project_dsl/tests/t_module_init_build_bodies_own_their_implicit_targets.nim",
         "libs/repro_project_dsl/tests/t_sub_tool_refs_codec.nim",
         "libs/repro_project_dsl/tests/t_sub_tools_per_platform.nim",
         "libs/repro_project_dsl/tests/t_tool_identity_ref_kind_codec.nim"
@@ -1598,7 +1599,7 @@
       "graph-fixture": 21,
       "integration": 1517,
       "platform/destructive": 176,
-      "pure unit": 754,
+      "pure unit": 755,
       "unclassified": 329
     },
     "graphOwnedTestArtifacts": [
@@ -1813,9 +1814,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2753,
+    "nimTestBinaryCount": 2754,
     "pythonTestFileCount": 44,
-    "testEntryCount": 2797
+    "testEntryCount": 2798
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -23909,6 +23910,23 @@
       "source": "libs/repro_project_dsl/tests/t_m9r79_registry_mutators.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 6,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_module_init_build_bodies_own_their_implicit_targets",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_project_dsl"
+      ],
+      "owner": "libs/repro_project_dsl",
+      "requiresReproBinary": false,
+      "source": "libs/repro_project_dsl/tests/t_module_init_build_bodies_own_their_implicit_targets.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 3,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

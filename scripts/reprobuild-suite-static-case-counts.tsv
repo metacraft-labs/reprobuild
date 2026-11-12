@@ -865,6 +865,7 @@ libs/repro_project_dsl/tests/t_m6_non_determinism_codec.nim	nim	5
 libs/repro_project_dsl/tests/t_m9r74_action_cwd_kind_codec.nim	nim	7
 libs/repro_project_dsl/tests/t_m9r75_declared_outputs_codec.nim	nim	9
 libs/repro_project_dsl/tests/t_m9r79_registry_mutators.nim	nim	6
+libs/repro_project_dsl/tests/t_module_init_build_bodies_own_their_implicit_targets.nim	nim	3
 libs/repro_project_dsl/tests/t_multi_package_macro.nim	nim	5
 libs/repro_project_dsl/tests/t_preserve_tree_refuses_a_generated_source.nim	nim	5
 libs/repro_project_dsl/tests/t_service_config_is_a_cached_build_output.nim	nim	3
