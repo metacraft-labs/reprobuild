@@ -5635,6 +5635,17 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "t_group_libs_repro_home_apply_tests_g01",
     singleReason: ""),
   TestSpec(
+    source: "libs/repro_home_apply/tests/t_zsh_package_resolves.nim",
+    binary: "build/test-bin/t_zsh_package_resolves",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "t_group_libs_repro_home_apply_tests_g01",
+    singleReason: ""),
+  TestSpec(
     source: "libs/repro_home_apply/tests/test_m1_fpc_resolves.nim",
     binary: "build/test-bin/test_m1_fpc_resolves",
     defines: @[],
