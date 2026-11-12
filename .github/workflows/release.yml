@@ -413,6 +413,41 @@ jobs:
           set -euo pipefail
           dev-exec ./build/bin/repro build --tool-provisioning=path --daemon=off --no-runquota .#release
 
+      # Publish the Nix package of THIS revision to the organisation cache.
+      #
+      # Consumers that bind an explicit Linux Repro runtime run
+      # `nix build github:metacraft-labs/reprobuild/<pin>#reprobuild`. Nothing
+      # used to build that attribute for a release revision (ci.yml builds
+      # `.#default` only on `main`/`dev` pushes and on pull requests not
+      # targeting `agents`), so every such lane compiled the engine from source
+      # for 28-38 minutes (reprobuild-pm issue
+      # 2026-11-12-the-reprobuild-package-at-a-pinned-agents-revision-is-in-no-binary-cache-...).
+      # The flake reference below is spelled exactly as the consumers spell it,
+      # so the store path pushed here is the one they ask for. `attic push`
+      # sends the whole closure and skips what the cache already holds; the
+      # watch-store started by setup-nix would also pick the paths up, but
+      # asynchronously, and a release should not depend on it winning a race
+      # with the end of the job. Linux only: that is the platform the consumer
+      # lanes build, and setup-nix does not start the watcher on macOS.
+      - name: Publish the Nix package to the organisation cache
+        if: runner.os == 'Linux'
+        shell: bash
+        env:
+          ATTIC_CACHE: ${{ vars.ATTIC_CACHE }}
+          ATTIC_TOKEN: ${{ secrets.ATTIC_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${ATTIC_TOKEN}" || -z "${ATTIC_CACHE}" ]]; then
+            echo "::error::ATTIC_TOKEN and vars.ATTIC_CACHE are required to publish the reprobuild package"
+            exit 1
+          fi
+          package="$(nix build --no-link --print-out-paths --no-update-lock-file \
+            "github:${GITHUB_REPOSITORY}/${GITHUB_SHA}#reprobuild")"
+          test -x "$package/bin/repro"
+          # setup-nix ran `attic login --set-default ci` for this job.
+          nix shell --accept-flake-config nixpkgs#attic-client -c attic push "$ATTIC_CACHE" "$package"
+          echo "Published $package (reprobuild $GITHUB_SHA)"
+
       - name: Bootstrap and Build (Windows)
         if: matrix.os-name == 'windows'
         # Fail-fast guard. The `.#release` build's interface-extraction phase
