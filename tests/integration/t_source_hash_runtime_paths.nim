@@ -2,18 +2,27 @@
 ## No mocks: both shared libraries are built from the tracked BLAKE3/xxHash
 ## implementations. Private SONAMEs keep the no-RPATH control from finding
 ## an unrelated installed library. All child loader search variables are absent.
+## The portable-release cases stand a real `libclingo.so` built here in for
+## clingo, and the newer-runtime case a real two-version runtime library in for
+## the release's libstdc++: a test cannot supply a glibc or libstdc++ newer than
+## its own toolchain's, and what is under test is the loader's resolution, which
+## treats every library alike.
 import std/[os, osproc, strtabs, strutils, tempfiles, unittest]
 import repro_interface_artifacts
 
 const repoRoot = currentSourcePath().parentDir.parentDir.parentDir
 
 when defined(linux):
-  proc run(argv: seq[string]; cleanLoader = false): tuple[output: string, code: int] =
+  proc run(argv: seq[string]; cleanLoader = false;
+           extraEnv: openArray[(string, string)] = []):
+      tuple[output: string, code: int] =
     var env = newStringTable(modeCaseSensitive)
     for key, value in envPairs():
       if not cleanLoader or key notin ["LD_LIBRARY_PATH", "LD_PRELOAD",
           "DYLD_LIBRARY_PATH", "DYLD_FALLBACK_LIBRARY_PATH"]:
         env[key] = value
+    for (key, value) in extraEnv:
+      env[key] = value
     # Nix's compiler wrapper otherwise manufactures RPATHs from -L flags,
     # which would conceal this bug. Both controls use only the explicit flags.
     env["NIX_DONT_SET_RPATH"] = "1"
@@ -231,5 +240,156 @@ echo marker()
       checkpoint(refused.output)
       check refused.code != 0
       check marker notin refused.output
+
+    test "portable release helpers load a clingo built for a newer runtime":
+      # The archive's libclingo.so is built against the bundled glibc and
+      # libstdc++. On a host whose own are older (Debian bookworm: glibc 2.36,
+      # GCC 12) the copy staged beside a host-linked helper resolves its
+      # dependencies to the host's, which lack the symbol versions it needs
+      # (GLIBC_2.38, GLIBCXX_3.4.32), and the helper died at module init with
+      # `could not load: libclingo.so`.
+      #
+      # A test cannot provide a glibc newer than its own, so the newer runtime
+      # here is a stand-in for the libstdc++ role: `libreprotestrt` in two
+      # builds with the same soname. The release's defines a symbol under the
+      # version node REPROTEST_2; the "host's" has only REPROTEST_1. The
+      # stand-in clingo requires REPROTEST_2 and, like the archive's, carries a
+      # RUNPATH naming a build-host directory that does not exist here. The
+      # release's lib directory holds real copies of this toolchain's loader
+      # and C library, the pair the archive bundles.
+      let scratch = createTempDir("repro portable newer runtime ", "")
+      defer: removeDir(scratch)
+      let release = scratch / "release lib"
+      let host = scratch / "host lib"
+      createDir(release)
+      createDir(host)
+      let cc = getEnv("CC", "cc")
+      let libcProbe = run(@[cc, "-print-file-name=libc.so.6"])
+      require libcProbe.code == 0
+      let glibcDir = parentDir(expandFilename(libcProbe.output.strip()))
+      var loaderName = ""
+      for kind, path in walkDir(glibcDir):
+        let leaf = extractFilename(path)
+        if leaf.startsWith("ld-linux") and ".so" in leaf:
+          loaderName = leaf
+          break
+      checkpoint("glibc directory: " & glibcDir)
+      require loaderName.len > 0
+      for leaf in [loaderName, "libc.so.6", "libm.so.6", "libdl.so.2",
+                   "libpthread.so.0", "librt.so.1"]:
+        if fileExists(glibcDir / leaf):
+          copyFile(glibcDir / leaf, release / leaf)
+          inclFilePermissions(release / leaf, {fpUserExec})
+      let loader = release / loaderName
+
+      let suffix = $getCurrentProcessId()
+      let runtimeSoname = "libreprotestrt_" & suffix & ".so.1"
+      writeFile(scratch / "old.map",
+        "REPROTEST_1 { global: repro_old_symbol; local: *; };\n")
+      writeFile(scratch / "new.map",
+        "REPROTEST_1 { global: repro_old_symbol; local: *; };\n" &
+        "REPROTEST_2 { global: repro_newer_symbol; } REPROTEST_1;\n")
+      writeFile(scratch / "old.c", "int repro_old_symbol(void) { return 1; }\n")
+      writeFile(scratch / "new.c", "int repro_old_symbol(void) { return 1; }\n" &
+        "int repro_newer_symbol(void) { return 2; }\n")
+      for (dir, name) in [(host, "old"), (release, "new")]:
+        let built = run(@[cc, "-shared", "-fPIC", "-Wl,-soname," & runtimeSoname,
+          "-Wl,--version-script=" & (scratch / (name & ".map")),
+          "-o", dir / runtimeSoname, scratch / (name & ".c")])
+        checkpoint(built.output)
+        require built.code == 0
+      let marker = "NEWER-RUNTIME-CLINGO-" & suffix
+      writeFile(scratch / "clingo.c", "extern int repro_newer_symbol(void);\n" &
+        "const char *repro_portable_marker(void) {\n" &
+        "  return repro_newer_symbol() == 2 ? \"" & marker & "\" : \"wrong\";\n}\n")
+      let buildHostDir = scratch / "build-host-store" / "lib"
+      let library = run(@[cc, "-shared", "-fPIC", "-o", release / "libclingo.so",
+        scratch / "clingo.c", release / runtimeSoname,
+        "-Wl,--enable-new-dtags", "-Wl,-rpath," & buildHostDir])
+      checkpoint(library.output)
+      require library.code == 0
+      # Falsifiability: the stand-in clingo must not find the release's runtime
+      # through a RUNPATH of its own, or the direct run below would pass.
+      let clingoRunpath = elfRunpathEntries(release / "libclingo.so")
+      check buildHostDir in clingoRunpath
+      check release notin clingoRunpath
+      check portableReleaseLibDirFor(release,
+        proc(path: string): bool = fileExists(path)) == release
+
+      let source = scratch / "probe.nim"
+      writeFile(source, """
+import std/dynlib
+let handle = loadLib("libclingo.so")
+if handle == nil:
+  echo "could not load: libclingo.so"
+  quit 3
+let marker = cast[proc(): cstring {.cdecl, gcsafe.}](
+  handle.symAddr("repro_portable_marker"))
+if marker == nil:
+  echo "foreign libclingo.so"
+  quit 4
+echo marker()
+""")
+      let nim = getEnv("REPRO_NIM_COMPILER", findExe("nim"))
+      let releaseFlags = portableReleaseRpathFlags("", release)
+      for (name, flags) in [("release", releaseFlags), ("prefix", @[])]:
+        let dir = scratch / (name & " helper")
+        let compiled = run(@[nim, "c", "--skipUserCfg:on", "--skipParentCfg:on",
+          "--skipProjCfg:on", "--hints:off"] & flags & @[
+          "--nimcache:" & (scratch / (name & " cache")),
+          "-o:" & (dir / "probe"), source])
+        checkpoint(compiled.output)
+        require compiled.code == 0
+      let helper = scratch / "release helper" / "probe"
+      let prefixHelper = scratch / "prefix helper" / "probe"
+      check stagePortableReleaseLibraries(release, parentDir(helper)) ==
+        @["libclingo.so"]
+      check PortableReleaseHelperRunpathMarker in elfRunpathEntries(helper)
+      check PortableReleaseHelperRunpathMarker notin
+        elfRunpathEntries(prefixHelper)
+      check elfRunpathEntries(source).len == 0
+      check elfRunpathEntries(scratch / "absent").len == 0
+      # A truncated image, cut inside its ELF or program headers, reads as
+      # having no RUNPATH rather than raising: the helper is then started
+      # directly, as before.
+      let image = readFile(helper)
+      for cut in [3, 63, 64, 120]:
+        if cut < image.len:
+          let truncated = scratch / ("truncated-" & $cut)
+          writeFile(truncated, image[0 ..< cut])
+          check elfRunpathEntries(truncated).len == 0
+
+      # The host's loader search finds the host's older runtime.
+      let hostEnv = [("LD_LIBRARY_PATH", host)]
+      # Old path: the helper started directly, as before this fix. The staged
+      # clingo resolves the host's runtime and cannot load.
+      let direct = run(@[helper], cleanLoader = true, extraEnv = hostEnv)
+      checkpoint(direct.output)
+      check direct.code != 0
+      check marker notin direct.output
+
+      # The fix: started through the release's loader with its lib directory.
+      let argv = portableReleaseHelperArgvFor([helper], loader, release,
+        elfRunpathEntries)
+      check argv == @[loader, "--library-path", release, helper]
+      let launched = run(argv, cleanLoader = true, extraEnv = hostEnv)
+      checkpoint(launched.output)
+      check launched.code == 0
+      check marker in launched.output
+
+      # A helper linked against a clingo prefix keeps its own loader; a bare
+      # program name, or no release, leaves the argv alone.
+      check portableReleaseHelperArgvFor([prefixHelper, "--x"], loader, release,
+        elfRunpathEntries) == @[prefixHelper, "--x"]
+      check portableReleaseHelperArgvFor(["probe"], loader, release,
+        elfRunpathEntries) == @["probe"]
+      check portableReleaseHelperArgvFor([helper], "", "",
+        elfRunpathEntries) == @[helper]
+      # A relative program is read where the child will run.
+      check portableReleaseHelperArgvFor(["./probe"], loader, release,
+        elfRunpathEntries, cwd = parentDir(helper)) ==
+        @[loader, "--library-path", release, "./probe"]
+      # This test process is not a portable release.
+      check portableReleaseHelperArgv([helper]) == @[helper]
 else:
   discard # ELF loader regression; Windows uses vendored C and macOS uses LC_RPATH.

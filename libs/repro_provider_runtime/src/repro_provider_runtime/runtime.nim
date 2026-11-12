@@ -4,6 +4,7 @@ when defined(posix):
   import std/posix
 
 import repro_core
+import repro_core/portable_release_launch
 import repro_hash
 import repro_provider_runtime/codec
 import repro_provider_runtime/types
@@ -217,9 +218,13 @@ proc runProviderProtocol*(config: ProviderExecutionConfig;
   let cwd =
     if config.workingDir.len > 0: config.workingDir
     else: getCurrentDir()
-  let argv = @[config.binaryPath] & config.extraArgs & @[
+  # Under the portable Linux release a provider it compiled starts through
+  # the bundled loader (`portableReleaseHelperArgv`), or it cannot load the
+  # release's clingo on a host glibc older than the release's.
+  let argv = portableReleaseHelperArgv(@[config.binaryPath] &
+    config.extraArgs & @[
     "--repro-provider-request", requestPath,
-    "--repro-provider-response", responsePath]
+    "--repro-provider-response", responsePath], cwd = cwd)
   # Spawn the provider binary DIRECTLY, without an intermediate shell.
   #
   # The earlier form ran the provider via ``execCmdEx`` →

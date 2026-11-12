@@ -32,6 +32,7 @@
 import std/[os, osproc, streams]
 
 import repro_core
+import repro_core/portable_release_launch
 import repro_hash
 import repro_provider_runtime/types
 
@@ -519,9 +520,13 @@ proc launchSession(pool: ProviderSessionPool; artifact: ProviderArtifactRef;
   let cwd =
     if artifact.workingDir.len > 0: artifact.workingDir
     else: getCurrentDir()
-  let argv = artifact.extraArgs & @[ProviderServeFlag]
-  let process = startProcess(artifact.binaryPath,
-    workingDir = cwd, args = argv,
+  # Under the portable Linux release a provider it compiled starts through
+  # the bundled loader (`portableReleaseHelperArgv`), or it cannot load the
+  # release's clingo on a host glibc older than the release's.
+  let argv = portableReleaseHelperArgv(@[artifact.binaryPath] &
+    artifact.extraArgs & @[ProviderServeFlag], cwd = cwd)
+  let process = startProcess(argv[0],
+    workingDir = cwd, args = argv[1 .. ^1],
     options = {poUsePath})
   inc pool.launchCount
   let session = ProviderSession(

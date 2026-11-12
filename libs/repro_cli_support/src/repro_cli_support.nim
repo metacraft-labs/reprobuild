@@ -14751,10 +14751,13 @@ proc runStableProviderProtocol(binaryPath, protocolRoot, stem, cwd: string;
   writeProviderRequestFile(requestPath, request)
   if fileExists(extendedPath(responsePath)):
     removeFile(extendedPath(responsePath))
-  let argv = @[
+  # Under the portable Linux release a provider it compiled starts through
+  # the bundled loader (`portableReleaseHelperArgv`), or it cannot load the
+  # release's clingo on a host glibc older than the release's.
+  let argv = portableReleaseHelperArgv(@[
     binaryPath,
     "--repro-provider-request", requestPath,
-    "--repro-provider-response", responsePath]
+    "--repro-provider-response", responsePath], cwd = cwd)
   # M8 stderr-truncation fix: previously used
   # ``startProcess + outputStream.readAll + waitForExit`` to drive the
   # provider here too, with the same symptom — diagnostics from the
