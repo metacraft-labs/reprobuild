@@ -57,13 +57,18 @@ if not fixtureRunnable():
     "Linux, " & reproBinary & " and cc"
 else:
   suite "M5 — an accepted change becomes a generation and a Remix":
-    let f = newFixture("m5", @["workspace.create:greeter",
+    # Acquired on first use from inside a case, so the runner's
+    # `--list-json` probe installs nothing and a failed install fails the
+    # case that needed it; released at the end of this suite by the process
+    # that acquired it (see `agent_harbor_fixture`).
+    var fixture = lazyFixture("m5", @["workspace.create:greeter",
       "source.read:greeter", "source.write:greeter", "build.run:greeter",
       "test.run:greeter", "preview.run:greeter", "remix.publish:private"],
-      withGenerations = true)
-    let g1 = f.backend.activeGeneration()
-    let launcher = f.backend.driver.launcherDir / "greeter"
-    let intent = f.host.captureIntent(f.consent, f.sid, "make greeter say v2")
+      "make greeter say v2", withGenerations = true)
+    template f: Fixture = fixture.acquire()
+    template g1: string = f.initialGeneration
+    template launcher: string = f.backend.driver.launcherDir / "greeter"
+    template intent: Intent = f.sessionIntent
     var release = ""
     var g2 = ""
     var stagedV2, activatedV2: seq[OpResult]
@@ -189,4 +194,4 @@ else:
       check "rejected=greeter/src/main.c.rej" in conflict[0].output
       check f.host.workspaces.hasKey(conflict[0].detail)
 
-    cleanup(f.tmp)
+    fixture.release()

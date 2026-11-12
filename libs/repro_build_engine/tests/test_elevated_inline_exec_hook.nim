@@ -15,7 +15,8 @@
 ##   4. ``brokerSpawn = nil`` + ``requiresElevation = true`` raises
 ##      ``BuildEngineError`` (no silent fallback to a direct fork).
 ##   5. The hook receives the verbatim argv (including the literal
-##      ``@FILE:<path>`` tokens) + cwd + env from the edge.
+##      ``@FILE:<path>`` tokens) + cwd + env from the edge, even for an
+##      edge the engine expands to key it on the files' contents.
 ##
 ## The test uses ``bakProcess`` actions with synthetic argv — the
 ## broker-side closure is purely a recording mock; no real privileged
@@ -183,6 +184,45 @@ suite "Windows-System-Resources Phase E — engine broker-dispatch hook":
     check recorder.invocations[0].actionId == "t-elevated"
     check recorder.invocations[0].argv == argv
     check recorder.invocations[0].cwd == ""
+
+  test "an @FILE: edge hands the broker the literal token, keyed on the contents":
+    # The engine substitutes ``@FILE:`` tokens when the run starts, to key
+    # the edge on the file's contents; the broker still receives the
+    # literal token, because it re-expands it under elevation and its
+    # audit log records the substitution as redacted (spec §2.1). A
+    # changed file must still miss the cache and reach the broker again.
+    resetTmp()
+    let cacheRoot = TmpDir / "cache-argfile"
+    let outputPath = absolutePath(TmpDir / "outputs-argfile" / "elevated.out")
+    let tokenPath = absolutePath(TmpDir / "runner.token")
+    createDir(cacheRoot)
+    createDir(splitPath(outputPath).head)
+    writeFile(tokenPath, "first-secret\n")
+
+    let argv = @["/usr/bin/config", "--token", "@FILE:" & tokenPath]
+    var action = elevatedAction("t-elevated", outputPath, argv)
+    action.expandsArgFiles = true
+    let recorder = newRecorder(materialiseOutput = outputPath)
+    let config = elevatedConfig(cacheRoot, recorder)
+
+    let first = runBuild(graph(@[action], newSeq[BuildPool]()), config)
+    check first.results[0].status == asSucceeded
+    check recorder.invocations.len == 1
+    check recorder.invocations[0].argv == argv
+
+    # Control: unchanged contents hit the cache.
+    let again = runBuild(graph(@[action], newSeq[BuildPool]()), config)
+    check again.results[0].launched == false
+    check recorder.invocations.len == 1
+
+    writeFile(tokenPath, "second-secret\n")
+    let changed = runBuild(graph(@[action], newSeq[BuildPool]()), config)
+    check changed.results[0].launched == true
+    check recorder.invocations.len == 2
+    check recorder.invocations[1].argv == argv
+    for invocation in recorder.invocations:
+      for arg in invocation.argv:
+        check "secret" notin arg
 
   test "second run hits the cache; broker hook is NOT invoked":
     resetTmp()

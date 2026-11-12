@@ -170,6 +170,32 @@ suite "service body — a setter in a shape the walk cannot read":
     check probe.mentions(
       "is not a shape the `service` setter `executable`")
 
+  test "a repeated single-value setter is refused naming both lines":
+    # Without the refusal each of these compiled clean and the second value
+    # silently replaced the first.
+    for (setter, first, second) in [
+        ("executable", "executable probeBin", "executable otherBin"),
+        ("description", "description \"a\"", "description \"b\""),
+        ("type", "`type` \"simple\"", "`type` \"oneshot\""),
+        ("execStart", "execStart \"/bin/a\"", "execStart \"/bin/b\""),
+        ("restart", "restart \"always\"", "restart \"no\""),
+        ("user", "user \"a\"", "user \"b\""),
+        ("group", "group \"a\"", "group \"b\"")]:
+      # Both lines are added, so the recipe holds the setter at least twice
+      # whether or not the control already declares it.
+      let probe = added("    " & first & "\n    " & second, "body-twice-" & setter)
+      checkpoint(probe.output)
+      check not probe.ok
+      check probe.mentions(
+        "`" & setter & "` is declared twice in one `service` body (lines ")
+
+  test "the repeatable setters may still repeat":
+    let probe = added("    args \"--again\"\n    wantedBy \"a.target\"\n" &
+      "    wantedBy \"b.target\"\n    env(\"A\", \"1\")\n    env(\"B\", \"2\")",
+      "body-repeatable")
+    checkpoint(probe.output)
+    check probe.ok
+
   test "a refused setter shape is not described as skipped":
     # The L4 and L9 near-miss refusals run ahead of the generic one; the
     # walk refuses every statement, so none of them may tell the author

@@ -8,6 +8,29 @@
 ## with `ReprobuildBackend`; and, for the gates that activate generations,
 ## `HomeSeamDriver`.
 ##
+## ACQUIRED ON FIRST USE, FROM INSIDE A CASE (`LazyFixture`). The suite
+## runner probes each gate binary with `--list-json` and then runs every
+## case in a process of its own, and every one of those processes executes
+## the module's top-level code (Test-Suite-Architecture-Guidelines,
+## "Fixture Lifetime Under One Process Per Case"). Installing the package
+## takes a full `repro build` -- minutes on a loaded host -- so a fixture
+## acquired in the `suite` body made every probe perform that install, and
+## an install that failed raised out of module scope: the probe exited 1,
+## a `--run` process wrote no result document, and the runner reported the
+## whole binary as failed with nothing to say which case or why. Acquired
+## lazily, the probe acquires nothing, and a failed install is the FAIL of
+## the case that needed the fixture, carrying the exception.
+## `t_agent_harbor_fixture_failure_fails_the_case` checks both from outside.
+##
+## RELEASED BY THE PROCESS THAT ACQUIRED IT. `LazyFixture.release`, called
+## at the end of each gate's `suite` body (module top-level code, which
+## every process runs to its end after its cases), removes the fixture's
+## scratch tree if this process acquired one. Not
+## `process_fixtures.releaseDirAtProcessExit`: the tree holds published
+## store prefixes, which are read-only by design, and a plain `removeDir`
+## at exit cannot remove them. An acquisition that fails part-way removes
+## what it created before re-raising, so a failed install leaks nothing.
+##
 ## `HomeSeamDriver` is the one stand-in, and it is a TEST SEAM, not a mock:
 ## it drives the real `repro home apply` / `repro home rollback` into real
 ## home generations, but it hands `repro home apply` the staged prefix
@@ -175,13 +198,15 @@ type Fixture* = ref object
   host*: Host
   consent*, agent*: Connection
   sid*: string
+  sessionIntent*: Intent
+    ## The user's request, captured once when the session opened.
+  initialGeneration*: string
+    ## With generations: the generation that runs the installed v1, made
+    ## current when the fixture was acquired. Empty without.
 
-proc newFixture*(name: string; grants: seq[string];
-                 withGenerations = false): Fixture =
-  ## Install greeter v1 from source and open an agent session holding
-  ## `grants`. With `withGenerations`, also make v1 the current home
-  ## generation and give the backend a `HomeSeamDriver`.
-  let f = Fixture(tmp: createTempDir("agent-" & name & "-", ""))
+proc populate(f: Fixture; grants: seq[string]; intentText: string;
+              withGenerations: bool) =
+  ## The body of `newFixture`, which owns `f.tmp` and removes it on failure.
   f.catalog = f.tmp / "catalog"
   f.store = f.tmp / "store"
   f.previewStore = f.tmp / "preview-store"
@@ -229,7 +254,55 @@ proc newFixture*(name: string; grants: seq[string];
   f.agent = newConnection(chProvider)
   discard f.host.hello(f.agent, ProtocolVersion, {low(Family) .. high(Family)})
   f.host.attach(f.agent, sid, secret)
+  f.sessionIntent = f.host.captureIntent(f.consent, f.sid, intentText)
+  if withGenerations:
+    f.initialGeneration = f.backend.activeGeneration()
+
+proc newFixture*(name: string; grants: seq[string]; intentText: string;
+                 withGenerations = false): Fixture =
+  ## Install greeter v1 from source, open an agent session holding
+  ## `grants` and capture `intentText` as its intent. With
+  ## `withGenerations`, also make v1 the current home generation and give
+  ## the backend a `HomeSeamDriver`. If any step fails, the scratch tree is
+  ## removed before the error propagates.
+  let f = Fixture(tmp: createTempDir("agent-" & name & "-", ""))
+  var acquired = false
+  try:
+    f.populate(grants, intentText, withGenerations)
+    acquired = true
+  finally:
+    if not acquired:
+      cleanup(f.tmp)
   f
+
+type LazyFixture* = object
+  ## A `Fixture` acquired on first use from inside a case, and released by
+  ## the process that acquired it (see the header).
+  name, intentText: string
+  grants: seq[string]
+  withGenerations: bool
+  acquired: Fixture
+
+proc lazyFixture*(name: string; grants: seq[string]; intentText: string;
+                  withGenerations = false): LazyFixture =
+  ## Records what to acquire; acquires nothing.
+  LazyFixture(name: name, grants: grants, intentText: intentText,
+              withGenerations: withGenerations)
+
+proc acquire*(lf: var LazyFixture): Fixture =
+  ## The fixture, installed by this call if this process has none yet. A
+  ## failed install raises to the calling case and is retried by the next
+  ## case that needs the fixture.
+  if lf.acquired == nil:
+    lf.acquired = newFixture(lf.name, lf.grants, lf.intentText,
+                             lf.withGenerations)
+  lf.acquired
+
+proc release*(lf: var LazyFixture) =
+  ## Remove the fixture's scratch tree if this process acquired one.
+  if lf.acquired != nil:
+    cleanup(lf.acquired.tmp)
+    lf.acquired = nil
 
 proc reinstall*(f: Fixture) =
   ## Rebuild the catalog's greeter into the installed store, as an upstream

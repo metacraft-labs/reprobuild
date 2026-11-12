@@ -909,7 +909,7 @@ Verify with `repro locking explain`.
 The store must be a git checkout of the record repository. If the directory
 is a plain directory, `adopt-manifest` refuses and writes nothing, because a
 git-checkout route to it could not record anything. Make it a checkout first,
-for example with `repro init` and the workspace's `[records] url`. A checkout
+for example with `git clone` of the workspace's `[records] url`. A checkout
 at its conventional location already serves as the team route, so nothing
 then needs adopting.
 

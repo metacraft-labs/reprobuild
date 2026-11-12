@@ -42,6 +42,7 @@ suite "content ids use a temporary index":
 
   test "t_content_id_uses_a_temporary_index_and_leaves_staging_untouched":
     let scratch = enterHermeticGit()
+    defer: leaveHermeticGit(scratch)
     let repo = newRepo(scratch, "work")
     writeEntryFile(repo, ".gitignore", "*.log\n")
     writeEntryFile(repo, "partly.txt", "one\n")
@@ -96,10 +97,10 @@ suite "content ids use a temporary index":
     # And the index-state id was the tree of what had been staged.
     check computeContentId(repo, commitState("HEAD"), caGitTreeSha1).id != staged.id
     check libraryTempLeftovers(scratch).len == 0
-    removeDir(scratch)
 
   test "the temporary index is dated so stat data is never trusted":
     let scratch = enterHermeticGit()
+    defer: leaveHermeticGit(scratch)
     let base = 1_000_000_000'i64
     let repo = newRepo(scratch, "racy")
     # Compare as little stat data as git allows, so that only content can
@@ -152,10 +153,10 @@ suite "content ids use a temporary index":
     check preserved.id == rewritten
     check indexBytes(repo) == before2
     check libraryTempLeftovers(scratch).len == 0
-    removeDir(scratch)
 
   test "a filesystem monitor that has not reported a change does not hide it":
     let scratch = enterHermeticGit()
+    defer: leaveHermeticGit(scratch)
     let repo = newRepo(scratch, "monitored")
     writeEntryFile(repo, "a.txt", "aaaa\n")
     commitAll(repo, "base")
@@ -177,10 +178,10 @@ suite "content ids use a temporary index":
                                         content: "a longer content\n")])
     check indexBytes(repo) == before
     check libraryTempLeftovers(scratch).len == 0
-    removeDir(scratch)
 
   test "a split index gains no shared index file":
     let scratch = enterHermeticGit()
+    defer: leaveHermeticGit(scratch)
     let repo = newRepo(scratch, "split")
     discard git(repo, "config", "core.splitIndex", "true")
     discard git(repo, "config", "splitIndex.maxPercentChange", "100")
@@ -211,10 +212,10 @@ suite "content ids use a temporary index":
               ContentEntry(path: "b.txt", mode: "100644", content: "b\n"),
               ContentEntry(path: "c.txt", mode: "100644", content: "c\n")])
     check libraryTempLeftovers(scratch).len == 0
-    removeDir(scratch)
 
   test "a repository with no index tracks nothing":
     let scratch = enterHermeticGit()
+    defer: leaveHermeticGit(scratch)
     for format in [("sha1", caGitTreeSha1), ("sha256", caGitTreeSha256)]:
       let repo = newRepo(scratch, "fresh-" & format[0], format[0])
       writeEntryFile(repo, "untracked.txt", "x\n")
@@ -225,4 +226,3 @@ suite "content ids use a temporary index":
       check id.id == emptyTree(format[1])
       check not fileExists(repo / ".git" / "index")
     check libraryTempLeftovers(scratch).len == 0
-    removeDir(scratch)

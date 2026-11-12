@@ -37,6 +37,7 @@
 ## signed cert travels exactly like an unsigned one did.
 
 import std/[json, os, osproc, strutils, tempfiles, unittest]
+import repro_test_support/scoped_env
 
 import repro_test_support
 import repro_cli_support
@@ -114,6 +115,7 @@ mainline = "main"
 
 type
   Fixture = object
+    storeEnv: ScopedEnv
     scratch: string
     reproBin: string
     workspaceRoot: string
@@ -125,7 +127,7 @@ type
 
 proc setupFixture(gitBin, slug: string): Fixture =
   result.scratch = createTempDir("repro-tc2-" & slug & "-", "")
-  result.certStore = isolateCertificateStore(result.scratch)
+  result.certStore = isolateCertificateStore(result.scratch, result.storeEnv)
   result.reproBin = reproBinary()
   result.libAOrigin = result.scratch / "origin-lib-a.git"
   result.libASha = seedGitOrigin(gitBin, result.libAOrigin,

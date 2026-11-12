@@ -59,6 +59,11 @@ proc lastRecorded(): BuildActionDef =
   check recorded.len == 1
   recorded[^1]
 
+proc containsPair(argv: seq[string]; flag, value: string): bool =
+  for i in 0 ..< argv.len - 1:
+    if argv[i] == flag and argv[i + 1] == value:
+      return true
+
 proc targetDirOf(argv: seq[string]): string =
   for i in 0 ..< argv.len - 1:
     if argv[i] == "--target-dir":
@@ -126,22 +131,70 @@ suite "cargo edges own their target directory":
       dependencyPolicy = makeDepfilePolicy(depfiles = ["custom/*.d"]))
     check lastRecorded().globsOf == @["custom/*.d"]
 
-  test "cargo.test: the globs follow the manifest's directory":
+  test "cargo.test: a crate below the root runs in its own directory":
+    # rustc's per-crate deps/*.d name sources relative to the crate's
+    # directory, so the edge runs there for the engine to resolve them.
+    resetBuildActionRegistry()
+    discard cargoTool.test(manifestPath = "rust/Cargo.toml", noRun = true,
+      extraOutputs = ["rust/target/debug/marker"])
+    let act = lastRecorded()
+    let argv = argvOf(act)
+    check act.cwdKind == acwdCustom
+    check act.cwdCustomPath == "rust"
+    check argv.containsPair("--manifest-path", "Cargo.toml")
+    check targetDirOf(argv) == "target"
+    check act.outputs.contains("target/debug/marker")
+    check act.globsOf == @["target/debug/deps/*.d",
+                           "target/release/deps/*.d"]
+
+  test "cargo.test: the manifest stays an input, spelled from the recipe root":
     resetBuildActionRegistry()
     discard cargoTool.test(manifestPath = "rust/Cargo.toml", noRun = true)
-    let act = lastRecorded()
-    check targetDirOf(argvOf(act)) == "rust/target"
-    check act.globsOf == @["rust/target/debug/deps/*.d",
-                           "rust/target/release/deps/*.d"]
+    check "rust/Cargo.toml" in lastRecorded().inputs
+    check "Cargo.toml" notin lastRecorded().inputs
 
-  test "cargo.test: an explicit target dir wins":
+  test "cargo.test: the test binary handle keeps the recipe-root spelling":
+    resetBuildActionRegistry()
+    let edge = cargoTool.test(manifestPath = "rust/Cargo.toml", noRun = true,
+      testBinaryPath = "rust/target/debug/deps/probe")
+    check edge.testBinary.path == "rust/target/debug/deps/probe"
+    check lastRecorded().outputs.contains("target/debug/deps/probe")
+
+  test "cargo.test: an explicit target dir is re-spelled for the crate dir":
     resetBuildActionRegistry()
     discard cargoTool.test(manifestPath = "rust/Cargo.toml", noRun = true,
       targetDir = "out/cargo")
     let act = lastRecorded()
-    check targetDirOf(argvOf(act)) == "out/cargo"
-    check act.globsOf == @["out/cargo/debug/deps/*.d",
-                           "out/cargo/release/deps/*.d"]
+    check act.cwdCustomPath == "rust"
+    check targetDirOf(argvOf(act)) == "../out/cargo"
+    check act.globsOf == @["../out/cargo/debug/deps/*.d",
+                           "../out/cargo/release/deps/*.d"]
+
+  test "cargo.build and cargo.test: a Windows-spelled manifest path is split alike":
+    resetBuildActionRegistry()
+    discard cargoTool.build(manifestPath = "rust\\Cargo.toml")
+    check targetDirOf(argvOf(lastRecorded())) == "rust/target"
+    resetBuildActionRegistry()
+    discard cargoTool.test(manifestPath = "rust\\Cargo.toml", noRun = true)
+    let act = lastRecorded()
+    check act.cwdCustomPath == "rust"
+    check argvOf(act).containsPair("--manifest-path", "Cargo.toml")
+    check "rust\\Cargo.toml" in act.inputs
+
+  test "cargo.test: an absolute target dir is kept":
+    resetBuildActionRegistry()
+    discard cargoTool.test(manifestPath = "rust/Cargo.toml", noRun = true,
+      targetDir = "/build/cargo/runner-1")
+    check targetDirOf(argvOf(lastRecorded())) == "/build/cargo/runner-1"
+
+  test "cargo.test: a manifest in the root changes nothing about the cwd":
+    resetBuildActionRegistry()
+    discard cargoTool.test(manifestPath = "Cargo.toml", noRun = true)
+    let act = lastRecorded()
+    check act.cwdKind == acwdRecipeRoot
+    check targetDirOf(argvOf(act)) == "target"
+    check act.globsOf == @["target/debug/deps/*.d",
+                           "target/release/deps/*.d"]
 
   test "cargo.install: the target dir follows the crate path":
     resetBuildActionRegistry()

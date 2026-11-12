@@ -71,6 +71,15 @@ proc portableCacheRoots*(projectRoot, workRoot: string;
   declaredFilesystemRoots(projectRoot, workRoot, storeRoot,
                           repositoryRootOf(projectRoot))
 
+var buildSourceTreesOf*: proc (projectRoot: string): seq[string] {.nimcall.}
+  ## The trees outside its own roots a build of `projectRoot` reads as source
+  ## (`BuildEngineConfig.sourceTrees`): its workspace root, the checkouts of
+  ## the dependencies its committed lock pins and its develop overrides.
+  ## Placing a locked dependency takes the lock reader and its placement
+  ## rule, which live in `repro_cli_support` proper, so that module installs
+  ## the derivation here when it is initialized; `nil` (a program that links
+  ## this module alone) declares no source trees.
+
 proc wireFilesystemRoots*(config: var BuildEngineConfig;
                           projectRoot, workRoot: string; outRoot = "") =
   ## Declare this invocation's root classification to the engine.
@@ -111,8 +120,16 @@ proc wireFilesystemRoots*(config: var BuildEngineConfig;
   ## (`issues/2026-10-14-macos-profile-compile-is-keyed-on-the-membership-of-
   ## every-ancestor-directory.md`). Wiring the rest is separable work; what
   ## must not happen is this comment claiming it is already done.
+  ##
+  ## The SOURCE TREES are declared here too, for the volatile-path fold
+  ## (`buildSourceTreesOf`): every configuration that knows its project
+  ## knows the workspace and lock that project's sources come from. Those
+  ## undeclared configurations fall back to each action's working directory,
+  ## the repository their git plumbing runs in.
   config.filesystemRoots = declaredFilesystemRoots(projectRoot, workRoot,
     resolvedStoreRootOrEmpty(), repositoryRootOf(projectRoot), outRoot)
+  if buildSourceTreesOf != nil and projectRoot.len > 0:
+    config.sourceTrees = buildSourceTreesOf(absolutePath(projectRoot))
 
 proc wirePortableCache*(config: var BuildEngineConfig;
                         projectRoot, workRoot: string) =

@@ -126,6 +126,47 @@ def catalog(binary: Path) -> dict:
     return {entry["name"]: entry for entry in document["tests"]}
 
 
+def ambient_nimble(directory: Path):
+    """The nearest `*.nimble` in `directory` or above it, or None.
+
+    This is the search the compiler runs for the package root, so it decides
+    whether a directory can serve as the "covered by nothing" half of the
+    experiment.
+    """
+    for candidate in (directory, *directory.parents):
+        found = sorted(candidate.glob("*.nimble"))
+        if found:
+            return found[0]
+    return None
+
+
+def unanchored_base() -> Path:
+    """A scratch directory with no `.nimble` file anywhere above it.
+
+    The anchor-loss control copies the fixtures somewhere no package root
+    covers. A stray `*.nimble` left in the system temp directory by an
+    unrelated run (a shared host keeps them for days) makes every directory
+    under it a package root, so the control would render the directory and
+    stop colliding; that says nothing about the repository. Try the usual
+    scratch locations and fail, naming the file, when none is clean.
+    """
+    rejected = []
+    for base in (tempfile.gettempdir(), "/dev/shm", "/var/tmp"):
+        path = Path(base)
+        if not path.is_dir():
+            continue
+        stray = ambient_nimble(path.resolve())
+        if stray is None:
+            return path
+        rejected.append(str(stray))
+    raise AssertionError(
+        "no scratch directory is free of a package root, so the anchor-loss "
+        "control cannot be set up. Package-root files found above the "
+        "candidates: " + ", ".join(rejected) + ". Remove them or point TMPDIR "
+        "at a directory with none above it."
+    )
+
+
 class PackageRootAnchorTests(unittest.TestCase):
     maxDiff = None
 
@@ -234,7 +275,11 @@ class PackageRootAnchorTests(unittest.TestCase):
             #     root, must collide. This is the removed-anchor state, so it
             #     demonstrates that (2) fails when the anchor goes away rather
             #     than passing for some incidental reason.
-            unanchored_root = Path(tmp) / "no-package-root"
+            unanchored_scratch = tempfile.TemporaryDirectory(
+                prefix="package-anchor-bare-", dir=str(unanchored_base())
+            )
+            self.addCleanup(unanchored_scratch.cleanup)
+            unanchored_root = Path(unanchored_scratch.name) / "no-package-root"
             for leaf in FIXTURE_LEAVES:
                 leaf_dir = unanchored_root / "tests" / leaf
                 leaf_dir.mkdir(parents=True)

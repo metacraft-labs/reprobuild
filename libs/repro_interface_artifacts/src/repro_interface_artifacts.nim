@@ -94,6 +94,8 @@ import repro_core/c_compiler
 import repro_core/c_compiler_probe
 export c_compiler_probe.CCompilerProbe, c_compiler_probe.cCompilerUnusableMessage
 import repro_core/nix_store_roots
+import repro_core/portable_release_launch
+export portable_release_launch
 import repro_domain_types
 import repro_hash
 import repro_project_dsl
@@ -2061,6 +2063,37 @@ proc readTarballArchiveDetail(bytes: openArray[byte]; pos: var int;
     result.teamId = readString(bytes, pos)
   if version >= 28'u16:
     result.installerApp = readString(bytes, pos)
+
+const FirstEnvelopeVersionWithTarballDetail = 21'u16
+  ## The envelope version that introduced ``TarballArchiveDetail`` (GM4b).
+
+proc writeTaggedTarballArchiveDetail*(outp: var seq[byte];
+                                      detail: TarballArchiveDetail) =
+  ## Write ``detail`` for a message other than the interface artifact -- the
+  ## store daemon's tarball realize frame -- so a tarball record crosses that
+  ## boundary through the one codec that already writes it as a unit and
+  ## cannot drift from it field by field.
+  ##
+  ## The bytes start with the envelope version they were written at. That
+  ## version moves whenever a detail field is added, and the message carrying
+  ## these bytes has its own version that a contributor can forget to bump
+  ## alongside; the tag lets the reader refuse a detail newer than it knows
+  ## instead of reading the new field's bytes as the next one.
+  outp.writeU16Le(EnvelopeVersion)
+  outp.writeTarballArchiveDetail(detail, EnvelopeVersion)
+
+proc readTaggedTarballArchiveDetail*(bytes: openArray[byte];
+                                     pos: var int): TarballArchiveDetail =
+  ## Read what ``writeTaggedTarballArchiveDetail`` wrote, at any envelope
+  ## version from the one that introduced the detail up to this build's.
+  let version = readU16Le(bytes, pos)
+  if version < FirstEnvelopeVersionWithTarballDetail or
+      version > EnvelopeVersion:
+    raise newException(ValueError,
+      "unsupported tarball archive detail version " & $version &
+      " (this build reads " & $FirstEnvelopeVersionWithTarballDetail &
+      " through " & $EnvelopeVersion & ")")
+  readTarballArchiveDetail(bytes, pos, version)
 
 proc writeTarballProvisioning(outp: var seq[byte];
                               provisioning: InterfaceTarballProvisioning;
@@ -6775,45 +6808,21 @@ const PortableReleaseDlopenedLibraries* = ["libclingo.so", "libzstd.so.1"]
   ## The libraries reprobuild dlopens by leaf name on Linux; the same pair
   ## `runtime_contract`'s Linux dlopen post-condition names.
 
-proc portableReleaseLibDirFor*(imageDir: string;
-                               probe: proc(path: string): bool): string =
-  ## ``imageDir`` when it is the private libdir of a Linux portable release
-  ## archive, else "". See `portableReleaseLibDir`.
-  if imageDir.len > 0 and probe(imageDir / "libc.so.6") and
-     probe(imageDir / "libclingo.so"):
-    imageDir
-  else:
-    ""
-
-proc portableReleaseLibDir*(): string =
-  ## The portable Linux release archive (`scripts/release/
-  ## write_posix_loader_launcher.sh`) runs every `.real` binary through the
-  ## glibc loader it bundles in `<prefix>/lib`, so `/proc/self/exe`, hence
-  ## `getAppFilename()`, is that loader and its directory is the archive's
-  ## private libdir. That launcher publishes no `REPROBUILD_RUNTIME_LIBRARY_PATH`
-  ## and the archive ships no `include/clingo.h`, so neither the runtime RPATH
-  ## nor the clingo prefix probe in `externalHashFlags` finds anything on a
-  ## host without a Nix store, and a helper linked by the host compiler died
-  ## at module init with `could not load: libclingo.so`.
-  ##
-  ## That directory cannot simply go into the helper's RPATH: it also holds
-  ## the bundled `libc.so.6`, which the host loader would then map in place of
-  ## the host libc the helper was linked against. The bundled libc beside
-  ## clingo is what identifies the layout.
-  when defined(linux):
-    portableReleaseLibDirFor(parentDir(getAppFilename()),
-      proc(path: string): bool = fileExists(path))
-  else:
-    ""
-
 proc portableReleaseRpathFlags*(clingoPrefix, releaseLibDir: string):
     seq[string] =
   ## `$ORIGIN` in the helper's RUNPATH when only the portable release can
   ## supply clingo; `stageHostDynlibsBesideBinary` copies the dlopened
   ## libraries next to the helper. Quoted because Nim splices `passL` text
   ## into a shell command line, which would otherwise expand `$ORIGIN`.
+  ##
+  ## The staged copy loads only where the host's glibc and libstdc++ are at
+  ## least as new as the release's. The entry is therefore also the marker
+  ## (`PortableReleaseHelperRunpathMarker`) by which every site that starts
+  ## such a helper runs it through the release's bundled loader
+  ## (`portableReleaseHelperArgv`), which loads the release's clingo on any
+  ## host the release itself runs on.
   if clingoPrefix.len == 0 and releaseLibDir.len > 0:
-    @["--passL:" & quoteShell("-Wl,-rpath,$ORIGIN")]
+    @["--passL:" & quoteShell("-Wl,-rpath," & PortableReleaseHelperRunpathMarker)]
   else:
     @[]
 
@@ -6929,6 +6938,10 @@ proc stageHostDynlibsBesideBinary*(destDir: string): seq[string]
     # `externalHashFlags`). The portable release archive is the exception:
     # see `portableReleaseLibDir`. There the helper is linked with
     # `$ORIGIN` in its RUNPATH and the dlopened libraries are copied here.
+    # The sites that start a helper run it through the bundled loader
+    # instead (`portableReleaseHelperArgv`), which the copy cannot replace on
+    # a host glibc older than the release's; the copy keeps a helper started
+    # directly loading where the host's C and C++ runtimes are new enough.
     result = stagePortableReleaseLibraries(portableReleaseLibDir(), destDir)
   else:
     discard
@@ -8445,7 +8458,11 @@ proc extractInterfaceFromModuleBody(modulePath, artifactPath,
     for anchor in relocationAnchors:
       runnerArgs.add(anchor)
   try:
-    let execution = runCommand(runnerArgs, cwd = tempRoot)
+    # Under the portable Linux release the runner starts through the bundled
+    # loader, so it can load the release's clingo on a host glibc older than
+    # the release's (`portableReleaseHelperArgv`).
+    let execution = runCommand(portableReleaseHelperArgv(runnerArgs,
+      cwd = tempRoot), cwd = tempRoot)
     if not fileExists(extendedPath(stagedArtifact)):
       raise newException(IOError,
         "interface extraction did not write artifact: " & artifactPath &

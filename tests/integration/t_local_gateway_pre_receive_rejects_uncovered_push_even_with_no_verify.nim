@@ -34,6 +34,7 @@
 ## Skip rule: ``git`` or ``ssh-keygen`` missing on PATH.
 
 import std/[json, os, osproc, strutils, tempfiles, unittest]
+import repro_test_support/scoped_env
 
 import repro_test_support
 import repro_cli_support
@@ -123,6 +124,7 @@ mainline = "main"
 
 type
   Fixture = object
+    storeEnv: ScopedEnv
     scratch: string
     reproBin: string
     workspaceRoot: string
@@ -135,7 +137,7 @@ type
 
 proc setupFixture(gitBin, policyLock: string): Fixture =
   result.scratch = createTempDir("repro-tc6-", "")
-  result.certStore = isolateCertificateStore(result.scratch)
+  result.certStore = isolateCertificateStore(result.scratch, result.storeEnv)
   result.reproBin = reproBinary()
   result.upstreamBare = result.scratch / "upstream-lib-a.git"
   result.gatewayBare = result.scratch / "gateway-lib-a.git"

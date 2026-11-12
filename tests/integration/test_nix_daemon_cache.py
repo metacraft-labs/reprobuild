@@ -1,55 +1,89 @@
-"""Real Nix helper/cache/store integration; no mocks or global garbage collection.
+"""A cached Nix resolution whose secondary output is gone is re-acquired.
 
-Only this test's uniquely named, unreferenced output is removed. Nix's normal
-liveness checks remain enabled. The other output must survive, so checking only
-the first returned path cannot satisfy the regression.
+Foreign-Provisioning-And-Nix-Evaluation-Daemon.md §3: the helper's response
+cache answers a repeated request without evaluating, but a cached answer whose
+store paths no longer exist must be re-acquired through Nix instead of being
+returned as a stale success.
+
+The request uses a REMOTE, CONTENT-LOCKED selector (a pinned revision and NAR
+hash) on purpose. The helper never answers a local-flake selector (``.#…``,
+``path:``, …) from its cache (``is_mutable_local_nix_selector``), so a case
+built on one evaluates on every request and passes whether or not the cache
+checks its paths: this case used to do exactly that, and could not fail.
+Edge-Derived-Identities.md §7 keeps content-locked remote selectors cacheable;
+whether an UNLOCKED one (``nixpkgs#…`` resolved through the registry) may be
+cached is still undecided, so this case does not depend on it.
+
+Mock justification: the one thing replaced is the host ``nix`` executable,
+with a script on ``PATH`` that records each invocation and "realises" two
+outputs by creating them. Counting invocations is the only way to observe the
+helper's cache decision directly -- a real ``nix build`` of an already-built
+path is not distinguishable from a cache hit by its result -- and a real remote
+selector would need the network and a substituter. Everything else is real:
+the helper runs as its own process, is reached over its Unix socket, and its
+cache sees the real filesystem when the output is removed.
+
+Only the SECOND output is removed and the first must survive, so a cache that
+checked only the first returned path cannot satisfy the case.
 """
 
 import json
 import os
 from pathlib import Path
-import shutil
 import socket
 import subprocess
 import sys
 import tempfile
 import time
 import unittest
-import uuid
 
 
 REPO = Path(__file__).resolve().parents[2]
 DAEMON = REPO / "tools/reprobuild-nix-daemon/reprobuild-nix-daemon"
-FIXTURE = REPO / "tests/fixtures/nix-daemon-local-flake"
+SELECTOR = ("github:NixOS/nixpkgs/0123456789abcdef0123456789abcdef01234567"
+            "?narHash=sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+            "#repro-two-output-tool^*")
 
 
-@unittest.skipUnless(os.name == "posix", "Nix provisioning requires a POSIX host")
+@unittest.skipUnless(os.name == "posix", "the Nix helper serves only on POSIX hosts")
 class NixDaemonCache(unittest.TestCase):
     def test_reacquires_a_removed_secondary_output(self):
-        self.assertIsNotNone(shutil.which("nix"), "the Nix integration gate requires Nix")
-        self.assertIsNotNone(shutil.which("nix-store"))
         with tempfile.TemporaryDirectory(prefix="rnc-", dir="/tmp") as directory:
-            root = Path(directory) / "flake"
+            directory = Path(directory)
+            root = directory / "workspace"
             root.mkdir()
-            name = "repro-nix-cache-" + uuid.uuid4().hex
-            flake = (FIXTURE / "flake.nix").read_text()
-            start = flake.index("        hello-sh = ")
-            end = flake.index("        default = ", start)
-            flake = flake[:start] + f'''        hello-sh = pkgs.runCommand "{name}" {{
-          outputs = [ "out" "support" ];
-        }} ''
-          mkdir -p "$out/bin" "$support"
-          printf '%s\\n' '{name}' > "$out/bin/control"
-          printf '%s\\n' '{name}-support' > "$support/control"
-        '';
-''' + flake[end:]
-            (root / "flake.nix").write_text(flake)
-            shutil.copyfile(FIXTURE / "flake.lock", root / "flake.lock")
-            endpoint = Path(directory) / "d.sock"
-            with (Path(directory) / "daemon.log").open("w+") as log:
+            (root / "flake.nix").write_text("{ outputs = _: {}; }\n")
+            primary = directory / "store" / "out"
+            secondary = directory / "store" / "support"
+            invocations = directory / "nix-invocations"
+            fake_bin = directory / "bin"
+            fake_bin.mkdir()
+            fake_nix = fake_bin / "nix"
+            # Each run realises both outputs, as `nix build` does for `^*`,
+            # and prints them primary first. The test's own interpreter runs
+            # it, so it needs no other tool on the action's declared PATH.
+            fake_nix.write_text(
+                f"#!{sys.executable}\n"
+                "import os\n"
+                f"with open({str(invocations)!r}, 'a') as log:\n"
+                "    log.write('invoked\\n')\n"
+                f"for path in ({str(primary)!r}, {str(secondary)!r}):\n"
+                "    os.makedirs(path, exist_ok=True)\n"
+                "    print(path)\n")
+            fake_nix.chmod(0o755)
+
+            def evaluations():
+                if not invocations.exists():
+                    return 0
+                return invocations.read_text().count("invoked")
+
+            env = dict(os.environ)
+            env["PATH"] = str(fake_bin) + os.pathsep + env.get("PATH", "")
+            endpoint = directory / "d.sock"
+            with (directory / "daemon.log").open("w+") as log:
                 process = subprocess.Popen(
                     [sys.executable, str(DAEMON), "--socket-path", str(endpoint),
-                     "--idle-exit-ms=120000"], stdout=log, stderr=log)
+                     "--idle-exit-ms=120000"], stdout=log, stderr=log, env=env)
                 try:
                     deadline = time.monotonic() + 5
                     while not endpoint.exists():
@@ -59,9 +93,9 @@ class NixDaemonCache(unittest.TestCase):
 
                     def request():
                         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
-                            client.settimeout(90)
+                            client.settimeout(30)
                             client.connect(str(endpoint))
-                            payload = dict(action="resolve", selector=".#hello-sh^*",
+                            payload = dict(action="resolve", selector=SELECTOR,
                                            workspaceRoot=str(root), evaluateOnly=True)
                             client.sendall((json.dumps(payload) + "\n").encode())
                             with client.makefile("rb") as response:
@@ -70,32 +104,27 @@ class NixDaemonCache(unittest.TestCase):
                             return result
 
                     cold = request()
-                    self.assertEqual(len(cold["paths"]), 2, cold)
-                    primary, secondary = map(Path, cold["paths"])
-                    self.assertEqual(primary.parent, Path("/nix/store"))
-                    self.assertTrue(primary.name.endswith("-" + name))
-                    self.assertEqual(secondary.parent, Path("/nix/store"))
-                    self.assertTrue(secondary.name.endswith("-" + name + "-support"))
-                    self.assertEqual((primary / "bin/control").read_text().strip(), name)
-                    self.assertEqual((secondary / "control").read_text().strip(), name + "-support")
-                    self.assertEqual(request(), cold, "warm request changed its evidence")
+                    self.assertEqual(cold["paths"], [str(primary), str(secondary)], cold)
+                    self.assertEqual(evaluations(), 1)
 
-                    # Refuse to touch a rooted or referenced path, including if
-                    # some other process unexpectedly acquired this private one.
-                    for query in ("--roots", "--referrers"):
-                        references = subprocess.check_output(
-                            ["nix-store", "--query", query, str(secondary)], text=True)
-                        self.assertEqual(references.strip(), "", references)
-                    subprocess.run(["nix-store", "--delete", str(secondary)],
-                                   check=True, capture_output=True, timeout=30)
-                    self.assertFalse(secondary.exists())
+                    # Control: with both outputs present the selector is
+                    # answered from the cache. Without this, the count below
+                    # would also be reached by a helper that never caches.
+                    self.assertEqual(request(), cold, "warm request changed its evidence")
+                    self.assertEqual(evaluations(), 1, "a warm remote request evaluated")
+
+                    secondary.rmdir()
                     self.assertTrue(primary.exists())
 
                     repaired = request()
                     self.assertEqual(repaired, cold)
-                    self.assertTrue(secondary.exists(), "cached success named a deleted output")
-                    self.assertEqual((secondary / "control").read_text().strip(), name + "-support")
-                    self.assertEqual((primary / "bin/control").read_text().strip(), name)
+                    self.assertEqual(evaluations(), 2,
+                                     "cached success named a deleted output")
+                    self.assertTrue(secondary.exists())
+
+                    # The re-acquired answer is cached again.
+                    self.assertEqual(request(), cold)
+                    self.assertEqual(evaluations(), 2)
                     self.assertIsNone(process.poll(), "recovery must use the same helper")
                 finally:
                     if process.poll() is None:

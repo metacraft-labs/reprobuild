@@ -105,6 +105,7 @@ else:
 
 import repro_core
 import repro_core/relocation
+import repro_core/arg_files
 import repro_core/target_object_check
 from repro_core/path_identity import resolveExistingTraversal, prsResolved
 # Nix GC roots for the store paths working-tree outputs name; see the ledger
@@ -706,6 +707,24 @@ type
       ## direct fork. The DSL's ``BuildActionDef.requiresElevation``
       ## field propagates here through ``lowerGraphAction`` so the
       ## engine consumes the same flag the build-graph author set.
+    expandsArgFiles*: bool
+      ## Windows-System-Resources §"`@FILE:<path>` argv substitution". Set
+      ## by the ``reprobuild.builtin.exec`` lowering: ``argv`` still holds
+      ## the literal ``@FILE:<path>`` tokens, and the engine replaces each
+      ## with the file's trimmed contents when a build run starts
+      ## (``withArgFilesExpanded``), mixing the expanded argv into
+      ## ``weakFingerprint`` there. The lowered graph, and the on-disk
+      ## lowered-graph cache that persists it, therefore never hold a
+      ## substituted value, and a warm graph cannot replay the value a
+      ## file held when the graph was lowered.
+    argFileLiteralArgv*: seq[string]
+      ## The argv as lowered, with its literal ``@FILE:<path>`` tokens,
+      ## kept by ``withArgFilesExpanded`` once ``argv`` holds the
+      ## substituted values. Empty for an action that carried no token.
+      ## An elevated edge hands this, not ``argv``, to the broker: the
+      ## broker re-expands the tokens under elevation and records each
+      ## substitution redacted in its audit log, so the values never
+      ## cross into the request.
     networkMode*: NetworkMode
       ## Sandbox-And-Monitoring.md §"The Network Dimension" — this
       ## action's network mode. The zero value is ``netDenied``, so every
@@ -1076,6 +1095,24 @@ type
       ## and is why no caller has to be updated to stay correct: an engine
       ## configuration that declares no roots keeps membership on every
       ## enumerated directory, exactly as before this field existed.
+    sourceTrees*: seq[string]
+      ## The trees OUTSIDE `filesystemRoots` that this invocation reads as
+      ## source: the workspace root (every member repository is checked out
+      ## beneath it) and each link beneath it, each dependency the project's
+      ## committed lock pins, at the checkout this machine has for it, and
+      ## each develop override's checkout. Absolute paths. Consumed by the
+      ## volatile-path fold alone (`actionVolatileScope`): a read at or under
+      ## one of them is never dropped as runtime state, whatever its prefix,
+      ## and one that cannot be told apart from runtime state refuses the
+      ## build (`volatileRootRefusals`).
+      ##
+      ## NOT A ROOT CLASSIFICATION, and deliberately not merged into
+      ## `filesystemRoots`: those feed the membership exemption and the
+      ## portable naming, and a sibling repository is neither the project's
+      ## tracked scope nor a root a portable key is named against. Empty
+      ## leaves the scope to the declared roots (or the working directory),
+      ## as before this field existed. The CLI fills it in
+      ## `wireFilesystemRoots` and for the dev-env activation.
     portableRoots*: seq[LogicalRoot]
       ## Cache-Scope P3.1: the logical roots against which each recorded
       ## action's PORTABLE fingerprint is computed
@@ -3838,6 +3875,46 @@ proc traceUnreadableInput(result: var BuildRunResult; actionId: string;
 
 proc raiseEngine(message: string) {.noreturn.} =
   raise newException(BuildEngineError, message)
+
+proc withArgFilesExpanded*(action: BuildAction;
+                           readPath: proc (path: string): string =
+                             readArgFile): BuildAction =
+  ## The action as it executes in THIS build run: every ``@FILE:<path>``
+  ## element of ``argv`` replaced by the file's trimmed contents, and the
+  ## weak fingerprint keyed on the argv that results. The identity for an
+  ## action that does not set ``expandsArgFiles``.
+  ##
+  ## Windows-System-Resources §"`@FILE:<path>` argv substitution" says the
+  ## substitution happens "at the moment of execution", and
+  ## Build-Engine-And-Scheduler §"Skippability and Invalidation" requires
+  ## the edge's key to follow its command line. Lowering used to do the
+  ## substitution, so the lowered-graph cache stored the expanded value and
+  ## the key mixed from it: a warm build that reused the graph spawned, and
+  ## looked its result up under, whatever the file held when the graph was
+  ## lowered. Here it runs on every build, before anything reads a
+  ## fingerprint, and the cached graph keeps the literal token.
+  ##
+  ## The fingerprint the lowering computed already covers the literal argv
+  ## (so the token's PATH is in the key); this mixes the expanded argv on
+  ## top, and re-applies the content-addressed-root mix ``action()`` gave
+  ## the literal ``argv[0]`` in case that element was itself a token.
+  result = action
+  if not action.expandsArgFiles:
+    return
+  var expanded: seq[string]
+  try:
+    expanded = expandArgFileValues(action.argv, readPath)
+  except ArgFileError as e:
+    raiseEngine("action '" & action.id & "': " & e.msg)
+  var fingerprint = keyedOnArgv(action.weakFingerprint, expanded)
+  if action.argv.len > 0 and isArgFileToken(action.argv[0]):
+    fingerprint = keyedOnContentAddressedToolRoot(fingerprint, expanded)
+  result.argFileLiteralArgv = action.argv
+  result.argv = expanded
+  result.weakFingerprint = fingerprint
+  # Expanded once: a second application (a dyndep re-derivation of the
+  # same action) must not read the files again or re-mix the key.
+  result.expandsArgFiles = false
 
 proc normalizeWriteRoot(p: string): string =
   ## M9.R.75 — canonical form for a declared write root path used by
@@ -9786,36 +9863,51 @@ proc refuseForeignTargetOutputs(action: BuildAction; triple: string;
 
 proc trackedFilesystemRootPaths*(roots: openArray[LogicalRoot]): seq[string]
 
+proc sourceTreePaths*(sourceTrees: openArray[string]): seq[string] =
+  ## `BuildEngineConfig.sourceTrees` in both spellings, declared and
+  ## symlink-resolved, for the reason `trackedFilesystemRootPaths` gives: the
+  ## monitor reports the resolved one.
+  ##
+  ## A path resolution per tree, and a workspace has hundreds of them, so a
+  ## build derives this ONCE (`runBuild`) and hands the result to every
+  ## action's `actionVolatileScope`, as it does `membershipTrackedRoots`.
+  trackedFilesystemRootPaths(sourceTrees.mapIt(
+    LogicalRoot(label: "source", path: it, kind: lrkTracked)))
+
 proc actionVolatileScope*(action: BuildAction;
-                          filesystemRoots: openArray[LogicalRoot]):
+                          filesystemRoots: openArray[LogicalRoot];
+                          sourceTreeSpellings: openArray[string] = []):
                           VolatileScope =
   ## The trees whose reads are this action's own even under a volatile
   ## runtime prefix (`repro_core/paths.dropsAsVolatileRuntimeState`).
   ##
   ## The DECLARED roots when the invocation declares any: the project, its
   ## repository, the work, store and output roots, in both of their spellings
-  ## (`trackedFilesystemRootPaths`). They are the roots the portable
-  ## fingerprint names paths against, so a path kept here is a tracked path
-  ## there too and is never left out of the portable key as untracked.
+  ## (`trackedFilesystemRootPaths`). The action's WORKING DIRECTORY
+  ## otherwise. Not every engine configuration declares roots
+  ## (`wireFilesystemRoots` lists the ones that do not), and each of those
+  ## still runs its actions in the project it works on; with no scope at
+  ## all, a project under `/dev/shm/<name>` would lose every read on those
+  ## edges, silently.
   ##
-  ## The action's WORKING DIRECTORY otherwise. Not every engine configuration
-  ## declares roots (`wireFilesystemRoots` lists the ones that do not), and
-  ## each of those still runs its actions in the project it works on; with
-  ## no scope at all, a project under `/dev/shm/<name>` would lose every read
-  ## on those edges, silently.
+  ## PLUS, either way, the SOURCE TREES (`BuildEngineConfig.sourceTrees`):
+  ## the workspace root and every dependency checkout the build reads
+  ## outside its own roots. Without them a sibling repository on a mount at
+  ## `/run/<dir>` was under no root, and an edit there was a cache hit.
+  ## `sourceTreeSpellings` is `sourceTreePaths` of them, already resolved:
+  ## this runs for every recorded action.
   ##
   ## A refused root (`volatileRootRefusal`) is left out of the scope; the
   ## build has already been refused for it (`volatileRootRefusals`).
-  let tracked = trackedFilesystemRootPaths(filesystemRoots)
-  if tracked.len > 0:
-    volatileScope(tracked)
-  elif action.cwd.len > 0:
-    volatileScope([absolutePath(action.cwd)])
-  else:
-    VolatileScope()
+  var roots = trackedFilesystemRootPaths(filesystemRoots)
+  if roots.len == 0 and action.cwd.len > 0:
+    roots.add(absolutePath(action.cwd))
+  roots.add(sourceTreeSpellings)
+  volatileScope(roots)
 
 proc volatileRootRefusals*(g: BuildGraph;
-                           filesystemRoots: openArray[LogicalRoot]):
+                           filesystemRoots: openArray[LogicalRoot];
+                           sourceTrees: openArray[string] = []):
                            seq[string] =
   ## One diagnostic per root this build would have to read as its own while
   ## the volatile-path fold drops it (`volatileRootRefusal`): a project at
@@ -9825,9 +9917,21 @@ proc volatileRootRefusals*(g: BuildGraph;
   ##
   ## The roots judged are the ones `actionVolatileScope` would use: the
   ## declared ones, or each action's working directory when none are
-  ## declared. A working directory is judged only when it is under a
-  ## volatile prefix, so an action run from `/` is not refused for
-  ## containing `/dev`; a DECLARED root of `/` is.
+  ## declared, and the source trees either way (a workspace whose root is
+  ## `/dev/shm` itself). A working directory or a source tree is judged only
+  ## when it is under a volatile prefix, so an action run from `/` is not
+  ## refused for containing `/dev`; a DECLARED root of `/` is.
+  for spelling in sourceTreePaths(sourceTrees):
+    if not spelling.isVolatileRuntimeStatePath():
+      continue
+    let reason = volatileRootRefusal(spelling)
+    if reason.len > 0:
+      let message = "refusing to build: the source tree " & spelling &
+        " (the workspace root, a workspace repository or a dependency " &
+        "checkout this build reads) is not a place a project's files can " &
+        "be fingerprinted: " & reason
+      if message notin result:
+        result.add(message)
   var declared = false
   for root in filesystemRoots:
     if root.kind != lrkTracked or root.path.len == 0:
@@ -9860,7 +9964,8 @@ proc volatileRootRefusals*(g: BuildGraph;
 
 proc collectEvidence(action: BuildAction; strict: bool;
                      hostedRecords: ptr seq[MonitorRecord] = nil;
-                     config: ptr BuildEngineConfig = nil):
+                     config: ptr BuildEngineConfig = nil;
+                     sourceTreeSpellings: ptr seq[string] = nil):
                      EvidenceCollection =
   ## ``hostedRecords`` (HM-5) is the in-memory record set for an action the
   ## engine hosted the monitor for. When it is non-nil the monitor evidence is
@@ -9877,7 +9982,12 @@ proc collectEvidence(action: BuildAction; strict: bool;
   result.evidence.declaredOutputs = action.outputs
   # Before anything is folded: every channel below is judged against it.
   result.evidence.volatileScope =
-    if config != nil: actionVolatileScope(action, config[].filesystemRoots)
+    if config != nil and sourceTreeSpellings != nil:
+      actionVolatileScope(action, config[].filesystemRoots,
+        sourceTreeSpellings[])
+    elif config != nil:
+      actionVolatileScope(action, config[].filesystemRoots,
+        sourceTreePaths(config[].sourceTrees))
     else: actionVolatileScope(action, [])
   # S5 — an action that declares the same path as BOTH an input and an
   # output consumes its own output: an incremental tool reading the state
@@ -18500,7 +18610,11 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
   # project dropped: a stale result served, a certificate for content nobody
   # tested. Refused here, before any action runs or is served from the
   # cache, naming the root and the reason. See `volatileRootRefusals`.
-  let volatileRefusals = volatileRootRefusals(g, config.filesystemRoots)
+  let volatileRefusals = volatileRootRefusals(g, config.filesystemRoots,
+    config.sourceTrees)
+  # The source trees' spellings, resolved once per build rather than once per
+  # recorded action (`sourceTreePaths`): a workspace has hundreds.
+  var sourceTreeSpellings = sourceTreePaths(config.sourceTrees)
   if volatileRefusals.len > 0:
     raiseEngine(volatileRefusals.join("\n"))
   var stats: BuildStats
@@ -18758,7 +18872,10 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
   # gates below consult.
   var preservingIds = initHashSet[string]()
   for i in 0 ..< buildGraph.actions.len:
-    buildGraph.actions[i] = withOptionalOutputIdentity(buildGraph.actions[i])
+    # `@FILE:` expansion first: the optional-output mix below wraps the
+    # weak fingerprint, so it has to wrap the one keyed on the expanded argv.
+    buildGraph.actions[i] = withOptionalOutputIdentity(
+      withArgFilesExpanded(buildGraph.actions[i]))
     buildGraph.actions[i].applyUnsafePreserveOutputs(
       config.unsafePreserveOutputs)
     if buildGraph.actions[i].unsafePreserveOutputs:
@@ -19801,7 +19918,8 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
       # (portable roots carry the declared spelling only), or a dependency
       # checkout there. Such a record is not portable, as an input outside
       # every root is not.
-      let scope = actionVolatileScope(action, config.filesystemRoots)
+      let scope = actionVolatileScope(action, config.filesystemRoots,
+        sourceTreeSpellings)
       let roots = portableRecordRoots()
       for path in reads & probes & enumerations:
         if path.isVolatileRuntimeStatePath() and
@@ -21395,7 +21513,8 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     ## before threading the new action through every scheduler bookkeeping
     ## structure. The producer id participates only in the trace message
     ## so the materialisation can be attributed back to its source.
-    var newAction = withOptionalOutputIdentity(incomingAction)
+    var newAction = withOptionalOutputIdentity(
+      withArgFilesExpanded(incomingAction))
     # A dynamically created step is selected by the preserve-outputs
     # selector exactly as a declared one (see `preservingIds`).
     newAction.applyUnsafePreserveOutputs(config.unsafePreserveOutputs)
@@ -22036,6 +22155,18 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
         # `cacheMissInputChanged` for this would have worked mechanically and
         # then lied in every diagnostic that reads it.
         var cacheInvalidatedByPolicy = false
+        # Set when a cacheable action's lookup found no record that can vouch
+        # for the outputs on disk: none for its weak fingerprint, one that was
+        # refused (`unservableCacheRecordReason`), or a payloadless record
+        # whose outputs are not the recorded ones (`aclMissNoOutputPayload`).
+        # It suppresses the same shortcut as the three flags above, because
+        # that shortcut asks only whether the declared output paths EXIST and
+        # here nothing says what produced them: a plain `cargo build`, an
+        # older engine whose records were evicted, a different cache root.
+        # Incremental-Invalidation.md §"Rebuild Decision Model": "action-cache
+        # records are present" is a condition of "up to date", and a
+        # condition that cannot be checked MUST fail closed by re-executing.
+        var cacheMissNoUsableRecord = false
         # Filled by the Nix-reference arm of the decision chain below, which
         # is reached only when no earlier arm already forces execution.
         var nixLostPaths: seq[string] = @[]
@@ -22045,8 +22176,8 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
         # "May a cache record for this action be reused where its result
         # already is?" — see `cachedResultReusableInPlace`. Distinct from
         # `outputsPresentBeforeLookup`, which stays a pure statement about
-        # DECLARED outputs so the no-record "outputs-present" shortcut below
-        # cannot fire for an edge that declares none.
+        # DECLARED outputs so the "outputs-present" shortcut below cannot
+        # fire for an edge that declares none.
         var reusableInPlace = false
         if action.cacheable and (config.peerCacheActionPublisher != nil or
             config.peerCacheActionFetcher != nil):
@@ -22155,8 +22286,8 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
             if not action.declaresNoOutputs():
               # Skipped entirely when nothing is declared: no declared output
               # can be missing, and `outputsPresentBeforeLookup` must stay
-              # false so the no-record "outputs-present" shortcut below
-              # cannot fire for such an edge.
+              # false so the "outputs-present" shortcut below cannot fire
+              # for such an edge.
               let outputStatStart = statStart()
               # Per-computation outputs: the declared (staging) paths say
               # nothing about a record's outputs, which lie in its own
@@ -22351,13 +22482,11 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
               # nothing else.
               #
               # ``aclMissInputChanged`` rather than ``aclMissNoRecord``
-              # because of what the arm below it does with each: the
-              # input-changed arm sets ``cacheMissInputChanged``, which is
-              # what stops the outputs-present shortcut from re-declaring
-              # this action up to date and skipping the re-execution the
-              # refusal exists to force. It is also the honest diagnosis —
-              # an input this record is keyed on can no longer be trusted
-              # to be what the record says it was.
+              # because it is the honest diagnosis: an input this record is
+              # keyed on can no longer be trusted to be what the record says
+              # it was. Either status stops the outputs-present shortcut from
+              # re-declaring this action up to date (``cacheMissInputChanged``
+              # / ``cacheMissNoUsableRecord``).
               let blocked = action.monitorLossBlockedRecordPath(lookup.record)
               if blocked.len > 0:
                 let reason = "monitor-loss-narrow-invalidation: " & blocked &
@@ -22531,10 +22660,15 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
             recordCacheLookupFacts(id, lookup)
             cacheInvalidatedByPolicy = true
           else:
+            # `aclMissNoRecord` (none, or a refused one) and
+            # `aclMissNoOutputPayload` (a payloadless record whose outputs are
+            # not in place as recorded). No record vouches for whatever is at
+            # the declared paths, so the action executes.
             runResult.results[idToIndex.resultIndex(id)].cacheDecision = cdMiss
             runResult.results[idToIndex.resultIndex(id)].reason =
               if lookup.message.len > 0: lookup.message else: $lookup.status
             recordCacheLookupFacts(id, lookup)
+            cacheMissNoUsableRecord = true
         elif not action.cacheable:
           runResult.results[idToIndex.resultIndex(id)].reason = "not-cacheable"
 
@@ -22545,6 +22679,16 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
           let outputStatStart = statStart()
           outputsPresent = action.allOutputsExist()
           finishStat("repro output stat", outputStatStart)
+        # Make's rule, "the outputs exist, so the edge is up to date". After
+        # the cache arms above it is reached by a non-cacheable action, which
+        # never has a record (Build-Engine-And-Scheduler.md: an absent
+        # declared output keeps such an edge out of date). A cacheable action
+        # reaches it only through a lookup outcome none of the flags below
+        # names, so every miss arm that can find the outputs in place sets
+        # one (the `missing-output` arms find them absent): present files
+        # with no record behind them are never "up to date"
+        # (`cacheMissNoUsableRecord`).
+        #
         # Not for per-computation outputs: their declared paths are the
         # staging ones, and only a record binds them to a computation, so
         # "present without a hit" says nothing about which computation they
@@ -22554,12 +22698,14 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
             not cacheMissInputChanged and
             not cacheRejectedOutput and
             not cacheInvalidatedByPolicy and
+            not cacheMissNoUsableRecord and
             not dependencyLaunched and
             not config.forceRebuild and
             not action.needsExecutionForPolicy():
           let evidenceStart = statStart()
           let evidence = collectEvidence(action, strict = true,
-            config = addr config)
+            config = addr config,
+            sourceTreeSpellings = addr sourceTreeSpellings)
           finishStat("repro evidence collect", evidenceStart)
           runResult.results[idToIndex.resultIndex(id)].evidence = evidence.evidence
           # M9.R.73.2 — the FOURTH evidence-collection site, and it was the
@@ -22633,9 +22779,14 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
                 "broker can fork it; the standalone `repro build` " &
                 "driver leaves the broker hook unset by design)")
           let elevatedStart = statStart()
+          # The literal ``@FILE:`` tokens, not the values the run
+          # substituted to key the edge: the broker expands them itself.
           let req = ElevatedExecRequest(
             actionId: action.id,
-            argv: action.argv,
+            argv: (if action.argFileLiteralArgv.len > 0:
+                     action.argFileLiteralArgv
+                   else:
+                     action.argv),
             cwd: action.cwd,
             env: action.env)
           var brokerOutcome: ElevatedExecResult
@@ -22692,7 +22843,8 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
               continue
             let evidenceStart = statStart()
             let evidence = collectEvidence(action, strict = true,
-              config = addr config)
+              config = addr config,
+              sourceTreeSpellings = addr sourceTreeSpellings)
             finishStat("repro evidence collect", evidenceStart)
             runResult.results[idx].evidence = evidence.evidence
             if not evidence.publishable:
@@ -22922,7 +23074,8 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
               continue
             let evidenceStart = statStart()
             var evidence = collectEvidence(plan.action, strict = true,
-              config = addr config)
+              config = addr config,
+              sourceTreeSpellings = addr sourceTreeSpellings)
             finishStat("repro evidence collect", evidenceStart)
             # DA-1f — the one thing the BUILT-IN knew that `collectEvidence`
             # cannot re-derive: what a foreign provisioner daemon reported
@@ -23543,10 +23696,12 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
             # for this action may not exist yet; that is the point.
             collectEvidence(action, strict = true,
               hostedRecords = addr hostedMonitorRecords,
-              config = addr config)
+              config = addr config,
+              sourceTreeSpellings = addr sourceTreeSpellings)
           else:
             collectEvidence(evidenceAction, strict = true,
-              config = addr config)
+              config = addr config,
+              sourceTreeSpellings = addr sourceTreeSpellings)
         hostedMonitorRecords = @[]
         finishStat("repro evidence collect", evidenceStart)
         if wrappedCapture.len > 0:

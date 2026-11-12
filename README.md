@@ -20,28 +20,31 @@ hermeticity guarantees, and the same rollback story everywhere.
 
 Imagine you want to fix a bug in Firefox. In a standard setup, this means
 spending hours setting up your build tools, matching libraries, and downloading
-massive toolchains. With Reprobuild, you simply run:
+massive toolchains. Reprobuild is designed so that one command does it all:
 
 ```bash
 repro develop firefox
 ```
 
-This instantly clones Firefox and provisions the exact compiler toolchain,
-libraries, and development tools its build needs.
+That is the goal `repro develop` is built toward: clone Firefox and provision
+the exact compiler toolchain, libraries, and development tools its build
+needs. **This workspace-creating form is planned but not yet implemented**;
+see [Getting Started](#2-getting-started) for what the command does today.
 
-But what if the bug isn't in Firefox itself, but in Cairo, one of its
-underlying libraries? Instead of fork-and-link hell, you just type:
+What works today is the second half of the story. Say the bug isn't in Firefox
+itself, but in Cairo, one of its underlying libraries. Inside a workspace whose
+lock set includes Cairo, you type:
 
 ```bash
-repro develop cairo
+repro develop --only=cairo
 ```
 
-Reprobuild pulls down the Cairo repository side-by-side, plugs it into your
-local workspace, and automatically routes Firefox's build system to compile
-against your local Cairo copy. When you edit and save a file in Cairo, the
-compiler recompiles the change and propagates it instantly up to Firefox. Your
-workspace grows dynamically to match exactly the slice of the universe you are
-modifying.
+Reprobuild checks the Cairo repository out side-by-side, plugs it into your
+local workspace, and routes the build of the project that depends on it to
+compile against your local Cairo copy. When you edit and save a file in Cairo,
+the compiler recompiles the change and propagates it up to the dependent
+project. Your workspace grows dynamically to match exactly the slice of the
+universe you are modifying.
 
 ---
 
@@ -97,27 +100,33 @@ Prefer to build from source, or on a platform with no published archive? See
 [CONTRIBUTING.md](./CONTRIBUTING.md).
 
 There is nothing else to install — no Docker, no language-specific version
-managers, no global toolchains. And there is nothing to set up before the
-command from the story above works, from any directory on your machine:
+managers, no global toolchains.
+
+`repro develop` works inside a workspace or a project that already exists. It
+does not yet create a workspace from a bare package name, so `repro develop
+firefox` run from an arbitrary directory fails with `develop target module not
+found`. The forms that work today:
 
 ```bash
-repro develop firefox
+repro develop --only=<dependency>        # check one dependency of the lock set out and build against it
+repro develop --all                      # the same for every dependency of the lock set
+repro develop <name> --source=<path>     # register a checkout you already have
+repro develop <target> -- <command>      # run a command in a local project's environment
 ```
 
-`repro develop` is workspace-creating: it clones the necessary repositories,
-provisions the pinned toolchains and libraries, wires up the build graph, and
-drops you into a ready development environment for any package in the catalog
-— whether or not you have ever checked anything out before.
+The workspace-creating form, which clones the necessary repositories for any
+package in the catalog from an empty directory, is planned and not yet
+available.
 
 ---
 
 ## 3. Starting a New Project
 
-For your own software, initialize a project from a template and step into its
-environment:
+For your own software, create a directory containing a `repro.nim` (described
+below) and step into its environment:
 
 ```bash
-repro init app my-app && cd my-app
+mkdir my-app && cd my-app   # then write repro.nim
 
 # Enter the project environment — every tool pinned by repro.nim
 repro shell
@@ -299,10 +308,10 @@ Reprobuild wraps all development workflows under one CLI.
 
 ### Package Management
 
-- `repro add [package]` / `repro remove [package]` — manage dependencies.
-- `repro search [query]` / `repro why [package]` — explore the catalog and
-  explain why a dependency is present.
-- `repro upgrade` — update dependencies within their declared constraints.
+- `repro add <repo> --remote=URL` / `repro remove <repo>` — add a repository
+  to, or remove it from, the workspace (develop-mode policy and workspace
+  membership; these do not manage package dependencies).
+- `repro why [package]` — explain why a dependency is present.
 
 ### Task Running
 
@@ -312,8 +321,9 @@ Reprobuild wraps all development workflows under one CLI.
 
 ### Workspace & Develop Mode
 
-- `repro develop [package]` — clone a dependency locally and link it
-  in-process.
+- `repro develop --only=<dependency>` / `--all` — check dependencies of the
+  workspace's lock set out locally and link them in-process;
+  `repro develop <name> --source=<path>` registers an existing checkout.
 - `repro workspace sync` — clone and update all repositories declared in
   `repro-workspace.toml`.
 - `repro workspace status` — audit git status and alignment across all
@@ -351,8 +361,8 @@ for this invocation. Existing checkouts keep their current object storage.
 
 - `repro infra plan` / `repro infra apply` — plan or apply declarative local
   machine profiles.
-- `repro infra rollback` — roll back the local system to a previous
-  generation.
+- `repro home rollback` / `repro system rollback` — roll back the user
+  environment or the system to a previous generation.
 
 ---
 

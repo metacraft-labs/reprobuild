@@ -452,6 +452,142 @@ printf '%s\n' /tmp/reprobuild-nix-daemon-fake-store
         check local["status"].getStr() == "success"
         check evaluations() == expected
 
+    test "Scenario 1.3: a slow client and a stale cached path are answered from the cache correctly":
+      # The cache paths the case above does not reach, counted rather than
+      # timed: a client slower to send its line than the inline read waits is
+      # still answered from the cache, and a cached answer whose store path
+      # is gone is resolved again. The cold and warm steps first re-establish
+      # what the case above grades, as this case's precondition. A fake
+      # `nix` on the helper's PATH records each run and prints a store path
+      # this case owns, so the case needs no network and no real store.
+      #
+      # The helper looks the cache up in TWO places, and each is graded:
+      # `ResolveCache.peek` on the accepting thread (a warm request, and one
+      # that arrives while another request resolves the same key), and
+      # `ResolveCache.get_or_resolve` under the key's lock on the thread a
+      # request is handed to (a client slower to send its line than the
+      # inline read waits). Disabling either fails a step below.
+      let repoRoot = findRepoRoot()
+      let daemonPath = findNixDaemon(repoRoot)
+      let fixtureRoot = createTempDir("repro-nix-daemon-warm-", "")
+      defer: removeDir(fixtureRoot)
+      writeFile(fixtureRoot / "flake.nix", "{ outputs = _: {}; }\n")
+      let fakeStore = fixtureRoot / "fake-store-path"
+      createDir(fakeStore)
+      let runs = fixtureRoot / "nix-runs.log"
+      # While `gate-armed` exists, a run waits (bounded) for `gate-open`
+      # after it has recreated the store path and recorded itself.
+      let gateArmed = fixtureRoot / "gate-armed"
+      let gateOpen = fixtureRoot / "gate-open"
+      let fakeBin = fixtureRoot / "bin"
+      createDir(fakeBin)
+      writeFile(fakeBin / "nix", "#!/bin/sh\n" &
+        "mkdir -p " & quoteShell(fakeStore) & "\n" &
+        "printf '%s\\n' \"$*\" >> " & quoteShell(runs) & "\n" &
+        "if [ -e " & quoteShell(gateArmed) & " ]; then\n" &
+        "  i=0\n" &
+        "  while [ ! -e " & quoteShell(gateOpen) & " ] && [ $i -lt 1200 ]; do\n" &
+        "    sleep 0.05; i=$((i + 1))\n" &
+        "  done\n" &
+        "fi\n" &
+        "printf '%s\\n' " & quoteShell(fakeStore) & "\n")
+      setFilePermissions(fakeBin / "nix", {fpUserRead, fpUserWrite, fpUserExec})
+      proc nixRuns(): int =
+        if fileExists(runs):
+          for line in readFile(runs).splitLines():
+            if line.len > 0: inc result
+
+      let socketPath = fixtureRoot / "nix-daemon.sock"
+      var childEnv = newStringTable(modeCaseSensitive)
+      for key, value in envPairs():
+        childEnv[key] = value
+      childEnv["PATH"] = fakeBin & PathSep & childEnv.getOrDefault("PATH")
+      let daemonProcess = startProcess(daemonPath,
+        args = ["--idle-exit-ms=30000", "--socket-path=" & socketPath],
+        env = childEnv, options = {})
+      defer:
+        stopHelperAndWait(daemonProcess)
+        removeFile(socketPath)
+
+      # Not a local flake (`.#`, `./`, `path:` ...), so the helper caches it.
+      let request = $(%*{"action": "resolve", "selector": "nixpkgs#hello",
+        "workspaceRoot": fixtureRoot}) & "\n"
+      proc connect(): Socket =
+        for i in 0 .. 40:
+          try:
+            result = newSocket(domain = AF_UNIX, sockType = SOCK_STREAM,
+              protocol = IPPROTO_IP)
+            result.connectUnix(socketPath)
+            return
+          except CatchableError:
+            result = nil
+            sleep(50)
+        doAssert result != nil, "the helper did not open " & socketPath
+      proc answer(sock: Socket; timeoutMs = -1): JsonNode =
+        var line = ""
+        sock.readLine(line, timeout = timeoutMs)
+        sock.close()
+        parseJson(line)
+      proc resolve(): JsonNode =
+        let sock = connect()
+        sock.send(request)
+        answer(sock)
+
+      let cold = resolve()
+      check cold["status"].getStr() == "success"
+      check cold["paths"][0].getStr() == fakeStore
+      check nixRuns() == 1
+
+      # Warm: the same request, answered from the cache.
+      let warm = resolve()
+      check warm["status"].getStr() == "success"
+      check warm["paths"] == cold["paths"]
+      check nixRuns() == 1
+
+      # A client that sends half its line and pauses past the inline read's
+      # wait (`INLINE_READ_TIMEOUT_S`, 0.5 s) is answered on a thread of its
+      # own, through `get_or_resolve`, and from the cache too. It also grades
+      # that the half already read is not lost in the hand-off: it was, and
+      # the thread answered the tail as malformed JSON.
+      block:
+        let sock = connect()
+        sock.send(request[0 ..< 12])
+        sleep(1500)
+        sock.send(request[12 .. ^1])
+        let slow = answer(sock)
+        check slow["status"].getStr() == "success"
+        check slow["paths"] == cold["paths"]
+        check nixRuns() == 1
+
+      # A cached answer whose store path has gone is not served: the request
+      # resolves again (the second run). That run recreates the path and then
+      # holds the key's lock until the gate opens, so the old answer is valid
+      # again while a resolution of its key is in progress. A request arriving
+      # now is answered on the accepting thread (`peek`) without waiting for
+      # it; a lookup that went through the key's lock would wait for the gate
+      # and time out here.
+      removeDir(fakeStore)
+      writeFile(gateArmed, "")
+      let pending = connect()
+      pending.send(request)
+      let runDeadline = epochTime() + 30.0
+      while nixRuns() < 2 and epochTime() < runDeadline:
+        sleep(20)
+      check nixRuns() == 2
+      try:
+        let during = block:
+          let sock = connect()
+          sock.send(request)
+          answer(sock, timeoutMs = 20_000)
+        check during["status"].getStr() == "success"
+        check during["paths"] == cold["paths"]
+      finally:
+        writeFile(gateOpen, "")
+      let again = answer(pending, timeoutMs = 60_000)
+      check again["status"].getStr() == "success"
+      check again["paths"] == cold["paths"]
+      check nixRuns() == 2
+
   test "Scenario 1.6: Self-Reaping Timeout":
     let repoRoot = findRepoRoot()
     let daemonPath = findNixDaemon(repoRoot)

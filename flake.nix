@@ -352,7 +352,13 @@
       # 2026-11-12-io-mon-macos-shim-deadlocks-a-fork-child-on-its-own-fd-lock).
       # Such a child now skips the shim's tables until exec and reports the skip
       # as event-loss.
-      url = "github:metacraft-labs/io-mon/8fd53d43f0a4c25d54c9c49494ac7dac4f02d63f";
+      # Bumped 8fd53d43 -> 35829647 (2026-11-12, io-mon `agents`): the preload
+      # runtime's trap handler reaches the shim's signal-death flush through a
+      # weak reference again. c8bc874 made it a strong one, so a hook library
+      # built on the runtime without the shim failed to load ("undefined symbol:
+      # repro_linux_sig_safe_flush_at_signal_death") and
+      # t_stackable_hooks_extracted_process_tree's extracted runtime exited 127.
+      url = "github:metacraft-labs/io-mon/35829647d603b481276d2632b39ec2a9ce3625b2";
       flake = false;
     };
     nim-shm-gset-src = {
@@ -946,7 +952,7 @@
     # Homebrew record (Provisioning-Contributions.md §"Homebrew bridge
     # records"). Move the pin when the catalog's records change.
     reprobuild-brew-packages-src = {
-      url = "github:metacraft-labs/reprobuild-brew-packages/49f4057f05b2ebd69d764208279ad5c8b1379fab";
+      url = "github:metacraft-labs/reprobuild-brew-packages/8b4838120c2dc515e9ae1a5684de8906b4e97c33";
       flake = false;
     };
   };
@@ -3008,6 +3014,19 @@
               # happened to leave behind. Respects an operator override.
               export GOSTI_OVMF_CODE="''${GOSTI_OVMF_CODE:-${pkgs.OVMF.fd}/FV/OVMF_CODE.fd}"
               export GOSTI_OVMF_VARS="''${GOSTI_OVMF_VARS:-${pkgs.OVMF.fd}/FV/OVMF_VARS.fd}"
+              # RDMF cross-implementation conformance
+              # (libs/repro_deploy_agent/tests/
+              # t_rdmf_v3_cross_implementation_conformance.nim): the Python
+              # producer it runs imports `cryptography` at load, and the
+              # test's default interpreter, the ambient `python3`, has no
+              # such package on a CI runner, so every case skipped there.
+              # Name an interpreter that has it. Exported by path rather than
+              # added to `packages`: a second `python3` ahead on PATH would
+              # change the interpreter of every other script this shell runs.
+              # Respects an operator override.
+              export RDMF_PYTHON="''${RDMF_PYTHON:-${
+                pkgs.python3.withPackages (p: [ p.cryptography ])
+              }/bin/python3}"
             '';
           };
 

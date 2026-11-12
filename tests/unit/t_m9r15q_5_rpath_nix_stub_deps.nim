@@ -63,8 +63,10 @@ suite "DSL-port M9.R.15q.5.1 — RPATH resolution for nix-stub deps":
       "/recipes/libltdl/.repro/output/install/usr/lib",
     ]
     let script = m9r14fEmitRpathPatchScript("/tmp/mirror/usr", deps)
+    # Each dir is listed once and tested by the loop that walks the list.
     for dep in deps:
-      check script.contains("[ -d \"" & dep & "\" ]")
+      check script.contains("\"" & dep & "\"")
+    check script.contains("[ -d \"$m9r14f_libdir\" ]")
 
   test "emitted_script_filters_ld_library_path_by_needed_soname":
     # ``$LD_LIBRARY_PATH`` is populated by the engine from each dep's

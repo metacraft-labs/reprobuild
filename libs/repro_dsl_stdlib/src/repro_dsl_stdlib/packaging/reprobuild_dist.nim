@@ -1031,3 +1031,14 @@ proc nimForkGuardScript*(forkTree, flakeLock: string): string =
 const NimForkGuardTools* = ["awk", "cat", "readlink", "dirname", "diff",
   "head", "sed"]
   ## The tools `nimForkGuardScript` runs, for the edge that runs it.
+
+const PrefixSourcesTools* = ["bash", "git", "tar", "find", "cp", "mkdir",
+  "rm", "chmod", "sed", "tr", "head", "wc", "dirname", "basename", "grep",
+  "env"]
+  ## The tools the `.#prefix` source-staging edge runs:
+  ## `scripts/release/stage_release_sources.sh` and the scripts it sources
+  ## and calls (`stage_release_catalog.sh`, `scripts/lib/release_git.sh`,
+  ## `stage_source_root.sh`, `stage_package_nimble.sh`). In path mode the
+  ## edge's PATH holds these and nothing else, so a tool those scripts gain
+  ## must be added here (`t_prefix_sources_tools` runs them on this list
+  ## alone).

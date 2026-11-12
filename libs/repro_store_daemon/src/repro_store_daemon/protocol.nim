@@ -2,13 +2,22 @@ import std/[os, strutils]
 
 import repro_core
 import repro_daemon_core/ipc
-export ipc
+from repro_interface_artifacts import writeTaggedTarballArchiveDetail,
+  readTaggedTarballArchiveDetail
+from repro_project_dsl import TarballArchiveDetail
+export ipc, TarballArchiveDetail
 
 when defined(posix):
   import std/posix
 
 const
-  StoreDaemonProtocolVersion* = 6'u16
+  StoreDaemonProtocolVersion* = 7'u16
+    ## v7: the external-realize body carries the record's whole
+    ## ``archiveDetail`` (``TarballArchiveDetail``, version-tagged) where v6
+    ## carried only its ``version``. A v6 peer reading a v7 body would read
+    ## the detail's tag and first fields as ``version`` and
+    ## ``stripComponents``.
+    ##
     ## v6: the external-realize body also carries ``version``. Same
     ## reasoning as every bump below: a v5 peer reading a v6 body would read
     ## the version string's length as ``stripComponents``.
@@ -120,13 +129,24 @@ type
       ## either does not fail — it produces a DIFFERENT prefix under a
       ## different cache key than the same realize performed in-process,
       ## which is the one way this path can go wrong silently.
-    version*: string
-      ## Upstream version the selected tarball record declares; empty for an
-      ## unversioned record. The daemon re-runs selection on the record it
-      ## rebuilds, and that selection filters by the ``uses:`` range in
-      ## ``rawConstraint``: without the version, a record the client
-      ## selected because it satisfies the range arrives unversioned, and an
-      ## unversioned record is eligible only when there is no range.
+    archiveDetail*: TarballArchiveDetail
+      ## The selected tarball record's archive-realization detail, whole:
+      ## its upstream ``version``, its ``sha512``/``sha1`` digests, its
+      ## install method and every installer field. All of it is input to
+      ## the daemon's selection and realization of the record it rebuilds:
+      ##
+      ##   * selection filters by the ``uses:`` range in ``rawConstraint``,
+      ##     judged against ``version`` -- an unversioned record satisfies
+      ##     no range;
+      ##   * a record pinned only by ``sha512`` or ``sha1`` carries an empty
+      ##     ``tarballSha256``, and without the detail it arrives with no
+      ##     digest at all;
+      ##   * a record with an installer feature (``extractPath``,
+      ##     ``installMethod``, ``appBundle`` ...) without the detail is a
+      ##     plain archive, extracted as-is into a different prefix.
+      ##
+      ## It travels as one unit, through the interface-artifact codec, so a
+      ## field added to the detail reaches the daemon without a change here.
     stripComponents*: int
 
 proc bytesOf(text: string): seq[byte] =
@@ -313,7 +333,7 @@ proc externalRealizeBody*(req: StoreDaemonExternalRealizeRequest): seq[byte] =
   result.writeU32Le(if req.nonRedistributable: 1'u32 else: 0'u32)
   result.writeString(req.launcher)
   result.writeString(req.closureManifest)
-  result.writeString(req.version)
+  result.writeTaggedTarballArchiveDetail(req.archiveDetail)
   result.writeU32Le(uint32(max(req.stripComponents, 0)))
 
 proc parseExternalRealizeBody*(body: openArray[byte]):
@@ -342,7 +362,7 @@ proc parseExternalRealizeBody*(body: openArray[byte]):
   result.nonRedistributable = body.readU32Le(pos) != 0'u32
   result.launcher = body.readString(pos)
   result.closureManifest = body.readString(pos)
-  result.version = body.readString(pos)
+  result.archiveDetail = body.readTaggedTarballArchiveDetail(pos)
   result.stripComponents = int(body.readU32Le(pos))
 
 proc releaseRootBody*(holderId, rootId: string): seq[byte] =

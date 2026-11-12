@@ -213,10 +213,11 @@ minimal disruption.
 
 ### Mode 1 → Mode 3
 
-Run `repro init` once. It writes a starter `repro.nim` describing the
-packages it discovered plus the initial `repro.scanned-deps.nim`. After
-that you own the `repro.nim` and `repro deps refresh` keeps the scanned
-file current. *(Available once Mode 1 ships.)*
+Once Mode 1 ships, a one-time scan will write a starter `repro.nim`
+describing the packages it discovered plus the initial
+`repro.scanned-deps.nim`, after which you own the `repro.nim` and the
+scanned file is refreshed for you. *(Not available yet: no `repro` verb
+performs this scan today, so write the `repro.nim` by hand.)*
 
 ### Mode 3 → Mode 2
 

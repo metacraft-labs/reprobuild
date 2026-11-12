@@ -44,11 +44,16 @@ if not fixtureRunnable():
     "Linux, " & reproBinary & " and cc"
 else:
   suite "M3 — Agent Harbor modifies an installed source package":
-    let f = newFixture("m3", @["context.active-app",
+    # Acquired on first use from inside a case, so the runner's
+    # `--list-json` probe installs nothing and a failed install fails the
+    # case that needed it; released at the end of this suite by the process
+    # that acquired it (see `agent_harbor_fixture`).
+    var fixture = lazyFixture("m3", @["context.active-app",
       "workspace.create:greeter", "source.read:greeter",
       "source.write:greeter", "build.run:greeter", "test.run:greeter",
-      "preview.run:greeter"])
-    let intent = f.host.captureIntent(f.consent, f.sid, "make greeter say v2")
+      "preview.run:greeter"], "make greeter say v2")
+    template f: Fixture = fixture.acquire()
+    template intent: Intent = f.sessionIntent
 
     # The suite runner runs every case in a process of its own, so a case
     # must not rely on a workspace, edit or preview an earlier case left
@@ -216,4 +221,4 @@ else:
       # The change's outputs went to the preview store.
       check dirExists(f.previewStore / "prefixes" / "greeter")
 
-    cleanup(f.tmp)
+    fixture.release()

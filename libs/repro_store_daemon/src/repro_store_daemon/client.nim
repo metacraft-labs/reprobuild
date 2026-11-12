@@ -143,7 +143,7 @@ proc requestFromTarballUse*(useDef: InterfaceToolUse; storeRoot, holderId,
     nonRedistributable: plan.declaredNonRedistributable,
     launcher: plan.declaredLauncher,
     closureManifest: plan.declaredClosureManifest,
-    version: plan.record.detail.version,
+    archiveDetail: plan.record.detail,
     stripComponents: plan.stripComponents)
 
 proc realizeExternalViaDaemon(req: StoreDaemonExternalRealizeRequest;

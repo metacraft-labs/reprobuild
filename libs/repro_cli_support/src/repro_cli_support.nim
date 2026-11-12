@@ -97,6 +97,9 @@ import repro_dsl_stdlib/packages_schema
               # `repro.nim` are stdlib, not CLI. The CLI reads the two flags
               # out of the layered configuration and calls into it.
 import repro_dsl_stdlib/foreign_env/auto_load
+# `ForeignEnvProgressTail`: a capture's producer stderr, forwarded live while
+# the dev-env edge runs.
+import repro_dsl_stdlib/foreign_env/env_capture
 # `flakeSiblingIsGitCheckout` / `flakeSiblingOverrideRef` — the ONE predicate
 # deciding whether a sibling is a checkout, and the ONE spelling naming it to
 # nix. Shared with `flakePrintDevEnvArgv` so the arguments emitted here and the
@@ -275,6 +278,7 @@ when defined(linux):
 import repro_cli_support/deploy_agent as cli_deploy_agent
 import repro_cli_support/hardware as cli_hardware
 import repro_cli_support/disk as cli_disk
+import repro_cli_support/cargo_gc as cli_cargo_gc
 import repro_cli_support/attest as cli_attest
 import repro_cli_support/mode1_loader
 import repro_cli_support/post_commit_trace
@@ -582,6 +586,10 @@ proc renderUsage*(programName: string): string =
       " deploy-agent keygen --secrets-key <FILE>\n       " &
           programName &
       " hardware {probe} [--dry-run | --output PATH | --regenerate]\n       " &
+          programName &
+      " cargo gc [--target-dir DIR] [--keep-sets N] [--min-age DURATION] [--dry-run] [--cargo-home[=DIR]]\n       " &
+          programName &
+      " cargo record-live [--target-dir DIR] [--from FILE|-] [--tee] [--keep-sets N]\n       " &
           programName &
       " attest expect --image PATH [--out PATH | --check PATH]\n       " &
           programName &
@@ -3356,20 +3364,21 @@ proc lowerGraphAction(node: GraphNode; profiles: Table[string, PathOnlyToolProfi
       raise newException(ValueError,
         "reprobuild.builtin.exec action " & payload.id &
           " has empty argv")
-    # Windows-System-Resources Phase E — the `@FILE:<path>` argv
-    # preprocessor. Every argv entry of the form `@FILE:<path>` is
-    # replaced with the trimmed contents of `<path>` at the moment of
-    # execution. The hook lives in the `reprobuild.builtin.exec`
-    # lowering so BOTH elevated and non-elevated edges run the same
-    # expansion semantics (spec §2.1). The build-graph payload keeps
-    # the literal `@FILE:...` (no secret in the plan); the substituted
-    # bytes only ride in the spawned process's argv. The audit-log
-    # rendering uses the literal `@FILE:<path>` form via the engine's
-    # log path — `auditArgvWithRedaction` is wired through the
-    # elevated-broker dispatch; the non-elevated direct-fork path is
-    # logged through the engine's own command-stats record which
-    # already redacts via this same engine boundary.
-    let argv = expandArgFiles(literalArgv, defaultArgFileReader)
+    # Windows-System-Resources §"`@FILE:<path>` argv substitution": every
+    # argv entry of the form `@FILE:<path>` is replaced with the trimmed
+    # contents of `<path>` at the moment of execution. The lowering does NOT
+    # substitute: the action keeps the literal `@FILE:...` and is flagged
+    # `expandsArgFiles`, and the engine substitutes when the build run
+    # starts (`withArgFilesExpanded`), keying the expanded argv there. The
+    # lowered graph is cached on disk and reused while
+    # `loweredGraphCacheKey` holds, and no field of that key covers a token
+    # file's contents, so a value substituted here would be replayed — and
+    # looked up under its old key — after the file changed. Keeping the
+    # literal also keeps the secret out of the cached graph, which is part
+    # of the plan the spec says carries no secret. The key computed below
+    # covers the literal argv, so the token's path is in it either way.
+    let argv = literalArgv
+    let expandsArgFiles = literalArgv.anyIt(isArgFileToken(it))
     let cwdValue = argValue("cwd")
     # M9.R.74 — canonical execution root (R2) resolution. The DSL
     # ``BuildActionDef.cwdKind`` declaration wins; when it is
@@ -3437,7 +3446,7 @@ proc lowerGraphAction(node: GraphNode; profiles: Table[string, PathOnlyToolProfi
       inlineEnv.add(entry)
     for entry in inlineDeclaredEnv.rest:
       inlineEnv.add(entry)
-    return repro_build_engine.action(
+    var lowered = repro_build_engine.action(
       payload.id,
       argv,
       # Named-Lock-Files §3.1/§7.2: every edge in a workspace that declares
@@ -3469,6 +3478,8 @@ proc lowerGraphAction(node: GraphNode; profiles: Table[string, PathOnlyToolProfi
       env = inlineEnv,
       envPassthrough = inlineEnvPassthrough,
       requiresElevation = payload.requiresElevation)
+    lowered.expandsArgFiles = expandsArgFiles
+    return lowered
 
   if payload.call.packageName == "reprobuild.builtin" and
       payload.call.executableName == "fs":
@@ -4895,7 +4906,12 @@ const
   # passthrough resolution and the stage-2 census both read this field,
   # and a census that answers differently cold and warm is not a
   # measurement.
-  LoweredGraphCacheVersion = 14'u16
+  LoweredGraphCacheVersion = 15'u16
+    # v15: ``BuildAction.expandsArgFiles``, one byte after the optional
+    # outputs. A v14 record holds an inline-exec argv whose `@FILE:` tokens
+    # were already substituted when the graph was lowered, and a key mixed
+    # from that value; decoding it would keep replaying the old contents,
+    # which is the defect the bump retires.
     # v14: optional output candidates, appended after removeBeforeRun.
     # v13: ``BuildAction.removeBeforeRun``, a string list after
     # ``scratchDirs``. A v12 cache would decode every action with nothing to
@@ -5964,6 +5980,7 @@ proc writeBuildAction(outp: var seq[byte]; action: BuildAction) =
   outp.writeStringSeq(action.scratchDirs)
   outp.writeStringSeq(action.removeBeforeRun)
   outp.writeStringSeq(action.optionalOutputs)
+  outp.add(if action.expandsArgFiles: 1'u8 else: 0'u8)
 
 proc readBuildAction(bytes: openArray[byte]; pos: var int): BuildAction =
   result = BuildAction(
@@ -6046,6 +6063,11 @@ proc readBuildAction(bytes: openArray[byte]; pos: var int): BuildAction =
   result.scratchDirs = readStringSeq(bytes, pos)
   result.removeBeforeRun = readStringSeq(bytes, pos)
   result.optionalOutputs = readStringSeq(bytes, pos)
+  let argFilesByte = readByteValue(bytes, pos)
+  if argFilesByte > 1'u8:
+    raiseEnvelopeError(eeMalformed,
+      "invalid lowered action @FILE: expansion sentinel")
+  result.expandsArgFiles = argFilesByte == 1'u8
 
 proc encodeLoweredGraphCache(record: LoweredGraphCacheRecord): seq[byte] =
   result.writeString(LoweredGraphCacheMagic)
@@ -10686,18 +10708,46 @@ proc canReuseMaterializedProducer(selector: string; binding: ProducerBinding;
       ". Restart the build to rematerialize the producer.")
   verifyLockPinnedProducerSource(binding.lockedDep, cachedRoot, consumerRoot)
 
+proc producerNativeLibraryNeedsBuild(lib: InterfaceLibrary;
+                                     producerRootAbs: string): bool =
+  ## Cross-Repo-Source-Consumption §4.2c: whether a declared ``library`` is a
+  ## NATIVE library, one whose consumed artifact is a compiled
+  ## ``.so``/``.a``/``.dylib`` under ``build/lib``, so it has to be built even
+  ## when the producer also exports a Nim source root.
+  ##
+  ## ``kind: shared`` / ``kind: both`` say so outright. ``kind: static`` is the
+  ## default of a bare ``library foo``, which is also how every pure-Nim source
+  ## library is declared, so it is native only when no importable source root
+  ## exists at its ``exportedPath``.
+  if lib.name.len == 0 or lib.kind == lkHeaderOnly:
+    return false
+  if lib.kind in {lkShared, lkBoth}:
+    return true
+  let exported =
+    if lib.exportedPath.len > 0: lib.exportedPath else: "src"
+  not dirExists(extendedPath(producerRootAbs / exported))
+
 proc recordProducerMaterialization(selector, producerRootAbs: string;
                                    producerArtifact: ProjectInterfaceArtifact;
                                    producerRuntimeIdentity: PathOnlyBuildIdentity;
-                                   binding: ProducerBinding): bool =
+                                   binding: ProducerBinding;
+                                   includeCompiledOutputs = true): bool =
   ## Discover a producer's already-materialized public outputs and project
   ## them onto the consumer's executable/library channels. The build path
   ## calls this after the producer sub-build; graph inspection calls it while
   ## loading an existing graph. Keeping this projection shared prevents the
   ## two surfaces from resolving different producer identities.
+  ##
+  ## ``includeCompiledOutputs = false`` projects only the Nim source root: a
+  ## producer admitted for its source channel alone (see
+  ## ``producerNativeLibraryNeedsBuild``) must not have a stale ``build/lib``
+  ## left by an earlier build spliced in, or the same consumer action would
+  ## carry a different identity depending on what happened to be on disk.
   var binDirs: seq[string] = @[]
   var realizedBinaries: seq[string] = @[]
   for exe in producerArtifact.projectInterface.publicExecutables:
+    if not includeCompiledOutputs:
+      break
     let binName =
       if exe.binaryName.len > 0: exe.binaryName else: exe.exportName
     if binName.len == 0:
@@ -10715,6 +10765,8 @@ proc recordProducerMaterialization(selector, producerRootAbs: string;
   mergeProducerRuntimeIdentity(producerRuntimeIdentity, binDirs, aux)
   var realizedLibraries: seq[string] = @[]
   block libraryChannel:
+    if not includeCompiledOutputs:
+      break libraryChannel
     let libOutDir = producerRootAbs / "build" / "lib"
     let includeOutDir = producerRootAbs / "build" / "include"
     let pkgConfigOutDir = libOutDir / "pkgconfig"
@@ -13440,19 +13492,25 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
           if binName.len > 0:
             needsProducerBuild = true
             break
-        if not needsProducerBuild:
-          for lib in producerArtifact.projectInterface.publicLibraries:
-            if lib.name.len == 0 or lib.kind == lkHeaderOnly:
-              continue
-            let exported =
-              if lib.exportedPath.len > 0: lib.exportedPath else: "src"
-            let nimSrcDir = producerRootAbs / exported
-            if not dirExists(extendedPath(nimSrcDir)):
-              # No importable Nim source root — the consumed artifact is a
-              # compiled ``.so``/``.a`` that must be built + discovered under
-              # ``build/lib``.
-              needsProducerBuild = true
-              break
+        # A native library declared beside a Nim source root (§4.2c): the
+        # producer is source-only for every consumer that merely imports it,
+        # and compiled for one that names it. Kept apart from
+        # ``needsProducerBuild`` so the out-of-closure gate below can still
+        # admit the source channel of such a producer, as it always has.
+        var producerHasNativeLibraryBesideSource = false
+        for lib in producerArtifact.projectInterface.publicLibraries:
+          if lib.name.len == 0 or lib.kind == lkHeaderOnly:
+            continue
+          let exported =
+            if lib.exportedPath.len > 0: lib.exportedPath else: "src"
+          let nimSrcDir = producerRootAbs / exported
+          if not dirExists(extendedPath(nimSrcDir)):
+            # No importable Nim source root — the consumed artifact is a
+            # compiled ``.so``/``.a`` that must be built + discovered under
+            # ``build/lib``.
+            needsProducerBuild = true
+          elif producerNativeLibraryNeedsBuild(lib, producerRootAbs):
+            producerHasNativeLibraryBesideSource = true
         # THE NARROWING (§4.2a admission gate; see the loop header).
         #
         # ``needsProducerBuild`` is now exactly "this producer exports a
@@ -13476,7 +13534,15 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
           if dirExists(extendedPath(producerRootAbs / exported)):
             producerExportsNimSourceRoot = true
             break
-        if not selectorInSelectedClosure and
+        # §4.2c: a producer whose only compiled artifact is a native library
+        # beside its Nim source root keeps the source channel for every
+        # consumer; the build and the compiled splice need the selected
+        # closure to name it.
+        let sourceChannelOnly = not selectorInSelectedClosure and
+          not needsProducerBuild and producerHasNativeLibraryBesideSource
+        if not sourceChannelOnly and producerHasNativeLibraryBesideSource:
+          needsProducerBuild = true
+        if not selectorInSelectedClosure and not sourceChannelOnly and
             (needsProducerBuild or not producerExportsNimSourceRoot):
           # Out of closure and not the Nim library-source channel: this is the
           # SC-2 / SC-3 scoping contract. Building it here is what made
@@ -13522,7 +13588,8 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
             "\" as a pure-Nim-source library — skipping producer sub-build " &
             "(no compiled artifact; src threaded via nimPathDirs).")
         if not recordProducerMaterialization(selector, producerRootAbs,
-            producerArtifact, producerRuntimeIdentity, producer):
+            producerArtifact, producerRuntimeIdentity, producer,
+            includeCompiledOutputs = not sourceChannelOnly):
           raise newException(OSError,
             "cross-repo producer \"" & selector & "\" at " & producerRootAbs &
             " declares no materialized executable, library, or Nim source " &
@@ -14689,10 +14756,13 @@ proc runStableProviderProtocol(binaryPath, protocolRoot, stem, cwd: string;
   writeProviderRequestFile(requestPath, request)
   if fileExists(extendedPath(responsePath)):
     removeFile(extendedPath(responsePath))
-  let argv = @[
+  # Under the portable Linux release a provider it compiled starts through
+  # the bundled loader (`portableReleaseHelperArgv`), or it cannot load the
+  # release's clingo on a host glibc older than the release's.
+  let argv = portableReleaseHelperArgv(@[
     binaryPath,
     "--repro-provider-request", requestPath,
-    "--repro-provider-response", responsePath]
+    "--repro-provider-response", responsePath], cwd = cwd)
   # M8 stderr-truncation fix: previously used
   # ``startProcess + outputStream.readAll + waitForExit`` to drive the
   # provider here too, with the same symptom — diagnostics from the
@@ -14764,6 +14834,17 @@ proc runDevEnvIntrospectionHelper(args: openArray[string]): int =
   try:
     if developOverridesPath.len > 0:
       putEnv(DevelopOverridesEnvVar, developOverridesPath)
+    # This helper's stderr, and the provider's below it, reach the terminal
+    # only after they exit. A foreign capture (`nix print-dev-env`) can wait
+    # for many minutes on something outside Reprobuild, so it forwards what
+    # its producer says to this file, which the activating CLI prints live.
+    # Emptied here as well as by the reader, so it holds one run's lines
+    # even for a caller that never reads it.
+    let foreignProgressPath =
+      absolutePath(devEnvForeignProgressPath(protocolRoot))
+    createDir(extendedPath(protocolRoot))
+    writeFile(extendedPath(foreignProgressPath), "")
+    putEnv(ForeignEnvProgressEnvVar, foreignProgressPath)
     let cwd = if projectRoot.len > 0: projectRoot else: getCurrentDir()
     let manifestResponse = runStableProviderProtocol(providerBinary,
       protocolRoot, "manifest", cwd, ProviderGraphRequest(
@@ -15584,8 +15665,24 @@ proc computePublicDevEnv(selection: DevEnvCliSelection;
       selection.projectRoot)
     stderr.flushFile()
   var progressCallback: BuildProgressCallback = nil
+  # What a foreign dev-env capture's producer (`nix print-dev-env`, `direnv`)
+  # writes to stderr, printed as it is written. The engine re-reports every
+  # running action every 100 ms, so the callback is also the poll.
+  var foreignProgress: ForeignEnvProgressTail
+  proc printForeignProgress(final: bool) =
+    let lines = foreignProgress.takeLines(final)
+    if lines.len == 0:
+      return
+    progress.clearProgressLine()
+    for line in lines:
+      stderr.writeLine(line)
+    stderr.flushFile()
+    progress.lastLen = 0
   if progress.enabled:
+    foreignProgress = openForeignEnvProgressTail(devEnvForeignProgressPath(
+      devEnvProtocolRoot(selection.outDir)))
     progressCallback = proc(event: BuildProgressEvent) =
+      printForeignProgress(final = false)
       progress.renderProgress(event)
   var autoRunQuota = startAutoRunQuotaIfNeeded(runQuotaBypassedByEnv())
   defer: releaseAutoRunQuotaProcess(autoRunQuota)
@@ -15609,6 +15706,12 @@ proc computePublicDevEnv(selection: DevEnvCliSelection;
     progressCallback: progressCallback,
     modulePath: selection.modulePath,
     projectRoot: selection.projectRoot,
+    # The volatile-path fold's source trees, as `wireFilesystemRoots` gives
+    # every build configuration.
+    sourceTrees:
+      (if buildSourceTreesOf != nil and selection.projectRoot.len > 0:
+         buildSourceTreesOf(absolutePath(selection.projectRoot))
+       else: @[]),
     outDir: selection.outDir,
     workDir: reprobuildLibraryWorkDir(),
     publicCliPath: publicCliPath,
@@ -15628,9 +15731,11 @@ proc computePublicDevEnv(selection: DevEnvCliSelection;
     # first so that diagnostic starts on a line of its own instead of being
     # appended to a half-drawn one.
     if progress.enabled:
+      printForeignProgress(final = true)
       progress.finishProgress()
     raise
   if progress.enabled:
+    printForeignProgress(final = true)
     progress.finishProgress()
     # What it did, not merely that it finished. `provider compiled` versus
     # `provider reused` is the twenty-second difference on a macOS host whose
@@ -18125,9 +18230,16 @@ proc supervisorCliArgs(config: DevSessionSupervisorConfig): seq[string] =
   if config.foreground:
     result.add("--foreground")
 
-proc startBackgroundSupervisor(config: DevSessionSupervisorConfig) =
+proc startBackgroundSupervisor(config: DevSessionSupervisorConfig):
+    DevSessionLaunch =
+  ## Detach the supervisor and return what the parent's wait needs to watch
+  ## it: its pid, and where its output starts in the append-only log. The
+  ## pid is the point -- a launch whose process is gone before the session
+  ## is up is a failure to start, and only the pid can show that; see
+  ## ``DevSessionLaunch``.
   createDir(extendedPath(config.outDir.sessionDir))
-  let logPath = config.outDir.sessionDir / "supervisor.log"
+  let logPath = config.outDir.supervisorLogPath
+  result.logOffset = config.outDir.supervisorLogSize
   when defined(windows):
     # NOT `osproc.startProcess`: with `poParentStreams` it handed the
     # supervisor our own stdout and stderr, and without it `CreateProcessW`
@@ -18140,9 +18252,9 @@ proc startBackgroundSupervisor(config: DevSessionSupervisorConfig) =
     if not isAbsolute(image):
       let found = findExe(image)
       image = if found.len > 0: found else: absolutePath(image)
-    discard spawnWithOwnStdio(image, config.supervisorCliArgs(),
-      env = [], inheritEnvironment = true, logPath = logPath,
-      workingDir = absolutePath(config.projectRoot))
+    result.supervisorPid = spawnWithOwnStdio(image,
+      config.supervisorCliArgs(), env = [], inheritEnvironment = true,
+      logPath = logPath, workingDir = absolutePath(config.projectRoot))
   else:
     # NO DESCRIPTOR ABOVE 2 CROSSES THE LAUNCH: the supervisor outlives this
     # invocation, so an inherited copy of a caller's pipe would hold that
@@ -18154,18 +18266,51 @@ proc startBackgroundSupervisor(config: DevSessionSupervisorConfig) =
     # before the supervisor starts. Only the flag moves, and it is put back
     # afterwards; this runs on the command's main flow, which starts no
     # other child inside the window.
+    #
+    # THE SHELL RECORDS `$!`, the backgrounded subshell's pid, which is the
+    # supervisor's: the subshell `exec`s it (and the thin `repro` client
+    # `execv`s the engine), so the pid survives both. The shell's exit
+    # status alone is worthless as evidence -- it is 0 as soon as the job is
+    # backgrounded -- and this pid is how the parent's wait learns of a
+    # supervisor that died in its first millisecond.
+    #
+    # INTO A FILE, NOT THROUGH A PIPE. Capturing the shell's stdout
+    # (`execCmdEx`) creates the pipe AFTER the descriptors above were marked
+    # close-on-exec, and the spawned shell keeps a copy of it above 2 that
+    # the subshell's redirections do not touch: the supervisor and every
+    # service it starts inherited the write end, so reading the pid waited
+    # for the whole session to exit and `repro up` never returned. A file
+    # written by the outer shell after the job is backgrounded crosses no
+    # descriptor at all. It is named for this launch's session id, so two
+    # concurrent launches cannot read each other's pid.
+    #
+    # Spawning the supervisor directly instead would make it this process's
+    # CHILD, whose zombie a pid probe reads as alive until it is reaped.
+    let pidPath = config.outDir.sessionDir /
+      ("supervisor-launch-" & config.sessionId & ".pid")
     let command = "(cd " & q(config.projectRoot) & " && exec " &
       shellCommand(@[config.publicCliPath] & config.supervisorCliArgs()) &
-      ") </dev/null >> " & q(logPath) & " 2>&1 &"
+      ") </dev/null >> " & q(logPath) & " 2>&1 & echo $! > " & q(pidPath)
     let madeCloseOnExec = markInheritableDescriptorsCloseOnExec()
     var exitCode = 0
     try:
       exitCode = execShellCmd(command)
     finally:
       restoreInheritableDescriptors(madeCloseOnExec)
-    if exitCode != 0:
+    var recorded = ""
+    try:
+      recorded = readFile(extendedPath(pidPath)).strip()
+      removeFile(extendedPath(pidPath))
+    except IOError, OSError:
+      discard
+    var pid = 0
+    if exitCode == 0 and recorded.len > 0 and recorded.allCharsInSet(Digits):
+      pid = parseInt(recorded)
+    if pid <= 0:
       raise newException(OSError,
-        "failed to launch dev session supervisor: " & command)
+        "failed to launch dev session supervisor (exit " & $exitCode &
+          ", recorded pid " & recorded.escape() & "): " & command)
+    result.supervisorPid = pid
 
 const DevSessionStillStartingExitCode* = 75
   ## The exit code ``repro up`` / ``repro dev`` returns when its wait expired
@@ -19818,11 +19963,11 @@ proc runUpOrDevCommand(args: openArray[string]; publicCliPath: string;
     let budget = config.readyBudget(parsed.readyTimeoutMs)
     # Only the locked supervisor may clear an old bind; the parent accepts
     # a ready marker only for this new launch's session ID.
-    config.startBackgroundSupervisor()
+    let launch = config.startBackgroundSupervisor()
     stderr.writeLine("repro " & commandName & ": waiting up to " &
       budget.describe() & " for the session to report `session.up`")
     try:
-      status = waitForDevSessionReady(config, budget)
+      status = waitForDevSessionReady(config, budget, launch)
     except DevSessionStillStartingError as err:
       stderr.writeLine("repro " & commandName & ": " & err.msg)
       return DevSessionStillStartingExitCode
@@ -26444,8 +26589,18 @@ proc startAutoRunQuotaIfNeeded*(bypassRunQuota: bool): owned(Process) =
       var client =
         try: runquota_client.connectDefault()
         except CatchableError as error:
-          # An existing private endpoint that does not answer is refused like
-          # the other private-selection failures, and says so the same way.
+          # An existing endpoint that does not answer (or fails its trust
+          # checks) is refused, never replaced, and the refusal NAMES it: a
+          # bare "Connection refused" said neither which endpoint refused nor
+          # where its path came from, and a socket left behind by a daemon
+          # that has exited -- exported to a nested `repro` by an older
+          # build -- looked like a fault of the command being run. A private
+          # selection additionally gets the same remedy as the other
+          # private-selection failures.
+          error.msg = "RunQuota endpoint " & configuredEndpoint.path &
+            (if explicitSocket.len > 0: " (from RUNQUOTA_SOCKET)" else: "") &
+            " exists but cannot be used: " & error.msg &
+            "; refusing per-user auto-start"
           addPrivateScopeRemedy(error)
           raise
       client.close()
@@ -29328,12 +29483,14 @@ proc addDevelopOverridesOf(loc: var LockedDepLocator; root: string) =
   except CatchableError:
     discard
 
-proc lockedDepLocator*(lockDir: string): LockedDepLocator =
+proc lockedDepLocator*(lockDir: string; pathBase = ""): LockedDepLocator =
   ## The locator for the lock held in ``lockDir``, resolving the workspace
-  ## membership itself when a name needs it.
+  ## membership itself when a name needs it. ``pathBase`` is
+  ## ``committedLockPathBase(lockDir)`` when the caller already has it (it
+  ## costs two git runs); empty derives it.
   let dir = os.normalizedPath(absolutePath(lockDir))
   result = LockedDepLocator(lockDir: dir,
-    pathBase: committedLockPathBase(dir),
+    pathBase: (if pathBase.len > 0: pathBase else: committedLockPathBase(dir)),
     overrides: initTable[string, string](),
     members: initTable[string, string]())
   result.addDevelopOverridesOf(dir)
@@ -29342,12 +29499,13 @@ proc lockedDepLocator*(lockDir: string): LockedDepLocator =
     result.addDevelopOverridesOf(os.normalizedPath(absolutePath(ws)))
 
 proc lockedDepLocator*(lockDir, workspaceRoot: string;
-    members: openArray[tuple[name, path: string]]): LockedDepLocator =
+    members: openArray[tuple[name, path: string]];
+    pathBase = ""): LockedDepLocator =
   ## The locator for the lock held in ``lockDir`` when the caller already
   ## holds the workspace membership (``members``, paths relative to
   ## ``workspaceRoot``) — a reader walking every participating repo's lock
   ## then resolves the membership once, not once per lock.
-  result = lockedDepLocator(lockDir)
+  result = lockedDepLocator(lockDir, pathBase)
   result.membershipLoaded = true
   for m in members:
     if m.name.len == 0 or m.path.len == 0 or m.name in result.members:
@@ -56998,6 +57156,231 @@ proc enclosingWorkspaceRoot*(startPath: string;
     if mainRoot.len > 0:
       return enclosingWorkspaceRoot(mainRoot, followWorktree = false)
 
+var sourceTreeMembershipMemo: Table[string,
+    tuple[stamp: string; members: seq[tuple[name, path: string]]]]
+  ## ``sourceTreeMembership`` per workspace root. Every engine configuration
+  ## of one invocation asks for the same workspace, and resolving a large
+  ## membership is the one costly step (measured 31-110 ms for 202
+  ## repositories, debug build), so it is resolved once per process and again
+  ## only when a document it is read from changes
+  ## (``sourceTreeMembershipStamp``, which holds their content: a long-lived
+  ## process, such as the Windows daemon, which builds in-process, sees every
+  ## edit).
+
+proc sourceTreeMembershipStamp(ws: string): string =
+  ## Every document the membership of the workspace at ``ws`` is resolved
+  ## from, WITH ITS CONTENT: the state and settings files and the manifest
+  ## declarations (``projects``, ``repos``, ``variants``, ``repo-sets``,
+  ## ``url-prefixes``) at the root, in ``.repro/manifests``, in each url
+  ## layer's checkout (``.repro/manifests-<i>-<name>``) and in each
+  ## ``local_path`` layer wherever it is, plus the two legacy migration
+  ## files the project name may come from. About 250 files on the
+  ## 202-repository workspace, read in a few milliseconds.
+  ##
+  ## Content, not size and modification time: an edit that keeps a
+  ## fragment's size within the filesystem's timestamp granularity (a member
+  ## renamed to another of the same length, by a script or a test, in the
+  ## same tick) kept such a stamp, and a member left out of the scope is a
+  ## read dropped silently. A file that cannot be read is named with no
+  ## content, so its appearing or disappearing still changes the stamp.
+  var roots: seq[string]
+  proc addFile(stamp: var string; path: string) =
+    stamp.add(path & "\t")
+    try:
+      let content = readFile(extendedPath(path))
+      stamp.add($content.len & "\n" & content)
+    except IOError, OSError:
+      stamp.add("-\n")
+  proc addManifests(stamp: var string; roots: var seq[string]; root: string) =
+    let normalized = os.normalizedPath(absolutePath(root, ws))
+    if normalized in roots or not dirExists(normalized):
+      return
+    roots.add(normalized)
+    for kind, path in walkDir(normalized):
+      if kind in {pcFile, pcLinkToFile} and path.endsWith(".toml"):
+        stamp.addFile(path)
+    for sub in ["projects", "repos", "variants", "repo-sets", "url-prefixes"]:
+      if dirExists(normalized / sub):
+        for path in walkDirRec(normalized / sub,
+            yieldFilter = {pcFile, pcLinkToFile}):
+          if path.endsWith(".toml"):
+            stamp.addFile(path)
+  result.addManifests(roots, ws)
+  result.addManifests(roots, ws / ".repro")
+  for kind, path in walkDir(ws / ".repro"):
+    if kind in {pcDir, pcLinkToDir} and
+        extractFilename(path).startsWith("manifests"):
+      result.addManifests(roots, path)
+  # A ``local_path`` layer may be anywhere (relative to ``ws`` or absolute).
+  # The state and settings files that name it are in the stamp already, so
+  # a layer added or moved changes the stamp whether or not it is read here.
+  try:
+    for layer in effectiveWorkspaceLocalWithNotes(ws).local.manifest:
+      if layer.local_path.isSome and layer.local_path.get().len > 0:
+        result.addManifests(roots, layer.local_path.get())
+  except CatchableError:
+    discard
+  for legacy in [ws / ".repo" / "workspace.toml",
+                 ws / ".repo" / ".repro-migration-complete"]:
+    if fileExists(extendedPath(legacy)):
+      result.addFile(legacy)
+
+proc sourceTreeMembership(ws: string): seq[tuple[name, path: string]] =
+  ## The repositories the workspace at ``ws`` declares, ``path`` relative to
+  ## ``ws``: the membership every workspace command resolves
+  ## (``resolveWorkspaceProjectShared``). Empty when the workspace declares
+  ## none (a committed-lock-only workspace, whose dependencies are its lock's)
+  ## or the declaration does not resolve, which the build reports itself.
+  ##
+  ## There is no cheaper record of it: the state file names only the active
+  ## projects, and the per-clone ignore set is best effort. So it is resolved
+  ## once per process (``sourceTreeMembershipMemo``).
+  # A malformed state or settings file raises here; the workspace command
+  # that reads it reports it, and a build that does not must not fail on it.
+  try:
+    if not hasResolvedManifestCheckout(ws) and
+        not isCompositionalWorkspaceToml(ws, ""):
+      return
+  except CatchableError:
+    return
+  let stamp = sourceTreeMembershipStamp(ws)
+  if ws in sourceTreeMembershipMemo and
+      sourceTreeMembershipMemo[ws].stamp == stamp:
+    return sourceTreeMembershipMemo[ws].members
+  try:
+    var repos: seq[ResolvedRepo]
+    {.cast(gcsafe).}:
+      repos = resolveWorkspaceProjectShared(ws, "",
+        "finding the trees a build reads").resolved.repos
+    for r in repos:
+      if r.name.len > 0 and r.path.len > 0:
+        result.add((name: r.name, path: r.path))
+  except CatchableError:
+    result = @[]
+  sourceTreeMembershipMemo[ws] = (stamp: stamp, members: result)
+
+var sourceTreeLayoutMemo: Table[string,
+    tuple[stamp, mainWorktree, lockFrame: string]]
+  ## Per project, the two answers ``buildSourceTrees`` asks git for: the main
+  ## worktree a linked worktree's workspace is found from
+  ## (``mainWorktreeRootFor``) and the frame of the committed lock's paths
+  ## (``committedLockPathBase``). Every engine configuration of one command
+  ## asks again (about eight in a no-op ``repro build``), and the git runs were
+  ## most of each call's cost: 10-20 ms, where the rest takes a few. Both
+  ## describe where the repository keeps its git data, so they are derived
+  ## again whenever that changes (``repositoryLayoutStamp``).
+
+proc repositoryLayoutStamp(project: string): string =
+  ## Where the repository enclosing ``project`` keeps its git data: the first
+  ## ``.git`` entry above it, whether a directory (a main worktree) or a file
+  ## (a linked worktree, with the pointer it holds). A repository created,
+  ## removed or relinked changes it; nothing else changes the two answers.
+  var dir = project
+  while dir.len > 0:
+    let entry = dir / ".git"
+    if dirExists(extendedPath(entry)):
+      return entry & "\tdir"
+    if fileExists(extendedPath(entry)):
+      try:
+        return entry & "\tfile\t" & readFile(extendedPath(entry))
+      except IOError, OSError:
+        return entry & "\tfile"
+    let parent = parentDir(dir)
+    if parent == dir:
+      break
+    dir = parent
+  "none"
+
+proc sourceTreeLayout(project: string; needsFrame: bool):
+    tuple[mainWorktree, lockFrame: string] =
+  ## ``sourceTreeLayoutMemo``'s entry for ``project``, derived when the
+  ## repository's layout changed or the lock frame is asked for first.
+  let stamp = repositoryLayoutStamp(project)
+  if project in sourceTreeLayoutMemo:
+    let known = sourceTreeLayoutMemo[project]
+    if known.stamp == stamp and (known.lockFrame.len > 0 or not needsFrame):
+      return (known.mainWorktree, known.lockFrame)
+  result.mainWorktree = mainWorktreeRootFor(project)
+  if needsFrame:
+    result.lockFrame = committedLockPathBase(project)
+  sourceTreeLayoutMemo[project] = (stamp: stamp,
+    mainWorktree: result.mainWorktree, lockFrame: result.lockFrame)
+
+proc buildSourceTrees*(projectRoot: string): seq[string] =
+  ## The trees outside its own roots that a build of ``projectRoot`` reads as
+  ## source (``BuildEngineConfig.sourceTrees``, installed as
+  ## ``portable_cache.buildSourceTreesOf``). The volatile-path fold never
+  ## drops a read in one of them, so a sibling repository or a dependency
+  ## checkout on a mount at ``/run/<dir>`` is fingerprinted like the project.
+  ##
+  ## * the enclosing WORKSPACE ROOT, and each repository its membership
+  ##   declares (``sourceTreeMembership``). The root holds every member's
+  ##   declared path, since a checkout path cannot leave it; each member is
+  ##   named as well because its checkout may be a link, nested inside
+  ##   another checkout or not, and the scope holds the resolved spelling of
+  ##   every tree it is given, which is where such a member's reads are seen;
+  ## * each DEPENDENCY the project's committed lock pins, at the checkout this
+  ##   machine has for it (``lockedDepCheckoutPath``, the one placement rule:
+  ##   a develop override, the workspace membership, a nested checkout or the
+  ##   ``../<name>`` sibling);
+  ## * each DEVELOP OVERRIDE's checkout, of the project and of the workspace,
+  ##   whether or not the lock names it.
+  ##
+  ## Everything here is a place the build's sources come from, never runtime
+  ## state, so keeping it errs only toward a miss. Nothing raises: a document
+  ## that cannot be read contributes nothing, and the build that reads it
+  ## reports it there.
+  proc addTree(trees: var seq[string]; path, base: string) =
+    if path.len == 0: return
+    let normalized = os.normalizedPath(absolutePath(path, base))
+    if normalized notin trees:
+      trees.add(normalized)
+  let project = os.normalizedPath(absolutePath(projectRoot))
+  let lockPath = committedLockPath(project)
+  let hasLock = fileExists(extendedPath(lockPath))
+  # ``enclosingWorkspaceRoot``, with its linked-worktree retry's git run
+  # taken from the memo: the marker walk itself is a few stats.
+  var found = findWorkspaceRoot(project)
+  var layout: tuple[mainWorktree, lockFrame: string]
+  if found.len == 0 or hasLock:
+    layout = sourceTreeLayout(project, needsFrame = hasLock)
+  if found.len == 0 and layout.mainWorktree.len > 0:
+    found = enclosingWorkspaceRoot(layout.mainWorktree, followWorktree = false)
+  let ws = if found.len > 0: os.normalizedPath(absolutePath(found)) else: ""
+  var members: seq[tuple[name, path: string]]
+  if ws.len > 0:
+    result.addTree(ws, ws)
+    members = sourceTreeMembership(ws)
+    for m in members:
+      result.addTree(m.path, ws)
+  for root in [project, ws]:
+    if root.len == 0: continue
+    try:
+      let doc = readDevelopOverridesFile(root)
+      if doc.isSome:
+        for e in listOverrides(doc.get()):
+          result.addTree(e.local_path, root)
+    except CatchableError:
+      discard
+  if hasLock:
+    try:
+      # The membership resolved above, and the frame from the memo, handed
+      # to the placement rule, which would otherwise derive both again.
+      var loc =
+        if ws.len > 0: lockedDepLocator(project, ws, members, layout.lockFrame)
+        else: lockedDepLocator(project, layout.lockFrame)
+      var deps = parseLockedDependencies(readFile(extendedPath(lockPath))).deps
+      localizeLockedDeps(deps, loc)
+      # The frame the placed paths are in (``committedLockPathBase``), as the
+      # locator resolved it: resolving it again costs two more git runs.
+      for d in deps:
+        if not isSelfLockedDep(d):
+          result.addTree(d.path, loc.pathBase)
+    except CatchableError:
+      discard
+
+buildSourceTreesOf = buildSourceTrees
+
 proc enclosingReproShell*(startPath: string): string =
   ## The nearest ancestor of ``startPath`` (inclusive) holding a ``.repro/``
   ## directory, or "".
@@ -73887,16 +74270,16 @@ proc planPushCertification(identity: GitToolIdentity; repoAbs: string;
           "--no-certify' leaves the decision to the pre-push and receiving gates"
 
 type
-  PinnedSibling = object
+  PinnedSibling* = object
     ## A sibling a member's committed ``repro.lock`` pins at a commit other than
     ## the one its checkout is at.
-    name, relPath, checkout, pin, head: string
+    name*, relPath*, checkout*, pin*, head*: string
 
-  IsolatedPinsWorkspace = object
+  IsolatedPinsWorkspace* = object
     ## A temporary workspace whose checkouts are the member's commit and its
     ## siblings' pinned commits (standalone clones under ``root``); every other
     ## entry mirrors the user's workspace by symlink.
-    root, scratch: string
+    root*, scratch*: string
 
 
 proc siblingsOffTheirPins(workspaceRoot: string;
@@ -73947,7 +74330,7 @@ proc removeMirrorTree(dir: string) =
       removeFile(path)
   removeDir(dir)
 
-proc removeIsolatedPinsWorkspace(ws: IsolatedPinsWorkspace): string =
+proc removeIsolatedPinsWorkspace*(ws: IsolatedPinsWorkspace): string =
   ## Remove the scratch tree: the clones, which only borrow the user's objects,
   ## and the mirror entries, which are links and are removed, never followed.
   ## Returns what could not be removed, or "".
@@ -73982,7 +74365,9 @@ proc exitInterrupted() {.noreturn.} =
   ## that exits 127, the status of a command that was not found.
   stderr.flushFile()
   when defined(posix):
-    discard posix.signal(posix.SIGINT, posix.SIG_DFL)
+    # No ``discard``: Nim 2.2.4's ``posix.signal`` returns nothing (discarding
+    # it does not compile), the dev shell's returns a discardable handler.
+    posix.signal(posix.SIGINT, posix.SIG_DFL)
     discard posix.kill(posix.getpid(), posix.SIGINT)
   quit(130)
 
@@ -74069,7 +74454,7 @@ proc populateSubmodules(identity: GitToolIdentity;
     if nested.len > 0:
       return nested
 
-proc prepareIsolatedPinsWorkspace(identity: GitToolIdentity;
+proc prepareIsolatedPinsWorkspace*(identity: GitToolIdentity;
     workspaceRoot, memberRel, memberCheckout, memberCommit: string;
     pinned: seq[PinnedSibling]):
     tuple[ok: bool; ws: IsolatedPinsWorkspace; diagnostic: string] =
@@ -74107,10 +74492,21 @@ proc prepareIsolatedPinsWorkspace(identity: GitToolIdentity;
     if step.ok:
       step = run(["-C", p.path, "remote", "remove", "repro-push-source"])
     if step.ok:
+      # Before any read: the clone reaches the user's pool only through nested
+      # alternates, and without the chain a blob the pool only promises is
+      # unreadable here although the user's checkout reads it.
+      let chain = ensureBorrowedPoolChain(identity.binaryPath, p.path, p.repo)
+      if chain.len > 0:
+        step = (ok: false, diagnostic: "could not give " & p.path &
+          " the refetch chain to the shared cache " & p.repo & " borrows " &
+          "from: " & chain)
+    if step.ok:
       let remotes = gitRunPlainQuery(identity, ["-C", p.repo, "remote"])
       for remote in remotes.output.splitLines():
         let r = remote.strip()
-        if r.len == 0 or not step.ok: continue
+        # The pool's remote serves missing objects and has no refs; the chain
+        # above wrote it with the rows it needs, which a copy would lack.
+        if r.len == 0 or r == LeafPoolRemoteName or not step.ok: continue
         let url = gitRunPlainQuery(identity,
           ["-C", p.repo, "remote", "get-url", r]).output.strip()
         step = run(["-C", p.path, "remote", "add", r, url])
@@ -74120,6 +74516,32 @@ proc prepareIsolatedPinsWorkspace(identity: GitToolIdentity;
     if step.ok:
       step = run(["-C", p.path, "-c", "advice.detachedHead=false", "checkout",
         "--quiet", "--detach", p.commit])
+    if step.ok:
+      # git checkout exits 0 when it cannot read a blob: it reports the file
+      # on stderr and leaves it out of the work tree (``write_entry`` reads
+      # the blob before it creates the file). Certifying such a tree would
+      # bind the commit to a test run that never saw those files. Only
+      # absent paths are that symptom: a content comparison (``git status``)
+      # would also flag a file whose committed bytes do not survive the
+      # checkout's own conversion (CRLF committed under a ``text``
+      # attribute), and refuse a commit the user's checkout shows clean. An
+      # unpopulated submodule's empty directory is present, so it is not
+      # listed.
+      let missing = gitRunPlainQuery(identity, ["-C", p.path, "ls-files",
+        "--deleted"])
+      if missing.code != 0:
+        step = (ok: false, diagnostic: "git ls-files --deleted failed in " &
+          p.path & " after checking out " & p.commit & ": " &
+          missing.diagnostic)
+      elif missing.output.strip().len > 0:
+        var listed = ""
+        for line in missing.output.strip().splitLines():
+          listed.add("\n  " & line)
+        step = (ok: false, diagnostic: "the checkout of " & p.commit &
+          " from " & p.repo & " is incomplete: git could not read the " &
+          "content of these tracked files and left them out:" & listed &
+          "\nRun 'repro health' in the workspace to check " & p.repo &
+          "'s refetch chain to its shared cache, then retry")
     if step.ok:
       let populated = populateSubmodules(identity, p.path, p.repo)
       if populated.len > 0:
@@ -86194,6 +86616,10 @@ type
     ipDirty             ## a SIBLING in the closure has a dirty tree.
     ipUnpublished       ## a sibling in the closure has an unpublished HEAD.
     ipOffLock           ## a sibling differs from the locked revision.
+    ipUndeclaredCheckout ## the attested repository is not a checkout the
+                         ## workspace declares (a second path to one, or a
+                         ## stray clone): no lock or publication state
+                         ## describes it.
     ipNoWorkspace       ## not a resolvable workspace → cannot bind to a lock.
     ipNoContentId       ## the tested state has no honest content id
                         ## (Content-Id §3) → nothing a certificate could name.
@@ -86530,6 +86956,18 @@ proc evaluateIssuancePreconditions*(workspaceRoot, currentRepo: string):
       result.kind = ipUnpublished
     of "lock-stale", "lock-failure":
       result.kind = ipOffLock
+    of "current-repo-identity":
+      # The repository being certified is not one this workspace declares:
+      # a second path to a declared checkout (a bind mount, a copy) or a
+      # stray clone. Nothing was published or locked wrongly, so neither the
+      # off-lock label nor the gate's push remedy describes it.
+      result.kind = ipUndeclaredCheckout
+      result.offender = currentRepo
+      result.remedy = "certify from the workspace's own checkout of this " &
+        "repository, or declare this checkout in the workspace membership; " &
+        "the workspace locks and publishes its declared checkouts, so it " &
+        "cannot say what this one was tested against" &
+        (if f.evidence.len > 0: " (" & f.evidence & ")" else: "")
     else:
       # A visibility / develop-missing failure is still a "not in a
       # publishable state" condition; treat it as off-lock so no cert is
@@ -88136,6 +88574,8 @@ proc issuancePreconditionLabel(kind: IssuancePreconditionKind): string =
   of ipDirty: "a develop-mode sibling's working tree is dirty"
   of ipUnpublished: "dependency has unpushed commits"
   of ipOffLock: "repo not at the locked revision"
+  of ipUndeclaredCheckout:
+    "this checkout is not a repository the workspace declares"
   of ipNoWorkspace: "not a workspace"
   of ipNoContentId: "the tested state has no content id"
   of ipNoLockInContent: "the tested content carries no usable lock"
@@ -95113,6 +95553,9 @@ const reproTopLevelCommands = [
   "anywhere",
   "deploy-agent",
   "hardware", "disk", "launch-plan", "locking",
+  # `repro cargo gc|record-live`: the cargo target-directory janitor
+  # (docs/cargo-gc.md).
+  "cargo",
   # `repro attest <sub>`: expected launch measurements for attested images.
   "attest",
   # Nix-Flake-Coexistence NF-1 — ``repro flake <sub>``: the override
@@ -104705,6 +105148,16 @@ proc runThinAppDispatch(programName: string): int =
       else:
         @[]
     return runDiskCommand(diskArgs)
+  if programName == "repro" and args.len > 0 and args[0] == "cargo":
+    # `repro cargo gc|record-live`: the cargo target-directory janitor. The
+    # dispatcher lives in `repro_cli_support/cargo_gc.nim`; the logic in the
+    # `repro_cargo_gc` library.
+    let cargoArgs =
+      if args.len > 1:
+        args[1 .. ^1]
+      else:
+        @[]
+    return cli_cargo_gc.runCargoCommand(cargoArgs)
   if programName == "repro" and args.len > 0 and args[0] == "attest":
     # `repro attest` — expected launch measurements for attested images.
     # The dispatcher lives in `repro_cli_support/attest.nim`; the CLI
