@@ -204,9 +204,15 @@ package cargo:
       # found by BARE NAME on the edge's PATH, so they are this tool's
       # sub-tools: a recipe that declares ``"rustc"`` and its C compiler
       # (``"gcc"`` on Linux, ``"clang"`` on macOS) in ``uses:`` gets their
-      # resolved directories on every cargo edge's PATH. A name the recipe
-      # does not declare is inert. Tools a crate's build script runs are
-      # the recipe's to declare at the call site; they are not cargo's.
+      # resolved directories on every cargo edge's PATH, and their profiles'
+      # include and library directories on its ``CPATH`` and
+      # ``LIBRARY_PATH``. The library directories are what let rustc link
+      # through a Nix clang on macOS: Rust's standard library links
+      # ``-liconv``, which the Nix Apple SDK splits out into a package of
+      # its own that only the clang profile's library path names. A name
+      # the recipe does not declare is inert. Tools a crate's build script
+      # runs are the recipe's to declare at the call site; they are not
+      # cargo's.
       # ``zig`` is the cross C toolchain of a ``--target`` build
       # (``adapters/cross_zig``); ``cmake``, ``perl`` and ``make`` are what
       # the build scripts of the common ``*-sys`` crates run (``aws-lc-sys``

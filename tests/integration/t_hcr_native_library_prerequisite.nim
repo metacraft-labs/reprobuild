@@ -100,6 +100,28 @@ when defined(linux) or defined(macosx):
       check refused.exitCode != 0
       check "requires declared " & compiler in refused.output
       check "Compiling" notin refused.output
+
+    test "the native script names the Windows artifact but refuses to build it":
+      # The Windows agent is a different translation unit built by a
+      # different producer. The native script compiles only the POSIX unit,
+      # so accepting the Windows target ends, depending on the host and
+      # compiler, in missing-header errors, a link error, or a host-format
+      # object named like a DLL.
+      let script = Root / "libs/repro_hcr_agent/build_lib.sh"
+      let named = uncontrolledExecCmdEx(
+        "bash " & quoteShell(script) & " --print-name --target-os=windows",
+        workingDir = Root)
+      check named.exitCode == 0
+      check named.output.strip == "repro_hcr_agent.dll"
+      let scratch = createTempDir("hcr-windows-refusal-", "")
+      defer: removeDir(scratch)
+      let refused = uncontrolledExecCmdEx("bash " & quoteShell(script) &
+        " " & quoteShell(scratch) & " --target-os=windows", workingDir = Root)
+      checkpoint refused.output
+      check refused.exitCode != 0
+      check "build_windows_agent.py" in refused.output
+      check "Compiling" notin refused.output
+      check not fileExists(scratch / "repro_hcr_agent.dll")
 else:
   suite "native HCR producer platform boundary":
     test "the native prerequisite does not qualify Windows":

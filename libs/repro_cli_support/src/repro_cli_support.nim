@@ -2683,6 +2683,61 @@ proc environmentPrefixKeyText*(profiles: Table[string, PathOnlyToolProfile];
   lines.sort()
   lines.join("\n")
 
+proc channelSubToolRefs*(subToolRefs, toolIdentityRefs: openArray[string]):
+    seq[string] =
+  ## The sub-tools that reach the engine as
+  ## ``BuildAction.subToolIdentityRefs``: the tool's ``subTools`` that the
+  ## edge does not already name in ``toolIdentityRefs``. A sub-tool the
+  ## edge names is a ref, and as a ref it already contributes every
+  ## channel; listing it twice would add nothing.
+  for refName in subToolRefs:
+    if refName.len > 0 and refName notin toolIdentityRefs and
+        refName notin result:
+      result.add(refName)
+
+proc subToolChannelKeyText*(profiles: Table[string, PathOnlyToolProfile];
+                            subToolRefs, toolIdentityRefs: openArray[string]):
+    string =
+  ## The identity of the compile and link channels an action's sub-tools
+  ## hand it, as text for the action's cache key.
+  ##
+  ## A sub-tool's directory reaches the action's ``PATH`` here, at lowering
+  ## time, so the declared ``PATH`` value keys it. Its ``cpathList`` and
+  ## ``libraryPathList`` do not: the engine applies them as ``CPATH`` and
+  ## ``LIBRARY_PATH`` at launch (``collectResolvedAuxPaths``), and those
+  ## channels can change while the tool's directory stays put. That
+  ## happened: a release that added the Darwin SDK's split-out libraries
+  ## to a Nix clang's library path left the clang wrapper's store path
+  ## unchanged. So each sub-tool that resolves to a profile with either
+  ## channel contributes ``<name>=<profileFingerprint>``; the fingerprint
+  ## covers both lists and the realization behind them.
+  ##
+  ## A sub-tool whose profile carries neither channel contributes nothing,
+  ## and nor does one the edge also names as a ref (``channelSubToolRefs``),
+  ## so the key of an action whose environment this does not change is
+  ## the key it had before. The same name match as ``toolPathPrefix``.
+  var lines: seq[string] = @[]
+  for refName in channelSubToolRefs(subToolRefs, toolIdentityRefs):
+    for profile in profiles.values:
+      if profile.executableName != refName and
+          bareToolSelector(profile.packageSelector) != refName:
+        continue
+      if profile.cpathList.len == 0 and profile.libraryPathList.len == 0:
+        continue
+      let line = refName & "=" & digestHex(profile.profileFingerprint)
+      if line notin lines:
+        lines.add(line)
+  lines.sort()
+  lines.join("\n")
+
+proc subToolChannelKeySuffix(profiles: Table[string, PathOnlyToolProfile];
+                             payload: BuildActionDef): string =
+  ## ``subToolChannelKeyText`` framed for appending to a lowering site's
+  ## fingerprint text; empty when it is empty.
+  let text = subToolChannelKeyText(profiles, payload.subToolRefs,
+    payload.toolIdentityRefs)
+  if text.len > 0: "\nsubToolChannels\n" & text else: ""
+
 proc actionPathEnvEntry*(profiles: openArray[PathOnlyToolProfile];
                          packageName = ""; executableName = "";
                          refs: openArray[string] = []): string =
@@ -3314,6 +3369,12 @@ proc lowerGraphAction(node: GraphNode; profiles: Table[string, PathOnlyToolProfi
     # action's bare-name argv (``meson`` / ``ninja`` / ``gcc`` / ...)
     # finds the right binaries.
     result.toolIdentityRefs = payload.toolIdentityRefs
+    # The tool's own sub-tools reach the engine apart from the refs: the
+    # engine takes only their compile and link channels, and none of what a
+    # ref selects (see ``BuildAction.subToolIdentityRefs``). Each site above
+    # keys those channels (``subToolChannelKeySuffix``).
+    result.subToolIdentityRefs = channelSubToolRefs(payload.subToolRefs,
+      payload.toolIdentityRefs)
     result.toolIdentityRefKinds = @[]
     for kind in payload.toolIdentityRefKinds:
       result.toolIdentityRefKinds.add(
@@ -3405,7 +3466,8 @@ proc lowerGraphAction(node: GraphNode; profiles: Table[string, PathOnlyToolProfi
     ].join("\n") & (block:
       let libraries = environmentPrefixKeyText(profiles,
         payload.toolIdentityRefs)
-      if libraries.len > 0: "\nenvironmentPrefix\n" & libraries else: "")
+      if libraries.len > 0: "\nenvironmentPrefix\n" & libraries else: "") &
+      subToolChannelKeySuffix(profiles, payload)
     # M9.R.14c.4 — inline-exec actions (autotools configure scripts,
     # from-source-custom shell rows, ...) need the same PATH +
     # extraEnv enrichment as typed-tool actions. Without this, an
@@ -3714,7 +3776,7 @@ proc lowerGraphAction(node: GraphNode; profiles: Table[string, PathOnlyToolProfi
       NimUnittestToolId,
       payload.call.subcommand,
       node.payload
-    ].join("\n")
+    ].join("\n") & subToolChannelKeySuffix(profiles, payload)
     var mergedEnv: seq[string] = @[]
     # THE NIM-UNITTEST EXECUTE SITE — `run` / `runTest` / `list` on an
     # already-built test binary — and therefore the site EVERY
@@ -3837,7 +3899,8 @@ proc lowerGraphAction(node: GraphNode; profiles: Table[string, PathOnlyToolProfi
   ].join("\n") & (block:
     let libraries = environmentPrefixKeyText(profiles,
       payload.subToolRefs & payload.toolIdentityRefs)
-    if libraries.len > 0: "\nenvironmentPrefix\n" & libraries else: "")
+    if libraries.len > 0: "\nenvironmentPrefix\n" & libraries else: "") &
+    subToolChannelKeySuffix(profiles, payload)
   var mergedEnv: seq[string] = @[]
   # The general typed-tool site — the one every `reprobuild.test_execute.*`
   # and `reprobuild.python_test.*` edge goes through, and so the one the
@@ -4906,7 +4969,11 @@ const
   # passthrough resolution and the stage-2 census both read this field,
   # and a census that answers differently cold and warm is not a
   # measurement.
-  LoweredGraphCacheVersion = 15'u16
+  LoweredGraphCacheVersion = 16'u16
+    # v16: ``BuildAction.subToolIdentityRefs``, a string list after the
+    # ``@FILE:`` expansion byte. A v15 record decoded without it would hand
+    # the engine no sub-tools, so a warm build would launch a sub-tool
+    # compiler without the compile and link channels a cold build gives it.
     # v15: ``BuildAction.expandsArgFiles``, one byte after the optional
     # outputs. A v14 record holds an inline-exec argv whose `@FILE:` tokens
     # were already substituted when the graph was lowered, and a key mixed
@@ -5981,6 +6048,7 @@ proc writeBuildAction(outp: var seq[byte]; action: BuildAction) =
   outp.writeStringSeq(action.removeBeforeRun)
   outp.writeStringSeq(action.optionalOutputs)
   outp.add(if action.expandsArgFiles: 1'u8 else: 0'u8)
+  outp.writeStringSeq(action.subToolIdentityRefs)
 
 proc readBuildAction(bytes: openArray[byte]; pos: var int): BuildAction =
   result = BuildAction(
@@ -6068,6 +6136,7 @@ proc readBuildAction(bytes: openArray[byte]; pos: var int): BuildAction =
     raiseEnvelopeError(eeMalformed,
       "invalid lowered action @FILE: expansion sentinel")
   result.expandsArgFiles = argFilesByte == 1'u8
+  result.subToolIdentityRefs = readStringSeq(bytes, pos)
 
 proc encodeLoweredGraphCache(record: LoweredGraphCacheRecord): seq[byte] =
   result.writeString(LoweredGraphCacheMagic)
@@ -47015,17 +47084,18 @@ proc manifestOwnedRepos*(composed: ComposedRouting;
       result.add(repo)
 
 # ---------------------------------------------------------------------------
-# HL-2 (§10 Migration) — legacy ``.repo/manifests`` migration guard.
+# HL-2 (§10 Migration) — record-store migration guard.
 #
-# "No implicit team route" (spec §10) means a legacy ``.repo/manifests``
-# workspace with no team route declared would silently become public-only and
-# stop writing its team manifest lock. That is a BREAKING change we must never
-# make silently. When a manifest checkout is present but the composed
-# configuration plane declares NO explicit route (so no team tier points at the
-# manifest), we emit a LOUD, ONE-TIME guidance naming the exact
-# ``repro locking adopt-manifest`` remedy that keeps the manifest as the team
-# backend. The guidance is throttled by a sentinel under ``.repro/`` so it does
-# not spam every lock/gate run.
+# "No implicit team route" (spec §10) means a workspace whose record-store
+# directory declares no route is public-only and writes no team lock. That
+# must never happen silently. A route is declared by a configuration layer, or
+# by the store existing as a CHECKOUT at its conventional location
+# (``existingRecordStoreRoot``). When a conventional store directory is present
+# but neither holds, we emit a LOUD, ONE-TIME guidance naming the directory and
+# the remedy: make it a checkout of the record repository. A store checkout
+# gets no guidance: it is already the team backend, and ``workspace lock``
+# writes into it. The guidance is throttled by a sentinel under ``.repro/`` so
+# it does not spam every lock/gate run.
 # ---------------------------------------------------------------------------
 
 proc legacyManifestMigrationSentinelPath(workspaceRoot: string): string =
@@ -47033,28 +47103,36 @@ proc legacyManifestMigrationSentinelPath(workspaceRoot: string): string =
 
 proc maybeWarnLegacyManifestWithoutTeamRoute*(workspaceRoot: string;
     composed: ComposedRouting) =
-  ## HL-2 (§10) — emit the one-time guidance when a ``.repro/manifests`` DB
-  ## checkout exists but no explicit route is declared (the workspace that WOULD
-  ## silently go public-only). Best-effort: never raises, never blocks the caller.
-  let manifestsDir = firstExistingRecordStoreDir(workspaceRoot)
-  if not dirExists(manifestsDir): return
+  ## HL-2 (§10) — emit the one-time guidance for the workspace that IS
+  ## silently public-only: a directory exists at a conventional record-store
+  ## location, but nothing declares a route. Nothing declares one when no
+  ## configuration layer names a route AND no conventional location holds a
+  ## checkout. A store CHECKOUT is itself the declaration
+  ## (``existingRecordStoreRoot``) and ``workspace lock`` writes into it, so
+  ## telling that workspace it is public-only would be false. Best-effort:
+  ## never raises, never blocks the caller.
+  let storeDir = firstExistingRecordStoreDir(workspaceRoot)
+  if storeDir.len == 0: return
   if composed.hasExplicitRoutes: return
+  if existingRecordStoreRoot(workspaceRoot).len > 0: return
   let sentinel = legacyManifestMigrationSentinelPath(workspaceRoot)
   if fileExists(sentinel): return
+  let storeRel = relativePath(storeDir, workspaceRoot).replace('\\', '/')
   stderr.writeLine(
-    "repro: WARNING — this workspace has a `.repro/manifests` checkout but NO " &
-    "team route declared in any configuration layer.")
+    "repro: WARNING — this workspace has a `" & storeRel & "` directory " &
+    "that is not a record-store checkout, and NO team route declared in any " &
+    "configuration layer.")
   stderr.writeLine(
     "  Under the tier-isolated locking model there is NO implicit team route: " &
-    "without an explicit route this workspace is PUBLIC-ONLY and will stop " &
-    "writing its team manifest lock (`" & manifestsDir & "/locks/...`).")
+    "this workspace is PUBLIC-ONLY and writes no team lock record (`" &
+    storeDir & "/locks/...`).")
   stderr.writeLine(
-    "  To keep `.repro/manifests` as the TEAM backend, run:  " &
-    "repro locking adopt-manifest --workspace-root=" & workspaceRoot)
+    "  To make `" & storeRel & "` the TEAM backend, make it a git checkout " &
+    "of the workspace's record repository (`[records] url`): a store " &
+    "checkout at that location is itself the route declaration.")
   stderr.writeLine(
-    "  That scaffolds a `[locking] route = [{ visibility = \"team\", " &
-    "backend = \"git-checkout\", path = \".repro/manifests\", repos = [...] }]` " &
-    "route mapping the team tier to the existing manifest checkout.")
+    "  `repro locking adopt-manifest` declares the route explicitly, but only " &
+    "over a checkout; it refuses a plain directory.")
   try:
     createDir(sentinel.parentDir)
     writeFile(sentinel, "warned\n")
@@ -49655,7 +49733,7 @@ type
     rokSkipped                ## Something was at a prior path, not a candidate.
     rokOrphaned               ## Checkouts at BOTH the prior and declared paths.
     rokRelocated              ## Moved.
-    rokRefused                ## One of the eight pre-flight refusals.
+    rokRefused                ## One of the ten pre-flight refusals.
     rokFailed                 ## The move was attempted and failed.
 
   RepoRelocationOutcome = object
@@ -49671,6 +49749,12 @@ type
       ## (§3.4 step 1 + §5): the copy fallback's verification needs it, and so
       ## does the rewritten-history detection, which tests whether the recorded
       ## pre-fetch tip is still an ancestor of the fetched tip.
+    linkedWorktreesBroken: bool
+      ## The move HAPPENED, but at least one linked worktree it cut off could
+      ## not be reconnected (`linked_worktree_repair_failed`). Not a
+      ## `rokFailed`: the checkout is at its declared path and must be synced
+      ## like any other, yet a worktree that stopped being a checkout is a
+      ## broken mutating action, so the run exits 1.
 
 proc relocationRefusal(tag, message: string): RepoRelocationOutcome =
   RepoRelocationOutcome(kind: rokRefused, tag: tag, message: message)
@@ -49916,6 +50000,44 @@ proc relocateDeclaredRenames(identity: GitToolIdentity;
           " submodule absorbgitdirs` and re-run. Nothing was moved.")
       continue
 
+    # §4 `linked_worktree_unrepairable`. A linked worktree's `.git` file names
+    # this checkout's location, so the move cuts every one of them off; §3.5
+    # repairs them after the move. What is refused here is the subset the
+    # repair cannot reach: a worktree that is missing, or one git has been
+    # told to leave alone (`locked`). A probe that cannot be run is itself a
+    # blocker — moving without knowing what the move strands is the failure
+    # this check exists for.
+    let worktrees = linkedWorktreeInventory(probe, candidateAbs)
+    if not worktrees.ok:
+      result[repoIdx] = relocationRefusal("linked_worktree_unrepairable",
+        "could not enumerate the linked worktrees of the checkout at '" &
+          prior.path & "' (" & worktrees.diagnostic & "), so a move could " &
+          "strand them. Nothing was moved.")
+      continue
+    # §4 `candidate_is_linked_worktree`. A checkout whose `.git` is a FILE
+    # is not something the rest of this sync can hold at the declared path:
+    # the observation step classifies it `missing_checkout`, and the clone
+    # that follows deletes it as a half-finished clone — uncommitted work
+    # included — and clones fresh. Moving it would therefore destroy it.
+    # Refused until sync handles linked-worktree checkouts.
+    if worktrees.selfLinked:
+      result[repoIdx] = relocationRefusal("candidate_is_linked_worktree",
+        "the checkout at '" & prior.path & "' is a linked worktree of " &
+          worktrees.commonDir & " (its `.git` is a file), and `repro sync` " &
+          "cannot keep a linked-worktree checkout at '" & repo.path & "'. " &
+          "Publish or move its work to a branch of the main worktree, " &
+          "remove it with `git worktree remove`, and re-run: `repro sync` " &
+          "then clones '" & repo.path & "'. Nothing was moved.")
+      continue
+    let unrepairable = unrepairableLinkedWorktrees(worktrees, prior.path)
+    if unrepairable.len > 0:
+      result[repoIdx] = relocationRefusal("linked_worktree_unrepairable",
+        "the checkout at '" & prior.path & "' has linked worktree(s) that " &
+          "moving it to '" & repo.path & "' would leave unable to find " &
+          "their repository, and that cannot be repaired afterwards: " &
+          unrepairable.join("; ") & ". Nothing was moved.")
+      continue
+
     # §3.3a — remote agreement. This is what excludes a FORK: a fork shares
     # every object with its upstream, so a history test alone cannot tell one
     # from the other, but a fork sits under a different org and its URL
@@ -50139,6 +50261,26 @@ proc relocateDeclaredRenames(identity: GitToolIdentity;
       evidence: identityEvidence, preMoveHeadSha: before.headSha)
     if moved.diagnostic.len > 0:
       outcome.message = moved.diagnostic
+
+    # §3.5 LINKED WORKTREES, first of the repairs because it is the one whose
+    # absence breaks checkouts rather than records: every linked worktree's
+    # `.git` file still names the prior path. Repaired and then verified from
+    # each worktree's own side; each one is reported, and one that still does
+    # not resolve fails the run (exit 1) with the command that fixes it.
+    let worktreeRepair = repairLinkedWorktrees(probe, candidateAbs,
+      destination, worktrees)
+    for item in worktreeRepair.repaired:
+      outcome.rekeyed.add(item)
+    if worktreeRepair.failures.len > 0:
+      outcome.tag = "linked_worktree_repair_failed"
+      outcome.linkedWorktreesBroken = true
+      let failureText = "moved '" & prior.path & "' to '" & repo.path &
+        "', but linked worktree(s) still cannot find their repository: " &
+        worktreeRepair.failures.join("; ")
+      outcome.message =
+        if outcome.message.len > 0: outcome.message & "; " & failureText
+        else: failureText
+      stderr.writeLine("workspace sync: ERROR: " & failureText)
 
     # §3.5 repairs. Four things live outside the moved directory.
     #
@@ -51278,6 +51420,8 @@ proc executeWorkspaceSync(args: WorkspaceSyncArgs;
           forceResetTarget.getOrDefault(repoIdx)
       else: decision.message
     let relocation = relocations.getOrDefault(repoIdx)
+    if relocation.linkedWorktreesBroken:
+      anyFailure = true
     report.repos.add(WorkspaceSyncRepoEntry(
       name: decision.name,
       path: decision.path,
@@ -54145,9 +54289,10 @@ proc executeWorkspaceLock(args: WorkspaceLockArgs;
   # ``recordRoutedParticipation`` below. The tier→backend binding comes from the
   # HL-1 composed configuration plane.
   let composed = composeLockingRouting(args.workspaceRoot, identity.binaryPath)
-  # HL-2 (§10) — a legacy ``.repo/manifests`` workspace with no team route must
-  # never silently go public-only; warn (once) and name the ``adopt-manifest``
-  # remedy. Best-effort — never blocks the lock.
+  # HL-2 (§10) — a workspace with a record-store directory but no declared
+  # route (no configured route, and no store checkout) must never silently go
+  # public-only; warn (once) and name the remedy. Best-effort — never blocks
+  # the lock.
   maybeWarnLegacyManifestWithoutTeamRoute(args.workspaceRoot, composed)
   # Carried into the report so every surface can tell a public-only workspace
   # (no route, no store, nothing to record — §10) apart from a routed one whose

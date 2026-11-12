@@ -532,5 +532,36 @@ class ReleaseInventoryTests(unittest.TestCase):
         self.assertEqual(self.REQUIRED, set(inventory))
 
 
+class ReleaseWorkflowPublishesNixPackage(unittest.TestCase):
+    """The Linux release leg must push `#reprobuild` of its own revision to Attic.
+
+    Consumers run `nix build github:metacraft-labs/reprobuild/<pin>#reprobuild`;
+    when no workflow ever built that attribute for the pinned revision, every
+    consumer lane compiled the engine from source for 28-38 minutes
+    (reprobuild-pm issue 2026-11-12-the-reprobuild-package-at-a-pinned-agents-
+    revision-is-in-no-binary-cache-...). The step is read out of the workflow
+    text: a run needs the organisation's Attic credentials.
+    """
+
+    def step(self):
+        workflow = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
+        marker = "      - name: Publish the Nix package to the organisation cache\n"
+        self.assertEqual(1, workflow.count(marker), "the cache publish step is required")
+        body = workflow.split(marker, 1)[1]
+        return body.split("\n      - ", 1)[0]
+
+    def test_the_linux_leg_builds_the_consumer_attribute_and_pushes_it(self):
+        step = self.step()
+        self.assertIn("if: runner.os == 'Linux'", step)
+        self.assertIn('"github:${GITHUB_REPOSITORY}/${GITHUB_SHA}#reprobuild"', step)
+        self.assertIn('attic push "$ATTIC_CACHE" "$package"', step)
+
+    def test_a_missing_cache_credential_fails_the_release_leg(self):
+        step = self.step()
+        self.assertIn("ATTIC_TOKEN: ${{ secrets.ATTIC_TOKEN }}", step)
+        self.assertIn("ATTIC_CACHE: ${{ vars.ATTIC_CACHE }}", step)
+        self.assertRegex(step, r"::error::[^\n]*\n\s*exit 1")
+
+
 if __name__ == "__main__":
     unittest.main()
