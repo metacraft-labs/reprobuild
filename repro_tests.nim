@@ -14026,7 +14026,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false,
     group: "",
-    singleReason: "suite-scope statement runs at every start-up: let f = newFixture(\"m5\", @[\"workspace.create:greeter\","),
+    singleReason: "special-cased by repro.nim: the Agent Harbor fixture-failure gate executes its binary by path"),
   TestSpec(
     source: "tests/e2e/agent-harbor/t_e2e_agent_harbor_combines_and_augments_remixes.nim",
     binary: "build/test-bin/t_e2e_agent_harbor_combines_and_augments_remixes",
@@ -14037,7 +14037,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false,
     group: "",
-    singleReason: "suite-scope statement runs at every start-up: let f = newFixture(\"m6\", @[\"workspace.create:greeter\","),
+    singleReason: "special-cased by repro.nim: the Agent Harbor fixture-failure gate executes its binary by path"),
   TestSpec(
     source: "tests/e2e/agent-harbor/t_e2e_agent_harbor_modifies_installed_source_package.nim",
     binary: "build/test-bin/t_e2e_agent_harbor_modifies_installed_source_package",
@@ -14048,7 +14048,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false,
     group: "",
-    singleReason: "suite-scope statement runs at every start-up: let f = newFixture(\"m3\", @[\"context.active-app\","),
+    singleReason: "special-cased by repro.nim: the Agent Harbor fixture-failure gate executes its binary by path"),
   TestSpec(
     source: "tests/e2e/agent-harbor/t_e2e_agent_harbor_preview_accept_reject.nim",
     binary: "build/test-bin/t_e2e_agent_harbor_preview_accept_reject",
@@ -14059,7 +14059,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false,
     group: "",
-    singleReason: "suite-scope statement runs at every start-up: let f = newFixture(\"m4\", @[\"workspace.create:greeter\","),
+    singleReason: "special-cased by repro.nim: the Agent Harbor fixture-failure gate executes its binary by path"),
   TestSpec(
     source: "tests/e2e/cmake-develop/t_e2e_repro_develop_cmake.nim",
     binary: "build/test-bin/t_e2e_repro_develop_cmake",
@@ -17459,6 +17459,17 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     selfInterposes: false,
     group: "",
     singleReason: "self-spawn marker getAppFilename"),
+  TestSpec(
+    source: "tests/integration/t_agent_harbor_fixture_failure_fails_the_case.nim",
+    binary: "build/test-bin/t_agent_harbor_fixture_failure_fails_the_case",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "",
+    singleReason: "special-cased by repro.nim: it executes its subjects' own binaries by path"),
   TestSpec(
     source: "tests/integration/t_agent_mock_roundtrip.nim",
     binary: "build/test-bin/t_agent_mock_roundtrip",
@@ -29480,7 +29491,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_unit_g04",
+    group: "t_group_tests_unit_g03",
     singleReason: ""),
   TestSpec(
     source: "tests/unit/t_nonredistributable_publish_gate.nim",
@@ -29881,6 +29892,17 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "tests/unit/t_stale_artifact_names_what_changed.nim",
     binary: "build/test-bin/t_stale_artifact_names_what_changed",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "t_group_tests_unit_g04",
+    singleReason: ""),
+  TestSpec(
+    source: "tests/unit/t_store_daemon_tarball_archive_detail_frame.nim",
+    binary: "build/test-bin/t_store_daemon_tarball_archive_detail_frame",
     defines: @[],
     requiresReproBinary: false,
     extraPassC: @[],

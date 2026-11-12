@@ -998,14 +998,17 @@ const
   RecipeSpecialCasedSources = [
     # ``repro.nim`` gives these an execute edge that a group's could not
     # carry: the M4 bundle verifier consumes the bundle binaries; the per-case
-    # fixture gate EXECUTES its subjects' own binaries by path; the opt-in
-    # layer source has a second, named ``.live`` execute edge.
+    # fixture gate and the Agent Harbor fixture-failure gate EXECUTE their
+    # subjects' own binaries by path; the opt-in layer source has a second,
+    # named ``.live`` execute edge.
     # ``repro.nim`` asserts at graph-construction time that each of these is
     # single, so this list cannot drift from it silently.
     ("tests/integration/t_m4_pure_unit_consolidation.nim",
      "its execute edge consumes every pure-unit bundle binary"),
     ("tests/integration/" &
        "t_when_each_case_runs_alone_no_fixture_outlives_its_process.nim",
+     "it executes its subjects' own binaries by path"),
+    ("tests/integration/t_agent_harbor_fixture_failure_fails_the_case.nim",
      "it executes its subjects' own binaries by path"),
     ("tests/integration/t_pcr_composite_matches_tpm.nim",
      "it has a second, opt-in-layer execute edge"),
@@ -1044,6 +1047,15 @@ const
     ## ``PerCaseFixtureGateSubjects`` in ``repro.nim``. Mirrored rather than
     ## imported because the recipe cannot be imported by a script; the
     ## recipe's assertion is what keeps the two equal.
+
+  AgentHarborFixtureFailureGateSubjectsMirror = [
+    "tests/e2e/agent-harbor/t_e2e_agent_harbor_change_to_generation_and_remix.nim",
+    "tests/e2e/agent-harbor/t_e2e_agent_harbor_combines_and_augments_remixes.nim",
+    "tests/e2e/agent-harbor/t_e2e_agent_harbor_modifies_installed_source_package.nim",
+    "tests/e2e/agent-harbor/t_e2e_agent_harbor_preview_accept_reject.nim",
+  ]
+    ## ``AgentHarborFixtureFailureGateSubjects`` in ``repro.nim``, mirrored
+    ## for the same reason.
 
   SlowStartupSources = [
     # M1 measured 68 ms and 56 ms of module initialisation (recipe modules
@@ -1148,6 +1160,9 @@ proc assignGroups(repoRoot: string; edges: var seq[TestEdge]) =
   for (src, why) in RecipeSpecialCasedSources: specialReason[src] = why
   for src in PerCaseFixtureGateSubjectsMirror:
     specialReason[src] = "the per-case fixture gate executes its binary by path"
+  for src in AgentHarborFixtureFailureGateSubjectsMirror:
+    specialReason[src] = "the Agent Harbor fixture-failure gate executes " &
+      "its binary by path"
   var candidates: seq[GroupCandidate]
   for e in edges:
     let stem = e.source.splitFile.name

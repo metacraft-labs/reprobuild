@@ -53,19 +53,38 @@ if not fixtureRunnable():
     "Linux, " & reproBinary & " and cc"
 else:
   suite "M6 — compose and augment Remixes":
-    let f = newFixture("m6", @["workspace.create:greeter",
+    # Acquired on first use from inside a case, so the runner's
+    # `--list-json` probe installs nothing and a failed install fails the
+    # case that needed it; released at the end of this suite by the process
+    # that acquired it (see `agent_harbor_fixture`).
+    var fixture = lazyFixture("m6", @["workspace.create:greeter",
       "source.read:greeter", "source.write:greeter", "build.run:greeter",
-      "test.run:greeter", "remix.publish:private"], withGenerations = true)
-    let g1 = f.backend.activeGeneration()
-    let launcher = f.backend.driver.launcherDir / "greeter"
-    let intent = f.host.captureIntent(f.consent, f.sid, "combine greeter remixes")
-    let a = f.stageChange(intent, @[("src/main.c", greeterV2),
-      ("tests/expected.txt", "hello from greeter v2\n")])
-    let b = f.stageChange(intent, @[("src/banner.txt", "banner from remix B\n")])
-    let c = f.stageChange(intent, @[("src/main.c",
-      greeterV1.replace("hello from greeter v1", "hello from greeter C"))])
+      "test.run:greeter", "remix.publish:private"], "combine greeter remixes",
+      withGenerations = true)
+    template f: Fixture = fixture.acquire()
+    template g1: string = f.initialGeneration
+    template launcher: string = f.backend.driver.launcherDir / "greeter"
+    template intent: Intent = f.sessionIntent
+    var staged: seq[string]
+
+    # The suite runner runs every case in a process of its own, so a case
+    # must not rely on a Remix or generation an earlier case made
+    # (Test-Suite-Architecture-Guidelines, "Every case MUST pass when run
+    # alone"). The three Remixes are staged at most once per process, on
+    # first use.
+    proc remixes(): tuple[a, b, c: string] =
+      ## A (v2 in main.c), B (the banner) and C (main.c's same line as A).
+      if staged.len == 0:
+        staged = @[
+          f.stageChange(intent, @[("src/main.c", greeterV2),
+            ("tests/expected.txt", "hello from greeter v2\n")]),
+          f.stageChange(intent, @[("src/banner.txt", "banner from remix B\n")]),
+          f.stageChange(intent, @[("src/main.c",
+            greeterV1.replace("hello from greeter v1", "hello from greeter C"))])]
+      (staged[0], staged[1], staged[2])
 
     test "compatible Remixes compose into a healthy generation with lineage":
+      let (a, b, _) = remixes()
       let composed = f.runPlan(intent, @[op(okRemixCompose, "greeter",
         {"releases": a & "," & b})], @["workspace.create:greeter"])
       checkpoint composed[0].detail & "\n" & composed[0].output
@@ -100,9 +119,9 @@ else:
       check f.backend.activeGeneration() != g1
       check exeOutput(launcher) == "hello from greeter v2"
 
-    let activeAfterGood = f.backend.activeGeneration()
-
     test "a patch conflict stops the composition before anything exists":
+      let (a, _, c) = remixes()
+      let activeBefore = f.backend.activeGeneration()
       let workspacesBefore = f.host.workspaces.len
       let rs = f.runPlan(intent, @[op(okRemixCompose, "greeter",
         {"releases": a & "," & c})], @["workspace.create:greeter"])
@@ -110,9 +129,11 @@ else:
       check rs[0].status == osFailed
       check "patch" in rs[0].detail
       check f.host.workspaces.len == workspacesBefore
-      check f.backend.activeGeneration() == activeAfterGood
+      check f.backend.activeGeneration() == activeBefore
 
     test "a blocked member stops the composition before anything exists":
+      let (a, b, _) = remixes()
+      let activeBefore = f.backend.activeGeneration()
       f.backend.blocked.incl b
       let workspacesBefore = f.host.workspaces.len
       let rs = f.runPlan(intent, @[op(okRemixCompose, "greeter",
@@ -121,6 +142,6 @@ else:
       check rs[0].status == osFailed
       check "blocked" in rs[0].detail
       check f.host.workspaces.len == workspacesBefore
-      check f.backend.activeGeneration() == activeAfterGood
+      check f.backend.activeGeneration() == activeBefore
 
-    cleanup(f.tmp)
+    fixture.release()

@@ -374,6 +374,23 @@ const
     ## sort BEFORE the gate in `reprobuildTestSpecs`, so that its build edge
     ## has been collected when the gate's execute edge is emitted.
 
+  AgentHarborFixtureFailureGate* =
+    "tests/integration/t_agent_harbor_fixture_failure_fails_the_case.nim"
+    ## Runs each Agent Harbor gate below the way the suite runner does, with
+    ## a failing `cc`, and fails unless the probe acquires nothing and the
+    ## failed fixture install is a case's FAIL with a result document. Its
+    ## execute edge takes every subject's binary as a typed input, collected
+    ## like `PerCaseFixtureGate`'s.
+
+  AgentHarborFixtureFailureGateSubjects* = [
+    "tests/e2e/agent-harbor/t_e2e_agent_harbor_change_to_generation_and_remix.nim",
+    "tests/e2e/agent-harbor/t_e2e_agent_harbor_combines_and_augments_remixes.nim",
+    "tests/e2e/agent-harbor/t_e2e_agent_harbor_modifies_installed_source_package.nim",
+    "tests/e2e/agent-harbor/t_e2e_agent_harbor_preview_accept_reject.nim",
+  ]
+    ## Kept in step with the test's own list by its last case. Every subject
+    ## sorts before the test (`tests/e2e/` before `tests/integration/`).
+
   profileCompileNimSpy = TestGraphArtifact(
     path: "build/test-bin/nim_spy",
     actionId: "reprobuild.test_helpers.nim_spy")
@@ -1941,6 +1958,8 @@ package reprobuild:
     # silently declares less.
     var perCaseFixtureGateInputs: seq[TestGraphArtifact] = @[]
     var perCaseFixtureGateNeedsRepro = false
+    # The Agent Harbor fixture-failure gate's subjects, the same way.
+    var agentHarborGateInputs: seq[TestGraphArtifact] = @[]
 
     # TEST-BINARY GROUPING (reprobuild-specs spec/Test-Binary-Grouping.md, M2).
     #
@@ -2014,6 +2033,8 @@ package reprobuild:
             spec.source != M4ConsolidationVerificationTest and
             spec.source != PerCaseFixtureGate and
             spec.source notin PerCaseFixtureGateSubjects and
+            spec.source != AgentHarborFixtureFailureGate and
+            spec.source notin AgentHarborFixtureFailureGateSubjects and
             not spec.source.startsWith("tests/bundles/") and
             not spec.source.contains("nix_daemon") and
             spec.source !=
@@ -2056,6 +2077,12 @@ package reprobuild:
           actionId: edge.action.id))
         perCaseFixtureGateNeedsRepro =
           perCaseFixtureGateNeedsRepro or spec.requiresReproBinary
+      if spec.source in AgentHarborFixtureFailureGateSubjects:
+        agentHarborGateInputs.add(TestGraphArtifact(
+          path:
+            when defined(windows): spec.binary & ".exe"
+            else: spec.binary,
+          actionId: edge.action.id))
       # THE C BACKEND, DECLARED ON THE TEST-BUILD EDGES TOO.
       #
       # ``nim c`` emits C and shells out to a BARE ``gcc``. ``nim.c(...)``
@@ -2126,6 +2153,20 @@ package reprobuild:
           requiredBinaries.add(artifact.path)
           executeDeps.add(artifact.actionId)
         if perCaseFixtureGateNeedsRepro and not spec.requiresReproBinary:
+          requiredBinaries.add(reproBinaryPath)
+          requiredBinaries.add(reprobuildEngineBinaryPath)
+      if spec.source == AgentHarborFixtureFailureGate:
+        # As above: the test executes each subject, and every subject drives
+        # the engine.
+        doAssert agentHarborGateInputs.len ==
+            AgentHarborFixtureFailureGateSubjects.len,
+          "AgentHarborFixtureFailureGate reached with " &
+          $agentHarborGateInputs.len & " of " &
+          $AgentHarborFixtureFailureGateSubjects.len & " subjects collected"
+        for artifact in agentHarborGateInputs:
+          requiredBinaries.add(artifact.path)
+          executeDeps.add(artifact.actionId)
+        if not spec.requiresReproBinary:
           requiredBinaries.add(reproBinaryPath)
           requiredBinaries.add(reprobuildEngineBinaryPath)
       # Graph-Owned-Test-Artifacts M3: typed fixture inputs on the EXECUTE
