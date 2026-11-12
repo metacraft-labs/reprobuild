@@ -20537,7 +20537,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g06",
+    group: "t_group_tests_integration_g05",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_health_reports_each_layer_status_with_remedy.nim",
@@ -21252,7 +21252,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g07",
+    group: "t_group_tests_integration_g06",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_integration_test_runner_adapter_registered.nim",
@@ -21857,7 +21857,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g08",
+    group: "t_group_tests_integration_g07",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_lock_entry_pins_the_resolved_target.nim",
@@ -22429,7 +22429,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g09",
+    group: "t_group_tests_integration_g08",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_managed_pre_push_propagates_certificates_through_the_reference_hook.nim",
@@ -23111,7 +23111,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g10",
+    group: "t_group_tests_integration_g09",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_plan_without_certificate_node_never_writes_the_lock.nim",
@@ -23457,6 +23457,17 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "tests/integration/t_pre_push_gate_enforces_inside_a_linked_worktree.nim",
     binary: "build/test-bin/t_pre_push_gate_enforces_inside_a_linked_worktree",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "t_group_tests_integration_g10",
+    singleReason: ""),
+  TestSpec(
+    source: "tests/integration/t_pre_push_identity_of_a_nested_submodule_checkout.nim",
+    binary: "build/test-bin/t_pre_push_identity_of_a_nested_submodule_checkout",
     defines: @[],
     requiresReproBinary: true,
     extraPassC: @[],
