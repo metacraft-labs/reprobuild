@@ -5,10 +5,12 @@ kind: reference
 persona: developer
 order: 90
 verifies:
-  commands: [build, graph, show-conventions, shell, exec, shell hook, allow, deny, dev-env export, up, down, run, tasks, develop, workspace, home, system, store gc, daemon, test, certify]
+  commands: [build, graph, show-conventions, cache publish, cache substitute, shell, exec, shell hook, allow, deny, dev-env export, up, down, run, tasks, develop, workspace, home, system, store gc, daemon, test, certify]
   tests:
     - tests/integration/t_dev_env_allow.nim
     - tests/integration/t_integration_local_store_gc.nim
+    - libs/repro_binary_cache_client/tests/t_a3_p2_cli_substitute.nim
+    - tests/integration/t_uses_resolves_sqlite3_from_real_reprobuild_packages.nim
 unverified:
   - claim: "The project-file names `repro.nim` and `reprobuild.nim` are both read."
     reason: "Read from the loader constants (LegacyProjectFileName); no test is cited yet."
@@ -50,6 +52,15 @@ or [system profile](#system-profile) can switch on. Commands select one with
 
 Do not use: role, feature, profile (for an activity).
 
+## Binary cache
+
+A server that holds results reprobuild built, so another machine can fetch a
+result instead of building it again. `repro cache publish` puts a result in one
+and `repro cache substitute` fetches it; `repro-binary-cache` is a server you can
+run yourself.
+
+Do not use: remote cache, substituter (for reprobuild's binary cache).
+
 ## Branch role
 
 A named purpose for a branch, which each repository in a [workspace](#workspace)
@@ -65,6 +76,16 @@ The graph of [actions](#action) reprobuild derives from a [project](#project),
 with an edge wherever one action uses another's output. `repro graph` prints it.
 
 Do not use: action graph, DAG (in prose).
+
+## Catalog
+
+A collection of package definitions, each listing the versions of one package it
+can provide and how to obtain or build each. A name in a project file's
+dependency list refers to a package in a catalog; the public catalog is
+`reprobuild-packages`. The documentation spells the word as `repro` does in its
+messages.
+
+Do not use: registry, package index, package set (for a catalog).
 
 ## Convention
 
