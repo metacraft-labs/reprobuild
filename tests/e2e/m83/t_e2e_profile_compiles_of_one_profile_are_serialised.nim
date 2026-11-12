@@ -223,7 +223,7 @@ proc runTwoAtOnce(sb: ProfileSandbox; args: openArray[string];
     # the second run waits on.
     let lockPath =
       if secondStateDir.len > 0:
-        profileDirLockPath(profileCompileKey(sb.profilePath.parentDir))
+        profileDirLockPath(profileCompileKey(expandFilename(sb.profileDir)))
       else:
         cachedProfileLockPath(sb.stateDir, profileCompileKey(sb.profilePath))
     result.overlap = watchSecond(sb, command, second, lockPath)
