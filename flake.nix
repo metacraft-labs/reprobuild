@@ -2934,9 +2934,11 @@
               #   * ``strace`` -- scripts/write_helper_deps.sh traces each
               #     helper's compile to list its staticRead inputs and C
               #     headers, and writes no list without it, so `just build`
-              #     fails and the tests refuse the helper binaries. Its
-              #     `nix build nixpkgs#strace` fallback is not a substitute
-              #     on CI: Test and Lint both stopped there.
+              #     fails and the tests refuse the helper binaries. It is the
+              #     strace that path mode resolves for repro.nim's
+              #     `nativeBuildDeps:` entry too (the helper-list edge of
+              #     `repro build .#apps`), so the graph takes this pinned
+              #     one, not the host's.
               pkgs.iproute2
               pkgs.nftables
               pkgs.strace
