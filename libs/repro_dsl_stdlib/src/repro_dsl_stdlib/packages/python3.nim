@@ -123,10 +123,16 @@ package python3:
     # GM4b: archive realizations formerly held by the retired
     # `VersionedProvisioning` catalog record (see the conflict notes
     # in the Gradual-Nix-To-Reprobuild-Migration GM4b milestone).
+    #
+    # The full installer ships `python.exe` and no `python3.exe`, exactly
+    # like the embeddable zip above, so it needs the same alias: a version
+    # pin selecting 3.14.5 would otherwise realize a prefix whose
+    # `python3` resolves to the host's.
     tarball url = "https://www.python.org/ftp/python/3.14.5/python-3.14.5-amd64.exe",
       sha256 = "f9c09f5ed6f796fd1a8bc5ddfa41715a494b453c4781f0e35d5077cf9fa58f6d",
       archiveType = "installer-nsis",
       executablePath = "python.exe",
+      executableAlias = "python3.exe",
       version = "3.14.5",
       packageId = "python3@3.14.5",
       installMethod = "installer-nsis-bundle",
@@ -137,6 +143,7 @@ package python3:
       sha256 = "f4a7df6ab4fa375cd7296127ff6b9a14fbd1313f51864ce020185deba10144fa",
       archiveType = "installer-nsis",
       executablePath = "python.exe",
+      executableAlias = "python3.exe",
       version = "3.14.5",
       packageId = "python3@3.14.5",
       installMethod = "installer-nsis-bundle",
