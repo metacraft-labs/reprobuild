@@ -18216,9 +18216,16 @@ proc supervisorCliArgs(config: DevSessionSupervisorConfig): seq[string] =
   if config.foreground:
     result.add("--foreground")
 
-proc startBackgroundSupervisor(config: DevSessionSupervisorConfig) =
+proc startBackgroundSupervisor(config: DevSessionSupervisorConfig):
+    DevSessionLaunch =
+  ## Detach the supervisor and return what the parent's wait needs to watch
+  ## it: its pid, and where its output starts in the append-only log. The
+  ## pid is the point -- a launch whose process is gone before the session
+  ## is up is a failure to start, and only the pid can show that; see
+  ## ``DevSessionLaunch``.
   createDir(extendedPath(config.outDir.sessionDir))
-  let logPath = config.outDir.sessionDir / "supervisor.log"
+  let logPath = config.outDir.supervisorLogPath
+  result.logOffset = config.outDir.supervisorLogSize
   when defined(windows):
     # NOT `osproc.startProcess`: with `poParentStreams` it handed the
     # supervisor our own stdout and stderr, and without it `CreateProcessW`
@@ -18231,9 +18238,9 @@ proc startBackgroundSupervisor(config: DevSessionSupervisorConfig) =
     if not isAbsolute(image):
       let found = findExe(image)
       image = if found.len > 0: found else: absolutePath(image)
-    discard spawnWithOwnStdio(image, config.supervisorCliArgs(),
-      env = [], inheritEnvironment = true, logPath = logPath,
-      workingDir = absolutePath(config.projectRoot))
+    result.supervisorPid = spawnWithOwnStdio(image,
+      config.supervisorCliArgs(), env = [], inheritEnvironment = true,
+      logPath = logPath, workingDir = absolutePath(config.projectRoot))
   else:
     # NO DESCRIPTOR ABOVE 2 CROSSES THE LAUNCH: the supervisor outlives this
     # invocation, so an inherited copy of a caller's pipe would hold that
@@ -18245,18 +18252,51 @@ proc startBackgroundSupervisor(config: DevSessionSupervisorConfig) =
     # before the supervisor starts. Only the flag moves, and it is put back
     # afterwards; this runs on the command's main flow, which starts no
     # other child inside the window.
+    #
+    # THE SHELL RECORDS `$!`, the backgrounded subshell's pid, which is the
+    # supervisor's: the subshell `exec`s it (and the thin `repro` client
+    # `execv`s the engine), so the pid survives both. The shell's exit
+    # status alone is worthless as evidence -- it is 0 as soon as the job is
+    # backgrounded -- and this pid is how the parent's wait learns of a
+    # supervisor that died in its first millisecond.
+    #
+    # INTO A FILE, NOT THROUGH A PIPE. Capturing the shell's stdout
+    # (`execCmdEx`) creates the pipe AFTER the descriptors above were marked
+    # close-on-exec, and the spawned shell keeps a copy of it above 2 that
+    # the subshell's redirections do not touch: the supervisor and every
+    # service it starts inherited the write end, so reading the pid waited
+    # for the whole session to exit and `repro up` never returned. A file
+    # written by the outer shell after the job is backgrounded crosses no
+    # descriptor at all. It is named for this launch's session id, so two
+    # concurrent launches cannot read each other's pid.
+    #
+    # Spawning the supervisor directly instead would make it this process's
+    # CHILD, whose zombie a pid probe reads as alive until it is reaped.
+    let pidPath = config.outDir.sessionDir /
+      ("supervisor-launch-" & config.sessionId & ".pid")
     let command = "(cd " & q(config.projectRoot) & " && exec " &
       shellCommand(@[config.publicCliPath] & config.supervisorCliArgs()) &
-      ") </dev/null >> " & q(logPath) & " 2>&1 &"
+      ") </dev/null >> " & q(logPath) & " 2>&1 & echo $! > " & q(pidPath)
     let madeCloseOnExec = markInheritableDescriptorsCloseOnExec()
     var exitCode = 0
     try:
       exitCode = execShellCmd(command)
     finally:
       restoreInheritableDescriptors(madeCloseOnExec)
-    if exitCode != 0:
+    var recorded = ""
+    try:
+      recorded = readFile(extendedPath(pidPath)).strip()
+      removeFile(extendedPath(pidPath))
+    except IOError, OSError:
+      discard
+    var pid = 0
+    if exitCode == 0 and recorded.len > 0 and recorded.allCharsInSet(Digits):
+      pid = parseInt(recorded)
+    if pid <= 0:
       raise newException(OSError,
-        "failed to launch dev session supervisor: " & command)
+        "failed to launch dev session supervisor (exit " & $exitCode &
+          ", recorded pid " & recorded.escape() & "): " & command)
+    result.supervisorPid = pid
 
 const DevSessionStillStartingExitCode* = 75
   ## The exit code ``repro up`` / ``repro dev`` returns when its wait expired
@@ -19909,11 +19949,11 @@ proc runUpOrDevCommand(args: openArray[string]; publicCliPath: string;
     let budget = config.readyBudget(parsed.readyTimeoutMs)
     # Only the locked supervisor may clear an old bind; the parent accepts
     # a ready marker only for this new launch's session ID.
-    config.startBackgroundSupervisor()
+    let launch = config.startBackgroundSupervisor()
     stderr.writeLine("repro " & commandName & ": waiting up to " &
       budget.describe() & " for the session to report `session.up`")
     try:
-      status = waitForDevSessionReady(config, budget)
+      status = waitForDevSessionReady(config, budget, launch)
     except DevSessionStillStartingError as err:
       stderr.writeLine("repro " & commandName & ": " & err.msg)
       return DevSessionStillStartingExitCode

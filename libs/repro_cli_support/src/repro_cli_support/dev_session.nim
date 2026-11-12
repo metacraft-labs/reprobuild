@@ -209,6 +209,23 @@ type
     ## code rather than to the one it uses for a session that cannot start.
     ## See the exit-code comment in ``runUpOrDevCommand``.
 
+  DevSessionLaunch* = object
+    ## What the parent knows about the supervisor it just detached, which is
+    ## what lets ``waitForDevSessionReady`` tell a launch that DIED from one
+    ## that is slow. Without it the parent's only evidence was the exit code
+    ## of a shell whose last token is ``&`` -- 0 as soon as the job is
+    ## backgrounded -- so a supervisor that aborted in its first millisecond
+    ## was waited on for the whole control-API phase and then reported as
+    ## "still starting", exit 75 (reprobuild-pm issue
+    ## ``2026-11-11-repro-up-cannot-see-a-supervisor-launch-that-died``).
+    supervisorPid*: int
+      ## The supervisor's pid, or 0 when the caller launched nothing it can
+      ## name (an in-process caller waiting on a directory it staged).
+    logOffset*: int64
+      ## The size of ``supervisor.log`` before this launch appended to it.
+      ## The log is opened for APPEND by every launch, so only the bytes past
+      ## this offset are this supervisor's own output.
+
   SessionState = object
     schemaId: string
     sessionId: string
@@ -318,6 +335,47 @@ proc sessionDir*(outDir: string): string =
 
 proc sessionMetadataPath*(outDir: string): string =
   outDir.sessionDir / MetadataFile
+
+proc supervisorLogPath*(outDir: string): string =
+  ## Where a detached supervisor's stdout and stderr go. The launch opens it
+  ## for append, so it accumulates every launch's output.
+  outDir.sessionDir / "supervisor.log"
+
+proc supervisorLogSize*(outDir: string): int64 =
+  ## The log's current size, 0 when it does not exist yet: the offset a
+  ## launch records BEFORE it appends, so ``supervisorLogSince`` can quote
+  ## that launch's output and nothing an earlier launch left behind.
+  try:
+    getFileSize(extendedPath(outDir.supervisorLogPath))
+  except OSError:
+    0
+
+const SupervisorLogQuoteBytes = 4096
+  ## The most of a dead supervisor's log a diagnostic quotes. A supervisor
+  ## that dies on launch writes one line (``repro dev-session supervisor:
+  ## error: ...``); the cap only stops a log that grew before the death
+  ## from flooding the terminal, and the full path is printed beside it.
+
+proc supervisorLogSince*(outDir: string; offset: int64): string =
+  ## The text this launch appended to ``supervisor.log`` -- its last
+  ## ``SupervisorLogQuoteBytes`` when there is more -- with surrounding
+  ## whitespace trimmed. "" when the log is missing or nothing was appended.
+  ## A log SHORTER than ``offset`` was replaced rather than appended to, and
+  ## is quoted from its start.
+  let path = extendedPath(outDir.supervisorLogPath)
+  var file: File
+  if not open(file, path, fmRead):
+    return ""
+  defer: file.close()
+  let size = getFileSize(file)
+  var start = if offset >= 0 and offset <= size: offset else: 0'i64
+  if size - start > SupervisorLogQuoteBytes:
+    start = size - SupervisorLogQuoteBytes
+  file.setFilePos(start)
+  var buffer = newString(int(size - start))
+  if buffer.len > 0:
+    buffer.setLen(file.readChars(toOpenArray(buffer, 0, buffer.high)))
+  buffer.strip()
 
 proc q(value: string): string =
   quoteShell(value)
@@ -2495,9 +2553,15 @@ proc reusableDevSession*(config: DevSessionSupervisorConfig): JsonNode =
   live
 
 proc waitForDevSessionReady*(config: DevSessionSupervisorConfig;
-                             budget: DevSessionReadyBudget): JsonNode =
+                             budget: DevSessionReadyBudget;
+                             launch: DevSessionLaunch): JsonNode =
   ## Wait for the session the caller detached to report ``session.up``, and
   ## report THREE outcomes rather than two.
+  ##
+  ## ``launch`` names the supervisor the caller detached, and has no default
+  ## for the same reason ``budget`` has none: a call site that forgot it
+  ## would silently lose the only witness to a supervisor that died. A
+  ## caller that launched nothing passes ``DevSessionLaunch()``.
   ##
   ## ``budget`` has NO DEFAULT, on purpose. The defect this replaces was a
   ## ``timeoutMs = 10000`` default that every call site accepted without
@@ -2513,10 +2577,13 @@ proc waitForDevSessionReady*(config: DevSessionSupervisorConfig;
   ##
   ## * the session reported ``up`` -- returns its published state.
   ## * the session reported a TERMINAL failure (``status == "failed"``, or
-  ##   its control API never appeared) -- raises ``IOError``. This is
-  ##   "cannot start", and it is raised AS SOON AS the supervisor says so
-  ##   rather than when the clock runs out, so a service that declares
-  ##   600_000 ms and fails in two seconds fails in two seconds.
+  ##   its control API never appeared), or the supervisor named by
+  ##   ``launch`` EXITED before the session reported ``up`` -- raises
+  ##   ``IOError``. This is "cannot start", and it is raised AS SOON AS the
+  ##   supervisor says so (or is seen to be gone) rather than when the clock
+  ##   runs out, so a service that declares 600_000 ms and fails in two
+  ##   seconds fails in two seconds, and a supervisor that dies on launch
+  ##   fails within one poll, quoting what it wrote to ``supervisor.log``.
   ## * the budget expired with the session still coming up -- raises
   ##   ``DevSessionStillStartingError``. Nothing here stops the supervisor,
   ##   so the session is left as it was, and the message says what this
@@ -2542,6 +2609,36 @@ proc waitForDevSessionReady*(config: DevSessionSupervisorConfig;
         $int((epochTime() - started) * 1000.0) & " ms of the " &
         $budget.timeoutMs & " ms allowed\n" & config.eventLogHint())
 
+  proc checkSupervisorAlive(phase: string) =
+    ## A supervisor that is gone before ``session.up`` is a failure to
+    ## start, whatever phase the wait is in: nothing will publish ``up``
+    ## for this launch any more. Its own terminal record, when it managed
+    ## to write one, is the better diagnostic, so that is re-read AFTER the
+    ## death is seen -- a supervisor that publishes ``failed`` and then
+    ## exits must not race this into the vaguer message.
+    ##
+    ## ``sessionProcessAlive`` probes the pid. On POSIX the supervisor is
+    ## not this process's child (the launching shell's subshell ``exec``s
+    ## it and the shell exits), so its zombie is reaped by init or the
+    ## nearest subreaper and the probe goes false on death; a pid recycled
+    ## inside one wait would read as alive, which only falls back to the
+    ## old behaviour of waiting the phase out.
+    if launch.supervisorPid <= 0 or
+        sessionProcessAlive(launch.supervisorPid):
+      return
+    checkTerminalLaunch()
+    let logPath = config.outDir.supervisorLogPath
+    let output = config.outDir.supervisorLogSince(launch.logOffset)
+    let quoted =
+      if output.len == 0: "  it wrote nothing to " & logPath
+      else: "  it wrote, to " & logPath & ":\n" &
+        output.splitLines().mapIt("    " & it).join("\n")
+    raise newException(IOError,
+      "dev session cannot start: its supervisor (pid " &
+        $launch.supervisorPid & ") exited " & phase & ", after the parent " &
+        "waited " & $int((epochTime() - started) * 1000.0) & " ms of the " &
+        $budget.timeoutMs & " ms allowed\n" & quoted)
+
   var launchBind: JsonNode
   proc launchReady(): bool =
     if not fileExists(extendedPath(readyFile)): return false
@@ -2560,6 +2657,10 @@ proc waitForDevSessionReady*(config: DevSessionSupervisorConfig;
     started + DevSessionControlApiTimeoutMs.float / 1000.0)
   while not launchReady():
     checkTerminalLaunch()
+    checkSupervisorAlive("before its control API published " & readyFile)
+    # The death check reads the pid, the readiness check reads a file: a
+    # supervisor that publishes and then dies in between is caught by the
+    # next phase's check, not misreported here.
     let now = epochTime()
     if now >= controlDeadline:
       if now >= deadline:
@@ -2573,13 +2674,13 @@ proc waitForDevSessionReady*(config: DevSessionSupervisorConfig;
         # claim about a process this arm has no witness for, and it is the
         # same unfounded assertion the expiry diagnostic below had removed
         # from it (see the comment there) -- reintroduced one phase
-        # earlier. ``startBackgroundSupervisor`` does not license it
-        # either: on POSIX it checks ``execShellCmd`` of a command whose
-        # last token is ``&``, so the shell reports 0 as soon as the job is
-        # BACKGROUNDED. A ``publicCliPath`` that does not exist, a
-        # supervisor that aborts in its first millisecond, and a supervisor
-        # that is alive and slow are indistinguishable from that exit code.
-        # It is a launch check, not a liveness check.
+        # earlier. The launch pid does not license it either. A supervisor
+        # that DIED is no longer reported here at all --
+        # ``checkSupervisorAlive`` turns its exit into a "cannot start"
+        # within one poll -- so reaching this arm with a pid means the pid
+        # answered the last probe. That is evidence of A process, not of a
+        # supervisor making progress: a pid can be recycled, and a caller
+        # that launched nothing passes none.
         #
         # What is left is the narrower statement that is true in every
         # arm -- this process stopped nothing -- plus the one artifact that
@@ -2638,6 +2739,9 @@ proc waitForDevSessionReady*(config: DevSessionSupervisorConfig;
             $int((epochTime() - started) * 1000.0) & " ms of the " &
             $budget.timeoutMs & " ms allowed\n" &
             config.eventLogHint())
+    # After the status read, so an ``up`` or ``failed`` the supervisor
+    # published before exiting is reported as what it is.
+    checkSupervisorAlive("before the session reported `session.up`")
     if epochTime() >= deadline:
       break
     sleep(50)

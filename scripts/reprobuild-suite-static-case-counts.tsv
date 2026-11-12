@@ -193,6 +193,7 @@ libs/repro_build_engine/tests/t_peer_key_binds_builtin_payload.nim	nim	2
 libs/repro_build_engine/tests/t_portable_fingerprint_engine.nim	nim	10
 libs/repro_build_engine/tests/t_portable_memo_hybrid_hit_publishes_only_recorded_content.nim	nim	2
 libs/repro_build_engine/tests/t_portable_record_from_local_hit.nim	nim	5
+libs/repro_build_engine/tests/t_present_outputs_without_a_record_do_not_make_an_action_up_to_date.nim	nim	3
 libs/repro_build_engine/tests/t_preserve_tree_rerun_never_writes_through_links.nim	nim	10
 libs/repro_build_engine/tests/t_provision_receipt_publish_is_atomic.nim	nim	3
 libs/repro_build_engine/tests/t_published_record_states_evidence_source.nim	nim	3
@@ -1310,7 +1311,7 @@ tests/e2e/dev-env/t_e2e_native_shell_hooks.nim	nim	3
 tests/e2e/dev-env/t_e2e_nf4_flake_dev_shell.nim	nim	6
 tests/e2e/dev-env/t_e2e_provider_dev_env_implicit_floor.nim	nim	2
 tests/e2e/dev-env/t_e2e_provider_dev_env_introspection.nim	nim	2
-tests/e2e/dev-env/t_e2e_repro_dev_sessions.nim	nim	26
+tests/e2e/dev-env/t_e2e_repro_dev_sessions.nim	nim	28
 tests/e2e/dev-env/t_e2e_repro_down_activity_discovery.nim	nim	7
 tests/e2e/dev-env/t_e2e_repro_exec_does_not_leak_engine_source_root.nim	nim	3
 tests/e2e/dev-env/t_e2e_repro_exec_installed_prefix_nim.nim	nim	4
