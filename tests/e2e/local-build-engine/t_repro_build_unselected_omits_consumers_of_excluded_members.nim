@@ -15,6 +15,13 @@
 ## and the full engine-facing action list is observable. A second
 ## fixture package puts a consumer, declared before the member it
 ## depends on, on a dependency cycle through that member.
+##
+## A third fixture routes the same rule through the ``default``
+## collection, which is what a bare ``repro build`` resolves to: a
+## ``default`` member depends on a ``test`` member, a second one on a
+## member of a collection the ``test`` collection nests, and the build
+## through ``default`` must omit both whether or not ``default`` is named
+## explicitly.
 
 import std/[algorithm, sets, unittest]
 
@@ -106,3 +113,32 @@ suite "t_repro_build_unselected_omits_consumers_of_excluded_members":
       buildUnselectedExclusionCycleFixturePackage))
     check danglingDeps(actions) == newSeq[string]()
     check sortedIds(actions) == @["cycle.kept"]
+
+  test "the default collection omits members that reach an excluded member":
+    let snapshot = fixtureSnapshot("unselectedExclusionDefaultFixture",
+      buildUnselectedExclusionDefaultFixturePackage)
+    let actions = lowered(["default"], snapshot)
+    check danglingDeps(actions) == newSeq[string]()
+    check sortedIds(actions) == @["dflt.helper"]
+
+  test "a nested collection of test is excluded from the omitted target":
+    let snapshot = fixtureSnapshot("unselectedExclusionDefaultFixture",
+      buildUnselectedExclusionDefaultFixturePackage)
+    let actions = lowered([""], snapshot)
+    check danglingDeps(actions) == newSeq[string]()
+    check sortedIds(actions) == @["dflt.helper", "dflt.product"]
+
+  test "selecting an excluded consumer beside default keeps its closure":
+    let snapshot = fixtureSnapshot("unselectedExclusionDefaultFixture",
+      buildUnselectedExclusionDefaultFixturePackage)
+    let actions = lowered(["default", "opt-in"], snapshot)
+    check danglingDeps(actions) == newSeq[string]()
+    check sortedIds(actions) == @["dflt.consumer", "dflt.helper",
+      "dflt.nested_consumer", "dflt.test_direct", "dflt.test_nested"]
+
+  test "selecting the nested collection by name builds its member":
+    let snapshot = fixtureSnapshot("unselectedExclusionDefaultFixture",
+      buildUnselectedExclusionDefaultFixturePackage)
+    let actions = lowered(["test"], snapshot)
+    check danglingDeps(actions) == newSeq[string]()
+    check sortedIds(actions) == @["dflt.test_direct", "dflt.test_nested"]

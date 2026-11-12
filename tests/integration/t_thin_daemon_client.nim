@@ -927,8 +927,25 @@ suite "MAC-1 thin daemon client":
       #
       # WHAT MAKES THIS FAIL: breaking `handOver` (e.g. resolving an engine
       # path that does not exist) reddens the artifact check with exit 127.
+      #
+      # IT STOPS THE DAEMON IT STARTS. This invocation carries no `--daemon`
+      # (see below), so the engine auto-starts a user daemon over this case's
+      # state directory -- and it used to be left running after the
+      # directory was removed: found alive, serving from the tree under
+      # test, at the end of whole suite runs (reprobuild-pm issue
+      # 2026-11-08-thin-client-interactive-terminal-case-leaks-an-auto-started-daemon).
+      # The endpoint is the case's OWN for the same reason: without one the
+      # engine uses whatever `REPRO_DAEMON_ENDPOINT` the environment carries,
+      # or the per-user default when it carries none -- the suite's shared
+      # endpoint under `just test`, the developer's real per-user daemon when
+      # the binary is run by hand -- and a daemon resident there from another
+      # image is REPLACED by this one.
       let tempRoot = createTempDir("repro-mac1-interactive", "")
-      defer: removeDirEventually(tempRoot)
+      let endpoint = daemonSocketEndpoint("mac1-interactive-" &
+        $getCurrentProcessId())
+      defer:
+        stopDaemon(tempRoot, endpoint)
+        removeDirEventually(tempRoot)
       createDir(tempRoot / "state")
       createDir(tempRoot / "store")
       let project = freshProject(tempRoot)
@@ -974,6 +991,7 @@ suite "MAC-1 thin daemon client":
       try:
         run = runCaptured(thinCliBin(), args, tempRoot,
           @[("REPRO_FULL_CLI", fullCliBin()),
+            ("REPRO_DAEMON_ENDPOINT", endpoint),
             ("REPRO_DAEMON_STATE_DIR", tempRoot / "state"),
             ("REPROBUILD_STORE_ROOT", tempRoot / "store"),
             ("REPROBUILD_PROGRESS", ""),
@@ -1000,6 +1018,37 @@ suite "MAC-1 thin daemon client":
         # would mean the gate is protecting a behaviour that no longer exists.
         check ptyBytes > 0
         check buf.contains("\27[")
+
+        # And nothing it started outlives it. The daemon the engine
+        # auto-started is found through the case's own endpoint and stopped
+        # HERE, inside the case, and its process must then be gone: a case
+        # that only cleaned up in `defer` could not observe its own leak.
+        # Dropping this `stopDaemon` (the `defer` one runs only after the
+        # checks) reddens the liveness check below -- the leak the issue
+        # recorded.
+        let status = runShell(shellCommand(@[fullCliBin(), "daemon",
+          "status", "--endpoint", endpoint, "--state-dir",
+          tempRoot / "state"]), repoRoot()).output
+        checkpoint("daemon status after the build:\n" & status)
+        var daemonPid = 0
+        for line in status.splitLines():
+          if line.startsWith("pid: "):
+            daemonPid = parseInt(line["pid: ".len .. ^1].strip())
+        # The premise: an interactive build with no `--daemon` DOES start
+        # one. If the engine stops doing that, this case has nothing left to
+        # stop, and the check below would pass vacuously -- so say so.
+        check daemonPid > 0
+        if daemonPid > 0:
+          stopDaemon(tempRoot, endpoint)
+          # `daemon stop` asks the daemon to shut down; give it the time a
+          # loaded host needs to exit, then require it gone.
+          var waitedMs = 0
+          while ptyPosix.kill(Pid(daemonPid), 0) == 0 and waitedMs < 30_000:
+            sleep(100)
+            waitedMs += 100
+          checkpoint("daemon pid " & $daemonPid & " after stop, waited " &
+            $waitedMs & " ms")
+          check ptyPosix.kill(Pid(daemonPid), 0) != 0
       finally:
         discard ptyPosix.close(master)
 

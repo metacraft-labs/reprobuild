@@ -899,6 +899,14 @@ package reprobuild:
     when defined(linux):
       # The owning Linux shell already supplies this cross-platform binary.
       "pwsh"
+      # scripts/write_helper_deps.sh traces the Nim compiler's front end
+      # with `strace -ff -y` (staticRead targets, what staticExec commands
+      # read); the edge `reprobuild.helper-deps.repro-binary-cache` names
+      # it. A tool the build runs, so it is declared here and never
+      # realized for a `--target`. In path mode it resolves from PATH like
+      # gcc and python3, and the flake's dev shell supplies its pinned
+      # strace there (flake.nix, the Linux host tools).
+      "strace"
     when not defined(windows):
       # Real subprocesses of the existing POSIX release-smoke controls.
       "mktemp"
@@ -1044,11 +1052,6 @@ package reprobuild:
       "sqlite"
       "libblake3"
       "xxhash"
-      # scripts/write_helper_deps.sh traces the Nim compiler's front end
-      # with strace (staticRead targets, what staticExec commands read);
-      # the edge `reprobuild.helper-deps.repro-binary-cache` names it, and
-      # the graph provisions it from reprobuild-packages like any tool.
-      "strace"
     # The shipped CLI is compiled with ``-d:ssl``. Model the corresponding
     # link/runtime closure explicitly so graph-built binaries receive
     # OpenSSL's library channels instead of depending on ambient
@@ -2842,8 +2845,9 @@ package reprobuild:
     # test and needs no list, and a build without one leaves the binary
     # refused by the tests, never accepted (the guard is fail-closed).
     #
-    # strace comes from this package's `uses:` (Linux), so the graph
-    # provisions it into the edge's PATH. The edge always exists on Linux;
+    # strace comes from this package's `nativeBuildDeps:` (Linux), so it
+    # is on the edge's PATH as a build-host tool: the dev shell's in path
+    # mode, never one realized for a `--target`. The edge always exists on Linux;
     # when strace cannot run (no ptrace: Yama ptrace_scope 2 or 3, a seccomp
     # profile without it) the writer fails and so does the build, loudly --
     # it never vanishes. Such a host builds with scripts/build_apps.sh in
