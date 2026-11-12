@@ -98,13 +98,33 @@ user fetched the installer over the same HTTPS they are about to distrust
 — it forces an attacker to compromise both hosts consistently, and makes
 the substitution show up in a diff of the file.
 
-`REPRO_KEYRING_SHA256` is **empty**, exactly as M2's
-`trusted-release-keys.txt` lists zero fingerprints, and for the same
-reason: reprobuild has no release key yet. **Release-mode installs
-therefore fail closed.** `REPRO_ALLOW_UNPINNED_KEYRING=1` is the only way
-past it, is never set by default, and prints a warning naming what it
-costs. The anchor is never fetched from the release page — verifying a
+`REPRO_KEYRING_SHA256` is **pinned**: both installers default it to
+`aa89db22…9b54c988`, the SHA-256 of `metacraft-labs-archive-keyring.asc`,
+which is the organisation key
+`22F8 0A4A 65B0 8E36 AEA8 9F57 E127 BF3A C4CE 1719`
+(`REPRO_KEYRING_SHA256` in `scripts/install/repro-install.sh`,
+`$KeyringSha256` in `scripts/install/repro-install.ps1`). On every run
+`install_trust_anchor()` (`Install-TrustAnchor` in PowerShell) hashes the
+fetched keyring — or the `REPRO_KEYRING_LOCAL` file, which gets the same
+check — and **refuses on a mismatch** before the keyring is installed or
+any repository is registered. Changing the pinned value is a key rotation.
+
+Only an **empty** `REPRO_KEYRING_SHA256`, which a mirror or a test has to
+set explicitly, makes the installer **fail closed** with
+`no trust anchor digest is pinned`. `REPRO_ALLOW_UNPINNED_KEYRING=1` is the
+only way past that refusal, is never set by default, and prints a warning
+naming what it costs. With the default pin in place that opt-out is never
+consulted. The anchor is never fetched from the release page — verifying a
 release against a key published beside it is circular.
+
+This pin is a separate control from M2's release-key allowlist,
+`scripts/release-signing/trusted-release-keys.txt`, which still lists zero
+fingerprints because reprobuild has no release key yet. That allowlist
+governs **signing**: `repro-sign-release.sh` refuses any key it does not
+list, so release-mode signing fails closed. It does not govern installs.
+The tarball fallback verifies `SHA256SUMS.asc` and the artefact's own
+signature with `repro-verify-release.sh` against the pinned organisation
+keyring, and refuses unless both carry a valid signature by that key.
 
 ### Where the configurable base URL lives
 
@@ -580,9 +600,11 @@ from this checkout.
    `codetracer-prod` is a state migration on a root that has been
    applied, and was deliberately left out of the porting change.
 4. **The release key.** M2's boundary, inherited. While
-   `trusted-release-keys.txt` is empty and `REPRO_KEYRING_SHA256` is
-   empty, release-mode signing and release-mode installs both fail closed.
-   All gate work uses M2's throwaway test key.
+   `trusted-release-keys.txt` is empty, release-mode signing fails closed,
+   and all gate work uses M2's throwaway test key. Repository installs do
+   not wait on it: they are anchored by the organisation key that
+   `REPRO_KEYRING_SHA256` pins (see "The trust anchor, and why it is
+   pinned by digest").
 5. **A Scoop bucket and a Homebrew tap** are **git repositories**;
    `scoop bucket add` and `brew tap` clone them, and R2 serves objects,
    not git. They need `metacraft-labs/scoop-reprobuild` and
@@ -673,14 +695,14 @@ The milestone names `install.reprobuild.com`. The repository already has
 project, and the Terraform attaches both. **Which is canonical is a
 decision for a human**, not something this work should quietly settle.
 
-`get/build-get.sh` now also publishes the M3 installer at **`/repo-sh`**,
-and `/pwsh` is the real PowerShell installer instead of the coming-soon
-stub. `/sh` still serves the legacy nix/local-prefix
-`install-on-distributions.sh`, because the M3 installer fails closed with
-no pinned anchor and serving it at `/sh` today would replace a working
-one-liner with one that refuses to run for everybody. The switch-over is a
-single variable — `REPRO_GET_SH_SOURCE=repo` — and belongs in the same
-commit that populates the anchor pin.
+`get/build-get.sh` serves the M3 installer,
+`scripts/install/repro-install.sh`, at **`/sh`** (`REPRO_GET_SH_SOURCE`
+defaults to `repo`) and again at **`/repo-sh`** as an alias, and `/pwsh`
+is `scripts/install/repro-install.ps1`. Both carry the pinned anchor
+digest, so a default run verifies the organisation key and proceeds.
+`REPRO_GET_SH_SOURCE=legacy` puts the nix/local-prefix
+`install-on-distributions.sh` back at `/sh`, as a rollback that needs no
+code change.
 
 ## Not done
 
