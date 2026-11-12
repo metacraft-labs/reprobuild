@@ -26360,8 +26360,18 @@ proc startAutoRunQuotaIfNeeded*(bypassRunQuota: bool): owned(Process) =
       var client =
         try: runquota_client.connectDefault()
         except CatchableError as error:
-          # An existing private endpoint that does not answer is refused like
-          # the other private-selection failures, and says so the same way.
+          # An existing endpoint that does not answer (or fails its trust
+          # checks) is refused, never replaced, and the refusal NAMES it: a
+          # bare "Connection refused" said neither which endpoint refused nor
+          # where its path came from, and a socket left behind by a daemon
+          # that has exited -- exported to a nested `repro` by an older
+          # build -- looked like a fault of the command being run. A private
+          # selection additionally gets the same remedy as the other
+          # private-selection failures.
+          error.msg = "RunQuota endpoint " & configuredEndpoint.path &
+            (if explicitSocket.len > 0: " (from RUNQUOTA_SOCKET)" else: "") &
+            " exists but cannot be used: " & error.msg &
+            "; refusing per-user auto-start"
           addPrivateScopeRemedy(error)
           raise
       client.close()

@@ -37342,7 +37342,7 @@
       "requiresReproBinary": false,
       "source": "tests/integration/t_auto_runquota_uses_private_endpoint_policy.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 19,
+      "staticCaseCount": 20,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
