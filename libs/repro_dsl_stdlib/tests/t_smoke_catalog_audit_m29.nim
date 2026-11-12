@@ -116,6 +116,11 @@ const AuditExemptions = [
   # by a closure lock that ``repro-harvest-apt --emit-lock`` generates, not
   # by a provisioning shape in this module.
   "apt_closure",
+  # ``cargo`` is the wrapper over ``cargo_cli``, the module that declares
+  # the package: it re-exports the package and adds the per-call target
+  # directory handling of ``build`` / ``install`` / ``test``, and carries no
+  # provisioning of its own. ``cargo_cli`` is audited as the entry.
+  "cargo",
 ]
 
 const CanonicalPinExemptions = [

@@ -23,17 +23,21 @@
 # Pass the flags the binary was built with. How it works: nim's --genDeps
 # (an alias of --genScript) runs the compiler's front end without
 # compiling or linking, in a nimcache of its own, and writes
-# <module>.deps. That run is traced with `strace -f`, the only way to see
-# what Nim does not record anywhere: staticRead targets and the files a
-# staticExec command reads. Each {.compile.} C file is compiled again with
+# <module>.deps. That run is traced with `strace -ff -y` (one trace per
+# process, each open's resolved path), the only way to see what Nim does
+# not record anywhere: staticRead targets and the files a staticExec
+# command reads. Each {.compile.} C file is compiled again with
 # the C compiler's own depfile (-MD), which names its headers. The list starts with the sha256 of the binary it describes, and
 # fresh_binary refuses a list written for another binary.
 #
 # The published list is removed first. A run that fails, for any reason,
-# leaves NO list, and a test then refuses the binary. strace is required
-# (from PATH, $REPRO_STRACE, or the flake's nixpkgs#strace): without it
-# nothing is written. strace is Linux only, so on other hosts
-# this exits 1 and the guarded helpers' tests refuse the binary.
+# leaves NO list, and a test then refuses the binary. strace is required,
+# from $REPRO_STRACE or PATH: the flake's dev shell carries its pinned
+# strace, where scripts/build_apps.sh and the Nim 2.2.4 lane run, and in
+# `repro build .#apps` the edge's PATH carries the strace repro.nim
+# declares in `nativeBuildDeps:`. Without it nothing is written. strace is
+# Linux only, so on other hosts this exits 1 and the guarded helpers'
+# tests refuse the binary.
 #
 # REPRO_TEST_BUILD_DIR names another build directory (the Nim 2.2.4
 # lane's). WRITE_HELPER_DEPS_MUTATION selects a falsifier: keep-old-list
@@ -66,14 +70,8 @@ if [ ! -f "${binary}" ]; then
   exit 1
 fi
 strace_bin="${REPRO_STRACE:-$(command -v strace || true)}"
-if [ -z "${strace_bin}" ] && command -v nix >/dev/null 2>&1 && [ "$(uname -s)" = Linux ]; then
-  # The flake's own nixpkgs, as the Nim 2.2.4 lane resolves its Nim.
-  repo="$(cd "$(dirname "$0")/.." && pwd)"
-  strace_bin="$(nix build --no-link --print-out-paths --inputs-from "${repo}" nixpkgs#strace 2>/dev/null)/bin/strace" || strace_bin=""
-  [ -x "${strace_bin}" ] || strace_bin=""
-fi
 if [ -z "${strace_bin}" ]; then
-  echo "write_helper_deps: strace is required (staticRead inputs and C headers are seen only through it); no list written" >&2
+  echo "write_helper_deps: strace is required (staticRead inputs and C headers are seen only through it); no list written. Run inside the dev shell (nix develop), which carries it, or set REPRO_STRACE" >&2
   exit 1
 fi
 cache="${build}/nimcache/${name}-deps"

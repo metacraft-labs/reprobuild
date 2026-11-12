@@ -344,7 +344,15 @@
       # Guarded by tests/e2e/io-monitor/
       # t_inherited_preload_hook_library_keeps_root_monitored.nim. Needs
       # nim-shm-gset 7bc81ad (below) for `emitNoGrow`.
-      url = "github:metacraft-labs/io-mon/7a9b2f331024f4bc0b952bcab89b1dc48525d804";
+      # Bumped 7a9b2f33 -> 8fd53d43 (2026-11-12, io-mon `agents`): brings 8fd53d4,
+      # the macOS shim's fork-child lock fix, and c9f87d7 on the way. A fork child
+      # of a multi-threaded process inherited a shim lock another thread held at
+      # the fork and waited on it forever in its first close or dup2 (hung cargo
+      # and go build children under repro build on macOS; reprobuild-pm issue
+      # 2026-11-12-io-mon-macos-shim-deadlocks-a-fork-child-on-its-own-fd-lock).
+      # Such a child now skips the shim's tables until exec and reports the skip
+      # as event-loss.
+      url = "github:metacraft-labs/io-mon/8fd53d43f0a4c25d54c9c49494ac7dac4f02d63f";
       flake = false;
     };
     nim-shm-gset-src = {
@@ -2934,9 +2942,11 @@
               #   * ``strace`` -- scripts/write_helper_deps.sh traces each
               #     helper's compile to list its staticRead inputs and C
               #     headers, and writes no list without it, so `just build`
-              #     fails and the tests refuse the helper binaries. Its
-              #     `nix build nixpkgs#strace` fallback is not a substitute
-              #     on CI: Test and Lint both stopped there.
+              #     fails and the tests refuse the helper binaries. It is the
+              #     strace that path mode resolves for repro.nim's
+              #     `nativeBuildDeps:` entry too (the helper-list edge of
+              #     `repro build .#apps`), so the graph takes this pinned
+              #     one, not the host's.
               pkgs.iproute2
               pkgs.nftables
               pkgs.strace
