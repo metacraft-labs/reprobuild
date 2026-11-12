@@ -102,13 +102,14 @@ package appAlpha:
     ##     that the sibling HAS nothing, not that it could not be asked;
     ##   * ``plain-with-version`` — the same recipe plus a ``VERSION`` file,
     ##     the CONSUMER's second source;
-    ##   * ``variants``           — declares ``enableTls`` and ``profile``. Its
-    ##     ``build:`` block is not decoration: ``buildCode`` emits the
-    ##     provider's ``runPackageProvider`` entry point only for a recipe that
-    ##     has one;
-    ##   * ``variants-no-build``  — declares a variant and cannot answer the
-    ##     provider protocol; since 0e7146a92 the probe runs such a recipe's
-    ##     initialiser directly.
+    ##   * ``variants``           — declares ``enableTls`` and ``profile``,
+    ##     with a ``build:`` block;
+    ##   * ``variants-no-build``  — declares a variant and has no ``build:``
+    ##     block: its provider still has the ``runPackageProvider``
+    ##     dispatcher, and answers the probe's manifest request;
+    ##   * ``variants-from-template`` — the same package, declared through a
+    ##     template from an imported module, so no line of the recipe names a
+    ##     package and only the compiled binary knows it has a dispatcher.
     ##
     ## Stable, because the probe reaches the sibling's declarations through
     ## the engine's interface-extraction and provider-compile edges, whose
@@ -442,9 +443,13 @@ proc variantSibling(): Scenario =
                     source: DevelopedPackage)],
     "variants")
 
-proc unaskableSibling(): Scenario =
-  ## A sibling that declares a variant and has no protocol dispatcher.
-  scenario("unaskable", NoPackages, "variants-no-build")
+proc noBuildSibling(): Scenario =
+  ## A sibling that declares a variant and has no ``build:`` body.
+  scenario("no-build", NoPackages, "variants-no-build")
+
+proc templatedSibling(): Scenario =
+  ## A sibling whose body-less package is declared through a template.
+  scenario("templated", NoPackages, "variants-from-template")
 
 suite "the engine's work stays out of the user's action cache":
   ## The verb compiles the sibling's provider, and the probe keeps that
@@ -602,25 +607,19 @@ suite "the engine records the sibling's variant declarations":
     check not entry.hasKey("version")
     check entry.len == 2
 
-  test "a recipe with no build: block is asked through its initialiser":
-    # THIS CASE USED TO PIN THE OPPOSITE, as a known limitation: `buildCode`
-    # emits the provider's protocol dispatcher only for a recipe with a
-    # `build:` (or `devEnv:`) body, and the probe used to send such a binary a
-    # manifest request it could not answer, discarding the solver inputs its
-    # module init had already written. 0e7146a92 ("Include resource-provider
-    # constraints in refreshed locks") closed that: for a declaration-only
-    # module `solverInputsFromCompiledProvider` now runs the binary's
-    # initialiser alone and reads the emission — the fix the writer's own
-    # doc-comment named ("teaching that probe to keep inputs the provider
-    # demonstrably wrote"). The limitation is gone, so the case asserts the
-    # declaration ARRIVES rather than that it is missing.
+  test "a recipe with no build: block is asked through its dispatcher":
+    # A recipe with no `build:` body still declares a package, so its
+    # provider binary carries the `runPackageProvider` dispatcher and answers
+    # the probe's manifest request; its module init has written the solver
+    # inputs by then, and `solverInputsFromCompiledProvider` reads them. The
+    # declaration must ARRIVE.
     #
     # The premise first, so this cannot silently become a test of something
     # else: the recipe really does declare a variant, and has no `build:`.
-    let recipe = readFile(unaskableSibling().checkout / "repro.nim")
+    let recipe = readFile(noBuildSibling().checkout / "repro.nim")
     check "enableTls: variant bool = true" in recipe
     check "build:" notin recipe
-    let entry = overrideEntry(unaskableSibling().metadataPath)
+    let entry = overrideEntry(noBuildSibling().metadataPath)
     check entry.hasKey("variants")
     var byName = initTable[string, JsonNode]()
     if entry.hasKey("variants"):
@@ -628,6 +627,23 @@ suite "the engine records the sibling's variant declarations":
         byName[item["name"].getStr()] = item
     # Exactly the one declaration, with its declared default — not the
     # two-variant sibling's set leaking in, and not a synthesized value.
+    check byName.len == 1
+    check "enableTls" in byName
+    if "enableTls" in byName:
+      check byName["enableTls"]["kind"].getStr() == "bool"
+      check byName["enableTls"]["default"].getStr() == "true"
+
+  test "a package declared through a template is asked the same way":
+    # No line of this recipe declares a package, so nothing short of running
+    # the compiled binary can tell the probe that it has a dispatcher.
+    let checkout = templatedSibling().checkout
+    check "package" notin readFile(checkout / "repro.nim")
+    let entry = overrideEntry(templatedSibling().metadataPath)
+    check entry.hasKey("variants")
+    var byName = initTable[string, JsonNode]()
+    if entry.hasKey("variants"):
+      for item in entry["variants"]:
+        byName[item["name"].getStr()] = item
     check byName.len == 1
     check "enableTls" in byName
     if "enableTls" in byName:

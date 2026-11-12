@@ -11,6 +11,7 @@ points a per-process consumer at:
 | `plain-with-version` | same recipe | `9.8.7` (the consumer's second source) |
 | `variants` | buildable, declares `enableTls` and `profile` | none |
 | `variants-no-build` | declares `enableTls`, no `build:` block | none |
+| `variants-from-template` | the same package, declared through a template from `declare.nim`, so no line of `repro.nim` names it | none |
 
 `plain` deliberately has no `VERSION`: the cases that assert a version was
 recorded must not be able to pass through the fallback.
