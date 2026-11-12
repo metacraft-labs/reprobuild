@@ -17071,16 +17071,18 @@
       "defines": [],
       "language": "nim",
       "localDependencyShape": [
+        "repro_core",
         "repro_dsl_stdlib",
         "repro_home_apply",
         "repro_project_dsl",
+        "repro_test_support",
         "repro_tool_profiles"
       ],
       "owner": "libs/repro_home_apply",
       "requiresReproBinary": false,
       "source": "libs/repro_home_apply/tests/t_beam_toolchain_packages_resolve.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 4,
+      "staticCaseCount": 6,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
