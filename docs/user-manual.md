@@ -113,10 +113,8 @@ Reprobuild integrates all build, runtime, task, and workspace workflows into a s
 ### Shell Environment & Services
 *   `repro shell` — enter an interactive, activated dev-env subshell.
 *   `repro exec -- [cmd]` — run a single command within the dev-env context.
-*   `repro service start [service]` — spin up background services (e.g. database).
-*   `repro service stop [service]` — stop background services.
-*   `repro service restart [service]` — restart background services.
-*   `repro service status` — check the state of running services.
+*   `repro up [selector]` — start the project's declared background services (e.g. database); `--replace` restarts services that are already running.
+*   `repro down [selector]` — stop the project's background services.
 
 ### Task Running & Local State
 *   `repro tasks` — list all named automation tasks registered in `repro.nim`.

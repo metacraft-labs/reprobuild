@@ -39,6 +39,8 @@ type
     userRoot: string       ## TEST_CERTIFICATES_DIR
     systemDir: string      ## TEST_CERTIFICATES_SYSTEM_DIR
     systemRoot: string     ## <systemDir>/<uid>
+    storeEnv: ScopedEnv
+      ## Restores both store variables when the fixture goes out of scope.
 
 proc runArgv(argv: seq[string]; cwd = "";
              env: seq[tuple[name, value: string]] = @[]):
@@ -132,8 +134,10 @@ proc setupStoreFixture(policySnapshot: string; slug: string;
   result.userRoot = result.scratch / "store-user"
   result.systemDir = result.scratch / "store-system"
   result.systemRoot = result.systemDir / $nativeStoreAccount()
-  putEnv("TEST_CERTIFICATES_DIR", result.userRoot)
-  putEnv("TEST_CERTIFICATES_SYSTEM_DIR", result.systemDir)
+  # Restored when the fixture goes out of scope (`ScopedEnv`): a grouped
+  # test binary runs many cases in one process.
+  result.storeEnv = scopedEnv([("TEST_CERTIFICATES_DIR", result.userRoot),
+    ("TEST_CERTIFICATES_SYSTEM_DIR", result.systemDir)])
   result.reproBin = storeReproBinary()
   result.upstreamBare = result.scratch / "upstream-lib-a.git"
   result.gatewayBare = result.scratch / "gateway-lib-a.git"

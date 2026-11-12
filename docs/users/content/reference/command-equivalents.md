@@ -5,7 +5,7 @@ kind: reference
 persona: evaluator
 order: 80
 verifies:
-  commands: [build, shell, exec, run, why, store gc, store copy, home history, home rollback, home apply, home plan, test, graph, clean, daemon stop, shell hook, allow, deny, dev-env export, tasks, up, down, workspace init, sync, workspace pull, workspace status, workspace forall, switch, infra plan, infra apply]
+  commands: [build, shell, exec, run, why, store gc, store copy, home history, home rollback, home apply, home plan, test, graph, clean, daemon stop, shell hook, allow, deny, dev-env export, tasks, up, down, workspace init, sync, workspace pull, workspace status, workspace forall, switch, infra plan, infra apply, infra apply --plan]
 unverified:
   - claim: "Each reprobuild command in the table exists with the arguments shown."
     reason: "scripts/render_command_equivalents.py --check verifies the top-level verb against the dispatcher; subcommands and flags need the CLI model."
@@ -105,8 +105,9 @@ reprobuild command. A dash means reprobuild has no equivalent. The pages under
 
 | Terraform and OpenTofu | reprobuild | Note |
 |---|---|---|
-| `terraform plan`, `tofu plan` | `repro infra plan` | Resources on the machine that runs repro only. |
-| `terraform apply`, `tofu apply` | `repro infra apply` | Resources on the machine that runs repro only. |
+| `terraform plan`, `tofu plan` | `repro infra plan` | Plans the machine that runs repro. |
+| `terraform apply`, `tofu apply` | `repro infra apply` | Applies to the machine that runs repro; each machine in a fleet applies its own state with repro deploy-agent. |
+| `terraform apply <plan-file>`, `tofu apply <plan-file>` | `repro infra apply --plan <plan-id>` | Refused when the machine changed since the plan was made. |
 | `terraform graph` | `repro graph` |  |
 | `terraform import`, `terraform state`, `terraform output` | — | No equivalent. |
 <!-- generated:end -->

@@ -42,7 +42,7 @@ export packages_schema
 
 const CatalogTarballModules* = [
     "addlicense", "alire", "appimage_runtime", "appimagetool", "autoconf",
-    "automake", "bash", "binutils", "bun", "cabal", "capnp", "cargo", "cargo_nextest",
+    "automake", "bash", "binutils", "bun", "cabal", "capnp", "cargo_cli", "cargo_nextest",
     "cargo_sort", "chocolatey", "circom", "clang", "claude_code", "clingo",
     "clippy", "cmake", "composer", "coreutils_install", "crystal", "curl",
     "dotnet_sdk", "electron_builder_nsis",
@@ -55,8 +55,9 @@ const CatalogTarballModules* = [
     "mingw_gcc", "mix", "mktemp", "msys2_libevent", "msys2_ncurses", "neovim",
     "nim", "nimble", "ninja", "node", "npm", "npx", "nsis", "ocaml",
     "openssl", "perl", "php", "piper", "piper_voice_lessac_medium",
-    "piper_voice_lessac_medium_config", "pkg_7zip", "postgresql",
-    "python3", "python_dev", "ruby", "rust_std", "rustc", "rustfmt", "rustup",
+    "piper_voice_lessac_medium_config", "pkg_7zip", "playwright",
+    "postgresql", "python3", "python_dev", "ruby", "rust_std", "rustc",
+    "rustfmt", "rustup",
     "sh",
     "solc", "stylus", "swift", "swig", "taplo", "tar", "tmux", "uv",
     "wasm_opt", "whisper_ggml_base", "windows_terminal", "winfsp", "wix",

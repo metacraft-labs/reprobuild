@@ -1,0 +1,27 @@
+# Browser builds for playwright-core 1.56.1 on Windows, unpacked into the
+# realized prefix beside the library (packages/playwright.nim, "Layout").
+#
+# <destination> <sha256> <url> <archiveType> <stripComponents>
+#
+# Derived from playwright-core-1.56.1.tgz, by hand:
+#
+# * Revisions: browsers.json -- chromium 1194, chromium-headless-shell 1194,
+#   ffmpeg 1011, winldd 1007 (none has a win64 revisionOverride).
+# * Destinations: lib/server/registry/index.js readDescriptors, the browser
+#   name with "-" as "_", then "-<revision>", under the ".local-browsers"
+#   directory PLAYWRIGHT_BROWSERS_PATH=0 selects (registryDirectory).
+# * URLs: DOWNLOAD_PATHS[name]["win64"] (hostPlatform is "win64" on every
+#   Windows host) on PLAYWRIGHT_CDN_MIRRORS[0]. A closure entry names one URL;
+#   the second mirror, playwright.download.prss.microsoft.com, served the same
+#   bytes for all four.
+# * Layout: each archive's members already sit where EXECUTABLE_PATHS[name].win
+#   expects them below the destination (chrome-win/chrome.exe,
+#   chrome-win/headless_shell.exe, ffmpeg-win64.exe, PrintDeps.exe), so no
+#   entry strips a component. Every member path was listed and none is
+#   absolute or contains "..".
+# * sha256: computed 2026-11-12 over each archive downloaded from both
+#   mirrors (sizes 156153766, 95373298, 1411741 and 128684 bytes).
+.local-browsers/chromium-1194 bc65aed7bded748e267bd4d5d21f19459fa6e47464370a923fb6d87ebb22d7fb https://cdn.playwright.dev/dbazure/download/playwright/builds/chromium/1194/chromium-win64.zip zip 0
+.local-browsers/chromium_headless_shell-1194 c745ef87016c69b11f461ca5eced32c69abcf1ae450e37b450585de9f446e103 https://cdn.playwright.dev/dbazure/download/playwright/builds/chromium/1194/chromium-headless-shell-win64.zip zip 0
+.local-browsers/ffmpeg-1011 8d08827c019ad36e7b9d49d3648447d884534cb2acf200e71c715f6dd834cc50 https://cdn.playwright.dev/dbazure/download/playwright/builds/ffmpeg/1011/ffmpeg-win64.zip zip 0
+.local-browsers/winldd-1007 0069f0d11d4ad6df068a068c003d22fe7dbec192a47bba64b2e115e9c8ce41d8 https://cdn.playwright.dev/dbazure/download/playwright/builds/winldd/1007/winldd-win64.zip zip 0

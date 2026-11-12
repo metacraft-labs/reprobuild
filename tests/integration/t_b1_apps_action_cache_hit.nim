@@ -21,11 +21,12 @@
 ## forcing one. The test does NOT remove ``build/bin/`` before running
 ## the first invocation. Instead it relies on the standard
 ## ``just build`` / ``scripts/run_tests.sh`` pipeline having already
-## materialised the binaries. In that pre-warmed state the FIRST
-## invocation here observes the engine's outputs-present fast path
-## (status=asUpToDate) and the SECOND observes the action-cache hit
-## (status=asCacheHit). Either way, every per-app action must end in a
-## cache-effective state for the test to pass.
+## materialised the binaries. Binaries that `just build` wrote carry no
+## action-cache record, so the FIRST invocation here recompiles each app
+## (present outputs with no record behind them never make a cacheable
+## action up to date); one left by an earlier `repro build` is reused. The
+## SECOND invocation must find every per-app action in a cache-effective
+## state (status=asCacheHit or asUpToDate) for the test to pass.
 ##
 ## No failure classifier. This case used to run its non-zero exit past a
 ## ``looksLike…(output)`` predicate that matched the engine's own diagnostic

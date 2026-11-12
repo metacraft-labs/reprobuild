@@ -1,339 +1,262 @@
+## The `cargo` typed tool.
+##
+## The package declaration -- cargo's subcommands, flags and provisioning --
+## is in `cargo_cli.nim`, and everything it declares is re-exported from here
+## except `build`, `install` and `test`, which this module wraps.
+##
+## WHY THEY ARE WRAPPED. Each of the three edges has to agree with cargo about
+## where its target directory is: the declared output, the depfile globs the
+## engine reads as dependency evidence, and the action key all name it. A
+## `cli:` declaration carries one literal policy per subcommand, so it could
+## only say `target/...` relative to the action's working directory, and that
+## was wrong twice:
+##
+##   * A crate below the working directory (`--manifest-path rust/Cargo.toml`
+##     from the repository root) writes `rust/target/...`, which the globs never
+##     matched. The edge read no depfile and reported up-to-date after a real
+##     source change.
+##   * A host that sets `CARGO_TARGET_DIR` or `CARGO_BUILD_TARGET_DIR` (the CI
+##     runners on high-mem-server do, per runner) moved the output away from the
+##     declared one, so a cache miss failed with "exited 0 but did not produce
+##     its declared output".
+##
+## So the edge owns the directory: every call passes an explicit `--target-dir`
+## (the caller's `targetDir`, else `<crate directory>/target`), and the depfile
+## globs are resolved under that same directory. cargo ranks `--target-dir`
+## above the environment variables and a config file's `build.target-dir`
+## (https://doc.rust-lang.org/cargo/reference/config.html#buildtarget-dir), so
+## the flag makes the ambient settings inert, and the action no longer depends
+## on them.
+##
+## The wrapper parameter lists repeat the generated ones in `cargo_cli.nim`: a
+## flag added to the `cli:` spec has to be added here too, or it is not
+## reachable from a recipe.
+
+import std/[os, sequtils, strutils]
+
 import repro_project_dsl
-import repro_dsl_stdlib/packages_schema
-import repro_dsl_stdlib/rust_toolchain_pins
-export packages_schema
+import cargo_cli
+export cargo_cli except build, install, test
 
-# ---------------------------------------------------------------------------
-# Typed output: a cargo test binary that speaks the rust libtest CLI.
-#
-# `cargo test --no-run --message-format=json-render-diagnostics` builds the
-# integration-test + lib-test binaries under
-# `target/<profile>/deps/<crate>-<hash>` (a hashed filename libtest picks)
-# and emits one JSON line per produced binary so the recipe can wire the
-# resulting paths through the engine. The recipe surfaces each produced
-# binary as a `CargoTestBinary` and then calls `.run(filter = ...)` to
-# schedule a per-test execute edge.
-#
-# Mirrors the `NimUnittestBinary` shape documented in
-# Test-Edges-And-Parallel-Runner.milestones.org §M0/M1 — same `.run()`
-# convention, same `TestBinary`-style interface so a future
-# `ct-test-runner` adapter can drive cargo test binaries through the
-# same parallel scheduler that handles Nim ones today.
-# ---------------------------------------------------------------------------
+type CargoTool = typeof(cargo_cli.cargo)
+  ## The type of the `cargo` value the package block declares.
 
-type CargoTestBinary* = object
-  ## Typed handle returned by `cargo.test.build(...)`. Carries the
-  ## on-disk path of one cargo-test binary so `.run()` / `.runTest()`
-  ## can wire it into the input set of an execute edge and the engine
-  ## action-cache keys on the binary content.
-  path*: string
+func slashJoin(dir, name: string): string =
+  ## `dir/name` with a forward slash on every host. The engine and cargo both
+  ## accept it on Windows, and it keeps the declared globs spelled the same
+  ## everywhere, which the action key depends on.
+  if dir.len == 0: name
+  elif dir[^1] == '/': dir & name
+  else: dir & "/" & name
 
-package cargo:
-  provisioning:
-    # The Nix channel realizes rust-lang's own releases, the same
-    # archives as the ``tarball`` arms below, with their ELF loader and
-    # RUNPATH pointed into the pinned nixpkgs' glibc. The pinned nixpkgs'
-    # own cargo is 1.91, outside the range the ``tarball`` arms pin, and a
-    # nixpkgs-built rustc cannot load rust-lang's prebuilt ``rust-std`` for
-    # a cross target. See ``nix/rust-1.94.0/default.nix``. ``rustc`` and
-    # ``cargo`` name the same expression per release, so they realize one
-    # prefix.
-    #
-    # One arm per release, each declaring its ``version`` so a ``uses:``
-    # range selects among them; the default release is first, so an
-    # unranged or wide ``uses:`` takes it, as with the ``tarball`` arms.
-    nixPackage "reprobuild-stdlib-rust-1.94.0",
-      executablePath = "bin/cargo",
-      expressionFile = "nix/rust-1.94.0/default.nix",
-      version = RustRelease1940.version,
-      # The archive of THIS platform (decision 35(a)): see
-      # ``rust_toolchain_pins``.
-      lockIdentity = rustNixLockIdentity(RustRelease1940)
-    nixPackage "reprobuild-stdlib-rust-1.97.1",
-      executablePath = "bin/cargo",
-      expressionFile = "nix/rust-1.97.1/default.nix",
-      version = RustRelease1971.version,
-      lockIdentity = rustNixLockIdentity(RustRelease1971)
-    # Windows / non-Nix Linux: cargo ships as part of the Rust toolchain
-    # that Scoop's ``rustup-msvc`` installs via ``rustup-init.exe``.
-    # The bytes live at ``<scoop-persist>/rustup-msvc/.cargo/bin/cargo.exe``;
-    # scoop's persist mechanism junctions ``.cargo`` into the app dir
-    # (``<scoop-app>/<ver>/.cargo`` -> ``<scoop-persist>/.cargo``), and the
-    # reprobuild scoop adapter junctions ``<prefix>/bin`` ->
-    # ``<scoop-app>/<ver>``, so the binary is reachable at
-    # ``<prefix>/bin/.cargo/bin/cargo.exe``. Operators who haven't yet
-    # had rustup bootstrap a default toolchain should run
-    # ``rustup default stable-msvc`` once after the scoop install so
-    # the persist tree actually contains ``cargo.exe``.
-    scoopApp(bucket = "main", app = "rustup-msvc",
-      preferredVersion = ">=1.20",
-      executablePath = ".cargo/bin/cargo.exe",
-      requiresExecutionProfileChecksum = false)
-    # Direct-download: the upstream Rust standalone-distribution tarball
-    # ships cargo / rustc / rustfmt / rust-std under a single
-    # `rust-X.Y.Z-x86_64-pc-windows-msvc/` top-level dir, with each
-    # component nested under its own subdir (`cargo/`, `rustc/`,
-    # `rust-std-<triple>/`, `rustfmt-preview/`, ...) — the official
-    # `install.sh` MERGES these components into one flat prefix at
-    # install time, which is the only layout where rustc can find
-    # libstd at `<bin>/../lib/rustlib/<triple>/lib/`. With
-    # `stripComponents=1` we strip the outer
-    # `rust-1.94.0-<triple>/` dir; the realize loop then auto-detects
-    # the rust-installer layout (via the `rust-installer-version` +
-    # `components` sentinel files) and replays the upstream merge so
-    # `cargo.exe` lands at `<prefix>/bin/cargo.exe` and libstd at
-    # `<prefix>/lib/rustlib/<triple>/lib/`. See
-    # ``mergeRustInstallerComponents`` in
-    # ``repro_tool_profiles.nim`` for the merge implementation.
-    tarball url = "https://static.rust-lang.org/dist/rust-1.94.0-x86_64-pc-windows-msvc.tar.xz",
-      sha256 = "2e65904a4340df11a1ed8a86a7cc5c08e09f65453ce822ef36159c605a97f6a5",
-      archiveType = "tar.xz",
-      stripComponents = 1,
-      executablePath = "bin/cargo.exe",
-      packageId = "rust@1.94.0",
-      cpu = "x86_64",
-      os = "windows",
-      lockIdentity = "tarball:rust@1.94.0:sha256:2e65904a4340df11a1ed8a86a7cc5c08e09f65453ce822ef36159c605a97f6a5",
-      version = "1.94.0"
-    # Linux x86_64: same rust standalone-distribution tarball as the
-    # Windows entry — different triple. The rust-installer auto-merge
-    # in the realize loop flattens cargo / rustc / rust-std into a
-    # single prefix so cargo lands at `<prefix>/bin/cargo`.
-    tarball url = "https://static.rust-lang.org/dist/rust-1.94.0-x86_64-unknown-linux-gnu.tar.xz",
-      sha256 = "e8fa4185f3ef6ae32725ff638b1ecdbff28f5d651dc0b3111e2539350d03b15a",
-      archiveType = "tar.xz",
-      stripComponents = 1,
-      executablePath = "bin/cargo",
-      packageId = "rust@1.94.0",
-      cpu = "x86_64",
-      os = "linux",
-      lockIdentity = "tarball:rust@1.94.0:linux:sha256:e8fa4185f3ef6ae32725ff638b1ecdbff28f5d651dc0b3111e2539350d03b15a",
-      version = "1.94.0"
-    # macOS aarch64: same rust standalone-distribution tarball — different
-    # triple (Apple Silicon). All current GitHub-hosted macOS runners are
-    # M1/M2/M3, so aarch64 is the only macOS entry we ship. The realize
-    # loop's rust-installer auto-merge applies the same way as on Linux
-    # and Windows so `cargo` lands at `<prefix>/bin/cargo`.
-    tarball url = "https://static.rust-lang.org/dist/rust-1.94.0-aarch64-apple-darwin.tar.xz",
-      sha256 = "9e55893e014e6aa76924b4cc244a289ad56de4d89d3721fbd5c7f497b31ea33c",
-      archiveType = "tar.xz",
-      stripComponents = 1,
-      executablePath = "bin/cargo",
-      packageId = "rust@1.94.0",
-      cpu = "aarch64",
-      os = "macos",
-      lockIdentity = "tarball:rust@1.94.0:macos-aarch64:sha256:9e55893e014e6aa76924b4cc244a289ad56de4d89d3721fbd5c7f497b31ea33c",
-      version = "1.94.0"
-    # GM4b: archive realizations formerly held by the retired
-    # `VersionedProvisioning` catalog record (see the conflict notes
-    # in the Gradual-Nix-To-Reprobuild-Migration GM4b milestone).
-    tarball url = "https://static.rust-lang.org/dist/rust-1.94.0-x86_64-apple-darwin.tar.xz",
-      sha256 = "63fe27931d4b8da0b0069f13d4d2c04792203a5cabb4df17ff15495aaaab0ef7",
-      archiveType = "tar.xz",
-      executablePath = "cargo/bin/cargo",
-      version = "1.94.0",
-      packageId = "cargo@1.94.0",
-      extractPath = "rust-1.94.0-x86_64-apple-darwin",
-      preInstall = preInstallAction("move-item", "$dir/rust-std-x86_64-pc-windows-msvc/lib/rustlib/x86_64-pc-windows-msvc/lib", "$dir/rustc/lib/rustlib/x86_64-pc-windows-msvc/lib", false, ""),
-      preInstall = preInstallAction("move-item", "$dir/rust-std-x86_64-unknown-linux-gnu/lib/rustlib/x86_64-unknown-linux-gnu/lib", "$dir/rustc/lib/rustlib/x86_64-unknown-linux-gnu/lib", false, ""),
-      preInstall = preInstallAction("move-item", "$dir/rust-std-x86_64-apple-darwin/lib/rustlib/x86_64-apple-darwin/lib", "$dir/rustc/lib/rustlib/x86_64-apple-darwin/lib", false, ""),
-      cpu = "x86_64",
-      os = "macos"
-    # Rust 1.97.1: the same four archives of a newer release, for a recipe
-    # whose ``uses:`` range excludes 1.94 (a crate that needs a newer stable
-    # compiler). Declared after the 1.94.0 arms, so an unranged or wide
-    # ``uses:`` keeps taking 1.94.0 (selection takes the first eligible arm
-    # in declaration order). Digests: upstream's ``<archive>.sha256``, read
-    # 2026-11-11, equal to channel-rust-1.97.toml's ``xz_hash`` rows.
-    tarball url = "https://static.rust-lang.org/dist/rust-1.97.1-x86_64-pc-windows-msvc.tar.xz",
-      sha256 = "a1cdfcfd1e351ba21823d6bd454a297fa95190abca2f432a372e3c47bef8b863",
-      archiveType = "tar.xz",
-      stripComponents = 1,
-      executablePath = "bin/cargo.exe",
-      packageId = "rust@1.97.1",
-      cpu = "x86_64",
-      os = "windows",
-      lockIdentity = "tarball:rust@1.97.1:sha256:a1cdfcfd1e351ba21823d6bd454a297fa95190abca2f432a372e3c47bef8b863",
-      version = "1.97.1"
-    tarball url = "https://static.rust-lang.org/dist/rust-1.97.1-x86_64-unknown-linux-gnu.tar.xz",
-      sha256 = "88f28fa9af20594179f85d6df67078dfd6fa93e2f6da5e1e9b0ac4997988ca4f",
-      archiveType = "tar.xz",
-      stripComponents = 1,
-      executablePath = "bin/cargo",
-      packageId = "rust@1.97.1",
-      cpu = "x86_64",
-      os = "linux",
-      lockIdentity = "tarball:rust@1.97.1:linux:sha256:88f28fa9af20594179f85d6df67078dfd6fa93e2f6da5e1e9b0ac4997988ca4f",
-      version = "1.97.1"
-    tarball url = "https://static.rust-lang.org/dist/rust-1.97.1-aarch64-apple-darwin.tar.xz",
-      sha256 = "c9748cc86107734a2a024069908a895de7caa2d37062fb641eef9f756938ace2",
-      archiveType = "tar.xz",
-      stripComponents = 1,
-      executablePath = "bin/cargo",
-      packageId = "rust@1.97.1",
-      cpu = "aarch64",
-      os = "macos",
-      lockIdentity = "tarball:rust@1.97.1:macos-aarch64:sha256:c9748cc86107734a2a024069908a895de7caa2d37062fb641eef9f756938ace2",
-      version = "1.97.1"
-    tarball url = "https://static.rust-lang.org/dist/rust-1.97.1-x86_64-apple-darwin.tar.xz",
-      sha256 = "891c32ea77b750dccc7fb0ea98e3feb9db3d29fe0cfea5907d002f270c59cf58",
-      archiveType = "tar.xz",
-      executablePath = "cargo/bin/cargo",
-      version = "1.97.1",
-      packageId = "cargo@1.97.1",
-      extractPath = "rust-1.97.1-x86_64-apple-darwin",
-      preInstall = preInstallAction("move-item", "$dir/rust-std-x86_64-pc-windows-msvc/lib/rustlib/x86_64-pc-windows-msvc/lib", "$dir/rustc/lib/rustlib/x86_64-pc-windows-msvc/lib", false, ""),
-      preInstall = preInstallAction("move-item", "$dir/rust-std-x86_64-unknown-linux-gnu/lib/rustlib/x86_64-unknown-linux-gnu/lib", "$dir/rustc/lib/rustlib/x86_64-unknown-linux-gnu/lib", false, ""),
-      preInstall = preInstallAction("move-item", "$dir/rust-std-x86_64-apple-darwin/lib/rustlib/x86_64-apple-darwin/lib", "$dir/rustc/lib/rustlib/x86_64-apple-darwin/lib", false, ""),
-      cpu = "x86_64",
-      os = "macos"
+func slashed(path: string): string =
+  ## `path` with forward slashes, so a Windows spelling (`rust\\Cargo.toml`)
+  ## is split into directory and file name the same way on every host.
+  path.replace('\\', '/')
 
-  executable cargo:
-    cli:
-      # cargo does not compile or link Rust itself. It runs ``rustc``, and
-      # ``rustc`` runs a C compiler driver (``cc``) as its linker. Both are
-      # found by BARE NAME on the edge's PATH, so they are this tool's
-      # sub-tools: a recipe that declares ``"rustc"`` and its C compiler
-      # (``"gcc"`` on Linux, ``"clang"`` on macOS) in ``uses:`` gets their
-      # resolved directories on every cargo edge's PATH. A name the recipe
-      # does not declare is inert. Tools a crate's build script runs are
-      # the recipe's to declare at the call site; they are not cargo's.
-      # ``zig`` is the cross C toolchain of a ``--target`` build
-      # (``adapters/cross_zig``); ``cmake``, ``perl`` and ``make`` are what
-      # the build scripts of the common ``*-sys`` crates run (``aws-lc-sys``
-      # configures with cmake, ``openssl-src`` with perl + make).
-      subTools "rustc", "gcc", "clang", "zig", "cmake", "perl", "make"
+const DefaultTargetDirName = "target"
+  ## cargo's own default target directory name, relative to its crate.
 
-      # MR16: cargo + rustc emit one Make-format ``.d`` depfile per
-      # crate under ``target/<profile>/deps/<crate>-<hash>.d`` (the
-      # hash depends on compiler-input content so the recipe cannot
-      # enumerate them at DSL-eval time). Each subcmd below declares
-      # both the debug and release deps dirs as glob patterns; the
-      # engine's evidence collector expands each glob at action-end
-      # and parses every matching ``.d`` as a recognized make-depfile
-      # report. Only the profile dir cargo actually wrote to has
-      # files; the other glob legitimately expands to zero matches.
-      #
-      # This replaces the previous ``dependencyPolicy declaredOnly``
-      # opt-out (which bypassed dependency evidence entirely) with
-      # first-class evidence collection driven by cargo's own ``.d``
-      # outputs. The recognized-format gathering kind does NOT wrap
-      # subprocesses with the IAT-patching io-monitor shim, so the
-      # rustc-on-Windows monitor-shim crash class that motivated the
-      # original ``declaredOnly`` opt-out is still avoided.
+proc cargoTargetDir*(targetDir, crateDir: string): string =
+  ## The target directory a cargo edge builds in: `targetDir` when the caller
+  ## named one, else `<crateDir>/target`. An empty `crateDir` is the action's
+  ## working directory.
+  if targetDir.len > 0: targetDir
+  elif crateDir == ".": DefaultTargetDirName
+  else: slashJoin(crateDir, DefaultTargetDirName)
 
-      subcmd "build":
-        # The vendored-sources configuration, by path: cargo reads
-        # `.cargo/config.toml` from its WORKING directory upward, not from
-        # the `--manifest-path` directory
-        # (https://doc.rust-lang.org/cargo/reference/config.html#hierarchical-structure).
-        flag config is string, alias = "--config"
-        dependencyPolicy makeDepfile,
-          depfiles = ["target/debug/deps/*.d", "target/release/deps/*.d"]
-        boolFlag locked is bool, alias = "--locked"
-        boolFlag release is bool, alias = "--release"
-        # ``--offline`` is what a from-source recipe's build is FOR: the
-        # dependency closure has already been vendored and the build must
-        # not reach the network, so a crate the vendor step missed has to
-        # fail here rather than be silently downloaded. Without the flag on
-        # this surface a recipe would be spelling it through a verbatim
-        # ``shell()``, which is exactly the hand-written acquisition the
-        # from-source tier exists to remove.
-        boolFlag offline is bool, alias = "--offline"
-        boolFlag noDefaultFeatures is bool, alias = "--no-default-features"
-        flag features is string, alias = "--features"
-        flag manifestPath is string,
-          alias = "--manifest-path",
-          role = input
-        flag targetDir is string,
-          alias = "--target-dir"
-        # Package / binary selectors: let a recipe restrict a virtual
-        # workspace build to one member crate + binary (a granular
-        # per-artifact edge) instead of building every member.
-        flag package is string, alias = "--package"
-        flag bin is string, alias = "--bin"
-        # ``--target <triple>``: build for another target. The compiled
-        # artefacts land under ``<target-dir>/<triple>/<profile>/``; cargo
-        # finds the target's standard library under rustc's sysroot
-        # (``lib/rustlib/<triple>/``) and the target's C toolchain through
-        # the ``CC_<triple>`` / ``CARGO_TARGET_<TRIPLE>_LINKER`` environment
-        # (``adapters/cross_zig`` renders both for a zig-driven cross build).
-        flag target is string, alias = "--target"
+proc cargoBuildDepfileGlobs*(targetDir, target: string): seq[string] =
+  ## The depfile globs of a `cargo build` or `cargo install` whose target
+  ## directory is `targetDir` (and whose `--target` triple is `target`, or
+  ## empty). Only the profile cargo actually built has files; the other glob
+  ## legitimately expands to zero matches.
+  ##
+  ## These are the dep-info files cargo places beside each artefact it links
+  ## (`<target-dir>/<profile>/<artefact>.d`), not the per-crate ones under
+  ## `deps/`. Both list the sources of the build, but rustc writes the `deps/`
+  ## ones with paths relative to the cargo workspace root, which the engine
+  ## would resolve against the action's working directory: for a crate below
+  ## it (`--manifest-path rust/Cargo.toml`) they name files that do not exist
+  ## there. cargo renders the linked artefacts' files with absolute paths.
+  let root = if target.len > 0: slashJoin(targetDir, target) else: targetDir
+  @[slashJoin(root, "debug/*.d"), slashJoin(root, "release/*.d")]
 
-      subcmd "install":
-        # The vendored-sources configuration, by path: cargo reads
-        # `.cargo/config.toml` from its WORKING directory upward, not from
-        # the `--manifest-path` directory
-        # (https://doc.rust-lang.org/cargo/reference/config.html#hierarchical-structure).
-        flag config is string, alias = "--config"
-        ## The canonical way to land a built binary in an FHS-shaped tree:
-        ## ``cargo install --root <dir>`` writes ``<dir>/bin/<binary>``,
-        ## which is what the standard component layout already expects.
-        ## Hand-copying out of ``target/<profile>/`` would have to guess
-        ## which of the profile directory's many files are the package's
-        ## binaries — cargo knows, from the manifest.
-        ##
-        ## Sharing ``--target-dir`` with the build subcommand above is what
-        ## keeps this from being a second full compile: cargo reuses the
-        ## artefacts it already produced.
-        dependencyPolicy makeDepfile,
-          depfiles = ["target/debug/deps/*.d", "target/release/deps/*.d"]
-        boolFlag locked is bool, alias = "--locked"
-        boolFlag offline is bool, alias = "--offline"
-        boolFlag noTrack is bool, alias = "--no-track"
-        # Without ``--force`` cargo refuses a root that already holds the
-        # binary (``binary … already exists in destination``), so an edge
-        # re-run after an input changed would fail on its own previous
-        # output.
-        boolFlag force is bool, alias = "--force"
-        boolFlag noDefaultFeatures is bool, alias = "--no-default-features"
-        flag features is string, alias = "--features"
-        flag path is string, alias = "--path", role = input
-        flag root is string, alias = "--root"
-        flag targetDir is string,
-          alias = "--target-dir"
-        # The same ``--target`` as ``build``, so the install reuses the
-        # cross artefacts the build produced instead of compiling the host
-        # variant a second time.
-        flag target is string, alias = "--target"
+proc cargoTestDepfileGlobs*(targetDir: string): seq[string] =
+  ## The depfile globs of a `cargo test --no-run` whose target directory is
+  ## `targetDir`. cargo does not link test executables into the profile
+  ## directory, so only the per-crate `deps/` files exist for them. Their
+  ## paths are relative to the cargo workspace root, so `test` runs the edge in
+  ## the manifest's directory (see there) to make them resolve.
+  @[slashJoin(targetDir, "debug/deps/*.d"),
+    slashJoin(targetDir, "release/deps/*.d")]
 
-      subcmd "test":
-        ## `cargo test` orchestrates build + run in one verb. The
-        ## reprobuild-native shape ALWAYS passes `--no-run` from this
-        ## subcommand so the action emits the test binaries as outputs;
-        ## individual tests are then driven via the typed handle's
-        ## `.run()` method below. Direct `cargo test` invocations that
-        ## run inside this subcommand without `--no-run` are still
-        ## supported (the legacy `just test` carries them) but they do
-        ## not produce reusable typed outputs.
-        ##
-        ## MR16: ``cargo test --no-run`` writes the same
-        ## ``target/<profile>/deps/<crate>-<hash>.d`` files for the
-        ## test crates as ``cargo build`` does for normal crates, so
-        ## the same multi-glob spec applies.
-        dependencyPolicy makeDepfile,
-          depfiles = ["target/debug/deps/*.d", "target/release/deps/*.d"]
-        boolFlag locked is bool, alias = "--locked"
-        boolFlag release is bool, alias = "--release"
-        boolFlag noRun is bool, alias = "--no-run"
-        # `cargo test` accepts --no-default-features exactly as `cargo build`
-        # does, and a crate whose default features are host-specific has to be
-        # able to test the same feature set it builds. `build` and `install`
-        # above carry the flag; its absence here was the gap.
-        boolFlag noDefaultFeatures is bool, alias = "--no-default-features"
-        flag manifestPath is string,
-          alias = "--manifest-path",
-          role = input
-        flag targetDir is string,
-          alias = "--target-dir"
-        # Same selectors as `build`: a test edge has to be able to target
-        # the member crate / binary its build edge built.
-        flag package is string, alias = "--package"
-        flag bin is string, alias = "--bin"
-        flag testBinaryPath is string,
-          alias = "--test",
-          role = output
-        outputs testBinary is CargoTestBinary, testBinaryPath
+proc cargoDepfilePolicy(policy: BuildActionDependencyPolicy;
+                        globs: seq[string]): BuildActionDependencyPolicy =
+  ## `policy` with `globs` filled in, unless the caller
+  ## supplied a policy of their own: only the bare depfile policy, which is
+  ## the default of the wrappers below, is completed.
+  if policy.kind == bdpMakeDepfile and policy.depfiles.len == 0:
+    makeDepfilePolicy(depfiles = globs,
+      ignoredInputPrefixes = policy.ignoredInputPrefixes,
+      captureBreadth = policy.captureBreadth,
+      suppressMonitorShimSeed = policy.suppressMonitorShimSeed)
+  else:
+    policy
+
+proc build*(pkg: CargoTool;
+            config = "";
+            locked = false;
+            release = false;
+            offline = false;
+            noDefaultFeatures = false;
+            features = "";
+            manifestPath = "";
+            targetDir = "";
+            package = "";
+            bin = "";
+            target = "";
+            actionId = "";
+            deps: openArray[string] = [];
+            after: openArray[BuildActionDef] = [];
+            extraInputs: openArray[string] = [];
+            extraOutputs: openArray[string] = [];
+            extraEnv: openArray[(string, string)] = [];
+            depfile = "";
+            cacheable = true;
+            actionCachePolicy = defaultActionCachePolicy();
+            commandStatsId = "";
+            dependencyPolicy = makeDepfilePolicy()): BuildActionDef
+    {.discardable.} =
+  ## `cargo build`. The target directory is `targetDir`, else the `target`
+  ## directory beside `manifestPath` (the working directory's, without one).
+  let effectiveTargetDir = cargoTargetDir(targetDir, parentDir(manifestPath.slashed))
+  cargo_cli.build(pkg, config = config, locked = locked, release = release,
+    offline = offline, noDefaultFeatures = noDefaultFeatures,
+    features = features, manifestPath = manifestPath,
+    targetDir = effectiveTargetDir, package = package, bin = bin,
+    target = target, actionId = actionId, deps = deps, after = after,
+    extraInputs = extraInputs, extraOutputs = extraOutputs,
+    extraEnv = extraEnv, depfile = depfile, cacheable = cacheable,
+    actionCachePolicy = actionCachePolicy, commandStatsId = commandStatsId,
+    dependencyPolicy = cargoDepfilePolicy(dependencyPolicy,
+      cargoBuildDepfileGlobs(effectiveTargetDir, target)))
+
+proc install*(pkg: CargoTool;
+              config = "";
+              locked = false;
+              offline = false;
+              noTrack = false;
+              force = false;
+              noDefaultFeatures = false;
+              features = "";
+              path = "";
+              root = "";
+              targetDir = "";
+              target = "";
+              actionId = "";
+              deps: openArray[string] = [];
+              after: openArray[BuildActionDef] = [];
+              extraInputs: openArray[string] = [];
+              extraOutputs: openArray[string] = [];
+              extraEnv: openArray[(string, string)] = [];
+              depfile = "";
+              cacheable = true;
+              actionCachePolicy = defaultActionCachePolicy();
+              commandStatsId = "";
+              dependencyPolicy = makeDepfilePolicy()): BuildActionDef
+    {.discardable.} =
+  ## `cargo install`. The target directory is `targetDir`, else the `target`
+  ## directory of the crate at `path`; a recipe that wants the install to
+  ## reuse a build edge's artefacts passes that edge's `targetDir`.
+  let effectiveTargetDir = cargoTargetDir(targetDir, path)
+  cargo_cli.install(pkg, config = config, locked = locked, offline = offline,
+    noTrack = noTrack, force = force, noDefaultFeatures = noDefaultFeatures,
+    features = features, path = path, root = root,
+    targetDir = effectiveTargetDir, target = target, actionId = actionId,
+    deps = deps, after = after, extraInputs = extraInputs,
+    extraOutputs = extraOutputs, extraEnv = extraEnv, depfile = depfile,
+    cacheable = cacheable, actionCachePolicy = actionCachePolicy,
+    commandStatsId = commandStatsId,
+    dependencyPolicy = cargoDepfilePolicy(dependencyPolicy,
+      cargoBuildDepfileGlobs(effectiveTargetDir, target)))
+
+proc test*(pkg: CargoTool;
+           locked = false;
+           release = false;
+           noRun = false;
+           noDefaultFeatures = false;
+           manifestPath = "";
+           targetDir = "";
+           package = "";
+           bin = "";
+           testBinaryPath = "";
+           actionId = "";
+           deps: openArray[string] = [];
+           after: openArray[BuildActionDef] = [];
+           extraInputs: openArray[string] = [];
+           extraOutputs: openArray[string] = [];
+           extraEnv: openArray[(string, string)] = [];
+           depfile = "";
+           cacheable = true;
+           actionCachePolicy = defaultActionCachePolicy();
+           commandStatsId = "";
+           dependencyPolicy = makeDepfilePolicy()): CargoTestEdge
+    {.discardable.} =
+  ## `cargo test`. The target directory is `targetDir`, else the `target`
+  ## directory beside `manifestPath` (the working directory's, without one).
+  ##
+  ## A manifest below the recipe root (`rust/Cargo.toml`) makes the edge run
+  ## IN that directory, as `cargo test` itself does. cargo does not link test
+  ## executables, so the only dependency evidence of the edge is rustc's
+  ## per-crate `deps/*.d`, whose source paths are relative to the cargo
+  ## workspace root, the manifest's directory; the engine resolves them against
+  ## the action's working directory, so they name the crate's sources only
+  ## when the two are the same. Every path of the call that cargo resolves
+  ## against its working directory (`--manifest-path`, `--target-dir`, the
+  ## extra outputs, the depfile globs) is re-spelled relative to it; declared
+  ## inputs (the manifest among them) keep the recipe-root spelling, because
+  ## the lowering materializes them against the recipe root.
+  let crateDir = parentDir(manifestPath.slashed)
+  let inCrateDir = crateDir notin ["", "."] and not manifestPath.isAbsolute and
+    not crateDir.startsWith("..")
+  proc fromCrateDir(path: string): string =
+    if not inCrateDir or path.len == 0 or path.isAbsolute: path
+    else: relativePath(path, crateDir, '/')
+  let effectiveTargetDir =
+    if inCrateDir:
+      cargoTargetDir(fromCrateDir(targetDir), "")
+    else:
+      cargoTargetDir(targetDir, crateDir)
+  result = cargo_cli.test(pkg, locked = locked, release = release,
+    noRun = noRun, noDefaultFeatures = noDefaultFeatures,
+    manifestPath = (if inCrateDir: extractFilename(manifestPath.slashed)
+                    else: manifestPath),
+    targetDir = effectiveTargetDir, package = package, bin = bin,
+    testBinaryPath = fromCrateDir(testBinaryPath), actionId = actionId,
+    deps = deps, after = after, extraInputs = extraInputs,
+    extraOutputs = (if inCrateDir: extraOutputs.mapIt(fromCrateDir(it))
+                    else: @extraOutputs),
+    extraEnv = extraEnv, depfile = depfile, cacheable = cacheable,
+    actionCachePolicy = actionCachePolicy, commandStatsId = commandStatsId,
+    dependencyPolicy = cargoDepfilePolicy(dependencyPolicy,
+      cargoTestDepfileGlobs(effectiveTargetDir)))
+  if inCrateDir:
+    setRegisteredActionCwd(result.action.id, acwdCustom, crateDir)
+    result.action.cwdKind = acwdCustom
+    result.action.cwdCustomPath = crateDir
+    # The manifest is an input, and inputs are materialized against the
+    # recipe root: put back the spelling the caller used, in the position the
+    # re-spelled flag held.
+    var inputs = result.action.inputs
+    for i in 0 ..< inputs.len:
+      if inputs[i] == extractFilename(manifestPath.slashed):
+        inputs[i] = manifestPath
+    setRegisteredActionInputs(result.action.id, inputs)
+    result.action.inputs = inputs
+    # The handle keeps the recipe-root spelling too: `.run()` takes its path
+    # as an input of its own edge, which runs in the recipe root.
+    if testBinaryPath.len > 0:
+      result.testBinary = CargoTestBinary(path: testBinaryPath)
 
 # ---------------------------------------------------------------------------
 # Manual wrapper on the `CargoTestBinary` typed output — emits one
@@ -347,7 +270,8 @@ package cargo:
 proc run*(self: CargoTestBinary; filter = "";
          actionId = ""; deps: openArray[string] = [];
          after: openArray[BuildActionDef] = [];
-         extraEnv: openArray[(string, string)] = []): BuildActionDef
+         extraEnv: openArray[(string, string)] = [];
+         targetDir = ""): BuildActionDef
     {.discardable.} =
   ## Schedules one cargo-test execute edge for this binary. When
   ## `filter` is non-empty, the binary is invoked with
@@ -365,6 +289,10 @@ proc run*(self: CargoTestBinary; filter = "";
   ## spawned test process. Useful for tests whose runtime needs
   ## additional env vars (e.g. cairo-corelib's ``CAIRO_CORELIB_DIR``)
   ## without resorting to a shell-wrapper indirection.
+  ##
+  ## ``targetDir`` names the target directory of the ``cargo.test --no-run``
+  ## build that produced the binary, for a handle whose ``path`` is not a
+  ## path into it; the default is the working directory's ``target``.
   var cliArgs: seq[PublicCliArg] = @[]
   cliArgs.add(inputArg("binary", self.path))
   if filter.len > 0:
@@ -376,18 +304,29 @@ proc run*(self: CargoTestBinary; filter = "";
     if actionId.len > 0: actionId
     else: defaultToolActionId(call)
   # MR16: the test-binary execute edge reuses the build-time ``.d``
-  # files left behind in ``target/<profile>/deps/`` by the
+  # files left behind in ``<target-dir>/<profile>/deps/`` by the
   # ``cargo.test --no-run`` build that produced this binary. The
   # binary's true source-input set lives in that depfile (cargo's
   # rustc invocation wrote one ``.d`` per crate the binary links),
   # so keying the execute edge on it correctly invalidates the run
   # whenever a source file the binary depends on changed since the
-  # last successful execution. We declare both the debug and release
-  # globs for the same reason the build subcmd does: at most one
-  # profile dir exists per workspace, the other glob legitimately
-  # expands to zero matches.
+  # last successful execution.
+  #
+  # A binary built into ``<target-dir>/<profile>/deps/`` names that
+  # directory itself, so the depfiles are the ``*.d`` beside it, wherever
+  # the build put its target directory. Otherwise both profile directories
+  # are declared, as in the build subcommand: at most one exists per
+  # workspace and the other glob legitimately expands to zero matches.
+  #
+  # The sources those files list are relative to the crate's directory and
+  # this edge runs in the recipe root, so they are not resolved here. That
+  # loses nothing: the binary is a declared input, and a changed source
+  # changes the binary, which invalidates this edge.
+  let binaryDir = parentDir(self.path)
+  let depfileGlobs =
+    if binaryDir.len > 0: @[slashJoin(binaryDir, "*.d")]
+    else: cargoTestDepfileGlobs(cargoTargetDir(targetDir, ""))
   result = recordToolInvocation(selectedActionId, call,
     deps = combineActionDeps(deps, after),
-    dependencyPolicy = makeDepfilePolicy(depfiles = [
-      "target/debug/deps/*.d", "target/release/deps/*.d"]),
+    dependencyPolicy = makeDepfilePolicy(depfiles = depfileGlobs),
     extraEnv = extraEnv)

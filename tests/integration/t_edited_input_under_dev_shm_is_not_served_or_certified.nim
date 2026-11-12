@@ -41,9 +41,11 @@ suite "an input under /dev/shm":
     else:
       let scratch = createTempDir("repro-devshm-", "", "/dev/shm")
       defer: removeDir(scratch)
+      let hadTmp = existsEnv("TMPDIR")
       let savedTmp = getEnv("TMPDIR")
       putEnv("TMPDIR", scratch)
-      defer: putEnv("TMPDIR", savedTmp)
+      defer:
+        if hadTmp: putEnv("TMPDIR", savedTmp) else: delEnv("TMPDIR")
       var fx = setupWorkspaceCertifyFixture("devshm", ["side"], buildLines)
       check fx.app.startsWith("/dev/shm/")
 

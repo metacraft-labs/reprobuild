@@ -23,6 +23,7 @@ suite "malformed and uncomputable content ids are distinct":
 
   test "t_content_id_malformed_and_uncomputable_are_distinct":
     let scratch = enterHermeticGit()
+    defer: leaveHermeticGit(scratch)
     let sha1Repo = newRepo(scratch, "sha1-repo", "sha1")
     let sha256Repo = newRepo(scratch, "sha256-repo", "sha256")
     for repo in [sha1Repo, sha256Repo]:
@@ -149,4 +150,3 @@ suite "malformed and uncomputable content ids are distinct":
     check m1.outcome == cioComputed
     check m1.id == m256.id
     check libraryTempLeftovers(scratch).len == 0
-    removeDir(scratch)

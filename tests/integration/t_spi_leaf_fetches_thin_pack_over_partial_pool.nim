@@ -69,6 +69,23 @@
 ##     exactly the state that fetch must survive. Positive control: the same
 ##     fetch with plain git in a plain ``--reference`` twin fails with
 ##     unresolved deltas.
+##   - ``clone_reference_of_partial_pool_borrows_and_carries_the_chain`` — the
+##     clone action with a ``referencePath`` to a ``blob:none`` pool whose
+##     tip commit's blob the pool only promises (issue ``2026-11-09-clone-
+##     reference-of-a-partial-pool-silently-falls-back-to-a-clone-that-
+##     borrows-nothing``). Positive control: a plain ``git clone --reference``
+##     fails its checkout with "unable to checkout working tree". The action
+##     succeeds, checks the blob out, leaves alternates naming the pool, the
+##     §3.4 promisor remote and a registry entry, and reports no fallback.
+##   - ``clone_reference_that_cannot_borrow_is_reported`` — the same with an
+##     unwritable pool: registration and the dissociating repack both fail,
+##     the checkout cannot be read, so the clone falls back to one that
+##     borrows nothing, and the action's result says so.
+##   - ``clone_reference_of_empty_upstream_keeps_the_borrow`` — an upstream
+##     with no commits leaves the new clone's HEAD unborn, so there is no tree
+##     to check out. The clone must still borrow from the pool (alternates
+##     kept), not be redone without the reference because ``reset --hard
+##     HEAD`` failed.
 ##
 ## No mocks: real ``git``, real repositories, and the real fetch and clone
 ## actions driven through the build engine (``runBuild``), as ``repro`` runs
@@ -557,3 +574,101 @@ suite "SPI: leaves of a partial-clone pool fetch thin packs":
         check samePathOnDisk(alternates[0], f.pool / "objects")
       check gitIn(clone, "config", "--get-regexp", "promisor").code != 0
       check poolState(f.pool) == poolBefore
+
+  test "clone_reference_of_partial_pool_borrows_and_carries_the_chain":
+    if findExe("git").len == 0:
+      skip("needs git on PATH")
+    else:
+      let root = createTempDir("repro-spi-clone-partial-pool-", "")
+      defer:
+        tearDown()
+        removeDir(root)
+      let cacheRoot = root / "cache"
+      let f = setUp(root, sharedBarePath(cacheRoot, "file://" & root / "up"),
+        owned = true, leafCount = 0)
+      # Upstream's tip is commit two: a commit the pool names whose big blob
+      # it only promises, which upstream therefore never sends.
+      discard must(f.up, "reset", "-q", "--hard", "HEAD~1")
+      let bigTwo = must(f.up, "rev-parse", "HEAD:big.txt")
+      doAssert not has(f.pool, bigTwo)
+      # Positive control: plain git cannot check this out.
+      let twin = gitIn(root, "clone", "--no-local", "--reference", f.pool,
+        f.url, root / "twin")
+      checkpoint("plain clone: " & twin.output)
+      check twin.code != 0
+      check twin.output.contains("unable to checkout working tree")
+
+      let (res, clone) = cloneThroughEngine(f, "main", f.pool,
+        singleBranch = false)
+      check res.results.len == 1
+      if res.results.len == 1:
+        if res.results[0].status != asSucceeded:
+          checkpoint("clone action: " & res.results[0].reason & ": " &
+            res.results[0].stderr)
+        check res.results[0].status == asSucceeded
+        check res.results[0].stderr == ""
+      check readFile(clone / "big.txt") == bigFile("extra\n")
+      let alternates = readAlternates(clone)
+      check alternates.len == 1
+      if alternates.len == 1:
+        check samePathOnDisk(alternates[0], f.pool / "objects")
+      check gitIn(clone, "config", "--get",
+        "remote.repro-pool.promisor").output == "true"
+      check clone in readFile(borrowersPath(f.pool))
+      check f.pool in poolsOfLeaf(clone, cacheRoot)
+
+  test "clone_reference_that_cannot_borrow_is_reported":
+    if findExe("git").len == 0:
+      skip("needs git on PATH")
+    elif not permissionsAreEnforced():
+      skip("needs POSIX permission bits enforced (not root, not Windows) " &
+        "to make the pool unwritable")
+    else:
+      let root = createTempDir("repro-spi-clone-unborrowable-", "")
+      defer:
+        tearDown()
+        removeDir(root)
+      let f = setUp(root, root / "repo-workspaces" / "clones" / "up.git",
+        owned = false, leafCount = 0)
+      discard must(f.up, "reset", "-q", "--hard", "HEAD~1")
+      let mode = getFilePermissions(f.pool)
+      setFilePermissions(f.pool, {fpUserRead, fpUserExec, fpGroupRead,
+        fpGroupExec, fpOthersRead, fpOthersExec})
+      defer: setFilePermissions(f.pool, mode)
+      let (res, clone) = cloneThroughEngine(f, "main", f.pool,
+        singleBranch = false)
+      check res.results.len == 1
+      if res.results.len == 1:
+        check res.results[0].status == asSucceeded
+        check res.results[0].stderr.contains("without borrowing from that pool")
+      check readFile(clone / "big.txt") == bigFile("extra\n")
+      check readAlternates(clone).len == 0
+
+  test "clone_reference_of_empty_upstream_keeps_the_borrow":
+    if findExe("git").len == 0:
+      skip("needs git on PATH")
+    else:
+      let root = createTempDir("repro-spi-clone-empty-upstream-", "")
+      defer:
+        tearDown()
+        removeDir(root)
+      let f = setUp(root, root / "repo-workspaces" / "clones" / "up.git",
+        owned = false, leafCount = 0)
+      # A second, empty upstream and a pool cloned from it.
+      let emptyUp = root / "empty-up"
+      createDir(emptyUp)
+      discard must(emptyUp, "init", "-q")
+      let emptyPool = root / "empty-pool.git"
+      discard must(root, "clone", "-q", "--bare", "--no-local",
+        "file://" & emptyUp, emptyPool)
+      var e = f
+      e.url = "file://" & emptyUp
+      let (res, clone) = cloneThroughEngine(e, "", emptyPool,
+        singleBranch = false)
+      # An empty clone has no HEAD to record, so the action itself fails at
+      # its HEAD probe; what is under test is that the borrow survived.
+      check res.results.len == 1
+      let alternates = readAlternates(clone)
+      check alternates.len == 1
+      if alternates.len == 1:
+        check samePathOnDisk(alternates[0], emptyPool / "objects")

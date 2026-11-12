@@ -8,6 +8,7 @@ wall clock.
 
 Run: python3 -m unittest tests/unit/test_attestation_collateral_monitor_landing.py
 """
+import datetime
 import shutil
 import subprocess
 import sys
@@ -18,8 +19,44 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 TOOL = ROOT / "tools" / "attestation_collateral_monitor.py"
 LEDGER_ROOT = ROOT / "tests" / "integration"
-# Seven Intel documents ended 2026-11-01 and the AMD lists 2026-11-09.
-AFTER_EXPIRY = "2026-11-12T00:00:00Z"
+ISO = "%Y-%m-%dT%H:%M:%SZ"
+# The ledger is a record that is refreshed as the vendors reissue their
+# collateral, so a date typed into this file goes stale with every refresh:
+# a fixed instant either predates a freshly pinned document (the monitor
+# then reports it not-yet-in-force, a contradiction that refuses a landing)
+# or no longer follows the expiry the test is about. The evaluation
+# instants below are therefore derived from the ledger's own window columns.
+LEDGER_ROW = "PcsTcbInfoSprJson"
+
+
+def _ledger_instants():
+    """(row's not_after, latest not_before over the whole ledger)."""
+    latest_start = None
+    row_end = None
+    for line in (LEDGER_ROOT / "attestation-fixture-ledger.tsv").read_text(
+            encoding="utf-8").splitlines():
+        f = line.split("\t")
+        if line.startswith("#") or len(f) != 10:
+            continue
+        if f[8] != "-":
+            start = datetime.datetime.strptime(f[8], ISO)
+            if latest_start is None or start > latest_start:
+                latest_start = start
+        if f[0] == LEDGER_ROW:
+            row_end = datetime.datetime.strptime(f[9], ISO)
+    assert row_end is not None, LEDGER_ROW + " is not in the ledger"
+    return row_end, latest_start
+
+
+def _iso(moment):
+    return moment.strftime(ISO)
+
+
+_ROW_END, _LATEST_START = _ledger_instants()
+# A day after the row stops being current; every pin has begun by then.
+AFTER_EXPIRY = _iso(_ROW_END + datetime.timedelta(days=1))
+# Ten days before it stops being current: inside the 30-day horizon.
+INSIDE_HORIZON = _iso(_ROW_END - datetime.timedelta(days=10))
 
 
 def run(*args, ledger_root=LEDGER_ROOT):
@@ -31,6 +68,15 @@ def run(*args, ledger_root=LEDGER_ROOT):
 
 
 class LandingVerdict(unittest.TestCase):
+    def test_the_derived_instants_fall_after_every_pin_begins(self):
+        # The premise of the two landing cases: at these instants nothing
+        # is from the future, so a refusal there would be a real finding.
+        for instant in (AFTER_EXPIRY, INSIDE_HORIZON):
+            self.assertGreater(
+                datetime.datetime.strptime(instant, ISO), _LATEST_START,
+                instant + " predates a pin that begins " + _iso(_LATEST_START)
+                + "; the row's window is too short to test the landing arm")
+
     def test_expired_pins_refuse_the_scheduled_run(self):
         code, out = run("--now", AFTER_EXPIRY)
         self.assertEqual(code, 1, out)
@@ -43,7 +89,7 @@ class LandingVerdict(unittest.TestCase):
         self.assertNotIn("  ! ", out)
 
     def test_due_for_refresh_is_a_notice_on_a_landing(self):
-        code, out = run("--now", "2026-10-25T00:00:00Z", "--landing")
+        code, out = run("--now", INSIDE_HORIZON, "--landing")
         self.assertEqual(code, 0, out)
         self.assertIn("~ ", out)
 

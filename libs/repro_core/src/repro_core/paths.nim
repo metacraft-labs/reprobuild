@@ -303,10 +303,13 @@ func isOrdinaryFileUnderRuntimeMount*(normalized: string): bool =
   ##   and secondary disks, projects and their dependencies included.
   ##
   ## Kept whether or not the path is inside the invocation's own trees
-  ## (`dropsAsVolatileRuntimeState`), because those trees are not every tree
-  ## a build reads: a sibling repository of the workspace, a dependency
-  ## checkout, an input named by absolute path are under none of them, and
-  ## dropping their reads serves a stale result when they change.
+  ## (`dropsAsVolatileRuntimeState`). Those trees are the build's roots and
+  ## its source trees (its workspace, the checkouts its lock pins), and a
+  ## build also reads files no tree of it contains: an input named by
+  ## absolute path, a tool installed there. The path alone says these places
+  ## hold ordinary files, the way `isXdgRuntimeDirPath` says it of
+  ## `/run/user/<uid>`, so dropping a read there could only serve a stale
+  ## result.
   const shmRoot = "/dev/shm/"
   if normalized.startsWith(shmRoot):
     let slash = normalized.find('/', shmRoot.len)
@@ -397,7 +400,8 @@ func dropsAsVolatileRuntimeState*(path: string; scope: VolatileScope): bool =
   ## state. True exactly when the path is under a volatile prefix
   ## (`isVolatileRuntimeStatePath`), is not in a place that holds only
   ## ordinary files (`isOrdinaryFileUnderRuntimeMount`), and is at or under
-  ## none of the invocation's own trees (`scope`).
+  ## none of the invocation's own trees (`scope`: its roots and the trees it
+  ## reads as source).
   ##
   ## THIS IS A SILENT DROP, and a wrong one is a stale SERVE: the action is
   ## fingerprinted as though it had never read the file. The decision used
@@ -408,13 +412,16 @@ func dropsAsVolatileRuntimeState*(path: string; scope: VolatileScope): bool =
   ## them is the project's and is kept, and a root that cannot be told apart
   ## from the runtime state around it is refused (`volatileRootRefusal`).
   ##
-  ## The places stay kept OUTSIDE the scope as well. The scope is the
-  ## invocation's own roots, not every tree it reads: a workspace sibling or
-  ## a dependency checkout under `/dev/shm/<dir>` is in none of them, and
-  ## dropping its reads was the original stale serve. What is left dropped
-  ## outside the scope is what a path cannot tell from runtime state: a flat
-  ## entry of `/dev/shm`, the rest of `/dev`, `/proc`, `/sys`, and `/run`
-  ## less `/run/user/<uid>` and `/run/media`.
+  ## The scope also holds the trees the build reads as source outside its
+  ## roots (the build engine's `BuildEngineConfig.sourceTrees`: the
+  ## workspace and its member repositories, the checkouts the lock pins, the
+  ## develop overrides), so a sibling repository on a mount at `/run/<dir>`
+  ## is kept as the project is. The places stay kept OUTSIDE the scope: they
+  ## are known by what they are, and a build reads files there that no tree
+  ## of it contains (an input named by absolute path). What is left dropped
+  ## is what neither the path nor the build can tell from runtime state: a
+  ## flat entry of `/dev/shm`, the rest of `/dev`, `/proc`, `/sys`, and
+  ## `/run` less `/run/user/<uid>`, `/run/media` and the build's trees.
   let normalized = path.replace('\\', '/')
   if not normalized.isVolatileRuntimeStatePath():
     return false

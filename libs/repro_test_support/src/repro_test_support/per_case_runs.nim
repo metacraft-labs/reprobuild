@@ -92,17 +92,24 @@ proc catalogCaseNames*(listJson: string): seq[string] =
     result.add(entry["name"].getStr())
 
 proc runEveryCaseInItsOwnProcess*(binary: string; env: StringTableRef;
-                                  resultDir: string): seq[CaseProcess] =
+                                  resultDir: string;
+                                  maxCases = high(int)): seq[CaseProcess] =
   ## Probe ``binary`` with ``--list-json`` and then run each case it lists
   ## with ``--run``, one process per case, sequentially. ``env`` is the
   ## complete child environment (``nil`` inherits this process's); each case
-  ## additionally gets ``NIMTEST_RESULT_FILE`` under ``resultDir``, which the
-  ## caller should keep OUTSIDE any directory it inspects for leftovers.
+  ## additionally gets ``NIMTEST_RESULT_FILE`` under ``resultDir``
+  ## (``case-<index>.json``, in catalog order), which the caller should keep
+  ## OUTSIDE any directory it inspects for leftovers.
+  ##
+  ## ``maxCases`` runs only the first that many cases of the catalog: ``0``
+  ## runs the probe alone, for a caller that judges what the probe itself
+  ## did, and a small number bounds a caller whose subject's cases are each
+  ## expensive and alike in what it checks.
   ##
   ## The probe is element 0 of the result, so a result of length 1 means the
-  ## binary registers no case on this platform; the caller decides what that
-  ## means. Raises when the probe itself fails, because "no cases ran" must
-  ## not read as "nothing leaked".
+  ## binary registers no case on this platform (or ``maxCases`` was 0); the
+  ## caller decides what that means. Raises when the probe itself fails,
+  ## because "no cases ran" must not read as "nothing leaked".
   createDir(resultDir)
   let probe = runOne(binary, ["--list-json"], env, "",
                      resultDir / "list-json.out")
@@ -113,6 +120,8 @@ proc runEveryCaseInItsOwnProcess*(binary: string; env: StringTableRef;
       probe.errorOutput.strip())
   let names = catalogCaseNames(probe.output)
   for i, name in names:
+    if i >= maxCases:
+      break
     let caseEnv = newStringTable(modeCaseSensitive)
     if env == nil:
       for k, v in envPairs():

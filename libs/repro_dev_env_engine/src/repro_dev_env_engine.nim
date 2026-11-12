@@ -33,6 +33,12 @@ type
   DevEnvEdgeConfig* = object
     modulePath*: string
     projectRoot*: string
+    sourceTrees*: seq[string]
+      ## The trees outside its roots that this project's activation reads as
+      ## source (``BuildEngineConfig.sourceTrees``): its workspace, the
+      ## checkouts its lock pins, its develop overrides. The CLI derives them
+      ## (``buildSourceTrees``); empty leaves the volatile-path scope to the
+      ## declared roots.
     outDir*: string
     workDir*: string
     publicCliPath*: string
@@ -319,6 +325,7 @@ proc engineConfig(config: DevEnvEdgeConfig): BuildEngineConfig =
   # direction.
   result.filesystemRoots = declaredFilesystemRoots(config.projectRoot,
     config.workDir, resolvedStoreRootOrEmpty(), outRoot = config.outDir)
+  result.sourceTrees = config.sourceTrees
   result.statsEnabled = config.statsEnabled
   result.progressCallback = config.progressCallback
   # A warm activation must stay on the no-op fast path even while it renders
@@ -691,11 +698,23 @@ const NixDevEnvEntropyJustification* =
   "across entries. This blesses ENTROPY from the `nix` image on the dev-env " &
   "introspection edge only."
 
+proc devEnvProtocolRoot*(outDir: string): string =
+  ## The introspection edge's protocol directory: request/response transcript
+  ## between the introspection helper and the provider binary.
+  outDir / "dev-env-protocol"
+
+proc devEnvForeignProgressPath*(protocolRoot: string): string =
+  ## Where a foreign dev-env capture forwards its producer's stderr while the
+  ## edge runs (`ForeignEnvProgressEnvVar` in the foreign-env stdlib). Under
+  ## the protocol directory because that is already excluded from the edge's
+  ## inputs and is serialised by the edge lock.
+  protocolRoot / "foreign-env.progress"
+
 proc devEnvIntrospectionAction(config: DevEnvEdgeConfig;
                                provider: ProviderCompileArtifact;
                                providerArtifactPath, providerArtifactId,
                                artifactPath: string): BuildAction =
-  let protocolRoot = config.outDir / "dev-env-protocol"
+  let protocolRoot = devEnvProtocolRoot(config.outDir)
   let weak = fingerprintText([
     "reprobuild.dev-env.introspection.v1",
     providerArtifactId,

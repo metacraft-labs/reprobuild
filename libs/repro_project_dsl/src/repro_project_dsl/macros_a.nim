@@ -4636,6 +4636,7 @@ const BundledStdlibSelectors* = [
   "xvfb-run",
   "xxhash",
   "yarn",
+  "zsh",
   "zstd",
   "zstd-dev",
 ]
@@ -4656,6 +4657,10 @@ const BundledStdlibSelectors* = [
   ## ``elixir``, ``mix``, ``iex``, ``rebar3``) is listed so a recipe can
   ## declare each executable its actions run
   ## (reprobuild-pm/issues/2026-11-07-the-stdlib-beam-packages-cannot-provision-erl-mix-or-rebar3.md).
+  ##
+  ## ``zsh`` is listed beside ``bash`` and ``sh`` so a recipe whose actions
+  ## run zsh can declare it instead of taking it from the caller's PATH
+  ## (reprobuild-pm/issues/2026-11-08-the-stdlib-has-no-zsh-package-so-a-recipe-cannot-provision-zsh.md).
 
 proc isBundledStdlibSelector*(selector: string): bool =
   selector in BundledStdlibSelectors

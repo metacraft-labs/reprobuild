@@ -35,7 +35,7 @@
 ## (``e2e_addon_bootstrap_uninstall_byte_identity``), with a negative
 ## control built with ``-d:reproAddonMutation=uninstall-skips-diversion-removal``.
 
-import std/[algorithm, json, os, posix, sets, strutils, times]
+import std/[algorithm, json, os, posix, sequtils, sets, strutils, times]
 
 import repro_core/host_apply_lock
 
@@ -279,6 +279,14 @@ type DiscardRecordWriter* = proc (path, text: string) {.closure.}
 proc atomicRecordWriter*(path, text: string) =
   writeFileAtomic(path, text, 0o600)
 
+proc retractDiscardRecord*(path: string) =
+  ## Withdraws the record of a discard that did not happen: the record
+  ## first, then its signature, so the signature never goes while the
+  ## record stays. Idempotent; a file that cannot be removed is left (a
+  ## crash can still leave one, which §13 decision 73 states).
+  try: removeFile(path) except OSError: discard
+  try: removeFile(path & DiscardRecordSigExt) except OSError: discard
+
 proc writeOverrideRecord(custody: CustodySite; dir: string;
                          objects: seq[string]; why: string;
                          writer: DiscardRecordWriter):
@@ -325,19 +333,18 @@ proc writeOverrideRecord(custody: CustodySite; dir: string;
   try:
     writer(result.path, result.text)
   except CatchableError as e:
-    # A signature is never deleted once its record is in place (round 7):
-    # when the record's write failed AFTER the rename (the directory sync),
-    # the record is at its name with its signature beside it, and both
-    # stay; the error is reported and nothing is discarded. Only a record
-    # that never reached its name has its signature removed.
-    let recordInPlace = fileExists(result.path) and
-      (try: readFile(result.path) == result.text except IOError: false)
-    if recordInPlace and not mutated("override-rollback-removes-sig"):
-      raise newException(OSError, "the record " & result.path & " and its " &
-        "signature are in place, but making them durable failed (" & e.msg &
-        "); both are kept")
-    try: removeFile(result.path & DiscardRecordSigExt) except OSError: discard
-    raise
+    # The discard does not happen, so no record of it may stay (round 8,
+    # option (c) of the issue 2026-11-08-discard-record-verifies-...): the
+    # record goes first, then its signature, so a record never exists
+    # without its signature. This covers a record that reached its name
+    # before its directory sync failed (round 7 kept both).
+    when not mutated("override-record-kept-on-failed-write"):
+      retractDiscardRecord(result.path)
+    else:
+      if not (fileExists(result.path) and (try: readFile(result.path) == result.text except IOError: false)):
+        try: removeFile(result.path & DiscardRecordSigExt) except OSError: discard
+    raise newException(OSError, "the discard record " & result.path &
+      " could not be made durable (" & e.msg & "); it was withdrawn")
 
 proc verifyDiscardRecord*(path: string; expectedKeyHex: string):
     tuple[ok: bool; why, keyHex: string; objects: seq[string]] =
@@ -442,6 +449,22 @@ proc storeEvidenceGate*(custody: CustodySite; opts: UninstallOptions;
       "writes and prints a signed record of each")
     result.errors.add("nothing was removed")
 
+proc withdrawUndoneDiscardRecord*(r: var UninstallResult;
+                                  pending: seq[string]) =
+  ## An uninstall that ends incomplete (drift or errors) with every
+  ## pending store-evidence object still in place discarded nothing, so
+  ## the record it wrote is withdrawn and not reported (round 8, §13
+  ## decision 73). The re-run writes its own. Once any object is gone the
+  ## record stays: it is then true.
+  if r.overrideRecord.len == 0 or (r.drift.len == 0 and r.errors.len == 0):
+    return
+  if not pending.allIt(fileExists(it) or dirExists(it)):
+    return
+  when not mutated("override-record-kept-after-failed-uninstall"):
+    retractDiscardRecord(r.overrideRecord)
+    r.overrideRecord = ""
+    r.overrideRecordText = ""
+
 proc runAddonUninstall*(opts: UninstallOptions): UninstallResult =
   let stateDir = if opts.stateDir.len > 0: opts.stateDir else: DefaultStateDir
   # The host-wide apply lock for the whole uninstall: it removes the store,
@@ -458,6 +481,10 @@ proc runAddonUninstall*(opts: UninstallOptions): UninstallResult =
   let evidenceKept = gate.pending
   result.overrideRecord = gate.overrideRecord
   result.overrideRecordText = gate.overrideRecordText
+  # §13 decision 73 (round 8): the record states a discard. An uninstall
+  # that returns incomplete with every pending object still in place has
+  # discarded nothing, so its record is withdrawn; the re-run writes its own.
+  defer: withdrawUndoneDiscardRecord(result, evidenceKept)
   if gate.errors.len > 0:
     result.errors.add(gate.errors)
     return

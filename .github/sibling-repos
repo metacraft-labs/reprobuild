@@ -229,7 +229,11 @@ reprobuild-packages
 # answers dlsym(RTLD_DEFAULT) relative to the caller (7a9b2f3), so a hook
 # library preloaded beside the monitor shim no longer makes every monitored
 # root a loss. Needs nim-shm-gset 7bc81ad (below). ac06360d is an ancestor.
-io-mon=7a9b2f331024f4bc0b952bcab89b1dc48525d804
+# Moved to 8fd53d43 (2026-11-12), io-mon's `agents` tip, with `io-mon-src` in
+# flake.nix and flake.lock: a macOS fork child of a multi-threaded process no
+# longer waits forever on a shim lock another thread held at the fork (8fd53d4).
+# 7a9b2f33 is an ancestor.
+io-mon=8fd53d43f0a4c25d54c9c49494ac7dac4f02d63f
 # `release.yml` overrides `nim-stackable-hooks-src` to THIS clone, so the
 # clone must be the revision the flake pins, or the release compiles the
 # monitor shim from different sources than every other build. Cloned at
@@ -245,7 +249,7 @@ nim-stackable-hooks
 # commits behind the pin.
 # Private auto-start requires the explicit endpoint policy in this revision;
 # keep release archives and CI overrides on the same API as the Nix pin.
-runquota=060f123a54db5a3c42ffd19bd6bce7085d6ed41a
+runquota=f9e1a4d3f3ba7840aefe56883127653af9c5a608
 nim-shm-queue
 nim-shm-gset=7bc81ad2440860a8a9254eb2757c585df9652438
 
@@ -302,3 +306,24 @@ test-certificates-spec=9ebbcb3c9e539f294dbe125dea87c445b270523e
 # scripts/run_addon_gate.sh resolves and every gate record carries; move
 # both together.
 gosti=24d481f29b2d350dcb95f702c55190823642d52a
+
+# The deployment repository (private; mainline `live`), cloned for ONE file:
+# `services/repro-deploy-manifest/render-deploy-manifest.py`, the independent
+# Python producer of the RDMF manifest format. It is the oracle of
+# libs/repro_deploy_agent/tests/t_rdmf_v3_cross_implementation_conformance.nim,
+# which finds it at ../infra/services/repro-deploy-manifest/ (findProducer),
+# runs it with the dev shell's RDMF_PYTHON, and -- with
+# RDMF_CONFORMANCE_REQUIRED=1, which the Test job sets -- fails rather than
+# skips when it is absent. Without this clone the cross-implementation half
+# never ran on CI.
+#
+# Cloned rather than vendored: reprobuild is public and the producer is not,
+# and a vendored copy would be a second record of it that the deployment's
+# own changes do not move. Pinned to an exact revision rather than `live`
+# because `live` moves with every deployment merge, and an encoder change
+# there would turn this suite red (or green) under a commit that changed
+# nothing here; moving the pin is how a new producer revision is adopted.
+# The test's mutations patch the producer's source text, so check them
+# (RDMF_CONFORMANCE_MUTATION=python-omits-closure-digests and
+# python-lists-default must each go red) when you move it.
+infra=037e029d66f1fb577928e61a29e22e4ae399cece

@@ -45,5 +45,35 @@ package unselectedExclusionCycleFixture:
       outputs = ["build/cycle-kept.stamp"])
     discard collect("test", [member])
 
+# A ``default`` member whose closure reaches a ``test`` member, and a
+# ``test`` collection that nests another collection holding a second member.
+package unselectedExclusionDefaultFixture:
+  build:
+    discard buildAction("dflt.product",
+      inlineExecCall(["/bin/true", "product"]),
+      outputs = ["build/dflt-product.stamp"])
+    let helper = buildAction("dflt.helper",
+      inlineExecCall(["/bin/true", "helper"]),
+      outputs = ["build/dflt-helper.stamp"])
+    let direct = buildAction("dflt.test_direct",
+      inlineExecCall(["/bin/true", "direct"]),
+      outputs = ["build/dflt-test-direct.stamp"])
+    let nested = buildAction("dflt.test_nested",
+      inlineExecCall(["/bin/true", "nested"]),
+      outputs = ["build/dflt-test-nested.stamp"])
+    let consumer = buildAction("dflt.consumer",
+      inlineExecCall(["/bin/true", "consumer"]),
+      deps = [direct.id],
+      outputs = ["build/dflt-consumer.stamp"])
+    let nestedConsumer = buildAction("dflt.nested_consumer",
+      inlineExecCall(["/bin/true", "nested-consumer"]),
+      deps = [nested.id],
+      outputs = ["build/dflt-nested-consumer.stamp"])
+    let inner = collect("test-inner", [nested])
+    discard collect("test", [direct], [inner])
+    discard collect("opt-in", [consumer, nestedConsumer])
+    discard collect("default", [helper, consumer, nestedConsumer])
+
 export buildUnselectedExclusionFixturePackage
 export buildUnselectedExclusionCycleFixturePackage
+export buildUnselectedExclusionDefaultFixturePackage

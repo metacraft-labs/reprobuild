@@ -344,7 +344,15 @@
       # Guarded by tests/e2e/io-monitor/
       # t_inherited_preload_hook_library_keeps_root_monitored.nim. Needs
       # nim-shm-gset 7bc81ad (below) for `emitNoGrow`.
-      url = "github:metacraft-labs/io-mon/7a9b2f331024f4bc0b952bcab89b1dc48525d804";
+      # Bumped 7a9b2f33 -> 8fd53d43 (2026-11-12, io-mon `agents`): brings 8fd53d4,
+      # the macOS shim's fork-child lock fix, and c9f87d7 on the way. A fork child
+      # of a multi-threaded process inherited a shim lock another thread held at
+      # the fork and waited on it forever in its first close or dup2 (hung cargo
+      # and go build children under repro build on macOS; reprobuild-pm issue
+      # 2026-11-12-io-mon-macos-shim-deadlocks-a-fork-child-on-its-own-fd-lock).
+      # Such a child now skips the shim's tables until exec and reports the skip
+      # as event-loss.
+      url = "github:metacraft-labs/io-mon/8fd53d43f0a4c25d54c9c49494ac7dac4f02d63f";
       flake = false;
     };
     nim-shm-gset-src = {
@@ -938,7 +946,7 @@
     # Homebrew record (Provisioning-Contributions.md §"Homebrew bridge
     # records"). Move the pin when the catalog's records change.
     reprobuild-brew-packages-src = {
-      url = "github:metacraft-labs/reprobuild-brew-packages/49f4057f05b2ebd69d764208279ad5c8b1379fab";
+      url = "github:metacraft-labs/reprobuild-brew-packages/8b4838120c2dc515e9ae1a5684de8906b4e97c33";
       flake = false;
     };
   };
@@ -2934,9 +2942,11 @@
               #   * ``strace`` -- scripts/write_helper_deps.sh traces each
               #     helper's compile to list its staticRead inputs and C
               #     headers, and writes no list without it, so `just build`
-              #     fails and the tests refuse the helper binaries. Its
-              #     `nix build nixpkgs#strace` fallback is not a substitute
-              #     on CI: Test and Lint both stopped there.
+              #     fails and the tests refuse the helper binaries. It is the
+              #     strace that path mode resolves for repro.nim's
+              #     `nativeBuildDeps:` entry too (the helper-list edge of
+              #     `repro build .#apps`), so the graph takes this pinned
+              #     one, not the host's.
               pkgs.iproute2
               pkgs.nftables
               pkgs.strace
@@ -2998,6 +3008,19 @@
               # happened to leave behind. Respects an operator override.
               export GOSTI_OVMF_CODE="''${GOSTI_OVMF_CODE:-${pkgs.OVMF.fd}/FV/OVMF_CODE.fd}"
               export GOSTI_OVMF_VARS="''${GOSTI_OVMF_VARS:-${pkgs.OVMF.fd}/FV/OVMF_VARS.fd}"
+              # RDMF cross-implementation conformance
+              # (libs/repro_deploy_agent/tests/
+              # t_rdmf_v3_cross_implementation_conformance.nim): the Python
+              # producer it runs imports `cryptography` at load, and the
+              # test's default interpreter, the ambient `python3`, has no
+              # such package on a CI runner, so every case skipped there.
+              # Name an interpreter that has it. Exported by path rather than
+              # added to `packages`: a second `python3` ahead on PATH would
+              # change the interpreter of every other script this shell runs.
+              # Respects an operator override.
+              export RDMF_PYTHON="''${RDMF_PYTHON:-${
+                pkgs.python3.withPackages (p: [ p.cryptography ])
+              }/bin/python3}"
             '';
           };
 

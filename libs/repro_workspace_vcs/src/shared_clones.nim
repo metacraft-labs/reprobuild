@@ -3682,6 +3682,24 @@ proc registerLeafWithPool*(gitBin, leaf, pool: string): string =
       return "could not register " & leaf & " in " & borrowersPath(pool)
     return ensureLeafPoolConfig(gitBin, leaf, pool)
 
+proc ensureBorrowedPoolChain*(gitBin, repo, source: string): string =
+  ## §3.4 "A repository one level removed": ``repo`` borrows ``source``'s
+  ## objects (``git clone --shared``), and through ``source``'s alternates
+  ## those of the pool ``source`` is a leaf of. Git follows nested alternates
+  ## when it reads, but it lazily fetches only through a promisor remote of
+  ## the repository doing the read, and a clone copies none of ``source``'s
+  ## config. A blob the partial pool only promises is then unreadable in
+  ## ``repo``, and ``git checkout`` reports it on stderr, leaves the file out
+  ## and exits 0. So ``repo`` gets the §3.4/§3.5 rows naming that pool, as a
+  ## leaf would. It is not registered with the pool (§3.2): every ref it holds
+  ## is one of ``source``'s, which is. Returns "" on success (also when
+  ## ``source`` borrows from no partial pool), otherwise the diagnostic.
+  for pool in poolsOfLeaf(source):
+    # A pool whose directory is gone (§4.5) cannot serve anything; configuring
+    # it would recreate ``<pool>/repro`` and nothing else.
+    if dirExists(pool / "objects") and repoIsPartialClone(gitBin, pool):
+      return ensureLeafPoolConfig(gitBin, repo, pool)
+
 # -- migration (§5) -----------------------------------------------------------
 
 type

@@ -373,9 +373,12 @@ suite "M9.R.83 install mirror emitted action shape":
         check toolName in mirror.toolIdentityRefs
       for dep in ["nativeMirrorDep", "buildMirrorDep", "runtimeMirrorDep"]:
         check dep in mirror.toolIdentityRefs
-        check (scratch / dep / ".repro/output/install/usr/lib").replace("\\", "/") in script
-        check (scratch / dep / ".repro/output/install" /
-          m9r30PropagatedManifestName).replace("\\", "/") in script
+        # A sibling under the recipes root is listed relative to it (`@` marks
+        # that), the root being stated once for the whole list.
+        check ("\"@/" & dep & "/.repro/output/install/usr/lib\"") in script
+        check ("\"@/" & dep & "/.repro/output/install/" &
+          m9r30PropagatedManifestName & "\"") in script
+        check (scratch / dep).replace("\\", "/") notin script
       check (projectRoot / ".repro/output/install" /
         m9r30PropagatedManifestName).replace("\\", "/") in script
       check sidecar in mirror.outputs
