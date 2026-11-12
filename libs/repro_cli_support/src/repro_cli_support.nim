@@ -25764,10 +25764,12 @@ when not defined(windows):
     ## invocation started admit them.
     ##
     ## THE DAEMON OUTLIVES THIS INVOCATION and is shared by every invocation
-    ## of the user, so it is started detached from it (a new session, `/`,
-    ## `/dev/null` and its log, no descriptor above 2;
-    ## `spawnDetachedUserDaemon`), and nothing here ever stops it once it has
-    ## answered: it exits by itself after `idleSeconds` with no client.
+    ## of the user, so it is started detached from it (not a child of this
+    ## process, a new session, `/`, `/dev/null` and its log, no descriptor
+    ## above 2; `spawnDetachedUserDaemon`), and nothing here ever stops it
+    ## once it has answered: it exits by itself after `idleSeconds` with no
+    ## client. Not being this process's child is what keeps it from becoming
+    ## the child of the command `repro exec` replaces this process with.
     ##
     ## On success this invocation HOLDS a connection to it (the readiness
     ## probe is the hold itself, `holdRunQuotaDaemon`), so it cannot idle out
@@ -25780,21 +25782,28 @@ when not defined(windows):
     args.add(budget.args)
     let logPath = socket.parentDir / userEndpointLogName
     let logFd = openUserDaemonLog(logPath)
-    var pid = 0
+    var launch: UserDaemonLaunch
     try:
-      pid = spawnDetachedUserDaemon(runquotad, args, logFd)
+      launch = spawnDetachedUserDaemon(runquotad, args, logFd)
     finally:
       closeUserDaemonLog(logFd)
     # Raises, with the log, when the daemon exits before it listens or is
-    # still not listening at the ceiling; it has been reaped then.
-    waitForUserDaemon(pid, runquotad, socket, logPath,
+    # still not listening at the ceiling. Returned or raised, the
+    # intermediate process that started it has been released and reaped:
+    # nothing of the start is left for this process to reap.
+    let pid = waitForUserDaemon(launch, runquotad, socket, logPath,
       proc (): bool = holdRunQuotaDaemon())
-    recordSpawnedUserDaemon(pid)
     result = spawnedDaemonProcess(pid)
     # DA-2 -- DERIVED class-3 IPC trust. We spawned this daemon, so its pid is
     # a fact this process holds rather than a claim anyone made, and
     # `trustDaemonWeSpawned` takes the `Process` precisely so that stays true
-    # (Dependency-Observation-Attribution.md §"Derived beats declared").
+    # (Dependency-Observation-Attribution.md §"Derived beats declared"). The
+    # pid came from the intermediate that forked it, over a pipe only this
+    # launch holds, not from anything the daemon or a peer said. It is NOT
+    # this process's child, so the registration does not rest on the pid
+    # being unreapable: `revalidatedTrustedDaemons` re-checks its start
+    # identity, which is what covers a daemon that idled out and a pid that
+    # was reused since.
     #
     # WHICH BRANCH OF §Class 3, and it is branch (a): `runquotad` CONTRIBUTES
     # NO CONTENT to any action. Its protocol is Hello / Acquire / Grant /
@@ -25903,7 +25912,6 @@ when not defined(windows):
     let directory = userEndpointDir()
     ensureUserEndpointDir(directory)
     let socket = directory / endpointSocketName
-    reapSpawnedUserDaemons()
     let previous = saveRunQuotaEnvironment()
     # PUBLISHED BEFORE THE LOOP, so every probe below -- the reachability
     # check, the handover, the hold -- addresses this endpoint under the
@@ -26403,12 +26411,11 @@ proc releaseAutoRunQuotaProcess*(process: var owned(Process)) =
   ## restored: they name a daemon that outlives the invocation, so the
   ## command `repro exec` runs next inherits them.
   ##
-  ## Daemons this process started and that have exited since are reaped here
-  ## without blocking (`reapSpawnedUserDaemons`), so a long-lived process
-  ## such as the user build daemon collects no zombies.
+  ## There is nothing to reap on POSIX: the daemon was never this process's
+  ## child (`spawnDetachedUserDaemon`), so neither a long-lived process such
+  ## as the user build daemon nor the command `repro exec` becomes collects a
+  ## zombie when it idles out.
   releaseAdoptedDaemonHold()
-  when not defined(windows):
-    reapSpawnedUserDaemons()
   if process == nil:
     return
   try:

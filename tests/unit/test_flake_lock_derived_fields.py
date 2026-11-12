@@ -30,8 +30,8 @@ REV = 'a' * 40
 HASH = 'sha256-' + 'A' * 43 + '='
 # The two nodes the defect was observed in, at the revisions they must keep.
 FORMERLY_HASHLESS = {
-    'reprobuild-ct-test-runner-src': 'bb7a4b6ed4466f39292da4b819ed35a4ceb938ef',
-    'reprobuild-test-adapters-src': 'b756151259068db452a85253141afad2b5840f64',
+    'reprobuild-ct-test-runner-src': '69167f4226e0faca4fb64cb0e913c7b49eddf853',
+    'reprobuild-test-adapters-src': '504ce5c8dbddd150ead5b9bc2cddfdda21b55789',
 }
 
 
