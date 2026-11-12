@@ -60712,6 +60712,26 @@ proc mutualPinBlockedSentence(sibling, selfName: string): string =
     "pushing it first is not a remedy, and neither is recording that " &
     "unpublished revision here"
 
+proc flakeLockResolvedRepositories(repoRoot: string):
+    seq[tuple[identity, input, lockedRev: string]] =
+  ## Every repository the worktree ``flake.lock`` resolves, by canonical
+  ## repository URL (never by name, §16.3), with the input that resolves it
+  ## and the revision it locks. The identity is the one ``flake.nix`` declares
+  ## when it declares one, as the commit-time coordination reads it. Empty
+  ## when the repo carries no ``flake.lock`` or the document is unreadable.
+  let inputs = gatherConsistencyInputs(repoRoot, csWorktree)
+  if not inputs.flakeLock.present: return
+  var declared = initTable[string, string]()
+  if inputs.flakeNix.present:
+    for c in flakeRecipeConstraintsOf(inputs.flakeNix.text,
+        inputs.flakeNix.path).inputs:
+      if c.canonicalRepo.len > 0: declared[c.input] = c.canonicalRepo
+  for r in flakeLockResolutions(inputs.flakeLock.text):
+    let identity = declared.getOrDefault(r.input, r.canonicalRepo)
+    if identity.len > 0:
+      result.add((identity: identity, input: r.input,
+        lockedRev: r.lockedRev.toLowerAscii()))
+
 proc verifyCommittedLockSiblingPins*(repoRoot: string;
     workspaceRoot = ""):
     tuple[examined, stale: bool; evidence, remediation, summary: string;
@@ -60745,6 +60765,15 @@ proc verifyCommittedLockSiblingPins*(repoRoot: string;
   var bad: seq[string] = @[]
   var blocked: seq[string] = @[]
   var refreshable = 0
+  var updatable: seq[string]   ## refreshable rows `flake.lock` also resolves
+  let flakeResolved = flakeLockResolvedRepositories(root)
+  proc flakeResolves(name: string): bool =
+    for d in ld.deps:
+      if d.name == name and not isSelfLockedDep(d) and
+          d.coordinates.kind == ckVcs:
+        let id = canonicalRepositoryUrl(d.coordinates.url)
+        for r in flakeResolved:
+          if id.len > 0 and r.identity == id: return true
   # Resolved lazily — only a disagreeing row needs the membership or a
   # publication probe, so a clean push pays nothing for the cycle rule.
   var cycle: PushCycleView
@@ -60784,6 +60813,7 @@ proc verifyCommittedLockSiblingPins*(repoRoot: string;
         (if headUnpublished: "; HEAD unpublished" else: ""))
       if not siblingAwaitsThisPush(cycle, o.name, headUnpublished):
         inc refreshable
+        if flakeResolves(o.name): updatable.add(o.name)
       else:
         # The refresh named below would record that unpublished HEAD, which
         # is exactly the unobtainable pin this rule exists not to publish.
@@ -60806,11 +60836,29 @@ proc verifyCommittedLockSiblingPins*(repoRoot: string;
   var remedyParts: seq[string] = @[]
   if blocked.len > 0: remedyParts.add(blocked.join(". ") & ".")
   if refreshable > 0:
-    remedyParts.add("run `repro lock refresh " & remedyPathWord(root) &
-      "`, commit " &
-      "repro.lock, then re-push (the managed pre-commit hook re-pins " &
-      "siblings on every commit once it is installed: " &
-      "`repro hooks ensure --vcs`)")
+    if updatable.len > 0:
+      # §16.3 H2: a repository both locks resolve must be named at one
+      # revision, and a refresh writes `repro.lock` alone, so it leaves the
+      # entry where it was (and the pin this stage refuses stays). The one
+      # writer that moves both is `repro lock update`; it re-locks the
+      # input's closure through nix, nixpkgs included, hence the warning.
+      var commands: seq[string]
+      for n in updatable:
+        commands.add("`repro lock update " & n & " --repo-root=" &
+          remedyPathWord(root) & "`")
+      remedyParts.add("flake.lock resolves the same repository as " &
+        "repro.lock's " & updatable.mapIt("'" & it & "'").join(", ") &
+        ", and `repro lock refresh` moves repro.lock alone (it holds that " &
+        "pin so the two locks keep agreeing, §16.3 H3): run " &
+        commands.join(", ") & " to move both locks, which re-locks the " &
+        "flake input's closure through nix (nixpkgs included, so flake.lock " &
+        "changes beyond the one input), commit both locks, then re-push")
+    if updatable.len < refreshable:
+      remedyParts.add("run `repro lock refresh " & remedyPathWord(root) &
+        "`, commit " &
+        "repro.lock, then re-push (the managed pre-commit hook re-pins " &
+        "siblings on every commit once it is installed: " &
+        "`repro hooks ensure --vcs`)")
   result.remediation = remedyParts.join(" ")
   result.summary = "the committed repro.lock does not pin the sibling " &
     "revisions this repo is being pushed against: " & result.evidence
@@ -91726,6 +91774,63 @@ proc gateRefreshedSiblingPins(projectDir, lockPath: string;
         "), so the existing pin was kept")
       deps[i] = pinned
 
+proc holdFlakeResolvedPins(projectDir, lockPath: string;
+    deps: var seq[LockedDep]): seq[string] =
+  ## Unified-Locking-And-Hooks.md §16.3 H3, applied to the explicit door: a
+  ## repository both `repro.lock` and `flake.lock` resolve is moved in both or
+  ## in neither. `repro lock refresh` writes `repro.lock` alone, so a freshly
+  ## observed sibling entry that would move such a repository to a revision
+  ## `flake.lock` does not name keeps the pin the lock at ``lockPath``
+  ## carries (as the commit-time re-pin holds it), and one sentence per
+  ## held repository is returned. A repository that moves onto the revision
+  ## `flake.lock` already names is left to move: the two then agree.
+  ## `repro lock update <name>` is the writer that moves both.
+  ##
+  ## An entry the committed lock does not carry has no pin to hold and is
+  ## not touched; neither is a repository `flake.lock` does not resolve.
+  if lockPath.len == 0 or not fileExists(extendedPath(lockPath)): return
+  let resolved = flakeLockResolvedRepositories(projectDir)
+  if resolved.len == 0: return
+  var existing: seq[LockedDep]
+  try:
+    existing = parseLockedDepsAt(readFile(extendedPath(lockPath)),
+      projectDir).deps
+  except CatchableError:
+    # An unreadable lock has no pins to hold; the refresh replaces it.
+    return
+  for i in 0 ..< deps.len:
+    let d = deps[i]
+    if isSelfLockedDep(d) or d.coordinates.kind != ckVcs or
+        d.coordinates.revision.len == 0:
+      continue
+    let identity = canonicalRepositoryUrl(d.coordinates.url)
+    if identity.len == 0: continue
+    var pinned: LockedDep
+    var found = false
+    for e in existing:
+      if not isSelfLockedDep(e) and e.coordinates.kind == ckVcs and
+          e.coordinates.revision.len > 0 and e.name == d.name:
+        pinned = e
+        found = true
+        break
+    if not found: continue
+    let newRev = d.coordinates.revision.toLowerAscii()
+    let oldRev = pinned.coordinates.revision.toLowerAscii()
+    if newRev == oldRev: continue
+    for r in resolved:
+      if r.identity != identity or r.lockedRev == newRev: continue
+      deps[i] = pinned
+      result.add("repository " & identity & " is resolved by both locks and " &
+        "was moved in NEITHER: repro.lock would move '" & d.name & "' " &
+        oldRev & " -> " & newRev & ", but this verb never writes " &
+        "flake.lock, which leaves input '" & r.input & "' at " &
+        r.lockedRev & ". Moving one alone would leave the two locks naming " &
+        "different revisions of it (§16.3 H3), so repro.lock keeps '" &
+        d.name & "' at " & oldRev & ". To move both, run `repro lock " &
+        "update " & d.name & " --repo-root=" & remedyPathWord(projectDir) &
+        "` (it re-locks the input's closure through nix, nixpkgs included)")
+      break
+
 proc reportGeneratedLock(verb, lockP: string;
                          generated: LockGenerationResult): int =
   ## Sandbox-And-Monitoring.md §"The Network Dimension" rule 4: the network
@@ -92578,6 +92683,11 @@ proc runLockGenerationVerb(rest: openArray[string]; verb: string;
     for r in gate.allowed:
       stderr.writeLine("repro lock " & verb & ": " &
         pinRegressionAllowedLine(r, via = "--allow-pin-regression"))
+    # §16.3 H3: after the regression gate, which judges the observation as
+    # made; a pin it allowed that `flake.lock` would not follow is held too.
+    for note in holdFlakeResolvedPins(projectDir, writeTo,
+        request.extraDeps):
+      stderr.writeLine("repro lock " & verb & ": WARNING: " & note)
   if gen.repin.len > 0:
     # Every committed version and variant value except the named packages'
     # becomes a hard pin. A held pin that contradicts a declared range is
