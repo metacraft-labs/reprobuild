@@ -65,6 +65,7 @@ suite "content ids refuse states with no honest identifier":
 
   test "t_content_id_refuses_states_with_no_honest_identifier":
     let scratch = enterHermeticGit()
+    defer: leaveHermeticGit(scratch)
 
     # --- unmerged entries ---------------------------------------------------
     let conflict = newRepo(scratch, "conflict")
@@ -175,4 +176,3 @@ suite "content ids refuse states with no honest identifier":
     check manifestV1Sha256(entries, ["ok.txt"]).outcome == cioComputed
 
     check libraryTempLeftovers(scratch).len == 0
-    removeDir(scratch)

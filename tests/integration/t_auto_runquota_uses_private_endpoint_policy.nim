@@ -449,6 +449,39 @@ when defined(posix):
       check "unset RUNQUOTA_ENDPOINT_SCOPE" notin hostUnanswered
       check not fileExists(root / "unexpected-start")
 
+    test "a socket whose daemon is gone is refused, naming the endpoint":
+      # The shape an older build exported to every command `repro exec`
+      # ran: a real socket inode, 0600 in a 0700 directory, bound by a
+      # daemon that has since exited, so nothing listens on it (0600, unlike
+      # `plantStaleSocket`'s, so the refusal is the connection's and not the
+      # mode check's). It is an EXISTING endpoint, so it keeps its refusal
+      # and is never replaced, but the refusal must say which endpoint
+      # refused and where its path came from -- a bare "Connection refused"
+      # said neither.
+      let deadDir = root / "dead"
+      createDir(deadDir)
+      setFilePermissions(deadDir, {fpUserRead, fpUserWrite, fpUserExec})
+      let dead = deadDir / "runquota.sock"
+      let previousMask = posix.umask(0o177)
+      let listener = net.newSocket(Domain.AF_UNIX, SockType.SOCK_STREAM,
+        Protocol.IPPROTO_IP)
+      try:
+        net.bindUnix(listener, dead)
+      finally:
+        net.close(listener)
+        discard posix.umask(previousMask)
+      # Non-vacuity: the inode is really a socket (nothing serves it).
+      require isSocketInode(dead)
+      for scope in ["private", ""]:
+        let message = checkRefusesWithoutSpawn(root, dead, scope)
+        check ("RunQuota endpoint " & dead & " (from RUNQUOTA_SOCKET)") in
+          message
+        check "exists but cannot be used" in message
+        check "refusing per-user auto-start" in message
+        check ("unset RUNQUOTA_ENDPOINT_SCOPE" in message) == (scope == "private")
+      check isSocketInode(dead)
+      check not fileExists(root / "unexpected-start")
+
     test "existing untrusted endpoint retains refusal and starts no daemon":
       let endpoint = root / "unsafe.sock"
       writeFile(endpoint, "a file cannot impersonate a daemon")

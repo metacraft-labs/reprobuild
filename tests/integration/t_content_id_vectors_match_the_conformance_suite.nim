@@ -67,6 +67,7 @@ suite "content ids against the conformance vectors":
 
   test "t_content_id_vectors_match_the_conformance_suite":
     let scratch = enterHermeticGit()
+    defer: leaveHermeticGit(scratch)
     let (root, error) = extractVectors(scratch)
     if error.len > 0:
       checkpoint(error)
@@ -156,10 +157,10 @@ suite "content ids against the conformance vectors":
       # 29 ids across the seven cases at the pinned revision.
       check checkedIds == 29
       check libraryTempLeftovers(scratch).len == 0
-    removeDir(scratch)
 
   test "scoped ids of a live repository use literal paths and keep full paths":
     let scratch = enterHermeticGit()
+    defer: leaveHermeticGit(scratch)
     let entries = @[
       ContentEntry(path: "src/db/schema.sql", mode: "100644", content: "t\n"),
       ContentEntry(path: "lib/db/schema.sql", mode: "100644", content: "t\n"),
@@ -217,4 +218,3 @@ suite "content ids against the conformance vectors":
                            ["glob/*"]).id ==
       manifestV1Sha256(entries, ["glob/*"]).id
     check libraryTempLeftovers(scratch).len == 0
-    removeDir(scratch)

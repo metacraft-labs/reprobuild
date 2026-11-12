@@ -93,8 +93,11 @@ proc powershellZipExtractScript*(archivePath, destination: string;
     "Add-Type -AssemblyName System.IO.Compression; " &
     # The extended-length spelling of an absolute ordinary path: a UNC path
     # `\\server\share\…` becomes `\\?\UNC\server\share\…`, a drive path
-    # `C:\…` becomes `\\?\C:\…`.
+    # `C:\…` becomes `\\?\C:\…`. Only Windows has that namespace: PowerShell
+    # 7 on Linux or macOS reads the prefix as a relative directory literally
+    # named `\\?\`, so there the path is returned as it is.
     "function ConvertTo-ExtendedPath([string]$p) { " &
+      "if ([System.IO.Path]::DirectorySeparatorChar -ne '\\') { return $p } " &
       "if ($p.StartsWith('\\\\?\\')) { return $p } " &
       "if ($p.StartsWith('\\\\')) { return '\\\\?\\UNC\\' + $p.Substring(2) } " &
       "return '\\\\?\\' + $p " &

@@ -30,6 +30,7 @@
 ## missing on PATH.
 
 import std/[json, os, osproc, strutils, tempfiles, unittest]
+import repro_test_support/scoped_env
 
 import repro_test_support
 import repro_cli_support
@@ -122,6 +123,7 @@ mainline = "main"
 
 type
   Fixture = object
+    storeEnv: ScopedEnv
     scratch: string
     reproBin: string
     workspaceRoot: string
@@ -136,7 +138,7 @@ proc writeProjectManifest(fx: Fixture) =
 
 proc setupFixture(gitBin: string): Fixture =
   result.scratch = createTempDir("repro-tc5-verify-", "")
-  discard isolateCertificateStore(result.scratch)
+  discard isolateCertificateStore(result.scratch, result.storeEnv)
   result.reproBin = reproBinary()
   result.libAOrigin = result.scratch / "origin-lib-a.git"
   result.libASha = seedGitOrigin(gitBin, result.libAOrigin,
