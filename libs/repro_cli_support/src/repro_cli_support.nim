@@ -42429,6 +42429,75 @@ proc existingRecordStoreRoot*(workspaceRoot: string): string =
       return candidate
   ""
 
+type DeclaredRecordStore = object
+  ## What the workspace settings file says about a SEPARATE record store
+  ## (``[records] url`` / ``branch``, Workspace-Settings-Files.md §3), and
+  ## where its checkout is.
+  declared: bool
+    ## ``[records] url`` is set. ``[records]`` carrying only
+    ## ``publish_locks`` declares no store and leaves this false.
+  url, branch: string
+  checkout: string
+    ## ``existingRecordStoreRoot`` — the checkout at the conventional
+    ## location, or "" when there is none.
+
+proc declaredRecordStore(workspaceRoot: string): DeclaredRecordStore =
+  ## The record store the settings file declares, for the lock WRITER
+  ## (``pickRecordStoreRoot``) and its READER (``pickStatusManifestLayerRoot``)
+  ## alike, so status looks where the gate wrote.
+  ##
+  ## Resolved the way ``manifestPublicationEnabled`` resolves
+  ## ``publish_locks``, which lives in the same ``[records]`` table
+  ## (``findBootstrapConfigPath``). A settings file that does not parse raises,
+  ## like every other reader of it; by the time a caller asks, workspace
+  ## resolution has read the same file strictly and refused already. Inside
+  ## ``repro health`` the failure is set aside, and the workspace reads as
+  ## declaring no store.
+  let configPath = findBootstrapConfigPath(workspaceRoot)
+  if configPath.len == 0:
+    return
+  var records: WorkspaceRecordsSettings
+  try:
+    records = readWorkspaceSettings(configPath).records
+  except WorkspaceManifestParseError as err:
+    if not setAsideMalformedWorkspaceFile(err, mwkSettings):
+      raise
+    return
+  if records.url.isNone or records.url.get().len == 0:
+    return
+  result.declared = true
+  result.url = records.url.get()
+  result.branch = records.branch.get("")
+  result.checkout = existingRecordStoreRoot(workspaceRoot)
+
+var missingRecordStoreNoticesAnnounced = initHashSet[string]()
+  ## The workspace roots whose "declared record store has no checkout" notice
+  ## this process has already printed: the pre-push gate resolves the store
+  ## from several seams (the gate, the push gateway, certificate coverage),
+  ## and the run says it once.
+
+proc announceMissingRecordStoreCheckout(workspaceRoot: string;
+                                        store: DeclaredRecordStore) =
+  ## The one-time stderr notice for a declared record store with no checkout.
+  ## Nothing else would say it: the gate passes, and the only trace of the
+  ## missing store is a lock record that was never written.
+  {.cast(gcsafe).}:
+    let key = absolutePath(workspaceRoot)
+    if key in missingRecordStoreNoticesAnnounced: return
+    missingRecordStoreNoticesAnnounced.incl(key)
+    let dest = workspaceRoot / ".repro" / RecordStoreDirName
+    let branchNote =
+      if store.branch.len > 0: " (branch '" & store.branch & "')"
+      else: ""
+    let branchFlag =
+      if store.branch.len > 0: "-b " & quoteShell(store.branch) & " "
+      else: ""
+    stderr.writeLine("repro: `[records] url` declares the lock record " &
+      "store " & store.url & branchNote & ", but no checkout of it exists " &
+      "at " & dest & ", so no lock record is written there (nor into the " &
+      "root repository in its place). Run `git clone " & branchFlag &
+      quoteShell(store.url) & " " & quoteShell(dest) & "` to keep records")
+
 proc bootstrapManifestCache(args: WorkspaceInitArgs): seq[
     WorkspaceInitClonedEntry] =
   ## RA-11 bootstrap manifest cache. When ``--manifest-url`` is given and
@@ -53773,16 +53842,29 @@ proc pickRecordStoreRoot(parsed: WorkspaceLockArgs;
   ## Resolve the directory that will OWN the lock file. Priority:
   ##   1. The explicit ``--record-store-root`` flag (M16 callers,
   ##      multi-tier setups).
-  ##   2. The first ``[[manifest]]`` layer in
-  ##      ``.repro/workspace-state.toml`` (composer mode). For ``local_path``
-  ##      layers the path is taken verbatim (relative to the
+  ##   2. A record store declared by ``[records] url`` in
+  ##      ``repro-workspace.toml``: its checkout at the conventional location
+  ##      (``.repro/records``, legacy ``.repro/manifests``), and NOTHING else.
+  ##      The store is a separate repository (Workspace-Settings-Files.md §3,
+  ##      §8 step 2), so neither the root base layer nor any other composed
+  ##      layer may stand in for it. With no checkout the answer is "" (no
+  ##      record is written) and a one-time notice names the clone.
+  ##   3. The first composed ``[[manifest]]`` layer (composer mode) — when
+  ##      the settings files declare any layer, the root repository as the
+  ##      base layer (§3: the store when ``[records]`` names none). For
+  ##      ``local_path`` layers the path is taken verbatim (relative to the
   ##      workspace root); for ``url`` layers it's the on-disk
   ##      checkout the composer materialised at
   ##      ``<workspaceRoot>/.repro/manifests-<i>-<sanitized>``.
-  ##   3. ``<workspaceRoot>`` (single-project mode,
-  ##      matching M9/M10's resolver dispatch).
+  ##   4. The record-store checkout at its conventional location, or "" when
+  ##      there is none (see the comment at the end).
   if parsed.recordStoreRoot.len > 0:
     return parsed.recordStoreRoot
+  let declared = declaredRecordStore(parsed.workspaceRoot)
+  if declared.declared:
+    if declared.checkout.len == 0:
+      announceMissingRecordStoreCheckout(parsed.workspaceRoot, declared)
+    return declared.checkout
   if workspaceLocal.isSome:
     let local = workspaceLocal.get()
     if local.manifest.len > 0:
@@ -75718,7 +75800,15 @@ proc pickStatusManifestLayerRoot(workspaceRoot: string;
   ## Resolve the manifest-layer root that OWNS the lock subtree for
   ## status's drift comparison. Mirrors M11's ``pickRecordStoreRoot``
   ## but without the ``--record-store-root`` override (status is
-  ## read-only and uses the same anchor M11 wrote to).
+  ## read-only and uses the same anchor M11 wrote to). A ``[records] url``
+  ## store is read from its checkout and never from a composed layer, as the
+  ## writer writes it; with no checkout the conventional (absent) location
+  ## reads as "no lock", and the writer's notice is not repeated here.
+  let declared = declaredRecordStore(workspaceRoot)
+  if declared.declared:
+    return
+      if declared.checkout.len > 0: declared.checkout
+      else: workspaceRoot / ".repro" / RecordStoreDirName
   if workspaceLocal.isSome:
     let local = workspaceLocal.get()
     if local.manifest.len > 0:
