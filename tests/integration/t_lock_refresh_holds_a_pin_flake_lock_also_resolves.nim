@@ -124,6 +124,20 @@ package app:
         betaSeed
       check readFile(fx.app / "flake.lock") == flakeBefore
 
+      # The hold follows the lock the refresh writes, not only the committed
+      # one: a refresh into another path (`--lock`) of a lock at the seed holds
+      # `beta` as well.
+      let otherLock = fx.scratch / "other.lock"
+      writeFile(otherLock, appLock(fx, betaSeed, epsilonSeed)
+        .replace("platform = \"x86_64-linux\"",
+                 "platform = \"" & currentPlatformId() & "\""))
+      let viaLock = run(q(fx.repro) & " lock refresh " & q(fx.app) &
+        " --lock=" & q(otherLock), cwd = fx.app)
+      checkpoint(viaLock.output)
+      check viaLock.code == 0
+      check reproLockRevisionOf(readFile(otherLock), "beta") == betaSeed
+      check reproLockRevisionOf(readFile(otherLock), "epsilon") == epsilonNext
+
       # The gate still refuses the stale `beta` pin (the checkout is ahead of
       # it), but no longer through an H2 disagreement, and its remedy is the
       # command that moves both locks.
