@@ -512,7 +512,23 @@ proc buildCode(pkg: PackageDef; body: NimNode): NimNode =
   let devEnvBody = l2LowerDevEnvActivities(pkg.packageName,
     collectDevEnvStatements(body))
   if buildBody.len == 0 and devEnvBody.len == 0:
-    return newStmtList()
+    # Every provider manifest advertises a dev-env introspection entry
+    # point, so a package with neither body still needs the provider
+    # dispatcher: without it, a provider compiled from the package exits
+    # without answering, and every dev-env activation fails with "provider
+    # did not write response". It gets no build or dev-env proc.
+    # ``buildPackageDevEnv`` treats the nil ``devEnvProc`` as the implicit
+    # environment (the toolchain floor, or the base environment when there
+    # is none), and ``dispatchProviderGraphRequest`` refuses a graph
+    # request, because the package declared nothing that could produce one.
+    # The dispatch is deferred to the end of the module's initialisation
+    # (``deferBodilessProviderDispatch``), so a package declared after this
+    # one still registers, and still dispatches if it has a body.
+    let bodilessPkgLiteral = parseExpr(packageLiteral(pkg))
+    return quote do:
+      when not defined(reproInterfaceMode) and
+          defined(reproProviderMode) and isMainModule:
+        deferBodilessProviderDispatch(`bodilessPkgLiteral`)
   let lifted = liftForeachStatements(pkg, buildBody)
   let procName = ident("build" & titleIdent(pkg.packageName))
   let devEnvProcName = ident("devEnv" & titleIdent(pkg.packageName))

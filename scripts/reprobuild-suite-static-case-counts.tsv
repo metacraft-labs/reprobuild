@@ -1315,7 +1315,7 @@ tests/e2e/dev-env/t_e2e_develop_overrides_activity.nim	nim	2
 tests/e2e/dev-env/t_e2e_hooks_shell_direnv.nim	nim	3
 tests/e2e/dev-env/t_e2e_native_shell_hooks.nim	nim	3
 tests/e2e/dev-env/t_e2e_nf4_flake_dev_shell.nim	nim	6
-tests/e2e/dev-env/t_e2e_provider_dev_env_implicit_floor.nim	nim	3
+tests/e2e/dev-env/t_e2e_provider_dev_env_implicit_floor.nim	nim	6
 tests/e2e/dev-env/t_e2e_provider_dev_env_introspection.nim	nim	2
 tests/e2e/dev-env/t_e2e_repro_dev_sessions.nim	nim	28
 tests/e2e/dev-env/t_e2e_repro_down_activity_discovery.nim	nim	7

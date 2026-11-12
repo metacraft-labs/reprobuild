@@ -879,6 +879,15 @@ when defined(reproProviderMode):
       manifestResponse(manifest)
     of prkGraphInvocation:
       if request.entryPointId == rootEntryPointId(pkg):
+        if buildProc == nil:
+          # A package with no ``build:`` and no ``devEnv:`` body is
+          # served only so its dev-env introspection entry point has an
+          # answer. Its graph comes from no code in this binary, so an
+          # empty fragment here would report a successful build of
+          # nothing.
+          raise newException(ValueError, "package " & pkg.packageName &
+            " declares no build: body, so a provider compiled from it" &
+            " cannot produce its build graph")
         graphResponse(manifest, buildPackageFragment(pkg, request, buildProc))
       elif foreachDispatch != nil:
         graphResponse(manifest, foreachDispatch(request))
@@ -1167,11 +1176,23 @@ when defined(reproProviderMode):
       toEngine.writeFrame(smtEntryPointResult, encodeEntryPointResult(result))
     0
 
+  var providerDispatchBegun = false
+  var bodilessDispatchClaimed = false
+
+  proc claimBodilessProviderDispatch*(): bool {.dynOrStatic.} =
+    ## True for the first package with no ``build:`` and no ``devEnv:``
+    ## body that asks, false for every later one: of the body-less
+    ## packages, only the first declared serves, as the engine treats the
+    ## first package as the project's root.
+    result = not bodilessDispatchClaimed
+    bodilessDispatchClaimed = true
+
   proc runPackageProvider*(pkg: PackageDef; buildProc: proc ();
                            foreachDefs: openArray[ProviderForeachDef] = [];
                            foreachDispatch: proc (
                              request: ProviderGraphRequest): GraphFragment = nil;
                            devEnvProc: proc () = nil): int {.dynOrStatic.} =
+    providerDispatchBegun = true
     try:
       # Any body that raised during the startup pass is reported here,
       # once per process, before a single request is answered. The pass is
@@ -1199,3 +1220,36 @@ when defined(reproProviderMode):
       stderr.writeLine("repro project provider: error: " & err.msg)
       1
 
+  proc exitWithoutHandlers(code: cint) {.importc: "_Exit",
+      header: "<stdlib.h>", noreturn.}
+
+  proc runDeferredBodilessProvider*(pkg: PackageDef) {.dynOrStatic.} =
+    ## Serve ``pkg`` from an exit procedure, unless a package dispatched
+    ## already. Exit procedures run through C ``atexit``, after the
+    ## process's exit status is fixed, so a failure cannot be reported by
+    ## setting a program result: it ends the process with its own code
+    ## through ``_Exit``, the one way out of an ``atexit`` handler that C
+    ## leaves defined. A success lets the normal exit, with status 0,
+    ## continue.
+    if providerDispatchBegun:
+      return
+    let code = runPackageProvider(pkg, nil)
+    if code != 0:
+      flushFile(stdout)
+      flushFile(stderr)
+      exitWithoutHandlers(cint(code))
+
+  template deferBodilessProviderDispatch*(pkg: PackageDef) =
+    ## The dispatcher of a package with no ``build:`` and no ``devEnv:``
+    ## body. It cannot run where the package is declared, as a bodied
+    ## package's does: it would end the module's initialisation before a
+    ## later package registered, finalised its variants or dispatched. It
+    ## runs once initialisation is over instead, and only if no package
+    ## dispatched and nothing failed. A bodied package that dispatches
+    ## later quits through the exit procedures, and this one then stands
+    ## down.
+    if claimBodilessProviderDispatch():
+      let reproBodilessPackage = pkg
+      addExitProc(proc () =
+        if getProgramResult() == 0:
+          runDeferredBodilessProvider(reproBodilessPackage))

@@ -34,6 +34,9 @@ import std/[algorithm, json, macros, options, os, strutils, tables]
 # on the project being built rather than on the engine's own checkout. The
 # module's procs are compile-time-only; importing it costs nothing at runtime.
 import std/compilesettings
+when defined(reproProviderMode):
+  # ``deferBodilessProviderDispatch`` (runtime_provider).
+  import std/exitprocs
 
 # DSL-port M9.A: ``nimcrypto/sha2`` powers the content-addressed sha256
 # hashing path for ``consumeConfigFile`` / ``consumeManagedBlock``. We
