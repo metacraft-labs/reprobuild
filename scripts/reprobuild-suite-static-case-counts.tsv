@@ -394,10 +394,11 @@ libs/repro_dsl_stdlib/tests/t_addon_apt_closure.nim	nim	41
 libs/repro_dsl_stdlib/tests/t_addon_apt_closure_trixie_armhf.nim	nim	2
 libs/repro_dsl_stdlib/tests/t_apt_deb_reader_streams.nim	nim	4
 libs/repro_dsl_stdlib/tests/t_c1_dsl_parse.nim	nim	12
-libs/repro_dsl_stdlib/tests/t_cargo_edge_owns_its_target_dir.nim	nim	15
+libs/repro_dsl_stdlib/tests/t_cargo_edge_owns_its_target_dir.nim	nim	16
 libs/repro_dsl_stdlib/tests/t_cargo_package_bin_selectors.nim	nim	4
 libs/repro_dsl_stdlib/tests/t_cargo_package_cross_target.nim	nim	31
 libs/repro_dsl_stdlib/tests/t_cargo_test_no_default_features.nim	nim	2
+libs/repro_dsl_stdlib/tests/t_catalog_nim_fork_pin_matches_flake.nim	nim	1
 libs/repro_dsl_stdlib/tests/t_certificate_policy_builder.nim	nim	10
 libs/repro_dsl_stdlib/tests/t_committed_lock_pins_versions.nim	nim	8
 libs/repro_dsl_stdlib/tests/t_committed_lock_variants_are_hard.nim	nim	7
@@ -462,6 +463,7 @@ libs/repro_dsl_stdlib/tests/t_packaging_third_party_producer.nim	nim	6
 libs/repro_dsl_stdlib/tests/t_packaging_windows_loader_closure.nim	nim	8
 libs/repro_dsl_stdlib/tests/t_pinned_fetch.nim	nim	5
 libs/repro_dsl_stdlib/tests/t_prefix_layout.nim	nim	7
+libs/repro_dsl_stdlib/tests/t_prefix_sources_tools.nim	nim	2
 libs/repro_dsl_stdlib/tests/t_reprobuild_nim_fork_guard.nim	nim	5
 libs/repro_dsl_stdlib/tests/t_rust_nix_arm_realizes_release_archive.nim	nim	6
 libs/repro_dsl_stdlib/tests/t_s7_nim_c_declares_its_nimcache_as_derived.nim	nim	5
@@ -2779,7 +2781,7 @@ tests/unit/test_package_root_anchor.py	python	3
 tests/unit/test_profile_daemon_worker_syscalls.py	python	6
 tests/unit/test_prune_undeclared_test_binaries.py	python	7
 tests/unit/test_publish_surface_routing.py	python	32
-tests/unit/test_readme_documents_only_dispatched_verbs.py	python	3
+tests/unit/test_readme_documents_only_dispatched_verbs.py	python	5
 tests/unit/test_regenerate_suite_artifacts.py	python	25
 tests/unit/test_release_git.py	python	6
 tests/unit/test_release_native_packages.py	python	8

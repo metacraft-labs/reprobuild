@@ -49,6 +49,11 @@ func slashJoin(dir, name: string): string =
   elif dir[^1] == '/': dir & name
   else: dir & "/" & name
 
+func slashed(path: string): string =
+  ## `path` with forward slashes, so a Windows spelling (`rust\\Cargo.toml`)
+  ## is split into directory and file name the same way on every host.
+  path.replace('\\', '/')
+
 const DefaultTargetDirName = "target"
   ## cargo's own default target directory name, relative to its crate.
 
@@ -124,7 +129,7 @@ proc build*(pkg: CargoTool;
     {.discardable.} =
   ## `cargo build`. The target directory is `targetDir`, else the `target`
   ## directory beside `manifestPath` (the working directory's, without one).
-  let effectiveTargetDir = cargoTargetDir(targetDir, parentDir(manifestPath))
+  let effectiveTargetDir = cargoTargetDir(targetDir, parentDir(manifestPath.slashed))
   cargo_cli.build(pkg, config = config, locked = locked, release = release,
     offline = offline, noDefaultFeatures = noDefaultFeatures,
     features = features, manifestPath = manifestPath,
@@ -211,7 +216,7 @@ proc test*(pkg: CargoTool;
   ## extra outputs, the depfile globs) is re-spelled relative to it; declared
   ## inputs (the manifest among them) keep the recipe-root spelling, because
   ## the lowering materializes them against the recipe root.
-  let crateDir = parentDir(manifestPath).replace('\\', '/')
+  let crateDir = parentDir(manifestPath.slashed)
   let inCrateDir = crateDir notin ["", "."] and not manifestPath.isAbsolute and
     not crateDir.startsWith("..")
   proc fromCrateDir(path: string): string =
@@ -224,7 +229,7 @@ proc test*(pkg: CargoTool;
       cargoTargetDir(targetDir, crateDir)
   result = cargo_cli.test(pkg, locked = locked, release = release,
     noRun = noRun, noDefaultFeatures = noDefaultFeatures,
-    manifestPath = (if inCrateDir: extractFilename(manifestPath)
+    manifestPath = (if inCrateDir: extractFilename(manifestPath.slashed)
                     else: manifestPath),
     targetDir = effectiveTargetDir, package = package, bin = bin,
     testBinaryPath = fromCrateDir(testBinaryPath), actionId = actionId,
@@ -244,7 +249,7 @@ proc test*(pkg: CargoTool;
     # re-spelled flag held.
     var inputs = result.action.inputs
     for i in 0 ..< inputs.len:
-      if inputs[i] == extractFilename(manifestPath):
+      if inputs[i] == extractFilename(manifestPath.slashed):
         inputs[i] = manifestPath
     setRegisteredActionInputs(result.action.id, inputs)
     result.action.inputs = inputs

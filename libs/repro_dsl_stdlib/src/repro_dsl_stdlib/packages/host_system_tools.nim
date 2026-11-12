@@ -704,6 +704,29 @@ package `touch`:
       os = "windows",
       lockIdentity = "tarball:git@2.54.0:sha256:bea006a6cc69673f27b1647e84ab3a68e912fbc175ab6320c5987e012897f311"
 
+package `tee`:
+  provisioning:
+    nixPackage "nixpkgs#coreutils", executablePath = "bin/tee",
+      nixpkgsRev = CanonicalNixpkgsRev,
+      nixpkgsNarHash = CanonicalNixpkgsNarHash
+    # Windows: Git for Windows ships this at `usr/bin/tee.exe`. Same two
+    # channels as `mkdir` and `sleep` -- Scoop's `main/git` and the pinned
+    # PortableGit archive. Without these arms a `uses: "tee"` recipe (a
+    # Justfile piping to `tee test-logs/x.log`) was realized by no mode and
+    # silently fell back to whatever `tee` the ambient PATH carried.
+    scoopApp(bucket = "main", app = "git",
+      preferredVersion = ">=2", executablePath = "usr/bin/tee.exe",
+      requiresExecutionProfileChecksum = false)
+    tarball url = "https://github.com/git-for-windows/git/releases/download/v2.54.0.windows.1/PortableGit-2.54.0-64-bit.7z.exe",
+      sha256 = "bea006a6cc69673f27b1647e84ab3a68e912fbc175ab6320c5987e012897f311",
+      archiveType = "7z.exe",
+      executablePath = "usr/bin/tee.exe",
+      version = "8.32",
+      packageId = "git@2.54.0",
+      cpu = "x86_64",
+      os = "windows",
+      lockIdentity = "tarball:git@2.54.0:sha256:bea006a6cc69673f27b1647e84ab3a68e912fbc175ab6320c5987e012897f311"
+
 package `du`:
   provisioning:
     nixPackage "nixpkgs#coreutils", executablePath = "bin/du",
