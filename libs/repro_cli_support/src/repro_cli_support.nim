@@ -14816,9 +14816,13 @@ proc validateDevEnvManifest(manifest: ProviderManifest;
       "provider manifest artifact mismatch: expected " &
         providerArtifactId & ", got " & manifest.providerArtifactId)
 
-proc runStableProviderProtocol(binaryPath, protocolRoot, stem, cwd: string;
-                               request: ProviderGraphRequest):
-                               ProviderGraphResponse =
+proc runStableProviderProcess(binaryPath, protocolRoot, stem, cwd: string;
+                               request: ProviderGraphRequest): string =
+  ## Run the provider at ``binaryPath`` on ``request`` and require it to exit
+  ## 0. Returns the path the protocol names for the response, which this
+  ## does not read: a binary whose main module declares no package has no
+  ## dispatcher, so it runs its module initialisation, exits 0 and writes
+  ## none.
   createDir(extendedPath(protocolRoot))
   let requestPath = protocolRoot / (stem & ".request.rbpg")
   let responsePath = protocolRoot / (stem & ".response.rbpg")
@@ -14860,6 +14864,13 @@ proc runStableProviderProtocol(binaryPath, protocolRoot, stem, cwd: string;
   if exitCode != 0:
     raise newException(OSError,
       "provider exited with code " & $exitCode & ": " & output)
+  responsePath
+
+proc runStableProviderProtocol(binaryPath, protocolRoot, stem, cwd: string;
+                               request: ProviderGraphRequest):
+                               ProviderGraphResponse =
+  let responsePath = runStableProviderProcess(binaryPath, protocolRoot, stem,
+    cwd, request)
   if not fileExists(extendedPath(responsePath)):
     raise newException(IOError, "provider did not write response: " &
       responsePath)
@@ -91471,20 +91482,15 @@ proc solverInputsFromCompiledProvider(projectDir: string;
       # emitted at top-level module scope), BEFORE any request is dispatched —
       # so the emission happens regardless of the request kind, and a manifest
       # request provisions no tools and builds nothing (no-build semantics).
-      if moduleHasBuildBlock(modulePath) or moduleHasDevEnvBlock(modulePath):
-        discard runStableProviderProtocol(provider.outputBinaryPath, protocolRoot,
-          "solver-inputs", cwd, ProviderGraphRequest(
-            kind: prkManifest,
-            providerArtifactId: digestHex(provider.providerFingerprint),
-            reason: girExplicitUserRequest))
-      else:
-        # Declaration-only modules emit solver inputs during initialization,
-        # but buildCode generates no request/response dispatcher for them.
-        let initialized = runFeedingStdin(provider.outputBinaryPath, [], "", cwd)
-        if initialized.code != 0:
-          raise newException(OSError,
-            "solver metadata initializer exited with code " &
-              $initialized.code & ": " & initialized.output)
+      # The response is not read: a module that declares no package has no
+      # dispatcher to write one, and its initialisation has emitted the
+      # inputs all the same. Whether a module declares one is not decided
+      # from its text, which a package declared through a template defeats.
+      discard runStableProviderProcess(provider.outputBinaryPath,
+        protocolRoot, "solver-inputs", cwd, ProviderGraphRequest(
+          kind: prkManifest,
+          providerArtifactId: digestHex(provider.providerFingerprint),
+          reason: girExplicitUserRequest))
     finally:
       delEnv(SolverInputsEmitEnvVar)
     if not fileExists(extendedPath(emitPath)):
@@ -93581,13 +93587,13 @@ proc siblingVariantDeclarations(checkout: string):
   ##
   ## A RECIPE WITH NO `build:` OR `devEnv:` BODY IS ASKED TOO. `buildCode`
   ## (`macros_b.nim`) emits the provider's `runPackageProvider` dispatcher
-  ## only for a recipe with one of those bodies, so such a binary cannot
-  ## answer a protocol request. It does not need to: its module init emits
-  ## the solver inputs, and since 0e7146a92 the probe runs a declaration-only
-  ## module's initialiser directly instead of sending it a request. This was
-  ## recorded here as a known limitation until then; it is now pinned the
-  ## other way round by `a recipe with no build: block is asked through its
-  ## initialiser` in `t_develop_override_records_the_identity_it_replaced`.
+  ## for every package the recipe declares, so the probe sends such a binary
+  ## the same manifest request as any other; its module init has emitted the
+  ## solver inputs by then. A module that declares no package has no
+  ## dispatcher and writes no response, and the probe accepts that. Pinned by
+  ## `a recipe with no build: block is asked through its dispatcher` and `a
+  ## package declared through a template is asked the same way` in
+  ## `t_develop_override_records_the_identity_it_replaced`.
   result = @[]
   if checkout.len == 0:
     return
