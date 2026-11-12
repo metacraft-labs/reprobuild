@@ -8,9 +8,15 @@
 ## allowed to advance. Thus ``no staged changes`` cannot be mistaken for
 ## ``nothing to publish``.
 ##
-## Additional cases cover a concurrent disjoint lock-only remote advance (the
-## local chain is verified, rebased, re-verified, and both records survive), a
-## remote non-lock advance, a local non-lock ahead commit, dirty index/tree,
+## Additional cases cover a concurrent disjoint lock-only remote advance that
+## landed before the first fetch (the stale record-store checkout: the local
+## chain is verified from the merge-base, replayed onto the fetched tip,
+## re-verified, and both records survive), a byte-identical record already
+## published (the replay settles as nothing-to-publish), a remote non-lock
+## advance (kept; the local lock commit is replayed onto it), a local non-lock
+## ahead or divergent commit, unrelated histories, a divergent chain that
+## carries a commit this checkout saw published before the upstream rewrote it
+## away (refused: replaying it would republish removed history), dirty index/tree,
 ## rename, symlink, wrong record identity, deletion, executable mode, corrupt
 ## expected TOML, and fetch failure. A final real race installs the canonical
 ## hook bundle and uses a preserved hook to advance the remote during every
@@ -260,20 +266,63 @@ suite "lock publication recovers verified ahead chains":
       discard require(q(gitBin) & " -C " & q(other) & " commit -m concurrent")
       discard require(q(gitBin) & " -C " & q(other) & " push origin main")
 
+      # The other publisher landed BEFORE this publish fetched, so the local
+      # lock commit already diverges from the tip the first fetch sees. This
+      # is the stale record-store checkout of reprobuild-pm issue
+      # 2026-11-05-pre-push-gate-refuses-a-lock-commit-made-on-a-stale-
+      # record-store-instead-of-replaying-it: the verified lock-only local
+      # side is replayed onto the fetched tip and published.
       let localHead = fx.git("rev-parse HEAD").strip()
       let remoteHead = fx.bareHead()
+      check run(q(gitBin) & " -C " & q(fx.repo) &
+        " merge-base --is-ancestor HEAD " & q(remoteHead)).code != 0
       let pub = publishWorkspaceLock(fx.identity, fx.repo,
         @[expected("app", "app", localOid)])
-      check pub.outcome == lpoFailed
-      check "not a fast-forward" in pub.diagnostic or
-        "unverified local backend state" in pub.diagnostic
-      check fx.git("rev-parse HEAD").strip() == localHead
+      checkpoint(pub.diagnostic)
+      check pub.outcome == lpoPublished
       check fx.git("symbolic-ref --short HEAD").strip() == "main"
       check fx.git("rev-parse --symbolic-full-name '@{u}'").strip() ==
         "refs/remotes/origin/main"
-      check fx.bareHead() == remoteHead
-      check not fx.remoteHas(lockRel("app", localOid))
+      check fx.git("rev-parse HEAD").strip() != localHead
+      check fx.bareHead() == fx.git("rev-parse HEAD").strip()
+      # Replayed, not merged: the other publisher's tip is the new parent.
+      check fx.git("rev-parse HEAD^").strip() == remoteHead
+      check fx.remoteHas(lockRel("app", localOid))
       check fx.remoteHas(lockRel("other", remoteOid))
+      let again = publishWorkspaceLock(fx.identity, fx.repo,
+        @[expected("app", "app", localOid)])
+      check again.outcome == lpoNothingToPublish
+
+  test "a stale chain whose records are already published identically settles":
+    let gitBin = findExe("git")
+    doAssert gitBin.len > 0, "Git is required for stale-store replay regression"
+    block:
+      let fx = setupFixture(gitBin)
+      defer: removeDir(fx.scratch)
+      let oid = repeat('9', 40)
+      let rel = lockRel("app", oid)
+      writeLock(fx.repo, "app", oid)
+      fx.commitAll("local lock")
+      # Another publisher files the byte-identical record first: the replay
+      # drops our commit as already applied, which is completion.
+      let other = fx.scratch / "same-bytes"
+      discard require(q(gitBin) & " clone " & q(fx.origin) & " " & q(other))
+      discard require(q(gitBin) & " -C " & q(other) &
+        " config user.email tester@example.invalid")
+      discard require(q(gitBin) & " -C " & q(other) &
+        " config user.name 'Same Bytes'")
+      writeLock(other, "app", oid)
+      discard require(q(gitBin) & " -C " & q(other) & " add locks")
+      discard require(q(gitBin) & " -C " & q(other) & " commit -m same")
+      discard require(q(gitBin) & " -C " & q(other) & " push origin main")
+      let remoteHead = fx.bareHead()
+      let pub = publishWorkspaceLock(fx.identity, fx.repo,
+        @[expected("app", "app", oid)])
+      checkpoint(pub.diagnostic)
+      check pub.outcome == lpoNothingToPublish
+      check fx.bareHead() == remoteHead
+      check fx.remoteHas(rel)
+      check fx.git("symbolic-ref --short HEAD").strip() == "main"
 
   test "non-lock local or remote movement is never rebased or pushed":
     let gitBin = findExe("git")
@@ -307,10 +356,131 @@ suite "lock publication recovers verified ahead chains":
         discard require(q(gitBin) & " -C " & q(other) & " commit -m movement")
         discard require(q(gitBin) & " -C " & q(other) & " push origin main")
         let remoteBefore = fx.bareHead()
+        # The REMOTE movement is somebody else's published history and is
+        # kept as it is; only the verified local lock-only commit moves, onto
+        # it. Nothing non-lock is rebased or pushed by this publisher.
         let pub = publishWorkspaceLock(fx.identity, fx.repo,
           @[expected("app", "app", oid)])
+        checkpoint(pub.diagnostic)
+        check pub.outcome == lpoPublished
+        check fx.git("rev-parse HEAD^").strip() == remoteBefore
+        check fx.bareHead() == fx.git("rev-parse HEAD").strip()
+        check fx.remoteHas(lockRel("app", oid))
+        check require(q(gitBin) & " --git-dir=" & q(fx.origin) &
+          " show refs/heads/main:README.md") == "remote non-lock\n"
+
+      block divergentLocalNonLock:
+        # A divergent local side that is not lock-only is never replayed: the
+        # stale-checkout replay holds it to the strictly-ahead proof.
+        let fx = setupFixture(gitBin)
+        defer: removeDir(fx.scratch)
+        let oid = repeat('8', 40)
+        writeLock(fx.repo, "app", oid)
+        fx.commitAll("local lock")
+        writeFile(fx.repo / "README.md", "local non-lock\n")
+        fx.commitAll("local non-lock")
+        let localHead = fx.git("rev-parse HEAD").strip()
+        let other = fx.scratch / "other"
+        discard require(q(gitBin) & " clone " & q(fx.origin) & " " & q(other))
+        discard require(q(gitBin) & " -C " & q(other) &
+          " config user.email tester@example.invalid")
+        discard require(q(gitBin) & " -C " & q(other) &
+          " config user.name 'Remote Mover'")
+        writeLock(other, "other", repeat('7', 40))
+        discard require(q(gitBin) & " -C " & q(other) & " add locks")
+        discard require(q(gitBin) & " -C " & q(other) & " commit -m other")
+        discard require(q(gitBin) & " -C " & q(other) & " push origin main")
+        let remoteBefore = fx.bareHead()
+        let pub = publishWorkspaceLock(fx.identity, fx.repo,
+          @[expected("app", "app", oid)])
+        checkpoint(pub.diagnostic)
         check pub.outcome == lpoFailed
+        check "unverified local backend state" in pub.diagnostic
+        check "README.md" in pub.diagnostic
         check fx.bareHead() == remoteBefore
+        check fx.git("rev-parse HEAD").strip() == localHead
+        check fx.git("symbolic-ref --short HEAD").strip() == "main"
+
+      block unrelatedHistory:
+        # A store whose history shares nothing with the upstream (a rewritten
+        # store, or a wrong remote) is not a lock-only divergence.
+        let fx = setupFixture(gitBin)
+        defer: removeDir(fx.scratch)
+        let oid = repeat('6', 40)
+        discard fx.git("checkout --orphan rewritten")
+        discard fx.git("rm -rf --quiet .")
+        writeLock(fx.repo, "app", oid)
+        fx.commitAll("orphan lock")
+        discard fx.git("branch -M main")
+        discard fx.git("branch --set-upstream-to=origin/main main")
+        let localHead = fx.git("rev-parse HEAD").strip()
+        let remoteBefore = fx.bareHead()
+        let pub = publishWorkspaceLock(fx.identity, fx.repo,
+          @[expected("app", "app", oid)])
+        checkpoint(pub.diagnostic)
+        check pub.outcome == lpoFailed
+        check "shares no history" in pub.diagnostic
+        check fx.bareHead() == remoteBefore
+        check fx.git("rev-parse HEAD").strip() == localHead
+
+  test "a stale chain that carries history the upstream rewrote away is refused":
+    # A partial rewrite keeps the unchanged prefix, so the stale checkout and
+    # the rewritten upstream still share a merge-base. The stretch from that
+    # merge-base to HEAD is then not only this checkout's unpublished record:
+    # it also holds a commit this checkout once saw published, which the
+    # rewrite removed. Replaying it would republish the removed history, so
+    # the divergence is refused and nothing moves on either side.
+    let gitBin = findExe("git")
+    doAssert gitBin.len > 0, "Git is required for the rewritten-store regression"
+    block:
+      let fx = setupFixture(gitBin)
+      defer: removeDir(fx.scratch)
+      let removedOid = repeat('5', 40)
+      writeLock(fx.repo, "removed", removedOid)
+      fx.commitAll("published, then rewritten away")
+      discard fx.git("push origin main")
+      let publishedThenRemoved = fx.git("rev-parse HEAD").strip()
+
+      let rewriter = fx.scratch / "rewriter"
+      discard require(q(gitBin) & " clone " & q(fx.origin) & " " & q(rewriter))
+      discard require(q(gitBin) & " -C " & q(rewriter) &
+        " config user.email tester@example.invalid")
+      discard require(q(gitBin) & " -C " & q(rewriter) &
+        " config user.name 'History Rewriter'")
+      discard require(q(gitBin) & " -C " & q(rewriter) &
+        " reset --hard " & q(fx.base))
+      writeLock(rewriter, "other", repeat('4', 40))
+      discard require(q(gitBin) & " -C " & q(rewriter) & " add locks")
+      discard require(q(gitBin) & " -C " & q(rewriter) & " commit -m other")
+      discard require(q(gitBin) & " -C " & q(rewriter) &
+        " push --force origin main")
+      let rewrittenTip = fx.bareHead()
+
+      # The stale checkout commits this operation's record on its old tip.
+      let oid = repeat('3', 40)
+      writeLock(fx.repo, "app", oid)
+      fx.commitAll("local lock")
+      let localHead = fx.git("rev-parse HEAD").strip()
+      # The checkout is not fetched here, as in the field: the shape is
+      # asserted on the bare. The published commit is no longer upstream,
+      # and the unchanged prefix is still shared.
+      check run(q(gitBin) & " --git-dir=" & q(fx.origin) &
+        " merge-base --is-ancestor " & q(publishedThenRemoved) & " " &
+        q(rewrittenTip)).code != 0
+      check run(q(gitBin) & " --git-dir=" & q(fx.origin) &
+        " merge-base --is-ancestor " & q(fx.base) & " " &
+        q(rewrittenTip)).code == 0
+
+      let pub = publishWorkspaceLock(fx.identity, fx.repo,
+        @[expected("app", "app", oid)])
+      checkpoint(pub.diagnostic)
+      check pub.outcome == lpoFailed
+      check publishedThenRemoved in pub.diagnostic
+      check fx.bareHead() == rewrittenTip
+      check not fx.remoteHas(lockRel("removed", removedOid))
+      check not fx.remoteHas(lockRel("app", oid))
+      check fx.git("rev-parse HEAD").strip() == localHead
+      check fx.git("symbolic-ref --short HEAD").strip() == "main"
 
   test "delete unsafe mode and corrupt expected record all fail closed":
     let gitBin = findExe("git")
@@ -752,6 +922,11 @@ suite "lock publication recovers verified ahead chains":
       # Nothing local was rewritten or reset on the operator's behalf either.
       check fx.git("rev-parse HEAD").strip() == localHead
       check fx.git("symbolic-ref --short HEAD").strip() == "main"
+      # The stale-checkout replay must name the collision, not report it as a
+      # divergence or a merge failure.
+      check "already published at" in pub.diagnostic
+      check "immutable" in pub.diagnostic
+      check rel in pub.diagnostic
 
   test "a push race at one key leaves the published bytes byte-identical":
     let gitBin = findExe("git")

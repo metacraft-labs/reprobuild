@@ -55630,6 +55630,115 @@ proc rebaseVerifiedLockChain(identity: GitToolIdentity; repoRoot, oldBase,
   verifyLockOnlyAheadChain(identity, repoRoot, newBase,
     newHead.output.strip(), expected)
 
+proc lockChainBase(identity: GitToolIdentity; repoRoot, head,
+    fetchedTip: string): tuple[ok: bool; base: string; divergent: bool;
+    diagnostic: string] =
+  ## The commit a local backend chain is verified from (push-hook-publication-
+  ## protocol.md §"Stale record-store checkout replay"). When the fetched tip is
+  ## an ancestor of ``head`` the chain starts at the tip, as it always has.
+  ## Otherwise the local side diverged because this checkout committed on a
+  ## tip that other publishers have since advanced, and the local side of that
+  ## divergence starts at the merge-base: that is the only stretch of history
+  ## this checkout owns, and the only one a replay may move.
+  if gitRunPlain(identity, ["-C", repoRoot, "merge-base", "--is-ancestor",
+      fetchedTip, head]).code == 0:
+    return (true, fetchedTip, false, "")
+  let mergeBase = gitRunPlainQuery(identity,
+    ["-C", repoRoot, "merge-base", head, fetchedTip])
+  if mergeBase.code != 0 or mergeBase.output.strip().len == 0:
+    # Unrelated histories: the store was rewritten or this is not a clone of
+    # it. Nothing here is a lock-only divergence, so nothing may be replayed.
+    return (false, "", true, "local backend HEAD shares no history with " &
+      "the fetched upstream")
+  let base = mergeBase.output.strip().toLowerAscii()
+  # A shared merge-base does not by itself make ``base..head`` this checkout's
+  # unpublished work. A partial rewrite of the store (``git filter-repo`` keeps
+  # the unchanged prefix) also leaves a merge-base, and then ``base..head``
+  # holds commits this checkout once saw PUBLISHED, which the rewrite removed.
+  # Replaying those would put the removed history back. Every value the
+  # upstream tracking ref has held is something this checkout saw on the
+  # remote: its fetches, pulls and pushes all record one in the ref's reflog.
+  # The ref itself has already moved to the tip this operation fetched, so
+  # its current value alone cannot answer the question. A local-side commit
+  # reachable from any of those values was published, and the divergence is
+  # refused. Without a reflog there is no such proof, so nothing is replayed.
+  let tracking = gitRunPlainQuery(identity,
+    ["-C", repoRoot, "rev-parse", "--symbolic-full-name", "@{u}"])
+  if tracking.code != 0 or tracking.output.strip().len == 0:
+    return (false, "", true, "local backend HEAD diverged from the fetched " &
+      "upstream and has no upstream tracking ref to prove which local " &
+      "commits were never published")
+  let trackingRef = tracking.output.strip()
+  if gitRunPlain(identity, ["-C", repoRoot, "reflog", "exists",
+      trackingRef]).code != 0:
+    return (false, "", true, "local backend HEAD diverged from the fetched " &
+      "upstream and " & trackingRef & " keeps no reflog, so nothing proves " &
+      "which local commits were never published")
+  let seen = gitRunPlainQuery(identity,
+    ["-C", repoRoot, "reflog", "show", "--format=%H", trackingRef])
+  if seen.code != 0:
+    return (false, "", true, "could not read the reflog of " & trackingRef)
+  var excluded = @[head, "^" & base]
+  for raw in seen.output.splitLines():
+    let oid = raw.strip()
+    if oid.len > 0 and ("^" & oid) notin excluded:
+      excluded.add("^" & oid)
+  let localSide = gitRunPlainQuery(identity,
+    ["-C", repoRoot, "rev-list", "--reverse", head, "^" & base])
+  let unpublished = gitRunPlainQuery(identity,
+    @["-C", repoRoot, "rev-list", "--ignore-missing"] & excluded)
+  if localSide.code != 0 or unpublished.code != 0:
+    return (false, "", true, "could not enumerate the divergent local side")
+  let neverPublished = unpublished.output.splitLines().mapIt(
+    it.strip().toLowerAscii()).filterIt(it.len > 0)
+  for raw in localSide.output.splitLines():
+    let commit = raw.strip().toLowerAscii()
+    if commit.len > 0 and commit notin neverPublished:
+      return (false, "", true, "local backend commit " & commit &
+        " was already published to " & trackingRef & " and is no longer " &
+        "on the fetched upstream, whose history was rewritten; it is not " &
+        "replayed. Bring the store onto the rewritten history before " &
+        "publishing")
+  (true, base, true, "")
+
+proc publishedLockKeyCollision(identity: GitToolIdentity; repoRoot,
+    tip: string; paths: openArray[string]; display: string): string =
+  ## INVARIANT 14 (push-hook-publication-protocol.md): a record already
+  ## published at one of ``paths`` with a DIFFERENT blob than local ``HEAD``
+  ## holds is never rewritten. Returns the refusal, or "" when every path is
+  ## either absent at ``tip`` or holds the identical blob (the replay then drops
+  ## the commit as already applied). The comparison is over blob object ids —
+  ## a hash over the exact bytes — so it is decided by the records themselves
+  ## and not by how Git happens to merge an add/add.
+  for path in paths:
+    let remoteBlob = gitRunPlainQuery(identity,
+      ["-C", repoRoot, "rev-parse", "--verify", "--quiet", tip & ":" & path])
+    if remoteBlob.code != 0 or remoteBlob.output.strip().len == 0:
+      continue
+    let localBlob = gitRunPlainQuery(identity,
+      ["-C", repoRoot, "rev-parse", "--verify", "--quiet", "HEAD:" & path])
+    if localBlob.code != 0 or localBlob.output.strip().len == 0:
+      continue
+    if remoteBlob.output.strip().toLowerAscii() !=
+        localBlob.output.strip().toLowerAscii():
+      return "a DIFFERENT lock record is already published at '" & path &
+        "' on " & display & " (published blob " &
+        remoteBlob.output.strip() & ", this operation generated " &
+        localBlob.output.strip() & "); published records are immutable and " &
+        "this one is not rewritten. Two sources disagree about the " &
+        "workspace state at that commit — bring this store up to date " &
+        "('git -C " & repoRoot & " pull --ff-only') and re-read the " &
+        "published record before deciding which answer is right"
+  ""
+
+proc lockChainAddedPaths(identity: GitToolIdentity; repoRoot, base,
+    head: string): tuple[ok: bool; paths: seq[string]] =
+  ## Paths a VERIFIED additions-only chain adds between ``base`` and ``head``.
+  let diff = gitRunPlainQuery(identity,
+    ["-C", repoRoot, "diff", "--name-only", "--no-renames", "-z", base, head])
+  if diff.code != 0: return (false, @[])
+  (true, diff.output.split('\0').filterIt(it.len > 0))
+
 proc publishVerifiedLockState(identity: GitToolIdentity; repoRoot: string;
     target: LockUpstream;
     expected: openArray[ExpectedLockRecord]): LockPublishResult =
@@ -55749,15 +55858,55 @@ proc publishVerifiedLockState(identity: GitToolIdentity; repoRoot: string;
     result.diagnostic = "no exact operation lock records were supplied"
     return
 
-  var verified = verifyLockOnlyAheadChain(identity, repoRoot, base,
+  # A divergence at the first fetch is the stale-checkout form of the race the
+  # loop below handles after a rejected push: this checkout committed its
+  # record on a tip other publishers have since advanced. The local side of it
+  # (merge-base..HEAD) is held to exactly the proof a strictly-ahead chain is
+  # held to, and then replayed with the same bounded procedure. Anything that
+  # is not a verified lock-only local chain is still refused unchanged.
+  let chainBase = lockChainBase(identity, repoRoot, initialHead, base)
+  if not chainBase.ok:
+    result.diagnostic = "unverified local backend state: " &
+      chainBase.diagnostic
+    return
+  var verified = verifyLockOnlyAheadChain(identity, repoRoot, chainBase.base,
     initialHead, operationExpected)
   if not verified.ok:
-    # Recovery begins from one immutable fetch. If local and remote history
-    # were already divergent at that point, this invocation did not observe a
-    # push race and must not mutate either branch. Bounded rebase is permitted
-    # only after our own later push returns a non-fast-forward rejection.
-    result.diagnostic = "unverified local backend state: " & verified.diagnostic
+    result.diagnostic = "unverified local backend state" &
+      (if chainBase.divergent: " (diverged from " & target.display &
+        " at " & chainBase.base & ")" else: "") & ": " & verified.diagnostic
     return
+  if chainBase.divergent:
+    let added = lockChainAddedPaths(identity, repoRoot, chainBase.base,
+      initialHead)
+    if not added.ok:
+      result.diagnostic = "could not enumerate the divergent local lock chain"
+      return
+    let collision = publishedLockKeyCollision(identity, repoRoot, base,
+      added.paths, target.display)
+    if collision.len > 0:
+      result.diagnostic = collision
+      return
+    let replayed = rebaseVerifiedLockChain(identity, repoRoot, chainBase.base,
+      base, operationExpected)
+    if not replayed.ok:
+      # Every replayed commit may have been dropped as already applied: other
+      # publishers filed the identical records. That is completion, proven the
+      # same way the behind/equal case above proves it.
+      let afterHead = gitRunPlainQuery(identity,
+        ["-C", repoRoot, "rev-parse", "HEAD^{commit}"])
+      if afterHead.code == 0 and gitRunPlain(identity,
+          ["-C", repoRoot, "merge-base", "--is-ancestor",
+           afterHead.output.strip(), base]).code == 0 and
+          verifyExpectedLocksAt(identity, repoRoot, base,
+            operationExpected).ok:
+        result.outcome = lpoNothingToPublish
+        result.diagnostic = "expected lock records are already reachable " &
+          "from " & target.display
+        return
+      result.diagnostic = "stale record-store replay refused: " &
+        replayed.diagnostic
+      return
   let verifiedHead = gitRunPlainQuery(identity,
     ["-C", repoRoot, "rev-parse", "HEAD^{commit}"])
   if verifiedHead.code == 0:
@@ -55856,6 +56005,8 @@ proc publishVerifiedLockState(identity: GitToolIdentity; repoRoot: string;
 
     # INVARIANT 14 (push-hook-publication-protocol.md) — IMMUTABILITY BINDS
     # PUBLISHED RECORDS, AND THIS IS THE LAST PLACE IT CAN BE CHECKED.
+    # (The stale-checkout replay before this loop applies the same
+    # ``publishedLockKeyCollision`` check to the tip its first fetch saw.)
     #
     # The push was rejected because the remote moved, and the remote may have
     # moved ONTO one of the very keys this operation is publishing. Until this
@@ -55888,29 +56039,20 @@ proc publishVerifiedLockState(identity: GitToolIdentity; repoRoot: string;
     # here: another publisher (or a retry of this one) filed the same record,
     # the rebase drops the replayed commit as already applied, and the loop
     # settles on its own.
-    for item in operationExpected:
-      let remoteBlob = gitRunPlainQuery(identity,
-        ["-C", repoRoot, "rev-parse", "--verify", "--quiet",
-         advanced.oid & ":" & item.relPath])
-      if remoteBlob.code != 0 or remoteBlob.output.strip().len == 0:
-        continue
-      let localBlob = gitRunPlainQuery(identity,
-        ["-C", repoRoot, "rev-parse", "--verify", "--quiet",
-         "HEAD:" & item.relPath])
-      if localBlob.code != 0 or localBlob.output.strip().len == 0:
-        continue
-      if remoteBlob.output.strip().toLowerAscii() !=
-          localBlob.output.strip().toLowerAscii():
-        result.diagnostic =
-          "a DIFFERENT lock record is already published at '" & item.relPath &
-          "' on " & target.display & " (published blob " &
-          remoteBlob.output.strip() & ", this operation generated " &
-          localBlob.output.strip() & "); published records are immutable and " &
-          "this one is not rewritten. Two sources disagree about the " &
-          "workspace state at that commit — bring this store up to date " &
-          "('git -C " & repoRoot & " pull --ff-only') and re-read the " &
-          "published record before deciding which answer is right"
-        return
+    #
+    # The comparison covers every path the local chain adds, not only this
+    # operation's own records: a stale store can carry an earlier operation's
+    # unpublished record, and its key is just as immutable.
+    let racedPaths = lockChainAddedPaths(identity, repoRoot, base, "HEAD")
+    if not racedPaths.ok:
+      result.diagnostic = "could not enumerate the local lock chain for " &
+        "non-fast-forward recovery"
+      return
+    let collision = publishedLockKeyCollision(identity, repoRoot,
+      advanced.oid, racedPaths.paths, target.display)
+    if collision.len > 0:
+      result.diagnostic = collision
+      return
 
     let rebased = rebaseVerifiedLockChain(identity, repoRoot, base,
       advanced.oid, operationExpected)
@@ -73866,22 +74008,40 @@ proc preflightLockBackendPlan(identity: GitToolIdentity;
     # contain this operation's expected records during preflight.
     result.ok = true
     return
-  let remoteInLocal = gitRunPlain(identity,
-    ["-C", plan.root, "merge-base", "--is-ancestor", fetched.oid, localOid])
-  if remoteInLocal.code != 0:
+  # A local chain that diverged from the fetched tip is the stale-checkout
+  # case: its unpublished side starts at the merge-base, and it is held to the
+  # same proof as a strictly-ahead chain. The member gates later replay it
+  # onto the advanced tip (push-hook-publication-protocol.md §"Stale
+  # record-store checkout replay"); here it is only verified, never moved.
+  let chainBase = lockChainBase(identity, plan.root, localOid, fetched.oid)
+  if not chainBase.ok:
     result.diagnostic = "lock backend is divergent from " &
-      upstream.target.display & "; refusing before source publication"
+      upstream.target.display & " (" & chainBase.diagnostic &
+      "); refusing before source publication"
     return
   # Inspect the actual unpublished changes before interpreting HEAD's record
   # prefix. Otherwise an ordinary backend commit can be blamed on an unrelated
   # record already present upstream, or hidden by the absence of any prefix.
-  let ahead = verifyLockOnlyAheadChain(identity, plan.root, fetched.oid,
+  let ahead = verifyLockOnlyAheadChain(identity, plan.root, chainBase.base,
     localOid, plan.expected, requireAllExpected = false,
     restrictToExpectedCoordinates = true)
   if not ahead.ok:
     result.diagnostic = "unverified lock backend ahead chain: " &
       ahead.diagnostic
     return
+  if chainBase.divergent:
+    # Refuse an Invariant 14 collision here, before any source ref leaves,
+    # rather than in the member gate after earlier members have landed.
+    let added = lockChainAddedPaths(identity, plan.root, chainBase.base,
+      localOid)
+    if not added.ok:
+      result.diagnostic = "could not enumerate the divergent lock backend chain"
+      return
+    let collision = publishedLockKeyCollision(identity, plan.root,
+      fetched.oid, added.paths, upstream.target.display)
+    if collision.len > 0:
+      result.diagnostic = collision
+      return
   let prefix = verifiedExpectedPrefixAt(identity, plan, localOid)
   if not prefix.ok:
     result.diagnostic = "unverified lock backend ahead chain: " &
@@ -73891,7 +74051,7 @@ proc preflightLockBackendPlan(identity: GitToolIdentity;
     # A partial recovery remains operation-scoped: it may contain only this
     # operation's exact prefix. Fully materialized operations may also include
     # earlier canonical refresh records for the same backend coordinates.
-    let scoped = verifyLockOnlyAheadChain(identity, plan.root, fetched.oid,
+    let scoped = verifyLockOnlyAheadChain(identity, plan.root, chainBase.base,
       localOid, plan.expected, requireAllExpected = false,
       rejectUnexpected = true, restrictToExpectedCoordinates = true)
     if not scoped.ok:
