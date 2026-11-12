@@ -308,6 +308,15 @@ proc useDefForNix(req: StoreDaemonExternalRealizeRequest): InterfaceToolUse =
     location: SourceLocation(file: "reprostored-ipc", line: 1))]
 
 proc useDefForTarball(req: StoreDaemonExternalRealizeRequest): InterfaceToolUse =
+  # The rebuilt record has no declaring file, so a relative manifest could
+  # only resolve against the daemon's own working directory, which is not
+  # the client's realize. The client sends it absolute; refuse anything else
+  # rather than open whatever that path names here.
+  if req.closureManifest.len > 0 and not req.closureManifest.isAbsolute:
+    raise newException(StoreDaemonRuntimeError,
+      "tarball realize request carries a relative closureManifest (" &
+      req.closureManifest & "); the client must send it resolved to an " &
+      "absolute path")
   result = InterfaceToolUse(
     rawConstraint:
       if req.rawConstraint.len > 0: req.rawConstraint else: req.packageSelector,
