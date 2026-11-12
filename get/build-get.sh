@@ -2,8 +2,10 @@
 # Assemble get/dist/ — the static tree published to https://get.reprobuild.com.
 #
 # The install scripts are SINGLE-SOURCED from the repo's canonical installers:
-#   /sh   <- install-on-distributions.sh   (the POSIX installer)
-#   /pwsh <- install.ps1 if present, else get/pwsh.stub.ps1 (coming-soon stub)
+#   /sh, /repo-sh <- scripts/install/repro-install.sh (REPRO_GET_SH_SOURCE=legacy
+#                    serves install-on-distributions.sh at /sh instead)
+#   /pwsh         <- install.ps1 if present, else scripts/install/repro-install.ps1,
+#                    else get/pwsh.stub.ps1 (coming-soon stub)
 # so get.reprobuild.com always re-serves the repo's real installer as text/plain
 # (Content-Type forced by get/_headers). See
 # metacraft-dev-guidelines/policies/product-install-domains.md.

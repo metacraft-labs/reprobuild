@@ -68702,10 +68702,10 @@
       "owner": "tests/unit",
       "requiresReproBinary": false,
       "source": "tests/unit/test_release_smoke_dev_exec.py",
-      "sourceCaseCount": 17,
+      "sourceCaseCount": 19,
       "sourceNewerThanBinary": false,
       "sourceSuiteCount": 1,
-      "staticCaseCount": 17,
+      "staticCaseCount": 19,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

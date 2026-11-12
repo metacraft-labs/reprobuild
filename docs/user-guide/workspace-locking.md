@@ -887,12 +887,25 @@ then re-run `repro locking explain` to confirm it resolved.
 
 ## Migrating a workspace with a record store but no team route
 
-If your workspace has a record store at `.repro/records` (or the older
-`.repro/manifests`) but no explicit team route, reprobuild will **not**
-silently drop its team lock. It warns once, and names `repro locking
-adopt-manifest` as the remedy.
+A record store that is a **git checkout** at `.repro/records` (or the older
+`.repro/manifests`) is already the team route. `repro workspace lock` writes
+its `locks/...` records into it, with no `[locking]` configuration and no
+warning.
 
-Run the scaffold to keep the record store as your team backend:
+When one of those directories exists but is **not** a git checkout, and no
+configuration layer declares a route, the workspace is public-only.
+Reprobuild does not let that happen silently. It warns once, naming the
+directory it found:
+
+> `repro: WARNING — this workspace has a \`.repro/records\` directory that
+> is not a record-store checkout, and NO team route declared in any
+> configuration layer.`
+
+The remedy is to make that directory a git checkout of the workspace's
+record repository (`[records] url`). The checkout alone declares the route.
+
+To declare the route explicitly as well, run the scaffold over the
+checkout:
 
 ```console
 $ repro locking adopt-manifest

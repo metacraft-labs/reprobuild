@@ -159,10 +159,16 @@ type
       ## with ``subTools "rustc", "gcc"`` directly under ``cli:``. A
       ## ``uses:`` entry of the calling recipe that matches one of these
       ## names has its resolved directory PREPENDED to every edge of this
-      ## tool; an unmatched name is inert. Unlike an edge's
-      ## ``toolIdentityRefs`` this is not a statement about the edge's
-      ## complete tool set, so it does not make the edge's ``PATH``
-      ## hermetic.
+      ## tool, and its profile's compile and link channels
+      ## (``cpathList`` on ``CPATH``, ``libraryPathList`` on
+      ## ``LIBRARY_PATH``) added after the edge's own; the profile's
+      ## fingerprint keys the edge when either channel is non-empty. An
+      ## unmatched name is inert. Unlike an edge's ``toolIdentityRefs``
+      ## this is not a statement about the edge's complete tool set, so
+      ## it does not make the edge's ``PATH`` hermetic, and a sub-tool
+      ## gets none of a ref's other channels: no run-time library path,
+      ## ``PKG_CONFIG_PATH``, ``CMAKE_PREFIX_PATH`` or provisioning
+      ## receipt.
     nonDeterminismJustification*: string
       ## Why the blessing above is sound. Required when the policy is
       ## ``ndpEntropyBlessed`` (the macro rejects a bare blessing), carried
@@ -1706,7 +1712,9 @@ type
       ## The typed tool's own ``subTools`` (see ``CliCommandDef.subTools``),
       ## copied onto each edge the tool's wrapper records. Each name that
       ## matches a resolved ``uses:`` tool contributes that tool's
-      ## directory to the edge's ``PATH`` ahead of everything else, and
+      ## directory to the edge's ``PATH`` ahead of everything else and its
+      ## include and library directories to ``CPATH`` / ``LIBRARY_PATH``
+      ## (lowered to the engine's ``BuildAction.subToolIdentityRefs``), and
       ## keeps the tool resolvable for a fragment build that selects only
       ## this edge. Unlike ``toolIdentityRefs`` these do NOT opt the edge
       ## into a hermetic ``PATH``: the tool vouches for what IT runs, not
@@ -2333,23 +2341,6 @@ proc allToolUses*(pkg: PackageDef): seq[PackageUseDef] =
   ## into the implicit dev-env floor, and a reordering would move that hash
   ## for every package — a fingerprint change with no change behind it.
   pkg.toolUses & pkg.nativeBuildDeps & pkg.runtimeDeps
-
-proc exposesDevEnvIntrospection*(pkg: PackageDef): bool =
-  ## Windows-dev-env M1: a package exposes a ``gpkDevEnvIntrospection``
-  ## entry point — so ``repro exec`` / ``repro shell`` / the direnv hook
-  ## can resolve a dev environment — in either of two cases:
-  ##
-  ## * it declared an explicit ``devEnv:`` block (``hasDevEnv``), which
-  ##   contributes shell ops / tasks / services / extra tool requirements
-  ##   on top of the floor; OR
-  ## * it declares a non-empty ``uses:`` toolchain floor (even with no
-  ##   ``devEnv:`` block). The IMPLICIT dev-env is just the floor: the
-  ##   PATH/env contributions of the ``uses:`` tools, with no extra tasks
-  ##   or env. ``buildPackageDevEnv`` already appends ``pkg.toolUses`` to
-  ##   the dev-env result's tool requirements for BOTH cases, so the
-  ##   implicit case reuses the exact same derivation with an empty
-  ##   "extra" dev-env body.
-  pkg.hasDevEnv or pkg.allToolUses().len > 0
 
 proc sharedServiceReplaceRefusal*(): string =
   ## §5.1's `replace` refusal, WRITTEN ONCE.

@@ -660,6 +660,17 @@ proc acquireProfileLock(stateDir, profileKey: string): ReproFileLock =
       " against another compile of the same profile: " &
       getCurrentExceptionMsg())
 
+proc profileDirLockKey*(absProfile: string): string =
+  ## The key of the lock that serialises compiles in the directory of the
+  ## profile root `absProfile` (`profileDirLockPath`): the BLAKE3 of the
+  ## directory's REAL path. Two spellings of one directory through a symlink
+  ## stage the same `config.nims` and `.nimble`, so they must take one lock.
+  ## A directory that cannot be resolved is keyed on its absolute path.
+  let profileDir =
+    try: expandFilename(absProfile.parentDir)
+    except OSError: absProfile.parentDir
+  profileCompileKey(profileDir)
+
 proc acquireProfileDirLock(absProfile: string): ReproFileLock =
   ## Take the lock that serialises the compiles and platform probes of ONE
   ## profile DIRECTORY across state directories (`profileDirLockPath`),
@@ -679,7 +690,7 @@ proc acquireProfileDirLock(absProfile: string): ReproFileLock =
   ## nimcache, as it would have anyway, but not at the same time as the
   ## other run. The wait is unbounded for the reason given on
   ## `acquireProfileLock`, and the lock file is outside the edges' view.
-  let lockPath = profileDirLockPath(profileCompileKey(absProfile.parentDir))
+  let lockPath = profileDirLockPath(profileDirLockKey(absProfile))
   try:
     when not defined(windows):
       # The lock lives in a world-writable directory: refuse a lock

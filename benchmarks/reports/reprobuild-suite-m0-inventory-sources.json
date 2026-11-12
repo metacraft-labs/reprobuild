@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 35,
-    "nimTestBinaries": 2754,
+    "nimTestBinaries": 2758,
     "pureUnitConsolidationGroups": 81,
     "pureUnitTests": 755,
     "staticallyDetectedRuntimeCompilerFlowTests": 138,
-    "testEntries": 2798
+    "testEntries": 2802
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1597,8 +1597,8 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 21,
-      "integration": 1517,
-      "platform/destructive": 176,
+      "integration": 1520,
+      "platform/destructive": 177,
       "pure unit": 755,
       "unclassified": 329
     },
@@ -1814,9 +1814,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2754,
+    "nimTestBinaryCount": 2758,
     "pythonTestFileCount": 44,
-    "testEntryCount": 2798
+    "testEntryCount": 2802
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -2711,7 +2711,7 @@
           "directExecutionLine": false,
           "enclosingCallable": "compileFloorProvider",
           "executedVariables": [],
-          "line": 40,
+          "line": 50,
           "path": "tests/e2e/dev-env/t_e2e_provider_dev_env_implicit_floor.nim",
           "patterns": [
             "repro-extract-interface"
@@ -2727,7 +2727,7 @@
           "directExecutionLine": false,
           "enclosingCallable": "compileFloorProvider",
           "executedVariables": [],
-          "line": 42,
+          "line": 52,
           "path": "tests/e2e/dev-env/t_e2e_provider_dev_env_implicit_floor.nim",
           "patterns": [
             "repro-compile-provider-binary"
@@ -12416,7 +12416,7 @@
       "requiresReproBinary": true,
       "source": "libs/repro_build_engine/tests/test_tool_identity_env_plumbing.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 12,
+      "staticCaseCount": 13,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -13922,6 +13922,27 @@
       "source": "libs/repro_cli_support/tests/t_strategy_unknown_name_refused.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 8,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_sub_tool_link_channels",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_build_engine",
+        "repro_cli_support",
+        "repro_project_dsl",
+        "repro_provider_runtime",
+        "repro_tool_profiles"
+      ],
+      "owner": "libs/repro_cli_support",
+      "requiresReproBinary": true,
+      "source": "libs/repro_cli_support/tests/t_sub_tool_link_channels.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 5,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -21568,8 +21589,8 @@
       "owner": "libs/repro_profile_compile",
       "requiresReproBinary": false,
       "source": "libs/repro_profile_compile/tests/t_profile_compile_relative_dirs_are_anchored.nim",
-      "sourceSuiteCount": 1,
-      "staticCaseCount": 2,
+      "sourceSuiteCount": 2,
+      "staticCaseCount": 4,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -26338,6 +26359,25 @@
       "source": "libs/repro_tool_profiles/tests/t_one_tarball_realizer.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 4,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_path_mode_library_selection_is_not_a_host_program",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_interface_artifacts",
+        "repro_project_dsl",
+        "repro_tool_profiles"
+      ],
+      "owner": "libs/repro_tool_profiles",
+      "requiresReproBinary": true,
+      "source": "libs/repro_tool_profiles/tests/t_path_mode_library_selection_is_not_a_host_program.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 3,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -32012,7 +32052,7 @@
       "requiresReproBinary": false,
       "source": "tests/e2e/dev-env/t_e2e_provider_dev_env_implicit_floor.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 2,
+      "staticCaseCount": 3,
       "staticallyDetectedRuntimeCompilerFlow": true,
       "targetOs": "soAny"
     },
@@ -41826,7 +41866,7 @@
       "requiresReproBinary": true,
       "source": "tests/integration/t_hcr_native_library_prerequisite.nim",
       "sourceSuiteCount": 2,
-      "staticCaseCount": 5,
+      "staticCaseCount": 6,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -42850,7 +42890,7 @@
       "requiresReproBinary": true,
       "source": "tests/integration/t_integration_daemon_nix_and_tarball_realize.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 4,
+      "staticCaseCount": 5,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -47680,6 +47720,24 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_record_store_checkout_declares_the_route_without_migration_warning",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_test_support",
+        "repro_workspace_manifests"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_record_store_checkout_declares_the_route_without_migration_warning.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 4,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_records_url_locates_the_lock_record_store",
       "class": "integration",
       "classificationReason": "e2e/integration path or requires the repro binary",
@@ -47951,6 +48009,23 @@
       "source": "tests/integration/t_rename_relocation_failure_is_clean.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_rename_relocation_repairs_linked_worktrees",
+      "class": "platform/destructive",
+      "classificationReason": "platform path, target OS, VM, privileged, or host mutation signal",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_test_support"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_rename_relocation_repairs_linked_worktrees.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 7,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -57454,7 +57529,7 @@
       "requiresReproBinary": false,
       "source": "tests/unit/t_store_daemon_tarball_archive_detail_frame.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 6,
+      "staticCaseCount": 9,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -58433,7 +58508,7 @@
       "requiresReproBinary": false,
       "source": "tests/unit/test_release_smoke_dev_exec.py",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 17,
+      "staticCaseCount": 19,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

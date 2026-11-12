@@ -142,7 +142,9 @@ proc requestFromTarballUse*(useDef: InterfaceToolUse; storeRoot, holderId,
     prunePaths: plan.declaredPrunePaths,
     nonRedistributable: plan.declaredNonRedistributable,
     launcher: plan.declaredLauncher,
-    closureManifest: plan.declaredClosureManifest,
+    # Resolved here, where the declaring file is known: the daemon rebuilds
+    # the record without it and runs in a working directory of its own.
+    closureManifest: resolvedClosureManifest(plan),
     archiveDetail: plan.record.detail,
     stripComponents: plan.stripComponents)
 

@@ -1126,6 +1126,29 @@ proc applySidecarProfile(profile: var PathOnlyToolProfile;
     else:
       discard
 
+proc libraryOutputPath(path: string): bool =
+  ## Whether a declared ``executablePath`` names a header or a library
+  ## (``include/zstd.h``, ``lib/libxcvt.so``) rather than a program.
+  let normalized = path.replace('\\', '/')
+  for root in ["include/", "lib/", "lib64/"]:
+    if normalized.startsWith(root): return true
+
+proc selectsLibraryOutputs*(useDef: InterfaceToolUse): bool =
+  ## Whether ``useDef`` selects a package for its headers and libraries
+  ## instead of for a program: it declares ``nixPackage`` / ``tarball`` arms
+  ## and every one of them anchors on a header or library path (the
+  ## ``zstd-dev`` / ``libxcvt`` convention, Package-Model.md §"Environment-
+  ## provided library prefixes"). A program of the same name on ``$PATH`` is
+  ## not that package: ``zstd`` the CLI carries no ``zstd.h``.
+  var anchors = 0
+  for arm in useDef.nixProvisioning:
+    inc anchors
+    if not libraryOutputPath(arm.executablePath): return false
+  for arm in useDef.tarballProvisioning:
+    inc anchors
+    if not libraryOutputPath(arm.executablePath): return false
+  anchors > 0
+
 proc enforcePathToolVersionRange(profile: PathOnlyToolProfile;
                                  useDef: InterfaceToolUse)
   ## Defined beside `enforceUsesVersionRange`.
@@ -1238,6 +1261,10 @@ proc pathOnlyResolutionSignature(useDef: InterfaceToolUse; pathValue: string;
   ## serve the first resolution's hashes after the library was replaced.
   if useDef.environmentPrefixProvisioning.len > 0:
     return "environmentPrefix\x1f" & environmentPrefixSignature(useDef)
+  if selectsLibraryOutputs(useDef):
+    # ``toolProfileFor`` never looks a library selection up on ``$PATH``, so
+    # no ``$PATH`` value changes where it lands.
+    return "library\x1f" & useDef.packageSelector
   let searchList = splitPathList(pathValue)
   let sidecarPath =
     findToolProfileSidecarOnPath(useDef.executableName, searchList, lookup)
@@ -3997,6 +4024,21 @@ proc closureManifestPath(plan: TarballAcquisitionPlan): string =
   if plan.closureManifestRoot.len == 0:
     return plan.declaredClosureManifest
   plan.closureManifestRoot / plan.declaredClosureManifest
+
+proc resolvedClosureManifest*(plan: TarballAcquisitionPlan): string =
+  ## The closure manifest the in-process realize of ``plan`` would open, as
+  ## an absolute path; empty when the record declares none.
+  ##
+  ## For a caller that hands the plan to another process — the store daemon
+  ## client — whose working directory, and whose idea of the declaring file,
+  ## differ from this one's. A relative manifest resolves against the
+  ## declaring file's directory, and failing that against THIS process's
+  ## working directory, exactly as ``closureManifestPath`` is opened here.
+  ## The cache key is the manifest's content, not its path, so sending the
+  ## absolute path does not move the prefix.
+  let path = closureManifestPath(plan)
+  if path.len == 0 or path.isAbsolute: path
+  else: absolutePath(path)
 
 proc normalizedClosureDestination(path: string): string =
   ## The destination with ``\`` read as ``/`` and empty and ``.`` components
@@ -10197,6 +10239,21 @@ proc toolProfileFor(useDef: InterfaceToolUse; mode: ToolProvisioningMode;
     # is never used: when nothing below realizes the tool inside the range,
     # the range refusal is what the operator sees, not the fallback's own
     # failure.
+    if selectsLibraryOutputs(useDef):
+      # Selected for its headers and libraries: an executable of the same
+      # name on PATH is not a realization of it (the CLI ``zstd`` has no
+      # ``zstd.h``), so PATH is not consulted. The package's own arms
+      # realize it, or it is refused by name.
+      if not pathModeFallThrough(useDef, storeRoot, result):
+        raise newException(OSError, "tool-resolution failed: '" &
+          useDef.packageSelector & "' requested by uses \"" &
+          useDef.rawConstraint & "\" selects a library (its arms anchor on " &
+          "headers or libraries), and --tool-provisioning=path has no " &
+          "realization for it: an executable named " & useDef.executableName &
+          " on PATH does not supply them. Declare an environmentPrefix arm " &
+          "or a nix/tarball arm usable on this host." &
+          environmentPrefixIgnoredNote(useDef))
+      return
     var pathRefusal = ""
     try:
       result = resolvePathOnlyTool(useDef, pathValue, pathLookup)
