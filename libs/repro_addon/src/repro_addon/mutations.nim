@@ -1380,6 +1380,9 @@ const
                           # a revert holds a refusal's subject even when
                           # the generation does not install it.
                           "revert-holds-any-subject",
+                          # a revert's hold written to /run, so a
+                          # reboot starts the held unit.
+                          "revert-hold-runtime-only",
                           # A13: a state backup or restore runs while a
                           # unit of the set may run.
                           "state-units-not-checked",
