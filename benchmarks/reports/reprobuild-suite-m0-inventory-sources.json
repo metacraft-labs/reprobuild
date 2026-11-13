@@ -2615,7 +2615,7 @@
             "t3",
             "tree"
           ],
-          "line": 154,
+          "line": 167,
           "path": "libs/repro_test_support/tests/t_fresh_helper_binary_refuses_a_stale_build.nim",
           "patterns": [
             "gcc"
@@ -2642,7 +2642,7 @@
             "t3",
             "tree"
           ],
-          "line": 186,
+          "line": 200,
           "path": "libs/repro_test_support/tests/t_fresh_helper_binary_refuses_a_stale_build.nim",
           "patterns": [
             "nim-argv"
@@ -2669,7 +2669,7 @@
             "t3",
             "tree"
           ],
-          "line": 289,
+          "line": 303,
           "path": "libs/repro_test_support/tests/t_fresh_helper_binary_refuses_a_stale_build.nim",
           "patterns": [
             "nim-argv"
@@ -2696,7 +2696,7 @@
             "t3",
             "tree"
           ],
-          "line": 371,
+          "line": 385,
           "path": "libs/repro_test_support/tests/t_fresh_helper_binary_refuses_a_stale_build.nim",
           "patterns": [
             "nim-argv"
@@ -2723,7 +2723,7 @@
             "t3",
             "tree"
           ],
-          "line": 503,
+          "line": 517,
           "path": "libs/repro_test_support/tests/t_fresh_helper_binary_refuses_a_stale_build.nim",
           "patterns": [
             "nim-argv"
@@ -26397,7 +26397,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_test_support/tests/t_fresh_helper_binary_refuses_a_stale_build.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 25,
+      "staticCaseCount": 26,
       "staticallyDetectedRuntimeCompilerFlow": true,
       "targetOs": "soAny"
     },
