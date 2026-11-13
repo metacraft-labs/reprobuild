@@ -329,6 +329,12 @@ dev-shell-hooks:
     bash ./tests/test_dev_shell_writes_nothing_elsewhere.sh
     bash ./tests/test_pre_commit_runs_lint_in_dev_shell.sh
 
+# The test runner uses the host's RunQuota daemon, and keeps a private
+# per-user endpoint only where no host service answers. Needs `runquota` and
+# `runquotad`; see tests/test_run_tests_runquota_endpoint.sh.
+test-run-tests-runquota-endpoint:
+    bash ./tests/test_run_tests_runquota_endpoint.sh
+
 dev-env-full-regression:
     mkdir -p test-logs
     bash ./scripts/run_tests.sh 2>&1 | tee test-logs/dev-env-full-regression.log

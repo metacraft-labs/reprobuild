@@ -285,22 +285,30 @@ case "$(uname -s)" in
     export REPRO_DAEMON_ENDPOINT="${REPRO_TEST_DAEMON_DIR}/d.sock"
     ;;
 esac
-# THE SHARED PER-USER runquotad, likewise (POSIX). On a host with no RunQuota
-# service every `repro` adopts or starts ONE runquotad per user, on a
-# well-known socket, and that daemon outlives the invocation (reprobuild-pm
-# spec/RunQuota-Host-Configuration.md, "The shared per-user daemon (POSIX)").
-# Left alone, the suite's builds would start, adopt -- and, being another
-# build, ask to make way -- the developer's own daemon, and every other process
-# of the user would lease against the suite's. A directory of the run's own
-# keeps the suite on a daemon of its own; tests that need a separate one still
-# name theirs. Under /tmp, not TMPDIR: the socket path must fit sun_path.
+# WHICH runquotad THE SUITE USES (POSIX). The suite uses the host's daemon when
+# there is one, so its builds draw on the host's one budget instead of a
+# whole budget of their own (scripts/lib/runquota_test_endpoint.sh decides and
+# says why; REPRO_TEST_RUNQUOTA=auto|host|private overrides). Only where no
+# host service answers does the run get a per-user endpoint directory of its
+# own: on a host with no RunQuota service every `repro` adopts or starts ONE
+# runquotad per user, on a well-known socket that outlives the invocation, and
+# a `repro` built from the tree under test would adopt
+# the developer's own daemon and, being another build, ask it to make way.
+# Tests of RunQuota itself name their own endpoint either way. Under /tmp, not
+# TMPDIR: the socket path must fit sun_path.
+# shellcheck source=scripts/lib/runquota_test_endpoint.sh
+. "${repo_root}/scripts/lib/runquota_test_endpoint.sh"
 REPRO_TEST_RUNQUOTA_DIR=""
 case "$(uname -s)" in
   MINGW*|MSYS*|CYGWIN*|Windows_NT)
     ;;
   *)
-    REPRO_TEST_RUNQUOTA_DIR="$(mktemp -d /tmp/repro-test-rq.XXXXXX)"
-    export RUNQUOTA_USER_ENDPOINT_DIR="${REPRO_TEST_RUNQUOTA_DIR}/u"
+    repro_test_runquota_decide || exit 2
+    if [[ "${REPRO_TEST_RUNQUOTA_MODE}" == private ]]; then
+      REPRO_TEST_RUNQUOTA_DIR="$(mktemp -d /tmp/repro-test-rq.XXXXXX)"
+      export RUNQUOTA_USER_ENDPOINT_DIR="${REPRO_TEST_RUNQUOTA_DIR}/u"
+    fi
+    echo "run_tests: RunQuota: ${REPRO_TEST_RUNQUOTA_MODE} daemon (${REPRO_TEST_RUNQUOTA_REASON})" >&2
     ;;
 esac
 _repro_test_daemon_cleanup() {
