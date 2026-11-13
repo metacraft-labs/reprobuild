@@ -556,6 +556,15 @@ class ReleaseWorkflowPublishesNixPackage(unittest.TestCase):
         self.assertIn('"github:${GITHUB_REPOSITORY}/${GITHUB_SHA}#reprobuild"', step)
         self.assertIn('attic push "$ATTIC_CACHE" "$package"', step)
 
+    def test_the_publish_phase_gets_a_fresh_github_token(self):
+        workflow = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
+        refresh = workflow.index("      - name: Refresh build authentication (cache publish)\n")
+        publish = workflow.index("      - name: Publish the Nix package to the organisation cache\n")
+        build = workflow.index("      - name: Build (POSIX)\n")
+        self.assertLess(build, refresh)
+        self.assertLess(refresh, publish)
+        self.assertIn("refresh-build-auth@dev", workflow[refresh:publish])
+
     def test_a_missing_cache_credential_fails_the_release_leg(self):
         step = self.step()
         self.assertIn("ATTIC_TOKEN: ${{ secrets.ATTIC_TOKEN }}", step)

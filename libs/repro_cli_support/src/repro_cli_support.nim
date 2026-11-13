@@ -261,6 +261,7 @@ proc gitRemoteNameFor*(repo: ResolvedRepo): string =
   # one of the two branches above.
   return "origin"
 import repro_cli_support/dev_env_shell_export
+import repro_cli_support/dev_env_run_edges
 import repro_cli_support/dev_env_rollback_manifest
 import repro_cli_support/dev_env_shell_hook_templates
 import repro_cli_support/home
@@ -11898,6 +11899,12 @@ proc restoreCachedOutputsEnvDefault(): bool =
   getEnv("REPRO_RESTORE_CACHED_OUTPUTS").normalize in
     ["1", "true", "yes", "on"]
 
+proc applyRunEdgeDevEnv(actions: var seq[BuildAction];
+                        snapshot: ProviderGraphSnapshot;
+                        projectRoot, workRoot, publicCliPath: string;
+                        announce: bool)
+  ## Defined beside ``computePublicDevEnv``, which it needs; see there.
+
 proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
                         publicCliPath: string;
                         selectDefaultAction = false;
@@ -14368,6 +14375,11 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
     appendForwardedArgs(scheduledActions, forwardedActionId)
     attachProducerAuxRefs(scheduledActions)
     foldProducerActionHashes(scheduledActions)
+    # A package that declares ``devEnv:`` gets it on its run-edges (the
+    # members of its ``test`` / ``bench`` collections), keyed by the
+    # contribution's identity. A no-op unless the plan holds such an edge.
+    applyRunEdgeDevEnv(scheduledActions, refresh.snapshot, projectRoot,
+      workRoot, publicCliPath, announce = progressMode != bpmQuiet)
     # Cross-Repo-Source-Consumption SC-4 (§4.3): a producer SOURCE change
     # rebuilds the consumer actions that READ it. Actions whose reads are
     # keyed (monitored, or built-in) get only the producer's realized
@@ -15849,6 +15861,86 @@ proc computePublicDevEnv(selection: DevEnvCliSelection;
       formatDuration(epochTime() - activationStart) & " (" & providerWord &
       ", " & envWord & ")")
     stderr.flushFile()
+
+proc emitDevEnvDiagnostics(artifact: DevEnvArtifact): bool
+
+proc applyRunEdgeDevEnv(actions: var seq[BuildAction];
+                        snapshot: ProviderGraphSnapshot;
+                        projectRoot, workRoot, publicCliPath: string;
+                        announce: bool) =
+  ## Give the run-edges of a package that declares ``devEnv:`` that
+  ## environment. ``repro_cli_support/dev_env_run_edges`` states which
+  ## edges, how the values merge and how they are keyed.
+  ##
+  ## The environment is realized exactly as ``repro exec`` realizes it, by
+  ## the tracked introspection edge (``computePublicDevEnv``), so a warm
+  ## run costs a cache hit. Only the recipe's own contribution is applied
+  ## (``artifact.shellOps``): the ``uses:`` tools are resolved per action
+  ## by the engine already, and the activation metadata variables describe
+  ## a shell, not an edge.
+  ##
+  ## FAILS CLOSED. A dev environment that cannot be realized, or that
+  ## reports an error diagnostic, stops the build before any action runs:
+  ## running the edge without it would be the very defect this exists to
+  ## remove, a verdict that depends on the shell ``repro`` came from.
+  var aliases = DirectTargetAliases(
+    byAction: initTable[string, string](),
+    rankByAction: initTable[string, int]())
+  for fragment in snapshot.fragments:
+    for node in fragment.nodes:
+      if node.kind == gnkMetadata and
+          node.stableName == "reprobuild.build-target.v1":
+        considerDirectAlias(aliases,
+          decodeBuildTargetPayload(toBytes(node.payload)))
+  let runEdgeIds = devEnvRunEdgeActionIds(snapshot, aliases.byAction)
+  if runEdgeIds.len == 0:
+    return
+  var receivers: seq[int] = @[]
+  for i, action in actions:
+    if action.kind == bakProcess and runEdgeIds.contains(action.id):
+      receivers.add(i)
+  if receivers.len == 0:
+    return
+  var selection = DevEnvCliSelection(selector: projectRoot,
+    workRoot: workRoot)
+  selection.resolveDevEnvSelection()
+  # Realizing the environment may publish the bootstrap toolchain into
+  # this process's environment; the run-edges must inherit what they would
+  # have inherited without it, as `repro exec`'s command does.
+  let toolchainEnv = snapshotBootstrapToolchainEnv()
+  var edge: DevEnvEdgeResult
+  try:
+    # Announced like any activation (a cold one evaluates a flake), unless
+    # this build was asked to be quiet.
+    edge = computePublicDevEnv(selection, publicCliPath, announce = announce)
+  except CatchableError as error:
+    restoreBootstrapToolchainEnv(toolchainEnv)
+    raise newException(ValueError,
+      "repro: " & $receivers.len & " run-edge(s) of " & projectRoot &
+      " need the dev environment its recipe declares (devEnv:), and it " &
+      "could not be realized: " & error.msg & "\nThe same environment is " &
+      "what `repro exec` activates; `repro exec -- true` reproduces this " &
+      "failure on its own.")
+  restoreBootstrapToolchainEnv(toolchainEnv)
+  if emitDevEnvDiagnostics(edge.artifact):
+    raise newException(ValueError,
+      "repro: the dev environment of " & projectRoot & " reported an " &
+      "error (above); its " & $receivers.len & " run-edge(s) cannot run " &
+      "without it.")
+  let ops = edge.artifact.shellOps
+  if ops.len == 0:
+    return
+  let identity = devEnvRunEdgeIdentity(ops)
+  var unremovable = initOrderedSet[string]()
+  proc inherited(name: string): string = getEnv(name)
+  for i in receivers:
+    for name in applyDevEnvToRunEdge(actions[i], ops, identity, inherited):
+      unremovable.incl(name)
+  for name in unremovable:
+    stderr.writeLine("repro: warning: the dev environment unsets " & name &
+      ", but run-edges inherit it from the environment repro was started " &
+      "in and an action's environment has no way to remove it; unset it " &
+      "before running repro if a test depends on its absence")
 
 proc devEnvPerformanceEvidenceJson(edge: DevEnvEdgeResult): JsonNode =
   let devStats = edge.devEnvResult.stats
@@ -49045,11 +49137,18 @@ proc observeRepoForSync(identity: GitToolIdentity;
                         resolved: ResolvedRepo;
                         forcePushedSHAs: HashSet[string]): RepoSyncObservation =
   ## Gather everything the M10 planner needs about ONE checkout. A
-  ## missing directory short-circuits with ``exists=false``; every
+  ## missing checkout short-circuits with ``exists=false``; every
   ## other observation field is filled in best-effort (a failed probe
   ## leaves the field empty so the planner's tolerant-compare logic
   ## degrades to "divergent_feature_branch" rather than crashing).
-  if not dirExists(repoPath / ".git"):
+  ##
+  ## "Missing" means no ``.git`` entry of either kind (``hasGitEntry``).
+  ## A linked worktree's or absorbed submodule's ``.git`` is a FILE, and
+  ## reading it as absent planned a clone that deleted the checkout; every
+  ## probe below goes through ``git -C``, which resolves the file. A ``.git``
+  ## file git cannot resolve fails the pre-plan fetch (``fetch_failed``) and
+  ## the clean probe, so the repo is refused; it is never cloned over.
+  if not hasGitEntry(repoPath):
     result.exists = false
     return
   result.exists = true
@@ -50244,30 +50343,17 @@ proc relocateDeclaredRenames(identity: GitToolIdentity;
     # this checkout's location, so the move cuts every one of them off; §3.5
     # repairs them after the move. What is refused here is the subset the
     # repair cannot reach: a worktree that is missing, or one git has been
-    # told to leave alone (`locked`). A probe that cannot be run is itself a
-    # blocker — moving without knowing what the move strands is the failure
-    # this check exists for.
+    # told to leave alone (`locked`), the candidate itself included when it
+    # is a locked linked worktree. A candidate that is an unlocked linked
+    # worktree moves and is re-registered with its common directory (§3.5).
+    # A probe that cannot be run is itself a blocker — moving without knowing
+    # what the move strands is the failure this check exists for.
     let worktrees = linkedWorktreeInventory(probe, candidateAbs)
     if not worktrees.ok:
       result[repoIdx] = relocationRefusal("linked_worktree_unrepairable",
         "could not enumerate the linked worktrees of the checkout at '" &
           prior.path & "' (" & worktrees.diagnostic & "), so a move could " &
           "strand them. Nothing was moved.")
-      continue
-    # §4 `candidate_is_linked_worktree`. A checkout whose `.git` is a FILE
-    # is not something the rest of this sync can hold at the declared path:
-    # the observation step classifies it `missing_checkout`, and the clone
-    # that follows deletes it as a half-finished clone — uncommitted work
-    # included — and clones fresh. Moving it would therefore destroy it.
-    # Refused until sync handles linked-worktree checkouts.
-    if worktrees.selfLinked:
-      result[repoIdx] = relocationRefusal("candidate_is_linked_worktree",
-        "the checkout at '" & prior.path & "' is a linked worktree of " &
-          worktrees.commonDir & " (its `.git` is a file), and `repro sync` " &
-          "cannot keep a linked-worktree checkout at '" & repo.path & "'. " &
-          "Publish or move its work to a branch of the main worktree, " &
-          "remove it with `git worktree remove`, and re-run: `repro sync` " &
-          "then clones '" & repo.path & "'. Nothing was moved.")
       continue
     let unrepairable = unrepairableLinkedWorktrees(worktrees, prior.path)
     if unrepairable.len > 0:
@@ -50743,7 +50829,7 @@ proc executeWorkspaceSync(args: WorkspaceSyncArgs;
   for repo in resolved.repos:
     let repoPath = args.workspaceRoot / repo.path
     var intended =
-      if dirExists(repoPath / ".git"): "update"
+      if hasGitEntry(repoPath): "update"
       else: "clone"
     # Declared-Repository-Renames.md §3.1 — ``relocate`` is a third verdict in
     # this plan, and ``--dry-run`` must print it and perform none. Decided here
@@ -50758,7 +50844,7 @@ proc executeWorkspaceSync(args: WorkspaceSyncArgs;
         if prior.path == repo.path:
           continue
         let priorAbs = args.workspaceRoot / prior.path
-        if dirExists(priorAbs / ".git") or fileExists(priorAbs / ".git"):
+        if hasGitEntry(priorAbs):
           intended = "relocate"
           previousPath = prior.path
           break
@@ -50894,7 +50980,7 @@ proc executeWorkspaceSync(args: WorkspaceSyncArgs;
   var oldRemoteTips = newSeq[string](resolved.repos.len)
   for repoIdx, repo in resolved.repos:
     let repoPath = args.workspaceRoot / repo.path
-    if dirExists(repoPath / ".git") and repo.revision.len > 0 and not looksLikeSha(repo.revision):
+    if hasGitEntry(repoPath) and repo.revision.len > 0 and not looksLikeSha(repo.revision):
       let rName = gitRemoteNameFor(repo)
       oldRemoteTips[repoIdx] = revParse(identity, repoPath,
         "refs/remotes/" & rName & "/" & repo.revision)
@@ -50910,7 +50996,7 @@ proc executeWorkspaceSync(args: WorkspaceSyncArgs;
     var reports: seq[LeafCheckReport]
     for repo in resolved.repos:
       let repoPath = args.workspaceRoot / repo.path
-      if args.cloneObjects in ["", "shared"] and dirExists(repoPath / ".git"):
+      if args.cloneObjects in ["", "shared"] and hasGitEntry(repoPath):
         reports.add(checkLeaf(identity.binaryPath, repoPath, lcmRepair,
           cacheRoot))
     emitLeafReports(reports)
@@ -50927,7 +51013,7 @@ proc executeWorkspaceSync(args: WorkspaceSyncArgs;
   var fetchFailureByPath = initTable[string, string]()
   for repoIdx, repo in resolved.repos:
     let repoPath = args.workspaceRoot / repo.path
-    if not dirExists(repoPath / ".git"):
+    if not hasGitEntry(repoPath):
       continue
     # RA-14 optimized-fetch (``repo --optimized-fetch`` equivalent): if the
     # locked SHA is already reachable in this checkout (counting objects
@@ -51540,7 +51626,7 @@ proc executeWorkspaceSync(args: WorkspaceSyncArgs;
         let repo = resolved.repos[repoIdx]
         if looksLikeSha(repo.revision): continue
         let repoAbs = args.workspaceRoot / repo.path
-        if dirExists(repoAbs / ".git"):
+        if hasGitEntry(repoAbs):
           let rName = gitRemoteNameFor(repo)
           let remoteRef = revParse(identity, repoAbs, "refs/remotes/" & rName & "/" & wsBranch)
           if remoteRef.len > 0:
@@ -51922,7 +52008,7 @@ proc executeMainlineSync(args: WorkspaceSyncArgs): MainlineSyncReport =
     if args.dryRun: newSeq[ResolvedRepo]()
     else: resolved.repos
   for idx, repo in reposToFetch:
-    if not dirExists(args.workspaceRoot / repo.path / ".git"):
+    if not hasGitEntry(args.workspaceRoot / repo.path):
       continue
     let idSeg = safeRepoIdSegment(repo.name) & "-" & $idx
     let actionId = "workspace-mainline-sync-fetch-" & idSeg
@@ -51987,7 +52073,7 @@ proc executeMainlineSync(args: WorkspaceSyncArgs): MainlineSyncReport =
     if roleResolved.isSome:
       obs.roleBranch = roleResolved.get().branch
       obs.roleDeclaredBy = roleDeclarerText(roleResolved.get())
-    if not dirExists(repoAbs / ".git"):
+    if not hasGitEntry(repoAbs):
       obs.exists = false
       observations.add(obs)
       continue
@@ -53098,7 +53184,13 @@ proc branchConvergenceBlockers(identity: GitToolIdentity;
   ## because a stash entry means an interrupted piece of work whose owner is
   ## almost certainly not expecting their branch to move underneath it, and the
   ## probe is one cheap command.
-  if not dirExists(repoDir / ".git"):
+  ##
+  ## A linked worktree's or absorbed submodule's ``.git`` is a FILE
+  ## (``hasGitEntry``). Read as "not a checkout", it found no blockers and
+  ## let `checkout -B` rewind a branch carrying unpushed commits. A ``.git``
+  ## file git cannot resolve makes every probe below fail, and a failed probe
+  ## is a blocker.
+  if not hasGitEntry(repoDir):
     return @[]
   result.add(uncommittedChangesBlocker(identity, repoDir))
   let attached = gitRunPlainQuery(identity,

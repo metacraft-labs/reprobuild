@@ -119,6 +119,25 @@ const
     ## silently accepts everything it exists to reject, so a reader that runs
     ## inside `pre-receive` must keep these three.
 
+proc hasGitEntry*(checkout: string): bool =
+  ## Whether `checkout` holds a `.git` entry of EITHER kind: the directory of
+  ## an ordinary clone, or the FILE (`gitdir: <elsewhere>`) of a linked
+  ## worktree (`git worktree add`) or an absorbed submodule. Symlinks count
+  ## too, dangling or not.
+  ##
+  ## This is the presence test for "an on-disk checkout lives here"
+  ## (`CLI/sync.md` § "Automatic cloning of missing repositories"). The
+  ## narrower `dirExists(checkout / ".git")` read a linked worktree as absent:
+  ## sync planned a clone, and the clone deleted the populated directory as a
+  ## half-cloned leftover, uncommitted work included. It deliberately asks
+  ## nothing of git: a `.git` file whose `gitdir` names nothing is still
+  ## something the operator put there, so it must stop a clone, not invite
+  ## one. Whether git can READ the checkout is the caller's next question.
+  ## https://git-scm.com/docs/gitrepository-layout ("a `.git` file ...
+  ## `gitdir: <path>`").
+  let entry = checkout / ".git"
+  dirExists(entry) or fileExists(entry) or symlinkExists(entry)
+
 proc isRepositoryLocalGitEnvKey(key: string): bool =
   for candidate in GitRepositoryLocalEnv:
     if key == candidate:

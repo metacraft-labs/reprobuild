@@ -95,7 +95,7 @@ libs/repro_addon/tests/t_addon_switch_planning.nim	nim	28
 libs/repro_addon/tests/t_addon_tmpfiles_scope.nim	nim	7
 libs/repro_addon/tests/t_addon_trace_attribution.nim	nim	6
 libs/repro_addon/tests/t_addon_uninstall_keeps_pre_bootstrap_inputs.nim	nim	8
-libs/repro_addon/tests/t_addon_units_meet_confinement_floor.nim	nim	2
+libs/repro_addon/tests/t_addon_units_meet_confinement_floor.nim	nim	3
 libs/repro_addon/tests/t_full_host_secrets_materialise_from_the_latest_envelope.nim	nim	9
 libs/repro_addon/tests/t_rdmf_v3_closure_digests_are_enforced.nim	nim	4
 libs/repro_addon/tests/t_system_activity_selects_its_store_packages.nim	nim	5
@@ -316,6 +316,7 @@ libs/repro_cli_support/tests/t_publish_refuses_a_dirty_prefix.nim	nim	2
 libs/repro_cli_support/tests/t_refresh_flake_lock_text_writes_the_fields_nix_reports.nim	nim	11
 libs/repro_cli_support/tests/t_reused_result_refused_when_key_does_not_cover_reads.nim	nim	1
 libs/repro_cli_support/tests/t_revocation_takes_effect_on_the_next_frame.nim	nim	1
+libs/repro_cli_support/tests/t_run_edge_dev_env_merge_and_key.nim	nim	15
 libs/repro_cli_support/tests/t_runquota_auto_spawn_defers_to_host_config.nim	nim	8
 libs/repro_cli_support/tests/t_s7_build_paths_reach_the_restore_config.nim	nim	6
 libs/repro_cli_support/tests/t_strategy_unknown_name_refused.nim	nim	8
@@ -1325,6 +1326,7 @@ tests/e2e/dev-env/t_e2e_repro_exec_does_not_leak_engine_source_root.nim	nim	3
 tests/e2e/dev-env/t_e2e_repro_exec_installed_prefix_nim.nim	nim	4
 tests/e2e/dev-env/t_e2e_repro_exec_recipe_compiler.nim	nim	2
 tests/e2e/dev-env/t_e2e_repro_exec_shell.nim	nim	5
+tests/e2e/dev-env/t_e2e_repro_test_run_edges_get_the_dev_env.nim	nim	1
 tests/e2e/dev-env/t_e2e_shell_hook_cd_activate_deactivate.nim	nim	1
 tests/e2e/dev-env/t_e2e_shell_hook_noop_io_bounded.nim	nim	1
 tests/e2e/dev-env/t_e2e_shell_hook_noop_latency.nim	nim	2
@@ -2211,7 +2213,7 @@ tests/integration/t_rename_refuses_nested_declared_checkout.nim	nim	2
 tests/integration/t_rename_refuses_unrelated_directory_at_previous_path.nim	nim	2
 tests/integration/t_rename_relocates_instead_of_cloning.nim	nim	6
 tests/integration/t_rename_relocation_failure_is_clean.nim	nim	1
-tests/integration/t_rename_relocation_repairs_linked_worktrees.nim	nim	7
+tests/integration/t_rename_relocation_repairs_linked_worktrees.nim	nim	9
 tests/integration/t_rename_renamed_and_rewritten_repo_relocates.nim	nim	1
 tests/integration/t_report_classifies_at_ahead_and_behind.nim	nim	1
 tests/integration/t_report_names_fallback_path.nim	nim	1
@@ -2354,6 +2356,7 @@ tests/integration/t_sync_fast_forwards_feature_branch_from_its_own_upstream.nim	
 tests/integration/t_sync_ff_only_per_repo_upstream.nim	nim	2
 tests/integration/t_sync_honours_branch_and_revision_together.nim	nim	2
 tests/integration/t_sync_interrupted_fast_forward_refusal.nim	nim	1
+tests/integration/t_sync_keeps_a_linked_worktree_checkout.nim	nim	6
 tests/integration/t_sync_mainline_reconcile.nim	nim	16
 tests/integration/t_sync_refreshes_flat_workspace_root.nim	nim	3
 tests/integration/t_sync_reports_partial_manifest_advance_without_rollback.nim	nim	1
@@ -2783,7 +2786,7 @@ tests/unit/test_cmake_generator_competitiveness_bench.py	python	18
 tests/unit/test_cmake_prereq_sdk.py	python	11
 tests/unit/test_continuous_benchmarking_policy.py	python	7
 tests/unit/test_ct_test_surface_addressability.py	python	14
-tests/unit/test_daemon_worker_confinement_systemd_analyze.py	python	14
+tests/unit/test_daemon_worker_confinement_systemd_analyze.py	python	15
 tests/unit/test_dev_shell_hook_scope.py	python	7
 tests/unit/test_flake_lock_derived_fields.py	python	11
 tests/unit/test_generated_artifact_merge_policy.py	python	19
@@ -2804,7 +2807,7 @@ tests/unit/test_readme_documents_only_dispatched_verbs.py	python	5
 tests/unit/test_regenerate_suite_artifacts.py	python	25
 tests/unit/test_release_git.py	python	6
 tests/unit/test_release_native_packages.py	python	8
-tests/unit/test_release_smoke_dev_exec.py	python	19
+tests/unit/test_release_smoke_dev_exec.py	python	20
 tests/unit/test_reprobuild_suite_inventory.py	python	110
 tests/unit/test_sibling_lock_pins.py	python	10
 tests/unit/test_source_revision.py	python	18
