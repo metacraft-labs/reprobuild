@@ -58249,7 +58249,7 @@
       "requiresReproBinary": false,
       "source": "tests/unit/test_daemon_worker_confinement_systemd_analyze.py",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 12,
+      "staticCaseCount": 14,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

@@ -22,7 +22,9 @@ shell provides it.
 """
 
 from pathlib import Path
+import contextlib
 import importlib.util
+import io
 import os
 import subprocess
 import sys
@@ -126,60 +128,51 @@ class PinnedSystemdAnalyzeTests(unittest.TestCase):
             self.derive.expand("@system-service")
         self.assertIn("REPRO_SYSTEMD_ANALYZE", str(caught.exception))
 
-    def virt_fake(self, answer="none", code=1):
-        """A fake `systemd-detect-virt`.
-
-        Bare metal prints `none` and exits NON-zero; that is detect-virt's own
-        convention for "found nothing", not a failure, so the default here
-        reproduces it rather than a tidier exit 0."""
-        marker = self.root / "virt-ran"
-        path = self.fake(self.root / "systemd-detect-virt", marker,
-                         stdout=answer + "\n", code=code)
-        os.environ[self.check.VIRT_ENV] = str(path)
-        return marker
-
-    def conf4(self, virt="none", virt_code=1, **answer):
+    def conf4(self, **answer):
         # The same answer from the "host" and the pinned binary, so the case
         # is about how a failure is CLASSIFIED whichever binary the check runs.
         self.host_fake(**answer)
-        self.pinned_fake(**answer)
-        self.virt_fake(virt, virt_code)
-        return self.check.check_conf4(UNIT.read_text(encoding="utf-8"))
+        pinned = self.pinned_fake(**answer)
+        return self.check.check_conf4(UNIT.read_text(encoding="utf-8")), pinned
 
     EXPOSURE = ("\u2192 Overall exposure level for repro-daemon-worker.service:"
                 " %s OK \U0001f642\n")
 
-    def test_conf4_compares_against_the_class_it_is_running_on(self):
-        # 3.1 is over bare metal's 2.6 and is exactly the virtualized ceiling,
-        # so one measurement must refuse on one class and pass on the other.
-        # This is the defect that made Lint red or green by which runner it
-        # drew: both kinds carry the same labels, so the class cannot be
-        # routed, only detected.
+    def test_conf4_analyses_the_unit_by_name_under_a_private_root(self):
+        # reprobuild-pm issue 2026-11-05-conf-4s-virtualized-class-holds-hosts-
+        # that-measure-2-6: without `--root` the offline analysis loads the
+        # host's unit directories, so the host's drop-ins were scored as part
+        # of the unit. The unit has to be named, not given as a path: a path
+        # outside the root is not found under it.
+        _, pinned = self.conf4(stdout=self.EXPOSURE % "2.6", code=0)
+        argv = pinned.read_text(encoding="utf-8").split()
+        roots = [a for a in argv if a.startswith("--root=")]
+        self.assertEqual(1, len(roots), argv)
+        self.assertIn("--offline=true", argv)
+        self.assertEqual("repro-daemon-worker.service", argv[-1])
+
+    def test_conf4_still_refuses_one_tenth_over_the_ceiling(self):
+        # 3.1 is what the LXC runners reported while their drop-in was scored
+        # with the unit; it was once accepted as a host class's ceiling and is
+        # now a regression on every host.
         with self.assertRaises(self.check.Failure) as caught:
-            self.conf4(virt="none", stdout=self.EXPOSURE % "3.1", code=0)
-        self.assertIn("host class none", str(caught.exception))
+            self.conf4(stdout=self.EXPOSURE % "2.7", code=0)
         self.assertIn("committed threshold 2.6", str(caught.exception))
-        self.conf4(virt="lxc", virt_code=0, stdout=self.EXPOSURE % "3.1", code=0)
 
-    def test_conf4_still_refuses_a_regression_on_a_virtualized_host(self):
-        # The virtualized number is a measured bar, not an exemption: one
-        # tenth above it still refuses.
+    def test_conf4_records_one_ceiling_not_one_per_host_class(self):
+        self.assertEqual("26", self.check.committed_threshold())
+
+    def test_conf4_refuses_a_threshold_file_keyed_by_host_class(self):
+        # The old per-class format must not be read as some ceiling: a file
+        # that still says `virtualized = 31` would otherwise re-admit the 0.5.
+        path = self.root / "confinement-threshold"
+        path.write_text("none = 26\nvirtualized = 31\n", encoding="utf-8")
+        saved = self.check.THRESHOLD
+        self.check.THRESHOLD = str(path)
+        self.addCleanup(setattr, self.check, "THRESHOLD", saved)
         with self.assertRaises(self.check.Failure) as caught:
-            self.conf4(virt="lxc", virt_code=0, stdout=self.EXPOSURE % "3.2", code=0)
-        self.assertIn("host class virtualized", str(caught.exception))
-        self.assertIn("committed threshold 3.1", str(caught.exception))
-
-    def test_conf4_refuses_an_unrecorded_host_class_rather_than_passing_it(self):
-        thresholds = self.check.committed_thresholds()
-        self.assertEqual({"none", "virtualized"}, set(thresholds))
-
-    def test_conf4_refuses_when_the_host_class_cannot_be_determined(self):
-        self.host_fake(stdout=self.EXPOSURE % "2.6", code=0)
-        self.pinned_fake(stdout=self.EXPOSURE % "2.6", code=0)
-        os.environ[self.check.VIRT_ENV] = str(self.root / "absent-detect-virt")
-        with self.assertRaises(self.check.Failure) as caught:
-            self.check.check_conf4(UNIT.read_text(encoding="utf-8"))
-        self.assertIn("host class cannot be determined", str(caught.exception))
+            self.check.committed_threshold()
+        self.assertIn("exactly one ceiling", str(caught.exception))
 
     def test_conf4_reports_a_binary_that_cannot_start_as_that(self):
         with self.assertRaises(self.check.Failure) as caught:
@@ -211,25 +204,97 @@ class PinnedSystemdAnalyzeTests(unittest.TestCase):
         self.assertNotIn("threshold 26", message)
 
     def test_conf4_passes_an_exposure_within_the_threshold(self):
-        ceiling, klass, virt = self.conf4(
+        ceiling, _ = self.conf4(
             stdout="→ Overall exposure level for repro-daemon-worker.service:"
                    " 2.6 OK 🙂\n", code=0)
-        # A pass reports WHICH class it compared against, so a green CONF-4 is
-        # attributable: the same measurement is a pass on one class and a
-        # refusal on the other, and "ok" alone cannot be checked against that.
-        self.assertEqual(("none", "none"), (klass, virt))
+        # Parsed here, not through the check's own reader, so the check
+        # cannot agree with itself about a number neither took from the file.
         self.assertEqual(
             ceiling,
-            # The file records a ceiling PER HOST CLASS, each with its
-            # provenance in comments. This case answers detect-virt as bare
-            # metal, so compare against that class's committed value --
-            # parsed here, not through the check's own reader, so the check
-            # cannot agree with itself about a number neither took from the
-            # file.
-            next(line.split("=", 1)[1].strip() for line in
+            next(line.strip() for line in
                  (ROOT / "recipes/repro-daemon-worker/confinement-threshold")
                  .read_text(encoding="utf-8").splitlines()
-                 if line.strip().startswith("none")))
+                 if line.strip() and not line.strip().startswith("#")))
+
+
+# The drop-in LXC's systemd generator writes into every unprivileged container
+# running systemd >= 256, verbatim
+# (https://github.com/lxc/distrobuilder/blob/main/distrobuilder/lxc.generator,
+# fix_systemd_override_unit). It is what the GARM runners carry.
+LXC_SERVICE_DROPIN = (
+    "[Service]\n"
+    "ProcSubset=all\n"
+    "ProtectProc=default\n"
+    "ProtectControlGroups=no\n"
+    "ProtectKernelTunables=no\n"
+    "NoNewPrivileges=no\n"
+    "LoadCredential=\n"
+    "PrivateNetwork=no\n"
+    "ImportCredential=\n")
+
+
+@unittest.skipIf(os.name == "nt" or not sys.platform.startswith("linux"),
+                 "CONF-4 runs systemd-analyze, which exists on Linux only")
+class HostDropInTests(unittest.TestCase):
+    """CONF-4 measures the unit, not the host it runs on.
+
+    reprobuild-pm issue 2026-11-05-conf-4s-virtualized-class-holds-hosts-that-
+    measure-2-6. The real pinned analyzer and the real unit; the host's unit
+    search path is given LXC's drop-in through `$SYSTEMD_UNIT_PATH`, which
+    systemd reads exactly as it reads /run/systemd/system, so the case needs
+    neither root nor a container. No mock: the variable is the documented
+    systemd input, and the positive control below proves the analyzer applies
+    it."""
+
+    def setUp(self):
+        self.pinned = os.environ.get("REPRO_SYSTEMD_ANALYZE")
+        if not self.pinned:
+            self.skipTest("needs the dev shell's REPRO_SYSTEMD_ANALYZE (flake.nix devShell)")
+        temporary = tempfile.TemporaryDirectory(prefix="repro-conf4-dropin-")
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        dropins = self.root / "host-units" / "service.d"
+        dropins.mkdir(parents=True)
+        (dropins / "zzz-lxc-service.conf").write_text(LXC_SERVICE_DROPIN, encoding="utf-8")
+        saved = os.environ.get("SYSTEMD_UNIT_PATH")
+        # The trailing colon keeps systemd's default directories after it.
+        os.environ["SYSTEMD_UNIT_PATH"] = str(self.root / "host-units") + ":"
+        self.addCleanup(lambda: os.environ.pop("SYSTEMD_UNIT_PATH", None)
+                        if saved is None else os.environ.__setitem__("SYSTEMD_UNIT_PATH", saved))
+        self.check = load("check_daemon_worker_unit_confinement")
+
+    def exposure(self, output):
+        verdict = self.check.EXPOSURE_LINE.search(output)
+        self.assertIsNotNone(verdict, output)
+        return verdict.group(1) + "." + verdict.group(2)
+
+    def test_the_hosts_dropin_does_not_enter_the_score(self):
+        text = UNIT.read_text(encoding="utf-8")
+        # Positive control: the analyzer, run the way CONF-4 used to run it,
+        # does apply the host's drop-in -- this is the 3.1 the GARM runners
+        # reported. Without it the case below would prove nothing.
+        unit = self.root / "repro-daemon-worker.service"
+        unit.write_text(self.check.render(text), encoding="utf-8")
+        out = subprocess.run([self.pinned, "security", "--offline=true", str(unit)],
+                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        self.assertEqual("3.1", self.exposure(out.stdout))
+        # CONF-4 itself scores the unit alone and passes against the single
+        # committed ceiling.
+        printed = io.StringIO()
+        with contextlib.redirect_stdout(printed):
+            self.check.check_conf4(text)
+        self.assertEqual("2.6", self.exposure(printed.getvalue()))
+
+    def test_a_unit_path_that_replaces_the_defaults_does_not_hide_the_unit(self):
+        # Without the trailing `:` the variable REPLACES systemd's default
+        # directories, the private root's etc/systemd/system among them, so
+        # the analyzer would answer "Unit ... not found" and CONF-4 would fail
+        # on what the host's environment says rather than on the unit.
+        os.environ["SYSTEMD_UNIT_PATH"] = str(self.root / "host-units")
+        printed = io.StringIO()
+        with contextlib.redirect_stdout(printed):
+            self.check.check_conf4(UNIT.read_text(encoding="utf-8"))
+        self.assertEqual("2.6", self.exposure(printed.getvalue()))
 
 
 @unittest.skipIf(os.name == "nt" or not sys.platform.startswith("linux"),

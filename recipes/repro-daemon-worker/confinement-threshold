@@ -1,23 +1,20 @@
-# Overall exposure ceiling for repro-daemon-worker.service, in tenths, PER
-# HOST CLASS: `none = 26` means 2.6 on bare metal.
+# Overall exposure ceiling for repro-daemon-worker.service, in tenths:
+# `26` means 2.6. It is the measured value of the unit ALONE, analysed by the
+# pinned systemd-analyze 260.1 under a private `--root` that holds nothing but
+# the rendered unit, so it is the same number on every host. Measured
+# 2026-11-12 at reprobuild e995221fb on nixos-ci-bare-002 (bare metal), both
+# as-is and with LXC's drop-in on the analyzer's unit search path.
 #
-# The same unit, analysed by the same pinned binary, measures differently
-# depending on whether the host is virtualised, because some of
-# systemd-analyze's checks cannot be verified from inside a container or VM:
-#
-#   none         2.6  bare metal (gpu-server-001-mcl-bench-001, systemd 260.1,
-#                     run 41208389754)
-#   virtualized  3.1  ephemeral GARM runners (runs 41186521526, 41197758502,
-#                     41201815981, 41251151966) -- 0.5 higher
-#
-# Recorded per class rather than routed to one class deliberately: both runner
-# kinds register with the IDENTICAL labels `self-hosted,linux,x64`, so a job's
-# `runs-on` cannot select the class a number was measured on. Giving the check
-# the class is the only way to compare like with like.
-#
-# Neither number is a concession. Each is the measured value for its own class,
-# so an exposure above its class's ceiling is a real regression, and a class
-# with no line here is REFUSED rather than passed -- a new kind of runner has
-# to be measured and recorded, never assumed.
-none = 26
-virtualized = 31
+# This file once recorded a ceiling per host class (`none = 26`,
+# `virtualized = 31`). The 0.5 was not the analyzer failing to verify checks
+# inside a container: `systemd-analyze security --offline` without `--root`
+# loads the HOST's unit directories and applies the drop-ins it finds there
+# before scoring. LXC's generator writes
+# /run/systemd/system/service.d/zzz-lxc-service.conf into every container
+# (https://github.com/lxc/distrobuilder/blob/main/distrobuilder/lxc.generator),
+# turning off ProtectControlGroups, ProtectKernelTunables, ProtectProc and
+# ProcSubset for every service. With that drop-in on the search path, the
+# analysis prints 3.1 and the same last 25 rows as GARM run 41251151966. A
+# Docker host has no such drop-in and measured 2.6. reprobuild-pm issue
+# 2026-11-05-conf-4s-virtualized-class-holds-hosts-that-measure-2-6.
+26

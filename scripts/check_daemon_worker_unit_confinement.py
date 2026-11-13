@@ -25,6 +25,8 @@ occurrence of a key — so a later `ProtectSystem=no` passed — and counted any
    floor's header is the one scripts/derive_lease_floor_syscalls.py derives.
 3. CONF-4 (Linux): `systemd-analyze security --offline` of the rendered unit
    does not exceed recipes/repro-daemon-worker/confinement-threshold. The
+   unit is analysed under a private `--root` holding only it, so the host's
+   own unit directories and drop-ins never enter the score. The
    verdict is read from the analysis' own "Overall exposure level" line: a
    `systemd-analyze` that exits non-zero WITHOUT one did not analyse the unit
    (it could not start, could not parse it, ...) and is reported as that, never
@@ -222,51 +224,38 @@ def render(text):
 EXPOSURE_LINE = re.compile(r"Overall exposure level for \S+: (\d+)\.(\d)\b")
 
 
-# CONF-4's ceiling is only comparable against the host class it was measured
-# on: the same unit and the same analyzer report 2.6 on bare metal and 3.1
-# inside the ephemeral runners, because some of systemd-analyze's checks cannot
-# be verified from within a container or VM. Both runner kinds register with
-# the identical labels (`self-hosted,linux,x64`), so no `runs-on` can route
-# this check to one class -- it has to detect the class it is on and compare
-# against that class's measured number.
-VIRT_ENV = "REPRO_SYSTEMD_DETECT_VIRT"
+# CONF-4 scores the unit ALONE. Without `--root`, an offline analysis loads
+# the host's own unit search path (/etc, /run and /usr/lib systemd/system, and
+# $SYSTEMD_UNIT_PATH) and applies whatever drop-ins it finds there before
+# scoring: the LXC runners' `service.d/zzz-lxc-service.conf` resets
+# ProtectControlGroups, ProtectKernelTunables, ProtectProc and ProcSubset (among
+# others) for every service, and that raised 2.6 to 3.1. Analysing
+# under a private root that holds only the rendered unit makes the measurement
+# a function of the unit and the pinned analyzer, never of the machine running
+# lint. https://www.freedesktop.org/software/systemd/man/systemd-analyze.html
+# (`--root=`, `--offline=`). $SYSTEMD_UNIT_PATH is removed from the analyzer's
+# environment as well: under `--root` its entries are resolved inside the
+# root, so they cannot add drop-ins, but one without systemd's trailing `:`
+# replaces the default directories and the unit is then "not found".
+# https://www.freedesktop.org/software/systemd/man/systemd.unit.html
+# (Unit File Load Path).
+UNIT_NAME = "repro-daemon-worker.service"
 
 
-def committed_thresholds():
-    """Host class -> ceiling in tenths, from the committed file."""
-    values = {}
+def committed_threshold():
+    """The committed ceiling, in tenths, as a string of digits."""
+    values = []
     with open(THRESHOLD) as f:
         for line in f:
             line = line.split("#", 1)[0].strip()
-            if not line:
-                continue
-            if "=" not in line:
-                raise Failure("CONF-4: %s: %r is not `<host-class> = <tenths>`. The "
-                              "ceiling is recorded per host class because the same "
-                              "unit measures differently on each."
-                              % (THRESHOLD, line))
-            key, _, value = line.partition("=")
-            values[key.strip()] = value.strip()
-    if not values:
-        raise Failure("CONF-4: %s records no ceiling at all" % THRESHOLD)
-    return values
-
-
-def host_class(analyze):
-    """``("none"|"virtualized", raw)`` -- the class, and what detect-virt said."""
-    override = os.environ.get(VIRT_ENV)
-    detect = override or os.path.join(os.path.dirname(analyze), "systemd-detect-virt")
-    if not (os.path.isfile(detect) and os.access(detect, os.X_OK)):
-        raise Failure("CONF-4: %s is not an executable, so the host class cannot be "
-                      "determined, and this ceiling is only comparable against the "
-                      "class it was measured on%s"
-                      % (detect, "" if override
-                         else " (set %s to name one)" % VIRT_ENV))
-    out = subprocess.run([detect], capture_output=True, text=True)
-    # detect-virt exits non-zero when it finds no virtualization, which is not
-    # an error here: "none" is precisely the answer bare metal gives.
-    raw = (out.stdout + out.stderr).strip() or "none"
-    return ("none" if raw == "none" else "virtualized"), raw
+            if line:
+                values.append(line)
+    if len(values) != 1 or not values[0].isdigit():
+        raise Failure("CONF-4: %s must record exactly one ceiling, in tenths (e.g. `26`), "
+                      "got %r. The unit is analysed alone under a private --root, so its "
+                      "exposure does not depend on the host and needs no per-host value."
+                      % (THRESHOLD, values))
+    return values[0]
 
 
 def check_conf4(text):
@@ -274,21 +263,16 @@ def check_conf4(text):
         analyze = systemd_analyze()
     except SystemdAnalyzeUnavailable as err:
         raise Failure("CONF-4: " + str(err))
-    thresholds = committed_thresholds()
-    klass, virt = host_class(analyze)
-    if klass not in thresholds:
-        raise Failure("CONF-4: %s records no ceiling for host class %r (detect-virt "
-                      "said %r); it records %s. Measure this class and record it "
-                      "rather than comparing it against another class's number."
-                      % (THRESHOLD, klass, virt, ", ".join(sorted(thresholds))))
-    threshold = thresholds[klass]
-    with tempfile.TemporaryDirectory() as tmp:
-        path = os.path.join(tmp, "repro-daemon-worker.service")
-        with open(path, "w") as f:
+    threshold = committed_threshold()
+    with tempfile.TemporaryDirectory() as root:
+        units = os.path.join(root, "etc", "systemd", "system")
+        os.makedirs(units)
+        with open(os.path.join(units, UNIT_NAME), "w") as f:
             f.write(render(text))
-        out = subprocess.run([analyze, "security", "--offline=true",
-                              "--threshold=" + threshold, path],
-                             capture_output=True, text=True)
+        env = {k: v for k, v in os.environ.items() if k != "SYSTEMD_UNIT_PATH"}
+        out = subprocess.run([analyze, "security", "--offline=true", "--root=" + root,
+                              "--threshold=" + threshold, UNIT_NAME],
+                             capture_output=True, text=True, env=env)
     output = out.stdout + out.stderr
     verdict = EXPOSURE_LINE.search(output)
     if verdict is None:
@@ -303,11 +287,9 @@ def check_conf4(text):
     if exposure > int(threshold):
         sys.stderr.write("\n".join(output.splitlines()[-25:]) + "\n")
         raise Failure("CONF-4: exposure of repro-daemon-worker.service, %d.%d, exceeds the "
-                      "committed threshold %d.%d for host class %s (detect-virt said "
-                      "%s) (%s)"
+                      "committed threshold %d.%d (%s)"
                       % (exposure // 10, exposure % 10,
-                         int(threshold) // 10, int(threshold) % 10,
-                         klass, virt, analyze))
+                         int(threshold) // 10, int(threshold) % 10, analyze))
     if out.returncode != 0:
         # `--threshold` makes systemd-analyze fail only above it; failing at
         # or below it is some other error, and is reported as one.
@@ -316,7 +298,7 @@ def check_conf4(text):
                       % (analyze, out.returncode, exposure // 10, exposure % 10, threshold,
                          "\n".join(output.splitlines()[-25:])))
     print(verdict.group(0) + " (" + analyze + ")")
-    return threshold, klass, virt
+    return threshold
 
 
 def check(text, linux_checks):
@@ -400,10 +382,8 @@ def main(argv):
         print("CONF-1/CONF-3 ok; CONF-4 (systemd-analyze security) and the lease floor "
               "derivation run on Linux, not on " + sys.platform)
     else:
-        ceiling, klass, virt = verdict
-        print("CONF-1/CONF-3/CONF-4 ok (exposure within the committed %d.%d for "
-              "host class %s; detect-virt said %s)"
-              % (int(ceiling) // 10, int(ceiling) % 10, klass, virt))
+        print("CONF-1/CONF-3/CONF-4 ok (exposure within the committed %d.%d)"
+              % (int(verdict) // 10, int(verdict) % 10))
     return 0
 
 
