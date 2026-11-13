@@ -100,3 +100,44 @@ suite "a failed provider compile says how it ended":
       check "killed by signal" notin report
       check "Error: undeclared identifier" in report
       check "wrote nothing" notin report
+
+suite "a failure that never launched still says why":
+
+  test "an unlaunched failure reports its recorded cause, not just the id":
+    # The shape of the reported `__repro_provider_compile asFailed`: the
+    # engine failed the action before launching it, so there is no exit code
+    # and no output; the cause lives in `missingOutputs`, the evidence
+    # diagnostics or `reason`.
+    let missing = ActionResult(id: "__repro_provider_compile",
+      status: asFailed, missingOutputs: @["/o/provider"])
+    check "/o/provider" in describeFailedAction(missing)
+    var evidence = ActionResult(id: "__repro_provider_compile",
+      status: asFailed)
+    evidence.evidence.diagnostics.add("dependency report missing: /x.iomon")
+    check "dependency report missing: /x.iomon" in describeFailedAction(evidence)
+    let reasoned = ActionResult(id: "__repro_provider_compile",
+      status: asFailed, reason: "monitor-plan-refused")
+    check "monitor-plan-refused" in describeFailedAction(reasoned)
+    let bare = describeFailedAction(ActionResult(
+      id: "__repro_provider_compile", status: asFailed))
+    check bare != "__repro_provider_compile asFailed"
+    check "did not launch" in bare
+
+  test "a failed edge leaves a log and the report names it":
+    let root = createTempDir("repro-provider-failure-", "")
+    defer: removeDir(root)
+    let outDir = root / "dev-env"
+    let report = recordEdgeFailure(outDir, "provider-compile-failure",
+      "__repro_provider_compile asFailed (exit code 1)\nboom")
+    let logPath = outDir / "provider-compile-failure.log"
+    check fileExists(logPath)
+    check "boom" in readFile(logPath)
+    check ("full report: " & logPath) in report
+
+  test "an unwritable log directory does not replace the failure":
+    let root = createTempDir("repro-provider-failure-", "")
+    defer: removeDir(root)
+    writeFile(root / "file", "")
+    let report = recordEdgeFailure(root / "file" / "sub", "x", "the failure")
+    check report.startsWith("the failure")
+    check "could not be written" in report

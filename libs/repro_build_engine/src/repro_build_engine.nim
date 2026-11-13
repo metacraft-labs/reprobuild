@@ -12396,8 +12396,25 @@ proc describeFailedAction*(item: ActionResult): string =
     parts.add(item.stderr)
   if item.stdout.len > 0:
     parts.add(item.stdout)
-  if item.launched and item.stderr.len == 0 and item.stdout.len == 0:
-    parts.add("the action wrote nothing to stdout or stderr")
+  if item.stderr.len == 0 and item.stdout.len == 0:
+    # An action that failed WITHOUT producing output still has a recorded
+    # cause in the places below. A report built from the output alone read
+    # `<id> asFailed` for an action that never launched (a refused monitor
+    # plan, unpublishable evidence, a missing declared output), which left a
+    # consumer nothing to act on.
+    if item.missingOutputs.len > 0:
+      parts.add("declared outputs not produced: " &
+        item.missingOutputs.join(", "))
+    if item.evidence.diagnostics.len > 0:
+      parts.add(item.evidence.diagnostics.join("\n"))
+    if item.reason.len > 0 and item.status != asBlocked:
+      parts.add("reason: " & item.reason)
+  if parts.len == 1:
+    if item.launched:
+      parts.add("the action wrote nothing to stdout or stderr")
+    elif item.status != asBlocked:
+      parts.add("the action did not launch and the engine recorded no " &
+        "reason; rerun with `repro build --log=actions` for its trace")
   parts.join("\n")
 
 proc processCwd(action: BuildAction; process: ProcessSpec): string =
