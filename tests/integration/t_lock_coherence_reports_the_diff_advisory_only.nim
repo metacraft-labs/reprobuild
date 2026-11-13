@@ -24,9 +24,14 @@
 ##      attention, and the remedies are offered cheapest-first with the extra
 ##      sibling + ``develop --into`` override LAST.
 ##   4. ``two_locks_disagreeing_about_one_node`` — two sibling repos' locks
-##      claim DIFFERENT revisions for the same node. Both claims are listed and
-##      the output says plainly that the locks contradict EACH OTHER, because no
-##      single re-pin satisfies both.
+##      claim revisions on DIVERGENT histories for the same node. Both claims
+##      are listed and the output says plainly that the locks contradict EACH
+##      OTHER, because no single revision satisfies both. Locks claiming
+##      different revisions of ONE history are lag, not a contradiction; that
+##      is ``t_lock_coherence_lagging_locks_name_the_stale_ones`` (issue
+##      2026-11-12), which also covers an abbreviated spelling of one
+##      revision, an absent claimed object, and a containing revision that is
+##      a claim on another history than the checkout.
 ##   5. ``advisory_never_blocks`` — in every case above ``sync`` and
 ##      ``status`` keep their own exit codes, and the output states which
 ##      revision the build will actually use (the checkout, in develop mode).
@@ -56,6 +61,7 @@
 import std/[json, os, osproc, strutils, tempfiles, unittest]
 
 import repro_test_support
+import repro_test_support/reasoned_skip
 
 proc q(value: string): string = quoteShell(value)
 
@@ -110,14 +116,16 @@ proc headSha(gitBin, repoPath: string): string =
 
 # ---- manifest + lock fixtures ---------------------------------------------
 
-proc projectToml(aUrl, bUrl: string): string =
+proc projectToml(aUrl, bUrl, cUrl: string): string =
   "schema = \"reprobuild.workspace.project.v1\"\n\n" &
   "[project]\n" &
   "name = \"myproject\"\n" &
   "\n" &
   "[[remote]]\nname = \"a-origin\"\nfetch = \"" & aUrl & "\"\n\n" &
   "[[remote]]\nname = \"b-origin\"\nfetch = \"" & bUrl & "\"\n\n" &
-  "includes = [\n  \"repos/lib-a.toml\",\n  \"repos/lib-b.toml\",\n]\n"
+  "[[remote]]\nname = \"c-origin\"\nfetch = \"" & cUrl & "\"\n\n" &
+  "includes = [\n  \"repos/lib-a.toml\",\n  \"repos/lib-b.toml\",\n" &
+  "  \"repos/lib-c.toml\",\n]\n"
 
 proc repoToml(name, remote: string): string =
   "schema = \"reprobuild.workspace.repo.v2\"\n\n" &
@@ -155,27 +163,32 @@ type
     scratch: string
     reproBin: string
     workspaceRoot: string
-    originA, originB: string
-    libA, libB: string
+    originA, originB, originC: string
+    libA, libB, libC: string
 
 proc setupFixture(gitBin, slug: string): Fixture =
   result.scratch = createTempDir("repro-coherence-" & slug & "-", "")
   result.reproBin = reproBinary()
   result.originA = result.scratch / "origin-lib-a.git"
   result.originB = result.scratch / "origin-lib-b.git"
+  result.originC = result.scratch / "origin-lib-c.git"
   discard seedOrigin(gitBin, result.originA, result.scratch / "seed-lib-a")
   discard seedOrigin(gitBin, result.originB, result.scratch / "seed-lib-b")
+  discard seedOrigin(gitBin, result.originC, result.scratch / "seed-lib-c")
 
   let workspaceRoot = result.scratch / "workspace"
   createDir(workspaceRoot)
   createDir(workspaceRoot / "projects")
   createDir(workspaceRoot / "repos")
   writeFile(workspaceRoot / "projects" / "myproject.toml",
-    projectToml(fileUrl(result.originA), fileUrl(result.originB)))
+    projectToml(fileUrl(result.originA), fileUrl(result.originB),
+      fileUrl(result.originC)))
   writeFile(workspaceRoot / "repos" / "lib-a.toml",
     repoToml("lib-a", "a-origin"))
   writeFile(workspaceRoot / "repos" / "lib-b.toml",
     repoToml("lib-b", "b-origin"))
+  writeFile(workspaceRoot / "repos" / "lib-c.toml",
+    repoToml("lib-c", "c-origin"))
   # ``check`` needs either a project positional (it has none) or the workspace
   # metadata marker; the marker also gives sync/status a recorded branch.
   createDir(workspaceRoot / ".repro")
@@ -187,8 +200,10 @@ proc setupFixture(gitBin, slug: string): Fixture =
   result.workspaceRoot = workspaceRoot
   result.libA = workspaceRoot / "lib-a"
   result.libB = workspaceRoot / "lib-b"
+  result.libC = workspaceRoot / "lib-c"
   cloneInto(gitBin, result.originA, result.libA)
   cloneInto(gitBin, result.originB, result.libB)
+  cloneInto(gitBin, result.originC, result.libC)
 
 proc invokeSync(fx: Fixture): CmdResult =
   runShell(shellCommand(@[
@@ -215,7 +230,8 @@ suite "lock coherence reports a difference and never blocks":
   test "t_lock_coherence_reports_the_diff_advisory_only":
     let gitBin = findExe("git")
     if gitBin.len == 0:
-      skip()
+      skip("git not on PATH; this case builds real repositories and " &
+        "compares lock claims against their histories")
     else:
       let fx = setupFixture(gitBin, "main")
       defer: removeDir(fx.scratch)
@@ -244,7 +260,11 @@ suite "lock coherence reports a difference and never blocks":
       check "lock coherence" in syncOut.output
       check "(ancestor)" in syncOut.output
       check "0 needing attention, 1 informational" in syncOut.output
-      check "remedy: `repro workspace lock`" in syncOut.output
+      # The lagging claim is lib-a's committed lock's own entry, which only a
+      # rewrite of that lock re-pins: ``repro workspace lock`` writes the
+      # manifests-DB record alone, so naming it here offered a no-op.
+      check "remedy: `repro lock refresh lib-a`" in syncOut.output
+      check "remedy: `repro workspace lock`" notin syncOut.output
       # Says plainly what the build will use, rather than leaving it inferred.
       check "the build uses the CHECKOUT" in syncOut.output
       check "ADVISORY" in syncOut.output
@@ -282,8 +302,9 @@ suite "lock coherence reports a difference and never blocks":
       check "(unreachable)" in syncOut.output
       check "1 needing attention" in syncOut.output
       # Remedies cheapest-first: re-pin, then move the checkout, then the
-      # extra-sibling override LAST.
-      let repin = syncOut.output.find("re-pin the lagging lock")
+      # extra-sibling override LAST. The re-pin names the command that
+      # rewrites lib-a's committed lock, whose own entry is the claim.
+      let repin = syncOut.output.find("`repro lock refresh lib-a` — re-pin")
       let point = syncOut.output.find("point the")
       let sibling = syncOut.output.find("develop --into")
       check repin >= 0
@@ -291,16 +312,25 @@ suite "lock coherence reports a difference and never blocks":
       check sibling > point
       check syncOut.code == coherentSyncCode
 
-      # ---- (4) two locks claiming DIFFERENT revisions for one node. ------
-      # lib-b's lock claims lib-a at the base commit; lib-a's own lock claims
-      # the divergent one. No single re-pin satisfies both.
+      # ---- (4) two locks claiming revisions on DIVERGENT histories. ------
+      # lib-a's own lock claims ``divergent``; lib-b's lock claims a commit on
+      # a SECOND side branch off the base, so neither claim contains the other
+      # and neither is contained in the checkout. No revision satisfies both,
+      # so this is a contradiction between the locks themselves. (Claims on ONE
+      # history are not: the newest of them contains the rest — see
+      # ``t_lock_coherence_lagging_locks_name_the_stale_ones``.)
+      discard git(gitBin, fx.libA, "checkout -b othertrack " & headA)
+      let otherDivergent = commitInto(gitBin, fx.libA, "another.txt",
+        "another\n")
+      discard git(gitBin, fx.libA, "checkout dev")
+      check headSha(gitBin, fx.libA) == advancedA
       writeFile(fx.libB / "repro.lock",
-        committedLock([depInline("lib-a", "../lib-a", headA),
+        committedLock([depInline("lib-a", "../lib-a", otherDivergent),
                        depInline("lib-b", ".", headB)]))
       syncOut = invokeSync(fx)
       check "contradict EACH OTHER" in syncOut.output
       check "lib-a/repro.lock claims " & divergent in syncOut.output
-      check "lib-b/repro.lock claims " & headA in syncOut.output
+      check "lib-b/repro.lock claims " & otherDivergent in syncOut.output
       check syncOut.code == coherentSyncCode
 
       # ---- (6) the same finding from status and from check. --------------
@@ -331,3 +361,151 @@ suite "lock coherence reports a difference and never blocks":
         noticeText.add(notice.getStr() & "\n")
       check "lock coherence" in noticeText
       check "contradict EACH OTHER" in noticeText
+
+  test "t_lock_coherence_lagging_locks_name_the_stale_ones":
+    ## Issue 2026-11-12 (reprobuild-pm): several dependents' locks pinned the
+    ## pushed repo at DIFFERENT ancestors of its checkout, and the advisory
+    ## said "these locks contradict EACH OTHER ... no single re-pin satisfies
+    ## both" and counted it as needing attention. Every one of those claims
+    ## is contained in the checkout, so re-pinning each stale lock there
+    ## satisfies them all: it is lag, which is informational, and the
+    ## advisory must name the stale locks and the command that re-pins each.
+    let gitBin = findExe("git")
+    if gitBin.len == 0:
+      skip("git not on PATH; this case builds real repositories and " &
+        "compares lock claims against their histories")
+    else:
+      let fx = setupFixture(gitBin, "lagging")
+      defer: removeDir(fx.scratch)
+
+      let base = headSha(gitBin, fx.libA)
+      let headB = headSha(gitBin, fx.libB)
+      let headC = headSha(gitBin, fx.libC)
+      let older = commitInto(gitBin, fx.libA, "one.txt", "one\n")
+      let newer = commitInto(gitBin, fx.libA, "two.txt", "two\n")
+      let headA = commitInto(gitBin, fx.libA, "three.txt", "three\n")
+      check base != older
+
+      # ---- (a) two dependents lag at different ancestors: NOT a ----------
+      # contradiction. Informational, and each stale lock is named with the
+      # command that re-pins it at the checkout.
+      writeFile(fx.libB / "repro.lock",
+        committedLock([depInline("lib-a", "../lib-a", older),
+                       depInline("lib-b", ".", headB)]))
+      writeFile(fx.libC / "repro.lock",
+        committedLock([depInline("lib-a", "../lib-a", newer),
+                       depInline("lib-c", ".", headC)]))
+      var syncOut = invokeSync(fx)
+      checkpoint(syncOut.output)
+      check "lib-b/repro.lock claims " & older & " (ancestor)" in syncOut.output
+      check "lib-c/repro.lock claims " & newer & " (ancestor)" in syncOut.output
+      check "contradict EACH OTHER" notin syncOut.output
+      check "no single re-pin" notin syncOut.output
+      check "0 needing attention, 1 informational" in syncOut.output
+      # Which revision satisfies every claim, and which locks are stale.
+      check ("one history: the checkout " & headA &
+        " contains every claim") in syncOut.output
+      check "stale: lib-b/repro.lock, lib-c/repro.lock" in syncOut.output
+      # The re-pin that actually rewrites a committed lock's sibling pin.
+      check "remedy: `repro lock refresh lib-b`" in syncOut.output
+      check "remedy: `repro lock refresh lib-c`" in syncOut.output
+      check "remedy: `repro workspace lock`" notin syncOut.output
+
+      # The same finding from ``status`` and ``check`` (the issue's surface).
+      let statusOut = invokeStatus(fx)
+      check "contradict EACH OTHER" notin statusOut.output
+      check "stale: lib-b/repro.lock, lib-c/repro.lock" in statusOut.output
+      let refsFile = fx.scratch / "pushed-refs.txt"
+      writeFile(refsFile, "refs/heads/dev " & headA &
+        " refs/heads/dev 0000000000000000000000000000000000000000\n")
+      let checkOut = invokeCheck(fx, fx.libA, refsFile)
+      let braceIdx = checkOut.output.find('{')
+      check braceIdx >= 0
+      if braceIdx >= 0:
+        let parsed = parseJson(checkOut.output[braceIdx .. ^1])
+        var noticeText = ""
+        for notice in parsed["notices"]:
+          noticeText.add(notice.getStr() & "\n")
+        checkpoint(noticeText)
+        check "lock coherence: 0 needing attention, 1 informational" in
+          noticeText
+        check "contradict EACH OTHER" notin noticeText
+        check "stale: lib-b/repro.lock, lib-c/repro.lock" in noticeText
+
+      # ---- (b) claims on one history AHEAD of the checkout: the newest ---
+      # claim contains the rest, so the stale lock is the older one and a
+      # fast-forward plus one re-pin clears it.
+      discard git(gitBin, fx.libA, "reset --hard " & older)
+      writeFile(fx.libB / "repro.lock",
+        committedLock([depInline("lib-a", "../lib-a", newer),
+                       depInline("lib-b", ".", headB)]))
+      writeFile(fx.libC / "repro.lock",
+        committedLock([depInline("lib-a", "../lib-a", headA),
+                       depInline("lib-c", ".", headC)]))
+      syncOut = invokeSync(fx)
+      checkpoint(syncOut.output)
+      check "(descendant)" in syncOut.output
+      check "contradict EACH OTHER" notin syncOut.output
+      check ("one history: " & headA & ", claimed by lib-c/repro.lock," &
+        " contains every claim") in syncOut.output
+      check "stale: lib-b/repro.lock" in syncOut.output
+      check "0 needing attention, 1 informational" in syncOut.output
+
+      # ---- (c) one revision, spelled in full and abbreviated: no ---------
+      # disagreement at all. Two spellings of one revision are one claim, so
+      # there is neither a contradiction nor a "stale" lock to name.
+      writeFile(fx.libB / "repro.lock",
+        committedLock([depInline("lib-a", "../lib-a", headA),
+                       depInline("lib-b", ".", headB)]))
+      writeFile(fx.libC / "repro.lock",
+        committedLock([depInline("lib-a", "../lib-a", headA[0 .. 11]),
+                       depInline("lib-c", ".", headC)]))
+      syncOut = invokeSync(fx)
+      checkpoint(syncOut.output)
+      check "lib-c/repro.lock claims " & headA[0 .. 11] in syncOut.output
+      check "contradict EACH OTHER" notin syncOut.output
+      check "one history" notin syncOut.output
+      check "stale:" notin syncOut.output
+      check "0 needing attention, 1 informational" in syncOut.output
+
+      # ---- (d) a claim whose object is absent: needs attention, but -------
+      # the advisory does not assert divergent histories it never inspected.
+      let absent = "0123456789abcdef0123456789abcdef01234567"
+      writeFile(fx.libC / "repro.lock",
+        committedLock([depInline("lib-a", "../lib-a", absent),
+                       depInline("lib-c", ".", headC)]))
+      syncOut = invokeSync(fx)
+      checkpoint(syncOut.output)
+      check "lib-c/repro.lock claims " & absent & " (not-fetched)" in
+        syncOut.output
+      check "1 needing attention" in syncOut.output
+      check "at least one is not present locally" in syncOut.output
+      check "divergent histories" notin syncOut.output
+      check "one history" notin syncOut.output
+
+      # ---- (e) the revision containing every claim is a claim on ANOTHER --
+      # history than the checkout. lib-a's own lock names a side commit off
+      # ``older``; the dependents pin ancestors of it. The locks agree with
+      # each other (that side commit contains them all), so it is not a
+      # contradiction, yet the unreachable own entry still needs attention.
+      discard git(gitBin, fx.libA, "checkout -b sidetrack " & older)
+      let side = commitInto(gitBin, fx.libA, "side.txt", "side\n")
+      discard git(gitBin, fx.libA, "checkout dev")
+      discard git(gitBin, fx.libA, "reset --hard " & headA)
+      writeFile(fx.libA / "repro.lock",
+        committedLock([depInline("lib-a", ".", side)]))
+      writeFile(fx.libB / "repro.lock",
+        committedLock([depInline("lib-a", "../lib-a", older),
+                       depInline("lib-b", ".", headB)]))
+      writeFile(fx.libC / "repro.lock",
+        committedLock([depInline("lib-a", "../lib-a", base),
+                       depInline("lib-c", ".", headC)]))
+      syncOut = invokeSync(fx)
+      checkpoint(syncOut.output)
+      check "lib-a/repro.lock claims " & side & " (unreachable)" in
+        syncOut.output
+      check "1 needing attention" in syncOut.output
+      check "contradict EACH OTHER" notin syncOut.output
+      check ("one history: " & side & ", claimed by lib-a/repro.lock," &
+        " contains every claim") in syncOut.output
+      check "stale: lib-b/repro.lock, lib-c/repro.lock" in syncOut.output

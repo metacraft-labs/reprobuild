@@ -44438,7 +44438,7 @@
       "requiresReproBinary": true,
       "source": "tests/integration/t_lock_coherence_reports_the_diff_advisory_only.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 1,
+      "staticCaseCount": 2,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

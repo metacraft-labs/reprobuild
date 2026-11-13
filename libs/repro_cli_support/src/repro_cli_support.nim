@@ -45674,6 +45674,12 @@ type
     selfEntry*: bool
       ## The claim is the lock's OWN entry (its repo's revision when the lock
       ## was written), not another repo's lock's pin.
+    lockDir*: string
+      ## Workspace-relative directory of the committed ``repro.lock`` the
+      ## claim came from; empty for a manifests-DB claim. It decides which
+      ## command re-pins the claim: a committed lock (its sibling pins and its
+      ## own entry alike) is rewritten by ``repro lock refresh <lockDir>``,
+      ## while ``repro workspace lock`` writes only the manifests-DB record.
 
   CoherenceFinding* = object
     ## One node about which at least one lock disagrees with reality.
@@ -45682,7 +45688,20 @@ type
     checkoutHead*: string  ## observed HEAD ("" when nothing is checked out)
     branch*: string        ## checked-out branch ("" when detached/absent)
     claims*: seq[LockClaim]
-    claimsDisagree*: bool  ## two or more locks claim DIFFERENT revisions
+    claimsDisagree*: bool
+      ## Two or more locks claim revisions that NO single revision contains:
+      ## they sit on divergent histories, so re-pinning every lock at one
+      ## revision cannot satisfy them all. Locks claiming different revisions
+      ## of ONE history do not set this; see ``commonRevision``.
+    commonRevision*: string
+      ## Set when the locks claim two or more DIFFERENT revisions that one
+      ## revision nonetheless contains: the checkout when it contains them
+      ## all, else the newest claim. Re-pinning every stale lock there
+      ## satisfies every claim, so this is lag, not a contradiction.
+    commonRevisionSource*: string
+      ## The lock claiming ``commonRevision``; empty when it is the checkout.
+    staleSources*: seq[string]
+      ## The locks whose claim is not ``commonRevision``, in claim order.
     interrupting*: bool    ## unreachable / not-fetched / no-checkout
     remedies*: seq[string] ## cheapest first
 
@@ -45735,9 +45754,12 @@ proc sameRevision(a, b: string): bool =
   ## Revision equality that tolerates an abbreviated prefix on either side —
   ## a lock may legitimately carry an abbreviation. An empty side matches
   ## NOTHING, which is what lets the caller distinguish "no claim" from a hit.
+  ## Case-folded, because git reads an object name's hex digits in either case.
   if a.len == 0 or b.len == 0: return false
-  if a == b: return true
-  a.startsWith(b) or b.startsWith(a)
+  let x = a.toLowerAscii()
+  let y = b.toLowerAscii()
+  if x == y: return true
+  x.startsWith(y) or y.startsWith(x)
 
 proc objectPresent(identity: GitToolIdentity; repoPath, sha: string): bool =
   ## ``cat-file -e <sha>^{commit}`` exits 0 only when the object is present AND
@@ -45769,6 +45791,35 @@ proc classifyClaim(identity: GitToolIdentity;
     return crDescendant
   crUnreachable
 
+proc repinRemedies(finding: CoherenceFinding;
+                   relations: set[CoherenceRelation]; dbText: string;
+                   committedTarget, suffix: string): seq[string] =
+  ## One re-pin remedy per lock that needs re-pinning, naming the command that
+  ## actually rewrites THAT lock. A committed ``repro.lock`` — a dependent's
+  ## sibling pin, or the lock's own entry — is rewritten by
+  ## ``repro lock refresh <dir>``, which re-observes every sibling at its
+  ## checkout (the §13.3 sibling re-pin) and the lock's own repo at its HEAD;
+  ## ``repro workspace lock`` writes only the manifests-DB record, so naming it
+  ## for a committed lock offered a remedy that changes nothing. A manifests-DB
+  ## claim keeps ``dbText`` — one line however many of them lag. Claims are
+  ## picked by ``relations``, or, when the finding has a ``commonRevision``,
+  ## also by being one of its ``staleSources``.
+  var dbOffered = false
+  var seen: seq[string]
+  for claim in finding.claims:
+    let stale = finding.commonRevision.len > 0 and
+      claim.source in finding.staleSources
+    if claim.relation notin relations and not stale:
+      continue
+    if claim.lockDir.len > 0:
+      if claim.lockDir in seen: continue
+      seen.add(claim.lockDir)
+      result.add("`repro lock refresh " & claim.lockDir & "` — re-pin " &
+        claim.source & " at " & committedTarget & ", then commit it" & suffix)
+    elif not dbOffered:
+      dbOffered = true
+      result.add(dbText & suffix)
+
 proc coherenceRemedies(finding: CoherenceFinding): seq[string] =
   ## Cheapest first. Every entry is something the operator can actually run;
   ## the ordering is the cost of doing it, not the tidiness of the result.
@@ -45780,18 +45831,29 @@ proc coherenceRemedies(finding: CoherenceFinding): seq[string] =
   of crMatch:
     @[]
   of crDescendant:
-    @["`repro sync` — the checkout is behind the claim and fast-forwards to it"]
+    # A stale lock on the claims' one history is re-pinned once the checkout
+    # has fast-forwarded to the revision that contains every claim.
+    @["`repro sync` — the checkout is behind the claim and fast-forwards to it"] &
+      (if finding.commonRevision.len > 0:
+        repinRemedies(finding, {}, "`repro workspace lock` — then re-pin " &
+          "the lagging lock at the fast-forwarded checkout",
+          "the fast-forwarded checkout", "")
+      else: @[])
   of crAncestor:
-    @["nothing, if the lock is simply older than your work",
-      "`repro workspace lock` — re-pin the lagging lock at the checkout"]
+    @["nothing, if the lock is simply older than your work"] &
+      repinRemedies(finding, {crAncestor},
+        "`repro workspace lock` — re-pin the lagging lock at the checkout",
+        "the checkout", "")
   of crNotFetched:
-    @["`repro sync` — fetch the claimed revision so it can be compared",
-      "`repro workspace lock` — re-pin the lock at the checkout if the claimed " &
-        "revision is gone for good"]
+    @["`repro sync` — fetch the claimed revision so it can be compared"] &
+      repinRemedies(finding, {crAncestor, crNotFetched},
+        "`repro workspace lock` — re-pin the lock at the checkout",
+        "the checkout", " if the claimed revision is gone for good")
   of crUnreachable:
-    @["`repro workspace lock` — re-pin the lagging lock at the checkout, if the " &
-        "checkout is the history you want",
-      "`git -C " & finding.path & " checkout <locked-revision>` — point the " &
+    repinRemedies(finding, {crAncestor, crUnreachable, crNotFetched},
+        "`repro workspace lock` — re-pin the lagging lock at the checkout",
+        "the checkout", ", if the checkout is the history you want") &
+      @["`git -C " & finding.path & " checkout <locked-revision>` — point the " &
         "checkout at the locked revision instead",
       "materialize a second checkout and `repro develop --into` it — last " &
         "resort, when both revisions must exist at once"]
@@ -45816,6 +45878,43 @@ proc selfEntryIsTheLocksBase(identity: GitToolIdentity;
   for parent in parents.output.strip().splitWhitespace():
     if sameRevision(parent, revision): return true
   false
+
+proc commonContainingRevision(identity: GitToolIdentity; repoAbs, head: string;
+                              claims: openArray[LockClaim];
+                              counted: openArray[int];
+                              revisions: openArray[string]):
+                             tuple[revision, source: string] =
+  ## The revision that contains every counted claim (each is it, or an
+  ## ancestor of it), or an empty revision when none does. The checkout is
+  ## tried first, from the relations already classified, because re-pinning
+  ## at the checkout is the cheapest remedy; then each claimed revision. A
+  ## claim whose object is absent cannot be shown to be contained, so a set
+  ## with one stays a contradiction rather than being guessed reconciled.
+  ## Bounded: at most ``revisions.len ^ 2`` local ``merge-base`` queries, over
+  ## the handful of locks that claim one node.
+  if head.len > 0:
+    var all = true
+    for idx in counted:
+      if claims[idx].relation notin {crMatch, crAncestor}:
+        all = false
+        break
+    if all:
+      return (revision: head, source: "")
+  for candidate in revisions:
+    if not objectPresent(identity, repoAbs, candidate):
+      continue
+    var all = true
+    for other in revisions:
+      if sameRevision(other, candidate): continue
+      if not objectPresent(identity, repoAbs, other) or
+          not isAncestorOf(identity, repoAbs, other, candidate):
+        all = false
+        break
+    if all:
+      for idx in counted:
+        if sameRevision(claims[idx].revision, candidate):
+          return (revision: candidate, source: claims[idx].source)
+  (revision: "", source: "")
 
 proc collectLockCoherence*(identity: GitToolIdentity;
                            workspaceRoot: string;
@@ -45886,7 +45985,8 @@ proc collectLockCoherence*(identity: GitToolIdentity;
         node: dep.name,
         revision: dep.coordinates.revision,
         source: (repo.path & "/" & CommittedLockFileName).replace('\\', '/'),
-        selfEntry: isSelfLockedDep(dep)))
+        selfEntry: isSelfLockedDep(dep),
+        lockDir: repo.path.replace('\\', '/')))
 
   for repo in repos:
     # A claims-only repo contributed its lock above and nothing else: it is out
@@ -45915,8 +46015,15 @@ proc collectLockCoherence*(identity: GitToolIdentity;
       if branchRes.code == 0:
         finding.branch = branchRes.output.strip()
 
-    var distinctRevisions = initHashSet[string]()
-    for claim in claims.mitems:
+    var counted: seq[int]   # indices of the claims that take part
+    # The distinct revisions the counted claims name, each in its longest
+    # spelling. Distinct by ``sameRevision``, not by string: one lock may carry
+    # an abbreviation of the revision another spells in full, and counting the
+    # two spellings as two revisions would report a disagreement between locks
+    # that agree — and, once a common revision is sought, leave no claim stale
+    # to name.
+    var revisions: seq[string]
+    for idx, claim in claims.mpairs:
       claim.relation = classifyClaim(identity, repoAbs, claim.revision,
         finding.checkoutHead)
       # A lock's own entry names the commit the lock was written against, and
@@ -45937,16 +46044,39 @@ proc collectLockCoherence*(identity: GitToolIdentity;
       # not even fetched) is a real disagreement and still counts
       # (CLI/README.md §"Lock Coherence").
       if not (claim.selfEntry and claim.relation in {crMatch, crAncestor}):
-        distinctRevisions.incl(claim.revision.toLowerAscii())
+        counted.add(idx)
+        var known = false
+        for seen in revisions.mitems:
+          if sameRevision(seen, claim.revision):
+            if claim.revision.len > seen.len: seen = claim.revision
+            known = true
+            break
+        if not known:
+          revisions.add(claim.revision)
       if claim.relation in {crUnreachable, crNotFetched, crNoCheckout}:
         finding.interrupting = true
     finding.claims = claims
-    # Two locks naming DIFFERENT revisions for one node is worth surfacing even
-    # when both are ancestors of the checkout: the locks contradict each other,
-    # not merely reality, and no single re-pin fixes both.
-    finding.claimsDisagree = distinctRevisions.len > 1
-    if finding.claimsDisagree:
-      finding.interrupting = true
+    # Locks naming DIFFERENT revisions for one node contradict EACH OTHER only
+    # when no single revision contains every claim. Claims on one history —
+    # several dependents' locks each lagging the checkout by a different
+    # amount, the normal state of a dependency under active development — are
+    # all satisfied by re-pinning the stale locks at the revision that
+    # contains them (issue 2026-11-12, CLI/README.md §"Lock Coherence"), so
+    # they stay the informational lag their relations say they are, and the
+    # finding names that revision and the stale locks instead.
+    if revisions.len > 1:
+      let common = commonContainingRevision(identity, repoAbs,
+        finding.checkoutHead, claims, counted, revisions)
+      if common.revision.len > 0:
+        finding.commonRevision = common.revision
+        finding.commonRevisionSource = common.source
+        for idx in counted:
+          if not sameRevision(claims[idx].revision, common.revision) and
+              claims[idx].source notin finding.staleSources:
+            finding.staleSources.add(claims[idx].source)
+      else:
+        finding.claimsDisagree = true
+        finding.interrupting = true
 
     var allMatch = true
     for claim in finding.claims:
@@ -46014,6 +46144,9 @@ proc coherenceReportToJson*(report: CoherenceReport): JsonNode =
       "checkoutHead": finding.checkoutHead,
       "branch": finding.branch,
       "claimsDisagree": finding.claimsDisagree,
+      "commonRevision": finding.commonRevision,
+      "commonRevisionSource": finding.commonRevisionSource,
+      "staleSources": %finding.staleSources,
       "interrupting": finding.interrupting,
       "claims": newJArray(),
       "remedies": newJArray(),
@@ -46046,9 +46179,30 @@ proc renderCoherenceTextLines*(report: CoherenceReport): seq[string] =
     for claim in finding.claims:
       result.add("    " & claim.source & " claims " & claim.revision &
         " (" & relationTag(claim.relation) & ")")
-    if finding.claimsDisagree:
+    var unseen = false   # a claim whose history could not be inspected
+    for claim in finding.claims:
+      if claim.relation in {crNotFetched, crNoCheckout}:
+        unseen = true
+    if finding.claimsDisagree and unseen:
+      # No revision was SHOWN to contain every claim, but one claim could not
+      # be inspected at all, so saying the histories diverge would be a guess.
+      result.add("    these locks claim different revisions and at least " &
+        "one is not present locally, so no revision is shown to satisfy " &
+        "them all; fetch it (`repro sync`) to tell lag from a contradiction")
+    elif finding.claimsDisagree:
       result.add("    these locks contradict EACH OTHER, not just the " &
-        "checkout — no single re-pin satisfies both")
+        "checkout — they claim revisions on divergent histories, so no " &
+        "single revision satisfies them all")
+    elif finding.commonRevision.len > 0:
+      let where =
+        if finding.commonRevisionSource.len == 0:
+          "the checkout " & finding.commonRevision
+        else:
+          finding.commonRevision & ", claimed by " &
+            finding.commonRevisionSource & ","
+      result.add("    these locks lag at different revisions of one history: " &
+        where & " contains every claim, so re-pinning the stale locks there " &
+        "satisfies them all (stale: " & finding.staleSources.join(", ") & ")")
     # Say what the build will do, so nobody has to infer it.
     result.add("    the build uses the CHECKOUT (develop mode); a " &
       "disagreeing lock is a stale record, not an override")
