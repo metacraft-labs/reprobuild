@@ -41,6 +41,33 @@ proc tool(name: string): string =
   result = findExe(name, followSymlinks = false)
   doAssert result.len > 0, name & " is not on PATH"
 
+proc readPid(path: string): int =
+  ## The pid a stand-in recorded in ``path`` (0 when absent or malformed).
+  ## Only pids this test's own stand-ins wrote are ever signalled.
+  try:
+    result = parseInt(readFile(path).strip())
+  except CatchableError:
+    result = 0
+  if result <= 1: result = 0
+
+proc pidAlive(pid: int): bool =
+  ## True while ``pid`` is a live process; a zombie awaiting its reaper
+  ## counts as gone (it runs nothing and holds nothing).
+  if pid <= 1 or posix.kill(Pid(pid), 0) != 0: return false
+  try:
+    let st = readFile("/proc/" & $pid & "/stat")
+    let rp = st.rfind(')')
+    if rp >= 0 and rp + 2 < st.len and st[rp + 2] == 'Z': return false
+  except CatchableError:
+    discard                       # no /proc: the signal probe stands
+  true
+
+proc killRecorded(pid: int) =
+  ## SIGKILL exactly ``pid``, a process one of this test's stand-ins
+  ## recorded; never a pattern match over other people's processes.
+  if pid > 1 and pidAlive(pid):
+    discard posix.kill(Pid(pid), SIGKILL)
+
 proc runHook(exe, logPath: string; timeoutSec, boundSec: int;
              pidDir = ""): tuple[code: int; secs: float; timedOut: bool] =
   ## Run the hook command; give up (and kill it) after ``boundSec``.
@@ -54,8 +81,12 @@ proc runHook(exe, logPath: string; timeoutSec, boundSec: int;
   defer: p.close()
   while p.peekExitCode() == -1:
     if epochTime() - t0 > boundSec.float:
-      # The stand-in; its grandchild is the caller's to clean up.
-      discard execCmd("pkill -KILL -f " & quoteShell(exe) & " >/dev/null 2>&1")
+      # The stand-in (which records its own pid, its session's and group's
+      # id, in ``<exe>.pid``); its grandchild is the caller's to clean up.
+      let sp = readPid(exe & ".pid")
+      if sp > 1:
+        discard posix.kill(Pid(-sp), SIGKILL)
+        killRecorded(sp)
       p.kill()
       discard p.waitForExit()
       return (-1, epochTime() - t0, true)
@@ -95,16 +126,21 @@ suite "the apt hook's wrapper":
     let ro = dir / "full-run"
     createDir(ro)
     setFilePermissions(ro, {fpUserRead, fpUserExec})
-    let marker = $(100000 + (getCurrentProcessId() + 7) mod 800000)
-    let r = runHook(script("hang2", "trap '' TERM\nsleep " & marker & " &\n" &
-                    "while :; do sleep 1; done"), log, 2, 20, pidDir = ro)
+    # The stand-in records its own pid and its grandchild's, so the test
+    # inspects and cleans up exactly those two processes.
+    let hang = script("hang2", "trap '' TERM\necho $$ > " & dir / "hang2.pid" &
+                    "\nsleep 3600 &\necho $! > " & dir / "hang2.child" &
+                    "\nwhile :; do sleep 1; done")
+    let r = runHook(hang, log, 2, 20, pidDir = ro)
+    let child = readPid(dir / "hang2.child")
     check not r.timedOut
     check r.code == 0
     check r.secs < 2.0 + 5.0 + 3.0
     check fileExists(log) and "verify-timeout" in readFile(log)
     sleep(500)
-    check execCmd("pgrep -x -f 'sleep " & marker & "' >/dev/null") != 0
-    discard execCmd("pkill -KILL -x -f 'sleep " & marker & "' >/dev/null 2>&1")
+    check child > 1
+    check not pidAlive(child)
+    killRecorded(child)           # only if a mutated hook left it behind
 
   test "the binary test runs inside the bounded group":
     let c = aptHookCommand("/repro/store/x/bin/repro")
@@ -122,19 +158,23 @@ suite "the apt hook's wrapper":
     # Ignores SIGTERM, and leaves a grandchild: only the follow-up SIGKILL
     # to the whole group ends it (uutils' timeout would leave the
     # grandchild behind).
-    # A grandchild with a duration unique to this run, so a leftover of an
-    # earlier (mutated) run cannot be mistaken for this one's.
-    let marker = $(100000 + getCurrentProcessId() mod 800000)
-    let r = runHook(script("hang", "trap '' TERM\nsleep " & marker & " &\n" &
-                    "while :; do sleep 1; done"), log, 2, 20)
+    # The stand-in records its own pid and its grandchild's, so a leftover
+    # of an earlier (mutated) run cannot be mistaken for this one's, and
+    # cleanup signals exactly those processes.
+    let hang = script("hang", "trap '' TERM\necho $$ > " & dir / "hang.pid" &
+                    "\nsleep 3600 &\necho $! > " & dir / "hang.child" &
+                    "\nwhile :; do sleep 1; done")
+    let r = runHook(hang, log, 2, 20)
+    let child = readPid(dir / "hang.child")
     check not r.timedOut
     check r.code == 0
     check r.secs < 2.0 + 5.0 + 3.0
     check fileExists(log) and "verify-timeout" in readFile(log)
     sleep(500)
-    check execCmd("pgrep -x -f 'sleep " & marker & "' >/dev/null") != 0
+    check child > 1
+    check not pidAlive(child)
     # This run's grandchild, if a mutated hook left it (never anyone else's).
-    discard execCmd("pkill -KILL -x -f 'sleep " & marker & "' >/dev/null 2>&1")
+    killRecorded(child)
     var leftovers: seq[string]
     for k, f in walkDir(dir):
       if "repro-addon-hook." in f: leftovers.add(f)
