@@ -10,14 +10,15 @@
 ## - **a template pulled in by ``Wants=``** with ``RuntimeDirectory=``
 ##   applies twice: what was absent at the check and exists after the
 ##   start is recorded, whenever systemd 252 stamps the instance's start
-##   (§13 decision 82);
+##   (spec §10.1, round 12);
 ## - **its instance restarted outside a switch** (``systemctl restart``):
 ##   the next apply accepts the directory the restart made, judged by the
 ##   instance that ran, not by the observation instance (decision 82,
 ##   finding 4);
 ## - **a socket-activated service** with ``RuntimeDirectory=<stem>`` and a
 ##   listener at ``/run/<stem>/sock`` applies twice: the directory its
-##   socket's start made is recorded for the service (finding 3), and once
+##   socket's start made is recorded for the service (finding 3; spec
+##   §10.1, round 12), and once
 ##   the service has started outside a switch, the next apply accepts the
 ##   directory it was handed;
 ##
@@ -26,7 +27,8 @@
 ## - **a stopped unit** whose ``StateDirectory=`` its last run made again
 ##   applies; a tree made after that run ended is refused, and the refused
 ##   apply's revert commits with the unit held, the host not pending
-##   (decision 83; spec §10.1 on a revert's floor check);
+##   (decision 83 for the stopped unit; spec §10.1, round 12, for the
+##   revert);
 ## - **a reused inode with a new birth time** on a 16-inode ext4 the guest
 ##   loop-mounts at ``/var/cache``: the kernel hands the number back, and
 ##   the next apply refuses the directory (decision 76, finding 7);
@@ -106,7 +108,8 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
     var evidences = newJArray()
     for n in 1 .. rounds():
       let tag = " (round " & $n & ")"
-      # The template, pulled in by the control unit (finding 1, decision 82).
+      # The template, pulled in by the control unit (finding 1; spec §10.1,
+      # round 12).
       let tpl = proc (d: string): string =
         Head & unitResource("a9r-control.service", "", binary,
                             unitLines = "Wants=a9r-t@1.service\n", description = d) &

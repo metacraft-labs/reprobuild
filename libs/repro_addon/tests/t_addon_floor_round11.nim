@@ -218,7 +218,7 @@ suite "round 11, finding 4: a template's instances share its directories":
     check flooredKey("foo@y.service") == "foo@.service"
     check flooredKey("bar.service") == "bar.service"
   test "a unit a dependency started during the switch is recorded":
-    # Since round 12 (§13 decision 82): absent at the check, present after
+    # Since round 12 (spec §10.1, round 12): absent at the check, present after
     # the start step, whatever the unit's start time says.
     let state = createTempDir("a9r11-", "-state")
     defer: removeDir(state)

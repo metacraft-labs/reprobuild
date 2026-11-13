@@ -1568,7 +1568,7 @@ proc recordStartedSince*(stateDir: string;
                          pending: openArray[tuple[path, unit: string]];
                          invocationOf: proc (u: string): tuple[id: string; start: int64];
                          identityOf: proc (p: string): PathIdentity = identityOfPath) =
-  ## After the start step (§13 decision 82): each pending directory -- one
+  ## After the start step (spec §10.1, round 12): each pending directory -- one
   ## the check found absent -- that exists now is recorded for the unit it
   ## was pending for, as ``recordCreatedDirs`` does for a unit the switch
   ## started by name. That covers a unit the switch did not start by name

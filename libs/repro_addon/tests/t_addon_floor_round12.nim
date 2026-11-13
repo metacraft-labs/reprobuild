@@ -7,7 +7,7 @@
 ##   earlier than 100 ms before the start systemd reports (decision 82;
 ##   finding 1); in a switch, what was absent at the check and exists after
 ##   the start is recorded, for a unit started by a dependency or by its
-##   activator alike (decision 82; finding 3);
+##   activator alike (spec §10.1, round 12; finding 3);
 ## - a stopped unit's directory passes only if it was born within the
 ##   unit's last run (decision 83);
 ## - the run is read in one call (finding 5);
@@ -179,7 +179,7 @@ suite "round 12 (§13 decision 83): a stopped unit":
   test "no end reported, it does not":
     check recreated(view(Start + 5 * Ms, stopped = true)).len > 0
 
-suite "round 12 (§13 decision 82): recorded at the start step":
+suite "round 12 (spec §10.1): recorded at the start step":
   let state = createTempDir("a9r12-", "-rec")
   createDir(state / "addon")
   test "absent at the check, made by the start: recorded, whenever the run began":
