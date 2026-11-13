@@ -24482,6 +24482,35 @@ proc runVcsHooksCommand(action: HookActionKind; parsed: ParsedHooksCommand) =
   echo "repro hooks: VCS hooks " & actionName & " " & status & " at " &
     hooksDir
 
+proc untouchedManifestRepos*(root: string): seq[string] =
+  ## Names of the repos a workspace-shaped checkout declares but a
+  ## single-repo ``hooks ensure --vcs`` could not reach.
+  ##
+  ## A directory that carries ``projects/*.toml`` AND ``repos/*.toml`` yet no
+  ## ``.repro/workspace-state.toml`` is either a workspace root whose project
+  ## set was never recorded, or the manifest lock backend (the same shape,
+  ## which really is a single-repo target — see
+  ## ``enumerateParticipatingReposStrict``). The two cannot be told apart from
+  ## the files, so the sweep stays single-repo; this lists the ``repos/``
+  ## fragments (by stem) so the operator sees what was NOT touched instead of
+  ## a success line that reads as if the workspace were covered. Empty when
+  ## the directory is not manifest-shaped.
+  var hasProject = false
+  let projectsDir = root / "projects"
+  if dirExists(projectsDir):
+    for kind, path in walkDir(projectsDir):
+      if kind == pcFile and path.endsWith(".toml"):
+        hasProject = true
+        break
+  if not hasProject:
+    return
+  let reposDir = root / "repos"
+  if dirExists(reposDir):
+    for kind, path in walkDir(reposDir):
+      if kind == pcFile and path.endsWith(".toml"):
+        result.add(extractFilename(path).changeFileExt(""))
+  result.sort()
+
 proc runVcsHooksEnsureCommand(parsed: ParsedHooksCommand): int =
   ## M17 entry point for ``repro hooks ensure --vcs``. Resolves the
   ## workspace root, enumerates participating repos, installs the four
@@ -24502,6 +24531,20 @@ proc runVcsHooksEnsureCommand(parsed: ParsedHooksCommand): int =
     if single.targetPath.len == 0:
       single.targetPath = workspaceRoot
     runVcsHooksCommand(hakEnsure, single)
+    # Say what was NOT done. The line above reads as success for the root repo
+    # alone; for a workspace whose project set was never recorded that hides
+    # that every participating repo kept its (usually absent) hooks and so
+    # pushes ungated. stderr: stdout is `.envrc`'s activation signal.
+    let untouched = untouchedManifestRepos(workspaceRoot)
+    if untouched.len > 0:
+      stderr.writeLine("repro hooks: NOTE " & workspaceRoot &
+        " carries workspace manifests (projects/, repos/) but declares no " &
+        "workspace (.repro/workspace-state.toml is missing), so only this " &
+        "repo's hooks were installed. The " & $untouched.len &
+        " repo(s) declared in repos/ were NOT touched: " &
+        untouched.join(", ") & ". If this is a workspace, record its " &
+        "project set ('repro ws enable <project>') and run " &
+        "'repro hooks ensure --vcs' again.")
     return 0
   var report = ensureWorkspaceHooks(workspaceRoot)
   writeHooksEnsureReport(report,
@@ -86051,6 +86094,28 @@ proc executeBranchFork(parsed: BranchArgs): BranchReport =
   # fork is told the workspace is uninitialized. Placed after the metadata
   # writers because it reads what they just recorded.
   refreshWorkspaceProjectsIndexBestEffort(parsed.forkPath, "repro branch")
+  # The fork starts GATED. `repro branch` clones and branches the repos but
+  # nothing else installs the managed git hooks (not init, not sync), so a
+  # fresh workspace used to push with no reproducibility gate at all until an
+  # operator happened to run `repro hooks ensure --vcs`. The state file is
+  # recorded above, so this sweep walks every participating repo.
+  try:
+    let hooks = ensureWorkspaceHooks(parsed.forkPath)
+    if hooks.exitCode != 0:
+      result.exitCode = 1
+      result.repos.add(BranchRepoEntry(
+        outcome: "hooks_failed",
+        diagnostic: "the managed git hooks could not be installed in every " &
+          "repo of '" & parsed.forkPath & "'; run `repro hooks ensure --vcs " &
+          parsed.forkPath & "` and read what it reports"))
+      return
+  except CatchableError as err:
+    result.exitCode = 1
+    result.repos.add(BranchRepoEntry(
+      outcome: "hooks_failed",
+      diagnostic: "installing the managed git hooks in '" & parsed.forkPath &
+        "' failed: " & err.msg))
+    return
   result.exitCode = 0
 
 ## ----------------------------------------------------------------------------

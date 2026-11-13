@@ -23,18 +23,22 @@
 ##    reports it as "authorised, not completed" (exit 3), never as a
 ##    discard.
 ##
-## 5. (§13 decision 81) An uninstall that ends incomplete (drift or an
-##    error) after the intent record writes no completion record, whether
-##    or not an object is already gone: the record verifies as "authorised,
-##    not completed".
+## 5. (§13 decisions 81 and 88) Drift after the intent record stops the
+##    uninstall with the objects in place: no completion, "authorised, not
+##    completed". Once the objects are gone (and synced), a later cleanup
+##    failure is reported on its own and the completion is written:
+##    "completed".
 ##
 ## Falsifying builds (each turns its own case red):
 ## ``override-keyless-unsigned`` (1), ``override-write-error-swallowed`` (2),
 ## ``override-sig-write-error-swallowed`` (3),
 ## ``override-rollback-removes-sig`` (4),
-## ``discard-completed-despite-errors`` (5).
+## ``discard-completion-held-by-cleanup-error`` (5).
 ##
-## Mocks: case 4's record writer writes the file as the real one does and
+## Mocks: case 3's writer raises on the signature's path (round 6
+## pre-created directories at the names; round 9 makes a taken name the
+## next free one, not a failure). Case 4's record writer writes the file
+## as the real one does and
 ## then raises, as the real one does when the directory's fsync fails
 ## after the rename (a failure of the file system cannot be produced on
 ## demand). ``ship`` is a stub answering "not acknowledged" -- the sink's
@@ -115,15 +119,15 @@ suite "the A11 code review's fifth round":
     let aside = leaveAside(site, "1-a")
     let logDir = root / "sigfail" / "log"
     createDir(logDir)
-    # A directory where the signature of each record the next seconds could
-    # write goes: only that write fails.
-    let t0 = getTime()
-    for s in 0 .. 20:
-      createDir(logDir / ("uninstall-" &
-        (t0 + initDuration(seconds = s)).utc.format("yyyyMMdd'T'HHmmss'Z'") &
-        DiscardIntentSuffix & DiscardRecordSigExt))
+    # Only the signature's write fails. (Round 9: a taken name is no
+    # longer a failure -- the record takes the next free name -- so the
+    # failure is the writer's.)
+    let sigFails = proc (path, text: string) =
+      if path.endsWith(DiscardRecordSigExt):
+        raise newException(IOError, "the signature could not be written")
+      atomicRecordWriter(path, text)
     let g = storeEvidenceGate(site, override, notAcknowledged,
-                              overrideDir = logDir)
+                              overrideDir = logDir, recordWriter = sigFails)
     checkpoint g.errors.join("\n")
     check g.errors.anyIt("could not be written" in it)
     check g.errors.anyIt(it == "nothing was removed")
@@ -163,7 +167,7 @@ suite "the A11 code review's fifth round":
       check v.status == dsAuthorised
       check runAddonCli(@["verify-discard-record", records[0], "--key", pub]) == 3
 
-  test "5: an uninstall that drifts or fails after the intent record does not complete it":
+  test "5: drift or a failure after the intent record: completed only once the objects are gone":
     let key = root / "drift" / "agent" / "attestation.key"
     createDir(parentDir(key))
     let pub = ensureAttestationKey(key).publicKeyHex
@@ -175,26 +179,34 @@ suite "the A11 code review's fifth round":
     check g.errors.len == 0
     check fileExists(g.overrideRecord)
     var signer = loadTextSigner(key)
+    # Drift stops the uninstall before the removal: the object is still in
+    # place, so there is no completion.
     var r = UninstallResult(overrideRecord: g.overrideRecord,
                             overrideRecordText: g.overrideRecordText)
     r.drift.add("/etc/x: drifted")
-    removeDir(aside)                      # the object itself is gone
     finishDiscard(r, site, signer, g.pending)
+    check dirExists(aside)
     check r.completionRecord.len == 0
     check not fileExists(completionPathOf(g.overrideRecord))
     check verifyDiscardRecord(g.overrideRecord, pub).status == dsAuthorised
 
-    # An error, no drift: the same.
+    # §13 decision 88: the evidence gone and synced, a later cleanup
+    # failure (here /run/repro) is reported on its own and does not hold
+    # the completion back. (The first object is cleared out of the way, so
+    # the second gate's pending set is the new object alone.)
+    removeDir(aside)
     let aside2 = leaveAside(site, "2-a")
     let g2 = storeEvidenceGate(site, override, notAcknowledged,
                                overrideDir = logDir / "2")
     var r2 = UninstallResult(overrideRecord: g2.overrideRecord,
                              overrideRecordText: g2.overrideRecordText)
-    r2.errors.add("some later step failed")
+    r2.errors.add("/run/repro: could not be removed")
     removeDir(aside2)
     finishDiscard(r2, site, signer, g2.pending)
     signer.wipe()
-    check r2.completionRecord.len == 0
-    check verifyDiscardRecord(g2.overrideRecord, pub).status == dsAuthorised
+    checkpoint r2.errors.join("\n")
+    check r2.errors == @["/run/repro: could not be removed"]
+    check r2.completionRecord.len > 0
+    check verifyDiscardRecord(g2.overrideRecord, pub).status == dsCompleted
 
 removeDir(root)

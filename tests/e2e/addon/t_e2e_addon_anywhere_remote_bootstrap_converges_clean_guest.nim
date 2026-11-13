@@ -41,10 +41,20 @@
 ## the test bed's own channel to it (gosti's SSH session, which the run
 ## created) and writes it there for the forwarded loopback port.
 ##
-## Falsifier: an ENGINE built with
+## *Plan-only writes outside the fingerprint.* The fingerprint covers the
+## paths an add-on could own, not ``/root``, ``/var/tmp`` or the rest of
+## ``/var/lib``. So the gate also records the guest's clock before the
+## plan-only run and lists every path on every disk-backed filesystem that
+## changed since, refusing each one outside the disclosed allowlist of
+## incidental SSH writes (``plan_only_writes.nim``; Safety Contract §5).
+##
+## Falsifiers: an ENGINE built with
 ## ``REPRO_ADDON_MUTATION=anywhere-digest-omits-profile`` (``just build``)
 ## leaves the profile out of the digest; the changed profile is then
-## applied and the gate goes red.
+## applied and the gate goes red. One built with
+## ``REPRO_ADDON_MUTATION=anywhere-probe-leaves-files`` leaves a file in
+## ``/var/tmp``, ``/root`` and ``/var/lib`` during plan-only mode, which
+## only the disk-write listing sees: the gate goes red on that step.
 ##
 ## *Mocking.* None. A real guest, the real engine, the real add-on.
 
@@ -54,6 +64,7 @@ import repro_test_support/reasoned_skip
 import repro_peer_cache/auth as peerAuth
 
 import ./addon_testbed
+import ./plan_only_writes
 
 const
   Gate = "e2e_addon_anywhere_remote_bootstrap_converges_clean_guest"
@@ -159,6 +170,15 @@ proc runBase(b: BaseImage; record: JsonNode; work: string): seq[string] =
 
     # Without an acknowledged plan: the reviewable plan and its digest, and
     # nothing persistent left (the base fingerprint is unchanged).
+    # The fingerprint covers only the paths an add-on could own, so the
+    # guest's clock is recorded first and every disk-backed filesystem is
+    # listed for what changed since (plan_only_writes.nim).
+    # systemd-timesyncd stamps /var/lib/systemd/timesync/clock on its own
+    # schedule and when it stops, whatever the run does: it is not an SSH
+    # write and not a log, so it is stopped (its stop-time write included)
+    # before the clock is taken instead of being allowlisted.
+    discard g.exec("systemctl stop systemd-timesyncd.service 2>/dev/null; true")
+    let t0 = g.run("date +%s.%N").strip()
     let (planOut, planRc) = execCmdEx(base & target)
     record["planOnlyOutput"] = %planOut
     var digest = ""
@@ -167,8 +187,18 @@ proc runBase(b: BaseImage; record: JsonNode; work: string): seq[string] =
         digest = line.split(':', 1)[1].strip()
     let u1 = unbootstrapped()
     let carried0 = ephemeralGone()
+    let written = g.exec("bash -c " & quoteShell(listWritesScript(t0)))
+    let unexplained = unexplainedWrites(written.stdout)
+    # Back to the base's own state before the fingerprint, which lists
+    # active units.
+    discard g.exec("systemctl start systemd-timesyncd.service 2>/dev/null; true")
     let fPlan = g.takeFingerprint(repro)
     let dPlan = identityReport(f0, fPlan)
+    step("plan-only wrote no file on a disk-backed filesystem beyond the " &
+         "disclosed SSH writes", written.exitCode == 0 and unexplained.len == 0,
+         "exit " & $written.exitCode & "\n" & written.stderr &
+           "\nunexplained writes:\n" & unexplained.join("\n") &
+           "\ndisk-backed mounts:\n" & g.exec("findmnt -rn -o TARGET,SOURCE,FSTYPE").stdout)
     step("without --expect-plan it prints the plan and leaves nothing",
          planRc == 3 and digest.len == 64 and
            "nothing was applied" in planOut and
