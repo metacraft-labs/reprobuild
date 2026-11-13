@@ -12,7 +12,12 @@
 ##   unit's last run (decision 83);
 ## - the run is read in one call (finding 5);
 ## - a template's directory is judged against the instance that ran
-##   (finding 4);
+##   (finding 4), and every name of a template reaches one verdict: the
+##   same candidate instances whichever name is checked, and a directory
+##   refused for one name not accepted for a later one in the same check,
+##   and an acceptance written once, after every name, only if no name
+##   refused it (issue 2026-11-13-floor-template-observation-instance-refuses-a-
+##   directory-its-instance-restart-made);
 ## - a statx error other than ENOENT/ENOTDIR is not "absent" (finding 6);
 ## - a reused inode with a new birth time is not the recorded directory
 ##   (finding 7; decision 76);
@@ -27,7 +32,9 @@
 ## ``observation-instance-judged-alone``, ``statx-errors-absent``,
 ## ``same-identity-ignores-btime``, ``listener-below-writable-allowed``,
 ## ``migration-skips-listeners``, ``start-step-records-first-unit``,
-## ``record-keeps-old-invocation``.
+## ``record-keeps-old-invocation``, ``template-instances-unjudged``,
+## ``template-refusal-forgotten``, ``template-acceptance-per-name``,
+## ``template-refused-written``.
 ##
 ## Mocks: as in ``t_addon_floor_round10``: systemd's view and the path
 ## identities are stand-ins built from what systemd and statx report, since
@@ -301,6 +308,157 @@ suite "round 12, finding 4: recorded for the observation instance":
                                ("/run/foo", "foo@1.service")], invOf, ident)
     let c = readCreatedDirs(state).getOrDefault("/run/foo")
     check c.unit == "foo@1.service" and c.invocation == "I7"
+
+proc templateInput(name, recUnit: string;
+                   viewOf: proc (u: string): SystemdView;
+                   seen: ref seq[string]): EffectiveInput =
+  ## One name of the template ``foo@.service`` with ``/run/foo`` recorded
+  ## for ``recUnit`` and made again since; ``seen`` collects each unit
+  ## ``onRecreated`` is called with.
+  result = goodInput()
+  result.unit = name
+  result.show["RuntimeDirectory"] = "foo"
+  result.inspectPath = existing(["/run/foo"])
+  result.pathIdentity = proc (p: string): PathIdentity = (true, 4'u64, 9'u64, Start + 5 * Ms)
+  result.createdDirs = {"/run/foo": CreatedDir(unit: recUnit, dev: 4, ino: 5,
+                                               btime: 6, invocation: "I1")}.toTable
+  result.systemdView = proc (p, u: string; s: ShowProps): SystemdView = viewOf(u)
+  result.runningInstances = proc (t: string): seq[string] = @[]
+  result.onRecreated = proc (p, u: string; v: SystemdView): bool =
+    seen[].add(u)
+    true
+
+suite "round 12, finding 4 (issue 2026-11-13): one verdict for every name of a template":
+  test "recorded for the observation instance, its instance stopped after the run that made it":
+    # Written by an engine that recorded a template's directory for its
+    # observation instance; foo@x, which the generation names, ran, systemd
+    # made the directory in that run, and it has stopped since (§13
+    # decision 83). Nothing runs now, so only the generation's instances
+    # name the instance that ran.
+    let vo = proc (u: string): SystemdView =
+      if u == "foo@x.service": view(Start + 5 * Ms, stopped = true, stop = Start + 900 * Ms)
+      else: SystemdView(dynamicUid: -1, btime: Start + 5 * Ms, stopped: true)
+    for n in ["foo@repro-addon-observe.service", "foo@x.service"]:
+      checkpoint n
+      let seen = new seq[string]
+      var e = templateInput(n, "foo@repro-addon-observe.service", vo, seen)
+      e.templateInstances = @["foo@x.service"]
+      check "[rule:existing-tree" notin problemsOf(e)
+      check seen[] == @["foo@x.service"]   # recorded for the instance that ran
+  test "a directory refused for one name is not accepted for a later name of the same check":
+    # systemd's state changes between the two names' reads: refused for the
+    # observation instance (foo@x's run is the recorded one), then foo@x
+    # restarted, which would accept it for foo@x.
+    var restarted = false
+    let vo = proc (u: string): SystemdView =
+      if u == "foo@x.service" and restarted: view(Start + 5 * Ms)
+      elif u == "foo@x.service": view(Start + 5 * Ms, id = "I1")
+      else: SystemdView(dynamicUid: -1, btime: Start + 5 * Ms, stopped: true)
+    # Without the shared set the second name accepts: the split is real.
+    block:
+      restarted = false
+      let seen = new seq[string]
+      var a = templateInput("foo@repro-addon-observe.service", "foo@x.service", vo, seen)
+      a.runningInstances = proc (t: string): seq[string] = @["foo@x.service"]
+      check "[rule:existing-tree" in problemsOf(a)
+      restarted = true
+      var b = templateInput("foo@x.service", "foo@x.service", vo, seen)
+      b.runningInstances = proc (t: string): seq[string] = @["foo@x.service"]
+      check "[rule:existing-tree" notin problemsOf(b)
+      check seen[] == @["foo@x.service"]
+    # Shared, as effectiveFloorCheck shares it between a template's names.
+    restarted = false
+    let refusedSet = new HashSet[string]
+    refusedSet[] = initHashSet[string]()
+    let seen = new seq[string]
+    var a = templateInput("foo@repro-addon-observe.service", "foo@x.service", vo, seen)
+    a.runningInstances = proc (t: string): seq[string] = @["foo@x.service"]
+    a.templateRefused = refusedSet
+    check "[rule:existing-tree" in problemsOf(a)
+    check "/run/foo" in refusedSet[]
+    restarted = true
+    var b = templateInput("foo@x.service", "foo@x.service", vo, seen)
+    b.runningInstances = proc (t: string): seq[string] = @["foo@x.service"]
+    b.templateRefused = refusedSet
+    check "[rule:existing-tree" in problemsOf(b)
+    check seen[].len == 0             # the record is not rewritten
+  test "the effective check shares one refused set between a template's names":
+    # (Read into a flag: a failed check would print the whole source.)
+    let sharesRefused = "templateRefused: tmplRefused" in ApplySource
+    let passesInstances = "templateInstances: tmplInstances" in ApplySource
+    let commitsOnce = "commitRecreatedProblems(tentative, tmplRefused[]," in ApplySource
+    check sharesRefused
+    check passesInstances
+    check commitsOnce
+
+proc heldInput(name: string; vo: proc (u: string): SystemdView;
+               refusedSet: ref HashSet[string];
+               held: ref seq[RecreatedAcceptance]): EffectiveInput =
+  ## A name of ``foo@.service`` as ``effectiveFloorCheck`` checks it: an
+  ## acceptance is held (``noteRecreated``), not written, until every name
+  ## has been checked.
+  result = templateInput(name, "foo@x.service", vo, new seq[string])
+  result.runningInstances = proc (t: string): seq[string] = @["foo@x.service"]
+  result.templateRefused = refusedSet
+  result.onRecreated = proc (p, u: string; v: SystemdView): bool =
+    noteRecreated(held[], name, p, u, "RuntimeDirectory", v)
+    true
+
+suite "round 12, finding 4 (issue 2026-11-13): a template's acceptance written once, after every name":
+  test "accepted under both names: recorded and logged once":
+    let vo = proc (u: string): SystemdView =
+      if u == "foo@x.service": view(Start + 5 * Ms)
+      else: SystemdView(dynamicUid: -1, btime: Start + 5 * Ms, stopped: true)
+    let refusedSet = new HashSet[string]
+    refusedSet[] = initHashSet[string]()
+    let held = new seq[RecreatedAcceptance]
+    for n in ["foo@repro-addon-observe.service", "foo@x.service"]:
+      check "[rule:existing-tree" notin problemsOf(heldInput(n, vo, refusedSet, held))
+    var writes: seq[string]
+    var written: seq[RecreatedAcceptance]
+    let problems = commitRecreatedProblems(held[], refusedSet[],
+      proc (p, u: string; v: SystemdView): bool =
+        writes.add(p & " " & u)
+        true, written)
+    check writes == @["/run/foo foo@x.service"]   # one record, one audit line
+    check written.len == 1 and problems.len == 0
+    check written[0].names == @["foo@repro-addon-observe.service", "foo@x.service"]
+  test "accepted under the first name, refused under a later one: nothing written":
+    var restarted = true
+    let vo = proc (u: string): SystemdView =
+      if u == "foo@x.service" and restarted: view(Start + 5 * Ms)
+      elif u == "foo@x.service": view(Start + 5 * Ms, id = "I1")
+      else: SystemdView(dynamicUid: -1, btime: Start + 5 * Ms, stopped: true)
+    let refusedSet = new HashSet[string]
+    refusedSet[] = initHashSet[string]()
+    let held = new seq[RecreatedAcceptance]
+    check "[rule:existing-tree" notin
+      problemsOf(heldInput("foo@repro-addon-observe.service", vo, refusedSet, held))
+    # systemd now reports the recorded run: no run made it, so refused.
+    restarted = false
+    check "[rule:existing-tree" in problemsOf(heldInput("foo@x.service", vo, refusedSet, held))
+    var writes = 0
+    var written: seq[RecreatedAcceptance]
+    discard commitRecreatedProblems(held[], refusedSet[],
+      proc (p, u: string; v: SystemdView): bool =
+        inc writes
+        true, written)
+    check writes == 0                 # the refused check rewrites no record
+    check written.len == 0
+  test "a write that fails refuses the directory under each name that accepted it":
+    var held: seq[RecreatedAcceptance]
+    noteRecreated(held, "foo@repro-addon-observe.service", "/run/foo", "foo@x.service",
+                  "RuntimeDirectory", view(Start + 5 * Ms))
+    noteRecreated(held, "foo@x.service", "/run/foo", "foo@x.service",
+                  "RuntimeDirectory", view(Start + 5 * Ms))
+    var written: seq[RecreatedAcceptance]
+    let problems = commitRecreatedProblems(held, initHashSet[string](),
+      proc (p, u: string; v: SystemdView): bool = false, written)
+    check written.len == 0
+    check problems.len == 2
+    for l in problems:
+      check "could not be recorded and logged" in l
+      check l.endsWith("[rule:existing-tree key:RuntimeDirectory]")
 
 suite "round 12, finding 6: a statx error is not absent":
   test "ENOENT and ENOTDIR are absent; ELOOP is a path with no known identity":

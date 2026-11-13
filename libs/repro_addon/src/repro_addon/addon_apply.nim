@@ -2042,12 +2042,31 @@ proc effectiveFloorCheck*(resources: openArray[SystemResource];
       groupsRead = true
     let denied = deniedCalls(rendered, groups)
     var names: seq[string]
+    # For a template: the instances the generation names, which every name
+    # of it judges a remade directory against, and the directories an
+    # earlier name refused, which a later name does not accept, so all its
+    # names reach one verdict and a refused check rewrites no record (§13
+    # decision 71; issue 2026-11-13-floor-template-observation-instance-
+    # refuses-a-directory-its-instance-restart-made).
+    var tmplInstances: seq[string]
+    var tmplRefused: ref HashSet[string] = nil
     if r.suName.contains("@."):
+      tmplInstances = floorInstancesOf(r.suName, resources)
+      tmplRefused = new HashSet[string]
+      tmplRefused[] = initHashSet[string]()
       when not mutated("unnamed-instances-unchecked"):
         names.add(templateObservationName(r.suName))
-      names.add(floorInstancesOf(r.suName, resources))
+      names.add(tmplInstances)
     else:
       names = @[r.suName]
+    # A template's directories decision 71 accepts are held until every
+    # name of it has been checked, then recorded and logged once each, and
+    # only if no name refused them (``commitRecreatedProblems``; same
+    # issue). So is what the start step would record for them
+    # (``startMayCreate``'s ``acceptedNow``): it stands only for a
+    # directory that was written.
+    var tentative: seq[RecreatedAcceptance]
+    var heldPending: seq[tuple[path, unit: string]]
     for name in names:
       var e = EffectiveInput(unit: name, rendered: rendered,
         version: r.suFloorVersion, exceptions: r.suFloorExceptions,
@@ -2058,16 +2077,25 @@ proc effectiveFloorCheck*(resources: openArray[SystemResource];
         createdDirs: created, ledgerDirs: ledgerDirs,
         systemdView: proc (p, u: string; s: ShowProps): SystemdView =
           hostSystemdView(p, u, s),
-        runningInstances: hostRunningInstances)
+        runningInstances: hostRunningInstances,
+        templateInstances: tmplInstances, templateRefused: tmplRefused)
       var acceptedNow: seq[string]
-      e.onRecreated = proc (path, unit: string; v: SystemdView): bool =
-        # Recorded again and logged, or not accepted (§13 decision 71; A9
-        # review round 11, finding 6).
-        if acceptRecreatedLogged == nil or not acceptRecreatedLogged(path, unit, v):
-          return false
-        acceptedNow.add(path)
-        if recreated != nil: recreated[].add((path, unit, v))
-        true
+      var held: seq[tuple[path, unit: string; v: SystemdView]]
+      if tmplRefused != nil:
+        # A template: held, decided after its last name.
+        e.onRecreated = proc (path, unit: string; v: SystemdView): bool =
+          held.add((path, unit, v))
+          acceptedNow.add(path)
+          true
+      else:
+        e.onRecreated = proc (path, unit: string; v: SystemdView): bool =
+          # Recorded again and logged, or not accepted (§13 decision 71; A9
+          # review round 11, finding 6).
+          if acceptRecreatedLogged == nil or not acceptRecreatedLogged(path, unit, v):
+            return false
+          acceptedNow.add(path)
+          if recreated != nil: recreated[].add((path, unit, v))
+          true
       for o in resources:
         if o.kind == srkSystemdSystemUnit and o.suName != r.suName and
             effectiveFloor(o).len > 0 and o.suCollision != "dropIn":
@@ -2092,6 +2120,13 @@ proc effectiveFloorCheck*(resources: openArray[SystemResource];
           result.add(refusalLine(name, "unreadable", "FragmentPath,DropInPaths",
                                  "cannot read " & f & ", which systemd loaded"))
       result.add(effectiveFloorProblems(e))
+      for h in held:
+        var key = ""
+        for fp in firstComponentPaths(e.show):
+          if fp.path == h.path:
+            key = fp.key
+            break
+        noteRecreated(tentative, name, h.path, h.unit, key, h.v)
       # The first components the unit's start may create, or make again on
       # a restart (§13 decisions 57 and 68; ``startMayCreate``).
       if pending != nil:
@@ -2100,7 +2135,10 @@ proc effectiveFloorCheck*(resources: openArray[SystemResource];
           # this switch's restart of the unit makes it again.
           if startMayCreate(fp.path, name, identityOfPath(fp.path), created,
                             acceptedNow):
-            pending[].add((fp.path, name))
+            if tmplRefused != nil and fp.path in acceptedNow:
+              heldPending.add((fp.path, name))
+            else:
+              pending[].add((fp.path, name))
       # The units that trigger it: sockets, timers, path units (A9 review
       # round 5, finding 2), whoever defines them.
       when not mutated("activators-unchecked"):
@@ -2144,6 +2182,17 @@ proc effectiveFloorCheck*(resources: openArray[SystemResource];
                                          serviceWritable = writablePlacesOf(e.show)))
           except CatchableError as ex:
             result.add(refusalLine(a, "show", "-", ex.msg))
+    if tmplRefused != nil:
+      var committed: seq[RecreatedAcceptance]
+      result.add(commitRecreatedProblems(tentative, tmplRefused[],
+                                         acceptRecreatedLogged, committed))
+      var written = initHashSet[string]()
+      for a in committed:
+        written.incl(a.path)
+        if recreated != nil: recreated[].add((a.path, a.unit, a.view))
+      if pending != nil:
+        for hp in heldPending:
+          if hp.path in written: pending[].add(hp)
 
 proc retargetedAddresses*(previous, wanted: openArray[SystemResource]):
     seq[tuple[address, was, now: string]] =

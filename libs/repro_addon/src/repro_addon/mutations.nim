@@ -1338,6 +1338,19 @@ const
                           # the start step records a template's
                           # directory for its observation instance.
                           "start-step-records-first-unit",
+                          # a template's remade directory judged without
+                          # the instances the generation names, so a
+                          # record naming its observation instance splits
+                          # the names' verdicts; a directory refused for
+                          # one name of a template accepted for a later
+                          # one in the same check (issue 2026-11-13).
+                          "template-instances-unjudged",
+                          "template-refusal-forgotten",
+                          # a template's remade directory recorded and
+                          # logged once per name that accepted it; one a
+                          # later name refused written anyway.
+                          "template-acceptance-per-name",
+                          "template-refused-written",
                           # a start in a switch leaves the recorded
                           # InvocationID of an unchanged directory as it
                           # was.

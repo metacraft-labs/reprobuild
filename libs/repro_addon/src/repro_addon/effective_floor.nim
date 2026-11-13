@@ -866,6 +866,61 @@ proc startMayCreate*(path, unit: string; now: PathIdentity;
   path in created and flooredKey(created[path].unit) == flooredKey(unit) and
     sameIdentity(created[path], now)
 
+type
+  RecreatedAcceptance* = object
+    ## A template's directory that §13 decision 71 accepted as made again
+    ## under one or more of its names in one effective check, not yet
+    ## recorded or logged (``noteRecreated``, ``commitRecreatedProblems``).
+    path*: string        ## the directory (a first component)
+    unit*: string        ## the instance whose run made it, as first judged
+    key*: string         ## the setting that declares it (``RuntimeDirectory``, ...)
+    view*: SystemdView   ## systemd's state it was accepted on
+    names*: seq[string]  ## the names of the template that accepted it
+
+proc noteRecreated*(t: var seq[RecreatedAcceptance];
+                    name, path, unit, key: string; v: SystemdView) =
+  ## Hold the acceptance of ``path`` under the template's name ``name``
+  ## until every name of the template has been checked: one entry per
+  ## directory, whichever names accept it, so it is recorded and logged
+  ## once (§13 decision 71; issue 2026-11-13-floor-template-observation-
+  ## instance-refuses-a-directory-its-instance-restart-made).
+  when not mutated("template-acceptance-per-name"):
+    # Falsifying build: one entry per name, so a directory is recorded and
+    # logged once for every name that accepted it.
+    for a in t.mitems:
+      if a.path == path:
+        if name notin a.names: a.names.add(name)
+        return
+  t.add(RecreatedAcceptance(path: path, unit: unit, key: key, view: v,
+                            names: @[name]))
+
+proc commitRecreatedProblems*(t: openArray[RecreatedAcceptance];
+                              refused: HashSet[string];
+                              write: proc (path, unit: string; v: SystemdView): bool;
+                              written: var seq[RecreatedAcceptance]): seq[string] =
+  ## After every name of a template has been checked: record and log each
+  ## held acceptance once, through ``write``, unless any name of the
+  ## template refused the directory (``refused``, rule existing-tree), in
+  ## whatever order, so a refused check rewrites no record. ``written``
+  ## gets each one written. A write that fails refuses the directory under
+  ## each name that accepted it -- one tagged line each, the result -- as
+  ## an acceptance that cannot be logged is not made (§13 decision 71; A9
+  ## review round 11, finding 6; issue 2026-11-13-floor-template-
+  ## observation-instance-refuses-a-directory-its-instance-restart-made).
+  for a in t:
+    when not mutated("template-refused-written"):
+      # Falsifying build: a directory a later name refused is written
+      # anyway.
+      if a.path in refused: continue
+    if write != nil and write(a.path, a.unit, a.view):
+      written.add(a)
+      continue
+    for n in a.names:
+      result.add(n & ": " & a.key & " " & a.path &
+        ": systemd made it again for the unit, but the acceptance could " &
+        "not be recorded and logged (§13 decision 71); it stays refused " &
+        "[rule:existing-tree key:" & a.key & "]")
+
 proc declaredDirectories*(show: ShowProps): seq[string] =
   ## Every directory the unit declares, as systemd resolves it: each
   ## ``RuntimeDirectory=``, ``StateDirectory=``, ``CacheDirectory=``,
@@ -1441,6 +1496,21 @@ type
       ## reports running; a template's remade directory is judged against
       ## the instance that ran (A9 review round 12, finding 4); ``nil``:
       ## only the instance the record names
+    templateInstances*: seq[string]
+      ## for an instance of a template, or its observation instance: the
+      ## instances of that template the generation names
+      ## (``floorInstancesOf``). A template's remade directory is judged
+      ## against the same instances whichever name is checked (§13
+      ## decision 71; issue 2026-11-13, floor template observation
+      ## instance); empty: none beyond the recorded and running ones
+    templateRefused*: ref HashSet[string]
+      ## shared by every name of one template within one effective check:
+      ## the directories an earlier name refused (rule existing-tree). One
+      ## in it is not accepted as made again for a later name, and
+      ## ``commitRecreatedProblems`` writes none an earlier name accepted, so the
+      ## names reach one verdict and a refused check does not rewrite the
+      ## record it refused (§13 decision 71; same issue); ``nil``: each
+      ## name is judged alone
     onRecreated*: proc (path, unit: string; v: SystemdView): bool
       ## told of each directory decision 71 would accept: it records the
       ## directory again under its new identity and writes the audit
@@ -1793,44 +1863,68 @@ proc effectiveFloorProblems*(e: EffectiveInput): seq[string] =
             # §13 decision 71: made again by systemd for the unit's current
             # invocation, outside a switch.
             if fp.path in e.createdDirs and e.systemdView != nil:
-              # A template's directory is judged against the instance the
-              # record names, the one that ran and whose restart made it
-              # again, whichever instance (or the observation instance,
-              # which never runs) is being checked (A9 review round 12,
-              # finding 4). Condition 1 still holds the record to this
-              # template.
+              # A template's directory is judged against the instances
+              # that can have run and made it again: the one the record
+              # names, every one systemd reports running, and every one
+              # the generation names -- never the observation instance,
+              # which never runs. The set is the same whichever name of
+              # the template is checked, so every name reaches one verdict
+              # (A9 review round 12, finding 4; §13 decision 71; issue
+              # 2026-11-13-floor-template-observation-instance-refuses-a-
+              # directory-its-instance-restart-made). Condition 1 still
+              # holds the record to this template.
               let recorded = e.createdDirs[fp.path].unit
               var runUnits: seq[string]
               when mutated("observation-instance-judged-alone"):
                 runUnits = @[unit]
               else:
                 if flooredKey(recorded) == flooredKey(unit) and '@' in unit:
-                  if not isObservationInstance(recorded): runUnits.add(recorded)
+                  var cands: seq[string]
+                  cands.add(recorded)
                   if e.runningInstances != nil:
-                    for i in e.runningInstances(flooredKey(unit)):
-                      if i notin runUnits and not isObservationInstance(i): runUnits.add(i)
+                    cands.add(e.runningInstances(flooredKey(unit)))
+                  when not mutated("template-instances-unjudged"):
+                    # Falsifying build: the generation's instances left
+                    # out, so a record naming the observation instance
+                    # falls back to the name checked.
+                    cands.add(e.templateInstances)
+                  for i in cands:
+                    if i notin runUnits and not isObservationInstance(i) and
+                        flooredKey(i) == flooredKey(unit):
+                      runUnits.add(i)
                 if runUnits.len == 0: runUnits = @[unit]
-              var runUnit = runUnits[0]
-              var v = e.systemdView(fp.path, runUnit, show)
-              for cand in runUnits:
-                let cv = e.systemdView(fp.path, cand, show)
-                if systemdRecreated(fp.path, unit, declaredDirectories(show),
-                                    e.createdDirs, dynamic, cv).len == 0:
-                  runUnit = cand
-                  v = cv
-                  break
-              if systemdRecreated(fp.path, unit, declaredDirectories(show),
-                                  e.createdDirs, dynamic, v).len == 0:
+              # Refused for an earlier name of this template in this check:
+              # not accepted for a later one, even if systemd's state moved
+              # between the two reads, so the check does not rewrite the
+              # record of an apply it refuses (same issue).
+              let refusedBefore =
+                when mutated("template-refusal-forgotten"): false
+                else: e.templateRefused != nil and fp.path in e.templateRefused[]
+              var runUnit = ""
+              var v: SystemdView
+              var accepted = false
+              if not refusedBefore:
+                for cand in runUnits:
+                  let cv = e.systemdView(fp.path, cand, show)
+                  if systemdRecreated(fp.path, unit, declaredDirectories(show),
+                                      e.createdDirs, dynamic, cv).len == 0:
+                    runUnit = cand
+                    v = cv
+                    accepted = true
+                    break
+              if accepted:
                 when mutated("unlogged-acceptance"):
                   if e.onRecreated != nil: discard e.onRecreated(fp.path, runUnit, v)
                   continue
                 else:
                   if e.onRecreated != nil and e.onRecreated(fp.path, runUnit, v): continue
+                  if e.templateRefused != nil: e.templateRefused[].incl(fp.path)
                   problem2("existing-tree", fp.key, fp.key & " " & fp.path &
                            ": systemd made it again for the unit, but the " &
                            "acceptance could not be recorded and logged (§13 " &
                            "decision 71); it stays refused")
                   continue
+          if e.templateRefused != nil: e.templateRefused[].incl(fp.path)
           problem2("existing-tree", fp.key, fp.key & " " & fp.path & ": " & why &
                    "; it exists and was not created for this unit (§13 decision 57)")
       for (k, p) in created:
