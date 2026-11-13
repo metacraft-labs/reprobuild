@@ -31,15 +31,16 @@ suite "TC-8d — the first commit is certifiable":
       var fx = setupCertifyFixture("tc8d-first-commit")
       defer: removeDir(fx.sib.scratch)
       let app = fx.sib.app
-      # Re-create app with the same files and no history.
-      let solver = readFile(app / "repro.solver")
+      # Re-create app with the same files and no history. Its recipe is the
+      # one input its lock is derived from (it declares app's dependencies).
+      let recipe = readFile(app / "repro.nim")
       removeDir(app)
       discard runCmd(q(fx.sib.gitBin) & " init -q -b main " & q(app))
       discard fx.gitIn(app, "config user.email tester@example.invalid")
       discard fx.gitIn(app, "config user.name \"Lock Tester\"")
       discard fx.gitIn(app, "config commit.gpgsign false")
       writeFile(app / "README.md", "app, before its first commit\n")
-      writeFile(app / "repro.solver", solver)
+      writeFile(app / "repro.nim", recipe)
       writeFile(app / ".gitignore", ".repro/\n")
       let locked = runCmd(q(fx.sib.repro) & " lock refresh " & q(app))
       checkpoint(locked.output)

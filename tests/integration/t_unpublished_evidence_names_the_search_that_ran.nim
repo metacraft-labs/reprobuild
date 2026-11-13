@@ -29,6 +29,7 @@
 import std/[json, os, strutils, tempfiles, unittest]
 
 import repro_test_support
+import repro_test_support/[reasoned_skip, recipe_dependencies]
 
 proc repoRoot(): string =
   result = currentSourcePath().parentDir.parentDir.parentDir
@@ -78,7 +79,6 @@ name = "lib-a"
 path = "lib-a"
 remote = "lib-a-origin"
 mainline = "main"
-depends = ["lib-b"]
 """
 
 const libBFragmentToml = """
@@ -161,9 +161,26 @@ proc buildFixture(gitBin, slug, siblingRemoteName: string): Fixture =
     ["config", "user.email", "tester@example.invalid"], result.sibling)
   discard requireGit(gitBin, ["config", "user.name", "Gate Tester"],
     result.sibling)
+  # lib-b is a declared dependency of lib-a where reprobuild reads one:
+  # lib-a's repro.nim `uses:` it, and lib-a's committed lock — refreshed from
+  # that recipe and published — pins lib-b's (unpublished) HEAD, so the lock
+  # is current and `unpublished` is the only thing to say about lib-b. (This
+  # was a fragment `depends`, which declares nothing since 2026-11-05.)
+  writeDependencyRecipe(result.sibling, [])
   writeFile(result.sibling / "local.txt", "local\n")
-  discard requireGit(gitBin, ["add", "local.txt"], result.sibling)
+  discard requireGit(gitBin, ["add", "-A"], result.sibling)
   discard requireGit(gitBin, ["commit", "-q", "-m", "local"], result.sibling)
+  writeDependencyRecipe(result.pushedRepo, ["lib-b"], library = false)
+  let refresh = refreshCommittedLock(result.reproBin, result.pushedRepo)
+  if refresh.code != 0:
+    checkpoint("lock refresh failed:\n" & refresh.output)
+    quit 1
+  discard requireGit(gitBin, ["add", "-A"], result.pushedRepo)
+  discard requireGit(gitBin, ["-c", "user.email=tester@example.invalid", "-c",
+    "user.name=Gate Tester", "commit", "-q", "-m", "depend on lib-b"],
+    result.pushedRepo)
+  discard requireGit(gitBin, ["push", "-q", "origin", "HEAD:main"],
+    result.pushedRepo)
 
 proc unpublishedEvidence(fx: Fixture): string =
   ## Run the gate and return the sibling's `unpublished` evidence string.
@@ -194,7 +211,7 @@ suite "pre-push `unpublished` evidence describes the search performed":
   test "t_unpublished_evidence_names_the_search_that_ran":
     let gitBin = findExe("git")
     if gitBin.len == 0:
-      skip()
+      skip("git is not on PATH")
     else:
       # --- the checkout has NO remote named `origin` -------------------
       let orgNamed = buildFixture(gitBin, "org-named", "metacraft-labs")

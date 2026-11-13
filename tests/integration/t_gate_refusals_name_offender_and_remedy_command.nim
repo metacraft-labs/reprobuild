@@ -69,6 +69,7 @@
 import std/[json, os, osproc, strutils, tempfiles, unittest]
 
 import repro_test_support
+import repro_test_support/recipe_dependencies
 import repro_workspace_manifests
 
 proc q(value: string): string = quoteShell(value)
@@ -211,9 +212,10 @@ mainline = "main"
 
 proc projectTomlWithWorkspaceRoot(libAUrl: string): string =
   ## A project that declares the workspace ROOT repo (``path = "."``) beside
-  ## an ordinary checkout. ``lib-a`` depends on ``ws-root``, which is what
-  ## sweeps the root into ``repro remove lib-a``'s RA-22 GC candidate set
-  ## without anyone naming it.
+  ## an ordinary checkout. ``lib-a`` depends on ``ws-root`` — its committed
+  ## ``repro.lock`` pins it (``writeLockEdges``), the only record of a
+  ## dependency since 2026-11-05 — which is what sweeps the root into
+  ## ``repro remove lib-a``'s RA-22 GC candidate set without anyone naming it.
   "schema = \"reprobuild.workspace.project.v1\"\n\n" &
   "[project]\n" &
   "name = \"lib-a\"\n" &
@@ -229,12 +231,22 @@ name = "lib-a"
 path = "lib-a"
 remote = "lib-a-origin"
 mainline = "main"
-depends = ["ws-root"]
 """
+
+proc commitLockEdges(libA: string) =
+  ## lib-a's committed lock pins ws-root (see ``projectTomlWithWorkspaceRoot``).
+  ## Committed, so lib-a stays a CLEAN checkout for the dirty guard.
+  writeLockEdges(libA, "lib-a", ["ws-root"])
+  let git = findExe("git")
+  discard requireGit(q(git) & " -C " & q(libA) & " add repro.lock")
+  discard requireGit(q(git) & " -C " & q(libA) &
+    " -c user.email=tester@example.invalid -c user.name=RA28 commit -qm lock")
+  discard requireGit(q(git) & " -C " & q(libA) & " push -q origin HEAD:main")
 
 proc declareWorkspaceRootRepo(fx: Fixture) =
   writeFile(fx.manifestsRoot / "repos" / "ws-root.toml", wsRootFragmentToml)
   writeFile(fx.manifestsRoot / "repos" / "lib-a.toml", libADependsOnRootToml)
+  commitLockEdges(fx.workspaceRoot / "lib-a")
   writeFile(fx.manifestsRoot / "projects" / "lib-a.toml",
     projectTomlWithWorkspaceRoot(fileUrl(fx.libAOrigin)))
 
@@ -269,6 +281,7 @@ proc nativeLayoutFixture(gitBin, slug: string): Fixture =
   result.manifestsRoot = workspaceRoot
   result.workspaceRoot = workspaceRoot
   cloneInto(gitBin, result.libAOrigin, workspaceRoot / "lib-a")
+  commitLockEdges(workspaceRoot / "lib-a")
   writeWorkspaceBranch(workspaceRoot, project = "lib-a", branch = "main")
 
   discard requireGit(q(gitBin) & " init -b main " & q(workspaceRoot))

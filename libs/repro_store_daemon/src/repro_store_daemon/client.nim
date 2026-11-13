@@ -116,6 +116,7 @@ proc requestFromNixUse*(useDef: InterfaceToolUse; storeRoot, holderId,
     lockIdentity: plan.lockIdentity,
     nixSelector: plan.nixSelector,
     nixExpressionFile: plan.nixExpressionFile,
+    nixRequesterDir: getCurrentDir(),
     nixpkgsRef: plan.nixpkgsRef,
     nixpkgsRev: plan.nixpkgsRev,
     nixpkgsNarHash: plan.nixpkgsNarHash)

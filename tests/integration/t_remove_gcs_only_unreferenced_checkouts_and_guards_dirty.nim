@@ -5,10 +5,18 @@
 ## workspace via ``execCmdEx`` (non-TTY by nature). Local bare git origins
 ## stand in for the develop-mode siblings.
 ##
-## Topology (RA-21 ``depends`` edges):
+## Topology (dependency edges, declared where reprobuild reads them — each
+## repo's ``repro.nim`` ``uses:`` and the committed ``repro.lock`` derived from
+## it; owner decision 2026-11-05):
 ##
-##     root-r ──▶ libb ──┬─▶ libs        root-t ──▶ libs
-##                       └─▶ libu
+##     libb ──┬─▶ libs        root-t ──▶ libs        root-r (uses nothing)
+##            └─▶ libu
+##
+## (``root-r`` used to reach ``libb`` through a fragment ``depends``. A lock
+## records the TRANSITIVE closure flat, so a root whose recipe uses ``libb``
+## pins ``libu`` itself — it genuinely still depends on it — and nothing would
+## be "reachable only through libb". The removed repo is therefore one no
+## surviving root uses, which is the state in which removing it is coherent.)
 ##
 ## ``libs`` is SHARED: reached from ``libb`` AND directly from the surviving
 ## root ``root-t``. ``libu`` is TRANSITIVE-ONLY: reached ONLY through ``libb``.
@@ -33,6 +41,7 @@
 import std/[json, os, osproc, strutils, tempfiles, unittest]
 
 import repro_test_support
+import repro_test_support/[reasoned_skip, recipe_dependencies]
 
 proc q(value: string): string = quoteShell(value)
 
@@ -125,23 +134,30 @@ proc setupFixture(gitBin, slug: string): Fixture =
   result.projectFile = manifestsRoot / "projects" / "demo.toml"
   writeFile(result.projectFile, pt)
 
-  # Fragments with the depends edges: root-r->libb, libb->{libs, libu},
-  # root-t->libs. ``libu`` is transitive-only (reached only via libb);
-  # ``libs`` is shared (reached via libb AND directly via root-t).
+  # Fragments declare membership only. The edges — libb->{libs, libu},
+  # root-t->libs — are in the recipes below. ``libu`` is reached only via
+  # libb; ``libs`` is shared (reached via libb AND directly via root-t).
+  # root-r's fragment keeps a legacy `depends` on libu, which must not keep
+  # libu alive.
   writeFile(manifestsRoot / "repos" / "root-r.toml",
-    fragmentToml("root-r", "root-r-origin", @["libb"]))
+    fragmentToml("root-r", "root-r-origin", @["libu"]))
   writeFile(manifestsRoot / "repos" / "root-t.toml",
-    fragmentToml("root-t", "root-t-origin", @["libs"]))
+    fragmentToml("root-t", "root-t-origin", @[]))
   writeFile(manifestsRoot / "repos" / "libb.toml",
-    fragmentToml("libb", "libb-origin", @["libs", "libu"]))
+    fragmentToml("libb", "libb-origin", @[]))
   writeFile(manifestsRoot / "repos" / "libs.toml",
     fragmentToml("libs", "libs-origin", @[]))
   writeFile(manifestsRoot / "repos" / "libu.toml",
     fragmentToml("libu", "libu-origin", @[]))
 
-  # Clone every repo into the workspace as a present sibling.
+  # Clone every repo into the workspace as a present sibling, then declare
+  # the edges in the recipes and write each dependent's lock.
   for i, n in repoNames:
     cloneInto(gitBin, origins[i], workspaceRoot / n)
+  discard declareDependenciesInRecipes(gitBin, result.reproBin, workspaceRoot,
+    [("libs", newSeq[string]()), ("libu", newSeq[string]()),
+     ("root-r", newSeq[string]()), ("libb", @["libs", "libu"]),
+     ("root-t", @["libs"])])
 
   createDir(workspaceRoot / ".repro")
   writeFile(workspaceRoot / ".repro" / "workspace-state.toml",
@@ -163,7 +179,7 @@ suite "RA-22 — repro remove reachability GC and dirty guard":
   test "test_ra22_remove_gcs_unique_checkout_keeps_shared":
     let gitBin = findExe("git")
     if gitBin.len == 0:
-      skip()
+      skip("git is not on PATH")
     else:
       let fx = setupFixture(gitBin, "gc")
       defer: removeDir(fx.scratch)
@@ -209,7 +225,7 @@ suite "RA-22 — repro remove reachability GC and dirty guard":
   test "test_ra22_remove_dirty_gc_target_non_tty_without_force_refuses":
     let gitBin = findExe("git")
     if gitBin.len == 0:
-      skip()
+      skip("git is not on PATH")
     else:
       let fx = setupFixture(gitBin, "dirty-refuse")
       defer: removeDir(fx.scratch)
@@ -233,7 +249,7 @@ suite "RA-22 — repro remove reachability GC and dirty guard":
   test "test_ra22_remove_dirty_gc_target_with_force_removes":
     let gitBin = findExe("git")
     if gitBin.len == 0:
-      skip()
+      skip("git is not on PATH")
     else:
       let fx = setupFixture(gitBin, "dirty-force")
       defer: removeDir(fx.scratch)

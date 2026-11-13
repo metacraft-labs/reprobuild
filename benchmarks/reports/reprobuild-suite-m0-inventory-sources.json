@@ -23763,7 +23763,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_project_dsl/tests/t_explicit_contract_import_precedence.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 3,
+      "staticCaseCount": 4,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -37231,7 +37231,7 @@
       "requiresReproBinary": true,
       "source": "tests/integration/t_add_respects_develop_mode_policy_and_overrides.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 6,
+      "staticCaseCount": 7,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -42908,7 +42908,7 @@
       "requiresReproBinary": true,
       "source": "tests/integration/t_integration_daemon_nix_and_tarball_realize.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 5,
+      "staticCaseCount": 6,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -44227,6 +44227,7 @@
       "defines": [],
       "language": "nim",
       "localDependencyShape": [
+        "repro_test_support",
         "repro_workspace_manifests"
       ],
       "owner": "tests/integration",
@@ -46768,6 +46769,24 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_pre_push_dependency_closure_comes_from_repro_nim",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_lock",
+        "repro_test_support"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_pre_push_dependency_closure_comes_from_repro_nim.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 5,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_pre_push_gate_checks_only_pushed_repo_dependency_closure",
       "class": "integration",
       "classificationReason": "e2e/integration path or requires the repro binary",
@@ -46965,23 +46984,6 @@
       "source": "tests/integration/t_pre_push_publishes_only_when_publish_locks_opted_in.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 1,
-      "staticallyDetectedRuntimeCompilerFlow": false,
-      "targetOs": "soAny"
-    },
-    {
-      "binary": "build/test-bin/t_pre_push_refuses_an_undeclared_depends_edge",
-      "class": "integration",
-      "classificationReason": "e2e/integration path or requires the repro binary",
-      "defines": [],
-      "language": "nim",
-      "localDependencyShape": [
-        "repro_test_support"
-      ],
-      "owner": "tests/integration",
-      "requiresReproBinary": true,
-      "source": "tests/integration/t_pre_push_refuses_an_undeclared_depends_edge.nim",
-      "sourceSuiteCount": 4,
-      "staticCaseCount": 11,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

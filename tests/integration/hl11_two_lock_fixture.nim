@@ -80,15 +80,23 @@ proc lockedRevOfNode*(lockText, node: string): string =
   if stop < 0: "" else: n[start ..< stop]
 
 proc reproLockRevisionOf*(lockText, name: string): string =
-  ## The `revision` of the `repro.lock` entry ``name``, or "".
+  ## The `revision` of the `repro.lock` dependency entry ``name``, or "".
+  ##
+  ## Only an entry that carries a `revision` within its own inline table
+  ## counts: a lock whose recipe `uses:` a sibling also lists that sibling's
+  ## package under the same name, and that package entry has no revision.
   let key = "{ name = \"" & name & "\", "
-  let at = lockText.find(key)
-  if at < 0: return ""
-  let revAt = lockText.find("revision = \"", at)
-  if revAt < 0: return ""
-  let start = revAt + "revision = \"".len
-  let stop = lockText.find('"', start)
-  if stop < 0: "" else: lockText[start ..< stop]
+  var at = lockText.find(key)
+  while at >= 0:
+    let close = lockText.find('}', at)
+    let entry = if close < 0: lockText[at .. ^1] else: lockText[at ..< close]
+    let revAt = entry.find("revision = \"")
+    if revAt >= 0:
+      let start = revAt + "revision = \"".len
+      let stop = entry.find('"', start)
+      return if stop < 0: "" else: entry[start ..< stop]
+    at = lockText.find(key, at + key.len)
+  ""
 
 proc indexTree*(fx: Nf2Fixture): string =
   ## The tree the index would record (`git write-tree`): the index, byte for

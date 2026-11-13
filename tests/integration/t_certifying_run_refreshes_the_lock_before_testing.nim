@@ -13,17 +13,21 @@
 ##   B. every revision matches, but lib-c's entry records a fetch ``url``
 ##      that is not its checkout's canonical one (§13.3: a re-observation
 ##      rewrites it);
-##   C. every revision matches, but the manifest now declares lib-d in app's
-##      develop set and the lock does not carry it (§13.3: it is added).
+##   C. every revision matches, and a (legacy) manifest edge names lib-d: the
+##      writers plan NOTHING (§13.3 amended 2026-11-05: the re-pin adds no
+##      entry; a dependency the recipe declares is added by `repro lock
+##      refresh`, and the pre-push gate refuses a lock that lacks one). This
+##      state used to expect lib-d to be added.
 ##
-## In each: the run prints the change, the lock-update node rewrites
+## In A and B: the run prints the change, the lock-update node rewrites
 ## ``repro.lock`` and stages it (and touches no other index entry), the test
 ## command reads the refreshed lock, the certificate names the content that
 ## includes it, and the commit leaves ``repro.lock`` byte-identical, records
 ## exactly the certified tree, and passes the TC-8g gate: the managed refresh
-## found nothing to do. B and C redden if the node is narrowed to revisions;
-## B and C also check the would-write predicate (``planCommitTimeLockWriters``)
-## sees each state before the run.
+## found nothing to do. In C the run and the commit leave ``repro.lock``
+## byte-identical and the certificate still covers the commit. B reddens if the node is narrowed to
+## revisions; B and C also check the would-write predicate
+## (``planCommitTimeLockWriters``) before the run.
 ##
 ## NO MOCKS: real repositories and manifest, the built ``repro``, the real
 ## provider, engine and monitor, real ``git commit`` through the installed
@@ -109,13 +113,41 @@ suite "HL-10 — the certifying run refreshes the lock before testing":
         "url = \"" & realUrl & "\"")
       check "never-published" notin fx.lockText()
 
-      # ---- C. a declared develop-set sibling is not carried ----------------
+      # ---- C. the commit-time writers ADD no sibling -----------------------
+      # A manifest edge app → lib-d used to be added here. A fragment declares
+      # no dependency now (owner decision 2026-11-05), and adding one the
+      # recipe declares needs the recipe's solve, which is `repro lock
+      # refresh`'s job, not a re-pin's: with every pin current, the would-write
+      # predicate plans nothing, and the lock still carries no lib-d.
       check depEntry(fx.lockText(), "lib-d").len == 0
-      fx.cf.sib.setAppDepends(@["lib-b", "lib-d"])
+      writeFile(ws / "repos" / "app.toml",
+        readFile(ws / "repos" / "app.toml") & "depends = [\"lib-d\"]\n")
       let planC = planCommitTimeLockWriters(ws, fx.app, tpmPathOnly,
         PinRegressionAllowance())
-      check planC.wouldWrite == @[fx.app / "repro.lock"]
+      check planC.wouldWrite.len == 0
+      check planC.refused.len == 0
+      # And the certifying run agrees with the predicate: its lock-update
+      # node writes nothing, the commit re-pins nothing, and the certificate
+      # covers the commit with the lock exactly as it was.
+      let beforeC = fx.lockText()
       writeFile(fx.app / "README.md", "app fixture, edited for C\n")
-      let libD = fx.cf.sib.headOf(ws / "lib-d")
-      fx.certifyAndCommit("C", "repro-lock added lib-d", libD)
-      check depEntry(fx.lockText(), "lib-d").len > 0
+      let runC = fx.reproIn(["test", "--tool-provisioning=path"])
+      checkpoint("C — repro test:\n" & runC.output)
+      check runC.code == 0
+      check fx.lockText() == beforeC
+      check fx.stagedLock() == beforeC
+      check fx.lockSeenByTests() == beforeC
+      let contentC = fx.contentNow()
+      check fx.certificatesFor(contentC, "test").len == 1
+      let logBeforeC = fx.preCommitLog().len
+      let commitC = fx.gitApp("commit", "-a", "-m", "C")
+      checkpoint("C — git commit:\n" & commitC.output)
+      check commitC.code == 0
+      check fx.lockText() == beforeC
+      check fx.headContent() == contentC
+      let appendedC = fx.preCommitLog().lastLinesSince(logBeforeC)
+      checkpoint("C — pre-commit log:\n" & appendedC)
+      check "repro-lock up-to-date" in appendedC
+      check "re-pinned" notin appendedC
+      check "certificate-gate covered" in appendedC
+      check depEntry(fx.lockText(), "lib-d").len == 0

@@ -49,9 +49,12 @@
 ##
 ##   5. Complete: refresh exits 0 with ``cargo = 1.85.0``.
 ##   6. ``leaf`` moved away and NO committed lock: refresh still exits ``5`` and
-##      creates no lock, because ``consumer``'s manifest ``depends`` names it.
-##   7. The ``depends`` edge removed, the complete lock restored: exits ``5``,
-##      lock byte-identical, because the committed lock pins ``leaf``.
+##      creates no lock, because a ``repos/leaf.toml`` fragment declares a
+##      repository named ``leaf`` (an identity question; this used to be a
+##      ``consumer`` fragment ``depends`` edge, which no longer declares
+##      anything — owner decision 2026-11-05).
+##   7. That fragment removed, the complete lock restored: exits ``5``, lock
+##      byte-identical, because the committed lock pins ``leaf``.
 ##
 ## Falsifiability: on the unfixed code (2) exits 0, rewrites the lock with
 ## ``cargo = 1.0.0`` and drops ``leaf_pkg``, so the exit-code and
@@ -312,7 +315,7 @@ suite "lock refresh refuses a solve missing a develop-set sibling's recipe":
         "  \"repos/mid.toml\",\n]\n")
       writeFile(workspace / "projects" / "app.toml", project)
       writeFile(workspace / "repos" / "consumer.toml",
-        fragment("consumer", @["mid", "leaf"]))
+        fragment("consumer", @[]))
       writeFile(workspace / "repos" / "mid.toml", fragment("mid", @[]))
       writeFile(workspace / "repos" / "leaf.toml", fragment("leaf", @[]))
       writeWorkspaceBranch(workspace, project = "app", branch = "main")
@@ -327,7 +330,9 @@ suite "lock refresh refuses a solve missing a develop-set sibling's recipe":
       check lockedVersion(completeLock, "cargo") == "1.85.0"
       check "{ name = \"leaf\"," in completeLock
 
-      # ---- (6) leaf away, no committed lock: the manifest edge declares it. -
+      # ---- (6) leaf away, no committed lock: leaf's FRAGMENT says `leaf` is a
+      # repository of this workspace (an identity, not a dependency: mid's
+      # recipe is what uses it), so the unreached selector is a sibling. ----
       createDir(parked)
       moveDir(leaf, parked / "leaf")
       removeFile(lockPath)
@@ -339,9 +344,8 @@ suite "lock refresh refuses a solve missing a develop-set sibling's recipe":
       check "'leaf'" in byManifest.output
       check "not checked out" in byManifest.output
 
-      # ---- (7) edge removed, lock restored: the lock's pin declares it. -----
-      writeFile(workspace / "repos" / "consumer.toml",
-        fragment("consumer", @["mid"]))
+      # ---- (7) fragment removed, lock restored: the lock's pin declares it. -
+      removeFile(workspace / "repos" / "leaf.toml")
       writeFile(lockPath, completeLock)
       let byLock = run(q(reproBinary) & " lock refresh " & q(consumer))
       checkpoint("lock-only refresh exit=" & $byLock.code)
