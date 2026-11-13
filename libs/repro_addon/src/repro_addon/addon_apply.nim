@@ -2028,6 +2028,12 @@ proc effectiveFloorCheck*(resources: openArray[SystemResource];
   for d in resources:
     if d.kind == srkSystemdSystemDropIn: own.incl(targetPathOf(d))
   for u in flooredUnitNames(resources): own.incl(startHoldPath(u))
+  # A revert's persistent holds are the add-on's own (§13 decision 126).
+  var revertHoldFiles: seq[string]
+  for d in [PersistentUnitDir, RuntimeUnitDir]:
+    try: revertHoldFiles.add(staleHolds(RevertHoldName, d))
+    except OSError: discard
+  for h in revertHoldFiles: own.incl(h)
   var ownUnits = initHashSet[string]()
   for d in resources:
     if d.kind == srkSystemdSystemUnit: ownUnits.incl(d.suName)
@@ -2136,6 +2142,8 @@ proc effectiveFloorCheck*(resources: openArray[SystemResource];
         if d.kind == srkSystemdSystemDropIn and dropInApplies(d.diUnit, name):
           e.ownDropIns.add((path: targetPathOf(d), content: d.diContent))
       e.ownDropIns.add((path: startHoldPath(name), content: StartHoldText))
+      for h in revertHoldFiles:
+        e.ownDropIns.add((path: h, content: RevertHoldText))
       try:
         let text = showUnitText(name)
         e.show = parseShow(text)
@@ -6138,7 +6146,15 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
             discard clearStaleStartHolds()
             removeStartHolds(startHolds)
             startHolds.setLen(0)
-            discard writeHolds(held, StartHoldName, StartHoldText)
+            # §13 decision 126: persistent, so a reboot does not start a
+            # held unit either; only a switch whose check passes removes it.
+            let holdDir =
+              when mutated("revert-hold-runtime-only"): RuntimeUnitDir
+              else: PersistentUnitDir
+            try: discard writeHolds(held, RevertHoldName, RevertHoldText, holdDir)
+            except IOError, OSError:
+              problems.add("the revert's hold could not be written: " &
+                           getCurrentExceptionMsg())
             try: daemonReload()
             except CatchableError as ex: problems.add(ex.msg)
             heldAtRevert = notHeld
@@ -6166,7 +6182,13 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
             # definitions.
             let stale = clearStaleStartHolds()
             removeStartHolds(startHolds)
-            if startHolds.len > 0 or stale.len > 0:
+            # A revert's holds go once a switch's check passes (§13
+            # decision 126), wherever a build wrote them.
+            var revertStale: seq[string]
+            for d in [PersistentUnitDir, RuntimeUnitDir]:
+              try: revertStale.add(clearStaleHolds(RevertHoldName, d))
+              except OSError: discard
+            if startHolds.len > 0 or stale.len > 0 or revertStale.len > 0:
               try: daemonReload()
               except CatchableError as ex: problems.add(ex.msg)
             startHolds.setLen(0)

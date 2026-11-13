@@ -54,6 +54,8 @@
 ##   Destructive, so last.
 ##
 ## Falsifying builds (each red here): ``revert-refuses-on-floor``,
+## ``revert-hold-runtime-only`` (the held unit starts at the reboot),
+## ``revert-holds-any-subject`` (a hold for every service),
 ## ``same-identity-ignores-btime``, ``listener-below-writable-allowed``,
 ## ``dependency-starts-unrecorded``, ``observation-instance-judged-alone``,
 ## ``template-instances-unjudged`` (the observation instance's record is
@@ -230,11 +232,53 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
          g.exec("systemctl is-active a9r-st.service").stdout.strip() != "active" and
          g.exec("stat -c %U /var/lib/a9r-st").stdout.strip() == "root",
          g.exec("systemctl status a9r-st.service --no-pager; ls -la /var/lib/a9r-st").stdout)
+    # §13 decision 126: the revert's hold is persistent and covers only
+    # units the generation installs, across a reboot.
+    const HoldName = "zz-repro-addon-revert-hold.conf"
+    let stHold = "/etc/systemd/system/a9r-st.service.d/" & HoldName
+    let ctlHold = "/etc/systemd/system/a9r-control.service.d/" & HoldName
+    let typeHold = "/etc/systemd/system/service.d/" & HoldName
+    step("the revert's hold is written under /etc",
+         g.exec("test -e " & stHold).exitCode == 0,
+         g.exec("ls -la /etc/systemd/system/a9r-st.service.d /run/systemd/system/a9r-st.service.d 2>&1").stdout)
+    # A host's drop-in for every service: the next apply's check, and its
+    # revert's, refuse it under the subject `service`, which the generation
+    # does not install, so the revert holds the generation's floored units.
+    discard g.run("mkdir -p /usr/lib/systemd/system/service.d && printf " &
+      "'[Service]\\nEnvironment=A9R_HOST=1\\n' > /usr/lib/systemd/system/service.d/zz-a9r.conf; " &
+      "systemctl daemon-reload")
+    r = g.applyProfile(repro, "p3b", st("p3b"))
+    let out3b = r.stdout & r.stderr
+    step("a host's drop-in for every service is refused, and the revert commits",
+         r.exitCode != 0 and "[rule:foreign-drop-in" in out3b and
+         "could not be rolled back" notin out3b, out3b)
+    notPending("the refused apply over the host's drop-in and its revert")
+    step("the revert held the generation's floored units, never `service`",
+         g.exec("test -e " & typeHold).exitCode != 0 and
+         g.exec("test -e " & ctlHold).exitCode == 0,
+         g.exec("ls -la /etc/systemd/system/service.d /etc/systemd/system/a9r-control.service.d 2>&1").stdout)
+    discard g.run("rm -f /usr/lib/systemd/system/service.d/zz-a9r.conf; " &
+                  "rmdir /usr/lib/systemd/system/service.d 2>/dev/null; systemctl daemon-reload")
+    g.rebootGuest()
+    let afterBoot = g.exec("systemctl is-active a9r-st.service a9r-control.service; " &
+      "systemctl show -p InvocationID -p AssertResult a9r-st.service; stat -c %U /var/lib/a9r-st; " &
+      "ls /etc/systemd/system/a9r-st.service.d/").stdout
+    record["afterReboot"] = %afterBoot
+    step("after a reboot the held units did not start and the tree is still root's",
+         g.exec("systemctl is-active a9r-st.service").stdout.strip() != "active" and
+         g.exec("systemctl is-active a9r-control.service").stdout.strip() != "active" and
+         g.exec("stat -c %U /var/lib/a9r-st").stdout.strip() == "root" and
+         g.exec("test -e " & stHold).exitCode == 0, afterBoot)
+    notPending("the reboot")
     discard g.run("rm -rf /var/lib/a9r-st")
     r = g.applyProfile(repro, "p4", st("p4"))
     step("once the tree is gone the unit applies and starts", r.exitCode == 0 and
          g.exec("systemctl is-active a9r-st.service").stdout.strip() == "active",
          r.stdout & r.stderr)
+    step("and the passing apply cleared the revert's holds",
+         g.exec("test -e " & stHold).exitCode != 0 and g.exec("test -e " & ctlHold).exitCode != 0 and
+         g.exec("systemctl is-active a9r-control.service").stdout.strip() == "active",
+         g.exec("ls -la /etc/systemd/system/a9r-st.service.d /etc/systemd/system/a9r-control.service.d 2>&1").stdout)
     r = g.applyProfile(repro, "c-st", control)
     discard g.run("rm -rf /var/lib/a9r-st; systemctl reset-failed 'a9r-*' 2>/dev/null; true")
     # A template's record naming its observation instance, as an engine

@@ -84,6 +84,16 @@ const
   StartHoldText* = "# Written by the ReproOS add-on switch: the unit may not " &
     "start until its\n# effective configuration has been checked against " &
     "its hardening floor.\n[Unit]\n" & StartHoldAssertion & "\n"
+  RevertHoldName* = "zz-repro-addon-revert-hold.conf"
+    ## The persistent drop-in a revert writes, under ``/etc/systemd/system``,
+    ## for each unit of the generation its own floor check refused (§13
+    ## decision 126): the same assertion as the start hold, so the unit
+    ## does not start, at a reboot either, until a later switch's check
+    ## passes and removes it.
+  RevertHoldText* = "# Written by the ReproOS add-on's revert: its floor " &
+    "check refused this unit,\n# which may not start until an apply " &
+    "whose check it passes removes this file.\n[Unit]\n" &
+    StartHoldAssertion & "\n"
   CredentialRoot* = "/run/repro/secrets"
     ## Where the add-on stages a service's credentials (``profile``'s
     ## ``SecretsRunRoot``): ``LoadCredential=`` may read only
