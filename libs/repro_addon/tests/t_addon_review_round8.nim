@@ -56,7 +56,8 @@
 ## ``discard-completed-objects-present`` (7),
 ## ``discard-verify-reports-intent-objects`` (8, 9),
 ## ``discard-completion-skips-sync`` (11),
-## ``intent-overwrites-existing`` (12).
+## ``intent-overwrites-existing`` (12),
+## ``discard-failed-removal-counted-as-kept`` (13).
 ##
 ## Mocks: ``ship`` is a stub answering "not acknowledged" -- the sink's
 ## refusal is held against a real sink by ``t_addon_review_round4`` case 2;
@@ -260,6 +261,30 @@ suite "the A11 code review's eighth round: §13 decision 81":
     check "0 object(s) discarded unshipped" in text
     check "1 object(s) kept with the store" in text
     check verifyExit(s) == 4
+
+  test "13: an aside whose removal failed is not kept with the store":
+    # reprobuild-pm issues/2026-11-13-discard-completion-records-an-object-*:
+    # without --keep-store, an aside still on disk (the /repro removal
+    # raised, or the store was still mounted) is neither gone nor kept. No
+    # completion is written; the intent stands (exit 3).
+    let s = scene("failed-removal")
+    var signer = loadTextSigner(s.key)
+    var r = resultOf(s)
+    r.errors.add("/repro: Operation not permitted")
+    classifyLeftAside(r, s.gate.pending, asideRoot(s.site), keepStore = false)
+    check r.keptEvidence.len == 0
+    check r.removed.len == 0
+    finishDiscard(r, s.site, signer, s.gate.pending)
+    signer.wipe()
+    check dirExists(s.aside)
+    check r.completionRecord.len == 0
+    check not fileExists(completionPathOf(s.gate.overrideRecord))
+    check verifyDiscardRecord(s.gate.overrideRecord, s.pub).status == dsAuthorised
+    check verifyExit(s) == 3
+    # With --keep-store the same aside is kept.
+    var k = resultOf(s)
+    classifyLeftAside(k, s.gate.pending, asideRoot(s.site), keepStore = true)
+    check k.keptEvidence == @[s.aside]
 
   test "9: a completion that does not account for the intent's objects is invalid":
     let s = scene("unaccounted")

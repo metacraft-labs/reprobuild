@@ -9,6 +9,9 @@
 ## * a rollback pauses every agent registered with the add-on (the deploy
 ##   agent's own marker), a paused agent's tick reports ``aoPaused`` (exit
 ##   0) and applies nothing, and resume lifts it;
+##   falsified by ``-d:reproAddonMutation=agent-ignores-pause``
+##   (``scripts/run_addon_unit_mutation.sh``), under which the paused
+##   tick is not ``aoPaused``;
 ## * the apply hook hands the add-on switch the add-on's state directory,
 ##   the manifest's deployment and sequence and its build actions; a source
 ##   profile is compiled by the injected (unprivileged) compiler and applied

@@ -72,6 +72,10 @@
 ##     ``tempfile.TemporaryFile()``, glibc ``tmpfile()``) and reopens it
 ##     through ``/proc/self/fd``: strace prints both opens ``(deleted)``,
 ##     and they are anonymous, never sources, so the list is written.
+## 30. (round 9) A directory a ``staticExec`` command lists whose name
+##     ends in a space is recorded and checked under that name: a new
+##     ``.nim`` entry in it is refused, and one in the decoy directory of
+##     the trimmed name beside it is not.
 ##
 ## Falsifying builds: ``stale-helper-accepted`` (cases 2-5 and 8-10 red),
 ## ``fresh-skips-included`` (case 4), ``fresh-skips-outside-tree`` (case
@@ -89,7 +93,8 @@
 ## the list says), ``trim-edge-spaces`` (case 26: the path written without
 ## its trailing space, as round 8's strip() read it; case 27's leading
 ## space sits after the path's "/", so no line strip reaches it, and it is
-## a positive case only), ``suffix-is-failure`` (case 28; ``accept-unparsed``
+## a positive case only; case 30: the listing written for the trimmed
+## directory name), ``suffix-is-failure`` (case 28; ``accept-unparsed``
 ## turns it red too), ``deleted-is-unparsed`` (case 29).
 ##
 ## Cases 22, 23 and 28 run the real strace behind a wrapper script named by
@@ -149,6 +154,14 @@ let trailing = fooDir / "tr.txt "
 let leading = fooDir / " lead.txt"
 for p in [trailing, leading]: writeFile(p, "a name with an edge space\n")
 for p in [fooDir / "tr.txt", fooDir / "lead.txt"]: writeFile(p, "decoy\n")
+# ...and a listed directory whose name ends in a space, beside a decoy of
+# the trimmed name with the same entries (so the two digests agree until
+# the case adds an entry).
+let spaceDir = fooDir / "ld "
+let spaceDirDecoy = fooDir / "ld"
+for d in [spaceDir, spaceDirDecoy]:
+  createDir(d)
+  writeFile(d / "one.nim", "discard\n")
 writeFile(helloSrc, "#include <stdio.h>\nint main(void){puts(\"hello\");return 0;}\n")
 block:
   let (o, c) = execCmdEx(quoteShellCommand(["gcc", "-o", hello, helloSrc]))
@@ -170,7 +183,8 @@ proc writeApp(extra = "") =
     "const fromHello = staticExec(\"./hello\")\n" &
     "const fromListing = staticExec(\"ls listdir\")\n" &
     "const fromSpaces = staticExec(\"cat 'tr.txt ' ' lead.txt'\")\n" &
-    "echo greeting(), farAway(), part(), fooHelper(), blob, fromExec, fromRel, fromPar.len, fromEscaped.len, fromHello, fromListing, fromSpaces.len\n" & extra)
+    "const fromSpaceDir = staticExec(\"ls 'ld '\")\n" &
+    "echo greeting(), farAway(), part(), fooHelper(), blob, fromExec, fromRel, fromPar.len, fromEscaped.len, fromHello, fromListing, fromSpaces.len, fromSpaceDir\n" & extra)
 writeApp()
 let binary = tree / "build" / "bin" / addFileExt("foo-helper", ExeExt)
 
@@ -513,6 +527,26 @@ suite "a helper binary is used only when built from the tree under test":
     check c2 == 0
     check fileExists(t3 / "build" / "nimcache" / "tmpf" / "tmpf.deps")
     check freshRepoBinary(t3, "tmpf") == bin3
+
+  test "30: a listed directory whose name ends in a space is checked under its own name":
+    build()
+    var dirs: seq[string]
+    for (d, _) in helperListings(tree, "foo-helper"): dirs.add(d)
+    checkpoint $dirs
+    check spaceDir in dirs
+    check refusal() == ""
+    # The directory the command listed first, while the decoy is as it
+    # was: an edit to it alone must be refused (a list that recorded the
+    # decoy accepts it).
+    writeFile(spaceDir / "two.nim", "discard\n")
+    let why = refusal()
+    checkpoint why
+    check ("listing of " & spaceDir & " that has changed") in why
+    removeFile(spaceDir / "two.nim")
+    check refusal() == ""
+    # The decoy is not what was listed: a new entry there changes nothing.
+    writeFile(spaceDirDecoy / "two.nim", "discard\n")
+    check refusal() == ""
 
   test "7: no binary, or no dependency list, is refused":
     build()

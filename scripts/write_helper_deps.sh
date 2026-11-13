@@ -352,12 +352,15 @@ else:
     # An open whose fd strace prints `<path>(deleted)`: the kernel names
     # the fd `<path> (deleted)` and strace moves the marker after the `>`.
     # An O_TMPFILE open always looks like this (the file is anonymous from
-    # the start: glibc tmpfile(), Python's tempfile.TemporaryFile()), as
-    # does any later open of such a file through /proc/self/fd. None of
-    # these can be a source, so they are read, not refused. A workspace
-    # file removed by the time strace read the fd is different: the
-    # compiler (or a staticExec command) read it, and the list could not
-    # check it, so it fails the list.
+    # the start: glibc tmpfile(), Python's tempfile.TemporaryFile()), and
+    # is skipped wherever it is made: it cannot be a source. Any other
+    # `(deleted)` open -- a later open of such a file through
+    # /proc/self/fd, which carries no O_TMPFILE flag, or a file removed
+    # by the time strace read the fd -- is skipped outside the workspace,
+    # where nothing is recorded anyway, and fails the list inside it: the
+    # build read it and the list could not check it. So an anonymous file
+    # made in the workspace (TMPDIR there) and reopened by path also fails
+    # the list; that errs toward refusing.
     open_deleted_re = re.compile(r'^open(?:at2?)?\((.*)\)\s+=\s+\d+<' + hexstr + r'>\(deleted\)\s*$')
     deleted_in_workspace = []
     unparsed = []
