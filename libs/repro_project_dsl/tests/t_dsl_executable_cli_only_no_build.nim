@@ -70,11 +70,11 @@ suite "t_dsl_executable_cli_only_no_build":
       elif cmd.name == "list":
         listCmd = cmd
     check runCmd.name == "run"
-    check runCmd.typedOutputs.len == 1
-    check runCmd.typedOutputs[0].fieldName == "results"
-    check runCmd.typedOutputs[0].types == @["TestResultsHandle"]
+    check runCmd.ext.typedOutputs.len == 1
+    check runCmd.ext.typedOutputs[0].fieldName == "results"
+    check runCmd.ext.typedOutputs[0].types == @["TestResultsHandle"]
     check listCmd.name == "list"
-    check listCmd.typedOutputs.len == 0
+    check listCmd.ext.typedOutputs.len == 0
     # Consumer side: the package compiles (parser accepts the body).
     # The runtime edge-registration assertion lives in the M1 suite;
     # M0 only contracts the compile-time shape.

@@ -420,6 +420,12 @@ proc profileCompileEnvAdditions*(repoRoot: string): StringTableRef =
   setPackageEnv("SHM_GSET_SRC", [
     dd / "nim-shm-gset" / "src",
   ], "shm_gset.nim")
+  # ``repro_project_dsl`` imports ``clispec`` from the ``nim-cli-spec``
+  # sibling, which is outside ``libs/*/src`` for the same reason; pinned the
+  # same way.
+  setPackageEnv("CLI_SPEC_SRC", [
+    dd / "nim-cli-spec" / "src",
+  ], "clispec.nim")
   if dirExists(dd / "io-mon" / "src"):
     if unsetInChild("IO_MON_SRC"):
       env["IO_MON_SRC"] = dd / "io-mon" / "src"

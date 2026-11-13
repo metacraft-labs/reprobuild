@@ -1079,12 +1079,13 @@ package reprobuild:
 
     # THE SIBLING NIM LIBRARIES THIS REPOSITORY IMPORTS, DECLARED.
     #
-    # Each of the four names a workspace PROJECT whose ``repro.nim``
+    # Each of the five names a workspace PROJECT whose ``repro.nim``
     # declares a ``library`` and NO ``executable``:
     #
     #   reprobuild-test-adapters -> ``library repro_test_adapters`` (src/)
     #   nim-stackable-hooks      -> ``library stackable_hooks``     (src/)
     #   nim-shm-queue            -> ``library shm_queue``           (src/)
+    #   nim-cli-spec             -> ``library clispec``             (src/)
     #   test-certificates-tools  -> ``library test_certificates``   (src/)
     #
     # That is Cross-Repo-Source-Consumption §4.2a (SC-11), the Nim
@@ -1138,6 +1139,11 @@ package reprobuild:
     "reprobuild-test-adapters"
     "nim-stackable-hooks"
     "nim-shm-queue"
+    # clispec: the ``cli:`` description language and typed CLI model
+    # ``repro_project_dsl`` builds every ``executable … cli:`` block on. Same
+    # SC-11 channel and the same one-change rule: this line and its
+    # ``repro.lock`` entry.
+    "nim-cli-spec"
     # The test-certificate standard's store, note framing and two-note merge
     # (``import test_certificates`` in repro_cli_support). Same SC-11 channel
     # and the same one-change rule: this line and its ``repro.lock`` entry.

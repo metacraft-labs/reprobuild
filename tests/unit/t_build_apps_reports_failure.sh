@@ -147,6 +147,7 @@ new_sandbox() {
     "${sandbox}/libs/repro_project_dsl_runtime_dll/src" \
     "${sandbox}/deps/bearssl/bearssl/abi" \
     "${sandbox}/deps/shmqueue" \
+    "${sandbox}/deps/clispec" \
     "${sandbox}/io-mon/scripts" \
     "${sandbox}/bin"
 
@@ -170,6 +171,7 @@ ENTRYPOINTS
   echo '#!/bin/sh' > "${sandbox}/tools/reprobuild-nix-daemon/reprobuild-nix-daemon"
   echo 'type Consttypes = int' > "${sandbox}/deps/bearssl/bearssl/abi/consttypes.nim"
   echo 'type ShmQueue = int' > "${sandbox}/deps/shmqueue/shm_queue.nim"
+  echo 'type CliSpec = int' > "${sandbox}/deps/clispec/clispec.nim"
 
   # Fake io-mon shim builder: produces the staged library under every
   # platform extension so the sandbox does not have to agree with the host
@@ -271,6 +273,7 @@ run_build() {
       IO_MON_SRC="${sandbox}/io-mon" \
       BEARSSL_SRC="${sandbox}/deps/bearssl" \
       SHM_QUEUE_SRC="${sandbox}/deps/shmqueue" \
+      CLI_SPEC_SRC="${sandbox}/deps/clispec" \
       NIX_LDFLAGS="" \
       LD_LIBRARY_PATH="" \
       CLINGO_PREFIX="" \
@@ -421,6 +424,7 @@ piped_status=0
     IO_MON_SRC="${sandbox}/io-mon" \
     BEARSSL_SRC="${sandbox}/deps/bearssl" \
     SHM_QUEUE_SRC="${sandbox}/deps/shmqueue" \
+    CLI_SPEC_SRC="${sandbox}/deps/clispec" \
     NIX_LDFLAGS="" \
     FAKE_NIM_SILENT_NOOP="alpha" \
     "${BASH_UNDER_TEST}" scripts/build_apps.sh 2>&1 | tail -n 40 > "${sandbox}/piped.log"

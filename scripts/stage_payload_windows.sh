@@ -178,6 +178,7 @@ stage_src "$WS/codetracer-trace-format-nim"   codetracer-trace-format-nim
 stage_src "$WS/io-mon/src"                    io-mon/src
 stage_src "$WS/nim-shm-gset/src"              nim-shm-gset/src
 stage_src "$WS/nim-shm-queue/src"             nim-shm-queue/src
+stage_src "$WS/nim-cli-spec/src"              nim-cli-spec/src
 stage_src "$WS/codetracer/src"                codetracer/src
 stage_src "$WS/reprobuild-ct-test-runner"     reprobuild-ct-test-runner
 stage_src "$WS/reprobuild-test-adapters/src"  reprobuild-test-adapters/src

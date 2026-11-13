@@ -46,6 +46,7 @@ const
     ## as a clean tree.
   RequiredPackageNames = [
     "BEARSSL_SRC",
+    "CLI_SPEC_SRC",
     "FASTSTREAMS_SRC",
     "NIMCRYPTO_SRC",
     "SHM_GSET_SRC",

@@ -52,7 +52,7 @@ for d in nimcrypto nim-faststreams/src nim-stew/src nim-serialization/src \
 done
 # Source-only inputs, as the runtime resolver adds them from the seeded roots.
 for d in reprobuild-test-adapters/src test-certificates-tools/src io-mon/src nim-stackable-hooks/src \
-         nim-shm-gset/src nim-shm-queue/src bearssl; do
+         nim-shm-gset/src nim-shm-queue/src nim-cli-spec/src bearssl; do
   [[ -d "$src/$d" ]] && paths+=("--path:$src/$d")
 done
 for d in "$src"/runquota/libs/*/src "$src"/reprobuild-ct-test-runner/libs/*/src; do

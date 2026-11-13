@@ -337,6 +337,7 @@ jobs:
             runquota-src=../runquota
             io-mon-src=../io-mon
             nim-shm-queue-src=../nim-shm-queue
+            nim-cli-spec-src=../nim-cli-spec
             nim-stackable-hooks-src=../nim-stackable-hooks
             reprobuild-test-adapters-src=../reprobuild-test-adapters
             test-certificates-tools-src=../test-certificates-tools
@@ -1006,6 +1007,7 @@ jobs:
             runquota-src=../runquota
             io-mon-src=../io-mon
             nim-shm-queue-src=../nim-shm-queue
+            nim-cli-spec-src=../nim-cli-spec
             nim-stackable-hooks-src=../nim-stackable-hooks
             reprobuild-test-adapters-src=../reprobuild-test-adapters
             test-certificates-tools-src=../test-certificates-tools

@@ -2,6 +2,10 @@ import std/[tables]
 
 import ./attr_ssz
 
+# The CLI model (``CliParam`` / ``CliCommand`` and their kinds) is clispec's;
+# reprobuild extends it below.
+import clispec/model
+
 type
   ExtensionBox* = ref object of RootRef
     typeId*: string
@@ -82,37 +86,23 @@ type
   ReproFs* = object
   ReproHcr* = object
 
-  CliParamKind* = enum
-    cpkPositional
-    cpkFlag
-
+  # The CLI model itself — commands, parameters, kinds, formats, placements —
+  # is the clispec library's (``clispec/model``). What follows is
+  # reprobuild's EXTENSION of it: the build-graph vocabulary a ``cli:`` block
+  # declares about an external tool, carried in the model's typed ``ext``
+  # slots and parsed by the extension hooks in ``cli_extension.nim``. The
+  # library knows none of it.
   CliArgRole* = enum
     carOrdinary
     carInput
     carOutput
 
-  CliArgFormat* = enum
-    cafSeparate
-    cafConcat
-    cafEquals
-
-  CliArgPlacement* = enum
-    capAfterSubcommand
-    capBeforeSubcommand
-
-  CliParamDef* = object
-    name*: string
-    nimType*: string
-    kind*: CliParamKind
+  ReproCliParamExt* = object
+    ## Reprobuild's declarations about one ``cli:`` parameter.
     role*: CliArgRole
-    format*: CliArgFormat
-    placement*: CliArgPlacement
-    repeated*: bool
-    position*: int
-    alias*: string
-    required*: bool
-    sourceFile*: string
-    sourceLine*: int
+      ## ``role = input`` / ``role = output``: the parameter names a path
+      ## the edge reads or writes. Output parameters are the only ones
+      ## ``outputs``, ``optionalOutputs`` and ``removeBeforeRun`` may name.
 
   TypedOutputDef* = object
     ## Typed-Outputs M0: one record per typed ``outputs`` statement of the
@@ -139,14 +129,11 @@ type
     sourceFile*: string
     sourceLine*: int
 
-  CliCommandDef* = object
-    name*: string
-    path*: seq[string]
-      ## Full lexical path from the cli root to this command. For a top-level
-      ## ``subcmd "build"``, the path is ``@["build"]``. For a nested
-      ## ``subcmd "build": subcmd "target"`` the inner command has path
-      ## ``@["build", "target"]``. Anonymous ``call:`` keeps the path empty.
-    params*: seq[CliParamDef]
+  ReproCliCommandExt* = object
+    ## Reprobuild's declarations about one ``cli:`` command: how the engine
+    ## monitors, caches and names the edges the command's typed-tool wrapper
+    ## records. A nested ``subcmd`` starts from a copy of its parent's value,
+    ## which is how every field below is "inherited by nested scopes".
     dependencyPolicy*: BuildActionDependencyPolicy
     nonDeterminism*: NonDeterminismPolicy
       ## Windows-Build-Correctness M6 — the tool's entropy blessing, declared
@@ -175,6 +162,8 @@ type
       ## through to the engine so ``repro why`` can print the reason a
       ## tool's randomness was ignored instead of leaving it to folklore.
     providerEntrypointId*: string
+      ## ``<package>.<executable>.call`` for an anonymous ``call:``, else
+      ## ``<package>.<executable>.<path joined by ".">``.
     optionalOutputFlags*: seq[string]
       ## Output parameters that the tool may legitimately leave absent.
     removeBeforeRunFlags*: seq[string]
@@ -194,8 +183,12 @@ type
       ## to this command (parent entries flow into nested ``subcmd`` scopes
       ## the same way ``outputFlags`` does). Each entry contributes one
       ## typed field on the per-call ``BuildEdge`` subtype.
-    sourceFile*: string
-    sourceLine*: int
+
+  CliParamDef* = CliParam[ReproCliParamExt]
+    ## A ``cli:`` parameter as reprobuild models it: the clispec parameter
+    ## with reprobuild's extension. Reprobuild-only fields are under ``ext``.
+  CliCommandDef* = CliCommand[ReproCliCommandExt, ReproCliParamExt]
+    ## A ``cli:`` command as reprobuild models it (see ``CliParamDef``).
 
   ExecutableDef* = object
     exportName*: string

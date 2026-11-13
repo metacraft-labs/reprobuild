@@ -1,0 +1,815 @@
+package "appimagetool"
+  executable "appimagetoolBin" binary="appimagetoolBin" src=repro_dsl_stdlib/packages/appimagetool.nim:146
+    command name="" path=[] entry="appimagetool.appimagetoolBin.call" src=repro_dsl_stdlib/packages/appimagetool.nim:156
+    dependencyPolicy=(kind: bdpAutomaticMonitor, depfiles: @[], ignoredInputPrefixes: @[], suppressMonitorShimSeed: false, captureBreadth: mcbFullCapture)
+    nonDeterminism=ndpUnblessed justification=""
+    subTools=[]
+    outputs=["output"]
+    optionalOutputs=[]
+    removeBeforeRun=[]
+    typedOutputs=[]
+      param name="extractAndRun" nimType="bool" kind=cpkFlag role=carOrdinary format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="--appimage-extract-and-run" required=false src=repro_dsl_stdlib/packages/appimagetool.nim:156
+      param name="noAppstream" nimType="bool" kind=cpkFlag role=carOrdinary format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="-n" required=false src=repro_dsl_stdlib/packages/appimagetool.nim:163
+      param name="runtimeFile" nimType="string" kind=cpkFlag role=carInput format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="--runtime-file" required=false src=repro_dsl_stdlib/packages/appimagetool.nim:166
+      param name="compression" nimType="string" kind=cpkFlag role=carOrdinary format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="--comp" required=false src=repro_dsl_stdlib/packages/appimagetool.nim:174
+      param name="appDir" nimType="string" kind=cpkPositional role=carInput format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="" required=true src=repro_dsl_stdlib/packages/appimagetool.nim:177
+      param name="output" nimType="string" kind=cpkPositional role=carOutput format=cafSeparate placement=capAfterSubcommand repeated=false position=1 alias="" required=true src=repro_dsl_stdlib/packages/appimagetool.nim:181
+    argv=["/tool/appimagetoolBin", "--appimage-extract-and-run", "-n", "--runtime-file", "runtimeFile-v", "--comp", "compression-v", "appDir-v", "output-v"]
+  interface sha256:9bd6ee6bd20f299f1b4c16764037d39f7c782df9ca4e18c2a3b3642c570be8a6
+package "ar"
+  executable "arBin" binary="arBin" src=repro_dsl_stdlib/packages/binutils.nim:123
+    command name="" path=[] entry="ar.arBin.call" src=repro_dsl_stdlib/packages/binutils.nim:128
+    dependencyPolicy=(kind: bdpAutomaticMonitor, depfiles: @[], ignoredInputPrefixes: @[], suppressMonitorShimSeed: false, captureBreadth: mcbFullCapture)
+    nonDeterminism=ndpUnblessed justification=""
+    subTools=[]
+    outputs=["archive"]
+    optionalOutputs=[]
+    removeBeforeRun=[]
+    typedOutputs=[]
+      param name="modifiers" nimType="string" kind=cpkPositional role=carOrdinary format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="" required=true src=repro_dsl_stdlib/packages/binutils.nim:128
+      param name="archive" nimType="string" kind=cpkPositional role=carOutput format=cafSeparate placement=capAfterSubcommand repeated=false position=1 alias="" required=true src=repro_dsl_stdlib/packages/binutils.nim:130
+      param name="objects" nimType="seq[string]" kind=cpkPositional role=carInput format=cafSeparate placement=capAfterSubcommand repeated=true position=2 alias="" required=true src=repro_dsl_stdlib/packages/binutils.nim:133
+    argv=["/tool/arBin", "modifiers-v", "archive-v", "objects-a", "objects-b"]
+  interface sha256:857e66ea8f69b763fae47321ad655aeb4ac3d7ffc79d5054191b2b5e24b6cef0
+package "autoconf"
+  executable "autoconfBin" binary="autoconfBin" src=repro_dsl_stdlib/packages/autoconf.nim:53
+    command name="" path=[] entry="autoconf.autoconfBin.call" src=repro_dsl_stdlib/packages/autoconf.nim:58
+    dependencyPolicy=(kind: bdpAutomaticMonitor, depfiles: @[], ignoredInputPrefixes: @[], suppressMonitorShimSeed: false, captureBreadth: mcbFullCapture)
+    nonDeterminism=ndpUnblessed justification=""
+    subTools=[]
+    outputs=[]
+    optionalOutputs=[]
+    removeBeforeRun=[]
+    typedOutputs=[]
+      param name="version" nimType="bool" kind=cpkFlag role=carOrdinary format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="--version" required=false src=repro_dsl_stdlib/packages/autoconf.nim:58
+      param name="force" nimType="bool" kind=cpkFlag role=carOrdinary format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="--force" required=false src=repro_dsl_stdlib/packages/autoconf.nim:59
+      param name="output" nimType="string" kind=cpkFlag role=carOutput format=cafConcat placement=capAfterSubcommand repeated=false position=0 alias="--output=" required=false src=repro_dsl_stdlib/packages/autoconf.nim:60
+      param name="includes" nimType="seq[string]" kind=cpkFlag role=carOrdinary format=cafConcat placement=capAfterSubcommand repeated=true position=0 alias="--include=" required=false src=repro_dsl_stdlib/packages/autoconf.nim:64
+      param name="configureAc" nimType="string" kind=cpkPositional role=carInput format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="" required=true src=repro_dsl_stdlib/packages/autoconf.nim:73
+    argv=["/tool/autoconfBin", "--version", "--force", "--output=output-v", "--include=includes-a", "--include=includes-b", "configureAc-v"]
+  interface sha256:301cde0beadfc6ce7e31d506c76fe1a6d3e03e6474fce4403cb44d5767057bdf
+package "cargo"
+  executable "cargo" binary="cargo" src=repro_dsl_stdlib/packages/cargo_cli.nim:200
+    command name="build" path=["build"] entry="cargo.cargo.build" src=repro_dsl_stdlib/packages/cargo_cli.nim:250
+    dependencyPolicy=(kind: bdpMakeDepfile, depfiles: @[], ignoredInputPrefixes: @[], suppressMonitorShimSeed: false, captureBreadth: mcbFullCapture)
+    nonDeterminism=ndpUnblessed justification=""
+    subTools=["rustc", "gcc", "clang", "zig", "cmake", "perl", "make"]
+    outputs=[]
+    optionalOutputs=[]
+    removeBeforeRun=[]
+    typedOutputs=[]
+      param name="config" nimType="string" kind=cpkFlag role=carOrdinary format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="--config" required=false src=repro_dsl_stdlib/packages/cargo_cli.nim:250
+      param name="locked" nimType="bool" kind=cpkFlag role=carOrdinary format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="--locked" required=false src=repro_dsl_stdlib/packages/cargo_cli.nim:252
+      param name="release" nimType="bool" kind=cpkFlag role=carOrdinary format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="--release" required=false src=repro_dsl_stdlib/packages/cargo_cli.nim:253
+      param name="offline" nimType="bool" kind=cpkFlag role=carOrdinary format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="--offline" required=false src=repro_dsl_stdlib/packages/cargo_cli.nim:261
+      param name="noDefaultFeatures" nimType="bool" kind=cpkFlag role=carOrdinary format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="--no-default-features" required=false src=repro_dsl_stdlib/packages/cargo_cli.nim:262
+      param name="features" nimType="string" kind=cpkFlag role=carOrdinary format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="--features" required=false src=repro_dsl_stdlib/packages/cargo_cli.nim:263
+      param name="manifestPath" nimType="string" kind=cpkFlag role=carInput format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="--manifest-path" required=false src=repro_dsl_stdlib/packages/cargo_cli.nim:264
+      param name="targetDir" nimType="string" kind=cpkFlag role=carOrdinary format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="--target-dir" required=false src=repro_dsl_stdlib/packages/cargo_cli.nim:267
+      param name="package" nimType="string" kind=cpkFlag role=carOrdinary format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="--package" required=false src=repro_dsl_stdlib/packages/cargo_cli.nim:272
+      param name="bin" nimType="string" kind=cpkFlag role=carOrdinary format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="--bin" required=false src=repro_dsl_stdlib/packages/cargo_cli.nim:273
+      param name="target" nimType="string" kind=cpkFlag role=carOrdinary format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="--target" required=false src=repro_dsl_stdlib/packages/cargo_cli.nim:280
+    argv=["/tool/cargo", "build", "--config", "config-v", "--locked", "--release", "--offline", "--no-default-features", "--features", "features-v", "--manifest-path", "manifestPath-v", "--target-dir", "targetDir-v", "--package", "package-v", "--bin", "bin-v", "--target", "target-v"]
+    command name="install" path=["install"] entry="cargo.cargo.install" src=repro_dsl_stdlib/packages/cargo_cli.nim:287
+    dependencyPolicy=(kind: bdpMakeDepfile, depfiles: @[], ignoredInputPrefixes: @[], suppressMonitorShimSeed: false, captureBreadth: mcbFullCapture)
+    nonDeterminism=ndpUnblessed justification=""
+    subTools=["rustc", "gcc", "clang", "zig", "cmake", "perl", "make"]
+    outputs=[]
+    optionalOutputs=[]
+    removeBeforeRun=[]
+    typedOutputs=[]
+      param name="config" nimType="string" kind=cpkFlag role=carOrdinary format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="--config" required=false src=repro_dsl_stdlib/packages/cargo_cli.nim:287
+      param name="locked" nimType="bool" kind=cpkFlag role=carOrdinary format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="--locked" required=false src=repro_dsl_stdlib/packages/cargo_cli.nim:299
+      param name="offline" nimType="bool" kind=cpkFlag role=carOrdinary format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="--offline" required=false src=repro_dsl_stdlib/packages/cargo_cli.nim:300
+      param name="noTrack" nimType="bool" kind=cpkFlag role=carOrdinary format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="--no-track" required=false src=repro_dsl_stdlib/packages/cargo_cli.nim:301
+      param name="force" nimType="bool" kind=cpkFlag role=carOrdinary format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="--force" required=false src=repro_dsl_stdlib/packages/cargo_cli.nim:306
+      param name="noDefaultFeatures" nimType="bool" kind=cpkFlag role=carOrdinary format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="--no-default-features" required=false src=repro_dsl_stdlib/packages/cargo_cli.nim:307
+      param name="features" nimType="string" kind=cpkFlag role=carOrdinary format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="--features" required=false src=repro_dsl_stdlib/packages/cargo_cli.nim:308
+      param name="path" nimType="string" kind=cpkFlag role=carInput format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="--path" required=false src=repro_dsl_stdlib/packages/cargo_cli.nim:309
+      param name="root" nimType="string" kind=cpkFlag role=carOrdinary format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="--root" required=false src=repro_dsl_stdlib/packages/cargo_cli.nim:310
+      param name="targetDir" nimType="string" kind=cpkFlag role=carOrdinary format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="--target-dir" required=false src=repro_dsl_stdlib/packages/cargo_cli.nim:311
+      param name="target" nimType="string" kind=cpkFlag role=carOrdinary format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="--target" required=false src=repro_dsl_stdlib/packages/cargo_cli.nim:316
+    argv=["/tool/cargo", "install", "--config", "config-v", "--locked", "--offline", "--no-track", "--force", "--no-default-features", "--features", "features-v", "--path", "path-v", "--root", "root-v", "--target-dir", "targetDir-v", "--target", "target-v"]
+    command name="test" path=["test"] entry="cargo.cargo.test" src=repro_dsl_stdlib/packages/cargo_cli.nim:319
+    dependencyPolicy=(kind: bdpMakeDepfile, depfiles: @[], ignoredInputPrefixes: @[], suppressMonitorShimSeed: false, captureBreadth: mcbFullCapture)
+    nonDeterminism=ndpUnblessed justification=""
+    subTools=["rustc", "gcc", "clang", "zig", "cmake", "perl", "make"]
+    outputs=[]
+    optionalOutputs=[]
+    removeBeforeRun=[]
+    typedOutputs=[(field: "testBinary", types: ["CargoTestBinary"], path: "testBinaryPath", src: repro_dsl_stdlib/packages/cargo_cli.nim:353)]
+      param name="locked" nimType="bool" kind=cpkFlag role=carOrdinary format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="--locked" required=false src=repro_dsl_stdlib/packages/cargo_cli.nim:333
+      param name="release" nimType="bool" kind=cpkFlag role=carOrdinary format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="--release" required=false src=repro_dsl_stdlib/packages/cargo_cli.nim:334
+      param name="noRun" nimType="bool" kind=cpkFlag role=carOrdinary format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="--no-run" required=false src=repro_dsl_stdlib/packages/cargo_cli.nim:335
+      param name="noDefaultFeatures" nimType="bool" kind=cpkFlag role=carOrdinary format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="--no-default-features" required=false src=repro_dsl_stdlib/packages/cargo_cli.nim:340
+      param name="manifestPath" nimType="string" kind=cpkFlag role=carInput format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="--manifest-path" required=false src=repro_dsl_stdlib/packages/cargo_cli.nim:341
+      param name="targetDir" nimType="string" kind=cpkFlag role=carOrdinary format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="--target-dir" required=false src=repro_dsl_stdlib/packages/cargo_cli.nim:344
+      param name="package" nimType="string" kind=cpkFlag role=carOrdinary format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="--package" required=false src=repro_dsl_stdlib/packages/cargo_cli.nim:348
+      param name="bin" nimType="string" kind=cpkFlag role=carOrdinary format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="--bin" required=false src=repro_dsl_stdlib/packages/cargo_cli.nim:349
+      param name="testBinaryPath" nimType="string" kind=cpkFlag role=carOutput format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="--test" required=false src=repro_dsl_stdlib/packages/cargo_cli.nim:350
+    argv=["/tool/cargo", "test", "--locked", "--release", "--no-run", "--no-default-features", "--manifest-path", "manifestPath-v", "--target-dir", "targetDir-v", "--package", "package-v", "--bin", "bin-v", "--test", "testBinaryPath-v"]
+  interface sha256:0e8f30e7bbc0f8a7e72a41e025f7ddb931df531560bac7ab2732daa924a41dd1
+package "clang"
+  executable "clang" binary="clang" src=repro_dsl_stdlib/packages/clang.nim:161
+    command name="" path=[] entry="clang.clang.call" src=repro_dsl_stdlib/packages/clang.nim:200
+    dependencyPolicy=(kind: bdpAutomaticMonitor, depfiles: @[], ignoredInputPrefixes: @[], suppressMonitorShimSeed: false, captureBreadth: mcbFullCapture)
+    nonDeterminism=ndpUnblessed justification=""
+    subTools=[]
+    outputs=["output"]
+    optionalOutputs=[]
+    removeBeforeRun=[]
+    typedOutputs=[]
+      param name="pic" nimType="bool" kind=cpkFlag role=carOrdinary format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="-fPIC" required=false src=repro_dsl_stdlib/packages/clang.nim:200
+      param name="debug3" nimType="bool" kind=cpkFlag role=carOrdinary format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="-g3" required=false src=repro_dsl_stdlib/packages/clang.nim:201
+      param name="compileOnly" nimType="bool" kind=cpkFlag role=carOrdinary format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="-c" required=false src=repro_dsl_stdlib/packages/clang.nim:202
+      param name="preprocessOnly" nimType="bool" kind=cpkFlag role=carOrdinary format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="-E" required=false src=repro_dsl_stdlib/packages/clang.nim:203
+      param name="makeDeps" nimType="bool" kind=cpkFlag role=carOrdinary format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="-M" required=false src=repro_dsl_stdlib/packages/clang.nim:204
+      param name="makeDepsMMD" nimType="bool" kind=cpkFlag role=carOrdinary format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="-MMD" required=false src=repro_dsl_stdlib/packages/clang.nim:205
+      param name="shared" nimType="bool" kind=cpkFlag role=carOrdinary format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="-shared" required=false src=repro_dsl_stdlib/packages/clang.nim:206
+      param name="staticLink" nimType="bool" kind=cpkFlag role=carOrdinary format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="-static" required=false src=repro_dsl_stdlib/packages/clang.nim:207
+      param name="depfileOut" nimType="string" kind=cpkFlag role=carOutput format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="-MF" required=false src=repro_dsl_stdlib/packages/clang.nim:208
+      param name="includes" nimType="seq[string]" kind=cpkFlag role=carInput format=cafSeparate placement=capAfterSubcommand repeated=true position=0 alias="-include" required=false src=repro_dsl_stdlib/packages/clang.nim:212
+      param name="includeDirs" nimType="seq[string]" kind=cpkFlag role=carOrdinary format=cafConcat placement=capAfterSubcommand repeated=true position=0 alias="-I" required=false src=repro_dsl_stdlib/packages/clang.nim:216
+      param name="libDirs" nimType="seq[string]" kind=cpkFlag role=carOrdinary format=cafConcat placement=capAfterSubcommand repeated=true position=0 alias="-L" required=false src=repro_dsl_stdlib/packages/clang.nim:220
+      param name="libs" nimType="seq[string]" kind=cpkFlag role=carOrdinary format=cafConcat placement=capAfterSubcommand repeated=true position=0 alias="-l" required=false src=repro_dsl_stdlib/packages/clang.nim:224
+      param name="defines" nimType="seq[string]" kind=cpkFlag role=carOrdinary format=cafConcat placement=capAfterSubcommand repeated=true position=0 alias="-D" required=false src=repro_dsl_stdlib/packages/clang.nim:228
+      param name="optimization" nimType="string" kind=cpkFlag role=carOrdinary format=cafConcat placement=capAfterSubcommand repeated=false position=0 alias="-O" required=false src=repro_dsl_stdlib/packages/clang.nim:232
+      param name="standard" nimType="string" kind=cpkFlag role=carOrdinary format=cafConcat placement=capAfterSubcommand repeated=false position=0 alias="-std=" required=false src=repro_dsl_stdlib/packages/clang.nim:235
+      param name="output" nimType="string" kind=cpkFlag role=carOutput format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="-o" required=true src=repro_dsl_stdlib/packages/clang.nim:238
+      param name="source" nimType="string" kind=cpkPositional role=carInput format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="" required=true src=repro_dsl_stdlib/packages/clang.nim:242
+    argv=["/tool/clang", "-fPIC", "-g3", "-c", "-E", "-M", "-MMD", "-shared", "-static", "-MF", "depfileOut-v", "-include", "includes-a", "-include", "includes-b", "-IincludeDirs-a", "-IincludeDirs-b", "-LlibDirs-a", "-LlibDirs-b", "-llibs-a", "-llibs-b", "-Ddefines-a", "-Ddefines-b", "-Ooptimization-v", "-std=standard-v", "-o", "output-v", "source-v"]
+  interface sha256:12ad83d701d125dc213f866551106aabfb49ecff1e118b78604b9f2503bfb77d
+package "cmake"
+  executable "cmakeBin" binary="cmakeBin" src=repro_dsl_stdlib/packages/cmake.nim:94
+    command name="configure" path=["configure"] entry="cmake.cmakeBin.configure" src=repro_dsl_stdlib/packages/cmake.nim:99
+    dependencyPolicy=(kind: bdpAutomaticMonitor, depfiles: @[], ignoredInputPrefixes: @[], suppressMonitorShimSeed: false, captureBreadth: mcbFullCapture)
+    nonDeterminism=ndpUnblessed justification=""
+    subTools=[]
+    outputs=["buildDir"]
+    optionalOutputs=[]
+    removeBeforeRun=[]
+    typedOutputs=[]
+      param name="srcDir" nimType="string" kind=cpkFlag role=carInput format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="-S" required=false src=repro_dsl_stdlib/packages/cmake.nim:99
+      param name="buildDir" nimType="string" kind=cpkFlag role=carOutput format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="-B" required=false src=repro_dsl_stdlib/packages/cmake.nim:103
+      param name="generator" nimType="string" kind=cpkFlag role=carOrdinary format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="-G" required=false src=repro_dsl_stdlib/packages/cmake.nim:107
+      param name="cacheVars" nimType="seq[string]" kind=cpkFlag role=carOrdinary format=cafConcat placement=capAfterSubcommand repeated=true position=0 alias="-D" required=false src=repro_dsl_stdlib/packages/cmake.nim:110
+      param name="toolchainFile" nimType="string" kind=cpkFlag role=carOrdinary format=cafConcat placement=capAfterSubcommand repeated=false position=0 alias="--toolchain=" required=false src=repro_dsl_stdlib/packages/cmake.nim:114
+      param name="config" nimType="string" kind=cpkFlag role=carOrdinary format=cafConcat placement=capAfterSubcommand repeated=false position=0 alias="--config=" required=false src=repro_dsl_stdlib/packages/cmake.nim:117
+      param name="fresh" nimType="bool" kind=cpkFlag role=carOrdinary format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="--fresh" required=false src=repro_dsl_stdlib/packages/cmake.nim:120
+    argv=["/tool/cmakeBin", "-S", "srcDir-v", "-B", "buildDir-v", "-G", "generator-v", "-DcacheVars-a", "-DcacheVars-b", "--toolchain=toolchainFile-v", "--config=config-v", "--fresh"]
+    command name="build" path=["build"] entry="cmake.cmakeBin.build" src=repro_dsl_stdlib/packages/cmake.nim:126
+    dependencyPolicy=(kind: bdpAutomaticMonitor, depfiles: @[], ignoredInputPrefixes: @[], suppressMonitorShimSeed: false, captureBreadth: mcbFullCapture)
+    nonDeterminism=ndpUnblessed justification=""
+    subTools=[]
+    outputs=[]
+    optionalOutputs=[]
+    removeBeforeRun=[]
+    typedOutputs=[]
+      param name="buildDir" nimType="string" kind=cpkFlag role=carInput format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="--build" required=true src=repro_dsl_stdlib/packages/cmake.nim:126
+      param name="target" nimType="string" kind=cpkFlag role=carOrdinary format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="--target" required=false src=repro_dsl_stdlib/packages/cmake.nim:131
+      param name="config" nimType="string" kind=cpkFlag role=carOrdinary format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="--config" required=false src=repro_dsl_stdlib/packages/cmake.nim:134
+      param name="jobs" nimType="int" kind=cpkFlag role=carOrdinary format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="-j" required=false src=repro_dsl_stdlib/packages/cmake.nim:137
+      param name="parallel" nimType="int" kind=cpkFlag role=carOrdinary format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="--parallel" required=false src=repro_dsl_stdlib/packages/cmake.nim:140
+    argv=["/tool/cmakeBin", "--build", "buildDir-v", "--target", "target-v", "--config", "config-v", "-j", "7", "--parallel", "7"]
+    command name="install" path=["install"] entry="cmake.cmakeBin.install" src=repro_dsl_stdlib/packages/cmake.nim:145
+    dependencyPolicy=(kind: bdpAutomaticMonitor, depfiles: @[], ignoredInputPrefixes: @[], suppressMonitorShimSeed: false, captureBreadth: mcbFullCapture)
+    nonDeterminism=ndpUnblessed justification=""
+    subTools=[]
+    outputs=[]
+    optionalOutputs=[]
+    removeBeforeRun=[]
+    typedOutputs=[]
+      param name="buildDir" nimType="string" kind=cpkFlag role=carInput format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="--install" required=true src=repro_dsl_stdlib/packages/cmake.nim:145
+      param name="prefix" nimType="string" kind=cpkFlag role=carOutput format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="--prefix" required=false src=repro_dsl_stdlib/packages/cmake.nim:150
+      param name="component" nimType="string" kind=cpkFlag role=carOrdinary format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="--component" required=false src=repro_dsl_stdlib/packages/cmake.nim:154
+      param name="config" nimType="string" kind=cpkFlag role=carOrdinary format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="--config" required=false src=repro_dsl_stdlib/packages/cmake.nim:157
+    argv=["/tool/cmakeBin", "--install", "buildDir-v", "--prefix", "prefix-v", "--component", "component-v", "--config", "config-v"]
+  interface sha256:a81748e88fd1f03ceb6cbd996e48cef6e29dd29f04f858f49a2c91593154acc4
+package "create-dmg"
+  executable "create-dmg" binary="create-dmg" src=repro_dsl_stdlib/packages/create_dmg.nim:14
+    command name="" path=[] entry="create-dmg.create-dmg.call" src=repro_dsl_stdlib/packages/create_dmg.nim:17
+    dependencyPolicy=(kind: bdpDefault, depfiles: @[], ignoredInputPrefixes: @[], suppressMonitorShimSeed: false, captureBreadth: mcbFullCapture)
+    nonDeterminism=ndpUnblessed justification=""
+    subTools=[]
+    outputs=["dmg"]
+    optionalOutputs=[]
+    removeBeforeRun=["dmg"]
+    typedOutputs=[]
+      param name="volname" nimType="string" kind=cpkFlag role=carOrdinary format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="" required=false src=repro_dsl_stdlib/packages/create_dmg.nim:17
+      param name="background" nimType="string" kind=cpkFlag role=carOrdinary format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="" required=false src=repro_dsl_stdlib/packages/create_dmg.nim:18
+      param name="windowPos" nimType="seq[string]" kind=cpkFlag role=carOrdinary format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="--window-pos" required=false src=repro_dsl_stdlib/packages/create_dmg.nim:19
+      param name="windowSize" nimType="seq[string]" kind=cpkFlag role=carOrdinary format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="--window-size" required=false src=repro_dsl_stdlib/packages/create_dmg.nim:20
+      param name="iconSize" nimType="string" kind=cpkFlag role=carOrdinary format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="--icon-size" required=false src=repro_dsl_stdlib/packages/create_dmg.nim:21
+      param name="icon" nimType="seq[string]" kind=cpkFlag role=carOrdinary format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="--icon" required=false src=repro_dsl_stdlib/packages/create_dmg.nim:22
+      param name="appDropLink" nimType="seq[string]" kind=cpkFlag role=carOrdinary format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="--app-drop-link" required=false src=repro_dsl_stdlib/packages/create_dmg.nim:23
+      param name="sandboxSafe" nimType="bool" kind=cpkFlag role=carOrdinary format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="--sandbox-safe" required=false src=repro_dsl_stdlib/packages/create_dmg.nim:24
+      param name="dmg" nimType="string" kind=cpkPositional role=carOutput format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="" required=true src=repro_dsl_stdlib/packages/create_dmg.nim:28
+      param name="src" nimType="string" kind=cpkPositional role=carOrdinary format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="" required=true src=repro_dsl_stdlib/packages/create_dmg.nim:29
+    argv=["/tool/create-dmg", "--volname", "volname-v", "--background", "background-v", "--window-pos", "windowPos-a", "windowPos-b", "--window-size", "windowSize-a", "windowSize-b", "--icon-size", "iconSize-v", "--icon", "icon-a", "icon-b", "--app-drop-link", "appDropLink-a", "appDropLink-b", "--sandbox-safe", "dmg-v", "src-v"]
+  interface sha256:575ac6da724f265a47f985b3cdfb95616f3d081a6acf220ef6918202c8a9ab8d
+package "dpkg-deb"
+  executable "dpkgDebBin" binary="dpkgDebBin" src=repro_dsl_stdlib/packages/dpkg_deb.nim:39
+    command name="" path=[] entry="dpkg-deb.dpkgDebBin.call" src=repro_dsl_stdlib/packages/dpkg_deb.nim:56
+    dependencyPolicy=(kind: bdpAutomaticMonitor, depfiles: @[], ignoredInputPrefixes: @[], suppressMonitorShimSeed: false, captureBreadth: mcbFullCapture)
+    nonDeterminism=ndpUnblessed justification=""
+    subTools=[]
+    outputs=["archive"]
+    optionalOutputs=[]
+    removeBeforeRun=[]
+    typedOutputs=[]
+      param name="rootOwnerGroup" nimType="bool" kind=cpkFlag role=carOrdinary format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="--root-owner-group" required=false src=repro_dsl_stdlib/packages/dpkg_deb.nim:56
+      param name="compression" nimType="string" kind=cpkFlag role=carOrdinary format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="-Z" required=false src=repro_dsl_stdlib/packages/dpkg_deb.nim:59
+      param name="compressLevel" nimType="string" kind=cpkFlag role=carOrdinary format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="-z" required=false src=repro_dsl_stdlib/packages/dpkg_deb.nim:62
+      param name="build" nimType="bool" kind=cpkFlag role=carOrdinary format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="--build" required=false src=repro_dsl_stdlib/packages/dpkg_deb.nim:67
+      param name="tree" nimType="string" kind=cpkPositional role=carInput format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="" required=true src=repro_dsl_stdlib/packages/dpkg_deb.nim:68
+      param name="archive" nimType="string" kind=cpkPositional role=carOutput format=cafSeparate placement=capAfterSubcommand repeated=false position=1 alias="" required=true src=repro_dsl_stdlib/packages/dpkg_deb.nim:72
+    argv=["/tool/dpkgDebBin", "--root-owner-group", "-Z", "compression-v", "-z", "compressLevel-v", "--build", "tree-v", "archive-v"]
+  interface sha256:004bb6b8012a194345d809fae34fd1ac0539375001935d4cc1702d337205a3dc
+package "gas"
+  executable "gasBin" binary="gasBin" src=repro_dsl_stdlib/packages/binutils.nim:289
+    command name="" path=[] entry="gas.gasBin.call" src=repro_dsl_stdlib/packages/binutils.nim:294
+    dependencyPolicy=(kind: bdpAutomaticMonitor, depfiles: @[], ignoredInputPrefixes: @[], suppressMonitorShimSeed: false, captureBreadth: mcbFullCapture)
+    nonDeterminism=ndpUnblessed justification=""
+    subTools=[]
+    outputs=["output"]
+    optionalOutputs=[]
+    removeBeforeRun=[]
+    typedOutputs=[]
+      param name="output" nimType="string" kind=cpkFlag role=carOutput format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="-o" required=true src=repro_dsl_stdlib/packages/binutils.nim:294
+      param name="includePaths" nimType="seq[string]" kind=cpkFlag role=carOrdinary format=cafSeparate placement=capAfterSubcommand repeated=true position=0 alias="-I" required=false src=repro_dsl_stdlib/packages/binutils.nim:299
+      param name="input" nimType="string" kind=cpkPositional role=carInput format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="" required=true src=repro_dsl_stdlib/packages/binutils.nim:303
+    argv=["/tool/gasBin", "-o", "output-v", "-I", "includePaths-a", "-I", "includePaths-b", "input-v"]
+  interface sha256:85eabb6d6b3a99c01ef617d10c519b7aa1b3c47a2d25f833599ac2e30496ef49
+package "gcc"
+  executable "gcc" binary="gcc" src=repro_dsl_stdlib/packages/gcc.nim:92
+    command name="" path=[] entry="gcc.gcc.call" src=repro_dsl_stdlib/packages/gcc.nim:173
+    dependencyPolicy=(kind: bdpAutomaticMonitor, depfiles: @[], ignoredInputPrefixes: @[], suppressMonitorShimSeed: false, captureBreadth: mcbFullCapture)
+    nonDeterminism=ndpUnblessed justification=""
+    subTools=[]
+    outputs=["output"]
+    optionalOutputs=[]
+    removeBeforeRun=[]
+    typedOutputs=[]
+      param name="pic" nimType="bool" kind=cpkFlag role=carOrdinary format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="-fPIC" required=false src=repro_dsl_stdlib/packages/gcc.nim:173
+      param name="debug3" nimType="bool" kind=cpkFlag role=carOrdinary format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="-g3" required=false src=repro_dsl_stdlib/packages/gcc.nim:174
+      param name="compileOnly" nimType="bool" kind=cpkFlag role=carOrdinary format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="-c" required=false src=repro_dsl_stdlib/packages/gcc.nim:175
+      param name="preprocessOnly" nimType="bool" kind=cpkFlag role=carOrdinary format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="-E" required=false src=repro_dsl_stdlib/packages/gcc.nim:176
+      param name="makeDeps" nimType="bool" kind=cpkFlag role=carOrdinary format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="-M" required=false src=repro_dsl_stdlib/packages/gcc.nim:177
+      param name="makeDepsMMD" nimType="bool" kind=cpkFlag role=carOrdinary format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="-MMD" required=false src=repro_dsl_stdlib/packages/gcc.nim:178
+      param name="shared" nimType="bool" kind=cpkFlag role=carOrdinary format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="-shared" required=false src=repro_dsl_stdlib/packages/gcc.nim:179
+      param name="staticLink" nimType="bool" kind=cpkFlag role=carOrdinary format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="-static" required=false src=repro_dsl_stdlib/packages/gcc.nim:180
+      param name="noStandardLibraries" nimType="bool" kind=cpkFlag role=carOrdinary format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="-nostdlib" required=false src=repro_dsl_stdlib/packages/gcc.nim:181
+      param name="depfileOut" nimType="string" kind=cpkFlag role=carOutput format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="-MF" required=false src=repro_dsl_stdlib/packages/gcc.nim:182
+      param name="includes" nimType="seq[string]" kind=cpkFlag role=carInput format=cafSeparate placement=capAfterSubcommand repeated=true position=0 alias="-include" required=false src=repro_dsl_stdlib/packages/gcc.nim:186
+      param name="includeDirs" nimType="seq[string]" kind=cpkFlag role=carOrdinary format=cafConcat placement=capAfterSubcommand repeated=true position=0 alias="-I" required=false src=repro_dsl_stdlib/packages/gcc.nim:190
+      param name="libDirs" nimType="seq[string]" kind=cpkFlag role=carOrdinary format=cafConcat placement=capAfterSubcommand repeated=true position=0 alias="-L" required=false src=repro_dsl_stdlib/packages/gcc.nim:194
+      param name="libs" nimType="seq[string]" kind=cpkFlag role=carOrdinary format=cafConcat placement=capAfterSubcommand repeated=true position=0 alias="-l" required=false src=repro_dsl_stdlib/packages/gcc.nim:198
+      param name="defines" nimType="seq[string]" kind=cpkFlag role=carOrdinary format=cafConcat placement=capAfterSubcommand repeated=true position=0 alias="-D" required=false src=repro_dsl_stdlib/packages/gcc.nim:202
+      param name="optimization" nimType="string" kind=cpkFlag role=carOrdinary format=cafConcat placement=capAfterSubcommand repeated=false position=0 alias="-O" required=false src=repro_dsl_stdlib/packages/gcc.nim:206
+      param name="standard" nimType="string" kind=cpkFlag role=carOrdinary format=cafConcat placement=capAfterSubcommand repeated=false position=0 alias="-std=" required=false src=repro_dsl_stdlib/packages/gcc.nim:209
+      param name="debugCompression" nimType="string" kind=cpkFlag role=carOrdinary format=cafConcat placement=capAfterSubcommand repeated=false position=0 alias="-gz=" required=false src=repro_dsl_stdlib/packages/gcc.nim:221
+      param name="output" nimType="string" kind=cpkFlag role=carOutput format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="-o" required=true src=repro_dsl_stdlib/packages/gcc.nim:224
+      param name="source" nimType="string" kind=cpkPositional role=carInput format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="" required=true src=repro_dsl_stdlib/packages/gcc.nim:228
+    argv=["/tool/gcc", "-fPIC", "-g3", "-c", "-E", "-M", "-MMD", "-shared", "-static", "-nostdlib", "-MF", "depfileOut-v", "-include", "includes-a", "-include", "includes-b", "-IincludeDirs-a", "-IincludeDirs-b", "-LlibDirs-a", "-LlibDirs-b", "-llibs-a", "-llibs-b", "-Ddefines-a", "-Ddefines-b", "-Ooptimization-v", "-std=standard-v", "-gz=debugCompression-v", "-o", "output-v", "source-v"]
+  interface sha256:371d8d58257fe348ee1b0d141e2180a3a9379534e204eb71e7270461f4c43008
+package "git"
+  executable "git" binary="git" src=repro_dsl_stdlib/packages/git.nim:109
+    command name="" path=[] entry="git.git.call" src=repro_dsl_stdlib/packages/git.nim:206
+    dependencyPolicy=(kind: bdpAutomaticMonitor, depfiles: @[], ignoredInputPrefixes: @[], suppressMonitorShimSeed: false, captureBreadth: mcbFullCapture)
+    nonDeterminism=ndpEntropyBlessed justification="git draws randomness only to name files it is about to rename away. Measured with io-mon @87143d62 on the linux-preload-hooks backend: `git init`, `git rev-parse HEAD`, `git log --oneline -1`, `git status --porcelain` and `git clone` draw NONE; `git add` draws one record and `git add` + `git commit` two, and each record sits in the same pid as the creation of .git/index.lock, .git/refs/heads/<branch>.lock and .git/objects/XX/tmp_obj_XXXXXX -- lock files and loose-object temporaries. Every one of those is renamed or hard-linked to a name git computes from CONTENT (the object hash) or fixes by convention (index, refs/heads/<branch>), so no random byte survives into an object, a ref or the working tree; that git\'s whole object store is content-addressed is what makes the claim checkable rather than a promise. Across CodeTracer\'s ten shell gates at 996f9b12 git accounts for 22 of the 45 records, all path=getrandom, all in `git add` / `git commit` pids. This blesses ENTROPY only, and the exception is worth naming because it is the one people reach for: a commit object\'s hash depends on its author and committer TIMESTAMPS. That is a clock read (mrTimeRead), a separate signal this engine does not grade for any tool, and nothing here waives it."
+    subTools=[]
+    outputs=[]
+    optionalOutputs=[]
+    removeBeforeRun=[]
+    typedOutputs=[]
+      param name="args" nimType="seq[string]" kind=cpkPositional role=carOrdinary format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="" required=true src=repro_dsl_stdlib/packages/git.nim:206
+    argv=["/tool/git", "args-a", "args-b"]
+  interface sha256:1368f698d9650d97aa2a357d071dab8726deced0be0b0fbe561eb248ffddf42f
+package "install-file"
+  executable "installBin" binary="installBin" src=repro_dsl_stdlib/packages/coreutils_install.nim:102
+    command name="" path=[] entry="install-file.installBin.call" src=repro_dsl_stdlib/packages/coreutils_install.nim:107
+    dependencyPolicy=(kind: bdpAutomaticMonitor, depfiles: @[], ignoredInputPrefixes: @[], suppressMonitorShimSeed: false, captureBreadth: mcbFullCapture)
+    nonDeterminism=ndpUnblessed justification=""
+    subTools=[]
+    outputs=["target"]
+    optionalOutputs=[]
+    removeBeforeRun=[]
+    typedOutputs=[]
+      param name="mode" nimType="string" kind=cpkFlag role=carOrdinary format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="-m" required=false src=repro_dsl_stdlib/packages/coreutils_install.nim:107
+      param name="createParents" nimType="bool" kind=cpkFlag role=carOrdinary format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="-D" required=false src=repro_dsl_stdlib/packages/coreutils_install.nim:114
+      param name="preserveTimestamps" nimType="bool" kind=cpkFlag role=carOrdinary format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="-p" required=false src=repro_dsl_stdlib/packages/coreutils_install.nim:120
+      param name="source" nimType="string" kind=cpkPositional role=carInput format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="" required=true src=repro_dsl_stdlib/packages/coreutils_install.nim:121
+      param name="target" nimType="string" kind=cpkPositional role=carOutput format=cafSeparate placement=capAfterSubcommand repeated=false position=1 alias="" required=true src=repro_dsl_stdlib/packages/coreutils_install.nim:125
+    argv=["/tool/installBin", "-m", "mode-v", "-D", "-p", "source-v", "target-v"]
+  interface sha256:e9e122c61d0204514803577ee04996d482b3839a952221a93976839e2ea8f348
+package "ld"
+  executable "ldBin" binary="ldBin" src=repro_dsl_stdlib/packages/binutils.nim:60
+    command name="" path=[] entry="ld.ldBin.call" src=repro_dsl_stdlib/packages/binutils.nim:65
+    dependencyPolicy=(kind: bdpAutomaticMonitor, depfiles: @[], ignoredInputPrefixes: @[], suppressMonitorShimSeed: false, captureBreadth: mcbFullCapture)
+    nonDeterminism=ndpUnblessed justification=""
+    subTools=[]
+    outputs=["output"]
+    optionalOutputs=[]
+    removeBeforeRun=[]
+    typedOutputs=[]
+      param name="output" nimType="string" kind=cpkFlag role=carOutput format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="-o" required=true src=repro_dsl_stdlib/packages/binutils.nim:65
+      param name="libDirs" nimType="seq[string]" kind=cpkFlag role=carOrdinary format=cafConcat placement=capAfterSubcommand repeated=true position=0 alias="-L" required=false src=repro_dsl_stdlib/packages/binutils.nim:70
+      param name="libs" nimType="seq[string]" kind=cpkFlag role=carOrdinary format=cafConcat placement=capAfterSubcommand repeated=true position=0 alias="-l" required=false src=repro_dsl_stdlib/packages/binutils.nim:74
+      param name="shared" nimType="bool" kind=cpkFlag role=carOrdinary format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="-shared" required=false src=repro_dsl_stdlib/packages/binutils.nim:78
+      param name="static" nimType="bool" kind=cpkFlag role=carOrdinary format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="-static" required=false src=repro_dsl_stdlib/packages/binutils.nim:79
+      param name="soname" nimType="string" kind=cpkFlag role=carOrdinary format=cafConcat placement=capAfterSubcommand repeated=false position=0 alias="-soname=" required=false src=repro_dsl_stdlib/packages/binutils.nim:80
+      param name="entry" nimType="string" kind=cpkFlag role=carOrdinary format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="-e" required=false src=repro_dsl_stdlib/packages/binutils.nim:83
+      param name="objects" nimType="seq[string]" kind=cpkPositional role=carInput format=cafSeparate placement=capAfterSubcommand repeated=true position=0 alias="" required=true src=repro_dsl_stdlib/packages/binutils.nim:86
+    argv=["/tool/ldBin", "-o", "output-v", "-LlibDirs-a", "-LlibDirs-b", "-llibs-a", "-llibs-b", "-shared", "-static", "-soname=soname-v", "-e", "entry-v", "objects-a", "objects-b"]
+  interface sha256:b95ea013cc450cc3b36a9135cf9b2989cb136cc2c5ed0ffacc7b601edc19d505
+package "make"
+  executable "makeBin" binary="makeBin" src=repro_dsl_stdlib/packages/make.nim:52
+    command name="" path=[] entry="make.makeBin.call" src=repro_dsl_stdlib/packages/make.nim:57
+    dependencyPolicy=(kind: bdpAutomaticMonitor, depfiles: @[], ignoredInputPrefixes: @[], suppressMonitorShimSeed: false, captureBreadth: mcbFullCapture)
+    nonDeterminism=ndpUnblessed justification=""
+    subTools=[]
+    outputs=[]
+    optionalOutputs=[]
+    removeBeforeRun=[]
+    typedOutputs=[]
+      param name="workDir" nimType="string" kind=cpkFlag role=carInput format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="-C" required=false src=repro_dsl_stdlib/packages/make.nim:57
+      param name="file" nimType="string" kind=cpkFlag role=carInput format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="-f" required=false src=repro_dsl_stdlib/packages/make.nim:61
+      param name="jobs" nimType="int" kind=cpkFlag role=carOrdinary format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="-j" required=false src=repro_dsl_stdlib/packages/make.nim:65
+      param name="vars" nimType="seq[string]" kind=cpkPositional role=carOrdinary format=cafSeparate placement=capAfterSubcommand repeated=true position=0 alias="" required=true src=repro_dsl_stdlib/packages/make.nim:68
+      param name="targets" nimType="seq[string]" kind=cpkPositional role=carOrdinary format=cafSeparate placement=capAfterSubcommand repeated=true position=1 alias="" required=true src=repro_dsl_stdlib/packages/make.nim:71
+    argv=["/tool/makeBin", "-C", "workDir-v", "-f", "file-v", "-j", "7", "vars-a", "vars-b", "targets-a", "targets-b"]
+  interface sha256:541d7eecceb9b7d1dd2a3a0810ea3954d5959ffd32679d36c41cea77bf26bf4d
+package "meson"
+  executable "mesonBin" binary="mesonBin" src=repro_dsl_stdlib/packages/meson.nim:113
+    command name="setup" path=["setup"] entry="meson.mesonBin.setup" src=repro_dsl_stdlib/packages/meson.nim:118
+    dependencyPolicy=(kind: bdpAutomaticMonitor, depfiles: @[], ignoredInputPrefixes: @[], suppressMonitorShimSeed: false, captureBreadth: mcbFullCapture)
+    nonDeterminism=ndpUnblessed justification=""
+    subTools=[]
+    outputs=["buildDir"]
+    optionalOutputs=[]
+    removeBeforeRun=[]
+    typedOutputs=[]
+      param name="prefix" nimType="string" kind=cpkFlag role=carOrdinary format=cafConcat placement=capAfterSubcommand repeated=false position=0 alias="--prefix=" required=false src=repro_dsl_stdlib/packages/meson.nim:118
+      param name="buildtype" nimType="string" kind=cpkFlag role=carOrdinary format=cafConcat placement=capAfterSubcommand repeated=false position=0 alias="--buildtype=" required=false src=repro_dsl_stdlib/packages/meson.nim:121
+      param name="options" nimType="seq[string]" kind=cpkFlag role=carOrdinary format=cafConcat placement=capAfterSubcommand repeated=true position=0 alias="-D" required=false src=repro_dsl_stdlib/packages/meson.nim:124
+      param name="crossFile" nimType="string" kind=cpkFlag role=carOrdinary format=cafConcat placement=capAfterSubcommand repeated=false position=0 alias="--cross-file=" required=false src=repro_dsl_stdlib/packages/meson.nim:128
+      param name="nativeFile" nimType="string" kind=cpkFlag role=carOrdinary format=cafConcat placement=capAfterSubcommand repeated=false position=0 alias="--native-file=" required=false src=repro_dsl_stdlib/packages/meson.nim:131
+      param name="wrapMode" nimType="string" kind=cpkFlag role=carOrdinary format=cafConcat placement=capAfterSubcommand repeated=false position=0 alias="--wrap-mode=" required=false src=repro_dsl_stdlib/packages/meson.nim:134
+      param name="buildDir" nimType="string" kind=cpkPositional role=carOutput format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="" required=true src=repro_dsl_stdlib/packages/meson.nim:137
+      param name="srcDir" nimType="string" kind=cpkPositional role=carInput format=cafSeparate placement=capAfterSubcommand repeated=false position=1 alias="" required=true src=repro_dsl_stdlib/packages/meson.nim:140
+    argv=["/tool/mesonBin", "setup", "--prefix=prefix-v", "--buildtype=buildtype-v", "-Doptions-a", "-Doptions-b", "--cross-file=crossFile-v", "--native-file=nativeFile-v", "--wrap-mode=wrapMode-v", "buildDir-v", "srcDir-v"]
+    command name="compile" path=["compile"] entry="meson.mesonBin.compile" src=repro_dsl_stdlib/packages/meson.nim:147
+    dependencyPolicy=(kind: bdpAutomaticMonitor, depfiles: @[], ignoredInputPrefixes: @[], suppressMonitorShimSeed: false, captureBreadth: mcbFullCapture)
+    nonDeterminism=ndpUnblessed justification=""
+    subTools=[]
+    outputs=[]
+    optionalOutputs=[]
+    removeBeforeRun=[]
+    typedOutputs=[]
+      param name="workDir" nimType="string" kind=cpkFlag role=carInput format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="-C" required=false src=repro_dsl_stdlib/packages/meson.nim:147
+      param name="jobs" nimType="int" kind=cpkFlag role=carOrdinary format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="-j" required=false src=repro_dsl_stdlib/packages/meson.nim:151
+    argv=["/tool/mesonBin", "compile", "-C", "workDir-v", "-j", "7"]
+    command name="install" path=["install"] entry="meson.mesonBin.install" src=repro_dsl_stdlib/packages/meson.nim:156
+    dependencyPolicy=(kind: bdpAutomaticMonitor, depfiles: @[], ignoredInputPrefixes: @[], suppressMonitorShimSeed: false, captureBreadth: mcbFullCapture)
+    nonDeterminism=ndpUnblessed justification=""
+    subTools=[]
+    outputs=[]
+    optionalOutputs=["destdir"]
+    removeBeforeRun=[]
+    typedOutputs=[]
+      param name="workDir" nimType="string" kind=cpkFlag role=carInput format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="-C" required=false src=repro_dsl_stdlib/packages/meson.nim:156
+      param name="destdir" nimType="string" kind=cpkFlag role=carOutput format=cafConcat placement=capAfterSubcommand repeated=false position=0 alias="--destdir=" required=false src=repro_dsl_stdlib/packages/meson.nim:160
+      param name="tags" nimType="seq[string]" kind=cpkFlag role=carOrdinary format=cafConcat placement=capAfterSubcommand repeated=true position=0 alias="--tags=" required=false src=repro_dsl_stdlib/packages/meson.nim:167
+    argv=["/tool/mesonBin", "install", "-C", "workDir-v", "--destdir=destdir-v", "--tags=tags-a", "--tags=tags-b"]
+    command name="dist" path=["dist"] entry="meson.mesonBin.dist" src=repro_dsl_stdlib/packages/meson.nim:173
+    dependencyPolicy=(kind: bdpAutomaticMonitor, depfiles: @[], ignoredInputPrefixes: @[], suppressMonitorShimSeed: false, captureBreadth: mcbFullCapture)
+    nonDeterminism=ndpUnblessed justification=""
+    subTools=[]
+    outputs=[]
+    optionalOutputs=[]
+    removeBeforeRun=[]
+    typedOutputs=[]
+      param name="workDir" nimType="string" kind=cpkFlag role=carInput format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="-C" required=false src=repro_dsl_stdlib/packages/meson.nim:173
+      param name="formats" nimType="seq[string]" kind=cpkFlag role=carOrdinary format=cafConcat placement=capAfterSubcommand repeated=true position=0 alias="--formats=" required=false src=repro_dsl_stdlib/packages/meson.nim:177
+    argv=["/tool/mesonBin", "dist", "-C", "workDir-v", "--formats=formats-a", "--formats=formats-b"]
+  interface sha256:043cb7297a00f554429d0b0f728fafe80dc474fd7c818adc949d90b28453801b
+package "mktemp"
+  executable "mktemp" binary="mktemp" src=repro_dsl_stdlib/packages/mktemp.nim:49
+    command name="" path=[] entry="mktemp.mktemp.call" src=repro_dsl_stdlib/packages/mktemp.nim:124
+    dependencyPolicy=(kind: bdpAutomaticMonitor, depfiles: @[], ignoredInputPrefixes: @[], suppressMonitorShimSeed: false, captureBreadth: mcbFullCapture)
+    nonDeterminism=ndpEntropyBlessed justification="GNU coreutils `mktemp` draws randomness for exactly one purpose: the X-suffix of the temporary name it creates and prints. That name is a handle to scratch space whose whole contract is that it does not outlive the caller, so the random bytes designate a LOCATION and never the content of a product. Measured with io-mon @87143d62 on the linux-preload-hooks backend: across CodeTracer\'s ten shell gates at 996f9b12 mktemp accounts for 23 of the 45 mrNonDeterministic records, every one path=getrandom, every one emitted in a pid whose mrProcessExec names mktemp and whose only writes are the scratch directory the gate later removes; not one of those names appears in a declared output. This blesses ENTROPY only. It says nothing about a recipe that captures the printed name INTO a product -- that is the recipe\'s bug, and a signal that records zero events for a script whose whole output is $RANDOM was never what guarded against it."
+    subTools=[]
+    outputs=[]
+    optionalOutputs=[]
+    removeBeforeRun=[]
+    typedOutputs=[]
+      param name="args" nimType="seq[string]" kind=cpkPositional role=carOrdinary format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="" required=true src=repro_dsl_stdlib/packages/mktemp.nim:124
+    argv=["/tool/mktemp", "args-a", "args-b"]
+  interface sha256:0a46340ae593956071ae44a9f34a5c22d32b60f918f1a115c021bfc450427e52
+package "nim"
+  executable "nim" binary="nim" src=repro_dsl_stdlib/packages/nim.nim:153
+    command name="c" path=["c"] entry="nim.nim.c" src=repro_dsl_stdlib/packages/nim.nim:280
+    dependencyPolicy=(kind: bdpAutomaticMonitor, depfiles: @[], ignoredInputPrefixes: @[], suppressMonitorShimSeed: false, captureBreadth: mcbOmitAmbientReads)
+    nonDeterminism=ndpEntropyBlessed justification="The nim compiler\'s randomness is confined to naming things it then throws away -- temporary files and temporary directories under its nimcache -- and to hash-table seeding inside its own process. Neither reaches an output: the generated C, the object files and the linked binary are named from the module path and the --out:/--nimcache: arguments, all of which are in the action\'s argv and therefore in its cache key. A temp name that differed between two runs would change no byte of the product. Measured on this host against the M5 shim, a full monitored `nim c` (nim driving gcc and ld, 25 206 records, mcComplete, eventLoss=0) in fact emitted ZERO mrNonDeterministic records at all, so the blessing is a declaration about what nim\'s randomness is FOR rather than a waiver being cashed in today -- which is the point: it must be in place before a nim or CRT revision starts drawing entropy on a path that does not affect the output."
+    subTools=["gcc"]
+    outputs=["output"]
+    optionalOutputs=[]
+    removeBeforeRun=[]
+    typedOutputs=[]
+      param name="defines" nimType="seq[string]" kind=cpkFlag role=carOrdinary format=cafConcat placement=capAfterSubcommand repeated=true position=0 alias="-d:" required=false src=repro_dsl_stdlib/packages/nim.nim:280
+      param name="mm" nimType="string" kind=cpkFlag role=carOrdinary format=cafConcat placement=capAfterSubcommand repeated=false position=0 alias="--mm:" required=false src=repro_dsl_stdlib/packages/nim.nim:284
+      param name="cpu" nimType="string" kind=cpkFlag role=carOrdinary format=cafConcat placement=capAfterSubcommand repeated=false position=0 alias="--cpu:" required=false src=repro_dsl_stdlib/packages/nim.nim:296
+      param name="cc" nimType="string" kind=cpkFlag role=carOrdinary format=cafConcat placement=capAfterSubcommand repeated=false position=0 alias="--cc:" required=false src=repro_dsl_stdlib/packages/nim.nim:299
+      param name="gccExe" nimType="string" kind=cpkFlag role=carOrdinary format=cafConcat placement=capAfterSubcommand repeated=false position=0 alias="--gcc.exe:" required=false src=repro_dsl_stdlib/packages/nim.nim:302
+      param name="gccLinkerExe" nimType="string" kind=cpkFlag role=carOrdinary format=cafConcat placement=capAfterSubcommand repeated=false position=0 alias="--gcc.linkerexe:" required=false src=repro_dsl_stdlib/packages/nim.nim:310
+      param name="os" nimType="string" kind=cpkFlag role=carOrdinary format=cafConcat placement=capAfterSubcommand repeated=false position=0 alias="--os:" required=false src=repro_dsl_stdlib/packages/nim.nim:317
+      param name="clangExe" nimType="string" kind=cpkFlag role=carOrdinary format=cafConcat placement=capAfterSubcommand repeated=false position=0 alias="--clang.exe:" required=false src=repro_dsl_stdlib/packages/nim.nim:320
+      param name="clangLinkerExe" nimType="string" kind=cpkFlag role=carOrdinary format=cafConcat placement=capAfterSubcommand repeated=false position=0 alias="--clang.linkerexe:" required=false src=repro_dsl_stdlib/packages/nim.nim:323
+      param name="threadsOn" nimType="bool" kind=cpkFlag role=carOrdinary format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="--threads:on" required=false src=repro_dsl_stdlib/packages/nim.nim:326
+      param name="parallelBuild" nimType="int" kind=cpkFlag role=carOrdinary format=cafConcat placement=capAfterSubcommand repeated=false position=0 alias="--parallelBuild:" required=false src=repro_dsl_stdlib/packages/nim.nim:327
+      param name="appLib" nimType="bool" kind=cpkFlag role=carOrdinary format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="--app:lib" required=false src=repro_dsl_stdlib/packages/nim.nim:336
+      param name="hintsOff" nimType="bool" kind=cpkFlag role=carOrdinary format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="--hints:off" required=false src=repro_dsl_stdlib/packages/nim.nim:337
+      param name="warningsOff" nimType="bool" kind=cpkFlag role=carOrdinary format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="--warnings:off" required=false src=repro_dsl_stdlib/packages/nim.nim:338
+      param name="disabledHints" nimType="seq[string]" kind=cpkFlag role=carOrdinary format=cafConcat placement=capAfterSubcommand repeated=true position=0 alias="--hint[" required=false src=repro_dsl_stdlib/packages/nim.nim:339
+      param name="disabledWarnings" nimType="seq[string]" kind=cpkFlag role=carOrdinary format=cafConcat placement=capAfterSubcommand repeated=true position=0 alias="--warning[" required=false src=repro_dsl_stdlib/packages/nim.nim:343
+      param name="debugInfo" nimType="bool" kind=cpkFlag role=carOrdinary format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="--debugInfo" required=false src=repro_dsl_stdlib/packages/nim.nim:347
+      param name="lineDirOn" nimType="bool" kind=cpkFlag role=carOrdinary format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="--lineDir:on" required=false src=repro_dsl_stdlib/packages/nim.nim:348
+      param name="stacktraceOn" nimType="bool" kind=cpkFlag role=carOrdinary format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="--stacktrace:on" required=false src=repro_dsl_stdlib/packages/nim.nim:349
+      param name="linetraceOn" nimType="bool" kind=cpkFlag role=carOrdinary format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="--linetrace:on" required=false src=repro_dsl_stdlib/packages/nim.nim:350
+      param name="hintsOn" nimType="bool" kind=cpkFlag role=carOrdinary format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="--hints:on" required=false src=repro_dsl_stdlib/packages/nim.nim:351
+      param name="warningsOn" nimType="bool" kind=cpkFlag role=carOrdinary format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="--warnings:on" required=false src=repro_dsl_stdlib/packages/nim.nim:352
+      param name="boundChecksOn" nimType="bool" kind=cpkFlag role=carOrdinary format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="--boundChecks:on" required=false src=repro_dsl_stdlib/packages/nim.nim:353
+      param name="dynlibOverrides" nimType="seq[string]" kind=cpkFlag role=carOrdinary format=cafConcat placement=capAfterSubcommand repeated=true position=0 alias="--dynlibOverride:" required=false src=repro_dsl_stdlib/packages/nim.nim:354
+      param name="passC" nimType="seq[string]" kind=cpkFlag role=carOrdinary format=cafConcat placement=capAfterSubcommand repeated=true position=0 alias="--passC:" required=false src=repro_dsl_stdlib/packages/nim.nim:361
+      param name="passL" nimType="seq[string]" kind=cpkFlag role=carOrdinary format=cafConcat placement=capAfterSubcommand repeated=true position=0 alias="--passL:" required=false src=repro_dsl_stdlib/packages/nim.nim:365
+      param name="nimcache" nimType="string" kind=cpkFlag role=carOrdinary format=cafConcat placement=capAfterSubcommand repeated=false position=0 alias="--nimcache:" required=false src=repro_dsl_stdlib/packages/nim.nim:369
+      param name="output" nimType="string" kind=cpkFlag role=carOutput format=cafConcat placement=capAfterSubcommand repeated=false position=0 alias="--out:" required=true src=repro_dsl_stdlib/packages/nim.nim:372
+      param name="paths" nimType="seq[string]" kind=cpkFlag role=carOrdinary format=cafConcat placement=capAfterSubcommand repeated=true position=0 alias="--path:" required=false src=repro_dsl_stdlib/packages/nim.nim:377
+      param name="source" nimType="string" kind=cpkPositional role=carInput format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="" required=true src=repro_dsl_stdlib/packages/nim.nim:381
+    argv=["/tool/nim", "c", "-d:defines-a", "-d:defines-b", "--mm:mm-v", "--cpu:cpu-v", "--cc:cc-v", "--gcc.exe:gccExe-v", "--gcc.linkerexe:gccLinkerExe-v", "--os:os-v", "--clang.exe:clangExe-v", "--clang.linkerexe:clangLinkerExe-v", "--threads:on", "--parallelBuild:7", "--app:lib", "--hints:off", "--warnings:off", "--hint[disabledHints-a", "--hint[disabledHints-b", "--warning[disabledWarnings-a", "--warning[disabledWarnings-b", "--debugInfo", "--lineDir:on", "--stacktrace:on", "--linetrace:on", "--hints:on", "--warnings:on", "--boundChecks:on", "--dynlibOverride:dynlibOverrides-a", "--dynlibOverride:dynlibOverrides-b", "--passC:passC-a", "--passC:passC-b", "--passL:passL-a", "--passL:passL-b", "--nimcache:nimcache-v", "--out:output-v", "--path:paths-a", "--path:paths-b", "source-v"]
+    command name="js" path=["js"] entry="nim.nim.js" src=repro_dsl_stdlib/packages/nim.nim:392
+    dependencyPolicy=(kind: bdpAutomaticMonitor, depfiles: @[], ignoredInputPrefixes: @[], suppressMonitorShimSeed: false, captureBreadth: mcbOmitAmbientReads)
+    nonDeterminism=ndpEntropyBlessed justification="The nim compiler\'s randomness is confined to naming things it then throws away -- temporary files and temporary directories under its nimcache -- and to hash-table seeding inside its own process. Neither reaches an output: the generated C, the object files and the linked binary are named from the module path and the --out:/--nimcache: arguments, all of which are in the action\'s argv and therefore in its cache key. A temp name that differed between two runs would change no byte of the product. Measured on this host against the M5 shim, a full monitored `nim c` (nim driving gcc and ld, 25 206 records, mcComplete, eventLoss=0) in fact emitted ZERO mrNonDeterministic records at all, so the blessing is a declaration about what nim\'s randomness is FOR rather than a waiver being cashed in today -- which is the point: it must be in place before a nim or CRT revision starts drawing entropy on a path that does not affect the output."
+    subTools=["gcc"]
+    outputs=["output"]
+    optionalOutputs=[]
+    removeBeforeRun=[]
+    typedOutputs=[]
+      param name="defines" nimType="seq[string]" kind=cpkFlag role=carOrdinary format=cafConcat placement=capAfterSubcommand repeated=true position=0 alias="-d:" required=false src=repro_dsl_stdlib/packages/nim.nim:392
+      param name="mm" nimType="string" kind=cpkFlag role=carOrdinary format=cafConcat placement=capAfterSubcommand repeated=false position=0 alias="--mm:" required=false src=repro_dsl_stdlib/packages/nim.nim:396
+      param name="hintsOff" nimType="bool" kind=cpkFlag role=carOrdinary format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="--hints:off" required=false src=repro_dsl_stdlib/packages/nim.nim:399
+      param name="warningsOff" nimType="bool" kind=cpkFlag role=carOrdinary format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="--warnings:off" required=false src=repro_dsl_stdlib/packages/nim.nim:400
+      param name="disabledHints" nimType="seq[string]" kind=cpkFlag role=carOrdinary format=cafConcat placement=capAfterSubcommand repeated=true position=0 alias="--hint[" required=false src=repro_dsl_stdlib/packages/nim.nim:401
+      param name="disabledWarnings" nimType="seq[string]" kind=cpkFlag role=carOrdinary format=cafConcat placement=capAfterSubcommand repeated=true position=0 alias="--warning[" required=false src=repro_dsl_stdlib/packages/nim.nim:405
+      param name="debugInfo" nimType="bool" kind=cpkFlag role=carOrdinary format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="--debugInfo" required=false src=repro_dsl_stdlib/packages/nim.nim:409
+      param name="lineDirOn" nimType="bool" kind=cpkFlag role=carOrdinary format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="--lineDir:on" required=false src=repro_dsl_stdlib/packages/nim.nim:410
+      param name="stacktraceOn" nimType="bool" kind=cpkFlag role=carOrdinary format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="--stacktrace:on" required=false src=repro_dsl_stdlib/packages/nim.nim:411
+      param name="linetraceOn" nimType="bool" kind=cpkFlag role=carOrdinary format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="--linetrace:on" required=false src=repro_dsl_stdlib/packages/nim.nim:412
+      param name="debugInfoOn" nimType="bool" kind=cpkFlag role=carOrdinary format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="--debugInfo:on" required=false src=repro_dsl_stdlib/packages/nim.nim:413
+      param name="sourcemapOn" nimType="bool" kind=cpkFlag role=carOrdinary format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="--sourcemap:on" required=false src=repro_dsl_stdlib/packages/nim.nim:414
+      param name="hotCodeReloadingOn" nimType="bool" kind=cpkFlag role=carOrdinary format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="--hotCodeReloading:on" required=false src=repro_dsl_stdlib/packages/nim.nim:415
+      param name="output" nimType="string" kind=cpkFlag role=carOutput format=cafConcat placement=capAfterSubcommand repeated=false position=0 alias="--out:" required=true src=repro_dsl_stdlib/packages/nim.nim:416
+      param name="paths" nimType="seq[string]" kind=cpkFlag role=carOrdinary format=cafConcat placement=capAfterSubcommand repeated=true position=0 alias="--path:" required=false src=repro_dsl_stdlib/packages/nim.nim:421
+      param name="source" nimType="string" kind=cpkPositional role=carInput format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="" required=true src=repro_dsl_stdlib/packages/nim.nim:425
+    argv=["/tool/nim", "js", "-d:defines-a", "-d:defines-b", "--mm:mm-v", "--hints:off", "--warnings:off", "--hint[disabledHints-a", "--hint[disabledHints-b", "--warning[disabledWarnings-a", "--warning[disabledWarnings-b", "--debugInfo", "--lineDir:on", "--stacktrace:on", "--linetrace:on", "--debugInfo:on", "--sourcemap:on", "--hotCodeReloading:on", "--out:output-v", "--path:paths-a", "--path:paths-b", "source-v"]
+  interface sha256:1c22fd739a93dbc1414c52e63dc15670ac27b01bc7e1469fbc5c18e71c9a5a72
+package "ninja"
+  executable "ninjaBin" binary="ninjaBin" src=repro_dsl_stdlib/packages/ninja.nim:99
+    command name="" path=[] entry="ninja.ninjaBin.call" src=repro_dsl_stdlib/packages/ninja.nim:104
+    dependencyPolicy=(kind: bdpAutomaticMonitor, depfiles: @[], ignoredInputPrefixes: @[], suppressMonitorShimSeed: false, captureBreadth: mcbFullCapture)
+    nonDeterminism=ndpUnblessed justification=""
+    subTools=[]
+    outputs=[]
+    optionalOutputs=[]
+    removeBeforeRun=[]
+    typedOutputs=[]
+      param name="workDir" nimType="string" kind=cpkFlag role=carInput format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="-C" required=false src=repro_dsl_stdlib/packages/ninja.nim:104
+      param name="file" nimType="string" kind=cpkFlag role=carInput format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="-f" required=false src=repro_dsl_stdlib/packages/ninja.nim:108
+      param name="jobs" nimType="int" kind=cpkFlag role=carOrdinary format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="-j" required=false src=repro_dsl_stdlib/packages/ninja.nim:112
+      param name="tool" nimType="string" kind=cpkFlag role=carOrdinary format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="-t" required=false src=repro_dsl_stdlib/packages/ninja.nim:115
+      param name="targets" nimType="seq[string]" kind=cpkPositional role=carInput format=cafSeparate placement=capAfterSubcommand repeated=true position=0 alias="" required=true src=repro_dsl_stdlib/packages/ninja.nim:118
+    argv=["/tool/ninjaBin", "-C", "workDir-v", "-f", "file-v", "-j", "7", "-t", "tool-v", "targets-a", "targets-b"]
+  interface sha256:2e8b86ed3b1f7c7cbdaed341ff58eedfc9f42f8b41a04f9f981a49b7d18038f1
+package "nm"
+  executable "nmBin" binary="nmBin" src=repro_dsl_stdlib/packages/binutils.nim:201
+    command name="" path=[] entry="nm.nmBin.call" src=repro_dsl_stdlib/packages/binutils.nim:206
+    dependencyPolicy=(kind: bdpAutomaticMonitor, depfiles: @[], ignoredInputPrefixes: @[], suppressMonitorShimSeed: false, captureBreadth: mcbFullCapture)
+    nonDeterminism=ndpUnblessed justification=""
+    subTools=[]
+    outputs=[]
+    optionalOutputs=[]
+    removeBeforeRun=[]
+    typedOutputs=[]
+      param name="dynamic" nimType="bool" kind=cpkFlag role=carOrdinary format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="-D" required=false src=repro_dsl_stdlib/packages/binutils.nim:206
+      param name="externalOnly" nimType="bool" kind=cpkFlag role=carOrdinary format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="-g" required=false src=repro_dsl_stdlib/packages/binutils.nim:207
+      param name="demangle" nimType="bool" kind=cpkFlag role=carOrdinary format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="-C" required=false src=repro_dsl_stdlib/packages/binutils.nim:208
+      param name="input" nimType="string" kind=cpkPositional role=carInput format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="" required=true src=repro_dsl_stdlib/packages/binutils.nim:209
+    argv=["/tool/nmBin", "-D", "-g", "-C", "input-v"]
+  interface sha256:81df766b787fd964f79da7d3a00b2025f21f28d999403ce850837fa2f6e262cd
+package "node"
+  executable "node" binary="node" src=repro_dsl_stdlib/packages/node.nim:124
+    command name="" path=[] entry="node.node.call" src=repro_dsl_stdlib/packages/node.nim:127
+    dependencyPolicy=(kind: bdpDefault, depfiles: @[], ignoredInputPrefixes: @[], suppressMonitorShimSeed: false, captureBreadth: mcbFullCapture)
+    nonDeterminism=ndpUnblessed justification=""
+    subTools=[]
+    outputs=[]
+    optionalOutputs=[]
+    removeBeforeRun=[]
+    typedOutputs=[]
+      param name="args" nimType="seq[string]" kind=cpkPositional role=carOrdinary format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="" required=true src=repro_dsl_stdlib/packages/node.nim:127
+    argv=["/tool/node", "args-a", "args-b"]
+  interface sha256:3d4a8c69240932c44b5f8f90d0aff843afa42782c2543947d15c0060a5331681
+package "nsis"
+  executable "makensis" binary="makensis" src=repro_dsl_stdlib/packages/nsis.nim:54
+    command name="" path=[] entry="nsis.makensis.call" src=repro_dsl_stdlib/packages/nsis.nim:63
+    dependencyPolicy=(kind: bdpAutomaticMonitor, depfiles: @[], ignoredInputPrefixes: @[], suppressMonitorShimSeed: false, captureBreadth: mcbFullCapture)
+    nonDeterminism=ndpUnblessed justification=""
+    subTools=[]
+    outputs=[]
+    optionalOutputs=[]
+    removeBeforeRun=[]
+    typedOutputs=[]
+      param name="defines" nimType="seq[string]" kind=cpkFlag role=carOrdinary format=cafConcat placement=capAfterSubcommand repeated=true position=0 alias="-D" required=false src=repro_dsl_stdlib/packages/nsis.nim:63
+      param name="noCd" nimType="bool" kind=cpkFlag role=carOrdinary format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="-NOCD" required=false src=repro_dsl_stdlib/packages/nsis.nim:70
+      param name="script" nimType="string" kind=cpkPositional role=carInput format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="" required=true src=repro_dsl_stdlib/packages/nsis.nim:72
+    argv=["/tool/makensis", "-Ddefines-a", "-Ddefines-b", "-NOCD", "script-v"]
+  interface sha256:6ccc160cb47b3eaee22529e1bb71bd3f70f62192fa07d6801117adde990076d5
+package "objcopy"
+  executable "objcopyBin" binary="objcopyBin" src=repro_dsl_stdlib/packages/binutils.nim:251
+    command name="" path=[] entry="objcopy.objcopyBin.call" src=repro_dsl_stdlib/packages/binutils.nim:256
+    dependencyPolicy=(kind: bdpAutomaticMonitor, depfiles: @[], ignoredInputPrefixes: @[], suppressMonitorShimSeed: false, captureBreadth: mcbFullCapture)
+    nonDeterminism=ndpUnblessed justification=""
+    subTools=[]
+    outputs=["output"]
+    optionalOutputs=[]
+    removeBeforeRun=[]
+    typedOutputs=[]
+      param name="outputFormat" nimType="string" kind=cpkFlag role=carOrdinary format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="-O" required=false src=repro_dsl_stdlib/packages/binutils.nim:256
+      param name="inputFormat" nimType="string" kind=cpkFlag role=carOrdinary format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="-I" required=false src=repro_dsl_stdlib/packages/binutils.nim:259
+      param name="onlySection" nimType="string" kind=cpkFlag role=carOrdinary format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="-j" required=false src=repro_dsl_stdlib/packages/binutils.nim:262
+      param name="stripAll" nimType="bool" kind=cpkFlag role=carOrdinary format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="-S" required=false src=repro_dsl_stdlib/packages/binutils.nim:265
+      param name="stripDebug" nimType="bool" kind=cpkFlag role=carOrdinary format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="--strip-debug" required=false src=repro_dsl_stdlib/packages/binutils.nim:266
+      param name="input" nimType="string" kind=cpkPositional role=carInput format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="" required=true src=repro_dsl_stdlib/packages/binutils.nim:267
+      param name="output" nimType="string" kind=cpkPositional role=carOutput format=cafSeparate placement=capAfterSubcommand repeated=false position=1 alias="" required=true src=repro_dsl_stdlib/packages/binutils.nim:270
+    argv=["/tool/objcopyBin", "-O", "outputFormat-v", "-I", "inputFormat-v", "-j", "onlySection-v", "-S", "--strip-debug", "input-v", "output-v"]
+  interface sha256:a0a8af7de6e14c3572b6028d30dac766df0b7be4f2567cda5b626316a3fa3ce6
+package "objdump"
+  executable "objdumpBin" binary="objdumpBin" src=repro_dsl_stdlib/packages/binutils.nim:225
+    command name="" path=[] entry="objdump.objdumpBin.call" src=repro_dsl_stdlib/packages/binutils.nim:230
+    dependencyPolicy=(kind: bdpAutomaticMonitor, depfiles: @[], ignoredInputPrefixes: @[], suppressMonitorShimSeed: false, captureBreadth: mcbFullCapture)
+    nonDeterminism=ndpUnblessed justification=""
+    subTools=[]
+    outputs=[]
+    optionalOutputs=[]
+    removeBeforeRun=[]
+    typedOutputs=[]
+      param name="disassemble" nimType="bool" kind=cpkFlag role=carOrdinary format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="-d" required=false src=repro_dsl_stdlib/packages/binutils.nim:230
+      param name="sectionHeaders" nimType="bool" kind=cpkFlag role=carOrdinary format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="-h" required=false src=repro_dsl_stdlib/packages/binutils.nim:231
+      param name="fullContents" nimType="bool" kind=cpkFlag role=carOrdinary format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="-s" required=false src=repro_dsl_stdlib/packages/binutils.nim:232
+      param name="section" nimType="string" kind=cpkFlag role=carOrdinary format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="-j" required=false src=repro_dsl_stdlib/packages/binutils.nim:233
+      param name="input" nimType="string" kind=cpkPositional role=carInput format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="" required=true src=repro_dsl_stdlib/packages/binutils.nim:236
+    argv=["/tool/objdumpBin", "-d", "-h", "-s", "-j", "section-v", "input-v"]
+  interface sha256:337283d5d13882d188810af4bec56297a63ae5f073f15898e5e8139011f07f7f
+package "patchelf"
+  executable "patchelfBin" binary="patchelfBin" src=repro_dsl_stdlib/packages/patchelf.nim:55
+    command name="" path=[] entry="patchelf.patchelfBin.call" src=repro_dsl_stdlib/packages/patchelf.nim:64
+    dependencyPolicy=(kind: bdpAutomaticMonitor, depfiles: @[], ignoredInputPrefixes: @[], suppressMonitorShimSeed: false, captureBreadth: mcbFullCapture)
+    nonDeterminism=ndpUnblessed justification=""
+    subTools=[]
+    outputs=["output"]
+    optionalOutputs=[]
+    removeBeforeRun=[]
+    typedOutputs=[]
+      param name="setRpath" nimType="string" kind=cpkFlag role=carOrdinary format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="--set-rpath" required=false src=repro_dsl_stdlib/packages/patchelf.nim:64
+      param name="forceRpath" nimType="bool" kind=cpkFlag role=carOrdinary format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="--force-rpath" required=false src=repro_dsl_stdlib/packages/patchelf.nim:71
+      param name="setInterpreter" nimType="string" kind=cpkFlag role=carOrdinary format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="--set-interpreter" required=false src=repro_dsl_stdlib/packages/patchelf.nim:72
+      param name="shrinkRpath" nimType="bool" kind=cpkFlag role=carOrdinary format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="--shrink-rpath" required=false src=repro_dsl_stdlib/packages/patchelf.nim:75
+      param name="output" nimType="string" kind=cpkFlag role=carOutput format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="--output" required=true src=repro_dsl_stdlib/packages/patchelf.nim:85
+      param name="file" nimType="string" kind=cpkPositional role=carInput format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="" required=true src=repro_dsl_stdlib/packages/patchelf.nim:90
+    argv=["/tool/patchelfBin", "--set-rpath", "setRpath-v", "--force-rpath", "--set-interpreter", "setInterpreter-v", "--shrink-rpath", "--output", "output-v", "file-v"]
+  interface sha256:6003953402eb2c5bf9fe4eace041bfae8ab2f8d8c28a76ed997aaadbd44fe738
+package "ranlib"
+  executable "ranlibBin" binary="ranlibBin" src=repro_dsl_stdlib/packages/binutils.nim:151
+    command name="" path=[] entry="ranlib.ranlibBin.call" src=repro_dsl_stdlib/packages/binutils.nim:156
+    dependencyPolicy=(kind: bdpAutomaticMonitor, depfiles: @[], ignoredInputPrefixes: @[], suppressMonitorShimSeed: false, captureBreadth: mcbFullCapture)
+    nonDeterminism=ndpUnblessed justification=""
+    subTools=[]
+    outputs=["archive"]
+    optionalOutputs=[]
+    removeBeforeRun=[]
+    typedOutputs=[]
+      param name="archive" nimType="string" kind=cpkPositional role=carOutput format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="" required=true src=repro_dsl_stdlib/packages/binutils.nim:156
+    argv=["/tool/ranlibBin", "archive-v"]
+  interface sha256:70b710d13de8c0aa0acc500646e90e712a8271d5d44404604d121d0734db7c45
+package "readelf"
+  executable "readelfBin" binary="readelfBin" src=repro_dsl_stdlib/packages/readelf.nim:57
+    command name="" path=[] entry="readelf.readelfBin.call" src=repro_dsl_stdlib/packages/readelf.nim:67
+    dependencyPolicy=(kind: bdpAutomaticMonitor, depfiles: @[], ignoredInputPrefixes: @[], suppressMonitorShimSeed: false, captureBreadth: mcbFullCapture)
+    nonDeterminism=ndpUnblessed justification=""
+    subTools=[]
+    outputs=[]
+    optionalOutputs=[]
+    removeBeforeRun=[]
+    typedOutputs=[]
+      param name="versionInfo" nimType="bool" kind=cpkFlag role=carOrdinary format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="-V" required=false src=repro_dsl_stdlib/packages/readelf.nim:67
+      param name="dynamic" nimType="bool" kind=cpkFlag role=carOrdinary format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="-d" required=false src=repro_dsl_stdlib/packages/readelf.nim:68
+      param name="wide" nimType="bool" kind=cpkFlag role=carOrdinary format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="-W" required=false src=repro_dsl_stdlib/packages/readelf.nim:69
+      param name="input" nimType="string" kind=cpkPositional role=carInput format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="" required=true src=repro_dsl_stdlib/packages/readelf.nim:70
+    argv=["/tool/readelfBin", "-V", "-d", "-W", "input-v"]
+  interface sha256:17526667b76d72c8a2c8b1bf61ba38c34e00425f8a863cf1932284a41d6a84c4
+package "rpmbuild"
+  executable "rpmbuildBin" binary="rpmbuildBin" src=repro_dsl_stdlib/packages/rpmbuild.nim:38
+    command name="" path=[] entry="rpmbuild.rpmbuildBin.call" src=repro_dsl_stdlib/packages/rpmbuild.nim:43
+    dependencyPolicy=(kind: bdpAutomaticMonitor, depfiles: @[], ignoredInputPrefixes: @[], suppressMonitorShimSeed: false, captureBreadth: mcbFullCapture)
+    nonDeterminism=ndpUnblessed justification=""
+    subTools=[]
+    outputs=[]
+    optionalOutputs=[]
+    removeBeforeRun=[]
+    typedOutputs=[]
+      param name="binaryOnly" nimType="bool" kind=cpkFlag role=carOrdinary format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="-bb" required=false src=repro_dsl_stdlib/packages/rpmbuild.nim:43
+      param name="defines" nimType="seq[string]" kind=cpkFlag role=carOrdinary format=cafSeparate placement=capAfterSubcommand repeated=true position=0 alias="--define" required=false src=repro_dsl_stdlib/packages/rpmbuild.nim:44
+      param name="target" nimType="string" kind=cpkFlag role=carOrdinary format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="--target" required=false src=repro_dsl_stdlib/packages/rpmbuild.nim:48
+      param name="buildRoot" nimType="string" kind=cpkFlag role=carOrdinary format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="--buildroot" required=false src=repro_dsl_stdlib/packages/rpmbuild.nim:60
+      param name="quiet" nimType="bool" kind=cpkFlag role=carOrdinary format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="--quiet" required=false src=repro_dsl_stdlib/packages/rpmbuild.nim:63
+      param name="specFile" nimType="string" kind=cpkPositional role=carInput format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="" required=true src=repro_dsl_stdlib/packages/rpmbuild.nim:64
+    argv=["/tool/rpmbuildBin", "-bb", "--define", "defines-a", "--define", "defines-b", "--target", "target-v", "--buildroot", "buildRoot-v", "--quiet", "specFile-v"]
+  interface sha256:0dc1f579070b2056b7f1afc6d917b7673cd845b83992111bc9eb8508d80d0f51
+package "sh"
+  executable "sh" binary="sh" src=repro_dsl_stdlib/packages/sh.nim:42
+    command name="" path=[] entry="sh.sh.call" src=repro_dsl_stdlib/packages/sh.nim:162
+    dependencyPolicy=(kind: bdpAutomaticMonitor, depfiles: @[], ignoredInputPrefixes: @[], suppressMonitorShimSeed: false, captureBreadth: mcbFullCapture)
+    nonDeterminism=ndpUnblessed justification=""
+    subTools=[]
+    outputs=[]
+    optionalOutputs=[]
+    removeBeforeRun=[]
+    typedOutputs=[]
+      param name="command" nimType="string" kind=cpkFlag role=carOrdinary format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="-c" required=true src=repro_dsl_stdlib/packages/sh.nim:162
+      param name="args" nimType="seq[string]" kind=cpkPositional role=carOrdinary format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="" required=true src=repro_dsl_stdlib/packages/sh.nim:165
+    argv=["/tool/sh", "-c", "command-v", "args-a", "args-b"]
+  interface sha256:e87935fcf8bab6aaaafc7814abadd96c2d6edaecf61c67d92c8e2310320c0d3b
+package "strip"
+  executable "stripBin" binary="stripBin" src=repro_dsl_stdlib/packages/binutils.nim:174
+    command name="" path=[] entry="strip.stripBin.call" src=repro_dsl_stdlib/packages/binutils.nim:179
+    dependencyPolicy=(kind: bdpAutomaticMonitor, depfiles: @[], ignoredInputPrefixes: @[], suppressMonitorShimSeed: false, captureBreadth: mcbFullCapture)
+    nonDeterminism=ndpUnblessed justification=""
+    subTools=[]
+    outputs=[]
+    optionalOutputs=[]
+    removeBeforeRun=[]
+    typedOutputs=[]
+      param name="stripAll" nimType="bool" kind=cpkFlag role=carOrdinary format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="-s" required=false src=repro_dsl_stdlib/packages/binutils.nim:179
+      param name="stripDebug" nimType="bool" kind=cpkFlag role=carOrdinary format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="-S" required=false src=repro_dsl_stdlib/packages/binutils.nim:180
+      param name="stripUnneeded" nimType="bool" kind=cpkFlag role=carOrdinary format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="--strip-unneeded" required=false src=repro_dsl_stdlib/packages/binutils.nim:181
+      param name="output" nimType="string" kind=cpkFlag role=carOutput format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="-o" required=false src=repro_dsl_stdlib/packages/binutils.nim:182
+      param name="input" nimType="string" kind=cpkPositional role=carInput format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="" required=true src=repro_dsl_stdlib/packages/binutils.nim:186
+    argv=["/tool/stripBin", "-s", "-S", "--strip-unneeded", "-o", "output-v", "input-v"]
+  interface sha256:15566f9c393c4ae6b4fccd51534f4a94350185e320a137abb3036c9025bfa609
+package "stylus"
+  executable "stylus" binary="stylus" src=repro_dsl_stdlib/packages/stylus.nim:63
+    command name="" path=[] entry="stylus.stylus.call" src=repro_dsl_stdlib/packages/stylus.nim:68
+    dependencyPolicy=(kind: bdpAutomaticMonitor, depfiles: @[], ignoredInputPrefixes: @[], suppressMonitorShimSeed: false, captureBreadth: mcbFullCapture)
+    nonDeterminism=ndpUnblessed justification=""
+    subTools=[]
+    outputs=["output"]
+    optionalOutputs=[]
+    removeBeforeRun=[]
+    typedOutputs=[]
+      param name="output" nimType="string" kind=cpkFlag role=carOutput format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="-o" required=true src=repro_dsl_stdlib/packages/stylus.nim:68
+      param name="source" nimType="string" kind=cpkPositional role=carInput format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="" required=true src=repro_dsl_stdlib/packages/stylus.nim:72
+    argv=["/tool/stylus", "-o", "output-v", "source-v"]
+  interface sha256:b7aec66aec9a901e5c2cbb1667a12860358e1c99c56dec4860cf906ef55bd3bc
+package "tar"
+  executable "tarBin" binary="tarBin" src=repro_dsl_stdlib/packages/tar.nim:88
+    command name="" path=[] entry="tar.tarBin.call" src=repro_dsl_stdlib/packages/tar.nim:93
+    dependencyPolicy=(kind: bdpAutomaticMonitor, depfiles: @[], ignoredInputPrefixes: @[], suppressMonitorShimSeed: false, captureBreadth: mcbFullCapture)
+    nonDeterminism=ndpUnblessed justification=""
+    subTools=[]
+    outputs=["file"]
+    optionalOutputs=[]
+    removeBeforeRun=[]
+    typedOutputs=[]
+      param name="create" nimType="bool" kind=cpkFlag role=carOrdinary format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="-c" required=false src=repro_dsl_stdlib/packages/tar.nim:93
+      param name="gzip" nimType="bool" kind=cpkFlag role=carOrdinary format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="-z" required=false src=repro_dsl_stdlib/packages/tar.nim:94
+      param name="file" nimType="string" kind=cpkFlag role=carOutput format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="-f" required=false src=repro_dsl_stdlib/packages/tar.nim:95
+      param name="directory" nimType="string" kind=cpkFlag role=carInput format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="-C" required=false src=repro_dsl_stdlib/packages/tar.nim:99
+      param name="sortByName" nimType="bool" kind=cpkFlag role=carOrdinary format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="--sort=name" required=false src=repro_dsl_stdlib/packages/tar.nim:103
+      param name="mtime" nimType="string" kind=cpkFlag role=carOrdinary format=cafConcat placement=capAfterSubcommand repeated=false position=0 alias="--mtime=" required=false src=repro_dsl_stdlib/packages/tar.nim:104
+      param name="owner" nimType="string" kind=cpkFlag role=carOrdinary format=cafConcat placement=capAfterSubcommand repeated=false position=0 alias="--owner=" required=false src=repro_dsl_stdlib/packages/tar.nim:107
+      param name="group" nimType="string" kind=cpkFlag role=carOrdinary format=cafConcat placement=capAfterSubcommand repeated=false position=0 alias="--group=" required=false src=repro_dsl_stdlib/packages/tar.nim:110
+      param name="numericOwner" nimType="bool" kind=cpkFlag role=carOrdinary format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="--numeric-owner" required=false src=repro_dsl_stdlib/packages/tar.nim:113
+      param name="transform" nimType="string" kind=cpkFlag role=carOrdinary format=cafConcat placement=capAfterSubcommand repeated=false position=0 alias="--transform=" required=false src=repro_dsl_stdlib/packages/tar.nim:114
+      param name="members" nimType="seq[string]" kind=cpkPositional role=carOrdinary format=cafSeparate placement=capAfterSubcommand repeated=true position=0 alias="" required=true src=repro_dsl_stdlib/packages/tar.nim:117
+    argv=["/tool/tarBin", "-c", "-z", "-f", "file-v", "-C", "directory-v", "--sort=name", "--mtime=mtime-v", "--owner=owner-v", "--group=group-v", "--numeric-owner", "--transform=transform-v", "members-a", "members-b"]
+  interface sha256:fd7104fd05c120f955844ab8e5d482216583ef5a6cef753db68c9ae9128f35b0
+package "tree-sitter"
+  executable "treeSitter" binary="tree-sitter" src=repro_dsl_stdlib/packages/tree_sitter.nim:11
+    command name="generate" path=["generate"] entry="tree-sitter.treeSitter.generate" src=repro_dsl_stdlib/packages/tree_sitter.nim:23
+    dependencyPolicy=(kind: bdpAutomaticMonitor, depfiles: @[], ignoredInputPrefixes: @[], suppressMonitorShimSeed: false, captureBreadth: mcbFullCapture)
+    nonDeterminism=ndpUnblessed justification=""
+    subTools=["node"]
+    outputs=["outputDir"]
+    optionalOutputs=[]
+    removeBeforeRun=[]
+    typedOutputs=[]
+      param name="outputDir" nimType="string" kind=cpkFlag role=carOutput format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="--output" required=true src=repro_dsl_stdlib/packages/tree_sitter.nim:23
+      param name="abi" nimType="int" kind=cpkFlag role=carOrdinary format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="--abi" required=false src=repro_dsl_stdlib/packages/tree_sitter.nim:28
+      param name="grammar" nimType="string" kind=cpkPositional role=carInput format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="" required=true src=repro_dsl_stdlib/packages/tree_sitter.nim:31
+    argv=["/tool/treeSitter", "generate", "--output", "outputDir-v", "--abi", "7", "grammar-v"]
+  interface sha256:0eb379daf026f9c94d3d6143a076312ee574320a4852f3b2ea6ff39fc06dd0e8
+package "wix-candle"
+  executable "candleBin" binary="candleBin" src=repro_dsl_stdlib/packages/wix3_tools.nim:70
+    command name="" path=[] entry="wix-candle.candleBin.call" src=repro_dsl_stdlib/packages/wix3_tools.nim:75
+    dependencyPolicy=(kind: bdpAutomaticMonitor, depfiles: @[], ignoredInputPrefixes: @[], suppressMonitorShimSeed: false, captureBreadth: mcbFullCapture)
+    nonDeterminism=ndpUnblessed justification=""
+    subTools=[]
+    outputs=["output"]
+    optionalOutputs=[]
+    removeBeforeRun=[]
+    typedOutputs=[]
+      param name="noLogo" nimType="bool" kind=cpkFlag role=carOrdinary format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="-nologo" required=false src=repro_dsl_stdlib/packages/wix3_tools.nim:75
+      param name="arch" nimType="string" kind=cpkFlag role=carOrdinary format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="-arch" required=false src=repro_dsl_stdlib/packages/wix3_tools.nim:76
+      param name="defines" nimType="seq[string]" kind=cpkFlag role=carOrdinary format=cafConcat placement=capAfterSubcommand repeated=true position=0 alias="-d" required=false src=repro_dsl_stdlib/packages/wix3_tools.nim:79
+      param name="extensions" nimType="seq[string]" kind=cpkFlag role=carOrdinary format=cafSeparate placement=capAfterSubcommand repeated=true position=0 alias="-ext" required=false src=repro_dsl_stdlib/packages/wix3_tools.nim:83
+      param name="output" nimType="string" kind=cpkFlag role=carOutput format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="-out" required=true src=repro_dsl_stdlib/packages/wix3_tools.nim:87
+      param name="sources" nimType="seq[string]" kind=cpkPositional role=carInput format=cafSeparate placement=capAfterSubcommand repeated=true position=0 alias="" required=true src=repro_dsl_stdlib/packages/wix3_tools.nim:92
+    argv=["/tool/candleBin", "-nologo", "-arch", "arch-v", "-ddefines-a", "-ddefines-b", "-ext", "extensions-a", "-ext", "extensions-b", "-out", "output-v", "sources-a", "sources-b"]
+  interface sha256:e219015158e75b1cc22f81cf790a55a3e29ae96f8ba2ac927c4dd438ada48316
+package "wix-light"
+  executable "lightBin" binary="lightBin" src=repro_dsl_stdlib/packages/wix3_tools.nim:111
+    command name="" path=[] entry="wix-light.lightBin.call" src=repro_dsl_stdlib/packages/wix3_tools.nim:116
+    dependencyPolicy=(kind: bdpAutomaticMonitor, depfiles: @[], ignoredInputPrefixes: @[], suppressMonitorShimSeed: false, captureBreadth: mcbFullCapture)
+    nonDeterminism=ndpUnblessed justification=""
+    subTools=[]
+    outputs=["output"]
+    optionalOutputs=[]
+    removeBeforeRun=[]
+    typedOutputs=[]
+      param name="noLogo" nimType="bool" kind=cpkFlag role=carOrdinary format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="-nologo" required=false src=repro_dsl_stdlib/packages/wix3_tools.nim:116
+      param name="suppressValidation" nimType="bool" kind=cpkFlag role=carOrdinary format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="-sval" required=false src=repro_dsl_stdlib/packages/wix3_tools.nim:123
+      param name="suppressWarnings" nimType="seq[string]" kind=cpkFlag role=carOrdinary format=cafConcat placement=capAfterSubcommand repeated=true position=0 alias="-sw" required=false src=repro_dsl_stdlib/packages/wix3_tools.nim:124
+      param name="extensions" nimType="seq[string]" kind=cpkFlag role=carOrdinary format=cafSeparate placement=capAfterSubcommand repeated=true position=0 alias="-ext" required=false src=repro_dsl_stdlib/packages/wix3_tools.nim:128
+      param name="output" nimType="string" kind=cpkFlag role=carOutput format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="-out" required=true src=repro_dsl_stdlib/packages/wix3_tools.nim:132
+      param name="objects" nimType="seq[string]" kind=cpkPositional role=carInput format=cafSeparate placement=capAfterSubcommand repeated=true position=0 alias="" required=true src=repro_dsl_stdlib/packages/wix3_tools.nim:137
+    argv=["/tool/lightBin", "-nologo", "-sval", "-swsuppressWarnings-a", "-swsuppressWarnings-b", "-ext", "extensions-a", "-ext", "extensions-b", "-out", "output-v", "objects-a", "objects-b"]
+  interface sha256:4c9bd3cbbe1be5d3e70f8226f1bddb1a1be09f6a2e54da0a5ca9302d4b5bd9dd
+package "zig"
+  executable "zig" binary="zig" src=repro_dsl_stdlib/packages/zig.nim:171
+    command name="cc" path=["cc"] entry="zig.zig.cc" src=repro_dsl_stdlib/packages/zig.nim:179
+    dependencyPolicy=(kind: bdpAutomaticMonitor, depfiles: @[], ignoredInputPrefixes: @[], suppressMonitorShimSeed: false, captureBreadth: mcbFullCapture)
+    nonDeterminism=ndpUnblessed justification=""
+    subTools=[]
+    outputs=["output"]
+    optionalOutputs=[]
+    removeBeforeRun=[]
+    typedOutputs=[]
+      param name="pic" nimType="bool" kind=cpkFlag role=carOrdinary format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="-fPIC" required=false src=repro_dsl_stdlib/packages/zig.nim:179
+      param name="debug3" nimType="bool" kind=cpkFlag role=carOrdinary format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="-g3" required=false src=repro_dsl_stdlib/packages/zig.nim:180
+      param name="compileOnly" nimType="bool" kind=cpkFlag role=carOrdinary format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="-c" required=false src=repro_dsl_stdlib/packages/zig.nim:181
+      param name="shared" nimType="bool" kind=cpkFlag role=carOrdinary format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="-shared" required=false src=repro_dsl_stdlib/packages/zig.nim:182
+      param name="staticLink" nimType="bool" kind=cpkFlag role=carOrdinary format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="-static" required=false src=repro_dsl_stdlib/packages/zig.nim:183
+      param name="includeDirs" nimType="seq[string]" kind=cpkFlag role=carOrdinary format=cafConcat placement=capAfterSubcommand repeated=true position=0 alias="-I" required=false src=repro_dsl_stdlib/packages/zig.nim:184
+      param name="libDirs" nimType="seq[string]" kind=cpkFlag role=carOrdinary format=cafConcat placement=capAfterSubcommand repeated=true position=0 alias="-L" required=false src=repro_dsl_stdlib/packages/zig.nim:188
+      param name="libs" nimType="seq[string]" kind=cpkFlag role=carOrdinary format=cafConcat placement=capAfterSubcommand repeated=true position=0 alias="-l" required=false src=repro_dsl_stdlib/packages/zig.nim:192
+      param name="defines" nimType="seq[string]" kind=cpkFlag role=carOrdinary format=cafConcat placement=capAfterSubcommand repeated=true position=0 alias="-D" required=false src=repro_dsl_stdlib/packages/zig.nim:196
+      param name="optimization" nimType="string" kind=cpkFlag role=carOrdinary format=cafConcat placement=capAfterSubcommand repeated=false position=0 alias="-O" required=false src=repro_dsl_stdlib/packages/zig.nim:200
+      param name="standard" nimType="string" kind=cpkFlag role=carOrdinary format=cafConcat placement=capAfterSubcommand repeated=false position=0 alias="-std=" required=false src=repro_dsl_stdlib/packages/zig.nim:203
+      param name="soname" nimType="string" kind=cpkFlag role=carOrdinary format=cafConcat placement=capAfterSubcommand repeated=false position=0 alias="-Wl,-soname," required=false src=repro_dsl_stdlib/packages/zig.nim:206
+      param name="output" nimType="string" kind=cpkFlag role=carOutput format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="-o" required=true src=repro_dsl_stdlib/packages/zig.nim:209
+      param name="targetArgs" nimType="seq[string]" kind=cpkPositional role=carOrdinary format=cafSeparate placement=capAfterSubcommand repeated=true position=0 alias="" required=true src=repro_dsl_stdlib/packages/zig.nim:213
+      param name="sources" nimType="seq[string]" kind=cpkPositional role=carInput format=cafSeparate placement=capAfterSubcommand repeated=true position=1 alias="" required=true src=repro_dsl_stdlib/packages/zig.nim:216
+      param name="extra" nimType="seq[string]" kind=cpkPositional role=carOrdinary format=cafSeparate placement=capAfterSubcommand repeated=true position=2 alias="" required=true src=repro_dsl_stdlib/packages/zig.nim:222
+    argv=["/tool/zig", "cc", "-fPIC", "-g3", "-c", "-shared", "-static", "-IincludeDirs-a", "-IincludeDirs-b", "-LlibDirs-a", "-LlibDirs-b", "-llibs-a", "-llibs-b", "-Ddefines-a", "-Ddefines-b", "-Ooptimization-v", "-std=standard-v", "-Wl,-soname,soname-v", "-o", "output-v", "targetArgs-a", "targetArgs-b", "sources-a", "sources-b", "extra-a", "extra-b"]
+    command name="ar" path=["ar"] entry="zig.zig.ar" src=repro_dsl_stdlib/packages/zig.nim:229
+    dependencyPolicy=(kind: bdpAutomaticMonitor, depfiles: @[], ignoredInputPrefixes: @[], suppressMonitorShimSeed: false, captureBreadth: mcbFullCapture)
+    nonDeterminism=ndpUnblessed justification=""
+    subTools=[]
+    outputs=["archive"]
+    optionalOutputs=[]
+    removeBeforeRun=[]
+    typedOutputs=[]
+      param name="modifiers" nimType="string" kind=cpkPositional role=carOrdinary format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="" required=true src=repro_dsl_stdlib/packages/zig.nim:229
+      param name="archive" nimType="string" kind=cpkPositional role=carOutput format=cafSeparate placement=capAfterSubcommand repeated=false position=1 alias="" required=true src=repro_dsl_stdlib/packages/zig.nim:231
+      param name="objects" nimType="seq[string]" kind=cpkPositional role=carInput format=cafSeparate placement=capAfterSubcommand repeated=true position=2 alias="" required=true src=repro_dsl_stdlib/packages/zig.nim:234
+    argv=["/tool/zig", "ar", "modifiers-v", "archive-v", "objects-a", "objects-b"]
+  interface sha256:0e19cde11f1976f758e56207ae84972cf2174ef89b2bf49edd2391579771b7b6
+defineCliInterface "cs-m1-iface"
+  call "cs-m1-iface" "cs-m1-iface" "" entry="cs-m1-iface.call"
+    dependencyPolicy=(kind: bdpMakeDepfile, depfiles: @[], ignoredInputPrefixes: @[], suppressMonitorShimSeed: false, captureBreadth: mcbFullCapture)
+    arg name="config" nimType="string" kind=cpkFlag role=carOrdinary format=cafEquals placement=capBeforeSubcommand repeated=false position=0 alias="--config" value="cfg"
+    arg name="verbose" nimType="bool" kind=cpkFlag role=carOrdinary format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="-v" value="true"
+    arg name="defines" nimType="seq[string]" kind=cpkFlag role=carOrdinary format=cafConcat placement=capAfterSubcommand repeated=true position=0 alias="-D" value="A\x1FB=1"
+    arg name="output" nimType="string" kind=cpkFlag role=carOutput format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="-o" value="out.bin"
+    arg name="sources" nimType="seq[string]" kind=cpkPositional role=carInput format=cafSeparate placement=capAfterSubcommand repeated=false position=1 alias="" value="a.c\x1Fb.c"
+    arg name="mode" nimType="string" kind=cpkPositional role=carOrdinary format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="" value="fast"
+    argv=["/tool/cs-m1-iface", "--config=cfg", "-v", "-DA", "-DB=1", "-o", "out.bin", "fast", "a.c", "b.c"]
+  call "cs-m1-iface" "cs-m1-iface" "link" entry="cs-m1-iface.link"
+    dependencyPolicy=(kind: bdpMakeDepfile, depfiles: @[], ignoredInputPrefixes: @[], suppressMonitorShimSeed: false, captureBreadth: mcbFullCapture)
+    arg name="config" nimType="string" kind=cpkFlag role=carOrdinary format=cafEquals placement=capBeforeSubcommand repeated=false position=0 alias="--config" value="cfg"
+    arg name="verbose" nimType="bool" kind=cpkFlag role=carOrdinary format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="-v" value="true"
+    arg name="defines" nimType="seq[string]" kind=cpkFlag role=carOrdinary format=cafConcat placement=capAfterSubcommand repeated=true position=0 alias="-D" value="C"
+    arg name="libs" nimType="seq[string]" kind=cpkFlag role=carOrdinary format=cafConcat placement=capBeforeSubcommand repeated=true position=0 alias="-l" value="m\x1Fz"
+    arg name="jobs" nimType="int" kind=cpkFlag role=carOrdinary format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="-j" value="4"
+    arg name="objects" nimType="seq[string]" kind=cpkPositional role=carInput format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="" value="a.o\x1Fb.o"
+    argv=["/tool/cs-m1-iface", "--config=cfg", "-lm", "-lz", "link", "-v", "-DC", "-j", "4", "a.o", "b.o"]

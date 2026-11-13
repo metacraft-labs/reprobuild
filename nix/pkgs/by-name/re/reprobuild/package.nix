@@ -146,6 +146,14 @@
     rev = "84fd76b174d4868e703ba3d599668ee340e0b6ea";
     hash = "sha256-ph1AMDJSXCDuvC4JH6NxSU7yXEFYz4UjJ1zW+Tj19EA=";
   },
+  # Added after the `src` commit, so it mirrors this tree's `flake.lock`
+  # (see the Sources header).
+  cliSpecSrc ? fetchFromGitHub {
+    owner = "metacraft-labs";
+    repo = "nim-cli-spec";
+    rev = "9b0606d695889674d4ac9d3d3afce69aa339b6fe";
+    hash = "sha256-W7otqc/5HS5HSkC3biyhpOIOXcsIaR8UoPd1kDL7YuE=";
+  },
   codetracerSrc ? fetchFromGitHub {
     owner = "metacraft-labs";
     repo = "codetracer";
@@ -303,6 +311,7 @@ stdenv.mkDerivation (finalAttrs: {
     IO_MON_SRC = "${ioMonSrc}/src";
     SHM_GSET_SRC = "${shmGsetSrc}/src";
     SHM_QUEUE_SRC = "${shmQueueSrc}/src";
+    CLI_SPEC_SRC = "${cliSpecSrc}/src";
     # Tier 3 of `config.nims`'s incremental-test-seam resolution, and the tier
     # this build has always needed. It runs in a pure sandbox with no
     # `../codetracer` in reach, so before this variable existed the packaged
@@ -450,6 +459,7 @@ stdenv.mkDerivation (finalAttrs: {
         --set-default IO_MON_SRC ${ioMonSrc}/src \
         --set-default SHM_GSET_SRC ${shmGsetSrc}/src \
         --set-default SHM_QUEUE_SRC ${shmQueueSrc}/src \
+        --set-default CLI_SPEC_SRC ${cliSpecSrc}/src \
         --set-default CODETRACER_PINNED_SRC ${codetracerSrc}/src \
         --set-default REPRO_CT_TEST_RUNNER_SRC ${ctTestRunnerSrc} \
         --set-default REPRO_TEST_ADAPTERS_SRC ${testAdaptersSrc}/src \
@@ -546,6 +556,7 @@ stdenv.mkDerivation (finalAttrs: {
         ioMonSrc
         shmGsetSrc
         shmQueueSrc
+        cliSpecSrc
         codetracerSrc
         ctTestRunnerSrc
         testAdaptersSrc

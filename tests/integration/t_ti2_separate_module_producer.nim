@@ -158,6 +158,7 @@ proc compileConsumer(consumerDir, witnessPath, producerSelector, bindStmt,
       quoteShell(repoRoot / "libs" / "nimcrypto"))
     for envName in [
         "BEARSSL_SRC",
+        "CLI_SPEC_SRC",
         "REPRO_CT_TEST_RUNNER_SRC",
         "REPRO_TEST_ADAPTERS_SRC",
         "SHM_GSET_SRC",

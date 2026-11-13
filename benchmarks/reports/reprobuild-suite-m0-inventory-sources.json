@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 35,
-    "nimTestBinaries": 2772,
+    "nimTestBinaries": 2774,
     "pureUnitConsolidationGroups": 82,
-    "pureUnitTests": 760,
+    "pureUnitTests": 761,
     "staticallyDetectedRuntimeCompilerFlowTests": 138,
-    "testEntries": 2816
+    "testEntries": 2818
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1292,6 +1292,23 @@
       "targetOs": "soAny"
     },
     {
+      "count": 6,
+      "defines": [],
+      "dependencyShape": [
+        "repro_project_dsl"
+      ],
+      "owner": "tests/unit",
+      "sources": [
+        "tests/unit/t_cs_m1_external_tool_argv_unchanged.nim",
+        "tests/unit/t_install_mirror_shell_tools.nim",
+        "tests/unit/t_m9r15p_0_qt6_transitive_auto_inject.nim",
+        "tests/unit/t_m9r15q_2_from_source_custom_registry_population.nim",
+        "tests/unit/t_m9r1_deps_package_level.nim",
+        "tests/unit/t_m9r34_recipe_edit_invalidates_local_cache.nim"
+      ],
+      "targetOs": "soAny"
+    },
+    {
       "count": 26,
       "defines": [],
       "dependencyShape": [
@@ -1406,22 +1423,6 @@
         "tests/unit/t_hcr_agent_protocol.nim",
         "tests/unit/t_hcr_agent_runtime.nim",
         "tests/unit/t_hcr_dispatch_c_smoke.nim"
-      ],
-      "targetOs": "soAny"
-    },
-    {
-      "count": 5,
-      "defines": [],
-      "dependencyShape": [
-        "repro_project_dsl"
-      ],
-      "owner": "tests/unit",
-      "sources": [
-        "tests/unit/t_install_mirror_shell_tools.nim",
-        "tests/unit/t_m9r15p_0_qt6_transitive_auto_inject.nim",
-        "tests/unit/t_m9r15q_2_from_source_custom_registry_population.nim",
-        "tests/unit/t_m9r1_deps_package_level.nim",
-        "tests/unit/t_m9r34_recipe_edit_invalidates_local_cache.nim"
       ],
       "targetOs": "soAny"
     },
@@ -1617,8 +1618,8 @@
       "graph-fixture": 21,
       "integration": 1526,
       "platform/destructive": 177,
-      "pure unit": 760,
-      "unclassified": 332
+      "pure unit": 761,
+      "unclassified": 333
     },
     "graphOwnedTestArtifacts": [
       {
@@ -1832,9 +1833,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2772,
+    "nimTestBinaryCount": 2774,
     "pythonTestFileCount": 44,
-    "testEntryCount": 2816
+    "testEntryCount": 2818
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -7833,7 +7834,7 @@
           "executedVariables": [
             "cmd"
           ],
-          "line": 175,
+          "line": 176,
           "path": "tests/integration/t_ti2_separate_module_producer.nim",
           "patterns": [
             "nim-compile-verb"
@@ -7847,7 +7848,7 @@
           "executedVariables": [
             "cmd"
           ],
-          "line": 177,
+          "line": 178,
           "path": "tests/integration/t_ti2_separate_module_producer.nim",
           "patterns": [
             "nim-compile-verb"
@@ -18584,6 +18585,23 @@
       "source": "libs/repro_interface_artifacts/tests/t_compiler_crash_is_not_a_compile_error.nim",
       "sourceSuiteCount": 3,
       "staticCaseCount": 12,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_consumer_compile_paths_carry_clispec",
+      "class": "unclassified",
+      "classificationReason": "mutates the process environment",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_interface_artifacts"
+      ],
+      "owner": "libs/repro_interface_artifacts",
+      "requiresReproBinary": false,
+      "source": "libs/repro_interface_artifacts/tests/t_consumer_compile_paths_carry_clispec.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 2,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -54504,6 +54522,23 @@
       "source": "tests/unit/t_cross_repo_runtime_tool_closure.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 2,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_cs_m1_external_tool_argv_unchanged",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_project_dsl"
+      ],
+      "owner": "tests/unit",
+      "requiresReproBinary": false,
+      "source": "tests/unit/t_cs_m1_external_tool_argv_unchanged.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 3,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

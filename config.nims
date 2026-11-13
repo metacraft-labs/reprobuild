@@ -953,6 +953,13 @@ addSiblingFirstPackagePath(".." / "nim-shm-queue" / "src", "SHM_QUEUE_SRC",
   "shm_queue.nim")
 addSiblingFirstPackagePath(".." / "nim-shm-gset" / "src", "SHM_GSET_SRC",
   "shm_gset.nim")
+# clispec: the ``cli:`` description language and its typed CLI model, which
+# ``repro_project_dsl`` builds every ``executable … cli:`` block on (and so
+# every recipe and provider compile imports). Developed side by side with this
+# repository, so the same sibling-first policy as the shm libraries applies:
+# the ``../nim-cli-spec`` checkout, else the ``$CLI_SPEC_SRC`` pin.
+addSiblingFirstPackagePath(".." / "nim-cli-spec" / "src", "CLI_SPEC_SRC",
+  "clispec.nim")
 
 # SHM-GSET: TWO independent users of one data structure, and the distinction is
 # easy to lose. io-mon's Linux dependency-capture channel is the grow-only

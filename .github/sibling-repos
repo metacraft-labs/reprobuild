@@ -256,6 +256,9 @@ nim-stackable-hooks
 runquota=9e81c1bd06b57d01e505d861ab4a3e09398de718
 nim-shm-queue
 nim-shm-gset=7bc81ad2440860a8a9254eb2757c585df9652438
+# clispec, the `cli:` language and typed CLI model repro_project_dsl builds
+# on. Cloned at repro.lock's revision, like nim-shm-queue.
+nim-cli-spec
 
 # nim-shm-lease: runquota's published stats table imports its anchor on
 # WINDOWS now, not only on Linux/macOS, and the Windows release leg builds

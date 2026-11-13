@@ -260,6 +260,8 @@ if [[ -z "${BEARSSL_SRC:-}" ]]; then
 fi
 shm_queue_src="$(resolve_shm_queue_src)"
 export SHM_QUEUE_SRC="${shm_queue_src}"
+CLI_SPEC_SRC="$(resolve_cli_spec_src)"
+export CLI_SPEC_SRC
 
 case "$(uname -s)" in
   MINGW*|MSYS*|CYGWIN*|Windows_NT)

@@ -83,6 +83,9 @@ if [[ -f "scripts/source_paths.sh" ]]; then
   if [[ -z "${SHM_QUEUE_SRC:-}" ]]; then
     export SHM_QUEUE_SRC="$(resolve_shm_queue_src)"
   fi
+  if [[ -z "${CLI_SPEC_SRC:-}" ]]; then
+    export CLI_SPEC_SRC="$(resolve_cli_spec_src)"
+  fi
 fi
 
 if ! command -v clang >/dev/null 2>&1; then

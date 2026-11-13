@@ -92,8 +92,9 @@ fi
 # shellcheck source=scripts/source_paths.sh
 source scripts/source_paths.sh
 SHM_QUEUE_SRC="$(resolve_shm_queue_src)"
+CLI_SPEC_SRC="$(resolve_cli_spec_src)"
 BEARSSL_SRC="$(resolve_bearssl_src)"
-export SHM_QUEUE_SRC BEARSSL_SRC
+export SHM_QUEUE_SRC CLI_SPEC_SRC BEARSSL_SRC
 
 mkdir -p build/nimcache
 

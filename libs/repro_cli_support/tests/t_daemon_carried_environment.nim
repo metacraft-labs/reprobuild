@@ -56,6 +56,7 @@ suite "daemon carried environment":
       "CLINGO_PREFIX",
       "REPROBUILD_RUNTIME_LIBRARY_PATH",
       "SHM_QUEUE_SRC",
+      "CLI_SPEC_SRC",
       "TEST_CERTIFICATES_TOOLS_SRC"
     ]
     var previous: seq[tuple[key: string; value: string; present: bool]]
@@ -78,6 +79,7 @@ suite "daemon carried environment":
     let clingoPrefix = getTempDir() / "clingo-prefix-carried-env"
     let runtimeLibraryPath = getTempDir() / "runtime-libraries-carried-env"
     let shmQueueSrc = getTempDir() / "shm-queue-src-carried-env"
+    let cliSpecSrc = getTempDir() / "cli-spec-src-carried-env"
     let testCertificatesToolsSrc = getTempDir() / "test-certificates-tools-carried-env"
     putEnv("REPRO_DAEMON_ENDPOINT", endpoint)
     putEnv("REPRO_DAEMON_STATE_DIR", stateDir)
@@ -91,6 +93,7 @@ suite "daemon carried environment":
     putEnv("CLINGO_PREFIX", clingoPrefix)
     putEnv("REPROBUILD_RUNTIME_LIBRARY_PATH", runtimeLibraryPath)
     putEnv("SHM_QUEUE_SRC", shmQueueSrc)
+    putEnv("CLI_SPEC_SRC", cliSpecSrc)
     putEnv("TEST_CERTIFICATES_TOOLS_SRC", testCertificatesToolsSrc)
 
     let carried = daemonCarriedEnvironment()
@@ -108,6 +111,7 @@ suite "daemon carried environment":
     check carried.hasEnvPair("REPROBUILD_RUNTIME_LIBRARY_PATH",
       runtimeLibraryPath)
     check carried.hasEnvPair("SHM_QUEUE_SRC", shmQueueSrc)
+    check carried.hasEnvPair("CLI_SPEC_SRC", cliSpecSrc)
     check carried.hasEnvPair("TEST_CERTIFICATES_TOOLS_SRC",
       testCertificatesToolsSrc)
 

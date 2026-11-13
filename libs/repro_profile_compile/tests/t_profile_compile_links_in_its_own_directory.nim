@@ -169,16 +169,18 @@ else:
 
     test "workspace siblings beside the source root do not break the " &
         "compile":
-      # A workspace checks out nim-shm-gset and nim-shm-queue beside the
-      # reprobuild source root, and config.nims prefers those siblings. It
-      # is included from a wrapper beside the profile, so a sibling path it
-      # adds must be anchored at the source root, not resolved against the
-      # profile's directory or `nim`'s working directory.
+      # A workspace checks out nim-shm-gset, nim-shm-queue and nim-cli-spec
+      # beside the reprobuild source root, and config.nims prefers those
+      # siblings. It is included from a wrapper beside the profile, so a
+      # sibling path it adds must be anchored at the source root, not
+      # resolved against the profile's directory or `nim`'s working
+      # directory.
       let dir = createTempDir("repro-profile-siblings-", "")
       defer: removeDir(dir)
       let root = symlinkedSourceRoot(dir, copyConfig = true)
       for (name, envName) in [("nim-shm-gset", "SHM_GSET_SRC"),
                               ("nim-shm-queue", "SHM_QUEUE_SRC"),
+                              ("nim-cli-spec", "CLI_SPEC_SRC"),
                               ("io-mon", "IO_MON_SRC")]:
         let src = getEnv(envName)
         doAssert src.len > 0, envName & " is unset: enter reprobuild's dev shell"

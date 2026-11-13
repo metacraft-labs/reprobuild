@@ -137,6 +137,17 @@ from repro_core/dependency_gathering import NonDeterminismPolicy,
   MonitorCaptureBreadth, mcbFullCapture, mcbOmitAmbientReads
 export NonDeterminismPolicy, MonitorCaptureBreadth
 
+# The ``cli:`` language and its typed model come from the clispec library
+# (sibling ``nim-cli-spec``; ``CLI_SPEC_SRC``). The model's types are part
+# of this module's public surface — every recipe's ``executable … cli:``
+# lowers to ``CliCommandDef`` / ``CliParamDef``, which instantiate them — so
+# ``clispec/model`` is re-exported. The parser (``clispec/dsl``) is
+# compile-time machinery for the ``package`` and ``defineCliInterface``
+# macros and is NOT re-exported, so its helper names never reach a recipe's
+# namespace.
+import clispec/[model, dsl]
+export model
+
 include "repro_project_dsl/types"
 
 # Project-DSL-Composition M5: per-section typed-object prelude.

@@ -405,6 +405,18 @@
       url = "github:metacraft-labs/nim-shm-queue/8dff4ad246ff4b15ef63ddf7d65938af3115f844";
       flake = false;
     };
+    nim-cli-spec-src = {
+      # nim-cli-spec ships the ``clispec`` package: the ``cli:`` description
+      # language and its typed CLI model. repro_project_dsl builds every
+      # ``executable … cli:`` block on it, so every DSL, recipe and provider
+      # compile imports it. config.nims reads CLI_SPEC_SRC (after a
+      # ``../nim-cli-spec`` sibling); the sandboxed package build + override-free
+      # CI jobs have no sibling, so seed it from here — exactly like
+      # nim-shm-queue-src. Keep this URL, flake.lock, repro.lock and
+      # .github/sibling-repos aligned.
+      url = "github:metacraft-labs/nim-cli-spec/9b0606d695889674d4ac9d3d3afce69aa339b6fe";
+      flake = false;
+    };
     nimcrypto-src = {
       url = "github:cheatfate/nimcrypto/69eec0375dd146aede41f920c702c531bfe89c6b";
       flake = false;
@@ -972,6 +984,7 @@
       io-mon-src,
       nim-shm-gset-src,
       nim-shm-queue-src,
+      nim-cli-spec-src,
       nim-fork-src,
       nim-csources-src,
       ct-trace-format-src,
@@ -1204,6 +1217,7 @@
               (row "STACKABLE_HOOKS_SRC" "nim-stackable-hooks-src" "/src")
               (row "SHM_GSET_SRC" "nim-shm-gset-src" "/src")
               (row "SHM_QUEUE_SRC" "nim-shm-queue-src" "/src")
+              (row "CLI_SPEC_SRC" "nim-cli-spec-src" "/src")
               (row "REPRO_CT_TEST_RUNNER_SRC" "reprobuild-ct-test-runner-src" "")
               (row "REPRO_TEST_ADAPTERS_SRC" "reprobuild-test-adapters-src" "/src")
               (row "TEST_CERTIFICATES_TOOLS_SRC" "test-certificates-tools-src" "/src")
@@ -1447,6 +1461,7 @@
                 export IO_MON_SRC=${io-mon-src}/src
                 export SHM_GSET_SRC=${nim-shm-gset-src}/src
                 export SHM_QUEUE_SRC=${nim-shm-queue-src}/src
+                export CLI_SPEC_SRC=${nim-cli-spec-src}/src
                 ${pkgs.lib.optionalString pkgs.stdenv.isLinux "export REPRO_LINUX_UAPI_INCLUDE=${pkgs.linuxHeaders}/include"}
                 ${pkgs.lib.optionalString pkgs.stdenv.isLinux "export REPRO_SYSTEMD_ANALYZE=${pkgs.systemd}/bin/systemd-analyze"}
                 export CODETRACER_PINNED_SRC=${codetracer-src}/src
@@ -1571,6 +1586,7 @@
               ioMonSrc = io-mon-src;
               shmGsetSrc = nim-shm-gset-src;
               shmQueueSrc = nim-shm-queue-src;
+              cliSpecSrc = nim-cli-spec-src;
               codetracerSrc = codetracer-src;
               ctTestRunnerSrc = reprobuild-ct-test-runner-src;
               testAdaptersSrc = reprobuild-test-adapters-src;
@@ -1725,6 +1741,7 @@
                 IO_MON_SRC|${io-mon-src}/src
                 SHM_GSET_SRC|${nim-shm-gset-src}/src
                 SHM_QUEUE_SRC|${nim-shm-queue-src}/src
+                CLI_SPEC_SRC|${nim-cli-spec-src}/src
                 CODETRACER_PINNED_SRC|${codetracer-src}/src
                 REPRO_CT_TEST_RUNNER_SRC|${reprobuild-ct-test-runner-src}
                 REPRO_TEST_ADAPTERS_SRC|${reprobuild-test-adapters-src}/src
@@ -1954,6 +1971,7 @@
                                       ${io-mon-src} \
                                       ${nim-shm-gset-src} \
                                       ${nim-shm-queue-src} \
+                                      ${nim-cli-spec-src} \
                                       ${codetracer-src} \
                                       ${reprobuild-ct-test-runner-src} \
                                       ${reprobuild-test-adapters-src} \
@@ -2565,6 +2583,7 @@
             IO_MON_SRC = "${io-mon-src}/src";
             SHM_GSET_SRC = "${nim-shm-gset-src}/src";
             SHM_QUEUE_SRC = "${nim-shm-queue-src}/src";
+            CLI_SPEC_SRC = "${nim-cli-spec-src}/src";
             # Kernel UAPI syscall tables for the CONF-3 lease-floor derivation
             # (scripts/derive_lease_floor_syscalls.py); NixOS has no /usr/include.
             REPRO_LINUX_UAPI_INCLUDE =

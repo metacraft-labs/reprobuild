@@ -46,7 +46,7 @@ suite "per-platform sub-tools":
       check pkg.executables.len == 1
       check pkg.executables[0].commands.len == 1
       for cmd in pkg.executables[0].commands:
-        check cmd.subTools == expected
+        check cmd.ext.subTools == expected
     check found
 
   test "an edge the wrapper records carries the selected sub-tools":

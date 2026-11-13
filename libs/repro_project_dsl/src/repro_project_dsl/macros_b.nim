@@ -8254,8 +8254,8 @@ proc l3DependencyReferenceChecks(pkg: PackageDef; pkgBody: NimNode): NimNode =
 #   "Honest deferrals" report in M6's commit log.
 #
 # * Per-parameter options (``alias = "..."``, ``required = true``,
-#   ``position = 2``, ``name = "...override"``). The legacy
-#   ``parseParam`` chain handles these for typed-tool wrapper emission;
+#   ``position = 2``, ``name = "...override"``). clispec's
+#   ``parseCliParam`` handles these for typed-tool wrapper emission;
 #   M6's registry captures only the minimal ``(name, typeName, kind)``
 #   triple plus the bucket key.
 #
@@ -8340,47 +8340,32 @@ proc m6ParseCliParam(stmt: NimNode):
   ## ``cliTypeNameFromNode`` output for the common shapes. For
   ## ``boolFlag`` the source omits the type; we default the recorded
   ## ``typeName`` to "bool".
-  if stmt.kind notin {nnkCall, nnkCommand}:
+  # The declaration head is read by clispec's lenient scanner, the same
+  # grammar the typed-tool path parses strictly: it matches exactly the
+  # ``pos`` / ``flag`` / ``boolFlag`` statements with a plain or
+  # ``<name> is <Type>`` head and raises nothing.
+  let head = parseCliParamHead(stmt)
+  if not head.matched:
     return
-  if stmt.len < 2:
-    return
-  let head = stmt[0]
-  if head.kind notin {nnkIdent, nnkSym}:
-    return
-  let headName = identText(head).normalize
-  case headName
-  of "pos":
+  case head.decl
+  of cpdPos:
     result.kind = cpkPos
-  of "flag":
+  of cpdFlag:
     result.kind = cpkFlag
-  of "boolflag":
+  of cpdBoolFlag:
     result.kind = cpkBoolFlag
-  else:
-    return
-  let nameArg = stmt[1]
-  # Common case: ``<name> is <Type>`` infix.
-  if nameArg.kind == nnkInfix and nameArg.len == 3 and
-      nameArg[0].eqIdent("is"):
-    if nameArg[1].kind notin {nnkIdent, nnkSym, nnkAccQuoted}:
-      return
-    result.name = identText(nameArg[1])
-    result.typeName = nameArg[2].repr
-    result.matched = true
-    return
-  # Bare-name case: ``boolFlag verbose`` (no type, defaults to "bool").
-  # Also accept ``pos input`` / ``flag x`` defensively even though
-  # those are non-canonical (legacy ``parseParam`` errors on them).
-  if nameArg.kind in {nnkIdent, nnkSym, nnkAccQuoted}:
-    result.name = identText(nameArg)
-    result.typeName =
-      if result.kind == cpkBoolFlag: "bool"
-      else: "string"
-        # Fallback for the bare ``flag`` / ``pos`` shape — M6 does not
-        # emit these in any of its acceptance fixtures, but the
-        # default keeps the registry well-formed if a recipe author
-        # writes the shape regardless. The legacy ``parseParam`` chain
-        # surfaces the missing-type error elsewhere.
-    result.matched = true
+  result.name = head.name
+  result.typeName =
+    if head.typed: head.nimType
+    # Bare-name case: ``boolFlag verbose`` (no type, defaults to "bool").
+    # Also accept ``pos input`` / ``flag x`` defensively even though
+    # those are non-canonical (clispec's ``parseCliParam`` errors on them).
+    # The "string" fallback keeps the registry well-formed if a recipe
+    # author writes the shape regardless; the typed-tool parser surfaces
+    # the missing-type error elsewhere.
+    elif result.kind == cpkBoolFlag: "bool"
+    else: "string"
+  result.matched = true
 
 proc m6EmitParamRegistration(packageName, artifactName, subcmd: string;
                              param: tuple[matched: bool; name: string;
@@ -8449,7 +8434,7 @@ proc emitM6CliLowering*(packageName: string;
       # Statements we don't recognise (``subcmd``, ``outputs``,
       # ``dependencyPolicy``, ``policy``) are silently skipped — the
       # legacy ``parseExecutable`` arm continues to consume them via
-      # ``parseCliScope`` for the typed-tool wrapper emission.
+      # ``parseReproCliBlock`` for the typed-tool wrapper emission.
       for cliStmt in cliBody:
         let p = m6ParseCliParam(cliStmt)
         if not p.matched:

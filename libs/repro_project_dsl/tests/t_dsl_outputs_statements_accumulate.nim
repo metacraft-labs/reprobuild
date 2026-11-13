@@ -33,4 +33,4 @@ suite "t_dsl_outputs_statements_accumulate":
   test "t_dsl_outputs_statements_accumulate":
     check pkg.executables.len == 1
     let cmd = pkg.executables[0].commands[0]
-    check cmd.outputFlags == @["out", "dep"]
+    check cmd.ext.outputFlags == @["out", "dep"]

@@ -128,41 +128,6 @@ proc boolLiteral(node: NimNode; fallback: bool): bool =
   else:
     fallback
 
-proc roleLiteral(node: NimNode; fallback: CliArgRole): CliArgRole =
-  let text = identText(node).normalize
-  case text
-  of "input", "carinput", "inputpath":
-    carInput
-  of "output", "caroutput", "outputpath":
-    carOutput
-  of "ordinary", "carordinary":
-    carOrdinary
-  else:
-    fallback
-
-proc formatLiteral(node: NimNode; fallback: CliArgFormat): CliArgFormat =
-  let text = identText(node).normalize
-  case text
-  of "separate", "cafseparate":
-    cafSeparate
-  of "concat", "cafconcat":
-    cafConcat
-  of "equals", "cafequals":
-    cafEquals
-  else:
-    fallback
-
-proc placementLiteral(node: NimNode; fallback: CliArgPlacement):
-    CliArgPlacement =
-  let text = identText(node).normalize
-  case text
-  of "after", "aftersubcommand", "capaftersubcommand":
-    capAfterSubcommand
-  of "before", "beforesubcommand", "global", "capbeforesubcommand":
-    capBeforeSubcommand
-  else:
-    fallback
-
 proc lineFile(node: NimNode): tuple[file: string; line: int] =
   ## The source site the DSL RECORDS for `node`. Nim's line information is
   ## always absolute; a recipe-relative provider compile names the recipe's
@@ -184,589 +149,10 @@ proc namedValue(node: NimNode; name: string): NimNode =
   else:
     nil
 
-proc parseIsTypedHead(node: NimNode;
-                      context: string): tuple[matched: bool, name: string,
-                                               nimType: string] =
-  if node.kind == nnkInfix and node.len == 3 and node[0].eqIdent("is"):
-    result.matched = true
-    result.name = identText(node[1])
-    result.nimType = node[2].repr
-  elif node.kind == nnkInfix:
-    error(context & " uses an unsupported infix form: " & node.repr, node)
-
-proc parseParam(node: NimNode): CliParamDef =
-  let kindName = calleeName(node).normalize
-  let loc = lineFile(node)
-  if kindName == "pos":
-    if node.len < 2:
-      error("pos requires a parameter name", node)
-    let head = parseIsTypedHead(node[1], "pos parameter")
-    result.kind = cpkPositional
-    result.name = if head.matched: head.name else: identText(node[1])
-    if head.matched:
-      result.nimType = head.nimType
-    else:
-      if node.len < 3:
-        error("pos requires a type", node)
-      result.nimType = node[2].repr
-    result.position = 0
-    result.required = true
-    let optionStart =
-      if head.matched or kindName == "boolflag": 2 else: 3
-    for i in optionStart ..< node.len:
-      let value = namedValue(node[i], "position")
-      if not value.isNil:
-        result.position = intLiteral(value, result.position)
-      let roleValue = namedValue(node[i], "role")
-      if not roleValue.isNil:
-        result.role = roleLiteral(roleValue, result.role)
-      let repeatedValue = namedValue(node[i], "repeated")
-      if not repeatedValue.isNil:
-        result.repeated = boolLiteral(repeatedValue, result.repeated)
-  elif kindName == "flag" or kindName == "boolflag":
-    if node.len < 2:
-      error(kindName & " requires a parameter name", node)
-    let head = parseIsTypedHead(node[1], kindName & " parameter")
-    result.kind = cpkFlag
-    result.name = if head.matched: head.name else: identText(node[1])
-    if kindName == "boolflag":
-      result.nimType = if head.matched: head.nimType else: "bool"
-      if result.nimType.normalize != "bool":
-        error("boolFlag requires bool type", node[1])
-    elif head.matched:
-      result.nimType = head.nimType
-    else:
-      if node.len < 3:
-        error("flag requires a type", node)
-      result.nimType = node[2].repr
-    result.position = 0
-    result.required = false
-    let optionStart = if head.matched: 2 else: 3
-    for i in optionStart ..< node.len:
-      let aliasValue = namedValue(node[i], "alias")
-      if not aliasValue.isNil:
-        result.alias = requireStrLit(aliasValue, "param alias")
-      let requiredValue = namedValue(node[i], "required")
-      if not requiredValue.isNil:
-        result.required = boolLiteral(requiredValue, result.required)
-      let roleValue = namedValue(node[i], "role")
-      if not roleValue.isNil:
-        result.role = roleLiteral(roleValue, result.role)
-      let formatValue = namedValue(node[i], "format")
-      if not formatValue.isNil:
-        result.format = formatLiteral(formatValue, result.format)
-      let placementValue = namedValue(node[i], "placement")
-      if not placementValue.isNil:
-        result.placement = placementLiteral(placementValue, result.placement)
-      let repeatedValue = namedValue(node[i], "repeated")
-      if not repeatedValue.isNil:
-        result.repeated = boolLiteral(repeatedValue, result.repeated)
-  else:
-    error("unsupported CLI parameter DSL form: " & node.repr, node)
-  result.sourceFile = loc.file
-  result.sourceLine = loc.line
-
-proc parseCaptureBreadth(value: NimNode;
-                         fallback: MonitorCaptureBreadth):
-    MonitorCaptureBreadth =
-  ## DA-6 — parse ``captureBreadth = fullCapture`` / ``= omitAmbientReads``.
-  ##
-  ## An unrecognised word is a compile ERROR rather than a silent fallback, for
-  ## the reason ``parseNonDeterminismDecl`` below gives for the same choice: the
-  ## failure this declaration can produce is a capture that grades
-  ## ``mcComplete`` while missing evidence a consumer needed, and a misspelt
-  ## narrowing that silently inherited the enclosing scope's value would be
-  ## read by its author as "the narrowing took".
-  case identText(value).normalize
-  of "fullcapture", "full":
-    mcbFullCapture
-  of "omitambientreads", "omitambient":
-    mcbOmitAmbientReads
-  else:
-    error("captureBreadth expects fullCapture or omitAmbientReads, got: " &
-      value.repr & ". Those are the only two declarations that are true: " &
-      "io-mon's DA-5 split proved over all 256 interest sets that " &
-      "`FullInterest - {ecAmbientReads}` is the ONLY safe proper subset for " &
-      "a reprobuild edge, because every other category carries a record kind " &
-      "some consumer reads (mrEnvRead keys the action cache via " &
-      "cacheEnvInputs, mrNonDeterministic gates publication via " &
-      "applyEntropyBlessingPolicy, mrIpcConnect/mrExternalContent are not " &
-      "gate-able at all).", value)
-    fallback
-
-proc refuseRetiredCaptureIpc(node: NimNode) =
-  ## DA-6 — ``captureIpc = ...`` is refused BY NAME, and this is the only
-  ## place that can refuse it.
-  ##
-  ## The switch was already inert before DA-5, but only CONTINGENTLY: the
-  ## engine happened to ask io-mon for every category, so a recipe asking for
-  ## the IPC category got it either way. After DA-5 it is PERMANENTLY,
-  ## STRUCTURALLY inert — ``categoryOf`` answers ``none`` for
-  ## ``mrIpcConnect``, alongside ``mrExternalContent`` and the META kinds,
-  ## because the harm the gate does is that the records are not there when
-  ## ``mergeFragments`` derives its synthetic ``mrEventLoss``, and no
-  ## granularity fixes that. There is therefore no set of categories at which
-  ## either value of this switch could be honoured.
-  ##
-  ## ACCEPTING IT SILENTLY IS THE WORSE ANSWER, which is why this is an error
-  ## and not a warning. A recipe that writes ``captureIpc = true`` believes it
-  ## has widened something and a recipe that writes ``captureIpc = false``
-  ## believes it has narrowed something; both are wrong, and the previous
-  ## generation of this field spent a whole milestone carrying an ``INERT``
-  ## comment that had gone stale precisely because nothing refused it.
-  ## Measured before removing it: zero call sites outside reprobuild's own
-  ## tests, across every recipe in this workspace.
-  if node.isNil:
-    return
-  error("captureIpc has been RETIRED — delete the line. io-mon's " &
-    "`mrIpcConnect` is not gate-able at any granularity (DA-5: `categoryOf` " &
-    "answers `none` for it, as it does for `mrExternalContent` and the META " &
-    "kinds), because the harm is that the records do not exist when " &
-    "`mergeFragments` derives the synthetic `mrEventLoss` that forces " &
-    "`mcIncomplete`. So no value of this switch could ever be honoured, and " &
-    "the IPC connects an action makes are always observed. To declare how " &
-    "much of io-mon's stream a TOOL asks for, use " &
-    "`captureBreadth = fullCapture` / `= omitAmbientReads`.", node)
-
-proc parseCommandDependencyPolicy(node: NimNode;
-                                  fallback = defaultDependencyPolicy()):
-    BuildActionDependencyPolicy =
-  if calleeName(node).normalize != "dependencypolicy" or node.len < 2:
-    error("dependencyPolicy expects a policy name", node)
-  let text = identText(node[1]).normalize
-  case text
-  of "default":
-    result = defaultDependencyPolicy()
-  of "automaticmonitor", "monitor":
-    result = automaticMonitorPolicy()
-  of "makedepfile":
-    result = makeDepfilePolicy()
-  of "iomonreport", "iomon":
-    result = iomonReportPolicy("")
-  else:
-    result = fallback
-  for i in 2 ..< node.len:
-    let depfileValue = namedValue(node[i], "depfile")
-    if not depfileValue.isNil:
-      let single = requireStrLit(depfileValue, "dependencyPolicy depfile")
-      if single.len > 0 and single notin result.depfiles:
-        result.depfiles.add(single)
-    let depfilesValue = namedValue(node[i], "depfiles")
-    if not depfilesValue.isNil:
-      for path in stringSeqLiteral(depfilesValue):
-        if path.len > 0 and path notin result.depfiles:
-          result.depfiles.add(path)
-    let ignoredValue = namedValue(node[i], "ignoredInputPrefixes")
-    if not ignoredValue.isNil:
-      result.ignoredInputPrefixes = stringSeqLiteral(ignoredValue)
-    let captureBreadthValue = namedValue(node[i], "captureBreadth")
-    if not captureBreadthValue.isNil:
-      result.captureBreadth =
-        parseCaptureBreadth(captureBreadthValue, result.captureBreadth)
-    # DA-6 — `captureNonDeterminism` survives as a SPELLING of
-    # `captureBreadth`, with its scope shrunk to the part that was ever safe.
-    # `true` is "capture the non-determinism signals, ambient ones included";
-    # `false` is "exclude the ambient ones", which is the ONLY member of the
-    # old `ecNonDeterminism` bundle this flag could ever have dropped without
-    # removing evidence a consumer reads — env reads still key the action
-    # through `cacheEnvInputs` and entropy still gates publication through
-    # `applyEntropyBlessingPolicy`, and neither is at this flag's mercy any
-    # more. Absent leaves the inherited declaration alone, so no edge that
-    # never mentioned the flag changes.
-    let captureNonDeterminismValue =
-      namedValue(node[i], "captureNonDeterminism")
-    if not captureNonDeterminismValue.isNil:
-      result.captureBreadth =
-        if boolLiteral(captureNonDeterminismValue, true): mcbFullCapture
-        else: mcbOmitAmbientReads
-    refuseRetiredCaptureIpc(namedValue(node[i], "captureIpc"))
-    let suppressSeedValue = namedValue(node[i], "suppressMonitorShimSeed")
-    if not suppressSeedValue.isNil:
-      result.suppressMonitorShimSeed =
-        boolLiteral(suppressSeedValue, result.suppressMonitorShimSeed)
-
-type
-  NonDeterminismDecl = tuple[policy: NonDeterminismPolicy; justification: string]
-
-proc parseNonDeterminismDecl(node: NimNode;
-                             fallback: NonDeterminismDecl): NonDeterminismDecl =
-  ## Windows-Build-Correctness M6 — parse the tool-level entropy blessing:
-  ##
-  ##   nonDeterminism entropyBlessed,
-  ##     justification = "why this tool's randomness cannot reach its output"
-  ##
-  ## Two rules are enforced HERE rather than left to review, because both
-  ## failures are silent at the point they matter (an action that quietly
-  ## keeps caching):
-  ##
-  ##   * A blessing MUST carry a justification. "Do not bless anything you
-  ##     cannot justify" is only a rule if the compiler asks for the reason;
-  ##     a bare ``nonDeterminism entropyBlessed`` is a compile error naming
-  ##     the tool.
-  ##   * An unrecognised policy word is a compile ERROR, not a silent
-  ##     fallback to the parent's value. ``dependencyPolicy`` falls back
-  ##     (its unknown-word case predates this), but the failure modes are
-  ##     not comparable: an unrecognised dependency policy leaves the
-  ##     inherited monitoring in place, while a misspelt blessing that
-  ##     silently inherited ``ndpUnblessed`` would read as "the author
-  ##     tried to bless this and it did not take" — which is the SAFE
-  ##     direction only by accident, and a misspelt word that inherited a
-  ##     blessing from an enclosing scope would not be safe at all.
-  if calleeName(node).normalize != "nondeterminism" or node.len < 2:
-    error("nonDeterminism expects a policy name " &
-      "(entropyBlessed or unblessed)", node)
-  result = fallback
-  let text = identText(node[1]).normalize
-  case text
-  of "entropyblessed", "blessed":
-    result.policy = ndpEntropyBlessed
-  of "unblessed", "none":
-    result.policy = ndpUnblessed
-    result.justification = ""
-  else:
-    error("nonDeterminism expects entropyBlessed or unblessed, got: " &
-      identText(node[1]), node)
-  for i in 2 ..< node.len:
-    let justificationValue = namedValue(node[i], "justification")
-    if not justificationValue.isNil:
-      result.justification =
-        foldStrLitConcat(justificationValue, "nonDeterminism justification")
-  if result.policy == ndpEntropyBlessed and result.justification.len == 0:
-    error("nonDeterminism entropyBlessed requires justification = \"...\": " &
-      "state what this tool draws randomness FOR and why it cannot reach " &
-      "the tool's output. An unjustified blessing silently restores cache " &
-      "publication for a tool whose results may not be reproducible.", node)
-
-proc collectOutputsOperands(node: NimNode; sink: var seq[NimNode]) =
-  ## Flatten the operand list of an ``outputs`` statement into a sequence
-  ## of identifier (or AccQuoted) nodes.
-  ##
-  ## Nim's parser interprets the keyword ``out`` in
-  ## ``outputs out depfile`` as the start of an ``out T`` parameter type
-  ## annotation, producing nodes like:
-  ##
-  ##   Command(outputs, OutTy)              # ``outputs out``
-  ##   Command(outputs, OutTy(depfile))     # ``outputs out depfile``
-  ##   Command(outputs, OutTy, depfile)     # ``outputs out, depfile``
-  ##   Command(outputs, Command(a, OutTy))  # ``outputs a out``
-  ##
-  ## Each ``OutTy`` node represents the literal flag name ``"out"``; we
-  ## translate it back to an ident here and continue walking its
-  ## children so the trailing flag names survive. AccQuoted survives
-  ## un-parsed (so users may also write `` outputs `out` ``).
-  case node.kind
-  of nnkIdent, nnkSym, nnkAccQuoted:
-    sink.add(node)
-  of nnkOutTy:
-    # Synthesise an ``out`` ident attributed to the OutTy node so the
-    # source-location plumbing below stays meaningful.
-    let outIdent = ident("out")
-    outIdent.copyLineInfo(node)
-    sink.add(outIdent)
-    for child in node:
-      collectOutputsOperands(child, sink)
-  of nnkCommand, nnkCall, nnkPar, nnkBracket:
-    for child in node:
-      collectOutputsOperands(child, sink)
-  else:
-    sink.add(node)
-
-proc collectDeclaredFlagNames(body: NimNode; output: var seq[string]) =
-  ## Walk a ``cli:`` body (or any sub-body) and accumulate the names of
-  ## every ``pos``/``flag``/``boolflag`` declaration encountered.
-  ## Used by ``outputs`` validation to distinguish "declared on a sibling
-  ## subcmd" (scoping error) from "does not exist" (typo).
-  case body.kind
-  of nnkCall, nnkCommand:
-    let head = calleeName(body).normalize
-    if head in ["pos", "flag", "boolflag"] and body.len >= 2:
-      let parsed = parseIsTypedHead(body[1], head & " parameter")
-      let paramName = if parsed.matched: parsed.name else: identText(body[1])
-      output.add(paramName)
-    for i in 0 ..< body.len:
-      collectDeclaredFlagNames(body[i], output)
-  of nnkStmtList:
-    for child in body:
-      collectDeclaredFlagNames(child, output)
-  else:
-    discard
-
-proc typeIdentRepr(node: NimNode): string =
-  ## Typed-Outputs M0: render one type identifier from the comma-separated
-  ## type list of a typed ``outputs`` statement. Accepts a bare ident
-  ## (``NimUnittestBinary``), a dotted ident (``cargo.CargoTestBinary``),
-  ## or an arbitrary AST whose ``.repr`` is the user-facing source form.
-  ## The string is what we hand to the wrapper code generator and what
-  ## the field's static type resolves to at typed-tool call sites.
-  case node.kind
-  of nnkIdent, nnkSym:
-    $node
-  of nnkAccQuoted:
-    var acc = ""
-    for child in node:
-      acc.add(typeIdentRepr(child))
-    acc
-  of nnkDotExpr, nnkBracketExpr:
-    node.repr
-  else:
-    node.repr
-
-proc isTypedOutputsHead(stmt: NimNode): bool =
-  ## Typed-Outputs M0: the typed form
-  ## ``outputs <fieldName> is <Type1>[, <Type2>...], <pathExpression>``
-  ## is distinguished from the M0 untyped form
-  ## ``outputs <flag> [<flag>...]`` by the presence of an
-  ## ``Infix(is, fieldName, FirstType)`` as the first operand. The
-  ## untyped form parses as a flat sequence of identifiers (with
-  ## ``OutTy`` nodes standing in for the literal ``out`` keyword).
-  if stmt.len < 2:
-    return false
-  let head = stmt[1]
-  head.kind == nnkInfix and head.len == 3 and head[0].eqIdent("is")
-
-proc parseTypedOutputsStatement(stmt: NimNode): TypedOutputDef =
-  ## Typed-Outputs M0: parse one statement of the typed form
-  ##
-  ##   ``outputs <fieldName> is <Type1>[, <Type2>...], <pathExpression>``
-  ##
-  ## The first comma-separated argument is the ``Infix(is, ...)`` node
-  ## carrying ``<fieldName>`` and ``<Type1>``. Subsequent operands up to
-  ## the second-to-last are additional types; the last operand is the
-  ## path expression, preserved verbatim (``.repr``) so M1 can
-  ## ``parseExpr`` it back at action-emission time without re-running
-  ## the macro.
-  let loc = lineFile(stmt)
-  result.sourceFile = loc.file
-  result.sourceLine = loc.line
-  if stmt.len < 3:
-    error("typed outputs requires at least one type and a path expression, " &
-      "e.g. ``outputs fieldName is SomeType, pathExpr``", stmt)
-  let head = stmt[1]
-  if head.kind != nnkInfix or head.len != 3 or not head[0].eqIdent("is"):
-    error("typed outputs expects ``<fieldName> is <Type>`` as the first " &
-      "operand", stmt)
-  if head[1].kind notin {nnkIdent, nnkSym, nnkAccQuoted}:
-    error("typed outputs: field name must be an identifier", head[1])
-  result.fieldName = identText(head[1])
-  result.types.add(typeIdentRepr(head[2]))
-  # Operands [2 ..< ^1] are additional type identifiers; operand [^1]
-  # is the path expression. ``stmt.len`` is always >= 3 at this point
-  # (the early check above), so the path operand exists.
-  for i in 2 ..< stmt.len - 1:
-    result.types.add(typeIdentRepr(stmt[i]))
-  let pathOperand = stmt[stmt.len - 1]
-  result.pathExpr = pathOperand.repr
-
-proc parseCliScope(packageName, executableName: string; body: NimNode;
-                   path: seq[string]; isRoot: bool;
-                   parentParams: openArray[CliParamDef];
-                   parentOutputFlags: openArray[string];
-                   parentTypedOutputs: openArray[TypedOutputDef];
-                   parentRemoveBeforeRun: openArray[string];
-                   parentOptionalOutputs: openArray[string];
-                   parentPolicy: BuildActionDependencyPolicy;
-                   parentNonDeterminism: NonDeterminismDecl;
-                   wholeBody: NimNode;
-                   commands: var seq[CliCommandDef]): CliCommandDef =
-  ## Named-Targets M0: walk a ``cli:`` body or a ``subcmd`` body in
-  ## source order, tracking the visible-flag set so that ``outputs``
-  ## statements can be validated against the lexical-scope rule on the
-  ## spot. Nested ``subcmd`` bodies recurse with a snapshot of the
-  ## visible set; every encountered command emits one ``CliCommandDef``
-  ## into ``commands``, and the function returns the command corresponding
-  ## to the current scope (an "anchor" the caller can inspect).
-  ##
-  ## ``wholeBody`` is the enclosing ``cli:`` body — kept so the
-  ## "not in lexical scope" diagnostic can disambiguate sibling-subcmd
-  ## flag references from genuinely unknown names.
-  let loc = lineFile(body)
-  result.sourceFile = loc.file
-  result.sourceLine = loc.line
-  result.path = path
-  result.name =
-    if path.len == 0: "" else: path[^1]
-  result.providerEntrypointId =
-    if result.name.len == 0:
-      packageName & "." & executableName & ".call"
-    else:
-      packageName & "." & executableName & "." & path.join(".")
-  result.dependencyPolicy = parentPolicy
-  # M6: the blessing is inherited from the enclosing ``cli:`` scope exactly
-  # the way ``dependencyPolicy`` is, which is what makes it a property of the
-  # TOOL: ``nim`` writes it once above its subcommands and both ``nim c`` and
-  # ``nim js`` carry it.
-  result.nonDeterminism = parentNonDeterminism.policy
-  result.nonDeterminismJustification = parentNonDeterminism.justification
-  result.params = @parentParams
-  result.outputFlags = @parentOutputFlags
-  result.typedOutputs = @parentTypedOutputs
-  result.removeBeforeRunFlags = @parentRemoveBeforeRun
-  result.optionalOutputFlags = @parentOptionalOutputs
-
-  for stmt in body:
-    let head = calleeName(stmt).normalize
-    case head
-    of "dependencypolicy":
-      result.dependencyPolicy = parseCommandDependencyPolicy(stmt,
-        result.dependencyPolicy)
-    of "nondeterminism":
-      let decl = parseNonDeterminismDecl(stmt,
-        (result.nonDeterminism, result.nonDeterminismJustification))
-      result.nonDeterminism = decl.policy
-      result.nonDeterminismJustification = decl.justification
-    of "pos":
-      # DSL-port M6: v8's ``cli:`` body accepts ``pos`` at the root scope
-      # (``executable myTool: cli: pos input is string``) for tools with
-      # no subcommands. The legacy reprobuild parser rejected this shape
-      # because pre-v8 ``cli:`` blocks were strictly subcommand-only; the
-      # v8 port relaxes that to match the upstream surface. The
-      # downstream typed-tool wrapper emission already handles
-      # ``cpkPositional`` params on the root command via the same code
-      # path it uses for subcommand-scoped positionals, so the relaxation
-      # is purely the lifting of the early check here.
-      let param = parseParam(stmt)
-      result.params.add(param)
-    of "flag", "boolflag":
-      var param = parseParam(stmt)
-      if isRoot:
-        param.placement = capBeforeSubcommand
-      result.params.add(param)
-    of "outputs":
-      # Typed-Outputs M0: distinguish the typed form
-      # ``outputs <fieldName> is <Type>[, <Type>...], <pathExpression>``
-      # from the Named-Targets M0 untyped form
-      # ``outputs <flag> [<flag>...]``. The typed form's first operand
-      # is an ``Infix(is, ...)`` node — bare flag idents never carry an
-      # ``is`` infix, so the dispatch is unambiguous.
-      if stmt.len < 2:
-        error("outputs requires at least one flag name", stmt)
-      if isTypedOutputsHead(stmt):
-        let td = parseTypedOutputsStatement(stmt)
-        # Disallow duplicate ``fieldName`` declarations along the
-        # lexical path so the generated ``BuildEdge`` subtype has a
-        # well-defined set of fields. Parent-scope inherited entries
-        # are compared by ``fieldName`` to keep the rule symmetric
-        # with the untyped ``outputFlags`` accumulation.
-        var duplicate = false
-        for existing in result.typedOutputs:
-          if existing.fieldName == td.fieldName:
-            duplicate = true
-            break
-        if not duplicate:
-          result.typedOutputs.add(td)
-      else:
-        # Validate every named operand against the currently visible set.
-        # We need a per-operand check that also detects the
-        # sibling-subcmd case (`not in lexical scope` vs `does not exist`).
-        var operands: seq[NimNode] = @[]
-        for i in 1 ..< stmt.len:
-          collectOutputsOperands(stmt[i], operands)
-        if operands.len == 0:
-          error("outputs requires at least one flag name", stmt)
-        for operand in operands:
-          if operand.kind notin {nnkIdent, nnkSym, nnkAccQuoted}:
-            error("outputs expects a flag name identifier, got: " &
-              operand.repr, operand)
-          let flagName = identText(operand)
-          var visible = false
-          for param in result.params:
-            if param.name == flagName:
-              visible = true
-              break
-          if not visible:
-            var declaredSomewhere: seq[string] = @[]
-            collectDeclaredFlagNames(wholeBody, declaredSomewhere)
-            if declaredSomewhere.find(flagName) >= 0:
-              error("outputs: '" & flagName &
-                "' is not in lexical scope (declared on a sibling subcmd, " &
-                "not on this subcmd or an enclosing one)", stmt)
-            else:
-              error("outputs: '" & flagName &
-                "' does not exist (no flag or positional by that name " &
-                "declared in this cli interface)", stmt)
-          if result.outputFlags.find(flagName) < 0:
-            result.outputFlags.add(flagName)
-    of "removebeforerun":
-      # ``removeBeforeRun <flag>...`` — outputs the engine removes before
-      # the edge runs, for a tool that refuses to write over an existing
-      # output (create-dmg's ``hdiutil convert``). Only an OUTPUT parameter
-      # may be named: that is what keeps the removal to paths the edge
-      # declares as its own, and it is checked here, where the author can
-      # still see the declaration.
-      if stmt.len < 2:
-        error("removeBeforeRun requires at least one output flag name", stmt)
-      var operands: seq[NimNode] = @[]
-      for i in 1 ..< stmt.len:
-        collectOutputsOperands(stmt[i], operands)
-      for operand in operands:
-        if operand.kind notin {nnkIdent, nnkSym, nnkAccQuoted}:
-          error("removeBeforeRun expects a flag name identifier, got: " &
-            operand.repr, operand)
-        let flagName = identText(operand)
-        var found = false
-        for param in result.params:
-          if param.name == flagName:
-            found = true
-            if param.role != carOutput:
-              error("removeBeforeRun: '" & flagName & "' is not an output " &
-                "(declare it with `role = output`); only an edge's own " &
-                "outputs may be removed before it runs", operand)
-            break
-        if not found:
-          error("removeBeforeRun: '" & flagName & "' is not a flag or " &
-            "positional visible in this cli scope", operand)
-        if result.removeBeforeRunFlags.find(flagName) < 0:
-          result.removeBeforeRunFlags.add(flagName)
-    of "optionaloutputs":
-      # Only the tool can declare an optional candidate. Require an output
-      # parameter so arbitrary input paths cannot be removed or claimed.
-      if stmt.len < 2:
-        error("optionalOutputs requires at least one output flag name", stmt)
-      var operands: seq[NimNode] = @[]
-      for i in 1 ..< stmt.len:
-        collectOutputsOperands(stmt[i], operands)
-      for operand in operands:
-        if operand.kind notin {nnkIdent, nnkSym, nnkAccQuoted}:
-          error("optionalOutputs expects a flag name identifier, got: " &
-            operand.repr, operand)
-        let flagName = identText(operand)
-        var found = false
-        for param in result.params:
-          if param.name == flagName:
-            found = true
-            if param.role != carOutput:
-              error("optionalOutputs: '" & flagName & "' is not an output " &
-                "(declare it with `role = output`); only an edge's own " &
-                "outputs may be optional", operand)
-            break
-        if not found:
-          error("optionalOutputs: '" & flagName & "' is not a flag or " &
-            "positional visible in this cli scope", operand)
-        if result.optionalOutputFlags.find(flagName) < 0:
-          result.optionalOutputFlags.add(flagName)
-    of "subtools":
-      if not isRoot:
-        error("subTools is a property of the TOOL: declare it once, " &
-          "directly under cli:, not inside a subcmd", stmt)
-    of "call", "subcmd":
-      let childName =
-        if head == "call": "" else: stringLiteral(stmt[1])
-      var childPath = path
-      if childName.len > 0:
-        childPath.add(childName)
-      let childBody = stmt[stmt.len - 1]
-      discard parseCliScope(packageName, executableName, childBody,
-        childPath, false, result.params, result.outputFlags,
-        result.typedOutputs, result.removeBeforeRunFlags,
-        result.optionalOutputFlags,
-        result.dependencyPolicy,
-        (result.nonDeterminism, result.nonDeterminismJustification),
-        wholeBody, commands)
-    else:
-      discard
-
-  if not isRoot:
-    commands.add(result)
+# The ``cli:`` grammar is clispec's; reprobuild's build-graph vocabulary in
+# it (roles, outputs, dependencyPolicy, nonDeterminism, subTools, ...) is the
+# extension in ``cli_extension.nim``.
+include "cli_extension"
 
 proc parseLockFileDesignation(stmt: NimNode; owner: string): string =
   ## Named-Lock-Files NLF-M7 (§4.3) — the one-line designation
@@ -791,50 +177,6 @@ proc parseLockFileDesignation(stmt: NimNode; owner: string): string =
     error("lockFile expects a bare identifier naming a declared lock file, " &
       "not " & $nameNode.kind & " (" & owner & ")", nameNode)
   identText(nameNode)
-
-proc platformConditionHolds(cond: NimNode): bool =
-  ## The value of a ``when`` condition guarding ``subTools`` under ``cli:``.
-  ## Only ``defined(<platform>)`` and its negation are accepted: the answer
-  ## is the platform the recipe is compiled for, the same one a
-  ## ``when defined(macosx)`` in the package's own code sees.
-  if cond.kind == nnkPrefix and identText(cond[0]) == "not":
-    return not platformConditionHolds(cond[1])
-  if cond.kind in {nnkCall, nnkCommand} and cond.len == 2 and
-      identText(cond[0]) == "defined":
-    case identText(cond[1]).normalize
-    of "macosx": return defined(macosx)
-    of "linux": return defined(linux)
-    of "windows": return defined(windows)
-    of "posix": return defined(posix)
-    else: discard
-  error("a `when` under cli: may only test defined(macosx), " &
-    "defined(linux), defined(windows) or defined(posix), or their negation",
-    cond)
-
-proc platformSubToolsStmts(stmt: NimNode): seq[NimNode] =
-  ## The ``subTools`` statements a root ``cli:`` statement contributes on
-  ## this platform: the statement itself, or the ``subTools`` statements of
-  ## the ``when`` branch that holds. A tool's sub-tools can differ by
-  ## platform -- the C compiler ``nim c`` runs is ``gcc`` on Linux and
-  ## ``clang`` on macOS -- and a sub-tool another platform needs must not be
-  ## declared here, because sub-tools precede the edge's own references on
-  ## its ``PATH`` and would shadow them. A branch may hold nothing but
-  ## ``subTools``: the rest of the ``cli:`` grammar is not platform-scoped,
-  ## and the scope walk would drop it without a word.
-  if stmt.kind == nnkWhenStmt:
-    proc branchBody(branch: NimNode): NimNode =
-      if branch.kind == nnkElifBranch: branch[1] else: branch[0]
-    for branch in stmt:
-      for inner in branchBody(branch):
-        if calleeName(inner).normalize != "subtools":
-          error("only subTools may appear inside a `when` under cli:", inner)
-    for branch in stmt:
-      if branch.kind == nnkElse or platformConditionHolds(branch[0]):
-        for inner in branchBody(branch):
-          result.add(inner)
-        return
-  elif calleeName(stmt).normalize == "subtools":
-    result.add(stmt)
 
 proc parseExecutable(packageName: string; node: NimNode): ExecutableDef =
   ## Accepts the same two shapes ``parseLibrary`` does — and says so here
@@ -892,39 +234,12 @@ proc parseExecutable(packageName: string; node: NimNode): ExecutableDef =
       result.lockFile = parseLockFileDesignation(stmt,
         "executable " & result.exportName)
     of "cli":
-      let cliBody = stmt[1]
-      var commands: seq[CliCommandDef] = @[]
-      # A root scope walk validates ``outputs`` statements that appear
-      # directly under ``cli:`` and seeds the cumulative output set that
-      # each subcommand inherits, all in one source-order pass.
-      let rootCmd = parseCliScope(packageName, result.exportName, cliBody,
-        @[], true, @[], @[], @[], @[], @[], defaultDependencyPolicy(),
-        # M6: every tool starts UNBLESSED. A tool is blessed only where its
-        # own spec says so, in writing, with a reason.
-        (ndpUnblessed, ""), cliBody,
-        commands)
-      discard rootCmd
-      # ``subTools "a", "b"`` — the bare-name tools this tool shells out
-      # to (cargo -> rustc and the C linker). A tool-level property, so it
-      # is read from the root scope only and copied onto every command.
-      var subTools: seq[string] = @[]
-      for rootStmt in cliBody:
-        for subToolsStmt in platformSubToolsStmts(rootStmt):
-          if subToolsStmt.len < 2:
-            error("subTools expects one or more tool names", subToolsStmt)
-          for i in 1 ..< subToolsStmt.len:
-            let name = stringLiteral(subToolsStmt[i])
-            if name.len == 0:
-              error("subTools expects string tool names", subToolsStmt[i])
-            if name notin subTools:
-              subTools.add(name)
-      for command in commands.mitems:
-        command.subTools = subTools
-      # ``parseCliScope`` only emits non-root commands into ``commands``.
-      # Existing call sites — the wrapper generator, the interface
-      # artifact pipeline, etc. — expect one ``CliCommandDef`` per
-      # ``call:`` or ``subcmd``, never one for the synthetic root scope.
-      result.commands.add(commands)
+      # One source-order pass over the block (clispec's grammar, this
+      # repository's ``cli_extension`` vocabulary): ``outputs`` statements
+      # are validated against the parameters visible where they appear, and
+      # every subcommand inherits what its enclosing scopes declared.
+      result.commands.add(parseReproCliBlock(packageName, result.exportName,
+        stmt[1]))
     else:
       # Named-Targets M0: detect the
       # ``implicitTargetName(call: T): string = body`` shape, which
@@ -3333,23 +2648,24 @@ proc packageLiteral(pkg: PackageDef): string =
         if pathIndex > 0:
           result.add(", ")
         result.add(escForCode(segment))
-      result.add("], providerEntrypointId: " &
-          escForCode(cmd.providerEntrypointId) &
-        ", dependencyPolicy: " & dependencyPolicyCode(cmd.dependencyPolicy) &
-        ", nonDeterminism: " & $cmd.nonDeterminism &
+      # Reprobuild's extension of the clispec command (``cli_extension``).
+      result.add("], ext: ReproCliCommandExt(providerEntrypointId: " &
+          escForCode(cmd.ext.providerEntrypointId) &
+        ", dependencyPolicy: " & dependencyPolicyCode(cmd.ext.dependencyPolicy) &
+        ", nonDeterminism: " & $cmd.ext.nonDeterminism &
         ", nonDeterminismJustification: " &
-          escForCode(cmd.nonDeterminismJustification) &
-        ", subTools: @[" & escapedCodeList(cmd.subTools) &
+          escForCode(cmd.ext.nonDeterminismJustification) &
+        ", subTools: @[" & escapedCodeList(cmd.ext.subTools) &
         "], removeBeforeRunFlags: @[" &
-          escapedCodeList(cmd.removeBeforeRunFlags) &
-        "], optionalOutputFlags: @[" & escapedCodeList(cmd.optionalOutputFlags) &
+          escapedCodeList(cmd.ext.removeBeforeRunFlags) &
+        "], optionalOutputFlags: @[" & escapedCodeList(cmd.ext.optionalOutputFlags) &
         "], outputFlags: @[")
-      for ofIndex, flagName in cmd.outputFlags:
+      for ofIndex, flagName in cmd.ext.outputFlags:
         if ofIndex > 0:
           result.add(", ")
         result.add(escForCode(flagName))
       result.add("], typedOutputs: @[")
-      for tdIndex, td in cmd.typedOutputs:
+      for tdIndex, td in cmd.ext.typedOutputs:
         if tdIndex > 0:
           result.add(", ")
         result.add("TypedOutputDef(fieldName: " & escForCode(td.fieldName) &
@@ -3361,7 +2677,7 @@ proc packageLiteral(pkg: PackageDef): string =
         result.add("], pathExpr: " & escForCode(td.pathExpr) &
           ", sourceFile: " & escForCode(td.sourceFile) &
           ", sourceLine: " & $td.sourceLine & ")")
-      result.add("], sourceFile: " & escForCode(cmd.sourceFile) &
+      result.add("]), sourceFile: " & escForCode(cmd.sourceFile) &
         ", sourceLine: " & $cmd.sourceLine & ", params: @[")
       for paramIndex, param in cmd.params:
         if paramIndex > 0:
@@ -3369,7 +2685,7 @@ proc packageLiteral(pkg: PackageDef): string =
         result.add("CliParamDef(name: " & escForCode(param.name) &
           ", nimType: " & escForCode(param.nimType) &
           ", kind: " & $param.kind &
-          ", role: " & $param.role &
+          ", ext: ReproCliParamExt(role: " & $param.ext.role & ")" &
           ", format: " & $param.format &
           ", placement: " & $param.placement &
           ", repeated: " & $param.repeated &
@@ -3492,7 +2808,7 @@ proc argBuilder(param: CliParamDef): string =
     else:
       "cpkFlag"
   let helper =
-    case param.role
+    case param.ext.role
     of carInput:
       if param.nimType.normalize == "seq[string]": "inputArgSeq" else: "inputArg"
     of carOutput:
@@ -3764,13 +3080,13 @@ proc toolActionWrapperCode(pkg: PackageDef): string =
   # (``nim.c``, ``gcc.compile``, ``stylus``) stay binary-compatible.
   var emittedTypeBlock = false
   for cmd in exe.commands:
-    if cmd.typedOutputs.len == 0:
+    if cmd.ext.typedOutputs.len == 0:
       continue
     if not emittedTypeBlock:
       result.add("type\n")
       emittedTypeBlock = true
     let subtypeName = buildEdgeSubtypeName(exe.exportName, cmd.name)
-    result.add(emitBuildEdgeSubtypeDecl(subtypeName, cmd.typedOutputs))
+    result.add(emitBuildEdgeSubtypeDecl(subtypeName, cmd.ext.typedOutputs))
   for cmd in exe.commands:
     var formals = @["pkg: " & typeName]
     for param in cmd.params:
@@ -3786,8 +3102,8 @@ proc toolActionWrapperCode(pkg: PackageDef): string =
     formals.add("actionCachePolicy = defaultActionCachePolicy()")
     formals.add("commandStatsId = \"\"")
     formals.add("dependencyPolicy = " &
-      dependencyPolicyCode(cmd.dependencyPolicy))
-    let typedReturn = cmd.typedOutputs.len > 0
+      dependencyPolicyCode(cmd.ext.dependencyPolicy))
+    let typedReturn = cmd.ext.typedOutputs.len > 0
     let returnType =
       if typedReturn: buildEdgeSubtypeName(exe.exportName, cmd.name)
       else: "BuildActionDef"
@@ -3805,7 +3121,7 @@ proc toolActionWrapperCode(pkg: PackageDef): string =
       result.add("    cliArgs.add(" & toolActionArgExpr(param) & ")\n")
     result.add("  let call = publicCliCall(" & escForCode(pkg.packageName) &
       ", " & escForCode(exe.binaryName) & ", " & escForCode(cmd.name) &
-      ", " & escForCode(cmd.providerEntrypointId) & ", cliArgs)\n")
+      ", " & escForCode(cmd.ext.providerEntrypointId) & ", cliArgs)\n")
     result.add("  let selectedActionId = if actionId.len > 0: actionId " &
       "else: defaultToolActionId(call)\n")
     result.add("  " & actionRef &
@@ -3830,19 +3146,19 @@ proc toolActionWrapperCode(pkg: PackageDef): string =
       #
       # Spliced, it survives both: every wrapper call carries it and no
       # caller can name it.
-      "nonDeterminism = " & $cmd.nonDeterminism & ", " &
+      "nonDeterminism = " & $cmd.ext.nonDeterminism & ", " &
       "nonDeterminismJustification = " &
-        escForCode(cmd.nonDeterminismJustification) & ", " &
+        escForCode(cmd.ext.nonDeterminismJustification) & ", " &
       "dependencyPolicy = dependencyPolicy)\n")
-    if cmd.subTools.len > 0:
+    if cmd.ext.subTools.len > 0:
       result.add("  appendRegisteredActionSubToolRefs(" & actionRef &
-        ".id, [" & escapedCodeList(cmd.subTools) & "])\n")
-    if cmd.removeBeforeRunFlags.len > 0:
+        ".id, [" & escapedCodeList(cmd.ext.subTools) & "])\n")
+    if cmd.ext.removeBeforeRunFlags.len > 0:
       result.add("  appendRegisteredActionRemoveBeforeRun(" & actionRef &
-        ".id, call, [" & escapedCodeList(cmd.removeBeforeRunFlags) & "])\n")
-    if cmd.optionalOutputFlags.len > 0:
+        ".id, call, [" & escapedCodeList(cmd.ext.removeBeforeRunFlags) & "])\n")
+    if cmd.ext.optionalOutputFlags.len > 0:
       result.add("  markRegisteredActionOptionalOutputs(" & actionRef &
-        ", call, [" & escapedCodeList(cmd.optionalOutputFlags) & "])\n")
+        ", call, [" & escapedCodeList(cmd.ext.optionalOutputFlags) & "])\n")
     # Typed-Outputs M1: bind each typed-output field by evaluating its
     # ``pathExpr`` in the call-site flag scope. The shared
     # ``emitTypedOutputBindings`` helper handles both the typed-handle
@@ -3851,7 +3167,7 @@ proc toolActionWrapperCode(pkg: PackageDef): string =
     # (fieldName, types, path) triple round-trips through the payload
     # codec to downstream consumers.
     if typedReturn:
-      result.add(emitTypedOutputBindings(cmd.typedOutputs, actionRef))
+      result.add(emitTypedOutputBindings(cmd.ext.typedOutputs, actionRef))
     # Named-Targets M1: append the implicit-target-name wiring suffix.
     # The wrapper proc returns either ``BuildActionDef`` directly (no
     # typed outputs) or a ``BuildEdge`` subtype with an embedded
@@ -3868,8 +3184,8 @@ proc toolActionWrapperCode(pkg: PackageDef): string =
     # when the return type is the typed subtype we need ``result.action.id``.
     # Generate the wiring as a small inline block parameterised by
     # ``actionRef``.
-    if cmd.outputFlags.len > 0 or hookProc.len > 0:
-      let flagsLit = outputFlagsLiteral(cmd.outputFlags)
+    if cmd.ext.outputFlags.len > 0 or hookProc.len > 0:
+      let flagsLit = outputFlagsLiteral(cmd.ext.outputFlags)
       result.add(wiringIndent &
         "var implicitNames = computeImplicitTargetNames(call, " &
         flagsLit & ")\n")
@@ -3962,7 +3278,7 @@ proc wrapperCode(pkg: PackageDef; recordActions = false): string =
       result.add("  discard pkg\n")
       result.add("  publicCliCall(" & escForCode(pkg.packageName) & ", " &
         escForCode(exe.binaryName) & ", " & escForCode(cmd.name) & ", " &
-        escForCode(cmd.providerEntrypointId) & ", @[" & argCalls.join(", ") &
+        escForCode(cmd.ext.providerEntrypointId) & ", @[" & argCalls.join(", ") &
         "])\n")
       let directParams =
         if params.len > 1:
@@ -3974,7 +3290,7 @@ proc wrapperCode(pkg: PackageDef; recordActions = false): string =
           "): PublicCliCall =\n")
         result.add("  publicCliCall(" & escForCode(pkg.packageName) & ", " &
           escForCode(exe.binaryName) & ", " & escForCode(cmd.name) & ", " &
-          escForCode(cmd.providerEntrypointId) & ", @[" & argCalls.join(", ") &
+          escForCode(cmd.ext.providerEntrypointId) & ", @[" & argCalls.join(", ") &
           "])\n")
 
 proc workspaceProducerLocation(selector, consumerSourceFile: string):
@@ -5472,7 +4788,7 @@ proc parseInterfaceParam(node: NimNode;
   let kindName = calleeName(node).normalize
   if node.len < 2:
     error("CLI parameter requires a name", node)
-  let head = parseIsTypedHead(node[1], "CLI parameter")
+  let head = parseCliTypedHead(node[1], "CLI parameter")
   result.name = if head.matched: head.name else: identText(node[1])
   result.placement = defaultPlacement
   var optionStart = 2
@@ -5521,13 +4837,13 @@ proc parseInterfaceParam(node: NimNode;
       result.position = intLiteral(positionValue, result.position)
     let roleValue = namedValue(node[i], "role")
     if not roleValue.isNil:
-      result.role = roleLiteral(roleValue, result.role)
+      result.ext.role = roleLiteral(roleValue, result.ext.role)
     let formatValue = namedValue(node[i], "format")
     if not formatValue.isNil:
-      result.format = formatLiteral(formatValue, result.format)
+      result.format = cliFormatLit(formatValue, result.format)
     let placementValue = namedValue(node[i], "placement")
     if not placementValue.isNil:
-      result.placement = placementLiteral(placementValue, result.placement)
+      result.placement = cliPlacementLit(placementValue, result.placement)
     let repeatedValue = namedValue(node[i], "repeated")
     if not repeatedValue.isNil:
       result.repeated = boolLiteral(repeatedValue, result.repeated)
@@ -5589,37 +4905,8 @@ proc parseInterfaceDependencyPolicy(node: NimNode;
       result.suppressMonitorShimSeed =
         boolLiteral(suppressSeedValue, result.suppressMonitorShimSeed)
 
-proc collectParamGroup(node: NimNode): tuple[name: string,
-                                            statements: seq[NimNode]] =
-  if node.kind != nnkTemplateDef:
-    error("CLI parameter group must be a template definition", node)
-  result.name = identText(node[0]).normalize
-  if node[3].kind != nnkFormalParams or node[3].len != 1:
-    error("CLI parameter group templates must not accept parameters", node[3])
-  let body = node[^1]
-  if body.kind != nnkStmtList:
-    error("CLI parameter group template must contain a statement body", body)
-  for stmt in body:
-    result.statements.add(stmt)
-
-proc expandInterfaceParamStmt(stmt: NimNode;
-                              paramGroups: Table[string, seq[NimNode]];
-                              stack: var seq[string]): seq[NimNode] =
-  let groupName = calleeName(stmt).normalize
-  if groupName.len > 0 and paramGroups.hasKey(groupName) and stmt.len == 1:
-    if stack.find(groupName) >= 0:
-      error("recursive CLI parameter group: " & groupName, stmt)
-    stack.add(groupName)
-    for groupedStmt in paramGroups[groupName]:
-      for expandedStmt in expandInterfaceParamStmt(groupedStmt, paramGroups,
-          stack):
-        result.add(expandedStmt)
-    discard stack.pop()
-  else:
-    result.add(stmt)
-
 proc parseInterfaceCommand(toolId: string; node: NimNode;
-                           paramGroups: Table[string, seq[NimNode]];
+                           paramGroups: CliParamGroups;
                            commonParams: openArray[CliParamDef];
                            defaultPolicy: BuildActionDependencyPolicy;
                            defaultNonDeterminism: NonDeterminismDecl):
@@ -5635,19 +4922,19 @@ proc parseInterfaceCommand(toolId: string; node: NimNode;
     result.name = stringLiteral(node[1])
   else:
     error("CLI interface accepts call: or subcmd \"name\": sections", node)
-  result.providerEntrypointId =
+  result.ext.providerEntrypointId =
     if result.name.len == 0: toolId & ".call" else: toolId & "." & result.name
-  result.dependencyPolicy = defaultPolicy
-  result.nonDeterminism = defaultNonDeterminism.policy
-  result.nonDeterminismJustification = defaultNonDeterminism.justification
+  result.ext.dependencyPolicy = defaultPolicy
+  result.ext.nonDeterminism = defaultNonDeterminism.policy
+  result.ext.nonDeterminismJustification = defaultNonDeterminism.justification
   result.params = @commonParams
   result.sourceFile = loc.file
   result.sourceLine = loc.line
   let body = node[node.len - 1]
   for stmt in body:
     if calleeName(stmt).normalize == "dependencypolicy":
-      result.dependencyPolicy = parseInterfaceDependencyPolicy(stmt,
-        result.dependencyPolicy)
+      result.ext.dependencyPolicy = parseInterfaceDependencyPolicy(stmt,
+        result.ext.dependencyPolicy)
       continue
     if calleeName(stmt).normalize == "nondeterminism":
       # M6: same statement, same meaning, in the second parser. The two CLI
@@ -5657,9 +4944,9 @@ proc parseInterfaceCommand(toolId: string; node: NimNode;
       # of them would be silently ignored in the other, which for a blessing
       # means the tool stays uncacheable with no diagnostic.
       let decl = parseNonDeterminismDecl(stmt,
-        (result.nonDeterminism, result.nonDeterminismJustification))
-      result.nonDeterminism = decl.policy
-      result.nonDeterminismJustification = decl.justification
+        (result.ext.nonDeterminism, result.ext.nonDeterminismJustification))
+      result.ext.nonDeterminism = decl.policy
+      result.ext.nonDeterminismJustification = decl.justification
       continue
     # Named-Targets M0/M1: ``outputs <flag> [<flag>...]`` declares the
     # cumulative output set for this subcommand. ``defineCliInterface``
@@ -5680,12 +4967,12 @@ proc parseInterfaceCommand(toolId: string; node: NimNode;
       if isTypedOutputsHead(stmt):
         let td = parseTypedOutputsStatement(stmt)
         var duplicate = false
-        for existing in result.typedOutputs:
+        for existing in result.ext.typedOutputs:
           if existing.fieldName == td.fieldName:
             duplicate = true
             break
         if not duplicate:
-          result.typedOutputs.add(td)
+          result.ext.typedOutputs.add(td)
         continue
       var operands: seq[NimNode] = @[]
       for i in 1 ..< stmt.len:
@@ -5706,11 +4993,11 @@ proc parseInterfaceCommand(toolId: string; node: NimNode;
           error("outputs: '" & flagName &
             "' is not declared at the root of this defineCliInterface " &
             "body or on this subcmd", stmt)
-        if result.outputFlags.find(flagName) < 0:
-          result.outputFlags.add(flagName)
+        if result.ext.outputFlags.find(flagName) < 0:
+          result.ext.outputFlags.add(flagName)
       continue
     var stack: seq[string] = @[]
-    for expandedStmt in expandInterfaceParamStmt(stmt, paramGroups, stack):
+    for expandedStmt in expandCliParamGroups(stmt, paramGroups, stack):
       let name = calleeName(expandedStmt).normalize
       if name in ["pos", "flag", "boolflag"]:
         result.params.add(parseInterfaceParam(expandedStmt))
@@ -5719,7 +5006,7 @@ proc parseInterfaceCommand(toolId: string; node: NimNode;
           expandedStmt)
 
 proc cliArgHelperName(param: CliParamDef): string =
-  case param.role
+  case param.ext.role
   of carInput:
     if param.nimType.normalize == "seq[string]": "inputArgSeq" else: "inputArg"
   of carOutput:
@@ -5788,13 +5075,13 @@ proc defineCliInterfaceCode(toolSymbol, toolId: string;
   # field set as their ``package``-block counterparts.
   var emittedTypeBlock = false
   for command in commands:
-    if command.typedOutputs.len == 0:
+    if command.ext.typedOutputs.len == 0:
       continue
     if not emittedTypeBlock:
       result.add("type\n")
       emittedTypeBlock = true
     let subtypeName = buildEdgeSubtypeName(toolSymbol, command.name)
-    result.add(emitBuildEdgeSubtypeDecl(subtypeName, command.typedOutputs))
+    result.add(emitBuildEdgeSubtypeDecl(subtypeName, command.ext.typedOutputs))
   for command in commands:
     var formals = @["tool: Tool[" & escForCode(toolId) & "]"]
     for param in command.params:
@@ -5810,8 +5097,8 @@ proc defineCliInterfaceCode(toolSymbol, toolId: string;
     formals.add("actionCachePolicy = defaultActionCachePolicy()")
     formals.add("commandStatsId = \"\"")
     formals.add("dependencyPolicy = " &
-      dependencyPolicyCode(command.dependencyPolicy))
-    let typedReturn = command.typedOutputs.len > 0
+      dependencyPolicyCode(command.ext.dependencyPolicy))
+    let typedReturn = command.ext.typedOutputs.len > 0
     let returnType =
       if typedReturn: buildEdgeSubtypeName(toolSymbol, command.name)
       else: "BuildActionDef"
@@ -5826,7 +5113,7 @@ proc defineCliInterfaceCode(toolSymbol, toolId: string;
       result.add("    cliArgs.add(" & interfaceArgExpr(param) & ")\n")
     result.add("  let call = publicCliCall(" & escForCode(toolId) & ", " &
       escForCode(toolId) & ", " & escForCode(command.name) & ", " &
-      escForCode(command.providerEntrypointId) & ", cliArgs)\n")
+      escForCode(command.ext.providerEntrypointId) & ", cliArgs)\n")
     result.add("  let selectedActionId = if actionId.len > 0: actionId " &
       "else: defaultToolActionId(call)\n")
     result.add("  " & actionRef &
@@ -5838,15 +5125,15 @@ proc defineCliInterfaceCode(toolSymbol, toolId: string;
       # M6: spliced literal, not a formal — see the identical splice in
       # ``toolActionWrapperCode`` for why the blessing must not be nameable
       # at a call site.
-      "nonDeterminism = " & $command.nonDeterminism & ", " &
+      "nonDeterminism = " & $command.ext.nonDeterminism & ", " &
       "nonDeterminismJustification = " &
-        escForCode(command.nonDeterminismJustification) & ", " &
+        escForCode(command.ext.nonDeterminismJustification) & ", " &
       "dependencyPolicy = dependencyPolicy)\n")
     # Typed-Outputs M1: bind typed fields against the call-site flag
     # values via the shared helper (the ``package``-block wrapper uses
     # the same one).
     if typedReturn:
-      result.add(emitTypedOutputBindings(command.typedOutputs, actionRef))
+      result.add(emitTypedOutputBindings(command.ext.typedOutputs, actionRef))
     # Named-Targets M1: ``defineCliInterface`` has no per-tool naming
     # hook (those live on ``executable`` inside a ``package`` block),
     # and the wrapper is not bound to a package — the call site's
@@ -5864,8 +5151,8 @@ proc defineCliInterfaceCode(toolSymbol, toolId: string;
     # rather than through the helper when typed outputs are present
     # because the helper hard-codes ``result.id``.
     if typedReturn:
-      if command.outputFlags.len > 0:
-        let flagsLit = outputFlagsLiteral(command.outputFlags)
+      if command.ext.outputFlags.len > 0:
+        let flagsLit = outputFlagsLiteral(command.ext.outputFlags)
         result.add("  var implicitNames = computeImplicitTargetNames(call, " &
           flagsLit & ")\n")
         result.add("  if implicitNames.len > 0:\n")
@@ -5878,7 +5165,7 @@ proc defineCliInterfaceCode(toolSymbol, toolId: string;
     else:
       result.add(emitTargetNameWiring(
         packageNameLit = escForCode(toolId),
-        outputFlags = command.outputFlags,
+        outputFlags = command.ext.outputFlags,
         params = command.params,
         hookProcName = "",
         hookCallTypeRepr = "",
@@ -5891,10 +5178,10 @@ macro defineCliInterface*(toolSymbol: untyped;
   if toolSymbol.kind notin {nnkIdent, nnkSym}:
     error("defineCliInterface expects a Nim identifier for the tool symbol",
       toolSymbol)
-  var paramGroups: Table[string, seq[NimNode]]
+  var paramGroups: CliParamGroups
   for stmt in body:
     if stmt.kind == nnkTemplateDef:
-      let group = collectParamGroup(stmt)
+      let group = collectCliParamGroup(stmt)
       paramGroups[group.name] = group.statements
   var commonParams: seq[CliParamDef] = @[]
   var defaultPolicy = defaultDependencyPolicy()
@@ -5902,7 +5189,7 @@ macro defineCliInterface*(toolSymbol: untyped;
   var defaultNonDeterminism: NonDeterminismDecl = (ndpUnblessed, "")
   proc addCommonParams(stmt: NimNode) =
     var stack: seq[string] = @[]
-    for expandedStmt in expandInterfaceParamStmt(stmt, paramGroups, stack):
+    for expandedStmt in expandCliParamGroups(stmt, paramGroups, stack):
       let head = calleeName(expandedStmt).normalize
       if head in ["flag", "boolflag"]:
         commonParams.add(parseInterfaceParam(expandedStmt,

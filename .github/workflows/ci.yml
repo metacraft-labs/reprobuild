@@ -94,6 +94,7 @@ jobs:
             nim-agent-harbor
             nim-agents
             nim-chronicles
+            nim-cli-spec
             nim-confutils
             nim-everywhere
             nim-json-serialization
@@ -467,6 +468,7 @@ jobs:
             nim-agent-harbor
             nim-agents
             nim-chronicles
+            nim-cli-spec
             nim-confutils
             nim-everywhere
             nim-json-serialization
@@ -1351,6 +1353,7 @@ jobs:
             nim-agent-harbor
             nim-agents
             nim-chronicles
+            nim-cli-spec
             nim-confutils
             nim-everywhere
             nim-json-serialization

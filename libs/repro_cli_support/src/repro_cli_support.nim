@@ -25744,6 +25744,7 @@ const
     "STACKABLE_HOOKS_SRC",
     "SHM_GSET_SRC",
     "SHM_QUEUE_SRC",
+    "CLI_SPEC_SRC",
     "REPRO_FROM_SOURCE_ROOT",
     # Tool-provisioning selection. The daemon-hosted executor re-parses the
     # request's rawArgs (which carry no --tool-provisioning when the user

@@ -167,6 +167,7 @@ const BuiltSourcePackageRoots = [
   ("GOSTI_SRC", compileTimeSourceRoot("GOSTI_SRC")),
   ("SHM_QUEUE_SRC", compileTimeSourceRoot("SHM_QUEUE_SRC")),
   ("SHM_GSET_SRC", compileTimeSourceRoot("SHM_GSET_SRC")),
+  ("CLI_SPEC_SRC", compileTimeSourceRoot("CLI_SPEC_SRC")),
   ("REPRO_CT_TEST_RUNNER_SRC",
     compileTimeSourceRoot("REPRO_CT_TEST_RUNNER_SRC")),
   # The PIN, not ``CODETRACER_SRC``. This table is re-exported into every
@@ -3134,7 +3135,7 @@ proc toProjectInterface*(pkg: PackageDef;
     for cmd in exe.commands:
       var normalizedCmd = InterfaceCommand(
         name: cmd.name,
-        providerEntrypointId: cmd.providerEntrypointId,
+        providerEntrypointId: cmd.ext.providerEntrypointId,
         location: SourceLocation(file: cmd.sourceFile, line: cmd.sourceLine))
       for param in cmd.params:
         normalizedCmd.params.add(toInterfaceParam(param))
@@ -5289,6 +5290,12 @@ proc bootstrapSiblingPackagePathFlags*(reprobuildRoot: string;
     ("SHM_GSET_SRC", anchored([
       ".." / "nim-shm-gset" / "src",
     ]), "shm_gset.nim"),
+    # ``repro_project_dsl`` builds every ``cli:`` block on the clispec library
+    # (nim-cli-spec), so every producer's ``repro.nim`` imports it. Mirror
+    # config.nims (CLI_SPEC_SRC), exactly as SHM_QUEUE_SRC above.
+    ("CLI_SPEC_SRC", anchored([
+      ".." / "nim-cli-spec" / "src",
+    ]), "clispec.nim"),
     ("REPRO_TEST_ADAPTERS_SRC", anchored([
       ".." / "reprobuild-test-adapters" / "src",
     ]), "repro_test_adapters" / "test_runner.nim"),
@@ -6763,6 +6770,11 @@ proc reproPackagePathFlags(workDir: string): seq[string] =
   result.addExternalPackagePath(workDir, "SHM_GSET_SRC", [
     ".." / "nim-shm-gset" / "src",
   ], "shm_gset.nim")
+  # `repro_project_dsl` imports `clispec` (the `cli:` language and its typed
+  # model), so every DSL compile needs it, for the same reason.
+  result.addExternalPackagePath(workDir, "CLI_SPEC_SRC", [
+    ".." / "nim-cli-spec" / "src",
+  ], "clispec.nim")
   result.addExternalPackagePath(workDir, "REPRO_TEST_ADAPTERS_SRC", [
     ".." / "reprobuild-test-adapters" / "src",
   ], "repro_test_adapters" / "test_runner.nim")

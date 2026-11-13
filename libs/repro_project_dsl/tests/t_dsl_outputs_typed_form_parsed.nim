@@ -1,7 +1,7 @@
 ## Typed-Outputs M0 verification: a fixture ``executable buildNimUnittest:``
 ## with ``cli: subcmd "build": flag source is string; flag binary is string;
 ## outputs testBinary is NimUnittestBinary, binary`` compiles. The
-## subcommand's ``CliCommandDef.typedOutputs`` contains exactly one
+## subcommand's ``CliCommandDef.ext.typedOutputs`` contains exactly one
 ## entry with ``fieldName == "testBinary"``, ``types == @["NimUnittestBinary"]``,
 ## and ``pathExpr`` round-trips (via ``parseExpr``) to an ident node
 ## named ``binary``.
@@ -57,8 +57,8 @@ suite "t_dsl_outputs_typed_form_parsed":
     check exe.commands.len == 1
     let cmd = exe.commands[0]
     check cmd.name == "build"
-    check cmd.typedOutputs.len == 1
-    let td = cmd.typedOutputs[0]
+    check cmd.ext.typedOutputs.len == 1
+    let td = cmd.ext.typedOutputs[0]
     check td.fieldName == "testBinary"
     check td.types == @["NimUnittestBinary"]
     # ``pathExpr`` round-trips (via compile-time ``parseExpr``) to an

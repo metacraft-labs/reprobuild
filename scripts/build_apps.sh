@@ -340,6 +340,9 @@ fi
 # ring BOTH sit on the extracted ``shm_queue/ring`` MPSC ring (nim-shm-queue).
 shm_queue_src="$(resolve_shm_queue_src)"
 export SHM_QUEUE_SRC="${shm_queue_src}"
+# clispec: repro_project_dsl's `cli:` language and typed CLI model.
+CLI_SPEC_SRC="$(resolve_cli_spec_src)"
+export CLI_SPEC_SRC
 
 # Platform detection must not depend on an external ``uname``.
 #

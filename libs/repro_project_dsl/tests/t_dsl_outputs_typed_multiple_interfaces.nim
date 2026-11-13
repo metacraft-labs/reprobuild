@@ -38,8 +38,8 @@ suite "t_dsl_outputs_typed_multiple_interfaces":
   test "t_dsl_outputs_typed_multiple_interfaces":
     check pkg.executables.len == 1
     let cmd = pkg.executables[0].commands[0]
-    check cmd.typedOutputs.len == 1
-    let td = cmd.typedOutputs[0]
+    check cmd.ext.typedOutputs.len == 1
+    let td = cmd.ext.typedOutputs[0]
     check td.fieldName == "testBinary"
     check td.types == @["NimUnittestBinary", "InstallableExecutable"]
     check td.pathExpr == "binary"

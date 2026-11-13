@@ -32,7 +32,7 @@ suite "t_dsl_outputs_untyped_form_unchanged":
     check cmd.name == "build"
     # Untyped form still produces the cumulative flag set on
     # ``outputFlags`` in declaration order.
-    check cmd.outputFlags == @["out", "dep"]
+    check cmd.ext.outputFlags == @["out", "dep"]
     # And it does NOT add a TypedOutputDef — the typed-output list
     # stays empty for the untyped form.
-    check cmd.typedOutputs.len == 0
+    check cmd.ext.typedOutputs.len == 0
