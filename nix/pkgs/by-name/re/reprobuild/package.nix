@@ -151,8 +151,8 @@
   cliSpecSrc ? fetchFromGitHub {
     owner = "metacraft-labs";
     repo = "nim-cli-spec";
-    rev = "9b0606d695889674d4ac9d3d3afce69aa339b6fe";
-    hash = "sha256-W7otqc/5HS5HSkC3biyhpOIOXcsIaR8UoPd1kDL7YuE=";
+    rev = "e382b3c77a19f525567028ae81ebeb9ee472d21a";
+    hash = "sha256-BD5ZetPFzPddJAnaWvlaqySEM2iyhIczuZ59vhjpz8Y=";
   },
   codetracerSrc ? fetchFromGitHub {
     owner = "metacraft-labs";

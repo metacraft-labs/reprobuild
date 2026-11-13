@@ -282,9 +282,9 @@ package "git"
     optionalOutputs=[]
     removeBeforeRun=[]
     typedOutputs=[]
-      param name="args" nimType="seq[string]" kind=cpkPositional role=carOrdinary format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="" required=true src=repro_dsl_stdlib/packages/git.nim:206
+      param name="args" nimType="seq[string]" kind=cpkPositional role=carOrdinary format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="" required=false src=repro_dsl_stdlib/packages/git.nim:206
     argv=["/tool/git", "args-a", "args-b"]
-  interface sha256:1368f698d9650d97aa2a357d071dab8726deced0be0b0fbe561eb248ffddf42f
+  interface sha256:d6fd2631beeaf18de8680a2b1b4439634f2b4da2dab7cc60203fda51a199dce0
 package "install-file"
   executable "installBin" binary="installBin" src=repro_dsl_stdlib/packages/coreutils_install.nim:102
     command name="" path=[] entry="install-file.installBin.call" src=repro_dsl_stdlib/packages/coreutils_install.nim:107
@@ -403,9 +403,9 @@ package "mktemp"
     optionalOutputs=[]
     removeBeforeRun=[]
     typedOutputs=[]
-      param name="args" nimType="seq[string]" kind=cpkPositional role=carOrdinary format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="" required=true src=repro_dsl_stdlib/packages/mktemp.nim:124
+      param name="args" nimType="seq[string]" kind=cpkPositional role=carOrdinary format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="" required=false src=repro_dsl_stdlib/packages/mktemp.nim:124
     argv=["/tool/mktemp", "args-a", "args-b"]
-  interface sha256:0a46340ae593956071ae44a9f34a5c22d32b60f918f1a115c021bfc450427e52
+  interface sha256:c0da1a846aee01775789c18fc96851444b2bddc86189317ea8ee74b91fd08058
 package "nim"
   executable "nim" binary="nim" src=repro_dsl_stdlib/packages/nim.nim:153
     command name="c" path=["c"] entry="nim.nim.c" src=repro_dsl_stdlib/packages/nim.nim:280
@@ -516,9 +516,9 @@ package "node"
     optionalOutputs=[]
     removeBeforeRun=[]
     typedOutputs=[]
-      param name="args" nimType="seq[string]" kind=cpkPositional role=carOrdinary format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="" required=true src=repro_dsl_stdlib/packages/node.nim:127
+      param name="args" nimType="seq[string]" kind=cpkPositional role=carOrdinary format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="" required=false src=repro_dsl_stdlib/packages/node.nim:127
     argv=["/tool/node", "args-a", "args-b"]
-  interface sha256:3d4a8c69240932c44b5f8f90d0aff843afa42782c2543947d15c0060a5331681
+  interface sha256:5901b2a0ba86fe30b377c2bf848a81afdbaebd09fe00393757218e3065bdf218
 package "nsis"
   executable "makensis" binary="makensis" src=repro_dsl_stdlib/packages/nsis.nim:54
     command name="" path=[] entry="nsis.makensis.call" src=repro_dsl_stdlib/packages/nsis.nim:63
@@ -646,9 +646,9 @@ package "sh"
     removeBeforeRun=[]
     typedOutputs=[]
       param name="command" nimType="string" kind=cpkFlag role=carOrdinary format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="-c" required=true src=repro_dsl_stdlib/packages/sh.nim:162
-      param name="args" nimType="seq[string]" kind=cpkPositional role=carOrdinary format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="" required=true src=repro_dsl_stdlib/packages/sh.nim:165
+      param name="args" nimType="seq[string]" kind=cpkPositional role=carOrdinary format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="" required=false src=repro_dsl_stdlib/packages/sh.nim:165
     argv=["/tool/sh", "-c", "command-v", "args-a", "args-b"]
-  interface sha256:e87935fcf8bab6aaaafc7814abadd96c2d6edaecf61c67d92c8e2310320c0d3b
+  interface sha256:ece00c47547f06a9b2fec5f79e8299d9594ee1b9ff563ef8e7173b3002311e47
 package "strip"
   executable "stripBin" binary="stripBin" src=repro_dsl_stdlib/packages/binutils.nim:174
     command name="" path=[] entry="strip.stripBin.call" src=repro_dsl_stdlib/packages/binutils.nim:179

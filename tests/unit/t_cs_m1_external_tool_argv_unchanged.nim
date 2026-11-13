@@ -18,6 +18,14 @@
 ## behaviour. Change the golden only together with a deliberate change to a
 ## tool definition or to argv rendering, and say so in that commit.
 ##
+## Deliberate changes since the capture:
+##
+## * clispec now reads ``required`` on a positional (it used to drop it), so
+##   the four ``pos args is seq[string], ..., required = false`` declarations
+##   (git, mktemp, node, sh) record ``required=false``, as they always said,
+##   and those packages' interface hashes changed with it. Their argv did not
+##   change.
+##
 ## The negative controls prove the comparison can fail: a model with one
 ## flag's ``alias`` changed, and one with a flag's ``format`` changed, must
 ## both render differently from the golden, at that flag.
