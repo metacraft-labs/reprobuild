@@ -37,13 +37,28 @@
 ##     all eight listed, in each of three runs (the list does not depend on
 ##     scheduling).
 ##
+## 15-18. A file a ``staticExec`` command reads whose name strace escapes
+##     (non-ASCII bytes, ``>``, a newline, a backslash): listed (strace
+##     ``-xx``, decoded), and an edit to it after the build is refused.
+## 19. A workspace binary a ``staticExec`` command executes (``execve``):
+##     listed, and a newer one refused.
+## 20. A directory a ``staticExec`` command lists (``getdents``): its
+##     entries are recorded, and a new entry refuses the binary (§13
+##     decision 80).
+## 21. A traced workspace path that is no longer a file when the list is
+##     written fails the writer: no list, never a silent drop.
+##
 ## Falsifying builds: ``stale-helper-accepted`` (cases 2-5 and 8-10 red),
 ## ``fresh-skips-included`` (case 4), ``fresh-skips-outside-tree`` (case
 ## 5), ``fresh-skips-c-sources`` (case 8), ``fresh-skips-headers`` (case
 ## 9), ``fresh-skips-static-reads`` (case 10), ``fresh-ignores-list-binary``
-## (case 11); and the script's ``WRITE_HELPER_DEPS_MUTATION`` in the
-## environment: ``keep-old-list`` (case 12), ``relative-to-script-dir``
-## (case 13), ``single-trace`` (case 14).
+## (case 11), ``fresh-ignores-listings`` (case 20); and the script's
+## ``WRITE_HELPER_DEPS_MUTATION`` in the environment: ``keep-old-list``
+## (case 12), ``relative-to-script-dir``
+## (case 13), ``single-trace`` (case 14), ``text-paths`` (cases 15-18;
+## it is the round-7 trace, so 19-21 go red with it),
+## ``no-execve`` (case 19), ``no-listing`` (case 20), ``drop-unresolved``
+## (case 21).
 ##
 ## Mocks: none -- the real compiler, the real script, strace.
 
@@ -79,6 +94,23 @@ for p in parInputs: writeFile(p, "read concurrently\n")
 var parCmd = ""
 for p in parInputs: parCmd.add("cat " & p & " & ")
 parCmd.add("wait")
+# Round 8: names strace escapes, an executed workspace binary, a listed
+# directory (§13 decision 80).
+let fooDir = tree / "apps" / "foo"
+let nonAscii = fooDir / "\xC3\xA9.txt"           # "é.txt"
+let gtName = fooDir / "a>b.txt"
+let nlName = fooDir / "nl\nx.txt"
+let bsName = fooDir / "bs\\c.txt"
+let helloSrc = fooDir / "hello.c"
+let hello = fooDir / "hello"
+let listDir = fooDir / "listdir"
+for p in [nonAscii, gtName, nlName, bsName]: writeFile(p, "escaped by strace\n")
+writeFile(helloSrc, "#include <stdio.h>\nint main(void){puts(\"hello\");return 0;}\n")
+block:
+  let (o, c) = execCmdEx(quoteShellCommand(["gcc", "-o", hello, helloSrc]))
+  doAssert c == 0, o
+createDir(listDir)
+writeFile(listDir / "one.txt", "listed\n")
 writeFile(lib, "proc greeting*(): string = \"hello\"\n")
 writeFile(outside, "proc farAway*(): string = \"from outside\"\n")
 writeFile(included, "proc part(): string = \"included\"\n")
@@ -90,7 +122,10 @@ proc writeApp(extra = "") =
     "const fromExec = staticExec(\"cat " & execInput & "\")\n" &
     "const fromRel = staticExec(\"cat rel-input.txt\")\n" &
     "const fromPar = staticExec(\"" & parCmd & "\")\n" &
-    "echo greeting(), farAway(), part(), fooHelper(), blob, fromExec, fromRel, fromPar.len\n" & extra)
+    "const fromEscaped = staticExec(\"cat \xC3\xA9.txt 'a>b.txt' nl?x.txt bs?c.txt\")\n" &
+    "const fromHello = staticExec(\"./hello\")\n" &
+    "const fromListing = staticExec(\"ls listdir\")\n" &
+    "echo greeting(), farAway(), part(), fooHelper(), blob, fromExec, fromRel, fromPar.len, fromEscaped.len, fromHello, fromListing\n" & extra)
 writeApp()
 let binary = tree / "build" / "bin" / addFileExt("foo-helper", ExeExt)
 
@@ -98,7 +133,8 @@ proc build() =
   ## Compile the tree and write its dependency list, after dating its
   ## sources a minute back (an earlier case may have dated one into the
   ## future).
-  for src in @[lib, app, included, outside, csrc, header, blob, execInput, relInput] & parInputs:
+  for src in @[lib, app, included, outside, csrc, header, blob, execInput, relInput,
+               nonAscii, gtName, nlName, bsName, hello] & parInputs:
     setLastModificationTime(src, getTime() - initDuration(seconds = 60))
   let flags = @["--path:" & tree / "libs" / "foolib" / "src",
                 "--path:" & parentDir(outside)]
@@ -244,6 +280,56 @@ suite "a helper binary is used only when built from the tree under test":
         if p notin deps: missing.add(p)
       checkpoint "run " & $run & ": missing " & $missing
       check missing.len == 0
+
+  for (n, label, p) in [(15, "a non-ASCII name", nonAscii), (16, "a name with '>'", gtName),
+                        (17, "a name with a newline", nlName), (18, "a name with a backslash", bsName)]:
+    test $n & ": a file with " & label & " a staticExec command reads is checked":
+      build()
+      check p in helperDependencies(tree, "foo-helper")
+      check refusal() == ""
+      touchAfterBinary(p)
+      let why = refusal()
+      checkpoint why
+      check ("older than " & p) in why
+
+  test "19: a workspace binary a staticExec command executes is checked":
+    build()
+    check hello in helperDependencies(tree, "foo-helper")
+    check refusal() == ""
+    touchAfterBinary(hello)
+    let why = refusal()
+    checkpoint why
+    check ("older than " & hello) in why
+
+  test "20: a directory a staticExec command lists is checked by its entries":
+    build()
+    check refusal() == ""
+    writeFile(listDir / "two.txt", "a new entry\n")
+    let why = refusal()
+    checkpoint why
+    check ("listing of " & listDir & " that has changed") in why
+    removeFile(listDir / "two.txt")
+    check refusal() == ""
+
+  test "21: a traced workspace path that is not a file fails the list":
+    # Its own tree: a staticExec that reads a file and removes it, so the
+    # path the trace names is no file when the list is written.
+    let t2 = base / "tree21"
+    let app2 = t2 / "apps" / "gone" / "gone.nim"
+    createDir(parentDir(app2))
+    writeFile(app2, "const g = staticExec(\"echo x > gone.txt; cat gone.txt; rm gone.txt\")\necho g\n")
+    let bin2 = t2 / "build" / "bin" / "gone"
+    let (o1, c1) = execCmdEx(quoteShellCommand(@["nim", "c", "--hints:off",
+      "--warnings:off", "--nimcache:" & t2 / "build" / "nimcache" / "gone",
+      "--out:" & bin2, app2]))
+    doAssert c1 == 0, o1
+    let (o2, c2) = execCmdEx(quoteShellCommand(@["bash",
+      RepoRoot / "scripts" / "write_helper_deps.sh", "gone", app2]),
+      workingDir = t2)
+    checkpoint o2
+    check c2 != 0
+    check "not what they were traced as" in o2
+    check not fileExists(t2 / "build" / "nimcache" / "gone" / "gone.deps")
 
   test "7: no binary, or no dependency list, is refused":
     build()

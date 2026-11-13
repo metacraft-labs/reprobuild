@@ -916,16 +916,33 @@
 ##                                            and staticExec inputs
 ## ``fresh-ignores-list-binary``              fresh_binary accepts a list
 ##                                            written for another binary
+## ``fresh-ignores-listings``                 fresh_binary does not check a
+##                                            listed directory's entries
+##                                            (decision 80)
 ## ``override-sig-write-error-swallowed``     a failed signature write does
 ##                                            not stop the discard (round 6)
-## ``override-record-kept-on-failed-write``  a record whose write failed
-##                                            after its rename stays, with
-##                                            its signature (round 7's rule,
-##                                            withdrawn in round 8)
-## ``override-record-kept-after-failed-uninstall``  an uninstall that stops
-##                                            after the gate with the store
-##                                            evidence in place leaves its
-##                                            discard record (round 8)
+## ``override-rollback-removes-sig``         an intent record whose write
+##                                            failed after its rename loses
+##                                            its signature (decision 81)
+## ``discard-verify-ignores-completion``      verify-discard-record reports
+##                                            "completed" from the intent
+##                                            record alone (decision 81)
+## ``discard-verify-completion-sig-alone``    a completion signature without
+##                                            its record counts as completed
+## ``discard-verify-skips-intent-digest``     a completion of another intent
+##                                            record counts
+## ``discard-completed-despite-errors``       an uninstall that drifted or
+##                                            failed after the intent record
+##                                            writes the completion record
+## ``discard-completed-objects-present``      the completion is written while
+##                                            a discarded object is still in
+##                                            place
+## ``discard-completion-key-read-late``       the completion is signed from
+##                                            the key file, which the removal
+##                                            took
+## ``discard-completion-sync-error-swallowed`` a completion record whose
+##                                            directory sync failed is not
+##                                            reported
 ## ``verify-accepts-missing-key``             verify-discard-record verifies
 ##                                            without --key (round 6)
 ## ``sim-skips-stop``                         the simulator's TLS smoke pass
@@ -1547,8 +1564,16 @@ const
                           "fresh-ignores-list-binary",
                           "override-sig-write-error-swallowed",
                           "verify-accepts-missing-key", "sim-skips-stop",
-                          "override-record-kept-on-failed-write",
-                          "override-record-kept-after-failed-uninstall"]
+                          # Round 8: §13 decision 81.
+                          "override-rollback-removes-sig",
+                          "discard-verify-ignores-completion",
+                          "discard-verify-completion-sig-alone",
+                          "discard-verify-skips-intent-digest",
+                          "discard-completed-despite-errors",
+                          "discard-completed-objects-present",
+                          "discard-completion-key-read-late",
+                          "discard-completion-sync-error-swallowed",
+                          "fresh-ignores-listings"]
 
 when AddonMutation.len > 0 and AddonMutation notin KnownAddonMutations and
     AddonMutation notin KnownAgentMutations:

@@ -16,20 +16,23 @@
 ##    discards nothing, and leaves no record of the discard: the signature
 ##    is written first and the record last.
 ##
-## 4. (round 8, replacing round 7's rule) When the record's write fails
-##    AFTER the record reached its name (the directory sync), the record and
-##    then its signature are withdrawn, the error is reported, and nothing
-##    is discarded: no record of a discard that did not happen.
+## 4. (§13 decision 81) When the intent record's write fails AFTER the
+##    record reached its name (the directory sync), the error is reported,
+##    nothing is discarded, and the record stays WITH its signature: it
+##    states an authorisation, which is true, and ``verify-discard-record``
+##    reports it as "authorised, not completed" (exit 3), never as a
+##    discard.
 ##
-## 5. (round 8) An uninstall that ends incomplete (drift or errors) after
-##    the gate, with the evidence still in place, withdraws its record; one
-##    that already removed an object keeps it.
+## 5. (§13 decision 81) An uninstall that ends incomplete (drift or an
+##    error) after the intent record writes no completion record, whether
+##    or not an object is already gone: the record verifies as "authorised,
+##    not completed".
 ##
 ## Falsifying builds (each turns its own case red):
 ## ``override-keyless-unsigned`` (1), ``override-write-error-swallowed`` (2),
 ## ``override-sig-write-error-swallowed`` (3),
-## ``override-record-kept-on-failed-write`` (4),
-## ``override-record-kept-after-failed-uninstall`` (5).
+## ``override-rollback-removes-sig`` (4),
+## ``discard-completed-despite-errors`` (5).
 ##
 ## Mocks: case 4's record writer writes the file as the real one does and
 ## then raises, as the real one does when the directory's fsync fails
@@ -42,6 +45,7 @@
 import std/[os, sequtils, strutils, times, unittest]
 
 import repro_addon/attestation
+import repro_addon/cli
 import repro_addon/evidence as addonEvidence
 import repro_addon/store_custody
 import repro_addon/uninstall
@@ -117,7 +121,7 @@ suite "the A11 code review's fifth round":
     for s in 0 .. 20:
       createDir(logDir / ("uninstall-" &
         (t0 + initDuration(seconds = s)).utc.format("yyyyMMdd'T'HHmmss'Z'") &
-        "-discarded-unshipped.json" & DiscardRecordSigExt))
+        DiscardIntentSuffix & DiscardRecordSigExt))
     let g = storeEvidenceGate(site, override, notAcknowledged,
                               overrideDir = logDir)
     checkpoint g.errors.join("\n")
@@ -127,13 +131,13 @@ suite "the A11 code review's fifth round":
     check dirExists(aside)
     var records = 0
     for kind, p in walkDir(logDir):
-      if kind == pcFile and p.endsWith("-discarded-unshipped.json"): inc records
+      if kind == pcFile and p.endsWith(DiscardIntentSuffix): inc records
     check records == 0
 
-  test "4: a record whose directory sync fails is withdrawn with its signature":
+  test "4: an intent record whose directory sync fails stays signed, as authorised":
     let key = root / "syncfail" / "agent" / "attestation.key"
     createDir(parentDir(key))
-    discard ensureAttestationKey(key)
+    let pub = ensureAttestationKey(key).publicKeyHex
     let site = scratchSite("syncfail", key)
     let aside = leaveAside(site, "1-a")
     let logDir = root / "syncfail" / "log"
@@ -144,21 +148,25 @@ suite "the A11 code review's fifth round":
     let g = storeEvidenceGate(site, override, notAcknowledged,
                               overrideDir = logDir, recordWriter = failAfterRename)
     checkpoint g.errors.join("\n")
-    check g.errors.anyIt("it was withdrawn" in it)
+    check g.errors.anyIt("making them durable failed" in it)
     check g.overrideRecord.len == 0
     check g.errors.anyIt(it == "nothing was removed")
     check dirExists(aside)
-    var records, sigs = 0
+    var records: seq[string]
     for kind, p in walkDir(logDir):
-      if kind == pcFile and p.endsWith("-discarded-unshipped.json"): inc records
-      if kind == pcFile and p.endsWith("-discarded-unshipped.json" & DiscardRecordSigExt): inc sigs
-    check records == 0
-    check sigs == 0
+      if kind == pcFile and p.endsWith(DiscardIntentSuffix): records.add(p)
+    check records.len == 1
+    if records.len == 1:
+      check fileExists(records[0] & DiscardRecordSigExt)
+      let v = verifyDiscardRecord(records[0], pub)
+      checkpoint v.why
+      check v.status == dsAuthorised
+      check runAddonCli(@["verify-discard-record", records[0], "--key", pub]) == 3
 
-  test "5: an incomplete uninstall withdraws the record of a discard that did not happen":
+  test "5: an uninstall that drifts or fails after the intent record does not complete it":
     let key = root / "drift" / "agent" / "attestation.key"
     createDir(parentDir(key))
-    discard ensureAttestationKey(key)
+    let pub = ensureAttestationKey(key).publicKeyHex
     let site = scratchSite("drift", key)
     let aside = leaveAside(site, "1-a")
     let logDir = root / "drift" / "log"
@@ -166,27 +174,27 @@ suite "the A11 code review's fifth round":
                               overrideDir = logDir)
     check g.errors.len == 0
     check fileExists(g.overrideRecord)
-    check fileExists(g.overrideRecord & DiscardRecordSigExt)
+    var signer = loadTextSigner(key)
     var r = UninstallResult(overrideRecord: g.overrideRecord,
                             overrideRecordText: g.overrideRecordText)
     r.drift.add("/etc/x: drifted")
-    withdrawUndoneDiscardRecord(r, g.pending)
-    check r.overrideRecord.len == 0
-    check r.overrideRecordText.len == 0
-    check not fileExists(g.overrideRecord)
-    check not fileExists(g.overrideRecord & DiscardRecordSigExt)
-    check dirExists(aside)
+    removeDir(aside)                      # the object itself is gone
+    finishDiscard(r, site, signer, g.pending)
+    check r.completionRecord.len == 0
+    check not fileExists(completionPathOf(g.overrideRecord))
+    check verifyDiscardRecord(g.overrideRecord, pub).status == dsAuthorised
 
-    # An object already gone: the record is true and stays.
+    # An error, no drift: the same.
+    let aside2 = leaveAside(site, "2-a")
     let g2 = storeEvidenceGate(site, override, notAcknowledged,
-                               overrideDir = logDir)
+                               overrideDir = logDir / "2")
     var r2 = UninstallResult(overrideRecord: g2.overrideRecord,
                              overrideRecordText: g2.overrideRecordText)
     r2.errors.add("some later step failed")
-    removeDir(aside)
-    withdrawUndoneDiscardRecord(r2, g2.pending)
-    check fileExists(r2.overrideRecord)
-    check fileExists(r2.overrideRecord & DiscardRecordSigExt)
-
+    removeDir(aside2)
+    finishDiscard(r2, site, signer, g2.pending)
+    signer.wipe()
+    check r2.completionRecord.len == 0
+    check verifyDiscardRecord(g2.overrideRecord, pub).status == dsAuthorised
 
 removeDir(root)

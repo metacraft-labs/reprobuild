@@ -159,14 +159,18 @@ commands:
             [--discard-unacknowledged-store-evidence]
       Reverse everything the ownership ledger records.
       --discard-unacknowledged-store-evidence discards store evidence the
-      Evidence sink has not acknowledged, after writing a record of it to
-      /var/log/repro-addon signed by the host's attestation key; without
-      that key it refuses.
+      Evidence sink has not acknowledged. Before removing anything it
+      writes an intent record to /var/log/repro-addon, signed by the
+      host's attestation key (without that key it refuses); after the
+      removal succeeded, a signed completion record beside it.
   verify-discard-record RECORD --key HEX
-      Check such a record: its signature (RECORD.sig) must be over exactly
-      the bytes of RECORD, by HEX, the host's enrolled attestation key
-      (required; without it this is a usage error, exit 2). Exit 0 only
-      then. Runs on any machine; the files may be copied off the host.
+      Check such a record (the intent record, or its completion): each
+      signature (FILE.sig) must be over exactly the bytes of FILE, by HEX,
+      the host's enrolled attestation key. Exit 0: the discard was
+      authorised and completed. Exit 3: authorised, not completed (the
+      uninstall failed, drifted or stopped after the intent record).
+      Exit 1: it does not verify. Exit 2: usage (no --key). Runs on any
+      machine; the files may be copied off the host.
   verify [--boot | --after-dpkg]
       Compare every ledger object with the host (report only). --after-dpkg
       (the apt hook): also report packages that now own ledger paths and
@@ -570,26 +574,44 @@ proc runAddonCli*(args: seq[string]): int =
                      "\n")
         return 2
       let v = verifyDiscardRecord(path, key)
-      if not v.ok:
+      case v.status
+      of dsInvalid:
         stderr.write("repro system addon verify-discard-record: " & path &
                      " does not verify: " & v.why & "\n")
         return 1
-      stdout.write("verified: " & path & " is signed by " & v.keyHex &
-                   " over exactly its bytes; " & $v.objects.len &
-                   " object(s) discarded unshipped:\n")
-      for o in v.objects: stdout.write("  " & o & "\n")
-      return 0
+      of dsAuthorised:
+        # §13 decision 81: never a discard that did not finish.
+        stdout.write("authorised, not completed: the intent record is " &
+                     "signed by " & v.keyHex & " over exactly its bytes, " &
+                     "but " & v.why & "; " & $v.objects.len &
+                     " object(s) were to be discarded unshipped:\n")
+        for o in v.objects: stdout.write("  " & o & "\n")
+        return 3
+      of dsCompleted:
+        stdout.write("completed: the intent record and its completion are " &
+                     "signed by " & v.keyHex & " over exactly their bytes; " &
+                     $v.objects.len & " object(s) discarded unshipped:\n")
+        for o in v.objects: stdout.write("  " & o & "\n")
+        return 0
     of "uninstall":
       let r = runAddonUninstall(parseUninstallArgs(rest))
       if r.overrideRecord.len > 0:
         # §13 decisions 62 and 64: the record of what was discarded
         # unshipped, its signature beside it.
-        stdout.write("store evidence discarded before the Evidence sink " &
-          "acknowledged it; the signed record is " & r.overrideRecord &
-          " (signature " & r.overrideRecord & DiscardRecordSigExt &
-          "; check it with `repro system addon verify-discard-record " &
-          r.overrideRecord & " --key <enrolled key>`):\n" &
-          r.overrideRecordText)
+        stdout.write("discarding store evidence the Evidence sink has " &
+          "not acknowledged was authorised; the signed intent record is " &
+          r.overrideRecord & " (signature " & r.overrideRecord &
+          DiscardRecordSigExt & "):\n" & r.overrideRecordText)
+        if r.completionRecord.len > 0:
+          stdout.write("the discard completed; the signed completion " &
+            "record is " & r.completionRecord & " (signature " &
+            r.completionRecord & DiscardRecordSigExt & ")\n")
+        else:
+          stdout.write("the discard did NOT complete: there is no " &
+            "completion record\n")
+        stdout.write("check it with `repro system addon " &
+          "verify-discard-record " & r.overrideRecord &
+          " --key <enrolled key>`\n")
       for p in r.removed: stdout.write("removed " & p & "\n")
       for d in r.drift: stdout.write("left in place (drift): " & d & "\n")
       for k in r.keptEvidence:

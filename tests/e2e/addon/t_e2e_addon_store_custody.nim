@@ -46,11 +46,13 @@
 ##    credential revoked at the sink), and ``--discard-store-evidence`` is
 ##    refused, removing nothing (decision 56). With
 ##    ``--discard-unacknowledged-store-evidence`` (decision 62) uninstall
-##    removes them, after writing a signed record of each object discarded
-##    unshipped to ``/var/log/repro-addon``, which it prints and which
-##    stays after it; ``repro system addon verify-discard-record`` accepts
-##    its signature with the attestation key bootstrap printed (decision
-##    64).
+##    removes them, after writing a signed intent record of each object
+##    discarded unshipped to ``/var/log/repro-addon``, and after the removal
+##    a signed completion record (decision 81); it prints both, and both
+##    stay after it. ``repro system addon verify-discard-record`` reports
+##    the discard "completed" (exit 0) with the attestation key bootstrap
+##    printed (decision 64) -- the completion signed with the key read
+##    before the removal took it.
 ##
 ## Falsifying mutations: ``custody-skips-file-sources`` (steps 2 and 4: the
 ## altered bytes are installed into /etc), ``custody-skips-closures`` (step
@@ -66,7 +68,9 @@
 ## (step 5: the override writes and prints no record),
 ## ``override-signs-other-bytes`` and ``override-empty-signature`` (step 5:
 ## ``verify-discard-record`` refuses the record), ``verify-accepts-missing-key``
-## (step 5: it verifies without ``--key``).
+## (step 5: it verifies without ``--key``), ``discard-completion-key-read-late``
+## (step 5: the completion is signed from the key file the removal took, so
+## there is none and the discard verifies as not completed).
 ##
 ## Opt-in: ``REPRO_ADDON_VM_GATES=1``.
 ##
@@ -339,7 +343,7 @@ proc body(g: Guest; repro: string; step: StepFn; record: JsonNode;
                   "--discard-unacknowledged-store-evidence", timeoutSec = 1800)
   record["uninstall"] = %(un.stdout & un.stderr)
   let said = un.stdout & un.stderr
-  let marker = "the signed record is "
+  let marker = "the signed intent record is "
   var recordPath = ""
   if marker in said:
     recordPath = said[said.find(marker) + marker.len .. ^1].splitLines()[0]
@@ -351,7 +355,8 @@ proc body(g: Guest; repro: string; step: StepFn; record: JsonNode;
          said.count("(store evidence)") == entries and
          (aside2 & " (store evidence left aside)") in said and
          recordPath.startsWith("/var/log/repro-addon/") and
-         aside2 in said[said.find(marker) .. ^1],
+         aside2 in said[said.find(marker) .. ^1] and
+         "the discard completed; the signed completion record is " in said,
        said)
   let kept = g.exec("cat " & quoteShell(recordPath)).stdout
   # Decision 64: checked the way an operator checks it, with the command,
@@ -365,12 +370,14 @@ proc body(g: Guest; repro: string; step: StepFn; record: JsonNode;
     quoteShell(recordPath))
   record["overrideVerifyWithoutKey"] = %(keyless.stdout & keyless.stderr)
   let signed = bs.attestationKey.len > 0 and verify.exitCode == 0 and
+    verify.stdout.startsWith("completed: ") and
     ("  " & aside2) in verify.stdout and keyless.exitCode == 2 and
-    "verified" notin keyless.stdout
+    "completed" notin keyless.stdout
   record["overrideRecord"] = %kept
   step("the record names the object discarded unshipped, stays after " &
-       "uninstall, and verify-discard-record accepts its signature with the " &
-       "enrolled key and refuses to verify without one (decisions 62, 64)",
+       "uninstall, and verify-discard-record reports the discard completed " &
+       "with the enrolled key and refuses to verify without one " &
+       "(decisions 62, 64, 81)",
        signed, kept & "\n" & verify.stdout & verify.stderr & "\n" &
        keyless.stdout & keyless.stderr)
   step("the evidence directory is gone with the state",

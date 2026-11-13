@@ -47,6 +47,7 @@ import ./attestation
 import ./etc_write
 import ./evidence
 import ./evidence_ship
+import ./fingerprint
 import ./generation0
 import ./handback
 import ./host_exec
@@ -81,6 +82,9 @@ type
       ## §13 decision 62: the signed local record written when store
       ## evidence was discarded unshipped ("" when none was).
     overrideRecordText*: string
+    completionRecord*: string
+      ## §13 decision 81: the signed completion record, once the removal
+      ## succeeded.
     keptEvidence*: seq[string]
       ## Store evidence left with a kept store (``--keep-store``): objects a
       ## crashed recovery left aside, named, not removed.
@@ -265,11 +269,37 @@ const UninstallOverrideDir* = "/var/log/repro-addon"
   ## ``/var/lib/repro`` and ``/etc/repro``, which uninstall removes.
 
 const
-  DiscardRecordSchema* = "repro-addon-store-evidence-discarded-unshipped/2"
-    ## /2: the record file holds the record alone, and the signature is
-    ## over exactly its bytes, beside it in ``<record>.sig`` (§13 decision
-    ## 64). /1 signed a compact re-serialisation the file did not hold.
+  DiscardRecordSchema* = "repro-addon-store-evidence-discard-intent/3"
+    ## §13 decision 81: the INTENT record, signed and made durable before
+    ## anything is removed. It says the operator authorised discarding these
+    ## objects unshipped; it does not say they were discarded. /2 (one
+    ## record, read as "discarded") and /1 are no longer written.
+  DiscardCompletionSchema* = "repro-addon-store-evidence-discard-completed/1"
+    ## §13 decision 81: the COMPLETION record, signed and made durable only
+    ## after the removal succeeded; it names the intent record by name and
+    ## sha256.
   DiscardRecordSigExt* = ".sig"
+  IntentRecordNote = "intent: the operator authorised discarding these " &
+    "objects unshipped; this record alone does not say they were discarded"
+  CompletionRecordNote = "completed: the objects of the intent record " &
+    "were discarded unshipped"
+  DiscardIntentSuffix* = "-discard-intent.json"
+  DiscardCompletionSuffix* = "-discard-completed.json"
+
+type
+  DiscardStatus* = enum
+    ## What ``verifyDiscardRecord`` found (decision 81).
+    dsInvalid       ## not a valid, enrolled-key-signed intent record
+    dsAuthorised    ## a valid intent record, and no valid completion
+    dsCompleted     ## a valid intent record and a valid completion of it
+
+proc completionPathOf*(intentPath: string): string =
+  ## ``uninstall-<stamp>-discard-intent.json`` ->
+  ## ``uninstall-<stamp>-discard-completed.json``.
+  if intentPath.endsWith(DiscardIntentSuffix):
+    intentPath[0 ..< intentPath.len - DiscardIntentSuffix.len] & DiscardCompletionSuffix
+  else:
+    intentPath & ".completed"
 
 type DiscardRecordWriter* = proc (path, text: string) {.closure.}
   ## Writes one file of the discard record durably (write, rename into
@@ -278,14 +308,6 @@ type DiscardRecordWriter* = proc (path, text: string) {.closure.}
 
 proc atomicRecordWriter*(path, text: string) =
   writeFileAtomic(path, text, 0o600)
-
-proc retractDiscardRecord*(path: string) =
-  ## Withdraws the record of a discard that did not happen: the record
-  ## first, then its signature, so the signature never goes while the
-  ## record stays. Idempotent; a file that cannot be removed is left (a
-  ## crash can still leave one, which §13 decision 73 states).
-  try: removeFile(path) except OSError: discard
-  try: removeFile(path & DiscardRecordSigExt) except OSError: discard
 
 proc writeOverrideRecord(custody: CustodySite; dir: string;
                          objects: seq[string]; why: string;
@@ -302,6 +324,7 @@ proc writeOverrideRecord(custody: CustodySite; dir: string;
   let keyPath = custody.evidence.attestationKey
   let keyless = not fileExists(keyPath)   # only under override-keyless-unsigned
   var j = %*{"schema": DiscardRecordSchema,
+             "record": IntentRecordNote,
              "time": t.utc.format("yyyy-MM-dd'T'HH:mm:ss'Z'"),
              "host": custody.evidence.host, "why": why,
              "objects": objects,
@@ -320,11 +343,15 @@ proc writeOverrideRecord(custody: CustodySite; dir: string;
   createDir(dir)
   setFilePermissions(dir, {fpUserRead, fpUserWrite, fpUserExec})
   result.path = dir / ("uninstall-" & t.utc.format("yyyyMMdd'T'HHmmss'Z'") &
-                       "-discarded-unshipped.json")
+                       DiscardIntentSuffix)
   # The signature goes first and the record last, so a record exists only
-  # with its signature beside it: a failed write of either leaves no
-  # record of a discard that does not happen (round 6). A record write
-  # that fails after the signature was written removes the signature.
+  # with its signature beside it. Each write is durable (the file fsynced,
+  # renamed into place, its directory fsynced: writeFileAtomic). A failed
+  # write stops the uninstall before anything is removed. An intent record
+  # that reached its name before its directory sync failed stays with its
+  # signature: it states an authorisation, which is true, and never a
+  # discard (decision 81); only a record that never reached its name has
+  # its signature removed.
   try:
     writer(result.path & DiscardRecordSigExt, signature & "\n")
   except CatchableError:
@@ -333,55 +360,120 @@ proc writeOverrideRecord(custody: CustodySite; dir: string;
   try:
     writer(result.path, result.text)
   except CatchableError as e:
-    # The discard does not happen, so no record of it may stay (round 8,
-    # option (c) of the issue 2026-11-08-discard-record-verifies-...): the
-    # record goes first, then its signature, so a record never exists
-    # without its signature. This covers a record that reached its name
-    # before its directory sync failed (round 7 kept both).
-    when not mutated("override-record-kept-on-failed-write"):
-      retractDiscardRecord(result.path)
-    else:
-      if not (fileExists(result.path) and (try: readFile(result.path) == result.text except IOError: false)):
-        try: removeFile(result.path & DiscardRecordSigExt) except OSError: discard
-    raise newException(OSError, "the discard record " & result.path &
-      " could not be made durable (" & e.msg & "); it was withdrawn")
+    let inPlace = fileExists(result.path) and
+      (try: readFile(result.path) == result.text except IOError: false)
+    if inPlace and not mutated("override-rollback-removes-sig"):
+      raise newException(OSError, "the intent record " & result.path &
+        " and its signature are in place, but making them durable failed (" &
+        e.msg & "); both are kept and state an authorisation only")
+    try: removeFile(result.path & DiscardRecordSigExt) except OSError: discard
+    raise newException(OSError, "the intent record " & result.path &
+      " could not be written (" & e.msg & ")")
 
-proc verifyDiscardRecord*(path: string; expectedKeyHex: string):
-    tuple[ok: bool; why, keyHex: string; objects: seq[string]] =
-  ## §13 decision 64 (amended round 6): whether the record at ``path`` is
-  ## signed, over exactly the bytes the file holds, by ``expectedKeyHex``
-  ## -- the host's enrolled attestation key, which the caller must give. A
-  ## signature that matches only the key the record itself names proves
-  ## nothing about who wrote it, so without an expected key nothing is
-  ## verified. Reads ``<path>.sig``.
-  when not mutated("verify-accepts-missing-key"):
-    if expectedKeyHex.len == 0:
-      return (false, "no expected key: give the host's enrolled attestation " &
-        "key with --key", "", @[])
+proc writeDiscardCompletion*(custody: CustodySite; signer: TextSigner;
+                             intentPath, intentText: string;
+                             removed, kept: seq[string];
+                             writer: DiscardRecordWriter = atomicRecordWriter):
+    tuple[path, text: string] =
+  ## §13 decision 81: the signed completion record, written only after the
+  ## removal succeeded. It names the intent record and its sha256, the
+  ## objects removed and any kept with the store (``--keep-store``). It is
+  ## signed with the key read before the removal (``signer``): the key file
+  ## goes with ``/var/lib/repro``. The signature goes first, the record
+  ## last; both durable.
+  var s = signer
+  when mutated("discard-completion-key-read-late"):
+    s = loadTextSigner(custody.evidence.attestationKey)
+  var j = %*{"schema": DiscardCompletionSchema,
+             "record": CompletionRecordNote,
+             "time": getTime().utc.format("yyyy-MM-dd'T'HH:mm:ss'Z'"),
+             "host": custody.evidence.host,
+             "intent": extractFilename(intentPath),
+             "intentSha256": sha256Hex(intentText),
+             "removed": removed, "keptWithTheStore": kept,
+             "attestationKey": s.publicKeyHex}
+  result.text = pretty(j) & "\n"
+  result.path = completionPathOf(intentPath)
+  writer(result.path & DiscardRecordSigExt, signWith(s, result.text) & "\n")
+  writer(result.path, result.text)
+
+proc readSignedRecord(path, schema, expectedKeyHex: string):
+    tuple[ok: bool; why, text: string; doc: JsonNode] =
+  ## A record at ``path`` of ``schema``, signed over exactly its bytes by
+  ## ``expectedKeyHex`` (``<path>.sig``).
   let text = try: readFile(path)
-             except IOError as e: return (false, "cannot read " & path & ": " & e.msg, "", @[])
+             except IOError as e: return (false, "cannot read " & path & ": " & e.msg, "", nil)
   let sig = try: readFile(path & DiscardRecordSigExt).strip()
             except IOError as e:
               return (false, "cannot read the signature " & path &
-                DiscardRecordSigExt & ": " & e.msg, "", @[])
+                DiscardRecordSigExt & ": " & e.msg, "", nil)
   var doc: JsonNode
   try: doc = parseJson(text)
-  except CatchableError as e: return (false, path & " is not a record: " & e.msg, "", @[])
-  if doc{"schema"}.getStr() != DiscardRecordSchema:
-    return (false, path & " is not a " & DiscardRecordSchema & " record", "", @[])
-  result.keyHex = doc{"attestationKey"}.getStr()
-  for o in doc{"objects"}.getElems(): result.objects.add(o.getStr())
-  if result.keyHex.len == 0:
-    result.why = "the record names no attestation key: it is unsigned"
+  except CatchableError as e: return (false, path & " is not a record: " & e.msg, "", nil)
+  if doc{"schema"}.getStr() != schema:
+    return (false, path & " is not a " & schema & " record", "", nil)
+  let keyHex = doc{"attestationKey"}.getStr()
+  if keyHex.len == 0:
+    return (false, path & " names no attestation key: it is unsigned", "", nil)
+  if expectedKeyHex.toLowerAscii() != keyHex.toLowerAscii():
+    return (false, path & " names the key " & keyHex & ", not the expected " &
+      expectedKeyHex, "", nil)
+  let v = verifyText(text, sig, keyHex)
+  if not v.ok: return (false, path & ": " & v.why, "", nil)
+  (true, "", text, doc)
+
+proc verifyDiscardRecord*(path: string; expectedKeyHex: string):
+    tuple[status: DiscardStatus; why, keyHex: string; objects: seq[string]] =
+  ## §13 decisions 64, 73 and 81. ``path`` names the intent record (or its
+  ## completion, which leads to the intent). Both must be signed, over
+  ## exactly their bytes, by ``expectedKeyHex`` -- the host's enrolled
+  ## attestation key, which the caller must give.
+  ##
+  ## - ``dsCompleted``: the intent record verifies, and a completion record
+  ##   verifies and names that intent by its sha256;
+  ## - ``dsAuthorised``: the intent verifies and there is no valid
+  ##   completion (the uninstall failed, drifted or crashed after the
+  ##   intent): the discard was authorised and is NOT claimed;
+  ## - ``dsInvalid``: anything else.
+  when not mutated("verify-accepts-missing-key"):
+    if expectedKeyHex.len == 0:
+      return (dsInvalid, "no expected key: give the host's enrolled " &
+        "attestation key with --key", "", @[])
+  var intentPath = path
+  if path.endsWith(DiscardCompletionSuffix):
+    intentPath = path[0 ..< path.len - DiscardCompletionSuffix.len] & DiscardIntentSuffix
+  var key = expectedKeyHex
+  if key.len == 0:      # only under verify-accepts-missing-key
+    try: key = parseJson(readFile(intentPath)){"attestationKey"}.getStr()
+    except CatchableError: discard
+  let intent = readSignedRecord(intentPath, DiscardRecordSchema, key)
+  if not intent.ok:
+    return (dsInvalid, intent.why, "", @[])
+  result.keyHex = intent.doc{"attestationKey"}.getStr()
+  for o in intent.doc{"objects"}.getElems(): result.objects.add(o.getStr())
+  when mutated("discard-verify-ignores-completion"):
+    return (dsCompleted, "", result.keyHex, result.objects)
+  let cpath = completionPathOf(intentPath)
+  if not fileExists(cpath):
+    when mutated("discard-verify-completion-sig-alone"):
+      if fileExists(cpath & DiscardRecordSigExt):
+        return (dsCompleted, "", result.keyHex, result.objects)
+    result.status = dsAuthorised
+    result.why = "no completion record (" & extractFilename(cpath) & "): " &
+      "the discard was authorised and is not known to have completed"
     return
-  if expectedKeyHex.len > 0 and
-      expectedKeyHex.toLowerAscii() != result.keyHex.toLowerAscii():
-    result.why = "the record names the key " & result.keyHex &
-      ", not the expected " & expectedKeyHex
+  let done = readSignedRecord(cpath, DiscardCompletionSchema, key)
+  if not done.ok:
+    result.status = dsInvalid
+    result.why = "the completion record does not verify: " & done.why
     return
-  let v = verifyText(text, sig, result.keyHex)
-  result.ok = v.ok
-  result.why = v.why
+  if done.doc{"intentSha256"}.getStr() != sha256Hex(intent.text) and
+      not mutated("discard-verify-skips-intent-digest"):
+    result.status = dsInvalid
+    result.why = cpath & " completes another intent record (its intentSha256 " &
+      "is not this intent's)"
+    return
+  result.status = dsCompleted
 
 proc storeEvidenceGate*(custody: CustodySite; opts: UninstallOptions;
                         ship: proc (): tuple[ok: bool; why: string];
@@ -449,21 +541,44 @@ proc storeEvidenceGate*(custody: CustodySite; opts: UninstallOptions;
       "writes and prints a signed record of each")
     result.errors.add("nothing was removed")
 
-proc withdrawUndoneDiscardRecord*(r: var UninstallResult;
-                                  pending: seq[string]) =
-  ## An uninstall that ends incomplete (drift or errors) with every
-  ## pending store-evidence object still in place discarded nothing, so
-  ## the record it wrote is withdrawn and not reported (round 8, §13
-  ## decision 73). The re-run writes its own. Once any object is gone the
-  ## record stays: it is then true.
-  if r.overrideRecord.len == 0 or (r.drift.len == 0 and r.errors.len == 0):
-    return
-  if not pending.allIt(fileExists(it) or dirExists(it)):
-    return
-  when not mutated("override-record-kept-after-failed-uninstall"):
-    retractDiscardRecord(r.overrideRecord)
-    r.overrideRecord = ""
-    r.overrideRecordText = ""
+proc finishDiscard*(r: var UninstallResult; custody: CustodySite;
+                   signer: TextSigner; pending: seq[string];
+                   writer: DiscardRecordWriter = atomicRecordWriter) =
+  ## §13 decision 81: after an uninstall that wrote an intent record, the
+  ## completion record is written only when the uninstall ended clean (no
+  ## drift, no error) and every pending object is gone or kept with the
+  ## store (``--keep-store``). Otherwise the intent stands alone, and
+  ## ``verify-discard-record`` reports "authorised, not completed".
+  if r.overrideRecord.len == 0: return
+  when not mutated("discard-completed-despite-errors"):
+    if r.drift.len > 0 or r.errors.len > 0: return
+  var removed, kept: seq[string]
+  for o in pending:
+    if o in r.keptEvidence: kept.add(o)
+    elif fileExists(o) or dirExists(o):
+      when not mutated("discard-completed-objects-present"):
+        return
+    else: removed.add(o)
+  try:
+    let c = writeDiscardCompletion(custody, signer, r.overrideRecord,
+                                   r.overrideRecordText, removed, kept, writer)
+    r.completionRecord = c.path
+  except CatchableError as e:
+    let cpath = completionPathOf(r.overrideRecord)
+    if fileExists(cpath):
+      # It reached its name, so it is true and stays; only its durability
+      # is unconfirmed (a crash now may still lose it, which leaves the
+      # intent as "authorised, not completed": never an overclaim).
+      r.completionRecord = cpath
+      when not mutated("discard-completion-sync-error-swallowed"):
+        r.errors.add("the store evidence was discarded and its completion " &
+          "record " & cpath & " written, but making it durable failed (" &
+          e.msg & ")")
+    else:
+      try: removeFile(cpath & DiscardRecordSigExt) except OSError: discard
+      r.errors.add("the store evidence was discarded, but its completion " &
+        "record could not be written (" & e.msg & "); the intent record " &
+        r.overrideRecord & " stands as authorised, not completed")
 
 proc runAddonUninstall*(opts: UninstallOptions): UninstallResult =
   let stateDir = if opts.stateDir.len > 0: opts.stateDir else: DefaultStateDir
@@ -481,10 +596,24 @@ proc runAddonUninstall*(opts: UninstallOptions): UninstallResult =
   let evidenceKept = gate.pending
   result.overrideRecord = gate.overrideRecord
   result.overrideRecordText = gate.overrideRecordText
-  # §13 decision 73 (round 8): the record states a discard. An uninstall
-  # that returns incomplete with every pending object still in place has
-  # discarded nothing, so its record is withdrawn; the re-run writes its own.
-  defer: withdrawUndoneDiscardRecord(result, evidenceKept)
+  # §13 decision 81: the completion record follows a clean removal, on
+  # every way out; an uninstall that ends incomplete leaves the intent
+  # record alone ("authorised, not completed").
+  # The key is read now, while it exists: the removal below takes it with
+  # /var/lib/repro, and the completion is signed after that.
+  var signer: TextSigner
+  if result.overrideRecord.len > 0:
+    try: signer = loadTextSigner(custody.evidence.attestationKey)
+    except CatchableError as e:
+      result.errors.add("the attestation key " &
+        custody.evidence.attestationKey & " could not be read to sign the " &
+        "completion of the discard (" & e.msg & "); the intent record " &
+        result.overrideRecord & " stands")
+      result.errors.add("nothing was removed")
+      return
+  defer:
+    finishDiscard(result, custody, signer, evidenceKept)
+    signer.wipe()
   if gate.errors.len > 0:
     result.errors.add(gate.errors)
     return

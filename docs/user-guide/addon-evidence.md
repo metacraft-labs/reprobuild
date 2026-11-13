@@ -244,37 +244,55 @@ explicitly:
 repro system addon uninstall --discard-unacknowledged-store-evidence
 ```
 
-Before it removes anything, this writes a record of every object it
-discards without the sink having acknowledged it, and of every record
-still queued, to
-`/var/log/repro-addon/uninstall-<time>-discarded-unshipped.json` (root
-only). The record names the public half of the host's attestation key,
-and `<record>.sig` beside it holds that key's signature over exactly the
-bytes of the record file. Uninstall prints the record's path and text.
-Both files stay after uninstall: keep them with the entries you copied
-off the host. If the attestation key is missing, or the record cannot be
-written, uninstall refuses and removes nothing. A record states a discard
-that happened: if the record cannot be made durable, or the uninstall
-ends incomplete (drift or an error) before any of those objects was
-removed, the record and its signature are withdrawn and not printed, and
-the next uninstall writes its own.
+Before it removes anything, this writes an **intent record**: every
+object it is about to discard without the sink having acknowledged it,
+and every record still queued, in
+`/var/log/repro-addon/uninstall-<time>-discard-intent.json` (root only).
+The record names the public half of the host's attestation key, and
+`<record>.sig` beside it holds that key's signature over exactly the
+bytes of the record file. The intent record says the discard was
+authorised. It does not say the discard happened.
 
-To check a record, on the host or on any machine you copied both files
-to, give as `<key>` the attestation key the sink has enrolled for the
-host (the one bootstrap printed):
+After the removal has succeeded, uninstall writes a **completion record**
+beside it, `uninstall-<time>-discard-completed.json` with its own `.sig`.
+The completion record names the intent record and its SHA-256, the
+objects removed, and any kept with the store (`--keep-store`). It is
+signed with the same key, which uninstall reads before the removal takes
+it away. Each file is flushed to disk and so is its directory before
+uninstall goes on.
+
+If the uninstall drifts, fails or stops after the intent record, no
+completion record is written, and the intent record stays as
+"authorised, not completed". Uninstall prints both paths and says
+whether the discard completed. All the files stay after uninstall: keep
+them with the entries you copied off the host. If the attestation key is
+missing, or the intent record cannot be written, uninstall refuses and
+removes nothing.
+
+To check a discard, on the host or on any machine you copied the files
+to, give the intent record (or its completion record) and, as `<key>`,
+the attestation key the sink has enrolled for the host (the one bootstrap
+printed):
 
 ```sh
 repro system addon verify-discard-record \
-  /var/log/repro-addon/uninstall-20261108T101500Z-discarded-unshipped.json \
+  /var/log/repro-addon/uninstall-20261108T101500Z-discard-intent.json \
   --key <key>
 ```
 
 `--key` is required: without it the command refuses with a usage error
 (exit 2), because a signature that matches only the key the record names
-itself proves nothing about who wrote the record. It exits 0 and lists
-the objects only when the signature is over the file's exact bytes and
-by the key you gave. A changed byte, another key or an empty signature
-is refused (exit 1).
+itself proves nothing about who wrote the record. Every signature must be
+over its file's exact bytes and by the key you gave. The command then
+reports one of:
+
+- **completed** (exit 0): the intent record and a completion record of
+  that same intent record both verify. It lists the objects.
+- **authorised, not completed** (exit 3): the intent record verifies, but
+  there is no completion record. The discard was authorised, and nothing
+  shows that it finished.
+- **does not verify** (exit 1): a changed byte, another key, an empty
+  signature, or a completion record that names a different intent record.
 
 A host bootstrapped by an older release is brought up to date by its
 first switch, or at once with

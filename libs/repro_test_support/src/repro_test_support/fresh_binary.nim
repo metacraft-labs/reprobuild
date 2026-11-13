@@ -36,7 +36,7 @@
 ##
 ## Mocks: none -- this is test support; it reads the real build outputs.
 
-import std/[json, os, strutils, times]
+import std/[algorithm, json, os, strutils, times]
 
 import nimcrypto/sha2
 
@@ -93,6 +93,25 @@ proc fileSha256(path: string): string =
     ctx.update(buf.toOpenArray(0, n - 1))
   toLowerAscii($ctx.finish())
 
+proc decodeListPath(list, encoded, name: string): string =
+  ## A path as ``scripts/write_helper_deps.sh`` writes it: every backslash,
+  ## control byte and non-ASCII byte as ``\xNN``, so that a name with a
+  ## newline stays on its line. Anything else after a backslash is not
+  ## something the writer produces, and the list is refused.
+  var i = 0
+  while i < encoded.len:
+    if encoded[i] == '\\':
+      if i + 3 < encoded.len and encoded[i + 1] == 'x' and
+          encoded[i + 2] in HexDigits and encoded[i + 3] in HexDigits:
+        result.add(char(parseHexInt(encoded[i + 2 .. i + 3])))
+        i += 4
+        continue
+      raise newException(StaleHelperBinary, list & " has a path that is " &
+        "not escaped the way scripts/write_helper_deps.sh writes one (" &
+        encoded & "); " & helperRebuildHint(name))
+    result.add(encoded[i])
+    inc i
+
 proc readHelperList(repoRoot, name: string):
     tuple[binarySha: string; deps: seq[tuple[kind, path: string]]] =
   ## The list ``scripts/write_helper_deps.sh`` wrote for ``name``: the
@@ -115,13 +134,38 @@ proc readHelperList(repoRoot, name: string):
     let value = line[sp + 1 .. ^1]
     if kind == "binary-sha256": result.binarySha = value.toLowerAscii()
     elif kind in ["module", "csource", "header", "read"]:
-      result.deps.add((kind, value))
+      result.deps.add((kind, decodeListPath(list, value, name)))
+    elif kind == "listing" and value.len > 65 and value[64] == ' ':
+      result.deps.add((kind, value[0 ..< 65] &
+        decodeListPath(list, value[65 .. ^1], name)))
     else:
       raise newException(StaleHelperBinary, list & " has an unknown entry " &
         "kind '" & kind & "'; " & helperRebuildHint(name))
   if result.binarySha.len == 0:
     raise newException(StaleHelperBinary, list & " names no binary-sha256: " &
       "it is not tied to a build; " & helperRebuildHint(name))
+
+proc listingDigest*(dir: string): string =
+  ## The sha256 of a directory's entry names, sorted bytewise and joined by
+  ## newlines -- what ``scripts/write_helper_deps.sh`` records for a
+  ## directory the compiler listed (§13 decision 80).
+  var names: seq[string]
+  for kind, path in walkDir(dir, relative = true):
+    names.add(path)
+  names.sort(system.cmp[string])
+  var ctx: sha256
+  ctx.init()
+  let joined = names.join("\n")
+  if joined.len > 0:
+    ctx.update(joined.toOpenArrayByte(0, joined.high))
+  toLowerAscii($ctx.finish())
+
+proc helperListings*(repoRoot, name: string): seq[tuple[dir, digest: string]] =
+  ## The directories the compiler listed while building ``name``, each with
+  ## the digest of its entries at list time.
+  for (kind, value) in readHelperList(repoRoot, name).deps:
+    if kind == "listing" and value.len > 65:
+      result.add((value[65 .. ^1], value[0 ..< 64]))
 
 proc helperDependencies*(repoRoot, name: string): seq[string] =
   ## Every source ``build/bin/<name>`` was compiled from that can change,
@@ -134,6 +178,7 @@ proc helperDependencies*(repoRoot, name: string): seq[string] =
   when FreshMutation == "fresh-skips-included":
     let linked = linkedModules(repoRoot, name)
   for (kind, dep) in readHelperList(repoRoot, name).deps:
+    if kind == "listing": continue          # checked by its digest
     when FreshMutation == "fresh-skips-outside-tree":
       if not dep.startsWith(root & "/"): continue
     when FreshMutation == "fresh-skips-included":
@@ -166,6 +211,17 @@ proc freshRepoBinary*(repoRoot, name: string): string =
         have & "): it was built by a path that wrote no list, or its list " &
         "is from another build; " & helperRebuildHint(name))
   let built = getLastModificationTime(result)
+  # A directory the compiler listed (a staticExec `ls`, a walkDir in a
+  # config.nims) must still list the same entries (§13 decision 80).
+  when FreshMutation != "fresh-ignores-listings":
+    for (dir, digest) in helperListings(repoRoot, name):
+      if not dirExists(dir):
+        raise newException(StaleHelperBinary, result & " was built after " &
+          "listing " & dir & ", which no longer exists; " & helperRebuildHint(name))
+      if listingDigest(dir) != digest:
+        raise newException(StaleHelperBinary, result & " was built from a " &
+          "listing of " & dir & " that has changed since; " &
+          helperRebuildHint(name))
   for dep in helperDependencies(repoRoot, name):
     if not fileExists(dep):
       raise newException(StaleHelperBinary, result & " was built from " &

@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 35,
-    "nimTestBinaries": 2770,
+    "nimTestBinaries": 2771,
     "pureUnitConsolidationGroups": 82,
-    "pureUnitTests": 759,
+    "pureUnitTests": 760,
     "staticallyDetectedRuntimeCompilerFlowTests": 138,
-    "testEntries": 2814
+    "testEntries": 2815
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -54,7 +54,7 @@
       "targetOs": "soAny"
     },
     {
-      "count": 6,
+      "count": 7,
       "defines": [],
       "dependencyShape": [
         "repro_addon"
@@ -66,7 +66,8 @@
         "libs/repro_addon/tests/t_addon_evidence_enrol_never_adopts_keys.nim",
         "libs/repro_addon/tests/t_addon_image_assembly_cleanup.nim",
         "libs/repro_addon/tests/t_addon_preflight_needs_a_c_compiler.nim",
-        "libs/repro_addon/tests/t_addon_review_round5.nim"
+        "libs/repro_addon/tests/t_addon_review_round5.nim",
+        "libs/repro_addon/tests/t_addon_review_round8.nim"
       ],
       "targetOs": "soAny"
     },
@@ -1616,7 +1617,7 @@
       "graph-fixture": 21,
       "integration": 1525,
       "platform/destructive": 177,
-      "pure unit": 759,
+      "pure unit": 760,
       "unclassified": 332
     },
     "graphOwnedTestArtifacts": [
@@ -1831,9 +1832,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2770,
+    "nimTestBinaryCount": 2771,
     "pythonTestFileCount": 44,
-    "testEntryCount": 2814
+    "testEntryCount": 2815
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -2600,12 +2601,40 @@
           "directExecutionLine": true,
           "executedVariables": [
             "app",
+            "app2",
+            "bin2",
             "binary",
             "flags",
+            "hello",
+            "helloSrc",
             "outside",
+            "t2",
             "tree"
           ],
-          "line": 105,
+          "line": 110,
+          "path": "libs/repro_test_support/tests/t_fresh_helper_binary_refuses_a_stale_build.nim",
+          "patterns": [
+            "gcc"
+          ],
+          "snippet": "let (o, c) = execCmdEx(quoteShellCommand([\"gcc\", \"-o\", hello, helloSrc]))"
+        },
+        {
+          "assignedCommandVariable": "",
+          "commandVariableExecuted": false,
+          "directExecutionLine": true,
+          "executedVariables": [
+            "app",
+            "app2",
+            "bin2",
+            "binary",
+            "flags",
+            "hello",
+            "helloSrc",
+            "outside",
+            "t2",
+            "tree"
+          ],
+          "line": 141,
           "path": "libs/repro_test_support/tests/t_fresh_helper_binary_refuses_a_stale_build.nim",
           "patterns": [
             "nim-argv"
@@ -2618,17 +2647,45 @@
           "directExecutionLine": true,
           "executedVariables": [
             "app",
+            "app2",
+            "bin2",
             "binary",
             "flags",
+            "hello",
+            "helloSrc",
             "outside",
+            "t2",
             "tree"
           ],
-          "line": 208,
+          "line": 244,
           "path": "libs/repro_test_support/tests/t_fresh_helper_binary_refuses_a_stale_build.nim",
           "patterns": [
             "nim-argv"
           ],
           "snippet": "let (o, c) = execCmdEx(quoteShellCommand(@[\"nim\", \"c\", \"--hints:off\","
+        },
+        {
+          "assignedCommandVariable": "",
+          "commandVariableExecuted": false,
+          "directExecutionLine": true,
+          "executedVariables": [
+            "app",
+            "app2",
+            "bin2",
+            "binary",
+            "flags",
+            "hello",
+            "helloSrc",
+            "outside",
+            "t2",
+            "tree"
+          ],
+          "line": 322,
+          "path": "libs/repro_test_support/tests/t_fresh_helper_binary_refuses_a_stale_build.nim",
+          "patterns": [
+            "nim-argv"
+          ],
+          "snippet": "let (o1, c1) = execCmdEx(quoteShellCommand(@[\"nim\", \"c\", \"--hints:off\","
         }
       ],
       "source": "libs/repro_test_support/tests/t_fresh_helper_binary_refuses_a_stale_build.nim"
@@ -9513,6 +9570,23 @@
       "source": "libs/repro_addon/tests/t_addon_review_round5.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 5,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_addon_review_round8",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_addon"
+      ],
+      "owner": "libs/repro_addon",
+      "requiresReproBinary": false,
+      "source": "libs/repro_addon/tests/t_addon_review_round8.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 7,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -26262,7 +26336,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_test_support/tests/t_fresh_helper_binary_refuses_a_stale_build.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 14,
+      "staticCaseCount": 18,
       "staticallyDetectedRuntimeCompilerFlow": true,
       "targetOs": "soAny"
     },

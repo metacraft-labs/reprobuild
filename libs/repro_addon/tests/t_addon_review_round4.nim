@@ -13,8 +13,9 @@
 ##    discard goes ahead.
 ## 3. Decision 62's override: ``--discard-unacknowledged-store-evidence``
 ##    discards only after a signed local record naming every object is
-##    written; ``verify-discard-record`` accepts it with the enrolled key and
-##    refuses another key or a changed byte.
+##    written; ``verify-discard-record`` accepts it with the enrolled key
+##    (as authorised, then, once the completion is written, as completed:
+##    decision 81) and refuses another key or a changed byte.
 ## 4. Sequence 0 is a sequence: ``ack --seq 0`` and ``payload --seq 0``
 ##    parse, ``retired@0:<id>`` is a retirement and is written back.
 ## 5. A tick heartbeat at sequence 0 is a beat before a containment.
@@ -149,12 +150,25 @@ suite "the A11 code review's fourth round":
     check g.overrideRecordText == readFile(g.overrideRecord)
     # Decision 64: verified through the operator's command, against the
     # enrolled key, over exactly the bytes the file holds.
+    # The gate wrote the intent record only (§13 decision 81): authorised,
+    # not completed, exit 3.
     check runAddonCli(@["verify-discard-record", g.overrideRecord,
-                        "--key", pub]) == 0
+                        "--key", pub]) == 3
     # Without --key nothing is verified: a usage error (decision 64,
     # amended round 6; falsifier verify-accepts-missing-key).
     check runAddonCli(@["verify-discard-record", g.overrideRecord]) == 2
-    check not verifyDiscardRecord(g.overrideRecord, "").ok
+    check verifyDiscardRecord(g.overrideRecord, "").status == dsInvalid
+    # The removal done and the completion written: completed, exit 0.
+    removeDir(aside)
+    var r = UninstallResult(overrideRecord: g.overrideRecord,
+                            overrideRecordText: g.overrideRecordText)
+    var signer = loadTextSigner(key)
+    finishDiscard(r, site, signer, g.pending)
+    signer.wipe()
+    checkpoint r.errors.join("\n")
+    check r.completionRecord.len > 0
+    check runAddonCli(@["verify-discard-record", g.overrideRecord,
+                        "--key", pub]) == 0
     # Another key, or one byte changed, does not verify.
     check runAddonCli(@["verify-discard-record", g.overrideRecord,
                         "--key", "04" & "ab".repeat(64)]) == 1

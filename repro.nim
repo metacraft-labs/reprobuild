@@ -919,7 +919,7 @@ package reprobuild:
       # The owning Linux shell already supplies this cross-platform binary.
       "pwsh"
       # scripts/write_helper_deps.sh traces the Nim compiler's front end
-      # with `strace -ff -y` (staticRead targets, what staticExec commands
+      # with `strace -ff -y -xx` (staticRead targets, what staticExec commands
       # read); the edge `reprobuild.helper-deps.repro-binary-cache` names
       # it. A tool the build runs, so it is declared here and never
       # realized for a `--target`. In path mode it resolves from PATH like
