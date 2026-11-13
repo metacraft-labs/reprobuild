@@ -155,6 +155,21 @@ type
 proc raiseDevEnvEdge(message: string) {.noreturn.} =
   raise newException(DevEnvEdgeError, message)
 
+proc recordEdgeFailure*(outDir, name, report: string): string =
+  ## Writes ``report`` to ``<outDir>/<name>.log`` and returns the report with
+  ## that path appended, so a failed edge leaves a file a consumer can open
+  ## and an error that says where it is. The write is best effort: a log that
+  ## cannot be written must not replace the failure it describes, so the
+  ## report then says so instead of naming a file that does not exist.
+  let path = outDir / (name & ".log")
+  try:
+    createDir(extendedPath(outDir))
+    writeFile(extendedPath(path), report & "\n")
+    report & "\nfull report: " & path
+  except CatchableError as err:
+    report & "\n(the report could not be written to " & path & ": " &
+      err.msg & ")"
+
 proc hexDigest(digest: ContentDigest): string =
   toHex(digest.bytes).toLowerAscii()
 
@@ -1012,7 +1027,9 @@ proc computeDevEnvEdge*(config: DevEnvEdgeConfig): DevEnvEdgeResult =
     result.stats.providerBuildSkippedFresh =
       result.providerCompileAction.status in {asCacheHit, asUpToDate}
     if result.providerCompileResult.hasFailedActions():
-      raiseDevEnvEdge(providerCompileFailure(result.providerCompileResult))
+      raiseDevEnvEdge(recordEdgeFailure(active.outDir,
+        "provider-compile-failure",
+        providerCompileFailure(result.providerCompileResult)))
     if not fileExists(extendedPath(result.providerArtifactPath)):
       raiseDevEnvEdge("provider compile edge did not write artifact: " &
         result.providerArtifactPath)
@@ -1085,7 +1102,8 @@ proc computeDevEnvEdge*(config: DevEnvEdgeConfig): DevEnvEdgeResult =
   if result.devEnvResult.hasFailedActions():
     for item in result.devEnvResult.results:
       if item.status in {asFailed, asBlocked}:
-        raiseDevEnvEdge(describeFailedAction(item))
+        raiseDevEnvEdge(recordEdgeFailure(active.outDir,
+          "dev-env-failure", describeFailedAction(item)))
     raiseDevEnvEdge("dev-env edge failed")
   if not fileExists(extendedPath(result.artifactPath)):
     raiseDevEnvEdge("dev-env edge did not write artifact: " &
