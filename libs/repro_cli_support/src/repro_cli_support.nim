@@ -49045,11 +49045,18 @@ proc observeRepoForSync(identity: GitToolIdentity;
                         resolved: ResolvedRepo;
                         forcePushedSHAs: HashSet[string]): RepoSyncObservation =
   ## Gather everything the M10 planner needs about ONE checkout. A
-  ## missing directory short-circuits with ``exists=false``; every
+  ## missing checkout short-circuits with ``exists=false``; every
   ## other observation field is filled in best-effort (a failed probe
   ## leaves the field empty so the planner's tolerant-compare logic
   ## degrades to "divergent_feature_branch" rather than crashing).
-  if not dirExists(repoPath / ".git"):
+  ##
+  ## "Missing" means no ``.git`` entry of either kind (``hasGitEntry``).
+  ## A linked worktree's or absorbed submodule's ``.git`` is a FILE, and
+  ## reading it as absent planned a clone that deleted the checkout; every
+  ## probe below goes through ``git -C``, which resolves the file. A ``.git``
+  ## file git cannot resolve fails the pre-plan fetch (``fetch_failed``) and
+  ## the clean probe, so the repo is refused; it is never cloned over.
+  if not hasGitEntry(repoPath):
     result.exists = false
     return
   result.exists = true
@@ -50244,30 +50251,17 @@ proc relocateDeclaredRenames(identity: GitToolIdentity;
     # this checkout's location, so the move cuts every one of them off; §3.5
     # repairs them after the move. What is refused here is the subset the
     # repair cannot reach: a worktree that is missing, or one git has been
-    # told to leave alone (`locked`). A probe that cannot be run is itself a
-    # blocker — moving without knowing what the move strands is the failure
-    # this check exists for.
+    # told to leave alone (`locked`), the candidate itself included when it
+    # is a locked linked worktree. A candidate that is an unlocked linked
+    # worktree moves and is re-registered with its common directory (§3.5).
+    # A probe that cannot be run is itself a blocker — moving without knowing
+    # what the move strands is the failure this check exists for.
     let worktrees = linkedWorktreeInventory(probe, candidateAbs)
     if not worktrees.ok:
       result[repoIdx] = relocationRefusal("linked_worktree_unrepairable",
         "could not enumerate the linked worktrees of the checkout at '" &
           prior.path & "' (" & worktrees.diagnostic & "), so a move could " &
           "strand them. Nothing was moved.")
-      continue
-    # §4 `candidate_is_linked_worktree`. A checkout whose `.git` is a FILE
-    # is not something the rest of this sync can hold at the declared path:
-    # the observation step classifies it `missing_checkout`, and the clone
-    # that follows deletes it as a half-finished clone — uncommitted work
-    # included — and clones fresh. Moving it would therefore destroy it.
-    # Refused until sync handles linked-worktree checkouts.
-    if worktrees.selfLinked:
-      result[repoIdx] = relocationRefusal("candidate_is_linked_worktree",
-        "the checkout at '" & prior.path & "' is a linked worktree of " &
-          worktrees.commonDir & " (its `.git` is a file), and `repro sync` " &
-          "cannot keep a linked-worktree checkout at '" & repo.path & "'. " &
-          "Publish or move its work to a branch of the main worktree, " &
-          "remove it with `git worktree remove`, and re-run: `repro sync` " &
-          "then clones '" & repo.path & "'. Nothing was moved.")
       continue
     let unrepairable = unrepairableLinkedWorktrees(worktrees, prior.path)
     if unrepairable.len > 0:
@@ -50743,7 +50737,7 @@ proc executeWorkspaceSync(args: WorkspaceSyncArgs;
   for repo in resolved.repos:
     let repoPath = args.workspaceRoot / repo.path
     var intended =
-      if dirExists(repoPath / ".git"): "update"
+      if hasGitEntry(repoPath): "update"
       else: "clone"
     # Declared-Repository-Renames.md §3.1 — ``relocate`` is a third verdict in
     # this plan, and ``--dry-run`` must print it and perform none. Decided here
@@ -50758,7 +50752,7 @@ proc executeWorkspaceSync(args: WorkspaceSyncArgs;
         if prior.path == repo.path:
           continue
         let priorAbs = args.workspaceRoot / prior.path
-        if dirExists(priorAbs / ".git") or fileExists(priorAbs / ".git"):
+        if hasGitEntry(priorAbs):
           intended = "relocate"
           previousPath = prior.path
           break
@@ -50894,7 +50888,7 @@ proc executeWorkspaceSync(args: WorkspaceSyncArgs;
   var oldRemoteTips = newSeq[string](resolved.repos.len)
   for repoIdx, repo in resolved.repos:
     let repoPath = args.workspaceRoot / repo.path
-    if dirExists(repoPath / ".git") and repo.revision.len > 0 and not looksLikeSha(repo.revision):
+    if hasGitEntry(repoPath) and repo.revision.len > 0 and not looksLikeSha(repo.revision):
       let rName = gitRemoteNameFor(repo)
       oldRemoteTips[repoIdx] = revParse(identity, repoPath,
         "refs/remotes/" & rName & "/" & repo.revision)
@@ -50910,7 +50904,7 @@ proc executeWorkspaceSync(args: WorkspaceSyncArgs;
     var reports: seq[LeafCheckReport]
     for repo in resolved.repos:
       let repoPath = args.workspaceRoot / repo.path
-      if args.cloneObjects in ["", "shared"] and dirExists(repoPath / ".git"):
+      if args.cloneObjects in ["", "shared"] and hasGitEntry(repoPath):
         reports.add(checkLeaf(identity.binaryPath, repoPath, lcmRepair,
           cacheRoot))
     emitLeafReports(reports)
@@ -50927,7 +50921,7 @@ proc executeWorkspaceSync(args: WorkspaceSyncArgs;
   var fetchFailureByPath = initTable[string, string]()
   for repoIdx, repo in resolved.repos:
     let repoPath = args.workspaceRoot / repo.path
-    if not dirExists(repoPath / ".git"):
+    if not hasGitEntry(repoPath):
       continue
     # RA-14 optimized-fetch (``repo --optimized-fetch`` equivalent): if the
     # locked SHA is already reachable in this checkout (counting objects
@@ -51540,7 +51534,7 @@ proc executeWorkspaceSync(args: WorkspaceSyncArgs;
         let repo = resolved.repos[repoIdx]
         if looksLikeSha(repo.revision): continue
         let repoAbs = args.workspaceRoot / repo.path
-        if dirExists(repoAbs / ".git"):
+        if hasGitEntry(repoAbs):
           let rName = gitRemoteNameFor(repo)
           let remoteRef = revParse(identity, repoAbs, "refs/remotes/" & rName & "/" & wsBranch)
           if remoteRef.len > 0:
@@ -51922,7 +51916,7 @@ proc executeMainlineSync(args: WorkspaceSyncArgs): MainlineSyncReport =
     if args.dryRun: newSeq[ResolvedRepo]()
     else: resolved.repos
   for idx, repo in reposToFetch:
-    if not dirExists(args.workspaceRoot / repo.path / ".git"):
+    if not hasGitEntry(args.workspaceRoot / repo.path):
       continue
     let idSeg = safeRepoIdSegment(repo.name) & "-" & $idx
     let actionId = "workspace-mainline-sync-fetch-" & idSeg
@@ -51987,7 +51981,7 @@ proc executeMainlineSync(args: WorkspaceSyncArgs): MainlineSyncReport =
     if roleResolved.isSome:
       obs.roleBranch = roleResolved.get().branch
       obs.roleDeclaredBy = roleDeclarerText(roleResolved.get())
-    if not dirExists(repoAbs / ".git"):
+    if not hasGitEntry(repoAbs):
       obs.exists = false
       observations.add(obs)
       continue
@@ -53098,7 +53092,13 @@ proc branchConvergenceBlockers(identity: GitToolIdentity;
   ## because a stash entry means an interrupted piece of work whose owner is
   ## almost certainly not expecting their branch to move underneath it, and the
   ## probe is one cheap command.
-  if not dirExists(repoDir / ".git"):
+  ##
+  ## A linked worktree's or absorbed submodule's ``.git`` is a FILE
+  ## (``hasGitEntry``). Read as "not a checkout", it found no blockers and
+  ## let `checkout -B` rewind a branch carrying unpushed commits. A ``.git``
+  ## file git cannot resolve makes every probe below fail, and a failed probe
+  ## is a blocker.
+  if not hasGitEntry(repoDir):
     return @[]
   result.add(uncommittedChangesBlocker(identity, repoDir))
   let attached = gitRunPlainQuery(identity,
