@@ -60,6 +60,7 @@ metacraft-labs/devops-modules	public
 metacraft-labs/ethereum.nix	public
 metacraft-labs/io-mon	public
 metacraft-labs/nim	public
+metacraft-labs/nim-cli-spec	public
 metacraft-labs/nim-result	public
 metacraft-labs/nim-shm-gset	public
 metacraft-labs/nim-shm-lease	public
