@@ -432,6 +432,18 @@ jobs:
       # asynchronously, and a release should not depend on it winning a race
       # with the end of the job. Linux only: that is the platform the consumer
       # lanes build, and setup-nix does not start the watcher on macOS.
+      # The refresh above is itself over an hour old by the time `.#release`
+      # has built (dispatch run 43294626712: the flake fetch below failed with
+      # "HTTP error 401 ... Bad credentials"), so mint a new token for this
+      # phase too.
+      - name: Refresh build authentication (cache publish)
+        if: runner.os == 'Linux'
+        uses: metacraft-labs/metacraft-github-actions/refresh-build-auth@dev
+        with:
+          app-id: ${{ secrets.CI_TOKEN_PROVIDER_APP_ID }}
+          private-key: ${{ secrets.CI_TOKEN_PROVIDER_PRIVATE_KEY }}
+          owner: metacraft-labs
+
       - name: Publish the Nix package to the organisation cache
         if: runner.os == 'Linux'
         shell: bash
