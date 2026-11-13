@@ -1,13 +1,13 @@
 ## A plain `nim c -r` of a test that runs a guarded helper, after
 ## `just build`, passes, and leaves both guarded helpers accepted
-## (ReproOS Add-On Mode spec §13 decision 86; reprobuild-pm issue
+## (ReproOS Add-On Mode spec §13 decision 111; reprobuild-pm issue
 ## 2026-11-13-helper-list-root-listing-refuses-the-helpers-after-the-first-
 ## plain-test-compile).
 ##
 ## The checkout's `config.nims` gives a `nim c` without `--nimcache:` a
 ## nimcache at `<checkout>/.nimcache/`, so the compile below adds that
 ## directory to the checkout root -- a directory the compiler's package
-## search lists while the helpers are built. Under decision 86 only an
+## search lists while the helpers are built. Under decision 111 only an
 ## entry that can change what the compiler resolves (a `.nim`, `.nimble`
 ## or `.nims` file, a directory on the search path) counts in a listing,
 ## so the helpers stay fresh. Under round 8's digest of every entry they

@@ -518,7 +518,13 @@ proc renderCompletedDiscard*(keyHex: string; removed, kept: seq[string]): string
   ## and 81): the objects removed are "discarded unshipped", those the
   ## completion records as kept with the store (``--keep-store``) are named
   ## as kept, never as discarded.
-  result = "completed: the intent record and its completion are signed by " &
+  # Round 10: with objects kept, the verdict names them first -- a plain
+  # "completed:" would read as every object gone.
+  let head = if kept.len > 0:
+      "completed with " & $kept.len & " object(s) kept with the store " &
+        "(--keep-store), not discarded"
+    else: "completed"
+  result = head & ": the intent record and its completion are signed by " &
     keyHex & " over exactly their bytes; " & $removed.len &
     " object(s) discarded unshipped:\n"
   for o in removed: result.add("  " & o & "\n")

@@ -23,7 +23,7 @@
 ##    reports it as "authorised, not completed" (exit 3), never as a
 ##    discard.
 ##
-## 5. (§13 decisions 81 and 88) Drift after the intent record stops the
+## 5. (§13 decisions 81 and 113) Drift after the intent record stops the
 ##    uninstall with the objects in place: no completion, "authorised, not
 ##    completed". Once the objects are gone (and synced), a later cleanup
 ##    failure is reported on its own and the completion is written:
@@ -40,7 +40,7 @@
 ## next free one, not a failure). Case 4's record writer writes the file
 ## as the real one does and
 ## then raises, as the real one does when the directory's fsync fails
-## after the rename (a failure of the file system cannot be produced on
+## after the link(2) that names it (a failure of the file system cannot be produced on
 ## demand). ``ship`` is a stub answering "not acknowledged" -- the sink's
 ## refusal to acknowledge is held against a real sink by
 ## ``t_addon_review_round4`` case 2; what these cases hold is what the gate
@@ -190,7 +190,7 @@ suite "the A11 code review's fifth round":
     check not fileExists(completionPathOf(g.overrideRecord))
     check verifyDiscardRecord(g.overrideRecord, pub).status == dsAuthorised
 
-    # §13 decision 88: the evidence gone and synced, a later cleanup
+    # §13 decision 113: the evidence gone and synced, a later cleanup
     # failure (here /run/repro) is reported on its own and does not hold
     # the completion back. (The first object is cleared out of the way, so
     # the second gate's pending set is the new object alone.)

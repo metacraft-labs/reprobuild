@@ -87,7 +87,16 @@ type
       ## succeeded.
     keptEvidence*: seq[string]
       ## Store evidence left with a kept store (``--keep-store``): objects a
-      ## crashed recovery left aside, named, not removed.
+      ## crashed recovery left aside, named, not removed. Only ever set
+      ## under ``--keep-store`` (round 10; ``classifyLeftAside``).
+    keepStore*: bool
+      ## ``--keep-store`` was given. ``finishDiscard`` counts an object as
+      ## kept with the store only then, whatever ``keptEvidence`` says
+      ## (round 10).
+    leftAside*: seq[string]
+      ## Store evidence still on disk after a removal that should have
+      ## taken it (no ``--keep-store``): a failed or refused removal of
+      ## ``/repro``. Neither discarded nor kept (round 10).
     undone*: HashSet[string]
       ## ``<class> <path>`` of every ledger entry this run undid; what the
       ## kept ledger of an incomplete run drops.
@@ -311,7 +320,7 @@ type
     ## at a chosen step.
   DiscardSyncer* = proc (removed: seq[string]) {.closure.}
     ## Makes the removal of ``removed`` durable before the completion
-    ## record is written (§13 decision 87). The default is
+    ## record is written (§13 decision 112). The default is
     ## ``syncRemovedObjects``; a test passes one that records the call or
     ## fails.
   RecordExistsError* = object of OSError
@@ -391,7 +400,7 @@ proc nearestExisting(p: string): string =
   if result.len == 0: result = "/"
 
 proc syncRemovedObjects*(removed: seq[string]) =
-  ## §13 decision 87: before the completion record is written, the removal
+  ## §13 decision 112: before the completion record is written, the removal
   ## it reports is made durable. For each removed object, the nearest
   ## directory that still exists above it is fsynced (the unlinks are
   ## entries of it, or of a directory removed from it), and the filesystem
@@ -465,8 +474,10 @@ proc writeOverrideRecord(custody: CustodySite; dir: string;
       break
     inc n
   # The signature goes first and the record last, so a record exists only
-  # with its signature beside it. Each write is durable (the file fsynced,
-  # renamed into place, its directory fsynced: writeFileAtomic). A failed
+  # with its signature beside it. Each write is durable and exclusive (the
+  # bytes fsynced in a temporary file, linked to the name with link(2),
+  # which refuses an existing name, and the directory fsynced:
+  # writeFileExclusiveDurable). A failed
   # write stops the uninstall before anything is removed. An intent record
   # that reached its name before its directory sync failed stays with its
   # signature: it states an authorisation, which is true, and never a
@@ -718,6 +729,12 @@ proc classifyLeftAside*(r: var UninstallResult; pending: seq[string];
         r.keptEvidence.add(e)               # FALSIFIER: dirExists alone
       else:
         if keepStore: r.keptEvidence.add(e)
+        else:
+          # Round 10: named, not silently left out of both lists.
+          r.leftAside.add(e)
+          r.errors.add(e & ": store evidence left aside is still there " &
+            "after the store's removal; it was neither discarded nor kept " &
+            "(no --keep-store)")
     else:
       r.removed.add(e & " (store evidence left aside)")
 
@@ -725,12 +742,12 @@ proc finishDiscard*(r: var UninstallResult; custody: CustodySite;
                    signer: TextSigner; pending: seq[string];
                    writer: DiscardRecordWriter = atomicRecordWriter;
                    syncer: DiscardSyncer = syncRemovedObjects) =
-  ## §13 decisions 81, 87 and 88: after an uninstall that wrote an intent
+  ## §13 decisions 81, 112 and 113: after an uninstall that wrote an intent
   ## record, the completion record is written once every pending object is
   ## gone or kept with the store (``--keep-store``), and the removal is
   ## made durable (``syncer``). A failure elsewhere in the uninstall (a
   ## unit, ``/run/repro``) is reported on its own and does not hold the
-  ## completion back (decision 88). An object still in place, or a failed
+  ## completion back (decision 113). An object still in place, or a failed
   ## sync, leaves the intent alone: ``verify-discard-record`` reports
   ## "authorised, not completed".
   if r.overrideRecord.len == 0: return
@@ -738,7 +755,10 @@ proc finishDiscard*(r: var UninstallResult; custody: CustodySite;
     if r.drift.len > 0 or r.errors.len > 0: return   # FALSIFIER: round 8
   var removed, kept: seq[string]
   for o in pending:
-    if o in r.keptEvidence: kept.add(o)
+    # Kept with the store only under --keep-store (round 10): a kept list
+    # without it does not excuse an object still on disk.
+    if o in r.keptEvidence and (r.keepStore or mutated("finish-trusts-kept-list")):
+      kept.add(o)
     elif fileExists(o) or dirExists(o) or symlinkExists(o):
       when not mutated("discard-completed-objects-present"):
         return
@@ -789,7 +809,8 @@ proc runAddonUninstall*(opts: UninstallOptions): UninstallResult =
   let evidenceKept = gate.pending
   result.overrideRecord = gate.overrideRecord
   result.overrideRecordText = gate.overrideRecordText
-  # §13 decisions 81, 87 and 88: the completion record follows the
+  result.keepStore = opts.keepStore
+  # §13 decisions 81, 112 and 113: the completion record follows the
   # removal of the evidence, made durable, on every way out; an uninstall
   # that stops before it leaves the intent record alone ("authorised, not
   # completed"), and a later cleanup failure does not hold it back.
