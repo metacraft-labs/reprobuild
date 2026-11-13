@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 35,
-    "nimTestBinaries": 2771,
+    "nimTestBinaries": 2772,
     "pureUnitConsolidationGroups": 82,
     "pureUnitTests": 760,
     "staticallyDetectedRuntimeCompilerFlowTests": 138,
-    "testEntries": 2815
+    "testEntries": 2816
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1615,7 +1615,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 21,
-      "integration": 1525,
+      "integration": 1526,
       "platform/destructive": 177,
       "pure unit": 760,
       "unclassified": 332
@@ -1832,9 +1832,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2771,
+    "nimTestBinaryCount": 2772,
     "pythonTestFileCount": 44,
-    "testEntryCount": 2815
+    "testEntryCount": 2816
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -42230,6 +42230,23 @@
       "owner": "tests/integration",
       "requiresReproBinary": true,
       "source": "tests/integration/t_health_reports_a_malformed_repo_fragment.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_health_reports_a_manifest_that_loads_on_one_root_role_only",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_test_support"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_health_reports_a_manifest_that_loads_on_one_root_role_only.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 1,
       "staticallyDetectedRuntimeCompilerFlow": false,

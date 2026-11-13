@@ -20595,6 +20595,17 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "t_group_tests_integration_g05",
     singleReason: ""),
   TestSpec(
+    source: "tests/integration/t_health_reports_a_manifest_that_loads_on_one_root_role_only.nim",
+    binary: "build/test-bin/t_health_reports_a_manifest_that_loads_on_one_root_role_only",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "t_group_tests_integration_g05",
+    singleReason: ""),
+  TestSpec(
     source: "tests/integration/t_health_reports_a_refusing_hook_as_not_ok.nim",
     binary: "build/test-bin/t_health_reports_a_refusing_hook_as_not_ok",
     defines: @[],

@@ -10,7 +10,7 @@ import repro_workspace_manifests/[types, diagnostics, reader, manifest_source,
   resolver,
   compose, sync_planner, manifest_refresh, lock_writer, workspace_branch,
   develop_overrides, override_resolution, provenance, project_set,
-  manifest_editor, settings, roles, retired_names]
+  manifest_editor, settings, roles, retired_names, root_role_manifests]
 
 export types
 export diagnostics
@@ -30,3 +30,4 @@ export manifest_editor
 export settings
 export roles
 export retired_names
+export root_role_manifests
