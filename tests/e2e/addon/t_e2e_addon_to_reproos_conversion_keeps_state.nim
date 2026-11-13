@@ -1404,12 +1404,20 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
       "socketService": nw.unitDiagnosis(R7SocketSvc),
       "targetService": nw.unitDiagnosis(R7TargetSvc),
       "validatorStarts": nw.unitStarts(DefaultValidatorUnit)}
+    # Both halves are recorded before either is asserted: under a falsifier
+    # the run stops at its first red step, and the classifier requires the
+    # other half's evidence -- that it is up and ran -- in every decision-79
+    # falsifier cell (A13 round 7: recorded one after the other, the target
+    # falsifier's stop left the socket half unrecorded).
+    var d79: seq[tuple[label, svc, active: string; ran: bool; ev: JsonNode]]
     for (label, svc) in [("target", R7TargetSvc), ("socket", R7SocketSvc)]:
       let active = nw.exec("systemctl is-active " & svc).stdout.strip()
       let (ran, ev) = nw.unitRan(svc, R7MarkerDir & "/" & svc & ".ran")
       ev["active"] = %active
       record["decision79"][label] = ev
       record["decision79"][label]["ran"] = %ran
+      d79.add((label, svc, active, ran, ev))
+    for (label, svc, active, ran, ev) in d79:
       step("decision 79, " & label & ": a confined static service an enabled " &
            label & " pulls in is up after the apply",
            active == "active" and ran and ev["markerContent"].getStr != "0",
