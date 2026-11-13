@@ -13,7 +13,7 @@
 ##
 ## The fixture is a real root repository (`projects/demo.toml`, one fragment,
 ## a real bare `origin`) with the two branches. `agents` carries the retired
-## `trunk` key; `dev` does not. Membership is recorded on `dev`, where the
+## `trunk` key and declares `unstable = agents`; `dev` has neither. Membership is recorded on `dev`, where the
 ## project still loads, then the checkout moves to `agents`. Against the REAL
 ## binary, `repro health --json`:
 ##
@@ -26,7 +26,10 @@
 ##      broken one) naming `agents` and `projects/demo.toml`.
 ##   3. On `dev` the same defect is a `warn` on that row (the broken role is
 ##      not the checked-out one), and `manifest` is ok: the defect is
-##      reported although the checkout is green.
+##      reported although the checkout is green. `dev`'s own settings file
+##      declares only a mainline, as the real root's does; the `agents`
+##      branch is found through the settings file published on
+##      `origin/agents`.
 ##   4. Control, so legs 1-2 cannot pass by never offering `workspace sync`:
 ##      when the broken checkout is BEHIND origin/agents (the fix is already
 ##      published there), the remedy is still `workspace sync`, and the
@@ -87,9 +90,15 @@ const fragmentToml =
   "schema = \"reprobuild.workspace.repo.v2\"\n\n[repo]\nname = \"core\"\n" &
   "path = \"core\"\nremote = \"acme\"\nmainline = \"main\"\n"
 
-const settingsToml =
-  "schema = \"reprobuild.workspace.settings.v1\"\n\n[workspace]\n" &
-  "mainline = \"dev\"\nunstable = \"agents\"\n"
+const
+  devSettingsToml =
+    "schema = \"reprobuild.workspace.settings.v1\"\n\n[workspace]\n" &
+    "mainline = \"dev\"\n"
+    ## `dev` declares only its mainline, as the real root's `dev` does.
+  agentsSettingsToml =
+    "schema = \"reprobuild.workspace.settings.v1\"\n\n[workspace]\n" &
+    "mainline = \"dev\"\nunstable = \"agents\"\n"
+    ## `agents` also declares the `unstable` role that names itself.
 
 proc rowNamed(doc: JsonNode; name: string): JsonNode =
   var found: seq[JsonNode]
@@ -128,7 +137,7 @@ suite "repro health on a root whose declared roles disagree":
       gitIn(gitBin, scratch, "init -q -b dev " & q(root))
       gitIn(gitBin, root, "config user.email tester@example.invalid")
       gitIn(gitBin, root, "config user.name Tester")
-      writeFile(root / "repro-workspace.toml", settingsToml)
+      writeFile(root / "repro-workspace.toml", devSettingsToml)
       writeFile(root / "repos" / "core.toml", fragmentToml)
       writeFile(root / "projects" / "demo.toml", projectToml(fetch, false))
       writeFile(root / ".gitignore", ".repro/\ncore/\n")
@@ -146,6 +155,7 @@ suite "repro health on a root whose declared roles disagree":
 
       # `agents`: the same tree plus the retired key.
       gitIn(gitBin, root, "checkout -q -b agents")
+      writeFile(root / "repro-workspace.toml", agentsSettingsToml)
       writeFile(root / "projects" / "demo.toml", projectToml(fetch, true))
       gitIn(gitBin, root, "commit -q -am agents-with-retired-trunk")
       gitIn(gitBin, root, "push -q -u origin agents")

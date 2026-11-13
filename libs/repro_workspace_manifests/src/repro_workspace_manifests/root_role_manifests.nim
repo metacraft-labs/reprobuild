@@ -102,6 +102,56 @@ proc declaredRootBranches*(s: WorkspaceSettings):
     if not placed:
       result.add((branch: r.branch, roles: @[r.role]))
 
+const
+  maxPublishedBranches = 200
+    ## Remote-tracking branches whose settings file is read; a root with more
+    ## is not a branch-role root in any sense this check is for.
+
+proc addDeclared(acc: var seq[tuple[branch: string; roles: seq[string]]];
+                 s: WorkspaceSettings) =
+  for entry in declaredRootBranches(s):
+    var placed = false
+    for have in acc.mitems:
+      if have.branch == entry.branch:
+        for role in entry.roles:
+          if role notin have.roles:
+            have.roles.add(role)
+        placed = true
+    if not placed:
+      acc.add(entry)
+
+proc declaredAcrossPublishedBranches(identity: GitToolIdentity; root: string;
+    checkedOut: Option[WorkspaceSettings]):
+    seq[tuple[branch: string; roles: seq[string]]] =
+  ## The branches the root declares a role for, as read from the checked-out
+  ## settings file AND from the settings file committed on every
+  ## remote-tracking branch of the root. A branch declares the roles of the
+  ## tree it is, so a `dev` whose settings declare only a mainline cannot name
+  ## the `unstable` branch that its sibling `agents` declares; reading only
+  ## the checked-out file would leave a defect on `agents` invisible from a
+  ## `dev` checkout, which is where it is fixable.
+  if checkedOut.isSome:
+    result.addDeclared(checkedOut.get())
+  let listing = git(identity, root, "for-each-ref", "--format=%(refname)",
+    "refs/remotes/origin")
+  if listing.isNone:
+    return
+  var seen = 0
+  for ref0 in listing.get().splitLines():
+    if ref0.len == 0 or ref0 == "refs/remotes/origin/HEAD":
+      continue
+    inc seen
+    if seen > maxPublishedBranches:
+      break
+    let content = git(identity, root, "show", ref0 & ":" & settingsFileName)
+    if content.isNone:
+      continue
+    try:
+      result.addDeclared(decodeWorkspaceSettingsContent(
+        ref0 & ":" & settingsFileName, content.get() & "\n"))
+    except CatchableError:
+      discard  # a branch whose settings do not load declares nothing here
+
 proc readRootRef(identity: GitToolIdentity; root, branch: string):
     tuple[refName, commit: string] =
   ## The published tip when the checkout has one (`origin/<branch>`), else the
@@ -159,9 +209,8 @@ proc checkRootRoleManifests*(workspaceRoot: string):
       not fileExists(workspaceRoot / ".git"):
     return
   let found = findWorkspaceSettings(workspaceRoot)
-  if found.isNone:
-    return
-  for entry in declaredRootBranches(found.get()):
+  for entry in declaredAcrossPublishedBranches(identity.get(), workspaceRoot,
+      found):
     result.add(loadBranchManifests(workspaceRoot, entry.branch, entry.roles,
       identity.get()))
 
@@ -217,17 +266,16 @@ proc diagnoseRootRefusal*(workspaceRoot: string): Option[RootRefusalDiagnosis] =
         # HEAD already contains the ref's tip.
         d.atTip = git(id, workspaceRoot, "merge-base", "--is-ancestor",
           d.followedRef, "HEAD").isSome
-  let settings = findWorkspaceSettings(workspaceRoot)
-  if settings.isSome:
-    for entry in declaredRootBranches(settings.get()):
-      if entry.branch == d.currentBranch:
-        continue
-      let outcome = loadBranchManifests(workspaceRoot, entry.branch,
-        entry.roles, id)
-      if outcome.available and outcome.failures.len == 0 and
-          d.resolvingBranch.len == 0:
-        d.resolvingBranch = entry.branch
-      d.otherRoles.add(outcome)
+  for entry in declaredAcrossPublishedBranches(id, workspaceRoot,
+      findWorkspaceSettings(workspaceRoot)):
+    if entry.branch == d.currentBranch:
+      continue
+    let outcome = loadBranchManifests(workspaceRoot, entry.branch,
+      entry.roles, id)
+    if outcome.available and outcome.failures.len == 0 and
+        d.resolvingBranch.len == 0:
+      d.resolvingBranch = entry.branch
+    d.otherRoles.add(outcome)
   some(d)
 
 proc refusalDetailSuffix*(d: RootRefusalDiagnosis): string =
