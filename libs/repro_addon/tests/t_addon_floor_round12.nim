@@ -34,7 +34,7 @@
 ## ``migration-skips-listeners``, ``start-step-records-first-unit``,
 ## ``record-keeps-old-invocation``, ``template-instances-unjudged``,
 ## ``template-refusal-forgotten``, ``template-acceptance-per-name``,
-## ``template-refused-written``.
+## ``template-refused-written``, ``revert-holds-any-subject``.
 ##
 ## Mocks: as in ``t_addon_floor_round10``: systemd's view and the path
 ## identities are stand-ins built from what systemd and statx report, since
@@ -227,6 +227,26 @@ suite "round 12 (§13 decision 82): a start refreshes the run on the record":
     recordStartedSince(state, [("/run/t", "t@1.service")],
       proc (u: string): tuple[id: string; start: int64] = ("I3", Start), ident)
     check readCreatedDirs(state)["/run/t"].invocation == "I3"
+
+suite "round 12: what a revert holds":
+  let own = toHashSet(["a.service", "t@.service", "a.socket", "ctl.service"])
+  let floored = @["a.service", "t@.service"]
+  test "a refused unit of the generation, a template for its instance":
+    check revertHeldUnits(["a.service: x [rule:existing-tree key:RuntimeDirectory]",
+                           "t@1.service: y [rule:existing-tree key:RuntimeDirectory]",
+                           "t@repro-addon-observe.service: y [rule:existing-tree]"],
+                          own, floored) == @["a.service", "t@.service"]
+  test "an activator of the generation is held by its own name":
+    check revertHeldUnits(["a.socket: listener /run/a: it exists [rule:existing-listener]"],
+                          own, floored) == @["a.socket"]
+  test "a subject the generation does not install holds its floored units, never itself":
+    # A host's type-wide drop-in is reported under `service`; a hold named
+    # so would keep every service on the host from starting.
+    let h = revertHeldUnits(["service: /run/systemd/system/service.d/x.conf: a drop-in " &
+                             "the add-on did not install [rule:foreign-drop-in key:DropInPaths]",
+                             "the unit search path: e [rule:search-path]"], own, floored)
+    check h == @["a.service", "t@.service"]
+    check "service" notin h
 
 suite "round 12, finding 5: the run in one snapshot":
   test "the start, the stop and the state come from the same read":

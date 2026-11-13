@@ -1344,6 +1344,33 @@ proc floorTemplateOf(name: string): string =
   let dot = name.rfind('.')
   if at > 0 and dot > at + 1: name[0 .. at] & name[dot .. ^1] else: ""
 
+proc revertHeldUnits*(refusals: openArray[string]; ownUnits: HashSet[string];
+                      floored: openArray[string]): seq[string] =
+  ## The units a revert keeps on hold for its floor check's ``refusals``
+  ## (spec §10.1, A9 review round 12): each refusal's subject when it is a
+  ## unit the generation installs (a template, for an instance), else
+  ## every floored unit of the generation (``floored``): a refusal about a
+  ## host's type-wide drop-in, the search path or the manager bears on all
+  ## of them. Never a name the generation does not install: a hold on
+  ## ``service`` would be a type-wide drop-in that keeps every service on
+  ## the host from starting.
+  for l in refusals:
+    let c = l.find(": ")
+    let subj = if c > 0: l[0 ..< c].strip() else: ""
+    var u = ""
+    when mutated("revert-holds-any-subject"):
+      # Falsifying build: the first cut, any subject held as named.
+      u = (let t = floorTemplateOf(subj); if t.len > 0: t else: subj)
+    else:
+      let t = floorTemplateOf(subj)
+      if t.len > 0 and t in ownUnits: u = t
+      elif subj in ownUnits: u = subj
+    if u.len == 0:
+      for f in floored:
+        if f notin result: result.add(f)
+    elif u notin result:
+      result.add(u)
+
 proc startHoldPath*(unit: string): string =
   ## Where the switch's start hold for ``unit`` (a template's, for an
   ## instance: one hold covers every instance) is written
@@ -6084,14 +6111,12 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
             else: (purpose == "revert" or (replaying and opts.replayOf == "revert")) and
                   reachLive.len == 0 and notHeld.len > 0
           if revertHolds:
-            var held: seq[string]
-            for l in notHeld:
-              let c = l.find(": ")
-              if c <= 0: continue
-              var u = l[0 ..< c].strip()
-              let t = floorTemplateOf(u)
-              if t.len > 0: u = t
-              if u notin held: held.add(u)
+            var genUnits = initHashSet[string]()
+            for r in composed.resources:
+              if r.kind == srkSystemdSystemUnit and r.suCollision != "dropIn":
+                genUnits.incl(r.suName)
+            let held = revertHeldUnits(notHeld, genUnits,
+                                       flooredUnitNames(composed.resources))
             proc isHeld(u: string): bool =
               u in held or floorTemplateOf(u) in held
             var kept: seq[Transition]
