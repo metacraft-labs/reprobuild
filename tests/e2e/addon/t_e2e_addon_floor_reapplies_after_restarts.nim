@@ -29,6 +29,19 @@
 ##   apply's revert commits with the unit held, the host not pending
 ##   (decision 83 for the stopped unit; spec §10.1, round 12, for the
 ##   revert);
+## - **a template's record naming its observation instance**, as an engine
+##   before the start step recorded a template's directory for the
+##   instance that ran wrote it: ``a9r-to@.service`` with
+##   ``StateDirectory=``, its instance ``a9r-to@1.service`` pulled in by
+##   ``Wants=``, applies; the record's entry is rewritten to name
+##   ``a9r-to@repro-addon-observe.service``, and the directory is removed
+##   and made again by a run of the instance that then stops. The next
+##   apply accepts it under every name of the template (the instance the
+##   generation names vouches for it), writes exactly one
+##   ``recreated-accepted`` audit record for it, and records it for the
+##   instance under its new identity; a refused apply leaves the record as
+##   it was (issue 2026-11-13-floor-template-observation-instance-refuses-
+##   a-directory-its-instance-restart-made);
 ## - **a reused inode with a new birth time** on a 16-inode ext4 the guest
 ##   loop-mounts at ``/var/cache``: the kernel hands the number back, and
 ##   the next apply refuses the directory (decision 76, finding 7);
@@ -41,7 +54,11 @@
 ##
 ## Falsifying builds (each red here): ``revert-refuses-on-floor``,
 ## ``same-identity-ignores-btime``, ``listener-below-writable-allowed``,
-## ``dependency-starts-unrecorded``, ``observation-instance-judged-alone``.
+## ``dependency-starts-unrecorded``, ``observation-instance-judged-alone``,
+## ``template-instances-unjudged`` (the observation instance's record is
+## refused, under every name, and the refused apply leaves it as it was),
+## ``template-acceptance-per-name`` (the directory is accepted, but its
+## ``recreated-accepted`` record is written once per name: two).
 ##
 ## Opt-in: ``REPRO_ADDON_VM_GATES=1``.
 ##
@@ -216,6 +233,84 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
          r.stdout & r.stderr)
     r = g.applyProfile(repro, "c-st", control)
     discard g.run("rm -rf /var/lib/a9r-st; systemctl reset-failed 'a9r-*' 2>/dev/null; true")
+    # A template's record naming its observation instance, as an engine
+    # before the start step recorded a template's directory for the
+    # instance that ran wrote it (issue 2026-11-13-floor-template-
+    # observation-instance-refuses-a-directory-its-instance-restart-made).
+    # Its instance's last run made the directory again and has ended, so
+    # no running instance vouches for it: every name of the template must
+    # judge it against the instance the generation names and reach one
+    # verdict, written once, and a refused apply must not rewrite it.
+    const ToDir = "/var/lib/a9r-to"
+    let obs = proc (d: string): string =
+      Head & unitResource("a9r-control.service", "", binary,
+                          unitLines = "Wants=a9r-to@1.service\n", description = d) &
+      unitResource("a9r-to@.service", "User=a9e\nStateDirectory=a9r-to\n", binary)
+    # The record's line for the directory, its tab-separated fields
+    # (``readCreatedDirs``: path, unit, st_dev, st_ino, birth ns,
+    # InvocationID).
+    proc toEntry(): seq[string] =
+      g.exec("awk -F'\\t' '$1==\"" & ToDir & "\"' " & Record).stdout.strip().split('\t')
+    # The directory's identity as the add-on records it: st_dev as
+    # major << 32 | minor (statx), the inode, the birth time in ns.
+    proc toIdentity(): seq[string] =
+      let f = g.exec("stat -c '%Hd %Ld %i %.9W' " & ToDir).stdout.strip().splitWhitespace()
+      if f.len != 4: return @[]
+      try:
+        @[$((parseBiggestUInt(f[0]) shl 32) or parseBiggestUInt(f[1])), f[2],
+          f[3].replace(".", "").strip(chars = {'0'}, trailing = false)]
+      except ValueError: @[]
+    # The ``recreated-accepted`` audit records for the directory, over every
+    # generation's apply log: its resourceAddress and outcome are adjacent,
+    # with the outcome's 4-byte length between them (``encodeAuditRecord``).
+    proc toAccepted(): int =
+      let c = g.exec("cat /var/lib/repro/system/generations/*/log/apply.log " &
+        "2>/dev/null | tr '\\000' '#' | LC_ALL=C grep -a -o " &
+        "'directory:" & ToDir & ".###recreated-accepted' | wc -l").stdout.strip()
+      try: parseInt(c) except ValueError: -1
+    r = g.applyProfile(repro, "o1", obs("o1"))
+    let e1 = toEntry()
+    step("a floored template with a StateDirectory, pulled in by Wants=, applies",
+         r.exitCode == 0 and e1.len == 6 and e1[1] == "a9r-to@1.service",
+         r.stdout & r.stderr & e1.join(" | "))
+    let rw = g.exec("awk -F'\\t' -v OFS='\\t' '$1==\"" & ToDir & "\"{$2=\"" &
+      "a9r-to@repro-addon-observe.service\"}1' " & Record & " > " & Record &
+      ".a9r && chmod 0600 " & Record & ".a9r && mv " & Record & ".a9r " & Record)
+    let e2 = toEntry()
+    step("its record is rewritten to name the observation instance",
+         rw.exitCode == 0 and e1.len == 6 and e2.len == 6 and
+         e2[1] == "a9r-to@repro-addon-observe.service" and e2[2 .. 5] == e1[2 .. 5],
+         rw.stdout & rw.stderr & e2.join(" | "))
+    discard g.run("systemctl stop a9r-to@1.service; rm -rf " & ToDir & "; " &
+                  "systemctl start a9r-to@1.service; systemctl stop a9r-to@1.service")
+    let ev5 = evidence(ToDir, "a9r-to@1.service")
+    record["observationRecord"] = %ev5
+    let id5 = toIdentity()
+    let before5 = g.exec("cat " & Record).stdout
+    let accepted5 = toAccepted()
+    r = g.applyProfile(repro, "o2", obs("o2"))
+    let out5 = r.stdout & r.stderr
+    let after5 = g.exec("cat " & Record).stdout
+    let e3 = toEntry()
+    step("the next apply accepts the directory its stopped instance's run made " &
+         "again, though the record names the observation instance",
+         r.exitCode == 0, out5 & ev5)
+    notPending("the apply over the observation instance's record")
+    let accepted6 = toAccepted()
+    step("it writes exactly one recreated-accepted record for the directory",
+         accepted5 >= 0 and accepted6 - accepted5 == 1,
+         "before " & $accepted5 & ", after " & $accepted6)
+    if r.exitCode == 0:
+      step("the record names the instance, with the directory's new identity",
+           e3.len == 6 and e3[1] == "a9r-to@1.service" and id5.len == 3 and
+           e3[2 .. 4] == id5,
+           e3.join(" | ") & " / " & id5.join(" ") & "\n" & after5)
+    else:
+      step("the refused apply left the record as it was", after5 == before5,
+           before5 & "---\n" & after5)
+    r = g.applyProfile(repro, "c-to", control)
+    discard g.run("systemctl stop 'a9r-to@*' 2>/dev/null; rm -rf " & ToDir &
+                  "; systemctl reset-failed 'a9r-*' 2>/dev/null; true")
     # A reused inode with a new birth time, on kernel ext4 (finding 7).
     let fsOk = g.exec("set -e; truncate -s 4M /var/tmp/a9r16.img; " &
       "mkfs.ext4 -q -F -N 16 /var/tmp/a9r16.img; mount -o loop /var/tmp/a9r16.img /var/cache")
