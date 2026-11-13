@@ -247,13 +247,17 @@ repro system addon uninstall --discard-unacknowledged-store-evidence
 Before it removes anything, this writes an **intent record**: every
 object it is about to discard without the sink having acknowledged it,
 and every record still queued, in
-`/var/log/repro-addon/uninstall-<time>-discard-intent.json` (root only).
+`/var/log/repro-addon/uninstall-<time>-discard-intent.json` (root only;
+a second discard in the same second gets `uninstall-<time>-1-…`, and a
+record is never written over another).
 The record names the public half of the host's attestation key, and
 `<record>.sig` beside it holds that key's signature over exactly the
 bytes of the record file. The intent record says the discard was
 authorised. It does not say the discard happened.
 
-After the removal has succeeded, uninstall writes a **completion record**
+Once the objects are gone and their removal has been flushed to disk
+(the filesystems that held them are synced), uninstall writes a
+**completion record**
 beside it, `uninstall-<time>-discard-completed.json` with its own `.sig`.
 The completion record names the intent record and its SHA-256, the
 objects removed, and any kept with the store (`--keep-store`). It is
@@ -261,9 +265,11 @@ signed with the same key, which uninstall reads before the removal takes
 it away. Each file is flushed to disk and so is its directory before
 uninstall goes on.
 
-If the uninstall drifts, fails or stops after the intent record, no
-completion record is written, and the intent record stays as
-"authorised, not completed". Uninstall prints both paths and says
+If the uninstall drifts or stops before the objects are gone, or the sync
+fails, no completion record is written, and the intent record stays as
+"authorised, not completed". A failure later in the uninstall, after the
+objects are gone (removing `/run/repro`, say), is reported as an error of
+its own and does not hold the completion back. Uninstall prints both paths and says
 whether the discard completed. All the files stay after uninstall: keep
 them with the entries you copied off the host. If the attestation key is
 missing, or the intent record cannot be written, uninstall refuses and
@@ -287,16 +293,18 @@ over its file's exact bytes and by the key you gave. The command then
 reports one of:
 
 - **completed** (exit 0): the intent record and a completion record of
-  that same intent record both verify, and the completion accounts for
-  every object of the intent. It lists the objects removed as discarded
-  unshipped, and separately any the completion records as kept with the
-  store (`uninstall --keep-store`); a kept object is still on the host.
+  that same intent record both verify, and every object was removed. It
+  lists the objects.
+- **completed, some kept** (exit 4): as above, but some objects were kept
+  with the store (`--keep-store`). Those are still on the host and were
+  not discarded; the command lists them apart from the discarded ones.
 - **authorised, not completed** (exit 3): the intent record verifies, but
   there is no completion record. The discard was authorised, and nothing
   shows that it finished.
 - **does not verify** (exit 1): a changed byte, another key, an empty
-  signature, a completion record that names a different intent record, or one whose
-  removed and kept lists do not cover the intent's objects.
+  signature (on either record), a completion record that names a
+  different intent record, or one whose removed and kept objects are not
+  exactly the intent record's.
 
 A host bootstrapped by an older release is brought up to date by its
 first switch, or at once with
