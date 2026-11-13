@@ -70809,7 +70809,12 @@ proc headPublicationOf*(identity: GitToolIdentity;
   if branchRes.code == 0:
     result.branch = branchRes.output.strip()
 
-  let first = queryGitState(isPublishedQuery(repoAbsPath, remoteName), identity)
+  # The first pass touches no remote, whatever ``allowFetch`` says: it is the
+  # "published as far as this checkout has FETCHED" question. Letting it fall
+  # back to ``ls-remote`` would answer a pushed-but-unfetched HEAD as plain
+  # ``published`` and the ``published_after_fetch`` verdict could never occur.
+  let first = queryGitState(
+    isPublishedQuery(repoAbsPath, remoteName, localOnly = true), identity)
   result.scope = first.publishedScope
   if first.status != gqsOk:
     result.status = hpsUnknown

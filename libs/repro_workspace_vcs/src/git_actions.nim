@@ -164,6 +164,12 @@ type
     queryAheadBehind*: bool
     queryUnmerged*: bool
     queryFileDetails*: bool
+    localOnly*: bool
+      ## For ``gqkIsPublished``: answer from the remote-tracking refs this
+      ## checkout already has and contact NO remote. Without it the lookup
+      ## falls back to ``ls-remote`` for checkouts that carry no tracking ref
+      ## (a commit fetched by SHA), which makes a "cheap local" pass reach the
+      ## network and report an unfetched-but-pushed HEAD as plain `published`.
 
   GitQueryStatus* = enum
     gqsOk
@@ -686,7 +692,8 @@ proc workingTreeIsClean(payload: GitVcsPayload; repoPath: string): tuple[ok: boo
         res.diagnostic)
   (ok: true, clean: res.output.strip.len == 0, diagnostic: "")
 
-proc remoteBranchContainsHead(payload: GitVcsPayload; repoPath, remote: string):
+proc remoteBranchContainsHead(payload: GitVcsPayload; repoPath, remote: string;
+                              localOnly = false):
     tuple[ok: bool; published: bool; scopedRemote: string;
           diagnostic: string] =
   ## Is HEAD contained in a remote-tracking branch?
@@ -775,6 +782,9 @@ proc remoteBranchContainsHead(payload: GitVcsPayload; repoPath, remote: string):
   # that commit is the tip of a branch on the remote. Ask the remote directly:
   # HEAD is published when it is exactly the tip of one of the remote's branches.
   # Only tips are matched, so the check needs no objects beyond HEAD itself.
+  if localOnly:
+    return (ok: true, published: false, scopedRemote: answeredScope,
+      diagnostic: "")
   let queryRemote = if answeredScope.len > 0: answeredScope else: "origin"
   let head = runGitQuery(payload, ["-C", repoPath, "rev-parse", "HEAD"])
   if head.exitCode == 0:
@@ -2389,9 +2399,10 @@ proc headShaQuery*(repoPath: string): GitQueryAction =
 proc isCleanQuery*(repoPath: string): GitQueryAction =
   GitQueryAction(kind: gqkIsClean, repoPath: repoPath)
 
-proc isPublishedQuery*(repoPath, remoteName: string): GitQueryAction =
+proc isPublishedQuery*(repoPath, remoteName: string;
+                       localOnly = false): GitQueryAction =
   GitQueryAction(kind: gqkIsPublished, repoPath: repoPath,
-    remoteName: remoteName)
+    remoteName: remoteName, localOnly: localOnly)
 
 proc extendedStatusQuery*(repoPath, trunkBranch: string;
                           queryStashes, queryFiles, queryAheadBehind,
@@ -2432,7 +2443,7 @@ proc queryGitState*(query: GitQueryAction;
         diagnostic: res.diagnostic)
   of gqkIsPublished:
     let res = remoteBranchContainsHead(payload, query.repoPath,
-      query.remoteName)
+      query.remoteName, query.localOnly)
     if res.ok:
       result = GitQueryResult(status: gqsOk, isPublished: res.published,
         publishedScope: res.scopedRemote)
