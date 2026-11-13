@@ -434,8 +434,11 @@ suite "the A11 code review's eighth round: §13 decision 81":
     # The result runAddonUninstall left before round 10 when removing
     # /repro raised: the error recorded and the surviving aside in the
     # kept list. Without --keep-store it was not kept: no completion,
-    # "authorised, not completed".
-    let s = scene("failed-removal")
+    # "authorised, not completed". (A scene of its own: case 13's aside
+    # would otherwise be pending here too, and hold the completion back
+    # whatever finishDiscard did with the kept list.)
+    let s = scene("listed-kept")
+    check s.gate.pending == @[s.aside]
     var signer = loadTextSigner(s.key)
     var r = resultOf(s)
     r.errors.add("/repro: removal failed part-way")
