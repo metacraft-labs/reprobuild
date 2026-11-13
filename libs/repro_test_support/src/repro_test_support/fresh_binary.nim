@@ -36,7 +36,7 @@
 ##
 ## Mocks: none -- this is test support; it reads the real build outputs.
 
-import std/[algorithm, json, os, strutils, times]
+import std/[algorithm, json, os, sets, strutils, times]
 
 import nimcrypto/sha2
 
@@ -100,6 +100,13 @@ proc decodeListPath(list, encoded, name: string): string =
   ## something the writer produces, and the list is refused.
   var i = 0
   while i < encoded.len:
+    # The writer escapes every space and control byte (round 9): one found
+    # raw is not its list, and a name ending in a space must never be
+    # checked under the name without it.
+    if encoded[i] <= ' ':
+      raise newException(StaleHelperBinary, list & " has a path with an " &
+        "unescaped space or control byte (" & encoded & "); " &
+        helperRebuildHint(name))
     if encoded[i] == '\\':
       if i + 3 < encoded.len and encoded[i + 1] == 'x' and
           encoded[i + 2] in HexDigits and encoded[i + 3] in HexDigits:
@@ -113,7 +120,8 @@ proc decodeListPath(list, encoded, name: string): string =
     inc i
 
 proc readHelperList(repoRoot, name: string):
-    tuple[binarySha: string; deps: seq[tuple[kind, path: string]]] =
+    tuple[binarySha: string; deps: seq[tuple[kind, path: string]];
+          searchPath: seq[string]; everyEntry: bool] =
   ## The list ``scripts/write_helper_deps.sh`` wrote for ``name``: the
   ## sha256 of the binary it describes, and every source with its kind
   ## (``module``, ``csource``, ``header``, ``read``). Raises
@@ -123,8 +131,9 @@ proc readHelperList(repoRoot, name: string):
     raise newException(StaleHelperBinary, "build/bin/" & name & " has no " &
       "dependency list (" & list & "): nothing shows what it was built " &
       "from; " & helperRebuildHint(name))
-  for raw in readFile(list).splitLines():
-    let line = raw.strip()
+  for line in readFile(list).splitLines():
+    # Never strip: the writer ends a line at the newline only, and a path
+    # keeps every byte of its name (round 9).
     if line.len == 0: continue
     let sp = line.find(' ')
     if sp < 0:
@@ -135,6 +144,10 @@ proc readHelperList(repoRoot, name: string):
     if kind == "binary-sha256": result.binarySha = value.toLowerAscii()
     elif kind in ["module", "csource", "header", "read"]:
       result.deps.add((kind, decodeListPath(list, value, name)))
+    elif kind == "searchpath":
+      result.searchPath.add(decodeListPath(list, value, name))
+    elif kind == "listing-filter" and value in ["resolution", "every-entry"]:
+      result.everyEntry = value == "every-entry"
     elif kind == "listing" and value.len > 65 and value[64] == ' ':
       result.deps.add((kind, value[0 ..< 65] &
         decodeListPath(list, value[65 .. ^1], name)))
@@ -145,13 +158,26 @@ proc readHelperList(repoRoot, name: string):
     raise newException(StaleHelperBinary, list & " names no binary-sha256: " &
       "it is not tied to a build; " & helperRebuildHint(name))
 
-proc listingDigest*(dir: string): string =
-  ## The sha256 of a directory's entry names, sorted bytewise and joined by
-  ## newlines -- what ``scripts/write_helper_deps.sh`` records for a
-  ## directory the compiler listed (§13 decision 80).
+proc relevantEntry(dir, name: string; searchPath: HashSet[string]): bool =
+  ## §13 decision 86: only an entry that can change what the compiler
+  ## resolves counts -- a ``.nim``, ``.nimble`` or ``.nims`` file, or a
+  ## directory that is itself on the search path. Kept in step with
+  ## ``relevant`` in ``scripts/write_helper_deps.sh``.
+  name.endsWith(".nim") or name.endsWith(".nimble") or
+    name.endsWith(".nims") or normalizedPath(dir / name) in searchPath
+
+proc listingDigest*(dir: string; searchPath: openArray[string] = [];
+                    everyEntry = false): string =
+  ## The sha256 of a directory's relevant entry names (``relevantEntry``),
+  ## sorted bytewise and joined by newlines -- what
+  ## ``scripts/write_helper_deps.sh`` records for a directory the compiler
+  ## listed (§13 decisions 80 and 86).
+  var sp = initHashSet[string]()
+  for p in searchPath: sp.incl(normalizedPath(p))
   var names: seq[string]
   for kind, path in walkDir(dir, relative = true):
-    names.add(path)
+    if everyEntry or relevantEntry(dir, path, sp):
+      names.add(path)
   names.sort(system.cmp[string])
   var ctx: sha256
   ctx.init()
@@ -160,9 +186,13 @@ proc listingDigest*(dir: string): string =
     ctx.update(joined.toOpenArrayByte(0, joined.high))
   toLowerAscii($ctx.finish())
 
+proc helperSearchPath*(repoRoot, name: string): seq[string] =
+  ## The compiler's search path the list recorded (decision 86).
+  readHelperList(repoRoot, name).searchPath
+
 proc helperListings*(repoRoot, name: string): seq[tuple[dir, digest: string]] =
   ## The directories the compiler listed while building ``name``, each with
-  ## the digest of its entries at list time.
+  ## the digest of its relevant entries at list time.
   for (kind, value) in readHelperList(repoRoot, name).deps:
     if kind == "listing" and value.len > 65:
       result.add((value[65 .. ^1], value[0 ..< 64]))
@@ -214,11 +244,13 @@ proc freshRepoBinary*(repoRoot, name: string): string =
   # A directory the compiler listed (a staticExec `ls`, a walkDir in a
   # config.nims) must still list the same entries (§13 decision 80).
   when FreshMutation != "fresh-ignores-listings":
+    let searchPath = helperSearchPath(repoRoot, name)
+    let everyEntry = readHelperList(repoRoot, name).everyEntry
     for (dir, digest) in helperListings(repoRoot, name):
       if not dirExists(dir):
         raise newException(StaleHelperBinary, result & " was built after " &
           "listing " & dir & ", which no longer exists; " & helperRebuildHint(name))
-      if listingDigest(dir) != digest:
+      if listingDigest(dir, searchPath, everyEntry) != digest:
         raise newException(StaleHelperBinary, result & " was built from a " &
           "listing of " & dir & " that has changed since; " &
           helperRebuildHint(name))

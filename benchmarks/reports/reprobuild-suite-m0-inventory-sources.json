@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 35,
-    "nimTestBinaries": 2773,
+    "nimTestBinaries": 2774,
     "pureUnitConsolidationGroups": 82,
     "pureUnitTests": 760,
-    "staticallyDetectedRuntimeCompilerFlowTests": 138,
-    "testEntries": 2817
+    "staticallyDetectedRuntimeCompilerFlowTests": 139,
+    "testEntries": 2818
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1615,7 +1615,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 21,
-      "integration": 1527,
+      "integration": 1528,
       "platform/destructive": 177,
       "pure unit": 760,
       "unclassified": 332
@@ -1832,9 +1832,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2773,
+    "nimTestBinaryCount": 2774,
     "pythonTestFileCount": 44,
-    "testEntryCount": 2817
+    "testEntryCount": 2818
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -2612,7 +2612,7 @@
             "t2",
             "tree"
           ],
-          "line": 124,
+          "line": 144,
           "path": "libs/repro_test_support/tests/t_fresh_helper_binary_refuses_a_stale_build.nim",
           "patterns": [
             "gcc"
@@ -2636,7 +2636,7 @@
             "t2",
             "tree"
           ],
-          "line": 155,
+          "line": 176,
           "path": "libs/repro_test_support/tests/t_fresh_helper_binary_refuses_a_stale_build.nim",
           "patterns": [
             "nim-argv"
@@ -2660,7 +2660,7 @@
             "t2",
             "tree"
           ],
-          "line": 258,
+          "line": 279,
           "path": "libs/repro_test_support/tests/t_fresh_helper_binary_refuses_a_stale_build.nim",
           "patterns": [
             "nim-argv"
@@ -2684,7 +2684,7 @@
             "t2",
             "tree"
           ],
-          "line": 336,
+          "line": 361,
           "path": "libs/repro_test_support/tests/t_fresh_helper_binary_refuses_a_stale_build.nim",
           "patterns": [
             "nim-argv"
@@ -6617,6 +6617,24 @@
           "assignedCommandVariable": "",
           "commandVariableExecuted": false,
           "directExecutionLine": true,
+          "executedVariables": [],
+          "line": 59,
+          "path": "tests/integration/t_plain_test_compile_keeps_the_helpers_fresh.nim",
+          "patterns": [
+            "nim-argv"
+          ],
+          "snippet": "let (o, c) = execCmdEx(quoteShellCommand([\"nim\", \"c\", \"-r\", \"--hints:off\","
+        }
+      ],
+      "source": "tests/integration/t_plain_test_compile_keeps_the_helpers_fresh.nim"
+    },
+    {
+      "class": "integration",
+      "matches": [
+        {
+          "assignedCommandVariable": "",
+          "commandVariableExecuted": false,
+          "directExecutionLine": true,
           "executedVariables": [
             "dir",
             "file"
@@ -9590,7 +9608,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_addon/tests/t_addon_review_round8.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 10,
+      "staticCaseCount": 12,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -26340,7 +26358,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_test_support/tests/t_fresh_helper_binary_refuses_a_stale_build.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 20,
+      "staticCaseCount": 23,
       "staticallyDetectedRuntimeCompilerFlow": true,
       "targetOs": "soAny"
     },
@@ -46494,6 +46512,23 @@
       "sourceSuiteCount": 1,
       "staticCaseCount": 1,
       "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_plain_test_compile_keeps_the_helpers_fresh",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_test_support"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": false,
+      "source": "tests/integration/t_plain_test_compile_keeps_the_helpers_fresh.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": true,
       "targetOs": "soAny"
     },
     {
