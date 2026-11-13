@@ -2604,6 +2604,7 @@
             "app2",
             "bin2",
             "binary",
+            "env",
             "flags",
             "hello",
             "helloSrc",
@@ -2611,7 +2612,7 @@
             "t2",
             "tree"
           ],
-          "line": 110,
+          "line": 124,
           "path": "libs/repro_test_support/tests/t_fresh_helper_binary_refuses_a_stale_build.nim",
           "patterns": [
             "gcc"
@@ -2627,6 +2628,7 @@
             "app2",
             "bin2",
             "binary",
+            "env",
             "flags",
             "hello",
             "helloSrc",
@@ -2634,7 +2636,7 @@
             "t2",
             "tree"
           ],
-          "line": 141,
+          "line": 155,
           "path": "libs/repro_test_support/tests/t_fresh_helper_binary_refuses_a_stale_build.nim",
           "patterns": [
             "nim-argv"
@@ -2650,6 +2652,7 @@
             "app2",
             "bin2",
             "binary",
+            "env",
             "flags",
             "hello",
             "helloSrc",
@@ -2657,7 +2660,7 @@
             "t2",
             "tree"
           ],
-          "line": 244,
+          "line": 258,
           "path": "libs/repro_test_support/tests/t_fresh_helper_binary_refuses_a_stale_build.nim",
           "patterns": [
             "nim-argv"
@@ -2673,6 +2676,7 @@
             "app2",
             "bin2",
             "binary",
+            "env",
             "flags",
             "hello",
             "helloSrc",
@@ -2680,7 +2684,7 @@
             "t2",
             "tree"
           ],
-          "line": 322,
+          "line": 336,
           "path": "libs/repro_test_support/tests/t_fresh_helper_binary_refuses_a_stale_build.nim",
           "patterns": [
             "nim-argv"
@@ -26336,7 +26340,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_test_support/tests/t_fresh_helper_binary_refuses_a_stale_build.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 18,
+      "staticCaseCount": 20,
       "staticallyDetectedRuntimeCompilerFlow": true,
       "targetOs": "soAny"
     },

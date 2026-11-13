@@ -46,7 +46,10 @@
 # targets, the files a staticExec command reads, the binaries it executes
 # (execve) and the directories it lists (getdents). A traced workspace
 # path that does not decode to a file that exists fails the run: no list
-# is written (fail closed). Each {.compile.} C file is compiled again with
+# is written (fail closed). So does a trace the writer cannot read: a line
+# of a traced syscall that succeeded but is not in the -xx form it parses,
+# or a trace without the compiler's own open of the entry module (the
+# positive control). Each {.compile.} C file is compiled again with
 # the C compiler's own depfile (-MD), which names its headers. The list starts with the sha256 of the binary it describes, and
 # fresh_binary refuses a list written for another binary.
 #
@@ -72,7 +75,8 @@
 # strings taken literally, without -xx), no-execve (executed binaries not
 # recorded), no-listing (listed directories not recorded),
 # drop-unresolved (a traced path that does not decode to a file is
-# skipped, not fatal). A file
+# skipped, not fatal), accept-unparsed (a trace the writer cannot read,
+# or one without the entry module's open, yields a list anyway). A file
 # <build>/nimcache/<name>/write-helper-deps.mutation selects one too, for
 # a run inside a graph edge, whose environment the engine sets; it is
 # read only when present.
@@ -142,9 +146,9 @@ if [ ! -s "${cache}/${module}.deps" ]; then
   exit 1
 fi
 python3 - "${cache}" "${module}" "${build}" "${strace_bin}" "${binary}" \
-    "${published}" <<'PY'
+    "${published}" "${entry}" <<'PY'
 import hashlib, json, os, re, shlex, subprocess, sys
-cache, module, build, strace, binary, published = sys.argv[1:7]
+cache, module, build, strace, binary, published, entry = sys.argv[1:8]
 cache = os.path.abspath(cache)
 build = os.path.abspath(build)
 workspace = os.path.dirname(os.path.abspath(os.getcwd()))
@@ -275,6 +279,66 @@ else:
     for f in os.listdir(cache):
         if f.startswith("front.trace."):
             events[int(f.rsplit(".", 1)[1])] = open(os.path.join(cache, f), errors="replace").read().splitlines()
+    # Positive control (issue 2026-11-13-helper-list-writer-publishes-a-
+    # list-from-a-trace-it-could-not-parse). The patterns above record only
+    # the lines they match, so a trace in another format -- a strace whose
+    # -y paths are text, one that ignored -xx, or no trace at all -- would
+    # otherwise yield a list of `module` entries alone that accepts the
+    # binary after a staticRead input changed. So every line of a traced
+    # syscall that succeeded must be one the patterns read, and the
+    # compiler's own open of the entry module must be among the decoded
+    # opens; otherwise no list is written.
+    # A line strace -ff writes: a syscall `name(args) = ret`, a signal
+    # (`--- SIG... ---`) or an exit (`+++ ... +++`), or the two halves of a
+    # syscall another thread interrupted (`<unfinished ...>`, `<... name
+    # resumed>`). The second half is judged like a whole line: the patterns
+    # do not read it, so if it succeeded it fails the list.
+    syscall_re = re.compile(r'^(?:<\.\.\. )?([a-z_][a-z0-9_]*)(?:\(| resumed>)')
+    succeeded_re = re.compile(r'\s=\s+(?:\d+|0x[0-9a-f]+)(?:<.*>)?\s*$')
+    dents_any_re = re.compile(r'^getdents(?:64)?\(\d+<' + hexstr + r'>,.*\)\s+=\s+\d+\s*$')
+    readers = {
+        "open": [open_re], "openat": [open_re], "openat2": [open_re],
+        "execve": [exec_re], "execveat": [execat_re],
+        "getdents": [dents_any_re], "getdents64": [dents_any_re],
+        "chdir": [chdir_re], "fchdir": [fchdir_re],
+        "clone": [child_re], "clone3": [child_re], "fork": [child_re],
+        "vfork": [child_re],
+    }
+    unparsed = []
+    entry_real = os.path.realpath(entry)
+    entry_opened = False
+    for pid in sorted(events):
+        for line in events[pid]:
+            if not line.strip() or line.startswith(("--- ", "+++ ")):
+                continue
+            m = syscall_re.match(line)
+            if not m:
+                unparsed.append("%d: %s" % (pid, line))
+                continue
+            if m.group(1) not in readers or "<unfinished ...>" in line:
+                continue
+            if not succeeded_re.search(line):
+                continue      # failed (= -1 E...) or never returned (= ?)
+            if not any(r.match(line) for r in readers[m.group(1)]):
+                unparsed.append("%d: %s" % (pid, line))
+                continue
+            o = open_re.match(line)
+            if o and decode(o.group(1)) == entry_real:
+                entry_opened = True
+    if mutation != "accept-unparsed":   # FALSIFIER: an unread trace accepted
+        if unparsed:
+            sys.exit("write_helper_deps: the strace that ran (" + strace +
+                     ") printed lines the writer could not parse (it reads "
+                     "only strace -ff -y -xx output); no list written:\n  " +
+                     "\n  ".join(l[:300] for l in unparsed[:10]) +
+                     ("\n  ... and %d more" % (len(unparsed) - 10)
+                      if len(unparsed) > 10 else ""))
+        if not entry_opened:
+            sys.exit("write_helper_deps: positive control failed: the trace "
+                     "of the strace that ran (" + strace + ") does not show "
+                     "the compiler opening the entry module " + entry_real +
+                     ", so it cannot be trusted to show what else was read; "
+                     "no list written")
     children = {}
     for pid, lines in events.items():
         for line in lines:

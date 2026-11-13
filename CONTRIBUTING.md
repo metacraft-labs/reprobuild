@@ -25,6 +25,10 @@ says no source changed since it was built
 `scripts/write_helper_deps.sh` writes the list. To see the files the Nim
 compiler reads at compile time (`staticRead`, and what a `staticExec`
 command reads), it traces the compiler with `strace`, which needs ptrace.
+It reads only the `strace -ff -y -xx` format, and it writes no list from a
+trace it cannot parse, or from one that does not show the compiler opening
+the entry module. The script prints the strace it ran; the dev shell's
+pinned one is the one it is tested with.
 
 `just build` (`scripts/build_apps.sh`) has two modes:
 

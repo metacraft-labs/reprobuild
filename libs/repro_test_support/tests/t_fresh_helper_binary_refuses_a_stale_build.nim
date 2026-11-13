@@ -47,6 +47,14 @@
 ##     decision 80).
 ## 21. A traced workspace path that is no longer a file when the list is
 ##     written fails the writer: no list, never a silent drop.
+## 22. A strace that prints a format the writer does not parse (a wrapper
+##     that drops ``-xx``, as any strace whose ``-y`` paths are text does):
+##     the writer fails, no list is written, and the binary is refused --
+##     never a list of ``module`` entries alone that accepts the binary
+##     after its ``staticRead`` input changed.
+## 23. A strace that traces none of the writer's syscalls (a wrapper that
+##     replaces ``-e trace=``): the positive control -- the entry module's
+##     own ``open`` -- is missing, so the writer fails and writes no list.
 ##
 ## Falsifying builds: ``stale-helper-accepted`` (cases 2-5 and 8-10 red),
 ## ``fresh-skips-included`` (case 4), ``fresh-skips-outside-tree`` (case
@@ -58,7 +66,13 @@
 ## (case 13), ``single-trace`` (case 14), ``text-paths`` (cases 15-18;
 ## it is the round-7 trace, so 19-21 go red with it),
 ## ``no-execve`` (case 19), ``no-listing`` (case 20), ``drop-unresolved``
-## (case 21).
+## (case 21), ``accept-unparsed`` (cases 22 and 23).
+##
+## Cases 22 and 23 run the real strace behind a wrapper script named by
+## ``REPRO_STRACE``. The wrapper is justified: it is how the writer's
+## caller selects a strace, and it stands in for a strace build that prints
+## another format (or the caller's PATH strace, which path mode runs),
+## which cannot be installed on demand.
 ##
 ## Mocks: none -- the real compiler, the real script, strace.
 
@@ -330,6 +344,46 @@ suite "a helper binary is used only when built from the tree under test":
     check c2 != 0
     check "not what they were traced as" in o2
     check not fileExists(t2 / "build" / "nimcache" / "gone" / "gone.deps")
+
+  proc straceWrapper(name, filter: string): string =
+    ## A ``REPRO_STRACE`` that runs the real strace with its arguments
+    ## rewritten by the bash ``filter`` (which reads ``$a``, appends to
+    ## ``args``).
+    let real = findExe("strace")
+    doAssert real.len > 0, "strace is required"
+    result = base / name
+    writeFile(result, "#!/usr/bin/env bash\nargs=()\nfor a in \"$@\"; do\n" &
+      filter & "\ndone\nexec " & quoteShell(real) & " \"${args[@]}\"\n")
+    setFilePermissions(result, {fpUserRead, fpUserWrite, fpUserExec})
+
+  proc writeWith(strace: string): (string, int) =
+    let env = "REPRO_STRACE=" & quoteShell(strace) & " "
+    execCmdEx(env & quoteShellCommand(@["bash",
+      RepoRoot / "scripts" / "write_helper_deps.sh", "foo-helper", app,
+      "--path:" & tree / "libs" / "foolib" / "src",
+      "--path:" & parentDir(outside)]), workingDir = tree)
+
+  test "22: a trace in a format the writer does not parse fails the list":
+    build()
+    check refusal() == ""
+    let (o, c) = writeWith(straceWrapper("strace-no-xx",
+      "  [ \"$a\" = -xx ] || args+=(\"$a\")"))
+    checkpoint o
+    check c != 0
+    check "could not parse" in o
+    check not fileExists(tree / "build" / "nimcache" / "foo-helper" / "foo-helper.deps")
+    check "has no dependency list" in refusal()
+
+  test "23: a trace without the entry module's own open fails the list":
+    build()
+    check refusal() == ""
+    let (o, c) = writeWith(straceWrapper("strace-traces-nothing",
+      "  case \"$a\" in trace=*) args+=(\"trace=getpid\") ;; *) args+=(\"$a\") ;; esac"))
+    checkpoint o
+    check c != 0
+    check "positive control" in o
+    check not fileExists(tree / "build" / "nimcache" / "foo-helper" / "foo-helper.deps")
+    check "has no dependency list" in refusal()
 
   test "7: no binary, or no dependency list, is refused":
     build()
