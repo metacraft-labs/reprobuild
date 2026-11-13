@@ -29,6 +29,10 @@
 ##    kept; the verdict names it kept and not discarded (exit 0).
 ## 9. A completion whose removed + kept lists do not cover the intent's
 ##    objects: invalid (exit 1).
+## 10. A completion whose signature does not hold: one byte of the record
+##    changed after signing, an empty ``.sig``, and a record signed by
+##     another key but naming the enrolled key as its ``attestationKey``:
+##    each invalid (exit 1).
 ##
 ## (Drift or an error after the intent record, and the intent record's own
 ## failed directory sync, are ``t_addon_review_round5`` cases 4 and 5.)
@@ -40,6 +44,7 @@
 ## ``discard-verify-completion-sig-alone`` (4),
 ## ``discard-completion-sync-error-swallowed`` (5),
 ## ``discard-verify-skips-intent-digest`` (6),
+## ``discard-verify-skips-completion-signature`` (10),
 ## ``discard-completed-objects-present`` (7),
 ## ``discard-verify-reports-intent-objects`` (8, 9).
 ##
@@ -246,5 +251,51 @@ suite "the A11 code review's eighth round: §13 decision 81":
     signer.wipe()
     check verifyDiscardRecord(s.gate.overrideRecord, s.pub).status == dsInvalid
     check verifyExit(s) == 1
+
+  test "10: a completion whose signature does not hold is invalid":
+    let s = scene("completion-sig")
+    removeDir(s.aside)
+    var signer = loadTextSigner(s.key)
+    let genuine = writeDiscardCompletion(s.site, signer, s.gate.overrideRecord,
+      s.gate.overrideRecordText, @[s.aside], @[])
+    signer.wipe()
+    let cpath = completionPathOf(s.gate.overrideRecord)
+    let sigPath = cpath & DiscardRecordSigExt
+    let text = readFile(cpath)
+    let sig = readFile(sigPath)
+    check cpath == genuine.path
+    check verifyExit(s) == 0                 # the genuine pair, as the control
+
+    # One byte changed after signing (the host name; still valid JSON).
+    let at = text.find("\"host\": \"h\"")
+    check at >= 0
+    writeFile(cpath, text[0 ..< at + 9] & "x" & text[at + 10 .. ^1])
+    var v = verifyDiscardRecord(s.gate.overrideRecord, s.pub)
+    checkpoint v.why
+    check v.status == dsInvalid
+    check verifyExit(s) == 1
+    writeFile(cpath, text)
+    check verifyExit(s) == 0
+
+    # An empty signature.
+    writeFile(sigPath, "")
+    v = verifyDiscardRecord(s.gate.overrideRecord, s.pub)
+    checkpoint v.why
+    check v.status == dsInvalid
+    check verifyExit(s) == 1
+
+    # Signed by another key, while the record names the enrolled one.
+    let otherKey = root / "completion-sig" / "other" / "attestation.key"
+    createDir(parentDir(otherKey))
+    discard ensureAttestationKey(otherKey)
+    var other = loadTextSigner(otherKey)
+    writeFile(sigPath, signWith(other, text) & "\n")
+    other.wipe()
+    v = verifyDiscardRecord(s.gate.overrideRecord, s.pub)
+    checkpoint v.why
+    check v.status == dsInvalid
+    check verifyExit(s) == 1
+    writeFile(sigPath, sig)
+    check verifyExit(s) == 0
 
 removeDir(root)

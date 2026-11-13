@@ -931,6 +931,9 @@
 ##                                            its record counts as completed
 ## ``discard-verify-skips-intent-digest``     a completion of another intent
 ##                                            record counts
+## ``discard-verify-skips-completion-signature``  the completion record is
+##                                            parsed, not verified: no
+##                                            signature, key or schema check
 ## ``discard-verify-reports-intent-objects``  the verdict lists the intent's
 ##                                            objects as discarded, whatever
 ##                                            the completion records (kept
@@ -1593,6 +1596,7 @@ const
                           "discard-verify-ignores-completion",
                           "discard-verify-completion-sig-alone",
                           "discard-verify-skips-intent-digest",
+                          "discard-verify-skips-completion-signature",
                           "discard-verify-reports-intent-objects",
                           "discard-completed-despite-errors",
                           "discard-completed-objects-present",

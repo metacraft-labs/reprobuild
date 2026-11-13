@@ -469,7 +469,16 @@ proc verifyDiscardRecord*(path: string; expectedKeyHex: string):
     result.why = "no completion record (" & extractFilename(cpath) & "): " &
       "the discard was authorised and is not known to have completed"
     return
-  let done = readSignedRecord(cpath, DiscardCompletionSchema, key)
+  when mutated("discard-verify-skips-completion-signature"):
+    # The completion is what turns "authorised" into "completed": parsing it
+    # without checking its signature lets anyone who can write the log
+    # directory claim a discard.
+    let done = try: (ok: true, why: "", text: readFile(cpath),
+                     doc: parseJson(readFile(cpath)))
+               except CatchableError as e:
+                 (false, cpath & " is not a record: " & e.msg, "", JsonNode(nil))
+  else:
+    let done = readSignedRecord(cpath, DiscardCompletionSchema, key)
   if not done.ok:
     result.status = dsInvalid
     result.why = "the completion record does not verify: " & done.why
