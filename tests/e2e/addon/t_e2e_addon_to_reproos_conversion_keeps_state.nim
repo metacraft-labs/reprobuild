@@ -503,18 +503,18 @@ const
           "ExecStart=/bin/sh -c 'id -u > /var/lib/a13-r7/%n.ran; exec /bin/sleep infinity'\n",
         enabled = false,
         address = "r7TargetSvc")
-      systemdSystemUnit(name = "eth-r7-sock.socket",
-        content = "[Unit]\nDescription=A13 decision-79 probe: a socket\n" &
-          "Wants=eth-r7-ssvc.service\n\n[Socket]\nListenStream=/run/eth-r7.sock\n" &
-          "Service=eth-r7-ssvc.service\n\n[Install]\nWantedBy=sockets.target\n",
-        address = "r7Socket")
       systemdSystemUnit(name = "eth-r7-ssvc.service",
         content = "[Unit]\nDescription=A13 decision-79 probe: pulled in by a " &
           "socket\n\n[Service]\nProtectSystem=strict\nNoNewPrivileges=yes\n" &
           "User=eth-validator\nGroup=eth-validator\nReadWritePaths=/var/lib/a13-r7\n" &
           "ExecStart=/bin/sh -c 'id -u > /var/lib/a13-r7/%n.ran; exec /bin/sleep infinity'\n",
         enabled = false,
-        address = "r7SocketSvc")"""
+        address = "r7SocketSvc")
+      systemdSystemUnit(name = "eth-r7-sock.socket",
+        content = "[Unit]\nDescription=A13 decision-79 probe: a socket\n" &
+          "Wants=eth-r7-ssvc.service\n\n[Socket]\nListenStream=/run/eth-r7.sock\n" &
+          "Service=eth-r7-ssvc.service\n\n[Install]\nWantedBy=sockets.target\n",
+        address = "r7Socket")"""
   R5Plan = r5Unit("eth-r5-plan.service", "ProtectSystem=strict\n" &
     "NoNewPrivileges=yes\nUser=eth-validator\nGroup=eth-validator\n" &
     "ReadWritePaths=/var/lib/ethereum/validator\n", "r5Plan")
@@ -586,7 +586,48 @@ proc probeWritablePaths(text: string): seq[string] =
     result.add(p)
     i = j
 
+proc socketServiceOrderProblem(resources: string): string =
+  ## A socket probe whose ``Service=`` unit is declared after it, or "".
+  ## The full apply writes the profile's units in its order, and
+  ## ``enable --now`` of a socket whose service unit is not there yet is
+  ## refused by systemd ("Socket service ... not loaded, refusing"; A13
+  ## round 7: the decision-79 socket probe failed so, under no hold).
+  var declared: seq[string]
+  for l in resources.splitLines():
+    let i = l.find("systemdSystemUnit(name = \"")
+    if i < 0: continue
+    let n = l[i + len("systemdSystemUnit(name = \"") .. ^1]
+    declared.add(n[0 ..< n.find('"')])
+  var k = 0
+  while true:
+    k = resources.find("Service=", k)
+    if k < 0: return ""
+    var j = k + len("Service=")
+    var svc = ""
+    while j < resources.len and resources[j] notin {'\\', '"', '\n', ' '}:
+      svc.add(resources[j]); inc j
+    # The socket naming it is the last unit declared before this point.
+    var owner = ""
+    for u in declared:
+      let at = resources.find("systemdSystemUnit(name = \"" & u & "\"")
+      if at >= 0 and at < k: owner = u
+    if owner.endsWith(".socket"):
+      let svcAt = resources.find("systemdSystemUnit(name = \"" & svc & "\"")
+      let sockAt = resources.find("systemdSystemUnit(name = \"" & owner & "\"")
+      if svcAt < 0 or svcAt > sockAt:
+        return owner & " names Service=" & svc & ", declared after it or not at all"
+    k = j
+
 static:
+  # A socket probe's service comes first (the apply's order), with a
+  # negative control.
+  doAssert socketServiceOrderProblem(R7Resources) == "",
+    socketServiceOrderProblem(R7Resources)
+  doAssert socketServiceOrderProblem(
+    "      systemdSystemUnit(name = \"x.socket\",\n" &
+    "        content = \"[Socket]\\nService=x-svc.service\\n\")\n" &
+    "      systemdSystemUnit(name = \"x-svc.service\",\n" &
+    "        content = \"[Service]\\nExecStart=/bin/true\\n\")\n") != ""
   # Every probe unit's writable path is one the gate creates, or the carried
   # directory itself: checked when the gate compiles.
   var all = PathReachProfile & R4Host & R5Plan & R5Resources & R6Resources &
@@ -629,6 +670,75 @@ proc unitRan(g: Guest; unit: string; marker: string): (bool, JsonNode) =
       ".d 2>&1; date --iso-8601=ns; echo '--- audit'; grep -a " & unit &
       " /var/lib/repro/system/generations/" & gen & "/log/apply.log 2>&1 | " &
       "tail -10").stdout
+
+proc unitDiagnosis(g: Guest; unit: string): JsonNode =
+  ## How systemd sees ``unit`` now, kept in the record of every run: its
+  ## status, this boot's journal, the properties a start depends on, and
+  ## every hold drop-in in force for it (A13 round 7: the decision-79
+  ## socket's start failed under the hold with no journal to say why).
+  %*{
+    "status": g.exec("systemctl status --no-pager -l " & unit & " 2>&1 | tail -40").stdout,
+    "journal": g.exec("journalctl -u " & unit & " -b --no-pager -o short-monotonic 2>&1 | tail -80").stdout,
+    "show": g.exec("systemctl show -p Result,ActiveState,SubState,ConditionResult," &
+      "Requires,Wants,After,Triggers,TriggeredBy " & unit & " 2>&1").stdout,
+    "holds": g.exec("for d in /run/systemd/system/" & unit & ".d /etc/systemd/system/" &
+      unit & ".d; do [ -d $d ] || continue; for f in $d/*.conf; do echo \"== $f\"; " &
+      "cat $f; done; done 2>&1").stdout}
+
+proc managerStartJobsDone*(verbose: string): int =
+  ## How many start jobs systemd (PID 1) completed for a unit, from
+  ## ``journalctl -o verbose _PID=1 UNIT=<unit>``: the entries whose fields
+  ## carry ``JOB_TYPE=start`` and ``JOB_RESULT=done``. A line the service
+  ## itself writes ("Started ...") is not the manager's and is not counted
+  ## (A13 round 7: counting every "Started" line of ``journalctl -u``
+  ## counted a line of the validator's own output as a second start).
+  var start, done = false
+  for l in verbose.splitLines():
+    if l.len > 0 and l[0] != ' ':
+      # An entry's header line: the previous entry is complete.
+      if start and done: inc result
+      start = false
+      done = false
+    let t = l.strip()
+    if t == "JOB_TYPE=start": start = true
+    if t == "JOB_RESULT=done": done = true
+  if start and done: inc result
+
+const
+  CapturedValidatorStart = """
+Fri 2026-11-13 03:25:39.519523 UTC [s=23bf;i=efd]
+    JOB_TYPE=start
+    MESSAGE=Starting eth-validator.service - Ethereum validator client (reference activity)...
+    JOB_ID=3106
+    INVOCATION_ID=55feea00d759497483a46cda9c50578a
+Fri 2026-11-13 03:25:39.603467 UTC [s=23bf;i=efe]
+    JOB_TYPE=start
+    JOB_RESULT=done
+    JOB_ID=3106
+    INVOCATION_ID=55feea00d759497483a46cda9c50578a
+    MESSAGE=Started eth-validator.service - Ethereum validator client (reference activity).
+"""
+    ## Captured, debian-13 (A13 round 7): one start job of the validator.
+
+static:
+  doAssert managerStartJobsDone(CapturedValidatorStart) == 1
+  doAssert managerStartJobsDone(CapturedValidatorStart & CapturedValidatorStart) == 2
+  # The service's own output is not the manager's.
+  doAssert managerStartJobsDone("Fri 2026-11-13 03:26:00 UTC [x]\n" &
+    "    MESSAGE=Started beacon node connection\n") == 0
+
+proc unitStarts(g: Guest; unit: string): JsonNode =
+  ## Every message systemd (PID 1) logged about ``unit`` this boot, with the
+  ## job and the invocation each belongs to (``-o verbose``'s JOB_ID,
+  ## JOB_TYPE, JOB_RESULT, INVOCATION_ID), so each start can be attributed
+  ## to a job; and the manager's own journal around them.
+  %*{
+    "verbose": g.exec("journalctl -b --no-pager -o verbose _PID=1 UNIT=" & unit &
+      " 2>&1 | grep -E '^[A-Z][a-z]{2} |^    (MESSAGE|JOB_ID|JOB_TYPE|JOB_RESULT|" &
+      "INVOCATION_ID|_SOURCE_MONOTONIC_TIMESTAMP)=' | tail -200").stdout,
+    "manager": g.exec("journalctl -b --no-pager -o short-monotonic _PID=1 2>&1 | " &
+      "grep -E 'eth-|repro-|a13r|Starting|Started|Stopp|Failed|Dependency' | " &
+      "tail -400").stdout}
 
 proc hexKey(k: openArray[byte]): string =
   for b in k: result.add(toHex(int(b), 2).toLowerAscii())
@@ -1287,6 +1397,13 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
     # under the engine builds ``reissue-skips-targets`` and
     # ``reissue-skips-sockets``, each on its own step.
     record["decision79"] = newJObject()
+    # Kept in every run (A13 round 7): how systemd saw the decision-79 units
+    # and the validator's starts right after the full apply.
+    record["decision79Diagnosis"] = %*{
+      "socket": nw.unitDiagnosis("eth-r7-sock.socket"),
+      "socketService": nw.unitDiagnosis(R7SocketSvc),
+      "targetService": nw.unitDiagnosis(R7TargetSvc),
+      "validatorStarts": nw.unitStarts(DefaultValidatorUnit)}
     for (label, svc) in [("target", R7TargetSvc), ("socket", R7SocketSvc)]:
       let active = nw.exec("systemctl is-active " & svc).stdout.strip()
       let (ran, ev) = nw.unitRan(svc, R7MarkerDir & "/" & svc & ".ran")
@@ -1344,8 +1461,10 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
     # signed a conflicting message.
     let firstStart = nw.monotonicOf(DefaultValidatorUnit,
                                     "ExecMainStartTimestampMonotonic")
-    let starts = nw.exec("journalctl -b -u " & DefaultValidatorUnit &
-      " --no-pager | grep -c 'Started' || true").stdout.strip()
+    # The manager's completed start jobs this boot, not every "Started"
+    # line of the unit's journal: the validator's own output has them too.
+    let starts = $managerStartJobsDone(nw.exec("journalctl -b --no-pager " &
+      "-o verbose _PID=1 UNIT=" & DefaultValidatorUnit & " 2>&1").stdout)
     step("on the new host the validator first started after the restore",
          restoredDone > 0 and firstStart > restoredDone and starts == "1",
          "restore done " & $restoredDone & ", validator start " & $firstStart &
