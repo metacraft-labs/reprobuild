@@ -13,9 +13,17 @@
 #                     a workspace binary a staticExec command executed
 #   listing <sha256> <dir>
 #                     a directory the compiler or a staticExec command
-#                     listed (getdents), with the sha256 of its entry
-#                     names, sorted bytewise and joined by newlines: a
-#                     changed listing refuses the binary (§13 decision 80)
+#                     listed (getdents), with the sha256 of the names of
+#                     its entries that can change what the compiler
+#                     resolves (Nim sources, .nimble/.nims, nim.cfg,
+#                     <project>.nim.cfg, nimble.paths, subdirectories;
+#                     never .nimcache, build, .git, result), sorted
+#                     bytewise and joined by newlines: a changed listing
+#                     refuses the binary (§13 decisions 80, 111, 123)
+#   listing-filter <name>
+#                     which entries the digests count ("resolution"; a
+#                     falsifier run writes another), so fresh_binary
+#                     digests the same way
 #
 # Each path is written with every backslash, control byte (a newline) and
 # non-ASCII byte as \xNN, so a path is always one line; fresh_binary
@@ -80,7 +88,12 @@
 # suffix-is-failure (a successful line with text after its fd path, such
 # as strace's `(deleted)`, is skipped as a failed syscall),
 # deleted-is-unparsed (an open strace prints `(deleted)` -- an O_TMPFILE
-# file, say -- is refused as unparseable rather than read). A file
+# file, say -- is refused as unparseable rather than read),
+# listing-digests-every-entry (round 8's digest of every name),
+# listing-skips-subdirectories, listing-skips-project-cfg and
+# listing-skips-nim-cfg (decision 123's rules, one each), no-parent-listings
+# (the listings of the entry's parent directories, where a parent nim.cfg
+# sits, not recorded). A file
 # <build>/nimcache/<name>/write-helper-deps.mutation selects one too, for
 # a run inside a graph edge, whose environment the engine sets; it is
 # read only when present.
@@ -144,7 +157,7 @@ else
         --nimcache:"${cache}" --out:"${cache}/${name}" "${entry}"
   fi
 fi
-# The compiler's search path, for the listing digests (§13 decision 86):
+# The compiler's search path, for the listing digests (§13 decision 111):
 # `nim dump` prints its configuration as JSON on stdout, after whatever
 # config.nims printed.
 nim dump --dump.format:json --hints:off --warnings:off "$@" "${entry}" \
@@ -232,16 +245,40 @@ if dump is None:
 search = sorted({os.path.normpath(p) for p in dump.get("lib_paths", []) + dump.get("lazyPaths", [])})
 search_set = set(search)
 
+# The listing filter this list is written with; fresh_binary digests the
+# way the list's `listing-filter` line says. Only falsifiers write another.
+listing_filter = {
+    "listing-digests-every-entry": "every-entry",        # round 8
+    "listing-skips-subdirectories": "resolution-no-subdirs",
+    "listing-skips-project-cfg": "resolution-no-project-cfg",
+    "listing-skips-nim-cfg": "resolution-no-nim-cfg",
+}.get(mutation, "resolution")
+# Entries that never change what the compiler resolves, whatever they are
+# (§13 decision 123): build output, VCS metadata, a nix result link.
+never_counted = {b".nimcache", b"build", b".git", b"result"}
+
 def relevant(d, name):
-    # §13 decision 86: only an entry that can change what the compiler
-    # resolves counts in a listing -- a Nim source, a .nimble or .nims
-    # file, or a directory that is itself on the search path. A .nimcache/
-    # or build/ appearing in a listed directory changes nothing.
-    if mutation == "listing-digests-every-entry":
+    # §13 decisions 111 and 123: an entry counts in a listing when it can
+    # change what the compiler resolves -- a Nim source, a .nimble or .nims
+    # file, a Nim configuration file (nim.cfg, <project>.nim.cfg), a
+    # nimble.paths, or a subdirectory (a package directory that shadows an
+    # import is one) -- except the fixed list above.
+    if listing_filter == "every-entry":
         return True           # FALSIFIER: round 8's digest of every name
-    if name.endswith((b".nim", b".nimble", b".nims")):
+    if name in never_counted:
+        return False
+    if name.endswith((b".nim", b".nimble", b".nims")) or name == b"nimble.paths":
         return True
-    return os.path.normpath(os.path.join(d, os.fsdecode(name))) in search_set
+    if name == b"nim.cfg":
+        return listing_filter != "resolution-no-nim-cfg"
+    if name.endswith(b".nim.cfg"):
+        return listing_filter != "resolution-no-project-cfg"
+    full = os.path.normpath(os.path.join(d, os.fsdecode(name)))
+    if full in search_set:
+        return True
+    if os.path.isdir(full):
+        return listing_filter != "resolution-no-subdirs"
+    return False
 
 def listing_digest(d):
     names = sorted(n for n in os.listdir(os.fsencode(d)) if relevant(d, n))
@@ -280,6 +317,10 @@ def keep(kind, p):
     if kind == "listing":
         if mutation == "no-listing":
             return            # FALSIFIER
+        if mutation == "no-parent-listings" and \
+                os.path.dirname(entry).startswith(p.rstrip("/") + "/"):
+            return            # FALSIFIER: a parent of the entry's directory
+                              # (where a parent nim.cfg sits) not recorded
         if p not in [d for d, _ in listings]:
             listings.append((p, listing_digest(p)))
         return
@@ -474,13 +515,12 @@ def enc(p):
             out.append(chr(b))
     return "".join(out)
 lines = ["binary-sha256 " + digest]
-# The search path the listing digests were filtered by (decision 86):
+# The search path the listing digests were filtered by (decision 111):
 # fresh_binary filters a listing the same way.
 lines += ["searchpath " + enc(p) for p in search]
 # Which entries the listing digests cover. fresh_binary digests a listing
 # the way the list says; only the falsifier writes "every-entry".
-lines.append("listing-filter " + ("every-entry" if mutation == "listing-digests-every-entry"
-                                  else "resolution"))
+lines.append("listing-filter " + listing_filter)
 lines += ["module " + enc(p) for p in modules]
 lines += ["csource " + enc(p) for p in csources]
 seen = set(modules) | set(csources)

@@ -44,7 +44,7 @@
 ##     listed, and a newer one refused.
 ## 20. A directory a ``staticExec`` command lists (``getdents``): its
 ##     Nim entries are recorded, and a new ``.nim`` entry refuses the
-##     binary; a new non-Nim entry does not (§13 decisions 80 and 86).
+##     binary; a new non-Nim entry does not (§13 decisions 80 and 111).
 ## 21. A traced workspace path that is no longer a file when the list is
 ##     written fails the writer: no list, never a silent drop.
 ## 22. A strace that prints a format the writer does not parse (a wrapper
@@ -55,10 +55,10 @@
 ## 23. A strace that traces none of the writer's syscalls (a wrapper that
 ##     replaces ``-e trace=``): the positive control -- the entry module's
 ##     own ``open`` -- is missing, so the writer fails and writes no list.
-## 24. (round 9, decision 86) A ``.nimcache/`` directory, another directory,
+## 24. (round 9, decision 111) A ``.nimcache/`` directory, another directory,
 ##     a ``result`` link and a non-source file added to directories the
 ##     compiler listed (the tree root among them) are not a change.
-## 25. (round 9, decision 86) A new ``.nim`` file in a directory the
+## 25. (round 9, decision 111) A new ``.nim`` file in a directory the
 ##     compiler searched (the tree root, the app's directory) is refused.
 ## 26-27. (round 9) A file read under a name with a trailing, or a
 ##     leading, space is checked under that name, not under the decoy of
@@ -76,6 +76,12 @@
 ##     ends in a space is recorded and checked under that name: a new
 ##     ``.nim`` entry in it is refused, and one in the decoy directory of
 ##     the trimmed name beside it is not.
+##
+## 31-34. (round 10, §13 decision 123) In a tree whose app imports
+##     ``pkgx/util`` through ``--path:vendor``: a package directory
+##     ``apps/foo/pkgx`` that shadows the import, ``apps/foo/foo.nim.cfg``,
+##     ``apps/foo/nim.cfg`` and a parent ``apps/nim.cfg`` (each adding a
+##     define) are each refused, and accepted again once removed.
 ##
 ## Falsifying builds: ``stale-helper-accepted`` (cases 2-5 and 8-10 red),
 ## ``fresh-skips-included`` (case 4), ``fresh-skips-outside-tree`` (case
@@ -95,7 +101,12 @@
 ## space sits after the path's "/", so no line strip reaches it, and it is
 ## a positive case only; case 30: the listing written for the trimmed
 ## directory name), ``suffix-is-failure`` (case 28; ``accept-unparsed``
-## turns it red too), ``deleted-is-unparsed`` (case 29).
+## turns it red too), ``deleted-is-unparsed`` (case 29),
+## ``listing-skips-subdirectories`` (case 31), ``listing-skips-project-cfg``
+## (case 32), ``listing-skips-nim-cfg`` (cases 33 and 34) and
+## ``no-parent-listings`` (case 34, the parent ``apps/nim.cfg``; it also
+## turns case 25's tree-root ``.nim`` red, and case 24, which checks that
+## the tree root was listed).
 ##
 ## Cases 22, 23 and 28 run the real strace behind a wrapper script named by
 ## ``REPRO_STRACE``. The wrapper is justified: it is how the writer's
@@ -363,7 +374,7 @@ suite "a helper binary is used only when built from the tree under test":
   test "20: a directory a staticExec command lists is checked by its Nim entries":
     build()
     check refusal() == ""
-    # §13 decision 86: a name that cannot change what the compiler
+    # §13 decision 111: a name that cannot change what the compiler
     # resolves does not count, even in a listing a command made.
     writeFile(listDir / "two.txt", "a new entry\n")
     check refusal() == ""
@@ -434,8 +445,8 @@ suite "a helper binary is used only when built from the tree under test":
     check not fileExists(tree / "build" / "nimcache" / "foo-helper" / "foo-helper.deps")
     check "has no dependency list" in refusal()
 
-  test "24: a .nimcache, a build directory or a result link in a listed directory is not a change":
-    # §13 decision 86: what a plain `nim c` (config.nims's default
+  test "24: a .nimcache, a .git, a build directory or a result link in a listed directory is not a change":
+    # §13 decision 111: what a plain `nim c` (config.nims's default
     # <checkout>/.nimcache), `just build` or `nix build` leaves in the
     # tree root, a directory the compiler's package search lists.
     build()
@@ -446,7 +457,7 @@ suite "a helper binary is used only when built from the tree under test":
     check listed.anyIt(it.dir == fooDir)
     createDir(tree / ".nimcache" / "foo")
     writeFile(tree / ".nimcache" / "foo" / "x.c", "/* generated */\n")
-    createDir(tree / "out-dir")
+    createDir(tree / ".git" / "objects")
     createSymlink(tree / "build", tree / "result")
     writeFile(fooDir / "notes.md", "not a source\n")
     let why = refusal()
@@ -547,6 +558,52 @@ suite "a helper binary is used only when built from the tree under test":
     # The decoy is not what was listed: a new entry there changes nothing.
     writeFile(spaceDirDecoy / "two.nim", "discard\n")
     check refusal() == ""
+
+  # ---- round 10, §13 decision 123: what else changes what the compiler
+  # resolves. Its own tree: an app that imports ``pkgx/util`` through
+  # ``--path:vendor`` and reads a define.
+  let rt = base / "tree-resolve"
+  let rApp = rt / "apps" / "foo" / "foo.nim"
+  let rBin = rt / "build" / "bin" / "rfoo"
+  proc buildResolve() =
+    createDir(rt / "vendor" / "pkgx")
+    createDir(parentDir(rApp))
+    writeFile(rt / "vendor" / "pkgx" / "util.nim", "proc which*(): string = \"vendor\"\n")
+    writeFile(rApp, "import pkgx/util\nwhen defined(probeFlag): echo \"flag\"\necho which()\n")
+    for p in [rApp, rt / "vendor" / "pkgx" / "util.nim"]:
+      setLastModificationTime(p, getTime() - initDuration(seconds = 60))
+    let (o1, c1) = execCmdEx(quoteShellCommand(@["nim", "c", "--hints:off",
+      "--warnings:off", "--path:" & rt / "vendor",
+      "--nimcache:" & rt / "build" / "nimcache" / "rfoo", "--out:" & rBin, rApp]))
+    doAssert c1 == 0, o1
+    let (o2, c2) = execCmdEx(quoteShellCommand(@["bash",
+      RepoRoot / "scripts" / "write_helper_deps.sh", "rfoo", rApp,
+      "--path:" & rt / "vendor"]), workingDir = rt)
+    doAssert c2 == 0, o2
+  proc rRefusal(): string =
+    try:
+      discard freshRepoBinary(rt, "rfoo")
+      ""
+    except StaleHelperBinary as e:
+      e.msg
+
+  for (n, label, rel, body) in [
+      (31, "a package directory that shadows an import", "apps/foo/pkgx/util.nim",
+       "proc which*(): string = \"local shadow\"\n"),
+      (32, "a <project>.nim.cfg", "apps/foo/foo.nim.cfg", "-d:probeFlag\n"),
+      (33, "a nim.cfg beside the project", "apps/foo/nim.cfg", "-d:probeFlag\n"),
+      (34, "a nim.cfg in a parent directory", "apps/nim.cfg", "-d:probeFlag\n")]:
+    test $n & ": " & label & " added after the build is refused":
+      buildResolve()
+      check rRefusal() == ""
+      createDir(parentDir(rt / rel))
+      writeFile(rt / rel, body)
+      let why = rRefusal()
+      checkpoint why
+      check "that has changed since" in why
+      removeFile(rt / rel)
+      if n == 31: removeDir(rt / "apps" / "foo" / "pkgx")
+      check rRefusal() == ""
 
   test "7: no binary, or no dependency list, is refused":
     build()

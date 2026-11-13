@@ -946,7 +946,7 @@
 ## ``discard-completion-held-by-cleanup-error`` a cleanup failure after
 ##                                            the evidence is gone holds
 ##                                            the completion back (round 8;
-##                                            decision 88 withdraws it)
+##                                            decision 113 withdraws it)
 ## ``discard-completed-objects-present``      the completion is written while
 ##                                            a discarded object is still in
 ##                                            place
@@ -957,9 +957,12 @@
 ## ``discard-completion-key-read-late``       the completion is signed from
 ##                                            the key file, which the removal
 ##                                            took
+## ``finish-trusts-kept-list``                finishDiscard counts a listed
+##                                            object as kept without
+##                                            --keep-store
 ## ``discard-completion-skips-sync``          the completion is written
 ##                                            without making the removal
-##                                            durable (decision 87)
+##                                            durable (decision 112)
 ## ``intent-overwrites-existing``             a discard record is written
 ##                                            over one of the same name
 ## ``discard-completion-sync-error-swallowed`` a completion record whose
@@ -1619,6 +1622,7 @@ const
                           "discard-verify-reports-intent-objects",
                           "discard-completion-held-by-cleanup-error",
                           "discard-completion-skips-sync",
+                          "finish-trusts-kept-list",
                           "intent-overwrites-existing",
                           "discard-completed-objects-present",
                           "discard-failed-removal-counted-as-kept",

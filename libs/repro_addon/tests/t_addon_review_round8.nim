@@ -25,7 +25,7 @@
 ## 7. A pending object still in place at the end of an otherwise clean run:
 ##    no completion (exit 3).
 ##
-## Round 9 (reprobuild-pm issues 2026-11-13-*; §13 decisions 87, 88):
+## Round 9 (reprobuild-pm issues 2026-11-13-*; §13 decisions 112, 113):
 ##
 ## 8. Under ``--keep-store`` the object kept with the store is listed as
 ##    kept, not discarded, and the command exits 4.
@@ -40,6 +40,12 @@
 ## 12. A second discard in the same second takes a new name and never
 ##    writes over an earlier record; the writer itself refuses a taken
 ##    name.
+## 13. (round 10) An aside whose removal failed, without ``--keep-store``,
+##     is classified as neither removed nor kept, and its discard is not
+##     completed: exit 3. With ``--keep-store`` it is kept.
+## 14. (round 10) ``finishDiscard`` itself: an object that the kept list
+##     names, without ``--keep-store``, still holds the completion back
+##     (exit 3).
 ##
 ## (Drift or an error after the intent record, and the intent record's own
 ## failed directory sync, are ``t_addon_review_round5`` cases 4 and 5.)
@@ -57,7 +63,8 @@
 ## ``discard-verify-reports-intent-objects`` (8, 9),
 ## ``discard-completion-skips-sync`` (11),
 ## ``intent-overwrites-existing`` (12),
-## ``discard-failed-removal-counted-as-kept`` (13).
+## ``discard-failed-removal-counted-as-kept`` (13),
+## ``finish-trusts-kept-list`` (14).
 ##
 ## Mocks: ``ship`` is a stub answering "not acknowledged" -- the sink's
 ## refusal is held against a real sink by ``t_addon_review_round4`` case 2;
@@ -67,7 +74,8 @@
 ## completion's signature and its record and nothing cleans up after it
 ## (4, which calls ``writeDiscardCompletion`` directly). Case 5's writer
 ## writes the file as the real one does and then raises, as the real one
-## does when the directory's fsync fails after the rename (a failure of the
+## does when the directory's fsync fails after the link(2) that names the
+## file (a failure of the
 ## file system cannot be produced on demand). Nothing else.
 
 import std/[json, os, sequtils, strutils, times, unittest]
@@ -237,7 +245,7 @@ suite "the A11 code review's eighth round: §13 decision 81":
     check not fileExists(completionPathOf(s.gate.overrideRecord))
     check verifyExit(s) == 3
 
-  # ---- round 9 (reprobuild-pm issues 2026-11-13-*; §13 decisions 87, 88)
+  # ---- round 9 (reprobuild-pm issues 2026-11-13-*; §13 decisions 112, 113)
 
   test "8: objects kept with the store are not reported as discarded":
     # --keep-store: the object stays on the host, and the completion says
@@ -247,6 +255,7 @@ suite "the A11 code review's eighth round: §13 decision 81":
     removeFile(s.key)
     var r = resultOf(s)
     r.keptEvidence = @[s.aside]           # what runAddonUninstall sets
+    r.keepStore = true                    # ... and only under --keep-store
     finishDiscard(r, s.site, signer, s.gate.pending)
     signer.wipe()
     checkpoint r.errors.join("\n")
@@ -260,6 +269,9 @@ suite "the A11 code review's eighth round: §13 decision 81":
     let text = renderCompletedDiscard(v.keyHex, v.removed, v.kept)
     check "0 object(s) discarded unshipped" in text
     check "1 object(s) kept with the store" in text
+    # Round 10: the verdict names the kept objects first.
+    check text.startsWith("completed with 1 object(s) kept with the store (--keep-store)")
+    check not text.startsWith("completed:")
     check verifyExit(s) == 4
 
   test "13: an aside whose removal failed is not kept with the store":
@@ -404,5 +416,28 @@ suite "the A11 code review's eighth round: §13 decision 81":
     expect RecordExistsError:
       exclusiveRecordWriter(earlier[0], "over it\n")
     check readFile(earlier[0]) == "an earlier intent record\n"
+
+
+  # ---- round 10 (reprobuild-pm issue 2026-11-13-discard-completion-
+  # records-an-object-a-failed-store-removal-left-as-kept-with-the-store)
+
+  test "14: an object listed as kept without --keep-store is not completed":
+    # The result runAddonUninstall left before round 10 when removing
+    # /repro raised: the error recorded and the surviving aside in the
+    # kept list. Without --keep-store it was not kept: no completion,
+    # "authorised, not completed".
+    let s = scene("failed-removal")
+    var signer = loadTextSigner(s.key)
+    var r = resultOf(s)
+    r.errors.add("/repro: removal failed part-way")
+    r.keptEvidence = @[s.aside]
+    r.keepStore = false
+    finishDiscard(r, s.site, signer, s.gate.pending)
+    signer.wipe()
+    check dirExists(s.aside)
+    check r.completionRecord.len == 0
+    check not fileExists(completionPathOf(s.gate.overrideRecord))
+    check verifyDiscardRecord(s.gate.overrideRecord, s.pub).status == dsAuthorised
+    check verifyExit(s) == 3
 
 removeDir(root)

@@ -93,6 +93,16 @@ proc fileSha256(path: string): string =
     ctx.update(buf.toOpenArray(0, n - 1))
   toLowerAscii($ctx.finish())
 
+const ListingFilters = ["resolution", "every-entry", "resolution-no-subdirs",
+                        "resolution-no-project-cfg", "resolution-no-nim-cfg"]
+  ## The listing filters a list may name (``listing-filter``). Only
+  ## ``resolution`` is written outside a falsifier run of
+  ## ``scripts/write_helper_deps.sh``; each other one drops one rule, so
+  ## the case that rule holds goes red.
+const NeverCounted = [".nimcache", "build", ".git", "result"]
+  ## §13 decision 123: entries that never change what the compiler
+  ## resolves.
+
 proc decodeListPath(list, encoded, name: string): string =
   ## A path as ``scripts/write_helper_deps.sh`` writes it: every backslash,
   ## control byte and non-ASCII byte as ``\xNN``, so that a name with a
@@ -121,7 +131,7 @@ proc decodeListPath(list, encoded, name: string): string =
 
 proc readHelperList(repoRoot, name: string):
     tuple[binarySha: string; deps: seq[tuple[kind, path: string]];
-          searchPath: seq[string]; everyEntry: bool] =
+          searchPath: seq[string]; listingFilter: string] =
   ## The list ``scripts/write_helper_deps.sh`` wrote for ``name``: the
   ## sha256 of the binary it describes, and every source with its kind
   ## (``module``, ``csource``, ``header``, ``read``). Raises
@@ -146,8 +156,8 @@ proc readHelperList(repoRoot, name: string):
       result.deps.add((kind, decodeListPath(list, value, name)))
     elif kind == "searchpath":
       result.searchPath.add(decodeListPath(list, value, name))
-    elif kind == "listing-filter" and value in ["resolution", "every-entry"]:
-      result.everyEntry = value == "every-entry"
+    elif kind == "listing-filter" and value in ListingFilters:
+      result.listingFilter = value
     elif kind == "listing" and value.len > 65 and value[64] == ' ':
       result.deps.add((kind, value[0 ..< 65] &
         decodeListPath(list, value[65 .. ^1], name)))
@@ -158,25 +168,36 @@ proc readHelperList(repoRoot, name: string):
     raise newException(StaleHelperBinary, list & " names no binary-sha256: " &
       "it is not tied to a build; " & helperRebuildHint(name))
 
-proc relevantEntry(dir, name: string; searchPath: HashSet[string]): bool =
-  ## §13 decision 86: only an entry that can change what the compiler
-  ## resolves counts -- a ``.nim``, ``.nimble`` or ``.nims`` file, or a
-  ## directory that is itself on the search path. Kept in step with
-  ## ``relevant`` in ``scripts/write_helper_deps.sh``.
-  name.endsWith(".nim") or name.endsWith(".nimble") or
-    name.endsWith(".nims") or normalizedPath(dir / name) in searchPath
+proc relevantEntry(dir, name: string; searchPath: HashSet[string];
+                   filter = "resolution"): bool =
+  ## §13 decisions 111 and 123: an entry counts when it can change what the
+  ## compiler resolves -- a ``.nim``, ``.nimble`` or ``.nims`` file, a Nim
+  ## configuration file (``nim.cfg``, ``<project>.nim.cfg``), a
+  ## ``nimble.paths``, or a subdirectory -- except ``NeverCounted``. Kept
+  ## in step with ``relevant`` in ``scripts/write_helper_deps.sh``.
+  if filter == "every-entry": return true
+  if name in NeverCounted: return false
+  if name.endsWith(".nim") or name.endsWith(".nimble") or
+      name.endsWith(".nims") or name == "nimble.paths":
+    return true
+  if name == "nim.cfg": return filter != "resolution-no-nim-cfg"
+  if name.endsWith(".nim.cfg"): return filter != "resolution-no-project-cfg"
+  let full = normalizedPath(dir / name)
+  if full in searchPath: return true
+  if dirExists(full): return filter != "resolution-no-subdirs"
+  false
 
 proc listingDigest*(dir: string; searchPath: openArray[string] = [];
-                    everyEntry = false): string =
+                    filter = "resolution"): string =
   ## The sha256 of a directory's relevant entry names (``relevantEntry``),
   ## sorted bytewise and joined by newlines -- what
   ## ``scripts/write_helper_deps.sh`` records for a directory the compiler
-  ## listed (§13 decisions 80 and 86).
+  ## listed (§13 decisions 80 and 111).
   var sp = initHashSet[string]()
   for p in searchPath: sp.incl(normalizedPath(p))
   var names: seq[string]
   for kind, path in walkDir(dir, relative = true):
-    if everyEntry or relevantEntry(dir, path, sp):
+    if relevantEntry(dir, path, sp, filter):
       names.add(path)
   names.sort(system.cmp[string])
   var ctx: sha256
@@ -187,7 +208,7 @@ proc listingDigest*(dir: string; searchPath: openArray[string] = [];
   toLowerAscii($ctx.finish())
 
 proc helperSearchPath*(repoRoot, name: string): seq[string] =
-  ## The compiler's search path the list recorded (decision 86).
+  ## The compiler's search path the list recorded (decision 111).
   readHelperList(repoRoot, name).searchPath
 
 proc helperListings*(repoRoot, name: string): seq[tuple[dir, digest: string]] =
@@ -245,12 +266,13 @@ proc freshRepoBinary*(repoRoot, name: string): string =
   # config.nims) must still list the same entries (§13 decision 80).
   when FreshMutation != "fresh-ignores-listings":
     let searchPath = helperSearchPath(repoRoot, name)
-    let everyEntry = readHelperList(repoRoot, name).everyEntry
+    var filter = readHelperList(repoRoot, name).listingFilter
+    if filter.len == 0: filter = "resolution"
     for (dir, digest) in helperListings(repoRoot, name):
       if not dirExists(dir):
         raise newException(StaleHelperBinary, result & " was built after " &
           "listing " & dir & ", which no longer exists; " & helperRebuildHint(name))
-      if listingDigest(dir, searchPath, everyEntry) != digest:
+      if listingDigest(dir, searchPath, filter) != digest:
         raise newException(StaleHelperBinary, result & " was built from a " &
           "listing of " & dir & " that has changed since; " &
           helperRebuildHint(name))
