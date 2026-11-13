@@ -1569,8 +1569,7 @@ proc recordCreatedDirs*(stateDir, unit: string;
     when mutated("created-dirs-by-path"):
       t[path] = c
     else:
-      if now.exists and now.btime != 0 and now.dev == c.dev and now.ino == c.ino and
-          now.btime == c.btime:
+      if sameIdentity(c, now):
         t[path] = c
   for (path, u) in pending:
     when not mutated("created-dirs-per-step"):
@@ -1630,7 +1629,7 @@ proc recordStartedSince*(stateDir: string;
       let c = t[path]
       # Kept while it is still that directory; a stale entry (the unit's
       # restart made it again) is replaced.
-      same = c.dev == now.dev and c.ino == now.ino and c.btime == now.btime
+      same = sameIdentity(c, now)
     var best = ""
     var bestId = ""
     when mutated("start-step-records-first-unit"):

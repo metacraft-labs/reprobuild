@@ -799,9 +799,14 @@ proc birthTimeOf*(path: string; follow = true): int64 =
   if not ok or (b.mask and StatxBtime) == 0: return 0
   b.btime.tvSec * 1_000_000_000'i64 + int64(b.btime.tvNsec)
 
-proc sameIdentity(c: CreatedDir; now: PathIdentity): bool =
+proc sameIdentity*(c: CreatedDir; now: PathIdentity): bool =
   ## The recorded directory is the one at the path now: same device,
-  ## inode and birth time, the birth time known (§13 decision 76).
+  ## inode and birth time, the birth time known (§13 decision 76). The one
+  ## comparison of a record with a path's identity: the effective check
+  ## (``createdForUnit``, ``startMayCreate``) and the record's own upkeep
+  ## (``addon_apply.recordCreatedDirs``, ``recordStartedSince``) all call
+  ## it, so the falsifier below reaches every one of them (issue
+  ## 2026-11-13-floor-decision-76-birth-time-is-never-tested-against-a-reused-inode).
   when mutated("same-identity-ignores-btime"):
     # Falsifying build: both birth times known, but not compared, so a
     # reused inode passes (A9 review round 12, finding 7).
