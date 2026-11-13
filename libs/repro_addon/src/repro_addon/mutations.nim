@@ -1331,6 +1331,9 @@ const
                           # a revert refused by its own floor check,
                           # leaving the host pending.
                           "revert-refuses-on-floor",
+                          # the start step records a template's
+                          # directory for its observation instance.
+                          "start-step-records-first-unit",
                           # A13: a state backup or restore runs while a
                           # unit of the set may run.
                           "state-units-not-checked",

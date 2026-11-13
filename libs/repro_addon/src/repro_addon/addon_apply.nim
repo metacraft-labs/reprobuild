@@ -1574,7 +1574,17 @@ proc recordStartedSince*(stateDir: string;
   when mutated("created-dirs-ignored"): return
   var t = readCreatedDirs(stateDir)
   var changed = false
+  # One entry per path. A template's directory is pending for its
+  # observation instance, which never runs, and for each instance the
+  # generation names; it is recorded for an instance that has a run
+  # (an InvocationID), never for the observation instance while one does
+  # (A9 review round 12, finding 4).
+  var order: seq[string]
+  var units = initTable[string, seq[string]]()
   for (path, u) in pending:
+    if path notin units: order.add(path)
+    units.mgetOrPut(path, @[]).add(u)
+  for path in order:
     let now = identityOf(path)
     if not now.exists or now.btime == 0: continue
     if path in t:
@@ -1582,7 +1592,22 @@ proc recordStartedSince*(stateDir: string;
       # Kept while it is still that directory; a stale entry (the unit's
       # restart made it again) is replaced.
       if c.dev == now.dev and c.ino == now.ino and c.btime == now.btime: continue
-    t[path] = entryOf(u, now, invocationOf(u).id)
+    var best = ""
+    var bestId = ""
+    when mutated("start-step-records-first-unit"):
+      # Falsifying build: round 12's first cut, the first pending unit
+      # (the observation instance, for a template).
+      best = units[path][0]
+      bestId = invocationOf(best).id
+    for u in units[path]:
+      when mutated("start-step-records-first-unit"): break
+      let id = invocationOf(u).id
+      if best.len == 0 or (bestId.len == 0 and id.len > 0) or
+          (isObservationInstance(best) and not isObservationInstance(u) and
+           (id.len > 0 or bestId.len == 0)):
+        best = u
+        bestId = id
+    t[path] = entryOf(best, now, bestId)
     changed = true
   if changed: writeCreatedDirs(stateDir, t)
 
@@ -1843,6 +1868,23 @@ proc unitInvocation*(unit: string): tuple[id: string; start: int64] =
   let r = unitRun(unit)
   (r.id, r.start)
 
+proc hostRunningInstances*(tmpl: string): seq[string] =
+  ## The instances of the template ``tmpl`` (``a@.service``) systemd reports
+  ## active, activating or reloading (``systemctl list-units``); empty when
+  ## it does not say.
+  let at = tmpl.find('@')
+  if at <= 0: return
+  let pattern = tmpl[0 .. at] & "*" & tmpl[at + 1 .. ^1]
+  try:
+    let r = runSystemctl(@["list-units", "--plain", "--no-legend", "--no-pager",
+                           "--state=active,activating,reloading", "--", pattern])
+    if r.exitCode != 0: return
+    for l in r.output.splitLines():
+      let w = l.splitWhitespace()
+      if w.len > 0 and w[0].startsWith(tmpl[0 .. at]) and w[0] != tmpl:
+        result.add(w[0])
+  except CatchableError: discard
+
 proc hostSystemdView*(path, unit: string; show: ShowProps;
                       systemctlShow: proc (args: seq[string]):
                         tuple[exitCode: int; output: string] = nil): SystemdView =
@@ -1995,7 +2037,8 @@ proc effectiveFloorCheck*(resources: openArray[SystemResource];
         adoptedFiles: adopted, startsOf: startsOf, conflictsOf: conflictsOf,
         createdDirs: created, ledgerDirs: ledgerDirs,
         systemdView: proc (p, u: string; s: ShowProps): SystemdView =
-          hostSystemdView(p, u, s))
+          hostSystemdView(p, u, s),
+        runningInstances: hostRunningInstances)
       var acceptedNow: seq[string]
       e.onRecreated = proc (path, unit: string; v: SystemdView): bool =
         # Recorded again and logged, or not accepted (§13 decision 71; A9

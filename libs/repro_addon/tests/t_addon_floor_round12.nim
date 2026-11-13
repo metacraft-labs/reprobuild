@@ -26,7 +26,7 @@
 ## ``dependency-starts-unrecorded``, ``view-two-calls``,
 ## ``observation-instance-judged-alone``, ``statx-errors-absent``,
 ## ``same-identity-ignores-btime``, ``listener-below-writable-allowed``,
-## ``migration-skips-listeners``.
+## ``migration-skips-listeners``, ``start-step-records-first-unit``.
 ##
 ## Mocks: as in ``t_addon_floor_round10``: systemd's view and the path
 ## identities are stand-ins built from what systemd and statx report, since
@@ -238,6 +238,39 @@ suite "round 12, finding 4: a template's directory, judged by the instance that 
         true
       check "[rule:existing-tree" notin problemsOf(e)
       check seen == @["foo@1.service"]   # recorded for the instance that ran
+
+suite "round 12, finding 4: recorded for the observation instance":
+  test "a directory recorded for the observation instance is judged by the instance running":
+    var e = goodInput()
+    e.unit = "foo@repro-addon-observe.service"
+    e.show["RuntimeDirectory"] = "foo"
+    e.inspectPath = existing(["/run/foo"])
+    e.pathIdentity = proc (p: string): PathIdentity = (true, 4'u64, 9'u64, Start + 5 * Ms)
+    e.createdDirs = {"/run/foo": CreatedDir(unit: "foo@repro-addon-observe.service",
+                                            dev: 4, ino: 5, btime: 6)}.toTable
+    e.systemdView = proc (p, u: string; s: ShowProps): SystemdView =
+      if u == "foo@2.service": view(Start + 5 * Ms)
+      else: SystemdView(dynamicUid: -1, btime: Start + 5 * Ms, stopped: true)
+    e.runningInstances = proc (t: string): seq[string] =
+      check t == "foo@.service"
+      @["foo@2.service"]
+    var seen: seq[string]
+    e.onRecreated = proc (p, u: string; v: SystemdView): bool =
+      seen.add(u)
+      true
+    check "[rule:existing-tree" notin problemsOf(e)
+    check seen == @["foo@2.service"]
+  test "the start step records a template's directory for the instance that ran":
+    let state = createTempDir("a9r12-", "-obs")
+    defer: removeDir(state)
+    createDir(state / "addon")
+    let ident = proc (p: string): PathIdentity = (true, 4'u64, 5'u64, 77'i64)
+    let invOf = proc (u: string): tuple[id: string; start: int64] =
+      if u == "foo@1.service": ("I7", Start) else: ("", 0'i64)
+    recordStartedSince(state, [("/run/foo", "foo@repro-addon-observe.service"),
+                               ("/run/foo", "foo@1.service")], invOf, ident)
+    let c = readCreatedDirs(state).getOrDefault("/run/foo")
+    check c.unit == "foo@1.service" and c.invocation == "I7"
 
 suite "round 12, finding 6: a statx error is not absent":
   test "ENOENT and ENOTDIR are absent; ELOOP is a path with no known identity":

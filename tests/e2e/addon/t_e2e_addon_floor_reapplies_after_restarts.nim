@@ -119,7 +119,9 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
            r.exitCode == 0, r.stdout & r.stderr & ev1)
       notPending("the template's second apply" & tag)
       # Its instance restarted outside a switch (finding 4, decision 82).
-      discard g.run("systemctl restart a9r-t@1.service")
+      let rs = g.exec("systemctl restart a9r-t@1.service")
+      step("its instance restarts outside a switch" & tag, rs.exitCode == 0,
+           rs.stdout & rs.stderr)
       let ev2 = evidence("/run/a9r-t", "a9r-t@1.service")
       evidences.add(%*{"round": n, "restart": ev2})
       r = g.applyProfile(repro, "t3-" & $n, tpl("t3"))
@@ -141,7 +143,8 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
       notPending("the socket's second apply" & tag)
       r = g.applyProfile(repro, "c-" & $n, control)
       step("back to the control" & tag, r.exitCode == 0, r.stdout & r.stderr)
-      discard g.run("rm -rf /run/a9r-sk; true")
+      discard g.run("systemctl stop 'a9r-t@*' a9r-sk.socket a9r-sk.service 2>/dev/null; " &
+                    "systemctl reset-failed 'a9r-*' 2>/dev/null; rm -rf /run/a9r-sk; true")
     record["evidence"] = evidences
     # A stopped unit (decision 83), and a failed apply's revert.
     let st = proc (d: string): string =

@@ -811,6 +811,13 @@ proc sameIdentity(c: CreatedDir; now: PathIdentity): bool =
     now.exists and now.btime != 0 and c.btime != 0 and c.dev == now.dev and
       c.ino == now.ino and c.btime == now.btime
 
+const ObservationInstanceTag* = "@repro-addon-observe."
+  ## The instance name the add-on checks a template under
+  ## (``collision.templateObservationName``); it never runs.
+
+proc isObservationInstance*(unit: string): bool =
+  ObservationInstanceTag in unit
+
 proc flooredKey*(unit: string): string =
   ## The floored resource a unit name stands for: a template's instances
   ## and its observation instance are the template (``a@x.service`` ->
@@ -1429,6 +1436,11 @@ type
     systemdView*: proc (path, unit: string; show: ShowProps): SystemdView
       ## systemd's own state of a directory of the unit (§13 decision 71);
       ## ``nil``: none is consulted, so a changed identity is refused
+    runningInstances*: proc (tmpl: string): seq[string]
+      ## the instances of the template ``tmpl`` (``a@.service``) systemd
+      ## reports running; a template's remade directory is judged against
+      ## the instance that ran (A9 review round 12, finding 4); ``nil``:
+      ## only the instance the record names
     onRecreated*: proc (path, unit: string; v: SystemdView): bool
       ## told of each directory decision 71 would accept: it records the
       ## directory again under its new identity and writes the audit
@@ -1788,10 +1800,25 @@ proc effectiveFloorProblems*(e: EffectiveInput): seq[string] =
               # finding 4). Condition 1 still holds the record to this
               # template.
               let recorded = e.createdDirs[fp.path].unit
-              let runUnit =
-                when mutated("observation-instance-judged-alone"): unit
-                else: (if flooredKey(recorded) == flooredKey(unit): recorded else: unit)
-              let v = e.systemdView(fp.path, runUnit, show)
+              var runUnits: seq[string]
+              when mutated("observation-instance-judged-alone"):
+                runUnits = @[unit]
+              else:
+                if flooredKey(recorded) == flooredKey(unit) and '@' in unit:
+                  if not isObservationInstance(recorded): runUnits.add(recorded)
+                  if e.runningInstances != nil:
+                    for i in e.runningInstances(flooredKey(unit)):
+                      if i notin runUnits and not isObservationInstance(i): runUnits.add(i)
+                if runUnits.len == 0: runUnits = @[unit]
+              var runUnit = runUnits[0]
+              var v = e.systemdView(fp.path, runUnit, show)
+              for cand in runUnits:
+                let cv = e.systemdView(fp.path, cand, show)
+                if systemdRecreated(fp.path, unit, declaredDirectories(show),
+                                    e.createdDirs, dynamic, cv).len == 0:
+                  runUnit = cand
+                  v = cv
+                  break
               if systemdRecreated(fp.path, unit, declaredDirectories(show),
                                   e.createdDirs, dynamic, v).len == 0:
                 when mutated("unlogged-acceptance"):
