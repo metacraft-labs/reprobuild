@@ -423,14 +423,20 @@ proc readSignedRecord(path, schema, expectedKeyHex: string):
   (true, "", text, doc)
 
 proc verifyDiscardRecord*(path: string; expectedKeyHex: string):
-    tuple[status: DiscardStatus; why, keyHex: string; objects: seq[string]] =
+    tuple[status: DiscardStatus; why, keyHex: string; objects: seq[string];
+          removed, kept: seq[string]] =
   ## §13 decisions 64, 73 and 81. ``path`` names the intent record (or its
   ## completion, which leads to the intent). Both must be signed, over
   ## exactly their bytes, by ``expectedKeyHex`` -- the host's enrolled
   ## attestation key, which the caller must give.
   ##
   ## - ``dsCompleted``: the intent record verifies, and a completion record
-  ##   verifies and names that intent by its sha256;
+  ##   verifies and names that intent by its sha256. ``removed`` and
+  ##   ``kept`` are the completion's own lists: the objects discarded and
+  ##   those kept with the store (``--keep-store``). Together they must
+  ##   cover exactly the intent's ``objects``, each in one list only;
+  ##   a completion that does not is ``dsInvalid``. ``objects`` is the
+  ##   intent's list, the authorisation, and never the verdict;
   ## - ``dsAuthorised``: the intent verifies and there is no valid
   ##   completion (the uninstall failed, drifted or crashed after the
   ##   intent): the discard was authorised and is NOT claimed;
@@ -438,7 +444,7 @@ proc verifyDiscardRecord*(path: string; expectedKeyHex: string):
   when not mutated("verify-accepts-missing-key"):
     if expectedKeyHex.len == 0:
       return (dsInvalid, "no expected key: give the host's enrolled " &
-        "attestation key with --key", "", @[])
+        "attestation key with --key", "", @[], @[], @[])
   var intentPath = path
   if path.endsWith(DiscardCompletionSuffix):
     intentPath = path[0 ..< path.len - DiscardCompletionSuffix.len] & DiscardIntentSuffix
@@ -448,21 +454,31 @@ proc verifyDiscardRecord*(path: string; expectedKeyHex: string):
     except CatchableError: discard
   let intent = readSignedRecord(intentPath, DiscardRecordSchema, key)
   if not intent.ok:
-    return (dsInvalid, intent.why, "", @[])
+    return (dsInvalid, intent.why, "", @[], @[], @[])
   result.keyHex = intent.doc{"attestationKey"}.getStr()
   for o in intent.doc{"objects"}.getElems(): result.objects.add(o.getStr())
   when mutated("discard-verify-ignores-completion"):
-    return (dsCompleted, "", result.keyHex, result.objects)
+    return (dsCompleted, "", result.keyHex, result.objects, result.objects, @[])
   let cpath = completionPathOf(intentPath)
   if not fileExists(cpath):
     when mutated("discard-verify-completion-sig-alone"):
       if fileExists(cpath & DiscardRecordSigExt):
-        return (dsCompleted, "", result.keyHex, result.objects)
+        return (dsCompleted, "", result.keyHex, result.objects,
+                result.objects, @[])
     result.status = dsAuthorised
     result.why = "no completion record (" & extractFilename(cpath) & "): " &
       "the discard was authorised and is not known to have completed"
     return
-  let done = readSignedRecord(cpath, DiscardCompletionSchema, key)
+  when mutated("discard-verify-skips-completion-signature"):
+    # The completion is what turns "authorised" into "completed": parsing it
+    # without checking its signature lets anyone who can write the log
+    # directory claim a discard.
+    let done = try: (ok: true, why: "", text: readFile(cpath),
+                     doc: parseJson(readFile(cpath)))
+               except CatchableError as e:
+                 (false, cpath & " is not a record: " & e.msg, "", JsonNode(nil))
+  else:
+    let done = readSignedRecord(cpath, DiscardCompletionSchema, key)
   if not done.ok:
     result.status = dsInvalid
     result.why = "the completion record does not verify: " & done.why
@@ -473,6 +489,24 @@ proc verifyDiscardRecord*(path: string; expectedKeyHex: string):
     result.why = cpath & " completes another intent record (its intentSha256 " &
       "is not this intent's)"
     return
+  # The completion's own account of each object (decision 81: "the objects
+  # removed and those kept"). It must account for exactly the intent's
+  # objects, none twice, or it is not a completion of this intent.
+  for o in done.doc{"removed"}.getElems(): result.removed.add(o.getStr())
+  for o in done.doc{"keptWithTheStore"}.getElems(): result.kept.add(o.getStr())
+  when not mutated("discard-verify-reports-intent-objects"):
+    var accounted = result.removed & result.kept
+    var wanted = result.objects
+    accounted.sort()
+    wanted.sort()
+    if accounted != wanted:
+      result.status = dsInvalid
+      result.why = cpath & " does not account for exactly the objects of " &
+        "its intent record (removed + kept differ from the intent's objects)"
+      return
+  else:
+    result.removed = result.objects
+    result.kept = @[]
   result.status = dsCompleted
 
 proc storeEvidenceGate*(custody: CustodySite; opts: UninstallOptions;

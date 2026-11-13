@@ -510,6 +510,20 @@ proc selfcheckManagedWrite*(path: string): string =
 proc runMigrationPlanCli*(args: seq[string]): int
   ## Below, beside the other plan verbs.
 
+proc renderCompletedDiscard*(keyHex: string; removed, kept: seq[string]): string =
+  ## The operator-facing verdict of a completed discard (§13 decisions 64
+  ## and 81): the objects removed are "discarded unshipped", those the
+  ## completion records as kept with the store (``--keep-store``) are named
+  ## as kept, never as discarded.
+  result = "completed: the intent record and its completion are signed by " &
+    keyHex & " over exactly their bytes; " & $removed.len &
+    " object(s) discarded unshipped:\n"
+  for o in removed: result.add("  " & o & "\n")
+  if kept.len > 0:
+    result.add($kept.len & " object(s) kept with the store (--keep-store), " &
+      "not discarded:\n")
+    for o in kept: result.add("  " & o & "\n")
+
 proc runAddonCli*(args: seq[string]): int =
   ## Dispatch ``repro system addon <args>``.
   if args.len == 0 or args[0] in ["-h", "--help", "help"]:
@@ -588,10 +602,7 @@ proc runAddonCli*(args: seq[string]): int =
         for o in v.objects: stdout.write("  " & o & "\n")
         return 3
       of dsCompleted:
-        stdout.write("completed: the intent record and its completion are " &
-                     "signed by " & v.keyHex & " over exactly their bytes; " &
-                     $v.objects.len & " object(s) discarded unshipped:\n")
-        for o in v.objects: stdout.write("  " & o & "\n")
+        stdout.write(renderCompletedDiscard(v.keyHex, v.removed, v.kept))
         return 0
     of "uninstall":
       let r = runAddonUninstall(parseUninstallArgs(rest))

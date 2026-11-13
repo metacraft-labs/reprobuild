@@ -130,7 +130,12 @@ The add-on handles this in four ways:
     that run's reported start (systemd 252 makes it a few milliseconds
     before it records the start); for a unit that is not running, it must
     also have been born before that run ended. A template's directory is
-    judged by the instance that ran. The apply logs each such acceptance
+    judged by the instances that can have run: the one recorded, any that
+    systemd reports running, and any the profile names. Every instance of
+    the template reaches the same verdict. The apply records such a
+    directory again once, after it has checked every instance, and only
+    if none of them refused it, so a refused apply leaves the record as it
+    was. The apply logs each such acceptance
     in the generation's audit log (if the log cannot be written, the
     directory is refused). A tree a root process makes at the path
     within those 100 ms before a start is taken as the unit's. On a host

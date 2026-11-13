@@ -78478,13 +78478,25 @@ proc gatherHealthChecksOverSettings(parsed: HealthArgs):
       # TC-9d: a manifest refused for the retired `[certificates]` table has
       # its own remedy; `workspace sync` would meet the same refusal.
       let legacyTable = err.keyPath == LegacyCertificatesKeyPath
+      # The root repository declares several roles that all carry manifests
+      # (Workspace-Branch-Roles.md §3.4). Say which branch this was read
+      # from, whether another role resolves, and do not name `workspace sync`
+      # as the remedy when the checkout is already at the tip it would sync
+      # to (CLI/health.md "Root role manifests").
+      let rootDiagnosis =
+        if legacyTable: none(RootRefusalDiagnosis)
+        else: diagnoseRootRefusal(parsed.workspaceRoot)
       ctx.manifestRemedy =
         if legacyTable: LegacyCertificatesRemedy
+        elif rootDiagnosis.isSome:
+          refusalRemedy(rootDiagnosis.get(), self & " workspace sync")
         else: self & " workspace sync"
       checks.add(HealthCheck(
         name: "manifest",
         status: hsFail,
-        detail: "manifest unresolved: " & err.msg,
+        detail: "manifest unresolved: " & err.msg &
+          (if rootDiagnosis.isSome: " " & refusalDetailSuffix(rootDiagnosis.get())
+           else: ""),
         remedy: ctx.manifestRemedy,
         fixKind: hfNone))
     except CatchableError as err:
@@ -78496,6 +78508,46 @@ proc gatherHealthChecksOverSettings(parsed: HealthArgs):
         detail: "manifest unresolved: " & err.msg,
         remedy: ctx.manifestRemedy,
         fixKind: hfNone))
+
+  # 6b. Every declared role of the root repository carries manifests, and
+  #     `manifest` above read only the checked-out one, for the active
+  #     projects only. A migration that landed on one role is invisible
+  #     until a workspace tracks the other and enables the affected project.
+  block rootRoleManifestsCheck:
+    let outcomes = checkRootRoleManifests(parsed.workspaceRoot)
+    if outcomes.len >= 2:
+      let current = block:
+        var branch = ""
+        let diag = diagnoseRootRefusal(parsed.workspaceRoot)
+        if diag.isSome: branch = diag.get().currentBranch
+        branch
+      var broken: seq[string]
+      var brokenCurrent = false
+      var okParts: seq[string]
+      for o in outcomes:
+        if not o.available:
+          okParts.add(rolesText(o) & ": no local ref, not checked")
+        elif o.failures.len == 0:
+          okParts.add(rolesText(o) & ": " & $o.projects &
+            " projects load at " & o.refName & " (" & o.commit & ")")
+        else:
+          broken.add(rolesText(o) & " at " & o.refName & " (" & o.commit &
+            "): " & $o.failures.len & " of " & $o.projects &
+            " projects do not load, " & describeFailures(o))
+          if o.branch == current: brokenCurrent = true
+      if broken.len == 0:
+        checks.add(HealthCheck(
+          name: "root-role-manifests", status: hsOk,
+          detail: okParts.join("; "), remedy: "", fixKind: hfNone))
+      else:
+        checks.add(HealthCheck(
+          name: "root-role-manifests",
+          status: (if brokenCurrent: hsFail else: hsWarn),
+          detail: broken.join("; "),
+          remedy: "land the manifest fix on every declared branch of the " &
+            "root repository; a workspace that tracks the broken role " &
+            "cannot be repaired by `workspace sync`",
+          fixKind: hfNone))
 
   # 7. Dependencies / develop-mode siblings — every declared repo must
   #    be checked out. Missing ones get a clone remedy and are eligible
