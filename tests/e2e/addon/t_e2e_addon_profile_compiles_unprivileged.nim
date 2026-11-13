@@ -105,8 +105,8 @@ done
 proc body(g: Guest; repro: string; step: StepFn; record: JsonNode;
           producer: var Producer) =
   discard g.run("cat > /root/watch.sh <<'EOS'\n" & Watcher & "EOS\n")
-  discard g.run("rm -f /root/compilers.log; setsid nohup sh /root/watch.sh " &
-                ">/dev/null 2>&1 & echo started")
+  discard g.run("rm -f /root/compilers.log")
+  g.startGuestSession("sh /root/watch.sh", "/root/watch.group")
   # The producer compiles the same source with the same engine on this
   # machine and pins the digest (B1): the guest's compile reproducing it is
   # the cross-host determinism check (x86_64 producer, Debian/Ubuntu guest).
@@ -119,7 +119,7 @@ proc body(g: Guest; repro: string; step: StepFn; record: JsonNode;
   discard producer.publish(PublishSpec(sequence: 1, profileText: Source,
     compiledProfile: pin))
   let t = g.tickUnits(timeoutSec = 2400)
-  discard g.exec("pkill -f /root/watch.sh")
+  g.stopGuestSession("/root/watch.group")
   record["tick"] = %($t)
   let seen = g.exec("sort -u -k1,1 /root/compilers.log 2>/dev/null").stdout
   record["compilerProcesses"] = %seen

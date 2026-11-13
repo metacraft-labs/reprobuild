@@ -624,6 +624,41 @@ proc run*(g: Guest; script: string; timeoutSec = 900): string =
       r.stderr)
   r.stdout
 
+proc startGuestSession*(g: Guest; command, groupFile: string) =
+  ## Start ``command`` (a ``sh`` command line) in the guest, detached from
+  ## the exec channel in a session of its own, and record that session's
+  ## process-group id in the guest file ``groupFile``. ``stopGuestSession``
+  ## ends exactly that group: ``command`` and everything it starts.
+  ##
+  ## The recorded id is the ``$$`` of the ``sh`` that ``setsid`` made the
+  ## session leader -- directly, or in the child it forks when its caller
+  ## leads a group -- so it IS the group's id, and ``command`` runs in that
+  ## group. A case therefore never has to find its helper again by name or
+  ## command line (``pkill -f``), which is the habit
+  ## ``scripts/check_pattern_kills.py`` refuses (reprobuild-pm issue
+  ## 2026-11-13).
+  discard g.run("rm -f " & quoteShell(groupFile) & "; setsid nohup sh -c " &
+    quoteShell("echo $$ > " & quoteShell(groupFile) & "; " & command) &
+    " > /dev/null 2>&1 < /dev/null &")
+  discard g.run("for i in $(seq 100); do [ -s " & quoteShell(groupFile) &
+    " ] && exit 0; sleep 0.1; done; echo 'no group id in " & groupFile &
+    "' >&2; exit 1")
+
+proc stopGuestSession*(g: Guest; groupFile: string; signal = "KILL";
+                       waitSec = 30) =
+  ## Send ``signal`` to the process group ``startGuestSession`` recorded in
+  ## ``groupFile`` and wait, up to ``waitSec``, until the group has no
+  ## member left. Signals only while the group still has members, so an id
+  ## the guest has since reissued is never hit; a group already gone is not
+  ## an error. ``signal`` is a name (``KILL``, ``TERM``): the guest's ``sh``
+  ## may be dash, whose ``kill`` reads ``-<name> -<pgid>`` but not
+  ## ``-s <name> -<pgid>``.
+  discard g.exec("g=$(cat " & quoteShell(groupFile) & " 2>/dev/null); " &
+    "case \"$g\" in ''|*[!0-9]*) exit 0 ;; esac; [ \"$g\" -gt 1 ] || exit 0; " &
+    "kill -0 -$g 2>/dev/null || exit 0; kill -" & signal & " -$g; " &
+    "i=0; while kill -0 -$g 2>/dev/null && [ $i -lt " & $(waitSec * 10) &
+    " ]; do sleep 0.1; i=$((i + 1)); done", timeoutSec = waitSec + 60)
+
 proc copyTo*(g: Guest; hostPath, guestPath: string) =
   when defined(gostiAvailable):
     if g.kind == gkIncus:

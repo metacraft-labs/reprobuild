@@ -781,6 +781,17 @@ lint:
     # it. Each instance passed alone and failed only in full runs. No
     # allowlist; source scan, no compiler, same cost class as its neighbours.
     python3 ./scripts/check_fixed_test_scratch_dirs.py 2>&1 | tee -a test-logs/lint.log
+    # Refuse test, benchmark or helper code that kills processes by name or
+    # pattern (`pkill`, `pkill -f`, `killall`, `pgrep | xargs kill`, and the
+    # Windows spellings). On a shared host a pattern also matches every
+    # other session's process of the same shape: a fixed-path `pkill -f`
+    # cleanup here stopped every concurrent run's nix helper, and committed
+    # root scripts ran `pkill -f 'cmake.*reproos'` (reprobuild-pm issue
+    # 2026-11-13). Self-test first, so a scanner that lost its power cannot
+    # pass the tree. Source scan, no compiler, same cost class as its
+    # neighbours.
+    python3 ./scripts/check_pattern_kills.py --self-test 2>&1 | tee -a test-logs/lint.log
+    python3 ./scripts/check_pattern_kills.py 2>&1 | tee -a test-logs/lint.log
     # Graph-Owned-Test-Artifacts M3: refuse a NEW test that compiles a helper
     # program in its own body instead of declaring a `repro.nim` build edge.
     # Source scan, no compiler, same class as the two gates above. It does NOT

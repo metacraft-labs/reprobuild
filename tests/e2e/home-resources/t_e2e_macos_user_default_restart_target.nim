@@ -17,11 +17,15 @@
 ## ## How the "killall fired?" assertion is made without a real
 ## ##  daemon
 ##
-## A benign placeholder process is started by the test itself —
-## `/bin/sleep` running for a long interval. Its process name is
-## `sleep`; `restartTarget = "sleep"` means the driver runs
-## `killall sleep` after a value-changing write. The test then
-## checks whether the placeholder process is still alive:
+## A benign placeholder process is started by the test itself — a copy
+## of `/bin/sleep` under a process NAME unique to this run (`rrt<hex>`),
+## running for a long interval. `restartTarget = "<that name>"` means
+## the driver runs `killall <that name>` after a value-changing write.
+## The name must be unique: `killall` matches every process of the user
+## with that name, so the earlier `restartTarget = "sleep"` also ended
+## every other session's `sleep` on the host (reprobuild-pm issue
+## 2026-11-13). The test then checks whether the placeholder process is
+## still alive:
 ##   - value changed  -> the placeholder was killed (killall fired)
 ##   - cache-hit       -> the placeholder is still alive (no killall)
 ## This keeps the gate self-contained and never touches a real
@@ -140,14 +144,22 @@ when defined(macosx):
     # Start a benign placeholder `sleep` and use its process name as
     # the restartTarget. A long sleep keeps it alive long enough to
     # observe whether the driver's `killall` reached it.
-    let ph1 = startProcess("/bin/sleep", args = @["600"],
-      options = {poUsePath})
+    # The placeholder's name is unique to this run (well under the 16
+    # bytes of a macOS process name), so the driver's `killall` can
+    # reach nothing but it.
+    let placeholderName = "rrt" &
+      toHex(getCurrentProcessId() and 0xFFFFFF, 6) &
+      toHex(int(epochTime() * 1000) and 0xFFFF, 4)
+    let placeholder = fixtureDir / placeholderName
+    copyFile("/bin/sleep", placeholder)
+    setFilePermissions(placeholder, {fpUserRead, fpUserWrite, fpUserExec})
+    let ph1 = startProcess(placeholder, args = @["600"], options = {})
     defer: terminateIfRunning(ph1)
     let resources1 = "userdefault:macos.theme:" & testDomain &
-      ";AppleInterfaceStyle;'Dark';sleep"
+      ";AppleInterfaceStyle;'Dark';" & placeholderName
     let r1 = runRepro(envFor(resources1), ["home", "apply"])
     check r1.exitCode == 0
-    # The value was created (a real change) -> killall sleep fired
+    # The value was created (a real change) -> the killall fired
     # -> the placeholder process is gone.
     check waitForExitWithin(ph1, 5000)
     # The value really landed in the test domain.
@@ -157,8 +169,7 @@ when defined(macosx):
     check readOut.strip() == "Dark"
 
     # --- Apply 2: identical value -> cache-hit -> NO killall ---
-    let ph2 = startProcess("/bin/sleep", args = @["600"],
-      options = {poUsePath})
+    let ph2 = startProcess(placeholder, args = @["600"], options = {})
     defer: terminateIfRunning(ph2)
     let r2 = runRepro(envFor(resources1), ["home", "apply"])
     check r2.exitCode == 0
@@ -169,6 +180,7 @@ when defined(macosx):
     check ph2.peekExitCode() == -1
 
 suite "M68 gate 3: e2e_macos_user_default_restart_target":
+  # pattern-kill-ok: the case's title names the product behaviour under test
   test "restartTarget killall fires on change, not on a cache-hit":
     when defined(macosx):
       runGate3()

@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 35,
-    "nimTestBinaries": 2776,
+    "nimTestBinaries": 2777,
     "pureUnitConsolidationGroups": 82,
     "pureUnitTests": 761,
     "staticallyDetectedRuntimeCompilerFlowTests": 139,
-    "testEntries": 2820
+    "testEntries": 2821
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1616,7 +1616,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 21,
-      "integration": 1528,
+      "integration": 1529,
       "platform/destructive": 177,
       "pure unit": 761,
       "unclassified": 333
@@ -1833,9 +1833,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2776,
+    "nimTestBinaryCount": 2777,
     "pythonTestFileCount": 44,
-    "testEntryCount": 2820
+    "testEntryCount": 2821
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -26482,6 +26482,23 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_owned_processes_stop_only_what_the_test_started",
+      "class": "integration",
+      "classificationReason": "subprocess or repro CLI invocation in test body",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_test_support"
+      ],
+      "owner": "libs/repro_test_support",
+      "requiresReproBinary": false,
+      "source": "libs/repro_test_support/tests/t_owned_processes_stop_only_what_the_test_started.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 4,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_scoped_env_restores_in_any_order",
       "class": "unclassified",
       "classificationReason": "mutates the process environment",
@@ -46300,6 +46317,7 @@
         "repro_dev_env_engine",
         "repro_interface_artifacts",
         "repro_local_store",
+        "repro_test_support",
         "repro_tool_profiles"
       ],
       "owner": "tests/integration",
@@ -46341,6 +46359,7 @@
       "localDependencyShape": [
         "repro_build_engine",
         "repro_interface_artifacts",
+        "repro_test_support",
         "repro_tool_profiles"
       ],
       "owner": "tests/integration",

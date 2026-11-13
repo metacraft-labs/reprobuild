@@ -29,6 +29,7 @@ import repro_dev_env_engine
 import repro_interface_artifacts
 from repro_local_store import ffpChecksum
 import repro_tool_profiles
+import repro_test_support/owned_processes
 
 const RepoMarker = "repro.nim"
 const FixtureRelRoot = "tests/fixtures/nix-daemon-local-flake"
@@ -407,8 +408,10 @@ suite "Nix Evaluation Daemon and Foreign Provisioner Integration Tests":
             delEnv("LD_LIBRARY_PATH")
           putEnv("REPROBUILD_NIX_DAEMON_BIN", previousDaemonBin)
           putEnv("USER", previousUser)
-          discard execCmd("pkill -f -u $USER " & quoteShell(socketPath) &
-            " || true")
+          # The helper ``resolveNixTool`` started on this case's private
+          # socket, found through the socket itself -- never by pattern,
+          # which would also stop a concurrent run's helper.
+          discard stopUnixSocketServer(socketPath)
           removeFile(socketPath)
 
         var useDef = InterfaceToolUse(

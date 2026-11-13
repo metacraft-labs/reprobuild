@@ -34,13 +34,15 @@
 ## ``CreateProcessW`` spawn.
 ##
 ## Process hygiene: every case kills the dispatch tree if it is still
-## alive, then sweeps any process whose command line still mentions the
-## per-case scratch directory NAME — including the detached child's own
-## opportunistic ``git gc`` over the shared bare, which is what still
-## holds the fixture open once the ref has landed. Orphans from this exact
-## defect outlived the sessions that produced them (one past 12 minutes,
-## another past 15, both with their parents gone); a test that reproduces
-## the defect must not reproduce that too.
+## alive, then stops the detached child it started -- including that
+## child's own opportunistic ``git gc`` over the shared bare, which is what
+## still holds the fixture open once the ref has landed. Orphans from this
+## exact defect outlived the sessions that produced them (one past 12
+## minutes, another past 15, both with their parents gone); a test that
+## reproduces the defect must not reproduce that too. The child is found by
+## what this case started, never by a command-line pattern, which would
+## also reach any other process on the host naming the same string
+## (reprobuild-pm issue 2026-11-13): see ``stopDetachedPush``.
 ##
 ## Hermetic: local ``git init --bare`` upstream + shared bare under one
 ## ``createTempDir``, ``REPRO_WORKSPACE_CLONES`` pinned into that tempdir
@@ -49,6 +51,7 @@
 import std/[os, osproc, strutils, tempfiles, times, unittest]
 
 import repro_test_support
+import repro_test_support/owned_processes
 import repro_workspace_manifests
 import shared_clones
 
@@ -93,16 +96,14 @@ proc gitMust(command: string; cwd = ""): string =
     "\n" & res.output
   res.output
 
-proc psQuote(value: string): string =
-  "'" & value.replace("'", "''") & "'"
-
 proc killProcessTree(pid: int) =
   ## Kill ``pid``, and on Windows its descendants too (``taskkill /T``).
   ## ``Process.kill`` would leave the wedged ``cmd.exe`` generations
   ## behind, which is precisely how this defect produced orphans in the
   ## first place. POSIX has no ``/T`` here — the child is not in its own
-  ## process group — so descendants are left to the marker sweep below,
-  ## which reaches them by command line rather than by parentage.
+  ## process group — and the only descendant that outlives the dispatch is
+  ## the detached push, which ``stopDetachedPush`` reaches through the
+  ## session it was detached into.
   try:
     when defined(windows):
       let taskkill = findExe("taskkill")
@@ -115,48 +116,34 @@ proc killProcessTree(pid: int) =
   except CatchableError:
     discard
 
-proc sweepStrayProcesses(marker: string) =
-  ## Last-resort cleanup: kill anything still alive whose command line
-  ## mentions ``marker``. Catches the failure mode ``killProcessTree``
-  ## structurally cannot — a detached child that OUTLIVED the dispatch
-  ## process, so there is no tree left to walk.
+const SetsidRecorderDir = "setsid-recorder"
+const SessionRecord = "detached-sessions"
+
+proc stopDetachedPush(scratch: string; job: ProcessJob) =
+  ## Stop the cache push this case's dispatch detached, with its git
+  ## children and the shared-bare gc that follows it -- and nothing else.
+  ## This catches what ``killProcessTree`` structurally cannot: a detached
+  ## child that OUTLIVED the dispatch process, so there is no tree left to
+  ## walk.
   ##
-  ## ``marker`` must be the scratch directory's BASENAME, not its full
-  ## path. The hook passes its ``--repo-root`` through with FORWARD
-  ## slashes while ``createTempDir`` hands back a backslash path, so a
-  ## full-path match silently finds nothing — and a sweep that silently
-  ## finds nothing is indistinguishable from a clean run. The basename
-  ## carries ``createTempDir``'s random suffix, so it is still specific
-  ## to this case and cannot reach anything it did not start.
-  ##
-  ## Each match is killed as a TREE, not as a process. Killing only the
-  ## match is what leaked the fixture twice while this test was being
-  ## written: the detached ``repro hooks cache-push`` matches, but the
-  ## ``git gc`` / ``git repack`` it spawns does not — those command lines
-  ## carry no path at all, only an inherited CWD *inside* the fixture,
-  ## and on Windows a live CWD is enough to make the directory
-  ## undeletable. Orphaning them is the same mistake in miniature that
-  ## this milestone is about.
+  ## * POSIX: the push is a ``setsid`` session, and the recorder
+  ##   ``observeHook`` put first on the dispatch's ``PATH`` recorded its
+  ##   process-group id. Every process of the detached work -- including
+  ##   the ``git gc`` / ``git repack`` whose command lines name no path at
+  ##   all -- inherits that group.
+  ## * Windows: ``runBounded`` adopted the dispatch into ``job`` as it
+  ##   started it, and every process the dispatch's tree creates joins the
+  ##   job: the engine the thin client starts, the push the engine starts
+  ##   with ``CreateProcessW`` (no ``CREATE_BREAKAWAY_FROM_JOB``), and the
+  ##   gc the push starts. Parentage could not find the push: its parent,
+  ##   the engine, has exited by now. Terminating the job ends the gc too,
+  ##   which matters because on Windows a live CWD inside the fixture is
+  ##   enough to make the directory undeletable.
   try:
     when defined(windows):
-      let powershell = findExe("powershell")
-      if powershell.len == 0:
-        return
-      let script =
-        "$m = " & psQuote(marker) & "; " &
-        "Get-CimInstance Win32_Process | Where-Object { " &
-        "$_.ProcessId -ne $PID -and $_.CommandLine -and " &
-        "$_.CommandLine.Contains($m) } | ForEach-Object { $_.ProcessId }"
-      let found = runShell(shellCommand(@[powershell, "-NoProfile",
-        "-NonInteractive", "-Command", script]))
-      for line in found.output.splitLines:
-        let pid = line.strip()
-        if pid.len > 0 and pid.allCharsInSet({'0' .. '9'}):
-          killProcessTree(parseInt(pid))
+      discard job.terminate()
     else:
-      let pkill = findExe("pkill")
-      if pkill.len > 0:
-        discard runShell(shellCommand(@[pkill, "-9", "-f", marker]))
+      discard stopRecordedSessions(scratch / SessionRecord)
   except CatchableError:
     discard
 
@@ -166,13 +153,17 @@ type BoundedRun = object
   elapsedMs: int
 
 proc runBounded(exe: string; args: seq[string]; cwd: string;
-                deadlineMs: int): BoundedRun =
+                deadlineMs: int; job: ProcessJob): BoundedRun =
   ## Run ``exe`` and wait AT MOST ``deadlineMs`` for it to exit. Uses
   ## ``poParentStreams`` on purpose: no pipes means no second way to
   ## block, so a non-return here can only be the child's own doing.
   let started = epochTime()
   let child = startProcess(exe, workingDir = cwd, args = args,
     options = {poParentStreams})
+  # Windows: into the job at once, before the client can start the engine,
+  # so the whole tree -- the detached push included -- is in it. The
+  # ``jobProcesses`` control below says whether that held.
+  discard job.adopt(child.processID)
   result.code = -1
   result.returned = false
   while int((epochTime() - started) * 1000.0) < deadlineMs:
@@ -211,11 +202,10 @@ proc buildFixture(gitBin, scratch, workspaceSubPath: string): Fixture =
   ##
   ## ``workspaceSubPath`` is the workspace directory RELATIVE to
   ## ``scratch`` and may contain separators, so a case can put its
-  ## quote-hostile characters BELOW the scratch root. That placement is
-  ## not cosmetic: the shared bare's path is derived from the origin URL
-  ## with spaces sanitized to ``_``, so a space in the scratch root
-  ## renames the very directory the teardown sweep matches on and the
-  ## opportunistic ``git gc`` escapes it.
+  ## quote-hostile characters BELOW the scratch root. The shared bare's
+  ## path is derived from the origin URL with spaces sanitized to ``_``,
+  ## so the fixture's own paths stay predictable only while the scratch
+  ## root itself is an ordinary path.
   result.scratch = scratch
   let origin = scratch / "origin.git"
   let seedPath = scratch / "seed"
@@ -296,8 +286,12 @@ type HookObservation = object
   elapsedMs: int         ## how long it took to return / hit the ceiling
   refAfter: string       ## the cache ref the DETACHED child was to push
   expectedSha: string    ## the just-committed sha it must equal
+  jobProcesses: int      ## Windows: processes ever in the case's job
+  recording: bool        ## POSIX: the setsid recorder was on its PATH
+  sessionsRecorded: int  ## how many detached sessions it recorded
 
-proc observeHook(gitBin, scratch, workspaceSubPath: string): HookObservation =
+proc observeHook(gitBin, scratch, workspaceSubPath: string;
+                 job: ProcessJob): HookObservation =
   ## Build the fixture, commit, fire the REAL post-commit dispatch under a
   ## hard ceiling, and report what happened. Parameterized only by the
   ## shape of the scratch paths so the plain and the quote-hostile
@@ -307,6 +301,14 @@ proc observeHook(gitBin, scratch, workspaceSubPath: string): HookObservation =
 
   putEnv("REPRO_WORKSPACE_CLONES", fx.cacheRoot)
   defer: delEnv("REPRO_WORKSPACE_CLONES")
+  # POSIX: record the session the dispatch detaches the push into, so the
+  # teardown can stop exactly that work (``stopDetachedPush``).
+  result.recording = installSetsidRecorder(scratch / SetsidRecorderDir,
+    scratch / SessionRecord, findExe("setsid"))
+  let previousPath = getEnv("PATH")
+  if result.recording:
+    putEnv("PATH", scratch / SetsidRecorderDir & PathSep & previousPath)
+  defer: putEnv("PATH", previousPath)
 
   writeFile(fx.repoPath / "feature.txt", "new work\n")
   discard gitMust(q(gitBin) & " -C " & q(fx.repoPath) & " add feature.txt")
@@ -319,7 +321,7 @@ proc observeHook(gitBin, scratch, workspaceSubPath: string): HookObservation =
 
   let run = runBounded(reproBin,
     @["hooks", "dispatch", "post-commit", "--repo-root", fx.repoPath, "--"],
-    fx.repoPath, HookHardDeadlineMs)
+    fx.repoPath, HookHardDeadlineMs, job)
   result.returned = run.returned
   result.exitCode = run.code
   result.elapsedMs = run.elapsedMs
@@ -331,16 +333,18 @@ proc observeHook(gitBin, scratch, workspaceSubPath: string): HookObservation =
     if result.refAfter.len > 0:
       break
     sleep(PollIntervalMs)
+  result.sessionsRecorded = recordedSessions(scratch / SessionRecord).len
+  result.jobProcesses = job.processesStarted()
 
-proc teardown(scratch: string) =
+proc teardown(scratch: string; job: ProcessJob) =
   ## Kill first, THEN delete — in that order, in one place, so the order
   ## does not depend on how ``defer`` unwinds.
   ##
   ## The detached child does more than the push: on a never-maintained
   ## shared bare it also runs the opportunistic ``git gc``
   ## (``maintainSharedBare``), which is still holding the bare open at the
-  ## moment the ref lands and the case stops waiting. That is what the
-  ## sweep is for.
+  ## moment the ref lands and the case stops waiting. That is what
+  ## ``stopDetachedPush`` is for.
   ##
   ## A scratch directory the OS will not release is a cleanup nuisance and
   ## NOT a verdict on the invariant under test, so removal failure is
@@ -349,13 +353,12 @@ proc teardown(scratch: string) =
   ##
   ## Two rounds, not one. The first-run-after-a-rebuild case is cold — the
   ## 36 MB binary is being paged in and the shared bare is being gc'd —
-  ## and a single sweep-then-delete loses that race often enough to leave
-  ## a directory behind. Sweeping again between attempts costs nothing on
+  ## and a single stop-then-delete loses that race often enough to leave
+  ## a directory behind. Stopping again between attempts costs nothing on
   ## the common path (the first round already succeeded and the loop is
   ## not entered a second time).
-  let marker = extractFilename(scratch)
   for round in 0 .. 1:
-    sweepStrayProcesses(marker)
+    stopDetachedPush(scratch, job)
     try:
       removeDirEventually(scratch, attempts = 50, sleepMs = 100)
       return
@@ -375,9 +378,11 @@ suite "W4 — post-commit dispatch returns and its detached push runs":
   test "test_w4_post_commit_dispatch_returns_and_detached_push_lands":
     let gitBin = requireGitBin()
     let scratch = createTempDir("repro-w4-postcommit-", "")
-    defer: teardown(scratch)
+    var job = openProcessJob()
+    defer: job.close()
+    defer: teardown(scratch, job)
 
-    let obs = observeHook(gitBin, scratch, "workspace")
+    let obs = observeHook(gitBin, scratch, "workspace", job)
     checkpoint("post-commit dispatch returned=" & $obs.returned &
       " exit=" & $obs.exitCode & " after " & $obs.elapsedMs & " ms")
 
@@ -393,6 +398,16 @@ suite "W4 — post-commit dispatch returns and its detached push runs":
     # (2) The DETACHED child actually ran. NOT implied by (1): a spawn that
     # is simply dropped returns instantly and lands nothing.
     check obs.refAfter == obs.expectedSha
+    # Control on the teardown: the detached push went through the recorder,
+    # so the teardown can reach it. Without this, a teardown that stops
+    # nothing is indistinguishable from a clean run.
+    if obs.recording:
+      check obs.sessionsRecorded == 1
+    # Windows: the job holds at least the client, the engine it started and
+    # the detached push. Fewer means the dispatch was adopted too late and
+    # the teardown would miss what escaped.
+    when defined(windows):
+      check obs.jobProcesses >= 3
 
   test "test_w4_post_commit_dispatch_survives_quote_hostile_paths":
     # A space in an ancestor directory (``C:\Program Files``-shaped) and a
@@ -402,17 +417,17 @@ suite "W4 — post-commit dispatch returns and its detached push runs":
     # whose escaping broke the shell round-trip in the first place. Both
     # are legal on NTFS and invisible to a shell-free spawn.
     #
-    # The space sits BELOW the scratch root, not in it: the shared bare is
-    # named after the origin URL with spaces sanitized to ``_``, so a
-    # space in the scratch root would rename the directory the teardown
-    # sweep matches on and leak the opportunistic ``git gc``. Both hostile
-    # characters still reach ``--repo-root`` / ``--workspace-name``, which
-    # is what the fix has to survive.
+    # The space sits BELOW the scratch root, not in it, so the scratch
+    # root itself stays an ordinary path. Both hostile characters still
+    # reach ``--repo-root`` / ``--workspace-name``, which is what the fix
+    # has to survive.
     let gitBin = requireGitBin()
     let scratch = createTempDir("repro-w4-hostile-", "")
-    defer: teardown(scratch)
+    var job = openProcessJob()
+    defer: job.close()
+    defer: teardown(scratch, job)
 
-    let obs = observeHook(gitBin, scratch, "has space" / "ws&x")
+    let obs = observeHook(gitBin, scratch, "has space" / "ws&x", job)
     checkpoint("post-commit dispatch returned=" & $obs.returned &
       " exit=" & $obs.exitCode & " after " & $obs.elapsedMs & " ms")
 
@@ -421,3 +436,7 @@ suite "W4 — post-commit dispatch returns and its detached push runs":
     check obs.elapsedMs < HookPromptBudgetMs
     check obs.exitCode == 0
     check obs.refAfter == obs.expectedSha
+    if obs.recording:
+      check obs.sessionsRecorded == 1
+    when defined(windows):
+      check obs.jobProcesses >= 3

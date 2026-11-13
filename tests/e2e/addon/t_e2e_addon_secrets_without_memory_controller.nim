@@ -154,8 +154,7 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
       repro & " system addon secret put --service swap-probe --name held " &
       "> /root/addon/held.log 2>&1\n")
     g.copyTo(g.runDir / "held.sh", "/root/addon/held.sh")
-    discard g.run("setsid nohup sh /root/addon/held.sh > /dev/null 2>&1 " &
-                  "< /dev/null &")
+    g.startGuestSession("sh /root/addon/held.sh", "/root/addon/held.group")
     var held = false
     for i in 0 ..< 120:
       if g.exec("cat " & SeamDir & "/test-paused-at 2>/dev/null").stdout.strip() ==
@@ -174,7 +173,7 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
     discard g.exec("python3 -c 'import time; b=bytes.fromhex(\"" & fillHex &
       "\")*32768; m=[bytearray(b) for _ in range(2600)]; time.sleep(3)' " &
       ">/dev/null 2>&1; sync", timeoutSec = 900)
-    discard g.exec("pkill -9 -f '[s]ecret put --service swap-probe'; sleep 1")
+    g.stopGuestSession("/root/addon/held.group")
     g.shutdown()
     var needles: seq[tuple[form, bytes: string]]
     for f in canaryForms(c6): needles.add(("c6-" & f.form, f.bytes))

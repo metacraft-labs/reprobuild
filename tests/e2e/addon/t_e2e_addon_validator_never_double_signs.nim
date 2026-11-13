@@ -114,6 +114,9 @@ const
   Activities = ["ethereum_validator"]
   RenamedUnit = "eth-validator-b.service"
   LifetimeLog = "/root/validator-lifetimes.log"
+  MonitorGroupFile = "/root/validator-monitor.group"
+    ## The monitor's session (``startGuestSession``), so it is stopped by the
+    ## group it was started in, not found again by its command line.
   StateDir = "/var/lib/ethereum/validator"
 
 proc hexKey(k: openArray[byte]): string =
@@ -186,9 +189,9 @@ proc body(g: Guest; repro, engine: string; step: StepFn; record: JsonNode) =
     monitor = monitor.replace("time.sleep(PAUSE)", "time.sleep(3600)")
   writeFile(work / "monitor.py", monitor)
   g.copyTo(work / "monitor.py", "/root/validator-monitor.py")
-  discard g.run("setsid nohup chrt -f 10 python3 /root/validator-monitor.py " &
-    LifetimeLog & " " & DefaultValidatorUnit & " " & RenamedUnit &
-    " >/dev/null 2>&1 < /dev/null &")
+  g.startGuestSession("exec chrt -f 10 python3 /root/validator-monitor.py " &
+    LifetimeLog & " " & DefaultValidatorUnit & " " & RenamedUnit,
+    MonitorGroupFile)
   var sequence = 1'u64
   proc apply(what: string): bool =
     discard publishPins(bs.producer, cache, kp, engine, pk, net, pins, sequence)
@@ -287,9 +290,9 @@ proc body(g: Guest; repro, engine: string; step: StepFn; record: JsonNode) =
   section("lifetimes and databases"):
     # The lifetimes and databases of the five steps.
     # SIGTERM: the monitor drains its queue once more and writes `end`.
-    # ([v]: the pattern must not match this shell's own command line.)
-    discard g.exec("pkill -TERM -f '[v]alidator-monitor.py'; for i in $(seq 60); do " &
-      "pgrep -f '[v]alidator-monitor.py' >/dev/null || break; sleep 0.5; done")
+    # Sent to the session the monitor was started in (it `exec`s, so it is
+    # that session's only process), and waited for.
+    g.stopGuestSession(MonitorGroupFile, signal = "TERM", waitSec = 30)
     let lifeLog = g.run("cat " & LifetimeLog)
     record["lifetimes"] = %lifeLog
     let ls = parseLifetimes(lifeLog)
@@ -328,6 +331,7 @@ proc body(g: Guest; repro, engine: string; step: StepFn; record: JsonNode) =
     # The validator package the host runs now (after the re-closure).
     prysmBin = pins.validatorPrefix
     # G26 residual 1: a validator outside the unit's control group.
+    let strayScope = "a12-stray-" & $getCurrentProcessId() & ".scope"
     let strayCmd = "systemd-run --scope --unit=a12-stray-" & $getCurrentProcessId() &
       " --uid=eth-validator --gid=eth-validator " &
       validatorCmd(prysmBin, chainCfg & " --wallet-password-file=/run/a12-pw")
@@ -338,6 +342,9 @@ proc body(g: Guest; repro, engine: string; step: StepFn; record: JsonNode) =
            besideUnit.stdout & besideUnit.stderr,
          besideUnit.stdout & besideUnit.stderr)
     discard g.run("systemctl stop " & unit)
+    # systemd-run --scope runs it in the transient scope ``strayScope``,
+    # which is how it is stopped below -- by name of the unit this case
+    # created, never by a process pattern.
     discard g.run("setsid nohup " & strayCmd & " > /root/stray.log 2>&1 &")
     sleep(15_000)
     let since = g.run("date +%s").strip()
@@ -346,8 +353,12 @@ proc body(g: Guest; repro, engine: string; step: StepFn; record: JsonNode) =
     let unitLog = g.exec("journalctl -q -o cat --since @" & since & " -u " & unit).stdout
     step("an instance the unit starts beside it cannot open the database",
          "cannot obtain database lock" in unitLog, unitLog)
-    discard g.exec("pkill -u eth-validator -f 'bin/validator'; sleep 5; " &
-                   "systemctl reset-failed " & unit & "; systemctl start " & unit)
+    # End both instances: the stray in the scope this case created, and the
+    # unit's own instance, which could not open the database. Each is
+    # stopped through the unit that holds it, so nothing outside this
+    # case's units is signalled.
+    discard g.exec("systemctl stop " & strayScope & "; systemctl stop " & unit &
+                   "; systemctl reset-failed " & unit & "; systemctl start " & unit)
     g.waitSigning(2)
     # G26 residual 2: a second host with the same keys.
     discard g.run("rm -rf " & rogueDir & " && mkdir -p " & rogueDir & " && " &

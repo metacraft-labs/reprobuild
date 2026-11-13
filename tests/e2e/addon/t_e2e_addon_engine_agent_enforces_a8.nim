@@ -203,13 +203,13 @@ proc body(g: Guest; repro: string; step: StepFn; record: JsonNode;
 
   # 6. The pinned source profile, compiled unprivileged.
   discard g.run("cat > /root/watch.sh <<'EOS'\n" & Watcher & "EOS\n")
-  discard g.run("rm -f /root/compilers.log; setsid nohup sh /root/watch.sh " &
-                ">/dev/null 2>&1 & echo started")
+  discard g.run("rm -f /root/compilers.log")
+  g.startGuestSession("sh /root/watch.sh", "/root/watch.group")
   var good = manifestOf(9, Source)
   good.profileFiles = Bundle
   good.compiledProfile = pin
   let t9 = g.tick(signer, good)
-  discard g.exec("pkill -f /root/watch.sh")
+  g.stopGuestSession("/root/watch.group")
   let seen = g.exec("sort -u -k1,1 /root/compilers.log 2>/dev/null").stdout
   record["compilerProcesses"] = %seen
   var lines, root: seq[string]

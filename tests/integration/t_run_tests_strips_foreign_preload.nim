@@ -308,10 +308,21 @@ suite "an add-on gate's helpers end with it (scripts/lib/process_group.sh)":
 
   test "negative control: without the group the helper outlives the command":
     let m = marker("5")
-    discard runShell(shellCommand(["bash", "-c",
-      "bash -c 'sleep " & m & " & exit 0'"]), repoRoot())
+    # The helper's pid, printed by the shell that started it, so this case
+    # ends exactly the process it orphaned -- never by its argv, which a
+    # concurrent run of this file can share (reprobuild-pm issue 2026-11-13).
+    let res = runShell(shellCommand(["bash", "-c",
+      "bash -c 'sleep " & m & " & echo \"helper=$!\"; exit 0'"]), repoRoot())
+    var helper = 0
+    for line in res.output.splitLines:
+      if line.startsWith("helper="):
+        helper = parseInt(line.substr("helper=".len).strip())
+    checkpoint(res.output)
+    require helper > 1
     check alive("sleep " & m)
-    discard execShellCmd("pkill -f 'sleep " & m & "'")
+    check readFile("/proc/" & $helper & "/cmdline").replace('\0', ' ').strip() ==
+      "sleep " & m
+    discard execShellCmd("kill " & $helper)
 
   test "run_addon_gate.sh runs the gate through run_in_own_group":
     let text = readFile(repoRoot() / "scripts" / "run_addon_gate.sh")

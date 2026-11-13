@@ -746,7 +746,14 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
       "/etc/systemd/system/repro-fixture-excl-old.service " &
       "/etc/systemd/system/repro-fixture-excl-old2.service " &
       "/etc/systemd/system/repro-fixture-excl-old2.socket; systemctl daemon-reload; true")
-    discard g.run("pkill -f '^/bin/sh /usr/local/bin/repro-fixture-withchild'; true")
+    # A KillMode=process worker of the Requires= fixture (g14) that outlived
+    # its unit stays in the control group systemd created for that unit,
+    # even once the unit file is gone: end what is left there, and only
+    # there (never by command line, which any other process may share).
+    discard g.run("for cg in /sys/fs/cgroup/system.slice/repro-fixture-excl-r.service " &
+      "/sys/fs/cgroup/systemd/system.slice/repro-fixture-excl-r.service; do " &
+      "[ -d $cg ] || continue; if [ -e $cg/cgroup.kill ]; then echo 1 > $cg/cgroup.kill; " &
+      "else for p in $(cat $cg/cgroup.procs); do kill -KILL $p; done; fi; done 2>/dev/null; true")
     let un = g.exec(repro & " system addon uninstall")
     step("uninstall", un.exitCode == 0, un.stdout & un.stderr)
   except CatchableError as e:
