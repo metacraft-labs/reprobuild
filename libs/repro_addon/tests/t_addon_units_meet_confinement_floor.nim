@@ -19,9 +19,26 @@
 ## apply-unit-without-protect-system``): the apply unit loses
 ## ``ProtectSystem=strict``, its exposure rises above its threshold: red.
 ##
-## Needs ``systemd-analyze`` with ``--offline`` (systemd 250 or later) on
-## ``PATH``: a missing tool is a failure, never a skip. The thresholds use
-## systemd's ``--threshold=`` scale (the printed level times ten).
+## Needs the dev shell's pinned ``systemd-analyze`` (``$REPRO_SYSTEMD_ANALYZE``,
+## flake.nix), never the host's on ``PATH``: the score is a function of the
+## analyser's version. A missing one is a failure, never a skip. The thresholds
+## use systemd's ``--threshold=`` scale (the printed level times ten).
+##
+## *Each unit is scored alone.* Without ``--root`` an offline analysis loads the
+## HOST's unit search path (``/etc``, ``/run``, ``/usr/lib`` ``systemd/system``
+## and ``$SYSTEMD_UNIT_PATH``) and applies the drop-ins it finds there -- LXC
+## writes ``service.d/zzz-lxc-service.conf`` into every container, relaxing
+## ProtectControlGroups, ProtectKernelTunables, ProtectProc and ProcSubset for
+## every service. And without ``--security-policy`` it reads the host's
+## ``systemd-analyze-security.policy`` from ``/etc/systemd``, ``/run/systemd``,
+## ``/usr/local/lib/systemd`` and ``/usr/lib/systemd`` whatever the root, which
+## re-weights or drops checks. So each unit is written alone into a private
+## root's ``etc/systemd/system``, named rather than passed as a path, and
+## analysed with an explicit empty policy and ``$SYSTEMD_UNIT_PATH`` removed
+## from the analyser's environment (reprobuild-pm issues
+## 2026-11-05-conf-4s-virtualized-class-holds-hosts-that-measure-2-6 and
+## 2026-11-12-the-add-on-units-conf-4-gate-scores-the-hosts-drop-ins-with-the-unit).
+## https://www.freedesktop.org/software/systemd/man/systemd-analyze.html
 ##
 ## *Mocking.* None: the real renderers, systemd's real analyser.
 
@@ -54,23 +71,44 @@ removeDir(work)
 createDir(work)
 
 proc analyser(): string =
-  result = findExe("systemd-analyze")
-  doAssert result.len > 0, "systemd-analyze is not on PATH: this gate " &
-    "needs systemd's offline security analyser (systemd 250 or later)"
+  result = getEnv("REPRO_SYSTEMD_ANALYZE")
+  doAssert result.len > 0 and fileExists(result),
+    "REPRO_SYSTEMD_ANALYZE does not name the dev shell's pinned " &
+    "systemd-analyze (got '" & result & "'): this gate needs systemd's " &
+    "offline security analyser, and the host's would make the score a " &
+    "function of the host's systemd version"
 
-proc exposure(unitFile: string): tuple[level: string; withinOf: proc(t: int): bool] =
-  ## The level systemd prints, and a check against a threshold.
-  let exe = analyser()
-  let (o, c) = execCmdEx(quoteShellCommand([exe, "security", "--offline=yes",
-    "--no-pager", unitFile]))
-  doAssert c == 0, "systemd-analyze security failed on " & unitFile & ": " & o
-  for l in o.splitLines():
+proc privateRoot(name, content: string): string =
+  ## A root holding only ``name`` and an empty security policy.
+  result = work / ("root-" & name)
+  removeDir(result)
+  createDir(result / "etc/systemd/system")
+  writeFile(result / "etc/systemd/system" / name, content)
+  writeFile(result / "security-policy.json", "{}\n")
+
+proc analyse(root, name: string; extra: openArray[string] = []): (string, int) =
+  ## ``systemd-analyze security`` of ``name`` alone under ``root``.
+  var argv = @["env", "-u", "SYSTEMD_UNIT_PATH", analyser(), "security",
+    "--offline=yes", "--no-pager", "--root=" & root,
+    "--security-policy=" & root / "security-policy.json"]
+  argv.add extra
+  argv.add name
+  execCmdEx(quoteShellCommand(argv))
+
+proc level(output: string): string =
+  for l in output.splitLines():
     if "Overall exposure level" in l:
-      result.level = l.split(':')[^1].strip()
-  let f = unitFile
+      result = l.split(':')[^1].strip()
+
+proc exposure(name, content: string): tuple[level: string; withinOf: proc(t: int): bool] =
+  ## The level systemd prints, and a check against a threshold.
+  let root = privateRoot(name, content)
+  let (o, c) = analyse(root, name)
+  doAssert c == 0, "systemd-analyze security failed on " & name & ": " & o
+  result.level = level(o)
+  doAssert result.level.len > 0, "no exposure verdict for " & name & ": " & o
   result.withinOf = proc(t: int): bool =
-    let (_, rc) = execCmdEx(quoteShellCommand([exe, "security",
-      "--offline=yes", "--no-pager", "--threshold=" & $t, f]))
+    let (_, rc) = analyse(root, name, ["--threshold=" & $t])
     rc == 0
 
 proc ownUnits(): seq[(string, string)] =
@@ -100,15 +138,13 @@ suite "t_addon_units_meet_confinement_floor":
     var all = ownUnits() & floorUnits()
     var seen: seq[string]
     for (name, content) in all:
-      let path = work / name
-      writeFile(path, content)
       var threshold = -1
       for (n, t) in Thresholds:
         if n == name: threshold = t
       checkpoint name
       check threshold >= 0          # a service unit with no committed level
       if threshold < 0: continue
-      let e = exposure(path)
+      let e = exposure(name, content)
       checkpoint name & ": " & e.level & ", threshold " & $threshold
       echo name, ": ", e.level
       check e.withinOf(threshold)
@@ -116,6 +152,40 @@ suite "t_addon_units_meet_confinement_floor":
     for (n, _) in Thresholds:
       checkpoint "rendered: " & n
       check n in seen
+
+  test "a host drop-in does not enter a unit's score":
+    # LXC's own drop-in, verbatim (distrobuilder lxc.generator,
+    # fix_systemd_override_unit, systemd >= 256, unprivileged), on the host's
+    # unit search path through $SYSTEMD_UNIT_PATH -- read exactly as
+    # /run/systemd/system is, so the case needs neither root nor a container.
+    let dropins = work / "host-units" / "service.d"
+    createDir(dropins)
+    writeFile(dropins / "zzz-lxc-service.conf", "[Service]\nProcSubset=all\n" &
+      "ProtectProc=default\nProtectControlGroups=no\nProtectKernelTunables=no\n" &
+      "NoNewPrivileges=no\nLoadCredential=\nPrivateNetwork=no\nImportCredential=\n")
+    var apply = ""
+    for (n, c) in ownUnits():
+      if n == AgentApplyUnit: apply = c
+    check apply.len > 0
+    let clean = exposure(AgentApplyUnit, apply).level
+    let saved = getEnv("SYSTEMD_UNIT_PATH")
+    let hadSaved = existsEnv("SYSTEMD_UNIT_PATH")
+    putEnv("SYSTEMD_UNIT_PATH", work / "host-units" & ":")
+    try:
+      # Positive control: the unit file passed as a path, with no root, takes
+      # the host's drop-in -- the invocation this gate used to make.
+      let path = work / AgentApplyUnit
+      writeFile(path, apply)
+      let (o, _) = execCmdEx(quoteShellCommand([analyser(), "security",
+        "--offline=yes", "--no-pager", path]))
+      checkpoint "without a private root: " & level(o) & ", alone: " & clean
+      check level(o).len > 0
+      # The drop-in relaxes settings, so it can only raise the exposure.
+      check parseFloat(level(o).split(' ')[0]) > parseFloat(clean.split(' ')[0])
+      check exposure(AgentApplyUnit, apply).level == clean
+    finally:
+      if hadSaved: putEnv("SYSTEMD_UNIT_PATH", saved)
+      else: delEnv("SYSTEMD_UNIT_PATH")
 
   test "what the score cannot weigh":
     var apply, store, closure = ""
