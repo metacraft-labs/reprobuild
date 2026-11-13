@@ -13346,6 +13346,17 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "t_group_tests_e2e_addon_g01",
     singleReason: ""),
   TestSpec(
+    source: "tests/e2e/addon/t_addon_plan_only_write_allowlist.nim",
+    binary: "build/test-bin/t_addon_plan_only_write_allowlist",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "t_group_tests_e2e_addon_g01",
+    singleReason: ""),
+  TestSpec(
     source: "tests/e2e/addon/t_addon_registry_mode_round_trip.nim",
     binary: "build/test-bin/t_addon_registry_mode_round_trip",
     defines: @[],

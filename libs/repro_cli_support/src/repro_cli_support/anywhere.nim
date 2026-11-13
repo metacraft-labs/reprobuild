@@ -300,6 +300,14 @@ proc runAnywhereAddon*(o: AnywhereOptions; work: string): AnywhereResult =
     # 8. Remove what was carried, whatever happened.
     discard ssh(o, "clean up", "umount " & quoteShell(RemoteDir) &
       "; rmdir " & quoteShell(RemoteDir), 120)
+    when mutated("anywhere-probe-leaves-files"):
+      # FALSIFYING MUTATION (see repro_addon/mutations.nim): the clean-up
+      # leaves files on disk-backed filesystems the base fingerprint does
+      # not cover, which Anywhere Safety Contract §5's add-on exception
+      # forbids and only the gate's disk-write listing can see.
+      discard ssh(o, "clean up", "mkdir -p /var/lib/repro-anywhere-left && " &
+        "touch /var/tmp/repro-anywhere-left /root/.repro-anywhere-left " &
+        "/var/lib/repro-anywhere-left/x", 120)
 
 # ---------------------------------------------------------------------------
 # The command line.

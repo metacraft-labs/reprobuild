@@ -56,6 +56,11 @@
 ##                                            text it applies (an ENGINE
 ##                                            mutation: build with
 ##                                            REPRO_ADDON_MUTATION set)
+## ``anywhere-probe-leaves-files``           `repro anywhere`'s clean-up
+##                                            leaves a file in /var/tmp,
+##                                            /root and /var/lib (an ENGINE
+##                                            mutation: build with
+##                                            REPRO_ADDON_MUTATION set)
 ## ``image-keeps-random-seed``               the image assembly's clean-up
 ##                                            leaves systemd-random-seed
 ##                                            running, so power-off writes
@@ -986,6 +991,7 @@ const
                           "image-keeps-first-boot-state",
                           "image-keeps-random-seed",
                           "anywhere-digest-omits-profile",
+                          "anywhere-probe-leaves-files",
                           "apply-skips-kind-check",
                           "uninstall-discards-state-on-drift",
                           "observer-never-package-owned",
