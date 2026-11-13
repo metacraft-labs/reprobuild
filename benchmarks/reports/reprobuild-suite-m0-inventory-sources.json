@@ -57273,8 +57273,8 @@
       "owner": "tests/unit",
       "requiresReproBinary": true,
       "source": "tests/unit/t_provider_compile_failure_says_how_the_action_ended.nim",
-      "sourceSuiteCount": 2,
-      "staticCaseCount": 5,
+      "sourceSuiteCount": 3,
+      "staticCaseCount": 6,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

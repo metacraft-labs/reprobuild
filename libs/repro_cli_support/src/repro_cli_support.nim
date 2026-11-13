@@ -13999,7 +13999,8 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
           (if item.reason.len > 0: " reason=" & item.reason else: "") &
           providerCompileInvocationSummary())
       if providerCompileResult.hasFailedActions():
-        raise newException(OSError, providerCompileFailure(providerCompileResult))
+        raise newException(OSError, providerCompileFailureWithLog(providerCompileResult,
+          providerArtifactPath))
       if not fileExists(extendedPath(providerArtifactPath)):
         raise newException(IOError,
           "provider compile edge did not write artifact: " & providerArtifactPath)
@@ -31802,7 +31803,8 @@ proc prepareBuildGraphInspection(target: string; mode: ToolProvisioningMode;
     # than just its own last consultation.
     noteProviderCompileConsultation(providerCompileResult)
     if providerCompileResult.hasFailedActions():
-      raise newException(OSError, providerCompileFailure(providerCompileResult))
+      raise newException(OSError, providerCompileFailureWithLog(providerCompileResult,
+          providerArtifactPath))
     # Re-derived from the engine's own decision now that the hand-written
     # freshness gate is gone: the edge was scheduled, and the engine either
     # restored its outputs from the CAS (``asCacheHit``) or accepted the
@@ -32040,7 +32042,8 @@ proc refreshRecipeProviderSnapshot(target: string;
     # than just its own last consultation.
     noteProviderCompileConsultation(providerCompileResult)
     if providerCompileResult.hasFailedActions():
-      raise newException(OSError, providerCompileFailure(providerCompileResult))
+      raise newException(OSError, providerCompileFailureWithLog(providerCompileResult,
+          providerArtifactPath))
     if not fileExists(extendedPath(providerArtifactPath)):
       raise newException(IOError,
         "provider compile edge did not write artifact: " & providerArtifactPath)
@@ -92164,7 +92167,8 @@ proc solverInputsFromCompiledProvider(projectDir: string;
           suppressTrace: true,
           skipCacheHitEvidence: true))
         if compiled.hasFailedActions():
-          raise newException(OSError, providerCompileFailure(compiled))
+          raise newException(OSError, providerCompileFailureWithLog(compiled,
+          providerArtifactPath))
         let lockProviderConsistency = providerCompileConsistencyAfterExecution(
           plan, providerArtifactPath)
         if not lockProviderConsistency.fresh:

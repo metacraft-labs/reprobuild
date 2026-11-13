@@ -141,3 +141,22 @@ suite "a failure that never launched still says why":
     let report = recordEdgeFailure(root / "file" / "sub", "x", "the failure")
     check report.startsWith("the failure")
     check "could not be written" in report
+
+suite "every provider-compile failure site leaves a log":
+
+  test "a real failed compile is logged beside the provider artifact":
+    let sh = findExe("sh")
+    if sh.len == 0:
+      skip(NoShell)
+    else:
+      let root = createTempDir("repro-provider-failure-", "")
+      defer: removeDir(root)
+      let res = build(root, [shellAction(sh, root, "__repro_provider_compile",
+        "echo 'Error: undeclared identifier' >&2; exit 3")])
+      let artifact = root / "out" / "provider.artifact"
+      let report = providerCompileFailureWithLog(res, artifact)
+      let logPath = root / "out" / "provider-compile-failure.log"
+      check fileExists(logPath)
+      check "Error: undeclared identifier" in readFile(logPath)
+      check "exit code 3" in report
+      check ("full report: " & logPath) in report

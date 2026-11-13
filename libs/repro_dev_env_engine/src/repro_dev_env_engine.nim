@@ -191,6 +191,15 @@ proc providerCompileFailure*(run: BuildRunResult): string =
       return describeFailedAction(item)
   "provider compile failed"
 
+proc providerCompileFailureWithLog*(run: BuildRunResult;
+                                    artifactPath: string): string =
+  ## `providerCompileFailure` for a caller that has the provider artifact
+  ## path: the report is also written to `provider-compile-failure.log`
+  ## beside that artifact and the returned text names the file, so every
+  ## provider-compile failure leaves something a consumer can open.
+  recordEdgeFailure(parentDir(artifactPath), "provider-compile-failure",
+    providerCompileFailure(run))
+
 proc providerCompileBuildAction(plan: ProviderCompilePlan;
                                 modulePath, interfacePath, artifactPath,
                                 helperCliPath, workDir: string;
