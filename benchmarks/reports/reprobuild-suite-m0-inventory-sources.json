@@ -9680,7 +9680,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_addon/tests/t_addon_units_meet_confinement_floor.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 2,
+      "staticCaseCount": 3,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
