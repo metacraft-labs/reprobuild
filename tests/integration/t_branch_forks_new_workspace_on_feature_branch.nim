@@ -682,6 +682,10 @@ suite "M27/WV-6 — repro branch <path> forks a new workspace":
       check res.code == 0
       check currentBranch(gitBin, forkPath / "lib-a") == "review-me"
       check currentBranch(gitBin, forkPath / "lib-b") == "review-me"
+      # The adopted fork is a workspace like any other: it carries the state
+      # file, or `hooks ensure --vcs` and the pre-push gate treat it as a
+      # single repo (issue 2026-11-13).
+      check fileExists(forkPath / ".repro" / "workspace-state.toml")
 
       # The mirror-image refusal: a branch that exists nowhere cannot be
       # adopted, so neither flag can silently do the other's job.
