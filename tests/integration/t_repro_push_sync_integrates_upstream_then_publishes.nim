@@ -52,6 +52,7 @@ import std/[json, os, osproc, strutils, tempfiles, unittest]
 import repro_test_support/reasoned_skip
 
 import repro_test_support
+import repro_test_support/recipe_dependencies
 import repro_workspace_manifests
 
 proc q(value: string): string = quoteShell(value)
@@ -137,7 +138,6 @@ name = "app"
 path = "app"
 remote = "app-origin"
 mainline = "main"
-depends = ["lib"]
 """
 
 const libFragment = """
@@ -212,6 +212,11 @@ proc setupFixture(gitBin, slug: string): Fixture =
 
   cloneInto(gitBin, result.appOrigin, workspaceRoot / "app")
   cloneInto(gitBin, result.libOrigin, workspaceRoot / "lib")
+  # app depends on lib where reprobuild reads it: app's repro.nim, and the
+  # committed lock derived from it (owner decision 2026-11-05; this used to be
+  # a fragment `depends`). Published, so the fixture starts clean.
+  discard declareDependenciesInRecipes(gitBin, result.reproBin, workspaceRoot,
+    [("lib", newSeq[string]()), ("app", @["lib"])])
   result.workspaceRoot = workspaceRoot
   writeWorkspaceBranch(workspaceRoot, project = "app", branch = "main")
   # Central lock publication is OPT-IN (MO-14). Absent
@@ -322,6 +327,22 @@ suite "RA-25 — repro push --sync integrates upstream then publishes":
       check ls.output.contains("local.txt")
       check ls.output.contains("teammate.txt")
       check report["lockPublished"].getBool()
+
+      # app's committed lock pinned lib's PRE-rebase commit, which the rebase
+      # replaced; the push re-pinned it at the rebased HEAD and committed that
+      # in app (Unified-Locking-And-Hooks.md §14.9), so the lock app published
+      # names the commit lib published. Falsifiable: without the re-pin, app's
+      # own gate refuses the stale pin (`committed_lock_sibling_pin_stale`)
+      # and the push exits non-zero above.
+      var appRepinned = false
+      for sr in report["syncResults"]:
+        if sr["name"].getStr() == "app" and sr["action"].getStr() == "re-pin":
+          appRepinned = sr["integrated"].getBool()
+      check appRepinned
+      let appLock = runCmd(q(gitBin) & " -C " & q(fx.appOrigin) &
+        " show refs/heads/main:repro.lock")
+      check appLock.code == 0
+      check ("revision = \"" & libBareTip & "\"") in appLock.output
 
       # ---- Control: plain push (no --sync) REFUSES the divergence ---------
       # Same divergence, fresh fixture: without --sync the divergent member

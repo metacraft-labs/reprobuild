@@ -8,13 +8,19 @@
 ##
 ## ## Topology (the issue's, reduced)
 ##
-##     app  --depends-->  lib  --depends-->  core
-##      ^                                     |
-##      +------- core/flake.nix pins app -----+   (`app-src`, rev-pinned,
-##                                                 `flake = false`)
+##     app  --uses:-->  lib  --uses:-->  core
+##      ^                                 |
+##      +----- core/flake.nix pins app ---+   (`app-src`, rev-pinned,
+##                                             `flake = false`)
+##
+## Every dependency edge is declared where reprobuild reads one: a `uses:` in
+## the dependent's `repro.nim`, recorded by `repro lock refresh` in its
+## committed `repro.lock` (owner decision 2026-11-05,
+## Unified-Locking-And-Hooks.md §14.9). The fragments declare membership and
+## placement only; they used to carry these edges as `depends`.
 ##
 ## `app` plays `codetracer`, `lib` plays `nim-shm-queue` (the intermediate
-## whose `depends = ["reprobuild"]` closes the loop) and `core` plays
+## whose dependency on `reprobuild` closes the loop) and `core` plays
 ## `reprobuild`, whose `codetracer-src` input pins codetracer by revision.
 ## `other` is a sibling `core`'s flake ALSO pins but that does not depend on
 ## `core` — the negative control for the deferral rule.
@@ -26,6 +32,11 @@
 ## bulk override, or membership in the develop set alone, leaves the pin to the
 ## lock checks and the gate does not compare it. Every case that needs the
 ## pre-push flake stage to compare `app-src` therefore records that override.
+##
+## Each dependent's commits are made the way its managed pre-commit hook makes
+## them, with the lock re-pinned at the siblings' HEADs (`commitFile`, through
+## `repro lock refresh`) — except `core`'s, whose lagging pins several cases
+## are about.
 ##
 ## `app` carries its own committed `repro.lock`, as `codetracer` does. That lock
 ## puts `app` in the develop set, which by itself does not substitute the
@@ -82,14 +93,14 @@
 ## `nix` is not run: the gate reads `flake.lock` and never evaluates it, and
 ## the `narHash` values are inert placeholders for the same reason the NF-2
 ## fixture's are. The explicit override document is written by hand in the
-## exact shape `repro develop <input> --into=…` writes, because that verb needs
-## a `repro.nim` in both checkouts and these repos carry none
-## (`substituteAppInCore` says why it is that document and not the workspace
-## override file).
+## exact shape `repro develop <input> --into=…` writes, so that these cases
+## do not also exercise that verb (`substituteAppInCore` says why it is that
+## document and not the workspace override file).
 
 import std/[json, os, osproc, strutils, tempfiles, unittest]
 
 import repro_test_support
+import repro_test_support/recipe_dependencies
 import repro_workspace_manifests
 
 proc q(value: string): string = quoteShell(value)
@@ -134,24 +145,36 @@ proc configure(fx: Fixture; path: string) =
   discard fx.gitIn(path, "config user.email tester@example.invalid")
   discard fx.gitIn(path, "config user.name 'Mutual Pin Tester'")
 
+proc refreshLock(fx: Fixture; repo: string) =
+  ## `repro lock refresh` in ``repo``: the lock its recipe derives, at the
+  ## siblings' current HEADs. Commits nothing.
+  let refreshed = refreshCommittedLock(fx.repro, repo)
+  if refreshed.code != 0:
+    stderr.writeLine("FIXTURE ABORT: repro lock refresh failed in " & repo &
+      ":\n" & refreshed.output)
+    quit 1
+
 proc commitFile(fx: Fixture; repo, file, content, message: string): string =
+  ## A commit of ``file``. A dependent that carries a committed lock has it
+  ## re-pinned first, as its managed pre-commit hook would; `core` never does
+  ## (its lagging pins are what the stage-3c cases are about), and neither
+  ## does a repo with no lock.
   writeFile(repo / file, content)
+  if extractFilename(repo) != "core" and fileExists(repo / "repro.lock"):
+    fx.refreshLock(repo)
   discard fx.gitIn(repo, "add -A")
   discard fx.gitIn(repo, "commit -q -m " & q(message))
   fx.head(repo)
 
-proc lockDep(fx: Fixture; name, path, sha, depends: string): string =
-  "{ name = \"" & name & "\", path = \"" & path &
-    "\", coord_kind = \"vcs\", url = \"" & fx.url(name) &
-    "\", revision = \"" & sha & "\", integrity = \"git-sha1:" &
-    sha & "\", version = \"\", visibility = \"public\", participation = \"\"" &
-    ", depends = \"" & depends & "\", groups = \"\" }"
-
-proc committedLock(deps: seq[string]): string =
-  "schema = \"reprobuild.solved-graph-lock.v2\"\n\n[lock]\n" &
-    "platform = \"x86_64-linux\"\noptimal = true\n" &
-    "inputs_digest = \"mutual-pin-fixture\"\nvariants = []\npackages = []\n" &
-    "deps = [" & deps.join(", ") & "]\n"
+proc declareUses(fx: Fixture; repo: string; uses: seq[string]) =
+  ## Give ``repo`` the recipe declaring ``uses``, lock it, commit both and
+  ## publish: the published state a case starts from.
+  writeDependencyRecipe(fx.dir(repo), uses)
+  fx.refreshLock(fx.dir(repo))
+  discard fx.gitIn(fx.dir(repo), "add -A")
+  discard fx.gitIn(fx.dir(repo), "commit -q -m " & q(repo & " uses " &
+    (if uses.len > 0: uses.join(", ") else: "nothing")))
+  discard fx.gitIn(fx.dir(repo), "push -q origin HEAD:main")
 
 proc flakeNode(fx: Fixture; input, repo, rev: string; revPinned: bool): string =
   ## One `flake = false` git input node in nix's on-disk shape. `original.rev`
@@ -191,12 +214,10 @@ proc writeCoreFlake(fx: Fixture; appPin, otherPin: string) =
     "        \"app-src\": \"app-src\",\n        \"other-src\": \"other-src\"\n" &
     "      }\n    }\n  },\n  \"root\": \"root\",\n  \"version\": 7\n}\n")
 
-proc repoToml(name: string; depends: seq[string]): string =
-  result = "schema = \"reprobuild.workspace.repo.v2\"\n\n[repo]\n" &
+proc repoToml(name: string): string =
+  "schema = \"reprobuild.workspace.repo.v2\"\n\n[repo]\n" &
     "name = \"" & name & "\"\npath = \"" & name & "\"\n" &
     "remote = \"" & name & "-origin\"\nmainline = \"main\"\n"
-  if depends.len > 0:
-    result.add("depends = [\"" & depends.join("\", \"") & "\"]\n")
 
 proc setup(slug: string; libDependsOnCore = true;
     extraDependsOnCore = false): Fixture =
@@ -220,13 +241,12 @@ proc setup(slug: string; libDependsOnCore = true;
     writeFile(seedDir / ".gitignore", ".repro/\n")
     writeFile(seedDir / "README.md", name & "\n")
     # A substituted sibling must be a flake (NF-1), exactly like codetracer.
+    # Its own committed lock (written below, from its recipe) is the record
+    # that puts it in the develop set (a repo's committed lock contributes its
+    # ROOT entry), which is what makes `core`'s flake input really
+    # substituted by this checkout.
     if name in ["app", "other"]:
       writeFile(seedDir / "flake.nix", "{ outputs = _: { }; }\n")
-      # Its own committed lock is the record that puts it in the develop set
-      # (a repo's committed lock contributes its ROOT entry), which is what
-      # makes `core`'s flake input really substituted by this checkout.
-      writeFile(seedDir / "repro.lock", committedLock(@[
-        fx.lockDep(name, ".", "0000000000000000000000000000000000000001", "")]))
     discard fx.gitIn(seedDir, "add -A")
     discard fx.gitIn(seedDir, "commit -q -m " & q("seed " & name))
     discard fx.gitIn(seedDir, "remote add origin " & q(fx.bare(name)))
@@ -243,17 +263,8 @@ proc setup(slug: string; libDependsOnCore = true;
   project.add("includes = [\"repos/app.toml\", \"repos/lib.toml\", " &
     "\"repos/core.toml\", \"repos/other.toml\", \"repos/extra.toml\"]\n")
   writeFile(result.manifests / "projects" / "app.toml", project)
-  writeFile(result.manifests / "repos" / "app.toml", repoToml("app", @["lib"]))
-  # `libDependsOnCore = false` breaks the cycle, for the `repro.lock` stage's
-  # non-cyclic negative control.
-  writeFile(result.manifests / "repos" / "lib.toml",
-    repoToml("lib", if libDependsOnCore: @["core"] else: @[]))
-  writeFile(result.manifests / "repos" / "core.toml", repoToml("core", @[]))
-  writeFile(result.manifests / "repos" / "other.toml", repoToml("other", @[]))
-  # `extraDependsOnCore` makes `extra` an override whose own `depends` reaches a
-  # member of `app`'s closure.
-  writeFile(result.manifests / "repos" / "extra.toml",
-    repoToml("extra", if extraDependsOnCore: @["core"] else: @[]))
+  for name in Repos:
+    writeFile(result.manifests / "repos" / (name & ".toml"), repoToml(name))
   discard require(q(fx.git) & " init -q --bare -b main " &
     q(fx.scratch / "manifest.git"))
   discard require(q(fx.git) & " init -q -b main " & q(fx.manifests))
@@ -268,6 +279,33 @@ proc setup(slug: string; libDependsOnCore = true;
       q(fx.dir(name)))
     fx.configure(fx.dir(name))
   writeWorkspaceBranch(result.workspace, project = "app", branch = "main")
+  # THE GRAPH, in the recipes, dependencies first so each lock pins the
+  # published HEAD its dependency ends on. `libDependsOnCore = false` breaks
+  # the cycle, for the `repro.lock` stage's non-cyclic negative control;
+  # `extraDependsOnCore` makes `extra` an override whose own dependencies
+  # reach a member of `app`'s closure. `core` gets a recipe and no lock (a
+  # case that needs one gives it one); `other` and `app` get their locks.
+  writeDependencyRecipe(fx.dir("core"), @[])
+  discard fx.gitIn(fx.dir("core"), "add -A")
+  discard fx.gitIn(fx.dir("core"), "commit -q -m 'core recipe'")
+  discard fx.gitIn(fx.dir("core"), "push -q origin HEAD:main")
+  if libDependsOnCore: fx.declareUses("lib", @["core"])
+  else:
+    writeDependencyRecipe(fx.dir("lib"), @[])
+    discard fx.gitIn(fx.dir("lib"), "add -A")
+    discard fx.gitIn(fx.dir("lib"), "commit -q -m 'lib recipe'")
+    discard fx.gitIn(fx.dir("lib"), "push -q origin HEAD:main")
+  fx.declareUses("other", @[])
+  if extraDependsOnCore: fx.declareUses("extra", @["core"])
+  else:
+    writeDependencyRecipe(fx.dir("extra"), @[])
+    discard fx.gitIn(fx.dir("extra"), "add -A")
+    discard fx.gitIn(fx.dir("extra"), "commit -q -m 'extra recipe'")
+    discard fx.gitIn(fx.dir("extra"), "push -q origin HEAD:main")
+  fx.declareUses("app", @["lib"])
+  for i, name in Repos:
+    fx.seed[i] = fx.head(fx.dir(name))
+  result = fx
   writeFile(result.workspace / "repro-workspace.toml",
     "schema = \"reprobuild.workspace.settings.v1\"\n\n[records]\n" &
     "url = \"" & fileUrl(fx.scratch / "manifest.git") & "\"\n" &
@@ -287,29 +325,41 @@ proc release(fx: Fixture) =
     delEnv(name)
   removeDir(fx.scratch)
 
-proc pinLibInCoreLock(fx: Fixture; libPin: string) =
-  ## Give `core` a committed `repro.lock` pinning `lib` — the issue's other
-  ## mutual pin: `reprobuild/repro.lock` pins `nim-shm-queue`, whose
-  ## `depends = ["reprobuild"]`. Committed and PUBLISHED, so the pin itself is
-  ## obtainable; the case then moves `lib` and commits in `core`.
-  writeFile(fx.dir("core") / "repro.lock", committedLock(@[
-    fx.lockDep("core", ".", "0000000000000000000000000000000000000001", ""),
-    fx.lockDep("lib", "../lib", libPin, "")]))
+proc pinInCoreLock(fx: Fixture; sibling, pin: string; commit = true) =
+  ## Make `core` use ``sibling`` and commit the lock that records it, pinned at
+  ## ``pin`` — for `lib`, the issue's other mutual pin: `reprobuild/repro.lock`
+  ## pins `nim-shm-queue`, which itself depends on `reprobuild`. The lock is
+  ## written by `repro lock refresh` with the sibling checked out at ``pin``,
+  ## and the sibling is put back where it was. Committed and PUBLISHED, so the
+  ## pin itself is obtainable; the case then moves the sibling and commits in
+  ## `core`. With ``commit = false`` the recipe and lock are left for the
+  ## case's own (unpublished) `core` commit to carry.
+  let sibDir = fx.dir(sibling)
+  let was = fx.head(sibDir)
+  if pin != was: discard fx.gitIn(sibDir, "reset -q --hard " & pin)
+  # A sibling that itself uses `core` closes a cycle, and is named as a peer
+  # (``writeDependencyRecipe`` says why).
+  if "\"core\"" in readFile(sibDir / "repro.nim"):
+    writeDependencyRecipe(fx.dir("core"), @[], peers = [sibling])
+  else:
+    writeDependencyRecipe(fx.dir("core"), @[sibling])
+  fx.refreshLock(fx.dir("core"))
+  if pin != was: discard fx.gitIn(sibDir, "reset -q --hard " & was)
+  if not commit: return
   discard fx.gitIn(fx.dir("core"), "add -A")
-  discard fx.gitIn(fx.dir("core"), "commit -q -m 'core repro.lock pins lib'")
+  discard fx.gitIn(fx.dir("core"), "commit -q -m " &
+    q("core repro.lock pins " & sibling))
   discard fx.gitIn(fx.dir("core"), "push -q origin HEAD:main")
 
+proc pinLibInCoreLock(fx: Fixture; libPin: string) =
+  fx.pinInCoreLock("lib", libPin)
+
 proc commitAppWork(fx: Fixture; label: string): string =
-  ## A new `app` commit carrying `app`'s committed `repro.lock`, written the way
-  ## its pre-commit hook writes it: the root entry plus every sibling at the
-  ## revision it is checked out at. Its `depends` edges are `app`'s OWN view
-  ## (`app -> lib`, nothing further) — which is what made the lock-rooted
-  ## closure miss `core` in the issue.
-  writeFile(fx.dir("app") / "repro.lock", committedLock(@[
-    fx.lockDep("app", ".", fx.seedOf("app"), "lib"),
-    fx.lockDep("lib", "../lib", fx.head(fx.dir("lib")), ""),
-    fx.lockDep("core", "../core", fx.head(fx.dir("core")), ""),
-    fx.lockDep("other", "../other", fx.head(fx.dir("other")), "")]))
+  ## A new `app` commit carrying `app`'s committed `repro.lock` as its
+  ## pre-commit hook leaves it: re-pinned at the HEADs of `lib` and of `core`,
+  ## which `app` reaches through `lib`'s recipe. `app`'s own recipe names
+  ## only `lib`, which is what made the lock-rooted closure miss `core` in the
+  ## issue when the lock recorded no transitive entries.
   fx.commitFile(fx.dir("app"), "work.txt", label & "\n", label)
 
 proc installHooks(fx: Fixture) =
@@ -349,10 +399,9 @@ proc substituteAppInCore(fx: Fixture) =
   ## Substitute `core`'s rev-pinned `app-src` input with the `app` checkout by
   ## an EXPLICIT develop override: `core`'s per-project override document, the
   ## record `repro develop app-src --into=<app>` keeps in `core`'s git
-  ## directory. Written in that document's exact on-disk shape, because the
-  ## verb itself needs a `repro.nim` in both checkouts and this fixture's repos
-  ## carry none (the gate matches an override by name or by checkout path, so
-  ## the path is what names `app` here).
+  ## directory. Written in that document's exact on-disk shape, so the case
+  ## does not also exercise the verb (the gate matches an override by name or
+  ## by checkout path, so the path is what names `app` here).
   ##
   ## Not the workspace `.repro/develop-overrides.toml` with `--only`
   ## provenance, although that is equally explicit: stage 3 reads THAT file,
@@ -601,19 +650,30 @@ suite "mutually pinned repro.lock siblings (stage 3c) land through repro push":
     checkpoint("raw lib push:\n" & libFirst.output)
     check libFirst.code != 0
     check gateRefused(libFirst.output, "unpublished", "core")
+    # core's own lock pins lib, so lib is in core's closure (lock edges), and
+    # a raw push keeps the ordinary publication stage: it is refused over
+    # lib's unpublished HEAD (Unified-Locking-And-Hooks.md §13.5, amended
+    # 2026-11-07). The lagging PIN is not what refuses it: stage 3c defers it
+    # and names the order that terminates.
     let core = fx.rawPush("core")
     checkpoint("raw core push:\n" & core.output)
-    check core.code == 0
+    check core.code != 0
+    check gateRefused(core.output, "unpublished", "lib")
     check not gateRefused(core.output, "committed_lock_sibling_pin_stale",
       "core")
     check "repro.lock pin DEFERRED" in core.output
     check "deferred=mutual-pin" in core.output
     check ("repro push --current-repo=" & fx.dir("lib")) in core.output
+    check fx.remoteHead("core") != coreHead
+    # That order is what `repro push` from the pinning repo follows: core,
+    # whose lock pins lib's PUBLISHED revision, then lib, whose lock pins
+    # core's new commit.
+    let pushed = fx.reproPush("core", explicit = true)
+    checkpoint("repro push from core:\n" & pushed.output)
+    check pushed.code == 0
     check fx.remoteHead("core") == coreHead
-    let lib = fx.rawPush("lib")
-    checkpoint("raw lib push after core:\n" & lib.output)
-    check lib.code == 0
     check fx.remoteHead("lib") == libHead
+    check fx.pushReport().orderOf() == @["core", "lib"]
 
   test "repro push from the dependent lands a cyclic repro.lock pin":
     let fx = setup("lock-cycle-push")
@@ -896,9 +956,7 @@ suite "develop overrides and worktrees land through repro push":
     defer: fx.release()
     let extraHead = fx.commitFile(fx.dir("extra"), "work.txt", "extra\n",
       "extra: unpublished override")
-    writeFile(fx.dir("core") / "repro.lock", committedLock(@[
-      fx.lockDep("core", ".", "0000000000000000000000000000000000000001", ""),
-      fx.lockDep("extra", "../extra", extraHead, "")]))
+    fx.pinInCoreLock("extra", extraHead, commit = false)
     let coreHead = fx.commitFile(fx.dir("core"), "work.txt", "core\n",
       "core: unpublished override pinning extra")
     fx.registerOverrides(["extra", "core"])

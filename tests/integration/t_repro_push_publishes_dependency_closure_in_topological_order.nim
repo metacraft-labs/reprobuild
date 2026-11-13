@@ -2,19 +2,24 @@
 ## closure in TOPOLOGICAL (dependency-first) order, never a dependent before
 ## its dependency, and publishes the workspace lock for the resulting state.
 ##
-## Topology (a 3-node chain so the toposort is non-trivial):
+## Topology (a 3-node chain so the toposort is non-trivial), declared where
+## reprobuild reads dependencies — each repo's ``repro.nim`` ``uses:``, and
+## the committed ``repro.lock`` ``repro lock refresh`` derives from it (owner
+## decision 2026-11-05; this used to be fragment ``depends``):
 ##
-##   app  depends = ["lib"]
-##   lib  depends = ["core"]
-##   core (no edge)
+##   app  uses: "lib"
+##   lib  uses: "core"
+##   core (uses nothing)
 ##
 ## So app's closure is {app, lib, core}, and the only valid push order that
 ## never publishes a dependent before its dependency is core → lib → app.
 ## ``other`` is an UNRELATED repo (not in app's closure) and must NOT be
 ## pushed.
 ##
-## All four repos start published, then each closure member (app, lib, core)
-## gets an UNPUBLISHED local commit. ``repro push`` (from app) must:
+## All four repos start published, then each closure member gets an
+## UNPUBLISHED local commit, made dependency-first through the managed
+## ``pre-commit`` hook so each commit re-pins the siblings it locks (the state
+## a developer's commits leave). ``repro push`` (from app) must:
 ##   - push core, then lib, then app (the assertion: core BEFORE lib BEFORE
 ##     app — a dependent is never published before its dependency);
 ##   - leave each bare upstream containing the local commit (both bares now
@@ -35,6 +40,7 @@
 import std/[json, os, osproc, strutils, tables, tempfiles, unittest]
 
 import repro_test_support
+import repro_test_support/[reasoned_skip, recipe_dependencies]
 import repro_workspace_manifests
 import repro_cli_support/push_hook_protocol
 
@@ -85,10 +91,19 @@ proc cloneInto(gitBin, originPath, targetPath: string) =
   discard requireGit(q(gitBin) & " -C " & q(targetPath) &
     " config user.name \"RA25 Tester\"")
 
-proc commitLocal(gitBin, repoPath, message: string): string =
-  ## Commit WITHOUT pushing — the new HEAD is unpublished.
+proc commitLocal(gitBin, reproBin, repoPath, message: string): string =
+  ## Commit WITHOUT pushing — the new HEAD is unpublished. The managed
+  ## pre-commit hook re-pins the committed lock, so it must be serviced by the
+  ## ``repro`` under test (``REPROBUILD_REPRO``), as ``invokePush`` does: the
+  ## ``repro`` on the ambient PATH may generate a different hook body, and the
+  ## hook then refuses to run it and re-pins nothing.
   writeFile(repoPath / "local.txt", message & "\n")
   discard requireGit(q(gitBin) & " -C " & q(repoPath) & " add local.txt")
+  let prior = getEnv("REPROBUILD_REPRO")
+  putEnv("REPROBUILD_REPRO", reproBin)
+  defer:
+    if prior.len > 0: putEnv("REPROBUILD_REPRO", prior)
+    else: delEnv("REPROBUILD_REPRO")
   discard requireGit(q(gitBin) & " -C " & q(repoPath) & " commit -m " & q(message))
   result = requireGit(q(gitBin) & " -C " & q(repoPath) &
     " rev-parse HEAD").strip()
@@ -122,7 +137,6 @@ name = "app"
 path = "app"
 remote = "app-origin"
 mainline = "main"
-depends = ["lib"]
 """
 
 const libFragment = """
@@ -133,7 +147,6 @@ name = "lib"
 path = "lib"
 remote = "lib-origin"
 mainline = "main"
-depends = ["core"]
 """
 
 const coreFragment = """
@@ -228,6 +241,17 @@ proc setupFixture(gitBin, slug: string): Fixture =
   cloneInto(gitBin, result.lib.origin, workspaceRoot / "lib")
   cloneInto(gitBin, result.core.origin, workspaceRoot / "core")
   cloneInto(gitBin, result.other.origin, workspaceRoot / "other")
+  # The chain, in the recipes; each dependent's lock is written after its
+  # dependency's final seed commit, and everything is published.
+  for (repo, head) in declareDependenciesInRecipes(gitBin, result.reproBin,
+      workspaceRoot, [("core", newSeq[string]()), ("other", newSeq[string]()),
+                      ("lib", @["core"]), ("app", @["lib"])]):
+    case repo
+    of "app": result.app.sha = head
+    of "lib": result.lib.sha = head
+    of "core": result.core.sha = head
+    of "other": result.other.sha = head
+    else: discard
   result.workspaceRoot = workspaceRoot
   result.userPostCommitLog = result.scratch / "manifest-user-post-commit.log"
   writeWorkspaceBranch(workspaceRoot, project = "app", branch = "main")
@@ -308,17 +332,27 @@ suite "RA-25 — repro push: closure published in topological order":
   test "t_repro_push_publishes_dependency_closure_in_topological_order":
     let gitBin = findExe("git")
     if gitBin.len == 0:
-      skip()
+      skip("git is not on PATH")
     else:
       let fx = setupFixture(gitBin, "main")
       defer: removeDir(fx.scratch)
 
       # Give each CLOSURE member an unpublished local commit; ``other`` stays
       # published (untouched) so we can assert it is NOT pushed.
-      discard commitLocal(gitBin, fx.workspaceRoot / "app", "app work")
-      discard commitLocal(gitBin, fx.workspaceRoot / "lib", "lib work")
-      discard commitLocal(gitBin, fx.workspaceRoot / "core", "core work")
+      # Hooks first, then dependency-first commits: each dependent's commit
+      # re-pins the dependency commit made just before it.
       installV2Hooks(fx)
+      discard commitLocal(gitBin, fx.reproBin,
+        fx.workspaceRoot / "core", "core work")
+      discard commitLocal(gitBin, fx.reproBin,
+        fx.workspaceRoot / "lib", "lib work")
+      discard commitLocal(gitBin, fx.reproBin,
+        fx.workspaceRoot / "app", "app work")
+      # Those commits ran the managed post-commit hook, which reports on them;
+      # the assertion below is about the PUSH's own internal lock commits, so
+      # it must start from no report.
+      removeFile(fx.workspaceRoot / ".repro" / "build" / "reports" /
+        "post-commit-report.json")
 
       let res = invokePush(fx)
       checkpoint("push output: " & res.output)
@@ -397,14 +431,24 @@ suite "RA-25 — repro push: closure published in topological order":
     # ``repro push <project>`` resolves the same closure as the no-arg form.
     let gitBin = findExe("git")
     if gitBin.len == 0:
-      skip()
+      skip("git is not on PATH")
     else:
       let fx = setupFixture(gitBin, "named")
       defer: removeDir(fx.scratch)
-      discard commitLocal(gitBin, fx.workspaceRoot / "app", "app work")
-      discard commitLocal(gitBin, fx.workspaceRoot / "lib", "lib work")
-      discard commitLocal(gitBin, fx.workspaceRoot / "core", "core work")
+      # Hooks first, then dependency-first commits: each dependent's commit
+      # re-pins the dependency commit made just before it.
       installV2Hooks(fx)
+      discard commitLocal(gitBin, fx.reproBin,
+        fx.workspaceRoot / "core", "core work")
+      discard commitLocal(gitBin, fx.reproBin,
+        fx.workspaceRoot / "lib", "lib work")
+      discard commitLocal(gitBin, fx.reproBin,
+        fx.workspaceRoot / "app", "app work")
+      # Those commits ran the managed post-commit hook, which reports on them;
+      # the assertion below is about the PUSH's own internal lock commits, so
+      # it must start from no report.
+      removeFile(fx.workspaceRoot / ".repro" / "build" / "reports" /
+        "post-commit-report.json")
 
       let res = invokePush(fx, fromProject = true)
       checkpoint("named push output: " & res.output)

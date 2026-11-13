@@ -92,6 +92,7 @@ import std/[os, osproc, strutils, times, tempfiles, unittest]
 import repro_test_support/reasoned_skip
 
 import repro_test_support
+import repro_test_support/recipe_dependencies
 import repro_workspace_manifests
 
 proc q(value: string): string = quoteShell(value)
@@ -123,7 +124,6 @@ name = "lib-a"
 path = "lib-a"
 remote = "lib-a-origin"
 mainline = "main"
-depends = ["lib-b"]
 """
 
 const libBFragmentToml = """
@@ -192,7 +192,7 @@ suite "pre-push — the committed `repro.lock` is verified, never rewritten":
       let reproBin = reproBinary()
 
       let originB = scratch / "origin-lib-b.git"
-      let libBHead = seedPublishedRepo(gitBin, originB, scratch / "seed-lib-b",
+      var libBHead = seedPublishedRepo(gitBin, originB, scratch / "seed-lib-b",
         "sibling fixture")
       let originA = scratch / "origin-lib-a.git"
       discard seedPublishedRepo(gitBin, originA, scratch / "seed-lib-a",
@@ -219,11 +219,29 @@ suite "pre-push — the committed `repro.lock` is verified, never rewritten":
       discard requireGit(q(gitBin) & " -C " & q(libA) &
         " config user.name \"Committed Lock Tester\"")
 
+      # lib-a depends on lib-b where reprobuild reads a dependency — lib-a's
+      # repro.nim `uses:` it (owner decision 2026-11-05; this was a fragment
+      # `depends`) — and lib-b carries the recipe that makes it a producer.
+      # The gate holds the lock's SET to that recipe by names alone, so the
+      # operator's hand-written bytes below (a foreign platform, a made-up
+      # digest) still pass, and are still the bytes whose survival is tested.
+      discard requireGit(q(gitBin) & " -C " & q(libB) &
+        " config user.email tester@example.invalid")
+      discard requireGit(q(gitBin) & " -C " & q(libB) &
+        " config user.name \"Committed Lock Tester\"")
+      writeDependencyRecipe(libB, [])
+      discard requireGit(q(gitBin) & " -C " & q(libB) & " add -A")
+      discard requireGit(q(gitBin) & " -C " & q(libB) & " commit -m recipe")
+      discard requireGit(q(gitBin) & " -C " & q(libB) & " push origin main")
+      libBHead = requireGit(q(gitBin) & " -C " & q(libB) &
+        " rev-parse HEAD").strip()
+      writeDependencyRecipe(libA, ["lib-b"], library = false)
+
       # The committed lock is part of a published commit of lib-a, and its one
       # pin names lib-b at the revision lib-b is checked out on.
       writeFile(libA / "repro.lock",
         committedLockToml(fileUrl(originB), libBHead))
-      discard requireGit(q(gitBin) & " -C " & q(libA) & " add repro.lock")
+      discard requireGit(q(gitBin) & " -C " & q(libA) & " add -A")
       discard requireGit(q(gitBin) & " -C " & q(libA) & " commit -m lock")
       discard requireGit(q(gitBin) & " -C " & q(libA) & " push origin main")
 

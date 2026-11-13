@@ -130,6 +130,7 @@ import std/[os, osproc, strutils, tempfiles, unittest]
 import repro_test_support/reasoned_skip
 
 import repro_test_support
+import repro_test_support/recipe_dependencies
 import repro_workspace_manifests
 
 const ReprobuildRepoRoot =
@@ -179,15 +180,6 @@ package producerSource:
     discard
   build:
     discard aggregate("producer-aggregate", actions = @[])
-"""
-
-const solverInputs = """
-package app
-versions: 0.1.0
-depends: nim >=2.2.0 <3.0.0
-
-package nim
-versions: 2.2.0
 """
 
 proc q(value: string): string = quoteShell(value)
@@ -400,9 +392,14 @@ suite "a committed lock does not depend on which worktree refreshed it":
           q(work))
         configureIdentity(gitBin, work)
         writeFile(work / "README.md", name & " fixture\n")
+        # app depends on lib-b where reprobuild reads a dependency: app's
+        # repro.nim `uses:` it (owner decision 2026-11-05; this was a
+        # fragment `depends`, with a `repro.solver` sidecar for app).
         if name == "app":
-          writeFile(work / "repro.solver", solverInputs)
+          writeDependencyRecipe(work, ["lib-b"], library = false)
           writeFile(work / ".gitignore", ".repro/\n.claude/\n")
+        else:
+          writeDependencyRecipe(work, [])
         discard requireGit(q(gitBin) & " -C " & q(work) & " add -A")
         discard requireGit(q(gitBin) & " -C " & q(work) & " commit -m seed")
         discard requireGit(q(gitBin) & " -C " & q(work) &
@@ -435,7 +432,7 @@ suite "a committed lock does not depend on which worktree refreshed it":
       project.add("includes = [\n  \"repos/app.toml\",\n" &
         "  \"repos/lib-b.toml\",\n]\n")
       writeFile(workspace / "projects" / "app.toml", project)
-      writeFile(workspace / "repos" / "app.toml", fragment("app", @["lib-b"]))
+      writeFile(workspace / "repos" / "app.toml", fragment("app", @[]))
       writeFile(workspace / "repos" / "lib-b.toml", fragment("lib-b", @[]))
       writeWorkspaceBranch(workspace, project = "app", branch = "main")
 

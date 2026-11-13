@@ -28,6 +28,7 @@ import repro_lock
 import repro_lock/certificate_policy
 import repro_lock_store
 import repro_test_support
+import repro_test_support/recipe_dependencies
 import repro_workspace_manifests
 import ./every_branch_policy
 
@@ -158,12 +159,16 @@ proc setup(gitBin: string): Fixture =
   writeFile(manifests / "repos" / "app.toml",
     "schema = \"reprobuild.workspace.repo.v2\"\n\n" &
     "[repo]\nname = \"app\"\npath = \"app\"\n" &
-    "remote = \"app-origin\"\nmainline = \"main\"\n" &
-    "depends = [\"dep\"]\n")
+    "remote = \"app-origin\"\nmainline = \"main\"\n")
   writeFile(manifests / "repos" / "dep.toml",
     "schema = \"reprobuild.workspace.repo.v2\"\n\n" &
     "[repo]\nname = \"dep\"\npath = \"dep\"\n" &
     "remote = \"dep-origin\"\nmainline = \"main\"\n")
+  # app depends on dep where reprobuild reads a dependency: app's repro.nim,
+  # and the committed lock derived from it (owner decision 2026-11-05; this
+  # was a fragment `depends`). Seeded and published before any hook exists.
+  discard declareDependenciesInRecipes(gitBin, result.reproBin,
+    result.workspace, [("dep", newSeq[string]()), ("app", @["dep"])])
   let ensured = runShell(shellCommand(@[result.reproBin, "hooks", "ensure",
     "--vcs", "--workspace-root=" & result.workspace, result.workspace]))
   if ensured.code != 0:

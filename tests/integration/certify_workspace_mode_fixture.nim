@@ -96,12 +96,18 @@ proc setupWorkspaceCertifyFixture*(label: string; stems: openArray[string];
   for stem in stems:
     writeFile(app / "src" / (stem & ".txt"), stem & " v1\n")
     body.add(edgeLine(stem))
+  # The siblings app already depends on stay declared: a recipe is where its
+  # dependencies are (owner decision 2026-11-05), so a rewrite that dropped
+  # them would make the next refresh drop their pins. They are not under the
+  # import path, so they resolve as workspace projects.
+  var siblingUses = ""
+  for u in result.cf.sib.appUses: siblingUses.add("    \"" & u & "\"\n")
   writeFile(app / "repro.nim",
     "import repro_project_dsl\n\n" &
     "package app:\n" &
     "  usesImportPath \"reprobuild/packages\"\n" &
     "  uses:\n" &
-    "    \"cert-tool >=1.0 <2.0\"\n\n" &
+    "    \"cert-tool >=1.0 <2.0\"\n" & siblingUses & "\n" &
     "  build:\n" & body & buildLines)
   # Build outputs and the run log are not part of the content.
   writeFile(app / ".gitignore", ".repro/\nbuild/\n")

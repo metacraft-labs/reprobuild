@@ -91,6 +91,7 @@
 
 import std/[json, os, osproc, strutils, tempfiles, unittest]
 
+import repro_test_support/recipe_dependencies
 import repro_workspace_manifests
 
 const reproBinary = "./build/bin/repro"
@@ -381,19 +382,15 @@ suite "a refusal names a command that runs where the operator is standing":
           " " & q(ws3 / name))
         gitConfig(gitBin, ws3 / name)
         writeFile(ws3 / name / "seed.txt", seed)
+        # ``follower`` carries a recipe so that ``lead``'s can name it.
+        if name == "follower": writeDependencyRecipe(ws3 / name, @[])
         discard requireGit(q(gitBin) & " -C " & q(ws3 / name) & " add -A")
         discard requireGit(q(gitBin) & " -C " & q(ws3 / name) &
           " commit -qm " & q("seed " & name))
         discard requireGit(q(gitBin) & " -C " & q(ws3 / name) &
           " push -q origin main")
         writeFile(ws3 / "repos" / (name & ".toml"),
-          repoFragment(name, name & "-origin") &
-          # ``lead`` develops against ``follower``, so the RA-21 pre-push
-          # scope of a ``lead`` push is {lead, follower}. Without the edge the
-          # sibling's move is out of scope, the gate calls the lock current,
-          # and the refusal under test never fires — a fixture that would have
-          # passed for the wrong reason.
-          (if name == "lead": "depends = [\"follower\"]\n" else: ""))
+          repoFragment(name, name & "-origin"))
 
       writeFile(ws3 / "projects" / "pair.toml",
         "schema = \"reprobuild.workspace.project.v1\"\n\n" &
@@ -427,10 +424,40 @@ suite "a refusal names a command that runs where the operator is standing":
         requireGit(q(gitBin) & " -C " & q(ws3 / repo) &
           " rev-parse HEAD").strip()
 
+      # ``lead`` develops against ``follower``, so the RA-21 pre-push scope of
+      # a ``lead`` push is {lead, follower}. The edge is declared where
+      # reprobuild reads one: ``lead``'s recipe ``uses: "follower"``, recorded
+      # in its committed lock (owner decision 2026-11-05; this was a fragment
+      # ``depends``). Without the edge the sibling's move is out of scope, the
+      # gate calls the lock current, and the refusal under test never fires —
+      # a fixture that would have passed for the wrong reason.
+      let followerSeed = head3("follower")
+      writeFile(ws3 / "follower" / "work.txt", "follower work\n")
+      discard requireGit(q(gitBin) & " -C " & q(ws3 / "follower") & " add -A")
+      discard requireGit(q(gitBin) & " -C " & q(ws3 / "follower") &
+        " commit -qm \"follower work\"")
+      discard requireGit(q(gitBin) & " -C " & q(ws3 / "follower") &
+        " push -q origin main")
+      let followerWork = head3("follower")
+      writeDependencyRecipe(ws3 / "lead", @["follower"])
+      let leadLock = refreshCommittedLock(reproAbs, ws3 / "lead")
+      checkpoint("case C lead lock: exit " & $leadLock.code & "\n" &
+        leadLock.output)
+      require leadLock.code == 0
+      discard requireGit(q(gitBin) & " -C " & q(ws3 / "lead") & " add -A")
+      discard requireGit(q(gitBin) & " -C " & q(ws3 / "lead") &
+        " commit -qm \"lead uses follower\"")
+      discard requireGit(q(gitBin) & " -C " & q(ws3 / "lead") &
+        " push -q origin main")
+
       let leadSha = head3("lead")
       check leadSha != head3("follower")
 
-      # Publish the immutable record at ``lead``'s commit.
+      # Publish the immutable record at ``lead``'s commit while ``follower``
+      # is checked out at its seed — the record a teammate's workspace wrote
+      # before it had fetched ``follower``'s work.
+      discard requireGit(q(gitBin) & " -C " & q(ws3 / "follower") &
+        " reset -q --hard " & followerSeed)
       let seed3 = run(reproAbs & " workspace lock --workspace-root=" & q(ws3) &
         " --trigger-repo=lead")
       checkpoint("case C seed lock: exit " & $seed3.code & "\n" & seed3.output)
@@ -438,15 +465,13 @@ suite "a refusal names a command that runs where the operator is standing":
       let burned = store3 / "locks" / "pair" / "lead" / (leadSha & ".toml")
       check fileExists(burned)
       let burnedBody = readFile(burned)
+      check followerSeed in burnedBody
 
-      # The sibling moves. ``lead`` does NOT, so its coordinate is unchanged
-      # and already occupied by published history.
-      writeFile(ws3 / "follower" / "work.txt", "follower work\n")
-      discard requireGit(q(gitBin) & " -C " & q(ws3 / "follower") & " add -A")
+      # The sibling moves to the commit ``lead``'s committed lock pins.
+      # ``lead`` does NOT, so its coordinate is unchanged and already occupied
+      # by published history.
       discard requireGit(q(gitBin) & " -C " & q(ws3 / "follower") &
-        " commit -qm \"follower work\"")
-      discard requireGit(q(gitBin) & " -C " & q(ws3 / "follower") &
-        " push -q origin main")
+        " reset -q --hard " & followerWork)
       check head3("lead") == leadSha
 
       let refs3 = scratch / "case-c-refs.txt"

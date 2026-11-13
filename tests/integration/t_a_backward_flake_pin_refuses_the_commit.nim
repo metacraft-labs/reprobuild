@@ -259,17 +259,18 @@ suite "the commit-time flake.lock refresh never moves a pin backward silently":
     if not nf2Prerequisites("t_a_refusal_in_either_lock_writes_neither"):
       skip("needs git on PATH and a built ./build/bin/repro (named above)")
     else:
-      let fx = setupNf2Fixture("both-locks")
+      let fx = setupNf2Fixture("both-locks", siblingRecipes = true)
       defer: removeDir(fx.scratch)
       isolateNf2Config(fx)
       defer: releaseNf2Config()
       # app also carries a committed repro.lock, written by the explicit door;
-      # its develop set is alpha, beta and epsilon (the workspace lock's
-      # `depends`), so alpha is pinned by BOTH locks and epsilon only by
-      # repro.lock.
-      writeFile(fx.app / "repro.solver",
-        "package app\nversions: 0.1.0\ndepends: nim >=2.2.0 <3.0.0\n\n" &
-        "package nim\nversions: 2.2.0\n")
+      # its dependencies are alpha, beta and epsilon, declared where a
+      # dependency is declared — `uses:` in app's repro.nim (owner decision
+      # 2026-11-05; this used to be the workspace lock's `depends`) — so alpha
+      # is pinned by BOTH locks and epsilon only by repro.lock.
+      writeFile(fx.app / "repro.nim", "import repro_project_dsl\n\n" &
+        "package app:\n  uses:\n    \"alpha\"\n    \"beta\"\n" &
+        "    \"epsilon\"\n")
       writeFile(fx.app / ".gitignore", ".repro/\n")
       let refresh = run(q(fx.repro) & " lock refresh " & q(fx.app))
       checkpoint("lock refresh:\n" & refresh.output)

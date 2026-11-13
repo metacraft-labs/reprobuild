@@ -334,8 +334,14 @@ suite "gateway lock gate: entries pinning other repositories are named, " &
     check ("    reprobuild gateway: refs/heads/main: " &
       unverifiedLine("lib-c")) in appReport
     check "remote: reprobuild gateway:" notin pushed.output
-    # lib-b's push carried no lock, so its gateway's lock gate read nothing
-    # and app's report is the only one naming siblings.
+    # lib-b's push carries lib-b's own lock, which pins lib-c (lib-b's
+    # repro.nim uses it; every repo whose recipe derives a dependency carries
+    # the lock that records it, owner decision 2026-11-05). Its gateway
+    # therefore names lib-c — and only lib-c — as not verified server-side:
+    # each gateway reports on the lock of the repository it receives.
     let libBReport = memberReport(pushed.output, "lib-b")
     check "(lib-b) → pushed" in libBReport
-    check "NOT verified server-side" notin libBReport
+    check ("    reprobuild gateway: refs/heads/main: " &
+      unverifiedLine("lib-c")) in libBReport
+    check unverifiedLine("lib-b") notin libBReport
+    check unverifiedLine("app") notin libBReport

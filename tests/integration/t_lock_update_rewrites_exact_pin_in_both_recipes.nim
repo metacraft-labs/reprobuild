@@ -195,6 +195,13 @@ proc writeAppReproLock(fx: Nf2Fixture; betaRev: string) =
   ## last field `tags`; the shared fixture spells it `groups`, which the
   ## reader ignores). Every writer of this file re-serializes the `deps` line,
   ## so a byte-for-byte expectation must start from the writer's own form.
+  ##
+  ## Also, when `app` has no recipe yet, the one that derives that pin:
+  ## a lock records only the dependencies `repro.nim` declares (owner
+  ## decision 2026-11-05), so a lock pinning beta beside no recipe naming it
+  ## is refused at the push. A case that states its own recipe overwrites it.
+  if not fileExists(fx.app / "repro.nim"):
+    writeFile(fx.app / "repro.nim", appRecipe("beta"))
   writeFile(fx.app / "repro.lock", reproLockText(fx, "app", headOf(fx, fx.app),
     [lockDepEntry(fx, "beta", "../beta", "beta", betaRev)]).replace(
       ", groups = \"\" }", ", tags = \"\" }"))
@@ -280,7 +287,7 @@ suite "HL-11 M4: repro lock update":
       skip("needs git on PATH and a built ./build/bin/repro (named above)")
     else:
       discard requireNix()
-      let fx = setupNf2Fixture("lu-exact")
+      let fx = setupNf2Fixture("lu-exact", siblingRecipes = true)
       defer: removeDir(fx.scratch)
       isolateNf2Config(fx)
       defer: releaseNf2Config()
@@ -326,7 +333,9 @@ suite "HL-11 M4: repro lock update":
       # repro.nim: exactly the version of that one uses: entry.
       check a1.reproNim == appRecipe("beta ==2.0.0")
       # repro.lock: exactly beta's revision and integrity.
-      check a1.reproLock == a0.reproLock.replace(betaOne, betaTwo)
+      # The commit that wrote it moved no pin, so the v2 lock was committed
+      # as written; this is its first rewrite (``asRewritten``).
+      check a1.reproLock == asRewritten(a0.reproLock.replace(betaOne, betaTwo))
       check a1.reproLock != a0.reproLock
       # flake.lock: re-locked by nix — both halves of the node, a NEW narHash
       # nix computed — and no other node touched.
@@ -468,7 +477,7 @@ suite "HL-11 M4: repro lock update":
       # The NF-2 flake as it is: `beta-src` floats on beta's origin. app's
       # repro.lock carries a dependency ALSO called `beta-src`, fetching
       # gamma's origin: one name, two repositories.
-      let fx = setupNf2Fixture("lu-ambiguous")
+      let fx = setupNf2Fixture("lu-ambiguous", siblingRecipes = true)
       defer: removeDir(fx.scratch)
       isolateNf2Config(fx)
       defer: releaseNf2Config()
@@ -666,7 +675,7 @@ suite "HL-11 M4: repro lock update":
       skip("needs git on PATH and a built ./build/bin/repro (named above)")
     else:
       discard requireNix()
-      let fx = setupNf2Fixture("lu-atomic")
+      let fx = setupNf2Fixture("lu-atomic", siblingRecipes = true)
       defer: removeDir(fx.scratch)
       isolateNf2Config(fx)
       defer: releaseNf2Config()
@@ -757,7 +766,7 @@ suite "HL-11 M4: repro lock update":
       # every resolution, with the push that publishes it. A repro.lock-only
       # move is written, with a warning.
       discard requireNix()
-      let fx = setupNf2Fixture("lu-unpublished")
+      let fx = setupNf2Fixture("lu-unpublished", siblingRecipes = true)
       defer: removeDir(fx.scratch)
       isolateNf2Config(fx)
       defer: releaseNf2Config()
@@ -872,7 +881,7 @@ suite "HL-11 M4: repro lock update":
       # (and so `refresh-lock --only`) is "what the checkout is", so it keeps
       # that rule; an explicit --to names a commit and is not affected.
       discard requireNix()
-      let fx = setupNf2Fixture("lu-dirty")
+      let fx = setupNf2Fixture("lu-dirty", siblingRecipes = true)
       defer: removeDir(fx.scratch)
       isolateNf2Config(fx)
       defer: releaseNf2Config()
@@ -928,7 +937,7 @@ suite "HL-11 M4: repro lock update":
       # Every comment, the floating line and the other inputs keep their
       # bytes.
       discard requireNix()
-      let fx = setupNf2Fixture("lu-two-inputs")
+      let fx = setupNf2Fixture("lu-two-inputs", siblingRecipes = true)
       defer: removeDir(fx.scratch)
       isolateNf2Config(fx)
       defer: releaseNf2Config()
@@ -1002,7 +1011,7 @@ suite "HL-11 M4: repro lock update":
       # input — with the regression and publication rules and the
       # all-or-nothing snapshot intact.
       discard requireNix()
-      let fx = setupNf2Fixture("lu-convert")
+      let fx = setupNf2Fixture("lu-convert", siblingRecipes = true)
       defer: removeDir(fx.scratch)
       isolateNf2Config(fx)
       defer: releaseNf2Config()
@@ -1079,7 +1088,8 @@ suite "HL-11 M4: repro lock update":
       check nodeText(a1.flakeLock, "gamma-src") ==
         nodeText(s0.flakeLock, "gamma-src")
       # repro.lock: exactly beta's revision and integrity.
-      check a1.reproLock == s0.reproLock.replace(betaTwo, betaThree)
+      check a1.reproLock ==
+        asRewritten(s0.reproLock.replace(betaTwo, betaThree))
       check a1.reproLock != s0.reproLock
       let identity = "_local_" & fx.scratch / "origin-beta"
       check (UpdateLabel & "'beta-src' is repository " & identity &
@@ -1135,7 +1145,7 @@ suite "HL-11 M4: repro lock update":
       # of the real refusal, run verbatim from the workspace root, and the
       # same commit then passes.
       discard requireNix()
-      let fx = setupNf2Fixture("lu-h1-h2")
+      let fx = setupNf2Fixture("lu-h1-h2", siblingRecipes = true)
       defer: removeDir(fx.scratch)
       isolateNf2Config(fx)
       defer: releaseNf2Config()
@@ -1198,7 +1208,7 @@ suite "HL-11 M4: repro lock update":
       skip("needs git on PATH and a built ./build/bin/repro (named above)")
     else:
       discard requireNix()
-      let fx = setupNf2Fixture("lu-h3")
+      let fx = setupNf2Fixture("lu-h3", siblingRecipes = true)
       defer: removeDir(fx.scratch)
       isolateNf2Config(fx)
       defer: releaseNf2Config()
@@ -1267,7 +1277,7 @@ suite "HL-11 M4: repro lock update":
       # exact pin (exit 3, nothing about the pin written); `--only=beta`
       # rewrites the pin, re-locks it through nix and moves repro.lock too.
       discard requireNix()
-      let fx = setupNf2Fixture("lu-refresh-only")
+      let fx = setupNf2Fixture("lu-refresh-only", siblingRecipes = true)
       defer: removeDir(fx.scratch)
       isolateNf2Config(fx)
       defer: releaseNf2Config()

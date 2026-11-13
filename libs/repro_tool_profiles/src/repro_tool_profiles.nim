@@ -2362,12 +2362,14 @@ proc nixReceiptNamesProfile(receipt: string;
 when defined(windows):
   proc resolveNixTool*(useDef: InterfaceToolUse;
                        storeRoot = "";
-                       writerMode = "direct"): PathOnlyToolProfile =
+                       writerMode = "direct";
+                       requesterDir = ""): PathOnlyToolProfile =
     raise newException(OSError, "resolveNixTool is not supported on Windows")
 else:
   proc resolveNixTool*(useDef: InterfaceToolUse;
                        storeRoot = "";
-                       writerMode = "direct"): PathOnlyToolProfile =
+                       writerMode = "direct";
+                       requesterDir = ""): PathOnlyToolProfile =
     ## Realize a ``nixPackage`` THROUGH ITS PROVISIONING EDGE and return its
     ## profile (Dependency-Provisioning-In-Build-Graph.md sections 2 and 3):
     ## a ``bakForeignProvision`` edge whose provisioner is ``"nix"``, executed
@@ -2391,8 +2393,12 @@ else:
     let plan = nixAcquisitionPlan(useDef)
     # The flake a ``.#…`` selector names, and what the helper reports the
     # evaluation read (``flake.nix`` / ``flake.lock``), are relative to the
-    # working directory -- a project's own ``repro`` invocation.
-    let workspaceRoot = getCurrentDir()
+    # requester's working directory -- a project's own ``repro`` invocation.
+    # A caller that is not the requester (the store daemon, serving a
+    # client's request) names that directory in ``requesterDir``; its own
+    # working directory is the requester's only for an in-process resolve.
+    let workspaceRoot =
+      if requesterDir.len > 0: requesterDir else: getCurrentDir()
     let materializationKey = nixMaterializationCacheKey(useDef, plan)
     let cached = readCachedNixMaterialization(storeRoot, useDef, plan,
       materializationKey)

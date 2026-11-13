@@ -273,6 +273,19 @@ proc nixUse(): InterfaceToolUse =
     lockIdentity: "nixpkgs#hello",
     location: SourceLocation(file: "fixture", line: 2))]
 
+const
+  LocalFlakeSelector = ".#hello-sh"
+  LocalFlakeText = "printf '%s\\n' reprobuild-nix-daemon-fixture"
+
+proc localFlakeUse(): InterfaceToolUse =
+  ## A ``.#attr`` selector: the flake it names is the one in the requesting
+  ## client's working directory.
+  result = nixUse()
+  result.nixProvisioning[0].selector = LocalFlakeSelector
+  result.nixProvisioning[0].executablePath = "bin/reprobuild-nix-daemon-fixture"
+  result.nixProvisioning[0].packageId = "m67-nix-local-flake"
+  result.nixProvisioning[0].lockIdentity = "fixture#" & LocalFlakeSelector
+
 proc runClientWorker(args: seq[string]): int =
   ## --client <tarball|tarball-ranged|tarball-sha512|tarball-extract-path|
   ##           tarball-closure|nix>
@@ -317,6 +330,12 @@ proc runClientWorker(args: seq[string]): int =
       let req = requestFromTarballUse(closureTarballUse(args[8], args[9]),
         storeRoot, holder, rootId)
       realizeTarballViaDaemon(req, endpoint)
+    elif mode == "nix-local-flake":
+      # <flakeDir>: the client's working directory, which is not the daemon's.
+      doAssert args.len >= 9
+      setCurrentDir(args[8])
+      let req = requestFromNixUse(localFlakeUse(), storeRoot, holder, rootId)
+      realizeNixViaDaemon(req, endpoint)
     elif mode == "nix":
       let req = requestFromNixUse(nixUse(), storeRoot, holder, rootId)
       realizeNixViaDaemon(req, endpoint)
@@ -575,3 +594,59 @@ suite "M67 daemon-mediated Nix and tarball realization":
       checkDaemonRealizesLikeInProcess("tarball-closure", "closure",
         "sha256", closureTarballUse, buildClosureFixture,
         @[ClosureEntryDir / ClosureEntryFile])
+
+  test "integration_daemon_nix_realize_resolves_selector_against_client_dir":
+    # A ``.#attr`` selector names the flake in the requesting client's working
+    # directory. The daemon runs elsewhere, so it must resolve the selector
+    # against the directory the request carries, as the in-process realize
+    # resolves it against its own.
+    when not defined(posix) or not isNixSupported:
+      echo "[platform N/A] dev store-daemon IPC and Nix are POSIX-only."
+    else:
+      let root = createTempDir("repro-m67-daemon-nixdir-", "")
+      defer:
+        try: removeDir(root) except OSError: discard
+      let runtimeRoot = root / "run"
+      createDir(runtimeRoot)
+      let endpoint = shortEndpoint("nixdir")
+      let storeRoot = root / "store"
+      defer: stopIfRunning(endpoint)
+
+      let fixtureRoot = repoRoot() / "tests" / "fixtures" /
+        "nix-daemon-local-flake"
+      let flakeDir = root / "client-project"
+      createDir(flakeDir)
+      let flakeText = readFile(fixtureRoot / "flake.nix")
+      doAssert LocalFlakeText in flakeText
+      # Unique output, so the realized store path is private to this run.
+      writeFile(flakeDir / "flake.nix", flakeText.replace(LocalFlakeText,
+        "printf '%s\\n' reprobuild-m67-nixdir-" & $getCurrentProcessId()))
+      copyFile(fixtureRoot / "flake.lock", flakeDir / "flake.lock")
+      for gitArgs in ["init -q", "add flake.nix flake.lock"]:
+        let (output, code) = execCmdEx("git -C " & q(flakeDir) & " " & gitArgs)
+        doAssert code == 0, "failed to prepare fixture flake: " & output
+
+      let helper = repoRoot() / "build" / "bin" / "reprobuild-nix-daemon"
+      if fileExists(helper):
+        putEnv("REPROBUILD_NIX_DAEMON_BIN", helper)
+      # Its own directory, which holds no flake: only the client's does.
+      let daemonCwd = root / "daemon-cwd"
+      createDir(daemonCwd)
+      let daemon = startDaemon(endpoint, storeRoot, runtimeRoot, daemonCwd)
+      defer: daemon.close()
+
+      let statusFile = root / "nixdir.json"
+      let worker = startProcess(binaryPath(),
+        args = @["--client", "nix-local-flake", endpoint, storeRoot, "holder-a",
+          "nixdir-root", statusFile, "-", flakeDir],
+        options = {poStdErrToStdOut})
+      let rc = worker.waitForExit()
+      if rc != 0: checkpoint(worker.outputStream.readAll())
+      worker.close()
+      check rc == 0
+      if rc == 0:
+        let res = parseJson(readFile(statusFile))
+        check res["installMethod"].getStr() == "nix"
+        check res["selectedStorePath"].getStr().startsWith("/nix/store/")
+        check fileExists(res["selectedStorePath"].getStr() /
+          "bin" / "reprobuild-nix-daemon-fixture")

@@ -57,7 +57,10 @@ suite "repro lock refresh holds a pin flake.lock also resolves":
           "checkout (REPROBUILD_PACKAGES_ROOT); catalog=" & catalog
         skip("nim or the reprobuild-packages catalog is missing (named above)")
       putEnv("REPROBUILD_PACKAGES_ROOT", catalog)
-      let fx = setupNf2Fixture("refresh-holds")
+      # `app`'s lock pins alpha, beta and epsilon, so its recipe must derive
+      # them (Unified-Locking-And-Hooks.md §14.9): each sibling carries the
+      # minimal recipe its `uses:` name needs.
+      let fx = setupNf2Fixture("refresh-holds", siblingRecipes = true)
       defer: removeDir(fx.scratch)
       isolateNf2Config(fx)
       defer: releaseNf2Config()
@@ -73,6 +76,9 @@ package app:
   defaultToolProvisioning "path"
   uses:
     "nim >=1.6 <3.0"
+    "alpha"
+    "beta"
+    "epsilon"
   build:
     let main = nim.c(
       source = "src/app.nim",

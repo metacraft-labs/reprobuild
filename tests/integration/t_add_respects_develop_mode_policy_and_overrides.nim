@@ -8,20 +8,28 @@
 ## The policy default is DATA: the workspace settings file
 ## (``repro-workspace.toml``) carries ``[develop] org_urls`` listing the
 ## fetch-URL prefix whose repos default to DEVELOP mode. A repo whose remote
-## begins with that prefix defaults to develop (a local sibling checkout +
-## a ``depends`` edge); every other repo defaults to BINARY (no checkout).
+## begins with that prefix defaults to develop (a local sibling checkout plus
+## workspace membership); every other repo defaults to BINARY (no checkout).
+## ``repro add`` never records a DEPENDENCY: dependencies are declared only in
+## a repo's ``repro.nim`` (owner decision 2026-11-05, CLI/add.md), so
+## ``--depends-of`` is refused and no fragment gains a ``depends`` key.
 ## ``--develop`` / ``--binary`` override the default per-add. ``--no-membership``
 ## clones a repo WITHOUT recording it as a dependency.
 ##
 ## Sub-cases (each its own ``test_ra22_*`` block):
-##   1. develop-org repo, no flag       → develop (checkout + depends edge).
+##   1. develop-org repo, no flag       → develop (checkout + membership; no
+##      ``depends`` key written anywhere).
 ##   2. third-party repo, no flag       → binary (NO checkout; binary_dependency).
 ##   3. develop-org repo, ``--binary``  → binary (override; NO checkout).
 ##   4. third-party repo, ``--develop`` → develop (override; checkout present).
-##   5. ``--no-membership``             → clones but NO depends edge / membership.
+##   5. ``--no-membership``             → clones but NO membership.
 ##   6. a ``[workspace] default_profile`` supplying a mainline → the fragment
 ##      declares none of its own and resolves to the profile's; a commit
 ##      ``--revision`` is written as a pin beside that mainline.
+##   7. ``--depends-of``                → refused (exit 2, usage) BEFORE anything
+##      is written, naming repro.nim as where the dependency is declared. This
+##      replaces the assertion that it recorded a fragment edge: that edge is
+##      ignored now, so recording it would report a dependency nothing reads.
 ##
 ## Two properties of the fragment written by case 1 are asserted there rather
 ## than left to inspection, because both are load-bearing and silent when they
@@ -31,10 +39,11 @@
 ##     leaf. The bare origins here are ``…/orglib.git`` directories, so the
 ##     remote planner's most-specific-base reuse would name the fragment
 ##     ``orglib.git``; ``repro add`` declines any plan that renames the repo
-##     and falls back to a per-repo ``<repo>-origin`` remote, because the
-##     develop-set ``depends`` edge it writes names the target and the closure
-##     keys off ``[repo].name``. A rename would leave that edge dangling and
-##     quietly shrink every pre-push dependency closure.
+##     and falls back to a per-repo ``<repo>-origin`` remote, because a
+##     dependent's ``repro.nim`` names the added repo by that name
+##     (``uses: "<target>"``, discovered at ``../<target>/repro.nim``) and its
+##     lock records it under it. A rename would leave that selector naming
+##     nothing.
 ##   * The fragment declares the BRANCH it follows as ``mainline`` and writes
 ##     no ``revision`` for it — a redundant pin would freeze the repo on the
 ##     day it was added while still resolving to the same value, so nothing
@@ -50,6 +59,7 @@
 import std/[json, os, osproc, strutils, tempfiles, unittest]
 
 import repro_test_support
+import repro_test_support/reasoned_skip
 import repro_workspace_manifests
 
 proc q(value: string): string = quoteShell(value)
@@ -215,8 +225,8 @@ suite "RA-22 — repro add develop-mode policy and overrides":
       defer: removeDir(fx.scratch)
 
       let remotesBefore = countRemotes(fx.projectFile)
-      let res = invokeAdd(fx,
-        @["orglib", "--remote=" & fx.orgRepoUrl, "--depends-of=app"])
+      let appFragmentBefore = readFile(fx.appFragment)
+      let res = invokeAdd(fx, @["orglib", "--remote=" & fx.orgRepoUrl])
       if res.code != 0:
         checkpoint("output: " & res.output)
       check res.code == 0
@@ -229,17 +239,19 @@ suite "RA-22 — repro add develop-mode policy and overrides":
       # On-disk: the sibling checkout exists and the include landed.
       check dirExists(fx.workspaceRoot / "orglib")
       check readFile(fx.projectFile).contains("repos/orglib.toml")
-      # The depends edge was recorded on the root repo.
-      check rep["dependsEdgeOn"].getStr() == "app"
-      check appDependsContains(fx, "orglib")
+      # No dependency is recorded anywhere: the root fragment is
+      # byte-identical and the report names no edge.
+      check rep["dependsEdgeOn"].getStr() == ""
+      check readFile(fx.appFragment) == appFragmentBefore
+      check not appDependsContains(fx, "orglib")
 
       # The fragment keeps the ADDED REPO'S NAME. The origin is a bare
       # `…/orglib.git` DIRECTORY, so the only way to reuse the surrounding
       # `file://…/org` base would be to name the repo `orglib.git`; that plan
       # is declined and a per-repo `orglib-origin` remote carrying the full
-      # URL is used instead, leaving `[repo].name` — which the `depends` edge
-      # above keys off — intact. The branch it follows is its `mainline`, and
-      # no `revision` restates it.
+      # URL is used instead, leaving `[repo].name` — which a dependent's
+      # `uses:` selector keys off — intact. The branch it follows is its
+      # `mainline`, and no `revision` restates it.
       check fragmentOf(fx, "orglib") ==
         "schema = \"reprobuild.workspace.repo.v2\"\n\n" &
         "[repo]\n" &
@@ -256,14 +268,15 @@ suite "RA-22 — repro add develop-mode policy and overrides":
       check projectText.contains("fetch = \"" & fx.orgRepoUrl & "\"")
       check not projectText.contains("name = \"org\"")
 
-      # Read back through the real resolver: the `depends` edge resolves to a
-      # repo that exists (it names the fragment's `[repo].name`), the omitted
-      # `revision` is inherited from `default_revision`, and the per-repo
-      # remote composes back to the requested clone URL.
+      # Read back through the real resolver: the omitted `revision` is
+      # inherited from `default_revision`, and the per-repo remote composes
+      # back to the requested clone URL. The manifest resolver states no
+      # dependency edge for either repo, declared or derived.
       let resolvedOrglib = resolvedRepo(fx, "orglib")
       check resolvedOrglib.revision == "main"
       check resolvedOrglib.fetchUrl == fx.orgRepoUrl
-      check resolvedRepo(fx, "app").depends == @["orglib"]
+      check resolvedRepo(fx, "app").depends.len == 0
+      check resolvedRepo(fx, "app").declaredDepends.len == 0
 
   test "test_ra22_third_party_repo_defaults_to_binary_no_checkout":
     let gitBin = findExe("git")
@@ -395,3 +408,34 @@ suite "RA-22 — repro add develop-mode policy and overrides":
       check "mainline" notin fragmentOf(fx2, "orglib")
       check resolvedRepo(fx2, "orglib").revision == pin
       check resolvedRepo(fx2, "orglib").branch == "main"
+
+  test "test_ra22_depends_of_is_refused_before_anything_is_written":
+    # `--depends-of` used to write `[repo] depends` into the dependent's
+    # fragment. A fragment declares no dependency now (they come only from
+    # repro.nim), so the flag is refused as a usage error, and — the property
+    # that makes the refusal safe to act on — NOTHING is written: no checkout,
+    # no include, no remote, no fragment.
+    let gitBin = findExe("git")
+    if gitBin.len == 0:
+      skip("git is not on PATH")
+    else:
+      let fx = setupFixture(gitBin, "depends-of-refused")
+      defer: removeDir(fx.scratch)
+
+      let projectBefore = readFile(fx.projectFile)
+      let appFragmentBefore = readFile(fx.appFragment)
+      let res = invokeAdd(fx,
+        @["orglib", "--remote=" & fx.orgRepoUrl, "--depends-of=app"])
+      checkpoint("output: " & res.output)
+      check res.code == 2
+      let rep = parseReport(res.output)
+      check rep["exitCode"].getInt() == 2
+      check rep["dependsEdgeOn"].getStr() == ""
+      let diagnostic = rep["diagnostic"].getStr()
+      check diagnostic.contains("--depends-of")
+      check diagnostic.contains("repro.nim")
+      check diagnostic.contains("uses: \"orglib\"")
+      check readFile(fx.projectFile) == projectBefore
+      check readFile(fx.appFragment) == appFragmentBefore
+      check not dirExists(fx.workspaceRoot / "orglib")
+      check not fileExists(fx.workspaceRoot / "repos" / "orglib.toml")

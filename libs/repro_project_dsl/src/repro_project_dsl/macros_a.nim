@@ -4686,6 +4686,73 @@ const
     ## here rather than beside its other user in ``macros_b`` because the
     ## resource-accessor generator below hands it on as well.
 
+proc explicitModuleFile(base, selector, consumerSourceFile: string): string =
+  ## The file ``import <base>/<module of selector>`` resolves to, or "".
+  ## Nim looks a relative module up against the importing file's directory
+  ## and then every search path, so those roots are probed, and so are the
+  ## recipe's ancestors (a fixture's path is typically relative to the
+  ## checkout root). Not the process directory: the VM cannot ask for it.
+  let rel = base & "/" & selectorModuleName(selector) & ".nim"
+  if base.isAbsolute: return (if fileExists(rel): rel else: "")
+  let consumerDir =
+    if consumerSourceFile.len > 0: consumerSourceFile.parentDir else: ""
+  var roots: seq[string]
+  var dir = consumerDir
+  while dir.len > 0:
+    roots.add(dir)
+    let up = dir.parentDir
+    if up == dir: break
+    dir = up
+  for root in querySettingSeq(searchPaths): roots.add(root)
+  for root in roots:
+    if fileExists(root / rel): return root / rel
+  ""
+
+proc explicitImportSplit(pkg: PackageDef; consumerSourceFile: string):
+    tuple[hasExplicitImports: bool; siblingsBesidePath: seq[string]] =
+  ## Whether ``pkg`` opts into an explicit ``usesImportPath``, and the
+  ## selectors such a path does NOT take: workspace siblings the path holds no
+  ## module for. Such a selector is a dependency on another repository, named
+  ## the one way a dependency is named (Unified-Locking-And-Hooks.md §14.9),
+  ## and that repository's recipe may be a minimal one with no typed surface to
+  ## put under the path. Before this an explicit path took EVERY selector, so a
+  ## recipe that opted into one could not name a sibling at all: the import of
+  ## ``<path>/<sibling>`` failed. Every other ``uses:`` selector of such a
+  ## recipe is taken by the path, and is no build reference to a workspace
+  ## project (``explicitlyContractedSelectors``).
+  for base in pkg.usesImportPaths:
+    if normalizedImportBase(base).len > 0:
+      result.hasExplicitImports = true
+  if not result.hasExplicitImports: return
+  for useDef in pkg.toolUses:
+    let selector = useDef.packageSelector
+    if isBundledStdlibSelector(selector) or
+        workspaceProducerModule(selector, consumerSourceFile).len == 0:
+      continue
+    var heldByPath = false
+    for base in pkg.usesImportPaths:
+      let normalizedBase = normalizedImportBase(base)
+      if normalizedBase.len > 0 and explicitModuleFile(normalizedBase,
+          selector, consumerSourceFile).len > 0:
+        heldByPath = true
+    if not heldByPath and selector notin result.siblingsBesidePath:
+      result.siblingsBesidePath.add(selector)
+
+proc explicitlyContractedSelectors*(pkg: PackageDef;
+    consumerSourceFile: string): seq[string] =
+  ## The ``uses:`` selectors an explicit ``usesImportPath`` takes: they import
+  ## the module under the path (a contract), never a workspace project's
+  ## recipe, so they are not cross-project build references. A recipe names
+  ## the other side of a dependency cycle this way (§14.9), and the
+  ## build-reference cycle check must not count it.
+  let split = explicitImportSplit(pkg, consumerSourceFile)
+  if not split.hasExplicitImports: return
+  for useDef in pkg.toolUses:
+    let selector = useDef.packageSelector
+    if selector.len > 0 and not isBundledStdlibSelector(selector) and
+        selector notin split.siblingsBesidePath and selector notin result:
+      result.add(selector)
+
 proc usesImportCode(pkg: PackageDef; consumerSourceFile = ""): string =
   # `uses:` AND `nativeBuildDeps:` import a package's typed command surface;
   # `runtimeDeps:` imports its marker alone (Provisioning-Contributions.md
@@ -4714,15 +4781,25 @@ proc usesImportCode(pkg: PackageDef; consumerSourceFile = ""): string =
       if modules.find(modulePath) < 0 and
           dependencyModules.find(modulePath) < 0:
         dependencyModules.add(modulePath)
-  var hasExplicitImports = false
+  let explicitSplit = explicitImportSplit(pkg, consumerSourceFile)
+  let hasExplicitImports = explicitSplit.hasExplicitImports
+  let siblingsBesidePath = explicitSplit.siblingsBesidePath
   for base in pkg.usesImportPaths:
     let normalizedBase = normalizedImportBase(base)
     if normalizedBase.len == 0:
       continue
-    hasExplicitImports = true
     for useDef in pkg.toolUses:
-      let modulePath = normalizedBase & "/" &
-        selectorModuleName(useDef.packageSelector)
+      if useDef.packageSelector in siblingsBesidePath:
+        continue
+      # Imported by the file it resolves to when one is found for the
+      # recipe: the recipe may be compiled as ANOTHER recipe's producer,
+      # through a shim elsewhere (see the producer imports below), and a path
+      # relative to this recipe would not resolve from there.
+      let found = explicitModuleFile(normalizedBase, useDef.packageSelector,
+        consumerSourceFile)
+      let modulePath =
+        if found.len > 0: found.changeFileExt("").replace('\\', '/')
+        else: normalizedBase & "/" & selectorModuleName(useDef.packageSelector)
       if modules.find(modulePath) < 0:
         modules.add(modulePath)
   for modulePath in modules:
@@ -4737,7 +4814,7 @@ proc usesImportCode(pkg: PackageDef; consumerSourceFile = ""): string =
     let excluded =
       if modulePath in nativeOnlyModules: "package, " & NativeImportExcluded
       else: "package"
-    result.add("import " & modulePath & " as " & moduleAlias &
+    result.add("import \"" & modulePath & "\" as " & moduleAlias &
       " except " & excluded & "\n")
     result.add("when compiles(" & moduleAlias &
       ".reprobuildPackageMarker()):\n")
@@ -4797,7 +4874,8 @@ proc usesImportCode(pkg: PackageDef; consumerSourceFile = ""): string =
   var resourceProducerSelectors: seq[string] = @[]
   for useDef in pkg.toolUses:
     let selector = useDef.packageSelector
-    if isBundledStdlibSelector(selector) or hasExplicitImports:
+    if isBundledStdlibSelector(selector) or
+        (hasExplicitImports and selector notin siblingsBesidePath):
       continue
     let producerModule = workspaceProducerModule(selector, consumerSourceFile)
     if producerModule.len == 0:

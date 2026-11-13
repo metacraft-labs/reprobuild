@@ -222,6 +222,7 @@ import repro_build_engine
 import repro_core/path_identity
 import repro_workspace_manifests
 import repro_test_support
+import repro_test_support/recipe_dependencies
 import git_actions
 import git_tool
 import shared_clones
@@ -841,7 +842,7 @@ suite "a declared checkout path cannot escape the workspace root":
     ##     that quietly skipped the delete would still drop the declaration
     ##     and still print a removal line, telling the operator a repo was
     ##     removed while its tree stayed.
-    ##   * SWEPT IN — `only-mine` declares `depends = ["ws-root"]`, so the
+    ##   * SWEPT IN — `only-mine`'s lock pins `ws-root`, so the
     ##     root lands in the GC candidate set without anyone naming it, and
     ##     is unreachable from the one surviving root (`keeper`). Here only
     ##     the root's own delete is skipped: `only-mine` IS removed in the
@@ -885,8 +886,10 @@ suite "a declared checkout path cannot escape the workspace root":
       writeFile(workspaceRoot / "precious-dir" / "inner.txt", "also\n")
 
       writeFragment(workspaceRoot / "repos" / "ws-root.toml", "ws-root", ".")
+      # `only-mine` depends on `ws-root` through its LOCK (written below once
+      # it is cloned): the only record of a dependency since 2026-11-05.
       writeFragment(workspaceRoot / "repos" / "only-mine.toml",
-        "only-mine", "only-mine", depends = @["ws-root"])
+        "only-mine", "only-mine")
       writeFragment(workspaceRoot / "repos" / "keeper.toml",
         "keeper", "keeper", remote = "keeper-origin")
 
@@ -912,6 +915,7 @@ suite "a declared checkout path cannot escape the workspace root":
       # `--force` is doing real work rather than decorating the command line.
       writeFile(workspaceRoot / "only-mine" / "uncommitted.txt",
         "local work\n")
+      writeLockEdges(workspaceRoot / "only-mine", "only-mine", ["ws-root"])
 
       let projectFile = workspaceRoot / "projects" / "rooted.toml"
       let projectBefore = readFile(projectFile)
@@ -2267,10 +2271,10 @@ suite "a declared checkout path cannot escape the workspace root":
         createDir(workspaceRoot / "precious-dir")
         writeFile(workspaceRoot / "precious-dir" / "inner.txt", "also\n")
 
-        # `hub` depends on `linked`, so removing `hub` sweeps `linked` into
-        # the GC set without anyone naming it — the second route.
-        writeFragment(workspaceRoot / "repos" / "hub.toml", "hub", "hub",
-          depends = @["linked"])
+        # `hub` depends on `linked` — its lock pins it, written once `hub` is
+        # cloned — so removing `hub` sweeps `linked` into the GC set without
+        # anyone naming it — the second route.
+        writeFragment(workspaceRoot / "repos" / "hub.toml", "hub", "hub")
         writeFragment(workspaceRoot / "repos" / "linked.toml",
           "linked", "linked")
         writeFragment(workspaceRoot / "repos" / "keeper.toml",
@@ -2291,6 +2295,7 @@ suite "a declared checkout path cannot escape the workspace root":
 
         discard requireGit(gitBin, "clone --quiet " & q(fileUrl(hubOrigin)) &
           " " & q(workspaceRoot / "hub"))
+        writeLockEdges(workspaceRoot / "hub", "hub", ["linked"])
         discard requireGit(gitBin, "clone --quiet " &
           q(fileUrl(keeperOrigin)) & " " & q(workspaceRoot / "keeper"))
 

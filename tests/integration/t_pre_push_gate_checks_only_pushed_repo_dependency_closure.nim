@@ -7,9 +7,14 @@
 ## unrelated dirty repo elsewhere in the workspace MUST NOT block the push
 ## (Workspace-And-Develop-Mode.md §"VCS Hook Integration").
 ##
-## Topology: repo A declares ``depends = ["lib-b"]`` (so A's closure is
-## {lib-a, lib-b}); lib-c is unrelated (no edge). All three start clean and
-## published, and the workspace lock is current.
+## Topology: lib-a's ``repro.nim`` declares ``uses: "lib-b"`` and its
+## committed ``repro.lock`` (written by ``repro lock refresh``) pins lib-b, so
+## A's closure is {lib-a, lib-b}; lib-c is unrelated. All three start clean
+## and published, and the workspace lock is current. The edge used to be a
+## fragment ``depends = ["lib-b"]``; a fragment declares no dependency now
+## (owner decision 2026-11-05), so the recipe and its lock carry it — and
+## lib-a's fragment now carries a legacy ``depends = ["lib-c"]``, which the old
+## gate would have walked into lib-c and refused on in Part 1.
 ##
 ##   Part 1 — out-of-closure dirty does NOT block. Make lib-c DIRTY and
 ##            unpublished. Pushing lib-a (with lib-a + lib-b clean and
@@ -33,6 +38,7 @@
 import std/[json, os, osproc, strutils, tempfiles, unittest]
 
 import repro_test_support
+import repro_test_support/[reasoned_skip, recipe_dependencies]
 import repro_workspace_manifests
 
 proc q(value: string): string = quoteShell(value)
@@ -109,8 +115,9 @@ proc projectTomlWith3Remotes(libAUrl, libBUrl, libCUrl: string): string =
     "  \"repos/lib-c.toml\",\n" &
     "]\n"
 
-# lib-a depends on lib-b → A's closure is {lib-a, lib-b}. lib-c is
-# unrelated (no edge) and therefore OUT of scope for a push of lib-a.
+# lib-a's RECIPE uses lib-b → A's closure is {lib-a, lib-b}. lib-c is
+# unrelated and therefore OUT of scope for a push of lib-a; the fragment's
+# legacy `depends` naming it must not pull it in.
 const libAFragmentToml = """
 schema = "reprobuild.workspace.repo.v2"
 
@@ -119,7 +126,7 @@ name = "lib-a"
 path = "lib-a"
 remote = "lib-a-origin"
 mainline = "main"
-depends = ["lib-b"]
+depends = ["lib-c"]
 """
 
 const libBFragmentToml = """
@@ -192,10 +199,31 @@ proc setupFixture(gitBin, slug: string): Fixture =
   writeFile(manifestsRoot / "repos" / "lib-c.toml", libCFragmentToml)
   result.workspaceRoot = workspaceRoot
 
-proc cloneAll(gitBin: string; fx: Fixture) =
+proc cloneAll(gitBin: string; fx: var Fixture) =
+  ## Clone all three, give each its recipe (lib-a uses lib-b; the others are
+  ## libraries using nothing), write lib-a's lock from its recipe, and publish
+  ## everything, so every repo starts clean and published.
   cloneInto(gitBin, fx.libA.origin, fx.workspaceRoot / "lib-a")
   cloneInto(gitBin, fx.libB.origin, fx.workspaceRoot / "lib-b")
   cloneInto(gitBin, fx.libC.origin, fx.workspaceRoot / "lib-c")
+  for (name, uses) in [("lib-a", @["lib-b"]), ("lib-b", newSeq[string]()),
+      ("lib-c", newSeq[string]())]:
+    let dir = fx.workspaceRoot / name
+    writeDependencyRecipe(dir, uses, library = name != "lib-a")
+    discard requireGit(q(gitBin) & " -C " & q(dir) & " add -A")
+    discard requireGit(q(gitBin) & " -C " & q(dir) & " commit -m recipe")
+  let refresh = refreshCommittedLock(fx.reproBin, fx.workspaceRoot / "lib-a")
+  if refresh.code != 0: checkpoint("lock refresh output: " & refresh.output)
+  doAssert refresh.code == 0, "repro lock refresh lib-a failed"
+  let libA = fx.workspaceRoot / "lib-a"
+  doAssert "\"lib-b\"" in readFile(libA / "repro.lock")
+  discard requireGit(q(gitBin) & " -C " & q(libA) & " add repro.lock")
+  discard requireGit(q(gitBin) & " -C " & q(libA) & " commit -m lock")
+  for name in ["lib-a", "lib-b", "lib-c"]:
+    discard requireGit(q(gitBin) & " -C " & q(fx.workspaceRoot / name) &
+      " push origin main")
+  fx.libA.sha = requireGit(q(gitBin) & " -C " & q(libA) &
+    " rev-parse HEAD").strip()
 
 proc seedMetadataBranch(fx: Fixture; branch: string) =
   writeWorkspaceBranch(fx.workspaceRoot,
@@ -233,9 +261,9 @@ suite "RA-21 — pre-push gate scoped to the pushed repo's dependency closure":
   test "t_pre_push_gate_checks_only_pushed_repo_dependency_closure":
     let gitBin = findExe("git")
     if gitBin.len == 0:
-      skip()
+      skip("git is not on PATH")
     else:
-      let fx = setupFixture(gitBin, "scope")
+      var fx = setupFixture(gitBin, "scope")
       defer: removeDir(fx.scratch)
       cloneAll(gitBin, fx)
       seedMetadataBranch(fx, "main")

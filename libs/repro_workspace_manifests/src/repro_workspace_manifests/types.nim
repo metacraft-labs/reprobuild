@@ -377,13 +377,16 @@ type
       ## `member_sets` on a repo-set manifest. The field was spelled `groups`
       ## until the membership model reclaimed that word for the membership
       ## concept; the old spelling is retired and fails as an unknown key.
-    # RA-21 — develop-set dependency edges. Names the OTHER repos in the
-    # same workspace that THIS repo depends on (a develop-mode sibling is
-    # a git-submodule replacement; see Workspace-And-Develop-Mode.md
-    # §"VCS Hook Integration"). The pre-push gate scopes its clean/published
-    # checks to the pushed repo plus the transitive closure of these edges,
-    # not the whole workspace. A missing/empty `depends` means the repo has
-    # no develop-set dependencies (it forms a singleton closure).
+    # DEPRECATED and IGNORED (owner decision 2026-11-05,
+    # Unified-Locking-And-Hooks.md §14.9). A repo's dependencies are declared
+    # only in its `repro.nim`; the committed `repro.lock` lock generation
+    # derives from it is the only record of them. This key used to name
+    # develop-set edges the pre-push gate and the lock writer read; it is
+    # still PARSED so fragments that carry it keep loading (an unknown key is
+    # an error in this schema), and it is carried through on round-trip so an
+    # editor never silently deletes authored data. Nothing reads it as a
+    # dependency: the resolver surfaces it only as
+    # `ResolvedRepo.declaredDepends`, for a deprecation notice.
     depends*: seq[string]
 
   RepoFragment* = object

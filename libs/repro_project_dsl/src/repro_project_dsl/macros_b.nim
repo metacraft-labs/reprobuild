@@ -10454,9 +10454,15 @@ macro packageImpl*(name: untyped;
   let certificatePolicyEmission =
     emitEnactedCertificatePolicy(packageName, body)
   # ── M5: cross-project uses + cycle detection ─────────────────────
+  # A selector an explicit ``usesImportPath`` takes imports a contract
+  # module, not the workspace project's recipe, so it is no build reference
+  # and cannot close a build-reference cycle (a recipe names the other side
+  # of a mutual dependency that way, Unified-Locking-And-Hooks.md §14.9).
+  let contracted = explicitlyContractedSelectors(pkg,
+    name.lineInfoObj().filename)
   var declaredUses: seq[string] = @[]
   for u in pkg.toolUses:
-    if u.packageSelector.len > 0:
+    if u.packageSelector.len > 0 and u.packageSelector notin contracted:
       declaredUses.add(u.packageSelector)
   let cycleError = detectCrossProjectCycle(packageName, declaredUses)
   if cycleError.len > 0:

@@ -54,6 +54,7 @@ import repro_test_support/reasoned_skip
 import repro_cli_support
 import repro_lock
 import repro_test_support
+import repro_test_support/recipe_dependencies
 import repro_workspace_manifests
 
 proc q(value: string): string = quoteShell(value)
@@ -192,14 +193,33 @@ suite "the committed lock records no materialization path":
       createDir(ws / "repos")
       writeFile(ws / "projects" / "app.toml", projectToml("app",
         @[("app", appOrigin), ("lib-b", libBOrigin)]))
-      writeFile(ws / "repos" / "app.toml", fragment("app", "app", @["lib-b"]))
+      writeFile(ws / "repos" / "app.toml", fragment("app", "app", @[]))
       writeFile(ws / "repos" / "lib-b.toml",
         fragment("lib-b", "libs/lib-b", @[]))
       writeWorkspaceBranch(ws, project = "app", branch = "main")
       let libBHead = headOf(gitBin, libB)
 
       # ---- (1) the real writer records identity only. --------------------
+      # The writer records only what the recipe side declares (owner decision
+      # 2026-11-05: no manifest edge adds a dependency; this case used to take
+      # lib-b from a fragment `depends`). A recipe `uses:` discovers a
+      # producer at `../<name>` or through a develop override, so the
+      # override is what tells it about lib-b at `libs/lib-b`; it is removed
+      # again before the read-back, which must place lib-b through the
+      # MANIFEST, by name.
+      # A develop override folds in only a checkout that is a reprobuild
+      # project, so lib-b carries a (library) recipe — uncommitted, which
+      # leaves its HEAD, the revision asserted below, untouched.
+      writeDependencyRecipe(libB, [])
+      createDir(app / ".repro")
+      let overrides = app / ".repro" / "develop-overrides.toml"
+      writeFile(overrides,
+        "schema = \"reprobuild.workspace.develop-overrides.v1\"\n\n" &
+        "[[override]]\npackage = \"lib-b\"\n" &
+        "local_path = \"../libs/lib-b\"\nstate = \"editable\"\n" &
+        "created_at = \"2026-11-05T00:00:00Z\"\n")
       let deps = lockedDepsForWorkspace(app)
+      removeFile(overrides)
       let body = serializeLockedDependencies(LockedDependencies(deps: deps))
       checkpoint(body)
       check v3Schema in body
@@ -258,6 +278,10 @@ suite "the committed lock records no materialization path":
       let appOrigin = seedPublished(gitBin, scratch, app, "app")
       let libCOrigin = seedPublished(gitBin, scratch, libC, "lib-c")
       let libDOrigin = seedPublished(gitBin, scratch, libD, "lib-d")
+      # lib-c is a `uses:` producer of app's recipe (``usesSelectors`` below),
+      # discovered at `../lib-c` by the recipe it carries; the refresh records
+      # it because the recipe declares it, not because a lock once did.
+      writeDependencyRecipe(libC, [])
       let libCPinned = headOf(gitBin, libC)
       let libCHead = advance(gitBin, libC)
       check libCPinned != libCHead
@@ -288,7 +312,7 @@ suite "the committed lock records no materialization path":
       # With the recorded path believed, `../dev/lib-c` is not a checkout and
       # the stale pin is carried forward verbatim; derived by name, the
       # checkout at `../lib-c` is found and its moved HEAD is recorded.
-      let refreshed = lockedDepsForWorkspace(app)
+      let refreshed = lockedDepsForWorkspace(app, usesSelectors = @["lib-c"])
       var libCRefreshed = LockedDep(name: "")
       for d in refreshed:
         if d.name == "lib-c": libCRefreshed = d

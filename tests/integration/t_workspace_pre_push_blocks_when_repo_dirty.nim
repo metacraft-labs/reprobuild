@@ -5,10 +5,13 @@
 ## with property ``dirty`` + remediation ``commit or stash changes in
 ## <repo>``. The dirty sibling NEED NOT be the repo the operator ran
 ## ``git push`` in — but it MUST be in the pushed repo's develop-set
-## dependency closure for the gate to refuse (RA-21). Here lib-a declares
-## ``depends = ["lib-b"]``, so a dirty lib-b blocks a push of lib-a; an
-## unrelated lib-c (no edge) is out of scope and is covered separately by
-## ``t_pre_push_gate_checks_only_pushed_repo_dependency_closure``.
+## dependency closure for the gate to refuse (RA-21). Here lib-a's
+## ``repro.nim`` uses lib-b and its committed ``repro.lock`` pins it, so a
+## dirty lib-b blocks a push of lib-a; an unrelated lib-c is out of scope and
+## is covered separately by
+## ``t_pre_push_gate_checks_only_pushed_repo_dependency_closure``. (The edge
+## used to be a fragment ``depends``, which no longer declares a dependency:
+## owner decision 2026-11-05.)
 ##
 ## Fixture pattern mirrors M17 / the M18 branch-mismatch test.
 ##
@@ -17,6 +20,7 @@
 import std/[json, os, osproc, strutils, tempfiles, unittest]
 
 import repro_test_support
+import repro_test_support/[reasoned_skip, recipe_dependencies]
 import repro_workspace_manifests
 
 proc q(value: string): string = quoteShell(value)
@@ -95,7 +99,6 @@ name = "lib-a"
 path = "lib-a"
 remote = "lib-a-origin"
 mainline = "main"
-depends = ["lib-b"]
 """
 
 const libBFragmentToml = """
@@ -168,10 +171,16 @@ proc setupFixture(gitBin, slug: string): M18Fixture =
   writeFile(manifestsRoot / "repos" / "lib-c.toml", libCFragmentToml)
   result.workspaceRoot = workspaceRoot
 
-proc cloneAll(gitBin: string; fx: M18Fixture) =
+proc cloneAll(gitBin: string; fx: var M18Fixture) =
+  ## Clone all three, declare lib-a -> lib-b in the recipes, write lib-a's
+  ## lock from its recipe, and publish everything.
   cloneInto(gitBin, fx.libA.origin, fx.workspaceRoot / "lib-a")
   cloneInto(gitBin, fx.libB.origin, fx.workspaceRoot / "lib-b")
   cloneInto(gitBin, fx.libC.origin, fx.workspaceRoot / "lib-c")
+  for (repo, head) in declareDependenciesInRecipes(gitBin, fx.reproBin,
+      fx.workspaceRoot, [("lib-b", newSeq[string]()), ("lib-c", newSeq[string]()),
+                         ("lib-a", @["lib-b"])]):
+    if repo == "lib-a": fx.libA.sha = head
 
 proc seedMetadataBranch(fx: M18Fixture; branch: string) =
   writeWorkspaceBranch(fx.workspaceRoot,
@@ -203,9 +212,9 @@ suite "M18 — repro check --mode=pre-push (dirty sibling)":
   test "t_workspace_pre_push_blocks_when_repo_dirty":
     let gitBin = findExe("git")
     if gitBin.len == 0:
-      skip()
+      skip("git is not on PATH")
     else:
-      let fx = setupFixture(gitBin, "repo-dirty")
+      var fx = setupFixture(gitBin, "repo-dirty")
       defer: removeDir(fx.scratch)
       cloneAll(gitBin, fx)
       seedMetadataBranch(fx, "main")
