@@ -60059,11 +60059,17 @@ proc committedLockDepsLine(ld: LockedDependencies): string =
     if line.startsWith("deps = ["): return line
   ""
 
-proc splicedCommittedLockDeps(text, originalDepsLine, depsLine: string):
+proc splicedCommittedLockDeps(text, originalDeps, depsLine: string):
     string =
-  ## ``text`` with its ``deps = [...]`` line replaced by ``depsLine`` — the
+  ## ``text`` with its ``deps`` statement replaced by ``depsLine`` — the
   ## splice every partial lock writer uses so the rest of the document (the
   ## solve, the certificate-policy snapshot) stays byte-identical.
+  ##
+  ## ``originalDeps`` is the WHOLE statement as ``lockStatementSource``
+  ## returns it, every physical line of a value laid out as continuation
+  ## lines; replacing only its first line left the rest behind as a document
+  ## that does not parse (Unified-Locking-And-Hooks.md §13.3, "A rewrite
+  ## replaces the whole statement").
   ##
   ## ``depsLine`` is rendered by the CURRENT writer, so its records carry no
   ## ``path``, and that is only correct under the current schema: a v2 reader
@@ -60073,7 +60079,7 @@ proc splicedCommittedLockDeps(text, originalDepsLine, depsLine: string):
   ## schemas differ only in the ``deps`` record). Match the top-level schema
   ## assignment by key, allowing the whitespace accepted by the reader, and
   ## leave the policy snapshot's separate schema untouched.
-  result = text.replace(originalDepsLine, depsLine)
+  result = text.replace(originalDeps, depsLine)
   var offset = 0
   for line in result.splitLines(keepEol = true):
     let stripped = line.strip()
@@ -60085,6 +60091,36 @@ proc splicedCommittedLockDeps(text, originalDepsLine, depsLine: string):
       result = result[0 ..< offset] & migrated & result[offset + line.len .. ^1]
       break
     offset += line.len
+
+proc committedLockRewriteProblem(original, rewritten, depsLine: string):
+    string =
+  ## Why ``rewritten`` must not replace ``original`` on disk, or "" when it
+  ## may (Unified-Locking-And-Hooks.md §13.3, "A refresh never writes a
+  ## document that does not parse"): it does not parse as TOML although
+  ## ``original`` did, it does not read back as a lock, or the ``deps`` it
+  ## reads back are not the ``depsLine`` the writer meant to record.
+  ##
+  ## The TOML check uses the strict reader the certificate code already
+  ## links (``test_certificates/toml``), not the lock's own subset reader, so
+  ## the subset cannot vouch for its own output. It is conditional on the
+  ## original parsing, so a lock that was already outside strict TOML in some
+  ## other way keeps being re-pinned as before rather than refusing every
+  ## commit over a defect the re-pin did not introduce.
+  var originalIsToml = true
+  try: discard tctoml.parseToml(original)
+  except CatchableError: originalIsToml = false
+  if originalIsToml:
+    try: discard tctoml.parseToml(rewritten)
+    except CatchableError as err:
+      return "the rewritten lock does not parse as TOML (" & err.msg & ")"
+  try:
+    let readBack = committedLockDepsLine(parseLockedDependencies(rewritten))
+    if readBack != depsLine:
+      return "the rewritten lock does not read back to the dependencies " &
+        "it was meant to record"
+  except CatchableError as err:
+    return "the rewritten lock does not read back (" & err.msg & ")"
+  ""
 
 # ---------------------------------------------------------------------------
 # HL-11 M2 — H1 / H2 at the hooks and in `repro check`
@@ -60899,7 +60935,9 @@ type
     ## a refused commit leaves the working tree and the index as it found them.
     lockPath: string
     text: string              ## the lock as read
-    originalDepsLine: string
+    originalDeps: string
+      ## the `deps` statement as read, every physical line of it
+      ## (``lockStatementSource``)
     depsLine: string          ## the re-pinned `deps = [...]` line
     changed: bool             ## `depsLine` differs from the original
     line: string              ## the log verdict, without its timestamp
@@ -60932,9 +60970,9 @@ proc summarizeCommittedLockRepin(plan: var CommittedLockRepinPlan) =
   # against the bytes on disk: a lock written before v3 renders differently
   # (its records carry `path`) even when not one pin changed, and a commit
   # that changed nothing must not rewrite it.
-  if plan.depsLine.len == 0 or plan.depsLine == plan.originalDepsLine or
+  if plan.depsLine.len == 0 or plan.depsLine == plan.originalDeps or
       plan.depsLine == committedLockDepsLine(plan.originalLd):
-    plan.depsLine = plan.originalDepsLine
+    plan.depsLine = plan.originalDeps
     plan.line = "repro-lock up-to-date"
   else:
     plan.changed = true
@@ -60950,6 +60988,17 @@ proc summarizeCommittedLockRepin(plan: var CommittedLockRepinPlan) =
     if added.len > 0: parts.add("added " & added.join(", "))
     if parts.len == 0: parts.add("refreshed sibling coordinates")
     plan.line = "repro-lock " & parts.join("; ")
+    # §13.3 "A refresh never writes a document that does not parse": the
+    # rewrite is checked here, while it is still a plan, so a refused one
+    # writes neither lock and is reported like any other refusal.
+    let problem = committedLockRewriteProblem(plan.text,
+      splicedCommittedLockDeps(plan.text, plan.originalDeps, plan.depsLine),
+      plan.depsLine)
+    if problem.len > 0:
+      plan.changed = false
+      plan.depsLine = plan.originalDeps
+      plan.line = "repro-lock refused-invalid-rewrite: " & plan.lockPath &
+        ": " & problem & "; nothing was written"
   if plan.held.len > 0:
     plan.line.add("; held (another lock or a recipe constraint does not " &
       "move with it): " & plan.held.join(", "))
@@ -61041,13 +61090,14 @@ proc planCommittedLockRepin(repoRoot: string;
   except CatchableError as err:
     result.line = "repro-lock refused-unreadable-lock: " & err.msg
     return
-  for line in result.text.splitLines():
-    if line.startsWith("deps = ["):
-      result.originalDepsLine = line
-      break
-  if result.originalDepsLine.len == 0:
+  try:
+    result.originalDeps = lockStatementSource(result.text, "deps")
+  except CatchableError as err:
+    result.line = "repro-lock refused-unreadable-lock: " & err.msg
+    return
+  if result.originalDeps.len == 0:
     result.line = "repro-lock refused-no-deps-line: " & result.lockPath &
-      " carries no `deps = [...]` line to re-pin"
+      " carries no `deps = [...]` statement to re-pin"
     return
   result.originalLd = ld
   # §16.5: a sibling the recipe pins by exact revision is not re-pinned.
@@ -61122,7 +61172,7 @@ proc applyCommittedLockRepin(plan: CommittedLockRepinPlan):
   if not plan.changed: return (true, plan.line)
   try:
     writeFile(extendedPath(plan.lockPath),
-      splicedCommittedLockDeps(plan.text, plan.originalDepsLine,
+      splicedCommittedLockDeps(plan.text, plan.originalDeps,
         plan.depsLine))
   except CatchableError as err:
     return (false, "repro-lock write-failed: " & err.msg)
@@ -62648,7 +62698,7 @@ proc applyCommitTimeLockWriters*(site: CommitTimeWriterSite;
   let plannedReproLock =
     if reproPlanned and reproPlan.changed:
       some(splicedCommittedLockDeps(reproPlan.text,
-        reproPlan.originalDepsLine, reproPlan.depsLine))
+        reproPlan.originalDeps, reproPlan.depsLine))
     else: none(string)
   let plannedFlakeLock =
     if flake.planned and flake.moves.len > 0: some(flake.plannedText)
@@ -93240,7 +93290,7 @@ proc refreshForeignPlatformLockPins(projectDir, lockP, lockPlatform,
     stderr.writeLine(label & ": WARNING: " & n)
   let plannedReproLock =
     if plan.changed:
-      some(splicedCommittedLockDeps(plan.text, plan.originalDepsLine,
+      some(splicedCommittedLockDeps(plan.text, plan.originalDeps,
         plan.depsLine))
     else: none(string)
   var consistency: ConsistencyReport
@@ -101146,11 +101196,12 @@ proc executeLockUpdate*(req: LockUpdateRequest): LockUpdateOutcome =
         writeFile(extendedPath(flakeLockPath), flakeLockText)
 
     if reproOfRepo.len > 0:
-      var originalDepsLine = ""
-      for line in inputs.reproLock.text.splitLines():
-        if line.startsWith("deps = ["):
-          originalDepsLine = line
-          break
+      var originalDeps = ""
+      try:
+        originalDeps = lockStatementSource(inputs.reproLock.text, "deps")
+      except CatchableError as err:
+        undoAll(LockUpdateExitFailed, reproLockPath & " cannot be read: " &
+          err.msg)
       var moved = false
       for i in reproOfRepo:
         var d = ld.deps[i]
@@ -101181,12 +101232,17 @@ proc executeLockUpdate*(req: LockUpdateRequest): LockUpdateOutcome =
           target)
       if moved:
         let depsLine = committedLockDepsLine(ld)
-        if originalDepsLine.len == 0 or depsLine.len == 0:
+        if originalDeps.len == 0 or depsLine.len == 0:
           undoAll(LockUpdateExitFailed, reproLockPath & " carries no " &
-            "`deps = [...]` line to rewrite")
-        writeFile(extendedPath(reproLockPath),
-          splicedCommittedLockDeps(inputs.reproLock.text, originalDepsLine,
-            depsLine))
+            "`deps = [...]` statement to rewrite")
+        let rewritten = splicedCommittedLockDeps(inputs.reproLock.text,
+          originalDeps, depsLine)
+        let problem = committedLockRewriteProblem(inputs.reproLock.text,
+          rewritten, depsLine)
+        if problem.len > 0:
+          undoAll(LockUpdateExitFailed, reproLockPath & ": " & problem &
+            "; nothing was written")
+        writeFile(extendedPath(reproLockPath), rewritten)
         result.written.add(reproLockPath)
     if reproNimText != inputs.reproNim.text:
       writeFile(extendedPath(reproNimPath), reproNimText)

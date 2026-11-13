@@ -6790,6 +6790,17 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "t_group_libs_repro_local_store_tests_g01",
     singleReason: ""),
   TestSpec(
+    source: "libs/repro_lock/tests/t_a_lock_value_spread_over_lines_reads_whole.nim",
+    binary: "build/test-bin/t_a_lock_value_spread_over_lines_reads_whole",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "t_group_libs_repro_lock_tests_g01",
+    singleReason: ""),
+  TestSpec(
     source: "libs/repro_lock/tests/t_a_store_pin_carries_its_archive_through_the_lock.nim",
     binary: "build/test-bin/t_a_store_pin_carries_its_archive_through_the_lock",
     defines: @[],

@@ -25,8 +25,9 @@ occurrence of a key — so a later `ProtectSystem=no` passed — and counted any
    floor's header is the one scripts/derive_lease_floor_syscalls.py derives.
 3. CONF-4 (Linux): `systemd-analyze security --offline` of the rendered unit
    does not exceed recipes/repro-daemon-worker/confinement-threshold. The
-   unit is analysed under a private `--root` holding only it, so the host's
-   own unit directories and drop-ins never enter the score. The
+   unit is analysed under a private `--root` holding only it, with an explicit
+   empty `--security-policy`, so neither the host's own unit directories and
+   drop-ins nor a host security policy enter the score. The
    verdict is read from the analysis' own "Overall exposure level" line: a
    `systemd-analyze` that exits non-zero WITHOUT one did not analyse the unit
    (it could not start, could not parse it, ...) and is reported as that, never
@@ -239,7 +240,19 @@ EXPOSURE_LINE = re.compile(r"Overall exposure level for \S+: (\d+)\.(\d)\b")
 # replaces the default directories and the unit is then "not found".
 # https://www.freedesktop.org/software/systemd/man/systemd.unit.html
 # (Unit File Load Path).
+#
+# `--root` does not cover the second host input: the security policy. Without
+# `--security-policy`, the analyzer reads `systemd-analyze-security.policy`
+# from the HOST's /etc/systemd, /run/systemd, /usr/local/lib/systemd and
+# /usr/lib/systemd whatever the root is (src/analyze/analyze-security.c in
+# systemd 260, `search_and_fopen_nulstr(..., root = NULL, ...)`), and such a
+# file re-weights or drops checks: one zeroing PrivateNetwork and the
+# AF_INET row scored this unit 2.0. The check therefore always passes an
+# explicit empty policy, which keeps systemd's built-in weights.
+# https://www.freedesktop.org/software/systemd/man/systemd-analyze.html
+# (`--security-policy=`).
 UNIT_NAME = "repro-daemon-worker.service"
+EMPTY_POLICY = "{}\n"
 
 
 def committed_threshold():
@@ -269,8 +282,12 @@ def check_conf4(text):
         os.makedirs(units)
         with open(os.path.join(units, UNIT_NAME), "w") as f:
             f.write(render(text))
+        policy = os.path.join(root, "security-policy.json")
+        with open(policy, "w") as f:
+            f.write(EMPTY_POLICY)
         env = {k: v for k, v in os.environ.items() if k != "SYSTEMD_UNIT_PATH"}
         out = subprocess.run([analyze, "security", "--offline=true", "--root=" + root,
+                              "--security-policy=" + policy,
                               "--threshold=" + threshold, UNIT_NAME],
                              capture_output=True, text=True, env=env)
     output = out.stdout + out.stderr

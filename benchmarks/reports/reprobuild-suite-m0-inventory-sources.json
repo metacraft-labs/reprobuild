@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 35,
-    "nimTestBinaries": 2761,
+    "nimTestBinaries": 2762,
     "pureUnitConsolidationGroups": 81,
-    "pureUnitTests": 755,
+    "pureUnitTests": 756,
     "staticallyDetectedRuntimeCompilerFlowTests": 138,
-    "testEntries": 2805
+    "testEntries": 2806
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -589,13 +589,14 @@
       "targetOs": "soAny"
     },
     {
-      "count": 4,
+      "count": 5,
       "defines": [],
       "dependencyShape": [
         "repro_lock"
       ],
       "owner": "libs/repro_lock",
       "sources": [
+        "libs/repro_lock/tests/t_a_lock_value_spread_over_lines_reads_whole.nim",
         "libs/repro_lock/tests/t_a_store_pin_carries_its_archive_through_the_lock.nim",
         "libs/repro_lock/tests/t_catalog_import_pins.nim",
         "libs/repro_lock/tests/t_lock_writer_output_reads_back.nim",
@@ -1599,7 +1600,7 @@
       "graph-fixture": 21,
       "integration": 1523,
       "platform/destructive": 177,
-      "pure unit": 755,
+      "pure unit": 756,
       "unclassified": 329
     },
     "graphOwnedTestArtifacts": [
@@ -1814,9 +1815,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2761,
+    "nimTestBinaryCount": 2762,
     "pythonTestFileCount": 44,
-    "testEntryCount": 2805
+    "testEntryCount": 2806
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -19565,6 +19566,23 @@
       "owner": "libs/repro_local_store",
       "requiresReproBinary": false,
       "source": "libs/repro_local_store/tests/t_win_store_hardlink_cap_falls_back_per_file.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 7,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_a_lock_value_spread_over_lines_reads_whole",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_lock"
+      ],
+      "owner": "libs/repro_lock",
+      "requiresReproBinary": false,
+      "source": "libs/repro_lock/tests/t_a_lock_value_spread_over_lines_reads_whole.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 7,
       "staticallyDetectedRuntimeCompilerFlow": false,
@@ -39102,7 +39120,7 @@
       "requiresReproBinary": true,
       "source": "tests/integration/t_commit_repins_committed_lock_siblings.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 2,
+      "staticCaseCount": 3,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -58248,7 +58266,7 @@
       "requiresReproBinary": false,
       "source": "tests/unit/test_daemon_worker_confinement_systemd_analyze.py",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 14,
+      "staticCaseCount": 15,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
