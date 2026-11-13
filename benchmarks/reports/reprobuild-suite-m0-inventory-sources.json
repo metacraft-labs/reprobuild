@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 35,
-    "nimTestBinaries": 2776,
+    "nimTestBinaries": 2778,
     "pureUnitConsolidationGroups": 82,
     "pureUnitTests": 761,
-    "staticallyDetectedRuntimeCompilerFlowTests": 139,
-    "testEntries": 2820
+    "staticallyDetectedRuntimeCompilerFlowTests": 140,
+    "testEntries": 2822
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1615,11 +1615,11 @@
   ],
   "static": {
     "classificationCounts": {
-      "graph-fixture": 21,
+      "graph-fixture": 22,
       "integration": 1528,
       "platform/destructive": 177,
       "pure unit": 761,
-      "unclassified": 333
+      "unclassified": 334
     },
     "graphOwnedTestArtifacts": [
       {
@@ -1833,9 +1833,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2776,
+    "nimTestBinaryCount": 2778,
     "pythonTestFileCount": 44,
-    "testEntryCount": 2820
+    "testEntryCount": 2822
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -2392,6 +2392,28 @@
         }
       ],
       "source": "libs/repro_peer_cache/tests/t_peer_cache_two_phase_lan_roundtrip.nim"
+    },
+    {
+      "class": "graph-fixture",
+      "matches": [
+        {
+          "assignedCommandVariable": "",
+          "callableReachable": true,
+          "commandVariableExecuted": false,
+          "directExecutionLine": true,
+          "enclosingCallable": "",
+          "executedVariables": [],
+          "line": 189,
+          "path": "libs/repro_profile_compile/tests/t_addon_arch_realisation_and_omarchy_account.nim",
+          "patterns": [
+            "repro-compile-profile-binary"
+          ],
+          "runtimeCompilerApi": "compileProfileBinary",
+          "runtimeCompilerApiModule": "repro_profile_compile",
+          "snippet": "let res = compileProfileBinary(profileRoot = dir / \"system.nim\","
+        }
+      ],
+      "source": "libs/repro_profile_compile/tests/t_addon_arch_realisation_and_omarchy_account.nim"
     },
     {
       "class": "graph-fixture",
@@ -8733,6 +8755,24 @@
       "source": "libs/repro_addon/tests/t_addon_apt_hook_and_base_identity.nim",
       "sourceSuiteCount": 7,
       "staticCaseCount": 21,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_addon_arch_base",
+      "class": "unclassified",
+      "classificationReason": "imports `posix`, which grants out-of-process reach",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_addon",
+        "repro_infra"
+      ],
+      "owner": "libs/repro_addon",
+      "requiresReproBinary": false,
+      "source": "libs/repro_addon/tests/t_addon_arch_base.nim",
+      "sourceSuiteCount": 9,
+      "staticCaseCount": 26,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -21699,6 +21739,27 @@
       "sourceSuiteCount": 1,
       "staticCaseCount": 5,
       "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_addon_arch_realisation_and_omarchy_account",
+      "class": "graph-fixture",
+      "classificationReason": "test body compiles or links a helper/fixture artifact",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_cli_support",
+        "repro_infra",
+        "repro_profile",
+        "repro_profile_compile",
+        "repro_profile_intent"
+      ],
+      "owner": "libs/repro_profile_compile",
+      "requiresReproBinary": false,
+      "source": "libs/repro_profile_compile/tests/t_addon_arch_realisation_and_omarchy_account.nim",
+      "sourceSuiteCount": 5,
+      "staticCaseCount": 10,
+      "staticallyDetectedRuntimeCompilerFlow": true,
       "targetOs": "soAny"
     },
     {
