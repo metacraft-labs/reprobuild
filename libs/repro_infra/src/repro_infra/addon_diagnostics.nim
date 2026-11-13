@@ -46,6 +46,10 @@ type
     adNetworkGuard = "EAddOnNetworkGuard"
       ## A `network` generation failed one of the guard's invariants and was
       ## reverted.
+    adSwitchPending = "EAddOnSwitchPending"
+      ## Uninstall refused because a switch's pending marker exists (spec
+      ## §6.4 step 0, §8.4): finish the switch or run `repro system addon
+      ## recover` first. Nothing was changed.
 
   EAddOn* = object of CatchableError
     ## Base of every add-on refusal.

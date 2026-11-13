@@ -28,6 +28,8 @@
 import std/[algorithm, json, nativesockets, net, os, posix, strutils, tables, uri]
 
 import repro_core
+import repro_infra/addon_diagnostics
+from repro_infra/profile import parseSystemProfile, SystemProfile, AddOnSettings
 import repro_peer_cache/auth as peerAuth
 import repro_peer_cache/pki
 import repro_peer_cache/types
@@ -41,6 +43,8 @@ import ./linux_fs
 import ./mutations
 import ./store_root
 import ./nft_tables
+import ./omarchy
+import ./pacman_db
 
 type
   Verdict* = enum
@@ -68,6 +72,12 @@ type
       ## Bootstrap creates no recipient key: the host creates its own at its
       ## next boot (``lcLateKey``; spec §6.2 step 3, §6.5.2). An image's
       ## assembly boot sets it, so no image ever holds a recipient key.
+    profilePath*: string
+      ## The host's first profile, in the canonical text form ``repro infra
+      ## apply`` reads (``--profile``); "" for none. The preflight reads its
+      ## ``addOn`` stanza -- on an Omarchy base the ``omarchyAccount`` it
+      ## must name (spec §6.1, §4.3.2) -- and binds its digest into the plan.
+      ## Required on an Omarchy base.
 
   KeptFile* = object
     ## A file bootstrap keeps as found. A content-pinned input (the signers
@@ -106,6 +116,14 @@ type
     gen0Inputs*: Gen0Inputs
     rootFsType*: string
     preBootstrap*: PreBootstrapInputs
+    archBase*: bool          ## an Arch-family base (spec §6.1)
+    snapperConfigs*: seq[string]
+      ## The snapper configurations whose ``SUBVOLUME`` is ``/`` (§5.1).
+    networkManager*: string
+      ## The active network manager (§4.5): ``NetworkManager``,
+      ## ``systemd-networkd``, ``both`` or ``none``. Arch bases only.
+    omarchy*: OmarchyFacts   ## Omarchy bases only
+    omarchyAccount*: string  ## the profile's, as checked
 
   OsRelease* = Table[string, string]
 
@@ -136,6 +154,19 @@ const
     ## The matrix as one phrase, for refusals.
 
   SupportedArchitectures* = ["amd64", "arm64", "armhf"]
+
+  ArchFamilyId* = "arch"
+    ## The ``os-release`` ``ID`` / ``ID_LIKE`` word of the Arch family:
+    ## Arch Linux is ``ID=arch``, Omarchy ``ID=omarchy`` with
+    ## ``ID_LIKE=arch`` (spec §6.1).
+  ArchMinSystemdMajor* = 258
+    ## Arch is a rolling release with no meaningful ``VERSION_ID``; its
+    ## matrix row is the systemd and pacman major versions instead (spec
+    ## §6.1: initially systemd 258 or later and pacman 7).
+  ArchPacmanMajors* = [7]
+  ArchBaseRule* = "an Arch-family base (ID=arch, or arch in ID_LIKE) with " &
+                  "systemd 258 or later and pacman 7"
+    ## The Arch row as one phrase, for refusals.
 
   MinimumFreeBytes* = 512'u64 * 1024 * 1024
 
@@ -575,6 +606,90 @@ proc baseMatrixNote*(id, versionId: string): string =
       return b.note
   ""
 
+proc snapperConfigSubvolume*(configText: string): string =
+  ## ``SUBVOLUME`` of a snapper configuration file
+  ## (``/etc/snapper/configs/<name>``, shell-style ``KEY="value"``; see
+  ## snapper-configs(5)), "" when it names none.
+  for raw in configText.splitLines():
+    let line = raw.strip()
+    if line.startsWith("SUBVOLUME="):
+      return line["SUBVOLUME=".len .. ^1].strip(chars = {'"', '\'', ' '})
+  ""
+
+proc snapperRootConfigs*(root = "/"): seq[string] =
+  ## The names of the snapper configurations for ``/`` (spec §5.1: the
+  ## preflight records whether a snapshot tool is configured for the root).
+  ## Read from the configuration files; snapper itself is not run.
+  let dir = root / "etc/snapper/configs"
+  if not dirExists(dir): return
+  for kind, p in walkDir(dir):
+    if kind notin {pcFile, pcLinkToFile}: continue
+    try:
+      if snapperConfigSubvolume(readFile(p)) == "/":
+        result.add(extractFilename(p))
+    except IOError, OSError:
+      discard
+  result.sort(system.cmp)
+
+proc networkManagerFromIsActive*(output: string): string =
+  ## ``systemctl is-active NetworkManager.service systemd-networkd.service``
+  ## prints one state per unit, in order (spec §4.5: the manager is the one
+  ## whose service is active; configuration files are not evidence).
+  let states = output.splitLines()
+  let nm = states.len > 0 and states[0].strip() == "active"
+  let nd = states.len > 1 and states[1].strip() == "active"
+  if nm and nd: "both"
+  elif nm: "NetworkManager"
+  elif nd: "systemd-networkd"
+  else: "none"
+
+proc activeNetworkManager*(): string =
+  ## The host's active network manager, asked of PID 1 (read-only). A
+  ## systemctl that cannot answer reads as ``unknown``.
+  try:
+    # `is-active` exits non-zero when a unit is not active; its output is
+    # still one state per unit.
+    let r = runSystemctl(["is-active", "--", "NetworkManager.service",
+                          "systemd-networkd.service"])
+    networkManagerFromIsActive(r.output)
+  except CatchableError:
+    "unknown"
+
+proc isArchFamily*(id, idLike: string): bool =
+  ## ``ID=arch``, or ``arch`` among the words of ``ID_LIKE`` (spec §6.1).
+  id.toLowerAscii() == ArchFamilyId or
+    ArchFamilyId in idLike.toLowerAscii().splitWhitespace()
+
+proc archMatrixRefusal*(systemdMajor: int; pacmanVersion: string): string =
+  ## "" when an Arch-family base's systemd and pacman are in the matrix,
+  ## else why not. Arch has no ``VERSION_ID`` row: the two majors are it.
+  if systemdMajor < ArchMinSystemdMajor:
+    return "systemd " & (if systemdMajor > 0: $systemdMajor else: "(unknown)") &
+      " is below the Arch matrix's " & $ArchMinSystemdMajor
+  let pm = pacmanMajor(pacmanVersion)
+  if pm notin ArchPacmanMajors:
+    return "pacman " & (if pacmanVersion.len > 0: pacmanVersion
+                        else: "(not installed)") &
+      " is not pacman " & ArchPacmanMajors.join(" or ")
+  ""
+
+proc baseMatrixVerdict*(id, versionId, idLike: string; systemdMajor: int;
+                        pacmanVersion: string): tuple[ok: bool; detail: string] =
+  ## The ``distribution`` check (spec §6.1): a Debian-family row by ``ID`` /
+  ## ``VERSION_ID``, or the Arch row by the systemd and pacman majors.
+  if isArchFamily(id, idLike):
+    let why = archMatrixRefusal(systemdMajor, pacmanVersion)
+    if why.len == 0:
+      return (true, id & " (Arch family, rolling; systemd " & $systemdMajor &
+        ", pacman " & pacmanVersion & ")")
+    return (false, "ID=" & id & " ID_LIKE=" & idLike & ": " & why &
+      " (the matrix accepts " & SupportedBaseList & "; and " & ArchBaseRule & ")")
+  let note = baseMatrixNote(id, versionId)
+  if note.len > 0:
+    return (true, id & " " & versionId & " (" & note & ")")
+  (false, "ID=" & id & " VERSION_ID=" & versionId &
+    " is not in the add-on base matrix (" & SupportedBaseList & ")")
+
 proc add(r: var PreflightReport; id: string; ok: bool; detail: string) =
   r.checks.add(PreflightCheck(id: id, verdict: (if ok: vPass else: vFail),
                               detail: detail))
@@ -755,11 +870,20 @@ proc runPreflight*(inp: PreflightInputs): PreflightReport =
   let id = osr.getOrDefault("ID")
   let versionId = osr.getOrDefault("VERSION_ID")
   let idLike = osr.getOrDefault("ID_LIKE")
-  let baseNote = baseMatrixNote(id, versionId)
-  result.add("distribution", baseNote.len > 0,
-    if baseNote.len > 0: id & " " & versionId & " (" & baseNote & ")"
-    else: "ID=" & id & " VERSION_ID=" & versionId &
-          " is not in the add-on base matrix (" & SupportedBaseList & ")")
+  let archFamily = isArchFamily(id, idLike)
+  var systemd = 0
+  try:
+    let v = runSystemctl(["--version"])
+    if v.exitCode == 0: systemd = systemdMajor(v.output)
+  except HostToolMissing:
+    systemd = 0
+  # On Arch the matrix row is the systemd and pacman majors (spec §6.1);
+  # pacman's version is read from its local database, never by running it.
+  let pacmanVersion =
+    if archFamily: pacmanInstalledVersion("pacman") else: ""
+  let baseVerdict = baseMatrixVerdict(id, versionId, idLike, systemd,
+                                      pacmanVersion)
+  result.add("distribution", baseVerdict.ok, baseVerdict.detail)
 
   # Architecture of the userspace.
   let arch = userspaceArchitecture()
@@ -769,12 +893,6 @@ proc runPreflight*(inp: PreflightInputs): PreflightReport =
   # PID 1 must be systemd.
   let pid1 = firstLine("/proc/1/comm")
   let booted = dirExists("/run/systemd/system")
-  var systemd = 0
-  try:
-    let v = runSystemctl(["--version"])
-    if v.exitCode == 0: systemd = systemdMajor(v.output)
-  except HostToolMissing:
-    systemd = 0
   let isSystemd = pid1 == "systemd" and booted and systemd > 0
   result.add("init-system", isSystemd,
     if isSystemd: "systemd " & $systemd & " is PID 1"
@@ -831,6 +949,46 @@ proc runPreflight*(inp: PreflightInputs): PreflightReport =
     else: "the root filesystem is read-only by design (" & fsType &
           (if fstabRo: ", fstab mounts / ro" else: "") &
           "); /repro cannot be created and there is no fallback")
+  # Arch (spec §5.1, §4.5): whether snapper is configured for `/`, and the
+  # active network manager, recorded in the plan. Debian plans keep their
+  # bytes: these are read and recorded on an Arch-family base only.
+  result.archBase = archFamily
+  if archFamily:
+    result.snapperConfigs = snapperRootConfigs()
+    result.networkManager = activeNetworkManager()
+
+  # The host's first profile (spec §6.1): its `addOn` stanza, and on an
+  # Omarchy base the account Omarchy runs as (§4.3.2, §8.5; §13 decision
+  # 94). The text is bound into the plan by its digest.
+  var profileSha = ""
+  var profileError = ""
+  if inp.profilePath.len > 0:
+    try:
+      let text = readFile(inp.profilePath)
+      profileSha = sha256Hex(text)
+      result.omarchyAccount = parseSystemProfile(text).addOn.omarchyAccount
+    except CatchableError as e:
+      profileError = inp.profilePath & ": " & e.msg
+    result.add("profile", profileError.len == 0,
+      if profileError.len > 0: "the profile cannot be read: " & profileError
+      else: inp.profilePath & " (sha256 " & profileSha[0 ..< 16] & "...)")
+  let omarchyBase = isOmarchyBase(id)
+  if omarchyBase:
+    result.omarchy = omarchyFacts(osr)
+  if omarchyBase or result.omarchyAccount.len > 0:
+    let why =
+      if omarchyBase and inp.profilePath.len == 0:
+        diagnosticMessage(adBaseLayerOwned, "the base is Omarchy, and the " &
+          "preflight needs the host's first profile (--profile <file>) to " &
+          "check the `omarchyAccount` it must name (spec §4.3.2, §6.1)")
+      elif profileError.len > 0: "the profile cannot be read"
+      else: omarchyAccountRefusal(id, result.omarchyAccount)
+    result.add("omarchy-account", why.len == 0,
+      if why.len > 0: why
+      else: "Omarchy runs as " & result.omarchyAccount & "; its hook " &
+            "directory is " & omarchyHooksDir(accountHome(
+              result.omarchyAccount).home))
+
   result.add("free-space", free >= MinimumFreeBytes,
     if free >= MinimumFreeBytes: "at least 512 MiB free on /"
     else: "less than 512 MiB free on /")
@@ -923,7 +1081,9 @@ proc runPreflight*(inp: PreflightInputs): PreflightReport =
 
   # Generation 0 must find every one of its paths absent.
   let reproExe = reproExeFor(result.binarySha256)
-  result.gen0Inputs = Gen0Inputs(reproExe: reproExe, deploySigners: signers,
+  result.gen0Inputs = Gen0Inputs(reproExe: reproExe,
+    packageManagerHook: (if archFamily: pmhNone else: pmhApt),
+    deploySigners: signers,
     cacheUrl: (if anchorsError.len > 0: "" else: inp.cacheUrl),
     cachePublishers: publishers,
     agent: (if agentError.len > 0: AgentUnitsInputs() else: agentInputs),
@@ -1022,6 +1182,23 @@ proc runPreflight*(inp: PreflightInputs): PreflightReport =
   if inp.deferRecipientKey:
     # Only when deferred, so every other plan keeps its bytes.
     plan["recipientKey"] = %"deferred"
+  if archFamily:
+    # Only on an Arch-family base, so every Debian plan keeps its bytes
+    # (spec §6.1, §5.1, §4.5).
+    plan["base"]["pacman"] = %pacmanVersion
+    plan["base"]["networkManager"] = %result.networkManager
+    plan["rootFilesystem"]["snapper"] = %result.snapperConfigs
+  if omarchyBase:
+    plan["omarchy"] = %*{
+      "versionId": result.omarchy.versionId,
+      "buildId": result.omarchy.buildId,
+      "package": result.omarchy.packageVersion,
+      "account": result.omarchyAccount,
+    }
+  if inp.profilePath.len > 0:
+    # Only when given, so a plan without a profile keeps its bytes.
+    plan["profile"] = %*{"sha256": profileSha,
+                         "omarchyAccount": result.omarchyAccount}
   result.planJson = canonical(plan)
   result.digest = sha256Hex(result.planJson)
 

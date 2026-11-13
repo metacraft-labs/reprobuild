@@ -18,7 +18,10 @@
 ##   network;
 ## - the apt hook ``/etc/apt/apt.conf.d/90repro-addon``: a report-only
 ##   ``DPkg::Post-Invoke`` that can never fail or stall a dpkg run, even when
-##   the binary it names is missing, fails or hangs (``aptHookCommand``);
+##   the binary it names is missing, fails or hangs (``aptHookCommand``).
+##   On a Debian-family base only: an Arch-family base carries no
+##   package-manager hook in generation 0 and nothing under ``/etc/apt``
+##   (``PackageManagerHook``);
 ## - ``/etc/profile.d/repro-addon.sh``: the add-on's ``repro`` on ``PATH``
 ##   (appended). The profile DSL's ``addOnToolPath()`` writes a file of its
 ##   own, ``/etc/profile.d/repro-addon-tools.sh`` (``repro_profile``
@@ -57,8 +60,24 @@ type
     content*: string
     enabled*: bool       ## ookUnit: ``systemctl enable --now``
 
+  PackageManagerHook* = enum
+    ## Which package manager's report-only hook generation 0 carries: the
+    ## hook is per base (spec §6.2 step 4, §7.8; §13 decision on Arch's
+    ## generation 0). The zero value is apt, so every Debian-family caller
+    ## keeps the generation 0 it had.
+    pmhApt = "apt"
+      ## ``/etc/apt/apt.conf.d/90repro-addon`` (Debian, Ubuntu, Raspberry
+      ## Pi OS).
+    pmhNone = "none"
+      ## No package-manager hook: an Arch-family base, until its ALPM hook
+      ## exists. Nothing is written under ``/etc/apt``, which Arch does not
+      ## have.
+
   Gen0Inputs* = object
     reproExe*: string           ## the add-on's ``repro`` inside the store
+    packageManagerHook*: PackageManagerHook
+      ## The base's package-manager hook (``pmhApt`` unless the preflight
+      ## found an Arch-family base).
     deploySigners*: seq[string] ## deploy-manifest signer keys (hex), canonical
     cacheUrl*: string           ## the binary cache to substitute from, or ""
     cachePublishers*: seq[string] ## the only producer keys trusted for it
@@ -1302,11 +1321,15 @@ proc generation0Objects*(inp: Gen0Inputs): seq[OwnObject] =
               content: secretsUnit(inp.reproExe), enabled: true),
     OwnObject(kind: ookUnit, unit: ReassertUnit, path: unitPath(ReassertUnit),
               content: reassertUnit(inp.reproExe), enabled: true),
-    OwnObject(kind: ookEtcFile, path: AptHookPath,
-              content: aptHook(inp.reproExe)),
-    OwnObject(kind: ookEtcFile, path: ProfileDPath,
-              content: profileD(inp.reproExe)),
   ]
+  case inp.packageManagerHook
+  of pmhApt:
+    result.add(OwnObject(kind: ookEtcFile, path: AptHookPath,
+                         content: aptHook(inp.reproExe)))
+  of pmhNone:
+    discard
+  result.add(OwnObject(kind: ookEtcFile, path: ProfileDPath,
+                       content: profileD(inp.reproExe)))
   if inp.agent.target.len > 0:
     # The deploy agent's units (A8): present only on a host bootstrapped
     # with a target and manifest sources, so a host without them keeps the

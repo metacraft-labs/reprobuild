@@ -99,6 +99,7 @@ import ./host_exec
 import ./health
 import ./ledger
 import ./mutations
+import ./omarchy
 import ./pending_plan
 import ./seams
 import ./static_tree
@@ -4152,6 +4153,23 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
   # re-observation before each write still sees a package installed since
   # the plan, without re-reading every file list for every operation.
   let driver = if opts.driver != nil: opts.driver else: detectCollisionDriver()
+  # A `.deb` closure cannot run on an Arch base (spec §8.3 *Services on
+  # Arch*, §13 decision 92). The `add-on-arch` realisation refuses it when a
+  # profile is compiled; this refuses a canonical text that reached the
+  # apply some other way, before anything is observed, realised or written.
+  if driver.name == "pacman":
+    for r in user.resources:
+      let lock =
+        case r.kind
+        of srkSystemdSystemUnit: r.suAptClosureLock
+        of srkLinuxAddOnTool: r.atAptClosureLock
+        else: ""
+      if lock.len > 0:
+        raise newAddOnOutOfScope($r.kind & ".aptClosureLock", "", r.address,
+          "`.deb` closures are not supported on Arch: a Debian closure's " &
+          "loader path resolves through Arch's /lib64 -> usr/lib to a file " &
+          "Debian does not ship; use a Reprobuild store package (spec §8.3, " &
+          "§13 decision 92). Nothing was realised or written")
   # --- The base (A10; spec §7.4, §7.9): observed at plan time, recorded
   # with the generation, and gated by the supported matrix. The gate runs
   # after the base itself and the previous ledger were read (they are what
@@ -4172,6 +4190,15 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
                                              result.baseIdentity)
     if purpose notin ["revert", "replay"] and not opts.recordOnly:
       checkSupportedBase(result.baseIdentity)
+      # The Omarchy account (spec §8.5, again at plan time): required on an
+      # Omarchy base, refused elsewhere. Generation 0 alone (bootstrap's
+      # apply, no operator profile) names no account and is not asked.
+      if user.addOn.declared or user.resources.len > 0:
+        let p = omarchyAccountProblem(result.baseIdentity.id,
+                                      user.addOn.omarchyAccount)
+        if p.detail.len > 0:
+          raise newAddOnError(p.diagnostic, p.detail &
+            "; nothing was planned or changed")
   let baseIdentityText = renderBaseIdentity(result.baseIdentity)
   # A package that arrived since the add-on took a unit name (spec §4.3):
   # reported on every plan and apply as actionable drift.

@@ -1116,9 +1116,23 @@ proc parseAddOnSection(body: NimNode; profileVar: NimNode): NimNode =
         result.add quote do:
           `profileVar`.addOn.confirmTimeoutSec = `secs`
         continue
+      if entry[0].kind == nnkIdent and $entry[0] == "omarchyAccount":
+        # `omarchyAccount: "zahary"` (§8.5): the name's syntax is the text
+        # form's (`repro_infra.omarchyAccountNameError`), checked when the
+        # compiled profile is rendered to it; whether the base is Omarchy
+        # and the account exists is a plan-time check on the host.
+        if entry.len < 2 or entry[1].kind != nnkStmtList or
+            entry[1].len != 1 or
+            entry[1][0].kind notin {nnkStrLit, nnkRStrLit, nnkTripleStrLit}:
+          error("omarchyAccount: expects a string literal", entry)
+        let account = newStrLitNode(entry[1][0].strVal)
+        result.add quote do:
+          `profileVar`.addOn.omarchyAccount = `account`
+        continue
       if entry[0].kind != nnkIdent or $entry[0] != "managedEtcPrefixes":
         error("addOn: unknown field " & entry[0].repr &
-              " (known: managedEtcPrefixes, confirmTimeout)", entry)
+              " (known: managedEtcPrefixes, confirmTimeout, " &
+              "omarchyAccount)", entry)
       if entry.len < 2 or entry[1].kind != nnkStmtList:
         error("managedEtcPrefixes must be an indented block of string " &
               "literals", entry)

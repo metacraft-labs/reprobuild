@@ -31,6 +31,10 @@ const
   DebianFamilyIds* = ["debian", "ubuntu", "raspbian"]
     ## The `ID` / `ID_LIKE` values of the Debian family, the bases the
     ## `add-on-debian` realisation covers.
+  ArchFamilyIds* = ["arch"]
+    ## The `ID` / `ID_LIKE` value of the Arch family (Arch Linux; Omarchy is
+    ## `ID=omarchy`, `ID_LIKE=arch`), the bases the `add-on-arch`
+    ## realisation covers (ReproOS-Add-On-Mode §8.1).
 
 type
   HostBaseKind* = enum
@@ -110,16 +114,24 @@ proc classifyHostBase*(osRelease: Table[string, string]; source: string;
   else:
     result.kind = hbkDistribution
 
-proc isDebianFamily*(b: HostBase): bool =
-  ## The base is Debian or a derivative (Ubuntu, Raspberry Pi OS, ...).
+proc inFamily(b: HostBase; ids: openArray[string]): bool =
+  ## A distribution whose `ID`, or a word of whose `ID_LIKE`, is in `ids`.
   if b.kind != hbkDistribution:
     return false
-  if b.id in DebianFamilyIds:
+  if b.id in ids:
     return true
   for like in b.idLike:
-    if like in DebianFamilyIds:
+    if like in ids:
       return true
   false
+
+proc isDebianFamily*(b: HostBase): bool =
+  ## The base is Debian or a derivative (Ubuntu, Raspberry Pi OS, ...).
+  b.inFamily(DebianFamilyIds)
+
+proc isArchFamily*(b: HostBase): bool =
+  ## The base is Arch Linux or a derivative (Omarchy, ...).
+  b.inFamily(ArchFamilyIds)
 
 proc describeHostBase*(b: HostBase): string =
   ## One phrase for diagnostics: `debian 13 (/etc/os-release)`, `NixOS`, ...

@@ -742,6 +742,10 @@ type
       ## ReproOS add-on mode on a Debian-family distribution: every field is
       ## classified by the `add-on-debian` realisation profile
       ## (`addon_realisation`), and an invalid one is `EAddOnOutOfScope`.
+    srAddOnArch = "add-on-arch"
+      ## ReproOS add-on mode on an Arch-family distribution (Arch Linux,
+      ## Omarchy): the `add-on-arch` profile, which refuses `.deb` closures
+      ## and diversions (spec §8.1, §8.3).
 
   SystemPlanTarget* = object
     ## The host a system profile is planned for. System scope selects per
@@ -1059,6 +1063,8 @@ proc adaptSystemProfile*(p: ProfileIntent;
     discard
   of srAddOnDebian:
     result.projection = projectResources(addOnDebianProfile(), selected)
+  of srAddOnArch:
+    result.projection = projectResources(addOnArchProfile(), selected)
   # The `addOn:` section is carried whatever the target: it is what the
   # text form's `addOn { ... }` stanza renders, and the add-on apply is what
   # gives it meaning. Each prefix is validated as the text parser would.
@@ -1076,6 +1082,11 @@ proc adaptSystemProfile*(p: ProfileIntent;
           $p.addOn.confirmTimeoutSec & " must be between 1 and " &
           $MaxConfirmTimeoutSec & " seconds")
       result.profile.addOn.confirmTimeoutSec = p.addOn.confirmTimeoutSec
+    if p.addOn.omarchyAccount.len > 0:
+      let problem = omarchyAccountNameError(p.addOn.omarchyAccount)
+      if problem.len > 0:
+        raise newException(ValueError, "addOn: " & problem)
+      result.profile.addOn.omarchyAccount = p.addOn.omarchyAccount
   for r in selected:
     if r.kind == SecretFileStanzaTag:
       # A declaration, not a resource (`SecretFileDecl`): it is carried
@@ -1094,7 +1105,7 @@ proc adaptSystemProfile*(p: ProfileIntent;
   # default the add-on's own parse applies (`parseSystemProfile(...,
   # addOnDefaults = true)`), so the canonical text a producer compiles for
   # an add-on host names the floor explicitly.
-  if target.realisation == srAddOnDebian:
+  if target.realisation in {srAddOnDebian, srAddOnArch}:
     applyAddOnServiceFloor(result.profile)
   # Same cross-resource refusal as the text path (`parseSystemProfile`).
   checkUnitStateConflicts(result.profile.resources)
@@ -1187,6 +1198,10 @@ proc renderSystemProfileToText*(sp: SystemProfile): string =
       renderListLiteral(sp.addOn.managedEtcPrefixes) & "\n" &
       (if sp.addOn.confirmTimeoutSec > 0:
          "  confirmTimeout = " & $sp.addOn.confirmTimeoutSec & "\n"
+       else: "") &
+      (if sp.addOn.omarchyAccount.len > 0:
+         "  omarchyAccount = " & quoteSystemValue(sp.addOn.omarchyAccount) &
+           "\n"
        else: "") & "}\n\n")
   # The secrets the profile declares (`secrets.secretFile`), each once and
   # in profile order: they are not resources, but a unit's `credentials`

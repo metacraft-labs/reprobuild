@@ -504,6 +504,8 @@ proc renderAddOnStanza*(settings: AddOnSettings): seq[string] =
   result.add("  managedEtcPrefixes = " & renderList(settings.managedEtcPrefixes))
   if settings.confirmTimeoutSec > 0:
     result.add("  confirmTimeout = " & $settings.confirmTimeoutSec)
+  if settings.omarchyAccount.len > 0:
+    result.add("  omarchyAccount = " & quoteSystemValue(settings.omarchyAccount))
   result.add("}")
 
 proc renderSecretFileStanza*(d: SecretFileDecl): seq[string] =

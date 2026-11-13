@@ -100,6 +100,10 @@ type
 
 const
   AddOnDebianProfileName* = "add-on-debian"
+  AddOnArchProfileName* = "add-on-arch"
+  DebClosuresNotOnArch* = "`.deb` closures are not supported on Arch"
+    ## The refusal of an `aptClosureLock` on an Arch base (spec §8.3
+    ## *Services on Arch*, §8.4, §13 decision 92).
   AddOnFirewallTable* = "inet repro"
     ## The one nftables table the add-on's opt-in firewall class owns (spec
     ## ReproOS-Add-On-Mode §4.1).
@@ -304,6 +308,42 @@ proc addOnDebianProfile*(): RealisationProfile =
         "rename (spec §7.2 steps 3-4); a full realisation writes the file " &
         "in place. What a reader opens -- its bytes, mode and owner -- is " &
         "the same")]
+
+proc addOnArchProfile*(): RealisationProfile =
+  ## The `add-on-arch` profile (spec ReproOS-Add-On-Mode §8.1, §8.3
+  ## *Services on Arch*): the `add-on-debian` classes, except that
+  ##
+  ## * an `aptClosureLock` is invalid (`EAddOnOutOfScope`, "`.deb` closures
+  ##   are not supported on Arch"; §13 decision 92). A Debian closure's
+  ##   loader path `/lib64/ld-linux-x86-64.so.2` resolves through Arch's
+  ##   `/lib64 -> usr/lib` into the closure's `usr/lib`, where Debian ships
+  ##   no loader, so every `execve` would fail; services on Arch are
+  ##   Reprobuild store packages. The refusal is a projection, so it comes
+  ##   at plan time, before anything is realised. It covers an operator
+  ##   tool's closure (`linux.addOnTool`) for the same reason;
+  ## * the diversion class does not exist: pacman has no `dpkg-divert`
+  ##   (§4.3.1 item 2), so `linux.dpkgDiversion` is invalid.
+  ##
+  ## Derived from `addOnDebianProfile` rather than written out again, so a
+  ## kind or field classified for one base is classified for both.
+  result = addOnDebianProfile()
+  result.name = AddOnArchProfileName
+  for k in result.kinds.mitems:
+    case k.kind
+    of "linux.dpkgDiversion":
+      k = KindRule(kind: k.kind, class: fcInvalid, reason: "pacman has no " &
+        "diversions (`dpkg-divert`); a package-owned file on Arch cannot be " &
+        "diverted (spec §4.3.1)")
+    of "systemd.systemUnit", "linux.addOnTool":
+      for f in k.fields.mitems:
+        if f.field == "aptClosureLock":
+          f = FieldRule(field: f.field, class: fcInvalid,
+            reason: DebClosuresNotOnArch & ": a Debian closure's loader " &
+              "path resolves through Arch's /lib64 -> usr/lib to a file " &
+              "Debian does not ship; use a Reprobuild store package (spec " &
+              "§8.3, §13 decision 92)")
+    else:
+      discard
 
 proc findKind*(rp: RealisationProfile; kind: string): int =
   ## Index of `kind` in `rp.kinds`, or -1.

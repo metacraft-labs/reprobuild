@@ -78,6 +78,10 @@ type
     deferRecipientKey*: bool
       ## Create no recipient key: the host creates its own at its next boot
       ## (``lcLateKey``; spec §6.2 step 3). An image's assembly boot sets it.
+    profilePath*: string
+      ## The host's first profile the preflight read (``--profile``): the
+      ## plan binds its digest, so bootstrap needs the same file to
+      ## recompute the acknowledged plan. Bootstrap does not apply it.
 
   BootstrapResult* = object
     planDigest*: string
@@ -212,7 +216,8 @@ proc runAddonBootstrap*(opts: BootstrapOptions): BootstrapResult =
     agentPollSec: opts.agentPollSec, evidenceSink: opts.evidenceSink,
     evidenceSinkCaPath: opts.evidenceSinkCaPath,
     evidenceHeartbeatSec: opts.evidenceHeartbeatSec,
-    deferRecipientKey: opts.deferRecipientKey)
+    deferRecipientKey: opts.deferRecipientKey,
+    profilePath: opts.profilePath)
   let plan = runPreflight(inputs)
   if plan.digest != opts.planDigest:
     raise newException(AddonPlanMismatch,
@@ -261,7 +266,8 @@ proc runAddonBootstrap*(opts: BootstrapOptions): BootstrapResult =
   # with the mode they have.
   var entries: seq[LedgerEntry]
   entries.add(establishRoot(plan, ReproRoot, 0o755,
-    asSubvolume = isBtrfs(parentDir(ReproRoot))))
+    asSubvolume = (when mutated("repro-root-plain-dir-on-btrfs"): false
+                   else: isBtrfs(parentDir(ReproRoot)))))
   entries.add(establishRoot(plan, StoreRoot, 0o755))
   entries.add(establishRoot(plan, "/var/lib/repro", 0o755))
   entries.add(establishRoot(plan, stateDir, 0o700))

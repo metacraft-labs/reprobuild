@@ -28,7 +28,20 @@
 ## ``listeners``       listening TCP and bound, unconnected UDP sockets
 ## ``addon-roots``     whether the add-on's own roots (``/repro``,
 ##                     ``/var/lib/repro``) exist, and what they are
+## ``nftables``        the names of the host's nftables tables
+## ``pacman-local``    (Arch) one record per installed package of pacman's
+##                     local database: its version and the SHA-256 of its
+##                     ``files`` entry (``%FILES%``, ``%BACKUP%`` with the
+##                     packaged MD5s); it replaces ``dpkg-status`` and
+##                     ``diversions``, which an Arch base does not have
+## ``btrfs-subvolumes`` (btrfs roots) path, id and parent id of every
+##                     subvolume, less the snapper snapshots the add-on did
+##                     not create
+## ``omarchy-hooks``   (Omarchy) every inode under the ``omarchyAccount``'s
+##                     ``~/.config/omarchy/hooks``, recorded as ``etc`` is
 ## ==================  ====================================================
+##
+## The Arch components are spec ReproOS-Add-On-Mode §12.2 *On Arch*.
 ##
 ## *Determinism.* The same host in the same state produces byte-identical
 ## output: records are sorted bytewise, the text is locale-independent, and
@@ -51,6 +64,8 @@ import nimcrypto/[hash, sha2]
 import ./host_exec
 import ./nft_tables
 import ./linux_fs
+import ./omarchy
+import ./pacman_db
 
 type
   FingerprintComponent* = enum
@@ -69,6 +84,15 @@ type
       ## ``table``), never their rules: what the add-on's egress observer
       ## adds and uninstall removes. A host whose ruleset cannot be listed
       ## records why, once, so two reads still compare equal.
+    fcPacmanLocal = "pacman-local"
+      ## Arch: ``<name>`` -> ``<version> files-sha256:<hex>`` per package of
+      ## ``/var/lib/pacman/local``.
+    fcBtrfsSubvolumes = "btrfs-subvolumes"
+      ## btrfs roots: ``<path>`` -> ``id <id> parent <id>`` from ``btrfs
+      ## subvolume list -a /`` (read as root), less the snapper snapshots
+      ## whose userdata carries no ``repro-addon`` key (§13 decision 100).
+    fcOmarchyHooks = "omarchy-hooks"
+      ## Omarchy: every inode under the account's hook directory.
 
   FingerprintRecord* = object
     component*: FingerprintComponent
@@ -122,6 +146,10 @@ type
     ## true.
     root*: string
     live*: bool
+    omarchyAccount*: string
+      ## The account whose ``~/.config/omarchy/hooks`` the ``omarchy-hooks``
+      ## component records (its home read from ``<root>/etc/passwd``); ""
+      ## records none. The account is the profile's ``omarchyAccount``.
 
 const
   FingerprintHeader* = "# repro-addon-fingerprint v1"
@@ -698,6 +726,139 @@ proc addonRootValue*(path: string): string =
            $st.st_gid
   "other " & modeString(st.st_mode)
 
+proc collectPacmanLocal(fp: var Fingerprint; opts: CollectOptions) =
+  ## ``pacman-local`` (spec §12.2): every package of the local database by
+  ## name, valued by its version and the digest of its ``files`` entry. A
+  ## package directory without a readable name or files list raises: a
+  ## component that silently lost a package would compare equal to anything.
+  let root = if opts.root.len == 0: "/" else: opts.root
+  for p in pacmanInstalledPackages(root):
+    if p.name.len == 0 or not fileExists(p.dir / "files"):
+      raise newException(FingerprintError, "pacman database entry " & p.dir &
+        " has no %NAME% or no files list")
+    fp.add(fcPacmanLocal, p.name, p.version & " files-sha256:" &
+           sha256OfFile(p.dir / "files"))
+
+proc parseBtrfsSubvolumeList*(text: string):
+    seq[tuple[id, parent: string; path: string]] =
+  ## ``btrfs subvolume list -a <mnt>``: ``ID <id> gen <gen> top level
+  ## <parent> path <path>``; with ``-a`` a path outside the mounted
+  ## subvolume is prefixed ``<FS_TREE>/``, which is dropped so the path is
+  ## the subvolume's path from the filesystem's top. ``gen`` changes with
+  ## every transaction and is not recorded.
+  ## https://btrfs.readthedocs.io/en/latest/btrfs-subvolume.html
+  for line in text.splitLines():
+    let f = line.splitWhitespace()
+    if f.len == 0 or f[0] != "ID": continue
+    var id, parent = ""
+    var i = 0
+    while i < f.len:
+      if f[i] == "ID" and i + 1 < f.len: id = f[i + 1]
+      elif f[i] == "level" and i > 0 and f[i - 1] == "top" and i + 1 < f.len:
+        parent = f[i + 1]
+      inc i
+    let at = line.find(" path ")
+    if id.len == 0 or parent.len == 0 or at < 0:
+      raise newException(FingerprintError,
+        "unreadable btrfs subvolume list line: " & line)
+    var path = line[at + " path ".len .. ^1]
+    const top = "<FS_TREE>/"
+    if path.startsWith(top): path = path[top.len .. ^1]
+    result.add((id: id, parent: parent, path: path))
+
+proc snapperUserdataHasAddonKey*(infoXml: string): bool =
+  ## Does a snapper snapshot's ``info.xml`` carry the ``repro-addon``
+  ## userdata key the add-on tags its own snapshots with (§7.2)? snapper
+  ## writes each pair as ``<userdata><key>K</key><value>V</value></userdata>``.
+  for chunk in infoXml.split("<userdata>")[1 .. ^1]:
+    let e = chunk.find("</userdata>")
+    let body = if e >= 0: chunk[0 ..< e] else: chunk
+    if "<key>repro-addon</key>" in body.replace(" ", "").replace("\n", ""):
+      return true
+  false
+
+proc btrfsTool(): string =
+  resolveHostTool(["/usr/bin/btrfs", "/usr/sbin/btrfs", "/sbin/btrfs",
+                   "/bin/btrfs"])
+
+proc foreignSnapperSnapshotIds(exe: string): seq[string] =
+  ## The subvolume ids of the snapper snapshots the add-on did not create:
+  ## under every snapper configuration's ``<SUBVOLUME>/.snapshots/<n>/``,
+  ## a ``snapshot`` whose ``info.xml`` has no ``repro-addon`` userdata
+  ## (spec §12.2; §13 decision 100). They are left out so the base can keep
+  ## taking its own snapshots (Omarchy's pre-update ones) under a do-no-harm
+  ## comparison; the add-on's own stay recorded.
+  let dir = "/etc/snapper/configs"
+  if not dirExists(dir): return
+  for kind, cfg in walkDir(dir):
+    if kind notin {pcFile, pcLinkToFile}: continue
+    var sub = ""
+    for raw in readFile(cfg).splitLines():
+      let l = raw.strip()
+      if l.startsWith("SUBVOLUME="):
+        sub = l["SUBVOLUME=".len .. ^1].strip(chars = {'"', '\'', ' '})
+    if sub.len == 0: continue
+    let snaps = sub / ".snapshots"
+    if not dirExists(snaps): continue
+    for k2, n in walkDir(snaps):
+      if k2 != pcDir: continue
+      let info = n / "info.xml"
+      let snap = n / "snapshot"
+      if not dirExists(snap): continue
+      if fileExists(info) and snapperUserdataHasAddonKey(readFile(info)):
+        continue
+      let r = runHostTool([exe, "inspect-internal", "rootid", snap],
+                          timeoutSec = 30)
+      if r.exitCode != 0:
+        raise newException(FingerprintError, "btrfs inspect-internal " &
+          "rootid " & snap & " failed: " & r.output.strip())
+      result.add(r.output.strip())
+
+proc collectBtrfsSubvolumes(fp: var Fingerprint) =
+  ## ``btrfs-subvolumes`` (spec §12.2), on a btrfs root only, read as root.
+  ## Unreadable (no ``btrfs`` tool, not root) raises: on a btrfs root the
+  ## ``/repro`` subvolume is what this component sees, and a fingerprint
+  ## without it would let an uninstall that left the store's subvolume
+  ## behind compare clean.
+  if not isBtrfs("/"): return
+  let exe = btrfsTool()
+  if exe.len == 0:
+    raise newException(FingerprintError, "the root filesystem is btrfs but " &
+      "no btrfs tool (btrfs-progs) is installed to list its subvolumes")
+  let r = runHostTool([exe, "subvolume", "list", "-a", "/"], timeoutSec = 60)
+  if r.exitCode != 0:
+    raise newException(FingerprintError, "btrfs subvolume list -a / failed " &
+      "(it needs root): " & r.output.strip())
+  let skip = foreignSnapperSnapshotIds(exe)
+  for s in parseBtrfsSubvolumeList(r.output):
+    if s.id in skip: continue
+    fp.add(fcBtrfsSubvolumes, s.path, "id " & s.id & " parent " & s.parent)
+
+proc collectOmarchyHooks(fp: var Fingerprint; opts: CollectOptions) =
+  ## ``omarchy-hooks`` (spec §12.2): every inode under the account's
+  ## ``~/.config/omarchy/hooks``, the account's home read from the password
+  ## file. A hook directory that is gone is recorded as ``absent``.
+  var home = ""
+  for (k, v) in parsePasswd(readFile(rootPath(opts, "/etc/passwd"))):
+    if k == "user:" & opts.omarchyAccount:
+      home = v.split(':')[3]
+  if home.len == 0:
+    raise newException(FingerprintError, "omarchy-hooks: account " &
+      opts.omarchyAccount & " is not in " & rootPath(opts, "/etc/passwd"))
+  let hooks = omarchyHooksDir(home)
+  let abs = rootPath(opts, hooks)
+  var st: Stat
+  if lstat(abs.cstring, st) != 0:
+    fp.add(fcOmarchyHooks, hooks, "absent")
+    return
+  fp.add(fcOmarchyHooks, hooks, etcEntryValue(abs))
+  if not S_ISDIR(st.st_mode): return
+  for path in walkDirRec(abs, yieldFilter = {pcFile, pcLinkToFile, pcDir,
+                                             pcLinkToDir},
+                         followFilter = {pcDir}, relative = true,
+                         skipSpecial = false):
+    fp.add(fcOmarchyHooks, hooks / path, etcEntryValue(abs / path))
+
 proc collectFingerprint*(opts = CollectOptions(root: "/", live: true)):
     Fingerprint =
   ## Record the host. Raises ``FingerprintError`` when a source the
@@ -721,7 +882,12 @@ proc collectFingerprint*(opts = CollectOptions(root: "/", live: true)):
   collectFileComponent(result, fcAccounts, parseGroup(readFile(group)))
   for p in AddonRootPaths:
     result.add(fcAddonRoots, p, addonRootValue(rootPath(opts, p)))
+  if dirExists(rootPath(opts, PacmanLocalDir)):
+    collectPacmanLocal(result, opts)
+  if opts.omarchyAccount.len > 0:
+    collectOmarchyHooks(result, opts)
   if opts.live:
+    collectBtrfsSubvolumes(result)
     collectUnits(result)
     collectSysctl(result)
     var memTotalKb = 0

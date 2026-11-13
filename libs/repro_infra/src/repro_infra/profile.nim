@@ -433,6 +433,13 @@ type
       ## from the moment its start step finished, for every unit's
       ## `healthCheck` to pass. 0 when not declared: the default applies
       ## (`DefaultConfirmTimeoutSec`).
+    omarchyAccount*: string
+      ## `omarchyAccount = "<name>"` (§4.3.2, §8.5; §13 decision 94): the
+      ## account Omarchy runs as, whose home (read from the password
+      ## database, never `$HOME`) holds Omarchy's hook directory. Required
+      ## on an Omarchy base and refused on any other (checked against the
+      ## host by `repro_addon/omarchy.omarchyAccountRefusal`); "" when not
+      ## declared.
 
   SecretFileDecl* = object
     ## A `secrets.secretFile { service = "<s>"  name = "<n>" }` declaration
@@ -1901,6 +1908,22 @@ proc managedPrefixError*(prefix: string): string =
         "units are reached only through the unit and drop-in classes"
   ""
 
+proc omarchyAccountNameError*(name: string): string =
+  ## Why `name` cannot name a login account, or "" when it can: 1 to 32
+  ## bytes of letters, digits, `_`, `-` and `.`, not starting with `-` or
+  ## `.` (the portable subset useradd(8) and systemd-sysusers accept). The
+  ## name is looked up in the password database, so anything outside it
+  ## could only be a typing error or an attempt to smuggle a path.
+  if name.len == 0 or name.len > 32:
+    return "omarchyAccount '" & name & "' must be 1 to 32 characters"
+  if name[0] in {'-', '.'}:
+    return "omarchyAccount '" & name & "' must not start with '-' or '.'"
+  for c in name:
+    if c notin {'a'..'z', 'A'..'Z', '0'..'9', '_', '-', '.'}:
+      return "omarchyAccount '" & name & "' may hold only letters, " &
+        "digits, '_', '-' and '.'"
+  ""
+
 proc parseAddOnStanza*(body: string): AddOnSettings =
   ## The `addOn { managedEtcPrefixes = [...] }` stanza.
   result.declared = true
@@ -1930,10 +1953,23 @@ proc parseAddOnStanza*(body: string): AddOnSettings =
         raiseSystemProfileInvalid("'" & AddOnStanzaTag & "' confirmTimeout " &
           $secs & " must be between 1 and " & $MaxConfirmTimeoutSec & " seconds")
       result.confirmTimeoutSec = secs
+    of "omarchyAccount":
+      if result.omarchyAccount.len > 0:
+        raiseSystemProfileInvalid("'" & AddOnStanzaTag &
+          "' declares omarchyAccount twice")
+      let v = rawValue.strip()
+      if v.len < 2 or v[0] != '"' or v[^1] != '"':
+        raiseSystemProfileInvalid("'" & AddOnStanzaTag & "' omarchyAccount " &
+          "must be a quoted string, got: " & rawValue)
+      let name = v[1 ..< v.len - 1]
+      let err = omarchyAccountNameError(name)
+      if err.len > 0:
+        raiseSystemProfileInvalid(err)
+      result.omarchyAccount = name
     else:
       raiseSystemProfileInvalid("'" & AddOnStanzaTag &
         "' has no field '" & key & "' (known: managedEtcPrefixes, " &
-        "confirmTimeout)")
+        "confirmTimeout, omarchyAccount)")
 
 proc isUnderManagedPrefix*(path, prefix: string): bool =
   ## Does `prefix` (as declared, see `managedPrefixError`) cover `path`?

@@ -96,6 +96,9 @@ const
     ## emits instead of a second, CBOR-native one. Optional; omitted when
     ## the profile declares none, so a profile without it encodes exactly
     ## as before. Envelope schema 14.
+  KeyOmarchyAccount = "omarchyAccount"
+    ## Inside the `addOn` map: the Omarchy account (ReproOS-Add-On-Mode
+    ## §8.5), as text. Optional; omitted when not declared.
   KeyConfirmTimeout = "confirmTimeout"
     ## Inside the `addOn` map: the add-on switch's `confirmTimeout` in
     ## seconds (ReproOS-Add-On Mode §7.5), as an unsigned integer. Optional;
@@ -363,6 +366,8 @@ proc encodeProfileIntent(p: ProfileIntent): DynamicValue =
       encodeStringArray(p.addOn.managedEtcPrefixes))]
     if p.addOn.confirmTimeoutSec > 0:
       ao.add entry(KeyConfirmTimeout, cborUInt(uint64(p.addOn.confirmTimeoutSec)))
+    if p.addOn.omarchyAccount.len > 0:
+      ao.add entry(KeyOmarchyAccount, cborText(p.addOn.omarchyAccount))
     entries.add entry(KeyAddOn, cborMap(ao))
   if p.baseOs.declared:
     entries.add entry(KeyBaseOs, cborText(encodeBaseOs(p.baseOs)))
@@ -700,6 +705,13 @@ proc decodeProfileIntentFromBytes*(bytes: openArray[byte]): ProfileIntent =
         raiseRbpiCorrupt("body", "addOn.confirmTimeout must be a positive " &
           "number of seconds")
       result.addOn.confirmTimeoutSec = int(ct.uintValue)
+    var oaFound = false
+    let oa = lookupOpt(ao, KeyOmarchyAccount, oaFound)
+    if oaFound:
+      let name = expectText(oa, KeyOmarchyAccount)
+      if name.len == 0:
+        raiseRbpiCorrupt("body", "addOn.omarchyAccount must not be empty")
+      result.addOn.omarchyAccount = name
   # ReproOS add-on mode A16: the `baseOs:` section is OPTIONAL on the wire.
   # A malformed one is corrupt, never dropped.
   var boFound = false

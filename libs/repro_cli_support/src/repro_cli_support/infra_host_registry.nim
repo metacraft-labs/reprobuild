@@ -191,9 +191,9 @@ proc realisationFor*(v: HostRegistryVerdict; base: HostBase):
     SystemRealisation =
   ## How the selected resources are realised on the host: in full, unless
   ## the registry says `addOn`, which needs a realisation profile for the
-  ## base. Only the Debian family has one (`add-on-debian`); another
-  ## distribution is `EAddOnUnsupportedBase`. Call after
-  ## `checkHostSystemMode`.
+  ## base: the Debian family has `add-on-debian`, the Arch family (Arch
+  ## Linux, Omarchy) `add-on-arch` (spec §8.1); another distribution is
+  ## `EAddOnUnsupportedBase`. Call after `checkHostSystemMode`.
   var addOn = v.management.isAddOn
   when defined(reproMutations):
     # The same harness as `checkHostSystemMode`: the mutated planner also
@@ -206,11 +206,14 @@ proc realisationFor*(v: HostRegistryVerdict; base: HostBase):
     return srFull
   if base.isDebianFamily:
     return srAddOnDebian
+  if base.isArchFamily:
+    return srAddOnArch
   raise newAddOnUnsupportedBase(describeHostBase(base),
     "host " & v.host & " is declared `system: " & AddOnKeyword & "`, but " &
     "it runs " & describeHostBase(base) & ", for which no add-on " &
     "realisation profile exists (`" & AddOnDebianProfileName & "` covers " &
-    "Debian, Ubuntu and their derivatives). Nothing was planned or changed.")
+    "Debian, Ubuntu and their derivatives, `" & AddOnArchProfileName &
+    "` Arch Linux and its derivatives). Nothing was planned or changed.")
 
 proc systemPlanTargetFor*(v: HostRegistryVerdict; base: HostBase):
     SystemPlanTarget =

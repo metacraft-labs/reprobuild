@@ -31,6 +31,7 @@ import repro_elevation/store_view
 
 import ./generation0
 import ./linux_fs
+import ./mutations
 
 export store_view.isMountPoint
 
@@ -187,6 +188,11 @@ proc removeReproRoot*() =
   if not dirExists(ReproRoot):
     return
   if isBtrfsSubvolume(ReproRoot):
+    when mutated("uninstall-keeps-repro-subvolume"):
+      # NEGATIVE CONTROL (see mutations.nim): the subvolume is left behind,
+      # which the fingerprint's ``btrfs-subvolumes`` and ``addon-roots``
+      # records must show.
+      return
     deleteBtrfsSubvolume(parentDir(ReproRoot), extractFilename(ReproRoot))
   else:
     removeDir(ReproRoot)

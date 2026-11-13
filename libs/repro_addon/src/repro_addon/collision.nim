@@ -13,9 +13,13 @@
 ## driver here reads ``/var/lib/dpkg/info/*.list`` and ``*.conffiles``
 ## (``dpkg-query -S`` semantics), the diversion database
 ## ``/var/lib/dpkg/diversions`` (``dpkg-divert --list`` semantics) and
-## unit provision through ``systemctl show``. A pacman driver reads the
-## local package database instead and has no diversions; it plugs in
-## behind the same ``CollisionDriver`` record.
+## unit provision through ``systemctl show``. The pacman driver (Arch and
+## Omarchy, spec §4.3.1) reads package ownership from the local database's
+## ``/var/lib/pacman/local/*/files`` ``%FILES%`` and unit provision the
+## same way, and has no diversions; it plugs in behind the same
+## ``CollisionDriver`` record, and ``detectCollisionDriver`` picks it from
+## the base's os-release. (Its ``%BACKUP%`` half -- backup files and
+## ``collision = takeOver`` -- is not in this module yet.)
 ##
 ## **It runs twice.** Once at plan time, to decide and to fill the plan's
 ## collision report; and once more immediately before each write, as the
@@ -44,6 +48,7 @@ import ./etc_write
 import ./fingerprint
 import ./host_exec
 import ./mutations
+import ./pacman_db
 import ./static_tree
 
 type
@@ -361,6 +366,32 @@ proc readUnitProvision*(unit: string): UnitProvision =
     raise newException(AddonCollisionError, "cannot observe unit " & unit &
       ": systemctl show reported no LoadState: " & r.output.strip())
 
+proc installCommonObservations(d: CollisionDriver; unitProvision: proc(
+    unit: string): UnitProvision {.gcsafe.}) =
+  ## The observations every driver makes the same way (spec §4.3.1 item 3):
+  ## unit provision through ``systemctl show`` (or the test's replacement)
+  ## and the drop-in directory hint; and, in the falsifying build, the
+  ## package provenance of units removed as it is for paths.
+  if unitProvision != nil:
+    d.unitProvision = unitProvision
+  else:
+    d.unitProvision = proc(unit: string): UnitProvision =
+      readUnitProvision(unit)
+  when mutated("observer-never-package-owned"):
+    # FALSIFYING MUTATION: no package provenance at all -- a unit a package
+    # provides is reported as provided by nobody.
+    let real = d.unitProvision
+    d.unitProvision = proc(unit: string): UnitProvision =
+      var u = real(unit)
+      if isPackageUnit(u):
+        u.fragmentPath = ""
+        u.loadState = "not-found"
+      u
+  d.dropInHint = proc(path: string): string =
+    # Programs that read a `.d` directory beside their file (sshd's
+    # `Include /etc/ssh/sshd_config.d/*.conf`, sudoers, ...) ship it.
+    if dirExists(path & ".d"): path & ".d/" else: ""
+
 proc newDpkgDriver*(root = "/"; unitProvision: proc(unit: string):
                     UnitProvision {.gcsafe.} = nil): CollisionDriver =
   ## The Debian/Ubuntu observer. ``root`` relocates the dpkg database for
@@ -386,32 +417,118 @@ proc newDpkgDriver*(root = "/"; unitProvision: proc(unit: string):
     if not fileExists(db): return DiversionRecord()
     let d = readDpkgDiversion(readFile(db), path)
     DiversionRecord(present: d.present, divertTo: d.divertTo, package: d.package)
-  if unitProvision != nil:
-    result.unitProvision = unitProvision
-  else:
-    result.unitProvision = proc(unit: string): UnitProvision =
-      readUnitProvision(unit)
-  when mutated("observer-never-package-owned"):
-    # FALSIFYING MUTATION: no package provenance at all -- a unit a package
-    # provides is reported as provided by nobody.
-    let real = result.unitProvision
-    result.unitProvision = proc(unit: string): UnitProvision =
-      var u = real(unit)
-      if isPackageUnit(u):
-        u.fragmentPath = ""
-        u.loadState = "not-found"
-      u
-  result.dropInHint = proc(path: string): string =
-    # Programs that read a `.d` directory beside their file (sshd's
-    # `Include /etc/ssh/sshd_config.d/*.conf`, sudoers, ...) ship it.
-    if dirExists(path & ".d"): path & ".d/" else: ""
   result.diversionTarget = proc(path: string): string =
     dpkgDiversionTarget(path)
+  installCommonObservations(result, unitProvision)
+
+# ---------------------------------------------------------------------------
+# The pacman driver (spec §4.3.1).
+# ---------------------------------------------------------------------------
+
+type
+  PacmanIndex = ref object
+    owner: Table[string, string]     ## absolute path -> package
+    loaded: bool
+    stamp: string
+
+proc pacmanIndexStamp*(root: string): string =
+  ## What the pacman index depends on: the local database directory (an
+  ## install, an upgrade or a removal adds or removes a package directory)
+  ## and every package's ``files`` entry. libalpm writes an entry in place
+  ## (``_alpm_local_db_write``), so a reinstall of the same version changes
+  ## no directory: each entry's own inode, size and times are stamped too.
+  result = statStamp(root / PacmanLocalDir)
+  for d in pacmanPackageDirs(root):
+    result.add("|" & statStamp(d / "files"))
+
+proc loadPacmanIndex(root: string; idx: PacmanIndex) =
+  ## Every installed package's ``%FILES%``, re-read whenever
+  ## ``pacmanIndexStamp`` changed (the per-operation freshness the dpkg
+  ## driver has). Fails closed: a database with no ``ALPM_DB_VERSION``, no
+  ## package, or an entry without a name or a files list would read paths
+  ## as unowned that a package owns.
+  let stamp = pacmanIndexStamp(root)
+  if idx.loaded and stamp == idx.stamp: return
+  let dir = root / PacmanLocalDir
+  if not pacmanDbPresent(root):
+    raise newException(AddonCollisionError, "the pacman package database " &
+      "is incomplete: " & dir / PacmanDbVersionFile & " does not exist, " &
+      "so package ownership cannot be observed; nothing is decided without it")
+  let pkgs = pacmanInstalledPackages(root)
+  if pkgs.len == 0:
+    raise newException(AddonCollisionError, "the pacman package database " &
+      dir & " lists no installed package; package ownership cannot be " &
+      "observed")
+  var owner = initTable[string, string]()
+  for p in pkgs:
+    if p.name.len == 0:
+      raise newException(AddonCollisionError, "the pacman package " &
+        "database entry " & p.dir & " has no %NAME%")
+    if not fileExists(p.dir / "files"):
+      raise newException(AddonCollisionError, "the pacman package " &
+        "database entry " & p.dir & " has no files list")
+    for path in pacmanFilesPaths(readFile(p.dir / "files")):
+      # Relative to pacman's root, which is ``root``.
+      owner[if root == "/" or root.len == 0: path else: root & path] = p.name
+  idx.owner = owner
+  idx.loaded = true
+  idx.stamp = stamp
+
+proc newPacmanDriver*(root = "/"; unitProvision: proc(unit: string):
+                      UnitProvision {.gcsafe.} = nil): CollisionDriver =
+  ## The Arch observer (spec §4.3.1 items 1 and 3): package ownership from
+  ## the local database's ``%FILES%``, unit provision through ``systemctl
+  ## show`` as on Debian, and no diversions (item 2: pacman has none, so
+  ## ``supportsDiversions`` is false and the decision table refuses a
+  ## ``divert`` opt-in by name). ``root`` and ``unitProvision`` as for
+  ## ``newDpkgDriver``.
+  let idx = PacmanIndex()
+  let rootDir = root
+  result = CollisionDriver(name: "pacman", supportsDiversions: false)
+  result.packageOwner = proc(path: string): PackageOwnership =
+    when mutated("observer-never-package-owned"):
+      return PackageOwnership()
+    else:
+      loadPacmanIndex(rootDir, idx)
+      PackageOwnership(package: idx.owner.getOrDefault(path))
+  result.diversion = proc(path: string): DiversionRecord =
+    DiversionRecord()
+  result.diversionTarget = proc(path: string): string = ""
+  installCommonObservations(result, unitProvision)
+
+proc distributionFamily(root: string): string =
+  ## ``arch``, ``debian`` or "" from ``root``'s os-release(5) ``ID`` and
+  ## ``ID_LIKE`` (Omarchy is ``ID=omarchy``, ``ID_LIKE=arch``).
+  for p in ["/etc/os-release", "/usr/lib/os-release"]:
+    let f = root / p
+    if not fileExists(f): continue
+    var ids: seq[string]
+    for raw in readFile(f).splitLines():
+      let line = raw.strip()
+      for key in ["ID=", "ID_LIKE="]:
+        if line.startsWith(key):
+          for w in line[key.len .. ^1].strip(chars = {'"', '\''}).splitWhitespace():
+            ids.add(w.toLowerAscii())
+    if "arch" in ids: return "arch"
+    for w in ["debian", "ubuntu", "raspbian"]:
+      if w in ids: return "debian"
+    return ""
+  ""
 
 proc detectCollisionDriver*(root = "/"): CollisionDriver =
-  ## The driver for the host's distribution: dpkg where its database is.
-  ## A status file without the ``info`` directory is a damaged database,
-  ## refused rather than read as "nothing is owned" (``loadDpkgIndex``).
+  ## The driver for the host's distribution: pacman on an Arch-family base
+  ## (os-release), else dpkg where its database is. The family decides
+  ## first because either database can exist on the other base (Debian
+  ## packages pacman, the AUR packages dpkg). A status file without the
+  ## ``info`` directory, and an Arch base without a pacman database, are
+  ## damaged databases, refused rather than read as "nothing is owned".
+  if distributionFamily(root) == "arch":
+    if not pacmanDbPresent(root):
+      raise newException(AddonCollisionError, "the base is Arch-family " &
+        "but has no pacman package database (" & root / PacmanLocalDir /
+        PacmanDbVersionFile & " does not exist); package ownership cannot " &
+        "be observed")
+    return newPacmanDriver(root)
   if fileExists(root / "/var/lib/dpkg/status"):
     if not dirExists(root / DpkgInfoDir):
       raise newException(AddonCollisionError, "the dpkg package database " &
@@ -419,7 +536,8 @@ proc detectCollisionDriver*(root = "/"): CollisionDriver =
     return newDpkgDriver(root)
   raise newAddOnUnsupportedBase("unknown",
     "no package database the collision observer can read (dpkg at " &
-    "/var/lib/dpkg/status); pacman support is not in this release")
+    "/var/lib/dpkg/status on a Debian-family base, pacman at " &
+    PacmanLocalDir & " on an Arch-family base)")
 
 # ---------------------------------------------------------------------------
 # Observing one target.

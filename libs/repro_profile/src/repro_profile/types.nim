@@ -106,6 +106,10 @@ type
     confirmTimeoutSec*: int
       ## `confirmTimeout: <seconds>` (§7.5): how long the add-on switch
       ## waits for every unit's `healthCheck`; 0 when not declared.
+    omarchyAccount*: string
+      ## `omarchyAccount: "<name>"` (§4.3.2, §8.5): the account whose home
+      ## holds Omarchy's hook directory, on an Omarchy base only; "" when
+      ## not declared.
 
   BaseOsBootFile* = object
     ## One boot firmware file of a `baseOs:` section (`config.txt`,

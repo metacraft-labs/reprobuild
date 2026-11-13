@@ -21,7 +21,7 @@
 ##   repro system addon image-assemble --payload <dir>
 ##   repro system addon agent-tick --source <manifest>... [--target T]
 ##   repro system rollback [<generation>] [--reconcile-drift]
-##   repro system addon fingerprint [--root R] [--no-live] [--out F]
+##   repro system addon fingerprint [--root R] [--no-live] [--omarchy-account A] [--out F]
 ##   repro system addon fingerprint diff <before> <after>
 ##                                [--except <component>:<key glob>]...
 ##                                [--expect <file>]
@@ -116,13 +116,17 @@ commands:
   preflight [--deploy-signers F] [--cache-publishers F [--cache-url U]]
             [--target T --manifest URL... [--profile-compiler P] [--poll-interval S]]
             [--evidence-sink ADDR:PORT --evidence-sink-ca F [--heartbeat-interval S]]
-            [--defer-recipient-key] [--json]
+            [--defer-recipient-key] [--profile F] [--json]
       Inventory the host read-only and print the plan and its digest.
+      --profile F, the host's first profile (canonical text): its addOn
+      stanza is checked and its digest bound into the plan; required on an
+      Omarchy base, whose profile must name its omarchyAccount.
   bootstrap --plan <digest> [--deploy-signers F] [--cache-publishers F [--cache-url U]]
             [--target T --manifest URL... [--profile-compiler P] [--poll-interval S]]
             [--evidence-sink ADDR:PORT --evidence-sink-ca F [--heartbeat-interval S]]
-            [--defer-recipient-key]
-      Install the add-on on a host whose preflight plan has <digest>. With
+            [--defer-recipient-key] [--profile F]
+      Install the add-on on a host whose preflight plan has <digest>. The
+      options are the preflight's (the plan is recomputed from them). With
       an Evidence sink, also generate the generation-attestation key and
       the sink write credential (enrol its certificate at the sink). With
       --defer-recipient-key, create no recipient key: the host's next boot
@@ -247,7 +251,7 @@ commands:
   release --operator NAME --reason TEXT
       Record and ship operator-released, unmask the agent's units and start
       its fetch timer again.
-  fingerprint [--root R] [--no-live] [--out F]
+  fingerprint [--root R] [--no-live] [--omarchy-account A] [--out F]
   fingerprint diff <before> <after> [--except C:GLOB]... [--expect F]
       Record the base fingerprint, or compare two.
   expected-delta <before-ledger|-> <after-ledger>
@@ -293,7 +297,7 @@ related (add-on hosts):
       previous generation holds); list the roots or the prefixes.
 """
 
-  FingerprintUsage* = """usage: repro-addon-fingerprint [--root R] [--no-live] [--out F]
+  FingerprintUsage* = """usage: repro-addon-fingerprint [--root R] [--no-live] [--omarchy-account A] [--out F]
        repro-addon-fingerprint diff <before> <after> [--except C:GLOB]... [--expect F]
 """
 
@@ -328,6 +332,8 @@ proc parsePreflightArgs*(rest: seq[string]): tuple[inp: PreflightInputs;
       inp.agentSources.add(takeValue(rest, i, "--manifest"))
     elif a == "--profile-compiler" or a.startsWith("--profile-compiler="):
       inp.profileCompiler = takeValue(rest, i, "--profile-compiler")
+    elif a == "--profile" or a.startsWith("--profile="):
+      inp.profilePath = takeValue(rest, i, "--profile")
     elif a == "--poll-interval" or a.startsWith("--poll-interval="):
       inp.agentPollSec = parseInt(takeValue(rest, i, "--poll-interval"))
     elif a == "--evidence-sink" or a.startsWith("--evidence-sink="):
@@ -397,6 +403,8 @@ proc parseBootstrapArgs*(rest: seq[string]): BootstrapOptions =
       opts.agentSources.add(takeValue(rest, i, "--manifest"))
     elif a == "--profile-compiler" or a.startsWith("--profile-compiler="):
       opts.profileCompiler = takeValue(rest, i, "--profile-compiler")
+    elif a == "--profile" or a.startsWith("--profile="):
+      opts.profilePath = takeValue(rest, i, "--profile")
     elif a == "--poll-interval" or a.startsWith("--poll-interval="):
       opts.agentPollSec = parseInt(takeValue(rest, i, "--poll-interval"))
     elif a == "--evidence-sink" or a.startsWith("--evidence-sink="):
@@ -455,6 +463,8 @@ proc runFingerprintCli*(args: seq[string]): int =
         opts.root = takeValue(args, i, "--root")
       elif a == "--no-live":
         opts.live = false
+      elif a == "--omarchy-account" or a.startsWith("--omarchy-account="):
+        opts.omarchyAccount = takeValue(args, i, "--omarchy-account")
       elif a == "--out" or a.startsWith("--out="):
         outPath = takeValue(args, i, "--out")
       elif a in ["-h", "--help"]:

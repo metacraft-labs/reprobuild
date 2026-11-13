@@ -977,6 +977,16 @@
 ##                                            however old it is
 ##                                            (``repro_test_support/
 ##                                            fresh_binary``; round 4)
+## ``uninstall-skips-pending-check``          uninstall does not refuse over
+##                                            a pending switch marker (spec
+##                                            §6.4 step 0)
+## ``repro-root-plain-dir-on-btrfs``          bootstrap creates ``/repro`` as
+##                                            a plain directory on a btrfs
+##                                            root, so a snapshot of ``/``
+##                                            carries the store (§5.1)
+## ``uninstall-keeps-repro-subvolume``        uninstall leaves the ``/repro``
+##                                            subvolume of a btrfs root in
+##                                            place (a negative control)
 ## =========================================  ==============================
 
 # The deploy agent's own mutations (``repro_deploy_agent/agent_mutations``)
@@ -1631,7 +1641,12 @@ const
                           "discard-failed-removal-counted-as-kept",
                           "discard-completion-key-read-late",
                           "discard-completion-sync-error-swallowed",
-                          "fresh-ignores-listings"]
+                          "fresh-ignores-listings",
+                          # The Arch track: uninstall's step 0 and the
+                          # store's placement by root filesystem.
+                          "uninstall-skips-pending-check",
+                          "repro-root-plain-dir-on-btrfs",
+                          "uninstall-keeps-repro-subvolume"]
 
 when AddonMutation.len > 0 and AddonMutation notin KnownAddonMutations and
     AddonMutation notin KnownAgentMutations:

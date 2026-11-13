@@ -44,6 +44,7 @@ import ./fingerprint
 import ./host_exec
 import ./ledger
 import ./mutations
+import ./pacman_db
 import ./preflight
 
 type
@@ -84,6 +85,12 @@ const
     ## the base -- every owner along the link chain, so on Ubuntu 26.04 both
     ## ``coreutils-from-uutils`` (the ``/usr/bin`` links) and
     ## ``rust-coreutils`` (their targets) -- found through dpkg's records.
+  AddonArchBaseTools* = ["/usr/bin/systemctl", "/usr/bin/pacman", "/bin/sh",
+                         "/usr/bin/setsid", "/usr/bin/sleep", "/usr/bin/cat",
+                         "/usr/bin/date", "/usr/bin/logger"]
+    ## The same on an Arch-family base (the pacman driver): pacman's own
+    ## package is the database the observer reads and the matrix row the
+    ## gate checks (spec §6.1); Arch has no apt, so no apt hook runs there.
   ExecKeys = ["ExecStart", "ExecStartPre", "ExecStartPost", "ExecStop",
               "ExecStopPost", "ExecReload", "ExecCondition"]
     ## Every command-line setting of systemd.service(5) ("Command lines";
@@ -353,10 +360,20 @@ proc matrixRefusal*(b: BaseIdentity): string =
   when mutated("base-matrix-unchecked"):
     # FALSIFYING MUTATION: every base is accepted.
     return ""
-  if baseMatrixNote(b.id, b.versionId).len == 0:
+  if isArchFamily(b.id, b.idLike):
+    # Arch's row is the systemd and pacman majors (spec §6.1): pacman is
+    # among the base identity's packages (``AddonArchBaseTools``).
+    var pacman = ""
+    for p in b.packages:
+      if p.name == "pacman" and p.status == "installed": pacman = p.version
+    let why = archMatrixRefusal(systemdMajor(b.systemd), pacman)
+    if why.len > 0:
+      return "the base is ID=" & b.id & " ID_LIKE=" & b.idLike & ": " & why &
+        "; the supported matrix's Arch row is " & ArchBaseRule
+  elif baseMatrixNote(b.id, b.versionId).len == 0:
     return "the base is ID=" & b.id & " VERSION_ID=" & b.versionId &
       ", which is not in the add-on's supported matrix (" &
-      SupportedBaseList & ")"
+      SupportedBaseList & "; and " & ArchBaseRule & ")"
   if b.architecture notin SupportedArchitectures:
     return "the userspace architecture '" & b.architecture &
       "' is not one of " & SupportedArchitectures.join(", ")
@@ -490,7 +507,8 @@ proc observeBaseIdentity*(ledger: Ledger;
   # names, the owners of the vendor units and of every base binary a
   # coupled unit runs.
   var names = initHashSet[string]()
-  for tool in AddonBaseTools:
+  let pacmanBase = driver.name == "pacman"
+  for tool in (if pacmanBase: @AddonArchBaseTools else: @AddonBaseTools):
     for p in toolOwners(tool, driver): names.incl(p)
   for e in ledger.entries:
     let p = packageOfObservation(e.observation)
@@ -521,9 +539,22 @@ proc observeBaseIdentity*(ledger: Ledger;
         if p.len > 0:
           names.incl(p)
           break
-  let status =
-    try: parseDpkgPackages(readFile(DpkgStatusPath), dpkgNativeArchitecture())
-    except IOError, OSError: initTable[string, BasePackage]()
+  var status = initTable[string, BasePackage]()
+  if pacmanBase:
+    # The local database's ``%VERSION%`` / ``%ARCH%`` (spec §4.3.1). The
+    # ``%FILES%`` digest the Arch base identity also names is a later
+    # extension of this record.
+    try:
+      for p in pacmanInstalledPackages():
+        if p.name.len > 0:
+          status[p.name] = BasePackage(name: p.name, version: p.version,
+            architecture: p.architecture, status: "installed")
+    except IOError, OSError:
+      discard
+  else:
+    status =
+      try: parseDpkgPackages(readFile(DpkgStatusPath), dpkgNativeArchitecture())
+      except IOError, OSError: initTable[string, BasePackage]()
   var sorted: seq[string]
   for n in names: sorted.add(n)
   sorted.sort()
