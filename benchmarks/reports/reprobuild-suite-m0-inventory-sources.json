@@ -2765,7 +2765,7 @@
             "src",
             "upstream"
           ],
-          "line": 102,
+          "line": 104,
           "path": "tests/e2e/addon/t_e2e_addon_zero_touch_image_synthesis_boots_converged.nim",
           "patterns": [
             "cc",

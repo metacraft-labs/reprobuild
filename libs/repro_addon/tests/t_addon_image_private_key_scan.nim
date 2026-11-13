@@ -1,5 +1,5 @@
-## `key_material.scanForPrivateKeys`: an image's private keys are found by
-## content and by location, never by file name (ReproOS Add-On Mode
+## `key_material.scanForPrivateKeys`: private keys in the scanned
+## directories are found by content and by location, never by file name (ReproOS Add-On Mode
 ## §6.5.2; owner review finding 1, 2026-11-13: a check by name missed a
 ## `cache-publisher.key` the `provisions-publisher-key` mutation left).
 ##
@@ -30,7 +30,7 @@ suite "private keys in an image are found by content and location":
     check scanForPrivateKeys(r).len == 0
     removeDir(r)
 
-  test "a Reprobuild key under any name, anywhere scanned":
+  test "a Reprobuild key under any name, in a scanned directory":
     let r = createTempDir("repro-keyscan-", "")
     let kp = peerAuth.generateKeypair()
     put(r / "var/lib/repro/system/notes.txt",

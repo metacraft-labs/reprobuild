@@ -662,9 +662,11 @@ proc synthesiseImage*(o: InfraImageOptions): InfraImageResult =
       for s in result.assembly.steps:
         if not s.ok: why = s.name & ": " & s.detail
       fail("the assembly failed at " & why)
-    # No image carries a private key (spec §6.5.2): every device creates
-    # its own at its first boot. Found by content and location, whatever
-    # its name (`key_material`); an image that holds one is refused.
+    # No image carries private-key material in the add-on's key-bearing
+    # directories (spec §6.5.2, D1 as narrowed on 2026-11-13): every device
+    # creates its own at its first boot. `key_material` finds the known
+    # formats by content and the key directories' private files by
+    # location, in `KeyScanRoots` only; an image that holds one is refused.
     let scan = work / "keyscan"
     removeDir(scan)
     for r in KeyScanRoots:
@@ -672,7 +674,8 @@ proc synthesiseImage*(o: InfraImageOptions): InfraImageResult =
     let keys = scanForPrivateKeys(scan)
     removeDir(scan)
     if keys.len > 0:
-      fail("the assembled image holds private-key material; every device " &
+      fail("the assembled image holds private-key material in a scanned " &
+        "directory; every device " &
         "must create its own. Nothing was written:\n  " & keys.join("\n  "))
     # Nor the assembly boot's random seed: systemd-random-seed writes it at
     # power-off unless the clean-up stopped the unit first, and every

@@ -20,8 +20,10 @@
 ## - ``repro infra plan`` on the booted guest predicts nothing (no ledger
 ##   change, no transition) and ``repro system addon verify`` is ok;
 ## - read offline from the built file (debugfs, before any boot): no
-##   private key under any name (``key_material``: by content and by
-##   location), not the assembly boot's machine id, no random seed, no
+##   private key of a known format, or private file in a key directory, in
+##   the scanned directories (``key_material.KeyScanRoots``, D1 as narrowed
+##   on 2026-11-13 -- not the whole image), not the assembly boot's
+##   machine id, no random seed, no
 ##   journal of the assembly boot, no SSH host key;
 ## - the boot was a first boot: a machine id of its own, not the assembly
 ##   boot's (recorded in the manifest), which systemd initialised itself;
@@ -293,7 +295,7 @@ proc runBase(b: BaseImage; record: JsonNode; work: string): seq[string] =
     let off = offlineImage(raw, work)
     record["offlineAgentDir"] = %off.listing
     record["offlinePrivateKeys"] = %off.privateKeys
-    step("the built image holds no private key of any name (read offline)",
+    step("the scanned directories hold no private-key material (read offline)",
          off.found and off.privateKeys.len == 0 and
            "recipient.key" notin off.listing and
            "recipient.pub" notin off.listing,

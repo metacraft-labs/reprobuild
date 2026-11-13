@@ -1,8 +1,14 @@
-## Private-key material in an image's root filesystem (ReproOS Add-On
-## Mode §6.5.2: no image carries a key a device must own alone).
+## Private-key material in the add-on's key-bearing directories of an
+## image (ReproOS Add-On Mode §6.5.2, D1 as narrowed by Zahary Karadjov on
+## 2026-11-13).
 ##
-## The check is by content and by location, never by file name: a key
-## written under any name is still found.
+## Scope: the directories in ``KeyScanRoots`` only, the formats below
+## only, and files up to 1 MiB for the content check. It is NOT a scan of
+## the whole image: a key a service writes elsewhere, a GnuPG or raw
+## binary key, or a private file in a subdirectory of a key directory is
+## not found (reprobuild-pm issues/2026-11-13-image-private-key-detection-
+## covers-only-the-scanned-directories.md). Within that scope the check is
+## by content and by location, not by file name.
 ##
 ## - *Content.* A file holds a private key when it carries the marker of a
 ##   private-key encoding Reprobuild or the base system writes: Reprobuild's
@@ -14,8 +20,8 @@
 ##   https://age-encryption.org/v1) and PuTTY key files.
 ## - *Location.* A key directory -- the add-on agent's, ``/etc/ssh``,
 ##   ``/etc/wireguard`` -- holds only public material that everyone may
-##   read; a regular file there that others cannot read is private, whatever
-##   it holds (a WireGuard key is 44 bytes of base64 with no marker at all).
+##   read; a regular file directly in one of them that others cannot read
+##   is private, whatever it holds (a WireGuard key is 44 bytes of base64 with no marker at all).
 ##
 ## ``scanForPrivateKeys`` walks a local copy of the image's files (the
 ## image command and the gate copy them out with ``debugfs rdump``); it
