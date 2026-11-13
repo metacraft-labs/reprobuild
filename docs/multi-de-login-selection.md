@@ -26,7 +26,7 @@ the runtime banner attempts surfacing whatever the open cascades allow.
 | Greeter | **SDDM 0.19.0 (jammy)** | Empirical DE-K2 finding: SDDM **works** under cascade G in real boot (validated via Hyper-V boot of DE-K1 ISO during the DE-K2 sub-agent campaign). GDM was tested in DE-G2 + fell over: gdm.service's hard dependencies on accountsservice + the gdm user-bus + the gnome-session pre-stage hit multiple unmet preconditions in the R9 minimal systemd tree. The decision is "use what works": SDDM. |
 | Session enumeration | **`/usr/share/wayland-sessions/*.desktop`** | freedesktop canonical path. SDDM scans this directory at greeter-start and lists one entry per `.desktop` file with a valid `[Desktop Entry]` block. The greeter UI surfaces the `Name=` line as the menu label and exec's the `Exec=` line when the user submits the form. |
 | Sessions exposed | 3 (Hyprland / GNOME / Plasma Wayland) | One `.desktop` file per DE; each `Exec=` points at the per-DE `/usr/local/bin/repro-start-<de>.sh` shim the per-DE builder already plants. Total user-visible delta vs DEM1: no GRUB cmdline parsing, no `repro-de-select.service`. |
-| Autologin | **Disabled** | DE-K1's stock `/etc/sddm.conf` carries an `[Autologin]` section that boots straight into Plasma Wayland without surfacing the greeter (this is what DE-K1's ISO ships, intentionally, to keep the Plasma path fast for vm-harness assertion). DEM2 strips `[Autologin]` -- otherwise the greeter never paints and the user cannot pick. |
+| Autologin | **Disabled** | DE-K1's stock `/etc/sddm.conf` carries an `[Autologin]` section that boots straight into Plasma Wayland without surfacing the greeter (this is what DE-K1's ISO ships, intentionally, to keep the Plasma path fast for gosti assertion). DEM2 strips `[Autologin]` -- otherwise the greeter never paints and the user cannot pick. |
 | GRUB layout | **Single-entry (`REPRO_GRUB_VARIANT=single`)** | No per-DE GRUB menu (that is DEM1's domain). The DEM2 ISO ships ONE GRUB entry that boots straight to the SDDM greeter. |
 | Wayland display server | **Forced via SDDM `[General] DisplayServer=wayland`** | The greeter itself runs as a Wayland client of a small compositor. We reuse `kwin_wayland` (already in the closure for DE-K1) as the greeter's compositor via `[Wayland] CompositorCommand=`. |
 | HiDPI | **`EnableHiDPI=false`** | llvmpipe on a Hyper-V framebuffer has no meaningful DPI; Qt's auto-scaler picks up wrong values and renders the greeter at unusable sizes. Explicitly turn it off. |
@@ -115,7 +115,7 @@ composer's stage 5 mirror lands three such files:
 | `plasmawayland.desktop` | Plasma (Wayland) | `/usr/local/bin/repro-start-plasma.sh` |
 
 Each `Exec=` shim sources the per-DE env (`/etc/profile.d/*.sh`),
-honours `REPRO_HEADLESS=1` for the vm-harness assertion path, then
+honours `REPRO_HEADLESS=1` for the gosti assertion path, then
 exec's the actual compositor / shell entrypoint.
 
 ## Risks of 3-way coexistence in a single rootfs
@@ -230,14 +230,14 @@ banner-green runtime gate. Specifically:
   telemetry via `journalctl -u sddm`; the painted UI is best-effort.
 - **3-DE session start.** Each of the three `repro-start-<de>.sh` shims
   has open per-DE cascades (DE-H2 / DE-G2 / DE-K2 partial outcomes).
-  The DEM2 vm-harness test does not assert any of them lands
+  The DEM2 gosti test does not assert any of them lands
   banner-green; it asserts only that SDDM started + enumerated 3
   sessions.
 
 The integration test
 [`tests/integration/dem/t_dem2_login_selection.sh`](../tests/integration/dem/t_dem2_login_selection.sh)
-gates the static composition; the vm-harness test
-[`vm-harness/tests/e2e/t_vm_harness_hyperv_reproos_multi_de_sddm.nim`](../../vm-harness/tests/e2e/t_vm_harness_hyperv_reproos_multi_de_sddm.nim)
+gates the static composition; the gosti test
+[`gosti/tests/e2e/t_gosti_hyperv_reproos_multi_de_sddm.nim`](../../gosti/tests/e2e/t_gosti_hyperv_reproos_multi_de_sddm.nim)
 attempts a runtime probe + documents the cascade-G outcome.
 
 ## References

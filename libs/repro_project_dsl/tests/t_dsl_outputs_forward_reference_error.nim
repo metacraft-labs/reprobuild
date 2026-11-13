@@ -4,19 +4,43 @@
 ## grammar — a flag must be declared *before* an ``outputs`` statement
 ## can reference it.
 
-import std/[unittest]
+##
+## Compile real modules: `package` cannot expand inside a `compiles` block,
+## even for valid input. The positive control proves the compiler can accept
+## the matching legal recipe before the refusal's diagnostic is inspected.
+## No mocks: the shared probe invokes the real Nim compiler on repository files.
 
-import repro_project_dsl
+import std/unittest
+import ./dsl_port/service_block_compile_probe
 
 suite "t_dsl_outputs_forward_reference_error":
   test "t_dsl_outputs_forward_reference_error":
-    check not compiles((block:
-      package tDslOutputsForwardBad:
-        uses:
-          "nim >=2.2 <3.0"
-        executable tool:
-          cli:
-            subcmd "c":
-              outputs notYet
-              flag notYet is string
-    ))
+    let accepted = checkRecipeSource("""
+import repro_project_dsl
+package tDslOutputsForward:
+  uses:
+    "nim >=2.2 <3.0"
+  executable tool:
+    cli:
+      subcmd "c":
+        flag notYet is string
+        outputs notYet
+""", "outputs-forward_reference-valid")
+    checkpoint accepted.output
+    require accepted.ok
+
+    let rejected = checkRecipeSource("""
+import repro_project_dsl
+package tDslOutputsForward:
+  uses:
+    "nim >=2.2 <3.0"
+  executable tool:
+    cli:
+      subcmd "c":
+        outputs notYet
+        flag notYet is string
+""", "outputs-forward_reference-invalid")
+    checkpoint rejected.output
+    check not rejected.ok
+    check rejected.mentions("outputs: 'notYet' is not in lexical scope")
+    check rejected.mentions("recipe.nim(8, 9) Error: outputs:")

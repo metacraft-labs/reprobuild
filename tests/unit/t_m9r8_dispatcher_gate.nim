@@ -160,12 +160,28 @@ suite "M9.R.8 dispatcher gate + buildDeps fallthrough":
     # mode. The Gap A nix / tarball / scoop smokes all surface this
     # same diagnostic shape — the M9.R.8 dispatcher gate broadening
     # must NOT relax it.
+    #
+    # TARBALL MODE IS THE ONE DELIBERATE EXCEPTION. Since eb88a3bd2 a
+    # tarball-mode use with no host tarball falls through to its
+    # from-source recipe (Dependency-Provisioning-In-Build-Graph.md 4.3);
+    # with no recipe either, the refusal names the host and the recipe path
+    # probed. The recipe root is pinned to an empty scratch tree so this
+    # does not depend on the catalog checkout beside the worktree.
+    let recipes = scratch / "recipes"
+    createDir(recipes)
+    let savedRoot = getEnv(FromSourceRootEnvVar)
+    putEnv(FromSourceRootEnvVar, recipes)
     try:
       discard toolBuildIdentity(artifact, tpmTarball, storeRoot = scratch)
       check false  # expected to raise
-    except ValueError as exc:
-      check exc.msg.contains("does not declare provisioning")
-      check exc.msg.contains("tarball")
+    except OSError as exc:
+      checkpoint exc.msg
+      check not exc.msg.contains("does not declare provisioning")
+      check exc.msg.contains("no tarball realization for this host")
+      check exc.msg.contains(recipes / "libfoo" / "repro.nim")
+    finally:
+      if savedRoot.len > 0: putEnv(FromSourceRootEnvVar, savedRoot)
+      else: delEnv(FromSourceRootEnvVar)
     # Nix provisioning is unavailable on Windows and rejects the host before
     # inspecting package metadata. Exercise the metadata contract where the
     # resolver itself is supported.

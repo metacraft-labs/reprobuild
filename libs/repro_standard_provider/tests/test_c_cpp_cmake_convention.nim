@@ -18,10 +18,10 @@
 ##     toolchain is missing):
 ##     - the convention emits a ``ccpp-cmake-configure`` action.
 ##     - the convention emits a ``ccpp-cmake-build-hello`` action that
-##       depends on the configure action and declares an executable
-##       output under ``.repro/build/cmake/``.
+##       depends on configure and consumes its tool-authored output
+##       metadata through a dynamic-output fragment.
 
-import std/[os, strutils, unittest]
+import std/[os, osproc, strutils, unittest]
 import repro_test_support
 
 import repro_core
@@ -250,7 +250,7 @@ suite "c-cpp-cmake convention M38":
       check configureActions[0].pool == "compile"
 
       # The build action for ``hello`` depends on the configure action
-      # and declares the predicted executable output path.
+      # and consumes the configured target's output metadata.
       var helloBuild: BuildActionDef
       var foundHello = false
       for a in buildActions:
@@ -260,13 +260,8 @@ suite "c-cpp-cmake convention M38":
           break
       check foundHello
       check helloBuild.deps == @["ccpp-cmake-configure"]
-      var sawBinary = false
-      for outPath in helloBuild.outputs:
-        let lower = outPath.toLowerAscii.replace('\\', '/')
-        if ".repro/build/cmake/" in lower and
-            (lower.endsWith("/hello") or lower.endsWith("/hello.exe")):
-          sawBinary = true
-      check sawBinary
+      check helloBuild.outputs.len == 0
+      check helloBuild.dynamicDepsFile.endsWith("outputs-hello.dyndep")
 
       # cmake --build argv: cmake, "--build", "<scratch>", "--target", "hello"
       let buildArgv = inlineArgvOf(helloBuild)
@@ -324,3 +319,36 @@ suite "c-cpp-cmake convention M38":
         sawBuildRefs = true
     check sawConfigureRefs
     check sawBuildRefs
+
+  test "custom output name and directory fulfill every declared output":
+    let scratch = getTempDir() / "repro-cmake-output-obligation"
+    if dirExists(scratch): removeDir(scratch)
+    createDir(scratch / "child")
+    defer: removeDir(scratch)
+    writeFile(scratch / "main.c", "int main(void) { return 0; }\n")
+    writeFile(scratch / "CMakeLists.txt", "cmake_minimum_required(VERSION 3.20)\nproject(outputs C)\nadd_subdirectory(child)\n")
+    writeFile(scratch / "child" / "CMakeLists.txt", "add_executable(hello ../main.c)\nset_target_properties(hello PROPERTIES OUTPUT_NAME actual RUNTIME_OUTPUT_DIRECTORY \"${CMAKE_BINARY_DIR}/custom\")\n")
+    writeFile(scratch / "reprobuild.nim", "import repro_project_dsl\npackage outputRegression:\n  uses:\n    \"gcc >=11\"\n    \"cmake >=3.20\"\n  executable hello:\n    discard\n")
+    let fragment = cmake_convention.cCppCMakeConvention().emitFragment(scratch, dummyRequest(scratch))
+    for node in fragment.nodes:
+      if node.kind != gnkAction: continue
+      let a = decodeBuildActionPayload(toBytes(node.payload))
+      var argv = inlineArgvOf(a)
+      if argv.len == 0: continue
+      for token in argv.mitems:
+        token = token.replace(getAppFilename(), ReprobuildRoot / "build/bin/repro-standard-provider")
+      let outcome = execCmdEx(argv.quoteShellCommand())
+      checkpoint outcome.output
+      require outcome.exitCode == 0
+      for output in a.outputs:
+        checkpoint "declared output: " & output
+        check fileExists(output) or dirExists(output)
+      if a.dynamicDepsFile.len > 0:
+        let lines = readFile(a.dynamicDepsFile).splitLines()
+        require lines.len > 1
+        check "custom/actual" in lines[1]
+        for line in lines:
+          if line.startsWith("output\t"):
+            let output = line.split('\t')[2]
+            check fileExists(output)
+            check execCmdEx(quoteShell(output)).exitCode == 0

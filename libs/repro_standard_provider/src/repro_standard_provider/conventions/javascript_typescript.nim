@@ -116,7 +116,7 @@
 ##     it accepts ``true`` — the spec rule "(or these are defaults under
 ##     modern tsc)" applies.
 
-import std/[algorithm, os, strutils]
+import std/[algorithm, json, os, strutils]
 
 import repro_core
 import repro_provider_runtime
@@ -919,7 +919,7 @@ proc emitTscCompileAction(projectRoot, npxExe: string;
                           tsSources, jsSources: seq[string];
                           tsConfigPath: string;
                           distDir: string;
-                          expectedOutputs: seq[string];
+                          outputFragment: string;
                           deps: seq[string] = @[]):
                             BuildActionDef =
   ## Emit the single ``npx tsc -p tsconfig.json --outDir <distDir>``
@@ -928,10 +928,9 @@ proc emitTscCompileAction(projectRoot, npxExe: string;
   ## the build into the convention's scratch dir without mutating the
   ## checked-in config.
   ##
-  ## ``--declaration`` + ``--declarationMap`` ensure the ``.d.ts`` /
-  ## ``.d.ts.map`` files are emitted regardless of what the project's
-  ## ``tsconfig.json`` toggled. The fixture ``tsconfig.json`` already
-  ## sets these so the explicit flag is defensive.
+  ## ``--declaration`` + ``--declarationMap`` request declaration outputs
+  ## when emission is enabled. The discovery edge uses the same options,
+  ## preserving effective ``noEmit`` and declaration-only settings.
   ##
   ## ``--rootDir`` is pinned to ``<projectRoot>/src`` so ``tsc`` mirrors
   ## the source tree under ``distDir`` (otherwise ``tsc`` chooses the
@@ -954,50 +953,65 @@ proc emitTscCompileAction(projectRoot, npxExe: string;
   for src in jsSources:
     inputs.add(src)
   inputs.add(tsConfigPath)
+  inputs.add(outputFragment)
   inputs.add(projectRoot / "package.json")
   let action = buildAction(
     id = "jsts-tsc-compile",
     call = inlineExecCall(argv, projectRoot),
     deps = deps,
     inputs = inputs,
-    outputs = expectedOutputs,
+    outputs = @[],
+    dynamicDepsFile = outputFragment,
     pool = "compile",
     dependencyPolicy = automaticMonitorPolicy(),
     commandStatsId = "jsts.tsc-compile")
   action
 
-proc predictedTscOutputs(projectRoot, distDir: string;
-                         tsSources, jsSources: seq[string]):
-                           seq[string] =
-  ## Predict the ``.js`` / ``.d.ts`` filenames ``tsc`` will emit. Mirrors
-  ## tsc's path-rewriting rules: each ``src/<rel>.ts`` lands at
-  ## ``<distDir>/<rel>.js`` (with ``--declaration`` also producing
-  ## ``<distDir>/<rel>.d.ts``). ``.tsx`` becomes ``.jsx`` only when
-  ## ``jsx: preserve`` is set in ``tsconfig.json`` — for the M16 fixtures
-  ## we don't have ``.tsx`` so we keep the prediction simple.
-  ##
-  ## ``.js`` sources under ``src/`` are NOT copied by ``tsc`` unless
-  ## ``allowJs`` is set, so the JS-only ``node-server`` fixture uses a
-  ## separate file-copy code path. ``tsSources`` is therefore the only
-  ## input the prediction loops over here.
-  let srcDir = projectRoot / "src"
-  for tsPath in tsSources:
-    let rel = relativePath(tsPath, srcDir).replace('\\', '/')
-    var stem = rel
-    if stem.endsWith(".ts"):
-      stem = stem[0 ..< stem.len - 3]
-    elif stem.endsWith(".tsx"):
-      stem = stem[0 ..< stem.len - 4]
-    elif stem.endsWith(".mts"):
-      stem = stem[0 ..< stem.len - 4]
-    elif stem.endsWith(".cts"):
-      stem = stem[0 ..< stem.len - 4]
-    else:
-      continue
-    result.add(distDir / (stem & ".js"))
-    result.add(distDir / (stem & ".d.ts"))
-  discard jsSources  # reserved — see comment above
-  result.sort(system.cmp[string])
+const TscOutputDiscoveryScript* = """
+const fs = require('fs'), path = require('path');
+// npx supplies the compiler on PATH. Resolve its package, rather than an
+// unrelated global TypeScript or the consumer project's module search path.
+const tsc = process.env.PATH.split(path.delimiter).map(p => path.join(p, 'tsc'))
+  .find(p => { try { return fs.statSync(p).isFile(); } catch { return false; } });
+if (!tsc) throw new Error('npx did not provide TypeScript');
+const ts = require(require.resolve('typescript', {paths: [
+  path.dirname(fs.realpathSync(tsc)), path.resolve(path.dirname(tsc), '..', '..')]}));
+const [config, outDir, rootDir, fragment, excludedJson] = process.argv.slice(1);
+const excluded = new Set(JSON.parse(excludedJson));
+const host = {...ts.sys, onUnRecoverableConfigFileDiagnostic: d => {
+  throw new Error(ts.flattenDiagnosticMessageText(d.messageText, '\n'));
+}};
+const parsed = ts.getParsedCommandLineOfConfigFile(config,
+  {outDir, rootDir, declaration: true, declarationMap: true}, host);
+if (!parsed || parsed.errors.length) throw new Error('cannot resolve TypeScript project configuration');
+const outputs = new Set();
+if (!parsed.options.noEmit) {
+  for (const file of parsed.fileNames)
+    for (const output of ts.getOutputFileNames(parsed, file, !ts.sys.useCaseSensitiveFileNames))
+      if (!excluded.has(output)) outputs.add(output);
+}
+// Incremental projects can emit build information even with noEmit.
+const info = ts.getTsBuildInfoEmitOutputFilePath(parsed.options);
+if (info) outputs.add(info);
+let text = 'repro-dynamic-graph-v1\n';
+for (const output of [...outputs].sort()) {
+  if (/[\t\r\n]/.test(output)) throw new Error('unsupported output path: ' + output);
+  text += 'output\tjsts-tsc-compile\t' + output.replace(/\\/g, '/') + '\n';
+}
+fs.mkdirSync(path.dirname(fragment), {recursive:true});
+fs.writeFileSync(fragment, text);
+"""
+
+proc emitTscOutputDiscoveryAction(projectRoot, npxExe, tsConfigPath,
+    distDir, fragment: string; excludedOutputs, inputs, deps: seq[string]): BuildActionDef =
+  ## Ask the same TypeScript compiler used for compilation to resolve its
+  ## effective config and output names; this does not compile or emit files.
+  let argv = @[npxExe, "--yes", "--package", "typescript@5.6", "node", "-e",
+    TscOutputDiscoveryScript, tsConfigPath, distDir, projectRoot / "src",
+    fragment, $(%excludedOutputs)]
+  buildAction(id = "jsts-tsc-outputs", call = inlineExecCall(argv, projectRoot),
+    deps = deps, inputs = inputs, outputs = @[fragment], pool = "compile",
+    dependencyPolicy = automaticMonitorPolicy(), commandStatsId = "jsts.tsc-outputs")
 
 proc hasLockfile(projectRoot: string): bool =
   ## M21 A1 gate: ``npm ci`` requires a ``package-lock.json`` (or
@@ -1232,19 +1246,6 @@ proc emitTestRunnerAction(projectRoot, nodeExe: string;
     dependencyPolicy = automaticMonitorPolicy(),
     commandStatsId = "jsts.test-run")
 
-proc filteredTscOutputs(rawOutputs: seq[string];
-                        excludedJsOutputs: seq[string]): seq[string] =
-  ## Drop entries in ``excludedJsOutputs`` from ``rawOutputs`` so the
-  ## convention's tsc action doesn't redundantly declare a ``.js`` path
-  ## that an esbuild bundle action also declares (the engine forbids
-  ## two actions declaring the same output). Equality is path-string
-  ## exact match — the predicted outputs and the excluded list are both
-  ## generated by the convention, so the strings line up.
-  for o in rawOutputs:
-    if o in excludedJsOutputs:
-      continue
-    result.add(o)
-
 proc syntheticPackage(projectRoot: string;
                       members: seq[JsTsMember];
                       info: JsTsProjectInfo): PackageDef =
@@ -1444,7 +1445,7 @@ proc jsTsEmitFragment(projectRoot: string;
               "cannot resolve tsc for TypeScript compile")
 
         # M21: pre-compute which ``.js`` outputs the bin-bundle actions
-        # are about to declare so the tsc action's predicted-output list
+        # are about to declare so the compiler-reported tsc output list
         # can exclude them. tsc still writes the file to disk (no flag
         # to disable .js emit for a specific source); the engine's
         # output-declaration uniqueness check only inspects the
@@ -1474,13 +1475,14 @@ proc jsTsEmitFragment(projectRoot: string;
                                outFile: outFile,
                                metafile: metafile))
 
-        let rawTscOutputs = predictedTscOutputs(projectRoot, distDir,
-          tsSources, jsSources)
-        let tscOutputs = filteredTscOutputs(rawTscOutputs, binBundleJsOutputs)
-
+        let outputFragment = scratchPathFor(projectRoot) / "tsc-outputs.dyndep"
+        let discovery = emitTscOutputDiscoveryAction(projectRoot, npxExe,
+          tsConfigPath, distDir, outputFragment, binBundleJsOutputs,
+          tsSources & jsSources & @[tsConfigPath, projectRoot / "package.json"], commonDeps)
+        allActions.add(discovery)
         let tscAction = emitTscCompileAction(projectRoot, npxExe,
-          tsSources, jsSources, tsConfigPath, distDir, tscOutputs,
-          deps = commonDeps)
+          tsSources, jsSources, tsConfigPath, distDir, outputFragment,
+          deps = commonDeps & @[discovery.id])
         allActions.add(tscAction)
 
         # M21 A5 + A6: per-bin esbuild bundle + launcher shim. The

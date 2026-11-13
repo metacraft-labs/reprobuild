@@ -90,6 +90,48 @@ type
     ## missing package and the lifecycle phase so authors can locate
     ## the call-site error.
 
+  SolverDeclarationSite* = enum
+    ## Where a solver-bound dependency edge was DECLARED, relative to the
+    ## recipe this process evaluates. Carried so a lock-conflict diagnostic can
+    ## say whether the declaring package is the project's own or a cross-repo
+    ## producer's (`Locking-And-Solver.md` §"Targeted re-pin": "When the
+    ## declaring package is not one of the consuming project's own — a
+    ## cross-repo producer reached through `uses:` — the diagnostic says so").
+    ##
+    ## WHY THIS SIGNAL. The `package` macro knows, at the registration site,
+    ## two facts nothing later in the process can recover: whether the
+    ## registering module is the recipe being built (`isMainModule` in a
+    ## provider compile, which names the recipe as its main module; in an
+    ## interface compile, whose main module is a generated runner importing
+    ## the recipe, whether the file lies under `-d:reproConsumerRoot`), and
+    ## whether the module is a project recipe (`repro.nim` / `reprobuild.nim`)
+    ## or a library module (a bundled stdlib package such as
+    ## `repro_dsl_stdlib/packages/sh.nim`). A sibling producer's recipe that
+    ## reaches this process is imported and lives in another checkout, so it
+    ## is not the recipe being built, and it is a project recipe, so it is not
+    ## a library module. `registerEnactedCertificatePolicy` draws the same
+    ## main-module line for the same reason ("a recipe imported from a sibling
+    ## is not the main module, so a sibling's own policy never reaches this
+    ## repository's lock").
+    ##
+    ## Alternatives rejected: a develop-override lookup for the parent names
+    ## develop siblings only, keyed by REPO name (`codetracer-trace-format-nim`)
+    ## where the registry holds PACKAGE names (`codetracer_trace_format_nim`),
+    ## and misses lock-pinned producers entirely; comparing paths against the
+    ## lock's directory breaks under `--lock <file>` and under recipe-relative
+    ## provider compiles, whose recorded source sites are relative.
+    sdsUnknown
+      ## A registration that did not come from the `package` macro (unit
+      ## tests, stdlib helpers registering on a package's behalf). No claim is
+      ## made about it.
+    sdsRootRecipe
+      ## Declared by the recipe this process evaluates.
+    sdsSiblingRecipe
+      ## Declared by ANOTHER project's recipe imported into this one — a
+      ## cross-repo producer.
+    sdsLibraryModule
+      ## Declared by an imported library module that is not a project recipe.
+
   SolverPackageInput* = object
     ## Spec-Implementation M2d: one dependency record the package macro
     ## hands to the solver. ``parentPackage`` is the package whose
@@ -119,6 +161,10 @@ type
       ##
       ## Empty is read as ``"target"`` so a record built by hand keeps its
       ## former meaning.
+    declarationSite*: SolverDeclarationSite
+      ## Which recipe declared this edge (see ``SolverDeclarationSite``).
+      ## Diagnostics only: it never reaches the solver inputs, so it moves no
+      ## rendered fixture and no inputs digest.
 
 var pendingSolverPackages {.threadvar.}: seq[SolverPackageInput]
   ## Spec-Implementation M2d: thread-local registry of solver-bound
@@ -315,7 +361,8 @@ proc resetVariantState*() =
 
 proc registerSolverDependency*(parentPackage, depPackage, rng: string;
                                 gateVariant = ""; gateValue = "";
-                                depKind = "target") =
+                                depKind = "target";
+                                declarationSite = sdsUnknown) =
   ## Spec-Implementation M2d: append one solver-bound dependency record.
   ## The ``package`` macro emits one of these per ``PackageUseDef``
   ## immediately after ``registerPackageDef``; ``finalizeVariants()``
@@ -331,7 +378,8 @@ proc registerSolverDependency*(parentPackage, depPackage, rng: string;
     rng: rng,
     gateVariant: gateVariant,
     gateValue: gateValue,
-    depKind: depKind)
+    depKind: depKind,
+    declarationSite: declarationSite)
   # A dependency reached through several imports is still the same constraint.
   if entry notin pendingSolverPackages:
     pendingSolverPackages.add(entry)
@@ -712,15 +760,23 @@ proc assertLockedVersionsSatisfyDeclaredRanges(pins: LockPins) =
       # would fail builds that are fine.
       continue
     if not satisfied:
-      raise newException(ELockConflict,
-        "the " & lockSourceDescription(pins) & " pins '" & entry.depPackage &
-        "' to " & locked & ", but package '" & entry.parentPackage &
-        "' declares `uses: " & entry.depPackage & " " & rangePart &
-        "`, which " & locked & " does not satisfy. A committed lock is a " &
-        "pin, not a preference: the build refuses to re-solve '" &
-        entry.depPackage & "' to a version the lock does not name. " &
-        "Regenerate the lock with `repro lock refresh` or relax the " &
-        "declared constraint.")
+      # The text is rendered by `lock_pins.lockConflictDiagnostic`, shared
+      # with `repro lock refresh --repin`'s held-pin check, so the two name
+      # the same remedies for the same contradiction. Its first remedy is the
+      # targeted re-pin; it says when the declarer is a cross-repo producer;
+      # and when the lock has no pin for the declarer it covers BOTH ways the
+      # writing solve can have missed that recipe — declared after the lock
+      # was written (the ordinary case of adding a dependency), or
+      # unreachable where the lock was regenerated. Issues:
+      # reprobuild-pm/issues/2026-10-12-lock-refresh-grounds-a-package-at-the-
+      # root-floor-so-the-writer-cannot-produce-a-lock-the-checker-accepts.md
+      # and 2026-10-14-declaring-a-sibling-producer-imports-its-toolchain-
+      # floor-into-the-consumers-committed-lock-solve.md.
+      raise newException(ELockConflict, lockConflictDiagnostic(
+        lockSourceDescription(pins), entry.depPackage, locked,
+        entry.parentPackage, rangePart,
+        declarerRecorded = pins.lockRecordsPackage(entry.parentPackage),
+        crossRepoProducer = entry.declarationSite == sdsSiblingRecipe))
 
 proc buildPackageDecls(parentPackages: openArray[string]): seq[PackageDecl] =
   ## Build the solver-side ``PackageDecl`` list from the pending
@@ -1054,6 +1110,36 @@ proc currentSolverVariantDecls*(): seq[VariantDecl] =
   ## Returns a copy; callers cannot mutate the ambient context through it.
   solverVariantDecls()
 
+const SolverDeclarationSitesSuffix* = ".sites"
+  ## Appended to the ``REPRO_EMIT_SOLVER_INPUTS`` path to name the file
+  ## ``renderSolverDeclarationSites`` is written to. MUST match
+  ## ``repro_cli_support.SolverDeclarationSitesSuffix`` (the CLI does not
+  ## import this module; see ``SolverInputsEmitEnvVar``).
+
+proc renderSolverDeclarationSites*(): string =
+  ## One ``<parent package>\t<site>`` line per parent package in the pending
+  ## registry, sorted by package. A package registered from several sites
+  ## reports the strongest claim to being the project's own: the root recipe
+  ## over anything else, and any macro-declared site over ``sdsUnknown`` —
+  ## so the cross-repo statement is made only when no registration of the
+  ## package came from the recipe being evaluated.
+  proc strength(site: SolverDeclarationSite): int =
+    case site
+    of sdsRootRecipe: 2
+    of sdsSiblingRecipe, sdsLibraryModule: 1
+    of sdsUnknown: 0
+  var sites = initTable[string, SolverDeclarationSite]()
+  for entry in pendingSolverPackages:
+    if entry.parentPackage notin sites or
+        strength(entry.declarationSite) >
+          strength(sites[entry.parentPackage]):
+      sites[entry.parentPackage] = entry.declarationSite
+  var names: seq[string] = @[]
+  for name in sites.keys: names.add(name)
+  names.sort()
+  for name in names:
+    result.add(name & "\t" & $sites[name] & "\n")
+
 proc emitSolverInputsIfRequested(variants: openArray[VariantDecl];
                                  packages: openArray[PackageDecl]) =
   ## MO-12 — if ``REPRO_EMIT_SOLVER_INPUTS`` is set, write the just-solved
@@ -1066,11 +1152,84 @@ proc emitSolverInputsIfRequested(variants: openArray[VariantDecl];
     writeFile(emitPath, renderSolverInputsFixture(variants, packages))
   except CatchableError:
     discard
+  # Beside the fixture, NOT in it: where each parent package was declared
+  # (`SolverDeclarationSite`). The fixture text is what `inputs_digest` is
+  # taken over, and a diagnostic-only fact must not move it. `repro lock
+  # refresh --repin` reads this to say, in a held pin's `ELockConflict`,
+  # whether the declaring package is a cross-repo producer — the same
+  # statement the build's conflict makes from the registry directly.
+  try:
+    writeFile(emitPath & SolverDeclarationSitesSuffix,
+      renderSolverDeclarationSites())
+  except CatchableError:
+    discard
+
+var solvedPrograms {.threadvar.}: Table[string, UnifiedSolution]
+  ## In-process memo of ``runUnifiedSolve``: the ASP program clingo was given,
+  ## mapped to the solution it produced. Never persisted and never shared
+  ## between processes.
+  ##
+  ## WHY THE KEY IS THE PROGRAM TEXT. ``solve`` derives every byte of a
+  ## successful ``UnifiedSolution`` from ``encodeUnified(variants, packages)``
+  ## and nothing else: clingo runs with default arguments and no seed
+  ## (`Named-Lock-Files.md` §1.1 measured that), and the parse reads only the
+  ## model. The program is therefore a key that covers everything the solve
+  ## reads by construction. The rendered solver-inputs fixture that
+  ## ``inputs_digest`` is taken over would be the cheaper key, but it is a
+  ## projection: it does not render ``PackageDecl.variants``, so two inputs
+  ## differing only there would collide. A registry that grows between calls
+  ## grows the program, so a grown registry is a miss.
+  ##
+  ## WHAT IT SAVES. Each ``package`` block re-arms the module-init solve, and
+  ## the per-consumer ``include`` shims turn a recipe's dependency DAG into a
+  ## tree of copies, each re-registering edges the registry already holds
+  ## (``registerSolverDependency`` deduplicates them). The re-armed solve then
+  ## runs over a byte-identical program. The 2026-11-07 diagnosis
+  ## (reprobuild-pm issue
+  ## `2026-11-07-test-binaries-pay-minutes-of-module-init-before-any-case-runs`)
+  ## counted 622 solves in `test_kwin_source` over about 110 distinct
+  ## registries.
+  ##
+  ## Only successful solves are memoised. ``EUnsatisfiable`` is raised from a
+  ## fresh solve every time, so its message — which carries the unsat core —
+  ## is built by the path that has always built it.
+
+var unifiedSolveRuns {.threadvar.}: int
+var unifiedSolveMemoHits {.threadvar.}: int
+
+proc unifiedSolveCount*(): int =
+  ## How many times this thread drove clingo for a unified solve. A memo hit
+  ## does not count. Test-facing: it is how a test asserts that a path did NOT
+  ## solve, which a timing cannot show.
+  unifiedSolveRuns
+
+proc unifiedSolveMemoHitCount*(): int =
+  ## How many unified solves this thread answered from the in-process memo.
+  unifiedSolveMemoHits
+
+proc resetUnifiedSolveMemo*() =
+  ## Drop the memo and zero both counters. Test-facing. Correctness never
+  ## needs it — an entry is a pure function of its key — which is why
+  ## ``resetVariantState`` leaves the memo alone.
+  solvedPrograms = initTable[string, UnifiedSolution]()
+  unifiedSolveRuns = 0
+  unifiedSolveMemoHits = 0
+
+proc memoisedSolve(variants: openArray[VariantDecl];
+                   packages: openArray[PackageDecl]): UnifiedSolution =
+  let program = encodeUnified(variants, packages)
+  if program in solvedPrograms:
+    inc unifiedSolveMemoHits
+    return solvedPrograms[program]
+  inc unifiedSolveRuns
+  result = solve(variants, packages)
+  solvedPrograms[program] = result
 
 proc runUnifiedSolve(applyTo: ConfigContext) =
   ## The solve half of ``finalizeVariants`` — build the solver inputs from the
   ## ambient variant context plus the pending dependency registry, drive
-  ## clingo once, and cache the answer.
+  ## clingo once, and cache the answer. An identical earlier solve in this
+  ## process answers from ``solvedPrograms`` instead of clingo.
   ##
   ## Hoisted out of ``finalizeVariants`` so the deferred module-init path
   ## (``finalizeVariantsAtModuleInit`` / ``ensureUnifiedSolution`` below) runs
@@ -1091,7 +1250,7 @@ proc runUnifiedSolve(applyTo: ConfigContext) =
   if variants.len == 0 and packages.len == 0:
     return
   try:
-    let sol = solve(variants, packages)
+    let sol = memoisedSolve(variants, packages)
     lastUnifiedSolution = sol
     hasUnifiedSolution = true
     # MO-12 — surface the EXACT inputs this solve consumed to the lock-
@@ -1100,10 +1259,9 @@ proc runUnifiedSolve(applyTo: ConfigContext) =
     if not applyTo.isNil:
       applySolverAssignments(applyTo, sol.variants)
   except EUnsatisfiable:
-    # Bubble the structured unsat error up so callers can render the
-    # diagnostic. M2e will replace this with a richer explanation
-    # path; for M2d we surface the encoder's best-effort
-    # ``unsatCore`` annotation verbatim.
+    # Re-raise the structured unsat error unchanged: its message already
+    # names the minimal core (``solve`` renders it in), and that message is
+    # what reaches the operator when this raise ends a recipe's module init.
     hasUnifiedSolution = false
     raise
 
@@ -1222,6 +1380,41 @@ proc ensureUnifiedSolution() =
     return
   moduleInitSolveDeferred = false
   runUnifiedSolve(nil)
+
+proc solvedAnswerMayAssignAny*(names: openArray[string]): bool =
+  ## Whether reading the solved answer (``hasSolverSolution`` /
+  ## ``lastSolverSolution``) could yield an assignment for any variant in
+  ## ``names``. A reader that wants only those variants may skip the read when
+  ## this is false: it would pay a solve whose answer cannot contain them.
+  ##
+  ## True when no module-init solve is owed, because the read is then a cache
+  ## lookup and costs nothing. When one IS owed, the solve would read
+  ## ``solverVariantDecls()`` — the open ambient context plus develop
+  ## siblings' declarations — and the solver assigns only variants some
+  ## declaration names, so the question is whether any of those declarations
+  ## carries one of ``names``. A governing lock pin does not change that:
+  ## ``lockedValueFor`` pins only a declared variant.
+  ##
+  ## The develop half walks names without building declarations, because
+  ## ``developVariantDecls`` resolves lock pins and may raise; a pin cannot add
+  ## a name, so the names alone answer the question.
+  if not moduleInitSolveDeferred:
+    return true
+  if not ambientVariantContext.isNil and
+      ambientVariantContext.state != ccsFinalized:
+    for node in ambientVariantContext.nodes:
+      if node.solverParticipating and node.scopeDerivedName in names:
+        return true
+  var seen: seq[string] = @[]
+  for entry in pendingSolverPackages:
+    if entry.depPackage in seen: continue
+    seen.add(entry.depPackage)
+    let developed = developSourceFor(entry.depPackage)
+    if developed.isNone: continue
+    for declared in developed.get().variants:
+      if qualifiedVariantName(entry.depPackage, declared.name) in names:
+        return true
+  false
 
 proc chosenVersion*(packageName: string): string =
   ## Spec-Implementation M2d: return the solver-chosen version for the

@@ -59,6 +59,7 @@
 ## managed body's dispatch line.
 
 import std/[os, strutils, times, unittest]
+import repro_test_support/reasoned_skip
 import repro_test_support
 import ./committed_lock_siblings_fixture
 
@@ -159,7 +160,7 @@ proc startPinnedAtNewest(label: string): Started =
   checkpoint("baseline commit:\n" & first.output)
   doAssert first.code == 0, "the baseline commit failed:\n" & first.output
   let committed = fx.git(fx.app, "show HEAD:repro.lock")
-  doAssert pinOf(committed, "../lib-b") == result.pinned,
+  doAssert pinOf(committed, "lib-b") == result.pinned,
     "the baseline commit did not pin lib-b's newest commit"
   result.fx = fx
 
@@ -179,7 +180,7 @@ suite "pre-commit never moves a repro.lock pin backward silently":
       let c = s.fx.tryCommit("after-another-advance")
       checkpoint(c.output)
       check c.code == 0
-      check pinOf(s.fx.git(s.fx.app, "show HEAD:repro.lock"), "../lib-b") ==
+      check pinOf(s.fx.git(s.fx.app, "show HEAD:repro.lock"), "lib-b") ==
         next
       check "REFUSED" notin c.output
       check "allowed pin regression" notin c.output
@@ -206,7 +207,7 @@ suite "pre-commit never moves a repro.lock pin backward silently":
       check readFile(fx.app / "repro.lock") == lockBefore
       check fx.git(fx.app, "diff --cached --name-only").strip() ==
         "work-against-a-stale-lib-b.txt"
-      check pinOf(readFile(fx.app / "repro.lock"), "../lib-b") == s.pinned
+      check pinOf(readFile(fx.app / "repro.lock"), "lib-b") == s.pinned
 
       # It names the sibling, the relation and distance, both revisions, the
       # variable, and when using the variable is and is not appropriate.
@@ -250,7 +251,7 @@ suite "pre-commit never moves a repro.lock pin backward silently":
           q("work-after-bringing-lib-b-forward")))
         checkpoint(again.output)
         check again.code == 0
-        check pinOf(fx.git(fx.app, "show HEAD:repro.lock"), "../lib-b") ==
+        check pinOf(fx.git(fx.app, "show HEAD:repro.lock"), "lib-b") ==
           s.pinned
 
   test "t_an_allowed_behind_regression_commits_the_older_pin_and_is_logged":
@@ -265,9 +266,9 @@ suite "pre-commit never moves a repro.lock pin backward silently":
       checkpoint(c.output)
       check c.code == 0
       let committed = fx.git(fx.app, "show HEAD:repro.lock")
-      check pinOf(committed, "../lib-b") == observed
+      check pinOf(committed, "lib-b") == observed
       check ("integrity = \"git-sha1:" & observed & "\"") in
-        depEntry(committed, "../lib-b")
+        depEntry(committed, "lib-b")
       check fx.git(fx.app, "status --porcelain").strip().len == 0
       # Printed into the commit's output, and logged, with both revisions.
       let announced = lineWith(c.output, "allowed pin regression",
@@ -294,7 +295,7 @@ suite "pre-commit never moves a repro.lock pin backward silently":
       checkpoint(c.output)
       check c.code != 0
       check fx.headOf(fx.app) == headBefore
-      check pinOf(readFile(fx.app / "repro.lock"), "../lib-b") == s.pinned
+      check pinOf(readFile(fx.app / "repro.lock"), "lib-b") == s.pinned
       check lineWith(c.output, "repro.lock sibling 'lib-b'",
         "behind by 1 commit(s)").len > 0
       check lineWith(c.output, AllowEnv & " names 'lib-c'",
@@ -312,7 +313,7 @@ suite "pre-commit never moves a repro.lock pin backward silently":
       checkpoint(c.output)
       checkpoint("pre-commit log:\n" & fx.preCommitLog())
       check c.code == 0
-      check pinOf(fx.git(fx.app, "show HEAD:repro.lock"), "../lib-b") == next
+      check pinOf(fx.git(fx.app, "show HEAD:repro.lock"), "lib-b") == next
       check lineWith(c.output, AllowEnv & " names 'lib-c'",
         "does not move backward", "Ignored").len > 0
       check lineWith(c.output, AllowEnv & " names 'nope'",
@@ -340,7 +341,7 @@ suite "pre-commit never moves a repro.lock pin backward silently":
       checkpoint(c.output)
       check c.code != 0
       check fx.headOf(fx.app) == headBefore
-      check pinOf(readFile(fx.app / "repro.lock"), "../lib-b") == s.pinned
+      check pinOf(readFile(fx.app / "repro.lock"), "lib-b") == s.pinned
       let headline = lineWith(c.output, "repro.lock sibling 'lib-b'",
         "diverged: 1 and 1 commits apart")
       checkpoint("headline: " & headline)
@@ -364,7 +365,7 @@ suite "pre-commit never moves a repro.lock pin backward silently":
         q("track-the-forked-lib-b"), allow = "lib-b"))
       checkpoint(allowed.output)
       check allowed.code == 0
-      check pinOf(fx.git(fx.app, "show HEAD:repro.lock"), "../lib-b") ==
+      check pinOf(fx.git(fx.app, "show HEAD:repro.lock"), "lib-b") ==
         observed
       check lineWith(allowed.output, "allowed pin regression",
         "diverged").len > 0
@@ -393,7 +394,7 @@ suite "pre-commit never moves a repro.lock pin backward silently":
       discard fx.git(side, "push -q origin HEAD:main")
       let absent = fx.headOf(side)
       let lock = readFile(fx.app / "repro.lock")
-      let entry = depEntry(lock, "../lib-b")
+      let entry = depEntry(lock, "lib-b")
       writeFile(fx.app / "repro.lock",
         lock.replace(entry, entry.replace(s.pinned, absent)))
       fx.removeHook()
@@ -408,7 +409,7 @@ suite "pre-commit never moves a repro.lock pin backward silently":
       checkpoint(c.output)
       check c.code != 0
       check fx.headOf(fx.app) == headBefore
-      check pinOf(readFile(fx.app / "repro.lock"), "../lib-b") == absent
+      check pinOf(readFile(fx.app / "repro.lock"), "lib-b") == absent
       let headline = lineWith(c.output, "repro.lock sibling 'lib-b'",
         "pinned commit " & absent & " not present in")
       checkpoint("headline: " & headline)
@@ -522,7 +523,7 @@ suite "pre-commit never moves a repro.lock pin backward silently":
       let allowed = fx.tryCommit("deliberate-downgrade", allow = "lib-b")
       checkpoint(allowed.output)
       check allowed.code == 0
-      check pinOf(fx.git(fx.app, "show HEAD:repro.lock"), "../lib-b") ==
+      check pinOf(fx.git(fx.app, "show HEAD:repro.lock"), "lib-b") ==
         observed
       let downgraded = readFile(lockPath)
       let again = runCmd(fx.gitCmd(fx.app, "commit -q --amend --no-edit"))

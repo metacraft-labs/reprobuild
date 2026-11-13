@@ -9,7 +9,7 @@
 ## mocks masked (they linked the producer's ``registerExtension`` marshaller
 ## straight into the test binary). Here the marshaller reaches the consumer
 ## ONLY through the lifted interface stub — exactly how the ``repro`` CLI
-## reconciling an out-of-tree provider (vm-harness) gets it.
+## reconciling an out-of-tree provider (gosti) gets it.
 ##
 ## The test drives the REAL shipped extractor (``extractInterfaceFromModule``)
 ## for a producer declaring a ``resourceType`` with flat SSZ-clean attributes,
@@ -67,7 +67,7 @@ proc nApply(inst: ResourceInstance; action: ResourceActionKind;
 let networkDriver = ResourceProviderDriver(
   identity: nIdentity, digest: nDigest, observe: nObserve, apply: nApply)
 
-resourceType "vm_harness.network":
+resourceType "gosti.network":
   attrs: NetworkAttrs
   wrapper: network
   determinism: rdVolatile
@@ -129,13 +129,13 @@ when isNixSupported:
       check fileExists(stubPath)
       check artifact.projectInterface.publicResources.len == 1
       check artifact.projectInterface.publicResources[0].typeId ==
-        "vm_harness.network"
+        "gosti.network"
 
       # The stub must carry the CONSUMER-IMPORTABLE attrs type + its codec
       # registration, and must NOT drag in the producer's private driver.
       let stubSource = readFile(stubPath)
       check stubSource.contains("registerExtension[")
-      check stubSource.contains("vm_harness.network")
+      check stubSource.contains("gosti.network")
       check stubSource.contains("subnet")
       check stubSource.contains("mtu")
       check stubSource.contains("dnsServers")
@@ -155,7 +155,7 @@ when isNixSupported:
         "import repro_project_dsl\n" &
         "import repro_resources\n" &
         "import \"" & (providerDir / "repro.nim").replace("\\", "/") & "\"\n\n" &
-        "let box = TypedExtensionBox[NetworkAttrs](typeId: \"vm_harness.network\",\n" &
+        "let box = TypedExtensionBox[NetworkAttrs](typeId: \"gosti.network\",\n" &
         "  val: NetworkAttrs(subnet: \"10.0.0.0/24\", mtu: 1500,\n" &
         "    dnsServers: @[\"1.1.1.1\", \"8.8.8.8\"], dhcp: true))\n" &
         "let bytes = marshalAttrs(box)\n" &
@@ -183,9 +183,9 @@ when isNixSupported:
         "import repro_resources\n" &
         "import vmnet_interface\n\n" &  # the LIFTED stub — nothing producer-side
         "let raw = readFile(paramStr(1))\n" &
-        "let box = unmarshalAttrs(\"vm_harness.network\", raw)\n" &
+        "let box = unmarshalAttrs(\"gosti.network\", raw)\n" &
         "let round = marshalAttrs(box)\n" &
-        "let typed = TypedExtensionBox[VmHarness_networkAttrs](box)\n" &
+        "let typed = TypedExtensionBox[Gosti_networkAttrs](box)\n" &
         "doAssert round == raw, \"attrs envelope did not round-trip\"\n" &
         "doAssert typed.val.subnet == \"10.0.0.0/24\"\n" &
         "doAssert typed.val.mtu == 1500\n" &
@@ -224,7 +224,7 @@ when isNixSupported:
         "import repro_resources\n" &
         "import vmnet_interface_no_ext\n\n" &
         "let raw = readFile(paramStr(1))\n" &
-        "discard unmarshalAttrs(\"vm_harness.network\", raw)\n")
+        "discard unmarshalAttrs(\"gosti.network\", raw)\n")
       let consumerNoExtBin = binDir / "consumer_no_ext"
       let cnOut = runNim(@["nim", "c", "--hints:off", "--verbosity:0"] & depFlags &
         pathFlags([thinDir, dslPath, resPath]) &

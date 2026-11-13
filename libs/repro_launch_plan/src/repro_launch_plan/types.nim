@@ -99,9 +99,9 @@ const
   LaunchSidecarEnvelopeMagic* = "RBLS"     ## Reprobuild Launch Sidecar
   LaunchPlanSidecarSuffix* = ".repro-launch"
   LaunchScriptMagicPosix* = "# repro-launch-script v1"
-  ## Prefix every generated POSIX launcher script starts with so the
-  ## activation layer can recognize a Reprobuild-managed launcher even
-  ## when its content hash has rotated.
+  ## Managed-launcher marker on line 2, after the executable shebang.
+  ## Older scripts placed it on line 1; marker-based consumers must accept
+  ## either position during the transition release, even if hashes rotate.
 
 proc newEnvBinding*(name: string; kind: EnvBindingKind; value: string): EnvBinding =
   EnvBinding(name: name, kind: kind, value: value)

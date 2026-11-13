@@ -6,8 +6,15 @@ import ./toolchain
 import ../types/options
 import ../packages/gcc as gcc_module
 import ../packages/clang as clang_module
+import ../active_context
+import ./zig_c
 
 proc archive*(opts: ArchiveOptions): BuildActionDef =
+  let zigTarget = activeZigCrossTarget()
+  if zigTarget != nil:
+    requireZigDeclared("archive")
+    return zig_c.zigArchive(opts)
+  requireCrossTargetConsulted("archive")
   case currentCompiler()
   of cfGcc:   gcc_module.gccArchive(opts)
   of cfClang: clang_module.clangArchive(opts)

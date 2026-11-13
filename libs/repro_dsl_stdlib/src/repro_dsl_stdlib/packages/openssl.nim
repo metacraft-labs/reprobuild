@@ -75,6 +75,7 @@ package openssl:
       sha256 = "2ebff5a1b5793e82495bf33c91fba040e11ff23333c2385ac66d0c3aee2cc14c",
       archiveType = "conda",
       executablePath = binDir(plConda) & "/openssl.exe",
+      version = "3.6.3",
       packageId = "openssl@3.6.3",
       cpu = "x86_64",
       os = "windows",

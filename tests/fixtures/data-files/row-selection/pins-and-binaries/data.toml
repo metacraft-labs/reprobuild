@@ -1,0 +1,15 @@
+# version and binaries do not affect selection; the same package in two
+# selected activities is selected once.
+[[package]]
+name = "ripgrep"
+activity = "default"
+binaries = ["rg"]
+
+[[package]]
+name = "jdk"
+activity = "dev"
+version = "21.0.5"
+
+[[package]]
+name = "ripgrep"
+activity = "dev"

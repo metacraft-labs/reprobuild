@@ -137,7 +137,7 @@ proc userVariableNameFromIdentity*(identity: string): string =
     return identity[(slash + 1) .. ^1]
   ""
 
-proc decodeRegistryStringValue(payload: RegistryValuePayload): string =
+proc decodeRegistryStringValue*(payload: RegistryValuePayload): string =
   ## Decode a REG_SZ / REG_EXPAND_SZ payload to a UTF-8 string. The
   ## trailing UTF-16LE NUL terminator is stripped. The POSIX arm
   ## writes the result into a shell `export` statement.

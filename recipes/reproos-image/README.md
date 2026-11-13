@@ -46,7 +46,7 @@ reaches `multi-user.target`.
 
 ## Boot a development VM
 
-With the `vm-harness` CLI on `PATH`, the recipe exposes a task that selects
+With the `gosti` CLI on `PATH`, the recipe exposes a task that selects
 the newest content-addressed QCOW2 output and leaves a transient VM running:
 
 ```sh
@@ -55,6 +55,6 @@ repro run boot-vm
 ```
 
 The same task uses Hyper-V on Windows and libvirt/QEMU on Linux. Hyper-V
-requires an elevated shell and `qemu-img`; vm-harness converts the QCOW2 to a
-temporary VHDX before attaching it. Additional vm-harness arguments can be
+requires an elevated shell and `qemu-img`; gosti converts the QCOW2 to a
+temporary VHDX before attaching it. Additional gosti arguments can be
 forwarded after `--`.

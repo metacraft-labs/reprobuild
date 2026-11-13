@@ -34,6 +34,10 @@
 ##   7. The inherited-activation case: ownership is derived from the
 ##      inherited roots (``VSINSTALLDIR`` etc.), so a nested engine also keeps
 ##      ``cl.exe`` reachable.
+##   8. ``isMsvcConsumerTool`` — the names that decide WHETHER the engine
+##      merges at all for an edge that declares its own PATH. An edge that
+##      declares none of them keeps its declared PATH untouched, an empty one
+##      included (``t_declared_env_is_in_the_cache_key`` cases 12 and 14).
 ##
 ## Platform-independent: both procs are pure string functions using Windows
 ## semantics (``;`` separator, case-insensitive), so this runs on every host.
@@ -134,6 +138,26 @@ suite "MSVC dev-env merge keeps the MSVC search lists":
     check VcBin in path
     check SdkBin in path
     check r"C:\Windows\System32" notin path
+
+  test "isMsvcConsumerTool names the tools that reach MSVC through the env":
+    # The merge above is applied by the engine only to an edge that
+    # inherits the host's PATH or declares one of these (see the engine's
+    # ``actionUsesMsvcToolchain``); a hermetic or empty PATH of any other
+    # edge is left exactly as declared.
+    for consumer in ["cargo", "rustc", "cl", "link", "cmake", "ninja",
+                     "msbuild", "clang-cl", "cc"]:
+      check isMsvcConsumerTool(consumer)
+    # References and executables alike: an absolute path, any separator,
+    # any case, with or without the Windows executable suffix.
+    check isMsvcConsumerTool(r"C:\tool-store\prefixes\cargo\bin\cargo.exe")
+    check isMsvcConsumerTool("/nix/store/abc-rustc/bin/rustc")
+    check isMsvcConsumerTool(VcBin & r"\CL.EXE")
+    # An edge that does not compile or link through MSVC: the npm bundle
+    # edge that searched the Visual Studio directories, a shell, and the
+    # MinGW compiler that must not be handed ``CC=cl.exe``.
+    for other in ["sh", "npm", "node", "gcc", "nim", "go", "python3", "",
+                  r"C:\BuildTools\bin\clx.exe", "cargo-foo"]:
+      check not isMsvcConsumerTool(other)
 
   test "msvcOwnedEntries keeps only entries under an MSVC root":
     let owned = msvcOwnedEntries(

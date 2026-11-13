@@ -142,12 +142,12 @@ proc seedGitOrigin(gitBin, originPath, workPath: string): string =
   requireGit(q(gitBin) & " -C " & q(workPath) & " rev-parse HEAD").strip()
 
 proc repoFragment(name, path, remote: string; depends: seq[string]): string =
-  result = "schema = \"reprobuild.workspace.repo.v1\"\n\n" &
+  result = "schema = \"reprobuild.workspace.repo.v2\"\n\n" &
     "[repo]\n" &
     "name = \"" & name & "\"\n" &
     "path = \"" & path & "\"\n" &
     "remote = \"" & remote & "\"\n" &
-    "revision = \"main\"\n"
+    "mainline = \"main\"\n"
   if depends.len > 0:
     result.add("depends = [\"" & depends.join("\", \"") & "\"]\n")
 
@@ -186,8 +186,7 @@ suite "DS-7: the dependency-edge modes over a real `depends` graph":
         "schema = \"reprobuild.workspace.project.v1\"\n\n" &
         "[project]\n" &
         "name = \"mix\"\n" &
-        "default_revision = \"main\"\n" &
-        "trunk = \"main\"\n\n" &
+        "\n" &
         remoteBlock &
         "includes = [\n  \"repos/ws-root.toml\",\n" &
         "  \"repos/lib-a.toml\",\n  \"repos/lib-b.toml\",\n" &
@@ -213,14 +212,14 @@ suite "DS-7: the dependency-edge modes over a real `depends` graph":
           q(ws / name))
 
       createDir(ws / ".repro")
-      writeFile(ws / ".repro" / "workspace.toml",
-        "schema = \"reprobuild.workspace.local.v1\"\n\n" &
+      writeFile(ws / ".repro" / "workspace-state.toml",
+        "schema = \"reprobuild.workspace.state.v1\"\n\n" &
         "[workspace]\n" &
         "project = \"mix\"\n" &
         "branch = \"main\"\n")
-      writeFile(ws / ".repro-workspace.toml",
-        "schema = \"reprobuild.workspace.bootstrap.v1\"\n\n" &
-        "[manifest]\n" &
+      writeFile(ws / "repro-workspace.toml",
+        "schema = \"reprobuild.workspace.settings.v1\"\n\n" &
+        "[records]\n" &
         "url = \"https://example.invalid/manifests.git\"\n")
 
       let layer5Dir = ws / ".git" / "repro"

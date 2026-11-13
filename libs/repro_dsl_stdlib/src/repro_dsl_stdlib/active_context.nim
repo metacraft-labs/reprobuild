@@ -45,6 +45,7 @@ import ./adapters/gcc_toolchain
 import ./adapters/clang_toolchain
 import ./adapters/native_cross_target
 import ./adapters/cross_aarch64_linux_gnu
+import ./adapters/cross_zig
 import ./adapters/solver_feature_set
 import ./configurables/variants
 
@@ -115,6 +116,12 @@ proc resolveCrossTarget(): CrossTarget =
   if isCrossTriple(selected.targetTriple):
     if isCrossAarch64Triple(selected.targetTriple):
       return crossAarch64LinuxGnuTarget()
+    # A triple zig knows (`adapters/cross_zig`'s table) is served by that
+    # adapter: a static-musl target with zig as its C toolchain and linker,
+    # which is what `cargo_package` and the target-parameterised C recipes
+    # read. The generic stub below is for triples no adapter claims.
+    if isZigCrossTriple(selected.targetTriple):
+      return crossZigTarget(selected.targetTriple)
     return crossTargetFromTriple(selected.targetTriple)
   nativeCrossTarget()
 
@@ -181,7 +188,39 @@ proc toolchain*(ctx: BuildContext): Toolchain =
 proc crossTarget*(ctx: BuildContext): CrossTarget =
   if crossTargetSlotIsStale(ctx.state):
     fillCrossTargetSlot(ctx.state)
+  ctx.state.crossTargetConsulted = true
   cast[CrossTarget](ctx.state.crossTargetSlot)
+
+proc activeCrossTarget*(): CrossTarget =
+  ## The `CrossTarget` governing the code being emitted now, with or
+  ## without an active `build:` block.
+  ##
+  ## Inside a build body this is `currentBuildContext().crossTarget`, so an
+  ## adapter that wrote the slot explicitly (`setCrossTarget`) is honoured.
+  ## Outside one -- a constructor driven by a test, or a recipe compiled for
+  ## interface extraction -- it is the variant-driven default, which is what
+  ## the slot would have been filled with. Constructors read THIS rather than
+  ## `currentBuildContext()` so they answer the same way in both settings
+  ## instead of raising in the second.
+  ##
+  ## Calling this from a recipe is the recipe's statement that it threads
+  ## the target itself, so it lifts `requireCrossTargetConsulted` for the
+  ## rest of the build block. A cross-aware constructor reads
+  ## `peekActiveCrossTarget` instead, so its own read does not lift the
+  ## guard for an unrelated constructor in the same block.
+  if tryCurrentBuildState() != nil:
+    return currentBuildContext().crossTarget
+  resolveCrossTarget()
+
+proc peekActiveCrossTarget*(): CrossTarget =
+  ## `activeCrossTarget` without lifting `requireCrossTargetConsulted`.
+  let state = tryCurrentBuildState()
+  if state != nil:
+    let consulted = state.crossTargetConsulted
+    result = currentBuildContext().crossTarget
+    state.crossTargetConsulted = consulted
+  else:
+    result = resolveCrossTarget()
 
 proc featureSet*(ctx: BuildContext): FeatureSet =
   if ctx.state.featureSetSlot == nil:
@@ -213,6 +252,48 @@ proc setCrossTarget*(ctx: BuildContext; ct: CrossTarget) =
 proc setFeatureSet*(ctx: BuildContext; fs: FeatureSet) =
   validate(fs)
   ctx.state.featureSetSlot = fs
+
+proc targetObjectExemption*(path: string; reason: string) =
+  ## Declare that the staged ``path`` -- relative to the installed prefix,
+  ## e.g. ``"usr/lib/firmware/brcm/fw.bin"`` -- holds a foreign-architecture
+  ## object this package ships on purpose (an ``EM_BPF`` program, firmware),
+  ## so the cross build's object check passes it (CLI/build.md §"Cross
+  ## Targets: `--target`", declared exemptions). One path, a reason, and
+  ## declared before the package emits its first edge. The mirror refuses an
+  ## exemption that covers nothing, and records each one in the
+  ## ``.realization-info@<triple>`` sidecar.
+  declareTargetObjectExemption(path, reason)
+
+proc requireCrossTargetConsulted*(caller: string) =
+  ## ReproOS-Add-On-Mode A15 fail-closed guard, called first by every
+  ## constructor that does not thread the target itself. Under a non-native
+  ## `--target` such a constructor would emit host-compiler edges whose
+  ## output is filed under the target's cache key and install mirror, so it
+  ## refuses before emitting anything — unless the recipe read
+  ## `activeCrossTarget()` in this build block and so threads the target
+  ## through the constructor's own options. Outside a build block there is
+  ## no recipe to have done that, so the refusal is unconditional.
+  let triple = activeTargetTriple()
+  if triple.len == 0:
+    return
+  let state = tryCurrentBuildState()
+  # A read in an enclosing frame of the same package covers the frames
+  # nested in it (an `executable` block inside the package's `build:`).
+  # `peekActiveCrossTarget` never sets the flag, so a helper's read through
+  # it lifts nothing.
+  for frame in enclosingBuildFrames():
+    if frame.crossTargetConsulted:
+      return
+  let recipe =
+    if state != nil: state.packageName
+    else: currentOwningPackage()
+  raise newException(ValueError,
+    "recipe '" & recipe & "': " & caller & " cannot build for --target '" &
+    triple & "': it does not thread a cross target, so it would compile " &
+    "for the host and file the result under the target. Use a " &
+    "cross-aware constructor (cargo_package), read activeCrossTarget() " &
+    "in the recipe and pass its flags through the constructor's options, " &
+    "or build without --target.")
 
 # ---------------------------------------------------------------------------
 # Named-Lock-Files NLF-M7 (§4.4) — the fifth slot

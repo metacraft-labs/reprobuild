@@ -17,7 +17,6 @@ schema = "reprobuild.workspace.project.v1"
 
 [project]
 name = "accounting"
-default_revision = "main"
 
 [[remote]]
 name = "metacraft-labs"
@@ -36,9 +35,10 @@ includes = [
 # Fragment 1: the metacraft "accounting" checkout. `repo.name = "accounting"`,
 # checked out at `metacraft/`, remote = `metacraft-labs`.
 const repoAccountingToml = """
-schema = "reprobuild.workspace.repo.v1"
+schema = "reprobuild.workspace.repo.v2"
 
 [repo]
+mainline = "main"
 name = "accounting"
 path = "metacraft"
 remote = "metacraft-labs"
@@ -47,9 +47,10 @@ remote = "metacraft-labs"
 # Fragment 2: the blocksense "accounting" checkout. SAME `repo.name`,
 # different path AND remote. This is the documented dual-fragment pattern.
 const repoAccountingBlocksenseToml = """
-schema = "reprobuild.workspace.repo.v1"
+schema = "reprobuild.workspace.repo.v2"
 
 [repo]
+mainline = "main"
 name = "accounting"
 path = "blocksense"
 remote = "blocksense-network"
@@ -62,7 +63,6 @@ schema = "reprobuild.workspace.project.v1"
 
 [project]
 name = "accounting"
-default_revision = "main"
 
 [[remote]]
 name = "metacraft-labs"

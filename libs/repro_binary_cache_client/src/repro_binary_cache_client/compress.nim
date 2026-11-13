@@ -30,7 +30,11 @@
 ## entry is still correct, merely larger. Producer and consumer never need
 ## to agree in advance, because the payload declares its own codec.
 
-import std/dynlib
+import std/[dynlib, os]
+when defined(posix):
+  from std/posix import nil
+when defined(windows):
+  from std/winlean import nil
 
 import ../../../repro_binary_cache_server/src/repro_binary_cache_server/types
 import ./dynlib_names
@@ -93,7 +97,32 @@ var
 
 const ZstdDynLib = zstdDynlibName(HostZstdDynlibTarget)
 
+when defined(reproStaticZstd):
+  {.passL: "-lzstd".}
+  proc zstdStatic_ZSTD_createCStream() {.importc: "ZSTD_createCStream", cdecl.}
+  proc zstdStatic_ZSTD_freeCStream() {.importc: "ZSTD_freeCStream", cdecl.}
+  proc zstdStatic_ZSTD_initCStream() {.importc: "ZSTD_initCStream", cdecl.}
+  proc zstdStatic_ZSTD_isError() {.importc: "ZSTD_isError", cdecl.}
+  proc zstdStatic_ZSTD_getErrorName() {.importc: "ZSTD_getErrorName", cdecl.}
+  proc zstdStatic_ZSTD_CStreamInSize() {.importc: "ZSTD_CStreamInSize", cdecl.}
+  proc zstdStatic_ZSTD_CStreamOutSize() {.importc: "ZSTD_CStreamOutSize", cdecl.}
+
 proc ensureZstdLoaded() =
+  when defined(reproStaticZstd):
+    # A statically linked binary (the ReproOS add-on's musl build) cannot
+    # dlopen: libzstd is linked in (``scripts/build_addon_static.sh``) and
+    # its entry points are taken directly.
+    if zstdLibHandle != nil:
+      return
+    ZSTD_createCStream = cast[ZstdCreateCStreamProc](zstdStatic_ZSTD_createCStream)
+    ZSTD_freeCStream = cast[ZstdFreeCStreamProc](zstdStatic_ZSTD_freeCStream)
+    ZSTD_initCStream = cast[ZstdInitCStreamProc](zstdStatic_ZSTD_initCStream)
+    ZSTD_isError = cast[ZstdIsErrorProc](zstdStatic_ZSTD_isError)
+    ZSTD_getErrorName = cast[ZstdGetErrorNameProc](zstdStatic_ZSTD_getErrorName)
+    ZSTD_CStreamInSize = cast[ZstdCStreamInSizeProc](zstdStatic_ZSTD_CStreamInSize)
+    ZSTD_CStreamOutSize = cast[ZstdCStreamOutSizeProc](zstdStatic_ZSTD_CStreamOutSize)
+    zstdLibHandle = cast[LibHandle](1)
+    return
   if zstdLibHandle != nil:
     return
   let lib = loadLib(ZstdDynLib)
@@ -171,8 +200,53 @@ proc compressFileToFile*(sourcePath, destinationPath: string;
 
   var source = open(sourcePath, fmRead)
   defer: close(source)
-  var destination = open(destinationPath, fmWrite)
-  defer: close(destination)
+  # The destination is created EXCLUSIVELY and every write is checked: it is
+  # a payload that will be signed and uploaded, so a pre-existing file or
+  # link at the path (another writer, a planted symlink) must not be
+  # written through, and a short write (a full disk) must fail the
+  # compression rather than leave a truncated frame to be published.
+  when defined(posix):
+    let destination = posix.open(destinationPath.cstring, posix.O_WRONLY or
+      posix.O_CREAT or posix.O_EXCL or posix.O_CLOEXEC, posix.Mode(0o600))
+    if destination < 0:
+      raise newException(CompressError, "compressFileToFile: cannot create " &
+        destinationPath & " exclusively: " & osErrorMsg(osLastError()))
+    defer: discard posix.close(destination)
+    proc writeOut(data: pointer; len: int) =
+      var off = 0
+      while off < len:
+        let n = posix.write(destination,
+          cast[pointer](cast[uint](data) + uint(off)), len - off)
+        if n < 0:
+          if posix.errno == posix.EINTR: continue
+          raise newException(CompressError, "compressFileToFile: writing " &
+            destinationPath & ": " & osErrorMsg(osLastError()))
+        if n == 0:
+          raise newException(CompressError, "compressFileToFile: writing " &
+            destinationPath & " made no progress")
+        off += n
+  elif defined(windows):
+    # `CREATE_NEW` refuses an existing file or link itself, so there is no
+    # check-then-create window.
+    let destination = winlean.createFileW(newWideCString(destinationPath),
+      winlean.GENERIC_WRITE, 0, nil, winlean.CREATE_NEW,
+      winlean.FILE_ATTRIBUTE_NORMAL, winlean.Handle(0))
+    if destination == winlean.INVALID_HANDLE_VALUE:
+      raise newException(CompressError, "compressFileToFile: cannot create " &
+        destinationPath & " exclusively: " & osErrorMsg(osLastError()))
+    defer: discard winlean.closeHandle(destination)
+    proc writeOut(data: pointer; len: int) =
+      var off = 0
+      while off < len:
+        var written = 0'i32
+        if winlean.writeFile(destination,
+            cast[pointer](cast[uint](data) + uint(off)), int32(len - off),
+            addr written, nil) == 0 or written <= 0:
+          raise newException(CompressError, "compressFileToFile: writing " &
+            destinationPath & ": " & osErrorMsg(osLastError()))
+        off += int(written)
+  else:
+    {.error: "compressFileToFile needs a POSIX or Windows writer".}
 
   var written = 0'i64
 
@@ -190,7 +264,7 @@ proc compressFileToFile*(sourcePath, destinationPath: string;
         raise newException(CompressError,
           "ZSTD_compressStream2: " & $ZSTD_getErrorName(rc))
       if zout.pos > 0:
-        discard destination.writeBuffer(addr outBuf[0], int(zout.pos))
+        writeOut(addr outBuf[0], int(zout.pos))
         written += int64(zout.pos)
       if endOp == ZstdEndDirectiveEnd:
         if rc == 0:

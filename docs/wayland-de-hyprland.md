@@ -11,7 +11,7 @@ This is a PoC-scoped architecture document. Production-breadth concerns
 via xdg-desktop-portal pipeline integration) are called out as post-PoC
 follow-ups but not implemented in this milestone.
 
-* DE-H2 — vm-harness Hyper-V Hyprland boot test (consumes the rootfs
+* DE-H2 — gosti Hyper-V Hyprland boot test (consumes the rootfs
   layout decided here).
 * DE-G1/DE-K1 — parallel GNOME / Plasma 6 docs (analogous shape; differ
   on display-manager + compositor + portal selection).
@@ -277,7 +277,7 @@ When upstream Hyprland is built in a future milestone, only the planted
 compositor binary changes; `/etc/hyprland.conf` is already in place and
 `/etc/sway/config` becomes vestigial (still present, ignored by Hyprland).
 
-## Risks for DE-H2 (vm-harness boot test)
+## Risks for DE-H2 (gosti boot test)
 
 1. **No Hyper-V SyntheticVideo support in sway 1.7's wlroots 0.15.** Sway
    1.7 (wlroots 0.15) opens `/dev/dri/card0` directly via the DRM backend.

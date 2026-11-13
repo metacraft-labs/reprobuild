@@ -157,5 +157,5 @@ suite "MO-10: status/health/add/remove use the unified resolver":
       let remove = run(reproBinary & " remove no-such-repo --workspace-root=" &
         repo)
       check "is declared in project" in remove.output
-      check "requires `.repro/workspace.toml`" notin remove.output
+      check "requires `.repro/workspace-state.toml`" notin remove.output
       check "no project or variant" notin remove.output

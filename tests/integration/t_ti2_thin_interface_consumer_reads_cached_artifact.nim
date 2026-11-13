@@ -82,7 +82,7 @@ proc cApply(inst: ResourceInstance; action: ResourceActionKind;
 let containerDriver = ResourceProviderDriver(
   identity: cIdentity, digest: cDigest, observe: cObserve, apply: cApply)
 
-resourceType "vm_harness.container":
+resourceType "gosti.container":
   attrs: ContainerAttrs
   wrapper: container
   determinism: rdVolatile
@@ -217,7 +217,7 @@ suite "TI2: thin-interface consumer reads the cached interface artifact":
     let cachedAccessors = readFile(accCache /
       (producerSelector & ".accessors.nim"))
     check cachedAccessors.contains("proc container*")
-    check cachedAccessors.contains("\"vm_harness.container\"")
+    check cachedAccessors.contains("\"gosti.container\"")
     check not cachedAccessors.contains("containerDriver")
     check not cachedAccessors.contains("registerResourceProvider")
 

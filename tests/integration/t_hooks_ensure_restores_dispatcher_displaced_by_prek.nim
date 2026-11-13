@@ -43,6 +43,7 @@
 ## the reprobuild dev shell provides both.
 
 import std/[os, osproc, strutils, tempfiles, unittest]
+import repro_test_support/reasoned_skip
 
 import repro_test_support
 

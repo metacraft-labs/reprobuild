@@ -85,7 +85,7 @@ suite "ReproOS source bridge inventory":
     check "source_recipe_selected" in stageScript
     check "reproosImageRootfsDeps.join(\" \")" in imageRecipe
     check "task \"boot-vm\"" in imageRecipe
-    check "vm-harness boot --backend auto" in imageRecipe
+    check "gosti boot --backend auto" in imageRecipe
     check "required source mirror missing: $recipe" in stageScript
     check "required iproute2 ss binary missing" in stageScript
     check "$STAGE_DIR/usr/bin/ss" in stageScript

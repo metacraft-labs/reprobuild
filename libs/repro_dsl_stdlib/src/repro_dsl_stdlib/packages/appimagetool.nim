@@ -136,6 +136,7 @@ package `appimagetool`:
       sha256 = AppImageToolSha256,
       archiveType = "raw",
       executablePath = "appimagetool",
+      version = AppImageToolVersion,
       packageId = "appimagetool@" & AppImageToolVersion,
       cpu = "x86_64",
       os = "linux",

@@ -90,18 +90,22 @@ proc runExportSplit(c: M74Case; shell: string;
   result.stdout = if fileExists(outPath): readFile(outPath) else: ""
   result.stderr = if fileExists(errPath): readFile(errPath) else: ""
 
-proc appliedMarkerOf(script: string): string =
-  ## Pull ``__REPRO_APPLIED='<key>'`` back out of the emitted bash script —
-  ## the same value the hook leaves in the shell, and therefore the input that
-  ## sends the NEXT invocation down the fast path.
+proc markerOf(script, name: string): string =
+  ## Pull ``<name>='<value>'`` back out of the emitted bash script — the same
+  ## value the hook leaves in the shell, and therefore an input that sends
+  ## the NEXT invocation down the fast path.
+  let needle = name & "='"
   for line in script.splitLines():
-    let idx = line.find("__REPRO_APPLIED='")
+    let idx = line.find(needle)
     if idx >= 0:
-      let rest = line[idx + len("__REPRO_APPLIED='") .. ^1]
+      let rest = line[idx + needle.len .. ^1]
       let close = rest.find('\'')
       if close > 0:
         return rest[0 ..< close]
   ""
+
+proc appliedMarkerOf(script: string): string =
+  markerOf(script, "__REPRO_APPLIED")
 
 when isIoMonitorSupported:
   suite "dev-env activation announces before it works":
@@ -142,10 +146,14 @@ when isIoMonitorSupported:
       check first.exitCode == 0
       let marker = appliedMarkerOf(first.stdout)
       check marker.len > 0
-      # Second invocation with the marker the first one emitted: this is the
-      # per-prompt case, and it must print nothing at all.
+      # Second invocation with the markers the first one emitted: this is the
+      # per-prompt case, and it must print nothing at all. Both markers, as
+      # in a real shell: the prompt key is compared against the prompt watch
+      # manifest of the activation `__REPRO_ACTIVE_MANIFEST` names.
       let second = runExportSplit(c, "bash",
-        [(name: "__REPRO_APPLIED", value: marker)])
+        [(name: "__REPRO_APPLIED", value: marker),
+         (name: "__REPRO_ACTIVE_MANIFEST",
+          value: markerOf(first.stdout, "__REPRO_ACTIVE_MANIFEST"))])
       check second.exitCode == 0
       check second.stderr.strip() == ""
       check second.stdout.contains("no-op")

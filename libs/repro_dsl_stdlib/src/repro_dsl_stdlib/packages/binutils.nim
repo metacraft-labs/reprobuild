@@ -22,13 +22,15 @@
 ## / etc. The ergonomic ``binutils.ld(...)`` form is deferred to a
 ## future milestone that lifts the one-executable restriction.
 ##
-## All seven packages share the same Nix provisioning shape
-## (``nixpkgs#binutils``). Windows / non-Nix Linux operators reuse the
-## binutils that ships inside the gcc.nim mingw distribution — no
-## separate Scoop manifest is harvested here.
+## All command selectors retain their Nix provisioning shape. The Windows
+## archiver additionally selects its own version-correct view of the same
+## pinned WinLibs distribution GCC uses; normal sibling realization reuse
+## shares the verified payload without a second extraction. Other command
+## selectors keep their existing provisioning channels.
 
 import repro_project_dsl
 import repro_dsl_stdlib/nixpkgs_pin
+import repro_dsl_stdlib/winlibs_pin
 # DSL-port M9.R.2c — typed slot var for each ``executable <tool>Bin:``
 # declared below (ldBin / arBin / ranlibBin / stripBin / nmBin /
 # objdumpBin / objcopyBin / gasBin).
@@ -104,6 +106,19 @@ package ar:
     nixPackage "nixpkgs#binutils", executablePath = "bin/ar",
       nixpkgsRev = CanonicalNixpkgsRev,
       nixpkgsNarHash = CanonicalNixpkgsNarHash
+
+    # A view of the existing compiler bundle, not another toolchain pin.
+    # The release's GNU Binutils version belongs to ar; GCC's version does not.
+    tarball url = WinLibsX64Url,
+      sha256 = WinLibsX64Sha256,
+      archiveType = "7z",
+      stripComponents = 1,
+      executablePath = "bin/ar.exe",
+      packageId = WinLibsX64PackageId,
+      cpu = "x86_64",
+      os = "windows",
+      lockIdentity = WinLibsX64LockIdentity,
+      version = WinLibsBinutilsVersion
 
   executable arBin:
     cli:

@@ -106,14 +106,12 @@ suite "M6 — MSYS2 pacman harvester source (hermetic)":
     let cache1 = setupFixtureEnv("idempotent-1")
     let entry1 = harvestMsys2Package(meMingw64, "test-tool",
       toolName = "test-tool", cacheDir = cache1)
-    let body1 = emitCatalogFile("test-tool",
-      "msys2:mingw64/test-tool", @[entry1])
+    let body1 = tarballStatements("test-tool", @[entry1])
     teardownFixtureEnv()
     let cache2 = setupFixtureEnv("idempotent-2")
     let entry2 = harvestMsys2Package(meMingw64, "test-tool",
       toolName = "test-tool", cacheDir = cache2)
-    let body2 = emitCatalogFile("test-tool",
-      "msys2:mingw64/test-tool", @[entry2])
+    let body2 = tarballStatements("test-tool", @[entry2])
     teardownFixtureEnv()
     check body1 == body2
     check body1.len > 0

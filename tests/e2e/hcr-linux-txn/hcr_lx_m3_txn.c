@@ -14,7 +14,11 @@
  *     functions the live agent calls;
  *   * the real cross-patcher claim map from
  *     `codetracer-native-recorder/ct_inline_hook/claimed_guest_text.c`, so
- *     "no claim is leaked" is answered by the map itself;
+ *     "no claim is leaked" is answered by the map itself -- when it is linked.
+ *     The recorder's claim-map arms (its `tests/reprobuild-hcr/`) link it.
+ *     reprobuild's own gates build with `REPRO_HCR_HLX_M3_NO_CLAIM_MAP`: no
+ *     claim count is read, every `claims*` field reports -1 ("not measured"),
+ *     and the provider's claim calls take the bridge's no-map path;
  *   * real replacement bodies extracted from a real relocatable object;
  *   * real `/proc/self/maps`, so "no patch page is leaked" is answered by the
  *     kernel's own accounting of this process's anonymous executable mappings
@@ -115,7 +119,12 @@ extern unsigned int repro_hcr_lx_probe_site_retained_body_count(
 
 /* ---- the real claim map -------------------------------------------------- */
 
+#ifdef REPRO_HCR_HLX_M3_NO_CLAIM_MAP
+static int claim_count(void) { return -1; }
+#else
 extern unsigned ct_claimed_guest_text_count(void);
+static int claim_count(void) { return (int)ct_claimed_guest_text_count(); }
+#endif
 
 /* ---- observation helpers ------------------------------------------------- */
 
@@ -485,7 +494,7 @@ static int run_prepare_arm(const char *mode) {
     return 2;
   }
 
-  claims_before = (int)ct_claimed_guest_text_count();
+  claims_before = claim_count();
   maps_before = anon_exec_bytes();
   snapshot_all_before();
   prepare_rc = repro_hcr_lx_probe_txn_prepare();
@@ -493,7 +502,7 @@ static int run_prepare_arm(const char *mode) {
     commit_rc = repro_hcr_lx_probe_txn_commit();
   }
   snapshot_all_after();
-  claims_after = (int)ct_claimed_guest_text_count();
+  claims_after = claim_count();
   maps_after = anon_exec_bytes();
 
   printf("{\"mode\":\"%s\",\"prepareRc\":%d,\"prepareRefusal\":\"%s\","
@@ -585,11 +594,11 @@ static int run_repeat(void) {
     print_hex(rolled, SNAP_BYTES);
   }
   printf("\",\"valueAfterRollback\":%d,\"siteLiveAfterRollback\":%d,"
-         "\"claimsAfterRollback\":%u,\"oldCodeRetained\":%d,"
+         "\"claimsAfterRollback\":%d,\"oldCodeRetained\":%d,"
          "\"retainedRegionCount\":%d}\n",
          hcr_lx_m3_victim_a(),
          repro_hcr_lx_probe_site_is_live(entry),
-         ct_claimed_guest_text_count(),
+         claim_count(),
          repro_hcr_lx_probe_last_old_code_retained(),
          repro_hcr_lx_probe_last_retained_region_count());
   return 0;
@@ -698,7 +707,7 @@ static int run_commit(int fault) {
   }
   repro_hcr_lx_probe_set_commit_fault_site(fault);
 
-  claims_before = (int)ct_claimed_guest_text_count();
+  claims_before = claim_count();
   maps_before = anon_exec_bytes();
   for (i = 0; i < 3; ++i) {
     snapshot(&victims[i], before[i]);
@@ -708,7 +717,7 @@ static int run_commit(int fault) {
   for (i = 0; i < 3; ++i) {
     snapshot(&victims[i], after[i]);
   }
-  claims_after = (int)ct_claimed_guest_text_count();
+  claims_after = claim_count();
   maps_after = anon_exec_bytes();
 
   printf("{\"mode\":\"commit\",\"fault\":%d,\"prepareRc\":%d,\"commitRc\":%d,"

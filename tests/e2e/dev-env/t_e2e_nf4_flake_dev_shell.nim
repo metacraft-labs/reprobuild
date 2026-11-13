@@ -36,6 +36,7 @@ import repro_dev_env_artifacts
 import repro_dev_env_engine
 import repro_provider_runtime
 import repro_test_support
+import repro_test_support/process_fixtures
 
 const NixSystem =
   when defined(macosx):
@@ -53,14 +54,39 @@ proc reproBinary(repoRoot: string): string =
   requireBinary(repoRoot / "build" / "bin" / addFileExt("repro", ExeExt),
     "reprobuild.apps.repro")
 
+proc bashExe(): string =
+  let found = findExe("bash")
+  doAssert found.len > 0, "NF-4's flake gate needs `bash` on PATH."
+  found
+
+var runToolCounter = 0
+
 proc runTool(exe: string; args: openArray[string]; workDir = "";
              env: StringTableRef = nil):
     tuple[output, error: string, code: int] =
-  var process = startProcess(exe, workDir, args, env, {})
+  ## stderr goes to a file, not a second pipe. Reading stdout to EOF and only
+  ## then stderr deadlocks as soon as the child writes more than one pipe
+  ## buffer (64 KiB on Linux) to stderr before closing stdout: the child
+  ## blocks in write(2) on stderr and the test blocks in read(2) on stdout.
+  ## `repro __repro-direnv-activate` renders its progress line to stderr for
+  ## as long as the flake evaluation runs, so on a loaded host it reaches
+  ## that size, and the case hung with the activation parked in `pipe_write`.
+  inc runToolCounter
+  let errPath = getTempDir() / ("repro-nf4-runtool-" &
+    $getCurrentProcessId() & "-" & $runToolCounter & ".stderr")
+  var shArgs = @["-c", "f=$1; shift; exec \"$@\" 2>\"$f\"", "runTool",
+    errPath, exe]
+  for arg in args:
+    shArgs.add(arg)
+  var process = startProcess(bashExe(), workDir, shArgs, env, {})
   try:
     let outText = process.outputStream().readAll()
-    let errText = process.errorStream().readAll()
-    result = (outText, errText, process.waitForExit())
+    let code = process.waitForExit()
+    var errText = ""
+    if fileExists(errPath):
+      errText = readFile(errPath)
+      removeFile(errPath)
+    result = (outText, errText, code)
   finally:
     process.close()
 
@@ -69,11 +95,6 @@ proc nixExe(): string =
   doAssert found.len > 0,
     "NF-4's flake gate needs `nix` on PATH. Install nix (or run the suite " &
     "inside the repo dev shell); this gate must not pass without it."
-  found
-
-proc bashExe(): string =
-  let found = findExe("bash")
-  doAssert found.len > 0, "NF-4's flake gate needs `bash` on PATH."
   found
 
 proc gitExe(): string =
@@ -173,6 +194,11 @@ proc prepareFixture(): Fixture =
   result.repoRoot = getCurrentDir()
   result.reproBin = reproBinary(result.repoRoot)
   result.root = createTempDir("repro-nf4-flake", "")
+  # The fixture is prepared at suite level, which runs in every process the
+  # runner starts -- one per case, plus its ``--list-json`` probe -- and none
+  # of them removed it. It is removed when THIS process exits. See
+  # ``repro_test_support/process_fixtures``.
+  releaseDirAtProcessExit(result.root)
   result.sibA = result.root / "sibA"
   result.sibB = result.root / "sibB"
   writeSibling(result.sibA, "sibA")
@@ -181,9 +207,12 @@ proc prepareFixture(): Fixture =
   # The counting wrapper. `/dev/shm` because the engine's evidence fold drops
   # every path under `/dev`, so the counter cannot become a cache input and
   # cannot invalidate the very edge whose invalidation it is measuring.
-  result.spawnCounter = "/dev/shm/repro-nf4-nix-spawns-" &
-    $getCurrentProcessId()
-  removeFile(result.spawnCounter)
+  # In a directory of its own, so that it is released with this process too.
+  let counterDir = "/dev/shm/repro-nf4-" & $getCurrentProcessId()
+  releaseDirAtProcessExit(counterDir)
+  removeDir(counterDir)
+  createDir(counterDir)
+  result.spawnCounter = counterDir / "nix-spawns"
   createDir(result.root / "bin")
   result.nixWrapper = result.root / "bin" / "nix"
   writeFile(result.nixWrapper,
@@ -341,11 +370,62 @@ proc nixDevelopEnv(f: Fixture; projectRoot: string):
   doAssert lines.len >= 3, "unexpected `nix develop` output: " & res.output
   (lines[0], lines[1], lines[2])
 
+const NixDaemonSocket = "/nix/var/nix/daemon-socket/socket"
+
+proc declareNixDaemonTrust(f: Fixture) =
+  ## Claim 3 needs the introspection edge to PUBLISH, and on a multi-user Nix
+  ## host it cannot unless the daemon it talks to is trusted: the monitor sees
+  ## an IPC peer outside the monitored tree (on a socket-activated host the
+  ## kernel names pid 1 as that peer), grades it as an unknown-scope loss, and
+  ## Failure-Semantics.md §Monitoring Failures skips the publish. Trust is
+  ## declared, never assumed (Dev-Env-Warm-Entry.md §3; c6c9f1654 "daemon
+  ## trust: identify a root-owned daemon by its endpoint, not its pid"), and
+  ## the production entry points apply the machine's declarations before
+  ## computing the edge (`startAutoRunQuotaIfNeeded` ->
+  ## `applyMachineDeclaredDaemonTrust`). This gate calls the engine directly,
+  ## so it does both itself: it declares the host's daemon BY ENDPOINT in a
+  ## file it owns (`REPRO_DAEMONS_CONFIG` replaces the system and user layers,
+  ## so the result does not depend on this machine's own configuration) and
+  ## applies it the way production does. The check behind the declaration is
+  ## the real one: the socket and its directories must be root-owned and the
+  ## peer of a test connection uid 0. A single-user Nix install has no daemon
+  ## socket and no peer to trust, so nothing is declared there.
+  # Existence of the socket's directory, not a passing check, decides this:
+  # a broken check must fail the gate, not read as "no daemon here".
+  if not dirExists(NixDaemonSocket.parentDir):
+    return
+  let conf = f.root / "daemons.conf"
+  writeFile(conf,
+    "[nix-daemon]\n" &
+    "socket = " & NixDaemonSocket & "\n" &
+    "endpoint-owner = root\n")
+  putEnv("REPRO_DAEMONS_CONFIG", conf)
+  for report in applyDeclaredDaemonTrust(loadDeclaredDaemons()):
+    doAssert report.outcome == dcoTrusted,
+      "NF-4's flake gate could not trust this host's nix daemon by its " &
+      "endpoint: " & renderDaemonCheckReport(report)
+
 suite "e2e_nf4_flake_dev_shell":
   when isIoMonitorSupported:
-    let fixture = prepareFixture()
-    let monitor = prepareMonitorTools(fixture.repoRoot,
-      fixture.root / "monitor", "nf4-flake")
+    # Prepared on the first case's `setup`, NOT in the suite body. The suite
+    # body runs at registration, in every process this binary starts --
+    # including `--list` / `--list-json`, which only enumerates and is run
+    # from a scratch working directory. Preparing here made enumeration lock
+    # a flake, check the nix daemon and resolve `<cwd>/build/bin/repro`; from
+    # a scratch directory that last step raised, so the binary listed no cases
+    # at all. The runner executes each case in its own process, so a case
+    # still prepares the template exactly once.
+    var prepared = false
+    var fixture: Fixture
+    var monitor: MonitorTools
+
+    setup:
+      if not prepared:
+        fixture = prepareFixture()
+        fixture.declareNixDaemonTrust()
+        monitor = prepareMonitorTools(fixture.repoRoot,
+          fixture.root / "monitor", "nf4-flake")
+        prepared = true
 
     test "activating_a_changed_flake_preserves_the_committed_lock":
       let project = fixture.cloneProject("preserve-lock")

@@ -105,3 +105,20 @@ suite "t_m9r75_declared_outputs_codec":
       readOnlyRoots = ["/tmp/src/x"])
     check action.declaredOutputs == @["/tmp/build/x"]
     check action.readOnlyRoots == @["/tmp/src/x"]
+
+  test "optional candidates round-trip separately and legacy payloads default empty":
+    let action = BuildActionDef(id: "dll", call: inlineExecCall(@["link"]),
+      outputs: @["a.dll"], optionalOutputs: @["a.lib"])
+    let decoded = decodeBuildActionPayload(encodeBuildActionPayload(action))
+    check decoded.outputs == @["a.dll"]
+    check decoded.optionalOutputs == @["a.lib"]
+    let legacy = decodeBuildActionPayload(
+      encodeBuildActionPayloadAtVersion(action, 31'u16))
+    check legacy.outputs == @["a.dll"]
+    check legacy.optionalOutputs.len == 0
+
+  test "optional candidates infer downstream producer dependencies":
+    let producer = BuildActionDef(id: "dll", optionalOutputs: @["a.lib"])
+    let consumer = BuildActionDef(id: "exe", inputs: @["a.lib"])
+    let graph = inferDeclaredActionDeps(@[producer, consumer])
+    check graph[1].deps == @["dll"]

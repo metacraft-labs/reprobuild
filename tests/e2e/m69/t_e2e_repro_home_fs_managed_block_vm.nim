@@ -14,6 +14,7 @@
 import std/[os, strutils]
 
 import std/unittest
+import repro_test_support/reasoned_skip
 
 import repro_home_resources
 

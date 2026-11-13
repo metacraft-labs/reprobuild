@@ -22,6 +22,7 @@ import std/[os, strutils, times]
 
 when defined(posix):
   import std/[net, posix]
+  from repro_core/paths import unixSocketPathMaxLen, unixSocketPathFits
   # Nim rejects exporting individual enum values (``cannot export:
   # AF_UNIX; enum field cannot be exported individually``), so we only
   # re-export the typed symbols and the helper procs from std/net and
@@ -149,6 +150,55 @@ proc endpointKindOf*(endpoint: string): EndpointKind =
 when defined(posix):
   var ipcBindStagingSequence = 0
 
+  proc toBase36(value: int): string =
+    ## Lower-case base 36 of a non-negative ``value``.
+    const Digits = "0123456789abcdefghijklmnopqrstuvwxyz"
+    var n = value
+    if n <= 0:
+      return "0"
+    while n > 0:
+      result.insert($Digits[n mod 36], 0)
+      n = n div 36
+
+  const IpcCompactStagingLeafReserve* =
+    2 + toBase36(int(high(Pid))).len + toBase36(high(int)).len
+    ## The bytes a COMPACT staging leaf (``compactStagingLeaf``) can need
+    ## beside an endpoint, for ANY process and ANY bind: the two ``.``
+    ## separators, the largest ``pid_t`` in base 36 and the largest bind
+    ## sequence (an ``int``) in base 36 -- 2 + 6 + 13 = 21 bytes on a 64-bit
+    ## host. Sized for the worst case rather than for a typical pid and a
+    ## process's first few binds, so an endpoint ``ipcEndpointFits`` accepted
+    ## is never refused later by ``bindIpcListener``, however many times the
+    ## process has bound. It costs nothing in practice: the default
+    ## endpoints' own leaves (``repro-daemon-<uid>.sock``,
+    ## ``reprostore-<uid>.sock``) are about as long, so the endpoint limit,
+    ## not this reserve, decides when a default falls back.
+
+  proc verboseStagingLeaf(pid, sequence: int): string =
+    ## The readable staging leaf, ``.<pid>-<seq>.bind``: says what it is and
+    ## whose it is to anyone listing the directory. 9 bytes plus the digits.
+    "." & $pid & "-" & $sequence & ".bind"
+
+  proc compactStagingLeaf(pid, sequence: int): string =
+    ## The short staging leaf, ``.<pid base36>.<seq base36>``, used when the
+    ## verbose one would not fit. Still unique per process and sequence --
+    ## which is what makes removing a leftover of exactly this name safe --
+    ## and it can never equal a verbose leaf (no ``-``, no ``.bind``).
+    "." & toBase36(pid) & "." & toBase36(sequence)
+
+  proc ipcEndpointFits*(endpoint: string): bool =
+    ## Whether ``bindIpcListener`` can publish ``endpoint`` on this platform:
+    ## the endpoint itself fits the Unix-socket path limit
+    ## (``repro_core/paths.unixSocketPathMaxLen``) AND its directory leaves
+    ## room for a compact staging sibling from any process
+    ## (``IpcCompactStagingLeafReserve``). Default-endpoint derivations use
+    ## this to decide when to fall back to a shorter directory; an endpoint
+    ## the caller chose is never rewritten, only refused by
+    ## ``bindIpcListener`` with a message naming the limit.
+    unixSocketPathFits(endpoint) and
+      parentDir(endpoint).len + 1 + IpcCompactStagingLeafReserve <=
+        unixSocketPathMaxLen()
+
   proc bindIpcListener*(endpoint: string): IpcListener =
     ## Publish the endpoint path only once the socket is ALREADY
     ## listening.
@@ -171,14 +221,39 @@ when defined(posix):
     ## ``rename`` within one directory is atomic and, like the previous
     ## unconditional ``removeFile(endpoint)``, replaces any leftover
     ## entry.
+    ##
+    ## BOTH names must fit the platform's Unix-socket path limit
+    ## (``repro_core/paths.unixSocketPathMaxLen``: 107 bytes on Linux, 91 on
+    ## macOS), and the staging name is the one that used to be forgotten:
+    ## its verbose leaf is 13-17 bytes, LONGER than a short endpoint leaf
+    ## such as ``d.sock``, so an endpoint that fitted could fail at the
+    ## staging bind with ``std/net``'s bare ``socket path too long``. The
+    ## verbose leaf is kept where it fits, a compact one is used where only
+    ## that fits, and where neither does -- or the endpoint itself does not
+    ## -- this raises ``IpcEndpointError`` naming the path and the limit
+    ## instead of binding non-atomically.
     result.endpoint = endpoint
-    createDir(parentDir(endpoint))
-    # Deliberately a SHORT leaf: AF_UNIX ``sun_path`` is 108 bytes, so
-    # the staging name must not be meaningfully longer than the
-    # endpoint it stands in for.
+    let limit = unixSocketPathMaxLen()
+    if not unixSocketPathFits(endpoint):
+      raise newException(IpcEndpointError,
+        "IPC endpoint " & endpoint & " is " & $endpoint.len &
+          " bytes, longer than the " & $limit &
+          "-byte Unix-socket path limit on this platform; use a shorter " &
+          "endpoint path")
+    let dir = parentDir(endpoint)
     inc ipcBindStagingSequence
-    let staging = parentDir(endpoint) /
-      ("." & $getCurrentProcessId() & "-" & $ipcBindStagingSequence & ".bind")
+    let pid = getCurrentProcessId()
+    var staging = dir / verboseStagingLeaf(pid, ipcBindStagingSequence)
+    if not unixSocketPathFits(staging):
+      staging = dir / compactStagingLeaf(pid, ipcBindStagingSequence)
+      if not unixSocketPathFits(staging):
+        raise newException(IpcEndpointError,
+          "IPC endpoint " & endpoint & " fits the " & $limit &
+            "-byte Unix-socket path limit on this platform, but its " &
+            "directory " & dir & " leaves too little room for the " &
+            "atomic-publish staging name beside it (" & staging & " needs " &
+            $staging.len & " bytes); use an endpoint in a shorter directory")
+    createDir(dir)
     try: removeFile(staging) except OSError: discard
     result.socket = newSocket(AF_UNIX, SOCK_STREAM, IPPROTO_NONE)
     try:
@@ -209,6 +284,15 @@ when defined(posix):
     result = IpcConn(socket: client)
 
   proc connectIpc*(endpoint: string): IpcConn =
+    # The dialling side of ``bindIpcListener``'s bound: an over-long
+    # explicit endpoint would otherwise fail inside ``connectUnix`` with a
+    # bare ``socket path too long`` that names no limit.
+    if not unixSocketPathFits(endpoint):
+      raise newException(IpcEndpointError,
+        "failed to connect to " & endpoint & ": the path is " &
+          $endpoint.len & " bytes, longer than the " &
+          $unixSocketPathMaxLen() &
+          "-byte Unix-socket path limit on this platform")
     var sock = newSocket(AF_UNIX, SOCK_STREAM, IPPROTO_NONE)
     try:
       sock.connectUnix(endpoint)

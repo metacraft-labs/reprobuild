@@ -49,8 +49,9 @@ const
   FetchScratchSubdir* = ".repro/fetch"
     ## Sub-directory under the project root that holds the downloaded
     ## tarballs + stamp files. Lives alongside ``.repro/build/``
-    ## (each Tier 2b convention's scratch root) so a ``repro clean``
-    ## wipes both consistently.
+    ## (each Tier 2b convention's scratch root). Only the stamp is a
+    ## declared output, so ``repro clean`` removes the stamp and keeps the
+    ## fetched payload.
 
 proc fetchScratchPath*(projectRoot: string): string =
   projectRoot / FetchScratchSubdir
@@ -109,6 +110,7 @@ proc emitFetchAction*(projectRoot, packageName: string;
     archiveUrl = spec.url)
   if spec.kind == dfkGitArchive:
     fetchToolRefs.add("git")
+    fetchToolRefs.add("ssh")   # a private repository is reached over ssh
   let shExe = findExe("sh")
   let escapedUrl = spec.url.replace("\"", "\\\"")
   let escapedHash = spec.hashHex.replace("\"", "\\\"")
@@ -144,14 +146,7 @@ proc emitFetchAction*(projectRoot, packageName: string;
       # Shallow clone + archive. The git rev is verified by extracting
       # archive contents and then hashing the resulting tarball — the
       # archive's deterministic output makes the hash stable.
-      script.add("rm -rf \"" & escapedTarball & ".git\"; ")
-      script.add("git clone --depth 1 ")
-      if escapedRev.len > 0:
-        script.add("--branch \"" & escapedRev & "\" ")
-      script.add("\"" & escapedUrl & "\" \"" & escapedTarball &
-        ".git\"; ")
-      script.add("(cd \"" & escapedTarball & ".git\" && git archive --format=tar HEAD > \"" &
-        escapedTarball & "\"); ")
+      script.add(gitArchiveFetchScript(escapedUrl, escapedRev, escapedTarball))
       case spec.hashAlg
       of dshaSha256:
         script.add("echo \"" & escapedHash & "  " & escapedTarball &

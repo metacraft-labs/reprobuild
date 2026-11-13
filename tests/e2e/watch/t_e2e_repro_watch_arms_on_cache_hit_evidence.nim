@@ -44,6 +44,8 @@
 ## real tool on PATH, a real runquotad, the real action cache, the real
 ## kqueue/inotify watcher. Nothing here is stubbed.
 
+import repro_test_support/reasoned_skip
+
 when defined(macosx) or defined(linux):
   import std/[json, os, osproc, strutils, tempfiles, unittest]
 

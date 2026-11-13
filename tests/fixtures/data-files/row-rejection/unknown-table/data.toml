@@ -1,0 +1,6 @@
+[[package]]
+name = "nvim"
+activity = "default"
+
+[[app]]
+name = "ghostty"

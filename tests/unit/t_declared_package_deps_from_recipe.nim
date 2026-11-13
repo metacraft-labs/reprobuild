@@ -48,11 +48,11 @@ package consumer:
     "ffmpeg >=7.0"
     "python3 >=3.10"
     uses: "GuiAssert"
-    uses: "vm-harness"
+    uses: "gosti"
 """)
     let deps = declaredPackageDeps(proj)
     # The two nested entries, in declaration order.
-    check deps == @["GuiAssert", "vm-harness"]
+    check deps == @["GuiAssert", "gosti"]
     # ...and emphatically NOT the tool requirements: a bare version string
     # names no importable Nim package.
     check "ffmpeg" notin deps

@@ -10,7 +10,7 @@ Reprobuild replaces multi-repo wrappers (like Google's `repo` tool or Git submod
 
 | VCS Manager Concept | Reprobuild Equivalent | How Repro Solves It |
 |---|---|---|
-| **Manifest File** (`default.xml`) | `repro-workspace.toml` | Declares sibling git repositories, clone locations, and track branches. |
+| **Manifest File** (`default.xml`) | `repos/*.toml` fragments (+ `repro-workspace.toml` settings) | Fragments declare sibling git repositories, clone locations, and mainline branches; the settings file holds workspace-wide policy. |
 | **`repo sync` / submodules** | `repro workspace sync` | Clones and fast-forwards sibling checkouts to match the manifest configuration. |
 | **Branch Status** (`repo status`) | `repro workspace status` | Audits uncommitted changes and commit hash alignments across all checkouts. |
 | **Workspace Init** | `repro workspace init` | Bootstraps a clean workspace on a new host. |
@@ -20,12 +20,42 @@ Reprobuild replaces multi-repo wrappers (like Google's `repo` tool or Git submod
 - `repro workspace init` — bootstrap a clean multi-project workspace on a new host.
 - `repro workspace sync` — clone and fetch all repositories in the manifest.
 - `repro workspace status` — audit git status across all sibling repositories.
+- `repro workspace branch-roles` — print the branch every branch role
+  (`mainline`, `unstable`, `stable`, ...) resolves to per repo, with the
+  fallback chain for a role a repo does not declare. `--unstable` (or
+  `--to=<role>`) prints one role; `--json` is the machine form. A read-only
+  lookup: use it instead of probing remotes for a branch name.
+- `repro sync --to=<role>` / `repro switch --to=<role>` /
+  `repro branch <path> --from=<role>` — reconcile with, switch to, or fork
+  from the branch a role resolves to in every repo at once, whatever each repo
+  calls it (`--unstable` reaches `agents` in a repo that declares it and the
+  mainline in one that does not). The shorthands `--mainline`, `--unstable`,
+  `--staging`, `--stable`, `--production` and `--lts` mean exactly
+  `--to=<role>` (on `branch`, `--from=<role>`). This is what replaces
+  `repo forall -c 'git rebase origin/<branch>'`: the branch name is read from
+  the manifest per repo, never typed. A declared role whose branch the remote
+  lacks is refused (`no_role_ref`) rather than silently redirected.
 - `repro workspace migrate` — reconcile each existing checkout's local git
   state (remote names and URLs, detached HEADs) with what the manifest now
   declares. Rarely needed by hand: the managed `post-merge` hook runs the same
   reconciliation, so an ordinary `git pull` is enough. Reach for the command
   when you want to see the plan first (`--dry-run`) or re-read a report that
   scrolled past.
+
+### The workspace branch and repository branches
+
+The default workspace branch is the root repository's `mainline`, declared in
+`repro-workspace.toml`. The root can declare that mainline directly in
+`[workspace]` or through its `profile` or `default_profile`; with no
+declaration there is no default workspace branch. Member repositories keep their own mainlines;
+a member's product profile does not determine the workspace branch.
+
+`workspace init` and a fully successful `workspace pull` record this default.
+`workspace lock` and pre-push checks prefer a recorded workspace branch, then
+the declared default. Status also prefers recorded state, then a live branch
+shared by every checkout, then the declared default. Its `--unmerged` query uses
+each repository's mainline, while ahead/behind counts use that checkout's
+remote-tracking upstream.
 
 ### Keeping an existing checkout current
 

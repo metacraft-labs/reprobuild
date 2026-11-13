@@ -102,6 +102,22 @@ proc readFingerprint(script: string): string =
     raise newException(ValueError, "unterminated __REPRO_APPLIED quote")
   rest[0 ..< e]
 
+proc readActiveManifest(script: string): string =
+  ## The prompt key is compared against the prompt watch manifest of the
+  ## activation ``$__REPRO_ACTIVE_MANIFEST`` names (cache-key v2,
+  ## ``reprobuild-pm``
+  ## ``issues/2026-09-28-dev-env-prompt-key-ignores-flake-inputs.md``), so a
+  ## prompt carries both markers, as a real shell does after activation.
+  const needle = "__REPRO_ACTIVE_MANIFEST='"
+  let s = script.find(needle)
+  if s < 0:
+    raise newException(ValueError, "no __REPRO_ACTIVE_MANIFEST marker")
+  let rest = script[(s + needle.len) .. ^1]
+  let e = rest.find('\'')
+  if e < 0:
+    raise newException(ValueError, "unterminated __REPRO_ACTIVE_MANIFEST")
+  rest[0 ..< e]
+
 proc captureExportOutput(c: ShellHookCase;
                          extraEnv: openArray[(string, string)] = []):
     tuple[stdout: string; exitCode: int] =
@@ -183,13 +199,15 @@ proc runScenario() =
   check initial.exitCode == 0
   let fingerprint = readFingerprint(initial.stdout)
   check fingerprint.len > 0
+  let activeManifest = readActiveManifest(initial.stdout)
 
   # Warm-up: 10 fast-path samples to let the OS' image cache and (on
   # Windows) Defender's first-byte scan reach steady state. These
   # samples are discarded.
   for i in 0 ..< 10:
     let r = captureExportOutput(c,
-      [("__REPRO_APPLIED", fingerprint)])
+      [("__REPRO_APPLIED", fingerprint),
+       ("__REPRO_ACTIVE_MANIFEST", activeManifest)])
     check r.exitCode == 0
     check r.stdout.contains(FastPathExpectedSubstring)
 
@@ -199,7 +217,8 @@ proc runScenario() =
   for i in 0 ..< Prompts:
     let t0 = getMonoTime()
     let r = captureExportOutput(c,
-      [("__REPRO_APPLIED", fingerprint)])
+      [("__REPRO_APPLIED", fingerprint),
+       ("__REPRO_ACTIVE_MANIFEST", activeManifest)])
     let elapsed = getMonoTime() - t0
     let dt = float(inNanoseconds(elapsed)) / 1_000_000.0
     perPrompt.add(dt)

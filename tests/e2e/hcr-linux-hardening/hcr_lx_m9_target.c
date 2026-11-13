@@ -89,12 +89,12 @@ int main(void) {
 
   entry_perms(entry_address, perms_after, sizeof(perms_after));
   /*
-   * Only call into the page if it is still executable. Under the fault lever
-   * the restore syscall is SKIPPED, so the page keeps whatever the transient
-   * left it as — RWX on a host that permits the RW|EXEC transition, and RW on
-   * one that does not. On the second kind of host this call would fault on
-   * instruction fetch, and a gate reading a SIGSEGV would attribute it to the
-   * patch rather than to the lever. -1 is reported instead, and the gate
+   * Only call into the page if it is still executable. The provider never
+   * makes target text writable or non-executable — it replaces the page with
+   * a finished executable copy, and under the fault lever it refuses before
+   * touching it — so a page without `x` here is a provider defect. Calling
+   * into it would fault on instruction fetch and a gate reading a SIGSEGV
+   * would attribute it to the patch; -1 is reported instead, and the gate
    * refuses it by name: this fixture has no arm in which -1 is acceptable.
    */
   after = (strchr(perms_after, 'x') != NULL) ? hcr_lx_m9_call() : -1;

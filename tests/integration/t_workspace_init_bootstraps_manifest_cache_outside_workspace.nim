@@ -90,19 +90,18 @@ proc projectTomlBody(libUrl: string): string =
   "schema = \"reprobuild.workspace.project.v1\"\n\n" &
   "[project]\n" &
   "name = \"myproject\"\n" &
-  "default_revision = \"main\"\n" &
-  "trunk = \"main\"\n\n" &
+  "\n" &
   "[[remote]]\nname = \"lib-origin\"\nfetch = \"" & libUrl & "\"\n\n" &
   "includes = [\n  \"repos/lib-a.toml\",\n]\n"
 
 const libATomlBody = """
-schema = "reprobuild.workspace.repo.v1"
+schema = "reprobuild.workspace.repo.v2"
 
 [repo]
 name = "lib-a"
 path = "lib-a"
 remote = "lib-origin"
-revision = "main"
+mainline = "main"
 """
 
 suite "RA-11 — bootstrap manifest cache":
@@ -168,8 +167,8 @@ suite "RA-11 — bootstrap manifest cache":
       seedBareWithFiles(gitBin, scratch, privateBare, [
         ("projects/_private_placeholder.toml",
           "schema = \"reprobuild.workspace.project.v1\"\n\n" &
-          "[project]\nname = \"private\"\ndefault_revision = \"main\"\n" &
-          "trunk = \"main\"\n\nincludes = []\n"),
+          "[project]\nname = \"private\"\n" &
+          "\nincludes = []\n"),
       ])
 
       # Hermetic cache root: an injected REPRO_MANIFEST_CACHE under scratch.

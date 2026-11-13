@@ -130,11 +130,10 @@ import repro_standard_provider/convention
 
 const
   ScratchDirName* = ".repro/build"
-    ## Identical to the Mode 2 JS/TS convention's scratch dir so the
-    ## two conventions produce co-located outputs and ``repro clean``
-    ## finds both. The Mode 3 convention is registered AFTER
-    ## ``javascript_typescript``, so the scratch path stays stable
-    ## when a project flips between package.json and Mode 3.
+    ## Identical to the Mode 2 JS/TS convention's scratch dir so the two
+    ## conventions produce co-located outputs. The Mode 3 convention is
+    ## registered AFTER ``javascript_typescript``, so the scratch path stays
+    ## stable when a project flips between package.json and Mode 3.
 
   EsbuildVersion* = "0.24.0"
     ## Pinned esbuild version. Matches the Mode 2 convention's

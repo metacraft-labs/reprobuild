@@ -75,12 +75,10 @@ when defined(linux) and defined(amd64):
     "repro_hcr_lx_probe_island_page_map_count", cdecl.}
   proc probeResetIslands() {.importc:
     "repro_hcr_lx_probe_reset_islands", cdecl.}
-  proc probeIslandReuseTransientProt(): cint {.importc:
-    "repro_hcr_lx_probe_island_reuse_transient_prot", cdecl.}
-  proc probeProtExec(): cint {.importc:
-    "repro_hcr_lx_probe_prot_exec", cdecl.}
-  proc probeTextRwxTransition(): cint {.importc:
-    "repro_hcr_lx_probe_text_rwx_transition", cdecl.}
+  proc probeCodePageIsDual(base: uint64): cint {.importc:
+    "repro_hcr_lx_probe_code_page_is_dual", cdecl.}
+  proc probeWxRequestsRefused(): uint64 {.importc:
+    "repro_hcr_lx_probe_wx_requests_refused", cdecl.}
   proc probeTextProtectionRoundtrip(): cint {.importc:
     "repro_hcr_lx_probe_text_protection_roundtrip", cdecl.}
   proc probeMembarrierSyncCore(): cint {.importc:
@@ -495,46 +493,39 @@ when defined(linux) and defined(amd64):
       copyMem(addr actual[0], cast[pointer](islandAddress), 14)
       check actual == expected
 
-      # A SECOND far target from a nearby window. On a host that allows
-      # `RW|EXEC` it packs into the same page 16 bytes on; on one that does not,
-      # a fresh page is taken rather than un-executing live islands.
+      # A SECOND far target from a nearby window. The first island's page is
+      # LIVE once that island exists, so it may be written again only through
+      # a separate writable view — a dual-mapped (memfd) page — and never by
+      # making it writable while it stays executable. An anonymous fallback
+      # page is therefore never reused; a fresh one is taken instead.
       let firstIsland = islandAddress
-      check probeIslandReuseTransientProt() == -1.cint
+      let firstPageDual = probeCodePageIsDual(
+        firstIsland and not uint64(pageSize - 1)) != 0
+      let wxBefore = probeWxRequestsRefused()
       check probeSelectTrampoline(windowB, farBody + 0x1000'u64, addr kind,
         addr jumpTarget, addr islandAddress, addr displacement) == 0
       check kind == 1
       check probeIslandAllocCount() == 2'u64
-      if probeTextRwxTransition() != 0:
+      if firstPageDual:
         check probeIslandReuseCount() == 1'u64
         check probeIslandPageCount() == 1
         check probeIslandPageMapCount() == 1'u64
         check islandAddress == firstIsland + 16'u64
-        # THE ASSERTION THE REUSE HAZARD IS ACTUALLY ABOUT.
-        #
-        # Every island already on this page is LIVE: published `rel32`s in
-        # target text jump to it, so a thread may be executing one at any
-        # moment. Making the page writable to add the second island must
-        # therefore KEEP `PROT_EXEC`; dropping it would fault such a thread.
-        #
-        # It has to be asserted against the RECORDED TRANSIENT and not against
-        # anything read after the call. `allocate_island` restores `R|X` before
-        # it returns, and writing slot 2 does not touch slot 1's bytes, so a
-        # post-hoc read of the first island's bytes — or of its page
-        # protection — is identical under both implementations. Measured on
-        # 2026-09-15: with the `PROT_EXEC` dropped from the reuse transition,
-        # a byte-intactness check on `firstIsland` stayed GREEN. That check
-        # could not fail and is kept below only as a corruption guard, never as
-        # the evidence for this property.
-        check (probeIslandReuseTransientProt() and probeProtExec()) ==
-          probeProtExec()
       else:
         check probeIslandReuseCount() == 0'u64
         check probeIslandPageCount() == 2
         check probeIslandPageMapCount() == 2'u64
-        # No page was reused, so no transient was taken at all.
-        check probeIslandReuseTransientProt() == -1.cint
+      # THE ASSERTION THE REUSE HAZARD IS ACTUALLY ABOUT, on either path: the
+      # provider asked for no writable+executable mapping. A post-hoc read of
+      # the first island's bytes or page protection cannot show this —
+      # `allocate_island` leaves the page `R|X` either way (measured
+      # 2026-09-15: a byte-intactness check stayed green over a transient that
+      # dropped `PROT_EXEC`) — so the provider counts every such request its
+      # raw `mprotect`/`mmap` refused, and the count must not move.
+      check probeWxRequestsRefused() == wxBefore
+      check wxBefore == 0'u64
       # A corruption guard only — see the note above on why this cannot be the
-      # evidence that the reuse kept `PROT_EXEC`.
+      # evidence for the W^X property.
       var firstAgain = newSeq[byte](14)
       copyMem(addr firstAgain[0], cast[pointer](firstIsland), 14)
       check firstAgain == expected

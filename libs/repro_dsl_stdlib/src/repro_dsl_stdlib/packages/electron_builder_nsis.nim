@@ -12,8 +12,10 @@
 ## Use ``nsis`` for anything driving NSIS directly.
 ##
 ## The ``3.0.4.1`` string is electron-builder's PACKAGING tag: a fourth
-## component appended to NSIS 3.0.4. The archive is flat — ``Bin/``,
-## ``Contrib/``, ``Include/`` and friends at the root — so no strip.
+## component appended to NSIS 3.0.4. The record's ``version`` is NSIS's own
+## spelling, ``3.04``, as ``Bin/makensis.exe -VERSION`` prints it from this
+## archive. The archive is flat — ``Bin/``, ``Contrib/``, ``Include/`` and
+## friends at the root — so no strip.
 ##
 ## **Identified, not merely pinned.** The SHA-512 of this artifact matches
 ## the constant ``nsisUtil.js`` passes to ``getBinFromUrl("nsis", "3.0.4.1",
@@ -37,6 +39,7 @@ package `electron-builder-nsis`:
       sha256 = "9877df902530f96357d13a7a31ae2b9df67f48b11ffc9a1700a7c961574ec5fa",
       archiveType = "7z",
       executablePath = "Bin/makensis.exe",
+      version = "3.04",
       packageId = "electron-builder-nsis@" & ElectronBuilderNsisTag,
       cpu = "x86_64",
       os = "windows",

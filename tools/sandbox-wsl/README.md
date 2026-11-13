@@ -32,11 +32,11 @@ New-Item -ItemType Directory -Force -Path $instanceDir | Out-Null
 wsl --import m9-throwaway $instanceDir $base
 
 # 3. (Optional) Pre-install ghc + cabal + crystal inside the distro
-#    via apt so the LIVE harness picks them up via the cakPath
-#    fallback. The M9 catalog half (poLinux slices in
-#    packages/<tool>.nim) is awaiting a Linux harvester pass; until
-#    that lands the LIVE harness needs SOME path resolution to
-#    graduate the fixtures.
+#    via apt so the LIVE harness picks them up through the `path`
+#    realization kind (the host's PATH). Linux `tarball` realizations
+#    in packages/<tool>.nim await a Linux harvester pass; until that
+#    lands the LIVE harness needs SOME path resolution to graduate the
+#    fixtures.
 wsl -d m9-throwaway -- bash -c "apt-get update && apt-get install -y ghc cabal-install crystal"
 
 # 4. Run the harness from inside the throwaway distro.
@@ -77,10 +77,10 @@ canonical "destructive-gate disposable env" for Linux — see
 
 The M9 resolver-level contract is asserted by
 ``tests/e2e/m9/t_e2e_m9_linux_phase2_partials_resolve.nim``. That gate
-runs on Windows under ``scripts/run_tests.sh`` and threads
-``hostOs = poLinux`` through ``chainResolvePackage`` to assert the
-chain's per-adapter classification matrix without needing a real
-Linux host. The WSL harness here is the LIVE-on-Linux gate (gated
+runs under ``scripts/run_tests.sh`` and resolves each package for an
+x86_64-linux target through ``resolveProfilePackage`` (GM4b: the selection
+a recipe's ``uses:`` makes too), asserting the per-kind classification
+matrix without needing a real Linux host. The WSL harness here is the LIVE-on-Linux gate (gated
 behind ``REPRO_LIVE=1`` per the M9 verification table).
 
 ## Out of scope for M9

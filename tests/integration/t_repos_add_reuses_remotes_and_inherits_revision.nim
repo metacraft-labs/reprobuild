@@ -5,12 +5,15 @@
 ## base does, and never guesses a `revision` OR a `branch`.
 ##
 ## "Never guesses a branch" is now a REFUSAL rather than an omission. A new
-## fragment given neither `--branch` nor `--revision` used to be written
-## carrying neither key, resolving only because the project stub seeded a
-## `default_revision` for it to inherit — the collection-level default the
-## membership model exists to remove. With that gone the same input would
-## author a repo with an empty revision, so it is rejected at the point of
-## authorship instead, and nothing is written.
+## fragment given no `--branch` used to be written without one, resolving only
+## because the project stub seeded a `default_revision` for it to inherit —
+## the collection-level default the membership model exists to remove. Every
+## fragment must now resolve a `mainline` (Workspace-Branch-Roles.md §3.3):
+## its own, or the one the workspace's `[workspace] default_profile` supplies.
+## So without `--branch`, in a workspace whose default profile supplies none,
+## the add is rejected at the point of authorship and nothing is written —
+## and `--revision` alone does not satisfy the rule, because a commit pin sits
+## BESIDE a mainline rather than being one.
 ##
 ## Regression origin: adding `nim-shm-lease` to the `reprobuild` project (whose
 ## manifest already declares `metacraft-labs` → `https://github.com/metacraft-labs`
@@ -36,7 +39,10 @@
 ## unreachable network URLs on purpose — `repos add` is a manifest
 ## AUTHORING verb and never contacts them. The one case that does contact a
 ## remote (explicit `--revision=` validation) uses a real local bare repo, so
-## the test stays hermetic and offline.
+## the test stays hermetic and offline. That case adds a real settings file
+## (`repro-workspace.toml`) whose default profile supplies the mainline, the
+## one workspace shape in which a `--revision` may be given without
+## `--branch`.
 ##
 ## Skip rule: `git` missing on PATH.
 
@@ -74,7 +80,6 @@ const projectToml = """schema = "reprobuild.workspace.project.v1"
 
 [project]
 name = "reprobuild"
-default_revision = "dev"
 
 [[remote]]
 name = "github"
@@ -93,15 +98,16 @@ includes = [
 ]
 """
 
-# A hand-written sibling fragment — the shape every generated fragment must
-# match.
-const siblingFragment = """schema = "reprobuild.workspace.repo.v1"
+# A hand-written sibling fragment, in the `repo.v2` spelling (`mainline`) every
+# workspace uses. It is the INPUT fixture written into the workspace, and also
+# the shape `repos add` must reproduce for a new first-party repo.
+const siblingFragment = """schema = "reprobuild.workspace.repo.v2"
 
 [repo]
 name = "nim-shm-queue"
 path = "nim-shm-queue"
 remote = "metacraft-labs"
-branch = "dev"
+mainline = "dev"
 """
 
 # The hand-written THIRD-PARTY shape (`repos/llvm-project.toml`,
@@ -110,15 +116,19 @@ branch = "dev"
 # `github` base and the org segment travels in `[repo].name` — the server-side
 # path — while `path` stays the local checkout dir. Identical to the real file
 # except for its nested `path` (which `repos add` derives from the
-# `<repo>` argument) and its pinned `revision` (this project has a
-# `default_revision` to inherit).
-const thirdPartyFragment = """schema = "reprobuild.workspace.repo.v1"
+# `<repo>` argument) and its pinned `revision` (no `--revision` is given here).
+#
+# Only ever an EXPECTED output here (nothing writes it into the workspace), so
+# it is spelled the way `repos add` must generate it: `repo.v2` with its
+# `--branch` as `mainline`, the only fragment schema this repro reads or
+# writes.
+const thirdPartyFragment = """schema = "reprobuild.workspace.repo.v2"
 
 [repo]
 name = "llvm/llvm-project"
 path = "llvm-project"
 remote = "github"
-branch = "main"
+mainline = "main"
 """
 
 type Fixture = object
@@ -229,8 +239,9 @@ suite "repro workspace repos add — remote reuse and revision inheritance":
       check generated.contains("name = \"nim-shm-lease\"")
       check not generated.contains("metacraft-labs/nim-shm-lease")
 
-      # DEFECT 2: with no `revision` key the repo inherits `default_revision`,
-      # and the composed clone URL is the one that was requested.
+      # DEFECT 2: with no `revision` key the repo follows its `mainline`
+      # (`--branch=dev`), and the composed clone URL is the one that was
+      # requested.
       check revisionOf(fx.projectFile, "nim-shm-lease") == "dev"
       check fetchUrlOf(fx.projectFile, "nim-shm-lease") ==
         "https://github.com/metacraft-labs/nim-shm-lease"
@@ -383,13 +394,21 @@ suite "repro workspace repos add — remote reuse and revision inheritance":
       # default, and the revision follows it because no exact pin was given.
       check resolved.repos[0].branch == "dev"
       check resolved.repos[0].revision == "dev"
-      check readFile(fx.workspaceRoot / "repos" / "brand-new-lib.toml")
-        .contains("branch = \"dev\"")
+      # Written as a `repo.v2` fragment — the only schema this repro writes —
+      # with `--branch` landing as `mainline`. The retired `[repo] branch` key
+      # is never written (a fragment carrying it does not load), and no
+      # `revision` is guessed when none was given.
+      let written = readFile(fx.workspaceRoot / "repos" / "brand-new-lib.toml")
+      check written.startsWith("schema = \"reprobuild.workspace.repo.v2\"")
+      check written.contains("mainline = \"dev\"")
+      check not written.contains("branch =")
+      check not written.contains("revision")
 
   test "test_repo_add_without_a_branch_is_refused_and_writes_nothing":
-    # Workspace-Membership-Model.md — "every repo fragment declares its own
-    # branch". A NEW fragment given neither `--branch` nor `--revision` would
-    # declare neither key and resolve to an empty revision.
+    # Workspace-Branch-Roles.md §3.3 — every repo resolves a `mainline`. A NEW
+    # fragment given no `--branch`, in a workspace whose default profile
+    # supplies none (this fixture has no settings file at all), would resolve
+    # no mainline and the workspace would not load.
     #
     # This used to be writable because the project stub seeded
     # `default_revision` for the fragment to inherit, which is the
@@ -439,16 +458,39 @@ suite "repro workspace repos add — remote reuse and revision inheritance":
       check fileExists(fx.workspaceRoot / "repos" / "unbranched-lib.toml")
       check revisionOf(fx.projectFile, "unbranched-lib") == "dev"
 
-      # SECOND CONTROL: an exact pin with no branch is also accepted. The rule
-      # is "declare something", not "always pass --branch"; a vendored tree
-      # pinned to a commit is the case the model carves out.
+      # An exact pin with no branch is refused the same way. A commit pin sits
+      # BESIDE a mainline, it is not one, so `--revision` alone leaves the
+      # fragment with no mainline to resolve — the refusal (exit 2) names
+      # `--branch` and the way to combine the two, and writes nothing.
+      let pinnedSha = "0123456789abcdef0123456789abcdef01234567"
+      # The positive control above minted the `acme` remote, so "nothing
+      # written" is measured against the project as it stands now.
+      let projectBeforePin = readFile(fx.projectFile)
+      let pinnedOnly = addRepo(fx, @["reprobuild", "pinned-only-lib",
+        "--remote=https://git.example.invalid/acme/pinned-only-lib.git",
+        "--revision=" & pinnedSha])
+      check pinnedOnly.code == 2
+      check pinnedOnly.output.contains("--branch is required")
+      check pinnedOnly.output.contains("--revision=<commit> alongside --branch")
+      check pinnedOnly.output.contains("Nothing was written")
+      check not fileExists(fx.workspaceRoot / "repos" / "pinned-only-lib.toml")
+      check not fileExists(fx.workspaceRoot / "repos" / "pinned-only-lib.md")
+      check readFile(fx.projectFile) == projectBeforePin
+
+      # SECOND CONTROL: the same pin given beside a branch is accepted and
+      # recorded as both — "tracks `dev`, sits at <commit>" — so the refusal
+      # above is specific to the missing mainline, not to `--revision`.
       let pinned = addRepo(fx, @["reprobuild", "pinned-only-lib",
         "--remote=https://git.example.invalid/acme/pinned-only-lib.git",
-        "--revision=" & "0123456789abcdef0123456789abcdef01234567"])
+        "--branch=dev", "--revision=" & pinnedSha])
       if pinned.code != 0:
         checkpoint("output: " & pinned.output)
       check pinned.code == 0
-      check fileExists(fx.workspaceRoot / "repos" / "pinned-only-lib.toml")
+      let pinnedText = readFile(fx.workspaceRoot / "repos" /
+        "pinned-only-lib.toml")
+      check pinnedText.contains("mainline = \"dev\"")
+      check pinnedText.contains("revision = \"" & pinnedSha & "\"")
+      check revisionOf(fx.projectFile, "pinned-only-lib") == pinnedSha
 
   test "test_repo_add_validates_an_explicit_revision_against_the_remote":
     let gitBin = findExe("git")
@@ -457,6 +499,18 @@ suite "repro workspace repos add — remote reuse and revision inheritance":
     else:
       let fx = setupFixture(gitBin, "revision")
       defer: removeDir(fx.scratch)
+
+      # A `--revision` without `--branch` is accepted only where the
+      # workspace's default profile supplies the mainline it sits beside
+      # (CLI/workspace.md `repos add`), so this case declares one in a real
+      # settings file and commits it with the rest of the fixture.
+      writeFile(fx.workspaceRoot / "repro-workspace.toml",
+        "schema = \"reprobuild.workspace.settings.v1\"\n\n" &
+        "[workspace]\ndefault_profile = \"product\"\n\n" &
+        "[profiles.product]\nmainline = \"dev\"\n")
+      discard requireGit(q(gitBin) & " -C " & q(fx.workspaceRoot) & " add -A")
+      discard requireGit(q(gitBin) & " -C " & q(fx.workspaceRoot) &
+        " commit -m settings")
 
       # A real remote whose only branch is `dev` — the exact shape of the
       # reported failure, where `main` does not exist.
@@ -485,6 +539,17 @@ suite "repro workspace repos add — remote reuse and revision inheritance":
       check not fileExists(fx.workspaceRoot / "repos" / "pinned-lib.toml")
       check not readFile(fx.projectFile).contains("pinned-lib")
 
+      # The pin is validated beside a branch too — "tracks <branch>, sits at
+      # <revision>" is the pinned form, so a valid `--branch` must not wave
+      # an invalid `--revision` through.
+      let badPin = addRepo(fx, @["reprobuild", "pinned-lib",
+        "--remote=" & url, "--branch=dev", "--revision=no-such-tag"])
+      checkpoint("branch + bad pin: " & badPin.output)
+      check badPin.code != 0
+      check badPin.output.contains("no-such-tag")
+      check not fileExists(fx.workspaceRoot / "repos" / "pinned-lib.toml")
+      check not readFile(fx.projectFile).contains("pinned-lib")
+
       # A revision the remote does have is accepted and pinned.
       let good = addRepo(fx, @["reprobuild", "pinned-lib",
         "--remote=" & url, "--revision=dev"])
@@ -493,5 +558,7 @@ suite "repro workspace repos add — remote reuse and revision inheritance":
       check good.code == 0
       let fragment = readFile(fx.workspaceRoot / "repos" / "pinned-lib.toml")
       check fragment.contains("revision = \"dev\"")
+      # No `--branch`, so no `mainline` key: the default profile supplies it.
+      check not fragment.contains("mainline")
       check revisionOf(fx.projectFile, "pinned-lib") == "dev"
       check fetchUrlOf(fx.projectFile, "pinned-lib") == url

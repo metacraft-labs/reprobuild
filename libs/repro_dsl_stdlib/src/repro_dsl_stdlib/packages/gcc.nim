@@ -1,38 +1,38 @@
-## M68 merge note (hand-edited): the auto-generated ``gccCatalog`` body
-## sits below the pre-existing ``package gcc:`` DSL block. The DSL
-## block remains the source of truth for the GCC CLI surface and the
-## Nix provisioning shape on Nix-capable hosts; the ``gccCatalog``
-## slice is consumed by the M64 ``cakBuiltin`` adapter on Windows.
-## Re-harvest emits ONLY the catalog half; re-attach the DSL block
-## by hand if you regenerate.
+## GM4b: every archive realization of ``gcc`` is a ``tarball`` statement
+## in the ``provisioning:`` block below. The M68 ``gccCatalog``
+## (``VersionedProvisioning``) record that once sat beside it — the
+## nuwen.net components-20.0 archive — was merged into those statements
+## and removed; it now follows the in-package WinLibs archive for the same
+## target, so it is selected only by pinning its version (15.2.0).
 ##
 ## **M3 update (Realize-Closure-And-Catalog-Expansion spec).** The
 ## previously-documented M69 realize-time gaps for gcc closed via M3:
-## the harvester now emits ``nested_7z = true`` on the platform slice
-## AND an allowlisted ``pre_install_actions`` list capturing the two
+## the harvester emits ``nested7z = true`` on the nuwen.net realization
+## AND an allowlisted ``preInstall`` list capturing the two
 ## ``Expand-7zArchive`` invocations (binutils + mingw-w64+gcc). The
 ## remaining ``Get-ChildItem | Remove-Item -Recurse -Force`` pipeline
-## lands in ``pre_install_unrecognized`` (pipelines are out of the
-## allowlist), but the nested_7z + the recursive extract pass remove
+## lands in ``preInstallUnrecognized`` (pipelines are out of the
+## allowlist), but the nested7z + the recursive extract pass remove
 ## the inner archives anyway — the unrecognized line is a NO-OP
 ## post-extraction, so the operator's only observable effect is the
 ## one ``WPreInstallUnrecognized`` stderr warning at apply time.
 ##
-## **Hand-edited bin_relpath divergence from the harvester.** The
+## **Hand-edited executable-list divergence from the harvester.** The
 ## harvester (driven by ``--bin-default gcc=gcc.exe,g++.exe,gfortran.exe``)
 ## emits all three binaries. nuwen.net's components-20.0 distribution
 ## ships gcc + g++ + binutils (as, ld, gcc-ar, gcc-nm, gcc-ranlib, etc.)
 ## but does NOT ship a Fortran front-end. M3 live smoke verified the
 ## bin/ tree carries gcc.exe + g++.exe + as.exe + ld.exe — and
 ## ``gcc.exe --version`` returns ``(GCC) 15.2.0`` cleanly. We drop
-## ``bin/gfortran.exe`` from the catalog so the realize loop's
+## ``bin/gfortran.exe`` from the realization so the realize loop's
 ## bin-existence sanity check passes. Operators who need Fortran
 ## should harvest the winlibs ``components-mingw-w64-msvcrt-13.0.0-rev3``
 ## (or newer) variant which DOES bundle a Fortran front-end.
 
-import std/tables
 import repro_project_dsl
 import repro_dsl_stdlib/nixpkgs_pin
+import repro_dsl_stdlib/winlibs_pin
+import repro_dsl_stdlib/packages/binutils as binutilsModule
 import repro_dsl_stdlib/packages_schema
 import repro_dsl_stdlib/types/library
 import repro_dsl_stdlib/types/options
@@ -59,15 +59,35 @@ package gcc:
     # entry but ships as a single (non-nested) .7z, which our tarball
     # resolver can extract directly. archive layout is `mingw64/bin/
     # gcc.exe` so stripComponents=1 flattens to `bin/gcc.exe`.
-    tarball url = "https://github.com/brechtsanders/winlibs_mingw/releases/download/16.1.0posix-14.0.0-ucrt-r2/winlibs-x86_64-posix-seh-gcc-16.1.0-mingw-w64ucrt-14.0.0-r2.7z",
-      sha256 = "62fb8588d2deee7d662dbcbd386702adbf19643764c971c38aa4839472eee232",
+    tarball url = WinLibsX64Url,
+      sha256 = WinLibsX64Sha256,
       archiveType = "7z",
       stripComponents = 1,
       executablePath = "bin/gcc.exe",
-      packageId = "gcc-winlibs@16.1.0",
+      packageId = WinLibsX64PackageId,
       cpu = "x86_64",
       os = "windows",
-      lockIdentity = "tarball:gcc-winlibs@16.1.0:sha256:62fb8588d2deee7d662dbcbd386702adbf19643764c971c38aa4839472eee232"
+      lockIdentity = WinLibsX64LockIdentity,
+      version = WinLibsGccVersion
+    # GM4b: archive realizations formerly held by the retired
+    # `VersionedProvisioning` catalog record (see the conflict notes
+    # in the Gradual-Nix-To-Reprobuild-Migration GM4b milestone).
+    tarball url = "https://nuwen.net/files/mingw/components-20.0.7z",
+      sha256 = "561d873b7f95dbb39a34b7ab00050dc6028808310a847721a8aea5e5b0bff1c9",
+      archiveType = "7z",
+      executablePath = "bin/gcc.exe",
+      extraExecutable = "bin/g++.exe",
+      version = "15.2.0",
+      packageId = "gcc@15.2.0",
+      extractPath = "components-20.0",
+      env = "CPLUS_INCLUDE_PATH=${prefix}\\include",
+      env = "C_INCLUDE_PATH=${prefix}\\include",
+      nested7z = true,
+      preInstall = preInstallAction("expand-7z", "$dir\\binutils-*.7z", "$dir", false, ""),
+      preInstall = preInstallAction("expand-7z", "$dir\\mingw-w64+gcc.7z", "$dir", false, ""),
+      preInstallUnrecognized = "Get-ChildItem \"$dir\\*.7z\" | Remove-Item -Recurse -Force",
+      cpu = "x86_64",
+      os = "windows"
 
   executable gcc:
     cli:
@@ -215,32 +235,6 @@ package gcc:
         outputs output
 
 # ---------------------------------------------------------------------------
-# M3-extended bulk-harvest catalog (cakBuiltin adapter consumer on Windows).
-# Harvested from bucket: ScoopInstaller/Main
-# Versions (newest-first): 15.2.0
-# ---------------------------------------------------------------------------
-
-let gccCatalog* = @[
-  VersionedProvisioning(
-    version: "15.2.0",
-    archive_format: afSevenZip,
-    install_method: imExtract,
-    bin_relpath: @["bin/gcc.exe", "bin/g++.exe"],
-    platforms: @[
-      PlatformBinary(cpu: pcX86_64, os: poWindows, url: "https://nuwen.net/files/mingw/components-20.0.7z", sha256: "561d873b7f95dbb39a34b7ab00050dc6028808310a847721a8aea5e5b0bff1c9", sha512: "", sha1: "", extract_path: "components-20.0", nested_7z: true)
-    ],
-    installer_args: @[],
-    pacman_packages: @[],
-    bootstrap_argv: @[],
-    env: {"CPLUS_INCLUDE_PATH": "${prefix}\\include", "C_INCLUDE_PATH": "${prefix}\\include"}.toTable(),
-    pre_install_actions: @[
-      PreInstallAction(kind: piaExpand7z, source: "$dir\\binutils-*.7z", target: "$dir", recurse: false, literal: ""),
-      PreInstallAction(kind: piaExpand7z, source: "$dir\\mingw-w64+gcc.7z", target: "$dir", recurse: false, literal: "")
-    ],
-    pre_install_unrecognized: @["Get-ChildItem \"$dir\\*.7z\" | Remove-Item -Recurse -Force"])
-]
-
-# ---------------------------------------------------------------------------
 # DSL-port M9.R.2b — Layer-2 operation implementations.
 #
 # The dispatcher in ``operations/{compile,link,archive,strip}.nim`` reads
@@ -321,37 +315,14 @@ proc gccLink*(opts: LinkOptions): BuildActionDef =
     libDirs = libDirs)
 
 proc gccArchive*(opts: ArchiveOptions): BuildActionDef =
-  ## ``ar`` archive call. v1 emits a thin ``BuildActionDef`` carrying
-  ## the canonical ``ar rcs <archive> <objs...>`` argv directly.
-  result = BuildActionDef(
-    call: PublicCliCall(
-      packageName: "binutils",
-      executableName: "ar",
-      subcommand: "",
-      arguments: @[]))
-  let modifiers =
-    if opts.modifiers.len > 0: opts.modifiers else: "rcs"
-  result.call.arguments.add(PublicCliArg(
-    name: "modifiers",
-    kind: cpkPositional,
-    position: 0,
-    encodedValue: modifiers))
-  result.call.arguments.add(PublicCliArg(
-    name: "archive",
-    kind: cpkPositional,
-    position: 1,
-    role: carOutput,
-    encodedValue: opts.target))
-  for i, obj in opts.objects:
-    let path =
-      if obj.outputs.len > 0: obj.outputs[0] else: ""
-    result.call.arguments.add(PublicCliArg(
-      name: "object" & $i,
-      kind: cpkPositional,
-      position: 2 + i,
-      role: carInput,
-      encodedValue: path))
-  result.outputs.add(opts.target)
+  ## Use the canonical archiver's existing typed CLI and provisioning identity.
+  ## The aggregate binutils selector may resolve to ld, which is not ar.
+  var objects: seq[string]
+  for obj in opts.objects:
+    objects.add(if obj.outputs.len > 0: obj.outputs[0] else: "")
+  binutilsModule.ar(
+    modifiers = (if opts.modifiers.len > 0: opts.modifiers else: "rcs"),
+    archive = opts.target, objects = objects, after = opts.objects)
 
 proc gccStrip*(opts: StripOptions): BuildActionDef =
   ## ``strip`` invocation.

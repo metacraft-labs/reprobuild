@@ -97,7 +97,10 @@ proc readBlob(buf: openArray[byte]; pos: var int;
               bodyEnd: int; filePath, field: string): seq[byte] =
   if pos + 8 > bodyEnd:
     raiseActivationBundleCorrupt(filePath, field, "truncated blob length")
-  let n = int(readU64Le(buf, pos))
+  let rawLength = readU64Le(buf, pos)
+  if rawLength > uint64(bodyEnd - pos):
+    raiseActivationBundleCorrupt(filePath, field, "declared blob length overflows body")
+  let n = int(rawLength)
   if pos + n > bodyEnd:
     raiseActivationBundleCorrupt(filePath, field,
       "declared blob length overflows body")
@@ -277,7 +280,10 @@ proc decodeActivationBundleBytes*(bytes: openArray[byte];
   if version >= ActivationBundleSchemaVersionV2:
     if pos + 4 > bodyEnd:
       raiseActivationBundleCorrupt(filePath, "casBlobs", "truncated count")
-    let blobCount = int(readU32Le(bytes, pos))
+    let blobCountRaw = readU32Le(bytes, pos)
+    if not elementCountFits(blobCountRaw, bodyEnd - pos, 40):
+      raiseActivationBundleCorrupt(filePath, "blobCount", "element count exceeds remaining body")
+    let blobCount = int(blobCountRaw)
     result.casBlobs = newSeq[ActivationBundleCasBlobEntry](blobCount)
     var previous = ""
     for i in 0 ..< blobCount:
@@ -300,7 +306,10 @@ proc decodeActivationBundleBytes*(bytes: openArray[byte];
       result.casBlobs[i] = blob
   if pos + 4 > bodyEnd:
     raiseActivationBundleCorrupt(filePath, "prefixes", "truncated count")
-  let prefixCount = int(readU32Le(bytes, pos))
+  let prefixCountRaw = readU32Le(bytes, pos)
+  if not elementCountFits(prefixCountRaw, bodyEnd - pos, 48):
+    raiseActivationBundleCorrupt(filePath, "prefixCount", "element count exceeds remaining body")
+  let prefixCount = int(prefixCountRaw)
   result.prefixes = newSeq[ActivationBundlePrefixClosure](prefixCount)
   for i in 0 ..< prefixCount:
     var closure: ActivationBundlePrefixClosure
@@ -313,7 +322,10 @@ proc decodeActivationBundleBytes*(bytes: openArray[byte];
     if pos + 4 > bodyEnd:
       raiseActivationBundleCorrupt(filePath, "prefixes[" & $i & "].files",
         "truncated file count")
-    let fileCount = int(readU32Le(bytes, pos))
+    let fileCountRaw = readU32Le(bytes, pos)
+    if not elementCountFits(fileCountRaw, bodyEnd - pos, 44):
+      raiseActivationBundleCorrupt(filePath, "fileCount", "element count exceeds remaining body")
+    let fileCount = int(fileCountRaw)
     closure.files = newSeq[ActivationBundleFileEntry](fileCount)
     for j in 0 ..< fileCount:
       var entry: ActivationBundleFileEntry

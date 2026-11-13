@@ -98,6 +98,12 @@ type
       ## a one-way firewall.
 
     # Instrumentation counters (Peer-Cache-Scale M0).
+    protocolPeriodCount*: int
+      ## Number of protocol periods this engine's `periodLoop` has
+      ## started. Convergence targets are stated in protocol periods, and
+      ## a period's wall-clock length stretches with the probe and with
+      ## scheduling delay, so a measurement counts periods here rather
+      ## than dividing elapsed time by `swimProbePeriodMs`.
     sentDirectProbeCount*: int
     sentIndirectProbeReqCount*: int
     sentAckCount*: int
@@ -838,6 +844,7 @@ proc probeOnce(engine: SwimEngine) {.async.} =
 proc periodLoop*(engine: SwimEngine) {.async.} =
   let period = max(1, engine.config.swimProbePeriodMs)
   while engine.running:
+    inc engine.protocolPeriodCount
     try:
       await probeOnce(engine)
     except CatchableError:

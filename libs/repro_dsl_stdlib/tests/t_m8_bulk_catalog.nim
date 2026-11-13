@@ -1,3 +1,10 @@
+## GM4b: the M8 ``<tool>Catalog`` records are now ``tarball`` realizations
+## of each tool's canonical ``package`` definition (7-Zip's is ``package
+## "7zip"``, in ``packages/pkg_7zip.nim``). The properties below are asserted over the records a recipe's
+## ``uses:`` and a home profile select from (``realization_checks``); the
+## retired catalog's "default entry" is what an unpinned reference selects
+## for x86_64-windows. The original M8 notes follow.
+##
 ## M8 bulk-harvest catalog test.
 ##
 ## Imports every M8-harvested ``packages/<tool>Catalog`` and asserts:
@@ -10,10 +17,9 @@
 ##   * the catalog seq is non-empty;
 ##   * ``selectDefault`` returns a populated entry whose ``version``
 ##     non-empty;
-##   * the operator-facing registry key (``gcc-winlibs`` /
-##     ``llvm-mingw``) resolves via ``getCatalog`` and returns the
-##     expected non-empty slice (catches a missing arm in
-##     ``catalog_registry.nim``).
+##   * the operator-facing package name (``gcc-winlibs`` /
+##     ``llvm-mingw`` / ``7zip``) is a definition the engine links
+##     (``package_registry``), so a profile reaches it.
 ##
 ## Scope per the M8 spec section's in-scope table (operator-extended):
 ##
@@ -24,7 +30,7 @@
 ##   | alire      | gh-releases:alire-project/alire              | landed in M7 — t_m7_gh_releases_source.nim covers it |
 ##   | gcc-winlibs| gh-releases:brechtsanders/winlibs_mingw      | NEW IN M8 |
 ##   | llvm-mingw | gh-releases:mstorsjo/llvm-mingw              | NEW IN M8 |
-##   | sevenzip   | scoop:ScoopInstaller/Main/7zip               | RE-HARVESTED IN M8 (replaced M3 hand-author) |
+##   | 7zip       | scoop:ScoopInstaller/Main/7zip               | RE-HARVESTED IN M8 (replaced M3 hand-author) |
 ##
 ## ``ocaml`` and ``alire`` are NOT walked here — they have their own
 ## per-source tests in ``tools/catalog-harvester/tests/`` and are
@@ -51,163 +57,109 @@
 ## default ``gcc`` post-campaign.
 
 import std/[options, strutils, unittest]
-import repro_dsl_stdlib/packages_schema
-import repro_dsl_stdlib/catalog_registry
 
-# The harvested files all re-export ``packages_schema`` so importing
-# any one of them brings the enum literals and validators into scope.
-import repro_dsl_stdlib/packages/gcc_winlibs
-import repro_dsl_stdlib/packages/llvm_mingw
-import repro_dsl_stdlib/packages/sevenzip
+import repro_dsl_stdlib/package_registry
+import repro_tool_profiles/realization_selection
+import ./realization_checks
 
-type
-  CatalogUnderTest = object
-    name: string                ## operator-facing registry key
-    entries: seq[VersionedProvisioning]
+const M8Tools = ["gcc-winlibs", "llvm-mingw", "7zip"]
 
-proc allCatalogs(): seq[CatalogUnderTest] =
-  result.add(CatalogUnderTest(name: "gcc-winlibs", entries: gcc_winlibsCatalog))
-  result.add(CatalogUnderTest(name: "llvm-mingw",  entries: llvm_mingwCatalog))
-  result.add(CatalogUnderTest(name: "7zip",        entries: sevenzipCatalog))
+proc defaultOf(name: string): InterfaceTarballProvisioning =
+  let picked = unpinnedSelection(name, pcX86_64, poWindows)
+  check picked.isSome
+  if picked.isSome: picked.get else: InterfaceTarballProvisioning()
 
-suite "M8 — bulk-harvested catalog validates":
+proc executablesOf(r: InterfaceTarballProvisioning): seq[string] =
+  @[r.executablePath] & r.detail.extraExecutables
 
-  test "every harvested catalog is non-empty":
-    for c in allCatalogs():
-      check c.entries.len > 0
-      if c.entries.len == 0:
-        echo "EMPTY catalog: " & c.name
+suite "M8 — bulk-harvested realizations validate":
 
-  test "validateCatalog returns no errors for any harvested file":
+  test "every harvested tool has archive realizations":
+    for name in M8Tools:
+      checkpoint name
+      check tarballRecordsOf(name).len > 0
+
+  test "every realization is well-formed":
     var failures: seq[string] = @[]
-    for c in allCatalogs():
-      let errors = validateCatalog(c.entries)
-      if errors.len > 0:
-        for err in errors:
-          failures.add(c.name & ": " & err)
-    if failures.len > 0:
-      for f in failures: echo f
+    for name in M8Tools:
+      failures.add(realizationProblems(name))
+    for f in failures: echo f
     check failures.len == 0
 
-  test "selectDefault returns a populated entry per catalog":
-    for c in allCatalogs():
-      let (found, entry) = selectDefault(c.entries)
-      check found
-      check entry.version.len > 0
-      check entry.platforms.len > 0
+  test "an unpinned reference selects a versioned record per tool":
+    for name in M8Tools:
+      checkpoint name
+      let r = defaultOf(name)
+      check r.detail.version.len > 0
+      check r.executablePath.len > 0
 
-  test "every default entry has at least one bin_relpath":
-    for c in allCatalogs():
-      let (found, entry) = selectDefault(c.entries)
-      check found
-      check entry.bin_relpath.len > 0
-      if entry.bin_relpath.len == 0:
-        echo "NO BIN: " & c.name & " v" & entry.version
+  test "no realization carries two digests":
+    for name in M8Tools:
+      for r in tarballRecordsOf(name):
+        check not (r.sha256.len > 0 and r.detail.sha512.len > 0)
 
-  test "no platform has both sha256 and sha512":
-    for c in allCatalogs():
-      for vp in c.entries:
-        for pb in vp.platforms:
-          check not (pb.sha256.len > 0 and pb.sha512.len > 0)
-
-  test "all M8 catalogs declare a Windows platform slice":
-    ## The M8 bulk-harvest pass is Windows-focused (winlibs gcc is
-    ## Windows-only by definition; llvm-mingw harvested the
-    ## ucrt-x86_64 zip explicitly). Every harvested catalog must
-    ## expose at least one ``poWindows`` slice.
-    for c in allCatalogs():
-      for vp in c.entries:
-        var sawWindows = false
-        for pb in vp.platforms:
-          if pb.os == poWindows: sawWindows = true
-        check sawWindows
-        if not sawWindows:
-          echo "NO WINDOWS: " & c.name & " v" & vp.version
+  test "all M8 tools keep a Windows realization":
+    for name in M8Tools:
+      var sawWindows = false
+      for r in tarballRecordsOf(name):
+        if r.os == "windows": sawWindows = true
+      checkpoint name
+      check sawWindows
 
   test "default versions are non-empty version-shaped strings":
     ## Winlibs uses dash-heavy multi-component versions
     ## (``16.1.0posix-14.0.0-ucrt-r2``); llvm-mingw uses a YYYYMMDD
-    ## datestamp (``20260519``). The check is loose: at minimum the
-    ## version must contain a digit.
-    for c in allCatalogs():
-      let (found, entry) = selectDefault(c.entries)
-      check found
+    ## datestamp (``20260519``). At minimum the version contains a digit.
+    for name in M8Tools:
       var sawDigit = false
-      for ch in entry.version:
+      for ch in defaultOf(name).detail.version:
         if ch in {'0' .. '9'}: sawDigit = true
+      checkpoint name
       check sawDigit
-      if not sawDigit:
-        echo "NO DIGIT: " & c.name & " version='" & entry.version & "'"
 
-  test "every M8 catalog is registered in catalog_registry":
-    ## The bulk-validation entry point: catches a missing
-    ## ``of "<key>": selectIfNonEmpty(<tool>Catalog)`` arm in
-    ## ``catalog_registry.nim``. Without this guard a fresh catalog
-    ## file would be byte-equal-emit-clean and still unreachable from
-    ## the resolver chain.
-    for c in allCatalogs():
-      check isRegistered(c.name)
-      let resolved = getCatalog(c.name)
-      check resolved.isSome
-      if resolved.isSome:
-        check resolved.get.len == c.entries.len
+  test "every M8 tool is a linked definition":
+    ## The bulk-validation entry point: a definition the engine does not
+    ## link is unreachable from a home profile however well-formed it is.
+    for name in M8Tools:
+      checkpoint name
+      check isLinkedPackage(name)
+      check profileToolUse(name).known
 
   test "gcc-winlibs entry bundles gfortran (winlibs's distinguishing trait)":
-    ## The whole reason for a separate ``gcc-winlibs`` entry alongside
-    ## the M68 ``gcc`` (nuwen.net components-20.0) is that winlibs
-    ## bundles a Fortran front-end while nuwen doesn't. Guard the
-    ## bin_relpath against an accidental re-harvest that drops it.
-    let (found, entry) = selectDefault(gcc_winlibsCatalog)
-    check found
     var sawGfortran = false
-    for relpath in entry.bin_relpath:
+    for relpath in executablesOf(defaultOf("gcc-winlibs")):
       if relpath.endsWith("gfortran.exe"):
         sawGfortran = true
-        break
     check sawGfortran
 
   test "llvm-mingw entry exposes clang + lld (no shared MinGW gcc)":
-    ## Guard against a drift where the harvest accidentally pulls the
-    ## winlibs gcc+clang bundle (which doesn't exist in the
-    ## mstorsjo/llvm-mingw repo, but a future harvest could mix
-    ## sources). The llvm-mingw entry MUST expose clang.exe and the
-    ## lld linker.
-    let (found, entry) = selectDefault(llvm_mingwCatalog)
-    check found
     var sawClang = false
     var sawLld = false
-    for relpath in entry.bin_relpath:
+    for relpath in executablesOf(defaultOf("llvm-mingw")):
       if relpath.endsWith("clang.exe"): sawClang = true
       if relpath.endsWith("ld.lld.exe") or relpath.endsWith("lld.exe"):
         sawLld = true
     check sawClang
     check sawLld
 
-  test "sevenzip entry is the M8 Scoop-MSI re-harvest (root-level 7z.exe)":
-    ## Guard the M8 sevenzip swap: the catalog is now the harvested
-    ## Scoop ``7zip`` MSI shape, not the M3 hand-authored
-    ## standalone-7zr trick. Assertions:
-    ##   - install method is imInstallerMsi (M3 was imExtract);
-    ##   - bin_relpath is root-level ``7z.exe`` (M3 was ``bin/7z.exe``)
-    ##     — confirms the discoverSevenZipExe extension is exercised;
-    ##   - Scoop bucket provenance is preserved in the file header.
-    let (found, entry) = selectDefault(sevenzipCatalog)
-    check found
-    check entry.install_method == imInstallerMsi
-    check entry.archive_format == afInstallerMsi
-    var sawRoot7z = false
-    for relpath in entry.bin_relpath:
-      # M8 MSI shape: ``7z.exe`` at the root, no leading ``bin/``.
-      if relpath == "7z.exe": sawRoot7z = true
-    check sawRoot7z
-    # The MSI ships the full distribution including the zstd codec —
-    # closes a long-standing M6 follow-up. We can't assert the codec
-    # presence at catalog-time (it's a realize-time artifact) but we
-    # CAN assert the catalog points at the canonical Scoop manifest.
+  test "7zip entry is the M8 Scoop-MSI re-harvest (root-level 7z.exe)":
+    ## Install method is installer-msi, the archive an MSI, the executable
+    ## root-level ``7z.exe``, and the URL the canonical upstream release.
+    ## Like every tarball record, the MSI is realized by the shared
+    ## provisioning edge; it asks that edge for installation.
+    let r = defaultOf("7zip")
+    check r.detail.installMethod == "installer-msi"
+    check r.archiveType == "installer-msi"
+    check "7z.exe" in executablesOf(r)
+    check archiveRouteFor("7zip", r) == arExtract
+    check "installMethod installer-msi" in archiveInstallerFeatures(r)
+    # The edge's input carries the MSI install shape, so it installs the
+    # MSI rather than extracting it as a plain archive.
+    let realization = archiveRealizationOf("7zip", r)
+    check realization.installMethod == imInstallerMsi
+    check realization.archiveFormat == afInstallerMsi
     var sawCanonicalUrl = false
-    for vp in sevenzipCatalog:
-      for pb in vp.platforms:
-        if pb.url.contains("ip7z/7zip/releases") and
-           pb.url.endsWith(".msi"):
-          sawCanonicalUrl = true
+    for rec in tarballRecordsOf("7zip"):
+      if rec.url.contains("ip7z/7zip/releases") and rec.url.endsWith(".msi"):
+        sawCanonicalUrl = true
     check sawCanonicalUrl

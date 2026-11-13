@@ -410,3 +410,100 @@ proc loadEndpoints*(): seq[SubstituteEndpoint] =
     if c.url.len == 0:
       continue
     result.add(toEndpoint(c))
+
+# ---------------------------------------------------------------------------
+# Resolved substitute + publish configuration for in-process consumers.
+# ---------------------------------------------------------------------------
+
+type
+  TrustedCacheConfig* = object
+    ## The binary-cache configuration an in-process consumer (the
+    ## provider-compile cache, the portable memo cache, and the apply-time
+    ## build-action substitute of ``repro infra apply`` / ``repro
+    ## deploy-agent``) resolves once and then acts on. Substitution and
+    ## publishing are resolved INDEPENDENTLY, because they carry different
+    ## trust:
+    ##
+    ##   * substituting is governed by the R1 trust anchors in
+    ##     ``caches.conf`` — every endpoint here comes from
+    ##     ``loadEndpoints`` and therefore has ``enforceTrust`` set, so a
+    ##     cache with no ``trusted-public-keys`` is never substituted from;
+    ##   * publishing needs a producer key the OPERATOR supplied
+    ##     (``REPRO_BINARY_CACHE_KEY_PATH`` + ``REPRO_BINARY_CACHE_CERT_PATH``,
+    ##     both present on disk). It is never auto-generated: a host that
+    ##     was not given a key is a consumer, and a consumer never publishes.
+    configured*: bool
+      ## At least one cache endpoint is configured and the cache is not
+      ## disabled. Required for BOTH substitute and publish.
+    keypairOk*: bool
+      ## An operator-supplied signing keypair is present. Required for
+      ## publish only; substitution verifies signatures and needs no key.
+    endpoints*: seq[SubstituteEndpoint]
+      ## Trust-enforcing endpoints, ascending priority (``loadEndpoints``).
+    publishEndpoint*: string
+    keyPath*: string
+    certPath*: string
+    configError*: string
+      ## Set when the config could not be loaded (a malformed
+      ## ``caches.conf``). The result is then unconfigured: a config the
+      ## loader cannot read grants no trust.
+
+const
+  ApplyPublishOptInVar* = "REPRO_APPLY_PUBLISH"
+    ## The explicit opt-in that makes an APPLY (``repro infra apply``,
+    ## ``repro deploy-agent``) publish the outputs it built. Distinct from the
+    ## ``repro build`` publisher's environment on purpose: a developer's shell
+    ## exports ``REPRO_BINARY_CACHE_KEY_PATH`` / ``_CERT_PATH`` for ordinary
+    ## builds, and ``sudo -E repro infra apply`` from that shell would
+    ## otherwise inherit the publisher role and push apply-time outputs that
+    ## every fleet host trusts. A keypair says "this host CAN sign"; this
+    ## variable says "this apply MAY publish". Both are required.
+
+proc applyPublishOptedIn*(): bool =
+  ## ``REPRO_APPLY_PUBLISH=1`` (or ``true`` / ``yes``). Anything else,
+  ## including unset, is no.
+  getEnv(ApplyPublishOptInVar, "").strip().toLowerAscii() in ["1", "true", "yes"]
+
+proc binaryCacheDisabled*(): bool =
+  ## ``REPRO_CACHE_DISABLE`` turns every in-process substitute and publish
+  ## path off at once, so a wrapper that disables one disables the others.
+  getEnv("REPRO_CACHE_DISABLE", "") in ["1", "true", "yes"]
+
+proc resolveTrustedCacheConfig*(): TrustedCacheConfig =
+  ## Resolve substitution trust and publish credentials.
+  ##
+  ## Substitution is configured when ``loadEndpoints`` yields at least one
+  ## endpoint: a ``caches.conf`` entry, or the back-compat
+  ## ``REPRO_BINARY_CACHE_URL`` cache. Each endpoint enforces its own trust
+  ## anchors, so an endpoint configured without a trusted key is attempted
+  ## and always misses (fail closed), never trusted.
+  ##
+  ## Publishing targets ``REPRO_BINARY_CACHE_URL`` (else the most-preferred
+  ## configured cache) and requires ``REPRO_BINARY_CACHE_KEY_PATH`` and
+  ## ``REPRO_BINARY_CACHE_CERT_PATH`` to name files that exist. There is
+  ## deliberately NO fallback to an auto-generated keypair (contrast the
+  ## developer-side ``mkBinaryCachePublisher``): a generated key is not on a
+  ## shared cache's allowed-signer list, and on a host that substitutes it
+  ## would make every applying host a publisher whose key the others may be
+  ## told to trust. No key means "this host does not publish".
+  if binaryCacheDisabled():
+    return
+  try:
+    result.endpoints = loadEndpoints()
+  except CatchableError as err:
+    result.endpoints = @[]
+    result.configError = err.msg
+    return
+  if result.endpoints.len == 0:
+    return
+  result.configured = true
+  result.publishEndpoint = getEnv(EnvUrlVar, "").strip()
+  if result.publishEndpoint.len == 0:
+    result.publishEndpoint = result.endpoints[0].baseUrl
+  let keyPath = getEnv("REPRO_BINARY_CACHE_KEY_PATH", "")
+  let certPath = getEnv(EnvCertVar, "")
+  if keyPath.len > 0 and certPath.len > 0 and
+      fileExists(keyPath) and fileExists(certPath):
+    result.keyPath = keyPath
+    result.certPath = certPath
+    result.keypairOk = true

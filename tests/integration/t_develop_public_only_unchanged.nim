@@ -95,7 +95,7 @@ proc seedGitOrigin(gitBin, originPath, workPath: string): string =
 proc depInline(name, path, url, sha, depends: string;
                tags = ""): string =
   "{ name = \"" & name & "\", path = \"" & path &
-    "\", coord_kind = \"vcs\", url = \"" & url & "\", ref = \"main\"" &
+    "\", coord_kind = \"vcs\", url = \"" & url & "\"" &
     ", revision = \"" & sha & "\", integrity = \"git-sha1:" & sha &
     "\", version = \"\", visibility = \"public\", participation = \"\"" &
     ", depends = \"" & depends & "\", tags = \"" & tags & "\" }"
@@ -183,9 +183,9 @@ suite "DS-1: a public-only workspace is unchanged by the lock-set composer":
       let ws3 = scratch / "ws-nolocking"
       createDir(ws3)
       writeFile(ws3 / "repro.lock", lockBody)
-      writeFile(ws3 / ".repro-workspace.toml",
-        "schema = \"reprobuild.workspace.bootstrap.v1\"\n\n" &
-        "[manifest]\n" &
+      writeFile(ws3 / "repro-workspace.toml",
+        "schema = \"reprobuild.workspace.settings.v1\"\n\n" &
+        "[records]\n" &
         "url = \"https://example.invalid/manifests.git\"\n")
       let deps3 = scratch / "deps-nolocking"
       let res3 = run(repro & " develop --all --into=" & q(deps3) &

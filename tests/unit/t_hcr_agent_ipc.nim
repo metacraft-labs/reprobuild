@@ -1,4 +1,7 @@
-import std/[envvars, options, os, unittest]
+import std/[envvars, options, os, strutils, unittest]
+import repro_test_support/reasoned_skip
+when defined(posix):
+  import std/posix
 
 import repro_hcr_agent
 import repro_hcr_test
@@ -188,3 +191,33 @@ suite "HCR agent IPC":
       check target.callOriginalPointer(FunctionName) == 77
     else:
       skip()
+
+  test "an over-long agent socket path is refused with an error naming the limit":
+    # `std/net` refuses a Unix-socket path of `Sockaddr_un_path_length` bytes
+    # or more (108 on Linux, 92 on macOS) with a bare `socket path too long`
+    # that names neither the path nor the limit. The library refuses first,
+    # on both the listening and the dialling side, and says which.
+    when defined(posix):
+      let limit = min(Sockaddr_un_path_length,
+        sizeof(Sockaddr_un().sun_path)) - 1
+      let socketPath = "/tmp/" & repeat('h', limit + 1 - "/tmp/".len)
+      require socketPath.len == limit + 1
+      for side in ["listen", "connect"]:
+        try:
+          if side == "listen":
+            var listener = listenHcrAgentUnixSocket(socketPath)
+            listener.close()
+          else:
+            var connection = connectHcrAgentUnixSocket(socketPath)
+            connection.close()
+          checkpoint(side & " accepted an over-long path")
+          check false
+        except ValueError as err:
+          checkpoint(side & ": " & err.msg)
+          check socketPath in err.msg
+          check ($socketPath.len & " bytes") in err.msg
+          check $limit in err.msg
+          check "socket path too long" notin err.msg
+      check not fileExists(socketPath)
+    else:
+      skip("Windows HCR agents use named pipes, which have no sun_path limit; the bound is POSIX-only")

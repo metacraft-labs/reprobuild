@@ -24,7 +24,7 @@ Do NOT migrate yet if:
 
 - You depend on a tool in M69's deferred-8 list (`swift`, `gcc`,
   `git`, `meson`, `python3`, `composer`, `erlang`, `ruby`). Those
-  tools have catalog entries but their cakBuiltin realize-time hooks
+  tools have archive realizations but their archive-realizer hooks
   haven't landed — `repro home apply` will fail closed on them with a
   structured "not yet implemented" diagnostic. Keep using `env.ps1`
   for these until a follow-up milestone closes the gap.
@@ -85,7 +85,7 @@ profile "migrated-from-env-scripts":
     # TODO: python3@3.12.10 — version not in catalog (catalog HEAD: 3.14.5).
     # TODO: maven@3.9.9 — version not in catalog (catalog HEAD: 3.9.16).
     # TODO: gradle@8.10.2 — version not in catalog (catalog HEAD: 9.5.1).
-    # TODO: swift@5.10.1 — DEFERRED (M69 deferred-8; cakBuiltin realize
+    # TODO: swift@5.10.1 — DEFERRED (M69 deferred-8; the archive realizer
     #       has a gap. Keep using env.ps1's Ensure-Swift until fix.)
     # TODO: zig@0.13.0 — version not in catalog (catalog HEAD: 0.16.0).
   hosts:

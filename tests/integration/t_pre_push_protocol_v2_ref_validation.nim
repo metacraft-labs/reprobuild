@@ -136,20 +136,20 @@ proc writeWorkspaceManifest(fx: Fixture) =
     let manifests = fx.workspace / ".repro" / "manifests"
     createDir(manifests / "projects")
     createDir(manifests / "repos")
-    writeFile(fx.workspace / ".repro" / "workspace.toml",
-      "schema = \"reprobuild.workspace.local.v1\"\n\n" &
+    writeFile(fx.workspace / ".repro" / "workspace-state.toml",
+      "schema = \"reprobuild.workspace.state.v1\"\n\n" &
       "[workspace]\nproject = \"app\"\nbranch = \"main\"\n")
     writeFile(manifests / "projects" / "app.toml",
       "schema = \"reprobuild.workspace.project.v1\"\n\n" &
-      "[project]\nname = \"app\"\ndefault_revision = \"main\"\n" &
-      "trunk = \"main\"\n\n" &
+      "[project]\nname = \"app\"\n" &
+      "\n" &
       "[[remote]]\nname = \"origin\"\nfetch = \"" &
         fx.origin.replace('\\', '/') & "\"\n\n" &
       "includes = [\"repos/app.toml\"]\n")
     writeFile(manifests / "repos" / "app.toml",
-      "schema = \"reprobuild.workspace.repo.v1\"\n\n" &
+      "schema = \"reprobuild.workspace.repo.v2\"\n\n" &
       "[repo]\nname = \"app\"\npath = \"app\"\n" &
-      "remote = \"origin\"\nrevision = \"main\"\n")
+      "remote = \"origin\"\nmainline = \"main\"\n")
 
 proc installPreservedHook(fx: Fixture) =
     let hooks = fx.repo / ".git" / "hooks"
@@ -623,10 +623,10 @@ template exerciseFormat(gitBin, objectFormat: string) =
     check fx.git(["push", "origin", "refs/tags/published-tag"],
       required = false).code == 0
     check fx.git(["push", "origin", ":scratch"], required = false).code == 0
-    discard fx.git(["notes", "--ref=refs/notes/reprobuild/certificates",
+    discard fx.git(["notes", "--ref=refs/notes/test-certificates/certificates",
       "add", "-m", "certificate", "HEAD"])
     check fx.git(["push", "origin",
-      "refs/notes/reprobuild/certificates"], required = false).code == 0
+      "refs/notes/test-certificates/certificates"], required = false).code == 0
 
     # Already-published HEAD keeps the existing allow policy for valid force
     # and multi-ref updates; outgoing-current is not needed in this state.

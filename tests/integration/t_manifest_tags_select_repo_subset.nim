@@ -79,8 +79,7 @@ proc projectToml(coreUrl, toolsUrl, heavyUrl: string): string =
   "schema = \"reprobuild.workspace.project.v1\"\n\n" &
   "[project]\n" &
   "name = \"myproject\"\n" &
-  "default_revision = \"main\"\n" &
-  "trunk = \"main\"\n\n" &
+  "\n" &
   "[[remote]]\nname = \"core-origin\"\nfetch = \"" & coreUrl & "\"\n\n" &
   "[[remote]]\nname = \"tools-origin\"\nfetch = \"" & toolsUrl & "\"\n\n" &
   "[[remote]]\nname = \"heavy-origin\"\nfetch = \"" & heavyUrl & "\"\n\n" &
@@ -91,34 +90,34 @@ proc projectToml(coreUrl, toolsUrl, heavyUrl: string): string =
   "]\n"
 
 const coreFragment = """
-schema = "reprobuild.workspace.repo.v1"
+schema = "reprobuild.workspace.repo.v2"
 
 [repo]
 name = "lib-core"
 path = "lib-core"
 remote = "core-origin"
-revision = "main"
+mainline = "main"
 """
 
 const toolsFragment = """
-schema = "reprobuild.workspace.repo.v1"
+schema = "reprobuild.workspace.repo.v2"
 
 [repo]
 name = "lib-tools"
 path = "lib-tools"
 remote = "tools-origin"
-revision = "main"
+mainline = "main"
 tags = ["tools"]
 """
 
 const heavyFragment = """
-schema = "reprobuild.workspace.repo.v1"
+schema = "reprobuild.workspace.repo.v2"
 
 [repo]
 name = "lib-heavy"
 path = "lib-heavy"
 remote = "heavy-origin"
-revision = "main"
+mainline = "main"
 tags = ["heavy"]
 """
 

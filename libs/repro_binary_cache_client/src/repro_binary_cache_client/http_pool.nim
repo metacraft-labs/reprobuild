@@ -28,7 +28,12 @@
 ## the BuildPool ``capacity`` knob — the engine guarantees one
 ## ``ClientContext`` accessor per worker thread.
 
-import std/[net, os, parseutils, strutils, times, uri]
+import std/[monotimes, nativesockets, net, os, parseutils, strutils, times, uri]
+
+when defined(windows):
+  import std/winlean
+else:
+  import std/posix
 
 when defined(ssl):
   import wrappers/openssl
@@ -86,8 +91,22 @@ type
       ## pool is full, ``streamGet`` opens a transient (non-pooled)
       ## connection instead of blocking.
     receiveTimeoutMs*: int
-      ## Per-read deadline; surfaced as ``HttpError`` if the upstream
-      ## stalls. 30s default — large payloads on slow links still fit.
+      ## Deadline for the peer to answer once connected; surfaced as
+      ## ``HttpError`` if it stalls. The status line and headers together
+      ## must arrive within it, as must each chunk-size line; each body
+      ## read, and each socket read or write of the TLS handshake, waits
+      ## at most this long. 30s default — large payloads on slow links
+      ## still fit, because the body as a whole has no deadline.
+    connectTimeoutMs: int
+      ## Deadline for opening a TCP connection, covering every address
+      ## the host name resolves to. It applies to every user of the pool,
+      ## not only binary-cache lookups. A cache whose address silently drops
+      ## packets (a firewalled or powered-off host, a stale address in
+      ## ``caches.conf``) would otherwise hold the caller for the
+      ## operating system's own connect timeout — about 130s on Linux —
+      ## when the caller's next step is to fall back to building. 5s
+      ## default: a reachable cache, even over a VPN, connects well
+      ## inside it, and it still leaves room for two lost SYNs.
 
   HttpError* = object of CatchableError
 
@@ -103,17 +122,36 @@ type
       ## the body length is then determined by the chunked-framing.
     bytesReceived*: int64
     chunked*: bool
+    location*: string
+      ## The ``Location`` header of a 3xx response, verbatim; ``""``
+      ## otherwise. ``streamGet`` does not follow redirects itself (a
+      ## redirect target is the caller's policy), so a caller that wants
+      ## them loops on this.
 
 const
   DefaultMaxConnections = 16
   DefaultReceiveTimeoutMs = 30_000
+  DefaultConnectTimeoutMs* = 5_000
 
 proc newHttpPool*(maxConnections = DefaultMaxConnections;
-                  receiveTimeoutMs = DefaultReceiveTimeoutMs): HttpPool =
+                  receiveTimeoutMs = DefaultReceiveTimeoutMs;
+                  connectTimeoutMs = DefaultConnectTimeoutMs): HttpPool =
+  ## ``connectTimeoutMs`` must be positive: there is deliberately no
+  ## "wait as long as the operating system does" setting, because that
+  ## is the unbounded stall the deadline exists to prevent.
+  if connectTimeoutMs <= 0:
+    raise newException(ValueError,
+      "connectTimeoutMs must be positive, got " & $connectTimeoutMs)
   HttpPool(
     connections: @[],
     maxConnections: maxConnections,
-    receiveTimeoutMs: receiveTimeoutMs)
+    receiveTimeoutMs: receiveTimeoutMs,
+    connectTimeoutMs: connectTimeoutMs)
+
+proc connectTimeoutMs*(pool: HttpPool): int =
+  ## The pool's connect deadline. Read-only: it is set, and checked to be
+  ## positive, only by ``newHttpPool``.
+  pool.connectTimeoutMs
 
 proc close*(pool: HttpPool) =
   if pool.isNil:
@@ -157,6 +195,139 @@ proc parseTarget*(url: string): ParsedUrl =
 # Connection lease
 # ---------------------------------------------------------------------------
 
+type ConnectWait = enum
+  cwFinished     ## the connect completed, successfully or not: read SO_ERROR
+  cwTimedOut     ## the deadline passed first
+  cwInterrupted  ## a signal interrupted the wait; wait again
+
+proc awaitConnect(fd: SocketHandle; remainingMs: int64): ConnectWait =
+  ## Waits for a pending non-blocking connect on ``fd`` to finish, for at
+  ## most ``remainingMs``. Raises ``OSError`` for a failure of the wait
+  ## itself other than an interruption by a signal.
+  let waitMs = cint(min(remainingMs, int64(high(cint))))
+  when defined(windows):
+    # Winsock reports a finished connect in the WRITE set when it
+    # succeeded and only in the EXCEPT set when it failed, so both sets
+    # are watched. A write-set-only wait never wakes for a refused
+    # connect and would report it as a timeout. Behaviour documented at
+    # https://learn.microsoft.com/en-us/windows/win32/api/winsock2/nf-winsock2-select
+    # (WSAPoll is not used: older Windows builds do not report a failed
+    # connect through it.)
+    var wr, ex: TFdSet
+    FD_ZERO(wr); FD_ZERO(ex)
+    FD_SET(fd, wr); FD_SET(fd, ex)
+    var tv = Timeval(tv_sec: int32(waitMs div 1000),
+                     tv_usec: int32((waitMs mod 1000) * 1000))
+    let rc = winlean.select(0, nil, addr wr, addr ex, addr tv)
+    if rc > 0: return cwFinished
+    if rc == 0: return cwTimedOut
+    raiseOSError(osLastError())
+  else:
+    # POSIX reports both outcomes as writability (a failure also raises
+    # POLLERR, which poll(2) reports whatever ``events`` asked for).
+    var pfd = TPollfd(fd: fd.cint, events: POLLOUT, revents: 0)
+    let rc = poll(addr pfd, 1, waitMs)
+    if rc > 0: return cwFinished
+    if rc == 0: return cwTimedOut
+    let err = osLastError()
+    if err.cint == EINTR: return cwInterrupted
+    raiseOSError(err)
+
+proc connectWithDeadline(sock: Socket; domain: Domain; host: string;
+                         port: Port; timeoutMs: int) =
+  ## Connects ``sock`` (created for address family ``domain``; ``net``
+  ## does not expose a socket's family) to ``host:port``, giving up once
+  ## ``timeoutMs`` has passed. The deadline is shared by every address
+  ## ``host`` resolves to, tried in resolver order as the blocking
+  ## ``net.connect`` does. Raises ``TimeoutError`` when the deadline passes
+  ## and ``OSError`` for any other failure (name resolution, refusal,
+  ## unreachable network), carrying the operating system's own message.
+  ##
+  ## Name resolution itself (``getaddrinfo``) is not bounded here; a
+  ## cache is normally named by an address or a host-local name.
+  ##
+  ## Not the standard library's timed ``connect`` (``net.connect`` with
+  ## ``timeout``), for three reasons. It stops at the first address whose
+  ## connect is pending, so a refusal that arrives later through
+  ## ``SO_ERROR`` is raised instead of falling through to the host's next
+  ## address the way the blocking connect did. On POSIX it reports a wait
+  ## interrupted by a signal (``EINTR``) as a timeout. And on Windows it
+  ## waits only for writability, which Winsock never signals for a failed
+  ## connect (see ``awaitConnect``), so a refused port would take the whole
+  ## deadline and be reported as a timeout.
+  ## Non-blocking connect protocol:
+  ## https://pubs.opengroup.org/onlinepubs/9799919799/functions/connect.html
+  ## The deadline is on the monotonic clock, so a wall-clock step neither
+  ## cuts the wait short nor extends it.
+  let fd = sock.getFd()
+  let deadline = getMonoTime() + initDuration(milliseconds = timeoutMs)
+  let aiList = getAddrInfo(host, port, domain)
+  defer: freeAddrInfo(aiList)
+  fd.setBlocking(false)
+  var lastError = OSErrorCode(0)
+  var ai = aiList
+  while ai != nil:
+    let started =
+      when defined(windows): winlean.connect(fd, ai.ai_addr, ai.ai_addrlen.SockLen)
+      else: posix.connect(fd, ai.ai_addr, ai.ai_addrlen.SockLen)
+    if started == 0:
+      fd.setBlocking(true)
+      return
+    let err = osLastError()
+    let pending =
+      when defined(windows): err.int32 == WSAEWOULDBLOCK
+      else: err.cint == EINPROGRESS
+    if not pending:
+      lastError = err
+      ai = ai.ai_next
+      continue
+    while true:
+      let remainingMs = (deadline - getMonoTime()).inMilliseconds
+      if remainingMs <= 0:
+        raise newException(TimeoutError, "connect timed out")
+      case awaitConnect(fd, remainingMs)
+      of cwFinished: break
+      of cwTimedOut: raise newException(TimeoutError, "connect timed out")
+      of cwInterrupted: continue
+    # The connect finished. ``SO_ERROR`` says how.
+    let soError = getSockOptInt(fd, SOL_SOCKET, SO_ERROR)
+    if soError == 0:
+      fd.setBlocking(true)
+      return
+    lastError = OSErrorCode(soError)
+    ai = ai.ai_next
+  if lastError.int == 0:
+    raise newException(OSError, "no address found for " & host)
+  raiseOSError(lastError)
+
+when defined(windows):
+  const
+    WinSoSndTimeo = cint(0x1005)
+    WinSoRcvTimeo = cint(0x1006)
+
+proc setIoTimeouts(fd: SocketHandle; timeoutMs: int) =
+  ## Bounds every blocking read and write on ``fd`` at ``timeoutMs``
+  ## (``SO_RCVTIMEO`` / ``SO_SNDTIMEO``). The pool's own reads wait for
+  ## data before reading, under their own deadlines; this bound covers
+  ## the blocking calls it does not control, which are OpenSSL's reads
+  ## and writes during the TLS handshake and inside a TLS record, and
+  ## ``send`` to a peer that has stopped reading. Raises ``OSError``.
+  ## https://pubs.opengroup.org/onlinepubs/9799919799/functions/setsockopt.html
+  when defined(windows):
+    # Winsock takes the timeout as a DWORD of milliseconds.
+    var ms = int32(min(timeoutMs, int(high(int32))))
+    for opt in [WinSoRcvTimeo, WinSoSndTimeo]:
+      if winlean.setsockopt(fd, SOL_SOCKET, opt, addr ms,
+                            SockLen(sizeof(ms))) != 0:
+        raiseOSError(osLastError())
+  else:
+    var tv = Timeval(tv_sec: posix.Time(timeoutMs div 1000),
+                     tv_usec: Suseconds((timeoutMs mod 1000) * 1000))
+    for opt in [SO_RCVTIMEO, SO_SNDTIMEO]:
+      if posix.setsockopt(fd, SOL_SOCKET, opt, addr tv,
+                          SockLen(sizeof(tv))) != 0:
+        raiseOSError(osLastError())
+
 proc leaseConnection(pool: HttpPool; host: string; port: Port;
                      secure: bool): PooledConnection =
   ## Returns a cached connection for the (host, port) tuple if one is
@@ -167,18 +338,41 @@ proc leaseConnection(pool: HttpPool; host: string; port: Port;
     if not c.inUse and c.host == host and c.port == port and c.secure == secure:
       c.inUse = true
       return c
-  let sock = newSocket()
+  let sock = newSocket(AF_INET)
   try:
-    sock.connect(host, port)
+    connectWithDeadline(sock, AF_INET, host, port, pool.connectTimeoutMs)
+  except TimeoutError:
+    try: sock.close() except CatchableError: discard
+    raise newException(HttpError,
+      "connect to " & host & ":" & $int(port) & " timed out after " &
+      $pool.connectTimeoutMs & "ms")
   except OSError as e:
+    try: sock.close() except CatchableError: discard
     raise newException(HttpError,
       "connect to " & host & ":" & $int(port) & " failed: " & e.msg)
+  if pool.receiveTimeoutMs > 0:
+    try:
+      setIoTimeouts(sock.getFd(), pool.receiveTimeoutMs)
+    except OSError as e:
+      try: sock.close() except CatchableError: discard
+      raise newException(HttpError,
+        "connect to " & host & ":" & $int(port) & " failed: " & e.msg)
   if secure:
     when defined(ssl):
+      let handshakeStart = getMonoTime()
       try:
         tlsContext().wrapConnectedSocket(sock, handshakeAsClient, host)
       except CatchableError as e:
         try: sock.close() except CatchableError: discard
+        # A blocking handshake read or write that hits the socket's
+        # timeout surfaces from OpenSSL as a generic error, so the elapsed
+        # time is what tells a silent peer from a refused handshake.
+        if pool.receiveTimeoutMs > 0 and
+            (getMonoTime() - handshakeStart).inMilliseconds >=
+              pool.receiveTimeoutMs:
+          raise newException(HttpError,
+            "TLS handshake to " & host & ":" & $int(port) &
+            " timed out after " & $pool.receiveTimeoutMs & "ms")
         raise newException(HttpError,
           "TLS handshake to " & host & ":" & $int(port) & " failed: " & e.msg)
     else:
@@ -212,29 +406,43 @@ proc releaseConnection(pool: HttpPool; conn: PooledConnection;
 # Line-oriented header read (small buffer; not on the payload hot path)
 # ---------------------------------------------------------------------------
 
-proc readLineWithTimeout(sock: Socket; timeoutMs: int): string =
-  ## Reads ``\r\n``-terminated header line. We hand-roll the byte-at-
-  ## a-time loop instead of using ``net.readLine`` because the std
-  ## implementation peeks via ``peekChar`` after each ``\r`` which has
-  ## surprised us with phantom EOF events on Windows winsock under
-  ## back-to-back keep-alive responses. Our loop reads one byte at a
-  ## time and tolerates ``\n``-only line terminators (some HTTP/1.0
-  ## servers emit them after a ``Connection: close``).
+proc readLineBefore(sock: Socket; deadline: MonoTime; timeoutMs: int;
+                    what: string): string =
+  ## Reads a ``\r\n``-terminated line, raising ``HttpError`` once
+  ## ``deadline`` (on the monotonic clock) has passed; ``timeoutMs`` and
+  ## ``what`` only word that error. We hand-roll the byte-at-a-time loop
+  ## instead of using ``net.readLine`` because the std implementation
+  ## peeks via ``peekChar`` after each ``\r`` which has surprised us with
+  ## phantom EOF events on Windows winsock under back-to-back keep-alive
+  ## responses. Our loop reads one byte at a time and tolerates
+  ## ``\n``-only line terminators (some HTTP/1.0 servers emit them after
+  ## a ``Connection: close``).
+  ##
+  ## Each byte is read with the timed ``recv``, which waits for data for
+  ## at most the time left before ``deadline``: the untimed one blocks
+  ## until the peer sends or closes, so a peer that stays silent would
+  ## never reach the deadline check.
   result = ""
   var c: char
-  let deadline = epochTime() + float(timeoutMs) / 1000.0
-  while epochTime() < deadline:
+  while true:
+    let remainingMs = (deadline - getMonoTime()).inMilliseconds
+    if remainingMs <= 0:
+      raise newException(HttpError, what & " timed out after " &
+        $timeoutMs & "ms")
     var n = 0
     try:
-      n = sock.recv(addr c, 1)
+      n = sock.recv(addr c, 1, timeout = int(remainingMs))
+    except TimeoutError:
+      raise newException(HttpError, what & " timed out after " &
+        $timeoutMs & "ms")
     except OSError as e:
-      raise newException(HttpError, "header read failed: " & e.msg)
+      raise newException(HttpError, what & " failed: " & e.msg)
     if n == 0:
       # Peer closed; return whatever we have. Header parsing decides
       # whether it's a fatal premature EOF.
       return result
     if n < 0:
-      raise newException(HttpError, "recv returned " & $n)
+      raise newException(HttpError, what & " failed: recv returned " & $n)
     if c == '\n':
       # Strip trailing \r if any.
       if result.len > 0 and result[^1] == '\r':
@@ -243,12 +451,21 @@ proc readLineWithTimeout(sock: Socket; timeoutMs: int): string =
     result.add(c)
     if result.len > 65536:
       raise newException(HttpError, "header line exceeds 64 KiB")
-  raise newException(HttpError, "header read timed out after " &
-    $timeoutMs & "ms")
+
+proc readLineWithTimeout(sock: Socket; timeoutMs: int): string =
+  ## A line of chunked framing (a chunk-size line, a trailer, the CRLF
+  ## after a chunk), which must arrive within ``timeoutMs``.
+  readLineBefore(sock, getMonoTime() + initDuration(milliseconds = timeoutMs),
+                 timeoutMs, "chunk framing read")
 
 proc readHeaders(sock: Socket; timeoutMs: int):
     tuple[statusCode: int; headers: seq[(string, string)]] =
-  let statusLine = readLineWithTimeout(sock, timeoutMs)
+  ## Reads the status line and headers, which must all arrive within
+  ## ``timeoutMs``: one deadline for the block, so a peer that sends a
+  ## header line now and then cannot hold the caller longer than a peer
+  ## that sends nothing.
+  let deadline = getMonoTime() + initDuration(milliseconds = timeoutMs)
+  let statusLine = readLineBefore(sock, deadline, timeoutMs, "header read")
   if not statusLine.startsWith("HTTP/"):
     raise newException(HttpError,
       "malformed status line: " & statusLine.escape())
@@ -260,7 +477,7 @@ proc readHeaders(sock: Socket; timeoutMs: int):
   result.statusCode = code
   result.headers = @[]
   while true:
-    let line = readLineWithTimeout(sock, timeoutMs)
+    let line = readLineBefore(sock, deadline, timeoutMs, "header read")
     if line.len == 0:
       break
     let colon = line.find(':')
@@ -385,10 +602,40 @@ proc drainUntilClose(sock: Socket;
 # Public GET — the streaming entry point
 # ---------------------------------------------------------------------------
 
+proc requestStatusOnly*(pool: HttpPool; meth, url: string;
+                        extraHeaders: seq[(string, string)] = @[]):
+    tuple[statusCode: int; location: string] =
+  ## Issue ``meth url`` (``HEAD``, or a ``GET`` with a ``Range``) and read
+  ## the status line and headers only: the body is never read, and the
+  ## connection is dropped, not reused, so a server that ignores ``Range``
+  ## and sends a whole file costs nothing. For a probe of whether a URL is
+  ## served.
+  let parsed = parseTarget(url)
+  let conn = pool.leaseConnection(parsed.host, parsed.port, parsed.secure)
+  try:
+    var req = meth & " " & parsed.path & " HTTP/1.1\r\n" &
+              "Host: " & parsed.host
+    if int(parsed.port) != (if parsed.secure: 443 else: 80):
+      req.add(":" & $int(parsed.port))
+    req.add("\r\nUser-Agent: repro-binary-cache-client/0.1\r\n" &
+            "Accept: */*\r\nConnection: close\r\n")
+    for (name, value) in extraHeaders:
+      req.add(name & ": " & value & "\r\n")
+    req.add("\r\n")
+    try:
+      conn.sock.send(req)
+    except OSError as e:
+      raise newException(HttpError, "send request failed: " & e.msg)
+    let (statusCode, headers) = readHeaders(conn.sock, pool.receiveTimeoutMs)
+    result = (statusCode, headerValue(headers, "location"))
+  finally:
+    pool.releaseConnection(conn, reusable = false)
+
 proc streamGet*(pool: HttpPool; url: string;
                 callback: StreamChunkCallback;
                 reuseBuffer: var seq[byte];
-                extraHeaders: seq[(string, string)] = @[]):
+                extraHeaders: seq[(string, string)] = @[];
+                maxBodyBytes = -1'i64):
                   StreamResponse =
   ## Issues ``GET url`` and pipes the response body through ``callback``
   ## as bytes arrive. ``reuseBuffer`` is the receive ring buffer — the
@@ -396,6 +643,13 @@ proc streamGet*(pool: HttpPool; url: string;
   ## so we don't allocate per substitute. Returns the response
   ## descriptor; ``bytesReceived`` lets the caller assert the wire-size
   ## against the manifest's declared payload size.
+  ##
+  ## ``maxBodyBytes`` (when non-negative) bounds a 2xx body: a
+  ## ``Content-Length`` above it is refused before a byte of the body is
+  ## read, and a chunked or unterminated body is refused at the first byte
+  ## past it. Either refusal is an ``HttpError`` raised from inside the
+  ## drain, so the connection is dropped, not reused. The callback never
+  ## sees a byte beyond the cap.
   let parsed = parseTarget(url)
   let conn = pool.leaseConnection(parsed.host, parsed.port, parsed.secure)
   var reusable = false
@@ -422,6 +676,7 @@ proc streamGet*(pool: HttpPool; url: string;
     let (statusCode, headers) =
       readHeaders(conn.sock, pool.receiveTimeoutMs)
     resp.statusCode = statusCode
+    resp.location = headerValue(headers, "location")
 
     let teRaw = headerValue(headers, "transfer-encoding").toLowerAscii()
     let connHdr = headerValue(headers, "connection").toLowerAscii()
@@ -435,29 +690,52 @@ proc streamGet*(pool: HttpPool; url: string;
     # reusable. We surface the status code to the caller; the caller
     # decides whether to act on the bytes.
     if resp.statusCode >= 200 and resp.statusCode < 300:
+      if maxBodyBytes >= 0 and resp.contentLength > maxBodyBytes:
+        raise newException(HttpError, "response body of " &
+          $resp.contentLength & " bytes exceeds the " & $maxBodyBytes &
+          "-byte cap for " & url)
+      var received = 0'i64
+      let cappedCallback: StreamChunkCallback =
+        if maxBodyBytes < 0: callback
+        else: (proc(chunk: openArray[byte]) {.gcsafe.} =
+          received += int64(chunk.len)
+          if received > maxBodyBytes:
+            raise newException(HttpError, "response body exceeds the " &
+              $maxBodyBytes & "-byte cap for " & url)
+          callback(chunk))
       if resp.chunked:
         resp.bytesReceived = drainChunked(
-          conn.sock, reuseBuffer, callback, pool.receiveTimeoutMs)
+          conn.sock, reuseBuffer, cappedCallback, pool.receiveTimeoutMs)
         reusable = not connHdr.contains("close")
       elif resp.contentLength >= 0:
         resp.bytesReceived = drainContentLength(
-          conn.sock, resp.contentLength, reuseBuffer, callback,
+          conn.sock, resp.contentLength, reuseBuffer, cappedCallback,
           pool.receiveTimeoutMs)
         reusable = not connHdr.contains("close")
       else:
         # No content-length, no chunked => drain until close. Not
         # reusable.
         resp.bytesReceived = drainUntilClose(
-          conn.sock, reuseBuffer, callback, pool.receiveTimeoutMs)
+          conn.sock, reuseBuffer, cappedCallback, pool.receiveTimeoutMs)
         reusable = false
     else:
       # Drain error body into a throwaway buffer so the connection stays
-      # in a known state. Cap at 64 KiB so a misbehaving server can't
-      # blow our memory.
+      # in a known state. The buffer keeps at most 64 KiB, and the read
+      # itself stops at 64 KiB too: a server that answers an error with an
+      # endless body would otherwise keep this call busy until the socket
+      # timed out, so past the cap the drain raises and the connection is
+      # dropped rather than reused.
+      const ErrorBodyCap = 65536
       var sink = newSeq[byte](0)
+      var drained = 0
       let drainCb: StreamChunkCallback = proc(chunk: openArray[byte]) =
-        if sink.len < 65536:
-          let want = min(chunk.len, 65536 - sink.len)
+        drained += chunk.len
+        if drained > ErrorBodyCap:
+          raise newException(HttpError, "error response body exceeds " &
+            $ErrorBodyCap & " bytes for " & url & " (HTTP " &
+            $resp.statusCode & ")")
+        if sink.len < ErrorBodyCap:
+          let want = min(chunk.len, ErrorBodyCap - sink.len)
           for i in 0 ..< want:
             sink.add(chunk[i])
       if resp.chunked:
@@ -465,6 +743,10 @@ proc streamGet*(pool: HttpPool; url: string;
                              pool.receiveTimeoutMs)
         reusable = not connHdr.contains("close")
       elif resp.contentLength >= 0:
+        if resp.contentLength > ErrorBodyCap:
+          raise newException(HttpError, "error response body of " &
+            $resp.contentLength & " bytes exceeds " & $ErrorBodyCap &
+            " for " & url & " (HTTP " & $resp.statusCode & ")")
         discard drainContentLength(
           conn.sock, resp.contentLength, reuseBuffer, drainCb,
           pool.receiveTimeoutMs)

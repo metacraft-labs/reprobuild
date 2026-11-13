@@ -104,6 +104,7 @@ proc buildPlatformTriple*(): string =
   const cpu =
     when defined(amd64) or defined(x86_64): "x86_64"
     elif defined(arm64) or defined(aarch64): "aarch64"
+    elif defined(arm): "armv7"
     elif defined(i386): "i686"
     elif defined(riscv64): "riscv64"
     else: "unknown"

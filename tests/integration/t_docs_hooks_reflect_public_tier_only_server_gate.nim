@@ -19,7 +19,8 @@
 ##     section from the user-guide page ⇒ assertions (B*) trip.
 ##
 ## The doc files live in sibling repos of this workspace:
-##   - ``reprobuild-specs/CLI/hooks.md``  (the spec-doc, sibling repo)
+##   - ``reprobuild-pm/spec/CLI/hooks.md``  (the spec-doc, sibling repo,
+##     formerly ``reprobuild-specs``; the old name is still looked up)
 ##   - ``reprobuild/docs/user-guide/workspace-locking.md``  (this repo)
 ## The test resolves both relative to this source file's location so it is
 ## location-robust; if a doc file is absent the test is SKIPPED (the sibling
@@ -47,9 +48,17 @@ let thisDir = currentSourcePath().parentDir
 # ``tests/integration`` walk up to the repo root, then into docs.
 let guidePath = findUp(thisDir, "docs" / "user-guide" / "workspace-locking.md")
 
-# ``reprobuild-specs/CLI/hooks.md`` — sibling repo. From the reprobuild repo
-# root, its parent holds the sibling ``reprobuild-specs`` checkout.
-let hooksPath = findUp(thisDir, ".." / "reprobuild-specs" / "CLI" / "hooks.md")
+# ``reprobuild-pm/spec/CLI/hooks.md`` — sibling repo. From the reprobuild
+# repo root, its parent holds the sibling checkout. The repository was
+# renamed from ``reprobuild-specs``; a workspace that still has it under the
+# old name is read from there.
+let hooksPath = block:
+  var found = findUp(thisDir, ".." / "reprobuild-pm" / "spec" / "CLI" /
+    "hooks.md")
+  if found.len == 0:
+    found = findUp(thisDir, ".." / "reprobuild-specs" / "spec" / "CLI" /
+      "hooks.md")
+  found
 
 suite "HL-8 docs reflect public-tier-only server gate":
 

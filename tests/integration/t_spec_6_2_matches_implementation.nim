@@ -97,25 +97,22 @@ import repro_profile
 const RepoRoot = currentSourcePath.parentDir.parentDir.parentDir
 
 const
-  SpecRelPath = ".." / "reprobuild-specs" / "ReproOS-Remote-Attestation.md"
+  SpecDocRel = "spec" / "ReproOS-Remote-Attestation.md"
   SectionHeading = "### 6.2 Activity module"
   FenceLanguage = "nim"
 
-proc findUpFile(startDir, rel: string): string =
-  var dir = startDir
-  for _ in 0 .. 8:
-    let candidate = dir / rel
-    if fileExists(candidate): return candidate
-    let parent = dir.parentDir
-    if parent.len == 0 or parent == dir: break
-    dir = parent
-  ""
-
 proc findUpDir(startDir, rel: string): string =
+  ## The nearest ancestor-relative ``rel`` that is a specification checkout,
+  ## i.e. holds a ``spec`` directory. A directory that merely carries the
+  ## name is not one: on a CI runner the walk climbs out of the job's
+  ## workspace into the runner's work root, where ``reprobuild-pm`` is the
+  ## workspace of ANOTHER repository's jobs (its checkout one level further
+  ## down), and taking it for the spec checkout failed every case with the
+  ## document "missing" instead of skipping them.
   var dir = startDir
   for _ in 0 .. 8:
     let candidate = dir / rel
-    if dirExists(candidate): return candidate
+    if dirExists(candidate / "spec"): return candidate
     let parent = dir.parentDir
     if parent.len == 0 or parent == dir: break
     dir = parent
@@ -237,8 +234,19 @@ proc configFieldNames(): seq[string] =
     result.add name
 
 let thisDir = currentSourcePath().parentDir
-let specPath = findUpFile(thisDir, SpecRelPath)
-let specDir = findUpDir(thisDir, ".." / "reprobuild-specs")
+# The specification checkout carries TWO names: it was renamed from
+# `reprobuild-specs` to `reprobuild-pm`. This resolved only the old one, so
+# `specDir` came back empty in a workspace that holds the renamed checkout and
+# every case below took its `skip()` branch -- the suite reported success while
+# reading nothing. An unreachable name is not an absent checkout. Both names
+# are accepted, newest first, since a workspace may still hold either.
+var specDir = findUpDir(thisDir, ".." / "reprobuild-pm")
+if specDir.len == 0:
+  specDir = findUpDir(thisDir, ".." / "reprobuild-specs")
+let specPath =
+  if specDir.len == 0: ""
+  elif fileExists(specDir / SpecDocRel): specDir / SpecDocRel
+  else: ""
 
 suite "the reference snippet and the shipped activity agree":
 

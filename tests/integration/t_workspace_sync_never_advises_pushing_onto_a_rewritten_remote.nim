@@ -50,6 +50,7 @@
 ## Skip rule: ``git`` missing on PATH (the convention this suite follows).
 
 import std/[json, os, osproc, strutils, tempfiles, unittest]
+import repro_test_support/reasoned_skip
 
 import repro_test_support
 
@@ -128,32 +129,30 @@ proc localBranchWithOwnWork(gitBin, repoPath, branch: string): string =
   requireGit(q(gitBin) & " -C " & q(repoPath) & " rev-parse HEAD").strip()
 
 proc repoFragmentToml(name: string): string =
-  "schema = \"reprobuild.workspace.repo.v1\"\n\n" &
+  "schema = \"reprobuild.workspace.repo.v2\"\n\n" &
   "[repo]\n" &
   "name = \"" & name & "\"\n" &
   "path = \"" & name & "\"\n" &
   "remote = \"" & name & "\"\n" &
-  "revision = \"main\"\n"
+  "mainline = \"main\"\n"
 
 proc branchTrackingFragmentToml(name, branch: string): string =
   ## The fragment shape every repo in the real workspace uses: a declared
   ## ``branch`` and NO ``revision``. The resolver copies the branch name into
   ## ``revision``, so this is not merely a spelling of the fragment above —
   ## it is the one the field defect was observed through.
-  "schema = \"reprobuild.workspace.repo.v1\"\n\n" &
+  "schema = \"reprobuild.workspace.repo.v2\"\n\n" &
   "[repo]\n" &
   "name = \"" & name & "\"\n" &
   "path = \"" & name & "\"\n" &
   "remote = \"" & name & "\"\n" &
-  "branch = \"" & branch & "\"\n"
+  "mainline = \"" & branch & "\"\n"
 
-proc projectToml(remotes: seq[(string, string)]; trunk = "main"): string =
+proc projectToml(remotes: seq[(string, string)]): string =
   result =
     "schema = \"reprobuild.workspace.project.v1\"\n\n" &
     "[project]\n" &
-    "name = \"rewriteproject\"\n" &
-    "default_revision = \"" & trunk & "\"\n" &
-    "trunk = \"" & trunk & "\"\n\n"
+    "name = \"rewriteproject\"\n\n"
   for (name, url) in remotes:
     result.add("[[remote]]\nname = \"" & name & "\"\nfetch = \"" & url &
       "\"\n\n")
@@ -424,7 +423,7 @@ suite "repro workspace sync — never advise pushing onto a rewritten remote":
       remotes.add(("intact", fileUrl(intactOrigin)))
 
       writeFile(workspaceRoot / "projects" / "rewriteproject.toml",
-        projectToml(remotes, trunk = "dev"))
+        projectToml(remotes))
 
       # THE PREMISES, asserted rather than assumed. Each is a fact the case
       # above does NOT have, and without them this would silently re-test the
@@ -583,7 +582,7 @@ suite "repro workspace sync — never advise pushing onto a rewritten remote":
       let observed = seedRewritten("observed", fetchBeforeSync = false)
       let inferred = seedRewritten("inferred", fetchBeforeSync = true)
       writeFile(workspaceRoot / "projects" / "rewriteproject.toml",
-        projectToml(remotes, trunk = "dev"))
+        projectToml(remotes))
 
       proc runSync(extra: openArray[string]): CmdResult =
         var argv = @[reproBin, "workspace", "sync", "rewriteproject",
@@ -623,13 +622,25 @@ suite "repro workspace sync — never advise pushing onto a rewritten remote":
         "force-pushes.json"
       check fileExists(forcePushesPath)
       let recorded = parseFile(forcePushesPath)
+      # THE FILE IS AN ARRAY OF RECORDS, not a flat ``{path: [sha…]}`` object.
+      # The flat shape was this writer's own, and it carried no branch, no new
+      # tip, no backup ref and no timestamp — so it was not a recovery record,
+      # which is the one thing the file is for. The richer shape is what the
+      # live workspace already carried and what a declared rename re-keys
+      # (Declared-Repository-Renames.md §3.5).
+      check recorded.kind == JArray
+      proc recordedFor(key: string): int =
+        for record in recorded:
+          if record.kind == JObject and "repo" in record and
+              record["repo"].getStr() == key:
+            inc result
       # ``observed``: the sync's own fetch watched the remote move, so the
       # superseded commits are on record and the replay has a base.
-      check recorded.hasKey("observed")
+      check recordedFor("observed") > 0
       # ``inferred``: the rewrite was already fetched, so this run saw no
       # transition and recorded nothing for it. Ancestry is the only signal
       # that produced its verdict, and there is nothing to replay from.
-      check not recorded.hasKey("inferred")
+      check recordedFor("inferred") == 0
 
       # The preserving remedy is offered where it can act, and nowhere else.
       check "--rebase-on-force-push" in observedReason

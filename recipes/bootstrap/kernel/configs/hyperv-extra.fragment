@@ -45,7 +45,7 @@ CONFIG_DRM_FBDEV_EMULATION=y
 # explicitly here so the intent survives a future merge_config sweep).
 CONFIG_DRM_VIRTIO_GPU=y
 
-# Serial console on COM1 @ 115200 8N1 — what vm-harness tails via the
+# Serial console on COM1 @ 115200 8N1 — what gosti tails via the
 # Hyper-V serial-pipe-to-named-pipe path.
 CONFIG_SERIAL_8250=y
 CONFIG_SERIAL_8250_CONSOLE=y
@@ -116,7 +116,7 @@ CONFIG_CGROUP_CPUACCT=y
 CONFIG_CGROUP_SCHED=y
 CONFIG_MEMCG=y
 
-# UEFI Secure Boot is OFF in the vm-harness boot spec, so we do not need
+# UEFI Secure Boot is OFF in the gosti boot spec, so we do not need
 # CONFIG_MODULE_SIG. We also do not build modules; everything is =y.
 # Belt-and-braces: explicitly disable module support so any `=m` setting
 # from kvm_guest.config gets demoted to `=y` or `=n` rather than `=m`.

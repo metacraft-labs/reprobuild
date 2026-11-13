@@ -104,21 +104,20 @@ proc projectToml(aUrl: string): string =
   "schema = \"reprobuild.workspace.project.v1\"\n\n" &
   "[project]\n" &
   "name = \"myproject\"\n" &
-  "default_revision = \"dev\"\n" &
-  "trunk = \"dev\"\n\n" &
+  "\n" &
   "[[remote]]\nname = \"a-origin\"\nfetch = \"" & aUrl & "\"\n\n" &
   "includes = [\n" &
   "  \"repos/lib-a.toml\",\n" &
   "]\n"
 
 const libAFragmentToml = """
-schema = "reprobuild.workspace.repo.v1"
+schema = "reprobuild.workspace.repo.v2"
 
 [repo]
 name = "lib-a"
 path = "lib-a"
 remote = "a-origin"
-revision = "dev"
+mainline = "dev"
 """
 
 type

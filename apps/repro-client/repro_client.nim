@@ -86,11 +86,12 @@
 ## in build events that no client reads. The full client derives it by parsing
 ## the target; deriving it here would mean duplicating ``parseBuildTarget``,
 ## which is exactly the CLI knowledge this binary must not carry. It is left
-## empty and the daemon's own documented fallback (``workingDir``) applies.
-## For the common invocation shapes — ``repro build`` and ``repro build .``
-## run from the project root — the two agree. When they disagree, the
-## difference is confined to the daemon's session bookkeeping; no build
-## output, exit code, cache decision or diagnostic depends on it.
+## empty, and the DAEMON derives it from ``rawArgs`` resolved against
+## ``workingDir`` (``UserDaemonProjectRootResolver``, in the full image the
+## daemon runs), falling back to ``workingDir`` only when the target does not
+## resolve. The daemon log records which happened (``projectRootSource=
+## request|derived|workingDir``). No build output, exit code, cache decision
+## or diagnostic depends on it.
 ##
 ## WHEN IT HANDS OVER, AND WHY EACH ARM IS THERE.
 ##
@@ -329,6 +330,12 @@ proc refuseSelfAsEngine(source, path: string) {.noreturn.} =
     " beside this binary), or unset it.")
   quit(ExitExecFailed)
 
+proc anchoredEnginePath(path: string): string =
+  ## An engine override made absolute against the working directory and
+  ## normalized. See ``resolveFullCli`` for why a relative one is not kept.
+  if path.isAbsolute: normalizedPath(path)
+  else: normalizedPath(getCurrentDir() / path)
+
 proc resolveFullCli(): string =
   ## The engine image this client defers to. Empty when none can be named —
   ## the caller then has nothing to fall back to and says so.
@@ -370,16 +377,26 @@ proc resolveFullCli(): string =
   ## Neither override may name this binary; see ``refuseSelfAsEngine``. The
   ## sibling probe below has always guarded the same case, and an override is
   ## the more likely of the two to hit it, because it is typed by hand.
+  ##
+  ## BOTH OVERRIDES ARE ANCHORED to the working directory. A relative path
+  ## would ``execv`` correctly from here, but it is ALSO the daemon identity
+  ## above, and ``expectedDaemonRunningDigestHex`` digests only an absolute
+  ## path: a relative ``REPRO_FULL_CLI`` produced no expected digest at all,
+  ## so whatever daemon was resident -- an engine from before the last
+  ## rebuild -- served the build silently (reprobuild-pm issue 2026-09-30).
+  ## ``startUserDaemon`` now refuses an unknown digest too; anchoring here is
+  ## what lets a relative override still be served instead of handed over.
+  ## The daemon also starts in its state directory, not here, so a relative
+  ## ``publicCliPath`` in the build request would name nothing there.
   let overridden = getEnv(FullCliEnvVar)
   if overridden.len > 0:
-    if namesThisImage(overridden):
-      refuseSelfAsEngine(FullCliEnvVar, overridden)
-    return overridden
+    let named = anchoredEnginePath(overridden)
+    if namesThisImage(named):
+      refuseSelfAsEngine(FullCliEnvVar, named)
+    return named
   let public = getEnv(PublicCliEnvVar)
   if public.len > 0:
-    let named =
-      if public.isAbsolute: normalizedPath(public)
-      else: normalizedPath(getCurrentDir() / public)
+    let named = anchoredEnginePath(public)
     if namesThisImage(named):
       refuseSelfAsEngine(PublicCliEnvVar, named)
     return named

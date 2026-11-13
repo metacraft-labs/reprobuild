@@ -35,6 +35,34 @@ when defined(linux) or defined(macosx):
       waitForFile(root / "a-release")
     quit(0)
 
+  proc fixtureShell(): string =
+    ## The shell the fixture action runs as its ROOT process.
+    ##
+    ## Not ``/bin/sh`` on macOS. The root is launched by the monitor itself,
+    ## and a SIP-protected root strips ``DYLD_INSERT_LIBRARIES``, so the shim
+    ## never loads in it; io-mon then (correctly) fails closed with
+    ## "spawn child missing process-start parent=0 …" and records none of the
+    ## root's reads — so every assertion below about which ``input.txt`` an
+    ## action read would fail for a reason that has nothing to do with
+    ## capture OWNERSHIP, which is what this file is about. (Measured at
+    ## reprobuild 8a61fb6963 on aarch64-darwin, once the RunQuota socket fix
+    ## let the cases get that far: 3/3 failed with ``/bin/sh``, 3/3 passed with
+    ## a non-SIP shell and nothing else changed.) io-mon rewrites only a SIP
+    ## SHEBANG interpreter for the root, not a SIP root executable, and keeps
+    ## an uninjectable root as a deliberate fail-closed control. The shell is
+    ## therefore the engine's own non-SIP resolution
+    ## (``resolveNonSipShell``, the resolver spec/MacOS-Monitoring.md
+    ## §"Packaged SIP replacements without an ambient shell" requires for the
+    ## engine's wrapper shell). A host with none cannot run this fixture, and
+    ## says so rather than failing on an evidence assertion.
+    when defined(macosx):
+      result = resolveNonSipShell()
+      doAssert result.len > 0,
+        "no non-SIP shell resolves on this host (" & nonSipShellSearchReport() &
+        "); the fixture's root would be uninjectable and capture nothing"
+    else:
+      result = "/bin/sh"
+
   if args.len > 0 and args[0] == "--build-worker":
     let role = args[1]
     let root = args[2]
@@ -42,7 +70,7 @@ when defined(linux) or defined(macosx):
     let work = root / role
     let input = work / "input.txt"
     let output = work / "output.txt"
-    let step = action("same-provider", ["/bin/sh", "-c",
+    let step = action("same-provider", [fixtureShell(), "-c",
         "cat " & quoteShell(input) & " > " & quoteShell(output) &
         (if role == "failure": "; exit 7" else: "")],
       cwd = work, outputs = [output], cacheable = true,

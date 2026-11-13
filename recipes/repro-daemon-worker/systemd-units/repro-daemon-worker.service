@@ -1,0 +1,150 @@
+# repro-daemon in the Distributed-Execution WORKER role.
+#
+# The worker executes other hosts' graphs, so it is untrusted-by-construction
+# (reprobuild-pm/spec/Distributed-Execution-Threat-Model.md §Zones; the class
+# infra already gives CI runner guests, SUP-4). This unit applies the
+# deployment-security-architecture.md CONF-1 floor. Every floor setting is
+# either set below or OMITTED WITH ITS REASON IN THIS FILE, as CONF-1
+# requires; scripts/check_daemon_worker_unit_confinement.sh fails when a floor
+# setting is neither present nor argued here, and compares
+# `systemd-analyze security` against the committed threshold in
+# recipes/repro-daemon-worker/confinement-threshold (CONF-4). An argument is
+# a line `# CONF-1 omission: <Key>=<the value set below> — <why>`; the check
+# reads every assignment with systemd's semantics (threat model G33).
+#
+# @REPRO@, @PATH@, @CIDR@, @IFACE@, @SINK@, @SINK_IP@, @SIGNER@, @SIGNER_IP@,
+# @EGRESS_IPS@ and @FLEET_CIDR@ are filled in by the declarative provisioning
+# (M6: nixos-modules); the analysis script substitutes stand-ins. Nothing
+# runs this unit for real yet: a transient-system-unit run with a worker and
+# its leases is still open (threat model G24, M6), and no script for it
+# exists in this tree.
+
+[Unit]
+Description=Reprobuild worker daemon (Distributed-Execution worker role)
+Documentation=https://github.com/metacraft-labs/reprobuild/blob/dev/recipes/repro-daemon-worker/README.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=repro-worker
+Group=repro-worker
+StateDirectory=repro-worker
+# Search-only for others (never read): the lease floor runs goals as a
+# SUBORDINATE uid that must traverse this directory to reach its own lease
+# (`lease.ensureLeaseTraversal` refuses the worker role otherwise — 0700 here
+# made the role refuse to start). Every file below keeps UMask=0077, and the
+# daemon's keys and lease metadata sit in owner-only directories.
+StateDirectoryMode=0711
+RuntimeDirectory=repro-worker
+RuntimeDirectoryMode=0700
+# The setuid id-mapping helpers live in /run/wrappers/bin on NixOS; the
+# toolchain the worker hands to its leases is the provisioned system path.
+Environment=PATH=/run/wrappers/bin:@PATH@
+Environment=XDG_STATE_HOME=/var/lib/repro-worker/xdg
+Environment=REPRO_DAEMON_STATE_DIR=/var/lib/repro-worker/daemon
+Environment=REPROBUILD_ACTION_CACHE_ROOT=/var/lib/repro-worker/action-cache
+ExecStart=@REPRO@ daemon serve --foreground \
+  --endpoint /run/repro-worker/daemon.sock \
+  --state-dir /var/lib/repro-worker/daemon \
+  --log /var/lib/repro-worker/daemon.log \
+  --peer-cache "lan://@CIDR@?tls=1&bind=@IFACE@&worker=1&evidence=@SINK@&signer=@SIGNER@&repos=/var/lib/repro-worker/repos"
+Restart=on-failure
+RestartSec=5
+
+# --- Filesystem -------------------------------------------------------------
+UMask=0077
+ProtectSystem=strict
+ReadWritePaths=/var/lib/repro-worker
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+# Nothing outside the Nix store is executable, except the two id-mapping
+# helpers the lease floor needs (see NoNewPrivileges below) and the lease
+# root: a test runs the binary its build produced, inside a lease. Within a
+# lease Landlock grants EXECUTE only beneath the closure and the goal's
+# declared output directories, and every other exec or executable mapping
+# is refused and reported (DET-1). No other setuid/setcap binary (sudo, su,
+# …) can be executed from this unit.
+NoExecPaths=/
+ExecPaths=/nix/store /run/wrappers/bin/newuidmap /run/wrappers/bin/newgidmap /var/lib/repro-worker/daemon/worker/leases
+
+# --- Kernel and process surface ---------------------------------------------
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+ProcSubset=pid
+KeyringMode=private
+RemoveIPC=yes
+LockPersonality=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+# The worker creates exactly these namespaces for every execution lease
+# (CONF-5: user, mount, network, pid, ipc, uts). Nothing else.
+RestrictNamespaces=user mnt net pid ipc uts
+# AF_INET: the peer-cache listener and dials; AF_UNIX: the daemon's control
+# socket and the lease supervisor's control channel; AF_NETLINK: interface
+# enumeration for the declared bind (getifaddrs) and the lease's loopback.
+RestrictAddressFamilies=AF_INET AF_UNIX AF_NETLINK
+
+# CONF-1 omission: NoNewPrivileges=no — the lease floor runs every remote
+# goal as a SUBORDINATE uid (/etc/subuid), not as repro-worker (CONF-5: "never
+# in the daemon's own ... user"). Only the privileged id-mapping helpers
+# newuidmap/newgidmap can install that mapping, and no_new_privs would strip
+# exactly the privilege they carry. Compensating controls: ExecPaths above
+# makes those two helpers the only privileged binaries this unit can execute;
+# CapabilityBoundingSet below holds only what they need; and every lease sets
+# no_new_privs on itself before it runs anything (repro_lease_linux.c).
+NoNewPrivileges=no
+# CONF-1 omission: CapabilityBoundingSet=CAP_SETUID — and CAP_SETGID, not an
+# empty set: they are the capabilities newuidmap/newgidmap exercise to write
+# a lease's id maps; with an empty bounding set they could not. The daemon
+# itself holds no ambient or effective capability.
+CapabilityBoundingSet=CAP_SETUID CAP_SETGID
+AmbientCapabilities=
+
+# --- System calls -------------------------------------------------------------
+SystemCallArchitectures=native
+SystemCallErrorNumber=EPERM
+# CONF-3: the filter is DERIVED. recipes/repro-daemon-worker/syscalls lists
+# what profiling (systemd-units/repro-daemon-worker.profile.conf, driven by
+# scripts/profile_daemon_worker_syscalls.sh) observed this service and its
+# leases use beyond @system-service, or inside the groups the floor removes.
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources @obsolete
+# Re-allowed from the removed groups, each observed in the profile:
+SystemCallFilter=capset lchown mount pivot_root setgroups setresuid umount2
+
+# CONF-1 omission: MemoryDenyWriteExecute=no — CONF-2's named exception.
+# Remote goals run test suites of JIT runtimes (Node.js, the JVM, CPython with
+# JIT extensions), and the seccomp filter this setting installs is inherited by
+# every execution lease, so they could not run. Compensating control, as it
+# stands: an execve/execveat of native code from outside the lease's computed
+# closure (nix-store -qR of the system and toolchain, not all of /nix/store)
+# and its declared output directories is refused and reported (DET-1,
+# lease-supervisor `exec-outside-closure`).
+# Native code reaching a lease WITHOUT an execve of its own from a file the
+# goal wrote (`ld.so <file>`, a file-backed PROT_EXEC mmap/mprotect) is
+# stopped by the lease's mounts: every writable mount in a lease is noexec,
+# and only the closure is mounted at all (operator decision 2026-10-20; the
+# executable-mapping interception that used to be argued here is removed).
+# Anonymous executable memory and memfds remain the named exception — the
+# hardened profile's answer is vm.memfd_noexec and a VM-grade boundary.
+# Interpreted code is the goal's own content, running inside the lease.
+MemoryDenyWriteExecute=no
+
+# --- Network (FLOW-3, enforced below the daemon) ------------------------------
+# The cgroup-level allow-list covers the daemon AND every lease's forwarders
+# (they connect from this unit): the evidence sink, the certificate signer,
+# the fleet's peer-cache range, and exactly the declared lease egress
+# destinations. A daemon whose own `egress=` setting was widened still
+# reaches nothing else (threat model G26).
+IPAddressDeny=any
+IPAddressAllow=localhost @FLEET_CIDR@ @SINK_IP@ @SIGNER_IP@ @EGRESS_IPS@
+
+[Install]
+WantedBy=multi-user.target

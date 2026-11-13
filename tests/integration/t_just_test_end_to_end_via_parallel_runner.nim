@@ -12,6 +12,7 @@
 ## appropriate as a manual benchmark or CI long-test gate.
 
 import std/[os, osproc, strutils, times, unittest]
+import repro_test_support/reasoned_skip
 
 const RepoRootMarker = "repro.nim"
 const LongTestEnv = "REPRO_M1_LONG_TEST"

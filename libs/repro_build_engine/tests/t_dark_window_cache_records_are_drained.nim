@@ -77,8 +77,10 @@ import repro_depfile
 import repro_hash
 import repro_local_store
 import io_mon/[types, writer, capabilities]
+from repro_test_support import testCaseScratchSlug
 
-const TmpDir = "build/test-tmp/t_dark_window_cache_records_are_drained"
+let TmpDir = "build/test-tmp/t_dark_window_cache_records_are_drained" /
+  testCaseScratchSlug()
 const ReuseDecisions = {cdHit, cdHybridCutoff}
 
 proc weak(name: string): ContentDigest =
@@ -196,7 +198,7 @@ proc writeRmdf(f: Fixture) =
     osPid: 4242, threadId: 4242))
   all.add(MonitorRecord(kind: mrFileRead, observationKind: moFileRead,
     osPid: 4242, threadId: 4242, path: f.observedPath))
-  writeFile(f.rmdfPath, cast[string](encodeCanonical(all)))
+  writeFile(f.rmdfPath, encodeCanonical(all))
 
 proc recFiles(f: Fixture): seq[string] =
   let hot = f.cacheRoot / "action-cache" / "hot-records"
@@ -264,11 +266,21 @@ suite "the record epoch makes pre-epoch frames unreadable":
 
     # The frame's version is the u16 immediately after the 4-byte magic.
     check encoded[0 .. 3] == cast[seq[byte]]("RBAR")
-    # 5 is in this list and is the one that matters: it is what a binary built
+    # 5 is in this set and is the one that matters: it is what a binary built
     # from mainline writes today, and it was written by a binary whose guard
     # was dead just as surely as 2, 3 and 4 were. An epoch drawn at 5 would
     # have drained the old records and left the recent ones.
-    for stale in [2'u16, 3'u16, 4'u16, 5'u16]:
+    #
+    # DERIVED FROM THE DECODER'S OWN ACCEPT SET rather than hand-listed.
+    # The hand-listed form of this very loop existed in THREE files
+    # (here, `test_m10_observed_env_cache_key` and
+    # `t_newest_alias_and_interned_records`) and all three stopped
+    # covering version 6 when the epoch moved 6 -> 7, with nothing
+    # failing. A list that means "everything below current" has to be
+    # computed from current.
+    let refused = actionRecordVersionsThisBuildRefuses()
+    check refused.len > 0
+    for stale in refused:
       var patched = encoded
       patched[4] = byte(stale and 0xff'u16)
       patched[5] = byte((stale shr 8) and 0xff'u16)
@@ -405,7 +417,14 @@ suite "a record keyed on nothing is refused at lookup":
     let builtin = builtinAction(bakWriteText, "pkg.write_text",
       outputs = ["out.txt"], text = "hello",
       governingLockIdentity = lockIdentityOutsideSolvedGraph())
-    check builtin.unservableCacheRecordReason(empty).len == 0
+    # Empty of INPUTS, but describing the action's own output, as every real
+    # record of this edge does — so this asserts the no-inputs exemption and
+    # nothing else (a record that does not describe the action's declared
+    # outputs is refused for that separate reason; see
+    # `recordOutputsNotOwnedBy`).
+    var emptyOfInputs = empty
+    emptyOfInputs.outputs = @[OutputBlob(path: "out.txt")]
+    check builtin.unservableCacheRecordReason(emptyOfInputs).len == 0
 
     # An edge whose evidence comes from a report its AUTHOR declared owns that
     # set; `dgRecognizedFormat` is not in `MonitorPolicyKinds`, the engine

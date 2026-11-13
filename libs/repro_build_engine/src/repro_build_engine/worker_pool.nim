@@ -168,6 +168,10 @@ var jobTail: EnginePoolJob = nil
 var outcomeHead: OutcomeNode = nil
 var queuedJobs: int = 0
 var tenantPending: array[MaxEnginePoolTenants, int]
+var tenantWaiters: array[MaxEnginePoolTenants, int]
+  ## Callers currently BLOCKED in ``awaitEnginePoolOutcome`` /
+  ## ``awaitEnginePoolTenantIdle`` for this tenant. Read by tasks through
+  ## ``enginePoolTenantHasWaiter``; see there for the one use.
 var tenantNames: array[MaxEnginePoolTenants, array[EnginePoolTenantNameLimit, char]]
 var tenantCount: int = 0
 var poolWorkers: array[MaxEnginePoolWorkers, Thread[int]]
@@ -492,6 +496,29 @@ proc drainEnginePoolOutcomes*(tenant: EnginePoolTenant):
   ## blocking on the ones that have not.
   takeOutcomes(tenant)
 
+proc enginePoolTenantHasWaiter*(tenant: EnginePoolTenant): bool =
+  ## Whether some caller is blocked right now waiting on this tenant's jobs.
+  ##
+  ## A task can read it to learn that its own completion is on somebody's
+  ## critical path. Its one use is the depfile flush's RELEASE test seam
+  ## (``monitor_flush.runFlushJob``): a publication held until the next edge
+  ## releases it must stop holding the moment the scheduler waits for it,
+  ## because a scheduler that waits is one the next edge can never release —
+  ## so "the scheduler waited" ends the hold by ORDER, not by a clock.
+  acquire(poolLock)
+  result = tenantWaiters[int(tenant)] > 0
+  release(poolLock)
+
+proc beginTenantWait(tenant: EnginePoolTenant) =
+  acquire(poolLock)
+  inc tenantWaiters[int(tenant)]
+  release(poolLock)
+
+proc endTenantWait(tenant: EnginePoolTenant) =
+  acquire(poolLock)
+  dec tenantWaiters[int(tenant)]
+  release(poolLock)
+
 proc enginePoolPending*(tenant: EnginePoolTenant): int =
   ## Jobs of this tenant that are queued or in flight.
   acquire(poolLock)
@@ -520,6 +547,8 @@ proc awaitEnginePoolOutcome*(tenant: EnginePoolTenant; key: string;
   ## in which case the caller already recorded it — or never queued, which is
   ## what a monitor fault leaves behind. Waiting longer would answer neither.
   let deadline = epochTime() + timeoutSeconds
+  beginTenantWait(tenant)
+  defer: endTenantWait(tenant)
   while true:
     var found = false
     var idle = false
@@ -543,6 +572,8 @@ proc awaitEnginePoolTenantIdle*(tenant: EnginePoolTenant;
   ## Wait for every one of this tenant's queued jobs and return the outcomes
   ## not yet drained.
   let deadline = epochTime() + timeoutSeconds
+  beginTenantWait(tenant)
+  defer: endTenantWait(tenant)
   while true:
     acquire(poolLock)
     let remaining = tenantPending[int(tenant)]

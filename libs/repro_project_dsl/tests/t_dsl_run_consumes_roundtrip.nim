@@ -55,6 +55,44 @@ suite "t_dsl_run_consumes_roundtrip":
         check back.policy.ttl == initDuration(minutes = 30)
     check found
 
+  test "corrupted entry and consumes counts fail closed":
+    ## A count damaged on disk must be refused against the bytes left in the
+    ## payload, never used to size a seq first: ``high(uint32)`` elements is
+    ## hundreds of gigabytes, and the decode then dies in the allocator
+    ## instead of raising ``BuildActionPayloadError``.
+    resetTargetExportRegistry()
+    run("topology-lease-smoke", build = "gate-action-id",
+        consumes = @[leased("topology", delayed(minutes = 30))],
+        args = @["--slice", "bounded"])
+    let payload = encodeTargetExportTablePayload(registeredTargetExports())
+
+    proc failure(bytes: seq[byte]; countAt: int): string =
+      var corrupt = bytes
+      for i in 0 ..< 4:
+        corrupt[countAt + i] = 0xff
+      try:
+        discard decodeTargetExportTablePayload(corrupt)
+      except BuildActionPayloadError as err:
+        result = err.msg
+
+    # The entry count is the first payload word after the 10-byte envelope.
+    check failure(payload, 10) ==
+      "target export entry count exceeds remaining payload bytes"
+    # The consumes count directly follows the last ``runArgs`` string,
+    # located by its length-prefixed bytes rather than by a fixed offset.
+    let last = "bounded"
+    var probe = @[byte(last.len), 0, 0, 0]
+    for ch in last:
+      probe.add(byte(ord(ch)))
+    var consumesAt = -1
+    for start in 0 .. payload.len - probe.len:
+      if payload[start ..< start + probe.len] == probe:
+        consumesAt = start + probe.len
+        break
+    check consumesAt > 0
+    check failure(payload, consumesAt) ==
+      "run-edge lease count exceeds remaining payload bytes"
+
   test "immediate + keep policies also survive the round-trip":
     resetTargetExportRegistry()
     run("run-immediate", build = "bin-a",

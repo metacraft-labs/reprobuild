@@ -134,9 +134,11 @@ created_at = "2026-06-27T00:00:00Z"
       check fileExists(repo / "repro.lock")
       let lockBody = readFile(repo / "repro.lock")
 
-      # (1) The sibling is a first-class locked dep: workspace-relative path,
-      # VCS coordinates (kind + revision) + a self-describing integrity.
-      check "path = \"../sib\"" in lockBody
+      # (1) The sibling is a first-class locked dep, recorded by NAME (a lock
+      # records no checkout path), with VCS coordinates (kind + revision) + a
+      # self-describing integrity.
+      check "{ name = \"sib\", coord_kind = \"vcs\"" in lockBody
+      check "path =" notin lockBody
       check "coord_kind = \"vcs\"" in lockBody
       # The sibling's locked entry carries the sibling's HEAD as the revision.
       let sibSha = git(gitBin, sib.work, "rev-parse HEAD").output.strip()

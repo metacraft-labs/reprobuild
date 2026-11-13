@@ -34,8 +34,7 @@ proc projectStub(name: string): string =
   "schema = \"reprobuild.workspace.project.v1\"\n\n" &
   "[project]\n" &
   "name = \"" & name & "\"\n" &
-  "default_revision = \"main\"\n" &
-  "trunk = \"main\"\n\n" &
+  "\n" &
   "includes = [\n]\n"
 
 proc setupWorkspace(slug: string; projectNames: openArray[string]): string =

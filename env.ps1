@@ -298,43 +298,9 @@ if ($ioMonDir) {
 # git ships the bash we want and `Ensure-Git` (framework, above) has already
 # put git on PATH, so the fix is to resolve bash from git's own installation
 # and put it AHEAD of the WSL stub rather than to provision anything new.
-function Get-CommandSourceOrEmpty {
-    param([string]$Name)
-    $cmd = Get-Command $Name -ErrorAction SilentlyContinue
-    if ($null -eq $cmd) { return "" }
-    if ($cmd.CommandType -eq "Alias") { return $cmd.Definition }
-    return $cmd.Source
-}
-
-function Test-UsableBash {
-    param([string]$Path)
-    if ([string]::IsNullOrWhiteSpace($Path)) { return $false }
-    if (-not (Test-Path -LiteralPath $Path)) { return $false }
-    # The WSL launcher lives in System32 / WindowsApps and is never the bash we
-    # want here, even when a distro IS installed: the build must run against the
-    # host filesystem with the host toolchain on PATH, not inside a Linux VM.
-    $dir = Split-Path -Parent $Path
-    if ($dir -match '\\(System32|SysWOW64|WindowsApps)$') { return $false }
-    return $true
-}
-
-function Resolve-GitBashDir {
-    # `git.exe` lives in `<root>\cmd` (or `<root>\bin`); bash sits in
-    # `<root>\bin\bash.exe` for every supported layout (Git for Windows,
-    # scoop, winget).
-    $git = Get-Command git -ErrorAction SilentlyContinue
-    if ($null -eq $git) { return "" }
-    $gitExe = if ($git.CommandType -eq "Alias") { $git.Definition } else { $git.Source }
-    if ([string]::IsNullOrWhiteSpace($gitExe)) { return "" }
-    $root = Split-Path -Parent (Split-Path -Parent $gitExe)
-    foreach ($candidate in @((Join-Path $root "bin"), (Join-Path $root "usr\bin"))) {
-        if (Test-Path -LiteralPath (Join-Path $candidate "bash.exe")) {
-            return $candidate
-        }
-    }
-    return ""
-}
-
+# `Get-CommandSourceOrEmpty`, `Test-UsableBash` and `Resolve-GitBashDir` live
+# in windows/toolchain-utils.ps1 (dot-sourced through bootstrap-toolchain.ps1
+# above), shared with scripts/release/package_windows_release.ps1.
 $currentBash = Get-CommandSourceOrEmpty 'bash'
 if (-not (Test-UsableBash $currentBash)) {
     $gitBashDir = Resolve-GitBashDir

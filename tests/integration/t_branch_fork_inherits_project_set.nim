@@ -102,19 +102,18 @@ proc projectToml(name, remoteName, remoteUrl, includePath: string): string =
   "schema = \"reprobuild.workspace.project.v1\"\n\n" &
   "[project]\n" &
   "name = \"" & name & "\"\n" &
-  "default_revision = \"main\"\n" &
-  "trunk = \"main\"\n\n" &
+  "\n" &
   "[[remote]]\nname = \"" & remoteName & "\"\nfetch = \"" & remoteUrl &
     "\"\n\n" &
   "includes = [\n  \"" & includePath & "\",\n]\n"
 
 proc repoToml(name, remoteName: string): string =
-  "schema = \"reprobuild.workspace.repo.v1\"\n\n" &
+  "schema = \"reprobuild.workspace.repo.v2\"\n\n" &
   "[repo]\n" &
   "name = \"" & name & "\"\n" &
   "path = \"" & name & "\"\n" &
   "remote = \"" & remoteName & "\"\n" &
-  "revision = \"main\"\n"
+  "mainline = \"main\"\n"
 
 type
   Fixture = object

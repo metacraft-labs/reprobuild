@@ -53,13 +53,13 @@
 ## same host (default 1 second). The clock is per-host so a multi-host
 ## harvest (mirror + snapshot) isn't gated unnecessarily.
 
-import std/[httpclient, monotimes, net, os, osproc, strutils, tables,
-            times, uri]
+import std/[monotimes, os, osproc, strutils, tables, times, uri]
 
 import blake3
 import nimcrypto/sha2 as nc_sha2_local
 
 import repro_harvest_apt/signature
+import repro_dsl_stdlib/packages/apt_closure
 
 type
   FetchClient* = ref object
@@ -131,10 +131,22 @@ proc newFetchClient*(cacheDir: string;
     offline: offline)
   createDir(cacheDir)
 
+const
+  MaxInReleaseBytes* = 16'i64 * 1024 * 1024
+    ## An InRelease is tens of KB (Raspbian trixie: 140 KB). Sixteen times
+    ## the largest seen leaves room for any archive and refuses a server
+    ## that streams without end.
+  MaxPackagesIndexBytes* = 512'i64 * 1024 * 1024
+    ## The largest compressed Packages index seen is Raspbian main/armhf at
+    ## 15.7 MB (uncompressed 84 MB); Debian main/amd64 is about 10 MB.
+
 proc fetchUrl*(c: FetchClient; url: string;
-              forceRefetch = false): CachedFetch =
+              forceRefetch = false;
+              maxBytes = MaxPackagesIndexBytes): CachedFetch =
   ## Fetch ``url`` from cache when possible, fall through to live HTTP
-  ## otherwise. The cache is updated atomically on a live fetch.
+  ## otherwise. The cache is updated atomically on a live fetch. The body
+  ## is streamed to the cache file and never read past ``maxBytes``
+  ## (``downloadBounded``), so an index fetch cannot fill memory or disk.
   let cachePath = cachePathFor(c.cacheDir, url)
   if (not forceRefetch) and fileExists(cachePath):
     return CachedFetch(bytes: readFile(cachePath),
@@ -146,31 +158,19 @@ proc fetchUrl*(c: FetchClient; url: string;
     raise e
   let host = parseUri(url).hostname
   waitForRate(c, host)
-  let client = newHttpClient(timeout = 30_000,
-    userAgent = c.userAgent,
-    sslContext = newContext(verifyMode = CVerifyPeer))
-  defer: client.close()
-  var bytes = ""
+  createDir(parentDir(cachePath))
+  let tmp = cachePath & ".part"
   try:
-    bytes = client.getContent(url)
-  except HttpRequestError as ex:
-    var e = newException(FetchError,
-      "HTTP fetch failed for " & url & ": " & ex.msg)
-    e.url = url
-    e.httpCode = -1
-    raise e
-  except CatchableError as ex:
+    discard downloadBounded(url, tmp, maxBytes = maxBytes,
+      timeoutMs = 30_000)
+  except IOError as ex:
     var e = newException(FetchError,
       "fetch failed for " & url & ": " & ex.msg)
     e.url = url
     e.httpCode = -1
     raise e
-  # Atomic write: tmp file in same dir, then rename.
-  createDir(parentDir(cachePath))
-  let tmp = cachePath & ".part"
-  writeFile(tmp, bytes)
   moveFile(tmp, cachePath)
-  result = CachedFetch(bytes: bytes, fromCache: false,
+  result = CachedFetch(bytes: readFile(cachePath), fromCache: false,
     cachePath: cachePath)
 
 # ---------------------------------------------------------------------------

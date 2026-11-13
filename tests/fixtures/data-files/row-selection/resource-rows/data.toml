@@ -1,0 +1,30 @@
+# Resource rows are profile-wide (like `resources:` entries): only their
+# guards select them. Each row is its kind's constructor call.
+[[package]]
+name = "ghostty"
+activity = "desktop"
+
+[[resource]]
+kind = "env.userVariable"
+name = "EDITOR"
+value = "nvim"
+
+[[resource]]
+kind = "fs.userFile"
+when = "linux"
+hostFile = "~/.config/gm4/linux.conf"
+content = "x = 1\n"
+
+[[resource]]
+kind = "launchd.userAgent"
+when = "macos"
+label = "org.gm4.agent"
+programArgs = ["/usr/bin/true"]
+
+[[resource]]
+kind = "fs.managedBlock"
+when = "host == \"home-pc\""
+hostFile = "~/.bashrc"
+blockId = "gm4"
+content = "export GM4=1"
+address = "gm4-bashrc"

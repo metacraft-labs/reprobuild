@@ -68,6 +68,26 @@ suite "e2e_path_only_tool_interfaces":
       check xvfbRunProbes[0].name == "help"
       check xvfbRunProbes[0].args == @["--help"]
 
+      # 7-Zip rejects the generic version switch. Its information command
+      # prints the version banner and terminates without opening an archive.
+      for executable in ["7z", "7z.exe"]:
+        let sevenZipProbes = configuredProbes("7zip@26.01", executable)
+        check sevenZipProbes.len == 1
+        check sevenZipProbes[0].kind == tpkVersion
+        check sevenZipProbes[0].args == @["i"]
+      check configuredProbes("another-tool", "7z")[0].args == @["--version"]
+
+      # Exercise the selected argv against the shell's real declared p7zip
+      # executable as a POSIX grammar control, not a Windows payload claim.
+      let sevenZip = findExe("7z")
+      require sevenZip.len > 0
+      let rejected = runShell(@[sevenZip, "--version"])
+      check rejected.code == 7
+      let accepted = runShell(@[sevenZip] &
+        configuredProbes("7zip@26.01", "7z")[0].args)
+      check accepted.code == 0
+      check accepted.output.contains("7-Zip")
+
     test "public build command resolves typed uses from explicit PATH-only mode":
       let repoRoot = getCurrentDir()
       let tempRoot = createTempDir("repro-m8-path-only", "")

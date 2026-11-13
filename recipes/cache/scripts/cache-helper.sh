@@ -23,9 +23,10 @@
 #   REPRO_BINARY_CACHE_KEY_PATH   — required for cache_publish
 #   REPRO_BINARY_CACHE_CERT_PATH  — required for cache_publish
 #   REPRO_LOCAL_STORE             — default ~/.local/share/repro/local-store
-#   REPRO_CACHE_DRY_RUN           — when "1", cache_lookup_and_substitute
-#                                    exits after the lookup attempt and
-#                                    propagates its result.
+#   REPRO_CACHE_DRY_RUN           — when "1", cache_phase_prepare prints the
+#                                    lookup result, then returns 2: no build
+#                                    product was produced. Use cache_lookup
+#                                    directly for lookup-only diagnostics.
 #   REPRO_CACHE_DISABLE           — when "1", lookups are forced to miss
 #                                    and publishes are no-ops. Useful for
 #                                    smoke-testing the build path.
@@ -205,8 +206,10 @@ cache_phase_prepare() {
   CACHE_HIT=0
   if [[ "${REPRO_CACHE_DRY_RUN:-0}" == "1" ]]; then
     cache_lookup "${CACHE_KEY_HEX}" || true
-    CACHE_HIT=2          # special: "dry-run; lookup attempted but build skipped"
-    return 0
+    # A build caller must not report success without its declared product.
+    # Keep lookup diagnostics available, but abort a cacheable build invocation.
+    printf 'cache dry-run cannot produce declared outputs\n' >&2
+    return 2
   fi
   if cache_lookup_and_substitute "${CACHE_KEY_HEX}" "${out_dir}/prefix"; then
     CACHE_HIT=1

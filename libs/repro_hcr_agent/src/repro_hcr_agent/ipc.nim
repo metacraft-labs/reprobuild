@@ -1,5 +1,7 @@
 import std/[json, net, os, strutils]
 from repro_core/paths import extendedPath
+when defined(posix):
+  from repro_core/paths import unixSocketPathMaxLen, unixSocketPathFits
 
 import repro_hcr_agent/protocol
 
@@ -59,9 +61,25 @@ proc recvLine(socket: Socket): string =
       return
     result.add ch
 
+when defined(posix):
+  proc requireHcrAgentSocketPathFits(path, action: string) =
+    ## Refuse a socket path ``std/net`` cannot bind or dial, BEFORE it is
+    ## handed to ``bindUnix`` / ``connectUnix``. Those refuse a path of
+    ## ``Sockaddr_un_path_length`` bytes or more (108 on Linux, 92 on macOS)
+    ## with a bare ``socket path too long`` that names neither the path nor
+    ## the limit; this says both. ``repro watch`` checks the resolved
+    ## ``--hcr-agent-socket`` earlier and names the flag; this is the
+    ## library-level defence for every other caller.
+    if not unixSocketPathFits(path):
+      raise newException(ValueError,
+        "cannot " & action & " HCR agent socket " & path & ": the path is " &
+          $path.len & " bytes, longer than the " & $unixSocketPathMaxLen() &
+          "-byte Unix-socket path limit on this platform")
+
 proc listenHcrAgentUnixSocket*(path: string;
                                removeExisting = true): HcrAgentUnixListener =
   when defined(posix):
+    requireHcrAgentSocketPathFits(path, "listen on")
     if removeExisting:
       try:
         removeFile(extendedPath(path))
@@ -84,6 +102,7 @@ proc acceptHcrAgentConnection*(listener: HcrAgentUnixListener):
 
 proc connectHcrAgentUnixSocket*(path: string): HcrAgentSocketConnection =
   when defined(posix):
+    requireHcrAgentSocketPathFits(path, "connect to")
     result = HcrAgentSocketConnection(
       socket: newSocket(AF_UNIX, SOCK_STREAM, IPPROTO_NONE))
     result.socket.connectUnix(path)

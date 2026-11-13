@@ -88,7 +88,7 @@ proc writeManifest(h: Harness; sequence: uint64; withSecrets: bool;
     m.hasSecrets = true
     m.secrets = sealSecrets(sealTo, h.cfg.target,
       @[SecretFile(path: "mcl.token", mode: 0o600'u32,
-                   content: bytesOf("REGISTRATION-TOKEN-" & $sequence))])
+                   content: bytesOf("REGISTRATION-TOKEN-" & $sequence))], noRevokedRecipientKeys("test"))
   signManifest(h.producer, m)
   var wire = newString(0)
   for b in encodeManifest(m):

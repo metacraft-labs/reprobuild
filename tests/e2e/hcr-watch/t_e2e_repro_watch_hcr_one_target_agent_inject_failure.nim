@@ -28,6 +28,9 @@
 ## ``runWatchCommand.runDirectWatch``) never had a platform in it.
 
 import std/[monotimes, os, osproc, sequtils, strutils, tempfiles, times, unittest]
+import repro_test_support/reasoned_skip
+when defined(posix):
+  from repro_test_support/process_fixtures import shortSocketDirAtProcessExit
 
 import repro_hcr_agent
 from repro_test_support import requireBinary, monitorShimPath
@@ -254,7 +257,11 @@ suite "t_e2e_repro_watch_hcr_one_target_agent_inject_failure":
          (defined(linux) and defined(amd64)):
       let repoRoot = getCurrentDir()
       let reproBin = compileRepro(repoRoot)
-      let tempRoot = createTempDir("repro-hcr-m4-inject-fail", "")
+      # Canonical, because the watch reports the source paths it observed
+      # canonicalised: under the stock macOS TMPDIR (`/var/folders/...`,
+      # `/var` a symlink to `/private/var`) an as-created path compares
+      # unequal to the one in the patch request.
+      let tempRoot = expandFilename(createTempDir("repro-hcr-m4-inject-fail", ""))
       defer: removeDir(tempRoot)
       let monitorTools = prepareMonitorTools(repoRoot, tempRoot / "monitor")
       let pathValue = prepareGccProxy(tempRoot / "tools")
@@ -265,8 +272,12 @@ suite "t_e2e_repro_watch_hcr_one_target_agent_inject_failure":
       let logPath = tempRoot / "repro-watch.log"
       let artifactsA = projectRoot / ".repro" / "hcr-a"
       let artifactsB = projectRoot / ".repro" / "hcr-b"
-      let socketA = tempRoot / "hcr-a.sock"
-      let socketB = tempRoot / "hcr-b.sock"
+      # The sockets do not go under ``tempRoot``: under the suite TMPDIR that
+      # is 94 bytes, past the 92 Nim's ``std/net`` binds on macOS. See
+      # ``shortSocketDirAtProcessExit``.
+      let socketDir = shortSocketDirAtProcessExit("hcrw-")
+      let socketA = socketDir / "hcr-a.sock"
+      let socketB = socketDir / "hcr-b.sock"
       # Target A's metadata path points at a file that does NOT exist
       # on disk — this simulates an agent-injection failure: cycle 1's
       # ``captureHcrWatchBaseline`` reads the metadata file, fails the

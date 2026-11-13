@@ -497,6 +497,73 @@ suite "S7 the CAS-restore configuration is reachable and gated":
     check reported.hasPath(destRoot / "usr" / "libfoo.so")
     check reported.hasPath(buildDir / "CMakeCache.txt")
 
+  test "explicit symlink spellings cannot hide declared roots or output files":
+    let base = createTempDir("repro-s7-explicit-link", "")
+    defer: removeDir(base)
+    let physical = base / "real"
+    createDir(physical / "build" / "out" / "nested")
+    createDir(physical / "scratch")
+    writeFile(physical / "build" / "out" / "product", "product")
+    writeFile(physical / "build" / "out" / "sidecar", "sidecar")
+    writeFile(physical / "scratch" / "scratch.o", "scratch")
+    let logical = base / "link"
+    createSymlink(expandFilename(physical), logical)
+    let resolved = expandFilename(physical)
+    require logical != resolved
+    require expandFilename(logical) == resolved
+
+    for productBase in [logical, resolved]:
+      for prefixBase in [logical, resolved]:
+        checkpoint("product=" & productBase & " prefix=" & prefixBase)
+        var act = action("symlink-product", @["tool"], cwd = logical,
+          outputs = @[productBase / "build" / "out" / "product"],
+          cacheable = true,
+          dependencyPolicy = automaticMonitorGatheringPolicy(@[
+            prefixBase / "build", prefixBase / "build" / "out",
+            prefixBase / "build" / "out" / "nested",
+            prefixBase / "scratch"]),
+          governingLockIdentity = lockIdentityOutsideSolvedGraph())
+        act.declaredOutputs = @[productBase / "build" / "out"]
+        let prefixes = act.honouredDerivedPrefixes()
+        require prefixes.len > 0
+        for prefix in prefixes:
+          check expandFilename(prefix) == resolved / "scratch"
+
+        # Without a write-root declaration, the output FILE must still
+        # disqualify its directory and its ancestors in either spelling.
+        act.declaredOutputs = @[]
+        act.dependencyPolicy = automaticMonitorGatheringPolicy(@[
+          prefixBase / "build", prefixBase / "build" / "out"])
+        check act.honouredDerivedPrefixes().len == 0
+        var evidence: PathSetEvidence
+        evidence.monitorWrites.observeAll(evidence.evidenceProvenance,
+          evcMonitorCapture, [resolved / "build" / "out" / "sidecar"])
+        check act.undeclaredSurvivingWrites(evidence).hasPath(
+          resolved / "build" / "out" / "sidecar")
+
+        # Product declarations remain protected before the product exists.
+        act.outputs = @[productBase / "build" / "out" / "absent" / "product"]
+        check act.honouredDerivedPrefixes().len == 0
+        act.declaredOutputs = @[productBase / "build" / "out" / "absent"]
+        act.outputs = @["stamp"]
+        act.dependencyPolicy = automaticMonitorGatheringPolicy(@[
+          prefixBase / "build" / "out" / "absent"])
+        check act.honouredDerivedPrefixes().len == 0
+        act.declaredOutputs = @[resolved / "build" / "out"]
+        act.dependencyPolicy = automaticMonitorGatheringPolicy(@["build/out"])
+        check act.honouredDerivedPrefixes().len == 0
+
+        # Disjoint scratch writes in either spelling retain their exemption.
+        act.declaredOutputs = @[]
+        act.dependencyPolicy = automaticMonitorGatheringPolicy(@[
+          prefixBase / "scratch"])
+        var scratchEvidence: PathSetEvidence
+        scratchEvidence.monitorWrites.observeAll(
+          scratchEvidence.evidenceProvenance, evcMonitorCapture,
+          [logical / "scratch" / "scratch.o",
+           resolved / "scratch" / "scratch.o"])
+        check act.undeclaredSurvivingWrites(scratchEvidence).len == 0
+
   test "a derived prefix disjoint from the product is still honoured":
     ## The other half, and the reason the rule is disjointness rather than
     ## "no prefix ever exempts": the nimcache declaration this milestone
@@ -703,3 +770,49 @@ suite "S7 the CAS-restore configuration is reachable and gated":
     # The whole point. A green build, a reported cache hit, and a tree that
     # is missing something the action really produces.
     check not fileExists(fx.undeclaredOutput)
+
+  test "a payload-less record is served in place, and only in place":
+    ## A record with matching inputs but no payloads (here withheld by the
+    ## gate; a record published before its edge stored payloads is the same)
+    ## cannot RESTORE. It used to be refused outright
+    ## (`aclMissNoOutputPayload`), and a monitored action — which never takes
+    ## the outputs-present shortcut — re-ran on EVERY build with its outputs
+    ## untouched. The recipe-relative interface extraction runs in this mode
+    ## (reprobuild-specs issues/2026-10-12-interface-extraction-variants-of-
+    ## one-recipe-overwrite-each-others-outputs.md), so any extraction whose
+    ## record the gate withheld would have re-extracted on every build.
+    ##
+    ## Both halves: outputs the record describes are reused where they are,
+    ## exactly as the metadata-only configuration reuses them, and outputs it
+    ## does not describe make the action run.
+    let tempRoot = createTempDir("repro-s7-payloadless", "")
+    defer: removeDir(tempRoot)
+    let fx = makeFixture(tempRoot, withUndeclared = true)
+
+    let config = restoreConfig(fx.cacheRoot, gate = true)
+    let first = runBuild(graph([fx.action]), config)
+    checkpoint(first.results[0].stderr)
+    check first.results[0].status == asSucceeded
+    let record = readRecord(dependencyEvidencePath(fx.cacheRoot, fx.action.id))
+    check record.outputPayloadKind == opkMetadataOnly
+
+    # In place and unchanged: served where it is, nothing runs or restores.
+    let warm = runBuild(graph([fx.action]), config)
+    checkpoint("warm: " & $warm.results[0].status & " " &
+      warm.results[0].reason & " " & warm.results[0].cacheMissReason)
+    check not warm.results[0].launched
+    check warm.results[0].cacheDecision == cdHit
+    check warm.results[0].status == asCacheHit
+    check warm.results[0].reason == "outputs-present"
+
+    # Rewritten by someone else: the record does not describe these bytes
+    # and has none of its own to put back, so the action runs.
+    writeFile(fx.declaredOutput, "another computation's product\n")
+    let rewritten = runBuild(graph([fx.action]), config)
+    checkpoint("rewritten: " & $rewritten.results[0].status & " " &
+      rewritten.results[0].cacheMissReason)
+    check rewritten.results[0].launched
+    check rewritten.results[0].status == asSucceeded
+    check "does not contain output payloads" in
+      rewritten.results[0].cacheMissReason
+    check readFile(fx.declaredOutput) == "payload\n"

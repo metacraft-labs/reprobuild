@@ -1,20 +1,20 @@
-## M68 merge note (hand-edited): the auto-generated ``gitCatalog`` body
-## sits below the pre-existing ``package git:`` Nix block. The Nix
-## block remains the source of truth for Nix-capable hosts; the
-## ``gitCatalog`` slice below is consumed by the M64 ``cakBuiltin``
-## adapter on Windows. Re-harvest emits ONLY the catalog half;
-## re-attach the Nix block by hand if you regenerate.
+## GM4b: every archive realization of ``git`` is a ``tarball`` statement
+## in the ``provisioning:`` block below. The M68 ``gitCatalog``
+## (``VersionedProvisioning``) copy that once sat beside it was merged
+## into these statements and removed, so a home profile and a recipe's
+## ``uses:`` select from one set of records. The catalog harvester
+## emits ``tarball`` statements to merge here.
 ##
 ## **M3 update (Realize-Closure-And-Catalog-Expansion spec).** The
 ## previously-documented M69 realize-time gap for git closed via M3:
-## the harvester now classifies git's ``PortableGit-X-64-bit.7z.exe``
-## URL as ``afSevenZipSfx`` and the realize loop dispatches through
-## the same 7z extractor (which transparently handles SFX-wrapped 7z
-## streams). The ``pre_install`` block (restore persisted
-## etc/gitconfig from ``$persist_dir``) is rejected by the cakBuiltin
+## the harvester classifies git's ``PortableGit-X-64-bit.7z.exe``
+## URL as ``archiveType = "7z-sfx"`` and the home archive realizer
+## dispatches through the same 7z extractor (which transparently handles
+## SFX-wrapped 7z streams). The ``pre_install`` block (restore persisted
+## etc/gitconfig from ``$persist_dir``) is rejected by the realizer's
 ## allowlist — Scoop's ``$persist_dir`` is a Scoop-specific layout that
 ## does not map to reprobuild's store. The full pre_install body lands
-## in ``pre_install_unrecognized`` and the realize loop emits a
+## in ``preInstallUnrecognized`` and the realize loop emits a
 ## ``WPreInstallUnrecognized`` warning per line at apply time so the
 ## operator sees the gap. A freshly-realized git prefix carries
 ## ``bin/git.exe`` + the full PortableGit tree WITHOUT the persisted
@@ -24,7 +24,6 @@
 ## install-context.reg writes (Windows system-state mutation) remain
 ## deferred per the campaign's system-vs-home boundary.
 
-import std/tables
 import repro_project_dsl
 import repro_dsl_stdlib/nixpkgs_pin
 import repro_dsl_stdlib/packages_schema
@@ -55,7 +54,57 @@ package git:
       packageId = "git@2.54.0",
       cpu = "x86_64",
       os = "windows",
-      lockIdentity = "tarball:git@2.54.0:sha256:bea006a6cc69673f27b1647e84ab3a68e912fbc175ab6320c5987e012897f311"
+      lockIdentity = "tarball:git@2.54.0:sha256:bea006a6cc69673f27b1647e84ab3a68e912fbc175ab6320c5987e012897f311",
+      version = "2.54.0",
+      # GM4b: the retired catalog record realized this SAME file (its URL
+      # carried Scoop's `#/dl.7z` rename hint) at the same version; its
+      # extra executables, `GIT_INSTALL_ROOT` binding and the Scoop
+      # pre_install lines it could not replay are folded in here instead of
+      # keeping a second, fully shadowed record. Its primary executable was
+      # `bin\sh.exe`, which made a home profile's `git` launcher start sh.
+      extraExecutable = "bin\\sh.exe",
+      extraExecutable = "git-bash.exe",
+      extraExecutable = "usr\\bin\\gpg.exe",
+      extraExecutable = "usr\\bin\\gpg-agent.exe",
+      extraExecutable = "usr\\bin\\gpgconf.exe",
+      extraExecutable = "usr\\bin\\gpg-connect-agent.exe",
+      extraExecutable = "usr\\bin\\pinentry.exe",
+      env = "GIT_INSTALL_ROOT=${prefix}",
+      preInstallUnrecognized = "$config_path = Join-Path -Path $dir -ChildPath 'etc\\gitconfig'",
+      preInstallUnrecognized = "$config_path_persisted = Join-Path -Path $persist_dir -ChildPath 'etc\\gitconfig'",
+      preInstallUnrecognized = "if (Test-Path -LiteralPath $config_path_persisted -PathType Leaf) {",
+      preInstallUnrecognized = "    info \"Restoring system-level config from $config_path_persisted...\"",
+      preInstallUnrecognized = "    Copy-Item -Path $config_path_persisted -Destination $config_path -Force",
+      preInstallUnrecognized = "    info \"Adjusting paths in $config_path...\"",
+      preInstallUnrecognized = "    (Get-Content -Path $config_path -Encoding UTF8) -replace '(?<=git/)[\\d.]+(?=/)', $version | Set-Content -Path $config_path -Encoding UTF8",
+      preInstallUnrecognized = "}"
+    # GM4b: the aarch64 archive realization formerly held by the retired
+    # catalog record. Its executable list is reordered so `bin\git.exe` is
+    # the primary (the record named `bin\sh.exe` first; see above).
+    tarball url = "https://github.com/git-for-windows/git/releases/download/v2.54.0.windows.1/PortableGit-2.54.0-arm64.7z.exe#/dl.7z",
+      sha256 = "f8e92cd3359fcbb96998cfd606a536ccc6dbfb23c04e12b29042f9ba45b6b0c7",
+      archiveType = "7z-sfx",
+      executablePath = "bin\\git.exe",
+      extraExecutable = "bin\\sh.exe",
+      extraExecutable = "git-bash.exe",
+      extraExecutable = "usr\\bin\\gpg.exe",
+      extraExecutable = "usr\\bin\\gpg-agent.exe",
+      extraExecutable = "usr\\bin\\gpgconf.exe",
+      extraExecutable = "usr\\bin\\gpg-connect-agent.exe",
+      extraExecutable = "usr\\bin\\pinentry.exe",
+      version = "2.54.0",
+      packageId = "git@2.54.0",
+      env = "GIT_INSTALL_ROOT=${prefix}",
+      preInstallUnrecognized = "$config_path = Join-Path -Path $dir -ChildPath 'etc\\gitconfig'",
+      preInstallUnrecognized = "$config_path_persisted = Join-Path -Path $persist_dir -ChildPath 'etc\\gitconfig'",
+      preInstallUnrecognized = "if (Test-Path -LiteralPath $config_path_persisted -PathType Leaf) {",
+      preInstallUnrecognized = "    info \"Restoring system-level config from $config_path_persisted...\"",
+      preInstallUnrecognized = "    Copy-Item -Path $config_path_persisted -Destination $config_path -Force",
+      preInstallUnrecognized = "    info \"Adjusting paths in $config_path...\"",
+      preInstallUnrecognized = "    (Get-Content -Path $config_path -Encoding UTF8) -replace '(?<=git/)[\\d.]+(?=/)', $version | Set-Content -Path $config_path -Encoding UTF8",
+      preInstallUnrecognized = "}",
+      cpu = "aarch64",
+      os = "windows"
 
   executable git:
     cli:
@@ -156,27 +205,4 @@ package git:
         # test can read it off.
         pos args is seq[string],
           position = 0,
-          required = false
-
-# ---------------------------------------------------------------------------
-# M3-extended bulk-harvest catalog (cakBuiltin adapter consumer on Windows).
-# Harvested from bucket: ScoopInstaller/Main
-# Versions (newest-first): 2.54.0
-# ---------------------------------------------------------------------------
-
-let gitCatalog* = @[
-  VersionedProvisioning(
-    version: "2.54.0",
-    archive_format: afSevenZipSfx,
-    install_method: imExtract,
-    bin_relpath: @["bin\\sh.exe", "bin\\git.exe", "git-bash.exe", "usr\\bin\\gpg.exe", "usr\\bin\\gpg-agent.exe", "usr\\bin\\gpgconf.exe", "usr\\bin\\gpg-connect-agent.exe", "usr\\bin\\pinentry.exe"],
-    platforms: @[
-      PlatformBinary(cpu: pcX86_64, os: poWindows, url: "https://github.com/git-for-windows/git/releases/download/v2.54.0.windows.1/PortableGit-2.54.0-64-bit.7z.exe#/dl.7z", sha256: "bea006a6cc69673f27b1647e84ab3a68e912fbc175ab6320c5987e012897f311", sha512: "", sha1: "", extract_path: ""),
-      PlatformBinary(cpu: pcAArch64, os: poWindows, url: "https://github.com/git-for-windows/git/releases/download/v2.54.0.windows.1/PortableGit-2.54.0-arm64.7z.exe#/dl.7z", sha256: "f8e92cd3359fcbb96998cfd606a536ccc6dbfb23c04e12b29042f9ba45b6b0c7", sha512: "", sha1: "", extract_path: "")
-    ],
-    installer_args: @[],
-    pacman_packages: @[],
-    bootstrap_argv: @[],
-    env: {"GIT_INSTALL_ROOT": "${prefix}"}.toTable(),
-    pre_install_unrecognized: @["$config_path = Join-Path -Path $dir -ChildPath 'etc\\gitconfig'", "$config_path_persisted = Join-Path -Path $persist_dir -ChildPath 'etc\\gitconfig'", "if (Test-Path -LiteralPath $config_path_persisted -PathType Leaf) {", "    info \"Restoring system-level config from $config_path_persisted...\"", "    Copy-Item -Path $config_path_persisted -Destination $config_path -Force", "    info \"Adjusting paths in $config_path...\"", "    (Get-Content -Path $config_path -Encoding UTF8) -replace '(?<=git/)[\\d.]+(?=/)', $version | Set-Content -Path $config_path -Encoding UTF8", "}"])
-]
+          required = false

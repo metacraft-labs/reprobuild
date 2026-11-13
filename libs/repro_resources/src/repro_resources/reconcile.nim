@@ -126,39 +126,153 @@ proc collectLeaseHolders*(desired: seq[ResourceInstance]):
     for ld in inst.consumes:
       result.mgetOrPut(ld.address, @[]).add(ld)
 
-proc mergeHolderDeadlines*(existing: Table[string, Time];
-                          renewals: seq[LeasedDep]; now: Time):
-    tuple[holders: Table[string, Time]; effective: Option[Time];
-          hasKeep: bool] =
-  ## Apply this run's `renewals` to the record's `existing` holder map and
-  ## recompute the reference-counted MAX deadline (§2.3):
+proc foldEffectiveDeadline(rec: ResourceStateRecord): Option[Time] =
+  ## The reaper's gate, derived from the holder sets (§2.3):
   ##
-  ##   * each renewal sets `holders[consumerId] = deadlineFrom(policy, now)`;
-  ##     a `keep`/none policy DROPS the consumer from the deadline map (it
-  ##     pins with no expiry — see `hasKeep`) rather than storing a bogus
-  ##     deadline;
-  ##   * `effective` = MAX over all remaining holder deadlines, so an
-  ##     `immediate` (now) holder never SHORTENS a `delayed`/later holder;
-  ##   * `hasKeep` is true if ANY renewal this run was `keep` — a keep
-  ##     holder makes the effective deadline `none` (never reap), dominating
-  ##     every dated holder.
-  var holders = existing
-  var hasKeep = false
+  ##   * any recorded keep holder -> `none` (keep dominates every dated holder);
+  ##   * an UNKNOWN keep-holder set (`keepHoldersKnown == false`, a pre-v4
+  ##     record still `none`) -> `none`: an anonymous keep pin may exist, and
+  ##     re-arming a deadline under a pin we cannot see would let the reaper
+  ##     destroy pinned state;
+  ##   * otherwise MAX over the dated deadlines, so an `immediate` (now)
+  ##     holder never SHORTENS a `delayed`/later one; `none` if there is no
+  ##     dated holder at all.
+  if rec.keepHolders.len > 0 or not rec.keepHoldersKnown:
+    return none(Time)
+  result = none(Time)
+  for _, dl in rec.holders:
+    if result.isNone or dl > result.get:
+      result = some(dl)
+
+proc applyHolderRenewal*(rec: var ResourceStateRecord; consumerId: string;
+                         policy: LeasePolicy; now: Time) =
+  ## Apply ONE consumer's renewal to `rec`'s lease fields in place. This is
+  ## THE renewal primitive: reconcile's `mergeHolderDeadlines` folds it over
+  ## a run's renewals, and the daemon's `udkLeaseRenew` handler
+  ## (`repro_daemon_core/lease_registry.renewHolder`) applies it to one —
+  ## so both sides of §4.3 (in-process store write, daemon registry) agree
+  ## on what a renewal means.
+  ##
+  ##   * a DATED policy (`immediate`/`delayed`) sets `holders[consumerId] =
+  ##     deadlineFrom(policy, now)` and removes the consumer from
+  ##     `keepHolders` — a keep holder that renews under a dated policy gives
+  ##     up its pin;
+  ##   * `keep` removes the consumer from the dated map (it must not
+  ##     masquerade as an expiring holder) and records it BY NAME in
+  ##     `keepHolders`, which keeps the pin across runs until that same
+  ##     consumer renews under a dated policy or the record is removed;
+  ##   * `lastRenewed = now`, and `effectiveDeadline` is re-derived
+  ##     (`foldEffectiveDeadline`).
+  ##
+  ## An unknown keep-holder set (`keepHoldersKnown == false`, a pre-v4 record
+  ## still `none` — the decoder already marks a pre-v4 record that carries a
+  ## dated deadline as known) stays unknown: this renewal's holders are
+  ## recorded by name, but naming one holder does not prove there is no
+  ## other, so it stays never-reap until the record is removed. The upgrade
+  ## below covers an in-memory record constructed without the field (Nim's
+  ## `false` default) beside a dated deadline: a dated deadline is never
+  ## written under a keep pin, so there is no pin to lose.
+  if not rec.keepHoldersKnown and rec.effectiveDeadline.isSome:
+    rec.keepHoldersKnown = true
+  let dl = deadlineFrom(policy, now)
+  if dl.isSome:
+    rec.holders[consumerId] = dl.get
+    let at = rec.keepHolders.find(consumerId)
+    if at >= 0:
+      rec.keepHolders.delete(at)
+  else:
+    rec.holders.del(consumerId)
+    if consumerId notin rec.keepHolders:
+      rec.keepHolders.add(consumerId)
+      rec.keepHolders.sort()           # canonical: ascending, no duplicates
+  rec.lastRenewed = now
+  rec.effectiveDeadline = foldEffectiveDeadline(rec)
+
+proc mergeHolderDeadlines*(existing: Option[ResourceStateRecord];
+                          renewals: seq[LeasedDep]; now: Time):
+    tuple[holders: Table[string, Time]; keepHolders: seq[string];
+          keepHoldersKnown: bool; effective: Option[Time]] =
+  ## Apply this run's `renewals` to the lease state of the `existing` record
+  ## (`none` when the state has no record yet) and return the merged lease
+  ## fields to persist — the dated holders, the keep holders, whether the
+  ## keep-holder set is complete, and the re-derived effective deadline.
+  ## Each renewal is `applyHolderRenewal`; see it for the rules (§2.3).
+  ##
+  ## The WHOLE existing holder state goes in, not just the dated map: a keep
+  ## holder from an earlier run is part of it, and a merge that could not see
+  ## it would re-arm a reap deadline under a pinned state the moment any
+  ## dated consumer renewed.
+  var rec =
+    if existing.isSome: existing.get
+    else: ResourceStateRecord(holders: initTable[string, Time](),
+                              keepHoldersKnown: true)   # nothing to not know
   for ld in renewals:
-    let dl = deadlineFrom(ld.policy, now)
-    if dl.isSome:
-      holders[ld.consumerId] = dl.get
-    else:
-      # keep / none: this holder pins with no deadline. Drop any stale
-      # dated entry for it so it cannot masquerade as an expiring holder.
-      hasKeep = true
-      holders.del(ld.consumerId)
-  var effective = none(Time)
-  if not hasKeep:
-    for _, dl in holders:
-      if effective.isNone or dl > effective.get:
-        effective = some(dl)
-  (holders: holders, effective: effective, hasKeep: hasKeep)
+    applyHolderRenewal(rec, ld.consumerId, ld.policy, now)
+  (holders: rec.holders, keepHolders: rec.keepHolders,
+   keepHoldersKnown: rec.keepHoldersKnown, effective: rec.effectiveDeadline)
+
+proc carriedProviderArtifact*(existing: Option[ResourceStateRecord];
+                              thisRun: Option[ResourceProviderArtifactRef]):
+    Option[ResourceProviderArtifactRef] =
+  ## Which provider artifact a record being (re)written should carry
+  ## (Ephemeral-State-Leases.md §4.2).
+  ##
+  ## THIS RUN'S ref wins when it has one — it just launched that provider, so
+  ## it is the freshest route anybody has. Otherwise the EXISTING record's ref
+  ## is carried forward, exactly as the lease fields are, and for the same
+  ## reason: a run that reconciled this resource IN-PROCESS has not discovered
+  ## that the provider binary is gone, it merely did not need it. Blanking the
+  ## ref there would silently withdraw the only route a later reap has to an
+  ## out-of-tree record, turning a reapable record into a permanently stuck one
+  ## — and it would do so on the ordinary path, where nobody is looking.
+  if thisRun.isSome:
+    thisRun
+  elif existing.isSome:
+    existing.get.providerArtifact
+  else:
+    none(ResourceProviderArtifactRef)
+
+proc writeUnconsumedStateRecord*(store: StateStore; inst: ResourceInstance;
+                                 binding: ResourceBinding;
+                                 providerArtifact =
+                                   none(ResourceProviderArtifactRef)) =
+  ## Persist the record of a resource NO consumer leases this run (a plain
+  ## resource, or a leased state that is in the graph but unconsumed), with
+  ## its lease fields CARRIED FORWARD unchanged from the existing record.
+  ##
+  ## A lease ends only by its own holder's renewal or by explicit teardown
+  ## (Ephemeral-State-Leases §2.3): a keep holder stays recorded until that
+  ## consumer renews under a dated policy, and a dated holder keeps its
+  ## deadline until the reaper acts on it. A run that merely does not consume
+  ## the state is neither, so it must not touch the lease. Writing the lease
+  ## fields empty here (what this write used to do) silently dropped a keep
+  ## holder's name, and turned a dated state into a never-reap one — its
+  ## deadline gone, `effectiveDeadline` `none`.
+  ##
+  ## Everything else (identity, digest, attrs, …) is this run's. With no
+  ## existing record, the lease fields are the empty defaults: nothing has
+  ## leased it. An existing record that cannot be decoded is overwritten
+  ## with those defaults, as this write always did: a non-leased reconcile
+  ## has never failed on a damaged record, and there is no lease in it to
+  ## carry forward that anyone could read.
+  var rec = buildStateRecord(inst, binding)
+  var prior = none(ResourceStateRecord)
+  if hasStateRecord(store, inst.address):
+    try:
+      prior = some(readStateRecord(store, inst.address))
+    except IOError, StateStoreCodecError:
+      discard
+    if prior.isSome:
+      let p = prior.get
+      rec.holders = p.holders
+      rec.keepHolders = p.keepHolders
+      rec.keepHoldersKnown = p.keepHoldersKnown
+      rec.effectiveDeadline = p.effectiveDeadline
+      rec.lastRenewed = p.lastRenewed
+  # The provider artifact is carried forward on the same terms as the lease
+  # above — see `carriedProviderArtifact`.
+  rec.providerArtifact = carriedProviderArtifact(prior, providerArtifact)
+  writeStateRecord(store, rec)
 
 proc reconcileResources*(desired: seq[ResourceInstance];
                          recorded: seq[ResourceBinding] = @[];
@@ -191,14 +305,16 @@ proc reconcileResources*(desired: seq[ResourceInstance];
   ##     `apply`; this is the cross-run reuse the feature exists for). If
   ##     the record is absent/stale, materialize normally.
   ##   * RENEW: set `holders[consumerId] = deadlineFrom(policy, now)` for
-  ##     each consumer this run (a `keep`/none consumer pins with no
-  ##     deadline), set `lastRenewed = now`, and recompute
-  ##     `effectiveDeadline = max(holders)` (none if any holder is keep).
-  ##     The updated lease fields are persisted with the record.
+  ##     each dated consumer this run, record each `keep` consumer by name in
+  ##     `keepHolders` (it pins with no deadline), set `lastRenewed = now`,
+  ##     and recompute `effectiveDeadline = max(holders)` (none while any
+  ##     keep holder — this run's or an earlier run's — is recorded). The
+  ##     updated lease fields are persisted with the record.
   ##
-  ## A non-leased resource (no `consumes` targeting it) follows the exact
-  ## L1 path; when `store` is `none` the whole loop is byte-identical to
-  ## pre-L1. `now` is injectable for hermetic tests.
+  ## A non-leased resource (no `consumes` targeting it) follows the L1 path,
+  ## carrying any lease its existing record holds forward unchanged
+  ## (`writeUnconsumedStateRecord`); when `store` is `none` the whole loop is
+  ## byte-identical to pre-L1. `now` is injectable for hermetic tests.
   result.actions = @[]
   result.bindings = @[]
 
@@ -277,19 +393,30 @@ proc reconcileResources*(desired: seq[ResourceInstance];
     # the reference-counted MAX effective deadline.
     if store.isSome and effective.isSome and effective.get.present:
       if isLeasedState:
-        let existingHolders =
+        let existing =
           if hasStateRecord(store.get, inst.address):
-            readStateRecord(store.get, inst.address).holders
+            some(readStateRecord(store.get, inst.address))
           else:
-            initTable[string, Time]()
-        let merged = mergeHolderDeadlines(existingHolders, renewals, now)
+            none(ResourceStateRecord)
+        let merged = mergeHolderDeadlines(existing, renewals, now)
         # `merged.effective` is `none` when this state has NO reap deadline
-        # (a `keep` holder, or no dated holder) — persisted as an OPTIONAL
-        # deadline (`none` = never reap), NOT an epoch-0/PAST sentinel that
-        # the reaper's `deadline < now` gate would wrongly reap.
+        # (a recorded `keep` holder, or no dated holder) — persisted as an
+        # OPTIONAL deadline (`none` = never reap), NOT an epoch-0/PAST
+        # sentinel that the reaper's `deadline < now` gate would wrongly
+        # reap. The keep holders are written BY NAME, so the record says
+        # which of the two `none`s it is and who pins it.
         writeStateRecord(store.get, inst, effective.get,
           holders = merged.holders,
           effectiveDeadline = merged.effective,
-          lastRenewed = now)
+          lastRenewed = now,
+          keepHolders = merged.keepHolders,
+          keepHoldersKnown = merged.keepHoldersKnown,
+          # This path reconciles IN-PROCESS, so it has no artifact of its own to
+          # record — but an existing record may carry one from a session
+          # reconcile of the same resource, and dropping it here would withdraw
+          # a later reap's only route to it (`carriedProviderArtifact`).
+          providerArtifact = carriedProviderArtifact(existing,
+            none(ResourceProviderArtifactRef)))
       else:
-        writeStateRecord(store.get, inst, effective.get)
+        # Not consumed this run: carry any existing lease forward untouched.
+        writeUnconsumedStateRecord(store.get, inst, effective.get)

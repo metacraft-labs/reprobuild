@@ -52,34 +52,84 @@ proc clearStateDirOverride*() =
 # OS-default resolution.
 # ---------------------------------------------------------------------------
 
+type
+  StateDirBase* = enum
+    ## The per-user directory a default state directory is relative to.
+    ## The string form is what `repro home export` publishes
+    ## (`concerns.profileBin`), so a consumer that knows the user's
+    ## directories (a Home Manager configuration) resolves the same path
+    ## Reprobuild resolves on that host.
+    sdbHome = "home"
+      ## `$HOME`.
+    sdbXdgStateHome = "xdgStateHome"
+      ## `$XDG_STATE_HOME`, or `$HOME/.local/state` when it is unset.
+    sdbLocalAppData = "localAppData"
+      ## `%LOCALAPPDATA%`, or `%USERPROFILE%\AppData\Local` when it is unset.
+
+  StateDirLocation* = object
+    ## A per-user path, as a base directory and the components below it.
+    base*: StateDirBase
+    components*: seq[string]
+
+proc defaultStateDirLocation*(platform: string): StateDirLocation =
+  ## The OS-default home state directory of `platform` (`linux`, `macos`
+  ## or `windows`: the `platform` names of `ProfileTargetPlatforms`) --
+  ## the one table behind `osDefaultStateDir` and behind the location
+  ## `repro home export` publishes for a target it is not running on.
+  ## Raises `ValueError` for any other name.
+  case platform
+  of "linux":
+    StateDirLocation(base: sdbXdgStateHome, components: @["repro", "home"])
+  of "macos":
+    StateDirLocation(base: sdbHome,
+      components: @["Library", "Application Support", "repro", "home"])
+  of "windows":
+    StateDirLocation(base: sdbLocalAppData, components: @["repro", "home"])
+  else:
+    raise newException(ValueError, "unknown platform '" & platform &
+      "' (known: linux, macos, windows)")
+
+const HostStatePlatform* =
+  when defined(windows): "windows"
+  elif defined(macosx): "macos"
+  else: "linux"
+    ## The `defaultStateDirLocation` row of the platform this binary runs
+    ## on (every other POSIX system uses the XDG layout).
+
 proc osDefaultStateDir*(): string =
-  when defined(windows):
+  let location = defaultStateDirLocation(HostStatePlatform)
+  case location.base
+  of sdbLocalAppData:
     let local = getEnv("LOCALAPPDATA")
     if local.len > 0:
-      return local / "repro" / "home"
-    let userProfile = getEnv("USERPROFILE")
-    if userProfile.len > 0:
-      return userProfile / "AppData" / "Local" / "repro" / "home"
-    raiseStateDirInvalid(
-      "neither LOCALAPPDATA nor USERPROFILE is set; cannot resolve a " &
-      "per-user home state directory on Windows")
-  elif defined(macosx):
+      result = local
+    else:
+      let userProfile = getEnv("USERPROFILE")
+      if userProfile.len == 0:
+        raiseStateDirInvalid(
+          "neither LOCALAPPDATA nor USERPROFILE is set; cannot resolve a " &
+          "per-user home state directory on Windows")
+      result = userProfile / "AppData" / "Local"
+  of sdbHome:
     let home = getEnv("HOME")
     if home.len == 0:
       raiseStateDirInvalid(
         "HOME is not set; cannot resolve a per-user home state directory " &
         "on macOS")
-    return home / "Library" / "Application Support" / "repro" / "home"
-  else:
+    result = home
+  of sdbXdgStateHome:
     let xdg = getEnv("XDG_STATE_HOME")
     if xdg.len > 0:
-      return xdg / "repro" / "home"
-    let home = getEnv("HOME")
-    if home.len == 0:
-      raiseStateDirInvalid(
-        "neither XDG_STATE_HOME nor HOME is set; cannot resolve a per-user " &
-        "home state directory")
-    return home / ".local" / "state" / "repro" / "home"
+      result = xdg
+    else:
+      let home = getEnv("HOME")
+      if home.len == 0:
+        raiseStateDirInvalid(
+          "neither XDG_STATE_HOME nor HOME is set; cannot resolve a per-user " &
+          "home state directory")
+      result = home / ".local" / "state"
+  for component in location.components:
+    result = result / component
 
 proc resolveStateDir*(): string =
   ## Resolve the home state directory in the documented precedence:

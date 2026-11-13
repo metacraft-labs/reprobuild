@@ -1,7 +1,7 @@
 version = "0.1.0"
 author = "Metacraft Labs"
 description = "Reprobuild profile-compile build-graph edge (M83 Phase C)"
-license = "MIT"
+license = "Apache-2.0"
 srcDir = "src"
 requires "nim >= 2.2.0"
 requires "blake3"

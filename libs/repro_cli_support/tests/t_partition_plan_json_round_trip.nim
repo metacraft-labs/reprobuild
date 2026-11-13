@@ -12,7 +12,11 @@ import std/[json, os, strutils, times, unittest]
 
 import repro_cli_support/partition
 
-const TmpDir = "build/test-tmp/m1-partition-plan-json-round-trip"
+# One directory PER PROCESS: the runner runs each case as its own process,
+# in parallel, and a shared fixed directory let one case's `resetTmp`
+# delete another's `plan.json` mid-case ("cannot open: .../plan.json").
+let TmpDir = "build/test-tmp/m1-partition-plan-json-round-trip" /
+  $getCurrentProcessId()
 
 proc resetTmp() =
   if dirExists(TmpDir):

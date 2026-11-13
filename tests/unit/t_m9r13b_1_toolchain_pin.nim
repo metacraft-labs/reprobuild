@@ -61,7 +61,8 @@
 ## non-Windows branch in ``externalHashFlags`` goes through homebrew /
 ## nix prefix discovery that does not run on the CI host.
 
-import std/[os, sequtils, strutils, unittest]
+import std/[os, sequtils, strutils, tempfiles, unittest]
+import repro_test_support/reasoned_skip
 
 import repro_interface_artifacts
 
@@ -191,5 +192,38 @@ suite "M9.R.13b.1 -- vendored-hash define propagation":
           if not hasDefine:
             checkpoint("env=" & ambiguous & " command: " & cmd.join(" "))
           check hasDefine
+    else:
+      skip("not a Windows host -- this arm pins the Windows providerCompileCommand flags")
+
+  test "Arm 5: a source root with a space keeps each -I one argument":
+    # reprobuild-pm issue 2026-10-27-interface-extraction-splits-a-spaced-
+    # install-path-in-the-vendored-hash-include: Nim splices `passC` text
+    # into the gcc command line verbatim, so an unquoted `-I` under
+    # `...\x b\...` reached gcc as `-I...\x` plus a stray `b\...\vendor`
+    # "linker input". The extract runner and the provider compile run
+    # outside `config.nims`, which quotes the same directories.
+    when defined(windows):
+      let spaced = createTempDir("m9r13b1 spaced ", "")
+      defer: removeDir(spaced)
+      doAssert ' ' in spaced
+      let blake3Inc = spaced / "libs" / "blake3" / "src" / "blake3" / "vendor"
+      let xxhashInc = spaced / "libs" / "xxh3" / "src" / "xxh3" / "vendor"
+      for (src, dst) in [
+          (workDir / "libs" / "blake3" / "src" / "blake3" / "vendor", blake3Inc),
+          (workDir / "libs" / "xxh3" / "src" / "xxh3" / "vendor", xxhashInc)]:
+        createDir(dst)
+        for name in ["blake3.h", "blake3.c", "xxhash.h", "xxhash.c"]:
+          if fileExists(src / name):
+            copyFile(src / name, dst / name)
+      withSystemHashEnv "":
+        let cmd = providerCompileCommand(modulePath = modulePath,
+          outputBinaryPath = outBin,
+          workDir = spaced)
+        checkpoint("command: " & cmd.join(" "))
+        check ("--passC:-I" & quoteShell(blake3Inc)) in cmd
+        check ("--passC:-I" & quoteShell(xxhashInc)) in cmd
+        # Never the unquoted spelling gcc splits at the space.
+        check ("--passC:-I" & blake3Inc) notin cmd
+        check ("--passC:-I" & xxhashInc) notin cmd
     else:
       skip("not a Windows host -- this arm pins the Windows providerCompileCommand flags")

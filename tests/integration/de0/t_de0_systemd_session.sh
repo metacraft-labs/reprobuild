@@ -21,7 +21,7 @@
 #   - A second invocation is a no-op (idempotency).
 #
 # What this test does NOT gate (covered by DE0-G smoke test):
-#   - Booting the augmented ISO in vm-harness.
+#   - Booting the augmented ISO in gosti.
 #   - Verifying `loginctl` shows an active session.
 #   - Verifying `$XDG_RUNTIME_DIR` is set to `/run/user/1000`.
 #   - Verifying `systemctl --user status` reports the user instance.

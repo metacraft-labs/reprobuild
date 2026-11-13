@@ -33,8 +33,8 @@
 ## orchestration wrapper that delegates to the POSIX driver inside a
 ## WSL2 distro).
 ##
-## The vm-harness boot-and-assert e2e is
-## ``vm-harness/tests/e2e/t_vm_harness_hyperv_reproos_mvp_foreign.nim``.
+## The gosti boot-and-assert e2e is
+## ``gosti/tests/e2e/t_gosti_hyperv_reproos_mvp_foreign.nim``.
 
 system reproosMvp:
   kernel = reproosKernel

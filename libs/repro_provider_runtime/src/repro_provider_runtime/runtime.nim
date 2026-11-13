@@ -103,10 +103,56 @@ proc providerSnapshotPath*(storeRoot: string): string =
   storeRoot / "provider-fragments.rbsz"
 
 proc loadProviderGraphSnapshot*(storeRoot: string): ProviderGraphSnapshot =
+  ## The provider-fragment cache, or an EMPTY snapshot when there is
+  ## nothing this build can read -- which the refresher reads as
+  ## "recompute".
+  ##
+  ## A SNAPSHOT IS A DERIVED CACHE, so an unreadable one must be
+  ## DISCARDED AND RECOMPUTED rather than raised. That is the whole of
+  ## the rule, and the absent-file arm below has always implemented half
+  ## of it; the version arm is the other half. Nothing in
+  ## `provider-fragments.rbsz` is anything but the output of an
+  ## evaluation this build can run again, and no caller holds an
+  ## identifier for a particular snapshot, so throwing one away costs
+  ## one evaluation and nothing else.
+  ##
+  ## WHY THAT IS NOT THE RULE FOR AN ARTIFACT, which is the comparison
+  ## that decides it. D-SS11 deliberately version-gates and DECODES the
+  ## dev-env artifact: an artifact IS the evaluation's output, addressed
+  ## by its content id, and a reader that silently discarded one would
+  ## answer with a recomputation whose id the caller had already been
+  ## promised. The two rules differ because the two things differ, not
+  ## because one lane is stricter than the other.
+  ##
+  ## AND WHY THIS ARM HAD TO LAND BEFORE THE VERSION MOVED. One
+  ## `ProviderGraphVersion` governs all THREE envelope types this
+  ## library frames -- request, response and snapshot -- so
+  ## Shared-Development-Services F1's change to the RESPONSE
+  ## (`DevEnvResult` grew an `actions` list) moves the version for the
+  ## SNAPSHOT too, although the snapshot payload layout did not change
+  ## at all. Bumping without this arm would therefore have turned every
+  ## `provider-fragments.rbsz` already on disk into a hard error at the
+  ## next build, for a cache the build was free to rebuild. With the arm
+  ## in place the same skew is a named, silent recomputation instead of
+  ## the loud-but-unnamed `trailing provider response payload bytes`
+  ## that a version-blind decode produced.
+  ##
+  ## THE ARM IS NARROW, and that is what keeps it from becoming "ignore
+  ## every snapshot that will not decode". Only `eeUnsupportedVersion`
+  ## is translated. A corrupt magic, a truncated payload, a wrong type
+  ## id or trailing bytes still raise, because those do not say "this
+  ## cache is from another epoch" -- they say the file is not the thing
+  ## it claims to be, and answering real corruption with a silent
+  ## recomputation is how it stays invisible.
   let path = providerSnapshotPath(storeRoot)
   if not fileExists(extendedPath(path)):
     return ProviderGraphSnapshot()
-  decodeProviderSnapshot(fromByteString(readFile(extendedPath(path))))
+  try:
+    result = decodeProviderSnapshot(fromByteString(readFile(extendedPath(path))))
+  except EnvelopeError as err:
+    if err.kind != eeUnsupportedVersion:
+      raise
+    result = ProviderGraphSnapshot()
 
 proc saveProviderGraphSnapshot*(storeRoot: string; snapshot: ProviderGraphSnapshot) =
   createDir(extendedPath(storeRoot))
@@ -325,13 +371,61 @@ proc validateFragment(fragment: GraphFragment; request: ProviderGraphRequest;
     if descriptors[child.entryPointId].bodyHash != child.entryPointBodyHash:
       raiseRuntime("child entry point body hash does not match manifest")
 
+proc resolvedResponsePath(path, base: string): string =
+  if path.len == 0 or path.isAbsolute or base.len == 0:
+    path
+  else:
+    os.normalizedPath(absolutePath(base) / path)
+
+proc resolveResponseInputs(inputs: var seq[GraphEvaluationInput];
+                           base: string): bool =
+  for input in inputs.mitems:
+    if input.kind in {gevFileRead, gevDirectoryEnumeration}:
+      let resolved = resolvedResponsePath(input.identity, base)
+      if resolved != input.identity:
+        input.identity = resolved
+        result = true
+
+proc resolveRelativeResponsePaths*(response: var ProviderGraphResponse;
+                                   workingDir: string) =
+  ## Provider-Runtime-Protocol-v1.md, "Paths in responses": a provider names
+  ## the recipe's own files RELATIVE to the recipe it was compiled from — a
+  ## recipe-relative provider compile is served to every copy of the recipe,
+  ## and the binary cannot know where it runs (`recipeSourceName`). The
+  ## engine launched it with `workingDir` = that copy's project root, so this
+  ## is where those names resolve. Applied when a response is received, so
+  ## every reader of a fragment or dev-env result — a snapshot's freshness
+  ## check above all — sees the absolute file of THIS copy. A fragment's
+  ## digest is recomputed after its validation against the provider's own.
+  if workingDir.len == 0:
+    return
+  case response.kind
+  of pskGraphResult:
+    if resolveResponseInputs(response.fragment.evaluationInputs, workingDir) and
+        response.fragment.fragmentDigest.len > 0:
+      response.fragment.fragmentDigest =
+        computeGraphFragmentDigest(response.fragment)
+  of pskDevEnvResult:
+    discard resolveResponseInputs(response.devEnv.evaluationInputs, workingDir)
+    for fingerprint in response.devEnv.sourceFingerprints.mitems:
+      if fingerprint.kind == "provider-source":
+        fingerprint.identity =
+          resolvedResponsePath(fingerprint.identity, workingDir)
+    for diagnostic in response.devEnv.diagnostics.mitems:
+      diagnostic.sourceFile =
+        resolvedResponsePath(diagnostic.sourceFile, workingDir)
+  of pskManifest:
+    discard
+
 proc invokeProviderEntryPoint*(config: ProviderExecutionConfig;
                                request: ProviderGraphRequest): ProviderGraphResponse =
-  let response = runProviderProtocol(config, request)
+  var response = runProviderProtocol(config, request)
   if response.kind != pskGraphResult:
     raiseRuntime("provider graph request returned a manifest response")
   validateManifest(response.manifest, request.providerArtifactId)
   validateFragment(response.fragment, request, response.manifest)
+  response.resolveRelativeResponsePaths(
+    if config.workingDir.len > 0: config.workingDir else: getCurrentDir())
   response
 
 proc splitActivities(activity: string): seq[string] =
@@ -400,11 +494,13 @@ proc invokeProviderDevEnvIntrospection*(config: ProviderExecutionConfig;
     arguments: projectRoot,
     lockSliceId: lockSliceId,
     activity: selectedActivity)
-  let response = runProviderProtocol(config, request)
+  var response = runProviderProtocol(config, request)
   if response.kind != pskDevEnvResult:
     raiseRuntime("provider dev-env request did not return a dev-env result")
   validateManifest(response.manifest, providerArtifactId)
   validateDevEnvResult(response.devEnv, request, response.manifest)
+  response.resolveRelativeResponsePaths(
+    if config.workingDir.len > 0: config.workingDir else: getCurrentDir())
   let expectedActivities = splitActivities(selectedActivity)
   if response.devEnv.selectedActivities != expectedActivities:
     raiseRuntime("provider dev-env activity selection mismatch")
@@ -808,7 +904,24 @@ proc runRootAndChildren(config: RefreshConfig; provider: ProviderExecutionConfig
                         reason: GraphInvocationReason) =
   let root = currentDescriptor(manifest, config.rootEntryPointId)
   if not root.found:
-    raiseRuntime("root entry point is missing from provider manifest")
+    # The root entry point is named from the project INTERFACE; the provider
+    # declares its own. They disagree when the two compiles saw different
+    # declarations - most plausibly a recipe `config.nims` / `nim.cfg`, which
+    # the provider compile reads and the interface (computed as an importer
+    # sees the package) does not (Hermetic-Builds-And-Path-Independence.md
+    # §"Engine-internal recipe compiles"). Name both sides.
+    var offered: seq[string] = @[]
+    for descriptor in manifest.entryPoints:
+      if descriptor.kind == gpkProjectRoot:
+        offered.add(descriptor.id)
+    raiseRuntime("root entry point is missing from provider manifest: the " &
+      "project interface names '" & config.rootEntryPointId &
+      "', the provider declares " &
+      (if offered.len > 0: "'" & offered.join("', '") & "'" else: "none") &
+      ". The interface and the provider were compiled from different " &
+      "declarations; a recipe configuration file (config.nims, nim.cfg) " &
+      "applies to the provider compile only, and must not change what the " &
+      "recipe declares")
   let rootStored = executePlan(config, provider, binaryInput, manifest, snapshot, report,
     InvocationPlan(
       entryPointId: root.descriptor.id,

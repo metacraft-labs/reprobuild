@@ -94,8 +94,7 @@ proc manifestBody(marker: string): string =
   "schema = \"reprobuild.workspace.project.v1\"\n\n" &
   "[project]\n" &
   "name = \"myproject\"\n" &
-  "default_revision = \"main\"\n" &
-  "trunk = \"main\"\n\n" &
+  "\n" &
   "# provenance-marker: " & marker & "\n\n" &
   "includes = []\n"
 

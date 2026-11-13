@@ -110,8 +110,7 @@ proc projectToml(aUrl, bUrl, cUrl, dUrl: string): string =
     "schema = \"reprobuild.workspace.project.v1\"\n\n" &
     "[project]\n" &
     "name = \"myproject\"\n" &
-    "default_revision = \"dev\"\n" &
-    "trunk = \"dev\"\n\n" &
+    "\n" &
     "[[remote]]\nname = \"a-origin\"\nfetch = \"" & aUrl & "\"\n\n" &
     "[[remote]]\nname = \"b-origin\"\nfetch = \"" & bUrl & "\"\n\n" &
     "[[remote]]\nname = \"c-origin\"\nfetch = \"" & cUrl & "\"\n\n" &
@@ -124,43 +123,43 @@ proc projectToml(aUrl, bUrl, cUrl, dUrl: string): string =
     "]\n"
 
 const libAFragmentToml = """
-schema = "reprobuild.workspace.repo.v1"
+schema = "reprobuild.workspace.repo.v2"
 
 [repo]
 name = "lib-a"
 path = "lib-a"
 remote = "a-origin"
-revision = "dev"
+mainline = "dev"
 """
 
 const libBFragmentToml = """
-schema = "reprobuild.workspace.repo.v1"
+schema = "reprobuild.workspace.repo.v2"
 
 [repo]
 name = "lib-b"
 path = "lib-b"
 remote = "b-origin"
-revision = "latest"
+mainline = "latest"
 """
 
 const libCFragmentToml = """
-schema = "reprobuild.workspace.repo.v1"
+schema = "reprobuild.workspace.repo.v2"
 
 [repo]
 name = "lib-c"
 path = "lib-c"
 remote = "c-origin"
-revision = "live"
+mainline = "live"
 """
 
 const libDFragmentToml = """
-schema = "reprobuild.workspace.repo.v1"
+schema = "reprobuild.workspace.repo.v2"
 
 [repo]
 name = "lib-d"
 path = "lib-d"
 remote = "d-origin"
-revision = "feat"
+mainline = "feat"
 """
 
 type
@@ -358,14 +357,14 @@ suite "RA-3 — sync fast-forwards each repo's own upstream":
       createDir(manifestsRoot / "repos")
       writeFile(manifestsRoot / "projects" / "myproject.toml",
         "schema = \"reprobuild.workspace.project.v1\"\n\n" &
-        "[project]\nname = \"myproject\"\ndefault_revision = \"main\"\n" &
-        "trunk = \"main\"\n\n" &
+        "[project]\nname = \"myproject\"\n" &
+        "\n" &
         "[[remote]]\nname = \"super-origin\"\nfetch = \"" &
         fileUrl(superOrigin) & "\"\n\nincludes = [\n  \"repos/super.toml\",\n]\n")
       writeFile(manifestsRoot / "repos" / "super.toml",
-        "schema = \"reprobuild.workspace.repo.v1\"\n\n[repo]\n" &
+        "schema = \"reprobuild.workspace.repo.v2\"\n\n[repo]\n" &
         "name = \"super\"\npath = \"super\"\nremote = \"super-origin\"\n" &
-        "revision = \"main\"\n")
+        "mainline = \"main\"\n")
 
       # Clone super WITH its submodule (checked out at subSha1); allow file://
       # submodule fetches for the later `git submodule update`.

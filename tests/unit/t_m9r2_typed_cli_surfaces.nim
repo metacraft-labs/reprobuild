@@ -38,10 +38,13 @@
 ## under the same syntax as production recipes.
 {.experimental: "callOperator".}
 
-import std/[os, unittest]
+import std/[os, osproc, tempfiles, unittest]
 
+import repro_build_engine as engine
 import repro_cli_support
 import repro_project_dsl
+import repro_provider_runtime
+import repro_test_support
 import repro_tool_profiles
 # Each ``package`` block emits a top-level ``const <name>* = <Type>()``.
 # Module-name == const-name collision is resolved by aliasing the
@@ -146,6 +149,13 @@ suite "DSL-port M9.R.2 — meson typed CLI surface":
     let installAction = meson.install(workDir = "./b",
       destdir = "/tmp/stage", tags = @["runtime", "devel"])
     check installAction.call.subcommand == "install"
+    check installAction.outputs.len == 0
+    check installAction.optionalOutputs == @["/tmp/stage"]
+    let registered = registeredBuildActions()[^1]
+    check registered.outputs.len == 0
+    check registered.optionalOutputs == @["/tmp/stage"]
+    let decoded = decodeBuildActionPayload(encodeBuildActionPayload(registered))
+    check decoded.optionalOutputs == @["/tmp/stage"]
     let ddArg = installAction.argByName("destdir")
     check ddArg.alias == "--destdir="
     check ddArg.format == cafConcat
@@ -154,6 +164,60 @@ suite "DSL-port M9.R.2 — meson typed CLI surface":
     let tagsArg = installAction.argByName("tags")
     check tagsArg.alias == "--tags="
     check tagsArg.repeated
+
+  test "real typed Meson install succeeds with empty and populated products":
+    # The actual typed payload is lowered through the production CLI path,
+    # then executed by the real engine and monitor. Meson and its filesystem
+    # are not mocked; setup only prepares the tool's genuine installation DB.
+    let root = createTempDir("repro-typed-meson-install-", "")
+    defer: removeDir(root)
+    let repoRoot = currentSourcePath.parentDir.parentDir.parentDir
+    let monitor = prepareMonitorTools(repoRoot, root, "typed-meson-install")
+    let priorShim = getEnv("REPRO_MONITOR_SHIM_LIB")
+    putEnv("REPRO_MONITOR_SHIM_LIB", monitor.shim)
+    defer:
+      if priorShim.len == 0: delEnv("REPRO_MONITOR_SHIM_LIB")
+      else: putEnv("REPRO_MONITOR_SHIM_LIB", priorShim)
+    let mesonExe = findExe("meson")
+    require mesonExe.len > 0
+    for populated in [false, true]:
+      let project = root / (if populated: "populated" else: "empty")
+      let buildDir = project / "build"
+      let stage = project / "stage"
+      createDir(project)
+      writeFile(project / "payload.txt", "installed payload\n")
+      writeFile(project / "meson.build", "project('install-output', version: '1.0')\n" &
+        (if populated: "install_data('payload.txt', install_dir: 'share/output-test')\n" else: ""))
+      let setup = execCmdEx(@[mesonExe, "setup", buildDir, project,
+        "--prefix=/usr"].quoteShellCommand())
+      checkpoint setup.output
+      require setup.exitCode == 0
+      let declared = meson.install(workDir = buildDir, destdir = stage)
+      let snapshot = ProviderGraphSnapshot(fragments: @[StoredGraphFragment(
+        namespace: "meson-install", nodes: @[GraphNode(id: declared.id,
+          kind: gnkAction, stableName: declared.id, payload: actionPayload(declared))])])
+      let identity = PathOnlyBuildIdentity(profiles: @[PathOnlyToolProfile(
+        packageSelector: "meson", executableName: "mesonBin",
+        resolvedExecutablePath: mesonExe)])
+      let lowered = lowerProviderSnapshot(snapshot, identity, project, @[declared.id])
+      require lowered.actions.len == 1
+      check lowered.actions[0].outputs.len == 0
+      check lowered.actions[0].optionalOutputs == @[stage]
+      var config = engine.defaultBuildEngineConfig(project / "cache")
+      config.bypassRunQuota = true
+      config.maxParallelism = 1
+      config.monitorCliPath = monitor.monitorCliPath
+      config.monitorCliArgs = monitor.monitorCliArgs
+      config.enableCachedOutputRestore()
+      let built = engine.runBuild(engine.graph(lowered.actions), config)
+      require built.results.len == 1
+      checkpoint built.results[0].stderr
+      require built.results[0].status == engine.asSucceeded
+      check built.results[0].missingOutputs.len == 0
+      if populated:
+        check readFile(stage / "usr/share/output-test/payload.txt") == "installed payload\n"
+      else:
+        check not dirExists(stage)
 
   test "meson.dist surfaces formats + workDir":
     let action = meson.dist(workDir = "./b",

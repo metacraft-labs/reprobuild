@@ -48,6 +48,7 @@
 ## handles RUN/LIST/ENUMERATE at engine execution time.
 
 import std/os
+from std/strutils import endsWith
 
 import ct_test_interface
 export ct_test_interface
@@ -133,7 +134,8 @@ proc build*(tool: BuildNimUnittest;
             dependencyPolicy = defaultDependencyPolicy();
             actionCachePolicy = defaultActionCachePolicy();
             commandStatsId = "";
-            extraEnv: openArray[(string, string)] = []):
+            extraEnv: openArray[(string, string)] = [];
+            typedTestBinary = true):
     BuildNimUnittestBuildEdge {.discardable.} =
   ## M4 rewrite of the pre-M4 ``defineCliInterface buildNimUnittest`` /
   ## engine-shim pair. Records a ``PublicCliCall`` against the ``nim``
@@ -221,7 +223,22 @@ proc build*(tool: BuildNimUnittest;
   # concat form; tagging the arg with ``role = output`` makes the
   # engine register the path as a declared output and supplies the
   # implicit target name (mirrors ``nim.c``'s ``flag output``).
-  cliArgs.add(outputArg(name = "output", value = binary,
+  #
+  # On Windows `nim c --out:foo` writes `foo.exe`, so the declared output
+  # names the file nim really writes, as `nim.c` does
+  # (repro_dsl_stdlib/packages/nim.nim, `effectiveBinary`): `--out:foo.exe`
+  # produces exactly `foo.exe`. Declaring `foo` left the edge's one output
+  # absent, which the engine fails for a cacheable action
+  # (Build-Engine-And-Scheduler.md §"A declared output is an obligation").
+  # `binary` itself is unchanged for the nimcache directory, the typed
+  # output and the callers, which already add `.exe` on Windows.
+  let outputBinary =
+    when defined(windows):
+      if binary.len == 0 or binary.endsWith(".exe"): binary
+      else: binary & ".exe"
+    else:
+      binary
+  cliArgs.add(outputArg(name = "output", value = outputBinary,
     alias = "--out:", format = cafConcat))
 
   # ``source`` is the positional input to ``nim c``. ``role = input``
@@ -268,14 +285,32 @@ proc build*(tool: BuildNimUnittest;
     actionCachePolicy = actionCachePolicy,
     extraEnv = extraEnv)
 
+  # Match the standard nim.c wrapper: Nim invokes its native C backend by
+  # bare name. A package-level uses declaration alone is scoped away unless
+  # the selected compile action references it. Keep the backend in the normal
+  # tool-identity resolver so both its PATH and identity reach this edge;
+  # undeclared selectors remain inert. No ambient compiler is substituted.
+  let backendCompiler =
+    when defined(macosx): "clang"
+    else: "gcc"
+  appendRegisteredActionToolIdentityRefs(result.action.id, [backendCompiler])
+
   # Typed-Outputs M1 binding: populate ``edge.testBinary`` with a
   # ``NimUnittestBinary`` whose ``path`` is the resolved binary path so
   # UFCS dispatch (``edge.testBinary.run(...)``) reaches the run/list
   # procs below.
+  #
+  # ``typedTestBinary = false`` leaves the TYPED OUTPUT off the graph (the
+  # handle is still returned). Test-Binary-Grouping M2 registers every
+  # grouped source's own compile as a FALLBACK edge, built only when its
+  # group fails to compile; consumers that enumerate the graph's test
+  # binaries by this type (``repro test --shard``) must not see those as a
+  # second copy of the group's cases.
   result.testBinary = NimUnittestBinary(path: binary)
-  appendRegisteredActionTypedOutput(
-    result.action.id, "testBinary",
-    @["NimUnittestBinary"], binary)
+  if typedTestBinary:
+    appendRegisteredActionTypedOutput(
+      result.action.id, "testBinary",
+      @["NimUnittestBinary"], binary)
 
   # Named-Targets M1: compute the implicit target name from the output
   # path basename and stamp it onto the edge so ``repro why`` / the
@@ -336,6 +371,10 @@ proc run*(self: NimUnittestBinary; filter = "";
   ## re-enter each other. Such a test passes ``makeDepfilePolicy(...)`` naming
   ## a depfile that describes its inputs, which resolves to a kind outside the
   ## engine's ``MonitorPolicyKinds``, so no wrap and no shim injection happen.
+  ## A recorder-backed test can likewise require a subject free of the
+  ## monitor's modified code and mutable mapped shards. Such a test must use
+  ## ``cacheable = false`` when a generated depfile does not observe its
+  ## complete runtime input closure.
   ## Where no step in the graph already emits such a file,
   ## ``fs.unmonitorableActionDepfile`` generates one as a graph output; read
   ## its docstring before reaching for it.

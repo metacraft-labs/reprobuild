@@ -57,12 +57,15 @@ const
     ## Re-inserts of every element. This is the duplication the structure
     ## absorbs at the liveness probe without writing anything: it is what makes
     ## the set bounded by DISTINCT ELEMENTS rather than by events.
-  StormBlockedThresholdSeconds = 0.050
+  StormBlockedThresholdSeconds = 1.0
     ## No single insert may take this long. A ring with blocking backpressure
-    ## parks a producer for as long as the consumer takes to drain; a grow-only
-    ## insert is a probe run plus at most one arena bump and one CAS, and a
-    ## GROWTH is one file creation. 50 ms is two orders of magnitude above the
-    ## latter and well below the former under a full ring.
+    ## parks a producer for as long as the consumer takes to drain, and this
+    ## case runs NO consumer, so a blocked insert never returns at all; a
+    ## grow-only insert is a probe run plus at most one arena bump and one CAS,
+    ## and a GROWTH is one file creation. The threshold therefore only has to
+    ## sit above what the scheduler can add to a single wall-clock sample: on a
+    ## host at load ~150 one insert measured 59 ms, which tripped the 50 ms
+    ## this used to be without anything having blocked.
 
 proc runStormWorker(cacheRoot, tag: string) =
   ## One producer process. Inserts `StormElementsPerProducer` distinct record

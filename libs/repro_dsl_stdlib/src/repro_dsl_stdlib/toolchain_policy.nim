@@ -39,10 +39,13 @@
 ## falls through to `lastSolverSolution()`, and every lookup answers exactly
 ## what it answered before. That is NLF-STAT-3's property at this layer.
 
-import std/[strutils, tables]
+import std/[os, strutils, tables]
 
 import repro_lock_files
 import repro_project_dsl
+import repro_core/target_object_check
+
+import repro_solver/lock_pins
 
 import ./configurables/variants
 
@@ -82,6 +85,29 @@ proc resetSolvedVariantRegistrations*() =
   ## not leak it into the next one.
   solvedGraphsByLockFile = initTable[string, Table[string, string]]()
 
+proc targetTripleFromEnv*(): string =
+  ## The `targetTriple` assignment in `REPRO_VARIANTS`, or "" when absent.
+  ##
+  ## `repro build --target=<triple>` writes `targetTriple=<triple>` there
+  ## (the same env the `--variant` flag writes). A recipe that never
+  ## declared the variant has no solver-assigned value for it, and the
+  ## solver assigns only what some package declared -- so without this
+  ## fallback a `--target` on the command line would reach no typed-tool
+  ## call at all. It is the contract `operations/buildtype.currentBuildType`
+  ## already gives `buildType` (`repro build --release` works for a recipe
+  ## that never declared the variant), applied to the one other variant the
+  ## CLI spells as a flag. A solver-assigned value outranks it, because the
+  ## solver already consumed the same contribution at `prSet`.
+  ##
+  ## Read HERE and nowhere else in the stdlib: this module is the one place
+  ## a toolchain decision reads variant state (see the module header), and
+  ## the env is variant state in a different envelope.
+  for assignment in getEnv(VariantEnvVar).split(','):
+    let kv = assignment.split('=', 1)
+    if kv.len == 2 and kv[0].strip() == "targetTriple":
+      return kv[1].strip()
+  ""
+
 proc activeSolvedVariants*(): ToolchainSelection =
   ## The variant assignments governing the ACTIVE build region.
   ##
@@ -91,12 +117,38 @@ proc activeSolvedVariants*(): ToolchainSelection =
   ##      region is under, if one is registered;
   ##   2. otherwise `lastSolverSolution()` — the single-solve path every
   ##      pre-NLF-M7 workspace takes.
+  ##
+  ## Step 2 is skipped when it cannot answer: no lock governs this build and
+  ## no declaration the owed solve would read names `targetTriple` or
+  ## `compiler` (`solvedAnswerMayAssignAny`). The solver assigns only declared
+  ## variants, so the skipped read would have returned neither and the result
+  ## is the same defaults plus `targetTripleFromEnv()`. What the skip saves is
+  ## the solve: a `build:` body runs at module init in every non-provider
+  ## binary, and each one used to pay a full clingo solve over the cumulative
+  ## registry here (`test_kwin_source`: 622 solves, 365 s; reprobuild-pm issue
+  ## `2026-11-07-test-binaries-pay-minutes-of-module-init-before-any-case-runs`,
+  ## option A1).
+  ##
+  ## A governing lock keeps the read even though it cannot assign either
+  ## variant, because the read is where a lock that contradicts a declared
+  ## range is refused (`ELockConflict`) for a build whose body reads nothing
+  ## else; skipping it would let that build proceed on a graph the lock never
+  ## named. An unsatisfiable package-only solve with no lock is not refused
+  ## here any more; it is refused, with the same core-naming message, at the
+  ## first read of the solved answer (`chosenVersion`, `lastSolverSolution`,
+  ## `hasSolverSolution`) — `t_module_init_solve_is_deferred_to_first_read`
+  ## pins both halves.
   let name = activeLockFileName()
   if name.len > 0 and solvedGraphsByLockFile.hasKey(name):
     let assigned = solvedGraphsByLockFile[name]
     result.lockFileName = name
     result.targetTriple = assigned.getOrDefault("targetTriple", "")
     result.compiler = assigned.getOrDefault("compiler", "")
+    return
+  let mayAnswer = name.len > 0 or not currentLockPins().isEmpty or
+    solvedAnswerMayAssignAny(["targetTriple", "compiler"])
+  if not mayAnswer:
+    result.targetTriple = targetTripleFromEnv()
     return
   if hasSolverSolution():
     let sol = lastSolverSolution()
@@ -105,9 +157,23 @@ proc activeSolvedVariants*(): ToolchainSelection =
       result.targetTriple = sol.variants["targetTriple"]
     if "compiler" in sol.variants:
       result.compiler = sol.variants["compiler"]
+  if result.targetTriple.len == 0:
+    result.targetTriple = targetTripleFromEnv()
 
 proc isCrossTriple*(triple: string): bool =
-  ## A triple names a cross build when it is present and is not `native`.
-  ## Written once so the two former paths cannot drift on the spelling of
-  ## "not cross" — they already had two copies of this test.
-  triple.len > 0 and triple.toLowerAscii() != "native"
+  ## A triple names a cross build when it is present, is not `native`, and
+  ## does not name the build host itself (CLI/build.md §"Cross Targets:
+  ## `--target`": `--target=<host triple>` is native). Written once so the
+  ## two former paths cannot drift on the spelling of "not cross"; the
+  ## install-mirror keying (`activeTargetTripleTag`) folds the same
+  ## spellings through the same `isHostTriple`.
+  triple.len > 0 and triple.toLowerAscii() != "native" and
+    not isHostTriple(triple)
+
+proc activeTargetTriple*(): string =
+  ## The triple the active build region compiles FOR, or "" for a native
+  ## build. `"native"` is the variant's spelling of "no cross target" and is
+  ## folded into "" here, so every consumer tests one thing.
+  let selected = activeSolvedVariants()
+  if isCrossTriple(selected.targetTriple): selected.targetTriple
+  else: ""

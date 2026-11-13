@@ -49,11 +49,14 @@ suite "daemon carried environment":
       "REPRO_DAEMON_RUNTIME_DIR",
       "RUNQUOTAD_BIN",
       "RUNQUOTA_BIN",
+      "RUNQUOTA_SOCKET",
+      "RUNQUOTA_ENDPOINT_SCOPE",
       "REPROBUILD_RUNQUOTA_MEMORY_BYTES",
       "STACKABLE_HOOKS_SRC",
       "CLINGO_PREFIX",
       "REPROBUILD_RUNTIME_LIBRARY_PATH",
-      "SHM_QUEUE_SRC"
+      "SHM_QUEUE_SRC",
+      "TEST_CERTIFICATES_TOOLS_SRC"
     ]
     var previous: seq[tuple[key: string; value: string; present: bool]]
     for key in keys:
@@ -75,16 +78,20 @@ suite "daemon carried environment":
     let clingoPrefix = getTempDir() / "clingo-prefix-carried-env"
     let runtimeLibraryPath = getTempDir() / "runtime-libraries-carried-env"
     let shmQueueSrc = getTempDir() / "shm-queue-src-carried-env"
+    let testCertificatesToolsSrc = getTempDir() / "test-certificates-tools-carried-env"
     putEnv("REPRO_DAEMON_ENDPOINT", endpoint)
     putEnv("REPRO_DAEMON_STATE_DIR", stateDir)
     putEnv("REPRO_DAEMON_RUNTIME_DIR", runtimeDir)
     putEnv("RUNQUOTAD_BIN", runquotadBin)
     putEnv("RUNQUOTA_BIN", runquotaBin)
+    putEnv("RUNQUOTA_SOCKET", getTempDir() / "private-invocation.sock")
+    putEnv("RUNQUOTA_ENDPOINT_SCOPE", "private")
     putEnv("REPROBUILD_RUNQUOTA_MEMORY_BYTES", runquotaMemoryBytes)
     putEnv("STACKABLE_HOOKS_SRC", stackableHooksSrc)
     putEnv("CLINGO_PREFIX", clingoPrefix)
     putEnv("REPROBUILD_RUNTIME_LIBRARY_PATH", runtimeLibraryPath)
     putEnv("SHM_QUEUE_SRC", shmQueueSrc)
+    putEnv("TEST_CERTIFICATES_TOOLS_SRC", testCertificatesToolsSrc)
 
     let carried = daemonCarriedEnvironment()
     check carried.hasEnvPair("REPRO_DAEMON_ENDPOINT", endpoint)
@@ -92,6 +99,8 @@ suite "daemon carried environment":
     check carried.hasEnvPair("REPRO_DAEMON_RUNTIME_DIR", runtimeDir)
     check carried.hasEnvPair("RUNQUOTAD_BIN", runquotadBin)
     check carried.hasEnvPair("RUNQUOTA_BIN", runquotaBin)
+    check carried.hasEnvPair("RUNQUOTA_SOCKET", getTempDir() / "private-invocation.sock")
+    check carried.hasEnvPair("RUNQUOTA_ENDPOINT_SCOPE", "private")
     check carried.hasEnvPair("REPROBUILD_RUNQUOTA_MEMORY_BYTES",
       runquotaMemoryBytes)
     check carried.hasEnvPair("STACKABLE_HOOKS_SRC", stackableHooksSrc)
@@ -99,6 +108,8 @@ suite "daemon carried environment":
     check carried.hasEnvPair("REPROBUILD_RUNTIME_LIBRARY_PATH",
       runtimeLibraryPath)
     check carried.hasEnvPair("SHM_QUEUE_SRC", shmQueueSrc)
+    check carried.hasEnvPair("TEST_CERTIFICATES_TOOLS_SRC",
+      testCertificatesToolsSrc)
 
   test "source provisioning and cache configuration follow daemon-hosted builds":
     let settings = [
@@ -194,8 +205,11 @@ suite "daemon carried environment":
       "PATH=/daemon-actions",
       OwnerTokenEnv & "=" & OwnerToken,
       "HOME=/daemon-home",
+      "RUNQUOTA_SOCKET=/private/invocation.sock",
+      "RUNQUOTA_ENDPOINT_SCOPE=private",
     ]
-    let expected = @["PATH=/daemon-actions", "HOME=/daemon-home"]
+    let expected = @["PATH=/daemon-actions", "HOME=/daemon-home",
+      "RUNQUOTA_SOCKET=/private/invocation.sock", "RUNQUOTA_ENDPOINT_SCOPE=private"]
 
     let buildBody = buildRequestBody(UserDaemonBuildRequest(
       runId: "build-owner-filter",
@@ -331,3 +345,21 @@ suite "daemon request environment authority":
     check getEnv(Key) == "/from-request"
     restoreDaemonRequestEnvironment(saved)
     check not existsEnv(Key)
+
+  test "the caller's IN_AGENT_SHELL governs the progress default, not the daemon's":
+    # `IN_AGENT_SHELL` is outside reprobuild's namespace, but reprobuild reads
+    # it: `configuredBuildProgressMode` falls back to quiet progress when it is
+    # set, and quiet progress makes the `--log` default quiet. A daemon started
+    # from an agent shell must not silence the status lines of a later caller
+    # that is not in one (reprobuild-pm issue
+    # 2026-10-20-daemon-worker-reads-in-agent-shell-from-the-daemon-not-the-caller).
+    const Key = "IN_AGENT_SHELL"
+    let current = @[Key & "=1", "PATH=/daemon-path"]
+    check Key in daemonWorkerEnvUnsets(@["PATH=/client-path"], current)
+    # A caller in an agent shell carries the variable; the overlay installs it.
+    check Key notin daemonWorkerEnvUnsets(@[Key & "=1"], current)
+    withEnv({Key: "1"}):
+      let saved = applyDaemonRequestEnvironment(@["PATH=" & getEnv("PATH")])
+      check not existsEnv(Key)
+      restoreDaemonRequestEnvironment(saved)
+      check getEnv(Key) == "1"

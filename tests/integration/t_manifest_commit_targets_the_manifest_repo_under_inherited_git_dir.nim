@@ -61,8 +61,6 @@ schema = "reprobuild.workspace.project.v1"
 
 [project]
 name = "demo"
-default_revision = "main"
-trunk = "main"
 
 [[remote]]
 name = "seed-origin"
@@ -74,17 +72,17 @@ includes = [
 """
 
 const seedFragmentToml = """
-schema = "reprobuild.workspace.repo.v1"
+schema = "reprobuild.workspace.repo.v2"
 
 [repo]
 name = "seed"
 path = "seed"
 remote = "seed-origin"
-revision = "main"
+mainline = "main"
 """
 
 const workspaceLocalToml = """
-schema = "reprobuild.workspace.local.v1"
+schema = "reprobuild.workspace.state.v1"
 
 [workspace]
 project = "demo"
@@ -130,7 +128,7 @@ suite "workspace manifest authoring under an inherited GIT_DIR":
       createDir(manifest / "projects")
       createDir(manifest / "repos")
       createDir(manifest / ".repro")
-      writeFile(manifest / ".repro" / "workspace.toml", workspaceLocalToml)
+      writeFile(manifest / ".repro" / "workspace-state.toml", workspaceLocalToml)
       writeFile(manifest / "projects" / "demo.toml",
         projectTomlTemplate % [fileUrl(seedOrigin)])
       writeFile(manifest / "repos" / "seed.toml", seedFragmentToml)

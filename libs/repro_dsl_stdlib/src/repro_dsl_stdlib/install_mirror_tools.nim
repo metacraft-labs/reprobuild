@@ -7,9 +7,25 @@ import ./configurables/variants
 import ./packages/sh as sh_module
 import ./packages/host_system_tools
 
+package `repro-install-mirror-publish`:
+  ## Reprobuild's own helper, shipped in the same `bin/` as `repro` (every
+  ## `scripts/build_apps.sh` build and the packaged release): what a
+  ## cross build's install-mirror action runs for the object check
+  ## (`emitInstallMirrorTargetCheck`). No provisioning arm: it comes from
+  ## the PATH `repro` itself is on, never from a catalog.
+  discard
+
+proc installMirrorActionTools(packageName: string): seq[string] =
+  ## The commands the generated install-mirror script runs. The publish
+  ## helper is among them only when the script calls it, i.e. under
+  ## `--target` (the object check).
+  result = typedInstallMirrorShellTools(packageName)
+  if effectiveInstallMirrorTarget().len > 0:
+    result.add(InstallMirrorPublishToolName)
+
 proc registerInstallMirrorTools*(packageName, sourceFile: string;
                                 sourceLine: int) =
-  for toolName in typedInstallMirrorShellTools(packageName):
+  for toolName in installMirrorActionTools(packageName):
     if registerPackageNativeTool(packageName, sourceFile, sourceLine, PackageUseDef(
         rawConstraint: toolName, packageSelector: toolName,
         executableName: toolName, depKind: DepKindNative)):

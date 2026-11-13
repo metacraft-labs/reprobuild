@@ -87,11 +87,11 @@ proc repoFragment(root, fragment, path, description: string;
   ## `[repo].name` when it differs from it (the `sel4` → `seL4` shape).
   let name = if declaredName.len > 0: declaredName else: fragment
   writeManifest(root, "repos" / (fragment & ".toml"),
-    "schema = \"reprobuild.workspace.repo.v1\"\n\n" &
+    "schema = \"reprobuild.workspace.repo.v2\"\n\n" &
     "[repo]\n" &
     "name = \"" & name & "\"\n" &
     "path = \"" & path & "\"\n" &
-    "branch = \"dev\"\n" &
+    "mainline = \"dev\"\n" &
     "url_prefix = \"acme\"\n")
   if description.len > 0:
     writeManifest(root, "repos" / (fragment & ".md"), description & "\n")
@@ -119,7 +119,7 @@ proc projectManifest(root, name: string; memberSets, memberRepos: openArray[stri
     body.add("  \"" & m & "\",\n")
   if inArrayComment.len > 0:
     body.add(inArrayComment & "\n")
-  body.add("]\n\n[project]\nname = \"" & name & "\"\ntrunk = \"dev\"\n")
+  body.add("]\n\n[project]\nname = \"" & name & "\"\n")
   writeManifest(root, "projects" / (name & ".toml"), body)
   root / "projects" / (name & ".toml")
 

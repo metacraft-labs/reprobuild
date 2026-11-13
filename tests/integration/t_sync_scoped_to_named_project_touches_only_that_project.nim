@@ -92,12 +92,12 @@ proc remoteBlock(name, url: string): string =
   "[[remote]]\nname = \"" & name & "\"\nfetch = \"" & url & "\"\n\n"
 
 proc repoFragment(name, remote: string): string =
-  "schema = \"reprobuild.workspace.repo.v1\"\n\n" &
+  "schema = \"reprobuild.workspace.repo.v2\"\n\n" &
   "[repo]\n" &
   "name = \"" & name & "\"\n" &
   "path = \"" & name & "\"\n" &
   "remote = \"" & remote & "\"\n" &
-  "revision = \"main\"\n"
+  "mainline = \"main\"\n"
 
 type
   RepoSeed = object
@@ -141,8 +141,8 @@ proc setupFixture(gitBin: string): Fixture =
   # on this full set.
   writeFile(manifestsRoot / "projects" / "everything.toml",
     "schema = \"reprobuild.workspace.project.v1\"\n\n" &
-    "[project]\nname = \"everything\"\ndefault_revision = \"main\"\n" &
-    "trunk = \"main\"\n\n" &
+    "[project]\nname = \"everything\"\n" &
+    "\n" &
     remotes &
     "includes = [\n  \"repos/alpha-1.toml\",\n  \"repos/alpha-2.toml\",\n" &
     "  \"repos/beta-1.toml\",\n]\n")
@@ -152,14 +152,14 @@ proc setupFixture(gitBin: string): Fixture =
   # set to just these.
   writeFile(manifestsRoot / "projects" / "group-a.toml",
     "schema = \"reprobuild.workspace.project.v1\"\n\n" &
-    "[project]\nname = \"group-a\"\ndefault_revision = \"main\"\n" &
-    "trunk = \"main\"\n\n" &
+    "[project]\nname = \"group-a\"\n" &
+    "\n" &
     remoteBlock("alpha1-origin", a1Url) & remoteBlock("alpha2-origin", a2Url) &
     "includes = [\n  \"repos/alpha-1.toml\",\n  \"repos/alpha-2.toml\",\n]\n")
   writeFile(manifestsRoot / "projects" / "group-b.toml",
     "schema = \"reprobuild.workspace.project.v1\"\n\n" &
-    "[project]\nname = \"group-b\"\ndefault_revision = \"main\"\n" &
-    "trunk = \"main\"\n\n" &
+    "[project]\nname = \"group-b\"\n" &
+    "\n" &
     remoteBlock("beta1-origin", b1Url) &
     "includes = [\n  \"repos/beta-1.toml\",\n]\n")
 

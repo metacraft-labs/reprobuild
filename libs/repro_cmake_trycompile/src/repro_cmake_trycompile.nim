@@ -57,7 +57,8 @@ import repro_core
 
 const
   TryCompileMetadataMagic* = "RBCT"
-  TryCompileMetadataVersion* = 4'u16
+  TryCompileMetadataVersion* = 5'u16
+  ## v5 appends optionalOutputs to each action; earlier readers reject it.
   ## v1: single target (legacy, TryCompile probes only).
   ## v2: multi-target with optional default + all aggregator (Tier 2c
   ##     — main CMake-generated projects). v1 readers should reject v2;
@@ -89,11 +90,11 @@ const
   ## for the provider artifact itself. Bumping ``Version`` invalidates
   ## that share — keep it in lockstep with the binary protocol.
   TryCompileProviderArtifactId* =
-    "repro-cmake-trycompile-provider.v3"
+    "repro-cmake-trycompile-provider.v5"
   TryCompileProviderRootEntryPointId* =
     "cmakeReprobuildTryCompile.root"
   TryCompileProviderRootBodyHash* =
-    "cmakeReprobuildTryCompile.root.v3"
+    "cmakeReprobuildTryCompile.root.v5"
   TryCompileProviderPackageName* = "cmakeReprobuildTryCompile"
   TryCompileProviderNamespace* = "project"
 
@@ -108,6 +109,7 @@ type
     deps*: seq[string]
     inputs*: seq[string]
     outputs*: seq[string]
+    optionalOutputs*: seq[string]
     pool*: string
     poolUnits*: uint32
     depfile*: string
@@ -204,7 +206,10 @@ proc writeStringSeq(outp: var seq[byte]; values: openArray[string]) =
     outp.writeString(value)
 
 proc readStringSeq(bytes: openArray[byte]; pos: var int): seq[string] =
-  let count = int(readU32Le(bytes, pos))
+  let countRaw = readU32Le(bytes, pos)
+  if not elementCountFits(countRaw, bytes.len - pos, 4):
+    raiseMetadata("element count exceeds remaining bytes")
+  let count = int(countRaw)
   result = newSeq[string](count)
   for i in 0 ..< count:
     result[i] = readString(bytes, pos)
@@ -225,8 +230,9 @@ proc writeAction(outp: var seq[byte]; action: TryCompileActionDef) =
   outp.writeString(action.dynamicDepsFile)
   outp.writeBool(action.cacheable)
   outp.writeString(action.commandStatsId)
+  outp.writeStringSeq(action.optionalOutputs)
 
-proc readAction(bytes: openArray[byte]; pos: var int): TryCompileActionDef =
+proc readAction(bytes: openArray[byte]; pos: var int; version: uint16): TryCompileActionDef =
   result.id = readString(bytes, pos)
   result.inline = readBool(bytes, pos)
   result.inlineArgv = readStringSeq(bytes, pos)
@@ -242,6 +248,8 @@ proc readAction(bytes: openArray[byte]; pos: var int): TryCompileActionDef =
   result.dynamicDepsFile = readString(bytes, pos)
   result.cacheable = readBool(bytes, pos)
   result.commandStatsId = readString(bytes, pos)
+  if version >= 5'u16:
+    result.optionalOutputs = readStringSeq(bytes, pos)
 
 proc encodeTryCompileMetadata*(meta: TryCompileMetadata): seq[byte] =
   var payload: seq[byte] = @[]
@@ -300,15 +308,21 @@ proc decodeTryCompileMetadata*(bytes: openArray[byte]): TryCompileMetadata =
       $payloadLength & ", actual " & $(bytes.len - pos) & ")")
 
   result.usedTools = readStringSeq(bytes, pos)
-  let poolCount = int(readU32Le(bytes, pos))
+  let poolCountRaw = readU32Le(bytes, pos)
+  if not elementCountFits(poolCountRaw, bytes.len - pos, 8):
+    raiseMetadata("element count exceeds remaining bytes")
+  let poolCount = int(poolCountRaw)
   result.pools = newSeq[TryCompilePoolDef](poolCount)
   for i in 0 ..< poolCount:
     result.pools[i].name = readString(bytes, pos)
     result.pools[i].capacity = readU32Le(bytes, pos)
-  let actionCount = int(readU32Le(bytes, pos))
+  let actionCountRaw = readU32Le(bytes, pos)
+  if not elementCountFits(actionCountRaw, bytes.len - pos, 4):
+    raiseMetadata("element count exceeds remaining bytes")
+  let actionCount = int(actionCountRaw)
   result.actions = newSeq[TryCompileActionDef](actionCount)
   for i in 0 ..< actionCount:
-    result.actions[i] = readAction(bytes, pos)
+    result.actions[i] = readAction(bytes, pos, version)
   if version == 1'u16:
     # Legacy single-target envelope. Hoist the target into the v2-shape
     # ``targets`` array so consumers see a uniform view.
@@ -319,7 +333,10 @@ proc decodeTryCompileMetadata*(bytes: openArray[byte]): TryCompileMetadata =
         name: result.targetName,
         actionIds: result.targetActionIds))
   else:
-    let targetCount = int(readU32Le(bytes, pos))
+    let targetCountRaw = readU32Le(bytes, pos)
+    if not elementCountFits(targetCountRaw, bytes.len - pos, 13):
+      raiseMetadata("element count exceeds remaining bytes")
+    let targetCount = int(targetCountRaw)
     result.targets = newSeq[TryCompileTargetDef](targetCount)
     for i in 0 ..< targetCount:
       result.targets[i].name = readString(bytes, pos)
@@ -332,7 +349,10 @@ proc decodeTryCompileMetadata*(bytes: openArray[byte]): TryCompileMetadata =
       # v3-flagged envelope MUST carry the trailer (the C++ emitter writes
       # it unconditionally).
       result.crossConfigs = readStringSeq(bytes, pos)
-      let crossTargetCount = int(readU32Le(bytes, pos))
+      let crossTargetCountRaw = readU32Le(bytes, pos)
+      if not elementCountFits(crossTargetCountRaw, bytes.len - pos, 16):
+        raiseMetadata("element count exceeds remaining bytes")
+      let crossTargetCount = int(crossTargetCountRaw)
       result.crossConfigTargets = newSeq[CrossConfigTargetDef](
         crossTargetCount)
       for i in 0 ..< crossTargetCount:

@@ -1,0 +1,5 @@
+# Files the snapshot services do not carry, fetched once from the live
+# archive and pinned by SHA-256 (recorded 2026-10-31). A changed file is a
+# refusal, never a silent update; snapshot_mirror.nim caches the pinned copy.
+5693a2405c3972968cee94185b0c537dd417e4f64cd6e8bd092c7b5f0038a6bf  archive.ubuntu.com/ubuntu/dists/resolute-updates/main/dist-upgrader-all/current/resolute.tar.gz
+d7802649b4d7c96a92c57aa038e37b3502e539dd351b04c2d5db20fe17dc1cb6  archive.ubuntu.com/ubuntu/dists/resolute-updates/main/dist-upgrader-all/current/resolute.tar.gz.gpg

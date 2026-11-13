@@ -20,12 +20,14 @@
 ##   * Pure, mock-free integration test running against the Python daemon shim
 ##     and the build engine's socket client logic.
 
-import std/[unittest, os, osproc, strutils, tempfiles]
+import std/[unittest, os, osproc, streams, strutils, strtabs, tables, json,
+  tempfiles, times]
 import repro_core
 import repro_core/dependency_gathering
 import repro_build_engine
 import repro_dev_env_engine
 import repro_interface_artifacts
+from repro_local_store import ffpChecksum
 import repro_tool_profiles
 
 const RepoMarker = "repro.nim"
@@ -90,6 +92,119 @@ when defined(posix):
     setFilePermissions(result, {fpUserRead, fpUserWrite, fpGroupRead,
       fpOthersRead})
 
+when defined(linux):
+  from std/posix import nil
+
+  # A SHARED HELPER UNDER CONCURRENT USE. The cases at the end of the suite
+  # run the engine's real client (``executeBuiltinAction`` on a
+  # ``bakForeignProvision`` action) against helpers on a private socket
+  # directory, with a fake ``nix`` on PATH so a resolution costs milliseconds.
+
+  const StressChildEnv = "REPRO_NIXD_STRESS_CHILD"
+  const StressRequests = 12
+  const StressMaxRequests = 2_000   ## backstop if ``release`` never appears
+  const StressSignalsWanted = 3     ## TERM, INT and KILL, once each
+  const StressDeadlineSec = 240.0   ## then release anyway; ``signals`` judges
+
+  proc foreignProvisionAction(selector, receipt, cwd: string): BuildAction =
+    BuildAction(
+      governingLockIdentity: lockIdentityOutsideSolvedGraph(),
+      kind: bakForeignProvision,
+      id: "test.foreign.nix.shared." & receipt.extractFilename,
+      argv: @["nix", selector],
+      outputs: @[receipt],
+      cwd: cwd,
+      dependencyPolicy: DependencyGatheringPolicy(kind: dgAutomaticMonitor))
+
+  if existsEnv(StressChildEnv):
+    # One of several client PROCESSES (the helper is shared between
+    # processes, not threads). Records one line per request. Every request
+    # names its own selector, so each one is a resolution the helper must
+    # run rather than a cache hit.
+    #
+    # A client does not decide when it is done: it keeps resolving until the
+    # stopper creates ``release`` (and at least ``StressRequests`` times).
+    # Left to a fixed count, the clients could -- and under a loaded suite
+    # did -- finish before the stopper had stopped a single helper, and the
+    # case exercised nothing (run 29: "helpers signalled 0 times").
+    let workDir = getEnv(StressChildEnv)
+    let tag = $getCurrentProcessId()
+    # Results go to a file, not a pipe: a client that runs until released
+    # could fill a pipe nobody reads until it exits, and then never exit.
+    var results = open(workDir / ("client-" & tag & ".out"), fmWrite)
+    var i = 0
+    while i < StressRequests or (not fileExists(workDir / "release") and
+        i < StressMaxRequests):
+      let receipt = workDir / ("receipt-" & tag & "-" & $i)
+      let res = executeBuiltinAction(foreignProvisionAction(
+        "fake#tool-" & tag & "-" & $i, receipt, workDir))
+      if res.status == asSucceeded and dirExists(readFile(receipt).strip()):
+        results.writeLine("OK")
+      else:
+        results.writeLine("FAIL " & res.stderr.strip().replace("\n", " | "))
+      results.flushFile()
+      inc i
+    results.close()
+    quit(0)
+
+  type SharedHelperFixture = object
+    root: string        ## scratch: fake nix, fake store, wrapper, pid files
+    socketDir: string   ## short: sun_path is 108 bytes
+    saved: seq[(string, string)]
+
+  proc setEnvSaving(f: var SharedHelperFixture; key, value: string) =
+    f.saved.add((key, getEnv(key, "\0unset")))
+    putEnv(key, value)
+
+  proc ownHelperPids(f: SharedHelperFixture): seq[int] =
+    ## Helpers THIS fixture started: recorded by its wrapper, and still
+    ## naming its private socket directory on their command line.
+    for kind, path in walkDir(f.root / "pids"):
+      let pid = try: parseInt(path.extractFilename) except ValueError: 0
+      if pid <= 0:
+        continue
+      try:
+        if f.socketDir in readFile("/proc/" & $pid & "/cmdline"):
+          result.add(pid)
+      except IOError, OSError:
+        discard
+
+  proc openSharedHelperFixture(startDelay = "0"; idleMs = 2_000):
+      SharedHelperFixture =
+    result.root = createTempDir("repro-nixd-shared-", "")
+    result.socketDir = createTempDir("rnd-", "", "/tmp")
+    let daemonPath = findNixDaemon(findRepoRoot())
+    let fakeBin = result.root / "bin"
+    createDir(fakeBin)
+    createDir(result.root / "pids")
+    createDir(result.root / "store")
+    # Each resolution takes a moment, so requests are in flight when a
+    # helper is stopped.
+    writeFile(fakeBin / "nix", "#!/bin/sh\nfor last; do :; done\nsleep 0.2\n" &
+      "d=" & quoteShell(result.root / "store") &
+      "/$(printf %s \"$last\" | tr -c 'a-zA-Z0-9' '-')-$$\n" &
+      "mkdir -p \"$d/bin\" && printf '%s\\n' \"$d\"\n")
+    setFilePermissions(fakeBin / "nix", {fpUserRead, fpUserWrite, fpUserExec})
+    let wrapper = result.root / "reprobuild-nix-daemon"
+    writeFile(wrapper, "#!/bin/sh\necho $$ > " &
+      quoteShell(result.root / "pids") & "/$$\nsleep " & startDelay &
+      "\nexec " & quoteShell(daemonPath) & " \"$@\" --idle-exit-ms=" &
+      $idleMs & "\n")
+    setFilePermissions(wrapper, {fpUserRead, fpUserWrite, fpUserExec})
+    result.setEnvSaving("PATH", fakeBin & PathSep & getEnv("PATH"))
+    result.setEnvSaving("REPROBUILD_NIX_DAEMON_BIN", wrapper)
+    result.setEnvSaving(NixDaemonSocketDirEnv, result.socketDir)
+    result.setEnvSaving("USER", "repro-nixd-shared-" & $getCurrentProcessId())
+
+  proc close(f: var SharedHelperFixture) =
+    for pid in f.ownHelperPids():
+      discard posix.kill(posix.Pid(pid), posix.SIGKILL)
+    for i in countdown(f.saved.high, 0):
+      let (key, value) = f.saved[i]
+      if value == "\0unset": delEnv(key) else: putEnv(key, value)
+    removeDir(f.root)
+    removeDir(f.socketDir)
+
 suite "Nix Evaluation Daemon and Foreign Provisioner Integration Tests":
 
   test "dev env repeated uses share acquisition but distinct selectors do not":
@@ -113,6 +228,63 @@ suite "Nix Evaluation Daemon and Foreign Provisioner Integration Tests":
     check repeated[0].id == actions[0].id
     check devEnvNixProvisioningActions([useDef], tpmPathOnly,
       fixtureRoot, fixtureRoot).len == 0
+
+  when not defined(windows):
+    test "dev env selector context is independent of compiler cwd":
+      let callerRoot = prepareFixtureRoot(findRepoRoot())
+      defer: removeDir(callerRoot)
+      let compilerRoot = findRepoRoot()
+      let useDef = InterfaceToolUse(packageSelector: "sh", rawConstraint: "sh",
+        nixProvisioning: @[InterfaceNixProvisioning(
+          selector: FixtureSelector, executablePath: FixtureExecutable)])
+      let actions = devEnvNixProvisioningActions([useDef], tpmNix,
+        callerRoot / "state", compilerRoot, callerRoot)
+      check actions.len == 1
+      check actions[0].cwd == callerRoot / "state" / "tool-store"
+      check actions[0].cwd != compilerRoot
+      check actions[0].actionCachePolicy == ffpChecksum
+      check callerRoot / "flake.nix" in actions[0].inputs
+      check callerRoot / "flake.lock" in actions[0].inputs
+      check parseJson(actions[0].builtinText)["workspaceRoot"].getStr() == callerRoot
+      let other = devEnvNixProvisioningActions([useDef], tpmNix,
+        callerRoot / "other-state", compilerRoot, compilerRoot)
+      check actions[0].id != other[0].id
+      check actions[0].weakFingerprint != other[0].weakFingerprint
+      writeFile(callerRoot / "tool.nix", "{}")
+      var expressionUse = useDef
+      expressionUse.nixProvisioning[0].expressionFile = callerRoot / "tool.nix"
+      let expressionActions = devEnvNixProvisioningActions([expressionUse], tpmNix,
+        callerRoot / "expression-state", compilerRoot, callerRoot)
+      check parseJson(expressionActions[0].builtinText)["expressionFile"].getStr() ==
+        callerRoot / "tool.nix"
+      check callerRoot / "tool.nix" in expressionActions[0].inputs
+      check not expressionActions[0].cacheable
+
+  when not defined(windows):
+    # Nix provisions nothing for a Windows host, so there is no edge to
+    # inspect there.
+    test "a provision edge for a Nix expressionFile is never cacheable":
+      # Owner decision, 2026-10-14 (Edge-Derived-Identities.md §7 rider):
+      # until the M19 edges exist, a Nix tool use with an expressionFile is
+      # never served from a cache. This edge is keyed by the selector alone,
+      # so for such a use it must run every time; a selector-only use stays
+      # cacheable.
+      let fixtureRoot = prepareFixtureRoot(findRepoRoot())
+      defer: removeDir(fixtureRoot)
+      let selectorOnly = InterfaceToolUse(packageSelector: "sh",
+        rawConstraint: "sh",
+        nixProvisioning: @[InterfaceNixProvisioning(
+          selector: "github:NixOS/nixpkgs/addf7cf5f383a3101ecfba091b98d0a1263dc9b8#bash",
+          executablePath: "bin/bash")])
+      var withExpression = selectorOnly
+      withExpression.nixProvisioning = @[InterfaceNixProvisioning(
+        selector: ".#expression-sh", executablePath: FixtureExecutable,
+        expressionFile: fixtureRoot / "default.nix")]
+      let actions = devEnvNixProvisioningActions(
+        [selectorOnly, withExpression, withExpression], tpmNix, fixtureRoot, fixtureRoot)
+      check actions.len == 2
+      check actions[0].cacheable
+      check not actions[1].cacheable
 
   when defined(posix):
     test "production provisioner rejects non-executable REPROBUILD_NIX_DAEMON_BIN":
@@ -210,10 +382,11 @@ suite "Nix Evaluation Daemon and Foreign Provisioner Integration Tests":
         setFilePermissions(fakeNix, {fpUserRead, fpUserWrite, fpUserExec})
 
         let uniqueUser = "repro-nix-direct-loader-" & $getCurrentProcessId()
-        let socketPath = "/tmp/reprobuild-nix-daemon-" & uniqueUser & ".sock"
+        # The client names the socket (``--socket-path``, keyed by the
+        # helper's identity), so the wrapper passes its arguments through.
         let daemonWrapper = tempRoot / "reprobuild-nix-daemon"
         writeFile(daemonWrapper, "#!/bin/sh\nexec " & quoteShell(daemonPath) &
-          " \"$@\" --socket-path=" & quoteShell(socketPath) & "\n")
+          " \"$@\"\n")
         setFilePermissions(daemonWrapper,
           {fpUserRead, fpUserWrite, fpUserExec})
 
@@ -225,6 +398,7 @@ suite "Nix Evaluation Daemon and Foreign Provisioner Integration Tests":
         putEnv("LD_LIBRARY_PATH", tempRoot / "target-libraries")
         putEnv("REPROBUILD_NIX_DAEMON_BIN", daemonWrapper)
         putEnv("USER", uniqueUser)
+        let socketPath = nixDaemonSocketPath(nixDaemonHelperKey(daemonWrapper))
         defer:
           putEnv("PATH", previousPath)
           if previousLoaderPath.len > 0:
@@ -352,3 +526,212 @@ suite "Nix Evaluation Daemon and Foreign Provisioner Integration Tests":
 
     # Clean up receipt
     removeFile(receiptFile)
+
+  when defined(posix):
+    test "reported flake inputs are relative to a symlinked action cwd":
+      let repoRoot = findRepoRoot()
+      let fixtureRoot = prepareFixtureRoot(repoRoot)
+      defer: removeDir(fixtureRoot)
+      let aliasRoot = createTempDir("repro-nix-daemon-alias-", "")
+      defer: removeDir(aliasRoot)
+      let linkedRoot = aliasRoot / "workspace"
+      createSymlink(fixtureRoot, linkedRoot)
+      defer: removeFile(linkedRoot)
+      require symlinkExists(linkedRoot)
+      require expandFilename(linkedRoot) == expandFilename(fixtureRoot)
+      require linkedRoot != expandFilename(linkedRoot)
+
+      let previousDaemonBin = getEnv("REPROBUILD_NIX_DAEMON_BIN")
+      putEnv("REPROBUILD_NIX_DAEMON_BIN", findNixDaemon(repoRoot))
+      defer: putEnv("REPROBUILD_NIX_DAEMON_BIN", previousDaemonBin)
+      let previousUser = getEnv("USER")
+      putEnv("USER", "repro-nix-provisioner-alias-" & $getCurrentProcessId())
+      defer: putEnv("USER", previousUser)
+
+      # This explicit alias reproduces /var -> /private/var on macOS even
+      # when the host's temporary directory itself has no symlink component.
+      let receipt = aliasRoot / "receipt"
+      let res = executeBuiltinAction(BuildAction(
+        governingLockIdentity: lockIdentityOutsideSolvedGraph(),
+        kind: bakForeignProvision,
+        id: "test.foreign.nix.symlink-cwd",
+        argv: @["nix", FixtureSelector],
+        outputs: @[receipt],
+        cwd: linkedRoot,
+        dependencyPolicy: DependencyGatheringPolicy(kind: dgAutomaticMonitor)))
+      checkpoint(res.stderr)
+      require res.status == asSucceeded
+      require fileExists(receipt)
+      check fileExists(readFile(receipt).strip() / FixtureExecutable)
+      let reads = res.evidence.provisionerReportedInputs
+      checkpoint("Symlink cwd: " & linkedRoot)
+      checkpoint("Canonical cwd: " & expandFilename(linkedRoot))
+      checkpoint("Provisioner-reported dependencies: " & $reads)
+      check "flake.nix" in reads
+      check "flake.lock" in reads
+      check res.evidence.monitorReads.len == 0
+      check evcForeignProvisionerReport in res.evidence.evidenceProvenance
+      check evcMonitorCapture notin res.evidence.evidenceProvenance
+
+      # A tool's evaluation workspace can differ from the action's cwd.
+      # Keep those reads too, expressed relative to the canonical cwd.
+      let outsideRoot = prepareFixtureRoot(repoRoot)
+      defer: removeDir(outsideRoot)
+      let outsideReceipt = aliasRoot / "outside-receipt"
+      let outside = executeBuiltinAction(BuildAction(
+        governingLockIdentity: lockIdentityOutsideSolvedGraph(),
+        kind: bakForeignProvision,
+        id: "test.foreign.nix.symlink-cwd.outside",
+        argv: @["nix", FixtureSelector],
+        outputs: @[outsideReceipt],
+        cwd: linkedRoot,
+        builtinText: $(%*{"workspaceRoot": outsideRoot}),
+        dependencyPolicy: DependencyGatheringPolicy(kind: dgAutomaticMonitor)))
+      checkpoint(outside.stderr)
+      require outside.status == asSucceeded
+      require fileExists(outsideReceipt)
+      check fileExists(readFile(outsideReceipt).strip() / FixtureExecutable)
+      let outsideReads = outside.evidence.provisionerReportedInputs
+      checkpoint("Outside dependencies: " & $outsideReads)
+      for name in ["flake.nix", "flake.lock"]:
+        let expected = relativePath(expandFilename(outsideRoot / name),
+          expandFilename(linkedRoot))
+        require expected.startsWith(".." & DirSep)
+        check expected in outsideReads
+      check outside.evidence.monitorReads.len == 0
+      check evcForeignProvisionerReport in outside.evidence.evidenceProvenance
+      check evcMonitorCapture notin outside.evidence.evidenceProvenance
+
+  when defined(linux):
+    test "a helper slower to start than two seconds is waited for":
+      # Measured on a host running a full suite (load ~180 on 32 cores): the
+      # Python helper took 0.26-3.3 s from exec to listening. The client
+      # waited a fixed 2 s and reported "Failed to connect or spawn
+      # reprobuild-nix-daemon" for every slower start.
+      var f = openSharedHelperFixture(startDelay = "3")
+      defer: f.close()
+      let receipt = f.root / "receipt-slow"
+      let res = executeBuiltinAction(foreignProvisionAction("fake#slow",
+        receipt, f.root))
+      checkpoint(res.stderr)
+      check res.status == asSucceeded
+      check dirExists(readFile(receipt).strip())
+
+    test "an edge with a relative or empty cwd sends an absolute root":
+      # The helper is shared and runs from ``/``, so it refuses a missing or
+      # relative ``workspaceRoot`` instead of resolving one against its own
+      # directory. A relative edge ``cwd`` is relative to the engine, as it
+      # is for every other builtin edge, so the engine must make the root
+      # absolute before it asks; otherwise the helper's refusal is what the
+      # edge reports.
+      var f = openSharedHelperFixture()
+      defer: f.close()
+      let relativeRoot = relativePath(f.root, getCurrentDir())
+      require not relativeRoot.isAbsolute
+      for (label, cwd) in [("relative", relativeRoot), ("empty", "")]:
+        let receipt = f.root / ("receipt-" & label & "-cwd")
+        let res = executeBuiltinAction(foreignProvisionAction(
+          "fake#" & label & "-cwd", receipt, cwd))
+        checkpoint(label & ": " & res.stderr)
+        check res.status == asSucceeded
+        check "not an absolute path" notin res.stderr
+        check "missing workspaceRoot" notin res.stderr
+        check fileExists(receipt)
+
+    test "the helper socket is keyed by the helper's identity":
+      # Every worktree, package and CI checkout resolves its own helper file,
+      # and one socket per user let whichever started first answer for all
+      # of them, older semantics included.
+      let root = createTempDir("repro-nixd-key-", "")
+      defer: removeDir(root)
+      writeFile(root / "a", "#!/bin/sh\necho a\n")
+      writeFile(root / "b", "#!/bin/sh\necho b\n")
+      writeFile(root / "c", "#!/bin/sh\necho a\n")
+      let keyA = nixDaemonHelperKey(root / "a")
+      check keyA.len == 16
+      check keyA == nixDaemonHelperKey(root / "c")
+      check keyA != nixDaemonHelperKey(root / "b")
+      check nixDaemonHelperKey(root / "missing") == ""
+      let previousDir = getEnv(NixDaemonSocketDirEnv)
+      putEnv(NixDaemonSocketDirEnv, root)
+      defer: putEnv(NixDaemonSocketDirEnv, previousDir)
+      check nixDaemonSocketPath(keyA).parentDir == root
+      check keyA in nixDaemonSocketPath(keyA).extractFilename
+      check nixDaemonSocketPath(keyA) != nixDaemonSocketPath(
+        nixDaemonHelperKey(root / "b"))
+
+    test "concurrent clients are served while helpers are stopped under them":
+      # Several client processes share one helper while it is stopped by pid
+      # (TERM, INT and KILL in turn) every few hundred milliseconds -- what a
+      # suite runner does to the helper each time the case that started it
+      # finishes, and what an agent stopping "its" helper does to everyone.
+      var f = openSharedHelperFixture(idleMs = 400)
+      defer: f.close()
+      var children: seq[Process] = @[]
+      for i in 0 ..< 4:
+        var env = newStringTable(modeCaseSensitive)
+        for key, value in envPairs():
+          env[key] = value
+        env[StressChildEnv] = f.root
+        children.add(startProcess(getAppFilename(), env = env,
+          options = {poParentStreams}))
+      # Each helper is stopped once it has been up for 1.5-3.9 s -- the
+      # lifetime of the case that happened to start it. A stopper that ends
+      # every helper before it can finish a request leaves nothing that could
+      # serve, which is not the situation being modelled.
+      #
+      # The STOPPER ends the case, not the clients: they keep requesting until
+      # it has sent TERM, INT and KILL to a helper, so every signal lands
+      # while all four clients are still mid-flight, on every run, however
+      # loaded the host. ``signalledWhileServing`` counts only signals sent
+      # while every client was still running, and is what the guard reads.
+      var signals = 0
+      var signalledWhileServing = 0
+      var firstSeen = initTable[int, float]()
+      let deadline = epochTime() + StressDeadlineSec
+      var released = false
+      while true:
+        var running = 0
+        for child in children:
+          if child.running:
+            inc running
+        if running == 0:
+          break
+        if not released and (signalledWhileServing >= StressSignalsWanted or
+            epochTime() > deadline):
+          writeFile(f.root / "release", "")
+          released = true
+        sleep(100)
+        let now = epochTime()
+        for pid in f.ownHelperPids():
+          if pid notin firstSeen:
+            firstSeen[pid] = now
+          elif now - firstSeen[pid] >= 1.5 + float(pid mod 4) * 0.8:
+            let sig = [posix.SIGTERM, posix.SIGINT, posix.SIGKILL][signals mod 3]
+            if posix.kill(posix.Pid(pid), sig) == 0:
+              inc signals
+              if not released and running == children.len:
+                inc signalledWhileServing
+      var ok = 0
+      var failures: seq[string] = @[]
+      for child in children:
+        let exitCode = child.waitForExit()
+        if exitCode != 0:
+          failures.add("client " & $child.processID & " exited " & $exitCode)
+        let outFile = f.root / ("client-" & $child.processID & ".out")
+        let lines = try: readFile(outFile).splitLines()
+                    except IOError: @["no results from client " & $child.processID]
+        child.close()
+        for line in lines:
+          if line == "OK":
+            inc ok
+          elif line.len > 0:
+            failures.add(line)
+      checkpoint("helpers signalled " & $signals & " times (" &
+        $signalledWhileServing & " while every client was mid-flight); " &
+        $ok & " requests served; failures: " & failures.join("\n"))
+      # Anti-vacuity: the stopper must have stopped helpers UNDER the clients.
+      check signals > 0
+      check signalledWhileServing >= StressSignalsWanted
+      check failures.len == 0
+      check ok >= 4 * StressRequests

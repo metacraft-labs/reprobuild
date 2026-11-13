@@ -1,0 +1,20 @@
+# A package selected by rows of two activities is one package, and its
+# version / binaries / activity come from the row the planner meets first:
+# activities are walked in the order they first appear (the expansion
+# creates them in first-row order), rows in file order within each. Here
+# `cli` appears first, so `jdk` comes from its row in `cli` (version 21)
+# even though the `ide` row (version 17) is earlier in the file.
+[[package]]
+name = "ripgrep"
+activity = "cli"
+
+[[package]]
+name = "jdk"
+activity = "ide"
+version = "17.0.9"
+
+[[package]]
+name = "jdk"
+activity = "cli"
+version = "21.0.5"
+binaries = ["java"]

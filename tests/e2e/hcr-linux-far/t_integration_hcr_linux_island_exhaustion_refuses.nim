@@ -26,7 +26,7 @@
 ##     vacuous — Verification-Harness-Traps.md trap 4's empty-set pass, arriving
 ##     through a `/proc/self/maps` parse that matched nothing.
 
-import std/[json, options, os, osproc, streams, strtabs, strutils, unittest]
+import std/[json, options, os, osproc, streams, strtabs, strutils, tempfiles, unittest]
 
 when defined(linux) and defined(amd64):
   import repro_hcr_agent
@@ -77,6 +77,14 @@ when defined(linux) and defined(amd64):
       let workDir = repoRoot / "build" / "hcr-linux-m2-exhaust"
       let agentDir = repoRoot / "libs" / "repro_hcr_agent" / "c"
       createDir(workDir)
+      # The agent socket cannot live under the work directory. sun_path is
+      # 108 bytes and the checkout prefix alone can exhaust it: the CI runner's
+      # is 57, which leaves too little for the rest and the gate dies on
+      # "socket path too long" before it asserts anything. Build artifacts stay
+      # where they were; only the socket moves to a short private directory,
+      # removed with the case.
+      let socketRoot = createTempDir("hlx-", "", "/tmp")
+      defer: removeDir(socketRoot)
 
       ck "gcc is on PATH", findExe("gcc").len > 0
       let compileFlags = patchableCompileFlags(ReproHcr())
@@ -102,7 +110,7 @@ when defined(linux) and defined(amd64):
       ck "the target was built", fileExists(targetBin)
 
       proc runCase(mode, patchId: string): RunOutcome =
-        let socketPath = workDir / (patchId & ".sock")
+        let socketPath = socketRoot / (patchId & ".sock")
         removeFile(socketPath)
         var listener = listenHcrAgentUnixSocket(socketPath)
         defer: listener.close()

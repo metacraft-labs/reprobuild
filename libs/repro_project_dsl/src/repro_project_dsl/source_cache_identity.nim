@@ -11,6 +11,9 @@ import blake3
 import repro_binary_cache_client/cache_key
 import repro_core
 
+import repro_binary_cache_server/types as bc_types
+import ./target_platform
+
 proc cacheIdentityExtendedPath(path: string): string =
   when defined(windows):
     if path.len == 0 or path.startsWith("\\\\"):
@@ -32,6 +35,18 @@ proc sourceProviderRevisionHex*(projectRoot: string): string =
     return ""
   let full = blake3.toHex(blake3.digest(body))
   if full.len >= 32: full[0 ..< 32] else: full
+
+proc sourceIdentityPlatform*(): PlatformTriple =
+  ## The platform a source-built package's identity names: the build host's
+  ## public-interface triple for a native build, and for a cross build
+  ## (`repro build --target=<triple>`) the platform the CONSUMING host of
+  ## that target derives (`target_platform`), so the entry a cross build
+  ## publishes carries the key -- and passes the compat check -- of the
+  ## appliance that substitutes it, not of the build box that made it
+  ## (ReproOS-Add-On-Mode A15, fourth deliverable).
+  let triple = activeTargetTripleTag()
+  if triple.len == 0: publicInterfaceTriple()
+  else: consumerPlatformForTarget(triple)
 
 proc sourceCacheEntryIdentity*(projectRoot, packageName, packageVersion,
                                conventionTag: string): CacheEntryIdentity =
@@ -87,7 +102,7 @@ proc sourceCacheEntryIdentity*(projectRoot, packageName, packageVersion,
   result = newCacheEntryIdentity(
     packageName = packageName,
     packageVersion = packageVersion,
-    platform = publicInterfaceTriple(),
+    platform = sourceIdentityPlatform(),
     toolchain = publicInterfaceToolchain(conventionTag),
     providerRevision = providerRevision)
   result.addOption(PendingCacheIdentityOptionKey,

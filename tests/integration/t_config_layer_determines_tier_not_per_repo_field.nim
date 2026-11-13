@@ -148,7 +148,7 @@ suite "HL-1 — tier is determined by the declaring layer, not a per-repo field"
           entry: LockingRouteEntry(visibility: "public",
             backend: "committed-file", repos: @["shhh"]),
           layer: clkParentWorkspace,
-          source: ws / ".repro-workspace.toml",
+          source: ws / "repro-workspace.toml",
           repos: @["shhh"])])
       let asgPublic = resolveRepoBackends(
         composedPublic, repos, ws, identity, gitBin)

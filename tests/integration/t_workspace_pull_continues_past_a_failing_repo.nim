@@ -106,9 +106,9 @@ proc buildWorkspace(root, prefix: string;
   var includes: seq[string]
   for repo in repos:
     writeFile(root / "repos" / (repo.name & ".toml"),
-      "schema = \"reprobuild.workspace.repo.v1\"\n\n" &
+      "schema = \"reprobuild.workspace.repo.v2\"\n\n" &
       "[repo]\nname = \"" & repo.name & "\"\npath = \"" & repo.name & "\"\n" &
-      "remote = \"org\"\nbranch = \"" & repo.branch & "\"\n")
+      "remote = \"org\"\nmainline = \"" & repo.branch & "\"\n")
     includes.add("repos/" & repo.name & ".toml")
   var project = "schema = \"reprobuild.workspace.project.v1\"\n\n" &
     "[project]\nname = \"demo\"\n\n" &
@@ -118,8 +118,8 @@ proc buildWorkspace(root, prefix: string;
     project.add("  \"" & inc & "\",\n")
   project.add("]\n")
   writeFile(root / "projects" / "demo.toml", project)
-  writeFile(root / ".repro" / "workspace.toml",
-    "schema = \"reprobuild.workspace.local.v1\"\n\n" &
+  writeFile(root / ".repro" / "workspace-state.toml",
+    "schema = \"reprobuild.workspace.state.v1\"\n\n" &
     "[workspace]\nproject = \"demo\"\nprojects = [\"demo\"]\n")
 
 proc breakPostCheckoutHook(checkout: string) =

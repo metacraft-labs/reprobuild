@@ -1,0 +1,4 @@
+let compiler = "rustc"
+let metadata = newStringTable("CC", compiler)
+discard execCmdEx(getAppFilename(),
+  options = {poUsePath}, env = metadata)

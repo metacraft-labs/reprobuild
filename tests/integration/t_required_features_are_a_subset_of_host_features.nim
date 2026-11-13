@@ -33,34 +33,39 @@
 ##      variable, the real ``cpuid`` probe behind ``auto``, and the
 ##      DEFAULT-PARAMETER seam that carries either into selection without
 ##      selection ever reading the environment itself;
-##   8. the standard library is still in the levelless AND featureless class,
-##      and every registered catalog still round-trips byte-identically through
-##      ``serializeAsCode`` — the "emit a new field only when non-default" rule
-##      PMC-2 established, extended to ``cpu_features``.
+##   8. the standard library is still in the levelless AND featureless class
+##      (no linked package's ``tarball`` realization declares ``cpuLevel`` or
+##      ``cpuFeatures``), and ``serializeAsCode`` — the harvester's parse
+##      model — still emits a capability field only when non-default.
 ##
 ## Falsifiable — each of these was applied, the failure observed, the source
-## restored: change ``satisfiesFeatures``'s ``<=`` to ``==`` and (1) fails on
-## every strict-superset host. Drop the ``cpu_features`` term from
-## ``requiredFeatures`` and (2) and (4) fail. Invert the same-tier capability
-## comparison in ``selectPlatformBinaryEx`` and (5) fails. Disable the
-## validator's feature-family check and (4) fails; revert the duplicate-slice
-## key to (cpu, os, level) and (5)'s fixture fails validation. Stub
-## ``resolveBuiltinPackage``'s ``hostFeatures`` default to ``{}`` and (7)
-## fails while everything else here still passes — which is what makes (7)
-## cover the seam rather than the arithmetic behind it. Emit ``cpu_features``
-## unconditionally in ``serializePlatformBinary`` and (8) fails on every
-## registered catalog.
+## restored (originally against the pre-GM4b resolver; the same mutations
+## apply to the GM4b code named here): change ``satisfiesFeatures``'s ``<=``
+## to ``==`` and (1) fails on every strict-superset host. Drop the
+## ``cpu_features`` term from ``requiredFeatures`` and (2) and (4) fail. Invert
+## the same-tier capability comparison in ``selectArm`` and (5) fails. Disable
+## the validator's feature-family check and (4) fails; revert the
+## duplicate-slice key to (cpu, os, level) and (5)'s fixture fails validation.
+## Make ``environmentHostTarget`` ignore ``detectHostCpuFeatures`` and (7)
+## fails on an x86_64 host while everything else here still passes — which is
+## what makes (7) cover the seam rather than the arithmetic behind it. Emit
+## ``cpu_features`` unconditionally in ``serializePlatformBinary`` and (8)'s
+## positive rule fails.
 ##
-## Hermetic: synthetic catalogs, synthetic host targets through the defaulted
-## ``hostCpu`` / ``hostOs`` / ``hostLevel`` / ``hostFeatures`` parameters. No
+## GM4b: the user-facing selection runs over ``tarball`` records through
+## ``realization_selection.selectTarballRecord`` — the selection recipes and
+## profiles share.
+##
+## Hermetic: synthetic catalogs and records, explicit synthetic targets. No
 ## AVX-512 hardware, and — as (3) shows by construction — no host probing at
-## all.
+## all outside (7).
 
-import std/[options, os, strutils, unittest]
+import std/[options, os, sets, strutils, unittest]
 
 import repro_dsl_stdlib/packages_schema
-import repro_dsl_stdlib/catalog_registry
+import repro_dsl_stdlib/package_registry
 import repro_home_apply/package_catalog
+import ./pmc_selection_support
 
 const Sha =
   "5555555555555555555555555555555555555555555555555555555555555555"
@@ -86,6 +91,13 @@ proc fixture(arms: seq[PlatformBinary]): seq[VersionedProvisioning] =
 proc host(level = mlNone; features: set[CpuFeature] = {}): PlatformTarget =
   initPlatformTarget(pcX86_64, level, features)
 
+proc record(tag: string; level = mlNone;
+            features: set[CpuFeature] = {}): InterfaceTarballProvisioning =
+  ## The same requirement as ``arm``, spelled as a ``tarball`` statement.
+  tarballRecord("https://example.invalid/" & tag & ".tar.gz", Sha,
+    level = (if level == mlNone: "" else: describeMicroarchLevel(level)),
+    features = renderCpuFeatureTokens(features))
+
 const AllLevels = [mlNone, mlX86_64_v1, mlX86_64_v2, mlX86_64_v3, mlX86_64_v4]
 
 suite "PMC-3 — required features are a subset of host features":
@@ -95,49 +107,46 @@ suite "PMC-3 — required features are a subset of host features":
     # ---- (1) subset selects, including a strict superset host -----------
     block subsetSelects:
       # The shape no level can express: v3 plus two AVX-512 extensions.
-      let cat = fixture(@[arm("avx512-slice", mlX86_64_v3,
-        {cfAvx512f, cfAvx512vl})])
+      let records = @[record("avx512-slice", mlX86_64_v3,
+        {cfAvx512f, cfAvx512vl})]
 
       # Exactly satisfied.
-      let exact = resolveBuiltinPackage("demo", cat, "", pcX86_64, poLinux,
+      let exact = selectFor(records, pcX86_64, poLinux,
         mlX86_64_v3, {cfAvx512f, cfAvx512vl})
-      check exact.found
-      check exact.resolution.urlUsed ==
-        "https://example.invalid/avx512-slice.tar.gz"
-      check exact.resolution.builtinCpuLevel == mlX86_64_v3
-      check exact.resolution.builtinCpuFeatures == {cfAvx512f, cfAvx512vl}
+      check exact.choice.status == kcSelected
+      check exact.record.url == "https://example.invalid/avx512-slice.tar.gz"
+      let archive = archiveRealizationOf("demo", exact.record)
+      check archive.builtinCpuLevel == mlX86_64_v3
+      check archive.builtinCpuFeatures == {cfAvx512f, cfAvx512vl}
 
       # Strictly MORE than required. A subset test must accept this; an
       # equality test would not, and equality is the shape every other axis
       # in this schema has, so it is the plausible wrong implementation.
-      let superset = resolveBuiltinPackage("demo", cat, "", pcX86_64, poLinux,
+      let superset = selectFor(records, pcX86_64, poLinux,
         mlX86_64_v4, {cfAvx512Vnni, cfAvx512Bf16, cfSha})
-      check superset.found
-      check superset.resolution.urlUsed ==
+      check superset.choice.status == kcSelected
+      check superset.record.url ==
         "https://example.invalid/avx512-slice.tar.gz"
 
-      # A host stating the same capability WITHOUT the level shorthand:
-      # v3's set spelled out, plus the two extensions. Same answer, because
-      # the comparison is on the expanded sets and nothing downstream can
-      # tell which spelling produced them.
-      let spelledOut = resolveBuiltinPackage("demo", cat, "", pcX86_64,
-        poLinux, mlNone, X86_64_V3_Features + {cfAvx512f, cfAvx512vl})
-      check spelledOut.found
-      check spelledOut.resolution.urlUsed ==
+      # A host stating the same capability WITHOUT the level shorthand.
+      let spelledOut = selectFor(records, pcX86_64, poLinux, mlNone,
+        X86_64_V3_Features + {cfAvx512f, cfAvx512vl})
+      check spelledOut.choice.status == kcSelected
+      check spelledOut.record.url ==
         "https://example.invalid/avx512-slice.tar.gz"
 
     # ---- (2) ONE missing feature refuses --------------------------------
     block oneMissingFeatureRefuses:
       let cat = fixture(@[arm("avx512-slice", mlX86_64_v3,
         {cfAvx512f, cfAvx512vl})])
+      let records = @[record("avx512-slice", mlX86_64_v3,
+        {cfAvx512f, cfAvx512vl})]
 
-      # Drop exactly one of the two required extensions. Everything else the
-      # arm asks for is present.
-      let short = resolveBuiltinPackage("demo", cat, "", pcX86_64, poLinux,
-        mlX86_64_v3, {cfAvx512f})
-      check not short.found
-      check short.error == breMicroarchFloorNotSatisfied
-      check short.resolution.urlUsed == ""
+      # Drop exactly one of the two required extensions.
+      let short = selectFor(records, pcX86_64, poLinux, mlX86_64_v3,
+        {cfAvx512f})
+      check short.choice.status == kcCapabilityShortfall
+      check short.record.url == ""
 
       # And the shortfall is that one feature, not a vague "some".
       let sel = selectPlatformBinaryEx(cat[0], host(mlX86_64_v3,
@@ -330,11 +339,12 @@ suite "PMC-3 — required features are a subset of host features":
     #     one thing that is true of every amd64 chip by definition: it
     #     provides at least the ``x86-64-v1`` baseline. That is a real
     #     assertion on real silicon and it is still host-independent;
-    #   * the DEFAULT-PARAMETER seam — the env var reaches
-    #     ``resolveBuiltinPackage`` through its defaulted ``hostFeatures``,
-    #     which the call in that block deliberately does not pass. Without
-    #     this the parameter could be plumbed correctly and the default
-    #     wired to nothing, and every other block here would still pass.
+    #   * the HOST-TARGET seam — the env var reaches selection through the
+    #     host's realization target (``profileRealizationTarget(...,
+    #     isHost = true)`` -> ``hostTarget()``), which the selection call in
+    #     that block does not build by hand. Without this the target could be
+    #     plumbed correctly and the declaration wired to nothing, and every
+    #     other block here would still pass.
     #
     # Why the probe is NOT the default is a policy decision rather than an
     # omission, and it is asserted too: an unset variable declares NOTHING,
@@ -382,28 +392,34 @@ suite "PMC-3 — required features are a subset of host features":
       putEnv(HostCpuFeaturesEnvVar, "avx512vl+avx512vnni")
       check detectHostCpuFeatures(pcX86_64) == {cfAvx512vl, cfAvx512Vnni}
 
-      # THE SEAM: no ``hostFeatures`` argument here. The declaration has to
-      # reach selection through the default-parameter expression, and it is
-      # ADDITIVE on top of the level rather than a replacement — this call
-      # says v3 through one variable and avx512vl through another.
+      # THE SEAM: the declarations reach selection through the host's
+      # realization target (``profileRealizationTarget(..., isHost = true)``
+      # reads ``hostTarget()``), and the feature declaration is ADDITIVE on
+      # top of the level. The x86_64 feature axis can only describe an
+      # x86_64 host, so selection through the seam is exercised where the
+      # host IS x86_64. On another family the same declaration is REFUSED at
+      # the seam — an x86 feature on an aarch64 host is never satisfiable —
+      # which still proves the declaration reaches it.
+      let v3PlusVlRecords = @[record("needs-vl", mlX86_64_v3, {cfAvx512vl})]
       putEnv(HostMicroarchLevelEnvVar, "v3")
       putEnv(HostCpuFeaturesEnvVar, "avx512vl")
-      let viaDefaults = resolveBuiltinPackage("demo", v3PlusVl, "",
-        pcX86_64, poLinux)
-      check viaDefaults.found
-      check viaDefaults.resolution.urlUsed ==
-        "https://example.invalid/needs-vl.tar.gz"
-
-      # Talked DOWN by dropping the feature half: the level alone is not
-      # enough, and the same call now refuses. This is the "target a floor
-      # below the builder" property PMC-2 built and PMC-4 depends on,
-      # extended to the feature axis.
-      delEnv(HostCpuFeaturesEnvVar)
-      let talkedDown = resolveBuiltinPackage("demo", v3PlusVl, "",
-        pcX86_64, poLinux)
-      check not talkedDown.found
-      check talkedDown.error == breMicroarchFloorNotSatisfied
-      check talkedDown.errorDetail.contains("missing cpu features: avx512vl")
+      if detectHostCpu() == pcX86_64:
+        let viaDefaults = selectTarballRecord(v3PlusVlRecords,
+          profileRealizationTarget("linux", "x86_64", isHost = true))
+        check viaDefaults.status == kcSelected
+        check v3PlusVlRecords[viaDefaults.index].url ==
+          "https://example.invalid/needs-vl.tar.gz"
+        # Talked DOWN by dropping the feature half: the level alone is not
+        # enough, and the same call now refuses.
+        delEnv(HostCpuFeaturesEnvVar)
+        let talkedDown = selectTarballRecord(v3PlusVlRecords,
+          profileRealizationTarget("linux", "x86_64", isHost = true))
+        check talkedDown.status == kcCapabilityShortfall
+        check talkedDown.detail.contains("missing cpu features: avx512vl")
+      else:
+        expect ValueError:
+          discard profileRealizationTarget("linux", "x86_64", isHost = true)
+        delEnv(HostCpuFeaturesEnvVar)
 
       # An unreadable value is REFUSED, not quietly defaulted.
       putEnv(HostCpuFeaturesEnvVar, "avx512vl,not-a-real-feature")
@@ -446,35 +462,27 @@ suite "PMC-3 — required features are a subset of host features":
     # rewrite all 259 checked-in catalogs and break the harvester's
     # idempotent-harvest property.
     block stdlibIsStillFeatureless:
-      var toolsSeen = 0
-      var armsSeen = 0
-      for tool in RegisteredTools:
-        let catOpt = getCatalog(tool)
-        if catOpt.isNone:
+      var packagesSeen = 0
+      var recordsSeen = 0
+      for name in linkedPackageNames():
+        let records = profileToolUse(name).useDef.tarballProvisioning
+        if records.len == 0:
           continue
-        let cat = catOpt.get
-        if cat.len == 0:
-          continue
-        inc toolsSeen
-        for vp in cat:
-          for pb in vp.platforms:
-            inc armsSeen
-            if pb.cpu_features != {}:
-              checkpoint tool & " " & vp.version & " declares cpu_features " &
-                describeCpuFeatures(pb.cpu_features) &
-                " — this test's premise no longer holds for it"
-            check pb.cpu_features == {}
-            check requiredFeatures(pb) == {}
-            check armCapabilityRank(pb) == 0
-          # The serialized form must mention neither capability field.
-          let code = serializeAsCode(vp)
-          if code.contains("cpu_features"):
-            checkpoint tool & " " & vp.version &
-              " serializes a cpu_features field"
-          check not code.contains("cpu_features")
-          check not code.contains("cpu_level")
-      check toolsSeen > 0
-      check armsSeen > 0
+        inc packagesSeen
+        for r in records:
+          inc recordsSeen
+          if r.detail.cpuLevel.len > 0 or r.detail.cpuFeatures.len > 0:
+            checkpoint name & " " & r.url & " declares cpuLevel '" &
+              r.detail.cpuLevel & "' / cpuFeatures '" & r.detail.cpuFeatures &
+              "' — this test's premise no longer holds for it"
+          check r.detail.cpuLevel == ""
+          check r.detail.cpuFeatures == ""
+          let arm = tarballArm(r)
+          check arm.ok
+          check requiredFeatures(arm.arm) == {}
+          check armCapabilityRank(arm.arm) == 0
+      check packagesSeen > 0
+      check recordsSeen > 0
 
       # The rule stated positively, so the block cannot pass by the
       # serializer having simply lost the ability to emit the field.

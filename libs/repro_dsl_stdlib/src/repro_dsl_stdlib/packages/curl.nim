@@ -13,10 +13,13 @@ package curl:
     scoopApp(bucket = "main", app = "git",
       preferredVersion = ">=2", executablePath = "mingw64/bin/curl.exe",
       requiresExecutionProfileChecksum = false)
+    # `version` is curl's, not Git's: `mingw64/bin/curl.exe --version`
+    # here reports 8.19.0.
     tarball url = "https://github.com/git-for-windows/git/releases/download/v2.54.0.windows.1/PortableGit-2.54.0-64-bit.7z.exe",
       sha256 = "bea006a6cc69673f27b1647e84ab3a68e912fbc175ab6320c5987e012897f311",
       archiveType = "7z.exe",
       executablePath = "mingw64/bin/curl.exe",
+      version = "8.19.0",
       packageId = "git@2.54.0",
       cpu = "x86_64",
       os = "windows",

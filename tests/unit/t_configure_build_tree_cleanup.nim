@@ -383,3 +383,20 @@ suite "configure build-tree cleanup caching":
       check compile.inputs == cleanup.outputs
     else:
       skip()
+
+when defined(reproProviderMode):
+  suite "cmake build script library path":
+    test "the dependency library path is exported unless the recipe opts out":
+      # Ninja runs each command through /bin/sh; where that is a dynamically
+      # linked bash, an exported source-built readline breaks every command.
+      let dirs = @["/deps/readline/usr/lib", "/deps/zlib/usr/lib"]
+      let argv = @["cmake", "--build", "build", "--parallel"]
+      let exported = cmakeBuildScript(dirs, argv, "/r/stamp")
+      check "export LD_LIBRARY_PATH=\"/deps/readline/usr/lib:/deps/zlib/usr/lib:" in
+        exported
+      check "\"cmake\" \"--build\" \"build\" \"--parallel\"; " in exported
+      let optedOut = cmakeBuildScript(dirs, argv, "/r/stamp",
+        exportLibraryPath = false)
+      check "LD_LIBRARY_PATH" notin optedOut
+      check optedOut == "set -e; \"cmake\" \"--build\" \"build\" \"--parallel\"; " &
+        ": > \"/r/stamp\""

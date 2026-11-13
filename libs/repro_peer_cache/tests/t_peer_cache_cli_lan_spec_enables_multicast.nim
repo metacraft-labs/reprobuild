@@ -76,6 +76,17 @@ suite "peer-cache CLI lan:// spec enables multicast":
 
     # Pick a high port distinct from the discovery test groups so
     # parallel test runs don't conflict.
+    # Every peer-cache node is a TLS node (Distributed-Execution M7 removed
+    # CIDR-only trust), so the node this command starts needs its host CA
+    # and an anchor directory — here the node's own CA, the setup of a host
+    # with no peers yet — under a state home of the test's own.
+    let prevState = getEnv("XDG_STATE_HOME")
+    let tlsDir = tmpDir / "xdg" / "repro-peer-cache" / "tls"
+    putEnv("XDG_STATE_HOME", tmpDir / "xdg")
+    discard loadOrCreateHostIdentity(tlsDir / "host-ca.crt",
+      tlsDir / "host-ca.key")
+    createDir(tlsDir / "anchors")
+    copyFile(tlsDir / "host-ca.crt", tlsDir / "anchors" / "self.crt")
     let prevCwd = getCurrentDir()
     setCurrentDir(tmpDir)
     try:
@@ -97,6 +108,8 @@ suite "peer-cache CLI lan:// spec enables multicast":
       check runtime.server.started
     finally:
       setCurrentDir(prevCwd)
+      if prevState.len > 0: putEnv("XDG_STATE_HOME", prevState)
+      else: delEnv("XDG_STATE_HOME")
       let runtime = lastStartedPeerCacheRuntime
       if not runtime.client.isNil:
         try: waitFor runtime.client.stop() except CatchableError: discard

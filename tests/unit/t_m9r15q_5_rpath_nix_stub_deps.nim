@@ -48,6 +48,7 @@
 ##      path.
 
 import std/[envvars, os, osproc, streams, strutils, tempfiles, unittest]
+import repro_test_support/reasoned_skip
 
 import repro_dsl_stdlib/types/package_result
 

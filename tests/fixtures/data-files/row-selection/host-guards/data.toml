@@ -1,0 +1,19 @@
+[[package]]
+name = "steam"
+activity = "default"
+when = "host == \"home-pc\""
+
+[[package]]
+name = "obs"
+activity = "default"
+when = "host in [\"home-pc\", \"m1\"]"
+
+[[package]]
+name = "fail2ban"
+activity = "default"
+when = "host != \"home-pc\""
+
+[[package]]
+name = "nvtop"
+activity = "default"
+when = "not (host == \"m1\")"

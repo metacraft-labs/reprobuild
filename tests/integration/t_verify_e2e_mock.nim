@@ -47,6 +47,8 @@
 
 import std/[net, options, os, posix, strutils, times, unittest]
 
+import repro_test_support/process_fixtures
+
 import repro_attest
 import repro_attest_agent
 import repro_attest_verify
@@ -132,6 +134,12 @@ proc baseUrl(h: AgentHarness): string =
   "http://127.0.0.1:" & $int(h.port)
 
 let scratch = getTempDir() / ("reproos-attest-verify-" & $getCurrentProcessId())
+# Removed when THIS process exits, whichever cases it ran — not by a final
+# "teardown" case, which under the runner's one-process-per-case model ran in
+# one process and left every other case process's scratch behind. Registering
+# a path that is never created is harmless. See
+# ``repro_test_support/process_fixtures``.
+releaseDirAtProcessExit(scratch)
 
 proc scratchFile(name, content: string): string =
   createDir(scratch)
@@ -560,7 +568,3 @@ suite "manifest to agent to verdict, over a socket, with no hardware":
       "--challenge-file", challengePath,
       "--out", verdictPath]) == AttestExitRejected
     check "verdict: rejected" in readFile(verdictPath)
-
-  test "the scratch directory is removed":
-    removeDir(scratch)
-    check not dirExists(scratch)

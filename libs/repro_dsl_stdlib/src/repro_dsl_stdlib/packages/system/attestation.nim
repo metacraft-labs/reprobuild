@@ -69,16 +69,32 @@
 ## Hence the rule: a tier that is not `mock` requires an image layout
 ## that can carry an integrity-checked, read-only root.
 ##
-## ## What the rule does not check, stated plainly
+## ## Where `imageLayout` comes from, and why that is the whole question
 ##
-## `imageLayout` is the name the image recipe was given. This module
-## cannot observe the disk it will run on — at plan time there is no such
-## disk, and at run time the agent is inside the image rather than above
-## it. So the rule cross-checks TWO DECLARATIONS that would otherwise
-## only meet at boot: the tier this profile enables, and the layout the
-## image it is installed into was built for. A profile that names a
-## layout its image was not built with is not caught here, and nothing at
-## plan time could catch it.
+## This module cannot observe a disk: at plan time there is no disk, and
+## at run time the agent is inside the image rather than above it. So the
+## value has to be handed to it, and everything depends on who by.
+##
+## `attestationConfig` takes it as a STRING THE PROFILE WRITES. Against
+## such a value the rule below cross-checks two declarations, and the one
+## failure it cannot see is the two disagreeing — a profile that says
+## `uefi-attested` while its image was built `uefi-ext4` plans, applies,
+## boots, and runs an agent quoting a launch measurement of a root
+## filesystem that is writable for the life of the boot. Nothing fails. A
+## verifier accepts the quote, because the quote is honest about a
+## machine that is not.
+##
+## `attestationConfigForImage` is the entry point that closes that. It
+## takes the `reproos.image-layout.v1` record the IMAGE BUILD published —
+## a document whose layout name the build refuses to publish unless it is
+## the name of the layout that rendered the partition table it actually
+## applied — and takes `imageLayout` from there. A profile may still name
+## a layout of its own, and then the two must agree: a disagreement is
+## refused at plan time, naming both. See `repro_attest/image_layout`.
+##
+## `attestationConfig` is kept, because a deployment that has no image
+## record yet — a mock-tier development machine, a test — still has to be
+## configurable. What it cannot do is tell you whether it is right.
 ##
 ## ## Mocking
 ##
@@ -87,6 +103,7 @@
 
 import std/strutils
 
+import repro_attest/image_layout
 import repro_attest/report
 import repro_attest_agent/unit
 import repro_profile
@@ -101,6 +118,10 @@ export config_violation
 # set of roots of trust is a property of the evidence model, not of the
 # activity that switches one on.
 export report.AttestationTier
+
+# The record's name, re-exported so a profile that reads it out of the
+# image writes the constant rather than a second copy of the filename.
+export image_layout.ImageLayoutRecordFileName
 
 # The agent's own defaults, re-exported so a profile that wants to name
 # one writes the constant rather than a second copy of its value.
@@ -189,6 +210,54 @@ proc attestationConfig*(imageLayout: string;
     exposeRemotely: exposeRemotely,
     provisionedSecretsDir: provisionedSecretsDir,
     imageLayout: imageLayout)
+
+proc attestationConfigForImage*(imageLayoutRecord: string;
+                                tier = atMock;
+                                declaredLayout = "";
+                                listen = DefaultListen;
+                                exposeRemotely = false;
+                                provisionedSecretsDir =
+                                  DefaultProvisionedSecretsDir):
+    AttestationActivityConfig =
+  ## Build a configuration whose `imageLayout` comes from the image
+  ## instead of from the profile.
+  ##
+  ## `imageLayoutRecord` is the CONTENTS of the
+  ## `reproos.image-layout.v1` document the image build published
+  ## (`ImageLayoutRecordFileName`). Its layout name is the one that
+  ## rendered the partition table that image's disk was created from —
+  ## the build refuses to publish a record for which that is not true —
+  ## so it is a report about an artifact rather than a second opinion
+  ## about an intention.
+  ##
+  ## `declaredLayout` is OPTIONAL and exists to be contradicted. A
+  ## profile that states the layout it believes it is installing into
+  ## gets that belief checked: if it disagrees with the image, the plan
+  ## does not exist and the diagnostic names both. A profile that states
+  ## nothing simply takes the image's answer. Either way the rules below
+  ## decide against what was BUILT.
+  let record = try:
+      parseImageLayoutRecord(imageLayoutRecord)
+    except ImageLayoutRecordError as err:
+      raise newException(EConfigViolation,
+        "the attestation activity was given an image layout record it " &
+        "cannot read, so it cannot tell what layout this image was " &
+        "built with: " & err.msg)
+  if declaredLayout.len > 0 and declaredLayout != record.layout:
+    raise newException(EConfigViolation,
+      "the attestation activity was told this profile's image layout is " &
+      declaredLayout.escape() & ", but the image it configures reports " &
+      "that it was BUILT as " & record.layout.escape() & " — and the " &
+      "image is the one that partitioned the disk. Enabling attestation " &
+      "on the strength of a layout the image does not have is how a " &
+      "machine ends up quoting a launch measurement of a root " &
+      "filesystem that stays writable: the quote is honest, and it is " &
+      "about a machine that is not the one described here. Either build " &
+      "the image as " & declaredLayout.escape() &
+      ", or drop the declaration and take " & record.layout.escape() &
+      " from the image.")
+  attestationConfig(record.layout, tier, listen, exposeRemotely,
+    provisionedSecretsDir)
 
 proc unitOptionsFor*(cfg: AttestationActivityConfig): UnitOptions =
   ## The service-unit options this configuration implies.

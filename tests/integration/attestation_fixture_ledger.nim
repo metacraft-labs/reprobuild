@@ -10,6 +10,10 @@
 ##   * `attestation-corpus-census.tsv` — every file in this directory
 ##     carrying pinned bytes, and whether those bytes have a lifecycle
 ##     at all. This is the stable-versus-refreshed separation.
+##   * `attestation-fixture-fetch.tsv` — the artifacts one HTTP GET
+##     returns. Read here as well as by the monitor because it is half
+##     of a structural rule: an artifact pinned for being OLD must not
+##     also claim an unattended route to the publisher's current answer.
 ##
 ## ## Why tables rather than Nim constants
 ##
@@ -67,13 +71,21 @@ type
     refresh*: string
     note*: string
 
+  FetchRow* = object
+    ## An artifact one HTTP GET returns, and the normalization that
+    ## makes the response equal the pinned bytes.
+    name*: string
+    url*: string
+    normalize*: string
+
 const
   LedgerText* = staticRead("attestation-fixture-ledger.tsv")
   PublishersText* = staticRead("attestation-fixture-publishers.tsv")
   CensusText* = staticRead("attestation-corpus-census.tsv")
+  FetchText* = staticRead("attestation-fixture-fetch.tsv")
 
-  LedgerReferenceInstant* = 1_790_640_000'i64
-    ## 2026-09-29T00:00:00Z. The instant the corpus census cases judge
+  LedgerReferenceInstant* = 1_790_985_600'i64
+    ## 2026-10-03T00:00:00Z. The instant the corpus census cases judge
     ## the pinned material at.
     ##
     ## PINNED, and that is deliberate rather than lazy. A case that
@@ -81,9 +93,39 @@ const
     ## day and would eventually fail for a reason that is not a defect —
     ## which is how a gate gets disabled. The calendar belongs to the
     ## scheduled monitor, which uses the wall clock precisely because
-    ## noticing the calendar is its whole job. This constant moves when
-    ## somebody refreshes the corpus, and moving it is a decision with a
-    ## diff.
+    ## noticing the calendar is its whole job.
+    ##
+    ## It is also DERIVED rather than chosen, which is what stops a
+    ## pinned instant drifting quietly into the past until the cases
+    ## over it describe a corpus nobody has: it is the UTC midnight that
+    ## ENDS the latest `observed` date in the ledger — the close of the
+    ## last day anybody went to a publisher.
+    ## `t_attestation_fixture_lifecycle` recomputes it from that column
+    ## and requires equality, and the column in turn is required to
+    ## overlap the window each observed artifact states, so neither side
+    ## is free.
+    ##
+    ## The midnight that ENDS the day and not the one that opens it, and
+    ## this is a repair rather than a preference. `observed` is a DATE,
+    ## so it fixes the judging instant only to within a day, and the
+    ## opening midnight is the one instant in that day at which an
+    ## artifact fetched later the same day is *not yet in force*. That is
+    ## not hypothetical: seven of these artifacts were re-fetched at
+    ## 17:13–17:28 UTC — and an eighth re-minted from one of them — and
+    ## under the opening midnight all eight classify `lsNotYetInForce`:
+    ## a corpus freshly taken from the publisher reported as a clock
+    ## fault. The closing midnight has no
+    ## such instant, because a document the publisher SERVED on a given
+    ## day was in force at some point in that day and therefore at its
+    ## end.
+    ##
+    ## It moves the instant LATER, which is the strict direction: later
+    ## can only turn `lsCurrent` into `lsDueForRefresh` or `lsExpired`,
+    ## never the reverse, so nothing this instant judges can be made to
+    ## look healthier by the change. The one status it can suppress is
+    ## `lsNotYetInForce`, which is exactly the artifact of the old rule —
+    ## and the case that every observed row overlaps its own window keeps
+    ## that from becoming a way to hide a document from the future.
 
 proc tsvRows(text: string; columns: int; what: string): seq[seq[string]] =
   ## Every non-comment, non-blank line of a table, split on tabs.
@@ -115,6 +157,10 @@ proc publisherRows*(): seq[PublisherRow] =
 proc censusRows*(): seq[CensusRow] =
   for f in tsvRows(CensusText, 4, "the corpus census"):
     result.add CensusRow(path: f[0], kind: f[1], refresh: f[2], note: f[3])
+
+proc fetchRows*(): seq[FetchRow] =
+  for f in tsvRows(FetchText, 3, "the fetch table"):
+    result.add FetchRow(name: f[0], url: f[1], normalize: f[2])
 
 proc integrationDir*(): string =
   ## This directory, located from this file rather than from the working

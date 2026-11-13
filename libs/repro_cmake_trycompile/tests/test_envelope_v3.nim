@@ -34,6 +34,7 @@ suite "trycompile.rbsz v3 envelope":
       actions: @[
         TryCompileActionDef(
           id: "compile-debug",
+          optionalOutputs: @["optional.lib"],
           inline: true,
           inlineArgv: @["gcc", "-c", "src.c", "-o", "src.debug.o"],
           inlineCwd: "",
@@ -109,7 +110,7 @@ suite "trycompile.rbsz v3 envelope":
     # comparing the encoder's output against the encoder's own constant
     # would agree with any bump, including one that forgot to teach the
     # decoder about the new trailer.
-    check encoded[4] == byte(4)
+    check encoded[4] == byte(5)
     check encoded[5] == byte(0)
 
     let decoded = decodeTryCompileMetadata(encoded)
@@ -119,7 +120,9 @@ suite "trycompile.rbsz v3 envelope":
     check decoded.pools[0].capacity == 2'u32
     check decoded.actions.len == 2
     check decoded.actions[0].id == "compile-debug"
+    check decoded.actions[0].optionalOutputs == @["optional.lib"]
     check decoded.actions[1].id == "compile-release"
+    check decoded.actions[1].optionalOutputs.len == 0
     check decoded.targets.len == 2
     check decoded.targets[0].name == "myTarget:Debug"
     check decoded.targets[0].actionIds == @["compile-debug"]

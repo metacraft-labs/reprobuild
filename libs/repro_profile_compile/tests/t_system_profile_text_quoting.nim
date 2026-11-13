@@ -1,0 +1,245 @@
+## The `system.nim` text form carries every field value byte for byte.
+##
+## Governing spec: ``reprobuild-pm/spec/System-Profile-And-Infra-Apply.md``
+## §Intent Layer, "The text form" — a field value is a double-quoted string
+## whose only escape is a doubled quote (``""`` for ``"``); a ``#`` inside a
+## value, on any of its lines, is value text.
+##
+## Why it matters: every compiled profile reaches the apply as text
+## (``renderSystemProfileToText`` -> ``parseSystemProfile``), and every
+## generation stores that text for rollback. Before this, a value could not
+## hold a ``"`` at all (both renderers raised), so YAML, udev rules and
+## ``caches.conf`` had to ride a side channel; and the parser stripped
+## comments per line, so a multi-line value lost its ``#`` lines and was cut
+## at an in-value ``#`` without a word (reprobuild-pm issue
+## ``2026-10-30-system-profile-text-parser-drops-hash-text-inside-multi-line-quoted-values``).
+##
+## No mocks: the real DSL templates, the real adapter and renderer, the real
+## parser, and the real editor on a real temporary file.
+
+import std/[os, strutils, unittest]
+
+import repro_elevation
+import repro_infra
+import repro_profile
+import repro_profile_compile
+
+const
+  # A unit with a comment line, an in-value `#`, quoted Environment= values,
+  # a `}` and a CRLF line: each one was lost or refused before.
+  Unit = "[Unit]\n" &
+    "Description=\"quoted\" exporter\n" &
+    "# a comment line inside the value\n" &
+    "\n" &
+    "[Service]\n" &
+    "Environment=\"GREETING=hello world\" \"EMPTY=\"\n" &
+    "ExecStart=/bin/sh -c 'echo a#b; test \"$1\" = \"}\"'\r\n" &
+    "\n" &
+    "[Install]\n" &
+    "WantedBy=multi-user.target\n"
+  Yaml = "modules:\n  http_2xx:\n    prober: http\n" &
+    "    http:\n      fail_if_body_not_matches_regexp: [\"ok\"]\n" &
+    "  # yaml comment\n"
+  UdevRule = "SUBSYSTEM==\"usb\", ATTRS{idVendor}==\"0764\", " &
+    "SYMLINK+=\"ups-server-room\"\n"
+  # Edges of the encoding: a value that IS a quote, starts or ends with one,
+  # holds a run of them, or is empty.
+  Edges = ["\"", "\"lead", "trail\"", "a\"\"\"b", "", "#", "\\\\server\\share"]
+
+proc compiledProfile(unit = Unit): SystemProfile =
+  var intent = ProfileIntent(name: "quoting")
+  systemdSystemUnit(intent.resources, name = "q.service", content = unit)
+  fsSystemFile(intent.resources, path = "/etc/q/blackbox.yml", content = Yaml)
+  linuxUdevRule(intent.resources, name = "90-q.rules", content = UdevRule)
+  for i, e in Edges:
+    fsSystemFile(intent.resources, path = "/etc/q/edge" & $i,
+      content = e)
+  profileIntentToSystemProfile(intent)
+
+proc contentOf(sp: SystemProfile; address: string): string =
+  for r in sp.resources:
+    if r.address == address:
+      case r.kind
+      of srkSystemdSystemUnit: return r.suContent
+      of srkFsSystemFile: return r.sfContent
+      of srkLinuxUdevRule: return r.udevContent
+      else: discard
+  raise newException(KeyError, "no resource " & address)
+
+suite "system.nim text form: quoting and comments":
+  test "issue reproduction: a # inside a multi-line value is kept":
+    # The exact stanza from the issue, hand-written.
+    let text = "systemd.systemUnit {\n" &
+      "  name = \"x.service\"\n" &
+      "  content = \"[Service]\n" &
+      "# a comment line\n" &
+      "ExecStart=/bin/echo a#b\n" &
+      "\"\n" &
+      "}\n"
+    let sp = parseSystemProfile(text)
+    check sp.resources.len == 1
+    check sp.resources[0].suContent ==
+      "[Service]\n# a comment line\nExecStart=/bin/echo a#b\n"
+
+  test "comments outside values are still comments":
+    let text = "# leading comment \"with an odd quote\n" &
+      "fs.systemFile { # trailing comment\n" &
+      "  path = \"/etc/q/a\"   # after a value\n" &
+      "  content = \"x#y\" # and another\n" &
+      "}\n# done\n"
+    let sp = parseSystemProfile(text)
+    check sp.resources.len == 1
+    check sp.resources[0].sfPath == "/etc/q/a"
+    check sp.resources[0].sfContent == "x#y"
+
+  test "compiled profile -> text -> parse is byte-identical":
+    let sp = compiledProfile()
+    let text = renderSystemProfileToText(sp)
+    let back = parseSystemProfile(text)
+    check back.resources.len == sp.resources.len
+    for r in sp.resources:
+      check back.contentOf(r.address) == sp.contentOf(r.address)
+    check back.contentOf("systemd.systemUnit:q.service") == Unit
+    check back.contentOf("fs.systemFile:/etc/q/blackbox.yml") == Yaml
+    check back.contentOf("linux.udevRule:90-q.rules") == UdevRule
+    for i, e in Edges:
+      check back.contentOf("fs.systemFile:/etc/q/edge" & $i) == e
+    # And the typed operation the broker receives carries the same bytes.
+    for r in back.resources:
+      if r.kind == srkSystemdSystemUnit:
+        check toPrivilegedOperation(r).suContent == Unit
+
+  test "a doubled quote is the encoding, and only it":
+    check quoteSystemValue("a\"b") == "\"a\"\"b\""
+    check quoteSystemValue("") == "\"\""
+    check quoteSystemValue("C:\\x\\") == "\"C:\\x\\\""
+
+  test "backward compatibility: text written before the escape parses as before":
+    # Single, undecoded backslashes, an empty value, a bool and a list.
+    let text = "windows.registryValue {\n" &
+      "  key = \"HKLM\\SOFTWARE\\Repro\"\n" &
+      "  name = \"\"\n" &
+      "  value = \"\\\\server\\share\"\n" &
+      "}\n"
+    let sp = parseSystemProfile(text)
+    check sp.resources[0].regKey == "HKLM\\SOFTWARE\\Repro"
+    check sp.resources[0].regName == ""
+    check sp.resources[0].regValueLiteral == "\\\\server\\share"
+
+  test "the editor renders, finds and removes a stanza whose value holds }":
+    let dir = getTempDir() / "t_system_profile_text_quoting_" & $getCurrentProcessId()
+    createDir(dir)
+    defer: removeDir(dir)
+    let path = dir / "system.nim"
+    writeFile(path, "")
+    # `Unit` holds a CRLF line: the editor must keep it inside the value
+    # while the file itself is LF (the line ending is decided by the first
+    # line only).
+    let sp = compiledProfile()
+    var doc = loadSystemIntent(path)
+    for r in sp.resources:
+      addResource(doc, r)
+    writeSystemIntent(doc)
+    doc = loadSystemIntent(path)
+    let spans = stanzaSpans(doc)
+    check spans.len == sp.resources.len
+    # Removing the unit (whose content holds `}` and blank lines) removes
+    # exactly it; every other stanza still parses with its bytes intact.
+    # The editor renders an `address =` line whenever a resource's address
+    # is not the parser default (`realWorldIdentity`), so a compiled
+    # profile's addresses (`systemd.systemUnit:...`) survive a round trip
+    # through the text form and a re-parsed stanza keeps its identity --
+    # the ledger of an add-on host names resources by it.
+    var unitAddress, udevAddress, yamlAddress: string
+    for r in sp.resources:
+      case r.kind
+      of srkSystemdSystemUnit: unitAddress = r.address
+      of srkLinuxUdevRule: udevAddress = r.address
+      of srkFsSystemFile:
+        if r.sfPath == "/etc/q/blackbox.yml": yamlAddress = r.address
+      else: discard
+    check removeResource(doc, unitAddress)
+    writeSystemIntent(doc)
+    let after = parseSystemProfile(readFile(path))
+    check after.resources.len == sp.resources.len - 1
+    check after.contentOf(udevAddress) == UdevRule
+    check after.contentOf(yamlAddress) == Yaml
+    for i, e in Edges:
+      var a = ""
+      for r in sp.resources:
+        if r.kind == srkFsSystemFile and r.sfPath == "/etc/q/edge" & $i:
+          a = r.address
+      check after.contentOf(a) == e
+
+  test "the editor on a CRLF file keeps a bare newline inside a value":
+    # The reverse of the case above: a CRLF profile whose value holds LF-only
+    # lines. `lines` is split on `\r\n` only, stanza bounds are counted the
+    # same way, and the bytes written back are the bytes read.
+    let dir = getTempDir() / "t_system_profile_text_quoting_crlf_" &
+      $getCurrentProcessId()
+    createDir(dir)
+    defer: removeDir(dir)
+    let path = dir / "system.nim"
+    let lfValue = "line1\nline2 \"q\"\n# not a comment\n"
+    let crlfText = "fs.systemFile {\r\n  path = \"/etc/q/first\"\r\n" &
+      "  content = " & quoteSystemValue(lfValue) & "\r\n}\r\n"
+    writeFile(path, crlfText)
+    var doc = loadSystemIntent(path)
+    check doc.lineEnding == "\r\n"
+    check doc.lines.len == 4
+    # Adding a resource whose value holds BOTH endings keeps each as written.
+    let mixed = "a\r\nb\nc"
+    var intent = ProfileIntent(name: "crlf")
+    fsSystemFile(intent.resources, path = "/etc/q/second", content = mixed)
+    let r = profileIntentToSystemProfile(intent).resources[0]
+    addResource(doc, r)
+    writeSystemIntent(doc)
+    let back = parseSystemProfile(readFile(path))
+    check back.resources.len == 2
+    check back.contentOf(realWorldIdentity(back.resources[0])) == lfValue
+    check back.contentOf(r.address) == mixed
+    check readFile(path).startsWith(crlfText)
+    # Removing the first stanza removes exactly it, by the parser's bounds.
+    doc = loadSystemIntent(path)
+    check stanzaSpans(doc).len == 2
+    check removeResource(doc, realWorldIdentity(back.resources[0]))
+    writeSystemIntent(doc)
+    let final = parseSystemProfile(readFile(path))
+    check final.resources.len == 1
+    check final.contentOf(r.address) == mixed
+
+  test "the editor appends after a comment-only header and leaves no leading blank":
+    let dir = getTempDir() / "t_system_profile_text_quoting_hdr_" &
+      $getCurrentProcessId()
+    createDir(dir)
+    defer: removeDir(dir)
+    let path = dir / "system.nim"
+    let header = "# rpi2 system profile\n# edited by repro system add\n"
+    writeFile(path, header)
+    var intent = ProfileIntent(name: "hdr")
+    fsSystemFile(intent.resources, path = "/etc/q/one", content = "1\n")
+    fsSystemFile(intent.resources, path = "/etc/q/two", content = "2\n")
+    let rs = profileIntentToSystemProfile(intent).resources
+    var doc = loadSystemIntent(path)
+    addResource(doc, rs[0])
+    writeSystemIntent(doc)
+    # The header stays first; the stanza follows it after one blank line.
+    check readFile(path).startsWith(header & "\nfs.systemFile {")
+    doc = loadSystemIntent(path)
+    addResource(doc, rs[1])
+    writeSystemIntent(doc)
+    check parseSystemProfile(readFile(path)).resources.len == 2
+    # Removing the first stanza of a header-less file leaves no blank line
+    # at the top.
+    writeFile(path, "")
+    doc = loadSystemIntent(path)
+    addResource(doc, rs[0])
+    addResource(doc, rs[1])
+    writeSystemIntent(doc)
+    doc = loadSystemIntent(path)
+    check removeResource(doc, rs[0].address)
+    writeSystemIntent(doc)
+    let text = readFile(path)
+    check text.startsWith("fs.systemFile {")
+    check parseSystemProfile(text).resources.len == 1
+    check parseSystemProfile(text).resources[0].sfContent == "2\n"

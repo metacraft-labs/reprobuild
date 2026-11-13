@@ -4,7 +4,7 @@
 ## an already-installed package version as a cache-hit even when the
 ## Scoop bucket head has drifted ahead of it — no reinstall. But M77
 ## did NOT update the PLAN-time classifier: the M72 package catalog's
-## `resolvePackage` / `previewPackageResolutions`
+## resolver and `previewPackageResolutions`
 ## (`repro_home_apply/package_catalog.nim`) decided cache-hit by
 ## requiring the installed version to EQUAL the bucket-head version. So
 ## `repro home apply --plan` reported an installed-but-bucket-drifted
@@ -19,6 +19,13 @@
 ## sharing ONE installed-version cache-hit predicate
 ## (`repro_tool_profiles.installedVersionSatisfies`) between the plan
 ## classifier and `resolveScoopTool`.
+##
+## GM4b: the fixture apps have no package definition, so they resolve
+## through the profile's host inventory — a Scoop app of the package's
+## name, installed or offered by a configured bucket, selected as an
+## AMBIENT `scoop` realization (Provisioning-Contributions.md §"Host
+## inventory"). The cache-hit verdict on that path is still
+## `installedVersionSatisfies` (`package_catalog.satisfiesProfile`).
 ##
 ## Per the M80 verification block, this gate stands up a sandboxed
 ## Scoop root (the M55 / M77 fixture pattern) and drives the REAL
@@ -48,6 +55,7 @@ import std/[algorithm, json, os, osproc, streams, strtabs, strutils,
   tempfiles]
 
 import std/unittest
+import repro_test_support/reasoned_skip
 import repro_home_generations
 import repro_local_store
 import repro_test_support
@@ -71,10 +79,10 @@ proc runRepro(envOverrides: openArray[tuple[k, v: string]];
               args: openArray[string]):
     tuple[exitCode: int; output: string] =
   ## Run the real `repro` CLI with the `REPRO_TEST_PACKAGE_*` test seams
-  ## defensively stripped: the production package catalog
-  ## (`package_catalog.resolvePackage` / `previewPackageResolutions`)
-  ## MUST be the only resolution path, so the gate exercises the M80
-  ## classifier and not a test seam.
+  ## defensively stripped: the production resolver
+  ## (`package_catalog.resolveProfilePackage` via
+  ## `previewPackageResolutions`) MUST be the only resolution path, so the
+  ## gate exercises the M80 classifier and not a test seam.
   var processEnv = newStringTable(modeCaseSensitive)
   for k, v in envPairs():
     if k in ["REPRO_TEST_PACKAGE_SOURCE", "REPRO_TEST_PACKAGE_SCOOP",

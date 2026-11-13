@@ -9,8 +9,7 @@
 ##     (gcc/gh/gpg/just/nim/python/repo) + a PowerShell env activation.
 ##   * ``cachePushSpawnCommand`` — the platform-parameterized detached
 ##     cache-push plan (POSIX ``setsid … &`` through ``sh`` vs Windows
-##     ``CreateProcessW`` + ``DETACHED_PROCESS``, which uses no shell at
-##     all; see W4).
+##     ``CreateProcessW``, which uses no shell at all; see W4).
 ##
 ## Both are PURE, platform-PARAMETERIZED functions (they take a
 ## ``WorkspaceTargetOs`` / install root, NOT ``when defined(windows)``), so
@@ -105,8 +104,8 @@ suite "RA-19 — Windows workspace bootstrap parity (plan/decision layer)":
     check plan.activation.activateCommand.contains("env.ps1")
 
   test "test_ra19_cache_push_windows_is_shell_free_not_posix_fork":
-    # W4: the Windows target detaches through ``CreateProcessW`` +
-    # ``DETACHED_PROCESS`` and carries NO shell command line at all.
+    # W4: the Windows target detaches through ``CreateProcessW`` and
+    # carries NO shell command line at all.
     #
     # It used to emit ``cmd /c start /b "" …`` and this case asserted that
     # string. That decision was the defect: the empty ``start`` title is a

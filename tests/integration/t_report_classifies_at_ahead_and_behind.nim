@@ -18,19 +18,24 @@
 ##   2. the same three classifications appear in the human rendering, each
 ##      naming its distance — the report and the message cannot disagree,
 ##      because there is one classifier;
-##   3. a `follows`-routed input carries no pin and is classified `unpinned`
-##      WITH ITS REASON rather than being dropped, and rather than being
-##      called drift. That decision is recorded in `flakeOverrideStateReport`'s
-##      header: such an input resolves to another input's node, so "the pin
-##      disagrees with the sibling" is not a proposition that can be false
-##      about it, and refusing would name a command that cannot help
-##      (`refreshFlakeLockText` deliberately declines to move it). It must
-##      still be VISIBLE, or "no drift" and "nothing here could be checked"
-##      would look alike;
+##   3. an input with no pin of its own is VISIBLE WITH ITS REASON rather
+##      than dropped, and is never called drift — "no drift" and "nothing here
+##      could be checked" must not look alike. Two shapes:
+##      a. a `follows`-routed input has no lock node of its own, so per
+##         spec/Nix-Flake-Coexistence.md §5b it is not substituted at all: it
+##         keeps its pin, is NOT a row, and the report's notices name it with
+##         that reason;
+##      b. a substituted input whose node pins no `rev` (a `path:` or
+##         dirty-tree input, locked by content) is a row classified
+##         `unpinned`, with its reason, and counted separately. "The pin
+##         disagrees with the sibling" is not a proposition that can be false
+##         about it, and refusing would name a command that cannot help;
 ##   4. an input whose node carries a `rev` and NO `narHash` / `lastModified` /
-##      `revCount` verifies normally. Those three fields are exactly what
-##      NF-2's refresh DELETES from every node whose revision it moved, so a
-##      verifier that required them would call every lock NF-2 wrote broken;
+##      `revCount` verifies normally. NF-2's refresh now writes those three
+##      from nix, but earlier versions DELETED them from every node whose
+##      revision they moved, and such `rev`-only nodes are in committed history
+##      and in checkouts today; a verifier that required them would call every
+##      one of those locks broken;
 ##   5. the ARGUMENTS and the REPORT describe the same set. There is one
 ##      resolution of the override set, so the inputs `override-args` hands the
 ##      dev shell and the inputs this report classifies are the same inputs —
@@ -153,9 +158,10 @@ suite "NF-3: the report classifies at, ahead and behind":
       check text.stderr.contains("1 at pin, 1 ahead, 1 behind")
 
       # ---- (4) a node with no derived fields verifies normally --------------
-      # NF-2's refresh drops `narHash`, `lastModified` and `revCount` from any
-      # node whose `rev` it moved. Strip them from alpha's node — the AT row —
-      # and the classification must be unchanged.
+      # Earlier NF-2 refreshes dropped `narHash`, `lastModified` and `revCount`
+      # from every node whose `rev` they moved, and those locks still exist.
+      # Strip them from alpha's node — the AT row — and the classification
+      # must be unchanged.
       var stripped: seq[string]
       for line in readFile(lockPath(fx)).splitLines():
         let t = line.strip()
@@ -172,24 +178,48 @@ suite "NF-3: the report classifies at, ahead and behind":
       check statusRow(strippedDoc, "beta-src")["relation"].getStr() == "ahead"
       check statusRow(strippedDoc, "gamma-src")["relation"].getStr() == "behind"
 
-      # ---- (3) a `follows`-routed input is `unpinned`, with its reason ------
+      # ---- (3a) a `follows`-routed input is named, not substituted --------
       # Route `beta-src` through a `follows` path — the shape nix writes when
       # one input is told to follow another — so it names no node of its own.
-      var lock = parseJson(readFile(lockPath(fx)))
+      let threeStateLock = readFile(lockPath(fx))
+      var lock = parseJson(threeStateLock)
       lock["nodes"]["root"]["inputs"]["beta-src"] = %*["alpha-src"]
       writeFile(lockPath(fx), pretty(lock, indent = 2))
       let follows = flakeStatus(fx, "--json")
+      checkpoint("follows report:\n" & follows.stdout)
       check follows.code == 0
       let followsDoc = parseJson(follows.stdout)
-      let followsRow = statusRow(followsDoc, "beta-src")
-      check not followsRow.isNil
-      check followsRow["relation"].getStr() == "unpinned"
-      check followsRow["detail"].getStr().contains("`follows` path")
-      check followsDoc["counts"]["unpinned"].getInt() == 1
+      check statusRow(followsDoc, "beta-src").isNil
+      check followsDoc["counts"]["unpinned"].getInt() == 0
+      let followsNotices = $followsDoc["notices"]
+      check followsNotices.contains("NOT substituted: flake input 'beta-src'")
+      check followsNotices.contains(
+        "a follows path has no independent lock node")
+      # The other two rows are unaffected by it.
+      check statusRow(followsDoc, "alpha-src")["relation"].getStr() == "at"
+      check statusRow(followsDoc, "gamma-src")["relation"].getStr() == "behind"
+
+      # ---- (3b) a node that pins no `rev` is an `unpinned` row -------------
+      # Same input, back on its own node, but locked by content rather than by
+      # revision: it is substituted, and there is nothing to compare.
+      lock = parseJson(threeStateLock)
+      let betaNode = lock["nodes"]["root"]["inputs"]["beta-src"].getStr()
+      lock["nodes"][betaNode]["locked"].delete("rev")
+      writeFile(lockPath(fx), pretty(lock, indent = 2))
+      let revless = flakeStatus(fx, "--json")
+      checkpoint("rev-less report:\n" & revless.stdout)
+      check revless.code == 0
+      let revlessDoc = parseJson(revless.stdout)
+      let revlessRow = statusRow(revlessDoc, "beta-src")
+      check not revlessRow.isNil
+      if not revlessRow.isNil:
+        check revlessRow["relation"].getStr() == "unpinned"
+        check revlessRow["detail"].getStr().contains("pins no `rev`")
+      check revlessDoc["counts"]["unpinned"].getInt() == 1
       # Visible, and not counted as drift.
-      let followsText = flakeStatus(fx)
-      check followsText.code == 0
-      check followsText.stderr.contains("carries no pin to compare")
+      let revlessText = flakeStatus(fx)
+      check revlessText.code == 0
+      check revlessText.stderr.contains("carries no pin to compare")
 
       # ---- (6) the gate reads the SAME report -------------------------------
       # Restore the lock to the three-state form, then publish everything so

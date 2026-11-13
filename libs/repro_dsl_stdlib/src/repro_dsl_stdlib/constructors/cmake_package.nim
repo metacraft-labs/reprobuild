@@ -21,6 +21,9 @@ import repro_project_dsl
 import ../types/package_result
 import ../packages/cmake as cmake_module
 import ../packages/sh as sh_module
+import ../active_context
+import ../adapters/cross_zig
+import ../operations/zig_c
 
 # ---------------------------------------------------------------------------
 # Fetch action (M9.R.12.4) — shared shape with ``autotools_package`` /
@@ -33,6 +36,17 @@ proc cmakeRuntimeLibraryDirs*(libraryDirs: openArray[string]): seq[string] =
   ## Profiles can propagate libc or Python runtimes through otherwise
   ## unrelated dependencies. Keep those directories in CMake's link-time
   ## search, but do not interpose them on CMake, Ninja, or helper processes.
+  ##
+  ## The same holds for the line-editing libraries a dynamically linked
+  ## /bin/sh loads: Ninja and make run every command through it, and on
+  ## NixOS that is a bash linked against its own readline. A source-built
+  ## readline older than that one (8.2 against 8.3) made every command fail
+  ## with "undefined symbol: rl_completion_rewrite_hook". Build helpers do
+  ## not need readline or ncurses, so neither is exported.
+  proc isShellRuntime(name: string): bool =
+    for lib in ["readline", "ncurses"]:
+      if name == lib or name.startsWith(lib & "-"):
+        return true
   const storePrefix = "/nix/store/"
   for path in libraryDirs:
     var isCoreRuntime = fileExists(path / "libc.so.6")
@@ -46,7 +60,8 @@ proc cmakeRuntimeLibraryDirs*(libraryDirs: openArray[string]): seq[string] =
         if packageEnd < 0: normalized[packageStart .. ^1]
         else: normalized[packageStart ..< packageEnd]
       isCoreRuntime = isCoreRuntime or packageName == "glibc" or
-        packageName == "python3" or packageName.startsWith("python3-")
+        packageName == "python3" or packageName.startsWith("python3-") or
+        isShellRuntime(packageName)
     if path.startsWith(storePrefix):
       let relative = path[storePrefix.len .. ^1]
       let slash = relative.find('/')
@@ -57,7 +72,8 @@ proc cmakeRuntimeLibraryDirs*(libraryDirs: openArray[string]): seq[string] =
           let packageName = storeEntry[hashSeparator + 1 .. ^1]
           isCoreRuntime = isCoreRuntime or packageName == "glibc" or
             packageName.startsWith("glibc-") or packageName == "python3" or
-            packageName.startsWith("python3-")
+            packageName.startsWith("python3-") or
+            isShellRuntime(packageName)
     if not isCoreRuntime:
       result.add(path)
 
@@ -144,6 +160,48 @@ proc maybeEmitFetchAction(packageName, projectRoot, extractedRel: string):
     toolIdentityRefs = fetchToolRefs)
   some(act)
 
+proc cmakeBuildScript*(libraryDirs, buildArgv: openArray[string];
+                       buildStamp: string;
+                       exportLibraryPath = true): string =
+  ## The ``sh -c`` body of the cmake build and install edges: optionally export
+  ## ``libraryDirs`` as ``LD_LIBRARY_PATH`` (see ``exportBuildLibraryPath``
+  ## on ``cmake_package``), run ``buildArgv``, then touch the stamp.
+  result = "set -e; "
+  if exportLibraryPath and libraryDirs.len > 0:
+    result.add("export LD_LIBRARY_PATH=\"")
+    for i, d in libraryDirs:
+      if i > 0: result.add(":")
+      result.add(d.replace("\\", "/").replace("\"", "\\\""))
+    result.add(":${LD_LIBRARY_PATH:-}\"; ")
+  var quoted: seq[string] = @[]
+  for a in buildArgv:
+    quoted.add("\"" & a.replace("\"", "\\\"") & "\"")
+  result.add(quoted.join(" ") & "; ")
+  result.add(": > \"" & buildStamp.replace("\\", "/") & "\"")
+
+proc cmakeEffectiveGenerator*(generator: string;
+                              nativeRefs: openArray[string]): string =
+  ## With no generator named, CMake picks Unix Makefiles and needs a make
+  ## the action PATH does not carry when the recipe declared ninja instead.
+  if generator.len == 0 and "ninja" in nativeRefs:
+    "Ninja"
+  else:
+    generator
+
+proc cmakeTransitiveLinkerFlags*(zigTarget: bool;
+                                 linkLibraryDirs: openArray[string]): string =
+  ## The linker flags `cmake_package` appends to `CMAKE_EXE_LINKER_FLAGS` /
+  ## `CMAKE_SHARED_LINKER_FLAGS`: binutils' `--copy-dt-needed-entries` plus
+  ## an `-rpath-link` per sibling library directory, for transitive
+  ## DT_NEEDED resolution (the M9.R.15j.3 note in `cmake_package`). Empty
+  ## under a zig target: zig's driver links with lld, which refuses the
+  ## first and needs neither (Reprobuild-Standard-Library.md, `cross_zig`).
+  if zigTarget:
+    return ""
+  result = "-Wl,--copy-dt-needed-entries"
+  for libDir in linkLibraryDirs:
+    result.add(" -Wl,-rpath-link," & libDir)
+
 proc cmake_package*(srcDir: string;
                     buildDir = "build";
                     destdir = "out";
@@ -154,7 +212,8 @@ proc cmake_package*(srcDir: string;
                     extraEnv: seq[(string, string)] = @[];
                     allowSourceWrites = false;
                     srcPatches: seq[string] = @[];
-                    freshConfigure = false): CmakePackageResult =
+                    freshConfigure = false;
+                    exportBuildLibraryPath = true): CmakePackageResult =
   ## Configure → build → install pipeline for an upstream cmake
   ## project. v1 leaves component selection up to the recipe
   ## (``component`` field on the install call); the standard layout
@@ -171,6 +230,15 @@ proc cmake_package*(srcDir: string;
   ## probes via the nix-wrapped pkg-config — the wrapper only consults
   ## PKG_CONFIG_PATH_FOR_TARGET, not the bare PKG_CONFIG_PATH, and the
   ## auto-channel doesn't compose for graphs with 70+ deps).
+  ##
+  ## ``exportBuildLibraryPath`` (default on) bakes every dependency library
+  ## directory into the build script's ``LD_LIBRARY_PATH`` for helper
+  ## binaries whose RUNPATH cannot find them (see M9.R.15q.13 below).
+  ## Ninja and make run each command through ``/bin/sh``, which then loads
+  ## those libraries too; where /bin/sh is a dynamically linked bash (NixOS)
+  ## a source-built readline older than its own breaks every command with
+  ## ``undefined symbol: rl_completion_rewrite_hook``. A recipe whose build
+  ## helpers find their libraries through CMake's build RPATH turns it off.
   ##
   ## ``allowSourceWrites`` is an explicit exception for upstream CMake
   ## projects that generate configuration inputs inside their extracted
@@ -214,6 +282,17 @@ proc cmake_package*(srcDir: string;
   ## srcDir), depends on the fetch action's stamp, and writes its own
   ## stamp under ``.repro/build/cmake-patch.stamp`` so the engine's
   ## action-cache fingerprint stays stable across rebuilds.
+  # A zig target is threaded through a CMake toolchain file
+  # (`adapters/cross_zig`); any other non-native target still refuses.
+  let zigTarget = activeZigCrossTarget()
+  if zigTarget != nil:
+    requireZigDeclared("cmake_package")
+  else:
+    requireCrossTargetConsulted("cmake_package")
+  # A target build's build tree (and the staging tree inside it) is keyed by
+  # the target, so a native and a target configure of one recipe never
+  # share (and wipe) one tree (CLI/build.md §"Cross Targets: `--target`").
+  let buildDir = targetKeyedDir(buildDir)
   let pkgName = currentOwningPackage()
   let projectRoot = activeProviderProjectRoot()
   let effectiveDestRoot =
@@ -225,6 +304,13 @@ proc cmake_package*(srcDir: string;
     if raw.len > 0: raw else: "src"
   let fetchActOpt = maybeEmitFetchAction(pkgName, projectRoot, extractedRel)
   var configureAfter: seq[BuildActionDef] = @[]
+  var zigToolchainFile = ""
+  if zigTarget != nil:
+    let wrappers = emitZigCrossWrappersAction(projectRoot, pkgName,
+      zigTarget.triple)
+    configureAfter.add(wrappers)
+    zigToolchainFile = zigCrossWrapperDir(projectRoot, zigTarget.triple) /
+      ZigCrossCmakeToolchainName
   var patchActionId = ""
   if fetchActOpt.isSome:
     configureAfter.add(fetchActOpt.get())
@@ -282,6 +368,8 @@ proc cmake_package*(srcDir: string;
   # convention assumption that breaks under sibling install prefixes.
   # Threading each ``<Component>_DIR`` explicitly is the surgical fix.
   var effectiveCacheVars = cacheVars
+  if zigToolchainFile.len > 0:
+    effectiveCacheVars.add("CMAKE_TOOLCHAIN_FILE=" & zigToolchainFile)
   var linkLibraryDirs: seq[string] = @[]
   # ECM's KDEClangFormat module generates .clang-format in the source tree
   # whenever clang-format is discoverable. Its platform check also opens the
@@ -419,10 +507,17 @@ proc cmake_package*(srcDir: string;
     # across re-configures. Recipes that need different link flags can
     # still override via their own cacheVars entries — CMake honours
     # the LAST -D<var>=<value> wins.
-    var transitiveLinkerFlags = "-Wl,--copy-dt-needed-entries"
-    for libDir in linkLibraryDirs:
-      transitiveLinkerFlags.add(" -Wl,-rpath-link," & libDir)
+    #
+    # Not under a zig target: zig's driver links with lld, refuses
+    # ``--copy-dt-needed-entries`` outright ("unsupported linker arg"), and
+    # -- like any lld link -- resolves a library's own DT_NEEDED symbols
+    # without needing them copied or found through ``-rpath-link``. The
+    # flag set is empty there, so nothing is appended.
+    let transitiveLinkerFlags = cmakeTransitiveLinkerFlags(
+      zigTarget != nil, linkLibraryDirs)
     proc appendLinkerFlags(cacheKey: string) =
+      if transitiveLinkerFlags.len == 0:
+        return
       var lastMatch = -1
       for i, value in effectiveCacheVars:
         if value.startsWith(cacheKey & "="):
@@ -496,6 +591,7 @@ proc cmake_package*(srcDir: string;
       if extra notin cmakeBuildRefs:
         cmakeBuildRefs.add(extra)
   let cmakeDepRefs = cmakeNativeRefs & cmakeBuildRefs
+  let generator = cmakeEffectiveGenerator(generator, cmakeNativeRefs)
   if patchActionId.len > 0:
     appendRegisteredActionToolIdentityRefs(patchActionId, cmakeDepRefs)
     classifyRegisteredActionToolIdentityRefs(patchActionId, cmakeBuildRefs)
@@ -632,21 +728,8 @@ proc cmake_package*(srcDir: string;
   # of paths into the build script via ``export LD_LIBRARY_PATH`` makes
   # the channel bulletproof.  Inert in unit-test mode (empty
   # ``projectRoot``).
-  let ldLibraryDirs = cmakeRuntimeLibraryDirs(linkLibraryDirs)
-  let buildScript = block:
-    var s = "set -e; "
-    if ldLibraryDirs.len > 0:
-      s.add("export LD_LIBRARY_PATH=\"")
-      for i, d in ldLibraryDirs:
-        if i > 0: s.add(":")
-        s.add(d.replace("\\", "/").replace("\"", "\\\""))
-      s.add(":${LD_LIBRARY_PATH:-}\"; ")
-    var quoted: seq[string] = @[]
-    for a in buildArgv:
-      quoted.add("\"" & a.replace("\"", "\\\"") & "\"")
-    s.add(quoted.join(" ") & "; ")
-    s.add(": > \"" & buildStamp.replace("\\", "/") & "\"")
-    s
+  let buildScript = cmakeBuildScript(cmakeRuntimeLibraryDirs(linkLibraryDirs),
+    buildArgv, buildStamp, exportBuildLibraryPath)
   let buildEdge = buildAction(
     id = "cmake-build-" & pkgName,
     call = inlineExecCall(@["sh", "-c", buildScript]),
@@ -688,24 +771,13 @@ proc cmake_package*(srcDir: string;
   let installArgv = @["cmake", "--install", buildDir, "--prefix", effectiveInstallPrefix]
   let installStamp = projectRoot / ".repro" / "build" / "cmake-install.stamp"
   createDir(parentDir(installStamp))
-  let installScript = block:
-    var s = "set -e; "
-    # M9.R.15q.13.1 — same LD_LIBRARY_PATH baking as the build script,
-    # so cmake --install's helper binaries (e.g. plugin-registration
-    # binaries, ELF strippers from sibling toolchain recipes) inherit
-    # the sibling install-mirror lib dirs.
-    if ldLibraryDirs.len > 0:
-      s.add("export LD_LIBRARY_PATH=\"")
-      for i, d in ldLibraryDirs:
-        if i > 0: s.add(":")
-        s.add(d.replace("\\", "/").replace("\"", "\\\""))
-      s.add(":${LD_LIBRARY_PATH:-}\"; ")
-    var quoted: seq[string] = @[]
-    for a in installArgv:
-      quoted.add("\"" & a.replace("\"", "\\\"") & "\"")
-    s.add(quoted.join(" ") & "; ")
-    s.add(": > \"" & installStamp.replace("\\", "/") & "\"")
-    s
+  # M9.R.15q.13.1 — same LD_LIBRARY_PATH baking as the build script,
+  # so cmake --install's helper binaries (e.g. plugin-registration
+  # binaries, ELF strippers from sibling toolchain recipes) inherit
+  # the sibling install-mirror lib dirs.
+  let installScript = cmakeBuildScript(
+    cmakeRuntimeLibraryDirs(linkLibraryDirs), installArgv, installStamp,
+    exportBuildLibraryPath)
   let installEdge = buildAction(
     id = "cmake-install-" & pkgName,
     call = inlineExecCall(@["sh", "-c", installScript]),

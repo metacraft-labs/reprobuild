@@ -1,4 +1,4 @@
-import std/[os, osproc, sequtils, strutils, tempfiles, unittest]
+import std/[algorithm, os, osproc, sequtils, strutils, tempfiles, unittest]
 
 import repro_interface_artifacts
 import repro_project_dsl
@@ -135,12 +135,24 @@ suite "federated provisioning contributions":
       discard toProjectInterface(consumer, candidates, @[developing])
 
   test "ambiguous contributors require an explicit selection":
+    # CONVERTED by ReproOS M7 deliverable 3. This case used to make the
+    # explicit selection with the REPRO_PROVISIONING_CONTRIBUTOR environment
+    # variable, which is removed; the explicit selection is now the
+    # resolver's pin (from the committed lock or a curator policy -- see
+    # t_e2e_locked_provisioning_contributor_selection for that chain end to
+    # end). Same scenario, same property: two eligible contributors refuse
+    # until one is selected explicitly, and then that one is used. The two
+    # contributors' selectors now differ, so WHICH one was used is observable
+    # (they were identical before, so the old final check could not tell).
     let old = getEnv("REPRO_PROVISIONING_CONTRIBUTOR")
     defer:
       if old.len > 0: putEnv("REPRO_PROVISIONING_CONTRIBUTOR", old)
       else: delEnv("REPRO_PROVISIONING_CONTRIBUTOR")
     delEnv("REPRO_PROVISIONING_CONTRIBUTOR")
-    let useDef = InterfaceToolUse(
+    # Nix realizes on Linux and macOS only (``realization_selection``), so
+    # the planner is asked for such a target on any host.
+    let nixTarget = realizationTargetFor(pcX86_64, poLinux)
+    var useDef = InterfaceToolUse(
       rawConstraint: "tool",
       packageSelector: "tool",
       executableName: "tool",
@@ -148,8 +160,47 @@ suite "federated provisioning contributions":
         InterfaceNixProvisioning(packageName: "tool", contributor: "one",
           selector: "nixpkgs#hello", executablePath: "bin/hello"),
         InterfaceNixProvisioning(packageName: "tool", contributor: "two",
-          selector: "nixpkgs#hello", executablePath: "bin/hello")])
-    expect ValueError:
-      discard nixAcquisitionPlan(useDef)
+          selector: "nixpkgs#hello-two", executablePath: "bin/hello")])
+    var ambiguity = ""
+    try:
+      discard nixAcquisitionPlan(useDef, nixTarget)
+    except ValueError as err:
+      ambiguity = err.msg
+    check "ambiguous nix provisioning" in ambiguity
+    check "one, two" in ambiguity
+    check "committed lock" in ambiguity
+    check "REPRO_PROVISIONING_CONTRIBUTOR" notin ambiguity
+    # The same pair declared in the other order refuses with the same text.
+    var reversed = useDef
+    reversed.nixProvisioning.reverse()
+    var reversedAmbiguity = ""
+    try:
+      discard nixAcquisitionPlan(reversed, nixTarget)
+    except ValueError as err:
+      reversedAmbiguity = err.msg
+    check reversedAmbiguity == ambiguity
+
+    let fingerprint = repeat('7', 64)
+    useDef.provisioningPin = ProvisioningPin(packageName: "tool",
+      contributor: "two", contributionFingerprint: fingerprint,
+      contributionRecordDigest: repeat('8', 64))
+    let plan = nixAcquisitionPlan(useDef, nixTarget)
+    check plan.nixSelector == "nixpkgs#hello-two"
+    check plan.lockIdentity ==
+      "contributor:two\ncontribution:" & fingerprint & "\nnixpkgs#hello-two"
+    useDef.provisioningPin.contributor = "one"
+    check nixAcquisitionPlan(useDef, nixTarget).nixSelector == "nixpkgs#hello"
+
+    # The removed variable is refused loudly, pinned or not; it never
+    # selects, and never overrides the pin.
     putEnv("REPRO_PROVISIONING_CONTRIBUTOR", "two")
-    check nixAcquisitionPlan(useDef).nixSelector == "nixpkgs#hello"
+    var removed = ""
+    try:
+      discard nixAcquisitionPlan(useDef, nixTarget)
+    except ValueError as err:
+      removed = err.msg
+    check "REPRO_PROVISIONING_CONTRIBUTOR is set" in removed
+    check "was removed" in removed
+    useDef.provisioningPin = ProvisioningPin()
+    expect ValueError:
+      discard nixAcquisitionPlan(useDef, nixTarget)

@@ -1,0 +1,4 @@
+let backend = "gcc"
+let projectRoot = "owned"
+let produced = projectRoot / "build" / addFileExt("backend", ExeExt)
+discard requireSuccess(shellCommand([produced]), projectRoot)

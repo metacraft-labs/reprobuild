@@ -2,7 +2,8 @@
 ##
 ## Named-Lock-Files NLF-M5 groundwork. Design reference: `Locking-And-Solver.md`
 ## ("the committed solved-graph lock") and `Workspace-Manifest-Optional`
-## MO-8 (the self-describing `…lock.v2` document).
+## MO-8 (the self-describing committed lock, now `…lock.v3`: identity only,
+## no checkout path per dependency).
 ##
 ## THE DEFECT THIS IS THE REGRESSION FOR. `serializeSolvedGraphLock` emitted a
 ## document tagged `reprobuild.solved-graph-lock.v1` while `parseSolvedGraphLock`
@@ -68,7 +69,7 @@ proc sameCoordinates(a, b: Coordinates): bool =
   if a.kind != b.kind: return false
   case a.kind
   of ckVcs:
-    a.url == b.url and a.gitRef == b.gitRef and a.revision == b.revision
+    a.url == b.url and a.revision == b.revision
   of ckStore:
     a.storeHash == b.storeHash
   of ckRegistry:
@@ -101,15 +102,20 @@ proc depsOfEveryCoordinateKind(): seq[LockedDep] =
   ## right number of fields in the wrong order, or a reader that read `url`
   ## into `revision`, would survive a fixture whose fields all read alike.
   ##
-  ## Listed in the writer's CANONICAL order (by name, then path), because
+  ## Listed in the writer's CANONICAL order (by name), because
   ## `serializeLockedDependencies` sorts the `deps` set on the way out — a
   ## documented normalization, not a loss, and the case below measures the
   ## normalization separately rather than letting it blur this fixture.
+  ##
+  ## Each `path` is the value the READER gives the entry, because `path` is a
+  ## local materialization that is never written (`LockedDep.path`): the
+  ## one-level sibling default for a VCS entry, "" for every other kind. The
+  ## case "no checkout path is written" below pins that a different value
+  ## does not survive the trip.
   @[
-    LockedDep(name: "alpha", path: "deps/alpha",
+    LockedDep(name: "alpha", path: defaultLockedDepCheckoutPath("alpha"),
       coordinates: Coordinates(kind: ckVcs,
         url: "https://example.invalid/alpha.git",
-        gitRef: "refs/heads/main",
         revision: "1111111111111111111111111111111111111111"),
       integrity: "blake3:aa01", version: "1.2.3", visibility: "public",
       participation: "source", depends: @["beta", "gamma"],
@@ -118,7 +124,7 @@ proc depsOfEveryCoordinateKind(): seq[LockedDep] =
       coordinates: Coordinates(kind: ckStore, storeHash: "bb02"),
       integrity: "blake3:bb02", version: "0.9.0", visibility: "private",
       participation: "binary", depends: @[], tags: @[]),
-    LockedDep(name: "delta", path: "vendor/delta",
+    LockedDep(name: "delta", path: "",
       coordinates: Coordinates(kind: ckForeign,
         provisioner: "nix", foreignCoordinates: "nixpkgs#hello"),
       integrity: "blake3:dd04", version: "2.10", visibility: "public",
@@ -151,7 +157,7 @@ suite "a written lock document reads back":
     # defect got wrong, so a test that compared only the payload would still
     # pass against a writer emitting an unreadable tag.
     check readBack == written
-    check readBack.schema == SolvedGraphLockSchemaV2
+    check readBack.schema == SolvedGraphLockSchemaV3
 
     # The solved graph the build path actually consumes survives too.
     check sameSolution(lockToSolution(readBack), lockToSolution(written))
@@ -200,7 +206,7 @@ suite "a written lock document reads back":
     # kind of wrong it is so the reader is not left guessing between a typo and
     # a superseded format.
     let stale = serializeSolvedGraphLock(solvedGraph(@[("libfoo", "1.4.2")]))
-      .replace(SolvedGraphLockSchemaV2, SolvedGraphLockSchemaV1)
+      .replace(SolvedGraphLockSchemaV3, SolvedGraphLockSchemaV1)
     expect SolvedGraphLockParseError:
       discard parseSolvedGraphLock(stale)
     try:
@@ -220,6 +226,23 @@ suite "a written lock document reads back":
 
 suite "the unified lock document reads back":
 
+  test "the writer refuses an external VCS dependency without a fetch URL":
+    for url in ["", "   "]:
+      let dep = LockedDep(name: "unfetchable", path: "../unfetchable",
+        coordinates: Coordinates(kind: ckVcs, url: url, revision: "abc"))
+      try:
+        discard serializeLockedDependencies(LockedDependencies(deps: @[dep]))
+        check false
+      except SolvedGraphLockParseError as error:
+        check "unfetchable" in error.msg
+        check "url" in error.msg.toLowerAscii()
+
+  test "the writer still permits an unpublished self repository":
+    let dep = LockedDep(name: "local", path: SelfLockedDepPath,
+      coordinates: Coordinates(kind: ckVcs, url: "", revision: "abc"))
+    check "self = \"true\"" in
+      serializeLockedDependencies(LockedDependencies(deps: @[dep]))
+
   test "serializeLockedDependencies round-trips over every coordinate kind":
     var written = lockedDepsFromSolved(solvedGraph(
       @[("libfoo", "1.4.2"), ("nim", "2.2.0")], @[("compiler", "clang")]))
@@ -238,7 +261,7 @@ suite "the unified lock document reads back":
 
   test "an out-of-order deps set normalizes rather than being lost":
     # The one way this pair is NOT the identity: the writer sorts `deps` by
-    # (name, path). Nothing is dropped — the same set comes back — so state the
+    # name. Nothing is dropped — the same set comes back — so state the
     # normalization explicitly instead of letting the fixture order hide it.
     var canonical = lockedDepsFromSolved(solvedGraph(@[("libfoo", "1.4.2")]))
     canonical.deps = depsOfEveryCoordinateKind()
@@ -257,7 +280,6 @@ suite "the unified lock document reads back":
     var b = a
     b.deps[0].coordinates = Coordinates(kind: ckVcs,
       url: "https://example.invalid/alpha.git",
-      gitRef: "refs/heads/main",
       revision: "2222222222222222222222222222222222222222")
     check serializeLockedDependencies(a) != serializeLockedDependencies(b)
     check not sameLockedDependencies(
@@ -271,3 +293,133 @@ suite "the unified lock document reads back":
     let solved = solvedGraph(
       @[("libfoo", "1.4.2"), ("nim", "2.2.0")], @[("compiler", "clang")])
     check solvedPartOf(lockedDepsFromSolved(solved)) == solved
+
+suite "a lock records identity, never a checkout path":
+
+  test "no checkout path is written, and the self entry is marked instead":
+    # Workspace-Manifests.md §"The locked-dependency model": a lock pins a
+    # dependency IDENTITY, not a materialization. A writer that observed a
+    # sibling at some location records where it found it nowhere.
+    var written = lockedDepsFromSolved(solvedGraph(@[("libfoo", "1.4.2")]))
+    written.deps = @[
+      LockedDep(name: "app", path: SelfLockedDepPath,
+        coordinates: Coordinates(kind: ckVcs, url: "https://example.invalid/app.git",
+          revision: "3333333333333333333333333333333333333333"),
+        integrity: "git-sha1:3333333333333333333333333333333333333333",
+        visibility: "public", depends: @["lib"]),
+      LockedDep(name: "lib", path: "../dev/somewhere-else/lib",
+        coordinates: Coordinates(kind: ckVcs, url: "https://example.invalid/lib.git",
+          revision: "4444444444444444444444444444444444444444"),
+        integrity: "git-sha1:4444444444444444444444444444444444444444",
+        visibility: "public")]
+    let document = serializeLockedDependencies(written)
+    check ("schema = \"" & SolvedGraphLockSchemaV3 & "\"") in document
+    check "path =" notin document
+    check "somewhere-else" notin document
+    check document.count("self = \"true\"") == 1
+    check "{ name = \"app\", self = \"true\"," in document
+
+    let readBack = parseLockedDependencies(document)
+    check readBack.deps.len == 2
+    check readBack.deps[0].name == "app"
+    check isSelfLockedDep(readBack.deps[0])
+    check readBack.deps[1].name == "lib"
+    check not isSelfLockedDep(readBack.deps[1])
+    # The writer's location did not travel; the reader's default stands in.
+    check readBack.deps[1].path == defaultLockedDepCheckoutPath("lib")
+    check readBack.deps[1].coordinates.revision ==
+      "4444444444444444444444444444444444444444"
+    check serializeLockedDependencies(readBack) == document
+
+  test "a v2 document still reads, and its recorded paths are not believed":
+    # Every lock committed before v3 carries `path`. It must keep reading, and
+    # the path may only identify the self entry: anything else it says is a
+    # location on the machine that wrote it — measured stale in the field
+    # (`../dev/reprobuild-latest`, a directory that never existed).
+    let v2 = "schema = \"" & SolvedGraphLockSchemaV2 & "\"\n\n" &
+      "[lock]\nplatform = \"amd64-linux\"\noptimal = true\n" &
+      "inputs_digest = \"d\"\nvariants = []\npackages = []\n" &
+      "deps = [{ name = \"app\", path = \".\", coord_kind = \"vcs\", " &
+      "url = \"u\", ref = \"\", revision = \"r1\", integrity = \"i1\", " &
+      "version = \"\", visibility = \"public\", participation = \"\", " &
+      "depends = \"lib\", tags = \"\" }, " &
+      "{ name = \"lib\", path = \"../dev/lib-latest\", " &
+      "coord_kind = \"vcs\", url = \"u2\", ref = \"\", revision = \"r2\", " &
+      "integrity = \"i2\", version = \"\", visibility = \"public\", " &
+      "participation = \"\", depends = \"\", tags = \"\" }, " &
+      "{ name = \"pkg\", path = \"\", coord_kind = \"store\", " &
+      "store_hash = \"h\", integrity = \"i3\", version = \"1\", " &
+      "visibility = \"public\", participation = \"\", depends = \"\", " &
+      "tags = \"\" }]\n"
+    let ld = parseLockedDependencies(v2)
+    check ld.deps.len == 3
+    check isSelfLockedDep(ld.deps[0])
+    check ld.deps[1].path == defaultLockedDepCheckoutPath("lib")
+    check not isSelfLockedDep(ld.deps[1])
+    # A non-VCS entry with an empty v2 path is a solved package, not the root.
+    check not isSelfLockedDep(ld.deps[2])
+    check ld.deps[2].path == ""
+    # Re-written, it is a v3 document carrying none of the old paths.
+    let rewritten = serializeLockedDependencies(ld)
+    check ("schema = \"" & SolvedGraphLockSchemaV3 & "\"") in rewritten
+    check "path =" notin rewritten
+    check "dev/lib-latest" notin rewritten
+
+  test "v3 rejects duplicate dependency identities on read and write":
+    let entry = "{ name = \"lib\", coord_kind = \"vcs\", url = \"u\", revision = \"r\" }"
+    let duplicate = "schema = \"" & SolvedGraphLockSchemaV3 & "\"\n[lock]\n" &
+      "deps = [" & entry & ", " & entry & "]\n"
+    expect SolvedGraphLockParseError:
+      discard parseLockedDependencies(duplicate)
+    let dep = LockedDep(name: "lib", path: "../lib",
+      coordinates: Coordinates(kind: ckVcs, url: "u", revision: "r"))
+    expect SolvedGraphLockParseError:
+      discard serializeLockedDependencies(LockedDependencies(deps: @[dep, dep]))
+
+  test "v3 rejects a non-VCS self record and multiple self records":
+    let prefix = "schema = \"" & SolvedGraphLockSchemaV3 & "\"\n[lock]\ndeps = ["
+    for kind in ["store", "registry", "foreign"]:
+      let invalid = prefix & "{ name = \"pkg\", self = \"true\", coord_kind = \"" & kind & "\" }]\n"
+      expect SolvedGraphLockParseError:
+        discard parseLockedDependencies(invalid)
+    let twoRoots = prefix &
+      "{ name = \"app\", self = \"true\", coord_kind = \"vcs\" }, " &
+      "{ name = \"other\", self = \"true\", coord_kind = \"vcs\" }]\n"
+    expect SolvedGraphLockParseError:
+      discard parseLockedDependencies(twoRoots)
+    expect SolvedGraphLockParseError:
+      discard serializeLockedDependencies(LockedDependencies(deps: @[
+        LockedDep(name: "pkg", path: SelfLockedDepPath,
+          coordinates: Coordinates(kind: ckStore, storeHash: "h"))]))
+
+suite "a lock pins a commit, never a branch":
+
+  test "no ref is written, and a ref an older writer recorded is dropped":
+    # Unified-Locking-And-Hooks.md §14.2: a pin's bytes depend only on the
+    # pinned commit. A `ref` (the published branch containing it) was a fact
+    # about the writer's remote-tracking refs, so two clones wrote different
+    # bytes for one pin and publishing a sibling rewrote a dependent's lock.
+    let entry = "{ name = \"app\", self = \"true\", coord_kind = \"vcs\", " &
+      "url = \"https://example.invalid/app.git\", REF" &
+      "revision = \"5555555555555555555555555555555555555555\", " &
+      "integrity = \"git-sha1:5555555555555555555555555555555555555555\", " &
+      "version = \"\", visibility = \"public\", participation = \"\", " &
+      "depends = \"\", tags = \"\" }"
+    proc document(refField: string): string =
+      "schema = \"" & SolvedGraphLockSchemaV3 & "\"\n\n[lock]\n" &
+        "platform = \"amd64-linux\"\noptimal = true\n" &
+        "inputs_digest = \"fnv1a64:0\"\nvariants = []\npackages = []\n" &
+        "deps = [" & entry.replace("REF", refField) & "]\n"
+    let current = document("")
+    # What the writer emits has no `ref`, and it reads back byte-identically.
+    check serializeLockedDependencies(parseLockedDependencies(current)) ==
+      current
+    # A lock written before carries one, published or not: it reads as the
+    # same lock, and its next write drops it.
+    for recorded in ["ref = \"main\", ", "ref = \"\", ",
+                     "ref = \"agents-to-dev-2026-10-12\", "]:
+      let legacy = document(recorded)
+      check sameLockedDependencies(parseLockedDependencies(legacy),
+        parseLockedDependencies(current))
+      check serializeLockedDependencies(parseLockedDependencies(legacy)) ==
+        current

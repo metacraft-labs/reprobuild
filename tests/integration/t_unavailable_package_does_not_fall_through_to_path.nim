@@ -1,59 +1,53 @@
 ## Platform-And-Microarchitecture-Constraints PMC-1 (Package-Model.md
 ## §"GAP: a package cannot declare the platforms it exists on") — a package
-## that DECLARED it cannot exist here must not reach the ``cakPath`` adapter.
+## that DECLARED it cannot exist here must not reach the ``path`` kind.
 ##
 ## This is the most important test in the milestone, and the reason is that
-## the failure it guards does not look like a failure. ``cakPath`` is the last
-## adapter in every default chain and it resolves "the executable is already
-## on PATH". So an unavailable package did not merely fail with a confusing
-## message before PMC-1 — on a host that happens to carry a same-named binary
-## it RESOLVED, silently, to something nobody declared. The spec calls this
-## out explicitly: "an unguarded dependency does not fail at the catalog, it
-## falls through to probing PATH. On a host that happens to have a same-named
-## binary it would resolve to *that*."
+## the failure it guards does not look like a failure. ``path`` is the last
+## kind in the default selection policy and it resolves "the executable is
+## already on PATH". So an unavailable package did not merely fail with a
+## confusing message before PMC-1 — on a host that happens to carry a
+## same-named binary it RESOLVED, silently, to something nobody declared.
 ##
-## The test plants exactly that hazard and asserts the resolver refuses it.
+## GM4b: resolution is ``realization_selection.selectRealization`` (reached
+## here through ``package_catalog.resolveProfilePackage``, the entry point a
+## home profile uses). The availability gate runs before any kind.
 ##
 ## Assertions:
 ##   1. A ``chocolatey`` executable really is discoverable on the PATH this
-##      test builds. Without this the rest is vacuous — it would be asserting
-##      a refusal that had nothing to refuse.
-##   2. CONTROL: with the SAME planted binary, the SAME ``[cakPath]`` chain,
-##      and a synthetic *windows* host (where the declaration is satisfied),
-##      resolution succeeds via ``cakPath`` and points at the planted file.
-##      This proves the PATH adapter can see it, so assertion (3) is about
-##      the availability gate and nothing else.
-##   3. With the only change being a synthetic *linux* host, resolution
-##      FAILS with ``EPackageUnavailableOnPlatform``. It does not resolve, and
-##      it does not fall through.
-##   4. The failure is raised even when ``cakPath`` is the ONLY adapter in the
-##      chain, so it cannot be an artefact of some earlier adapter refusing
-##      first — the gate runs before the chain, not inside it.
-##   5. No resolution is produced at all: the returned value is never
-##      observed, and in particular never carries a ``sourcePath`` pointing
-##      at the planted binary.
-##   6. The LEGACY ``resolvePackage`` entry point is gated identically. That
-##      is the route this package actually takes in production —
-##      ``realizeViaProductionCatalog`` only uses the chain for packages with
-##      a built-in catalog registration or a pinned version, and ``chocolatey``
-##      has neither — and both of its exits end at the PATH probe.
+##      test builds. Without this the rest is vacuous.
+##   2. CONTROL: with the SAME planted binary, the policy ``[path]`` and a
+##      synthetic *windows* host target (where the declaration is satisfied),
+##      resolution selects ``path`` and points at the planted file. This
+##      proves the PATH inventory can see it, so assertion (3) is about the
+##      availability gate and nothing else.
+##   3. With the only change being a synthetic *linux* host target,
+##      resolution FAILS with ``EPlatformUnavailable``. It does not resolve,
+##      and it does not fall through.
+##   4. The failure is raised even when ``path`` is the ONLY kind in the
+##      policy, so it cannot be an artefact of some earlier kind refusing
+##      first — the gate runs before the policy is walked.
+##   5. The failure carries no policy steps: no kind was consulted, so the
+##      PATH probe never ran.
+##   6. The full default policy behaves the same on the unavailable target.
 ##
-## Falsifiable: this test FAILS if the ``cakPath`` step ever becomes reachable
-## for a declared-unavailable package. Confirmed by removing the gate from
-## ``chainResolvePackage``: assertion (3) then resolves quietly through
-## ``cakPath`` to the planted stub — the exact silent-wrong-thing outcome.
+## Falsifiable: this test FAILS if the ``path`` step ever becomes reachable
+## for a declared-unavailable package — e.g. by moving the
+## ``isAvailableOn`` gate in ``selectRealization`` after the policy loop, or
+## deleting it: assertion (3) then resolves quietly through ``path`` to the
+## planted stub — the exact silent-wrong-thing outcome.
 ##
-## Hermetic: the host target comes from the ``hostCpu`` / ``hostOs``
-## parameters, and the planted binary lives in a temp dir that is removed
-## afterwards; PATH is restored on exit.
+## Hermetic: the target comes from ``realizationTargetFor`` (a synthetic
+## host target), and the planted binary lives in a temp dir that is removed
+## afterwards; PATH is restored on exit. No mocks: the real PATH inventory
+## probe (``pathInventoryProbe``) and the real stdlib ``chocolatey``
+## definition.
 
-import std/[options, os, osproc, strutils, tempfiles, unittest]
+import std/[options, os, strutils, tempfiles, unittest]
 
-import repro_dsl_stdlib/packages_schema
-import repro_dsl_stdlib/catalog_registry
 import repro_home_apply/package_catalog
 
-suite "PMC-1 — an unavailable package never reaches the PATH adapter":
+suite "PMC-1 — an unavailable package never reaches the PATH inventory":
 
   test "t_unavailable_package_does_not_fall_through_to_path":
     let scratch = createTempDir("repro-pmc1-path-", "")
@@ -71,17 +65,12 @@ suite "PMC-1 — an unavailable package never reaches the PATH adapter":
       else: "#!/bin/sh\necho not-the-real-chocolatey\n"
     writeFile(planted, body)
     when not defined(windows):
-      discard execShellCmd("chmod +x " & quoteShell(planted))
+      setFilePermissions(planted, {fpUserRead, fpUserWrite, fpUserExec})
 
     let originalPath = getEnv("PATH")
     putEnv("PATH", binDir & PathSep & originalPath)
-    # Keep the Scoop branch inert so nothing consults a real install.
-    putEnv("SCOOP", scratch / "no-such-scoop-root")
-    putEnv("REPRO_TEST_SCOOP_OVERRIDE", scratch / "no-such-scoop.exe")
     defer:
       putEnv("PATH", originalPath)
-      delEnv("SCOOP")
-      delEnv("REPRO_TEST_SCOOP_OVERRIDE")
 
     # ---- (1) the hazard is really present -------------------------------
     let discovered = findExe("chocolatey")
@@ -91,70 +80,44 @@ suite "PMC-1 — an unavailable package never reaches the PATH adapter":
     # The declaration must be armed, or (3) proves nothing.
     check packageAvailability("chocolatey").declared
 
-    var cat = openProductionCatalog()
+    let inventory = HostInventory(probePath: pathInventoryProbe())
+    let windowsHost = realizationTargetFor(pcX86_64, poWindows, isHost = true)
+    let linuxHost = realizationTargetFor(pcX86_64, poLinux, isHost = true)
 
-    # ---- (2) CONTROL: on a satisfied host, cakPath DOES resolve it ------
+    # ---- (2) CONTROL: on a satisfied host, path DOES resolve it ---------
     block controlWindowsHost:
-      let resolution = chainResolvePackage(cat, "chocolatey",
-        chain = @[cakPath], hostCpu = pcX86_64, hostOs = poWindows)
-      check resolution.adapter == cakPath
-      check resolution.sourcePath.len > 0
-      check resolution.sourcePath.extractFilename.startsWith("chocolatey")
+      let resolution = resolveProfilePackage("chocolatey", windowsHost,
+        @[rkPath], inventory = inventory)
+      check resolution.selection.kind == rkPath
+      check resolution.selection.ambient
+      check resolution.selection.pathExecutable.extractFilename.startsWith(
+        "chocolatey")
 
-    # ---- (3)(4)(5) same binary, same chain, unavailable host ------------
+    # ---- (3)(4)(5) same binary, same policy, unavailable host -----------
     block unavailableLinuxHost:
       var raised = false
-      var resolvedAnyway = CatalogResolution()
       var didResolve = false
       try:
-        resolvedAnyway = chainResolvePackage(cat, "chocolatey",
-          chain = @[cakPath], hostCpu = pcX86_64, hostOs = poLinux)
+        discard resolveProfilePackage("chocolatey", linuxHost, @[rkPath],
+          inventory = inventory)
         didResolve = true
-      except EPackageUnavailableOnPlatform as err:
+      except EPlatformUnavailable as err:
         raised = true
-        check err.packageId == "chocolatey"
-        check err.msg.contains("this host is linux")
+        check err.packageName == "chocolatey"
+        check err.msg.contains("the target is linux")
+        # (5) the gate ran before any kind: no step, so no PATH probe.
+        check err.steps.len == 0
       check raised
       check not didResolve
-      # (5) nothing was produced. ``resolvedAnyway`` still holds the default
-      # ``CatalogResolution``: no package id was bound and, decisively, no
-      # ``sourcePath`` — which is the field a ``cakPath`` hit populates with
-      # the planted binary.
-      check resolvedAnyway.packageId.len == 0
-      check resolvedAnyway.sourcePath.len == 0
 
-    # ---- (6) the LEGACY resolver is gated too ---------------------------
-    # ``realizeViaProductionCatalog`` only routes through the adapter chain
-    # when the package has a built-in catalog registration or a pinned
-    # version. ``chocolatey`` has neither — it is a DSL ``tarball`` arm — so
-    # in production it takes the legacy ``resolvePackage`` path, whose every
-    # exit ends at the PATH probe. Gating only the chain would have left the
-    # hole open on precisely the route this package travels.
-    block legacyResolverControl:
-      let resolution = resolvePackage(cat, "chocolatey",
-        hostCpu = pcX86_64, hostOs = poWindows)
-      check resolution.adapter == cakPath
-      check resolution.sourcePath.extractFilename.startsWith("chocolatey")
-
-    block legacyResolverGated:
+    # ---- (6) the full default policy behaves the same -------------------
+    block fullPolicyUnavailableHost:
       var raised = false
       try:
-        discard resolvePackage(cat, "chocolatey",
-          hostCpu = pcX86_64, hostOs = poLinux)
-      except EPackageUnavailableOnPlatform as err:
+        discard resolveProfilePackage("chocolatey", linuxHost,
+          DefaultSelectionPolicy, inventory = inventory)
+      except EPlatformUnavailable:
         raised = true
-        check err.msg.contains("this host is linux")
-      check raised
-
-    # ---- (4 cont.) the full default-shaped chain behaves the same -------
-    block fullChainUnavailableHost:
-      var raised = false
-      try:
-        discard chainResolvePackage(cat, "chocolatey",
-          chain = @[cakNix, cakBuiltin, cakPath],
-          hostCpu = pcX86_64, hostOs = poLinux)
-      except EPackageUnavailableOnPlatform:
-        raised = true
-      except EAdapterChainExhausted as err:
-        checkpoint "reached the chain instead of the gate: " & err.msg
+      except EMissingRealization as err:
+        checkpoint "reached the policy instead of the gate: " & err.msg
       check raised

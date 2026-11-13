@@ -68,7 +68,10 @@ untracked = false
 argv = ["repro", "test"]
 """
 
-let state = VerificationState(repo: "lib-a", commit: fixtureCommit)
+# TC-8b: the state under evaluation is described by its content id (the
+# record below never gets as far as being compared with it).
+let state = stateWithKnownContent([KnownContentId(algorithm: "git-tree-sha1",
+  id: "git-tree-sha1:" & fixtureCommit)], repo = "lib-a")
 
 proc requirement(): VerificationRequirement =
   VerificationRequirement(

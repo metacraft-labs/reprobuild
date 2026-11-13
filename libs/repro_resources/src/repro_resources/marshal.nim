@@ -31,6 +31,16 @@ proc marshalAttrs*(box: ExtensionBox): string =
       "registerExtension[Attrs](\"" & box.typeId & "\")")
   extensionRegistry[box.typeId].marshal(box)
 
+proc isAttrsMarshallerRegistered*(typeId: string): bool =
+  ## Whether THIS process can turn `typeId`'s payload into a typed box.
+  ##
+  ## The predicate the strict/opaque decision and its diagnostics are phrased
+  ## in, so no caller has to reach into `extensionRegistry` itself to ask —
+  ## and so "the codec is absent" can be distinguished from "the codec is
+  ## present and the payload is bad", which are different failures with
+  ## different remedies.
+  extensionRegistry.contains(typeId)
+
 proc unmarshalAttrs*(typeId: string; payload: string): ExtensionBox =
   ## Re-hydrate an attribute box for `typeId`. Hard error on an
   ## unknown id. `payload` is the versioned SSZ envelope bytes carried

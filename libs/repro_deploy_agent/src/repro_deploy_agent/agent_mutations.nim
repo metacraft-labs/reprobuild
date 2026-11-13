@@ -1,0 +1,76 @@
+## Compile-time falsifying mutations of the deploy agent's own checks.
+##
+## The same switch as the add-on's (``-d:reproAddonMutation=<name>``,
+## ``repro_addon/mutations``): a gate builds a separate binary with one
+## check broken and requires it to go red. This library cannot import the
+## add-on's module (the add-on depends on it), so it reads the same define
+## here; the names are also listed in the add-on's ``KnownAddonMutations``
+## so a static add-on build with one of them is accepted. A build without
+## the define contains none of the broken code.
+##
+## ===================================  ====================================
+## name                                 what the build does wrong
+## ===================================  ====================================
+## ``rdmf-ignores-revoked-keys``        a producer seals to a recipient key
+##                                      on its revoked-key list
+## ``rdmf-skips-closure-digest``        a v3 closure digest is never
+##                                      compared with the output it pins
+## ``rdmf-ignores-issued-at``           a stale v3 manifest is not reported
+##                                      ``aoStale``
+## ``agent-issued-at-future-trusted``   an ``issuedAt`` in the future (or
+##                                      before the last applied one) is
+##                                      accepted as fresh
+## ``agent-state-plain-write``          the sequence floor, quarantine and
+##                                      pause are written in place, and an
+##                                      empty floor reads as 0
+## ``agent-skips-compile-digest``       a compiled profile is applied
+##                                      whatever its digest
+## ``engine-agent-skips-a8``            the full engine's agent on an
+##                                      add-on host accepts a manifest
+##                                      without the attestation block and
+##                                      skips the A8 profile checks
+## ``engine-agent-shares-addon-state``  the full engine's agent on an
+##                                      add-on host, given the add-on's
+##                                      own state directory as its
+##                                      ``--state-dir``, applies with the
+##                                      plain hook instead of refusing
+## ``compile-pin-drops-selection``      the pin's system selection is bound
+##                                      into no digest and not passed to
+##                                      the agent's compile
+## ``engine-agent-ignores-pin``         the full engine's agent off an
+##                                      add-on host compiles a pinned
+##                                      source profile for ``default`` and
+##                                      never compares the pinned digest
+## ``agent-select-by-source-order``     among copies of one sequence the
+##                                      agent takes the last-listed source,
+##                                      not the latest signature
+## ``engine-agent-ignores-untrusted-pointer``  an untrusted add-on
+##                                      state-directory pointer reads as
+##                                      none, and the engine agent takes the
+##                                      plain apply
+## ``engine-agent-pointer-refusal-unwired``  the CLI does not act on the
+##                                      untrusted-pointer route, and the
+##                                      tick takes the plain apply
+## ===================================  ====================================
+
+const AgentMutation {.strdefine: "reproAddonMutation".} = ""
+
+const KnownAgentMutations* = ["rdmf-ignores-revoked-keys",
+                              "rdmf-skips-closure-digest",
+                              "rdmf-ignores-issued-at",
+                              "agent-issued-at-future-trusted",
+                              "agent-state-plain-write",
+                              "agent-skips-compile-digest",
+                              "engine-agent-skips-a8",
+                              "engine-agent-shares-addon-state",
+                              "compile-pin-drops-selection",
+                              "engine-agent-ignores-pin",
+                              "agent-select-by-source-order",
+                              "engine-agent-ignores-untrusted-pointer",
+                              "engine-agent-pointer-refusal-unwired"]
+
+template agentMutated*(name: static string): bool =
+  ## True only in the build compiled with ``-d:reproAddonMutation=<name>``.
+  static:
+    doAssert name in KnownAgentMutations, "unknown agent mutation " & name
+  AgentMutation == name

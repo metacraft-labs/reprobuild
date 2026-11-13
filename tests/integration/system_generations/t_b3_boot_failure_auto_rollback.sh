@@ -10,7 +10,7 @@
 #   2. Rewrite grub.cfg so the default entry points at the previous
 #      generation.
 #
-# A real boot test is out of scope (vm-harness covers that in Phase D).
+# A real boot test is out of scope (gosti covers that in Phase D).
 # This gate verifies the on-disk side of the auto-rollback contract.
 
 set -euo pipefail

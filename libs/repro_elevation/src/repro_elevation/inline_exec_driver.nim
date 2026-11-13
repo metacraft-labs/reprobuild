@@ -37,6 +37,7 @@
 
 import std/[osproc, streams, strtabs, strutils]
 from repro_core/process_streams import drainStream
+from repro_core/process_close import closeProcessOnce
 
 import ./errors
 import ./operations
@@ -142,7 +143,11 @@ proc spawnInlineExecCall(argv: seq[string]; cwd: string;
       options = {poStdErrToStdOut, poUsePath})
   except OSError as e:
     raiseProtocol("reprobuild.inlineExecCall spawn failed: " & e.msg)
-  defer: process.close()
+  # Not `process.close()`: that closes the merged stdout/stderr descriptor
+  # twice on POSIX. This runs inside the build engine's elevated-exec broker
+  # hook, on the scheduler thread, possibly while the engine's worker pool is
+  # live; see `repro_core/process_close`.
+  defer: closeProcessOnce(process)
   # Capture stdout (with stderr merged in) so the audit log keeps the
   # last few KiB on a failure. Empty captures collapse to empty
   # strings — a "well-behaved" elevated command logs to syslog /

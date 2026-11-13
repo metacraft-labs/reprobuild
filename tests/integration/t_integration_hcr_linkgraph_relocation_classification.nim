@@ -1,4 +1,5 @@
 import std/[algorithm, json, os, osproc, sequtils, strutils, tempfiles, unittest]
+import repro_test_support/reasoned_skip
 
 import repro_hcr_linkgraph
 

@@ -13,8 +13,9 @@
 
 import std/[os, strutils, unittest]
 import repro_home_intent
+from repro_test_support import testCaseScratchSlug
 
-const TmpDir = "build/test-tmp/m69-home-add-versioned"
+let TmpDir = "build/test-tmp/m69-home-add-versioned" / testCaseScratchSlug()
 
 proc resetTmp() =
   if dirExists(TmpDir):

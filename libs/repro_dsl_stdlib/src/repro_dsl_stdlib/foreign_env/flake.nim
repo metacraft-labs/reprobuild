@@ -17,11 +17,25 @@
 ##
 ## `nix print-dev-env --profile <profile> '.?submodules=1' --override-input
 ## <name> <sibling-ref> …` is exactly what `nix-direnv`'s `use_flake` runs in
-## this workspace today. Wrapping that command rather than re-deriving it means
+## this workspace today. (`'.?submodules=1'` loses its query when the checkout
+## declares a submodule it has not initialised — see `flakeProjectRef`.)
+## Wrapping that command rather than re-deriving it means
 ## a project's shell does not change when activation moves to Reprobuild —
 ## which is the entire promise of the degenerate end. `--profile` is part of the
-## shape and not decoration: it is the gcroot that stops the shell's store paths
-## being garbage-collected out from under a cached artifact.
+## shape and not decoration: it is the gcroot that stops THE SHELL's store
+## paths — the closure of the `nix-shell-env` this generation captured — being
+## garbage-collected while the activation that sourced them is in use.
+##
+## It roots the shell ONLY, and only at the generation it wrote. It does not
+## root what a build run inside the shell wrote absolute store paths to: a
+## binary linked under an older generation names that generation's openssl,
+## not the one the current profile holds (reprobuild-pm issue 2026-10-02).
+## Those are rooted elsewhere, by `repro_core/nix_store_roots`: the build
+## engine roots the store paths each action's outputs name in a ledger under
+## its cache root (and re-executes an action whose recorded paths were
+## collected anyway), and `resolveNixTool` roots each tool's current
+## realization under the tool store's `nix-gc-roots/`, dropping the root of
+## the realization it supersedes.
 ##
 ## ## The override arguments
 ##
@@ -34,10 +48,11 @@
 ## workspace; explicit pairs win over it. `workspaceOverrides = false` opts
 ## out when a recipe deliberately needs only its explicit overrides.
 
-import std/[json, os, osproc, streams, strutils]
+import std/[json, os, strutils]
 
 import repro_core/ambient_execution
 import repro_core/paths
+import repro_core/workspace_root
 import repro_project_dsl
 
 import ./apply
@@ -50,6 +65,10 @@ const
     ## only when the flake expression names a DIRECTORY, and `.?submodules=1`
     ## is not one) — the first of the three failure modes §2b records, and the
     ## reason the default here is the one that broke rather than a tidier one.
+    ##
+    ## It is what the recipe ASKS for, not always what nix is given:
+    ## `flakeProjectRef` drops `submodules=1` when the checkout declares a
+    ## submodule it has not initialised, by the same rule as a sibling.
 
   ForeignEnvWorkDirName* = "foreign-env"
 
@@ -169,6 +188,84 @@ proc flakeSiblingOverrideRef*(dir: string; gitExe = ""): string =
   ## The same answer, classifying ``dir`` first.
   flakeSiblingOverrideRef(dir, flakeSiblingKind(dir, gitExe))
 
+proc enclosingGitCheckout(dir: string): string =
+  ## The nearest directory at or above ``dir`` that is a git checkout, or ""
+  ## when there is none. A flake in a subdirectory (``flakeRef = "./nix"``) is
+  ## fetched by nix as part of the ENCLOSING repository, so that repository's
+  ## submodules are the ones nix will try to fetch.
+  var current = os.normalizedPath(dir)
+  while current.len > 0:
+    if flakeSiblingIsGitCheckout(current):
+      return current
+    let parent = parentDir(current)
+    if parent == current or parent.len == 0:
+      break
+    current = parent
+  ""
+
+proc flakeProjectRef*(projectRoot: string; flakeRef = DefaultFlakeRef;
+                      gitExe = ""): string =
+  ## How the project's OWN flake is named to nix: ``flakeRef``, except that a
+  ## local reference asking for ``submodules=1`` drops that parameter when
+  ## the checkout declares a submodule it has not initialised.
+  ##
+  ## The question is the one `flakeSiblingOverrideRef` answers for a sibling,
+  ## and it is answered by the same classifier, `flakeSiblingKind`: with an
+  ## uninitialised submodule, `?submodules=1` makes nix try to fetch it and
+  ## abort the whole flake fetch (`…/<submodule>' does not appear to be a git
+  ## repository`), so activation fails outright. That is the default spelling
+  ## (`DefaultFlakeRef`), and a clone made without `--recurse-submodules` is
+  ## in exactly that state, so it is the ordinary case rather than an exotic
+  ## one. Every other classification keeps the reference as written: an
+  ## initialised submodule is still fetched, which is what the flag is for.
+  ##
+  ## ## Why the uninitialised arm is plain git here, not `path:`
+  ##
+  ## A sibling in that state gets `path:` — a copy of what is on disk.
+  ## The project's own root cannot: it holds `.repro/`, which contains this
+  ## very activation's profile gcroot and scratch, and the dev-env edge's own
+  ## outputs. A `path:` copy would make the flake source change on every
+  ## activation and put the edge's outputs into its observed inputs, and it
+  ## would copy gitignored build output, which is the cost §2b removed for
+  ## siblings. Dropping the parameter keeps the git fetcher, which honours
+  ## `.gitignore` and cannot fail on an absent submodule. What it omits is
+  ## the content of submodules that ARE initialised while another one is not;
+  ## those are exactly the trees the flag cannot fetch anyway while any
+  ## submodule is missing.
+  ##
+  ## Only a LOCAL reference is touched (no scheme; a `path:` reference names
+  ## a directory copy, where the parameter has no meaning to drop). Other
+  ## query parameters and the `#fragment` are preserved.
+  let hashAt = flakeRef.find('#')
+  let base = if hashAt >= 0: flakeRef[0 ..< hashAt] else: flakeRef
+  let fragment = if hashAt >= 0: flakeRef[hashAt .. ^1] else: ""
+  let queryAt = base.find('?')
+  if queryAt < 0:
+    return flakeRef
+  let localPath = base[0 ..< queryAt]
+  if localPath.contains(':'):
+    return flakeRef
+  let params = base[queryAt + 1 .. ^1].split('&')
+  var kept: seq[string]
+  var asksForSubmodules = false
+  for param in params:
+    if param in ["submodules=1", "submodules=true"]:
+      asksForSubmodules = true
+    else:
+      kept.add(param)
+  if not asksForSubmodules:
+    return flakeRef
+  let flakeDir = absolutePath(if localPath.len > 0: localPath else: ".",
+    projectRoot)
+  let checkout = enclosingGitCheckout(flakeDir)
+  if checkout.len == 0 or
+      flakeSiblingKind(checkout, gitExe) != fskGitSubmodulesUninitialised:
+    return flakeRef
+  result = localPath
+  if kept.len > 0:
+    result.add("?" & kept.join("&"))
+  result.add(fragment)
+
 proc flakePrintDevEnvArgv*(nixExe, flakeRef, profilePath: string;
                            overrideInputs: openArray[(string, string)] = [];
                            extraArgs: openArray[string] = []): seq[string] =
@@ -264,8 +361,12 @@ proc flakeDevShellOps*(projectRoot: string; flakeRef = DefaultFlakeRef;
   let profilePath =
     if profile.len > 0: profile
     else: workDir / "flake-profile"
-  let argv = flakePrintDevEnvArgv(resolveNixExe(nixExe), flakeRef, profilePath,
-    overrideInputs, extraArgs)
+  # The project's own flake goes through the same submodule rule as a
+  # sibling override (`flakeProjectRef`), or a declared-but-uninitialised
+  # submodule fails activation outright.
+  let argv = flakePrintDevEnvArgv(resolveNixExe(nixExe),
+    flakeProjectRef(projectRoot, flakeRef), profilePath, overrideInputs,
+    extraArgs)
   let split = withoutNixShellScratch(captureForeignEnvOps(argv, projectRoot,
     workDir / "print-dev-env.bash", separator = $PathSep))
   if split.scratchDir.len > 0 and dirExists(extendedPath(split.scratchDir)):
@@ -280,13 +381,15 @@ proc flakeDevShellOps*(projectRoot: string; flakeRef = DefaultFlakeRef;
 proc workspaceFlakeOverrides*(projectRoot: string; flakeRef = DefaultFlakeRef):
     seq[(string, string)] =
   ## Ask NF-1 for the actual develop bindings instead of duplicating its resolver.
-  var root = absolutePath(projectRoot)
-  while not fileExists(extendedPath(root / ".repro-workspace.toml")) and
-      not fileExists(extendedPath(root / ".repro" / "workspace.toml")):
-    let parent = parentDir(root)
-    if parent == root or parent.len == 0:
-      return
-    root = parent
+  # The workspace root is found by the one walk every workspace-root lookup
+  # uses (`repro_core/workspace_root`, Workspace-Settings-Files.md §6). A
+  # root found only by the MO-2 committed lock is a single-repo workspace with
+  # no siblings to develop against, so there are no overrides to ask for and
+  # no `repro` to start.
+  let found = discoverWorkspaceRoot(projectRoot)
+  if found.marker in {wrmNone, wrmCommittedLock}:
+    return
+  let root = found.root
   var localRef = flakeRef.split('#')[0].split('?')[0]
   if localRef.startsWith("path:"):
     localRef = localRef[5 .. ^1]
@@ -317,16 +420,19 @@ proc workspaceFlakeOverrides*(projectRoot: string; flakeRef = DefaultFlakeRef):
   var probe: tuple[output: string, exitCode: int]
   var stderrText = ""
   try:
-    let process = uncontrolledStartProcess(repro, workingDir = projectRoot,
-      args = @["flake", "override-args", "--all", "--json",
-        "--workspace-root=" & root, "--flake=" & flakeRoot],
-      options = {poUsePath})
-    try:
-      probe.output = process.outputStream.readAll()
-      stderrText = process.errorStream.readAll().strip()
-      probe.exitCode = process.waitForExit()
-    finally:
-      process.close()
+    # Use the foreign-env capture's file-backed runner: reading stdout to EOF
+    # before draining stderr deadlocks when the child fills its stderr pipe.
+    # Per-call scratch also isolates concurrent entries and is removed on every
+    # outcome, so diagnostics cannot become persistent activation inputs.
+    let workDir = flakeForeignEnvWorkDir(projectRoot)
+    createDir(extendedPath(workDir))
+    let scratch = claimCaptureScratch(workDir)
+    defer: removeDir(extendedPath(scratch))
+    let captured = runCaptureCommand(@[repro, "flake", "override-args",
+      "--all", "--json", "--workspace-root=" & root, "--flake=" & flakeRoot],
+      projectRoot, scratch / "resolver.stdout", scratch / "resolver.stderr")
+    probe = (captured.output, captured.exitCode)
+    stderrText = captured.error.strip()
   except CatchableError as err:
     raise newException(ForeignEnvCaptureError,
       "native workspace flake override resolution failed: could not run `" &

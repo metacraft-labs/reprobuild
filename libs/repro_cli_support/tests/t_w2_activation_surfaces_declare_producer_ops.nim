@@ -110,6 +110,7 @@ const
   ActivationEntryPoints = [
     "activatedEnvironment(",
     "runActivatedCommand(",
+    "execActivatedCommand(",
     "spawnActivatedShell(",
     "renderDevEnvArtifact(",
     "renderDevEnvShellOps(",
@@ -471,6 +472,6 @@ suite "w2_activation_surfaces_declare_producer_ops":
     let root = findRepoRoot()
     let content = readFile(root / "libs" / "repro_cli_support" / "src" / "repro_cli_support.nim")
     check content.contains("return runActivatedCommand(artifact, \"\", command, canonicalProjectRoot)")
-    check content.contains("return runActivatedCommand(artifact, edge.artifactPath, parsed.command,")
+    check content.contains("return execActivatedCommand(artifact, edge.artifactPath, parsed.command,")
     check content.contains("return spawnActivatedShell(artifact, edge.artifactPath, shellPath,")
 

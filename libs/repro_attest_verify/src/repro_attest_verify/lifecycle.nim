@@ -51,6 +51,12 @@
 ## instruction to refresh it, while it is still valid — `isUsable`
 ## stays true and no verdict changes.
 ##
+## The horizon is *proportional*, and that is a repair rather than a
+## refinement: a flat thirty days is longer than the entire stated
+## lifetime of some of the documents in this corpus, and for those the
+## announcement was true from the hour they were issued. See
+## `effectiveHorizon`.
+##
 ## ## Drift
 ##
 ## `driftOf` is the other half of the same job and deliberately has
@@ -90,6 +96,27 @@ type
       ## Revocation lists and trusted-computing-base documents. These
       ## are REISSUED on a schedule; a difference is expected and the
       ## pin is what needs refreshing.
+    lcHistoricalVintage = "historical-vintage"
+      ## Vendor collateral pinned BECAUSE it is old. A corpus that holds
+      ## one vintage of a document proves that this build reads the
+      ## vintage it happens to hold; two vintages, issued years apart,
+      ## prove that the reader is reading the FORMAT. So some of these
+      ## documents are kept at an issue date long past, and their expiry
+      ## is the property they are there for rather than a state to get
+      ## out of — refreshing one would delete the second vintage and
+      ## leave the corpus unable to make the claim.
+      ##
+      ## It is a separate class and not a note on a `lcVendorCollateral`
+      ## row because `needsAttention` is the whole output of the
+      ## scheduled monitor: a document that is expired on purpose,
+      ## reported as needing attention every week forever, is the
+      ## crying-wolf failure the classification exists to prevent, and
+      ## the complement — reporting nothing — is worse. The class says
+      ## which, and `expiryNeedsAttention` below is where it is spent.
+      ##
+      ## The claim has teeth in the other direction too. A row in this
+      ## class that is NOT expired is a row misclassified to quieten it,
+      ## and both this build's gate and the scheduled monitor refuse it.
     lcGenuineCapture = "genuine-capture"
       ## A report, quote or log a real machine produced once. It cannot
       ## be re-fetched and a live endpoint asked again answers with a
@@ -144,10 +171,14 @@ const
     ## the scarce thing, not the number.
 
   DefaultRefreshHorizonDays* = 30
-    ## How far ahead an expiry is announced. Thirty days is a month of
-    ## working days, which is the unit a collateral refresh is actually
-    ## scheduled in; a shorter horizon announces a deadline that has
-    ## already passed for anyone on holiday.
+    ## How far ahead an expiry is announced, at most. Thirty days is a
+    ## month of working days, which is the unit a collateral refresh is
+    ## actually scheduled in; a shorter horizon announces a deadline
+    ## that has already passed for anyone on holiday.
+    ##
+    ## It is a CEILING and not the horizon itself — see
+    ## `effectiveHorizon`, which is the repair for a defect this
+    ## constant had on its own.
 
   IsoInstantFormat* = "yyyy-MM-dd'T'HH:mm:ss'Z'"
     ## The one spelling of an instant this module reads out of a
@@ -202,6 +233,38 @@ proc windowOfIssueAndNextUpdate*(issueDate, nextUpdate: string):
   window(parseIsoInstant(issueDate, "the document's issue date"),
          parseIsoInstant(nextUpdate, "the document's next-update date"))
 
+proc effectiveHorizon*(w: LifecycleWindow; horizonSeconds: int64): int64 =
+  ## How far ahead THIS artifact's expiry is announced: the lesser of
+  ## the caller's horizon and half the artifact's own stated lifetime.
+  ##
+  ## ## Why a horizon cannot be a flat number
+  ##
+  ## An announcement that is true for an artifact's whole life is not an
+  ## announcement. It was measured rather than reasoned about: every
+  ## trusted-computing-base document and platform revocation list one of
+  ## these vendors serves states a next-update EXACTLY thirty days after
+  ## its issue date, so under a flat thirty-day horizon not one of them
+  ## is ever `lsCurrent` — it is born due for refresh and stays due until
+  ## it expires. A scheduled run over such a corpus reports the same
+  ## rows every week from the day it is switched on, and a report that
+  ## has never once been empty cannot say that something changed. That
+  ## is the defect this procedure repairs, and it is the same shape as
+  ## `driftOf`'s: the value of a signal is in what it does NOT say.
+  ##
+  ## Half, specifically, because half is the largest fraction that
+  ## guarantees the quiet period is at least as long as the warning
+  ## period. A larger one leaves a window too short to be news; a
+  ## smaller one throws away lead time this corpus has no spare of.
+  ##
+  ## This NARROWS the warning and never the validity: `lsExpired`,
+  ## `isUsable` and every evaluator's refusal are untouched, and an
+  ## artifact's expiry date is still read out of its own bytes. The only
+  ## thing that moves is the day the announcement starts.
+  if not (w.hasNotBefore and w.hasNotAfter): return horizonSeconds
+  let lifetime = w.notAfter - w.notBefore
+  if lifetime <= 0: return horizonSeconds
+  min(horizonSeconds, lifetime div 2)
+
 proc classify*(w: LifecycleWindow; nowSeconds: int64;
                horizonSeconds = int64(DefaultRefreshHorizonDays) *
                                 int64(SecondsPerDay)): LifecycleStatus =
@@ -217,7 +280,7 @@ proc classify*(w: LifecycleWindow; nowSeconds: int64;
     return lsNoStatedEnd
   if nowSeconds >= w.notAfter:
     return lsExpired
-  if nowSeconds + horizonSeconds >= w.notAfter:
+  if nowSeconds + effectiveHorizon(w, horizonSeconds) >= w.notAfter:
     return lsDueForRefresh
   lsCurrent
 
@@ -235,6 +298,22 @@ proc needsAttention*(s: LifecycleStatus): bool =
   ## of `lsCurrent`, written out rather than negated, so a status added
   ## to the enumeration has to be placed in one of the two by hand.
   s in {lsNotYetInForce, lsDueForRefresh, lsExpired, lsNoStatedEnd}
+
+proc expiryNeedsAttention*(class: LifecycleClass; status: LifecycleStatus):
+    bool =
+  ## Whether a scheduled run should report this (class, status) pair
+  ## LOUDLY, as opposed to printing it and moving on.
+  ##
+  ## `needsAttention` answers the question for a status alone and is
+  ## still the right answer for every class but one. A
+  ## `lcHistoricalVintage` row is pinned BECAUSE it has expired, so
+  ## `lsExpired` is the state it is supposed to be in and reporting it
+  ## is noise — while any OTHER status for it contradicts the class,
+  ## which is a louder finding than the one it displaces rather than a
+  ## quieter one.
+  if class == lcHistoricalVintage:
+    return status != lsExpired
+  needsAttention(status)
 
 proc daysBetween(a, b: int64): int64 =
   ## Whole days from `a` to `b`, rounded toward zero.
@@ -306,7 +385,12 @@ proc driftOf*(class: LifecycleClass; pinnedSha256, observedSha256: string):
       $class & " has no publisher to compare against: it is produced " &
       "here, from inputs this repository already pins, so there is no " &
       "second party whose answer a difference could be a difference FROM")
-  of lcProtocolVector, lcTrustRoot, lcVendorCollateral:
+  of lcProtocolVector, lcTrustRoot, lcVendorCollateral, lcHistoricalVintage:
+    # A historical vintage sits here rather than beside `lcGenuineCapture`
+    # for a reason worth stating: its publisher is a project's committed
+    # test data at a named commit, which cannot answer differently. So a
+    # difference IS a defect in the pin, exactly as for the two above —
+    # the class quietens its EXPIRY and nothing else.
     if pinnedSha256 == observedSha256: doUnchanged else: doDrifted
   of lcGenuineCapture:
     if pinnedSha256 == observedSha256: doUnchanged else: doExpectedToDiffer

@@ -51,39 +51,79 @@ proc repositoryRootOf*(projectRoot: string): string =
 
 proc portableCacheRoots*(projectRoot, workRoot: string;
                          storeRoot = resolveStoreRoot()): seq[LogicalRoot] =
-  if projectRoot.len > 0:
-    result.add(LogicalRoot(label: "project", path: absolutePath(projectRoot),
-                           kind: lrkTracked))
-  # The repository the project lives in: a recipe's dependencies are
-  # provisioned into its SIBLING recipes (`<repo>/packages/source/<dep>/
-  # .repro/output/install`), and every action names them in its environment.
-  # Without this root those paths stay absolute, so the same recipe in two
-  # checkouts of the repository never agreed on a single weak fingerprint.
-  let repository = repositoryRootOf(projectRoot)
-  if repository.len > 0 and repository != absolutePath(projectRoot):
-    result.add(LogicalRoot(label: "repository", path: repository,
-                           kind: lrkTracked))
-  if workRoot.len > 0:
-    result.add(LogicalRoot(label: "work", path: absolutePath(workRoot),
-                           kind: lrkTracked))
-  if storeRoot.len > 0:
-    result.add(LogicalRoot(label: "store", path: absolutePath(storeRoot),
-                           kind: lrkTracked))
-  when defined(windows):
-    let systemRoot = getEnv("SystemRoot", "C:\\Windows")
-    result.add(LogicalRoot(label: "system", path: systemRoot,
-                           kind: lrkUntracked))
-  else:
-    for dir in ["/proc", "/sys", "/dev"]:
-      result.add(LogicalRoot(label: "system" & dir.replace('/', '-'),
-                             path: dir, kind: lrkUntracked))
+  ## The declared root classification for this invocation.
+  ##
+  ## THE DERIVATION MOVED to `repro_build_engine.declaredFilesystemRoots`,
+  ## and this is now the thin wrapper that supplies the one root the engine
+  ## layer has no business discovering: the REPOSITORY the project lives in.
+  ## A recipe's dependencies are provisioned into its SIBLING recipes
+  ## (`<repo>/packages/source/<dep>/.repro/output/install`), and every action
+  ## names them in its environment; without that root those paths stay
+  ## absolute, so the same recipe in two checkouts never agreed on a single
+  ## weak fingerprint. Finding it is a `.git` walk (`repositoryRootOf`),
+  ## which must not sit on the dev-env activation path.
+  ##
+  ## There is now a SECOND consumer of this same classification — the
+  ## membership exemption of `Incremental-Invalidation.md` §"Validation
+  ## Criteria", via `BuildEngineConfig.filesystemRoots` — and it is why the
+  ## derivation is shared instead of copied: two lists of the roots a
+  ## workspace declares is one list to forget to update.
+  declaredFilesystemRoots(projectRoot, workRoot, storeRoot,
+                          repositoryRootOf(projectRoot))
+
+proc wireFilesystemRoots*(config: var BuildEngineConfig;
+                          projectRoot, workRoot: string; outRoot = "") =
+  ## Declare this invocation's root classification to the engine.
+  ##
+  ## UNCONDITIONAL, unlike `wirePortableCache`. The portable identity is
+  ## opt-in because it costs a BLAKE3 pass per input; the membership
+  ## exemption this feeds is REQUIRED ("A second exemption is mandatory…"),
+  ## costs a path-prefix test, and its absence is what made the dev-env
+  ## provider-compile edge key on the immediate membership of `/` and of the
+  ## user's home directory. Leaving it behind `REPRO_PORTABLE_CACHE` would
+  ## also put the exemption behind an environment variable, which
+  ## §"Validation Criteria" forbids outright.
+  ##
+  ## EVERY EXPLICITLY CONSTRUCTED engine configuration in the CLI calls this
+  ## — all seven `var … = BuildEngineConfig(` sites — and not only the two
+  ## build paths. The edges that walk furthest UP the filesystem are the
+  ## internal helper ones — interface extraction and the provider compile,
+  ## both of which run `nim c` — and they are the ones the measurement was
+  ## taken on. An engine config that skipped this would simply keep every
+  ## ancestor's membership in its key, silently, which is the shape
+  ## `t_s7_build_paths_reach_the_restore_config.nim` was written about, and
+  ## `t_every_engine_config_declares_its_filesystem_roots.nim` asserts over
+  ## that population so a newly added site cannot opt out by not being
+  ## looked at.
+  ##
+  ## WHAT IS NOT WIRED, said here rather than left as an overclaim. The
+  ## roughly twenty `defaultBuildEngineConfig(...)` sites in the CLI do not
+  ## call this, and neither does `repro_profile_compile`'s
+  ## `profileCompileEngineConfig`, `repro_lock_gen` or
+  ## `repro_tool_profiles`. Those keep the pre-exemption behaviour exactly,
+  ## which is the fail-closed direction, and they are the workspace and VCS
+  ## plumbing paths — `cloneForDevelop`, `executeWorkspaceSync`,
+  ## `executeBranchCreate`, `executeWorkspaceSwitch` — whose edges run git
+  ## rather than a compiler that searches upward. The profile compile has
+  ## answered the same question by a different mechanism: it stages a
+  ## `.nimble` so Nim's upward search STOPS at the profile directory and
+  ## there are no ancestor enumerations to exempt
+  ## (`issues/2026-10-14-macos-profile-compile-is-keyed-on-the-membership-of-
+  ## every-ancestor-directory.md`). Wiring the rest is separable work; what
+  ## must not happen is this comment claiming it is already done.
+  config.filesystemRoots = declaredFilesystemRoots(projectRoot, workRoot,
+    resolvedStoreRootOrEmpty(), repositoryRootOf(projectRoot), outRoot)
 
 proc wirePortableCache*(config: var BuildEngineConfig;
                         projectRoot, workRoot: string) =
   ## Attach portable caching to an engine configuration, when enabled.
+  ##
+  ## The root classification is declared either way: see
+  ## `wireFilesystemRoots`.
+  wireFilesystemRoots(config, projectRoot, workRoot)
   if not portableCacheEnabled():
     return
-  config.portableRoots = portableCacheRoots(projectRoot, workRoot)
+  config.portableRoots = config.filesystemRoots
   config.portableLookup = true
   # A portable key is only shareable if the action cannot see the invoking
   # shell's own variables, so portable caching launches actions with an

@@ -1,0 +1,12 @@
+{
+  "description": "Platform and architecture predicates are evaluated for the target system; wsl is false for every target.",
+  "hosts": {},
+  "evaluations": [
+    { "host": "h", "system": "aarch64-darwin", "packages": ["iterm2", "rosetta-tools"] },
+    { "host": "h", "system": "x86_64-darwin", "packages": ["cpuid", "iterm2"] },
+    { "host": "h", "system": "x86_64-linux", "packages": ["cpuid", "valgrind"] },
+    { "host": "h", "system": "aarch64-linux", "packages": ["rosetta-tools", "valgrind"] },
+    { "host": "h", "system": "x86_64-windows", "packages": ["cpuid", "windows-terminal"] },
+    { "host": "h", "system": "aarch64-windows", "packages": ["rosetta-tools", "windows-terminal"] }
+  ]
+}

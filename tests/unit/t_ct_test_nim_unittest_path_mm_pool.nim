@@ -116,3 +116,17 @@ suite "ct_test_nim_unittest RX passthroughs — --path: / --mm: / build-pool":
     let action = handle.run(registerImplicitName = false)
     check action.pool == ""
     check action.poolUnits == 1'u32
+
+  test "native compilation records its platform C backend on the registered edge":
+    let edge = buildNimUnittest.build(
+      source = "tests/foo.nim",
+      binary = "build/test-bin/rx_backend")
+    let expected = when defined(macosx): "clang" else: "gcc"
+    let wrong = when defined(macosx): "gcc" else: "clang"
+    var matches = 0
+    for action in registeredBuildActions():
+      if action.id == edge.action.id:
+        inc matches
+        check action.toolIdentityRefs.count(expected) == 1
+        check wrong notin action.toolIdentityRefs
+    check matches == 1

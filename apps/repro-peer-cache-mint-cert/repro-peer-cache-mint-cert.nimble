@@ -11,7 +11,7 @@
 version       = "0.1.0"
 author        = "Metacraft Labs"
 description   = "Peer-cache cert mint: self-signed, CA, and CA-signed peer certs"
-license       = "MIT"
+license       = "Apache-2.0"
 srcDir        = "."
 bin           = @["repro_peer_cache_mint_cert"]
 
