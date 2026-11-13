@@ -1434,17 +1434,17 @@
     "nim-shm-queue-src": {
       "flake": false,
       "locked": {
-        "lastModified": 1793346901,
-        "narHash": "sha256-ph1AMDJSXCDuvC4JH6NxSU7yXEFYz4UjJ1zW+Tj19EA=",
+        "lastModified": 1794438542,
+        "narHash": "sha256-x9UKDQRIJtADZqwKJsBR2AMG2OPZWqj8ztf/xDn17v4=",
         "owner": "metacraft-labs",
         "repo": "nim-shm-queue",
-        "rev": "84fd76b174d4868e703ba3d599668ee340e0b6ea",
+        "rev": "8dff4ad246ff4b15ef63ddf7d65938af3115f844",
         "type": "github"
       },
       "original": {
         "owner": "metacraft-labs",
         "repo": "nim-shm-queue",
-        "rev": "84fd76b174d4868e703ba3d599668ee340e0b6ea",
+        "rev": "8dff4ad246ff4b15ef63ddf7d65938af3115f844",
         "type": "github"
       }
     },
