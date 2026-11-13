@@ -950,6 +950,10 @@
 ## ``discard-completed-objects-present``      the completion is written while
 ##                                            a discarded object is still in
 ##                                            place
+## ``discard-failed-removal-counted-as-kept`` a store aside still on disk after
+##                                            a failed removal is listed as
+##                                            kept with the store, without
+##                                            --keep-store
 ## ``discard-completion-key-read-late``       the completion is signed from
 ##                                            the key file, which the removal
 ##                                            took
@@ -1617,6 +1621,7 @@ const
                           "discard-completion-skips-sync",
                           "intent-overwrites-existing",
                           "discard-completed-objects-present",
+                          "discard-failed-removal-counted-as-kept",
                           "discard-completion-key-read-late",
                           "discard-completion-sync-error-swallowed",
                           "fresh-ignores-listings"]

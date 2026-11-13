@@ -701,6 +701,26 @@ proc storeEvidenceGate*(custody: CustodySite; opts: UninstallOptions;
       "writes and prints a signed record of each")
     result.errors.add("nothing was removed")
 
+proc classifyLeftAside*(r: var UninstallResult; pending: seq[string];
+                        asideDir: string; keepStore: bool) =
+  ## Sorts the store evidence left aside in ``/repro`` after the removal
+  ## step. An aside that is gone was removed. One still on disk is "kept
+  ## with the store" only when the operator asked for that (``--keep-store``,
+  ## §13 decision 81). When the removal failed instead (``/repro: ...``
+  ## raised, or the store was still mounted), it is neither gone nor kept:
+  ## it stays out of both lists, so ``finishDiscard`` sees an object still in
+  ## place and writes no completion; the intent stands as "authorised, not
+  ## completed" and the removal error is reported (decision 113).
+  for e in pending:
+    if not e.startsWith(asideDir): continue
+    if dirExists(e):
+      when mutated("discard-failed-removal-counted-as-kept"):
+        r.keptEvidence.add(e)               # FALSIFIER: dirExists alone
+      else:
+        if keepStore: r.keptEvidence.add(e)
+    else:
+      r.removed.add(e & " (store evidence left aside)")
+
 proc finishDiscard*(r: var UninstallResult; custody: CustodySite;
                    signer: TextSigner; pending: seq[string];
                    writer: DiscardRecordWriter = atomicRecordWriter;
@@ -988,12 +1008,8 @@ proc runAddonUninstall*(opts: UninstallOptions): UninstallResult =
     result.removed.add(e & " (store evidence)")
   # Objects a crashed recovery left aside in the store were named above
   # (the refusal); they went with the store, or stay with it.
-  for e in evidenceKept:
-    if e.startsWith(asideRoot(custodySite(stateDir))):
-      if dirExists(e):
-        result.keptEvidence.add(e)
-      else:
-        result.removed.add(e & " (store evidence left aside)")
+  classifyLeftAside(result, evidenceKept, asideRoot(custodySite(stateDir)),
+                    opts.keepStore)
   for root in ["/etc/repro", "/var/lib/repro", "/run/repro"]:
     if dirExists(root):
       try:
