@@ -11,7 +11,12 @@ when defined(posix):
   import std/posix
 
 const
-  StoreDaemonProtocolVersion* = 7'u16
+  StoreDaemonProtocolVersion* = 8'u16
+    ## v8: the external-realize body carries ``nixRequesterDir``, the
+    ## client's working directory, which a relative ``expressionFile`` and a
+    ## ``.#`` selector are resolved against. A v7 peer reading a v8 body
+    ## would read the directory's length as the next field.
+    ##
     ## v7: the external-realize body carries the record's whole
     ## ``archiveDetail`` (``TarballArchiveDetail``, version-tagged) where v6
     ## carried only its ``version``. A v6 peer reading a v7 body would read
@@ -103,6 +108,10 @@ type
     lockIdentity*: string
     nixSelector*: string
     nixExpressionFile*: string
+    nixRequesterDir*: string
+      ## Absolute working directory of the requesting client. The daemon's
+      ## own directory is not the project's, so a relative ``nixExpressionFile``
+      ## and a ``.#`` selector must not be resolved against it.
     nixpkgsRef*: string
     nixpkgsRev*: string
     nixpkgsNarHash*: string
@@ -321,6 +330,7 @@ proc externalRealizeBody*(req: StoreDaemonExternalRealizeRequest): seq[byte] =
   result.writeString(req.lockIdentity)
   result.writeString(req.nixSelector)
   result.writeString(req.nixExpressionFile)
+  result.writeString(req.nixRequesterDir)
   result.writeString(req.nixpkgsRef)
   result.writeString(req.nixpkgsRev)
   result.writeString(req.nixpkgsNarHash)
@@ -350,6 +360,7 @@ proc parseExternalRealizeBody*(body: openArray[byte]):
   result.lockIdentity = body.readString(pos)
   result.nixSelector = body.readString(pos)
   result.nixExpressionFile = body.readString(pos)
+  result.nixRequesterDir = body.readString(pos)
   result.nixpkgsRef = body.readString(pos)
   result.nixpkgsRev = body.readString(pos)
   result.nixpkgsNarHash = body.readString(pos)

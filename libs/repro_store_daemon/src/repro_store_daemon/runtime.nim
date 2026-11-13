@@ -384,7 +384,7 @@ proc realizeNixDaemon(config: DevDaemonConfig;
     StoreDaemonRealizeResult =
   ensureRequestStoreMatches(config, req.storeRoot)
   let profile = resolveNixTool(useDefForNix(req), config.storeRoot,
-    writerMode = "daemon")
+    writerMode = "daemon", requesterDir = req.nixRequesterDir)
   let attached = attachProfileRoot(config, req.holderId, req.rootId, profile)
   let artifact = writeHolderProfileArtifact(config, req.holderId, req.rootId,
     "nix", profile)
