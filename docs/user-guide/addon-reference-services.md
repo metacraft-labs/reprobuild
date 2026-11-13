@@ -118,27 +118,46 @@ The add-on handles this in four ways:
     earlier apply, created it, and it is still that same directory (the
     same device, inode and birth time; on a file system that reports no
     birth time it is always refused); who owns it does not matter. The
-    instances of a template share their directories. When the unit is restarted or activated
+    instances of a template share their directories. A directory that
+    was absent when an apply checked the unit and exists once the apply
+    has started its units is recorded as the unit's, whether the apply
+    started the unit by name, a dependency pulled it in, or its socket's
+    start made the directory. When the unit is restarted or activated
     between applies, systemd removes such a directory and makes it again;
     the next apply accepts it only if it is exactly one of the unit's
-    directories, the unit is running, and the directory was born after
-    the unit's current run began (to within the one clock tick by which
-    the kernel's file timestamps can trail the precise clock), and
-    it logs that acceptance in the generation's audit log (if the log
-    cannot be written, the directory is refused). On a host upgraded from an add-on version that kept no such
-    record, the first apply records, once, the directories the installed
-    services exactly declare and logs each one. A directory first created outside an apply (the unit's first
-    start by its socket or timer, or by hand) is refused at the next
-    apply, and so is one another package installs.
+    directories, systemd reports a different run of the unit than the one
+    recorded, and the directory was born no earlier than 100 ms before
+    that run's reported start (systemd 252 makes it a few milliseconds
+    before it records the start); for a unit that is not running, it must
+    also have been born before that run ended. A template's directory is
+    judged by the instance that ran. The apply logs each such acceptance
+    in the generation's audit log (if the log cannot be written, the
+    directory is refused). A tree a root process makes at the path
+    within those 100 ms before a start is taken as the unit's. On a host
+    upgraded from an add-on version that kept no such record, the first
+    apply records, once, the directories the installed services exactly
+    declare and the existing sockets of their socket units, and logs each
+    one. A directory first created outside an apply (the unit's first
+    start by its timer, or by hand) is refused at the next apply, and so
+    is one another package installs. If an apply is refused and goes
+    back to the previous generation, the step back is not refused for
+    such a directory: the unit it refuses stays stopped, held from
+    starting, until a later apply finds nothing to refuse, and the hold
+    is logged.
     The list of base-system directory names was measured on the amd64
     Debian 12 and 13 and Ubuntu 24.04 and 26.04 test images; on other
     bases, such as Raspberry Pi OS, only the existence check applies;
   - a unix socket of such a unit must be `/run/foo` or below `/run/foo/`,
     named after the service the socket starts (`foo.service`) whatever
-    the socket is called; a socket or timer named after a directory the
-    base system has (`udev.socket`, `systemd.socket`) is refused, and so
-    is a socket path that already exists and that this socket did not
-    create;
+    the socket is called; deeper than `/run/foo/<name>` (for example
+    `/run/foo/sub/control`), it is refused when the service can write a
+    directory on its path (its `RuntimeDirectory=foo`, a
+    `ReadWritePaths=`), since the service could turn that directory into
+    a link the service manager then follows; a socket or timer named
+    after a directory the base system has (`udev.socket`,
+    `systemd.socket`) is refused, and so is a socket path that already
+    exists, that this socket did not create, or whose identity cannot be
+    read;
   - realtime scheduling, a reboot `FailureAction=`, or a resource limit
     above the service manager's default;
   - a dependency such as `OnFailure=` or `Wants=` that starts a unit

@@ -715,13 +715,11 @@ type
     stopped*: bool
       ## the unit is not running (its ``ActiveState`` is none of
       ## ``active``, ``activating``, ``reloading``), or systemd does not say
-    clockResolution*: int64
-      ## how far, in nanoseconds, a file system's timestamp may lag the
-      ## precise clock systemd stamps an invocation with: the kernel takes
-      ## inode times from the coarse clock (fs/inode.c ``current_time``,
-      ## ``ktime_get_coarse_real_ts64``), so a directory made just after the
-      ## invocation began can carry a birth time up to one tick earlier;
-      ## ``clock_getres(CLOCK_REALTIME_COARSE)``
+    lastStop*: int64
+      ## when its last run ended (``InactiveEnterTimestamp``), nanoseconds
+      ## since the epoch; 0 when unknown. Read with the start, the
+      ## ``InvocationID`` and the state in one ``systemctl show``, so the
+      ## four are one snapshot (A9 review round 12, finding 5).
 
 # statx(2) through the raw system call: glibc and the static musl build
 # both have syscall(2), and the struct is the kernel's own
@@ -759,32 +757,32 @@ const
   StatxIno = 0x100'u32
   StatxBtime = 0x800'u32
 
-proc statxOf(path: string; follow: bool): tuple[ok: bool; buf: StatxBuf] =
-  ## ``statx(2)`` of ``path``: the inode and the birth time it reports.
+proc statxOf(path: string; follow: bool): tuple[ok: bool; buf: StatxBuf; err: cint] =
+  ## ``statx(2)`` of ``path``: the inode and the birth time it reports, or
+  ## the ``errno`` it failed with (``ENOSYS`` where there is no statx).
   when SysStatx < 0:
-    return (false, StatxBuf())
+    return (false, StatxBuf(), ENOSYS)
   else:
     var buf: StatxBuf
     let flags = (if follow: 0 else: AtSymlinkNoFollow)
     let r = c_syscall(clong(SysStatx), cint(AtFdcwd), path.cstring, cint(flags),
                       cuint(StatxIno or StatxBtime), addr buf)
-    (r == 0, buf)
-
-proc coarseResolutionNs*(): int64 =
-  ## The resolution of the coarse real-time clock the kernel stamps inode
-  ## times with (one tick), in nanoseconds; 0 where it cannot be read, so
-  ## comparisons stay exact.
-  when defined(linux):
-    var ts: Timespec
-    # CLOCK_REALTIME_COARSE (include/uapi/linux/time.h).
-    if clock_getres(ClockId(5), ts) == 0:
-      return int64(ts.tv_sec) * 1_000_000_000'i64 + int64(ts.tv_nsec)
-  0
+    (r == 0, buf, (if r == 0: 0.cint else: errno))
 
 proc identityOfPath*(path: string): PathIdentity =
   ## ``path``'s identity now (not following a final link), or not there.
-  let (ok, b) = statxOf(path, follow = false)
-  if not ok: return (false, 0'u64, 0'u64, 0'i64)
+  ## Only ``ENOENT`` (and ``ENOTDIR`` on a component) means absent. Any other
+  ## failure (``EACCES``, ``EPERM`` from a filter, ``ELOOP``, ``EIO``,
+  ## ``ENOSYS``) reads as a path that exists with no identity known: it
+  ## never matches a record and is never taken as absent, so every check
+  ## that needs it refuses (A9 review round 12, finding 6).
+  let (ok, b, err) = statxOf(path, follow = false)
+  if not ok:
+    when mutated("statx-errors-absent"):
+      return (false, 0'u64, 0'u64, 0'i64)   # Falsifying build: round 11's reading
+    else:
+      if err in [ENOENT, ENOTDIR]: return (false, 0'u64, 0'u64, 0'i64)
+      return (true, 0'u64, 0'u64, 0'i64)
   let bt =
     when mutated("identity-without-btime"):
       1'i64        # Falsifying build: every birth time alike, so device and inode decide
@@ -797,15 +795,21 @@ proc identityOfPath*(path: string): PathIdentity =
 proc birthTimeOf*(path: string; follow = true): int64 =
   ## ``path``'s birth time in nanoseconds (following links unless told
   ## not to), or 0 where the file system reports none.
-  let (ok, b) = statxOf(path, follow)
+  let (ok, b, _) = statxOf(path, follow)
   if not ok or (b.mask and StatxBtime) == 0: return 0
   b.btime.tvSec * 1_000_000_000'i64 + int64(b.btime.tvNsec)
 
 proc sameIdentity(c: CreatedDir; now: PathIdentity): bool =
   ## The recorded directory is the one at the path now: same device,
   ## inode and birth time, the birth time known (§13 decision 76).
-  now.exists and now.btime != 0 and c.btime != 0 and c.dev == now.dev and
-    c.ino == now.ino and c.btime == now.btime
+  when mutated("same-identity-ignores-btime"):
+    # Falsifying build: both birth times known, but not compared, so a
+    # reused inode passes (A9 review round 12, finding 7).
+    now.exists and now.btime != 0 and c.btime != 0 and c.dev == now.dev and
+      c.ino == now.ino
+  else:
+    now.exists and now.btime != 0 and c.btime != 0 and c.dev == now.dev and
+      c.ino == now.ino and c.btime == now.btime
 
 proc flooredKey*(unit: string): string =
   ## The floored resource a unit name stands for: a template's instances
@@ -865,17 +869,13 @@ proc declaredDirectories*(show: ShowProps): seq[string] =
       let d = t.split(':')[0]
       if d.len > 0: result.add(normalisedPath(root & "/" & d))
 
-proc bornBefore*(btime, start, resolution: int64): bool =
-  ## ``btime``, a file system's birth time, is earlier than ``start``, a
-  ## time systemd took from the precise clock, by more than the coarse
-  ## clock's ``resolution`` the file system stamps with (§13 decision 77:
-  ## "not earlier than" is judged at the resolution the birth time has).
-  when mutated("btime-exact"):
-    # Falsifying build: the precise comparison, which refuses a directory
-    # systemd made within a tick of the invocation's start.
-    btime < start
-  else:
-    btime + max(resolution, 0'i64) < start
+const RestartWindowNs* = 100_000_000'i64
+  ## §13 decision 82: how much earlier than the start systemd reports a
+  ## directory made for that start may be born. systemd 252 makes it in the
+  ## child it forks before it stamps the start (up to 17.6 ms measured on
+  ## debian-12); 100 ms covers that with room. A residual the owner
+  ## accepted: a tree a root process makes in that window before a start
+  ## is taken as systemd's.
 
 proc systemdRecreated*(path, unit: string; declared: openArray[string];
                        created: Table[string, CreatedDir]; dynamic: bool;
@@ -889,14 +889,17 @@ proc systemdRecreated*(path, unit: string; declared: openArray[string];
   ## 1. the record names ``path`` for this same unit;
   ## 2. ``path`` is exactly one of the directories the unit declares
   ##    (``declaredDirectories``), never a prefix or a parent of one;
-  ## 3. systemd's state shows it made the directory for the unit's current
-  ##    invocation: the directory's birth time is not earlier than the
-  ##    current invocation's start (§13 decision 77), for a static and a
-  ##    dynamic user alike. Where the file system reports no birth time, or
-  ##    systemd no start, it is refused. Neither ownership nor ctime counts:
-  ##    systemd's adoption of an existing tree (it chowns it, or moves a
-  ##    public one into ``private/``) and any write into it change both, and
-  ##    neither makes the tree new.
+  ## 3. systemd's state shows a run of the unit made it (§13 decisions 77,
+  ##    82 and 83), for a static and a dynamic user alike: the unit's
+  ##    ``InvocationID`` differs from the one recorded (it started again
+  ##    since), and the directory was born no earlier than
+  ##    ``RestartWindowNs`` before that run's start; for a unit that is not
+  ##    running now, also no later than that run's end. Where the file
+  ##    system reports no birth time, or systemd no invocation, start or
+  ##    (for a stopped unit) end, it is refused. Neither ownership nor ctime
+  ##    counts: systemd's adoption of an existing tree (it chowns it, or
+  ##    moves a public one into ``private/``) and any write into it change
+  ##    both, and neither makes the tree new.
   when not mutated("recreated-unrecorded-accepted"):
     if path notin created: return "the add-on has no record of it"
     if flooredKey(created[path].unit) != flooredKey(unit):
@@ -914,18 +917,29 @@ proc systemdRecreated*(path, unit: string; declared: openArray[string];
       return ""
     return "ctime predates the invocation"
   elif not mutated("recreated-systemd-unchecked"):
-    when not mutated("recreated-while-stopped"):
-      # A unit that is not running has no invocation making its
-      # directories: a tree made at the path after its last start (by a
-      # package, tmpfiles.d, an operator) is not systemd's.
-      if v.stopped:
-        return "the unit is not running, so no invocation of it made it"
     if v.btime == 0:
       return "the file system reports no birth time for it"
+    if v.invocationId.len == 0:
+      return "systemd reports no invocation of the unit"
+    when not mutated("recreated-same-invocation"):
+      if path in created and v.invocationId == created[path].invocation:
+        return "the unit has not started again since the add-on recorded it " &
+          "(the same InvocationID), so no run of it made this tree"
     if v.invocationStart <= 0:
-      return "systemd reports no start for the unit's current invocation"
-    if bornBefore(v.btime, v.invocationStart, v.clockResolution):
-      return "it was born before the unit's current invocation began"
+      return "systemd reports no start for the unit's last run"
+    let window = (when mutated("recreated-window-exact"): 0'i64 else: RestartWindowNs)
+    if v.btime < v.invocationStart - window:
+      return "it was born more than " & $(window div 1_000_000) &
+        " ms before the unit's last run began"
+    if v.stopped:
+      # §13 decision 83: a stopped unit's directory passes only if it was
+      # born within its last run; a tree made after that run ended (a
+      # package, tmpfiles.d, an operator) is not systemd's.
+      when not mutated("recreated-while-stopped"):
+        if v.lastStop <= 0 or v.lastStop < v.invocationStart:
+          return "the unit is not running and systemd reports no end of its last run"
+        if v.btime > v.lastStop:
+          return "the unit is not running, and the tree was born after its last run ended"
   ""
 
 proc managerPathProblem*(path: string; uid: int; dynamic: bool): string =
@@ -1245,13 +1259,26 @@ const ListenerKeys* = "Listen,ListenStream,ListenDatagram,ListenSequentialPacket
   ## (systemd.socket(5)), so the parse-time rules' rerun over the file does
   ## not report the listener the dedicated rule already refused.
 
+proc writablePlacesOf*(show: ShowProps): seq[string] =
+  ## The places the unit can write, as systemd reports its settings
+  ## (``floorWritablePlaces`` over ``ReadWritePaths=``, writable binds,
+  ## tmpfs and every ``*Directory=``), for §13 decision 84.
+  var ds: seq[tuple[key, value: string]]
+  for k in ["ReadWritePaths", "BindPaths", "TemporaryFileSystem", "StateDirectory",
+            "RuntimeDirectory", "CacheDirectory", "LogsDirectory",
+            "ConfigurationDirectory"]:
+    let v = show.getOrDefault(k)
+    if v.len > 0: ds.add((key: k, value: v))
+  floorWritablePlaces(ds)
+
 proc activatorProblems*(unit: string; show: ShowProps; lines: ShowLines;
                         fragment: string; ownDropIns: openArray[string];
                         loaded: openArray[tuple[path, content: string]] = [];
                         startsOf: proc (u: string): seq[string] = nil;
                         ownUnits = initHashSet[string]();
                         conflictsOf: proc (unit: string): seq[string] = nil;
-                        listenerProvenance: proc (path: string): string = nil):
+                        listenerProvenance: proc (path: string): string = nil;
+                        serviceWritable: seq[string] = @[]):
                         seq[string] =
   ## A socket, timer or path unit that triggers a floored service, as
   ## systemd reads it (A9 review rounds 5 and 7): loaded from the add-on's
@@ -1291,7 +1318,7 @@ proc activatorProblems*(unit: string; show: ShowProps; lines: ShowLines;
       continue
     when not mutated("activator-show-unjudged"):
       let address = (if open >= 0: l[0 ..< open] else: l).strip()
-      let why = listenerRefusal(unit, address, serviceName)
+      let why = listenerRefusal(unit, address, serviceName, serviceWritable)
       if why.len > 0:
         problem2("listener", ListenerKeys, "listener " & l & ": " & why)
       elif address.startsWith("/") and listenerProvenance != nil:
@@ -1754,14 +1781,24 @@ proc effectiveFloorProblems*(e: EffectiveInput): seq[string] =
             # §13 decision 71: made again by systemd for the unit's current
             # invocation, outside a switch.
             if fp.path in e.createdDirs and e.systemdView != nil:
-              let v = e.systemdView(fp.path, unit, show)
+              # A template's directory is judged against the instance the
+              # record names, the one that ran and whose restart made it
+              # again, whichever instance (or the observation instance,
+              # which never runs) is being checked (A9 review round 12,
+              # finding 4). Condition 1 still holds the record to this
+              # template.
+              let recorded = e.createdDirs[fp.path].unit
+              let runUnit =
+                when mutated("observation-instance-judged-alone"): unit
+                else: (if flooredKey(recorded) == flooredKey(unit): recorded else: unit)
+              let v = e.systemdView(fp.path, runUnit, show)
               if systemdRecreated(fp.path, unit, declaredDirectories(show),
                                   e.createdDirs, dynamic, v).len == 0:
                 when mutated("unlogged-acceptance"):
-                  if e.onRecreated != nil: discard e.onRecreated(fp.path, unit, v)
+                  if e.onRecreated != nil: discard e.onRecreated(fp.path, runUnit, v)
                   continue
                 else:
-                  if e.onRecreated != nil and e.onRecreated(fp.path, unit, v): continue
+                  if e.onRecreated != nil and e.onRecreated(fp.path, runUnit, v): continue
                   problem2("existing-tree", fp.key, fp.key & " " & fp.path &
                            ": systemd made it again for the unit, but the " &
                            "acceptance could not be recorded and logged (§13 " &

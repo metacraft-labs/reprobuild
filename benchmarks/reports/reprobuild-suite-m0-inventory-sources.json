@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 35,
-    "nimTestBinaries": 2768,
+    "nimTestBinaries": 2770,
     "pureUnitConsolidationGroups": 82,
     "pureUnitTests": 759,
     "staticallyDetectedRuntimeCompilerFlowTests": 138,
-    "testEntries": 2812
+    "testEntries": 2814
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1614,10 +1614,10 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 21,
-      "integration": 1524,
+      "integration": 1525,
       "platform/destructive": 177,
       "pure unit": 759,
-      "unclassified": 331
+      "unclassified": 332
     },
     "graphOwnedTestArtifacts": [
       {
@@ -1831,9 +1831,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2768,
+    "nimTestBinaryCount": 2770,
     "pythonTestFileCount": 44,
-    "testEntryCount": 2812
+    "testEntryCount": 2814
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -8948,8 +8948,26 @@
       "owner": "libs/repro_addon",
       "requiresReproBinary": false,
       "source": "libs/repro_addon/tests/t_addon_floor_round11.nim",
-      "sourceSuiteCount": 7,
-      "staticCaseCount": 20,
+      "sourceSuiteCount": 6,
+      "staticCaseCount": 16,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_addon_floor_round12",
+      "class": "unclassified",
+      "classificationReason": "imports `osproc`, which grants out-of-process reach",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_addon",
+        "repro_infra"
+      ],
+      "owner": "libs/repro_addon",
+      "requiresReproBinary": false,
+      "source": "libs/repro_addon/tests/t_addon_floor_round12.nim",
+      "sourceSuiteCount": 9,
+      "staticCaseCount": 18,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -30949,6 +30967,23 @@
       "owner": "tests/e2e",
       "requiresReproBinary": false,
       "source": "tests/e2e/addon/t_e2e_addon_floor_held_until_checked.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_e2e_addon_floor_reapplies_after_restarts",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_test_support"
+      ],
+      "owner": "tests/e2e",
+      "requiresReproBinary": false,
+      "source": "tests/e2e/addon/t_e2e_addon_floor_reapplies_after_restarts.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 1,
       "staticallyDetectedRuntimeCompilerFlow": false,

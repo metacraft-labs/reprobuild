@@ -325,13 +325,16 @@ suite "round 10 (§13 decision 70): a unit named after a base tree":
 suite "round 10 (§13 decisions 71 and 77): made again by systemd outside a switch":
   # The record says the add-on's start in a switch made /run/a (identity
   # 1/2, born 50, invocation I1); it is gone and made again (identity 1/3,
-  # born 2000) by the unit's invocation I2, which began at 1999.
+  # born 1 ms after Start) by the unit's invocation I2, which began at
+  # Start. Times in nanoseconds since the epoch: since round 12 the window
+  # before a start is 100 ms (§13 decision 82).
+  const Start = 1_794_000_000_000_000_000'i64
   let rec = {"/run/a": CreatedDir(unit: "a.service", dev: 1, ino: 2, btime: 50,
                                   invocation: "I1")}.toTable
-  let madeAgain: PathIdentity = (true, 1'u64, 3'u64, 2000'i64)
+  let madeAgain: PathIdentity = (true, 1'u64, 3'u64, Start + 1_000_000)
   proc restarted(): SystemdView =
-    SystemdView(dynamicUid: -1, owner: 1000, btime: 2000, ctime: 0,
-                invocationId: "I2", invocationStart: 1999)
+    SystemdView(dynamicUid: -1, owner: 1000, btime: Start + 1_000_000, ctime: 0,
+                invocationId: "I2", invocationStart: Start)
   proc input(dirs = "a"; view = restarted(); r = rec; dynamic = false): EffectiveInput =
     result = goodInput()
     result.show["RuntimeDirectory"] = dirs
@@ -370,7 +373,7 @@ suite "round 10 (§13 decisions 71 and 77): made again by systemd outside a swit
                            restarted()) == "it is not exactly a directory the unit declares"
   test "condition 3 (§13 decision 77): born no earlier than the invocation":
     var v = restarted()
-    v.btime = 1000                        # born before the invocation began
+    v.btime = Start - 500_000_000         # born half a second before it began
     check "[rule:existing-tree" in problemsOf(input(view = v))
     v = restarted()
     v.btime = 0                           # no birth time reported
@@ -379,9 +382,10 @@ suite "round 10 (§13 decisions 71 and 77): made again by systemd outside a swit
     v.invocationStart = 0                 # no start reported
     check "[rule:existing-tree" in problemsOf(input(view = v))
     # A dynamic user by the same evidence, and no other.
-    var d = SystemdView(dynamicUid: 61200, owner: 61200, btime: 2000, invocationStart: 1999)
+    var d = SystemdView(dynamicUid: 61200, owner: 61200, btime: Start + 1_000_000,
+                        invocationId: "I2", invocationStart: Start)
     check "[rule:existing-tree" notin problemsOf(input(view = d, dynamic = true))
-    d.btime = 1000
+    d.btime = Start - 500_000_000
     check "[rule:existing-tree" in problemsOf(input(view = d, dynamic = true))
   test "systemd's view follows its own private/ link and no other":
     let d = createTempDir("a9r10-", "-lib")

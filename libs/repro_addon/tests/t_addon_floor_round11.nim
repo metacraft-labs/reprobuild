@@ -20,17 +20,13 @@
 ## - the migration runs only over a generation an older engine wrote, and
 ##   reads the generation's own files (finding 5);
 ## - an acceptance or a migration is never made unlogged, and a no-op
-##   try-restart records nothing (finding 6);
-## - from the effective-unit gate: a directory of a unit that is not
-##   running is not systemd's, and a birth time is compared with the
-##   invocation's start at the coarse clock's resolution it is stamped with.
+##   try-restart records nothing (finding 6).
 ##
 ## Falsifying builds: ``identity-without-btime``,
 ## ``recreated-by-ctime-or-owner``, ``listener-named-for-socket``,
 ## ``base-tree-activators-allowed``, ``existing-listeners-allowed``,
 ## ``instances-not-shared``, ``dependency-starts-unrecorded``,
 ## ``migration-ignores-engine``, ``migration-reads-systemd``,
-## ``recreated-while-stopped``, ``btime-exact``,
 ## ``unlogged-acceptance``, ``unlogged-migration``,
 ## ``record-after-noop-restart``.
 ##
@@ -179,69 +175,31 @@ suite "round 11 (§13 decision 76): a directory's identity":
 
 suite "round 11 (§13 decision 77): systemd made it for this invocation":
   # Recorded at the add-on's start (invocation I1); the unit now runs
-  # invocation I2, begun at 1999.
+  # invocation I2, begun at Start (nanoseconds; the window before a start
+  # is 100 ms since round 12, §13 decision 82).
+  const Start = 1_794_000_000_000_000_000'i64
   let rec = {"/run/a": CreatedDir(unit: "a.service", dev: 1, ino: 2, btime: 50,
                                   invocation: "I1")}.toTable
   test "a tree systemd took over (chowned, moved into private/) is not":
-    # Born before the invocation; the adoption set its owner and ctime.
-    let v = SystemdView(dynamicUid: 61200, owner: 61200, btime: 1000,
-                        ctime: 3000, invocationId: "I2", invocationStart: 1999)
+    # Born well before the invocation; the adoption set its owner and ctime.
+    let v = SystemdView(dynamicUid: 61200, owner: 61200, btime: Start - 500_000_000,
+                        ctime: Start div 1_000_000_000 + 1, invocationId: "I2",
+                        invocationStart: Start)
     check systemdRecreated("/run/a", "a.service", ["/run/a"], rec, true, v) ==
-      "it was born before the unit's current invocation began"
+      "it was born more than 100 ms before the unit's last run began"
     var s = v
     s.dynamicUid = -1
     check systemdRecreated("/run/a", "a.service", ["/run/a"], rec, false, s).len > 0
   test "a tree written after the unit started is not":
-    let v = SystemdView(dynamicUid: -1, owner: 1000, btime: 1000, ctime: 2500,
-                        invocationId: "I2", invocationStart: 1999)
+    let v = SystemdView(dynamicUid: -1, owner: 1000, btime: Start - 500_000_000,
+                        ctime: Start div 1_000_000_000 + 1, invocationId: "I2",
+                        invocationStart: Start)
     check systemdRecreated("/run/a", "a.service", ["/run/a"], rec, false, v).len > 0
   test "one born after the invocation began is, for a static and a dynamic user":
-    let v = SystemdView(dynamicUid: -1, owner: 1000, btime: 2000, invocationId: "I2",
-                        invocationStart: 1999)
+    let v = SystemdView(dynamicUid: -1, owner: 1000, btime: Start + 1_000_000,
+                        invocationId: "I2", invocationStart: Start)
     check systemdRecreated("/run/a", "a.service", ["/run/a"], rec, false, v) == ""
     check systemdRecreated("/run/a", "a.service", ["/run/a"], rec, true, v) == ""
-
-suite "round 11, from its gate: running, and at the clock's resolution":
-  # The effective-unit gate at af384f497a: on debian-13 a StateDirectory
-  # removed and made again by root while its unit was stopped passed
-  # condition 3 (born after that unit's last start); on debian-12 a
-  # template instance's directory, made by systemd for its start, read as
-  # born before it, the birth time being the coarse clock's.
-  let rec = {"/run/a": CreatedDir(unit: "a.service", dev: 1, ino: 2, btime: 50,
-                                  invocation: "I1")}.toTable
-  test "a directory of a unit that is not running is not systemd's":
-    let v = SystemdView(dynamicUid: -1, btime: 2000, invocationId: "I2",
-                        invocationStart: 1999, stopped: true)
-    check systemdRecreated("/run/a", "a.service", ["/run/a"], rec, false, v) ==
-      "the unit is not running, so no invocation of it made it"
-  test "a birth time within a tick of the invocation's start is not earlier":
-    var v = SystemdView(dynamicUid: -1, btime: 1997, invocationId: "I2",
-                        invocationStart: 1999, clockResolution: 4)
-    check systemdRecreated("/run/a", "a.service", ["/run/a"], rec, false, v) == ""
-    v.btime = 1994
-    check systemdRecreated("/run/a", "a.service", ["/run/a"], rec, false, v) ==
-      "it was born before the unit's current invocation began"
-    v.btime = 1997
-    v.clockResolution = 0
-    check systemdRecreated("/run/a", "a.service", ["/run/a"], rec, false, v).len > 0
-  test "the record after a dependency start, at the same resolution":
-    let state = createTempDir("a9r11-", "-res")
-    defer: removeDir(state)
-    createDir(state / "addon")
-    let ident = proc (p: string): PathIdentity = (true, 4'u64, 5'u64, 97'i64)
-    let invOf = proc (u: string): tuple[id: string; start: int64] = ("I9", 100'i64)
-    recordStartedSince(state, [("/run/foo", "foo@1.service")], 90, invOf, ident,
-                       resolution = 4)
-    check readCreatedDirs(state).getOrDefault("/run/foo").unit == "foo@1.service"
-    let state2 = createTempDir("a9r11-", "-res")
-    defer: removeDir(state2)
-    createDir(state2 / "addon")
-    recordStartedSince(state2, [("/run/foo", "foo@1.service")], 90, invOf, ident,
-                       resolution = 2)
-    check "/run/foo" notin readCreatedDirs(state2)
-  test "the host's coarse clock has a resolution":
-    when defined(linux):
-      check coarseResolutionNs() > 0
 
 suite "round 11, finding 4: a template's instances share its directories":
   let here: PathIdentity = (true, 4'u64, 5'u64, 6'i64)
@@ -259,19 +217,21 @@ suite "round 11, finding 4: a template's instances share its directories":
       check "[rule:existing-tree" notin problemsOf(tplInput(n))
     check flooredKey("foo@y.service") == "foo@.service"
     check flooredKey("bar.service") == "bar.service"
-  test "a unit a dependency started during the switch is recorded by systemd's evidence":
+  test "a unit a dependency started during the switch is recorded":
+    # Since round 12 (§13 decision 82): absent at the check, present after
+    # the start step, whatever the unit's start time says.
     let state = createTempDir("a9r11-", "-state")
     defer: removeDir(state)
     createDir(state / "addon")
     let ident = proc (p: string): PathIdentity =
-      if p == "/run/foo": (true, 4'u64, 5'u64, 150'i64) else: (true, 4'u64, 7'u64, 50'i64)
-    let invOf = proc (u: string): tuple[id: string; start: int64] =
-      if u == "foo@1.service": ("I9", 100'i64) else: ("I8", 10'i64)
+      if p == "/run/foo": (true, 4'u64, 5'u64, 150'i64) else: (false, 0'u64, 0'u64, 0'i64)
+    let invOf = proc (u: string): tuple[id: string; start: int64] = ("I9", 100'i64)
     recordStartedSince(state, [("/run/foo", "foo@1.service"), ("/run/bar", "bar.service")],
-                       90, invOf, ident)
+                       invOf, ident)
     let r = readCreatedDirs(state)
     check r.getOrDefault("/run/foo").unit == "foo@1.service"
-    check "/run/bar" notin r           # its invocation began before the switch
+    check r.getOrDefault("/run/foo").invocation == "I9"
+    check "/run/bar" notin r           # not made by the start
 
 suite "round 11, finding 5: the migration's trigger and its source":
   proc host(declares = "RuntimeDirectory=a\n"): tuple[state, unitFile: string; ledger: Ledger] =

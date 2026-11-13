@@ -306,6 +306,17 @@ proc cases(binary, prefix: string): seq[Case] =
                 "  content = \"[Socket]\nListenStream=/run/udev/control\n" &
                 "Service=a9e-udsock.service\n\n[Install]\nWantedBy=sockets.target\n\"\n" &
                 "  enabled = true\n}\n"),
+    # Round 12 (§13 decision 84): a listener below a directory its own
+    # service can write (RuntimeDirectory=a9e-lnk covers /run/a9e-lnk/sub),
+    # the reviewer's activator; the service's account could turn sub into
+    # a link to /run/udev, and the manager unlinks through it on a stop.
+    Case(name: "a9e-lnk.service", rule: "listener", activatorOnly: true,
+         service: "User=a9e\nRuntimeDirectory=a9e-lnk\n",
+         extra: "systemd.systemUnit {\n  name = \"a9e-lnk.socket\"\n" &
+                "  content = \"[Socket]\nListenStream=/run/a9e-lnk/sub/control\n" &
+                "SocketUser=a9e\nSocketMode=0600\nRemoveOnStop=yes\n" &
+                "\n[Install]\nWantedBy=sockets.target\n\"\n" &
+                "  enabled = true\n}\n"),
     Case(name: "a9e-rtsys.service", rule: "directories", service: "User=a9e\nRuntimeDirectory=systemd\n")]
 
 proc ruleCodesOf*(output, caseName: string): seq[string] =

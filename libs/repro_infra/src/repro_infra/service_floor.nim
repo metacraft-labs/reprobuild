@@ -1500,7 +1500,8 @@ const
     "SocketProtocol", "FlushPending", "Writable"]
     ## Round 5's list, kept for the falsifying build ``socket-options-by-list``.
 
-proc listenerRefusal*(unitName, value: string; service = ""): string =
+proc listenerRefusal*(unitName, value: string; service = "";
+                      serviceWritable: openArray[string] = []): string =
   ## Why a ``ListenStream=``/``ListenDatagram=``/``ListenSequentialPacket=``
   ## value of an activator is not one the floor allows, or "": a network
   ## address (``port``, ``addr:port``, ``[addr]:port``, ``vsock:cid:port``),
@@ -1544,6 +1545,20 @@ proc listenerRefusal*(unitName, value: string; service = ""): string =
         return np & " is not named for the unit (/run/" & stem & " or below " &
           "/run/" & stem & "/, so " &
           "the manager never creates, chowns or removes another's path)"
+      # §13 decision 84: deeper than /run/<stem>/<name>, the manager walks
+      # directories below the unit's own; if the service can write one of
+      # them it can replace it with a link (``/run/<stem>/sub`` ->
+      # ``/run/udev``), and the manager, as root, binds and unlinks through
+      # it. Directly at /run/<stem>/<name> only the final name is the
+      # service's to replace, which a bind or unlink does not follow.
+      when FloorMutation != "listener-below-writable-allowed":
+        if np["/run/".len .. ^1].split('/').len >= 3:
+          for w in serviceWritable:
+            let wp = normalisedPath(w)
+            if np.startsWith(wp & "/") or wp == "/":
+              return np & " lies below " & wp & ", which the service can " &
+                "write: it could turn a directory on the path into a link " &
+                "the manager follows as root (§13 decision 84)"
     return ""
   if v.startsWith("@"):
     if not ownName(v[1 .. ^1].split('/')[0]):
@@ -1554,7 +1569,8 @@ proc listenerRefusal*(unitName, value: string; service = ""): string =
     return "not a network address or a unix socket path"
   ""
 
-proc socketOptionRefusal*(unitName, key, value: string; service = ""): string =
+proc socketOptionRefusal*(unitName, key, value: string; service = "";
+                          serviceWritable: openArray[string] = []): string =
   ## Why one ``[Socket]`` option of an activator is refused, or ""
   ## (``SocketOptionRules``).
   when FloorMutation == "socket-options-by-list":
@@ -1570,7 +1586,7 @@ proc socketOptionRefusal*(unitName, key, value: string; service = ""): string =
     if k != key: continue
     let v = value.strip()
     case rule
-    of sorListener: return listenerRefusal(unitName, v, service)
+    of sorListener: return listenerRefusal(unitName, v, service, serviceWritable)
     of sorBool:
       if v.toLowerAscii() notin ["yes", "no", "true", "false", "1", "0", "on", "off"]:
         return "not a boolean"
@@ -1610,7 +1626,8 @@ proc baseTreeActivatorRefusal*(unitName: string): string =
   ""
 
 proc activatorRefusal*(unitName, content: string; dropIn: bool;
-                       half = fhParse; service = ""): string =
+                       half = fhParse; service = "";
+                       serviceWritable: openArray[string] = []): string =
   ## A socket, timer or path unit that activates a floored service, or a
   ## drop-in onto one (A9 review rounds 5 and 7): the manager opens a
   ## socket's listeners as root and hands them to the service, applies its
@@ -1642,7 +1659,8 @@ proc activatorRefusal*(unitName, content: string; dropIn: bool;
         "service runs as root, outside the floor"
     if d.section == section:
       let why = case typ
-        of "socket": socketOptionRefusal(unitName, d.key, d.value, service)
+        of "socket": socketOptionRefusal(unitName, d.key, d.value, service,
+                                         serviceWritable)
         of "timer": (if d.key in TimerKeys: "" else: "is not a timer setting the floor allows")
         else: (if d.key in PathKeys: "" else: "is not a path-unit setting the floor allows (MakeDirectory= creates, as root)")
       if why.len > 0:

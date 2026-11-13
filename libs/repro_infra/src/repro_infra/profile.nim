@@ -1202,11 +1202,22 @@ proc checkFloorActivators*(p: SystemProfile) =
         r.suName.endsWith(".path"):
       if isFloored(activatedService(r.suName, r.suContent)):
         activators.incl(r.suName)
+  # §13 decision 84: the places the activated service can write, from the
+  # profile's own unit for it (a template's, for an instance or Accept=yes).
+  proc writableOf(service: string): seq[string] =
+    let at = service.find('@')
+    let dot = service.rfind('.')
+    let tpl = if at > 0 and dot > at: service[0 .. at] & service[dot .. ^1] else: service
+    for r in p.resources:
+      if r.kind == srkSystemdSystemUnit and r.suCollision != "dropIn" and
+          r.suName in [service, tpl]:
+        result.add(floorWritablePlaces(serviceDirectives(r.suContent)))
   for r in p.resources:
     if r.kind == srkSystemdSystemUnit and r.suCollision != "dropIn" and
         r.suName in activators:
+      let svc = activatedService(r.suName, r.suContent)
       let why = activatorRefusal(r.suName, r.suContent, dropIn = false,
-                                 service = activatedService(r.suName, r.suContent))
+                                 service = svc, serviceWritable = writableOf(svc))
       if why.len > 0:
         raiseSystemProfileInvalid("systemd.systemUnit '" & r.suName &
           "' activates a floored service: " & why)
@@ -1236,7 +1247,8 @@ proc checkFloorActivators*(p: SystemProfile) =
           if r.kind == srkSystemdSystemUnit and r.suName == a:
             service = activatedService(a, r.suContent)
     if applies:
-      let why = activatorRefusal(target, content, dropIn = true, service = service)
+      let why = activatorRefusal(target, content, dropIn = true, service = service,
+                                 serviceWritable = writableOf(service))
       if why.len > 0:
         raiseSystemProfileInvalid("the drop-in '" & d.address & "' onto " &
           target & ", which activates a floored service: " & why)

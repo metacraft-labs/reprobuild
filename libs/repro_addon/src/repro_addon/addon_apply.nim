@@ -322,6 +322,11 @@ type
     failedAtFloor*: seq[string]
       ## Non-empty when the switch failed after its flip and the rollback
       ## floor kept it in place: what failed (spec §7.5, ``failed-at-floor``).
+    heldAtRevert*: seq[string]
+      ## A revert whose own effective-unit check refused units: each refusal
+      ## line. The revert commits; those units keep their start hold and
+      ## are not started, until a later switch's check passes (spec §10.1,
+      ## A9 review round 12).
 
 const
   DefaultStateDir* = SystemStateDir
@@ -1552,18 +1557,19 @@ proc recordCreatedDirs*(stateDir, unit: string;
 
 proc recordStartedSince*(stateDir: string;
                          pending: openArray[tuple[path, unit: string]];
-                         sinceNs: int64;
                          invocationOf: proc (u: string): tuple[id: string; start: int64];
-                         identityOf: proc (p: string): PathIdentity = identityOfPath;
-                         resolution = coarseResolutionNs()) =
-  ## After the start step: each pending directory of a unit the switch did
-  ## not start by name, but which started during it (a template instance a
-  ## ``Wants=`` pulled in, an instance its socket started), is recorded for
-  ## that unit when systemd's state shows the unit's own start made it:
-  ## the unit's current invocation began at or after ``sinceNs`` (this
-  ## switch's start step), and the directory was born at or after that
-  ## invocation began (§13 decisions 68 and 77; A9 review round 11, finding
-  ## 4). Anything else stays unrecorded, so it is refused at the next apply.
+                         identityOf: proc (p: string): PathIdentity = identityOfPath) =
+  ## After the start step (§13 decision 82): each pending directory -- one
+  ## the check found absent -- that exists now is recorded for the unit it
+  ## was pending for, as ``recordCreatedDirs`` does for a unit the switch
+  ## started by name. That covers a unit the switch did not start by name
+  ## but that started during it (a template instance a ``Wants=`` pulled
+  ## in), and a directory its activator's start made for it (a socket's
+  ## start makes the listener's parent, ``/run/<stem>``, which is the
+  ## service's ``RuntimeDirectory=``; A9 review round 12, finding 3). The
+  ## residual is the start step's own: a tree another process makes there
+  ## between the check and the start is recorded as the unit's. The
+  ## unit's ``InvocationID`` is recorded with it, empty when it has none.
   when mutated("dependency-starts-unrecorded"): return
   when mutated("created-dirs-ignored"): return
   var t = readCreatedDirs(stateDir)
@@ -1574,14 +1580,9 @@ proc recordStartedSince*(stateDir: string;
     if path in t:
       let c = t[path]
       # Kept while it is still that directory; a stale entry (the unit's
-      # restart made it again) is replaced by the same evidence.
+      # restart made it again) is replaced.
       if c.dev == now.dev and c.ino == now.ino and c.btime == now.btime: continue
-    let inv = invocationOf(u)
-    if inv.id.len == 0 or inv.start <= 0 or inv.start < sinceNs: continue
-    # The birth time is the coarse clock's (``bornBefore``): a directory
-    # made within a tick of the invocation's start can read as earlier.
-    if bornBefore(now.btime, inv.start, resolution): continue
-    t[path] = entryOf(u, now, inv.id)
+    t[path] = entryOf(u, now, invocationOf(u).id)
     changed = true
   if changed: writeCreatedDirs(stateDir, t)
 
@@ -1632,6 +1633,35 @@ proc installedDirectories*(unitFile: string; dropIns: openArray[string]): seq[st
     for v in vals.getOrDefault(k):
       let d = v.split(':')[0]
       if d.len > 0 and '/' notin d: result.add(normalisedPath(root & "/" & d))
+
+proc installedListeners*(unitFile: string; dropIns: openArray[string]):
+    tuple[service: string; paths: seq[string]] =
+  ## The unix listeners an activator the add-on installed declares, and the
+  ## service it starts, read from the files the add-on wrote for it (its
+  ## unit file, then its own drop-ins; an empty assignment resets), for §13
+  ## decision 85.
+  let name = extractFilename(unitFile)
+  let dot = name.rfind('.')
+  if dot <= 0 or name[dot + 1 .. ^1] != "socket": return
+  var explicit, accept = ""
+  var vals: seq[string]
+  for f in @[unitFile] & @dropIns:
+    var text = ""
+    try: text = readFile(f)
+    except IOError, OSError: continue
+    for d in serviceFloor.sectionDirectives(text, ["Socket"]):
+      case d.key
+      of "Service": explicit = d.value.strip()
+      of "Accept": accept = d.value.strip()
+      of "ListenStream", "ListenDatagram", "ListenSequentialPacket":
+        if d.value.strip().len == 0: vals = @[]
+        elif d.value.strip().startsWith("/"): vals.add(normalisedPath(d.value.strip()))
+      else: discard
+  result.paths = vals
+  result.service =
+    if explicit.len > 0: explicit
+    elif accept.toLowerAscii() in ["yes", "true", "1", "on"]: name[0 ..< dot] & "@.service"
+    else: name[0 ..< dot] & ".service"
 
 proc migrateCreatedDirs*(stateDir, committed: string; previous: Ledger;
                          invocationOf: proc (unit: string): string;
@@ -1724,44 +1754,98 @@ proc migrateCreatedDirs*(stateDir, committed: string; previous: Ledger;
             t[path] = c
           else:
             if audit(path, c): t[path] = c
+    # §13 decision 85: the unix listeners of the activators that generation
+    # installed for its floored services, as its own files declare them and
+    # where the listener rule allows them, recorded for the activator, so
+    # the first apply under this engine, and its revert, pass decision 78's
+    # existing-listener rule.
+    when not mutated("migration-skips-listeners"):
+      var flooredFiles = initHashSet[string]()
+      for (unit, file) in units:
+        try:
+          if FloorMarker in readFile(file): flooredFiles.incl(unit)
+        except IOError, OSError: discard
+      for (unit, file) in units:
+        if not unit.endsWith(".socket") or file.len == 0 or '@' in unit: continue
+        let (service, paths) = installedListeners(file, dropIns.getOrDefault(unit))
+        let at = service.find('@')
+        let sdot = service.rfind('.')
+        let tpl = if at > 0 and sdot > at: service[0 .. at] & service[sdot .. ^1] else: service
+        if service notin flooredFiles and tpl notin flooredFiles: continue
+        for path in paths:
+          if inAddOnTree(path) or path in t: continue
+          if serviceFloor.listenerRefusal(unit, path, service).len > 0: continue
+          let now = identityOf(path)
+          if now.exists and now.btime != 0:
+            let c = entryOf(unit, now, invocationOf(unit))
+            if audit(path, c): t[path] = c
   writeCreatedDirs(stateDir, t)
   for k, v in t: result.add((k, v))
 
-proc unitInvocation*(unit: string): tuple[id: string; start: int64] =
-  ## The unit's current ``InvocationID`` and when that invocation began
-  ## (``InactiveExitTimestamp``, nanoseconds since the epoch, read with
-  ## microseconds in UTC: systemctl(1) ``--timestamp=us+utc``), or empty
-  ## when systemd does not say.
+type UnitRun* = object
+  ## One snapshot of a unit's run, from one ``systemctl show`` (A9 review
+  ## round 12, finding 5): its ``InvocationID``, when its current or last
+  ## run began (``InactiveExitTimestamp``) and ended
+  ## (``InactiveEnterTimestamp``, for a unit not running), and whether it
+  ## runs (``ActiveState``). Times are nanoseconds since the epoch, 0 when
+  ## systemd does not say.
+  id*: string
+  start*, stop*: int64
+  running*: bool
+
+proc parseUtcStamp(v: string): int64 =
+  ## "Sun 2026-11-08 10:00:00.123456 UTC" (``--timestamp=us+utc``) in
+  ## nanoseconds since the epoch, or 0.
+  let parts = v.strip().splitWhitespace()
+  if parts.len == 4 and parts[3] == "UTC":
+    try:
+      let dt = parse(parts[1] & " " & parts[2].split('.')[0], "yyyy-MM-dd HH:mm:ss", utc())
+      var us = 0'i64
+      if '.' in parts[2]: us = parseBiggestInt(parts[2].split('.')[1])
+      return dt.toTime.toUnix * 1_000_000_000'i64 + us * 1000
+    except ValueError, TimeParseError: discard
+  0
+
+proc parseUnitRun*(output: string): UnitRun =
+  ## ``UnitRun`` from the output of ``systemctl show --timestamp=us+utc -p
+  ## InvocationID -p InactiveExitTimestamp -p InactiveEnterTimestamp -p
+  ## ActiveState``.
+  for l in output.splitLines():
+    let eq = l.find('=')
+    if eq <= 0: continue
+    let k = l[0 ..< eq]
+    let v = l[eq + 1 .. ^1].strip()
+    case k
+    of "InvocationID": result.id = v
+    of "InactiveExitTimestamp": result.start = parseUtcStamp(v)
+    of "InactiveEnterTimestamp": result.stop = parseUtcStamp(v)
+    of "ActiveState": result.running = v in ["active", "activating", "reloading"]
+    else: discard
+
+proc unitRun*(unit: string;
+              show: proc (args: seq[string]): tuple[exitCode: int; output: string] = nil):
+              UnitRun =
+  ## ``unit``'s run, read in one ``systemctl show`` (``show`` stands in for
+  ## systemctl in tests); empty when systemd does not say.
+  let args = @["show", "--no-pager", "--timestamp=us+utc", "-p", "InvocationID",
+               "-p", "InactiveExitTimestamp", "-p", "InactiveEnterTimestamp",
+               "-p", "ActiveState", "--", unit]
   try:
-    let r = runSystemctl(@["show", "--no-pager", "--timestamp=us+utc", "-p",
-                           "InvocationID", "-p", "InactiveExitTimestamp", "--", unit])
+    let r = (if show != nil: show(args)
+             else: (let x = runSystemctl(args); (x.exitCode, x.output)))
     if r.exitCode != 0: return
-    for l in r.output.splitLines():
-      if l.startsWith("InvocationID="): result.id = l["InvocationID=".len .. ^1].strip()
-      elif l.startsWith("InactiveExitTimestamp="):
-        let v = l["InactiveExitTimestamp=".len .. ^1].strip()
-        # "Sun 2026-11-08 10:00:00.123456 UTC"
-        let parts = v.splitWhitespace()
-        if parts.len == 4 and parts[3] == "UTC":
-          try:
-            let dt = parse(parts[1] & " " & parts[2].split('.')[0], "yyyy-MM-dd HH:mm:ss", utc())
-            var us = 0'i64
-            if '.' in parts[2]: us = parseBiggestInt(parts[2].split('.')[1])
-            result.start = dt.toTime.toUnix * 1_000_000_000'i64 + us * 1000
-          except ValueError, TimeParseError: discard
+    result = parseUnitRun(r.output)
   except CatchableError: discard
 
-proc unitRunning*(unit: string): bool =
-  ## systemd reports ``unit`` running: its ``ActiveState`` is ``active``,
-  ## ``activating`` or ``reloading`` (systemd.unit(5)); false when it does
-  ## not say.
-  try:
-    let r = runSystemctl(@["show", "--no-pager", "-p", "ActiveState", "--value", "--", unit])
-    if r.exitCode != 0: return false
-    r.output.strip() in ["active", "activating", "reloading"]
-  except CatchableError: false
+proc unitInvocation*(unit: string): tuple[id: string; start: int64] =
+  ## The unit's current ``InvocationID`` and when that invocation began
+  ## (``unitRun``).
+  let r = unitRun(unit)
+  (r.id, r.start)
 
-proc hostSystemdView*(path, unit: string; show: ShowProps): SystemdView =
+proc hostSystemdView*(path, unit: string; show: ShowProps;
+                      systemctlShow: proc (args: seq[string]):
+                        tuple[exitCode: int; output: string] = nil): SystemdView =
   ## systemd's own state of ``path``, a directory of ``unit``, for §13
   ## decisions 71 and 77: the directory's birth time (through systemd's own
   ## ``private/<name>`` link of a dynamic user and no other link) and the
@@ -1799,11 +1883,21 @@ proc hostSystemdView*(path, unit: string; show: ShowProps): SystemdView =
     result.owner = int(st.st_uid)
     result.ctime = int64(st.st_ctim.tv_sec)
   result.btime = birthTimeOf(target)
-  let inv = unitInvocation(unit)
-  result.invocationId = inv.id
-  result.invocationStart = inv.start
-  result.stopped = not unitRunning(unit)
-  result.clockResolution = coarseResolutionNs()
+  when mutated("view-two-calls"):
+    # Falsifying build: round 11's two reads, the start and the state from
+    # separate calls.
+    let a = unitRun(unit, systemctlShow)
+    let b = unitRun(unit, systemctlShow)
+    result.invocationId = a.id
+    result.invocationStart = a.start
+    result.lastStop = a.stop
+    result.stopped = not b.running
+  else:
+    let run = unitRun(unit, systemctlShow)
+    result.invocationId = run.id
+    result.invocationStart = run.start
+    result.lastStop = run.stop
+    result.stopped = not run.running
 
 proc refusalLine*(subject, code, key, msg: string): string =
   ## A refusal line of the effective check that no rule of
@@ -1900,7 +1994,8 @@ proc effectiveFloorCheck*(resources: openArray[SystemResource];
         limitCeilings: limits, storeObjects: owned, ownFiles: ownFiles,
         adoptedFiles: adopted, startsOf: startsOf, conflictsOf: conflictsOf,
         createdDirs: created, ledgerDirs: ledgerDirs,
-        systemdView: hostSystemdView)
+        systemdView: proc (p, u: string; s: ShowProps): SystemdView =
+          hostSystemdView(p, u, s))
       var acceptedNow: seq[string]
       e.onRecreated = proc (path, unit: string; v: SystemdView): bool =
         # Recorded again and logged, or not accepted (§13 decision 71; A9
@@ -1975,10 +2070,15 @@ proc effectiveFloorCheck*(resources: openArray[SystemResource];
               if createdForUnit(path, act, now, created, ledgerDirs): return ""
               if pending != nil and startMayCreate(path, act, now, created):
                 pending[].add((path, act))
+              # A path statx could not read (EACCES, a filter's EPERM, ELOOP)
+              # is no less refused (A9 review round 12, finding 6).
+              if now.dev == 0 and now.ino == 0 and now.btime == 0:
+                return "its identity cannot be read"
               "it exists"
             result.add(activatorProblems(a, ash, parseShowLines(at),
                                          unitPath(a), aown, aloaded, startsOf,
-                                         ownUnits, conflictsOf, listenerProvenance))
+                                         ownUnits, conflictsOf, listenerProvenance,
+                                         serviceWritable = writablePlacesOf(e.show)))
           except CatchableError as ex:
             result.add(refusalLine(a, "show", "-", ex.msg))
 
@@ -5366,6 +5466,7 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
       adopt: adoptAddresses, activeUnits: activeAtPlan, plans: saved,
       storedTarget: storedTarget, storedTargetRecorded: true))
   var secretsFailure = ""
+  var heldAtRevert: seq[string]   # spec §10.1: what a revert keeps on hold
   if not opts.planOnly:
     writeSecretsSource(stateDir, secretsSource)
   var marker = PendingMarker(fromGeneration: committedPrevious,
@@ -5823,8 +5924,10 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
                   resourceAddress: "directory:" & path,
                   outcome: "recreated-accepted",
                   diagnostic: unit & ": made again by systemd for invocation " &
-                    v.invocationId & ", born " & $v.btime & " ns >= invocation " &
-                    "start " & $v.invocationStart & " ns (§13 decisions 71, 77)",
+                    v.invocationId & " (recorded: another), born " & $v.btime &
+                    " ns, run started " & $v.invocationStart & " ns" &
+                    (if v.stopped: ", ended " & $v.lastStop & " ns" else: ", running") &
+                    " (§13 decisions 71, 82, 83)",
                   recordClass: AuditClassLiveState))
                 acceptRecreated(stateDir, path, unit, v.invocationId)
                 true
@@ -5838,12 +5941,58 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
                                                composed.resources, stateDir)
           if reachLive.len > 0:
             problems.add(reachLive.join("; ") & "; nothing was started")
-          if notHeld.len > 0:
+          # A revert does not refuse on its own floor check (spec §10.1, A9
+          # review round 12): it goes back to the generation the failed
+          # switch left, whose units the switch it reverts never started.
+          # Each unit the check refuses keeps its start hold and is not
+          # started, so nothing hands it the tree or listener refused; the
+          # revert commits with the refusals recorded, and the host is not
+          # left pending. The next switch checks the unit again.
+          var floorRefusals = notHeld
+          let revertHolds =
+            when mutated("revert-refuses-on-floor"): false
+            else: (purpose == "revert" or (replaying and opts.replayOf == "revert")) and
+                  reachLive.len == 0 and notHeld.len > 0
+          if revertHolds:
+            var held: seq[string]
+            for l in notHeld:
+              let c = l.find(": ")
+              if c <= 0: continue
+              var u = l[0 ..< c].strip()
+              let t = floorTemplateOf(u)
+              if t.len > 0: u = t
+              if u notin held: held.add(u)
+            proc isHeld(u: string): bool =
+              u in held or floorTemplateOf(u) in held
+            var kept: seq[Transition]
+            for t in stepTransitions:
+              if t.verb in {tvStart, tvRestart, tvStopStart, tvReload} and isHeld(t.unit):
+                continue
+              kept.add(t)
+            stepTransitions = kept
+            var keepActive = initHashSet[string]()
+            for u in assumeActive:
+              if not isHeld(u): keepActive.incl(u)
+            assumeActive = keepActive
+            discard clearStaleStartHolds()
+            removeStartHolds(startHolds)
+            startHolds.setLen(0)
+            discard writeHolds(held, StartHoldName, StartHoldText)
+            try: daemonReload()
+            except CatchableError as ex: problems.add(ex.msg)
+            heldAtRevert = notHeld
+            stderr.writeLine("repro-addon: the revert keeps " & held.join(", ") &
+              " on hold, not started: its floor check refused them:\n  " &
+              notHeld.join("\n  "))
+            floorRefusals = @[]
+          if floorRefusals.len > 0:
             # One refusal per line: each ends with its rule tag, and the
             # gate reads them line by line (A9 review round 9, finding 3).
             problems.add($adFloorNotEffective & ":\n  " & notHeld.join("\n  ") &
               "\n  nothing was started")
-          if reachLive.len > 0 or notHeld.len > 0:
+          if revertHolds:
+            discard
+          elif reachLive.len > 0 or notHeld.len > 0:
             # Refused: the holds stay until the revert's own switch has
             # checked its generation and cleared them (A13 review round 6,
             # finding 6), so no socket, timer or dependency starts a unit
@@ -5883,14 +6032,11 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
                 try: recordCreatedDirs(stateDir, u, createdPending,
                                        invocation = unitInvocation(u).id)
                 except IOError, OSError: discard
-          let stepAt = getTime()
-          let startStepNs = stepAt.toUnix * 1_000_000_000'i64 +
-                            int64(stepAt.nanosecond)
           runStart(stepTransitions, paused, notRunning,
                    noBlock = opts.nonBlockingStarts, reloadedAt = reloadedAt,
                    afterStart = recordAfter)
           if not opts.nonBlockingStarts and createdPending.len > 0:
-            try: recordStartedSince(stateDir, createdPending, startStepNs, unitInvocation)
+            try: recordStartedSince(stateDir, createdPending, unitInvocation)
             except IOError, OSError: discard
           # A replay or a revert plans the units the interrupted switch had
           # running as running, but `try-restart` leaves a unit the crash
@@ -6318,6 +6464,13 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
   # marker goes, so a crash here is finished by the recovery's re-assert
   # (``secrets_ops.reassertSecrets`` completes it from the source record).
   commitSecretsOf(stateDir, secretsLayout, result.generationId)
+  result.heldAtRevert = heldAtRevert
+  for l in heldAtRevert:
+    appendAuditRecord(applyLogPath(stateDir, result.generationId), AuditRecord(
+      timestamp: getTime().toUnix(), operationKind: "addon.floor",
+      resourceAddress: "unit:" & l.split(": ")[0],
+      outcome: "held-at-revert", diagnostic: l,
+      recordClass: AuditClassLiveState))
   if secretsFailure.len > 0:
     appendAuditRecord(applyLogPath(stateDir, result.generationId), AuditRecord(
       timestamp: getTime().toUnix(), operationKind: "addon.secrets",

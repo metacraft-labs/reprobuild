@@ -1297,7 +1297,23 @@ const
                           # unit is not running; a birth time compared
                           # with the invocation's start more precisely
                           # than the file system stamps it.
-                          "recreated-while-stopped", "btime-exact",
+                          "recreated-while-stopped",
+                          # A9 round 12: a restart's InvocationID not
+                          # compared; the 100 ms window dropped; the run
+                          # read in two calls; a template judged by the
+                          # instance checked, not the one that ran; the
+                          # migration without listeners; a statx error
+                          # read as absent; the birth time not compared;
+                          # a listener below a directory its service can
+                          # write.
+                          "recreated-same-invocation", "recreated-window-exact",
+                          "view-two-calls", "observation-instance-judged-alone",
+                          "migration-skips-listeners", "statx-errors-absent",
+                          "same-identity-ignores-btime",
+                          "listener-below-writable-allowed",
+                          # a revert refused by its own floor check,
+                          # leaving the host pending.
+                          "revert-refuses-on-floor",
                           # A13: a state backup or restore runs while a
                           # unit of the set may run.
                           "state-units-not-checked",
