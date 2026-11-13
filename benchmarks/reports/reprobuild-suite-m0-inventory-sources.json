@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 35,
-    "nimTestBinaries": 2765,
-    "pureUnitConsolidationGroups": 81,
-    "pureUnitTests": 757,
+    "nimTestBinaries": 2768,
+    "pureUnitConsolidationGroups": 82,
+    "pureUnitTests": 759,
     "staticallyDetectedRuntimeCompilerFlowTests": 138,
-    "testEntries": 2809
+    "testEntries": 2812
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -74,6 +74,21 @@
       "count": 2,
       "defines": [],
       "dependencyShape": [
+        "repro_addon",
+        "repro_deploy_agent",
+        "repro_peer_cache"
+      ],
+      "owner": "libs/repro_addon",
+      "sources": [
+        "libs/repro_addon/tests/t_addon_engine_agent_tick_records.nim",
+        "libs/repro_addon/tests/t_addon_late_recipient_key_pair.nim"
+      ],
+      "targetOs": "soAny"
+    },
+    {
+      "count": 2,
+      "defines": [],
+      "dependencyShape": [
         "repro_agent_protocol"
       ],
       "owner": "libs/repro_agent_protocol",
@@ -132,13 +147,14 @@
       "targetOs": "soAny"
     },
     {
-      "count": 9,
+      "count": 10,
       "defines": [],
       "dependencyShape": [
         "repro_cli_support"
       ],
       "owner": "libs/repro_cli_support",
       "sources": [
+        "libs/repro_cli_support/tests/t_anywhere_plan_digest_covers_what_it_applies.nim",
         "libs/repro_cli_support/tests/t_dep_prefix_names_the_library_prefix.nim",
         "libs/repro_cli_support/tests/t_l8_minted_attribute_reaches_the_service_argv.nim",
         "libs/repro_cli_support/tests/t_lock_publish_hook_refusal_classification.nim",
@@ -1600,8 +1616,8 @@
       "graph-fixture": 21,
       "integration": 1524,
       "platform/destructive": 177,
-      "pure unit": 757,
-      "unclassified": 330
+      "pure unit": 759,
+      "unclassified": 331
     },
     "graphOwnedTestArtifacts": [
       {
@@ -1815,9 +1831,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2765,
+    "nimTestBinaryCount": 2768,
     "pythonTestFileCount": 44,
-    "testEntryCount": 2809
+    "testEntryCount": 2812
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -2687,11 +2703,12 @@
             "key",
             "output",
             "raw",
+            "scan",
             "spec",
             "src",
             "upstream"
           ],
-          "line": 89,
+          "line": 102,
           "path": "tests/e2e/addon/t_e2e_addon_zero_touch_image_synthesis_boots_converged.nim",
           "patterns": [
             "cc",
@@ -9138,6 +9155,25 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_addon_image_private_key_scan",
+      "class": "unclassified",
+      "classificationReason": "spawns a subprocess",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_addon",
+        "repro_peer_cache",
+        "repro_test_support"
+      ],
+      "owner": "libs/repro_addon",
+      "requiresReproBinary": false,
+      "source": "libs/repro_addon/tests/t_addon_image_private_key_scan.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 7,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_addon_import_skeleton",
       "class": "unclassified",
       "classificationReason": "imports `posix`, which grants out-of-process reach",
@@ -9173,6 +9209,25 @@
       "source": "libs/repro_addon/tests/t_addon_key_lists_accept_utf8_comments.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 5,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_addon_late_recipient_key_pair",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_addon",
+        "repro_deploy_agent",
+        "repro_peer_cache"
+      ],
+      "owner": "libs/repro_addon",
+      "requiresReproBinary": false,
+      "source": "libs/repro_addon/tests/t_addon_late_recipient_key_pair.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 4,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -12699,6 +12754,23 @@
       "source": "libs/repro_cli_support/tests/t_addon_platform_dispatch.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 7,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_anywhere_plan_digest_covers_what_it_applies",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_cli_support"
+      ],
+      "owner": "libs/repro_cli_support",
+      "requiresReproBinary": false,
+      "source": "libs/repro_cli_support/tests/t_anywhere_plan_digest_covers_what_it_applies.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 6,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -31577,6 +31649,7 @@
       "defines": [],
       "language": "nim",
       "localDependencyShape": [
+        "repro_addon",
         "repro_dsl_stdlib",
         "repro_peer_cache",
         "repro_test_support"

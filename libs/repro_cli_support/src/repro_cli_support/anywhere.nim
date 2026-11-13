@@ -8,8 +8,13 @@
 ## the host's disk; `/run` itself is `noexec` on Debian 13) and runs §6.1's
 ## preflight there. Plan and apply are separate, as §6.1 and the Anywhere
 ## safety contract require: without `--expect-plan` the command prints the
-## plan digest and applies nothing. With the acknowledged digest it runs
-## the preflight again, refuses any other digest, bootstraps with it (§6.2),
+## reviewable plan -- the host's preflight report, the canonical text of
+## the profile it would apply, the add-on binary's digest and the anchors'
+## -- with ONE digest over all of it (`anywherePlanDocument`), and applies
+## nothing. With the acknowledged digest it runs the preflight again,
+## recomputes the digest from this invocation's inputs and refuses any
+## other (a profile changed after the review is refused before anything is
+## written), bootstraps with the host's own bootstrap plan digest (§6.2),
 ## applies the profile's canonical text with the store copy of `repro` that
 ## bootstrap reports, plans again and requires no change and no drift,
 ## writes the recipient public key bootstrap generated on the host to
@@ -23,9 +28,11 @@
 ## (reprobuild-pm `spec/ReproOS-Anywhere-Safety-Contract.md`). Remote
 ## commands are built from shell-quoted words only.
 
-import std/[os, osproc, strutils]
+import std/[json, os, osproc, strutils]
 
 import repro_core/ambient_execution
+import repro_addon/mutations
+from repro_addon/fingerprint import sha256Hex
 import repro_profile/types
 import repro_addon/host_exec
 from repro_addon/image_boot import elfMachineArch
@@ -53,15 +60,18 @@ type
     agentSources*: seq[string]
     pollIntervalSec*: int
     expectPlan*: string
-      ## The plan digest the operator acknowledged (spec §6.5.3, §6.1). ""
-      ## runs the preflight only, prints the digest and applies nothing.
+      ## The anywhere plan digest the operator acknowledged (spec §6.5.3,
+      ## §6.1). "" runs the preflight only, prints the plan and its digest
+      ## and applies nothing.
     recipientOut*: string       ## "" => print only
     appliedProfileOut*: string  ## "" => not kept; else the canonical text
                                 ## applied, for a later `repro infra plan`
     log*: proc(line: string) {.closure.}
 
   AnywhereResult* = object
-    planDigest*: string
+    planDigest*: string         ## the anywhere plan digest (all it applies)
+    bootstrapPlanDigest*: string  ## the host preflight's own (§6.1)
+    planText*: string           ## the reviewable plan, for plan-only runs
     generationId*: string
     reproExe*: string
     recipientPublicKey*: string
@@ -148,6 +158,49 @@ proc bootstrapFlags(o: AnywhereOptions): seq[string] =
     if o.pollIntervalSec > 0:
       result.add @["--poll-interval", $o.pollIntervalSec]
 
+proc fileDigest(path: string): string =
+  if path.len == 0: "" else: sha256Hex(readFile(path))
+
+proc anywherePlanDocument*(o: AnywhereOptions; bootstrapPlanDigest: string):
+    string =
+  ## The canonical text of everything one acknowledged run applies to the
+  ## host (spec §6.5.3 step 4, amended 2026-11-13): the host's bootstrap
+  ## plan (its digest binds the preflight's inventory and the anchors'
+  ## installation), the bootstrap options, the add-on binary, the anchor
+  ## files' bytes and the canonical text of the profile applied after
+  ## bootstrap. The anywhere plan digest is its SHA-256, so changing any of
+  ## them after the review changes the digest.
+  var doc = %*{"schema": "reprobuild.anywhere.addon-plan.v1",
+    "host": o.host, "target": o.target,
+    "bootstrapPlanDigest": bootstrapPlanDigest,
+    "bootstrapArgs": bootstrapFlags(o),
+    "addonSha256": o.addonSha256,
+    "deploySignersSha256": fileDigest(o.deploySigners),
+    "cachePublishersSha256": fileDigest(o.cachePublishers),
+    "profileSha256": sha256Hex(o.profileText)}
+  when mutated("anywhere-digest-omits-profile"):
+    # FALSIFYING MUTATION (see repro_addon/mutations.nim): the digest no
+    # longer covers the profile, so a profile changed after the review is
+    # applied under the acknowledged digest.
+    doc.delete("profileSha256")
+  $doc
+
+proc anywherePlanDigest*(document: string): string =
+  ## The digest an operator acknowledges with `--expect-plan`.
+  sha256Hex(document)
+
+proc renderAnywherePlan*(o: AnywhereOptions; preflightReport, document,
+                         digest: string): string =
+  ## The plan as an operator reviews it: what the host's preflight found
+  ## and would bootstrap, the profile text that would then be applied, the
+  ## document the digest is taken over, and the digest.
+  result = "== the host's preflight (read-only) and bootstrap plan ==\n" &
+    preflightReport.strip(leading = false) & "\n" &
+    "== the profile applied after bootstrap (canonical text, sha256 " &
+    sha256Hex(o.profileText) & ") ==\n" & o.profileText.strip(leading = false) &
+    "\n== the plan document (the digest is its SHA-256) ==\n" & document &
+    "\nanywhere plan digest: " & digest & "\n"
+
 proc runAnywhereAddon*(o: AnywhereOptions; work: string): AnywhereResult =
   ## The eight steps of §6.5.3. `work` is a local scratch directory.
   if o.knownHosts.len == 0 or not fileExists(o.knownHosts):
@@ -188,24 +241,31 @@ proc runAnywhereAddon*(o: AnywhereOptions; work: string): AnywhereResult =
     o.say("preflight")
     let pre = ssh(o, "preflight",
       remoteCommand(@[remoteRepro, "system", "addon", "preflight"] & flags))
-    result.planDigest = fieldOf(pre.output, "plan digest")
-    if pre.exitCode != 0 or result.planDigest.len == 0:
+    result.bootstrapPlanDigest = fieldOf(pre.output, "plan digest")
+    if pre.exitCode != 0 or result.bootstrapPlanDigest.len == 0:
       fail("preflight", "the host is not compatible (exit " & $pre.exitCode &
         "):\n" & pre.output)
+    let document = anywherePlanDocument(o, result.bootstrapPlanDigest)
+    result.planDigest = anywherePlanDigest(document)
     o.say("plan digest: " & result.planDigest)
     if o.expectPlan.len == 0:
-      # Plan and apply are separate (spec §6.5.3, as approved 2026-11-08):
-      # nothing is applied until the operator acknowledges this digest.
+      # Plan and apply are separate (spec §6.5.3, as approved 2026-11-08
+      # and 2026-11-13): nothing is applied until the operator acknowledges
+      # this digest, which covers everything the run would apply.
+      result.planText = renderAnywherePlan(o, pre.output, document,
+                                           result.planDigest)
       o.say("nothing was applied; review the plan and run again with " &
         "--expect-plan " & result.planDigest)
       return
     if o.expectPlan != result.planDigest:
-      fail("preflight", "the host's plan is " & result.planDigest &
-        ", not the acknowledged " & o.expectPlan & "; nothing was written")
+      fail("preflight", "this run's plan is " & result.planDigest &
+        ", not the acknowledged " & o.expectPlan & " (the host, the profile, " &
+        "the binary or an anchor changed since the review); nothing was " &
+        "written")
     # 5. Bootstrap, then the profile through the store copy.
     o.say("bootstrap")
     let boot = mustSsh(o, "bootstrap", remoteCommand(@[remoteRepro, "system",
-      "addon", "bootstrap", "--plan", result.planDigest] & flags))
+      "addon", "bootstrap", "--plan", result.bootstrapPlanDigest] & flags))
     result.generationId = fieldOf(boot, "generation")
     result.reproExe = fieldOf(boot, "add-on binary")
     result.recipientPublicKey = fieldOf(boot, "recipient public key")
@@ -255,10 +315,13 @@ const AnywhereUsage* = """usage: repro anywhere --mode addon --host NAME --profi
          [--home-profile-dir DIR] root@ADDRESS
   Bootstrap an already-booted distribution host into ReproOS add-on mode
   over SSH (ReproOS Add-On Mode §6.5.3). Without --expect-plan it runs the
-  read-only preflight, prints the plan digest and applies nothing (exit 3).
-  With --expect-plan DIGEST, the acknowledged digest, it runs the
-  preflight again, refuses any other digest, then bootstraps, applies the
-  profile and requires a plan that predicts nothing. Options a profile's
+  read-only preflight, prints the plan -- the host's preflight report, the
+  profile text it would apply, the binary and anchor digests -- and one
+  digest over all of it, and applies nothing (exit 3). With --expect-plan
+  DIGEST, the acknowledged digest, it runs the preflight again, refuses
+  any other digest (a changed profile, binary or anchor included), then
+  bootstraps, applies the profile and requires a plan that predicts
+  nothing. Options a profile's
   baseOs.bootstrap declares are its defaults.
 """
 
@@ -353,8 +416,9 @@ proc runAnywhereCli*(args: seq[string]): int =
   try:
     let r = runAnywhereAddon(o, work)
     if not r.applied:
-      echo "repro anywhere --mode addon: preflight only"
+      echo "repro anywhere --mode addon: plan only (nothing was applied)"
       echo "  host       : " & o.host & " (" & o.target & ")"
+      stdout.write(r.planText)
       echo "  plan digest: " & r.planDigest
       stderr.writeLine("repro anywhere: refusing to apply without an " &
         "acknowledged plan; nothing was written. Review the plan and run " &

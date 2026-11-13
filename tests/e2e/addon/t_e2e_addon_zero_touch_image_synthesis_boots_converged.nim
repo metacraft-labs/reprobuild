@@ -19,13 +19,16 @@
 ## - the first boot's ``repro-addon-reassert.service`` reported ``ok``;
 ## - ``repro infra plan`` on the booted guest predicts nothing (no ledger
 ##   change, no transition) and ``repro system addon verify`` is ok;
-## - the boot was a first boot: a machine id and SSH host keys of its own,
-##   none of them the assembly boot's (recorded in the manifest), systemd
-##   initialised the machine id itself, and cloud-init ran the declared
-##   instance;
-## - the image holds no secrets recipient key, read offline from the built
-##   file (spec §6.5.2: the key is deferred), and the first boot created
-##   one, ``0400`` root, whose public half the re-assert reported;
+## - read offline from the built file (debugfs, before any boot): no
+##   private key under any name (``key_material``: by content and by
+##   location), not the assembly boot's machine id, no random seed, no
+##   journal of the assembly boot, no SSH host key;
+## - the boot was a first boot: a machine id of its own, not the assembly
+##   boot's (recorded in the manifest), which systemd initialised itself;
+##   SSH host keys this boot created (the image held none), none of them
+##   the assembly's or the image's; cloud-init ran the declared instance;
+## - the first boot created its own recipient key, ``0400`` root, whose
+##   public half the re-assert reported (spec §6.5.2: the key is deferred);
 ## - a second first boot of the same image creates a different key and a
 ##   different machine id;
 ## - ``repro system addon uninstall`` on the booted image succeeds and takes
@@ -39,7 +42,13 @@
 ## ``image-bakes-recipient-key`` makes the assembly create the recipient key
 ## after bootstrap: the image command must refuse the image (red).
 ## ``image-keeps-first-boot-state`` makes the clean-up keep the assembly
-## boot's machine id and SSH host keys: the first-boot step goes red.
+## boot's machine id and SSH host keys: the offline machine-id step and the
+## first-boot step go red (on debian-13 the assembly boot creates no host
+## key, so there the machine id is what turns it red).
+## ``provisions-publisher-key`` makes bootstrap leave a cache-publisher key
+## in the agent directory: the image command refuses the image (red).
+## ``image-keeps-random-seed`` leaves systemd-random-seed running, so the
+## assembly's power-off writes its seed: the image command refuses (red).
 ##
 ## Opt-in: ``REPRO_ADDON_VM_GATES=1`` (``just
 ## e2e_addon_zero_touch_image_synthesis_boots_converged``). Bases:
@@ -61,6 +70,10 @@ import repro_test_support/reasoned_skip
 
 import repro_dsl_stdlib/packages/apt_closure
 import repro_peer_cache/auth as peerAuth
+
+import repro_addon/key_material
+from repro_addon/image_assemble import RandomSeedPath
+from repro_addon/fingerprint import sha256Hex
 
 import ./addon_testbed
 import ./deb_fixture_support
@@ -95,26 +108,57 @@ proc helloDeb(work, debArch: string): tuple[path: string; lock: AptClosureLock] 
     ("./usr/bin/tb-hello", '0', 0o755, readFile(bin), "")])
   result.lock = fixtureLock("tb-hello", result.path, debArch)
 
-proc offlineAgentDir(raw: string): tuple[found: bool; listing, machineId: string] =
-  ## Read the built image WITHOUT booting it: for each partition sfdisk
-  ## reports, ask debugfs (read-only) for ``/var/lib/repro/agent`` and
-  ## ``/etc/machine-id``. ``found`` is false when no partition holds the
-  ## agent directory -- the positive control that the check looked at the
-  ## right filesystem.
+type OfflineImage = object
+  found: bool                 ## a partition holds /var/lib/repro/agent
+  listing, machineId: string  ## the agent directory; /etc/machine-id
+  privateKeys: seq[string]    ## key_material's findings
+  randomSeed: bool            ## /var/lib/systemd/random-seed exists
+  journalDirs: seq[string]    ## /var/log/journal's entries
+  sshHostKeyShas: seq[string] ## SHA-256 of each ssh_host_*.pub
+  sshHostFiles: seq[string]   ## every ssh_host_* name in /etc/ssh
+
+proc offlineImage(raw, work: string): OfflineImage =
+  ## Read the built image WITHOUT booting it, with debugfs (read-only):
+  ## the root partition is the one holding ``/var/lib/repro/agent``
+  ## (``found`` is the positive control that the checks looked at the
+  ## right filesystem). The private-key scan runs on a ``debugfs rdump``
+  ## copy of ``key_material.KeyScanRoots`` -- by content and location, not
+  ## by file name.
   let (j, c) = execCmdEx("sfdisk -J " & quoteShell(raw))
   if c != 0: raise newException(TestBedError, "sfdisk -J: " & j)
   let table = parseJson(j)["partitiontable"]
   let sector = table{"sectorsize"}.getInt(512)
   for part in table["partitions"]:
     let spec = quoteShell(raw & "?offset=" & $(part["start"].getInt() * sector))
+    proc dfs(cmd: string): string =
+      execCmdEx("debugfs -R " & quoteShell(cmd) & " " & spec & " 2>/dev/null").output
+    proc entries(dir: string): seq[string] =
+      for line in dfs("ls -p " & dir).splitLines():
+        let parts = line.split('/')
+        if parts.len >= 7 and parts[5] notin [".", ".."] and parts[5].len > 0:
+          result.add parts[5]
     let (st, _) = execCmdEx("debugfs -R 'stat /var/lib/repro/agent' " & spec &
                             " 2>&1")
     if "Type: directory" notin st: continue
     result.found = true
-    result.listing = execCmdEx("debugfs -R 'ls -l /var/lib/repro/agent' " &
-                               spec & " 2>/dev/null").output
-    result.machineId = execCmdEx("debugfs -R 'cat /etc/machine-id' " & spec &
-                                 " 2>/dev/null").output
+    result.listing = dfs("ls -l /var/lib/repro/agent")
+    result.machineId = dfs("cat /etc/machine-id")
+    result.randomSeed = "Inode:" in execCmdEx("debugfs -R " &
+      quoteShell("stat " & RandomSeedPath) & " " & spec & " 2>&1").output
+    result.journalDirs = entries("/var/log/journal")
+    for n in entries("/etc/ssh"):
+      if n.startsWith("ssh_host_"):
+        result.sshHostFiles.add n
+        if n.endsWith(".pub"):
+          result.sshHostKeyShas.add sha256Hex(dfs("cat /etc/ssh/" & n))
+    let scan = work / "offline-keyscan"
+    removeDir(scan)
+    for r in KeyScanRoots:
+      createDir(scan / r.parentDir)
+      discard execCmdEx("debugfs -R " & quoteShell("rdump " & r & " " &
+        (scan / r.parentDir)) & " " & spec & " 2>/dev/null")
+    result.privateKeys = scanForPrivateKeys(scan)
+    removeDir(scan)
     return
 
 proc hostKeyShas(g: Guest): seq[string] =
@@ -246,16 +290,25 @@ proc runBase(b: BaseImage; record: JsonNode; work: string): seq[string] =
                              quoteShell(raw))
     step("the xz output unpacks", xc == 0, xo)
     let assembly = manifest["assembly"]
-    let off = offlineAgentDir(raw)
+    let off = offlineImage(raw, work)
     record["offlineAgentDir"] = %off.listing
-    step("the built image holds no recipient key (read offline)",
-         off.found and "recipient.key" notin off.listing and
+    record["offlinePrivateKeys"] = %off.privateKeys
+    step("the built image holds no private key of any name (read offline)",
+         off.found and off.privateKeys.len == 0 and
+           "recipient.key" notin off.listing and
            "recipient.pub" notin off.listing,
-         "agent dir found: " & $off.found & "\n" & off.listing)
+         "agent dir found: " & $off.found & "\n" & off.listing &
+           "\nfound: " & $off.privateKeys)
     let assemblyId = assembly{"assemblyMachineId"}.getStr()
     step("the built image does not carry the assembly boot's machine id",
          assemblyId.len == 32 and assemblyId notin off.machineId,
          "assembly " & assemblyId & ", image " & off.machineId.strip())
+    step("the built image holds no random seed and no assembly journal",
+         off.found and not off.randomSeed and assemblyId notin off.journalDirs,
+         "random seed present: " & $off.randomSeed & "; /var/log/journal: " &
+           $off.journalDirs & " (assembly " & assemblyId & ")")
+    step("the built image holds no SSH host key",
+         off.found and off.sshHostFiles.len == 0, $off.sshHostFiles)
 
     # The boot: a fresh overlay of the output, the image's own seed.
     g = newImageGuest(b, raw, key)
@@ -276,18 +329,25 @@ proc runBase(b: BaseImage; record: JsonNode; work: string): seq[string] =
     var assemblyKeys: seq[string]
     for k in assembly{"assemblySshHostKeys"}.getElems():
       assemblyKeys.add(k.getStr().splitWhitespace()[^1])
+    # Host keys: the image held none (offline step above), so every key
+    # the booted guest has was created by this boot; none may be one the
+    # assembly boot or the image carried. On a base whose assembly boot
+    # generates no host key (debian-13 genericcloud: cloud-init, disabled
+    # there, is what generates them) the comparison with the assembly's
+    # keys is empty, and "created by this boot" is what the step proves.
     var shared: seq[string]
     for k in keys:
-      if k in assemblyKeys: shared.add(k)
+      if k in assemblyKeys or k in off.sshHostKeyShas: shared.add(k)
     let serial = (try: readFile(g.serialLog) except IOError: "")
     step("a first boot: its own machine id and SSH host keys",
          first.machineId.len == 32 and assemblyId.len == 32 and
            first.machineId != assemblyId and keys.len > 0 and
-           shared.len == 0 and
+           off.sshHostFiles.len == 0 and shared.len == 0 and
            "Initializing machine ID from random generator" in serial,
          "machine id " & first.machineId & " (assembly " & assemblyId &
-           "); host keys " & $keys & " (assembly " & $assemblyKeys &
-           "); shared " & $shared & "; serial initialised the id: " &
+           "); host keys created by this boot " & $keys & " (assembly " &
+           $assemblyKeys & ", image " & $off.sshHostKeyShas & "); shared " &
+           $shared & "; serial initialised the id: " &
            $("Initializing machine ID from random generator" in serial))
     let rk = g.exec("stat -c '%a %U' /var/lib/repro/agent/recipient.key")
     step("the first boot created its own recipient key, 0400 root",

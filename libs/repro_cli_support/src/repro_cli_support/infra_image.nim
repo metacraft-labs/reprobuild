@@ -45,6 +45,7 @@ from repro_addon/fingerprint import sha256Hex
 import repro_addon/image_assemble
 import repro_addon/image_boot
 import repro_addon/image_layout
+import repro_addon/key_material
 
 type
   EInfraImage* = object of CatchableError
@@ -201,6 +202,27 @@ proc listDir(fs: Ext4; path: string): seq[string] =
     let parts = line.split('/')
     if parts.len >= 7 and parts[5] notin [".", ".."] and parts[5].len > 0:
       result.add parts[5]
+
+proc listEntries(fs: Ext4; path: string): seq[tuple[name: string; isDir: bool]] =
+  ## Entries with their type, from `ls -p`'s mode field.
+  for line in debugfs(fs, "ls -p " & path).splitLines():
+    let parts = line.split('/')
+    if parts.len >= 7 and parts[5] notin [".", ".."] and parts[5].len > 0:
+      result.add (parts[5], parts[2].startsWith("40"))
+
+proc removeTree(fs: Ext4; path: string; acc: var seq[string]) =
+  ## Commands removing `path` and everything below it, deepest first.
+  for (n, isDir) in fs.listEntries(path):
+    if isDir: fs.removeTree(path / n, acc)
+    else: acc.add "rm " & path / n
+  acc.add "rmdir " & path
+
+proc copyOut(fs: Ext4; path, localParent: string) =
+  ## `debugfs rdump`: `path` and everything below it into `localParent`,
+  ## with the files' permission bits.
+  createDir(localParent)
+  discard run([tool("debugfs"), "-R", "rdump " & path & " " & localParent,
+               fs.spec])
 
 proc runScript(fs: Ext4; workDir: string; lines: seq[string]) =
   ## Run `lines` as one `debugfs -w -f` script and refuse any error line
@@ -640,14 +662,24 @@ proc synthesiseImage*(o: InfraImageOptions): InfraImageResult =
       for s in result.assembly.steps:
         if not s.ok: why = s.name & ": " & s.detail
       fail("the assembly failed at " & why)
-    # No image carries a recipient key (spec §6.5.2): every device creates
-    # its own at its first boot. An image that holds one is refused.
-    if root.exists("/var/lib/repro/agent"):
-      for n in root.listDir("/var/lib/repro/agent"):
-        if n.startsWith("recipient.key"):
-          fail("the assembled image holds a recipient key (/var/lib/repro/" &
-            "agent/" & n & "); every device must create its own. Nothing " &
-            "was written")
+    # No image carries a private key (spec §6.5.2): every device creates
+    # its own at its first boot. Found by content and location, whatever
+    # its name (`key_material`); an image that holds one is refused.
+    let scan = work / "keyscan"
+    removeDir(scan)
+    for r in KeyScanRoots:
+      if root.exists(r): root.copyOut(r, scan / r.parentDir)
+    let keys = scanForPrivateKeys(scan)
+    removeDir(scan)
+    if keys.len > 0:
+      fail("the assembled image holds private-key material; every device " &
+        "must create its own. Nothing was written:\n  " & keys.join("\n  "))
+    # Nor the assembly boot's random seed: systemd-random-seed writes it at
+    # power-off unless the clean-up stopped the unit first, and every
+    # device would then credit the same seed.
+    if root.exists(RandomSeedPath):
+      fail("the assembled image holds " & RandomSeedPath & " (the assembly " &
+        "boot's random seed, written at its power-off); nothing was written")
 
     # Step 6: finish.
     var fin: seq[string]
@@ -655,6 +687,13 @@ proc synthesiseImage*(o: InfraImageOptions): InfraImageResult =
       fin.add "rm " & CloudInitDisabledMarker
     fin.add "rm " & resultPath
     fin.add "rmdir " & AssemblyPayloadDir
+    # The assembly boot's persistent journal, named by its machine id: its
+    # log is not the device's, and it names the assembly's identity.
+    let assemblyJournal = "/var/log/journal/" &
+      result.assembly.assemblyMachineId
+    if result.assembly.assemblyMachineId.len == 32 and
+        root.exists(assemblyJournal):
+      root.removeTree(assemblyJournal, fin)
     let ci = o.baseOs.cloudInit
     var seedFiles: seq[tuple[name, content: string]]
     if ci.declared:

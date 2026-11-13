@@ -51,6 +51,15 @@
 ## ``image-keeps-first-boot-state``           the image assembly's clean-up
 ##                                            keeps the assembly boot's
 ##                                            machine id and SSH host keys
+## ``anywhere-digest-omits-profile``         `repro anywhere`'s plan digest
+##                                            does not cover the profile
+##                                            text it applies (an ENGINE
+##                                            mutation: build with
+##                                            REPRO_ADDON_MUTATION set)
+## ``image-keeps-random-seed``               the image assembly's clean-up
+##                                            leaves systemd-random-seed
+##                                            running, so power-off writes
+##                                            the assembly's seed
 ## ``observer-never-package-owned``           the collision observer reports
 ##                                            no package provenance: no
 ##                                            path is package-owned and no
@@ -951,6 +960,8 @@ const
                           "image-omits-gen0-ledger", "image-omits-store-closure",
                           "image-bakes-recipient-key",
                           "image-keeps-first-boot-state",
+                          "image-keeps-random-seed",
+                          "anywhere-digest-omits-profile",
                           "apply-skips-kind-check",
                           "uninstall-discards-state-on-drift",
                           "observer-never-package-owned",

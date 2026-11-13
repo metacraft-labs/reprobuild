@@ -498,16 +498,60 @@ proc recordReassertEvidence*(r: ReassertReport; stateDir: string;
       "record: " & e.msg & "\n")
 
 var lateKeyNoFollow {.importc: "O_NOFOLLOW", header: "<fcntl.h>".}: cint
+proc cRename(src, dst: cstring): cint {.importc: "rename", header: "<stdio.h>".}
+
+proc writePublicHalf(pubPath, pubHex: string) =
+  ## ``pubPath`` holding exactly ``pubHex``, ``0444``: written beside it
+  ## (``O_EXCL | O_NOFOLLOW``) and renamed over it, so a stale or foreign
+  ## file -- or a symbolic link -- at ``pubPath`` is replaced, never
+  ## written through.
+  let tmp = pubPath & ".new-" & $getCurrentProcessId()
+  discard posix.unlink(tmp.cstring)
+  let fd = posix.open(tmp.cstring,
+                      O_WRONLY or O_CREAT or O_EXCL or lateKeyNoFollow, Mode(0o444))
+  if fd < 0: raiseOSError(osLastError(), tmp)
+  let line = pubHex & "\n"
+  if posix.write(fd, unsafeAddr line[0], line.len) != line.len:
+    discard posix.close(fd)
+    discard posix.unlink(tmp.cstring)
+    raiseOSError(osLastError(), tmp)
+  discard fsync(fd)
+  discard posix.close(fd)
+  if cRename(tmp.cstring, pubPath.cstring) != 0:
+    let err = osLastError()
+    discard posix.unlink(tmp.cstring)
+    raiseOSError(err, pubPath)
+
+proc ensureLateKeyPair*(keyPath, pubPath: string):
+    tuple[pubHex: string; created, pubRewritten: bool] =
+  ## The deferred recipient key at ``keyPath`` -- created when missing,
+  ## ``0400``, never replacing one (``ensureRecipientKeyFile``) -- and its
+  ## public half at ``pubPath``, always DERIVED from the key: a
+  ## ``recipient.pub`` that is missing, or that is not the key's (a key
+  ## removed while its ``.pub`` stayed, a hand edit), is rewritten, so the
+  ## half an operator registers is never one no key on the host matches.
+  result.created = not fileExists(keyPath)
+  let key = ensureRecipientKeyFile(keyPath)
+  result.pubHex = peerAuth.publicKeyHex(key.publicKey)
+  var current = ""
+  if fileExists(pubPath) and not symlinkExists(pubPath):
+    try: current = readFile(pubPath).strip()
+    except IOError: current = ""
+  if current != result.pubHex:
+    result.pubRewritten = fileExists(pubPath) or symlinkExists(pubPath)
+    writePublicHalf(pubPath, result.pubHex)
 
 proc createLateRecipientKey*(stateDir: string): seq[string] =
   ## A host bootstrapped with ``--defer-recipient-key`` (an image's assembly
   ## boot, spec §6.5.2) creates its own secrets recipient key here, at its
   ## first real boot, so no image ever carries one: generated on the host,
-  ## ``0400`` from the start and never replacing a key
-  ## (``ensureRecipientKeyFile``), its public half beside it. Not during
+  ## ``0400`` from the start and never replacing a key, its public half
+  ## beside it and always the key's own (``ensureLateKeyPair``). Not during
   ## the assembly boot itself (``ImageAssemblyDir`` present). Every later
-  ## boot reports the public half again. Returns the notes for the
-  ## report; raises on a failure, which the caller reports.
+  ## boot reports the public half again: an operator reads it from this
+  ## unit's journal, which a distribution may keep in RAM only (Raspberry
+  ## Pi OS). Returns the notes for the report; raises on a failure, which
+  ## the caller reports.
   let ledgerPath = ledgerCopyPath(stateDir)
   if not fileExists(ledgerPath): return
   var deferred = false
@@ -517,28 +561,17 @@ proc createLateRecipientKey*(stateDir: string): seq[string] =
   if dirExists(ImageAssemblyDir):
     return @["recipient key: deferred; this is an image's assembly boot, " &
              "which creates none"]
-  if fileExists(RecipientKeyPath) and fileExists(RecipientPubPath):
-    # Reported at every boot, not only the first: an operator reads the
-    # public half from this unit's journal, which a distribution may keep
-    # in RAM only (Raspberry Pi OS), so the first boot's line can be gone.
-    return @["recipient key: this host's own; public half " &
-             readFile(RecipientPubPath).strip()]
-  let key = ensureRecipientKeyFile(RecipientKeyPath)
-  let pubHex = peerAuth.publicKeyHex(key.publicKey)
-  if not fileExists(RecipientPubPath):
-    let fd = posix.open(RecipientPubPath.cstring,
-                        O_WRONLY or O_CREAT or O_EXCL or lateKeyNoFollow, Mode(0o444))
-    if fd < 0: raiseOSError(osLastError(), RecipientPubPath)
-    let line = pubHex & "\n"
-    if posix.write(fd, unsafeAddr line[0], line.len) != line.len:
-      discard posix.close(fd)
-      raiseOSError(osLastError(), RecipientPubPath)
-    discard fsync(fd)
-    discard posix.close(fd)
-  result.add("recipient key: created this host's own; public half " & pubHex)
+  let k = ensureLateKeyPair(RecipientKeyPath, RecipientPubPath)
+  if k.pubRewritten:
+    result.add("recipient key: " & RecipientPubPath & " was not the key's " &
+      "public half; rewritten from the key")
+  if not k.created:
+    result.add("recipient key: this host's own; public half " & k.pubHex)
+    return
+  result.add("recipient key: created this host's own; public half " & k.pubHex)
   discard recordEvidence(EvidenceEvent(detector: edBootstrap,
     category: ecAudit, trigger: "recipient-key", kind: "recipient-key",
-    fields: @[("recipientKey", pubHex), ("path", RecipientKeyPath)]),
+    fields: @[("recipientKey", k.pubHex), ("path", RecipientKeyPath)]),
     defaultSite(stateDir))
 
 proc runAddonReassert*(stateDir = DefaultStateDir; atBoot = false;
