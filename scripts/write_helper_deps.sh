@@ -19,7 +19,9 @@
 #                     <project>.nim.cfg, nimble.paths, subdirectories;
 #                     never .nimcache, build, .git, result), sorted
 #                     bytewise and joined by newlines: a changed listing
-#                     refuses the binary (§13 decisions 80, 111, 123)
+#                     refuses the binary (§13 decisions 80 and 111, and
+#                     round 10's listing rules, which §13 does not
+#                     record yet)
 #   listing-filter <name>
 #                     which entries the digests count ("resolution"; a
 #                     falsifier run writes another), so fresh_binary
@@ -91,7 +93,7 @@
 # file, say -- is refused as unparseable rather than read),
 # listing-digests-every-entry (round 8's digest of every name),
 # listing-skips-subdirectories, listing-skips-project-cfg and
-# listing-skips-nim-cfg (decision 123's rules, one each), no-parent-listings
+# listing-skips-nim-cfg (round 10's listing rules, one each), no-parent-listings
 # (the listings of the entry's parent directories, where a parent nim.cfg
 # sits, not recorded). A file
 # <build>/nimcache/<name>/write-helper-deps.mutation selects one too, for
@@ -254,11 +256,15 @@ listing_filter = {
     "listing-skips-nim-cfg": "resolution-no-nim-cfg",
 }.get(mutation, "resolution")
 # Entries that never change what the compiler resolves, whatever they are
-# (§13 decision 123): build output, VCS metadata, a nix result link.
+# (round 10's listing rules: reprobuild-pm issue 2026-11-13-helper-list-
+# listing-filter-accepts-a-new-package-directory-or-nim-cfg-that-changes-
+# the-build; §13 records no decision for them yet, and its 123 is another
+# track's): build output, VCS metadata, a nix result link.
 never_counted = {b".nimcache", b"build", b".git", b"result"}
 
 def relevant(d, name):
-    # §13 decisions 111 and 123: an entry counts in a listing when it can
+    # §13 decision 111 and round 10's listing rules: an entry counts in a
+    # listing when it can
     # change what the compiler resolves -- a Nim source, a .nimble or .nims
     # file, a Nim configuration file (nim.cfg, <project>.nim.cfg), a
     # nimble.paths, or a subdirectory (a package directory that shadows an

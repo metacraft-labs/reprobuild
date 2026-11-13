@@ -77,11 +77,12 @@
 ##     ``.nim`` entry in it is refused, and one in the decoy directory of
 ##     the trimmed name beside it is not.
 ##
-## 31-34. (round 10, §13 decision 123) In a tree whose app imports
-##     ``pkgx/util`` through ``--path:vendor``: a package directory
-##     ``apps/foo/pkgx`` that shadows the import, ``apps/foo/foo.nim.cfg``,
-##     ``apps/foo/nim.cfg`` and a parent ``apps/nim.cfg`` (each adding a
-##     define) are each refused, and accepted again once removed.
+## 31-34. (round 10's listing rules, no §13 decision yet) In a tree
+##     whose app imports ``pkgx/util`` through ``--path:vendor``: a
+##     package directory ``apps/foo/pkgx`` that shadows the import,
+##     ``apps/foo/foo.nim.cfg``, ``apps/foo/nim.cfg`` and a parent
+##     ``apps/nim.cfg`` (each adding a define) are each refused, and
+##     accepted again once removed.
 ##
 ## Falsifying builds: ``stale-helper-accepted`` (cases 2-5 and 8-10 red),
 ## ``fresh-skips-included`` (case 4), ``fresh-skips-outside-tree`` (case
@@ -559,9 +560,11 @@ suite "a helper binary is used only when built from the tree under test":
     writeFile(spaceDirDecoy / "two.nim", "discard\n")
     check refusal() == ""
 
-  # ---- round 10, §13 decision 123: what else changes what the compiler
-  # resolves. Its own tree: an app that imports ``pkgx/util`` through
-  # ``--path:vendor`` and reads a define.
+  # ---- round 10's listing rules (reprobuild-pm issue 2026-11-13-helper-
+  # list-listing-filter-accepts-a-new-package-directory-or-nim-cfg-that-
+  # changes-the-build; no §13 decision yet): what else changes what the
+  # compiler resolves. Its own tree: an app that imports ``pkgx/util``
+  # through ``--path:vendor`` and reads a define.
   let rt = base / "tree-resolve"
   let rApp = rt / "apps" / "foo" / "foo.nim"
   let rBin = rt / "build" / "bin" / "rfoo"

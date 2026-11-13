@@ -63,6 +63,8 @@ import repro_addon/effective_floor
 import repro_addon/ledger
 import repro_addon/switch
 
+import ./spec_citations
+
 const
   Prefix = "/repro/store/prefixes/svc/1.0"
   Src = currentSourcePath().parentDir.parentDir / "src" / "repro_addon"
@@ -616,38 +618,6 @@ suite "round 12 (§10.1 round 12, \"The migration records listeners\")":
     check r.getOrDefault("/run/a").unit == "a.socket"
     check "/run/b/x" notin r            # not named for the service: never recorded
     check m.len == 1
-
-proc citedDecisions(text: string): seq[int] =
-  ## Every number cited as a "decision" in ``text``: ``decision N``,
-  ## ``decisions N, M and K``, across comment-marker line breaks
-  ## (``(§13 decision\n  ## 82)``), as the floor code and its tests cite §13.
-  var flat = newStringOfCap(text.len)
-  var i = 0
-  while i < text.len:
-    if text[i] == '\n':
-      # A line break and the next line's indentation and comment markers
-      # read as one space, so a citation wrapped over two lines is found.
-      inc i
-      while i < text.len and text[i] in {' ', '\t', '#'}: inc i
-      flat.add(' ')
-    else:
-      flat.add(text[i])
-      inc i
-  let low = flat.toLowerAscii()
-  var at = low.find("decision")
-  while at >= 0:
-    var j = at + "decision".len
-    if j < low.len and low[j] == 's': inc j
-    while true:
-      while j < low.len and low[j] in {' ', ',', '\t'}: inc j
-      if low.continuesWith("and ", j): j += 4
-      while j < low.len and low[j] == ' ': inc j
-      var k = j
-      while k < low.len and low[k] in Digits: inc k
-      if k == j: break
-      result.add(parseInt(low[j ..< k]))
-      j = k
-    at = low.find("decision", at + 1)
 
 suite "round 12: no citation of a §13 entry the spec does not record":
   # §13 of the spec ends at entry 81. The rules this round added were cited

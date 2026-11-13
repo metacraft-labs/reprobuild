@@ -50,6 +50,13 @@
 ## (Drift or an error after the intent record, and the intent record's own
 ## failed directory sync, are ``t_addon_review_round5`` cases 4 and 5.)
 ##
+## Round 9's decisions are §13 111 to 113, not the 86 to 88 first reserved
+## for them, which the Arch track's decisions hold (reprobuild-pm issue
+## ``2026-11-13-a11-round-9-decisions-are-cited-as-86-to-88-and-numbered-
+## 111-to-113-twice``). The last suite reads round 9's sources, tests and
+## scripts: none cites an Arch-track number, each cites the decision it
+## implements, and none describes a record as renamed into place.
+##
 ## Falsifying builds (each turns its own case red):
 ## ``discard-completion-key-read-late`` (1, 8: both remove the key file
 ## before the completion),
@@ -85,6 +92,8 @@ import repro_addon/cli
 import repro_addon/evidence as addonEvidence
 import repro_addon/store_custody
 import repro_addon/uninstall
+
+import ./spec_citations
 
 let root = getTempDir() / ("a11-round8-" & $getCurrentProcessId())
 removeDir(root)
@@ -439,5 +448,107 @@ suite "the A11 code review's eighth round: §13 decision 81":
     check not fileExists(completionPathOf(s.gate.overrideRecord))
     check verifyDiscardRecord(s.gate.overrideRecord, s.pub).status == dsAuthorised
     check verifyExit(s) == 3
+
+suite "round 9's decisions are cited by their own §13 numbers":
+  # The three decisions of round 9 were reserved as §13 86 to 88, but the
+  # Arch track's decisions took 86 to 110 (and 116 to 125) first, so the
+  # spec records round 9's as 111 (the listing digests), 112 (the removal
+  # made durable before the completion) and 113 (the completion follows
+  # the evidence) -- the note "*Numbers 111 to 113*" (reprobuild-pm issue
+  # ``2026-11-13-a11-round-9-decisions-are-cited-as-86-to-88-and-numbered-
+  # 111-to-113-twice``). A citation of an Arch number in round 9's code
+  # lands on a network-guard decision. Every literal below is split after
+  # "decision", so this file's own text cites nothing it should not.
+  const
+    ArchTrack = toSeq(86 .. 110) & toSeq(116 .. 125)
+    Listing = 111       # what the helper-dependency list's digests count
+    Durable = 112       # the removal is synced before the completion
+    Evidence = 113      # the completion follows the evidence
+  let repoRoot = currentSourcePath().parentDir.parentDir.parentDir.parentDir
+  proc source(rel: string): string =
+    let path = repoRoot / rel
+    check fileExists(path)
+    readFile(path)
+  proc rowsNamed(text, prefix: string): string =
+    ## The ``## ``name``  meaning`` rows of ``mutations.nim``'s table whose
+    ## name starts with ``prefix``, each with its continuation lines.
+    var keep = false
+    for line in text.splitLines:
+      let row = line.strip(trailing = false)
+      if row.startsWith("## ``"):
+        keep = row.startsWith("## ``" & prefix)
+      elif not row.startsWith("##"):
+        keep = false
+      if keep: result.add(line & "\n")
+  proc linesNaming(text, needle: string): string =
+    for line in text.splitLines:
+      if needle in line: result.add(line & "\n")
+  proc noArch(rel, text: string) =
+    for n in citedDecisions(text):
+      if n in ArchTrack:
+        checkpoint rel & " cites decision " & $n & ", an Arch-track decision"
+      check n notin ArchTrack
+  proc uncited(rel, text: string; wanted: openArray[int]): seq[int] =
+    ## The numbers of ``wanted`` that ``text`` does not cite, each named in
+    ## a checkpoint; the caller checks that there are none.
+    let got = citedDecisions(text)
+    for n in wanted:
+      if n notin got:
+        checkpoint rel & " cites " & $got & ", not decision " & $n
+        result.add(n)
+
+  test "the reader finds a citation in a list and over a shell comment":
+    check citedDecisions("§13 decisions" & " 81, 112 and 113: x") ==
+      @[81, 112, 113]
+    check citedDecisions("# §13 decision" & "\n    # 111: only") == @[111]
+    check citedDecisions("(round 9, decision" & " 111) A") == @[111]
+
+  test "no round-9 source, test or script cites an Arch-track number":
+    for rel in ["libs/repro_addon/src/repro_addon/uninstall.nim",
+                "libs/repro_addon/src/repro_addon/cli.nim",
+                "libs/repro_addon/tests/t_addon_review_round5.nim",
+                "libs/repro_addon/tests/t_addon_review_round8.nim",
+                "libs/repro_test_support/src/repro_test_support/fresh_binary.nim",
+                "libs/repro_test_support/tests/" &
+                  "t_fresh_helper_binary_refuses_a_stale_build.nim",
+                "scripts/write_helper_deps.sh",
+                "tests/integration/t_plain_test_compile_keeps_the_helpers_fresh.nim"]:
+      noArch(rel, source(rel))
+    # Two shared files: only round 9's part of each.
+    let rows = rowsNamed(source("libs/repro_addon/src/repro_addon/mutations.nim"),
+                         "discard-completion-")
+    check rows.len > 0
+    noArch("mutations.nim (discard-completion-*)", rows)
+    let disposition = linesNaming(
+      source("scripts/test-body-helper-compilation-dispositions.tsv"),
+      "t_plain_test_compile_keeps_the_helpers_fresh.nim")
+    check disposition.len > 0
+    noArch("test-body-helper-compilation-dispositions.tsv", disposition)
+
+  test "each decision is cited where it is implemented":
+    let uninstall = source("libs/repro_addon/src/repro_addon/uninstall.nim")
+    check uncited("uninstall.nim", uninstall, [Durable, Evidence]).len == 0
+    check uncited("mutations.nim (discard-completion-*)", rowsNamed(
+      source("libs/repro_addon/src/repro_addon/mutations.nim"),
+      "discard-completion-"), [Durable, Evidence]).len == 0
+    for rel in ["libs/repro_test_support/src/repro_test_support/fresh_binary.nim",
+                "scripts/write_helper_deps.sh",
+                "tests/integration/t_plain_test_compile_keeps_the_helpers_fresh.nim"]:
+      check uncited(rel, source(rel), [Listing]).len == 0
+    check uncited("test-body-helper-compilation-dispositions.tsv", linesNaming(
+      source("scripts/test-body-helper-compilation-dispositions.tsv"),
+      "t_plain_test_compile_keeps_the_helpers_fresh.nim"), [Listing]).len == 0
+
+  test "a record is described as linked into place, never renamed":
+    # §13 decision 81's round-9 amendment: records are written exclusively,
+    # with link(2), by writeFileExclusiveDurable; the round-8 writer
+    # renamed them into place and could write over a record.
+    let uninstall = source("libs/repro_addon/src/repro_addon/uninstall.nim")
+    check ("writeFile" & "Atomic") notin uninstall
+    check ("renamed into" & " place") notin uninstall
+    for rel in ["libs/repro_addon/tests/t_addon_review_round5.nim",
+                "libs/repro_addon/tests/t_addon_review_round8.nim"]:
+      checkpoint rel
+      check ("after the" & " rename") notin source(rel)
 
 removeDir(root)
