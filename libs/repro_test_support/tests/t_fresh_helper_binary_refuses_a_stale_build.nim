@@ -63,6 +63,10 @@
 ## 26-27. (round 9) A file read under a name with a trailing, or a
 ##     leading, space is checked under that name, not under the decoy of
 ##     the trimmed name beside it.
+## 28. A successful open whose fd path strace marks ``(deleted)`` (printed
+##     after the closing ``>``): the line is not in the form the writer
+##     reads, so the writer fails -- it is never skipped as a failed
+##     syscall, which left the ``staticRead`` file out of the list.
 ##
 ## Falsifying builds: ``stale-helper-accepted`` (cases 2-5 and 8-10 red),
 ## ``fresh-skips-included`` (case 4), ``fresh-skips-outside-tree`` (case
@@ -80,9 +84,10 @@
 ## the list says), ``trim-edge-spaces`` (case 26: the path written without
 ## its trailing space, as round 8's strip() read it; case 27's leading
 ## space sits after the path's "/", so no line strip reaches it, and it is
-## a positive case only).
+## a positive case only), ``suffix-is-failure`` (case 28; ``accept-unparsed``
+## turns it red too).
 ##
-## Cases 22 and 23 run the real strace behind a wrapper script named by
+## Cases 22, 23 and 28 run the real strace behind a wrapper script named by
 ## ``REPRO_STRACE``. The wrapper is justified: it is how the writer's
 ## caller selects a strace, and it stands in for a strace build that prints
 ## another format (or the caller's PATH strace, which path mode runs),
@@ -449,6 +454,32 @@ suite "a helper binary is used only when built from the tree under test":
       let why = refusal()
       checkpoint why
       check ("older than " & p) in why
+
+  test "28: a successful open strace marks (deleted) fails the list":
+    # The wrapper runs the real strace, then marks ONLY the open of
+    # blob.txt the way strace prints an fd whose file is gone
+    # (`= 3<path>(deleted)`), so the entry module's open -- the positive
+    # control -- is untouched and only this line's handling is tested.
+    let real = findExe("strace")
+    doAssert real.len > 0, "strace is required"
+    var blobHex = ""
+    for c in "/blob.txt": blobHex.add("\\\\x" & toHex(ord(c), 2).toLowerAscii)
+    let wrapper = base / "strace-marks-deleted"
+    writeFile(wrapper, "#!/usr/bin/env bash\nout=''\nprev=''\n" &
+      "for a in \"$@\"; do [ \"$prev\" = -o ] && out=\"$a\"; prev=\"$a\"; done\n" &
+      quoteShell(real) & " \"$@\"\nrc=$?\n" &
+      "for f in \"$out\".*; do sed -i -E 's/^(open[a-z0-9]*\\(.*\\) += [0-9]+<[^>]*" &
+      blobHex & ">)$/\\1(deleted)/' \"$f\"; done\nexit $rc\n")
+    setFilePermissions(wrapper, {fpUserRead, fpUserWrite, fpUserExec})
+    build()
+    check refusal() == ""
+    let (o, c) = writeWith(wrapper)
+    checkpoint o
+    check c != 0
+    check "could not parse" in o
+    check "(deleted)" in o
+    check not fileExists(tree / "build" / "nimcache" / "foo-helper" / "foo-helper.deps")
+    check "has no dependency list" in refusal()
 
   test "7: no binary, or no dependency list, is refused":
     build()
