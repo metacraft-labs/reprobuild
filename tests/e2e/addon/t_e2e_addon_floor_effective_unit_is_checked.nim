@@ -306,7 +306,8 @@ proc cases(binary, prefix: string): seq[Case] =
                 "  content = \"[Socket]\nListenStream=/run/udev/control\n" &
                 "Service=a9e-udsock.service\n\n[Install]\nWantedBy=sockets.target\n\"\n" &
                 "  enabled = true\n}\n"),
-    # Round 12 (§13 decision 84): a listener below a directory its own
+    # Round 12 (spec §10.1 round 12, "A listener below a place its
+    # service can write"): a listener below a directory its own
     # service can write (RuntimeDirectory=a9e-lnk covers /run/a9e-lnk/sub),
     # the reviewer's activator; the service's account could turn sub into
     # a link to /run/udev, and the manager unlinks through it on a stop.

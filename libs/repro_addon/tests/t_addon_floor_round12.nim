@@ -1,15 +1,17 @@
 ## The hardening floor after A9's review round 12 (ReproOS Add-On Mode spec
-## §10.1, *Amended 2026-11-13 (A9 adversarial review, round 12)*; §13
-## decisions 82 to 85), from the reviewer's probes (``zz_a9rev12_*``):
+## §10.1, *Amended 2026-11-13 (A9 adversarial review, round 12)*; each rule
+## is cited by its title there), from the reviewer's probes
+## (``zz_a9rev12_*``):
 ##
 ## - a restart outside a switch is accepted only when the unit's
 ##   InvocationID changed since the record and the directory was born no
-##   earlier than 100 ms before the start systemd reports (decision 82;
-##   finding 1); in a switch, what was absent at the check and exists after
-##   the start is recorded, for a unit started by a dependency or by its
-##   activator alike (spec §10.1, round 12; finding 3);
+##   earlier than 100 ms before the start systemd reports ("A directory
+##   made again outside a switch"; finding 1); in a switch, what was absent
+##   at the check and exists after the start is recorded, for a unit
+##   started by a dependency or by its activator alike ("What the start
+##   step made"; finding 3);
 ## - a stopped unit's directory passes only if it was born within the
-##   unit's last run (decision 83);
+##   unit's last run ("A stopped unit's directory");
 ## - the run is read in one call (finding 5);
 ## - a template's directory is judged against the instance that ran
 ##   (finding 4), and every name of a template reaches one verdict: the
@@ -22,9 +24,15 @@
 ## - a reused inode with a new birth time is not the recorded directory
 ##   (finding 7; decision 76);
 ## - a listener below a directory its service can write is refused, in both
-##   halves (decision 84; finding 2);
-## - the one-time migration records existing activator listeners
-##   (decision 85).
+##   halves ("A listener below a place its service can write"; finding 2),
+##   and the refusal names that rule;
+## - the one-time migration records existing activator listeners ("The
+##   migration records listeners");
+## - no floor source, unit test or VM gate cites one of the four §13
+##   entries numbered 82 to 85, which the spec never recorded (reprobuild-pm
+##   issue ``2026-11-13-floor-code-cites-section-13-decisions-82-to-85-that-
+##   the-spec-does-not-have``): they were cited for the rules above before
+##   the spec stated them, and the spec states them in §10.1 instead.
 ##
 ## Falsifying builds, each red on its own test: ``recreated-same-invocation``,
 ## ``recreated-window-exact``, ``recreated-while-stopped``,
@@ -139,6 +147,10 @@ proc existing(paths: openArray[string]): proc (p: string; uid: int; dynamic: boo
     if p in s: "it exists and belongs to uid 0, not to the unit's own account" else: ""
 
 
+const ListenerRule = "§10.1 round 12, \"A listener below a place its " &
+  "service can write\""
+  ## How a refusal of a listener below a writable place names its rule.
+
 const Start = 1_794_000_000_000_000_000'i64     # a start, ns since the epoch
 const Ms = 1_000_000'i64
 
@@ -152,7 +164,7 @@ proc view(btime: int64; id = "I2"; stopped = false; stop = 0'i64): SystemdView =
 proc recreated(v: SystemdView): string =
   systemdRecreated("/run/a", "a.service", ["/run/a"], rec, false, v)
 
-suite "round 12 (§13 decision 82): a restart outside a switch":
+suite "round 12 (§10.1 round 12, \"A directory made again outside a switch\")":
   test "born up to 100 ms before the start systemd reports, it is the unit's":
     # systemd 252 makes it in the child before it stamps the start: 17.6 ms
     # measured on debian-12.
@@ -170,7 +182,7 @@ suite "round 12 (§13 decision 82): a restart outside a switch":
     v.invocationStart = 0
     check recreated(v).len > 0
 
-suite "round 12 (§13 decision 83): a stopped unit":
+suite "round 12 (§10.1 round 12, \"A stopped unit's directory\")":
   test "born within its last run, it passes":
     check recreated(view(Start + 5 * Ms, stopped = true, stop = Start + 900 * Ms)) == ""
   test "born after its last run ended, it does not":
@@ -179,7 +191,7 @@ suite "round 12 (§13 decision 83): a stopped unit":
   test "no end reported, it does not":
     check recreated(view(Start + 5 * Ms, stopped = true)).len > 0
 
-suite "round 12 (spec §10.1): recorded at the start step":
+suite "round 12 (§10.1 round 12, \"What the start step made\")":
   let state = createTempDir("a9r12-", "-rec")
   createDir(state / "addon")
   test "absent at the check, made by the start: recorded, whenever the run began":
@@ -199,7 +211,7 @@ suite "round 12 (spec §10.1): recorded at the start step":
     check "/run/gone" notin r
   removeDir(state)
 
-suite "round 12 (§13 decision 82): a start refreshes the run on the record":
+suite "round 12 (§10.1 round 12, \"A directory made again outside a switch\"): a start refreshes the run on the record":
   test "a switch's start records its run for an unchanged directory, so a later tree in that run is refused":
     let state = createTempDir("a9r12-", "-inv")
     defer: removeDir(state)
@@ -352,8 +364,8 @@ suite "round 12, finding 4 (issue 2026-11-13): one verdict for every name of a t
   test "recorded for the observation instance, its instance stopped after the run that made it":
     # Written by an engine that recorded a template's directory for its
     # observation instance; foo@x, which the generation names, ran, systemd
-    # made the directory in that run, and it has stopped since (§13
-    # decision 83). Nothing runs now, so only the generation's instances
+    # made the directory in that run, and it has stopped since (spec §10.1
+    # round 12, "A stopped unit's directory"). Nothing runs now, so only the generation's instances
     # name the instance that ran.
     let vo = proc (u: string): SystemdView =
       if u == "foo@x.service": view(Start + 5 * Ms, stopped = true, stop = Start + 900 * Ms)
@@ -505,12 +517,12 @@ suite "round 12, finding 7 (§13 decision 76): a reused inode with a new birth t
     let same: PathIdentity = (true, 7'u64, 14'u64, Start)
     check createdForUnit("/run/a", "a.service", same, r, initHashSet[string]())
 
-suite "round 12 (§13 decision 84): a listener below a place its service can write":
+suite "round 12 (§10.1 round 12, \"A listener below a place its service can write\")":
   test "below /run/<stem>/<dir>/ with RuntimeDirectory=<stem>: refused":
     let w = floorWritablePlaces(serviceDirectives("[Service]\nRuntimeDirectory=a\n"))
-    check "§13 decision 84" in listenerRefusal("a.socket", "/run/a/sub/control",
+    check ListenerRule in listenerRefusal("a.socket", "/run/a/sub/control",
                                                "a.service", w)
-    check "§13 decision 84" in listenerRefusal("a.socket", "/run/a/sub/control",
+    check ListenerRule in listenerRefusal("a.socket", "/run/a/sub/control",
       "a.service", floorWritablePlaces(serviceDirectives("[Service]\nReadWritePaths=/run/a/sub\n")))
   test "directly at /run/<stem>/<name>, or with nothing writable on the path: allowed":
     let w = floorWritablePlaces(serviceDirectives("[Service]\nRuntimeDirectory=a\n"))
@@ -525,12 +537,12 @@ suite "round 12 (§13 decision 84): a listener below a place its service can wri
     let svc12 = "User=a\nRuntimeDirectory=a\nExecStart=" & Prefix & "/bin/svc\n"
     let sock = rawUnit("a.socket", "[Socket]\nListenStream=/run/a/sub/control\n" &
                        "Service=a.service\nRemoveOnStop=yes\n")
-    check "§13 decision 84" in refused(unitStanza("a.service", svc12) & sock)
+    check ListenerRule in refused(unitStanza("a.service", svc12) & sock)
     let sock1 = rawUnit("a.socket", "[Socket]\nListenStream=/run/a/control\n" &
                         "Service=a.service\n")
     check refused(unitStanza("a.service", svc12) & sock1) == ""
 
-suite "round 12 (§13 decision 85): the migration records existing listeners":
+suite "round 12 (§10.1 round 12, \"The migration records listeners\")":
   test "an older engine's activator listener is recorded for the activator":
     let state = createTempDir("a9r12-", "-mig")
     defer: removeDir(state)
@@ -551,3 +563,72 @@ suite "round 12 (§13 decision 85): the migration records existing listeners":
     check r.getOrDefault("/run/a").unit == "a.socket"
     check "/run/b/x" notin r            # not named for the service: never recorded
     check m.len == 1
+
+proc citedDecisions(text: string): seq[int] =
+  ## Every number cited as a "decision" in ``text``: ``decision N``,
+  ## ``decisions N, M and K``, across comment-marker line breaks
+  ## (``(§13 decision\n  ## 82)``), as the floor code and its tests cite §13.
+  var flat = newStringOfCap(text.len)
+  var i = 0
+  while i < text.len:
+    if text[i] == '\n':
+      # A line break and the next line's indentation and comment markers
+      # read as one space, so a citation wrapped over two lines is found.
+      inc i
+      while i < text.len and text[i] in {' ', '\t', '#'}: inc i
+      flat.add(' ')
+    else:
+      flat.add(text[i])
+      inc i
+  let low = flat.toLowerAscii()
+  var at = low.find("decision")
+  while at >= 0:
+    var j = at + "decision".len
+    if j < low.len and low[j] == 's': inc j
+    while true:
+      while j < low.len and low[j] in {' ', ',', '\t'}: inc j
+      if low.continuesWith("and ", j): j += 4
+      while j < low.len and low[j] == ' ': inc j
+      var k = j
+      while k < low.len and low[k] in Digits: inc k
+      if k == j: break
+      result.add(parseInt(low[j ..< k]))
+      j = k
+    at = low.find("decision", at + 1)
+
+suite "round 12: no citation of a §13 entry the spec does not record":
+  # §13 of the spec ends at entry 81. The rules this round added were cited
+  # as entries 82 to 85, which no one recorded; the spec states them in
+  # §10.1's round-12 amendment, and the code cites them by title there.
+  const Unrecorded = [82, 83, 84, 85]
+  let repoRoot = currentSourcePath().parentDir.parentDir.parentDir.parentDir
+  let roots = [repoRoot / "libs" / "repro_addon" / "src",
+               repoRoot / "libs" / "repro_addon" / "tests",
+               repoRoot / "libs" / "repro_infra" / "src",
+               repoRoot / "tests" / "e2e" / "addon"]
+  test "the reader finds wrapped and listed citations":
+    # Each literal is split after "decision", so this file's own text cites
+    # nothing and the scan below can read it too.
+    check citedDecisions("(§13 decision" & "\n  ## 82): x") == @[82]
+    check citedDecisions("(§13 decisions" & " 71, 82, 83)") == @[71, 82, 83]
+    check citedDecisions("§13 decisions" & " 77,\n  ##    82 and 83), y") ==
+      @[77, 82, 83]
+    check citedDecisions("decision" & " 84\" in outl") == @[84]
+    check citedDecisions("no citation here, 82 ms") == newSeq[int]()
+  test "no floor source, unit test or VM gate cites one":
+    var scanned = 0
+    for root in roots:
+      check dirExists(root)
+      for f in walkDirRec(root):
+        if not f.endsWith(".nim"): continue
+        inc scanned
+        for n in citedDecisions(readFile(f)):
+          if n in Unrecorded:
+            checkpoint f.relativePath(repoRoot) & " cites decision " & $n
+            check n notin Unrecorded
+    check scanned > 10
+  test "a refusal names the §10.1 rule, never a §13 entry it does not have":
+    let w = floorWritablePlaces(serviceDirectives("[Service]\nRuntimeDirectory=a\n"))
+    let why = listenerRefusal("a.socket", "/run/a/sub/control", "a.service", w)
+    check ListenerRule in why
+    for n in citedDecisions(why): check n notin Unrecorded

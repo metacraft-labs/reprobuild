@@ -176,7 +176,8 @@ suite "round 11 (§13 decision 76): a directory's identity":
 suite "round 11 (§13 decision 77): systemd made it for this invocation":
   # Recorded at the add-on's start (invocation I1); the unit now runs
   # invocation I2, begun at Start (nanoseconds; the window before a start
-  # is 100 ms since round 12, §13 decision 82).
+  # is 100 ms since round 12: spec §10.1 round 12, "A directory made
+  # again outside a switch").
   const Start = 1_794_000_000_000_000_000'i64
   let rec = {"/run/a": CreatedDir(unit: "a.service", dev: 1, ino: 2, btime: 50,
                                   invocation: "I1")}.toTable
@@ -218,7 +219,8 @@ suite "round 11, finding 4: a template's instances share its directories":
     check flooredKey("foo@y.service") == "foo@.service"
     check flooredKey("bar.service") == "bar.service"
   test "a unit a dependency started during the switch is recorded":
-    # Since round 12 (spec §10.1, round 12): absent at the check, present after
+    # Since round 12 (spec §10.1 round 12, "What the start step made"):
+    # absent at the check, present after
     # the start step, whatever the unit's start time says.
     let state = createTempDir("a9r11-", "-state")
     defer: removeDir(state)

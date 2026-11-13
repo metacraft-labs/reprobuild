@@ -10,11 +10,11 @@
 ## - **a template pulled in by ``Wants=``** with ``RuntimeDirectory=``
 ##   applies twice: what was absent at the check and exists after the
 ##   start is recorded, whenever systemd 252 stamps the instance's start
-##   (spec §10.1, round 12);
+##   (spec §10.1 round 12, "What the start step made");
 ## - **its instance restarted outside a switch** (``systemctl restart``):
 ##   the next apply accepts the directory the restart made, judged by the
-##   instance that ran, not by the observation instance (decision 82,
-##   finding 4);
+##   instance that ran, not by the observation instance (spec
+##   §10.1 round 12, "A directory made again outside a switch", finding 4);
 ## - **a socket-activated service** with ``RuntimeDirectory=<stem>`` and a
 ##   listener at ``/run/<stem>/sock`` applies twice: the directory its
 ##   socket's start made is recorded for the service (finding 3; spec
@@ -27,8 +27,8 @@
 ## - **a stopped unit** whose ``StateDirectory=`` its last run made again
 ##   applies; a tree made after that run ended is refused, and the refused
 ##   apply's revert commits with the unit held, the host not pending
-##   (decision 83 for the stopped unit; spec §10.1, round 12, for the
-##   revert);
+##   (spec §10.1 round 12, "A stopped unit's directory" and
+##   "A revert does not refuse on its own floor check");
 ## - **a template's record naming its observation instance**, as an engine
 ##   before the start step recorded a template's directory for the
 ##   instance that ran wrote it: ``a9r-to@.service`` with
@@ -50,7 +50,8 @@
 ##   build ``listener-below-writable-allowed`` it applies, the service's
 ##   account links ``/run/a9r-lr/sub`` to ``/run/udev``, a stop of the
 ##   socket unlinks udev's control socket, and the gate goes red
-##   (decision 84). Destructive, so last.
+##   (spec §10.1 round 12, "A listener below a place its service can write").
+##   Destructive, so last.
 ##
 ## Falsifying builds (each red here): ``revert-refuses-on-floor``,
 ## ``same-identity-ignores-btime``, ``listener-below-writable-allowed``,
@@ -125,8 +126,8 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
     var evidences = newJArray()
     for n in 1 .. rounds():
       let tag = " (round " & $n & ")"
-      # The template, pulled in by the control unit (finding 1; spec §10.1,
-      # round 12).
+      # The template, pulled in by the control unit (finding 1; spec
+      # §10.1 round 12, "What the start step made").
       let tpl = proc (d: string): string =
         Head & unitResource("a9r-control.service", "", binary,
                             unitLines = "Wants=a9r-t@1.service\n", description = d) &
@@ -140,7 +141,8 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
       step("and applies again over the directory its instance's start made" & tag,
            r.exitCode == 0, r.stdout & r.stderr & ev1)
       notPending("the template's second apply" & tag)
-      # Its instance restarted outside a switch (finding 4, decision 82).
+      # Its instance restarted outside a switch (finding 4; spec
+      # §10.1 round 12, "A directory made again outside a switch").
       let rs = g.exec("systemctl restart a9r-t@1.service")
       step("its instance restarts outside a switch" & tag, rs.exitCode == 0,
            rs.stdout & rs.stderr)
@@ -181,7 +183,9 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
       discard g.run("systemctl stop 'a9r-t@*' a9r-sk.socket a9r-sk.service 2>/dev/null; " &
                     "systemctl reset-failed 'a9r-*' 2>/dev/null; rm -rf /run/a9r-sk; true")
     record["evidence"] = evidences
-    # A stopped unit (decision 83), and a failed apply's revert.
+    # A stopped unit (spec §10.1 round 12, "A stopped unit's
+    # directory"), and a failed apply's revert ("A revert does not refuse
+    # on its own floor check").
     let st = proc (d: string): string =
       control & unitResource("a9r-st.service", "User=a9e\nStateDirectory=a9r-st\n",
                              binary, description = d)
@@ -344,7 +348,8 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
       discard g.run("rm -rf /var/cache/a9r-c; true")
       discard g.applyProfile(repro, "c-c", control)
       discard g.run("systemctl stop a9r-c.service 2>/dev/null; umount /var/cache; true")
-    # The reviewer's link (decision 84). Last: the falsifier breaks udev.
+    # The reviewer's link (spec §10.1 round 12, "A listener below a place
+    # its service can write"). Last: the falsifier breaks udev.
     let lr = control & unitResource("a9r-lr.service", "User=a9e\nRuntimeDirectory=a9r-lr\n",
                                     binary, enabled = false) &
       socketResource("a9r-lr.socket", "ListenStream=/run/a9r-lr/sub/control\n" &
@@ -354,7 +359,8 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
     let outl = r.stdout & r.stderr
     if r.exitCode != 0:
       step("an activator whose listener lies below a directory its service " &
-           "can write is refused (§13 decision 84)", "decision 84" in outl, outl)
+           "can write is refused, citing its rule (§10.1 round 12)",
+           "A listener below a place its service can write" in outl, outl)
     else:
       let plant = g.exec("systemctl start a9r-lr.service; stat -c '%n %U' /run/udev/control; " &
         "runuser -u a9e -- sh -c 'mv /run/a9r-lr/sub /run/a9r-lr/old && " &

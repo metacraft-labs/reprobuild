@@ -1576,9 +1576,10 @@ proc recordCreatedDirs*(stateDir, unit: string;
     when not mutated("created-dirs-per-step"):
       if u != unit: continue
     if path in t:
-      # The same directory, now the run this start began (§13 decision
-      # 82): its InvocationID is recorded, so a tree made at the path later
-      # in this same run is not taken as a new run's (A9 review round 12).
+      # The same directory, now the run this start began (spec §10.1
+      # round 12, "A directory made again outside a switch"): its
+      # InvocationID is recorded, so a tree made at the path later in this
+      # same run is not taken as a new run's (A9 review round 12).
       when not mutated("record-keeps-old-invocation"):
         if invocation.len > 0 and t[path].invocation != invocation and
             flooredKey(t[path].unit) == flooredKey(unit):
@@ -1595,7 +1596,8 @@ proc recordStartedSince*(stateDir: string;
                          pending: openArray[tuple[path, unit: string]];
                          invocationOf: proc (u: string): tuple[id: string; start: int64];
                          identityOf: proc (p: string): PathIdentity = identityOfPath) =
-  ## After the start step (spec §10.1, round 12): each pending directory -- one
+  ## After the start step (spec §10.1 round 12, "What the start step made"):
+  ## each pending directory -- one
   ## the check found absent -- that exists now is recorded for the unit it
   ## was pending for, as ``recordCreatedDirs`` does for a unit the switch
   ## started by name. That covers a unit the switch did not start by name
@@ -1646,7 +1648,8 @@ proc recordStartedSince*(stateDir: string;
         bestId = id
     if same:
       # The same directory: only the run it now belongs to is refreshed
-      # (§13 decision 82), so a later tree in this run is not a new run's.
+      # (spec §10.1 round 12, "A directory made again outside a
+      # switch"), so a later tree in this run is not a new run's.
       when not mutated("record-keeps-old-invocation"):
         if bestId.len > 0 and t[path].invocation != bestId and
             flooredKey(t[path].unit) == flooredKey(best):
@@ -1710,8 +1713,9 @@ proc installedListeners*(unitFile: string; dropIns: openArray[string]):
     tuple[service: string; paths: seq[string]] =
   ## The unix listeners an activator the add-on installed declares, and the
   ## service it starts, read from the files the add-on wrote for it (its
-  ## unit file, then its own drop-ins; an empty assignment resets), for §13
-  ## decision 85.
+  ## unit file, then its own drop-ins; an empty assignment resets), for the
+  ## one-time migration (spec §10.1 round 12, "The migration records
+  ## listeners").
   let name = extractFilename(unitFile)
   let dot = name.rfind('.')
   if dot <= 0 or name[dot + 1 .. ^1] != "socket": return
@@ -1826,7 +1830,8 @@ proc migrateCreatedDirs*(stateDir, committed: string; previous: Ledger;
             t[path] = c
           else:
             if audit(path, c): t[path] = c
-    # §13 decision 85: the unix listeners of the activators that generation
+    # Spec §10.1 round 12, "The migration records listeners": the unix
+    # listeners of the activators that generation
     # installed for its floored services, as its own files declare them and
     # where the listener rule allows them, recorded for the activator, so
     # the first apply under this engine, and its revert, pass decision 78's
@@ -6084,7 +6089,9 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
                     v.invocationId & " (recorded: another), born " & $v.btime &
                     " ns, run started " & $v.invocationStart & " ns" &
                     (if v.stopped: ", ended " & $v.lastStop & " ns" else: ", running") &
-                    " (§13 decisions 71, 82, 83)",
+                    " (§13 decision 71; §10.1 round 12, \"A directory " &
+                    "made again outside a switch\", \"A stopped unit's " &
+                    "directory\")",
                   recordClass: AuditClassLiveState))
                 acceptRecreated(stateDir, path, unit, v.invocationId)
                 true

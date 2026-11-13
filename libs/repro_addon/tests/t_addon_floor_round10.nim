@@ -327,7 +327,8 @@ suite "round 10 (§13 decisions 71 and 77): made again by systemd outside a swit
   # 1/2, born 50, invocation I1); it is gone and made again (identity 1/3,
   # born 1 ms after Start) by the unit's invocation I2, which began at
   # Start. Times in nanoseconds since the epoch: since round 12 the window
-  # before a start is 100 ms (§13 decision 82).
+  # before a start is 100 ms (spec §10.1 round 12, "A directory made
+  # again outside a switch").
   const Start = 1_794_000_000_000_000_000'i64
   let rec = {"/run/a": CreatedDir(unit: "a.service", dev: 1, ino: 2, btime: 50,
                                   invocation: "I1")}.toTable

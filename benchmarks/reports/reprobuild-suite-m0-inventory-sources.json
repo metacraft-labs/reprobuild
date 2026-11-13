@@ -9023,8 +9023,8 @@
       "owner": "libs/repro_addon",
       "requiresReproBinary": false,
       "source": "libs/repro_addon/tests/t_addon_floor_round12.nim",
-      "sourceSuiteCount": 14,
-      "staticCaseCount": 31,
+      "sourceSuiteCount": 15,
+      "staticCaseCount": 34,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

@@ -1202,7 +1202,8 @@ proc checkFloorActivators*(p: SystemProfile) =
         r.suName.endsWith(".path"):
       if isFloored(activatedService(r.suName, r.suContent)):
         activators.incl(r.suName)
-  # §13 decision 84: the places the activated service can write, from the
+  # Spec §10.1 round 12, "A listener below a place its service can write":
+  # the places the activated service can write, from the
   # profile's own unit for it (a template's, for an instance or Accept=yes).
   proc writableOf(service: string): seq[string] =
     let at = service.find('@')

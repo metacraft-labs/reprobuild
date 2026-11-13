@@ -932,12 +932,14 @@ proc declaredDirectories*(show: ShowProps): seq[string] =
       if d.len > 0: result.add(normalisedPath(root & "/" & d))
 
 const RestartWindowNs* = 100_000_000'i64
-  ## §13 decision 82: how much earlier than the start systemd reports a
-  ## directory made for that start may be born. systemd 252 makes it in the
-  ## child it forks before it stamps the start (up to 17.6 ms measured on
-  ## debian-12); 100 ms covers that with room. A residual the owner
-  ## accepted: a tree a root process makes in that window before a start
-  ## is taken as systemd's.
+  ## Spec §10.1 round 12, "A directory made again outside a switch": how much
+  ## earlier than the start systemd reports a directory made for that start
+  ## may be born. systemd 252 makes it in the child it forks before it
+  ## stamps the start (up to 17.6 ms measured on debian-12); 100 ms covers
+  ## that with room. The residual -- a tree a root process makes in that
+  ## window before a start is taken as systemd's -- is reported to the
+  ## owner, whose answer to that question is still open: this is an
+  ## implementation amendment, not an owner decision.
 
 proc systemdRecreated*(path, unit: string; declared: openArray[string];
                        created: Table[string, CreatedDir]; dynamic: bool;
@@ -951,8 +953,10 @@ proc systemdRecreated*(path, unit: string; declared: openArray[string];
   ## 1. the record names ``path`` for this same unit;
   ## 2. ``path`` is exactly one of the directories the unit declares
   ##    (``declaredDirectories``), never a prefix or a parent of one;
-  ## 3. systemd's state shows a run of the unit made it (§13 decisions 77,
-  ##    82 and 83), for a static and a dynamic user alike: the unit's
+  ## 3. systemd's state shows a run of the unit made it (§13 decision 77,
+  ##    as spec §10.1 round 12, "A directory made again outside a switch" and
+  ##    "A stopped unit's directory" amend it), for a static and a dynamic
+  ##    user alike: the unit's
   ##    ``InvocationID`` differs from the one recorded (it started again
   ##    since), and the directory was born no earlier than
   ##    ``RestartWindowNs`` before that run's start; for a unit that is not
@@ -994,7 +998,8 @@ proc systemdRecreated*(path, unit: string; declared: openArray[string];
       return "it was born more than " & $(window div 1_000_000) &
         " ms before the unit's last run began"
     if v.stopped:
-      # §13 decision 83: a stopped unit's directory passes only if it was
+      # Spec §10.1 round 12, "A stopped unit's directory": a stopped
+      # unit's directory passes only if it was
       # born within its last run; a tree made after that run ended (a
       # package, tmpfiles.d, an operator) is not systemd's.
       when not mutated("recreated-while-stopped"):
@@ -1324,7 +1329,8 @@ const ListenerKeys* = "Listen,ListenStream,ListenDatagram,ListenSequentialPacket
 proc writablePlacesOf*(show: ShowProps): seq[string] =
   ## The places the unit can write, as systemd reports its settings
   ## (``floorWritablePlaces`` over ``ReadWritePaths=``, writable binds,
-  ## tmpfs and every ``*Directory=``), for §13 decision 84.
+  ## tmpfs and every ``*Directory=``), for spec
+  ## §10.1 round 12, "A listener below a place its service can write".
   var ds: seq[tuple[key, value: string]]
   for k in ["ReadWritePaths", "BindPaths", "TemporaryFileSystem", "StateDirectory",
             "RuntimeDirectory", "CacheDirectory", "LogsDirectory",

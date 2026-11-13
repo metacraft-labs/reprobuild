@@ -1545,7 +1545,8 @@ proc listenerRefusal*(unitName, value: string; service = "";
         return np & " is not named for the unit (/run/" & stem & " or below " &
           "/run/" & stem & "/, so " &
           "the manager never creates, chowns or removes another's path)"
-      # §13 decision 84: deeper than /run/<stem>/<name>, the manager walks
+      # Spec §10.1 round 12, "A listener below a place its service can write":
+      # deeper than /run/<stem>/<name>, the manager walks
       # directories below the unit's own; if the service can write one of
       # them it can replace it with a link (``/run/<stem>/sub`` ->
       # ``/run/udev``), and the manager, as root, binds and unlinks through
@@ -1558,7 +1559,8 @@ proc listenerRefusal*(unitName, value: string; service = "";
             if np.startsWith(wp & "/") or wp == "/":
               return np & " lies below " & wp & ", which the service can " &
                 "write: it could turn a directory on the path into a link " &
-                "the manager follows as root (§13 decision 84)"
+                "the manager follows as root (§10.1 round 12, \"A " &
+                "listener below a place its service can write\")"
     return ""
   if v.startsWith("@"):
     if not ownName(v[1 .. ^1].split('/')[0]):
