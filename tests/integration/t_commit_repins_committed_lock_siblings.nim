@@ -232,9 +232,14 @@ suite "pre-commit re-pins the committed lock's siblings":
         parsesAsToml = false
       check parsesAsToml
       # Nothing of the old statement is left behind, and nothing is doubled.
+      # The `packages` line names the siblings as packages too, so the
+      # records are counted in the rest of the document: that is where the
+      # old rewrite left a second copy behind.
       check "\n, { name" notin committed
-      check committed.count("{ name = \"lib-c\"") == 1
-      check committed.count("{ name = \"lib-b\"") == 1
+      let outsidePackages = committed.replace(
+        linePrefixed(committed, "packages = "), "")
+      check outsidePackages.count("{ name = \"lib-c\"") == 1
+      check outsidePackages.count("{ name = \"lib-b\"") == 1
       let ld = parseLockedDependencies(committed)
       check ld.deps.len == 3
       check ("revision = \"" & libCNext & "\"") in depEntry(committed, "lib-c")
