@@ -8771,8 +8771,8 @@
       "owner": "libs/repro_addon",
       "requiresReproBinary": false,
       "source": "libs/repro_addon/tests/t_addon_arch_base.nim",
-      "sourceSuiteCount": 9,
-      "staticCaseCount": 26,
+      "sourceSuiteCount": 10,
+      "staticCaseCount": 27,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

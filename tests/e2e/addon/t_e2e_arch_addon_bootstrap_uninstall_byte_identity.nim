@@ -67,7 +67,8 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
     step("fingerprint is deterministic", det.ok, det.text)
     if not det.ok: return fails
     step("the fingerprint has pacman-local records",
-         "\npacman-local\t" in f0, "no pacman-local component")
+         "\npacman-local\t" in f0,
+         (if "\npacman-local\t" in f0: "present" else: "no pacman-local component"))
 
     if not g.bootstrapArch(repro, step).ok: return fails
     let l0 = g.ledgerOf()

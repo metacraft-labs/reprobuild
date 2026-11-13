@@ -122,7 +122,11 @@ proc createRootDir*(path: string; mode: int; asSubvolume = false): string =
   else:
     if posix.mkdir(path.cstring, Mode(mode)) != 0:
       raiseOSError(osLastError(), "mkdir " & path)
-    result = "dir"
+    # The word the fingerprint's ``addon-roots`` records for it: ``dir``,
+    # or ``btrfs-dir`` for a plain directory on a btrfs filesystem
+    # (``/var/lib/repro`` on a btrfs root), so the ledger's expectation is
+    # the fingerprint's value.
+    result = if isBtrfs(path): "btrfs-dir" else: "dir"
   if posix.chmod(path.cstring, Mode(mode)) != 0:
     raiseOSError(osLastError(), "chmod " & path)
   if posix.chown(path.cstring, 0, 0) != 0:

@@ -21,7 +21,8 @@ import std/[os, posix, strutils, tables, unittest]
 
 import repro_infra/addon_diagnostics
 import repro_addon/[base_identity, collision, fingerprint, generation0,
-                    omarchy, pacman_db, preflight, static_tree, uninstall]
+                    ledger, omarchy, pacman_db, preflight, static_tree,
+                    uninstall]
 
 let root = getTempDir() / ("repro-addon-arch-" & $getCurrentProcessId())
 removeDir(root)
@@ -330,6 +331,34 @@ suite "the fingerprint on Arch":
       "</key><value>yes</value></userdata><description>repro-addon" &
       "</description></snapshot>")
     check not snapperUserdataHasAddonKey("<snapshot></snapshot>")
+
+suite "the ledger's delta on a btrfs root":
+  test "/repro as a subvolume accounts for one btrfs-subvolumes record":
+    let sub = Ledger(entries: @[LedgerEntry(class: lcRoot, path: "/repro",
+      kindHint: "btrfs-subvolume", mode: "0755", owner: "0:0")])
+    let plain = Ledger(entries: @[LedgerEntry(class: lcRoot, path: "/repro",
+      kindHint: "dir", mode: "0755", owner: "0:0")])
+    let added = DiffEntry(op: doAdded, component: fcBtrfsSubvolumes,
+      key: "repro", after: "id 259 parent 5")
+    let roots = DiffEntry(op: doChanged, component: fcAddonRoots,
+      key: "/repro", before: "absent", after: "btrfs-subvolume 0755 0:0")
+    check matchExpectations(@[roots, added], expectedDelta(Ledger(), sub)).ok
+    let undercover = DiffEntry(op: doAdded, component: fcBtrfsSubvolumes,
+      key: "@/repro", after: "id 270 parent 256")
+    check matchExpectations(@[roots, undercover],
+                            expectedDelta(Ledger(), sub)).ok
+    # A plain /repro accounts for no subvolume: one appearing is unexpected.
+    let rootsPlain = DiffEntry(op: doChanged, component: fcAddonRoots,
+      key: "/repro", before: "absent", after: "dir 0755 0:0")
+    check not matchExpectations(@[rootsPlain, added],
+                                expectedDelta(Ledger(), plain)).ok
+    # Its removal by uninstall is accounted for the same way.
+    let removed = DiffEntry(op: doRemoved, component: fcBtrfsSubvolumes,
+      key: "repro", before: "id 259 parent 5")
+    let rootsGone = DiffEntry(op: doChanged, component: fcAddonRoots,
+      key: "/repro", before: "btrfs-subvolume 0755 0:0", after: "absent")
+    check matchExpectations(@[rootsGone, removed],
+                            expectedDelta(sub, Ledger())).ok
 
 suite "generation 0 on Arch":
   test "no apt hook and nothing under /etc/apt; Debian keeps its hook":
