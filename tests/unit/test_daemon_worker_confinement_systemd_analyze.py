@@ -26,6 +26,8 @@ import contextlib
 import importlib.util
 import io
 import os
+import shlex
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -150,6 +152,10 @@ class PinnedSystemdAnalyzeTests(unittest.TestCase):
         self.assertEqual(1, len(roots), argv)
         self.assertIn("--offline=true", argv)
         self.assertEqual("repro-daemon-worker.service", argv[-1])
+        # And an explicit policy: without one the analyzer reads the HOST's
+        # systemd-analyze-security.policy whatever the root (HostSecurityPolicyTests).
+        policies = [a for a in argv if a.startswith("--security-policy=")]
+        self.assertEqual(1, len(policies), argv)
 
     def test_conf4_still_refuses_one_tenth_over_the_ceiling(self):
         # 3.1 is what the LXC runners reported while their drop-in was scored
@@ -294,6 +300,84 @@ class HostDropInTests(unittest.TestCase):
         printed = io.StringIO()
         with contextlib.redirect_stdout(printed):
             self.check.check_conf4(UNIT.read_text(encoding="utf-8"))
+        self.assertEqual("2.6", self.exposure(printed.getvalue()))
+
+
+# A host security policy that zeroes the weight of two rows the unit fails.
+# With it the default analysis scores the unit 2.0 instead of 2.6.
+HOST_POLICY = ('{"PrivateNetwork": {"weight": 0}, '
+               '"RestrictAddressFamilies_AF_INET_INET6": {"weight": 0}}')
+
+
+@unittest.skipIf(os.name == "nt" or not sys.platform.startswith("linux"),
+                 "CONF-4 runs systemd-analyze, which exists on Linux only")
+class HostSecurityPolicyTests(unittest.TestCase):
+    """CONF-4 does not take the host's security policy either.
+
+    `--root` does not move the analyzer's default policy lookup: it still
+    reads systemd-analyze-security.policy from the host's /etc/systemd and
+    /run/systemd. The real pinned analyzer and the real unit; the host policy
+    is planted at /run/systemd by running the analyzer in an unprivileged
+    user + mount namespace (`unshare -Urm`) over a private tmpfs, because no
+    environment variable redirects that lookup and the test must not write
+    to the real /run. The wrapper is a launcher, not a fake: it execs the
+    pinned binary unchanged, and the positive control proves the planted
+    policy is read."""
+
+    def setUp(self):
+        pinned = os.environ.get("REPRO_SYSTEMD_ANALYZE")
+        if not pinned:
+            self.skipTest("needs the dev shell's REPRO_SYSTEMD_ANALYZE (flake.nix devShell)")
+        unshare = shutil.which("unshare")
+        if not unshare or subprocess.run([unshare, "-Urm", "true"],
+                                         capture_output=True).returncode != 0:
+            self.skipTest("unprivileged user namespaces (unshare -Urm) are unavailable here")
+        if not os.path.isdir("/run/systemd"):
+            # The launcher mounts its tmpfs over /run/systemd, so it needs the
+            # directory to exist; a host without systemd (a plain container)
+            # has none, and there is also no host policy there to leak.
+            self.skipTest("/run/systemd does not exist here, so there is no mount point "
+                          "for the planted host policy")
+        temporary = tempfile.TemporaryDirectory(prefix="repro-conf4-policy-")
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        policy = self.root / "host.policy"
+        policy.write_text(HOST_POLICY, encoding="utf-8")
+        self.wrapper = self.root / "systemd-analyze-with-host-policy"
+        self.wrapper.write_text(
+            "#!/bin/sh\n"
+            "exec %s -Urm /bin/sh -c 'mount -t tmpfs tmpfs /run/systemd && "
+            "cp \"$0\" /run/systemd/systemd-analyze-security.policy && "
+            "exec \"$@\"' %s %s \"$@\"\n"
+            % (shlex.quote(unshare), shlex.quote(str(policy)), shlex.quote(pinned)),
+            encoding="utf-8")
+        self.wrapper.chmod(0o755)
+        saved = os.environ.get("REPRO_SYSTEMD_ANALYZE")
+        os.environ["REPRO_SYSTEMD_ANALYZE"] = str(self.wrapper)
+        self.addCleanup(os.environ.__setitem__, "REPRO_SYSTEMD_ANALYZE", saved)
+        self.check = load("check_daemon_worker_unit_confinement")
+
+    def exposure(self, output):
+        verdict = self.check.EXPOSURE_LINE.search(output)
+        self.assertIsNotNone(verdict, output)
+        return verdict.group(1) + "." + verdict.group(2)
+
+    def test_the_hosts_security_policy_does_not_enter_the_score(self):
+        text = UNIT.read_text(encoding="utf-8")
+        # Positive control: under a private root but without an explicit
+        # policy, the analyzer reads the planted host policy.
+        units = self.root / "root" / "etc" / "systemd" / "system"
+        units.mkdir(parents=True)
+        (units / "repro-daemon-worker.service").write_text(self.check.render(text),
+                                                           encoding="utf-8")
+        out = subprocess.run([str(self.wrapper), "security", "--offline=true",
+                              "--root=" + str(self.root / "root"),
+                              "repro-daemon-worker.service"],
+                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        self.assertEqual("2.0", self.exposure(out.stdout))
+        printed = io.StringIO()
+        with contextlib.redirect_stdout(printed):
+            self.check.check_conf4(text)
         self.assertEqual("2.6", self.exposure(printed.getvalue()))
 
 

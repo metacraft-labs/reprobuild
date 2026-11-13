@@ -1,7 +1,9 @@
 # Overall exposure ceiling for repro-daemon-worker.service, in tenths:
 # `26` means 2.6. It is the measured value of the unit ALONE, analysed by the
 # pinned systemd-analyze 260.1 under a private `--root` that holds nothing but
-# the rendered unit, so it is the same number on every host. Measured
+# the rendered unit, with an explicit empty `--security-policy` (without one
+# the analyzer reads the host's systemd-analyze-security.policy whatever the
+# root), so it is the same number on every host. Measured
 # 2026-11-12 at reprobuild e995221fb on nixos-ci-bare-002 (bare metal), both
 # as-is and with LXC's drop-in on the analyzer's unit search path.
 #
