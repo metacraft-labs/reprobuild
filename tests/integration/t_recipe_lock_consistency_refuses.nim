@@ -92,6 +92,30 @@ proc checkNoConsistencyFailure(gate: tuple[code: int; output: string;
   check not hasGateFailure(gate.report, H2)
   check gate.code == 0
 
+proc checkNoConsistencyFailureForAliasedLock(gate: tuple[code: int;
+    output: string; report: JsonNode]) =
+  ## ``checkNoConsistencyFailure`` for the H2 case, whose hand-written
+  ## ``repro.lock`` names repositories under ALIASES (``hooks-lib`` for
+  ## ``beta``, ``beta-src`` for ``delta``) to prove H2 compares repositories
+  ## by identity, never by name. No ``repro.nim`` can derive such a lock: a
+  ## ``uses:`` entry is named after the sibling's directory, and the lock
+  ## records only what the recipe derives (owner decision 2026-11-05,
+  ## Unified-Locking-And-Hooks.md §13.5 / §14.9). So the gate also refuses it
+  ## as ``committed_lock_dependency_set_stale`` — correctly, and orthogonally
+  ## to H1 / H2. That refusal, and nothing else, is accepted here.
+  checkpoint("gate output:\n" & gate.output)
+  check not hasGateFailure(gate.report, H1)
+  check not hasGateFailure(gate.report, H2)
+  check hasGateFailure(gate.report, "committed_lock_dependency_set_stale")
+  var others: seq[string]
+  if gate.report.kind == JObject and gate.report.hasKey("failures"):
+    for f in gate.report["failures"]:
+      let property = f{"property"}.getStr()
+      if property != "committed_lock_dependency_set_stale":
+        others.add(property)
+  check others.len == 0
+  check gate.code == 2
+
 suite "HL-11 H1 / H2: the recipe and its locks are consistent":
 
   test "t_h1_flake_rev_pin_disagreeing_with_lock_refuses":
@@ -326,12 +350,20 @@ suite "HL-11 H1 / H2: the recipe and its locks are consistent":
       let deltaSeed = fx.seedSha[3]
       let pinLine = lineNumberOf(readFile(fx.app / "flake.nix"),
         "beta-src.url")
-      proc appLock(hooksLibRev: string): string =
-        reproLockText(fx, "app", headOf(fx, fx.app),
-          [lockDepEntry(fx, "hooks-lib", "../beta", "beta", hooksLibRev),
+      let epsilonSeed = fx.seedSha[4]
+      proc appLock(hooksLibRev: string; epsilonRev = ""): string =
+        var deps = @[lockDepEntry(fx, "hooks-lib", "../beta", "beta", hooksLibRev),
            # Same NAME as the flake input, a DIFFERENT repository: never
            # compared with `beta-src`, although its revision differs.
-           lockDepEntry(fx, "beta-src", "../delta", "delta", deltaSeed)])
+           lockDepEntry(fx, "beta-src", "../delta", "delta", deltaSeed)]
+        # `epsilon` is placed by its own name (`../epsilon`), is no flake
+        # input and is not pinned by revision, so the commit-time re-pin
+        # observes it. Pinned behind its checkout, it gives the re-pin a real
+        # change to make — the change a refused commit must NOT apply.
+        if epsilonRev.len > 0:
+          deps.add(lockDepEntry(fx, "epsilon", "../epsilon", "epsilon",
+            epsilonRev))
+        reproLockText(fx, "app", headOf(fx, fx.app), deps)
 
       # ---- positive control: both locks name the pinned revision. ---------
       writeFile(fx.app / "repro.lock", appLock(betaSeed))
@@ -341,20 +373,29 @@ suite "HL-11 H1 / H2: the recipe and its locks are consistent":
       check ok.code == 0
       check betaSeed != deltaSeed
       check "lock-consistency refused" notin preCommitLog(fx)
-      # The re-pin ran and added the manifest-declared develop-set siblings the
-      # hand-written lock did not carry (`alpha`, `epsilon`): it is the step
-      # the refused commit below must NOT apply.
+      # The commit-time re-pin ran and ADDED nothing: it re-observes the
+      # entries a lock carries and no longer adds siblings a manifest declared
+      # (`alpha`, `epsilon` used to be added here; §13.3 amended 2026-11-05).
+      # Which entries a lock carries is `repro lock refresh`'s to change.
       let committedReproLock = run(q(fx.gitBin) & " -C " & q(fx.app) &
         " show HEAD:repro.lock").output
-      check originUrl(fx, "alpha") in committedReproLock
-      check originUrl(fx, "epsilon") in committedReproLock
+      check originUrl(fx, "alpha") notin committedReproLock
+      check originUrl(fx, "epsilon") notin committedReproLock
+      check originUrl(fx, "beta") in committedReproLock
       publishRepo(fx, fx.app)
-      checkNoConsistencyFailure(gatePrePush(fx))
+      checkNoConsistencyFailureForAliasedLock(gatePrePush(fx))
 
       # ---- `repro.lock` moves to another revision of the same repository.
       let betaNext = moveAndPublishSibling(fx, "beta", "revision 2")
       check betaNext != betaSeed
-      writeFile(fx.app / "repro.lock", appLock(betaNext))
+      # `epsilon` moves too, and the lock still pins its old revision: the
+      # re-pin the hook plans for this commit would advance it, so the file
+      # and the index below prove the refusal applied none of that plan
+      # (the control after the refusal shows the same plan IS applied once
+      # the locks agree).
+      let epsilonNext = moveAndPublishSibling(fx, "epsilon", "revision 2")
+      check epsilonNext != epsilonSeed
+      writeFile(fx.app / "repro.lock", appLock(betaNext, epsilonSeed))
       let reproLockWritten = readFile(fx.app / "repro.lock")
       let headBefore = headOf(fx, fx.app)
       let reproLockBefore = run(q(fx.gitBin) & " -C " & q(fx.app) &
@@ -366,11 +407,13 @@ suite "HL-11 H1 / H2: the recipe and its locks are consistent":
       check c.head == headBefore
       check run(q(fx.gitBin) & " -C " & q(fx.app) &
         " show HEAD:repro.lock").output == reproLockBefore
-      # The refused commit wrote and staged nothing: the re-pin it planned (it
-      # adds the manifest-declared siblings `alpha` and `epsilon`) was not
-      # applied, so the file and the index hold exactly what the case wrote.
+      # The refused commit wrote and staged nothing: the re-pin it planned
+      # (advancing `epsilon` to its new HEAD) was not applied, so the file and
+      # the index hold exactly what the case wrote.
+      check ("revision = \"" & epsilonSeed & "\"") in reproLockWritten
       check readFile(fx.app / "repro.lock") == reproLockWritten
       check stagedText(fx, "repro.lock") == reproLockWritten
+      check epsilonNext notin readFile(fx.app / "repro.lock")
       check ("H2 (the two locks agree): repository ") in c.output
       check (" is resolved by " & fx.app / "repro.lock" & " as 'hooks-lib' " &
         "at " & betaNext & " and by " & fx.app / "flake.lock" &
@@ -396,6 +439,24 @@ suite "HL-11 H1 / H2: the recipe and its locks are consistent":
       check deltaSeed notin c.output
       check "stale" notin c.output.toLowerAscii()
       discard gitIn(fx, fx.app, "reset -q")
+
+      # ---- control: with the locks agreeing, the same re-pin IS applied. --
+      # This is what makes the "staged nothing" assertions above meaningful:
+      # the hook really had an `epsilon` advance to write for that lock.
+      writeFile(fx.app / "repro.lock", appLock(betaSeed, epsilonSeed))
+      let agreed = tryCommitInApp(fx, "the locks agree again")
+      checkpoint(agreed.output)
+      checkpoint("pre-commit log:\n" & preCommitLog(fx))
+      check agreed.code == 0
+      check agreed.head != headBefore
+      let repinned = run(q(fx.gitBin) & " -C " & q(fx.app) &
+        " show HEAD:repro.lock").output
+      check ("revision = \"" & epsilonNext & "\"") in repinned
+      check ("revision = \"" & epsilonSeed & "\"") notin repinned
+      check readFile(fx.app / "repro.lock") == repinned
+
+      # The disagreeing state again, for the bypass case below.
+      writeFile(fx.app / "repro.lock", appLock(betaNext))
 
       # ---- the same state, pushed past the hook, is refused as H2. --------
       commitWithoutHook(fx, "bypass the hook")

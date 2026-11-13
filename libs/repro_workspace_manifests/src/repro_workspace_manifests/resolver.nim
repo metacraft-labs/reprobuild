@@ -222,11 +222,27 @@ type
     copyfile*: seq[CopyLinkFileEntry]
     linkfile*: seq[CopyLinkFileEntry]
     tags*: seq[string]
-    # RA-21 — develop-set dependency edges carried verbatim from the
-    # fragment. Names the other repos this repo depends on; the pre-push
-    # gate uses these to compute the pushed repo's transitive dependency
-    # closure (Workspace-And-Develop-Mode.md §"VCS Hook Integration").
     depends*: seq[string]
+      ## The repos this repo depends on, by name: the non-root VCS entries of
+      ## its committed `repro.lock`, which lock generation derives from its
+      ## `repro.nim` (Unified-Locking-And-Hooks.md §14.2 and §14.9, owner
+      ## decision 2026-11-05). The manifest resolver leaves this EMPTY — a
+      ## fragment declares identity and placement, never dependencies — and
+      ## the CLI fills it from each checkout's lock when it resolves a
+      ## workspace (`withRecipeDerivedEdges` in `repro_cli_support`). Every
+      ## closure question (the pre-push gate's scope, `repro push` ordering,
+      ## the mutual-pin rule, `repro remove`'s reachability) walks these.
+    directDepends*: seq[string]
+      ## The subset of `depends` this repo's own recipe names: the `depends`
+      ## of its committed `repro.lock`'s root entry, which lock generation
+      ## writes as the root's DIRECT dependencies (Unified-Locking-And-Hooks.md
+      ## §14.2). Filled beside `depends` by the CLI. Empty when no lock says;
+      ## a reader that needs direct edges then falls back to `depends`. Only
+      ## `repro develop --direct` / `--indirect` distinguish the two.
+    declaredDepends*: seq[string]
+      ## The fragment's deprecated `[repo] depends` list, verbatim. IGNORED
+      ## as a dependency source; carried only so a caller can say that it is
+      ## (the pre-push gate prints a notice for the pushed repo).
     previously*: seq[ResolvedPreviousIdentity]
       ## Declared-Repository-Renames.md §2 — the identities this repo was
       ## previously declared under, most recent first, resolved from
@@ -677,12 +693,12 @@ proc getFetchUrl*(fetchBase, repoName: string): string =
 # got — see `preserveRepoName` below.
 #
 # `preserveRepoName` is for callers that cannot accept a server-side name:
-# `repro add` records develop-set `depends` edges that key off `[repo].name`,
-# so a fragment whose `name` is not the added repo's own name would leave those
-# edges dangling. Such a caller asks for a plan that keeps the name, which
-# restricts rule 1 to bases that compose to the URL with the requested name
-# unchanged. (`repro workspace repos add` writes no `depends` edges and
-# so takes the unrestricted, convention-matching plan.)
+# `repro add` adds a repo that a `repro.nim` `uses:` selector names by its
+# `[repo].name` (and checks it out at that name), so a fragment whose `name` is
+# not the added repo's own name would leave the selector naming nothing. Such a
+# caller asks for a plan that keeps the name, which restricts rule 1 to bases
+# that compose to the URL with the requested name unchanged. (`repro workspace
+# repos add` takes the unrestricted, convention-matching plan.)
 
 type
   RepoRemotePlan* = object
@@ -1237,8 +1253,11 @@ proc resolveFragment(ctx: FragmentContext; fragmentRel: string;
   result.linkfile = fragment.repo.linkfile
   result.tags = fragment.repo.tags
 
-  # RA-21 — carry the develop-set dependency edges through verbatim.
-  result.depends = fragment.repo.depends
+  # The fragment's `depends` is deprecated and never a dependency source
+  # (owner decision 2026-11-05): it is surfaced for a deprecation notice and
+  # nothing else. `depends` stays empty here; the CLI fills it from the
+  # repo's committed `repro.lock`, which is derived from its `repro.nim`.
+  result.declaredDepends = fragment.repo.depends
 
   # Declared-Repository-Renames.md §2 — resolve each declared prior identity
   # to its EFFECTIVE (name, path, fetchUrl) triple. An omitted field inherits

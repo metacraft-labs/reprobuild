@@ -184,9 +184,12 @@ jobs:
     # was cancelled at 6 h 0 m in its archive smoke after every build step had
     # passed. The release runners are self-hosted, where a job may run for up
     # to five days, so the cap is set here with headroom over the slowest
-    # measured leg. The steps that can wedge keep their own tighter caps
-    # (Windows build 240, each archive verify 60).
-    timeout-minutes: 540
+    # measured leg. v0.2.24 (run 43218423379) ran its Linux leg 9 h 0 m: every
+    # build and verify step passed, then the cap cancelled the artifact upload
+    # at 540 minutes, so the release did not publish. The cap is 900 now. The
+    # steps that can wedge keep their own tighter caps (Windows build 240,
+    # each archive verify 60).
+    timeout-minutes: 900
     env:
       # Per-edge lines instead of a repainting bar, on every leg.
       #

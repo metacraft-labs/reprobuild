@@ -5,14 +5,19 @@
 ## ``unpublished`` and remediation ``run 'git push' in <repo> first``.
 ## The active-branch and dirty checks must have passed before this
 ## stage runs. RA-21: the offending sibling must be in the pushed repo's
-## develop-set dependency closure, so lib-a declares
-## ``depends = ["lib-c"]`` here (a transitive edge would do as well).
+## dependency closure, so lib-a's ``repro.nim`` uses lib-c and its committed
+## ``repro.lock`` pins lib-c's unpublished HEAD (a transitive edge would do
+## as well). The edge used to be a fragment ``depends``, which no longer
+## declares a dependency (owner decision 2026-11-05); pinning the unpublished
+## HEAD — rather than leaving the old pin — keeps the `repro.lock` stage's pin
+## check satisfied, so `unpublished` is still the only refusal.
 ##
 ## Skip rule: ``git`` missing on PATH.
 
 import std/[json, os, osproc, strutils, tempfiles, unittest]
 
 import repro_test_support
+import repro_test_support/[reasoned_skip, recipe_dependencies]
 import repro_workspace_manifests
 
 proc q(value: string): string = quoteShell(value)
@@ -101,7 +106,6 @@ name = "lib-a"
 path = "lib-a"
 remote = "lib-a-origin"
 mainline = "main"
-depends = ["lib-c"]
 """
 
 const libBFragmentToml = """
@@ -174,10 +178,17 @@ proc setupFixture(gitBin, slug: string): M18Fixture =
   writeFile(manifestsRoot / "repos" / "lib-c.toml", libCFragmentToml)
   result.workspaceRoot = workspaceRoot
 
-proc cloneAll(gitBin: string; fx: M18Fixture) =
+proc cloneAll(gitBin: string; fx: var M18Fixture) =
+  ## Clone all three, declare lib-a -> lib-c in the recipes, write lib-a's
+  ## lock from its recipe, and publish everything.
   cloneInto(gitBin, fx.libA.origin, fx.workspaceRoot / "lib-a")
   cloneInto(gitBin, fx.libB.origin, fx.workspaceRoot / "lib-b")
   cloneInto(gitBin, fx.libC.origin, fx.workspaceRoot / "lib-c")
+  for (repo, head) in declareDependenciesInRecipes(gitBin, fx.reproBin,
+      fx.workspaceRoot, [("lib-b", newSeq[string]()),
+                         ("lib-c", newSeq[string]()), ("lib-a", @["lib-c"])]):
+    if repo == "lib-a": fx.libA.sha = head
+    if repo == "lib-c": fx.libC.sha = head
 
 proc seedMetadataBranch(fx: M18Fixture; branch: string) =
   writeWorkspaceBranch(fx.workspaceRoot,
@@ -209,9 +220,9 @@ suite "M18 — repro check --mode=pre-push (unpublished HEAD)":
   test "t_workspace_pre_push_blocks_when_head_unpublished":
     let gitBin = findExe("git")
     if gitBin.len == 0:
-      skip()
+      skip("git is not on PATH")
     else:
-      let fx = setupFixture(gitBin, "head-unpublished")
+      var fx = setupFixture(gitBin, "head-unpublished")
       defer: removeDir(fx.scratch)
       cloneAll(gitBin, fx)
       seedMetadataBranch(fx, "main")
@@ -221,6 +232,17 @@ suite "M18 — repro check --mode=pre-push (unpublished HEAD)":
       let unpushedSha = commitLocalChange(gitBin,
         fx.workspaceRoot / "lib-c", "unpublished commit")
       check unpushedSha != fx.libC.sha
+      # lib-a's lock records the revision it is being pushed against.
+      let libA = fx.workspaceRoot / "lib-a"
+      let refresh = refreshCommittedLock(fx.reproBin, libA)
+      checkpoint(refresh.output)
+      check refresh.code == 0
+      check ("revision = \"" & unpushedSha & "\"") in readFile(libA / "repro.lock")
+      discard requireGit(q(gitBin) & " -C " & q(libA) & " commit -qam repin")
+      # Published, as before this case: lib-a's own HEAD is not the question.
+      discard requireGit(q(gitBin) & " -C " & q(libA) & " push -q origin main")
+      fx.libA.sha = requireGit(q(gitBin) & " -C " & q(libA) &
+        " rev-parse HEAD").strip()
 
       let refsFile = fx.scratch / "pushed-refs.txt"
       writeRefsFile(refsFile, "refs/heads/main", fx.libA.sha)

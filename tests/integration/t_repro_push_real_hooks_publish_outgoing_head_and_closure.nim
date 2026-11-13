@@ -1,6 +1,11 @@
 ## Protocol-v2 end-to-end publication through real installed Git hooks.
 ##
-## Topology is ``app -> lib -> core`` plus unrelated ``other``. Every source
+## Topology is ``app -> lib -> core`` plus unrelated ``other``, declared where
+## reprobuild reads a dependency: each dependent's ``repro.nim`` ``uses:``,
+## recorded by ``repro lock refresh`` in its committed ``repro.lock`` (owner
+## decision 2026-11-05; the fragments used to carry ``depends``). Every
+## dependent's commit re-pins that lock first, as its managed pre-commit hook
+## would (``commit``), so a case's state is one a developer can reach. Every source
 ## and the manifest lock backend is a real worktree with a local bare remote;
 ## generated dispatchers/bodies are installed and the built single `repro`
 ## executable runs every hook process. The cases prove: an exact raw outgoing core
@@ -39,6 +44,7 @@ import repro_cli_support
 import repro_cli_support/push_hook_protocol
 import repro_test_support
 import repro_test_support/reasoned_skip
+import repro_test_support/recipe_dependencies
 import repro_workspace_manifests
 
 const ObsoleteComponentProtocolEnv = "REPRO_TEST_OBSOLETE_COMPONENT_PROTOCOL"
@@ -115,9 +121,20 @@ type
     user: EnvSnapshot
     vcsPrivate: EnvSnapshot
 
-proc commit(fx: Fixture; gitBin, path, label: string): string =
+proc commit(fx: Fixture; gitBin, path, label: string; repin = true): string =
+  ## A commit of ``<label>.txt``. A repo with a committed lock has it
+  ## re-pinned at its dependencies' HEADs first and committed with it, which
+  ## is what its managed pre-commit hook does (the cases install hooks only
+  ## once their commits exist); ``repin = false`` commits the lock as it is.
   writeFile(path / (label & ".txt"), label & "\n")
   discard require(q(gitBin) & " -C " & q(path) & " add " & q(label & ".txt"))
+  if repin and fileExists(path / "repro.lock"):
+    let refreshed = refreshCommittedLock(fx.reproBin, path)
+    if refreshed.code != 0:
+      stderr.writeLine("FIXTURE ABORT: repro lock refresh in " & path &
+        " failed:\n" & refreshed.output)
+      quit 1
+    discard require(q(gitBin) & " -C " & q(path) & " add repro.lock")
   let prior = getEnv("REPROBUILD_REPRO")
   putEnv("REPROBUILD_REPRO", fx.reproBin)
   defer:
@@ -141,16 +158,10 @@ proc projectToml(fx: Fixture): string =
   "includes = [\"repos/app.toml\", \"repos/lib.toml\", " &
     "\"repos/core.toml\", \"repos/other.toml\"]\n"
 
-proc repoToml(name, remote: string; depends: seq[string] = @[]): string =
-  result = "schema = \"reprobuild.workspace.repo.v2\"\n\n[repo]\n" &
+proc repoToml(name, remote: string): string =
+  "schema = \"reprobuild.workspace.repo.v2\"\n\n[repo]\n" &
     "name = \"" & name & "\"\npath = \"" & name & "\"\n" &
     "remote = \"" & remote & "\"\nmainline = \"main\"\n"
-  if depends.len > 0:
-    result.add("depends = [")
-    for i, dep in depends:
-      if i > 0: result.add(", ")
-      result.add("\"" & dep & "\"")
-    result.add("]\n")
 
 proc repoTomlWithLocalRemote(name, projectRemote, localRemote: string): string =
   "schema = \"reprobuild.workspace.repo.v2\"\n\n[repo]\n" &
@@ -177,9 +188,9 @@ proc setup(gitBin, slug: string; customCoreRemote = false): Fixture =
   createDir(result.manifests / "repos")
   writeFile(result.manifests / "projects" / "app.toml", result.projectToml())
   writeFile(result.manifests / "repos" / "app.toml",
-    repoToml("app", "app-origin", @["lib"]))
+    repoToml("app", "app-origin"))
   writeFile(result.manifests / "repos" / "lib.toml",
-    repoToml("lib", "lib-origin", @["core"]))
+    repoToml("lib", "lib-origin"))
   writeFile(result.manifests / "repos" / "core.toml",
     if customCoreRemote:
       repoTomlWithLocalRemote("core", "core-origin", "publish-upstream")
@@ -209,6 +220,11 @@ proc setup(gitBin, slug: string; customCoreRemote = false): Fixture =
   clone(gitBin, result.libBare, result.lib)
   clone(gitBin, result.coreBare, result.core)
   clone(gitBin, result.otherBare, result.other)
+  # THE GRAPH, in the recipes; each dependent's lock is written from them and
+  # everything is published, so a case starts clean.
+  discard declareDependenciesInRecipes(gitBin, result.reproBin,
+    result.workspace, [("core", newSeq[string]()), ("other", newSeq[string]()),
+    ("lib", @["core"]), ("app", @["lib"])])
   if customCoreRemote:
     discard require(q(gitBin) & " -C " & q(result.core) &
       " remote rename origin publish-upstream")
@@ -530,12 +546,33 @@ proc checkSourceCapabilitiesEmpty(fx: Fixture; gitBin: string) =
     let directory = common / "reprobuild" / "hook-capabilities"
     if dirExists(directory): check toSeq(walkDir(directory)).len == 0
 
-proc configureCycle(fx: Fixture; gitBin: string) =
-  writeFile(fx.manifests / "repos" / "core.toml",
-    repoToml("core", "core-origin", @["app"]))
-  discard require(q(gitBin) & " -C " & q(fx.manifests) & " add repos")
-  discard require(q(gitBin) & " -C " & q(fx.manifests) & " commit -m cycle")
-  discard require(q(gitBin) & " -C " & q(fx.manifests) & " push origin main")
+proc configureCycle(fx: Fixture; gitBin: string;
+    coreUses: seq[string] = @["app"]) =
+  ## Close the loop: `core` uses `app` (and ``coreUses``'s other entries). Committed (with the lock it derives)
+  ## and published, the way the edge used to be a published manifest edit.
+  ## `app`'s and `lib`'s locks then lag `core` by this commit, as a mutual pin
+  ## always lags by one; their next commit re-pins it (``commit``).
+  # `app` closes the cycle, so `core` names it as a peer
+  # (``writeDependencyRecipe`` says why).
+  var plain: seq[string]
+  for u in coreUses:
+    if u != "app": plain.add(u)
+  writeDependencyRecipe(fx.core, plain, peers = ["app"])
+  let refreshed = refreshCommittedLock(fx.reproBin, fx.core)
+  if refreshed.code != 0:
+    stderr.writeLine("FIXTURE ABORT: repro lock refresh in core failed:\n" &
+      refreshed.output)
+    quit 1
+  discard require(q(gitBin) & " -C " & q(fx.core) & " add -A")
+  discard require(q(gitBin) & " -C " & q(fx.core) &
+    " -c core.hooksPath=/dev/null commit -q -m " & q("core uses " &
+      coreUses.join(", ")))
+  let remote =
+    if require(q(gitBin) & " -C " & q(fx.core) & " remote").contains(
+        "publish-upstream"): "publish-upstream"
+    else: "origin"
+  discard require(q(gitBin) & " -C " & q(fx.core) & " push " & remote &
+    " HEAD:main")
 
 suite "protocol v2 real-hook repro push closure":
   test "routing config isolation restores exact ambient values after exception":
@@ -756,23 +793,8 @@ suite "protocol v2 real-hook repro push closure":
     # The issue's pushed repository carries an older, published sibling pin.
     # Its source push must retain the existing mutual-pin deferral while the
     # peer's new HEAD is still unpublished; a future HEAD is never pinned here.
-    proc row(name, path, sha, depends, url: string): string =
-      "{ name = \"" & name & "\", path = \"" & path &
-        "\", coord_kind = \"vcs\", url = \"" & url &
-        "\", revision = \"" & sha &
-        "\", integrity = \"git-sha1:" & sha &
-        "\", version = \"\", visibility = \"public\", participation = \"\", " &
-        "depends = \"" & depends & "\", groups = \"\" }"
-    let appBefore = remoteHead(gitBin, fx.appBare)
-    let libBefore = remoteHead(gitBin, fx.libBare)
-    writeFile(fx.app / "repro.lock",
-      "schema = \"reprobuild.solved-graph-lock.v2\"\n[lock]\n" &
-      "platform = \"x86_64-linux\"\noptimal = true\n" &
-      "inputs_digest = \"published-cycle-pin\"\nvariants = []\npackages = []\n" &
-      "deps = [" & row("app", ".", appBefore, "lib", fileUrl(fx.appBare)) &
-      ", " & row("lib", "../lib", libBefore, "core", fileUrl(fx.libBare)) &
-      ", " & row("core", "../core", coreBefore, "app", fileUrl(fx.coreBare)) & "]\n")
-    discard require(q(gitBin) & " -C " & q(fx.app) & " add repro.lock")
+    # app commits first, so its re-pinned lock names lib's and core's
+    # PUBLISHED heads; lib's commit after it is the unpublished peer.
     let appSha = commit(fx, gitBin, fx.app, "pair-app")
     let libSha = commit(fx, gitBin, fx.lib, "pair-lib")
     installHooks(fx)
@@ -857,22 +879,13 @@ suite "protocol v2 real-hook repro push closure":
         remoteHead(gitBin, fx.libBare), remoteHead(gitBin, fx.coreBare)]
       let libSha = commit(fx, gitBin, fx.lib, "pin-cycle-lib")
       let coreSha = commit(fx, gitBin, fx.core, "pin-cycle-core")
-      # app's lock pins lib's new commit; a repro.lock records the whole develop
-      # set, so it pins core's too, and app is then pushed after both.
-      proc vcsPin(name, bare, sha: string): string =
-        "{name = \"" & name & "\", path = \"../" & name & "\", " &
-          "coord_kind = \"vcs\", url = \"" & fileUrl(bare) & "\", " &
-          "revision = \"" & sha & "\", integrity = \"git-sha1:" & sha &
-          "\", version = \"\", visibility = \"public\", participation = \"\", " &
-          "depends = \"\", groups = \"\"}"
-      if kind == "repro":
-        writeFile(fx.app / "repro.lock",
-          "schema = \"reprobuild.solved-graph-lock.v2\"\n[lock]\n" &
-          "platform = \"x86_64-linux\"\noptimal = true\n" &
-          "inputs_digest = \"fixture\"\nvariants = []\npackages = []\n" &
-          "deps = [" & vcsPin("lib", fx.libBare, libSha) & ", " &
-          vcsPin("core", fx.coreBare, coreSha) & "]\n")
-      else:
+      # kind "repro": app's commit re-pins its lock at lib's new commit; a
+      # repro.lock records the whole dependency set, so it pins core's too,
+      # and app is then pushed after both. kind "flake": app's flake.lock
+      # names lib's new commit, and `repro lock update` moves the repro.lock
+      # entry for lib with it (the two locks must agree on lib, H2), while
+      # core keeps the published pin app was committed with.
+      if kind == "flake":
         # The flake that lock belongs to: its input is what binds the pin to
         # lib's checkout (by canonical URL), so the pin is lib's own.
         writeFile(fx.app / "flake.nix", "{\n  inputs.lib = {\n    url = \"git+" &
@@ -884,10 +897,14 @@ suite "protocol v2 real-hook repro push closure":
             "root": {"inputs": {"lib": "lib"}},
             "lib": {"locked": {"type": "git", "url": fileUrl(fx.libBare),
               "rev": libSha}, "original": {"type": "git", "url": fileUrl(fx.libBare)}}}}))
+        discard require(q(gitBin) & " -C " & q(fx.app) & " add flake.lock")
+        discard require(q(fx.reproBin) & " lock update lib --to " & libSha &
+          " --repo-root=" & q(fx.app))
+        discard require(q(gitBin) & " -C " & q(fx.app) & " add repro.lock")
       let order =
         if kind == "repro": %*["lib", "core", "app"] else: %*["lib", "app", "core"]
-      discard require(q(gitBin) & " -C " & q(fx.app) & " add " & kind & ".lock")
-      let appSha = commit(fx, gitBin, fx.app, "pin-cycle-app")
+      let appSha = commit(fx, gitBin, fx.app, "pin-cycle-app",
+        repin = kind == "repro")
       installHooks(fx)
       # The pinned peer's receive fails. The pinning member comes after it, so
       # nothing publishes it while its pin names a commit no remote has.
@@ -988,15 +1005,14 @@ suite "protocol v2 real-hook repro push closure":
     check gitBin.len > 0
     let fx = setup(gitBin, "cycle-external-dependency")
     defer: removeDir(fx.scratch)
-    writeFile(fx.manifests / "repos" / "core.toml",
-      repoToml("core", "core-origin", @["app", "other"]))
-    discard require(q(gitBin) & " -C " & q(fx.manifests) & " add repos")
-    discard require(q(gitBin) & " -C " & q(fx.manifests) & " commit -m cycle")
-    discard require(q(gitBin) & " -C " & q(fx.manifests) & " push origin main")
+    configureCycle(fx, gitBin, @["app", "other"])
+    # `other` commits before `core`, whose commit re-pins it: `other` is no
+    # member of the cycle, so a lagging pin of it would be refused, not
+    # deferred.
+    let otherSha = commit(fx, gitBin, fx.other, "external-cycle-other")
     let appSha = commit(fx, gitBin, fx.app, "external-cycle-app")
     let libSha = commit(fx, gitBin, fx.lib, "external-cycle-lib")
     let coreSha = commit(fx, gitBin, fx.core, "external-cycle-core")
-    let otherSha = commit(fx, gitBin, fx.other, "external-cycle-other")
     installHooks(fx)
     let pushed = invokePush(fx)
     if pushed.code != 0: checkpoint(pushed.output)

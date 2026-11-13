@@ -25,6 +25,7 @@ import std/[algorithm, json, os, osproc, streams, strtabs, strutils, tempfiles,
 import git_actions
 import git_tool
 import repro_test_support
+import repro_test_support/recipe_dependencies
 import repro_workspace_manifests
 
 type
@@ -127,7 +128,6 @@ name = "app"
 path = "app"
 remote = "app-origin"
 mainline = "main"
-depends = ["dep"]
 """
   DepToml = """
 schema = "reprobuild.workspace.repo.v2"
@@ -186,6 +186,13 @@ proc setup(gitBin: string): Fixture =
   cloneRepo(gitBin, result.depOrigin, result.dep)
   createDir(result.unrelated.parentDir())
   cloneRepo(gitBin, result.unrelatedOrigin, result.unrelated)
+  # app depends on dep where reprobuild reads a dependency: app's repro.nim,
+  # and the committed lock derived from it (owner decision 2026-11-05; this
+  # was a fragment `depends`). Both are published.
+  for (repo, head) in declareDependenciesInRecipes(gitBin, result.reproBin,
+      result.workspace, [("dep", newSeq[string]()), ("app", @["dep"])]):
+    if repo == "app": result.appSha = head
+    if repo == "dep": result.depSha = head
 
   createDir(result.workspace / "projects")
   createDir(result.workspace / "repos")
@@ -667,8 +674,14 @@ suite "linked-worktree pre-push repository-local environment isolation":
         " commit -m 'advance ambient repo after lock'")
 
       writeFile(fx.linked / "multi-project-head.txt", "outgoing head\n")
+      # app's committed lock pins dep, and the outgoing commit carries it
+      # re-pinned at dep's new HEAD, as app's managed pre-commit hook would
+      # leave it: the case is about the two blockers above, not a stale pin.
+      let repinned = refreshCommittedLock(fx.reproBin, fx.linked)
+      if repinned.code != 0: checkpoint(repinned.output)
+      check repinned.code == 0
       discard require(q(gitBin) & " -C " & q(fx.linked) &
-        " add multi-project-head.txt")
+        " add multi-project-head.txt repro.lock")
       discard require(q(gitBin) & " -C " & q(fx.linked) &
         " commit -m 'multi-project outgoing head'")
       let linkedSha = require(q(gitBin) & " -C " & q(fx.linked) &

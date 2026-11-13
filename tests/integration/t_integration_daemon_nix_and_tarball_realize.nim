@@ -219,6 +219,46 @@ proc extractPathTarballUse(url, sha256: string): InterfaceToolUse =
   result.tarballProvisioning[0].stripComponents = 0
   result.tarballProvisioning[0].detail.extractPath = "m67tarball-1.0.0"
 
+const
+  ## The closure fixture: a directory beside the archive standing in for the
+  ## one that holds the declaring ``repro.nim``, the manifest it declares by
+  ## a RELATIVE path, and the one archive that manifest names.
+  ClosureDeclDir = "decl"
+  ClosureManifestName = "closure.manifest"
+  ClosureEntryDir = "lib"
+  ClosureEntryFile = "dep.txt"
+
+proc fixtureRootOf(url: string): string =
+  ## The temp root ``buildTarballFixture`` wrote the archive into, recovered
+  ## from its ``file://`` URL so a client worker needs no extra argument.
+  parentDir(url.substr("file://".len))
+
+proc closureTarballUse(url, sha256: string): InterfaceToolUse =
+  ## The fixture archive with a closure, declared by a record whose
+  ## ``closureManifest`` is relative to the file that declared it. Neither
+  ## the client's nor the daemon's working directory is that file's
+  ## directory, so only a manifest resolved against the declaring file is
+  ## found.
+  result = tarballUse(url, sha256)
+  result.tarballProvisioning[0].closureManifest = ClosureManifestName
+  result.tarballProvisioning[0].location = SourceLocation(
+    file: fixtureRootOf(url) / ClosureDeclDir / "repro.nim", line: 2)
+
+proc buildClosureFixture(root: string) =
+  ## Write the closure archive and the manifest naming it, next to the
+  ## declaring file ``closureTarballUse`` reports.
+  let payload = root / "closure-payload" / "dep"
+  createDir(payload)
+  writeFile(payload / ClosureEntryFile, "closure entry\n")
+  let archive = root / "dep.tar.gz"
+  let tar = execCmdEx(shellCommand([findExe("tar"), "-czf", archive, "-C",
+    root / "closure-payload", "dep"]))
+  doAssert tar.exitCode == 0, "tar failed: " & tar.output
+  createDir(root / ClosureDeclDir)
+  writeFile(root / ClosureDeclDir / ClosureManifestName,
+    ClosureEntryDir & " " & fileSha256Hex(archive) & " file://" & archive &
+    " tar.gz 1\n")
+
 proc nixUse(): InterfaceToolUse =
   result = InterfaceToolUse(
     rawConstraint: "m67-nix",
@@ -234,7 +274,8 @@ proc nixUse(): InterfaceToolUse =
     location: SourceLocation(file: "fixture", line: 2))]
 
 proc runClientWorker(args: seq[string]): int =
-  ## --client <tarball|tarball-ranged|tarball-sha512|tarball-extract-path|nix>
+  ## --client <tarball|tarball-ranged|tarball-sha512|tarball-extract-path|
+  ##           tarball-closure|nix>
   ##          <endpoint> <storeRoot> <holder> <rootId> <statusFile> <barrier>
   ##          [tarballUrl tarballDigest]
   ##
@@ -269,6 +310,11 @@ proc runClientWorker(args: seq[string]): int =
     elif mode == "tarball-extract-path":
       doAssert args.len >= 10
       let req = requestFromTarballUse(extractPathTarballUse(args[8], args[9]),
+        storeRoot, holder, rootId)
+      realizeTarballViaDaemon(req, endpoint)
+    elif mode == "tarball-closure":
+      doAssert args.len >= 10
+      let req = requestFromTarballUse(closureTarballUse(args[8], args[9]),
         storeRoot, holder, rootId)
       realizeTarballViaDaemon(req, endpoint)
     elif mode == "nix":
@@ -337,11 +383,13 @@ proc verifyPairResult(pair: tuple[a, b: JsonNode]; adapter, storeRoot: string) =
     else:
       check identity.profiles[0].selectedStorePath == item["path"].getStr()
 
-proc startDaemon(endpoint, storeRoot, runtimeRoot: string): Process =
+proc startDaemon(endpoint, storeRoot, runtimeRoot: string;
+                 workingDir = ""): Process =
   ## Spawn ``repro store serve --dev`` and wait until it answers for
   ## ``storeRoot``. A daemon that exits during start-up is reported with its
   ## output, so the failure names the cause rather than a status timeout.
-  result = startProcess(publicReproBin(),
+  ## ``workingDir`` empty runs it in this process's working directory.
+  result = startProcess(publicReproBin(), workingDir = workingDir,
     args = @["store", "serve", "--dev", "--store-root", storeRoot,
       "--endpoint", endpoint],
     env = makeEnv(endpoint, runtimeRoot),
@@ -360,13 +408,20 @@ proc startDaemon(endpoint, storeRoot, runtimeRoot: string): Process =
   check status.daemonProfile == StoreDaemonProfileDev
 
 proc checkDaemonRealizesLikeInProcess(mode, prefixName, digest: string;
-    inProcessUse: proc (url, digest: string): InterfaceToolUse) =
+    inProcessUse: proc (url, digest: string): InterfaceToolUse;
+    prepare: proc (root: string) = nil; expectedFiles: seq[string] = @[]) =
   ## Realize one fixture record through the daemon (two concurrent holders,
   ## as every case here does) and in-process into a second store, and
   ## require the same prefix from both: the same store-relative path, the
   ## same realization hash, the executable at the declared path. The daemon
   ## rebuilds the record from the request, so any part of the record the
   ## request drops shows up here as a refusal or as a different prefix.
+  ##
+  ## The daemon runs in a directory of its own, so a path the request leaves
+  ## relative is not found by accident in the test's working directory.
+  ## ``prepare`` writes any further fixture files into the temp root before
+  ## either realize, and every prefix-relative path in ``expectedFiles`` must
+  ## exist in both prefixes.
   let root = createTempDir("repro-m67-daemon-" & prefixName & "-", "")
   defer:
     try: removeDir(root) except OSError: discard
@@ -376,10 +431,14 @@ proc checkDaemonRealizesLikeInProcess(mode, prefixName, digest: string;
   let storeRoot = root / "store"
   defer: stopIfRunning(endpoint)
 
-  let daemon = startDaemon(endpoint, storeRoot, runtimeRoot)
+  let daemonCwd = root / "daemon-cwd"
+  createDir(daemonCwd)
+  let daemon = startDaemon(endpoint, storeRoot, runtimeRoot, daemonCwd)
   defer: daemon.close()
 
   let fixture = buildTarballFixture(root)
+  if prepare != nil:
+    prepare(root)
   let fixtureDigest = if digest == "sha512": fixture.sha512 else: fixture.sha256
   let pair = runPair(mode, endpoint, storeRoot, root,
     @[fixture.url, fixtureDigest])
@@ -397,6 +456,9 @@ proc checkDaemonRealizesLikeInProcess(mode, prefixName, digest: string;
   let executable =
     when defined(windows): "bin" / "m67tarball.cmd" else: "bin" / "m67tarball"
   check fileExists(daemonPrefix / executable)
+  for path in expectedFiles:
+    check fileExists(daemonPrefix / path)
+    check fileExists(direct.selectedStorePath / path)
 
 suite "M67 daemon-mediated Nix and tarball realization":
   test "integration_daemon_nix_and_tarball_realize":
@@ -500,3 +562,16 @@ suite "M67 daemon-mediated Nix and tarball realization":
     else:
       checkDaemonRealizesLikeInProcess("tarball-extract-path", "extract",
         "sha256", extractPathTarballUse)
+
+  test "integration_daemon_tarball_realize_relative_closure_manifest":
+    # A record whose ``closureManifest`` is relative to the file that
+    # declared it. In-process the manifest resolves next to that file; the
+    # daemon, running in another directory, must open the same manifest and
+    # lay the same closure into the same prefix, rather than look for the
+    # relative path under its own working directory.
+    when not defined(posix):
+      echo "[platform N/A] dev store-daemon IPC is POSIX-only in M66/M67."
+    else:
+      checkDaemonRealizesLikeInProcess("tarball-closure", "closure",
+        "sha256", closureTarballUse, buildClosureFixture,
+        @[ClosureEntryDir / ClosureEntryFile])

@@ -23,8 +23,14 @@
 ##      HEAD with matching `git-sha1:` integrity; lib-c keeps its pin; the
 ##      `packages` line (the solve) is byte-identical; nothing is left
 ##      unstaged.
-##   3. The manifest gains the edge app → lib-d → the next commit adds a
-##      `../lib-d` entry and the root `depends` names it.
+##   3. The re-pin ADDS nothing: neither a legacy manifest edge app → lib-d
+##      (fragment `depends`) nor a recipe that now `uses: "lib-d"` makes the
+##      next commit carry a lib-d entry. Which entries a lock carries is the
+##      recipe's question, answered by `repro lock refresh`; the pre-push gate
+##      refuses a lock whose set has drifted from it. This case used to assert
+##      that the manifest edge was added; that edge no longer declares a
+##      dependency (owner decision 2026-11-05), and the replacement asserts the
+##      opposite for both sources.
 ##   4. A dirty sibling does not refuse the commit; the hook pins its HEAD and
 ##      names it as not describing the working tree.
 ##
@@ -97,15 +103,26 @@ suite "pre-commit re-pins the committed lock's siblings":
       check linePrefixed(committed, "packages = ") == packagesBefore
       check fx.git(fx.app, "status --porcelain").strip().len == 0
 
-      # 3. a newly declared develop-set sibling is added.
-      fx.setAppDepends(@["lib-b", "lib-d"])
-      let c3 = fx.commitInApp("after-edge")
+      # 3. the re-pin adds no entry, whatever declares one. lib-b moves
+      # before each commit, so each commit's lock proves the hook RAN (it
+      # re-pinned lib-b) while it still added no lib-d.
+      writeFile(fx.ws / "repos" / "app.toml",
+        readFile(fx.ws / "repos" / "app.toml") & "depends = [\"lib-d\"]\n")
+      let libBAtEdge = fx.advance("lib-b")
+      let c3 = fx.commitInApp("after-manifest-edge")
       checkpoint(c3.output)
       check c3.code == 0
-      let withD = fx.git(fx.app, "show HEAD:repro.lock")
-      let libD = depEntry(withD, "lib-d")
-      check ("revision = \"" & fx.headOf(fx.ws / "lib-d") & "\"") in libD
-      check "lib-d" in depEntry(withD, ".")
+      let afterEdge = fx.git(fx.app, "show HEAD:repro.lock")
+      check ("revision = \"" & libBAtEdge & "\"") in depEntry(afterEdge, "lib-b")
+      check depEntry(afterEdge, "lib-d") == ""
+      check "lib-d" notin depEntry(afterEdge, ".")
+      let libBAtUses = fx.advance("lib-b")
+      fx.setAppUses(@["lib-b", "lib-d"])  # commits the recipe: the hook runs
+      let afterUses = fx.git(fx.app, "show HEAD:repro.lock")
+      check ("revision = \"" & libBAtUses & "\"") in depEntry(afterUses, "lib-b")
+      check depEntry(afterUses, "lib-d") == ""
+      check "lib-d" notin depEntry(afterUses, ".")
+      check fx.git(fx.app, "status --porcelain").strip().len == 0
 
       # 4. a dirty sibling is recorded at HEAD and named, never refused.
       writeFile(fx.ws / "lib-c" / "scratch.txt", "uncommitted\n")

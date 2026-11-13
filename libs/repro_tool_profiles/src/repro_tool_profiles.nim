@@ -4025,6 +4025,21 @@ proc closureManifestPath(plan: TarballAcquisitionPlan): string =
     return plan.declaredClosureManifest
   plan.closureManifestRoot / plan.declaredClosureManifest
 
+proc resolvedClosureManifest*(plan: TarballAcquisitionPlan): string =
+  ## The closure manifest the in-process realize of ``plan`` would open, as
+  ## an absolute path; empty when the record declares none.
+  ##
+  ## For a caller that hands the plan to another process — the store daemon
+  ## client — whose working directory, and whose idea of the declaring file,
+  ## differ from this one's. A relative manifest resolves against the
+  ## declaring file's directory, and failing that against THIS process's
+  ## working directory, exactly as ``closureManifestPath`` is opened here.
+  ## The cache key is the manifest's content, not its path, so sending the
+  ## absolute path does not move the prefix.
+  let path = closureManifestPath(plan)
+  if path.len == 0 or path.isAbsolute: path
+  else: absolutePath(path)
+
 proc normalizedClosureDestination(path: string): string =
   ## The destination with ``\`` read as ``/`` and empty and ``.`` components
   ## dropped -- what two lines must not share, because the second would

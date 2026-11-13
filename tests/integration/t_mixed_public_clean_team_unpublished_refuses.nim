@@ -8,8 +8,11 @@
 ##
 ## Fixture (built ``./build/bin/repro``, black-box): a ``.repo/manifests``
 ## workspace with two cloned repos —
-##   - ``pub``  → PUBLIC, clean + published, the pushed/current repo; it
-##     ``depends = ["core"]`` so ``core`` is in its dependency closure;
+##   - ``pub``  → PUBLIC, clean + published, the pushed/current repo; its
+##     ``repro.nim`` uses ``core`` and its committed ``repro.lock`` (refreshed
+##     from that recipe) pins ``core``'s HEAD, so ``core`` is in its dependency
+##     closure (owner decision 2026-11-05: dependencies are declared only in
+##     ``repro.nim``; this was a fragment ``depends = ["core"]``);
 ##   - ``core`` → TEAM, routed (by NAME) to a separate git-checkout backend, but
 ##     with a LOCAL commit that was never pushed to its origin (HEAD unpublished).
 ##
@@ -19,7 +22,7 @@
 ##      the public sibling is clean/published and does NOT fail.
 ##
 ## Falsifiability: the refusal depends on ``core`` being IN SCOPE (``pub``'s
-## dependency closure). Dropping the ``depends = ["core"]`` edge narrows the
+## dependency closure). Dropping ``uses: "core"`` from ``pub``'s recipe narrows the
 ## closure to ``{pub}`` alone, so the unpublished team HEAD is no longer checked
 ## and the gate PASSES (exit 0) — assertion (1) trips. (Confirmed below by a
 ## second run with the edge removed: the gate passes.) This proves the corner
@@ -31,6 +34,7 @@
 
 import std/[json, os, osproc, strutils, tempfiles, unittest]
 from repro_test_support import fileUrl
+import repro_test_support/[reasoned_skip, recipe_dependencies]
 
 import repro_workspace_manifests
 
@@ -113,16 +117,13 @@ proc projectToml(pubUrl, coreUrl: string): string =
   "[[remote]]\nname = \"core-origin\"\nfetch = \"" & coreUrl & "\"\n\n" &
   "includes = [\n  \"repos/pub.toml\",\n  \"repos/core.toml\",\n]\n"
 
-proc pubFragment(withDepends: bool): string =
-  result =
-    "schema = \"reprobuild.workspace.repo.v2\"\n\n" &
-    "[repo]\n" &
-    "name = \"pub\"\n" &
-    "path = \"pub\"\n" &
-    "remote = \"pub-origin\"\n" &
-    "mainline = \"main\"\n"
-  if withDepends:
-    result.add("depends = [\"core\"]\n")
+proc pubFragment(): string =
+  "schema = \"reprobuild.workspace.repo.v2\"\n\n" &
+  "[repo]\n" &
+  "name = \"pub\"\n" &
+  "path = \"pub\"\n" &
+  "remote = \"pub-origin\"\n" &
+  "mainline = \"main\"\n"
 
 proc coreFragment(): string =
   "schema = \"reprobuild.workspace.repo.v2\"\n\n" &
@@ -149,7 +150,7 @@ proc buildWorkspace(gitBin, scratch: string; withDepends: bool):
   createDir(manifestsRoot / "repos")
   writeFile(manifestsRoot / "projects" / "mix.toml",
     projectToml(fileUrl(pubOrigin), fileUrl(coreOrigin)))
-  writeFile(manifestsRoot / "repos" / "pub.toml", pubFragment(withDepends))
+  writeFile(manifestsRoot / "repos" / "pub.toml", pubFragment())
   writeFile(manifestsRoot / "repos" / "core.toml", coreFragment())
 
   cloneInto(gitBin, pubOrigin, ws / "pub")
@@ -168,16 +169,38 @@ proc buildWorkspace(gitBin, scratch: string; withDepends: bool):
     "route = [{ visibility = \"team\", backend = \"git-checkout\", " &
     "path = \"manifests-team\", repos = [\"core\"] }]\n")
 
-  # ``core`` gains a LOCAL commit never pushed — its HEAD is unpublished.
+  # ``core`` gains LOCAL commits never pushed — its recipe, then a change —
+  # so its HEAD is unpublished.
+  writeDependencyRecipe(ws / "core", [])
+  discard requireGit(q(gitBin) & " -C " & q(ws / "core") & " add -A")
+  discard requireGit(q(gitBin) & " -C " & q(ws / "core") &
+    " -c user.email=tester@example.invalid -c user.name=Tester commit -qm recipe")
   let unpubSha = commitLocalUnpublished(gitBin, ws / "core")
-  (ws: ws, pubSha: pubSha, unpubSha: unpubSha)
+  # ``pub`` declares (or not) its dependency on ``core`` in its recipe, and
+  # with it the lock that records ``core``'s HEAD; ``pub`` is published, so
+  # its own HEAD is not what the gate refuses.
+  let pub = ws / "pub"
+  writeDependencyRecipe(pub, (if withDepends: @["core"] else: newSeq[string]()),
+    library = false)
+  if withDepends:
+    let refresh = refreshCommittedLock(reproBinary, pub)
+    if refresh.code != 0:
+      checkpoint("lock refresh failed:\n" & refresh.output)
+      quit 1
+  discard requireGit(q(gitBin) & " -C " & q(pub) & " add -A")
+  discard requireGit(q(gitBin) & " -C " & q(pub) &
+    " -c user.email=tester@example.invalid -c user.name=Tester commit -qm deps")
+  discard requireGit(q(gitBin) & " -C " & q(pub) & " push -q origin HEAD:main")
+  let pubHead = requireGit(q(gitBin) & " -C " & q(pub) & " rev-parse HEAD").strip()
+  discard pubSha
+  (ws: ws, pubSha: pubHead, unpubSha: unpubSha)
 
 suite "HL-7 — mixed public-clean + team-unpublished refuses":
 
   test "t_mixed_public_clean_team_unpublished_refuses":
     let gitBin = findExe("git")
     if gitBin.len == 0 or not fileExists(reproBinary):
-      skip()
+      skip("git is not on PATH, or build/bin/repro is not built")
     else:
       let scratch = createTempDir("hl7-pub-team-unpub-", "")
       defer: removeDir(scratch)

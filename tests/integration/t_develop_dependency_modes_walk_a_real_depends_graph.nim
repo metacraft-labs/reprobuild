@@ -14,13 +14,12 @@
 ## for the first time in this change) was never exercised against a single real
 ## edge.
 ##
-## The edges are constructible and always were: `repos/<repo>.toml` carries a
-## documented `depends` array (Workspace-Manifests.md §"`repos/<repo>.toml`"),
-## the resolver copies it into `ResolvedRepo.depends`, and
+## The edges are constructible: each repo's committed `repro.lock` records
+## the repos it depends on, the workspace resolution copies those into
+## `ResolvedRepo.depends` (`withRecipeDerivedEdges`), and
 ## `lockedDepFromStoreRepo` copies THAT into `LockedDep.depends` — which is the
-## field `dasmDirect`, `dasmIndirect` and `dasmTransitiveOf` read. A
-## manifest-backed lock set therefore carries dependency edges whenever the
-## fragments declare them.
+## field `dasmDirect`, `dasmIndirect` and `dasmTransitiveOf` read. (They used
+## to come from fragment `depends`, which declares nothing since 2026-11-05.)
 ##
 ## Fixture (built ``./build/bin/repro``, black-box, fully offline):
 ##
@@ -31,9 +30,9 @@
 ##                                  edges: `isRootLockedDep` is what
 ##                                  `--direct` reads them from)
 ##       .repro/manifests/        — the TEAM backend (a git checkout)
-##         repos/ws-root.toml     — depends = ["lib-a", "lib-b"]
-##         repos/lib-a.toml       — depends = ["lib-c"]
-##         repos/lib-{b,c,d}.toml — no depends
+##         repos/*.toml           — membership only
+##       repro.lock               — ws-root's lock edges: lib-a, lib-b
+##       lib-a/repro.lock         — lib-a's lock edge: lib-c
 ##         locks/mix/ws-root/<sha>.toml — pins all five
 ##       .git/repro/config.toml   — layer 5: team -> git-checkout
 ##
@@ -70,6 +69,7 @@
 
 import std/[algorithm, os, osproc, strutils, tempfiles, unittest]
 from repro_test_support import fileUrl
+import repro_test_support/recipe_dependencies
 
 const ReprobuildRepoRoot = currentSourcePath().parentDir().parentDir().parentDir()
   ## The reprobuild checkout root, resolved from THIS SOURCE FILE's path
@@ -192,11 +192,11 @@ suite "DS-7: the dependency-edge modes over a real `depends` graph":
         "  \"repos/lib-a.toml\",\n  \"repos/lib-b.toml\",\n" &
         "  \"repos/lib-c.toml\",\n  \"repos/lib-d.toml\",\n]\n")
 
-      # THE GRAPH. Only a repo at path "." can carry the root's direct edges.
+      # Membership only. THE GRAPH is in the locks, below.
       writeFile(manifestsRoot / "repos" / "ws-root.toml",
-        repoFragment("ws-root", ".", "root-origin", @["lib-a", "lib-b"]))
+        repoFragment("ws-root", ".", "root-origin", @[]))
       writeFile(manifestsRoot / "repos" / "lib-a.toml",
-        repoFragment("lib-a", "lib-a", "lib-a-origin", @["lib-c"]))
+        repoFragment("lib-a", "lib-a", "lib-a-origin", @[]))
       for name in ["lib-b", "lib-c", "lib-d"]:
         writeFile(manifestsRoot / "repos" / (name & ".toml"),
           repoFragment(name, name, name & "-origin", @[]))
@@ -231,13 +231,34 @@ suite "DS-7: the dependency-edge modes over a real `depends` graph":
         "path = \".repro/manifests\", repos = [\"ws-root\", \"lib-a\", " &
         "\"lib-b\", \"lib-c\", \"lib-d\"] }]\n")
 
+      # THE GRAPH, recorded where every dependency edge is read from since
+      # 2026-11-05 (owner decision: dependencies are declared only in
+      # repro.nim, and each repo's committed repro.lock records them; this
+      # graph used to be fragment `depends`). Only a repo at path "." can
+      # carry the root's direct edges. The locks are written directly
+      # (``writeLockEdges``) because `repro develop` reads only their edges.
+      # Written once the root's own commit is known (below), at the revisions
+      # the commit-keyed record pins, so the two backends agree on every repo.
       writeFile(ws / ".gitignore",
-        ".repro/\nlib-a/\nlib-b/\nlib-c/\nlib-d/\n")
+        ".repro/\nrepro.lock\nlib-a/\nlib-b/\nlib-c/\nlib-d/\n")
       discard requireGit(q(gitBin) & " -C " & q(ws) & " add -A")
       discard requireGit(q(gitBin) & " -C " & q(ws) & " commit -m c1")
       let rootSha = requireGit(q(gitBin) & " -C " & q(ws) &
         " rev-parse HEAD").strip()
       check rootSha.len == 40
+      # In the shape `repro lock refresh` writes: the entries are the whole
+      # transitive set (lib-c too, which ws-root reaches only through lib-a),
+      # the root entry's `depends` names the DIRECT dependencies, and lib-a's
+      # entry names its own. `--direct` must therefore not answer "every
+      # entry" — the answer it gave when the root edges were the lock's whole
+      # entry set.
+      writeLockEdges(ws, "ws-root", rootSha,
+        [(name: "lib-a", revision: shas[0]), (name: "lib-b", revision: shas[1]),
+         (name: "lib-c", revision: shas[2])],
+        pinDepends = [(name: "lib-a", depends: "lib-c")],
+        rootDepends = ["lib-a", "lib-b"])
+      writeLockEdges(ws / "lib-a", "lib-a", shas[0],
+        [(name: "lib-c", revision: shas[2])])
 
       # The commit-keyed record, pinning every repo in the graph.
       var record = "schema = \"reprobuild.workspace.lock.v1\"\n\n" &
