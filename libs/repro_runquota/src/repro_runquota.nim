@@ -1553,7 +1553,9 @@ proc runWithRunQuota*(request: ReproResourceRequest;
       lease.finish(
         outcome = outcome,
         peakMemoryBytes = completion.peakResidentMemoryBytes,
-        processCount = completion.processCount)
+        processCount = completion.processCount,
+        totals = completion.totals,
+        cpuProfile = completion.cpuProfile)
       result = ReproRunQuotaExecution(
         leaseId: lease.id.value,
         exitCode: completion.exitCode,
@@ -2438,7 +2440,9 @@ proc finishCompleted*(running: var ReproRunQuotaRunningProcess):
       running.lease.finish(
         outcome = outcome,
         peakMemoryBytes = completion.peakResidentMemoryBytes,
-        processCount = completion.processCount)
+        processCount = completion.processCount,
+        totals = completion.totals,
+        cpuProfile = completion.cpuProfile)
       leaseFinishedSent = true
     finally:
       if running.lease.active:
@@ -2472,7 +2476,9 @@ proc cancelAndWait*(running: var ReproRunQuotaRunningProcess):
       running.lease.finish(
         outcome = outcome,
         peakMemoryBytes = completion.peakResidentMemoryBytes,
-        processCount = completion.processCount)
+        processCount = completion.processCount,
+        totals = completion.totals,
+        cpuProfile = completion.cpuProfile)
       leaseFinishedSent = true
     finally:
       if running.lease.active:

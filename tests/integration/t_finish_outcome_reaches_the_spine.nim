@@ -55,12 +55,34 @@
 ## instead would assert the mapping and prove nothing about whether any real
 ## execution can reach it.
 
-import std/[os, osproc, streams, strutils, tables, times, unittest]
+import std/[json, os, osproc, streams, strutils, tables, times, unittest]
 
 import repro_runquota
 import repro_runquota/stats_query
+import runquota_client
+import runquota_protocol
 
 import repro_test_support
+
+when defined(posix):
+  import std/posix
+
+  # THE CPU FIXTURE FOR THE TOTALS ARM: this binary, re-executed as
+  # `--burn SECONDS`, spins until it has used SECONDS of CPU by its own
+  # clock and exits. Bounded by CPU time, not wall time, so a loaded host
+  # stretches it rather than shrinking what it burns.
+  if paramCount() >= 2 and paramStr(1) == "--burn":
+    let target = int64(parseFloat(paramStr(2)) * 1e9)
+    proc cpuNanos(): int64 =
+      var ts: Timespec
+      discard clock_gettime(CLOCK_PROCESS_CPUTIME_ID, ts)
+      int64(ts.tv_sec) * 1_000_000_000'i64 + int64(ts.tv_nsec)
+    let start = cpuNanos()
+    var x = 0'u64
+    while cpuNanos() - start < target:
+      for i in 0 ..< 100_000:
+        x = x * 6364136223846793005'u64 + 1442695040888963407'u64
+    quit(int(x and 0'u64))
 
 proc repoRoot(): string = getCurrentDir()
 
@@ -284,3 +306,63 @@ suite "a finish outcome reaches the spine as the word it deserves":
       check view.loss.known
       check view.loss.contradictoryExecutions == 0
       check view.sampleCount == 3
+
+    test "a finish carries the CPU of grandchildren its root waited for":
+      # THE TOTALS ARM. The leased child is a shell that starts three
+      # burners of one CPU-second each and waits for them, so the CPU is
+      # spent by the launcher's GRANDCHILDREN. `repro_runquota` must pass
+      # the totals of its wait for the shell (`wait4` rusage, which
+      # includes the waited-for burners) with the finish, and the row must
+      # carry at least 3 s. Falsifying mutation: drop `totals =` from the
+      # `lease.finish` calls in `repro_runquota` and the row's CPU columns
+      # are NULL; report the shell's own usage only and they read ~0 s.
+      let root = getTempDir() / ("rq-ft-" & $getCurrentProcessId())
+      removeDir(root)
+      createDir(root)
+      let previousSocket = getEnv("RUNQUOTA_SOCKET", "")
+      var daemon = startSpineDaemon(root)
+      defer:
+        daemon.stop()
+        putEnv("RUNQUOTA_SOCKET", previousSocket)
+        removeDir(root)
+
+      var session = openRunQuotaSession("finish-totals-spine", "0.1.0")
+      let burner = quoteShell(getAppFilename()) & " --burn 1"
+      var running = session.startWithRunQuota(leasedRequest("spine_totals"),
+        shellCommand(burner & " & " & burner & " & " & burner & " & wait"))
+      let execution = running.finishCompleted()
+      check execution.exited
+      check execution.exitCode == 0
+      check execution.leaseFinishedSent
+      session.close()
+
+      # THE ROW, through the daemon (the only reader of the store): the
+      # export subject returns every spine column of the key's executions.
+      var cpuMillis = -1'i64
+      let deadline = epochTime() + 30.0
+      while cpuMillis == -1 and epochTime() < deadline:
+        var client = connectDefault()
+        try:
+          let answer = client.queryStats(statsSubjectExport, "spine_totals",
+            span = profileSpanWireAll, limit = 50)
+          for row in answer.extensionRows:
+            # One `row_json` cell per execution: every spine column, typed.
+            let cell = row.columns.find("row_json")
+            if cell < 0:
+              continue
+            let fields = parseJson(row.values[cell])
+            let user = fields{"cpu_user_millis"}
+            let sys = fields{"cpu_sys_millis"}
+            if user.isNil or sys.isNil or user.kind != JInt or
+                sys.kind != JInt:
+              # NULL: the finish carried no totals.
+              checkpoint "cpu columns: " & $user & " " & $sys
+              cpuMillis = -2
+            else:
+              cpuMillis = user.getBiggestInt + sys.getBiggestInt
+        finally:
+          client.close()
+        if cpuMillis == -1:
+          sleep(200)
+      checkpoint "cpu millis " & $cpuMillis
+      check cpuMillis >= 3000

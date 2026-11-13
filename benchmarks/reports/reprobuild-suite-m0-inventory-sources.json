@@ -41840,7 +41840,7 @@
       "requiresReproBinary": false,
       "source": "tests/integration/t_finish_outcome_reaches_the_spine.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 1,
+      "staticCaseCount": 2,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

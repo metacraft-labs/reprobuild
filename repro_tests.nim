@@ -20284,8 +20284,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g05",
-    singleReason: ""),
+    group: "",
+    singleReason: "self-spawn marker getAppFilename"),
   TestSpec(
     source: "tests/integration/t_first_commit_of_a_repository_is_certifiable.nim",
     binary: "build/test-bin/t_first_commit_of_a_repository_is_certifiable",
@@ -20680,7 +20680,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g06",
+    group: "t_group_tests_integration_g05",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_health_reports_each_layer_status_with_remedy.nim",
@@ -21406,7 +21406,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g07",
+    group: "t_group_tests_integration_g06",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_integration_test_runner_interface.nim",
@@ -22022,7 +22022,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g08",
+    group: "t_group_tests_integration_g07",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_lock_file_only_workspace_fully_described_from_lock_not_head.nim",
