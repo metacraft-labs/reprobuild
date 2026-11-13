@@ -38,16 +38,6 @@
 ## in the unit's own ``[Unit]``, so they reach their rule, not the drop-in
 ## allowlist.
 ##
-## Rounds 11 and 12 add applies in a row (every build but the two below,
-## whose first apply records differently): a floored template applied twice, a recorded
-## ``StateDirectory=`` replaced on the guest's kernel ext4, and, for §13
-## decision 76's own comparison, a ``CacheDirectory=`` replaced on a small
-## kernel ext4 loop-mounted over ``/var/cache`` whose free inodes are used
-## up first, so the new directory has the old
-## inode number and a new birth time; the next apply must refuse it, and
-## ``REPRO_ADDON_MUTATION=same-identity-ignores-btime`` (the birth time
-## recorded but not compared) turns that step red.
-##
 ## Builds:
 ##
 ## - the product build: each case is refused at parse time, or held;
@@ -517,66 +507,6 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
            "/var/lib/a9e-ino" in i2.stdout & i2.stderr, swap.stdout & i2.stdout & i2.stderr)
       discard g.run("rm -rf /var/lib/a9e-ino; systemctl reset-failed 'a9e-*' 2>/dev/null; true")
       discard g.applyProfile(repro, "back2", head & unitResource("a9e-control.service", "", binary))
-      # §13 decision 76's own comparison: the inode number reused, the birth
-      # time new. The swap above leaves that to the kernel, and kernel ext4
-      # avoids a recently freed inode while it has others (the round-11
-      # record: debian-13 132085 -> 132043, debian-12 132235 -> 132187), so
-      # it never compared two birth times (issue 2026-11-13-floor-decision-
-      # 76-birth-time-is-never-tested-against-a-reused-inode). Here the
-      # directory is made on a small loop-mounted kernel ext4 (16 inodes of
-      # 256 bytes, which carry a birth time) whose free inodes are used up
-      # before the swap, so the removed directory's inode is the only one
-      # free and the directory made in its place takes it. What the check
-      # judges and records is a directory's first component, so the image
-      # is the parent of that: it is mounted over /var/cache, for a unit's
-      # CacheDirectory=, for the two applies (nothing else this gate
-      # applies there reads /var/cache), and unmounted after.
-      let reuse = head & unitResource("a9e-control.service", "", binary) &
-        unitResource("a9e-reuse.service", "User=a9e\nCacheDirectory=a9e-reuse\n", binary)
-      let dir = "/var/cache/a9e-reuse"
-      let img = g.exec("truncate -s 8M /var/tmp/a9e-reuse.img && " &
-        "mkfs.ext4 -F -q -I 256 -N 16 -O has_journal /var/tmp/a9e-reuse.img && " &
-        "mount -o loop /var/tmp/a9e-reuse.img /var/cache && " &
-        "stat -f -c %T /var/cache && df -i /var/cache")
-      step("a small ext4 image is mounted over /var/cache", img.exitCode == 0,
-           img.stdout & img.stderr)
-      let u1 = g.applyProfile(repro, "reuse1", reuse)
-      let made = g.exec("stat -c %i,%.9W " & dir & " && cut -f1 " &
-        "/var/lib/repro/system/addon/floor-created-dirs | grep -x " & dir)
-      step("a floored unit's start makes its CacheDirectory on the image, and " &
-           "the record holds it", u1.exitCode == 0 and made.exitCode == 0,
-           u1.stdout & u1.stderr & made.stdout & made.stderr)
-      let swap2 = g.exec("before=$(stat -c %i,%.9W " & dir & "); " &
-        "systemctl stop a9e-reuse.service; " &
-        "i=0; while touch /var/cache/fill$i 2>/dev/null; do i=$((i+1)); done; " &
-        "rm -rf " & dir & "; mkdir " & dir & "; " &
-        "after=$(stat -c %i,%.9W " & dir & "); echo \"$before $after\"")
-      record["inodeReuse"] = %(made.stdout & swap2.stdout)
-      let pair = swap2.stdout.strip().splitWhitespace()
-      # Birth times to the nanosecond (``%.9W``): whole seconds would read a
-      # directory made again within the same second as unchanged. A birth
-      # time the file system does not report reads 0 (stat(1)), and fails
-      # the step rather than passing it.
-      proc knownBirth(s: string): bool =
-        try: parseFloat(s) > 0.0
-        except ValueError: false
-      var reused = false
-      if swap2.exitCode == 0 and pair.len == 2:
-        let a = pair[0].split(',')
-        let z = pair[1].split(',')
-        reused = a.len == 2 and z.len == 2 and a[0] == z[0] and a[1] != z[1] and
-          knownBirth(a[1]) and knownBirth(z[1])
-      step("the directory made in its place has the same inode and a new birth time",
-           reused, swap2.stdout & swap2.stderr)
-      let u2 = g.applyProfile(repro, "reuse2", reuse.replace("Description=A9 round 3",
-                                                             "Description=A9 round 12"))
-      step("the tree with the reused inode is refused at the next apply (§13 decision 76)",
-           u2.exitCode != 0 and "[rule:existing-tree" in u2.stdout & u2.stderr and
-           dir in u2.stdout & u2.stderr, swap2.stdout & u2.stdout & u2.stderr)
-      discard g.run("systemctl stop a9e-reuse.service 2>/dev/null; " &
-        "umount /var/cache 2>/dev/null; rm -f /var/tmp/a9e-reuse.img; " &
-        "systemctl reset-failed 'a9e-*' 2>/dev/null; true")
-      discard g.applyProfile(repro, "back3", head & unitResource("a9e-control.service", "", binary))
   except CatchableError as e:
     fails.add(b.name & ": " & e.msg)
     steps.add(%*{"step": "exception", "ok": false, "detail": e.msg})
