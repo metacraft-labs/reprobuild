@@ -129,8 +129,17 @@ proc ensureNftables*(g: Guest) =
   ## images do not ship it (Ubuntu's do), and bootstrap never installs a
   ## package. As an operator would before bootstrapping an agent host with
   ## a sink, the fixture installs the distribution's ``nftables`` first.
-  discard g.exec("command -v nft >/dev/null || DEBIAN_FRONTEND=noninteractive " &
-    "apt-get install -y -q nftables >/dev/null", timeoutSec = 1800)
+  ##
+  ## The package lists the image carries can be older than the mirror (a
+  ## package updated since names a file the mirror no longer has), so a
+  ## failed install refreshes them once and tries again, as an operator
+  ## would. A failure after that stops the gate with apt's own output: a
+  ## preflight's "the base has no nft" would hide why.
+  discard g.run("command -v nft >/dev/null && exit 0; " &
+    "export DEBIAN_FRONTEND=noninteractive; " &
+    "apt-get install -y -q nftables || " &
+    "{ apt-get update -q && apt-get install -y -q nftables; }",
+    timeoutSec = 1800)
 
 proc provideSinkCa*(g: Guest; s: GateSink) =
   ## Before the preflight: the sink's CA where the flags name it, and the
