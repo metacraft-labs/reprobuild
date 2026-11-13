@@ -3507,7 +3507,18 @@ proc checkLeaf*(gitBin, leaf: string; mode: LeafCheckMode;
     result.leaf = leaf
     var thePool = pool
     if thePool.len == 0:
-      let pools = poolsOfLeaf(leaf, cacheRoot)
+      # A ``.git`` FILE that is not a ``gitdir:`` line makes ``gitObjectDir``
+      # raise. git rejects that checkout too ("invalid gitfile format"), so
+      # it is "not a git checkout" here as below, and the caller's own git
+      # probes refuse it. Raising would abort the caller's whole run over one
+      # unreadable checkout.
+      var pools: seq[string]
+      try:
+        pools = poolsOfLeaf(leaf, cacheRoot)
+      except IOError, OSError:
+        result.diagnostic = "not a git checkout: " & leaf & " (" &
+          getCurrentExceptionMsg() & ")"
+        return
       if pools.len == 0:
         return                           # not a leaf of any pool: nothing to do
       thePool = pools[0]

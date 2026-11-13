@@ -20,8 +20,11 @@
 ##      and its remedy, and moves nothing.
 ##   4. A linked worktree inside the moved checkout is mapped to its new
 ##      location when the workspace root is reached through a symlink.
-##   5. A candidate that is ITSELF a linked worktree is refused and left
-##      with its work, because sync cannot keep one at the declared path.
+##   5. A candidate that is ITSELF a linked worktree is moved with its work,
+##      re-registered with its common directory (no `prunable` entry left),
+##      and then synced in place like any checkout, including one whose
+##      `gitdir:` is relative and whose declared path is at another depth;
+##      a LOCKED one is refused and left where it is, with its work.
 ##   6. A linked worktree the repair cannot rewrite after the move fails the
 ##      run (exit 1, `linked_worktree_repair_failed`) and names the command
 ##      that repairs it, while the moved checkout stays at its declared path.
@@ -67,6 +70,31 @@ proc setUpCandidate(fx: RenameFixture; gitBin: string): string =
   fx.cloneInto(gitBin, "widget-pm", result)
   discard requireGit(q(gitBin) & " -C " & q(result) &
     " remote set-url origin " & q(fx.originUrl("widget-specs")))
+
+proc setUpLinkedCandidate(fx: RenameFixture; gitBin: string;
+                          declaredPath = "widget-pm";
+                          relative = false): tuple[mainClone, oldPath: string] =
+  ## The prior checkout `widget-specs` as a LINKED worktree (on `main`, the
+  ## branch the fragment names) of a clone outside the workspace that is
+  ## reached by the old URL. `relative` creates it with `--relative-paths`
+  ## (the caller checks the git supports it); `declaredPath` is where the
+  ## fragment now declares the repo.
+  discard fx.seedOrigin(gitBin, "widget-pm")
+  fx.writeFragment("widget-pm", "widget-pm", declaredPath,
+    previously = "[{ name = \"widget-specs\", path = \"widget-specs\" }]")
+  fx.writeProject(["widget-pm"])
+  result.mainClone = fx.scratch / "main-clone"
+  fx.cloneInto(gitBin, "widget-pm", result.mainClone)
+  discard requireGit(q(gitBin) & " -C " & q(result.mainClone) &
+    " remote set-url origin " & q(fx.originUrl("widget-specs")))
+  # Free `main` for the linked worktree.
+  discard requireGit(q(gitBin) & " -C " & q(result.mainClone) &
+    " checkout --detach")
+  result.oldPath = fx.workspaceRoot / "widget-specs"
+  discard requireGit(q(gitBin) & " -C " & q(result.mainClone) &
+    " worktree add " & (if relative: "--relative-paths " else: "") &
+    q(result.oldPath) & " main")
+  doAssert fileExists(result.oldPath / ".git")
 
 proc gitAtLeast(versionLine: string; major, minor: int): bool =
   ## Whether `git --version` output (`git version 2.54.0`, possibly with a
@@ -294,54 +322,139 @@ suite "declared rename — linked worktrees of the moved checkout":
       if common.code == 0:
         check sameFile(common.path, newPath / ".git")
 
-  test "t_rename_refuses_a_candidate_that_is_itself_a_linked_worktree":
+  test "t_rename_relocates_a_candidate_that_is_itself_a_linked_worktree":
     # The prior checkout is a LINKED worktree of a clone outside the
-    # workspace: its `.git` is a file. The rest of sync cannot hold such a
-    # checkout at a declared path — it classifies it `missing_checkout` and
-    # the clone deletes it as a half-finished clone, uncommitted work and
-    # all. Moving it there would destroy it, so the relocation refuses and
-    # leaves it, and its work, exactly where they are.
+    # workspace: its `.git` is a file. Moving it cuts the link the other
+    # way round from the cases above — the outside clone, which did not
+    # move, still records the prior path, so git would list the moved
+    # checkout `prunable` and the next `git worktree prune` would discard its
+    # index and HEAD. The relocation re-registers it, and the sync then holds
+    # it at the declared path like any checkout: its uncommitted work makes
+    # it `dirty`, refused, never cloned over (sync.md "What counts as an
+    # on-disk checkout").
     let gitBin = findExe("git")
     if gitBin.len == 0:
       skip("git is not on PATH; this case uses real Git repositories")
     else:
       let fx = newRenameFixture(gitBin, "wt-self")
       defer: removeDir(fx.scratch)
-      discard fx.seedOrigin(gitBin, "widget-pm")
-      fx.writeFragment("widget-pm", "widget-pm", "widget-pm",
-        previously = "[{ name = \"widget-specs\", path = \"widget-specs\" }]")
-      fx.writeProject(["widget-pm"])
-      let mainClone = fx.scratch / "main-clone"
-      fx.cloneInto(gitBin, "widget-pm", mainClone)
-      discard requireGit(q(gitBin) & " -C " & q(mainClone) &
-        " remote set-url origin " & q(fx.originUrl("widget-specs")))
-      # Free `main` for the linked worktree, the branch the fragment names.
-      discard requireGit(q(gitBin) & " -C " & q(mainClone) &
-        " checkout --detach")
-      let oldPath = fx.workspaceRoot / "widget-specs"
-      discard requireGit(q(gitBin) & " -C " & q(mainClone) &
-        " worktree add " & q(oldPath) & " main")
-      check fileExists(oldPath / ".git")
+      let (mainClone, oldPath) = setUpLinkedCandidate(fx, gitBin)
       writeFile(oldPath / "in-flight.txt", "uncommitted work\n")
+
+      let res = fx.invokeSync()
+      checkpoint("sync output:\n" & res.output)
+      let newPath = fx.workspaceRoot / "widget-pm"
+      let entry = fx.readReport().entryFor("widget-pm")
+      check entry.field("relocation") == "relocated"
+      check entry.field("syncCase") == "dirty"
+      check entry.field("executionStatus") != "cloned"
+      check res.code == 2
+      check not dirExists(oldPath)
+      # Still a linked worktree, with its work, of the outside clone.
+      check fileExists(newPath / ".git")
+      check fileExists(newPath / "in-flight.txt")
+      let common = commonDirOf(gitBin, newPath)
+      checkpoint("moved checkout common dir: " & $common)
+      check common.code == 0
+      if common.code == 0:
+        check sameFile(common.path, mainClone / ".git")
+      # The backlink: the outside clone lists the NEW path as a live
+      # worktree, and nothing as prunable.
+      let listing = requireGit(q(gitBin) & " -C " & q(mainClone) &
+        " worktree list --porcelain")
+      checkpoint("post-sync worktree list:\n" & listing)
+      check "prunable" notin listing
+      var listedAtNewPath = false
+      for line in listing.splitLines():
+        if line.startsWith("worktree ") and
+            dirExists(line["worktree ".len .. ^1]) and
+            sameFile(line["worktree ".len .. ^1], newPath):
+          listedAtNewPath = true
+      check listedAtNewPath
+      check rekeyedOf(entry).len > 0
+
+  test "t_rename_refuses_a_candidate_that_is_itself_a_locked_linked_worktree":
+    # A lock is git's "do not move this worktree" marker (`git worktree move`
+    # refuses one too); an unattended sync does not override it.
+    let gitBin = findExe("git")
+    if gitBin.len == 0:
+      skip("git is not on PATH; this case uses real Git repositories")
+    else:
+      let fx = newRenameFixture(gitBin, "wt-self-locked")
+      defer: removeDir(fx.scratch)
+      let (mainClone, oldPath) = setUpLinkedCandidate(fx, gitBin)
+      writeFile(oldPath / "in-flight.txt", "uncommitted work\n")
+      discard requireGit(q(gitBin) & " -C " & q(mainClone) &
+        " worktree lock --reason \"on the travel disk\" " & q(oldPath))
 
       let res = fx.invokeSync()
       checkpoint("sync output:\n" & res.output)
       check res.code == 2
       let entry = fx.readReport().entryFor("widget-pm")
-      check entry.field("relocation") == "candidate_is_linked_worktree"
+      check entry.field("relocation") == "linked_worktree_unrepairable"
       let detail = entry.field("relocationDetail")
       checkpoint("detail: " & detail)
-      check "linked worktree" in detail
-      check "git worktree remove" in detail
-      # Nothing moved, nothing was cloned over the declared path, and the
-      # linked worktree is still a checkout of the outside clone, with its
-      # work.
+      check "LOCKED" in detail
+      check "on the travel disk" in detail
+      check "worktree unlock" in detail
       check not dirExists(fx.workspaceRoot / "widget-pm")
+      # Left where it was, with its work, still a worktree of the outside
+      # clone.
       check fileExists(oldPath / "in-flight.txt")
       let common = commonDirOf(gitBin, oldPath)
       check common.code == 0
       if common.code == 0:
         check sameFile(common.path, mainClone / ".git")
+
+  test "t_rename_relocates_a_relative_linked_worktree_candidate_to_a_new_depth":
+    # The candidate's `.git` file names its common directory RELATIVE to
+    # itself, and the declared path is one level deeper, so the move breaks
+    # BOTH links: the moved checkout's `../main-clone/...` no longer resolves,
+    # and the outside clone's backlink names the prior path. The repair runs
+    # from the common directory's side, which recovers both.
+    let gitBin = findExe("git")
+    if gitBin.len == 0:
+      skip("git is not on PATH; this case uses real Git repositories")
+    else:
+      let fx = newRenameFixture(gitBin, "wt-self-rel")
+      defer: removeDir(fx.scratch)
+      let version = requireGit(q(gitBin) & " --version").strip()
+      if not gitAtLeast(version, 2, 48):
+        skip("git " & version & " lacks `worktree add --relative-paths`")
+      else:
+        let (mainClone, oldPath) = setUpLinkedCandidate(fx, gitBin,
+          declaredPath = "nested/widget-pm", relative = true)
+        check readFile(oldPath / ".git").startsWith("gitdir: ..")
+        writeFile(oldPath / "in-flight.txt", "uncommitted work\n")
+
+        let res = fx.invokeSync()
+        checkpoint("sync output:\n" & res.output)
+        let newPath = fx.workspaceRoot / "nested" / "widget-pm"
+        let entry = fx.readReport().entryFor("nested/widget-pm")
+        checkpoint("report entry:\n" & pretty(entry, indent = 2))
+        check entry.field("relocation") == "relocated"
+        check entry.field("syncCase") == "dirty"
+        check entry.field("executionStatus") != "cloned"
+        check res.code == 2
+        check not dirExists(oldPath)
+        check fileExists(newPath / ".git")
+        check fileExists(newPath / "in-flight.txt")
+        let common = commonDirOf(gitBin, newPath)
+        checkpoint("moved checkout common dir: " & $common)
+        check common.code == 0
+        if common.code == 0:
+          check sameFile(common.path, mainClone / ".git")
+        let listing = requireGit(q(gitBin) & " -C " & q(mainClone) &
+          " worktree list --porcelain")
+        checkpoint("post-sync worktree list:\n" & listing)
+        check "prunable" notin listing
+        var listedAtNewPath = false
+        for line in listing.splitLines():
+          if line.startsWith("worktree ") and
+              dirExists(line["worktree ".len .. ^1]) and
+              sameFile(line["worktree ".len .. ^1], newPath):
+            listedAtNewPath = true
+        check listedAtNewPath
 
   test "t_rename_reports_a_linked_worktree_the_repair_could_not_reach":
     # The post-move half of §3.5: a worktree that passed the pre-flight

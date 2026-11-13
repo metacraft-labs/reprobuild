@@ -186,7 +186,11 @@ proc resolveServiceAccount*(user, group, supplementaryGroups: string;
   # With User= empty under DynamicUser=yes systemd names the account after
   # the unit's prefix (``user_from_unit_name()`` uses
   # ``unit_name_to_prefix()``): ``root@x.service`` runs as ``root``.
-  let unitStem = when AccountMutation == "account-dynamic-name-from-stem":
+  # The falsifying builds name it after the prefix and the instance
+  # (``-without-live-check``: the conversion gate's, with a full apply's
+  # live cross-check off as well).
+  let unitStem = when AccountMutation in ["account-dynamic-name-from-stem",
+                    "account-dynamic-name-from-stem-without-live-check"]:
                    (if parts.instance.len > 0: parts.prefix & "@" & parts.instance
                     else: parts.prefix)
                  else: parts.prefix

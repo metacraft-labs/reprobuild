@@ -24,10 +24,17 @@
 
 import std/strutils
 
-const ValuesMutation {.strdefine: "reproAddonMutation".} = ""
-  ## ``reach-values-as-text`` (falsifying build): round 4's reading --
-  ## booleans from ``yes true 1 on`` only (case-insensitive), the enum
-  ## lower-cased.
+const
+  ValuesMutation {.strdefine: "reproAddonMutation".} = ""
+    ## The falsifying build this is (``repro_addon/mutations``), if any.
+  ValuesAsText = ValuesMutation in ["reach-values-as-text",
+                                    "reach-values-as-text-without-live-check"]
+    ## ``reach-values-as-text`` (falsifying build): round 4's reading --
+    ## booleans from ``yes true 1 on`` only (case-insensitive), the enum
+    ## lower-cased. ``reach-values-as-text-without-live-check`` reads the
+    ## same, and also leaves out a full apply's live cross-check
+    ## (``repro_infra/apply``), which would refuse the conversion gate's
+    ## probe as systemd loaded it.
 
 type
   SettingRead* = enum
@@ -41,7 +48,7 @@ proc parseSystemdBoolean*(raw: string; value: var bool): SettingRead =
   ## ``0 no n false f off``; anything else is ignored. An empty value is
   ## not a boolean either (``config_parse_bool`` ignores it).
   let v = raw.strip()
-  when ValuesMutation == "reach-values-as-text":
+  when ValuesAsText:
     if v.toLowerAscii() in ["yes", "true", "1", "on"]:
       value = true
       return srValid
@@ -62,7 +69,7 @@ proc parseProtectSystem*(raw: string; mode: var ProtectSystemMode): SettingRead 
   ## ``no``); else exactly ``no``, ``yes``, ``full`` or ``strict``
   ## (case-sensitive); anything else is ignored.
   let v = raw.strip()
-  when ValuesMutation == "reach-values-as-text":
+  when ValuesAsText:
     mode = if v.toLowerAscii() == "strict": psStrict else: psNo
     return srValid
   if v.len == 0:

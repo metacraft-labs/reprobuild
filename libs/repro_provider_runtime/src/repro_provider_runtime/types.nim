@@ -530,6 +530,18 @@ type
 
 const ProviderProtocolVersion* = 1'u32
 
+const DevEnvDeclaredGraphStableName* = "reprobuild.dev-env-declared.v1"
+  ## The metadata node a package's ROOT fragment carries when its recipe
+  ## declares a ``devEnv:`` block. Its payload is the package name.
+  ##
+  ## ``repro test`` reads it to decide which run-edges receive the
+  ## package's dev environment (the members of the package's ``test`` and
+  ## ``bench`` collections; ``repro_cli_support/dev_env_run_edges``). A
+  ## fragment without it contributes no such edge, so a build of a recipe
+  ## that declares no ``devEnv:`` never realizes a dev environment and no
+  ## cache key moves. Absence also keeps every pre-existing fragment
+  ## byte-identical.
+
 proc manifestResponse*(manifest: ProviderManifest;
                        diagnostics: openArray[string] = []): ProviderGraphResponse =
   ProviderGraphResponse(kind: pskManifest, manifest: manifest,

@@ -1006,18 +1006,22 @@ proc executeClone(payload: GitVcsPayload; cwd, receiptPath: string): ActionResul
   if parent.len > 0:
     createDir(parent)
   if dirExists(target):
-    if dirExists(target / ".git"):
+    if hasGitEntry(target):
       # A pre-existing *git* tree is a hard error: clone must be the act
       # of creating the working tree. The CLI-level "init-or-resync"
       # flow uses fetch/merge/force-reset, not clone, on an existing tree.
+      # A ``.git`` FILE counts: a linked worktree or an absorbed submodule
+      # is a checkout, and the half-clone cleanup below would delete it,
+      # uncommitted work included (CLI/sync.md § "Automatic cloning of
+      # missing repositories").
       return failed("clone-target-exists",
         "clone target already exists: " & target)
-    # RA-16 resume correctness: a leftover directory with NO ``.git`` is a
-    # half-cloned / interrupted-clone artifact (no receipt was written, so
-    # the engine re-schedules this clone). Remove it so the re-run redoes
-    # just this repo cleanly instead of being confused by the partial
-    # state. We only remove a non-git directory — a real tree above — and only
-    # one proven to sit beneath the workspace root.
+    # RA-16 resume correctness: a leftover directory with NO ``.git`` entry
+    # of either kind is a half-cloned / interrupted-clone artifact (no
+    # receipt was written, so the engine re-schedules this clone). Remove it
+    # so the re-run redoes just this repo cleanly instead of being confused
+    # by the partial state. We only remove a non-git directory — a real tree
+    # above — and only one proven to sit beneath the workspace root.
     let cleaned = removeCloneTargetSafely(target, cwd)
     if not cleaned.ok:
       return failed("clone-partial-cleanup-failed",
@@ -1240,7 +1244,7 @@ proc executeClone(payload: GitVcsPayload; cwd, receiptPath: string): ActionResul
 
 proc executeFetch(payload: GitVcsPayload; cwd, receiptPath: string): ActionResult =
   let target = absoluteRepoPath(payload, cwd)
-  if not dirExists(target / ".git"):
+  if not hasGitEntry(target):
     return failed("fetch-target-missing",
       "fetch target is not a git working tree: " & target)
   # A checkout that borrows from a partial-clone pool -- a foreign one, or an
@@ -1282,7 +1286,7 @@ proc executeFetch(payload: GitVcsPayload; cwd, receiptPath: string): ActionResul
 
 proc executeSwitch(payload: GitVcsPayload; cwd, receiptPath: string): ActionResult =
   let target = absoluteRepoPath(payload, cwd)
-  if not dirExists(target / ".git"):
+  if not hasGitEntry(target):
     return failed("switch-target-missing",
       "switch target is not a git working tree: " & target)
   # Refuse on a dirty tree BEFORE invoking git switch — the contract
@@ -1343,7 +1347,7 @@ proc executeBranchCreate(payload: GitVcsPayload;
   ## so the M14 planner can refuse the workspace-wide create
   ## atomically.
   let target = absoluteRepoPath(payload, cwd)
-  if not dirExists(target / ".git"):
+  if not hasGitEntry(target):
     return failed("branch-create-target-missing",
       "branch-create target is not a git working tree: " & target)
   let headRes = resolveHeadSha(payload, target)
@@ -1390,7 +1394,7 @@ proc executeForkBranch(payload: GitVcsPayload;
   ## at a DIFFERENT SHA is a collision and fails loudly rather than
   ## silently moving the operator's ref.
   let target = absoluteRepoPath(payload, cwd)
-  if not dirExists(target / ".git"):
+  if not hasGitEntry(target):
     return failed("fork-branch-target-missing",
       "fork-branch target is not a git working tree: " & target)
   let wanted = payload.revision.strip()
@@ -1568,7 +1572,7 @@ proc executeRemoteBranchProbe(payload: GitVcsPayload;
   var source: string
   if payload.repoPath.len > 0:
     source = absoluteRepoPath(payload, cwd)
-    if not dirExists(source / ".git"):
+    if not hasGitEntry(source):
       return failed("remote-branch-probe-source-missing",
         "remote branch probe source is not a git working tree: " & source)
     let remote =
@@ -1617,7 +1621,7 @@ proc executeMergeFf(payload: GitVcsPayload;
   ## failure rather than a destructive merge. The remote-tracking ref is
   ## assumed current because the action depends on its sibling ``fetch``.
   let target = absoluteRepoPath(payload, cwd)
-  if not dirExists(target / ".git"):
+  if not hasGitEntry(target):
     return failed("merge-ff-target-missing",
       "merge-ff target is not a git working tree: " & target)
   let cleanRes = workingTreeIsClean(payload, target)
@@ -1734,7 +1738,7 @@ proc executeForceReset(payload: GitVcsPayload;
       "directory beneath the workspace root or a sibling of it, never an " &
       "ancestor — then re-run `repro sync --force-sync`.")
   let targetIsWorkspaceRoot = contained.verdict == cmIsWorkspaceRoot
-  if not dirExists(target / ".git"):
+  if not hasGitEntry(target):
     return failed("force-reset-target-missing",
       "force-reset target is not a git working tree: " & target)
   if payload.revision.len == 0:
@@ -1787,7 +1791,7 @@ proc executeForcePushRebase(payload: GitVcsPayload;
   ## Replay the commits the operator still OWNS on top of the new remote
   ## tip: the ones whose change is not already present upstream.
   let target = absoluteRepoPath(payload, cwd)
-  if not dirExists(target / ".git"):
+  if not hasGitEntry(target):
     return failed("force-push-rebase-target-missing",
       "force-push-rebase target is not a git working tree: " & target)
 

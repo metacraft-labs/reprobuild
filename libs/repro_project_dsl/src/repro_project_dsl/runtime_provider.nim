@@ -260,6 +260,16 @@ when defined(reproProviderMode):
         stableName: CertificatePolicyGraphStableName,
         payload: renderCertificatePolicyEmission(enactedPolicy,
           pkg.packageName)))
+    # A ``devEnv:`` block reaches the package's run-edges
+    # (``DevEnvDeclaredGraphStableName``): say so in the stored graph, so
+    # the CLI can tell without running the provider again. Root fragment
+    # only, like the policy above: a structural member is not the package.
+    if isRootFragment and pkg.hasDevEnv:
+      result.nodes.add(GraphNode(
+        id: request.namespace & ":metadata:dev-env-declared",
+        kind: gnkMetadata,
+        stableName: DevEnvDeclaredGraphStableName,
+        payload: pkg.packageName))
     # Named-Runnable-Edges N2: carry the resource-lane graph (the
     # ``stateGroup`` resource subgraph + membership) that this package's
     # ``buildProc()`` collected to the CLI, so the ``repro run`` leased-

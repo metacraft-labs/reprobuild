@@ -1042,7 +1042,10 @@ proc unitNames(unit: string; texts: seq[string]; root: string): seq[string] =
   ## follows, is reported as ``<unparsed ...>``: the unit reaches
   ## everything.
   result = @[unit]
-  when CarriedMutation == "reach-alias-dropins-unread":
+  # FALSIFYING MUTATION: the unit's own name only (``-without-live-check``:
+  # the conversion gate's build, with a full apply's live cross-check off).
+  when CarriedMutation in ["reach-alias-dropins-unread",
+                          "reach-alias-dropins-unread-without-live-check"]:
     return
   for t in texts:
     for (section, key, value) in unitDirectivesOf(t):

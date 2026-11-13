@@ -580,6 +580,19 @@
 ## ``adopt-without-profile``                 ``repro system adopt`` takes
 ##                                           drifted bytes the profile does
 ##                                           not declare (decision 61)
+## ``reach-values-as-text-without-live-check``  ``reach-values-as-text``,
+##                                           and a full apply does not run
+##                                           the carried-state cross-check
+##                                           (as ``infra-live-reach-
+##                                           skipped``): the conversion
+##                                           gate's falsifier of the static
+##                                           reading, which the live check
+##                                           otherwise catches as well
+## ``reach-alias-dropins-unread-without-live-check``  the same for
+##                                           ``reach-alias-dropins-unread``
+## ``account-dynamic-name-from-stem-without-live-check``  the same for
+##                                           ``account-dynamic-name-from-
+##                                           stem``
 ## ``plan-ignores-profile-digest``           an apply of a stored plan does
 ##                                           not compare the plan's profile
 ##                                           digest with the text it runs
@@ -1376,6 +1389,14 @@ const
                           "reissue-skips-targets",
                           "reissue-skips-sockets",
                           "plan-ignores-profile-digest",
+                          # The conversion gate's falsifiers of three
+                          # round-5 static readings: each with the full
+                          # apply's live cross-check off too, which
+                          # otherwise refuses the same probe (A13 review
+                          # round 7).
+                          "reach-values-as-text-without-live-check",
+                          "reach-alias-dropins-unread-without-live-check",
+                          "account-dynamic-name-from-stem-without-live-check",
                           "full-apply-keeps-undeclared-dropins",
                           "install-unit-reads-host-manifest",
                           "live-reach-unchecked",

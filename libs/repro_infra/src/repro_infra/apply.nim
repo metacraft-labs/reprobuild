@@ -338,9 +338,22 @@ proc allocateGenerationId(stateDir, profileDigestHex, hostIdentity: string;
 # (typed op + plan baseline digest).
 # ---------------------------------------------------------------------------
 
-const ApplyMutation {.strdefine: "reproAddonMutation".} = ""
-  ## ``plan-ignores-profile-digest``, ``full-apply-keeps-undeclared-dropins``
-  ## (falsifying builds, ``repro_addon/mutations``).
+const
+  ApplyMutation {.strdefine: "reproAddonMutation".} = ""
+    ## ``plan-ignores-profile-digest``, ``full-apply-keeps-undeclared-dropins``
+    ## (falsifying builds, ``repro_addon/mutations``).
+  LiveCheckSkipped = ApplyMutation in [
+    "infra-live-reach-skipped",
+    "reach-values-as-text-without-live-check",
+    "reach-alias-dropins-unread-without-live-check",
+    "account-dynamic-name-from-stem-without-live-check"]
+    ## The builds whose full apply does not run the carried-state cross-check
+    ## (§13 decision 59): ``infra-live-reach-skipped``, its falsifier, and the
+    ## three that break a static reading of the reach analysis besides. The
+    ## live check judges the unit as systemd loaded it, so it refuses the
+    ## conversion gate's probe of each of those readings too; with it on,
+    ## the probe never runs and the gate's red is the live check's, not the
+    ## static reading's (A13 review round 7).
 
 proc undeclaredDropIns*(stateDir, profileText: string): seq[SystemResource] =
   ## The ``systemd.systemDropIn`` resources the active generation declares
@@ -662,7 +675,7 @@ when defined(posix):
     if c.units.len == 0: return
     systemctlOrRaise(["daemon-reload"])
     var problems: seq[string]
-    when ApplyMutation != "infra-live-reach-skipped":
+    when not LiveCheckSkipped:
       problems = liveReachProblems(c.units, p,
         proc (u: string): Table[string, string] = systemctlShow(u), root)
       # And the refusal again over the host as the reload left it: a

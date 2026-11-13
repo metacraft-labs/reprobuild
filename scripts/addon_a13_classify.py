@@ -90,11 +90,14 @@ EXPECT = {
                 "engine build reach-host-dropins-ignored"),
     "mutreq": ("e2e_addon_to_reproos_conversion_keeps_state", "red",
                "engine build restore-requirement-by-manifest-only"),
-    "mutvalues": ("e2e_addon_to_reproos_conversion_keeps_state", "red", "engine build reach-values-as-text"),
-    "mutalias": ("e2e_addon_to_reproos_conversion_keeps_state", "red", "engine build reach-alias-dropins-unread"),
+    # The live cross-check off as well: it refuses these probes too, so
+    # under the static reading's build alone the probe never runs (A13
+    # review round 7). mutinfralive is the other half of each pair.
+    "mutvalues": ("e2e_addon_to_reproos_conversion_keeps_state", "red", "engine build reach-values-as-text-without-live-check"),
+    "mutalias": ("e2e_addon_to_reproos_conversion_keeps_state", "red", "engine build reach-alias-dropins-unread-without-live-check"),
     "mutconfine": ("e2e_addon_to_reproos_conversion_keeps_state", "red", "engine build confined-without-nnp-or-groups"),
     "mutnss": ("e2e_addon_to_reproos_conversion_keeps_state", "red", "engine build account-nss-unread"),
-    "mutprefix": ("e2e_addon_to_reproos_conversion_keeps_state", "red", "engine build account-dynamic-name-from-stem"),
+    "mutprefix": ("e2e_addon_to_reproos_conversion_keeps_state", "red", "engine build account-dynamic-name-from-stem-without-live-check"),
     "mutactivated": ("e2e_addon_to_reproos_conversion_keeps_state", "red", "engine build restore-requirement-skips-activated"),
     "mutundeclared": ("e2e_addon_to_reproos_conversion_keeps_state", "red", "engine build full-apply-keeps-undeclared-dropins"),
     "mutplan": ("e2e_addon_to_reproos_conversion_keeps_state", "red", "engine build plan-ignores-profile-digest"),
@@ -196,6 +199,10 @@ TARGET.update({
 ROUND4_PROBES = ["account", "timer", "pathfloored", "path", "host"]
 ROUND5_PROBES = ["r5values", "r5alias", "r5group", "r5nnp", "r5userdb",
                  "r5prefix", "r5plan"]
+LIVE_PAIRED_PROBES = ["r5values", "r5alias", "r5prefix"]
+"""The probes the full apply's live cross-check refuses as well as the
+static reading each falsifier breaks: their falsifiers are built with the
+live check off too, and mutinfralive shows them refused without it."""
 ROUND6_PROBES = ["r6lines", "r6exec", "r6aliaschain", "r6wantslink",
                  "r6reserved", "r6polkit", "r6live", "r6liverw"]
 
@@ -225,6 +232,15 @@ def on_target_rec(kind, rec):
                   "mutconfine": ["r5group", "r5nnp"], "mutnss": ["r5userdb"],
                   "mutprefix": ["r5prefix"]}[kind]
         return all(let_in_and_ran(probes, l) for l in labels) and on_target(kind, steps)
+    if kind == "mutinfralive" and not all(
+            probes.get(l, {}).get("judged") is True and
+            probes.get(l, {}).get("refusedForReason") is True
+            for l in LIVE_PAIRED_PROBES):
+        # The pair of the three "-without-live-check" builds: with the live
+        # check off and the static readings intact, each of their probes is
+        # still refused for its own reason (the round-5 probes run before
+        # this cell's target step).
+        return False
     if kind in ("mutlines", "mutexec", "mutchain", "mutdeplinks", "mutreserved",
                 "mutdaemons", "mutinfralive", "mutpostreload"):
         label = {"mutlines": "r6lines", "mutexec": "r6exec", "mutchain": "r6aliaschain",
