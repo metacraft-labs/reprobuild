@@ -43,26 +43,42 @@
 ## 19. A workspace binary a ``staticExec`` command executes (``execve``):
 ##     listed, and a newer one refused.
 ## 20. A directory a ``staticExec`` command lists (``getdents``): its
-##     entries are recorded, and a new entry refuses the binary (§13
-##     decision 80).
+##     Nim entries are recorded, and a new ``.nim`` entry refuses the
+##     binary; a new non-Nim entry does not (§13 decisions 80 and 86).
 ## 21. A traced workspace path that is no longer a file when the list is
 ##     written fails the writer: no list, never a silent drop.
+## 22. (round 9, decision 86) A ``.nimcache/`` directory, another directory,
+##     a ``result`` link and a non-source file added to directories the
+##     compiler listed (the tree root among them) are not a change.
+## 23. (round 9, decision 86) A new ``.nim`` file in a directory the
+##     compiler searched (the tree root, the app's directory) is refused.
+## 24-25. (round 9) A file read under a name with a trailing, or a
+##     leading, space is checked under that name, not under the decoy of
+##     the trimmed name beside it.
+## 26. (round 9) A trace the writer cannot read (an strace that drops
+##     ``-xx``) fails the writer: no list.
 ##
 ## Falsifying builds: ``stale-helper-accepted`` (cases 2-5 and 8-10 red),
 ## ``fresh-skips-included`` (case 4), ``fresh-skips-outside-tree`` (case
 ## 5), ``fresh-skips-c-sources`` (case 8), ``fresh-skips-headers`` (case
 ## 9), ``fresh-skips-static-reads`` (case 10), ``fresh-ignores-list-binary``
-## (case 11), ``fresh-ignores-listings`` (case 20); and the script's
+## (case 11), ``fresh-ignores-listings`` (cases 20, 23); and the script's
 ## ``WRITE_HELPER_DEPS_MUTATION`` in the environment: ``keep-old-list``
-## (case 12), ``relative-to-script-dir``
-## (case 13), ``single-trace`` (case 14), ``text-paths`` (cases 15-18;
-## it is the round-7 trace, so 19-21 go red with it),
-## ``no-execve`` (case 19), ``no-listing`` (case 20), ``drop-unresolved``
-## (case 21).
+## (case 12), ``relative-to-script-dir`` (case 13), ``single-trace``
+## (case 14), ``text-paths`` (cases 15-18; it is the round-7 trace, so
+## 19-23 and 26 go red with it), ``no-execve`` (case 19), ``no-listing``
+## (cases 20, 23, and 22, which first checks that the root and the app's
+## directory were listed), ``drop-unresolved`` (case 21),
+## ``listing-digests-every-entry`` (cases 20, 22: round 8's digest of every
+## name, written and checked as the list says), ``trim-edge-spaces``
+## (case 24: the path written without its trailing space, as round 8's
+## strip() read it; case 25's leading space sits after the path's "/", so
+## no line strip reaches it, and it is a positive case only),
+## ``accept-unparsed`` (case 26).
 ##
 ## Mocks: none -- the real compiler, the real script, strace.
 
-import std/[os, osproc, strutils, tempfiles, times, unittest]
+import std/[os, osproc, sequtils, strutils, tempfiles, times, unittest]
 
 import repro_test_support/fresh_binary
 
@@ -105,6 +121,12 @@ let helloSrc = fooDir / "hello.c"
 let hello = fooDir / "hello"
 let listDir = fooDir / "listdir"
 for p in [nonAscii, gtName, nlName, bsName]: writeFile(p, "escaped by strace\n")
+# Round 9: names with a trailing and a leading space, each beside a decoy
+# of the trimmed name.
+let trailing = fooDir / "tr.txt "
+let leading = fooDir / " lead.txt"
+for p in [trailing, leading]: writeFile(p, "a name with an edge space\n")
+for p in [fooDir / "tr.txt", fooDir / "lead.txt"]: writeFile(p, "decoy\n")
 writeFile(helloSrc, "#include <stdio.h>\nint main(void){puts(\"hello\");return 0;}\n")
 block:
   let (o, c) = execCmdEx(quoteShellCommand(["gcc", "-o", hello, helloSrc]))
@@ -125,7 +147,8 @@ proc writeApp(extra = "") =
     "const fromEscaped = staticExec(\"cat \xC3\xA9.txt 'a>b.txt' nl?x.txt bs?c.txt\")\n" &
     "const fromHello = staticExec(\"./hello\")\n" &
     "const fromListing = staticExec(\"ls listdir\")\n" &
-    "echo greeting(), farAway(), part(), fooHelper(), blob, fromExec, fromRel, fromPar.len, fromEscaped.len, fromHello, fromListing\n" & extra)
+    "const fromSpaces = staticExec(\"cat 'tr.txt ' ' lead.txt'\")\n" &
+    "echo greeting(), farAway(), part(), fooHelper(), blob, fromExec, fromRel, fromPar.len, fromEscaped.len, fromHello, fromListing, fromSpaces.len\n" & extra)
 writeApp()
 let binary = tree / "build" / "bin" / addFileExt("foo-helper", ExeExt)
 
@@ -134,7 +157,7 @@ proc build() =
   ## sources a minute back (an earlier case may have dated one into the
   ## future).
   for src in @[lib, app, included, outside, csrc, header, blob, execInput, relInput,
-               nonAscii, gtName, nlName, bsName, hello] & parInputs:
+               nonAscii, gtName, nlName, bsName, hello, trailing, leading] & parInputs:
     setLastModificationTime(src, getTime() - initDuration(seconds = 60))
   let flags = @["--path:" & tree / "libs" / "foolib" / "src",
                 "--path:" & parentDir(outside)]
@@ -301,14 +324,18 @@ suite "a helper binary is used only when built from the tree under test":
     checkpoint why
     check ("older than " & hello) in why
 
-  test "20: a directory a staticExec command lists is checked by its entries":
+  test "20: a directory a staticExec command lists is checked by its Nim entries":
     build()
     check refusal() == ""
+    # §13 decision 86: a name that cannot change what the compiler
+    # resolves does not count, even in a listing a command made.
     writeFile(listDir / "two.txt", "a new entry\n")
+    check refusal() == ""
+    writeFile(listDir / "two.nim", "discard\n")
     let why = refusal()
     checkpoint why
     check ("listing of " & listDir & " that has changed") in why
-    removeFile(listDir / "two.txt")
+    removeFile(listDir / "two.nim")
     check refusal() == ""
 
   test "21: a traced workspace path that is not a file fails the list":
@@ -330,6 +357,64 @@ suite "a helper binary is used only when built from the tree under test":
     check c2 != 0
     check "not what they were traced as" in o2
     check not fileExists(t2 / "build" / "nimcache" / "gone" / "gone.deps")
+
+  test "22: a .nimcache, a build directory or a result link in a listed directory is not a change":
+    # §13 decision 86: what a plain `nim c` (config.nims's default
+    # <checkout>/.nimcache), `just build` or `nix build` leaves in the
+    # tree root, a directory the compiler's package search lists.
+    build()
+    check refusal() == ""
+    let listed = helperListings(tree, "foo-helper")
+    checkpoint $listed
+    check listed.anyIt(it.dir == tree)
+    check listed.anyIt(it.dir == fooDir)
+    createDir(tree / ".nimcache" / "foo")
+    writeFile(tree / ".nimcache" / "foo" / "x.c", "/* generated */\n")
+    createDir(tree / "out-dir")
+    createSymlink(tree / "build", tree / "result")
+    writeFile(fooDir / "notes.md", "not a source\n")
+    let why = refusal()
+    checkpoint why
+    check why == ""
+
+  test "23: a new .nim file in a directory the compiler searched is refused":
+    build()
+    check refusal() == ""
+    for d in [tree, fooDir]:
+      writeFile(d / "shadow.nim", "discard\n")
+      let why = refusal()
+      checkpoint why
+      check ("listing of " & d & " that has changed") in why
+      removeFile(d / "shadow.nim")
+      check refusal() == ""
+
+  for (n, label, p) in [(24, "a trailing", trailing), (25, "a leading", leading)]:
+    test $n & ": a name with " & label & " space is checked under its own name, not its decoy's":
+      build()
+      check p in helperDependencies(tree, "foo-helper")
+      check refusal() == ""
+      touchAfterBinary(p)
+      let why = refusal()
+      checkpoint why
+      check ("older than " & p) in why
+
+  test "26: a trace the writer cannot read (an strace without -xx) leaves no list":
+    build()
+    check refusal() == ""
+    # An strace that drops -xx: its -y paths are printed as text, which
+    # the parser does not read. The writer must fail, not publish a list
+    # without the compile-time reads (round 9).
+    let wrapper = base / "strace-without-xx"
+    writeFile(wrapper, "#!/usr/bin/env bash\nargs=()\nfor a in \"$@\"; do [ \"$a\" = -xx ] || args+=(\"$a\"); done\n" &
+      "exec " & quoteShell(findExe("strace")) & " \"${args[@]}\"\n")
+    setFilePermissions(wrapper, {fpUserRead, fpUserWrite, fpUserExec})
+    let (o, c) = execCmdEx(quoteShellCommand(@["env", "REPRO_STRACE=" & wrapper,
+      "bash", RepoRoot / "scripts" / "write_helper_deps.sh", "foo-helper", app,
+      "--path:" & tree / "libs" / "foolib" / "src", "--path:" & parentDir(outside)]),
+      workingDir = tree)
+    checkpoint o
+    check c != 0
+    check "has no dependency list" in refusal()
 
   test "7: no binary, or no dependency list, is refused":
     build()

@@ -136,15 +136,24 @@ else
         --nimcache:"${cache}" --out:"${cache}/${name}" "${entry}"
   fi
 fi
+# The compiler's search path, for the listing digests (§13 decision 86):
+# `nim dump` prints its configuration as JSON on stdout, after whatever
+# config.nims printed.
+nim dump --dump.format:json --hints:off --warnings:off "$@" "${entry}" \
+  > "${cache}/dump.out" 2>/dev/null || {
+  echo "write_helper_deps: nim dump failed; no list written" >&2
+  exit 1
+}
 module="$(basename "${entry}" .nim)"
 if [ ! -s "${cache}/${module}.deps" ]; then
   echo "write_helper_deps: nim wrote no ${cache}/${module}.deps" >&2
   exit 1
 fi
 python3 - "${cache}" "${module}" "${build}" "${strace_bin}" "${binary}" \
-    "${published}" <<'PY'
+    "${published}" "${entry}" <<'PY'
 import hashlib, json, os, re, shlex, subprocess, sys
-cache, module, build, strace, binary, published = sys.argv[1:7]
+cache, module, build, strace, binary, published, entry = sys.argv[1:8]
+entry = os.path.abspath(entry)
 cache = os.path.abspath(cache)
 build = os.path.abspath(build)
 workspace = os.path.dirname(os.path.abspath(os.getcwd()))
@@ -202,8 +211,35 @@ for i, (src, cmd) in enumerate(compiles):
         if ok and p.startswith(workspace + "/") and p not in traced:
             traced.append(p)
 mutation = os.environ.get("WRITE_HELPER_DEPS_MUTATION", "")
-listings = []   # (directory, sha256 of its sorted entry names)
+listings = []   # (directory, sha256 of its resolution-relevant entry names)
 unresolved = []
+unparsed = []   # successful traced syscalls no pattern below read
+opened = set()  # every path an open returned, decoded
+
+# The compiler's search path (`nim dump`): its lib_paths and lazy paths.
+dump = None
+for line in open(os.path.join(cache, "dump.out"), errors="replace"):
+    if line.startswith("{"):
+        dump = json.loads(line)
+if dump is None:
+    sys.exit("write_helper_deps: nim dump printed no configuration; no list written")
+search = sorted({os.path.normpath(p) for p in dump.get("lib_paths", []) + dump.get("lazyPaths", [])})
+search_set = set(search)
+
+def relevant(d, name):
+    # §13 decision 86: only an entry that can change what the compiler
+    # resolves counts in a listing -- a Nim source, a .nimble or .nims
+    # file, or a directory that is itself on the search path. A .nimcache/
+    # or build/ appearing in a listed directory changes nothing.
+    if mutation == "listing-digests-every-entry":
+        return True           # FALSIFIER: round 8's digest of every name
+    if name.endswith((b".nim", b".nimble", b".nims")):
+        return True
+    return os.path.normpath(os.path.join(d, os.fsdecode(name))) in search_set
+
+def listing_digest(d):
+    names = sorted(n for n in os.listdir(os.fsencode(d)) if relevant(d, n))
+    return hashlib.sha256(b"\n".join(names)).hexdigest()
 
 def decode(text):
     # strace -xx prints a string as \xNN bytes; anything else is literal.
@@ -239,8 +275,7 @@ def keep(kind, p):
         if mutation == "no-listing":
             return            # FALSIFIER
         if p not in [d for d, _ in listings]:
-            names = sorted(os.listdir(os.fsencode(p)))
-            listings.append((p, hashlib.sha256(b"\n".join(names)).hexdigest()))
+            listings.append((p, listing_digest(p)))
         return
     if kind == "exec" and mutation == "no-execve":
         return                # FALSIFIER
@@ -271,6 +306,7 @@ else:
     fchdir_re = re.compile(r'^fchdir\(\d+<' + hexstr + r'>\)\s+=\s+0\s*$')
     cwd_re = re.compile(r'AT_FDCWD<' + hexstr + r'>')
     child_re = re.compile(r'^(?:clone3?|v?fork)\(.*\)\s+=\s+([1-9]\d*)\s*$')
+    success_re = re.compile(r'^(open|openat2?|execve|execveat|getdents(?:64)?|chdir|fchdir)\(.*\)\s+=\s+(\d+)\b')
     events = {}
     for f in os.listdir(cache):
         if f.startswith("front.trace."):
@@ -286,7 +322,9 @@ else:
             hint = cwd_re.search(line)
             if hint: cwd = decode(hint.group(1))
             m = open_re.match(line)
-            if m: keep("read", decode(m.group(1))); continue
+            if m:
+                opened.add(os.path.normpath(decode(m.group(1))))
+                keep("read", decode(m.group(1))); continue
             m = exec_re.match(line)
             if m:
                 keep("exec", os.path.normpath(os.path.join(cwd, decode(m.group(1))))); continue
@@ -301,10 +339,30 @@ else:
             m = fchdir_re.match(line)
             if m: cwd = decode(m.group(1)); continue
             m = child_re.match(line)
-            if m: walk(int(m.group(1)), cwd)
+            if m: walk(int(m.group(1)), cwd); continue
+            # Fail closed on a trace it cannot read (round 9): a traced
+            # syscall that succeeded and matched no pattern above -- an
+            # strace without -xx or -y, another output format -- would
+            # otherwise just be skipped, and its input left unchecked. A
+            # getdents that returned 0 (the end of a listing) reads nothing.
+            m = success_re.match(line)
+            if m and not (m.group(1).startswith("getdents") and m.group(2) == "0"):
+                unparsed.append("pid %d: %s" % (pid, line[:200]))
     for pid in sorted(events):
         if pid not in is_child:
             walk(pid, os.getcwd())
+    if mutation != "accept-unparsed":
+        # Positive control: the compiler always opens the entry module, so
+        # a trace this parser read finds it. Without it the trace was not
+        # read, whatever it said (round 9).
+        if os.path.normpath(entry) not in opened:
+            sys.exit("write_helper_deps: the trace does not show the compiler "
+                     "opening " + entry + " (the positive control); it was not "
+                     "read as strace -ff -y -xx prints it, so no list is written")
+        if unparsed:
+            sys.exit("write_helper_deps: traced syscalls that succeeded but "
+                     "could not be parsed; no list written:\n  " +
+                     "\n  ".join(unparsed[:20]))
     if unresolved:
         sys.exit("write_helper_deps: traced paths in the workspace that are "
                  "not what they were traced as (a name that does not decode "
@@ -323,14 +381,26 @@ def enc(p):
     # line or the encoding -- a backslash, a control byte (a newline), DEL,
     # and every non-ASCII byte -- is written as \xNN; fresh_binary.nim
     # decodes it back to the exact bytes of the name.
+    # A space is escaped too (round 9): the list's fields are split at
+    # spaces, and a name that ends in one must come back with it.
+    raw = os.fsencode(p)
+    if mutation == "trim-edge-spaces":
+        raw = raw.strip(b" ")     # FALSIFIER: round 8's strip() of the line
     out = []
-    for b in os.fsencode(p):
-        if b == 0x5C or b < 0x20 or b >= 0x7F:
+    for b in raw:
+        if b == 0x5C or b <= 0x20 or b >= 0x7F:
             out.append("\\x%02x" % b)
         else:
             out.append(chr(b))
     return "".join(out)
 lines = ["binary-sha256 " + digest]
+# The search path the listing digests were filtered by (decision 86):
+# fresh_binary filters a listing the same way.
+lines += ["searchpath " + enc(p) for p in search]
+# Which entries the listing digests cover. fresh_binary digests a listing
+# the way the list says; only the falsifier writes "every-entry".
+lines.append("listing-filter " + ("every-entry" if mutation == "listing-digests-every-entry"
+                                  else "resolution"))
 lines += ["module " + enc(p) for p in modules]
 lines += ["csource " + enc(p) for p in csources]
 seen = set(modules) | set(csources)

@@ -291,7 +291,10 @@ type
     ## What ``verifyDiscardRecord`` found (decision 81).
     dsInvalid       ## not a valid, enrolled-key-signed intent record
     dsAuthorised    ## a valid intent record, and no valid completion
-    dsCompleted     ## a valid intent record and a valid completion of it
+    dsCompleted     ## a valid intent record and a valid completion of
+                    ## it: every object removed
+    dsCompletedKept ## completed, but some objects were kept with the
+                    ## store (``--keep-store``): those were not discarded
 
 proc completionPathOf*(intentPath: string): string =
   ## ``uninstall-<stamp>-discard-intent.json`` ->
@@ -301,13 +304,115 @@ proc completionPathOf*(intentPath: string): string =
   else:
     intentPath & ".completed"
 
-type DiscardRecordWriter* = proc (path, text: string) {.closure.}
-  ## Writes one file of the discard record durably (write, rename into
-  ## place, sync the directory). The default is ``writeFileAtomic``; a
-  ## test passes one that fails at a chosen step.
+type
+  DiscardRecordWriter* = proc (path, text: string) {.closure.}
+    ## Writes one file of the discard record durably and exclusively. The
+    ## default is ``exclusiveRecordWriter``; a test passes one that fails
+    ## at a chosen step.
+  DiscardSyncer* = proc (removed: seq[string]) {.closure.}
+    ## Makes the removal of ``removed`` durable before the completion
+    ## record is written (§13 decision 87). The default is
+    ## ``syncRemovedObjects``; a test passes one that records the call or
+    ## fails.
+  RecordExistsError* = object of OSError
+    ## A discard record's name is taken: it is never written over.
+
+var
+  ODirectory {.importc: "O_DIRECTORY", header: "<fcntl.h>".}: cint
+  ONoFollow {.importc: "O_NOFOLLOW", header: "<fcntl.h>".}: cint
+
+proc syncDirFd(dir: string) =
+  let fd = posix.open(dir.cstring, O_RDONLY or ODirectory or O_CLOEXEC)
+  if fd < 0:
+    raise newException(OSError, "cannot open " & dir & " to sync it: " &
+      $strerror(errno))
+  defer: discard posix.close(fd)
+  if fsync(fd) != 0:
+    raise newException(OSError, "fsync of " & dir & " failed: " & $strerror(errno))
+
+proc writeFileExclusiveDurable*(path, text: string; mode = 0o600) =
+  ## Writes ``path`` only if no file of that name exists (round 9): the
+  ## bytes go to a temporary file in the same directory, which is fsynced
+  ## and then linked to ``path`` -- ``link(2)`` refuses an existing name,
+  ## where a rename would replace it -- and the directory is fsynced.
+  ## Raises ``RecordExistsError`` when the name is taken.
+  let dir = parentDir(path)
+  let tmp = dir / ("." & extractFilename(path) & ".tmp-" &
+                   $getCurrentProcessId() & "-" & $epochTime().int64)
+  let fd = posix.open(tmp.cstring, O_WRONLY or O_CREAT or O_EXCL or
+                      ONoFollow or O_CLOEXEC, Mode(mode))
+  if fd < 0:
+    raise newException(OSError, "cannot create " & tmp & ": " & $strerror(errno))
+  var ok = false
+  try:
+    var off = 0
+    while off < text.len:
+      let n = posix.write(fd, unsafeAddr text[off], text.len - off)
+      if n <= 0:
+        raise newException(OSError, "writing " & tmp & " failed: " & $strerror(errno))
+      off += n
+    if fsync(fd) != 0:
+      raise newException(OSError, "fsync of " & tmp & " failed: " & $strerror(errno))
+    ok = true
+  finally:
+    discard posix.close(fd)
+    if not ok: discard posix.unlink(tmp.cstring)
+  when mutated("intent-overwrites-existing"):
+    # FALSIFIER: replace an existing record, as a rename does.
+    try: moveFile(tmp, path)
+    except OSError:
+      discard posix.unlink(tmp.cstring)
+      raise
+  else:
+    if link(tmp.cstring, path.cstring) != 0:
+      let e = errno
+      discard posix.unlink(tmp.cstring)
+      if e == EEXIST:
+        raise newException(RecordExistsError, path & " exists; a discard " &
+          "record is never written over")
+      raise newException(OSError, "link to " & path & " failed: " & $strerror(e))
+    discard posix.unlink(tmp.cstring)
+  syncDirFd(dir)
+
+proc exclusiveRecordWriter*(path, text: string) =
+  writeFileExclusiveDurable(path, text, 0o600)
 
 proc atomicRecordWriter*(path, text: string) =
-  writeFileAtomic(path, text, 0o600)
+  ## The default writer (kept under its round-8 name for the tests'
+  ## wrappers): exclusive and durable.
+  exclusiveRecordWriter(path, text)
+
+proc syncfs(fd: cint): cint {.importc, header: "<unistd.h>".}
+
+proc nearestExisting(p: string): string =
+  result = parentDir(p)
+  while result.len > 1 and not dirExists(result):
+    result = parentDir(result)
+  if result.len == 0: result = "/"
+
+proc syncRemovedObjects*(removed: seq[string]) =
+  ## §13 decision 87: before the completion record is written, the removal
+  ## it reports is made durable. For each removed object, the nearest
+  ## directory that still exists above it is fsynced (the unlinks are
+  ## entries of it, or of a directory removed from it), and the filesystem
+  ## that holds it is synced with ``syncfs(2)`` (on btrfs an fsync of the
+  ## log directory does not commit unlinks in another subvolume). Raises on
+  ## any failure: then no completion is written.
+  var done: seq[string]
+  for o in removed:
+    let d = nearestExisting(o)
+    if d in done: continue
+    done.add(d)
+    syncDirFd(d)
+    let fd = posix.open(d.cstring, O_RDONLY or ODirectory or O_CLOEXEC)
+    if fd < 0:
+      raise newException(OSError, "cannot open " & d & ": " & $strerror(errno))
+    let rc = syncfs(fd)
+    let e = errno
+    discard posix.close(fd)
+    if rc != 0:
+      raise newException(OSError, "syncfs of the filesystem holding " & d &
+        " failed: " & $strerror(e))
 
 proc writeOverrideRecord(custody: CustodySite; dir: string;
                          objects: seq[string]; why: string;
@@ -342,8 +447,23 @@ proc writeOverrideRecord(custody: CustodySite; dir: string;
       signature = signText(result.text, keyPath).signature
   createDir(dir)
   setFilePermissions(dir, {fpUserRead, fpUserWrite, fpUserExec})
-  result.path = dir / ("uninstall-" & t.utc.format("yyyyMMdd'T'HHmmss'Z'") &
-                       DiscardIntentSuffix)
+  # A unique name (round 9): the second-resolution stamp, and a sequence
+  # number when a record, its signature or its completion already holds
+  # it. The writer still refuses a name taken in between.
+  let stamp = "uninstall-" & t.utc.format("yyyyMMdd'T'HHmmss'Z'")
+  var n = 0
+  while true:
+    result.path = dir / (stamp & (if n == 0: "" else: "-" & $n) & DiscardIntentSuffix)
+    when mutated("intent-overwrites-existing"):
+      break
+    if not (symlinkExists(result.path) or fileExists(result.path) or
+            dirExists(result.path) or
+            symlinkExists(result.path & DiscardRecordSigExt) or
+            fileExists(result.path & DiscardRecordSigExt) or
+            dirExists(result.path & DiscardRecordSigExt) or
+            fileExists(completionPathOf(result.path))):
+      break
+    inc n
   # The signature goes first and the record last, so a record exists only
   # with its signature beside it. Each write is durable (the file fsynced,
   # renamed into place, its directory fsynced: writeFileAtomic). A failed
@@ -359,6 +479,10 @@ proc writeOverrideRecord(custody: CustodySite; dir: string;
       raise
   try:
     writer(result.path, result.text)
+  except RecordExistsError:
+    # Taken between the choice of name and the write: never written over.
+    try: removeFile(result.path & DiscardRecordSigExt) except OSError: discard
+    raise
   except CatchableError as e:
     let inPlace = fileExists(result.path) and
       (try: readFile(result.path) == result.text except IOError: false)
@@ -423,8 +547,8 @@ proc readSignedRecord(path, schema, expectedKeyHex: string):
   (true, "", text, doc)
 
 proc verifyDiscardRecord*(path: string; expectedKeyHex: string):
-    tuple[status: DiscardStatus; why, keyHex: string; objects: seq[string];
-          removed, kept: seq[string]] =
+    tuple[status: DiscardStatus; why, keyHex: string;
+          objects, removed, kept: seq[string]] =
   ## §13 decisions 64, 73 and 81. ``path`` names the intent record (or its
   ## completion, which leads to the intent). Both must be signed, over
   ## exactly their bytes, by ``expectedKeyHex`` -- the host's enrolled
@@ -463,8 +587,7 @@ proc verifyDiscardRecord*(path: string; expectedKeyHex: string):
   if not fileExists(cpath):
     when mutated("discard-verify-completion-sig-alone"):
       if fileExists(cpath & DiscardRecordSigExt):
-        return (dsCompleted, "", result.keyHex, result.objects,
-                result.objects, @[])
+        return (dsCompleted, "", result.keyHex, result.objects, result.objects, @[])
     result.status = dsAuthorised
     result.why = "no completion record (" & extractFilename(cpath) & "): " &
       "the discard was authorised and is not known to have completed"
@@ -489,25 +612,28 @@ proc verifyDiscardRecord*(path: string; expectedKeyHex: string):
     result.why = cpath & " completes another intent record (its intentSha256 " &
       "is not this intent's)"
     return
-  # The completion's own account of each object (decision 81: "the objects
-  # removed and those kept"). It must account for exactly the intent's
-  # objects, none twice, or it is not a completion of this intent.
+  # Round 9: what was removed and what was kept with the store
+  # (``--keep-store``) come from the completion (decision 81: "the objects
+  # removed and those kept"). Together they must be exactly the intent's
+  # objects, none in both lists, or it is not a completion of this intent;
+  # only the removed ones are reported as discarded.
   for o in done.doc{"removed"}.getElems(): result.removed.add(o.getStr())
   for o in done.doc{"keptWithTheStore"}.getElems(): result.kept.add(o.getStr())
   when not mutated("discard-verify-reports-intent-objects"):
-    var accounted = result.removed & result.kept
-    var wanted = result.objects
-    accounted.sort()
-    wanted.sort()
-    if accounted != wanted:
+    var covered = result.removed & result.kept
+    covered.sort()
+    var want = result.objects
+    want.sort()
+    if covered != want or result.removed.anyIt(it in result.kept):
       result.status = dsInvalid
       result.why = cpath & " does not account for exactly the objects of " &
         "its intent record (removed + kept differ from the intent's objects)"
       return
   else:
+    # FALSIFIER: the intent's objects reported as discarded.
     result.removed = result.objects
     result.kept = @[]
-  result.status = dsCompleted
+  result.status = if result.kept.len == 0: dsCompleted else: dsCompletedKept
 
 proc storeEvidenceGate*(custody: CustodySite; opts: UninstallOptions;
                         ship: proc (): tuple[ok: bool; why: string];
@@ -577,22 +703,35 @@ proc storeEvidenceGate*(custody: CustodySite; opts: UninstallOptions;
 
 proc finishDiscard*(r: var UninstallResult; custody: CustodySite;
                    signer: TextSigner; pending: seq[string];
-                   writer: DiscardRecordWriter = atomicRecordWriter) =
-  ## §13 decision 81: after an uninstall that wrote an intent record, the
-  ## completion record is written only when the uninstall ended clean (no
-  ## drift, no error) and every pending object is gone or kept with the
-  ## store (``--keep-store``). Otherwise the intent stands alone, and
-  ## ``verify-discard-record`` reports "authorised, not completed".
+                   writer: DiscardRecordWriter = atomicRecordWriter;
+                   syncer: DiscardSyncer = syncRemovedObjects) =
+  ## §13 decisions 81, 87 and 88: after an uninstall that wrote an intent
+  ## record, the completion record is written once every pending object is
+  ## gone or kept with the store (``--keep-store``), and the removal is
+  ## made durable (``syncer``). A failure elsewhere in the uninstall (a
+  ## unit, ``/run/repro``) is reported on its own and does not hold the
+  ## completion back (decision 88). An object still in place, or a failed
+  ## sync, leaves the intent alone: ``verify-discard-record`` reports
+  ## "authorised, not completed".
   if r.overrideRecord.len == 0: return
-  when not mutated("discard-completed-despite-errors"):
-    if r.drift.len > 0 or r.errors.len > 0: return
+  when mutated("discard-completion-held-by-cleanup-error"):
+    if r.drift.len > 0 or r.errors.len > 0: return   # FALSIFIER: round 8
   var removed, kept: seq[string]
   for o in pending:
     if o in r.keptEvidence: kept.add(o)
-    elif fileExists(o) or dirExists(o):
+    elif fileExists(o) or dirExists(o) or symlinkExists(o):
       when not mutated("discard-completed-objects-present"):
         return
     else: removed.add(o)
+  when not mutated("discard-completion-skips-sync"):
+    try:
+      syncer(removed)
+    except CatchableError as e:
+      r.errors.add("the store evidence was removed, but making its " &
+        "removal durable failed (" & e.msg & "); no completion record is " &
+        "written, and the intent record " & r.overrideRecord &
+        " stands as authorised, not completed")
+      return
   try:
     let c = writeDiscardCompletion(custody, signer, r.overrideRecord,
                                    r.overrideRecordText, removed, kept, writer)
@@ -630,9 +769,10 @@ proc runAddonUninstall*(opts: UninstallOptions): UninstallResult =
   let evidenceKept = gate.pending
   result.overrideRecord = gate.overrideRecord
   result.overrideRecordText = gate.overrideRecordText
-  # §13 decision 81: the completion record follows a clean removal, on
-  # every way out; an uninstall that ends incomplete leaves the intent
-  # record alone ("authorised, not completed").
+  # §13 decisions 81, 87 and 88: the completion record follows the
+  # removal of the evidence, made durable, on every way out; an uninstall
+  # that stops before it leaves the intent record alone ("authorised, not
+  # completed"), and a later cleanup failure does not hold it back.
   # The key is read now, while it exists: the removal below takes it with
   # /var/lib/repro, and the completion is signed after that.
   var signer: TextSigner

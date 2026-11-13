@@ -167,10 +167,13 @@ commands:
       Check such a record (the intent record, or its completion): each
       signature (FILE.sig) must be over exactly the bytes of FILE, by HEX,
       the host's enrolled attestation key. Exit 0: the discard was
-      authorised and completed. Exit 3: authorised, not completed (the
-      uninstall failed, drifted or stopped after the intent record).
-      Exit 1: it does not verify. Exit 2: usage (no --key). Runs on any
-      machine; the files may be copied off the host.
+      authorised and completed, every object removed. Exit 4: completed,
+      but some objects were kept with the store (--keep-store) and were
+      not discarded; they are listed apart. Exit 3: authorised, not
+      completed (the uninstall stopped before the objects were gone, or
+      their removal could not be made durable). Exit 1: it does not
+      verify. Exit 2: usage (no --key). Runs on any machine; the files may
+      be copied off the host.
   verify [--boot | --after-dpkg]
       Compare every ledger object with the host (report only). --after-dpkg
       (the apt hook): also report packages that now own ledger paths and
@@ -601,8 +604,11 @@ proc runAddonCli*(args: seq[string]): int =
                      " object(s) were to be discarded unshipped:\n")
         for o in v.objects: stdout.write("  " & o & "\n")
         return 3
-      of dsCompleted:
+      of dsCompleted, dsCompletedKept:
         stdout.write(renderCompletedDiscard(v.keyHex, v.removed, v.kept))
+        # Round 9: an object kept with the store (--keep-store) is still on
+        # the host; it was not discarded, and the exit status says so too.
+        if v.kept.len > 0: return 4
         return 0
     of "uninstall":
       let r = runAddonUninstall(parseUninstallArgs(rest))

@@ -402,7 +402,7 @@
       # landing branch and its complete compiler source closure.
       # Bumped 91451f22 -> 84fd76b (2026-10-30, `agents`): the same preallocation
       # for a new ring segment file as nim-shm-gset's shards.
-      url = "github:metacraft-labs/nim-shm-queue/84fd76b174d4868e703ba3d599668ee340e0b6ea";
+      url = "github:metacraft-labs/nim-shm-queue/8dff4ad246ff4b15ef63ddf7d65938af3115f844";
       flake = false;
     };
     nimcrypto-src = {

@@ -938,15 +938,21 @@
 ##                                            objects as discarded, whatever
 ##                                            the completion records (kept
 ##                                            objects reported discarded)
-## ``discard-completed-despite-errors``       an uninstall that drifted or
-##                                            failed after the intent record
-##                                            writes the completion record
+## ``discard-completion-held-by-cleanup-error`` a cleanup failure after
+##                                            the evidence is gone holds
+##                                            the completion back (round 8;
+##                                            decision 88 withdraws it)
 ## ``discard-completed-objects-present``      the completion is written while
 ##                                            a discarded object is still in
 ##                                            place
 ## ``discard-completion-key-read-late``       the completion is signed from
 ##                                            the key file, which the removal
 ##                                            took
+## ``discard-completion-skips-sync``          the completion is written
+##                                            without making the removal
+##                                            durable (decision 87)
+## ``intent-overwrites-existing``             a discard record is written
+##                                            over one of the same name
 ## ``discard-completion-sync-error-swallowed`` a completion record whose
 ##                                            directory sync failed is not
 ##                                            reported
@@ -1598,7 +1604,9 @@ const
                           "discard-verify-skips-intent-digest",
                           "discard-verify-skips-completion-signature",
                           "discard-verify-reports-intent-objects",
-                          "discard-completed-despite-errors",
+                          "discard-completion-held-by-cleanup-error",
+                          "discard-completion-skips-sync",
+                          "intent-overwrites-existing",
                           "discard-completed-objects-present",
                           "discard-completion-key-read-late",
                           "discard-completion-sync-error-swallowed",

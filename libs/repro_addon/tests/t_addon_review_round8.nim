@@ -25,28 +25,38 @@
 ## 7. A pending object still in place at the end of an otherwise clean run:
 ##    no completion (exit 3).
 ##
-## 8. A discard under ``--keep-store``: the completion records the object as
-##    kept; the verdict names it kept and not discarded (exit 0).
+## Round 9 (reprobuild-pm issues 2026-11-13-*; §13 decisions 87, 88):
+##
+## 8. Under ``--keep-store`` the object kept with the store is listed as
+##    kept, not discarded, and the command exits 4.
 ## 9. A completion whose removed + kept lists do not cover the intent's
 ##    objects: invalid (exit 1).
 ## 10. A completion whose signature does not hold: one byte of the record
 ##    changed after signing, an empty ``.sig``, and a record signed by
 ##     another key but naming the enrolled key as its ``attestationKey``:
 ##    each invalid (exit 1).
+## 11. The removal is made durable (the syncer) before the completion is
+##    written, and a failed sync writes no completion: exit 3.
+## 12. A second discard in the same second takes a new name and never
+##    writes over an earlier record; the writer itself refuses a taken
+##    name.
 ##
 ## (Drift or an error after the intent record, and the intent record's own
 ## failed directory sync, are ``t_addon_review_round5`` cases 4 and 5.)
 ##
 ## Falsifying builds (each turns its own case red):
-## ``discard-completion-key-read-late`` (1),
-## ``discard-verify-ignores-completion`` (2, 3; and every other case that
-## checks a status before or without a valid completion: 1, 4, 6, 7),
+## ``discard-completion-key-read-late`` (1, 8: both remove the key file
+## before the completion),
+## ``discard-verify-ignores-completion`` (2, 3; and every case that checks
+## a status other than a plain "completed": 1-4 and 6-12),
 ## ``discard-verify-completion-sig-alone`` (4),
 ## ``discard-completion-sync-error-swallowed`` (5),
 ## ``discard-verify-skips-intent-digest`` (6),
 ## ``discard-verify-skips-completion-signature`` (10),
 ## ``discard-completed-objects-present`` (7),
-## ``discard-verify-reports-intent-objects`` (8, 9).
+## ``discard-verify-reports-intent-objects`` (8, 9),
+## ``discard-completion-skips-sync`` (11),
+## ``intent-overwrites-existing`` (12).
 ##
 ## Mocks: ``ship`` is a stub answering "not acknowledged" -- the sink's
 ## refusal is held against a real sink by ``t_addon_review_round4`` case 2;
@@ -59,7 +69,7 @@
 ## does when the directory's fsync fails after the rename (a failure of the
 ## file system cannot be produced on demand). Nothing else.
 
-import std/[json, os, strutils, unittest]
+import std/[json, os, sequtils, strutils, times, unittest]
 
 import repro_addon/attestation
 import repro_addon/cli
@@ -198,11 +208,13 @@ suite "the A11 code review's eighth round: §13 decision 81":
   test "6: the completion of another intent record does not complete this one":
     let a = scene("digest-a")
     let b = scene("digest-b")
-    # Both on one key, so only the intent digest tells them apart.
+    # Signed with a's key and naming a's object as removed, so the
+    # signature and the object accounting both hold: only the intent
+    # digest (b's, not a's) tells it apart (round 9).
     var signer = loadTextSigner(a.key)
-    removeDir(b.aside)
+    removeDir(a.aside)
     let other = writeDiscardCompletion(a.site, signer, b.gate.overrideRecord,
-      b.gate.overrideRecordText, @[b.aside], @[])
+      b.gate.overrideRecordText, @[a.aside], @[])
     signer.wipe()
     let cpath = completionPathOf(a.gate.overrideRecord)
     copyFile(other.path, cpath)
@@ -210,6 +222,7 @@ suite "the A11 code review's eighth round: §13 decision 81":
     let v = verifyDiscardRecord(a.gate.overrideRecord, a.pub)
     checkpoint v.why
     check v.status == dsInvalid
+    check "completes another intent record" in v.why
     check verifyExit(a) == 1
 
   test "7: an object still in place at the end is not completed":
@@ -223,24 +236,30 @@ suite "the A11 code review's eighth round: §13 decision 81":
     check not fileExists(completionPathOf(s.gate.overrideRecord))
     check verifyExit(s) == 3
 
-  test "8: objects kept with the store (--keep-store) are not reported discarded":
+  # ---- round 9 (reprobuild-pm issues 2026-11-13-*; §13 decisions 87, 88)
+
+  test "8: objects kept with the store are not reported as discarded":
+    # --keep-store: the object stays on the host, and the completion says
+    # it was kept. verify-discard-record lists it apart and exits 4.
     let s = scene("kept")
     var signer = loadTextSigner(s.key)
+    removeFile(s.key)
     var r = resultOf(s)
-    r.keptEvidence = @[s.aside]              # as runAddonUninstall sets it
+    r.keptEvidence = @[s.aside]           # what runAddonUninstall sets
     finishDiscard(r, s.site, signer, s.gate.pending)
     signer.wipe()
-    check dirExists(s.aside)                 # still on the host
+    checkpoint r.errors.join("\n")
+    check dirExists(s.aside)
     check r.completionRecord.len > 0
     let v = verifyDiscardRecord(s.gate.overrideRecord, s.pub)
     checkpoint v.why
-    check v.status == dsCompleted
+    check v.status == dsCompletedKept
     check v.removed.len == 0
     check v.kept == @[s.aside]
     let text = renderCompletedDiscard(v.keyHex, v.removed, v.kept)
     check "0 object(s) discarded unshipped" in text
     check "1 object(s) kept with the store" in text
-    check verifyExit(s) == 0
+    check verifyExit(s) == 4
 
   test "9: a completion that does not account for the intent's objects is invalid":
     let s = scene("unaccounted")
@@ -297,5 +316,68 @@ suite "the A11 code review's eighth round: §13 decision 81":
     check verifyExit(s) == 1
     writeFile(sigPath, sig)
     check verifyExit(s) == 0
+
+
+  test "11: the removal is made durable before the completion, and a failed sync writes none":
+    let s = scene("sync")
+    removeDir(s.aside)
+    var calls: seq[string]
+    let logSync = proc (removed: seq[string]) =
+      calls.add("sync " & $removed.len)
+    let logWrite = proc (path, text: string) =
+      calls.add("write " & extractFilename(path))
+      atomicRecordWriter(path, text)
+    var signer = loadTextSigner(s.key)
+    var r = resultOf(s)
+    finishDiscard(r, s.site, signer, s.gate.pending, logWrite, logSync)
+    checkpoint calls.join(", ")
+    check calls.len == 3
+    check calls.len > 0 and calls[0] == "sync 1"
+    check r.completionRecord.len > 0
+
+    # A failed sync: no completion, "authorised, not completed".
+    let s2 = scene("syncfail")
+    removeDir(s2.aside)
+    let failSync = proc (removed: seq[string]) =
+      raise newException(OSError, "syncfs failed")
+    var r2 = resultOf(s2)
+    finishDiscard(r2, s2.site, signer, s2.gate.pending, atomicRecordWriter, failSync)
+    signer.wipe()
+    checkpoint r2.errors.join("\n")
+    check r2.errors.anyIt("making its removal durable failed" in it)
+    check r2.completionRecord.len == 0
+    check not fileExists(completionPathOf(s2.gate.overrideRecord))
+    check verifyExit(s2) == 3
+
+  test "12: a second discard in the same second never writes over the first":
+    let key = root / "same" / "agent" / "attestation.key"
+    createDir(parentDir(key))
+    let pub = ensureAttestationKey(key).publicKeyHex
+    let site = scratchSite("same", key)
+    discard leaveAside(site, "1-a")
+    let logDir = root / "same" / "log"
+    createDir(logDir)
+    # Earlier records at every name the next 21 seconds would give.
+    let t0 = getTime()
+    var earlier: seq[string]
+    for sec in 0 .. 20:
+      let p = logDir / ("uninstall-" &
+        (t0 + initDuration(seconds = sec)).utc.format("yyyyMMdd'T'HHmmss'Z'") &
+        DiscardIntentSuffix)
+      writeFile(p, "an earlier intent record\n")
+      writeFile(p & DiscardRecordSigExt, "an earlier signature\n")
+      earlier.add(p)
+    let g = storeEvidenceGate(site, override, notAcknowledged, overrideDir = logDir)
+    checkpoint g.errors.join("\n")
+    check g.errors.len == 0
+    check g.overrideRecord notin earlier
+    for p in earlier:
+      check readFile(p) == "an earlier intent record\n"
+      check readFile(p & DiscardRecordSigExt) == "an earlier signature\n"
+    check verifyDiscardRecord(g.overrideRecord, pub).status == dsAuthorised
+    # And the writer itself refuses a taken name.
+    expect RecordExistsError:
+      exclusiveRecordWriter(earlier[0], "over it\n")
+    check readFile(earlier[0]) == "an earlier intent record\n"
 
 removeDir(root)
