@@ -52,6 +52,11 @@
 ##     `repro.lock` entry and leaves `flake.nix` and `flake.lock` alone
 ##     (joining the two refused the whole update, since the node has no
 ##     revision to move).
+##   * `t_lock_update_rewrites_a_deps_array_laid_out_over_lines_whole` — a
+##     `repro.lock` whose `deps` array continues over a second line (valid
+##     TOML) is read whole: the update moves the record on the continuation
+##     line and replaces the whole statement with the writer's one line,
+##     leaving the rest of the document byte-identical.
 ##   * `t_lock_update_leaves_every_file_when_the_relock_fails` — with no nix
 ##     on PATH, and with a real nix that cannot fetch the input's url (the
 ##     origin is moved away after the target was pushed), `flake.nix`, both
@@ -668,6 +673,74 @@ suite "HL-11 M4: repro lock update":
       check depLineOf(after.reproLock).contains("revision = \"" & next & "\"")
       check not depLineOf(after.reproLock).contains("revision = \"" &
         betaSeed & "\"")
+
+  test "t_lock_update_rewrites_a_deps_array_laid_out_over_lines_whole":
+    # reprobuild-pm issue 2026-11-12-the-pre-commit-lock-rewrite-misreads-a-
+    # multi-line-deps-entry-and-writes-invalid-toml. `repro lock update`
+    # located `deps` by its first physical line, as the commit-time re-pin
+    # did, so a lock whose array continued over further lines (valid TOML)
+    # was rewritten with those lines left behind. Here beta's record sits on
+    # a continuation line, and beta is the one the update moves.
+    #
+    # Falsifiability (observed against `agents` a763df539 with the fix's
+    # source changes reverted): the update reads only the first line's self
+    # entry, so beta is "resolved by neither … flake.lock nor … repro.lock";
+    # it exits 2 and repro.lock keeps beta's old pin.
+    if not nf3Prerequisites(
+        "t_lock_update_rewrites_a_deps_array_laid_out_over_lines_whole"):
+      skip("needs git on PATH and a built ./build/bin/repro (named above)")
+    else:
+      discard requireNix()
+      let fx = setupNf2Fixture("lu-spread-deps")
+      defer: removeDir(fx.scratch)
+      isolateNf2Config(fx)
+      defer: releaseNf2Config()
+      publishAll(fx)
+      let betaSeed = fx.seedSha[1]
+      # A flake that does not read beta: beta's one resolution is repro.lock's.
+      writeFile(fx.app / "flake.nix",
+        "{\n" &
+        "  inputs.alpha-src.url = \"git+" & originUrl(fx, "alpha") &
+          "?ref=main\";\n" &
+        "  outputs = _: { };\n" &
+        "}\n")
+      removeFile(lockPath(fx))
+      let locked = nixIn(fx.app, "flake lock")
+      checkpoint(locked.output)
+      check locked.code == 0
+      writeAppReproLock(fx, betaSeed)
+      let canonical = readFile(fx.app / "repro.lock")
+      let line = depLineOf(canonical)
+      let spreadDeps =
+        line.replace("}, { name = \"beta\"", "}\n, { name = \"beta\"")
+      let spread = canonical.replace(line, spreadDeps)
+      check spread.count("\n, { name = \"beta\"") == 1
+      writeFile(fx.app / "repro.lock", spread)
+      commitWithoutHook(fx, "deps laid out over two lines")
+      let next = moveAndPublishSibling(fx, "beta", "revision 2")
+      let before = appFiles(fx)
+      let r = lockUpdate(fx, "beta --to " & next & " --repo-root=" &
+        q(fx.app))
+      checkpoint("lock update -> " & $r.code & "\n" & r.output)
+      check r.code == 0
+      let after = appFiles(fx)
+      checkpoint(after.reproLock)
+      check after.flakeNix == before.flakeNix
+      check after.flakeLock == before.flakeLock
+      # The whole statement was replaced: one line, beta moved, nothing of
+      # the old continuation line left behind or doubled.
+      check "\n, { name" notin after.reproLock
+      check after.reproLock.count("{ name = \"beta\"") == 1
+      check depLineOf(after.reproLock).contains("revision = \"" & next & "\"")
+      check not after.reproLock.contains("revision = \"" & betaSeed & "\"")
+      # And only it: the rest of the document is byte-identical (the fixture
+      # commits a v2 lock, which the first write tags v3).
+      check after.reproLock == spread.replace(spreadDeps,
+        depLineOf(after.reproLock)).replace(
+          "schema = \"" & SolvedGraphLockSchemaV2 & "\"",
+          "schema = \"" & SolvedGraphLockSchemaV3 & "\"")
+      check parseLockedDependencies(after.reproLock).deps.len ==
+        parseLockedDependencies(canonical).deps.len
 
   test "t_lock_update_leaves_every_file_when_the_relock_fails":
     if not nf3Prerequisites(

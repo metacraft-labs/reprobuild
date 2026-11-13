@@ -2665,6 +2665,17 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "",
     singleReason: "no other source shares its compile options"),
   TestSpec(
+    source: "libs/repro_cli_support/tests/t_a_lock_rewrite_that_does_not_parse_is_refused.nim",
+    binary: "build/test-bin/t_a_lock_rewrite_that_does_not_parse_is_refused",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "",
+    singleReason: "module-level statement runs at every start-up: let moved = repeat('4', 40)"),
+  TestSpec(
     source: "libs/repro_cli_support/tests/t_a_pinned_nim_archive_is_verified_against_the_lock.nim",
     binary: "build/test-bin/t_a_pinned_nim_archive_is_verified_against_the_lock",
     defines: @[],
