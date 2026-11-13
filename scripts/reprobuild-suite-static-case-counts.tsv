@@ -67,8 +67,10 @@ libs/repro_addon/tests/t_addon_generation_attestation.nim	nim	6
 libs/repro_addon/tests/t_addon_host_lock_guards_the_switch_and_the_store.nim	nim	8
 libs/repro_addon/tests/t_addon_image_assembly_cleanup.nim	nim	6
 libs/repro_addon/tests/t_addon_image_layout_and_boot.nim	nim	14
+libs/repro_addon/tests/t_addon_image_private_key_scan.nim	nim	7
 libs/repro_addon/tests/t_addon_import_skeleton.nim	nim	9
 libs/repro_addon/tests/t_addon_key_lists_accept_utf8_comments.nim	nim	5
+libs/repro_addon/tests/t_addon_late_recipient_key_pair.nim	nim	4
 libs/repro_addon/tests/t_addon_ledger_and_plan.nim	nim	46
 libs/repro_addon/tests/t_addon_legacy_apt_closure_adoption.nim	nim	9
 libs/repro_addon/tests/t_addon_preflight_needs_a_c_compiler.nim	nim	3
@@ -252,6 +254,7 @@ libs/repro_cas_store/tests/t_repro_cas_store_basic.nim	nim	14
 libs/repro_cli_support/tests/t_a_pinned_nim_archive_is_verified_against_the_lock.nim	nim	4
 libs/repro_cli_support/tests/t_action_cache_root_resolution.nim	nim	3
 libs/repro_cli_support/tests/t_addon_platform_dispatch.nim	nim	7
+libs/repro_cli_support/tests/t_anywhere_plan_digest_covers_what_it_applies.nim	nim	6
 libs/repro_cli_support/tests/t_audit_holds_at_the_gate_rate.nim	nim	3
 libs/repro_cli_support/tests/t_build_report_is_streamed_not_held_in_memory.nim	nim	6
 libs/repro_cli_support/tests/t_build_source_trees_follow_a_membership_edit.nim	nim	2
