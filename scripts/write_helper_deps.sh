@@ -76,7 +76,9 @@
 # recorded), no-listing (listed directories not recorded),
 # drop-unresolved (a traced path that does not decode to a file is
 # skipped, not fatal), accept-unparsed (a trace the writer cannot read,
-# or one without the entry module's open, yields a list anyway). A file
+# or one without the entry module's open, yields a list anyway),
+# suffix-is-failure (a successful line with text after its fd path, such
+# as strace's `(deleted)`, is skipped as a failed syscall). A file
 # <build>/nimcache/<name>/write-helper-deps.mutation selects one too, for
 # a run inside a graph edge, whose environment the engine sets; it is
 # read only when present.
@@ -327,7 +329,15 @@ else:
     # resumed>`). The second half is judged like a whole line: the patterns
     # do not read it, so if it succeeded it fails the list.
     syscall_re = re.compile(r'^(?:<\.\.\. )?([a-z_][a-z0-9_]*)(?:\(| resumed>)')
-    succeeded_re = re.compile(r'\s=\s+(?:\d+|0x[0-9a-f]+)(?:<.*>)?\s*$')
+    # Success is judged by the return value alone, whatever strace prints
+    # after it: an fd path with `(deleted)` after its `>` (the file was
+    # removed by the time strace read the fd), a `-T` duration. A line
+    # that succeeded but carries such a suffix is not one the patterns
+    # read, so it fails the list rather than passing as a failed syscall.
+    succeeded_re = re.compile(r'\s=\s+(?:\d+|0x[0-9a-f]+)(?![0-9a-zA-Z])')
+    if mutation == "suffix-is-failure":
+        # FALSIFIER: a suffix after the fd path read as a failed syscall.
+        succeeded_re = re.compile(r'\s=\s+(?:\d+|0x[0-9a-f]+)(?:<.*>)?\s*$')
     dents_any_re = re.compile(r'^getdents(?:64)?\(\d+<' + hexstr + r'>,.*\)\s+=\s+\d+\s*$')
     readers = {
         "open": [open_re], "openat": [open_re], "openat2": [open_re],
@@ -363,7 +373,9 @@ else:
             sys.exit("write_helper_deps: the strace that ran (" + strace +
                      ") printed lines the writer could not parse (it reads "
                      "only strace -ff -y -xx output); no list written:\n  " +
-                     "\n  ".join(l[:300] for l in unparsed[:10]) +
+                     "\n  ".join(l if len(l) <= 400 else
+                                  l[:200] + " ... " + l[-200:]
+                                  for l in unparsed[:10]) +
                      ("\n  ... and %d more" % (len(unparsed) - 10)
                       if len(unparsed) > 10 else ""))
         if not entry_opened:
