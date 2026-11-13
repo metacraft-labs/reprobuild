@@ -1383,6 +1383,9 @@ const
                           # a revert's hold written to /run, so a
                           # reboot starts the held unit.
                           "revert-hold-runtime-only",
+                          # a revert hold exempted from the loaded-file
+                          # rules by its name, whatever it says.
+                          "revert-hold-any-content",
                           # A13: a state backup or restore runs while a
                           # unit of the set may run.
                           "state-units-not-checked",

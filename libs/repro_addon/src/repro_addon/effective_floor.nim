@@ -1341,6 +1341,18 @@ const ListenerKeys* = "Listen,ListenStream,ListenDatagram,ListenSequentialPacket
   ## (systemd.socket(5)), so the parse-time rules' rerun over the file does
   ## not report the listener the dedicated rule already refused.
 
+proc isAddonHold*(path, content: string): bool =
+  ## ``path`` is one of the add-on's own holds, which the rules about
+  ## loaded files do not judge: the switch's start hold, or a revert's
+  ## persistent hold (§13 decision 126) holding exactly ``RevertHoldText``.
+  ## A file of that name with other content is judged like any drop-in.
+  if path.endsWith("/" & StartHoldName): return true
+  when mutated("revert-hold-any-content"):
+    # Falsifying build: a revert hold exempted by its name alone.
+    path.endsWith("/" & RevertHoldName)
+  else:
+    path.endsWith("/" & RevertHoldName) and content == RevertHoldText
+
 proc writablePlacesOf*(show: ShowProps): seq[string] =
   ## The places the unit can write, as systemd reports its settings
   ## (``floorWritablePlaces`` over ``ReadWritePaths=``, writable binds,
@@ -2103,7 +2115,7 @@ proc effectiveFloorProblems*(e: EffectiveInput): seq[string] =
     # applied at exec time and has no property): the files it loaded may
     # carry only keys the floor knows.
     for (path, content) in e.loaded:
-      if path.endsWith("/" & StartHoldName): continue   # the switch's own hold
+      if isAddonHold(path, content): continue   # the add-on's own hold
       let dropIn = path != e.fragment
       for d in sectionDirectives(content):
         # Only the settings systemd does not report (PermissionsStartOnly=):
@@ -2130,7 +2142,7 @@ proc effectiveFloorProblems*(e: EffectiveInput): seq[string] =
       let ownUnits = e.ownUnits
       let isOwn = proc (u: string): bool = ownUnitOf(u, ownUnits)
       for (path, content) in e.loaded:
-        if path.endsWith("/" & StartHoldName): continue
+        if isAddonHold(path, content): continue
         let why = conflictsRefusal(unit, content, isOwn, half = fhEffective)
         if why.len > 0: rerun("conflicts", path & ", by the floor's rules: " & why)
       if own.len > 0:
@@ -2143,7 +2155,7 @@ proc effectiveFloorProblems*(e: EffectiveInput): seq[string] =
             if why.len > 0: rerun("parse-rule", "by the floor's rules: " & why)
         except EServiceFloor as x: rerun("parse-rule", "by the floor's rules: " & x.msg)
         for (path, content) in e.loaded:
-          if path == e.fragment or path.endsWith("/" & StartHoldName): continue
+          if path == e.fragment or isAddonHold(path, content): continue
           try:
             let why = dropInFloorRefusal(unit, own, content, exParsed,
                                          half = fhEffective)

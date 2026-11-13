@@ -42,7 +42,7 @@
 ## ``observation-instance-judged-alone``, ``statx-errors-absent``,
 ## ``same-identity-ignores-btime``, ``listener-below-writable-allowed``,
 ## ``migration-skips-listeners``, ``start-step-records-first-unit``,
-## ``record-keeps-old-invocation``, ``template-instances-unjudged``,
+## ``record-keeps-old-invocation``, ``revert-hold-any-content``, ``template-instances-unjudged``,
 ## ``template-refusal-forgotten``, ``template-acceptance-per-name``,
 ## ``template-refused-written``, ``revert-holds-any-subject``.
 ##
@@ -263,6 +263,20 @@ suite "round 12: what a revert holds":
                              "the unit search path: e [rule:search-path]"], own, floored)
     check h == @["a.service", "t@.service"]
     check "service" notin h
+
+suite "§13 decision 126: a revert's persistent hold":
+  const HoldPath = "/etc/systemd/system/a.service.d/" & RevertHoldName
+  test "the add-on's own hold is not judged as a drop-in's keys":
+    var e = goodInput()
+    e.loaded.add((path: HoldPath, content: RevertHoldText))
+    check "[rule:file-keys" notin problemsOf(e)
+    check isAddonHold(HoldPath, RevertHoldText)
+  test "a file of that name with other content is judged like any drop-in":
+    var e = goodInput()
+    let other = "[Unit]\nAssertPathExists=!/\nWants=reboot.target\n"
+    e.loaded.add((path: HoldPath, content: other))
+    check not isAddonHold(HoldPath, other)
+    check "[rule:" in problemsOf(e)
 
 suite "round 12, finding 5: the run in one snapshot":
   test "the start, the stop and the state come from the same read":
