@@ -263,7 +263,10 @@ suite "lock coherence reports a difference and never blocks":
       # The lagging claim is lib-a's committed lock's own entry, which only a
       # rewrite of that lock re-pins: ``repro workspace lock`` writes the
       # manifests-DB record alone, so naming it here offered a no-op.
-      check "remedy: `repro lock refresh lib-a`" in syncOut.output
+      # Absolute, so the remedy runs from wherever the advisory was printed.
+      check ("remedy: `repro lock refresh " & quoteShell(fx.libA) & "`") in
+        syncOut.output
+      check "remedy: `repro lock refresh lib-a`" notin syncOut.output
       check "remedy: `repro workspace lock`" notin syncOut.output
       # Says plainly what the build will use, rather than leaving it inferred.
       check "the build uses the CHECKOUT" in syncOut.output
@@ -304,8 +307,11 @@ suite "lock coherence reports a difference and never blocks":
       # Remedies cheapest-first: re-pin, then move the checkout, then the
       # extra-sibling override LAST. The re-pin names the command that
       # rewrites lib-a's committed lock, whose own entry is the claim.
-      let repin = syncOut.output.find("`repro lock refresh lib-a` — re-pin")
+      let repin = syncOut.output.find("`repro lock refresh " &
+        quoteShell(fx.libA) & "` — re-pin")
       let point = syncOut.output.find("point the")
+      check ("`git -C " & quoteShell(fx.libA) & " checkout <locked-revision>`") in
+        syncOut.output
       let sibling = syncOut.output.find("develop --into")
       check repin >= 0
       check point > repin
@@ -407,8 +413,10 @@ suite "lock coherence reports a difference and never blocks":
         " contains every claim") in syncOut.output
       check "stale: lib-b/repro.lock, lib-c/repro.lock" in syncOut.output
       # The re-pin that actually rewrites a committed lock's sibling pin.
-      check "remedy: `repro lock refresh lib-b`" in syncOut.output
-      check "remedy: `repro lock refresh lib-c`" in syncOut.output
+      check ("remedy: `repro lock refresh " & quoteShell(fx.libB) & "`") in
+        syncOut.output
+      check ("remedy: `repro lock refresh " & quoteShell(fx.libC) & "`") in
+        syncOut.output
       check "remedy: `repro workspace lock`" notin syncOut.output
 
       # The same finding from ``status`` and ``check`` (the issue's surface).
@@ -509,3 +517,50 @@ suite "lock coherence reports a difference and never blocks":
       check ("one history: " & side & ", claimed by lib-a/repro.lock," &
         " contains every claim") in syncOut.output
       check "stale: lib-b/repro.lock, lib-c/repro.lock" in syncOut.output
+
+  test "t_lock_coherence_check_reports_the_pushed_repos_dependency_lag":
+    ## The issue's second observation: a push of reprobuild whose own lock
+    ## pinned nim-shm-queue at an ANCESTOR of the nim-shm-queue checkout did
+    ## not list that lag in the gate's advisory. The gate's scope is the pushed
+    ## repo's dependency closure, which includes every dependency its committed
+    ## lock records, so the dependency's lag must appear from ``check`` exactly
+    ## as it does from ``status`` — informational, with the pushed repo's lock
+    ## named stale and its re-pin offered.
+    let gitBin = findExe("git")
+    if gitBin.len == 0:
+      skip("git is not on PATH")
+    else:
+      let fx = setupFixture(gitBin, "dependency-lag")
+      defer: removeDir(fx.scratch)
+
+      let pinned = headSha(gitBin, fx.libA)
+      let checkoutA = commitInto(gitBin, fx.libA, "moved.txt", "moved\n")
+      check checkoutA != pinned
+      # lib-b (the pushed repo) depends on lib-a and pins it one commit back;
+      # the lock is committed and published, the state a real push is in.
+      writeFile(fx.libB / "repro.lock",
+        committedLock([depInline("lib-a", "../lib-a", pinned),
+                       depInline("lib-b", ".", headSha(gitBin, fx.libB))]))
+      let pushedB = commitInto(gitBin, fx.libB, "repro.lock",
+        readFile(fx.libB / "repro.lock"))
+      discard git(gitBin, fx.libB, "push origin dev")
+
+      let refsFile = fx.scratch / "pushed-refs-b.txt"
+      writeFile(refsFile, "refs/heads/dev " & pushedB &
+        " refs/heads/dev 0000000000000000000000000000000000000000\n")
+      let checkOut = invokeCheck(fx, fx.libB, refsFile)
+      let braceIdx = checkOut.output.find('{')
+      check braceIdx >= 0
+      if braceIdx >= 0:
+        let parsed = parseJson(checkOut.output[braceIdx .. ^1])
+        var noticeText = ""
+        for notice in parsed["notices"]:
+          noticeText.add(notice.getStr() & "\n")
+        checkpoint(noticeText)
+        check "lock coherence: 0 needing attention, 1 informational" in
+          noticeText
+        check ("lib-a: checked out " & checkoutA) in noticeText
+        check ("lib-b/repro.lock claims " & pinned & " (ancestor)") in
+          noticeText
+        check ("remedy: `repro lock refresh " & quoteShell(fx.libB) & "`") in
+          noticeText

@@ -13999,7 +13999,8 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
           (if item.reason.len > 0: " reason=" & item.reason else: "") &
           providerCompileInvocationSummary())
       if providerCompileResult.hasFailedActions():
-        raise newException(OSError, providerCompileFailure(providerCompileResult))
+        raise newException(OSError, providerCompileFailureWithLog(providerCompileResult,
+          providerArtifactPath))
       if not fileExists(extendedPath(providerArtifactPath)):
         raise newException(IOError,
           "provider compile edge did not write artifact: " & providerArtifactPath)
@@ -31802,7 +31803,8 @@ proc prepareBuildGraphInspection(target: string; mode: ToolProvisioningMode;
     # than just its own last consultation.
     noteProviderCompileConsultation(providerCompileResult)
     if providerCompileResult.hasFailedActions():
-      raise newException(OSError, providerCompileFailure(providerCompileResult))
+      raise newException(OSError, providerCompileFailureWithLog(providerCompileResult,
+          providerArtifactPath))
     # Re-derived from the engine's own decision now that the hand-written
     # freshness gate is gone: the edge was scheduled, and the engine either
     # restored its outputs from the CAS (``asCacheHit``) or accepted the
@@ -32040,7 +32042,8 @@ proc refreshRecipeProviderSnapshot(target: string;
     # than just its own last consultation.
     noteProviderCompileConsultation(providerCompileResult)
     if providerCompileResult.hasFailedActions():
-      raise newException(OSError, providerCompileFailure(providerCompileResult))
+      raise newException(OSError, providerCompileFailureWithLog(providerCompileResult,
+          providerArtifactPath))
     if not fileExists(extendedPath(providerArtifactPath)):
       raise newException(IOError,
         "provider compile edge did not write artifact: " & providerArtifactPath)
@@ -45791,7 +45794,16 @@ proc classifyClaim(identity: GitToolIdentity;
     return crDescendant
   crUnreachable
 
-proc repinRemedies(finding: CoherenceFinding;
+proc remedyPath(workspaceRoot, relPath: string): string =
+  ## A workspace-relative path as a remedy prints it: absolute and
+  ## shell-quoted, so the command is runnable where it is printed. The
+  ## advisory is printed by ``sync`` / ``status`` / ``check`` from any working
+  ## directory (``--workspace-root``, or a hook running inside one repo), and a
+  ## relative ``lib-b`` resolved against that directory names the wrong repo or
+  ## nothing.
+  quoteShell(absolutePath(workspaceRoot / relPath).replace('\\', '/'))
+
+proc repinRemedies(finding: CoherenceFinding; workspaceRoot: string;
                    relations: set[CoherenceRelation]; dbText: string;
                    committedTarget, suffix: string): seq[string] =
   ## One re-pin remedy per lock that needs re-pinning, naming the command that
@@ -45814,13 +45826,15 @@ proc repinRemedies(finding: CoherenceFinding;
     if claim.lockDir.len > 0:
       if claim.lockDir in seen: continue
       seen.add(claim.lockDir)
-      result.add("`repro lock refresh " & claim.lockDir & "` — re-pin " &
+      result.add("`repro lock refresh " &
+        remedyPath(workspaceRoot, claim.lockDir) & "` — re-pin " &
         claim.source & " at " & committedTarget & ", then commit it" & suffix)
     elif not dbOffered:
       dbOffered = true
       result.add(dbText & suffix)
 
-proc coherenceRemedies(finding: CoherenceFinding): seq[string] =
+proc coherenceRemedies(finding: CoherenceFinding;
+                       workspaceRoot: string): seq[string] =
   ## Cheapest first. Every entry is something the operator can actually run;
   ## the ordering is the cost of doing it, not the tidiness of the result.
   var worst = crMatch
@@ -45835,25 +45849,25 @@ proc coherenceRemedies(finding: CoherenceFinding): seq[string] =
     # has fast-forwarded to the revision that contains every claim.
     @["`repro sync` — the checkout is behind the claim and fast-forwards to it"] &
       (if finding.commonRevision.len > 0:
-        repinRemedies(finding, {}, "`repro workspace lock` — then re-pin " &
+        repinRemedies(finding, workspaceRoot, {}, "`repro workspace lock` — then re-pin " &
           "the lagging lock at the fast-forwarded checkout",
           "the fast-forwarded checkout", "")
       else: @[])
   of crAncestor:
     @["nothing, if the lock is simply older than your work"] &
-      repinRemedies(finding, {crAncestor},
+      repinRemedies(finding, workspaceRoot, {crAncestor},
         "`repro workspace lock` — re-pin the lagging lock at the checkout",
         "the checkout", "")
   of crNotFetched:
     @["`repro sync` — fetch the claimed revision so it can be compared"] &
-      repinRemedies(finding, {crAncestor, crNotFetched},
+      repinRemedies(finding, workspaceRoot, {crAncestor, crNotFetched},
         "`repro workspace lock` — re-pin the lock at the checkout",
         "the checkout", " if the claimed revision is gone for good")
   of crUnreachable:
-    repinRemedies(finding, {crAncestor, crUnreachable, crNotFetched},
+    repinRemedies(finding, workspaceRoot, {crAncestor, crUnreachable, crNotFetched},
         "`repro workspace lock` — re-pin the lagging lock at the checkout",
         "the checkout", ", if the checkout is the history you want") &
-      @["`git -C " & finding.path & " checkout <locked-revision>` — point the " &
+      @["`git -C " & remedyPath(workspaceRoot, finding.path) & " checkout <locked-revision>` — point the " &
         "checkout at the locked revision instead",
       "materialize a second checkout and `repro develop --into` it — last " &
         "resort, when both revisions must exist at once"]
@@ -46085,7 +46099,7 @@ proc collectLockCoherence*(identity: GitToolIdentity;
     if allMatch and not finding.claimsDisagree:
       continue
 
-    finding.remedies = coherenceRemedies(finding)
+    finding.remedies = coherenceRemedies(finding, workspaceRoot)
     if finding.interrupting: inc result.interrupting
     else: inc result.informational
     result.findings.add(finding)
@@ -92153,7 +92167,8 @@ proc solverInputsFromCompiledProvider(projectDir: string;
           suppressTrace: true,
           skipCacheHitEvidence: true))
         if compiled.hasFailedActions():
-          raise newException(OSError, providerCompileFailure(compiled))
+          raise newException(OSError, providerCompileFailureWithLog(compiled,
+          providerArtifactPath))
         let lockProviderConsistency = providerCompileConsistencyAfterExecution(
           plan, providerArtifactPath)
         if not lockProviderConsistency.fresh:

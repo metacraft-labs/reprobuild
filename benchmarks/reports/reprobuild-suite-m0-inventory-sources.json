@@ -44474,7 +44474,7 @@
       "requiresReproBinary": true,
       "source": "tests/integration/t_lock_coherence_reports_the_diff_advisory_only.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 2,
+      "staticCaseCount": 3,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -57288,8 +57288,8 @@
       "owner": "tests/unit",
       "requiresReproBinary": true,
       "source": "tests/unit/t_provider_compile_failure_says_how_the_action_ended.nim",
-      "sourceSuiteCount": 2,
-      "staticCaseCount": 5,
+      "sourceSuiteCount": 3,
+      "staticCaseCount": 6,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
