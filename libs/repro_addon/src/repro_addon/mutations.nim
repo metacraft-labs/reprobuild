@@ -1334,6 +1334,10 @@ const
                           # the start step records a template's
                           # directory for its observation instance.
                           "start-step-records-first-unit",
+                          # a start in a switch leaves the recorded
+                          # InvocationID of an unchanged directory as it
+                          # was.
+                          "record-keeps-old-invocation",
                           # A13: a state backup or restore runs while a
                           # unit of the set may run.
                           "state-units-not-checked",

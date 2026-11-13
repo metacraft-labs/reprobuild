@@ -1548,7 +1548,16 @@ proc recordCreatedDirs*(stateDir, unit: string;
   for (path, u) in pending:
     when not mutated("created-dirs-per-step"):
       if u != unit: continue
-    if path in t: continue
+    if path in t:
+      # The same directory, now the run this start began (§13 decision
+      # 82): its InvocationID is recorded, so a tree made at the path later
+      # in this same run is not taken as a new run's (A9 review round 12).
+      when not mutated("record-keeps-old-invocation"):
+        if invocation.len > 0 and t[path].invocation != invocation and
+            flooredKey(t[path].unit) == flooredKey(unit):
+          t[path].invocation = invocation
+          t[path].unit = unit
+      continue
     let now = identityOf(path)
     if now.exists and now.btime != 0:
       t[path] = entryOf(u, now, invocation)
@@ -1587,11 +1596,12 @@ proc recordStartedSince*(stateDir: string;
   for path in order:
     let now = identityOf(path)
     if not now.exists or now.btime == 0: continue
+    var same = false
     if path in t:
       let c = t[path]
       # Kept while it is still that directory; a stale entry (the unit's
       # restart made it again) is replaced.
-      if c.dev == now.dev and c.ino == now.ino and c.btime == now.btime: continue
+      same = c.dev == now.dev and c.ino == now.ino and c.btime == now.btime
     var best = ""
     var bestId = ""
     when mutated("start-step-records-first-unit"):
@@ -1607,6 +1617,16 @@ proc recordStartedSince*(stateDir: string;
            (id.len > 0 or bestId.len == 0)):
         best = u
         bestId = id
+    if same:
+      # The same directory: only the run it now belongs to is refreshed
+      # (§13 decision 82), so a later tree in this run is not a new run's.
+      when not mutated("record-keeps-old-invocation"):
+        if bestId.len > 0 and t[path].invocation != bestId and
+            flooredKey(t[path].unit) == flooredKey(best):
+          t[path].invocation = bestId
+          t[path].unit = best
+          changed = true
+      continue
     t[path] = entryOf(best, now, bestId)
     changed = true
   if changed: writeCreatedDirs(stateDir, t)

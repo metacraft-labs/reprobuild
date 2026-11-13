@@ -26,7 +26,8 @@
 ## ``dependency-starts-unrecorded``, ``view-two-calls``,
 ## ``observation-instance-judged-alone``, ``statx-errors-absent``,
 ## ``same-identity-ignores-btime``, ``listener-below-writable-allowed``,
-## ``migration-skips-listeners``, ``start-step-records-first-unit``.
+## ``migration-skips-listeners``, ``start-step-records-first-unit``,
+## ``record-keeps-old-invocation``.
 ##
 ## Mocks: as in ``t_addon_floor_round10``: systemd's view and the path
 ## identities are stand-ins built from what systemd and statx report, since
@@ -190,6 +191,35 @@ suite "round 12 (§13 decision 82): recorded at the start step":
     check r.getOrDefault("/run/sk").unit == "sk.service"
     check "/run/gone" notin r
   removeDir(state)
+
+suite "round 12 (§13 decision 82): a start refreshes the run on the record":
+  test "a switch's start records its run for an unchanged directory, so a later tree in that run is refused":
+    let state = createTempDir("a9r12-", "-inv")
+    defer: removeDir(state)
+    createDir(state / "addon")
+    let ident = proc (p: string): PathIdentity = (true, 4'u64, 5'u64, 77'i64)
+    # Recorded for run I1 (an acceptance of a remade directory) ...
+    recordCreatedDirs(state, "a.service", [("/var/lib/a", "a.service")], ident,
+                      invocation = "I1")
+    check readCreatedDirs(state)["/var/lib/a"].invocation == "I1"
+    # ... then this switch restarted the unit: run I2, the same directory.
+    recordCreatedDirs(state, "a.service", [("/var/lib/a", "a.service")], ident,
+                      invocation = "I2")
+    let r = readCreatedDirs(state)
+    check r["/var/lib/a"].invocation == "I2"
+    # A tree made later in run I2 has the same InvocationID as the record.
+    check "the same InvocationID" in systemdRecreated("/var/lib/a", "a.service",
+      ["/var/lib/a"], r, false, view(Start + 5 * Ms, id = "I2"))
+  test "so does the start step for a unit it did not start by name":
+    let state = createTempDir("a9r12-", "-inv2")
+    defer: removeDir(state)
+    createDir(state / "addon")
+    let ident = proc (p: string): PathIdentity = (true, 4'u64, 5'u64, 77'i64)
+    recordCreatedDirs(state, "t@1.service", [("/run/t", "t@1.service")], ident,
+                      invocation = "I1")
+    recordStartedSince(state, [("/run/t", "t@1.service")],
+      proc (u: string): tuple[id: string; start: int64] = ("I3", Start), ident)
+    check readCreatedDirs(state)["/run/t"].invocation == "I3"
 
 suite "round 12, finding 5: the run in one snapshot":
   test "the start, the stop and the state come from the same read":
