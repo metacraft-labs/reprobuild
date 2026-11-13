@@ -14,6 +14,10 @@
 ##    (``quarantined``) with no new apply attempt;
 ## 5. a fixed sequence 4 applies, and the quarantine is gone.
 ##
+## Falsifying mutation (``REPRO_ADDON_MUTATION=agent-ignores-quarantine``):
+## the tick never reads the quarantine record, so step 4's later tick
+## retries sequence 3 instead of reporting it ``quarantined``: red.
+##
 ## Opt-in: ``REPRO_ADDON_VM_GATES=1`` (``just e2e_addon_agent_end_to_end``).
 ##
 ## *Mocking.* None: real units, a real HTTP origin, real signatures.

@@ -743,14 +743,17 @@ proc runAgentTick*(cfg: AgentConfig; deps: AgentDeps): AgentOutcome =
           errorCode: "issued_at_regressed")
 
   # -- PAUSE (a local operator rollback, spec §9.3 of the add-on) --------
-  let pause = readPauseMarker(cfg.stateDir)
-  if pause.paused:
-    return AgentOutcome(kind: aoPaused, target: cfg.target,
-      sequence: selected.sequence, deploymentId: selected.deploymentId,
-      message: "paused by a local rollback to generation " &
-        pause.generation & " (operator " & pause.operator & ", " & pause.at &
-        "); `repro system addon resume` lets the agent converge again",
-      errorCode: "paused")
+  # The falsifying build ``agent-ignores-pause`` leaves this check out, so
+  # the gates that rely on it (threat model C64, T30) must go red.
+  when not agentMutated("agent-ignores-pause"):
+    let pause = readPauseMarker(cfg.stateDir)
+    if pause.paused:
+      return AgentOutcome(kind: aoPaused, target: cfg.target,
+        sequence: selected.sequence, deploymentId: selected.deploymentId,
+        message: "paused by a local rollback to generation " &
+          pause.generation & " (operator " & pause.operator & ", " & pause.at &
+          "); `repro system addon resume` lets the agent converge again",
+        errorCode: "paused")
 
   # -- MONOTONICITY ------------------------------------------------------
   let lastApplied = readLastAppliedSequence(cfg)
@@ -767,14 +770,17 @@ proc runAgentTick*(cfg: AgentConfig; deps: AgentDeps): AgentOutcome =
   # A reverted deployment is not retried: each retry would take the
   # service down for the confirmation timeout again. Only a strictly
   # higher sequence moves on (and clears the record when it applies).
-  let q = readQuarantine(cfg)
-  if q.found and selected.sequence <= q.sequence:
-    return AgentOutcome(kind: aoRolledBack, target: cfg.target,
-      sequence: selected.sequence, deploymentId: selected.deploymentId,
-      message: "deployment " & q.deploymentId & " at sequence " &
-        $q.sequence & " was reverted and is quarantined; publish a higher " &
-        "sequence to move on",
-      errorCode: "quarantined")
+  # The falsifying build ``agent-ignores-quarantine`` leaves this check
+  # out, so the gates that rely on it (threat model C64) must go red.
+  when not agentMutated("agent-ignores-quarantine"):
+    let q = readQuarantine(cfg)
+    if q.found and selected.sequence <= q.sequence:
+      return AgentOutcome(kind: aoRolledBack, target: cfg.target,
+        sequence: selected.sequence, deploymentId: selected.deploymentId,
+        message: "deployment " & q.deploymentId & " at sequence " &
+          $q.sequence & " was reverted and is quarantined; publish a " &
+          "higher sequence to move on",
+        errorCode: "quarantined")
 
   # -- SECRETS (before the apply, because the apply consumes them) -------
   #
