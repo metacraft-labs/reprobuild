@@ -56,6 +56,7 @@
 ## Falsifying builds (each red here): ``revert-refuses-on-floor``,
 ## ``revert-hold-runtime-only`` (the held unit starts at the reboot),
 ## ``revert-holds-any-subject`` (a hold for every service),
+## ``cleared-hold-not-started`` (a held unit stays down after its hold goes),
 ## ``same-identity-ignores-btime``, ``listener-below-writable-allowed``,
 ## ``dependency-starts-unrecorded``, ``observation-instance-judged-alone``,
 ## ``template-instances-unjudged`` (the observation instance's record is

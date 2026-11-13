@@ -6188,6 +6188,24 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
             for d in [PersistentUnitDir, RuntimeUnitDir]:
               try: revertStale.add(clearStaleHolds(RevertHoldName, d))
               except OSError: discard
+            # A unit a revert held is started now if the generation enables
+            # it and it is not running: the hold, not the unit, kept it down,
+            # and an unchanged unit has no transition of its own (§13
+            # decision 126).
+            when not mutated("cleared-hold-not-started"):
+              for h in revertStale:
+                var u = extractFilename(parentDir(h))
+                if u.endsWith(".d"): u.setLen(u.len - 2)
+                if '@' in u: continue      # a template: its instances start by their own triggers
+                var planned = false
+                for t in stepTransitions:
+                  if t.unit == u: planned = true
+                if planned: continue
+                for rr in composed.resources:
+                  if rr.kind == srkSystemdSystemUnit and rr.suName == u and rr.suEnabled and
+                      not unitIsActive(u):
+                    stepTransitions.add(Transition(unit: u, verb: tvStart,
+                      reason: "a revert held it; its hold is cleared"))
             if startHolds.len > 0 or stale.len > 0 or revertStale.len > 0:
               try: daemonReload()
               except CatchableError as ex: problems.add(ex.msg)
