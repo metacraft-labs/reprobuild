@@ -38,7 +38,8 @@
 ## (R7-4), ``dependency-links-unread`` (R7-5, R7-7),
 ## ``requirement-name-not-reserved`` (R7-6), ``privileged-daemons-unread``
 ## (decision 58), ``restore-requirement-skips-closure`` (decision 60);
-## round 7: ``boot-closure-reads-generation-dropins`` (P60-2),
+## round 7: ``narrowed-live-set`` (a switch that writes no unit file),
+## ``boot-closure-reads-generation-dropins`` (P60-2),
 ## ``polkit-subject-rebind-trusted`` (P58-1, P58-2 and the other binding
 ## forms), ``reissue-skips-targets`` and ``reissue-skips-sockets``
 ## (decision 79, each on its own case).
@@ -1155,6 +1156,27 @@ suite "the requirement follows the distribution's dependency closure (decision 6
       "ProtectSystem=strict\nNoNewPrivileges=yes\nUser=app\n" &
       "ReadWritePaths=/var/lib/other\nExecStart=/bin/true\n")
     check "nofile.service" in carriedRequirementUnits(parseSystemProfile(starter), d, root)
+
+suite "the switch judges its services in every switch (round 7, finding 1)":
+  test "a switch that writes no unit file holds, reloads and judges the services":
+    # A switch changing only a file a confined service depends_on (or its
+    # credentials) restarts it at step 7: carried state on the host, the
+    # services are judged anyway.
+    let d = liveCheckAtStep6(anyUnitChange = false, replaying = false,
+                             recordOnly = false, ["a.service", "b.service"])
+    check d.reload
+    check d.judged == @["a.service", "b.service"]
+
+  test "control: no services to judge and no unit change, no reload":
+    let d = liveCheckAtStep6(false, false, false, [])
+    check not d.reload
+    check d.judged.len == 0
+
+  test "control: a unit change reloads; a record-only switch judges nothing":
+    check liveCheckAtStep6(true, false, false, []).reload
+    let r = liveCheckAtStep6(true, false, true, ["a.service"])
+    check r.reload
+    check r.judged.len == 0
 
 suite "the boot closure leaves the generation's drop-ins out (round 7)":
   proc bootHost(root: string) =

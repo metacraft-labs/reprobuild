@@ -181,17 +181,19 @@ ALT_TARGETS = {
 }
 
 
-# Round 7 of the A13 review.
+# Round 7 of the A13 review. The add-on build narrowed-live-set has no VM
+# cell: in the adopt gate's every-switch case a dependency restart's own
+# unit driver reloads systemd at step 3, so the case cannot tell the build
+# from the product; its falsifier is the unit case
+# t_addon_carried_state_fails_closed "a switch that writes no unit file
+# holds, reloads and judges the services".
 EXPECT.update({
-    "mutnarrowed": ("e2e_addon_adopt_hand_configured_service", "red",
-                    "add-on build narrowed-live-set"),
     "mutreissuetgt": ("e2e_addon_to_reproos_conversion_keeps_state", "red",
                       "engine build reissue-skips-targets"),
     "mutreissuesock": ("e2e_addon_to_reproos_conversion_keeps_state", "red",
                        "engine build reissue-skips-sockets"),
 })
 TARGET.update({
-    "mutnarrowed": "a switch that changes only a file the service depends_on",
     "mutreissuetgt": "decision 79, target:",
     "mutreissuesock": "decision 79, socket:",
 })
@@ -252,11 +254,6 @@ def on_target_rec(kind, rec):
         # Started, and ran as root: its ExecStartPre's uid marker reads 0.
         lc = rec.get("liveCrossCheck", {})
         return on_target(kind, steps) and lc.get("ranAsRoot") is True
-    if kind == "mutnarrowed":
-        # The restart ran the loaded root definition: the uid marker reads 0.
-        ev = rec.get("everySwitch", {})
-        return (on_target(kind, steps) and ev.get("ranAsRoot") is True and
-                ev.get("loadedUserBefore") == "root")
     if kind == "mutadoptprofile":
         # The silent revert itself: the gate reached the revert step (its
         # record says so) and the old profile's switch ran (no scope or drift

@@ -3482,6 +3482,25 @@ proc revertOverwritesRestored*(purpose: string; ledgerOwns, regularFile: bool;
 proc liveReachProfile(resources: openArray[SystemResource]): SystemProfile =
   for r in resources: result.resources.add(r)
 
+proc liveCheckAtStep6*(anyUnitChange, replaying, recordOnly: bool;
+                       liveUnits: openArray[string]):
+    tuple[reload: bool; judged: seq[string]] =
+  ## Step 6's decision (spec §11.1, §13 decision 59): whether the switch
+  ## holds, reloads and judges, and the services it judges. Every switch
+  ## that writes a unit file, replays, or has services to judge (carried
+  ## state on the host) reloads; a switch that is not record-only judges
+  ## every service of ``liveUnits`` -- also a switch that writes no unit
+  ## file but restarts one whose ``depends_on`` file or credentials changed
+  ## (A13 review round 7, finding 1). The reload the switch relies on is
+  ## this one: a unit driver's own reload in step 3 (the dependency restart
+  ## the planner dispatches rewrites the unit file and reloads) is incidental
+  ## to how that driver writes, and a credentials-only restart has none.
+  let every =
+    when mutated("narrowed-live-set"): false
+    else: liveUnits.len > 0
+  result.reload = anyUnitChange or replaying or every
+  if result.reload and not recordOnly: result.judged = @liveUnits
+
 proc liveReachUnitsFor(opts: AddonApplyOptions;
                        resources: openArray[SystemResource]): seq[string] =
   ## The services the carried-state cross-check judges for this switch
@@ -5535,10 +5554,9 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
   # an operator's reload after a host generator changed its output
   # included. So wherever the check has units to judge, the switch holds
   # them, reloads, and judges them before step 7, whatever else it changes
-  # (A13 review round 7, finding 1).
-  let liveCheckEverySwitch =
-    when mutated("narrowed-live-set"): false
-    else: preWriteLiveUnits.len > 0
+  # (A13 review round 7, finding 1; ``liveCheckAtStep6``).
+  let step6 = liveCheckAtStep6(anyUnitChange, replaying, opts.recordOnly,
+                               preWriteLiveUnits)
   let sysctlKeys = block:
     var keys: seq[string]
     for p in plans:
@@ -5730,7 +5748,7 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
       # the daemon reload, sysctl through the host's own service, and
       # the kernel values a removed sysctl resource leaves behind.
       try:
-        if anyUnitChange or replaying or liveCheckEverySwitch:
+        if step6.reload:
           # The start holds go in before the reload: from it until the
           # effective-unit check passes, no floored unit can start (a
           # socket, a timer, D-Bus or a Wants= would otherwise start it on
@@ -5739,7 +5757,7 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
             liveUnits =
               when mutated("live-units-chosen-after-writes"):
                 liveReachUnitsFor(opts, composed.resources)
-              else: preWriteLiveUnits
+              else: step6.judged
             startHolds = writeStartHolds(composed.resources, liveUnits)
           daemonReload()
           # From here on every start runs the generation's definitions:

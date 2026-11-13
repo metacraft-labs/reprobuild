@@ -620,9 +620,17 @@ proc runBase(m: SnapshotMirror; b: BaseImage; record: JsonNode): seq[string] =
     # only a file the service ``depends_on``: no unit file changes, and the
     # service is restarted (§7.3). The switch must hold the service, reload,
     # and judge it as systemd then loads it before restarting it -- so it
-    # never runs as root. Falsifier: the add-on build narrowed-live-set (the
-    # set judged, held and reloaded for only in a switch that writes a unit
-    # file), under which the restart runs the loaded root definition.
+    # never runs as root. Not a falsifier cell: under the add-on build
+    # narrowed-live-set (the set judged, held and reloaded for only in a
+    # switch that writes a unit file) the restart still runs the on-disk
+    # definition, because the planner dispatches a dependency restart's own
+    # unit driver, which rewrites the unit file and reloads systemd at step
+    # 3 (posix_system_driver.applySystemdSystemUnit; measured at 66235698d0
+    # with every systemctl call of the switch logged). That reload is
+    # incidental to how the driver writes; the decision the fix relies on
+    # is tested in t_addon_carried_state_fails_closed (liveCheckAtStep6),
+    # whose falsifier narrowed-live-set is. This case stays as the
+    # outcome: the restart never runs the definition the operator removed.
     let depUnit = "a13r7-dep.service"
     let depFile = "/etc/a13r7/dep.conf"
     proc depProfile(content: string): string =
@@ -656,13 +664,28 @@ proc runBase(m: SnapshotMirror; b: BaseImage; record: JsonNode): seq[string] =
       ".d/10-root.conf && systemctl daemon-reload && rm -rf " &
       "/etc/systemd/system/" & depUnit & ".d")
     let loadedUser = g.run("systemctl show -P User " & depUnit).strip()
+    # Diagnosis (A13 round 7): what reloaded systemd, if anything, during
+    # the switch, and what systemd had loaded before and after it.
+    let needReload0 = g.run("systemctl show -P NeedDaemonReload " & depUnit).strip()
+    let since2 = g.run("cut -d' ' -f1 /proc/uptime").strip()
     let d2 = g.applyProfile(repro, "dep2", depProfile("v2\n"))
     let d2Out = d2.stdout & d2.stderr
     let uids2 = g.run("cat /var/lib/a13r7-dep/uids 2>/dev/null || true").strip()
     let inv2 = g.invocation(depUnit)
+    let until2 = g.run("cut -d' ' -f1 /proc/uptime").strip()
+    let managerDuring = "switch window " & since2 & " .. " & until2 & " s\n" &
+      g.run("journalctl -b --no-pager -o short-monotonic _PID=1 2>&1 | " &
+        "grep -E -i 'reload|" & depUnit & "' | tail -60")
     record["everySwitch"] = %*{"exit": d2.exitCode, "loadedUserBefore": loadedUser,
       "uids": uids2, "invocationBefore": inv1, "invocationAfter": inv2,
-      "restarted": inv1 != inv2, "ranAsRoot": "0" in uids2.splitLines()}
+      "restarted": inv1 != inv2, "ranAsRoot": "0" in uids2.splitLines(),
+      "needDaemonReloadBefore": needReload0,
+      "needDaemonReloadAfter": g.run("systemctl show -P NeedDaemonReload " &
+        depUnit).strip(),
+      "userAfter": g.run("systemctl show -P User " & depUnit).strip(),
+      "managerDuring": managerDuring,
+      "transitions": d2Out[max(0, d2Out.find("service transitions")) ..<
+        min(d2Out.len, max(0, d2Out.find("service transitions")) + 400)]}
     step("the operator's reload left systemd's loaded definition running " &
          "the service as root (the case's premise)", loadedUser == "root",
          loadedUser)
