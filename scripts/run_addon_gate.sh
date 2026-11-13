@@ -7,7 +7,9 @@
 #   REPRO_ADDON_BASES     comma-separated test-bed bases (default: the amd64
 #                         matrix debian-12-amd64,debian-13-amd64,
 #                         ubuntu-24.04-amd64; also debian-13-arm64 and
-#                         ubuntu-24.04-armhf, which run under TCG)
+#                         ubuntu-24.04-armhf, which run under TCG; the Arch
+#                         gates take arch-btrfs-amd64, arch-ext4-amd64 and
+#                         arch-old-systemd-amd64, tests/e2e/addon/arch_testbed.nim)
 #   REPRO_ADDON_MUTATION  build and run the falsifying mutation of that name
 #                         (libs/repro_addon/src/repro_addon/mutations.nim);
 #                         the gate is then expected to FAIL. The off-host
@@ -99,7 +101,12 @@ case "$test" in
     export REPRO_ADDON_TEST_SEAMS=1 ;;
 esac
 [ "${REPRO_ADDON_TEST_SEAMS:-}" = "1" ] && mutation_args+=(--test-seams)
-bash ./scripts/build_addon_static.sh ${mutation_args[@]+"${mutation_args[@]}"} "${arches[@]}"
+# A gate of the test bed itself (that its guests are what their pins say)
+# runs no add-on binary, so none is built for it.
+case "$test" in
+  t_e2e_arch_testbed_is_pinned) ;;
+  *) bash ./scripts/build_addon_static.sh ${mutation_args[@]+"${mutation_args[@]}"} "${arches[@]}" ;;
+esac
 
 mkdir -p build/test-bin
 # Mutations of code that runs in the GATE process, not on the guest: the
