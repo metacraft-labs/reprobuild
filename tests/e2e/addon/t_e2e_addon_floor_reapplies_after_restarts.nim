@@ -17,7 +17,9 @@
 ##   finding 4);
 ## - **a socket-activated service** with ``RuntimeDirectory=<stem>`` and a
 ##   listener at ``/run/<stem>/sock`` applies twice: the directory its
-##   socket's start made is recorded for the service (finding 3).
+##   socket's start made is recorded for the service (finding 3), and once
+##   the service has started outside a switch, the next apply accepts the
+##   directory it was handed;
 ##
 ## Then once per base:
 ##
@@ -141,6 +143,19 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
       step("and applies again" & tag, r.exitCode == 0,
            r.stdout & r.stderr & g.exec("ls -la /run/a9r-sk; cat " & Record).stdout)
       notPending("the socket's second apply" & tag)
+      # The service started once outside a switch, as its socket would start
+      # it: systemd hands it the directory its socket's start made (the same
+      # directory, now owned by the service's account), and the next apply,
+      # which changes and so restarts the service, accepts it (the issue's
+      # second measurement).
+      let ss = g.exec("systemctl start a9r-sk.service")
+      let ev4 = g.exec("stat -c '%n %U %i %.9W' /run/a9r-sk; cat " & Record).stdout
+      step("the socket's service starts outside a switch" & tag, ss.exitCode == 0,
+           ss.stdout & ss.stderr & ev4)
+      r = g.applyProfile(repro, "s3-" & $n, sk("s3"))
+      step("and the next apply accepts the directory it was handed" & tag,
+           r.exitCode == 0, r.stdout & r.stderr & ev4)
+      notPending("the socket's apply after its service ran" & tag)
       r = g.applyProfile(repro, "c-" & $n, control)
       step("back to the control" & tag, r.exitCode == 0, r.stdout & r.stderr)
       discard g.run("systemctl stop 'a9r-t@*' a9r-sk.socket a9r-sk.service 2>/dev/null; " &
@@ -162,7 +177,10 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
          r.exitCode == 0, r.stdout & r.stderr & ev3)
     let current = g.exec("readlink /var/lib/repro/system/current " &
                          "/var/lib/repro/system/addon/current 2>/dev/null; true").stdout
-    discard g.run("rm -rf /var/lib/a9r-st; mkdir /var/lib/a9r-st; touch /var/lib/a9r-st/theirs")
+    # p2 started the unit again; stop it, so the tree below is made after
+    # its last run ended and the held unit must stay down.
+    discard g.run("systemctl stop a9r-st.service; rm -rf /var/lib/a9r-st; " &
+                  "mkdir /var/lib/a9r-st; touch /var/lib/a9r-st/theirs")
     r = g.applyProfile(repro, "p3", st("p3"))
     let out3 = r.stdout & r.stderr
     step("a tree made after its last run ended is refused", r.exitCode != 0 and
@@ -172,9 +190,18 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
     notPending("the refused apply and its revert")
     let after = g.exec("readlink /var/lib/repro/system/current " &
                        "/var/lib/repro/system/addon/current 2>/dev/null; true").stdout
-    step("current is the generation before the refused apply",
-         after.strip().len > 0 and after == current,
-         current & " / " & after)
+    # A revert re-applies the generation `current` named under a new id
+    # (§7.5): "rolled back to <previous> (re-applied as generation <new>)".
+    let previous = extractFilename(current.strip())
+    var reapplied = ""
+    let at = out3.find("(re-applied as generation ")
+    if at >= 0:
+      reapplied = out3[at + len("(re-applied as generation ") .. ^1].split(')')[0].strip()
+    step("current is the revert's re-application of the generation before " &
+         "the refused apply",
+         previous.len > 0 and ("rolled back to " & previous) in out3 and
+         reapplied.len > 0 and extractFilename(after.strip()) == reapplied,
+         current & " / " & after & " / " & reapplied)
     step("the held unit was not started on the refused tree",
          g.exec("systemctl is-active a9r-st.service").stdout.strip() != "active" and
          g.exec("stat -c %U /var/lib/a9r-st").stdout.strip() == "root",
