@@ -86093,6 +86093,28 @@ proc executeBranchFork(parsed: BranchArgs): BranchReport =
   # fork is told the workspace is uninitialized. Placed after the metadata
   # writers because it reads what they just recorded.
   refreshWorkspaceProjectsIndexBestEffort(parsed.forkPath, "repro branch")
+  # The fork starts GATED. `repro branch` clones and branches the repos but
+  # nothing else installs the managed git hooks (not init, not sync), so a
+  # fresh workspace used to push with no reproducibility gate at all until an
+  # operator happened to run `repro hooks ensure --vcs`. The state file is
+  # recorded above, so this sweep walks every participating repo.
+  try:
+    let hooks = ensureWorkspaceHooks(parsed.forkPath)
+    if hooks.exitCode != 0:
+      result.exitCode = 1
+      result.repos.add(BranchRepoEntry(
+        outcome: "hooks_failed",
+        diagnostic: "the managed git hooks could not be installed in every " &
+          "repo of '" & parsed.forkPath & "'; run `repro hooks ensure --vcs " &
+          parsed.forkPath & "` and read what it reports"))
+      return
+  except CatchableError as err:
+    result.exitCode = 1
+    result.repos.add(BranchRepoEntry(
+      outcome: "hooks_failed",
+      diagnostic: "installing the managed git hooks in '" & parsed.forkPath &
+        "' failed: " & err.msg))
+    return
   result.exitCode = 0
 
 ## ----------------------------------------------------------------------------
