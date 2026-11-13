@@ -22,7 +22,9 @@
 ##   directory-its-instance-restart-made);
 ## - a statx error other than ENOENT/ENOTDIR is not "absent" (finding 6);
 ## - a reused inode with a new birth time is not the recorded directory
-##   (finding 7; decision 76);
+##   (finding 7; decision 76), to the effective check, to the start's
+##   record and to the start step alike: every comparison is
+##   ``sameIdentity``;
 ## - a listener below a directory its service can write is refused, in both
 ##   halves ("A listener below a place its service can write"; finding 2),
 ##   and the refusal names that rule;
@@ -516,6 +518,57 @@ suite "round 12, finding 7 (§13 decision 76): a reused inode with a new birth t
     check not createdForUnit("/run/a", "a.service", reused, r, initHashSet[string]())
     let same: PathIdentity = (true, 7'u64, 14'u64, Start)
     check createdForUnit("/run/a", "a.service", same, r, initHashSet[string]())
+  # The record's own upkeep and the start step compare with the same
+  # predicate (``sameIdentity``), so a reused inode reaches each of them
+  # too (issue 2026-11-13-floor-decision-76-birth-time-is-never-tested-
+  # against-a-reused-inode). The numbers are those kernel ext4 gave in a
+  # test-bed guest, ``rmdir d3; mkdir d3`` on a 16-inode image: inode 14
+  # kept, a new nanosecond birth time.
+  test "a reused inode is not the unit's to record again at its start":
+    let r = {"/run/a": CreatedDir(unit: "a.service", dev: 7, ino: 14,
+                                  btime: Start, invocation: "I1")}.toTable
+    let reused: PathIdentity = (true, 7'u64, 14'u64, Start + 16 * Ms)
+    check not startMayCreate("/run/a", "a.service", reused, r)
+    let same: PathIdentity = (true, 7'u64, 14'u64, Start)
+    check startMayCreate("/run/a", "a.service", same, r)
+  test "the record drops an entry whose inode was reused, and records the new directory afresh":
+    let state = createTempDir("a9r12-", "-reuse")
+    defer: removeDir(state)
+    createDir(state / "addon")
+    var born = Start
+    let ident = proc (p: string): PathIdentity =
+      if p == "/var/lib/a": (true, 7'u64, 14'u64, born)
+      else: (false, 0'u64, 0'u64, 0'i64)
+    recordCreatedDirs(state, "a.service", [("/var/lib/a", "a.service")], ident,
+                      invocation = "I1")
+    check readCreatedDirs(state)["/var/lib/a"].btime == Start
+    # Removed and made again at the same path, the inode number reused.
+    born = Start + 16 * Ms
+    # Another unit's start: the stale entry is not kept for the new tree.
+    recordCreatedDirs(state, "b.service", [("/var/lib/b", "b.service")], ident,
+                      invocation = "J1")
+    check "/var/lib/a" notin readCreatedDirs(state)
+    # Recorded again, by the unit's own start, with the identity it has now.
+    recordCreatedDirs(state, "a.service", [("/var/lib/a", "a.service")], ident,
+                      invocation = "I1")
+    born = Start + 32 * Ms
+    recordCreatedDirs(state, "a.service", [("/var/lib/a", "a.service")], ident,
+                      invocation = "I2")
+    let r = readCreatedDirs(state)
+    check r["/var/lib/a"].btime == Start + 32 * Ms
+    check r["/var/lib/a"].invocation == "I2"
+  test "the start step replaces an entry whose inode was reused":
+    let state = createTempDir("a9r12-", "-reuse2")
+    defer: removeDir(state)
+    createDir(state / "addon")
+    var born = Start
+    let ident = proc (p: string): PathIdentity = (true, 7'u64, 14'u64, born)
+    recordCreatedDirs(state, "t@1.service", [("/run/t", "t@1.service")], ident,
+                      invocation = "I1")
+    born = Start + 16 * Ms
+    recordStartedSince(state, [("/run/t", "t@1.service")],
+      proc (u: string): tuple[id: string; start: int64] = ("I1", Start), ident)
+    check readCreatedDirs(state)["/run/t"].btime == Start + 16 * Ms
 
 suite "round 12 (§10.1 round 12, \"A listener below a place its service can write\")":
   test "below /run/<stem>/<dir>/ with RuntimeDirectory=<stem>: refused":
