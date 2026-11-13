@@ -1358,6 +1358,9 @@ const
                           # InvocationID of an unchanged directory as it
                           # was.
                           "record-keeps-old-invocation",
+                          # a revert holds a refusal's subject even when
+                          # the generation does not install it.
+                          "revert-holds-any-subject",
                           # A13: a state backup or restore runs while a
                           # unit of the set may run.
                           "state-units-not-checked",
