@@ -287,12 +287,16 @@ over its file's exact bytes and by the key you gave. The command then
 reports one of:
 
 - **completed** (exit 0): the intent record and a completion record of
-  that same intent record both verify. It lists the objects.
+  that same intent record both verify, and the completion accounts for
+  every object of the intent. It lists the objects removed as discarded
+  unshipped, and separately any the completion records as kept with the
+  store (`uninstall --keep-store`); a kept object is still on the host.
 - **authorised, not completed** (exit 3): the intent record verifies, but
   there is no completion record. The discard was authorised, and nothing
   shows that it finished.
 - **does not verify** (exit 1): a changed byte, another key, an empty
-  signature, or a completion record that names a different intent record.
+  signature, a completion record that names a different intent record, or one whose
+  removed and kept lists do not cover the intent's objects.
 
 A host bootstrapped by an older release is brought up to date by its
 first switch, or at once with

@@ -25,6 +25,11 @@
 ## 7. A pending object still in place at the end of an otherwise clean run:
 ##    no completion (exit 3).
 ##
+## 8. A discard under ``--keep-store``: the completion records the object as
+##    kept; the verdict names it kept and not discarded (exit 0).
+## 9. A completion whose removed + kept lists do not cover the intent's
+##    objects: invalid (exit 1).
+##
 ## (Drift or an error after the intent record, and the intent record's own
 ## failed directory sync, are ``t_addon_review_round5`` cases 4 and 5.)
 ##
@@ -35,7 +40,8 @@
 ## ``discard-verify-completion-sig-alone`` (4),
 ## ``discard-completion-sync-error-swallowed`` (5),
 ## ``discard-verify-skips-intent-digest`` (6),
-## ``discard-completed-objects-present`` (7).
+## ``discard-completed-objects-present`` (7),
+## ``discard-verify-reports-intent-objects`` (8, 9).
 ##
 ## Mocks: ``ship`` is a stub answering "not acknowledged" -- the sink's
 ## refusal is held against a real sink by ``t_addon_review_round4`` case 2;
@@ -211,5 +217,34 @@ suite "the A11 code review's eighth round: §13 decision 81":
     check r.completionRecord.len == 0
     check not fileExists(completionPathOf(s.gate.overrideRecord))
     check verifyExit(s) == 3
+
+  test "8: objects kept with the store (--keep-store) are not reported discarded":
+    let s = scene("kept")
+    var signer = loadTextSigner(s.key)
+    var r = resultOf(s)
+    r.keptEvidence = @[s.aside]              # as runAddonUninstall sets it
+    finishDiscard(r, s.site, signer, s.gate.pending)
+    signer.wipe()
+    check dirExists(s.aside)                 # still on the host
+    check r.completionRecord.len > 0
+    let v = verifyDiscardRecord(s.gate.overrideRecord, s.pub)
+    checkpoint v.why
+    check v.status == dsCompleted
+    check v.removed.len == 0
+    check v.kept == @[s.aside]
+    let text = renderCompletedDiscard(v.keyHex, v.removed, v.kept)
+    check "0 object(s) discarded unshipped" in text
+    check "1 object(s) kept with the store" in text
+    check verifyExit(s) == 0
+
+  test "9: a completion that does not account for the intent's objects is invalid":
+    let s = scene("unaccounted")
+    removeDir(s.aside)
+    var signer = loadTextSigner(s.key)
+    discard writeDiscardCompletion(s.site, signer, s.gate.overrideRecord,
+      s.gate.overrideRecordText, @[], @[])   # names neither removed nor kept
+    signer.wipe()
+    check verifyDiscardRecord(s.gate.overrideRecord, s.pub).status == dsInvalid
+    check verifyExit(s) == 1
 
 removeDir(root)

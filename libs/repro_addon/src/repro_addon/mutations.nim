@@ -931,6 +931,10 @@
 ##                                            its record counts as completed
 ## ``discard-verify-skips-intent-digest``     a completion of another intent
 ##                                            record counts
+## ``discard-verify-reports-intent-objects``  the verdict lists the intent's
+##                                            objects as discarded, whatever
+##                                            the completion records (kept
+##                                            objects reported discarded)
 ## ``discard-completed-despite-errors``       an uninstall that drifted or
 ##                                            failed after the intent record
 ##                                            writes the completion record
@@ -1576,6 +1580,7 @@ const
                           "discard-verify-ignores-completion",
                           "discard-verify-completion-sig-alone",
                           "discard-verify-skips-intent-digest",
+                          "discard-verify-reports-intent-objects",
                           "discard-completed-despite-errors",
                           "discard-completed-objects-present",
                           "discard-completion-key-read-late",
