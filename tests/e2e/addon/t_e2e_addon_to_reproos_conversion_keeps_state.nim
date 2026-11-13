@@ -244,10 +244,29 @@ const
     ## A confined, non-root service elsewhere (with the floor's
     ## ProtectSystem=strict): let in while the directory is pending.
   R4ConfinedUnfloored = "[Unit]\\nDescription=A13 round-4 probe\\n\\n" &
-    "[Service]\\nProtectSystem=strict\\nUser=eth-validator\\n" &
-    "Group=eth-validator\\nReadWritePaths=/var/lib/a13-r4\\n" & R4Run
+    "[Service]\\nProtectSystem=strict\\nNoNewPrivileges=yes\\n" &
+    "User=eth-validator\\nGroup=eth-validator\\n" &
+    "ReadWritePaths=/var/lib/a13-r4\\n" & R4Run
     ## The same confinement written out, without the floor: only the
-    ## carried-state reach analysis judges what activates it.
+    ## carried-state reach analysis judges what activates it. With
+    ## ``NoNewPrivileges=yes``, which round 5 made part of confinement:
+    ## without it the unit is refused for that rule whatever reach says, so
+    ## the falsifier of the path unit's reach would let in nothing that
+    ## runs (A13 review round 7).
+  R4UidAlias = "a13r4uid0"
+    ## The account probe's ``User=``: a second name for uid 0, which the gate
+    ## adds to ``/etc/passwd`` for that probe only. systemd runs
+    ## ``DynamicUser=yes`` with an existing static account as that account
+    ## (systemd.exec(5), ``DynamicUser=``; measured as a premise), so the
+    ## unit runs as root. Not ``User=root``: under ``account-as-written``
+    ## that unit is let past the account rule but refused by decision 58's,
+    ## the D-Bus system policy's ``<policy user="root">`` naming its
+    ## account, so it never runs and the falsifier's red is not its own
+    ## (A13 review round 7). An alias is what the account resolution alone
+    ## sees through: round 3's reading takes it as a dynamic user.
+  R4UidAliasAdd = "grep -q '^" & R4UidAlias & ":' /etc/passwd || echo '" &
+    R4UidAlias & ":x:0:0:A13 uid-0 alias:/root:/usr/sbin/nologin' >> /etc/passwd"
+  R4UidAliasRemove = "sed -i '/^" & R4UidAlias & ":/d' /etc/passwd"
   R4Floor = "        hardening = \"serviceFloor\",\n" &
     "        floorExceptions = @[\"NoExecPaths: the conversion gate's " &
     "round-4 probe runs /bin/sh\"],\n"
@@ -255,9 +274,10 @@ const
     ("account", "r4Account",
      "      systemdSystemUnit(name = \"eth-r4-account.service\",\n" &
      "        content = \"[Unit]\\nDescription=A13 round-4 account probe\\n\\n" &
-     "[Service]\\nDynamicUser=yes\\nUser=root\\nReadWritePaths=/var/lib/a13-r4\\n" &
+     "[Service]\\nDynamicUser=yes\\nUser=" & R4UidAlias & "\\nNoNewPrivileges=yes\\n" &
+     "ReadWritePaths=/var/lib/a13-r4\\n" &
      R4Run & "\",\n        address = \"r4Account\")\n",
-     "runs as root", "reach"),
+     "runs as root (" & R4UidAlias & ")", "reach"),
     ("timer", "r4Timer",
      "      systemdSystemUnit(name = \"eth-r4-timed.service\",\n" &
      "        content = \"" & R4Confined & "\",\n" & R4Floor &
@@ -297,6 +317,9 @@ const
     ## reach says: defence in depth, so a change that drops either layer
     ## turns a step red. It runs before the reach case, so the path
     ## falsifier shows the floor still refusing and the reach step red.
+    ## The unfloored units set ``NoNewPrivileges=yes`` themselves (the
+    ## floor sets it for the others), so each ``reach`` case's falsifier is
+    ## the only guard between its probe and a run.
   R4Host = "      systemdSystemUnit(name = \"eth-r4-host.service\",\n" &
     "        content = \"" & R4Confined & "\",\n" & R4Floor &
     "        address = \"r4Host\")\n"
@@ -343,6 +366,22 @@ const
     ## ``NoNewPrivileges=yes``), ``account-nss-unread`` (a userdb record of
     ## uid 0 under ``DynamicUser=yes``), ``account-dynamic-name-from-stem``
     ## (an instance of ``root@.service`` under ``DynamicUser=yes``).
+    ##
+    ## The values, alias and prefix probes are each also refused by the full
+    ## apply's live cross-check (§13 decision 59): systemd loads each unit
+    ## unconfined, and that check judges the unit as systemd loaded it,
+    ## through readings the three builds above leave intact. Under those
+    ## builds the probe is let in by the static analysis and then held by
+    ## the live check, so it never runs and the red is not its own (A13
+    ## review round 7). Their falsifiers are therefore the engine builds
+    ## ``reach-values-as-text-without-live-check``,
+    ## ``reach-alias-dropins-unread-without-live-check`` and
+    ## ``account-dynamic-name-from-stem-without-live-check``: the same
+    ## reading broken, and the live check off as in
+    ## ``infra-live-reach-skipped``. That build's own cell is the other half
+    ## of the pair: with the live check off and the static readings intact,
+    ## all three probes are refused for their reasons
+    ## (``scripts/addon_a13_classify.py`` requires both).
   R6Confined = "ProtectSystem=strict\nNoNewPrivileges=yes\n" &
     "User=eth-validator\nGroup=eth-validator\n"
   R6Probes = [
@@ -859,26 +898,34 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
         "[Service]\\nType=oneshot\\nUser=%%i\\nExecStart=/usr/bin/id -u\\n"),
       "User=%U": idOf("a13r4idu.service",
         "[Service]\\nType=oneshot\\nUser=%%U\\nExecStart=/usr/bin/id -u\\n")}
+    discard nw.run(R4UidAliasAdd)
+    premises["DynamicUser=yes User=" & R4UidAlias & " (uid 0 in /etc/passwd)"] =
+      %nw.exec("systemd-run --wait --pipe --quiet -p DynamicUser=yes -p User=" &
+        R4UidAlias & " /usr/bin/id -u").stdout.strip()
+    discard nw.run(R4UidAliasRemove)
     record["accountPremises"] = premises
     var dynId = -1
     try: dynId = parseInt(premises["DynamicUser=yes User=nosuchr4"].getStr())
     except ValueError: discard
-    step("systemd runs DynamicUser=yes with User=root, User=%i of the " &
-         "instance root and User=%U as uid 0, and a missing name as a " &
-         "dynamic user (the resolver's premises)",
+    step("systemd runs DynamicUser=yes with User=root or a uid-0 alias, " &
+         "User=%i of the instance root and User=%U as uid 0, and a missing " &
+         "name as a dynamic user (the resolver's premises)",
          premises["DynamicUser=yes User=root"].getStr() == "0" and
+         premises["DynamicUser=yes User=" & R4UidAlias &
+           " (uid 0 in /etc/passwd)"].getStr() == "0" and
          premises["User=%i on a13r4id@root"].getStr() == "0" and
          premises["User=%U"].getStr() == "0" and dynId >= 61184,
          $premises)
     # Each reach case of the review's round 4, refused while the directory
-    # is pending, naming the resource: a unit that runs as root under
-    # DynamicUser=yes; a profile drop-in that retargets a profile timer at
-    # a distribution unit; a path unit that creates a directory inside the
-    # carried one.
+    # is pending, naming the resource: a unit that runs as root (through a
+    # uid-0 alias) under DynamicUser=yes; a profile drop-in that retargets a
+    # profile timer at a distribution unit; a path unit that creates a
+    # directory inside the carried one.
     let probes = newJObject()
     record["roundFourProbes"] = probes
     for (label, address, resources, reason, layer) in R4Probes:
       discard nw.run("rm -f " & R4MarkerDir & "/*.ran")
+      if label == "account": discard nw.run(R4UidAliasAdd)
       let pf = probeFile(label)
       writeFile(work / pf, probeProfile("r4" & label, resources))
       nw.copyTo(work / pf, RefDir / pf)
@@ -915,6 +962,7 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
             ev[u] = e
         probes[label]["ran"] = %ranAll
         probes[label]["runEvidence"] = ev
+      if label == "account": discard nw.run(R4UidAliasRemove)
       step("round 4, " & label & ": refused while the directory is pending, " &
            (if layer == "floor": "by the hardening floor, " else: "") &
            "naming " & address,
@@ -922,8 +970,12 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
            (if judged(o): "" else: "NOT JUDGED (the profile did not compile): ") & o)
     # A host drop-in the profile does not have (here in /run): read as
     # systemd reads it. Without it the confined unit is let in (control);
-    # with it, ProtectSystem=no from the host unconfines the unit and the
-    # apply is refused.
+    # with it, a ReadWritePaths= from the host gives the unit the carried
+    # directory and the apply is refused. Writable paths, not the unit's
+    # confinement: the full apply's live cross-check judges confinement as
+    # systemd loaded the unit and so would refuse an unconfining drop-in
+    # too, leaving the falsifier's probe held and never run (A13 review
+    # round 7). Optional ("-"): the directory may not exist while pending.
     let hf = probeFile("host")
     writeFile(work / hf, probeProfile("r4host", R4Host))
     nw.copyTo(work / hf, RefDir / hf)
@@ -943,17 +995,26 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
     step("round 4, host drop-in (control): the unit let in really ran",
          ctlRan, $ctlEv)
     discard nw.run("mkdir -p " & R4HostDropIn.parentDir & " && printf " &
-      "'[Service]\\nProtectSystem=no\\n' > " & R4HostDropIn &
-      " && systemctl daemon-reload")
+      "'[Service]\\nReadWritePaths=-/var/lib/ethereum/validator\\n' > " &
+      R4HostDropIn & " && systemctl daemon-reload")
+    discard nw.run("rm -f " & R4MarkerDir & "/*.ran")
     let hr = nw.exec(hostApply, timeoutSec = 3600)
     let ho = hr.stdout & hr.stderr
+    let hostRefused = hr.exitCode != 0 and "ECarriedStatePending" in ho and
+      "/var/lib/ethereum/validator (r4Host)" in ho
     probes["host"] = %*{"exit": hr.exitCode, "judged": judged(ho),
-      "refusedForReason": hr.exitCode != 0 and "ECarriedStatePending" in ho and
-        "(r4Host: not confined" in ho}
+      "refusedForReason": hostRefused}
+    if hr.exitCode == 0:
+      # Let in (the falsifier's cell): the apply starts the enabled unit
+      # after its live check, and it must be shown to have run.
+      let (ok, e) = nw.unitRan("eth-r4-host.service",
+        R4MarkerDir & "/eth-r4-host.service.ran")
+      probes["host"]["ran"] = %ok
+      probes["host"]["runEvidence"] = e
     step("round 4, host drop-in: a drop-in in /run the profile does not " &
-         "have makes the unit reach everything, and the apply is refused",
-         judged(ho) and hr.exitCode != 0 and "ECarriedStatePending" in ho and
-           "(r4Host: not confined" in ho,
+         "have makes the unit reach the carried directory, and the apply " &
+         "is refused",
+         judged(ho) and hostRefused,
          (if judged(ho): "" else: "NOT JUDGED (the profile did not compile): ") & ho)
     discard nw.run("rm -rf " & R4HostDropIn.parentDir &
       " && systemctl daemon-reload")
