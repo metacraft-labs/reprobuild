@@ -63,10 +63,15 @@
 ## 26-27. (round 9) A file read under a name with a trailing, or a
 ##     leading, space is checked under that name, not under the decoy of
 ##     the trimmed name beside it.
-## 28. A successful open whose fd path strace marks ``(deleted)`` (printed
-##     after the closing ``>``): the line is not in the form the writer
-##     reads, so the writer fails -- it is never skipped as a failed
-##     syscall, which left the ``staticRead`` file out of the list.
+## 28. A successful open of a workspace file whose fd path strace marks
+##     ``(deleted)`` (printed after the closing ``>``): the file was read
+##     and the list cannot check it, so the writer fails -- it is never
+##     skipped as a failed syscall, which left the ``staticRead`` file out
+##     of the list.
+## 29. A ``staticExec`` command that makes an ``O_TMPFILE`` file (Python's
+##     ``tempfile.TemporaryFile()``, glibc ``tmpfile()``) and reopens it
+##     through ``/proc/self/fd``: strace prints both opens ``(deleted)``,
+##     and they are anonymous, never sources, so the list is written.
 ##
 ## Falsifying builds: ``stale-helper-accepted`` (cases 2-5 and 8-10 red),
 ## ``fresh-skips-included`` (case 4), ``fresh-skips-outside-tree`` (case
@@ -85,7 +90,7 @@
 ## its trailing space, as round 8's strip() read it; case 27's leading
 ## space sits after the path's "/", so no line strip reaches it, and it is
 ## a positive case only), ``suffix-is-failure`` (case 28; ``accept-unparsed``
-## turns it red too).
+## turns it red too), ``deleted-is-unparsed`` (case 29).
 ##
 ## Cases 22, 23 and 28 run the real strace behind a wrapper script named by
 ## ``REPRO_STRACE``. The wrapper is justified: it is how the writer's
@@ -476,10 +481,38 @@ suite "a helper binary is used only when built from the tree under test":
     let (o, c) = writeWith(wrapper)
     checkpoint o
     check c != 0
-    check "could not parse" in o
-    check "(deleted)" in o
+    check "opened and then deleted" in o
+    check blob in o
     check not fileExists(tree / "build" / "nimcache" / "foo-helper" / "foo-helper.deps")
     check "has no dependency list" in refusal()
+
+  test "29: an O_TMPFILE file a staticExec command makes does not fail the list":
+    # Its own tree, so the other cases do not depend on python3. The
+    # command makes an anonymous file (O_TMPFILE) and reopens it through
+    # /proc/self/fd; strace prints both opens `<...>(deleted)`.
+    let py = findExe("python3")
+    doAssert py.len > 0, "python3 is required"
+    let t3 = base / "tree29"
+    let app3 = t3 / "apps" / "tmpf" / "tmpf.nim"
+    createDir(parentDir(app3))
+    writeFile(app3, "const t = staticExec(\"" & py & " -c 'import os, tempfile; " &
+      "f = tempfile.TemporaryFile(); f.write(b\\\"x\\\"); f.flush(); " &
+      "os.close(os.open(\\\"/proc/self/fd/%d\\\" % f.fileno(), os.O_RDONLY)); " &
+      "print(\\\"made\\\")'\")\necho t\n")
+    let bin3 = t3 / "build" / "bin" / "tmpf"
+    let (o1, c1) = execCmdEx(quoteShellCommand(@["nim", "c", "--hints:off",
+      "--warnings:off", "--nimcache:" & t3 / "build" / "nimcache" / "tmpf",
+      "--out:" & bin3, app3]))
+    doAssert c1 == 0, o1
+    let (ob, cb) = execCmdEx(quoteShellCommand(@[bin3]))
+    doAssert cb == 0 and "made" in ob, ob
+    let (o2, c2) = execCmdEx(quoteShellCommand(@["bash",
+      RepoRoot / "scripts" / "write_helper_deps.sh", "tmpf", app3]),
+      workingDir = t3)
+    checkpoint o2
+    check c2 == 0
+    check fileExists(t3 / "build" / "nimcache" / "tmpf" / "tmpf.deps")
+    check freshRepoBinary(t3, "tmpf") == bin3
 
   test "7: no binary, or no dependency list, is refused":
     build()

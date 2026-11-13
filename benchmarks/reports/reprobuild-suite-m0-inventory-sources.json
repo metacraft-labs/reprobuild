@@ -2602,7 +2602,9 @@
           "executedVariables": [
             "app",
             "app2",
+            "app3",
             "bin2",
+            "bin3",
             "binary",
             "env",
             "flags",
@@ -2610,9 +2612,10 @@
             "helloSrc",
             "outside",
             "t2",
+            "t3",
             "tree"
           ],
-          "line": 149,
+          "line": 154,
           "path": "libs/repro_test_support/tests/t_fresh_helper_binary_refuses_a_stale_build.nim",
           "patterns": [
             "gcc"
@@ -2626,7 +2629,9 @@
           "executedVariables": [
             "app",
             "app2",
+            "app3",
             "bin2",
+            "bin3",
             "binary",
             "env",
             "flags",
@@ -2634,9 +2639,10 @@
             "helloSrc",
             "outside",
             "t2",
+            "t3",
             "tree"
           ],
-          "line": 181,
+          "line": 186,
           "path": "libs/repro_test_support/tests/t_fresh_helper_binary_refuses_a_stale_build.nim",
           "patterns": [
             "nim-argv"
@@ -2650,7 +2656,9 @@
           "executedVariables": [
             "app",
             "app2",
+            "app3",
             "bin2",
+            "bin3",
             "binary",
             "env",
             "flags",
@@ -2658,9 +2666,10 @@
             "helloSrc",
             "outside",
             "t2",
+            "t3",
             "tree"
           ],
-          "line": 284,
+          "line": 289,
           "path": "libs/repro_test_support/tests/t_fresh_helper_binary_refuses_a_stale_build.nim",
           "patterns": [
             "nim-argv"
@@ -2674,7 +2683,9 @@
           "executedVariables": [
             "app",
             "app2",
+            "app3",
             "bin2",
+            "bin3",
             "binary",
             "env",
             "flags",
@@ -2682,9 +2693,37 @@
             "helloSrc",
             "outside",
             "t2",
+            "t3",
             "tree"
           ],
-          "line": 366,
+          "line": 371,
+          "path": "libs/repro_test_support/tests/t_fresh_helper_binary_refuses_a_stale_build.nim",
+          "patterns": [
+            "nim-argv"
+          ],
+          "snippet": "let (o1, c1) = execCmdEx(quoteShellCommand(@[\"nim\", \"c\", \"--hints:off\","
+        },
+        {
+          "assignedCommandVariable": "",
+          "commandVariableExecuted": false,
+          "directExecutionLine": true,
+          "executedVariables": [
+            "app",
+            "app2",
+            "app3",
+            "bin2",
+            "bin3",
+            "binary",
+            "env",
+            "flags",
+            "hello",
+            "helloSrc",
+            "outside",
+            "t2",
+            "t3",
+            "tree"
+          ],
+          "line": 503,
           "path": "libs/repro_test_support/tests/t_fresh_helper_binary_refuses_a_stale_build.nim",
           "patterns": [
             "nim-argv"
@@ -26358,7 +26397,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_test_support/tests/t_fresh_helper_binary_refuses_a_stale_build.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 24,
+      "staticCaseCount": 25,
       "staticallyDetectedRuntimeCompilerFlow": true,
       "targetOs": "soAny"
     },

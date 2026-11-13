@@ -78,7 +78,9 @@
 # skipped, not fatal), accept-unparsed (a trace the writer cannot read,
 # or one without the entry module's open, yields a list anyway),
 # suffix-is-failure (a successful line with text after its fd path, such
-# as strace's `(deleted)`, is skipped as a failed syscall). A file
+# as strace's `(deleted)`, is skipped as a failed syscall),
+# deleted-is-unparsed (an open strace prints `(deleted)` -- an O_TMPFILE
+# file, say -- is refused as unparseable rather than read). A file
 # <build>/nimcache/<name>/write-helper-deps.mutation selects one too, for
 # a run inside a graph edge, whose environment the engine sets; it is
 # read only when present.
@@ -347,6 +349,17 @@ else:
         "clone": [child_re], "clone3": [child_re], "fork": [child_re],
         "vfork": [child_re],
     }
+    # An open whose fd strace prints `<path>(deleted)`: the kernel names
+    # the fd `<path> (deleted)` and strace moves the marker after the `>`.
+    # An O_TMPFILE open always looks like this (the file is anonymous from
+    # the start: glibc tmpfile(), Python's tempfile.TemporaryFile()), as
+    # does any later open of such a file through /proc/self/fd. None of
+    # these can be a source, so they are read, not refused. A workspace
+    # file removed by the time strace read the fd is different: the
+    # compiler (or a staticExec command) read it, and the list could not
+    # check it, so it fails the list.
+    open_deleted_re = re.compile(r'^open(?:at2?)?\((.*)\)\s+=\s+\d+<' + hexstr + r'>\(deleted\)\s*$')
+    deleted_in_workspace = []
     unparsed = []
     entry_real = os.path.realpath(entry)
     entry_opened = False
@@ -362,6 +375,14 @@ else:
                 continue
             if not succeeded_re.search(line):
                 continue      # failed (= -1 E...) or never returned (= ?)
+            d = open_deleted_re.match(line)
+            if d and mutation != "deleted-is-unparsed":   # FALSIFIER
+                if "O_TMPFILE" in d.group(1):
+                    continue  # an anonymous file: never a source
+                gone = decode(d.group(2))
+                if in_workspace(gone):
+                    deleted_in_workspace.append("%d: %s" % (pid, gone))
+                continue      # outside the workspace: not recorded anyway
             if not any(r.match(line) for r in readers[m.group(1)]):
                 unparsed.append("%d: %s" % (pid, line))
                 continue
@@ -378,6 +399,11 @@ else:
                                   for l in unparsed[:10]) +
                      ("\n  ... and %d more" % (len(unparsed) - 10)
                       if len(unparsed) > 10 else ""))
+        if deleted_in_workspace:
+            sys.exit("write_helper_deps: the trace shows workspace files "
+                     "opened and then deleted (strace printed them "
+                     "`(deleted)`), so the list could not check them; no "
+                     "list written:\n  " + "\n  ".join(deleted_in_workspace))
         if not entry_opened:
             sys.exit("write_helper_deps: positive control failed: the trace "
                      "of the strace that ran (" + strace + ") does not show "
