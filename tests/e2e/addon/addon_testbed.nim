@@ -267,7 +267,8 @@ proc artefact*(debArch: string): tuple[path, sha256: string] =
 # Images.
 # ---------------------------------------------------------------------------
 
-proc fileDigest(path, algo: string): string =
+proc fileDigest*(path, algo: string): string =
+  ## The ``algo`` (``sha512`` / ``sha256``) digest of a file, lowercase hex.
   var f = open(path, fmRead)
   defer: f.close()
   var buf = newString(1 shl 20)
@@ -370,12 +371,14 @@ proc note*(g: Guest; s: string) =
   g.log.add(line)
   stderr.writeLine(line)
 
-proc randomHex(n: int): string =
+proc randomHex*(n: int): string =
   var r = initRand()
   for i in 0 ..< n:
     result.add(toHex(r.rand(15), 1).toLowerAscii())
 
-proc claimRunDir(name: string): tuple[dir, token: string] =
+proc claimRunDir*(name: string): tuple[dir, token: string] =
+  ## Claim ``<cache>/runs/<name>`` with an exclusive ``mkdir`` and a fresh
+  ## owner token (see the module header).
   let runs = cacheDir() / "runs"
   createDir(runs)
   let dir = runs / name
@@ -386,7 +389,8 @@ proc claimRunDir(name: string): tuple[dir, token: string] =
   writeFile(dir / "owner-token", token)
   (dir, token)
 
-proc releaseRunDir(dir, token: string) =
+proc releaseRunDir*(dir, token: string) =
+  ## Remove a run directory, only while its owner token is still ``token``.
   if dir.len == 0 or not dirExists(dir): return
   let f = dir / "owner-token"
   if not fileExists(f) or readFile(f) != token:
@@ -438,12 +442,15 @@ const
   GuestProxyPort* = 3128
 
 proc newGuest*(b: BaseImage; diskGiB = 8; relayPort = 0; cpus = 0;
-               memoryMB = 0): Guest =
+               memoryMB = 0; image = ""): Guest =
   ## Claim a run and prepare (not boot) a guest of ``b``. ``diskGiB`` is the
   ## overlay's virtual size (a release upgrade needs more than 8);
   ## ``cpus`` and ``memoryMB`` override the default size (0: the default).
   ## ``relayPort > 0`` restricts the guest's network to one service: the
   ## host's loopback ``relayPort``, at ``GuestProxyAddress:GuestProxyPort``.
+  ## ``image``, when given, is the qcow2 the overlay is created over instead
+  ## of ``b``'s cached download: an image the test bed built from ``b``
+  ## (the Arch guests of ``arch_testbed.nim``), which the caller verified.
   when not defined(gostiAvailable):
     raise newException(TestBedError,
       "gosti is not available: set GOSTI_SRC to gosti's src directory")
@@ -459,7 +466,7 @@ proc newGuest*(b: BaseImage; diskGiB = 8; relayPort = 0; cpus = 0;
         raise newException(TestBedError, "no Incus image for " & b.name)
       result.incus = newIncusBackend()
       return
-    let image = fetchImage(b)
+    let image = if image.len > 0: image else: fetchImage(b)
     result.keyPath = dir / "id_ed25519"
     if execCmd("ssh-keygen -q -t ed25519 -N '' -C repro-addon-testbed -f " &
                quoteShell(result.keyPath)) != 0:

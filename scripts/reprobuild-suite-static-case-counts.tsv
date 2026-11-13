@@ -1300,6 +1300,7 @@ tests/e2e/addon/t_e2e_addon_validator_never_double_signs.nim	nim	1
 tests/e2e/addon/t_e2e_addon_write_time_recheck.nim	nim	1
 tests/e2e/addon/t_e2e_addon_writes_never_follow_symlinks.nim	nim	1
 tests/e2e/addon/t_e2e_addon_zero_touch_image_synthesis_boots_converged.nim	nim	1
+tests/e2e/addon/t_e2e_arch_testbed_is_pinned.nim	nim	1
 tests/e2e/addon/t_system_profile_host_selection.nim	nim	0
 tests/e2e/addon/t_validator_safety_checks.nim	nim	11
 tests/e2e/agent-harbor/t_e2e_agent_harbor_change_to_generation_and_remix.nim	nim	5
