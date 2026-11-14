@@ -1990,6 +1990,7 @@ tests/integration/t_legacy_manifest_without_team_route_warns_and_scaffolds.nim	n
 tests/integration/t_level_and_its_equivalent_feature_set_select_alike.nim	nim	1
 tests/integration/t_levelless_catalog_selection_is_unchanged.nim	nim	1
 tests/integration/t_library_load_evidence_is_recorded.nim	nim	1
+tests/integration/t_library_outputs_are_path_free_with_debug_info.nim	nim	2
 tests/integration/t_linked_worktree_pre_push_repository_env.nim	nim	15
 tests/integration/t_local_daemons_control_plane_m0.nim	nim	3
 tests/integration/t_local_daemons_control_plane_m1.nim	nim	3
@@ -2425,6 +2426,8 @@ tests/integration/t_tpm_quote_verifies.nim	nim	7
 tests/integration/t_tpm_read_wait_tells_a_signal_from_a_timeout.nim	nim	3
 tests/integration/t_transparency_log_inclusion_against_a_witnessed_root.nim	nim	15
 tests/integration/t_tsm_report_transport.nim	nim	39
+tests/integration/t_two_checkouts_share_a_static_library_edge.nim	nim	2
+tests/integration/t_two_projects_share_a_library_built_with_the_same_flags.nim	nim	2
 tests/integration/t_two_repos_on_different_policy_pins_resolve_different_rules.nim	nim	1
 tests/integration/t_unavailable_package_does_not_fall_through_to_path.nim	nim	1
 tests/integration/t_unavailable_package_fails_with_platform_reason.nim	nim	1

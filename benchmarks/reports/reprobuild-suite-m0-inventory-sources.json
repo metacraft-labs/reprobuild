@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 35,
-    "nimTestBinaries": 2777,
+    "nimTestBinaries": 2781,
     "pureUnitConsolidationGroups": 82,
     "pureUnitTests": 761,
     "staticallyDetectedRuntimeCompilerFlowTests": 139,
-    "testEntries": 2821
+    "testEntries": 2825
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1616,7 +1616,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 21,
-      "integration": 1529,
+      "integration": 1533,
       "platform/destructive": 177,
       "pure unit": 761,
       "unclassified": 333
@@ -1833,9 +1833,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2777,
+    "nimTestBinaryCount": 2781,
     "pythonTestFileCount": 44,
-    "testEntryCount": 2821
+    "testEntryCount": 2825
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -26516,6 +26516,23 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_test_owned_runquotad_binds_on_hosts_with_a_runquota_account",
+      "class": "integration",
+      "classificationReason": "subprocess or repro CLI invocation in test body",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_test_support"
+      ],
+      "owner": "libs/repro_test_support",
+      "requiresReproBinary": false,
+      "source": "libs/repro_test_support/tests/t_test_owned_runquotad_binds_on_hosts_with_a_runquota_account.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_a_declared_alias_is_never_served_from_a_prefix_without_it",
       "class": "integration",
       "classificationReason": "e2e/integration path or requires the repro binary",
@@ -44297,6 +44314,21 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_library_outputs_are_path_free_with_debug_info",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_library_outputs_are_path_free_with_debug_info.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 2,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_linked_worktree_pre_push_repository_env",
       "class": "integration",
       "classificationReason": "e2e/integration path or requires the repro binary",
@@ -52035,6 +52067,38 @@
       "source": "tests/integration/t_tsm_report_transport.nim",
       "sourceSuiteCount": 9,
       "staticCaseCount": 39,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_two_checkouts_share_a_static_library_edge",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_test_support"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_two_checkouts_share_a_static_library_edge.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 2,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_two_projects_share_a_library_built_with_the_same_flags",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_two_projects_share_a_library_built_with_the_same_flags.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 2,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
