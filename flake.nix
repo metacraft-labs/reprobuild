@@ -575,7 +575,10 @@
       # until the v0.1.0 tag carries it; then it moves to the tag, with
       # `repro lock update`, which moves this URL, flake.lock and repro.lock
       # together (CI clones the sibling at repro.lock's revision).
-      url = "github:metacraft-labs/test-certificates-tools/4b395de551d86c745d6eb8ebf7c7228df25298f5";
+      # Moved 4b395de -> a726655 (2026-11-14), the sibling's `agents` tip: the
+      # version now lives inside src/, so a consumer that ships src/ alone
+      # compiles. 4b395de is an ancestor.
+      url = "github:metacraft-labs/test-certificates-tools/a726655886808d1062390d05c50f4fce03150eb4";
       flake = false;
     };
     # A source-only input was removed from this set, and this note is where
