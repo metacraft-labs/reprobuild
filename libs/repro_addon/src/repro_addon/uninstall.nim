@@ -7,7 +7,8 @@
 ##    store); their install links are the ledger's, removed in step 2;
 ## 2. remove the units and drop-ins (and any install link ``disable``
 ##    left), restoring an adopted or replaced unit from the bytes the
-##    ledger preserved;
+##    ledger preserved, and every revert hold the ledger records
+##    (``lcRevertHold``, §13 decision 133);
 ## 3. remove each diversion: the file a generation put at the diverted path
 ##    first, then ``dpkg-divert --local --rename --remove``, which moves the
 ##    package's file back;
@@ -997,6 +998,14 @@ proc runAddonUninstall*(opts: UninstallOptions): UninstallResult =
     removeOwned(u, result, driver)
   for di in byClass[lcDropIn]:
     removeOwned(di, result, driver)
+  # A revert's persistent holds (§13 decision 133) go with the drop-ins:
+  # left behind, one would keep an operator's own unit of that name, or a
+  # package unit the add-on had replaced and handed back, from ever
+  # starting. Each is removed only while it still holds the bytes the
+  # ledger recorded (the revert's hold text); its ``<unit>.d`` directory is
+  # an ``lcDir`` entry, removed in step 4 once empty.
+  for rh in byClass[lcRevertHold]:
+    removeOwned(rh, result, driver)
 
   # 3. Diversions: the profile's file at the path, then the diversion.
   var handled = initHashSet[string]()

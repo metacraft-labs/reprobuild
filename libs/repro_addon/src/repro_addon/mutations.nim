@@ -1417,6 +1417,10 @@ const
                           # a unit whose revert hold a passing apply
                           # clears is left down.
                           "cleared-hold-not-started",
+                          # a revert's hold is recorded in no ledger,
+                          # so uninstall leaves it behind (issue
+                          # 2026-11-14).
+                          "revert-hold-unledgered",
                           # A13: a state backup or restore runs while a
                           # unit of the set may run.
                           "state-units-not-checked",

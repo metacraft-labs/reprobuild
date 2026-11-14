@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 35,
-    "nimTestBinaries": 2787,
+    "nimTestBinaries": 2789,
     "pureUnitConsolidationGroups": 82,
-    "pureUnitTests": 762,
+    "pureUnitTests": 763,
     "staticallyDetectedRuntimeCompilerFlowTests": 140,
-    "testEntries": 2832
+    "testEntries": 2834
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -22,7 +22,7 @@
       "targetOs": "soAny"
     },
     {
-      "count": 4,
+      "count": 5,
       "defines": [],
       "dependencyShape": [
         "repro_addon",
@@ -33,6 +33,7 @@
         "libs/repro_addon/tests/t_addon_agent_repin.nim",
         "libs/repro_addon/tests/t_addon_floor_round8.nim",
         "libs/repro_addon/tests/t_addon_retargeted_address_is_refused.nim",
+        "libs/repro_addon/tests/t_addon_revert_hold_ledger.nim",
         "libs/repro_addon/tests/t_addon_tmpfiles_scope.nim"
       ],
       "targetOs": "soAny"
@@ -1617,9 +1618,9 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 22,
-      "integration": 1535,
+      "integration": 1536,
       "platform/destructive": 178,
-      "pure unit": 762,
+      "pure unit": 763,
       "unclassified": 335
     },
     "graphOwnedTestArtifacts": [
@@ -1834,9 +1835,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2787,
+    "nimTestBinaryCount": 2789,
     "pythonTestFileCount": 45,
-    "testEntryCount": 2832
+    "testEntryCount": 2834
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -9632,6 +9633,24 @@
       "source": "libs/repro_addon/tests/t_addon_retargeted_address_is_refused.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 3,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_addon_revert_hold_ledger",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_addon",
+        "repro_infra"
+      ],
+      "owner": "libs/repro_addon",
+      "requiresReproBinary": false,
+      "source": "libs/repro_addon/tests/t_addon_revert_hold_ledger.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 6,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -31915,6 +31934,23 @@
       "owner": "tests/e2e",
       "requiresReproBinary": false,
       "source": "tests/e2e/addon/t_e2e_addon_unattended_upgrades_week.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_e2e_addon_uninstall_removes_revert_holds",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_test_support"
+      ],
+      "owner": "tests/e2e",
+      "requiresReproBinary": false,
+      "source": "tests/e2e/addon/t_e2e_addon_uninstall_removes_revert_holds.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 1,
       "staticallyDetectedRuntimeCompilerFlow": false,

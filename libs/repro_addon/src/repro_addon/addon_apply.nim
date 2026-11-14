@@ -2390,6 +2390,71 @@ proc dirEntry(path, resource: string): LedgerEntry =
   LedgerEntry(class: lcDir, path: path, mode: st.mode, owner: st.owner,
               resource: resource)
 
+const RevertHoldResource* = "revert-hold"
+  ## The ``resource`` of a revert hold's ledger entries (``lcRevertHold``
+  ## and the ``lcDir`` a revert created for one). Not a profile resource:
+  ## a removal never walks it, and since it is not empty the entries are
+  ## not carried forward as bootstrap's are; every ledger write records
+  ## the holds on the host afresh (``revertHoldEntries``).
+
+proc revertHoldEntries*(previous: openArray[LedgerEntry];
+                        installed: HashSet[string];
+                        written: openArray[string];
+                        createdDirs: openArray[string];
+                        root = PersistentUnitDir): seq[LedgerEntry] =
+  ## The ledger entries for the revert holds on the host (spec §10.1,
+  ## §13 decision 133; issue 2026-11-14-floor-a-revert-hold-is-in-no-
+  ## ledger-so-uninstall-leaves-it): a revert hold is an add-on object, so
+  ## the ledger of every switch that writes one, and of every later switch
+  ## while it is there, records it and uninstall removes it (§6.4 step 2).
+  ##
+  ## A file ``<root>/<unit>.d/`` ``RevertHoldName`` is the add-on's only
+  ## when it is a regular file (never a link) holding exactly
+  ## ``RevertHoldText`` -- the content test the floor check applies
+  ## (``isAddonHold``) -- and the add-on wrote it: ``written`` by this
+  ## switch, recorded by the ``previous`` ledger, or on a unit the
+  ## generation installs (``installed``; a revert writes a hold for no
+  ## other unit, and this also takes over a hold an engine before the fix
+  ## wrote). A file of that name anywhere else, or with other bytes, is
+  ## not claimed: uninstall must never remove an operator's file.
+  ##
+  ## The directory holding a hold is the add-on's when this switch created
+  ## it (``createdDirs``) or the previous ledger recorded it so, for as long
+  ## as it exists; uninstall removes it only once it is empty.
+  when mutated("revert-hold-unledgered"):
+    # Falsifying build: the engine before the fix, recording no hold.
+    return
+  var prevHolds = initHashSet[string]()
+  var dirs: seq[string]
+  for e in previous:
+    if e.class == lcRevertHold: prevHolds.incl(e.path)
+    elif e.class == lcDir and e.resource == RevertHoldResource and
+        e.path notin dirs:
+      dirs.add(e.path)
+  for d in createdDirs:
+    if d notin dirs: dirs.add(d)
+  for d in dirs:
+    if dirExists(d) and not symlinkExists(d):
+      result.add(dirEntry(d, RevertHoldResource))
+  var holds: seq[string]
+  try: holds = staleHolds(RevertHoldName, root)
+  except OSError: return
+  for h in holds:
+    let dir = parentDir(h)
+    var unit = extractFilename(dir)
+    if not unit.endsWith(".d"): continue
+    unit.setLen(unit.len - 2)
+    if h notin written and h notin prevHolds and unit notin installed:
+      continue
+    if symlinkExists(h) or not fileExists(h): continue
+    var text = ""
+    try: text = readFile(h)
+    except IOError, OSError: continue
+    if text != RevertHoldText: continue
+    var e = fileEntry(lcRevertHold, h, RevertHoldResource, "")
+    e.unit = unit
+    result.add(e)
+
 proc entriesFor(p: ResourcePlan; previous: seq[LedgerEntry];
                 driver: CollisionDriver): seq[LedgerEntry] =
   ## The ledger entries of one applied resource. Entries the previous
@@ -5637,6 +5702,10 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
       storedTarget: storedTarget, storedTargetRecorded: true))
   var secretsFailure = ""
   var heldAtRevert: seq[string]   # spec §10.1: what a revert keeps on hold
+  # The revert holds this switch wrote, and the ``<unit>.d`` directories it
+  # created for them: the ledger records both (``revertHoldEntries``).
+  var revertHoldsWritten: seq[string]
+  var revertHoldDirsCreated: seq[string]
   if not opts.planOnly:
     writeSecretsSource(stateDir, secretsSource)
   var marker = PendingMarker(fromGeneration: committedPrevious,
@@ -6151,7 +6220,11 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
             let holdDir =
               when mutated("revert-hold-runtime-only"): RuntimeUnitDir
               else: PersistentUnitDir
-            try: discard writeHolds(held, RevertHoldName, RevertHoldText, holdDir)
+            for u in held:
+              let d = parentDir(holdPath(u, RevertHoldName, holdDir))
+              if not dirExists(d) and d notin revertHoldDirsCreated:
+                revertHoldDirsCreated.add(d)
+            try: revertHoldsWritten = writeHolds(held, RevertHoldName, RevertHoldText, holdDir)
             except IOError, OSError:
               problems.add("the revert's hold could not be written: " &
                            getCurrentExceptionMsg())
@@ -6379,6 +6452,18 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
             readLiveSysctl(e.path) == e.value and e.replaced != e.value
           else: false
         if stillOurs: put(e)
+      # The revert holds on the host (§13 decision 133): add-on objects,
+      # recorded by every ledger written while they are there, so uninstall
+      # removes them (§6.4 step 2). A switch whose check passed removed
+      # them above, and its ledger no longer lists them.
+      block:
+        var installed = initHashSet[string]()
+        for r in composed.resources:
+          if r.kind == srkSystemdSystemUnit and r.suCollision != "dropIn":
+            installed.incl(r.suName)
+        for e in revertHoldEntries(previous.entries, installed,
+                                   revertHoldsWritten, revertHoldDirsCreated):
+          put(e)
       when mutated("switch-fails-before-ledger"):
         const Trigger = "/var/tmp/repro-addon-fail-before-ledger"
         if fileExists(Trigger):
