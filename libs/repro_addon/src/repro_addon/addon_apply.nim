@@ -2397,6 +2397,32 @@ const RevertHoldResource* = "revert-hold"
   ## not carried forward as bootstrap's are; every ledger write records
   ## the holds on the host afresh (``revertHoldEntries``).
 
+proc revertHoldDirsToClaim*(held: openArray[string]; replaying: bool;
+                            root = PersistentUnitDir): seq[string] =
+  ## The ``<unit>.d`` directories a revert about to write its holds for
+  ## ``held`` makes the add-on's (``revertHoldEntries``): each that does
+  ## not exist yet. A replayed revert also claims one that holds nothing but
+  ## the revert's own hold: the interrupted attempt it replays created it
+  ## and died before its ledger recorded it, and left unclaimed it would
+  ## outlive an uninstall, empty. A directory with anything else in it, or
+  ## a hold with other bytes, is someone else's and is never claimed.
+  for u in held:
+    let d = parentDir(holdPath(u, RevertHoldName, root))
+    if d in result: continue
+    if not dirExists(d):
+      result.add(d)
+      continue
+    when not mutated("replayed-hold-dir-unclaimed"):
+      if replaying and not symlinkExists(d):
+        var only: seq[string]
+        for kind, f in walkDir(d): only.add(f)
+        let h = d / RevertHoldName
+        if only == @[h] and not symlinkExists(h) and fileExists(h):
+          var text = ""
+          try: text = readFile(h)
+          except IOError, OSError: discard
+          if text == RevertHoldText: result.add(d)
+
 proc revertHoldEntries*(previous: openArray[LedgerEntry];
                         installed: HashSet[string];
                         written: openArray[string];
@@ -6220,10 +6246,8 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
             let holdDir =
               when mutated("revert-hold-runtime-only"): RuntimeUnitDir
               else: PersistentUnitDir
-            for u in held:
-              let d = parentDir(holdPath(u, RevertHoldName, holdDir))
-              if not dirExists(d) and d notin revertHoldDirsCreated:
-                revertHoldDirsCreated.add(d)
+            revertHoldDirsCreated = revertHoldDirsToClaim(held,
+              replaying and opts.replayOf == "revert", holdDir)
             try: revertHoldsWritten = writeHolds(held, RevertHoldName, RevertHoldText, holdDir)
             except IOError, OSError:
               problems.add("the revert's hold could not be written: " &

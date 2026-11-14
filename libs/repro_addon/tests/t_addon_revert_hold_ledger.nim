@@ -19,9 +19,16 @@
 ## uninstall removing it on a real guest, and an operator's own unit of the
 ## same name starting afterwards.
 ##
-## Falsifying build: ``revert-hold-unledgered`` (the engine before the fix,
+## - a replayed revert claims the ``<unit>.d`` directory its interrupted
+##   attempt created and holds nothing but the hold, so uninstall does not
+##   leave it behind empty; a directory with anything else is never claimed
+##   (``revertHoldDirsToClaim``).
+##
+## Falsifying builds: ``revert-hold-unledgered`` (the engine before the fix,
 ## recording no hold) is red on every test that expects an entry: the
-## first, second, fourth, fifth and sixth.
+## first, second, fourth, fifth and sixth of the first suite;
+## ``replayed-hold-dir-unclaimed`` is red on "a replayed revert claims the
+## directory its interrupted attempt made".
 ##
 ## Mocks: none. The holds are real files under a temporary directory that
 ## stands in for ``/etc/systemd/system`` (``revertHoldEntries`` takes the
@@ -137,3 +144,34 @@ suite "a revert hold is in the ledger":
       if x.component == fcEtc and x.key == a:
         removed = x.op == doRemoved
     check removed
+
+suite "the directory a revert's hold is written in":
+  test "a revert claims a directory it makes, never one that was there":
+    let root = createTempDir("revert-hold-", "")
+    defer: removeDir(root)
+    createDir(root / "b.service.d")
+    writeFile(root / "b.service.d" / "10-operator.conf", "[Unit]\n")
+    let claimed = revertHoldDirsToClaim(["a.service", "b.service", "t@1.service"],
+                                        false, root)
+    check claimed == @[root / "a.service.d", root / "t@.service.d"]
+    # Not replaying: an existing directory holding only a hold is not
+    # claimed either (an earlier, recorded revert's).
+    discard holdAt(root, "c.service")
+    check revertHoldDirsToClaim(["c.service"], false, root).len == 0
+
+  test "a replayed revert claims the directory its interrupted attempt made":
+    let root = createTempDir("revert-hold-", "")
+    defer: removeDir(root)
+    # The interrupted attempt wrote the hold, then died before its ledger.
+    let h = holdAt(root, "a.service")
+    check revertHoldDirsToClaim(["a.service"], true, root) == @[parentDir(h)]
+    # Recorded, it is removed with the hold at uninstall (``lcDir``).
+    let es = revertHoldEntries([], initHashSet[string](), [h],
+                               revertHoldDirsToClaim(["a.service"], true, root), root)
+    check classes(es, lcRevertHold) == @[h]
+    check classes(es, lcDir) == @[parentDir(h)]
+    # Something else in it, or other bytes: someone else's directory.
+    writeFile(root / "a.service.d" / "10-operator.conf", "[Unit]\n")
+    check revertHoldDirsToClaim(["a.service"], true, root).len == 0
+    discard holdAt(root, "b.service", "[Unit]\nDescription=operator's\n")
+    check revertHoldDirsToClaim(["b.service"], true, root).len == 0

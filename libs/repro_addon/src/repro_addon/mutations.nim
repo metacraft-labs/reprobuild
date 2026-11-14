@@ -1421,6 +1421,9 @@ const
                           # so uninstall leaves it behind (issue
                           # 2026-11-14).
                           "revert-hold-unledgered",
+                          # a replayed revert leaves the hold directory
+                          # its interrupted attempt created unclaimed.
+                          "replayed-hold-dir-unclaimed",
                           # A13: a state backup or restore runs while a
                           # unit of the set may run.
                           "state-units-not-checked",
