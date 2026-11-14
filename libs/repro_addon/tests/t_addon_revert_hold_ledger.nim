@@ -19,16 +19,27 @@
 ## uninstall removing it on a real guest, and an operator's own unit of the
 ## same name starting afterwards.
 ##
-## - a replayed revert claims the ``<unit>.d`` directory its interrupted
-##   attempt created and holds nothing but the hold, so uninstall does not
-##   leave it behind empty; a directory with anything else is never claimed
-##   (``revertHoldDirsToClaim``).
+## - a revert claims only the ``<unit>.d`` directories it creates, never one
+##   that exists, and records them durably before it creates them
+##   (``revertHoldDirsPath``), so the replay of an attempt that died before
+##   its ledger claims exactly those: uninstall leaves no empty directory of
+##   the revert's behind and never removes an operator's
+##   (``revertHoldDirsToCreate``, ``readRevertHoldDirs``). The record is
+##   removed at the commit; the VM gate resets the guest between the
+##   revert's ledger and its commit.
+## - a passing switch removes every revert hold, and a hold's directory
+##   only when a ledger or the record claims it: an operator's empty
+##   ``<unit>.d`` that a revert put its hold in stays (``clearRevertHolds``).
 ##
 ## Falsifying builds: ``revert-hold-unledgered`` (the engine before the fix,
 ## recording no hold) is red on every test that expects an entry: the
-## first, second, fourth, fifth and sixth of the first suite;
+## first, second, fourth, fifth and sixth of the first suite, and the
+## two later tests whose ledger it builds;
 ## ``replayed-hold-dir-unclaimed`` is red on "a replayed revert claims the
-## directory its interrupted attempt made".
+## directories its interrupted attempt recorded" and "the record names only
+## hold directories under the unit directory";
+## ``revert-hold-clear-removes-any-dir`` is red on "it removes a hold's
+## directory only when the add-on owns it".
 ##
 ## Mocks: none. The holds are real files under a temporary directory that
 ## stands in for ``/etc/systemd/system`` (``revertHoldEntries`` takes the
@@ -151,27 +162,71 @@ suite "the directory a revert's hold is written in":
     defer: removeDir(root)
     createDir(root / "b.service.d")
     writeFile(root / "b.service.d" / "10-operator.conf", "[Unit]\n")
-    let claimed = revertHoldDirsToClaim(["a.service", "b.service", "t@1.service"],
-                                        false, root)
-    check claimed == @[root / "a.service.d", root / "t@.service.d"]
-    # Not replaying: an existing directory holding only a hold is not
-    # claimed either (an earlier, recorded revert's).
+    check revertHoldDirsToCreate(["a.service", "b.service", "t@1.service"], root) ==
+      @[root / "a.service.d", root / "t@.service.d"]
+    # An existing directory holding nothing but a hold, or nothing at all,
+    # is not claimed either: it may be an operator's.
     discard holdAt(root, "c.service")
-    check revertHoldDirsToClaim(["c.service"], false, root).len == 0
+    createDir(root / "d.service.d")
+    check revertHoldDirsToCreate(["c.service", "d.service"], root).len == 0
 
-  test "a replayed revert claims the directory its interrupted attempt made":
+  test "a replayed revert claims the directories its interrupted attempt recorded":
+    let root = createTempDir("revert-hold-", "")
+    let state = createTempDir("revert-hold-state-", "")
+    defer:
+      removeDir(root)
+      removeDir(state)
+    # An operator's empty directory, there before the revert.
+    createDir(root / "b.service.d")
+    # The interrupted attempt: it records what it will create, creates it,
+    # writes the holds, and dies before its ledger.
+    let made = revertHoldDirsToCreate(["a.service", "b.service"], root)
+    check made == @[root / "a.service.d"]
+    recordRevertHoldDirs(state, made, root)
+    let ha = holdAt(root, "a.service")
+    let hb = holdAt(root, "b.service")
+    # The replay finds both directories and creates nothing.
+    check revertHoldDirsToCreate(["a.service", "b.service"], root).len == 0
+    let es = revertHoldEntries([], initHashSet[string](), [ha, hb],
+                               readRevertHoldDirs(state, root), root)
+    check classes(es, lcRevertHold).toHashSet == toHashSet([ha, hb])
+    check classes(es, lcDir) == @[root / "a.service.d"]
+    clearRevertHoldDirs(state)
+    check readRevertHoldDirs(state, root).len == 0
+
+  test "the record names only hold directories under the unit directory":
+    let root = createTempDir("revert-hold-", "")
+    let state = createTempDir("revert-hold-state-", "")
+    defer:
+      removeDir(root)
+      removeDir(state)
+    createDir(state / "addon")
+    writeFile(revertHoldDirsPath(state), root / "a.service.d" & "\n" &
+      "/etc\n" & root / "x" & "\n" & root / "a.service.d/../../evil.d" & "\n" &
+      root / "a.service.d" & "\n")
+    check readRevertHoldDirs(state, root) == @[root / "a.service.d"]
+
+suite "a passing switch clears the holds":
+  test "it removes a hold's directory only when the add-on owns it":
     let root = createTempDir("revert-hold-", "")
     defer: removeDir(root)
-    # The interrupted attempt wrote the hold, then died before its ledger.
-    let h = holdAt(root, "a.service")
-    check revertHoldDirsToClaim(["a.service"], true, root) == @[parentDir(h)]
-    # Recorded, it is removed with the hold at uninstall (``lcDir``).
-    let es = revertHoldEntries([], initHashSet[string](), [h],
-                               revertHoldDirsToClaim(["a.service"], true, root), root)
-    check classes(es, lcRevertHold) == @[h]
-    check classes(es, lcDir) == @[parentDir(h)]
-    # Something else in it, or other bytes: someone else's directory.
-    writeFile(root / "a.service.d" / "10-operator.conf", "[Unit]\n")
-    check revertHoldDirsToClaim(["a.service"], true, root).len == 0
-    discard holdAt(root, "b.service", "[Unit]\nDescription=operator's\n")
-    check revertHoldDirsToClaim(["b.service"], true, root).len == 0
+    # A directory a ledger records, one only the record names (a revert
+    # that died before its commit), and an operator's empty directory that
+    # was there before the revert put its hold in it.
+    let a = holdAt(root, "a.service")
+    let b = holdAt(root, "b.service")
+    let c = holdAt(root, "c.service")
+    let previous = revertHoldEntries([], initHashSet[string](), [a],
+                                     [parentDir(a)], root)
+    let cleared = clearRevertHolds(previous, [parentDir(b)], @[root])
+    check cleared.toHashSet == toHashSet([a, b, c])
+    for h in [a, b, c]: check not fileExists(h)
+    check not dirExists(parentDir(a))
+    check not dirExists(parentDir(b))
+    check dirExists(parentDir(c))
+    # An owned directory with anything else in it stays.
+    let d = holdAt(root, "d.service")
+    writeFile(root / "d.service.d" / "10-operator.conf", "[Unit]\n")
+    discard clearRevertHolds([], [parentDir(d)], @[root])
+    check not fileExists(d)
+    check fileExists(root / "d.service.d" / "10-operator.conf")

@@ -162,6 +162,8 @@ proc finishCommittedSwitch(stateDir: string; m: PendingMarker): seq[string] =
   if m.purpose == "revert":
     recordRolledBack(stateDir, m.revertOf, m.fromGeneration, current,
       m.revertReason & " (the revert was finished at boot)", false)
+  # Its committed ledger claimed the directories a revert recorded.
+  clearRevertHoldDirs(stateDir)
   clearPendingMarker(stateDir)
   clearPendingPlan(stateDir)
   # A switch the rollback floor kept in place is resolved by its commit.

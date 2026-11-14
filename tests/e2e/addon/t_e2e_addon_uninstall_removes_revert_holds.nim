@@ -11,7 +11,9 @@
 ##    persistent hold ``/etc/systemd/system/a9r-st.service.d/zz-repro-addon-
 ##    revert-hold.conf`` written and no switch pending;
 ## 2. the ledger copy the revert wrote records the hold (class
-##    ``revertHold``) and the ``a9r-st.service.d`` directory it made;
+##    ``revertHold``) and the ``a9r-st.service.d`` directory it made, and
+##    the record of the directories it was about to make
+##    (``revert-hold-dirs``, written before it made them) is gone;
 ## 3. ``repro system addon uninstall`` exits 0 and leaves neither the hold
 ##    nor its directory, and the base's fingerprint is what it was before
 ##    bootstrap (the fixture's account and the refused tree aside, which
@@ -20,11 +22,25 @@
 ##    starts (the issue's measurement: before the fix ``start=1``,
 ##    ``AssertResult=no``).
 ##
-## Falsifying build (red here): ``revert-hold-unledgered``, the engine
-## before the fix: the ledger records no hold, uninstall leaves it, and
-## the operator's unit cannot start.
+## The second test does the same with the guest hard-reset while the
+## revert is paused at ``revert:step-8``: its ledger is written, it has not
+## committed. The boot's recovery replays the revert from the ledger the
+## refused switch started from, which names no hold directory, so only the
+## record (``revert-hold-dirs``) tells the replay the directory is the
+## add-on's. Steps 2 to 4 hold after the replay commits.
 ##
-## Opt-in: ``REPRO_ADDON_VM_GATES=1``.
+## Falsifying builds (red here): ``revert-hold-unledgered``, the engine
+## before the fix: the ledger records no hold, uninstall leaves it, and
+## the operator's unit cannot start; ``revert-hold-dirs-cleared-at-ledger``
+## (red on the second test only): the record goes with the revert's
+## ledger, the replay leaves the directory unclaimed, and uninstall leaves
+## it behind, empty; ``revert-hold-not-synced`` (red on the second test
+## only): the hold reaches the disk empty and the held unit starts at the
+## boot.
+##
+## Opt-in: ``REPRO_ADDON_VM_GATES=1``. The second test pauses a switch and
+## resets a QEMU guest, so it needs the seam build, which
+## ``scripts/run_addon_gate.sh`` makes for this gate.
 ##
 ## *Mocking.* None: the real add-on, the base's own systemd.
 
@@ -39,6 +55,7 @@ const Head = "addOn {\n  managedEtcPrefixes = []\n}\n\n"
 const Pending = "/var/lib/repro/system/addon/pending"
 const HoldDir = "/etc/systemd/system/a9r-st.service.d"
 const Hold = HoldDir & "/zz-repro-addon-revert-hold.conf"
+const RecordPath = "/var/lib/repro/system/addon/revert-hold-dirs"
 
 proc unitResource(name, service, binary: string; description: string): string =
   ## A floored oneshot unit that stays active, enabled.
@@ -48,7 +65,19 @@ proc unitResource(name, service, binary: string; description: string): string =
     "ExecStart=" & binary & " --version\n" &
     "\n[Install]\nWantedBy=multi-user.target\n\"\n  enabled = true\n}\n"
 
-proc runBase(b: BaseImage; record: JsonNode): seq[string] =
+proc startedPastItsAsserts(journal: string): bool =
+  ## Whether the unit's journal shows a start that got past its assertions.
+  ## A start the hold refused logs "Starting requested but asserts failed"
+  ## and "Assertion failed for ...", which ``journalStarted`` would count.
+  for l in journal.splitLines():
+    if ("Started " in l or "Starting " in l) and "skipped" notin l and
+        "asserts failed" notin l:
+      return true
+  false
+
+proc runBase(b: BaseImage; record: JsonNode; resetAt = ""): seq[string] =
+  ## ``resetAt``: a seam point of the refused switch's revert at which the
+  ## guest is hard-reset, or "" for a revert that runs to its commit.
   var g: Guest
   let steps = newJArray()
   var fails: seq[string]
@@ -65,6 +94,11 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
     # The unit's account, made before the base fingerprint: the gate's, not
     # the add-on's.
     discard g.run("useradd -r -M -s /usr/sbin/nologin a9e")
+    if resetAt.len > 0:
+      # The base after a clean reboot, as the guest will be after the
+      # reset: a first boot runs units (``ldconfig.service`` and the like,
+      # ``ConditionNeedsUpdate=``) that a later boot does not.
+      g.rebootGuest()
     let f0 = g.takeFingerprint(repro)
     if not g.bootstrapAddon(repro, step): return fails
     let binary = g.run("ls -d /repro/store/prefixes/repro-addon/*/bin/repro " &
@@ -79,13 +113,51 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
     # apply's check refuses it, and so does its revert's, which holds it.
     discard g.run("systemctl stop a9r-st.service; rm -rf /var/lib/a9r-st; " &
                   "mkdir /var/lib/a9r-st; touch /var/lib/a9r-st/theirs")
-    r = g.applyProfile(repro, "u2", st("u2"))
-    let out2 = r.stdout & r.stderr
-    let pending = g.exec("test -e " & Pending & " && cat " & Pending & "; true").stdout
-    step("the refused apply's revert commits holding the unit, nothing pending",
-         r.exitCode != 0 and "keeps a9r-st.service on hold" in out2 and
-         "could not be rolled back" notin out2 and pending.strip().len == 0,
-         tail(out2) & "\npending=" & pending)
+    if resetAt.len == 0:
+      r = g.applyProfile(repro, "u2", st("u2"))
+      let out2 = r.stdout & r.stderr
+      let pending = g.exec("test -e " & Pending & " && cat " & Pending & "; true").stdout
+      step("the refused apply's revert commits holding the unit, nothing pending",
+           r.exitCode != 0 and "keeps a9r-st.service on hold" in out2 and
+           "could not be rolled back" notin out2 and pending.strip().len == 0,
+           tail(out2) & "\npending=" & pending)
+    else:
+      # "Not synced" means "not on the disk" at the reset
+      # (``holdWriteback``), so a hold written without a sync comes back
+      # empty every time, not when the kernel happens to be slow.
+      g.holdWriteback()
+      let paused = g.startSwitchPausedAt(repro, "u2", st("u2"), resetAt)
+      step("the refused apply's revert paused at " & resetAt,
+           paused.exitCode == 0, tail(paused.stdout & paused.stderr))
+      if paused.exitCode != 0: return fails
+      let log = g.exec("cat /root/addon/bg-apply.log").stdout
+      let ledgerBefore = g.ledgerOf()
+      var dirBefore = false
+      for l in ledgerBefore.splitLines():
+        let f = l.split('\t')
+        if f.len > 1 and f[0] == "dir" and f[1] == HoldDir: dirBefore = true
+      step("the paused revert has written the hold, its ledger and the record",
+           "keeps a9r-st.service on hold" in log and
+           g.exec("test -f " & Hold).exitCode == 0 and dirBefore and
+           g.exec("grep -qx " & HoldDir & " " & RecordPath).exitCode == 0,
+           tail(log) & "\n" & ledgerBefore & "\nrecord:\n" &
+           g.exec("cat " & RecordPath & " 2>&1").stdout)
+      g.hardResetAfterSettle()
+      g.boot()
+      let journal = g.waitReasserted()
+      record["reassert"] = %journal
+      let pending = g.exec("test -e " & Pending & " && cat " & Pending & "; true").stdout
+      # The hold was on the disk, whole, so the held unit did not start at
+      # the boot, before the recovery ran either.
+      let unitJournal = g.exec("journalctl -b -o cat --no-pager -u a9r-st.service").stdout
+      let state = g.exec("systemctl show -p ActiveState -p AssertResult a9r-st.service").stdout
+      step("the boot's recovery replays the revert to its commit, nothing pending",
+           pending.strip().len == 0 and "ActiveState=active" notin state,
+           tail(journal) & "\npending=" & pending & "\n" & state)
+      step("the held unit did not start at the boot",
+           not startedPastItsAsserts(unitJournal) and
+           "Assertion failed for a9r-st.service" in unitJournal,
+           unitJournal & "\n" & state)
     step("the revert's hold is written under /etc",
          g.exec("test -f " & Hold).exitCode == 0,
          g.exec("ls -la " & HoldDir & " 2>&1").stdout)
@@ -98,6 +170,11 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
       if f.len > 1 and f[0] == "dir" and f[1] == HoldDir: dirLine = true
     step("the revert's ledger records the hold and the directory it made",
          holdLine and dirLine, ledger)
+    # The directories the revert recorded before creating them are in its
+    # committed ledger now, and the record is gone.
+    step("the revert's record of the directories it made is cleared at its commit",
+         g.exec("test -e " & RecordPath).exitCode != 0,
+         g.exec("cat " & RecordPath & " 2>&1").stdout)
     let un = g.exec(repro & " system addon uninstall", timeoutSec = 1200)
     let left = g.exec("ls -la " & HoldDir & " 2>&1; ls /etc/systemd/system/a9r-st.service 2>&1").stdout
     step("uninstall exits 0 and leaves neither the hold nor its directory",
@@ -129,21 +206,30 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
       g.destroy()
   fails
 
+proc runGate(resetAt: string) =
+  var failures: seq[string]
+  for b in selectedBases():
+    let record = %*{"gate": Gate, "base": b.name, "arch": b.debArch,
+      "backend": (if useIncus(): "incus" else: "qemu"),
+      "mutation": mutation(), "reprobuild": gitHead(),
+      "resetAt": resetAt, "started": $now().utc}
+    let f = runBase(b, record, resetAt)
+    record["verdict"] = %(if f.len == 0: "green" else: "red")
+    record["finished"] = %($now().utc)
+    echo "record: ", writeRecord(Gate, record)
+    failures.add(f)
+  for f in failures: echo "FAIL ", f
+  check failures.len == 0
+
 suite Gate:
   test "uninstall removes a revert's hold, and an operator's unit of that name starts":
     if not gatesEnabled():
       skip("add-on VM gate: set REPRO_ADDON_VM_GATES=1 (just " & Gate & ")")
     else:
-      var failures: seq[string]
-      for b in selectedBases():
-        let record = %*{"gate": Gate, "base": b.name, "arch": b.debArch,
-          "backend": (if useIncus(): "incus" else: "qemu"),
-          "mutation": mutation(), "reprobuild": gitHead(),
-          "started": $now().utc}
-        let f = runBase(b, record)
-        record["verdict"] = %(if f.len == 0: "green" else: "red")
-        record["finished"] = %($now().utc)
-        echo "record: ", writeRecord(Gate, record)
-        failures.add(f)
-      for f in failures: echo "FAIL ", f
-      check failures.len == 0
+      runGate("")
+
+  test "the same after a reset between the revert's ledger and its commit":
+    if not gatesEnabled():
+      skip("add-on VM gate: set REPRO_ADDON_VM_GATES=1 (just " & Gate & ")")
+    else:
+      runGate("revert:step-8")

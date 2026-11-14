@@ -1421,9 +1421,23 @@ const
                           # so uninstall leaves it behind (issue
                           # 2026-11-14).
                           "revert-hold-unledgered",
-                          # a replayed revert leaves the hold directory
-                          # its interrupted attempt created unclaimed.
+                          # a replay forgets the hold directories its
+                          # interrupted revert recorded, so they are left
+                          # unclaimed.
                           "replayed-hold-dir-unclaimed",
+                          # a passing switch that clears a revert hold
+                          # removes its directory whenever it is left
+                          # empty, an operator's too.
+                          "revert-hold-clear-removes-any-dir",
+                          # the record of a revert's hold directories is
+                          # cleared when its ledger is written, not at
+                          # its commit, so a replay after a crash in
+                          # between leaves them unclaimed.
+                          "revert-hold-dirs-cleared-at-ledger",
+                          # a revert's hold is written unsynced, so a
+                          # power loss brings it back empty and the held
+                          # unit starts at boot.
+                          "revert-hold-not-synced",
                           # A13: a state backup or restore runs while a
                           # unit of the set may run.
                           "state-units-not-checked",
