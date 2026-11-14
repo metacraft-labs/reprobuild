@@ -295,7 +295,10 @@ when defined(reproProviderMode):
 const
   BuildActionPayloadMagic = [byte(ord('R')), byte(ord('B')), byte(ord('A')),
     byte(ord('P'))]
-  BuildActionPayloadVersion* = 32'u16
+  BuildActionPayloadVersion* = 33'u16
+    ## v33: the action's width range and width flag (``cpuMinMilli``,
+    ## ``cpuPreferredMilli``, ``widthFlag``), appended after the optional
+    ## output candidates. v32-and-earlier payloads decode as unsized.
     ## v32: optional output candidates, appended after removeBeforeRun.
     ## v31: ``removeBeforeRun`` — declared outputs the engine removes before
     ## the action runs, a string list appended last.
@@ -2170,6 +2173,14 @@ proc buildAction*(id: string; call: PublicCliCall;
     activeProviderProjectRoot())
   let packageActionEnv = currentPackageActionEnvEntries()
   let actionEnv = mergePackageActionEnv(packageActionEnv, env)
+  # An action that starts a parallel tool is sized: it asks RunQuota for a
+  # width range and names the flag that takes the grant (``sized_tools``).
+  var suppliedArguments: seq[string] = @[]
+  for arg in call.arguments:
+    if arg.encodedValue.len > 0:
+      suppliedArguments.add(arg.name)
+  let width = sizedWidthFor(call.packageName, call.executableName,
+    call.subcommand, suppliedArguments)
   result = BuildActionDef(
     id: id,
     call: call,
@@ -2179,6 +2190,9 @@ proc buildAction*(id: string; call: PublicCliCall;
     optionalOutputs: @optionalOutputs,
     pool: pool,
     poolUnits: poolUnits,
+    cpuMinMilli: width.minMilli,
+    cpuPreferredMilli: width.preferredMilli,
+    widthFlag: width.flag,
     depfile: depfile,
     dynamicDepsFile: dynamicDepsFile,
     cacheable: cacheable,
@@ -4408,6 +4422,10 @@ proc encodeBuildActionPayloadAtVersion*(action: BuildActionDef;
     payload.writeStringSeq(action.removeBeforeRun)
   if version >= 32'u16:
     payload.writeStringSeq(action.optionalOutputs)
+  if version >= 33'u16:
+    payload.writeU32Le(action.cpuMinMilli)
+    payload.writeU32Le(action.cpuPreferredMilli)
+    payload.writeString(action.widthFlag)
 
   result.add(BuildActionPayloadMagic)
   result.writeU16Le(version)
@@ -4682,6 +4700,16 @@ proc decodeBuildActionPayload*(bytes: openArray[byte]): BuildActionDef {.dynOrSt
     result.removeBeforeRun = @[]
   if version >= 32'u16:
     result.optionalOutputs = readStringSeq(bytes, pos)
+  if version >= 33'u16:
+    result.cpuMinMilli = readU32Le(bytes, pos)
+    result.cpuPreferredMilli = readU32Le(bytes, pos)
+    result.widthFlag = readString(bytes, pos)
+  else:
+    # An older payload carries no width: the action is the one-slot default
+    # it always was.
+    result.cpuMinMilli = 0'u32
+    result.cpuPreferredMilli = 0'u32
+    result.widthFlag = ""
   if pos != bytes.len:
     raisePayload("trailing build action payload bytes")
 

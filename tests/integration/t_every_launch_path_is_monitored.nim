@@ -941,7 +941,11 @@ proc capabilitySurfaces(): seq[CapabilitySurface] =
                # small state machine plus one env-var read. All are values
                # in, values out: the launch that follows is still one of
                # the spawning entries above. None starts a process.
-               "applyGrantedWidth", "fillWidthPlaceholders",
+               # `applyGrant` and `withParentLease` add the lease as the
+               # parent of the command's own RunQuota clients: one more
+               # environment entry on a command the launch below starts.
+               "applyGrantedWidth", "applyGrant", "withParentLease",
+               "fillWidthPlaceholders",
                "widthPlaceholderArgv", "withWidthFlag", "grantedSlots",
                "frontierWaitMillis", "initFrontierSizer",
                "noteGrantedAtOnce", "noteOldestWait", "noteQueuedGrant"]),
