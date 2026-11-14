@@ -41,6 +41,7 @@ import repro_core/file_lock
 import repro_core/host_apply_lock
 
 import repro_infra
+from repro_infra/start_holds import templateOf
 import repro_local_store/store
 import repro_peer_cache/auth as peerAuth
 from repro_deploy_agent/secrets import ensureRecipientKeyFile
@@ -282,10 +283,24 @@ proc startCommittedUnits*(stateDir: string; noBlock: bool): seq[string] =
   ## boot transaction owns the order.
   let lp = ledgerCopyPath(stateDir)
   if not fileExists(lp): return
-  for e in readLedger(lp).entries:
+  let entries = readLedger(lp).entries
+  # A unit a revert holds (§13 decision 133) is not started: its hold
+  # fails the start, and a queued one (``--no-block``) would be reported
+  # as started although it never ran. Its hold names it, or its template.
+  var held: seq[string]
+  when not mutated("recovery-starts-held-units"):
+    for e in entries:
+      if e.class == lcRevertHold and e.unit.len > 0 and fileExists(e.path):
+        held.add(e.unit)
+  for e in entries:
     # Targets follow their units, and this unit is the one running.
     if e.class != lcUnit or not e.started or e.unit.len == 0 or
         e.unit.endsWith(".target") or e.unit == ReassertUnit:
+      continue
+    let tmpl = templateOf(e.unit)
+    if e.unit in held or (tmpl.len > 0 and tmpl in held):
+      result.add("kept " & e.unit & " down: a revert holds it (its floor " &
+                 "check refused it; an apply whose check passes releases it)")
       continue
     # Never a second instance beside one that is still alive (an
     # exclusive unit whose stop could not be confirmed, §7.3).

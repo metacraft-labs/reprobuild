@@ -9760,7 +9760,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_addon/tests/t_addon_revert_hold_ledger.nim",
       "sourceSuiteCount": 3,
-      "staticCaseCount": 10,
+      "staticCaseCount": 12,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -32080,7 +32080,7 @@
       "requiresReproBinary": false,
       "source": "tests/e2e/addon/t_e2e_addon_uninstall_removes_revert_holds.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 2,
+      "staticCaseCount": 3,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

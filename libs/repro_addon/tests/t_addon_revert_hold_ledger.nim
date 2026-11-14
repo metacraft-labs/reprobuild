@@ -20,13 +20,15 @@
 ## same name starting afterwards.
 ##
 ## - a revert claims only the ``<unit>.d`` directories it creates, never one
-##   that exists, and records them durably before it creates them
-##   (``revertHoldDirsPath``), so the replay of an attempt that died before
-##   its ledger claims exactly those: uninstall leaves no empty directory of
-##   the revert's behind and never removes an operator's
-##   (``revertHoldDirsToCreate``, ``readRevertHoldDirs``). The record is
-##   removed at the commit; the VM gate resets the guest between the
-##   revert's ledger and its commit.
+##   that exists: it makes each under an unguessable staging name and
+##   renames it into place without replacing anything, recording every step
+##   first (``placeRevertHold``, ``revertHoldDirsPath``). So the replay of
+##   an attempt that died at any point claims exactly the directories it
+##   made, and an operator's directory made in the meantime -- even at the
+##   very path -- is never claimed (``claimedRevertHoldDirs``): uninstall
+##   leaves no empty directory of the revert's behind and never removes an
+##   operator's. The record is removed at the commit; the VM gate resets
+##   the guest between the revert's ledger and its commit.
 ## - a passing switch removes every revert hold, and a hold's directory
 ##   only when a ledger or the record claims it: an operator's empty
 ##   ``<unit>.d`` that a revert put its hold in stays (``clearRevertHolds``).
@@ -35,9 +37,15 @@
 ## recording no hold) is red on every test that expects an entry: the
 ## first, second, fourth, fifth and sixth of the first suite, and the
 ## two later tests whose ledger it builds;
-## ``replayed-hold-dir-unclaimed`` is red on "a replayed revert claims the
-## directories its interrupted attempt recorded" and "the record names only
-## hold directories under the unit directory";
+## ``replayed-hold-dir-unclaimed`` is red on "a revert claims a directory it
+## makes, never one that was there", "a replayed revert claims the
+## directories its interrupted attempt recorded", "a crash before the
+## rename leaves an operator's directory unclaimed" (its staging directory
+## is not dropped), "a directory the revert made, once removed, is never
+## claimed again" and "the record names only
+## hold directories and staging names under the unit directory";
+## ``revert-hold-gone-dir-reclaimed`` is red on "a directory the revert
+## made, once removed, is never claimed again";
 ## ``revert-hold-clear-removes-any-dir`` is red on "it removes a hold's
 ## directory only when the add-on owns it".
 ##
@@ -156,19 +164,44 @@ suite "a revert hold is in the ledger":
         removed = x.op == doRemoved
     check removed
 
+proc stagingLeft(root: string): seq[string] =
+  for kind, f in walkDir(root):
+    if extractFilename(f).startsWith(RevertHoldStagingPrefix): result.add(f)
+
+proc stagingName(root: string; c: char): string =
+  root / (RevertHoldStagingPrefix & repeat(c, 32))
+
+proc writeRecord(state: string; lines: openArray[string]) =
+  createDir(state / "addon")
+  writeFile(revertHoldDirsPath(state), lines.join("\n") & "\n")
+
 suite "the directory a revert's hold is written in":
   test "a revert claims a directory it makes, never one that was there":
     let root = createTempDir("revert-hold-", "")
-    defer: removeDir(root)
+    let state = createTempDir("revert-hold-state-", "")
+    defer:
+      removeDir(root)
+      removeDir(state)
+    # An operator's empty directory, and one with their own drop-in.
     createDir(root / "b.service.d")
-    writeFile(root / "b.service.d" / "10-operator.conf", "[Unit]\n")
-    check revertHoldDirsToCreate(["a.service", "b.service", "t@1.service"], root) ==
-      @[root / "a.service.d", root / "t@.service.d"]
-    # An existing directory holding nothing but a hold, or nothing at all,
-    # is not claimed either: it may be an operator's.
-    discard holdAt(root, "c.service")
-    createDir(root / "d.service.d")
-    check revertHoldDirsToCreate(["c.service", "d.service"], root).len == 0
+    createDir(root / "c.service.d")
+    writeFile(root / "c.service.d" / "10-operator.conf", "[Unit]\n")
+    let a = placeRevertHold(state, "a.service", root)
+    let b = placeRevertHold(state, "b.service", root)
+    let c = placeRevertHold(state, "c.service", root)
+    let t = placeRevertHold(state, "t@1.service", root)
+    check a.createdDir == root / "a.service.d"
+    check t.createdDir == root / "t@.service.d"
+    check b.createdDir == "" and c.createdDir == ""
+    for h in [a.hold, b.hold, c.hold, t.hold]:
+      check readFile(h) == RevertHoldText
+    check stagingLeft(root).len == 0
+    # The record claims exactly the two it made.
+    check claimedRevertHoldDirs(state, root).toHashSet ==
+      toHashSet([root / "a.service.d", root / "t@.service.d"])
+    clearRevertHoldDirs(state)
+    check not fileExists(revertHoldDirsPath(state))
+    check claimedRevertHoldDirs(state, root).len == 0
 
   test "a replayed revert claims the directories its interrupted attempt recorded":
     let root = createTempDir("revert-hold-", "")
@@ -176,35 +209,81 @@ suite "the directory a revert's hold is written in":
     defer:
       removeDir(root)
       removeDir(state)
-    # An operator's empty directory, there before the revert.
-    createDir(root / "b.service.d")
-    # The interrupted attempt: it records what it will create, creates it,
-    # writes the holds, and dies before its ledger.
-    let made = revertHoldDirsToCreate(["a.service", "b.service"], root)
-    check made == @[root / "a.service.d"]
-    recordRevertHoldDirs(state, made, root)
-    let ha = holdAt(root, "a.service")
-    let hb = holdAt(root, "b.service")
-    # The replay finds both directories and creates nothing.
-    check revertHoldDirsToCreate(["a.service", "b.service"], root).len == 0
-    let es = revertHoldEntries([], initHashSet[string](), [ha, hb],
-                               readRevertHoldDirs(state, root), root)
-    check classes(es, lcRevertHold).toHashSet == toHashSet([ha, hb])
+    # The interrupted attempt placed a.service's hold and died before its
+    # ledger: its record says staged, and the staging directory is gone.
+    let a = placeRevertHold(state, "a.service", root)
+    let es = revertHoldEntries([], initHashSet[string](), [a.hold],
+                               claimedRevertHoldDirs(state, root), root)
+    check classes(es, lcRevertHold) == @[a.hold]
     check classes(es, lcDir) == @[root / "a.service.d"]
-    clearRevertHoldDirs(state)
-    check readRevertHoldDirs(state, root).len == 0
 
-  test "the record names only hold directories under the unit directory":
+  test "a crash before the rename leaves an operator's directory unclaimed":
     let root = createTempDir("revert-hold-", "")
     let state = createTempDir("revert-hold-state-", "")
     defer:
       removeDir(root)
       removeDir(state)
-    createDir(state / "addon")
-    writeFile(revertHoldDirsPath(state), root / "a.service.d" & "\n" &
-      "/etc\n" & root / "x" & "\n" & root / "a.service.d/../../evil.d" & "\n" &
-      root / "a.service.d" & "\n")
-    check readRevertHoldDirs(state, root) == @[root / "a.service.d"]
+    # Each pair: the revert meant to make <x>.d and died; then an operator
+    # made <x>.d before the replay.
+    # b: died after recording `intended`, before making the staging dir.
+    # c: died after recording `staged`, before the rename (staging left).
+    # d: the rename found <x>.d there and the staging was dropped.
+    let sb = stagingName(root, 'b')
+    let sc = stagingName(root, 'c')
+    let sd = stagingName(root, 'd')
+    writeRecord(state, [
+      root / "b.service.d" & "\t" & sb & "\tintended",
+      root / "c.service.d" & "\t" & sc & "\tintended",
+      root / "c.service.d" & "\t" & sc & "\tstaged",
+      root / "d.service.d" & "\t" & sd & "\tintended",
+      root / "d.service.d" & "\t" & sd & "\tstaged",
+      root / "d.service.d" & "\t" & sd & "\tabandoned"])
+    createDir(sc)
+    writeFile(sc / RevertHoldName, RevertHoldText)
+    for x in ["b", "c", "d"]: createDir(root / (x & ".service.d"))
+    check claimedRevertHoldDirs(state, root).len == 0
+    # The staging directory the revert left is gone, and recorded so.
+    check not dirExists(sc)
+    check claimedRevertHoldDirs(state, root).len == 0
+    for x in ["b", "c", "d"]: check dirExists(root / (x & ".service.d"))
+
+  test "a directory the revert made, once removed, is never claimed again":
+    let root = createTempDir("revert-hold-", "")
+    let state = createTempDir("revert-hold-state-", "")
+    defer:
+      removeDir(root)
+      removeDir(state)
+    # The revert made a.service.d and died before its commit; an uninstall
+    # (or a passing switch) then removed the hold and the directory, and
+    # failed before the record went. An operator makes a.service.d.
+    let a = placeRevertHold(state, "a.service", root)
+    check claimedRevertHoldDirs(state, root) == @[a.createdDir]
+    removeFile(a.hold)
+    removeDir(a.createdDir)
+    check claimedRevertHoldDirs(state, root).len == 0
+    createDir(a.createdDir)
+    check claimedRevertHoldDirs(state, root).len == 0
+    check readRevertHoldDirRecords(state, root)[0].phase == "abandoned"
+
+  test "the record names only hold directories and staging names under the unit directory":
+    let root = createTempDir("revert-hold-", "")
+    let state = createTempDir("revert-hold-state-", "")
+    defer:
+      removeDir(root)
+      removeDir(state)
+    let good = stagingName(root, 'a')
+    createDir(root / "a.service.d")
+    writeRecord(state, [
+      root / "a.service.d" & "\t" & good & "\tstaged",
+      "/etc\t" & good & "\tstaged",
+      root / "x" & "\t" & good & "\tstaged",
+      root / "a.service.d/../../evil.d" & "\t" & good & "\tstaged",
+      root / "b.service.d" & "\t" & root / "elsewhere" & "\tstaged",
+      root / "b.service.d" & "\t" & stagingName(root, 'z') & "\tplanted",
+      root / "a.service.d"])
+    check readRevertHoldDirRecords(state, root) ==
+      @[(dir: root / "a.service.d", staging: good, phase: "staged")]
+    check claimedRevertHoldDirs(state, root) == @[root / "a.service.d"]
 
 suite "a passing switch clears the holds":
   test "it removes a hold's directory only when the add-on owns it":

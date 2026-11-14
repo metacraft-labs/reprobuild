@@ -1452,6 +1452,20 @@ const
                           # interrupted revert recorded, so they are left
                           # unclaimed.
                           "replayed-hold-dir-unclaimed",
+                          # the staging directory of a revert's hold is
+                          # not synced before its record says staged.
+                          "revert-hold-staging-not-synced",
+                          # a staged record whose directory is gone stays
+                          # staged, so a later <unit>.d at that path is
+                          # claimed.
+                          "revert-hold-gone-dir-reclaimed",
+                          # uninstall removes only the holds a ledger
+                          # names, not those of a revert that died before
+                          # its ledger.
+                          "uninstall-ignores-unledgered-holds",
+                          # recovery starts a unit a revert holds and
+                          # reports it started.
+                          "recovery-starts-held-units",
                           # a passing switch that clears a revert hold
                           # removes its directory whenever it is left
                           # empty, an operator's too.

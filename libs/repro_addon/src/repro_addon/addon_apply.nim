@@ -66,6 +66,7 @@ from std/posix import Statvfs, statvfs, Stat, lstat, stat, rmdir, S_ISLNK, ENOEN
   O_TRUNC, O_RDONLY, O_CLOEXEC, fsync
 import std/posix as posix
 import std/uri
+import std/sysrand
 import repro_binary_cache_client/http_pool
 
 import repro_core/host_apply_lock
@@ -2480,91 +2481,189 @@ const RevertHoldResource* = "revert-hold"
   ## not carried forward as bootstrap's are; every ledger write records
   ## the holds on the host afresh (``revertHoldEntries``).
 
-proc revertHoldDirsToCreate*(held: openArray[string];
-                             root = PersistentUnitDir): seq[string] =
-  ## The ``<unit>.d`` directories a revert about to write its holds for
-  ## ``held`` will create: each that does not exist yet. Only these become
-  ## the add-on's (``revertHoldEntries``); a directory that already exists
-  ## is never claimed, whatever it holds, because nothing on the host can
-  ## tell an operator's directory from one an interrupted revert made.
-  ## That is what ``revertHoldDirsPath`` is for.
-  for u in held:
-    let d = parentDir(holdPath(u, RevertHoldName, root))
-    if d notin result and not dirExists(d) and not symlinkExists(d):
-      result.add(d)
+const RevertHoldStagingPrefix* = ".repro-addon-revert-hold."
+  ## The name a revert gives the ``<unit>.d`` it is about to create for a
+  ## hold while it fills it (``placeRevertHold``), followed by 32 random
+  ## hex digits. systemd reads no directory of that name (it does not end
+  ## in ``.d``), and nothing else can name it in advance.
 
-proc writeRevertHolds*(held: openArray[string];
-                       root = PersistentUnitDir): seq[string] =
-  ## Write the revert's hold for each unit of ``held`` (its template's, for
-  ## an instance) and return the files written. Durably: the hold exists
-  ## to keep a refused unit down across a reboot (§13 decision 133), and a
-  ## power loss after the revert must not bring it back as an empty
-  ## drop-in, which systemd reads as no assertion and starts the unit at
-  ## boot, before recovery runs. So each file is written whole and synced,
-  ## with its directory, and ``root`` is synced when a ``<unit>.d`` was
-  ## created in it. Never through a link (``writeFileNoFollow``). Raises.
-  for u in held:
-    let p = holdPath(u, RevertHoldName, root)
-    if p in result: continue
-    let d = parentDir(p)
-    let made = not dirExists(d)
-    createDir(d)
-    when mutated("revert-hold-not-synced"):
-      # Falsifying build: the hold written as the start holds are, unsynced.
-      writeFile(p, RevertHoldText)
-    else:
-      writeFileNoFollow(p, RevertHoldText, 0o644)
-      if made:
-        let fd = openDirNoFollow(root)
-        defer: discard posix.close(fd)
-        if posix.fsync(fd) != 0:
-          raiseOSError(osLastError(), "fsync " & root)
-    result.add(p)
+type RevertHoldDirRecord* = tuple[dir, staging, phase: string]
+  ## One line of ``revertHoldDirsPath``: the ``<unit>.d`` a revert means to
+  ## create, the staging directory it fills first, and how far it got:
+  ## ``intended`` (written before the staging directory is made),
+  ## ``staged`` (it exists; the next step renames it to ``dir``) or
+  ## ``abandoned`` (it is not, or no longer, to become ``dir``). The last
+  ## line of a pair decides.
 
 proc revertHoldDirsPath*(stateDir: string): string =
-  ## The ``<unit>.d`` directories a revert is about to create for its holds,
-  ## one absolute path per line, written durably BEFORE it creates them. A
-  ## revert that dies after creating a directory and before its commit
-  ## leaves them named here, so the replay's ledger claims exactly those
-  ## and no directory that was there before. Removed when the switch that recorded them, or the replay that
-  ## finishes it, commits (``clearRevertHoldDirs``): until then a replay
-  ## starts from the ledger the interrupted switch started from, which
-  ## does not name them, so a ledger written before the commit is not
-  ## enough.
+  ## The record of the ``<unit>.d`` directories a revert creates for its
+  ## holds (``RevertHoldDirRecord``), each step written durably before the
+  ## step it announces. It is how a later switch knows which directory is
+  ## the add-on's when the revert that made it died before its commit,
+  ## without guessing from what the directory holds: a ``<unit>.d`` is the
+  ## add-on's exactly when its record says ``staged`` and the staging
+  ## directory is gone, because the only way it goes while ``staged`` is
+  ## the rename into ``<unit>.d``, which never replaces anything
+  ## (``renameNoReplace``). Removed when the switch that wrote it, or the
+  ## replay that finishes it, commits (``clearRevertHoldDirs``): until then
+  ## a replay starts from the ledger the interrupted switch started from,
+  ## which does not name them.
   addonDir(stateDir) / "revert-hold-dirs"
 
-proc readRevertHoldDirs*(stateDir: string;
-                         root = PersistentUnitDir): seq[string] =
-  ## ``revertHoldDirsPath``: only lines naming a ``<unit>.d`` directly under
-  ## ``root``, so a damaged record can name nothing else. None when absent
-  ## or unreadable.
-  when mutated("replayed-hold-dir-unclaimed"):
-    # Falsifying build: an interrupted revert's directories are forgotten.
-    return
+proc validStaging(staging, root: string): bool =
+  let n = extractFilename(staging)
+  staging == normalizedPath(staging) and parentDir(staging) == root and
+    n.startsWith(RevertHoldStagingPrefix) and
+    n.len == RevertHoldStagingPrefix.len + 32 and
+    n[RevertHoldStagingPrefix.len .. ^1].allCharsInSet(HexDigits)
+
+proc readRevertHoldDirRecords*(stateDir: string;
+                               root = PersistentUnitDir): seq[RevertHoldDirRecord] =
+  ## ``revertHoldDirsPath``, one entry per (directory, staging) pair, its
+  ## last phase. Only a ``<unit>.d`` directly under ``root`` and a staging
+  ## name ``validStaging`` accepts, so a damaged record names nothing else.
+  ## None when absent or unreadable.
   var text = ""
   try: text = readFile(revertHoldDirsPath(stateDir))
   except IOError, OSError: return
   for l in text.splitLines():
-    let d = l.strip()
-    if d.len == 0 or d != normalizedPath(d) or parentDir(d) != root or
-        not d.endsWith(".d") or d in result:
+    let f = l.split('\t')
+    if f.len != 3: continue
+    let (d, st, ph) = (f[0], f[1], f[2])
+    if d != normalizedPath(d) or parentDir(d) != root or not d.endsWith(".d") or
+        not validStaging(st, root) or ph notin ["intended", "staged", "abandoned"]:
       continue
-    result.add(d)
+    var found = false
+    for r in result.mitems:
+      if r.dir == d and r.staging == st:
+        r.phase = ph
+        found = true
+    if not found: result.add((d, st, ph))
 
-proc recordRevertHoldDirs*(stateDir: string; dirs: openArray[string];
-                           root = PersistentUnitDir) =
-  ## Add ``dirs`` to ``revertHoldDirsPath`` (atomically, synced) before the
-  ## revert creates them. Raises on failure.
-  var all = readRevertHoldDirs(stateDir, root)
-  for d in dirs:
-    if d notin all: all.add(d)
+proc recordRevertHoldDir(stateDir: string; r: RevertHoldDirRecord) =
+  ## Append ``r`` to ``revertHoldDirsPath``, atomically and synced. Raises.
+  var text = ""
+  try: text = readFile(revertHoldDirsPath(stateDir))
+  except IOError, OSError: discard
   createDir(addonDir(stateDir))
-  writeFileAtomic(revertHoldDirsPath(stateDir), all.join("\n") & "\n", 0o600)
+  writeFileAtomic(revertHoldDirsPath(stateDir),
+                  text & r.dir & "\t" & r.staging & "\t" & r.phase & "\n", 0o600)
+
+proc writeRevertHoldFile(p: string) =
+  ## The hold file, durably: the hold exists to keep a refused unit down
+  ## across a reboot (§13 decision 133), and a power loss after the revert
+  ## must not bring it back as an empty drop-in, which systemd reads as no
+  ## assertion and starts the unit at boot, before recovery runs. Written
+  ## whole and synced, with its directory, never through a link
+  ## (``writeFileNoFollow``). Raises.
+  when mutated("revert-hold-not-synced"):
+    # Falsifying build: the hold written as the start holds are, unsynced.
+    writeFile(p, RevertHoldText)
+  else:
+    writeFileNoFollow(p, RevertHoldText, 0o644)
+
+proc dropStaging(stateDir: string; r: RevertHoldDirRecord) =
+  ## A staging directory that is not to become ``r.dir``: recorded
+  ## ``abandoned`` first, so a crash part-way cannot leave the record
+  ## saying ``staged`` with the staging directory gone (which reads as
+  ## renamed), then emptied of the hold and removed. Raises.
+  recordRevertHoldDir(stateDir, (r.dir, r.staging, "abandoned"))
+  if dirExists(r.staging) and not symlinkExists(r.staging):
+    discard removeLeafNoFollow(r.staging / RevertHoldName)
+    discard removeEmptyDirNoFollow(r.staging)
+
+proc placeRevertHold*(stateDir, unit: string; root = PersistentUnitDir):
+    tuple[hold, createdDir: string] =
+  ## Write the revert's hold for ``unit`` (its template's, for an
+  ## instance) and return its path and, when this created the ``<unit>.d``
+  ## it is in, that directory (else ""). Raises; the caller then keeps the
+  ## unit's start hold.
+  ##
+  ## An existing ``<unit>.d`` -- an operator's, a package's or an earlier
+  ## revert's -- gets the hold written into it and is never claimed. A
+  ## missing one is made under a staging name (``RevertHoldStagingPrefix``),
+  ## filled, and renamed into place with ``renameNoReplace``, each step
+  ## recorded before it is taken (``revertHoldDirsPath``). If a
+  ## ``<unit>.d`` appeared in the meantime the rename fails, the staging
+  ## directory is dropped and the hold goes into the one that appeared,
+  ## unclaimed. So a directory is the add-on's only if the add-on made it
+  ## (spec §4.2), and a crash at any point leaves enough on record for the
+  ## next switch to tell which (``claimedRevertHoldDirs``).
+  let p = holdPath(unit, RevertHoldName, root)
+  let d = parentDir(p)
+  result.hold = p
+  if dirExists(d) or symlinkExists(d):
+    writeRevertHoldFile(p)
+    return
+  var nonce = ""
+  for b in urandom(16): nonce.add(toHex(b, 2).toLowerAscii())
+  let st = root / (RevertHoldStagingPrefix & nonce)
+  recordRevertHoldDir(stateDir, (d, st, "intended"))
+  try:
+    createDir(st)
+    # Durable before ``staged`` is: a record that says ``staged`` over a
+    # staging directory a power loss took back would read as renamed, and
+    # an operator's ``<unit>.d`` made before the replay would be claimed.
+    when not mutated("revert-hold-staging-not-synced"):
+      syncDirNoFollow(root)
+  except CatchableError:
+    try: dropStaging(stateDir, (d, st, "intended"))
+    except CatchableError: discard
+    raise
+  recordRevertHoldDir(stateDir, (d, st, "staged"))
+  try:
+    writeRevertHoldFile(st / RevertHoldName)
+    let rc = renameNoReplace(root, extractFilename(st), extractFilename(d))
+    if rc == EEXIST:
+      # Someone made the <unit>.d in between: theirs, not claimed.
+      dropStaging(stateDir, (d, st, "staged"))
+      writeRevertHoldFile(p)
+      return
+    if rc != 0:
+      raiseOSError(OSErrorCode(rc), "rename " & st & " to " & d)
+  except CatchableError:
+    try: dropStaging(stateDir, (d, st, "staged"))
+    except CatchableError: discard
+    raise
+  when not mutated("revert-hold-not-synced"):
+    syncDirNoFollow(root)
+  result.createdDir = d
+
+proc claimedRevertHoldDirs*(stateDir: string;
+                            root = PersistentUnitDir): seq[string] =
+  ## The ``<unit>.d`` directories ``revertHoldDirsPath`` shows a revert
+  ## made: each whose record says ``staged`` and whose staging directory is
+  ## gone, renamed into it. Every staging directory a revert left behind is
+  ## dropped on the way (``dropStaging``): the revert did not get to rename
+  ## it, so the ``<unit>.d``, if one exists, is not the add-on's. A
+  ## ``staged`` record whose directory is gone (removed since, by a passing
+  ## switch or an uninstall) is recorded ``abandoned``: a ``<unit>.d`` made
+  ## at that path afterwards is someone else's.
+  when mutated("replayed-hold-dir-unclaimed"):
+    # Falsifying build: an interrupted revert's directories are forgotten.
+    return
+  for r in readRevertHoldDirRecords(stateDir, root):
+    let stagingThere = dirExists(r.staging) or symlinkExists(r.staging)
+    if stagingThere:
+      try: dropStaging(stateDir, r)
+      except CatchableError: discard
+    elif r.phase == "staged":
+      if dirExists(r.dir) and not symlinkExists(r.dir):
+        if r.dir notin result: result.add(r.dir)
+      else:
+        when not mutated("revert-hold-gone-dir-reclaimed"):
+          try: recordRevertHoldDir(stateDir, (r.dir, r.staging, "abandoned"))
+          except CatchableError: discard
 
 proc clearRevertHoldDirs*(stateDir: string) =
   ## The record's directories are in the committed ledger now. Called at
   ## the commit, before the pending marker goes: a crash in between is
   ## finished by ``reassert.finishCommittedSwitch``, which never replays.
+  ## A staging directory still named in it is dropped first; one that
+  ## could not be keeps the record, so a later switch drops it.
+  discard claimedRevertHoldDirs(stateDir)
+  for r in readRevertHoldDirRecords(stateDir):
+    if dirExists(r.staging) or symlinkExists(r.staging): return
   try: removeFile(revertHoldDirsPath(stateDir))
   except OSError: discard
 
@@ -2634,7 +2733,7 @@ proc clearRevertHolds*(holds: openArray[string];
   ## return those removed. A hold's ``<unit>.d`` directory goes with it,
   ## once empty, only when the add-on owns it: a ``dir`` entry of the
   ## ``previous`` ledger, or one a revert ``recorded`` before creating it
-  ## (``readRevertHoldDirs``). Removal deletes only ledger entries (spec
+  ## (``claimedRevertHoldDirs``). Removal deletes only ledger entries (spec
   ## §4.2): an operator's own empty ``<unit>.d`` that a revert put its hold
   ## in stays, as uninstall leaves it. ``removeHolds`` would ``rmdir`` any
   ## parent left empty.
@@ -6476,16 +6575,16 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
               discard clearStaleStartHolds()
               removeStartHolds(startHolds)
               startHolds.setLen(0)
-              revertHoldDirsCreated = revertHoldDirsToCreate(held, holdDir)
-              if revertHoldDirsCreated.len > 0 and holdDir == PersistentUnitDir:
-                try: recordRevertHoldDirs(stateDir, revertHoldDirsCreated)
-                except IOError, OSError:
-                  problems.add("the revert's hold directories could not be " &
-                               "recorded: " & getCurrentExceptionMsg())
-              try: revertHoldsWritten = writeRevertHolds(held, holdDir)
-              except CatchableError:
-                problems.add("the revert's hold could not be written: " &
-                             getCurrentExceptionMsg())
+              for u in held:
+                try:
+                  let placed = placeRevertHold(stateDir, u, holdDir)
+                  if placed.hold notin revertHoldsWritten:
+                    revertHoldsWritten.add(placed.hold)
+                  if placed.createdDir.len > 0:
+                    revertHoldDirsCreated.add(placed.createdDir)
+                except CatchableError:
+                  problems.add("the revert's hold could not be written: " &
+                               getCurrentExceptionMsg())
               try: daemonReload()
               except CatchableError as ex: problems.add(ex.msg)
             else:
@@ -6497,21 +6596,12 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
               # recover` replays it), and until then no unit the check
               # refused is ever without a hold.
               # The ledger records the holds and the drop-in directories the
-              # revert creates for them. Those are recorded first, so an
-              # attempt that dies before its commit leaves them named for
-              # the replay, which then claims exactly those and never a
-              # directory that was there before (``revertHoldDirsPath``).
-              revertHoldDirsCreated = revertHoldDirsToCreate(held, holdDir)
+              # revert creates for them: each directory is made under a
+              # staging name and renamed into place, every step recorded
+              # first, so an attempt that dies before its commit leaves the
+              # replay able to tell exactly which it made, and never claims
+              # one that was there before (``placeRevertHold``).
               var notWritten: seq[string]
-              if revertHoldDirsCreated.len > 0 and holdDir == PersistentUnitDir:
-                try: recordRevertHoldDirs(stateDir, revertHoldDirsCreated)
-                except IOError, OSError:
-                  # Unrecorded, a directory made now could be lost to the
-                  # ledger by a crash; no hold is written, so none is made.
-                  let why = getCurrentExceptionMsg()
-                  for u in held:
-                    notWritten.add(u & " (the hold directories could not " &
-                                   "be recorded: " & why & ")")
               if notWritten.len == 0:
                 for u in held:
                   # A file of that name that is not the add-on's hold -- an
@@ -6528,8 +6618,12 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
                                    "add-on's hold)")
                     continue
                   try:
-                    for h in writeRevertHolds([u], holdDir):
-                      if h notin revertHoldsWritten: revertHoldsWritten.add(h)
+                    let placed = placeRevertHold(stateDir, u, holdDir)
+                    if placed.hold notin revertHoldsWritten:
+                      revertHoldsWritten.add(placed.hold)
+                    if placed.createdDir.len > 0 and
+                        placed.createdDir notin revertHoldDirsCreated:
+                      revertHoldDirsCreated.add(placed.createdDir)
                   except CatchableError:
                     notWritten.add(u & " (" & getCurrentExceptionMsg() & ")")
               if notWritten.len == 0:
@@ -6580,7 +6674,7 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
               if e.class == lcRevertHold: holdUnits.incl(holdUnitOf(e.path))
             let revertStale = clearRevertHolds(addonRevertHolds(holdUnits),
                                                previous.entries,
-                                               readRevertHoldDirs(stateDir))
+                                               claimedRevertHoldDirs(stateDir))
             # A unit a revert held is started now if the generation enables
             # it and it is not running: the hold, not the unit, kept it down,
             # and an unchanged unit has no transition of its own (§13
@@ -6781,7 +6875,7 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
           if r.kind == srkSystemdSystemUnit and r.suCollision != "dropIn":
             installed.incl(r.suName)
         var dirs = revertHoldDirsCreated
-        for d in readRevertHoldDirs(stateDir):
+        for d in claimedRevertHoldDirs(stateDir):
           if d notin dirs: dirs.add(d)
         for e in revertHoldEntries(previous.entries, installed,
                                    revertHoldsWritten, dirs):

@@ -1045,6 +1045,10 @@ proc holdWriteback*(g: Guest) =
     raise newException(TestBedError, "could not hold writeback back: " &
       r.stdout & r.stderr)
 
+const PausedGroupFile* = "/root/addon/bg-apply.pgid"
+  ## The process-group id of the command ``startPausedAt`` runs, recorded by
+  ## the ``sh`` that ``setsid`` made its session leader.
+
 proc startPausedAt*(g: Guest; command, point: string;
                     timeoutSec = 900): ExecOut =
   ## Start ``command`` (a guest shell command line running the seam build)
@@ -1059,7 +1063,10 @@ proc startPausedAt*(g: Guest; command, point: string;
   discard g.run("rm -f " & SeamDir & "/test-paused-at " & SeamDir &
     "/test-resume /root/addon/bg-apply.log /root/addon/bg-apply.rc; printf '%s\\n' " &
     point & " > " & SeamDir & "/test-pause-at; sync")
-  discard g.run("setsid nohup sh -c '" & command &
+  # The session's group id is recorded first (``startGuestSession``'s
+  # ``echo $$``), so ``killPausedCommand`` can end exactly this command.
+  discard g.run("rm -f " & PausedGroupFile & "; setsid nohup sh -c 'echo $$ > " &
+    PausedGroupFile & "; " & command &
     " > /root/addon/bg-apply.log 2>&1; echo $? > /root/addon/bg-apply.rc' " &
     "> /dev/null 2>&1 < /dev/null &")
   let deadline = epochTime() + timeoutSec.float
@@ -1076,6 +1083,13 @@ proc startPausedAt*(g: Guest; command, point: string;
   ExecOut(exitCode: 1, stderr: "the command did not reach " & point &
     " within " & $timeoutSec & " s: " &
     g.exec("cat /root/addon/bg-apply.log").stdout)
+
+proc killPausedCommand*(g: Guest) =
+  ## Kill the command ``startPausedAt`` started -- the whole process group
+  ## it recorded, and nothing else (``stopGuestSession``) -- as a crash
+  ## would, with no reboot: whatever it had written stays, and nothing
+  ## recovers it.
+  g.stopGuestSession(PausedGroupFile)
 
 proc startSwitchPausedAt*(g: Guest; repro, name, text, point: string;
                           timeoutSec = 900): ExecOut =

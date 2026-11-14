@@ -1105,6 +1105,26 @@ proc runAddonUninstall*(opts: UninstallOptions): UninstallResult =
   # an ``lcDir`` entry, removed in step 4 once empty.
   for rh in byClass[lcRevertHold]:
     removeOwned(rh, result, driver)
+  # A revert that died before its ledger -- a crash, never replayed --
+  # left holds and directories no ledger names. They are claimed exactly as
+  # the next ledger write would claim them (``revertHoldEntries``): a hold
+  # holding exactly the hold text on a unit this ledger installs, and a
+  # directory the revert's own record shows it made
+  # (``claimedRevertHoldDirs``), so uninstall does not depend on a replay
+  # having run, and never takes an operator's file or directory.
+  var lateHoldDirs: seq[LedgerEntry]
+  when not mutated("uninstall-ignores-unledgered-holds"):
+    block:
+      var installed = initHashSet[string]()
+      var ledgered = initHashSet[string]()
+      for u in byClass[lcUnit]:
+        if u.unit.len > 0: installed.incl(u.unit)
+      for e in l.entries: ledgered.incl(entryKey(e))
+      for e in revertHoldEntries(l.entries, installed, [],
+                                 claimedRevertHoldDirs(stateDir)):
+        if entryKey(e) in ledgered: continue
+        if e.class == lcRevertHold: removeOwned(e, result, driver)
+        elif e.class == lcDir: lateHoldDirs.add(e)
 
   # 3. Diversions: the profile's file at the path, then the diversion.
   var handled = initHashSet[string]()
@@ -1153,7 +1173,12 @@ proc runAddonUninstall*(opts: UninstallOptions): UninstallResult =
         result.errors.add(sl.path & ": " & ex.msg)
     else:
       result.undone.incl(entryKey(sl))
-  removeEmptyDirs(byClass[lcDir])
+  removeEmptyDirs(byClass[lcDir] & lateHoldDirs)
+  if lateHoldDirs.len > 0:
+    # Each removed is recorded ``abandoned`` at once, so an uninstall that
+    # fails and keeps its state never claims a ``<unit>.d`` made at that
+    # path before its re-run.
+    discard claimedRevertHoldDirs(stateDir)
   systemctlOrRecord(["daemon-reload"], result)
   # A unit of the add-on's that ended failed stays listed, failed, after its
   # file is gone; the base never had that record. Best effort: a unit that
