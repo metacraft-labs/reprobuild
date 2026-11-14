@@ -274,7 +274,18 @@ proc resolveCompileTarget*(host, platform, arch, systemMode: string;
     result.exitCode = CompileProfileTargetExit
     result.message = getCurrentException().msg
 
-proc runDeployAgentCompileProfile*(args: seq[string]): int =
+const CompileProfileFailureExit* = 1
+  ## ``compile-profile``'s exit code when it understood its command line
+  ## and its target but produced no compile: a profile the realisation
+  ## refuses, unreadable ``--stdio`` input, a bundle it cannot stage. Like
+  ## ``CompileProfileTargetExit`` it is never retried; only the usage exit
+  ## (2) is (ReproOS-Add-On-Mode §13 decision 134, as amended).
+
+proc readAllStdin(): string = stdin.readAll()
+
+proc runDeployAgentCompileProfile*(args: seq[string];
+    observe: proc(): HostBase {.nimcall.} = observeHostBase;
+    readInput: proc(): string {.nimcall.} = readAllStdin): int =
   ## ``repro deploy-agent compile-profile --staged <module.nim>
   ## --canonical-out <file> --actions-out <file> [--state-dir D]
   ## [--host H] [--platform P] [--arch A] [--digest-out F]
@@ -299,6 +310,13 @@ proc runDeployAgentCompileProfile*(args: seq[string]): int =
   ## The unprivileged fetch unit of a ReproOS add-on host runs this as its
   ## profile compiler, so the compiler never runs as root (ReproOS add-on
   ## §9.1).
+  ##
+  ## Exit codes: 0 compiled; 2 a command line it does not understand (the
+  ## only one an agent retries, without ``--system-base``); 3 a target it
+  ## cannot compile for (``CompileProfileTargetExit``); 1 anything else
+  ## (``CompileProfileFailureExit``). ``observe`` (the base ``this-host``
+  ## reads) and ``readInput`` (the ``--stdio`` request) are the running
+  ## machine's and stdin; tests pass their own.
   var staged, canonicalOut, actionsOut, stateDir, digestOut, revisionOut = ""
   var host, platform, arch, systemMode, systemBase = ""
   var systemActivities: seq[string]
@@ -365,7 +383,7 @@ proc runDeployAgentCompileProfile*(args: seq[string]): int =
       return 2
     var files: seq[ProfileFile]
     try:
-      let j = parseJson(stdin.readAll())
+      let j = parseJson(readInput())
       profileText = base64.decode(j["profileText"].getStr())
       for f in j{"profileFiles"}.getElems():
         files.add(ProfileFile(path: f["path"].getStr(),
@@ -374,9 +392,11 @@ proc runDeployAgentCompileProfile*(args: seq[string]): int =
       if dirExists(workspace): removeDir(workspace)
       staged = stageProfileSources(workspace / "source", profileText, files)
     except CatchableError as e:
+      # Not a command-line error: the retry an agent makes on exit 2 could
+      # not help, so it must not be asked for.
       stderr.writeLine("repro deploy-agent compile-profile: unreadable " &
         "--stdio input: " & e.msg)
-      return 2
+      return CompileProfileFailureExit
     # A dynamic user has no home: the compiler's caches go to the scratch.
     for v in ["HOME", "XDG_CACHE_HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME"]:
       putEnv(v, workspace / "home")
@@ -401,7 +421,7 @@ proc runDeployAgentCompileProfile*(args: seq[string]): int =
   if not hostGiven:
     host = try: selectHost("", false).name except CatchableError: ""
   let resolved = resolveCompileTarget(host, platform, arch, systemMode,
-                                      systemActivities, systemBase)
+                                      systemActivities, systemBase, observe)
   if resolved.exitCode != 0:
     stderr.writeLine("repro deploy-agent compile-profile: " & resolved.message)
     return resolved.exitCode
@@ -410,7 +430,7 @@ proc runDeployAgentCompileProfile*(args: seq[string]): int =
       "repro deploy-agent compile-profile", text,
       planCommand = "repro infra plan", outBuildActions = addr actions,
       target = target, declaredInputs = bundlePaths):
-    return 1
+    return CompileProfileFailureExit
   let actionsJson = $(%actions)
   if stdio:
     echo CompiledProfileStdioMarker & base64.encode($(%*{

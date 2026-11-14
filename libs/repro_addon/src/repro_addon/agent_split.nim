@@ -36,6 +36,7 @@ import repro_core/host_apply_lock
 import repro_infra
 import repro_infra/addon_diagnostics
 import repro_infra/profile
+from repro_infra/host_base import observeHostBase
 import repro_profile
 import repro_profile_compile/binary_cache_build_actions
 import repro_dsl_stdlib/packages/apt_closure
@@ -197,8 +198,10 @@ proc runProfileCompiler*(argv: openArray[string];
   ## one.
   runHostTool(argv, timeoutSec = timeoutSec, path = ProfileCompilePath)
 
-proc compileProfile(conf: AgentConf; m: DeployManifest;
-                    dir, workspace: string): string =
+proc compileProfileWith*(conf: AgentConf; m: DeployManifest;
+    dir, workspace: string;
+    run: proc(argv: seq[string]): HostToolResult;
+    observe: HostBaseObservation = observeHostBase): string =
   ## Run the configured profile compiler over the staged source as this
   ## (unprivileged) process; "" when it produced ``profile.canonical`` and
   ## ``actions.json``, else why not. Refused outright as root: compiling
@@ -223,8 +226,7 @@ proc compileProfile(conf: AgentConf; m: DeployManifest;
     "--actions-out", dir / StagedActionsName,
     "--state-dir", workspace / "state",
     "--revision-out", dir / StagedCompilerRevisionName] & compileFactArgs(m)
-  let attempt = runCompileForAnyRevision(argv, proc(a: seq[string]):
-      HostToolResult = runProfileCompiler(a))
+  let attempt = runCompileForAnyRevision(argv, run)
   let r = attempt.result
   if r.exitCode != 0:
     return "the profile compiler failed (exit " & $r.exitCode & "): " &
@@ -235,13 +237,21 @@ proc compileProfile(conf: AgentConf; m: DeployManifest;
     let revision = try: readFile(dir / StagedCompilerRevisionName).strip()
                    except IOError, OSError: ""
     let why = retriedCompileRefusal(true, revision,
-      m.compiledProfile.compilerRevision, agentHostIsDebianFamily())
+      m.compiledProfile.compilerRevision, agentHostIsDebianFamily(observe))
     if why.len > 0:
       # Nothing staged from this compile may reach the apply.
-      for f in [StagedCanonicalName, StagedActionsName]:
+      for f in [StagedCanonicalName, StagedActionsName,
+                StagedCompilerRevisionName]:
         removeFile(dir / f)
       return why
   ""
+
+proc compileProfile(conf: AgentConf; m: DeployManifest;
+                    dir, workspace: string): string =
+  ## ``compileProfileWith`` as the fetch unit runs it: the configured
+  ## compiler, on the running host's base.
+  compileProfileWith(conf, m, dir, workspace,
+    proc(a: seq[string]): HostToolResult = runProfileCompiler(a))
 
 proc stageOutputs(m: DeployManifest; actions: seq[ProfileBuildAction];
                   dir, scratch: string; notes: var seq[string]) =

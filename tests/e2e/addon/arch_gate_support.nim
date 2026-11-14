@@ -177,50 +177,93 @@ proc archGateRecord*(gate: string): JsonNode =
 # ---------------------------------------------------------------------------
 
 type
+  RecordCheck* = tuple[name: string; check: proc(record: JsonNode): bool]
+    ## A property of the falsifier run's record beyond its steps (the
+    ## exact final diff of the byte-identity control, the uninstall over a
+    ## marker having run to its end), named for the record.
+
   Falsifier* = object
     ## What a gate's falsifying build must do to one base (AR1 review
-    ## round 2): ``required`` are step names that must be red; a red step
-    ## whose name starts with one of ``mustStayGreen`` refutes it (the
-    ## mutation broke something it should not reach); ``green`` says the
-    ## base is outside the mutation (an ext4 root under a btrfs-only
-    ## mutation) and must stay entirely green. ``recordTrue`` names record
-    ## fields that must be ``true`` (the byte-identity control's
-    ## ``diffNamesReproSubvolume``).
+    ## rounds 2 and 3). The judgement is an allow-list: a step may be red
+    ## only when it is ``required`` (the mutation's own failure) or listed
+    ## in ``mayBeRed`` (a stated consequence of it); every other step the
+    ## run recorded must be green. ``mustRunGreen`` names steps that must
+    ## be PRESENT and green -- bootstrap, the generation applies,
+    ## uninstall, every step before the mutated code -- so a run that
+    ## stopped early, or whose uninstall simply failed, is never taken for
+    ## the mutation's red. ``green`` marks a base outside the mutation (an
+    ## ext4 root under a btrfs-only mutation): nothing may be red there.
+    ## ``recordChecks`` must all hold.
     required*: seq[string]
-    mustStayGreen*: seq[string]
+    mayBeRed*: seq[string]
+    mustRunGreen*: seq[string]
     green*: bool
-    recordTrue*: seq[string]
+    recordChecks*: seq[RecordCheck]
 
 proc falsifierVerdict*(f: Falsifier; record: JsonNode):
     tuple[confirmed: bool; why: string] =
   ## Whether ``record`` (one base of a mutated run) shows exactly the
-  ## failure the mutation is for. An ``exception`` step -- a guest that did
-  ## not answer, an SSH timeout, any infrastructure failure -- never counts
-  ## as the expected red, and neither does a run that stopped before the
-  ## required step: a red that does not name the property under test
-  ## measures nothing.
-  var failed: seq[string]
+  ## failure the mutation is for, and nothing else. An ``exception`` step
+  ## -- a guest that did not answer, an SSH timeout, any infrastructure
+  ## failure -- is never allowed red, so it always refutes.
+  var failed, passed: seq[string]
   for s in record{"steps"}.getElems():
-    if not s{"ok"}.getBool(): failed.add(s{"step"}.getStr())
+    if s{"ok"}.getBool(): passed.add(s{"step"}.getStr())
+    else: failed.add(s{"step"}.getStr())
   if "exception" in failed:
     return (false, "an exception, not the mutation's failure: " &
       $record{"steps"})
+  for m in f.mustRunGreen:
+    if m notin passed:
+      return (false, "a step that must run and stay green did not: " & m &
+        (if m in failed: " (red)" else: " (absent)"))
   if f.green:
     if failed.len > 0:
       return (false, "outside the mutation, but red: " & failed.join("; "))
-    return (true, "outside the mutation, and green")
-  for r in f.required:
-    if r notin failed:
-      return (false, "the required step is not red: " & r & " (red: " &
-        failed.join("; ") & ")")
-  for s in failed:
-    for p in f.mustStayGreen:
-      if s.startsWith(p):
-        return (false, "a step the mutation must not reach is red: " & s)
-  for k in f.recordTrue:
-    if not record{k}.getBool():
-      return (false, "the record's " & k & " is not true")
-  (true, "red at: " & f.required.join("; "))
+  else:
+    for r in f.required:
+      if r notin failed:
+        return (false, "the required step is not red: " & r & " (red: " &
+          failed.join("; ") & ")")
+    for s in failed:
+      if s notin f.required and s notin f.mayBeRed:
+        return (false, "a step outside the mutation's reach is red: " & s)
+  for c in f.recordChecks:
+    if not c.check(record):
+      return (false, "the record check failed: " & c.name)
+  if f.green: (true, "outside the mutation, and green")
+  else: (true, "red at: " & f.required.join("; "))
+
+block falsifierVerdictSelfCheck:
+  # The judge's own controls, run whenever a gate starts: the mutation's
+  # red alone confirms; a red outside the list, an exception, a missing or
+  # red must-run step, or a failed record check refutes.
+  proc rec(steps: openArray[(string, bool)]): JsonNode =
+    result = %*{"steps": []}
+    for (n, ok) in steps: result["steps"].add(%*{"step": n, "ok": ok})
+  let f = Falsifier(required: @["mutated"], mayBeRed: @["consequence"],
+                    mustRunGreen: @["bootstrap", "uninstall"])
+  doAssert falsifierVerdict(f, rec([("bootstrap", true), ("mutated", false),
+    ("consequence", false), ("uninstall", true)])).confirmed
+  doAssert not falsifierVerdict(f, rec([("bootstrap", true), ("mutated", false),
+    ("elsewhere", false), ("uninstall", true)])).confirmed
+  doAssert not falsifierVerdict(f, rec([("bootstrap", true), ("mutated", false),
+    ("uninstall", false)])).confirmed
+  doAssert not falsifierVerdict(f, rec([("bootstrap", true),
+    ("mutated", false)])).confirmed
+  doAssert not falsifierVerdict(f, rec([("bootstrap", true), ("mutated", false),
+    ("uninstall", true), ("exception", false)])).confirmed
+  doAssert not falsifierVerdict(f, rec([("bootstrap", true), ("mutated", true),
+    ("uninstall", true)])).confirmed
+  let g = Falsifier(green: true, mustRunGreen: @["uninstall"])
+  doAssert falsifierVerdict(g, rec([("uninstall", true)])).confirmed
+  doAssert not falsifierVerdict(g, rec([("uninstall", true),
+    ("x", false)])).confirmed
+  var c = f
+  c.recordChecks = @[(name: "always false",
+                      check: proc(r: JsonNode): bool = false)]
+  doAssert not falsifierVerdict(c, rec([("bootstrap", true), ("mutated", false),
+    ("uninstall", true)])).confirmed
 
 proc judgeRun*(gate: string; record: JsonNode; baseFailures: seq[string];
                expected: proc(mutation: string; b: BaseImage): Falsifier;
@@ -233,9 +276,12 @@ proc judgeRun*(gate: string; record: JsonNode; baseFailures: seq[string];
   if mut.len == 0: return baseFailures
   let f = expected(mut, b)
   let v = falsifierVerdict(f, record)
+  var checks: seq[string]
+  for c in f.recordChecks: checks.add(c.name)
   record["falsifier"] = %*{"mutation": mut, "confirmed": v.confirmed,
-    "why": v.why, "required": f.required, "mustStayGreen": f.mustStayGreen,
-    "outsideMutation": f.green, "recordTrue": f.recordTrue}
+    "why": v.why, "required": f.required, "mayBeRed": f.mayBeRed,
+    "mustRunGreen": f.mustRunGreen, "outsideMutation": f.green,
+    "recordChecks": checks}
   if not v.confirmed:
     result.add(b.name & ": falsifier " & mut & " not confirmed: " & v.why)
 

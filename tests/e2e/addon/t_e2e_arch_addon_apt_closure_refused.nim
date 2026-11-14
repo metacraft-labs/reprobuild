@@ -46,12 +46,31 @@
 ##   '((builtins.getFlake (toString ./.)).packages.${builtins.currentSystem}
 ##   .reprobuild).overrideAttrs (_: { REPRO_ADDON_MUTATION =
 ##   "arch-realisation-accepts-deb-closure"; })'`` (``scripts/build_apps.sh``
-##   compiles the variable in). The realisation legs go red; the gate is red.
+##   compiles the variable in). The realisation legs go red.
 ## * ``arch-apply-skips-deb-closure-check``: a static binary without the
 ##   apply-side refusal. The realisation legs stay green -- the realisation
 ##   alone refuses every profile that is compiled -- and the apply-side
 ##   legs, which hand the binary a canonical text no realisation compiled,
 ##   go red.
+##
+## The lock is an amd64 one -- the guests' architecture -- of a one-member
+## fixture closure (``deb_fixture_support``), and the member is seeded in
+## the add-on's ``.deb`` cache before the baseline, so nothing but the
+## ``.deb``-closure refusal stops a realisation: with it gone the apply
+## realises the closure and the "nothing realised or written" legs see it.
+## (A closure for another architecture would be refused for that instead,
+## and those legs could not tell whether the Arch check ran.) The gate also
+## checks that the engine closure's ``compile-profile --stdio`` reports the
+## revision the gate runs at.
+##
+## A falsifier run (``REPRO_ADDON_MUTATION``) passes only when every base
+## shows the mutation's own red steps and nothing else (``expectedFalsifier``,
+## judged by ``arch_gate_support.falsifierVerdict``): only the listed steps
+## may be red, the steps that run before and around the mutated code
+## (bootstrap, the generation applies, uninstall, ...) must be present and
+## green, and an exception or infrastructure failure always fails it. A base
+## outside the mutation must stay green. The base's own verdict stays
+## ``red`` in its record; the judgement is the record's ``falsifier``.
 ##
 ## Opt-in: ``REPRO_ADDON_VM_GATES=1`` and ``REPRO_ADDON_ENGINE_CLOSURE``
 ## (``just e2e_arch_addon_apt_closure_refused``).
@@ -167,24 +186,40 @@ proc state(g: Guest; repro: string): string =
         "ls -1 /repro/store/prefixes/*/ 2>/dev/null; echo ---; " &
         "ls -d /var/cache/repro/apt 2>/dev/null; true")
 
+const
+  RealisationRefusals = @[
+    "[realisation] infra plan of a .nim profile with an aptClosureLock, " &
+      "through a `system: addOn` registry entry, is refused",
+    "[realisation] the agent's compile (--system-base this-host) of the " &
+      "aptClosureLock profile is refused"]
+  ApplySideRefusals = @[
+    "[apply side] plan of an aptClosureLock unit is refused with EAddOnOutOfScope",
+    "[apply side] apply of an aptClosureLock unit is refused with EAddOnOutOfScope"]
+  AptRunsGreen = @["preflight is compatible", "bootstrap",
+    "baseline: udevadm settle and systemctl daemon-reload",
+    "[realisation] control: the same unit as a store package plans, " &
+      "realised add-on-arch",
+    "[realisation] control: the agent's compile of the store package " &
+      "profile succeeds",
+    "[realisation] the engine closure's compile reports this tree's revision",
+    "[apply side] control: the same unit as a store package plans",
+    "[apply side] control: the same unit as a store package applies",
+    "uninstall"]
+
 proc expectedFalsifier(mut: string; b: BaseImage): Falsifier =
-  ## Each falsifier's expected red (``falsifierVerdict``), group by group.
+  ## Each falsifier's expected red (``falsifierVerdict``), group by group:
+  ## the other group's refusals and every control stay green.
   case mut
   of "arch-apply-skips-deb-closure-check":
     # The realisation still refuses everything it compiles; the static
     # binary, handed the canonical text directly, plans it and realises it.
-    Falsifier(required: @[
-      "[apply side] plan of an aptClosureLock unit is refused with EAddOnOutOfScope",
-      "[apply side] apply of an aptClosureLock unit is refused with EAddOnOutOfScope",
+    Falsifier(required: ApplySideRefusals & @[
+      "[apply side] the refused apply wrote nothing (fingerprint)",
       "[apply side] the refused apply realised and committed nothing"],
-      mustStayGreen: @["[realisation]"])
+      mustRunGreen: AptRunsGreen & RealisationRefusals)
   of "arch-realisation-accepts-deb-closure":
-    Falsifier(required: @[
-      "[realisation] infra plan of a .nim profile with an aptClosureLock, " &
-        "through a `system: addOn` registry entry, is refused",
-      "[realisation] the agent's compile (--system-base this-host) of the " &
-        "aptClosureLock profile is refused"],
-      mustStayGreen: @["[apply side]"])
+    Falsifier(required: RealisationRefusals,
+      mustRunGreen: AptRunsGreen & ApplySideRefusals)
   else: raise unknownMutation("e2e_arch_addon_apt_closure_refused", mut)
 
 proc runBase(b: BaseImage; record: JsonNode; engine: string): seq[string] =

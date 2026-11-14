@@ -25,11 +25,13 @@
 ## snapshot carries the store and the gate turns red. Record red, then green.
 ##
 ## A falsifier run (``REPRO_ADDON_MUTATION``) passes only when every base
-## shows the mutation's own red step (``expectedFalsifier``, judged by
-## ``arch_gate_support.falsifierVerdict``): a red from an exception or an
-## infrastructure failure, a red elsewhere, or a base outside the mutation
-## turning red fails it. The base's own verdict stays ``red`` in its
-## record; the judgement is the record's ``falsifier``.
+## shows the mutation's own red steps and nothing else (``expectedFalsifier``,
+## judged by ``arch_gate_support.falsifierVerdict``): only the listed steps
+## may be red, the steps that run before and around the mutated code
+## (bootstrap, the generation applies, uninstall, ...) must be present and
+## green, and an exception or infrastructure failure always fails it. A base
+## outside the mutation must stay green. The base's own verdict stays
+## ``red`` in its record; the judgement is the record's ``falsifier``.
 ##
 ## Opt-in: ``REPRO_ADDON_VM_GATES=1``
 ## (``just e2e_arch_addon_store_placement_by_root_fs``). Bases: the btrfs
@@ -74,13 +76,22 @@ proc comparableLedger*(ledger: string): string =
 proc expectedFalsifier(mut: string; b: BaseImage): Falsifier =
   ## Each falsifier's expected red (``falsifierVerdict``): on a btrfs root
   ## ``/repro`` is a plain directory and snapper's snapshot carries the
-  ## store; an ext4 root is outside the mutation.
+  ## store, while bootstrap, the generation, the snapshot itself and
+  ## uninstall all succeed; an ext4 root is outside the mutation.
   case mut
   of "repro-root-plain-dir-on-btrfs":
+    let common = @["root filesystem (vacuity guard)",
+      "preflight is compatible", "bootstrap", "apply generation 1",
+      "uninstall", "uninstall removed /repro"]
     if rootIsBtrfs(b):
       Falsifier(required: @["/repro is a btrfs subvolume",
-        "the snapper snapshot of / contains none of /repro/store"])
-    else: Falsifier(green: true)
+        "the snapper snapshot of / contains none of /repro/store"],
+        mustRunGreen: common & @["snapper has the configuration root of /",
+          "snapper takes a snapshot of /",
+          "vacuity guard: the snapshot holds / as of generation 1 (the " &
+            "fixture's /etc directory and the /repro mount point)",
+          "the gate's snapshot is deleted"])
+    else: Falsifier(green: true, mustRunGreen: common & @["/repro is a plain directory"])
   else: raise unknownMutation("e2e_arch_addon_store_placement_by_root_fs", mut)
 
 proc runBase(b: BaseImage; record: JsonNode;

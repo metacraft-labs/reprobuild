@@ -31,11 +31,13 @@
 ## marker, so the refusal step is red. Record red, then green.
 ##
 ## A falsifier run (``REPRO_ADDON_MUTATION``) passes only when every base
-## shows the mutation's own red step (``expectedFalsifier``, judged by
-## ``arch_gate_support.falsifierVerdict``): a red from an exception or an
-## infrastructure failure, a red elsewhere, or a base outside the mutation
-## turning red fails it. The base's own verdict stays ``red`` in its
-## record; the judgement is the record's ``falsifier``.
+## shows the mutation's own red steps and nothing else (``expectedFalsifier``,
+## judged by ``arch_gate_support.falsifierVerdict``): only the listed steps
+## may be red, the steps that run before and around the mutated code
+## (bootstrap, the generation applies, uninstall, ...) must be present and
+## green, and an exception or infrastructure failure always fails it. A base
+## outside the mutation must stay green. The base's own verdict stays
+## ``red`` in its record; the judgement is the record's ``falsifier``.
 ##
 ## Opt-in: ``REPRO_ADDON_VM_GATES=1`` and ``REPRO_ADDON_TEST_SEAMS=1``
 ## (``just e2e_arch_addon_uninstall_refuses_pending_switch``).
@@ -78,14 +80,38 @@ proc killPendingOwner(g: Guest): tuple[ok: bool; detail: string] =
     sleep(250)
   (false, "pid " & pid & " is still there after SIGKILL")
 
+proc uninstallOverMarkerRanToItsEnd(record: JsonNode): bool =
+  ## Under the mutation the uninstall over the marker must have proceeded
+  ## and succeeded (exit 0): a refusal for another reason, or a failure,
+  ## is not the skipped check.
+  record{"uninstallOverMarkerExit"}.getInt(-1) == 0
+
 proc expectedFalsifier(mut: string; b: BaseImage): Falsifier =
-  ## Each falsifier's expected red (``falsifierVerdict``).
+  ## Each falsifier's expected red (``falsifierVerdict``): the uninstall
+  ## over the marker proceeds (it neither refuses nor keeps the agent
+  ## running), and what follows from that may be red; everything up to the
+  ## uninstall must have run green.
   case mut
   of "uninstall-skips-pending-check":
-    Falsifier(required: @[
-      "uninstall refuses with EAddOnSwitchPending, naming the marker",
-      "the refusal came before the units were stopped (the agent's fetch " &
-        "timer is still active)"])
+    Falsifier(
+      required: @[
+        "uninstall refuses with EAddOnSwitchPending, naming the marker",
+        "the refusal came before the units were stopped (the agent's fetch " &
+          "timer is still active)"],
+      mayBeRed: @["the refused uninstall changed nothing",
+        "the pending marker is still there",
+        "recover finishes or reverts the switch",
+        "uninstall completes after recover",
+        "base fingerprint after uninstall == before bootstrap"],
+      mustRunGreen: @["baseline: udevadm settle and systemctl daemon-reload",
+        "preflight is compatible", "bootstrap",
+        "the deploy agent's fetch timer is active after bootstrap",
+        "apply generation 1 (an etcFile)",
+        "the switch to generation 2 stops after its pending marker",
+        "the apply that owns the marker is killed (SIGKILL)",
+        "the refusal is not ELockTimeout (the owner's lock went with it)"],
+      recordChecks: @[(name: "the uninstall over the marker ran to its end (exit 0)",
+                       check: uninstallOverMarkerRanToItsEnd)])
   else: raise unknownMutation("e2e_arch_addon_uninstall_refuses_pending_switch", mut)
 
 proc runBase(b: BaseImage; record: JsonNode): seq[string] =
@@ -130,6 +156,7 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
     let un = g.exec(repro & " system addon uninstall", timeoutSec = 600)
     let said = un.stdout & un.stderr
     record["uninstallOverMarker"] = %said
+    record["uninstallOverMarkerExit"] = %un.exitCode
     step("uninstall refuses with EAddOnSwitchPending, naming the marker",
          un.exitCode != 0 and "EAddOnSwitchPending" in said and
            PendingMarker in said,

@@ -44,11 +44,13 @@
 ## which must be present and unchanged at the end.
 ##
 ## A falsifier run (``REPRO_ADDON_MUTATION``) passes only when every base
-## shows the mutation's own red step (``expectedFalsifier``, judged by
-## ``arch_gate_support.falsifierVerdict``): a red from an exception or an
-## infrastructure failure, a red elsewhere, or a base outside the mutation
-## turning red fails it. The base's own verdict stays ``red`` in its
-## record; the judgement is the record's ``falsifier``.
+## shows the mutation's own red steps and nothing else (``expectedFalsifier``,
+## judged by ``arch_gate_support.falsifierVerdict``): only the listed steps
+## may be red, the steps that run before and around the mutated code
+## (bootstrap, the generation applies, uninstall, ...) must be present and
+## green, and an exception or infrastructure failure always fails it. A base
+## outside the mutation must stay green. The base's own verdict stays
+## ``red`` in its record; the judgement is the record's ``falsifier``.
 ##
 ## Opt-in: ``REPRO_ADDON_VM_GATES=1``
 ## (``just e2e_arch_addon_bootstrap_uninstall_byte_identity``).
@@ -62,16 +64,70 @@ import repro_test_support/reasoned_skip
 
 import ./arch_gate_support
 
+proc diffIsExactlyTheReproSubvolume*(diffText: string): bool =
+  ## The final diff the negative control must produce, and nothing else:
+  ## exactly two records, ``/repro``'s ``addon-roots`` record changed from
+  ## ``absent`` to a subvolume, and its ``btrfs-subvolumes`` record added
+  ## under the top (``repro``) or Omarchy's ``@`` (``@/repro``).
+  var lines: seq[string]
+  for l in diffText.splitLines():
+    if l.strip().len > 0: lines.add(l)
+  if lines.len != 2: return false
+  var root, subvolume = false
+  for l in lines:
+    let f = l.split('\t')
+    if f.len != 3: return false
+    if f[0] == "~ addon-roots" and f[1] == "/repro" and
+        f[2].startsWith("absent => btrfs-subvolume "):
+      root = true
+    elif f[0] == "+ btrfs-subvolumes" and f[1] in ["repro", "@/repro"] and
+        f[2].startsWith("id "):
+      subvolume = true
+  root and subvolume
+
+static:
+  doAssert diffIsExactlyTheReproSubvolume(
+    "~ addon-roots\t/repro\tabsent => btrfs-subvolume 0755 0:0\n" &
+    "+ btrfs-subvolumes\trepro\tid 259 parent 5\n")
+  doAssert diffIsExactlyTheReproSubvolume(
+    "~ addon-roots\t/repro\tabsent => btrfs-subvolume 0755 0:0\n" &
+    "+ btrfs-subvolumes\t@/repro\tid 265 parent 256\n")
+  doAssert not diffIsExactlyTheReproSubvolume(
+    "~ addon-roots\t/repro\tabsent => btrfs-subvolume 0755 0:0\n" &
+    "+ btrfs-subvolumes\trepro\tid 259 parent 5\n+ etc\t/etc/x\tf\n")
+  doAssert not diffIsExactlyTheReproSubvolume(
+    "+ btrfs-subvolumes\tnotrepro\tid 259 parent 5\n" &
+    "~ addon-roots\t/repro\tabsent => btrfs-subvolume 0755 0:0\n")
+  doAssert not diffIsExactlyTheReproSubvolume("fingerprints identical")
+
+proc reproSubvolumeIsTheWholeDiff(record: JsonNode): bool =
+  record{"diffNamesReproSubvolume"}.getBool()
+
 proc expectedFalsifier(mut: string; b: BaseImage): Falsifier =
-  ## Each negative control's expected red (``falsifierVerdict``): the
-  ## ``/repro`` subvolume left behind shows in the final diff, which names
-  ## it, on a btrfs root; an ext4 root has no subvolume and stays green.
+  ## Each negative control's expected red (``falsifierVerdict``): with
+  ## bootstrap, both generations and uninstall succeeding, the final diff
+  ## is exactly the ``/repro`` subvolume left behind, on a btrfs root; an
+  ## ext4 root has no subvolume and stays green.
   case mut
   of "uninstall-keeps-repro-subvolume":
+    var runs = @["root filesystem (vacuity guard)",
+      "baseline: udevadm settle and systemctl daemon-reload",
+      "fingerprint is deterministic", "preflight is compatible",
+      "bootstrap", "bootstrap diff == generation 0 ledger",
+      "apply generation 1", "generation 1 diff == ledger delta",
+      "apply generation 2", "generation 2 diff == ledger delta",
+      "uninstall"]
+    if isOmarchyBase(b):
+      runs.add("an empty operator profile on Omarchy is refused, " &
+               "EAddOnBaseLayerOwned")
     if rootIsBtrfs(b):
       Falsifier(required: @["base fingerprint after uninstall == before bootstrap"],
-                recordTrue: @["diffNamesReproSubvolume"])
-    else: Falsifier(green: true)
+        mustRunGreen: runs,
+        recordChecks: @[(name: "the final diff is exactly /repro's addon-roots " &
+                           "and btrfs-subvolumes records",
+                         check: reproSubvolumeIsTheWholeDiff)])
+    else: Falsifier(green: true, mustRunGreen: runs &
+      @["base fingerprint after uninstall == before bootstrap"])
   else: raise unknownMutation("e2e_arch_addon_bootstrap_uninstall_byte_identity", mut)
 
 proc runBase(b: BaseImage; record: JsonNode;
@@ -169,7 +225,7 @@ proc runBase(b: BaseImage; record: JsonNode;
       covered.add(g.rootFsType())
     if not ident.ok and rootIsBtrfs(b):
       record["diffNamesReproSubvolume"] =
-        %("btrfs-subvolumes" in ident.text and "repro" in ident.text)
+        %diffIsExactlyTheReproSubvolume(ident.text)
     for (n, t) in [("f0", f0), ("f1", f1), ("f2", f2), ("f3", f3), ("f4", f4),
                    ("l0", l0), ("l1", l1), ("l2", l2)]:
       writeFile(g.runDir / (n & ".txt"), t)

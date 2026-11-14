@@ -32,19 +32,40 @@
 ## give; the test derives the expectation from the same observation rather
 ## than assuming the build host's distribution.
 ##
-## Two stand-ins in 5, both justified: (a) the compiler is a closure
+## 6. Both agent call sites apply that decision, driven end to end with a
+##    stand-in compiler and a stand-in base observation: the fetch unit's
+##    compile (`agent_split.compileProfileWith`, `--staged`) and the
+##    switch's unprivileged compile (`verified_compile.verifiedCompileWith`,
+##    `--stdio`). For each -- a compiler refusing an unreadable `os-release`
+##    (exit 3), an old compiler on an Arch host, on a host whose
+##    `os-release` is unreadable and on a Debian host, and a retry reporting
+##    the pinned revision -- the call site refuses or accepts as decided,
+##    and on a refusal nothing of the compile is staged or handed back.
+## 7. The command itself: `compile-profile --system-base bogus`, and
+##    `this-host` on a host whose `os-release` is unreadable, exit 3 and
+##    write nothing; unreadable `--stdio` input exits 1. None of them is the
+##    usage exit an agent retries on.
+##
+## Stand-ins in 5-7, all justified: (a) the compiler is a closure
 ## answering as a compiler of an older revision would (the usage exit for
 ## the unknown option, then a stdio result with its own revision), because
 ## the point is a revision that is NOT this tree's, which no build of this
 ## tree can be; the closure is passed through the same `run` parameter the
-## agent's real compile runs through. (b) An unreadable `os-release` is the
+## agent's real compile runs through (`run`); in 6 it also writes the
+## `--staged` outputs a compiler writes. (b) An unreadable `os-release` is the
 ## observation `classifyHostBase` gives when no file was read, passed
 ## through `resolveCompileTarget`'s `observe` parameter, because the test
 ## must not make the build host's own `/etc/os-release` unreadable; the
 ## real command uses `observeHostBase`, which returns exactly that value in
-## that case.
+## that case; 6 and 7 pass it, and an Arch or Debian observation, through
+## the call sites' and the command's `observe` parameter the same way.
+## (c) In 7 the `--stdio` request is given through the command's
+## `readInput` parameter, because the test process's own stdin is not a
+## request. `compileProfileWith` sets `HOME` and the XDG variables of this
+## process to its scratch directory, as it does in the fetch unit; no other
+## test in this file reads them.
 
-import std/[base64, json, sets, strutils, tables, unittest]
+import std/[base64, json, os, sets, strutils, tables, unittest]
 
 import repro_profile
 import repro_profile_compile
@@ -56,6 +77,7 @@ import repro_cli_support/infra_host_registry
 import repro_cli_support/deploy_agent
 import repro_addon/verified_compile
 import repro_addon/host_exec
+import repro_addon/agent_split
 
 proc base(id, idLike: string): HostBase =
   var osr = {"ID": id}.toTable
@@ -229,3 +251,166 @@ suite "an agent whose compiler predates --system-base":
                                            refusing)
     check attempt.result.exitCode == 1 and calls[].len == 1
     check not attempt.retriedWithoutBase
+
+# ---------------------------------------------------------------------------
+# 6. Both agent call sites.
+# ---------------------------------------------------------------------------
+
+proc archHost(): HostBase = base("arch", "")
+proc debianHost(): HostBase = base("debian", "")
+
+proc argAfter(a: seq[string]; flag: string): string =
+  let i = a.find(flag)
+  if i >= 0 and i + 1 < a.len: a[i + 1] else: ""
+
+proc standInCompiler(calls: ref seq[seq[string]]; revision: string;
+                     refuseTarget = false): proc(a: seq[string]): HostToolResult =
+  ## A compiler of ``revision`` that predates ``--system-base`` (the usage
+  ## exit when given it), or, with ``refuseTarget``, a current one that
+  ## refuses the target (exit 3, as for an unreadable ``os-release``).
+  ## Without the option it compiles: ``--stdio`` prints the result line;
+  ## ``--staged`` writes the three outputs, as the real command does.
+  result = proc(a: seq[string]): HostToolResult =
+    calls[].add(a)
+    if refuseTarget:
+      return HostToolResult(exitCode: verified_compile.CompileProfileTargetExit,
+        output: "EAddOnUnsupportedBase: no os-release")
+    if "--system-base" in a:
+      return HostToolResult(exitCode: 2, output: "repro deploy-agent " &
+        "compile-profile: unknown option --system-base\n")
+    if "--stdio" in a:
+      return HostToolResult(exitCode: 0, output: verified_compile.CompiledProfileStdioMarker &
+        base64.encode($(%*{"canonical": base64.encode("x"),
+          "actions": base64.encode("[]"), "revision": revision})) & "\n")
+    writeFile(argAfter(a, "--canonical-out"), "x")
+    writeFile(argAfter(a, "--actions-out"), "[]")
+    writeFile(argAfter(a, "--revision-out"), revision & "\n")
+    HostToolResult(exitCode: 0, output: "")
+
+proc sourceManifest(): DeployManifest =
+  result.compiledProfile = CompiledProfilePin(digest: "sha256:" &
+    "1".repeat(64), compilerRevision: "a8f640f709", platform: "linux",
+    arch: "x86_64", host: "h", systemMode: "addOn")
+  result.profileText = "import repro_profile\n"
+
+type CallSiteResult = tuple[accepted, staged: bool; why: string; calls: int]
+
+proc viaFetchUnit(compiler: proc(a: seq[string]): HostToolResult;
+                  calls: ref seq[seq[string]];
+                  observe: HostBaseObservation): CallSiteResult =
+  ## ``agent_split.compileProfileWith``: the fetch unit's compile.
+  let work = getTempDir() / ("t-r2b-fetch-" & $getCurrentProcessId())
+  removeDir(work)
+  createDir(work / "staging")
+  defer: removeDir(work)
+  let why = compileProfileWith(AgentConf(profileCompiler: "/stand-in/compiler"),
+    sourceManifest(), work / "staging", work / "scratch", compiler, observe)
+  var staged = false
+  for f in [StagedCanonicalName, StagedActionsName, StagedCompilerRevisionName]:
+    if fileExists(work / "staging" / f): staged = true
+  (why.len == 0, staged, why, calls[].len)
+
+proc viaUnprivilegedCompile(compiler: proc(a: seq[string]): HostToolResult;
+                            calls: ref seq[seq[string]];
+                            observe: HostBaseObservation): CallSiteResult =
+  ## ``verified_compile.verifiedCompileWith``: the switch's compile.
+  let m = sourceManifest()
+  let r = verifiedCompileWith(@["/stand-in/compiler", "deploy-agent",
+    "compile-profile", "--stdio"] & compileFactArgs(m), m, compiler, observe)
+  (r.ok, r.canonical.len > 0 or r.revision.len > 0, r.error, calls[].len)
+
+suite "both agent call sites fail closed when the compiler predates --system-base":
+  for site in ["fetch unit", "unprivileged compile"]:
+    proc drive(compiler: proc(a: seq[string]): HostToolResult;
+               calls: ref seq[seq[string]];
+               observe: HostBaseObservation): CallSiteResult =
+      if site == "fetch unit": viaFetchUnit(compiler, calls, observe)
+      else: viaUnprivilegedCompile(compiler, calls, observe)
+
+    test site & ": a compiler that cannot read os-release (exit 3) is not retried":
+      let calls = new seq[seq[string]]
+      let r = drive(standInCompiler(calls, "a8f640f709", refuseTarget = true),
+                    calls, unreadableOsRelease)
+      check not r.accepted
+      check r.calls == 1
+      check not r.staged
+
+    test site & ": an old compiler on an Arch host is refused, nothing staged":
+      let calls = new seq[seq[string]]
+      let r = drive(standInCompiler(calls, "0ld0ld0ld0"), calls, archHost)
+      check r.calls == 2
+      check not r.accepted
+      check r.why.startsWith(CompilerRevisionMismatch) or
+        CompilerRevisionMismatch in r.why
+      check "0ld0ld0ld0" in r.why
+      check not r.staged
+
+    test site & ": an old compiler where os-release is unreadable is refused":
+      let calls = new seq[seq[string]]
+      let r = drive(standInCompiler(calls, "0ld0ld0ld0"), calls,
+                    unreadableOsRelease)
+      check r.calls == 2
+      check not r.accepted
+      check CompilerRevisionMismatch in r.why
+      check not r.staged
+
+    test site & ": an old compiler on a Debian host reaches the pin check":
+      let calls = new seq[seq[string]]
+      let r = drive(standInCompiler(calls, "0ld0ld0ld0"), calls, debianHost)
+      check r.calls == 2
+      check r.accepted and r.staged
+      check compiledProfileRefusal(sourceManifest(), "x", "[]",
+        "0ld0ld0ld0").startsWith(CompilerRevisionMismatch)
+
+    test site & ": a retry that reports the pinned revision is refused":
+      for observe in [archHost, debianHost]:
+        let calls = new seq[seq[string]]
+        let r = drive(standInCompiler(calls, "a8f640f709"), calls, observe)
+        check r.calls == 2
+        check not r.accepted
+        check "pinned revision" in r.why
+        check not r.staged
+
+# ---------------------------------------------------------------------------
+# 7. The command's exit codes.
+# ---------------------------------------------------------------------------
+
+proc unreadableOsReleaseNimcall(): HostBase {.nimcall.} =
+  classifyHostBase(initTable[string, string](), "", true)
+
+proc notARequest(): string {.nimcall.} = "this is not a --stdio request"
+proc requestWithoutProfile(): string {.nimcall.} = $(%*{"profileFiles": []})
+
+suite "compile-profile's exit codes are the ones the agent's retry reads":
+  let work = getTempDir() / ("t-r2b-cmd-" & $getCurrentProcessId())
+  removeDir(work)
+  createDir(work)
+  writeFile(work / "profile.nim", "import repro_profile\n")
+  let outputs = @["--staged", work / "profile.nim",
+    "--canonical-out", work / "c", "--actions-out", work / "a",
+    "--host", "h", "--platform", "linux", "--arch", "x86_64",
+    "--system-mode", "addOn"]
+
+  test "--system-base bogus exits 3 and writes nothing":
+    check runDeployAgentCompileProfile(outputs & @["--system-base", "bogus"]) ==
+      deploy_agent.CompileProfileTargetExit
+    check not fileExists(work / "c") and not fileExists(work / "a")
+
+  test "this-host with an unreadable os-release exits 3 and writes nothing":
+    check runDeployAgentCompileProfile(outputs &
+      @["--system-base", SystemBaseThisHost],
+      observe = unreadableOsReleaseNimcall) == deploy_agent.CompileProfileTargetExit
+    check not fileExists(work / "c") and not fileExists(work / "a")
+
+  test "unreadable --stdio input exits 1, never the retried usage exit":
+    for input in [notARequest, requestWithoutProfile]:
+      let code = runDeployAgentCompileProfile(@["--stdio", "--host", "h"],
+        readInput = input)
+      check code == deploy_agent.CompileProfileFailureExit
+      check code != verified_compile.CompileProfileUsageExit
+
+  test "an option the command does not know is still the usage exit":
+    check runDeployAgentCompileProfile(@["--no-such-option", "x"]) ==
+      verified_compile.CompileProfileUsageExit
+
+  removeDir(work)

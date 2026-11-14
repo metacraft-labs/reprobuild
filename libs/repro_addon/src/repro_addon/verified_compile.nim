@@ -111,13 +111,20 @@ proc runCompileForAnyRevision*(argv: seq[string];
     result.result = run(withoutSystemBase(argv))
     result.retriedWithoutBase = true
 
-proc agentHostIsDebianFamily*(): bool =
-  ## The running host's ``os-release`` names the Debian family. False on
-  ## any other base, and when it cannot be read: the one base a compile
-  ## made without ``--system-base`` (the ``add-on-debian`` realisation) can
-  ## be right for.
+type
+  HostBaseObservation* = proc(): HostBase
+    ## How an agent observes the base of the host it compiles on:
+    ## ``observeHostBase`` (the running machine's ``os-release``) in
+    ## production. A parameter, so the refusal can be driven for each base
+    ## without touching the build host's own ``/etc/os-release``.
+
+proc agentHostIsDebianFamily*(observe: HostBaseObservation = observeHostBase):
+    bool =
+  ## The host's ``os-release`` names the Debian family. False on any other
+  ## base, and when it cannot be read: the one base a compile made without
+  ## ``--system-base`` (the ``add-on-debian`` realisation) can be right for.
   try:
-    observeHostBase().isDebianFamily
+    observe().isDebianFamily
   except CatchableError:
     false
 
@@ -243,16 +250,18 @@ proc parseCompileOutput*(output: string):
           "malformed: " & e.msg)
   (false, "", "", "", "the compiler printed no result")
 
-proc unprivilegedCompile*(engineExe: string; m: DeployManifest):
+proc verifiedCompileWith*(argv: seq[string]; m: DeployManifest;
+    run: proc(argv: seq[string]): HostToolResult;
+    observe: HostBaseObservation = observeHostBase):
     tuple[ok: bool; canonical, actionsJson, revision, error: string] =
-  ## Compile ``m``'s source profile with ``engineExe`` as a dynamic user
-  ## (``unprivilegedCompileArgv``) and return what it emitted. The result is
-  ## untrusted: the caller compares it with the signed pin
-  ## (``compiledProfileRefusal``) before using it.
-  let argv = unprivilegedCompileArgv(engineExe, m)
-  let input = compileInput(m)
-  let attempt = runCompileForAnyRevision(argv, proc(a: seq[string]):
-      HostToolResult = runHostTool(a, mergeStderr = false, input = input))
+  ## The agent's ``compile-profile --stdio`` run (``argv``, through ``run``)
+  ## with the decision of spec §13 decision 134 applied: the retry without
+  ## ``--system-base`` on the usage exit only, and the refusal of a
+  ## retried compile (``retriedCompileRefusal``) for the base ``observe``
+  ## reports. ``unprivilegedCompile`` is this with the confined
+  ## ``systemd-run`` command line and the running host's base; the
+  ## parameters are what a test drives it through.
+  let attempt = runCompileForAnyRevision(argv, run)
   let r = attempt.result
   if r.exitCode != 0:
     return (false, "", "", "", "the unprivileged profile compile failed " &
@@ -261,6 +270,18 @@ proc unprivilegedCompile*(engineExe: string; m: DeployManifest):
   if result.ok:
     let why = retriedCompileRefusal(attempt.retriedWithoutBase,
       result.revision, m.compiledProfile.compilerRevision,
-      agentHostIsDebianFamily())
+      agentHostIsDebianFamily(observe))
     if why.len > 0:
+      # Nothing of the refused compile is handed back.
       return (false, "", "", "", why)
+
+proc unprivilegedCompile*(engineExe: string; m: DeployManifest):
+    tuple[ok: bool; canonical, actionsJson, revision, error: string] =
+  ## Compile ``m``'s source profile with ``engineExe`` as a dynamic user
+  ## (``unprivilegedCompileArgv``) and return what it emitted. The result is
+  ## untrusted: the caller compares it with the signed pin
+  ## (``compiledProfileRefusal``) before using it.
+  let input = compileInput(m)
+  verifiedCompileWith(unprivilegedCompileArgv(engineExe, m), m,
+    proc(a: seq[string]): HostToolResult =
+      runHostTool(a, mergeStderr = false, input = input))

@@ -50,11 +50,13 @@
 ## marker leg must turn red.
 ##
 ## A falsifier run (``REPRO_ADDON_MUTATION``) passes only when every base
-## shows the mutation's own red step (``expectedFalsifier``, judged by
-## ``arch_gate_support.falsifierVerdict``): a red from an exception or an
-## infrastructure failure, a red elsewhere, or a base outside the mutation
-## turning red fails it. The base's own verdict stays ``red`` in its
-## record; the judgement is the record's ``falsifier``.
+## shows the mutation's own red steps and nothing else (``expectedFalsifier``,
+## judged by ``arch_gate_support.falsifierVerdict``): only the listed steps
+## may be red, the steps that run before and around the mutated code
+## (bootstrap, the generation applies, uninstall, ...) must be present and
+## green, and an exception or infrastructure failure always fails it. A base
+## outside the mutation must stay green. The base's own verdict stays
+## ``red`` in its record; the judgement is the record's ``falsifier``.
 ##
 ## Opt-in: ``REPRO_ADDON_VM_GATES=1`` (``just e2e_arch_addon_preflight_is_zero_write``).
 ## Bases: ``REPRO_ADDON_BASES`` (default ``arch-btrfs-amd64,arch-ext4-amd64``);
@@ -97,10 +99,22 @@ proc newerThanMarker(g: Guest; repro: string): ExecOut =
     "\\) -prune -o -newer /run/addon-marker -print")
 
 proc expectedFalsifier(mut: string; b: BaseImage): Falsifier =
-  ## Each falsifier's expected red (``arch_gate_support.falsifierVerdict``).
+  ## Each falsifier's expected red (``arch_gate_support.falsifierVerdict``):
+  ## the marker leg alone; the read-only leg (which the mutation swallows)
+  ## and every check after the marker leg stay green, so the red is the
+  ## write and not a preflight that failed.
   case mut
   of "preflight-writes":
-    Falsifier(required: @["the preflight modified no file on the root filesystem"])
+    let belowMatrix = not isOmarchyBase(b) and archVariantOf(b) == avOldSystemd
+    Falsifier(required: @["the preflight modified no file on the root filesystem"],
+      mustRunGreen: (if belowMatrix:
+          @["the preflight refuses a base whose systemd is below the matrix",
+            "qcow2 byte-identical after the read-only preflight"]
+        else:
+          @["preflight on a write-protected disk is compatible",
+            "qcow2 byte-identical after the read-only preflight",
+            "read-write preflight is compatible",
+            "plan digest is the same read-only and read-write"]))
   else: raise unknownMutation("e2e_arch_addon_preflight_is_zero_write", mut)
 
 proc runBase(b: BaseImage; record: JsonNode): seq[string] =
