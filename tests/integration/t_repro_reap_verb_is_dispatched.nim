@@ -22,8 +22,8 @@
 ##
 ##   1. `repro reap --once --state-root=<empty>` reaches the verb: it prints the
 ##      verb's own report (`state-root=`, `reaped:`, `kept:`) and exits 0.
-##      Control: a neighbouring *undispatched* spelling (`repro reapx`) prints
-##      the usage banner and does NOT print a reap report — so arm 1 is evidence
+##      Control: a neighbouring *undispatched* spelling (`repro reapx`) is an
+##      unknown command and does NOT print a reap report — so arm 1 is evidence
 ##      about the `reap` arm and not about the binary in general.
 ##   2. The sweep targets the `--state-root` it was given and ONLY that one:
 ##      two stores are seeded identically, one is named, and the other must come
@@ -92,7 +92,10 @@ suite "repro reap is a dispatched verb":
     # a usage error and prints no reap report. Without this, arm 1 could pass
     # on a binary that printed a reap report for every argv.
     let undispatched = runShell(shellCommand([bin, "reapx", "--once"]))
-    # A usage error: the parser names what it rejected and points at help.
+    # A usage error: the parser names the word as an unknown command (not
+    # as a stray argument, and before the flag after it) and points at help.
+    check undispatched.output.contains(
+      "unknown subcommand 'reapx' for 'repro'")
     check undispatched.output.contains("Run `repro --help`")
     check not undispatched.output.contains("repro reap: state-root=")
     # The exit code is the sharper half of the control, and the pair is what

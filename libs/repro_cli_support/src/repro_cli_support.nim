@@ -501,12 +501,6 @@ const LegacyVerbSynopses = [
     "repro clean [--project-root=PATH] [--work-root=PATH] [--dry-run]\n"),
   ("run",
     "repro run [task:NAME|PACKAGE:NAME|NAME] [--choose] [--activity=NAME] [--work-root=PATH] [-- ARGS...]\n"),
-  ("tasks",
-    "repro tasks [selector] [--activity=NAME] [--work-root=PATH]\n"),
-  ("graph",
-    "repro graph [target[#name]] [--view=actions|neighborhood|inputs|dependents|blast-radius|critical-path|partition-candidates] [--focus=ACTION] [--path=PATH] [--run=last|ID] [--kind=dylib] [--format=text|json|dot] [--tool-provisioning=path|nix|tarball|scoop|from-source] [--work-root=PATH] [--action-cache-root=PATH]\n"),
-  ("why",
-    "repro why <package-or-action> [target[#name]] [--action=ACTION] [--format=text|json] [--tool-provisioning=path|nix|tarball|scoop|from-source] [--work-root=PATH] [--action-cache-root=PATH]\n"),
   ("exec",
     "repro exec [selector] [--activity=name] [--dev-env-stats=PATH] -- <command> [args...]\n"),
   ("shell",
@@ -553,8 +547,6 @@ const LegacyVerbSynopses = [
     "repro home {add | remove | enable | disable | list | why | history | apply | plan | export | facts | compare | rollback | set | get | adopt | resource} [--profile-dir=PATH] [--host=NAME] ...\n"),
   ("daemon",
     "repro daemon {status | start | stop | restart | logs | sessions} [--endpoint=PATH] [--state-dir=PATH] [--log=PATH]\n"),
-  ("stats",
-    "repro stats [status|overview|rank|show|snapshot|compare]\n"),
   ("store",
     "repro store {gc | recover | roots | list | closure | export | import | daemon} ...\n"),
   ("bundle",
@@ -2388,23 +2380,16 @@ proc renderCapabilitiesText*(): string =
     "hcrDecisionAuthority: " &
       caps["interfaces"]["hcr"]["decisionAuthority"].getStr()
 
-proc runConfigsCommand(args: openArray[string]): int =
+proc runConfigsCommand(): int =
   ## List the recognized standard build configurations and the currently
   ## selected ``buildType`` (Standard-Configurations.md). A "configuration"
   ## is a value of the conventional ``buildType`` variant axis; the
   ## ``--release`` / ``--debug`` flags are sugar for
   ## ``--variant buildType=<config>``.
-  var i = 0
-  while i < args.len:
-    let arg = args[i]
-    if arg == "--help" or arg == "-h":
-      echo "usage: repro configs"
-      echo "List the recognized standard build configurations " &
-        "(values of the buildType variant axis)."
-      return 0
-    else:
-      raise newException(ValueError, "unsupported configs argument: " & arg)
-    inc i
+  ##
+  ## ``repro configs`` takes no arguments; its command line is parsed from
+  ## repro's description (``repro_cli_support/cli_description``), which
+  ## answers ``--help`` and rejects anything else as a usage error.
   var current = "debug"
   for assignment in getEnv("REPRO_VARIANTS").split(','):
     let kv = assignment.split('=', 1)
@@ -15032,8 +15017,6 @@ type
     choose: bool
     forwardedArgs: seq[string]
 
-  ParsedReproTasks = object
-    selection: DevEnvCliSelection
 
 proc valueFromFlag(args: openArray[string]; i: var int; flag: string): string =
   let arg = args[i]
@@ -15579,29 +15562,6 @@ proc parseReproRunArgs(args: openArray[string]): ParsedReproRun =
         result.qualifier = rtqNone
         result.target = rawTarget
 
-  selection.resolveDevEnvSelection()
-  result.selection = selection
-
-proc parseReproTasksArgs(args: openArray[string]): ParsedReproTasks =
-  var selection = DevEnvCliSelection()
-  var i = 0
-  while i < args.len:
-    let arg = args[i]
-    if arg == "--activity" or arg.startsWith("--activity="):
-      selection.activity.appendActivitySelection(valueFromFlag(args, i, "--activity"))
-    elif arg == "--work-root" or arg.startsWith("--work-root="):
-      selection.workRoot = valueFromFlag(args, i, "--work-root")
-    elif arg == "--lock-slice" or arg.startsWith("--lock-slice="):
-      selection.lockSliceId = valueFromFlag(args, i, "--lock-slice")
-    elif arg == "--dev-env-stats" or arg.startsWith("--dev-env-stats="):
-      selection.statsPath = valueFromFlag(args, i, "--dev-env-stats")
-    elif arg.startsWith("-"):
-      raise newException(ValueError, "unsupported tasks flag: " & arg)
-    elif selection.selector.len == 0:
-      selection.selector = arg
-    else:
-      raise newException(ValueError, "unexpected tasks argument: " & arg)
-    inc i
   selection.resolveDevEnvSelection()
   result.selection = selection
 
@@ -17445,16 +17405,25 @@ proc runReproRunCommand(args: openArray[string];
     stderr.write(renderUnknownTargetDiagnostic(err[]))
     return 2
 
-proc runReproTasksCommand(args: openArray[string];
+proc runReproTasksCommand(conf: ReproCommandLineTasks;
                           publicCliPath: string): int =
-  let parsed = parseReproTasksArgs(args)
+  ## ``repro tasks [selector]``. Its command line is parsed from repro's
+  ## description (``repro_cli_support/cli_description``); each
+  ## ``--activity`` value may itself be a comma-separated list, and the
+  ## activities are collected in order, each once.
+  var selection = DevEnvCliSelection(selector: conf.selector,
+    workRoot: conf.workRoot, lockSliceId: conf.lockSlice,
+    statsPath: conf.devEnvStats)
+  for value in conf.activity:
+    selection.activity.appendActivitySelection(value)
+  selection.resolveDevEnvSelection()
   var autoRunQuota = startAutoRunQuotaIfNeeded(runQuotaBypassedByEnv())
   defer: releaseAutoRunQuotaProcess(autoRunQuota)
-  var listedTasks = inspectDevEnvTasks(parsed.selection, publicCliPath)
-  if parsed.selection.statsPath.len > 0:
-    let edge = computePublicDevEnv(parsed.selection, publicCliPath,
+  var listedTasks = inspectDevEnvTasks(selection, publicCliPath)
+  if selection.statsPath.len > 0:
+    let edge = computePublicDevEnv(selection, publicCliPath,
     announce = true)
-    writeDevEnvStats(parsed.selection.statsPath, edge, "tasks")
+    writeDevEnvStats(selection.statsPath, edge, "tasks")
     let artifact = edge.artifact
     if emitDevEnvDiagnostics(artifact):
       return 1
@@ -26711,7 +26680,8 @@ proc releaseAutoRunQuotaProcess*(process: var owned(Process)) =
     discard
   process = nil
 
-proc runDepsRefreshCommand(args: openArray[string]): int =
+proc runDepsRefreshCommand(projectFlag, pathArg: string;
+                           checkOnly, dryRun: bool): int =
   ## Implements ``repro deps refresh`` — the Mode 3 scanner CLI.
   ##
   ## Three behaviours, selected by flag:
@@ -26723,38 +26693,16 @@ proc runDepsRefreshCommand(args: openArray[string]): int =
   ##                    stdout (and the unified diff against the on-disk
   ##                    file as a comment header). Never writes.
   ##
-  ## Project resolution: a single positional argument (or ``--project=PATH``)
-  ## is used as the workspace root; default is the current working dir.
+  ## Project resolution: ``--project=PATH`` (``projectFlag``) or the
+  ## positional ``PATH`` (``pathArg``) is the workspace root, given once;
+  ## the default is the current working dir. The command line is parsed
+  ## from repro's description (``repro_cli_support/cli_description``).
   ## See ``reprobuild-specs/Three-Mode-Convention-System.md`` §"`repro
   ## deps refresh` CLI" for the contract.
-  var projectArg = ""
-  var checkOnly = false
-  var dryRun = false
-  var i = 0
-  while i < args.len:
-    let arg = args[i]
-    if arg == "--help" or arg == "-h":
-      echo "usage: repro deps refresh [--check] [--dry-run] [--project=PATH] [PATH]"
-      return 0
-    elif arg == "--check":
-      checkOnly = true
-    elif arg == "--dry-run":
-      dryRun = true
-    elif arg == "--project":
-      if i + 1 >= args.len:
-        raise newException(ValueError, "--project requires a value")
-      projectArg = args[i + 1]
-      inc i
-    elif arg.startsWith("--project="):
-      projectArg = arg["--project=".len .. ^1]
-    elif arg.startsWith("-"):
-      raise newException(ValueError, "unsupported deps refresh flag: " & arg)
-    elif projectArg.len == 0:
-      projectArg = arg
-    else:
-      raise newException(ValueError,
-        "unexpected deps refresh argument: " & arg)
-    inc i
+  if projectFlag.len > 0 and pathArg.len > 0:
+    raise newException(ValueError,
+      "give the workspace root once, as --project or as an argument")
+  let projectArg = if projectFlag.len > 0: projectFlag else: pathArg
 
   let workspaceRoot =
     if projectArg.len == 0:
@@ -27444,34 +27392,6 @@ proc runShowConventionsCommand(projectFlag, pathArg, targetFilter: string;
     stdout.write(renderShowConventionsText(workspaceRoot, projectMatch,
       scan.members, scan.edges, manual, targetFilter))
   0
-
-proc runDepsCommand(args: openArray[string]): int =
-  ## Dispatch ``repro deps <subcommand>``. Today the only subcommand is
-  ## ``refresh``; the spec leaves room for ``deps show`` /
-  ## ``deps explain`` as part of the ``repro show-conventions`` follow-on
-  ## work (step 3 of the sequencing plan in
-  ## ``Three-Mode-Convention-System.md`` §"Sequencing plan").
-  if args.len == 0:
-    stderr.writeLine("repro deps: missing subcommand (expected: refresh)")
-    stderr.writeLine("usage: repro deps refresh [--check] [--dry-run] " &
-      "[--project=PATH] [PATH]")
-    return 2
-  let sub = args[0]
-  let rest =
-    if args.len > 1:
-      args[1 .. ^1]
-    else:
-      @[]
-  case sub
-  of "refresh":
-    return runDepsRefreshCommand(rest)
-  of "--help", "-h", "help":
-    echo "usage: repro deps refresh [--check] [--dry-run] " &
-      "[--project=PATH] [PATH]"
-    return 0
-  else:
-    stderr.writeLine("repro deps: unknown subcommand: " & sub)
-    return 2
 
 # Named-Targets M5 forward declaration: the actual definition lives after
 # ``prepareBuildGraphInspection`` (which the implementation calls) further
@@ -31068,6 +30988,20 @@ proc parseGraphOutputFormat(value: string; allowDot: bool): GraphOutputFormat =
         (if allowDot: " (expected text, json, or dot)"
         else: " (expected text or json)"))
 
+proc inspectionFormat(format: string; json: bool; allowDot: bool;
+                      dot = false): GraphOutputFormat =
+  ## The output format of `repro graph` and `repro why` from their flags:
+  ## `--format` when given (in any case, as ``parseGraphOutputFormat`` reads
+  ## it), else the `--dot` and `--json` shortcuts, else text.
+  if format.len > 0:
+    parseGraphOutputFormat(format, allowDot)
+  elif dot:
+    gofDot
+  elif json:
+    gofJson
+  else:
+    gofText
+
 proc buildActionById(actions: openArray[BuildAction]): Table[string, BuildAction] =
   for action in actions:
     result[action.id] = action
@@ -33541,64 +33475,36 @@ proc runCleanCommand(args: openArray[string]): int =
   echo "repro clean: " & verb & $count & " output(s) of " & projectRoot
   if res.failed > 0: 1 else: 0
 
-proc runStatsCommand(args: openArray[string]; publicCliPath: string): int =
-  var view = "overview"
-  var scope = ""
-  var metric = ""
-  var actionId = ""
-  var inputPath = ""
-  var label = ""
-  var baseline = ""
-  var candidate = ""
-  var projectRoot = getCurrentDir()
-  var target = ""
-  var workRoot = ""
-  var mode = tpmUnspecified
-  var top = 10
-  var format = sofText
-  var i = 0
-  while i < args.len:
-    let arg = args[i]
-    if arg in ["status", "overview", "rank", "show", "snapshot", "compare"]:
-      view = arg
-    elif arg == "--scope" or arg.startsWith("--scope="):
-      scope = valueFromFlag(args, i, "--scope")
-    elif arg == "--by" or arg.startsWith("--by="):
-      metric = valueFromFlag(args, i, "--by")
-    elif arg == "--id" or arg.startsWith("--id="):
-      actionId = valueFromFlag(args, i, "--id")
-    elif arg == "--path" or arg.startsWith("--path="):
-      inputPath = valueFromFlag(args, i, "--path")
-    elif arg == "--label" or arg.startsWith("--label="):
-      label = valueFromFlag(args, i, "--label")
-    elif arg == "--baseline" or arg.startsWith("--baseline="):
-      baseline = valueFromFlag(args, i, "--baseline")
-    elif arg == "--candidate" or arg.startsWith("--candidate="):
-      candidate = valueFromFlag(args, i, "--candidate")
-    elif arg == "--project-root" or arg.startsWith("--project-root="):
-      projectRoot = valueFromFlag(args, i, "--project-root")
-    elif arg == "--target" or arg.startsWith("--target="):
-      target = valueFromFlag(args, i, "--target")
-    elif arg == "--work-root" or arg.startsWith("--work-root="):
-      workRoot = valueFromFlag(args, i, "--work-root")
-    elif arg == "--tool-provisioning" or arg.startsWith("--tool-provisioning="):
-      mode = parseToolProvisioning(valueFromFlag(args, i, "--tool-provisioning"))
-    elif arg == "--action-cache-root" or arg.startsWith("--action-cache-root="):
-      setActionCacheRootOverride(valueFromFlag(args, i, "--action-cache-root"))
-    elif arg == "--top" or arg.startsWith("--top="):
-      top = parseInt(valueFromFlag(args, i, "--top"))
-    elif arg == "--json":
-      format = sofJson
-    elif arg == "--format" or arg.startsWith("--format="):
-      format = parseStatsOutputFormat(valueFromFlag(args, i, "--format"))
-    elif arg == "--help" or arg == "-h":
-      echo "usage: repro stats [status|overview|rank|show|snapshot|compare] [--format=text|json] [--project-root=PATH]"
-      return 0
-    elif arg.startsWith("-"):
-      raise newException(ValueError, "unsupported stats flag: " & arg)
+proc runStatsCommand(conf: ReproCommandLineStats; publicCliPath: string): int =
+  ## ``repro stats [view]``. The command line is parsed from repro's
+  ## description (``repro_cli_support/cli_description``): ``view`` is one of
+  ## the views the description lists (``overview`` when absent), and the
+  ## flags are the same for every view.
+  let view = conf.view
+  let scope = conf.scope
+  var metric = conf.by
+  let actionId = conf.id
+  let inputPath = conf.path
+  let label = conf.label
+  let baseline = conf.baseline
+  let candidate = conf.candidate
+  var projectRoot =
+    if conf.projectRoot.len > 0: conf.projectRoot else: getCurrentDir()
+  let target = conf.target
+  let workRoot = conf.workRoot
+  let mode =
+    if conf.toolProvisioning.len > 0:
+      parseToolProvisioning(conf.toolProvisioning)
     else:
-      raise newException(ValueError, "unsupported stats view: " & arg)
-    inc i
+      tpmUnspecified
+  if conf.actionCacheRoot.len > 0:
+    setActionCacheRootOverride(conf.actionCacheRoot)
+  let top = conf.top
+  # `--format` when given, else the `--json` shortcut.
+  let format =
+    if conf.format.len > 0: parseStatsOutputFormat(conf.format)
+    elif conf.json: sofJson
+    else: sofText
 
   projectRoot = absolutePath(projectRoot)
   let storePath = derivedStatsStorePath(projectRoot)
@@ -33882,101 +33788,33 @@ proc renderGraphAnalysisText(node: JsonNode): string =
     lines.add("unsupported view")
   lines.join("\n") & "\n"
 
-proc runGraphCommand(args: openArray[string]; publicCliPath: string): int =
-  var target = ""
-  var view = "actions"
-  var focus = ""
-  var path = ""
-  var runId = ""
-  var kind = ""
-  var mode = tpmUnspecified
-  var workRoot = ""
-  var format = gofText
-  var positionals: seq[string] = @[]
-  var i = 0
-  while i < args.len:
-    let arg = args[i]
-    if arg == "--build":
-      inc i
-    elif arg == "--view" or arg.startsWith("--view="):
-      view = valueFromFlag(args, i, "--view")
-      inc i
-    elif arg in ["--lock", "--infra", "--all"]:
-      raise newException(ValueError,
-        arg & " is not implemented yet; use repro lock visualize/debug for " &
-          "solved package graph inspection")
-    elif arg.startsWith("--focus="):
-      focus = arg.split("=", maxsplit = 1)[1]
-      inc i
-    elif arg == "--focus":
-      if i + 1 >= args.len:
-        raise newException(ValueError, "--focus requires a value")
-      focus = args[i + 1]
-      inc i, 2
-    elif arg == "--path" or arg.startsWith("--path="):
-      path = valueFromFlag(args, i, "--path")
-      inc i
-    elif arg == "--run" or arg.startsWith("--run="):
-      runId = valueFromFlag(args, i, "--run")
-      inc i
-    elif arg == "--kind" or arg.startsWith("--kind="):
-      kind = valueFromFlag(args, i, "--kind")
-      inc i
-    elif arg == "--target" or arg.startsWith("--target="):
-      target = valueFromFlag(args, i, "--target")
-      inc i
-    elif arg == "--json":
-      format = gofJson
-      inc i
-    elif arg == "--dot":
-      format = gofDot
-      inc i
-    elif arg.startsWith("--format="):
-      format = parseGraphOutputFormat(arg.split("=", maxsplit = 1)[1],
-        allowDot = true)
-      inc i
-    elif arg == "--format":
-      if i + 1 >= args.len:
-        raise newException(ValueError, "--format requires a value")
-      format = parseGraphOutputFormat(args[i + 1], allowDot = true)
-      inc i, 2
-    elif arg.startsWith("--tool-provisioning="):
-      mode = parseToolProvisioning(arg.split("=", maxsplit = 1)[1])
-      inc i
-    elif arg == "--tool-provisioning":
-      if i + 1 >= args.len:
-        raise newException(ValueError, "--tool-provisioning requires a value")
-      mode = parseToolProvisioning(args[i + 1])
-      inc i, 2
-    elif arg.startsWith("--work-root="):
-      workRoot = arg.split("=", maxsplit = 1)[1]
-      inc i
-    elif arg == "--work-root":
-      if i + 1 >= args.len:
-        raise newException(ValueError, "--work-root requires a value")
-      workRoot = args[i + 1]
-      inc i, 2
-    elif arg.startsWith("--action-cache-root="):
-      setActionCacheRootOverride(arg.split("=", maxsplit = 1)[1])
-      inc i
-    elif arg == "--action-cache-root":
-      if i + 1 >= args.len:
-        raise newException(ValueError, "--action-cache-root requires a value")
-      setActionCacheRootOverride(args[i + 1])
-      inc i, 2
-    elif arg.startsWith("-"):
-      raise newException(ValueError, "unsupported graph flag: " & arg)
-    else:
-      positionals.add(arg)
-      inc i
-
-  if positionals.len > 2:
+proc runGraphCommand(conf: ReproCommandLineGraph; publicCliPath: string): int =
+  ## ``repro graph [target[#action]]``. The command line is parsed from
+  ## repro's description (``repro_cli_support/cli_description``). The
+  ## target is the positional or ``--target`` (the positional wins); a
+  ## second positional names the focus action, as ``--focus`` does (and
+  ## wins over it).
+  if conf.lock or conf.infra or conf.all:
+    let given = if conf.lock: "--lock" elif conf.infra: "--infra" else: "--all"
     raise newException(ValueError,
-      "unexpected graph arguments: " & positionals[2 .. ^1].join(" "))
-  if positionals.len >= 1:
-    target = positionals[0]
-  if positionals.len >= 2:
-    focus = positionals[1]
+      given & " is not implemented yet; use repro lock visualize/debug for " &
+        "solved package graph inspection")
+  var target = if conf.selector.len > 0: conf.selector else: conf.target
+  let view = conf.view
+  var focus = if conf.focusAction.len > 0: conf.focusAction else: conf.focus
+  let path = conf.path
+  let runId = conf.run
+  var kind = conf.kind
+  let mode =
+    if conf.toolProvisioning.len > 0:
+      parseToolProvisioning(conf.toolProvisioning)
+    else:
+      tpmUnspecified
+  let workRoot = conf.workRoot
+  if conf.actionCacheRoot.len > 0:
+    setActionCacheRootOverride(conf.actionCacheRoot)
+  let format = inspectionFormat(conf.format, conf.json, allowDot = true,
+    dot = conf.dot)
   let targetWasOmitted = target.len == 0
   # Named-Targets M5: if the first positional is a bare or
   # qualified name (not a path/fragment selector), route it through
@@ -34422,78 +34260,29 @@ proc whyPackageJson(sol: UnifiedSolution; name, graphSource,
   if graphSource == "lock":
     result["lockPath"] = %lockPath
 
-proc runWhyCommand(args: openArray[string]; publicCliPath: string): int =
-  var subject = ""
-  var target = ""
-  var mode = tpmUnspecified
-  var workRoot = ""
-  var format = gofText
-  var explicitAction = false
-  var i = 0
-  while i < args.len:
-    let arg = args[i]
-    if arg.startsWith("--action="):
-      subject = arg.split("=", maxsplit = 1)[1]
-      explicitAction = true
-      inc i
-    elif arg == "--action":
-      if i + 1 >= args.len:
-        raise newException(ValueError, "--action requires a value")
-      subject = args[i + 1]
-      explicitAction = true
-      inc i, 2
-    elif arg == "--json":
-      format = gofJson
-      inc i
-    elif arg.startsWith("--format="):
-      format = parseGraphOutputFormat(arg.split("=", maxsplit = 1)[1],
-        allowDot = false)
-      inc i
-    elif arg == "--format":
-      if i + 1 >= args.len:
-        raise newException(ValueError, "--format requires a value")
-      format = parseGraphOutputFormat(args[i + 1], allowDot = false)
-      inc i, 2
-    elif arg.startsWith("--tool-provisioning="):
-      mode = parseToolProvisioning(arg.split("=", maxsplit = 1)[1])
-      inc i
-    elif arg == "--tool-provisioning":
-      if i + 1 >= args.len:
-        raise newException(ValueError, "--tool-provisioning requires a value")
-      mode = parseToolProvisioning(args[i + 1])
-      inc i, 2
-    elif arg.startsWith("--work-root="):
-      workRoot = arg.split("=", maxsplit = 1)[1]
-      inc i
-    elif arg == "--work-root":
-      if i + 1 >= args.len:
-        raise newException(ValueError, "--work-root requires a value")
-      workRoot = args[i + 1]
-      inc i, 2
-    elif arg.startsWith("--action-cache-root="):
-      setActionCacheRootOverride(arg.split("=", maxsplit = 1)[1])
-      inc i
-    elif arg == "--action-cache-root":
-      if i + 1 >= args.len:
-        raise newException(ValueError, "--action-cache-root requires a value")
-      setActionCacheRootOverride(args[i + 1])
-      inc i, 2
-    elif arg.startsWith("-"):
-      raise newException(ValueError, "unsupported why flag: " & arg)
-    elif explicitAction:
-      if target.len == 0:
-        target = arg
-        inc i
-      else:
-        raise newException(ValueError, "unexpected why argument: " & arg)
-    elif subject.len == 0:
-      subject = arg
-      inc i
-    elif target.len == 0:
-      target = arg
-      inc i
+proc runWhyCommand(conf: ReproCommandLineWhy; publicCliPath: string): int =
+  ## ``repro why <package-or-action> [target]`` or ``repro why
+  ## --action=<action-id> [target]``. The command line is parsed from repro's
+  ## description (``repro_cli_support/cli_description``). With ``--action``
+  ## the subject is the action and the one positional the description fills
+  ## first is the target; a second positional is then an error.
+  var subject = conf.subject
+  var target = conf.target
+  let explicitAction = conf.action.len > 0
+  if explicitAction:
+    if conf.target.len > 0:
+      raise newException(ValueError, "unexpected why argument: " & conf.target)
+    target = conf.subject
+    subject = conf.action
+  let mode =
+    if conf.toolProvisioning.len > 0:
+      parseToolProvisioning(conf.toolProvisioning)
     else:
-      raise newException(ValueError, "unexpected why argument: " & arg)
+      tpmUnspecified
+  let workRoot = conf.workRoot
+  if conf.actionCacheRoot.len > 0:
+    setActionCacheRootOverride(conf.actionCacheRoot)
+  let format = inspectionFormat(conf.format, conf.json, allowDot = false)
 
   if subject.len == 0:
     raise newException(ValueError,
@@ -104790,67 +104579,6 @@ proc runLegacyCommand(programName: string; args: seq[string];
     except CatchableError as err:
       stderr.writeLine("repro debug artifact: error: " & err.msg)
       return 1
-  if programName == "repro" and args.len > 0 and args[0] == "configs":
-    try:
-      let configArgs =
-        if args.len > 1:
-          args[1 .. ^1]
-        else:
-          @[]
-      return runConfigsCommand(configArgs)
-    except CatchableError as err:
-      stderr.writeLine("repro configs: error: " & err.msg)
-      return 1
-  if programName == "repro" and args.len > 0 and args[0] == "graph":
-    try:
-      let graphArgs =
-        if args.len > 1:
-          args[1 .. ^1]
-        else:
-          @[]
-      return runGraphCommand(graphArgs, publicCliPath)
-    except BuildTargetAmbiguousError as err:
-      # Named-Targets M5 ``target_ambiguous`` diagnostic for the
-      # graph arm. Same shape as ``repro build`` so JSON consumers
-      # and test harnesses can rely on the unified text.
-      stderr.write(renderAmbiguousTargetDiagnostic(err[]))
-      return 2
-    except BuildTargetUnknownError as err:
-      # Named-Targets M5 ``unknown_target`` diagnostic with the M2
-      # Levenshtein candidates.
-      stderr.write(renderUnknownTargetDiagnostic(err[]))
-      return 2
-    except CatchableError as err:
-      stderr.writeLine("repro graph: error: " & err.msg)
-      return 1
-  if programName == "repro" and args.len > 0 and args[0] == "why":
-    try:
-      let whyArgs =
-        if args.len > 1:
-          args[1 .. ^1]
-        else:
-          @[]
-      return runWhyCommand(whyArgs, publicCliPath)
-    except BuildTargetAmbiguousError as err:
-      stderr.write(renderAmbiguousTargetDiagnostic(err[]))
-      return 2
-    except BuildTargetUnknownError as err:
-      stderr.write(renderUnknownTargetDiagnostic(err[]))
-      return 2
-    except CatchableError as err:
-      stderr.writeLine("repro why: error: " & err.msg)
-      return 1
-  if programName == "repro" and args.len > 0 and args[0] == "deps":
-    try:
-      let depsArgs =
-        if args.len > 1:
-          args[1 .. ^1]
-        else:
-          @[]
-      return runDepsCommand(depsArgs)
-    except CatchableError as err:
-      stderr.writeLine("repro deps: error: " & err.msg)
-      return 1
   if programName == "repro" and args.len > 0 and args[0] == "build":
     try:
       let buildArgs =
@@ -105008,17 +104736,6 @@ proc runLegacyCommand(programName: string; args: seq[string];
     except CatchableError as err:
       stderr.writeLine("repro clean: error: " & err.msg)
       return 1
-  if programName == "repro" and args.len > 0 and args[0] == "stats":
-    try:
-      let statsArgs =
-        if args.len > 1:
-          args[1 .. ^1]
-        else:
-          @[]
-      return runStatsCommand(statsArgs, publicCliPath)
-    except CatchableError as err:
-      stderr.writeLine("repro stats: error: " & err.msg)
-      return 1
   if programName == "repro" and args.len > 0 and args[0] == "run":
     try:
       let runArgs =
@@ -105029,17 +104746,6 @@ proc runLegacyCommand(programName: string; args: seq[string];
       return runReproRunCommand(runArgs, publicCliPath)
     except CatchableError as err:
       stderr.writeLine("repro run: error: " & err.msg)
-      return 1
-  if programName == "repro" and args.len > 0 and args[0] == "tasks":
-    try:
-      let tasksArgs =
-        if args.len > 1:
-          args[1 .. ^1]
-        else:
-          @[]
-      return runReproTasksCommand(tasksArgs, publicCliPath)
-    except CatchableError as err:
-      stderr.writeLine("repro tasks: error: " & err.msg)
       return 1
   if programName == "repro" and args.len > 0 and args[0] == "exec":
     try:
@@ -106022,8 +105728,8 @@ const LegacyVerbsAnsweringHelp = [
   # takes it as an operand (`repro allow --help` trusts a directory named
   # `--help`), so `repro help` must never hand it one. An entry goes when its
   # command moves onto the description.
-  "anywhere", "branch", "bundle", "cache", "cargo", "clean", "configs",
-  "deps", "health", "hooks", "stats", "switch", "sync", "workspace"]
+  "anywhere", "branch", "bundle", "cache", "cargo", "clean", "health",
+  "hooks", "switch", "sync", "workspace"]
 
 proc runReproHelp(programName: string; topic: seq[string];
                   publicCliPath: string): int =
@@ -106113,6 +105819,60 @@ proc runReproCommandLine(programName: string; args: seq[string];
         sc.json)
     except CatchableError as err:
       stderr.writeLine("repro show-conventions: error: " & err.msg)
+      return 1
+  of ReproCommandLineCommand.configs:
+    try:
+      return runConfigsCommand()
+    except CatchableError as err:
+      stderr.writeLine("repro configs: error: " & err.msg)
+      return 1
+  of ReproCommandLineCommand.tasks:
+    try:
+      return runReproTasksCommand(conf.tasks, publicCliPath)
+    except CatchableError as err:
+      stderr.writeLine("repro tasks: error: " & err.msg)
+      return 1
+  of ReproCommandLineCommand.deps:
+    case conf.deps.command
+    of ReproCommandLineDepsCommand.refresh:
+      try:
+        let r = conf.deps.refresh
+        return runDepsRefreshCommand(r.project, r.path, r.check, r.dryRun)
+      except CatchableError as err:
+        stderr.writeLine("repro deps: error: " & err.msg)
+        return 1
+    of ReproCommandLineDepsCommand.help:
+      # `repro deps help [<word>...]` is `repro help deps [<word>...]`.
+      return runReproHelp(programName, @["deps"] & conf.deps.help.topic,
+        publicCliPath)
+  of ReproCommandLineCommand.stats:
+    try:
+      return runStatsCommand(conf.stats, publicCliPath)
+    except CatchableError as err:
+      stderr.writeLine("repro stats: error: " & err.msg)
+      return 1
+  of ReproCommandLineCommand.graph, ReproCommandLineCommand.why:
+    let verb = if conf.command == ReproCommandLineCommand.graph: "graph"
+               else: "why"
+    try:
+      return
+        if conf.command == ReproCommandLineCommand.graph:
+          runGraphCommand(conf.graph, publicCliPath)
+        else:
+          runWhyCommand(conf.why, publicCliPath)
+    except BuildTargetAmbiguousError as err:
+      # Named-Targets M5 ``target_ambiguous`` diagnostic, the same shape as
+      # ``repro build``'s so JSON consumers and test harnesses can rely on
+      # the unified text.
+      stderr.write(renderAmbiguousTargetDiagnostic(err[]))
+      return 2
+    except BuildTargetUnknownError as err:
+      # Named-Targets M5 ``unknown_target`` diagnostic with the M2
+      # Levenshtein candidates.
+      stderr.write(renderUnknownTargetDiagnostic(err[]))
+      return 2
+    except CatchableError as err:
+      stderr.writeLine("repro " & verb & ": error: " & err.msg)
       return 1
   else:
     let passed = reproPassThrough(conf)
