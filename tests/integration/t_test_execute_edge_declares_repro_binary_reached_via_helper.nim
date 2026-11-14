@@ -58,12 +58,38 @@
 ##                includer's own, while importing the includer still sees
 ##                only what it exports.
 ##
-## No mocks. The engine arms shell out to the real ``build/bin/repro``
-## and read the real build report; the analysis arm runs the real
-## analysis module against real files in a temp directory.
+## ``precondition`` — the engine arms run against the REAL workspace, so
+##                their answer depends on its siblings as well as on this
+##                tree. Cross-Repo-Source-Consumption §5.2 makes the engine
+##                refuse a lock-pinned producer whose placed sibling checkout
+##                is not at the commit ``repro.lock`` pins, and that refusal
+##                says nothing about execute-edge closures. When the engine
+##                refuses for exactly that reason, and the sibling it names
+##                really is off its pin, each engine arm is SKIPPED with the
+##                unmet precondition named — the sibling, its HEAD, the pin
+##                and the remedy — rather than reported as closure
+##                assertions failing. A skip is not a pass. Any other failure,
+##                including the same refusal about a sibling that is in fact
+##                at its pin, stays a failure. This arm pins both directions
+##                of that classification against real git checkouts.
+##
+## No mocks in the engine and analysis arms. The engine arms shell out to
+## the real ``build/bin/repro`` and read the real build report; the analysis
+## arm runs the real analysis module against real files in a temp directory.
+##
+## The ``precondition`` arm feeds the classifier refusal TEXT it writes
+## itself, beside real git checkouts it creates. That is the one synthetic
+## input in this file, and it is justified: the real refusal can only be
+## produced by a workspace whose sibling has drifted, which a test must not
+## arrange by moving a checkout it does not own, and which the engine arms
+## then consume for real whenever it occurs. What the arm has to prove is the
+## classifier's rule — refused AND really off the pin — so it supplies both
+## halves explicitly and checks each one alone keeps the arm red.
 
-import std/[json, os, osproc, strtabs, strutils, tempfiles, unittest]
+import std/[json, os, osproc, sequtils, streams, strtabs, strutils, tempfiles, unittest]
+import repro_lock
 import repro_test_support
+import repro_test_support/reasoned_skip
 import "../../scripts/repro_binary_reachability"
 
 const RepoMarker = "repro.nim"
@@ -149,6 +175,118 @@ proc dryRunClosure(repoRoot, selector: string;
       for action in actions:
         result.actions.add(action{"id"}.getStr())
 
+type
+  SiblingPinDrift = object
+    ## A sibling checkout the consumer lock pins, which is not at its pin.
+    name: string      ## the dependency's name in ``repro.lock``.
+    checkout: string  ## where the sibling is checked out.
+    pinned: string    ## the commit ``repro.lock`` pins.
+    head: string      ## the checkout's actual ``HEAD`` commit.
+
+proc gitCommitOf(checkout, rev: string): string =
+  ## The commit ``rev`` names in ``checkout``, or "" when it names none.
+  ## Repository-selecting variables are dropped so the answer is about the
+  ## checkout on disk, as the engine's own check is
+  ## (``verifyLockPinnedProducerSource``).
+  let gitBin = findExe("git")
+  if gitBin.len == 0:
+    return ""
+  var env = newStringTable()
+  for k, v in envPairs():
+    if k notin ["GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE",
+        "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+        "GIT_COMMON_DIR", "GIT_NAMESPACE", "GIT_CEILING_DIRECTORIES"]:
+      env[k] = v
+  try:
+    let p = startProcess(gitBin, args = ["-C", checkout, "rev-parse",
+        "--verify", "--quiet", "--end-of-options", rev & "^{commit}"],
+      env = env, options = {})
+    defer: p.close()
+    let output = p.outputStream.readAll()
+    if p.waitForExit() != 0:
+      return ""
+    output.strip()
+  except OSError:
+    ""
+
+proc placedSiblingCheckout(name, consumerRoot: string): string =
+  ## Where the engine finds ``name`` checked out beside ``consumerRoot``:
+  ## the nearest ancestor's ``<name>`` directory that holds a project file.
+  ## Mirrors ``repro_cli_support.findSiblingProjectFile``, which is what
+  ## places a lock-pinned producer's source (``producerSourceRoot``); "" when
+  ## the engine would fetch the pin instead.
+  var dir = consumerRoot
+  for _ in 0 ..< 16:
+    let parent = dir.parentDir
+    if parent.len == 0 or parent == dir:
+      break
+    let candidate = parent / name
+    if fileExists(candidate / "repro.nim") or
+        fileExists(candidate / "reprobuild.nim"):
+      return candidate
+    dir = parent
+  ""
+
+proc siblingPinDrift(consumerRoot: string;
+    deps: openArray[LockedDep]): seq[SiblingPinDrift] =
+  ## Every VCS dependency in ``deps`` that is checked out beside
+  ## ``consumerRoot`` at a commit other than the one it pins. Commit identity,
+  ## not tree identity, is what the engine compares (§5.2), so a
+  ## tree-identical merge on top of the pin is drift too.
+  for dep in deps:
+    if dep.coordinates.kind != ckVcs or dep.isSelfLockedDep or
+        dep.coordinates.revision.len == 0:
+      continue
+    let checkout = placedSiblingCheckout(dep.name, consumerRoot)
+    if checkout.len == 0:
+      continue
+    let head = gitCommitOf(checkout, "HEAD")
+    let pinned = gitCommitOf(checkout, dep.coordinates.revision)
+    if head.len == 0 or head != pinned:
+      result.add(SiblingPinDrift(name: dep.name, checkout: checkout,
+        pinned: dep.coordinates.revision,
+        head: (if head.len > 0: head else: "<unresolvable>")))
+
+proc siblingPinDrift(repoRoot: string): seq[SiblingPinDrift] =
+  ## ``siblingPinDrift`` against this tree's committed ``repro.lock``.
+  siblingPinDrift(repoRoot,
+    parseLockedDependencies(readFile(repoRoot / "repro.lock")).deps)
+
+proc unmetSiblingPin(drift: openArray[SiblingPinDrift]; exitCode: int;
+    output: string): string =
+  ## The unmet precondition behind a failed dry run, or "" when the failure
+  ## is not one. BOTH halves are required: the engine refused naming a
+  ## producer's source revision, AND that producer's checkout really is off
+  ## the pin. A refusal about a sibling that is at its pin is an engine
+  ## defect and stays a failure; so does every other non-zero exit.
+  if exitCode == 0:
+    return ""
+  for d in drift:
+    if ("cross-repo producer \"" & d.name & "\" source revision mismatch") in
+        output:
+      return "precondition unmet: workspace sibling " & d.name & " at " &
+        d.checkout & " is at " & d.head & ", but repro.lock pins " &
+        d.pinned & ", and the engine refuses a lock-pinned producer whose " &
+        "checkout is not at its pin (Cross-Repo-Source-Consumption §5.2), " &
+        "so no closure can be measured. Check out the pin in the sibling, " &
+        "or move the pin with `repro lock update " & d.name & " --to=" &
+        d.head & "`."
+  ""
+
+proc unmetSiblingPin(drift: openArray[SiblingPinDrift];
+    closure: tuple[actions: seq[string]; output: string; exitCode: int]):
+    string =
+  unmetSiblingPin(drift, closure.exitCode, closure.output)
+
+template skipForUnmetPrecondition(reason: string) =
+  ## Skip, naming the unmet precondition on the run's own output as well.
+  ## The fork's ``skip(reason)`` records the reason only in the protocol
+  ## result document, so a direct run would print a bare ``[SKIPPED]``; the
+  ## stock arm of ``reasoned_skip`` already prints it.
+  when UnittestSkipTakesReason:
+    echo "    [SKIPPED] ", reason
+  skip(reason)
+
 suite "test execute edges follow helpers to the repro binary":
 
   test "anchor: the anchor reaches the CLI only through a helper":
@@ -193,30 +331,38 @@ suite "test execute edges follow helpers to the repro binary":
     check fileExists(repoRoot / "build" / "bin" / addFileExt("repro", ExeExt))
 
     let closure = dryRunClosure(repoRoot, ".#" & AnchorExecuteId)
-    checkpoint("exit=" & $closure.exitCode)
-    checkpoint("actions=" & closure.actions.join(", "))
-    if closure.exitCode != 0:
-      checkpoint(closure.output)
-    check closure.exitCode == 0
-    check AnchorExecuteId in closure.actions
+    let unmet = unmetSiblingPin(siblingPinDrift(repoRoot), closure)
+    if unmet.len > 0:
+      skipForUnmetPrecondition(unmet)
+    else:
+      checkpoint("exit=" & $closure.exitCode)
+      checkpoint("actions=" & closure.actions.join(", "))
+      if closure.exitCode != 0:
+        checkpoint(closure.output)
+      check closure.exitCode == 0
+      check AnchorExecuteId in closure.actions
 
-    # THE GATE. Absent this action, a rebuild of the CLI cannot reach
-    # this test: the edge does not depend on the binary it executes.
-    check ReproProducerId in closure.actions
+      # THE GATE. Absent this action, a rebuild of the CLI cannot reach
+      # this test: the edge does not depend on the binary it executes.
+      check ReproProducerId in closure.actions
 
   test "control: a pure-unit execute edge does not pull in the CLI":
     let repoRoot = findRepoRoot()
     let closure = dryRunClosure(repoRoot, ".#" & ControlExecuteId)
-    checkpoint("exit=" & $closure.exitCode)
-    checkpoint("actions=" & closure.actions.join(", "))
-    if closure.exitCode != 0:
-      checkpoint(closure.output)
-    check closure.exitCode == 0
-    check ControlExecuteId in closure.actions
-    # Declaring the binary on every edge would satisfy the arm above and
-    # destroy the action cache's selectivity. It must not be declared
-    # here.
-    check ReproProducerId notin closure.actions
+    let unmet = unmetSiblingPin(siblingPinDrift(repoRoot), closure)
+    if unmet.len > 0:
+      skipForUnmetPrecondition(unmet)
+    else:
+      checkpoint("exit=" & $closure.exitCode)
+      checkpoint("actions=" & closure.actions.join(", "))
+      if closure.exitCode != 0:
+        checkpoint(closure.output)
+      check closure.exitCode == 0
+      check ControlExecuteId in closure.actions
+      # Declaring the binary on every edge would satisfy the arm above and
+      # destroy the action cache's selectivity. It must not be declared
+      # here.
+      check ReproProducerId notin closure.actions
 
   test "overlap: each dry-run reads its own closure report":
     let repoRoot = findRepoRoot()
@@ -227,23 +373,102 @@ suite "test execute edges follow helpers to the repro binary":
         control = dryRunClosure(repoRoot, ".#" & ControlExecuteId)
         controlRan = true)
 
-    checkpoint("anchor exit=" & $anchor.exitCode & " actions=" &
-      anchor.actions.join(", "))
-    checkpoint("control exit=" & $control.exitCode & " actions=" &
-      control.actions.join(", "))
-    if anchor.exitCode != 0:
-      checkpoint(anchor.output)
-    if control.exitCode != 0:
-      checkpoint(control.output)
-    check controlRan
-    check anchor.exitCode == 0
-    check control.exitCode == 0
-    check AnchorExecuteId in anchor.actions
-    check ReproProducerId in anchor.actions
-    check ControlExecuteId notin anchor.actions
-    check ControlExecuteId in control.actions
-    check AnchorExecuteId notin control.actions
-    check ReproProducerId notin control.actions
+    # Both queries must be measurable; either one refused for a drifted
+    # sibling leaves nothing to compare.
+    let drift = siblingPinDrift(repoRoot)
+    var unmet = unmetSiblingPin(drift, anchor)
+    if unmet.len == 0 and controlRan:
+      unmet = unmetSiblingPin(drift, control)
+    if unmet.len > 0:
+      skipForUnmetPrecondition(unmet)
+    else:
+      checkpoint("anchor exit=" & $anchor.exitCode & " actions=" &
+        anchor.actions.join(", "))
+      checkpoint("control exit=" & $control.exitCode & " actions=" &
+        control.actions.join(", "))
+      if anchor.exitCode != 0:
+        checkpoint(anchor.output)
+      if control.exitCode != 0:
+        checkpoint(control.output)
+      check controlRan
+      check anchor.exitCode == 0
+      check control.exitCode == 0
+      check AnchorExecuteId in anchor.actions
+      check ReproProducerId in anchor.actions
+      check ControlExecuteId notin anchor.actions
+      check ControlExecuteId in control.actions
+      check AnchorExecuteId notin control.actions
+      check ReproProducerId notin control.actions
+
+  test "precondition: a drifted sibling is named only when it is the refusal":
+    # Real git checkouts on the real filesystem, laid out as a workspace: a
+    # consumer, a sibling one commit past its pin (an empty commit, so the
+    # tree is identical — the case §5.2 still refuses), a sibling at its pin,
+    # and a pinned dependency with no checkout beside the consumer.
+    let gitBin = findExe("git")
+    if gitBin.len == 0:
+      skip("git is not on PATH — the sibling checkouts this arm classifies " &
+        "are real git repositories")
+    else:
+      let root = createTempDir("repro-sibling-pin-", "")
+      defer: removeDir(root)
+      proc git(dir: string; args: varargs[string]) =
+        let cmd = @[gitBin.quoteShell, "-C", dir.quoteShell] &
+          @args.mapIt(it.quoteShell)
+        let run = execCmdEx(cmd.join(" "))
+        doAssert run.exitCode == 0, cmd.join(" ") & "\n" & run.output
+      proc makeSibling(name: string): string =
+        let dir = root / name
+        createDir(dir)
+        writeFile(dir / "repro.nim", "# " & name & "\n")
+        git(dir, "init", "-q")
+        git(dir, "add", "repro.nim")
+        git(dir, "-c", "user.name=t", "-c", "user.email=t@example.invalid",
+          "commit", "-q", "-m", "pin")
+        gitCommitOf(dir, "HEAD")
+      let consumer = root / "consumer"
+      createDir(consumer)
+      writeFile(consumer / "repro.nim", "# consumer\n")
+      let driftedPin = makeSibling("drifted")
+      git(root / "drifted", "-c", "user.name=t",
+        "-c", "user.email=t@example.invalid",
+        "commit", "-q", "--allow-empty", "-m", "tree-identical")
+      let driftedHead = gitCommitOf(root / "drifted", "HEAD")
+      let onPin = makeSibling("onpin")
+      proc vcsDep(name, rev: string): LockedDep =
+        LockedDep(name: name, path: "../" & name,
+          coordinates: Coordinates(kind: ckVcs,
+            url: "https://example.invalid/" & name, revision: rev))
+      let deps = @[vcsDep("drifted", driftedPin), vcsDep("onpin", onPin),
+        vcsDep("absent", driftedPin)]
+
+      # Only the checkout that is off its pin is drift; one with no checkout
+      # is the engine's to fetch, and is not.
+      let drift = siblingPinDrift(consumer, deps)
+      checkpoint("drift=" & $drift)
+      check drift.len == 1
+      check drift.len == 1 and drift[0].name == "drifted" and
+        drift[0].head == driftedHead and drift[0].pinned == driftedPin and
+        drift[0].checkout == root / "drifted"
+      check driftedHead != driftedPin
+
+      proc refusal(name: string): string =
+        "repro build: error: cross-repo producer \"" & name &
+          "\" source revision mismatch at " & (root / name) & ": ..."
+
+      # The engine refused for the drifted sibling: named, with the remedy.
+      let named = unmetSiblingPin(drift, 1, refusal("drifted"))
+      checkpoint("named=" & named)
+      check named.startsWith("precondition unmet: workspace sibling drifted")
+      check driftedHead in named and driftedPin in named
+      check "repro lock update drifted --to=" & driftedHead in named
+
+      # Each half alone stays a failure: a run that exited 0, a refusal
+      # about a sibling that is at its pin, and any unrelated failure.
+      check unmetSiblingPin(drift, 0, refusal("drifted")) == ""
+      check unmetSiblingPin(drift, 1, refusal("onpin")) == ""
+      check unmetSiblingPin(drift, 1, "Error: unhandled exception") == ""
+      check unmetSiblingPin(@[], 1, refusal("drifted")) == ""
 
   test "analysis: calling a helper taints, importing it alone does not":
     # A synthetic source tree on the real filesystem, laid out the way

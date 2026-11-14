@@ -537,7 +537,11 @@
       # test preserves r7.
       # Bumped 7533478 -> c1d55ce (2026-11-05) with io-mon-src: io-mon e66e05c9
       # imports `platform/linux_image_code_ranges`, which arrives in c1d55ce.
-      url = "github:metacraft-labs/nim-stackable-hooks/c1d55ce33fb2a29e4cf8d8bdbe1713f355370d0a";
+      # Bumped c1d55ce -> d715806 (2026-11-14): the `agents-to-dev-2026-11-01`
+      # promotion merge, now the tip of both `dev` and `agents`. Its tree is
+      # identical to c1d55ce, but a checkout synced to either branch is at this
+      # commit, and the engine refuses a placed sibling off its pin.
+      url = "github:metacraft-labs/nim-stackable-hooks/d715806424e8373708494913e59a48237978cc2a";
       flake = false;
     };
     reprobuild-ct-test-runner-src = {
