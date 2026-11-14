@@ -18,8 +18,8 @@
 ## the string `"four"` under `-d:csM6Wrong` and the integer `4` otherwise:
 ##
 ## 1. with the define, the compile fails, with clispec's message naming the
-##    parameter and the value, in the fixture (on the line marked `# CHECK`
-##    for repro's own description; see `LineExact`);
+##    parameter and the value, in the fixture on the line marked `# CHECK`,
+##    the line that wrote the value (not the enclosing command's);
 ## 2. CONTROL: without it, the same fixture compiles. If it did not, the
 ##    fixture would be broken for another reason and case 1 would prove
 ##    nothing.
@@ -42,8 +42,6 @@ const
     "repro_description.nim"]
   Expected = "clispec: parameter 'jobs': default `csM6Default` is not a " &
     "valid int"
-  LineExact = ["repro_description.nim"]
-    ## The fixtures whose error is reported on the `# CHECK` line itself.
 
 proc repoRoot(): string =
   var dir = currentSourcePath().parentDir
@@ -88,12 +86,8 @@ suite "CS-M6: reprobuild's clispec macros place cliModelTypeChecks":
       let (output, exitCode) = nimCheck(root, fixture, wrong = true)
       checkpoint(output)
       check exitCode != 0
-      # Reported in the fixture, naming the parameter and the value. For
-      # repro's own description the line is the one that wrote the value;
-      # through the `package` and `defineCliInterface` macros it was
-      # observed to be the enclosing command's (`subcmd`, or the
-      # `defineCliInterface` head) instead, so only the file is required
-      # there (see `LineExact`).
+      # Reported in the fixture, naming the parameter and the value, at
+      # the line that wrote the value.
       var named = false
       var atLine = false
       for l in output.splitLines():
@@ -102,8 +96,7 @@ suite "CS-M6: reprobuild's clispec macros place cliModelTypeChecks":
           if fixture & "(" & $line & ", " in l:
             atLine = true
       check named
-      if fixture in LineExact:
-        check atLine
+      check atLine
 
     test "control: a right-typed default compiles: " & fixture:
       let (output, exitCode) = nimCheck(repoRoot(), fixture, wrong = false)
