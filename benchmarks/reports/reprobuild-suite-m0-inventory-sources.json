@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 35,
-    "nimTestBinaries": 2798,
+    "nimTestBinaries": 2800,
     "pureUnitConsolidationGroups": 82,
     "pureUnitTests": 766,
     "staticallyDetectedRuntimeCompilerFlowTests": 141,
-    "testEntries": 2843
+    "testEntries": 2845
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1620,7 +1620,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 23,
-      "integration": 1539,
+      "integration": 1541,
       "platform/destructive": 179,
       "pure unit": 766,
       "unclassified": 336
@@ -1837,9 +1837,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2798,
+    "nimTestBinaryCount": 2800,
     "pythonTestFileCount": 45,
-    "testEntryCount": 2843
+    "testEntryCount": 2845
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -40179,6 +40179,23 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_cs_m6_project_introspection_command_lines",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_test_support"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_cs_m6_project_introspection_command_lines.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 4,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_ct_test_surface_case_addressability",
       "class": "integration",
       "classificationReason": "e2e/integration path or requires the repro binary",
@@ -49088,6 +49105,24 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_repro_push_explicit_routes_skip_unpublished_record_store",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_test_support",
+        "repro_workspace_manifests"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_repro_push_explicit_routes_skip_unpublished_record_store.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 2,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_repro_push_publishes_dependency_closure_in_topological_order",
       "class": "integration",
       "classificationReason": "e2e/integration path or requires the repro binary",
@@ -55179,7 +55214,7 @@
       "requiresReproBinary": false,
       "source": "tests/unit/t_cs_m6_spec_pages_match_declarations.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 5,
+      "staticCaseCount": 6,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -59024,7 +59059,7 @@
       "requiresReproBinary": false,
       "source": "tests/unit/test_addon_a13_classify.py",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 47,
+      "staticCaseCount": 50,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

@@ -12,13 +12,17 @@
 ##
 ## WHAT IS COMPARED, AND HOW IT GROWS. `CoveredCommands` lists the commands
 ## whose flags and environment variables are compared: the commands parsed
-## from the description (the root, and the first group: `help`, `version`,
-## `completion`, `capabilities`, `show-conventions`). Each later group of
-## commands is added by listing it here and in the generator's
+## from the description (the root; the first group: `help`, `version`,
+## `completion`, `capabilities`, `show-conventions`; the second: `configs`,
+## `tasks`, `graph`, `why`, `deps` with `deps refresh`, `stats`). Each later
+## group of commands is added by listing it here and in the generator's
 ## `COVERED_COMMANDS`; the last one replaces the list with every command. The
-## top-level command list is compared in full already, against two explicit
-## lists of known differences that may only shrink: a difference that is no
-## longer there fails the test until its entry is removed.
+## top-level command list is compared in full already. Both comparisons run
+## against explicit lists of known differences that may only shrink: a
+## difference that is no longer there fails the test until its entry is
+## removed. The only flag differences are flags a page specifies that are not
+## implemented yet (`SpecifiedNotImplemented`); a flag is declared when it is
+## implemented, and its entry goes then.
 ##
 ## `--help` and `-h` are compared on neither side: the parser builds them into
 ## every command.
@@ -39,8 +43,17 @@ import repro_cli_support/cli_description
 const
   CoveredCommands = [
     "repro", "repro help", "repro version", "repro completion",
-    "repro capabilities", "repro show-conventions"]
+    "repro capabilities", "repro show-conventions", "repro configs",
+    "repro tasks", "repro graph", "repro why", "repro deps",
+    "repro deps refresh", "repro stats"]
     ## The commands whose flags and environment variables are compared.
+  SpecifiedNotImplemented = [
+    # `repro stats`' common options beyond the first implementation.
+    "flag\trepro stats\t--db", "flag\trepro stats\t--metric-group",
+    "flag\trepro stats\t--redact", "flag\trepro stats\t--runs",
+    "flag\trepro stats\t--since", "flag\trepro stats\t--watch-session"]
+    ## Flags a covered command's page specifies that repro does not
+    ## implement yet.
   SpecifiedNotDeclared = [
     "audit", "info", "init", "list", "lsp", "mcp", "outdated", "package",
     "search", "upgrade"]
@@ -127,6 +140,10 @@ const
   Declared = declaredSurface("", "", false)
   WithoutCapabilitiesFormat = declaredSurface("capabilities", "format", true)
   WithoutConfigs = declaredSurface("configs", "", true)
+  # A flag of a shared group (spliced into `why`, `graph` and `stats`): the
+  # comparison sees the flag in each command it is spliced into.
+  WithoutWhyToolProvisioning = declaredSurface("why", "toolProvisioning",
+    true)
 
 proc repoRoot(): string =
   var dir = currentSourcePath().parentDir
@@ -160,6 +177,8 @@ proc differences(declared, specified: openArray[string]): seq[string] =
     let fields = row.split('\t')
     if fields[0] == "verb" and fields[1] in SpecifiedNotDeclared:
       continue
+    if row in SpecifiedNotImplemented:
+      continue
     result.add(row & ": specified, not declared")
   for row in decl - spec:
     let fields = row.split('\t')
@@ -170,6 +189,10 @@ proc differences(declared, specified: openArray[string]): seq[string] =
     if "verb\t" & verb notin spec or "verb\t" & verb in decl:
       result.add("verb\t" & verb & ": no longer a difference; remove it " &
         "from SpecifiedNotDeclared")
+  for row in SpecifiedNotImplemented:
+    if row notin spec or row in decl:
+      result.add(row & ": no longer a difference; remove it from " &
+        "SpecifiedNotImplemented")
   for verb in DeclaredNotSpecified:
     if "verb\t" & verb notin decl or "verb\t" & verb in spec:
       result.add("verb\t" & verb & ": no longer a difference; remove it " &
@@ -194,6 +217,8 @@ suite "CS-M6: the specification pages match the declarations":
   test "the comparison sees the declarations it compares":
     # A surface that lost its flags would agree with an empty fixture.
     check "flag\trepro capabilities\t--format" in Declared
+    check "flag\trepro graph\t--tool-provisioning" in Declared
+    check "flag\trepro deps refresh\t--check" in Declared
     check "flag\trepro\t-V" in Declared
     check "verb\tbuild" in Declared
     check "verb\tws" notin Declared
@@ -203,6 +228,10 @@ suite "CS-M6: the specification pages match the declarations":
       WithoutCapabilitiesFormat
     check differences(WithoutCapabilitiesFormat, specified()) ==
       @["flag\trepro capabilities\t--format: specified, not declared"]
+
+  test "removing a shared group's flag from one command fails the comparison":
+    check differences(WithoutWhyToolProvisioning, specified()) ==
+      @["flag\trepro why\t--tool-provisioning: specified, not declared"]
 
   test "removing one command's declaration fails the comparison":
     check differences(WithoutConfigs, specified()) ==

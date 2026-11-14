@@ -30,6 +30,9 @@ import ./plan_envelope
 import ./profile
 import ./state_dir
 
+const PlannerMutation {.strdefine: "reproAddonMutation".} = ""
+  ## A falsifying build (``repro_addon/mutations``); never a product build.
+
 # Re-export the shared graph kernel's value types + enum members so
 # callers of `repro_infra` see the same names they did before the
 # M82 DRY refactor. `Graph` / `GraphEdge` / `EdgeKind` / `edkExplicit`
@@ -610,6 +613,10 @@ proc buildDependencyGraph*(profile: SystemProfile): DependencyGraph =
   # writes and starts units in this order. A profile therefore need not
   # declare the service first nor spell out a `depends_on`.
   for triggerIdx in 0 ..< profile.resources.len:
+    when PlannerMutation == "trigger-edges-omitted":
+      # FALSIFYING MUTATION: no trigger is ordered after its unit (§13
+      # decision 137).
+      break
     let (tName, tContent) = triggerContent(profile.resources[triggerIdx])
     if tName.len == 0: continue
     let target = triggeredUnitName(tName, tContent)

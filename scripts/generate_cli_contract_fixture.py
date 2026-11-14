@@ -56,6 +56,13 @@ COVERED_COMMANDS = [
     "completion",
     "capabilities",
     "show-conventions",
+    "configs",
+    "tasks",
+    "graph",
+    "why",
+    "deps",
+    "deps refresh",
+    "stats",
 ]
 
 BUILT_IN_FLAGS = {"--help", "-h"}

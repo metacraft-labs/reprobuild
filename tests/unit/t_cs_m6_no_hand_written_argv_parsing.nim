@@ -45,7 +45,7 @@ const
     # (file, hand-written argv comparisons against flag literals it holds).
     # `apps/repro-client/repro_client.nim` left this list in the first group:
     # its flag tables are generated from the description.
-    ("libs/repro_cli_support/src/repro_cli_support.nim", 1218),
+    ("libs/repro_cli_support/src/repro_cli_support.nim", 1109),
     ("libs/repro_cli_support/src/repro_cli_support/anywhere.nim", 23),
     ("libs/repro_cli_support/src/repro_cli_support/attest.nim", 96),
     ("libs/repro_cli_support/src/repro_cli_support/bundle_cli.nim", 2),
@@ -65,12 +65,18 @@ const
     ("libs/repro_cli_support/src/repro_cli_support/workspace_restore.nim", 8),
   ]
   MigratedProcs = [
-    # The commands parsed from the description: `version`, `capabilities`,
-    # `show-conventions`, `completion` (and `help`, which has no proc of its
-    # own besides the dispatcher's `runReproHelp`).
+    # The commands parsed from the description. The first group:
+    # `version`, `capabilities`, `show-conventions`, `completion` (and
+    # `help`, which has no proc of its own besides the dispatcher's
+    # `runReproHelp`).
     "runVersionCommand", "runCapabilitiesCommand",
     "runShowConventionsCommand", "runCompletionCommand", "runReproHelp",
-    "runReproCommandLine"]
+    "runReproCommandLine",
+    # The second group: `configs`, `tasks`, `deps refresh`, `stats`,
+    # `graph`, `why`, and the format choice `graph` and `why` share.
+    "runConfigsCommand", "runReproTasksCommand", "runDepsRefreshCommand",
+    "runStatsCommand", "runGraphCommand", "runWhyCommand",
+    "inspectionFormat"]
 
 proc isFlagLiteralAt(line: string; quote: int): bool =
   ## Whether the string literal opening at `quote` spells a flag.

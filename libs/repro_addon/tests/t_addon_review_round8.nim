@@ -47,7 +47,7 @@
 ##     names, without ``--keep-store``, still holds the completion back
 ##     (exit 3).
 ## 15-17. (round 12) A completion that fails is not lost: see that suite.
-## 18. (round 12, §13 decision 140) Records no run can ship (the sink's
+## 18. (round 12, §13 decision 56) Records no run can ship (the sink's
 ##     configuration gone) are refused with the override named, never "run
 ##     uninstall again once it has"; records the sink only has not
 ##     acknowledged yet still are. Its ``ship`` answers as
@@ -561,7 +561,7 @@ suite "the A11 code review's round 12: a completion that fails is not lost (§13
     check unfinishedDiscardIntent(own.site, logOf(s)).path != tampered
     check unfinishedDiscardIntent(own.site, logOf(s)).path.len == 0
 
-suite "A11 code review round 12: §13 decision 140":
+suite "A11 code review round 12: §13 decision 56, amended":
   test "18: records no run can ship are never waited for":
     # The refusal names the override, never "run uninstall again once it
     # has", when no acknowledgement can arrive (the sink's configuration
@@ -730,12 +730,22 @@ suite "rounds 10 and 11's decisions are cited by their own §13 numbers":
       check Coverage in got
 
   test "round 12's decisions are cited where they are implemented":
-    # 139 (the completion before the keys) and 140 (the sink's
-    # configuration kept) in the uninstall; 142 (--skipUserCfg) in the
-    # helper builder, writer and reader. Literals split as above.
-    let u = readFile(repoRoot / "libs/repro_addon/src/repro_addon/uninstall.nim")
-    check 139 in citedDecisions(u)
-    check 140 in citedDecisions(u)
+    # Round 12 amended decisions 81 (the completion before the keys) and
+    # 56 (the sink's configuration kept until the state goes); the
+    # uninstall cites those, never 139 or 140, which are A9's (a listener
+    # below /run/<stem>/, a unit only a timer starts) -- reprobuild-pm
+    # issue ``2026-11-14-addon-uninstall-removes-the-sink-configuration-
+    # before-it-knows-the-run-will-finish-so-a-re-run-cannot-ship``.
+    # 142 (--skipUserCfg) in the helper builder, writer and reader.
+    # Literals split as above.
+    for rel in ["libs/repro_addon/src/repro_addon/uninstall.nim",
+                "tests/e2e/addon/t_e2e_addon_store_custody.nim"]:
+      let got = citedDecisions(readFile(repoRoot / rel))
+      checkpoint rel & " cites " & $got
+      check 56 in got
+      check 81 in got
+      check 139 notin got
+      check 140 notin got
     for rel in ["scripts/build_apps.sh", "scripts/write_helper_deps.sh",
                 "libs/repro_test_support/src/repro_test_support/fresh_binary.nim"]:
       let got = citedDecisions(readFile(repoRoot / rel))

@@ -365,7 +365,13 @@
       # stopped programs that find their C runtime through their own DT_RPATH
       # from loading the shim. 58048ea gives macOS Apple toolchain drop-ins the
       # shim's default SDK.
-      url = "github:metacraft-labs/io-mon/a7b272f6877687c1d5c81027111c94cb107c056e";
+      # Bumped a7b272f6 -> 4212d138 (2026-11-14, io-mon `agents`): the Linux
+      # shim excludes its own image from inline-syscall patching by the address
+      # of its trap handler, not by its file name, so a copy of the shim under
+      # another name (a `REPRO_MONITOR_SHIM_LIB` override) no longer patches
+      # its own raw syscalls and kills every program with SIGTRAP. 77bf297f
+      # runs an inline clone with a child stack outside the trap handler.
+      url = "github:metacraft-labs/io-mon/4212d138707f2e30c844344870db46b81e73a96c";
       flake = false;
     };
     nim-shm-gset-src = {
@@ -421,7 +427,7 @@
       # CI jobs have no sibling, so seed it from here — exactly like
       # nim-shm-queue-src. Keep this URL, flake.lock, repro.lock and
       # .github/sibling-repos aligned.
-      url = "github:metacraft-labs/nim-cli-spec/29792c06ac2ecdea82e10adc78628e832f55d179";
+      url = "github:metacraft-labs/nim-cli-spec/d3589de9fbe9b45f245ade68aabd522977528365";
       flake = false;
     };
     nim-confutils-src = {

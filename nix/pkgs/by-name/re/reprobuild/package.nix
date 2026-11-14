@@ -151,8 +151,8 @@
   cliSpecSrc ? fetchFromGitHub {
     owner = "metacraft-labs";
     repo = "nim-cli-spec";
-    rev = "29792c06ac2ecdea82e10adc78628e832f55d179";
-    hash = "sha256-EeTmGzSKBKvtKYJG6gvj8a5q6nLTQLrtA4DPYl8Zuwg=";
+    rev = "d3589de9fbe9b45f245ade68aabd522977528365";
+    hash = "sha256-SQyzyDVuHJEBaV0X5iHpL+PPTTYomBZnQ3EQqF8Rhuw=";
   },
   # Added after the `src` commit too: confutils over a clispec description,
   # which repro's own command line is.

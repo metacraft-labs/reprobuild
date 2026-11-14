@@ -78,3 +78,60 @@ command	repro show-conventions
 flag	repro show-conventions	--json
 flag	repro show-conventions	--project
 flag	repro show-conventions	--target
+command	repro configs
+command	repro tasks
+flag	repro tasks	--activity
+flag	repro tasks	--dev-env-stats
+flag	repro tasks	--lock-slice
+flag	repro tasks	--work-root
+command	repro graph
+flag	repro graph	--action-cache-root
+flag	repro graph	--all
+flag	repro graph	--build
+flag	repro graph	--dot
+flag	repro graph	--focus
+flag	repro graph	--format
+flag	repro graph	--infra
+flag	repro graph	--json
+flag	repro graph	--kind
+flag	repro graph	--lock
+flag	repro graph	--path
+flag	repro graph	--run
+flag	repro graph	--target
+flag	repro graph	--tool-provisioning
+flag	repro graph	--view
+flag	repro graph	--work-root
+command	repro why
+flag	repro why	--action
+flag	repro why	--action-cache-root
+flag	repro why	--format
+flag	repro why	--json
+flag	repro why	--tool-provisioning
+flag	repro why	--work-root
+command	repro deps
+command	repro deps refresh
+flag	repro deps refresh	--check
+flag	repro deps refresh	--dry-run
+flag	repro deps refresh	--project
+command	repro stats
+flag	repro stats	--action-cache-root
+flag	repro stats	--baseline
+flag	repro stats	--by
+flag	repro stats	--candidate
+flag	repro stats	--db
+flag	repro stats	--format
+flag	repro stats	--id
+flag	repro stats	--json
+flag	repro stats	--label
+flag	repro stats	--metric-group
+flag	repro stats	--path
+flag	repro stats	--project-root
+flag	repro stats	--redact
+flag	repro stats	--runs
+flag	repro stats	--scope
+flag	repro stats	--since
+flag	repro stats	--target
+flag	repro stats	--tool-provisioning
+flag	repro stats	--top
+flag	repro stats	--watch-session
+flag	repro stats	--work-root
