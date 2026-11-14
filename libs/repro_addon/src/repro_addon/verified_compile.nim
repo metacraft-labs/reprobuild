@@ -53,6 +53,11 @@ proc compileFactArgs*(m: DeployManifest): seq[string] =
     if m.compiledProfile.hasSystemSelection:
       result.add(["--system-mode", m.compiledProfile.systemMode,
         "--system-activities", m.compiledProfile.systemActivities.join(",")])
+      # An agent compiles on the host it applies to: an add-on selection
+      # is realised for this host's base (``add-on-arch`` on Arch), as
+      # ``repro infra`` realises it there (spec §8.1).
+      if m.compiledProfile.systemMode == "addOn":
+        result.add(["--system-base", "this-host"])
 
 proc launcherOf*(exe: string): string =
   ## The program to exec to run ``exe`` in a FRESH environment. A transient

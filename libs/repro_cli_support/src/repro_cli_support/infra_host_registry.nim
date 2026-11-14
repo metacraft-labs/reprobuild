@@ -187,6 +187,24 @@ proc checkHostSystemMode*(v: HostRegistryVerdict; base: HostBase) =
         ManagedElsewhereKeyword & "(\"<what manages it>\")` if something " &
         "else does. Nothing was planned or changed.")
 
+proc addOnRealisationFor*(base: HostBase; subject = "this host"):
+    SystemRealisation =
+  ## The add-on realisation profile for a distribution base (spec §8.1):
+  ## `add-on-debian` on the Debian family, `add-on-arch` on the Arch family
+  ## (Arch Linux, Omarchy); any other base is `EAddOnUnsupportedBase`.
+  ## Shared by the registry's `realisationFor` and the deploy agent's
+  ## compile on its own host (`deploy_agent.compileTargetFor`), so the two
+  ## realise one base the same way.
+  if base.isDebianFamily:
+    return srAddOnDebian
+  if base.isArchFamily:
+    return srAddOnArch
+  raise newAddOnUnsupportedBase(describeHostBase(base),
+    subject & " runs " & describeHostBase(base) & ", for which no add-on " &
+    "realisation profile exists (`" & AddOnDebianProfileName & "` covers " &
+    "Debian, Ubuntu and their derivatives, `" & AddOnArchProfileName &
+    "` Arch Linux and its derivatives). Nothing was planned or changed.")
+
 proc realisationFor*(v: HostRegistryVerdict; base: HostBase):
     SystemRealisation =
   ## How the selected resources are realised on the host: in full, unless
@@ -204,16 +222,8 @@ proc realisationFor*(v: HostRegistryVerdict; base: HostBase):
       addOn = true
   if not addOn:
     return srFull
-  if base.isDebianFamily:
-    return srAddOnDebian
-  if base.isArchFamily:
-    return srAddOnArch
-  raise newAddOnUnsupportedBase(describeHostBase(base),
-    "host " & v.host & " is declared `system: " & AddOnKeyword & "`, but " &
-    "it runs " & describeHostBase(base) & ", for which no add-on " &
-    "realisation profile exists (`" & AddOnDebianProfileName & "` covers " &
-    "Debian, Ubuntu and their derivatives, `" & AddOnArchProfileName &
-    "` Arch Linux and its derivatives). Nothing was planned or changed.")
+  addOnRealisationFor(base, "host " & v.host & " is declared `system: " &
+    AddOnKeyword & "`, but it")
 
 proc systemPlanTargetFor*(v: HostRegistryVerdict; base: HostBase):
     SystemPlanTarget =

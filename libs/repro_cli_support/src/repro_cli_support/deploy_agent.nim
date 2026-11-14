@@ -52,6 +52,9 @@ import repro_home_intent/host_identity
 import repro_profile
 from repro_core import ReprobuildSourceRevision
 import ./infra
+import ./infra_host_registry
+import repro_infra/addon_diagnostics
+import repro_infra/host_base
 # Add-on mode owns Linux filesystem and ledger operations, so its closure
 # reaches `repro_addon/linux_fs` and its `<sys/vfs.h>` bindings. Keep those
 # imports out of the portable engine, exactly as `./infra` does -- this
@@ -184,8 +187,15 @@ const CompiledProfileStdioMarker* = "REPRO-COMPILED-PROFILE "
   ## JSON object ``{"canonical", "actions"}``, each base64), so whatever the
   ## compiler prints around it cannot be mistaken for it.
 
-proc compileTargetFor(host, platform, arch: string; systemMode = "";
-                      systemActivities: seq[string] = @[]): SystemPlanTarget =
+const
+  SystemBaseThisHost* = "this-host"
+    ## ``--system-base this-host``: realise an ``addOn`` selection for the
+    ## base of the machine the compile runs on, observed as ``repro infra``
+    ## observes it. What an agent passes when it compiles on its own host.
+
+proc compileTargetFor*(host, platform, arch: string; systemMode = "";
+                       systemActivities: seq[string] = @[];
+                       systemBase = ""): SystemPlanTarget =
   ## The plan target of an agent compile: the ``default`` activity, with the
   ## predicate facts overridden by whatever the caller names. A producer
   ## compiles for its target's facts, and the target's agent compiles with
@@ -198,12 +208,38 @@ proc compileTargetFor(host, platform, arch: string; systemMode = "";
   ## realised, exactly what ``system: {mode: ..., activities: [...]}`` gives
   ## ``repro infra plan`` on that host. Without them the target is the
   ## ``default`` activity realised in full, as before.
+  ##
+  ## ``systemBase`` says which base an ``addOn`` selection is realised for
+  ## (ReproOS-Add-On-Mode §8.1, §8.3): ``this-host`` (``SystemBaseThisHost``)
+  ## observes the machine the compile runs on, as ``repro infra plan`` does
+  ## (``add-on-arch`` on an Arch-family base, ``add-on-debian`` on a
+  ## Debian-family one, ``EAddOnUnsupportedBase`` otherwise) -- what the
+  ## agent's own compile on its host asks for; ``debian`` or ``arch`` names
+  ## the target's family from elsewhere (a producer compiling for another
+  ## machine); "" is ``debian``, the producer's default. The realisation
+  ## decides only which fields are refused, never the compiled text, so it
+  ## is not part of the pin: a producer's ``add-on-debian`` compile and an
+  ## Arch host's ``add-on-arch`` compile of the same accepted profile give
+  ## the same digest, and the host refuses what its base cannot run.
+  if systemBase.len > 0 and systemMode != "addOn":
+    raise newException(ValueError, "--system-base applies only to " &
+      "--system-mode addOn, got '" & systemBase & "' with mode '" &
+      systemMode & "'")
   if systemMode.len == 0 and systemActivities.len == 0:
     result = defaultSystemPlanTarget(host)
   else:
     let realisation = case systemMode
       of "", "full": srFull
-      of "addOn": srAddOnDebian
+      of "addOn":
+        case systemBase
+        of "", "debian": srAddOnDebian
+        of "arch": srAddOnArch
+        of SystemBaseThisHost:
+          addOnRealisationFor(observeHostBase(), "the host this agent " &
+            "compiles on")
+        else: raise newException(ValueError, "--system-base must be " &
+          "debian, arch or " & SystemBaseThisHost & ", got '" & systemBase &
+          "'")
       else: raise newException(ValueError, "--system-mode must be addOn " &
         "or full, got '" & systemMode & "'")
     result = systemPlanTarget(host, toHashSet(systemActivities), realisation)
@@ -215,7 +251,8 @@ proc runDeployAgentCompileProfile*(args: seq[string]): int =
   ## --canonical-out <file> --actions-out <file> [--state-dir D]
   ## [--host H] [--platform P] [--arch A] [--digest-out F]
   ## [--revision-out F] [--system-mode addOn|full]
-  ## [--system-activities a,b]``: compile a
+  ## [--system-activities a,b] [--system-base debian|arch|this-host]``:
+  ## compile a
   ## staged manifest profile (its bundle beside it, as
   ## ``stageProfileSources`` writes it) to the canonical resource text and
   ## the build actions, through the same Phase-F3 path ``repro infra apply``
@@ -235,7 +272,7 @@ proc runDeployAgentCompileProfile*(args: seq[string]): int =
   ## profile compiler, so the compiler never runs as root (ReproOS add-on
   ## §9.1).
   var staged, canonicalOut, actionsOut, stateDir, digestOut, revisionOut = ""
-  var host, platform, arch, systemMode = ""
+  var host, platform, arch, systemMode, systemBase = ""
   var systemActivities: seq[string]
   var hostGiven, stdio = false
   if args == @["--probe-c-compiler"]:
@@ -276,6 +313,7 @@ proc runDeployAgentCompileProfile*(args: seq[string]): int =
     of "--platform": platform = args[i + 1]
     of "--arch": arch = args[i + 1]
     of "--system-mode": systemMode = args[i + 1]
+    of "--system-base": systemBase = args[i + 1]
     of "--system-activities":
       for name in args[i + 1].split(','):
         if name.strip().len > 0: systemActivities.add(name.strip())
@@ -321,7 +359,7 @@ proc runDeployAgentCompileProfile*(args: seq[string]): int =
       "<module.nim> --canonical-out <file> --actions-out <file> " &
       "[--state-dir D] [--host H] [--platform P] [--arch A] " &
       "[--digest-out F] [--revision-out F] [--system-mode addOn|full] " &
-      "[--system-activities a,b]\n       repro deploy-agent compile-profile --stdio " &
+      "[--system-activities a,b] [--system-base debian|arch|this-host]\n       repro deploy-agent compile-profile --stdio " &
       "[--host H] [--platform P] [--arch A]")
     return 2
   else:
@@ -337,8 +375,9 @@ proc runDeployAgentCompileProfile*(args: seq[string]): int =
   var target: SystemPlanTarget
   try:
     target = compileTargetFor(host, platform, arch, systemMode,
-                              systemActivities)
-  except ValueError as e:
+                              systemActivities, systemBase)
+  except ValueError, EAddOnUnsupportedBase:
+    let e = getCurrentException()
     stderr.writeLine("repro deploy-agent compile-profile: " & e.msg)
     return 2
   if not resolveSystemProfileText(staged, profileText, stateDir,
@@ -510,9 +549,13 @@ proc runDeployAgentCommand*(args: seq[string]): int =
         not agentMutated("engine-agent-ignores-pin")
       if pinned:
         try:
+          # The engine's agent compiles on the host it applies to, so an
+          # add-on selection is realised for this host's base.
           target = compileTargetFor(pin.host, pin.platform, pin.arch,
-            pin.systemMode, pin.systemActivities)
-        except ValueError as e:
+            pin.systemMode, pin.systemActivities,
+            (if pin.systemMode == "addOn": SystemBaseThisHost else: ""))
+        except ValueError, EAddOnUnsupportedBase:
+          let e = getCurrentException()
           pinRefusal = "the compiled-profile pin cannot be compiled for: " & e.msg
           return false
       result = resolveSystemProfileText(profilePath, profileText,

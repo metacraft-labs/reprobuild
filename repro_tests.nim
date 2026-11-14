@@ -2929,6 +2929,17 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "",
     singleReason: "per-file config libs/repro_cli_support/tests/t_deploy_agent_probe_refuses_without_a_c_compiler.nim.cfg"),
   TestSpec(
+    source: "libs/repro_cli_support/tests/t_deploy_agent_realises_add_on_for_its_host_base.nim",
+    binary: "build/test-bin/t_deploy_agent_realises_add_on_for_its_host_base",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "t_group_libs_repro_cli_support_tests_g01",
+    singleReason: ""),
+  TestSpec(
     source: "libs/repro_cli_support/tests/t_develop_override_records_the_identity_it_replaced.nim",
     binary: "build/test-bin/t_develop_override_records_the_identity_it_replaced",
     defines: @[],
@@ -3212,7 +3223,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_libs_repro_cli_support_tests_g01",
+    group: "t_group_libs_repro_cli_support_tests_g02",
     singleReason: ""),
   TestSpec(
     source: "libs/repro_cli_support/tests/t_lock_list_without_a_build_block.nim",
