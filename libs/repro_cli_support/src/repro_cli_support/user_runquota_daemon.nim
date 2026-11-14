@@ -49,6 +49,18 @@ when defined(posix):
       ## the environment of the daemon started here: it must outlive its
       ## parent, and a caller's environment can still carry the variables
       ## (a ``runquotad`` that was itself started with them, say).
+    invocationOwnershipEnvVars = ["REPRO_TEST_RUNNER_OWNER_TOKEN"]
+      ## Markers that tie a process to the invocation that started it, so
+      ## that whoever owns that invocation can find and end it. The test
+      ## runner ends every process whose environment carries a finished
+      ## case's ``REPRO_TEST_RUNNER_OWNER_TOKEN`` (``ownedProcessIds``). A
+      ## per-user daemon is SHARED by every invocation of the user, so it
+      ## must not carry the token of whichever case happened to start it:
+      ## when that case ended, the runner killed the daemon under every
+      ## other case's live lease, and their next frame failed with
+      ## ``Broken pipe`` (full run 52, the dev-env e2e cluster). The run's
+      ## daemon is stopped by ``run_tests.sh`` at the end of the run, and
+      ## idles out on its own otherwise.
 
   var oNoFollow {.importc: "O_NOFOLLOW", header: "<fcntl.h>".}: cint
     ## Not exported by ``std/posix``.
@@ -411,7 +423,9 @@ when defined(posix):
     ##   ``SIGCHLD`` makes the kernel reap children unasked, and their exit
     ##   status is lost) -- and so that the daemon does not inherit that
     ##   setting across ``execve`` either;
-    ## * the invocation's environment without ``RUNQUOTA_EXIT_WITH_PARENT*``.
+    ## * the invocation's environment without ``RUNQUOTA_EXIT_WITH_PARENT*``
+    ##   and without the test runner's ownership token
+    ##   (``invocationOwnershipEnvVars``).
     ##   The caller has already published ``RUNQUOTA_SOCKET`` and
     ##   ``RUNQUOTA_ENDPOINT_SCOPE=private`` into it.
     ##
@@ -427,7 +441,8 @@ when defined(posix):
     argv.add(args)
     var environment: seq[string] = @[]
     for key, value in envPairs():
-      if key notin exitWithParentEnvVars:
+      if key notin exitWithParentEnvVars and
+          key notin invocationOwnershipEnvVars:
         environment.add(key & "=" & value)
     let cargv = allocCStringArray(argv)
     defer: deallocCStringArray(cargv)
