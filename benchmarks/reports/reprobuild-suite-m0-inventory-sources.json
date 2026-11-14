@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 35,
-    "nimTestBinaries": 2785,
+    "nimTestBinaries": 2786,
     "pureUnitConsolidationGroups": 82,
     "pureUnitTests": 762,
-    "staticallyDetectedRuntimeCompilerFlowTests": 139,
-    "testEntries": 2830
+    "staticallyDetectedRuntimeCompilerFlowTests": 140,
+    "testEntries": 2831
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1616,7 +1616,7 @@
   ],
   "static": {
     "classificationCounts": {
-      "graph-fixture": 21,
+      "graph-fixture": 22,
       "integration": 1535,
       "platform/destructive": 178,
       "pure unit": 762,
@@ -1834,9 +1834,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2785,
+    "nimTestBinaryCount": 2786,
     "pythonTestFileCount": 45,
-    "testEntryCount": 2830
+    "testEntryCount": 2831
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -8074,6 +8074,26 @@
         }
       ],
       "source": "tests/integration/t_ti3_fingerprint_split.nim"
+    },
+    {
+      "class": "graph-fixture",
+      "matches": [
+        {
+          "assignedCommandVariable": "cmd",
+          "commandVariableExecuted": true,
+          "directExecutionLine": false,
+          "executedVariables": [
+            "cmd"
+          ],
+          "line": 91,
+          "path": "tests/unit/t_build_package_fragment_outside_provider_mode_names_the_define.nim",
+          "patterns": [
+            "nim-compile-verb"
+          ],
+          "snippet": "var cmd = quoteShell(requireNim()) & \" check --hints:off --warnings:off \" &"
+        }
+      ],
+      "source": "tests/unit/t_build_package_fragment_outside_provider_mode_names_the_define.nim"
     },
     {
       "class": "graph-fixture",
@@ -54557,6 +54577,21 @@
       "sourceSuiteCount": 1,
       "staticCaseCount": 3,
       "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_build_package_fragment_outside_provider_mode_names_the_define",
+      "class": "graph-fixture",
+      "classificationReason": "test body compiles or links a helper/fixture artifact",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [],
+      "owner": "tests/unit",
+      "requiresReproBinary": false,
+      "source": "tests/unit/t_build_package_fragment_outside_provider_mode_names_the_define.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 2,
+      "staticallyDetectedRuntimeCompilerFlow": true,
       "targetOs": "soAny"
     },
     {

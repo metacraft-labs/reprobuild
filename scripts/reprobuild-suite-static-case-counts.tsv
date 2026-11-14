@@ -2565,6 +2565,7 @@ tests/unit/t_binary_decoder_provider_session_counts.nim	nim	7
 tests/unit/t_binary_decoder_resource_legacy_counts.nim	nim	1
 tests/unit/t_binary_decoder_secondary_counts.nim	nim	16
 tests/unit/t_bootstrap_nim_monitoring.nim	nim	3
+tests/unit/t_build_package_fragment_outside_provider_mode_names_the_define.nim	nim	2
 tests/unit/t_cached_source_dependency_closure.nim	nim	11
 tests/unit/t_capabilities.nim	nim	3
 tests/unit/t_cargo_deinherit.nim	nim	21

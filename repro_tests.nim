@@ -28108,6 +28108,17 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "t_group_tests_unit_g01",
     singleReason: ""),
   TestSpec(
+    source: "tests/unit/t_build_package_fragment_outside_provider_mode_names_the_define.nim",
+    binary: "build/test-bin/t_build_package_fragment_outside_provider_mode_names_the_define",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "t_group_tests_unit_g01",
+    singleReason: ""),
+  TestSpec(
     source: "tests/unit/t_cached_source_dependency_closure.nim",
     binary: "build/test-bin/t_cached_source_dependency_closure",
     defines: @[],

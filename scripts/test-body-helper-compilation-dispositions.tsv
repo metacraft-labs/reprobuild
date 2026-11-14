@@ -98,6 +98,9 @@
 # 2026-11-11 added one migrate-pending row, blocked on the C edge:
 # t_inherited_preload_hook_library_keeps_root_monitored (a stand-in LD_PRELOAD
 # hook library compiled from a fixed const, the io-mon pin's regression gate).
+# 2026-11-14 added one compiler-is-subject row:
+# t_build_package_fragment_outside_provider_mode_names_the_define (a nim check
+# that must fail, naming -d:reproProviderMode).
 #
 # THE CLASS LABEL DOES NOT PARTITION MIGRATE FROM KEEP.  Reviewing only the 12
 # graph-fixture entries would have missed t_ct_test_runner_full_suite_parity,
@@ -332,6 +335,7 @@ tests/integration/t_ti1_interface_artifact_edge.nim	product-api	liftInterfaceArt
 tests/integration/t_ti2_separate_module_producer.nim	compiler-is-subject	compileConsumer's nim check vs nim c is load-bearing: staticExec runs only under nim c, and the test reads countWitness to prove which path the COMPILE took.
 tests/integration/t_ti2_thin_interface_consumer_reads_cached_artifact.nim	compiler-is-subject	Same mechanism, stated in the file: 'a consumer that type-checks under nim check PROVES it took the exec-free TI2 fast path'.
 tests/integration/t_ti3_fingerprint_split.nim	compiler-is-subject	liftInterfaceArtifact drives the fingerprint split, but the consumer is compiled as a subprocess with `nim check` vs `nim c --compileOnly` chosen per case: nim check cannot run staticExec, so a green check PROVES the consumer took the exec-free VM readFile fast path. The compiler MODE is the measurement. Recorded as product-api first; the audit refused it.
+tests/unit/t_build_package_fragment_outside_provider_mode_names_the_define.nim	compiler-is-subject	The compiler's DIAGNOSTIC is the assertion: checkProbe runs nim check on the checked-in tests/unit/fixtures/build_package_fragment_outside_provider_mode/probe.nim without -d:reproProviderMode and asserts the refusal names that define on the line of every call, then with it as the control and asserts a clean check. One of the two compiles is required to FAIL, so no build edge can produce it, and no artifact is produced.
 tests/unit/t_hcr_watch_inference.nim	compiler-is-subject	Compiles OldSource, runs the inference, then OVERWRITES the same source and object paths with NewSource and recompiles: the edit-and-recompile is the stimulus the watch inference is asked about.
 tests/unit/t_m9r13a_provider_compile_sharing.nim	compiler-is-subject	compileWithMeasuredCpu times the compile and the test asserts on the RATIO between a shared and an unshared nimcache. The compiler invocation is the instrument; a cached graph artifact would measure nothing.
 tests/unit/t_m9r14f_2_rpath_patching.nim	mutated-artifact	Builds a tiny libfoo.so and main in a scratch dir precisely so patchelf --set-rpath can destructively rewrite them and the test can compare rpath before and after. A shared graph output must not be mutated in place.
