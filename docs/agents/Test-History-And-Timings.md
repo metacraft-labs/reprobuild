@@ -13,14 +13,24 @@ on demand**. On Linux it is `/var/lib/runquota/observations.sqlite3`
 reads *no* environment variables, deliberately — an env override would
 reintroduce the per-user divergence the fixed path exists to remove.
 
-If that directory is absent, `runquotad` **refuses capture** and runs
-normally otherwise. Nothing fails. Builds and tests pass. No rows are
-written.
+**Capture is off by default.** RunQuota holds every measurement to a
+budget (at most 1% more wall and CPU time with all of them on), and
+capture currently costs more than that, so `runquotad` records nothing
+unless it was started with `--measurement capture=on`. Nothing fails
+without it. Builds and tests pass. No rows are written. Check with
+`runquota stats capture` before you conclude anything from an empty
+answer, and if it says `OFF`, the host's daemon has to be restarted with
+that switch (which is an operator's decision on a shared host, not
+yours).
+
+If the host-state directory is absent, `runquotad` **refuses capture**
+even with the switch, and runs normally otherwise.
 
 > **The trap:** the query API returns an **empty sequence** when capture
-> is off — it does not raise. So a query against an unprovisioned host
-> answers "no slow tests" rather than "no data", and that answer looks
-> exactly like a healthy result.
+> is off — it does not raise. So a query against a host whose daemon
+> does not capture (the default) or is unprovisioned answers "no slow
+> tests" rather than "no data", and that answer looks exactly like a
+> healthy result.
 >
 > **`runquota stats` closes this trap, which is why you should use it.**
 > Every verb reports a `status`, and the exit code separates the kinds:
@@ -29,7 +39,8 @@ written.
 Two more things that produce a silently empty store:
 
 - **The daemon decides at startup.** A `runquotad` already running when
-  the directory was created still has capture off. It must be restarted.
+  the directory was created, or started without `--measurement
+  capture=on`, still has capture off. It must be restarted.
 - `.nimtest/history.db` is the **retired** per-runner backend. Data does
   not go there any more; finding one tells you nothing about today.
 
@@ -44,7 +55,7 @@ executed process, carrying:
 | `duration_millis`, `started_at_unix_millis` | the timing question |
 | `termination` | `exited` / `signalled` / `timeout` / `oom_killed` / `refused` — **the daemon knows**, so never infer OOM or timeout from an exit status |
 | `exit_status`, `attempt`, `retry_of` | retries are linked, not conflated |
-| `peak_rss_bytes`, `max_processes` | memory pressure and fan-out |
+| `peak_rss_bytes`, `max_processes` | memory pressure and fan-out. The launching client's `tree-sampling` is off by default (also over budget), so the peak is the largest **single** process (`ru_maxrss`) and the process count is not sampled; `RUNQUOTA_MEASUREMENT=tree-sampling=on` in the launching client's (Reprobuild's) environment records the tree's summed peak and process count |
 | `major_page_faults` | is it slow, or is it thrashing? |
 | `capture_completeness` | `complete` / `sampled` / `degraded` |
 

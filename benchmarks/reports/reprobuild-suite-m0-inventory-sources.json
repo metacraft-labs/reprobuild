@@ -5636,7 +5636,7 @@
           "executedVariables": [
             "cmd"
           ],
-          "line": 192,
+          "line": 196,
           "path": "tests/integration/t_ext_test_execution_rows.nim",
           "patterns": [
             "nim-c"
@@ -6636,7 +6636,7 @@
             "cmd",
             "summaryPath"
           ],
-          "line": 224,
+          "line": 228,
           "path": "tests/integration/t_m20_second_runner_generic_layer.nim",
           "patterns": [
             "nim-c"
@@ -6658,7 +6658,7 @@
             "cmd",
             "command"
           ],
-          "line": 197,
+          "line": 200,
           "path": "tests/integration/t_m21_point_in_time_queries.nim",
           "patterns": [
             "nim-c"

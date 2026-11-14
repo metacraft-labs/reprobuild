@@ -253,7 +253,7 @@ nim-stackable-hooks
 # commits behind the pin.
 # Private auto-start requires the explicit endpoint policy in this revision;
 # keep release archives and CI overrides on the same API as the Nix pin.
-runquota=c0e771baae47eefb896a0942479623afe40a9c26
+runquota=7d4ee104b601031983554ea5e5dccba39cff4ae1
 nim-shm-queue
 nim-shm-gset=7bc81ad2440860a8a9254eb2757c585df9652438
 # clispec, the `cli:` language and typed CLI model repro_project_dsl builds

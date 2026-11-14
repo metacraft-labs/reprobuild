@@ -122,7 +122,9 @@ proc startRunQuotaDaemon(socketPath, identityFile, observationDb: string):
   ## ``--observation-db`` IS WHAT MAKES THE TWO HOSTS MEET. Without it
   ## each daemon would open its own default store beside its own identity
   ## file, and the "two hosts" fixture would be two separate one-host
-  ## stores that no query could compare.
+  ## stores that no query could compare. Naming the file does not turn
+  ## capture on, which is off by default (it costs more than RunQuota's
+  ## measurement budget allows), so ``capture=on`` is given explicitly.
   # THE STALE SOCKET FILE IS REMOVED FIRST, and this is not defensive
   # tidying. The second daemon binds the same path the first one used;
   # a leftover socket inode makes ``bind`` fail with EADDRINUSE, the
@@ -135,6 +137,7 @@ proc startRunQuotaDaemon(socketPath, identityFile, observationDb: string):
     args = @["--socket", socketPath,
              "--host-identity-file", identityFile,
              "--observation-db", observationDb,
+             "--measurement", "capture=on",
              "--ambient-sample-interval-millis", "0"],
     options = {poStdErrToStdOut})
   for _ in 0 ..< 400:

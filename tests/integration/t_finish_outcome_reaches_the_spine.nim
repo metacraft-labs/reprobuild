@@ -98,9 +98,10 @@ type SpineDaemon = object
   socket: string
 
 proc startSpineDaemon(root: string): SpineDaemon =
-  ## A real `runquotad` with capture ON (no flag needed — capture is the
-  ## default) and its own observation database, so the rows read back are
-  ## this test's and only this test's.
+  ## A real `runquotad` with capture ON and its own observation database,
+  ## so the rows read back are this test's and only this test's. Capture
+  ## is off by default (it costs more than RunQuota's measurement budget
+  ## allows), so it is turned on explicitly.
   ##
   ## THE ENDPOINT DIRECTORY COMES FROM `runquotaRendezvousDir`: RunQuota
   ## provisions and verifies it (owner, mode), and it moves to a short
@@ -114,6 +115,7 @@ proc startSpineDaemon(root: string): SpineDaemon =
     "--socket", socketPath,
     "--host-identity-file", stateDir / "host-id",
     "--observation-db", stateDir / "observations.db",
+    "--measurement", "capture=on",
     "--ambient-sample-interval-millis", "0"
   ], options = {poStdErrToStdOut})
   putEnv("RUNQUOTA_SOCKET", socketPath)
