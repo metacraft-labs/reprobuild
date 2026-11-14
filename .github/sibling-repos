@@ -237,7 +237,12 @@ reprobuild-packages
 # flake.nix and flake.lock: a hook library built on the preload runtime without
 # the shim loads again (the signal-death flush is a weak reference). 8fd53d43
 # is an ancestor.
-io-mon=35829647d603b481276d2632b39ec2a9ce3625b2
+# Moved to a7b272f6 (2026-11-14), io-mon's `agents` tip, with `io-mon-src` in
+# flake.nix and flake.lock: the Linux shim builder links with no DT_RUNPATH
+# and refuses to publish a shim that carries one (a7b272f), and macOS Apple
+# toolchain drop-ins get the shim's default SDK (58048ea). 35829647 is an
+# ancestor.
+io-mon=a7b272f6877687c1d5c81027111c94cb107c056e
 # `release.yml` overrides `nim-stackable-hooks-src` to THIS clone, so the
 # clone must be the revision the flake pins, or the release compiles the
 # monitor shim from different sources than every other build. Cloned at

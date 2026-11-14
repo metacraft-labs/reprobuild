@@ -23906,6 +23906,17 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "t_group_tests_integration_g10",
     singleReason: ""),
   TestSpec(
+    source: "tests/integration/t_preloaded_monitor_shim_carries_no_runpath.nim",
+    binary: "build/test-bin/t_preloaded_monitor_shim_carries_no_runpath",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "t_group_tests_integration_g10",
+    singleReason: ""),
+  TestSpec(
     source: "tests/integration/t_preloaded_monitor_shim_is_loader_inert.nim",
     binary: "build/test-bin/t_preloaded_monitor_shim_is_loader_inert",
     defines: @[],
@@ -23958,7 +23969,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g10",
+    group: "t_group_tests_integration_g11",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_project_extension_inert_when_absent_and_auto_activates_in_develop_workspace.nim",
@@ -24552,7 +24563,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g11",
+    group: "t_group_tests_integration_g12",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_repro_clean_removes_owned_outputs_and_keeps_caches.nim",
