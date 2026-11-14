@@ -23,7 +23,7 @@
 ##    the secrets ramfs, ``/run/repro``, ``/etc/repro`` but the Evidence
 ##    sink's configuration and CA (decision 56), the keys, those two files
 ##    and ``/etc/repro``, and last the state, ``/var/lib/repro``, with its
-##    ledger copy last of all (§13 decision 146). Any failure
+##    ledger copy last of all (§13 decision 150). Any failure
 ##    on the way keeps the state, with its ledger copy and the attestation
 ##    key, for a second uninstall to finish (A11 code review rounds 11 and
 ##    12).
@@ -950,7 +950,7 @@ proc removeStateRoot*(r: var UninstallResult; root, ledgerCopy: string;
                       evidence: seq[string] = @[];
                       syncer: DiscardSyncer = syncRemovedObjects) =
   ## Removes the add-on's state, ``/var/lib/repro``, with its ledger copy
-  ## last (§13 decision 146): everything else first, checked gone and
+  ## last (§13 decision 150): everything else first, checked gone and
   ## synced, then the ledger copy, then the empty directories. A removal
   ## that fails part-way leaves the ledger copy, so a re-run can read it
   ## and finish; the root and its evidence entries are reported removed
@@ -1347,7 +1347,7 @@ proc runAddonUninstall*(opts: UninstallOptions): UninstallResult =
   # removed unless the operator passed --discard-store-evidence (above);
   # they were removed, each checked gone, above. One that appeared since
   # is reported with the root, once the root is gone.
-  # The state goes last, and within it the ledger copy (§13 decision 146).
+  # The state goes last, and within it the ledger copy (§13 decision 150).
   removeStateRoot(result, "/var/lib/repro", ledgerCopyPath(stateDir),
                   evidenceEntries(custodySite(stateDir)))
   restorePreBootstrapInputs(captured, opts.keepStore, result)

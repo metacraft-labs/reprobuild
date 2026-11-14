@@ -86,7 +86,7 @@
 ## and the first intent verifies as completed. The entries the runs report
 ## removed are all the entries. (``ship-ok-without-sink-configuration``
 ## is held here again by deleting the configuration by hand before a
-## re-run, §13 decision 145.)
+## re-run, §13 decision 149.)
 ##
 ## Falsifying mutations: ``custody-skips-file-sources`` (steps 2 and 4: the
 ## altered bytes are installed into /etc), ``custody-skips-closures`` (step
@@ -451,7 +451,7 @@ proc body(g: Guest; repro: string; step: StepFn; record: JsonNode;
          g.exec("test -d " & aside2).exitCode == 0 and
          g.exec("test -f /etc/repro/evidence.conf").exitCode == 0,
        saidW)
-  # §13 decision 145 (A11 code review round 13): the path a host still
+  # §13 decision 149 (A11 code review round 13): the path a host still
   # reaches when the sink's configuration is gone with records queued --
   # an operator who deleted it, or a state an older engine left. The
   # configuration is deleted by hand; the plain flag is refused, the
@@ -466,7 +466,7 @@ proc body(g: Guest; repro: string; step: StepFn; record: JsonNode;
   record["uninstallConfigurationGone"] = %saidG
   step("with the sink's configuration deleted by hand and records queued, " &
        "--discard-store-evidence is refused, the refusal names only the " &
-       "override, and nothing is removed (decision 145)",
+       "override, and nothing is removed (decision 149)",
        confGone.exitCode == 0 and unG.exitCode != 0 and
          "no later run can ship them" in saidG and
          "run uninstall again once it has" notin saidG and

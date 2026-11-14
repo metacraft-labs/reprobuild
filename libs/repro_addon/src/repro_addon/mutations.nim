@@ -1001,7 +1001,7 @@
 ## ``ledger-copy-removed-with-the-rest``      /var/lib/repro is removed in
 ##                                            one recursive removal, so a
 ##                                            part-way failure can take the
-##                                            ledger copy (decision 146)
+##                                            ledger copy (decision 150)
 ## ``sink-config-removed-in-step-4``          the Evidence sink's
 ##                                            configuration and CA go with
 ##                                            the other /etc objects
