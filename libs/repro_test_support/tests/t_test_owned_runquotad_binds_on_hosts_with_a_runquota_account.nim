@@ -9,7 +9,7 @@
 ## host policy refuses a daemon the invoking user started in a directory the
 ## invoking user owns. A real `runquotad` is started, because the refusal is
 ## the daemon's, not this library's. No mock is involved.
-import std/[os, osproc, unittest]
+import std/[os, osproc, streams, unittest]
 import repro_test_support
 
 const OtherAccountUid = "953"
@@ -61,5 +61,18 @@ suite "test-owned runquotad on a host with a runquota account":
         if not daemon.running:
           break
         sleep(25)
+      if not appeared and not daemon.running:
+        # Say why the daemon left instead of only that no socket appeared.
+        checkpoint(daemon.outputStream.readAll())
       check appeared
     )
+
+  test "a scope the test already chose is left alone":
+    let hadScope = existsEnv("RUNQUOTA_ENDPOINT_SCOPE")
+    let prevScope = getEnv("RUNQUOTA_ENDPOINT_SCOPE")
+    defer:
+      if hadScope: putEnv("RUNQUOTA_ENDPOINT_SCOPE", prevScope)
+      else: delEnv("RUNQUOTA_ENDPOINT_SCOPE")
+    putEnv("RUNQUOTA_ENDPOINT_SCOPE", "host")
+    discard runquotaSocketEndpoint("repro-rqt-keep-" & $getCurrentProcessId())
+    check getEnv("RUNQUOTA_ENDPOINT_SCOPE") == "host"
