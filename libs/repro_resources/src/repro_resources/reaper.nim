@@ -1019,6 +1019,98 @@ proc defaultUserStateStoreRoot*(): string =
   ## The L4 system daemon supplies a system-scoped root instead.
   getHomeDir() / ".cache" / "repro" / "state"
 
+proc reapRefusalOfBuildSpelling*(spelling: string): string =
+  ## What `repro reap` says to `--hard-rebuild` / `--rebuild-host-bound`
+  ## (see `runReapCli` for why both are refused explicitly).
+  "repro reap: " & spelling & " is a `repro build` verb (it selects " &
+    "which determinism classes to invalidate in the action cache). To " &
+    "reap a still-leased state, use `repro reap --force`."
+
+proc runReap*(force: bool; targets: seq[string]; storeRoot = "";
+              now: Time = getTime();
+              transport = none(ReapTransport);
+              echoLine: proc (line: string) {.closure.} = nil): int =
+  ## One sweep of the state store at ``storeRoot`` (default: the per-user
+  ## store), the body of ``repro reap``: `force` selects every present record
+  ## regardless of its lease, and a non-empty `targets` restricts the sweep
+  ## to those addresses. Returns the process exit code. ``repro reap``'s
+  ## command line is parsed from repro's description; ``runReapCli`` is the
+  ## same entry over an argv. See ``runReapCli`` for the transport and the
+  ## output.
+  let emit = if echoLine != nil: echoLine
+             else: (proc (line: string) = echo line)
+  let root = if storeRoot.len > 0: storeRoot else: defaultUserStateStoreRoot()
+
+  if not dirExists(root):
+    emit("repro reap: no state store at " & root & " (nothing to reap)")
+    return 0
+
+  let store = openStateStore(root)
+  # The pool is OWNED by this sweep and closed before we return, including on a
+  # failure: `repro reap` is a one-shot command, so leaving a launched provider
+  # child behind would leak a process per invocation. It stays empty unless some
+  # record actually names an artifact.
+  var pool: ProviderSessionPool = nil
+  defer:
+    if pool != nil:
+      try: pool.closeAll() except CatchableError: discard
+  let fromRecords =
+    if transport.isSome:
+      nil                            # pinned by the caller — open nothing
+    else:
+      reapTransportFactory(@[], proc (artifact: ResourceProviderArtifactRef):
+          ProviderHandle =
+        if pool == nil:
+          pool = newProviderSessionPool()
+        pool.openProviderSession(ProviderArtifactRef(
+            binaryPath: artifact.binaryPath,
+            providerArtifactId: artifact.providerArtifactId,
+            workingDir: artifact.workingDir),
+          defaultSessionPolicy(), reapEngineHello()))
+  let report = reapOnce(store, now,
+                        if transport.isSome: transport.get
+                        else: inProcessTransport(),
+                        force = force, onlyAddresses = targets,
+                        transportFromRecords = fromRecords)
+  emit("repro reap: state-root=" & root &
+       (if force: " (force)" else: ""))
+  emit("reaped: " & $report.reaped.len)
+  for ev in report.reaped:
+    emit("  - " & ev.address & " (" & ev.typeId & ")" &
+         (if ev.wasPresent: "" else: " [already-absent]"))
+  emit("kept: " & $report.skipped.len)
+  # A newer repro's record is healthy, just not ours: said so (an operator
+  # would otherwise wonder why it never goes), but it does not fail the verb.
+  if report.foreign.len > 0:
+    emit("foreign: " & $report.foreign.len)
+    for f in report.foreign:
+      emit("  - " & f.path & " (written by a newer repro, version " &
+           $f.version & "; left untouched)")
+  # Corrupt state was found. The sweep moved it aside and carried on, but the
+  # resource that record described may now be leaked with nothing holding its
+  # address, so an operator has to look: exit non-zero, name the evidence.
+  if report.quarantined.len > 0:
+    emit("quarantined: " & $report.quarantined.len)
+    for q in report.quarantined:
+      emit("  - " & q.path & " -> " & q.quarantinePath & ": " & q.reason)
+  if report.unreadable.len > 0:
+    emit("unreadable: " & $report.unreadable.len)
+    for u in report.unreadable:
+      emit("  - " & u.path & ": " & u.reason)
+  # A selected record the sweep could NOT reap is reported, never swallowed:
+  # dropping it here would reproduce, at the CLI, the same invisibility that
+  # let the daemon's tick fail for 60 days unnoticed. It is also why the exit
+  # code is non-zero — `repro reap` was asked to destroy this state and did
+  # not, and an operator (or CI) scripting the verb has to be able to tell.
+  if report.failed.len > 0:
+    emit("unreapable: " & $report.failed.len)
+    for f in report.failed:
+      emit("  - " & f.address & " (" & f.typeId & ") " & f.reason)
+  if report.failed.len > 0 or report.quarantined.len > 0 or
+      report.unreadable.len > 0:
+    return 1
+  0
+
 proc runReapCli*(args: seq[string];
                  storeRootOverride = "";
                  now: Time = getTime();
@@ -1100,9 +1192,7 @@ proc runReapCli*(args: seq[string];
     elif raw == "--force":
       force = true
     elif raw == "--hard-rebuild" or raw == "--rebuild-host-bound":
-      emit("repro reap: " & raw & " is a `repro build` verb (it selects " &
-        "which determinism classes to invalidate in the action cache). To " &
-        "reap a still-leased state, use `repro reap --force`.")
+      emit(reapRefusalOfBuildSpelling(raw))
       return 2
     elif raw.startsWith("--state-root="):
       storeRoot = raw[len("--state-root=") .. ^1]
@@ -1111,74 +1201,4 @@ proc runReapCli*(args: seq[string];
     else:
       targets.add(raw)
 
-  let root = if storeRoot.len > 0: storeRoot else: defaultUserStateStoreRoot()
-
-  if not dirExists(root):
-    emit("repro reap: no state store at " & root & " (nothing to reap)")
-    return 0
-
-  let store = openStateStore(root)
-  # The pool is OWNED by this sweep and closed before we return, including on a
-  # failure: `repro reap` is a one-shot command, so leaving a launched provider
-  # child behind would leak a process per invocation. It stays empty unless some
-  # record actually names an artifact.
-  var pool: ProviderSessionPool = nil
-  defer:
-    if pool != nil:
-      try: pool.closeAll() except CatchableError: discard
-  let fromRecords =
-    if transport.isSome:
-      nil                            # pinned by the caller — open nothing
-    else:
-      reapTransportFactory(@[], proc (artifact: ResourceProviderArtifactRef):
-          ProviderHandle =
-        if pool == nil:
-          pool = newProviderSessionPool()
-        pool.openProviderSession(ProviderArtifactRef(
-            binaryPath: artifact.binaryPath,
-            providerArtifactId: artifact.providerArtifactId,
-            workingDir: artifact.workingDir),
-          defaultSessionPolicy(), reapEngineHello()))
-  let report = reapOnce(store, now,
-                        if transport.isSome: transport.get
-                        else: inProcessTransport(),
-                        force = force, onlyAddresses = targets,
-                        transportFromRecords = fromRecords)
-  emit("repro reap: state-root=" & root &
-       (if force: " (force)" else: ""))
-  emit("reaped: " & $report.reaped.len)
-  for ev in report.reaped:
-    emit("  - " & ev.address & " (" & ev.typeId & ")" &
-         (if ev.wasPresent: "" else: " [already-absent]"))
-  emit("kept: " & $report.skipped.len)
-  # A newer repro's record is healthy, just not ours: said so (an operator
-  # would otherwise wonder why it never goes), but it does not fail the verb.
-  if report.foreign.len > 0:
-    emit("foreign: " & $report.foreign.len)
-    for f in report.foreign:
-      emit("  - " & f.path & " (written by a newer repro, version " &
-           $f.version & "; left untouched)")
-  # Corrupt state was found. The sweep moved it aside and carried on, but the
-  # resource that record described may now be leaked with nothing holding its
-  # address, so an operator has to look: exit non-zero, name the evidence.
-  if report.quarantined.len > 0:
-    emit("quarantined: " & $report.quarantined.len)
-    for q in report.quarantined:
-      emit("  - " & q.path & " -> " & q.quarantinePath & ": " & q.reason)
-  if report.unreadable.len > 0:
-    emit("unreadable: " & $report.unreadable.len)
-    for u in report.unreadable:
-      emit("  - " & u.path & ": " & u.reason)
-  # A selected record the sweep could NOT reap is reported, never swallowed:
-  # dropping it here would reproduce, at the CLI, the same invisibility that
-  # let the daemon's tick fail for 60 days unnoticed. It is also why the exit
-  # code is non-zero — `repro reap` was asked to destroy this state and did
-  # not, and an operator (or CI) scripting the verb has to be able to tell.
-  if report.failed.len > 0:
-    emit("unreapable: " & $report.failed.len)
-    for f in report.failed:
-      emit("  - " & f.address & " (" & f.typeId & ") " & f.reason)
-  if report.failed.len > 0 or report.quarantined.len > 0 or
-      report.unreadable.len > 0:
-    return 1
-  0
+  runReap(force, targets, storeRoot, now, transport, emit)

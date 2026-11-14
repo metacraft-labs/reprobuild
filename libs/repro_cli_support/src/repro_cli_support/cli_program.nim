@@ -23,7 +23,7 @@
 ## command, so the parser files everything after them under the command's
 ## ``passThrough`` positional.
 
-import std/[macros, strutils]
+import std/[macros, options, strutils]
 
 import confutils/clispec_config
 
@@ -35,6 +35,9 @@ export CliSources, CliOptions, CliHelpRequest, CliCompletionRequest,
   CliUsageError, CliConfigError, CliErrorKind, CliShell, CliGrammar,
   cliProcessEnv, cliParseShell, cliChildNamed
 export ReproCommandLineType, ReproProgramName
+# The configuration objects hold `Option[int]` fields (`store export
+# --zstd-level`, `bundle create --level`, ...).
+export options
 
 proc passThroughCode(model: CliModel[NoCliExtension,
                      ReproCommandLineParamExt]): NimNode =

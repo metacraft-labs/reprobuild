@@ -214,7 +214,8 @@ when isNixSupported:
       check started.contains("store-root: " & storeRoot)
 
       let userDaemon = requireFailure(shellCommand([publicReproBin(), "daemon"]))
-      check userDaemon.contains("usage: repro")
+      # A usage error naming the user-daemon namespace, not the store daemon.
+      check userDaemon.contains("'repro daemon' needs a subcommand")
       check not userDaemon.contains("development-store")
 
       let stopped = requireSuccess(shellCommand([

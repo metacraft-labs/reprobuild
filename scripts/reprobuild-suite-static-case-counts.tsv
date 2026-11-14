@@ -1752,6 +1752,7 @@ tests/integration/t_cross_repo_nim_library_src_threaded_onto_consumer_path.nim	n
 tests/integration/t_cross_targeting_axes_do_not_silently_disagree.nim	nim	5
 tests/integration/t_cross_tier_move_between_layers_errors_loudly.nim	nim	1
 tests/integration/t_cs_m6_project_introspection_command_lines.nim	nim	4
+tests/integration/t_cs_m6_stores_and_daemons_command_lines.nim	nim	3
 tests/integration/t_ct_test_surface_case_addressability.nim	nim	6
 tests/integration/t_cvm_evidence_emulator_all_protocol_paths.nim	nim	9
 tests/integration/t_d1_buildnimunittest_resolves_in_path_mode.nim	nim	2
@@ -2595,7 +2596,7 @@ tests/unit/t_cross_repo_runtime_tool_closure.nim	nim	2
 tests/unit/t_cs_m1_external_tool_argv_unchanged.nim	nim	3
 tests/unit/t_cs_m6_cli_model_type_checks_in_reprobuild_macros.nim	nim	2
 tests/unit/t_cs_m6_no_hand_written_argv_parsing.nim	nim	3
-tests/unit/t_cs_m6_spec_pages_match_declarations.nim	nim	6
+tests/unit/t_cs_m6_spec_pages_match_declarations.nim	nim	7
 tests/unit/t_ct_test_nim_unittest_path_mm_pool.nim	nim	6
 tests/unit/t_custom_role_fallback_cycle_is_rejected.nim	nim	1
 tests/unit/t_da1i_evidence_help_names_the_hazard.nim	nim	9
