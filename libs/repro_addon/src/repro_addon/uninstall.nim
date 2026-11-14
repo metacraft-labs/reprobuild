@@ -19,9 +19,9 @@
 ##    ``systemctl daemon-reload``; put every kernel parameter a sysctl
 ##    fragment set back to the value the ledger recorded before it;
 ## 5. remove the store (unless ``--keep-store``), then each store-evidence
-##    entry, then write the discard's completion (§13 decision 139), then
+##    entry, then write the discard's completion (§13 decision 81), then
 ##    the secrets ramfs, ``/run/repro``, ``/etc/repro`` but the Evidence
-##    sink's configuration and CA (decision 140), the keys, those two files
+##    sink's configuration and CA (decision 56), the keys, those two files
 ##    and ``/etc/repro``, and last the state, ``/var/lib/repro``. Any failure
 ##    on the way keeps the state, with its ledger copy and the attestation
 ##    key, for a second uninstall to finish (A11 code review rounds 11 and
@@ -260,7 +260,7 @@ proc restorePreBootstrapInputs*(captured: CapturedInputs; keepStore: bool;
 const CannotBeShipped* = "cannot be shipped"
   ## The words ``shipAndConfirm`` ends its reason with when no later run can
   ## ship the records either: ``storeEvidenceGate`` then does not tell the
-  ## operator to wait for an acknowledgement (§13 decision 140).
+  ## operator to wait for an acknowledgement (§13 decision 56).
 
 proc shipAndConfirm*(site: ShipSite; host: string):
     tuple[ok: bool; why: string] =
@@ -777,7 +777,7 @@ proc storeEvidenceGate*(custody: CustodySite; opts: UninstallOptions;
   when not mutated("uninstall-skips-ack-refusal"):
     if CannotBeShipped in shipped.why:
       # No acknowledgement can arrive: never ask the operator to wait for
-      # one (§13 decision 140).
+      # one (§13 decision 56).
       result.errors.add("the Evidence sink has not acknowledged the " &
         "records of the store evidence uninstall would discard (" &
         shipped.why & "), and no later run can ship them; discard them " &
@@ -1131,7 +1131,7 @@ proc runAddonUninstall*(opts: UninstallOptions): UninstallResult =
   #    directories the add-on created, deepest first; the kernel values
   #    sysctl fragments set go back to what the ledger recorded before.
   # The Evidence sink's configuration and CA stay until the state itself
-  # goes, at the end of a run that finished (§13 decision 140): an
+  # goes, at the end of a run that finished (§13 decision 56): an
   # uninstall left incomplete keeps the outbox with the state, and a re-run
   # must still be able to ship it.
   var sinkFiles: seq[LedgerEntry]
@@ -1223,7 +1223,7 @@ proc runAddonUninstall*(opts: UninstallOptions): UninstallResult =
   # while the key and the state are still there (decision 113), and kept
   # for a re-run when it cannot be (decision 62).
   discardFinished = true
-  # (§13 decision 139: the completion, before the keys and the state.)
+  # (§13 decision 81: the completion, before the keys and the state.)
   if completeDiscardBeforeKeys(result, l, stateDir, custody, signer,
                                evidenceKept):
     return

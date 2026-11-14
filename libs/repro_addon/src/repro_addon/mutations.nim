@@ -998,7 +998,7 @@
 ## ``sink-config-removed-in-step-4``          the Evidence sink's
 ##                                            configuration and CA go with
 ##                                            the other /etc objects
-##                                            (decision 140)
+##                                            (decision 56)
 ## ``state-removed-after-root-failure``       the state goes although
 ##                                            /etc/repro, a key or the
 ##                                            secrets ramfs failed
