@@ -591,6 +591,15 @@
 ##                                           drivers started are not
 ##                                           re-issued (decision 79)
 ## ``reissue-skips-sockets``                 the same for sockets
+## ``reissue-skips-unit-state``              the same for a ``systemd.unitState``
+##                                           start (2026-11-14)
+## ``reissue-skips-timers``                  the same for a ``systemd.systemTimer``
+##                                           start
+## ``refusal-holds-every-unit``              one refused unit keeps every
+##                                           judged unit held and down
+## ``trigger-fired-under-hold-not-started``  a timer or path unit's trigger that
+##                                           fired under the hold does not
+##                                           get its service started
 ## ``adopt-without-profile``                 ``repro system adopt`` takes
 ##                                           drifted bytes the profile does
 ##                                           not declare (decision 61)
@@ -1490,6 +1499,10 @@ const
                           "narrowed-live-set",
                           "reissue-skips-targets",
                           "reissue-skips-sockets",
+                          "reissue-skips-unit-state",
+                          "reissue-skips-timers",
+                          "refusal-holds-every-unit",
+                          "trigger-fired-under-hold-not-started",
                           "plan-ignores-profile-digest",
                           # The conversion gate's falsifiers of three
                           # round-5 static readings: each with the full

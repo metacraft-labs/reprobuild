@@ -42,7 +42,9 @@
 ## ``boot-closure-reads-generation-dropins`` (P60-2),
 ## ``polkit-subject-rebind-trusted`` (P58-1, P58-2 and the other binding
 ## forms), ``reissue-skips-targets`` and ``reissue-skips-sockets``
-## (decision 79, each on its own case).
+## (decision 79, each on its own case); 2026-11-14:
+## ``reissue-skips-unit-state``, ``reissue-skips-timers``,
+## ``refusal-holds-every-unit`` and ``trigger-fired-under-hold-not-started``.
 ##
 ## *Mocking.* The unit liveness (``AlivenessFn``), as in
 ## ``t_addon_state_sets``: a unit test has no systemd unit whose cgroup the
@@ -57,6 +59,7 @@ import repro_core/host_apply_lock
 
 import repro_infra
 import repro_infra/systemd_syntax
+import repro_infra/start_holds
 from repro_test_support import testCaseScratchSlug
 import repro_elevation
 import repro_addon/[addon_apply, adoption_cli, state_sets, transitions]
@@ -1318,6 +1321,133 @@ suite "the drivers' start jobs are issued again after the check (decision 79)":
       op("h.service", false, held = true)], activeOnly(["r.service", "h.service"]))
     checkpoint $jobs
     check jobs == @["r.service"]
+
+suite "every driver's start is issued again after the check (decision 79, 2026-11-14)":
+  ## Mocking: ``LiveHost`` stands for systemd's answers and ``start``: a unit
+  ## test has no systemd whose jobs or timers it could read (the conversion
+  ## gate runs the real ones). What is asserted is which units are started,
+  ## in which order, and which are left held.
+  proc unitState(name: string; running: bool): PlannedOperation =
+    PlannedOperation(operation: PrivilegedOperation(kind: pokSystemdUnitState,
+      usName: name, usEnabled: true, usRunning: running))
+
+  proc timer(name: string; running: bool): PlannedOperation =
+    PlannedOperation(operation: PrivilegedOperation(kind: pokSystemdSystemTimer,
+      stName: name, stEnabled: true, stRunning: running))
+
+  proc none(u: string): bool = false
+
+  test "a unitState start of a unit the profile does not own is issued again":
+    check driverStartJobs([unitState("multi-user.target", true)], none) ==
+      @["multi-user.target"]
+
+  test "a unitState that was already running, stopped or destroyed has no job":
+    check driverStartJobs([unitState("multi-user.target", true)],
+      proc (u: string): bool = true).len == 0
+    check driverStartJobs([unitState("x.service", false)], none).len == 0
+    check driverStartJobs([PlannedOperation(operation: PrivilegedOperation(
+      kind: pokSystemdUnitState, usName: "d.service", usRunning: true,
+      usDestroy: true))], none).len == 0
+
+  test "a running systemTimer's start is issued again, a stopped one's is not":
+    check driverStartJobs([timer("x.timer", true), timer("y.timer", false)],
+      none) == @["x.timer"]
+    check driverStartJobs([PlannedOperation(operation: PrivilegedOperation(
+      kind: pokSystemdSystemTimer, stName: "d.timer", stRunning: true,
+      stDestroy: true))], none).len == 0
+
+  proc fakeHost(active: seq[string]; shows: Table[string, Table[string, string]];
+                log: ref seq[string]; failing = ""): LiveHost =
+    LiveHost(
+      isActive: proc (u: string): bool = u in active,
+      show: proc (u: string): Table[string, string] =
+        if u notin shows: raise newException(OSError, "no unit " & u)
+        shows[u],
+      start: proc (u: string): tuple[ok: bool, output: string] =
+        log[].add(u)
+        (u != failing, "refused " & u))
+
+  let held = {"ConditionResult": "no", "ConditionTimestampMonotonic": "5000"}.toTable
+  let heldBefore = {"ConditionResult": "no", "ConditionTimestampMonotonic": "900"}.toTable
+  let passing = {"ConditionResult": "yes", "ConditionTimestampMonotonic": "5000"}.toTable
+  let neverTested = {"ConditionResult": "yes", "ConditionTimestampMonotonic": "0"}.toTable
+  let timerShows = {"x.timer": {"Triggers": "x.service"}.toTable}.toTable
+
+  test "a trigger that fired under the hold: its held service is started once":
+    var shows = timerShows
+    shows["x.service"] = held
+    var log = new seq[string]
+    let host = fakeHost(@["x.timer"], shows, log)
+    let fired = firedUnderHold(["x.timer"], ["x.service"], [], host, 1000)
+    check fired == @["x.service"]
+    let p = parseSystemProfile("")
+    check releaseStarts(p, ["x.service"], ["x.service"], [], [], ["x.timer"],
+      fired, host).len == 0
+    check log[] == @["x.timer", "x.service"]
+
+  test "a service the hold did not skip is left to its trigger":
+    for st in [heldBefore, passing, neverTested]:
+      var shows = timerShows
+      shows["x.service"] = st
+      var log = new seq[string]
+      check firedUnderHold(["x.timer"], ["x.service"], [], fakeHost(@[], shows, log), 1000).len == 0
+    # already active, not judged by the check, or refused
+    var shows = timerShows
+    shows["x.service"] = held
+    var log = new seq[string]
+    check firedUnderHold(["x.timer"], ["x.service"], [],
+      fakeHost(@["x.service"], shows, log), 1000).len == 0
+    check firedUnderHold(["x.timer"], ["other.service"], [],
+      fakeHost(@[], shows, log), 1000).len == 0
+    check firedUnderHold(["x.timer"], ["x.service"], ["x.service"],
+      fakeHost(@[], shows, log), 1000).len == 0
+
+  test "a path unit's trigger is read the same way":
+    var shows = {"w.path": {"Triggers": "w.service"}.toTable}.toTable
+    shows["w.service"] = held
+    var log = new seq[string]
+    check firedUnderHold(["w.path"], ["w.service"], [], fakeHost(@[], shows, log), 1000) ==
+      @["w.service"]
+
+  test "one refusal holds only the refused unit; the others start":
+    let problems = ["floored unit: bad.service as systemd loaded it reaches the carried state"]
+    let refused = refusedUnits(["ok.service", "bad.service"], problems)
+    check refused == @["bad.service"]
+    var log = new seq[string]
+    let host = fakeHost(@["ok.target"], initTable[string, Table[string, string]](), log)
+    let p = parseSystemProfile("""systemd.systemUnit {
+  name = "ok.service"
+  content = "[Service]\nExecStart=/bin/true\n"
+}
+""")
+    discard p
+    check releaseStarts(p, ["ok.service", "bad.service"], ["ok.service"],
+      refused, ["ok.service"], ["bad.service", "ok.target"], [], host).len == 0
+    check "bad.service" notin log[]
+    check "ok.target" in log[]
+
+  test "a passed instance does not lift the hold its refused sibling shares":
+    let n = "zz-repro-carried-check-hold.conf"
+    check liftableHolds(["foo@b.service", "ok.service"], ["foo@a.service"], n) ==
+      @[holdPath("ok.service", n)]
+    check liftableHolds(["foo@b.service"], ["foo@a.service"], n,
+      PersistentUnitDir).len == 0
+    check liftableHolds(["foo@b.service", "foo@c.service"], [], n) ==
+      @[holdPath("foo@b.service", n)]
+
+  test "a refusal no unit is named in holds every unit":
+    check refusedUnits(["a.service", "b.service"],
+      ["carried state reached after the reload (decided again after the reload)"]) ==
+      @["a.service", "b.service"]
+    check refusedUnits(["a.service"], []).len == 0
+
+  test "a failed start is reported, and the others still start":
+    var log = new seq[string]
+    let host = fakeHost(@["a.target", "b.target"], initTable[string, Table[string, string]](), log, "a.target")
+    let probs = releaseStarts(parseSystemProfile(""), ["s.service"], ["s.service"],
+      [], [], ["a.target", "b.target"], [], host)
+    check log[] == @["a.target", "b.target"]
+    check probs.len == 1 and "a.target" in probs[0]
 
 suite "the live cross-check is one shared check (round 6)":
   test "liveReachUnits names the services judged confined, liveReachProblems judges them":
