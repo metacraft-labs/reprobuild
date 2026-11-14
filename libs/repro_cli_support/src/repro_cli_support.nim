@@ -92612,6 +92612,28 @@ type UnreachedDevelopSibling = object
     ## ``<ancestor>/<selector>/repro.nim`` above the naming recipe, or a
     ## develop override), so the recipe exists and was still not read.
   siblingRecipe: string ## that recipe's path when ``checkedOut``
+  undeclared: bool
+    ## True when the project sits in a resolved workspace and neither its
+    ## membership nor any ``repos/*.toml`` fragment names the sibling. Only the
+    ## committed lock then knows it, and `repro sync` / `repro ws enable` act
+    ## on declared repos only, so the usual remedy cannot work.
+
+proc workspaceDeclaresRepo(projectDir, name: string): bool =
+  ## Whether the workspace enclosing ``projectDir`` declares a repo called
+  ## ``name`` (resolved membership or any ``repos/*.toml`` fragment, enabled
+  ## or not). True outside a workspace: with no manifests there is nothing
+  ## whose absence could be reported.
+  let membership = manifestMembershipOf(projectDir)
+  if not membership.resolved: return true
+  for r in membership.repos:
+    if r.name == name: return true
+  let fragments = manifestsRoot(membership.workspaceRoot) / "repos"
+  if dirExists(extendedPath(fragments)):
+    for file in walkFiles(fragments / "*.toml"):
+      try:
+        if readRepoFragment(file).repo.name == name: return true
+      except CatchableError: continue
+  false
 
 proc declaredDevelopSet(projectDir, lockPath: string):
     seq[tuple[name, checkout: string]] =
@@ -92737,6 +92759,8 @@ proc unreachedDevelopSiblings(projectDir, lockPath: string;
         continue  # a checkout without a recipe declares no constraints
       finding.checkedOut = true
       finding.siblingRecipe = siblingRecipe
+    else:
+      finding.undeclared = not workspaceDeclaresRepo(projectDir, miss.selector)
     reported.add(miss.selector)
     result.add(finding)
 
@@ -92748,7 +92772,16 @@ proc renderUnreachedDevelopSibling(f: UnreachedDevelopSibling): string =
   let consequence = "its recipe's constraints would be missing from the " &
     "solve, so the lock would pin versions the next build in a complete " &
     "workspace refuses"
-  if not f.checkedOut:
+  if not f.checkedOut and f.undeclared:
+    "develop-set sibling '" & f.sibling & "' is not checked out at " &
+      f.expectedAt & ", but " & f.ownerRecipe & " declares `uses: \"" &
+      f.sibling & "\"`; " & consequence & ". No repos/*.toml fragment of " &
+      "this workspace names '" & f.sibling & "', so `repro sync` and " &
+      "`repro ws enable` cannot check it out: only the committed lock " &
+      "knows it. Add its fragment to the workspace manifests (or sync the " &
+      "workspace root to the branch that carries it), then run the " &
+      "command again"
+  elif not f.checkedOut:
     "develop-set sibling '" & f.sibling & "' is not checked out at " &
       f.expectedAt & ", but " & f.ownerRecipe & " declares `uses: \"" &
       f.sibling & "\"`; " & consequence & ". Check it out (`repro sync`, " &

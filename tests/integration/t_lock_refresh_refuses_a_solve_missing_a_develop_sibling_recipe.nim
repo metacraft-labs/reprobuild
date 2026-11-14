@@ -343,6 +343,9 @@ suite "lock refresh refuses a solve missing a develop-set sibling's recipe":
       check not fileExists(lockPath)
       check "'leaf'" in byManifest.output
       check "not checked out" in byManifest.output
+      # A fragment declares it, so `repro sync` / `repro ws enable` can act.
+      check "Check it out (`repro sync`" in byManifest.output
+      check "repos/*.toml fragment of this workspace names" notin byManifest.output
 
       # ---- (7) fragment removed, lock restored: the lock's pin declares it. -
       removeFile(workspace / "repos" / "leaf.toml")
@@ -353,3 +356,10 @@ suite "lock refresh refuses a solve missing a develop-set sibling's recipe":
       check byLock.code == RefusalExitCode
       check readFile(lockPath) == completeLock
       check "'leaf'" in byLock.output
+      # `repro sync` and `repro ws enable` act only on a repo some fragment
+      # declares. Here none names `leaf`, so offering them as the remedy sends
+      # the reader to a command that answers "names no repo in this workspace"
+      # (reprobuild-pm issue 2026-11-14): the refusal must say so instead.
+      check "repos/*.toml fragment of this workspace names" in byLock.output
+      check "cannot check it out" in byLock.output
+      check "Check it out (`repro sync`" notin byLock.output
