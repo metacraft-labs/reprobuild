@@ -57,6 +57,7 @@ suite "daemon carried environment":
       "REPROBUILD_RUNTIME_LIBRARY_PATH",
       "SHM_QUEUE_SRC",
       "CLI_SPEC_SRC",
+      "CONFUTILS_SRC",
       "TEST_CERTIFICATES_TOOLS_SRC"
     ]
     var previous: seq[tuple[key: string; value: string; present: bool]]
@@ -80,6 +81,7 @@ suite "daemon carried environment":
     let runtimeLibraryPath = getTempDir() / "runtime-libraries-carried-env"
     let shmQueueSrc = getTempDir() / "shm-queue-src-carried-env"
     let cliSpecSrc = getTempDir() / "cli-spec-src-carried-env"
+    let confutilsSrc = getTempDir() / "confutils-src-carried-env"
     let testCertificatesToolsSrc = getTempDir() / "test-certificates-tools-carried-env"
     putEnv("REPRO_DAEMON_ENDPOINT", endpoint)
     putEnv("REPRO_DAEMON_STATE_DIR", stateDir)
@@ -94,6 +96,7 @@ suite "daemon carried environment":
     putEnv("REPROBUILD_RUNTIME_LIBRARY_PATH", runtimeLibraryPath)
     putEnv("SHM_QUEUE_SRC", shmQueueSrc)
     putEnv("CLI_SPEC_SRC", cliSpecSrc)
+    putEnv("CONFUTILS_SRC", confutilsSrc)
     putEnv("TEST_CERTIFICATES_TOOLS_SRC", testCertificatesToolsSrc)
 
     let carried = daemonCarriedEnvironment()
@@ -112,6 +115,7 @@ suite "daemon carried environment":
       runtimeLibraryPath)
     check carried.hasEnvPair("SHM_QUEUE_SRC", shmQueueSrc)
     check carried.hasEnvPair("CLI_SPEC_SRC", cliSpecSrc)
+    check carried.hasEnvPair("CONFUTILS_SRC", confutilsSrc)
     check carried.hasEnvPair("TEST_CERTIFICATES_TOOLS_SRC",
       testCertificatesToolsSrc)
 

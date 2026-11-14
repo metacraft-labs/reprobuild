@@ -50,6 +50,16 @@ resolve_cli_spec_src() {
   return 2
 }
 
+# confutils (the metacraft-labs fork), rooted at its checkout: repro's own
+# command line is instantiated through ``confutils/clispec_config``.
+resolve_confutils_src() {
+  if resolve_repo_source_path "CONFUTILS_SRC" "confutils.nim" "../nim-confutils"; then
+    return 0
+  fi
+  echo "missing nim-confutils source; set CONFUTILS_SRC or provide ../nim-confutils" >&2
+  return 2
+}
+
 # The marker for nim-bearssl is the module the build actually needs, not the
 # package's root file.
 #

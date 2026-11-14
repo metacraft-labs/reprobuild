@@ -81,7 +81,9 @@
 ##
 ##   * ``thin_client_does_not_link_the_build_engine`` — the structural
 ##     property the milestone's number depends on. Importing
-##     ``repro_cli_support`` from ``apps/repro-client`` reddens it.
+##     ``repro_cli_support`` from ``apps/repro-client`` reddens it, and so
+##     does linking the command-line parser (``repro_cli_support/
+##     cli_program``) instead of reading the description at compile time.
 
 import std/[os, osproc, strtabs, strutils, tempfiles, unittest]
 
@@ -119,7 +121,7 @@ const
     "NIM_TOML_SERIALIZATION_SRC", "SSZ_SERIALIZATION_SRC", "NIMCRYPTO_SRC",
     "BEARSSL_SRC", "RESULTS_SRC", "STINT_SRC", "IO_MON_SRC",
     "STACKABLE_HOOKS_SRC", "GOSTI_SRC", "SHM_QUEUE_SRC", "SHM_GSET_SRC",
-    "CLI_SPEC_SRC", "REPRO_CT_TEST_RUNNER_SRC", "CODETRACER_PINNED_SRC",
+    "CLI_SPEC_SRC", "CONFUTILS_SRC", "REPRO_CT_TEST_RUNNER_SRC", "CODETRACER_PINNED_SRC",
     "RUNQUOTA_SRC"
   ]
     ## ``repro_interface_artifacts.BuiltSourcePackageRoots``. Removing these
@@ -507,6 +509,10 @@ suite "MAC-1 thin daemon client":
     # doing client-side work the thin client cannot reproduce.
     let cases = @[
       ("a verb that is not build", @["daemon", "status"],
+        newSeq[(string, string)]()),
+      # Completion is answered by the engine from repro's command-line
+      # description; the thin client links no parser and forwards it.
+      ("a completion request", @["__complete", "fish", "bu"],
         newSeq[(string, string)]()),
       ("no arguments at all", newSeq[string](),
         newSeq[(string, string)]()),
@@ -1069,3 +1075,9 @@ suite "MAC-1 thin daemon client":
     let image = readFile(thinCliBin())
     check not image.contains("scheduler: actions=")
     check readFile(fullCliBin()).contains("scheduler: actions=")
+    # Nor the command-line parser: its client-handled flags are a constant
+    # generated from repro's description at compile time. The schema name of
+    # the help the parser generates is in the engine, which answers help and
+    # completion, and not here.
+    check not image.contains("clispec-help/1")
+    check readFile(fullCliBin()).contains("clispec-help/1")

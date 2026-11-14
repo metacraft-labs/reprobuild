@@ -1332,17 +1332,34 @@
     "nim-cli-spec-src": {
       "flake": false,
       "locked": {
-        "lastModified": 1794612913,
-        "narHash": "sha256-mYeYxVIjWye8Cv+HhfenrHDzslqARkZdW9f8/MPGpmI=",
+        "lastModified": 1794655071,
+        "narHash": "sha256-EeTmGzSKBKvtKYJG6gvj8a5q6nLTQLrtA4DPYl8Zuwg=",
         "owner": "metacraft-labs",
         "repo": "nim-cli-spec",
-        "rev": "4e09ba984487d1151f946ebf767de3fee3a98677",
+        "rev": "29792c06ac2ecdea82e10adc78628e832f55d179",
         "type": "github"
       },
       "original": {
         "owner": "metacraft-labs",
         "repo": "nim-cli-spec",
-        "rev": "4e09ba984487d1151f946ebf767de3fee3a98677",
+        "rev": "29792c06ac2ecdea82e10adc78628e832f55d179",
+        "type": "github"
+      }
+    },
+    "nim-confutils-src": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1794656412,
+        "narHash": "sha256-P20Zi4iwayGpeDyH1zG619F9eLuRgJolm5Zcv1Z564A=",
+        "owner": "metacraft-labs",
+        "repo": "nim-confutils",
+        "rev": "1a60f8c08d877e7f8e1d18f2cc84aad741c2facb",
+        "type": "github"
+      },
+      "original": {
+        "owner": "metacraft-labs",
+        "repo": "nim-confutils",
+        "rev": "1a60f8c08d877e7f8e1d18f2cc84aad741c2facb",
         "type": "github"
       }
     },
@@ -2570,6 +2587,7 @@
         "io-mon-src": "io-mon-src",
         "nim-checksums-src": "nim-checksums-src",
         "nim-cli-spec-src": "nim-cli-spec-src",
+        "nim-confutils-src": "nim-confutils-src",
         "nim-csources-src": "nim-csources-src",
         "nim-fork-src": "nim-fork-src",
         "nim-nimony-src": "nim-nimony-src",

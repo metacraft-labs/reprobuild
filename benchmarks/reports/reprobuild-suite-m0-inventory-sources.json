@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 35,
-    "nimTestBinaries": 2795,
+    "nimTestBinaries": 2798,
     "pureUnitConsolidationGroups": 82,
-    "pureUnitTests": 764,
-    "staticallyDetectedRuntimeCompilerFlowTests": 140,
-    "testEntries": 2840
+    "pureUnitTests": 766,
+    "staticallyDetectedRuntimeCompilerFlowTests": 141,
+    "testEntries": 2843
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1264,7 +1264,7 @@
       "targetOs": "soAny"
     },
     {
-      "count": 5,
+      "count": 6,
       "defines": [],
       "dependencyShape": [
         "repro_cli_support"
@@ -1272,6 +1272,7 @@
       "owner": "tests/unit",
       "sources": [
         "tests/unit/t_capabilities.nim",
+        "tests/unit/t_cs_m6_spec_pages_match_declarations.nim",
         "tests/unit/t_da1i_evidence_help_names_the_hazard.nim",
         "tests/unit/t_recipe_lock_consistency_check.nim",
         "tests/unit/t_recipe_pin_edit.nim",
@@ -1618,10 +1619,10 @@
   ],
   "static": {
     "classificationCounts": {
-      "graph-fixture": 22,
+      "graph-fixture": 23,
       "integration": 1539,
       "platform/destructive": 179,
-      "pure unit": 764,
+      "pure unit": 766,
       "unclassified": 336
     },
     "graphOwnedTestArtifacts": [
@@ -1836,9 +1837,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2795,
+    "nimTestBinaryCount": 2798,
     "pythonTestFileCount": 45,
-    "testEntryCount": 2840
+    "testEntryCount": 2843
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -8096,6 +8097,26 @@
         }
       ],
       "source": "tests/unit/t_build_package_fragment_outside_provider_mode_names_the_define.nim"
+    },
+    {
+      "class": "graph-fixture",
+      "matches": [
+        {
+          "assignedCommandVariable": "cmd",
+          "commandVariableExecuted": true,
+          "directExecutionLine": false,
+          "executedVariables": [
+            "cmd"
+          ],
+          "line": 74,
+          "path": "tests/unit/t_cs_m6_cli_model_type_checks_in_reprobuild_macros.nim",
+          "patterns": [
+            "nim-compile-verb"
+          ],
+          "snippet": "var cmd = quoteShell(nim) & \" c --compileOnly --hints:off --warnings:off \" &"
+        }
+      ],
+      "source": "tests/unit/t_cs_m6_cli_model_type_checks_in_reprobuild_macros.nim"
     },
     {
       "class": "graph-fixture",
@@ -39872,7 +39893,7 @@
       "requiresReproBinary": true,
       "source": "tests/integration/t_completion_emits_shell_script.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 2,
+      "staticCaseCount": 3,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -51163,13 +51184,14 @@
       "defines": [],
       "language": "nim",
       "localDependencyShape": [
+        "repro_cli_support",
         "repro_test_support"
       ],
       "owner": "tests/integration",
       "requiresReproBinary": true,
       "source": "tests/integration/t_sync_and_hooks_help_print_usage.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 1,
+      "staticCaseCount": 2,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -55042,6 +55064,53 @@
       "source": "tests/unit/t_cs_m1_external_tool_argv_unchanged.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 3,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_cs_m6_cli_model_type_checks_in_reprobuild_macros",
+      "class": "graph-fixture",
+      "classificationReason": "test body compiles or links a helper/fixture artifact",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [],
+      "owner": "tests/unit",
+      "requiresReproBinary": false,
+      "source": "tests/unit/t_cs_m6_cli_model_type_checks_in_reprobuild_macros.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 2,
+      "staticallyDetectedRuntimeCompilerFlow": true,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_cs_m6_no_hand_written_argv_parsing",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [],
+      "owner": "tests/unit",
+      "requiresReproBinary": false,
+      "source": "tests/unit/t_cs_m6_no_hand_written_argv_parsing.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 3,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_cs_m6_spec_pages_match_declarations",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_cli_support"
+      ],
+      "owner": "tests/unit",
+      "requiresReproBinary": false,
+      "source": "tests/unit/t_cs_m6_spec_pages_match_declarations.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 5,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

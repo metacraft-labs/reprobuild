@@ -264,6 +264,12 @@ nim-shm-gset=7bc81ad2440860a8a9254eb2757c585df9652438
 # clispec, the `cli:` language and typed CLI model repro_project_dsl builds
 # on. Cloned at repro.lock's revision, like nim-shm-queue.
 nim-cli-spec
+# confutils (the metacraft-labs fork): repro's own command line is
+# instantiated through its clispec bridge (CONFUTILS_SRC). repro.lock does not
+# pin it -- the fork has no repro.nim declaring a library, so it cannot be a
+# `uses:` producer (see repro.nim) -- so it is pinned here, at flake.lock's
+# `nim-confutils-src` revision. Move the two together.
+nim-confutils=1a60f8c08d877e7f8e1d18f2cc84aad741c2facb
 
 # nim-shm-lease: runquota's published stats table imports its anchor on
 # WINDOWS now, not only on Linux/macOS, and the Windows release leg builds

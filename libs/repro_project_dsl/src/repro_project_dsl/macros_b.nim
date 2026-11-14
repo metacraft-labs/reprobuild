@@ -10395,8 +10395,12 @@ macro packageImpl*(name: untyped;
   # several walkers below reached it first.
   refusePackageHeadArguments(name, body)
   let (sectionStmts, preservedStmts) = partitionPackageBody(body)
+  # Only this package's `cli:` blocks: nothing a failed earlier expansion
+  # left behind.
+  discard takeCliModelTypeChecks()
   let pkg = parsePackageDef(name, body, resolvedPlatforms,
     resolvedToolProvisioning, resolvedUses)
+  let cliTypeChecks = takeCliModelTypeChecks()
   let packageName = pkg.packageName
   # ── DSL-port M2: emit ``config:`` scalar registrations + ``versions:``
   # entries. The two emitters operate on the M1 ``sectionStmts``
@@ -10495,6 +10499,9 @@ macro packageImpl*(name: untyped;
   # type-checks against the already-declared hook.
   result.add(collectImplicitTargetNameHooks(body))
   result.add(generated)
+  # The `cli:` blocks' `cliModelTypeChecks`, after the imports `generated`
+  # starts with, so the types their parameters name are in scope.
+  result.add(cliTypeChecks)
   # Shared-Development-Services L3: the lifted service/activity surface —
   # the handle types, the `<Title>PackageExports` reflection object, the
   # accessor procs that make `<dep>.<service>` a typed symbol, and the
