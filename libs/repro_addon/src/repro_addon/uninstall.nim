@@ -1232,9 +1232,15 @@ proc runAddonUninstall*(opts: UninstallOptions): UninstallResult =
   # the sink's files, the keys, then the sink's files and /etc/repro, and
   # only then /var/lib/repro. A failure at any of them keeps the state,
   # with its ledger copy and the attestation key, so a re-run can finish.
+  # Only these steps' own failures count here: a completion that failed
+  # has stopped the run above, and one whose record is in place but not
+  # yet durable is reported without keeping the state (decision 113).
+  let errorsBeforeCleanup = result.errors.len
+  let driftBeforeCleanup = result.drift.len
   template keepIfFailed() =
     when not mutated("state-removed-after-root-failure"):
-      if result.errors.len > 0 or result.drift.len > 0:
+      if result.errors.len > errorsBeforeCleanup or
+          result.drift.len > driftBeforeCleanup:
         discard keepStateWhenIncomplete(result, l, stateDir)
         return
   # The secrets ramfs (A7) is unmounted, its plaintext gone, first.
