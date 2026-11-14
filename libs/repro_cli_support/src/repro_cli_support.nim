@@ -60199,6 +60199,107 @@ proc runPostCommitLockCommand*(args: openArray[string]): int =
 # act from testing one, and a stale checkout must not become a stale published
 # lock.
 
+# ---------------------------------------------------------------------------
+# `.github/sibling-repos` follows `flake.lock`
+#
+# `.github/sibling-repos` may pin a sibling clone by commit (`name=<40-hex>`),
+# and `scripts/check_sibling_lock_pins.py` requires that commit to equal the
+# revision `flake.lock` locks for the same repository (a direct root input
+# owned by metacraft-labs; the input alias, often `*-src`, is not the name).
+# Every writer of `flake.lock` that moves such a revision therefore moves the
+# entry with it, in the same step: otherwise the commit that carries the new
+# lock carries a bill of materials the check refuses, and CI clones a sibling
+# the flake no longer pins (reprobuild-pm issue
+# 2026-11-14-commit-time-repin-moves-runquota-in-flake-lock-without-sibling-repos).
+#
+# The move is computed from the OLD and NEW lock texts rather than from a
+# writer's own bookkeeping, so the commit hook, `repro flake refresh-lock` and
+# `repro lock update` share one rule. Only an entry that currently equals the
+# OLD revision is rewritten: an entry that already disagrees was wrong before
+# this change, which is the check's finding to report, not this move's to hide.
+# ---------------------------------------------------------------------------
+
+const SiblingReposRelPath* = ".github/sibling-repos"
+
+type SiblingRepoPinMove* = object
+  repo*, oldRev*, newRev*: string
+
+proc flakeLockRootRevisions(lockText: string): Table[string, string] =
+  ## repository name -> locked revision, for the direct root inputs that are
+  ## github or git repositories (the checker's coordinate: the repository, not
+  ## the input alias). Unparseable text yields an empty
+  ## table: the callers hold a lock they have just read or produced.
+  result = initTable[string, string]()
+  try:
+    let doc = parseJson(lockText)
+    let nodes = doc["nodes"]
+    for _, nodeId in doc["nodes"][doc["root"].getStr()]{"inputs"}.pairs:
+      if nodeId.kind != JString: continue  # a `follows`, not a source pin
+      let pin = nodes{nodeId.getStr()}{"locked"}
+      if pin.isNil or pin{"rev"}.getStr().len == 0: continue
+      case pin{"type"}.getStr()
+      of "github":
+        result[pin{"repo"}.getStr()] = pin{"rev"}.getStr()
+      of "git":
+        # The repository is the last segment of the url, as `git clone` names
+        # the checkout.
+        var name = pin{"url"}.getStr().strip(chars = {'/'}).rsplit({'/', ':'}, 1)[^1]
+        if name.endsWith(".git"): name = name[0 ..< name.len - 4]
+        if name.len > 0: result[name] = pin{"rev"}.getStr()
+      else: discard
+  except CatchableError:
+    discard
+
+proc siblingRepoPinMoves*(oldLock, newLock: string): seq[SiblingRepoPinMove] =
+  ## The repositories whose root-input revision differs between two locks.
+  let before = flakeLockRootRevisions(oldLock)
+  let after = flakeLockRootRevisions(newLock)
+  for repo, rev in after.pairs:
+    let old = before.getOrDefault(repo, "")
+    if old.len > 0 and old.toLowerAscii() != rev.toLowerAscii():
+      result.add(SiblingRepoPinMove(repo: repo, oldRev: old, newRev: rev))
+  result.sort(proc(a, b: SiblingRepoPinMove): int = cmp(a.repo, b.repo))
+
+proc rewriteSiblingRepoPins*(text: string;
+    moves: openArray[SiblingRepoPinMove]): tuple[text: string; changes: seq[string]] =
+  ## Replace, line by line, the commit of every `name=<old>` / `name!=<old>`
+  ## entry that a move names. Everything else, comments included, is carried
+  ## through byte for byte.
+  var lines = text.split('\n')
+  for i in 0 ..< lines.len:
+    let hash = lines[i].find('#')
+    let entry = (if hash >= 0: lines[i][0 ..< hash] else: lines[i])
+    let eq = entry.find('=')
+    if eq < 0: continue
+    var name = entry[0 ..< eq].strip()
+    if name.endsWith("!"): name = name[0 ..< name.len - 1].strip()
+    let rev = entry[eq + 1 .. ^1].strip()
+    for m in moves:
+      if name == m.repo and rev.toLowerAscii() == m.oldRev.toLowerAscii():
+        let at = entry.find(rev, eq + 1)
+        lines[i] = entry[0 ..< at] & m.newRev & entry[at + rev.len .. ^1] &
+          (if hash >= 0: lines[i][hash .. ^1] else: "")
+        result.changes.add(SiblingReposRelPath & ": " & m.repo & "=" &
+          m.oldRev & " -> " & m.newRev)
+        break
+  result.text = lines.join("\n")
+
+proc syncSiblingRepoPins*(repoRoot, oldLock, newLock: string):
+    tuple[path: string; changes: seq[string]; error: string] =
+  ## Bring `<repoRoot>/.github/sibling-repos` in line with a `flake.lock`
+  ## move. ``path`` is empty when nothing was written; ``error`` is set when
+  ## the file could not be read or written.
+  let path = repoRoot / SiblingReposRelPath
+  let moves = siblingRepoPinMoves(oldLock, newLock)
+  if moves.len == 0 or not fileExists(path): return
+  try:
+    let rewritten = rewriteSiblingRepoPins(readFile(path), moves)
+    if rewritten.changes.len == 0: return
+    writeFile(path, rewritten.text)
+    result = (path: path, changes: rewritten.changes, error: "")
+  except CatchableError as err:
+    result.error = path & " could not be updated (" & err.msg & ")"
+
 proc stageRefreshedFlakeLock(repoRoot, lockPath: string;
     useHookIndex = true): tuple[ok: bool; diagnostic: string] =
   ## `git add` the refreshed lock into the IN-FLIGHT index, so the commit
@@ -62244,6 +62345,26 @@ proc applyPreCommitFlakeLock(site: CommitTimeWriterSite;
     appendCommitTimeWriterLog(site, workspaceRoot,
       timestamp & " " & flake.line)
     return
+  # `.github/sibling-repos` pins some siblings by the commit `flake.lock`
+  # locks; move such an entry with the lock and stage it into the same commit.
+  let siblingPins = syncSiblingRepoPins(flake.flakeRoot, flake.originalText,
+    flake.plannedText)
+  if siblingPins.error.len > 0:
+    stderr.writeLine(label & ": WARNING: " & siblingPins.error &
+      "; `scripts/check_sibling_lock_pins.py` will refuse it")
+  if siblingPins.path.len > 0:
+    outcome.written.add(siblingPins.path)
+    for change in siblingPins.changes:
+      outcome.changes.add(change)
+      stderr.writeLine(label & ": " & change & " (follows flake.lock)")
+    let stagedPins = stageRefreshedFlakeLock(flake.flakeRoot,
+      siblingPins.path, useHookIndex = site == ctwsPreCommitHook)
+    if not stagedPins.ok:
+      flake.notStaged = stagedPins.diagnostic
+      outcome.notStaged.add(siblingPins.path & ": " & stagedPins.diagnostic)
+      stderr.writeLine(label & ": " & SiblingReposRelPath & " was updated " &
+        "but could NOT be staged, so THIS COMMIT DOES NOT CARRY IT: " &
+        stagedPins.diagnostic)
   flake.changed = true
   flake.allowed = allowed
   flake.line = "flake-lock refreshed: " &
@@ -100612,6 +100733,11 @@ proc executeFlakeLockRefresh(flakeRoot, workspaceRoot, currentRepo: string;
     return
   result.changed = true
   result.tag = "refreshed"
+  let siblingPins = syncSiblingRepoPins(flakeRoot, lockText, refreshed.text)
+  for change in siblingPins.changes:
+    result.notices.add(change & " (follows flake.lock)")
+  if siblingPins.error.len > 0:
+    result.notices.add(siblingPins.error)
   # Only the regressions that were actually written are reported as allowed:
   # a row the rewrite declined (a pin `flake.nix` states by revision) did not
   # move, and must not be announced as having moved.
@@ -101167,7 +101293,7 @@ proc executeLockUpdate*(req: LockUpdateRequest): LockUpdateOutcome =
 
   # ---- (4) snapshot, then plan and apply, all or nothing --------------------
   let snapshot = takeLockUpdateSnapshot([flakeNixPath, flakeLockPath,
-    reproNimPath, reproLockPath])
+    reproNimPath, reproLockPath, root / SiblingReposRelPath])
   var flakeLockText = if haveFlake: inputs.flakeLock.text else: ""
   template undoAll(code: int; line: string) =
     let unrestored = restoreLockUpdateSnapshot(snapshot)
@@ -101559,6 +101685,15 @@ proc executeLockUpdate*(req: LockUpdateRequest): LockUpdateOutcome =
             " together with its dependency closure")
         flakeLockText = relocked.text
         writeFile(extendedPath(flakeLockPath), flakeLockText)
+
+    if haveFlake and flakeLockText != inputs.flakeLock.text:
+      let siblingPins = syncSiblingRepoPins(root, inputs.flakeLock.text,
+        flakeLockText)
+      if siblingPins.error.len > 0:
+        undoAll(LockUpdateExitFailed, siblingPins.error)
+      if siblingPins.path.len > 0:
+        result.written.add(siblingPins.path)
+        for change in siblingPins.changes: result.report.add(change)
 
     if reproOfRepo.len > 0:
       var originalDeps = ""
