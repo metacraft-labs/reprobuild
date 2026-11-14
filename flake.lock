@@ -2637,11 +2637,11 @@
         "runquota-package-catalog": "runquota-package-catalog"
       },
       "locked": {
-        "lastModified": 1794635966,
-        "narHash": "sha256-5qwq1pUrxyhEe8xrOyEyMCPkOf3uJ1/0uKkgfjZ/UyA=",
+        "lastModified": 1794652073,
+        "narHash": "sha256-jmhDmHKwz6EH1QjZj5RoKCrhxdUMFQrITLAHCtiWtM8=",
         "owner": "metacraft-labs",
         "repo": "runquota",
-        "rev": "e9b86fd5d48562c684d0e30660385d8fcc2cf741",
+        "rev": "c0e771baae47eefb896a0942479623afe40a9c26",
         "type": "github"
       },
       "original": {
@@ -2895,17 +2895,17 @@
     "test-certificates-tools-src": {
       "flake": false,
       "locked": {
-        "lastModified": 1793493787,
-        "narHash": "sha256-kj7SWWfs675mrVpN5iiaBenh/hiKAP68aPNTADmSwP8=",
+        "lastModified": 1793866381,
+        "narHash": "sha256-QtrNpzM3rUIfreSre8T9GfNoxDxkTisoccsaYMSyo/c=",
         "owner": "metacraft-labs",
         "repo": "test-certificates-tools",
-        "rev": "4b395de551d86c745d6eb8ebf7c7228df25298f5",
+        "rev": "a726655886808d1062390d05c50f4fce03150eb4",
         "type": "github"
       },
       "original": {
         "owner": "metacraft-labs",
         "repo": "test-certificates-tools",
-        "rev": "4b395de551d86c745d6eb8ebf7c7228df25298f5",
+        "rev": "a726655886808d1062390d05c50f4fce03150eb4",
         "type": "github"
       }
     },
