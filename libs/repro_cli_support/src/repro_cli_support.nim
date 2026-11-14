@@ -96788,10 +96788,21 @@ proc siblingVariantDeclarations(checkout: string):
     return
   let inheritedOverrides = getEnv(DevelopOverridesEnvVar)
   delEnv(DevelopOverridesEnvVar)
+  # Why the probe could not be ASKED, as opposed to the sibling declaring
+  # nothing. The written document still cannot tell the two apart (see
+  # above), but the operator can be told: a swallowed failure here surfaces
+  # only as a missing `variants` field, far from its cause -- a RunQuota
+  # auto-start that failed, an extraction or provider compile that failed --
+  # and twice now that has been all a failing run left behind.
+  var probeFailure = ""
   try:
     let probed = solverInputsFromCompiledProvider(checkout,
-      requireSolverBinding = false)
+      requireSolverBinding = false, failure = addr probeFailure)
     if probed.isNone:
+      if probeFailure.len > 0:
+        stderr.writeLine("repro develop: note: could not read the variant " &
+          "declarations of " & checkout & ", so the override records " &
+          "none: " & probeFailure)
       return
     for decl in probed.get().variants:
       if decl.name.len == 0:
@@ -96821,7 +96832,10 @@ proc siblingVariantDeclarations(checkout: string):
         if contributed.priority == vpDefault:
           recorded.default = contributed.value
       result.add(recorded)
-  except CatchableError:
+  except CatchableError as error:
+    stderr.writeLine("repro develop: note: could not read the variant " &
+      "declarations of " & checkout & ", so the override records none: " &
+      error.msg)
     result = @[]
   finally:
     if inheritedOverrides.len > 0:
