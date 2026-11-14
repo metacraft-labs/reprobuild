@@ -34,15 +34,25 @@ import ./arch_gate_support
 const Snapshot = "/.repro-addon-gate-snapshot"
 
 proc comparableLedger*(ledger: string): string =
-  ## A ledger with what legitimately differs between two hosts taken out:
-  ## time stamps and the host's own identities. Lines are kept in order.
+  ## What "the same generation sequence produces the same ledgers" compares
+  ## (spec §5.1): every entry's class, path, mode and owner, in order, and
+  ## the content digest of the objects the profile itself declares (the
+  ## fixture file and unit). Left out, because they differ between two
+  ## hosts by design: the generation id; the content of host-specific
+  ## objects (the recipient key the host generated, the anchors the test
+  ## bed drew for each guest, the files prefix holding them); and a root's
+  ## kind word, which is the property under test (``btrfs-subvolume`` /
+  ## ``btrfs-dir`` on btrfs, ``dir`` on ext4) and is checked by the steps.
   for line in ledger.splitLines():
-    var f = line.split('\t')
-    var kept: seq[string]
-    for x in f:
-      if x.len >= 20 and x[4] == '-' and x[10] == 'T': kept.add("<time>")
-      else: kept.add(x)
-    result.add(kept.join("\t") & "\n")
+    let f = line.split('\t')
+    if f.len < 6 or f[0] in ["generation", "#"] or line.startsWith("#"):
+      continue
+    if f[0] == "storePrefix" and "repro-addon-files" in f[1]:
+      result.add("storePrefix\trepro-addon-files\n")
+      continue
+    let declared = f[1].startsWith(FixturePrefix) or FixtureUnitName in f[1]
+    result.add(f[0] & "\t" & f[1] & "\t" & f[4] & "\t" & f[5] &
+      (if declared: "\t" & f[3] else: "") & "\n")
 
 proc runBase(b: BaseImage; record: JsonNode;
              ledgers: var seq[string]): seq[string] =
