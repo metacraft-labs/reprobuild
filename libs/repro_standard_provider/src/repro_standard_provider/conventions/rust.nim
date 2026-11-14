@@ -124,6 +124,7 @@ import repro_project_dsl
 import repro_standard_provider/convention
 import repro_standard_provider/conventions/emit_cache
 import repro_standard_provider/crude
+import repro_cargo_edge/edge_cli
 
 const
   ScratchDirName* = ".repro/build"
@@ -1406,19 +1407,34 @@ proc rustCrudeFallback(projectRoot: string;
       packageName = projectRoot.extractFilename
     if packageName.len == 0:
       packageName = "rust-crude"
-    let argv = @[
+    let cargoArgv = @[
       cargoExe,
       "build",
       "--release",
       "--locked",
       "--offline",
     ]
+    # The thin cargo edge (``libs/repro_cargo_edge``, Build-Engine-And-
+    # Scheduler.md "Integration tiers" -> Cargo). cargo stays the build system;
+    # the edge asks it, through ``--message-format=json``, which final
+    # products it made, and writes that answer to ``productsFile``, the
+    # action's one declared output. ``target`` is cargo's own incremental
+    # state: a tool-owned cache that is neither declared nor cleared, so an
+    # edit to one crate recompiles that crate. Declaring it an output (as this
+    # used to) made the engine record the whole tree, and declaring it opaque
+    # would clear it before every run and recompile every unit.
+    let productsFile = projectRoot / ".repro" / "build" / "cargo" /
+      (packageName & ".products")
+    let argv = edgeCommand(getAppFilename(), productsFile, cargoArgv)
     result = emitCrudeFragment(
       projectRoot = projectRoot,
       request = request,
       packageName = packageName,
       nativeBuildArgv = argv,
-      outputDirs = ["target"])
+      outputDirs = [],
+      toolCacheDirs = ["target"],
+      outputFiles = [productsFile],
+      widthFlag = "-j")
 
 proc rustEmitFragment(projectRoot: string;
                       request: ProviderGraphRequest):

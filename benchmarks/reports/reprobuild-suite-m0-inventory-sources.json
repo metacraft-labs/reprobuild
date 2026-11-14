@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 35,
-    "nimTestBinaries": 2802,
+    "nimTestBinaries": 2808,
     "pureUnitConsolidationGroups": 82,
-    "pureUnitTests": 765,
+    "pureUnitTests": 766,
     "staticallyDetectedRuntimeCompilerFlowTests": 141,
-    "testEntries": 2848
+    "testEntries": 2854
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1620,9 +1620,9 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 23,
-      "integration": 1543,
+      "integration": 1548,
       "platform/destructive": 179,
-      "pure unit": 765,
+      "pure unit": 766,
       "unclassified": 338
     },
     "graphOwnedTestArtifacts": [
@@ -1837,9 +1837,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2802,
+    "nimTestBinaryCount": 2808,
     "pythonTestFileCount": 46,
-    "testEntryCount": 2848
+    "testEntryCount": 2854
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -12930,6 +12930,23 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_rqe_cg3_cargo_edge",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_cargo_edge"
+      ],
+      "owner": "libs/repro_cargo_edge",
+      "requiresReproBinary": false,
+      "source": "libs/repro_cargo_edge/tests/t_rqe_cg3_cargo_edge.nim",
+      "sourceSuiteCount": 5,
+      "staticCaseCount": 22,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_rqe_cg2_cargo_gc",
       "class": "integration",
       "classificationReason": "subprocess or repro CLI invocation in test body",
@@ -17290,7 +17307,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_dsl_stdlib/tests/t_sized_typed_tools.nim",
       "sourceSuiteCount": 2,
-      "staticCaseCount": 9,
+      "staticCaseCount": 12,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -49817,6 +49834,94 @@
       "sourceSuiteCount": 1,
       "staticCaseCount": 3,
       "staticallyDetectedRuntimeCompilerFlow": true,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_rqe_cg3_delegated_edge_bounded",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_test_support"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_rqe_cg3_delegated_edge_bounded.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_rqe_cg3_incremental_preserved",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_project_dsl",
+        "repro_test_support"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_rqe_cg3_incremental_preserved.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_rqe_cg3_nextest_threads_follow_grant",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_project_dsl",
+        "repro_test_support"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_rqe_cg3_nextest_threads_follow_grant.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_rqe_cg3_per_crate_totals_learned",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_test_support"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_rqe_cg3_per_crate_totals_learned.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 2,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_rqe_cg3_wrapper_is_transparent",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_cargo_edge",
+        "repro_test_support"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_rqe_cg3_wrapper_is_transparent.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
     {

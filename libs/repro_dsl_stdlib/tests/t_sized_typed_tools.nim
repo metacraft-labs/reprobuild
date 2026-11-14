@@ -25,6 +25,7 @@ import repro_dsl_stdlib/packages/make as make_module
 import repro_dsl_stdlib/packages/ninja as ninja_module
 import repro_dsl_stdlib/packages/cmake as cmake_module
 import repro_dsl_stdlib/packages/meson as meson_module
+import repro_dsl_stdlib/packages/cargo_nextest as nextest_module
 
 proc only(): BuildActionDef =
   let recorded = registeredBuildActions()
@@ -94,6 +95,38 @@ suite "parallel tools are sized":
     let action = only()
     check action.widthFlag == "-j"
     checkSized(action, "-j")
+
+  test "cargo nextest run takes --test-threads":
+    resetBuildActionRegistry()
+    discard cargo_nextest.nextest(run = true, workspace = true,
+      actionId = "nx")
+    let action = only()
+    check action.widthFlag == "--test-threads"
+    checkSized(action, "--test-threads")
+    # The word `run` is recorded first among the arguments, so it follows the
+    # subcommand and precedes the flags (the order nextest parses); the
+    # integration case t_rqe_cg3_nextest_threads_follow_grant runs the call.
+    check action.call.subcommand == "nextest"
+    check action.call.arguments.len >= 2
+    check action.call.arguments[0].name == "run"
+
+  test "a recipe's own nextest thread count is a supplied argument":
+    resetBuildActionRegistry()
+    discard cargo_nextest.nextest(run = true, testThreads = 2,
+      actionId = "nx2")
+    let action = only()
+    check action.widthFlag == "--test-threads"
+    var named = false
+    for arg in action.call.arguments:
+      if arg.name == "testThreads": named = true
+    check named
+
+  test "nextest without `run` starts one process and stays unsized":
+    resetBuildActionRegistry()
+    discard cargo_nextest.nextest(actionId = "nl")
+    let action = only()
+    check action.widthFlag == ""
+    checkUnsized(action)
 
   test "calls that start one process stay the one-slot default":
     resetBuildActionRegistry()

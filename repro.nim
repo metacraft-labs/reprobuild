@@ -1468,6 +1468,9 @@ package reprobuild:
   executable attestationAgent:
     name: "attestation-agent"
 
+  executable reproRustcWrapper:
+    name: "repro-rustc-wrapper"
+
 
   # Bootstrap-And-Self-Build B2: test-helper executables.
   #
@@ -3021,6 +3024,23 @@ package reprobuild:
       nimcache = "build/nimcache/attestation-agent",
       runInSourceDir = true,
       actionId = "reprobuild.apps.attestation-agent"))
+
+    # Thin cargo edge: the RUSTC_WRAPPER of a leased cargo action. A row of
+    # ``apps/entrypoints.txt`` and therefore a member of ``.#apps`` too; it
+    # sits beside the engine, where the engine looks for it
+    # (``libs/repro_cargo_edge``).
+    reprobuildAppsActions.add(nim.c(
+      source = "apps/repro-rustc-wrapper/repro_rustc_wrapper.nim",
+      binary = "build/bin/repro-rustc-wrapper",
+      # ``reproVendoredHash`` as in the entrypoints row: a wrapper that
+      # started two more shared libraries on every rustc would pay for them
+      # once per compile.
+      defines = @["release", "reproVendoredHash"],
+      paths = sourceOnlyNimPaths,
+      extraEnv = sourceOnlyEnv,
+      nimcache = "build/nimcache/repro-rustc-wrapper",
+      runInSourceDir = true,
+      actionId = "reprobuild.apps.repro-rustc-wrapper"))
 
     # Dependency-Attribution MAC-1 — the thin daemon client, and since the
     # thin-client-on-PATH rename the image that OWNS THE NAME ``repro``. This

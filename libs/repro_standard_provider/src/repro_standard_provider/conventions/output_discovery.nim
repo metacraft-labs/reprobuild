@@ -24,6 +24,7 @@ from repro_core/paths import extendedPath
 from repro_core/ambient_execution import uncontrolledFindExe,
   uncontrolledStartProcess
 import repro_project_dsl
+import repro_cargo_edge/edge_cli
 
 type DiscoveredOutputs* = object
   outputs*: seq[string]
@@ -1224,6 +1225,14 @@ proc runOutputDiscoveryCommand*(args: seq[string]): bool =
   ## Internal standard-provider operation, invoked by a discovery action.
   if args.len > 0 and args[0] == "--delegated-outputs":
     runDelegatedOutputsCommand(args)
+    return true
+  if args.len > 0 and args[0] == EdgeHelperFlag:
+    # The thin cargo edge (libs/repro_cargo_edge): one cargo invocation whose
+    # final products are read from its JSON. It ends the process itself with
+    # cargo's exit status, which is the action's.
+    let code = runEdge(args[1 .. ^1], "repro-standard-provider " & EdgeHelperFlag)
+    if code != 0:
+      quit(code)
     return true
   if args.len > 0 and args[0] == "--gradle-dependencies":
     if args.len != 6 or args[3] notin ["wrapper", "gradle"]:

@@ -10,5 +10,6 @@ Reprobuild repository.
 - [Dependency Collection](dependency-collection.md)
 - [Build Stats](stats.md)
 - [Cleaning a cargo target directory](cargo-gc.md)
+- [Cargo in a Reprobuild build: the thin cargo edge](cargo-edge.md)
 - [Nix Provisioning Catalog](nix-provisioning.md)
 - [Package Cache Identity Safety](package-cache-identity.md)
