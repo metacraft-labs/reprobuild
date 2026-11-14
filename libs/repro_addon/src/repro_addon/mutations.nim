@@ -590,6 +590,9 @@
 ## ``template-live-by-name``                the live check reads a template
 ##                                           by its own name, which systemd
 ##                                           refuses (decision 135)
+## ``trigger-edges-omitted``               the planner orders no socket,
+##                                           timer or path unit after the
+##                                           unit it triggers (decision 137)
 ## ``live-check-call-site-reverted``       the add-on switch's call site
 ##                                           decides step 6's reload and
 ##                                           judgement from a unit-file
@@ -1587,6 +1590,8 @@ const
                           # The every-switch check's call site (owner
                           # decision on the round-8 wiring issue).
                           "live-check-call-site-reverted",
+                          # §13 decision 137: the planner's trigger edges.
+                          "trigger-edges-omitted",
                           "reissue-skips-targets",
                           "reissue-skips-sockets",
                           "reissue-skips-unit-state",

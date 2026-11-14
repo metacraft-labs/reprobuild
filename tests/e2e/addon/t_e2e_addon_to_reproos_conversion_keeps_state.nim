@@ -486,6 +486,9 @@ const
     ## Where the decision-79 probe services write their uid when they run.
   R7TargetSvc = "eth-r7-tsvc.service"
   R7SocketSvc = "eth-r7-ssvc.service"
+  R7Socket = "eth-r7-sock.socket"
+  R7Timer = "eth-r7-tmr.timer"
+  R7TimerSvc = "eth-r7-tmsvc.service"
   R7Resources = """
       # A13 owner decision 79: confined static services (not enabled, no
       # [Install]) that only another unit's start pulls in -- an enabled
@@ -517,7 +520,23 @@ const
           "User=eth-validator\nGroup=eth-validator\nReadWritePaths=/var/lib/a13-r7\n" &
           "ExecStart=/bin/sh -c 'id -u > /var/lib/a13-r7/%n.ran; exec /bin/sleep infinity'\n",
         enabled = false,
-        address = "r7SocketSvc")"""
+        address = "r7SocketSvc")
+      # §13 decision 137: a timer declared BEFORE the service it names, as
+      # the socket above is. The planner applies a trigger after the unit
+      # it triggers (systemd refuses to start a timer whose unit is not
+      # loaded); red under the engine build ``trigger-edges-omitted``.
+      systemdSystemUnit(name = "eth-r7-tmr.timer",
+        content = "[Unit]\nDescription=A13 decision-137 probe: a timer " &
+          "declared before its service\n\n[Timer]\nOnActiveSec=1s\n" &
+          "Unit=eth-r7-tmsvc.service\n\n[Install]\nWantedBy=timers.target\n",
+        address = "r7Timer")
+      systemdSystemUnit(name = "eth-r7-tmsvc.service",
+        content = "[Unit]\nDescription=A13 decision-137 probe: started by a " &
+          "timer\n\n[Service]\nProtectSystem=strict\nNoNewPrivileges=yes\n" &
+          "User=eth-validator\nGroup=eth-validator\nReadWritePaths=/var/lib/a13-r7\n" &
+          "ExecStart=/bin/sh -c 'id -u > /var/lib/a13-r7/%n.ran; exec /bin/sleep infinity'\n",
+        enabled = false,
+        address = "r7TimerSvc")"""
   R9MarkerDir = "/var/lib/a13-r9"
     ## Where the decision-135 template's instances write their uid.
   R9Instances = ["eth-r9-tpl@a.service", "eth-r9-tpl@b.service"]
@@ -1409,6 +1428,46 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
            active == "active" and ran and ev["markerContent"].getStr != "0",
            $ev & "\n" & nw.exec("systemctl status --no-pager " & svc &
              " 2>&1 | tail -15").stdout)
+    # Owner decision 137 (decided 2026-11-14): a trigger declared before the
+    # unit it triggers -- the socket and the timer above -- is applied after
+    # it, so systemd does not refuse its start, and the unit it triggers
+    # runs. Red under the engine build ``trigger-edges-omitted`` (the
+    # planner without the trigger edges): the apply refuses each trigger,
+    # "not loaded".
+    block:
+      let applyOut = applied.stdout & applied.stderr
+      var d137 = newJObject()
+      for (label, trig, svc) in [("socket", R7Socket, R7SocketSvc),
+                                 ("timer", R7Timer, R7TimerSvc)]:
+        # The timer fires 1 s after it starts; give it the time.
+        discard nw.exec("for i in $(seq 20); do [ -s " & R7MarkerDir & "/" &
+          svc & ".ran ] && break; sleep 1; done; true")
+        let active = nw.exec("systemctl is-active " & trig).stdout.strip()
+        let (ran, ev) = nw.unitRan(svc, R7MarkerDir & "/" & svc & ".ran")
+        # Refused for the order: the apply reports the trigger's
+        # ``enable --now`` failed (it says only "Job failed"), and systemd's
+        # own reason in this boot's journal of the trigger is that the unit
+        # it triggers was not loaded ("Socket service ... not loaded,
+        # refusing", "Refusing to start, unit ... to trigger not loaded").
+        var applyRefused = false
+        for l in applyOut.splitLines():
+          if ("'" & trig & "' failed") in l: applyRefused = true
+        let journalNotLoaded = "not loaded" in nw.exec("journalctl -b -u " &
+          trig & " --no-pager 2>&1").stdout
+        let refused = applyRefused and journalNotLoaded
+        ev["triggerActive"] = %active
+        ev["applyRefused"] = %applyRefused
+        ev["journalNotLoaded"] = %journalNotLoaded
+        ev["refusedNotLoaded"] = %refused
+        ev["ran"] = %ran
+        d137[label] = ev
+        step("decision 137, " & label & " first: a " & label & " declared " &
+             "before the service it triggers is applied, active, and its " &
+             "service ran", active == "active" and ran and not refused and
+             ev["markerContent"].getStr != "0",
+             $ev & "\n" & nw.exec("systemctl status --no-pager " & trig &
+               " " & svc & " 2>&1 | tail -25").stdout)
+      record["decision137"] = d137
     # Owner decision 135 (decided 2026-11-14): a confined template service
     # is judged through its instances, never by its own name, so on the
     # converted host its instances come up after the full apply's check.

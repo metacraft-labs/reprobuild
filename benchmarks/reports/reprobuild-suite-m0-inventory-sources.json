@@ -59042,7 +59042,7 @@
       "requiresReproBinary": false,
       "source": "tests/unit/test_addon_a13_classify.py",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 47,
+      "staticCaseCount": 50,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
