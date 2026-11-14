@@ -8772,7 +8772,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_addon/tests/t_addon_arch_base.nim",
       "sourceSuiteCount": 10,
-      "staticCaseCount": 27,
+      "staticCaseCount": 28,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

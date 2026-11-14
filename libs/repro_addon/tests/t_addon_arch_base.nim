@@ -262,6 +262,13 @@ suite "the Omarchy account":
     check omarchyAccountProblem("arch", "", lookup).detail == ""
     check omarchyAccountProblem("debian", "", lookup).detail == ""
 
+  test "the account is checked on an operator profile's apply only":
+    check omarchyAccountChecked("apply", false, true)
+    check not omarchyAccountChecked("apply", false, false)   # generation 0
+    check not omarchyAccountChecked("replay", false, true)
+    check not omarchyAccountChecked("revert", false, true)
+    check not omarchyAccountChecked("apply", true, true)     # record-only
+
   test "Omarchy's version is os-release's and the package's":
     pkg("omarchy", "4.0.6-1", ["usr/share/omarchy/"])
     let f = omarchyFacts({"VERSION_ID": "4.0.6", "BUILD_ID": "4.0.6-2"}.toTable,

@@ -4190,15 +4190,16 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
                                              result.baseIdentity)
     if purpose notin ["revert", "replay"] and not opts.recordOnly:
       checkSupportedBase(result.baseIdentity)
-      # The Omarchy account (spec §8.5, again at plan time): required on an
-      # Omarchy base, refused elsewhere. Generation 0 alone (bootstrap's
-      # apply, no operator profile) names no account and is not asked.
-      if user.addOn.declared or user.resources.len > 0:
-        let p = omarchyAccountProblem(result.baseIdentity.id,
-                                      user.addOn.omarchyAccount)
-        if p.detail.len > 0:
-          raise newAddOnError(p.diagnostic, p.detail &
-            "; nothing was planned or changed")
+    # The Omarchy account (spec §8.5, again at plan time): required on an
+    # Omarchy base, refused elsewhere; see ``omarchyAccountChecked`` for
+    # which applies ask.
+    if omarchyAccountChecked(purpose, opts.recordOnly,
+        user.addOn.declared or user.resources.len > 0):
+      let p = omarchyAccountProblem(result.baseIdentity.id,
+                                    user.addOn.omarchyAccount)
+      if p.detail.len > 0:
+        raise newAddOnError(p.diagnostic, p.detail &
+          "; nothing was planned or changed")
   let baseIdentityText = renderBaseIdentity(result.baseIdentity)
   # A package that arrived since the add-on took a unit name (spec §4.3):
   # reported on every plan and apply as actionable drift.

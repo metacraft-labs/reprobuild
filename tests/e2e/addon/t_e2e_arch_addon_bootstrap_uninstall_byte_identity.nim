@@ -26,10 +26,12 @@
 ## red on the btrfs guest with a diff naming it (``btrfs-subvolumes`` and
 ## ``addon-roots`` records of ``/repro``). The record says which.
 ##
-## Bases: ``REPRO_ADDON_BASES`` (default ``arch-btrfs-amd64,arch-ext4-amd64``).
-## The Omarchy VM joins the matrix when the Arch test bed provides it; its
-## leg passes ``--profile`` with the ``omarchyAccount`` and fingerprints the
-## account's hook tree (``omarchy-hooks``).
+## Bases: ``REPRO_ADDON_BASES`` (the recipe's default is
+## ``arch-btrfs-amd64,arch-ext4-amd64,omarchy-amd64``). On the Omarchy VM
+## (the test bed's pinned Omarchy 4.5.0 install) the preflight and bootstrap
+## take ``--profile`` with the ``omarchyAccount``, every generation names
+## it, and the fingerprint also records the account's hook tree
+## (``omarchy-hooks``), which must be present and unchanged at the end.
 ##
 ## Opt-in: ``REPRO_ADDON_VM_GATES=1``
 ## (``just e2e_arch_addon_bootstrap_uninstall_byte_identity``).
@@ -60,57 +62,62 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
     let (repro, sha) = g.installArtefact()
     record["artefactSha256"] = %sha
 
-    let f0 = g.fingerprintArch(repro)
+    let account = accountFor(b)
+    let f0 = g.fingerprintArch(repro, account)
     sleep(20_000)
-    let f0b = g.fingerprintArch(repro)
+    let f0b = g.fingerprintArch(repro, account)
     let det = identityReport(f0, f0b)
     step("fingerprint is deterministic", det.ok, det.text)
     if not det.ok: return fails
     step("the fingerprint has pacman-local records",
          "\npacman-local\t" in f0,
          (if "\npacman-local\t" in f0: "present" else: "no pacman-local component"))
+    if account.len > 0:
+      step("the fingerprint has omarchy-hooks records (the real hook tree)",
+           hooksRecorded(f0),
+           g.run("ls -la ~" & account & "/.config/omarchy/hooks 2>&1"))
 
-    if not g.bootstrapArch(repro, step).ok: return fails
+    if not g.bootstrapArch(repro, step, g.firstProfileFlag(b)).ok: return fails
     let l0 = g.ledgerOf()
-    let f1 = g.fingerprintArch(repro)
+    let f1 = g.fingerprintArch(repro, account)
     let d0 = deltaReport(f0, f1, "", l0)
     step("bootstrap diff == generation 0 ledger", d0.ok, d0.text)
     step("generation 0 wrote nothing under /etc/apt",
          g.exec("test -e /etc/apt").exitCode != 0,
          g.exec("ls -la /etc/apt 2>&1").stdout)
-    if archVariantOf(b) == avBtrfs:
+    if rootIsBtrfs(b):
       step("/repro is a btrfs subvolume",
            g.exec("test \"$(stat -c %i /repro)\" = 256").exitCode == 0,
            g.run("stat -c '%i %F' /repro"))
 
     let exe = g.gen0ReproExe()
-    let a1 = g.applyProfile(repro, "gen1", gen1Profile(exe))
+    let a1 = g.applyProfile(repro, "gen1", gen1Profile(exe, account))
     step("apply generation 1", a1.exitCode == 0, a1.stdout & a1.stderr)
     if a1.exitCode != 0: return fails
     let l1 = g.ledgerOf()
-    let f2 = g.fingerprintArch(repro)
+    let f2 = g.fingerprintArch(repro, account)
     let d1 = deltaReport(f1, f2, l0, l1)
     step("generation 1 diff == ledger delta", d1.ok, d1.text)
     step("the fixture unit is active",
          g.exec("systemctl is-active " & FixtureUnitName).exitCode == 0,
          g.exec("systemctl status --no-pager " & FixtureUnitName).stdout)
 
-    let a2 = g.applyProfile(repro, "gen2", gen2Profile())
+    let a2 = g.applyProfile(repro, "gen2", gen2Profile(account))
     step("apply generation 2", a2.exitCode == 0, a2.stdout & a2.stderr)
     if a2.exitCode != 0: return fails
     let l2 = g.ledgerOf()
-    let f3 = g.fingerprintArch(repro)
+    let f3 = g.fingerprintArch(repro, account)
     let d2 = deltaReport(f2, f3, l1, l2)
     step("generation 2 diff == ledger delta", d2.ok, d2.text)
 
     let un = g.exec(repro & " system addon uninstall")
     step("uninstall", un.exitCode == 0, un.stdout & un.stderr)
-    let f4 = g.fingerprintArch(repro)
+    let f4 = g.fingerprintArch(repro, account)
     let ident = identityReport(f0, f4)
     record["finalDiff"] = %ident.text
     step("base fingerprint after uninstall == before bootstrap", ident.ok,
          ident.text)
-    if not ident.ok and archVariantOf(b) == avBtrfs:
+    if not ident.ok and rootIsBtrfs(b):
       record["diffNamesReproSubvolume"] =
         %("btrfs-subvolumes" in ident.text and "repro" in ident.text)
     for (n, t) in [("f0", f0), ("f1", f1), ("f2", f2), ("f3", f3), ("f4", f4),
@@ -137,6 +144,7 @@ suite "e2e_arch_addon_bootstrap_uninstall_byte_identity":
       for b in selectedArchBases():
         let record = archGateRecord("e2e_arch_addon_bootstrap_uninstall_byte_identity")
         record["base"] = %b.name
+        if isOmarchyBase(b): record["omarchy"] = omarchyRecordBase()
         let f = runBase(b, record)
         record["verdict"] = %(if f.len == 0: "green" else: "red")
         echo "record: ", writeRecord(

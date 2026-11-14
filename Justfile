@@ -95,13 +95,13 @@ e2e_arch_addon_apt_closure_refused:
     REPRO_ADDON_BASES="${REPRO_ADDON_BASES:-arch-btrfs-amd64,arch-ext4-amd64}" bash ./scripts/run_addon_gate.sh t_e2e_arch_addon_apt_closure_refused
 
 e2e_arch_addon_bootstrap_uninstall_byte_identity:
-    REPRO_ADDON_BASES="${REPRO_ADDON_BASES:-arch-btrfs-amd64,arch-ext4-amd64}" bash ./scripts/run_addon_gate.sh t_e2e_arch_addon_bootstrap_uninstall_byte_identity
+    REPRO_ADDON_BASES="${REPRO_ADDON_BASES:-arch-btrfs-amd64,arch-ext4-amd64,omarchy-amd64}" bash ./scripts/run_addon_gate.sh t_e2e_arch_addon_bootstrap_uninstall_byte_identity
 
 e2e_arch_addon_uninstall_refuses_pending_switch:
     REPRO_ADDON_TEST_SEAMS=1 REPRO_ADDON_BASES="${REPRO_ADDON_BASES:-arch-btrfs-amd64,arch-ext4-amd64}" bash ./scripts/run_addon_gate.sh t_e2e_arch_addon_uninstall_refuses_pending_switch
 
 e2e_arch_addon_preflight_is_zero_write:
-    REPRO_ADDON_BASES="${REPRO_ADDON_BASES:-arch-btrfs-amd64,arch-ext4-amd64}" bash ./scripts/run_addon_gate.sh t_e2e_arch_addon_preflight_is_zero_write
+    REPRO_ADDON_BASES="${REPRO_ADDON_BASES:-arch-btrfs-amd64,arch-ext4-amd64,omarchy-amd64}" bash ./scripts/run_addon_gate.sh t_e2e_arch_addon_preflight_is_zero_write
 
 e2e_arch_addon_store_placement_by_root_fs:
     REPRO_ADDON_BASES="arch-btrfs-amd64,arch-ext4-amd64" bash ./scripts/run_addon_gate.sh t_e2e_arch_addon_store_placement_by_root_fs

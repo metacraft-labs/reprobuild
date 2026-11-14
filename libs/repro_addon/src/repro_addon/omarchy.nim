@@ -111,6 +111,15 @@ proc omarchyAccountProblem*(baseId, account: string;
       hooks & " is not a directory; Omarchy's hook directory must exist " &
       "in the account's home (spec §4.3.2)")
 
+proc omarchyAccountChecked*(purpose: string; recordOnly,
+                            operatorProfile: bool): bool =
+  ## Whether an apply checks the profile's ``omarchyAccount`` against the
+  ## base (spec §8.5): on an operator profile's apply, and not on generation
+  ## 0 alone (bootstrap's apply carries no operator profile), a replay, a
+  ## revert or a record-only pass, which finish or undo a switch already
+  ## decided and are never refused for the base.
+  operatorProfile and purpose notin ["revert", "replay"] and not recordOnly
+
 proc omarchyAccountRefusal*(baseId, account: string;
                             lookup: proc(name: string): tuple[found: bool;
                               home: string] = accountHome): string =

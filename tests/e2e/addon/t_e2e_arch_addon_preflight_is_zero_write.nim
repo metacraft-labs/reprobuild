@@ -18,6 +18,17 @@
 ##    for ``--profile``, because the Omarchy account cannot be checked
 ##    without the profile). The Arch plan records ``base.pacman``,
 ##    ``base.networkManager`` and ``rootFilesystem.snapper``.
+## 3b. **on the Omarchy VM** (the test bed's pinned Omarchy 4.5.0 install,
+##    ``ID=omarchy`` / ``ID_LIKE=arch`` as installed): the read-only and the
+##    read-write runs take ``--profile`` naming ``omarchyAccount``; the plan
+##    records Omarchy's ``VERSION_ID``, ``BUILD_ID`` and the ``omarchy``
+##    package's version, which must equal what ``omarchy-version`` prints;
+##    without ``--profile``, with a profile naming no account, and with an
+##    account the password database does not know, the ``omarchy-account``
+##    check fails with ``EAddOnBaseLayerOwned``; with the account's hook
+##    directory moved away it fails naming the directory. On a plain Arch
+##    guest a profile naming an ``omarchyAccount`` fails with
+##    ``EAddOnOutOfScope``.
 ## 4. **an archive date below the matrix**: on ``arch-old-systemd-amd64``
 ##    (pacman pinned to an Arch Linux Archive date whose systemd major is
 ##    257) the preflight refuses with the ``distribution`` check failed,
@@ -59,13 +70,16 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
   proc step(name: string; ok: bool; detail: string) =
     steps.add(%*{"step": name, "ok": ok, "detail": detail})
     if not ok: fails.add(b.name & ": " & name & ": " & detail)
-  let belowMatrix = archVariantOf(b) == avOldSystemd
+  let belowMatrix = not isOmarchyBase(b) and archVariantOf(b) == avOldSystemd
+  let omarchy = isOmarchyBase(b)
   try:
     g = newArchGuest(b)
     g.boot()
     g.prepareArchGuest()
     let (repro, sha) = g.installArtefact()
     record["artefactSha256"] = %sha
+    # The first profile, on the disk before the hash is taken (Omarchy only).
+    let profileFlag = g.firstProfileFlag(b)
     g.shutdown()
     let h0 = g.diskSha256()
 
@@ -75,7 +89,7 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
     g.copyTo(a.path, "/mnt/repro")
     discard g.run("cd /mnt && echo '" & a.sha256 &
                   "  repro' | sha256sum -c - && chmod 0755 repro")
-    let ro = g.exec("/mnt/repro system addon preflight")
+    let ro = g.exec("/mnt/repro system addon preflight" & profileFlag)
     record["readOnlyPreflight"] = %(ro.stdout & ro.stderr)
     if belowMatrix:
       step("the preflight refuses a base whose systemd is below the matrix",
@@ -98,7 +112,7 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
          else: newer.stdout & newer.stderr)
     if belowMatrix: return fails
 
-    let rw = g.exec(repro & " system addon preflight")
+    let rw = g.exec(repro & " system addon preflight" & profileFlag)
     step("read-write preflight is compatible", rw.exitCode == 0,
          rw.stdout & rw.stderr)
     if rw.exitCode == 0 and ro.exitCode == 0:
@@ -106,7 +120,7 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
       let rwDigest = planDigestOf(rw.stdout)
       step("plan digest is the same read-only and read-write",
            rwDigest == roDigest, "ro " & roDigest & " rw " & rwDigest)
-    let js = g.exec(repro & " system addon preflight --json")
+    let js = g.exec(repro & " system addon preflight --json" & profileFlag)
     var plan: JsonNode
     try:
       plan = parseJson(js.stdout)
@@ -122,6 +136,57 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
     step("the plan records the root filesystem type",
          p{"rootFilesystem", "type"}.getStr() == g.rootFsType(),
          $p{"rootFilesystem"})
+
+    if omarchy:
+      let osr = g.run(". /etc/os-release && printf '%s|%s|%s|%s' \"$ID\" \"$ID_LIKE\" \"$VERSION_ID\" \"$BUILD_ID\"").strip().split('|')
+      let ver = g.run("omarchy-version 2>/dev/null || true").strip()
+      let pkg = g.run("pacman -Q omarchy | cut -d' ' -f2").strip()
+      record["omarchyFacts"] = %*{"osRelease": osr, "omarchyVersion": ver,
+                                  "package": pkg}
+      step("the installed base is ID=omarchy ID_LIKE=arch, and passes",
+           osr.len == 4 and osr[0] == "omarchy" and "arch" in osr[1] and
+             "pass distribution" in rw.stdout and
+             "pass omarchy-account" in rw.stdout, rw.stdout)
+      let o = p{"omarchy"}
+      step("the plan records Omarchy's version from os-release and the package",
+           o != nil and o{"versionId"}.getStr() == osr[2] and
+             o{"buildId"}.getStr() == osr[3] and o{"package"}.getStr() == pkg and
+             o{"account"}.getStr() == accountFor(b) and
+             (ver.len == 0 or ver == osr[2] or pkg.startsWith(ver)),
+           $o & " omarchy-version=" & ver)
+      let none = g.exec(repro & " system addon preflight")
+      step("no --profile on Omarchy is refused, EAddOnBaseLayerOwned",
+           none.exitCode == 2 and "fail omarchy-account" in none.stdout and
+             "EAddOnBaseLayerOwned" in none.stdout, none.stdout)
+      let noAcct = g.exec(repro & " system addon preflight --profile " &
+        g.putProfile("no-account", addOnStanza("")))
+      step("a profile naming no omarchyAccount is refused, EAddOnBaseLayerOwned",
+           noAcct.exitCode == 2 and "fail omarchy-account" in noAcct.stdout and
+             "EAddOnBaseLayerOwned" in noAcct.stdout, noAcct.stdout)
+      let unknown = g.exec(repro & " system addon preflight --profile " &
+        g.putProfile("unknown-account", addOnStanza("nosuchuser")))
+      step("an account the password database does not know is refused",
+           unknown.exitCode == 2 and "EAddOnBaseLayerOwned" in unknown.stdout and
+             "not an account" in unknown.stdout, unknown.stdout)
+      let hooks = g.run("getent passwd " & accountFor(b) & " | cut -d: -f6").strip() &
+        "/.config/omarchy/hooks"
+      discard g.run("mv " & hooks & " " & hooks & ".repro-gate")
+      let noDir = g.exec(repro & " system addon preflight" & profileFlag)
+      discard g.run("mv " & hooks & ".repro-gate " & hooks)
+      step("an account with no hook directory is refused, naming it",
+           noDir.exitCode == 2 and "EAddOnBaseLayerOwned" in noDir.stdout and
+             hooks in noDir.stdout, noDir.stdout)
+      let back = g.exec(repro & " system addon preflight" & profileFlag)
+      step("compatible again with the hook directory back", back.exitCode == 0,
+           back.stdout)
+      return fails
+
+    # On a plain Arch base an omarchyAccount has no meaning.
+    let stray = g.exec(repro & " system addon preflight --profile " &
+      g.putProfile("stray-account", addOnStanza("root")))
+    step("an omarchyAccount on a base that is not Omarchy is EAddOnOutOfScope",
+         stray.exitCode == 2 and "fail omarchy-account" in stray.stdout and
+           "EAddOnOutOfScope" in stray.stdout, stray.stdout)
 
     # Omarchy's os-release: the base rule accepts ID=omarchy ID_LIKE=arch;
     # without --profile the Omarchy account cannot be checked.
@@ -160,12 +225,14 @@ suite "e2e_arch_addon_preflight_is_zero_write":
       var bases = selectedArchBases()
       var hasOld = false
       for b in bases:
-        if archVariantOf(b) == avOldSystemd: hasOld = true
+        if not isOmarchyBase(b) and archVariantOf(b) == avOldSystemd:
+          hasOld = true
       if not hasOld: bases.add(ArchOldSystemd)
       for b in bases:
         let record = archGateRecord("e2e_arch_addon_preflight_is_zero_write")
         record["base"] = %b.name
-        record["archiveDate"] = %archiveDateOf(b)
+        if isOmarchyBase(b): record["omarchy"] = omarchyRecordBase()
+        else: record["archiveDate"] = %archiveDateOf(b)
         let f = runBase(b, record)
         record["verdict"] = %(if f.len == 0: "green" else: "red")
         echo "record: ", writeRecord("e2e_arch_addon_preflight_is_zero_write",

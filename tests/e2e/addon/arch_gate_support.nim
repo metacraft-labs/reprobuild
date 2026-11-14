@@ -79,15 +79,39 @@ proc fingerprintArch*(g: Guest; repro: string; omarchyAccount = ""): string =
         (if omarchyAccount.len > 0: " --omarchy-account " & omarchyAccount
          else: ""))
 
+proc rootIsBtrfs*(b: BaseImage): bool =
+  ## The base's root filesystem as the test bed builds it: btrfs for the
+  ## Arch cloud image and its archive-date variant, and for the Omarchy VM
+  ## (Omarchy's installer: btrfs ``@`` with snapper); ext4 for the ext4 guest.
+  isOmarchyBase(b) or archVariantOf(b) in {avBtrfs, avOldSystemd}
+
+proc accountFor*(b: BaseImage): string =
+  ## The ``omarchyAccount`` a profile names on ``b``: the account the
+  ## Omarchy VM's installer created, "" on a plain Arch guest.
+  if isOmarchyBase(b): OmarchyAccount else: ""
+
 proc vacuityGuardRootFs*(g: Guest; b: BaseImage): tuple[ok: bool; detail: string] =
-  ## The byte-identity gate's vacuity guard: the btrfs base must report a
+  ## The byte-identity gate's vacuity guard: a btrfs base must report a
   ## btrfs root and the ext4 base an ext4 one (``findmnt -no FSTYPE /``),
   ## or the two legs would test one placement twice.
   let fs = g.rootFsType()
-  let want = case archVariantOf(b)
-    of avBtrfs, avOldSystemd: "btrfs"
-    of avExt4: "ext4"
+  let want = if rootIsBtrfs(b): "btrfs" else: "ext4"
   (fs == want, b.name & ": findmnt -no FSTYPE / = " & fs & ", expected " & want)
+
+proc firstProfileFlag*(g: Guest; b: BaseImage): string =
+  ## ``--profile <file>`` for the preflight and bootstrap on an Omarchy base
+  ## (spec §6.1: the account cannot be checked without the profile), with
+  ## the ``addOn`` stanza naming the account; "" on a plain Arch guest.
+  if not isOmarchyBase(b): return ""
+  " --profile " & g.putProfile("first", addOnStanza(accountFor(b)))
+
+proc hooksRecorded*(fingerprint: string): bool =
+  ## The fingerprint records the account's hook tree (``omarchy-hooks``),
+  ## and the hook directory itself is present, not ``absent``.
+  for line in fingerprint.splitLines():
+    if line.startsWith("omarchy-hooks	"):
+      if line.endsWith("	absent"): return false
+      result = true
 
 proc preflightArch*(g: Guest; repro, flags: string): ExecOut =
   g.exec(repro & " system addon preflight" & flags)
