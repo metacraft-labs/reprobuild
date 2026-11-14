@@ -97,6 +97,20 @@
 ##     tree root, with a ``.nim`` inside, is not a change.
 ## 39. (decision 115) A ``tmp`` or ``docs`` directory there is refused:
 ##     the cost the owner accepted.
+## 40. (§13 decision 142) Built with ``--skipUserCfg``, as
+##     scripts/build_apps.sh builds a guarded helper, a ``nim.cfg`` or
+##     ``config.nims`` in ``$XDG_CONFIG_HOME/nim`` neither refuses the
+##     helper nor changes a rebuild.
+## 41. (decision 142) A helper built without the flag is refused.
+## 42. (round 12, decision 115 (B) narrowed) A fixed-list name as a later
+##     import component: ``vend2/pkgx/build/util.nim`` shadowing
+##     ``import pkgx/build/util`` from vend1 is refused.
+## 43. (round 12) Under an execute-only parent the list is written, a new
+##     ``nim.cfg`` there is refused (``configs-probed``), and a listed
+##     directory that can no longer be listed is refused.
+## 44. (round 12) A relative ``--path`` is recorded absolute, and the
+##     helper is accepted from ``/`` and from a directory with its own
+##     ``vendor/``.
 ##
 ## Falsifying builds: ``stale-helper-accepted`` (cases 2-5 and 8-10 red),
 ## ``fresh-skips-included`` (case 4), ``fresh-skips-outside-tree`` (case
@@ -126,7 +140,11 @@
 ## own message, which comes first, so each falsifier still turns them
 ## red. ``no-parent-configs``
 ## (cases 35 and 36), ``no-search-listings`` (case 37) and
-## ``listing-counts-tool-dirs`` (case 38).
+## ``listing-counts-tool-dirs`` (case 38), ``import-listings-exclude-tool-dirs``
+## (case 42), ``configs-fail-unreadable`` (case 43), ``relative-search-paths``
+## (case 44); and the builds ``-d:reproAddonMutation=fresh-accepts-user-config``
+## (case 41) and ``helper-built-without-skip-user-cfg`` (case 40, this
+## test's own: its fixture built without the flag).
 ##
 ## Cases 22, 23 and 28 run the real strace behind a wrapper script named by
 ## ``REPRO_STRACE``. The wrapper is justified: it is how the writer's
@@ -141,6 +159,8 @@ import std/[os, osproc, sequtils, strutils, tempfiles, times, unittest]
 import repro_test_support/fresh_binary
 
 const RepoRoot = currentSourcePath().parentDir.parentDir.parentDir.parentDir
+const TestMutation {.strdefine: "reproAddonMutation".} = ""
+  ## Case 40's own falsifier, ``helper-built-without-skip-user-cfg``.
 
 let base = createTempDir("fresh-binary-", "")
 let tree = base / "tree"
@@ -226,7 +246,9 @@ proc build() =
   for src in @[lib, app, included, outside, csrc, header, blob, execInput, relInput,
                nonAscii, gtName, nlName, bsName, hello, trailing, leading] & parInputs:
     setLastModificationTime(src, getTime() - initDuration(seconds = 60))
-  let flags = @["--path:" & tree / "libs" / "foolib" / "src",
+  # --skipUserCfg as scripts/build_apps.sh builds a guarded helper (§13
+  # decision 142).
+  let flags = @["--skipUserCfg", "--path:" & tree / "libs" / "foolib" / "src",
                 "--path:" & parentDir(outside)]
   let (o1, c1) = execCmdEx(quoteShellCommand(@["nim", "c", "--hints:off",
     "--warnings:off"] & flags & @["--nimcache:" & tree / "build" / "nimcache" / "foo-helper",
@@ -440,7 +462,7 @@ suite "a helper binary is used only when built from the tree under test":
     let env = "REPRO_STRACE=" & quoteShell(strace) & " "
     execCmdEx(env & quoteShellCommand(@["bash",
       RepoRoot / "scripts" / "write_helper_deps.sh", "foo-helper", app,
-      "--path:" & tree / "libs" / "foolib" / "src",
+      "--skipUserCfg", "--path:" & tree / "libs" / "foolib" / "src",
       "--path:" & parentDir(outside)]), workingDir = tree)
 
   test "22: a trace in a format the writer does not parse fails the list":
@@ -546,13 +568,15 @@ suite "a helper binary is used only when built from the tree under test":
       "print(\\\"made\\\")'\")\necho t\n")
     let bin3 = t3 / "build" / "bin" / "tmpf"
     let (o1, c1) = execCmdEx(quoteShellCommand(@["nim", "c", "--hints:off",
-      "--warnings:off", "--nimcache:" & t3 / "build" / "nimcache" / "tmpf",
+      "--warnings:off", "--skipUserCfg",
+      "--nimcache:" & t3 / "build" / "nimcache" / "tmpf",
       "--out:" & bin3, app3]))
     doAssert c1 == 0, o1
     let (ob, cb) = execCmdEx(quoteShellCommand(@[bin3]))
     doAssert cb == 0 and "made" in ob, ob
     let (o2, c2) = execCmdEx(quoteShellCommand(@["bash",
-      RepoRoot / "scripts" / "write_helper_deps.sh", "tmpf", app3]),
+      RepoRoot / "scripts" / "write_helper_deps.sh", "tmpf", app3,
+      "--skipUserCfg"]),
       workingDir = t3)
     checkpoint o2
     check c2 == 0
@@ -562,7 +586,7 @@ suite "a helper binary is used only when built from the tree under test":
   test "30: a listed directory whose name ends in a space is checked under its own name":
     build()
     var dirs: seq[string]
-    for (d, _) in helperListings(tree, "foo-helper"): dirs.add(d)
+    for (d, _, _) in helperListings(tree, "foo-helper"): dirs.add(d)
     checkpoint $dirs
     check spaceDir in dirs
     check refusal() == ""
@@ -587,11 +611,14 @@ suite "a helper binary is used only when built from the tree under test":
   let rt = base / "tree-resolve"
   let rApp = rt / "apps" / "foo" / "foo.nim"
   let rBin = rt / "build" / "bin" / "rfoo"
-  proc buildResolve(paths = @["vendor"]) =
+  proc buildResolve(paths = @["vendor"]; skipUserCfg = true;
+                    relative = false) =
     ## ``paths``: the ``--path`` directories under ``rt``, in order (Nim
-    ## searches a later one first).
+    ## searches a later one first). ``relative``: given relative to ``rt``,
+    ## where the compiler and the writer run.
     var flags: seq[string]
-    for d in paths: flags.add("--path:" & rt / d)
+    if skipUserCfg: flags.add("--skipUserCfg")
+    for d in paths: flags.add("--path:" & (if relative: d else: rt / d))
     createDir(rt / "vendor" / "pkgx")
     createDir(parentDir(rApp))
     writeFile(rt / "vendor" / "pkgx" / "util.nim", "proc which*(): string = \"vendor\"\n")
@@ -600,7 +627,8 @@ suite "a helper binary is used only when built from the tree under test":
       setLastModificationTime(p, getTime() - initDuration(seconds = 60))
     let (o1, c1) = execCmdEx(quoteShellCommand(@["nim", "c", "--hints:off",
       "--warnings:off"] & flags & @[
-      "--nimcache:" & rt / "build" / "nimcache" / "rfoo", "--out:" & rBin, rApp]))
+      "--nimcache:" & rt / "build" / "nimcache" / "rfoo", "--out:" & rBin, rApp]),
+      workingDir = rt)
     doAssert c1 == 0, o1
     let (o2, c2) = execCmdEx(quoteShellCommand(@["bash",
       RepoRoot / "scripts" / "write_helper_deps.sh", "rfoo", rApp] & flags),
@@ -689,7 +717,7 @@ suite "a helper binary is used only when built from the tree under test":
     # gains the subdirectory, is checked first).
     buildResolve(@["vendor", "vendor2"])
     check rRefusal() == ""
-    check (rt / "vendor2", listingDigest(rt / "vendor2")) in
+    check (rt / "vendor2", listingDigest(rt / "vendor2"), false) in
       helperListings(rt, "rfoo")
     createDir(parentDir(shadow))
     writeFile(shadow, body)
@@ -729,6 +757,139 @@ suite "a helper binary is used only when built from the tree under test":
       check ("listing of " & tree & " that has changed") in why
       removeDir(tree / d)
       check refusal() == ""
+
+  # ---- A11 code review round 12. A tree of its own per case, built and
+  # listed the way scripts/build_apps.sh does a guarded helper.
+  proc buildIn(t, name, app: string; flags: seq[string]; cwd = ""): string =
+    ## Compiles ``app`` to ``t/build/bin/name`` and writes its list, both in
+    ## ``cwd`` (default ``t``); "" when both succeed, else their output.
+    let wd = if cwd.len > 0: cwd else: t
+    let (o1, c1) = execCmdEx(quoteShellCommand(@["nim", "c", "--hints:off",
+      "--warnings:off"] & flags & @["--nimcache:" & t / "build" / "nimcache" / name,
+      "--out:" & t / "build" / "bin" / name, app]), workingDir = wd)
+    if c1 != 0: return "nim c: " & o1
+    let (o2, c2) = execCmdEx(quoteShellCommand(@["bash",
+      RepoRoot / "scripts" / "write_helper_deps.sh", name, app] & flags),
+      workingDir = wd)
+    if c2 != 0: return "write_helper_deps: " & o2
+    ""
+  proc refusalOf(t, name: string): string =
+    try:
+      discard freshRepoBinary(t, name)
+      ""
+    except StaleHelperBinary as e:
+      e.msg
+
+  test "40: the user's Nim configuration neither changes nor refuses a helper built with --skipUserCfg":
+    # §13 decision 142. The test's own falsifier,
+    # -d:reproAddonMutation=helper-built-without-skip-user-cfg, builds it
+    # without the flag: the list says so, and the helper is refused.
+    let xdg = base / "xdg"
+    createDir(xdg / "nim")
+    putEnv("XDG_CONFIG_HOME", xdg)
+    defer: delEnv("XDG_CONFIG_HOME")
+    buildResolve(skipUserCfg = TestMutation != "helper-built-without-skip-user-cfg")
+    var why = rRefusal()
+    checkpoint why
+    check why == ""
+    for (cfg, body) in [("nim.cfg", "-d:probeFlag\n"),
+                        ("config.nims", "switch(\"define\", \"probeFlag\")\n")]:
+      writeFile(xdg / "nim" / cfg, body)
+      why = rRefusal()
+      checkpoint cfg & ": " & why
+      check why == ""
+      # Built the same way again, the helper does not change: the flag
+      # keeps the file out (without it, the rebuild prints "flag").
+      let (o, c) = execCmdEx(quoteShellCommand(@["nim", "c", "-r",
+        "--hints:off", "--warnings:off", "--skipUserCfg",
+        "--path:" & rt / "vendor", "--nimcache:" & rt / "build" / "probe40",
+        "--out:" & rt / "build" / "probe40" / "p", rApp]))
+      checkpoint o
+      check c == 0 and "flag" notin o
+      removeFile(xdg / "nim" / cfg)
+
+  test "41: a helper built reading the user's Nim configuration is refused":
+    # Falsifier: -d:reproAddonMutation=fresh-accepts-user-config.
+    buildResolve(skipUserCfg = false)
+    let why = rRefusal()
+    checkpoint why
+    check "was built without --skipUserCfg" in why
+
+  test "42: a fixed-list name as a later import component is a change":
+    # Round 12 narrows decision 115 (B) to an import path's first
+    # component: with `import pkgx/build/util` found in vend1, a new
+    # vend2/pkgx/build/util.nim (vend2 searched first) shadows it.
+    # Falsifier: WRITE_HELPER_DEPS_MUTATION=import-listings-exclude-tool-dirs.
+    let t = base / "tree-build-component"
+    createDir(t / "vend1" / "pkgx" / "build")
+    createDir(t / "vend2" / "pkgx")
+    createDir(t / "apps" / "b")
+    writeFile(t / "vend1" / "pkgx" / "build" / "util.nim",
+      "proc which*(): string = \"vend1 build\"\n")
+    writeFile(t / "vend2" / "pkgx" / "other.nim", "discard\n")
+    let app = t / "apps" / "b" / "b.nim"
+    writeFile(app, "import pkgx/build/util\necho which()\n")
+    let flags = @["--skipUserCfg", "--path:" & t / "vend1", "--path:" & t / "vend2"]
+    let built = buildIn(t, "bfoo", app, flags)
+    checkpoint built
+    check built == ""
+    check refusalOf(t, "bfoo") == ""
+    let shadow = t / "vend2" / "pkgx" / "build" / "util.nim"
+    createDir(parentDir(shadow))
+    writeFile(shadow, "proc which*(): string = \"VENDOR2 build SHADOW\"\n")
+    let why = refusalOf(t, "bfoo")
+    checkpoint why
+    check ("listing of " & t / "vend2" / "pkgx" & " that has changed") in why
+    removeDir(t / "vend2" / "pkgx" / "build")
+    check refusalOf(t, "bfoo") == ""
+
+  test "43: a parent directory that cannot be listed is probed, not a failure":
+    # Round 12: under an execute-only directory the compile works, so the
+    # list must too. Nim opens nim.cfg and config.nims there by name; the
+    # list looks them up the same way (configs-probed). Falsifier:
+    # WRITE_HELPER_DEPS_MUTATION=configs-fail-unreadable.
+    let xo = base / "xo"
+    let t = xo / "ws" / "t"
+    let app = t / "apps" / "u" / "u.nim"
+    createDir(parentDir(app))
+    writeFile(app, "when defined(probeFlag): echo \"flag\"\necho \"u\"\n")
+    setFilePermissions(xo, {fpUserWrite, fpUserExec, fpGroupExec, fpOthersExec})
+    defer: setFilePermissions(xo, {fpUserRead, fpUserWrite, fpUserExec})
+    let built = buildIn(t, "ufoo", app, @["--skipUserCfg"])
+    checkpoint built
+    check built == ""
+    check refusalOf(t, "ufoo") == ""
+    if built == "":
+      check helperConfigs(t, "ufoo").anyIt(it.dir == xo and it.probed)
+    writeFile(xo / "nim.cfg", "-d:probeFlag\n")
+    var why = refusalOf(t, "ufoo")
+    checkpoint why
+    check ("built when " & xo & " held other Nim configuration files") in why
+    removeFile(xo / "nim.cfg")
+    check refusalOf(t, "ufoo") == ""
+    # A directory listed when the list was written and unlistable now is
+    # refused, never read as empty.
+    setFilePermissions(t / "apps", {fpUserWrite, fpUserExec})
+    why = refusalOf(t, "ufoo")
+    setFilePermissions(t / "apps", {fpUserRead, fpUserWrite, fpUserExec})
+    checkpoint why
+    check "cannot be now" in why or ("listing of " & t / "apps") in why
+
+  test "44: a relative --path is recorded absolute and checked from any directory":
+    # Round 12. Falsifier: WRITE_HELPER_DEPS_MUTATION=relative-search-paths.
+    buildResolve(relative = true)
+    let sp = helperSearchPath(rt, "rfoo")
+    checkpoint $sp
+    check sp.allIt(it.isAbsolute)
+    let here = getCurrentDir()
+    defer: setCurrentDir(here)
+    let other = base / "cwd44"
+    createDir(other / "vendor")
+    for d in ["/", other]:
+      setCurrentDir(d)
+      let why = rRefusal()
+      checkpoint d & ": " & why
+      check why == ""
 
   test "7: no binary, or no dependency list, is refused":
     build()

@@ -778,10 +778,20 @@ while read -r name path extra_flags; do
   # the build (scripts/write_helper_deps.sh, below): repro_test_support/
   # fresh_binary reads it to refuse a binary older than any source it was
   # compiled from (a test must never report on an old build).
+  # A guarded helper is built without the user's Nim configuration
+  # ($XDG_CONFIG_HOME/nim), which is no source of the tree and which its
+  # dependency list cannot describe (ReproOS Add-On Mode spec §13 decision
+  # 142); the same flag goes to scripts/write_helper_deps.sh below, which
+  # records it.
+  helper_flags=()
+  case " ${HELPER_DEPS_APPS} " in
+    *" ${name} "*) helper_flags=(--skipUserCfg) ;;
+  esac
   entrypoint_status=0
   (
     unset_clingo_searchpath
     nim c \
+      ${helper_flags[@]+"${helper_flags[@]}"} \
       ${nim_mode_flags[@]+"${nim_mode_flags[@]}"} \
       ${extra_flag_array[@]+"${extra_flag_array[@]}"} \
       ${ssl_passl[@]+"${ssl_passl[@]}"} \
@@ -812,6 +822,7 @@ while read -r name path extra_flags; do
         *" ${name} "*)
           if [ "${REPRO_BUILD_APPS_HELPER_DEPS}" = write ] && ! (unset_clingo_searchpath
                 bash scripts/write_helper_deps.sh "${name}" "${path}" \
+                  ${helper_flags[@]+"${helper_flags[@]}"} \
                   ${nim_mode_flags[@]+"${nim_mode_flags[@]}"} \
                   ${extra_flag_array[@]+"${extra_flag_array[@]}"}); then
             record_failure "${name}: built, but its dependency list (scripts/write_helper_deps.sh) could not be written; a test will refuse the binary. On a host that denies ptrace (strace cannot run), build with REPRO_BUILD_APPS_HELPER_DEPS=none (see CONTRIBUTING.md); the tests that run this helper then refuse it"

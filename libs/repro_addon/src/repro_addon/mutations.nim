@@ -590,6 +590,9 @@
 ## ``template-live-by-name``                the live check reads a template
 ##                                           by its own name, which systemd
 ##                                           refuses (decision 135)
+## ``trigger-edges-omitted``               the planner orders no socket,
+##                                           timer or path unit after the
+##                                           unit it triggers (decision 137)
 ## ``live-check-call-site-reverted``       the add-on switch's call site
 ##                                           decides step 6's reload and
 ##                                           judgement from a unit-file
@@ -955,6 +958,9 @@
 ## ``fresh-ignores-listings``                 fresh_binary does not check a
 ##                                            listed directory's entries
 ##                                            (decision 80)
+## ``fresh-accepts-user-config``              fresh_binary accepts a helper
+##                                            built without --skipUserCfg
+##                                            (decision 142)
 ## ``override-sig-write-error-swallowed``     a failed signature write does
 ##                                            not stop the discard (round 6)
 ## ``override-rollback-removes-sig``         an intent record whose write
@@ -992,6 +998,13 @@
 ##                                            attestation key and the state
 ##                                            when the discard's completion
 ##                                            could not be written
+## ``sink-config-removed-in-step-4``          the Evidence sink's
+##                                            configuration and CA go with
+##                                            the other /etc objects
+##                                            (decision 56)
+## ``state-removed-after-root-failure``       the state goes although
+##                                            /etc/repro, a key or the
+##                                            secrets ramfs failed
 ## ``ship-ok-without-sink-configuration``     uninstall reads a missing sink
 ##                                            configuration as "nothing to
 ##                                            wait for" though records are
@@ -1438,9 +1451,23 @@ const
                           # so uninstall leaves it behind (issue
                           # 2026-11-14).
                           "revert-hold-unledgered",
-                          # a replayed revert leaves the hold directory
-                          # its interrupted attempt created unclaimed.
+                          # a replay forgets the hold directories its
+                          # interrupted revert recorded, so they are left
+                          # unclaimed.
                           "replayed-hold-dir-unclaimed",
+                          # a passing switch that clears a revert hold
+                          # removes its directory whenever it is left
+                          # empty, an operator's too.
+                          "revert-hold-clear-removes-any-dir",
+                          # the record of a revert's hold directories is
+                          # cleared when its ledger is written, not at
+                          # its commit, so a replay after a crash in
+                          # between leaves them unclaimed.
+                          "revert-hold-dirs-cleared-at-ledger",
+                          # a revert's hold is written unsynced, so a
+                          # power loss brings it back empty and the held
+                          # unit starts at boot.
+                          "revert-hold-not-synced",
                           # a revert removes the start holds and reloads
                           # before its persistent hold is written, and
                           # reloads whether the write failed or not.
@@ -1563,6 +1590,8 @@ const
                           # The every-switch check's call site (owner
                           # decision on the round-8 wiring issue).
                           "live-check-call-site-reverted",
+                          # §13 decision 137: the planner's trigger edges.
+                          "trigger-edges-omitted",
                           "reissue-skips-targets",
                           "reissue-skips-sockets",
                           "reissue-skips-unit-state",
@@ -1714,13 +1743,16 @@ const
                           "finish-trusts-kept-list",
                           "evidence-reported-removed-unchecked",
                           "ship-ok-without-sink-configuration",
+                          "sink-config-removed-in-step-4",
+                          "state-removed-after-root-failure",
                           "intent-overwrites-existing",
                           "discard-completed-objects-present",
                           "discard-failed-removal-counted-as-kept",
                           "discard-completion-key-read-late",
                           "discard-completion-failure-discards-key",
                           "discard-completion-sync-error-swallowed",
-                          "fresh-ignores-listings"]
+                          "fresh-ignores-listings",
+                          "fresh-accepts-user-config"]
 
 when AddonMutation.len > 0 and AddonMutation notin KnownAddonMutations and
     AddonMutation notin KnownAgentMutations:

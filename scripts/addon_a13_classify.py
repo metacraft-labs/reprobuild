@@ -255,10 +255,16 @@ EXPECT.update({
     # owner decision on the round-8 wiring issue): red on the same case.
     "mutcallsite": ("e2e_addon_adopt_hand_configured_service", "red",
                     "add-on build live-check-call-site-reverted"),
+    # §13 decision 137: the planner without the trigger edges. Not run
+    # with REPRO_A13_STOP_AT_RED: both the socket-first and the timer-first
+    # case must be seen red, and the apply's refusal comes earlier.
+    "mutnoedges": ("e2e_addon_to_reproos_conversion_keeps_state", "red",
+                   "engine build trigger-edges-omitted"),
 })
 TARGET.update({
     "mutliveset": "a switch that changes only a service's credential judges it",
     "mutcallsite": "a switch that changes only a service's credential judges it",
+    "mutnoedges": "decision 137, timer first:",
 })
 
 ROUND4_PROBES = ["account", "timer", "pathfloored", "path", "host"]
@@ -317,6 +323,22 @@ def on_target_rec(kind, rec):
         # Started, and ran as root: its ExecStartPre's uid marker reads 0.
         lc = rec.get("liveCrossCheck", {})
         return on_target(kind, steps) and lc.get("ranAsRoot") is True
+    if kind == "mutnoedges":
+        # Red because systemd refused each trigger whose unit was not yet
+        # loaded, for the socket and for the timer alike.
+        d = rec.get("decision137", {})
+        st = {x["step"]: x for x in steps}
+        red_both = all(any(n.startswith("decision 137, %s first:" % l) and not x["ok"]
+                           for n, x in st.items()) for l in ("socket", "timer"))
+        # Both halves of the refusal, for each trigger: the apply reported
+        # its enable --now failed, and systemd's journal says why ("not
+        # loaded"). Either alone could be another failure.
+        def refused(l):
+            e = d.get(l, {})
+            return (e.get("applyRefused") is True and
+                    e.get("journalNotLoaded") is True and
+                    e.get("refusedNotLoaded") is True)
+        return red_both and refused("socket") and refused("timer")
     if kind in ("mutliveset", "mutcallsite"):
         # The credentials-only switch changed the probe's materialised
         # credential and wrote none of its unit files (``credentialsOnly``),
@@ -396,7 +418,10 @@ def on_target_rec(kind, rec):
                 d.get("target", {}).get("ran") is True and
                 d.get("socket", {}).get("ran") is True and
                 rec.get("decision135Converted", {}).get("ran") is True and
-                rec.get("decision135Converted", {}).get("judgedTemplate") is True)
+                rec.get("decision135Converted", {}).get("judgedTemplate") is True and
+                all(rec.get("decision137", {}).get(l, {}).get("ran") is True and
+                    rec.get("decision137", {}).get(l, {}).get("refusedNotLoaded") is False
+                    for l in ("socket", "timer")))
     if kind == "mutreceipt":
         # At receipt-before-dir-fsync the receipt on the disk is empty (the
         # rename committed, the data not); before the rename the old receipt

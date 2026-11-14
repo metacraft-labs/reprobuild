@@ -26,12 +26,29 @@
 #                     (an absent one as the digest of no names), and in
 #                     each of them the directories an import found
 #                     elsewhere would be looked up in (decision 115 (A))
+#   listing-full <sha256> <dir>
+#                     as `listing`, for a directory a later component of
+#                     an import path is looked up in: the fixed list counts
+#                     there (a `build/` below `pkgx/` shadows
+#                     `import pkgx/build/m`), so only an import's first
+#                     component escapes it (round 12)
 #   configs <sha256> <dir>
 #                     the entry's directory and each of its parents up to
 #                     /, with the sha256 of the names of its nim.cfg,
 #                     config.nims and *.nims files: Nim reads the first
 #                     two in every parent directory of the project
 #                     (decision 115 (A)), so a new one refuses the binary
+#   configs-probed <sha256> <dir>
+#                     as `configs`, for a directory that cannot be listed
+#                     (execute-only): the digest covers which of nim.cfg
+#                     and config.nims exist there, looked up by name as
+#                     Nim does (round 12)
+#   user-config skipped|read
+#                     whether the binary was built with --skipUserCfg;
+#                     fresh_binary refuses "read" (§13 decision 142)
+#
+# Every `searchpath` and listed search directory is absolute: a relative
+# --path is resolved against the directory the compiler ran in (round 12).
 #   listing-filter <name>
 #                     which entries the digests count ("resolution"; a
 #                     falsifier run writes another), so fresh_binary
@@ -110,7 +127,11 @@
 # file above the package root not recorded), no-search-listings (search
 # directories the compiler never listed not recorded; both decision 115
 # (A)), listing-counts-tool-dirs (decision 114's fixed list without 115
-# (B)'s tool directories). A file
+# (B)'s tool directories), import-listings-exclude-tool-dirs (an import
+# path's later components digested without the fixed list counted),
+# configs-fail-unreadable (a parent that cannot be listed fails the list,
+# as in round 11), relative-search-paths (a relative --path recorded as
+# given). A file
 # <build>/nimcache/<name>/write-helper-deps.mutation selects one too, for
 # a run inside a graph edge, whose environment the engine sets; it is
 # read only when present.
@@ -126,6 +147,15 @@ if [ -z "${WRITE_HELPER_DEPS_MUTATION:-}" ] && [ -f "${mutation_file}" ]; then
   echo "write_helper_deps: FALSIFYING RUN: ${WRITE_HELPER_DEPS_MUTATION} (from ${mutation_file})" >&2
 fi
 export WRITE_HELPER_DEPS_MUTATION="${WRITE_HELPER_DEPS_MUTATION:-}"
+# Was the binary built with --skipUserCfg (§13 decision 142)? The flags
+# given here are the ones it was built with.
+WRITE_HELPER_DEPS_USER_CONFIG=read
+for a in "$@"; do
+  case "$a" in
+    --skipUserCfg|--skipUserCfg:on|--skipUserCfg:true) WRITE_HELPER_DEPS_USER_CONFIG=skipped ;;
+  esac
+done
+export WRITE_HELPER_DEPS_USER_CONFIG
 if [ "${WRITE_HELPER_DEPS_MUTATION:-}" != "keep-old-list" ]; then
   rm -f "${published}"
 fi
@@ -259,7 +289,15 @@ for line in open(os.path.join(cache, "dump.out"), errors="replace"):
         dump = json.loads(line)
 if dump is None:
     sys.exit("write_helper_deps: nim dump printed no configuration; no list written")
-search = sorted({os.path.normpath(p) for p in dump.get("lib_paths", []) + dump.get("lazyPaths", [])})
+# A relative entry (a relative --path given on the command line) is
+# relative to the directory the compiler ran in, this one: it is recorded
+# absolute, so the reader checks the same directory from any working
+# directory (A11 code review round 12).
+def absolute_search(p):
+    if mutation == "relative-search-paths":
+        return os.path.normpath(p)        # FALSIFIER: as given
+    return os.path.normpath(os.path.join(os.getcwd(), p))
+search = sorted({absolute_search(p) for p in dump.get("lib_paths", []) + dump.get("lazyPaths", [])})
 search_set = set(search)
 
 # The listing filter this list is written with; fresh_binary digests the
@@ -286,7 +324,7 @@ if listing_filter == "resolution-counts-tool-dirs":
     # FALSIFIER: decision 114's list alone, before 115 (B).
     never_counted = {b".nimcache", b"build", b".git", b"result"}
 
-def relevant(d, name):
+def relevant(d, name, full=False):
     # §13 decisions 111, 114 and 115: an entry counts in a listing when
     # it can
     # change what the compiler resolves -- a Nim source, a .nimble or .nims
@@ -295,7 +333,7 @@ def relevant(d, name):
     # import is one) -- except the fixed list above.
     if listing_filter == "every-entry":
         return True           # FALSIFIER: round 8's digest of every name
-    if name in never_counted:
+    if name in never_counted and not full:
         return False
     if name.endswith((b".nim", b".nimble", b".nims")) or name == b"nimble.paths":
         return True
@@ -310,12 +348,14 @@ def relevant(d, name):
         return listing_filter != "resolution-no-subdirs"
     return False
 
-def listing_digest(d):
+def listing_digest(d, full=False):
     # A directory that does not exist lists no names: a search directory
-    # created later (decision 115 (A)) changes the digest.
+    # created later (decision 115 (A)) changes the digest. ``full``: the
+    # fixed list counts too (a directory an import path's later component
+    # is looked up in; decision 115 (B) as narrowed in round 12).
     if not os.path.isdir(d):
         return hashlib.sha256(b"").hexdigest()
-    names = sorted(n for n in os.listdir(os.fsencode(d)) if relevant(d, n))
+    names = sorted(n for n in os.listdir(os.fsencode(d)) if relevant(d, n, full))
     return hashlib.sha256(b"\n".join(names)).hexdigest()
 
 def configs_digest(d):
@@ -323,6 +363,16 @@ def configs_digest(d):
     # (`nim.cfg`, `config.nims`), and any other `.nims` (decision 115 (A)).
     names = sorted(n for n in os.listdir(os.fsencode(d))
                    if n in (b"nim.cfg", b"config.nims") or n.endswith(b".nims"))
+    return hashlib.sha256(b"\n".join(names)).hexdigest()
+
+def configs_probe_digest(d):
+    # A directory that cannot be listed (execute-only, 0711 and the like):
+    # Nim still opens nim.cfg and config.nims in it, so the writer looks up
+    # those two names the same way, and the reader does too (A11 code
+    # review round 12). A directory that cannot be searched either hides
+    # them from Nim as well.
+    names = sorted(n for n in (b"config.nims", b"nim.cfg")
+                   if os.path.lexists(os.path.join(os.fsencode(d), n)))
     return hashlib.sha256(b"\n".join(names)).hexdigest()
 
 def decode(text):
@@ -362,8 +412,8 @@ def keep(kind, p):
                 os.path.dirname(entry).startswith(p.rstrip("/") + "/"):
             return            # FALSIFIER: a parent of the entry's directory
                               # (where a parent nim.cfg sits) not recorded
-        if p not in [d for d, _ in listings]:
-            listings.append((p, listing_digest(p)))
+        if p not in [x[0] for x in listings]:
+            listings.append((p, listing_digest(p), False))
         return
     if kind == "exec" and mutation == "no-execve":
         return                # FALSIFIER
@@ -537,14 +587,24 @@ else:
 # shadows a module found later. Every search directory outside the
 # immutable prefixes is listed, and in each of them the directories an
 # import found elsewhere would be looked up in (a/ and a/b/ above) where
-# they exist; an absent one is covered by its parent's listing.
+# they exist; an absent one is covered by its parent's listing. Those
+# directories are digested with the fixed list counted (``full``): an
+# absent `build/` below `a/` shadows `import a/build/m` as well as any
+# other name would (A11 code review round 12, narrowing decision 115 (B)
+# to an import path's first component).
 def recordable(d):
     return (not any(d.startswith(e) for e in excluded)
             and "/.git/" not in d + "/")
 
-def add_listing(d):
-    if d not in [x for x, _ in listings]:
-        listings.append((d, listing_digest(d)))
+def add_listing(d, full=False):
+    if mutation == "import-listings-exclude-tool-dirs":
+        full = False                      # FALSIFIER: decision 115 (B) as first written
+    for i, x in enumerate(listings):
+        if x[0] == d:
+            if full and not x[2]:
+                listings[i] = (d, listing_digest(d, True), True)
+            return
+    listings.append((d, listing_digest(d, full), full))
 
 if mutation != "no-search-listings":
     roots = [d for d in search if recordable(d + "/")]
@@ -560,7 +620,7 @@ if mutation != "no-search-listings":
                 for k in range(1, len(parts) + 1):
                     sub = os.path.join(d, *parts[:k])
                     if os.path.isdir(sub):
-                        add_listing(sub)
+                        add_listing(sub, full=True)
 # The configuration files above the project (§13 decision 115 (A)): Nim
 # reads nim.cfg and config.nims in the project's directory and in every
 # parent of it up to /, unless --skipParentCfg; a config file that does
@@ -571,10 +631,13 @@ if mutation != "no-parent-configs":
     d = os.path.dirname(entry)
     while True:
         try:
-            configs.append((d, configs_digest(d)))
+            configs.append((d, configs_digest(d), "configs"))
         except OSError as e:
-            sys.exit("write_helper_deps: cannot list %s for its Nim "
-                     "configuration files (%s); no list written" % (d, e))
+            if mutation == "configs-fail-unreadable":
+                # FALSIFIER: round 11, which failed the build here.
+                sys.exit("write_helper_deps: cannot list %s for its Nim "
+                         "configuration files (%s); no list written" % (d, e))
+            configs.append((d, configs_probe_digest(d), "configs-probed"))
         parent = os.path.dirname(d)
         if parent == d:
             break
@@ -620,10 +683,14 @@ for p in traced:
     seen.add(p)
     kind = "header" if p.endswith((".h", ".hpp", ".hh", ".inc")) else "read"
     lines.append(kind + " " + enc(p))
-for d, digest in listings:
-    lines.append("listing " + digest + " " + enc(d))
-for d, digest in configs:
-    lines.append("configs " + digest + " " + enc(d))
+for d, digest, full in listings:
+    lines.append(("listing-full " if full else "listing ") + digest + " " + enc(d))
+for d, digest, kind in configs:
+    lines.append(kind + " " + digest + " " + enc(d))
+# Whether the compiler read the user's Nim configuration (§13 decision
+# 142): a guarded helper is built with --skipUserCfg, and fresh_binary
+# refuses a list that says otherwise.
+lines.append("user-config " + os.environ.get("WRITE_HELPER_DEPS_USER_CONFIG", "read"))
 part = published + ".part"
 with open(part, "w") as fh:
     fh.write("\n".join(lines) + "\n")

@@ -173,6 +173,9 @@ def green(kind, base="debian-13"):
                 "instances": ["eth-r9-tpl@a.service", "eth-r9-tpl@b.service"],
                 "ran": True, "judgedTemplate": True, "judgedByName": False,
                 "applyRefusedTemplate": False}
+            rec["decision137"] = {
+                l: {"ran": True, "triggerActive": "active",
+                    "refusedNotLoaded": False} for l in ("socket", "timer")}
             rec["orderingCheck"] = "not run: the product engine carries no seam"
         else:
             rec["steps"] = padded([], 37, "a carried unit without default "
@@ -282,6 +285,21 @@ def red_record(kind, base="debian-13"):
                "the old one"),
             red("receipt receipt-before-dir-fsync: after the reset the receipt "
                 "is the old one or the new one", "on disk (0 bytes)")]
+    elif kind == "mutnoedges":
+        rec = base_record(CONV, base, engine=ENGINE,
+                          engine_mutation="trigger-edges-omitted")
+        rec["decision137"] = {
+            l: {"ran": False, "triggerActive": "inactive",
+                "applyRefused": True, "journalNotLoaded": True,
+                "refusedNotLoaded": True} for l in ("socket", "timer")}
+        rec["steps"] = [ok("bootstrap"),
+                        red("the reinstalled host realises the activities in full"),
+                        red("decision 137, socket first: a socket declared before "
+                            "the service it triggers is applied, active, and its "
+                            "service ran"),
+                        red("decision 137, timer first: a timer declared before "
+                            "the service it triggers is applied, active, and its "
+                            "service ran")]
     elif kind == "mutholdwin":
         rec = base_record(HELD, base, mutation="start-holds-after-driver-writes",
                           with_gate_mutation=False)
@@ -334,7 +352,7 @@ GREEN_KINDS = ["adopt", "conv", "convseam", "confirm", "floorupgrade",
                "parity", "heldwin"]
 RED_KINDS = ["mutexec", "mutimport", "mutstate", "mutunordered", "tickold",
              "mutreceipt", "mutliveset", "mutcallsite", "muttplconv", "muttpladopt",
-             "mutholdwin"]
+             "mutholdwin", "mutnoedges"]
 
 
 class Accepts(unittest.TestCase):
@@ -681,6 +699,55 @@ class TheTemplateEvidence(unittest.TestCase):
         rec = red_record("muttplconv")
         rec["engineBuild"]["mutation"] = ""
         self.assertRejected("muttplconv-debian-13", rec)
+
+
+class TheTriggerOrderEvidence(unittest.TestCase):
+    """§13 decision 137: both trigger-first cases, green and red."""
+
+    def assertRejected(self, cell, rec):
+        ok_, _, why = cls.classify(cell, rec)
+        self.assertFalse(ok_, "%s accepted: %s" % (cell, why))
+
+    def test_a_green_record_whose_trigger_did_not_run(self):
+        for l in ("socket", "timer"):
+            with self.subTest(trigger=l):
+                rec = green("conv")
+                rec["decision137"][l]["ran"] = False
+                self.assertRejected("conv-debian-13", rec)
+                rec = green("conv")
+                rec["decision137"][l]["refusedNotLoaded"] = True
+                self.assertRejected("conv-debian-13", rec)
+        rec = green("conv")
+        del rec["decision137"]
+        self.assertRejected("conv-debian-13", rec)
+
+    def test_each_half_of_the_refusal_alone_is_not_enough(self):
+        # The apply's failure without systemd's "not loaded" reason could be
+        # any failure; the journal line without the apply's failure is not
+        # this apply's refusal. Both are required, for each trigger.
+        for l in ("socket", "timer"):
+            for half in ("applyRefused", "journalNotLoaded"):
+                with self.subTest(trigger=l, missing=half):
+                    rec = red_record("mutnoedges")
+                    rec["decision137"][l][half] = False
+                    self.assertRejected("mutnoedges-debian-13", rec)
+                    rec = red_record("mutnoedges")
+                    del rec["decision137"][l][half]
+                    self.assertRejected("mutnoedges-debian-13", rec)
+
+    def test_a_falsifier_red_on_one_trigger_only(self):
+        for l in ("socket", "timer"):
+            with self.subTest(trigger=l):
+                rec = red_record("mutnoedges")
+                rec["decision137"][l]["refusedNotLoaded"] = False
+                self.assertRejected("mutnoedges-debian-13", rec)
+                rec = red_record("mutnoedges")
+                rec["steps"] = [s for s in rec["steps"]
+                                if not s["step"].startswith("decision 137, %s" % l)]
+                self.assertRejected("mutnoedges-debian-13", rec)
+        rec = red_record("mutnoedges")
+        rec["engineBuild"]["mutation"] = ""
+        self.assertRejected("mutnoedges-debian-13", rec)
 
 
 class TheHoldWindowEvidence(unittest.TestCase):
