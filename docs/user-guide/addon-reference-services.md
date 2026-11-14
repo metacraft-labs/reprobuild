@@ -128,9 +128,11 @@ The add-on handles this in four ways:
     directories, systemd reports a different run of the unit than the one
     recorded, and the directory was born no earlier than 100 ms before
     that run's reported start (systemd 252 makes it a few milliseconds
-    before it records the start) and no later than 250 ms after the
-    start of that run's main process (a tree made later in the run, by
-    the unit or by anything else, is not the one systemd made for it); for
+    before it records the start) and no later than 250 ms after that
+    reported start (systemd makes a unit's directories as it starts the
+    run's first command, which may be an `ExecStartPre=` that runs long
+    before the main process; a tree made later in the run, by the unit or
+    by anything else, is not the one systemd made for it); for
     a unit that is not running, it must also have been born before that
     run ended. A template's directory is
     judged by the instances that can have run: the one recorded, any that
@@ -141,8 +143,8 @@ The add-on handles this in four ways:
     was. The apply logs each such acceptance
     in the generation's audit log (if the log cannot be written, the
     directory is refused). A tree a root process makes at the path
-    within those 100 ms before a start, or within 250 ms after its main
-    process starts, is taken as the unit's. On a host
+    from 100 ms before to 250 ms after a run's reported start is taken as
+    the unit's. On a host
     upgraded from an add-on version that kept no such record, the first
     apply records, once, the directories the installed services exactly
     declare and the existing sockets of their socket units, and logs each
@@ -158,11 +160,17 @@ The add-on handles this in four ways:
     file of that name holding exactly the text it writes, on a unit the
     add-on installs: a file of that name with anything else in it is
     judged like any other drop-in, and no apply removes or overwrites it.
-    If the hold cannot be written (a full or read-only `/etc`, an
+    If the hold cannot be written in full (a full or read-only `/etc`, an
     immutable directory), the unit keeps the hold the switch put in
     `/run`, the step back is not completed, and the host stays pending
     until the hold can be written and you run
-    `repro system addon recover`.
+    `repro system addon recover`. A reboot in the meantime does not free
+    the unit: every hardened unit starts only after the add-on's boot-time
+    re-assertion, which redoes the step back, and its hold, first. One
+    consequence: a hardened unit wanted by `multi-user.target` makes that
+    target wait for the re-assertion. A unit installed by an add-on version
+    that predates this ordering does not wait, until an apply installs it
+    again.
   - **a unit that only a timer or a path unit starts** never has its
     directories recorded by an apply, because no apply starts it. After
     the first run its timer starts, the next apply refuses the unit's
@@ -190,7 +198,11 @@ The add-on handles this in four ways:
     `ReadWritePaths=`), since that unit's account could turn the
     directory into a link the service manager then follows; the paths
     are compared as the kernel resolves them, so `ReadWritePaths=/var/run/foo`
-    covers `/run/foo/sub/control`; a socket or timer named
+    covers `/run/foo/sub/control`, and a place spelled with a specifier
+    counts by the part before it, so a template's
+    `RuntimeDirectory=foo/%i` covers everything below `/run/foo/`; a
+    unit named `foo` installed after the apply is not seen until the next
+    apply checks the socket again; a socket or timer named
     after a directory the base system has (`udev.socket`,
     `systemd.socket`) is refused, and so is a socket path that already
     exists, that this socket did not create, or whose identity cannot be
