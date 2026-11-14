@@ -10783,6 +10783,17 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "t_group_libs_repro_test_support_tests_g01",
     singleReason: ""),
   TestSpec(
+    source: "libs/repro_test_support/tests/t_test_owned_runquotad_binds_on_hosts_with_a_runquota_account.nim",
+    binary: "build/test-bin/t_test_owned_runquotad_binds_on_hosts_with_a_runquota_account",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "t_group_libs_repro_test_support_tests_g01",
+    singleReason: ""),
+  TestSpec(
     source: "libs/repro_tool_profiles/tests/t_a_declared_alias_is_never_served_from_a_prefix_without_it.nim",
     binary: "build/test-bin/t_a_declared_alias_is_never_served_from_a_prefix_without_it",
     defines: @[],
