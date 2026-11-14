@@ -607,6 +607,24 @@ when defined(posix):
       "Point RUNQUOTAD_BIN at a current runquotad (or remove the stale one " &
       "from PATH), or start the host's RunQuota service."
 
+  const unknownArgumentMarker* = "unknown runquotad argument: "
+    ## What `runquotad` prints before it exits on a flag it does not know
+    ## (runquota `apps/runquotad/runquotad.nim`).
+
+  proc staleDaemonArgumentRemedy*(runquotad, logText: string): string =
+    ## The remedy for a started daemon that refused a flag repro passed it,
+    ## or "" when its log shows no such refusal. Such a daemon is older than
+    ## the flag, and the version string cannot tell it from a current build
+    ## (reprobuild-pm issue 2026-11-12, a profile runquotad 0.1.3 without
+    ## `--idle-exit-after`), so the remedy names the binary that was started.
+    let at = logText.rfind(unknownArgumentMarker)
+    if at < 0:
+      return ""
+    let flag = logText[at + unknownArgumentMarker.len .. ^1].splitLines()[0].strip()
+    "\nremedy: " & runquotad & " does not know " & flag & ", so it is " &
+      "older than this repro. Point RUNQUOTAD_BIN at a current runquotad " &
+      "(or remove the stale one from PATH)."
+
   proc waitForUserDaemon*(launch: var UserDaemonLaunch;
                           exe, socket, logPath: string;
                           answered: proc (): bool): int =
@@ -645,10 +663,12 @@ when defined(posix):
       $(getMonoTime() - started).inMilliseconds & " ms after it was started"
     proc diagnostics(): string =
       # The log's tail, then -- when the log shows the daemon refused its
-      # private endpoint under the HOST policy -- what that means and what
-      # to do (`hostPolicyDaemonRemedy`).
+      # private endpoint under the HOST policy, or refused a flag it is too
+      # old to know -- what that means and what to do
+      # (`hostPolicyDaemonRemedy`, `staleDaemonArgumentRemedy`).
       let tail = userDaemonLogTail(logPath)
-      tail & hostPolicyDaemonRemedy(exe, tail)
+      tail & hostPolicyDaemonRemedy(exe, tail) &
+        staleDaemonArgumentRemedy(exe, tail)
     # Why the daemon's state can no longer be read, once it cannot. From
     # then on only `answered()` and the ceiling end the wait.
     var unobservable = ""

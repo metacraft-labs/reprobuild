@@ -89038,6 +89038,13 @@ proc startDaemonWorkerRole*(host: PeerCacheHost; stateDir: string): string =
       # detection log carry the detections, the requester signs.
       dw.newWorkerReceiver(config, localOnly, storeOutput)
   receiver.storeRecord = storeRecord
+  # A previous daemon that crashed or was killed mid-lease left its leases
+  # behind, their files owned by a slot's subordinate uid; a clean stop
+  # removes its own (`workerStop` below).
+  discard dw.reclaimOrphanedLeases(receiver)
+  host.workerStop = proc() {.gcsafe, closure.} =
+    {.cast(gcsafe).}:
+      discard dw.stopLeases(receiver)
   host.localLogs.add(config.detectionLogPath)
   let app = host.appender
   if hardened:
