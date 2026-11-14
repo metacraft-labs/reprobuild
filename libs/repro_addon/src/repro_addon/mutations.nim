@@ -987,6 +987,14 @@
 ## ``uninstall-keeps-repro-subvolume``        uninstall leaves the ``/repro``
 ##                                            subvolume of a btrfs root in
 ##                                            place (a negative control)
+## ``arch-apply-skips-deb-closure-check``     the apply does not refuse an
+##                                            ``aptClosureLock`` on a pacman
+##                                            host itself
+## ``arch-realisation-accepts-deb-closure``   the engine's ``add-on-arch``
+##                                            realisation accepts an
+##                                            ``aptClosureLock`` (an engine
+##                                            mutation: the Nix package
+##                                            built with it)
 ## =========================================  ==============================
 
 # The deploy agent's own mutations (``repro_deploy_agent/agent_mutations``)
@@ -1646,7 +1654,15 @@ const
                           # store's placement by root filesystem.
                           "uninstall-skips-pending-check",
                           "repro-root-plain-dir-on-btrfs",
-                          "uninstall-keeps-repro-subvolume"]
+                          "uninstall-keeps-repro-subvolume",
+                          # The apply's own `.deb`-closure refusal on Arch
+                          # removed, so only the realisation refuses.
+                          "arch-apply-skips-deb-closure-check",
+                          # The engine's add-on-arch realisation accepts a
+                          # `.deb` closure (repro_profile_compile/
+                          # addon_realisation); the static binary only
+                          # carries the name.
+                          "arch-realisation-accepts-deb-closure"]
 
 when AddonMutation.len > 0 and AddonMutation notin KnownAddonMutations and
     AddonMutation notin KnownAgentMutations:

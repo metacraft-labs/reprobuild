@@ -66,12 +66,15 @@ proc pacmanDbPresent*(root = "/"): bool =
   fileExists(root / PacmanLocalDir / PacmanDbVersionFile)
 
 proc pacmanPackageDirs*(root = "/"): seq[string] =
-  ## Every package directory of the local database, sorted. A directory
-  ## without a ``desc`` entry is not a package (pacman writes it first).
+  ## Every directory of the local database, sorted -- one without a
+  ## ``desc`` entry included: pacman writes a package's directory before its
+  ## ``desc``, so such a directory is a package being installed or a damaged
+  ## entry, and a reader that must fail closed has to see it
+  ## (``pacmanInstalledPackages`` returns it with no name).
   let dir = root / PacmanLocalDir
   if not dirExists(dir): return
   for kind, p in walkDir(dir):
-    if kind == pcDir and fileExists(p / "desc"): result.add(p)
+    if kind == pcDir: result.add(p)
   result.sort(system.cmp)
 
 proc parsePacmanDesc*(descEntry: string; dir = ""): PacmanPackage =
@@ -83,10 +86,14 @@ proc parsePacmanDesc*(descEntry: string; dir = ""): PacmanPackage =
 
 proc pacmanInstalledPackages*(root = "/"): seq[PacmanPackage] =
   ## Every installed package, sorted by name; empty without a database.
-  ## An entry with no ``%NAME%`` is returned with an empty name, so a caller
-  ## that must fail closed on a damaged database can see it.
+  ## An entry with no ``desc`` or no ``%NAME%`` is returned with an empty
+  ## name, so a caller that must fail closed on a damaged database (the
+  ## collision driver, the fingerprint) can see it.
   for d in pacmanPackageDirs(root):
-    result.add(parsePacmanDesc(readFile(d / "desc"), d))
+    if fileExists(d / "desc"):
+      result.add(parsePacmanDesc(readFile(d / "desc"), d))
+    else:
+      result.add(PacmanPackage(dir: d))
   result.sort(proc(a, b: PacmanPackage): int = cmp(a.name, b.name))
 
 proc pacmanInstalledVersion*(name: string; root = "/"): string =
@@ -109,3 +116,20 @@ proc pacmanMajor*(version: string): int =
     else: break
   if digits.len == 0: return 0
   try: parseInt(digits) except ValueError: 0
+
+proc isArchFamilyRoot*(root = "/"): bool =
+  ## ``root``'s os-release(5) (``/etc/os-release``, else
+  ## ``/usr/lib/os-release``) names the Arch family: ``ID=arch``, or ``arch``
+  ## among the words of ``ID_LIKE`` (Omarchy). False when neither file is
+  ## readable.
+  for p in ["/etc/os-release", "/usr/lib/os-release"]:
+    let f = if root == "/" or root.len == 0: p else: root & p
+    if not fileExists(f): continue
+    for raw in readFile(f).splitLines():
+      let line = raw.strip()
+      for key in ["ID=", "ID_LIKE="]:
+        if line.startsWith(key):
+          for w in line[key.len .. ^1].strip(chars = {'"', '\''}).splitWhitespace():
+            if w.toLowerAscii() == "arch": return true
+    return false
+  false

@@ -146,6 +146,24 @@ suite "the pacman driver (ownership half)":
     writeFile(r2 / "var/lib/pacman/local/x-1-1/desc", "%VERSION%\n1-1\n")
     expect AddonCollisionError:     # an entry without %NAME%
       discard newPacmanDriver(r2, provision).packageOwner(r2 / "etc/x")
+    # A package directory without a desc entry, beside a good package.
+    removeDir(r2 / "var/lib/pacman/local/x-1-1")
+    createDir(r2 / "var/lib/pacman/local/good-1-1")
+    writeFile(r2 / "var/lib/pacman/local/good-1-1/desc", "%NAME%\ngood\n")
+    writeFile(r2 / "var/lib/pacman/local/good-1-1/files", "%FILES%\netc/g\n")
+    check newPacmanDriver(r2, provision).packageOwner(r2 & "/etc/g").package ==
+      "good"
+    createDir(r2 / "var/lib/pacman/local/half-1-1")
+    expect AddonCollisionError:     # a directory with no desc
+      discard newPacmanDriver(r2, provision).packageOwner(r2 / "etc/x")
+    createDir(r2 / "etc")
+    writeFile(r2 / "etc/passwd", "root:x:0:0::/root:/bin/sh\n")
+    writeFile(r2 / "etc/group", "root:x:0:\n")
+    try:
+      discard collectFingerprint(CollectOptions(root: r2, live: false))
+      check false
+    except FingerprintError as e:
+      check "half-1-1" in e.msg and "no desc" in e.msg
     removeDir(r2)
 
   test "the guard sees what the plan decided, and a package that appears after it":
@@ -193,6 +211,7 @@ suite "the Arch base matrix":
     check baseMatrixVerdict("omarchy", "4.0.6", "arch", 258, "7.0.0-6").ok
     let old = baseMatrixVerdict("arch", "", "", 257, "7.0.0-6")
     check not old.ok and "below the Arch matrix's 258" in old.detail
+    check old.detail.startsWith("EAddOnUnsupportedBase: ")
     check not baseMatrixVerdict("arch", "", "", 258, "6.1.0-3").ok
     check not baseMatrixVerdict("arch", "", "", 258, "").ok
     check not baseMatrixVerdict("omarchy", "4.0.6", "", 258, "7.0.0").ok
@@ -229,6 +248,10 @@ suite "preflight records on Arch":
     check networkManagerFromIsActive("inactive\nactive\n") == "systemd-networkd"
     check networkManagerFromIsActive("active\nactive\n") == "both"
     check networkManagerFromIsActive("inactive\ninactive\n") == "none"
+    # systemctl that could not answer is not evidence that neither runs.
+    check networkManagerFromIsActive("") == "unknown"
+    check networkManagerFromIsActive("Failed to connect to bus\n") == "unknown"
+    check networkManagerFromIsActive("active\n") == "unknown"
 
 suite "the Omarchy account":
   let home = root / "home/zahary"
@@ -263,11 +286,15 @@ suite "the Omarchy account":
     check omarchyAccountProblem("debian", "", lookup).detail == ""
 
   test "the account is checked on an operator profile's apply only":
-    check omarchyAccountChecked("apply", false, true)
-    check not omarchyAccountChecked("apply", false, false)   # generation 0
-    check not omarchyAccountChecked("replay", false, true)
-    check not omarchyAccountChecked("revert", false, true)
-    check not omarchyAccountChecked("apply", true, true)     # record-only
+    # An operator profile's apply, an empty profile included.
+    check omarchyAccountChecked("apply", false, false, true)
+    check omarchyAccountChecked("apply", false, false, false)
+    # Generation 0 alone, and generation 0 with the stored operator profile.
+    check not omarchyAccountChecked("apply", false, true, false)
+    check omarchyAccountChecked("apply", false, true, true)
+    check not omarchyAccountChecked("replay", false, false, true)
+    check not omarchyAccountChecked("revert", false, false, true)
+    check not omarchyAccountChecked("apply", true, false, true)  # record-only
 
   test "Omarchy's version is os-release's and the package's":
     pkg("omarchy", "4.0.6-1", ["usr/share/omarchy/"])
@@ -321,15 +348,18 @@ suite "the fingerprint on Arch":
       discard collectFingerprint(CollectOptions(root: root, live: false,
                                                 omarchyAccount: "nobody"))
 
-  test "swap alias units are not recorded; the swap device's own unit is":
-    let r = parseListUnits(
-      "dev-disk-by\\x2duuid-5d857e7b\\x2d2876.swap loaded active active /dev/disk/by-uuid/5d857e7b\n" &
-      "dev-disk-by\\x2dlabel-zram0.swap loaded active active /dev/disk/by-label/zram0\n" &
-      "dev-zram0.swap loaded active active Compressed Swap on /dev/zram0\n" &
-      "swap-swapfile.swap loaded active active /swap/swapfile\n")
-    var names: seq[string]
-    for e in r: names.add(e.key)
-    check names == @["dev-zram0.swap", "swap-swapfile.swap"]
+  test "btrfs-subvolumes is an Arch component: os-release decides":
+    check isArchFamilyRoot(root)              # the fixture is ID=arch
+    let r3 = root & "-deb-osr"
+    removeDir(r3)
+    createDir(r3 / "etc")
+    writeFile(r3 / "etc/os-release", "ID=debian\nVERSION_ID=\"13\"\n")
+    check not isArchFamilyRoot(r3)
+    writeFile(r3 / "etc/os-release", "ID=omarchy\nID_LIKE=\"arch\"\n")
+    check isArchFamilyRoot(r3)
+    removeFile(r3 / "etc/os-release")
+    check not isArchFamilyRoot(r3)
+    removeDir(r3)
 
   test "btrfs subvolume list and snapper userdata":
     let l = parseBtrfsSubvolumeList(
@@ -364,6 +394,22 @@ suite "the ledger's delta on a btrfs root":
       key: "@/repro", after: "id 270 parent 256")
     check matchExpectations(@[roots, undercover],
                             expectedDelta(Ledger(), sub)).ok
+    # Exactly one: no subvolume record is a missing one, a removal in
+    # place of the creation is mismatched, and a second one is unexpected.
+    check not matchExpectations(@[roots], expectedDelta(Ledger(), sub)).ok
+    let wrongOp = DiffEntry(op: doRemoved, component: fcBtrfsSubvolumes,
+      key: "repro", before: "id 259 parent 5")
+    check not matchExpectations(@[roots, wrongOp],
+                                expectedDelta(Ledger(), sub)).ok
+    check not matchExpectations(@[roots, added, undercover],
+                                expectedDelta(Ledger(), sub)).ok
+    let lookalike = DiffEntry(op: doAdded, component: fcBtrfsSubvolumes,
+      key: "notrepro", after: "id 300 parent 5")
+    check not matchExpectations(@[roots, lookalike],
+                                expectedDelta(Ledger(), sub)).ok
+    # The text form round-trips the path-suffix expectation.
+    let rendered = renderExpectation(expectedDelta(Ledger(), sub)[^1])
+    check parseExpectations(rendered)[0].pathSuffix
     # A plain /repro accounts for no subvolume: one appearing is unexpected.
     let rootsPlain = DiffEntry(op: doChanged, component: fcAddonRoots,
       key: "/repro", before: "absent", after: "dir 0755 0:0")

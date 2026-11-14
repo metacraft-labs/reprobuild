@@ -23,7 +23,7 @@
 ## derives the expectation from the same observation rather than assuming
 ## the build host's distribution.
 
-import std/[sets, strutils, tables, unittest]
+import std/[base64, json, sets, strutils, tables, unittest]
 
 import repro_profile
 import repro_profile_compile
@@ -34,6 +34,7 @@ import repro_deploy_agent
 import repro_cli_support/infra_host_registry
 import repro_cli_support/deploy_agent
 import repro_addon/verified_compile
+import repro_addon/host_exec
 
 proc base(id, idLike: string): HostBase =
   var osr = {"ID": id}.toTable
@@ -108,3 +109,45 @@ suite "the add-on realisation follows the host's base":
       renderSystemProfileToText(arch.profile)
     check deb.projection.profile == "add-on-debian"
     check arch.projection.profile == "add-on-arch"
+
+suite "an agent whose compiler predates --system-base":
+  # The compiler is a closure that answers as a compiler of the revision
+  # before the option did: it refuses the option as a usage error (exit 2)
+  # and compiles without it, reporting its own (older) revision.
+  proc oldCompiler(calls: ref seq[seq[string]]): proc(a: seq[string]):
+      HostToolResult =
+    result = proc(a: seq[string]): HostToolResult =
+      calls[].add(a)
+      if "--system-base" in a:
+        return HostToolResult(exitCode: 2, output: "repro deploy-agent " &
+          "compile-profile: unknown option --system-base\n")
+      HostToolResult(exitCode: 0, output: verified_compile.CompiledProfileStdioMarker &
+        base64.encode($(%*{"canonical": base64.encode("x"),
+          "actions": base64.encode("[]"), "revision": "0ld0ld0ld0"})) & "\n")
+
+  test "reports the compiler revision mismatch, not a usage failure":
+    var m: DeployManifest
+    m.compiledProfile = CompiledProfilePin(digest: "sha256:" & "1".repeat(64),
+      compilerRevision: "a8f640f709", platform: "linux", arch: "x86_64",
+      host: "h", systemMode: "addOn")
+    let calls = new seq[seq[string]]
+    let argv = @["/x/reprobuild", "deploy-agent", "compile-profile",
+                 "--stdio"] & compileFactArgs(m)
+    let r = runCompileForAnyRevision(argv, oldCompiler(calls))
+    check calls[].len == 2
+    check "--system-base" notin calls[][1]
+    check calls[][1] == withoutSystemBase(argv)
+    let res = parseCompileOutput(r.output)
+    check res.ok and res.revision == "0ld0ld0ld0"
+    let refusal = compiledProfileRefusal(m, res.canonical, res.actionsJson,
+                                         res.revision)
+    check refusal.startsWith(CompilerRevisionMismatch)
+
+  test "a profile the realisation refuses (exit 1) is never retried":
+    let calls = new seq[seq[string]]
+    let refusing = proc(a: seq[string]): HostToolResult =
+      calls[].add(a)
+      HostToolResult(exitCode: 1, output: "EAddOnOutOfScope: ...")
+    let r = runCompileForAnyRevision(@["c", "--system-base", "this-host"],
+                                     refusing)
+    check r.exitCode == 1 and calls[].len == 1

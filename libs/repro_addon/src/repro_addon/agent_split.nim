@@ -223,7 +223,8 @@ proc compileProfile(conf: AgentConf; m: DeployManifest;
     "--actions-out", dir / StagedActionsName,
     "--state-dir", workspace / "state",
     "--revision-out", dir / StagedCompilerRevisionName] & compileFactArgs(m)
-  let r = runProfileCompiler(argv)
+  let r = runCompileForAnyRevision(argv, proc(a: seq[string]):
+      HostToolResult = runProfileCompiler(a))
   if r.exitCode != 0:
     return "the profile compiler failed (exit " & $r.exitCode & "): " &
       r.output.strip()

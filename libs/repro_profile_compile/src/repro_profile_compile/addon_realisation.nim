@@ -107,6 +107,13 @@ const
   AddOnFirewallTable* = "inet repro"
     ## The one nftables table the add-on's opt-in firewall class owns (spec
     ## ReproOS-Add-On-Mode §4.1).
+  RealisationMutation {.strdefine: "reproAddonMutation".} = ""
+    ## The add-on's falsifying-mutation switch (``repro_addon/mutations``,
+    ## which validates the name): ``arch-realisation-accepts-deb-closure``
+    ## builds an engine whose `add-on-arch` keeps `aptClosureLock` shared.
+    ## Read here directly because this library sits below ``repro_addon``.
+    ## Only the Nix package built with ``REPRO_ADDON_MUTATION`` set carries
+    ## it; a product build has the empty default.
 
 proc firewallChainCheck(value: FieldValue): string =
   ## `linux.firewallRule.chain` is `<family> <table> <chain>`; on an add-on
@@ -335,6 +342,11 @@ proc addOnArchProfile*(): RealisationProfile =
         "diversions (`dpkg-divert`); a package-owned file on Arch cannot be " &
         "diverted (spec §4.3.1)")
     of "systemd.systemUnit", "linux.addOnTool":
+      when RealisationMutation == "arch-realisation-accepts-deb-closure":
+        # Falsifying mutation for `e2e_arch_addon_apt_closure_refused`: a
+        # realisation that lets a `.deb` closure through on Arch. Compiled
+        # in only by that define, so no product build has this branch.
+        continue
       for f in k.fields.mitems:
         if f.field == "aptClosureLock":
           f = FieldRule(field: f.field, class: fcInvalid,

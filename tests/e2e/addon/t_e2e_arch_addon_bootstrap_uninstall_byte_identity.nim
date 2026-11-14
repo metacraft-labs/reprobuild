@@ -18,8 +18,16 @@
 ## decision 130): the gate also checks that nothing appeared under
 ## ``/etc/apt``.
 ##
-## Vacuity guard: ``findmnt -no FSTYPE /`` must be ``btrfs`` on the btrfs
-## guest and ``ext4`` on the ext4 guest.
+## Baseline: before the first fingerprint the gate runs ``udevadm settle``
+## and ``systemctl daemon-reload`` in the guest (``settleBaseline``, §12.2,
+## §13 decision 134), so units the base's generators emit on a reload are
+## in the baseline. Nothing is excluded from the comparison.
+##
+## Vacuity guards: ``findmnt -no FSTYPE /`` must be ``btrfs`` on the btrfs
+## guest and ``ext4`` on the ext4 guest; and the run as a whole must have
+## covered a plain Arch guest of each (whatever ``REPRO_ADDON_BASES``
+## says), or the gate fails: a run on one placement does not measure the
+## other.
 ##
 ## Negative control (``REPRO_ADDON_MUTATION=uninstall-keeps-repro-subvolume``):
 ## uninstall leaves the ``/repro`` subvolume in place, so the gate must go
@@ -45,7 +53,8 @@ import repro_test_support/reasoned_skip
 
 import ./arch_gate_support
 
-proc runBase(b: BaseImage; record: JsonNode): seq[string] =
+proc runBase(b: BaseImage; record: JsonNode;
+             covered: var seq[string]): seq[string] =
   var g: Guest
   let steps = newJArray()
   var fails: seq[string]
@@ -63,6 +72,7 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
     record["artefactSha256"] = %sha
 
     let account = accountFor(b)
+    g.settleBaseline(step)
     let f0 = g.fingerprintArch(repro, account)
     sleep(20_000)
     let f0b = g.fingerprintArch(repro, account)
@@ -117,6 +127,8 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
     record["finalDiff"] = %ident.text
     step("base fingerprint after uninstall == before bootstrap", ident.ok,
          ident.text)
+    if not isOmarchyBase(b):
+      covered.add(g.rootFsType())
     if not ident.ok and rootIsBtrfs(b):
       record["diffNamesReproSubvolume"] =
         %("btrfs-subvolumes" in ident.text and "repro" in ident.text)
@@ -141,14 +153,21 @@ suite "e2e_arch_addon_bootstrap_uninstall_byte_identity":
            "e2e_arch_addon_bootstrap_uninstall_byte_identity)")
     else:
       var failures: seq[string]
+      var covered: seq[string]
       for b in selectedArchBases():
         let record = archGateRecord("e2e_arch_addon_bootstrap_uninstall_byte_identity")
         record["base"] = %b.name
         if isOmarchyBase(b): record["omarchy"] = omarchyRecordBase()
-        let f = runBase(b, record)
+        let f = runBase(b, record, covered)
         record["verdict"] = %(if f.len == 0: "green" else: "red")
         echo "record: ", writeRecord(
           "e2e_arch_addon_bootstrap_uninstall_byte_identity", record)
         failures.add(f)
+      # The per-run vacuity guard: a plain Arch guest on each root
+      # filesystem ran the sequence to its end.
+      for fs in ["btrfs", "ext4"]:
+        if fs notin covered:
+          failures.add("vacuity guard: the run covered no plain Arch guest " &
+            "with a " & fs & " root (covered: " & covered.join(",") & ")")
       for f in failures: echo "FAIL ", f
       check failures.len == 0

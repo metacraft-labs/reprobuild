@@ -635,17 +635,28 @@ proc networkManagerFromIsActive*(output: string): string =
   ## ``systemctl is-active NetworkManager.service systemd-networkd.service``
   ## prints one state per unit, in order (spec §4.5: the manager is the one
   ## whose service is active; configuration files are not evidence).
-  let states = output.splitLines()
-  let nm = states.len > 0 and states[0].strip() == "active"
-  let nd = states.len > 1 and states[1].strip() == "active"
+  ## Anything but one known state per unit reads as ``unknown``: a
+  ## systemctl that could not answer is not evidence that neither runs.
+  const Known = ["active", "inactive", "failed", "activating",
+                 "deactivating", "reloading", "maintenance", "refreshing"]
+  var states: seq[string]
+  for l in output.splitLines():
+    if l.strip().len > 0: states.add(l.strip())
+  if states.len != 2 or states[0] notin Known or states[1] notin Known:
+    return "unknown"
+  let nm = states[0] == "active"
+  let nd = states[1] == "active"
   if nm and nd: "both"
   elif nm: "NetworkManager"
   elif nd: "systemd-networkd"
   else: "none"
 
 proc activeNetworkManager*(): string =
-  ## The host's active network manager, asked of PID 1 (read-only). A
-  ## systemctl that cannot answer reads as ``unknown``.
+  ## The host's active network manager, asked of PID 1 (read-only):
+  ## ``NetworkManager``, ``systemd-networkd``, ``both``, ``none``, or
+  ## ``unknown`` when systemctl cannot answer (spec §6.1). The preflight
+  ## records it; deciding on it is the ``network`` class's, which refuses
+  ## anything but ``NetworkManager``.
   try:
     # `is-active` exits non-zero when a unit is not active; its output is
     # still one state per unit.
@@ -682,12 +693,13 @@ proc baseMatrixVerdict*(id, versionId, idLike: string; systemdMajor: int;
     if why.len == 0:
       return (true, id & " (Arch family, rolling; systemd " & $systemdMajor &
         ", pacman " & pacmanVersion & ")")
-    return (false, "ID=" & id & " ID_LIKE=" & idLike & ": " & why &
+    return (false, "EAddOnUnsupportedBase: ID=" & id & " ID_LIKE=" & idLike &
+      ": " & why &
       " (the matrix accepts " & SupportedBaseList & "; and " & ArchBaseRule & ")")
   let note = baseMatrixNote(id, versionId)
   if note.len > 0:
     return (true, id & " " & versionId & " (" & note & ")")
-  (false, "ID=" & id & " VERSION_ID=" & versionId &
+  (false, "EAddOnUnsupportedBase: ID=" & id & " VERSION_ID=" & versionId &
     " is not in the add-on base matrix (" & SupportedBaseList & ")")
 
 proc add(r: var PreflightReport; id: string; ok: bool; detail: string) =

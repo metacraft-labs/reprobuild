@@ -635,12 +635,12 @@ proc expectedDelta*(before, after: Ledger): seq[Expectation] =
       result.add(Expectation(op: doChanged, component: comp, key: k[1],
                              value: toV))
   # ``btrfs-subvolumes`` (spec §12.2): ``/repro`` created as a subvolume
-  # on a btrfs root is one more subvolume, listed by its path from the
-  # filesystem's top (``repro`` on a root that is the top-level subvolume,
-  # ``@/repro`` under Omarchy's ``@``), which the ledger cannot name. The
-  # exact half of the check is the ``addon-roots`` record of ``/repro``
-  # above, whose kind is ``btrfs-subvolume``; this accounts for the
-  # subvolume list's record of the same object.
+  # on a btrfs root is exactly one more subvolume, listed by its path from
+  # the filesystem's top (``repro`` on a root that is the top-level
+  # subvolume, ``@/repro`` under Omarchy's ``@``), whose leading part the
+  # ledger cannot name: one created (or, on removal, one removed) record
+  # whose path ends at the ``repro`` segment, required, with its op
+  # checked; its id and parent are the kernel's (value ``*``).
   proc reproIsSubvolume(l: Ledger): bool =
     for e in l.entries:
       if e.class == lcRoot and e.path == "/repro" and
@@ -651,8 +651,8 @@ proc expectedDelta*(before, after: Ledger): seq[Expectation] =
   let subAfter = reproIsSubvolume(after)
   if subBefore != subAfter:
     result.add(Expectation(op: (if subAfter: doAdded else: doRemoved),
-      component: fcBtrfsSubvolumes, key: "*repro", value: "*",
-      optional: true))
+      component: fcBtrfsSubvolumes, key: "repro", value: "*",
+      pathSuffix: true))
   result.sort(proc(x, y: Expectation): int =
     result = cmp(ord(x.component), ord(y.component))
     if result == 0: result = cmp(x.key, y.key))

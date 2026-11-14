@@ -72,6 +72,24 @@ proc gen2Profile*(omarchyAccount = ""): string =
   ## A2's generation 2: the unit removed, the file changed.
   addOnStanza(omarchyAccount) & fixtureFile("fixture = 2\n")
 
+const SettleBaselineCommand* = "udevadm settle && systemctl daemon-reload"
+  ## Run in the guest before a baseline fingerprint (spec §12.2, §13
+  ## decision 134): the base's own generators and udev rules have finished
+  ## and systemd's unit set reflects them, so units a generator emits only
+  ## on a reload (Omarchy's zram swap aliases) are already in the baseline
+  ## when bootstrap's own ``daemon-reload`` would otherwise make them
+  ## appear. It is part of the gate, never of preflight, which writes
+  ## nothing (spec §6.1).
+
+proc settleBaseline*(g: Guest; step: StepFn) =
+  ## ``SettleBaselineCommand`` as a recorded step of the gate.
+  let r = g.exec(SettleBaselineCommand, timeoutSec = 300)
+  step("baseline: udevadm settle and systemctl daemon-reload",
+       r.exitCode == 0, r.stdout & r.stderr)
+  if r.exitCode != 0:
+    raise newException(TestBedError, "the baseline step failed: " &
+      r.stdout & r.stderr)
+
 proc fingerprintArch*(g: Guest; repro: string; omarchyAccount = ""): string =
   ## The fingerprint with the Arch components (``pacman-local``,
   ## ``btrfs-subvolumes`` on a btrfs root, ``omarchy-hooks`` for an account).

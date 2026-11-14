@@ -244,6 +244,10 @@ type
   PacmanRepo* = object
     name*: string
     servers*: seq[string]
+    cacheServers*: seq[string]
+      ## ``CacheServer`` entries (pacman.conf(5), pacman >= 7.0): pacman
+      ## downloads from them before any ``Server``, so an unpinned one
+      ## unpins the guest exactly as an unpinned ``Server`` does.
 
 proc archiveRule*(date: string): PacmanServerRule =
   PacmanServerRule(archiveDate: date)
@@ -273,31 +277,50 @@ proc pacmanServerViolations*(repos: seq[PacmanRepo]; rule: PacmanServerRule;
       if s != want:
         result.add("[" & r.name & "] names " & s & " (only " & want &
                    " is pinned)")
+    for s in r.cacheServers:
+      if s != want:
+        result.add("[" & r.name & "] names CacheServer " & s & " (only " &
+                   want & " is pinned)")
+
+const PacmanServerKeys* = ["Server", "CacheServer"]
+  ## Every per-repository key through which pacman.conf(5) names a URL
+  ## pacman downloads packages from. ``pacman-conf`` exits non-zero for a
+  ## key it does not know, so a pacman without ``CacheServer`` fails the
+  ## dump (closed) rather than silently reporting none.
 
 proc parsePacmanConfDump*(dump: string): seq[PacmanRepo] =
   ## Parse ``PacmanConfDump``'s output: one ``<repo>\t`` line per
-  ## repository, then one ``<repo>\t<server>`` line per server.
+  ## repository, then one ``<repo>\t<key>\t<url>`` line per server, where
+  ## ``<key>`` is one of ``PacmanServerKeys``. Any other shape, or another
+  ## key, is refused: the pin check must not skip a line it cannot read.
   var index = initTable[string, int]()
   for line in dump.splitLines():
     if line.len == 0: continue
-    let tab = line.find('\t')
-    if tab < 0:
+    let fields = line.split('\t')
+    if fields.len notin [2, 3] or fields[0].len == 0 or
+       (fields.len == 2 and fields[1].len > 0) or
+       (fields.len == 3 and (fields[1] notin PacmanServerKeys or
+                             fields[2].len == 0)):
       raise newException(TestBedError, "unexpected pacman-conf line: " & line)
-    let repo = line[0 ..< tab]
-    let server = line[tab + 1 .. ^1]
+    let repo = fields[0]
     if repo notin index:
       index[repo] = result.len
       result.add(PacmanRepo(name: repo))
-    if server.len > 0:
-      result[index[repo]].servers.add(server)
+    if fields.len == 3:
+      if fields[1] == "Server": result[index[repo]].servers.add(fields[2])
+      else: result[index[repo]].cacheServers.add(fields[2])
 
 const PacmanConfDump* = "set -e; for r in $(pacman-conf --repo-list); do " &
-  "printf '%s\\t\\n' \"$r\"; pacman-conf --repo=\"$r\" Server | " &
-  "while IFS= read -r s; do printf '%s\\t%s\\n' \"$r\" \"$s\"; done; done"
+  "printf '%s\\t\\n' \"$r\"; for k in Server CacheServer; do " &
+  "v=$(pacman-conf --repo=\"$r\" \"$k\"); " &
+  "printf '%s\\n' \"$v\" | while IFS= read -r s; do [ -n \"$s\" ] || continue; " &
+  "printf '%s\\t%s\\t%s\\n' \"$r\" \"$k\" \"$s\"; done; done; done"
   ## pacman's own view of its configuration: ``pacman-conf`` parses
   ## ``/etc/pacman.conf`` and every file it includes, and prints each
-  ## repository's servers with ``$repo`` and ``$arch`` substituted
-  ## (pacman-conf(8)).
+  ## repository's ``Server`` and ``CacheServer`` values with ``$repo`` and
+  ## ``$arch`` substituted (pacman-conf(8)). Each ``pacman-conf`` call is
+  ## a plain assignment rather than the head of a pipeline so that
+  ## ``set -e`` sees its exit status, and nothing is written to the guest.
 
 proc pacmanRepos*(g: Guest): seq[PacmanRepo] =
   parsePacmanConfDump(g.run(PacmanConfDump))
@@ -314,21 +337,37 @@ proc requirePinnedPacman*(g: Guest; rule: PacmanServerRule) =
 
 static:
   # The rule's negative and positive controls, on pacman-conf output.
-  let pinned = parsePacmanConfDump("core\t\ncore\thttps://archive.archlinux.org/repos/2026/11/01/core/os/x86_64\n" &
-    "extra\t\nextra\thttps://archive.archlinux.org/repos/2026/11/01/extra/os/x86_64\n")
+  let pinned = parsePacmanConfDump("core\t\ncore\tServer\thttps://archive.archlinux.org/repos/2026/11/01/core/os/x86_64\n" &
+    "extra\t\nextra\tServer\thttps://archive.archlinux.org/repos/2026/11/01/extra/os/x86_64\n")
   doAssert pacmanServerViolations(pinned, archiveRule("2026/11/01")).len == 0
   doAssert pacmanServerViolations(pinned, archiveRule("2026/11/02")).len == 2
-  let live = parsePacmanConfDump("core\t\ncore\thttps://archive.archlinux.org/repos/2026/11/01/core/os/x86_64\n" &
-    "core\thttps://geo.mirror.pkgbuild.com/core/os/x86_64\nextra\t\n" &
-    "extra\thttps://archive.archlinux.org/repos/2026/11/01/extra/os/x86_64\n")
+  let live = parsePacmanConfDump("core\t\ncore\tServer\thttps://archive.archlinux.org/repos/2026/11/01/core/os/x86_64\n" &
+    "core\tServer\thttps://geo.mirror.pkgbuild.com/core/os/x86_64\nextra\t\n" &
+    "extra\tServer\thttps://archive.archlinux.org/repos/2026/11/01/extra/os/x86_64\n")
   doAssert pacmanServerViolations(live, archiveRule("2026/11/01")).len == 1
   doAssert pacmanServerViolations(@[], archiveRule("2026/11/01")).len == 1
   let noServer = parsePacmanConfDump("core\t\n")
   doAssert pacmanServerViolations(noServer, archiveRule("2026/11/01")).len == 1
-  let cache = parsePacmanConfDump("omarchy\t\nomarchy\tfile:///var/cache/tb/omarchy\n")
+  let cache = parsePacmanConfDump("omarchy\t\nomarchy\tServer\tfile:///var/cache/tb/omarchy\n")
   doAssert pacmanServerViolations(cache, captureCacheRule("file:///var/cache/tb")).len == 0
   doAssert pacmanServerViolations(cache, archiveRule("2026/11/01")).len == 1
   doAssert pacmanServerViolations(pinned, captureCacheRule("file:///var/cache/tb")).len == 2
+  # A live CacheServer beside a pinned Server is refused; one equal to
+  # the pin is not.
+  let liveCache = parsePacmanConfDump("core\t\ncore\tServer\thttps://archive.archlinux.org/repos/2026/11/01/core/os/x86_64\n" &
+    "core\tCacheServer\thttps://geo.mirror.pkgbuild.com/core/os/x86_64\n")
+  doAssert liveCache[0].cacheServers.len == 1
+  doAssert pacmanServerViolations(liveCache, archiveRule("2026/11/01")).len == 1
+  let pinnedCache = parsePacmanConfDump("core\t\ncore\tServer\thttps://archive.archlinux.org/repos/2026/11/01/core/os/x86_64\n" &
+    "core\tCacheServer\thttps://archive.archlinux.org/repos/2026/11/01/core/os/x86_64\n")
+  doAssert pacmanServerViolations(pinnedCache, archiveRule("2026/11/01")).len == 0
+  # Lines the parser cannot read are refused, never skipped.
+  for bad in ["core\tMirror\thttps://x\n", "core\thttps://x\n", "core\n",
+              "core\tServer\t\n"]:
+    var raised = false
+    try: discard parsePacmanConfDump(bad)
+    except TestBedError: raised = true
+    doAssert raised, bad
 
 proc mirrorlistLine*(date: string): string =
   ## The one ``Server`` line of a guest pinned to ``date``.

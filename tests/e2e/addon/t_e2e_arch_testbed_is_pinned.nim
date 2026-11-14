@@ -60,6 +60,9 @@ import ./arch_testbed
 const
   LiveMirror = "https://geo.mirror.pkgbuild.com/$repo/os/$arch"
   LiveRepoConf = "\n[testbed-live]\nServer = https://geo.mirror.pkgbuild.com/extra/os/$arch\n"
+  LiveCacheServerLine = "CacheServer = https://geo.mirror.pkgbuild.com/$repo/os/$arch"
+    ## A live mirror as a ``CacheServer`` of ``[core]``: pacman downloads
+    ## from it before any ``Server``, with the pinned mirror list intact.
 
   OmarchyDirectPacman = "OMARCHY_ALLOW_DIRECT_PACMAN=1"
   StableMirrorLine = "Server = https://stable-mirror.omarchy.org/$repo/os/$arch"
@@ -280,8 +283,17 @@ suite "e2e_arch_testbed_is_pinned":
           verify("negative control: a live-mirror repository in pacman.conf " &
                 "is refused", extra.refused and "testbed-live" in extra.detail,
                 extra.detail)
+          let cacheSrv = refusedAfter(ArchBtrfs, btrfsOf[0], work,
+            "live-cacheserver",
+            "sed -i " & quoteShell("/^\\[core\\]$/a " & LiveCacheServerLine) &
+            " /etc/pacman.conf && grep -q '^CacheServer' /etc/pacman.conf",
+            notes)
+          verify("negative control: a live CacheServer in pacman.conf is " &
+                "refused", cacheSrv.refused and "CacheServer" in cacheSrv.detail and
+                "geo.mirror.pkgbuild.com" in cacheSrv.detail, cacheSrv.detail)
           record["negativeControls"] = %*{"liveMirrorlist": live.detail,
-                                          "liveRepository": extra.detail}
+                                          "liveRepository": extra.detail,
+                                          "liveCacheServer": cacheSrv.detail}
         if omarchySel:
           # Omarchy's own mirror named beside the capture cache in [core].
           let om = refusedAfter(OmarchyBase, imageOf(OmarchyBase, 0), work,

@@ -23,8 +23,11 @@
 ##    plans, and the `full` block form plans its activities there; a host the registry does not declare plans on Debian as before,
 ##    and the report says it is not declared.
 ## 3. `system: addOn` on Ubuntu 24.04 and on Raspberry Pi OS 13 (`ID_LIKE=
-##    debian`) plans through `add-on-debian`; on Arch it is
-##    `EAddOnUnsupportedBase`.
+##    debian`) plans through `add-on-debian`; on Arch it plans through
+##    `add-on-arch` (spec §8.1), where a unit carrying an `aptClosureLock`
+##    is `EAddOnOutOfScope` ("`.deb` closures are not supported on Arch",
+##    §8.3, §13 decision 92) and nothing is planned, while the same profile
+##    plans on Debian.
 ## 4. An add-on host selecting an activity that sets a machine-only field
 ##    (`os.hostname`) is `EAddOnOutOfScope` naming `os.hostname` and the
 ##    activity; one whose firewall rule targets a table other than the
@@ -94,6 +97,25 @@ profile "a6mmSystem":
       address = "baseConf")
 """
 
+const DebLock = staticRead("../../../libs/repro_dsl_stdlib/tests/fixtures/" &
+  "apt_closure/debian-trixie-20261001-armhf-node-exporter.lock")
+  ## A real lock (the realiser's fixture); never fetched here, since the
+  ## refusal is a projection.
+
+const DebProfile = """
+import repro_profile
+
+const debLock = staticRead("deb.lock")
+
+profile "a6mmDeb":
+  resources:
+    systemdSystemUnit(name = "a6mm-deb.service",
+      content = "[Service]\nExecStart=/usr/bin/prometheus-node-exporter\n",
+      aptClosureLock = debLock,
+      floorExceptions = @["serviceFloor: a test fixture that is never run"],
+      address = "debUnit")
+"""
+
 proc stateFingerprint(stateDir: string): seq[string] =
   treeFingerprint(stateDir, [stateDir / "profile-cache"])
 
@@ -103,13 +125,16 @@ suite "ReproOS add-on mode: mode mismatch and out-of-scope refusals":
     let sb = newProfileSandbox("a6mm", HomeProfile)
     defer: sb.dispose()
     sb.writeProfileFile("system.nim", SystemProfile)
+    sb.writeProfileFile("deb.nim", DebProfile)
+    sb.writeProfileFile("deb.lock", DebLock)
     let systemPath = sb.profileDir / "system.nim"
     let stateDir = sb.root / "infra-state"
     createDir(stateDir)
 
-    proc run(args: openArray[string]; host, base: string): ReproRun =
+    proc run(args: openArray[string]; host, base: string;
+             profile = systemPath): ReproRun =
       var argv = @args
-      argv.add ["--state-dir", stateDir, "--profile", systemPath,
+      argv.add ["--state-dir", stateDir, "--profile", profile,
                 "--host", host]
       result = sb.runRepro(argv, host = "", extraEnv = [baseEnv(base),
         ("REPROBUILD_ACTION_CACHE_ROOT", sb.root / "action-cache")])
@@ -181,7 +206,8 @@ suite "ReproOS add-on mode: mode mismatch and out-of-scope refusals":
       undeclared.stdout
     check "realised full" in undeclared.stdout
 
-    # 3. addOn on the Debian family plans; on Arch there is no realisation.
+    # 3. addOn on the Debian family plans through add-on-debian, on Arch
+    # through add-on-arch.
     for base in ["ubuntu-24.04", "raspbian-13", "debian-13"]:
       let r = run(["infra", "plan"], "mm-addon", base)
       check r.exitCode == 0
@@ -190,12 +216,26 @@ suite "ReproOS add-on mode: mode mismatch and out-of-scope refusals":
       check "* create system-file /etc/a6mm-test/base.conf  [create]" in
         r.stdout
     block:
-      let before = stateFingerprint(stateDir)
       let r = run(["infra", "plan"], "mm-addon", "arch")
+      check r.exitCode == 0
+      check "system  : activities default; realised add-on-arch" in r.stdout
+      check "* create system-file /etc/a6mm-test/base.conf  [create]" in
+        r.stdout
+    # A `.deb` closure is refused on Arch at plan time, writing nothing;
+    # the same profile plans on Debian (the control).
+    block:
+      let debPath = sb.profileDir / "deb.nim"
+      let before = stateFingerprint(stateDir)
+      let r = run(["infra", "plan"], "mm-addon", "arch", debPath)
       check r.exitCode == 1
-      check "EAddOnUnsupportedBase: host mm-addon is declared `system: " &
-        "addOn`, but it runs arch" in r.stderr
+      check "EAddOnOutOfScope" in r.stderr
+      check "systemd.systemUnit.aptClosureLock" in r.stderr
+      check ".deb` closures are not supported on Arch" in r.stderr
+      check "plan-id" notin r.stdout
       check stateFingerprint(stateDir) == before
+      let deb = run(["infra", "plan"], "mm-addon", "debian-13", debPath)
+      check deb.exitCode == 0
+      check "realised add-on-debian" in deb.stdout
 
     # 4. Out-of-scope fields, named with the activity that set them.
     block:

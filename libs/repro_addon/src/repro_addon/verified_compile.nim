@@ -59,6 +59,44 @@ proc compileFactArgs*(m: DeployManifest): seq[string] =
       if m.compiledProfile.systemMode == "addOn":
         result.add(["--system-base", "this-host"])
 
+const
+  CompileProfileUsageExit* = 2
+    ## ``compile-profile``'s exit code for a command line it refuses (an
+    ## unknown option, such as ``--system-base`` to a compiler older than
+    ## it) or a target it cannot compile for. A profile the realisation
+    ## refuses exits 1, and is never retried.
+
+proc withoutSystemBase*(argv: openArray[string]): seq[string] =
+  ## ``argv`` without its ``--system-base <value>`` pair.
+  var i = 0
+  while i < argv.len:
+    if argv[i] == "--system-base" and i + 1 < argv.len:
+      i += 2
+      continue
+    result.add(argv[i])
+    inc i
+
+proc runCompileForAnyRevision*(argv: seq[string];
+    run: proc(argv: seq[string]): HostToolResult): HostToolResult =
+  ## Run an agent's ``compile-profile`` (``run``), and when the compiler is
+  ## older than ``--system-base`` and refuses it as an unknown option, run
+  ## it again without it (spec §13 decision 134). The compiler's own
+  ## revision then reaches the pin check, which reports the revision
+  ## mismatch -- the producer pinned a newer compiler -- instead of the
+  ## agent failing on a usage error. A compiler that predates the option
+  ## but reports the pinned revision compiles for the Debian realisation;
+  ## the realisation changes only what is refused, and on an Arch host the
+  ## apply's own refusals (the ``.deb`` closure, the diversion) still hold.
+  ##
+  ## The retry is decided by the exit code alone (``CompileProfileUsageExit``),
+  ## because the unprivileged compile does not capture stderr. Any other
+  ## refusal with that code fails the second run too, or, for a base this
+  ## host's compiler cannot realise, is refused again by the apply's own
+  ## base gate.
+  result = run(argv)
+  if result.exitCode == CompileProfileUsageExit and "--system-base" in argv:
+    result = run(withoutSystemBase(argv))
+
 proc launcherOf*(exe: string): string =
   ## The program to exec to run ``exe`` in a FRESH environment. A transient
   ## unit inherits nothing from this process, so an image a launcher script
@@ -159,7 +197,9 @@ proc unprivilegedCompile*(engineExe: string; m: DeployManifest):
   ## untrusted: the caller compares it with the signed pin
   ## (``compiledProfileRefusal``) before using it.
   let argv = unprivilegedCompileArgv(engineExe, m)
-  let r = runHostTool(argv, mergeStderr = false, input = compileInput(m))
+  let input = compileInput(m)
+  let r = runCompileForAnyRevision(argv, proc(a: seq[string]): HostToolResult =
+    runHostTool(a, mergeStderr = false, input = input))
   if r.exitCode != 0:
     return (false, "", "", "", "the unprivileged profile compile failed " &
       "(exit " & $r.exitCode & ")")

@@ -208,7 +208,7 @@ proc timerTrigger(g: Guest): string =
   g.run("systemctl show -p LastTriggerUSecMonotonic --value " &
         "repro-agent-fetch.timer 2>/dev/null; true").strip()
 
-proc waitAgentIdle(g: Guest; timeoutSec: int) =
+proc waitAgentIdle*(g: Guest; timeoutSec: int) =
   ## Until neither agent unit is running or queued.
   discard g.exec("for i in $(seq 1 " & $timeoutSec & "); do " &
     "busy=0; for u in repro-agent-fetch.service repro-agent-apply.service; do " &

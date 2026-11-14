@@ -546,6 +546,8 @@ proc observeBaseIdentity*(ledger: Ledger;
     # extension of this record.
     try:
       for p in pacmanInstalledPackages():
+        # A nameless entry fails the collision driver's index, which every
+        # apply loads before this record is used.
         if p.name.len > 0:
           status[p.name] = BasePackage(name: p.name, version: p.version,
             architecture: p.architecture, status: "installed")

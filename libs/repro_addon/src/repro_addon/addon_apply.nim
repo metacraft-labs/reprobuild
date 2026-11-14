@@ -4157,7 +4157,8 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
   # Arch*, §13 decision 92). The `add-on-arch` realisation refuses it when a
   # profile is compiled; this refuses a canonical text that reached the
   # apply some other way, before anything is observed, realised or written.
-  if driver.name == "pacman":
+  if driver.name == "pacman" and
+      not mutated("arch-apply-skips-deb-closure-check"):
     for r in user.resources:
       let lock =
         case r.kind
@@ -4194,6 +4195,7 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
     # Omarchy base, refused elsewhere; see ``omarchyAccountChecked`` for
     # which applies ask.
     if omarchyAccountChecked(purpose, opts.recordOnly,
+        opts.ownProfileText.len > 0,
         user.addOn.declared or user.resources.len > 0):
       let p = omarchyAccountProblem(result.baseIdentity.id,
                                     user.addOn.omarchyAccount)

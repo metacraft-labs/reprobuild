@@ -111,14 +111,19 @@ proc omarchyAccountProblem*(baseId, account: string;
       hooks & " is not a directory; Omarchy's hook directory must exist " &
       "in the account's home (spec §4.3.2)")
 
-proc omarchyAccountChecked*(purpose: string; recordOnly,
-                            operatorProfile: bool): bool =
+proc omarchyAccountChecked*(purpose: string; recordOnly, generationZero,
+                            hasOperatorProfile: bool): bool =
   ## Whether an apply checks the profile's ``omarchyAccount`` against the
-  ## base (spec §8.5): on an operator profile's apply, and not on generation
-  ## 0 alone (bootstrap's apply carries no operator profile), a replay, a
-  ## revert or a record-only pass, which finish or undo a switch already
-  ## decided and are never refused for the base.
-  operatorProfile and purpose notin ["revert", "replay"] and not recordOnly
+  ## base (spec §8.5; §13 decision 131): on every operator profile's apply,
+  ## an empty profile included, and not on a replay, a revert or a
+  ## record-only pass, which finish or undo a switch already decided and are
+  ## never refused for the base. ``generationZero`` is an apply of the
+  ## add-on's own objects that the caller supplies itself (bootstrap,
+  ## ``ownProfileText``): it is checked only when it also carries an
+  ## operator profile (``hasOperatorProfile``, the stored profile a re-pin
+  ## or enrolment applies again).
+  if purpose in ["revert", "replay"] or recordOnly: return false
+  not generationZero or hasOperatorProfile
 
 proc omarchyAccountRefusal*(baseId, account: string;
                             lookup: proc(name: string): tuple[found: bool;

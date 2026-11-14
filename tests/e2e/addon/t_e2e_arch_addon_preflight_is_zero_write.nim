@@ -17,12 +17,21 @@
 ##    ``ID_LIKE=arch``, still passes the ``distribution`` check (and asks
 ##    for ``--profile``, because the Omarchy account cannot be checked
 ##    without the profile). The Arch plan records ``base.pacman``,
-##    ``base.networkManager`` and ``rootFilesystem.snapper``.
+##    ``base.networkManager`` -- exactly the guest's (``systemd-networkd``
+##    on the plain Arch guests, ``NetworkManager`` on the Omarchy VM,
+##    ``ExpectedNetworkManager``) -- and ``rootFilesystem.snapper``, exactly
+##    the guest's real snapper configurations (none on the plain guests,
+##    which have no ``snapper``; ``snapper --csvout list-configs``, which
+##    must be non-empty, on the Omarchy VM).
 ## 3b. **on the Omarchy VM** (the test bed's pinned Omarchy 4.5.0 install,
 ##    ``ID=omarchy`` / ``ID_LIKE=arch`` as installed): the read-only and the
 ##    read-write runs take ``--profile`` naming ``omarchyAccount``; the plan
 ##    records Omarchy's ``VERSION_ID``, ``BUILD_ID`` and the ``omarchy``
-##    package's version, which must equal what ``omarchy-version`` prints;
+##    package's version, which must equal what ``omarchy-version`` prints
+##    and the pinned ``4.5.0-3`` (an empty ``omarchy-version`` fails); a
+##    stale ``~/.local/share/omarchy/version`` planted in the account's
+##    home (what pre-package Omarchy installs kept) changes nothing in the
+##    plan;
 ##    without ``--profile``, with a profile naming no account, and with an
 ##    account the password database does not know, the ``omarchy-account``
 ##    check fails with ``EAddOnBaseLayerOwned``; with the account's hook
@@ -32,9 +41,9 @@
 ## 4. **an archive date below the matrix**: on ``arch-old-systemd-amd64``
 ##    (pacman pinned to an Arch Linux Archive date whose systemd major is
 ##    257) the preflight refuses with the ``distribution`` check failed,
-##    naming systemd below 258 -- the ``EAddOnUnsupportedBase`` condition
-##    (spec §8.4), which bootstrap and every apply then raise -- and writes
-##    nothing there either.
+##    naming systemd below 258 and ``EAddOnUnsupportedBase`` (spec §8.4,
+##    the error bootstrap and every apply then raise), and writes nothing
+##    there either.
 ##
 ## Falsifying mutation (``REPRO_ADDON_MUTATION=preflight-writes``): a
 ## preflight that writes under ``/var/lib`` and swallows the error; step 2's
@@ -51,6 +60,23 @@ import std/[json, os, strutils, unittest]
 import repro_test_support/reasoned_skip
 
 import ./arch_gate_support
+
+proc expectedNetworkManager(b: BaseImage): string =
+  ## What ``base.networkManager`` must say on each guest (spec §6.1): the
+  ## plain Arch cloud image runs systemd-networkd; Omarchy's installer
+  ## enables NetworkManager.
+  if isOmarchyBase(b): "NetworkManager" else: "systemd-networkd"
+
+proc realSnapperConfigs(g: Guest): seq[string] =
+  ## The guest's snapper configurations as snapper itself lists them; none
+  ## where snapper is not installed.
+  if g.exec("command -v snapper").exitCode != 0: return
+  for line in g.run("snapper --csvout list-configs").splitLines()[1 .. ^1]:
+    let name = line.split(',')[0].strip()
+    if name.len > 0: result.add(name)
+
+proc snapperOf(p: JsonNode): seq[string] =
+  for n in p{"rootFilesystem", "snapper"}.getElems(): result.add(n.getStr())
 
 proc newerThanMarker(g: Guest; repro: string): ExecOut =
   ## Every file on the root filesystem modified after a marker while the
@@ -94,7 +120,8 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
     if belowMatrix:
       step("the preflight refuses a base whose systemd is below the matrix",
            ro.exitCode == 2 and "fail distribution" in ro.stdout and
-             "below the Arch matrix's 258" in ro.stdout,
+             "below the Arch matrix's 258" in ro.stdout and
+             "EAddOnUnsupportedBase" in ro.stdout,
            ro.stdout & ro.stderr)
     else:
       step("preflight on a write-protected disk is compatible",
@@ -128,11 +155,20 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
       step("the plan is JSON", false, e.msg & "\n" & js.stdout)
       return fails
     let p = plan
-    step("the plan records pacman, the network manager and snapper",
-         p{"base", "pacman"}.getStr().startsWith("7") and
-           p{"base", "networkManager"}.getStr().len > 0 and
-           p{"rootFilesystem", "snapper"} != nil,
-         $p{"base"} & " " & $p{"rootFilesystem"})
+    step("the plan records pacman", p{"base", "pacman"}.getStr().startsWith("7"),
+         $p{"base"})
+    let nm = p{"base", "networkManager"}.getStr()
+    step("the plan's network manager is the guest's (" &
+         expectedNetworkManager(b) & ")", nm == expectedNetworkManager(b),
+         $p{"base"})
+    let snapper = g.realSnapperConfigs()
+    record["snapperConfigs"] = %snapper
+    step("the plan's snapper configurations are the guest's real ones" &
+         (if omarchy: " (non-empty on Omarchy)" else: " (none)"),
+         p{"rootFilesystem", "snapper"} != nil and
+           p{"rootFilesystem", "snapper"}.kind == JArray and
+           p.snapperOf() == snapper and (snapper.len > 0) == omarchy,
+         $p{"rootFilesystem"} & " snapper list-configs: " & $snapper)
     step("the plan records the root filesystem type",
          p{"rootFilesystem", "type"}.getStr() == g.rootFsType(),
          $p{"rootFilesystem"})
@@ -148,12 +184,30 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
              "pass distribution" in rw.stdout and
              "pass omarchy-account" in rw.stdout, rw.stdout)
       let o = p{"omarchy"}
-      step("the plan records Omarchy's version from os-release and the package",
+      step("the plan records Omarchy's version from os-release and the " &
+           "package, the pinned " & OmarchyVersion & ", as omarchy-version prints it",
            o != nil and o{"versionId"}.getStr() == osr[2] and
              o{"buildId"}.getStr() == osr[3] and o{"package"}.getStr() == pkg and
              o{"account"}.getStr() == accountFor(b) and
-             (ver.len == 0 or ver == osr[2] or pkg.startsWith(ver)),
-           $o & " omarchy-version=" & ver)
+             ver.len > 0 and ver == OmarchyVersion and pkg == OmarchyVersion,
+           $o & " omarchy-version=" & ver & " pacman -Q omarchy=" & pkg)
+      # A stale version file where pre-package Omarchy kept its checkout:
+      # the plan reads the package database and os-release, never it.
+      let home = g.run("getent passwd " & accountFor(b) & " | cut -d: -f6").strip()
+      let stale = home & "/.local/share/omarchy/version"
+      discard g.run("mkdir -p " & home & "/.local/share/omarchy && " &
+        "{ [ ! -e " & stale & " ] || mv " & stale & " " & stale & ".repro-gate; } && " &
+        "printf '0.0.1-stale-repro-gate\\n' > " & stale)
+      let sj = g.exec(repro & " system addon preflight --json" & profileFlag)
+      discard g.run("rm -f " & stale & " && { [ ! -e " & stale & ".repro-gate ] || " &
+        "mv " & stale & ".repro-gate " & stale & "; }")
+      var so: JsonNode
+      try: so = parseJson(sj.stdout){"omarchy"}
+      except CatchableError: so = nil
+      record["staleVersionPlan"] = %sj.stdout
+      step("a stale ~/.local/share/omarchy/version is ignored",
+           sj.exitCode == 0 and so != nil and $so == $o and
+             "stale-repro-gate" notin sj.stdout, $so & "\n" & sj.stderr)
       let none = g.exec(repro & " system addon preflight")
       step("no --profile on Omarchy is refused, EAddOnBaseLayerOwned",
            none.exitCode == 2 and "fail omarchy-account" in none.stdout and

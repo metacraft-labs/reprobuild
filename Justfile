@@ -104,7 +104,7 @@ e2e_arch_addon_preflight_is_zero_write:
     REPRO_ADDON_BASES="${REPRO_ADDON_BASES:-arch-btrfs-amd64,arch-ext4-amd64,omarchy-amd64}" bash ./scripts/run_addon_gate.sh t_e2e_arch_addon_preflight_is_zero_write
 
 e2e_arch_addon_store_placement_by_root_fs:
-    REPRO_ADDON_BASES="arch-btrfs-amd64,arch-ext4-amd64" bash ./scripts/run_addon_gate.sh t_e2e_arch_addon_store_placement_by_root_fs
+    REPRO_ADDON_BASES="arch-btrfs-amd64,arch-ext4-amd64,omarchy-amd64" bash ./scripts/run_addon_gate.sh t_e2e_arch_addon_store_placement_by_root_fs
 
 e2e_addon_bootstrap_changes_nothing_preexisting:
     bash ./scripts/run_addon_gate.sh t_e2e_addon_bootstrap_changes_nothing_preexisting

@@ -1,27 +1,32 @@
 ## Gate ``e2e_arch_addon_store_placement_by_root_fs`` (spec
 ## ReproOS-Add-On-Mode §5.1, §6.4).
 ##
-## On the btrfs guest ``/repro`` is its own subvolume (inode 256 on btrfs,
-## listed by ``btrfs subvolume list``); a snapshot of ``/`` taken after a
-## generation is realised contains none of ``/repro/store`` (a nested
-## subvolume appears in its parent's snapshot as an empty directory). On the
-## ext4 guest ``/repro`` is a plain directory. The same generation sequence
-## produces the same ledgers on both (compared after the store paths, which
-## carry no root-filesystem identity, and the timestamps are taken out).
-## Uninstall removes either form (``/repro`` absent afterwards).
+## On a btrfs root (the btrfs Arch guest and the Omarchy VM) ``/repro``
+## is its own subvolume (inode 256 on btrfs, ``btrfs subvolume show``); a
+## snapper snapshot of ``/`` taken after a generation is realised contains
+## none of ``/repro/store`` (a nested subvolume appears in its parent's
+## snapshot as an empty directory). On the ext4 guest ``/repro`` is a plain
+## directory. The same generation sequence produces the same ledgers on the
+## two plain Arch guests (compared after the store paths, which carry no
+## root-filesystem identity, and the timestamps are taken out). Uninstall
+## removes either form (``/repro`` absent afterwards).
 ##
-## The snapshot is a read-only btrfs snapshot of ``/`` made with
-## ``btrfs subvolume snapshot -r`` -- what snapper makes for a configuration
-## of ``/`` (the plain Arch guests have no snapper configured) -- and the
-## gate deletes it again before uninstalling.
+## The snapshot is snapper's own (``snapper -c root create``), taken by the
+## configuration of ``/`` the base has: on the Omarchy VM the one its
+## installer set up, on the btrfs guest one the gate creates
+## (``snapper -c root create-config /``) after installing ``snapper`` from
+## the guest's pinned archive (the guest's pacman names nothing else,
+## ``arch_testbed.requirePinnedPacman``). The gate reads the snapshot at
+## ``/.snapshots/<n>/snapshot`` and deletes it (``snapper delete``) before
+## uninstalling.
 ##
 ## Falsifying mutation (``REPRO_ADDON_MUTATION=repro-root-plain-dir-on-btrfs``):
 ## bootstrap creates ``/repro`` as a plain directory on the btrfs root, so the
 ## snapshot carries the store and the gate turns red. Record red, then green.
 ##
 ## Opt-in: ``REPRO_ADDON_VM_GATES=1``
-## (``just e2e_arch_addon_store_placement_by_root_fs``). Bases: the btrfs and
-## the ext4 guest (the ledger comparison needs both).
+## (``just e2e_arch_addon_store_placement_by_root_fs``). Bases: the btrfs
+## and the ext4 guest (the ledger comparison needs both) and the Omarchy VM.
 ##
 ## *Mocking.* None.
 
@@ -31,7 +36,12 @@ import repro_test_support/reasoned_skip
 
 import ./arch_gate_support
 
-const Snapshot = "/.repro-addon-gate-snapshot"
+const
+  SnapperInstall = "pacman -Sy --noconfirm --needed snapper"
+    ## From the guest's pinned archive (the image was built from the same
+    ## date, so ``-Sy`` brings the same database the image has).
+  SnapperCreate = "snapper -c root create --print-number --description " &
+    "'reprobuild add-on placement gate'"
 
 proc comparableLedger*(ledger: string): string =
   ## What "the same generation sequence produces the same ledgers" compares
@@ -62,7 +72,8 @@ proc runBase(b: BaseImage; record: JsonNode;
   proc step(name: string; ok: bool; detail: string) =
     steps.add(%*{"step": name, "ok": ok, "detail": detail})
     if not ok: fails.add(b.name & ": " & name & ": " & detail)
-  let btrfs = archVariantOf(b) == avBtrfs
+  let btrfs = rootIsBtrfs(b)
+  let account = accountFor(b)
   try:
     g = newArchGuest(b)
     g.boot()
@@ -72,7 +83,18 @@ proc runBase(b: BaseImage; record: JsonNode;
     if not guard.ok: return fails
     let (repro, sha) = g.installArtefact()
     record["artefactSha256"] = %sha
-    if not g.bootstrapArch(repro, step).ok: return fails
+    if btrfs and not isOmarchyBase(b):
+      let inst = g.exec(SnapperInstall & " && snapper -c root create-config /",
+                        timeoutSec = 1800)
+      step("snapper installed from the pinned archive and configured for /",
+           inst.exitCode == 0, inst.stdout & inst.stderr)
+      if inst.exitCode != 0: return fails
+    if btrfs:
+      let cfg = g.exec("snapper --csvout list-configs")
+      record["snapperConfigs"] = %cfg.stdout
+      step("snapper has the configuration root of /", cfg.exitCode == 0 and
+           "root,/" in cfg.stdout.splitLines(), cfg.stdout & cfg.stderr)
+    if not g.bootstrapArch(repro, step, g.firstProfileFlag(b)).ok: return fails
     let inode = g.run("stat -c %i /repro").strip()
     record["reproInode"] = %inode
     if btrfs:
@@ -85,23 +107,35 @@ proc runBase(b: BaseImage; record: JsonNode;
            "inode " & inode)
 
     let exe = g.gen0ReproExe()
-    let a1 = g.applyProfile(repro, "gen1", gen1Profile(exe))
+    let a1 = g.applyProfile(repro, "gen1", gen1Profile(exe, account))
     step("apply generation 1", a1.exitCode == 0, a1.stdout & a1.stderr)
     if a1.exitCode != 0: return fails
-    ledgers.add(comparableLedger(g.ledgerOf()))
+    if not isOmarchyBase(b):
+      ledgers.add(comparableLedger(g.ledgerOf()))
 
     if btrfs:
-      let snap = g.exec("btrfs subvolume snapshot -r / " & Snapshot)
-      step("a snapshot of / is taken", snap.exitCode == 0,
-           snap.stdout & snap.stderr)
-      let inSnap = g.exec("ls -A " & Snapshot & "/repro 2>&1; " &
-                          "ls -A " & Snapshot & "/repro/store 2>/dev/null | head")
+      let snap = g.exec(SnapperCreate)
+      let n = snap.stdout.strip()
+      step("snapper takes a snapshot of /", snap.exitCode == 0 and
+           n.len > 0 and n.allCharsInSet({'0'..'9'}), snap.stdout & snap.stderr)
+      if snap.exitCode != 0 or n.len == 0: return fails
+      let at = "/.snapshots/" & n & "/snapshot"
+      record["snapshot"] = %at
+      let real = g.exec("test -d " & at & "/etc/repro-addon-fixture && " &
+                        "test -d " & at & "/repro")
+      step("vacuity guard: the snapshot holds / as of generation 1 (the " &
+           "fixture's /etc directory and the /repro mount point)",
+           real.exitCode == 0, g.exec("ls -la " & at & " 2>&1").stdout)
+      let inSnap = g.exec("ls -A " & at & "/repro 2>&1; " &
+                          "ls -A " & at & "/repro/store 2>/dev/null | head")
       record["snapshotRepro"] = %inSnap.stdout
-      step("the snapshot of / contains none of /repro/store",
+      step("the snapper snapshot of / contains none of /repro/store",
            inSnap.stdout.strip().len == 0 and
-             g.exec("test -e " & Snapshot & "/repro/store").exitCode != 0,
+             g.exec("test -e " & at & "/repro/store").exitCode != 0,
            inSnap.stdout)
-      discard g.exec("btrfs subvolume delete " & Snapshot)
+      let del = g.exec("snapper -c root delete " & n)
+      step("the gate's snapshot is deleted", del.exitCode == 0,
+           del.stdout & del.stderr)
 
     let un = g.exec(repro & " system addon uninstall")
     step("uninstall", un.exitCode == 0, un.stdout & un.stderr)
@@ -126,7 +160,7 @@ suite "e2e_arch_addon_store_placement_by_root_fs":
     else:
       var failures: seq[string]
       var ledgers: seq[string]
-      for b in [ArchBtrfs, ArchExt4]:
+      for b in [ArchBtrfs, ArchExt4, OmarchyBase]:
         let record = archGateRecord("e2e_arch_addon_store_placement_by_root_fs")
         record["base"] = %b.name
         let f = runBase(b, record, ledgers)

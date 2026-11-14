@@ -129,6 +129,13 @@ type
     key*: string
     value*: string
     optional*: bool
+    pathSuffix*: bool
+      ## Not optional, and ``key`` names the last segments of a path whose
+      ## leading part the expecter cannot know (``repro`` for ``/repro``'s
+      ## subvolume, listed as ``repro`` on a root that is the top-level
+      ## subvolume and as ``@/repro`` under Omarchy's ``@``): exactly one
+      ## diff entry whose key is ``key`` or ends in ``/<key>`` must match,
+      ## with the expected op and value.
 
   ExceptionRule* = object
     ## An enumerated, permitted difference: ``component`` plus a key glob
@@ -243,23 +250,6 @@ const
     "proc-sys-fs-binfmt_misc",
   ]
 
-  SwapAliasUnitPrefix* = "dev-disk-by"
-    ## With the ``.swap`` suffix: the swap units systemd loads for each
-    ## ``/dev/disk/by-*`` symlink of an active swap device, as udev creates
-    ## the links (``dev-disk-by\x2duuid-<uuid>.swap``, ``...by\x2dlabel...``,
-    ## ``...by\x2ddiskseq...``). They are aliases of the device's own
-    ## unit (``dev-zram0.swap``), which stays recorded. Their names carry
-    ## per-boot identifiers -- a zram swap is formatted afresh at every
-    ## boot, so its UUID changes -- and whether they are loaded follows
-    ## udev's timing after boot (measured 2026-11-14 on the Omarchy 4.5.0
-    ## guest: absent at one fingerprint and present at a later one, with
-    ## no apply in between doing more than a daemon-reload). Only the
-    ## ``active-units`` component is affected; such units have no unit file.
-
-proc isSwapAliasUnit*(name: string): bool =
-  ## A ``/dev/disk/by-*`` alias unit of an active swap device
-  ## (``SwapAliasUnitPrefix``).
-  name.startsWith(SwapAliasUnitPrefix) and name.endsWith(".swap")
 
 # ---------------------------------------------------------------------------
 # Escaping: one record per line, three tab-separated fields.
@@ -628,8 +618,7 @@ proc parseListUnits*(text: string): seq[tuple[key, value: string]] =
     if l.startsWith("*"): l = l[1 .. ^1].strip()
     let f = l.splitWhitespace()
     if f.len < 4: continue
-    if isVolatileUnit(f[0]) or f[0] in VolatileActiveUnits or
-        isSwapAliasUnit(f[0]): continue
+    if isVolatileUnit(f[0]) or f[0] in VolatileActiveUnits: continue
     if f[2] in ["active", "failed"]:
       result.add((key: f[0], value: f[2]))
 
@@ -754,7 +743,7 @@ proc collectPacmanLocal(fp: var Fingerprint; opts: CollectOptions) =
   for p in pacmanInstalledPackages(root):
     if p.name.len == 0 or not fileExists(p.dir / "files"):
       raise newException(FingerprintError, "pacman database entry " & p.dir &
-        " has no %NAME% or no files list")
+        " has no desc, no %NAME% or no files list")
     fp.add(fcPacmanLocal, p.name, p.version & " files-sha256:" &
            sha256OfFile(p.dir / "files"))
 
@@ -905,7 +894,9 @@ proc collectFingerprint*(opts = CollectOptions(root: "/", live: true)):
     collectPacmanLocal(result, opts)
   if opts.omarchyAccount.len > 0:
     collectOmarchyHooks(result, opts)
-  if opts.live:
+  if opts.live and isArchFamilyRoot(rootPath(opts, "/")):
+    # ``btrfs-subvolumes`` is an Arch component (spec §12.2 *On Arch*); a
+    # Debian-family base's fingerprint is what it was, whatever its root.
     collectBtrfsSubvolumes(result)
     collectUnits(result)
     collectSysctl(result)
@@ -1018,8 +1009,10 @@ proc applyExceptions*(entries: seq[DiffEntry];
       result.add(e)
 
 proc renderExpectation*(e: Expectation): string =
-  ## ``<op>[?] <component>\t<key>\t<value>``; ``?`` marks an optional one.
-  $e.op & (if e.optional: "? " else: " ") & $e.component & "\t" &
+  ## ``<op>[?|/] <component>\t<key>\t<value>``; ``?`` marks an optional
+  ## one, ``/`` a path-suffix one.
+  $e.op & (if e.optional: "? " elif e.pathSuffix: "/ " else: " ") &
+    $e.component & "\t" &
     escapeField(e.key) & "\t" & escapeField(e.value)
 
 proc parseExpectations*(text: string): seq[Expectation] =
@@ -1027,7 +1020,8 @@ proc parseExpectations*(text: string): seq[Expectation] =
   for raw in text.splitLines():
     if raw.len == 0 or raw.startsWith("#"): continue
     let optional = raw.len > 2 and raw[1] == '?'
-    let head = if optional: 3 else: 2
+    let pathSuffix = raw.len > 2 and raw[1] == '/'
+    let head = if optional or pathSuffix: 3 else: 2
     if raw.len < head + 1 or raw[head - 1] != ' ':
       raise newException(FingerprintError, "malformed expectation: " & raw)
     let op = case raw[0]
@@ -1041,7 +1035,8 @@ proc parseExpectations*(text: string): seq[Expectation] =
       raise newException(FingerprintError, "malformed expectation: " & raw)
     result.add(Expectation(op: op, component: componentFromString(parts[0]),
                            key: unescapeField(parts[1]),
-                           value: unescapeField(parts[2]), optional: optional))
+                           value: unescapeField(parts[2]), optional: optional,
+                           pathSuffix: pathSuffix))
 
 type
   ExpectationReport* = object
@@ -1063,6 +1058,22 @@ proc matchExpectations*(entries: seq[DiffEntry];
   for x in expected:
     if x.optional:
       optionals.add(x)        # matched against what is left, by glob
+      continue
+    if x.pathSuffix:
+      # Exactly one entry of the component whose key ends at the segment.
+      var hits: seq[DiffEntry]
+      for e in entries:
+        if e.component == x.component and (e.component, e.key) notin used and
+            (e.key == x.key or e.key.endsWith("/" & x.key)):
+          hits.add(e)
+      if hits.len == 0:
+        result.missing.add(x)
+        continue
+      let actual = hits[0]       # any further hit stays unexpected
+      used.incl((actual.component, actual.key))
+      let value = if x.op == doRemoved: actual.before else: actual.after
+      if actual.op != x.op or (x.value != "*" and x.value != value):
+        result.mismatched.add((expected: x, actual: actual))
       continue
     let k = (x.component, x.key)
     if k notin byKey:

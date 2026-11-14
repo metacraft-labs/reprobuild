@@ -463,7 +463,9 @@ proc loadPacmanIndex(root: string; idx: PacmanIndex) =
   for p in pkgs:
     if p.name.len == 0:
       raise newException(AddonCollisionError, "the pacman package " &
-        "database entry " & p.dir & " has no %NAME%")
+        "database entry " & p.dir & " has no desc or no %NAME% (a package " &
+        "being installed, or a damaged entry); package ownership cannot be " &
+        "observed while it is so")
     if not fileExists(p.dir / "files"):
       raise newException(AddonCollisionError, "the pacman package " &
         "database entry " & p.dir & " has no files list")
