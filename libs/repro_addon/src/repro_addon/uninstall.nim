@@ -256,7 +256,22 @@ proc shipAndConfirm*(site: ShipSite; host: string):
   ## every record in it: ``ok`` only when the outbox is empty after the
   ## run. A sink that refuses, does not answer, or answers without a
   ## receipt leaves the records queued, and ``why`` says how many and why.
-  if not fileExists(site.confPath): return (true, "")
+  ##
+  ## No sink configuration: a host without a sink writes no outbox entries
+  ## (``EvidenceSite.confPath``), so an empty outbox means there is nothing
+  ## to wait for. A non-empty one means the configuration was there when
+  ## the records were queued and is gone now -- an earlier uninstall that
+  ## did not finish removed it with the ``/etc`` objects -- and the records
+  ## were never acknowledged (A11 code review round 11; §13 decision 62:
+  ## nothing is discarded unshipped without its signed record).
+  if not fileExists(site.confPath):
+    let queued = outboxEntries(site.outbox).len
+    when mutated("ship-ok-without-sink-configuration"):
+      return (true, "")                   # FALSIFIER: queued records ignored
+    if queued == 0: return (true, "")
+    return (false, $queued & " record(s) still queued, and the sink " &
+      "configuration " & site.confPath & " is gone (an earlier uninstall " &
+      "that did not finish removed it), so they cannot be shipped")
   try:
     let conf = loadEvidenceConf(site.confPath)
     let r = runEvidenceShip(site, conf, host)

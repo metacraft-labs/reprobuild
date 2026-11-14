@@ -972,6 +972,11 @@
 ## ``discard-completion-key-read-late``       the completion is signed from
 ##                                            the key file, which the removal
 ##                                            took
+## ``ship-ok-without-sink-configuration``     uninstall reads a missing sink
+##                                            configuration as "nothing to
+##                                            wait for" though records are
+##                                            queued, so a re-run discards
+##                                            them without a signed record
 ## ``evidence-reported-removed-unchecked``    a store evidence entry is
 ##                                            reported removed although its
 ##                                            removal failed, and the
@@ -1658,6 +1663,7 @@ const
                           "discard-completion-skips-sync",
                           "finish-trusts-kept-list",
                           "evidence-reported-removed-unchecked",
+                          "ship-ok-without-sink-configuration",
                           "intent-overwrites-existing",
                           "discard-completed-objects-present",
                           "discard-failed-removal-counted-as-kept",

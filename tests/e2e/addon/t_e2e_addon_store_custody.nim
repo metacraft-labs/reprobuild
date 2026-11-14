@@ -64,7 +64,11 @@
 ## exits non-zero, does not report that entry removed, and again keeps the
 ## state and the key (falsifier ``evidence-reported-removed-unchecked``).
 ## That run passes ``--keep-store``, so the object left aside is still
-## there for the final run. After ``chattr -i`` the re-run completes; the
+## there for the final run. Each re-run finds the sink configuration gone
+## with the first run's ``/etc`` objects and the records still queued, so
+## it writes and prints its own intent record rather than discarding them
+## unrecorded (falsifier ``ship-ok-without-sink-configuration``: no intent,
+## and the steps that check one go red). After ``chattr -i`` the re-run completes; the
 ## entries it reports removed and the ones the failed run removed are all
 ## the entries.
 ##

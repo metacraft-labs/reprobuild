@@ -21,7 +21,7 @@ import std/[os, posix, strutils, unittest]
 
 import repro_infra
 import repro_addon/fingerprint
-import repro_addon/[addon_apply, ledger, store_root, uninstall]
+import repro_addon/[addon_apply, evidence, evidence_ship, ledger, store_root, uninstall]
 
 let me = $getuid() & ":" & $getgid()
 
@@ -281,3 +281,31 @@ suite "a failed store-evidence removal keeps the state":
     check not removeStateEvidence(r, @[e])
     check not dirExists(e)
     check (e & " (store evidence)") in r.removed and r.errors.len == 0
+
+# ---------------------------------------------------------------------------
+# A11 code review round 11, found by the store-custody VM gate: a first
+# uninstall that does not finish removes the `/etc` objects, the sink
+# configuration among them, and keeps the state with its evidence outbox.
+# A re-run then found no configuration, read it as "a host without a sink:
+# nothing to wait for", and discarded the unshipped evidence with no signed
+# record (§13 decisions 62 and 81). A host without a sink never writes an
+# outbox entry, so queued entries without a configuration are records the
+# sink never acknowledged. Falsifier ``ship-ok-without-sink-configuration``.
+# No mocks: a real outbox directory and the uninstall's own ``shipAndConfirm``.
+# ---------------------------------------------------------------------------
+
+suite "a lost sink configuration does not acknowledge queued records":
+  let root = getTempDir() / ("repro-uninstall-ship-" & $getCurrentProcessId())
+  removeDir(root)
+  createDir(root / "outbox")
+  let site = ShipSite(confPath: root / "evidence.conf", outbox: root / "outbox",
+                      stateDir: root / "state")
+
+  test "no configuration and an empty outbox: nothing to wait for":
+    check shipAndConfirm(site, "h") == (true, "")
+
+  test "no configuration and queued records: not acknowledged, and says why":
+    writeOutboxEntry(site.outbox, "1-x.evr", "bytes")
+    let r = shipAndConfirm(site, "h")
+    check not r.ok
+    check "1 record(s) still queued" in r.why and "is gone" in r.why
