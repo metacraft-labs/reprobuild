@@ -36,6 +36,10 @@
 ## ``uninstall-discards-state-on-drift``      uninstall removes the state
 ##                                            directory and ledger even
 ##                                            when it left drift behind
+## ``uninstall-discards-state-after-failed-store-removal``
+##                                            uninstall removes the state
+##                                            even when the store's own
+##                                            removal failed
 ## ``recipient-key-0644``                     bootstrap writes the recipient
 ##                                            key group- and world-readable
 ## ``provisions-publisher-key``               bootstrap also leaves a binary
@@ -1007,6 +1011,7 @@ const
                           "anywhere-probe-leaves-files",
                           "apply-skips-kind-check",
                           "uninstall-discards-state-on-drift",
+                          "uninstall-discards-state-after-failed-store-removal",
                           "observer-never-package-owned",
                           "observer-checks-path-text-only",
                           "exclusive-as-plain-restart",

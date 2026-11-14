@@ -793,6 +793,67 @@ proc finishDiscard*(r: var UninstallResult; custody: CustodySite;
         "record could not be written (" & e.msg & "); the intent record " &
         r.overrideRecord & " stands as authorised, not completed")
 
+type StoreRemover* = proc () {.closure.}
+
+proc removeStore*(r: var UninstallResult; keepStore: bool;
+                  remover: StoreRemover = removeReproRoot;
+                  mounted: bool = dirExists(StoreRoot) and
+                                  isMountPoint(StoreRoot)): bool =
+  ## Removes ``/repro`` unless ``--keep-store``. True when the removal was
+  ## attempted or required and did not happen (still mounted, or ``remover``
+  ## raised): the uninstall is then incomplete and must keep the state.
+  if mounted:
+    r.errors.add(StoreRoot & " is still mounted; the store is kept")
+    return true
+  if keepStore: return false
+  try:
+    remover()
+    r.removed.add(ReproRoot)
+  except OSError as ex:
+    r.errors.add(ReproRoot & ": " & ex.msg)
+    return true
+
+proc keepStateWhenIncomplete*(r: var UninstallResult; l: Ledger;
+                              stateDir: string): bool =
+  ## §10.2 step 5: an uninstall that left drift or failed a step keeps the
+  ## state directory (ledger copy, attestation key, evidence configuration)
+  ## so a second uninstall can finish. Writes the ledger of what the add-on
+  ## still owns NOW (objects this run undid are dropped, so the next run
+  ## never reports one as drift) and returns true; false when complete.
+  if r.drift.len == 0 and r.errors.len == 0: return false
+  writeLedger(ledgerCopyPath(stateDir), remainingLedger(l, r))
+  r.errors.add("the add-on's state and ledger at " & stateDir &
+    " are kept: the uninstall is incomplete (see the drift and errors " &
+    "above); fix or accept them and run uninstall again")
+  true
+
+proc keepStateAfterStore*(r: var UninstallResult; l: Ledger;
+                          stateDir: string; storeFailed: bool): bool =
+  ## After the store's removal (and ``classifyLeftAside``): a failed removal,
+  ## or a store-evidence aside still in place, keeps the state like drift
+  ## does. True when the uninstall must stop here.
+  when not mutated("uninstall-discards-state-after-failed-store-removal"):
+    if storeFailed or r.leftAside.len > 0:
+      discard keepStateWhenIncomplete(r, l, stateDir)
+      return true
+  false
+
+proc removeDirTree(d: string) = removeDir(d)
+
+proc removeHostRoot*(r: var UninstallResult; root: string;
+                     evidence: seq[string] = @[];
+                     remover: proc (d: string) = removeDirTree) =
+  ## Removes one of the host roots. ``evidence`` (store evidence held under
+  ## it) is listed as removed only once the root is gone: a removal that
+  ## failed part-way must not report entries still on disk.
+  if not dirExists(root): return
+  try:
+    remover(root)
+    r.removed.add(root)
+    for e in evidence: r.removed.add(e & " (store evidence)")
+  except OSError as ex:
+    r.errors.add(root & ": " & ex.msg)
+
 proc runAddonUninstall*(opts: UninstallOptions): UninstallResult =
   let stateDir = if opts.stateDir.len > 0: opts.stateDir else: DefaultStateDir
   # The host-wide apply lock for the whole uninstall: it removes the store,
@@ -984,17 +1045,15 @@ proc runAddonUninstall*(opts: UninstallOptions): UninstallResult =
   #    the operator restored or accepted the object) can finish the job.
   #    Only a complete reversal removes the state.
   when not mutated("uninstall-discards-state-on-drift"):
-    if result.drift.len > 0 or result.errors.len > 0:
-      # The ledger must describe what the add-on still owns NOW: the
-      # objects this run did remove are taken out of it, so the next
-      # uninstall acts only on what is left and never reports an object
-      # it already undid (a diversion already removed, a file already
-      # deleted) as drift.
-      writeLedger(ledgerCopyPath(stateDir), remainingLedger(l, result))
-      result.errors.add("the add-on's state and ledger at " & stateDir &
-        " are kept: the uninstall is incomplete (see the drift and errors " &
-        "above); fix or accept them and run uninstall again")
-      return
+    if keepStateWhenIncomplete(result, l, stateDir): return
+  # The store goes BEFORE the keys and the state: a removal that fails
+  # (``/repro`` part-way, or still mounted) makes the uninstall incomplete
+  # just as drift does, and the state, with the ledger copy and the
+  # attestation key a second uninstall needs, must still be there then.
+  let storeFailed = removeStore(result, opts.keepStore)
+  classifyLeftAside(result, evidenceKept, asideRoot(custodySite(stateDir)),
+                    opts.keepStore)
+  if keepStateAfterStore(result, l, stateDir, storeFailed): return
   for k in byClass[lcKey]:
     if not k.isPreBootstrapInput:
       removeOwned(k, result)
@@ -1007,14 +1066,6 @@ proc runAddonUninstall*(opts: UninstallOptions): UninstallResult =
         result.removed.add(k.path)
       except OSError as ex:
         result.errors.add(k.path & ": " & ex.msg)
-  if dirExists(StoreRoot) and isMountPoint(StoreRoot):
-    result.errors.add(StoreRoot & " is still mounted; the store is kept")
-  elif not opts.keepStore:
-    try:
-      removeReproRoot()
-      result.removed.add(ReproRoot)
-    except OSError as ex:
-      result.errors.add(ReproRoot & ": " & ex.msg)
   # The secrets ramfs (A7) is unmounted, its plaintext gone, before the
   # roots are removed.
   try:
@@ -1025,17 +1076,8 @@ proc runAddonUninstall*(opts: UninstallOptions): UninstallResult =
   # (`/var/lib/repro`), whatever --keep-store says (that keeps `/repro`).
   # Its entries were named, and the uninstall refused, before anything was
   # removed unless the operator passed --discard-store-evidence (above).
-  for e in evidenceEntries(custodySite(stateDir)):
-    result.removed.add(e & " (store evidence)")
-  # Objects a crashed recovery left aside in the store were named above
-  # (the refusal); they went with the store, or stay with it.
-  classifyLeftAside(result, evidenceKept, asideRoot(custodySite(stateDir)),
-                    opts.keepStore)
+  let stateEvidence = evidenceEntries(custodySite(stateDir))
   for root in ["/etc/repro", "/var/lib/repro", "/run/repro"]:
-    if dirExists(root):
-      try:
-        removeDir(root)
-        result.removed.add(root)
-      except OSError as ex:
-        result.errors.add(root & ": " & ex.msg)
+    removeHostRoot(result, root,
+                   if root == "/var/lib/repro": stateEvidence else: @[])
   restorePreBootstrapInputs(captured, opts.keepStore, result)
