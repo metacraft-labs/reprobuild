@@ -1001,7 +1001,11 @@ proc capabilitySurfaces(): seq[CapabilitySurface] =
                # it was missed — the case reported `unclassified.len == 1`
                # until this line, which is the audit doing its job on an
                # incomplete fix to itself.
-               "findShimLibrary"]),
+               "findShimLibrary",
+               # Renders the body of one Apple toolchain drop-in as a
+               # string; ``populateAppleToolchainDropIns`` is what writes
+               # and resolves it. Inert: it returns text and starts nothing.
+               "renderAppleToolchainDropIn"]),
     # The escape hatches, and the rewrite templates that warn about the
     # stdlib names. The templates are pattern rewrites, but they are also
     # ordinary exported templates that can be called by name, so they are
@@ -2615,15 +2619,19 @@ suite "every_launch_path_is_monitored":
     #    to the unknown-subcommand path (exit 2) if any one of them stops
     #    matching, which is how a renamed triple surfaces as a failed
     #    action rather than as a compile error.
+    #    The self-spawn arm is spelled in TWO dispatchers:
+    #    ``runLegacyCommand`` (the commands not yet moved onto the
+    #    command-line description) and ``runThinAppDispatch`` (the per-program
+    #    arms, which must see it BEFORE ``repro-daemon`` does).
     check countOccurrences(cliSupport,
-      "args[0] == \"internal\" and args[1] == \"io\" and") == 1
+      "args[0] == \"internal\" and args[1] == \"io\" and") == 2
     check countOccurrences(cliSupport,
       "args[0] == \"debug\" and") >= 1
     check countOccurrences(cliSupport,
       "args[1] == \"io\" and args[2] == \"monitor\"") == 1   # the debug arm
-    # Two arms, so two ``monitor`` word tests: the self-spawn arm and the
-    # operator-facing one.
-    check countOccurrences(cliSupport, "args[2] == \"monitor\"") == 2
+    # Three arms, so three ``monitor`` word tests: the two self-spawn
+    # arms above and the operator-facing one.
+    check countOccurrences(cliSupport, "args[2] == \"monitor\"") == 3
 
     # 4. The hand-copied literal in the dev-session supervisor.
     let devSession = readFile(root /

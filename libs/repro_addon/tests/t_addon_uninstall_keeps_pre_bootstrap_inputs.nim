@@ -309,3 +309,51 @@ suite "a lost sink configuration does not acknowledge queued records":
     let r = shipAndConfirm(site, "h")
     check not r.ok
     check "1 record(s) still queued" in r.why and "is gone" in r.why
+
+# ---------------------------------------------------------------------------
+# A11 code review round 13 (§13 decision 146): the state, /var/lib/repro, goes
+# with its ledger copy last, so a removal that fails part-way leaves the one
+# file a re-run reads first. A directory without write permission stands for
+# an immutable file (the test runs without root); the real removal and the
+# real readLedger otherwise. Falsifier ``ledger-copy-removed-with-the-rest``.
+# ---------------------------------------------------------------------------
+
+suite "the ledger copy goes last":
+  test "a state removal that fails part-way keeps the ledger copy, and a re-run finishes":
+    let st = getTempDir() / ("repro-uninstall-varlib-" & $getCurrentProcessId())
+    removeDir(st)
+    createDir(st / "system" / "addon")
+    writeFile(st / "system" / "addon" / "other", "y")
+    let ledger = ledgerCopyPath(st / "system")
+    writeLedger(ledger, Ledger(generation: "g0"))
+    # The blocker is the first directory the removal reaches AFTER system/
+    # (the directory order is the file system's), so a removal that does not
+    # keep the ledger copy for last has already taken it when it fails.
+    for i in 0 ..< 16:
+      createDir(st / ("d" & $i))
+      writeFile(st / ("d" & $i) / "keep.me", "x")
+    var order: seq[string]
+    var extra = 0
+    while true:
+      order = @[]
+      for kind, p in walkDir(st, relative = true): order.add(p)
+      if order.find("system") < order.high: break
+      createDir(st / ("e" & $extra))      # system/ listed last: add more
+      writeFile(st / ("e" & $extra) / "keep.me", "x")
+      inc extra
+    let blocker = st / order[order.find("system") + 1]
+    checkpoint "order: " & $order & " blocker: " & blocker
+    setFilePermissions(blocker, {fpUserRead, fpUserExec})
+    var r: UninstallResult
+    removeStateRoot(r, st, ledger, @[st / "ev"])
+    checkpoint $r.errors
+    check r.errors.len == 1 and "is kept" in r.errors[0]
+    check st notin r.removed
+    check fileExists(ledger)
+    check readLedger(ledger).generation == "g0"
+    setFilePermissions(blocker, {fpUserRead, fpUserWrite, fpUserExec})
+    var again: UninstallResult
+    removeStateRoot(again, st, ledger, @[st / "ev"])
+    check again.errors.len == 0
+    check not dirExists(st)
+    check st in again.removed and (st / "ev" & " (store evidence)") in again.removed

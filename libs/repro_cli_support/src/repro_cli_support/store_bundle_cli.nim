@@ -1,16 +1,18 @@
 ## `repro store closure | export | import` — the command-line face of
 ## `repro_local_store/store_bundle` (see `docs/store-bundles.md`).
 ##
-## This module only parses arguments, resolves roots exactly as `repro build`
-## resolves them, captures frozen dev-env activations and prints reports. All
-## bundle behaviour lives in the library.
+## This module only takes the parsed arguments (repro's command line is
+## parsed from its description, `repro_cli_support/cli_description`),
+## resolves roots exactly as `repro build` resolves them, captures frozen
+## dev-env activations and prints reports. All bundle behaviour lives in the
+## library.
 ##
 ## Two helpers belong to the main CLI module and are passed in as hooks
 ## instead of being imported, because that module imports this one:
 ## resolving the action-cache root (the same precedence `repro build` uses)
 ## and writing a dev-env allow file (the same file `repro allow` writes).
 
-import std/[json, os, osproc, streams, strtabs, strutils]
+import std/[json, options, os, osproc, streams, strtabs, strutils]
 import blake3
 import repro_core/ambient_execution
 import repro_local_store/store
@@ -22,19 +24,30 @@ type
     resolveActionCacheRoot*: proc (explicit: string): string
     allowProject*: proc (projectRoot: string): int
 
-const StoreBundleUsage* = """usage:
-  repro store closure --root=DIR... [--json]
-  repro store export  --root=DIR... --out=DIR [--freeze-dev-env=PROJECT]...
-                      [--part-size=SIZE] [--zstd-level=N] [--zstd-threads=N]
-  repro store import  DIR [--root=DIR]... [--allow-dev-env] [--force]
-common: [--store-root=PATH] [--action-cache-root=PATH]
-See docs/store-bundles.md."""
+  StoreBundleArgs* = object
+    ## What `repro store closure|export|import` was given; each subcommand
+    ## reads the fields its flags fill.
+    storeRoot*: string            ## `--store-root`
+    actionCacheRoot*: string      ## `--action-cache-root`
+    roots*: seq[string]           ## `--root`, repeated
+    freezeDevEnv*: seq[string]    ## `--freeze-dev-env`, repeated
+    outDir*: string               ## `--out`
+    partSize*: string             ## `--part-size`
+    zstdLevel*: Option[int]       ## `--zstd-level`
+    zstdThreads*: Option[int]     ## `--zstd-threads`
+    emitJson*: bool               ## `--json`
+    allowDevEnv*: bool            ## `--allow-dev-env`
+    force*: bool                  ## `--force`
+    bundleDir*: string            ## `import`'s bundle directory
+
+proc helpHint(sub: string): string =
+  "; run `repro store " & sub & " --help` for its usage"
 
 when defined(windows):
-  proc runStoreBundleCommand*(args: seq[string];
+  proc runStoreBundleCommand*(sub: string; a: StoreBundleArgs;
                               hooks: StoreBundleCliHooks): int =
     ## Bundles need POSIX nanosecond timestamps (docs/store-bundles.md).
-    stderr.writeLine("repro store " & (if args.len > 0: args[0] else: "") &
+    stderr.writeLine("repro store " & sub &
       ": store bundles are not supported on Windows")
     1
 else:
@@ -145,68 +158,30 @@ else:
       echo "skipped record " & s.strongHex[0 ..< 16] & " in " &
         s.edgeDir.extractFilename & ": " & s.reason
 
-  proc runStoreBundleCommand*(args: seq[string];
+  proc runStoreBundleCommand*(sub: string; a: StoreBundleArgs;
                               hooks: StoreBundleCliHooks): int =
-    ## `args[0]` is the subcommand.
-    if args.len == 0:
-      echo StoreBundleUsage
-      return 2
-    let sub = args[0]
-    var storeRootFlag, acRootFlag, outDir = ""
-    var roots, freeze, positionals: seq[string]
-    var emitJson, allowDevEnv, force = false
+    ## `repro store closure|export|import` (`sub`).
     var exportOpts = defaultExportOptions("")
-    for raw in args[1 .. ^1]:
-      if raw.startsWith("--store-root="):
-        storeRootFlag = raw.split('=', 1)[1]
-      elif raw.startsWith("--action-cache-root="):
-        acRootFlag = raw.split('=', 1)[1]
-      elif raw.startsWith("--root="):
-        roots.add(raw.split('=', 1)[1])
-      elif raw.startsWith("--out="):
-        outDir = raw.split('=', 1)[1]
-      elif raw.startsWith("--freeze-dev-env="):
-        freeze.add(raw.split('=', 1)[1])
-      elif raw.startsWith("--part-size="):
-        if not parseSize(raw.split('=', 1)[1], exportOpts.partSize):
-          stderr.writeLine("repro store " & sub & ": bad --part-size: " & raw)
-          return 2
-      elif raw.startsWith("--zstd-level="):
-        try: exportOpts.zstdLevel = parseInt(raw.split('=', 1)[1])
-        except ValueError:
-          stderr.writeLine("repro store " & sub & ": bad --zstd-level: " & raw)
-          return 2
-      elif raw.startsWith("--zstd-threads="):
-        try: exportOpts.zstdThreads = parseInt(raw.split('=', 1)[1])
-        except ValueError:
-          stderr.writeLine("repro store " & sub & ": bad --zstd-threads: " & raw)
-          return 2
-      elif raw == "--json": emitJson = true
-      elif raw == "--allow-dev-env": allowDevEnv = true
-      elif raw == "--force": force = true
-      elif raw in ["-h", "--help"]:
-        echo StoreBundleUsage
-        return 0
-      elif raw.startsWith("--"):
-        stderr.writeLine("repro store " & sub & ": unknown flag: " & raw)
-        return 2
-      else:
-        positionals.add(raw)
-
+    if a.partSize.len > 0 and not parseSize(a.partSize, exportOpts.partSize):
+      stderr.writeLine("repro store " & sub & ": bad --part-size: " &
+        "--part-size=" & a.partSize)
+      return 2
+    if a.zstdLevel.isSome: exportOpts.zstdLevel = a.zstdLevel.get
+    if a.zstdThreads.isSome: exportOpts.zstdThreads = a.zstdThreads.get
+    let roots = a.roots
+    let freeze = a.freezeDevEnv
+    let outDir = a.outDir
+    let emitJson = a.emitJson
     let local = BundleRoots(
-      storeRoot: resolveStoreRoot(storeRootFlag),
-      actionCacheRoot: hooks.resolveActionCacheRoot(acRootFlag),
+      storeRoot: resolveStoreRoot(a.storeRoot),
+      actionCacheRoot: hooks.resolveActionCacheRoot(a.actionCacheRoot),
       workspaceRoots: roots)
     try:
       case sub
       of "closure", "export":
-        if positionals.len > 0:
-          stderr.writeLine("repro store " & sub & ": unexpected argument: " &
-            positionals[0])
-          return 2
         if roots.len == 0:
           stderr.writeLine("repro store " & sub & ": at least one --root=DIR " &
-            "is required\n" & StoreBundleUsage)
+            "is required" & helpHint(sub))
           return 2
         if sub == "export" and outDir.len == 0:
           stderr.writeLine("repro store export: --out=DIR is required")
@@ -244,13 +219,9 @@ else:
             echo "frozen dev-env: " & env.projectRoot & " -> " & env.scriptPath
         return 0
       of "import":
-        if positionals.len != 1:
-          stderr.writeLine("repro store import: exactly one bundle directory " &
-            "is required\n" & StoreBundleUsage)
-          return 2
-        let report = importBundle(ImportOptions(bundleDir: positionals[0],
-          force: force), local)
-        if allowDevEnv:
+        let report = importBundle(ImportOptions(bundleDir: a.bundleDir,
+          force: a.force), local)
+        if a.allowDevEnv:
           for env in report.devEnvs:
             if hooks.allowProject(env.projectRoot) != 0:
               return 1

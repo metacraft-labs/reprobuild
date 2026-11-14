@@ -76,3 +76,28 @@ proc trackedFiles*(repoRoot: string; roots: openArray[string]): seq[string] =
   if rc != 0: return
   for f in o.split('\0'):
     if f.len > 0: result.add(repoRoot / f)
+
+proc readDecisionList*(text: string): seq[int] =
+  ## The numbers of a committed decision list: whitespace-separated, ``#``
+  ## starts a comment.
+  for line in text.splitLines():
+    let l = line.split('#')[0]
+    for w in l.splitWhitespace():
+      result.add(parseInt(w))
+
+proc findAddonSpec*(repoRoot: string; env = getEnv("REPRO_ADDON_SPEC")): string =
+  ## The add-on spec: ``env`` when set, else the first
+  ## ``<dir>/reprobuild-pm/spec/ReproOS-Add-On-Mode.md`` (or the checkout's
+  ## former name, ``reprobuild-specs``) in ``repoRoot``'s parent or an
+  ## ancestor of it, as the other spec-reading tests find theirs; "" when
+  ## there is none.
+  if env.len > 0: return env
+  var d = repoRoot.parentDir
+  while d.len > 1:
+    for name in ["reprobuild-pm", "reprobuild-specs"]:
+      let p = d / name / "spec" / "ReproOS-Add-On-Mode.md"
+      if fileExists(p): return p
+    let up = d.parentDir
+    if up == d: break
+    d = up
+  ""

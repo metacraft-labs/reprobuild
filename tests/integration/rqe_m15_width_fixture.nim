@@ -27,23 +27,37 @@ proc pathPresent(path: string): bool =
   except OSError:
     false
 
-proc startPrivateDaemon*(repoRoot: string; cpuMilli: int): PrivateDaemon =
+proc startPrivateDaemon*(repoRoot: string; cpuMilli: int;
+                         observationDb = ""): PrivateDaemon =
   ## A `runquotad` with a `cpuMilli` budget on a fresh private endpoint,
   ## published to this process (and so to every `repro` it starts) through
   ## `RUNQUOTA_SOCKET`.
+  ##
+  ## `observationDb` names a private observation store and turns the daemon's
+  ## `capture` measurement on, so that finished leases are recorded and the
+  ## aggregate table is published (the daemon is otherwise run with
+  ## `--no-write-stats`, off the host-wide store).
   let daemonBin = requireRunQuotaDaemonBin(repoRoot)
   let socketPath = runquotaSocketEndpoint(
     "repro-m15-rq-" & $getCurrentProcessId())
   # The endpoint belongs to the user running the case, whatever account a
   # host's own RunQuota service runs as.
   putEnv("RUNQUOTA_ENDPOINT_SCOPE", "private")
-  let daemon = startProcess(daemonBin, args = [
+  var daemonArgs = @[
     "--socket", socketPath,
     "--cpu-milli", $cpuMilli,
-    "--memory-bytes", "34359738368",
+    "--memory-bytes", "34359738368"]
+  if observationDb.len > 0:
+    # The host identity file is private too: the daemon will not capture
+    # without one, and the host-wide location is not the test's to write.
+    daemonArgs.add ["--observation-db", observationDb,
+      "--host-identity-file", observationDb & ".host-id",
+      "--measurement", "capture=on"]
+  else:
     # A test daemon stays out of the host-wide observation store.
-    "--no-write-stats"
-  ], options = {poUsePath, poStdErrToStdOut})
+    daemonArgs.add "--no-write-stats"
+  let daemon = startProcess(daemonBin, args = daemonArgs,
+    options = {poUsePath, poStdErrToStdOut})
   putEnv("RUNQUOTA_SOCKET", socketPath)
   for _ in 0 ..< 1200:
     if pathPresent(socketPath):

@@ -14,7 +14,9 @@
 ## whose flags and environment variables are compared: the commands parsed
 ## from the description (the root; the first group: `help`, `version`,
 ## `completion`, `capabilities`, `show-conventions`; the second: `configs`,
-## `tasks`, `graph`, `why`, `deps` with `deps refresh`, `stats`). Each later
+## `tasks`, `graph`, `why`, `deps` with `deps refresh`, `stats`; the third:
+## `daemon`, `store`, `cas`, `cache`, `bundle`, `reap`, `launch-plan`,
+## `cert-signer`, `self` and their subcommands). Each later
 ## group of commands is added by listing it here and in the generator's
 ## `COVERED_COMMANDS`; the last one replaces the list with every command. The
 ## top-level command list is compared in full already. Both comparisons run
@@ -45,7 +47,22 @@ const
     "repro", "repro help", "repro version", "repro completion",
     "repro capabilities", "repro show-conventions", "repro configs",
     "repro tasks", "repro graph", "repro why", "repro deps",
-    "repro deps refresh", "repro stats"]
+    "repro deps refresh", "repro stats",
+    # The third group (stores and daemons).
+    "repro daemon", "repro store", "repro store gc", "repro store recover",
+    "repro store roots", "repro store list", "repro store optimise",
+    "repro store materialize", "repro store closure", "repro store export",
+    "repro store import", "repro store copy", "repro store daemon",
+    "repro store serve", "repro cas", "repro cas gc", "repro cas verify",
+    "repro cas path", "repro cas exists", "repro cache",
+    "repro cache lookup", "repro cache substitute", "repro cache publish",
+    "repro cache derive-key", "repro cache gen-key", "repro bundle",
+    "repro bundle create", "repro bundle publish", "repro bundle restore",
+    "repro reap", "repro launch-plan", "repro launch-plan show",
+    "repro launch-plan id", "repro cert-signer", "repro cert-signer serve",
+    "repro cert-signer registration", "repro self", "repro self install",
+    "repro self provision", "repro self hold", "repro self which",
+    "repro self list", "repro self prune-roots"]
     ## The commands whose flags and environment variables are compared.
   SpecifiedNotImplemented = [
     # `repro stats`' common options beyond the first implementation.
@@ -59,12 +76,10 @@ const
     "search", "upgrade"]
     ## Commands the specification describes that repro does not have yet.
   DeclaredNotSpecified = [
-    "allow", "anywhere", "cache", "cargo", "cas", "certificates",
-    "cert-signer", "deny", "deploy-agent", "flake", "locking", "pull",
-    "self"]
+    "allow", "anywhere", "cargo", "certificates", "deny", "deploy-agent",
+    "flake", "locking", "pull"]
     ## Commands repro has whose specification is not a command page (some
-    ## are specified only in design documents, `self` nowhere); each needs a
-    ## page.
+    ## are specified only in design documents); each needs a page.
   BuiltInFlags = ["--help", "-h"]
 
 proc paramName(stmt: NimNode): string =
@@ -144,6 +159,8 @@ const
   # comparison sees the flag in each command it is spliced into.
   WithoutWhyToolProvisioning = declaredSurface("why", "toolProvisioning",
     true)
+  # A namespace's own flag (inherited by every `repro daemon` subcommand).
+  WithoutDaemonEndpoint = declaredSurface("daemon", "endpoint", true)
 
 proc repoRoot(): string =
   var dir = currentSourcePath().parentDir
@@ -219,6 +236,9 @@ suite "CS-M6: the specification pages match the declarations":
     check "flag\trepro capabilities\t--format" in Declared
     check "flag\trepro graph\t--tool-provisioning" in Declared
     check "flag\trepro deps refresh\t--check" in Declared
+    check "flag\trepro store gc\t--budget" in Declared
+    check "flag\trepro daemon\t--endpoint" in Declared
+    check "flag\trepro cache publish\t--platform-cpu" in Declared
     check "flag\trepro\t-V" in Declared
     check "verb\tbuild" in Declared
     check "verb\tws" notin Declared
@@ -232,6 +252,10 @@ suite "CS-M6: the specification pages match the declarations":
   test "removing a shared group's flag from one command fails the comparison":
     check differences(WithoutWhyToolProvisioning, specified()) ==
       @["flag\trepro why\t--tool-provisioning: specified, not declared"]
+
+  test "removing a namespace's own flag fails the comparison":
+    check differences(WithoutDaemonEndpoint, specified()) ==
+      @["flag\trepro daemon\t--endpoint: specified, not declared"]
 
   test "removing one command's declaration fails the comparison":
     check differences(WithoutConfigs, specified()) ==

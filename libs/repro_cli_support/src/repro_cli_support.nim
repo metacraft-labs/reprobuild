@@ -545,14 +545,6 @@ const LegacyVerbSynopses = [
       "repro debug artifact <path> [--format=text|json]\n"),
   ("home",
     "repro home {add | remove | enable | disable | list | why | history | apply | plan | export | facts | compare | rollback | set | get | adopt | resource} [--profile-dir=PATH] [--host=NAME] ...\n"),
-  ("daemon",
-    "repro daemon {status | start | stop | restart | logs | sessions} [--endpoint=PATH] [--state-dir=PATH] [--log=PATH]\n"),
-  ("store",
-    "repro store {gc | recover | roots | list | closure | export | import | daemon} ...\n"),
-  ("bundle",
-    "repro bundle {create | publish | restore} ...\n"),
-  ("self",
-    "repro self {install | provision | hold | which | list | prune-roots} ...\n"),
   ("infra",
     "repro infra {plan | apply | install-root} ...\n"),
   ("system",
@@ -564,7 +556,8 @@ const LegacyVerbSynopses = [
     "repro hardware {probe} [--dry-run | --output PATH | --regenerate]\n"),
   ("cargo",
     "repro cargo gc [--target-dir DIR] [--keep-sets N] [--min-age DURATION] [--dry-run] [--cargo-home[=DIR]]\n" &
-      "repro cargo record-live [--target-dir DIR] [--from FILE|-] [--tee] [--keep-sets N]\n"),
+      "repro cargo record-live [--target-dir DIR] [--from FILE|-] [--tee] [--keep-sets N]\n" &
+      "repro cargo run [-j N] [--products FILE] [--fragment FILE --action-id ID] [--relative-to DIR] [--libs] -- cargo ARGS...\n"),
   ("attest",
     "repro attest expect --image PATH [--out PATH | --check PATH]\n" &
       "repro attest cross-check --manifest PATH --policy PATH --attestations PATH ...\n"),
@@ -4154,8 +4147,7 @@ proc substituteMaterializedBinaryCacheEntries*(g: BuildGraph):
       $getCurrentProcessId()
     removeMaterializedPath(staged)
     createDir(parentDir(staged))
-    let rc = bcCliDispatch.runCacheSubcommand(
-      @["substitute", key, staged])
+    let rc = bcCliDispatch.cacheSubstitute(key, staged)
     if rc == 0:
       removeMaterializedPath(prefix)
       moveDir(staged, prefix)
@@ -39213,49 +39205,58 @@ proc runDevelopCommand*(args: openArray[string]): int =
     resolved.identity, resolved.identityPath, resolved.inspectionPath,
     interfacePath)
 
-proc runStoreDaemonCommand(args: seq[string]): int =
-  if args.len == 0:
-    echo "usage: repro store daemon {start | status | stop} --dev " &
-      "[--store-root <path>]"
-    return 2
-  let action = args[0]
-  let rest = if args.len > 1: args[1 .. ^1] else: @[]
-  if "--dev" notin rest:
+proc runStoreDaemonCommand(conf: ReproCommandLineStoreDaemon): int =
+  ## ``repro store daemon start|status|stop --dev [--store-root PATH]
+  ## [--endpoint PATH]``. The command line is parsed from repro's description
+  ## (``repro_cli_support/cli_description``); only the development profile
+  ## is implemented, so ``--dev`` is required.
+  let action = $conf.command
+  if not conf.dev:
     stderr.writeLine("repro store daemon: only --dev is implemented in " &
       "this pass; production service hardening is not implemented")
     return 2
-  var filtered: seq[string] = @[]
-  for arg in rest:
-    if arg != "--dev":
-      filtered.add(arg)
   try:
-    let parsed = parseDevConfig(filtered)
-    if parsed.rest.len > 0:
-      stderr.writeLine("repro store daemon: unexpected argument: " &
-        parsed.rest[0])
-      return 2
-    case action
-    of "start":
-      let status = startDevDaemon(stablePublicCliPath(), parsed.config)
+    let config = DevDaemonConfig(
+      endpoint: (if conf.endpoint.len > 0: conf.endpoint
+                 else: defaultDevEndpoint()),
+      storeRoot: devStoreRoot(conf.storeRoot))
+    case conf.command
+    of ReproCommandLineStoreDaemonCommand.start:
+      let status = startDevDaemon(stablePublicCliPath(), config)
       echo renderStatus(status)
       return 0
-    of "status":
-      echo renderStatus(queryDevStatus(parsed.config.endpoint))
+    of ReproCommandLineStoreDaemonCommand.status:
+      echo renderStatus(queryDevStatus(config.endpoint))
       return 0
-    of "stop":
-      let status = queryDevStatus(parsed.config.endpoint)
+    of ReproCommandLineStoreDaemonCommand.stop:
+      let status = queryDevStatus(config.endpoint)
       if not status.running:
         echo renderStatus(status)
         return 0
-      stopDevDaemon(parsed.config.endpoint)
+      stopDevDaemon(config.endpoint)
       echo "repro store daemon: stopped"
       return 0
-    else:
-      stderr.writeLine("repro store daemon: unknown action: " & action)
-      return 2
   except CatchableError as err:
     stderr.writeLine("repro store daemon " & action & ": error: " & err.msg)
     return 1
+
+proc runStoreServeCommand(conf: ReproCommandLineStoreServe): int =
+  ## ``repro store serve --dev [--store-root PATH] [--endpoint PATH]``: the
+  ## development store daemon PROCESS, which ``repro store daemon start``
+  ## launches (the standalone ``reprostored`` program name stays an
+  ## alias). Runs in the foreground until stopped.
+  if not conf.dev:
+    stderr.writeLine("reprostored: only --dev is implemented in this pass")
+    return 2
+  try:
+    return runDevDaemonForeground(DevDaemonConfig(
+      endpoint: (if conf.endpoint.len > 0: conf.endpoint
+                 else: defaultDevEndpoint()),
+      storeRoot: devStoreRoot(conf.storeRoot)))
+  except CatchableError as err:
+    stderr.writeLine("reprostored: error: " & err.msg)
+    return 1
+
 
 proc parseStoreByteSize(text: string; value: var int64): bool =
   ## `123`, `512K`, `64M`, `384G`, `1.5T` (binary multiples; an optional
@@ -39300,7 +39301,11 @@ proc parseStoreDuration(text: string; value: var int64): bool =
   except ValueError:
     false
 
-proc runStoreCommand*(args: seq[string]): int =
+# `store gc --grace-seconds` declares this default as a literal (a
+# description default is an expression in the description's own scope).
+static: doAssert DefaultGcGraceSeconds == 300
+
+proc runStoreCommand*(conf: ReproCommandLineStore): int =
   ## Implements `repro store <subcommand>` for the M56 unified local
   ## content-addressed store. Supported subcommands:
   ##
@@ -39346,134 +39351,86 @@ proc runStoreCommand*(args: seq[string]): int =
   ## convention, and refusing to run against an unindexed directory would
   ## make the verb useless for exactly the composition it exists for.
   ##
-  ## Each subcommand accepts an optional `--store-root=PATH` to
-  ## override the per-user default; the `$REPRO_STORE_ROOT` env var
-  ## is honoured otherwise.
-  if args.len == 0:
-    echo "usage: repro store {gc | recover | roots | list | optimise | " &
-      "materialize <src-dir> <dst-dir> | closure | export | import | " &
-      "copy} " &
-      "[--store-root=PATH] [--grace-seconds=N] [--json] [--no-shared-inode] " &
-      "[--budget=SIZE [--target=SIZE] [--keep-recent=DURATION] " &
-      "[--evict-cas] [--dry-run]]"
-    return 2
-  if args[0] == "serve":
-    # Executable-Consolidation M3: `repro store serve` is the store daemon
-    # PROCESS entry — the role formerly carried by the standalone `reprostored`
-    # binary (whose program name stays a compatibility alias). `repro store
-    # daemon …` remain the client control commands.
-    return runReprostoredCommand(if args.len > 1: args[1 .. ^1] else: @[])
-  if args[0] == "daemon":
-    let daemonArgs = if args.len > 1: args[1 .. ^1] else: @[]
-    return runStoreDaemonCommand(daemonArgs)
-  if args[0] == "copy":
-    # Closure copy into another store root. Routed before the flag loop
-    # below: it takes its own flags (--to, --root-id, ...).
-    return runStoreCopyCommand(args, StoreCopyCliHooks(
-      withDestinationLock: proc (dest: string; body: proc (): int): int =
-        when defined(linux):
-          # The add-on's system store is written under the host apply lock
-          # by every add-on writer (see the gc arm below), however its path
-          # is spelled.
-          var isSystemStore = false
-          if dirExists(AddOnSystemStoreRoot / "prefixes") and dirExists(dest):
-            try: isSystemStore = sameFile(dest, AddOnSystemStoreRoot)
-            except OSError: discard
-          if isSystemStore:
-            var lock = acquireHostApplyLock("repro store copy")
-            defer: lock.release()
-            return body()
-        body()))
-  if args[0] in ["closure", "export", "import"]:
-    # Native-store bundles (docs/store-bundles.md). Routed before the flag
-    # loop below: they take their own flags (--root, --out, ...) and must
-    # resolve the action-cache root exactly as `repro build` does.
-    return runStoreBundleCommand(args, StoreBundleCliHooks(
+  ## `optimise` (also `optimize`) hardlinks byte-identical files across
+  ## realized prefixes; `copy` copies closures into another store root;
+  ## `daemon` and `serve` are the development store daemon's control
+  ## commands and process.
+  ##
+  ## The command line is parsed from repro's description
+  ## (``repro_cli_support/cli_description``): each subcommand takes the
+  ## flags it uses. A subcommand that opens the store takes
+  ## `--store-root=PATH` to override the per-user default; the
+  ## `$REPRO_STORE_ROOT` env var is honoured otherwise.
+  case conf.command
+  of ReproCommandLineStoreCommand.serve:
+    return runStoreServeCommand(conf.serve)
+  of ReproCommandLineStoreCommand.daemon:
+    return runStoreDaemonCommand(conf.daemon)
+  of ReproCommandLineStoreCommand.copy:
+    let c = conf.copy
+    return runStoreCopyCommand(c.prefixes, c.rootId, c.to, c.storeRoot, c.json,
+      StoreCopyCliHooks(
+        withDestinationLock: proc (dest: string; body: proc (): int): int =
+          when defined(linux):
+            # The add-on's system store is written under the host apply lock
+            # by every add-on writer (see the gc arm below), however its
+            # path is spelled.
+            var isSystemStore = false
+            if dirExists(AddOnSystemStoreRoot / "prefixes") and
+                dirExists(dest):
+              try: isSystemStore = sameFile(dest, AddOnSystemStoreRoot)
+              except OSError: discard
+            if isSystemStore:
+              var lock = acquireHostApplyLock("repro store copy")
+              defer: lock.release()
+              return body()
+          body()))
+  of ReproCommandLineStoreCommand.closure, ReproCommandLineStoreCommand.`export`,
+      ReproCommandLineStoreCommand.`import`:
+    # Native-store bundles (docs/store-bundles.md); they resolve the
+    # action-cache root exactly as `repro build` does.
+    var a = StoreBundleArgs()
+    var sub = ""
+    case conf.command
+    of ReproCommandLineStoreCommand.closure:
+      sub = "closure"
+      let c = conf.closure
+      a = StoreBundleArgs(storeRoot: c.storeRoot,
+        actionCacheRoot: c.actionCacheRoot, roots: c.root,
+        freezeDevEnv: c.freezeDevEnv, emitJson: c.json)
+    of ReproCommandLineStoreCommand.`export`:
+      sub = "export"
+      let c = conf.`export`
+      a = StoreBundleArgs(storeRoot: c.storeRoot,
+        actionCacheRoot: c.actionCacheRoot, roots: c.root,
+        freezeDevEnv: c.freezeDevEnv, outDir: c.`out`, partSize: c.partSize,
+        zstdLevel: c.zstdLevel, zstdThreads: c.zstdThreads, emitJson: c.json)
+    else:
+      sub = "import"
+      let c = conf.`import`
+      a = StoreBundleArgs(storeRoot: c.storeRoot,
+        actionCacheRoot: c.actionCacheRoot, roots: c.root,
+        allowDevEnv: c.allowDevEnv, force: c.force, emitJson: c.json,
+        bundleDir: c.bundleDir)
+    return runStoreBundleCommand(sub, a, StoreBundleCliHooks(
       resolveActionCacheRoot: proc (explicit: string): string =
         resolveActionCacheRoot(explicit),
       allowProject: proc (projectRoot: string): int =
         runReproAllowCommand([projectRoot])))
-  var storeRootOverride = ""
-  var graceSeconds = DefaultGcGraceSeconds
-  var emitJson = false
-  # Materialisation defaults to the shared-inode arm being ALLOWED. The
-  # opposite default is the single most likely way for a composed tree to
-  # be a full byte copy on a filesystem where links work perfectly well,
-  # and it produces no error to notice. Declining it is therefore an
-  # explicit flag rather than something a caller inherits by silence.
-  var allowSharedInode = true
-  var budgetBytes = 0'i64
-  var targetBytes = 0'i64
-  var keepRecentSeconds = 2 * 86400'i64
-  var evictCas = false
-  var dryRun = false
-  var budgetFlagSeen = false
-  var positionals: seq[string] = @[]
-  for raw in args:
-    if raw.startsWith("--budget="):
-      if not parseStoreByteSize(raw[len("--budget=") .. ^1], budgetBytes):
-        stderr.writeLine("repro store: --budget wants a size such as 384G: " & raw)
-        return 2
-    elif raw.startsWith("--target="):
-      budgetFlagSeen = true
-      if not parseStoreByteSize(raw[len("--target=") .. ^1], targetBytes):
-        stderr.writeLine("repro store: --target wants a size such as 340G: " & raw)
-        return 2
-    elif raw.startsWith("--keep-recent="):
-      budgetFlagSeen = true
-      if not parseStoreDuration(raw[len("--keep-recent=") .. ^1],
-          keepRecentSeconds):
-        stderr.writeLine("repro store: --keep-recent wants a duration such as 2d: " & raw)
-        return 2
-    elif raw == "--evict-cas":
-      budgetFlagSeen = true
-      evictCas = true
-    elif raw == "--dry-run":
-      budgetFlagSeen = true
-      dryRun = true
-    elif raw.startsWith("--store-root="):
-      storeRootOverride = raw[len("--store-root=") .. ^1]
-    elif raw.startsWith("--grace-seconds="):
-      graceSeconds = parseInt(raw[len("--grace-seconds=") .. ^1])
-    elif raw == "--json":
-      emitJson = true
-    elif raw == "--no-shared-inode":
-      allowSharedInode = false
-    elif raw.startsWith("--"):
-      stderr.writeLine("repro store: unknown flag: " & raw)
-      return 2
-    else:
-      positionals.add raw
-  if positionals.len == 0:
-    stderr.writeLine("repro store: missing subcommand")
-    return 2
-  let sub = positionals[0]
-  if sub != "materialize" and positionals.len > 1:
-    stderr.writeLine("repro store: unexpected argument: " & positionals[1])
-    return 2
-  if (budgetBytes > 0 or budgetFlagSeen) and sub != "gc":
-    stderr.writeLine("repro store: --budget and its options apply to `gc` only")
-    return 2
-  if budgetFlagSeen and budgetBytes <= 0:
-    stderr.writeLine("repro store gc: --target / --keep-recent / --evict-cas / " &
-      "--dry-run need --budget=SIZE")
-    return 2
-  if targetBytes > 0 and targetBytes > budgetBytes:
-    stderr.writeLine("repro store gc: --target must not exceed --budget")
-    return 2
-
-  if sub == "materialize":
-    if positionals.len != 3:
-      stderr.writeLine("usage: repro store materialize <src-dir> <dst-dir> " &
-        "[--json] [--no-shared-inode]")
-      return 2
-    let srcDir = positionals[1]
-    let dstDir = positionals[2]
+  of ReproCommandLineStoreCommand.materialize:
+    let m = conf.materialize
+    let srcDir = m.srcDir
+    let dstDir = m.dstDir
     try:
       var report: MaterializeReport
+      # Materialisation defaults to the shared-inode arm being ALLOWED. The
+      # opposite default is the single most likely way for a composed tree
+      # to be a full byte copy on a filesystem where links work perfectly
+      # well, and it produces no error to notice. Declining it is therefore
+      # an explicit flag rather than something a caller inherits by silence.
       materializeDirectory(srcDir, dstDir, report,
-                           allowSharedInode = allowSharedInode)
-      if emitJson:
+                           allowSharedInode = not m.noSharedInode)
+      if m.json:
         echo renderMaterializeReportJson(report, srcDir, dstDir)
       else:
         echo renderMaterializeReportText(report, srcDir, dstDir)
@@ -39481,6 +39438,65 @@ proc runStoreCommand*(args: seq[string]): int =
     except CatchableError as err:
       stderr.writeLine("repro store materialize: error: " & err.msg)
       return 1
+  else:
+    discard
+
+  # `gc`, `recover`, `roots`, `list` and `optimise` open the store root.
+  var storeRootOverride = ""
+  var graceSeconds = DefaultGcGraceSeconds
+  var emitJson = false
+  var budgetBytes = 0'i64
+  var targetBytes = 0'i64
+  var keepRecentSeconds = 2 * 86400'i64
+  var evictCas = false
+  var dryRun = false
+  var sub = ""
+  case conf.command
+  of ReproCommandLineStoreCommand.gc:
+    sub = "gc"
+    let g = conf.gc
+    storeRootOverride = g.storeRoot
+    graceSeconds = g.graceSeconds
+    emitJson = g.json
+    evictCas = g.evictCas
+    dryRun = g.dryRun
+    if g.budget.len > 0 and not parseStoreByteSize(g.budget, budgetBytes):
+      stderr.writeLine("repro store: --budget wants a size such as 384G: " &
+        "--budget=" & g.budget)
+      return 2
+    if g.target.len > 0 and not parseStoreByteSize(g.target, targetBytes):
+      stderr.writeLine("repro store: --target wants a size such as 340G: " &
+        "--target=" & g.target)
+      return 2
+    if g.keepRecent.len > 0 and
+        not parseStoreDuration(g.keepRecent, keepRecentSeconds):
+      stderr.writeLine("repro store: --keep-recent wants a duration such as " &
+        "2d: --keep-recent=" & g.keepRecent)
+      return 2
+    let budgetFlagSeen = g.target.len > 0 or g.keepRecent.len > 0 or
+      g.evictCas or g.dryRun
+    if budgetFlagSeen and budgetBytes <= 0:
+      stderr.writeLine("repro store gc: --target / --keep-recent / " &
+        "--evict-cas / --dry-run need --budget=SIZE")
+      return 2
+    if targetBytes > 0 and targetBytes > budgetBytes:
+      stderr.writeLine("repro store gc: --target must not exceed --budget")
+      return 2
+  of ReproCommandLineStoreCommand.recover:
+    sub = "recover"
+    storeRootOverride = conf.recover.storeRoot
+  of ReproCommandLineStoreCommand.roots:
+    sub = "roots"
+    storeRootOverride = conf.roots.storeRoot
+  of ReproCommandLineStoreCommand.list:
+    sub = "list"
+    storeRootOverride = conf.list.storeRoot
+  of ReproCommandLineStoreCommand.optimise:
+    sub = "optimise"
+    storeRootOverride = conf.optimise.storeRoot
+    emitJson = conf.optimise.json
+  else:
+    return 2
 
   let root = resolveStoreRoot(storeRootOverride)
   when defined(linux):
@@ -39629,7 +39645,7 @@ proc runStoreCommand*(args: seq[string]): int =
         echo "  - " & row.adapter & " " & row.packageName & " " &
           row.version & " " & row.realizedPath
       return 0
-    of "optimise", "optimize":
+    of "optimise":
       # Post-hoc hardlink dedup across every realized prefix — the
       # complement to materialisation-time `cloneSiblingRealization`, which
       # only fires when a same-content sibling already exists and so misses
@@ -39652,96 +39668,69 @@ proc runStoreCommand*(args: seq[string]): int =
           formatFloat(mib, ffDecimal, 1) & " MiB)"
       return 0
     else:
-      stderr.writeLine("repro store: unknown subcommand: " & sub)
       return 2
   except CatchableError as err:
     stderr.writeLine("repro store " & sub & ": error: " & err.msg)
     return 1
 
-proc runCasCommand*(args: seq[string]): int =
+
+proc parseCasDigest(hex: string): (bool, ContentHash) =
+  ## A blob's 64-character hex digest (either case), or false.
+  if hex.len != 64:
+    return (false, ContentHash(default(array[32, byte])))
+  var raw: array[32, byte]
+  for i in 0 ..< 32:
+    let hi = hex[2 * i]
+    let lo = hex[2 * i + 1]
+    let hiVal =
+      if hi >= '0' and hi <= '9': int(hi) - int('0')
+      elif hi >= 'a' and hi <= 'f': 10 + int(hi) - int('a')
+      elif hi >= 'A' and hi <= 'F': 10 + int(hi) - int('A')
+      else: return (false, ContentHash(default(array[32, byte])))
+    let loVal =
+      if lo >= '0' and lo <= '9': int(lo) - int('0')
+      elif lo >= 'a' and lo <= 'f': 10 + int(lo) - int('a')
+      elif lo >= 'A' and lo <= 'F': 10 + int(lo) - int('A')
+      else: return (false, ContentHash(default(array[32, byte])))
+    raw[i] = byte((hiVal shl 4) or loVal)
+  (true, toContentHash(raw))
+
+proc runCasCommand*(conf: ReproCommandLineCas): int =
   ## Implements ``repro cas <subcommand>`` for the R11 Layer-1
   ## content-addressed blob store. This is the NARROW view onto the
   ## same on-disk store ``repro store`` operates against — it exposes
-  ## only the blob-level surface (put / get / verify / path / gc) and
+  ## only the blob-level surface (gc / verify / path / exists) and
   ## does NOT touch the Layer-2 prefix / roots / receipts tables.
   ##
   ## Spec: Store-And-Installation-Layout.md §R11 Two-Layer Split.
   ##
-  ## Supported subcommands:
+  ## The command line is parsed from repro's description
+  ## (``repro_cli_support/cli_description``); ``--store-root=PATH`` is the
+  ## namespace's own flag, so it goes before or after the subcommand.
   ##
-  ##   gc [--keep=HEX,HEX,...] [--store-root=PATH]
+  ##   gc [--keep=HEX,HEX,...]
   ##     Reclaim CAS blobs NOT in the ``--keep`` retain set. Returns
   ##     the freed bytes count. NOTE: this is the narrow Layer-1 GC;
   ##     for the store-wide GC that walks the prefix graph and
   ##     reclaims everything unreachable from any live root, use
   ##     ``repro store gc`` (which delegates through the SQLite root
   ##     tables).
-  ##
-  ##   verify <hex> [--store-root=PATH]
-  ##     Verify one blob's on-disk bytes against its digest.
-  ##
-  ##   path <hex> [--store-root=PATH]
-  ##     Print the absolute on-disk path for one blob.
-  ##
-  ##   exists <hex> [--store-root=PATH]
-  ##     Exit 0 if the blob is present, 1 if not.
-  if args.len == 0:
-    echo "usage: repro cas {gc | verify <hex> | path <hex> | " &
-      "exists <hex>} [--store-root=PATH] [--keep=HEX,HEX,...]"
-    return 2
-  var storeRootOverride = ""
-  var keepList = ""
-  var sub = ""
-  var positional: seq[string] = @[]
-  for raw in args:
-    if raw.startsWith("--store-root="):
-      storeRootOverride = raw[len("--store-root=") .. ^1]
-    elif raw.startsWith("--keep="):
-      keepList = raw[len("--keep=") .. ^1]
-    elif raw.startsWith("--"):
-      stderr.writeLine("repro cas: unknown flag: " & raw)
-      return 2
-    elif sub.len == 0:
-      sub = raw
-    else:
-      positional.add(raw)
-  if sub.len == 0:
-    stderr.writeLine("repro cas: missing subcommand")
-    return 2
-
-  let root = resolveStoreRoot(storeRootOverride)
-
-  proc parseHex64(hex: string): (bool, ContentHash) =
-    if hex.len != 64:
-      return (false, ContentHash(default(array[32, byte])))
-    var raw: array[32, byte]
-    for i in 0 ..< 32:
-      let hi = hex[2 * i]
-      let lo = hex[2 * i + 1]
-      let hiVal =
-        if hi >= '0' and hi <= '9': int(hi) - int('0')
-        elif hi >= 'a' and hi <= 'f': 10 + int(hi) - int('a')
-        elif hi >= 'A' and hi <= 'F': 10 + int(hi) - int('A')
-        else: return (false, ContentHash(default(array[32, byte])))
-      let loVal =
-        if lo >= '0' and lo <= '9': int(lo) - int('0')
-        elif lo >= 'a' and lo <= 'f': 10 + int(lo) - int('a')
-        elif lo >= 'A' and lo <= 'F': 10 + int(lo) - int('A')
-        else: return (false, ContentHash(default(array[32, byte])))
-      raw[i] = byte((hiVal shl 4) or loVal)
-    (true, toContentHash(raw))
-
+  ##   verify <hex>   Verify one blob's on-disk bytes against its digest.
+  ##   path <hex>     Print the absolute on-disk path for one blob.
+  ##   exists <hex>   Exit 0 if the blob is present, 1 if not.
+  let root = resolveStoreRoot(conf.storeRoot)
+  let sub = $conf.command
   try:
-    case sub
-    of "gc":
+    case conf.command
+    of ReproCommandLineCasCommand.gc:
       var cas = openCasStore(root)
       defer: cas.close()
       var retain: HashSet[ContentHash]
-      if keepList.len > 0:
-        for entry in keepList.split(','):
+      if conf.gc.keep.len > 0:
+        for entry in conf.gc.keep.split(','):
           let trimmed = entry.strip()
           if trimmed.len == 0: continue
-          let (ok, h) = parseHex64(trimmed)
+          let (ok, h) = parseCasDigest(trimmed)
           if not ok:
             stderr.writeLine(
               "repro cas gc: --keep entry is not a 64-char hex digest: " &
@@ -39753,12 +39742,9 @@ proc runCasCommand*(args: seq[string]): int =
       echo "retain count: " & $retain.len
       echo "freed bytes: " & $freed
       return 0
-    of "verify":
-      if positional.len != 1:
-        stderr.writeLine(
-          "repro cas verify: exactly one 64-char hex digest required")
-        return 2
-      let (ok, h) = parseHex64(positional[0])
+    of ReproCommandLineCasCommand.verify:
+      let digest = conf.verify.digest
+      let (ok, h) = parseCasDigest(digest)
       if not ok:
         stderr.writeLine(
           "repro cas verify: argument is not a 64-char hex digest")
@@ -39766,17 +39752,13 @@ proc runCasCommand*(args: seq[string]): int =
       var cas = openCasStore(root)
       defer: cas.close()
       if cas.casVerify(h):
-        echo "repro cas verify: ok " & positional[0]
+        echo "repro cas verify: ok " & digest
         return 0
       else:
-        stderr.writeLine("repro cas verify: FAILED " & positional[0])
+        stderr.writeLine("repro cas verify: FAILED " & digest)
         return 1
-    of "path":
-      if positional.len != 1:
-        stderr.writeLine(
-          "repro cas path: exactly one 64-char hex digest required")
-        return 2
-      let (ok, h) = parseHex64(positional[0])
+    of ReproCommandLineCasCommand.path:
+      let (ok, h) = parseCasDigest(conf.path.digest)
       if not ok:
         stderr.writeLine(
           "repro cas path: argument is not a 64-char hex digest")
@@ -39785,58 +39767,86 @@ proc runCasCommand*(args: seq[string]): int =
       defer: cas.close()
       echo cas.casPath(h)
       return 0
-    of "exists":
-      if positional.len != 1:
-        stderr.writeLine(
-          "repro cas exists: exactly one 64-char hex digest required")
-        return 2
-      let (ok, h) = parseHex64(positional[0])
+    of ReproCommandLineCasCommand.exists:
+      let (ok, h) = parseCasDigest(conf.exists.digest)
       if not ok:
         stderr.writeLine(
           "repro cas exists: argument is not a 64-char hex digest")
         return 2
       var cas = openCasStore(root)
       defer: cas.close()
-      if cas.casExists(h):
-        return 0
-      else:
-        return 1
-    else:
-      stderr.writeLine("repro cas: unknown subcommand: " & sub)
-      return 2
+      return (if cas.casExists(h): 0 else: 1)
   except CatchableError as err:
     stderr.writeLine("repro cas " & sub & ": error: " & err.msg)
     return 1
 
-proc runUserDaemonCliCommand(args: seq[string]): int =
-  if args.len == 0:
-    echo "usage: repro daemon {status | start | stop | restart | logs | sessions} " &
-      "[--foreground] [--dev] [--endpoint PATH] [--state-dir PATH] " &
-      "[--log PATH] [--peer-cache lan://CIDR[:port][?seeds=HOST:PORT,...&listen=PORT]]"
-    return 2
-  let action = args[0]
-  let rest = if args.len > 1: args[1 .. ^1] else: @[]
+# The executors `repro daemon serve` installs, defined further down with the
+# build and watch paths they run.
+proc installUserDaemonParentPrewarmer()
+proc installUserDaemonBuildExecutor()
+proc installUserDaemonWatchExecutor()
+proc installUserDaemonPeerCacheService*()
+
+proc userDaemonConfigOf(d: ReproCommandLineDaemon): UserDaemonConfig =
+  ## The daemon configuration `repro daemon`'s flags select, over the
+  ## per-user defaults; without `--log` the log is
+  ## `<state dir>/logs/repro-daemon.log`.
+  result = defaultUserDaemonConfig()
+  result.foreground = d.foreground
+  result.devMode = d.dev
+  result.systemScope = d.system
+  if d.daemonExe.len > 0: result.daemonExe = d.daemonExe
+  if d.sourceExe.len > 0: result.sourceExe = d.sourceExe
+  if d.stagedGeneration.len > 0:
+    result.stagedGenerationDir = d.stagedGeneration
+  if d.previousStagedGeneration.len > 0:
+    result.previousStagedGenerationDir = d.previousStagedGeneration
+  if d.restartRunId.len > 0: result.restartRunId = d.restartRunId
+  if d.endpoint.len > 0: result.endpoint = d.endpoint
+  if d.stateDir.len > 0: result.stateDir = d.stateDir
+  if d.stateRoot.len > 0: result.leaseStoreRoot = d.stateRoot
+  if d.peerCache.len > 0: result.peerCacheSpec = d.peerCache
+  if d.trustProfile.len > 0: result.trustProfile = d.trustProfile
+  result.logPath =
+    if d.log.len > 0: d.log
+    else: result.stateDir / "logs" / "repro-daemon.log"
+
+proc runUserDaemonCliCommand(conf: ReproCommandLineDaemon): int =
+  ## ``repro daemon <subcommand>``. The command line is parsed from repro's
+  ## description (``repro_cli_support/cli_description``): the daemon's
+  ## configuration flags are the namespace's own, taken by every
+  ## subcommand.
+  let action = $conf.command
+  let config = userDaemonConfigOf(conf)
+  if conf.command == ReproCommandLineDaemonCommand.serve:
+    # `repro daemon serve` is the daemon PROCESS entry — the role formerly
+    # carried by the standalone `repro-daemon` binary (whose program name
+    # stays a compatibility alias). Every other subcommand is a client
+    # control command.
+    installUserDaemonParentPrewarmer()
+    installUserDaemonBuildExecutor()
+    installUserDaemonWatchExecutor()
+    installUserDaemonPeerCacheService()
+    try:
+      return runUserDaemonForeground(config)
+    except CatchableError as err:
+      stderr.writeLine("repro-daemon: error: " & err.msg)
+      return 1
   try:
-    let parsed = parseUserDaemonConfigFlags(rest)
-    if parsed.rest.len > 0:
-      stderr.writeLine("repro daemon: unexpected argument: " &
-        parsed.rest[0])
-      return 2
-    let config = parsed.config
-    case action
-    of "status":
+    case conf.command
+    of ReproCommandLineDaemonCommand.status:
       let status = queryUserDaemonStatus(config.endpoint)
       if not status.running:
         discard cleanupStaleUserDaemonDiscovery(config)
       echo renderUserDaemonStatus(status)
       return 0
-    of "start":
+    of ReproCommandLineDaemonCommand.start:
       if config.foreground:
         return runUserDaemonForeground(config)
       let status = startUserDaemon(stablePublicCliPath(), config)
       echo renderUserDaemonStatus(status)
       return 0
-    of "stop":
+    of ReproCommandLineDaemonCommand.stop:
       let status = queryUserDaemonStatus(config.endpoint)
       if not status.running:
         discard cleanupStaleUserDaemonDiscovery(config)
@@ -39847,7 +39857,7 @@ proc runUserDaemonCliCommand(args: seq[string]): int =
       discard cleanupStaleUserDaemonDiscovery(config)
       echo "repro daemon: stopped"
       return 0
-    of "restart":
+    of ReproCommandLineDaemonCommand.restart:
       let status = queryUserDaemonStatus(config.endpoint)
       if status.running:
         stopUserDaemon(config.endpoint)
@@ -39861,13 +39871,13 @@ proc runUserDaemonCliCommand(args: seq[string]): int =
       let started = startUserDaemon(stablePublicCliPath(), config)
       echo renderUserDaemonStatus(started)
       return 0
-    of "logs":
+    of ReproCommandLineDaemonCommand.logs:
       let logs = renderUserDaemonLogs(config)
       stdout.write(logs)
       if not logs.endsWith("\n"):
         stdout.writeLine("")
       return 0
-    of "sessions":
+    of ReproCommandLineDaemonCommand.sessions:
       let status = queryUserDaemonStatus(config.endpoint)
       if not status.running:
         discard cleanupStaleUserDaemonDiscovery(config)
@@ -39875,14 +39885,13 @@ proc runUserDaemonCliCommand(args: seq[string]): int =
         return 1
       echo renderUserDaemonSessions(requestUserDaemonSessions(config.endpoint))
       return 0
-    else:
-      stderr.writeLine("repro daemon: unknown action: " & action)
+    of ReproCommandLineDaemonCommand.serve:
       return 2
   except CatchableError as err:
     stderr.writeLine("repro daemon " & action & ": error: " & err.msg)
     return 1
 
-proc runLaunchPlanCommand*(args: seq[string]): int =
+proc runLaunchPlanCommand*(conf: ReproCommandLineLaunchPlan): int =
   ## Implements `repro launch-plan <subcommand>`. v1 subcommands:
   ##
   ##   show <hex-id>      Render the LaunchPlan stored in the local M56
@@ -39894,38 +39903,19 @@ proc runLaunchPlanCommand*(args: seq[string]): int =
   ##                      the store. Useful when verifying activation
   ##                      artifacts.
   ##
-  ## Both subcommands accept `--store-root=PATH` and honour
-  ## `$REPRO_STORE_ROOT` exactly as `repro store ...` does.
-  if args.len == 0:
-    echo "usage: repro launch-plan {show <hex-id> | id <path>} " &
-      "[--store-root=PATH]"
-    return 2
-  var storeRootOverride = ""
-  var positional: seq[string] = @[]
-  for raw in args:
-    if raw.startsWith("--store-root="):
-      storeRootOverride = raw[len("--store-root=") .. ^1]
-    elif raw.startsWith("--"):
-      stderr.writeLine("repro launch-plan: unknown flag: " & raw)
-      return 2
-    else:
-      positional.add(raw)
-  if positional.len == 0:
-    stderr.writeLine("repro launch-plan: missing subcommand")
-    return 2
-  let sub = positional[0]
-  case sub
-  of "show":
-    if positional.len < 2:
-      stderr.writeLine("repro launch-plan show: missing <hex-id>")
-      return 2
-    let hex = positional[1].toLowerAscii
+  ## The command line is parsed from repro's description
+  ## (``repro_cli_support/cli_description``). `--store-root=PATH` is the
+  ## namespace's own flag and honours `$REPRO_STORE_ROOT` exactly as
+  ## `repro store ...` does.
+  case conf.command
+  of ReproCommandLineLaunchPlanCommand.show:
+    let hex = conf.show.hexId.toLowerAscii
     if hex.len != 64:
       stderr.writeLine(
         "repro launch-plan show: expected 64-char hex digest, got " &
         $hex.len & " chars")
       return 2
-    let root = resolveStoreRoot(storeRootOverride)
+    let root = resolveStoreRoot(conf.storeRoot)
     try:
       var store = openStore(root)
       defer: store.close()
@@ -39940,11 +39930,8 @@ proc runLaunchPlanCommand*(args: seq[string]): int =
     except CatchableError as err:
       stderr.writeLine("repro launch-plan show: error: " & err.msg)
       return 1
-  of "id":
-    if positional.len < 2:
-      stderr.writeLine("repro launch-plan id: missing <path>")
-      return 2
-    let path = positional[1]
+  of ReproCommandLineLaunchPlanCommand.id:
+    let path = conf.id.path
     try:
       let raw = readFile(extendedPath(path))
       var buf = newSeq[byte](raw.len)
@@ -39955,9 +39942,7 @@ proc runLaunchPlanCommand*(args: seq[string]): int =
     except CatchableError as err:
       stderr.writeLine("repro launch-plan id: error: " & err.msg)
       return 1
-  else:
-    stderr.writeLine("repro launch-plan: unknown subcommand: " & sub)
-    return 2
+
 
 type
   HcrCoordinateArgs = object
@@ -90368,10 +90353,13 @@ proc runCertifyVerify*(args: openArray[string]): int =
     cert.targets.join(","))
   0
 
-proc runCertSignerCommand*(args: openArray[string]): int =
+proc runCertSignerCommand*(conf: ReproCommandLineCertSigner): int =
   ## ``repro cert-signer serve|registration`` — the certificate signer of
   ## Distributed-Execution M7 (EDGE-5, threat model D5): the service that
-  ## holds every worker's signing CA, OFF the workers.
+  ## holds every worker's signing CA, OFF the workers. The command line is
+  ## parsed from repro's description
+  ## (``repro_cli_support/cli_description``); each flag also takes its value
+  ## as the next word.
   ##
   ##   repro cert-signer serve --state DIR --identity DIR --anchors DIR
   ##       --authorized FILE [--revoked FILE] [--bind ADDR] [--port N]
@@ -90385,40 +90373,10 @@ proc runCertSignerCommand*(args: openArray[string]): int =
   ##   repro cert-signer registration --state DIR --worker HOSTID
   ##     Prints the registered-keys entry (`key_id`, `cert-authority …`)
   ##     callers add to accept that worker's certificates.
-  var cmd = ""
-  var stateDir, identityDir, anchorsDir, authorized, revoked, readyFile,
-    worker = ""
-  var bindAddr = "127.0.0.1"
-  var port = 0
-  var i = 0
-  while i < args.len:
-    let a = args[i]
-    template value(): string =
-      (if i + 1 < args.len: (inc i; args[i]) else: "")
-    var key = a
-    var val = ""
-    let eq = a.find('=')
-    if a.startsWith("--") and eq > 0:
-      key = a[0 ..< eq]
-      val = a[eq + 1 .. ^1]
-    case key
-    of "--state": stateDir = (if val.len > 0: val else: value())
-    of "--identity": identityDir = (if val.len > 0: val else: value())
-    of "--anchors": anchorsDir = (if val.len > 0: val else: value())
-    of "--authorized": authorized = (if val.len > 0: val else: value())
-    of "--revoked": revoked = (if val.len > 0: val else: value())
-    of "--ready-file": readyFile = (if val.len > 0: val else: value())
-    of "--bind": bindAddr = (if val.len > 0: val else: value())
-    of "--port": port = parseInt(if val.len > 0: val else: value())
-    of "--worker": worker = (if val.len > 0: val else: value())
-    else:
-      if a.startsWith("-") or cmd.len > 0:
-        stderr.writeLine("repro cert-signer: unexpected argument " & a)
-        return 2
-      cmd = a
-    inc i
-  case cmd
-  of "registration":
+  case conf.command
+  of ReproCommandLineCertSignerCommand.registration:
+    let stateDir = conf.registration.state
+    let worker = conf.registration.worker
     if stateDir.len == 0 or worker.len != 64:
       stderr.writeLine("usage: repro cert-signer registration --state DIR " &
         "--worker <64-hex host id>")
@@ -90427,7 +90385,16 @@ proc runCertSignerCommand*(args: openArray[string]): int =
     stdout.writeLine("key_id = \"" & ca.keyId & "\"")
     stdout.writeLine("public_key = \"" & ca.registration & "\"")
     return 0
-  of "serve":
+  of ReproCommandLineCertSignerCommand.serve:
+    let c = conf.serve
+    let stateDir = c.state
+    let identityDir = c.identity
+    let anchorsDir = c.anchors
+    let authorized = c.authorized
+    let revoked = c.revoked
+    let readyFile = c.readyFile
+    let bindAddr = c.bindAddr
+    let port = c.port
     if stateDir.len == 0 or identityDir.len == 0 or anchorsDir.len == 0 or
         authorized.len == 0:
       stderr.writeLine("usage: repro cert-signer serve --state DIR " &
@@ -90455,9 +90422,6 @@ proc runCertSignerCommand*(args: openArray[string]): int =
     stdout.flushFile()
     while true:
       try: poll(200) except ValueError: sleep(200)
-  else:
-    stderr.writeLine("usage: repro cert-signer serve|registration ...")
-    return 2
 
 proc runCertifyCheckSet*(args: openArray[string];
                          publicCliPath = ""): int =
@@ -104631,14 +104595,6 @@ proc runLegacyCommand(programName: string; args: seq[string];
     # TC-9a: list the project's named certificates, or the
     # certificate-producing nodes a plan materializes.
     return runCertificatesCommand(args[1 .. ^1], publicCliPath)
-  if programName == "repro" and args.len > 0 and args[0] == "cert-signer":
-    # Distributed-Execution M7 (EDGE-5, threat model D5): the certificate
-    # signer that holds the workers' signing CAs, off the workers.
-    try:
-      return runCertSignerCommand(args[1 .. ^1])
-    except CatchableError as err:
-      stderr.writeLine("repro cert-signer: error: " & err.msg)
-      return 1
   if programName == "repro" and args.len > 0 and args[0] == "certify":
     # TC-1: ``repro certify`` is the explicit "run the full required set to
     # obtain a certificate" form — an alias for ``repro test --certify``
@@ -104920,24 +104876,6 @@ proc runLegacyCommand(programName: string; args: seq[string];
     except CatchableError as err:
       stderr.writeLine("repro flake: error: " & err.msg)
       return 2
-  if programName == "repro" and args.len > 0 and args[0] == "cache":
-    # Binary-Caches.md §"Client CLI Surface (`repro cache`)" — the
-    # single-entry binary-cache client. Folds in the retired standalone
-    # ``repro-binary-cache-client`` toolset; ``runCacheSubcommand`` routes
-    # ``lookup|substitute|publish|derive-key|gen-key`` to the SAME shared
-    # ``substituteInProcess`` + HTTP-publish machinery ``repro build`` uses
-    # (including R1 default-untrusted trust). No behaviour beyond argv
-    # parsing + exit codes lives here.
-    try:
-      let cacheArgs =
-        if args.len > 1:
-          args[1 .. ^1]
-        else:
-          @[]
-      return bcCliDispatch.runCacheSubcommand(cacheArgs)
-    except CatchableError as err:
-      stderr.writeLine("repro cache: error: " & err.msg)
-      return 1
   if programName == "repro" and args.len > 0 and args[0] == "check":
     # M18 — top-level `repro check` subcommand per CLI/check.md. The
     # M17 pre-push dispatcher routes through this same entry point so
@@ -104970,31 +104908,6 @@ proc runLegacyCommand(programName: string; args: seq[string];
     except CatchableError as err:
       stderr.writeLine("repro gateway: error: " & err.msg &
         "; REJECTING (fail closed)")
-      return 1
-  if programName == "repro" and args.len > 0 and args[0] == "reap":
-    # Ephemeral-State-Leases.md §4.3 fallback (b): `repro reap --once` — one
-    # lease sweep by hand, the always-available enforcer for a host with no
-    # daemon running and the diagnostic an operator reaches for when the
-    # `lease-reaper` health row goes red.
-    #
-    # `runReapCli` has existed and been tested since L3; nothing DISPATCHED
-    # it, so the command the spec promises exited 2 as an unknown
-    # subcommand. That is also why the health row above could not name a
-    # remedy before: a remedy that is not a command is not a remedy
-    # (Interactive-UX-And-Progress.md Principle 2).
-    #
-    # Default in-process transport. A sweep from the CLI reaps what this
-    # build links and REPORTS what it cannot, exiting non-zero — which is the
-    # diagnosis, not a failure of the command.
-    try:
-      let reapArgs =
-        if args.len > 1:
-          args[1 .. ^1]
-        else:
-          newSeq[string]()
-      return runReapCli(reapArgs)
-    except CatchableError as err:
-      stderr.writeLine("repro reap: error: " & err.msg)
       return 1
   if programName == "repro" and args.len > 0 and args[0] == "health":
     # RA-30 — top-level `repro health` (the environment doctor) per
@@ -105539,64 +105452,6 @@ proc runLegacyCommand(programName: string; args: seq[string];
     except CatchableError as err:
       stderr.writeLine("repro develop: error: " & err.msg)
       return 1
-  if programName == "repro" and args.len > 0 and args[0] == "self":
-    let selfArgs =
-      if args.len > 1:
-        args[1 .. ^1]
-      else:
-        @[]
-    return cli_selfhost.runSelfCommand(selfArgs)
-  if programName == "repro" and args.len > 0 and args[0] == "bundle":
-    # Workspace bundles (docs/workspace-bundles.md).
-    return runBundleCommand(args[1 .. ^1], BundleCliHooks(
-      resolveActionCacheRoot: proc (explicit: string): string =
-        resolveActionCacheRoot(explicit),
-      allowProject: proc (projectRoot: string): int =
-        runReproAllowCommand([projectRoot]),
-      workspaceRootFor: proc (startPath: string): string =
-        enclosingWorkspaceRoot(startPath)))
-  if programName == "repro" and args.len > 0 and args[0] == "store":
-    let storeArgs =
-      if args.len > 1:
-        args[1 .. ^1]
-      else:
-        @[]
-    return runStoreCommand(storeArgs)
-  if programName == "repro" and args.len > 0 and args[0] == "cas":
-    # M9.R.77.5 — R11 Layer-1 CLI (blob-level put/get/verify/path/gc).
-    # Separate from ``repro store`` because it exposes ONLY the CAS
-    # surface — see runCasCommand's doc block for the two-layer split.
-    let casArgs =
-      if args.len > 1:
-        args[1 .. ^1]
-      else:
-        @[]
-    return runCasCommand(casArgs)
-  if programName == "repro" and args.len > 0 and args[0] == "daemon":
-    let daemonArgs =
-      if args.len > 1:
-        args[1 .. ^1]
-      else:
-        @[]
-    # Executable-Consolidation M2: `repro daemon serve` is the daemon PROCESS
-    # entry — the role formerly carried by the standalone `repro-daemon` binary
-    # (whose program name stays a compatibility alias below). Every other
-    # `daemon` subcommand (status / start / stop / restart / logs / sessions)
-    # is a client control command.
-    if daemonArgs.len > 0 and daemonArgs[0] == "serve":
-      installUserDaemonParentPrewarmer()
-      installUserDaemonBuildExecutor()
-      installUserDaemonWatchExecutor()
-      installUserDaemonPeerCacheService()
-      return runUserDaemonCommand(daemonArgs[1 .. ^1])
-    return runUserDaemonCliCommand(daemonArgs)
-  if programName == "repro" and args.len > 0 and args[0] == "launch-plan":
-    let lpArgs =
-      if args.len > 1:
-        args[1 .. ^1]
-      else:
-        @[]
-    return runLaunchPlanCommand(lpArgs)
   if programName == "repro" and args.len > 0 and args[0] == "__remote-activate":
     let remoteArgs =
       if args.len > 1:
@@ -105712,6 +105567,175 @@ proc runLegacyCommand(programName: string; args: seq[string];
     "line `repro " & args[0] & "` accepts; run `repro help " & args[0] & "`")
   2
 
+proc namespaceHelpText(namespace: string; topic: seq[string]): string =
+  ## The help `repro <namespace> help [<word>...]` prints: the subcommand's
+  ## when the words name one, else the namespace's (whose own parser always
+  ## answered `help` with its usage, whatever followed).
+  try:
+    ReproCommandLine.helpText(@[namespace] & topic)
+  except CliUsageError:
+    ReproCommandLine.helpText([namespace])
+
+proc cacheIdentityValuesOf[T](c: T): bcCliDispatch.CacheIdentityValues =
+  ## The identity flags of `repro cache publish|derive-key|gen-key`.
+  bcCliDispatch.CacheIdentityValues(packageName: c.packageName,
+    packageVersion: c.packageVersion, platformCpu: c.platformCpu,
+    platformOs: c.platformOs, platformAbi: c.platformAbi,
+    platformLibc: c.platformLibc, toolchainName: c.toolchainName,
+    toolchainVersion: c.toolchainVersion,
+    toolchainHostLdSo: c.toolchainHostLdso,
+    toolchainExtra: c.toolchainExtra, providerRevision: c.providerRevision,
+    deps: c.dep, options: c.option)
+
+proc runCacheCommand(conf: ReproCommandLineCache): int =
+  ## ``repro cache <subcommand>``: the single-entry binary-cache client,
+  ## folding in the retired standalone ``repro-binary-cache-client``
+  ## toolset. Each
+  ## subcommand calls the SAME shared ``substituteInProcess`` + HTTP-publish
+  ## machinery ``repro build`` uses (including R1 default-untrusted trust);
+  ## the command line is parsed from repro's description
+  ## (``repro_cli_support/cli_description``). A malformed `--option` is a
+  ## usage error (exit 2); another malformed value (an entry key, a CPU
+  ## family) is reported as an error (exit 1).
+  try:
+    case conf.command
+    of ReproCommandLineCacheCommand.call:
+      # `repro cache` alone prints its help.
+      stdout.write(ReproCommandLine.helpText(["cache"]))
+      return 0
+    of ReproCommandLineCacheCommand.help:
+      stdout.write(namespaceHelpText("cache", conf.help.topic))
+      return 0
+    of ReproCommandLineCacheCommand.lookup:
+      return bcCliDispatch.cacheLookup(conf.lookup.entryKey)
+    of ReproCommandLineCacheCommand.substitute:
+      return bcCliDispatch.cacheSubstitute(conf.substitute.entryKey,
+        conf.substitute.outDir)
+    of ReproCommandLineCacheCommand.publish:
+      let c = conf.publish
+      return bcCliDispatch.cachePublish(c.entryKey, c.prefixDir,
+        cacheIdentityValuesOf(c))
+    of ReproCommandLineCacheCommand.deriveKey:
+      return bcCliDispatch.cacheDeriveKey(cacheIdentityValuesOf(
+        conf.deriveKey))
+    of ReproCommandLineCacheCommand.genKey:
+      return bcCliDispatch.cacheGenKey()
+  except bcCliDispatch.CacheUsageError as err:
+    stderr.writeLine(err.msg)
+    return 2
+  except CatchableError as err:
+    stderr.writeLine("repro cache: error: " & err.msg)
+    return 1
+
+proc runSelfCommand(conf: ReproCommandLineSelf): int =
+  ## ``repro self <subcommand>`` (``repro_cli_support/selfhost``), its
+  ## command line parsed from repro's description
+  ## (``repro_cli_support/cli_description``).
+  let sub = case conf.command
+    of ReproCommandLineSelfCommand.install: "install"
+    of ReproCommandLineSelfCommand.provision: "provision"
+    of ReproCommandLineSelfCommand.hold: "hold"
+    of ReproCommandLineSelfCommand.which: "which"
+    of ReproCommandLineSelfCommand.list: "list"
+    of ReproCommandLineSelfCommand.pruneRoots: "prune-roots"
+  try:
+    case conf.command
+    of ReproCommandLineSelfCommand.install:
+      let c = conf.install
+      return cli_selfhost.runSelfInstall(cli_selfhost.SelfArgs(
+        fromDir: c.fromDir, version: c.version, package: c.package,
+        platform: c.platform, storeRoot: c.storeRoot, emitJson: c.json))
+    of ReproCommandLineSelfCommand.provision:
+      let c = conf.provision
+      return cli_selfhost.runSelfProvision(cli_selfhost.SelfArgs(
+        fromDir: c.fromDir, version: c.version, package: c.package,
+        platform: c.platform, project: c.project, storeRoot: c.storeRoot,
+        emitJson: c.json))
+    of ReproCommandLineSelfCommand.hold:
+      let c = conf.hold
+      return cli_selfhost.runSelfHold(cli_selfhost.SelfArgs(
+        package: c.package, project: c.project, storeRoot: c.storeRoot,
+        emitJson: c.json))
+    of ReproCommandLineSelfCommand.which:
+      let c = conf.which
+      return cli_selfhost.runSelfWhich(cli_selfhost.SelfArgs(
+        package: c.package, project: c.project, storeRoot: c.storeRoot,
+        emitJson: c.json))
+    of ReproCommandLineSelfCommand.list:
+      let c = conf.list
+      return cli_selfhost.runSelfList(cli_selfhost.SelfArgs(
+        package: c.package, storeRoot: c.storeRoot, emitJson: c.json))
+    of ReproCommandLineSelfCommand.pruneRoots:
+      let c = conf.pruneRoots
+      return cli_selfhost.runSelfPruneRoots(cli_selfhost.SelfArgs(
+        storeRoot: c.storeRoot, emitJson: c.json))
+  except CatchableError as e:
+    stderr.writeLine("repro self " & sub & ": error: " & e.msg)
+    return 1
+
+proc runBundleCliCommand(conf: ReproCommandLineBundle): int =
+  ## ``repro bundle create|publish|restore`` — workspace bundles
+  ## (docs/workspace-bundles.md, ``repro_cli_support/bundle_cli``), the
+  ## command line parsed from repro's description
+  ## (``repro_cli_support/cli_description``).
+  let hooks = BundleCliHooks(
+    resolveActionCacheRoot: proc (explicit: string): string =
+      resolveActionCacheRoot(explicit),
+    allowProject: proc (projectRoot: string): int =
+      runReproAllowCommand([projectRoot]),
+    workspaceRootFor: proc (startPath: string): string =
+      enclosingWorkspaceRoot(startPath))
+  case conf.command
+  of ReproCommandLineBundleCommand.help:
+    stdout.write(namespaceHelpText("bundle", conf.help.topic))
+    return 0
+  of ReproCommandLineBundleCommand.create:
+    let c = conf.create
+    return runBundleCommand("create", BundleArgs(positional: c.selector,
+      outDir: c.`out`, workspaceRoot: c.workspaceRoot, name: c.name,
+      primary: c.primary, zstd: c.zstd, repro: c.repro, level: c.level,
+      partSize: c.partSize, nativeRoots: c.nativeRoot,
+      allShells: c.allShells, noNix: c.noNix, noSources: c.noSources,
+      noNative: c.noNative, freezeDevEnv: c.freezeDevEnv,
+      checkStable: c.checkStable, storeRoot: c.storeRoot,
+      actionCacheRoot: c.actionCacheRoot, emitJson: c.json), hooks)
+  of ReproCommandLineBundleCommand.publish:
+    let c = conf.publish
+    return runBundleCommand("publish", BundleArgs(positional: c.bundleDir,
+      to: c.to, endpoint: c.endpoint, region: c.region,
+      parallel: c.parallel), hooks)
+  of ReproCommandLineBundleCommand.restore:
+    let c = conf.restore
+    return runBundleCommand("restore", BundleArgs(positional: c.source,
+      workspace: c.workspace, activate: c.activate,
+      activationFile: c.activationFile, bashrcFile: c.bashrcFile,
+      allowDevEnv: c.allowDevEnv, parallel: c.parallel, staging: c.staging,
+      nixRoot: c.nixRoot, afterBootstrap: c.afterBootstrap,
+      storeRoot: c.storeRoot, actionCacheRoot: c.actionCacheRoot,
+      emitJson: c.json), hooks)
+
+proc runReapCommand(conf: ReproCommandLineReap): int =
+  ## ``repro reap [--once] [--force] [--state-root=PATH] [address...]`` —
+  ## one lease sweep by hand, the always-available enforcer for a host with
+  ## no daemon running and the diagnostic an operator reaches for when the
+  ## `lease-reaper` health row goes red. Default in-process transport: a sweep from the CLI reaps
+  ## what this build links and REPORTS what it cannot, exiting non-zero —
+  ## which is the diagnosis, not a failure of the command.
+  ##
+  ## The command line is parsed from repro's description
+  ## (``repro_cli_support/cli_description``). `repro build`'s
+  ## `--hard-rebuild` and `--rebuild-host-bound` are accepted only to be
+  ## refused with a pointer to `--force` (see ``runReapCli``).
+  if conf.hardRebuild or conf.rebuildHostBound:
+    echo reapRefusalOfBuildSpelling(
+      if conf.hardRebuild: "--hard-rebuild" else: "--rebuild-host-bound")
+    return 2
+  try:
+    return runReap(conf.force, conf.addresses, conf.stateRoot)
+  except CatchableError as err:
+    stderr.writeLine("repro reap: error: " & err.msg)
+    return 1
+
 proc reportReproUsageError(e: ref CliUsageError): int =
   ## A command line the generated parser rejected: its one-line message
   ## (clispec's error taxonomy, naming the command) and where to look next,
@@ -105728,8 +105752,8 @@ const LegacyVerbsAnsweringHelp = [
   # takes it as an operand (`repro allow --help` trusts a directory named
   # `--help`), so `repro help` must never hand it one. An entry goes when its
   # command moves onto the description.
-  "anywhere", "branch", "bundle", "cache", "cargo", "clean", "health",
-  "hooks", "switch", "sync", "workspace"]
+  "anywhere", "branch", "cargo", "clean", "health", "hooks", "switch",
+  "sync", "workspace"]
 
 proc runReproHelp(programName: string; topic: seq[string];
                   publicCliPath: string): int =
@@ -105874,6 +105898,28 @@ proc runReproCommandLine(programName: string; args: seq[string];
     except CatchableError as err:
       stderr.writeLine("repro " & verb & ": error: " & err.msg)
       return 1
+  of ReproCommandLineCommand.daemon:
+    return runUserDaemonCliCommand(conf.daemon)
+  of ReproCommandLineCommand.store:
+    return runStoreCommand(conf.store)
+  of ReproCommandLineCommand.cas:
+    return runCasCommand(conf.cas)
+  of ReproCommandLineCommand.cache:
+    return runCacheCommand(conf.cache)
+  of ReproCommandLineCommand.bundle:
+    return runBundleCliCommand(conf.bundle)
+  of ReproCommandLineCommand.reap:
+    return runReapCommand(conf.reap)
+  of ReproCommandLineCommand.launchPlan:
+    return runLaunchPlanCommand(conf.launchPlan)
+  of ReproCommandLineCommand.certSigner:
+    try:
+      return runCertSignerCommand(conf.certSigner)
+    except CatchableError as err:
+      stderr.writeLine("repro cert-signer: error: " & err.msg)
+      return 1
+  of ReproCommandLineCommand.self:
+    return runSelfCommand(conf.self)
   else:
     let passed = reproPassThrough(conf)
     if not passed.found:
@@ -105883,6 +105929,12 @@ proc runReproCommandLine(programName: string; args: seq[string];
       return 2
     return runLegacyCommand(programName, passed.path & passed.args,
       publicCliPath)
+
+proc runReproCommandLineInProcess*(args: seq[string]): int =
+  ## ``repro <args>`` run in this process, through the same generated parser
+  ## and dispatch the engine uses, without the entry's environment set-up
+  ## (``runThinApp``). For tests that drive a command in-process.
+  runReproCommandLine("repro", args, stablePublicCliPath())
 
 proc runThinAppDispatch(programName: string): int =
   # Source-only inputs captured by a packaged or locally built CLI must cross

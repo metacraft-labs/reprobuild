@@ -2141,6 +2141,8 @@
                   pkgs.go
                   pkgs.rustc
                   pkgs.cargo
+                  # The test runner the sized-nextest case drives.
+                  pkgs.cargo-nextest
                   pkgs.gfortran
                   pkgs.fpc
                   pkgs.ldc
