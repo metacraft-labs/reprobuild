@@ -128,8 +128,11 @@ The add-on handles this in four ways:
     directories, systemd reports a different run of the unit than the one
     recorded, and the directory was born no earlier than 100 ms before
     that run's reported start (systemd 252 makes it a few milliseconds
-    before it records the start); for a unit that is not running, it must
-    also have been born before that run ended. A template's directory is
+    before it records the start) and no later than 250 ms after the
+    start of that run's main process (a tree made later in the run, by
+    the unit or by anything else, is not the one systemd made for it); for
+    a unit that is not running, it must also have been born before that
+    run ended. A template's directory is
     judged by the instances that can have run: the one recorded, any that
     systemd reports running, and any the profile names. Every instance of
     the template reaches the same verdict. The apply records such a
@@ -138,7 +141,8 @@ The add-on handles this in four ways:
     was. The apply logs each such acceptance
     in the generation's audit log (if the log cannot be written, the
     directory is refused). A tree a root process makes at the path
-    within those 100 ms before a start is taken as the unit's. On a host
+    within those 100 ms before a start, or within 250 ms after its main
+    process starts, is taken as the unit's. On a host
     upgraded from an add-on version that kept no such record, the first
     apply records, once, the directories the installed services exactly
     declare and the existing sockets of their socket units, and logs each
@@ -148,17 +152,45 @@ The add-on handles this in four ways:
     back to the previous generation, the step back is not refused for
     such a directory: the unit it refuses stays stopped, held from
     starting, until a later apply finds nothing to refuse, and the hold
-    is logged.
+    is logged. The hold is a file,
+    `/etc/systemd/system/<unit>.d/zz-repro-addon-revert-hold.conf`, so it
+    holds across a reboot too. The add-on counts as its own hold only a
+    file of that name holding exactly the text it writes, on a unit the
+    add-on installs: a file of that name with anything else in it is
+    judged like any other drop-in, and no apply removes or overwrites it.
+    If the hold cannot be written (a full or read-only `/etc`, an
+    immutable directory), the unit keeps the hold the switch put in
+    `/run`, the step back is not completed, and the host stays pending
+    until the hold can be written and you run
+    `repro system addon recover`.
+  - **a unit that only a timer or a path unit starts** never has its
+    directories recorded by an apply, because no apply starts it. After
+    the first run its timer starts, the next apply refuses the unit's
+    directories (none was recorded), and the step back holds the unit,
+    so its timer no longer runs it, until you act. A directory that is
+    kept between runs (`StateDirectory=`, `CacheDirectory=`,
+    `LogsDirectory=`) and that any run but the last made again is
+    refused from then on, whatever later runs do. To recover: stop the
+    timer or path unit, save what the unit's directories hold if you
+    need it, remove the directories, and apply a profile in which the
+    apply starts the unit once -- enable it (`[Install]` with
+    `WantedBy=` and `enabled = true`) or pull it in with `Wants=` from a
+    unit the apply starts. The apply then records the directories that
+    start makes, and later runs of the timer reuse them.
     The list of base-system directory names was measured on the amd64
     Debian 12 and 13 and Ubuntu 24.04 and 26.04 test images; on other
     bases, such as Raspberry Pi OS, only the existence check applies;
   - a unix socket of such a unit must be `/run/foo` or below `/run/foo/`,
     named after the service the socket starts (`foo.service`) whatever
     the socket is called; deeper than `/run/foo/<name>` (for example
-    `/run/foo/sub/control`), it is refused when the service can write a
-    directory on its path (its `RuntimeDirectory=foo`, a
-    `ReadWritePaths=`), since the service could turn that directory into
-    a link the service manager then follows; a socket or timer named
+    `/run/foo/sub/control`), it is refused when the service, or any
+    other unit named `foo` -- a template `foo@.service` and its
+    instances, the profile's or the host's, and their drop-ins -- can
+    write a directory on its path (a `RuntimeDirectory=foo`, a
+    `ReadWritePaths=`), since that unit's account could turn the
+    directory into a link the service manager then follows; the paths
+    are compared as the kernel resolves them, so `ReadWritePaths=/var/run/foo`
+    covers `/run/foo/sub/control`; a socket or timer named
     after a directory the base system has (`udev.socket`,
     `systemd.socket`) is refused, and so is a socket path that already
     exists, that this socket did not create, or whose identity cannot be

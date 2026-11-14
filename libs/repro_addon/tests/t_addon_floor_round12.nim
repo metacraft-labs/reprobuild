@@ -64,6 +64,7 @@ import repro_addon/ledger
 import repro_addon/switch
 
 import ./spec_citations
+import repro_test_support/reasoned_skip
 
 const
   Prefix = "/repro/store/prefixes/svc/1.0"
@@ -163,7 +164,7 @@ let rec = {"/run/a": CreatedDir(unit: "a.service", dev: 1, ino: 2, btime: 50,
 
 proc view(btime: int64; id = "I2"; stopped = false; stop = 0'i64): SystemdView =
   SystemdView(dynamicUid: -1, btime: btime, invocationId: id,
-              invocationStart: Start, stopped: stopped, lastStop: stop)
+              invocationStart: Start, mainStart: Start, stopped: stopped, lastStop: stop)
 
 proc recreated(v: SystemdView): string =
   systemdRecreated("/run/a", "a.service", ["/run/a"], rec, false, v)
@@ -634,15 +635,17 @@ suite "round 12 (§10.1 round 12, \"The migration records listeners\")":
     check m.len == 1
 
 suite "round 12: no citation of a §13 entry the spec does not record":
-  # §13 of the spec ends at entry 81. The rules this round added were cited
-  # as entries 82 to 85, which no one recorded; the spec states them in
-  # §10.1's round-12 amendment, and the code cites them by title there.
-  const Unrecorded = [82, 83, 84, 85]
+  # Round 12 cited rules as entries 82 to 85 before the spec recorded them.
+  # The spec's §13 is read now, and every decision a TRACKED floor source,
+  # unit test or VM gate cites must be one it records (A9 review round 13:
+  # a list fixed in the test went stale once the owner recorded 82 to 85,
+  # and a scan of every file on disk read reviewers' untracked probes).
   let repoRoot = currentSourcePath().parentDir.parentDir.parentDir.parentDir
-  let roots = [repoRoot / "libs" / "repro_addon" / "src",
-               repoRoot / "libs" / "repro_addon" / "tests",
-               repoRoot / "libs" / "repro_infra" / "src",
-               repoRoot / "tests" / "e2e" / "addon"]
+  let roots = ["libs/repro_addon/src", "libs/repro_addon/tests",
+               "libs/repro_infra/src", "tests/e2e/addon"]
+  # The governing spec, beside this checkout in a workspace, or named.
+  let specPath = getEnv("REPRO_ADDON_SPEC",
+    repoRoot.parentDir / "reprobuild-pm" / "spec" / "ReproOS-Add-On-Mode.md")
   test "the reader finds wrapped and listed citations":
     # Each literal is split after "decision", so this file's own text cites
     # nothing and the scan below can read it too.
@@ -652,20 +655,40 @@ suite "round 12: no citation of a §13 entry the spec does not record":
       @[77, 82, 83]
     check citedDecisions("decision" & " 84\" in outl") == @[84]
     check citedDecisions("no citation here, 82 ms") == newSeq[int]()
-  test "no floor source, unit test or VM gate cites one":
-    var scanned = 0
-    for root in roots:
-      check dirExists(root)
-      for f in walkDirRec(root):
+    # A dated decision is not a numbered one.
+    check citedDecisions("(owner decision" & "\n## 2026-11-04; x)") == newSeq[int]()
+  test "§13 is read from the spec: numbered titles inside it, nothing outside":
+    let spec = "## 12. Other\n\n7. **not §13**\n\n## 13. Decisions\n\n" &
+      "1. **One** (x).\n\n82. **A remade directory**\n    text 83. **no**\n" &
+      "133. **A revert holds**\n\n## 14. Cross-references\n\n140. **after**\n"
+    check recordedDecisions(spec) == @[1, 82, 133]
+  test "only tracked files are scanned":
+    let tracked = trackedFiles(repoRoot, roots)
+    check tracked.len > 10
+    # A file git does not track is never read, whatever it cites.
+    let probe = repoRoot / "tests" / "e2e" / "addon" / "zz_round13_untracked_probe.nim"
+    writeFile(probe, "# cites decision" & " 99999\n")
+    defer: removeFile(probe)
+    check probe notin trackedFiles(repoRoot, roots)
+  test "no floor source, unit test or VM gate cites a decision §13 does not record":
+    checkpoint "the spec read: " & specPath
+    if not fileExists(specPath):
+      skip("the add-on spec is not beside this checkout (" & specPath &
+           "); set REPRO_ADDON_SPEC to its path")
+    else:
+      let recorded = recordedDecisions(readFile(specPath))
+      check recorded.len > 100
+      var scanned = 0
+      for f in trackedFiles(repoRoot, roots):
         if not f.endsWith(".nim"): continue
         inc scanned
         for n in citedDecisions(readFile(f)):
-          if n in Unrecorded:
+          if n notin recorded:
             checkpoint f.relativePath(repoRoot) & " cites decision " & $n
-            check n notin Unrecorded
-    check scanned > 10
+            check n in recorded
+      check scanned > 10
   test "a refusal names the §10.1 rule, never a §13 entry it does not have":
     let w = floorWritablePlaces(serviceDirectives("[Service]\nRuntimeDirectory=a\n"))
     let why = listenerRefusal("a.socket", "/run/a/sub/control", "a.service", w)
     check ListenerRule in why
-    for n in citedDecisions(why): check n notin Unrecorded
+    check citedDecisions(why).len == 0

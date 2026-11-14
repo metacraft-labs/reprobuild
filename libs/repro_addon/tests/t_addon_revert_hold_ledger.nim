@@ -218,7 +218,9 @@ suite "a passing switch clears the holds":
     let c = holdAt(root, "c.service")
     let previous = revertHoldEntries([], initHashSet[string](), [a],
                                      [parentDir(a)], root)
-    let cleared = clearRevertHolds(previous, [parentDir(b)], @[root])
+    let units = toHashSet(["a.service", "b.service", "c.service", "d.service"])
+    let cleared = clearRevertHolds(addonRevertHolds(units, [root]), previous,
+                                   [parentDir(b)])
     check cleared.toHashSet == toHashSet([a, b, c])
     for h in [a, b, c]: check not fileExists(h)
     check not dirExists(parentDir(a))
@@ -227,6 +229,7 @@ suite "a passing switch clears the holds":
     # An owned directory with anything else in it stays.
     let d = holdAt(root, "d.service")
     writeFile(root / "d.service.d" / "10-operator.conf", "[Unit]\n")
-    discard clearRevertHolds([], [parentDir(d)], @[root])
+    discard clearRevertHolds(addonRevertHolds(units, [root]), [],
+                             [parentDir(d)])
     check not fileExists(d)
     check fileExists(root / "d.service.d" / "10-operator.conf")

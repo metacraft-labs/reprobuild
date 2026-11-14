@@ -1455,6 +1455,22 @@ const
                           # power loss brings it back empty and the held
                           # unit starts at boot.
                           "revert-hold-not-synced",
+                          # a revert removes the start holds and reloads
+                          # before its persistent hold is written, and
+                          # reloads whether the write failed or not.
+                          "revert-hold-written-after-release",
+                          # a remade directory born any time after its
+                          # run's start is accepted: no upper bound at
+                          # the main process's start.
+                          "recreated-no-upper-bound",
+                          # a listener's covering places are those of
+                          # the activated service alone, not of every
+                          # unit sharing its stem.
+                          "listener-writable-own-unit-only",
+                          # a listener's covering places are compared as
+                          # spelled (/var/run is not /run, no link is
+                          # resolved).
+                          "listener-writable-by-spelling",
                           # A13: a state backup or restore runs while a
                           # unit of the set may run.
                           "state-units-not-checked",
