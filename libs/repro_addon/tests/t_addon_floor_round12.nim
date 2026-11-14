@@ -655,6 +655,8 @@ suite "round 12: no citation of a §13 entry the spec does not record":
       @[77, 82, 83]
     check citedDecisions("decision" & " 84\" in outl") == @[84]
     check citedDecisions("no citation here, 82 ms") == newSeq[int]()
+    # A dated decision is not a numbered one.
+    check citedDecisions("(owner decision" & "\n## 2026-11-04; x)") == newSeq[int]()
   test "§13 is read from the spec: numbered titles inside it, nothing outside":
     let spec = "## 12. Other\n\n7. **not §13**\n\n## 13. Decisions\n\n" &
       "1. **One** (x).\n\n82. **A remade directory**\n    text 83. **no**\n" &
@@ -669,6 +671,7 @@ suite "round 12: no citation of a §13 entry the spec does not record":
     defer: removeFile(probe)
     check probe notin trackedFiles(repoRoot, roots)
   test "no floor source, unit test or VM gate cites a decision §13 does not record":
+    checkpoint "the spec read: " & specPath
     if not fileExists(specPath):
       skip("the add-on spec is not beside this checkout (" & specPath &
            "); set REPRO_ADDON_SPEC to its path")

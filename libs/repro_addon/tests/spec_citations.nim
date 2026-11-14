@@ -43,6 +43,8 @@ proc citedDecisions*(text: string): seq[int] =
       var k = j
       while k < low.len and low[k] in Digits: inc k
       if k == j: break
+      # "owner decision 2026-11-04" is a date, not a decision number.
+      if k < low.len and low[k] == '-': break
       result.add(parseInt(low[j ..< k]))
       j = k
     at = low.find("decision", at + 1)
