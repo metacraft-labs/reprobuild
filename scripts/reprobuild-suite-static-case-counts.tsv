@@ -56,8 +56,9 @@ libs/repro_addon/tests/t_addon_evidence_units_and_tick_records.nim	nim	8
 libs/repro_addon/tests/t_addon_fingerprint.nim	nim	16
 libs/repro_addon/tests/t_addon_floor_round10.nim	nim	33
 libs/repro_addon/tests/t_addon_floor_round11.nim	nim	16
-libs/repro_addon/tests/t_addon_floor_round12.nim	nim	41
-libs/repro_addon/tests/t_addon_floor_round13.nim	nim	16
+libs/repro_addon/tests/t_addon_floor_round12.nim	nim	43
+libs/repro_addon/tests/t_addon_floor_round13.nim	nim	15
+libs/repro_addon/tests/t_addon_floor_round14.nim	nim	10
 libs/repro_addon/tests/t_addon_floor_round3.nim	nim	16
 libs/repro_addon/tests/t_addon_floor_round4.nim	nim	16
 libs/repro_addon/tests/t_addon_floor_round5.nim	nim	15

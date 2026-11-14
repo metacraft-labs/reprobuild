@@ -564,6 +564,17 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "",
     singleReason: "suite-scope statement runs at every start-up: let service = unitStanza(\"a9s.service\", \"User=a9e\\nExecStart..."),
   TestSpec(
+    source: "libs/repro_addon/tests/t_addon_floor_round14.nim",
+    binary: "build/test-bin/t_addon_floor_round14",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "",
+    singleReason: "suite-scope statement runs at every start-up: let created = {\"/var/lib/a\": CreatedDir(unit: \"a.service\", i..."),
+  TestSpec(
     source: "libs/repro_addon/tests/t_addon_floor_round3.nim",
     binary: "build/test-bin/t_addon_floor_round3",
     defines: @[],

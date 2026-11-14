@@ -1498,6 +1498,20 @@ const
                           # spelled (/var/run is not /run, no link is
                           # resolved).
                           "listener-writable-by-spelling",
+                          # a hold is written with writeFile, whose
+                          # failure on a full file system goes unseen.
+                          "hold-written-unchecked",
+                          # a floored unit is not ordered after the boot
+                          # re-assertion, so a reboot before recovery
+                          # starts it with no hold.
+                          "floored-not-after-reassert",
+                          # decision 141's bound counts from the main
+                          # process's start (ExecMainStartTimestamp).
+                          "recreated-bound-from-main-start",
+                          # a template's writable place is read only
+                          # through its observation instance, its
+                          # specifiers resolved for that instance.
+                          "writable-specifier-resolved",
                           # A13: a state backup or restore runs while a
                           # unit of the set may run.
                           "state-units-not-checked",

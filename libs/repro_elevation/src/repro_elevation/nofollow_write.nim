@@ -298,8 +298,13 @@ proc writeFileNoFollow*(path, content: string; mode: int;
     when not SkipsFsync:
       if fsync(fd) != 0:
         raiseOSError(osLastError(), "fsync " & path)
-  finally:
+  except CatchableError:
     discard posix.close(fd)
+    raise
+  # close(2) can be the only report of a write error, so its result is
+  # checked before the rename makes the file visible.
+  if posix.close(fd) != 0:
+    raiseOSError(osLastError(), "close " & path)
   if c_renameat(dirfd, tmp.cstring, dirfd, leaf.cstring) != 0:
     raiseOSError(osLastError(), "rename " & tmp & " -> " & path)
   committed = true

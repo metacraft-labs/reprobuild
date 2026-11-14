@@ -1399,6 +1399,18 @@ proc addonRevertHolds*(genUnits: HashSet[string];
         except IOError, OSError: continue
         if c == RevertHoldText: result.add(h)
 
+proc holdInTheWay*(path: string): bool =
+  ## A file at ``path`` (a revert hold's place) that the revert must not
+  ## write over: a link, or a file whose text is not a prefix of
+  ## ``RevertHoldText`` -- an operator's, or one planted. An empty or
+  ## truncated hold (a write a full file system cut short, a power loss
+  ## before it reached the disk) is not the add-on's hold, and is never in
+  ## the way of the hold it failed to be (A9 review round 14, finding 1).
+  if symlinkExists(path): return true
+  if not fileExists(path): return false
+  try: not RevertHoldText.startsWith(readFile(path))
+  except IOError, OSError: true
+
 proc startHoldPath*(unit: string): string =
   ## Where the switch's start hold for ``unit`` (a template's, for an
   ## instance: one hold covers every instance) is written
@@ -1555,13 +1567,23 @@ proc writeDurably(path, text: string) =
       if n < 0: raiseOSError(osLastError(), tmp)
       off += n
     if fsync(fd) != 0: raiseOSError(osLastError(), tmp)
-  finally:
+  except CatchableError:
     discard posix.close(fd)
+    discard posix.unlink(tmp.cstring)
+    raise
+  # close(2)'s result is checked too: it can be the only report of a write
+  # error (A9 review round 14, finding 1), and so is the directory's fsync.
+  if posix.close(fd) != 0:
+    let e = osLastError()
+    discard posix.unlink(tmp.cstring)
+    raiseOSError(e, "close " & tmp)
   moveFile(tmp, path)
   let dfd = posix.open(parentDir(path).cstring, O_RDONLY or O_CLOEXEC)
-  if dfd >= 0:
-    discard fsync(dfd)
-    discard posix.close(dfd)
+  if dfd < 0: raiseOSError(osLastError(), "open " & parentDir(path))
+  let synced = fsync(dfd)
+  let e = osLastError()
+  discard posix.close(dfd)
+  if synced != 0: raiseOSError(e, "fsync " & parentDir(path))
 
 proc writeCreatedDirs(stateDir: string; t: Table[string, CreatedDir]) =
   var text = ""
@@ -2072,10 +2094,24 @@ proc stemWritablePlaces*(service: string; show: ShowProps;
       problem = ex.msg
     for n in names:
       if n == service: continue
-      try: raw.add(writablePlacesOf(parseShow(showUnitText(templateObservationName(n)))))
+      try:
+        let sh = parseShow(showUnitText(templateObservationName(n)))
+        raw.add(writablePlacesOf(sh))
+        # A template, shown through its observation instance, has its
+        # specifiers resolved for that instance, which no real instance
+        # is. Its own files are read too, and a place spelled with a
+        # specifier counts by its literal prefix (§13 decision 145; A9
+        # review round 14, finding 4).
+        let at = n.find('@')
+        if at > 0 and n.find('.', at) == at + 1:
+          when not mutated("writable-specifier-resolved"):
+            for f in @[sh.getOrDefault("FragmentPath")] &
+                     sh.getOrDefault("DropInPaths").splitWhitespace():
+              if f.len == 0: continue
+              raw.add(floorWritablePlaces(serviceDirectives(readFile(f))))
       except CatchableError as ex:
         problem = "systemd will not show " & n & ", a unit sharing the stem " &
-          stem & ": " & ex.msg
+          stem & ", or its files cannot be read: " & ex.msg
   for w in raw:
     let c = canonicalPlace(w, resolveLinks = true)
     if c notin result: result.add(c)
@@ -2556,11 +2592,16 @@ proc writeRevertHoldFile(p: string) =
   ## assertion and starts the unit at boot, before recovery runs. Written
   ## whole and synced, with its directory, never through a link
   ## (``writeFileNoFollow``). Raises.
-  when mutated("revert-hold-not-synced"):
-    # Falsifying build: the hold written as the start holds are, unsynced.
+  when mutated("revert-hold-not-synced") or mutated("hold-written-unchecked"):
+    # Falsifying builds: the hold written with Nim's writeFile, unsynced
+    # and with fclose's result discarded (A9 review round 14, finding 1:
+    # on a full file system it leaves an empty hold and raises nothing).
     writeFile(p, RevertHoldText)
   else:
     writeFileNoFollow(p, RevertHoldText, 0o644)
+    # Read back: only a file holding the text is a hold (round 14).
+    if readFile(p) != RevertHoldText:
+      raise newException(OSError, p & " does not hold the hold's text")
 
 proc dropStaging(stateDir: string; r: RevertHoldDirRecord) =
   ## A staging directory that is not to become ``r.dir``: recorded
@@ -6294,7 +6335,7 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
       when not mutated("migration-ignores-engine"):
         try:
           createDir(generationDir(stateDir, generationId))
-          writeFile(recordKeptMarker(stateDir, generationId), "")
+          writeDurably(recordKeptMarker(stateDir, generationId), "")
         except IOError, OSError:
           problems.add("cannot mark generation " & generationId & " as written " &
                        "by an engine that keeps the record of floored units' " &
@@ -6609,11 +6650,7 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
                   # present file the ledger does not name is not the
                   # add-on's to overwrite); the unit then keeps its start hold.
                   let p = holdPath(u, RevertHoldName, holdDir)
-                  var inTheWay = symlinkExists(p)
-                  if not inTheWay and fileExists(p):
-                    try: inTheWay = readFile(p) != RevertHoldText
-                    except IOError, OSError: inTheWay = true
-                  if inTheWay:
+                  if holdInTheWay(p):
                     notWritten.add(u & " (" & p & " is there and is not the " &
                                    "add-on's hold)")
                     continue
@@ -6635,9 +6672,12 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
               else:
                 problems.add("the revert's hold could not be written for " &
                   notWritten.join(", ") & "; their start holds stay and " &
-                  "systemd was not reloaded, so none of them can start; the " &
-                  "revert is not committed: once the hold can be written, " &
-                  "run `repro system addon recover`")
+                  "systemd was not reloaded, so none of them can start now; " &
+                  "the revert is not committed. Once the hold can be written, " &
+                  "run `repro system addon recover`. A reboot first runs the " &
+                  "boot re-assertion, which replays this revert and puts the " &
+                  "start holds back before any unit rendered with floor " &
+                  "version 5 or later starts (§13 decision 143)")
             heldAtRevert = notHeld
             stderr.writeLine("repro-addon: the revert keeps " & held.join(", ") &
               " on hold, not started: its floor check refused them:\n  " &

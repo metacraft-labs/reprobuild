@@ -9,9 +9,9 @@
 ##   (``/var/run`` is ``/run``, links on the existing prefix followed), not
 ##   as spelled;
 ## - §13 decision 141: a directory made again outside a switch is accepted
-##   only when it was born no later than the main process's start
-##   (``ExecMainStartTimestamp``, read in the same ``systemctl show``) plus
-##   ``MainStartToleranceNs``; a tree made later in the run is refused;
+##   only when it was born no later than the run's start
+##   (``InactiveExitTimestamp``, decision 144) plus ``RunStartToleranceNs``;
+##   a tree made later in the run is refused;
 ## - the revert hold is the add-on's only when it is a regular file holding
 ##   exactly ``RevertHoldText`` on a unit the generation installs
 ##   (``addonRevertHolds``, which both the effective check's collection and
@@ -111,7 +111,7 @@ suite "§13 decision 139: the places every unit of the stem can write":
     check listenerRefusal("a.socket", "/run/a/sub/control", "a.service",
                           ["/run/a"]).len > 0
 
-suite "§13 decision 141: no later than the main process's start":
+suite "§13 decision 141, as 144 amends it: no later than the run's start":
   let created = {"/var/lib/a": CreatedDir(unit: "a.service", invocation: "I0")}.toTable
   proc view(btime, mainStart: int64; stopped = false): SystemdView =
     SystemdView(dynamicUid: -1, owner: 1000, btime: btime, invocationId: "I1",
@@ -121,16 +121,13 @@ suite "§13 decision 141: no later than the main process's start":
     systemdRecreated("/var/lib/a", "a.service", ["/var/lib/a"], created, false, v)
   test "born as systemd sets the run up: accepted":
     check verdict(view(Start + 2_000_000, Start + 1_000_000)) == ""
-    check verdict(view(Start + 1_000_000 + MainStartToleranceNs,
-                       Start + 1_000_000)) == ""
+    check verdict(view(Start + RunStartToleranceNs, Start + 1_000_000)) == ""
   test "born three seconds into the run: refused":
     let why = verdict(view(Start + 3_000_000_000'i64, Start + 1_000_000))
-    check "after the main process" in why
+    check "after the unit's last run began" in why
   test "the same for a stopped unit's last run":
-    check "after the main process" in
+    check "after the unit's last run began" in
       verdict(view(Start + 3_000_000_000'i64, Start + 1_000_000, stopped = true))
-  test "no main-process start reported: refused":
-    check "no start of the main process" in verdict(view(Start + 1, 0))
   test "the start is read in the same systemctl show as the run":
     let r = parseUnitRun("InvocationID=abc\n" &
       "InactiveExitTimestamp=Sat 2026-11-14 10:00:00.100000 UTC\n" &
