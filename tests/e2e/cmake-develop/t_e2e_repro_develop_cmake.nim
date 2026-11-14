@@ -44,13 +44,26 @@ proc readProfileSidecar(buildDir, executableName: string): string =
     ""
 
 proc generatedProviderDeclaresToolUse(buildDir, toolRef: string): bool =
+  ## Whether the fork's generated provider declares `toolRef` in `uses:`,
+  ## and declares it with NO version range. No one owns a version number
+  ## for these tools: the CMake project states none, and a wrapper stands
+  ## for whichever compiler CMake selected. Neither `repro develop --cmake`
+  ## nor the fork may invent one -- the placeholder `>=1.0 <2.0` both used
+  ## to carry refused the fork's `cmake` (4.3) and every current compiler
+  ## once PATH mode held ranges against `--version` (reprobuild-pm issue
+  ## 2026-11-14-t-e2e-repro-develop-cmake-fails-the-declared-cmake-version-
+  ## range-against-the-fork; spec CMake-Reprobuild-Generator.md, "Tool uses
+  ## carry no version range").
   let providerPath = buildDir / "reprobuild.nim"
   check fileExists(providerPath)
   if not fileExists(providerPath):
     return false
   let provider = readFile(providerPath)
   provider.contains("uses:") and
-    provider.contains("\"" & toolRef & " >=1.0 <2.0\"")
+    # Compare whole lines: the fork writes the provider in text mode, so it
+    # ends lines with CRLF on Windows, and a trailing range or any other
+    # suffix must not match.
+    provider.splitLines.anyIt(it.strip() == "\"" & toolRef & "\"")
 
 proc ensureRunQuotaDaemon(repoRoot: string): tuple[process: owned(Process);
     socket: string] =

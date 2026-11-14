@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 35,
-    "nimTestBinaries": 2783,
+    "nimTestBinaries": 2784,
     "pureUnitConsolidationGroups": 82,
-    "pureUnitTests": 761,
+    "pureUnitTests": 762,
     "staticallyDetectedRuntimeCompilerFlowTests": 139,
-    "testEntries": 2827
+    "testEntries": 2829
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1292,6 +1292,22 @@
       "targetOs": "soAny"
     },
     {
+      "count": 3,
+      "defines": [],
+      "dependencyShape": [
+        "repro_cli_support",
+        "repro_interface_artifacts",
+        "repro_tool_profiles"
+      ],
+      "owner": "tests/unit",
+      "sources": [
+        "tests/unit/t_cmake_develop_tools_accept_any_reported_version.nim",
+        "tests/unit/t_m9r14h_1_auto_recurse_idempotency.nim",
+        "tests/unit/t_tool_identity_key_resolves_before_it_keys.nim"
+      ],
+      "targetOs": "soAny"
+    },
+    {
       "count": 6,
       "defines": [],
       "dependencyShape": [
@@ -1497,21 +1513,6 @@
       "count": 2,
       "defines": [],
       "dependencyShape": [
-        "repro_cli_support",
-        "repro_interface_artifacts",
-        "repro_tool_profiles"
-      ],
-      "owner": "tests/unit",
-      "sources": [
-        "tests/unit/t_m9r14h_1_auto_recurse_idempotency.nim",
-        "tests/unit/t_tool_identity_key_resolves_before_it_keys.nim"
-      ],
-      "targetOs": "soAny"
-    },
-    {
-      "count": 2,
-      "defines": [],
-      "dependencyShape": [
         "io_mon"
       ],
       "owner": "tests/unit",
@@ -1618,8 +1619,8 @@
       "graph-fixture": 21,
       "integration": 1534,
       "platform/destructive": 178,
-      "pure unit": 761,
-      "unclassified": 333
+      "pure unit": 762,
+      "unclassified": 334
     },
     "graphOwnedTestArtifacts": [
       {
@@ -1833,9 +1834,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2783,
-    "pythonTestFileCount": 44,
-    "testEntryCount": 2827
+    "nimTestBinaryCount": 2784,
+    "pythonTestFileCount": 45,
+    "testEntryCount": 2829
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -54650,6 +54651,25 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_cmake_develop_tools_accept_any_reported_version",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_cli_support",
+        "repro_interface_artifacts",
+        "repro_tool_profiles"
+      ],
+      "owner": "tests/unit",
+      "requiresReproBinary": false,
+      "source": "tests/unit/t_cmake_develop_tools_accept_any_reported_version.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 3,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_cmake_direct_tool_identity",
       "class": "integration",
       "classificationReason": "e2e/integration path or requires the repro binary",
@@ -54657,13 +54677,14 @@
       "language": "nim",
       "localDependencyShape": [
         "repro_cli_support",
-        "repro_cmake_trycompile"
+        "repro_cmake_trycompile",
+        "repro_tool_profiles"
       ],
       "owner": "tests/unit",
       "requiresReproBinary": true,
       "source": "tests/unit/t_cmake_direct_tool_identity.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 5,
+      "staticCaseCount": 6,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -58636,6 +58657,21 @@
       "source": "tests/unit/t_workspace_sync_summary_counts_an_unknown_status.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 4,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "",
+      "class": "unclassified",
+      "classificationReason": "imports `__future__`, which this scan does not recognize; refusing to call it pure rather than assuming it is",
+      "defines": [],
+      "language": "python",
+      "localDependencyShape": [],
+      "owner": "tests/unit",
+      "requiresReproBinary": false,
+      "source": "tests/unit/test_addon_a13_classify.py",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 40,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

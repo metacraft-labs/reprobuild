@@ -2,6 +2,7 @@ import std/[os, tempfiles, unittest]
 
 import repro_cli_support/cmake_direct
 import repro_cmake_trycompile
+import repro_tool_profiles
 
 const Wrapper = "reprobuild-cmake-wrapper-fixture"
 
@@ -60,3 +61,17 @@ suite "CMake direct-provider tool identity":
     meta.usedTools = @[]
     expect ValueError:
       discard cmakeDirectBuildIdentity(meta, root)
+
+  test "a wrapper's compiler resolves whatever version it reports":
+    # The generated provider's wrappers stand for whichever compiler CMake
+    # selected; nothing declares a version for them. The resolver probes the
+    # sidecar's executable with `--version`, so a placeholder range used to
+    # refuse every real compiler (gcc 14 is not `>=1.0 <2.0`) -- reprobuild-pm
+    # issue 2026-11-14-t-e2e-repro-develop-cmake-fails-the-declared-cmake-
+    # version-range-against-the-fork.
+    let executable = sidecar(root, "#!/bin/sh\necho 'gcc (GCC) 14.3.0'\n")
+    setFilePermissions(executable, {fpUserRead, fpUserWrite, fpUserExec})
+    let identity = cmakeDirectBuildIdentity(metadata(), root)
+    require identity.profiles.len == 1
+    check identity.profiles[0].resolvedExecutablePath == executable
+    check realizedVersionOf(identity.profiles[0]) == "14.3.0"

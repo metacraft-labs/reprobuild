@@ -184,6 +184,7 @@ when not defined(windows):
   from repro_core/descriptor_inheritance import
     markInheritableDescriptorsCloseOnExec, restoreInheritableDescriptors
 import repro_cli_support/cmake_direct
+import repro_cli_support/cmake_develop_interface
 import repro_cli_support/daemon_working_directory
 # TC-8b: the certificate verifier matches by CONTENT (Verification §4.1.1), so
 # it computes the content id of the state under evaluation with the TC-8a
@@ -25264,70 +25265,6 @@ proc runReproDirenvActivationHelper(args: openArray[string];
       value: selection.activity)
   ], depPosix))
   0
-
-proc sourceLocation(file: string): SourceLocation =
-  SourceLocation(file: file, line: 1)
-
-proc cmakeNixExecutable(name: string): string =
-  # Windows: Nix store binaries have a `.exe` suffix. The forked CMake build
-  # tree from `metacraft-labs/reprobuild-cmake` also produces `cmake.exe`,
-  # `cc.exe`, etc. Emit relative paths with `.exe` on Windows so the path-only
-  # / Nix executablePath actually points at a runnable file.
-  when defined(windows):
-    case name
-    of "cmake":
-      "bin/cmake.exe"
-    of "cc":
-      "bin/cc.exe"
-    of "c++":
-      "bin/c++.exe"
-    else:
-      "bin/" & name & ".exe"
-  else:
-    case name
-    of "cmake":
-      "bin/cmake"
-    of "cc":
-      "bin/cc"
-    of "c++":
-      "bin/c++"
-    else:
-      "bin/" & name
-
-proc cmakeNixSelector(name: string): string =
-  case name
-  of "cmake":
-    "nixpkgs#cmake"
-  of "cc", "c++":
-    "nixpkgs#clang"
-  else:
-    "nixpkgs#" & name
-
-proc cmakeToolUse(sourceRoot, name: string): InterfaceToolUse =
-  let loc = sourceLocation(sourceRoot / "CMakeLists.txt")
-  InterfaceToolUse(
-    rawConstraint: name & " >=1.0 <2.0",
-    packageSelector: name,
-    executableName: name,
-    nixProvisioning: @[InterfaceNixProvisioning(
-      packageName: name,
-      selector: cmakeNixSelector(name),
-      executablePath: cmakeNixExecutable(name),
-      packageId: cmakeNixSelector(name),
-      lockIdentity: cmakeNixSelector(name),
-      location: loc)],
-    location: loc)
-
-proc cmakeDevelopArtifact(sourceRoot: string): ProjectInterfaceArtifact =
-  artifactFor(ProjectInterface(
-    projectName: "cmakeDevelop",
-    packageName: "cmakeDevelop",
-    toolUses: @[
-      cmakeToolUse(sourceRoot, "cmake"),
-      cmakeToolUse(sourceRoot, "cc"),
-      cmakeToolUse(sourceRoot, "c++")
-    ],
-    location: sourceLocation(sourceRoot / "CMakeLists.txt")))
 
 proc cmakeDevelopOutDir(sourceRoot, workRoot: string): string =
   let scopedRoot = scopedWorktreeRoot(sourceRoot / "CMakeLists.txt", workRoot)
