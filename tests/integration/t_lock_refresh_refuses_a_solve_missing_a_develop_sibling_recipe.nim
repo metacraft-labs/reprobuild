@@ -363,3 +363,97 @@ suite "lock refresh refuses a solve missing a develop-set sibling's recipe":
       check "repos/*.toml fragment of this workspace names" in byLock.output
       check "cannot check it out" in byLock.output
       check "Check it out (`repro sync`" notin byLock.output
+
+  test "t_a_tool_selector_whose_namesake_repo_discovery_cannot_reach_is_not_a_sibling":
+    ## Issue: reprobuild-pm/issues/2026-11-14-lock-refresh-refuses-a-tool-
+    ## selector-whose-namesake-repo-uses-discovery-cannot-reach.md. The
+    ## workspace declares ``repos/leaf.toml`` at ``refs/leaf`` — a nested
+    ## path whose LAST component is the selector, the shape of
+    ## ``repos/nix.toml`` at ``reprobuild/references/nix`` — while
+    ## ``consumer`` declares ``uses: "leaf"``. ``uses:`` discovery probes
+    ## ``<ancestor>/leaf`` above ``consumer`` and can never reach
+    ## ``<workspace>/refs/leaf``, so that repo is not what the selector can
+    ## mean, and checking it out would put no recipe in the solve.
+    ##
+    ##   8. ``refs/leaf`` not checked out: refresh exits 0 and writes a lock.
+    ##      Unfixed (``discoverableAs`` compared only the leaf name): exit 5,
+    ##      "not checked out at <workspace>/refs/leaf", no lock.
+    ##   9. ``refs/leaf`` checked out WITH a recipe: still exit 0. Unfixed:
+    ##      exit 5, "could not reach it" — the permanent refusal the issue
+    ##      predicts, which no checkout can clear.
+    ##  10. Control: the same fragment moved to ``path = "leaf"`` (where
+    ##      discovery does look), the checkout parked away: exit 5 with "not
+    ##      checked out". Without it, a fix that dropped manifest-declared
+    ##      repos from the develop set altogether would pass (8) and (9).
+    let gitBin = findExe("git")
+    let catalog = packagesRoot()
+    if gitBin.len == 0:
+      skip("git not on PATH; this case needs real sibling repositories")
+    elif not fileExists(reproBinary):
+      skip("build/bin/repro is not built; this case drives the real CLI")
+    elif catalog.len == 0:
+      skip("no reprobuild-packages checkout (set REPROBUILD_PACKAGES_ROOT); " &
+        "the refresh resolves the plain `cargo` tool use against it")
+    else:
+      let hadCatalogEnv = existsEnv("REPROBUILD_PACKAGES_ROOT")
+      let oldCatalogEnv = getEnv("REPROBUILD_PACKAGES_ROOT")
+      putEnv("REPROBUILD_PACKAGES_ROOT", catalog)
+      defer:
+        if hadCatalogEnv: putEnv("REPROBUILD_PACKAGES_ROOT", oldCatalogEnv)
+        else: delEnv("REPROBUILD_PACKAGES_ROOT")
+      let scratch = getTempDir() / ("lock-refresh-nested-namesake-" &
+        $getCurrentProcessId())
+      removeDir(scratch)
+      createDir(scratch)
+      defer: removeDir(scratch)
+      let workspace = scratch / "workspace"
+      createDir(workspace)
+      let consumer = workspace / "consumer"
+      initRepoWith(gitBin, consumer, consumerRecipe.replace("\"mid\"",
+        "\"leaf\""), origin = scratch / "origin-consumer.git")
+      createDir(workspace / "projects")
+      createDir(workspace / "repos")
+      var project = "schema = \"reprobuild.workspace.project.v1\"\n\n" &
+        "[project]\nname = \"app\"\n\n"
+      for name in ["consumer", "leaf"]:
+        project.add("[[remote]]\nname = \"" & name & "-origin\"\nfetch = \"" &
+          fileUrl(scratch / ("origin-" & name & ".git")) & "\"\n\n")
+      project.add("includes = [\n  \"repos/consumer.toml\",\n]\n")
+      writeFile(workspace / "projects" / "app.toml", project)
+      writeFile(workspace / "repos" / "consumer.toml",
+        fragment("consumer", @[]))
+      writeFile(workspace / "repos" / "leaf.toml",
+        fragment("leaf", @[]).replace("path = \"leaf\"",
+          "path = \"refs/leaf\""))
+      writeWorkspaceBranch(workspace, project = "app", branch = "main")
+      let lockPath = consumer / "repro.lock"
+
+      # ---- (8) the nested namesake is absent: not a sibling, no refusal. ----
+      let absent = run(q(reproBinary) & " lock refresh " & q(consumer))
+      checkpoint("nested namesake absent: exit=" & $absent.code)
+      checkpoint(absent.output)
+      check absent.code == 0
+      check fileExists(lockPath)
+      check "develop-set sibling 'leaf'" notin absent.output
+
+      # ---- (9) the nested namesake checked out with a recipe: still none. ---
+      createDir(workspace / "refs")
+      initRepoWith(gitBin, workspace / "refs" / "leaf", leafRecipe,
+        origin = scratch / "origin-leaf.git")
+      let present = run(q(reproBinary) & " lock refresh " & q(consumer))
+      checkpoint("nested namesake present: exit=" & $present.code)
+      checkpoint(present.output)
+      check present.code == 0
+      check "develop-set sibling 'leaf'" notin present.output
+      check "could not reach" notin present.output
+
+      # ---- (10) control: at `path = "leaf"` discovery reaches it. -----------
+      writeFile(workspace / "repos" / "leaf.toml", fragment("leaf", @[]))
+      removeFile(lockPath)
+      let reachable = run(q(reproBinary) & " lock refresh " & q(consumer))
+      checkpoint("reachable namesake absent: exit=" & $reachable.code)
+      checkpoint(reachable.output)
+      check reachable.code == RefusalExitCode
+      check not fileExists(lockPath)
+      check "'leaf'" in reachable.output
+      check "not checked out" in reachable.output

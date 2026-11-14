@@ -92756,8 +92756,59 @@ proc workspaceDeclaresRepo(projectDir, name: string): bool =
       except CatchableError: continue
   false
 
+type DevelopSetMember = tuple[name, checkout: string; lockRecorded: bool]
+  ## One repo ``declaredDevelopSet`` names. ``lockRecorded``: the committed
+  ## lock pins it, so a previous refresh read its recipe through ``uses:``
+  ## and the name is a repository of ours whatever its path. A member only the
+  ## workspace manifest declares is a finding only for an owner from which
+  ## ``uses:`` discovery can reach its checkout path
+  ## (``usesDiscoveryCanReach``).
+
+proc usesDiscoveryCanReach(selector, owner, checkout: string): bool =
+  ## Whether ``uses: "<selector>"`` in the recipe directory ``owner`` can ever
+  ## resolve to a recipe at ``checkout``: the probes
+  ## ``discoverProducerSourceRoot`` makes, taken as PATHS rather than as
+  ## lookups, so the answer does not depend on whether ``checkout`` exists.
+  ## They are a develop override for ``selector`` registered under ``owner``,
+  ## ``<ancestor>/<selector>`` for each ancestor of ``owner``
+  ## (``findSiblingProjectFile``), and the same walk from the main worktree
+  ## (``committedLockPathBase``). A repo the workspace keeps anywhere else —
+  ## ``repos/nix.toml`` at ``reprobuild/references/nix`` — is not what the
+  ## selector can mean, however its last path component is spelled
+  ## (reprobuild-pm issue 2026-11-14, "lock refresh refuses a tool selector
+  ## whose namesake repo uses: discovery cannot reach").
+  if selector.len == 0 or owner.len == 0 or checkout.len == 0: return false
+  let target = os.normalizedPath(absolutePath(checkout))
+  let ownerAbs = os.normalizedPath(absolutePath(owner))
+  let overrides =
+    try: readDevelopOverridesFile(ownerAbs)
+    except CatchableError: none(DevelopOverrides)
+  if overrides.isSome:
+    let entry = findOverride(overrides.get(), selector)
+    if entry.isSome:
+      let at =
+        try: resolveOverrideAbsolutePath(ownerAbs, entry.get())
+        except CatchableError: ""
+      if at.len > 0 and cmpPaths(os.normalizedPath(at), target) == 0:
+        return true
+  proc walkReaches(anchor: string): bool =
+    # The same bound and order as ``findSiblingProjectFile``'s walk.
+    var dir = anchor
+    for _ in 0 ..< 16:
+      let parent = dir.parentDir
+      if parent.len == 0 or parent == dir: break
+      if cmpPaths(os.normalizedPath(parent / selector), target) == 0:
+        return true
+      dir = parent
+    false
+  if walkReaches(ownerAbs): return true
+  let mainBase =
+    try: os.normalizedPath(committedLockPathBase(ownerAbs))
+    except CatchableError: ownerAbs
+  cmpPaths(mainBase, ownerAbs) != 0 and walkReaches(mainBase)
+
 proc declaredDevelopSet(projectDir, lockPath: string):
-    seq[tuple[name, checkout: string]] =
+    seq[DevelopSetMember] =
   ## The repos a ``uses:`` selector the solve could not reach may name, as
   ## (repo name, absolute checkout path) pairs, each name once. A selector
   ## naming one of them means a recipe that exists was left out of the solve;
@@ -92772,16 +92823,18 @@ proc declaredDevelopSet(projectDir, lockPath: string):
   ##     Outside a workspace (a standalone clone, CI) it is the only record.
   ##     An unreadable or absent lock adds nothing.
   ##   * Every repo the workspace DECLARES — its resolved membership and every
-  ##     ``repos/*.toml`` fragment, enabled or not — whose checkout path ends
-  ##     in its own name, at that path. The membership is the ENABLED projects:
+  ##     ``repos/*.toml`` fragment, enabled or not — at its checkout path. The membership is the ENABLED projects:
   ##     a workspace that enables a project containing ``codetracer`` but not
   ##     the one containing ``isonim-tui`` resolves no ``isonim-tui`` at all,
   ##     though a ``codetracer`` recipe uses it, and that sibling — the one not
-  ##     checked out — is precisely the case this check exists for. The
-  ##     path condition is what keeps a TOOL selector from being mistaken for
-  ##     a repository that shares its name: ``uses:`` discovers a sibling at
-  ##     ``../<selector>``, so a repo declared under the name ``nim`` but kept
-  ##     at ``codetracer-nim`` is not what ``uses: "nim"`` can mean.
+  ##     checked out — is precisely the case this check exists for. Such a
+  ##     member counts only where ``uses:`` discovery from the naming recipe
+  ##     can reach its path (``usesDiscoveryCanReach``, applied per owner by
+  ##     ``unreachedDevelopSiblings``). That condition is what keeps a TOOL
+  ##     selector from being mistaken for a repository that shares its name:
+  ##     a repo declared as ``nim`` but kept at ``codetracer-nim``, or as
+  ##     ``nix`` at ``reprobuild/references/nix``, is not what
+  ##     ``uses: "nim"`` / ``uses: "nix"`` can mean.
   ##
   ## These answer an IDENTITY question ("is this name a repository of ours?"),
   ## not a dependency one: that a recipe depends on the repo is already known,
@@ -92789,22 +92842,21 @@ proc declaredDevelopSet(projectDir, lockPath: string):
   ## ``depends`` closure here instead; that key no longer declares anything
   ## (owner decision 2026-11-05, Unified-Locking-And-Hooks.md §14.9).
   ##
-  ## A declared (membership) path wins over a lock path for the same name.
-  proc addMember(members: var seq[tuple[name, checkout: string]];
-                 name, checkout: string) =
-    for member in members:
-      if member.name == name: return
-    members.add((name, os.normalizedPath(absolutePath(checkout))))
-  proc discoverableAs(name, path: string): bool =
-    ## ``uses: "<name>"`` can reach a checkout kept at ``path`` only when the
-    ## checkout's directory is named ``name``.
-    name.len > 0 and path.len > 0 and
-      extractFilename(path.strip(leading = false, chars = {'/', '\\'})) == name
+  ## A declared (membership) path wins over a lock path for the same name;
+  ## a name the lock also records is ``lockRecorded`` either way.
+  proc addMember(members: var seq[DevelopSetMember];
+                 name, checkout: string; lockRecorded: bool) =
+    for member in members.mitems:
+      if member.name == name:
+        member.lockRecorded = member.lockRecorded or lockRecorded
+        return
+    members.add((name, os.normalizedPath(absolutePath(checkout)),
+      lockRecorded))
   let membership = manifestMembershipOf(projectDir)
   if membership.resolved:
     for r in membership.repos:
-      if r.name != membership.selfName and discoverableAs(r.name, r.path):
-        result.addMember(r.name, membership.workspaceRoot / r.path)
+      if r.name.len > 0 and r.path.len > 0 and r.name != membership.selfName:
+        result.addMember(r.name, membership.workspaceRoot / r.path, false)
     let fragments = manifestsRoot(membership.workspaceRoot) / "repos"
     if dirExists(extendedPath(fragments)):
       for file in walkFiles(fragments / "*.toml"):
@@ -92813,8 +92865,8 @@ proc declaredDevelopSet(projectDir, lockPath: string):
         except CatchableError: continue
         let name = fragment.repo.name
         let path = if fragment.repo.path.len > 0: fragment.repo.path else: name
-        if name != membership.selfName and discoverableAs(name, path):
-          result.addMember(name, membership.workspaceRoot / path)
+        if name.len > 0 and name != membership.selfName:
+          result.addMember(name, membership.workspaceRoot / path, false)
   if lockPath.len == 0 or not fileExists(extendedPath(lockPath)): return
   var existing: seq[LockedDep]
   try:
@@ -92826,7 +92878,7 @@ proc declaredDevelopSet(projectDir, lockPath: string):
   for d in existing:
     if isSelfLockedDep(d) or d.path.len == 0 or d.coordinates.kind != ckVcs:
       continue
-    result.addMember(d.name, pathBase / d.path)
+    result.addMember(d.name, pathBase / d.path, true)
 
 proc unreachedDevelopSiblings(projectDir, lockPath: string;
     unreached: seq[UnreachedUsesSelector]): seq[UnreachedDevelopSibling] =
@@ -92845,6 +92897,11 @@ proc unreachedDevelopSiblings(projectDir, lockPath: string;
   ## WHAT IS NOT A FINDING, deliberately:
   ##   * a selector naming no develop-set sibling — a plain tool such as
   ##     ``cargo`` or ``nim`` has no sibling recipe to miss;
+  ##   * a selector naming a repo only the workspace manifest declares, at a
+  ##     path ``uses:`` discovery from the naming recipe cannot reach
+  ##     (``usesDiscoveryCanReach``) — the tool ``nix`` beside a declared
+  ##     ``reprobuild/references/nix``. Checking that repo out would not put a
+  ##     recipe in the solve, so the refusal's remedy could never help;
   ##   * a sibling checked out WITHOUT a recipe — it declares no constraints,
   ##     so a solve without it loses nothing.
   ## A sibling that is not checked out, or is checked out with a recipe that
@@ -92859,7 +92916,11 @@ proc unreachedDevelopSiblings(projectDir, lockPath: string;
     var checkout = ""
     for member in developSet:
       if member.name == miss.selector:
-        checkout = member.checkout
+        # Not recorded in `reported`: another owner of the same selector may
+        # sit where discovery does reach this checkout.
+        if member.lockRecorded or
+            usesDiscoveryCanReach(miss.selector, miss.owner, member.checkout):
+          checkout = member.checkout
         break
     if checkout.len == 0: continue
     let ownerRecipe =

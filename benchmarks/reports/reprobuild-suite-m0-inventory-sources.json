@@ -45138,7 +45138,7 @@
       "requiresReproBinary": true,
       "source": "tests/integration/t_lock_refresh_refuses_a_solve_missing_a_develop_sibling_recipe.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 2,
+      "staticCaseCount": 3,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
