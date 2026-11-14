@@ -223,7 +223,7 @@ def green(kind, base="debian-13"):
                               "vaultwarden again")
     elif kind == "heldwin":
         rec = base_record(HELD, base, with_gate_mutation=False)
-        rec["steps"] = padded([], 21, "and the service runs after C")
+        rec["steps"] = padded([], 17, "and the service runs after C")
     else:
         raise KeyError(kind)
     rec["verdict"] = "green"
@@ -264,8 +264,10 @@ def red_record(kind, base="debian-13"):
         rec["steps"] = [ok("bootstrap"),
                         red("the tick observes a fresh cycle, which applies "
                             "sequence 3")]
-    elif kind == "mutliveset":
-        rec = base_record(ADOPT, base, mutation="narrowed-live-set")
+    elif kind in ("mutliveset", "mutcallsite"):
+        rec = base_record(ADOPT, base, mutation=(
+            "narrowed-live-set" if kind == "mutliveset"
+            else "live-check-call-site-reverted"))
         rec["credentialSwitch"] = {"exit": 0, "restarted": True,
                                    "ranAsRoot": True, "credentialsOnly": True,
                                    "credentialChanged": True}
@@ -331,7 +333,8 @@ GREEN_KINDS = ["adopt", "conv", "convseam", "confirm", "floorupgrade",
                "hardreset", "refused", "tickctl", "agente2e", "validator",
                "parity", "heldwin"]
 RED_KINDS = ["mutexec", "mutimport", "mutstate", "mutunordered", "tickold",
-             "mutreceipt", "mutliveset", "muttplconv", "muttpladopt", "mutholdwin"]
+             "mutreceipt", "mutliveset", "mutcallsite", "muttplconv", "muttpladopt",
+             "mutholdwin"]
 
 
 class Accepts(unittest.TestCase):
@@ -451,6 +454,28 @@ class TheIssuesDoctoredInputs(unittest.TestCase):
         rec = red_record("mutliveset")
         rec["mutation"] = ""
         self.assertRejected("mutliveset-debian-13", rec, "narrowed-live-set")
+
+    def test_a_call_site_record_not_red_for_its_own_reason(self):
+        # The call-site falsifier is judged by the same evidence, and under
+        # its own build only: the decision-function build is another cell.
+        for field in ("ranAsRoot", "restarted", "credentialsOnly",
+                      "credentialChanged"):
+            with self.subTest(field=field):
+                rec = red_record("mutcallsite")
+                rec["credentialSwitch"][field] = False
+                self.assertRejected("mutcallsite-debian-13", rec, "own reason")
+        rec = red_record("mutcallsite")
+        rec["mutation"] = "narrowed-live-set"
+        self.assertRejected("mutcallsite-debian-13", rec,
+                            "live-check-call-site-reverted")
+
+    def test_a_held_window_record_short_of_generation_c(self):
+        # Generation C's measured record has 17 steps (reprobuild
+        # e9dc503ac9); one that stops before them is not complete.
+        rec = green("heldwin")
+        rec["steps"] = rec["steps"][:15] + rec["steps"][-1:]
+        ok_, _, why = cls.classify("heldwin-debian-13", rec)
+        self.assertFalse(ok_, why)
 
 
 class TheRecordsBuild(unittest.TestCase):

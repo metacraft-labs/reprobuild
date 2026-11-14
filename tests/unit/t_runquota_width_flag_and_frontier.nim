@@ -163,3 +163,21 @@ suite "the advertised frontier":
     check sizer.width == 7
     sizer.noteGrantedAtOnce(4)
     check sizer.width == 8
+
+suite "a lease is the parent of its action's RunQuota clients":
+  # The action's own environment names its lease, so that a
+  # RunQuota client in its tree takes a sub-lease of the grant instead of
+  # asking the host for slots the action already holds. Mutation: return the
+  # command unchanged and both cases fail.
+  test "the lease is named in the command's environment":
+    let command = ReproCommandSpec(argv: @["tool"], env: @["A=1"])
+    check command.withParentLease(42).env ==
+      @["A=1", "RUNQUOTA_PARENT_LEASE=42"]
+
+  test "the entry comes last, so it replaces an inherited value":
+    # The launch layers `env` over the inherited environment in order, so a
+    # later entry for the same name wins over an earlier one and over what
+    # was inherited.
+    let command = ReproCommandSpec(argv: @["tool"],
+      env: @["RUNQUOTA_PARENT_LEASE=999999"])
+    check command.withParentLease(7).env[^1] == "RUNQUOTA_PARENT_LEASE=7"

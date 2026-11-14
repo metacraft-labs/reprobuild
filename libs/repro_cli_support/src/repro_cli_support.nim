@@ -3363,6 +3363,13 @@ proc lowerGraphAction(node: GraphNode; profiles: Table[string, PathOnlyToolProfi
     # ``binaryCachePublisher`` closure.
     result.publishToBinaryCache = payload.publishToBinaryCache
     result.fixedOutput = payload.fixedOutput
+    # A sized action (a typed parallel tool: cargo, nim c, make, ninja, ...)
+    # asks RunQuota for a width range and has the grant written after its
+    # width flag at launch. Applied here, to whichever branch built the
+    # action, so no lowering path can drop it.
+    result.cpuMinMilli = payload.cpuMinMilli
+    result.cpuPreferredMilli = payload.cpuPreferredMilli
+    result.widthFlag = payload.widthFlag
     result.cacheEntryIdentity = payload.cacheEntryIdentity
     # M9.N Batch B: propagate the convention-supplied tool-identity
     # refs through to the engine-side ``BuildAction``. The engine

@@ -87,7 +87,7 @@ libs/repro_addon/tests/t_addon_review_round2.nim	nim	9
 libs/repro_addon/tests/t_addon_review_round3.nim	nim	8
 libs/repro_addon/tests/t_addon_review_round4.nim	nim	6
 libs/repro_addon/tests/t_addon_review_round5.nim	nim	5
-libs/repro_addon/tests/t_addon_review_round8.nim	nim	21
+libs/repro_addon/tests/t_addon_review_round8.nim	nim	24
 libs/repro_addon/tests/t_addon_secret_declarations.nim	nim	5
 libs/repro_addon/tests/t_addon_secret_files_created_private_and_never_through_symlinks.nim	nim	6
 libs/repro_addon/tests/t_addon_secrets_envelopes_and_rotation.nim	nim	13
@@ -483,6 +483,7 @@ libs/repro_dsl_stdlib/tests/t_s7_nim_c_declares_its_nimcache_as_derived.nim	nim	
 libs/repro_dsl_stdlib/tests/t_sevenzip_bootstrap_matches_stdlib_catalog.nim	nim	2
 libs/repro_dsl_stdlib/tests/t_shell_entropy_is_not_blessed.nim	nim	5
 libs/repro_dsl_stdlib/tests/t_shell_extra_env.nim	nim	4
+libs/repro_dsl_stdlib/tests/t_sized_typed_tools.nim	nim	9
 libs/repro_dsl_stdlib/tests/t_smoke_expand_archive.nim	nim	39
 libs/repro_dsl_stdlib/tests/t_smoke_generated_config.nim	nim	15
 libs/repro_dsl_stdlib/tests/t_smoke_phase_e_requires_elevation.nim	nim	7
@@ -2286,6 +2287,9 @@ tests/integration/t_rp5a_consumer_imports_resource_contract_no_driver.nim	nim	1
 tests/integration/t_rp5a_producer_exports_resource_contract_across_workspace.nim	nim	1
 tests/integration/t_rp5b_resource_driver_via_protocol.nim	nim	1
 tests/integration/t_rp8_lsp_typecheck_and_goto_def.nim	nim	3
+tests/integration/t_rqe_m15_action_exports_its_lease.nim	nim	1
+tests/integration/t_rqe_m15_nim_edge_bounded.nim	nim	1
+tests/integration/t_rqe_m15_recorder_cargo_edge_bounded.nim	nim	1
 tests/integration/t_run_consumes_opaque_out_of_tree.nim	nim	1
 tests/integration/t_run_consumes_session_store_out_of_tree.nim	nim	1
 tests/integration/t_run_edge_session_resolver_auto.nim	nim	2
@@ -2762,7 +2766,7 @@ tests/unit/t_runquota_endpoint_paths.nim	nim	6
 tests/unit/t_runquota_grant_wait_unresponsive.nim	nim	11
 tests/unit/t_runquota_grant_wait_wedged_connected.nim	nim	2
 tests/unit/t_runquota_queue_wait_is_loud_and_bounded.nim	nim	15
-tests/unit/t_runquota_width_flag_and_frontier.nim	nim	13
+tests/unit/t_runquota_width_flag_and_frontier.nim	nim	15
 tests/unit/t_rx_runquotad_forwards_custom_pools.nim	nim	6
 tests/unit/t_same_project_fragment_selectors.nim	nim	12
 tests/unit/t_script_launcher.nim	nim	3
@@ -2798,7 +2802,7 @@ tests/unit/t_windows_system_hash_mode.nim	nim	2
 tests/unit/t_workspace_root_for_repo_managed_worktree.nim	nim	1
 tests/unit/t_workspace_settings_v1_decode.nim	nim	3
 tests/unit/t_workspace_sync_summary_counts_an_unknown_status.nim	nim	4
-tests/unit/test_addon_a13_classify.py	python	45
+tests/unit/test_addon_a13_classify.py	python	47
 tests/unit/test_attestation_collateral_monitor_landing.py	python	6
 tests/unit/test_bootstrap_dry_run_outputs.py	python	2
 tests/unit/test_build_report_attribution.py	python	20

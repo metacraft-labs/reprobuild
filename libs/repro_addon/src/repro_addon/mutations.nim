@@ -590,6 +590,12 @@
 ## ``template-live-by-name``                the live check reads a template
 ##                                           by its own name, which systemd
 ##                                           refuses (decision 135)
+## ``live-check-call-site-reverted``       the add-on switch's call site
+##                                           decides step 6's reload and
+##                                           judgement from a unit-file
+##                                           change alone, not through
+##                                           ``liveCheckAtStep6`` (red on
+##                                           the adopt gate's case 2e)
 ## ``start-holds-after-driver-writes``     the add-on switch writes its
 ##                                           start holds at step 6, after
 ##                                           the drivers' reloads loaded
@@ -982,6 +988,10 @@
 ## ``discard-completion-key-read-late``       the completion is signed from
 ##                                            the key file, which the removal
 ##                                            took
+## ``discard-completion-failure-discards-key`` uninstall goes on to remove the
+##                                            attestation key and the state
+##                                            when the discard's completion
+##                                            could not be written
 ## ``ship-ok-without-sink-configuration``     uninstall reads a missing sink
 ##                                            configuration as "nothing to
 ##                                            wait for" though records are
@@ -1548,6 +1558,9 @@ const
                           "template-live-by-name",
                           # §13 decision 136.
                           "start-holds-after-driver-writes",
+                          # The every-switch check's call site (owner
+                          # decision on the round-8 wiring issue).
+                          "live-check-call-site-reverted",
                           "reissue-skips-targets",
                           "reissue-skips-sockets",
                           "reissue-skips-unit-state",
@@ -1703,6 +1716,7 @@ const
                           "discard-completed-objects-present",
                           "discard-failed-removal-counted-as-kept",
                           "discard-completion-key-read-late",
+                          "discard-completion-failure-discards-key",
                           "discard-completion-sync-error-swallowed",
                           "fresh-ignores-listings"]
 

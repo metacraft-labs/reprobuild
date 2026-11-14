@@ -1594,6 +1594,15 @@ type
       ## on a cache hit, so stale artifacts cannot impersonate fresh output.
     pool*: string
     poolUnits*: uint32
+    cpuMinMilli*: uint32
+    cpuPreferredMilli*: uint32
+    widthFlag*: string
+      ## The width range the action asks RunQuota for and the flag through
+      ## which its tool takes the granted width (``sized_tools``): the engine
+      ## writes the grant after the flag at launch. Zero and empty (the
+      ## default) are the one-slot default of a single-process action. Set by
+      ## ``buildAction`` for the standard library's parallel tools, never by a
+      ## recipe; payload codec v33.
     depfile*: string
     dynamicDepsFile*: string
     cacheable*: bool
