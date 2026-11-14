@@ -386,6 +386,10 @@ proc body(g: Guest; repro: string; step: StepFn; record: JsonNode;
   let imm = immutable("+i")
   step("an object left aside is made immutable, so the store's removal fails",
        imm.exitCode == 0, imm.stdout & imm.stderr)
+  # The entries the run must keep, by name: the directory alone survives a
+  # run that removes every entry (reprobuild-pm issue 2026-11-14-addon-
+  # store-custody-gate-checks-the-evidence-directory-not-its-entries-...).
+  let evidenceBefore = g.exec("ls -1 " & Evidence).stdout.strip()
   let unF = g.exec(repro & " system addon uninstall " &
                    "--discard-unacknowledged-store-evidence", timeoutSec = 1800)
   let said0 = unF.stdout & unF.stderr
@@ -409,8 +413,12 @@ proc body(g: Guest; repro: string; step: StepFn; record: JsonNode;
     "test -f /var/lib/repro/agent/attestation.key && test -d " & Evidence)
   step("the state, the ledger copy, the store evidence and the attestation " &
        "key that must sign the completion are kept",
-       keptState.exitCode == 0,
-       g.exec("ls -la /var/lib/repro /var/lib/repro/agent 2>&1").stdout)
+       keptState.exitCode == 0 and entries > 0 and
+         evidenceBefore.splitLines().len == entries and
+         g.exec("ls -1 " & Evidence).stdout.strip() == evidenceBefore,
+       "before: " & evidenceBefore & "\n" &
+         g.exec("ls -la /var/lib/repro /var/lib/repro/agent " & Evidence &
+                " 2>&1").stdout)
   # §13 decision 56: the sink's configuration and CA stay with the state
   # an incomplete uninstall keeps, so a re-run can still ship (falsifier
   # sink-config-removed-in-step-4).
