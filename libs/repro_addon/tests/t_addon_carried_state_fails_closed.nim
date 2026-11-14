@@ -38,7 +38,10 @@
 ## (R7-4), ``dependency-links-unread`` (R7-5, R7-7),
 ## ``requirement-name-not-reserved`` (R7-6), ``privileged-daemons-unread``
 ## (decision 58), ``restore-requirement-skips-closure`` (decision 60);
-## round 7: ``narrowed-live-set`` (a switch that writes no unit file),
+## round 7: ``narrowed-live-set`` (a switch that writes no unit file; the
+## decision alone -- its use at the switch's step 6 is falsified end to end
+## by case 2e of ``tests/e2e/addon/t_e2e_addon_adopt_hand_configured_service``,
+## a credentials-only switch, A13 review round 8),
 ## ``boot-closure-reads-generation-dropins`` (P60-2),
 ## ``polkit-subject-rebind-trusted`` (P58-1, P58-2 and the other binding
 ## forms), ``reissue-skips-targets`` and ``reissue-skips-sockets``

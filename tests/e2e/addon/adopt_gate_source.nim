@@ -209,6 +209,11 @@ proc step(name: string; ok: bool; detail: string) =
     ## the assignment check allows only with a string key. A new use means
     ## changing this list, on purpose.
   RunBaseNames = """
+after3 c1 c1b c2 c2out cinv1 cinv2 cloadeduser cmanager cneedreload0
+credgen1 credgen2 creddir credonly credprofile credsecret credsvc credunit
+csince ctokens1 ctokens2 ctokensput cuids1 cuids2 cuntil extractfilename put1
+put2 q secretafter secretbefore token1 token2 unitfilesafter unitfilesbefore
+unitfilescmd
 find managerduring max min needreload0 since2 until2
 != $ % %* & + .. ..< / == > @ Amdropindir Amstate Closurefixture Guest
 Mutationstop Vwstate ^ a a0am a0vw ad add address admintoken adopted
@@ -396,7 +401,7 @@ suite "gate source":
   SourceStart = "## Gate ``e2e_addon_adopt_hand_configured_service``"
     ## How the file begins.
   GateDigest =
-    "2114841ba93dc6d8ebd314e5bec225082c8f9925260bcddacac1d8bfbda3d04d"
+    "b18776b6576aae6c9608322f236d0cbc8d6817dd9250de1ff6b1c6d20ad4d1dd"
     ## ``codeDigest`` of the gate as reviewed. The structural checks above
     ## are each a freeze of one part of the gate, and seven reviews of
     ## 2026-11-12 each found a part left open: a helper of the gate that

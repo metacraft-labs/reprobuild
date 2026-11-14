@@ -589,7 +589,10 @@
 ##                                           ``subject`` guards (decision 58)
 ## ``narrowed-live-set``                     the add-on switch judges and
 ##                                           holds no unit in a switch that
-##                                           changes no unit file
+##                                           changes no unit file (red in
+##                                           t_addon_carried_state_fails_closed
+##                                           and in the adopt gate's case
+##                                           2e, a credentials-only switch)
 ## ``reissue-skips-targets``                 after a full apply's live check,
 ##                                           the start jobs of the targets the
 ##                                           drivers started are not

@@ -207,12 +207,7 @@ ALT_TARGETS = {
 }
 
 
-# Round 7 of the A13 review. The add-on build narrowed-live-set has no VM
-# cell: in the adopt gate's every-switch case a dependency restart's own
-# unit driver reloads systemd at step 3, so the case cannot tell the build
-# from the product; its falsifier is the unit case
-# t_addon_carried_state_fails_closed "a switch that writes no unit file
-# holds, reloads and judges the services".
+# Round 7 of the A13 review: the decision-79 re-issue cells.
 EXPECT.update({
     "mutreissuetgt": ("e2e_addon_to_reproos_conversion_keeps_state", "red",
                       "engine build reissue-skips-targets"),
@@ -222,6 +217,23 @@ EXPECT.update({
 TARGET.update({
     "mutreissuetgt": "decision 79, target:",
     "mutreissuesock": "decision 79, socket:",
+})
+
+# Round 8 of the A13 review. The add-on build narrowed-live-set has a VM
+# cell again: the adopt gate's case 2e, a switch that changes only a
+# service's credential. No unit driver runs for it, so nothing but step 6's
+# own hold, reload and judgement keeps the restart off the root definition
+# the operator left loaded. Case 2d (a depends_on restart) is no cell for
+# it: the dependency restart's unit driver reloads systemd at step 3 and
+# masks the build. The unit case t_addon_carried_state_fails_closed "a
+# switch that writes no unit file holds, reloads and judges the services"
+# tests the decision (liveCheckAtStep6) beside it.
+EXPECT.update({
+    "mutliveset": ("e2e_addon_adopt_hand_configured_service", "red",
+                   "add-on build narrowed-live-set"),
+})
+TARGET.update({
+    "mutliveset": "a switch that changes only a service's credential judges it",
 })
 
 ROUND4_PROBES = ["account", "timer", "pathfloored", "path", "host"]
@@ -280,6 +292,17 @@ def on_target_rec(kind, rec):
         # Started, and ran as root: its ExecStartPre's uid marker reads 0.
         lc = rec.get("liveCrossCheck", {})
         return on_target(kind, steps) and lc.get("ranAsRoot") is True
+    if kind == "mutliveset":
+        # The credentials-only switch changed the probe's materialised
+        # credential and wrote none of its unit files (``credentialsOnly``),
+        # restarted it (its invocation changed), and the restarted probe ran
+        # as root: its uid marker reads 0. A root run some other path made
+        # (``secret put`` restarts a running consumer itself) is not this.
+        cs = rec.get("credentialSwitch", {})
+        return (on_target(kind, steps) and cs.get("ranAsRoot") is True and
+                cs.get("restarted") is True and
+                cs.get("credentialChanged") is True and
+                cs.get("credentialsOnly") is True)
     if kind == "mutadoptprofile":
         # The silent revert itself: the gate reached the revert step (its
         # record says so) and the old profile's switch ran (no scope or drift
@@ -454,9 +477,13 @@ ADOPT_EVERY_SWITCH_STEPS = [
     "after the generator and the manifest are gone, the switch succeeds",
     "a switch that changes only a file the service depends_on judges it as "
     "systemd loads it",
+    "a switch that changes only a service's credential judges it as systemd "
+    "loads it",
+    "the credentials-only switch restarted the probe for its credential alone",
 ]
 """The adopt gate's every-switch and live-cross-check steps (spec §11.1; A13
-review round 7, finding 1), each of which a green adopt record carries ok."""
+review rounds 7 and 8: finding 1 and its credentials-only case 2e), each of
+which a green adopt record carries ok."""
 
 
 def kind_of(cell):
@@ -538,6 +565,19 @@ def green_incomplete(kind, rec):
                 {k: es.get(k) for k in ("exit", "ranAsRoot")})
         if es["exit"] == 0 and es.get("restarted") is not True:
             return "everySwitch exit 0 without a restart"
+        cs = rec.get("credentialSwitch")
+        if not isinstance(cs, dict):
+            return "credentialSwitch not recorded"
+        # Case 2e is the narrowed-live-set cell's case: green only when its
+        # switch was the credentials-only restart it is meant to be, and the
+        # restarted probe stayed confined.
+        want = {"exit": 0, "restarted": True, "ranAsRoot": False,
+                "credentialsOnly": True, "credentialChanged": True,
+                "tokenReached": True}
+        got = {k: cs.get(k) for k in want}
+        if any(got[k] is not v if isinstance(v, bool) else got[k] != v
+               for k, v in want.items()):
+            return "credentialSwitch %r, expected %r" % (got, want)
         lc = rec.get("liveCrossCheck")
         if not isinstance(lc, dict):
             return "liveCrossCheck not recorded"

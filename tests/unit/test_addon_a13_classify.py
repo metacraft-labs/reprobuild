@@ -90,6 +90,10 @@ ADOPT_EVERY_SWITCH_STEPS = [
     "a switch that changes only a file the service depends_on judges it as "
     "systemd loads it before restarting it: it never runs as root",
     "after the manifest is gone, the switch back to the skeleton succeeds",
+    "a switch that changes only a service's credential judges it as systemd "
+    "loads it before restarting it: it never runs as root",
+    "the credentials-only switch restarted the probe for its credential "
+    "alone, and the restarted probe has the value it brought back",
 ]
 
 
@@ -142,6 +146,10 @@ def green(kind, base="debian-13"):
                               "loadedUserBefore": "root"}
         rec["liveCrossCheck"] = {"exit": 1, "started": False,
                                  "ranAsRoot": False}
+        rec["credentialSwitch"] = {"exit": 0, "restarted": True,
+                                   "ranAsRoot": False, "credentialsOnly": True,
+                                   "credentialChanged": True,
+                                   "tokenReached": True}
         rec["revertStepReached"] = True
     elif kind in ("conv", "convseam"):
         rec = base_record(CONV, base, engine=ENGINE,
@@ -240,6 +248,14 @@ def red_record(kind, base="debian-13"):
         rec["steps"] = [ok("bootstrap"),
                         red("the tick observes a fresh cycle, which applies "
                             "sequence 3")]
+    elif kind == "mutliveset":
+        rec = base_record(ADOPT, base, mutation="narrowed-live-set")
+        rec["credentialSwitch"] = {"exit": 0, "restarted": True,
+                                   "ranAsRoot": True, "credentialsOnly": True,
+                                   "credentialChanged": True}
+        rec["steps"] = [ok("bootstrap"),
+                        red(ADOPT_EVERY_SWITCH_STEPS[8]),
+                        red("stopped at the first red step under the mutation")]
     elif kind == "mutreceipt":
         rec = base_record(HARDRESET, base, mutation="receipt-no-fsync",
                           with_gate_mutation=False)
@@ -258,7 +274,7 @@ GREEN_KINDS = ["adopt", "conv", "convseam", "confirm", "floorupgrade",
                "hardreset", "refused", "tickctl", "agente2e", "validator",
                "parity"]
 RED_KINDS = ["mutexec", "mutimport", "mutstate", "mutunordered", "tickold",
-             "mutreceipt"]
+             "mutreceipt", "mutliveset"]
 
 
 class Accepts(unittest.TestCase):
@@ -324,14 +340,14 @@ class TheIssuesDoctoredInputs(unittest.TestCase):
         self.assertRejected("adopt-debian-13", rec)
 
     def test_an_adopt_record_without_the_every_switch_fields(self):
-        for field in ("everySwitch", "liveCrossCheck"):
+        for field in ("everySwitch", "liveCrossCheck", "credentialSwitch"):
             with self.subTest(field=field):
                 rec = green("adopt")
                 del rec[field]
                 self.assertRejected("adopt-debian-13", rec, field)
 
     def test_an_adopt_record_whose_cross_checks_ran_as_root(self):
-        for field in ("everySwitch", "liveCrossCheck"):
+        for field in ("everySwitch", "liveCrossCheck", "credentialSwitch"):
             with self.subTest(field=field):
                 rec = green("adopt")
                 rec[field]["ranAsRoot"] = True
@@ -341,12 +357,43 @@ class TheIssuesDoctoredInputs(unittest.TestCase):
         self.assertRejected("adopt-debian-13", rec, "liveCrossCheck")
 
     def test_an_adopt_record_missing_one_every_switch_step(self):
-        for name in ADOPT_EVERY_SWITCH_STEPS[:4] + ADOPT_EVERY_SWITCH_STEPS[6:7]:
+        for name in (ADOPT_EVERY_SWITCH_STEPS[:4] + ADOPT_EVERY_SWITCH_STEPS[6:7]
+                     + ADOPT_EVERY_SWITCH_STEPS[8:10]):
             with self.subTest(step=name):
                 rec = green("adopt")
                 rec["steps"] = [s if s["step"] != name else ok("filler")
                                 for s in rec["steps"]]
                 self.assertRejected("adopt-debian-13", rec)
+
+    def test_an_adopt_record_whose_credentials_case_was_not_one(self):
+        # Case 2e green only for the credentials-only restart it is meant to
+        # be (A13 review round 8): one that wrote a unit file, changed no
+        # credential, restarted nothing or failed is no evidence.
+        for field, value in (("credentialsOnly", False),
+                             ("credentialChanged", False),
+                             ("restarted", False), ("tokenReached", False),
+                             ("exit", 1), ("credentialsOnly", None)):
+            with self.subTest(field=field, value=value):
+                rec = green("adopt")
+                rec["credentialSwitch"][field] = value
+                self.assertRejected("adopt-debian-13", rec, "credentialSwitch")
+
+    def test_a_narrowed_live_set_record_not_red_for_its_own_reason(self):
+        # The root run must be the credentials-only switch's restart.
+        for field in ("ranAsRoot", "restarted", "credentialsOnly",
+                      "credentialChanged"):
+            with self.subTest(field=field):
+                rec = red_record("mutliveset")
+                rec["credentialSwitch"][field] = False
+                self.assertRejected("mutliveset-debian-13", rec, "own reason")
+        rec = red_record("mutliveset")
+        rec["steps"] = [ok("bootstrap"),
+                        red(ADOPT_EVERY_SWITCH_STEPS[6]),
+                        red("stopped at the first red step under the mutation")]
+        self.assertRejected("mutliveset-debian-13", rec, "own reason")
+        rec = red_record("mutliveset")
+        rec["mutation"] = ""
+        self.assertRejected("mutliveset-debian-13", rec, "narrowed-live-set")
 
 
 class TheRecordsBuild(unittest.TestCase):
