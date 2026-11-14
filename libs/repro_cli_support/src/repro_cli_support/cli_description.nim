@@ -183,12 +183,172 @@ proc devEnvSelectionFlags(): NimNode {.compileTime.} =
       help = "Write statistics of the development-environment computation " &
         "to the path"
 
+proc storeRootFlags(): NimNode {.compileTime.} =
+  ## The store root of the commands that open the local store (`store`'s
+  ## subcommands, `cas`, `launch-plan`, `self`). Spelt `--store-root=PATH`
+  ## only: these commands never took the path as the next word. The
+  ## variable `REPRO_STORE_ROOT` is read where the root is resolved, after
+  ## the flag, as `repro build` resolves it.
+  quote do:
+    flag storeRoot is string, format = equals,
+      help = "The store root (default: `$REPRO_STORE_ROOT`, else the " &
+        "per-user store)"
+
+proc storeAndActionCacheRootFlags(): NimNode {.compileTime.} =
+  ## The two roots of the bundle commands (`store closure|export|import`,
+  ## `bundle create|restore`), resolved as `repro build` resolves them.
+  quote do:
+    flag storeRoot is string, format = equals,
+      help = "The store root (default: `$REPRO_STORE_ROOT`, else the " &
+        "per-user store)"
+    flag actionCacheRoot is string, format = equals,
+      help = "The action-cache root (default: " &
+        "`$REPRO_ACTION_CACHE_ROOT`, else the store's)"
+
+proc storeBundleSelectionFlags(): NimNode {.compileTime.} =
+  ## What `store closure` and `store export` bundle: the workspace roots and
+  ## the development environments frozen into the bundle.
+  let roots = storeAndActionCacheRootFlags()
+  quote do:
+    `roots`
+    flag root is seq[string], format = equals,
+      help = "A workspace root to bundle (at least one); repeat it for " &
+        "several"
+    flag freezeDevEnv is seq[string], format = equals,
+      help = "A project whose development-environment activation the " &
+        "bundle carries; repeat it for several"
+
+proc userDaemonConfigFlags(): NimNode {.compileTime.} =
+  ## The per-user daemon's configuration, which every `repro daemon`
+  ## subcommand takes (the client commands to find the daemon, `start`,
+  ## `restart` and `serve` to configure it). Each value is also accepted as
+  ## the next word, the form the daemon's own launches pass.
+  quote do:
+    boolFlag foreground is bool,
+      help = "Run the daemon in the foreground instead of detaching it"
+    boolFlag dev is bool,
+      help = "Development mode: run from a staged copy and restart when " &
+        "the binary changes"
+    boolFlag system is bool,
+      help = "Serve the system lease scope instead of the per-user one"
+    flag endpoint is string,
+      help = "The daemon's endpoint (default: the per-user endpoint)"
+    flag stateDir is string,
+      help = "The daemon's state directory (default: the per-user one)"
+    flag log is string,
+      help = "The daemon log (default: `<state dir>/logs/repro-daemon.log`)"
+    flag stateRoot is string,
+      help = "The resource-state store the daemon's reaper sweeps " &
+        "(default: the scope's)"
+    flag peerCache is string,
+      help = "Serve the peer cache: `none` or " &
+        "`lan://CIDR[:port][?seeds=HOST:PORT,...&listen=PORT]`"
+    flag trustProfile is string,
+      help = "The trust profile of the peer cache and the worker role: " &
+        "`trusted` or `hardened`"
+    # Internal (accepted, never shown in help): the daemon passes these to
+    # the process it restarts into in development mode.
+    flag daemonExe is string, visibility = internal,
+      help = "The daemon image to launch"
+    flag sourceExe is string, visibility = internal,
+      help = "The image a development-mode daemon watches for changes"
+    flag stagedGeneration is string, visibility = internal,
+      help = "The staged generation directory this daemon runs from"
+    flag previousStagedGeneration is string, visibility = internal,
+      help = "The staged generation directory to remove once this one runs"
+    flag restartRunId is string, visibility = internal,
+      help = "The run id of the restart that launched this daemon"
+
+proc storeDaemonConfigFlags(): NimNode {.compileTime.} =
+  ## The development store daemon's configuration (`store daemon`, `store
+  ## serve`). Each value is also accepted as the next word, the form
+  ## `store daemon start` passes to the process it launches.
+  quote do:
+    boolFlag dev is bool,
+      help = "The development profile (required: the only one implemented)"
+    flag storeRoot is string,
+      help = "The development store root (default: the platform's " &
+        "development store)"
+    flag endpoint is string,
+      help = "The development endpoint (default: `$REPROSTORED_ENDPOINT`, " &
+        "else the platform's)"
+
+proc cacheIdentityFlags(): NimNode {.compileTime.} =
+  ## The cache-entry identity `repro cache publish` labels a manifest with
+  ## and `repro cache derive-key` derives a key from. Spelt `--name=value`
+  ## only, and a value may be empty (`--platform-libc=`), which is how a
+  ## build script leaves a field out.
+  quote do:
+    flag packageName is string, format = equals, help = "The package name"
+    flag packageVersion is string, format = equals,
+      help = "The package version"
+    flag platformCpu is string, format = equals,
+      help = "The CPU family: x86_64, aarch64, armv7 or x86 (and their " &
+        "aliases, such as amd64 and armhf)"
+    flag platformOs is string, format = equals, help = "The operating system"
+    flag platformAbi is string, format = equals, help = "The ABI"
+    flag platformLibc is string, format = equals, help = "The libc variant"
+    flag toolchainName is string, format = equals,
+      help = "The toolchain's name"
+    flag toolchainVersion is string, format = equals,
+      help = "The toolchain's version"
+    flag toolchainHostLdso is string, format = equals,
+      help = "The toolchain's host dynamic-loader ABI"
+    flag toolchainExtra is string, format = equals,
+      help = "An extra toolchain fingerprint"
+    flag providerRevision is string, format = equals,
+      help = "The provider revision"
+    flag dep is seq[string], format = equals,
+      help = "A dependency's entry key; repeat it for several"
+    flag option is seq[string], format = equals,
+      help = "An option, as `name=value`; repeat it for several"
+
+proc certSignerStateFlag(): NimNode {.compileTime.} =
+  ## The certificate signer's state directory, which both of its
+  ## subcommands read.
+  quote do:
+    flag state is string,
+      help = "The signer's state directory, holding the workers' signing " &
+        "CAs and `issued.log` (required)"
+
+proc selfFlags(): tuple[version, package, platform,
+                        project: NimNode] {.compileTime.} =
+  ## The flags `repro self`'s subcommands share, each spelt `--name=value`
+  ## only.
+  result.version = quote do:
+    flag version is string, format = equals,
+      help = "The version to act on (required)"
+  result.package = quote do:
+    flag package is string, format = equals,
+      help = "`reprobuild` (the default) or `nim`, the compiler that " &
+        "builds the project's provider"
+  result.platform = quote do:
+    flag platform is string, format = equals,
+      help = "The platform (default: this host's)"
+  result.project = quote do:
+    flag project is string, format = equals,
+      help = "The project whose pin to act on (default: the one enclosing " &
+        "the current directory)"
+
 proc reproCommandLineDescription*(): NimNode {.compileTime.} =
   ## The ``cli:`` body of repro's command line.
   ##
   ## Command order is the order ``repro --help`` lists them in.
   let graphInspection = graphInspectionFlags()
   let devEnvSelection = devEnvSelectionFlags()
+  let storeRootFlag = storeRootFlags()
+  let storeBundleRoots = storeBundleSelectionFlags()
+  let storeBundleCommonRoots = storeAndActionCacheRootFlags()
+  let bundleStoreRoots = storeAndActionCacheRootFlags()
+  let userDaemonConfig = userDaemonConfigFlags()
+  let storeDaemonConfig = storeDaemonConfigFlags()
+  let cacheIdentity = cacheIdentityFlags()
+  let certSignerState = certSignerStateFlag()
+  let self = selfFlags()
+  let selfVersion = self.version
+  let selfPackage = self.package
+  let selfPlatform = self.platform
+  let selfProject = self.project
   result = unbound quote do:
     help "Reproducible builds, development environments and workspaces"
     # Command-line flags are kebab-case (`--tool-provisioning`); keys in
@@ -434,25 +594,338 @@ proc reproCommandLineDescription*(): NimNode {.compileTime.} =
 
     # ---- Stores, caches and daemons -------------------------------------
     subcmd "daemon", help = "Manage the per-user reprobuild daemon":
-      pos args is seq[string], required = false, passThrough = true
+      # Every subcommand takes the same daemon configuration, so the flags
+      # are the namespace's own and each subcommand inherits them.
+      `userDaemonConfig`
+      subcmd "status":
+        help "Print the daemon's identity, protocol and " &
+          "sessions count"
+      subcmd "start":
+        help "Start the daemon unless it is running " &
+          "(detached, unless --foreground)"
+      subcmd "stop":
+        help "Stop the daemon gracefully"
+      subcmd "restart":
+        help "Stop the daemon if it runs, then start it"
+      subcmd "logs":
+        help "Print the daemon log (the previous generation first)"
+      subcmd "sessions":
+        help "List the build and watch sessions the daemon hosts"
+      # The daemon process itself, which `start` launches.
+      subcmd "serve", visibility = internal:
+        help "Run the daemon process in the foreground"
     subcmd "store", help = "Manage the local store":
-      pos args is seq[string], required = false, passThrough = true
+      subcmd "gc", help = "Garbage-collect unreachable store contents, or " &
+          "evict down to a size budget":
+        `storeRootFlag`
+        flag graceSeconds is int, format = equals,
+          default = 300,
+          help = "How long a quarantined tree waits before it is unlinked"
+        boolFlag json is bool,
+          help = "Print the budget collector's report as JSON"
+        flag budget is string, format = equals,
+          help = "Collect as a cache bounded by this size (`384G`, `1.5T`): " &
+            "evict the least recently used dead objects when above it"
+        flag target is string, format = equals,
+          help = "The size budget mode evicts down to (default: 90% of " &
+            "--budget)"
+        flag keepRecent is string, format = equals,
+          help = "Never evict anything used within this duration (`90s`, " &
+            "`30m`, `12h`, `2d`; default: `2d`)"
+        boolFlag evictCas is bool,
+          help = "Also evict CAS blobs no remaining action-cache entry " &
+            "references"
+        boolFlag dryRun is bool,
+          help = "Plan the budget eviction without removing anything"
+      subcmd "recover", help = "Reconcile the store's index with the " &
+          "prefixes on disk after an unclean shutdown":
+        `storeRootFlag`
+      subcmd "roots", help = "List the roots registered against the store":
+        `storeRootFlag`
+      subcmd "list", help = "List every realized prefix the store records":
+        `storeRootFlag`
+      subcmd "optimise", aliases = ["optimize"],
+          help = "Hardlink byte-identical files across realized prefixes":
+        `storeRootFlag`
+        boolFlag json is bool, help = "Print the report as JSON"
+      subcmd "materialize", help = "Reproduce a directory tree at another " &
+          "path with the store's materialiser, and report what it did":
+        boolFlag json is bool, help = "Print the report as JSON"
+        boolFlag noSharedInode is bool,
+          help = "Copy every file instead of hardlinking it"
+        pos srcDir is string, help = "The directory to reproduce"
+        pos dstDir is string, help = "Where to reproduce it"
+      subcmd "closure", help = "List what a native-store bundle of the " &
+          "workspace roots would carry, writing nothing":
+        `storeBundleRoots`
+        boolFlag json is bool, help = "Print the closure as JSON"
+      subcmd "export",
+          help = "Write the native-store bundle of the workspace roots " &
+            "(docs/store-bundles.md)":
+        `storeBundleRoots`
+        flag out is string, format = equals,
+          help = "The directory the bundle is written to (required)"
+        flag partSize is string, format = equals,
+          help = "The size of each part (`64M`, `1G`; default: 64 MiB)"
+        flag zstdLevel is Option[int], format = equals,
+          help = "The zstd compression level (default: 19)"
+        flag zstdThreads is Option[int], format = equals,
+          help = "The zstd worker threads (default: all cores)"
+        boolFlag json is bool, help = "Print the bundle manifest"
+      subcmd "import", help = "Restore a native-store bundle":
+        `storeBundleCommonRoots`
+        flag root is seq[string], format = equals,
+          help = "A workspace root the bundle must have been produced at; " &
+            "repeat it for several"
+        boolFlag allowDevEnv is bool,
+          help = "Allow the frozen development environments the bundle " &
+            "carries, as `repro allow` would"
+        boolFlag force is bool,
+          help = "Unpack again even when the bundle was already imported"
+        boolFlag json is bool,
+          help = "Print the report, with per-phase wall times, as JSON"
+        pos bundleDir is string, help = "The bundle directory"
+      subcmd "copy", help = "Copy realized closures into another store root":
+        `storeRootFlag`
+        flag to is string, format = equals,
+          help = "The destination store root (required)"
+        flag rootId is seq[string], format = equals,
+          help = "Copy every prefix this registered root holds; repeat it " &
+            "for several"
+        boolFlag json is bool, help = "Print the report as JSON"
+        pos prefixes is seq[string], required = false,
+          help = "Prefixes of the source store, as absolute paths or " &
+            "`prefixes/<pkg>/<dir>`; a path inside a prefix names that prefix"
+      subcmd "daemon",
+          help = "Start, query or stop the development store daemon":
+        `storeDaemonConfig`
+        subcmd "start":
+          help "Start the development store daemon"
+        subcmd "status":
+          help "Print the development store daemon's " &
+            "status"
+        subcmd "stop":
+          help "Stop the development store daemon"
+      # The store daemon process itself, which `store daemon start` launches.
+      subcmd "serve", visibility = internal,
+          help = "Run the development store daemon in the foreground":
+        `storeDaemonConfig`
     subcmd "cas", help = "Inspect the content-addressed blob store":
-      pos args is seq[string], required = false, passThrough = true
+      `storeRootFlag`
+      subcmd "gc",
+          help = "Reclaim every CAS blob outside the retain set":
+        flag keep is string, format = equals,
+          help = "The blobs to keep, as comma-separated 64-character hex " &
+            "digests"
+      subcmd "verify",
+          help = "Check one blob's bytes against its digest (exit 1 when " &
+            "they differ)":
+        pos digest is string, help = "The blob's 64-character hex digest"
+      subcmd "path", help = "Print the on-disk path of one blob":
+        pos digest is string, help = "The blob's 64-character hex digest"
+      subcmd "exists",
+          help = "Exit 0 when the blob is present, 1 when it is not":
+        pos digest is string, help = "The blob's 64-character hex digest"
     subcmd "cache",
-        help = "Look up, substitute and publish binary-cache entries":
-      pos args is seq[string], required = false, passThrough = true
-    subcmd "bundle", help = "Create, publish and restore store bundles":
-      pos args is seq[string], required = false, passThrough = true
+        help = "Look up, substitute and publish binary-cache entries. The " &
+          "cache is `$REPRO_BINARY_CACHE_URL` (default " &
+          "`http://localhost:7878`); `substitute` trusts only the caches " &
+          "`$REPRO_CACHES_CONFIG` (else /etc/repro/caches.conf and " &
+          "~/.config/repro/caches.conf) lists with their producer keys; " &
+          "`publish` and `gen-key` read the producer key pair from " &
+          "`$REPRO_BINARY_CACHE_KEY_PATH` and " &
+          "`$REPRO_BINARY_CACHE_CERT_PATH`; `substitute` fetches through the " &
+          "local store `$REPRO_LOCAL_STORE`":
+      # `repro cache` alone prints this help and succeeds, as it always has.
+      call:
+        discard
+      subcmd "lookup",
+          help = "Exit 0 when the cache holds the entry, 1 when it does not":
+        pos entryKey is string, help = "The entry key, 64 hex characters"
+      subcmd "substitute", help = "Fetch an entry from a trusted cache and " &
+          "extract it into a directory":
+        pos entryKey is string, help = "The entry key, 64 hex characters"
+        pos outDir is string, help = "The directory to extract it into"
+      subcmd "publish", help = "Pack a directory, sign its manifest with " &
+          "the producer key and upload it":
+        `cacheIdentity`
+        pos entryKey is string, help = "The entry key, 64 hex characters"
+        pos prefixDir is string, help = "The directory to publish"
+      subcmd "derive-key",
+          help = "Print the entry key the identity flags derive":
+        `cacheIdentity`
+      subcmd "gen-key", help = "Create the producer key pair when it is " &
+          "missing, and print its public key":
+        `cacheIdentity`
+      # `repro cache help`: the same as `repro cache --help`.
+      subcmd "help", visibility = hidden:
+        pos topic is seq[string], required = false
+    subcmd "bundle", help = "Create, publish and restore workspace bundles " &
+        "(docs/workspace-bundles.md)":
+      subcmd "create", help = "Write the bundle of a workspace selection":
+        flag out is string, format = equals,
+          help = "The directory the bundle is written under (required)"
+        flag workspaceRoot is string, format = equals,
+          help = "The workspace (default: the one enclosing the current " &
+            "directory)"
+        flag name is string, format = equals,
+          help = "The bundle's name (default: derived from the selector)"
+        boolFlag allShells is bool,
+          help = "Capture every member's development shell"
+        flag primary is string, format = equals,
+          help = "The shell the bundle activates, as `MEMBER:SHELL`"
+        boolFlag noNix is bool, help = "Leave out the Nix half"
+        boolFlag noSources is bool, help = "Leave out the source checkouts"
+        boolFlag noNative is bool, help = "Leave out the native-store half"
+        flag nativeRoot is seq[string], format = equals,
+          help = "A workspace root whose native store the bundle carries; " &
+            "repeat it for several"
+        boolFlag freezeDevEnv is bool,
+          help = "Freeze the repro development environment of every member " &
+            "that is a repro project"
+        flag zstd is string, format = equals,
+          help = "The store path the bootstrap realises when the restoring " &
+            "machine has no zstd"
+        flag repro is string, format = equals,
+          help = "The store path whose `bin/repro` the bootstrap hands over to"
+        flag level is Option[int], format = equals,
+          help = "The zstd compression level"
+        flag partSize is string, format = equals,
+          help = "The size of each part (`64M`, `1G`)"
+        boolFlag checkStable is bool,
+          help = "Capture every shell environment twice and refuse when the " &
+            "captures differ"
+        `bundleStoreRoots`
+        boolFlag json is bool, help = "Print the bundle's `latest.json`"
+        pos selector is string,
+          help = "The project, variant, repository set or repository to bundle"
+      subcmd "publish", help = "Upload a bundle to S3 (credentials from " &
+          "`$AWS_ACCESS_KEY_ID` and `$AWS_SECRET_ACCESS_KEY`) or to GitHub " &
+          "(your git credentials)":
+        flag to is string, format = equals,
+          help = "`s3://BUCKET[/PREFIX]` or `github:OWNER/REPO` (required)"
+        flag endpoint is string, format = equals,
+          help = "The S3 endpoint URL"
+        flag region is string, format = equals, help = "The S3 region"
+        flag parallel is Option[int], format = equals,
+          help = "How many uploads run at once"
+        pos bundleDir is string, help = "The bundle, `<out>/<bundle>`"
+      subcmd "restore", help = "Restore a bundle on this machine":
+        flag workspace is string, format = equals,
+          help = "Where the workspace is restored"
+        boolFlag activate is bool,
+          help = "Write the profile script that enters the primary shell in " &
+            "every new shell"
+        flag activationFile is string, format = equals,
+          help = "The profile script --activate writes"
+        flag bashrcFile is string, format = equals,
+          help = "The shell startup file that sources the profile script"
+        boolFlag allowDevEnv is bool,
+          help = "Allow the frozen development environments the bundle " &
+            "carries"
+        flag parallel is Option[int], format = equals,
+          help = "How many downloads run at once"
+        flag staging is string, format = equals,
+          help = "Where downloads are staged"
+        flag nixRoot is string, format = equals,
+          help = "Restore the Nix half into another store root (for tests)"
+        boolFlag afterBootstrap is bool, visibility = internal,
+          help = "Run by the bundle's restore.sh once the Nix half is restored"
+        `bundleStoreRoots`
+        boolFlag json is bool, help = "Print the report as JSON"
+        pos source is string, help = "A bundle directory or URL, or " &
+          "`github:OWNER/REPO[@REF]/BUNDLE`"
+      # `repro bundle help`: the same as `repro bundle --help`.
+      subcmd "help", visibility = hidden:
+        pos topic is seq[string], required = false
     subcmd "reap", help = "Run one sweep of the resource-state store":
-      pos args is seq[string], required = false, passThrough = true
+      boolFlag once is bool,
+        help = "Sweep once (the only mode; accepted for clarity)"
+      boolFlag force is bool,
+        help = "Reap every present record (or the named ones) regardless " &
+          "of its lease"
+      flag stateRoot is string, format = equals,
+        help = "The state store to sweep (default: the per-user store)"
+      # `repro build`'s spellings, refused with a pointer to `--force`
+      # rather than as unknown flags.
+      boolFlag hardRebuild is bool, visibility = hidden
+      boolFlag rebuildHostBound is bool, visibility = hidden
+      pos addresses is seq[string], required = false,
+        help = "Restrict the sweep to these records"
     subcmd "launch-plan", help = "Show stored launch plans":
-      pos args is seq[string], required = false, passThrough = true
+      `storeRootFlag`
+      subcmd "show", help = "Print a stored launch plan as JSON":
+        pos hexId is string,
+          help = "The launch plan's 64-character hex digest"
+      subcmd "id",
+          help = "Print the launch-plan id of an envelope file on disk":
+        pos path is string, help = "The launch-plan envelope file"
     subcmd "cert-signer",
         help = "Run the certificate signer for remote build workers":
-      pos args is seq[string], required = false, passThrough = true
+      subcmd "serve", help = "Sign one certificate per request for an " &
+          "authorized worker":
+        `certSignerState`
+        flag identity is string,
+          help = "The signer's host CA directory (required)"
+        flag anchors is string,
+          help = "The directory of the workers' host CAs (required)"
+        flag authorized is string,
+          help = "The file of authorized worker host ids, re-read on every " &
+            "request (required)"
+        flag revoked is string, help = "The file of revoked worker host ids"
+        flag bindAddr is string, perSource = [cli = "bind"],
+          default = "127.0.0.1",
+          help = "The address to listen on (never a wildcard)"
+        flag port is int, help = "The port to listen on (default: any free " &
+          "port)"
+        flag readyFile is string,
+          help = "Write `ADDR:PORT` and the signer's host id here once it " &
+            "listens"
+      subcmd "registration",
+          help = "Print the registered-keys entry for one worker":
+        `certSignerState`
+        flag worker is string,
+          help = "The worker's host id, 64 hex characters (required)"
     subcmd "self", help = "Install and manage reprobuild's own versions":
-      pos args is seq[string], required = false, passThrough = true
+      subcmd "install",
+          help = "Realize a built reprobuild image tree into the store":
+        flag fromDir is string, format = equals, perSource = [cli = "from"],
+          help = "The image tree to install (required)"
+        `selfVersion`
+        `selfPackage`
+        `selfPlatform`
+        `storeRootFlag`
+        boolFlag json is bool, help = "Print the result as JSON"
+      subcmd "provision",
+          help = "Put the version a pin names into the store":
+        `selfVersion`
+        `selfPackage`
+        `selfPlatform`
+        `selfProject`
+        `storeRootFlag`
+        flag fromDir is string, format = equals, perSource = [cli = "from"],
+          help = "Install from this image tree when the version is missing"
+        boolFlag json is bool, help = "Print the result as JSON"
+      subcmd "hold", help = "Attach the project's pin root to the prefix " &
+          "its lock pins, so `repro store gc` keeps it":
+        `selfPackage`
+        `selfProject`
+        `storeRootFlag`
+        boolFlag json is bool, help = "Print the result as JSON"
+      subcmd "which",
+          help = "Report what the launcher would run here, and why":
+        `selfPackage`
+        `selfProject`
+        `storeRootFlag`
+        boolFlag json is bool, help = "Print the report as JSON"
+      subcmd "list", help = "List the images resident in the store":
+        `selfPackage`
+        `storeRootFlag`
+        boolFlag json is bool, help = "Print the list as JSON"
+      subcmd "prune-roots",
+          help = "Re-derive every pin root from the lock it names":
+        `storeRootFlag`
+        boolFlag json is bool, help = "Print the outcomes as JSON"
 
     # ---- Machines --------------------------------------------------------
     subcmd "home", help = "Manage your home profile":

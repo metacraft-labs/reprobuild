@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 35,
-    "nimTestBinaries": 2800,
+    "nimTestBinaries": 2802,
     "pureUnitConsolidationGroups": 82,
-    "pureUnitTests": 766,
+    "pureUnitTests": 765,
     "staticallyDetectedRuntimeCompilerFlowTests": 141,
-    "testEntries": 2846
+    "testEntries": 2848
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1620,10 +1620,10 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 23,
-      "integration": 1541,
+      "integration": 1543,
       "platform/destructive": 179,
-      "pure unit": 766,
-      "unclassified": 337
+      "pure unit": 765,
+      "unclassified": 338
     },
     "graphOwnedTestArtifacts": [
       {
@@ -1837,9 +1837,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2800,
+    "nimTestBinaryCount": 2802,
     "pythonTestFileCount": 46,
-    "testEntryCount": 2846
+    "testEntryCount": 2848
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -5441,7 +5441,7 @@
             "workRoot",
             "wrapped"
           ],
-          "line": 1374,
+          "line": 1378,
           "path": "tests/integration/t_every_launch_path_is_monitored.nim",
           "patterns": [
             "cc"
@@ -9268,14 +9268,13 @@
       "language": "nim",
       "localDependencyShape": [
         "repro_addon",
-        "repro_infra",
-        "repro_test_support"
+        "repro_infra"
       ],
       "owner": "libs/repro_addon",
       "requiresReproBinary": false,
       "source": "libs/repro_addon/tests/t_addon_floor_round12.nim",
       "sourceSuiteCount": 16,
-      "staticCaseCount": 41,
+      "staticCaseCount": 43,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -9293,7 +9292,25 @@
       "requiresReproBinary": false,
       "source": "libs/repro_addon/tests/t_addon_floor_round13.nim",
       "sourceSuiteCount": 3,
-      "staticCaseCount": 16,
+      "staticCaseCount": 15,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_addon_floor_round14",
+      "class": "unclassified",
+      "classificationReason": "imports `posix`, which grants out-of-process reach",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_addon",
+        "repro_infra"
+      ],
+      "owner": "libs/repro_addon",
+      "requiresReproBinary": false,
+      "source": "libs/repro_addon/tests/t_addon_floor_round14.nim",
+      "sourceSuiteCount": 4,
+      "staticCaseCount": 10,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -10095,8 +10112,8 @@
       "owner": "libs/repro_addon",
       "requiresReproBinary": false,
       "source": "libs/repro_addon/tests/t_addon_uninstall_keeps_pre_bootstrap_inputs.nim",
-      "sourceSuiteCount": 6,
-      "staticCaseCount": 22,
+      "sourceSuiteCount": 7,
+      "staticCaseCount": 23,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -40196,6 +40213,23 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_cs_m6_stores_and_daemons_command_lines",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_test_support"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_cs_m6_stores_and_daemons_command_lines.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 3,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_ct_test_surface_case_addressability",
       "class": "integration",
       "classificationReason": "e2e/integration path or requires the repro binary",
@@ -55214,7 +55248,7 @@
       "requiresReproBinary": false,
       "source": "tests/unit/t_cs_m6_spec_pages_match_declarations.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 6,
+      "staticCaseCount": 7,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -57510,8 +57544,8 @@
     },
     {
       "binary": "build/test-bin/t_m9r77_cas_cli",
-      "class": "pure unit",
-      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
       "defines": [],
       "language": "nim",
       "localDependencyShape": [
@@ -57520,7 +57554,7 @@
         "repro_core"
       ],
       "owner": "tests/unit",
-      "requiresReproBinary": false,
+      "requiresReproBinary": true,
       "source": "tests/unit/t_m9r77_cas_cli.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 12,

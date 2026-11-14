@@ -145,10 +145,18 @@ template off5(h: FloorHalf): bool =
   Round5Off and h == fhParse
 
 const
-  FloorVersion* = "4"
+  FloorVersion* = "5"
     ## The floor version this module renders (see the header). A stored
     ## generation records the version it was rendered with; 1 and 2 are
-    ## the frozen ``service_floor_v1`` / ``service_floor_v2``.
+    ## the frozen ``service_floor_v1`` / ``service_floor_v2``, 3 is
+    ## ``service_floor_v3``. Version 4 is this module's floor lines without
+    ## the boot ordering version 5 adds to ``[Unit]``
+    ## (``FloorBootOrdering``; §13 decision 143).
+  FloorBootOrdering* = "After=repro-addon-reassert.service"
+    ## §13 decision 143: every floored unit (from floor version 5) starts
+    ## only after the add-on's boot re-assertion, which replays a pending
+    ## revert -- putting its start holds back -- before any floored unit
+    ## can start (systemd.unit(5), After=).
   ServiceFloorHardening* = "serviceFloor"
     ## The one value of the ``hardening`` field.
   WholeFloorException* = "serviceFloor"
@@ -1381,11 +1389,32 @@ proc floorNoExecMounts*(directives: openArray[tuple[key, value: string]]):
         let p = "-" & root & "/" & name
         if p notin result: result.add(p)
 
+proc literalPrefix*(path: string): string =
+  ## ``path`` up to the component holding its first specifier (``%i``,
+  ## ``%n``, ...; systemd.unit(5), "Specifiers"): ``/run/a9q/%i`` and
+  ## ``/run/a9q/x%i/y`` are ``/run/a9q``, so a template's place covers
+  ## every instance's (§13 decision 145). ``%%`` is a literal ``%`` and is
+  ## not a specifier. A path with no specifier is returned as it is.
+  when FloorMutation == "writable-specifier-resolved":
+    return path
+  var i = 0
+  while i < path.len:
+    if path[i] == '%':
+      if i + 1 < path.len and path[i + 1] == '%':
+        i += 2
+        continue
+      let slash = path.rfind('/', last = i)
+      return (if slash <= 0: "/" else: path[0 ..< slash])
+    inc i
+  path
+
 proc floorWritablePlaces*(directives: openArray[tuple[key, value: string]]):
     seq[string] =
   ## Every place the unit's ``[Service]`` lines make writable for it, as
   ## normalised paths: ``ReadWritePaths=``, each writable bind's
-  ## destination, each tmpfs, each ``*Directory=`` under its root.
+  ## destination, each tmpfs, each ``*Directory=`` under its root. A place
+  ## spelled with a specifier counts by its literal prefix
+  ## (``literalPrefix``; §13 decision 145).
   const roots = [("StateDirectory", "/var/lib"), ("RuntimeDirectory", "/run"),
                  ("CacheDirectory", "/var/cache"), ("LogsDirectory", "/var/log"),
                  ("ConfigurationDirectory", "/etc")]
@@ -1394,22 +1423,22 @@ proc floorWritablePlaces*(directives: openArray[tuple[key, value: string]]):
     of "ReadWritePaths":
       for t in v.splitWhitespace():
         let q = t.strip(leading = true, trailing = false, chars = {'-', '+'})
-        if q.startsWith("/"): result.add(normalisedPath(q))
+        if q.startsWith("/"): result.add(literalPrefix(normalisedPath(q)))
     of "BindPaths":
       for t in v.splitWhitespace():
         let parts = t.strip(leading = true, trailing = false,
                             chars = {'-', '+'}).split(':')
         let d = if parts.len >= 2: parts[1] else: parts[0]
-        if d.startsWith("/"): result.add(normalisedPath(d))
+        if d.startsWith("/"): result.add(literalPrefix(normalisedPath(d)))
     of "TemporaryFileSystem":
       for t in v.splitWhitespace():
         let d = t.split(':')[0]
-        if d.startsWith("/"): result.add(normalisedPath(d))
+        if d.startsWith("/"): result.add(literalPrefix(normalisedPath(d)))
     else:
       for (dk, root) in roots:
         if k == dk:
           for t in v.splitWhitespace():
-            result.add(normalisedPath(root & "/" & t.split(':')[0]))
+            result.add(literalPrefix(normalisedPath(root & "/" & t.split(':')[0])))
 
 type SocketOptionRule* = enum
   ## How the floor judges one ``[Socket]`` option of a unit that activates
@@ -1500,6 +1529,15 @@ const
     "TriggerLimitBurst", "PollLimitIntervalSec", "PollLimitBurst",
     "SocketProtocol", "FlushPending", "Writable"]
     ## Round 5's list, kept for the falsifying build ``socket-options-by-list``.
+
+proc withBootOrdering*(content: string): string =
+  ## ``content`` with ``FloorBootOrdering`` as the first line of its
+  ## ``[Unit]`` section (a ``[Unit]`` section is added at the top when it
+  ## has none).
+  let at = content.find("[Unit]\n")
+  if at < 0: return "[Unit]\n" & FloorBootOrdering & "\n\n" & content
+  let b = at + "[Unit]\n".len
+  content[0 ..< b] & FloorBootOrdering & "\n" & content[b .. ^1]
 
 proc canonicalPlace*(path: string; resolveLinks = false): string =
   ## ``path`` as the kernel resolves it, for comparing a listener with the

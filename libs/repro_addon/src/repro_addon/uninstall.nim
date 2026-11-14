@@ -22,7 +22,8 @@
 ##    entry, then write the discard's completion (§13 decision 81), then
 ##    the secrets ramfs, ``/run/repro``, ``/etc/repro`` but the Evidence
 ##    sink's configuration and CA (decision 56), the keys, those two files
-##    and ``/etc/repro``, and last the state, ``/var/lib/repro``. Any failure
+##    and ``/etc/repro``, and last the state, ``/var/lib/repro``, with its
+##    ledger copy last of all (§13 decision 146). Any failure
 ##    on the way keeps the state, with its ledger copy and the attestation
 ##    key, for a second uninstall to finish (A11 code review rounds 11 and
 ##    12).
@@ -933,6 +934,44 @@ proc removeHostRoot*(r: var UninstallResult; root: string;
   except OSError as ex:
     r.errors.add(root & ": " & ex.msg)
 
+proc removeAllBut(dir, keep: string) =
+  ## Removes everything below ``dir`` except ``keep`` and the directories
+  ## on its way. Raises ``OSError`` at the first entry it cannot remove.
+  for kind, p in walkDir(dir):
+    if p == keep: continue
+    if keep.startsWith(p & "/") and kind == pcDir:
+      removeAllBut(p, keep)
+    elif kind == pcDir:
+      removeDir(p)
+    else:
+      removeFile(p)
+
+proc removeStateRoot*(r: var UninstallResult; root, ledgerCopy: string;
+                      evidence: seq[string] = @[];
+                      syncer: DiscardSyncer = syncRemovedObjects) =
+  ## Removes the add-on's state, ``/var/lib/repro``, with its ledger copy
+  ## last (§13 decision 146): everything else first, checked gone and
+  ## synced, then the ledger copy, then the empty directories. A removal
+  ## that fails part-way leaves the ledger copy, so a re-run can read it
+  ## and finish; the root and its evidence entries are reported removed
+  ## only once the root is gone.
+  if not dirExists(root): return
+  when mutated("ledger-copy-removed-with-the-rest"):
+    removeHostRoot(r, root, evidence)    # FALSIFIER: round 12's one removeDir
+    return
+  try:
+    if ledgerCopy.startsWith(root & "/") and fileExists(ledgerCopy):
+      removeAllBut(root, ledgerCopy)
+      syncer(@[root & "/.state-removed"])   # the unlinks above, made durable
+      removeFile(ledgerCopy)
+    removeDir(root)
+    r.removed.add(root)
+    for e in evidence: r.removed.add(e & " (store evidence)")
+  except OSError as ex:
+    r.errors.add(root & ": " & ex.msg & (if fileExists(ledgerCopy):
+      "; the ledger copy " & ledgerCopy & " is kept, so uninstall, run " &
+      "again once the cause is cleared, finishes the removal" else: ""))
+
 proc removeStateEvidence*(r: var UninstallResult; entries: seq[string];
                           remover: proc (d: string) = removeDirTree): bool =
   ## Removes each store-evidence entry under the state (A11 code review
@@ -1308,6 +1347,7 @@ proc runAddonUninstall*(opts: UninstallOptions): UninstallResult =
   # removed unless the operator passed --discard-store-evidence (above);
   # they were removed, each checked gone, above. One that appeared since
   # is reported with the root, once the root is gone.
-  removeHostRoot(result, "/var/lib/repro",
-                 evidenceEntries(custodySite(stateDir)))
+  # The state goes last, and within it the ledger copy (§13 decision 146).
+  removeStateRoot(result, "/var/lib/repro", ledgerCopyPath(stateDir),
+                  evidenceEntries(custodySite(stateDir)))
   restorePreBootstrapInputs(captured, opts.keepStore, result)

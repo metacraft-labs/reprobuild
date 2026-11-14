@@ -44,11 +44,12 @@ const
   Remaining = [
     # (file, hand-written argv comparisons against flag literals it holds).
     # `apps/repro-client/repro_client.nim` left this list in the first group:
-    # its flag tables are generated from the description.
-    ("libs/repro_cli_support/src/repro_cli_support.nim", 1109),
+    # its flag tables are generated from the description. The third group
+    # emptied `bundle_cli.nim`, `selfhost.nim`, `store_bundle_cli.nim` and
+    # `store_copy_cli.nim`.
+    ("libs/repro_cli_support/src/repro_cli_support.nim", 1086),
     ("libs/repro_cli_support/src/repro_cli_support/anywhere.nim", 23),
     ("libs/repro_cli_support/src/repro_cli_support/attest.nim", 96),
-    ("libs/repro_cli_support/src/repro_cli_support/bundle_cli.nim", 2),
     ("libs/repro_cli_support/src/repro_cli_support/cargo_gc.nim", 10),
     ("libs/repro_cli_support/src/repro_cli_support/deploy_agent.nim", 32),
     ("libs/repro_cli_support/src/repro_cli_support/dev_env_fast_path.nim", 13),
@@ -59,9 +60,6 @@ const
     ("libs/repro_cli_support/src/repro_cli_support/infra_image.nim", 1),
     ("libs/repro_cli_support/src/repro_cli_support/infra_install_root.nim", 20),
     ("libs/repro_cli_support/src/repro_cli_support/project_pins.nim", 4),
-    ("libs/repro_cli_support/src/repro_cli_support/selfhost.nim", 7),
-    ("libs/repro_cli_support/src/repro_cli_support/store_bundle_cli.nim", 13),
-    ("libs/repro_cli_support/src/repro_cli_support/store_copy_cli.nim", 6),
     ("libs/repro_cli_support/src/repro_cli_support/workspace_restore.nim", 8),
   ]
   MigratedProcs = [
@@ -76,7 +74,16 @@ const
     # `graph`, `why`, and the format choice `graph` and `why` share.
     "runConfigsCommand", "runReproTasksCommand", "runDepsRefreshCommand",
     "runStatsCommand", "runGraphCommand", "runWhyCommand",
-    "inspectionFormat"]
+    "inspectionFormat",
+    # The third group: `daemon`, `store`, `cas`, `cache`, `bundle`, `reap`,
+    # `launch-plan`, `cert-signer`, `self` (their submodules,
+    # `store_bundle_cli`, `store_copy_cli`, `bundle_cli` and `selfhost`,
+    # left `Remaining` with nothing to parse).
+    "runUserDaemonCliCommand", "userDaemonConfigOf", "runStoreCommand",
+    "runStoreDaemonCommand", "runStoreServeCommand", "runCasCommand",
+    "parseCasDigest", "runCacheCommand",
+    "runBundleCliCommand", "namespaceHelpText", "runReapCommand",
+    "runLaunchPlanCommand", "runCertSignerCommand", "runSelfCommand"]
 
 proc isFlagLiteralAt(line: string; quote: int): bool =
   ## Whether the string literal opening at `quote` spells a flag.

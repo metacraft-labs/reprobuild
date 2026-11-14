@@ -33,57 +33,22 @@ export PinRootOutcome, PinRootAction
 import repro_local_store
 import repro_cli_support/project_pins
 
-const SelfUsage = """usage: repro self <subcommand> [options]
-
-  install --from=DIR --version=V [--package=P] [--platform=P] [--store-root=PATH]
-  provision --version=V [--package=P] [--platform=P] [--store-root=PATH] [--from=DIR]
-  hold [--package=P] [--project=DIR] [--store-root=PATH]
-  which [--package=P] [--project=DIR] [--store-root=PATH] [--json]
-  list [--package=P] [--store-root=PATH] [--json]
-  prune-roots [--store-root=PATH] [--json]
-
-  --package is `reprobuild` (the default) or `nim`, the compiler that builds
-  the project's provider (M5 "pin the provider-compile toolchain")."""
-
 type
-  SelfArgs = object
-    sub: string
-    fromDir: string
-    version: string
-    platform: string
-    project: string
-    storeRoot: string
-    emitJson: bool
-    package: string
-
-proc parseSelfArgs(args: openArray[string]): (SelfArgs, string) =
-  var parsed = SelfArgs()
-  for raw in args:
-    if raw.startsWith("--from="):
-      parsed.fromDir = raw["--from=".len .. ^1]
-    elif raw.startsWith("--version="):
-      parsed.version = raw["--version=".len .. ^1]
-    elif raw.startsWith("--platform="):
-      parsed.platform = raw["--platform=".len .. ^1]
-    elif raw.startsWith("--project="):
-      parsed.project = raw["--project=".len .. ^1]
-    elif raw.startsWith("--package="):
-      parsed.package = raw["--package=".len .. ^1]
-    elif raw.startsWith("--store-root="):
-      parsed.storeRoot = raw["--store-root=".len .. ^1]
-    elif raw == "--json":
-      parsed.emitJson = true
-    elif raw.startsWith("--"):
-      return (parsed, "unknown flag: " & raw)
-    elif parsed.sub.len == 0:
-      parsed.sub = raw
-    else:
-      return (parsed, "unexpected argument: " & raw)
-  (parsed, "")
+  SelfArgs* = object
+    ## What a ``repro self`` subcommand was given. The command line is
+    ## parsed from repro's description (``repro_cli_support/cli_description``,
+    ## ``self``); a subcommand reads only the fields its flags fill.
+    fromDir*: string     ## ``--from``
+    version*: string     ## ``--version``
+    platform*: string    ## ``--platform``
+    project*: string     ## ``--project``
+    storeRoot*: string   ## ``--store-root``
+    emitJson*: bool      ## ``--json``
+    package*: string     ## ``--package``
 
 proc pkgOf(a: SelfArgs): PinnedPackage =
-  ## The package a verb acts on; raises (reported by `runSelfCommand`) for a
-  ## name nothing here can lay out.
+  ## The package a verb acts on; raises (reported by the `repro self`
+  ## dispatcher) for a name nothing here can lay out.
   if a.package.len == 0: reprobuildPin() else: pinnedPackageNamed(a.package)
 
 proc effectivePlatform(explicit: string): string =
@@ -105,7 +70,7 @@ proc pinStateWord(state: SelfPinState): string =
   of spsTampered: "tampered"
   of spsPinned: "pinned"
 
-proc runSelfInstall(a: SelfArgs): int =
+proc runSelfInstall*(a: SelfArgs): int =
   if a.fromDir.len == 0 or a.version.len == 0:
     stderr.writeLine("repro self install: --from=DIR and --version=V are " &
       "both required")
@@ -133,7 +98,7 @@ proc runSelfInstall(a: SelfArgs): int =
     echo "executable: " & res.executablePath
   0
 
-proc runSelfProvision(a: SelfArgs): int =
+proc runSelfProvision*(a: SelfArgs): int =
   ## Put the named version in the store.
   ##
   ## THE M3 BOUNDARY IS HERE AND IS NAMED RATHER THAN PAPERED OVER. The
@@ -198,7 +163,7 @@ proc runSelfProvision(a: SelfArgs): int =
     "substituted tree with the command above.")
   1
 
-proc runSelfHold(a: SelfArgs): int =
+proc runSelfHold*(a: SelfArgs): int =
   let root = resolveStoreRoot(a.storeRoot)
   let project = effectiveProject(a.project)
   let pkg = pkgOf(a)
@@ -220,7 +185,7 @@ proc runSelfHold(a: SelfArgs): int =
       prefixIdHex(prefixId) & " (" & pkg.name & " " & pin.version & ")"
   0
 
-proc runSelfWhich(a: SelfArgs): int =
+proc runSelfWhich*(a: SelfArgs): int =
   ## What the launcher would exec here, and why. Exit 0 when a pin resolves
   ## to a resident image, 1 otherwise — so a script can gate on it.
   let root = resolveStoreRoot(a.storeRoot)
@@ -266,7 +231,7 @@ proc runSelfWhich(a: SelfArgs): int =
       echo "detail: " & pin.detail
   if pin.state == spsPinned and resident: 0 else: 1
 
-proc runSelfList(a: SelfArgs): int =
+proc runSelfList*(a: SelfArgs): int =
   let root = resolveStoreRoot(a.storeRoot)
   let pkg = pkgOf(a)
   let rows = selfinstall.listPinnedPrefixes(pkg, root)
@@ -286,7 +251,7 @@ proc runSelfList(a: SelfArgs): int =
         row.realizedPath
   0
 
-proc runSelfPruneRoots(a: SelfArgs): int =
+proc runSelfPruneRoots*(a: SelfArgs): int =
   let root = resolveStoreRoot(a.storeRoot)
   let outcomes = selfinstall.prunePinRoots(root)
   if a.emitJson:
@@ -309,31 +274,3 @@ proc prunePinRootsForGc*(storeRoot: string): seq[PinRootOutcome] =
   ## separately from `prunePinRoots` so the gc arm reads as one call and so
   ## the CLI keeps exactly one import of the install half.
   selfinstall.prunePinRoots(storeRoot)
-
-proc runSelfCommand*(args: seq[string]): int =
-  ## ``repro self <subcommand>``.
-  if args.len == 0:
-    echo SelfUsage
-    return 2
-  let (parsed, err) = parseSelfArgs(args)
-  if err.len > 0:
-    stderr.writeLine("repro self: " & err)
-    return 2
-  if parsed.sub.len == 0:
-    stderr.writeLine("repro self: missing subcommand")
-    return 2
-  try:
-    case parsed.sub
-    of "install": return runSelfInstall(parsed)
-    of "provision": return runSelfProvision(parsed)
-    of "hold": return runSelfHold(parsed)
-    of "which": return runSelfWhich(parsed)
-    of "list": return runSelfList(parsed)
-    of "prune-roots": return runSelfPruneRoots(parsed)
-    else:
-      stderr.writeLine("repro self: unknown subcommand: " & parsed.sub)
-      stderr.writeLine(SelfUsage)
-      return 2
-  except CatchableError as e:
-    stderr.writeLine("repro self " & parsed.sub & ": error: " & e.msg)
-    return 1

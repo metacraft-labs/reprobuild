@@ -1,4 +1,5 @@
-## `repro reap` reaches `runReapCli` instead of falling through to usage.
+## `repro reap` reaches the reaper (`runReap`, the entry `runReapCli` wraps)
+## instead of falling through to usage.
 ##
 ## Ephemeral-State-Leases.md §4.3 names `repro reap --once` as fallback (b) —
 ## the reason the lease model does not require a daemon for correctness — and

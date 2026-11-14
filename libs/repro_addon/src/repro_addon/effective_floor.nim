@@ -961,19 +961,26 @@ const RestartWindowNs* = 100_000_000'i64
   ## owner, whose answer to that question is still open: this is an
   ## implementation amendment, not an owner decision.
 
-const MainStartToleranceNs* = 250_000_000'i64
-  ## §13 decision 141: how much later than the start of the main process
-  ## (``ExecMainStartTimestamp``) a directory systemd made for that run may
-  ## be born. The manager stamps that start when it forks the process, and
-  ## the forked child makes the directories before it executes the command:
-  ## systemd 257 does that in its separate executor binary
-  ## (``systemd-executor``), which it executes first. Measured over 150
-  ## transient units per load (idle; 2x and 8x nproc busy loops) on a host
-  ## at load average ~40, birth minus ``ExecMainStartTimestamp``: at most
-  ## 27.3 ms on debian-12 (systemd 252), and 6.1 to 60.4 ms -- always after
-  ## the stamp -- on debian-13 (systemd 257). 250 ms is about four times the
-  ## worst. The residual: a tree a root process makes within 250 ms after
-  ## the main process starts is taken as systemd's.
+const RunStartToleranceNs* = (when hostCPU == "amd64": 1_000_000_000'i64
+                              else: 8_000_000_000'i64)
+  ## §13 decisions 141, 144 and 146: how much later than the start of a
+  ## unit's run (``InactiveExitTimestamp``) a directory systemd made for it
+  ## may be born. systemd makes the directories as it spawns the run's first
+  ## process (systemd 257 first executes its ``systemd-executor``), after it
+  ## stamps that start. Measured, birth minus ``InactiveExitTimestamp``, over
+  ## transient units with and without an ``ExecStartPre=``, idle and under 2x
+  ## and 8x ``nproc`` busy loops, on a host at load average 40 to 60 (the A9
+  ## round-14 record):
+  ##
+  ## * amd64 (KVM): at most 9.2 ms on debian-12 (systemd 252), 215.9 ms on
+  ##   debian-13 (systemd 257) -- over round 13's 250 ms with no margin, so
+  ##   1 s (4.6 times the worst);
+  ## * arm64 (debian-13) and armhf (ubuntu-24.04), under TCG emulation: at
+  ##   most 3.54 s and 3.42 s, so 8 s (2.3 times the worst). Native hardware
+  ##   was not measured.
+  ##
+  ## The residual: a tree a root process makes at the path within this long
+  ## after a run of the unit begins is taken as systemd's.
 
 proc systemdRecreated*(path, unit: string; declared: openArray[string];
                        created: Table[string, CreatedDir]; dynamic: bool;
@@ -1041,17 +1048,26 @@ proc systemdRecreated*(path, unit: string; declared: openArray[string];
           return "the unit is not running and systemd reports no end of its last run"
         if v.btime > v.lastStop:
           return "the unit is not running, and the tree was born after its last run ended"
-    # §13 decision 141: an upper bound. systemd makes a unit's
-    # directories while it sets up the run, before or just after it forks
-    # the main process; a tree born later in the run (a root process three
-    # seconds into it) is not systemd's, whichever run made way for it.
-    when not mutated("recreated-no-upper-bound"):
+    # §13 decision 141, as decision 144 amends it: an upper bound, counted
+    # from the start of the run (``InactiveExitTimestamp``, read in the
+    # same ``systemctl show`` as the rest), not from its main process.
+    # systemd makes a unit's directories when it spawns the run's FIRST
+    # process -- its first ``ExecCondition=``/``ExecStartPre=`` command, or
+    # the first ``ExecStart=`` of a oneshot -- which may be seconds before
+    # the main process (A9 review round 14, finding 3). A tree born later
+    # than the tolerance after the run began is not systemd's.
+    when mutated("recreated-bound-from-main-start"):
+      # Falsifying build: round 13's bound, from the main process.
       if v.mainStart <= 0:
         return "systemd reports no start of the main process of the unit's last run"
-      if v.btime > v.mainStart + MainStartToleranceNs:
-        return "it was born more than " & $(MainStartToleranceNs div 1_000_000) &
-          " ms after the main process of the unit's last run started, so " &
-          "that run, not systemd setting it up, made it (§13 decision 141)"
+      if v.btime > v.mainStart + RunStartToleranceNs:
+        return "it was born more than " & $(RunStartToleranceNs div 1_000_000) &
+          " ms after the main process of the unit's last run started"
+    elif not mutated("recreated-no-upper-bound"):
+      if v.btime > v.invocationStart + RunStartToleranceNs:
+        return "it was born more than " & $(RunStartToleranceNs div 1_000_000) &
+          " ms after the unit's last run began, so that run, not systemd " &
+          "setting it up, made it (§13 decisions 141 and 144)"
   ""
 
 proc managerPathProblem*(path: string; uid: int; dynamic: bool): string =

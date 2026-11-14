@@ -949,7 +949,7 @@ proc renderedSystemUnitContent*(r: SystemResource): string =
       "' hardening '" & r.suHardening & "' is not known (the one value is " &
       "\"" & ServiceFloorHardening & "\")")
   case r.suFloorVersion
-  of "", FloorVersion:
+  of "", FloorVersion, "4":
     discard
   of "3":
     # 778e8207f2 to 221ac312b6: exactly their rendering (frozen v3).
@@ -1025,6 +1025,12 @@ proc renderedSystemUnitContent*(r: SystemResource): string =
       dropMdwe = InfraAddonMutation == "floor-without-mdwe",
       allowMemfd = InfraAddonMutation == "floor-allows-memfd")
     result = appendToServiceSection(result, lines)
+    # §13 decision 143 (floor version 5): ordered after the boot
+    # re-assertion. Version 4 renders the same floor lines without it,
+    # byte for byte what the engines of that version stored.
+    if r.suFloorVersion != "4" and not wholeWaiver and
+        InfraAddonMutation != "floored-not-after-reassert":
+      result = withBootOrdering(result)
   except EServiceFloor as e:
     raiseSystemProfileInvalid(e.msg)
 

@@ -85,8 +85,8 @@
 ## (falsifier ``state-removed-after-root-failure``). The last run finishes,
 ## and the first intent verifies as completed. The entries the runs report
 ## removed are all the entries. (``ship-ok-without-sink-configuration``
-## cannot bite here any more: the configuration is kept; its unit case
-## holds it.)
+## is held here again by deleting the configuration by hand before a
+## re-run, §13 decision 145.)
 ##
 ## Falsifying mutations: ``custody-skips-file-sources`` (steps 2 and 4: the
 ## altered bytes are installed into /etc), ``custody-skips-closures`` (step
@@ -443,6 +443,33 @@ proc body(g: Guest; repro: string; step: StepFn; record: JsonNode;
          g.exec("test -d " & aside2).exitCode == 0 and
          g.exec("test -f /etc/repro/evidence.conf").exitCode == 0,
        saidW)
+  # §13 decision 145 (A11 code review round 13): the path a host still
+  # reaches when the sink's configuration is gone with records queued --
+  # an operator who deleted it, or a state an older engine left. The
+  # configuration is deleted by hand; the plain flag is refused, the
+  # refusal names only the override, and nothing is removed (falsifier
+  # ship-ok-without-sink-configuration: the re-run reads the missing
+  # configuration as "nothing to wait for" and discards unrecorded).
+  let confGone = g.exec("cp -p /etc/repro/evidence.conf /root/evidence.conf.kept " &
+    "&& rm /etc/repro/evidence.conf")
+  let unG = g.exec(repro & " system addon uninstall --discard-store-evidence",
+                   timeoutSec = 1800)
+  let saidG = unG.stdout & unG.stderr
+  record["uninstallConfigurationGone"] = %saidG
+  step("with the sink's configuration deleted by hand and records queued, " &
+       "--discard-store-evidence is refused, the refusal names only the " &
+       "override, and nothing is removed (decision 145)",
+       confGone.exitCode == 0 and unG.exitCode != 0 and
+         "no later run can ship them" in saidG and
+         "run uninstall again once it has" notin saidG and
+         "nothing was removed" in saidG and
+         g.evidenceCount() == entries and
+         g.exec("test -d " & aside2).exitCode == 0 and
+         g.exec("test -f /var/lib/repro/system/addon-ledger").exitCode == 0,
+       saidG)
+  let confBack = g.exec("cp -p /root/evidence.conf.kept /etc/repro/evidence.conf")
+  step("the configuration is put back", confBack.exitCode == 0,
+       confBack.stdout & confBack.stderr)
   # Round 11, the second half: the store evidence's removal fails (an
   # immutable file in one entry). The run keeps the store (--keep-store),
   # so the final run below still finds the object left aside; the other

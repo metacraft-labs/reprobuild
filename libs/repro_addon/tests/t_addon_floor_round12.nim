@@ -64,7 +64,6 @@ import repro_addon/ledger
 import repro_addon/switch
 
 import ./spec_citations
-import repro_test_support/reasoned_skip
 
 const
   Prefix = "/repro/store/prefixes/svc/1.0"
@@ -643,9 +642,15 @@ suite "round 12: no citation of a §13 entry the spec does not record":
   let repoRoot = currentSourcePath().parentDir.parentDir.parentDir.parentDir
   let roots = ["libs/repro_addon/src", "libs/repro_addon/tests",
                "libs/repro_infra/src", "tests/e2e/addon"]
-  # The governing spec, beside this checkout in a workspace, or named.
-  let specPath = getEnv("REPRO_ADDON_SPEC",
-    repoRoot.parentDir / "reprobuild-pm" / "spec" / "ReproOS-Add-On-Mode.md")
+  # The governing spec (A9 review round 14): named by REPRO_ADDON_SPEC, or
+  # found up the tree the way the other spec-reading tests find it (the
+  # checkout's current name, then its former one). In CI there is none, so
+  # the decisions §13 records are also committed beside this test
+  # (``addon_spec_section13.txt``): the citations are judged against that
+  # list everywhere, deterministically, and wherever the spec is found the
+  # list must be one it records -- a spec behind the list fails loudly.
+  let snapshotPath = currentSourcePath().parentDir / "addon_spec_section13.txt"
+  let specPath = findAddonSpec(repoRoot)
   test "the reader finds wrapped and listed citations":
     # Each literal is split after "decision", so this file's own text cites
     # nothing and the scan below can read it too.
@@ -670,23 +675,39 @@ suite "round 12: no citation of a §13 entry the spec does not record":
     writeFile(probe, "# cites decision" & " 99999\n")
     defer: removeFile(probe)
     check probe notin trackedFiles(repoRoot, roots)
-  test "no floor source, unit test or VM gate cites a decision §13 does not record":
-    checkpoint "the spec read: " & specPath
-    if not fileExists(specPath):
-      skip("the add-on spec is not beside this checkout (" & specPath &
-           "); set REPRO_ADDON_SPEC to its path")
-    else:
+  test "the committed list of §13 decisions is one the spec records":
+    let snapshot = readDecisionList(readFile(snapshotPath))
+    check snapshot.len > 100
+    checkpoint "the spec read: " & (if specPath.len > 0: specPath else: "none found")
+    if specPath.len > 0:
       let recorded = recordedDecisions(readFile(specPath))
-      check recorded.len > 100
-      var scanned = 0
-      for f in trackedFiles(repoRoot, roots):
-        if not f.endsWith(".nim"): continue
-        inc scanned
-        for n in citedDecisions(readFile(f)):
-          if n notin recorded:
-            checkpoint f.relativePath(repoRoot) & " cites decision " & $n
-            check n in recorded
-      check scanned > 10
+      for n in snapshot:
+        if n notin recorded:
+          checkpoint "the list names decision " & $n & ", which " & specPath &
+            " does not record: that spec is stale, or the list is wrong"
+          check n in recorded
+  test "no floor source, unit test or VM gate cites a decision §13 does not record":
+    let recorded = readDecisionList(readFile(snapshotPath))
+    var scanned = 0
+    for f in trackedFiles(repoRoot, roots):
+      if not f.endsWith(".nim"): continue
+      inc scanned
+      for n in citedDecisions(readFile(f)):
+        if n notin recorded:
+          checkpoint f.relativePath(repoRoot) & " cites decision " & $n &
+            ", which " & snapshotPath.extractFilename & " does not list"
+          check n in recorded
+    check scanned > 10
+  test "the list reader and the spec finder":
+    check readDecisionList("# comment\n1 2\n\n133 139\n") == @[1, 2, 133, 139]
+    let d = createTempDir("a9r14-", "")
+    defer: removeDir(d)
+    createDir(d / "reprobuild-pm" / "spec")
+    writeFile(d / "reprobuild-pm" / "spec" / "ReproOS-Add-On-Mode.md", "x")
+    createDir(d / "reprobuild")
+    check findAddonSpec(d / "reprobuild", env = "") ==
+      d / "reprobuild-pm" / "spec" / "ReproOS-Add-On-Mode.md"
+    check findAddonSpec(d / "reprobuild", env = "/named/spec.md") == "/named/spec.md"
   test "a refusal names the §10.1 rule, never a §13 entry it does not have":
     let w = floorWritablePlaces(serviceDirectives("[Service]\nRuntimeDirectory=a\n"))
     let why = listenerRefusal("a.socket", "/run/a/sub/control", "a.service", w)

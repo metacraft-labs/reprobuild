@@ -1,8 +1,9 @@
 ## `repro bundle create | publish | restore` — the command-line face of
-## `repro_bundle` (reprobuild docs/workspace-bundles.md). Parsing, root
-## resolution and reports only; the behaviour is in the library.
+## `repro_bundle` (reprobuild docs/workspace-bundles.md). Root resolution and
+## reports only: the command line is parsed from repro's description
+## (`repro_cli_support/cli_description`), and the behaviour is in the library.
 
-import std/[json, os, strutils]
+import std/[json, options, os, strutils]
 import repro_local_store/store
 
 when not defined(windows):
@@ -16,23 +17,40 @@ type
     allowProject*: proc (projectRoot: string): int
     workspaceRootFor*: proc (startPath: string): string
 
-const BundleUsage* = """usage:
-  repro bundle create <selector> --out=DIR [--workspace-root=DIR] [--name=N]
-      [--all-shells] [--primary=MEMBER:SHELL] [--no-nix] [--no-sources]
-      [--no-native] [--native-root=DIR]... [--freeze-dev-env]
-      [--zstd=STORE-PATH] [--repro=STORE-PATH] [--level=N] [--part-size=SIZE]
-      [--check-stable] [--json]
-  repro bundle publish <out>/<bundle> --to=s3://BUCKET[/PREFIX]
-      [--endpoint=URL] [--region=R] [--parallel=N]
-  repro bundle publish <out>/<bundle> --to=github:OWNER/REPO
-  repro bundle restore <url-or-dir | github:OWNER/REPO[@REF]/BUNDLE>
-      [--workspace=DIR] [--activate] [--activation-file=PATH]
-      [--bashrc-file=PATH] [--allow-dev-env] [--parallel=N]
-      [--staging=DIR] [--nix-root=DIR] [--after-bootstrap] [--json]
-common: [--store-root=PATH] [--action-cache-root=PATH]
-Publishing to S3 reads AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY from the
-environment; publishing to GitHub uses your own git credentials.
-See docs/workspace-bundles.md."""
+  BundleArgs* = object
+    ## What `repro bundle create|publish|restore` was given; each subcommand
+    ## reads the fields its flags fill.
+    positional*: string        ## the selector, bundle directory or source
+    outDir*: string            ## `create --out`
+    workspaceRoot*: string     ## `create --workspace-root`
+    name*: string              ## `create --name`
+    primary*: string           ## `create --primary`
+    zstd*: string              ## `create --zstd`
+    repro*: string             ## `create --repro`
+    level*: Option[int]        ## `create --level`
+    partSize*: string          ## `create --part-size`
+    nativeRoots*: seq[string]  ## `create --native-root`, repeated
+    allShells*: bool           ## `create --all-shells`
+    noNix*: bool               ## `create --no-nix`
+    noSources*: bool           ## `create --no-sources`
+    noNative*: bool            ## `create --no-native`
+    freezeDevEnv*: bool        ## `create --freeze-dev-env`
+    checkStable*: bool         ## `create --check-stable`
+    to*: string                ## `publish --to`
+    endpoint*: string          ## `publish --endpoint`
+    region*: string            ## `publish --region`
+    parallel*: Option[int]     ## `publish|restore --parallel`
+    workspace*: string         ## `restore --workspace`
+    activationFile*: string    ## `restore --activation-file`
+    bashrcFile*: string        ## `restore --bashrc-file`
+    staging*: string           ## `restore --staging`
+    nixRoot*: string           ## `restore --nix-root`
+    activate*: bool            ## `restore --activate`
+    allowDevEnv*: bool         ## `restore --allow-dev-env`
+    afterBootstrap*: bool      ## `restore --after-bootstrap`
+    storeRoot*: string         ## `--store-root`
+    actionCacheRoot*: string   ## `--action-cache-root`
+    emitJson*: bool            ## `--json`
 
 proc mib(n: int64): string = $(n shr 20) & " MiB"
 
@@ -53,94 +71,46 @@ proc parseSizeArg(text: string; value: var int64): bool =
     false
 
 when defined(windows):
-  proc runBundleCommand*(args: seq[string]; hooks: BundleCliHooks): int =
+  proc runBundleCommand*(sub: string; a: BundleArgs;
+                         hooks: BundleCliHooks): int =
     stderr.writeLine("repro bundle: workspace bundles are not supported on " &
       "Windows")
     1
 else:
-  proc runBundleCommand*(args: seq[string]; hooks: BundleCliHooks): int =
-    if args.len == 0 or args[0] in ["-h", "--help", "help"]:
-      echo BundleUsage
-      return (if args.len == 0: 2 else: 0)
-    let sub = args[0]
-    var positionals, nativeRoots: seq[string]
-    var flags: seq[(string, string)]
-    var switches: seq[string]
-    for raw in args[1 .. ^1]:
-      if raw.startsWith("--"):
-        let eq = raw.find('=')
-        if eq > 0:
-          let key = raw[2 ..< eq]
-          let value = raw[eq + 1 .. ^1]
-          if key == "native-root": nativeRoots.add(value)
-          else: flags.add((key, value))
-        else:
-          switches.add(raw[2 .. ^1])
-      else:
-        positionals.add(raw)
-    proc flag(name: string; default = ""): string =
-      result = default
-      for (k, v) in flags:
-        if k == name: result = v
-    proc has(name: string): bool = name in switches
-    let known = case sub
-      of "create": @["out", "workspace-root", "name", "primary", "zstd",
-        "repro", "level", "part-size", "store-root", "action-cache-root",
-        "all-shells", "no-nix", "no-sources", "no-native", "freeze-dev-env",
-        "check-stable", "json"]
-      of "publish": @["to", "endpoint", "region", "parallel"]
-      of "restore": @["workspace", "activation-file", "bashrc-file",
-        "parallel", "staging",
-        "nix-root", "store-root", "action-cache-root", "activate",
-        "allow-dev-env", "after-bootstrap", "json"]
-      else: @[]
-    if known.len == 0:
-      stderr.writeLine("repro bundle: unknown subcommand: " & sub & "\n" &
-        BundleUsage)
-      return 2
-    for (k, _) in flags:
-      if k notin known:
-        stderr.writeLine("repro bundle " & sub & ": unknown flag: --" & k)
-        return 2
-    for k in switches:
-      if k notin known:
-        stderr.writeLine("repro bundle " & sub & ": unknown flag: --" & k)
-        return 2
-    let emitJson = has("json")
+  proc runBundleCommand*(sub: string; a: BundleArgs;
+                         hooks: BundleCliHooks): int =
+    ## `repro bundle create|publish|restore` (`sub`).
+    let emitJson = a.emitJson
     try:
       case sub
       of "create":
-        if positionals.len != 1:
-          stderr.writeLine("repro bundle create: exactly one selector is " &
-            "required\n" & BundleUsage)
-          return 2
-        let outDir = flag("out")
+        let outDir = a.outDir
         if outDir.len == 0:
           stderr.writeLine("repro bundle create: --out=DIR is required")
           return 2
-        var ws = flag("workspace-root")
+        var ws = a.workspaceRoot
         if ws.len == 0: ws = hooks.workspaceRootFor(getCurrentDir())
         if ws.len == 0:
           stderr.writeLine("repro bundle create: not inside a workspace; " &
             "pass --workspace-root=DIR")
           return 2
-        var opts = CreateOptions(workspaceRoot: ws, selector: positionals[0],
-          outDir: outDir, name: flag("name"), nix: not has("no-nix"),
-          sources: not has("no-sources"), native: not has("no-native"))
-        opts.nixOptions = NixHalfOptions(allShells: has("all-shells"),
-          primary: flag("primary"), zstd: flag("zstd"), repro: flag("repro"),
-          checkStable: has("check-stable"))
-        if flag("level").len > 0: opts.level = parseInt(flag("level"))
-        if flag("part-size").len > 0 and
-            not parseSizeArg(flag("part-size"), opts.partSize):
+        var opts = CreateOptions(workspaceRoot: ws, selector: a.positional,
+          outDir: outDir, name: a.name, nix: not a.noNix,
+          sources: not a.noSources, native: not a.noNative)
+        opts.nixOptions = NixHalfOptions(allShells: a.allShells,
+          primary: a.primary, zstd: a.zstd, repro: a.repro,
+          checkStable: a.checkStable)
+        if a.level.isSome: opts.level = a.level.get
+        if a.partSize.len > 0 and
+            not parseSizeArg(a.partSize, opts.partSize):
           stderr.writeLine("repro bundle create: bad --part-size")
           return 2
-        let storeRoot = resolveStoreRoot(flag("store-root"))
+        let storeRoot = resolveStoreRoot(a.storeRoot)
         opts.nativeRoots = BundleRoots(storeRoot: storeRoot,
           actionCacheRoot: hooks.resolveActionCacheRoot(
-            flag("action-cache-root")), workspaceRoots: nativeRoots)
-        if opts.native and has("freeze-dev-env"):
-          for m in resolveMembers(ws, positionals[0]):
+            a.actionCacheRoot), workspaceRoots: a.nativeRoots)
+        if opts.native and a.freezeDevEnv:
+          for m in resolveMembers(ws, a.positional):
             if m.checkedOut and (fileExists(m.absPath / "repro.nim") or
                 fileExists(m.absPath / "reprobuild.nim")):
               try:
@@ -162,34 +132,30 @@ else:
           echo "restore: " & r.restoreScript
         return 0
       of "publish":
-        if positionals.len != 1 or flag("to").len == 0:
+        if a.to.len == 0:
           stderr.writeLine("repro bundle publish: a bundle directory and " &
             "--to=s3://BUCKET[/PREFIX] are required")
           return 2
-        var po = PublishOptions(bundleDir: positionals[0], target: flag("to"),
-          endpoint: flag("endpoint"), region: flag("region"))
-        if flag("parallel").len > 0: po.parallel = parseInt(flag("parallel"))
+        var po = PublishOptions(bundleDir: a.positional, target: a.to,
+          endpoint: a.endpoint, region: a.region)
+        if a.parallel.isSome: po.parallel = a.parallel.get
         let r = publishBundle(po)
         for u in r.uploaded: echo "uploaded  " & u
         for s in r.skipped: echo "unchanged " & s
         echo "published " & r.baseUrl
         return 0
       of "restore":
-        if positionals.len != 1:
-          stderr.writeLine("repro bundle restore: exactly one bundle " &
-            "directory or URL is required")
-          return 2
-        let storeRoot = resolveStoreRoot(flag("store-root"))
-        let acRoot = hooks.resolveActionCacheRoot(flag("action-cache-root"))
-        let allow = has("allow-dev-env")
-        var ro = RestoreOptions(source: positionals[0],
-          workspaceDir: flag("workspace"), nixRoot: flag("nix-root"),
-          staging: flag("staging"), activate: has("activate"),
-          activationFile: flag("activation-file"),
-          bashrcFile: flag("bashrc-file"),
-          afterBootstrap: has("after-bootstrap"), storeRoot: storeRoot,
+        let storeRoot = resolveStoreRoot(a.storeRoot)
+        let acRoot = hooks.resolveActionCacheRoot(a.actionCacheRoot)
+        let allow = a.allowDevEnv
+        var ro = RestoreOptions(source: a.positional,
+          workspaceDir: a.workspace, nixRoot: a.nixRoot,
+          staging: a.staging, activate: a.activate,
+          activationFile: a.activationFile,
+          bashrcFile: a.bashrcFile,
+          afterBootstrap: a.afterBootstrap, storeRoot: storeRoot,
           actionCacheRoot: acRoot)
-        if flag("parallel").len > 0: ro.parallel = parseInt(flag("parallel"))
+        if a.parallel.isSome: ro.parallel = a.parallel.get
         ro.importNative = proc (dir: string): ImportReport =
           result = importBundle(ImportOptions(bundleDir: dir,
             manifestName: "native-store.json"),
