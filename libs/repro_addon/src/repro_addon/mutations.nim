@@ -590,6 +590,12 @@
 ## ``template-live-by-name``                the live check reads a template
 ##                                           by its own name, which systemd
 ##                                           refuses (decision 135)
+## ``live-check-call-site-reverted``       the add-on switch's call site
+##                                           decides step 6's reload and
+##                                           judgement from a unit-file
+##                                           change alone, not through
+##                                           ``liveCheckAtStep6`` (red on
+##                                           the adopt gate's case 2e)
 ## ``start-holds-after-driver-writes``     the add-on switch writes its
 ##                                           start holds at step 6, after
 ##                                           the drivers' reloads loaded
@@ -1538,6 +1544,9 @@ const
                           "template-live-by-name",
                           # §13 decision 136.
                           "start-holds-after-driver-writes",
+                          # The every-switch check's call site (owner
+                          # decision on the round-8 wiring issue).
+                          "live-check-call-site-reverted",
                           "reissue-skips-targets",
                           "reissue-skips-sockets",
                           "reissue-skips-unit-state",

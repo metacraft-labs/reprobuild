@@ -5797,8 +5797,20 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
   # included. So wherever the check has units to judge, the switch holds
   # them, reloads, and judges them before step 7, whatever else it changes
   # (A13 review round 7, finding 1; ``liveCheckAtStep6``).
-  let step6 = liveCheckAtStep6(anyUnitChange, replaying, opts.recordOnly,
-                               preWriteLiveUnits)
+  let step6 =
+    when mutated("live-check-call-site-reverted"):
+      # FALSIFYING MUTATION: the call site goes back to the round-6 test,
+      # deciding the hold, reload and judgement itself from whether the
+      # switch writes a unit file (or replays) instead of asking
+      # ``liveCheckAtStep6``; a credentials-only restart then runs on what
+      # systemd last loaded.
+      (reload: anyUnitChange or replaying,
+       judged: (if (anyUnitChange or replaying) and not opts.recordOnly:
+                  preWriteLiveUnits
+                else: newSeq[string]()))
+    else:
+      liveCheckAtStep6(anyUnitChange, replaying, opts.recordOnly,
+                       preWriteLiveUnits)
   let sysctlKeys = block:
     var keys: seq[string]
     for p in plans:
