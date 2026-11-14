@@ -1618,8 +1618,8 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 22,
-      "integration": 1536,
-      "platform/destructive": 178,
+      "integration": 1535,
+      "platform/destructive": 179,
       "pure unit": 763,
       "unclassified": 335
     },
@@ -31291,8 +31291,8 @@
     },
     {
       "binary": "build/test-bin/t_e2e_addon_floor_held_until_checked",
-      "class": "integration",
-      "classificationReason": "e2e/integration path or requires the repro binary",
+      "class": "platform/destructive",
+      "classificationReason": "platform path, target OS, VM, privileged, or host mutation signal",
       "defines": [],
       "language": "nim",
       "localDependencyShape": [
@@ -58776,7 +58776,7 @@
       "requiresReproBinary": false,
       "source": "tests/unit/test_addon_a13_classify.py",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 44,
+      "staticCaseCount": 45,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

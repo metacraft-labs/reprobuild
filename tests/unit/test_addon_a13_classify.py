@@ -75,6 +75,7 @@ ADOPT = "e2e_addon_adopt_hand_configured_service"
 CONV = "e2e_addon_to_reproos_conversion_keeps_state"
 TICK = "e2e_addon_tick_observes_a_fresh_cycle"
 HARDRESET = "e2e_addon_hard_reset_at_every_step"
+HELD = "e2e_addon_floor_held_until_checked"
 ENGINE = "/nix/store/00000000000000000000000000000000-reprobuild-test"
 
 ADOPT_EVERY_SWITCH_STEPS = [
@@ -220,6 +221,9 @@ def green(kind, base="debian-13"):
         rec["steps"] = padded([], 59, "the add-on guest's re-assert "
                               "materialises the token and starts the failed "
                               "vaultwarden again")
+    elif kind == "heldwin":
+        rec = base_record(HELD, base, with_gate_mutation=False)
+        rec["steps"] = padded([], 21, "and the service runs after C")
     else:
         raise KeyError(kind)
     rec["verdict"] = "green"
@@ -276,6 +280,19 @@ def red_record(kind, base="debian-13"):
                "the old one"),
             red("receipt receipt-before-dir-fsync: after the reset the receipt "
                 "is the old one or the new one", "on disk (0 bytes)")]
+    elif kind == "mutholdwin":
+        rec = base_record(HELD, base, mutation="start-holds-after-driver-writes",
+                          with_gate_mutation=False)
+        rec["decision136"] = {"startedBefore": "2", "startedInWindow": "4"}
+        rec["steps"] = [
+            ok("the floored service did not start in the window (socket, "
+               "systemctl start)"),
+            ok("generation C's definition is loaded by the drivers' reloads "
+               "(the case's premise)"),
+            red("decision 136: the hold is loaded before step 6"),
+            red("decision 136: the floored service did not start between the "
+                "drivers' reloads and step 6 (socket, systemctl start)",
+                "2 -> 4")]
     elif kind == "muttplconv":
         rec = base_record(CONV, base, engine=ENGINE,
                           engine_mutation="template-live-by-name")
@@ -312,9 +329,9 @@ def red_record(kind, base="debian-13"):
 
 GREEN_KINDS = ["adopt", "conv", "convseam", "confirm", "floorupgrade",
                "hardreset", "refused", "tickctl", "agente2e", "validator",
-               "parity"]
+               "parity", "heldwin"]
 RED_KINDS = ["mutexec", "mutimport", "mutstate", "mutunordered", "tickold",
-             "mutreceipt", "mutliveset", "muttplconv", "muttpladopt"]
+             "mutreceipt", "mutliveset", "muttplconv", "muttpladopt", "mutholdwin"]
 
 
 class Accepts(unittest.TestCase):
@@ -639,6 +656,28 @@ class TheTemplateEvidence(unittest.TestCase):
         rec = red_record("muttplconv")
         rec["engineBuild"]["mutation"] = ""
         self.assertRejected("muttplconv-debian-13", rec)
+
+
+class TheHoldWindowEvidence(unittest.TestCase):
+    """§13 decision 136: the falsifier is red because C's instance ran."""
+
+    def assertRejected(self, cell, rec):
+        ok_, _, why = cls.classify(cell, rec)
+        self.assertFalse(ok_, "%s accepted: %s" % (cell, why))
+
+    def test_red_for_another_reason(self):
+        rec = red_record("mutholdwin")
+        rec["decision136"]["startedInWindow"] = "2"
+        self.assertRejected("mutholdwin-debian-13", rec)
+        rec = red_record("mutholdwin")
+        rec["steps"][1]["ok"] = False      # C's definition never loaded
+        self.assertRejected("mutholdwin-debian-13", rec)
+        rec = red_record("mutholdwin")
+        rec["steps"][0]["ok"] = False      # B's window was not held either
+        self.assertRejected("mutholdwin-debian-13", rec)
+        rec = red_record("mutholdwin")
+        rec["mutation"] = "floor-start-unheld"
+        self.assertRejected("mutholdwin-debian-13", rec)
 
 
 class TheEngineBuildResolver(unittest.TestCase):

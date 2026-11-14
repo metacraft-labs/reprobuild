@@ -223,8 +223,17 @@ EXPECT.update({
     "muttpladopt": ("e2e_addon_adopt_hand_configured_service", "red",
                     "add-on build template-live-by-name"),
 })
+EXPECT.update({
+    # §13 decision 136: the add-on switch holds before its privileged set.
+    # The floor-hold gate (seam build) gains generation C, paused at step-4.
+    "heldwin": ("e2e_addon_floor_held_until_checked", "green",
+                "none (A9 regression; §13 decision 136's generation C)"),
+    "mutholdwin": ("e2e_addon_floor_held_until_checked", "red",
+                   "add-on seam build start-holds-after-driver-writes"),
+})
 TARGET.update({
     "muttplconv": "decision 135, converted host: the full apply's live check judged",
+    "mutholdwin": "decision 136: the floored service did not start between",
     "muttpladopt": "decision 135, add-on host: the switch's live check judged",
     "mutreissuetgt": "decision 79, target:",
     "mutreissuesock": "decision 79, socket:",
@@ -314,6 +323,18 @@ def on_target_rec(kind, rec):
                 cs.get("restarted") is True and
                 cs.get("credentialChanged") is True and
                 cs.get("credentialsOnly") is True)
+    if kind == "mutholdwin":
+        # Red because an instance ran on generation C's loaded, unchecked
+        # definition, not for another reason: C's definition was loaded
+        # (the premise), and B's window after step 6's reload stayed held.
+        st = {x["step"]: x for x in steps}
+        def ok_step(prefix):
+            return any(n.startswith(prefix) and x["ok"] for n, x in st.items())
+        d = rec.get("decision136", {})
+        return (on_target(kind, steps) and
+                ok_step("generation C's definition is loaded by the drivers' reloads") and
+                ok_step("the floored service did not start in the window") and
+                d.get("startedInWindow") not in (None, d.get("startedBefore")))
     if kind == "muttplconv":
         # The template was refused for being read by name, and its instances
         # never came up.
@@ -457,6 +478,7 @@ recorded and empty (the validator gate's ``REPRO_A12_MUTATION``)."""
 GATES_WITHOUT_GATE_MUTATION = {
     "e2e_addon_confirm_or_revert",
     "e2e_addon_floor_upgrade_keeps_installed_generations",
+    "e2e_addon_floor_held_until_checked",
     "e2e_addon_hard_reset_at_every_step",
     "e2e_addon_refused_recovery_keeps_its_record",
 }
@@ -482,6 +504,8 @@ GREEN = {
                      "the restore (held at its seam) and does not start when "
                      "it fails"),
     "floorupgrade": (24, "and its service serves page-prefloor"),
+    # Generation C (§13 decision 136) adds eight steps to the A9 gate.
+    "heldwin": (16, "and the service runs after C"),
     "hardreset": (181, "uninstall"),
     "parity": (59, "the add-on guest's re-assert materialises the token and "
                    "starts the failed vaultwarden again"),

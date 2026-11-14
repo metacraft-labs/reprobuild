@@ -23,6 +23,16 @@
 ## Falsifying build: ``REPRO_ADDON_MUTATION=floor-start-unheld`` (no hold):
 ## the service runs in the window -- red.
 ##
+## Generation C (§13 decision 136): the holds go in before the privileged
+## set, not at step 6. C changes the template again; the gate pauses C's
+## switch at ``step-4`` -- after the drivers wrote the template and their
+## own reloads loaded it, before step 6 -- and requires the hold loaded and
+## no instance run by the socket or by ``systemctl start``. Falsifying
+## build: ``REPRO_ADDON_MUTATION=start-holds-after-driver-writes`` (the
+## holds only at step 6): the instance runs on C's unchecked definition in
+## that window -- red. Generation B's window, after step 6's reload, is held
+## under that build too, so its steps stay green.
+##
 ## Needs the seam build: ``REPRO_ADDON_TEST_SEAMS=1``. Opt-in:
 ## ``REPRO_ADDON_VM_GATES=1``.
 ##
@@ -106,6 +116,39 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
       discard g.exec("timeout 5 bash -c 'exec 3<>/dev/tcp/127.0.0.1/" & $Port &
                      "' 2>/dev/null; sleep 3; true")
       step("and the service runs after", g.started() != inWindow, g.started())
+      # Generation C: the window between the drivers' reloads and step 6.
+      let beforeC = g.started()
+      let pc = g.startSwitchPausedAt(repro, "c", profile(binary, "A9 hold C"),
+                                     "step-4")
+      step("generation C pauses after the drivers' writes, before step 6",
+           pc.exitCode == 0, pc.stdout & pc.stderr)
+      if pc.exitCode == 0:
+        let loaded = g.exec("systemctl show -p Description -p DropInPaths " &
+                            "a9h@probe.service").stdout
+        record["decision136Loaded"] = %loaded
+        step("generation C's definition is loaded by the drivers' reloads " &
+             "(the case's premise)", "A9 hold C" in loaded, loaded)
+        step("decision 136: the hold is loaded before step 6",
+             "zz-repro-addon-floor-hold.conf" in loaded, loaded)
+        discard g.exec("timeout 5 bash -c 'exec 3<>/dev/tcp/127.0.0.1/" &
+                       $Port & "' 2>/dev/null; systemctl start " &
+                       "a9h@manual.service 2>&1; sleep 3; true")
+        let inWindowC = g.started()
+        record["decision136"] = %*{"startedBefore": beforeC,
+                                   "startedInWindow": inWindowC}
+        step("decision 136: the floored service did not start between the " &
+             "drivers' reloads and step 6 (socket, systemctl start)",
+             inWindowC == beforeC, beforeC & " -> " & inWindowC)
+        let resC = g.resumeSwitch()
+        step("generation C applies once checked", resC.exitCode == 0,
+             resC.stdout & resC.stderr)
+        step("no hold is left after C", g.exec("ls /run/systemd/system/" &
+             "a9h@.service.d/zz-repro-addon-floor-hold.conf 2>/dev/null").
+             stdout.strip() == "", "")
+        discard g.exec("timeout 5 bash -c 'exec 3<>/dev/tcp/127.0.0.1/" &
+                       $Port & "' 2>/dev/null; sleep 3; true")
+        step("and the service runs after C", g.started() != inWindowC,
+             g.started())
   except CatchableError as e:
     fails.add(b.name & ": " & e.msg)
     steps.add(%*{"step": "exception", "ok": false, "detail": e.msg})
