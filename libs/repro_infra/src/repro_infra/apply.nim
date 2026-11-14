@@ -775,7 +775,10 @@ when defined(posix):
     ## file (``holdPath``), so a passed instance must not lift the hold of a
     ## refused sibling.
     var kept: seq[string]
-    for u in refused: kept.add(holdPath(u, name, dir))
+    when ApplyMutation != "shared-hold-lifted-by-passed-instance":
+      # FALSIFYING MUTATION (when absent): a passed instance lifts the
+      # shared hold of a refused sibling.
+      for u in refused: kept.add(holdPath(u, name, dir))
     for u in passed:
       let h = holdPath(u, name, dir)
       if h notin kept and h notin result: result.add(h)

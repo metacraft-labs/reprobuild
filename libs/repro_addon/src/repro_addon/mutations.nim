@@ -599,6 +599,8 @@
 ##                                           start (2026-11-14)
 ## ``reissue-skips-timers``                  the same for a ``systemd.systemTimer``
 ##                                           start
+## ``shared-hold-lifted-by-passed-instance`` a passed template instance lifts the
+##                                           hold its refused sibling shares
 ## ``refusal-holds-every-unit``              one refused unit keeps every
 ##                                           judged unit held and down
 ## ``trigger-fired-under-hold-not-started``  a timer or path unit's trigger that
@@ -1507,6 +1509,7 @@ const
                           "reissue-skips-unit-state",
                           "reissue-skips-timers",
                           "refusal-holds-every-unit",
+                          "shared-hold-lifted-by-passed-instance",
                           "trigger-fired-under-hold-not-started",
                           "plan-ignores-profile-digest",
                           # The conversion gate's falsifiers of three

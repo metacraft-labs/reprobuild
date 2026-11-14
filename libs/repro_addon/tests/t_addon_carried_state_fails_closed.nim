@@ -44,7 +44,8 @@
 ## forms), ``reissue-skips-targets`` and ``reissue-skips-sockets``
 ## (decision 79, each on its own case); 2026-11-14:
 ## ``reissue-skips-unit-state``, ``reissue-skips-timers``,
-## ``refusal-holds-every-unit`` and ``trigger-fired-under-hold-not-started``.
+## ``refusal-holds-every-unit``, ``shared-hold-lifted-by-passed-instance`` and
+## ``trigger-fired-under-hold-not-started``.
 ##
 ## *Mocking.* The unit liveness (``AlivenessFn``), as in
 ## ``t_addon_state_sets``: a unit test has no systemd unit whose cgroup the
