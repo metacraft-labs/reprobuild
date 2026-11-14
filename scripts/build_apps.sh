@@ -343,6 +343,9 @@ export SHM_QUEUE_SRC="${shm_queue_src}"
 # clispec: repro_project_dsl's `cli:` language and typed CLI model.
 CLI_SPEC_SRC="$(resolve_cli_spec_src)"
 export CLI_SPEC_SRC
+# confutils: repro's own command line (repro_cli_support/cli_program).
+CONFUTILS_SRC="$(resolve_confutils_src)"
+export CONFUTILS_SRC
 
 # Platform detection must not depend on an external ``uname``.
 #

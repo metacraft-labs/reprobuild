@@ -110,6 +110,7 @@ required_sources=(
   src/nim-shm-gset/src/shm_gset.nim
   src/nim-shm-queue/src/shm_queue.nim
   src/nim-cli-spec/src/clispec.nim
+  src/nim-confutils/confutils/clispec_config.nim
   src/runquota/libs/runquota_core/src/runquota_core.nim
   # The module `repro_deploy_agent` imports, not bearssl's root file:
   # the root file is present in revisions that cannot satisfy the

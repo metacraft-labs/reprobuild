@@ -54,14 +54,13 @@ proc findRepoRoot(): string =
     "cannot locate reprobuild repo root from " & currentSourcePath())
 
 proc looksLikeUsageDump(output: string): bool =
-  ## The pre-D2 failure shape: the CLI's top-level dispatcher prints the
-  ## full usage banner when it can't decode the command. These needles
-  ## appear in every usage dump but not in legitimate engine diagnostics.
+  ## The pre-D2 failure shape: the CLI rejects the command line instead of
+  ## decoding it, printing a usage error or the primary help. These needles
+  ## appear in those and not in legitimate engine diagnostics.
   for needle in [
-    "usage: repro --version",
+    "Run `repro --help` for the list of commands",
+    "Usage: repro [options] [<command>]",
     "repro build [target[#name]",
-    "repro graph [target[#name]",
-    "repro show-conventions [--project=PATH]",
   ]:
     if needle in output:
       return true

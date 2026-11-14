@@ -126,6 +126,7 @@ stage_src IO_MON_SRC                     io-mon/src
 stage_src SHM_GSET_SRC                   nim-shm-gset/src
 stage_src SHM_QUEUE_SRC                  nim-shm-queue/src
 stage_src CLI_SPEC_SRC                   nim-cli-spec/src
+stage_src CONFUTILS_SRC                  nim-confutils
 stage_src CODETRACER_PINNED_SRC          codetracer/src
 stage_src REPRO_CT_TEST_RUNNER_SRC       reprobuild-ct-test-runner
 stage_src REPRO_TEST_ADAPTERS_SRC        reprobuild-test-adapters/src

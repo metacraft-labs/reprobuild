@@ -160,7 +160,7 @@ stage REPRO_CT_TEST_RUNNER_SRC reprobuild-ct-test-runner \
 stage IO_MON_SRC io-mon/src io_mon.nim ../io-mon/src
 stage STACKABLE_HOOKS_SRC nim-stackable-hooks/src stackable_hooks.nim \
   ../nim-stackable-hooks/src
-# config.nims resolves these three sibling-FIRST; mirror it so the archive holds
+# config.nims resolves these four sibling-FIRST; mirror it so the archive holds
 # what was compiled.
 sibling_first() { # sibling_first <ENV_VAR> <sibling> <marker>
   if [[ -f "$2/$3" ]]; then printf '%s' "$2"; else printf '%s' "${!1:-}"; fi
@@ -171,6 +171,8 @@ SHM_QUEUE_SRC=$(sibling_first SHM_QUEUE_SRC ../nim-shm-queue/src shm_queue.nim) 
   stage SHM_QUEUE_SRC nim-shm-queue/src shm_queue.nim
 CLI_SPEC_SRC=$(sibling_first CLI_SPEC_SRC ../nim-cli-spec/src clispec.nim) \
   stage CLI_SPEC_SRC nim-cli-spec/src clispec.nim
+CONFUTILS_SRC=$(sibling_first CONFUTILS_SRC ../nim-confutils confutils.nim) \
+  stage CONFUTILS_SRC nim-confutils confutils.nim
 stage RUNQUOTA_SRC runquota libs/runquota_core/src/runquota_core.nim ../runquota
 # The marker is the MODULE the staged archive has to be able to compile, not
 # the package root file: `bearssl.nim` is in every revision, including ones

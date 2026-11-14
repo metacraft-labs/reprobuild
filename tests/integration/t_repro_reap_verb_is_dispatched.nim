@@ -88,11 +88,12 @@ suite "repro reap is a dispatched verb":
     # An empty store is nothing to do, which is success.
     check res.code == 0
 
-    # POSITIVE CONTROL for the control: a spelling with no dispatch arm falls
-    # through to usage and prints no reap report. Without this, arm 1 could pass
+    # POSITIVE CONTROL for the control: a spelling repro does not declare is
+    # a usage error and prints no reap report. Without this, arm 1 could pass
     # on a binary that printed a reap report for every argv.
     let undispatched = runShell(shellCommand([bin, "reapx", "--once"]))
-    check undispatched.output.contains("usage: repro")
+    # A usage error: the parser names what it rejected and points at help.
+    check undispatched.output.contains("Run `repro --help`")
     check not undispatched.output.contains("repro reap: state-root=")
     # The exit code is the sharper half of the control, and the pair is what
     # makes arm 1 meaningful: a dispatched verb with nothing to do exits 0, an

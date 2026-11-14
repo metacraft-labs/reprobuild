@@ -4847,6 +4847,25 @@ proc parseInterfaceParam(node: NimNode;
     let repeatedValue = namedValue(node[i], "repeated")
     if not repeatedValue.isNil:
       result.repeated = boolLiteral(repeatedValue, result.repeated)
+    # The value expressions clispec keeps in the model. Recorded (not
+    # ignored) so `cliCommandsTypeChecks` checks them against the
+    # parameter's type: a wrong-typed one is a compile error here, as it is
+    # in a package's `cli:` block.
+    let defaultValue = namedValue(node[i], "default")
+    if not defaultValue.isNil:
+      result.default = cliExprOf(defaultValue)
+    let optionalValueNode = namedValue(node[i], "optionalValue")
+    if not optionalValueNode.isNil:
+      if result.kind != cpkFlag:
+        error("optionalValue belongs on a flag", optionalValueNode)
+      result.optionalValue = cliExprOf(optionalValueNode)
+    let valuesNode = namedValue(node[i], "values")
+    if not valuesNode.isNil:
+      if valuesNode.kind != nnkBracket or valuesNode.len == 0:
+        error("values must be a non-empty list such as [a, b, c], got: " &
+          valuesNode.repr, valuesNode)
+      for item in valuesNode:
+        result.values.add(cliExprOf(item))
 
 proc dependencyPolicyLiteral(node: NimNode;
                              fallback: BuildActionDependencyPolicy):
@@ -5233,5 +5252,9 @@ macro defineCliInterface*(toolSymbol: untyped;
         discard
       else:
         error("CLI interface accepts call: or subcmd \"name\": sections", stmt)
-  result = parseStmt(defineCliInterfaceCode(identText(toolSymbol), toolId,
-    commands))
+  result = newStmtList(parseStmt(defineCliInterfaceCode(
+    identText(toolSymbol), toolId, commands)))
+  # clispec's type checks (`cliModelTypeChecks`): a wrong-typed `default`,
+  # `optionalValue`, `values` entry or `implies` value is a compile error
+  # naming the parameter, as it is in a package's `cli:` block.
+  result.add(cliCommandsTypeChecks(commands))

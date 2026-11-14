@@ -8,6 +8,7 @@
     "shmGsetSrc": "nim-shm-gset-src",
     "shmQueueSrc": "nim-shm-queue-src",
     "cliSpecSrc": "nim-cli-spec-src",
+    "confutilsSrc": "nim-confutils-src",
     "codetracerSrc": "codetracer-src",
     "ctTestRunnerSrc": "reprobuild-ct-test-runner-src",
     "testAdaptersSrc": "reprobuild-test-adapters-src",

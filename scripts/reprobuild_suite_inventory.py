@@ -960,6 +960,7 @@ def external_source_checkouts(
         "runquota": ("RUNQUOTA_SRC",),
         "nim-shm-queue": ("SHM_QUEUE_SRC",),
         "nim-cli-spec": ("CLI_SPEC_SRC",),
+        "nim-confutils": ("CONFUTILS_SRC",),
         "nim-shm-gset": ("SHM_GSET_SRC",),
         "nim-stackable-hooks": (
             "NIM_STACKABLE_HOOKS_SRC",
@@ -1009,6 +1010,7 @@ def runtime_metadata(
         "RUNQUOTA_SRC",
         "SHM_QUEUE_SRC",
         "CLI_SPEC_SRC",
+        "CONFUTILS_SRC",
         "SHM_GSET_SRC",
         "NIM_STACKABLE_HOOKS_SRC",
         "STACKABLE_HOOKS_SRC",

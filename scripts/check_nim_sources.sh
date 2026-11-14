@@ -12,6 +12,8 @@ source scripts/source_paths.sh
 export SHM_QUEUE_SRC="$(resolve_shm_queue_src)"
 # ``repro_project_dsl`` imports the ``clispec`` package (nim-cli-spec).
 export CLI_SPEC_SRC="$(resolve_cli_spec_src)"
+# repro's own command line goes through confutils (nim-confutils).
+export CONFUTILS_SRC="$(resolve_confutils_src)"
 export BEARSSL_SRC="$(resolve_bearssl_src)"
 
 # Mirror the compile defines used by the real app build in

@@ -503,6 +503,33 @@ proc parseCliCommandExtension(cmd: var CliCommandDef; stmt: NimNode;
     return false
   true
 
+var pendingCliModelTypeChecks {.compileTime.}: seq[NimNode]
+  ## The ``cliModelTypeChecks`` of every ``cli:`` block parsed since the
+  ## package macro last took them (``takeCliModelTypeChecks``).
+
+proc takeCliModelTypeChecks*(): NimNode {.compileTime.} =
+  ## The type checks of the ``cli:`` blocks parsed since the last call, for
+  ## the package macro to place in its output, and forgets them.
+  ##
+  ## clispec's parser checks what it can tell from spellings; whether a
+  ## ``default``, ``optionalValue``, ``values`` entry or ``implies`` value is
+  ## a value of its parameter's type needs the compiler, so
+  ## ``cliModelTypeChecks`` generates those checks as code, which a macro
+  ## building a model places in its output where the description's types
+  ## are visible. A wrong-typed value is then a compile error naming the
+  ## parameter, at the line that wrote it.
+  result = newStmtList()
+  for checks in pendingCliModelTypeChecks:
+    result.add(checks)
+  pendingCliModelTypeChecks.setLen(0)
+
+proc cliCommandsTypeChecks*(commands: seq[CliCommandDef]): NimNode =
+  ## ``cliModelTypeChecks`` over commands a front end built without a
+  ## ``CliModel`` (``defineCliInterface``): the same checks, for the same
+  ## parameters.
+  cliModelTypeChecks(CliModel[ReproCliCommandExt, ReproCliParamExt](
+    commands: commands))
+
 proc parseReproCliBlock(packageName, executableName: string;
                         cliBody: NimNode): seq[CliCommandDef] =
   ## The commands of an ``executable``'s ``cli:`` block: one per ``call:``
@@ -528,6 +555,7 @@ proc parseReproCliBlock(packageName, executableName: string;
           error("subTools expects string tool names", subToolsStmt[i])
         if name notin subTools:
           subTools.add(name)
+  pendingCliModelTypeChecks.add(cliModelTypeChecks(model))
   result = model.commands
   for command in result.mitems:
     # clispec records the compiler's file names; the DSL records them the

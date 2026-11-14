@@ -151,8 +151,16 @@
   cliSpecSrc ? fetchFromGitHub {
     owner = "metacraft-labs";
     repo = "nim-cli-spec";
-    rev = "4e09ba984487d1151f946ebf767de3fee3a98677";
-    hash = "sha256-mYeYxVIjWye8Cv+HhfenrHDzslqARkZdW9f8/MPGpmI=";
+    rev = "29792c06ac2ecdea82e10adc78628e832f55d179";
+    hash = "sha256-EeTmGzSKBKvtKYJG6gvj8a5q6nLTQLrtA4DPYl8Zuwg=";
+  },
+  # Added after the `src` commit too: confutils over a clispec description,
+  # which repro's own command line is.
+  confutilsSrc ? fetchFromGitHub {
+    owner = "metacraft-labs";
+    repo = "nim-confutils";
+    rev = "1a60f8c08d877e7f8e1d18f2cc84aad741c2facb";
+    hash = "sha256-P20Zi4iwayGpeDyH1zG619F9eLuRgJolm5Zcv1Z564A=";
   },
   codetracerSrc ? fetchFromGitHub {
     owner = "metacraft-labs";
@@ -312,6 +320,7 @@ stdenv.mkDerivation (finalAttrs: {
     SHM_GSET_SRC = "${shmGsetSrc}/src";
     SHM_QUEUE_SRC = "${shmQueueSrc}/src";
     CLI_SPEC_SRC = "${cliSpecSrc}/src";
+    CONFUTILS_SRC = "${confutilsSrc}";
     # Tier 3 of `config.nims`'s incremental-test-seam resolution, and the tier
     # this build has always needed. It runs in a pure sandbox with no
     # `../codetracer` in reach, so before this variable existed the packaged
@@ -460,6 +469,7 @@ stdenv.mkDerivation (finalAttrs: {
         --set-default SHM_GSET_SRC ${shmGsetSrc}/src \
         --set-default SHM_QUEUE_SRC ${shmQueueSrc}/src \
         --set-default CLI_SPEC_SRC ${cliSpecSrc}/src \
+        --set-default CONFUTILS_SRC ${confutilsSrc} \
         --set-default CODETRACER_PINNED_SRC ${codetracerSrc}/src \
         --set-default REPRO_CT_TEST_RUNNER_SRC ${ctTestRunnerSrc} \
         --set-default REPRO_TEST_ADAPTERS_SRC ${testAdaptersSrc}/src \
@@ -557,6 +567,7 @@ stdenv.mkDerivation (finalAttrs: {
         shmGsetSrc
         shmQueueSrc
         cliSpecSrc
+        confutilsSrc
         codetracerSrc
         ctTestRunnerSrc
         testAdaptersSrc

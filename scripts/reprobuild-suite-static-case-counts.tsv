@@ -1734,7 +1734,7 @@ tests/integration/t_committed_lock_records_develop_set_siblings.nim	nim	3
 tests/integration/t_committed_lock_records_no_materialization_path.nim	nim	3
 tests/integration/t_compiler_args_transport.nim	nim	6
 tests/integration/t_compiler_scratch_isolation.nim	nim	6
-tests/integration/t_completion_emits_shell_script.nim	nim	2
+tests/integration/t_completion_emits_shell_script.nim	nim	3
 tests/integration/t_concurrent_lock_publishes_retry_without_user_visible_failure.nim	nim	1
 tests/integration/t_concurrent_publish_disjoint_per_backend.nim	nim	1
 tests/integration/t_concurrent_repro_exec_in_one_project_share_the_dev_env_edge.nim	nim	1
@@ -2363,7 +2363,7 @@ tests/integration/t_suite_artifact_generator_refuses_arguments_it_cannot_honour.
 tests/integration/t_switch_mainline_and_fetch.nim	nim	6
 tests/integration/t_switch_new_branch_marks_feature_branch.nim	nim	7
 tests/integration/t_switch_stashes_and_restores_per_repo_wip.nim	nim	1
-tests/integration/t_sync_and_hooks_help_print_usage.nim	nim	1
+tests/integration/t_sync_and_hooks_help_print_usage.nim	nim	2
 tests/integration/t_sync_check_operate_from_committed_lock_without_manifests.nim	nim	1
 tests/integration/t_sync_clones_commit_pinned_repo.nim	nim	4
 tests/integration/t_sync_clones_newly_declared_dependency_after_pull.nim	nim	3
@@ -2583,6 +2583,9 @@ tests/unit/t_cross_build_root_lock.nim	nim	1
 tests/unit/t_cross_prefix_runtime_closure.nim	nim	2
 tests/unit/t_cross_repo_runtime_tool_closure.nim	nim	2
 tests/unit/t_cs_m1_external_tool_argv_unchanged.nim	nim	3
+tests/unit/t_cs_m6_cli_model_type_checks_in_reprobuild_macros.nim	nim	2
+tests/unit/t_cs_m6_no_hand_written_argv_parsing.nim	nim	3
+tests/unit/t_cs_m6_spec_pages_match_declarations.nim	nim	5
 tests/unit/t_ct_test_nim_unittest_path_mm_pool.nim	nim	6
 tests/unit/t_custom_role_fallback_cycle_is_rejected.nim	nim	1
 tests/unit/t_da1i_evidence_help_names_the_hazard.nim	nim	9

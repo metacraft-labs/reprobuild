@@ -86,6 +86,9 @@ if [[ -f "scripts/source_paths.sh" ]]; then
   if [[ -z "${CLI_SPEC_SRC:-}" ]]; then
     export CLI_SPEC_SRC="$(resolve_cli_spec_src)"
   fi
+  if [[ -z "${CONFUTILS_SRC:-}" ]]; then
+    export CONFUTILS_SRC="$(resolve_confutils_src)"
+  fi
 fi
 
 if ! command -v clang >/dev/null 2>&1; then

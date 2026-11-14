@@ -96,6 +96,7 @@ const
     ("SHM_GSET_SRC", "nim-shm-gset/src"),
     ("SHM_QUEUE_SRC", "nim-shm-queue/src"),
     ("CLI_SPEC_SRC", "nim-cli-spec/src"),
+    ("CONFUTILS_SRC", "nim-confutils"),
     ("CODETRACER_PINNED_SRC", "codetracer/src"),
     ("REPRO_CT_TEST_RUNNER_SRC", "reprobuild-ct-test-runner"),
     ("REPRO_TEST_ADAPTERS_SRC", "reprobuild-test-adapters/src"),

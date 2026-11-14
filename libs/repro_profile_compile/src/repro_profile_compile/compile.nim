@@ -426,6 +426,11 @@ proc profileCompileEnvAdditions*(repoRoot: string): StringTableRef =
   setPackageEnv("CLI_SPEC_SRC", [
     dd / "nim-cli-spec" / "src",
   ], "clispec.nim")
+  # ``repro_cli_support`` instantiates repro's own command line through
+  # confutils (``nim-confutils``, rooted at the checkout); pinned the same way.
+  setPackageEnv("CONFUTILS_SRC", [
+    dd / "nim-confutils",
+  ], "confutils.nim")
   if dirExists(dd / "io-mon" / "src"):
     if unsetInChild("IO_MON_SRC"):
       env["IO_MON_SRC"] = dd / "io-mon" / "src"

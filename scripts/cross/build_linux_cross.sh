@@ -400,6 +400,7 @@ pinned_sources=(
   "SHM_QUEUE_SRC nim-shm-queue-src nim-shm-queue /src"
   "SHM_GSET_SRC nim-shm-gset-src nim-shm-gset /src"
   "CLI_SPEC_SRC nim-cli-spec-src nim-cli-spec /src"
+  "CONFUTILS_SRC nim-confutils-src nim-confutils"
   "RUNQUOTA_SRC runquota-src runquota"
   "REPRO_TEST_ADAPTERS_SRC reprobuild-test-adapters-src reprobuild-test-adapters /src"
   "TEST_CERTIFICATES_TOOLS_SRC test-certificates-tools-src test-certificates-tools /src"

@@ -1144,6 +1144,13 @@ package reprobuild:
     # SC-11 channel and the same one-change rule: this line and its
     # ``repro.lock`` entry.
     "nim-cli-spec"
+    # NOT LISTED: nim-confutils, which the engine imports for its own command
+    # line (``confutils/clispec_config``, through ``CONFUTILS_SRC`` in
+    # ``config.nims``). The fork has no ``repro.nim`` declaring a
+    # ``library``, so it is not a workspace project this channel can resolve:
+    # a ``uses:`` line for it would buy a lock entry and no ``--path:``, the
+    # half-truth the io-mon note below describes. It is pinned by
+    # ``flake.lock`` and ``.github/sibling-repos`` until it declares one.
     # The test-certificate standard's store, note framing and two-note merge
     # (``import test_certificates`` in repro_cli_support). Same SC-11 channel
     # and the same one-change rule: this line and its ``repro.lock`` entry.
