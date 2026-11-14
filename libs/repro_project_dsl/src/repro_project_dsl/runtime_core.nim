@@ -1268,7 +1268,8 @@ proc dependencyRootEnvVarName*(depName: string): string {.dynOrStatic.} =
   "DEP_" & body & "_ROOT"
 
 proc dependencyRootEnvEntries*(recipesRoot: string;
-                               depConstraints: openArray[string]):
+                               depConstraints: openArray[string];
+                               onlyExistingSiblings = true):
     seq[(string, string)] {.dynOrStatic.} =
   ## M9.R.81: produce resolver-backed per-dependency install-mirror env
   ## entries in caller-supplied declaration order. Duplicate env var
@@ -1286,6 +1287,9 @@ proc dependencyRootEnvEntries*(recipesRoot: string;
       continue
     let root = packageInstallMirrorRoot(recipesRoot, depName)
     if root.len == 0:
+      continue
+    if onlyExistingSiblings and not dirExists(recipesRoot / depName) and
+        not dirExists(root):
       continue
     seenEnvNames.add(envName)
     result.add((envName, root))
@@ -1381,7 +1385,8 @@ proc packageDependencyRootEnvEntries*(packageName, projectRoot: string):
       continue
     return dependencyRootEnvEntries(
       parentDir(projectRoot),
-      packageDeclaredDependencyConstraints(pkg))
+      packageDeclaredDependencyConstraints(pkg),
+      onlyExistingSiblings = true)
   return @[]
 
 proc currentPackageDependencyRootEnvEntries*(): seq[(string, string)]

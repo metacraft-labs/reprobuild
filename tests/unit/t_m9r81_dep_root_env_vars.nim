@@ -123,7 +123,49 @@ suite "M9.R.81 dependency root env vars":
         )
       ]
 
+  test "buildAction registry omits roots of dependencies with no sibling":
+    # A project outside a recipe catalog has no sibling directory per
+    # dependency; the tool comes from the host. Naming `<parent>/<dep>/...`
+    # anyway made every action's environment, and so its portable key,
+    # depend on the checkout's parent directory.
+    withLegacyMirrorMode:
+      resetBuildActionRegistry()
+      setCurrentOwningPackageOverride("m9r81DepEnvFixture")
+      try:
+        discard buildAction(
+          id = "m9r81-no-sibling-action",
+          call = publicCliCall("pkg", "exe", "build",
+            "pkg.exe.build", @[]),
+          env = @[("EXPLICIT_ENV", "kept-last")])
+      finally:
+        clearCurrentOwningPackageOverride()
+      let names = findAction("m9r81-no-sibling-action").envNames()
+      check names == @["OUT_MIRROR", "EXPLICIT_ENV"]
+
+  test "dependencyRootEnvEntries only-existing keeps catalog siblings":
+    withLegacyMirrorMode:
+      let scratch = getTempDir() / "t_m9r81_only_existing_siblings"
+      if dirExists(scratch):
+        removeDir(scratch)
+      createDir(scratch / "qt6-base")
+      defer: removeDir(scratch)
+      let entries = dependencyRootEnvEntries(scratch,
+        @["qt6-base >=6", "gcc >=11"], onlyExistingSiblings = true)
+      check entries == @[("DEP_QT6_BASE_ROOT",
+        scratch & "/qt6-base/.repro/output/install")]
+
   test "buildAction registry carries package dependency roots":
+    # The dependencies are siblings of the project here, as in a catalog.
+    let tests = currentSourcePath.parentDir.parentDir
+    var made: seq[string] = @[]
+    for dep in ["native-tool", "qt6-base", "dep.with+dots", "runtime+tool",
+                "libxkbcommon", "mesa"]:
+      if not dirExists(tests / dep):
+        createDir(tests / dep)
+        made.add(tests / dep)
+    defer:
+      for d in made:
+        try: removeDir(d) except OSError: discard
     withLegacyMirrorMode:
       resetBuildActionRegistry()
       setCurrentOwningPackageOverride("m9r81DepEnvFixture")
@@ -182,6 +224,9 @@ suite "M9.R.81 dependency root env vars":
       else: ""
     let oldDepExists = fileExists(depSidecar)
     let oldDepParentExists = dirExists(parentDir(depSidecar))
+    # The sibling directory itself must not outlive the test: its mere
+    # existence turns the DEP_QT6_BASE_ROOT entry on for later runs.
+    let oldDepRootExists = dirExists(recipesRoot / "qt6-base")
     let oldDep =
       if oldDepExists: readFile(depSidecar)
       else: ""
@@ -200,6 +245,8 @@ suite "M9.R.81 dependency root env vars":
         removeFile(depSidecar)
       if not oldDepParentExists and dirExists(parentDir(depSidecar)):
         try: removeDir(parentDir(depSidecar)) except OSError: discard
+      if not oldDepRootExists and dirExists(recipesRoot / "qt6-base"):
+        try: removeDir(recipesRoot / "qt6-base") except OSError: discard
 
     writeRealizationInfoFile(recipesRoot, "unit", "1.0.0", ownHashHex)
     writeRealizationInfoFile(recipesRoot, "qt6-base", "6.6.2", depHashHex)

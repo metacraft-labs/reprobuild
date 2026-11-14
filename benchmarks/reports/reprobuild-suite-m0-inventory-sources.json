@@ -57154,7 +57154,7 @@
       "requiresReproBinary": false,
       "source": "tests/unit/t_m9r81_dep_root_env_vars.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 5,
+      "staticCaseCount": 7,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

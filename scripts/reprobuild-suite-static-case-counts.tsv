@@ -2710,7 +2710,7 @@ tests/unit/t_m9r77_cas_cli.nim	nim	12
 tests/unit/t_m9r77_hashed_mirror_wiring.nim	nim	15
 tests/unit/t_m9r79_constructors_compile.nim	nim	6
 tests/unit/t_m9r7_target_triple_cache_namespacing.nim	nim	14
-tests/unit/t_m9r81_dep_root_env_vars.nim	nim	5
+tests/unit/t_m9r81_dep_root_env_vars.nim	nim	7
 tests/unit/t_m9r82_action_cache_cas_migration.nim	nim	8
 tests/unit/t_m9r83_install_mirror_action_shapes.nim	nim	9
 tests/unit/t_m9r83_install_mirror_publish.nim	nim	9
