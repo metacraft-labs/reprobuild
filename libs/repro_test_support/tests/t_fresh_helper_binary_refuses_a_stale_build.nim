@@ -77,7 +77,7 @@
 ##     ``.nim`` entry in it is refused, and one in the decoy directory of
 ##     the trimmed name beside it is not.
 ##
-## 31-34. (round 10's listing rules, no §13 decision yet) In a tree
+## 31-34. (round 10's listing rules, §13 decision 114) In a tree
 ##     whose app imports ``pkgx/util`` through ``--path:vendor``: a
 ##     package directory ``apps/foo/pkgx`` that shadows the import,
 ##     ``apps/foo/foo.nim.cfg``, ``apps/foo/nim.cfg`` and a parent
@@ -562,7 +562,7 @@ suite "a helper binary is used only when built from the tree under test":
 
   # ---- round 10's listing rules (reprobuild-pm issue 2026-11-13-helper-
   # list-listing-filter-accepts-a-new-package-directory-or-nim-cfg-that-
-  # changes-the-build; no §13 decision yet): what else changes what the
+  # changes-the-build; §13 decision 114): what else changes what the
   # compiler resolves. Its own tree: an app that imports ``pkgx/util``
   # through ``--path:vendor`` and reads a define.
   let rt = base / "tree-resolve"

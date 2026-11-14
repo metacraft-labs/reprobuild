@@ -467,6 +467,7 @@ suite "round 9's decisions are cited by their own §13 numbers":
     Listing = 111       # what the helper-dependency list's digests count
     Durable = 112       # the removal is synced before the completion
     Evidence = 113      # the completion follows the evidence
+    Resolution = 114    # round 10: config files and subdirectories count
   let repoRoot = currentSourcePath().parentDir.parentDir.parentDir.parentDir
   proc source(rel: string): string =
     let path = repoRoot / rel
@@ -541,6 +542,24 @@ suite "round 9's decisions are cited by their own §13 numbers":
     check uncited("test-body-helper-compilation-dispositions.tsv", linesNaming(
       source("scripts/test-body-helper-compilation-dispositions.tsv"),
       "t_plain_test_compile_keeps_the_helpers_fresh.nim"), [Listing]).len == 0
+
+  test "round 10's listing rules cite decision 114, not a missing decision":
+    # A11's round-10 decision is 114 (*Numbers 111 to 113*'s note); the
+    # four places that implement or test its listing rules once said §13
+    # records no decision for them (reprobuild-pm issue ``2026-11-14-
+    # round-10-listing-rules-say-section-13-records-no-decision-though-
+    # decision-114-is-theirs``).
+    const Stale = ["record " & "yet", "no §13 " & "decision", "records no " &
+                   "decision", "123 is " & "another"]
+    for rel in ["libs/repro_test_support/src/repro_test_support/fresh_binary.nim",
+                "scripts/write_helper_deps.sh",
+                "libs/repro_test_support/tests/" &
+                  "t_fresh_helper_binary_refuses_a_stale_build.nim"]:
+      let text = source(rel)
+      check uncited(rel, text, [Resolution]).len == 0
+      for phrase in Stale:
+        if phrase in text: checkpoint rel & " still says \"" & phrase & "\""
+        check phrase notin text
 
   test "a record is described as linked into place, never renamed":
     # §13 decision 81's round-9 amendment: records are written exclusively,

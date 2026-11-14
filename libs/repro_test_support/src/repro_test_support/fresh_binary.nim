@@ -101,10 +101,9 @@ const ListingFilters = ["resolution", "every-entry", "resolution-no-subdirs",
   ## the case that rule holds goes red.
 const NeverCounted = [".nimcache", "build", ".git", "result"]
   ## Entries that never change what the compiler resolves (round 10's
-  ## listing rules: reprobuild-pm issue
+  ## listing rules, §13 decision 114: reprobuild-pm issue
   ## ``2026-11-13-helper-list-listing-filter-accepts-a-new-package-
-  ## directory-or-nim-cfg-that-changes-the-build``; §13 records no
-  ## decision for them yet, and its 123 is another track's).
+  ## directory-or-nim-cfg-that-changes-the-build``).
 
 proc decodeListPath(list, encoded, name: string): string =
   ## A path as ``scripts/write_helper_deps.sh`` writes it: every backslash,
@@ -173,7 +172,7 @@ proc readHelperList(repoRoot, name: string):
 
 proc relevantEntry(dir, name: string; searchPath: HashSet[string];
                    filter = "resolution"): bool =
-  ## §13 decision 111 and round 10's listing rules (``NeverCounted``):
+  ## §13 decisions 111 and 114 (round 10's listing rules, ``NeverCounted``):
   ## an entry counts when it can change what the
   ## compiler resolves -- a ``.nim``, ``.nimble`` or ``.nims`` file, a Nim
   ## configuration file (``nim.cfg``, ``<project>.nim.cfg``), a
