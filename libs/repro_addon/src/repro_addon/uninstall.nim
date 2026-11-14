@@ -18,8 +18,14 @@
 ##    goes with the store), then the directories it created, then
 ##    ``systemctl daemon-reload``; put every kernel parameter a sysctl
 ##    fragment set back to the value the ledger recorded before it;
-## 5. remove the add-on's state and keys, ``/etc/repro`` (with the static
-##    tree link), and the store (unless ``--keep-store``).
+## 5. remove the store (unless ``--keep-store``), then each store-evidence
+##    entry, then write the discard's completion (§13 decision 139), then
+##    the secrets ramfs, ``/run/repro``, ``/etc/repro`` but the Evidence
+##    sink's configuration and CA (decision 140), the keys, those two files
+##    and ``/etc/repro``, and last the state, ``/var/lib/repro``. Any failure
+##    on the way keeps the state, with its ledger copy and the attestation
+##    key, for a second uninstall to finish (A11 code review rounds 11 and
+##    12).
 ##
 ## Accounts a sysusers fragment created are listed and kept (``account``
 ## ledger entries): a reused UID would hand the files the old account
@@ -251,6 +257,11 @@ proc restorePreBootstrapInputs*(captured: CapturedInputs; keepStore: bool;
     except CatchableError as ex:
       r.errors.add(e.path & ": " & ex.msg)
 
+const CannotBeShipped* = "cannot be shipped"
+  ## The words ``shipAndConfirm`` ends its reason with when no later run can
+  ## ship the records either: ``storeEvidenceGate`` then does not tell the
+  ## operator to wait for an acknowledgement (§13 decision 140).
+
 proc shipAndConfirm*(site: ShipSite; host: string):
     tuple[ok: bool; why: string] =
   ## Ship ``site``'s outbox once and report whether the sink acknowledged
@@ -272,7 +283,7 @@ proc shipAndConfirm*(site: ShipSite; host: string):
     if queued == 0: return (true, "")
     return (false, $queued & " record(s) still queued, and the sink " &
       "configuration " & site.confPath & " is gone (an earlier uninstall " &
-      "that did not finish removed it), so they cannot be shipped")
+      "that did not finish removed it), so they " & CannotBeShipped)
   try:
     let conf = loadEvidenceConf(site.confPath)
     let r = runEvidenceShip(site, conf, host)
@@ -764,11 +775,20 @@ proc storeEvidenceGate*(custody: CustodySite; opts: UninstallOptions;
         result.errors.add("nothing was removed")
     return
   when not mutated("uninstall-skips-ack-refusal"):
-    result.errors.add("the Evidence sink has not acknowledged the " &
-      "records of the store evidence uninstall would discard (" &
-      shipped.why & "); run uninstall again once it has, or discard them " &
-      "unshipped with --discard-unacknowledged-store-evidence, which " &
-      "writes and prints a signed record of each")
+    if CannotBeShipped in shipped.why:
+      # No acknowledgement can arrive: never ask the operator to wait for
+      # one (§13 decision 140).
+      result.errors.add("the Evidence sink has not acknowledged the " &
+        "records of the store evidence uninstall would discard (" &
+        shipped.why & "), and no later run can ship them; discard them " &
+        "unshipped with --discard-unacknowledged-store-evidence, which " &
+        "writes and prints a signed record of each")
+    else:
+      result.errors.add("the Evidence sink has not acknowledged the " &
+        "records of the store evidence uninstall would discard (" &
+        shipped.why & "); run uninstall again once it has, or discard them " &
+        "unshipped with --discard-unacknowledged-store-evidence, which " &
+        "writes and prints a signed record of each")
     result.errors.add("nothing was removed")
 
 proc classifyLeftAside*(r: var UninstallResult; pending: seq[string];
@@ -1110,9 +1130,18 @@ proc runAddonUninstall*(opts: UninstallOptions): UninstallResult =
   # 4. /etc files (those a diversion step did not already take), then the
   #    directories the add-on created, deepest first; the kernel values
   #    sysctl fragments set go back to what the ledger recorded before.
+  # The Evidence sink's configuration and CA stay until the state itself
+  # goes, at the end of a run that finished (§13 decision 140): an
+  # uninstall left incomplete keeps the outbox with the state, and a re-run
+  # must still be able to ship it.
+  var sinkFiles: seq[LedgerEntry]
   for f in byClass[lcEtcFile]:
     if f.path in handled:
       continue
+    when not mutated("sink-config-removed-in-step-4"):
+      if f.path in [EvidenceConfPath, EvidenceSinkCaPath]:
+        sinkFiles.add(f)
+        continue
     removeOwned(f, result, driver)
   for sl in byClass[lcStaticLink]:
     if symlinkExists(sl.path):
@@ -1194,9 +1223,37 @@ proc runAddonUninstall*(opts: UninstallOptions): UninstallResult =
   # while the key and the state are still there (decision 113), and kept
   # for a re-run when it cannot be (decision 62).
   discardFinished = true
+  # (§13 decision 139: the completion, before the keys and the state.)
   if completeDiscardBeforeKeys(result, l, stateDir, custody, signer,
                                evidenceKept):
     return
+  # What is left goes in an order that keeps the state to the end (A11
+  # code review round 12): the secrets ramfs, /run/repro, /etc/repro but
+  # the sink's files, the keys, then the sink's files and /etc/repro, and
+  # only then /var/lib/repro. A failure at any of them keeps the state,
+  # with its ledger copy and the attestation key, so a re-run can finish.
+  template keepIfFailed() =
+    when not mutated("state-removed-after-root-failure"):
+      if result.errors.len > 0 or result.drift.len > 0:
+        discard keepStateWhenIncomplete(result, l, stateDir)
+        return
+  # The secrets ramfs (A7) is unmounted, its plaintext gone, first.
+  try:
+    releaseRunDir(defaultSecretsLayout())
+  except CatchableError as ex:
+    result.errors.add(defaultSecretsLayout().runDir & ": " & ex.msg)
+  removeHostRoot(result, "/run/repro")
+  keepIfFailed()
+  if dirExists("/etc/repro"):
+    var sinkPaths: seq[string]
+    for f in sinkFiles: sinkPaths.add(f.path)
+    try:
+      for kind, p in walkDir("/etc/repro"):
+        if p in sinkPaths: continue
+        if kind == pcDir: removeDir(p) else: removeFile(p)
+    except OSError as ex:
+      result.errors.add("/etc/repro: " & ex.msg)
+  keepIfFailed()
   for k in byClass[lcKey]:
     if not k.isPreBootstrapInput:
       removeOwned(k, result)
@@ -1209,20 +1266,17 @@ proc runAddonUninstall*(opts: UninstallOptions): UninstallResult =
         result.removed.add(k.path)
       except OSError as ex:
         result.errors.add(k.path & ": " & ex.msg)
-  # The secrets ramfs (A7) is unmounted, its plaintext gone, before the
-  # roots are removed.
-  try:
-    releaseRunDir(defaultSecretsLayout())
-  except CatchableError as ex:
-    result.errors.add(defaultSecretsLayout().runDir & ": " & ex.msg)
+  keepIfFailed()
+  for f in sinkFiles:
+    removeOwned(f, result, driver)
+  removeHostRoot(result, "/etc/repro")
+  keepIfFailed()
   # The store evidence directory (§13 decision 47) goes with the state
   # (`/var/lib/repro`), whatever --keep-store says (that keeps `/repro`).
   # Its entries were named, and the uninstall refused, before anything was
   # removed unless the operator passed --discard-store-evidence (above);
   # they were removed, each checked gone, above. One that appeared since
   # is reported with the root, once the root is gone.
-  let stateEvidence = evidenceEntries(custodySite(stateDir))
-  for root in ["/etc/repro", "/var/lib/repro", "/run/repro"]:
-    removeHostRoot(result, root,
-                   if root == "/var/lib/repro": stateEvidence else: @[])
+  removeHostRoot(result, "/var/lib/repro",
+                 evidenceEntries(custodySite(stateDir)))
   restorePreBootstrapInputs(captured, opts.keepStore, result)

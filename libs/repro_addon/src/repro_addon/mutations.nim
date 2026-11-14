@@ -955,6 +955,9 @@
 ## ``fresh-ignores-listings``                 fresh_binary does not check a
 ##                                            listed directory's entries
 ##                                            (decision 80)
+## ``fresh-accepts-user-config``              fresh_binary accepts a helper
+##                                            built without --skipUserCfg
+##                                            (decision 142)
 ## ``override-sig-write-error-swallowed``     a failed signature write does
 ##                                            not stop the discard (round 6)
 ## ``override-rollback-removes-sig``         an intent record whose write
@@ -992,6 +995,13 @@
 ##                                            attestation key and the state
 ##                                            when the discard's completion
 ##                                            could not be written
+## ``sink-config-removed-in-step-4``          the Evidence sink's
+##                                            configuration and CA go with
+##                                            the other /etc objects
+##                                            (decision 140)
+## ``state-removed-after-root-failure``       the state goes although
+##                                            /etc/repro, a key or the
+##                                            secrets ramfs failed
 ## ``ship-ok-without-sink-configuration``     uninstall reads a missing sink
 ##                                            configuration as "nothing to
 ##                                            wait for" though records are
@@ -1728,13 +1738,16 @@ const
                           "finish-trusts-kept-list",
                           "evidence-reported-removed-unchecked",
                           "ship-ok-without-sink-configuration",
+                          "sink-config-removed-in-step-4",
+                          "state-removed-after-root-failure",
                           "intent-overwrites-existing",
                           "discard-completed-objects-present",
                           "discard-failed-removal-counted-as-kept",
                           "discard-completion-key-read-late",
                           "discard-completion-failure-discards-key",
                           "discard-completion-sync-error-swallowed",
-                          "fresh-ignores-listings"]
+                          "fresh-ignores-listings",
+                          "fresh-accepts-user-config"]
 
 when AddonMutation.len > 0 and AddonMutation notin KnownAddonMutations and
     AddonMutation notin KnownAgentMutations:

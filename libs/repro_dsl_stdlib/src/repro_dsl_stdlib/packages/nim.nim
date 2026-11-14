@@ -334,6 +334,9 @@ package nim:
         # graph edge (the ``test-fixtures`` collection in ``repro.nim``)
         # instead of a per-test runtime ``nim c --app:lib`` shell-out.
         boolFlag appLib is bool, alias = "--app:lib"
+        # The user's configuration ($XDG_CONFIG_HOME/nim) is no source of
+        # the tree: an edge that must not depend on it skips it.
+        boolFlag skipUserCfg is bool, alias = "--skipUserCfg"
         boolFlag hintsOff is bool, alias = "--hints:off"
         boolFlag warningsOff is bool, alias = "--warnings:off"
         flag disabledHints is seq[string],
@@ -666,6 +669,7 @@ proc c*(pkg: NimPackage; source: string; binary: string;
         passL: seq[string] = @[];
         nimcache = "";
         appLib = false;
+        skipUserCfg = false;
         threadsOn = false;
         parallelBuild = 0;
         actionId = "";
@@ -818,7 +822,8 @@ proc c*(pkg: NimPackage; source: string; binary: string;
     gccExe = gccExe, gccLinkerExe = gccLinkerExe, mm = mm,
     paths = paths.mapIt(fromRunDir(it)), passC = passC,
     passL = effectivePassL, nimcache = fromRunDir(cacheDir),
-    appLib = appLib, threadsOn = threadsOn, parallelBuild = parallelBuild,
+    appLib = appLib, skipUserCfg = skipUserCfg, threadsOn = threadsOn,
+    parallelBuild = parallelBuild,
     actionId = actionId,
     deps = deps,
     after = (if threadZig: @after & @[cross.wrappers] else: @after),
