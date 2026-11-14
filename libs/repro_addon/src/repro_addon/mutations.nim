@@ -998,6 +998,10 @@
 ##                                            attestation key and the state
 ##                                            when the discard's completion
 ##                                            could not be written
+## ``ledger-copy-removed-with-the-rest``      /var/lib/repro is removed in
+##                                            one recursive removal, so a
+##                                            part-way failure can take the
+##                                            ledger copy (decision 146)
 ## ``sink-config-removed-in-step-4``          the Evidence sink's
 ##                                            configuration and CA go with
 ##                                            the other /etc objects
@@ -1772,6 +1776,7 @@ const
                           "evidence-reported-removed-unchecked",
                           "ship-ok-without-sink-configuration",
                           "sink-config-removed-in-step-4",
+                          "ledger-copy-removed-with-the-rest",
                           "state-removed-after-root-failure",
                           "intent-overwrites-existing",
                           "discard-completed-objects-present",
