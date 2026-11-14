@@ -556,7 +556,8 @@ const LegacyVerbSynopses = [
     "repro hardware {probe} [--dry-run | --output PATH | --regenerate]\n"),
   ("cargo",
     "repro cargo gc [--target-dir DIR] [--keep-sets N] [--min-age DURATION] [--dry-run] [--cargo-home[=DIR]]\n" &
-      "repro cargo record-live [--target-dir DIR] [--from FILE|-] [--tee] [--keep-sets N]\n"),
+      "repro cargo record-live [--target-dir DIR] [--from FILE|-] [--tee] [--keep-sets N]\n" &
+      "repro cargo run [-j N] [--products FILE] [--fragment FILE --action-id ID] [--relative-to DIR] [--libs] -- cargo ARGS...\n"),
   ("attest",
     "repro attest expect --image PATH [--out PATH | --check PATH]\n" &
       "repro attest cross-check --manifest PATH --policy PATH --attestations PATH ...\n"),

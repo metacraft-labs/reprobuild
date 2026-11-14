@@ -2120,8 +2120,15 @@ proc buildAction*(id: string; call: PublicCliCall;
                   readOnlyRoots: openArray[string] = [];
                   scratchDirs: openArray[string] = [];
                   removeBeforeRun: openArray[string] = [];
-                  optionalOutputs: openArray[string] = []):
+                  optionalOutputs: openArray[string] = [];
+                  sizedBy = ""):
     BuildActionDef {.dynOrStatic.} =
+  ## ``sizedBy``: the width flag of a command that is not a typed call but
+  ## runs a parallel tool (``sized_tools.sizedWidthByFlag``). The edge then
+  ## asks for the same width range a typed call gets, and the engine writes the
+  ## granted width after that flag. A typed call that is sized already keeps
+  ## its own.
+  ##
   ## ``outputTag`` (Recipe-Val M8): which package-output this edge
   ## contributes to. Defaults to the empty string which the closure
   ## walker treats identically to ``"out"`` — preserves legacy
@@ -2179,8 +2186,10 @@ proc buildAction*(id: string; call: PublicCliCall;
   for arg in call.arguments:
     if arg.encodedValue.len > 0:
       suppliedArguments.add(arg.name)
-  let width = sizedWidthFor(call.packageName, call.executableName,
+  var width = sizedWidthFor(call.packageName, call.executableName,
     call.subcommand, suppliedArguments)
+  if width.flag.len == 0 and sizedBy.len > 0:
+    width = sizedWidthByFlag(sizedBy)
   result = BuildActionDef(
     id: id,
     call: call,

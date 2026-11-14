@@ -2100,7 +2100,7 @@ proc stemWritablePlaces*(service: string; show: ShowProps;
         # A template, shown through its observation instance, has its
         # specifiers resolved for that instance, which no real instance
         # is. Its own files are read too, and a place spelled with a
-        # specifier counts by its literal prefix (§13 decision 145; A9
+        # specifier counts by its literal prefix (§13 decision 146; A9
         # review round 14, finding 4).
         let at = n.find('@')
         if at > 0 and n.find('.', at) == at + 1:
@@ -6677,7 +6677,7 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
                   "run `repro system addon recover`. A reboot first runs the " &
                   "boot re-assertion, which replays this revert and puts the " &
                   "start holds back before any unit rendered with floor " &
-                  "version 5 or later starts (§13 decision 143)")
+                  "version 5 or later starts (§13 decision 144)")
             heldAtRevert = notHeld
             stderr.writeLine("repro-addon: the revert keeps " & held.join(", ") &
               " on hold, not started: its floor check refused them:\n  " &

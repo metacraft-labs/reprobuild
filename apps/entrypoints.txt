@@ -73,6 +73,11 @@ repro-harvest-apt apps/repro-harvest-apt/repro_harvest_apt.nim --define:ssl --pa
 # transport nobody is meant to rely on (the binding, not the transport, is
 # what makes the evidence trustworthy).
 attestation-agent apps/attestation-agent/attestation_agent.nim
+# Thin cargo edge: the RUSTC_WRAPPER the engine installs into a leased cargo
+# action. It runs once per rustc, so it links only the RunQuota client; see
+# libs/repro_cargo_edge. --opt:size and the vendored hash backend (no libblake3
+# or libxxhash to load on every compile) keep its start-up cost down.
+repro-rustc-wrapper apps/repro-rustc-wrapper/repro_rustc_wrapper.nim --opt:size --define:reproVendoredHash
 # Distributed-Execution M7: the Evidence zone of the worker pool. Its own
 # binary, like the attestation agent, because it runs on a DIFFERENT host
 # from the workers whose detections and audit records it holds, and its

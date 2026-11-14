@@ -94,3 +94,50 @@ package `cargo-nextest`:
       os = "macos",
       lockIdentity = "tarball:cargo-nextest@" & NextestVersion &
         ":macos-universal:sha256:7fa40a74fbad476859211759528186252da77d6872bdb67b06a709152bd0a20c"
+
+  # -------------------------------------------------------------------
+  # Typed CLI surface: ``cargo_nextest.nextest(run = true, ...)`` records
+  # ``cargo-nextest nextest run ...``, which is what ``cargo nextest run``
+  # executes.
+  #
+  # THE WIDTH. nextest runs one process per test, as many at once as it has
+  # test threads (``-j``, ``--test-threads``; default: the CPU count). That is
+  # the tool's parallelism, so the edge is SIZED (``sized_tools``): it asks
+  # RunQuota for a width range and the engine writes the granted width after
+  # ``--test-threads``, which makes the thread count follow the grant. A
+  # recipe's own ``testThreads`` is kept when it is within the grant.
+  #
+  # WHAT THE WIDTH DOES NOT REACH. nextest builds the test binaries first, with
+  # cargo, using cargo's own job count (``--build-jobs``, default the CPU
+  # count), and that build is not bounded by the test-thread grant. A recipe
+  # that must bound it builds the binaries in a sized ``cargo.test(noRun =
+  # true)`` edge first, so nextest finds them fresh.
+  #
+  # ``run`` is a flag spelled as the word itself so that the subcommand
+  # ``nextest`` is followed by ``run`` and then by the flags, which is the
+  # order nextest parses (``cargo-nextest nextest run --test-threads 4``);
+  # the subcommand name is one argv word and cannot carry both.
+  # -------------------------------------------------------------------
+  executable cargoNextest:
+    name: "cargo-nextest"
+    cli:
+      dependencyPolicy automaticMonitor
+
+      subcmd "nextest":
+        boolFlag run is bool, alias = "run"
+        boolFlag workspace is bool, alias = "--workspace"
+        flag package is string, alias = "--package"
+        boolFlag release is bool, alias = "--release"
+        boolFlag locked is bool, alias = "--locked"
+        boolFlag offline is bool, alias = "--offline"
+        boolFlag noDefaultFeatures is bool, alias = "--no-default-features"
+        flag features is string, alias = "--features"
+        flag manifestPath is string,
+          alias = "--manifest-path",
+          role = input
+        flag targetDir is string, alias = "--target-dir"
+        flag profile is string, alias = "--profile"
+        boolFlag noFailFast is bool, alias = "--no-fail-fast"
+        flag testThreads is int, alias = "--test-threads"
+        flag buildJobs is int, alias = "--build-jobs"
+        flag filterset is string, alias = "-E"

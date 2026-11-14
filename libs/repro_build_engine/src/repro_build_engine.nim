@@ -144,6 +144,7 @@ import repro_cas_store
 import io_mon
 import repro_platform
 import repro_runquota
+import repro_cargo_edge/wrapper_env
 # M17: the ``ext_repro_action`` schema, the compatibility key, and the
 # row shape. A leaf module by construction — it imports only the hash
 # library — so the engine can build a row without the row's definition
@@ -15169,6 +15170,36 @@ proc preparedActionEnv(action: BuildAction;
   preparedActionEnv(action, config,
     collectResolvedAuxPaths(action, config.toolIdentityResolver))
 
+proc cargoRustcWrapperEntries(action: BuildAction;
+                              env: seq[string]): seq[string] =
+  ## The environment entries that put the rustc wrapper in front of the
+  ## compiler of a sized cargo action (``libs/repro_cargo_edge``). Added at
+  ## launch and not to the action's description, so the wrapper changes
+  ## neither the action's key nor what cargo writes: it is a measurement.
+  ##
+  ## Only an action that cargo itself runs under a lease's width (a sized
+  ## ``cargo build``/``install``/``test``) gets it: the wrapper reports through
+  ## ``RUNQUOTA_PARENT_LEASE``, which only a leased action has. Off unless
+  ## ``REPRO_RUSTC_WRAPPER`` says on (or the default has been turned on after
+  ## its overhead measurement), and absent when the wrapper executable is not
+  ## beside the engine, where it runs as if the feature did not exist.
+  if action.cpuMinMilli == 0'u32 or action.widthFlag != "-j":
+    return
+  let start = executedImageArgvIndex(action.argv)
+  if start < 0 or start >= action.argv.len:
+    return
+  # Cargo itself (a typed cargo call), or a helper that runs it through the
+  # thin cargo edge (the standard provider's delegated build).
+  let runsCargo = isCargoProgram(action.argv[start]) or
+    (start + 1 < action.argv.len and action.argv[start + 1] == EdgeHelperFlag)
+  if not runsCargo:
+    return
+  if not wrapperEnabled(getEnv(WrapperSwitchEnv)):
+    return
+  let wrapper = wrapperBinaryPath(getAppFilename().parentDir,
+    getEnv(WrapperPathEnv))
+  rustcWrapperEntries(env, wrapper)
+
 proc preparedRunQuotaCommand(action: BuildAction;
                              config: BuildEngineConfig;
                              shellUmaskWrap = true): ReproCommandSpec =
@@ -15202,7 +15233,7 @@ proc preparedRunQuotaCommand(action: BuildAction;
     argv: (if shellUmaskWrap: umaskWrappedArgv(deferred.argv)
            else: deferred.argv),
     cwd: action.cwd,
-    env: deferred.env,
+    env: deferred.env & cargoRustcWrapperEntries(action, deferred.env),
     stdoutLimit: config.stdoutLimit,
     stderrLimit: config.stderrLimit,
     isolatedEnv: isolatedEnv)

@@ -19,7 +19,8 @@
 ## compile hand their children a jobserver sized by the flag, so a build
 ## script's ``make`` or ``cc`` stays inside the width too) or has none to
 ## follow (a Nim compile takes ``--parallelBuild:N``, a test binary
-## ``--test-threads N``). Given the width as a flag, none of them needs the
+## ``--test-threads N``, and so does cargo nextest). Given the width as a flag,
+## none of them needs the
 ## engine to serve tokens as well, and a launched tool that cannot be
 ## reconfigured is not an action of this table. RunQuota's own jobserver
 ## (``runquota jobserver``) serves the commands that cannot take a flag; an
@@ -61,6 +62,13 @@ func sized(flag: string): SizedWidth =
   SizedWidth(minMilli: SizedMinMilli, preferredMilli: SizedPreferredMilli,
     flag: flag)
 
+func sizedWidthByFlag*(flag: string): SizedWidth =
+  ## The width range of an edge that is not a typed call but runs a parallel
+  ## tool whose width flag the caller names (the standard provider's cargo
+  ## delegation passes `-j` to its helper, which hands it to cargo). The same
+  ## range as a typed call gets; an empty `flag` is the unsized value.
+  if flag.len == 0: SizedWidth() else: sized(flag)
+
 func sizedWidthFor*(packageName, executableName, subcommand: string;
                     argumentNames: openArray[string]): SizedWidth =
   ## The width range and flag of the edge that a typed call records, or the
@@ -83,6 +91,12 @@ func sizedWidthFor*(packageName, executableName, subcommand: string;
     elif executableName == "cargo-test-binary" and subcommand == "run":
       # The test-binary edge is a libtest process: its width is its worker
       # threads.
+      return sized("--test-threads")
+  of "cargo-nextest":
+    # `cargo nextest run` runs one process per test, `--test-threads` at a
+    # time. `list`, `archive` and the other subcommands start one process.
+    if executableName == "cargo-nextest" and subcommand == "nextest" and
+        "run" in argumentNames:
       return sized("--test-threads")
   of "nim":
     if executableName == "nim" and subcommand in ["c", "cpp", "objc"]:

@@ -1,17 +1,17 @@
 ## The hardening floor after the A9 review's round 14 (ReproOS Add-On Mode
-## spec §10.1 and §13 decisions 143 to 145; reprobuild-pm issues
+## spec §10.1 and §13 decisions 144 to 146; reprobuild-pm issues
 ## 2026-11-14-floor-*):
 ##
 ## - a hold is written with every step checked (``writeHoldFile``): a write
 ##   the file system refuses raises, where Nim's ``writeFile`` left an empty
 ##   file and raised nothing; an empty or truncated hold is never in the
 ##   way of the revert's own (``holdInTheWay``);
-## - §13 decision 143: a floored unit rendered with floor version 5 is
+## - §13 decision 144: a floored unit rendered with floor version 5 is
 ##   ordered after the boot re-assertion; version 4 renders as it did;
-## - §13 decision 144: a remade directory is bounded from the run's start
+## - §13 decision 145: a remade directory is bounded from the run's start
 ##   (``InactiveExitTimestamp``), so a tree made during ``ExecStartPre=``
 ##   or before a oneshot's last ``ExecStart=`` is refused;
-## - §13 decision 145: a writable place spelled with a specifier counts by
+## - §13 decision 146: a writable place spelled with a specifier counts by
 ##   its literal prefix.
 ##
 ## Falsifying builds, each red here: ``hold-written-unchecked``,
@@ -83,7 +83,7 @@ suite "a hold is written with every step checked":
     writeFile(p, "[Unit]\nDescription=the operator's\n")
     check holdInTheWay(p)
 
-suite "§13 decision 143: floored units wait for the boot re-assertion":
+suite "§13 decision 144: floored units wait for the boot re-assertion":
   proc rendered(version: string): string =
     let p = parseAddOnUserProfile("systemd.systemUnit {\n  name = \"a.service\"\n" &
       "  content = \"[Unit]\nDescription=x\n\n[Service]\nUser=a\nExecStart=" &
@@ -101,7 +101,7 @@ suite "§13 decision 143: floored units wait for the boot re-assertion":
     check FloorBootOrdering notin rendered("4")
     check rendered("4") & "" != rendered("5")
 
-suite "§13 decision 144: bounded from the run's start":
+suite "§13 decision 145: bounded from the run's start":
   let created = {"/var/lib/a": CreatedDir(unit: "a.service", invocation: "I0")}.toTable
   proc verdict(btime, mainStart: int64): string =
     systemdRecreated("/var/lib/a", "a.service", ["/var/lib/a"], created, false,
@@ -118,7 +118,7 @@ suite "§13 decision 144: bounded from the run's start":
   test "a directory made as the run begins is accepted":
     check verdict(Start + 30_000_000, Start + 6_000_000_000'i64) == ""
 
-suite "§13 decision 145: a specifier place counts by its literal prefix":
+suite "§13 decision 146: a specifier place counts by its literal prefix":
   test "the prefix stops at the component holding the first specifier":
     check literalPrefix("/run/a9q/%i") == "/run/a9q"
     check literalPrefix("/run/a9q/x%i/y") == "/run/a9q"

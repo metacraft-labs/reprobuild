@@ -963,7 +963,7 @@ const RestartWindowNs* = 100_000_000'i64
 
 const RunStartToleranceNs* = (when hostCPU == "amd64": 1_000_000_000'i64
                               else: 8_000_000_000'i64)
-  ## §13 decisions 141, 144 and 146: how much later than the start of a
+  ## §13 decisions 141, 145 and 147: how much later than the start of a
   ## unit's run (``InactiveExitTimestamp``) a directory systemd made for it
   ## may be born. systemd makes the directories as it spawns the run's first
   ## process (systemd 257 first executes its ``systemd-executor``), after it
@@ -1048,7 +1048,7 @@ proc systemdRecreated*(path, unit: string; declared: openArray[string];
           return "the unit is not running and systemd reports no end of its last run"
         if v.btime > v.lastStop:
           return "the unit is not running, and the tree was born after its last run ended"
-    # §13 decision 141, as decision 144 amends it: an upper bound, counted
+    # §13 decision 141, as decision 145 amends it: an upper bound, counted
     # from the start of the run (``InactiveExitTimestamp``, read in the
     # same ``systemctl show`` as the rest), not from its main process.
     # systemd makes a unit's directories when it spawns the run's FIRST
@@ -1067,7 +1067,7 @@ proc systemdRecreated*(path, unit: string; declared: openArray[string];
       if v.btime > v.invocationStart + RunStartToleranceNs:
         return "it was born more than " & $(RunStartToleranceNs div 1_000_000) &
           " ms after the unit's last run began, so that run, not systemd " &
-          "setting it up, made it (§13 decisions 141 and 144)"
+          "setting it up, made it (§13 decisions 141 and 145)"
   ""
 
 proc managerPathProblem*(path: string; uid: int; dynamic: bool): string =

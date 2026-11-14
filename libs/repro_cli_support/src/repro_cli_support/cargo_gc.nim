@@ -6,6 +6,8 @@
 ##                  [--dry-run] [--cargo-home [DIR]]
 ##   repro cargo record-live [--target-dir DIR] [--from FILE|-] [--tee]
 ##                           [--keep-sets N]
+##   repro cargo run [-j N] [--products FILE] [--fragment FILE --action-id ID]
+##                   [--relative-to DIR] [--libs] -- cargo ARGS...
 ##
 ## Arguments are parsed here; everything else is `repro_cargo_gc`.
 ##
@@ -15,13 +17,17 @@
 
 import std/[os, strutils]
 import repro_cargo_gc
+import repro_cargo_edge/edge_cli as cargo_edge_cli
 
 const
   CargoUsage* =
     "usage: repro cargo gc [--target-dir DIR] [--keep-sets N] " &
     "[--min-age DURATION] [--dry-run] [--cargo-home[=DIR]]\n" &
     "       repro cargo record-live [--target-dir DIR] [--from FILE|-] " &
-    "[--tee] [--keep-sets N]\n"
+    "[--tee] [--keep-sets N]\n" &
+    "       repro cargo run [-j N] [--products FILE] " &
+    "[--fragment FILE --action-id ID] [--relative-to DIR] [--libs] " &
+    "-- cargo ARGS...\n"
   ExitBusy* = 75
 
 proc cargoHelp(): string =
@@ -43,6 +49,16 @@ record-live   Read `cargo ... --message-format=json` output (stdin, or the
               directory, e.g.
                 cargo build --message-format=json | repro cargo record-live --tee
               --tee copies the stream to stdout so the pipe stays usable.
+
+run           The thin cargo edge: run the cargo command after `--` with
+              `--message-format=json-render-diagnostics`, read the final
+              products (executables, cdylib/staticlib outputs of the project's
+              own packages) from cargo's JSON, and write them to --products
+              (one path per line) and/or --fragment (a dynamic-graph fragment
+              declaring them as the outputs of --action-id). cargo's target
+              directory is left to cargo: it is a cache, not an output. -j N
+              is passed on to cargo. A failed build leaves no answer behind.
+              --libs also lists the project's rlibs.
 
 --target-dir  the target directory (default: $CARGO_TARGET_DIR, else ./target).
               Under `build.build-dir` split layouts pass the build directory.
@@ -212,6 +228,7 @@ proc runCargoCommand*(args: seq[string]): int =
   case args[0]
   of "gc": runGc(rest)
   of "record-live": runRecordLive(rest)
+  of "run": cargo_edge_cli.runEdge(rest)
   of "-h", "--help", "help":
     stdout.write cargoHelp()
     0

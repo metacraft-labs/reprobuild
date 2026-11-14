@@ -566,6 +566,9 @@ for libName in [
   # and deletes stale build units (docs/cargo-gc.md). ``repro_cli_support``
   # imports it for `repro cargo`.
   "repro_cargo_gc",
+  # Thin cargo edge: the transparent rustc wrapper, its environment and
+  # product discovery from cargo's JSON (docs/cargo-edge.md).
+  "repro_cargo_edge",
   # Incremental-Test-Runner M0b-3: the former vendored ``repro_ct_incremental``
   # engine copy was DELETED. The ``repro watch --ct-incremental`` decision seam
   # now flows through the engine-free ``ct_incremental_adapter`` (resolved from

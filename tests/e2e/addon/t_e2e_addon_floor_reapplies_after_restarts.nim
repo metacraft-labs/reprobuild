@@ -65,17 +65,17 @@
 ## - **a reboot before the recovery** of that pending revert: every floored
 ##   unit waits for the boot re-assertion, which replays the revert and puts
 ##   its start holds back first, so the refused unit stays down and its tree
-##   root's (§13 decision 143);
+##   root's (§13 decision 144);
 ## - **a full file system** (a filled 4 KiB tmpfs over the drop-in
 ##   directory): the hold's write fails at the flush, the revert sees it and
 ##   stays pending, the refused unit cannot start, and with room again the
 ##   recovery writes the hold in full (A9 review round 14, finding 1);
 ## - **a tree made 3 s into a run before its main process**, during a 6 s
 ##   ``ExecStartPre=`` or before a oneshot's last ``ExecStart=``, is refused
-##   (§13 decision 144: the bound counts from the run's start);
+##   (§13 decision 145: the bound counts from the run's start);
 ## - **a base template whose place carries a specifier**
 ##   (``RuntimeDirectory=<stem>/%i``) covers a listener below
-##   ``/run/<stem>/`` (§13 decision 145);
+##   ``/run/<stem>/`` (§13 decision 146);
 ## - **a tree made 3 s into a run** that began outside a switch is refused
 ##   (§13 decision 141: no later than the main process's start plus
 ##   ``MainStartToleranceNs``);
@@ -391,7 +391,7 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
          "is still root's", "start=0" notin startW.stdout and
          g.exec("stat -c %U /var/lib/a9r-st").stdout.strip() == "root",
          startW.stdout & startW.stderr)
-    # §13 decision 143: a reboot before the recovery. Every floored unit
+    # §13 decision 144: a reboot before the recovery. Every floored unit
     # waits for the boot re-assertion, which replays the pending revert and
     # puts its start holds back first, so the refused unit stays down.
     g.rebootGuest()
@@ -406,7 +406,7 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
       "journalctl -b --no-pager -u a9r-st.service -u repro-addon-reassert.service | tail -8")
     record["unwritableHoldReboot"] = %bootW.stdout
     step("a reboot before the recovery does not start the refused unit: its " &
-         "tree is still root's and the revert still pending (§13 decision 143)",
+         "tree is still root's and the revert still pending (§13 decision 144)",
          g.exec("systemctl is-active a9r-st.service").stdout.strip() != "active" and
          g.exec("stat -c %U /var/lib/a9r-st").stdout.strip() == "root" and
          g.exec("test -e " & Pending).exitCode == 0, bootW.stdout & bootW.stderr)
@@ -459,7 +459,7 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
     step("then the unit applies and starts again", r.exitCode == 0 and
          g.exec("systemctl is-active a9r-st.service").stdout.strip() == "active",
          r.stdout & r.stderr)
-    # §13 decision 144: the bound counts from the run's start, so a tree
+    # §13 decision 145: the bound counts from the run's start, so a tree
     # made during an ExecStartPre= (6 s), or before a oneshot's last
     # ExecStart=, is refused.
     for (label, exec) in [("pre", "ExecStartPre=/bin/sleep 6\nExecStart=" & binary & " --version\n"),
@@ -479,7 +479,7 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
       r = g.applyProfile(repro, label & "2", pu(label & "2"))
       let outp = r.stdout & r.stderr
       step("a root tree made 3 s into the run, before its main process (" & label &
-           "), is refused (§13 decision 144)", r.exitCode != 0 and
+           "), is refused (§13 decision 145)", r.exitCode != 0 and
            "[rule:existing-tree" in outp and "/var/lib/a9r-p" in outp, evp & outp)
       notPending("the refused apply over a tree made before the main process (" & label & ")")
       discard g.run("systemctl stop a9r-p.service; rm -rf /var/lib/a9r-p; true")
@@ -666,7 +666,7 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
     discard g.applyProfile(repro, "c-lh", control)
     discard g.run("systemctl stop a9r-h.socket 'a9r-h@*' 2>/dev/null; rm -f " &
       "/usr/lib/systemd/system/a9r-h@.service; systemctl daemon-reload; rm -rf /run/a9r-h; true")
-    # (d) §13 decision 145: a base template whose place carries a specifier
+    # (d) §13 decision 146: a base template whose place carries a specifier
     # (RuntimeDirectory=a9r-q/%i) counts by its literal prefix, though the
     # observation instance resolves it to a directory no instance has.
     discard g.run("printf '[Service]\\nUser=a9e\\nRuntimeDirectory=a9r-q/%%i\\n" &
@@ -679,7 +679,7 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
     let outq = r.stdout & r.stderr
     if r.exitCode != 0:
       step("a base template whose RuntimeDirectory= is <stem>/%i covers the " &
-           "listener below /run/<stem>/ (§13 decision 145)",
+           "listener below /run/<stem>/ (§13 decision 146)",
            "unit sharing its stem" in outq, outq)
       notPending("the refused apply over a specifier place")
     else:
