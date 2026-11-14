@@ -43,11 +43,34 @@ template boundedDecode(errorType: typedesc; expression: untyped) =
   doAssert getMaxMem() - before < 512 * 1024,
     "decoder allocated from an impossible element count"
 
+proc offsetAfterString(bytes: openArray[byte]; marker: string): int =
+  ## Position just past the one length-prefixed occurrence of ``marker`` in
+  ## ``bytes``. Locating a count through the encoder's own output keeps a case
+  ## aimed at its list when fields are added ahead of it; a literal offset
+  ## silently drifts onto a neighbouring string length instead.
+  var encoded: seq[byte]
+  encoded.writeString(marker)
+  result = -1
+  for start in 0 .. bytes.len - encoded.len:
+    if bytes.toOpenArray(start, start + encoded.len - 1) == encoded:
+      doAssert result < 0, "marker " & marker & " is not unique"
+      result = start + encoded.len
+  doAssert result >= 0, "marker " & marker & " was not encoded"
+
 proc exercise(family: string; offset: int) =
   case family
-  of "store":
-    var bytes = externalRealizeBody(StoreDaemonExternalRealizeRequest())
-    bytes.corruptCount(offset, false)
+  of "storeMirrors", "storePrune":
+    # Each list is preceded by a string field carrying a marker, so the count
+    # is found where the encoder actually put it rather than at a fixed byte.
+    let request = StoreDaemonExternalRealizeRequest(
+      tarballUrl: "mirror-count-follows", executableAlias: "prune-count-follows")
+    var bytes = externalRealizeBody(request)
+    let at = offsetAfterString(bytes, if family == "storeMirrors":
+      request.tarballUrl else: request.executableAlias) + offset
+    var cursor = at
+    doAssert readU32Le(bytes, cursor) == 0'u32,
+      "the derived offset does not hold the empty list's count"
+    bytes.corruptCount(at, false)
     boundedDecode(EnvelopeError, parseExternalRealizeBody(bytes))
   of "launch":
     var bytes = encodeLaunchPlan(LaunchPlan(schemaVersion: LaunchPlanCurrentSchemaVersion))
@@ -160,7 +183,8 @@ proc runCase(family: string; offset: int) =
 
 suite "binary collection counts are bounded before allocation":
   test "store daemon mirror and prune lists":
-    for offset in [60, 76]: runCase("store", offset)
+    runCase("storeMirrors", 0)
+    runCase("storePrune", 0)
   test "launch arguments environment executables and runtime paths":
     for offset in [24, 33, 37, 41]: runCase("launch", offset)
   test "activation manifest collections":
