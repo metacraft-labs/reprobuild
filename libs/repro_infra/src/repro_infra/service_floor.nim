@@ -151,9 +151,9 @@ const
     ## the frozen ``service_floor_v1`` / ``service_floor_v2``, 3 is
     ## ``service_floor_v3``. Version 4 is this module's floor lines without
     ## the boot ordering version 5 adds to ``[Unit]``
-    ## (``FloorBootOrdering``; §13 decision 143).
+    ## (``FloorBootOrdering``; §13 decision 144).
   FloorBootOrdering* = "After=repro-addon-reassert.service"
-    ## §13 decision 143: every floored unit (from floor version 5) starts
+    ## §13 decision 144: every floored unit (from floor version 5) starts
     ## only after the add-on's boot re-assertion, which replays a pending
     ## revert -- putting its start holds back -- before any floored unit
     ## can start (systemd.unit(5), After=).
@@ -1393,7 +1393,7 @@ proc literalPrefix*(path: string): string =
   ## ``path`` up to the component holding its first specifier (``%i``,
   ## ``%n``, ...; systemd.unit(5), "Specifiers"): ``/run/a9q/%i`` and
   ## ``/run/a9q/x%i/y`` are ``/run/a9q``, so a template's place covers
-  ## every instance's (§13 decision 145). ``%%`` is a literal ``%`` and is
+  ## every instance's (§13 decision 146). ``%%`` is a literal ``%`` and is
   ## not a specifier. A path with no specifier is returned as it is.
   when FloorMutation == "writable-specifier-resolved":
     return path
@@ -1414,7 +1414,7 @@ proc floorWritablePlaces*(directives: openArray[tuple[key, value: string]]):
   ## normalised paths: ``ReadWritePaths=``, each writable bind's
   ## destination, each tmpfs, each ``*Directory=`` under its root. A place
   ## spelled with a specifier counts by its literal prefix
-  ## (``literalPrefix``; §13 decision 145).
+  ## (``literalPrefix``; §13 decision 146).
   const roots = [("StateDirectory", "/var/lib"), ("RuntimeDirectory", "/run"),
                  ("CacheDirectory", "/var/cache"), ("LogsDirectory", "/var/log"),
                  ("ConfigurationDirectory", "/etc")]
