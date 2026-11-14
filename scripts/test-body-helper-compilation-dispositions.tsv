@@ -88,6 +88,7 @@
 # t_e2e_codetracer_in_place_project_file dynamic-source -> graph-owned.
 # 2026-11-06: t_e2e_codetracer_in_place_project_file removed with the
 # CodeTracer e2e tests (CodeTracer's own CI covers them); its row is gone.
+# 2026-11-15: t_path_only_tool_interfaces migrate-pending -> graph-owned.
 # 2026-11-07: t_e2e_hcr_linux_replay_of_patched_recording (migrate-pending)
 # moved to codetracer-native-recorder, and t_e2e_repro_watch's four
 # CodeTracer cases moved to CodeTracer, taking the file's only compiler flow
@@ -281,7 +282,7 @@ tests/e2e/m83/t_e2e_profile_run_edge_is_unblessed.nim	product-api	compileProfile
 tests/e2e/m83/t_e2e_repro_profile_compile.nim	migrate-pending	MIGRATABLE IN PART: compileAndRun over seven tracked tests/fixtures/m83 sources. One of them, home_compile_fail.nim, asserts a compile FAILURE and must stay out of the graph -- a graph edge that fails is a broken build, not a passing test.
 tests/e2e/m83/t_e2e_repro_profile_compile_via_action.nim	product-api	Drives compileProfileToRbpi across cache miss/hit/force/failure plus the repro __repro-compile-profile helper subcommand.
 tests/e2e/macos-monitor/t_macos_monitor_shim_event_taxonomy.nim	migrate-pending	MIGRATABLE: FixtureSource is a fixed const (:7) written verbatim (:227) then cc -pthread (:175). The shim and CLI are already requireBinary'd. BLOCKED ON THE C EDGE: repro.nim has no C-compiler edge at all, so this cannot be lifted today no matter how static the source is.
-tests/e2e/path-only/t_path_only_tool_interfaces.nim	migrate-pending	MIGRATABLE: requireSuccess(@['nim','c',...,'--out:'&reproBin, apps/repro/repro.nim]) rebuilds the CLI that edge reprobuild.apps.repro already produces. Every other suite reaches it through requireBinary. Not done in this pass.
+tests/e2e/path-only/t_path_only_tool_interfaces.nim	graph-owned	Uses build/bin/repro from edge reprobuild.apps.repro through requireHostBinary(reproBinaryPath()); its private `nim c` of apps/repro/repro.nim is gone (that unrpathed copy could not load libclingo once interface extraction ran isolated).
 tests/integration/t_arm_outside_declared_platforms_is_a_lint_error.nim	compiler-is-subject	Its own docstring: 'this test compiles fixture recipes with nim c rather than calling a proc: the behaviour under test IS the compile'. Assertion 1 is a compile FAILURE.
 tests/integration/t_b0_runquota_repro_nim_compiles.nim	migrate-pending	MIGRATABLE in principle, same shape as t_spec_example_fixtures_compile: a tracked file, nim check'ed (:85-:103) for a bare exit-0. TWO BLOCKERS, both named: (1) the source is ../runquota/repro.nim, in a SIBLING repo resolved at run time by requireRunQuotaSourceRoot, and repro.nim edges name repo-relative sources -- this needs the cross-repo source-consumption path; (2) no type-check-only edge kind exists. The file's second assertion (substring checks on the package/executable/library shape) is deliberately syntactic and is unaffected either way. Newly detected: the argv form '"nim", "check",' (:85).
 tests/integration/t_compiler_scratch_isolation.nim	compiler-is-subject	Executing the providerCompileCommand argv asserts real Nim SDK/config/extra-path resolution and linking; prebuilding would remove that boundary. Original compilation-API scratch/CWD/concurrency controls remain.
