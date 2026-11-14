@@ -87,7 +87,7 @@ const
   RevertHoldName* = "zz-repro-addon-revert-hold.conf"
     ## The persistent drop-in a revert writes, under ``/etc/systemd/system``,
     ## for each unit of the generation its own floor check refused (§13
-    ## decision 126): the same assertion as the start hold, so the unit
+    ## decision 133): the same assertion as the start hold, so the unit
     ## does not start, at a reboot either, until a later switch's check
     ## passes and removes it.
   RevertHoldText* = "# Written by the ReproOS add-on's revert: its floor " &
@@ -1344,7 +1344,7 @@ const ListenerKeys* = "Listen,ListenStream,ListenDatagram,ListenSequentialPacket
 proc isAddonHold*(path, content: string): bool =
   ## ``path`` is one of the add-on's own holds, which the rules about
   ## loaded files do not judge: the switch's start hold, or a revert's
-  ## persistent hold (§13 decision 126) holding exactly ``RevertHoldText``.
+  ## persistent hold (§13 decision 133) holding exactly ``RevertHoldText``.
   ## A file of that name with other content is judged like any drop-in.
   if path.endsWith("/" & StartHoldName): return true
   when mutated("revert-hold-any-content"):

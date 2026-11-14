@@ -2028,7 +2028,7 @@ proc effectiveFloorCheck*(resources: openArray[SystemResource];
   for d in resources:
     if d.kind == srkSystemdSystemDropIn: own.incl(targetPathOf(d))
   for u in flooredUnitNames(resources): own.incl(startHoldPath(u))
-  # A revert's persistent holds are the add-on's own (§13 decision 126).
+  # A revert's persistent holds are the add-on's own (§13 decision 133).
   var revertHoldFiles: seq[string]
   for d in [PersistentUnitDir, RuntimeUnitDir]:
     try: revertHoldFiles.add(staleHolds(RevertHoldName, d))
@@ -6146,7 +6146,7 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
             discard clearStaleStartHolds()
             removeStartHolds(startHolds)
             startHolds.setLen(0)
-            # §13 decision 126: persistent, so a reboot does not start a
+            # §13 decision 133: persistent, so a reboot does not start a
             # held unit either; only a switch whose check passes removes it.
             let holdDir =
               when mutated("revert-hold-runtime-only"): RuntimeUnitDir
@@ -6183,7 +6183,7 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
             let stale = clearStaleStartHolds()
             removeStartHolds(startHolds)
             # A revert's holds go once a switch's check passes (§13
-            # decision 126), wherever a build wrote them.
+            # decision 133), wherever a build wrote them.
             var revertStale: seq[string]
             for d in [PersistentUnitDir, RuntimeUnitDir]:
               try: revertStale.add(clearStaleHolds(RevertHoldName, d))
@@ -6191,7 +6191,7 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
             # A unit a revert held is started now if the generation enables
             # it and it is not running: the hold, not the unit, kept it down,
             # and an unchanged unit has no transition of its own (§13
-            # decision 126).
+            # decision 133).
             when not mutated("cleared-hold-not-started"):
               for h in revertStale:
                 var u = extractFilename(parentDir(h))

@@ -264,7 +264,7 @@ suite "round 12: what a revert holds":
     check h == @["a.service", "t@.service"]
     check "service" notin h
 
-suite "§13 decision 126: a revert's persistent hold":
+suite "§13 decision 133: a revert's persistent hold":
   const HoldPath = "/etc/systemd/system/a.service.d/" & RevertHoldName
   test "the add-on's own hold is not judged as a drop-in's keys":
     var e = goodInput()
