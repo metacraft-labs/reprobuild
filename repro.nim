@@ -2525,6 +2525,8 @@ package reprobuild:
         source == "tests/unit/test_ci_reconcile_lock_credentials.py"
       let releaseSmokeTest =
         source == "tests/unit/test_release_smoke_dev_exec.py"
+      let releaseTagTest =
+        source == "tests/unit/test_release_tag_names_build.py"
       let confinementSystemdAnalyzeTest =
         source == "tests/unit/test_daemon_worker_confinement_systemd_analyze.py"
       let pyExecute = pythonUnittest.run(
@@ -2553,6 +2555,11 @@ package reprobuild:
             "scripts/release/with_windows_archive_runquota.ps1",
             ".github/workflows/release.yml",
             "scripts/verify_release.sh", "repro.nim"]
+        elif releaseTagTest:
+          # The guard, and the workflow whose publish-job steps the test runs.
+          # It copies the guard into the runner clone it builds.
+          @["scripts/release/assert_tag_names_commit.sh",
+            ".github/workflows/release.yml"]
         elif confinementSystemdAnalyzeTest:
           # The two CONF-3/CONF-4 scripts it imports, and the real unit,
           # threshold and lease-floor inputs and header they read.
@@ -2582,6 +2589,10 @@ package reprobuild:
       # for the loopback-forge cases.
       if ciLockCredentialsTest:
         appendRegisteredActionToolIdentityRefs(pyExecute.id, ["git"])
+      # Real git and bash: a bare repository as the remote, `git ls-remote`
+      # against it, and the workflow steps' `run:` lines under bash.
+      if releaseTagTest:
+        appendRegisteredActionToolIdentityRefs(pyExecute.id, ["bash", "git"])
       if releaseSmokeTest:
         # Bind actual declared child tools into the filtered execute PATH.
         appendRegisteredActionToolIdentityRefs(pyExecute.id, ["bash", "just"])
