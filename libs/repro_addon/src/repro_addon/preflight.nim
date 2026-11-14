@@ -120,8 +120,10 @@ type
     snapperConfigs*: seq[string]
       ## The snapper configurations whose ``SUBVOLUME`` is ``/`` (§5.1).
     networkManager*: string
-      ## The active network manager (§4.5): ``NetworkManager``,
-      ## ``systemd-networkd``, ``both`` or ``none``. Arch bases only.
+      ## The active network manager (§4.5, §6.1): ``NetworkManager``,
+      ## ``systemd-networkd``, ``both``, ``none``, or ``unknown`` when
+      ## ``systemctl is-active`` does not answer with exactly one known
+      ## state per service (``networkManagerFromIsActive``). Arch bases only.
     omarchy*: OmarchyFacts   ## Omarchy bases only
     omarchyAccount*: string  ## the profile's, as checked
 

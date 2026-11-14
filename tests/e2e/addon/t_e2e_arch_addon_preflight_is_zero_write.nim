@@ -49,6 +49,13 @@
 ## preflight that writes under ``/var/lib`` and swallows the error; step 2's
 ## marker leg must turn red.
 ##
+## A falsifier run (``REPRO_ADDON_MUTATION``) passes only when every base
+## shows the mutation's own red step (``expectedFalsifier``, judged by
+## ``arch_gate_support.falsifierVerdict``): a red from an exception or an
+## infrastructure failure, a red elsewhere, or a base outside the mutation
+## turning red fails it. The base's own verdict stays ``red`` in its
+## record; the judgement is the record's ``falsifier``.
+##
 ## Opt-in: ``REPRO_ADDON_VM_GATES=1`` (``just e2e_arch_addon_preflight_is_zero_write``).
 ## Bases: ``REPRO_ADDON_BASES`` (default ``arch-btrfs-amd64,arch-ext4-amd64``);
 ## step 4 always runs on ``arch-old-systemd-amd64`` as well.
@@ -88,6 +95,13 @@ proc newerThanMarker(g: Guest; repro: string): ExecOut =
     "find / -xdev \\( -path /proc -o -path /sys -o -path /dev -o -path /run " &
     "-o -path /tmp -o -path /var/log -o -path /var/lib/systemd/timesync " &
     "\\) -prune -o -newer /run/addon-marker -print")
+
+proc expectedFalsifier(mut: string; b: BaseImage): Falsifier =
+  ## Each falsifier's expected red (``arch_gate_support.falsifierVerdict``).
+  case mut
+  of "preflight-writes":
+    Falsifier(required: @["the preflight modified no file on the root filesystem"])
+  else: raise unknownMutation("e2e_arch_addon_preflight_is_zero_write", mut)
 
 proc runBase(b: BaseImage; record: JsonNode): seq[string] =
   var g: Guest
@@ -289,8 +303,9 @@ suite "e2e_arch_addon_preflight_is_zero_write":
         else: record["archiveDate"] = %archiveDateOf(b)
         let f = runBase(b, record)
         record["verdict"] = %(if f.len == 0: "green" else: "red")
+        let judged = judgeRun("e2e_arch_addon_preflight_is_zero_write", record, f, expectedFalsifier, b)
         echo "record: ", writeRecord("e2e_arch_addon_preflight_is_zero_write",
                                      record)
-        failures.add(f)
+        failures.add(judged)
       for f in failures: echo "FAIL ", f
       check failures.len == 0

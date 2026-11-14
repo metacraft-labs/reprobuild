@@ -8771,8 +8771,8 @@
       "owner": "libs/repro_addon",
       "requiresReproBinary": false,
       "source": "libs/repro_addon/tests/t_addon_arch_base.nim",
-      "sourceSuiteCount": 10,
-      "staticCaseCount": 29,
+      "sourceSuiteCount": 11,
+      "staticCaseCount": 30,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -13294,7 +13294,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_cli_support/tests/t_deploy_agent_realises_add_on_for_its_host_base.nim",
       "sourceSuiteCount": 2,
-      "staticCaseCount": 8,
+      "staticCaseCount": 12,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -32000,6 +32000,7 @@
       "defines": [],
       "language": "nim",
       "localDependencyShape": [
+        "repro_dsl_stdlib",
         "repro_test_support"
       ],
       "owner": "tests/e2e",

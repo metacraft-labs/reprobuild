@@ -30,6 +30,13 @@
 ## with ``REPRO_ADDON_TEST_SEAMS=1``): uninstall proceeds over the pending
 ## marker, so the refusal step is red. Record red, then green.
 ##
+## A falsifier run (``REPRO_ADDON_MUTATION``) passes only when every base
+## shows the mutation's own red step (``expectedFalsifier``, judged by
+## ``arch_gate_support.falsifierVerdict``): a red from an exception or an
+## infrastructure failure, a red elsewhere, or a base outside the mutation
+## turning red fails it. The base's own verdict stays ``red`` in its
+## record; the judgement is the record's ``falsifier``.
+##
 ## Opt-in: ``REPRO_ADDON_VM_GATES=1`` and ``REPRO_ADDON_TEST_SEAMS=1``
 ## (``just e2e_arch_addon_uninstall_refuses_pending_switch``).
 ##
@@ -70,6 +77,16 @@ proc killPendingOwner(g: Guest): tuple[ok: bool; detail: string] =
       return (true, "killed pid " & pid & " (" & cmd.strip() & ")")
     sleep(250)
   (false, "pid " & pid & " is still there after SIGKILL")
+
+proc expectedFalsifier(mut: string; b: BaseImage): Falsifier =
+  ## Each falsifier's expected red (``falsifierVerdict``).
+  case mut
+  of "uninstall-skips-pending-check":
+    Falsifier(required: @[
+      "uninstall refuses with EAddOnSwitchPending, naming the marker",
+      "the refusal came before the units were stopped (the agent's fetch " &
+        "timer is still active)"])
+  else: raise unknownMutation("e2e_arch_addon_uninstall_refuses_pending_switch", mut)
 
 proc runBase(b: BaseImage; record: JsonNode): seq[string] =
   var g: Guest
@@ -162,8 +179,9 @@ suite "e2e_arch_addon_uninstall_refuses_pending_switch":
         record["base"] = %b.name
         let f = runBase(b, record)
         record["verdict"] = %(if f.len == 0: "green" else: "red")
+        let judged = judgeRun("e2e_arch_addon_uninstall_refuses_pending_switch", record, f, expectedFalsifier, b)
         echo "record: ", writeRecord(
           "e2e_arch_addon_uninstall_refuses_pending_switch", record)
-        failures.add(f)
+        failures.add(judged)
       for f in failures: echo "FAIL ", f
       check failures.len == 0

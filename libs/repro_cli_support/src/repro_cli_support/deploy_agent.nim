@@ -192,10 +192,23 @@ const
     ## ``--system-base this-host``: realise an ``addOn`` selection for the
     ## base of the machine the compile runs on, observed as ``repro infra``
     ## observes it. What an agent passes when it compiles on its own host.
+  CompileProfileTargetExit* = 3
+    ## ``compile-profile``'s exit code when it understood its command line
+    ## but cannot compile for the target it names: a selection or base it
+    ## refuses (``ValueError``), or ``this-host`` on a base no add-on
+    ## realisation covers, an unreadable ``os-release`` included
+    ## (``EAddOnUnsupportedBase``). Distinct from the usage exit (2), which
+    ## an agent takes as "this compiler predates ``--system-base``" and
+    ## retries without it: a target refusal must never be retried, because
+    ## the retry would compile for the Debian realisation on a host that is
+    ## not Debian (ReproOS-Add-On-Mode §13 decision 134, as amended at AR1
+    ## review round 2). Mirrored by ``repro_addon/verified_compile``.
 
 proc compileTargetFor*(host, platform, arch: string; systemMode = "";
                        systemActivities: seq[string] = @[];
-                       systemBase = ""): SystemPlanTarget =
+                       systemBase = "";
+                       observe: proc(): HostBase {.nimcall.} = observeHostBase):
+    SystemPlanTarget =
   ## The plan target of an agent compile: the ``default`` activity, with the
   ## predicate facts overridden by whatever the caller names. A producer
   ## compiles for its target's facts, and the target's agent compiles with
@@ -235,7 +248,7 @@ proc compileTargetFor*(host, platform, arch: string; systemMode = "";
         of "", "debian": srAddOnDebian
         of "arch": srAddOnArch
         of SystemBaseThisHost:
-          addOnRealisationFor(observeHostBase(), "the host this agent " &
+          addOnRealisationFor(observe(), "the host this agent " &
             "compiles on")
         else: raise newException(ValueError, "--system-base must be " &
           "debian, arch or " & SystemBaseThisHost & ", got '" & systemBase &
@@ -245,6 +258,21 @@ proc compileTargetFor*(host, platform, arch: string; systemMode = "";
     result = systemPlanTarget(host, toHashSet(systemActivities), realisation)
   if platform.len > 0: result.facts.platform = platform
   if arch.len > 0: result.facts.arch = arch
+
+proc resolveCompileTarget*(host, platform, arch, systemMode: string;
+    systemActivities: seq[string]; systemBase: string;
+    observe: proc(): HostBase {.nimcall.} = observeHostBase):
+    tuple[target: SystemPlanTarget; exitCode: int; message: string] =
+  ## ``compileTargetFor`` as ``compile-profile`` uses it: exit code 0 and
+  ## the target, or ``CompileProfileTargetExit`` and why not. ``observe``
+  ## is the base observation ``this-host`` reads (a seam for tests; the
+  ## command always observes the running machine).
+  try:
+    result.target = compileTargetFor(host, platform, arch, systemMode,
+      systemActivities, systemBase, observe)
+  except ValueError, EAddOnUnsupportedBase:
+    result.exitCode = CompileProfileTargetExit
+    result.message = getCurrentException().msg
 
 proc runDeployAgentCompileProfile*(args: seq[string]): int =
   ## ``repro deploy-agent compile-profile --staged <module.nim>
@@ -372,14 +400,12 @@ proc runDeployAgentCompileProfile*(args: seq[string]): int =
   var actions: seq[ProfileBuildAction]
   if not hostGiven:
     host = try: selectHost("", false).name except CatchableError: ""
-  var target: SystemPlanTarget
-  try:
-    target = compileTargetFor(host, platform, arch, systemMode,
-                              systemActivities, systemBase)
-  except ValueError, EAddOnUnsupportedBase:
-    let e = getCurrentException()
-    stderr.writeLine("repro deploy-agent compile-profile: " & e.msg)
-    return 2
+  let resolved = resolveCompileTarget(host, platform, arch, systemMode,
+                                      systemActivities, systemBase)
+  if resolved.exitCode != 0:
+    stderr.writeLine("repro deploy-agent compile-profile: " & resolved.message)
+    return resolved.exitCode
+  let target = resolved.target
   if not resolveSystemProfileText(staged, profileText, stateDir,
       "repro deploy-agent compile-profile", text,
       planCommand = "repro infra plan", outBuildActions = addr actions,

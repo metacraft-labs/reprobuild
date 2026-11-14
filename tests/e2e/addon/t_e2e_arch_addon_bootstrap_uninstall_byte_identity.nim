@@ -38,8 +38,17 @@
 ## ``arch-btrfs-amd64,arch-ext4-amd64,omarchy-amd64``). On the Omarchy VM
 ## (the test bed's pinned Omarchy 4.5.0 install) the preflight and bootstrap
 ## take ``--profile`` with the ``omarchyAccount``, every generation names
-## it, and the fingerprint also records the account's hook tree
-## (``omarchy-hooks``), which must be present and unchanged at the end.
+## it, an operator apply of an empty profile (which names no account) is
+## refused with ``EAddOnBaseLayerOwned`` and changes nothing, and the
+## fingerprint also records the account's hook tree (``omarchy-hooks``),
+## which must be present and unchanged at the end.
+##
+## A falsifier run (``REPRO_ADDON_MUTATION``) passes only when every base
+## shows the mutation's own red step (``expectedFalsifier``, judged by
+## ``arch_gate_support.falsifierVerdict``): a red from an exception or an
+## infrastructure failure, a red elsewhere, or a base outside the mutation
+## turning red fails it. The base's own verdict stays ``red`` in its
+## record; the judgement is the record's ``falsifier``.
 ##
 ## Opt-in: ``REPRO_ADDON_VM_GATES=1``
 ## (``just e2e_arch_addon_bootstrap_uninstall_byte_identity``).
@@ -52,6 +61,18 @@ import std/[json, os, strutils, unittest]
 import repro_test_support/reasoned_skip
 
 import ./arch_gate_support
+
+proc expectedFalsifier(mut: string; b: BaseImage): Falsifier =
+  ## Each negative control's expected red (``falsifierVerdict``): the
+  ## ``/repro`` subvolume left behind shows in the final diff, which names
+  ## it, on a btrfs root; an ext4 root has no subvolume and stays green.
+  case mut
+  of "uninstall-keeps-repro-subvolume":
+    if rootIsBtrfs(b):
+      Falsifier(required: @["base fingerprint after uninstall == before bootstrap"],
+                recordTrue: @["diffNamesReproSubvolume"])
+    else: Falsifier(green: true)
+  else: raise unknownMutation("e2e_arch_addon_bootstrap_uninstall_byte_identity", mut)
 
 proc runBase(b: BaseImage; record: JsonNode;
              covered: var seq[string]): seq[string] =
@@ -99,6 +120,23 @@ proc runBase(b: BaseImage; record: JsonNode;
       step("/repro is a btrfs subvolume",
            g.exec("test \"$(stat -c %i /repro)\" = 256").exitCode == 0,
            g.run("stat -c '%i %F' /repro"))
+
+    if account.len > 0:
+      # An operator apply of an empty profile names no omarchyAccount, so
+      # the account check refuses it (spec §4.3.2, §8.5; §13 decision 131:
+      # only generation 0, a replay or a revert is exempt), and it changes
+      # nothing.
+      let empty = g.applyProfile(repro, "empty-operator", "")
+      let said = empty.stdout & empty.stderr
+      record["emptyOperatorProfile"] = %said
+      step("an empty operator profile on Omarchy is refused, " &
+           "EAddOnBaseLayerOwned", empty.exitCode != 0 and
+             "EAddOnBaseLayerOwned" in said,
+           "exit " & $empty.exitCode & "\n" & said)
+      let same = identityReport(f1, g.fingerprintArch(repro, account))
+      step("the refused empty profile changed nothing", same.ok, same.text)
+      step("the refused empty profile left the ledger as it was",
+           g.ledgerOf() == l0, "")
 
     let exe = g.gen0ReproExe()
     let a1 = g.applyProfile(repro, "gen1", gen1Profile(exe, account))
@@ -160,9 +198,10 @@ suite "e2e_arch_addon_bootstrap_uninstall_byte_identity":
         if isOmarchyBase(b): record["omarchy"] = omarchyRecordBase()
         let f = runBase(b, record, covered)
         record["verdict"] = %(if f.len == 0: "green" else: "red")
+        let judged = judgeRun("e2e_arch_addon_bootstrap_uninstall_byte_identity", record, f, expectedFalsifier, b)
         echo "record: ", writeRecord(
           "e2e_arch_addon_bootstrap_uninstall_byte_identity", record)
-        failures.add(f)
+        failures.add(judged)
       # The per-run vacuity guard: a plain Arch guest on each root
       # filesystem ran the sequence to its end.
       for fs in ["btrfs", "ext4"]:

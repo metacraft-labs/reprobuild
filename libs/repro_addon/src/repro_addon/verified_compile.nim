@@ -29,6 +29,8 @@ import std/[base64, json, os, strutils]
 import repro_deploy_agent/manifest
 import repro_deploy_agent/agent_mutations
 
+import repro_infra/host_base
+
 import ./host_exec
 from ./generation0 import AgentCompileMemoryMax, AgentCompileNice,
   AgentCompileWeight, AgentCompileOomScoreAdjust
@@ -61,10 +63,22 @@ proc compileFactArgs*(m: DeployManifest): seq[string] =
 
 const
   CompileProfileUsageExit* = 2
-    ## ``compile-profile``'s exit code for a command line it refuses (an
-    ## unknown option, such as ``--system-base`` to a compiler older than
-    ## it) or a target it cannot compile for. A profile the realisation
-    ## refuses exits 1, and is never retried.
+    ## ``compile-profile``'s exit code for a command line it refuses: here,
+    ## ``--system-base`` given to a compiler older than the option. The one
+    ## exit an agent retries without the option.
+  CompileProfileTargetExit* = 3
+    ## Mirrors ``repro_cli_support/deploy_agent.CompileProfileTargetExit``:
+    ## the compiler understood its command line but cannot compile for the
+    ## target (an unsupported base, an unreadable ``os-release``). Never
+    ## retried. A profile the realisation refuses exits 1, never retried
+    ## either.
+
+type
+  CompileAttempt* = object
+    ## What ``runCompileForAnyRevision`` ran: the last result, and whether
+    ## it is the retry without ``--system-base``.
+    result*: HostToolResult
+    retriedWithoutBase*: bool
 
 proc withoutSystemBase*(argv: openArray[string]): seq[string] =
   ## ``argv`` without its ``--system-base <value>`` pair.
@@ -77,25 +91,64 @@ proc withoutSystemBase*(argv: openArray[string]): seq[string] =
     inc i
 
 proc runCompileForAnyRevision*(argv: seq[string];
-    run: proc(argv: seq[string]): HostToolResult): HostToolResult =
-  ## Run an agent's ``compile-profile`` (``run``), and when the compiler is
-  ## older than ``--system-base`` and refuses it as an unknown option, run
-  ## it again without it (spec §13 decision 134). The compiler's own
-  ## revision then reaches the pin check, which reports the revision
-  ## mismatch -- the producer pinned a newer compiler -- instead of the
-  ## agent failing on a usage error. A compiler that predates the option
-  ## but reports the pinned revision compiles for the Debian realisation;
-  ## the realisation changes only what is refused, and on an Arch host the
-  ## apply's own refusals (the ``.deb`` closure, the diversion) still hold.
+    run: proc(argv: seq[string]): HostToolResult): CompileAttempt =
+  ## Run an agent's ``compile-profile`` (``run``), and when the compiler
+  ## rejected ``--system-base`` as an unknown option -- the usage exit
+  ## (``CompileProfileUsageExit``) and nothing else -- run it again without
+  ## it (spec §13 decision 134, amended at AR1 review round 2). The retry
+  ## exists only so that the compiler's own revision reaches the agent,
+  ## which then refuses it as a revision mismatch instead of failing on a
+  ## usage error; ``retriedCompileRefusal`` decides what a retried compile
+  ## may be used for. A target the compiler cannot compile for exits
+  ## ``CompileProfileTargetExit`` and is not retried.
   ##
-  ## The retry is decided by the exit code alone (``CompileProfileUsageExit``),
-  ## because the unprivileged compile does not capture stderr. Any other
-  ## refusal with that code fails the second run too, or, for a base this
-  ## host's compiler cannot realise, is refused again by the apply's own
-  ## base gate.
-  result = run(argv)
-  if result.exitCode == CompileProfileUsageExit and "--system-base" in argv:
-    result = run(withoutSystemBase(argv))
+  ## The retry is decided by the exit code, because the unprivileged
+  ## compile does not capture stderr: the agent's own command line is
+  ## well-formed for every compiler revision except in that one option.
+  result.result = run(argv)
+  if result.result.exitCode == CompileProfileUsageExit and
+      "--system-base" in argv:
+    result.result = run(withoutSystemBase(argv))
+    result.retriedWithoutBase = true
+
+proc agentHostIsDebianFamily*(): bool =
+  ## The running host's ``os-release`` names the Debian family. False on
+  ## any other base, and when it cannot be read: the one base a compile
+  ## made without ``--system-base`` (the ``add-on-debian`` realisation) can
+  ## be right for.
+  try:
+    observeHostBase().isDebianFamily
+  except CatchableError:
+    false
+
+proc retriedCompileRefusal*(retriedWithoutBase: bool;
+    compilerRevision, pinnedRevision: string; hostIsDebianFamily: bool): string =
+  ## Why a compile retried without ``--system-base`` must not be used, or
+  ## "" when the pin check that follows may decide (spec §13 decision 134,
+  ## as amended at AR1 review round 2):
+  ##
+  ## * a compiler that reports the PINNED revision knows the option, so its
+  ##   usage exit was not the old-compiler case, and its compile is refused;
+  ## * on a host that is not Debian-family (Arch, Omarchy, or an unreadable
+  ##   ``os-release``) a compile made without ``--system-base`` realised the
+  ##   Debian projection, which is wrong for the host: it is refused as the
+  ##   revision mismatch it is, naming both revisions;
+  ## * on a Debian-family host the compile is the right realisation, and
+  ##   ``compiledProfileRefusal`` reports the revision mismatch itself.
+  if not retriedWithoutBase: return ""
+  let reported = if compilerRevision.len > 0: compilerRevision
+                 else: "of an unknown revision"
+  if compilerRevision.len > 0 and compilerRevision == pinnedRevision:
+    return "the compiler reports the pinned revision " & pinnedRevision &
+      " but refused --system-base, which that revision accepts; its " &
+      "compile without the option is refused"
+  if not hostIsDebianFamily:
+    return CompilerRevisionMismatch & ": the producer compiled with " &
+      "reprobuild " & pinnedRevision & ", this host's compiler is " &
+      reported & ", which predates --system-base and so cannot compile " &
+      "for this host's base; a compile without it is accepted only on a " &
+      "Debian-family host"
+  ""
 
 proc launcherOf*(exe: string): string =
   ## The program to exec to run ``exe`` in a FRESH environment. A transient
@@ -198,9 +251,16 @@ proc unprivilegedCompile*(engineExe: string; m: DeployManifest):
   ## (``compiledProfileRefusal``) before using it.
   let argv = unprivilegedCompileArgv(engineExe, m)
   let input = compileInput(m)
-  let r = runCompileForAnyRevision(argv, proc(a: seq[string]): HostToolResult =
-    runHostTool(a, mergeStderr = false, input = input))
+  let attempt = runCompileForAnyRevision(argv, proc(a: seq[string]):
+      HostToolResult = runHostTool(a, mergeStderr = false, input = input))
+  let r = attempt.result
   if r.exitCode != 0:
     return (false, "", "", "", "the unprivileged profile compile failed " &
       "(exit " & $r.exitCode & ")")
-  parseCompileOutput(r.output)
+  result = parseCompileOutput(r.output)
+  if result.ok:
+    let why = retriedCompileRefusal(attempt.retriedWithoutBase,
+      result.revision, m.compiledProfile.compilerRevision,
+      agentHostIsDebianFamily())
+    if why.len > 0:
+      return (false, "", "", "", why)

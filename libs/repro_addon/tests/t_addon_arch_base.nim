@@ -461,3 +461,17 @@ suite "uninstall step 0":
     check "unreadable" in pendingSwitchRefusal(st, pointerFile, me)
 
 removeDir(root)
+
+suite "the live components of a fingerprint":
+  test "every live component is collected whatever the base's family; btrfs-subvolumes only on Arch":
+    # Pins the regression of 05ba6e76d7: a Debian fingerprint lost its
+    # units, mounts, sysctl, nftables and listeners.
+    let debian = liveComponentsFor(archFamily = false)
+    let arch = liveComponentsFor(archFamily = true)
+    for c in [fcUnitFiles, fcActiveUnits, fcSysctl, fcMounts, fcNftables,
+              fcListeners]:
+      check c in debian
+      check c in arch
+    check fcBtrfsSubvolumes notin debian
+    check fcBtrfsSubvolumes in arch
+    check arch - debian == {fcBtrfsSubvolumes}

@@ -867,6 +867,21 @@ proc collectOmarchyHooks(fp: var Fingerprint; opts: CollectOptions) =
                          skipSpecial = false):
     fp.add(fcOmarchyHooks, hooks / path, etcEntryValue(abs / path))
 
+const LiveComponents* = {fcUnitFiles, fcActiveUnits, fcSysctl, fcMounts,
+                         fcNftables, fcListeners}
+  ## The components read from the running system (``CollectOptions.live``)
+  ## on every base.
+
+proc liveComponentsFor*(archFamily: bool): set[FingerprintComponent] =
+  ## The live components a fingerprint collects on a base: every one of
+  ## ``LiveComponents`` on every base, and ``btrfs-subvolumes`` on an
+  ## Arch-family base only (spec §12.2 *On Arch*). Only that one component
+  ## depends on the family: limiting the others to Arch dropped the units,
+  ## mounts and listeners of every Debian fingerprint once (reprobuild
+  ## ``05ba6e76d7``, caught by the Debian byte-identity gate).
+  result = LiveComponents
+  if archFamily: result.incl fcBtrfsSubvolumes
+
 proc collectFingerprint*(opts = CollectOptions(root: "/", live: true)):
     Fingerprint =
   ## Record the host. Raises ``FingerprintError`` when a source the
@@ -895,41 +910,44 @@ proc collectFingerprint*(opts = CollectOptions(root: "/", live: true)):
   if opts.omarchyAccount.len > 0:
     collectOmarchyHooks(result, opts)
   if opts.live:
-    if isArchFamilyRoot(rootPath(opts, "/")):
-      # ``btrfs-subvolumes`` is an Arch component (spec §12.2 *On Arch*);
-      # on any other base the component is absent, whatever its root, and
-      # every other live component below is collected on every base.
+    let live = liveComponentsFor(isArchFamilyRoot(rootPath(opts, "/")))
+    if fcBtrfsSubvolumes in live:
       collectBtrfsSubvolumes(result)
-    collectUnits(result)
-    collectSysctl(result)
-    var memTotalKb = 0
-    try:
-      for l in readFile("/proc/meminfo").splitLines():
-        if l.startsWith("MemTotal:"):
-          memTotalKb = parseInt(l.splitWhitespace()[1])
-          break
-    except CatchableError:
-      discard                    # no normalisation without it
-    collectFileComponent(result, fcMounts,
-      parseMountinfo(readFile("/proc/self/mountinfo"), memTotalKb,
-                     int(sysconf(SC_PAGESIZE))))
-    var ephLo, ephHi = 0
-    try:
-      let r = readFile("/proc/sys/net/ipv4/ip_local_port_range").splitWhitespace()
-      if r.len == 2:
-        ephLo = parseInt(r[0]); ephHi = parseInt(r[1])
-    except IOError, OSError, ValueError:
-      discard
-    let nft = listTableNames()
-    if nft.ok:
-      for t in nft.tables: result.add(fcNftables, t, "table")
-    elif nftBinary().len > 0:
-      result.add(fcNftables, "(unreadable)", nft.why)
-    for proto in ["tcp", "tcp6", "udp", "udp6"]:
-      let p = "/proc/net/" & proto
-      if fileExists(p):
-        collectFileComponent(result, fcListeners,
-                             parseProcNet(readFile(p), proto, ephLo, ephHi))
+    if fcUnitFiles in live or fcActiveUnits in live:
+      collectUnits(result)
+    if fcSysctl in live:
+      collectSysctl(result)
+    if fcMounts in live:
+      var memTotalKb = 0
+      try:
+        for l in readFile("/proc/meminfo").splitLines():
+          if l.startsWith("MemTotal:"):
+            memTotalKb = parseInt(l.splitWhitespace()[1])
+            break
+      except CatchableError:
+        discard                    # no normalisation without it
+      collectFileComponent(result, fcMounts,
+        parseMountinfo(readFile("/proc/self/mountinfo"), memTotalKb,
+                       int(sysconf(SC_PAGESIZE))))
+    if fcNftables in live:
+      let nft = listTableNames()
+      if nft.ok:
+        for t in nft.tables: result.add(fcNftables, t, "table")
+      elif nftBinary().len > 0:
+        result.add(fcNftables, "(unreadable)", nft.why)
+    if fcListeners in live:
+      var ephLo, ephHi = 0
+      try:
+        let r = readFile("/proc/sys/net/ipv4/ip_local_port_range").splitWhitespace()
+        if r.len == 2:
+          ephLo = parseInt(r[0]); ephHi = parseInt(r[1])
+      except IOError, OSError, ValueError:
+        discard
+      for proto in ["tcp", "tcp6", "udp", "udp6"]:
+        let p = "/proc/net/" & proto
+        if fileExists(p):
+          collectFileComponent(result, fcListeners,
+                               parseProcNet(readFile(p), proto, ephLo, ephHi))
   result.normalise()
 
 # ---------------------------------------------------------------------------

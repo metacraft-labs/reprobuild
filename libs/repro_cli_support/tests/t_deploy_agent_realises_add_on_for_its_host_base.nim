@@ -18,10 +18,31 @@
 ##    refused: an accepted profile adapts to the same `SystemProfile` under
 ##    both, so the producer's pin digest still reproduces on an Arch host.
 ##
-## No mocks: the real adapter, registry helpers and argument builder. The
-## running machine's own base decides what `this-host` must give; the test
-## derives the expectation from the same observation rather than assuming
-## the build host's distribution.
+## 5. An agent whose compiler predates `--system-base` (spec §13 decision
+##    134, as amended at AR1 review round 2): it retries without the option
+##    only on the usage exit (2); a target the compiler refuses -- an
+##    unreadable `os-release` among them -- exits 3 and is never retried; a
+##    retried compile is refused when it reports the pinned revision, and
+##    on any host that is not Debian-family it is refused as the revision
+##    mismatch; on a Debian-family host the retry reaches the pin check,
+##    which reports the mismatch.
+##
+## No mocks for 1-4: the real adapter, registry helpers and argument
+## builder. The running machine's own base decides what `this-host` must
+## give; the test derives the expectation from the same observation rather
+## than assuming the build host's distribution.
+##
+## Two stand-ins in 5, both justified: (a) the compiler is a closure
+## answering as a compiler of an older revision would (the usage exit for
+## the unknown option, then a stdio result with its own revision), because
+## the point is a revision that is NOT this tree's, which no build of this
+## tree can be; the closure is passed through the same `run` parameter the
+## agent's real compile runs through. (b) An unreadable `os-release` is the
+## observation `classifyHostBase` gives when no file was read, passed
+## through `resolveCompileTarget`'s `observe` parameter, because the test
+## must not make the build host's own `/etc/os-release` unreadable; the
+## real command uses `observeHostBase`, which returns exactly that value in
+## that case.
 
 import std/[base64, json, sets, strutils, tables, unittest]
 
@@ -110,12 +131,16 @@ suite "the add-on realisation follows the host's base":
     check deb.projection.profile == "add-on-debian"
     check arch.projection.profile == "add-on-arch"
 
+proc unreadableOsRelease(): HostBase =
+  ## What ``observeHostBase`` returns when no ``os-release`` was readable.
+  classifyHostBase(initTable[string, string](), "", true)
+
 suite "an agent whose compiler predates --system-base":
   # The compiler is a closure that answers as a compiler of the revision
   # before the option did: it refuses the option as a usage error (exit 2)
-  # and compiles without it, reporting its own (older) revision.
-  proc oldCompiler(calls: ref seq[seq[string]]): proc(a: seq[string]):
-      HostToolResult =
+  # and compiles without it, reporting its own revision.
+  proc oldCompiler(calls: ref seq[seq[string]]; revision = "0ld0ld0ld0"):
+      proc(a: seq[string]): HostToolResult =
     result = proc(a: seq[string]): HostToolResult =
       calls[].add(a)
       if "--system-base" in a:
@@ -123,31 +148,84 @@ suite "an agent whose compiler predates --system-base":
           "compile-profile: unknown option --system-base\n")
       HostToolResult(exitCode: 0, output: verified_compile.CompiledProfileStdioMarker &
         base64.encode($(%*{"canonical": base64.encode("x"),
-          "actions": base64.encode("[]"), "revision": "0ld0ld0ld0"})) & "\n")
+          "actions": base64.encode("[]"), "revision": revision})) & "\n")
 
-  test "reports the compiler revision mismatch, not a usage failure":
-    var m: DeployManifest
-    m.compiledProfile = CompiledProfilePin(digest: "sha256:" & "1".repeat(64),
-      compilerRevision: "a8f640f709", platform: "linux", arch: "x86_64",
-      host: "h", systemMode: "addOn")
+  proc pinned(): DeployManifest =
+    result.compiledProfile = CompiledProfilePin(digest: "sha256:" &
+      "1".repeat(64), compilerRevision: "a8f640f709", platform: "linux",
+      arch: "x86_64", host: "h", systemMode: "addOn")
+
+  proc agentArgv(m: DeployManifest): seq[string] =
+    @["/x/reprobuild", "deploy-agent", "compile-profile", "--stdio"] &
+      compileFactArgs(m)
+
+  test "an unreadable os-release is a target refusal (exit 3), never retried":
+    let r = resolveCompileTarget("h", "linux", "x86_64", "addOn", @[],
+      SystemBaseThisHost, unreadableOsRelease)
+    check r.exitCode == deploy_agent.CompileProfileTargetExit
+    check r.exitCode != verified_compile.CompileProfileUsageExit
+    check verified_compile.CompileProfileTargetExit ==
+      deploy_agent.CompileProfileTargetExit
+    check "EAddOnUnsupportedBase" in r.message
+    # The agent sees that exit and does not fall back.
     let calls = new seq[seq[string]]
-    let argv = @["/x/reprobuild", "deploy-agent", "compile-profile",
-                 "--stdio"] & compileFactArgs(m)
-    let r = runCompileForAnyRevision(argv, oldCompiler(calls))
+    let refusing = proc(a: seq[string]): HostToolResult =
+      calls[].add(a)
+      HostToolResult(exitCode: r.exitCode, output: r.message)
+    let attempt = runCompileForAnyRevision(agentArgv(pinned()), refusing)
+    check calls[].len == 1
+    check not attempt.retriedWithoutBase
+    check attempt.result.exitCode == deploy_agent.CompileProfileTargetExit
+    # A named base the compiler refuses is the same exit.
+    check resolveCompileTarget("h", "linux", "x86_64", "addOn", @[],
+      "nosuchbase").exitCode == deploy_agent.CompileProfileTargetExit
+
+  test "an old compiler on an Arch host is refused, naming the revision mismatch":
+    let m = pinned()
+    let calls = new seq[seq[string]]
+    let argv = agentArgv(m)
+    let attempt = runCompileForAnyRevision(argv, oldCompiler(calls))
     check calls[].len == 2
-    check "--system-base" notin calls[][1]
     check calls[][1] == withoutSystemBase(argv)
-    let res = parseCompileOutput(r.output)
+    check attempt.retriedWithoutBase
+    let res = parseCompileOutput(attempt.result.output)
     check res.ok and res.revision == "0ld0ld0ld0"
-    let refusal = compiledProfileRefusal(m, res.canonical, res.actionsJson,
-                                         res.revision)
-    check refusal.startsWith(CompilerRevisionMismatch)
+    let why = retriedCompileRefusal(attempt.retriedWithoutBase, res.revision,
+      m.compiledProfile.compilerRevision, hostIsDebianFamily = false)
+    check why.startsWith(CompilerRevisionMismatch)
+    check "0ld0ld0ld0" in why and "a8f640f709" in why
+
+  test "an old compiler on a Debian host: the retry reaches the pin check":
+    let m = pinned()
+    let calls = new seq[seq[string]]
+    let attempt = runCompileForAnyRevision(agentArgv(m), oldCompiler(calls))
+    check calls[].len == 2 and attempt.retriedWithoutBase
+    let res = parseCompileOutput(attempt.result.output)
+    check retriedCompileRefusal(true, res.revision,
+      m.compiledProfile.compilerRevision, hostIsDebianFamily = true) == ""
+    check compiledProfileRefusal(m, res.canonical, res.actionsJson,
+      res.revision).startsWith(CompilerRevisionMismatch)
+
+  test "a retried compile that reports the pinned revision is refused":
+    let m = pinned()
+    let calls = new seq[seq[string]]
+    let attempt = runCompileForAnyRevision(agentArgv(m),
+      oldCompiler(calls, revision = m.compiledProfile.compilerRevision))
+    let res = parseCompileOutput(attempt.result.output)
+    for debian in [true, false]:
+      let why = retriedCompileRefusal(attempt.retriedWithoutBase, res.revision,
+        m.compiledProfile.compilerRevision, debian)
+      check "pinned revision" in why
+
+  test "a compile that was not retried is left to the pin check":
+    check retriedCompileRefusal(false, "0ld", "a8f640f709", false) == ""
 
   test "a profile the realisation refuses (exit 1) is never retried":
     let calls = new seq[seq[string]]
     let refusing = proc(a: seq[string]): HostToolResult =
       calls[].add(a)
       HostToolResult(exitCode: 1, output: "EAddOnOutOfScope: ...")
-    let r = runCompileForAnyRevision(@["c", "--system-base", "this-host"],
-                                     refusing)
-    check r.exitCode == 1 and calls[].len == 1
+    let attempt = runCompileForAnyRevision(@["c", "--system-base", "this-host"],
+                                           refusing)
+    check attempt.result.exitCode == 1 and calls[].len == 1
+    check not attempt.retriedWithoutBase

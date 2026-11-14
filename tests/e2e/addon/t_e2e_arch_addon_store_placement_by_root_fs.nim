@@ -24,6 +24,13 @@
 ## bootstrap creates ``/repro`` as a plain directory on the btrfs root, so the
 ## snapshot carries the store and the gate turns red. Record red, then green.
 ##
+## A falsifier run (``REPRO_ADDON_MUTATION``) passes only when every base
+## shows the mutation's own red step (``expectedFalsifier``, judged by
+## ``arch_gate_support.falsifierVerdict``): a red from an exception or an
+## infrastructure failure, a red elsewhere, or a base outside the mutation
+## turning red fails it. The base's own verdict stays ``red`` in its
+## record; the judgement is the record's ``falsifier``.
+##
 ## Opt-in: ``REPRO_ADDON_VM_GATES=1``
 ## (``just e2e_arch_addon_store_placement_by_root_fs``). Bases: the btrfs
 ## and the ext4 guest (the ledger comparison needs both) and the Omarchy VM.
@@ -63,6 +70,18 @@ proc comparableLedger*(ledger: string): string =
     let declared = f[1].startsWith(FixturePrefix) or FixtureUnitName in f[1]
     result.add(f[0] & "\t" & f[1] & "\t" & f[4] & "\t" & f[5] &
       (if declared: "\t" & f[3] else: "") & "\n")
+
+proc expectedFalsifier(mut: string; b: BaseImage): Falsifier =
+  ## Each falsifier's expected red (``falsifierVerdict``): on a btrfs root
+  ## ``/repro`` is a plain directory and snapper's snapshot carries the
+  ## store; an ext4 root is outside the mutation.
+  case mut
+  of "repro-root-plain-dir-on-btrfs":
+    if rootIsBtrfs(b):
+      Falsifier(required: @["/repro is a btrfs subvolume",
+        "the snapper snapshot of / contains none of /repro/store"])
+    else: Falsifier(green: true)
+  else: raise unknownMutation("e2e_arch_addon_store_placement_by_root_fs", mut)
 
 proc runBase(b: BaseImage; record: JsonNode;
              ledgers: var seq[string]): seq[string] =
@@ -165,10 +184,18 @@ suite "e2e_arch_addon_store_placement_by_root_fs":
         record["base"] = %b.name
         let f = runBase(b, record, ledgers)
         record["verdict"] = %(if f.len == 0: "green" else: "red")
+        let judged = judgeRun("e2e_arch_addon_store_placement_by_root_fs", record, f, expectedFalsifier, b)
         echo "record: ", writeRecord("e2e_arch_addon_store_placement_by_root_fs",
                                      record)
-        failures.add(f)
-      if ledgers.len == 2 and ledgers[0] != ledgers[1]:
+        failures.add(judged)
+      # The comparison is vacuous unless both plain Arch guests produced a
+      # ledger with entries.
+      if ledgers.len != 2 or ledgers[0].strip().len == 0 or
+          ledgers[1].strip().len == 0:
+        failures.add("vacuity guard: the ledger comparison needs a non-empty " &
+          "generation-1 ledger from both the btrfs and the ext4 guest (got " &
+          $ledgers.len & ")")
+      elif ledgers[0] != ledgers[1]:
         failures.add("the generation-1 ledgers differ between the btrfs and " &
           "the ext4 guest:\n" & ledgers[0] & "\n---\n" & ledgers[1])
       for f in failures: echo "FAIL ", f

@@ -171,3 +171,73 @@ proc archGateRecord*(gate: string): JsonNode =
   result["reprobuild"] = %gitHead()
   result["mutation"] = %mutation()
   result["testSeams"] = %testSeams()
+
+# ---------------------------------------------------------------------------
+# Falsifier runs (REPRO_ADDON_MUTATION).
+# ---------------------------------------------------------------------------
+
+type
+  Falsifier* = object
+    ## What a gate's falsifying build must do to one base (AR1 review
+    ## round 2): ``required`` are step names that must be red; a red step
+    ## whose name starts with one of ``mustStayGreen`` refutes it (the
+    ## mutation broke something it should not reach); ``green`` says the
+    ## base is outside the mutation (an ext4 root under a btrfs-only
+    ## mutation) and must stay entirely green. ``recordTrue`` names record
+    ## fields that must be ``true`` (the byte-identity control's
+    ## ``diffNamesReproSubvolume``).
+    required*: seq[string]
+    mustStayGreen*: seq[string]
+    green*: bool
+    recordTrue*: seq[string]
+
+proc falsifierVerdict*(f: Falsifier; record: JsonNode):
+    tuple[confirmed: bool; why: string] =
+  ## Whether ``record`` (one base of a mutated run) shows exactly the
+  ## failure the mutation is for. An ``exception`` step -- a guest that did
+  ## not answer, an SSH timeout, any infrastructure failure -- never counts
+  ## as the expected red, and neither does a run that stopped before the
+  ## required step: a red that does not name the property under test
+  ## measures nothing.
+  var failed: seq[string]
+  for s in record{"steps"}.getElems():
+    if not s{"ok"}.getBool(): failed.add(s{"step"}.getStr())
+  if "exception" in failed:
+    return (false, "an exception, not the mutation's failure: " &
+      $record{"steps"})
+  if f.green:
+    if failed.len > 0:
+      return (false, "outside the mutation, but red: " & failed.join("; "))
+    return (true, "outside the mutation, and green")
+  for r in f.required:
+    if r notin failed:
+      return (false, "the required step is not red: " & r & " (red: " &
+        failed.join("; ") & ")")
+  for s in failed:
+    for p in f.mustStayGreen:
+      if s.startsWith(p):
+        return (false, "a step the mutation must not reach is red: " & s)
+  for k in f.recordTrue:
+    if not record{k}.getBool():
+      return (false, "the record's " & k & " is not true")
+  (true, "red at: " & f.required.join("; "))
+
+proc judgeRun*(gate: string; record: JsonNode; baseFailures: seq[string];
+               expected: proc(mutation: string; b: BaseImage): Falsifier;
+               b: BaseImage): seq[string] =
+  ## The gate's failures for one base: ``baseFailures`` on a product run;
+  ## on a falsifier run, nothing when ``falsifierVerdict`` confirms the
+  ## expected red, and why not otherwise. The base's own verdict stays in
+  ## ``record["verdict"]``; the judgement goes to ``record["falsifier"]``.
+  let mut = mutation()
+  if mut.len == 0: return baseFailures
+  let f = expected(mut, b)
+  let v = falsifierVerdict(f, record)
+  record["falsifier"] = %*{"mutation": mut, "confirmed": v.confirmed,
+    "why": v.why, "required": f.required, "mustStayGreen": f.mustStayGreen,
+    "outsideMutation": f.green, "recordTrue": f.recordTrue}
+  if not v.confirmed:
+    result.add(b.name & ": falsifier " & mut & " not confirmed: " & v.why)
+
+proc unknownMutation*(gate, mutation: string): ref TestBedError =
+  newException(TestBedError, gate & " has no falsifier named " & mutation)

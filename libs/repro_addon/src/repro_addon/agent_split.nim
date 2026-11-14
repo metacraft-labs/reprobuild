@@ -223,13 +223,24 @@ proc compileProfile(conf: AgentConf; m: DeployManifest;
     "--actions-out", dir / StagedActionsName,
     "--state-dir", workspace / "state",
     "--revision-out", dir / StagedCompilerRevisionName] & compileFactArgs(m)
-  let r = runCompileForAnyRevision(argv, proc(a: seq[string]):
+  let attempt = runCompileForAnyRevision(argv, proc(a: seq[string]):
       HostToolResult = runProfileCompiler(a))
+  let r = attempt.result
   if r.exitCode != 0:
     return "the profile compiler failed (exit " & $r.exitCode & "): " &
       r.output.strip()
   if not fileExists(dir / StagedCanonicalName):
     return "the profile compiler wrote no canonical text"
+  if attempt.retriedWithoutBase:
+    let revision = try: readFile(dir / StagedCompilerRevisionName).strip()
+                   except IOError, OSError: ""
+    let why = retriedCompileRefusal(true, revision,
+      m.compiledProfile.compilerRevision, agentHostIsDebianFamily())
+    if why.len > 0:
+      # Nothing staged from this compile may reach the apply.
+      for f in [StagedCanonicalName, StagedActionsName]:
+        removeFile(dir / f)
+      return why
   ""
 
 proc stageOutputs(m: DeployManifest; actions: seq[ProfileBuildAction];

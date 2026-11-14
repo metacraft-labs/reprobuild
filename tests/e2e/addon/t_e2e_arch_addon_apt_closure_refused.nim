@@ -53,10 +53,6 @@
 ##   legs, which hand the binary a canonical text no realisation compiled,
 ##   go red.
 ##
-## The lock is a real one (the realiser's test fixture: Debian trixie
-## armhf, ``prometheus-node-exporter``); its members are never fetched,
-## because every refusal comes before realisation.
-##
 ## Opt-in: ``REPRO_ADDON_VM_GATES=1`` and ``REPRO_ADDON_ENGINE_CLOSURE``
 ## (``just e2e_arch_addon_apt_closure_refused``).
 ## Bases: ``REPRO_ADDON_BASES`` (default ``arch-btrfs-amd64,arch-ext4-amd64``).
@@ -67,21 +63,39 @@ import std/[base64, json, os, strutils, unittest]
 
 import repro_test_support/reasoned_skip
 
+import repro_dsl_stdlib/packages/apt_closure
+
 import ./agent_e2e_support
 import ./arch_gate_support
+import ./deb_fixture_support
 
-const LockText = staticRead("../../../libs/repro_dsl_stdlib/tests/fixtures/" &
-  "apt_closure/debian-trixie-20261001-armhf-node-exporter.lock")
+const DebFixtureName = "ar1-deb-fixture"
 
-proc closureProfile(): string =
+proc debFixture(work: string): tuple[path: string; lock: AptClosureLock] =
+  ## A one-member amd64 closure: a ``.deb`` holding one data file, and the
+  ## lock that pins it by size and SHA-256.
+  result.path = work / (DebFixtureName & ".deb")
+  writeDeb(result.path, @[dir("./"), dir("./usr/"), dir("./usr/share/"),
+    dir("./usr/share/" & DebFixtureName & "/"),
+    ("./usr/share/" & DebFixtureName & "/ok.txt", '0', 0o644, "ar1\n", "")])
+  result.lock = fixtureLock(DebFixtureName, result.path, "amd64")
+
+proc seedDebCache(g: Guest; fx: tuple[path: string; lock: AptClosureLock]) =
+  ## Put the member where the realiser looks first, so a realisation never
+  ## contacts the (fictitious) archive.
+  discard g.run("mkdir -p " & AddOnAptDebCacheDir & " && chmod 0700 " &
+                AddOnAptDebCacheDir)
+  g.copyTo(fx.path, AddOnAptDebCacheDir & "/" & fx.lock.debs[0].sha256 & ".deb")
+
+proc closureProfile(lockText: string): string =
   addOnStanza() &
   "systemd.systemUnit {\n" &
   "  floorExceptions = [\"serviceFloor: a test fixture that is refused before it runs\"]\n" &
   "  name = \"repro-addon-deb-fixture.service\"\n" &
   "  content = \"[Unit]\nDescription=a .deb closure on Arch\n[Service]\n" &
-    "ExecStart=/usr/bin/prometheus-node-exporter\n\"\n" &
+    "ExecStart=/usr/bin/true\n\"\n" &
   "  enabled = false\n" &
-  "  aptClosureLock = \"" & LockText & "\"\n}\n"
+  "  aptClosureLock = \"" & lockText & "\"\n}\n"
 
 proc storeProfile(reproExe: string): string =
   addOnStanza() & fixtureUnit(reproExe)
@@ -109,7 +123,7 @@ proc nimUnit(lockLine, execStart: string): string =
 
 proc debNim(): string =
   nimUnit("      aptClosureLock = debLock,\n",
-          "/usr/bin/prometheus-node-exporter")
+          "/usr/bin/true")
 
 proc storeNim(reproExe: string): string = nimUnit("", reproExe & " --version")
 
@@ -128,11 +142,21 @@ proc putGuestFile(g: Guest; name, guestPath, text: string) =
   writeFile(g.runDir / name, text)
   g.copyTo(g.runDir / name, guestPath)
 
-proc stdioRequest(profile: string): string =
+proc stdioRequest(profile, lockText: string): string =
   ## The fetch unit's ``compile-profile --stdio`` input
   ## (``repro_addon/verified_compile``): the profile and its files, base64.
   $(%*{"profileText": base64.encode(profile), "profileFiles": [
-    {"path": "deb.lock", "content": base64.encode(LockText)}]})
+    {"path": "deb.lock", "content": base64.encode(lockText)}]})
+
+proc stdioRevision(stdout: string): string =
+  ## The ``revision`` of a ``compile-profile --stdio`` result line, or "".
+  for line in stdout.splitLines():
+    if line.startsWith("REPRO-COMPILED-PROFILE "):
+      try:
+        return parseJson(base64.decode(line["REPRO-COMPILED-PROFILE ".len .. ^1].strip())){
+          "revision"}.getStr()
+      except CatchableError:
+        return ""
 
 proc state(g: Guest; repro: string): string =
   ## What a refused plan or apply must leave as it is, beyond the
@@ -142,6 +166,26 @@ proc state(g: Guest; repro: string): string =
         "readlink /var/lib/repro/system/current; echo ---; " &
         "ls -1 /repro/store/prefixes/*/ 2>/dev/null; echo ---; " &
         "ls -d /var/cache/repro/apt 2>/dev/null; true")
+
+proc expectedFalsifier(mut: string; b: BaseImage): Falsifier =
+  ## Each falsifier's expected red (``falsifierVerdict``), group by group.
+  case mut
+  of "arch-apply-skips-deb-closure-check":
+    # The realisation still refuses everything it compiles; the static
+    # binary, handed the canonical text directly, plans it and realises it.
+    Falsifier(required: @[
+      "[apply side] plan of an aptClosureLock unit is refused with EAddOnOutOfScope",
+      "[apply side] apply of an aptClosureLock unit is refused with EAddOnOutOfScope",
+      "[apply side] the refused apply realised and committed nothing"],
+      mustStayGreen: @["[realisation]"])
+  of "arch-realisation-accepts-deb-closure":
+    Falsifier(required: @[
+      "[realisation] infra plan of a .nim profile with an aptClosureLock, " &
+        "through a `system: addOn` registry entry, is refused",
+      "[realisation] the agent's compile (--system-base this-host) of the " &
+        "aptClosureLock profile is refused"],
+      mustStayGreen: @["[apply side]"])
+  else: raise unknownMutation("e2e_arch_addon_apt_closure_refused", mut)
 
 proc runBase(b: BaseImage; record: JsonNode; engine: string): seq[string] =
   var g: Guest
@@ -170,6 +214,9 @@ proc runBase(b: BaseImage; record: JsonNode; engine: string): seq[string] =
     record["engine"] = %engine
     if not g.bootstrapArch(repro, step).ok: return fails
     let exe = g.gen0ReproExe()
+    let fx = debFixture(g.runDir)
+    let lockText = renderAptClosureLock(fx.lock)
+    g.seedDebCache(fx)
 
     g.settleBaseline(step)
     let f0 = g.fingerprintArch(repro)
@@ -185,7 +232,7 @@ proc runBase(b: BaseImage; record: JsonNode; engine: string): seq[string] =
     discard g.run("mkdir -p " & EngineDir & "/profile " & EngineDir & "/home")
     g.putGuestFile("ar1-home.nim", EngineDir & "/profile/home.nim",
                    RegistryProfile)
-    g.putGuestFile("ar1-deb.lock", EngineDir & "/profile/deb.lock", LockText)
+    g.putGuestFile("ar1-deb.lock", EngineDir & "/profile/deb.lock", lockText)
     g.putGuestFile("ar1-deb.nim", EngineDir & "/profile/deb.nim", debNim())
     g.putGuestFile("ar1-store.nim", EngineDir & "/profile/store.nim",
                    storeNim(exe))
@@ -210,7 +257,7 @@ proc runBase(b: BaseImage; record: JsonNode; engine: string): seq[string] =
 
     proc agentCompile(name, profile: string): ExecOut =
       g.putGuestFile("ar1-" & name & ".json", EngineDir & "/" & name & ".json",
-                     stdioRequest(profile))
+                     stdioRequest(profile, lockText))
       g.exec("cd " & EngineDir & " && " & eng & " deploy-agent " &
         "compile-profile --stdio --host " & EngineHost & " --platform " &
         "linux --arch x86_64 --system-mode addOn --system-base this-host < " &
@@ -227,12 +274,19 @@ proc runBase(b: BaseImage; record: JsonNode; engine: string): seq[string] =
       "profile succeeds", acc.exitCode == 0 and
         "REPRO-COMPILED-PROFILE" in acc.stdout,
       "exit " & $acc.exitCode & "\n" & acc.stderr)
+    # The engine under test is this tree's: the revision its compile
+    # reports is the one the gate runs at.
+    let rev = stdioRevision(acc.stdout)
+    record["engineRevision"] = %rev
+    realisationStep("the engine closure's compile reports this tree's " &
+      "revision", rev.len > 0 and rev == gitHead(),
+      "compile-profile --stdio revision '" & rev & "', gate at " & gitHead())
 
     # The apply-side legs.
     for verb in ["plan", "apply"]:
       let r =
-        if verb == "plan": g.planProfile(repro, "deb-" & verb, closureProfile())
-        else: g.applyProfile(repro, "deb-" & verb, closureProfile())
+        if verb == "plan": g.planProfile(repro, "deb-" & verb, closureProfile(lockText))
+        else: g.applyProfile(repro, "deb-" & verb, closureProfile(lockText))
       let said = r.stdout & r.stderr
       applySideStep(verb & " of an aptClosureLock unit is refused with " &
         "EAddOnOutOfScope", r.exitCode != 0 and refusedForArch(said),
@@ -279,7 +333,8 @@ suite "e2e_arch_addon_apt_closure_refused":
         record["base"] = %b.name
         let f = runBase(b, record, engine)
         record["verdict"] = %(if f.len == 0: "green" else: "red")
+        let judged = judgeRun("e2e_arch_addon_apt_closure_refused", record, f, expectedFalsifier, b)
         echo "record: ", writeRecord("e2e_arch_addon_apt_closure_refused", record)
-        failures.add(f)
+        failures.add(judged)
       for f in failures: echo "FAIL ", f
       check failures.len == 0
