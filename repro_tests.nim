@@ -24687,6 +24687,17 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "",
     singleReason: "module-level putEnv"),
   TestSpec(
+    source: "tests/integration/t_repro_push_explicit_routes_skip_unpublished_record_store.nim",
+    binary: "build/test-bin/t_repro_push_explicit_routes_skip_unpublished_record_store",
+    defines: @[],
+    requiresReproBinary: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "t_group_tests_integration_g12",
+    singleReason: ""),
+  TestSpec(
     source: "tests/integration/t_repro_push_publishes_dependency_closure_in_topological_order.nim",
     binary: "build/test-bin/t_repro_push_publishes_dependency_closure_in_topological_order",
     defines: @[],
@@ -25333,7 +25344,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g12",
+    group: "t_group_tests_integration_g13",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_sc_native_library_beside_nim_source_is_a_declared_input.nim",
@@ -26147,7 +26158,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g13",
+    group: "t_group_tests_integration_g14",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_sync_resumes_after_interruption_and_force_sync_overwrites_dirty.nim",
@@ -26829,7 +26840,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g14",
+    group: "t_group_tests_integration_g15",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_unrouted_private_repo_refuses_loudly.nim",
