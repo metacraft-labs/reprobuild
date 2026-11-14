@@ -56,8 +56,9 @@ libs/repro_addon/tests/t_addon_evidence_units_and_tick_records.nim	nim	8
 libs/repro_addon/tests/t_addon_fingerprint.nim	nim	16
 libs/repro_addon/tests/t_addon_floor_round10.nim	nim	33
 libs/repro_addon/tests/t_addon_floor_round11.nim	nim	16
-libs/repro_addon/tests/t_addon_floor_round12.nim	nim	41
-libs/repro_addon/tests/t_addon_floor_round13.nim	nim	16
+libs/repro_addon/tests/t_addon_floor_round12.nim	nim	43
+libs/repro_addon/tests/t_addon_floor_round13.nim	nim	15
+libs/repro_addon/tests/t_addon_floor_round14.nim	nim	10
 libs/repro_addon/tests/t_addon_floor_round3.nim	nim	16
 libs/repro_addon/tests/t_addon_floor_round4.nim	nim	16
 libs/repro_addon/tests/t_addon_floor_round5.nim	nim	15
@@ -82,7 +83,7 @@ libs/repro_addon/tests/t_addon_reassert_defers_to_a_live_switch.nim	nim	2
 libs/repro_addon/tests/t_addon_recipient_key_mode_checked_at_load.nim	nim	6
 libs/repro_addon/tests/t_addon_restore_before_start.nim	nim	2
 libs/repro_addon/tests/t_addon_retargeted_address_is_refused.nim	nim	3
-libs/repro_addon/tests/t_addon_revert_hold_ledger.nim	nim	10
+libs/repro_addon/tests/t_addon_revert_hold_ledger.nim	nim	12
 libs/repro_addon/tests/t_addon_review_findings.nim	nim	16
 libs/repro_addon/tests/t_addon_review_round2.nim	nim	9
 libs/repro_addon/tests/t_addon_review_round3.nim	nim	8
@@ -100,7 +101,7 @@ libs/repro_addon/tests/t_addon_switch_exclusive_retention.nim	nim	35
 libs/repro_addon/tests/t_addon_switch_planning.nim	nim	28
 libs/repro_addon/tests/t_addon_tmpfiles_scope.nim	nim	7
 libs/repro_addon/tests/t_addon_trace_attribution.nim	nim	6
-libs/repro_addon/tests/t_addon_uninstall_keeps_pre_bootstrap_inputs.nim	nim	22
+libs/repro_addon/tests/t_addon_uninstall_keeps_pre_bootstrap_inputs.nim	nim	23
 libs/repro_addon/tests/t_addon_units_meet_confinement_floor.nim	nim	3
 libs/repro_addon/tests/t_full_host_secrets_materialise_from_the_latest_envelope.nim	nim	9
 libs/repro_addon/tests/t_rdmf_v3_closure_digests_are_enforced.nim	nim	4
@@ -1299,7 +1300,7 @@ tests/e2e/addon/t_e2e_addon_tick_observes_a_fresh_cycle.nim	nim	1
 tests/e2e/addon/t_e2e_addon_to_reproos_conversion_keeps_state.nim	nim	1
 tests/e2e/addon/t_e2e_addon_ubuntu_24_04_to_26_04_release_upgrade.nim	nim	1
 tests/e2e/addon/t_e2e_addon_unattended_upgrades_week.nim	nim	1
-tests/e2e/addon/t_e2e_addon_uninstall_removes_revert_holds.nim	nim	2
+tests/e2e/addon/t_e2e_addon_uninstall_removes_revert_holds.nim	nim	3
 tests/e2e/addon/t_e2e_addon_unit_syscall_filters_cover_their_traces.nim	nim	1
 tests/e2e/addon/t_e2e_addon_validator_never_double_signs.nim	nim	1
 tests/e2e/addon/t_e2e_addon_write_time_recheck.nim	nim	1
@@ -2845,6 +2846,7 @@ tests/unit/test_regenerate_suite_artifacts.py	python	25
 tests/unit/test_release_git.py	python	6
 tests/unit/test_release_native_packages.py	python	8
 tests/unit/test_release_smoke_dev_exec.py	python	20
+tests/unit/test_release_tag_names_build.py	python	11
 tests/unit/test_reprobuild_suite_inventory.py	python	110
 tests/unit/test_sibling_lock_pins.py	python	10
 tests/unit/test_source_revision.py	python	18

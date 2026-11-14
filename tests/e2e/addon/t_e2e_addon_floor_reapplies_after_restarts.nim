@@ -62,6 +62,20 @@
 ##   directory): the refused unit keeps its start hold and cannot start, the
 ##   host is pending, and the recovery commits once the directory is
 ##   writable;
+## - **a reboot before the recovery** of that pending revert: every floored
+##   unit waits for the boot re-assertion, which replays the revert and puts
+##   its start holds back first, so the refused unit stays down and its tree
+##   root's (§13 decision 143);
+## - **a full file system** (a filled 4 KiB tmpfs over the drop-in
+##   directory): the hold's write fails at the flush, the revert sees it and
+##   stays pending, the refused unit cannot start, and with room again the
+##   recovery writes the hold in full (A9 review round 14, finding 1);
+## - **a tree made 3 s into a run before its main process**, during a 6 s
+##   ``ExecStartPre=`` or before a oneshot's last ``ExecStart=``, is refused
+##   (§13 decision 144: the bound counts from the run's start);
+## - **a base template whose place carries a specifier**
+##   (``RuntimeDirectory=<stem>/%i``) covers a listener below
+##   ``/run/<stem>/`` (§13 decision 145);
 ## - **a tree made 3 s into a run** that began outside a switch is refused
 ##   (§13 decision 141: no later than the main process's start plus
 ##   ``MainStartToleranceNs``);
@@ -88,7 +102,12 @@
 ## ``recreated-no-upper-bound`` (the tree made 3 s into the run passes),
 ## ``listener-writable-own-unit-only`` (the template's and the base
 ## template's links are followed), ``listener-writable-by-spelling`` (the
-## ``/var/run`` link is followed).
+## ``/var/run`` link is followed), ``floored-not-after-reassert`` (the
+## refused unit starts at the reboot), ``hold-written-unchecked`` (the
+## revert commits over an empty hold and the unit starts),
+## ``recreated-bound-from-main-start`` (the trees made before the main
+## process pass), ``writable-specifier-resolved`` (the instance's link is
+## followed).
 ##
 ## Opt-in: ``REPRO_ADDON_VM_GATES=1``.
 ##
@@ -106,14 +125,19 @@ const Pending = "/var/lib/repro/system/addon/pending"
 const Record = "/var/lib/repro/system/addon/floor-created-dirs"
 
 proc unitResource(name, service, binary: string; unitLines = "";
-                  enabled = true; description = "A9 round 12"): string =
+                  enabled = true; description = "A9 round 12";
+                  exceptions = ""; exec = ""): string =
   ## A floored oneshot unit that stays active; a template, or a unit only
-  ## its socket starts (``enabled = false``), is not enabled.
+  ## its socket starts (``enabled = false``), is not enabled. ``exec``
+  ## replaces the one ``ExecStart=`` line; ``exceptions`` is one floor
+  ## exception.
   let tmpl = name.contains("@.") or not enabled
-  "systemd.systemUnit {\n  name = \"" & name & "\"\n  content = \"[Unit]\n" &
+  "systemd.systemUnit {\n" &
+    (if exceptions.len > 0: "  floorExceptions = [\"" & exceptions & "\"]\n" else: "") &
+    "  name = \"" & name & "\"\n  content = \"[Unit]\n" &
     "Description=" & description & "\n" & unitLines &
     "\n[Service]\nType=oneshot\nRemainAfterExit=yes\n" & service &
-    "ExecStart=" & binary & " --version\n" &
+    (if exec.len > 0: exec else: "ExecStart=" & binary & " --version\n") &
     (if tmpl: "\"\n  enabled = false\n}\n"
      else: "\n[Install]\nWantedBy=multi-user.target\n\"\n  enabled = true\n}\n")
 
@@ -367,6 +391,25 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
          "is still root's", "start=0" notin startW.stdout and
          g.exec("stat -c %U /var/lib/a9r-st").stdout.strip() == "root",
          startW.stdout & startW.stderr)
+    # §13 decision 143: a reboot before the recovery. Every floored unit
+    # waits for the boot re-assertion, which replays the pending revert and
+    # puts its start holds back first, so the refused unit stays down.
+    g.rebootGuest()
+    # The boot re-assertion replays the pending revert; wait for it to end
+    # (a oneshot that stays active), so the recovery below does not find it
+    # running and defer.
+    discard g.exec("for i in $(seq 1 300); do [ \"$(systemctl show -p ActiveState " &
+      "--value repro-addon-reassert.service)\" = active ] && break; sleep 2; done", timeoutSec = 900)
+    let bootW = g.exec("test -e " & Pending & " && echo pending=yes; " &
+      "systemctl is-active a9r-st.service; stat -c '%n %U' /var/lib/a9r-st; " &
+      "systemctl show -p After a9r-st.service | tr ' ' '\\n' | grep -c reassert; " &
+      "journalctl -b --no-pager -u a9r-st.service -u repro-addon-reassert.service | tail -8")
+    record["unwritableHoldReboot"] = %bootW.stdout
+    step("a reboot before the recovery does not start the refused unit: its " &
+         "tree is still root's and the revert still pending (§13 decision 143)",
+         g.exec("systemctl is-active a9r-st.service").stdout.strip() != "active" and
+         g.exec("stat -c %U /var/lib/a9r-st").stdout.strip() == "root" and
+         g.exec("test -e " & Pending).exitCode == 0, bootW.stdout & bootW.stderr)
     discard g.run("chattr -i /etc/systemd/system/a9r-st.service.d")
     let recw = g.exec(repro & " system addon recover", timeoutSec = 1200)
     step("once the directory is writable, the recovery commits with the hold written",
@@ -380,6 +423,67 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
          g.exec("test -e " & stHold).exitCode != 0 and
          g.exec("systemctl is-active a9r-st.service").stdout.strip() == "active",
          r.stdout & r.stderr)
+    # A9 review round 14, finding 1: a full file system under the drop-in
+    # directory. The hold's write fails at the flush; the revert must see it,
+    # keep the start holds and stay pending, and no empty hold may block the
+    # recovery once there is room.
+    discard g.run("systemctl stop a9r-st.service; rm -rf /var/lib/a9r-st; " &
+                  "mkdir /var/lib/a9r-st; touch /var/lib/a9r-st/theirs; " &
+                  "mkdir -p /etc/systemd/system/a9r-st.service.d; " &
+                  "mount -t tmpfs -o size=4k a9full /etc/systemd/system/a9r-st.service.d; " &
+                  "dd if=/dev/zero of=/etc/systemd/system/a9r-st.service.d/.fill bs=4096 count=4 2>/dev/null; true")
+    r = g.applyProfile(repro, "f1", st("f1"))
+    let outf = r.stdout & r.stderr
+    let fullW = g.exec("df -h /etc/systemd/system/a9r-st.service.d; " &
+      "ls -la /etc/systemd/system/a9r-st.service.d /run/systemd/system/a9r-st.service.d 2>&1; " &
+      "systemctl start a9r-st.service; echo start=$?; systemctl is-active a9r-st.service; " &
+      "stat -c '%n %U' /var/lib/a9r-st")
+    record["fullHold"] = %fullW.stdout
+    step("a refused apply whose revert finds the hold's file system full stays " &
+         "pending, reporting it", r.exitCode != 0 and
+         "hold could not be written" in outf and
+         g.exec("test -e " & Pending).exitCode == 0, outf & fullW.stdout)
+    step("and the refused unit cannot start; the tree is still root's",
+         "start=0" notin fullW.stdout and
+         g.exec("stat -c %U /var/lib/a9r-st").stdout.strip() == "root", fullW.stdout)
+    discard g.run("umount /etc/systemd/system/a9r-st.service.d; true")
+    let recf = g.exec(repro & " system addon recover", timeoutSec = 1200)
+    step("with room again, the recovery commits with the hold written in full",
+         recf.exitCode == 0 and
+         g.exec("grep -qx 'AssertPathExists=!/' " & stHold).exitCode == 0 and
+         g.exec("systemctl is-active a9r-st.service").stdout.strip() != "active",
+         recf.stdout & recf.stderr & g.exec("ls -la /etc/systemd/system/a9r-st.service.d").stdout)
+    notPending("the recovery of the revert over a full file system")
+    discard g.run("rm -rf /var/lib/a9r-st")
+    r = g.applyProfile(repro, "f2", st("f2"))
+    step("then the unit applies and starts again", r.exitCode == 0 and
+         g.exec("systemctl is-active a9r-st.service").stdout.strip() == "active",
+         r.stdout & r.stderr)
+    # §13 decision 144: the bound counts from the run's start, so a tree
+    # made during an ExecStartPre= (6 s), or before a oneshot's last
+    # ExecStart=, is refused.
+    for (label, exec) in [("pre", "ExecStartPre=/bin/sleep 6\nExecStart=" & binary & " --version\n"),
+                          ("multi", "ExecStart=/bin/sleep 6\nExecStart=" & binary & " --version\n")]:
+      let pu = proc (d: string): string =
+        control & unitResource("a9r-p.service", "User=a9e\nStateDirectory=a9r-p\n", binary,
+          description = d, exceptions = "NoExecPaths: the gate runs the base's sleep",
+          exec = exec)
+      r = g.applyProfile(repro, label & "1", pu(label & "1"))
+      step("a floored unit with a 6 s " & label & " phase and a StateDirectory applies",
+           r.exitCode == 0, r.stdout & r.stderr)
+      let evp = g.exec("systemctl restart --no-block a9r-p.service; sleep 3; rm -rf /var/lib/a9r-p; " &
+        "mkdir /var/lib/a9r-p; touch /var/lib/a9r-p/planted; sleep 7; " &
+        "stat -c '%n %U %.9W' /var/lib/a9r-p; systemctl show --timestamp=us+utc " &
+        "-p InvocationID -p InactiveExitTimestamp -p ExecMainStartTimestamp -p ActiveState a9r-p.service").stdout
+      record["beforeMain-" & label] = %evp
+      r = g.applyProfile(repro, label & "2", pu(label & "2"))
+      let outp = r.stdout & r.stderr
+      step("a root tree made 3 s into the run, before its main process (" & label &
+           "), is refused (§13 decision 144)", r.exitCode != 0 and
+           "[rule:existing-tree" in outp and "/var/lib/a9r-p" in outp, evp & outp)
+      notPending("the refused apply over a tree made before the main process (" & label & ")")
+      discard g.run("systemctl stop a9r-p.service; rm -rf /var/lib/a9r-p; true")
+      discard g.applyProfile(repro, label & "-c", control)
     # §13 decision 141: a tree a root process makes seconds into a run that
     # began outside a switch is not systemd's.
     discard g.run("systemctl restart a9r-st.service; sleep 3; rm -rf /var/lib/a9r-st; " &
@@ -514,10 +618,10 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
     # compared as the kernel resolves them. A root-owned victim stands for
     # udev's socket: if the manager ever binds or unlinks through a link
     # the service's account planted, the victim is gone.
-    proc victimSafe(label, plantDir: string): tuple[ok: bool; detail: string] =
+    proc victimSafe(label, plantDir: string; leaf = "sub"): tuple[ok: bool; detail: string] =
       let o = g.exec("mkdir -p /run/a9v && rm -f /run/a9v/control && touch /run/a9v/control; " &
-        "runuser -u a9e -- sh -c 'mv " & plantDir & "/sub " & plantDir & "/old && " &
-        "ln -s /run/a9v " & plantDir & "/sub'; echo plant=$?; " &
+        "runuser -u a9e -- sh -c 'mv " & plantDir & "/" & leaf & " " & plantDir & "/old && " &
+        "ln -s /run/a9v " & plantDir & "/" & leaf & "'; echo plant=$?; " &
         "systemctl stop " & label & ".socket; echo stop=$?; " &
         "systemctl start " & label & ".socket; echo start=$?; stat -c '%n %U %F' /run/a9v/control")
       (g.exec("test -f /run/a9v/control && test \"$(stat -c %U /run/a9v/control)\" = root").exitCode == 0,
@@ -562,6 +666,31 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
     discard g.applyProfile(repro, "c-lh", control)
     discard g.run("systemctl stop a9r-h.socket 'a9r-h@*' 2>/dev/null; rm -f " &
       "/usr/lib/systemd/system/a9r-h@.service; systemctl daemon-reload; rm -rf /run/a9r-h; true")
+    # (d) §13 decision 145: a base template whose place carries a specifier
+    # (RuntimeDirectory=a9r-q/%i) counts by its literal prefix, though the
+    # observation instance resolves it to a directory no instance has.
+    discard g.run("printf '[Service]\\nUser=a9e\\nRuntimeDirectory=a9r-q/%%i\\n" &
+      "ExecStart=/bin/sleep infinity\\n' > /usr/lib/systemd/system/a9r-q@.service; " &
+      "systemctl daemon-reload")
+    let lq = control & unitResource("a9r-q.service", "User=a9e\n", binary, enabled = false) &
+      socketResource("a9r-q.socket", "ListenStream=/run/a9r-q/sub/x/control\n" &
+        "Service=a9r-q.service\nSocketUser=a9e\nSocketMode=0600\nRemoveOnStop=yes\n")
+    r = g.applyProfile(repro, "lq", lq)
+    let outq = r.stdout & r.stderr
+    if r.exitCode != 0:
+      step("a base template whose RuntimeDirectory= is <stem>/%i covers the " &
+           "listener below /run/<stem>/ (§13 decision 145)",
+           "unit sharing its stem" in outq, outq)
+      notPending("the refused apply over a specifier place")
+    else:
+      discard g.run("systemctl start a9r-q@sub.service; for i in $(seq 1 50); do " &
+        "[ \"$(stat -c %U /run/a9r-q/sub 2>/dev/null)\" = a9e ] && break; sleep 0.2; done")
+      let v = victimSafe("a9r-q", "/run/a9r-q/sub", leaf = "x")
+      step("the manager did not follow the instance's link to a root file", v.ok,
+           outq & v.detail)
+    discard g.applyProfile(repro, "c-lq", control)
+    discard g.run("systemctl stop a9r-q.socket 'a9r-q@*' 2>/dev/null; rm -f " &
+      "/usr/lib/systemd/system/a9r-q@.service; systemctl daemon-reload; rm -rf /run/a9r-q /run/a9v; true")
     # (c) A place spelled through /var/run covers a listener below /run.
     discard g.run("mkdir -p /run/a9r-v && chown a9e /run/a9r-v")
     let lv = control & unitResource("a9r-v.service", "User=a9e\nReadWritePaths=/var/run/a9r-v\n",

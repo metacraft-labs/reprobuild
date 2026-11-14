@@ -202,6 +202,43 @@ proc syncDir(dirfd: cint; what: string) =
   if fsync(dirfd) != 0:
     raiseOSError(osLastError(), "fsync directory of " & what)
 
+var sysRenameat2 {.importc: "SYS_renameat2", header: "<sys/syscall.h>".}: clong
+proc c_syscall(number: clong): clong {.importc: "syscall", header: "<unistd.h>", varargs.}
+const RenameNoReplace = 1.clong
+  ## ``RENAME_NOREPLACE`` (rename(2), "renameat2()"): fail with ``EEXIST``
+  ## rather than replace an existing destination. Called through
+  ## ``syscall(2)`` because the libc wrapper is missing from older glibc
+  ## and from the musl the static add-on links against; ``SYS_renameat2``
+  ## is defined for every Linux architecture the add-on builds for.
+
+proc renameNoReplace*(dir, fromName, toName: string): cint =
+  ## Rename ``dir/fromName`` to ``dir/toName`` unless ``toName`` exists,
+  ## atomically: nothing can appear at ``toName`` between the check and the
+  ## rename (``renameat2(2)`` with ``RENAME_NOREPLACE``). ``dir`` is opened
+  ## without following a link on the way (``openDirNoFollow``); the names
+  ## are single components. Returns 0, or the ``errno`` of the failure
+  ## (``EEXIST`` when ``toName`` exists). Raises only when ``dir`` cannot be
+  ## opened, or a name is not a single component.
+  if '/' in fromName or '/' in toName or fromName in ["", ".", ".."] or
+      toName in ["", ".", ".."]:
+    raise newException(NoFollowError, "not a single path component: " &
+                       fromName & " -> " & toName)
+  let dirfd = openDirNoFollow(dir)
+  defer: discard posix.close(dirfd)
+  if c_syscall(sysRenameat2, clong(dirfd), fromName.cstring, clong(dirfd),
+               toName.cstring, RenameNoReplace) != 0:
+    return cint(osLastError())
+  0
+
+proc syncDirNoFollow*(dir: string) =
+  ## ``fsync(2)`` the directory ``dir`` (opened without following a link):
+  ## an entry created, renamed or removed in it is durable once this
+  ## returns. Raises.
+  let dirfd = openDirNoFollow(dir)
+  defer: discard posix.close(dirfd)
+  if fsync(dirfd) != 0:
+    raiseOSError(osLastError(), "fsync " & dir)
+
 proc writeFileNoFollow*(path, content: string; mode: int;
                         uid = -1; gid = -1; replacingLinkTo = "") =
   ## Write ``content`` to ``path`` atomically, never through a link (see
@@ -261,8 +298,13 @@ proc writeFileNoFollow*(path, content: string; mode: int;
     when not SkipsFsync:
       if fsync(fd) != 0:
         raiseOSError(osLastError(), "fsync " & path)
-  finally:
+  except CatchableError:
     discard posix.close(fd)
+    raise
+  # close(2) can be the only report of a write error, so its result is
+  # checked before the rename makes the file visible.
+  if posix.close(fd) != 0:
+    raiseOSError(osLastError(), "close " & path)
   if c_renameat(dirfd, tmp.cstring, dirfd, leaf.cstring) != 0:
     raiseOSError(osLastError(), "rename " & tmp & " -> " & path)
   committed = true

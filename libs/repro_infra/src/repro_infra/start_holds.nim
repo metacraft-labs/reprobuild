@@ -26,9 +26,14 @@ import std/[os, posix, strutils, tables]
 import ./host_exec
 
 const HoldMutation {.strdefine: "reproAddonMutation".} = ""
+
+var ONoFollow {.importc: "O_NOFOLLOW", header: "<fcntl.h>".}: cint
+var ODirectory {.importc: "O_DIRECTORY", header: "<fcntl.h>".}: cint
+proc cRename(a, b: cstring): cint {.importc: "rename", header: "<stdio.h>".}
   ## ``start-hold-removes-directory`` (A9's falsifying build): removing a
   ## hold deletes its whole directory. ``stale-start-holds-kept``: stale
-  ## holds are not cleared.
+  ## holds are not cleared. ``hold-written-unchecked``: a hold is written
+  ## with ``writeFile``, whose failures on a full file system go unseen.
 
 type HoldMode* = enum
   hmAssert, hmCondition
@@ -60,14 +65,64 @@ proc holdPath*(unit, name: string; dir = RuntimeUnitDir): string =
   let t = templateOf(unit)
   dir / ((if t.len > 0: t else: unit) & ".d") / name
 
+proc writeHoldFile*(path, text: string) =
+  ## ``text`` at ``path``, every step checked (A9 review round 14, finding
+  ## 1): a temporary file in the same directory is opened, written in full,
+  ## ``fsync``-ed and closed, each result checked, renamed over ``path``,
+  ## the directory ``fsync``-ed, and the file read back and compared. Nim's
+  ## ``writeFile`` buffers in stdio and discards ``fclose``'s result, so on
+  ## a full file system it leaves an empty file and raises nothing
+  ## (write(2), fsync(2), close(2): "a failure to close ... may be the only
+  ## indication of a ... write error"). Raises ``OSError`` on any failure,
+  ## leaving no temporary file.
+  when HoldMutation == "hold-written-unchecked":
+    # Falsifying build: round 13's plain writeFile.
+    writeFile(path, text)
+    return
+  let dir = parentDir(path)
+  let tmp = dir / ("." & extractFilename(path) & ".tmp")
+  discard unlink(tmp.cstring)
+  let fd = posix.open(tmp.cstring, O_WRONLY or O_CREAT or O_EXCL or ONoFollow or O_CLOEXEC, 0o644)
+  if fd < 0: raiseOSError(osLastError(), "create " & tmp)
+  var ok = false
+  try:
+    var off = 0
+    while off < text.len:
+      let n = posix.write(fd, unsafeAddr text[off], text.len - off)
+      if n <= 0: raiseOSError(osLastError(), "write " & tmp)
+      off += n
+    if fsync(fd) != 0: raiseOSError(osLastError(), "fsync " & tmp)
+    let c = posix.close(fd)
+    if c != 0: raiseOSError(osLastError(), "close " & tmp)
+    if cRename(tmp.cstring, path.cstring) != 0:
+      raiseOSError(osLastError(), "rename " & tmp & " -> " & path)
+    ok = true
+  finally:
+    if not ok:
+      discard posix.close(fd)       # harmless EBADF when already closed
+      discard unlink(tmp.cstring)
+  let dfd = posix.open(dir.cstring, O_RDONLY or ODirectory or O_CLOEXEC)
+  if dfd < 0: raiseOSError(osLastError(), "open " & dir)
+  let synced = fsync(dfd)
+  let err = osLastError()
+  discard posix.close(dfd)
+  if synced != 0: raiseOSError(err, "fsync " & dir)
+  var back = ""
+  try: back = readFile(path)
+  except IOError as e: raise newException(OSError, "read back " & path & ": " & e.msg)
+  if back != text:
+    raise newException(OSError, path & " does not hold what was written (" &
+      $back.len & " of " & $text.len & " bytes)")
+
 proc writeHolds*(units: openArray[string]; name, text: string;
                  dir = RuntimeUnitDir): seq[string] =
-  ## A hold for each unit; returns the files written.
+  ## A hold for each unit, each written by ``writeHoldFile``; returns the
+  ## files written. Raises ``OSError`` on the first that cannot be.
   for u in units:
     let p = holdPath(u, name, dir)
     if p in result: continue
     createDir(parentDir(p))
-    writeFile(p, text)
+    writeHoldFile(p, text)
     result.add(p)
 
 proc removeHolds*(holds: openArray[string]) =

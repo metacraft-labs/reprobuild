@@ -998,6 +998,10 @@
 ##                                            attestation key and the state
 ##                                            when the discard's completion
 ##                                            could not be written
+## ``ledger-copy-removed-with-the-rest``      /var/lib/repro is removed in
+##                                            one recursive removal, so a
+##                                            part-way failure can take the
+##                                            ledger copy (decision 146)
 ## ``sink-config-removed-in-step-4``          the Evidence sink's
 ##                                            configuration and CA go with
 ##                                            the other /etc objects
@@ -1455,6 +1459,20 @@ const
                           # interrupted revert recorded, so they are left
                           # unclaimed.
                           "replayed-hold-dir-unclaimed",
+                          # the staging directory of a revert's hold is
+                          # not synced before its record says staged.
+                          "revert-hold-staging-not-synced",
+                          # a staged record whose directory is gone stays
+                          # staged, so a later <unit>.d at that path is
+                          # claimed.
+                          "revert-hold-gone-dir-reclaimed",
+                          # uninstall removes only the holds a ledger
+                          # names, not those of a revert that died before
+                          # its ledger.
+                          "uninstall-ignores-unledgered-holds",
+                          # recovery starts a unit a revert holds and
+                          # reports it started.
+                          "recovery-starts-held-units",
                           # a passing switch that clears a revert hold
                           # removes its directory whenever it is left
                           # empty, an operator's too.
@@ -1484,6 +1502,20 @@ const
                           # spelled (/var/run is not /run, no link is
                           # resolved).
                           "listener-writable-by-spelling",
+                          # a hold is written with writeFile, whose
+                          # failure on a full file system goes unseen.
+                          "hold-written-unchecked",
+                          # a floored unit is not ordered after the boot
+                          # re-assertion, so a reboot before recovery
+                          # starts it with no hold.
+                          "floored-not-after-reassert",
+                          # decision 141's bound counts from the main
+                          # process's start (ExecMainStartTimestamp).
+                          "recreated-bound-from-main-start",
+                          # a template's writable place is read only
+                          # through its observation instance, its
+                          # specifiers resolved for that instance.
+                          "writable-specifier-resolved",
                           # A13: a state backup or restore runs while a
                           # unit of the set may run.
                           "state-units-not-checked",
@@ -1744,6 +1776,7 @@ const
                           "evidence-reported-removed-unchecked",
                           "ship-ok-without-sink-configuration",
                           "sink-config-removed-in-step-4",
+                          "ledger-copy-removed-with-the-rest",
                           "state-removed-after-root-failure",
                           "intent-overwrites-existing",
                           "discard-completed-objects-present",
