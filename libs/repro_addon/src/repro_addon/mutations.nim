@@ -982,6 +982,10 @@
 ## ``discard-completion-key-read-late``       the completion is signed from
 ##                                            the key file, which the removal
 ##                                            took
+## ``discard-completion-failure-discards-key`` uninstall goes on to remove the
+##                                            attestation key and the state
+##                                            when the discard's completion
+##                                            could not be written
 ## ``ship-ok-without-sink-configuration``     uninstall reads a missing sink
 ##                                            configuration as "nothing to
 ##                                            wait for" though records are
@@ -1689,6 +1693,7 @@ const
                           "discard-completed-objects-present",
                           "discard-failed-removal-counted-as-kept",
                           "discard-completion-key-read-late",
+                          "discard-completion-failure-discards-key",
                           "discard-completion-sync-error-swallowed",
                           "fresh-ignores-listings"]
 

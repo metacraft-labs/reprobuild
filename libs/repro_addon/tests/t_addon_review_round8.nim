@@ -89,6 +89,8 @@ import std/[json, os, sequtils, strutils, times, unittest]
 
 import repro_addon/attestation
 import repro_addon/cli
+import repro_addon/addon_apply
+import repro_addon/ledger
 import repro_addon/evidence as addonEvidence
 import repro_addon/store_custody
 import repro_addon/uninstall
@@ -451,6 +453,107 @@ suite "the A11 code review's eighth round: §13 decision 81":
     check not fileExists(completionPathOf(s.gate.overrideRecord))
     check verifyDiscardRecord(s.gate.overrideRecord, s.pub).status == dsAuthorised
     check verifyExit(s) == 3
+
+suite "the A11 code review's round 12: a completion that fails is not lost (§13 decisions 62, 113)":
+  ## The completion is written after the evidence is gone and BEFORE the
+  ## attestation key and the state are removed; when it cannot be written
+  ## (or the removal cannot be made durable) the state and the key stay, and
+  ## a second uninstall signs the completion of the first run's intent.
+  ## Falsifier ``discard-completion-failure-discards-key`` (15, 16).
+  ## The writer and the syncer that fail are stand-ins: a file system that
+  ## refuses a write or a sync cannot be produced on demand (the VM gate
+  ## ``e2e_addon_store_custody`` makes the log directory immutable instead).
+  let failWriter = proc (path, text: string) =
+    raise newException(IOError, "Operation not permitted")
+  let failSync = proc (removed: seq[string]) =
+    raise newException(OSError, "syncfs failed")
+
+  proc stateOf(s: Scene): string = parentDir(parentDir(s.key)) / "state"
+  proc logOf(s: Scene): string = parentDir(s.gate.overrideRecord)
+  proc ledgerAt(s: Scene): Ledger =
+    result = Ledger(generation: "g0")
+    writeLedger(ledgerCopyPath(stateOf(s)), result)
+
+  test "15: a completion that cannot be written keeps the key and the state":
+    let s = scene("r12-write")
+    removeDir(s.aside)
+    var signer = loadTextSigner(s.key)
+    var r = resultOf(s)
+    let stop = completeDiscardBeforeKeys(r, ledgerAt(s), stateOf(s), s.site,
+                                         signer, s.gate.pending, failWriter)
+    signer.wipe()
+    checkpoint r.errors.join("\n")
+    check stop
+    check r.completionRecord.len == 0
+    check r.errors.anyIt("could not be written" in it)
+    check r.errors.anyIt("are kept" in it)
+    check fileExists(s.key)
+    check fileExists(ledgerCopyPath(stateOf(s)))
+    check not fileExists(completionPathOf(s.gate.overrideRecord) & DiscardRecordSigExt)
+    check verifyExit(s) == 3
+
+  test "16: a second run completes the intent the first could not":
+    for failing in ["write", "sync"]:
+      let s = scene("r12-rerun-" & failing)
+      removeDir(s.aside)
+      var first = loadTextSigner(s.key)
+      var r1 = resultOf(s)
+      if failing == "write":
+        check completeDiscardBeforeKeys(r1, ledgerAt(s), stateOf(s), s.site,
+                                        first, s.gate.pending, failWriter)
+      else:
+        check completeDiscardBeforeKeys(r1, ledgerAt(s), stateOf(s), s.site,
+                                        first, s.gate.pending,
+                                        atomicRecordWriter, failSync)
+      first.wipe()
+      check verifyExit(s) == 3
+      # The second uninstall: nothing is pending any more.
+      let before = toSeq(walkFiles(logOf(s) / "*")).len
+      let g = storeEvidenceGate(s.site, override, notAcknowledged,
+                                overrideDir = logOf(s))
+      checkpoint g.errors.join("\n")
+      check g.errors.len == 0
+      check g.overrideRecord == s.gate.overrideRecord
+      check g.overrideRecordText == s.gate.overrideRecordText
+      check g.pending == s.gate.pending
+      var second = loadTextSigner(s.key)
+      var r2 = UninstallResult(overrideRecord: g.overrideRecord,
+                               overrideRecordText: g.overrideRecordText)
+      check not completeDiscardBeforeKeys(r2, ledgerAt(s), stateOf(s), s.site,
+                                          second, g.pending)
+      second.wipe()
+      check r2.completionRecord == completionPathOf(s.gate.overrideRecord)
+      check verifyExit(s) == 0
+      # No new intent was written for it, only the completion and its signature.
+      check toSeq(walkFiles(logOf(s) / "*")).len == before + 2
+      # A third run finds nothing to complete.
+      check storeEvidenceGate(s.site, override, notAcknowledged,
+                              overrideDir = logOf(s)).overrideRecord.len == 0
+
+  test "17: an intent that is completed, signed by another key, or altered is not resumed":
+    let s = scene("r12-skip")
+    removeDir(s.aside)
+    var signer = loadTextSigner(s.key)
+    var r = resultOf(s)
+    finishDiscard(r, s.site, signer, s.gate.pending)
+    signer.wipe()
+    check r.completionRecord.len > 0
+    check unfinishedDiscardIntent(s.site, logOf(s)).path.len == 0
+    # Another key's intent in the same directory, with no completion.
+    let other = scene("r12-other")
+    let foreign = logOf(s) / "uninstall-29990101T000000Z-discard-intent.json"
+    copyFile(other.gate.overrideRecord, foreign)
+    copyFile(other.gate.overrideRecord & DiscardRecordSigExt,
+             foreign & DiscardRecordSigExt)
+    check unfinishedDiscardIntent(s.site, logOf(s)).path.len == 0
+    # An intent of this host's own key whose bytes changed does not verify.
+    let own = scene("r12-tamper")
+    let tampered = logOf(s) / "uninstall-29990102T000000Z-discard-intent.json"
+    writeFile(tampered, readFile(own.gate.overrideRecord) & " ")
+    copyFile(own.gate.overrideRecord & DiscardRecordSigExt,
+             tampered & DiscardRecordSigExt)
+    check unfinishedDiscardIntent(own.site, logOf(s)).path != tampered
+    check unfinishedDiscardIntent(own.site, logOf(s)).path.len == 0
 
 suite "round 9's decisions are cited by their own §13 numbers":
   # The three decisions of round 9 were reserved as §13 86 to 88, but the
