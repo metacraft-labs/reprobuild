@@ -243,6 +243,24 @@ const
     "proc-sys-fs-binfmt_misc",
   ]
 
+  SwapAliasUnitPrefix* = "dev-disk-by"
+    ## With the ``.swap`` suffix: the swap units systemd loads for each
+    ## ``/dev/disk/by-*`` symlink of an active swap device, as udev creates
+    ## the links (``dev-disk-by\x2duuid-<uuid>.swap``, ``...by\x2dlabel...``,
+    ## ``...by\x2ddiskseq...``). They are aliases of the device's own
+    ## unit (``dev-zram0.swap``), which stays recorded. Their names carry
+    ## per-boot identifiers -- a zram swap is formatted afresh at every
+    ## boot, so its UUID changes -- and whether they are loaded follows
+    ## udev's timing after boot (measured 2026-11-14 on the Omarchy 4.5.0
+    ## guest: absent at one fingerprint and present at a later one, with
+    ## no apply in between doing more than a daemon-reload). Only the
+    ## ``active-units`` component is affected; such units have no unit file.
+
+proc isSwapAliasUnit*(name: string): bool =
+  ## A ``/dev/disk/by-*`` alias unit of an active swap device
+  ## (``SwapAliasUnitPrefix``).
+  name.startsWith(SwapAliasUnitPrefix) and name.endsWith(".swap")
+
 # ---------------------------------------------------------------------------
 # Escaping: one record per line, three tab-separated fields.
 # ---------------------------------------------------------------------------
@@ -610,7 +628,8 @@ proc parseListUnits*(text: string): seq[tuple[key, value: string]] =
     if l.startsWith("*"): l = l[1 .. ^1].strip()
     let f = l.splitWhitespace()
     if f.len < 4: continue
-    if isVolatileUnit(f[0]) or f[0] in VolatileActiveUnits: continue
+    if isVolatileUnit(f[0]) or f[0] in VolatileActiveUnits or
+        isSwapAliasUnit(f[0]): continue
     if f[2] in ["active", "failed"]:
       result.add((key: f[0], value: f[2]))
 

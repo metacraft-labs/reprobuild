@@ -321,6 +321,16 @@ suite "the fingerprint on Arch":
       discard collectFingerprint(CollectOptions(root: root, live: false,
                                                 omarchyAccount: "nobody"))
 
+  test "swap alias units are not recorded; the swap device's own unit is":
+    let r = parseListUnits(
+      "dev-disk-by\\x2duuid-5d857e7b\\x2d2876.swap loaded active active /dev/disk/by-uuid/5d857e7b\n" &
+      "dev-disk-by\\x2dlabel-zram0.swap loaded active active /dev/disk/by-label/zram0\n" &
+      "dev-zram0.swap loaded active active Compressed Swap on /dev/zram0\n" &
+      "swap-swapfile.swap loaded active active /swap/swapfile\n")
+    var names: seq[string]
+    for e in r: names.add(e.key)
+    check names == @["dev-zram0.swap", "swap-swapfile.swap"]
+
   test "btrfs subvolume list and snapper userdata":
     let l = parseBtrfsSubvolumeList(
       "ID 256 gen 120 top level 5 path <FS_TREE>/@\n" &
