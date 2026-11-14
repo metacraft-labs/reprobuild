@@ -99,11 +99,21 @@ e2e_addon_store_roots_and_btrfs:
     bash ./scripts/run_addon_gate.sh t_e2e_addon_store_roots_and_btrfs
 
 # The Arch test bed (AR1; tests/e2e/addon/arch_testbed.nim): two independent
-# builds of every Arch guest from its pins agree, `pacman -Syu` on a fresh
-# guest is a no-op, and a guest whose pacman names anything but its pinned
-# Arch Linux Archive date is refused before any gate runs.
+# builds of every Arch guest and of the Omarchy VM from their pins agree,
+# `pacman -Syu` on a fresh guest is a no-op, and a guest whose pacman names
+# anything but its pin (an Arch Linux Archive date, or the Omarchy capture
+# cache) is refused before any gate runs.
 e2e_arch_testbed_is_pinned:
-    REPRO_ADDON_BASES="${REPRO_ADDON_BASES:-arch-btrfs-amd64,arch-ext4-amd64,arch-old-systemd-amd64}" bash ./scripts/run_addon_gate.sh t_e2e_arch_testbed_is_pinned
+    REPRO_ADDON_BASES="${REPRO_ADDON_BASES:-arch-btrfs-amd64,arch-ext4-amd64,arch-old-systemd-amd64,omarchy-amd64}" bash ./scripts/run_addon_gate.sh t_e2e_arch_testbed_is_pinned
+
+# Capture the pinned Omarchy release (its ISO, repository databases and
+# packages) into the Arch test bed's content cache and rewrite its SHA-256
+# list, tests/e2e/addon/fixtures/omarchy/. Run only to change the pin set;
+# commit the list it writes.
+addon-omarchy-capture:
+    mkdir -p build/test-bin build/nimcache
+    nim c --hints:off --warnings:off --nimcache:build/nimcache/capture_omarchy --out:build/test-bin/capture_omarchy tests/e2e/addon/capture_omarchy.nim
+    ./build/test-bin/capture_omarchy
 
 # The ownership-ledger and collision gates (A3). They run on the two
 # supported bases by default; the Debian 12 upgrade source has no row here.

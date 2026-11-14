@@ -341,6 +341,14 @@ type
       ## Extra writable disks attached after the boot disk (``/dev/vdb``,
       ## ...), each a ``DataDisk`` the gate owns: destroying the guest does
       ## not delete them (QEMU only).
+    uefi*: bool
+      ## Boot amd64 under UEFI (OVMF) rather than legacy BIOS: a guest whose
+      ## disk has only an EFI boot loader (the Omarchy guest's Limine).
+      ## ARM guests always boot UEFI.
+    networkIsolated*: bool
+      ## No network at all beyond the SSH forward (QEMU ``restrict=on``, no
+      ## relay): what a guest that must resolve nothing from the network
+      ## boots with.
     relayPort*: int
       ## > 0: the guest's network is restricted (QEMU ``restrict=on``) and
       ## its only reachable service is ``GuestProxyAddress:GuestProxyPort``,
@@ -414,7 +422,7 @@ proc release*(d: DataDisk) =
   if d.dir.len > 0:
     releaseRunDir(d.dir, d.token)
 
-proc freePort(): int =
+proc freePort*(): int =
   ## A loopback TCP port the kernel just handed out (bound to port 0 and
   ## released again).
   let s = newSocket()
@@ -522,6 +530,9 @@ proc bootTimeout(g: Guest): int =
 
 when defined(gostiAvailable):
   proc restrictNetwork(g: Guest; spec: var BootMediaSpec) =
+    if g.networkIsolated and g.relayPort <= 0:
+      spec.networkRestricted = true
+      return
     if g.relayPort <= 0: return
     let socat = findExe("socat")
     if socat.len == 0:
@@ -537,7 +548,7 @@ when defined(gostiAvailable):
       mediaPath: g.diskPath, secondaryIsoPath: g.seedPath,
       cpus: (if g.cpus > 0: g.cpus elif g.base.debArch == "amd64": 2 else: 4),
       memoryMB: (if g.memoryMB > 0: g.memoryMB else: 2048),
-      generation: (if g.base.debArch == "amd64": 1 else: 2),
+      generation: (if g.base.debArch == "amd64" and not g.uefi: 1 else: 2),
       acceleration: baAuto, sshForwardPort: freePort(),
       serialLogPath: g.serialLog, guestArch: qemuArch(g.base),
       diskReadonly: readonly, diskInPlace: true,
@@ -582,7 +593,7 @@ proc bootNoWait*(g: Guest) =
     var spec = BootMediaSpec(name: g.name, kind: bmkQcow2,
       mediaPath: g.diskPath, secondaryIsoPath: g.seedPath,
       cpus: (if g.base.debArch == "amd64": 2 else: 4), memoryMB: 2048,
-      generation: (if g.base.debArch == "amd64": 1 else: 2),
+      generation: (if g.base.debArch == "amd64" and not g.uefi: 1 else: 2),
       acceleration: baAuto, sshForwardPort: freePort(),
       serialLogPath: g.serialLog, guestArch: qemuArch(g.base),
       diskInPlace: true)
@@ -645,6 +656,16 @@ proc copyFrom*(g: Guest; guestPath, hostPath: string) =
       raise newException(TestBedError, "copyFrom is not supported on Incus")
     g.qemu.copyFromGuest(g.vm, guestPath, hostPath)
 
+const
+  PowerOffCommand* = "systemctl poweroff --check-inhibitors=no || " &
+    "systemctl poweroff || poweroff"
+    ## Power a guest off from a non-interactive session even while a logind
+    ## inhibitor is held: without ``--check-inhibitors=no`` systemctl refuses
+    ## ("Operation inhibited"), and a desktop base (the Omarchy guest's
+    ## session) holds one (systemctl(1), ``--check-inhibitors``, systemd
+    ## 248 and later; the plain forms are the fallback for an older one).
+  RebootCommand* = "systemctl reboot --check-inhibitors=no || systemctl reboot"
+
 proc shutdown*(g: Guest) =
   ## Power the guest off and wait for QEMU to exit (the disk is then
   ## quiescent and may be hashed). Incus containers are stopped.
@@ -653,7 +674,7 @@ proc shutdown*(g: Guest) =
     if g.kind == gkIncus:
       discard g.incus.runIncus(@["stop", g.name], timeoutSec = 120)
     else:
-      discard g.exec("systemctl poweroff || poweroff", timeoutSec = 30)
+      discard g.exec(PowerOffCommand, timeoutSec = 30)
       if not g.qemu.waitForShutdown(g.vm, g.bootTimeout()):
         g.note("guest did not power off in time; stopping QEMU")
       g.qemu.stopAndCleanup(g.vm, deleteVm = true)
@@ -1142,7 +1163,7 @@ proc addKernelCmdline*(g: Guest; args: string; timeoutSec = 900) =
 proc rebootGuest*(g: Guest; timeoutSec = 600) =
   ## A clean reboot (QEMU runs with -no-reboot: the process ends and the
   ## same disk is booted again).
-  discard g.exec("systemctl reboot", timeoutSec = 30)
+  discard g.exec(RebootCommand, timeoutSec = 30)
   discard g.waitPoweredOff(timeoutSec)
   g.boot()
 

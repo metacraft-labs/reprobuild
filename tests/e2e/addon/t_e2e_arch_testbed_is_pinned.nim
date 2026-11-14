@@ -27,11 +27,22 @@
 ##    flattened and booted again as a new guest; ``prepareArchGuest`` must
 ##    raise, naming the server.
 ##
-## *Not covered yet:* the Omarchy VM's half of the gate (its two builds,
-## its ``BUILD_ID``, its ``pacman -Syu`` under
-## ``OMARCHY_ALLOW_DIRECT_PACMAN=1``, and the refusal of a pacman
-## configuration naming anything but the capture cache). The Omarchy VM is
-## not built yet; the record says so in ``omarchy``.
+## 6. **The Omarchy VM** (``omarchy-amd64``) gets the same treatment: two
+##    builds from the pinned ISO and the capture list agree on ``pacman -Q``
+##    and on ``os-release`` ``BUILD_ID``; each is the installed Omarchy
+##    layout (btrfs root, a snapper configuration for ``/``, Limine) at the
+##    pinned ``omarchy-version``; its ``pacman -Syu`` is a no-op and runs
+##    with ``OMARCHY_ALLOW_DIRECT_PACMAN=1``, inside the VM only (Omarchy's
+##    ``00-omarchy-update-guard.hook`` aborts a direct upgrade otherwise,
+##    spec §7.9), which the record states; and an Omarchy VM whose pacman
+##    names a server other than the capture cache (Omarchy's own
+##    ``stable-mirror.omarchy.org``) is refused before any gate runs.
+##
+## *How it is started.* ``just e2e_arch_testbed_is_pinned``. From a shell an
+## agent harness's command-trace preload is loaded into, ``run_addon_gate.sh``
+## refuses (its preload guard); this gate runs no engine edge, so its binary
+## may then be run directly, and the record names any foreign preload it ran
+## under (``hostPreload``).
 ##
 ## Opt-in: ``REPRO_ADDON_VM_GATES=1`` (``just e2e_arch_testbed_is_pinned``).
 ## Bases: ``REPRO_ADDON_BASES`` (Arch names only).
@@ -50,15 +61,23 @@ const
   LiveMirror = "https://geo.mirror.pkgbuild.com/$repo/os/$arch"
   LiveRepoConf = "\n[testbed-live]\nServer = https://geo.mirror.pkgbuild.com/extra/os/$arch\n"
 
+  OmarchyDirectPacman = "OMARCHY_ALLOW_DIRECT_PACMAN=1"
+  StableMirrorLine = "Server = https://stable-mirror.omarchy.org/$repo/os/$arch"
+
 type GuestFacts = object
   fsType: string
   packages: string
   syu: SyuReport
   systemd: string
+  buildId: string
+  omarchyVersion: string
+  snapperRoot: string
+  limine: string
 
 proc selection(): seq[BaseImage] =
   if getEnv("REPRO_ADDON_BASES").len == 0:
     for b in ArchBases: result.add(b)
+    result.add(OmarchyBase)
   else:
     result = selectedArchBases()
 
@@ -73,7 +92,16 @@ proc observe(b: BaseImage; image: string; note: var seq[string]): GuestFacts =
     result.fsType = g.rootFsType()
     result.systemd = g.run("systemctl --version | head -n 1").strip()
     result.packages = g.packageList()
-    result.syu = g.syuReport()
+    if isOmarchyBase(b):
+      result.buildId = g.omarchyBuildId()
+      result.omarchyVersion = g.run("omarchy-version").strip()
+      result.snapperRoot = g.exec("grep -h '^SUBVOLUME=' " &
+        "/etc/snapper/configs/root 2>&1").stdout.strip()
+      result.limine = g.exec("pacman -Q limine 2>&1; ls /boot/EFI/limine/" &
+        "limine_x64.efi /boot/EFI/BOOT/BOOTX64.EFI 2>&1").stdout.strip()
+      result.syu = g.syuReport(env = OmarchyDirectPacman)
+    else:
+      result.syu = g.syuReport()
   finally:
     if g != nil:
       note.add(g.log)
@@ -92,6 +120,8 @@ proc refusedAfter(b: BaseImage; image, workDir, tag, edit: string;
     discard g.run(edit)
     g.shutdown()
     convertTo(g.diskPath, disk)
+    if isOmarchyBase(b):
+      copyFile(omarchyKeyOf(image), omarchyKeyOf(disk))
     g.destroy()
     g = nil
     h = newArchGuestOver(b, disk)
@@ -107,9 +137,10 @@ proc refusedAfter(b: BaseImage; image, workDir, tag, edit: string;
         note.add(x.log)
         x.destroy()
     removeFile(disk)
+    removeFile(omarchyKeyOf(disk))
 
 suite "e2e_arch_testbed_is_pinned":
-  test "two builds of every Arch guest agree, -Syu is a no-op, an unpinned pacman is refused":
+  test "two builds of every Arch guest and of the Omarchy VM agree, -Syu is a no-op, an unpinned pacman is refused":
     if not gatesEnabled():
       skip("add-on VM gate: set REPRO_ADDON_VM_GATES=1 (just " &
            "e2e_arch_testbed_is_pinned)")
@@ -121,9 +152,12 @@ suite "e2e_arch_testbed_is_pinned":
       record["reprobuild"] = %gitHead()
       record["backend"] = %"qemu"
       record["started"] = %($now().utc)
-      record["omarchy"] = %("not covered: the Omarchy VM is not built yet " &
-        "(AR1 open question: which Omarchy version is pinned and what its " &
-        "installer is)")
+      for k, v in omarchyRecordBase(): record[k] = v
+      record["omarchyDirectPacman"] = %("pacman -Syu on the Omarchy VM ran " &
+        "with " & OmarchyDirectPacman & ", inside the VM only (Omarchy's " &
+        "00-omarchy-update-guard.hook aborts a direct upgrade otherwise; " &
+        "spec §7.9); the test bed never sets it on a host")
+      record["hostPreload"] = %getEnv("LD_PRELOAD")
       var failures: seq[string]
       var notes: seq[string]
       let builds = newJArray()
@@ -135,16 +169,25 @@ suite "e2e_arch_testbed_is_pinned":
         $getCurrentProcessId() & "-" & randomHex(6))
       try:
         let sel = selection()
+        var archSel, omarchySel = false
         var needBtrfs = false
         for b in sel:
-          if archVariantOf(b) != avBtrfs: needBtrfs = true
+          if isOmarchyBase(b): omarchySel = true
+          else:
+            archSel = true
+            if archVariantOf(b) != avBtrfs: needBtrfs = true
+        proc imageOf(b: BaseImage; round: int): string =
+          let r = ["A", "B"][round]
+          if isOmarchyBase(b): work / ("omarchy-" & r & ".qcow2")
+          else: work / ($archVariantOf(b) & "-" & r & ".qcow2")
         var btrfsOf: array[2, string]
         for round in 0 .. 1:
           let r = ["A", "B"][round]
           # The btrfs build of this round is the source of its ext4 and
           # old-systemd builds, so the rounds share nothing but the pins.
           var wanted: seq[ArchVariant]
-          for b in sel: wanted.add(archVariantOf(b))
+          for b in sel:
+            if not isOmarchyBase(b): wanted.add(archVariantOf(b))
           if needBtrfs: wanted.add(avBtrfs)
           for v in [avBtrfs, avExt4, avOldSystemd]:
             if v notin wanted: continue
@@ -155,39 +198,72 @@ suite "e2e_arch_testbed_is_pinned":
             builds.add(%*{"variant": $v, "round": r, "sha256": bi.sha256,
               "seconds": bi.seconds, "started": bi.startedAt,
               "finished": bi.finishedAt, "pinSet": bi.pinSet})
+          if omarchySel:
+            # Each Omarchy build is an install from the pinned ISO of its
+            # own, onto a blank disk: it shares nothing with the other round
+            # but the ISO and the capture.
+            let bi = buildOmarchyImage(imageOf(OmarchyBase, round))
+            notes.add(bi.log)
+            builds.add(%*{"variant": "omarchy", "round": r,
+              "sha256": bi.sha256, "seconds": bi.seconds,
+              "started": bi.startedAt, "finished": bi.finishedAt,
+              "pinSet": bi.pinSet})
         for b in sel:
-          let v = archVariantOf(b)
+          let om = isOmarchyBase(b)
           var facts: array[2, GuestFacts]
           for round in 0 .. 1:
             let r = ["A", "B"][round]
-            facts[round] = observe(b, work / ($v & "-" & r & ".qcow2"), notes)
+            facts[round] = observe(b, imageOf(b, round), notes)
             let f = facts[round]
-            let wantFs = if v == avExt4: "ext4" else: "btrfs"
+            let wantFs = if not om and archVariantOf(b) == avExt4: "ext4"
+                         else: "btrfs"
             verify(b.name & " build " & r & ": root filesystem is " & wantFs,
                   f.fsType == wantFs, f.fsType)
-            verify(b.name & " build " & r & ": pacman -Syu is a no-op",
+            verify(b.name & " build " & r & ": pacman -Syu is a no-op" &
+                  (if om: " (" & OmarchyDirectPacman & ")" else: ""),
                   f.syu.noop, f.syu.detail & "\n" & f.syu.output)
-            if v == avOldSystemd:
+            if not om and archVariantOf(b) == avOldSystemd:
               var major = 0
               let parts = f.systemd.splitWhitespace()
               if parts.len >= 2:
                 try: major = parseInt(parts[1]) except ValueError: discard
               verify(b.name & " build " & r & ": PID 1 is systemd below 258",
                     major > 0 and major < 258, f.systemd)
+            if om:
+              verify(b.name & " build " & r & ": omarchy-version is " &
+                    OmarchyVersion, f.omarchyVersion == OmarchyVersion,
+                    f.omarchyVersion)
+              verify(b.name & " build " & r & ": BUILD_ID is " &
+                    OmarchyBuildId, f.buildId == OmarchyBuildId, f.buildId)
+              verify(b.name & " build " & r & ": snapper is configured for /",
+                    f.snapperRoot == "SUBVOLUME=\"/\"", f.snapperRoot)
+              verify(b.name & " build " & r & ": the boot loader is Limine",
+                    f.limine.startsWith("limine ") and
+                    "No such file" notin f.limine, f.limine)
           verify(b.name & ": the two builds list the same packages",
                 facts[0].packages == facts[1].packages,
                 "A " & $facts[0].packages.countLines() & " lines, B " &
                 $facts[1].packages.countLines() & " lines")
+          if om:
+            verify(b.name & ": the two builds have the same BUILD_ID",
+                  facts[0].buildId == facts[1].buildId and
+                  facts[0].buildId.len > 0,
+                  "A " & facts[0].buildId & ", B " & facts[1].buildId)
           record[b.name] = %*{"packages": facts[0].packages,
             "packageCount": facts[0].packages.strip().countLines(),
             "systemd": facts[0].systemd, "rootFs": facts[0].fsType,
+            "buildId": [facts[0].buildId, facts[1].buildId],
+            "omarchyVersion": facts[0].omarchyVersion,
+            "snapperRoot": facts[0].snapperRoot, "limine": facts[0].limine,
             "syuA": facts[0].syu.output, "syuB": facts[1].syu.output}
           # 4. The cached image the other Arch gates boot.
           let cachedAt = now().utc
-          let cached = observe(b, archGoldenImage(v), notes)
+          let cachedImg = if om: omarchyGoldenImage()
+                          else: archGoldenImage(archVariantOf(b))
+          let cached = observe(b, cachedImg, notes)
           verify(b.name & ": the cached image lists the same packages",
                 cached.packages == facts[0].packages,
-                "cached image " & archImageDir(v) & ", read " & $cachedAt)
+                "cached image " & cachedImg & ", read " & $cachedAt)
           verify(b.name & " cached image: pacman -Syu is a no-op",
                 cached.syu.noop, cached.syu.detail)
         # 5. Negative controls.
@@ -206,6 +282,18 @@ suite "e2e_arch_testbed_is_pinned":
                 extra.detail)
           record["negativeControls"] = %*{"liveMirrorlist": live.detail,
                                           "liveRepository": extra.detail}
+        if omarchySel:
+          # Omarchy's own mirror named beside the capture cache in [core].
+          let om = refusedAfter(OmarchyBase, imageOf(OmarchyBase, 0), work,
+            "omarchy-stable-mirror",
+            "sed -i " & quoteShell("/^\\[core\\]$/a " & StableMirrorLine) &
+            " /etc/pacman.conf && grep -q stable-mirror /etc/pacman.conf",
+            notes)
+          verify("negative control: an Omarchy VM whose pacman names a " &
+                "server other than the capture cache is refused",
+                om.refused and "stable-mirror.omarchy.org" in om.detail,
+                om.detail)
+          record["negativeControlOmarchy"] = %om.detail
       except CatchableError as e:
         failures.add("exception: " & e.msg)
       finally:

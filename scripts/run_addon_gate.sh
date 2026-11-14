@@ -8,8 +8,9 @@
 #                         matrix debian-12-amd64,debian-13-amd64,
 #                         ubuntu-24.04-amd64; also debian-13-arm64 and
 #                         ubuntu-24.04-armhf, which run under TCG; the Arch
-#                         gates take arch-btrfs-amd64, arch-ext4-amd64 and
-#                         arch-old-systemd-amd64, tests/e2e/addon/arch_testbed.nim)
+#                         gates take arch-btrfs-amd64, arch-ext4-amd64,
+#                         arch-old-systemd-amd64 and omarchy-amd64,
+#                         tests/e2e/addon/arch_testbed.nim)
 #   REPRO_ADDON_MUTATION  build and run the falsifying mutation of that name
 #                         (libs/repro_addon/src/repro_addon/mutations.nim);
 #                         the gate is then expected to FAIL. The off-host
