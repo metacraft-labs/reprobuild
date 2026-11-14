@@ -90,6 +90,28 @@ proc unbound(n: NimNode): NimNode {.compileTime.} =
   ## as written, the way a macro's untyped argument is: ``required = false``
   ## names the literal ``false``, which clispec reads as an identifier, not
   ## a symbol of ``system``.
+  ##
+  ## A ``help`` text written as string literals joined with ``&``, to keep
+  ## the lines short, is folded into the one literal clispec requires there,
+  ## a statement list spliced into a scope is flattened into it, and a type
+  ## such as ``seq[string]`` is kept a bracket expression.
+  if n.kind == nnkInfix and n.len == 3 and n[0].eqIdent("&"):
+    let left = unbound(n[1])
+    let right = unbound(n[2])
+    if left.kind in {nnkStrLit..nnkTripleStrLit} and
+        right.kind in {nnkStrLit..nnkTripleStrLit}:
+      result = newLit(left.strVal & right.strVal)
+      result.copyLineInfo(n)
+      return
+  # `quote` turns `seq[string]` into a call of the `[]` operator; the
+  # language reads (and help prints) the bracket expression as written.
+  if n.kind == nnkCall and n.len >= 2 and
+      n[0].kind in {nnkSym, nnkOpenSymChoice, nnkClosedSymChoice} and
+      (if n[0].kind == nnkSym: $n[0] else: $n[0][0]) == "[]":
+    result = nnkBracketExpr.newNimNode(n)
+    for child in n[1 .. ^1]:
+      result.add(unbound(child))
+    return
   case n.kind
   of nnkSym:
     result = ident($n)
@@ -100,15 +122,73 @@ proc unbound(n: NimNode): NimNode {.compileTime.} =
   of nnkNone, nnkEmpty, nnkIdent, nnkCharLit..nnkUInt64Lit,
       nnkFloatLit..nnkFloat64Lit, nnkStrLit..nnkTripleStrLit, nnkNilLit:
     result = n
+  of nnkStmtList:
+    # A shared group of declarations (``graphInspectionFlags`` and the like)
+    # is spliced in as a statement list of its own; its statements belong
+    # to the scope it is spliced into, which is where clispec reads them.
+    result = n.kind.newNimNode(n)
+    for child in n:
+      let converted = unbound(child)
+      if converted.kind == nnkStmtList:
+        for statement in converted:
+          result.add(statement)
+      else:
+        result.add(converted)
   else:
     result = n.kind.newNimNode(n)
     for child in n:
       result.add(unbound(child))
 
+proc graphInspectionFlags(): NimNode {.compileTime.} =
+  ## The flags of every command that materializes the project's build graph
+  ## to inspect it (`graph`, `why`, `stats`): how the graph's tools are
+  ## provisioned and where its build state and action cache live. Each takes
+  ## the same value, and has the same effect, as on `repro build`.
+  ##
+  ## None of them declares an environment variable: these commands do not
+  ## read `REPRO_TOOL_PROVISIONING` (a project's `defaultToolProvisioning`
+  ## applies when the flag is absent), and the work root's and the action
+  ## cache's variables are read where the paths are resolved, after the
+  ## flag, so the precedence stays in one place.
+  quote do:
+    # Every spelling `parseToolProvisioning` accepts: the five modes, and the
+    # other two spellings of `from-source` (`fromSource`, the project DSL's
+    # name, and the shorthand `source`).
+    flag toolProvisioning is string, values = ["path", "nix", "tarball",
+        "scoop", "from-source", "fromSource", "source"],
+      help = "How the graph's tools are provisioned (`from-source` is also " &
+        "spelt `fromSource` or `source`); default: the project's " &
+        "`defaultToolProvisioning`"
+    flag workRoot is string,
+      help = "The work root the project's build state lives under " &
+        "(default: `$REPROBUILD_WORK_ROOT`, else the project's `.repro/`)"
+    flag actionCacheRoot is string,
+      help = "The action-cache root (default: " &
+        "`$REPROBUILD_ACTION_CACHE_ROOT`, else the store's)"
+
+proc devEnvSelectionFlags(): NimNode {.compileTime.} =
+  ## The flags that select a project's development environment, shared by the
+  ## commands that compute it.
+  quote do:
+    flag activity is seq[string],
+      help = "Activate the named activity; repeat it or give a " &
+        "comma-separated list for several (default: `default`)"
+    flag workRoot is string,
+      help = "The work root the development environment is computed under"
+    # Internal (accepted, never shown in help): the engine names the lock
+    # slice when it computes an environment on a caller's behalf.
+    flag lockSlice is string, visibility = internal,
+      help = "The lock slice the development environment must match"
+    flag devEnvStats is string,
+      help = "Write statistics of the development-environment computation " &
+        "to the path"
+
 proc reproCommandLineDescription*(): NimNode {.compileTime.} =
   ## The ``cli:`` body of repro's command line.
   ##
   ## Command order is the order ``repro --help`` lists them in.
+  let graphInspection = graphInspectionFlags()
+  let devEnvSelection = devEnvSelectionFlags()
   result = unbound quote do:
     help "Reproducible builds, development environments and workspaces"
     # Command-line flags are kebab-case (`--tool-provisioning`); keys in
@@ -172,18 +252,103 @@ proc reproCommandLineDescription*(): NimNode {.compileTime.} =
     subcmd "run", help = "Run a task, a build output or a target once":
       pos args is seq[string], required = false, passThrough = true
     subcmd "tasks", help = "List the current project's tasks":
-      pos args is seq[string], required = false, passThrough = true
+      `devEnvSelection`
+      pos selector is string, required = false,
+        help = "The project whose tasks to list (default: the current " &
+          "directory's)"
 
     # ---- Inspecting the graph -------------------------------------------
     subcmd "graph", help = "Render the build graph of the current context":
-      pos args is seq[string], required = false, passThrough = true
+      flag view is string, default = "actions",
+        values = ["actions", "env", "neighborhood", "inputs", "dependents",
+          "blast-radius", "critical-path", "partition-candidates"],
+        help = "The view of the graph to render"
+      flag focus is string,
+        help = "The action the neighborhood and inputs views are about " &
+          "(default: the selected target's action)"
+      flag path is string,
+        help = "The input path the dependents and blast-radius views are about"
+      flag run is string,
+        help = "The run (an id, or `last`) the critical-path view is about"
+      flag kind is string,
+        help = "The partition kind of the partition-candidates view " &
+          "(default: `dylib`)"
+      flag target is string,
+        help = "The target whose graph to render, as an alternative to the " &
+          "positional"
+      flag format is string,
+        help = "The output format: `text` (the default), `json` or `dot`"
+      boolFlag json is bool, help = "Shortcut for `--format=json`"
+      boolFlag dot is bool, help = "Shortcut for `--format=dot`"
+      boolFlag lock is bool,
+        help = "Focus on the solved package graph (not implemented yet: " &
+          "use `repro lock visualize`)"
+      boolFlag infra is bool,
+        help = "Focus on the resource and infrastructure graph (not " &
+          "implemented yet)"
+      boolFlag all is bool,
+        help = "Show the combined cross-layer graph (not implemented yet)"
+      boolFlag build is bool,
+        help = "Focus on the build/action graph (the default, and the only " &
+          "graph implemented)"
+      `graphInspection`
+      pos selector is string, required = false,
+        help = "The target (`target[#action]`, a path or a target name) " &
+          "whose graph to render (default: the current project)"
+      pos focusAction is string, required = false,
+        help = "The focus action, as an alternative to --focus"
     subcmd "why",
         help = "Explain why a package or an action is in the active context":
-      pos args is seq[string], required = false, passThrough = true
+      flag action is string,
+        help = "Explain this build action; the positional is then the target"
+      flag format is string,
+        help = "The output format: `text` (the default) or `json`"
+      boolFlag json is bool, help = "Shortcut for `--format=json`"
+      `graphInspection`
+      pos subject is string, required = false,
+        help = "The package or build action to explain"
+      pos target is string, required = false,
+        help = "The target (`target[#action]` or a path) whose graph to " &
+          "search (default: the current project)"
     subcmd "deps", help = "Refresh and check scanner-inferred dependencies":
-      pos args is seq[string], required = false, passThrough = true
+      subcmd "refresh",
+          help = "Scan the workspace and rewrite repro.scanned-deps.nim":
+        boolFlag check is bool,
+          help = "Compare against the file on disk without writing; exit " &
+            "1 when it is out of date"
+        boolFlag dryRun is bool,
+          help = "Print what the file would contain; never write it"
+        flag project is string,
+          help = "The workspace root to scan (default: the current directory)"
+        pos path is string, required = false,
+          help = "The workspace root, as an alternative to --project"
+      # `repro deps help`: the same as `repro deps --help`.
+      subcmd "help", visibility = hidden:
+        pos topic is seq[string], required = false
     subcmd "stats", help = "Inspect accumulated build analytics":
-      pos args is seq[string], required = false, passThrough = true
+      flag scope is string, values = ["actions", "inputs", "targets", "tools"],
+        help = "What `rank` and `show` are about"
+      flag by is string,
+        help = "The metric `rank` orders by (default: the scope's own)"
+      flag id is string, help = "The action `show --scope=actions` is about"
+      flag path is string, help = "The input `show --scope=inputs` is about"
+      flag label is string, help = "The name `snapshot` records"
+      flag baseline is string, help = "The snapshot `compare` starts from"
+      flag candidate is string, help = "The snapshot `compare` compares"
+      flag top is int, default = 10, help = "How many rows `rank` prints"
+      flag projectRoot is string,
+        help = "The project whose analytics to read (default: the current " &
+          "directory)"
+      flag target is string,
+        help = "The target whose graph structural metrics use"
+      flag format is string,
+        help = "The output format: `text` (the default) or `json`"
+      boolFlag json is bool, help = "Shortcut for `--format=json`"
+      `graphInspection`
+      pos view is string, default = "overview",
+        values = ["status", "overview", "rank", "show", "snapshot", "compare"],
+        help = "What to show: status, overview, rank, show, snapshot or " &
+          "compare"
     subcmd "show-conventions",
         help = "Print the resolved convention stack of a workspace":
       flag project is string,
@@ -194,8 +359,8 @@ proc reproCommandLineDescription*(): NimNode {.compileTime.} =
         help = "Print a JSON document instead of the text form"
       pos path is string, required = false,
         help = "The workspace root, as an alternative to --project"
-    subcmd "configs", help = "List the standard build configurations":
-      pos args is seq[string], required = false, passThrough = true
+    subcmd "configs":
+      help "List the standard build configurations"
     subcmd "capabilities",
         help = "Describe what this build of repro supports":
       flag format is string, values = ["json", "text"], default = "json",
