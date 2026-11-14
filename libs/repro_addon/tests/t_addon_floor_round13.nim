@@ -10,7 +10,7 @@
 ##   as spelled;
 ## - §13 decision 141: a directory made again outside a switch is accepted
 ##   only when it was born no later than the run's start
-##   (``InactiveExitTimestamp``, decision 144) plus ``RunStartToleranceNs``;
+##   (``InactiveExitTimestamp``, decision 145) plus ``RunStartToleranceNs``;
 ##   a tree made later in the run is refused;
 ## - the revert hold is the add-on's only when it is a regular file holding
 ##   exactly ``RevertHoldText`` on a unit the generation installs

@@ -1025,7 +1025,7 @@ proc renderedSystemUnitContent*(r: SystemResource): string =
       dropMdwe = InfraAddonMutation == "floor-without-mdwe",
       allowMemfd = InfraAddonMutation == "floor-allows-memfd")
     result = appendToServiceSection(result, lines)
-    # §13 decision 143 (floor version 5): ordered after the boot
+    # §13 decision 144 (floor version 5): ordered after the boot
     # re-assertion. Version 4 renders the same floor lines without it,
     # byte for byte what the engines of that version stored.
     if r.suFloorVersion != "4" and not wholeWaiver and
