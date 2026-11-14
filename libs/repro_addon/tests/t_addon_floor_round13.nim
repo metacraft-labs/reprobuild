@@ -122,12 +122,12 @@ suite "§13 decision 141, as 144 amends it: no later than the run's start":
   test "born as systemd sets the run up: accepted":
     check verdict(view(Start + 2_000_000, Start + 1_000_000)) == ""
     check verdict(view(Start + RunStartToleranceNs, Start + 1_000_000)) == ""
-  test "born three seconds into the run: refused":
-    let why = verdict(view(Start + 3_000_000_000'i64, Start + 1_000_000))
+  test "born well into the run: refused":
+    let why = verdict(view(Start + RunStartToleranceNs + 1_000_000_000'i64, Start + 1_000_000))
     check "after the unit's last run began" in why
   test "the same for a stopped unit's last run":
     check "after the unit's last run began" in
-      verdict(view(Start + 3_000_000_000'i64, Start + 1_000_000, stopped = true))
+      verdict(view(Start + RunStartToleranceNs + 1_000_000_000'i64, Start + 1_000_000, stopped = true))
   test "the start is read in the same systemctl show as the run":
     let r = parseUnitRun("InvocationID=abc\n" &
       "InactiveExitTimestamp=Sat 2026-11-14 10:00:00.100000 UTC\n" &

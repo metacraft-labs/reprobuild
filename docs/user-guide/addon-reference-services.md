@@ -128,8 +128,8 @@ The add-on handles this in four ways:
     directories, systemd reports a different run of the unit than the one
     recorded, and the directory was born no earlier than 100 ms before
     that run's reported start (systemd 252 makes it a few milliseconds
-    before it records the start) and no later than 250 ms after that
-    reported start (systemd makes a unit's directories as it starts the
+    before it records the start) and no later than 1 s after that
+    reported start (8 s on arm64 and armhf) (systemd makes a unit's directories as it starts the
     run's first command, which may be an `ExecStartPre=` that runs long
     before the main process; a tree made later in the run, by the unit or
     by anything else, is not the one systemd made for it); for
@@ -143,8 +143,8 @@ The add-on handles this in four ways:
     was. The apply logs each such acceptance
     in the generation's audit log (if the log cannot be written, the
     directory is refused). A tree a root process makes at the path
-    from 100 ms before to 250 ms after a run's reported start is taken as
-    the unit's. On a host
+    from 100 ms before to 1 s after a run's reported start (8 s on arm64
+    and armhf) is taken as the unit's. On a host
     upgraded from an add-on version that kept no such record, the first
     apply records, once, the directories the installed services exactly
     declare and the existing sockets of their socket units, and logs each

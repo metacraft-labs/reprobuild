@@ -107,11 +107,14 @@ suite "§13 decision 144: bounded from the run's start":
     systemdRecreated("/var/lib/a", "a.service", ["/var/lib/a"], created, false,
       SystemdView(dynamicUid: -1, owner: 1000, btime: btime, invocationId: "I1",
                   invocationStart: Start, mainStart: mainStart))
-  test "a tree made 3 s into a 6 s ExecStartPre= is refused":
+  # A tree made well into the pre-start phase: past the tolerance from
+  # the run's start, before the main process.
+  let late = Start + RunStartToleranceNs + 1_000_000_000'i64
+  test "a tree made during a long ExecStartPre= is refused":
     check "after the unit's last run began" in
-      verdict(Start + 3_000_000_000'i64, Start + 6_000_000_000'i64)
+      verdict(late, late + 3_000_000_000'i64)
   test "and one made before a oneshot's last ExecStart=":
-    check verdict(Start + 1_000_000_000'i64, Start + 2_000_000_000'i64).len > 0
+    check verdict(late, late + 1_000_000_000'i64).len > 0
   test "a directory made as the run begins is accepted":
     check verdict(Start + 30_000_000, Start + 6_000_000_000'i64) == ""
 

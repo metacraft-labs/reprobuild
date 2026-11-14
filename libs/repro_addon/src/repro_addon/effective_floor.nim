@@ -961,19 +961,26 @@ const RestartWindowNs* = 100_000_000'i64
   ## owner, whose answer to that question is still open: this is an
   ## implementation amendment, not an owner decision.
 
-const RunStartToleranceNs* = 250_000_000'i64
-  ## §13 decision 141: how much later than the start of the main process
-  ## (``ExecMainStartTimestamp``) a directory systemd made for that run may
-  ## be born. The manager stamps that start when it forks the process, and
-  ## the forked child makes the directories before it executes the command:
-  ## systemd 257 does that in its separate executor binary
-  ## (``systemd-executor``), which it executes first. Measured over 150
-  ## transient units per load (idle; 2x and 8x nproc busy loops) on a host
-  ## at load average ~40, birth minus ``ExecMainStartTimestamp``: at most
-  ## 27.3 ms on debian-12 (systemd 252), and 6.1 to 60.4 ms -- always after
-  ## the stamp -- on debian-13 (systemd 257). 250 ms is about four times the
-  ## worst. The residual: a tree a root process makes within 250 ms after
-  ## the main process starts is taken as systemd's.
+const RunStartToleranceNs* = (when hostCPU == "amd64": 1_000_000_000'i64
+                              else: 8_000_000_000'i64)
+  ## §13 decisions 141, 144 and 146: how much later than the start of a
+  ## unit's run (``InactiveExitTimestamp``) a directory systemd made for it
+  ## may be born. systemd makes the directories as it spawns the run's first
+  ## process (systemd 257 first executes its ``systemd-executor``), after it
+  ## stamps that start. Measured, birth minus ``InactiveExitTimestamp``, over
+  ## transient units with and without an ``ExecStartPre=``, idle and under 2x
+  ## and 8x ``nproc`` busy loops, on a host at load average 40 to 60 (the A9
+  ## round-14 record):
+  ##
+  ## * amd64 (KVM): at most 9.2 ms on debian-12 (systemd 252), 215.9 ms on
+  ##   debian-13 (systemd 257) -- over round 13's 250 ms with no margin, so
+  ##   1 s (4.6 times the worst);
+  ## * arm64 (debian-13) and armhf (ubuntu-24.04), under TCG emulation: at
+  ##   most 3.54 s and 3.42 s, so 8 s (2.3 times the worst). Native hardware
+  ##   was not measured.
+  ##
+  ## The residual: a tree a root process makes at the path within this long
+  ## after a run of the unit begins is taken as systemd's.
 
 proc systemdRecreated*(path, unit: string; declared: openArray[string];
                        created: Table[string, CreatedDir]; dynamic: bool;
