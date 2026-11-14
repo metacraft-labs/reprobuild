@@ -5061,6 +5061,17 @@ proc reprobuildExternalLibsRoot(workDir: string): string =
   if result.len == 0:
     result = siblingReprobuildLibsRoot(workDir)
 
+proc explicitSourceEnv(envName: string): string =
+  ## ``$<envName>`` when the caller set it, "" when it is unset OR still holds
+  ## the value this CLI seeded itself (``seedSourcePackageEnvironment``). A
+  ## seeded root is the engine's own build-time snapshot, a default: it must
+  ## rank below the consumer's sibling checkout, or a workspace whose pinned
+  ## ``repro`` lags the tree being compiled would compile that tree against
+  ## the engine's older copy of a library (e.g. runquota's ``withWidthRange``
+  ## missing in 0.2.18's snapshot).
+  if envName in seededSourcePackageEnvironmentNames(): ""
+  else: getEnv(envName)
+
 proc markedPackageRoot(candidate, marker: string): string =
   if candidate.len == 0:
     return ""
@@ -5090,13 +5101,17 @@ proc resolveBootstrapPackagePath*(envName: string;
   ## 2. each candidate path in declaration order (if it contains marker)
   ## 3. the source root captured when ``repro`` was built
   ## 4. "" (caller skips the ``--path:`` flag entirely)
-  let envPath = markedPackageRoot(getEnv(envName), marker)
+  let envPath = markedPackageRoot(explicitSourceEnv(envName), marker)
   if envPath.len > 0:
     return envPath
   for candidate in candidates:
     let resolved = markedPackageRoot(candidate, marker)
     if resolved.len > 0:
       return resolved
+  # Seeded (engine snapshot) value: only after every checkout candidate.
+  let seededPath = markedPackageRoot(getEnv(envName), marker)
+  if seededPath.len > 0:
+    return seededPath
   markedPackageRoot(builtCandidate, marker)
 
 proc resolveCtTestRunnerAdapterPath(anchorRoot: string): string =
@@ -5135,9 +5150,11 @@ proc resolveCtIncrementalAdapterPath(anchorRoot: string): string =
 
 proc resolveRunquotaRoot(anchorRoot, consumerParent: string): string =
   let marker = "libs" / "runquota_core" / "src" / "runquota_core.nim"
-  for candidate in [getEnv("RUNQUOTA_SRC"),
+  # Seeded engine snapshot last (see ``explicitSourceEnv``).
+  for candidate in [explicitSourceEnv("RUNQUOTA_SRC"),
                     anchorRoot.parentDir / "runquota",
-                    consumerParent / "runquota"]:
+                    consumerParent / "runquota",
+                    getEnv("RUNQUOTA_SRC")]:
     if candidate.len > 0 and fileExists(extendedPath(candidate / marker)):
       return candidate
   ""

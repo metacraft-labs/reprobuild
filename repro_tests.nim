@@ -6207,6 +6207,17 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "t_group_libs_repro_interface_artifacts_tests_g01",
     singleReason: ""),
   TestSpec(
+    source: "libs/repro_interface_artifacts/tests/t_seeded_source_root_ranks_below_sibling_checkout.nim",
+    binary: "build/test-bin/t_seeded_source_root_ranks_below_sibling_checkout",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "",
+    singleReason: "mutates the process environment (RUNQUOTA_SRC), so it must not share a binary"),
+  TestSpec(
     source: "libs/repro_interface_artifacts/tests/t_installed_layout_source_roots.nim",
     binary: "build/test-bin/t_installed_layout_source_roots",
     defines: @[],
