@@ -419,15 +419,19 @@ io_mon_status=0
 # lines that name the compiler rather than the shim.
 #
 # The shim's only DT_NEEDED entries are the C runtime's own, so it needs no
-# rpath at all: every one of them must come from the host process. The variable
-# is nixpkgs-specific and inert under any other toolchain, which is why it is
-# not the guarantee — the refusal below is. See
+# rpath at all: every one of them must come from the host process. It must not
+# carry a DT_RUNPATH of any kind either, and a dev shell hands every link one
+# more: stdenv's `-rpath $out/lib` in NIX_LDFLAGS, with `$out` the nonexistent
+# `<checkout>/outputs/out`. `preload_shim_link_without_rpath` sets
+# NIX_DONT_SET_RPATH=1 and removes NIX_LDFLAGS from the link for both reasons.
+# Both variables are nixpkgs-specific and inert under any other toolchain,
+# which is why they are not the guarantee — the refusal below is. See
 # `scripts/lib/preloaded_shim_loader.sh`.
-NIX_DONT_SET_RPATH=1 \
 IO_MON_SHIM_OUT_DIR="$(pwd)/build/lib/tmp" \
 IO_MON_SHIM_NIMCACHE_DIR="$(pwd)/build/nimcache/io-mon-shim" \
 IO_MON_BUILD_MODE="${REPROBUILD_BUILD_MODE:-debug}" \
 SHM_QUEUE_SRC="${shm_queue_src}" \
+  preload_shim_link_without_rpath \
   bash "${io_mon_src}/scripts/build_shim.sh" || io_mon_status=$?
 if [ "${io_mon_status}" -ne 0 ]; then
   # Name the builder AND the sibling it came from. A Nim error raised inside
@@ -474,7 +478,7 @@ verify_fresh_artifact "${staged_shim}" "io-mon monitor shim" || abort_if_failed
 # not fail visibly at build time at all — it fails much later, inside somebody
 # else's compile, as a loader error naming two directories and no cause.
 verify_shim_loader_inert() {
-  local shim="$1" imposed dir sonames
+  local shim="$1" findings
   case "${REPRO_HOST_PLATFORM}" in
     linux) ;;
     *)
@@ -482,30 +486,14 @@ verify_shim_loader_inert() {
       # dylib fixups) and Windows resolves by search order with no analogue.
       return 0 ;;
   esac
-  if ! command -v patchelf >/dev/null 2>&1; then
-    record_failure "monitor shim: patchelf is not on PATH, so the staged ${shim} cannot be checked for an imposed C runtime. This is refused rather than skipped: a shim that carries one loads fine here and kills every monitored compile that runs on a different C runtime. Install patchelf, or build from the dev shell, which provides it."
+  if ! preload_shim_have_elf_tools; then
+    record_failure "monitor shim: patchelf and/or readelf is not on PATH, so the staged ${shim} cannot be checked for a DT_RUNPATH or an imposed C runtime. This is refused rather than skipped: a shim that carries either loads fine here and kills monitored programs that run on a different C runtime. Install them, or build from the dev shell, which provides both."
     return 1
   fi
-  imposed="$(preload_shim_imposed_runtime_dirs "${shim}")"
-  [ -n "${imposed}" ] || return 0
-  echo "" >&2
-  echo "monitor shim: ${shim} carries a C runtime on its own DT_RUNPATH:" >&2
-  while IFS="$(printf '\t')" read -r dir sonames; do
-    [ -n "${dir}" ] || continue
-    echo "  ${dir}" >&2
-    echo "      provides: ${sonames}" >&2
-  done <<EOF
-${imposed}
-EOF
-  echo "  This library is LD_PRELOADed into processes built elsewhere. With that" >&2
-  echo "  directory on its search path the loader takes the shim's libm/librt/" >&2
-  echo "  libpthread from it, into a process whose libc.so.6 came from another" >&2
-  echo "  build; the symbol versions do not line up and the process dies before" >&2
-  echo "  main, with a loader error naming the compiler instead of the shim." >&2
-  echo "  Remedy: the link must not add it. NIX_DONT_SET_RPATH=1 is set for the" >&2
-  echo "  shim build above; if it stopped working, see" >&2
-  echo "  scripts/lib/preloaded_shim_loader.sh rather than deleting this check." >&2
-  record_failure "monitor shim: the staged library imposes a C runtime on every process it is preloaded into"
+  findings="$(preload_shim_search_path_findings "${shim}")"
+  [ -n "${findings}" ] || return 0
+  preload_shim_report_search_path_findings "${shim}" "${findings}"
+  record_failure "monitor shim: the staged library carries a search path a preloaded library must not have"
   return 1
 }
 verify_shim_loader_inert "${staged_shim}" || abort_if_failed

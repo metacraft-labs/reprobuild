@@ -39,6 +39,7 @@ import std/[os, posix, sets, strutils, tables]
 import repro_elevation
 import repro_infra/addon_diagnostics
 import repro_infra/profile
+from repro_infra/carried_state import TemplateObservationInstance, observationInstanceOf
 
 import ./etc_write
 import ./fingerprint
@@ -311,7 +312,7 @@ proc unitProvisionFromShow*(text: string): UnitProvision =
   result.activeState = kv.getOrDefault("ActiveState")
   result.needDaemonReload = kv.getOrDefault("NeedDaemonReload") != "no"
 
-const TemplateProbeInstance* = "repro-addon-observe"
+const TemplateProbeInstance* = TemplateObservationInstance
   ## The instance a template is observed through (``readUnitProvision``).
 
 proc templateObservationName*(unit: string): string =
@@ -322,12 +323,8 @@ proc templateObservationName*(unit: string): string =
     # refuses -- no floored template can be applied (finding 4's vector
     # never reaches the switch, so nothing about it is tested).
     return unit
-  let at = unit.find('@')
-  let dot = unit.rfind('.')
-  if at > 0 and dot == at + 1:
-    unit[0 .. at] & TemplateProbeInstance & unit[dot .. ^1]
-  else:
-    unit
+  # The one rule, shared with the carried-state live check.
+  observationInstanceOf(unit)
 
 proc readUnitProvision*(unit: string): UnitProvision =
   ## ``systemctl show`` for one unit. Fails closed: a missing systemctl,

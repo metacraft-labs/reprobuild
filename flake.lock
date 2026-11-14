@@ -1247,17 +1247,17 @@
     "io-mon-src": {
       "flake": false,
       "locked": {
-        "lastModified": 1794504076,
-        "narHash": "sha256-llYhoO9iyth1UKougYc/opo6FDb669YkS0hUMYxnou0=",
+        "lastModified": 1794661102,
+        "narHash": "sha256-U/Vw8A9wVA7NTYVj9ss7RodBlycHWMogh5DhdkwqqJw=",
         "owner": "metacraft-labs",
         "repo": "io-mon",
-        "rev": "35829647d603b481276d2632b39ec2a9ce3625b2",
+        "rev": "a7b272f6877687c1d5c81027111c94cb107c056e",
         "type": "github"
       },
       "original": {
         "owner": "metacraft-labs",
         "repo": "io-mon",
-        "rev": "35829647d603b481276d2632b39ec2a9ce3625b2",
+        "rev": "a7b272f6877687c1d5c81027111c94cb107c056e",
         "type": "github"
       }
     },
@@ -2655,11 +2655,11 @@
         "runquota-package-catalog": "runquota-package-catalog"
       },
       "locked": {
-        "lastModified": 1794635966,
-        "narHash": "sha256-5qwq1pUrxyhEe8xrOyEyMCPkOf3uJ1/0uKkgfjZ/UyA=",
+        "lastModified": 1794661877,
+        "narHash": "sha256-pJ4ejIAz15fAK151BCgMbf3HV9SdhIf8+A56xsG07mE=",
         "owner": "metacraft-labs",
         "repo": "runquota",
-        "rev": "e9b86fd5d48562c684d0e30660385d8fcc2cf741",
+        "rev": "7d4ee104b601031983554ea5e5dccba39cff4ae1",
         "type": "github"
       },
       "original": {
@@ -2913,17 +2913,17 @@
     "test-certificates-tools-src": {
       "flake": false,
       "locked": {
-        "lastModified": 1793493787,
-        "narHash": "sha256-kj7SWWfs675mrVpN5iiaBenh/hiKAP68aPNTADmSwP8=",
+        "lastModified": 1793866381,
+        "narHash": "sha256-QtrNpzM3rUIfreSre8T9GfNoxDxkTisoccsaYMSyo/c=",
         "owner": "metacraft-labs",
         "repo": "test-certificates-tools",
-        "rev": "4b395de551d86c745d6eb8ebf7c7228df25298f5",
+        "rev": "a726655886808d1062390d05c50f4fce03150eb4",
         "type": "github"
       },
       "original": {
         "owner": "metacraft-labs",
         "repo": "test-certificates-tools",
-        "rev": "4b395de551d86c745d6eb8ebf7c7228df25298f5",
+        "rev": "a726655886808d1062390d05c50f4fce03150eb4",
         "type": "github"
       }
     },

@@ -358,7 +358,14 @@
       # built on the runtime without the shim failed to load ("undefined symbol:
       # repro_linux_sig_safe_flush_at_signal_death") and
       # t_stackable_hooks_extracted_process_tree's extracted runtime exited 127.
-      url = "github:metacraft-labs/io-mon/35829647d603b481276d2632b39ec2a9ce3625b2";
+      # Bumped 35829647 -> a7b272f6 (2026-11-14, io-mon `agents`): the Linux
+      # shim builder removes the dev shell's linker-wrapper rpaths from its link
+      # (stdenv's `-rpath $out/lib` in NIX_LDFLAGS named a directory that never
+      # exists) and refuses to publish a shim carrying any DT_RUNPATH, which
+      # stopped programs that find their C runtime through their own DT_RPATH
+      # from loading the shim. 58048ea gives macOS Apple toolchain drop-ins the
+      # shim's default SDK.
+      url = "github:metacraft-labs/io-mon/a7b272f6877687c1d5c81027111c94cb107c056e";
       flake = false;
     };
     nim-shm-gset-src = {
@@ -588,7 +595,10 @@
       # until the v0.1.0 tag carries it; then it moves to the tag, with
       # `repro lock update`, which moves this URL, flake.lock and repro.lock
       # together (CI clones the sibling at repro.lock's revision).
-      url = "github:metacraft-labs/test-certificates-tools/4b395de551d86c745d6eb8ebf7c7228df25298f5";
+      # Moved 4b395de -> a726655 (2026-11-14), the sibling's `agents` tip: the
+      # version now lives inside src/, so a consumer that ships src/ alone
+      # compiles. 4b395de is an ancestor.
+      url = "github:metacraft-labs/test-certificates-tools/a726655886808d1062390d05c50f4fce03150eb4";
       flake = false;
     };
     # A source-only input was removed from this set, and this note is where

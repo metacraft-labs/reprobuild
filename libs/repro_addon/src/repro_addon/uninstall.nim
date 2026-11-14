@@ -7,7 +7,8 @@
 ##    store); their install links are the ledger's, removed in step 2;
 ## 2. remove the units and drop-ins (and any install link ``disable``
 ##    left), restoring an adopted or replaced unit from the bytes the
-##    ledger preserved;
+##    ledger preserved, and every revert hold the ledger records
+##    (``lcRevertHold``, §13 decision 133);
 ## 3. remove each diversion: the file a generation put at the diverted path
 ##    first, then ``dpkg-divert --local --rename --remove``, which moves the
 ##    package's file back;
@@ -528,9 +529,9 @@ proc writeDiscardCompletion*(custody: CustodySite; signer: TextSigner;
   ## §13 decision 81: the signed completion record, written only after the
   ## removal succeeded. It names the intent record and its sha256, the
   ## objects removed and any kept with the store (``--keep-store``). It is
-  ## signed with the key read before the removal (``signer``): the key file
-  ## goes with ``/var/lib/repro``. The signature goes first, the record
-  ## last; both durable.
+  ## signed with the key read before the removal (``signer``); the caller
+  ## writes it before the key file is removed, and keeps the key when this
+  ## fails. The signature goes first, the record last; both durable.
   var s = signer
   when mutated("discard-completion-key-read-late"):
     s = loadTextSigner(custody.evidence.attestationKey)
@@ -661,6 +662,35 @@ proc verifyDiscardRecord*(path: string; expectedKeyHex: string):
     result.kept = @[]
   result.status = if result.kept.len == 0: dsCompleted else: dsCompletedKept
 
+proc unfinishedDiscardIntent*(custody: CustodySite;
+                              dir = UninstallOverrideDir):
+    tuple[path, text: string; objects: seq[string]] =
+  ## §13 decisions 62, 81 and 113: the newest intent record in ``dir``
+  ## that the host's own attestation key signed and that has no completion
+  ## record, or an empty path. An earlier uninstall wrote it and did not
+  ## finish (its completion could not be written, or its removal could not
+  ## be made durable) and kept the state and the key so that a later run
+  ## could. A record signed by another key, or one that does not verify, is
+  ## not the host's authorisation and is left alone.
+  let keyPath = custody.evidence.attestationKey
+  if not dirExists(dir) or not fileExists(keyPath): return
+  var hostKey = ""
+  try: hostKey = attestationPublicKeyHex(keyPath)
+  except CatchableError: return
+  var names: seq[string]
+  for kind, path in walkDir(dir):
+    if kind == pcFile and path.endsWith(DiscardIntentSuffix):
+      names.add(path)
+  names.sort(order = SortOrder.Descending)
+  for path in names:
+    if fileExists(completionPathOf(path)): continue
+    let rec = readSignedRecord(path, DiscardRecordSchema, hostKey)
+    if not rec.ok: continue
+    result.path = path
+    result.text = rec.text
+    for o in rec.doc{"objects"}.getElems(): result.objects.add(o.getStr())
+    return
+
 proc storeEvidenceGate*(custody: CustodySite; opts: UninstallOptions;
                         ship: proc (): tuple[ok: bool; why: string];
                         overrideDir = UninstallOverrideDir;
@@ -683,7 +713,21 @@ proc storeEvidenceGate*(custody: CustodySite; opts: UninstallOptions;
   ##   (and returned, for the caller to print). Nothing is lost silently,
   ##   and the operator is never stuck.
   result.pending = pendingStoreEvidence(custody)
-  if result.pending.len == 0: return
+  if result.pending.len == 0:
+    # Nothing is left to discard, but an earlier run may have removed the
+    # evidence and failed to write its completion, keeping the state and
+    # the key for this run (decision 113; decision 62: never stuck). This
+    # run then signs that intent's completion; it writes no new intent.
+    let unfinished = unfinishedDiscardIntent(custody, overrideDir)
+    if unfinished.path.len > 0:
+      # A partial completion (its signature alone, from a crash) would make
+      # the exclusive writer refuse the name, so it goes first.
+      let stale = completionPathOf(unfinished.path) & DiscardRecordSigExt
+      if fileExists(stale): discard tryRemoveFile(stale)
+      result.pending = unfinished.objects
+      result.overrideRecord = unfinished.path
+      result.overrideRecordText = unfinished.text
+    return
   let discarding = opts.discardStoreEvidence or
                    opts.discardUnacknowledgedStoreEvidence
   when not mutated("uninstall-discards-unrecorded"):
@@ -893,6 +937,36 @@ proc removeStateEvidence*(r: var UninstallResult; entries: seq[string];
       else:
         r.removed.add(e & " (store evidence)")
 
+proc completeDiscardBeforeKeys*(r: var UninstallResult; l: Ledger;
+                                stateDir: string; custody: CustodySite;
+                                signer: TextSigner; pending: seq[string];
+                                writer: DiscardRecordWriter = atomicRecordWriter;
+                                syncer: DiscardSyncer = syncRemovedObjects): bool =
+  ## §13 decisions 81 and 113: the completion record is written where
+  ## decision 113 places it, as soon as the store evidence is gone and
+  ## synced, and BEFORE the attestation key and the state are removed. A
+  ## completion that cannot be written (or a removal that cannot be made
+  ## durable) is then not lost for good: the state, the ledger copy and the
+  ## key are kept, as for a failed evidence removal, and a second uninstall
+  ## finds the intent and signs the completion itself (decision 62: the
+  ## operator is never stuck). True when the uninstall must stop here and
+  ## keep the state; false when there is no discard, or its completion is
+  ## written (a failure to make that record durable only is reported: the
+  ## record is in place and stays).
+  if r.overrideRecord.len == 0: return false
+  finishDiscard(r, custody, signer, pending, writer, syncer)
+  # FALSIFIER: go on to the keys regardless of the completion.
+  if r.completionRecord.len > 0 or
+     mutated("discard-completion-failure-discards-key"): return false
+  if r.errors.len == 0:
+    # finishDiscard returns quietly for an object still in place; the
+    # kept state must still be explained.
+    r.errors.add("the discard's completion record was not written; the " &
+      "intent record " & r.overrideRecord & " stands as authorised, not " &
+      "completed")
+  discard keepStateWhenIncomplete(r, l, stateDir)
+  true
+
 proc runAddonUninstall*(opts: UninstallOptions): UninstallResult =
   let stateDir = if opts.stateDir.len > 0: opts.stateDir else: DefaultStateDir
   # The host-wide apply lock for the whole uninstall: it removes the store,
@@ -907,6 +981,8 @@ proc runAddonUninstall*(opts: UninstallOptions): UninstallResult =
   let gate = storeEvidenceGate(custody, opts,
     proc (): tuple[ok: bool; why: string] = shipEvidenceNow(stateDir))
   let evidenceKept = gate.pending
+  let evidenceAtStart = evidenceKept.filterIt(
+    fileExists(it) or dirExists(it) or symlinkExists(it))
   result.overrideRecord = gate.overrideRecord
   result.overrideRecordText = gate.overrideRecordText
   result.keepStore = opts.keepStore
@@ -914,8 +990,10 @@ proc runAddonUninstall*(opts: UninstallOptions): UninstallResult =
   # removal of the evidence, made durable, on every way out; an uninstall
   # that stops before it leaves the intent record alone ("authorised, not
   # completed"), and a later cleanup failure does not hold it back.
-  # The key is read now, while it exists: the removal below takes it with
-  # /var/lib/repro, and the completion is signed after that.
+  # The key is read now, before anything is removed, so that a key that
+  # cannot be read stops the uninstall with nothing removed. The completion
+  # is written before the key is removed (``completeDiscardBeforeKeys``);
+  # a run that stops earlier signs it from the deferred call below.
   var signer: TextSigner
   if result.overrideRecord.len > 0:
     try: signer = loadTextSigner(custody.evidence.attestationKey)
@@ -926,8 +1004,10 @@ proc runAddonUninstall*(opts: UninstallOptions): UninstallResult =
         result.overrideRecord & " stands")
       result.errors.add("nothing was removed")
       return
+  var discardFinished = false   # the completion step already ran
   defer:
-    finishDiscard(result, custody, signer, evidenceKept)
+    if not discardFinished:
+      finishDiscard(result, custody, signer, evidenceKept)
     signer.wipe()
   if gate.errors.len > 0:
     result.errors.add(gate.errors)
@@ -997,6 +1077,14 @@ proc runAddonUninstall*(opts: UninstallOptions): UninstallResult =
     removeOwned(u, result, driver)
   for di in byClass[lcDropIn]:
     removeOwned(di, result, driver)
+  # A revert's persistent holds (§13 decision 133) go with the drop-ins:
+  # left behind, one would keep an operator's own unit of that name, or a
+  # package unit the add-on had replaced and handed back, from ever
+  # starting. Each is removed only while it still holds the bytes the
+  # ledger recorded (the revert's hold text); its ``<unit>.d`` directory is
+  # an ``lcDir`` entry, removed in step 4 once empty.
+  for rh in byClass[lcRevertHold]:
+    removeOwned(rh, result, driver)
 
   # 3. Diversions: the profile's file at the path, then the diversion.
   var handled = initHashSet[string]()
@@ -1090,7 +1178,9 @@ proc runAddonUninstall*(opts: UninstallOptions): UninstallResult =
   # just as drift does, and the state, with the ledger copy and the
   # attestation key a second uninstall needs, must still be there then.
   let storeFailed = removeStore(result, opts.keepStore)
-  classifyLeftAside(result, evidenceKept, asideRoot(custodySite(stateDir)),
+  # Only what this run found on disk can be removed by it; the objects of
+  # an earlier run's intent were gone before this one started.
+  classifyLeftAside(result, evidenceAtStart, asideRoot(custodySite(stateDir)),
                     opts.keepStore)
   if keepStateAfterStore(result, l, stateDir, storeFailed): return
   # The store evidence under the state goes next, still before the keys
@@ -1099,6 +1189,13 @@ proc runAddonUninstall*(opts: UninstallOptions): UninstallResult =
   # with the attestation key must still be there for the second run.
   if removeStateEvidence(result, evidenceEntries(custodySite(stateDir))):
     discard keepStateWhenIncomplete(result, l, stateDir)
+    return
+  # Everything the discard removes is gone: the completion is written now,
+  # while the key and the state are still there (decision 113), and kept
+  # for a re-run when it cannot be (decision 62).
+  discardFinished = true
+  if completeDiscardBeforeKeys(result, l, stateDir, custody, signer,
+                               evidenceKept):
     return
   for k in byClass[lcKey]:
     if not k.isPreBootstrapInput:

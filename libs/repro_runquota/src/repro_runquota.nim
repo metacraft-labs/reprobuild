@@ -885,6 +885,30 @@ proc applyGrantedWidth*(command: ReproCommandSpec;
     result.argv.add fillWidthPlaceholders(arg, slots)
   result.env.add(GrantedWidthEnvVar & "=" & $slots)
 
+proc withParentLease*(command: ReproCommandSpec;
+                      leaseId: uint64): ReproCommandSpec =
+  ## The command as it is launched under lease `leaseId`: its environment
+  ## names that lease as the parent of anything RunQuota-aware it starts
+  ## (`RUNQUOTA_PARENT_LEASE`). A nested `runquota jobserver` or other
+  ## sub-lease client then takes its width from this action's grant instead
+  ## of asking the host for slots a second time, which would count the same
+  ## work twice and could wait on the very slots this action holds.
+  ##
+  ## The entry replaces an inherited value. A build started from inside
+  ## another RunQuota-supervised tree would otherwise hand its actions that
+  ## tree's lease, and a sub-lease against it would be drawn from a grant
+  ## that is not theirs.
+  result = command
+  result.env.add(ParentLeaseEnvVar & "=" & $leaseId)
+
+proc applyGrant*(command: ReproCommandSpec;
+                 lease: RunQuotaLease): ReproCommandSpec =
+  ## `command` as it is launched under `lease`: the granted width in its
+  ## width flag (``applyGrantedWidth``) and the lease as the parent of its
+  ## own RunQuota clients (``withParentLease``).
+  command.applyGrantedWidth(lease.resources.cpu.value)
+    .withParentLease(lease.id.value)
+
 # ---------------------------------------------------------------------------
 # The advertised frontier
 # ---------------------------------------------------------------------------
@@ -1769,7 +1793,7 @@ proc runWithRunQuota*(request: ReproResourceRequest;
     try:
       lease.markStarting()
       var child = launchProcess(launchSpec(
-        command.applyGrantedWidth(lease.resources.cpu.value)))
+        command.applyGrant(lease)))
       lease.markRunning(
         childProcessId = child.info.processId,
         processGroupId = child.info.processGroupId,
@@ -2003,7 +2027,7 @@ proc startGrantedWithRunQuota(session: ReproRunQuotaSession;
   try:
     lease.markStarting()
     child = launchProcess(launchSpec(
-      command.applyGrantedWidth(lease.resources.cpu.value)))
+      command.applyGrant(lease)))
     launched = true
     lease.markRunning(
       childProcessId = child.info.processId,

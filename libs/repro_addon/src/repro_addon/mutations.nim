@@ -587,9 +587,19 @@
 ## ``polkit-subject-rebind-trusted``         a polkit rule that rebinds
 ##                                           ``subject`` is judged by its
 ##                                           ``subject`` guards (decision 58)
+## ``template-live-by-name``                the live check reads a template
+##                                           by its own name, which systemd
+##                                           refuses (decision 135)
+## ``start-holds-after-driver-writes``     the add-on switch writes its
+##                                           start holds at step 6, after
+##                                           the drivers' reloads loaded
+##                                           the generation (decision 136)
 ## ``narrowed-live-set``                     the add-on switch judges and
 ##                                           holds no unit in a switch that
-##                                           changes no unit file
+##                                           changes no unit file (red in
+##                                           t_addon_carried_state_fails_closed
+##                                           and in the adopt gate's case
+##                                           2e, a credentials-only switch)
 ## ``reissue-skips-targets``                 after a full apply's live check,
 ##                                           the start jobs of the targets the
 ##                                           drivers started are not
@@ -972,6 +982,10 @@
 ## ``discard-completion-key-read-late``       the completion is signed from
 ##                                            the key file, which the removal
 ##                                            took
+## ``discard-completion-failure-discards-key`` uninstall goes on to remove the
+##                                            attestation key and the state
+##                                            when the discard's completion
+##                                            could not be written
 ## ``ship-ok-without-sink-configuration``     uninstall reads a missing sink
 ##                                            configuration as "nothing to
 ##                                            wait for" though records are
@@ -1414,6 +1428,13 @@ const
                           # a unit whose revert hold a passing apply
                           # clears is left down.
                           "cleared-hold-not-started",
+                          # a revert's hold is recorded in no ledger,
+                          # so uninstall leaves it behind (issue
+                          # 2026-11-14).
+                          "revert-hold-unledgered",
+                          # a replayed revert leaves the hold directory
+                          # its interrupted attempt created unclaimed.
+                          "replayed-hold-dir-unclaimed",
                           # A13: a state backup or restore runs while a
                           # unit of the set may run.
                           "state-units-not-checked",
@@ -1513,6 +1534,10 @@ const
                           "boot-closure-reads-generation-dropins",
                           "polkit-subject-rebind-trusted",
                           "narrowed-live-set",
+                          # A13 review round 8, §13 decision 135.
+                          "template-live-by-name",
+                          # §13 decision 136.
+                          "start-holds-after-driver-writes",
                           "reissue-skips-targets",
                           "reissue-skips-sockets",
                           "reissue-skips-unit-state",
@@ -1668,6 +1693,7 @@ const
                           "discard-completed-objects-present",
                           "discard-failed-removal-counted-as-kept",
                           "discard-completion-key-read-late",
+                          "discard-completion-failure-discards-key",
                           "discard-completion-sync-error-swallowed",
                           "fresh-ignores-listings"]
 

@@ -37,6 +37,7 @@ import ./plan_envelope
 import ./planner
 import ./profile
 import ./state_dir
+import ./systemd_syntax
 when defined(posix):
   import std/tables
   import ./carried_state
@@ -283,6 +284,12 @@ type
       ## edges that ran a local process this apply (not a cache hit /
       ## substitute). This is the "M built locally" number.
     auditLogPath*: string
+    liveJudged*: seq[string]
+      ## The units the carried-state live check read from systemd, by the
+      ## name it read them under (``carried_state.liveJudgedNames``: a
+      ## template through its instances, §13 decision 135); empty when the
+      ## check did not run. Reported so an operator, and a gate, can see
+      ## what the check covered.
     diagnostics*: seq[string]
     buildActionResults*: seq[BuildActionApplyOutcome]
       ## Windows-System-Resources Phase G. Per-edge outcomes reported
@@ -657,12 +664,16 @@ proc refusedUnits*(units, problems: openArray[string]): seq[string] =
   ## ``... : <unit> ...`` or ``... : <unit>: ...``). A problem that names
   ## none of them (the refusal decided again over the host as the reload
   ## left it) cannot be attributed, so it holds every unit: a refusal that
-  ## cannot say whom it concerns lets nothing start (§11.1).
+  ## cannot say whom it concerns lets nothing start (§11.1). A template's
+  ## problems name its instances (§13 decision 135), so a problem naming
+  ## any ``<stem>@...`` refuses the template, whose hold holds them all.
   if problems.len == 0: return
   for u in units:
+    let stem = if isTemplateUnit(u): u[0 .. u.find('@')] else: ""
     for pr in problems:
-      if (": " & u & " ") in pr or (": " & u & ":") in pr:
-        if u notin result: result.add(u)
+      let named = if stem.len > 0: (": " & stem) in pr
+                  else: (": " & u & " ") in pr or (": " & u & ":") in pr
+      if named and u notin result: result.add(u)
   when ApplyMutation == "refusal-holds-every-unit":
     # FALSIFYING MUTATION: one refused unit holds them all.
     if result.len > 0: result = @units
@@ -731,6 +742,18 @@ proc releaseStarts*(p: SystemProfile; units, passed, refused, wasActive,
   var started: seq[string]
   for r in p.resources:
     if r.kind != srkSystemdSystemUnit or r.suName notin passed: continue
+    if isTemplateUnit(r.suName):
+      # A template is not started by name (systemd refuses it): the
+      # instances that were running before start again (§13 decision 135).
+      let stem = r.suName[0 .. r.suName.find('@')]
+      for i in wasActive:
+        if i.startsWith(stem) and i notin started:
+          started.add(i)
+          let s = host.start(i)
+          if not s.ok:
+            result.add("systemctl start " & i & " after the " &
+              "carried-state check: " & s.output.strip())
+      continue
     if r.suEnabled or r.suName in wasActive:
       started.add(r.suName)
       let s = host.start(r.suName)
@@ -746,7 +769,7 @@ proc releaseStarts*(p: SystemProfile; units, passed, refused, wasActive,
   # state, and a unit already running is not restarted a second time
   # (its restart's stop half ran in the drivers' job).
   for u in driverStarts:
-    if u in started or u in refused: continue
+    if u in started or u in refused or isTemplateUnit(u): continue
     # Not a unit that ran and exited, or failed, in the drivers' job (a
     # one-shot service): issuing its start again would run it twice.
     # Its pulled-in units were queued by that job and stay as the hold
@@ -800,6 +823,11 @@ when defined(posix):
       "start until its loaded configuration has been checked against the " &
       "carried-state reach (ReproOS Add-On Mode spec §11.1).")
 
+  proc hostRunningInstances(tmpl: string): seq[string] =
+    ## The instances of ``tmpl`` systemd has running or starting.
+    let r = runSystemctlArgs(runningInstancesArgs(tmpl))
+    if r.exitCode == 0: result = parseRunningInstances(tmpl, r.output)
+
   proc beginLiveCheck(p: SystemProfile; dir, root: string;
                       planned: openArray[PlannedOperation]): LiveCheck =
     ## Hold every unit ``liveReachUnits`` names before the drivers write
@@ -812,6 +840,12 @@ when defined(posix):
     result.units = liveReachUnits(p, dir, root)
     if result.units.len == 0: return
     for u in result.units:
+      if isTemplateUnit(u):
+        # A template never runs; its running instances do (§13 decision
+        # 135). Their restarts are skipped under the template's hold too.
+        for i in hostRunningInstances(u):
+          if i notin result.wasActive: result.wasActive.add(i)
+        continue
       let r = runSystemctlArgs(["is-active", "--quiet", "--", u])
       if r.exitCode == 0: result.wasActive.add(u)
     result.driverStarts = driverStartJobs(planned,
@@ -822,7 +856,8 @@ when defined(posix):
                               liveCheckHoldText())
     systemctlOrRaise(["daemon-reload"])
 
-  proc finishLiveCheck(c: LiveCheck; p: SystemProfile; dir, root: string): seq[string] =
+  proc finishLiveCheck(c: LiveCheck; p: SystemProfile; dir, root: string;
+                       judged: var seq[string]): seq[string] =
     ## After the privileged set: reload, judge each held unit as systemd
     ## loaded it (``liveReachProblems``, the add-on switch's own check), and
     ## either release and start what should run, or keep the refused units
@@ -832,8 +867,16 @@ when defined(posix):
     systemctlOrRaise(["daemon-reload"])
     var problems: seq[string]
     when not LiveCheckSkipped:
+      # One reading of each template's running instances serves both the
+      # check and the report of what it judged.
+      var runningSeen = initTable[string, seq[string]]()
+      let running = proc (t: string): seq[string] =
+        if t notin runningSeen: runningSeen[t] = hostRunningInstances(t)
+        runningSeen[t]
+      judged = liveJudgedNames(c.units, p, running)
       problems = liveReachProblems(c.units, p,
-        proc (u: string): Table[string, string] = systemctlShow(u), root)
+        proc (u: string): Table[string, string] = systemctlShow(u), root,
+        running)
       # And the refusal again over the host as the reload left it: a
       # drop-in a generator made at a reload of this apply is read now.
       when ApplyMutation != "post-reload-refusal-skipped":
@@ -1151,7 +1194,7 @@ proc runInfraApply*(profileText: string; opts: ApplyOptions): ApplyResult =
 
   when defined(posix):
     for pr in finishLiveCheck(liveCheck, parseSystemProfile(profileText),
-                              liveDir, liveRoot):
+                              liveDir, liveRoot, result.liveJudged):
       inc result.errorCount
       result.diagnostics.add(pr)
 
