@@ -875,6 +875,10 @@ proc renderAddonSections*(r: AddonApplyResult): string =
     # Every weakening of the hardening floor, in every plan (§10.1, CONF-2).
     result.add("service floor exceptions:\n")
     for l in r.floorExceptions: result.add("  " & l & "\n")
+  if r.liveJudged.len > 0:
+    # What the carried-state live check read from systemd (§11.1).
+    result.add("carried-state live check judged:\n")
+    for u in r.liveJudged: result.add("  " & u & "\n")
   if r.baseIdentity.id.len > 0:
     # The base the plan was computed against (§7.4) and, after a
     # distribution upgrade, what changed since the current generation (§7.9).

@@ -587,6 +587,13 @@
 ## ``polkit-subject-rebind-trusted``         a polkit rule that rebinds
 ##                                           ``subject`` is judged by its
 ##                                           ``subject`` guards (decision 58)
+## ``template-live-by-name``                the live check reads a template
+##                                           by its own name, which systemd
+##                                           refuses (decision 135)
+## ``start-holds-after-driver-writes``     the add-on switch writes its
+##                                           start holds at step 6, after
+##                                           the drivers' reloads loaded
+##                                           the generation (decision 136)
 ## ``narrowed-live-set``                     the add-on switch judges and
 ##                                           holds no unit in a switch that
 ##                                           changes no unit file (red in
@@ -1537,6 +1544,10 @@ const
                           "boot-closure-reads-generation-dropins",
                           "polkit-subject-rebind-trusted",
                           "narrowed-live-set",
+                          # A13 review round 8, §13 decision 135.
+                          "template-live-by-name",
+                          # §13 decision 136.
+                          "start-holds-after-driver-writes",
                           "reissue-skips-targets",
                           "reissue-skips-sockets",
                           "reissue-skips-unit-state",

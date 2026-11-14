@@ -38,6 +38,8 @@
 ## (R7-4), ``dependency-links-unread`` (R7-5, R7-7),
 ## ``requirement-name-not-reserved`` (R7-6), ``privileged-daemons-unread``
 ## (decision 58), ``restore-requirement-skips-closure`` (decision 60);
+## round 8: ``template-live-by-name`` (decision 135, a template read
+## through its instances);
 ## round 7: ``narrowed-live-set`` (a switch that writes no unit file; the
 ## decision alone -- its use at the switch's step 6 is falsified end to end
 ## by case 2e of ``tests/e2e/addon/t_e2e_addon_adopt_hand_configured_service``,
@@ -1164,6 +1166,60 @@ suite "the requirement follows the distribution's dependency closure (decision 6
       "ReadWritePaths=/var/lib/other\nExecStart=/bin/true\n")
     check "nofile.service" in carriedRequirementUnits(parseSystemProfile(starter), d, root)
 
+suite "the live check judges a template through its instances (decision 135)":
+  # systemd's show refuses a template name ("neither a valid invocation ID
+  # nor unit name"): the stub raises for one, as systemd does.
+  proc stubShow(rootUnits: seq[string]): proc (u: string): Table[string, string] =
+    result = proc (u: string): Table[string, string] =
+      if isTemplateUnit(u):
+        raise newException(OSError, "Unit name " & u &
+          " is neither a valid invocation ID nor unit name.")
+      var t = {"ProtectSystem": "strict", "DynamicUser": "no",
+               "NoNewPrivileges": "yes", "User": "app", "Group": "app",
+               "SupplementaryGroups": ""}.toTable
+      if u in rootUnits: t["User"] = "root"
+      t
+
+  const Tpl = "systemd.systemUnit {\n  name = \"tpl@.service\"\n" &
+    "  content = \"[Service]\nProtectSystem=strict\nNoNewPrivileges=yes\n" &
+    "User=app\nReadWritePaths=/var/lib/other\nExecStart=/bin/true\n\"\n}\n"
+  const Starter = "systemd.systemUnit {\n  name = \"st.target\"\n" &
+    "  content = \"[Unit]\nWants=tpl@a.service\n\"\n}\n"
+
+  test "the judged names: the observation instance, the generation's and the running instances":
+    let p = parseSystemProfile(Tpl & Starter)
+    let names = liveJudgedNames(["tpl@.service", "plain.service"], p,
+      proc (t: string): seq[string] = @["tpl@b.service"])
+    checkpoint $names
+    check names == @["tpl@repro-addon-observe.service", "tpl@a.service",
+                     "tpl@b.service", "plain.service"]
+    check "tpl@.service" notin names
+
+  test "a confined template whose instances systemd loads confined passes":
+    let (root, d) = installedR6("r9-tpl")
+    let p = parseSystemProfile(Tpl & Starter)
+    check liveReachUnits(p, d, root) == @["tpl@.service"]
+    let problems = liveReachProblems(liveReachUnits(p, d, root), p,
+      stubShow(@[]), root, proc (t: string): seq[string] = @["tpl@b.service"])
+    checkpoint $problems
+    check problems.len == 0
+
+  test "an instance systemd loads as root is refused, by its instance name":
+    let (root, d) = installedR6("r9-tpl2")
+    let p = parseSystemProfile(Tpl & Starter)
+    let problems = liveReachProblems(liveReachUnits(p, d, root), p,
+      stubShow(@["tpl@b.service"]), root, proc (t: string): seq[string] = @["tpl@b.service"])
+    checkpoint $problems
+    check problems.len == 1
+    check "tpl@b.service as systemd loaded it is not confined" in problems[0]
+
+  test "list-units output: the instances, never the template or the observation instance":
+    let out0 = "tpl@a.service loaded active running A\n" &
+      "tpl@repro-addon-observe.service loaded inactive dead O\n" &
+      "tpl@.service loaded inactive dead T\nother@x.service loaded active running X\n"
+    check parseRunningInstances("tpl@.service", out0) == @["tpl@a.service"]
+    check runningInstancesArgs("tpl@.service")[^1] == "tpl@*.service"
+
 suite "the switch judges its services in every switch (round 7, finding 1)":
   test "a switch that writes no unit file holds, reloads and judges the services":
     # A switch changing only a file a confined service depends_on (or its
@@ -1444,6 +1500,35 @@ suite "every driver's start is issued again after the check (decision 79, 2026-1
       ["carried state reached after the reload (decided again after the reload)"]) ==
       @["a.service", "b.service"]
     check refusedUnits(["a.service"], []).len == 0
+
+  test "a template is refused by its instances' problems (decision 135)":
+    # liveReachProblems names a template's instances, never the template.
+    let problems = ["floored unit: foo@b.service as systemd loaded it runs as root"]
+    check refusedUnits(["foo@.service", "ok.service"], problems) ==
+      @["foo@.service"]
+    # A unit whose name merely starts like the stem is not the template's.
+    check refusedUnits(["foo@.service", "ok.service"],
+      ["floored unit: foobar.service as systemd loaded it runs as root"]) ==
+      @["foo@.service", "ok.service"]
+
+  test "a passed template starts its instances that ran before, never its name (decision 135)":
+    var log = new seq[string]
+    let host = fakeHost(@["t.target"], initTable[string, Table[string, string]](), log)
+    let p = parseSystemProfile("""systemd.systemUnit {
+  name = "foo@.service"
+  content = "[Service]\nExecStart=/bin/true\n"
+  enabled = false
+}
+""")
+    check releaseStarts(p, ["foo@.service"], ["foo@.service"], [],
+      ["foo@a.service", "foo@b.service", "bar.service"],
+      ["foo@.service", "t.target"], [], host).len == 0
+    check log[] == @["foo@a.service", "foo@b.service", "t.target"]
+    # Refused: none of its instances start.
+    log[].setLen(0)
+    check releaseStarts(p, ["foo@.service"], [], ["foo@.service"],
+      ["foo@a.service"], [], [], host).len == 0
+    check log[].len == 0
 
   test "a failed start is reported, and the others still start":
     var log = new seq[string]

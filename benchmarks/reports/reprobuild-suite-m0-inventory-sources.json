@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 35,
-    "nimTestBinaries": 2789,
+    "nimTestBinaries": 2790,
     "pureUnitConsolidationGroups": 82,
     "pureUnitTests": 763,
     "staticallyDetectedRuntimeCompilerFlowTests": 140,
-    "testEntries": 2834
+    "testEntries": 2835
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1619,7 +1619,7 @@
     "classificationCounts": {
       "graph-fixture": 22,
       "integration": 1536,
-      "platform/destructive": 178,
+      "platform/destructive": 179,
       "pure unit": 763,
       "unclassified": 335
     },
@@ -1835,9 +1835,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2789,
+    "nimTestBinaryCount": 2790,
     "pythonTestFileCount": 45,
-    "testEntryCount": 2834
+    "testEntryCount": 2835
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -5636,7 +5636,7 @@
           "executedVariables": [
             "cmd"
           ],
-          "line": 192,
+          "line": 196,
           "path": "tests/integration/t_ext_test_execution_rows.nim",
           "patterns": [
             "nim-c"
@@ -6636,7 +6636,7 @@
             "cmd",
             "summaryPath"
           ],
-          "line": 224,
+          "line": 228,
           "path": "tests/integration/t_m20_second_runner_generic_layer.nim",
           "patterns": [
             "nim-c"
@@ -6658,7 +6658,7 @@
             "cmd",
             "command"
           ],
-          "line": 197,
+          "line": 200,
           "path": "tests/integration/t_m21_point_in_time_queries.nim",
           "patterns": [
             "nim-c"
@@ -8804,8 +8804,8 @@
       "owner": "libs/repro_addon",
       "requiresReproBinary": false,
       "source": "libs/repro_addon/tests/t_addon_carried_state_fails_closed.nim",
-      "sourceSuiteCount": 26,
-      "staticCaseCount": 108,
+      "sourceSuiteCount": 27,
+      "staticCaseCount": 114,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -31291,8 +31291,8 @@
     },
     {
       "binary": "build/test-bin/t_e2e_addon_floor_held_until_checked",
-      "class": "integration",
-      "classificationReason": "e2e/integration path or requires the repro binary",
+      "class": "platform/destructive",
+      "classificationReason": "platform path, target OS, VM, privileged, or host mutation signal",
       "defines": [],
       "language": "nim",
       "localDependencyShape": [
@@ -47753,6 +47753,23 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_preloaded_monitor_shim_carries_no_runpath",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_test_support"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_preloaded_monitor_shim_carries_no_runpath.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 5,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_preloaded_monitor_shim_is_loader_inert",
       "class": "integration",
       "classificationReason": "e2e/integration path or requires the repro binary",
@@ -58776,7 +58793,7 @@
       "requiresReproBinary": false,
       "source": "tests/unit/test_addon_a13_classify.py",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 42,
+      "staticCaseCount": 45,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

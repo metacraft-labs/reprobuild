@@ -76,7 +76,9 @@ when defined(posix):
 
   proc writeRealDaemonWrapper(root, daemonBin: string): string =
     ## A `RUNQUOTAD_BIN` that execs the real daemon with this test's own
-    ## host file, identity and store, so nothing touches the host's.
+    ## host file, identity and store, so nothing touches the host's, and
+    ## with capture on: it is off by default (it costs more than
+    ## RunQuota's measurement budget allows) and the test reads it back.
     result = root / "runquotad"
     let hostFile = root / "host.toml"
     writeFile(hostFile, "schema = \"runquota.host-config.v1\"\n")
@@ -84,6 +86,7 @@ when defined(posix):
       " --host-config " & quoteShell(hostFile) &
       " --host-identity-file " & quoteShell(root / "host-id") &
       " --observation-db " & quoteShell(root / "observations.sqlite") &
+      " --measurement capture=on" &
       " --ambient-sample-interval-millis 0 \"$@\"\n")
     setFilePermissions(result, {fpUserRead, fpUserWrite, fpUserExec})
 

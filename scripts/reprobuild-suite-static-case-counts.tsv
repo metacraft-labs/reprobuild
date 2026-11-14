@@ -35,7 +35,7 @@ libs/repro_addon/tests/t_addon_agent_repin.nim	nim	3
 libs/repro_addon/tests/t_addon_agent_split.nim	nim	25
 libs/repro_addon/tests/t_addon_agent_staging_copy_streams.nim	nim	4
 libs/repro_addon/tests/t_addon_apt_hook_and_base_identity.nim	nim	21
-libs/repro_addon/tests/t_addon_carried_state_fails_closed.nim	nim	108
+libs/repro_addon/tests/t_addon_carried_state_fails_closed.nim	nim	114
 libs/repro_addon/tests/t_addon_collision.nim	nim	38
 libs/repro_addon/tests/t_addon_crash_recovery_records.nim	nim	25
 libs/repro_addon/tests/t_addon_cross_prefix_needs_the_sysroot_glibc.nim	nim	5
@@ -2180,6 +2180,7 @@ tests/integration/t_pre_push_warns_and_allows_on_unreachable_personal_backend.ni
 tests/integration/t_pre_push_writes_the_lock_record_it_demands.nim	nim	1
 tests/integration/t_pre_receive_accepts_clean_public_lock_and_stays_blind_to_private_tiers.nim	nim	1
 tests/integration/t_pre_receive_rejects_public_lock_with_private_ref_and_integrity_mismatch.nim	nim	3
+tests/integration/t_preloaded_monitor_shim_carries_no_runpath.nim	nim	5
 tests/integration/t_preloaded_monitor_shim_is_loader_inert.nim	nim	4
 tests/integration/t_private_repo_participates_via_evidence_without_source_exposure.nim	nim	1
 tests/integration/t_production_policy_rejects_all_software_roots.nim	nim	8
@@ -2797,7 +2798,7 @@ tests/unit/t_windows_system_hash_mode.nim	nim	2
 tests/unit/t_workspace_root_for_repo_managed_worktree.nim	nim	1
 tests/unit/t_workspace_settings_v1_decode.nim	nim	3
 tests/unit/t_workspace_sync_summary_counts_an_unknown_status.nim	nim	4
-tests/unit/test_addon_a13_classify.py	python	42
+tests/unit/test_addon_a13_classify.py	python	45
 tests/unit/test_attestation_collateral_monitor_landing.py	python	6
 tests/unit/test_bootstrap_dry_run_outputs.py	python	2
 tests/unit/test_build_report_attribution.py	python	20
