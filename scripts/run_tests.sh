@@ -311,6 +311,11 @@ case "$(uname -s)" in
     if [[ "${REPRO_TEST_RUNQUOTA_MODE}" == private ]]; then
       REPRO_TEST_RUNQUOTA_DIR="$(mktemp -d /tmp/repro-test-rq.XXXXXX)"
       export RUNQUOTA_USER_ENDPOINT_DIR="${REPRO_TEST_RUNQUOTA_DIR}/u"
+      # A private run owns its endpoint: a RUNQUOTA_SOCKET or a private
+      # RUNQUOTA_ENDPOINT_SCOPE an enclosing `repro exec` published names the
+      # CALLER's daemon, and that scope would hold every scratch socket a test
+      # names to the owner-only rule.
+      unset RUNQUOTA_SOCKET RUNQUOTA_ENDPOINT_SCOPE
     fi
     echo "run_tests: RunQuota: ${REPRO_TEST_RUNQUOTA_MODE} daemon (${REPRO_TEST_RUNQUOTA_REASON})" >&2
     ;;
