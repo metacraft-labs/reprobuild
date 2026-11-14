@@ -491,7 +491,10 @@ const
       # [Install]) that only another unit's start pulls in -- an enabled
       # target's Wants=, an enabled socket's Wants= -- held by the full
       # apply's carried-state check while the drivers start that unit, and
-      # brought up after the check by the start job issued again.
+      # brought up after the check by the start job issued again. The
+      # socket is declared BEFORE the service it names, on purpose: the
+      # planner orders a trigger unit after the unit it triggers, so the
+      # natural order must apply (a regression guard for that ordering).
       systemdSystemUnit(name = "eth-r7-tgt.target",
         content = "[Unit]\nDescription=A13 decision-79 probe: a target\n" &
           "Wants=eth-r7-tsvc.service\n\n[Install]\nWantedBy=multi-user.target\n",
@@ -503,18 +506,18 @@ const
           "ExecStart=/bin/sh -c 'id -u > /var/lib/a13-r7/%n.ran; exec /bin/sleep infinity'\n",
         enabled = false,
         address = "r7TargetSvc")
+      systemdSystemUnit(name = "eth-r7-sock.socket",
+        content = "[Unit]\nDescription=A13 decision-79 probe: a socket\n" &
+          "Wants=eth-r7-ssvc.service\n\n[Socket]\nListenStream=/run/eth-r7.sock\n" &
+          "Service=eth-r7-ssvc.service\n\n[Install]\nWantedBy=sockets.target\n",
+        address = "r7Socket")
       systemdSystemUnit(name = "eth-r7-ssvc.service",
         content = "[Unit]\nDescription=A13 decision-79 probe: pulled in by a " &
           "socket\n\n[Service]\nProtectSystem=strict\nNoNewPrivileges=yes\n" &
           "User=eth-validator\nGroup=eth-validator\nReadWritePaths=/var/lib/a13-r7\n" &
           "ExecStart=/bin/sh -c 'id -u > /var/lib/a13-r7/%n.ran; exec /bin/sleep infinity'\n",
         enabled = false,
-        address = "r7SocketSvc")
-      systemdSystemUnit(name = "eth-r7-sock.socket",
-        content = "[Unit]\nDescription=A13 decision-79 probe: a socket\n" &
-          "Wants=eth-r7-ssvc.service\n\n[Socket]\nListenStream=/run/eth-r7.sock\n" &
-          "Service=eth-r7-ssvc.service\n\n[Install]\nWantedBy=sockets.target\n",
-        address = "r7Socket")"""
+        address = "r7SocketSvc")"""
   R5Plan = r5Unit("eth-r5-plan.service", "ProtectSystem=strict\n" &
     "NoNewPrivileges=yes\nUser=eth-validator\nGroup=eth-validator\n" &
     "ReadWritePaths=/var/lib/ethereum/validator\n", "r5Plan")
@@ -586,48 +589,7 @@ proc probeWritablePaths(text: string): seq[string] =
     result.add(p)
     i = j
 
-proc socketServiceOrderProblem(resources: string): string =
-  ## A socket probe whose ``Service=`` unit is declared after it, or "".
-  ## The full apply writes the profile's units in its order, and
-  ## ``enable --now`` of a socket whose service unit is not there yet is
-  ## refused by systemd ("Socket service ... not loaded, refusing"; A13
-  ## round 7: the decision-79 socket probe failed so, under no hold).
-  var declared: seq[string]
-  for l in resources.splitLines():
-    let i = l.find("systemdSystemUnit(name = \"")
-    if i < 0: continue
-    let n = l[i + len("systemdSystemUnit(name = \"") .. ^1]
-    declared.add(n[0 ..< n.find('"')])
-  var k = 0
-  while true:
-    k = resources.find("Service=", k)
-    if k < 0: return ""
-    var j = k + len("Service=")
-    var svc = ""
-    while j < resources.len and resources[j] notin {'\\', '"', '\n', ' '}:
-      svc.add(resources[j]); inc j
-    # The socket naming it is the last unit declared before this point.
-    var owner = ""
-    for u in declared:
-      let at = resources.find("systemdSystemUnit(name = \"" & u & "\"")
-      if at >= 0 and at < k: owner = u
-    if owner.endsWith(".socket"):
-      let svcAt = resources.find("systemdSystemUnit(name = \"" & svc & "\"")
-      let sockAt = resources.find("systemdSystemUnit(name = \"" & owner & "\"")
-      if svcAt < 0 or svcAt > sockAt:
-        return owner & " names Service=" & svc & ", declared after it or not at all"
-    k = j
-
 static:
-  # A socket probe's service comes first (the apply's order), with a
-  # negative control.
-  doAssert socketServiceOrderProblem(R7Resources) == "",
-    socketServiceOrderProblem(R7Resources)
-  doAssert socketServiceOrderProblem(
-    "      systemdSystemUnit(name = \"x.socket\",\n" &
-    "        content = \"[Socket]\\nService=x-svc.service\\n\")\n" &
-    "      systemdSystemUnit(name = \"x-svc.service\",\n" &
-    "        content = \"[Service]\\nExecStart=/bin/true\\n\")\n") != ""
   # Every probe unit's writable path is one the gate creates, or the carried
   # directory itself: checked when the gate compiles.
   var all = PathReachProfile & R4Host & R5Plan & R5Resources & R6Resources &

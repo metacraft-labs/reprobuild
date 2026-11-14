@@ -233,7 +233,7 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
          g.exec("systemctl is-active a9r-st.service").stdout.strip() != "active" and
          g.exec("stat -c %U /var/lib/a9r-st").stdout.strip() == "root",
          g.exec("systemctl status a9r-st.service --no-pager; ls -la /var/lib/a9r-st").stdout)
-    # §13 decision 126: the revert's hold is persistent and covers only
+    # §13 decision 133: the revert's hold is persistent and covers only
     # units the generation installs, across a reboot.
     const HoldName = "zz-repro-addon-revert-hold.conf"
     let stHold = "/etc/systemd/system/a9r-st.service.d/" & HoldName

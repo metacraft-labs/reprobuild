@@ -2126,6 +2126,70 @@ windows.capability { name = "OpenSSH.Server~~~~0.0.1.0" }
     check graph.edges[0].toIdx == 0
     check graph.edges[0].kind == edkImplicit
 
+  test "a socket declared before its service is ordered after it":
+    # Regression: systemd refuses to start a socket whose service is not
+    # loaded ("Socket service x.service not loaded, refusing"), so the
+    # full apply must write the service first however the profile is
+    # ordered, with no depends_on.
+    let profile = parseSystemProfile("""
+systemd.systemUnit { name = "x.socket" content = "[Socket]
+ListenStream=/run/x
+" }
+systemd.systemUnit { name = "x.service" content = "[Service]
+ExecStart=/bin/true
+" }
+""")
+    let graph = buildDependencyGraph(profile)
+    check graph.edges.len == 1
+    check graph.edges[0].fromIdx == 1
+    check graph.edges[0].toIdx == 0
+    check graph.edges[0].kind == edkImplicit
+    check topologicallyOrder(profile, graph) == @[1, 0]
+
+  test "a timer or path unit follows the Unit= it names, else its namesake":
+    let profile = parseSystemProfile("""
+systemd.systemTimer { name = "a.timer" content = "[Timer]
+Unit=job.service
+" }
+systemd.systemUnit { name = "b.path" content = "[Path]
+PathChanged=/x
+" }
+systemd.systemUnit { name = "job.service" content = "[Service]
+ExecStart=/bin/true
+" }
+systemd.systemUnit { name = "b.service" content = "[Service]
+ExecStart=/bin/true
+" }
+""")
+    let order = topologicallyOrder(profile, buildDependencyGraph(profile))
+    check order.find(2) < order.find(0)
+    check order.find(3) < order.find(1)
+
+  test "a socket whose service depends_on it is not made cyclic":
+    let profile = parseSystemProfile("""
+systemd.systemUnit { name = "x.socket" content = "[Socket]
+ListenStream=/run/x
+" }
+systemd.systemUnit { name = "x.service" content = "[Service]
+ExecStart=/bin/true
+" depends_on = ["systemd.systemUnit:x.socket"] }
+""")
+    check topologicallyOrder(profile, buildDependencyGraph(profile)) == @[0, 1]
+
+  test "a socket whose service depends_on it through a third unit is not made cyclic":
+    let profile = parseSystemProfile("""
+systemd.systemUnit { name = "x.socket" content = "[Socket]
+ListenStream=/run/x
+" }
+systemd.systemUnit { name = "mid.service" content = "[Service]
+ExecStart=/bin/true
+" depends_on = ["systemd.systemUnit:x.socket"] }
+systemd.systemUnit { name = "x.service" content = "[Service]
+ExecStart=/bin/true
+" depends_on = ["systemd.systemUnit:mid.service"] }
+""")
+    check topologicallyOrder(profile, buildDependencyGraph(profile)) == @[0, 1, 2]
+
   test "topologicallyOrder respects an explicit dependency chain":
     # A -> B -> C -> D via explicit depends_on, declared in REVERSE
     # order (D first, A last) — the topological sort must put A

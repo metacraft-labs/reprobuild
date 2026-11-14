@@ -524,6 +524,34 @@ proc findResourceIndex(profile: SystemProfile;
       return i
   return -1
 
+proc triggeredUnitName(triggerName, content: string): string =
+  ## The unit a `.socket` / `.timer` / `.path` unit triggers: the
+  ## `Service=` (socket) or `Unit=` (timer, path) setting of its own
+  ## section, else the same-basename `.service` (systemd.socket(5),
+  ## systemd.timer(5), systemd.path(5)). "" when `triggerName` is not a
+  ## trigger unit.
+  let (section, key) =
+    if triggerName.endsWith(".socket"): ("Socket", "Service")
+    elif triggerName.endsWith(".timer"): ("Timer", "Unit")
+    elif triggerName.endsWith(".path"): ("Path", "Unit")
+    else: return ""
+  var inSection = false
+  for raw in content.splitLines:
+    let line = raw.strip
+    if line.len > 1 and line[0] == '[' and line[^1] == ']':
+      inSection = line[1 ..< line.high] == section
+    elif inSection and line.startsWith(key & "="):
+      # the last assignment wins; an empty one resets to the default
+      result = line[key.len + 1 .. ^1].strip
+  if result.len == 0:
+    result = triggerName[0 ..< triggerName.rfind('.')] & ".service"
+
+proc triggerContent(r: SystemResource): (string, string) =
+  case r.kind
+  of srkSystemdSystemUnit: (r.suName, r.suContent)
+  of srkSystemdSystemTimer: (r.stName, r.stContent)
+  else: ("", "")
+
 proc buildDependencyGraph*(profile: SystemProfile): DependencyGraph =
   ## Resolve every explicit `depends_on` entry + every implicit
   ## producer / consumer fact into an edge set over the profile's
@@ -574,6 +602,40 @@ proc buildDependencyGraph*(profile: SystemProfile): DependencyGraph =
       let consumerIdx = findResourceIndex(profile, c.kind, c.name)
       if consumerIdx >= 0:
         record(result, producerIdx, consumerIdx, edkImplicit)
+
+  # 3. IMPLICIT edges from a trigger unit to the unit it triggers: the
+  # trigger is applied AFTER the unit it names, because systemd refuses
+  # to start a socket, timer or path unit whose target is not loaded
+  # ("Socket service ... not loaded, refusing"), and the full apply
+  # writes and starts units in this order. A profile therefore need not
+  # declare the service first nor spell out a `depends_on`.
+  for triggerIdx in 0 ..< profile.resources.len:
+    let (tName, tContent) = triggerContent(profile.resources[triggerIdx])
+    if tName.len == 0: continue
+    let target = triggeredUnitName(tName, tContent)
+    if target.len == 0: continue
+    let targetIdx = findResourceIndex(profile,
+                                      $srkSystemdSystemUnit, target)
+    if targetIdx < 0 or targetIdx == triggerIdx: continue
+    # The profile already orders the other way, directly or through
+    # other resources (the triggered unit depends_on the trigger): honour
+    # it rather than manufacture a cycle out of a valid profile. A path
+    # trigger -> ... -> target in the edges so far means exactly that.
+    var seen = newSeq[bool](profile.resources.len)
+    var stack = @[triggerIdx]
+    seen[triggerIdx] = true
+    var reverse = false
+    while stack.len > 0 and not reverse:
+      let n = stack.pop()
+      for e in result.edges:
+        if e.fromIdx == n and not seen[e.toIdx]:
+          if e.toIdx == targetIdx:
+            reverse = true
+            break
+          seen[e.toIdx] = true
+          stack.add e.toIdx
+    if not reverse:
+      record(result, targetIdx, triggerIdx, edkImplicit)
 
 proc topologicallyOrder*(profile: SystemProfile;
                          graph: DependencyGraph): seq[int] =
