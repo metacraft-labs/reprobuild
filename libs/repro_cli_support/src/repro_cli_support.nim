@@ -4970,7 +4970,12 @@ const
   # passthrough resolution and the stage-2 census both read this field,
   # and a census that answers differently cold and warm is not a
   # measurement.
-  LoweredGraphCacheVersion = 16'u16
+  LoweredGraphCacheVersion = 17'u16
+    # v17: ``BuildAction.cpuMinMilli``, ``cpuPreferredMilli`` (u32 each) and
+    # ``widthFlag`` (a string) after ``subToolIdentityRefs``: a negotiated
+    # width range and the flag that passes the grant to the command. A v16
+    # record decoded without them would run a ranged action at a fixed width
+    # with its width flag lost on the warm path only.
     # v16: ``BuildAction.subToolIdentityRefs``, a string list after the
     # ``@FILE:`` expansion byte. A v15 record decoded without it would hand
     # the engine no sub-tools, so a warm build would launch a sub-tool
@@ -6050,6 +6055,9 @@ proc writeBuildAction(outp: var seq[byte]; action: BuildAction) =
   outp.writeStringSeq(action.optionalOutputs)
   outp.add(if action.expandsArgFiles: 1'u8 else: 0'u8)
   outp.writeStringSeq(action.subToolIdentityRefs)
+  outp.writeU32Le(action.cpuMinMilli)
+  outp.writeU32Le(action.cpuPreferredMilli)
+  outp.writeString(action.widthFlag)
 
 proc readBuildAction(bytes: openArray[byte]; pos: var int): BuildAction =
   result = BuildAction(
@@ -6138,6 +6146,9 @@ proc readBuildAction(bytes: openArray[byte]; pos: var int): BuildAction =
       "invalid lowered action @FILE: expansion sentinel")
   result.expandsArgFiles = argFilesByte == 1'u8
   result.subToolIdentityRefs = readStringSeq(bytes, pos)
+  result.cpuMinMilli = readU32Le(bytes, pos)
+  result.cpuPreferredMilli = readU32Le(bytes, pos)
+  result.widthFlag = readString(bytes, pos)
 
 proc encodeLoweredGraphCache(record: LoweredGraphCacheRecord): seq[byte] =
   result.writeString(LoweredGraphCacheMagic)

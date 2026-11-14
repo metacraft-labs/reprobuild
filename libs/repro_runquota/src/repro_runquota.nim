@@ -47,6 +47,15 @@ type
       ## ``priorityInteractive`` so that, when capacity frees up, it is granted
       ## ahead of queued build work instead of behind it. It does not preempt
       ## anything already running.
+    cpuMinMilli*: uint32
+    cpuPreferredMilli*: uint32
+      ## A CPU RANGE instead of the single ``cpuMilli`` (negotiated widths):
+      ## RunQuota grants the widest width in ``cpuMinMilli ..
+      ## cpuPreferredMilli`` that is free, and the request waits while not
+      ## even the minimum is. Zero ``cpuPreferredMilli`` (the default) asks
+      ## for exactly ``cpuMilli``; a zero minimum with a preferred width means
+      ## one slot. A daemon too old to grant ranges is asked for the
+      ## preferred width, capped to its budget (``runquota_client``).
 
   ReproCommandSpec* = object
     argv*: seq[string]
@@ -63,6 +72,15 @@ type
       ## action that declares its whole environment
       ## (``BuildAction.isolateHostEnvironment``). Carried through the helper's
       ## argv as ``--isolated-env``.
+    widthFlag*: string
+      ## How the command takes a parallelism width, for a child that does not
+      ## take jobserver tokens: ``--test-threads`` (Rust's libtest, nextest),
+      ## ``-j``, ``--workers`` (Playwright), or any other flag. The GRANTED
+      ## width, in whole slots, is passed with it when the lease is granted
+      ## (``applyGrantedWidth``), and exported as ``RUNQUOTA_RUN_WIDTH``.
+      ## A flag ending in ``=`` or ``:`` takes the width joined to it
+      ## (``--parallelBuild:``); any other takes it as the next argument.
+      ## Empty: the command line is left alone.
 
   ReproRunQuotaExecution* = object
     leaseId*: uint64
@@ -128,6 +146,14 @@ type
 proc effectiveCpu(request: ReproResourceRequest): uint32 =
   if request.cpuMilli == 0'u32: 1000'u32 else: request.cpuMilli
 
+proc widthRange(request: ReproResourceRequest): tuple[min, pref: uint32] =
+  ## The range asked for, or (0, 0) for a single value.
+  if request.cpuPreferredMilli == 0'u32:
+    return (0'u32, 0'u32)
+  let minimum = if request.cpuMinMilli == 0'u32: 1000'u32
+    else: request.cpuMinMilli
+  (minimum, max(minimum, request.cpuPreferredMilli))
+
 proc effectiveMemory(request: ReproResourceRequest): uint64 =
   if request.memoryBytes == 0'u64: 128'u64 * 1024'u64 * 1024'u64
   else: request.memoryBytes
@@ -147,6 +173,10 @@ proc toRunQuotaRequest*(request: ReproResourceRequest): ResourceRequest =
     deadline: noDeadline(),
     priority: (if request.interactive: priorityInteractive else: priorityNormal),
     metadata: metadataNone())
+  let range = request.widthRange()
+  if range.pref > 0'u32:
+    # Not resizable: the width reaches the child once, as a flag.
+    result = result.withWidthRange(milliCpu(range.min), milliCpu(range.pref))
 
 proc diagnosticText(diagnostic: Diagnostic): string =
   if diagnostic.detail.len > 0:
@@ -730,6 +760,199 @@ proc finishOutcome(completion: ProcessCompletion;
     # the same shape of untruth these types exist to prevent.
     cancelled()
 
+const GrantedWidthEnvVar* = "RUNQUOTA_RUN_WIDTH"
+  ## The granted width in whole slots, exported to a command that declares a
+  ## width flag -- the same variable `runquota run` exports, for scripts and
+  ## tools the flag does not reach.
+
+proc grantedSlots*(grantedMilli: uint32): int =
+  ## Whole slots in a grant; a fraction rounds up (it was reserved).
+  max(1, int((uint64(grantedMilli) + 999'u64) div 1000'u64))
+
+const
+  WidthPlaceholderPrefix = "@@RUNQUOTA_WIDTH:"
+  WidthPlaceholderSuffix = "@@"
+
+proc widthPlaceholder(kept: int): string =
+  ## Stands for the granted width until the grant is known. `kept` is a
+  ## value the command line already gave the flag (0: none usable): it is
+  ## kept when it is within the grant, and replaced by the grant otherwise.
+  WidthPlaceholderPrefix & $kept & WidthPlaceholderSuffix
+
+proc widthPlaceholderArgv*(argv: openArray[string]; flag: string):
+    seq[string] =
+  ## `argv` with `flag` carrying a PLACEHOLDER for the granted width, decided
+  ## before the command is wrapped for launch. The wrappers around an action
+  ## (the umask shell, the monitor) re-quote and prefix its argv, so the
+  ## flag's place can only be found on the action's own argv; the grant is
+  ## known only at launch, where `fillWidthPlaceholders` substitutes it into
+  ## whatever the wrappers made of it.
+  ##
+  ## A value the command line already gives the flag is kept if it is a
+  ## whole number from 1 to the grant (the author asked for less), and
+  ## replaced by the grant otherwise (more, 0, or not a number). With no such
+  ## flag it goes before the first `--` (which passes the rest of the line
+  ## on to something else), or at the end. argv[0] is never touched. A flag
+  ## ending in `=` or `:` takes the value joined to it.
+  result = @argv
+  if flag.len == 0 or argv.len == 0:
+    return
+  let joined = flag[^1] in {'=', ':'}
+  proc kept(value: string): int =
+    if value.len == 0 or value.len > 6 or not value.allCharsInSet(Digits):
+      return 0
+    parseInt(value)
+  var i = 1
+  while i < result.len:
+    let arg = result[i]
+    if arg == "--":
+      break
+    if joined:
+      if arg.startsWith(flag):
+        result[i] = flag & widthPlaceholder(kept(arg[flag.len .. ^1]))
+        return
+    else:
+      if arg == flag:
+        if i + 1 < result.len and result[i + 1].len > 0 and
+            result[i + 1][0] != '-':
+          result[i + 1] = widthPlaceholder(kept(result[i + 1]))
+        else:
+          result.insert(widthPlaceholder(0), i + 1)
+        return
+      if arg.startsWith(flag & "="):
+        result[i] = flag & "=" & widthPlaceholder(kept(arg[flag.len + 1 .. ^1]))
+        return
+      if flag.len == 2 and flag[0] == '-' and arg.len > 2 and
+          arg.startsWith(flag) and arg[2 .. ^1].allCharsInSet(Digits):
+        # `-j8`: a short flag with its value attached.
+        result[i] = flag & widthPlaceholder(kept(arg[2 .. ^1]))
+        return
+    inc i
+  if joined:
+    result.insert(flag & widthPlaceholder(0), i)
+  else:
+    result.insert(widthPlaceholder(0), i)
+    result.insert(flag, i)
+
+proc fillWidthPlaceholders*(text: string; slots: int): string =
+  ## Every width placeholder in `text` replaced by the width it stands for
+  ## under a grant of `slots`. Substring replacement, so a placeholder the
+  ## umask wrapper quoted into a shell string is filled as well.
+  result = ""
+  var pos = 0
+  while true:
+    let start = text.find(WidthPlaceholderPrefix, pos)
+    if start < 0:
+      result.add text[pos .. ^1]
+      return
+    let valueStart = start + WidthPlaceholderPrefix.len
+    let stop = text.find(WidthPlaceholderSuffix, valueStart)
+    if stop < 0:
+      result.add text[pos .. ^1]
+      return
+    let value = text[valueStart ..< stop]
+    var width = slots
+    if value.len > 0 and value.len <= 6 and value.allCharsInSet(Digits):
+      let asked = parseInt(value)
+      if asked >= 1 and asked <= slots:
+        width = asked
+    result.add text[pos ..< start]
+    result.add $width
+    pos = stop + WidthPlaceholderSuffix.len
+
+proc withWidthFlag*(argv: openArray[string]; flag: string;
+                    slots: int): seq[string] =
+  ## `argv` with `flag` carrying `slots` (see `widthPlaceholderArgv` for
+  ## where it goes and when a written value is kept).
+  for arg in widthPlaceholderArgv(argv, flag):
+    result.add fillWidthPlaceholders(arg, max(1, slots))
+
+proc applyGrantedWidth*(command: ReproCommandSpec;
+                        grantedMilli: uint32): ReproCommandSpec =
+  ## The command as it is launched under a grant of `grantedMilli`: its
+  ## width flag carries the granted slots and `RUNQUOTA_RUN_WIDTH` names
+  ## them. A command without a width flag is launched as it is.
+  ##
+  ## The command's argv already carries placeholders where the width goes
+  ## (`widthPlaceholderArgv`, applied by the engine before wrapping); here
+  ## they are filled in, wherever the wrappers put them.
+  result = command
+  if command.widthFlag.len == 0:
+    return
+  let slots = grantedSlots(grantedMilli)
+  result.argv = @[]
+  for arg in command.argv:
+    result.argv.add fillWidthPlaceholders(arg, slots)
+  result.env.add(GrantedWidthEnvVar & "=" & $slots)
+
+# ---------------------------------------------------------------------------
+# The advertised frontier
+# ---------------------------------------------------------------------------
+
+type
+  FrontierSizer* = object
+    ## How many candidates a build keeps OFFERED (queued at RunQuota, not yet
+    ## granted). It offers more while grants arrive as fast as it offers --
+    ## RunQuota has room it is not using -- and fewer once its queued
+    ## candidates wait: advertising a long queue only holds places in the
+    ## daemon's order that the build cannot use any sooner. Additive
+    ## increase, multiplicative decrease, between ``floor`` and ``cap``.
+    width*: int
+    floor*: int
+    cap*: int
+    waitThresholdMillis*: int
+    lastShrinkMillis*: int
+
+const
+  DefaultFrontierWaitMillis* = 1000
+    ## A queued candidate that waits longer than this halves the frontier.
+    ## One second is long beside a grant on an idle host (a round trip) and
+    ## short beside a build.
+  FrontierWaitEnv* = "REPRO_RUNQUOTA_FRONTIER_WAIT_MS"
+
+proc frontierWaitMillis*(): int =
+  ## `REPRO_RUNQUOTA_FRONTIER_WAIT_MS`, or the default when it is unset or
+  ## not a positive whole number.
+  let text = getEnv(FrontierWaitEnv).strip()
+  if text.len > 0 and text.len <= 9 and text.allCharsInSet(Digits):
+    let value = parseInt(text)
+    if value > 0:
+      return value
+  DefaultFrontierWaitMillis
+
+proc initFrontierSizer*(cap: int;
+                        waitThresholdMillis = DefaultFrontierWaitMillis):
+    FrontierSizer =
+  ## Starts at ``cap`` (the build's configured parallelism), so a build on an
+  ## idle host offers what it always did. The floor keeps two candidates on
+  ## offer, so one that does not fit cannot hold back one that would.
+  let top = max(1, cap)
+  FrontierSizer(width: top, floor: min(top, 2), cap: top,
+    waitThresholdMillis: max(1, waitThresholdMillis),
+    lastShrinkMillis: low(int) div 2)
+
+proc noteGrantedAtOnce*(sizer: var FrontierSizer; count: int) =
+  ## `count` candidates were granted in the answer to their offer: grants
+  ## arrive as fast as the build offers, so it may offer more.
+  if count > 0:
+    sizer.width = min(sizer.cap, sizer.width + count)
+
+proc noteQueuedGrant*(sizer: var FrontierSizer; waitedMillis: int) =
+  ## A queued candidate was granted after `waitedMillis`. A short wait is a
+  ## grant rate that keeps up: one more on offer.
+  if waitedMillis < sizer.waitThresholdMillis:
+    sizer.width = min(sizer.cap, sizer.width + 1)
+
+proc noteOldestWait*(sizer: var FrontierSizer; oldestWaitMillis,
+                     nowMillis: int) =
+  ## The longest-waiting queued candidate has waited `oldestWaitMillis`.
+  ## Past the threshold the frontier halves, at most once per threshold, so
+  ## one long wait is not counted again at every turn of the loop.
+  if oldestWaitMillis >= sizer.waitThresholdMillis and
+      nowMillis - sizer.lastShrinkMillis >= sizer.waitThresholdMillis:
+    sizer.width = max(sizer.floor, sizer.width div 2)
+    sizer.lastShrinkMillis = nowMillis
+
 proc launchSpec(command: ReproCommandSpec): CommandSpec =
   ## The one place a ``ReproCommandSpec`` becomes RunQuota's ``CommandSpec``.
   ##
@@ -778,6 +1001,9 @@ proc helperCliArgs*(request: ReproResourceRequest;
     "--pool", request.namedPool,
     "--pool-units", $request.namedPoolUnits,
     "--pool-capacity", $request.namedPoolCapacity,
+    "--cpu-min", $request.cpuMinMilli,
+    "--cpu-pref", $request.cpuPreferredMilli,
+    "--width-flag", command.widthFlag,
     "--cwd", command.cwd,
     "--stdout-limit", $command.stdoutLimit,
     "--stderr-limit", $command.stderrLimit
@@ -1542,7 +1768,8 @@ proc runWithRunQuota*(request: ReproResourceRequest;
     result.leaseId = lease.id.value
     try:
       lease.markStarting()
-      var child = launchProcess(launchSpec(command))
+      var child = launchProcess(launchSpec(
+        command.applyGrantedWidth(lease.resources.cpu.value)))
       lease.markRunning(
         childProcessId = child.info.processId,
         processGroupId = child.info.processGroupId,
@@ -1775,7 +2002,8 @@ proc startGrantedWithRunQuota(session: ReproRunQuotaSession;
   var launched = false
   try:
     lease.markStarting()
-    child = launchProcess(launchSpec(command))
+    child = launchProcess(launchSpec(
+      command.applyGrantedWidth(lease.resources.cpu.value)))
     launched = true
     lease.markRunning(
       childProcessId = child.info.processId,
@@ -2550,6 +2778,18 @@ proc runRunQuotaHelperCli*(args: openArray[string]): int =
     of "--pool-capacity":
       if i + 1 >= args.len: return 2
       request.namedPoolCapacity = uint32(parseUInt(args[i + 1]))
+      i += 2
+    of "--cpu-min":
+      if i + 1 >= args.len: return 2
+      request.cpuMinMilli = uint32(parseUInt(args[i + 1]))
+      i += 2
+    of "--cpu-pref":
+      if i + 1 >= args.len: return 2
+      request.cpuPreferredMilli = uint32(parseUInt(args[i + 1]))
+      i += 2
+    of "--width-flag":
+      if i + 1 >= args.len: return 2
+      command.widthFlag = args[i + 1]
       i += 2
     of "--cwd":
       if i + 1 >= args.len: return 2

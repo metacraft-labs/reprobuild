@@ -2292,6 +2292,7 @@ tests/integration/t_runquota_auto_spawned_daemon_follows_host_config.nim	nim	4
 tests/integration/t_runquota_bypass_is_reported_in_build_header_and_report.nim	nim	6
 tests/integration/t_runquota_daemon_from_another_build_makes_way.nim	nim	5
 tests/integration/t_runquota_long_temp_rendezvous.nim	nim	4
+tests/integration/t_runquota_test_threads_follow_grant.nim	nim	1
 tests/integration/t_s7_repro_build_restores_a_deleted_output.nim	nim	1
 tests/integration/t_sc_capstone_reprobuild_runquota_and_library_edge_both_modes.nim	nim	1
 tests/integration/t_sc_develop_mode_consumes_sibling_exe_and_lib_from_source.nim	nim	1
@@ -2754,6 +2755,7 @@ tests/unit/t_runquota_endpoint_paths.nim	nim	6
 tests/unit/t_runquota_grant_wait_unresponsive.nim	nim	11
 tests/unit/t_runquota_grant_wait_wedged_connected.nim	nim	2
 tests/unit/t_runquota_queue_wait_is_loud_and_bounded.nim	nim	15
+tests/unit/t_runquota_width_flag_and_frontier.nim	nim	13
 tests/unit/t_rx_runquotad_forwards_custom_pools.nim	nim	6
 tests/unit/t_same_project_fragment_selectors.nim	nim	12
 tests/unit/t_script_launcher.nim	nim	3

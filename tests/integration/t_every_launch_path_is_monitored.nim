@@ -934,7 +934,17 @@ proc capabilitySurfaces(): seq[CapabilitySurface] =
                # per-user daemon keeps: one `connectDefault` client, kept
                # open. It starts nothing; the start itself is
                # `repro_cli_support/user_runquota_daemon`'s.
-               "holdRunQuotaDaemon"]),
+               "holdRunQuotaDaemon",
+               # Negotiated widths. The width flag's placeholder is written
+               # into an argv, filled into the launch command, and the
+               # granted slots are counted; the advertised frontier is a
+               # small state machine plus one env-var read. All are values
+               # in, values out: the launch that follows is still one of
+               # the spawning entries above. None starts a process.
+               "applyGrantedWidth", "fillWidthPlaceholders",
+               "widthPlaceholderArgv", "withWidthFlag", "grantedSlots",
+               "frontierWaitMillis", "initFrontierSizer",
+               "noteGrantedAtOnce", "noteOldestWait", "noteQueuedGrant"]),
     # THE MODULE THE ENGINE NOW HOSTS FROM. Before HM-4 this surface was six
     # names and the engine called none of them; the decomposed host API
     # (IoMon-Decomposed-Host-API DH-2) added seven more, and THIS AUDIT IS
