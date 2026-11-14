@@ -163,6 +163,11 @@ proc revoke*(s: GateSink; host: string) =
   ## acknowledges none (re-read at every frame, G17).
   writeFile(s.revokedPath, host & "\n")
 
+proc reinstate*(s: GateSink) =
+  ## Undo ``revoke``: with no revocation file the sink acknowledges again
+  ## (re-read at every frame, G17), as after an operator lifts it.
+  if fileExists(s.revokedPath): removeFile(s.revokedPath)
+
 proc entries*(s: GateSink): seq[EvidenceEntry] =
   ## Read locally, as an investigator on the sink host would (EVID-3).
   try: readEvidenceStore(s.storeDir) except CatchableError: @[]
