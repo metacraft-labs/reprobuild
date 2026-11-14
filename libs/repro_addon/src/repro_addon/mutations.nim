@@ -590,6 +590,12 @@
 ## ``template-live-by-name``                the live check reads a template
 ##                                           by its own name, which systemd
 ##                                           refuses (decision 135)
+## ``live-check-call-site-reverted``       the add-on switch's call site
+##                                           decides step 6's reload and
+##                                           judgement from a unit-file
+##                                           change alone, not through
+##                                           ``liveCheckAtStep6`` (red on
+##                                           the adopt gate's case 2e)
 ## ``start-holds-after-driver-writes``     the add-on switch writes its
 ##                                           start holds at step 6, after
 ##                                           the drivers' reloads loaded
@@ -1435,6 +1441,22 @@ const
                           # a replayed revert leaves the hold directory
                           # its interrupted attempt created unclaimed.
                           "replayed-hold-dir-unclaimed",
+                          # a revert removes the start holds and reloads
+                          # before its persistent hold is written, and
+                          # reloads whether the write failed or not.
+                          "revert-hold-written-after-release",
+                          # a remade directory born any time after its
+                          # run's start is accepted: no upper bound at
+                          # the main process's start.
+                          "recreated-no-upper-bound",
+                          # a listener's covering places are those of
+                          # the activated service alone, not of every
+                          # unit sharing its stem.
+                          "listener-writable-own-unit-only",
+                          # a listener's covering places are compared as
+                          # spelled (/var/run is not /run, no link is
+                          # resolved).
+                          "listener-writable-by-spelling",
                           # A13: a state backup or restore runs while a
                           # unit of the set may run.
                           "state-units-not-checked",
@@ -1538,6 +1560,9 @@ const
                           "template-live-by-name",
                           # §13 decision 136.
                           "start-holds-after-driver-writes",
+                          # The every-switch check's call site (owner
+                          # decision on the round-8 wiring issue).
+                          "live-check-call-site-reverted",
                           "reissue-skips-targets",
                           "reissue-skips-sockets",
                           "reissue-skips-unit-state",

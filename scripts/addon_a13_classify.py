@@ -251,9 +251,14 @@ TARGET.update({
 EXPECT.update({
     "mutliveset": ("e2e_addon_adopt_hand_configured_service", "red",
                    "add-on build narrowed-live-set"),
+    # The every-switch check's call site reverted to the round-6 test (the
+    # owner decision on the round-8 wiring issue): red on the same case.
+    "mutcallsite": ("e2e_addon_adopt_hand_configured_service", "red",
+                    "add-on build live-check-call-site-reverted"),
 })
 TARGET.update({
     "mutliveset": "a switch that changes only a service's credential judges it",
+    "mutcallsite": "a switch that changes only a service's credential judges it",
 })
 
 ROUND4_PROBES = ["account", "timer", "pathfloored", "path", "host"]
@@ -312,7 +317,7 @@ def on_target_rec(kind, rec):
         # Started, and ran as root: its ExecStartPre's uid marker reads 0.
         lc = rec.get("liveCrossCheck", {})
         return on_target(kind, steps) and lc.get("ranAsRoot") is True
-    if kind == "mutliveset":
+    if kind in ("mutliveset", "mutcallsite"):
         # The credentials-only switch changed the probe's materialised
         # credential and wrote none of its unit files (``credentialsOnly``),
         # restarted it (its invocation changed), and the restarted probe ran
@@ -505,7 +510,7 @@ GREEN = {
                      "it fails"),
     "floorupgrade": (24, "and its service serves page-prefloor"),
     # Generation C (§13 decision 136) adds eight steps to the A9 gate.
-    "heldwin": (16, "and the service runs after C"),
+    "heldwin": (17, "and the service runs after C"),
     "hardreset": (181, "uninstall"),
     "parity": (59, "the add-on guest's re-assert materialises the token and "
                    "starts the failed vaultwarden again"),

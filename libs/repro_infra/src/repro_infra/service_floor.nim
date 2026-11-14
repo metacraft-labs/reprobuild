@@ -100,6 +100,7 @@
 ## the engines of those versions stored, byte for byte.
 
 import std/[algorithm, sequtils, strutils, tables]
+from std/posix import realpath
 
 const FloorMutation {.strdefine: "reproAddonMutation".} = ""
   ## The falsifying builds of the A9 gates (``repro_addon/mutations``):
@@ -1500,6 +1501,35 @@ const
     "SocketProtocol", "FlushPending", "Writable"]
     ## Round 5's list, kept for the falsifying build ``socket-options-by-list``.
 
+proc canonicalPlace*(path: string; resolveLinks = false): string =
+  ## ``path`` as the kernel resolves it, for comparing a listener with the
+  ## places a service can write (§13 decision 139): normalised, with
+  ## ``/var/run`` read as ``/run`` (a link to it on every base the add-on
+  ## supports: Filesystem Hierarchy Standard 3.0 §5.13, and systemd's
+  ## file-hierarchy(7)), and, with ``resolveLinks`` (on the host, the
+  ## effective half), every link on the longest existing prefix resolved
+  ## (realpath(3)), the rest appended as written.
+  result = normalisedPath(path)
+  when FloorMutation == "listener-writable-by-spelling":
+    return
+  if result == "/var/run" or result.startsWith("/var/run/"):
+    result = "/run" & result["/var/run".len .. ^1]
+  if resolveLinks and result.startsWith("/"):
+    var head = result
+    var tail = ""
+    while head.len > 1:
+      var buf: array[4097, char]
+      let r = realpath(head.cstring, cast[cstring](addr buf[0]))
+      if r != nil:
+        let resolved = $cast[cstring](addr buf[0])
+        result = normalisedPath(resolved & tail)
+        if result == "/var/run" or result.startsWith("/var/run/"):
+          result = "/run" & result["/var/run".len .. ^1]
+        return
+      let slash = head.rfind('/')
+      tail = head[slash .. ^1] & tail
+      head = if slash <= 0: "/" else: head[0 ..< slash]
+
 proc listenerRefusal*(unitName, value: string; service = "";
                       serviceWritable: openArray[string] = []): string =
   ## Why a ``ListenStream=``/``ListenDatagram=``/``ListenSequentialPacket=``
@@ -1555,10 +1585,13 @@ proc listenerRefusal*(unitName, value: string; service = "";
       when FloorMutation != "listener-below-writable-allowed":
         if np["/run/".len .. ^1].split('/').len >= 3:
           for w in serviceWritable:
-            let wp = normalisedPath(w)
+            # Compared as the kernel resolves them, never as spelled
+            # (§13 decision 139: `/var/run/a` covers `/run/a/sub/x`).
+            let wp = canonicalPlace(w)
             if np.startsWith(wp & "/") or wp == "/":
-              return np & " lies below " & wp & ", which the service can " &
-                "write: it could turn a directory on the path into a link " &
+              return np & " lies below " & wp & ", which the service, or a " &
+                "unit sharing its stem, can write: it could turn a directory " &
+                "on the path into a link " &
                 "the manager follows as root (§10.1 round 12, \"A " &
                 "listener below a place its service can write\")"
     return ""

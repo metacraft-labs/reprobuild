@@ -1202,17 +1202,28 @@ proc checkFloorActivators*(p: SystemProfile) =
         r.suName.endsWith(".path"):
       if isFloored(activatedService(r.suName, r.suContent)):
         activators.incl(r.suName)
-  # Spec §10.1 round 12, "A listener below a place its service can write":
-  # the places the activated service can write, from the
-  # profile's own unit for it (a template's, for an instance or Accept=yes).
+  # Spec §10.1 round 12, "A listener below a place its service can write",
+  # as §13 decision 139 extends it: the places any unit sharing the
+  # activated service's stem can write -- the service, a template of that
+  # stem and its instances, and every drop-in the profile writes onto one
+  # of them -- since the listener rule lets each of them name /run/<stem>.
   proc writableOf(service: string): seq[string] =
     let at = service.find('@')
     let dot = service.rfind('.')
     let tpl = if at > 0 and dot > at: service[0 .. at] & service[dot .. ^1] else: service
+    let stem = unitStem(service)
     for r in p.resources:
-      if r.kind == srkSystemdSystemUnit and r.suCollision != "dropIn" and
-          r.suName in [service, tpl]:
-        result.add(floorWritablePlaces(serviceDirectives(r.suContent)))
+      if r.kind == srkSystemdSystemUnit:
+        let mine =
+          when InfraAddonMutation == "listener-writable-own-unit-only":
+            r.suCollision != "dropIn" and r.suName in [service, tpl]
+          else: unitStem(r.suName) == stem
+        if mine:
+          result.add(floorWritablePlaces(serviceDirectives(r.suContent)))
+      elif r.kind == srkSystemdSystemDropIn:
+        when InfraAddonMutation != "listener-writable-own-unit-only":
+          if unitStem(r.diUnit) == stem:
+            result.add(floorWritablePlaces(serviceDirectives(r.diContent)))
   for r in p.resources:
     if r.kind == srkSystemdSystemUnit and r.suCollision != "dropIn" and
         r.suName in activators:

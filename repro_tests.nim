@@ -553,6 +553,17 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "",
     singleReason: "module-level statement runs at every start-up: let plain = unitStanza(\"a.service\", svc)"),
   TestSpec(
+    source: "libs/repro_addon/tests/t_addon_floor_round13.nim",
+    binary: "build/test-bin/t_addon_floor_round13",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "",
+    singleReason: "suite-scope statement runs at every start-up: let service = unitStanza(\"a9s.service\", \"User=a9e\\nExecStart..."),
+  TestSpec(
     source: "libs/repro_addon/tests/t_addon_floor_round3.nim",
     binary: "build/test-bin/t_addon_floor_round3",
     defines: @[],
