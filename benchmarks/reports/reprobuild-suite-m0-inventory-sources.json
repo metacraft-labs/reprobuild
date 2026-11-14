@@ -8177,7 +8177,7 @@
           "executedVariables": [
             "cmd"
           ],
-          "line": 74,
+          "line": 72,
           "path": "tests/unit/t_cs_m6_cli_model_type_checks_in_reprobuild_macros.nim",
           "patterns": [
             "nim-compile-verb"
@@ -41972,7 +41972,7 @@
       "requiresReproBinary": true,
       "source": "tests/integration/t_execution_lease_confinement.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 7,
+      "staticCaseCount": 8,
       "staticallyDetectedRuntimeCompilerFlow": true,
       "targetOs": "soAny"
     },
