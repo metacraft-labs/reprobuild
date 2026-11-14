@@ -17,9 +17,21 @@
 #                     its entries that can change what the compiler
 #                     resolves (Nim sources, .nimble/.nims, nim.cfg,
 #                     <project>.nim.cfg, nimble.paths, subdirectories;
-#                     never .nimcache, build, .git, result), sorted
+#                     never .nimcache, build, .git, result, .direnv,
+#                     .repro, nimcache, htmldocs, test-logs), sorted
 #                     bytewise and joined by newlines: a changed listing
-#                     refuses the binary (§13 decisions 80, 111 and 114)
+#                     refuses the binary (§13 decisions 80, 111, 114 and
+#                     115). Besides the directories traced, every
+#                     directory on the compiler's search path is listed
+#                     (an absent one as the digest of no names), and in
+#                     each of them the directories an import found
+#                     elsewhere would be looked up in (decision 115 (A))
+#   configs <sha256> <dir>
+#                     the entry's directory and each of its parents up to
+#                     /, with the sha256 of the names of its nim.cfg,
+#                     config.nims and *.nims files: Nim reads the first
+#                     two in every parent directory of the project
+#                     (decision 115 (A)), so a new one refuses the binary
 #   listing-filter <name>
 #                     which entries the digests count ("resolution"; a
 #                     falsifier run writes another), so fresh_binary
@@ -31,9 +43,10 @@
 #
 # Not recorded (§13 decisions 74 and 80): existence checks -- stat,
 # access, `test -f`, fileExists. The Nim compiler's own module search makes
-# many of them (one per search path per import), so recording each would
-# refuse the binary whenever any search directory changed; a module the
-# search found is recorded as a module. A staticExec command whose output
+# many of them (one per search path per import); a module the search found
+# is recorded as a module, and the directories the search probes and the
+# config files it probes above the project are recorded as listings and
+# configs lines (decision 115 (A)). A staticExec command whose output
 # depends only on whether a file exists is the residual.
 #
 # Paths under /nix/store, /proc, /sys, /dev, /etc and /run, and the build
@@ -91,9 +104,13 @@
 # file, say -- is refused as unparseable rather than read),
 # listing-digests-every-entry (round 8's digest of every name),
 # listing-skips-subdirectories, listing-skips-project-cfg and
-# listing-skips-nim-cfg (round 10's listing rules, one each), no-parent-listings
+# listing-skips-nim-cfg (decision 114's rules, one each), no-parent-listings
 # (the listings of the entry's parent directories, where a parent nim.cfg
-# sits, not recorded). A file
+# sits, not recorded), no-parent-configs (no `configs` lines: a config
+# file above the package root not recorded), no-search-listings (search
+# directories the compiler never listed not recorded; both decision 115
+# (A)), listing-counts-tool-dirs (decision 114's fixed list without 115
+# (B)'s tool directories). A file
 # <build>/nimcache/<name>/write-helper-deps.mutation selects one too, for
 # a run inside a graph edge, whose environment the engine sets; it is
 # read only when present.
@@ -252,16 +269,26 @@ listing_filter = {
     "listing-skips-subdirectories": "resolution-no-subdirs",
     "listing-skips-project-cfg": "resolution-no-project-cfg",
     "listing-skips-nim-cfg": "resolution-no-nim-cfg",
+    "listing-counts-tool-dirs": "resolution-counts-tool-dirs",
 }.get(mutation, "resolution")
 # Entries that never change what the compiler resolves, whatever they are
-# (§13 decision 114, round 10's listing rules: reprobuild-pm issue
-# 2026-11-13-helper-list-listing-filter-accepts-a-new-package-directory-or-
-# nim-cfg-that-changes-the-build): build output, VCS metadata, a nix result link.
-never_counted = {b".nimcache", b"build", b".git", b"result"}
+# (§13 decision 114, extended by decision 115 (B)): build output, VCS
+# metadata, a nix result link, and the tool directories of a checkout --
+# direnv's cache, repro's state, a nimcache, generated docs, test logs.
+# None of them is on a search path or holds a config the compiler reads;
+# what is left is an import whose first component is one of these names
+# (`import nimcache/x`), which no build here makes. `tmp` and `docs` are
+# not on the list: a new one refuses (the cost decision 115 accepts).
+never_counted = {b".nimcache", b"build", b".git", b"result",
+                 b".direnv", b".repro", b"nimcache", b"htmldocs",
+                 b"test-logs"}
+if listing_filter == "resolution-counts-tool-dirs":
+    # FALSIFIER: decision 114's list alone, before 115 (B).
+    never_counted = {b".nimcache", b"build", b".git", b"result"}
 
 def relevant(d, name):
-    # §13 decisions 111 and 114 (round 10's listing rules): an entry counts in a
-    # listing when it can
+    # §13 decisions 111, 114 and 115: an entry counts in a listing when
+    # it can
     # change what the compiler resolves -- a Nim source, a .nimble or .nims
     # file, a Nim configuration file (nim.cfg, <project>.nim.cfg), a
     # nimble.paths, or a subdirectory (a package directory that shadows an
@@ -284,7 +311,18 @@ def relevant(d, name):
     return False
 
 def listing_digest(d):
+    # A directory that does not exist lists no names: a search directory
+    # created later (decision 115 (A)) changes the digest.
+    if not os.path.isdir(d):
+        return hashlib.sha256(b"").hexdigest()
     names = sorted(n for n in os.listdir(os.fsencode(d)) if relevant(d, n))
+    return hashlib.sha256(b"\n".join(names)).hexdigest()
+
+def configs_digest(d):
+    # The configuration files Nim reads in a directory above the project
+    # (`nim.cfg`, `config.nims`), and any other `.nims` (decision 115 (A)).
+    names = sorted(n for n in os.listdir(os.fsencode(d))
+                   if n in (b"nim.cfg", b"config.nims") or n.endswith(b".nims"))
     return hashlib.sha256(b"\n".join(names)).hexdigest()
 
 def decode(text):
@@ -492,6 +530,55 @@ else:
                  "not what they were traced as (a name that does not decode "
                  "to a file, or a file gone since); no list written:\n  " +
                  "\n  ".join(unresolved))
+# Directories the compiler resolves imports in but may never list
+# (§13 decision 115 (A)). Nim resolves `import a/b/m` by testing
+# <dir>/a/b/m.nim in each search directory, an existence probe and not a
+# listing, so a new file in a search directory the build found nothing in
+# shadows a module found later. Every search directory outside the
+# immutable prefixes is listed, and in each of them the directories an
+# import found elsewhere would be looked up in (a/ and a/b/ above) where
+# they exist; an absent one is covered by its parent's listing.
+def recordable(d):
+    return (not any(d.startswith(e) for e in excluded)
+            and "/.git/" not in d + "/")
+
+def add_listing(d):
+    if d not in [x for x, _ in listings]:
+        listings.append((d, listing_digest(d)))
+
+if mutation != "no-search-listings":
+    roots = [d for d in search if recordable(d + "/")]
+    for d in roots:
+        add_listing(d)
+    for m in modules:
+        for s in search:
+            if not m.startswith(s + "/"):
+                continue
+            parts = os.path.dirname(os.path.relpath(m, s)).split(os.sep)
+            parts = [x for x in parts if x not in ("", ".")]
+            for d in roots:
+                for k in range(1, len(parts) + 1):
+                    sub = os.path.join(d, *parts[:k])
+                    if os.path.isdir(sub):
+                        add_listing(sub)
+# The configuration files above the project (§13 decision 115 (A)): Nim
+# reads nim.cfg and config.nims in the project's directory and in every
+# parent of it up to /, unless --skipParentCfg; a config file that does
+# not exist is an existence probe, never traced. Each of those directories
+# is recorded with the names of its config files.
+configs = []
+if mutation != "no-parent-configs":
+    d = os.path.dirname(entry)
+    while True:
+        try:
+            configs.append((d, configs_digest(d)))
+        except OSError as e:
+            sys.exit("write_helper_deps: cannot list %s for its Nim "
+                     "configuration files (%s); no list written" % (d, e))
+        parent = os.path.dirname(d)
+        if parent == d:
+            break
+        d = parent
 h = hashlib.sha256()
 with open(binary, "rb") as fh:
     for chunk in iter(lambda: fh.read(1 << 20), b""):
@@ -535,6 +622,8 @@ for p in traced:
     lines.append(kind + " " + enc(p))
 for d, digest in listings:
     lines.append("listing " + digest + " " + enc(d))
+for d, digest in configs:
+    lines.append("configs " + digest + " " + enc(d))
 part = published + ".part"
 with open(part, "w") as fh:
     fh.write("\n".join(lines) + "\n")

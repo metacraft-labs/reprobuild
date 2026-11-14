@@ -854,6 +854,30 @@ proc removeHostRoot*(r: var UninstallResult; root: string;
   except OSError as ex:
     r.errors.add(root & ": " & ex.msg)
 
+proc removeStateEvidence*(r: var UninstallResult; entries: seq[string];
+                          remover: proc (d: string) = removeDirTree): bool =
+  ## Removes each store-evidence entry under the state (A11 code review
+  ## round 11), before the keys and the state, and reports it removed only
+  ## once it is gone. True when any entry is still there: the uninstall is
+  ## then incomplete and must keep the state, with the attestation key that
+  ## signs the discard's completion (§13 decision 81, §6.4 step 5).
+  for e in entries:
+    try:
+      remover(e)
+    except OSError as ex:
+      when not mutated("evidence-reported-removed-unchecked"):
+        r.errors.add(e & ": " & ex.msg)
+        result = true
+        continue
+    when mutated("evidence-reported-removed-unchecked"):
+      r.removed.add(e & " (store evidence)")   # FALSIFIER: unchecked
+    else:
+      if dirExists(e) or fileExists(e) or symlinkExists(e):
+        r.errors.add(e & ": store evidence still on disk after its removal")
+        result = true
+      else:
+        r.removed.add(e & " (store evidence)")
+
 proc runAddonUninstall*(opts: UninstallOptions): UninstallResult =
   let stateDir = if opts.stateDir.len > 0: opts.stateDir else: DefaultStateDir
   # The host-wide apply lock for the whole uninstall: it removes the store,
@@ -1054,6 +1078,13 @@ proc runAddonUninstall*(opts: UninstallOptions): UninstallResult =
   classifyLeftAside(result, evidenceKept, asideRoot(custodySite(stateDir)),
                     opts.keepStore)
   if keepStateAfterStore(result, l, stateDir, storeFailed): return
+  # The store evidence under the state goes next, still before the keys
+  # (round 11): an entry that cannot be removed (an immutable file) makes
+  # the uninstall incomplete like a failed store removal, and the state
+  # with the attestation key must still be there for the second run.
+  if removeStateEvidence(result, evidenceEntries(custodySite(stateDir))):
+    discard keepStateWhenIncomplete(result, l, stateDir)
+    return
   for k in byClass[lcKey]:
     if not k.isPreBootstrapInput:
       removeOwned(k, result)
@@ -1075,7 +1106,9 @@ proc runAddonUninstall*(opts: UninstallOptions): UninstallResult =
   # The store evidence directory (§13 decision 47) goes with the state
   # (`/var/lib/repro`), whatever --keep-store says (that keeps `/repro`).
   # Its entries were named, and the uninstall refused, before anything was
-  # removed unless the operator passed --discard-store-evidence (above).
+  # removed unless the operator passed --discard-store-evidence (above);
+  # they were removed, each checked gone, above. One that appeared since
+  # is reported with the root, once the root is gone.
   let stateEvidence = evidenceEntries(custodySite(stateDir))
   for root in ["/etc/repro", "/var/lib/repro", "/run/repro"]:
     removeHostRoot(result, root,

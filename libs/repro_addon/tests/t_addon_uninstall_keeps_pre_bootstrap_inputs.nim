@@ -229,3 +229,55 @@ suite "the decision after the store's removal, and the second uninstall":
     var good: UninstallResult
     removeHostRoot(good, dir, @[dir / "ev"])
     check dir in good.removed and (dir / "ev" & " (store evidence)") in good.removed
+
+# ---------------------------------------------------------------------------
+# A11 code review round 11: the store-evidence entries under the state are
+# removed before the keys and the state, each reported removed only once it
+# is gone, and an entry that cannot be removed keeps the state with the
+# attestation key (spec §6.4 step 5, *Order*; §13 decision 81, amended
+# 2026-11-14). Falsifier ``evidence-reported-removed-unchecked`` (an entry
+# reported removed though its removal failed, and the uninstall going on to
+# the keys) turns this suite red.
+#
+# The failing removal is a remover that raises ``OSError``, as ``removeDir``
+# does on an immutable file; the VM gate ``e2e_addon_store_custody`` makes
+# the same failure with ``chattr +i`` on a real host.
+# ---------------------------------------------------------------------------
+
+suite "a failed store-evidence removal keeps the state":
+  test "an entry whose removal fails is not reported removed, and stops the uninstall":
+    let s = stateScene("evidence")
+    let e1 = s.state / "ev1"
+    let e2 = s.state / "ev2"
+    createDir(e1)
+    createDir(e2)
+    var r: UninstallResult
+    let failed = removeStateEvidence(r, @[e1, e2],
+      proc (d: string) =
+        if d == e1: raise newException(OSError, "Operation not permitted")
+        removeDir(d))
+    check failed
+    check (e1 & " (store evidence)") notin r.removed
+    check (e2 & " (store evidence)") in r.removed
+    check r.errors.len == 1 and "Operation not permitted" in r.errors[0]
+    check keepStateWhenIncomplete(r, s.l, s.state)
+    check fileExists(s.state / "agent/attestation.key")
+    check fileExists(ledgerCopyPath(s.state))
+
+  test "an entry still on disk after a removal that did not raise is a failure":
+    let s = stateScene("evidence-left")
+    let e = s.state / "ev"
+    createDir(e)
+    var r: UninstallResult
+    check removeStateEvidence(r, @[e], proc (d: string) = discard)
+    check (e & " (store evidence)") notin r.removed
+    check "still on disk" in r.errors[0]
+
+  test "entries that are removed are reported, and do not stop it":
+    let s = stateScene("evidence-ok")
+    let e = s.state / "ev"
+    createDir(e)
+    var r: UninstallResult
+    check not removeStateEvidence(r, @[e])
+    check not dirExists(e)
+    check (e & " (store evidence)") in r.removed and r.errors.len == 0

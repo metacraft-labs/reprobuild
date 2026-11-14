@@ -77,12 +77,26 @@
 ##     ``.nim`` entry in it is refused, and one in the decoy directory of
 ##     the trimmed name beside it is not.
 ##
-## 31-34. (round 10's listing rules, §13 decision 114) In a tree
+## 31-34. (§13 decision 114) In a tree
 ##     whose app imports ``pkgx/util`` through ``--path:vendor``: a
 ##     package directory ``apps/foo/pkgx`` that shadows the import,
 ##     ``apps/foo/foo.nim.cfg``, ``apps/foo/nim.cfg`` and a parent
 ##     ``apps/nim.cfg`` (each adding a define) are each refused, and
 ##     accepted again once removed.
+## 35-36. (§13 decision 115 (A)) A ``nim.cfg``, and a ``config.nims``, in
+##     the workspace root (above the package root, never listed) are
+##     refused, and accepted again once removed.
+## 37. (decision 115 (A)) With ``--path:vendor --path:vendor2`` (vendor2
+##     searched first), a ``vendor2/pkgx/util.nim`` that shadows the import
+##     is refused: when vendor2 was empty, when ``vendor2/pkgx`` already
+##     held another module, and when vendor2 did not exist. A rebuild
+##     shows the shadow is real.
+## 38. (decision 115 (B)) Each of the fixed list's directories (.direnv,
+##     .repro, nimcache, htmldocs, test-logs, and decision 114's
+##     .nimcache, build, .git, result where absent) created in the listed
+##     tree root, with a ``.nim`` inside, is not a change.
+## 39. (decision 115) A ``tmp`` or ``docs`` directory there is refused:
+##     the cost the owner accepted.
 ##
 ## Falsifying builds: ``stale-helper-accepted`` (cases 2-5 and 8-10 red),
 ## ``fresh-skips-included`` (case 4), ``fresh-skips-outside-tree`` (case
@@ -107,7 +121,12 @@
 ## (case 32), ``listing-skips-nim-cfg`` (cases 33 and 34) and
 ## ``no-parent-listings`` (case 34, the parent ``apps/nim.cfg``; it also
 ## turns case 25's tree-root ``.nim`` red, and case 24, which checks that
-## the tree root was listed).
+## the tree root was listed). Cases 33 and 34's files are refused by their
+## ``configs`` lines too (decision 115 (A)); the cases check the listing's
+## own message, which comes first, so each falsifier still turns them
+## red. ``no-parent-configs``
+## (cases 35 and 36), ``no-search-listings`` (case 37) and
+## ``listing-counts-tool-dirs`` (case 38).
 ##
 ## Cases 22, 23 and 28 run the real strace behind a wrapper script named by
 ## ``REPRO_STRACE``. The wrapper is justified: it is how the writer's
@@ -560,15 +579,19 @@ suite "a helper binary is used only when built from the tree under test":
     writeFile(spaceDirDecoy / "two.nim", "discard\n")
     check refusal() == ""
 
-  # ---- round 10's listing rules (reprobuild-pm issue 2026-11-13-helper-
-  # list-listing-filter-accepts-a-new-package-directory-or-nim-cfg-that-
-  # changes-the-build; §13 decision 114): what else changes what the
+  # ---- §13 decision 114 (the owner's decision on reprobuild-pm issue
+  # 2026-11-13-helper-list-listing-filter-accepts-a-new-package-directory-
+  # or-nim-cfg-that-changes-the-build): what else changes what the
   # compiler resolves. Its own tree: an app that imports ``pkgx/util``
   # through ``--path:vendor`` and reads a define.
   let rt = base / "tree-resolve"
   let rApp = rt / "apps" / "foo" / "foo.nim"
   let rBin = rt / "build" / "bin" / "rfoo"
-  proc buildResolve() =
+  proc buildResolve(paths = @["vendor"]) =
+    ## ``paths``: the ``--path`` directories under ``rt``, in order (Nim
+    ## searches a later one first).
+    var flags: seq[string]
+    for d in paths: flags.add("--path:" & rt / d)
     createDir(rt / "vendor" / "pkgx")
     createDir(parentDir(rApp))
     writeFile(rt / "vendor" / "pkgx" / "util.nim", "proc which*(): string = \"vendor\"\n")
@@ -576,12 +599,12 @@ suite "a helper binary is used only when built from the tree under test":
     for p in [rApp, rt / "vendor" / "pkgx" / "util.nim"]:
       setLastModificationTime(p, getTime() - initDuration(seconds = 60))
     let (o1, c1) = execCmdEx(quoteShellCommand(@["nim", "c", "--hints:off",
-      "--warnings:off", "--path:" & rt / "vendor",
+      "--warnings:off"] & flags & @[
       "--nimcache:" & rt / "build" / "nimcache" / "rfoo", "--out:" & rBin, rApp]))
     doAssert c1 == 0, o1
     let (o2, c2) = execCmdEx(quoteShellCommand(@["bash",
-      RepoRoot / "scripts" / "write_helper_deps.sh", "rfoo", rApp,
-      "--path:" & rt / "vendor"]), workingDir = rt)
+      RepoRoot / "scripts" / "write_helper_deps.sh", "rfoo", rApp] & flags),
+      workingDir = rt)
     doAssert c2 == 0, o2
   proc rRefusal(): string =
     try:
@@ -607,6 +630,105 @@ suite "a helper binary is used only when built from the tree under test":
       removeFile(rt / rel)
       if n == 31: removeDir(rt / "apps" / "foo" / "pkgx")
       check rRefusal() == ""
+
+  # ---- §13 decision 115 (A): the directories the compiler resolves in
+  # without listing them. ``base`` is the writer's workspace root for
+  # ``rt`` (the parent of the directory it runs in), above the package
+  # root, where Nim reads nim.cfg and config.nims but lists nothing.
+  for (n, cfg, body) in [(35, "nim.cfg", "-d:probeFlag\n"),
+                         (36, "config.nims", "switch(\"define\", \"probeFlag\")\n")]:
+    test $n & ": a " & cfg & " in the workspace root, above the package root, is refused":
+      buildResolve()
+      check rRefusal() == ""
+      check helperConfigs(rt, "rfoo").anyIt(it.dir == base)
+      check helperConfigs(rt, "rfoo").anyIt(it.dir == "/")
+      writeFile(base / cfg, body)
+      let why = rRefusal()
+      checkpoint why
+      check ("built when " & base & " held other Nim configuration files") in why
+      removeFile(base / cfg)
+      check rRefusal() == ""
+
+  test "37: a shadowing package in a search directory the compiler never listed is refused":
+    # ``--path:vendor2`` comes later, so Nim searches it first: a
+    # ``vendor2/pkgx/util.nim`` shadows ``vendor/pkgx/util.nim``. The
+    # compiler only probes vendor2 for the file, never lists it.
+    let shadow = rt / "vendor2" / "pkgx" / "util.nim"
+    let body = "proc which*(): string = \"vendor2 shadow\"\n"
+    # vendor2 empty at build time: the new package directory is refused.
+    createDir(rt / "vendor2")
+    buildResolve(@["vendor", "vendor2"])
+    check rRefusal() == ""
+    check helperListings(rt, "rfoo").anyIt(it.dir == rt / "vendor2")
+    createDir(parentDir(shadow))
+    writeFile(shadow, body)
+    var why = rRefusal()
+    checkpoint why
+    check ("listing of " & rt / "vendor2" & " that has changed") in why
+    # ...and it does change the build: a rebuild prints the shadow.
+    block:
+      let (o, c) = execCmdEx(quoteShellCommand(@["nim", "c", "-r",
+        "--hints:off", "--warnings:off", "--path:" & rt / "vendor",
+        "--path:" & rt / "vendor2", "--nimcache:" & rt / "build" / "probe",
+        "--out:" & rt / "build" / "probe" / "p", rApp]))
+      checkpoint o
+      check c == 0 and "vendor2 shadow" in o
+    removeFile(shadow)
+    # vendor2/pkgx already there (another module in it): the new util.nim
+    # is in a directory the import would be looked up in.
+    writeFile(rt / "vendor2" / "pkgx" / "other.nim", "discard\n")
+    buildResolve(@["vendor", "vendor2"])
+    check rRefusal() == ""
+    writeFile(shadow, body)
+    why = rRefusal()
+    checkpoint why
+    check ("listing of " & rt / "vendor2" / "pkgx" & " that has changed") in why
+    removeDir(rt / "vendor2")
+    # vendor2 absent at build time: its listing is recorded as no names,
+    # and creating it is refused (here the tree root's listing, which
+    # gains the subdirectory, is checked first).
+    buildResolve(@["vendor", "vendor2"])
+    check rRefusal() == ""
+    check (rt / "vendor2", listingDigest(rt / "vendor2")) in
+      helperListings(rt, "rfoo")
+    createDir(parentDir(shadow))
+    writeFile(shadow, body)
+    why = rRefusal()
+    checkpoint why
+    check "that has changed since" in why
+    removeDir(rt / "vendor2")
+    check rRefusal() == ""
+
+  # ---- §13 decision 115 (B): a checkout's tool directories are not a
+  # change; ``tmp`` and ``docs`` are (the accepted cost).
+  const ToolDirs = [".nimcache", "build", ".git", "result", ".direnv",
+                    ".repro", "nimcache", "htmldocs", "test-logs"]
+  test "38: the checkout's tool directories created after the build are not a change":
+    build()
+    check refusal() == ""
+    var made: seq[string]
+    for d in ToolDirs:
+      if dirExists(tree / d) or symlinkExists(tree / d): continue
+      createDir(tree / d)
+      writeFile(tree / d / "x.nim", "discard\n")
+      made.add(d)
+      let why = refusal()
+      checkpoint d & ": " & why
+      check why == ""
+    checkpoint $made
+    check ".direnv" in made and "test-logs" in made
+    for d in made: removeDir(tree / d)
+
+  test "39: a tmp or docs directory created after the build is refused":
+    build()
+    check refusal() == ""
+    for d in ["tmp", "docs"]:
+      createDir(tree / d)
+      let why = refusal()
+      checkpoint d & ": " & why
+      check ("listing of " & tree & " that has changed") in why
+      removeDir(tree / d)
+      check refusal() == ""
 
   test "7: no binary, or no dependency list, is refused":
     build()

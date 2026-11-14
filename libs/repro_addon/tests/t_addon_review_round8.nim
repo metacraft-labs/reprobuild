@@ -573,4 +573,42 @@ suite "round 9's decisions are cited by their own §13 numbers":
       checkpoint rel
       check ("after the" & " rename") notin source(rel)
 
+suite "rounds 10 and 11's decisions are cited by their own §13 numbers":
+  # Round 10's listing rules were cited as having no §13 decision after
+  # the owner had decided them as 114 (reprobuild-pm issue
+  # ``2026-11-14-round-10-listing-rules-say-section-13-records-no-
+  # decision-though-decision-114-is-theirs``); round 11's coverage and
+  # tool-directory rules are 115. Literals are split after "decision" as
+  # above, so this file's own text cites nothing it should not.
+  const
+    ArchTrack11 = toSeq(86 .. 110) & toSeq(116 .. 134)
+    Rules = 114       # configuration files and subdirectories count
+    Coverage = 115    # parent configs, search directories, tool dirs
+  let repoRoot = currentSourcePath().parentDir.parentDir.parentDir.parentDir
+  let files = ["libs/repro_test_support/src/repro_test_support/fresh_binary.nim",
+               "scripts/write_helper_deps.sh",
+               "libs/repro_test_support/tests/" &
+                 "t_fresh_helper_binary_refuses_a_stale_build.nim"]
+
+  test "the helper list's writer, reader and test cite 114 and 115":
+    for rel in files:
+      let got = citedDecisions(readFile(repoRoot / rel))
+      checkpoint rel & " cites " & $got
+      check Rules in got
+      check Coverage in got
+
+  test "none of them cites an Arch-track number or says §13 has no decision":
+    for rel in files:
+      let text = readFile(repoRoot / rel)
+      for n in citedDecisions(text):
+        if n in ArchTrack11:
+          checkpoint rel & " cites decision " & $n & ", an Arch-track decision"
+        check n notin ArchTrack11
+      let flat = text.replace("#", " ").splitWhitespace().join(" ")
+      for stale in ["records no" & " decision", "no §13" & " decision",
+                    "another" & " track's", "does not" & " record yet",
+                    "§13 does" & " not record"]:
+        checkpoint rel & ": " & stale
+        check stale notin flat
+
 removeDir(root)

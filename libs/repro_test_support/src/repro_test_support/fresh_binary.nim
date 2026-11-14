@@ -94,16 +94,21 @@ proc fileSha256(path: string): string =
   toLowerAscii($ctx.finish())
 
 const ListingFilters = ["resolution", "every-entry", "resolution-no-subdirs",
-                        "resolution-no-project-cfg", "resolution-no-nim-cfg"]
+                        "resolution-no-project-cfg", "resolution-no-nim-cfg",
+                        "resolution-counts-tool-dirs"]
   ## The listing filters a list may name (``listing-filter``). Only
   ## ``resolution`` is written outside a falsifier run of
   ## ``scripts/write_helper_deps.sh``; each other one drops one rule, so
   ## the case that rule holds goes red.
-const NeverCounted = [".nimcache", "build", ".git", "result"]
-  ## Entries that never change what the compiler resolves (round 10's
-  ## listing rules, §13 decision 114: reprobuild-pm issue
-  ## ``2026-11-13-helper-list-listing-filter-accepts-a-new-package-
-  ## directory-or-nim-cfg-that-changes-the-build``).
+const NeverCounted = [".nimcache", "build", ".git", "result",
+                      ".direnv", ".repro", "nimcache", "htmldocs", "test-logs"]
+  ## Entries that never change what the compiler resolves: build output,
+  ## VCS metadata and a ``nix build`` link (§13 decision 114), and a
+  ## checkout's tool directories (decision 115 (B)). Kept in step with
+  ## ``never_counted`` in ``scripts/write_helper_deps.sh``.
+const NeverCountedBefore115 = [".nimcache", "build", ".git", "result"]
+  ## Decision 114's list alone, for the ``resolution-counts-tool-dirs``
+  ## filter only a falsifier run writes.
 
 proc decodeListPath(list, encoded, name: string): string =
   ## A path as ``scripts/write_helper_deps.sh`` writes it: every backslash,
@@ -160,7 +165,7 @@ proc readHelperList(repoRoot, name: string):
       result.searchPath.add(decodeListPath(list, value, name))
     elif kind == "listing-filter" and value in ListingFilters:
       result.listingFilter = value
-    elif kind == "listing" and value.len > 65 and value[64] == ' ':
+    elif kind in ["listing", "configs"] and value.len > 65 and value[64] == ' ':
       result.deps.add((kind, value[0 ..< 65] &
         decodeListPath(list, value[65 .. ^1], name)))
     else:
@@ -172,14 +177,15 @@ proc readHelperList(repoRoot, name: string):
 
 proc relevantEntry(dir, name: string; searchPath: HashSet[string];
                    filter = "resolution"): bool =
-  ## §13 decisions 111 and 114 (round 10's listing rules, ``NeverCounted``):
-  ## an entry counts when it can change what the
+  ## §13 decisions 111, 114 and 115 (``NeverCounted``): an entry counts when it can change what the
   ## compiler resolves -- a ``.nim``, ``.nimble`` or ``.nims`` file, a Nim
   ## configuration file (``nim.cfg``, ``<project>.nim.cfg``), a
   ## ``nimble.paths``, or a subdirectory -- except ``NeverCounted``. Kept
   ## in step with ``relevant`` in ``scripts/write_helper_deps.sh``.
   if filter == "every-entry": return true
-  if name in NeverCounted: return false
+  if filter == "resolution-counts-tool-dirs":
+    if name in NeverCountedBefore115: return false
+  elif name in NeverCounted: return false
   if name.endsWith(".nim") or name.endsWith(".nimble") or
       name.endsWith(".nims") or name == "nimble.paths":
     return true
@@ -195,7 +201,9 @@ proc listingDigest*(dir: string; searchPath: openArray[string] = [];
   ## The sha256 of a directory's relevant entry names (``relevantEntry``),
   ## sorted bytewise and joined by newlines -- what
   ## ``scripts/write_helper_deps.sh`` records for a directory the compiler
-  ## listed (§13 decisions 80 and 111).
+  ## listed (§13 decisions 80 and 111). A directory that does not exist
+  ## lists no names (decision 115 (A): a search directory created later
+  ## changes the digest).
   var sp = initHashSet[string]()
   for p in searchPath: sp.incl(normalizedPath(p))
   var names: seq[string]
@@ -209,6 +217,31 @@ proc listingDigest*(dir: string; searchPath: openArray[string] = [];
   if joined.len > 0:
     ctx.update(joined.toOpenArrayByte(0, joined.high))
   toLowerAscii($ctx.finish())
+
+proc configsDigest*(dir: string): string =
+  ## The sha256 of the names of a directory's Nim configuration files
+  ## (``nim.cfg``, ``config.nims``, any other ``.nims``), sorted bytewise
+  ## and joined by newlines -- what ``scripts/write_helper_deps.sh``
+  ## records in a ``configs`` line for the project's directory and each of
+  ## its parents (§13 decision 115 (A)).
+  var names: seq[string]
+  for kind, path in walkDir(dir, relative = true):
+    if path == "nim.cfg" or path == "config.nims" or path.endsWith(".nims"):
+      names.add(path)
+  names.sort(system.cmp[string])
+  var ctx: sha256
+  ctx.init()
+  let joined = names.join("\n")
+  if joined.len > 0:
+    ctx.update(joined.toOpenArrayByte(0, joined.high))
+  toLowerAscii($ctx.finish())
+
+proc helperConfigs*(repoRoot, name: string): seq[tuple[dir, digest: string]] =
+  ## The project's directory and its parents, each with the digest of its
+  ## configuration file names at list time (decision 115 (A)).
+  for (kind, value) in readHelperList(repoRoot, name).deps:
+    if kind == "configs" and value.len > 65:
+      result.add((value[65 .. ^1], value[0 ..< 64]))
 
 proc helperSearchPath*(repoRoot, name: string): seq[string] =
   ## The compiler's search path the list recorded (decision 111).
@@ -232,7 +265,7 @@ proc helperDependencies*(repoRoot, name: string): seq[string] =
   when FreshMutation == "fresh-skips-included":
     let linked = linkedModules(repoRoot, name)
   for (kind, dep) in readHelperList(repoRoot, name).deps:
-    if kind == "listing": continue          # checked by its digest
+    if kind in ["listing", "configs"]: continue   # checked by its digest
     when FreshMutation == "fresh-skips-outside-tree":
       if not dep.startsWith(root & "/"): continue
     when FreshMutation == "fresh-skips-included":
@@ -272,13 +305,22 @@ proc freshRepoBinary*(repoRoot, name: string): string =
     var filter = readHelperList(repoRoot, name).listingFilter
     if filter.len == 0: filter = "resolution"
     for (dir, digest) in helperListings(repoRoot, name):
-      if not dirExists(dir):
+      # A search directory absent at list time is recorded as listing no
+      # names (decision 115 (A)); any other listed directory must exist.
+      if not dirExists(dir) and digest != listingDigest(dir):
         raise newException(StaleHelperBinary, result & " was built after " &
           "listing " & dir & ", which no longer exists; " & helperRebuildHint(name))
       if listingDigest(dir, searchPath, filter) != digest:
         raise newException(StaleHelperBinary, result & " was built from a " &
           "listing of " & dir & " that has changed since; " &
           helperRebuildHint(name))
+  # The configuration files in the project's directory and its parents,
+  # which Nim reads without listing them (§13 decision 115 (A)).
+  for (dir, digest) in helperConfigs(repoRoot, name):
+    if configsDigest(dir) != digest:
+      raise newException(StaleHelperBinary, result & " was built when " &
+        dir & " held other Nim configuration files (nim.cfg, " &
+        "config.nims, *.nims); " & helperRebuildHint(name))
   for dep in helperDependencies(repoRoot, name):
     if not fileExists(dep):
       raise newException(StaleHelperBinary, result & " was built from " &

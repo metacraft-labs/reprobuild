@@ -54,6 +54,20 @@
 ##    printed (decision 64) -- the completion signed with the key read
 ##    before the removal took it.
 ##
+## Round 11: before the final uninstall, the store's removal is made to
+## fail (``chattr +i`` on a file of the object left aside): the uninstall
+## exits non-zero, writes no completion (verify exit 3), and keeps the
+## state, the ledger copy, the store evidence and the attestation key;
+## after ``chattr -i`` (falsifier
+## ``uninstall-discards-state-after-failed-store-removal``). Then a store
+## evidence entry's removal is made to fail the same way: the uninstall
+## exits non-zero, does not report that entry removed, and again keeps the
+## state and the key (falsifier ``evidence-reported-removed-unchecked``).
+## That run passes ``--keep-store``, so the object left aside is still
+## there for the final run. After ``chattr -i`` the re-run completes; the
+## entries it reports removed and the ones the failed run removed are all
+## the entries.
+##
 ## Falsifying mutations: ``custody-skips-file-sources`` (steps 2 and 4: the
 ## altered bytes are installed into /etc), ``custody-skips-closures`` (step
 ## 3: the altered member is used), ``recovery-discards-evidence`` (the
@@ -336,9 +350,88 @@ proc body(g: Guest; repro: string; step: StepFn; record: JsonNode;
   step("the sink received the append and appended none of its records",
        refusedAppend and not aside2Appended, "")
 
+  # Round 11: the store's removal fails first (an immutable file inside the
+  # object left aside, without --keep-store). The discard is not completed,
+  # and the uninstall keeps the keys, the attestation key and the state,
+  # so the operator can clear the cause and run it again (spec §10.2
+  # step 5; reprobuild-pm issue 2026-11-14-addon-uninstall-removes-the-
+  # state-and-attestation-key-after-a-failed-store-removal-...).
+  # The store is a read-only bind mount until the uninstall unmounts it:
+  # while it is mounted, the flag is set through a private writable view.
+  let immutable = proc (flag: string): ExecOut =
+    g.exec("unshare --mount --propagation private /bin/sh -c " &
+      quoteShell("if mountpoint -q /repro/store; then mount -o " &
+                 "remount,bind,rw /repro/store || exit 1; fi; chattr " &
+                 flag & " " & aside2 & "/f"))
+  let imm = immutable("+i")
+  step("an object left aside is made immutable, so the store's removal fails",
+       imm.exitCode == 0, imm.stdout & imm.stderr)
+  let unF = g.exec(repro & " system addon uninstall " &
+                   "--discard-unacknowledged-store-evidence", timeoutSec = 1800)
+  let said0 = unF.stdout & unF.stderr
+  record["uninstallFailedStore"] = %said0
+  let marker0 = "the signed intent record is "
+  var record0 = ""
+  if marker0 in said0:
+    record0 = said0[said0.find(marker0) + marker0.len .. ^1].splitLines()[0].split(' ')[0]
+    record0.removeSuffix(":")
+  step("with the store's removal failing, uninstall exits non-zero, writes no " &
+       "completion, and names the object as neither discarded nor kept",
+       unF.exitCode != 0 and "neither discarded nor kept" in said0 and
+         "the discard did NOT complete" in said0 and
+         "are kept: the uninstall is incomplete" in said0,
+       said0)
+  let v0 = g.exec(repro & " system addon verify-discard-record " &
+    quoteShell(record0) & " --key " & quoteShell(bs.attestationKey))
+  step("its intent verifies as authorised, not completed (exit 3)",
+       v0.exitCode == 3, v0.stdout & v0.stderr)
+  let keptState = g.exec("test -f /var/lib/repro/system/addon-ledger && " &
+    "test -f /var/lib/repro/agent/attestation.key && test -d " & Evidence)
+  step("the state, the ledger copy, the store evidence and the attestation " &
+       "key that must sign the completion are kept",
+       keptState.exitCode == 0,
+       g.exec("ls -la /var/lib/repro /var/lib/repro/agent 2>&1").stdout)
+  let unimm = immutable("-i")
+  step("the cause is cleared", unimm.exitCode == 0, unimm.stdout & unimm.stderr)
+  # Round 11, the second half: the store evidence's removal fails (an
+  # immutable file in one entry). The run keeps the store (--keep-store),
+  # so the final run below still finds the object left aside; the other
+  # entries go, that one is not reported removed, and the state and the
+  # key are kept again.
+  let entry = g.exec("ls -d " & Evidence & "/*/ | head -n 1").stdout.strip().strip(
+    leading = false, chars = {'/'})
+  let entryFile = g.exec("find " & quoteShell(entry) &
+    " -type f | head -n 1").stdout.strip()
+  let immE = g.exec("chattr +i " & quoteShell(entryFile))
+  step("a file of a store evidence entry is made immutable",
+       entry.len > 0 and entryFile.len > 0 and immE.exitCode == 0,
+       entry & " " & entryFile & " " & immE.stdout & immE.stderr)
+  let unE = g.exec(repro & " system addon uninstall --keep-store " &
+                   "--discard-unacknowledged-store-evidence", timeoutSec = 1800)
+  let saidE = unE.stdout & unE.stderr
+  record["uninstallFailedEvidence"] = %saidE
+  step("with an evidence entry's removal failing, uninstall exits non-zero, " &
+       "does not report that entry removed, and keeps the state",
+       unE.exitCode != 0 and (entry & " (store evidence)") notin saidE and
+         "the discard did NOT complete" in saidE and
+         "are kept: the uninstall is incomplete" in saidE,
+       saidE)
+  let keptState1 = g.exec("test -f /var/lib/repro/system/addon-ledger && " &
+    "test -f /var/lib/repro/agent/attestation.key && test -d " &
+    quoteShell(entry))
+  step("the state, the ledger copy, that entry and the attestation key are " &
+       "kept again", keptState1.exitCode == 0,
+       g.exec("ls -la /var/lib/repro /var/lib/repro/agent " & Evidence &
+              " 2>&1").stdout)
+  let unimmE = g.exec("chattr -i " & quoteShell(entryFile))
+  step("that cause is cleared", unimmE.exitCode == 0,
+       unimmE.stdout & unimmE.stderr)
+
   # Decision 62, the explicit recorded override: uninstall discards anyway,
   # after a signed local record of every object discarded unshipped, which
-  # it prints and leaves outside the state it removes.
+  # it prints and leaves outside the state it removes. (Round 11: this is
+  # the re-run after the failed store removal above; it writes its own
+  # intent record and completes it.)
   let un = g.exec(repro & " system addon uninstall " &
                   "--discard-unacknowledged-store-evidence", timeoutSec = 1800)
   record["uninstall"] = %(un.stdout & un.stderr)
@@ -352,7 +445,8 @@ proc body(g: Guest; repro: string; step: StepFn; record: JsonNode;
   step("with --discard-unacknowledged-store-evidence uninstall succeeds, " &
        "names each store-evidence entry and prints its signed record",
        un.exitCode == 0 and
-         said.count("(store evidence)") == entries and
+         said.count("(store evidence)") + saidE.count("(store evidence)") ==
+           entries and said.count("(store evidence)") >= 1 and
          (aside2 & " (store evidence left aside)") in said and
          recordPath.startsWith("/var/log/repro-addon/") and
          aside2 in said[said.find(marker) .. ^1] and

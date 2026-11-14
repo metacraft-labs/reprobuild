@@ -30,6 +30,16 @@ trace it cannot parse, or from one that does not show the compiler opening
 the entry module. The script prints the strace it ran; the dev shell's
 pinned one is the one it is tested with.
 
+The list also records what can change how the compiler resolves an
+import: the Nim sources, configuration files and subdirectories of every
+directory on the compiler's search path and of the checkout root, and the
+`nim.cfg`, `config.nims` and `*.nims` files of every directory from the
+entry module's up to `/`. So a new subdirectory in the checkout root (a
+`tmp/` or `docs/`, say) or a new `nim.cfg` in the workspace directory makes
+the tests refuse the helpers until `just build` runs again. The checkout's
+tool directories never count: `.nimcache`, `build`, `.git`, `result`,
+`.direnv`, `.repro`, `nimcache`, `htmldocs` and `test-logs`.
+
 `just build` (`scripts/build_apps.sh`) has two modes:
 
 - `REPRO_BUILD_APPS_HELPER_DEPS=write`, the default on Linux, writes
