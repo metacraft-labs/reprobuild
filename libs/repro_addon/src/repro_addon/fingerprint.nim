@@ -894,10 +894,12 @@ proc collectFingerprint*(opts = CollectOptions(root: "/", live: true)):
     collectPacmanLocal(result, opts)
   if opts.omarchyAccount.len > 0:
     collectOmarchyHooks(result, opts)
-  if opts.live and isArchFamilyRoot(rootPath(opts, "/")):
-    # ``btrfs-subvolumes`` is an Arch component (spec §12.2 *On Arch*); a
-    # Debian-family base's fingerprint is what it was, whatever its root.
-    collectBtrfsSubvolumes(result)
+  if opts.live:
+    if isArchFamilyRoot(rootPath(opts, "/")):
+      # ``btrfs-subvolumes`` is an Arch component (spec §12.2 *On Arch*);
+      # on any other base the component is absent, whatever its root, and
+      # every other live component below is collected on every base.
+      collectBtrfsSubvolumes(result)
     collectUnits(result)
     collectSysctl(result)
     var memTotalKb = 0

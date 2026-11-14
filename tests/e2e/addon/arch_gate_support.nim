@@ -72,14 +72,21 @@ proc gen2Profile*(omarchyAccount = ""): string =
   ## A2's generation 2: the unit removed, the file changed.
   addOnStanza(omarchyAccount) & fixtureFile("fixture = 2\n")
 
-const SettleBaselineCommand* = "udevadm settle && systemctl daemon-reload"
+const SettleBaselineCommand* = "udevadm settle && systemctl daemon-reload && " &
+  "for a in $(systemctl list-units --type=automount --state=active --plain " &
+  "--no-legend | awk '{print $1}'); do m=\"${a%.automount}.mount\"; " &
+  "if systemctl -q is-active \"$m\"; then systemctl stop \"$m\"; fi; done"
   ## Run in the guest before a baseline fingerprint (spec §12.2, §13
   ## decision 134): the base's own generators and udev rules have finished
   ## and systemd's unit set reflects them, so units a generator emits only
   ## on a reload (Omarchy's zram swap aliases) are already in the baseline
   ## when bootstrap's own ``daemon-reload`` would otherwise make them
-  ## appear. It is part of the gate, never of preflight, which writes
-  ## nothing (spec §6.1).
+  ## appear. A mount behind an armed automount (the Arch guests' ``/efi``)
+  ## is stopped, the state the base returns to by itself once the
+  ## automount's idle timeout passes, so the baseline does not depend on
+  ## whether something touched it in the last minutes; the automount stays
+  ## armed, and a later access shows in the comparison. It is part of the
+  ## gate, never of preflight, which writes nothing (spec §6.1).
 
 proc settleBaseline*(g: Guest; step: StepFn) =
   ## ``SettleBaselineCommand`` as a recorded step of the gate.
@@ -135,17 +142,25 @@ proc preflightArch*(g: Guest; repro, flags: string): ExecOut =
   g.exec(repro & " system addon preflight" & flags)
 
 proc bootstrapArch*(g: Guest; repro: string; step: StepFn;
-                    flags = ""): tuple[ok: bool; anchors: Anchors] =
+                    flags = ""; withCache = true):
+    tuple[ok: bool; anchors: Anchors] =
   ## Preflight and bootstrap with the acknowledged plan digest; ``flags``
   ## (``--profile <file>`` on Omarchy) go to both, since bootstrap
-  ## recomputes the plan from the same inputs.
+  ## recomputes the plan from the same inputs. ``withCache = false`` names
+  ## the deploy signers only: a gate that configures the deploy agent must
+  ## not name the test bed's cache, whose host does not resolve, because
+  ## preflight pins every origin of the agent to addresses (spec §9.1), as
+  ## ``agent_e2e_support.agentFlags`` does for the Debian agent gates.
   let anchors = g.installAnchors()
   result.anchors = anchors
-  let pre = g.preflightArch(repro, anchors.flags & flags)
+  let anchorFlags =
+    if withCache: anchors.flags
+    else: " --deploy-signers /root/addon/deploy-signers.anchors"
+  let pre = g.preflightArch(repro, anchorFlags & flags)
   step("preflight is compatible", pre.exitCode == 0, pre.stdout & pre.stderr)
   if pre.exitCode != 0: return
   let boot = g.exec(repro & " system addon bootstrap --plan " &
-    planDigestOf(pre.stdout) & anchors.flags & flags, timeoutSec = 1800)
+    planDigestOf(pre.stdout) & anchorFlags & flags, timeoutSec = 1800)
   step("bootstrap", boot.exitCode == 0, boot.stdout & boot.stderr)
   result.ok = boot.exitCode == 0
 

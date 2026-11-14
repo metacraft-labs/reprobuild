@@ -86,7 +86,7 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
     record["artefactSha256"] = %sha
     g.settleBaseline(step)
     let f0 = g.fingerprintArch(repro)
-    if not g.bootstrapArch(repro, step, AgentFlags).ok: return fails
+    if not g.bootstrapArch(repro, step, AgentFlags, withCache = false).ok: return fails
     step("the deploy agent's fetch timer is active after bootstrap",
          g.exec("systemctl is-active " & AgentTimer).exitCode == 0,
          g.exec("systemctl status --no-pager " & AgentTimer & " 2>&1").stdout)

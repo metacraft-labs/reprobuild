@@ -27,6 +27,13 @@
 ## ``.deb`` cache directory appears. Control: the same unit as a store
 ## package plans and applies.
 ##
+## "Wrote nothing" is judged against a fingerprint taken after bootstrap,
+## through the gate's baseline step (``settleBaseline``: udev settled,
+## systemd reloaded, a mount behind an armed automount such as ``/efi``
+## stopped), so a mount the base drops on its own idle timeout during the
+## legs is not mistaken for a write; nothing is excluded from the
+## comparison.
+##
 ## The record carries a verdict per group (``realisationLegs``,
 ## ``applySideLegs``) beside the gate's.
 ##
@@ -164,6 +171,7 @@ proc runBase(b: BaseImage; record: JsonNode; engine: string): seq[string] =
     if not g.bootstrapArch(repro, step).ok: return fails
     let exe = g.gen0ReproExe()
 
+    g.settleBaseline(step)
     let f0 = g.fingerprintArch(repro)
     let s0 = g.state(repro)
     proc unchanged(what: string; stepFn: StepFn) =
