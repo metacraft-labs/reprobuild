@@ -185,7 +185,7 @@ suite "round 11 (§13 decision 77): systemd made it for this invocation":
     # Born well before the invocation; the adoption set its owner and ctime.
     let v = SystemdView(dynamicUid: 61200, owner: 61200, btime: Start - 500_000_000,
                         ctime: Start div 1_000_000_000 + 1, invocationId: "I2",
-                        invocationStart: Start)
+                        invocationStart: Start, mainStart: Start)
     check systemdRecreated("/run/a", "a.service", ["/run/a"], rec, true, v) ==
       "it was born more than 100 ms before the unit's last run began"
     var s = v
@@ -194,11 +194,11 @@ suite "round 11 (§13 decision 77): systemd made it for this invocation":
   test "a tree written after the unit started is not":
     let v = SystemdView(dynamicUid: -1, owner: 1000, btime: Start - 500_000_000,
                         ctime: Start div 1_000_000_000 + 1, invocationId: "I2",
-                        invocationStart: Start)
+                        invocationStart: Start, mainStart: Start)
     check systemdRecreated("/run/a", "a.service", ["/run/a"], rec, false, v).len > 0
   test "one born after the invocation began is, for a static and a dynamic user":
     let v = SystemdView(dynamicUid: -1, owner: 1000, btime: Start + 1_000_000,
-                        invocationId: "I2", invocationStart: Start)
+                        invocationId: "I2", invocationStart: Start, mainStart: Start)
     check systemdRecreated("/run/a", "a.service", ["/run/a"], rec, false, v) == ""
     check systemdRecreated("/run/a", "a.service", ["/run/a"], rec, true, v) == ""
 
@@ -276,7 +276,7 @@ suite "round 11, finding 6: logged or not made; a no-op restart records nothing"
     e.createdDirs = {"/run/a": CreatedDir(unit: "a.service", dev: 1, ino: 2, btime: 50,
                                           invocation: "I1")}.toTable
     e.systemdView = proc (p, u: string; s: ShowProps): SystemdView =
-      SystemdView(dynamicUid: -1, btime: 2000, invocationId: "I2", invocationStart: 1999)
+      SystemdView(dynamicUid: -1, btime: 2000, invocationId: "I2", invocationStart: 1999, mainStart: 1999)
     e.onRecreated = proc (p, u: string; v: SystemdView): bool = false
     check "could not be recorded and logged" in problemsOf(e)
   test "a migrated entry whose audit record cannot be written is not recorded":

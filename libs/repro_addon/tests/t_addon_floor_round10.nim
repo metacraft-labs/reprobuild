@@ -335,7 +335,7 @@ suite "round 10 (§13 decisions 71 and 77): made again by systemd outside a swit
   let madeAgain: PathIdentity = (true, 1'u64, 3'u64, Start + 1_000_000)
   proc restarted(): SystemdView =
     SystemdView(dynamicUid: -1, owner: 1000, btime: Start + 1_000_000, ctime: 0,
-                invocationId: "I2", invocationStart: Start)
+                invocationId: "I2", invocationStart: Start, mainStart: Start)
   proc input(dirs = "a"; view = restarted(); r = rec; dynamic = false): EffectiveInput =
     result = goodInput()
     result.show["RuntimeDirectory"] = dirs
@@ -384,7 +384,7 @@ suite "round 10 (§13 decisions 71 and 77): made again by systemd outside a swit
     check "[rule:existing-tree" in problemsOf(input(view = v))
     # A dynamic user by the same evidence, and no other.
     var d = SystemdView(dynamicUid: 61200, owner: 61200, btime: Start + 1_000_000,
-                        invocationId: "I2", invocationStart: Start)
+                        invocationId: "I2", invocationStart: Start, mainStart: Start)
     check "[rule:existing-tree" notin problemsOf(input(view = d, dynamic = true))
     d.btime = Start - 500_000_000
     check "[rule:existing-tree" in problemsOf(input(view = d, dynamic = true))

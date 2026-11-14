@@ -722,6 +722,11 @@ type
     invocationStart*: int64
       ## when its current invocation began (``InactiveExitTimestamp``),
       ## nanoseconds since the epoch; 0 when unknown
+    mainStart*: int64
+      ## when the main process of its current or last run started
+      ## (``ExecMainStartTimestamp``), nanoseconds since the epoch; 0 when
+      ## systemd does not say. Read in the same ``systemctl show`` as the
+      ## start, the end and the state (§13 decision 141).
     stopped*: bool
       ## the unit is not running (its ``ActiveState`` is none of
       ## ``active``, ``activating``, ``reloading``), or systemd does not say
@@ -956,6 +961,20 @@ const RestartWindowNs* = 100_000_000'i64
   ## owner, whose answer to that question is still open: this is an
   ## implementation amendment, not an owner decision.
 
+const MainStartToleranceNs* = 250_000_000'i64
+  ## §13 decision 141: how much later than the start of the main process
+  ## (``ExecMainStartTimestamp``) a directory systemd made for that run may
+  ## be born. The manager stamps that start when it forks the process, and
+  ## the forked child makes the directories before it executes the command:
+  ## systemd 257 does that in its separate executor binary
+  ## (``systemd-executor``), which it executes first. Measured over 150
+  ## transient units per load (idle; 2x and 8x nproc busy loops) on a host
+  ## at load average ~40, birth minus ``ExecMainStartTimestamp``: at most
+  ## 27.3 ms on debian-12 (systemd 252), and 6.1 to 60.4 ms -- always after
+  ## the stamp -- on debian-13 (systemd 257). 250 ms is about four times the
+  ## worst. The residual: a tree a root process makes within 250 ms after
+  ## the main process starts is taken as systemd's.
+
 proc systemdRecreated*(path, unit: string; declared: openArray[string];
                        created: Table[string, CreatedDir]; dynamic: bool;
                        v: SystemdView): string =
@@ -1022,6 +1041,17 @@ proc systemdRecreated*(path, unit: string; declared: openArray[string];
           return "the unit is not running and systemd reports no end of its last run"
         if v.btime > v.lastStop:
           return "the unit is not running, and the tree was born after its last run ended"
+    # §13 decision 141: an upper bound. systemd makes a unit's
+    # directories while it sets up the run, before or just after it forks
+    # the main process; a tree born later in the run (a root process three
+    # seconds into it) is not systemd's, whichever run made way for it.
+    when not mutated("recreated-no-upper-bound"):
+      if v.mainStart <= 0:
+        return "systemd reports no start of the main process of the unit's last run"
+      if v.btime > v.mainStart + MainStartToleranceNs:
+        return "it was born more than " & $(MainStartToleranceNs div 1_000_000) &
+          " ms after the main process of the unit's last run started, so " &
+          "that run, not systemd setting it up, made it (§13 decision 141)"
   ""
 
 proc managerPathProblem*(path: string; uid: int; dynamic: bool): string =

@@ -53,6 +53,26 @@
 ##   (spec §10.1 round 12, "A listener below a place its service can write").
 ##   Destructive, so last.
 ##
+## - **the revert hold by its content** (A9 review round 13): an operator's
+##   file of the hold's name on a unit the add-on does not install survives
+##   a passing apply; one planted under that name on a floored unit is
+##   refused as a foreign drop-in, and the revert does not write over it but
+##   keeps the unit's start hold and stays pending until the file goes;
+## - **a hold that cannot be written** (``chattr +i`` on the drop-in
+##   directory): the refused unit keeps its start hold and cannot start, the
+##   host is pending, and the recovery commits once the directory is
+##   writable;
+## - **a tree made 3 s into a run** that began outside a switch is refused
+##   (§13 decision 141: no later than the main process's start plus
+##   ``MainStartToleranceNs``);
+## - **listeners below /run/<stem>/** (§13 decision 139): a template of the
+##   stem that owns ``/run/<stem>`` (the reviewer's profile; the parse
+##   half), a base template of the stem the parse half cannot see (the
+##   effective half), and a ``ReadWritePaths=`` spelled through
+##   ``/var/run``; under a falsifier each applies, the account links the
+##   listener's directory to a root-owned victim, and the manager unlinks
+##   it;
+##
 ## Falsifying builds (each red here): ``revert-refuses-on-floor``,
 ## ``revert-hold-runtime-only`` (the held unit starts at the reboot),
 ## ``revert-holds-any-subject`` (a hold for every service),
@@ -62,7 +82,13 @@
 ## ``template-instances-unjudged`` (the observation instance's record is
 ## refused, under every name, and the refused apply leaves it as it was),
 ## ``template-acceptance-per-name`` (the directory is accepted, but its
-## ``recreated-accepted`` record is written once per name: two).
+## ``recreated-accepted`` record is written once per name: two),
+## ``revert-hold-any-content`` (the planted file passes),
+## ``revert-hold-written-after-release`` (the refused unit starts),
+## ``recreated-no-upper-bound`` (the tree made 3 s into the run passes),
+## ``listener-writable-own-unit-only`` (the template's and the base
+## template's links are followed), ``listener-writable-by-spelling`` (the
+## ``/var/run`` link is followed).
 ##
 ## Opt-in: ``REPRO_ADDON_VM_GATES=1``.
 ##
@@ -282,6 +308,97 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
          g.exec("ls -la /etc/systemd/system/a9r-st.service.d /etc/systemd/system/a9r-control.service.d 2>&1").stdout)
     r = g.applyProfile(repro, "c-st", control)
     discard g.run("rm -rf /var/lib/a9r-st; systemctl reset-failed 'a9r-*' 2>/dev/null; true")
+    # A9 review round 13: a revert hold is the add-on's only when it holds
+    # exactly its text on a unit the generation installs. An operator's file
+    # of that name on a unit the add-on does not install is never removed;
+    # one planted on a floored unit is judged like any drop-in, and the
+    # revert never writes over it.
+    const OpNote = "/etc/systemd/system/a9r-opbase.service.d/" & HoldName
+    const Planted = "/etc/systemd/system/a9r-control.service.d/" & HoldName
+    const StartHold = "/run/systemd/system/a9r-control.service.d/zz-repro-addon-floor-hold.conf"
+    discard g.run("mkdir -p /etc/systemd/system/a9r-opbase.service.d && printf " &
+      "'[Unit]\\nDescription=the operator note\\n' > " & OpNote)
+    r = g.applyProfile(repro, "h1", st("h1"))
+    step("a floored generation applies beside an operator's file of the hold's name",
+         r.exitCode == 0 and g.exec("test -e " & OpNote).exitCode == 0,
+         r.stdout & r.stderr)
+    discard g.run("mkdir -p /etc/systemd/system/a9r-control.service.d && printf " &
+      "'[Unit]\\nDescription=planted by an operator\\n[Service]\\nEnvironment=A9R_PLANTED=1\\n' > " &
+      Planted & "; systemctl daemon-reload")
+    r = g.applyProfile(repro, "h2", st("h2"))
+    let outh = r.stdout & r.stderr
+    step("a drop-in planted under the hold's name with other content is refused " &
+         "as a foreign drop-in", r.exitCode != 0 and "[rule:foreign-drop-in" in outh, outh)
+    step("the revert did not write over it: it kept the unit's start hold, and " &
+         "is pending until the file goes",
+         "planted by an operator" in g.exec("cat " & Planted).stdout and
+         g.exec("test -e " & StartHold).exitCode == 0 and
+         g.exec("test -e " & Pending).exitCode == 0 and
+         StartHold in g.exec("systemctl show -p DropInPaths a9r-control.service").stdout,
+         outh & g.exec("ls -la /run/systemd/system/a9r-control.service.d " &
+                       "/etc/systemd/system/a9r-control.service.d; cat " & Pending).stdout)
+    discard g.run("rm -f " & Planted & "; systemctl daemon-reload")
+    let rech = g.exec(repro & " system addon recover", timeoutSec = 1200)
+    step("once the planted file is gone, the recovery commits", rech.exitCode == 0,
+         rech.stdout & rech.stderr)
+    notPending("the recovery of the revert over the planted file")
+    r = g.applyProfile(repro, "h3", st("h3"))
+    step("and the next apply passes, leaving the operator's file of that name",
+         r.exitCode == 0 and g.exec("test -e " & OpNote).exitCode == 0 and
+         "the operator note" in g.exec("cat " & OpNote).stdout,
+         r.stdout & r.stderr & g.exec("ls -la /etc/systemd/system/a9r-opbase.service.d").stdout)
+    # A9 review round 13: a revert whose hold cannot be written keeps the
+    # start holds, does not reload, and does not commit.
+    discard g.run("systemctl stop a9r-st.service; rm -rf /var/lib/a9r-st; " &
+                  "mkdir /var/lib/a9r-st; touch /var/lib/a9r-st/theirs; " &
+                  "mkdir -p /etc/systemd/system/a9r-st.service.d; " &
+                  "chattr +i /etc/systemd/system/a9r-st.service.d")
+    r = g.applyProfile(repro, "w1", st("w1"))
+    let outw = r.stdout & r.stderr
+    let startW = g.exec("systemctl start a9r-st.service; echo start=$?; " &
+      "systemctl is-active a9r-st.service; stat -c '%n %U' /var/lib/a9r-st; " &
+      "ls -la /run/systemd/system/a9r-st.service.d 2>&1")
+    record["unwritableHold"] = %startW.stdout
+    step("a refused apply whose revert cannot write the hold leaves the host " &
+         "pending, reporting it", r.exitCode != 0 and
+         "hold could not be written" in outw and
+         g.exec("test -e " & Pending).exitCode == 0, outw)
+    step("and the refused unit cannot start: its start hold stays and the tree " &
+         "is still root's", "start=0" notin startW.stdout and
+         g.exec("stat -c %U /var/lib/a9r-st").stdout.strip() == "root",
+         startW.stdout & startW.stderr)
+    discard g.run("chattr -i /etc/systemd/system/a9r-st.service.d")
+    let recw = g.exec(repro & " system addon recover", timeoutSec = 1200)
+    step("once the directory is writable, the recovery commits with the hold written",
+         recw.exitCode == 0 and g.exec("test -e " & stHold).exitCode == 0 and
+         g.exec("systemctl is-active a9r-st.service").stdout.strip() != "active",
+         recw.stdout & recw.stderr)
+    notPending("the recovery of the revert with an unwritable hold")
+    discard g.run("rm -rf /var/lib/a9r-st")
+    r = g.applyProfile(repro, "w2", st("w2"))
+    step("then the unit applies and starts, its hold cleared", r.exitCode == 0 and
+         g.exec("test -e " & stHold).exitCode != 0 and
+         g.exec("systemctl is-active a9r-st.service").stdout.strip() == "active",
+         r.stdout & r.stderr)
+    # §13 decision 141: a tree a root process makes seconds into a run that
+    # began outside a switch is not systemd's.
+    discard g.run("systemctl restart a9r-st.service; sleep 3; rm -rf /var/lib/a9r-st; " &
+                  "mkdir /var/lib/a9r-st; touch /var/lib/a9r-st/planted")
+    let evm = g.exec("stat -c '%n %U %.9W' /var/lib/a9r-st; systemctl show " &
+      "--timestamp=us+utc -p InvocationID -p InactiveExitTimestamp " &
+      "-p ExecMainStartTimestamp -p ActiveState a9r-st.service").stdout
+    record["laterInTheRun"] = %evm
+    r = g.applyProfile(repro, "m1", st("m1"))
+    let outm = r.stdout & r.stderr
+    step("a root tree made 3 s into a run that began outside a switch is refused " &
+         "(§13 decision 141)", r.exitCode != 0 and "[rule:existing-tree" in outm and
+         "/var/lib/a9r-st" in outm, outm & evm)
+    notPending("the refused apply over a tree made later in the run")
+    discard g.run("systemctl stop a9r-st.service; rm -rf /var/lib/a9r-st")
+    r = g.applyProfile(repro, "m2", st("m2"))
+    step("and once it is gone the unit applies again", r.exitCode == 0, r.stdout & r.stderr)
+    r = g.applyProfile(repro, "c-st2", control)
+    discard g.run("rm -rf /var/lib/a9r-st; systemctl reset-failed 'a9r-*' 2>/dev/null; true")
     # A template's record naming its observation instance, as an engine
     # before the start step recorded a template's directory for the
     # instance that ran wrote it (issue 2026-11-13-floor-template-
@@ -393,6 +510,73 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
       discard g.run("rm -rf /var/cache/a9r-c; true")
       discard g.applyProfile(repro, "c-c", control)
       discard g.run("systemctl stop a9r-c.service 2>/dev/null; umount /var/cache; true")
+    # §13 decision 139: the places every unit sharing the stem can write,
+    # compared as the kernel resolves them. A root-owned victim stands for
+    # udev's socket: if the manager ever binds or unlinks through a link
+    # the service's account planted, the victim is gone.
+    proc victimSafe(label, plantDir: string): tuple[ok: bool; detail: string] =
+      let o = g.exec("mkdir -p /run/a9v && rm -f /run/a9v/control && touch /run/a9v/control; " &
+        "runuser -u a9e -- sh -c 'mv " & plantDir & "/sub " & plantDir & "/old && " &
+        "ln -s /run/a9v " & plantDir & "/sub'; echo plant=$?; " &
+        "systemctl stop " & label & ".socket; echo stop=$?; " &
+        "systemctl start " & label & ".socket; echo start=$?; stat -c '%n %U %F' /run/a9v/control")
+      (g.exec("test -f /run/a9v/control && test \"$(stat -c %U /run/a9v/control)\" = root").exitCode == 0,
+       o.stdout & o.stderr)
+    proc listenerSocket(label: string): string =
+      socketResource(label & ".socket", "ListenStream=/run/" & label & "/sub/control\n" &
+        "Service=" & label & ".service\nSocketUser=a9e\nSocketMode=0600\nRemoveOnStop=yes\n")
+    # (a) The reviewer's profile: a template of the stem owns /run/<stem>.
+    let ls = Head & unitResource("a9r-control.service", "", binary,
+                                 unitLines = "Wants=a9r-s@1.service\n") &
+      unitResource("a9r-s.service", "User=a9e\n", binary, enabled = false) &
+      unitResource("a9r-s@.service", "User=a9e\nRuntimeDirectory=a9r-s\n", binary) &
+      listenerSocket("a9r-s")
+    r = g.applyProfile(repro, "ls", ls)
+    let outs = r.stdout & r.stderr
+    if r.exitCode != 0:
+      step("a listener below /run/<stem>/ that a template of the stem owns is " &
+           "refused (§13 decision 139)", "unit sharing its stem" in outs, outs)
+    else:
+      let v = victimSafe("a9r-s", "/run/a9r-s")
+      step("the manager did not follow the template's link to a root file", v.ok,
+           outs & v.detail)
+    discard g.applyProfile(repro, "c-ls", control)
+    discard g.run("systemctl stop a9r-s.socket 'a9r-s@*' 2>/dev/null; rm -rf /run/a9r-s; true")
+    # (b) The effective half: a base template of the stem, which the parse
+    # half cannot see, owns /run/<stem> while its instance runs.
+    discard g.run("printf '[Service]\\nUser=a9e\\nRuntimeDirectory=a9r-h\\n" &
+      "ExecStart=/bin/sleep infinity\\n' > /usr/lib/systemd/system/a9r-h@.service; " &
+      "systemctl daemon-reload; systemctl start a9r-h@1.service")
+    let lh = control & unitResource("a9r-h.service", "User=a9e\n", binary, enabled = false) &
+      listenerSocket("a9r-h")
+    r = g.applyProfile(repro, "lh", lh)
+    let outh2 = r.stdout & r.stderr
+    if r.exitCode != 0:
+      step("the effective half refuses it when a base template of the stem owns " &
+           "/run/<stem> (§13 decision 139)", "unit sharing its stem" in outh2, outh2)
+      notPending("the refused apply over a base template of the stem")
+    else:
+      let v = victimSafe("a9r-h", "/run/a9r-h")
+      step("the manager did not follow the base template's link to a root file",
+           v.ok, outh2 & v.detail)
+    discard g.applyProfile(repro, "c-lh", control)
+    discard g.run("systemctl stop a9r-h.socket 'a9r-h@*' 2>/dev/null; rm -f " &
+      "/usr/lib/systemd/system/a9r-h@.service; systemctl daemon-reload; rm -rf /run/a9r-h; true")
+    # (c) A place spelled through /var/run covers a listener below /run.
+    discard g.run("mkdir -p /run/a9r-v && chown a9e /run/a9r-v")
+    let lv = control & unitResource("a9r-v.service", "User=a9e\nReadWritePaths=/var/run/a9r-v\n",
+                                    binary, enabled = false) & listenerSocket("a9r-v")
+    r = g.applyProfile(repro, "lv", lv)
+    let outv = r.stdout & r.stderr
+    if r.exitCode != 0:
+      step("ReadWritePaths= spelled through /var/run covers the listener below " &
+           "/run (§13 decision 139)", "lies below /run/a9r-v" in outv, outv)
+    else:
+      let v = victimSafe("a9r-v", "/run/a9r-v")
+      step("the manager did not follow the link under /var/run's spelling", v.ok,
+           outv & v.detail)
+    discard g.applyProfile(repro, "c-lv", control)
+    discard g.run("systemctl stop a9r-v.socket 2>/dev/null; rm -rf /run/a9r-v /run/a9v; true")
     # The reviewer's link (spec §10.1 round 12, "A listener below a place
     # its service can write"). Last: the falsifier breaks udev.
     let lr = control & unitResource("a9r-lr.service", "User=a9e\nRuntimeDirectory=a9r-lr\n",

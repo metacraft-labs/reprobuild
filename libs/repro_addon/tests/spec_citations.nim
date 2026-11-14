@@ -5,13 +5,13 @@
 ## not used*" and "*Numbers 111 to 113*": an old citation must never land
 ## on an unrelated decision).
 ##
-## Used by ``t_addon_floor_round12`` (no citation of the unrecorded 82 to
-## 85) and ``t_addon_review_round8`` (A11's round-9 decisions are cited as
+## Used by ``t_addon_floor_round12`` (every decision a tracked floor file
+## cites is one §13 records, read from the spec itself) and ``t_addon_review_round8`` (A11's round-9 decisions are cited as
 ## 111 to 113, never by the Arch track's numbers).
 ##
 ## Not a test file (no ``t_`` prefix).
 
-import std/strutils
+import std/[os, osproc, streams, strutils]
 
 proc citedDecisions*(text: string): seq[int] =
   ## Every number cited as a "decision" in ``text``: ``decision N``,
@@ -46,3 +46,31 @@ proc citedDecisions*(text: string): seq[int] =
       result.add(parseInt(low[j ..< k]))
       j = k
     at = low.find("decision", at + 1)
+
+proc recordedDecisions*(spec: string): seq[int] =
+  ## The numbers §13 of the add-on spec records: every list item ``N.``
+  ## that opens a bold title (``N. **...``) between the heading
+  ## ``## 13.`` and the next ``## `` heading.
+  var inSection = false
+  for line in spec.splitLines():
+    if line.startsWith("## "):
+      inSection = line.startsWith("## 13.")
+      continue
+    if not inSection: continue
+    let dot = line.find(". **")
+    if dot > 0 and line[0 ..< dot].allCharsInSet(Digits):
+      result.add(parseInt(line[0 ..< dot]))
+
+proc trackedFiles*(repoRoot: string; roots: openArray[string]): seq[string] =
+  ## The files git tracks under ``roots`` (paths relative to ``repoRoot``),
+  ## as absolute paths: a reviewer's or an operator's untracked probe beside
+  ## them is never read. Empty when git cannot list them.
+  var args = @["-C", repoRoot, "ls-files", "-z", "--"]
+  for r in roots: args.add(r)
+  let p = startProcess("git", args = args, options = {poUsePath, poStdErrToStdOut})
+  let o = p.outputStream.readAll()
+  let rc = p.waitForExit()
+  p.close()
+  if rc != 0: return
+  for f in o.split('\0'):
+    if f.len > 0: result.add(repoRoot / f)
