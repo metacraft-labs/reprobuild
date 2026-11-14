@@ -38,7 +38,11 @@ entry module's up to `/`. So a new subdirectory in the checkout root (a
 `tmp/` or `docs/`, say) or a new `nim.cfg` in the workspace directory makes
 the tests refuse the helpers until `just build` runs again. The checkout's
 tool directories never count: `.nimcache`, `build`, `.git`, `result`,
-`.direnv`, `.repro`, `nimcache`, `htmldocs` and `test-logs`.
+`.direnv`, `.repro`, `nimcache`, `htmldocs` and `test-logs`. (Inside a
+directory an import's later path component is looked up in, those names
+count too: a new `pkgx/build/` can shadow `import pkgx/build/util`.) The
+helpers are built with `--skipUserCfg`, so your own Nim configuration
+(`~/.config/nim`) neither changes them nor makes the tests refuse them.
 
 `just build` (`scripts/build_apps.sh`) has two modes:
 

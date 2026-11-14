@@ -267,10 +267,32 @@ uninstall goes on.
 
 If the uninstall drifts or stops before the objects are gone, or the sync
 fails, no completion record is written, and the intent record stays as
-"authorised, not completed". A failure later in the uninstall, after the
-objects are gone (removing `/run/repro`, say), is reported as an error of
-its own and does not hold the completion back. Uninstall prints both paths and says
-whether the discard completed. All the files stay after uninstall: keep
+"authorised, not completed". The completion is written as soon as the
+objects are gone, before the keys and the add-on's state are removed, so
+a failure later in the uninstall (removing `/etc/repro`, say) is reported
+as an error of its own and does not hold the completion back. Uninstall
+prints both paths and says whether the discard completed.
+
+An uninstall that does not finish keeps the add-on's state, the ledger,
+the attestation key and the Evidence sink's configuration, so you can fix
+the cause and run uninstall again. If the completion record itself could
+not be written (its directory read-only, say), the evidence is already
+gone and the attestation key is kept: the next uninstall finds that run's
+intent record (the newest one signed by the host's key with no completion
+record), completes it instead of writing a new one, and prints it with the
+completion's path.
+
+Each run that discards writes its own intent record. When a run stops
+before the objects are gone, its intent record stays "authorised, not
+completed" for good, and the run that finishes writes a new intent record
+and completes that one. To tell them apart, check each intent record in
+`/var/log/repro-addon` with `verify-discard-record`: the one that reports
+**completed** is the discard that happened, and the completion record
+beside it names it by file name and SHA-256. The others are the
+authorisations of runs that stopped: such a run may already have removed
+some of the objects its intent names, and the completed discard names only
+what was still there when its run began. Keep all of them with the entries
+you copied off the host. All the files stay after uninstall: keep
 them with the entries you copied off the host. If the attestation key is
 missing, or the intent record cannot be written, uninstall refuses and
 removes nothing.

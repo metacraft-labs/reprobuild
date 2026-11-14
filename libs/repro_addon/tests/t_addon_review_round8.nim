@@ -46,6 +46,12 @@
 ## 14. (round 10) ``finishDiscard`` itself: an object that the kept list
 ##     names, without ``--keep-store``, still holds the completion back
 ##     (exit 3).
+## 15-17. (round 12) A completion that fails is not lost: see that suite.
+## 18. (round 12, §13 decision 140) Records no run can ship (the sink's
+##     configuration gone) are refused with the override named, never "run
+##     uninstall again once it has"; records the sink only has not
+##     acknowledged yet still are. Its ``ship`` answers as
+##     ``shipAndConfirm`` does when the configuration is gone.
 ##
 ## (Drift or an error after the intent record, and the intent record's own
 ## failed directory sync, are ``t_addon_review_round5`` cases 4 and 5.)
@@ -555,6 +561,29 @@ suite "the A11 code review's round 12: a completion that fails is not lost (§13
     check unfinishedDiscardIntent(own.site, logOf(s)).path != tampered
     check unfinishedDiscardIntent(own.site, logOf(s)).path.len == 0
 
+suite "A11 code review round 12: §13 decision 140":
+  test "18: records no run can ship are never waited for":
+    # The refusal names the override, never "run uninstall again once it
+    # has", when no acknowledgement can arrive (the sink's configuration
+    # gone). ``ship`` answers as ``shipAndConfirm`` does then; the VM gate
+    # e2e_addon_store_custody holds that the configuration is kept.
+    let site = scratchSite("cannot-ship", root / "cannot-ship" / "k")
+    discard leaveAside(site, "1-a")
+    let gone = proc (): tuple[ok: bool; why: string] =
+      (false, "2 record(s) still queued, and the sink configuration " &
+        "/etc/repro/evidence.conf is gone, so they " & CannotBeShipped)
+    let g = storeEvidenceGate(site,
+      UninstallOptions(discardStoreEvidence: true), gone,
+      overrideDir = root / "cannot-ship" / "log")
+    checkpoint g.errors.join("\n")
+    check g.errors.anyIt("no later run can ship them" in it and
+      "--discard-unacknowledged-store-evidence" in it)
+    check not g.errors.anyIt("once it has" in it)
+    let waiting = storeEvidenceGate(site,
+      UninstallOptions(discardStoreEvidence: true), notAcknowledged,
+      overrideDir = root / "cannot-ship" / "log")
+    check waiting.errors.anyIt("once it has" in it)
+
 suite "round 9's decisions are cited by their own §13 numbers":
   # The three decisions of round 9 were reserved as §13 86 to 88, but the
   # Arch track's decisions took 86 to 110 (and 116 to 125) first, so the
@@ -684,7 +713,7 @@ suite "rounds 10 and 11's decisions are cited by their own §13 numbers":
   # tool-directory rules are 115. Literals are split after "decision" as
   # above, so this file's own text cites nothing it should not.
   const
-    ArchTrack11 = toSeq(86 .. 110) & toSeq(116 .. 134)
+    ArchTrack11 = toSeq(86 .. 110) & toSeq(116 .. 138)
     Rules = 114       # configuration files and subdirectories count
     Coverage = 115    # parent configs, search directories, tool dirs
   let repoRoot = currentSourcePath().parentDir.parentDir.parentDir.parentDir
@@ -699,6 +728,19 @@ suite "rounds 10 and 11's decisions are cited by their own §13 numbers":
       checkpoint rel & " cites " & $got
       check Rules in got
       check Coverage in got
+
+  test "round 12's decisions are cited where they are implemented":
+    # 139 (the completion before the keys) and 140 (the sink's
+    # configuration kept) in the uninstall; 142 (--skipUserCfg) in the
+    # helper builder, writer and reader. Literals split as above.
+    let u = readFile(repoRoot / "libs/repro_addon/src/repro_addon/uninstall.nim")
+    check 139 in citedDecisions(u)
+    check 140 in citedDecisions(u)
+    for rel in ["scripts/build_apps.sh", "scripts/write_helper_deps.sh",
+                "libs/repro_test_support/src/repro_test_support/fresh_binary.nim"]:
+      let got = citedDecisions(readFile(repoRoot / rel))
+      checkpoint rel & " cites " & $got
+      check 142 in got
 
   test "none of them cites an Arch-track number or says §13 has no decision":
     for rel in files:
