@@ -774,6 +774,7 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
   try:
     let engine = engineFromEnv()
     record["engine"] = %engine
+    record["engineBuild"] = engineBuild(engine)
     let eng = enginePath(engine)
     dd = newDataDisk(4)
     # ------------------------------------------------------------------

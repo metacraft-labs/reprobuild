@@ -22,7 +22,7 @@
 ##
 ## *Mocking.* None: real units, a real HTTP origin, real signatures.
 
-import std/[json, strutils, times, unittest]
+import std/[json, os, strutils, times, unittest]
 
 import repro_test_support/reasoned_skip
 
@@ -134,7 +134,9 @@ suite "e2e_addon_agent_end_to_end":
         let record = %*{"gate": "e2e_addon_agent_end_to_end",
           "base": b.name, "arch": b.debArch,
           "backend": (if useIncus(): "incus" else: "qemu"),
-          "mutation": mutation(), "reprobuild": gitHead(),
+          "mutation": mutation(),
+          # tickUnits reads it; the record classifier requires it.
+          "gateMutation": getEnv("REPRO_A13_MUTATION"), "reprobuild": gitHead(),
           "started": $now().utc}
         let f = runBase(b, record)
         record["verdict"] = %(if f.len == 0: "green" else: "red")

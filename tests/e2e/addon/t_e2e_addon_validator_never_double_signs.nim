@@ -429,6 +429,7 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
   try:
     let engine = engineFromEnv()
     record["engine"] = %engine
+    record["engineBuild"] = engineBuild(engine)
     g = newGuest(b, diskGiB = 16, cpus = 4, memoryMB = 6144)
     g.boot()
     g.prepareBase()
@@ -454,6 +455,10 @@ suite Gate:
       for b in selectedBases():
         let record = %*{"gate": Gate, "base": b.name, "arch": b.debArch,
           "mutation": mutation(), "gateMutation": gateMutation(),
+          # ``gateMutation`` is this gate's own (REPRO_A12_MUTATION);
+          # tickUnits reads REPRO_A13_MUTATION, and the A13 record
+          # classifier requires it recorded too.
+          "a13GateMutation": getEnv("REPRO_A13_MUTATION"),
           "reprobuild": gitHead(), "started": $now().utc}
         let f = runBase(b, record)
         record["verdict"] = %(if f.len == 0: "green" else: "red")
