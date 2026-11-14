@@ -21,7 +21,7 @@ import std/[os, posix, strutils, unittest]
 
 import repro_infra
 import repro_addon/fingerprint
-import repro_addon/[addon_apply, ledger, uninstall]
+import repro_addon/[addon_apply, ledger, store_root, uninstall]
 
 let me = $getuid() & ":" & $getgid()
 
@@ -120,3 +120,112 @@ suite "a profile cannot declare a resource at a kept path":
     check keptPathRefusal(previous, "/etc/app/app.conf") == ""
     check keptPathRefusal(previous, "/etc/other") == ""
     check keptPathRefusal(previous, "") == ""
+
+# ---------------------------------------------------------------------------
+# reprobuild-pm issue 2026-11-14-addon-uninstall-removes-the-state-and-
+# attestation-key-after-a-failed-store-removal-so-the-discard-can-never-
+# complete (spec §10.2 Uninstall step 5, §13 decisions 62 and 113): a failed
+# removal of /repro must keep the state (ledger copy, attestation key), so a
+# second uninstall can finish the discard.
+#
+# No mocks of the unit under test: a real temporary state directory with a
+# real ledger and key file, and the uninstall's own ``removeStore`` and
+# ``keepStateWhenIncomplete``. The failing removal is a ``StoreRemover`` that
+# raises ``OSError`` as ``removeReproRoot`` does part-way: the host-level verb
+# needs root and a bootstrapped host (the VM gates cover that), and /repro
+# cannot be made to fail portably here.
+# ---------------------------------------------------------------------------
+
+proc stateScene(name: string): tuple[state: string; l: Ledger] =
+  let dir = getTempDir() / ("repro-uninstall-state-" & name & "-" &
+                            $getCurrentProcessId())
+  removeDir(dir)
+  createDir(dir / "agent")
+  writeFile(dir / "agent/attestation.key", "KEY")
+  let l = Ledger(generation: "g0", entries: @[
+    LedgerEntry(class: lcDir, path: dir / "gone-nowhere", mode: "0755",
+                owner: "0:0", collision: "adopt")])
+  writeLedger(ledgerCopyPath(dir), l)
+  (dir, l)
+
+suite "a failed store removal keeps the state":
+  test "the removal error makes the uninstall incomplete and keeps state":
+    let s = stateScene("failed")
+    var r: UninstallResult
+    let failed = removeStore(r, keepStore = false,
+      remover = proc () = raise newException(OSError, "Operation not permitted"),
+      mounted = false)
+    check failed
+    check ReproRoot notin r.removed
+    check r.errors.len == 1 and "Operation not permitted" in r.errors[0]
+    check keepStateWhenIncomplete(r, s.l, s.state)
+    check fileExists(s.state / "agent/attestation.key")
+    check fileExists(ledgerCopyPath(s.state))
+    check "are kept" in r.errors[^1]
+
+  test "a store still mounted is also a failed removal":
+    var r: UninstallResult
+    check removeStore(r, keepStore = false, remover = proc () = discard,
+                      mounted = true)
+    check "still mounted" in r.errors[0]
+
+  test "a successful removal is complete: the state may go":
+    let s = stateScene("ok")
+    var r: UninstallResult
+    check not removeStore(r, keepStore = false, remover = proc () = discard,
+                          mounted = false)
+    check ReproRoot in r.removed
+    check not keepStateWhenIncomplete(r, s.l, s.state)
+
+  test "--keep-store removes nothing and is not a failure":
+    var r: UninstallResult
+    var called = false
+    check not removeStore(r, keepStore = true,
+      remover = proc () = called = true, mounted = false)
+    check not called and r.errors.len == 0
+
+suite "the decision after the store's removal, and the second uninstall":
+  test "a failed store removal stops the uninstall before the state goes":
+    let s = stateScene("decision")
+    var r: UninstallResult
+    let failed = removeStore(r, false,
+      proc () = raise newException(OSError, "EPERM"), mounted = false)
+    check keepStateAfterStore(r, s.l, s.state, failed)
+    check fileExists(s.state / "agent/attestation.key")
+
+  test "a leftover aside without --keep-store also stops it":
+    let s = stateScene("aside")
+    var r: UninstallResult
+    r.leftAside.add("/repro/store/tmp/custody-aside/x")
+    r.errors.add("aside still there")
+    check keepStateAfterStore(r, s.l, s.state, false)
+
+  test "a clean store removal does not stop it":
+    let s = stateScene("clean")
+    var r: UninstallResult
+    check not keepStateAfterStore(r, s.l, s.state, false)
+
+  test "a second uninstall finds the key and the ledger and completes":
+    let s = stateScene("second")
+    var first: UninstallResult
+    let failed = removeStore(first, false,
+      proc () = raise newException(OSError, "EPERM"), mounted = false)
+    check keepStateAfterStore(first, s.l, s.state, failed)
+    # Second run: the ledger copy is readable and the key is still there.
+    let again = readLedger(ledgerCopyPath(s.state))
+    check again.generation == "g0"
+    check fileExists(s.state / "agent/attestation.key")
+    var second: UninstallResult
+    check not removeStore(second, false, proc () = discard, mounted = false)
+    check not keepStateAfterStore(second, again, s.state, false)
+
+  test "evidence is listed as removed only after its root is gone":
+    let dir = getTempDir() / ("repro-uninstall-root-" & $getCurrentProcessId())
+    createDir(dir)
+    var bad: UninstallResult
+    removeHostRoot(bad, dir, @[dir / "ev"],
+      proc (d: string) = raise newException(OSError, "busy"))
+    check bad.removed.len == 0 and bad.errors.len == 1
+    var good: UninstallResult
+    removeHostRoot(good, dir, @[dir / "ev"])
+    check dir in good.removed and (dir / "ev" & " (store evidence)") in good.removed

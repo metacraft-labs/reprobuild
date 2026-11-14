@@ -15,11 +15,37 @@ Usage::
     addon_a13_classify.py <cell> <record.json>      # prints the verdict
     addon_a13_classify.py --table                    # the expectations, JSON
 
+A record is judged by the cell it was run for, not only by its verdict
+(reprobuild-pm issue
+``2026-11-14-addon-a13-classifier-accepts-another-gates-record-and-an-empty-green-one``):
+
+* its ``gate`` is the cell's gate and its ``base`` the cell's base on the
+  record's ``arch`` (``debian-13`` -> ``debian-13-amd64``);
+* the builds it ran are the cell's (``BUILD``, parsed from ``EXPECT``): the
+  add-on build (``mutation``), the gate-level mutation (``gateMutation``, or
+  ``variant`` in the tick gate's record) and the engine build
+  (``engineBuild.mutation`` and ``engineBuild.testSeams`` for the engine
+  closure named by ``engine``). A gate that reads ``REPRO_A13_MUTATION``
+  must record it; an engine closure whose build is unknown is not as
+  expected;
+* a green record is complete (``GREEN``): every step ok, no ``exception``
+  step, at least the steps its gate records and its gate's final step last,
+  and for ``adopt`` the every-switch and live-cross-check steps and fields.
+
+On the command line the build of a record's ``engine`` closure is read from
+that closure's derivation (``nix-store -q --deriver`` and ``nix derivation
+show``, see ``resolve_engine_build``) and is the authority: an older record
+without ``engineBuild`` gets it, and a recorded ``engineBuild`` that
+disagrees with it is not as expected (``reconcile_engine_build``).
+``classify`` itself reads only the record.
+
 Exit 0 when the cell is as expected, 1 when it is not, 2 on a usage error.
 Importable: ``classify(cell, record) -> (as_expected, kind, why)``.
 """
 
 import json
+import os
+import subprocess
 import sys
 
 EXPECT = {
@@ -331,9 +357,195 @@ def on_target(kind, steps):
 
 
 
+def parse_build(description):
+    """The builds a cell's ``EXPECT`` description names, as a dict:
+    ``mutation`` (the add-on build), ``gateMutation`` (gate-level),
+    ``engine`` (the engine build) and ``engineSeams`` (the engine built with
+    ``REPRO_ADDON_TEST_SEAMS``). Raises ``ValueError`` on a form it does not
+    know, so a new ``EXPECT`` entry cannot be read as "no mutation"."""
+    b = {"mutation": "", "gateMutation": "", "engine": "", "engineSeams": False}
+    word = lambda rest: rest.split()[0].rstrip(",")
+    if description.startswith("none"):
+        pass
+    elif description.startswith("add-on build "):
+        b["mutation"] = word(description[len("add-on build "):])
+    elif description.startswith("add-on seam build "):
+        b["mutation"] = word(description[len("add-on seam build "):])
+    elif description.startswith("gate-level REPRO_A13_MUTATION="):
+        b["gateMutation"] = word(description[len("gate-level REPRO_A13_MUTATION="):])
+    elif description.startswith("engine build "):
+        b["engine"] = word(description[len("engine build "):])
+    elif description.startswith("engine seam build with "):
+        b["engine"] = word(description[len("engine seam build with "):])
+        b["engineSeams"] = True
+    else:
+        raise ValueError("unparsed build description: " + description)
+    return b
+
+
+# What the description of a kind does not say in its build words: convseam
+# is the product engine's seam build (no mutation; the conversion gate's
+# ordering check runs only under it).
+BUILD_OVERRIDES = {"convseam": {"engineSeams": True}}
+
+BUILD = {}
+for _kind, (_gate, _verdict, _desc) in EXPECT.items():
+    BUILD[_kind] = parse_build(_desc)
+    BUILD[_kind].update(BUILD_OVERRIDES.get(_kind, {}))
+
+GATE_MUTATION_FIELD = {"e2e_addon_tick_observes_a_fresh_cycle": "variant",
+                       "e2e_addon_validator_never_double_signs":
+                           "a13GateMutation"}
+"""Where a gate's record keeps its gate-level mutation
+(``REPRO_A13_MUTATION``), when not in ``gateMutation``: the tick gate
+records it as ``variant``; the validator gate's ``gateMutation`` is its own
+``REPRO_A12_MUTATION``, and the A13 one (read by ``tickUnits``) is
+``a13GateMutation``."""
+
+OTHER_GATE_MUTATIONS = {"e2e_addon_validator_never_double_signs":
+                        ["gateMutation"]}
+"""A gate's other gate-level mutations, which no A13 cell runs: each must be
+recorded and empty (the validator gate's ``REPRO_A12_MUTATION``)."""
+
+GATES_WITHOUT_GATE_MUTATION = {
+    "e2e_addon_confirm_or_revert",
+    "e2e_addon_floor_upgrade_keeps_installed_generations",
+    "e2e_addon_hard_reset_at_every_step",
+    "e2e_addon_refused_recovery_keeps_its_record",
+}
+"""The gates that never read ``REPRO_A13_MUTATION`` (neither themselves nor
+through ``agent_e2e_support.tickUnits``): their records may omit it. Every
+other gate's record must say which gate-level mutation it ran."""
+
+# A green record is complete: at least the steps its gate records, and the
+# gate's final step last. The counts and final steps are the round-7 green
+# records' (reprobuild-pm Measurements/
+# 2026-11-14-addon-a13-round7-split-757b04f116.json; adopt and conv on all
+# three bases at 757b04f116, the same count on each; convseam at
+# bc83794147, confirm, parity, refused and validator at a2a1d662ae,
+# agente2e and tickctl at cc02f0def7, floorupgrade at e63ec50fdd,
+# hardreset at 757b04f116). A later gate that records more steps still
+# passes; one that records fewer, or stops before its end, does not.
+GREEN = {
+    "adopt": (48, "after the rollback the state directories are unchanged"),
+    "agente2e": (17, "the sequence floor is 4"),
+    "confirm": (28, "uninstall"),
+    "conv": (68, "a carried unit does not start at boot while its restore fails"),
+    "convseam": (37, "a carried unit without default dependencies waits for "
+                     "the restore (held at its seam) and does not start when "
+                     "it fails"),
+    "floorupgrade": (24, "and its service serves page-prefloor"),
+    "hardreset": (181, "uninstall"),
+    "parity": (59, "the add-on guest's re-assert materialises the token and "
+                   "starts the failed vaultwarden again"),
+    "refused": (26, "uninstall"),
+    "tickctl": (6, "the file holds sequence 3's content"),
+    "validator": (32, "positive control: a second database's real double "
+                      "sign is found"),
+}
+for _kind, (_gate, _verdict, _desc) in EXPECT.items():
+    if (_verdict == "green") != (_kind in GREEN):
+        raise ValueError("GREEN and EXPECT disagree on " + _kind)
+
+ADOPT_EVERY_SWITCH_STEPS = [
+    "switch 1 of the updated profile succeeds",
+    "switch 2 of the updated profile succeeds",
+    "the add-on switch refuses a unit systemd loaded unconfined",
+    "after the generator and the manifest are gone, the switch succeeds",
+    "a switch that changes only a file the service depends_on judges it as "
+    "systemd loads it",
+]
+"""The adopt gate's every-switch and live-cross-check steps (spec §11.1; A13
+review round 7, finding 1), each of which a green adopt record carries ok."""
+
+
 def kind_of(cell):
     """The kind of a cell named ``<kind>-<base>``."""
     return cell.split("-", 1)[0].rstrip("0123456789")
+
+
+def base_of(cell):
+    """The base of a cell named ``<kind>-<base>`` (``debian-13``)."""
+    return cell.split("-", 1)[1] if "-" in cell else ""
+
+
+def build_mismatch(kind, rec):
+    """Why ``rec`` was not run under the builds ``kind`` names, or None."""
+    want = BUILD[kind]
+    gate = EXPECT[kind][0]
+    if "mutation" not in rec:
+        return "mutation not recorded, expected %r" % want["mutation"]
+    if rec["mutation"] != want["mutation"]:
+        return "mutation %r, expected %r" % (rec["mutation"], want["mutation"])
+    field = GATE_MUTATION_FIELD.get(gate, "gateMutation")
+    if field in rec:
+        got = rec[field]
+    elif gate in GATES_WITHOUT_GATE_MUTATION:
+        got = ""
+    else:
+        return "%s not recorded, expected %r" % (field, want["gateMutation"])
+    if got != want["gateMutation"]:
+        return "%s %r, expected %r" % (field, got, want["gateMutation"])
+    for other in OTHER_GATE_MUTATIONS.get(gate, []):
+        if rec.get(other, None) != "":
+            return "%s %r, expected it recorded and empty" % (
+                other, rec.get(other, "not recorded"))
+    if rec.get("engine"):
+        eb = rec.get("engineBuild")
+        if not isinstance(eb, dict) or "mutation" not in eb or "testSeams" not in eb:
+            reason = eb.get("error", "incomplete") if isinstance(eb, dict) \
+                else "not recorded"
+            return ("engineBuild of engine %s unknown (%s), expected engine "
+                    "build %r" % (rec["engine"], reason, want["engine"]))
+        if eb.get("closure") != rec["engine"]:
+            # The build of another closure says nothing about this one.
+            return "engineBuild is of closure %r, the record's engine is %r" % (
+                eb.get("closure"), rec["engine"])
+        if eb["mutation"] != want["engine"]:
+            return "engine build %r, expected %r" % (eb["mutation"], want["engine"])
+        if eb["testSeams"] is not want["engineSeams"]:
+            return "engineBuild testSeams %r, expected %r" % (
+                eb["testSeams"], want["engineSeams"])
+    elif want["engine"] or want["engineSeams"]:
+        return "the record names no engine, expected engine build %r%s" % (
+            want["engine"], " with testSeams" if want["engineSeams"] else "")
+    return None
+
+
+def green_incomplete(kind, rec):
+    """Why a green record of ``kind`` is not a complete run, or None."""
+    steps = rec.get("steps", [])
+    least, last = GREEN[kind]
+    red = [st["step"] for st in steps if not st.get("ok")]
+    if red:
+        return "green record with red steps: %r" % red
+    if any(st.get("step") == "exception" for st in steps):
+        return "green record with an exception step"
+    if len(steps) < least:
+        return "%d steps, expected at least %d" % (len(steps), least)
+    if steps[-1].get("step") != last:
+        return "final step %r, expected %r" % (steps[-1].get("step"), last)
+    if kind == "adopt":
+        names = [st["step"] for st in steps]
+        for needle in ADOPT_EVERY_SWITCH_STEPS:
+            if not any(n.startswith(needle) for n in names):
+                return "step %r missing" % needle
+        es = rec.get("everySwitch")
+        if not isinstance(es, dict):
+            return "everySwitch not recorded"
+        if es.get("ranAsRoot") is not False or not isinstance(es.get("exit"), int):
+            return "everySwitch %r, expected ranAsRoot false and an exit code" % (
+                {k: es.get(k) for k in ("exit", "ranAsRoot")})
+        if es["exit"] == 0 and es.get("restarted") is not True:
+            return "everySwitch exit 0 without a restart"
+        lc = rec.get("liveCrossCheck")
+        if not isinstance(lc, dict):
+            return "liveCrossCheck not recorded"
+        if (lc.get("started") is not False or lc.get("ranAsRoot") is not False
+                or lc.get("exit") in (0, None)):
+            return "liveCrossCheck %r, expected refused, not started, not root" % (
+                {k: lc.get(k) for k in ("exit", "started", "ranAsRoot")})
+    return None
 
 
 def classify(cell, rec):
@@ -341,25 +553,127 @@ def classify(cell, rec):
     kind = kind_of(cell)
     if kind not in EXPECT:
         return (False, kind, "no expectation for kind " + kind)
-    want = EXPECT[kind][1]
+    gate, want, _ = EXPECT[kind]
+    if rec.get("gate") != gate:
+        return (False, kind, "gate %r, expected %r" % (rec.get("gate"), gate))
+    base = "%s-%s" % (base_of(cell), rec.get("arch"))
+    if rec.get("base") != base:
+        return (False, kind, "base %r, expected %r" % (rec.get("base"), base))
+    why = build_mismatch(kind, rec)
+    if why:
+        return (False, kind, why)
     verdict = rec.get("verdict", "missing")
     if verdict != want:
         return (False, kind, "verdict %s, expected %s" % (verdict, want))
+    if want == "green":
+        why = green_incomplete(kind, rec)
+        if why:
+            return (False, kind, why)
     if not on_target_rec(kind, rec):
         return (False, kind, "not red (or green) for its own reason: the "
                 "target step or the evidence the record must carry is missing")
     return (True, kind, "as expected")
 
 
+def engine_build_from_derivation(engine, deriver, text):
+    """The engine build recorded in ``nix derivation show <deriver>``'s
+    output ``text``: ``{"closure", "deriver", "mutation", "testSeams"}``, or
+    ``{"closure", "deriver", "error"}`` when it cannot be read or is not the
+    derivation of ``engine``. Both output shapes: Nix >= 2.32's
+    ``{"version": N, "derivations": {"<name>.drv": ...}}`` with output paths
+    by base name, and the older ``{"/nix/store/<name>.drv": ...}`` with full
+    paths (https://nix.dev/manual/nix/latest/command-ref/new-cli/nix3-derivation-show)."""
+    out = {"closure": engine, "deriver": deriver}
+    try:
+        j = json.loads(text)
+        drvs = j["derivations"] if "derivations" in j else j
+        body = (drvs.get(deriver) or drvs.get(os.path.basename(deriver))
+                if len(drvs) != 1 else next(iter(drvs.values())))
+        paths = [os.path.basename(o.get("path", ""))
+                 for o in body["outputs"].values()]
+        env = body["env"]
+    except (ValueError, KeyError, TypeError, AttributeError, StopIteration) as e:
+        out["error"] = "unreadable derivation: %s" % e
+        return out
+    if os.path.basename(engine.rstrip("/")) not in paths:
+        out["error"] = "the deriver's outputs %r do not include the engine" % paths
+        return out
+    out["mutation"] = env.get("REPRO_ADDON_MUTATION", "")
+    out["testSeams"] = env.get("REPRO_ADDON_TEST_SEAMS", "") == "1"
+    return out
+
+
+def _run(argv):
+    return subprocess.run(argv, capture_output=True, text=True,
+                          check=True).stdout
+
+
+def resolve_engine_build(engine, run=_run):
+    """The build of the engine closure ``engine``, from its derivation (see
+    ``engine_build_from_derivation``). ``run(argv) -> stdout`` runs a
+    command; any failure is returned as ``error``, never raised."""
+    try:
+        deriver = run(["nix-store", "-q", "--deriver", engine]).strip()
+        if not deriver.endswith(".drv"):
+            return {"closure": engine, "error": "no deriver: %r" % deriver}
+        text = run(["nix", "--extra-experimental-features", "nix-command",
+                    "derivation", "show", deriver])
+    except (OSError, subprocess.CalledProcessError) as e:
+        return {"closure": engine, "error": "derivation lookup failed: %s" % e}
+    return engine_build_from_derivation(engine, deriver, text)
+
+
+def reconcile_engine_build(rec, resolve=resolve_engine_build):
+    """``rec`` with its ``engineBuild`` checked against the engine closure it
+    names, read from that closure's derivation (``resolve``). The derivation
+    is the authority: a record that lacks ``engineBuild`` (one written before
+    the gates recorded it) gets the resolved one, and a record whose
+    ``engineBuild`` disagrees with it has its ``engineBuild`` replaced by an
+    ``error`` saying so, which ``classify`` rejects. When the closure cannot
+    be resolved here (collected from this store, or no ``nix``), a recorded
+    ``engineBuild`` is kept: the gate read it from the same derivation while
+    the closure existed. Returns ``rec``."""
+    engine = rec.get("engine")
+    if not engine:
+        return rec
+    resolved = resolve(engine)
+    recorded = rec.get("engineBuild")
+    if "error" in resolved:
+        if recorded is None:
+            rec["engineBuild"] = resolved
+            rec["engineBuild"]["resolvedFrom"] = "the record's engine closure"
+        return rec
+    if recorded is None:
+        rec["engineBuild"] = resolved
+        rec["engineBuild"]["resolvedFrom"] = "the record's engine closure"
+        return rec
+    keys = ("closure", "mutation", "testSeams")
+    if not isinstance(recorded, dict) or any(
+            recorded.get(k) != resolved.get(k) for k in keys):
+        rec["engineBuild"] = {
+            "closure": engine,
+            "error": "the recorded engineBuild %r disagrees with the engine "
+                     "closure's derivation %r" % (
+                         {k: recorded.get(k) for k in keys}
+                         if isinstance(recorded, dict) else recorded,
+                         {k: resolved.get(k) for k in keys})}
+    return rec
+
+
 def main(argv):
     if len(argv) == 2 and argv[1] == "--table":
         print(json.dumps({"expect": EXPECT, "target": TARGET,
-                          "altTargets": ALT_TARGETS}, indent=1))
+                          "altTargets": ALT_TARGETS, "build": BUILD,
+                          "green": GREEN,
+                          "adoptEverySwitchSteps": ADOPT_EVERY_SWITCH_STEPS},
+                         indent=1))
         return 0
     if len(argv) != 3:
         print(__doc__)
         return 2
-    rec = json.load(open(argv[2]))
+    with open(argv[2]) as f:
+        rec = json.load(f)
+    rec = reconcile_engine_build(rec)
     ok, kind, why = classify(argv[1], rec)
     print("%s %s %s: %s" % ("OK" if ok else "UNEXPECTED", argv[1], kind, why))
     return 0 if ok else 1

@@ -518,7 +518,10 @@ proc gateMain*(gate: string; body: GateBody; bootstrap = true;
   for b in selectedBases():
     let record = %*{"gate": gate, "base": b.name, "arch": b.debArch,
       "backend": (if useIncus(): "incus" else: "qemu"),
-      "mutation": mutation(), "reprobuild": gitHead(),
+      "mutation": mutation(),
+      # tickUnits reads it (the tick gate also records it as ``variant``);
+      # the A13 record classifier requires it.
+      "gateMutation": getEnv("REPRO_A13_MUTATION"), "reprobuild": gitHead(),
       "started": $now().utc}
     let f = runAgentGate(b, record, body, bootstrap, extraFlags, diskGiB,
                          beforeBootstrap)

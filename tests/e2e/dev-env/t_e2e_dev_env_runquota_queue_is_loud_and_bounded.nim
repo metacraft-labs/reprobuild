@@ -99,7 +99,10 @@ proc startSaturatedRunQuota(c: M74Case; env: StringTableRef): PrivateRunQuota =
   # selected the private scope there, so the daemon and the CLI it is
   # handed would otherwise run under the host scope and be refused on a
   # host with a `runquota` account.
-  env["RUNQUOTA_ENDPOINT_SCOPE"] = getEnv("RUNQUOTA_ENDPOINT_SCOPE")
+  # Only when set: the call selects it on POSIX only, and an empty value is
+  # refused by the endpoint policy rather than read as "unset".
+  if existsEnv("RUNQUOTA_ENDPOINT_SCOPE"):
+    env["RUNQUOTA_ENDPOINT_SCOPE"] = getEnv("RUNQUOTA_ENDPOINT_SCOPE")
   result.daemon = startProcess(daemonBin, args = [
     "--socket", result.socket,
     "--cpu-milli", "1000",

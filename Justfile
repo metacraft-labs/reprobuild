@@ -850,6 +850,11 @@ lint:
     # issue 2026-10-31). Reads git and three files, no evaluation; the test
     # first, so a check that has lost its power cannot pass the tree.
     python3 ./tests/unit/test_package_nix_pending_sources.py 2>&1 | tee -a test-logs/lint.log
+    # The A13 record classifier judges a record by its cell's gate, base and
+    # builds, and a green record only when complete (reprobuild-pm issue
+    # 2026-11-14-addon-a13-classifier-accepts-another-gates-record-and-an-
+    # empty-green-one). Synthetic records, no VM, under a second.
+    python3 ./tests/unit/test_addon_a13_classify.py 2>&1 | tee -a test-logs/lint.log
     python3 ./scripts/check_package_nix_pending_sources.py 2>&1 | tee -a test-logs/lint.log
     # Every attestation mutation row must still be able to NAME ITS SITE in
     # the tree. Same class as its neighbours -- a source scan, no compiler,
