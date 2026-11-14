@@ -74504,9 +74504,22 @@ proc pushLockBackendPlans(identity: GitToolIdentity; workspaceRoot: string;
       project: resolved.projectName, repoName: repoName, repoPath: repoPath,
       oid: oid, relPath: lockPath))
 
+  # Central publication of the record-store checkout is opt-in
+  # (``[records] publish_locks``, Workspace-Manifests.md §"`publish_locks`").
+  # With it off the pre-push gate writes the record but deliberately does not
+  # commit or push it and passes cleanly, so there is nothing for ``repro push``
+  # to prove remotely: demanding it would refuse every push of a
+  # committed-lock-only workspace over the record the gate just wrote. Routed
+  # per-tier backends are published by the gate whatever this says, so only the
+  # record-store checkout itself is left out.
+  let publishRecordStore = manifestPublicationEnabled(workspaceRoot)
+  let recordStoreCanonical =
+    if recordStoreRoot.len > 0: canonicalExisting(recordStoreRoot) else: ""
+
   let composed = composeLockingRouting(workspaceRoot, identity.binaryPath)
   if not composed.hasExplicitRoutes:
-    if recordStoreRoot.len > 0 and gitTopLevel(recordStoreRoot).len > 0:
+    if publishRecordStore and recordStoreRoot.len > 0 and
+        gitTopLevel(recordStoreRoot).len > 0:
       for name in order:
         add(recordStoreRoot, "git-checkout", wvTeam, name,
           reposByName[name].path, preflight[name].headSha,
@@ -74523,6 +74536,9 @@ proc pushLockBackendPlans(identity: GitToolIdentity; workspaceRoot: string;
     if asg.store.isNil: continue
     let roots = asg.store.manifestLayerRoots()
     for root in roots:
+      if not publishRecordStore and recordStoreCanonical.len > 0 and
+          canonicalExisting(root) == recordStoreCanonical:
+        continue
       add(root, asg.backendKind, asg.visibility, asg.repoName, asg.repoPath,
         preflight[asg.repoName].headSha,
         lockFileRepoRelativePath(resolved.projectName, asg.repoName,
