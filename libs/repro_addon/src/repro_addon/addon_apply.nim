@@ -315,6 +315,10 @@ type
       ## or under an older floor version (``floorIntroducedUnits``): each
       ## is a changed unit file and a restart, listed apart in the plan;
       ## an agent apply refuses them (spec §10.1).
+    liveJudged*: seq[string]
+      ## The units step 6's carried-state live check read from systemd, by
+      ## the name it read them under (a template through its instances,
+      ## §13 decision 135); empty when it judged none.
     floorExceptions*: seq[string]
       ## The target profile's hardening-floor exceptions (spec §10.1,
       ## CONF-2): ``<unit>: <Setting>: <reason>`` each, printed in every
@@ -1320,23 +1324,9 @@ proc floorInstancesOf(tmpl: string; resources: openArray[SystemResource]):
     seq[string] =
   ## The instances of a floored template (``foo@.service``) the generation
   ## names: a drop-in for one, a unit that depends on one, or a unit of
-  ## that name. systemd will not show the template itself.
-  let at = tmpl.find('@')
-  let typ = tmpl[tmpl.rfind('.') .. ^1]
-  let stem = tmpl[0 .. at]
-  proc consider(n: string; acc: var seq[string]) =
-    if n.startsWith(stem) and n.endsWith(typ) and n.len > stem.len + typ.len and
-        n != tmpl and n notin acc:
-      acc.add(n)
-  for r in resources:
-    case r.kind
-    of srkSystemdSystemDropIn: consider(r.diUnit, result)
-    of srkSystemdSystemUnit:
-      consider(r.suName, result)
-      for t in r.suContent.splitWhitespace():
-        for w in t.split({'=', ' '}):
-          consider(w, result)
-    else: discard
+  ## that name. systemd will not show the template itself. The same reading
+  ## the carried-state live check uses (``carried_state.generationInstancesOf``).
+  generationInstancesOf(tmpl, resources)
 
 proc floorTemplateOf(name: string): string =
   ## ``foo@.service`` for an instance ``foo@x.service``, else "".
@@ -1923,17 +1913,11 @@ proc hostRunningInstances*(tmpl: string): seq[string] =
   ## The instances of the template ``tmpl`` (``a@.service``) systemd reports
   ## active, activating or reloading (``systemctl list-units``); empty when
   ## it does not say.
-  let at = tmpl.find('@')
-  if at <= 0: return
-  let pattern = tmpl[0 .. at] & "*" & tmpl[at + 1 .. ^1]
+  if tmpl.find('@') <= 0: return
   try:
-    let r = runSystemctl(@["list-units", "--plain", "--no-legend", "--no-pager",
-                           "--state=active,activating,reloading", "--", pattern])
+    let r = runSystemctl(runningInstancesArgs(tmpl))
     if r.exitCode != 0: return
-    for l in r.output.splitLines():
-      let w = l.splitWhitespace()
-      if w.len > 0 and w[0].startsWith(tmpl[0 .. at]) and w[0] != tmpl:
-        result.add(w[0])
+    result = parseRunningInstances(tmpl, r.output)
   except CatchableError: discard
 
 proc hostSystemdView*(path, unit: string; show: ShowProps;
@@ -3757,7 +3741,8 @@ proc carriedRefusalFor(opts: AddonApplyOptions; stateDir: string): string
 
 proc liveReachProblemsFor(opts: AddonApplyOptions; units: seq[string];
                           resources: openArray[SystemResource];
-                          stateDir: string): seq[string] =
+                          stateDir: string;
+                          judged: var seq[string]): seq[string] =
   ## After step 6's reload, before any start: each of ``units`` re-judged
   ## from ``systemctl show`` (``carried_state.liveReachProblems``, shared
   ## with ``runInfraApply``), and the carried-state refusal decided again
@@ -3767,8 +3752,19 @@ proc liveReachProblemsFor(opts: AddonApplyOptions; units: seq[string];
   when mutated("addon-live-reach-skipped"):
     return
   let root = if opts.carriedStateRoot.len > 0: opts.carriedStateRoot else: "/"
-  result = liveReachProblems(units, liveReachProfile(resources),
-    proc (u: string): Table[string, string] = showUnit(u), root)
+  # A template is judged through its observation instance, the instances
+  # the generation names and the ones systemd reports running (§13
+  # decision 135), never by its own name.
+  # One reading of each template's running instances serves both the
+  # check and the report of what it judged (``liveJudged``).
+  var runningSeen = initTable[string, seq[string]]()
+  let running = proc (t: string): seq[string] =
+    if t notin runningSeen: runningSeen[t] = hostRunningInstances(t)
+    runningSeen[t]
+  let profile = liveReachProfile(resources)
+  judged = liveJudgedNames(units, profile, running)
+  result = liveReachProblems(units, profile,
+    proc (u: string): Table[string, string] = showUnit(u), root, running)
   when not mutated("post-reload-refusal-skipped"):
     let why = carriedRefusalFor(opts, stateDir)
     if why.len > 0: result.add(why & " (decided again after the reload)")
@@ -5862,6 +5858,7 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
     purpose == "apply" and not replaying and
     generationAgentSequence(stateDir, committedPrevious) < opts.rollbackFloor
   var hookFailedAtFloor: seq[string]
+  var hookLiveJudged: seq[string]  # what step 6's live check read (§11.1)
 
   proc beforeSet(planId: string) {.gcsafe.} =
     ## Steps 2 and 3: pre-stop, then flip. A refusal here (an exclusive
@@ -6204,7 +6201,8 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
           # as confined must be confined as systemd reads it too, or nothing
           # starts (a problem stops step 7, and the switch reverts).
           let reachLive = liveReachProblemsFor(opts, liveUnits,
-                                               composed.resources, stateDir)
+                                               composed.resources, stateDir,
+                                               hookLiveJudged)
           if reachLive.len > 0:
             problems.add(reachLive.join("; ") & "; nothing was started")
           # A revert does not refuse on its own floor check (spec §10.1, A9
@@ -6597,6 +6595,7 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
   except CatchableError as e:
     infraError = "repro infra apply failed: " & e.msg
   result.generationId = hookGeneration
+  result.liveJudged = hookLiveJudged
   result.ledger = newLedger
   if keptAsDrift.len > 0 and not mutated("apply-prints-reviewed-plan"):
     # What steps 2 and 7 executed, not the reviewed plan: the re-check

@@ -151,6 +151,14 @@ def green(kind, base="debian-13"):
                                    "credentialChanged": True,
                                    "tokenReached": True}
         rec["revertStepReached"] = True
+        rec["steps"].insert(len(ADOPT_EVERY_SWITCH_STEPS), ok(
+            "decision 135, add-on host: a profile with a confined template "
+            "applies with carried state on the host, and the instances an "
+            "enabled target pulls in start confined"))
+        rec["decision135AddOn"] = {"exit": 0, "uidA": "61234",
+                                   "uidB": "61235", "ran": True,
+                                   "judgedTemplate": True,
+                                   "refusedTemplate": False}
     elif kind in ("conv", "convseam"):
         rec = base_record(CONV, base, engine=ENGINE,
                           seams=(kind == "convseam"))
@@ -160,6 +168,10 @@ def green(kind, base="debian-13"):
             rec["roundFourProbes"] = conv_probes()
             rec["decision79"] = {"target": {"ran": True},
                                  "socket": {"ran": True}}
+            rec["decision135Converted"] = {
+                "instances": ["eth-r9-tpl@a.service", "eth-r9-tpl@b.service"],
+                "ran": True, "judgedTemplate": True, "judgedByName": False,
+                "applyRefusedTemplate": False}
             rec["orderingCheck"] = "not run: the product engine carries no seam"
         else:
             rec["steps"] = padded([], 37, "a carried unit without default "
@@ -264,6 +276,34 @@ def red_record(kind, base="debian-13"):
                "the old one"),
             red("receipt receipt-before-dir-fsync: after the reset the receipt "
                 "is the old one or the new one", "on disk (0 bytes)")]
+    elif kind == "muttplconv":
+        rec = base_record(CONV, base, engine=ENGINE,
+                          engine_mutation="template-live-by-name")
+        rec["roundFourProbes"] = conv_probes()
+        rec["decision135Converted"] = {
+            "instances": ["eth-r9-tpl@a.service", "eth-r9-tpl@b.service"],
+            "ran": False, "judgedTemplate": False, "judgedByName": True,
+            "applyRefusedTemplate": True}
+        rec["steps"] = [ok("bootstrap"),
+                        red("decision 135, converted host: the full apply's "
+                            "live check judged the template through its "
+                            "observation instance and its instances"),
+                        red("decision 135, converted host: a confined "
+                            "template's instances an enabled target pulls in "
+                            "are up after the full apply")]
+    elif kind == "muttpladopt":
+        rec = base_record(ADOPT, base, mutation="template-live-by-name")
+        rec["decision135AddOn"] = {"exit": 1, "ran": False,
+                                   "judgedTemplate": False,
+                                   "refusedTemplate": True}
+        rec["steps"] = [ok("bootstrap"),
+                        red("decision 135, add-on host: the switch's live "
+                            "check judged the template through its "
+                            "observation instance and its instances"),
+                        red("decision 135, add-on host: a profile with a "
+                            "confined template applies with carried state on "
+                            "the host, and the instances an enabled target "
+                            "pulls in start confined")]
     else:
         raise KeyError(kind)
     rec["verdict"] = "red"
@@ -274,7 +314,7 @@ GREEN_KINDS = ["adopt", "conv", "convseam", "confirm", "floorupgrade",
                "hardreset", "refused", "tickctl", "agente2e", "validator",
                "parity"]
 RED_KINDS = ["mutexec", "mutimport", "mutstate", "mutunordered", "tickold",
-             "mutreceipt", "mutliveset"]
+             "mutreceipt", "mutliveset", "muttplconv", "muttpladopt"]
 
 
 class Accepts(unittest.TestCase):
@@ -545,6 +585,60 @@ class AGreenRecordIsComplete(unittest.TestCase):
                 rec = green(kind)
                 rec["steps"] = rec["steps"][-1:]
                 self.assertRejected(kind + "-debian-13", rec)
+
+
+class TheTemplateEvidence(unittest.TestCase):
+    """§13 decision 135: the template cases' evidence, green and red."""
+
+    def assertRejected(self, cell, rec):
+        ok_, _, why = cls.classify(cell, rec)
+        self.assertFalse(ok_, "%s accepted: %s" % (cell, why))
+
+    def test_a_green_record_whose_template_did_not_run(self):
+        rec = green("conv")
+        rec["decision135Converted"]["ran"] = False
+        self.assertRejected("conv-debian-13", rec)
+        rec = green("conv")
+        del rec["decision135Converted"]
+        self.assertRejected("conv-debian-13", rec)
+        rec = green("adopt")
+        rec["decision135AddOn"]["ran"] = False
+        self.assertRejected("adopt-debian-13", rec)
+        rec = green("adopt")
+        del rec["decision135AddOn"]
+        self.assertRejected("adopt-debian-13", rec)
+        # Green, instances up, but the live check never judged the template
+        # (the round-8 void run): not evidence of decision 135.
+        rec = green("adopt")
+        rec["decision135AddOn"]["judgedTemplate"] = False
+        self.assertRejected("adopt-debian-13", rec)
+        rec = green("conv")
+        rec["decision135Converted"]["judgedTemplate"] = False
+        self.assertRejected("conv-debian-13", rec)
+        rec = green("adopt")
+        rec["steps"] = [st for st in rec["steps"]
+                        if not st["step"].startswith("decision 135")]
+        self.assertRejected("adopt-debian-13", rec)
+
+    def test_a_falsifier_red_for_another_reason(self):
+        # Red at the template's step, but the template was not refused by
+        # name: the mutation did not make it red.
+        rec = red_record("muttplconv")
+        rec["decision135Converted"]["applyRefusedTemplate"] = False
+        self.assertRejected("muttplconv-debian-13", rec)
+        rec = red_record("muttplconv")
+        rec["decision135Converted"]["judgedByName"] = False
+        self.assertRejected("muttplconv-debian-13", rec)
+        rec = red_record("muttpladopt")
+        rec["decision135AddOn"]["refusedTemplate"] = False
+        self.assertRejected("muttpladopt-debian-13", rec)
+        # Under another build.
+        rec = red_record("muttpladopt")
+        rec["mutation"] = ""
+        self.assertRejected("muttpladopt-debian-13", rec)
+        rec = red_record("muttplconv")
+        rec["engineBuild"]["mutation"] = ""
+        self.assertRejected("muttplconv-debian-13", rec)
 
 
 class TheEngineBuildResolver(unittest.TestCase):

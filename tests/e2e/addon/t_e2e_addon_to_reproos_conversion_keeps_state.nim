@@ -115,7 +115,7 @@
 ## conversion is a reinstall, and ReproOS is the engine's full realisation
 ## on a re-identified guest.
 
-import std/[json, os, strutils, tables, times, unittest]
+import std/[json, os, sequtils, strutils, tables, times, unittest]
 
 import repro_test_support/reasoned_skip
 import repro_addon/generation0
@@ -518,6 +518,27 @@ const
           "ExecStart=/bin/sh -c 'id -u > /var/lib/a13-r7/%n.ran; exec /bin/sleep infinity'\n",
         enabled = false,
         address = "r7SocketSvc")"""
+  R9MarkerDir = "/var/lib/a13-r9"
+    ## Where the decision-135 template's instances write their uid.
+  R9Instances = ["eth-r9-tpl@a.service", "eth-r9-tpl@b.service"]
+  R9Resources = """
+      # A13 owner decision 135: a confined template service (static, not
+      # enabled) whose instances an enabled target pulls in. The full
+      # apply's live check judges it through its observation instance and
+      # its instances -- systemd refuses to show a template by name -- and
+      # the instances come up after the check.
+      systemdSystemUnit(name = "eth-r9-tpl@.service",
+        content = "[Unit]\nDescription=A13 decision-135 probe: a confined " &
+          "template\n\n[Service]\nProtectSystem=strict\nNoNewPrivileges=yes\n" &
+          "User=eth-validator\nGroup=eth-validator\nReadWritePaths=/var/lib/a13-r9\n" &
+          "ExecStart=/bin/sh -c 'id -u > /var/lib/a13-r9/%n.ran; exec /bin/sleep infinity'\n",
+        enabled = false,
+        address = "r9Template")
+      systemdSystemUnit(name = "eth-r9-tpl.target",
+        content = "[Unit]\nDescription=A13 decision-135 probe: wants two " &
+          "instances\nWants=eth-r9-tpl@a.service eth-r9-tpl@b.service\n\n" &
+          "[Install]\nWantedBy=multi-user.target\n",
+        address = "r9TemplateTarget")"""
   R5Plan = r5Unit("eth-r5-plan.service", "ProtectSystem=strict\n" &
     "NoNewPrivileges=yes\nUser=eth-validator\nGroup=eth-validator\n" &
     "ReadWritePaths=/var/lib/ethereum/validator\n", "r5Plan")
@@ -565,7 +586,7 @@ const
         address = "validatorShadow")"""
 
 const ProbeWritableDirs = ["/var/lib/a13-r4", "/var/lib/a13-r5", "/var/lib/a13-r6",
-                           "/var/lib/a13-r7"]
+                           "/var/lib/a13-r7", "/var/lib/a13-r9"]
   ## The writable directories the probe units name besides the carried one,
   ## created on the converted host before any probe is applied. systemd
   ## refuses to start a unit whose ``ReadWritePaths=`` names a missing path
@@ -593,7 +614,7 @@ static:
   # Every probe unit's writable path is one the gate creates, or the carried
   # directory itself: checked when the gate compiles.
   var all = PathReachProfile & R4Host & R5Plan & R5Resources & R6Resources &
-    R7Resources & ShadowResource
+    R7Resources & R9Resources & ShadowResource
   for (_, _, res, _, _) in R4Probes: all.add(res)
   for (_, _, res, _, _, _) in R5Probes: all.add(res)
   for (_, res, _, _, _) in R6Probes: all.add(res)
@@ -631,7 +652,9 @@ proc unitRan(g: Guest; unit: string; marker: string): (bool, JsonNode) =
       "/run/systemd/system/" & unit & ".d /etc/systemd/system/" & unit &
       ".d 2>&1; date --iso-8601=ns; echo '--- audit'; grep -a " & unit &
       " /var/lib/repro/system/generations/" & gen & "/log/apply.log 2>&1 | " &
-      "tail -10").stdout
+      # The audit log is binary: keep printable text only, so the record
+      # stays valid UTF-8 JSON (a raw byte made a round-8 record unreadable).
+      "tail -10 | LC_ALL=C tr -cd '\\11\\12\\15\\40-\\176'").stdout
 
 proc unitDiagnosis(g: Guest; unit: string): JsonNode =
   ## How systemd sees ``unit`` now, kept in the record of every run: its
@@ -898,10 +921,10 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
       raise newException(CatchableError, "the reference profile's " &
         "validator account is not where the gate adds the shadow unit")
     writeFile(work / "system.nim", src0.replace(anchor, anchor & ShadowResource &
-      R5Resources & R6Resources & R7Resources & R5TuneResource))
+      R5Resources & R6Resources & R7Resources & R9Resources & R5TuneResource))
     # The next generation: the same, without the tune drop-in (finding 3).
     writeFile(work / "system_next.nim", src0.replace(anchor, anchor &
-      ShadowResource & R5Resources & R6Resources & R7Resources))
+      ShadowResource & R5Resources & R6Resources & R7Resources & R9Resources))
     writeFile(work / PinsModule, pinsSource(pins))
     writeFile(work / "home.nim", readFile(FixtureDir / "home.nim"))
     for f in ["system.nim", "system_next.nim", PinsModule, "home.nim"]:
@@ -1386,6 +1409,41 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
            active == "active" and ran and ev["markerContent"].getStr != "0",
            $ev & "\n" & nw.exec("systemctl status --no-pager " & svc &
              " 2>&1 | tail -15").stdout)
+    # Owner decision 135 (decided 2026-11-14): a confined template service
+    # is judged through its instances, never by its own name, so on the
+    # converted host its instances come up after the full apply's check.
+    # Red under the engine build ``template-live-by-name`` (the template
+    # read by name, refused by systemd, held: the instances never start).
+    block:
+      var ev = newJObject()
+      var allRan = true
+      for inst in R9Instances:
+        let (ran, e) = nw.unitRan(inst, R9MarkerDir & "/" & inst & ".ran")
+        e["active"] = %nw.exec("systemctl is-active " & inst).stdout.strip()
+        ev[inst] = e
+        allRan = allRan and ran and e["active"].getStr == "active"
+      # What the full apply's live check read from systemd (its
+      # ``live check`` line): the template must be in it, through its
+      # observation instance and both instances, or this case judged
+      # nothing and its green says nothing about decision 135.
+      var judged: seq[string]
+      for l in applied.stdout.splitLines():
+        let k = l.find("live check   : ")
+        if k >= 0: judged = l[k + len("live check   : ") .. ^1].splitWhitespace()
+      let observe = "eth-r9-tpl@repro-addon-observe.service"
+      let judgedTemplate = observe in judged and
+        R9Instances.allIt(it in judged)
+      record["decision135Converted"] = %*{"instances": ev, "ran": allRan,
+        "judged": judged, "judgedTemplate": judgedTemplate,
+        "judgedByName": "eth-r9-tpl@.service" in judged,
+        "applyRefusedTemplate": "eth-r9-tpl@.service: its loaded unit cannot be read" in
+          (applied.stdout & applied.stderr)}
+      step("decision 135, converted host: the full apply's live check judged " &
+           "the template through its observation instance and its instances",
+           judgedTemplate, judged.join(" "))
+      step("decision 135, converted host: a confined template's instances " &
+           "an enabled target pulls in are up after the full apply",
+           allRan, $ev)
     # Finding 3: the next generation no longer declares the tune drop-in;
     # a host realised in full removes it (and keeps the requirement). Red
     # under the engine build ``full-apply-keeps-undeclared-dropins``.

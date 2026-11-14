@@ -587,6 +587,9 @@
 ## ``polkit-subject-rebind-trusted``         a polkit rule that rebinds
 ##                                           ``subject`` is judged by its
 ##                                           ``subject`` guards (decision 58)
+## ``template-live-by-name``                the live check reads a template
+##                                           by its own name, which systemd
+##                                           refuses (decision 135)
 ## ``narrowed-live-set``                     the add-on switch judges and
 ##                                           holds no unit in a switch that
 ##                                           changes no unit file (red in
@@ -1523,6 +1526,8 @@ const
                           "boot-closure-reads-generation-dropins",
                           "polkit-subject-rebind-trusted",
                           "narrowed-live-set",
+                          # A13 review round 8, §13 decision 135.
+                          "template-live-by-name",
                           "reissue-skips-targets",
                           "reissue-skips-sockets",
                           "reissue-skips-unit-state",

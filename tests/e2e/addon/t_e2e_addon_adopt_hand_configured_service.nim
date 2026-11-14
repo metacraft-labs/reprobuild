@@ -866,6 +866,74 @@ proc runBase(m: SnapshotMirror; b: BaseImage; record: JsonNode): seq[string] =
          after3.exitCode == 0, after3.stdout & after3.stderr)
     if fails.len > 0: return fails
 
+    # --- 2f. A confined template on an add-on host with carried state (§13
+    # decision 135): the switch's live check judges the template through its
+    # observation instance and its instances -- systemd refuses to show a
+    # template by name -- so a profile with one applies, and the instances
+    # an enabled target pulls in start. Falsifier: the add-on build
+    # template-live-by-name, under which the template is read by name and
+    # the switch is refused. The template must read as confined to the
+    # static analysis, or the live check never judges it: no specifier in
+    # a path setting (``RuntimeDirectory=a13r9-%i`` read as reaching
+    # everything, and the round-8 run of this case judged nothing; the
+    # record's voidRuns). The step that reads the switch's ``carried-state
+    # live check judged`` section is what shows it was judged.
+    let tplUnit = "a13r9-tpl@.service"
+    let tplProfile = mergeSkeletons([skeleton2,
+      "systemd.systemUnit {\n  name = \"" & tplUnit & "\"\n" &
+      "  content = \"[Unit]\nDescription=A13 decision-135 probe: a confined template\n\n" &
+      "[Service]\nDynamicUser=yes\nNoNewPrivileges=yes\n" &
+      "StateDirectory=a13r9-tpl\n" &
+      "ExecStart=/bin/sh -c 'id -u > /var/lib/a13r9-tpl/%i.uid; exec /bin/sleep infinity'\n\"\n" &
+      "  enabled = false\n" &
+      "  floorExceptions = [\"serviceFloor: the A13 decision-135 template probe\"]\n}\n\n" &
+      "systemd.systemUnit {\n  name = \"a13r9-tpl.target\"\n" &
+      "  content = \"[Unit]\nDescription=A13 decision-135 probe: wants two instances\n" &
+      "Wants=a13r9-tpl@a.service a13r9-tpl@b.service\n\n[Install]\n" &
+      "WantedBy=multi-user.target\n\"\n}\n"])
+    discard g.run("mkdir -p /var/lib/repro/system/carried && chmod 700 " &
+      "/var/lib/repro/system/carried && printf '%s' '{\"schema\": " &
+      "\"repro-state-set/1\", \"host\": \"a13r9\", \"createdAt\": " &
+      "\"2026-11-14T00:00:00Z\", \"entries\": []}' > " &
+      "/var/lib/repro/system/carried/state-set.json")
+    let tp = g.applyProfile(repro, "tpl", tplProfile)
+    let tpOut = tp.stdout & tp.stderr
+    let uidA = g.run("cat /var/lib/a13r9-tpl/a.uid 2>/dev/null || true").strip()
+    let uidB = g.run("cat /var/lib/a13r9-tpl/b.uid 2>/dev/null || true").strip()
+    # The switch's report of what its live check read from systemd.
+    var tplJudged: seq[string]
+    var inJudged = false
+    for l in tpOut.splitLines():
+      if l.startsWith("carried-state live check judged:"):
+        inJudged = true
+      elif inJudged and l.startsWith("  "):
+        tplJudged.add(l.strip())
+      else:
+        inJudged = false
+    let tplObserve = "a13r9-tpl@repro-addon-observe.service"
+    let tplJudgedOk = tplObserve in tplJudged and
+      "a13r9-tpl@a.service" in tplJudged and "a13r9-tpl@b.service" in tplJudged
+    record["decision135AddOn"] = %*{"exit": tp.exitCode, "uidA": uidA, "uidB": uidB,
+      "ran": uidA.len > 0 and uidB.len > 0 and uidA != "0" and uidB != "0",
+      "judged": tplJudged, "judgedTemplate": tplJudgedOk,
+      "refusedTemplate": (tplUnit & ": its loaded unit cannot be read") in tpOut}
+    step("decision 135, add-on host: the switch's live check judged the " &
+         "template through its observation instance and its instances",
+         tplJudgedOk, tplJudged.join(" ") & "\n" & tpOut)
+    step("decision 135, add-on host: a profile with a confined template " &
+         "applies with carried state on the host, and the instances an " &
+         "enabled target pulls in start confined",
+         tp.exitCode == 0 and uidA.len > 0 and uidB.len > 0 and
+           uidA != "0" and uidB != "0",
+         tpOut & "\nuids: " & uidA & " " & uidB)
+    discard g.run("rm -f /var/lib/repro/system/carried/state-set.json && " &
+      "rmdir /var/lib/repro/system/carried 2>/dev/null; systemctl daemon-reload")
+    let after4 = g.applyProfile(repro, "skeleton2d", skeleton2)
+    step("after the manifest is gone, the switch back to the skeleton " &
+         "succeeds (decision 135 probe removed)",
+         after4.exitCode == 0, after4.stdout & after4.stderr)
+    if fails.len > 0: return fails
+
     # --- 3. Converge: hardened, from the store, state untouched.
     let work = g.runDir / "a13"
     createDir(work)

@@ -214,7 +214,18 @@ EXPECT.update({
     "mutreissuesock": ("e2e_addon_to_reproos_conversion_keeps_state", "red",
                        "engine build reissue-skips-sockets"),
 })
+EXPECT.update({
+    # Round 8 of the A13 review, decision 135: a template judged through its
+    # instances. Neither cell stops at its first red step (a refused full
+    # apply is red before the template's own step).
+    "muttplconv": ("e2e_addon_to_reproos_conversion_keeps_state", "red",
+                   "engine build template-live-by-name"),
+    "muttpladopt": ("e2e_addon_adopt_hand_configured_service", "red",
+                    "add-on build template-live-by-name"),
+})
 TARGET.update({
+    "muttplconv": "decision 135, converted host: the full apply's live check judged",
+    "muttpladopt": "decision 135, add-on host: the switch's live check judged",
     "mutreissuetgt": "decision 79, target:",
     "mutreissuesock": "decision 79, socket:",
 })
@@ -303,6 +314,17 @@ def on_target_rec(kind, rec):
                 cs.get("restarted") is True and
                 cs.get("credentialChanged") is True and
                 cs.get("credentialsOnly") is True)
+    if kind == "muttplconv":
+        # The template was refused for being read by name, and its instances
+        # never came up.
+        ev = rec.get("decision135Converted", {})
+        return (on_target(kind, steps) and ev.get("ran") is False and
+                ev.get("applyRefusedTemplate") is True and
+                ev.get("judgedByName") is True)
+    if kind == "muttpladopt":
+        ev = rec.get("decision135AddOn", {})
+        return (on_target(kind, steps) and ev.get("refusedTemplate") is True and
+                ev.get("exit", 0) != 0)
     if kind == "mutadoptprofile":
         # The silent revert itself: the gate reached the revert step (its
         # record says so) and the old profile's switch ran (no scope or drift
@@ -346,7 +368,9 @@ def on_target_rec(kind, rec):
                     for l in labels) and
                 ctl.get("exit") == 0 and ctl.get("ran") is True and
                 d.get("target", {}).get("ran") is True and
-                d.get("socket", {}).get("ran") is True)
+                d.get("socket", {}).get("ran") is True and
+                rec.get("decision135Converted", {}).get("ran") is True and
+                rec.get("decision135Converted", {}).get("judgedTemplate") is True)
     if kind == "mutreceipt":
         # At receipt-before-dir-fsync the receipt on the disk is empty (the
         # rename committed, the data not); before the rename the old receipt
@@ -470,6 +494,7 @@ for _kind, (_gate, _verdict, _desc) in EXPECT.items():
     if (_verdict == "green") != (_kind in GREEN):
         raise ValueError("GREEN and EXPECT disagree on " + _kind)
 
+ADOPT_TEMPLATE_STEP = "decision 135, add-on host:"
 ADOPT_EVERY_SWITCH_STEPS = [
     "switch 1 of the updated profile succeeds",
     "switch 2 of the updated profile succeeds",
@@ -578,6 +603,15 @@ def green_incomplete(kind, rec):
         if any(got[k] is not v if isinstance(v, bool) else got[k] != v
                for k, v in want.items()):
             return "credentialSwitch %r, expected %r" % (got, want)
+        # §13 decision 135: a profile's confined template applies, and the
+        # instances an enabled target pulls in started.
+        if not any(n.startswith(ADOPT_TEMPLATE_STEP) for n in names):
+            return "step %r missing" % ADOPT_TEMPLATE_STEP
+        d135 = rec.get("decision135AddOn")
+        if (not isinstance(d135, dict) or d135.get("ran") is not True or
+                d135.get("judgedTemplate") is not True):
+            return ("decision135AddOn %r, expected the template judged and its "
+                    "instances run" % d135)
         lc = rec.get("liveCrossCheck")
         if not isinstance(lc, dict):
             return "liveCrossCheck not recorded"

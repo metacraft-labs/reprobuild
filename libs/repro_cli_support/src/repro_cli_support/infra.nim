@@ -1176,6 +1176,9 @@ proc runInfraApply(args: openArray[string]): int =
   echo "  broker used  : " & $applyResult.usedBroker &
     " (launches: " & $applyResult.brokerLaunchCount & ")"
   echo "  audit log    : " & applyResult.auditLogPath
+  if applyResult.liveJudged.len > 0:
+    # What the carried-state live check read from systemd (§11.1).
+    echo "  live check   : " & applyResult.liveJudged.join(" ")
   if applyResult.restartNeeded:
     echo "  NOTE: a reboot is required to finish one or more changes; " &
       "Reprobuild does not auto-reboot."
@@ -1529,6 +1532,9 @@ proc runSystemSync(args: openArray[string]): int =
   echo "  broker used  : " & $applyResult.usedBroker &
     " (launches: " & $applyResult.brokerLaunchCount & ")"
   echo "  audit log    : " & applyResult.auditLogPath
+  if applyResult.liveJudged.len > 0:
+    # What the carried-state live check read from systemd (§11.1).
+    echo "  live check   : " & applyResult.liveJudged.join(" ")
   if applyResult.restartNeeded:
     echo "  NOTE: a reboot is required to finish one or more changes; " &
       "Reprobuild does not auto-reboot."
