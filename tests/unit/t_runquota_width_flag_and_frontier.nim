@@ -57,7 +57,15 @@ suite "the granted width on the command line":
 
   test "a joined flag takes the width attached":
     check withWidthFlag(["nim", "c", "x.nim"], "--parallelBuild:", 4) ==
-      @["nim", "c", "x.nim", "--parallelBuild:4"]
+      @["nim", "c", "--parallelBuild:4", "x.nim"]
+    # Nothing may follow the source file: nim reads it as a program argument.
+    check withWidthFlag(["nim", "c", "-d:release", "x.nim"],
+      "--parallelBuild:", 4) ==
+      @["nim", "c", "-d:release", "--parallelBuild:4", "x.nim"]
+    check withWidthFlag(["nim", "c"], "--parallelBuild:", 4) ==
+      @["nim", "c", "--parallelBuild:4"]
+    check withWidthFlag(["bin", "--", "x"], "--parallelBuild:", 4) ==
+      @["bin", "--parallelBuild:4", "--", "x"]
     check withWidthFlag(["nim", "--parallelBuild:0", "c"],
       "--parallelBuild:", 4) == @["nim", "--parallelBuild:4", "c"]
 

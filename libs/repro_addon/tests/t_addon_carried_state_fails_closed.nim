@@ -1559,3 +1559,89 @@ suite "the live cross-check is one shared check (round 6)":
     check liveReachProblems(["lv.service"], p, failing, root).len == 1
 
 removeDir(scratch)
+
+suite "held units' triggers, the triggers to fire again, and requirers of a refused unit (decisions 151-153)":
+  # The release's systemd reads and starts are closures (``LiveHost``), so
+  # the order and the choice of what is stopped and started is tested
+  # without a running systemd; the VM cases run the real manager.
+  proc host9(active: seq[string]; shows: Table[string, Table[string, string]];
+             log: ref seq[string]): LiveHost =
+    LiveHost(
+      isActive: proc (u: string): bool = u in active,
+      show: proc (u: string): Table[string, string] =
+        if u notin shows: raise newException(OSError, "no unit " & u)
+        shows[u],
+      start: proc (u: string): tuple[ok: bool, output: string] =
+        log[].add("start " & u)
+        (true, ""),
+      stop: proc (u: string): tuple[ok: bool, output: string] =
+        log[].add("stop " & u)
+        (true, ""),
+      resetFailed: proc (u: string) = log[].add("reset-failed " & u))
+
+  test "decision 151: a held unit's loaded triggers are read from its TriggeredBy=":
+    let shows = {
+      "a.service": {"TriggeredBy": "a.socket a.path foo.target"}.toTable,
+      "tpl@x.service": {"TriggeredBy": "tpl@x.timer"}.toTable}.toTable
+    var log = new seq[string]
+    check loadedTriggersOf(["a.service", "tpl@x.service", "gone.service"],
+      host9(@[], shows, log)) == @["a.socket", "a.path", "tpl@x.timer"]
+
+  test "decision 151: the profile's own triggers of held units, an instance's by its template":
+    let p = parseSystemProfile("""systemd.systemUnit {
+  name = "x.socket"
+  content = "[Socket]\nListenStream=/run/x\n"
+}
+systemd.systemUnit {
+  name = "bk.timer"
+  content = "[Timer]
+OnActiveSec=1
+Unit=bk@daily.service
+"
+}
+systemd.systemUnit {
+  name = "other.timer"
+  content = "[Timer]
+OnActiveSec=1
+"
+}
+""")
+    check profileTriggersOf(p, ["x.service", "bk@.service"]) == @["x.socket", "bk.timer"]
+
+  test "decision 151: a stopped trigger comes back with reset-failed, but a refused unit's and an unloaded one":
+    let shows = {
+      "a.socket": {"LoadState": "loaded"}.toTable,
+      "gone.path": {"LoadState": "not-found"}.toTable,
+      "r.socket": {"LoadState": "loaded"}.toTable}.toTable
+    var log = new seq[string]
+    check triggerRestarts(["a.socket", "gone.path", "r.socket"], ["r.socket"],
+      host9(@[], shows, log)).len == 0
+    check log[] == @["reset-failed a.socket", "start a.socket"]
+
+  test "decision 152: the triggers looked at are every held unit's, not only the drivers' starts":
+    check fireSources(["d.timer"], ["u.timer", "d.timer"]) == @["d.timer", "u.timer"]
+
+  test "decision 152: an instance timer of a judged template that fired under the hold":
+    let heldShow = {"ConditionResult": "no", "ConditionTimestampMonotonic": "5000"}.toTable
+    var shows = {"tpl@daily.timer": {"Triggers": "tpl@daily.service"}.toTable}.toTable
+    shows["tpl@daily.service"] = heldShow
+    var log = new seq[string]
+    check firedUnderHold(["tpl@daily.timer"], ["tpl@.service"], [],
+      host9(@["tpl@daily.timer"], shows, log), 1000) == @["tpl@daily.service"]
+
+  test "decision 153: a unit that requires or binds to a refused unit stays held, transitively":
+    let shows = {
+      "dep.service": {"Requires": "bad.service network.target"}.toTable,
+      "dep2.service": {"BindsTo": "dep.service"}.toTable,
+      "inst.service": {"Requires": "tpl@a.service"}.toTable,
+      "free.service": {"Requires": "other.service", "Wants": "bad.service"}.toTable}.toTable
+    var log = new seq[string]
+    let held = requiringRefused(
+      ["dep2.service", "dep.service", "inst.service", "free.service"],
+      ["bad.service", "tpl@.service"], host9(@[], shows, log))
+    var units: seq[string]
+    for (u, because) in held: units.add(u & " <- " & because)
+    check units.len == 3
+    check "dep.service <- bad.service" in units
+    check "dep2.service <- dep.service" in units
+    check "inst.service <- tpl@a.service" in units

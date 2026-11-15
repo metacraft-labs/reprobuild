@@ -160,6 +160,10 @@ def green(kind, base="debian-13"):
                                    "uidB": "61235", "ran": True,
                                    "judgedTemplate": True,
                                    "refusedTemplate": False}
+        rec["decision151AddOn"] = {
+            "pass": {"exit": 0, "ok": True},
+            "refused": {"exit": 1, "notFailed": True, "refusedForReason": True},
+            "recovered": {"exit": 0, "ok": True}}
     elif kind in ("conv", "convseam"):
         rec = base_record(CONV, base, engine=ENGINE,
                           seams=(kind == "convseam"))
@@ -176,6 +180,13 @@ def green(kind, base="debian-13"):
             rec["decision137"] = {
                 l: {"ran": True, "triggerActive": "active",
                     "refusedNotLoaded": False} for l in ("socket", "timer")}
+            up = {l: {"triggerActive": True, "ran": True,
+                      "trigger": "ActiveState=active Result=success"}
+                  for l in ("socket", "path")}
+            rec["decision151"] = {"firstApply": up, "nextApply": dict(up)}
+            rec["decision153"] = {"exit": 1, "reported": True,
+                                  "heldInEtc": True, "started": False,
+                                  "judged": True}
             rec["orderingCheck"] = "not run: the product engine carries no seam"
         else:
             rec["steps"] = padded([], 37, "a carried unit without default "
@@ -285,6 +296,41 @@ def red_record(kind, base="debian-13"):
                "the old one"),
             red("receipt receipt-before-dir-fsync: after the reset the receipt "
                 "is the old one or the new one", "on disk (0 bytes)")]
+    elif kind in ("mutreissuetgt", "mutreissuesock"):
+        rec = base_record(CONV, base, engine=ENGINE, engine_mutation=(
+            "reissue-skips-targets" if kind == "mutreissuetgt"
+            else "reissue-skips-sockets"))
+        mine = "target" if kind == "mutreissuetgt" else "socket"
+        other = "socket" if kind == "mutreissuetgt" else "target"
+        rec["decision79"] = {mine: {"ran": False}, other: {"ran": True}}
+        rec["steps"] = [ok("bootstrap"),
+                        red("decision 79, %s: a confined static service an "
+                            "enabled %s pulls in is up after the apply" %
+                            (mine, mine)),
+                        red("stopped at the first red step under the mutation")]
+    elif kind == "muttrigconv":
+        rec = base_record(CONV, base, engine=ENGINE,
+                          engine_mutation="triggers-left-running")
+        hit = {l: {"triggerActive": False, "ran": False,
+                   "trigger": "ActiveState=failed Result=trigger-limit-hit"}
+               for l in ("socket", "path")}
+        rec["decision151"] = {"firstApply": hit}
+        rec["steps"] = [ok("bootstrap"),
+                        red("decision 151, full apply (first realisation): a "
+                            "socket with connections arriving and a path unit "
+                            "whose path exists, held through the apply, are "
+                            "active after it and their services run")]
+    elif kind == "muttrigadopt":
+        rec = base_record(ADOPT, base, mutation="triggers-left-running")
+        rec["decision151AddOn"] = {"pass": {"exit": 0, "ok": False, "state": [
+            "ActiveState=failed Result=trigger-limit-hit ",
+            "ActiveState=failed Result=trigger-limit-hit ", "", ""]}}
+        rec["steps"] = [ok("bootstrap"),
+                        red("decision 151, add-on switch: a socket with "
+                            "connections arriving and a path unit whose path "
+                            "exists, held through a passing switch, are "
+                            "active after it and their services run"),
+                        red("stopped at the first red step under the mutation")]
     elif kind == "mutnoedges":
         rec = base_record(CONV, base, engine=ENGINE,
                           engine_mutation="trigger-edges-omitted")
@@ -352,7 +398,8 @@ GREEN_KINDS = ["adopt", "conv", "convseam", "confirm", "floorupgrade",
                "parity", "heldwin"]
 RED_KINDS = ["mutexec", "mutimport", "mutstate", "mutunordered", "tickold",
              "mutreceipt", "mutliveset", "mutcallsite", "muttplconv", "muttpladopt",
-             "mutholdwin", "mutnoedges"]
+             "mutholdwin", "mutnoedges", "mutreissuetgt", "mutreissuesock",
+             "muttrigconv", "muttrigadopt"]
 
 
 class Accepts(unittest.TestCase):
@@ -748,6 +795,83 @@ class TheTriggerOrderEvidence(unittest.TestCase):
         rec = red_record("mutnoedges")
         rec["engineBuild"]["mutation"] = ""
         self.assertRejected("mutnoedges-debian-13", rec)
+
+
+class TheTriggersOfHeldUnits(unittest.TestCase):
+    """§13 decisions 151 and 153: their evidence, green and red."""
+
+    def assertRejected(self, cell, rec):
+        ok_, _, why = cls.classify(cell, rec)
+        self.assertFalse(ok_, "%s accepted: %s" % (cell, why))
+
+    def test_a_green_conversion_whose_trigger_failed(self):
+        for apply in ("firstApply", "nextApply"):
+            for l in ("socket", "path"):
+                with self.subTest(apply=apply, trigger=l):
+                    rec = green("conv")
+                    rec["decision151"][apply] = dict(rec["decision151"][apply])
+                    rec["decision151"][apply][l] = {"triggerActive": False,
+                                                    "ran": True}
+                    self.assertRejected("conv-debian-13", rec)
+        rec = green("conv")
+        del rec["decision151"]["nextApply"]
+        self.assertRejected("conv-debian-13", rec)
+
+    def test_a_green_conversion_whose_requirer_ran(self):
+        for field, value in (("started", True), ("reported", False),
+                             ("heldInEtc", False), ("exit", 0)):
+            with self.subTest(field=field):
+                rec = green("conv")
+                rec["decision153"][field] = value
+                self.assertRejected("conv-debian-13", rec)
+
+    def test_a_green_adopt_whose_trigger_failed(self):
+        for part, field in (("pass", "ok"), ("refused", "notFailed"),
+                            ("refused", "refusedForReason"),
+                            ("recovered", "ok")):
+            with self.subTest(part=part, field=field):
+                rec = green("adopt")
+                rec["decision151AddOn"][part][field] = False
+                self.assertRejected("adopt-debian-13", rec)
+
+    def test_a_trigger_falsifier_red_for_another_reason(self):
+        for l in ("socket", "path"):
+            with self.subTest(trigger=l):
+                rec = red_record("muttrigconv")
+                rec["decision151"]["firstApply"][l]["trigger"] = \
+                    "ActiveState=inactive Result=success"
+                self.assertRejected("muttrigconv-debian-13", rec)
+        rec = red_record("muttrigadopt")
+        rec["decision151AddOn"]["pass"]["state"][1] = "ActiveState=active Result=success "
+        self.assertRejected("muttrigadopt-debian-13", rec)
+        rec = red_record("muttrigadopt")
+        rec["mutation"] = ""
+        self.assertRejected("muttrigadopt-debian-13", rec)
+
+
+class OwnEvidenceIsRecorded(unittest.TestCase):
+    """A13 review round 9: a falsifier's own evidence must be in the record,
+    not merely absent from it."""
+
+    def assertRejected(self, cell, rec):
+        ok_, _, why = cls.classify(cell, rec)
+        self.assertFalse(ok_, "%s accepted: %s" % (cell, why))
+
+    def test_a_reissue_falsifier_without_its_own_half(self):
+        for kind, mine in (("mutreissuetgt", "target"),
+                           ("mutreissuesock", "socket")):
+            with self.subTest(kind=kind):
+                rec = red_record(kind)
+                del rec["decision79"][mine]
+                self.assertRejected(kind + "-debian-13", rec)
+                rec = red_record(kind)
+                rec["decision79"][mine] = {}
+                self.assertRejected(kind + "-debian-13", rec)
+
+    def test_a_held_window_falsifier_without_the_count_before(self):
+        rec = red_record("mutholdwin")
+        del rec["decision136"]["startedBefore"]
+        self.assertRejected("mutholdwin-debian-13", rec)
 
 
 class TheHoldWindowEvidence(unittest.TestCase):

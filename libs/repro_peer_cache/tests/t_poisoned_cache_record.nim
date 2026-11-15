@@ -73,9 +73,7 @@
 ## The built edge is MONITORED by the engine's io-monitor (owner decision
 ## 2026-10-29, Edge-Derived-Identities.md §3.4 item 1 rider: only a monitored
 ## or builtin record crosses hosts; until then the compile was evidenced by
-## its make depfile, which the engine now keeps local). Where io-mon cannot
-## prove detached-descendant quiescence (`NoTreeLifetimeGuard`, macOS) no
-## monitored edge is published, and the cases are skipped with that reason.
+## its make depfile, which the engine now keeps local).
 ##
 ## MOCK POLICY — none: real sockets, real TLS with host-CA leaves, the real
 ## build engine and a real C compiler, real disk stores, the real sink
@@ -95,8 +93,6 @@ import repro_cli_support/peer_cache_wiring
 import ./m7_test_pki
 import repro_test_support/reasoned_skip
 from repro_test_support import prepareMonitorTools, ReprobuildRepoRoot
-from repro_test_support/descendant_guard_expectations import
-  NoTreeLifetimeGuard
 
 const
   ConfigV1 = "#define GREETING \"hello from config v1\"\n"
@@ -216,13 +212,6 @@ suite "Distributed-Execution M7: poisoned cache records":
     if ccPath().len == 0:
       checkpoint("no C compiler on PATH; the test needs a real build")
       fail()
-    elif NoTreeLifetimeGuard:
-      skip("io-mon cannot prove detached-descendant quiescence on this " &
-        "platform, so every monitored capture fails closed and no monitored " &
-        "edge is published; since the owner decision of 2026-10-29 a " &
-        "depfile-evidenced edge does not cross hosts either " &
-        "(Edge-Derived-Identities.md §3.4 item 1 rider), so no node here " &
-        "has a record to serve")
     else:
       let base = normalizedPath(absolutePath(getTempDir() /
         ("repro-m7-poison-" & $getCurrentProcessId())))
@@ -556,13 +545,6 @@ suite "Distributed-Execution M7: poisoned cache records":
     if ccPath().len == 0:
       checkpoint("no C compiler on PATH; the test needs a real build")
       fail()
-    elif NoTreeLifetimeGuard:
-      skip("io-mon cannot prove detached-descendant quiescence on this " &
-        "platform, so every monitored capture fails closed and no monitored " &
-        "edge is published; since the owner decision of 2026-10-29 a " &
-        "depfile-evidenced edge does not cross hosts either " &
-        "(Edge-Derived-Identities.md §3.4 item 1 rider), so no node here " &
-        "has a record to serve")
     else:
       let base = normalizedPath(absolutePath(getTempDir() /
         ("repro-m7-poison-trusted-" & $getCurrentProcessId())))

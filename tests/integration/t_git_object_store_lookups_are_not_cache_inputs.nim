@@ -48,23 +48,17 @@
 ## * `objects/info/alternates` appearing MUST still invalidate — it decides
 ##   WHERE names are looked up, so it is not a by-name lookup itself.
 ##
-## THE KEY IS CHECKED ON EVERY PLATFORM, PUBLICATION ONLY WHERE IT EXISTS.
+## THE KEY IS CHECKED ON EVERY PLATFORM, AND SO IS REUSE.
 ## Each scenario first asks `cacheInputPaths` / `cacheEnumeratedDirectories`
 ## what the key WOULD be built from, over the evidence the monitor really
 ## recorded in run 1: no observed by-name object-store entry may be in it,
 ## while `HEAD`, `refs/heads/main` and `objects/info/alternates` (and, in the
 ## lookalike control, the lookalike file) must be. That is the classification
 ## itself, and it needs no published record. The reuse half — a second run
-## hitting after the store moved — needs one, and on macOS there
-## never is: io-mon's `docs/usage.md` ("macOS limitation
-## (normative)", io-mon 57ce305) makes every capture there carry an
-## `mrEventLoss` tree-lifetime marker and grade `mcIncomplete`, consumers
-## MUST conservatively rebuild, and nothing promotes such a capture to
-## complete. So where `NoTreeLifetimeGuard` holds, the publication-dependent
-## assertions are replaced by the specified fail-closed behaviour — the
-## marker and `monitor-loss` are reported, no record exists, and the next run
-## re-launches and reads the current store — and Linux keeps every reuse
-## assertion unchanged. Neither arm filters or overrides the loss.
+## hitting after the store moved — needs one; io-mon proves tree quiescence on
+## every platform (`docs/usage.md`, "The macOS tree-lifetime guard
+## (normative)"), so a healthy capture is complete and its record is
+## published everywhere.
 ##
 ## TWO HOST FACTS THE FIXTURE ACCOMMODATES, both measured on macOS:
 ##
@@ -84,7 +78,6 @@ import repro_build_engine
 import repro_core
 import repro_local_store
 import repro_test_support
-import repro_test_support/descendant_guard_expectations
 import repro_test_support/reasoned_skip
 
 const RepoRootMarker = "repro.nim"
@@ -313,27 +306,6 @@ proc recordedInputsUnder(f: Fixture; edge: BuildAction; dir: string):
         input.path.replace('\\', '/') == dir.replace('\\', '/'):
       result.add(input.path)
 
-proc checkFailsClosed(f: Fixture; edge: BuildAction; r0: ActionResult) =
-  ## Where `NoTreeLifetimeGuard` holds, the specified outcome of run 1 in
-  ## place of a published record (io-mon `docs/usage.md`, "macOS
-  ## limitation (normative)"): the capture carries this platform's exact
-  ## tree-lifetime marker, the engine reports the skip as `monitor-loss`, and
-  ## nothing was published — so a later run cannot reuse it and must rebuild.
-  ## Asserting all three keeps the arm from passing on an unrelated failure
-  ## (a run that published nothing because it observed nothing, say).
-  var markers = 0
-  for diagnostic in r0.evidence.diagnostics:
-    const lead = "monitor loss: "
-    if diagnostic.startsWith(lead) and
-        diagnostic[lead.len .. ^1].isTreeLifetimeLimitation:
-      inc markers
-  checkpoint(edge.id & " diagnostics: " & $r0.evidence.diagnostics)
-  checkpoint(edge.id & " publish skipped: " & r0.cachePublishSkipReason)
-  check markers == 1
-  check "monitor-loss" in r0.cachePublishSkipReason
-  var cache = openActionCache(f.cacheRoot / "action-cache")
-  check not cache.readHotRecord(edge.weakFingerprint).found
-
 proc checkKeyClassification(f: Fixture; edge: BuildAction; r0: ActionResult) =
   ## The classification under test, asked of the evidence the monitor REALLY
   ## recorded in run 1 rather than of a published record, so it holds on every
@@ -384,9 +356,6 @@ proc firstRun(f: Fixture; repoRoot: string; edge: BuildAction;
   check f.runLines(name).len == 1
   check seen.len > 0
   f.checkKeyClassification(edge, r0)
-  if NoTreeLifetimeGuard:
-    f.checkFailsClosed(edge, r0)
-
 proc secondRun(f: Fixture; config: BuildEngineConfig; edge: BuildAction;
                name: string): ActionResult =
   let second = runBuild(graph([edge]), config)
@@ -397,21 +366,10 @@ proc secondRun(f: Fixture; config: BuildEngineConfig; edge: BuildAction;
 
 proc checkReuse(f: Fixture; r: ActionResult; name: string) =
   ## The positive cases' run 2, after the store moved under names run 1 read.
-  ## Where records are published the edge must be reused without running.
-  ## Where `NoTreeLifetimeGuard` holds nothing was published (run 1 checked
-  ## that), so the specified outcome is a conservative rebuild: the edge
-  ## re-launches, succeeds, and reads the same content through the moved
-  ## store. That arm says nothing about the elision — `checkKeyClassification`
-  ## carries it there — and must not be read as a reuse result.
-  if NoTreeLifetimeGuard:
-    check r.status == asSucceeded
-    check r.cacheDecision notin ReuseDecisions
-    check r.launched
-    check f.runLines(name) == @["ran one", "ran one"]
-  else:
-    check r.cacheDecision in ReuseDecisions
-    check not r.launched
-    check f.runLines(name).len == 1
+  ## The edge must be reused without running.
+  check r.cacheDecision in ReuseDecisions
+  check not r.launched
+  check f.runLines(name).len == 1
 
 suite "a git object store's churn does not invalidate a by-name lookup":
 
@@ -486,11 +444,8 @@ suite "a git object store's churn does not invalidate a by-name lookup":
       let edge = f.gitReadEdge("commit")
       let config = f.firstRun(repoRoot, edge, "commit").config
       # The ref really is a recorded input (the guarantee this control leans
-      # on), not merely something the engine happened to notice. Without a
-      # published record (`NoTreeLifetimeGuard`) `firstRun` has already
-      # checked the ref is in the key the record would have been built from.
-      if not NoTreeLifetimeGuard:
-        check f.recordedInputsUnder(edge, f.gitDir / "refs").len > 0
+      # on), not merely something the engine happened to notice.
+      check f.recordedInputsUnder(edge, f.gitDir / "refs").len > 0
       sleep(20)
       f.commitFile("two")
       let r = f.secondRun(config, edge, "commit")
@@ -511,23 +466,14 @@ suite "a git object store's churn does not invalidate a by-name lookup":
       let edge = f.gitReadEdge("alternates")
       let config = f.firstRun(repoRoot, edge, "alternates").config
       let alternates = f.gitDir / "objects" / "info" / "alternates"
-      # As in the commit control: without a published record, `firstRun`'s
-      # key check is what shows `alternates` is kept.
-      if not NoTreeLifetimeGuard:
-        check alternates in f.recordedInputsUnder(edge, f.gitDir / "objects")
+      check alternates in f.recordedInputsUnder(edge, f.gitDir / "objects")
       let other = f.root / "other.git"
       discard f.git("init", "-q", "--bare", other)
       writeFile(alternates, other / "objects" & "\n")
       let r = f.secondRun(config, edge, "alternates")
       check r.cacheDecision notin ReuseDecisions
       check r.launched
-      # The miss can only NAME `alternates` when there was a record to
-      # compare it against; without one the rebuild is unconditional, and
-      # the run must still have seen the store as it now is.
-      if NoTreeLifetimeGuard:
-        check f.runLines("alternates") == @["ran one", "ran one"]
-      else:
-        check "alternates" in r.cacheMissReason
+      check "alternates" in r.cacheMissReason
 
   test "`git -C` paths are not re-anchored on the action's cwd":
     ## Issue: `reprobuild-pm/issues/2026-10-18-macos-shim-records-relative-
@@ -608,12 +554,8 @@ suite "a git object store's churn does not invalidate a by-name lookup":
     let config = monitoredConfig(repoRoot, f.cacheRoot)
     let r0 = runBuild(graph([edge]), config).byId(edge.id)
     check r0.status == asSucceeded
-    # The key half holds everywhere; the record half where one is published.
     check lookalike in edge.cacheInputPaths(r0.evidence)
-    if NoTreeLifetimeGuard:
-      f.checkFailsClosed(edge, r0)
-    else:
-      check lookalike in f.recordedInputsUnder(edge, f.root / "data")
+    check lookalike in f.recordedInputsUnder(edge, f.root / "data")
     sleep(20)
     writeFile(lookalike, "second\n")
     let r = f.secondRun(config, edge, "lookalike")

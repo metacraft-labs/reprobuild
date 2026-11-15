@@ -47,6 +47,15 @@
 ##     names, without ``--keep-store``, still holds the completion back
 ##     (exit 3).
 ## 15-17. (round 12) A completion that fails is not lost: see that suite.
+## 19-22. (round 13, §13 decision 148) A plain re-run completes no intent
+##     without a valid discard marker: P1 (run 1 stopped with its object in
+##     place, run 2 completed its own), P2 (the operator deleted the object),
+##     a marker that binds another intent, a forged or unsigned marker.
+##     Cases 15 and 16 also check the marker: written before a completion
+##     that fails, and never when the removal could not be synced.
+##     Falsifiers ``resume-without-marker`` (19, 20), ``marker-not-bound-to-
+##     intent`` (21), ``marker-signature-unchecked`` (22),
+##     ``marker-before-sync`` (16).
 ## 18. (round 12, §13 decision 56) Records no run can ship (the sink's
 ##     configuration gone) are refused with the override named, never "run
 ##     uninstall again once it has"; records the sink only has not
@@ -493,6 +502,9 @@ suite "the A11 code review's round 12: a completion that fails is not lost (§13
     check r.completionRecord.len == 0
     check r.errors.anyIt("could not be written" in it)
     check r.errors.anyIt("are kept" in it)
+    # Decision 148: the marker is in the state, written before the
+    # completion that failed.
+    check fileExists(discardMarkerPath(s.site, s.gate.overrideRecord))
     check fileExists(s.key)
     check fileExists(ledgerCopyPath(stateOf(s)))
     check not fileExists(completionPathOf(s.gate.overrideRecord) & DiscardRecordSigExt)
@@ -513,6 +525,15 @@ suite "the A11 code review's round 12: a completion that fails is not lost (§13
                                         atomicRecordWriter, failSync)
       first.wipe()
       check verifyExit(s) == 3
+      if failing == "sync":
+        # Decision 148: the removal was never made durable, so no marker
+        # was written (falsifier marker-before-sync), and the intent stays
+        # "authorised, not completed" for good: no later run completes it.
+        check not fileExists(discardMarkerPath(s.site, s.gate.overrideRecord))
+        check storeEvidenceGate(s.site, override, notAcknowledged,
+                                overrideDir = logOf(s)).overrideRecord.len == 0
+        check verifyExit(s) == 3
+        continue
       # The second uninstall: nothing is pending any more.
       let before = toSeq(walkFiles(logOf(s) / "*")).len
       let g = storeEvidenceGate(s.site, override, notAcknowledged,
@@ -560,6 +581,80 @@ suite "the A11 code review's round 12: a completion that fails is not lost (§13
              tampered & DiscardRecordSigExt)
     check unfinishedDiscardIntent(own.site, logOf(s)).path != tampered
     check unfinishedDiscardIntent(own.site, logOf(s)).path.len == 0
+
+  # ---- A11 code review round 13, §13 decision 148: a re-run completes
+  # only an intent that carries a valid discard marker. The reviewer's unit
+  # probes P1 and P2 (reprobuild-pm issue 2026-11-14-addon-uninstall-re-run-
+  # completes-an-earlier-run-s-intent-including-one-that-stopped-before-its-
+  # objects-were-gone), and the marker's binding and signature.
+  let plain = UninstallOptions()
+  proc twoRuns(name: string): tuple[s: Scene; i1, i2: string] =
+    ## Run 1 wrote I1 and stopped with its object in place; run 2 wrote I2,
+    ## removed the object and completed I2 (with its marker).
+    let s = scene(name)
+    sleep(1100)
+    let g2 = storeEvidenceGate(s.site, override, notAcknowledged,
+                               overrideDir = logOf(s))
+    doAssert g2.errors.len == 0 and g2.overrideRecord != s.gate.overrideRecord
+    removeDir(s.aside)
+    var sg = loadTextSigner(s.key)
+    var r2 = UninstallResult(overrideRecord: g2.overrideRecord,
+                             overrideRecordText: g2.overrideRecordText)
+    doAssert not completeDiscardBeforeKeys(r2, ledgerAt(s), stateOf(s), s.site,
+                                           sg, g2.pending)
+    sg.wipe()
+    (s, s.gate.overrideRecord, g2.overrideRecord)
+
+  test "19: P1, a plain re-run never completes a run that stopped before its object was gone":
+    # Falsifier resume-without-marker.
+    let (s, i1, i2) = twoRuns("r13-p1")
+    check verifyExit(s, i2) == 0
+    check verifyExit(s, i1) == 3
+    let g3 = storeEvidenceGate(s.site, plain, notAcknowledged,
+                               overrideDir = logOf(s))
+    checkpoint extractFilename(g3.overrideRecord)
+    check g3.errors.len == 0 and g3.overrideRecord.len == 0
+    check verifyExit(s, i1) == 3
+
+  test "20: P2, an object the operator deleted by hand completes nothing":
+    # Falsifier resume-without-marker.
+    let s = scene("r13-p2")
+    removeDir(s.aside)                    # the operator, by hand
+    let g = storeEvidenceGate(s.site, plain, notAcknowledged,
+                              overrideDir = logOf(s))
+    check g.overrideRecord.len == 0
+    check verifyExit(s) == 3
+
+  test "21: a marker that binds another intent completes nothing":
+    # Falsifier marker-not-bound-to-intent: I2's valid marker, put where
+    # I1's would be.
+    let (s, i1, i2) = twoRuns("r13-bind")
+    let m1 = discardMarkerPath(s.site, i1)
+    let m2 = discardMarkerPath(s.site, i2)
+    check fileExists(m2)
+    copyFile(m2, m1)
+    copyFile(m2 & DiscardRecordSigExt, m1 & DiscardRecordSigExt)
+    check storeEvidenceGate(s.site, plain, notAcknowledged,
+                            overrideDir = logOf(s)).overrideRecord.len == 0
+    check verifyExit(s, i1) == 3
+
+  test "22: a forged or unsigned marker completes nothing":
+    # Falsifier marker-signature-unchecked. The marker binds I1 exactly and
+    # its object is gone, but another key signed it, or nothing did.
+    for how in ["forged", "unsigned"]:
+      let (s, i1, _) = twoRuns("r13-" & how)
+      let other = scene("r13-" & how & "-other")
+      var foreign = loadTextSigner(other.key)
+      writeDiscardMarker(s.site, foreign, i1, readFile(i1),
+                         @[s.aside], @[])
+      foreign.wipe()
+      let m1 = discardMarkerPath(s.site, i1)
+      if how == "unsigned":
+        writeFile(m1 & DiscardRecordSigExt, "")
+      checkpoint how
+      check storeEvidenceGate(s.site, plain, notAcknowledged,
+                              overrideDir = logOf(s)).overrideRecord.len == 0
+      check verifyExit(s, i1) == 3
 
 suite "A11 code review round 12: §13 decision 56, amended":
   test "18: records no run can ship are never waited for":

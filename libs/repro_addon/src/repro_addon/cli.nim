@@ -618,7 +618,14 @@ proc runAddonCli*(args: seq[string]): int =
         return 0
     of "uninstall":
       let r = runAddonUninstall(parseUninstallArgs(rest))
-      if r.overrideRecord.len > 0:
+      if r.overrideRecord.len > 0 and r.resumedIntent:
+        # §13 decision 148: an earlier run's intent, carrying its discard
+        # marker; this run authorised nothing, so it never says it did.
+        stdout.write("completing the discard an earlier uninstall " &
+          "authorised and carried out (its discard marker " &
+          discardMarkerPath(custodySite(DefaultStateDir), r.overrideRecord) &
+          " is valid); its signed intent record is " & r.overrideRecord & "\n")
+      elif r.overrideRecord.len > 0:
         # §13 decisions 62 and 64: the record of what was discarded
         # unshipped, its signature beside it.
         stdout.write("discarding store evidence the Evidence sink has " &

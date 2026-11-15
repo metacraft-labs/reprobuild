@@ -792,7 +792,8 @@ proc widthPlaceholderArgv*(argv: openArray[string]; flag: string):
   ## whole number from 1 to the grant (the author asked for less), and
   ## replaced by the grant otherwise (more, 0, or not a number). With no such
   ## flag it goes before the first `--` (which passes the rest of the line
-  ## on to something else), or at the end. argv[0] is never touched. A flag
+  ## on to something else), or at the end (a joined flag goes ahead of a
+  ## trailing positional word instead). argv[0] is never touched. A flag
   ## ending in `=` or `:` takes the value joined to it.
   result = @argv
   if flag.len == 0 or argv.len == 0:
@@ -829,6 +830,14 @@ proc widthPlaceholderArgv*(argv: openArray[string]; flag: string):
         return
     inc i
   if joined:
+    # A joined flag is an option. Tools that read everything after their first
+    # positional word as the program's own arguments (``nim c x.nim``: nim
+    # answers "arguments can only be given if the '--run' option is selected")
+    # must see it BEFORE a trailing positional, so it goes ahead of the last
+    # word when that is not itself an option. argv[0] and the subcommand
+    # (index 1 of a three-word line) stay where they are.
+    if i >= 3 and i == result.len and not result[i - 1].startsWith("-"):
+      dec i
     result.insert(flag & widthPlaceholder(0), i)
   else:
     result.insert(widthPlaceholder(0), i)
@@ -2005,12 +2014,24 @@ proc recordRunQuotaExtensionRow*(session: ReproRunQuotaSession;
   except CatchableError:
     discard
 
+proc runQuotaSessionLeases*(session: ReproRunQuotaSession): seq[string]
+
 proc close*(session: ReproRunQuotaSession) =
   if session.isNil:
     return
   try:
     if session.active and session.session.active:
-      session.session.closeSession()
+      try:
+        session.session.closeSession()
+      except CatchableError as err:
+        # The refusal names no lease. Ask the daemon while the connection is
+        # still open (the ``finally`` below tears it down), and say which
+        # lease and action it is refusing over.
+        let leftover = runQuotaSessionLeases(session)
+        if leftover.len == 0:
+          raise
+        raise newException(ReproRunQuotaError,
+          err.msg & " (unreleased: " & leftover.join("; ") & ")")
   finally:
     session.client.close()
     session.active = false
@@ -2521,6 +2542,41 @@ proc runQuotaLeaseHolders*(session: ReproRunQuotaSession): seq[string] =
   try:
     result = summarizeRunQuotaLeaseHolders(
       session.client.inspectionJson("leases"))
+  except CatchableError:
+    result = @[]
+
+proc summarizeSessionLeases*(leasesJson: string; sessionId: uint64): seq[string] =
+  ## One line per lease of ``sessionId`` that is not finished, in ANY state
+  ## (queued included): exactly the set the daemon's ``CloseSession`` refuses
+  ## on ("session still owns leases"). Names the lease id, its label (the
+  ## action) and its state, so a refused close says which lease leaked and
+  ## which action held it. Pure; malformed input yields no lines.
+  try:
+    let doc = parseJson(leasesJson)
+    if doc.kind != JObject or not doc.hasKey("leases") or
+        doc["leases"].kind != JArray:
+      return
+    for lease in doc["leases"]:
+      if lease.kind != JObject or
+          uint64(lease{"session_id"}.getBiggestInt()) != sessionId:
+        continue
+      let state = lease{"state"}.getStr()
+      if state == "finished":
+        continue
+      result.add("lease " & $lease{"id"}.getBiggestInt() & " \"" &
+        lease{"label"}.getStr() & "\" state=" & state &
+        " child=" & $lease{"child_process_id"}.getBiggestInt())
+  except CatchableError:
+    result = @[]
+
+proc runQuotaSessionLeases*(session: ReproRunQuotaSession): seq[string] =
+  ## The leases the daemon still counts against ``session``'s close. Best
+  ## effort: empty on any failure, since it only enriches a failure report.
+  if session.isNil or not session.active:
+    return
+  try:
+    result = summarizeSessionLeases(session.client.inspectionJson("leases"),
+      session.session.id.value)
   except CatchableError:
     result = @[]
 

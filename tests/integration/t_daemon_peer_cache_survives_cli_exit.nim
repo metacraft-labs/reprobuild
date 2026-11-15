@@ -28,16 +28,11 @@
 ## served; B's build report says the action was not launched; the artifact
 ## in ws-b carries ws-a's content; B's memo store now holds A's selector.
 ##
-## Where io-mon cannot prove detached-descendant quiescence
-## (`NoTreeLifetimeGuard`: macOS; Windows too before io-mon 4d468bc), every
-## monitored capture fails closed and the engine never publishes a monitored
-## edge (io-mon's normative platform limitation, upstream `7c606dbb2`). The
-## action used to gather its evidence from a make depfile there instead; since
-## the owner decision of 2026-10-29 (Edge-Derived-Identities.md §3.4 item 1
-## rider, "builtins yes, depfiles no") a depfile-evidenced record does not
-## cross hosts, so on such a platform this edge has nothing to publish and the
-## gate is skipped with that reason. Everywhere else it is a monitored edge,
-## which also covers the `mkdir -p build` probe described below.
+## The edge is a monitored one: a depfile-evidenced record does not cross
+## hosts (owner decision 2026-10-29, Edge-Derived-Identities.md §3.4 item 1
+## rider, "builtins yes, depfiles no"), and io-mon publishes a complete
+## capture on every platform. That also covers the `mkdir -p build` probe
+## described below.
 ##
 ## Campaign M17 (Edge-Derived-Identities.md §3.3a, §3.6): the action is
 ## recorded under `ffpChecksum` (the recipe says `acfpChecksum`). Under the
@@ -58,7 +53,6 @@ import std/[json, os, osproc, streams, strtabs, strutils, tables, tempfiles,
             times, unittest]
 
 import repro_test_support
-import repro_test_support/descendant_guard_expectations
 import repro_test_support/reasoned_skip
 
 import ../../libs/repro_peer_cache/tests/m7_test_pki
@@ -285,8 +279,9 @@ proc memoEntries(cacheRoot: string): seq[string] =
     if path.endsWith(".rpme"):
       result.add(path.extractFilename)
 
-proc runDaemonRoundTrip() =
-  ## The gate (see the module doc).
+proc runDaemonRoundTrip(): bool =
+  ## The gate (see the module doc). True once every step has run; a failed
+  ## step raises, so the caller's `check` asserts the whole round trip.
   let base = createTempDir("repro-m0-daemon-pc-", "")
   var nodeA = newNode(base, "a")
   var nodeB = newNode(base, "b")
@@ -369,16 +364,9 @@ proc runDaemonRoundTrip() =
     check entry in memoEntries(nodeB.cacheRoot)
   check nodeA.process.running
   check nodeB.process.running
+  result = true
 
 suite "Distributed-Execution M0: daemon-hosted peer cache":
 
   test "t_daemon_peer_cache_survives_cli_exit":
-    if NoTreeLifetimeGuard:
-      skip("io-mon cannot prove detached-descendant quiescence on this " &
-        "platform, so every monitored capture fails closed and no monitored " &
-        "edge is published; since the owner decision of 2026-10-29 a " &
-        "depfile-evidenced edge does not cross hosts either " &
-        "(Edge-Derived-Identities.md §3.4 item 1 rider), so daemon A has " &
-        "nothing to serve")
-    else:
-      runDaemonRoundTrip()
+    check runDaemonRoundTrip()
