@@ -7021,6 +7021,17 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "t_group_libs_repro_local_store_tests_g01",
     singleReason: ""),
   TestSpec(
+    source: "libs/repro_local_store/tests/t_store_index_gains_additive_schema_on_every_open.nim",
+    binary: "build/test-bin/t_store_index_gains_additive_schema_on_every_open",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "t_group_libs_repro_local_store_tests_g01",
+    singleReason: ""),
+  TestSpec(
     source: "libs/repro_local_store/tests/t_store_optimise_dedup.nim",
     binary: "build/test-bin/t_store_optimise_dedup",
     defines: @[],
