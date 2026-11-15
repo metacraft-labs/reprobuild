@@ -2406,6 +2406,11 @@ proc effectiveFloorCheck*(resources: openArray[SystemResource];
           for d in resources:
             if d.kind == srkSystemdSystemDropIn and dropInApplies(d.diUnit, a):
               aown.add(targetPathOf(d))
+          # The start hold the switch writes on the activator, and a revert's
+          # hold on it (§13 decisions 133 and 151): the add-on's own.
+          aown.add(startHoldPath(a))
+          for h in revertHoldFiles:
+            if holdUnitOf(h) == a: aown.add(h)
           try:
             let at = showUnitText(a)
             let ash = parseShow(at)
@@ -2413,7 +2418,13 @@ proc effectiveFloorCheck*(resources: openArray[SystemResource];
             for f in @[ash.getOrDefault("FragmentPath")] &
                      ash.getOrDefault("DropInPaths").splitWhitespace():
               if f.len == 0: continue
-              try: aloaded.add((path: f, content: readFile(f)))
+              # The add-on's own holds on the activator are not judged by the
+              # loaded-file rules, as on a service; a file under a hold's
+              # name that is not exactly the add-on's is (``isAddonHold``).
+              try:
+                let c = readFile(f)
+                if isAddonHold(f, c): continue
+                aloaded.add((path: f, content: c))
               except IOError, OSError:
                 result.add(refusalLine(a, "unreadable", "FragmentPath,DropInPaths",
                                        "cannot read " & f & ", which systemd loaded"))
@@ -2427,7 +2438,15 @@ proc effectiveFloorCheck*(resources: openArray[SystemResource];
               if not now.exists:
                 if pending != nil: pending[].add((path, act))
                 return ""
-              if createdForUnit(path, act, now, created, ledgerDirs): return ""
+              if createdForUnit(path, act, now, created, ledgerDirs):
+                # The switch stops the activator for its holds and starts it
+                # again after the check (§13 decision 151), and the manager
+                # unlinks the listener and binds a new one: pending, so the
+                # record follows it (``recordStartedSince`` replaces the
+                # stale entry), or the next switch refuses the new socket.
+                when not mutated("restarted-listener-not-rerecorded"):
+                  if pending != nil: pending[].add((path, act))
+                return ""
               if pending != nil and startMayCreate(path, act, now, created):
                 pending[].add((path, act))
               # A path statx could not read (EACCES, a filter's EPERM, ELOOP)

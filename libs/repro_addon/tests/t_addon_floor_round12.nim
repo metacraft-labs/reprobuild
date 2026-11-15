@@ -278,6 +278,16 @@ suite "§13 decision 133: a revert's persistent hold":
     check not isAddonHold(HoldPath, other)
     check "[rule:" in problemsOf(e)
 
+suite "§13 decision 151: a start hold the switch writes on a trigger":
+  const StartPath = "/run/systemd/system/a.socket.d/" & StartHoldName
+  test "the add-on's start hold, exactly its text under /run, is its own":
+    check isAddonHold(StartPath, StartHoldText)
+  test "a file under its name that is not exactly that is judged":
+    check not isAddonHold(StartPath, StartHoldText & "Wants=reboot.target\n")
+    check not isAddonHold(StartPath, "")
+    check not isAddonHold("/etc/systemd/system/a.socket.d/" & StartHoldName,
+                          StartHoldText)
+
 suite "round 12, finding 5: the run in one snapshot":
   test "the start, the stop and the state come from the same read":
     let d = createTempDir("a9r12-", "-view")
