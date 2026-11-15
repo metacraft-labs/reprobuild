@@ -335,7 +335,6 @@ import repro_build_engine
 import repro_core
 import repro_test_support
 import repro_test_support/process_fixtures
-import repro_test_support/descendant_guard_expectations
 
 type
   LaunchPathKind = enum
@@ -1584,14 +1583,13 @@ proc resultById(run: BuildRunResult; id: string): ActionResult =
 ## ``checkMonitoredEvidence`` below asserts each path's evidence is
 ## non-empty and readable. That is weaker than what is actually true:
 ## for the same fixture, all four launch paths produce the SAME
-## evidence, including the required platform limitation diagnostic where
-## the backend has no tree-lifetime guard. Asserting identity
+## evidence (no backend carries a tree-lifetime limitation diagnostic any
+## more, so a healthy capture has none). Asserting identity
 ## costs nothing and turns "monitored" into "monitored the same way",
 ## which is the property a change to how the monitor is hosted has to
 ## preserve.
 ##
-## Legitimate differences are path prefixes, per-case filenames, and the
-## run ID in the exact platform limitation diagnostic. Those are
+## Legitimate differences are path prefixes and per-case filenames. Those are
 ## substituted out and the whole
 ## ``PathSetEvidence`` is rendered to one comparable string. Rendering
 ## every field (not just ``monitorReads``) is deliberate: a change that
@@ -1672,25 +1670,13 @@ proc renderEvidencePaths(name: string; paths: seq[string];
   items.sort()
   name & "=[" & items.join(" ") & "]"
 
-const MonitorLossSummary =
-  "monitor depfile is incomplete (unknown-scope loss); " &
-  "action-cache publish skipped this session per " &
-  "Failure-Semantics.md §Monitoring Failures"
-const MonitorLossDiagnosticPrefix = "monitor loss: "
-
 proc renderEvidenceDiagnostics(diagnostics: seq[string]): string =
-  ## Compare the full diagnostic multiset. Only the run ID of the exact
-  ## required platform marker varies legitimately between captures. Do not
-  ## apply path substitutions or deduplicate: either can conceal extra loss.
-  var items: seq[string]
-  for diagnostic in diagnostics:
-    var value = diagnostic
-    if diagnostic.startsWith(MonitorLossDiagnosticPrefix):
-      let detail = diagnostic[MonitorLossDiagnosticPrefix.len .. ^1]
-      if detail.isTreeLifetimeLimitation and
-          detail[TreeLifetimeLimitationPrefix.len .. ^1].find(Whitespace) < 0:
-        value = MonitorLossDiagnosticPrefix & TreeLifetimeLimitationPrefix & "<run>"
-    items.add value
+  ## Compare the full diagnostic multiset. Nothing is normalized: the retired
+  ## "no complete tree-lifetime guard" marker carried a per-run ID that had to
+  ## be folded, but no backend writes it any more, so any monitor-loss
+  ## diagnostic is a real difference. Do not apply path substitutions or
+  ## deduplicate: either can conceal extra loss.
+  var items = diagnostics
   items.sort()
   # Quote entries so one diagnostic cannot compare equal to two fragments.
   "diagnostics=[" & items.mapIt(it.escape).join(" ") & "]"
@@ -1960,7 +1946,7 @@ template checkMonitoredEvidence(res: ActionResult; markerPath, label: string) =
   check mentionsPath(res.evidence.monitorReads.paths, markerPath)
 
   # The depfile must be readable and a monitor must have been selected.
-  # The required platform limitation is checked separately below.
+  # The absence of any loss diagnostic is checked separately below.
   for diagnostic in res.evidence.diagnostics:
     check not diagnostic.contains("monitor depfile read failed")
     check not diagnostic.contains(
@@ -1968,9 +1954,11 @@ template checkMonitoredEvidence(res: ActionResult; markerPath, label: string) =
 
 suite "every_launch_path_is_monitored":
 
-  test "evidence shape normalizes only exact platform limitation run IDs":
+  test "evidence shape never folds a monitor-loss diagnostic":
     # Synthetic evidence exercises the comparison boundary; the real capture
     # cases below still require every launch path and its complete evidence.
+    # The retired "no complete tree-lifetime guard" marker is written by no
+    # platform; if one reappeared it must not be folded into an equal shape.
     const lossPrefix = "monitor loss: "
     const markerPrefix = lossPrefix &
       "detached-descendant quiescence cannot be established: "
@@ -1991,14 +1979,9 @@ suite "every_launch_path_is_monitored":
       let normalized = prefix & "<run>"
       let expected = shape(@[summary, normalized])
       let actual = shape(@[summary, first])
-      if NoTreeLifetimeGuard and
-          prefix == lossPrefix & TreeLifetimeLimitationPrefix:
-        check actual == expected
-        check shape(@[summary, second]) == expected
-      else:
-        # A marker for another backend is evidence of a real difference.
-        check actual != expected
-        check shape(@[summary, second]) != actual
+      # A marker is evidence of a real difference, whatever its run ID.
+      check actual != expected
+      check shape(@[summary, second]) != actual
       check actual != empty
       check shape(@[first]) != actual
       check shape(@[summary]) != actual
@@ -2972,7 +2955,7 @@ suite "every_launch_path_is_monitored":
           # comparison below while proving nothing, so the shared shape
           # is pinned: the fixture's own read is there, nothing else that
           # is not a mapped library is, and the diagnostics contain exactly
-          # the platform limitation and its unknown-scope summary, if required.
+          # no diagnostic at all (the capture is complete).
           #
           # THIS PIN WAS STALE, AND THE SKIP IS WHY NOBODY SAW IT. It
           # read ``monitorReads=[<marker>]`` — an EXACT set — which was
@@ -3088,13 +3071,9 @@ suite "every_launch_path_is_monitored":
               "shared object: ", unexplained.join(" "), "\n", shape
           check unexplained.len == 0
           check shape.contains("\nmonitorWrites=[<out>]\n")
-          let expectedDiagnostics =
-            if NoTreeLifetimeGuard:
-              "diagnostics=[" & MonitorLossSummary.escape & " " &
-                (MonitorLossDiagnosticPrefix & TreeLifetimeLimitationPrefix &
-                  "<run>").escape & "]"
-            else:
-              "diagnostics=[]"
+          # A healthy capture carries no diagnostic, so the retired
+          # tree-lifetime marker is asserted ABSENT, not merely unfolded.
+          let expectedDiagnostics = "diagnostics=[]"
           # Check every path independently, including marker multiplicity;
           # agreement alone would accept five equally broken captures.
           for entry in recordedEvidence:
@@ -3253,8 +3232,8 @@ suite "every_launch_path_is_monitored":
           # Measured, not reasoned: with the `getentropy` call below in
           # `FixtureSource`, all five recorded actions carry
           # `entropyObservations=[getentropy@ecoUnattributed]` AND
-          # no entropy-policy diagnostic. The platform limitation, where
-          # required, is independent of this entropy policy.
+          # no entropy-policy diagnostic. A monitor-loss
+          # diagnostic would be independent of this entropy policy.
           #
           # So the class is produced, exactly as `monitorProbes` and
           # `monitorDirectoryEnumerations` produce theirs, and the render

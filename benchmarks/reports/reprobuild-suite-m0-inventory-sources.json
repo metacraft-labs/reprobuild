@@ -2387,7 +2387,7 @@
             "wsA",
             "wsB"
           ],
-          "line": 211,
+          "line": 205,
           "path": "libs/repro_peer_cache/tests/t_peer_cache_two_phase_lan_roundtrip.nim",
           "patterns": [
             "cc"
@@ -4885,7 +4885,7 @@
             "repoRoot",
             "shimDylib"
           ],
-          "line": 177,
+          "line": 176,
           "path": "tests/e2e/macos-monitor/t_macos_monitor_shim_event_taxonomy.nim",
           "patterns": [
             "cc"
@@ -5341,7 +5341,6 @@
             "daemon",
             "daemonBin",
             "declared",
-            "detail",
             "devEnvEngine",
             "devSession",
             "died",
@@ -5378,6 +5377,7 @@
             "interestRoot",
             "isIdent",
             "item",
+            "items",
             "keyword",
             "launchPathDrives",
             "lines",
@@ -5441,7 +5441,7 @@
             "workRoot",
             "wrapped"
           ],
-          "line": 1378,
+          "line": 1377,
           "path": "tests/integration/t_every_launch_path_is_monitored.nim",
           "patterns": [
             "cc"
@@ -5463,7 +5463,7 @@
             "f",
             "workRoot"
           ],
-          "line": 211,
+          "line": 209,
           "path": "tests/integration/t_executed_binary_is_a_recorded_input.nim",
           "patterns": [
             "cc"
@@ -5479,7 +5479,7 @@
             "f",
             "workRoot"
           ],
-          "line": 212,
+          "line": 210,
           "path": "tests/integration/t_executed_binary_is_a_recorded_input.nim",
           "patterns": [
             "cc"
@@ -5495,7 +5495,7 @@
             "f",
             "workRoot"
           ],
-          "line": 272,
+          "line": 270,
           "path": "tests/integration/t_executed_binary_is_a_recorded_input.nim",
           "patterns": [
             "cc"
@@ -5511,7 +5511,7 @@
             "f",
             "workRoot"
           ],
-          "line": 273,
+          "line": 271,
           "path": "tests/integration/t_executed_binary_is_a_recorded_input.nim",
           "patterns": [
             "cc"
@@ -6634,7 +6634,7 @@
             "libDir",
             "workRoot"
           ],
-          "line": 175,
+          "line": 172,
           "path": "tests/integration/t_library_load_evidence_is_recorded.nim",
           "patterns": [
             "cc"
@@ -6651,7 +6651,7 @@
             "libDir",
             "workRoot"
           ],
-          "line": 176,
+          "line": 173,
           "path": "tests/integration/t_library_load_evidence_is_recorded.nim",
           "patterns": [
             "cc"
@@ -6668,7 +6668,7 @@
             "libDir",
             "workRoot"
           ],
-          "line": 210,
+          "line": 207,
           "path": "tests/integration/t_library_load_evidence_is_recorded.nim",
           "patterns": [
             "cc"
@@ -6685,7 +6685,7 @@
             "libDir",
             "workRoot"
           ],
-          "line": 211,
+          "line": 208,
           "path": "tests/integration/t_library_load_evidence_is_recorded.nim",
           "patterns": [
             "cc"

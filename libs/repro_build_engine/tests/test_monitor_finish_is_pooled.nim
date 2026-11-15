@@ -23,12 +23,14 @@
 ##     lengthen that interval. So the TIMING is asserted, not only the output.
 ##
 ## PLATFORMS, AND WHAT EACH ONE CAN SHOW. Both hosting forms run on Linux and
-## macOS, and the evidence comparison runs on both. Linux has the §4.1
-## detached-descendant guard and its grace-window timing calibration. macOS,
-## from io-mon 3d47bb1 (G42) on, has its tree-lifetime guard: the quiesced
-## control grades complete there too and the live descendant incomplete, so
-## the same two verdicts are required on both platforms. Raw records and
-## engine evidence are always compared in full.
+## macOS, and the evidence comparison and the grace-window timing calibration
+## run on both. Linux holds the §4.1 detached-descendant window open for
+## ``IO_MON_LINUX_DESCENDANT_GRACE_MS``; macOS holds its kernel-census window
+## open for ``IO_MON_MACOS_DESCENDANT_GRACE_MS`` (io-mon ``docs/usage.md``,
+## "The macOS tree-lifetime guard (normative)"). On both, the quiesced
+## control grades complete and the live descendant incomplete, so the same
+## two verdicts are required. Raw records and engine evidence are always
+## compared in full.
 ##
 ## The macOS shim also stamps per-object and per-process identities
 ## (``ino=``, ``mtime=``, ``start=``, ``childstart=``, KERN_PROC_PID MIBs) that
@@ -99,7 +101,6 @@
 import std/[algorithm, os, sets, strutils, tables, unittest]
 
 import repro_build_engine
-import repro_test_support/descendant_guard_expectations
 import repro_build_engine/worker_pool
 from repro_test_support import prepareMonitorTools, testCaseScratchSlug
 from repro_core/dependency_gathering import automaticMonitorGatheringPolicy
@@ -156,10 +157,24 @@ when not (defined(linux) or defined(macosx)):
       skip()
 else:
   const GraceMs = 300
-    ## The §4.1 detached-descendant grace, shortened from io-mon's 500 ms
+    ## The detached-descendant grace window, shortened from io-mon's 500 ms
     ## default so the timing case runs in seconds rather than tens of them.
     ## It is the unit BOTH arms of that case are measured in, so shortening it
-    ## changes the runtime and not the property.
+    ## changes the runtime and not the property. It is applied to the Linux
+    ## §4.1 window and to the macOS census window alike (the two knobs below),
+    ## which io-mon reads with the same ``envInt`` rule and the same 500 ms
+    ## default; the knob of the other platform is inert there.
+
+  const DescendantGraceKnobs = [
+    "IO_MON_LINUX_DESCENDANT_GRACE_MS", "IO_MON_MACOS_DESCENDANT_GRACE_MS"]
+
+  proc setDescendantGraceKnobs() =
+    for knob in DescendantGraceKnobs:
+      putEnv(knob, $GraceMs)
+
+  proc clearDescendantGraceKnobs() =
+    for knob in DescendantGraceKnobs:
+      delEnv(knob)
 
   proc scratchRoot(name: string): string =
     let root = absolutePath("build" / "test-tmp" / "test_monitor_finish" /
@@ -315,7 +330,8 @@ else:
 
   proc normaliseDetail(n: var Normaliser; detail: string): string =
     ## The writer's whitespace-separated ``key=value`` convention. Two token
-    ## kinds carry per-run identity: ``run=<id>`` and ``pids=<list>``.
+    ## kinds carry per-run identity: ``run=<id>`` and ``pids=<list>``; the
+    ## macOS guard's ``grace-ms=`` / ``load1=`` are measurements, blanked.
     ## A run token is a BIJECTION and stays one — there is exactly one run
     ## id per run, so its assignment cannot depend on an order.
     var parts: seq[string] = @[]
@@ -328,6 +344,14 @@ else:
       elif token.startsWith("ino="):
         parts.add "ino=" & InoPlaceholder
       elif isIdentityTimeToken(token):
+        parts.add token[0 .. token.find('=')] & TimePlaceholder
+      elif token.startsWith("grace-ms=") or token.startsWith("load1="):
+        # The macOS tree-lifetime guard's loss detail reports how long it
+        # actually waited (``grace-ms=<spent>``) and the host's 1-minute load
+        # average (``load1=<n>``) -- io-mon ``macos_tree_guard.nim``
+        # ``spentToken``. Both are measurements of the moment, which cannot
+        # agree between two arms. ``ceiling-ms=`` and ``ceiling-reached`` are
+        # the bound and whether the stretch hit it: they stay VERBATIM.
         parts.add token[0 .. token.find('=')] & TimePlaceholder
       elif token.startsWith("pids="):
         var mapped: seq[string] = @[]
@@ -625,13 +649,12 @@ else:
       ## diffs against — and the two must produce the same evidence.
       ##
       ## IT IS RUN FOR TWO FIXTURES AND THE SECOND ONE IS THE POINT. The
-      ## quiesced fixture is the control: after accounting for the exact macOS
-      ## tree-lifetime limitation, it must carry no unrelated loss. The
-      ## descendant fixture is
+      ## quiesced fixture is the control: it must grade ``mcComplete`` with no
+      ## loss. The descendant fixture is
       ## the acceptance: a real child is left running past the root's
       ## exit, held alive across every grace window either path can open, so
       ## BOTH arms must reach ``mcIncomplete`` through the §4.1 guard on
-      ## Linux or the explicit platform limitation on macOS. Two
+      ## Linux or the census guard on macOS. Two
       ## paths agreeing on ``mcComplete`` proves nothing.
       ##
       ## MUTATION TARGETS.
@@ -644,7 +667,7 @@ else:
       ##     collapses to the declared sets and this case reddens on the
       ##     rendered comparison.
       ## (3) Skip the §4.1 grace on the hosted arm — reachable only by
-      ##     shortening ``IO_MON_LINUX_DESCENDANT_GRACE_MS`` to 0 for one arm
+      ##     shortening the grace knob to 0 for one arm
       ##     — and the descendant fixture reddens on ``completeness``.
       let root = scratchRoot("evidence")
       let work = root / "work"
@@ -662,7 +685,7 @@ else:
       template runOneArm(tag: string; hosted: bool; descendant: bool):
           tuple[records: seq[string]; pidCount, inodeCount: int;
                 evidence, histogram: string;
-                completeness, subsystemCompleteness: MonitorCompleteness;
+                completeness: MonitorCompleteness;
                 status: ActionStatus] =
         # The work directory is torn down and REBUILT for every arm, with
         # the same contents at the same absolute path. That is what makes the
@@ -700,15 +723,14 @@ else:
         let depFile =
           if fileExists(depPath): readMonitorDepFile(depPath)
           else: MonitorDepFile()
-        let subsystemCompleteness = descendantSubsystemEvidence(depFile).completeness
         (renderRecords(depFile, work), distinctPids(depFile),
          distinctInodes(depFile),
          renderEvidence(run.results[0].evidence, work),
          kindHistogram(depFile), depFile.completeness,
-         subsystemCompleteness, run.results[0].status)
+         run.results[0].status)
 
-      putEnv("IO_MON_LINUX_DESCENDANT_GRACE_MS", $GraceMs)
-      defer: delEnv("IO_MON_LINUX_DESCENDANT_GRACE_MS")
+      setDescendantGraceKnobs()
+      defer: clearDescendantGraceKnobs()
 
       # ---- the quiesced control ----
       let quiescedHosted = runOneArm("quiesced-hosted", true, false)
@@ -718,20 +740,14 @@ else:
           quiescedWrapped.status == asSucceeded,
         "the quiesced fixture did not succeed on both arms: hosted=" &
         $quiescedHosted.status & " wrapped=" & $quiescedWrapped.status
-      # On macOS too, from io-mon 3d47bb1 (G42): the tree-lifetime guard
-      # proves the quiesced action left no descendant, so it grades complete
-      # and its edge is publishable. Before G42 every macOS capture graded
-      # mcIncomplete here, and no monitored edge was ever published on macOS.
+      # On macOS too (io-mon's tree-lifetime guard): the guard proves the
+      # quiesced action left no descendant, so it grades complete and its
+      # edge is publishable.
       checkOrEcho quiescedHosted.completeness == mcComplete and
           quiescedWrapped.completeness == mcComplete,
         "CONTROL: a quiesced action must grade mcComplete on both arms: " &
         "hosted=" & $quiescedHosted.completeness &
         " wrapped=" & $quiescedWrapped.completeness
-      checkOrEcho quiescedHosted.subsystemCompleteness == mcComplete and
-          quiescedWrapped.subsystemCompleteness == mcComplete,
-        "CONTROL: the quiesced fixture has loss beyond the exact platform " &
-        "tree-lifetime limitation: hosted=" & $quiescedHosted.subsystemCompleteness &
-        " wrapped=" & $quiescedWrapped.subsystemCompleteness
       # NOT VACUOUS: identical-but-empty would satisfy every comparison below.
       checkOrEcho quiescedHosted.records.len > 0,
         "the hosted arm produced NO records, so comparing the two arms " &
@@ -892,8 +908,8 @@ else:
       ##     mistaken for one.
       const Monitors = 4
 
-      putEnv("IO_MON_LINUX_DESCENDANT_GRACE_MS", $GraceMs)
-      defer: delEnv("IO_MON_LINUX_DESCENDANT_GRACE_MS")
+      setDescendantGraceKnobs()
+      defer: clearDescendantGraceKnobs()
 
       template runTimedArm(tag: string; workerCount: int):
           tuple[samples: int; maxOpenDelayMs, maxQueueDelayMs: float;
@@ -960,58 +976,49 @@ else:
         "the one-worker arm handed off " & $serial.samples & " finishes, " &
         "not " & $Monitors
 
-      # THE CONTROL AND THE PROPERTY ARE MEASURED IN §4.1 GRACE WINDOWS, AND
-      # §4.1 EXISTS ON LINUX ONLY. The one-worker arm can see a delay only
+      # THE CONTROL AND THE PROPERTY ARE MEASURED IN GRACE WINDOWS: Linux's
+      # §4.1 window and macOS's census window (the Windows Job Object guard
+      # does not run in this suite). The one-worker arm can see a delay only
       # because each finish holds the detached-descendant window open for a
-      # full grace — and io-mon's guard is a ``/proc`` scan that
-      # ``settleMonitorDescendants`` runs ``when defined(linux)`` alone
-      # (macOS fails closed without a tree-lifetime guard; Windows waits on a
-      # Job Object instead, but this suite does not run on Windows at all).
-      # Off Linux a finish
-      # holds nothing open, so the one-worker arm's worst delay is the sum of
-      # three ordinary finishes: 20.8 ms at load ~21 and 24.7 ms at load ~70,
-      # measured on aarch64-darwin at reprobuild 8a61fb6963 / 07391efa6e.
-      # That is not a loaded host making the instrument slow to see — it is
-      # an instrument with nothing to see, and no host load or bound makes it
-      # calibrated. So the comparison is made where the window exists; the
-      # grace-window delay is meaningless where there is no window.
-      # Everywhere, the handoff itself is still asserted: every monitor of
-      # both arms was handed to the pool (``samples`` above) and the submit
-      # reaches a worker promptly (below). The evidence case pins that the
-      # platform limitation is explicit, so a future macOS lifetime guard
-      # must update that assertion and this calibration together.
-      when defined(linux):
-        # THE INSTRUMENT IS NOT BLIND. With one worker the k-th finish waits
-        # for its k-1 predecessors, each of which holds the §4.1 window open
-        # for a full grace, so the worst delay must exceed one grace window.
-        # If it does not, the measurement below cannot distinguish a pool that
-        # runs finishes concurrently from one that does not, and this case
-        # refuses to report a pass it did not earn.
-        checkOrEcho serial.maxOpenDelayMs > float(GraceMs),
-          "SENSITIVITY CONTROL FAILED: with ONE worker and " & $Monitors &
-          " monitors each holding a " & $GraceMs & " ms grace window open, " &
-          "the worst grace-window delay was only " &
-          formatFloat(serial.maxOpenDelayMs, ffDecimal, 1) & " ms. The " &
-          "instrument cannot see a delay it is supposed to be able to see, " &
-          "so the assertion below would pass from blindness."
+      # full grace, and ``settleMonitorDescendants`` opens that window when
+      # ``finishMonitor`` runs on both platforms. The fixture's descendant is
+      # a live carrier, which ends the macOS window at the plain grace (the
+      # stretch for a starved host applies only to unclassified young
+      # processes), so the window is ``GraceMs`` on both. Everywhere, the
+      # handoff itself is also asserted: every monitor of both arms was handed
+      # to the pool (``samples`` above) and the submit reaches a worker
+      # promptly (below).
+      # THE INSTRUMENT IS NOT BLIND. With one worker the k-th finish waits
+      # for its k-1 predecessors, each of which holds the §4.1 window open
+      # for a full grace, so the worst delay must exceed one grace window.
+      # If it does not, the measurement below cannot distinguish a pool that
+      # runs finishes concurrently from one that does not, and this case
+      # refuses to report a pass it did not earn.
+      checkOrEcho serial.maxOpenDelayMs > float(GraceMs),
+        "SENSITIVITY CONTROL FAILED: with ONE worker and " & $Monitors &
+        " monitors each holding a " & $GraceMs & " ms grace window open, " &
+        "the worst grace-window delay was only " &
+        formatFloat(serial.maxOpenDelayMs, ffDecimal, 1) & " ms. The " &
+        "instrument cannot see a delay it is supposed to be able to see, " &
+        "so the assertion below would pass from blindness."
 
-        # THE PROPERTY. With a worker per monitor the pool must not delay the
-        # window's opening by even one grace window — i.e. no monitor's
-        # evidence can drift toward mcComplete by as much as a single §4.1
-        # interval because of where the work ran.
-        checkOrEcho pooled.maxOpenDelayMs < float(GraceMs),
-          "a pooled finish widened the §4.1 grace window by " &
-          formatFloat(pooled.maxOpenDelayMs, ffDecimal, 1) & " ms, which is " &
-          "at least one whole grace window (" & $GraceMs & " ms). A monitor " &
-          "that opens its window that late grades a descendant that died in " &
-          "the interval mcComplete where the reference grades it " &
-          "mcIncomplete (DH-4 item 2)."
-        checkOrEcho pooled.maxOpenDelayMs * 2.0 < serial.maxOpenDelayMs,
-          "the pooled arm's worst grace-window delay (" &
-          formatFloat(pooled.maxOpenDelayMs, ffDecimal, 1) & " ms) is not " &
-          "materially better than the one-worker arm's (" &
-          formatFloat(serial.maxOpenDelayMs, ffDecimal, 1) & " ms), so the " &
-          "finishes are not actually running concurrently"
+      # THE PROPERTY. With a worker per monitor the pool must not delay the
+      # window's opening by even one grace window — i.e. no monitor's
+      # evidence can drift toward mcComplete by as much as a single §4.1
+      # interval because of where the work ran.
+      checkOrEcho pooled.maxOpenDelayMs < float(GraceMs),
+        "a pooled finish widened the §4.1 grace window by " &
+        formatFloat(pooled.maxOpenDelayMs, ffDecimal, 1) & " ms, which is " &
+        "at least one whole grace window (" & $GraceMs & " ms). A monitor " &
+        "that opens its window that late grades a descendant that died in " &
+        "the interval mcComplete where the reference grades it " &
+        "mcIncomplete (DH-4 item 2)."
+      checkOrEcho pooled.maxOpenDelayMs * 2.0 < serial.maxOpenDelayMs,
+        "the pooled arm's worst grace-window delay (" &
+        formatFloat(pooled.maxOpenDelayMs, ffDecimal, 1) & " ms) is not " &
+        "materially better than the one-worker arm's (" &
+        formatFloat(serial.maxOpenDelayMs, ffDecimal, 1) & " ms), so the " &
+        "finishes are not actually running concurrently"
 
       # AND THE HANDOFF ITSELF COSTS NOTHING. ``openDelayNs`` includes the
       # rest of the settle pass; ``queueDelayNs`` is submit-to-worker alone,
