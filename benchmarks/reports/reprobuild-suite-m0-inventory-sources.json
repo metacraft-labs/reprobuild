@@ -1637,10 +1637,10 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 23,
-      "integration": 1563,
+      "integration": 1564,
       "platform/destructive": 182,
       "pure unit": 770,
-      "unclassified": 344
+      "unclassified": 343
     },
     "graphOwnedTestArtifacts": [
       {
@@ -13518,8 +13518,8 @@
     },
     {
       "binary": "build/test-bin/t_daemon_carried_environment",
-      "class": "unclassified",
-      "classificationReason": "mutates the process environment",
+      "class": "integration",
+      "classificationReason": "subprocess or repro CLI invocation in test body",
       "defines": [],
       "language": "nim",
       "localDependencyShape": [
@@ -13530,7 +13530,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_cli_support/tests/t_daemon_carried_environment.nim",
       "sourceSuiteCount": 2,
-      "staticCaseCount": 15,
+      "staticCaseCount": 16,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

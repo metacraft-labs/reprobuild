@@ -1,4 +1,4 @@
-import std/[options, os, sequtils, strutils, unittest]
+import std/[options, os, osproc, sequtils, strutils, unittest]
 
 import repro_cli_support
 import repro_daemon_core/protocol
@@ -397,3 +397,47 @@ suite "daemon request environment authority":
         @[Key & "=!include /job/nix-access-tokens.conf"])
       check getEnv(Key) == "!include /job/nix-access-tokens.conf"
       restoreDaemonRequestEnvironment(carried)
+
+  test "the caller's compiler toolchain governs a hosted build, not the daemon's":
+    # The cc-wrapper's inputs decide what an action compiles:
+    # `NIX_HARDENING_ENABLE` containing `fortify` makes it add `-O2` and
+    # `_FORTIFY_SOURCE`, and it reads that only for the roles a stdenv shell
+    # activated (`NIX_CC_WRAPPER_TARGET_HOST_<triple>`). A daemon forked from a
+    # `nix develop` shell must not compile a later plain-shell caller's code
+    # with that shell's settings: `--daemon=off` from the caller's shell would
+    # not, and the hosted build must be equivalent to it.
+    const Hardening = "NIX_HARDENING_ENABLE"
+    const Role = "NIX_CC_WRAPPER_TARGET_HOST_x86_64_unknown_linux_gnu"
+    let current = @[Hardening & "=fortify fortify3 pic", Role & "=1",
+      "NIX_CFLAGS_COMPILE=-isystem /daemon-shell/include",
+      "PATH=/daemon-path", "SOME_PROJECT_SETTING=daemon"]
+    let unsets = daemonWorkerEnvUnsets(@["PATH=/client-path"], current)
+    check Hardening in unsets
+    check Role in unsets
+    check "NIX_CFLAGS_COMPILE" in unsets
+    # Control: the rule is the toolchain set, not the whole environment.
+    check "SOME_PROJECT_SETTING" notin unsets
+    check "PATH" notin unsets
+    # A caller in a dev shell carries its own values; the overlay installs them.
+    check Hardening notin daemonWorkerEnvUnsets(
+      @[Hardening & "=pic", Role & "=1"], current)
+    check Role notin daemonWorkerEnvUnsets(
+      @[Hardening & "=pic", Role & "=1"], current)
+    withEnv({Hardening: "fortify fortify3 pic", Role: "1"}):
+      let saved = applyDaemonRequestEnvironment(@["PATH=" & getEnv("PATH")])
+      check not existsEnv(Hardening)
+      check not existsEnv(Role)
+      # What an action spawned now inherits: neither variable.
+      let seen = execCmdEx("sh -c 'echo ${" & Hardening & "-unset}:${" &
+        Role & "-unset}'")
+      check seen.exitCode == 0
+      check seen.output.strip == "unset:unset"
+      restoreDaemonRequestEnvironment(saved)
+      check getEnv(Hardening) == "fortify fortify3 pic"
+      check getEnv(Role) == "1"
+      let carried = applyDaemonRequestEnvironment(
+        @["PATH=" & getEnv("PATH"), Hardening & "=pic"])
+      check getEnv(Hardening) == "pic"
+      check not existsEnv(Role)
+      restoreDaemonRequestEnvironment(carried)
+      check getEnv(Hardening) == "fortify fortify3 pic"
