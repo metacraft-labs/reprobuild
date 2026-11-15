@@ -214,8 +214,8 @@ credgen1 credgen2 creddir credonly credprofile credsecret credsvc credunit
 csince ctokens1 ctokens2 ctokensput cuids1 cuids2 cuntil extractfilename put1
 put2 q secretafter secretbefore token1 token2 unitfilesafter unitfilesbefore
 unitfilescmd
-find managerduring max min needreload0 since2 until2 tp tplprofile tplunit tpout uida uidb tpljudged injudged l tplobserve tpljudgedok after4
-!= $ % %* & + .. ..< / == > @ Amdropindir Amstate Closurefixture Guest
+find managerduring max min needreload0 since2 until2 tp tplprofile tplunit tpout uida uidb tpljudged injudged l tplobserve tpljudgedok after4 after5 replace t0 t1 t1ok t1state t2 t2notfailed t2out t2state t3 t3ok t3state trigagitate trigcalm trigcheck trigprofile trigwaiver
+!= >= $ % %* & + .. ..< / == > @ Amdropindir Amstate Closurefixture Guest
 Mutationstop Vwstate ^ a a0am a0vw ad add address admintoken adopted
 adoptresource after after2 all amaddress ambind amclosure and
 applyprofile aptclosurefixture b back bool boot bootstrapaddon
@@ -401,7 +401,7 @@ suite "gate source":
   SourceStart = "## Gate ``e2e_addon_adopt_hand_configured_service``"
     ## How the file begins.
   GateDigest =
-    "bb9a966ab0bcd82b4983e8a4b6b3edc2bf432b78f7f52e0e10aec2068c7838f2"
+    "5a7e38cc65555975eff6d2110e16d5203a17b0973dd897617e83124aa638f87e"
     ## ``codeDigest`` of the gate as reviewed. The structural checks above
     ## are each a freeze of one part of the gate, and seven reviews of
     ## 2026-11-12 each found a part left open: a helper of the gate that

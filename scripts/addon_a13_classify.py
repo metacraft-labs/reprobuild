@@ -258,6 +258,13 @@ EXPECT.update({
     # §13 decision 137: the planner without the trigger edges. Not run
     # with REPRO_A13_STOP_AT_RED: both the socket-first and the timer-first
     # case must be seen red, and the apply's refusal comes earlier.
+    # §13 decision 151: neither the full apply nor the add-on switch stops
+    # or holds the triggers of held units. Neither stops at its first red
+    # step in the conversion gate (both apply steps carry evidence).
+    "muttrigconv": ("e2e_addon_to_reproos_conversion_keeps_state", "red",
+                    "engine build triggers-left-running"),
+    "muttrigadopt": ("e2e_addon_adopt_hand_configured_service", "red",
+                     "add-on build triggers-left-running"),
     "mutnoedges": ("e2e_addon_to_reproos_conversion_keeps_state", "red",
                    "engine build trigger-edges-omitted"),
 })
@@ -265,6 +272,8 @@ TARGET.update({
     "mutliveset": "a switch that changes only a service's credential judges it",
     "mutcallsite": "a switch that changes only a service's credential judges it",
     "mutnoedges": "decision 137, timer first:",
+    "muttrigconv": "decision 151, full apply (first realisation):",
+    "muttrigadopt": "decision 151, add-on switch: a socket with connections",
 })
 
 ROUND4_PROBES = ["account", "timer", "pathfloored", "path", "host"]
@@ -339,6 +348,17 @@ def on_target_rec(kind, rec):
                     e.get("journalNotLoaded") is True and
                     e.get("refusedNotLoaded") is True)
         return red_both and refused("socket") and refused("timer")
+    if kind == "muttrigconv":
+        # Red because each trigger fired at its held service until its rate
+        # limit failed it, during the first realisation.
+        first = rec.get("decision151", {}).get("firstApply", {})
+        return (on_target(kind, steps) and
+                all(limit_hit(first.get(l, {}).get("trigger", ""))
+                    for l in ("socket", "path")))
+    if kind == "muttrigadopt":
+        st = rec.get("decision151AddOn", {}).get("pass", {}).get("state", [])
+        return (on_target(kind, steps) and len(st) >= 2 and
+                limit_hit(st[0]) and limit_hit(st[1]))
     if kind in ("mutliveset", "mutcallsite"):
         # The credentials-only switch changed the probe's materialised
         # credential and wrote none of its unit files (``credentialsOnly``),
@@ -361,6 +381,7 @@ def on_target_rec(kind, rec):
         return (on_target(kind, steps) and
                 ok_step("generation C's definition is loaded by the drivers' reloads") and
                 ok_step("the floored service did not start in the window") and
+                d.get("startedBefore") is not None and
                 d.get("startedInWindow") not in (None, d.get("startedBefore")))
     if kind == "muttplconv":
         # The template was refused for being read by name, and its instances
@@ -402,8 +423,11 @@ def on_target_rec(kind, rec):
         d = rec.get("decision79", {})
         other = "socket" if kind == "mutreissuetgt" else "target"
         mine = "target" if kind == "mutreissuetgt" else "socket"
+        # Its own half must be recorded, and recorded as not run (A13 review
+        # round 9): a record without it says nothing about that service.
+        own = d.get(mine)
         return (on_target(kind, steps) and d.get(other, {}).get("ran") is True and
-                d.get(mine, {}).get("ran") is not True)
+                isinstance(own, dict) and own.get("ran") is False)
     if kind == "conv":
         # Every probe of every round judged and refused for its reason, the
         # round-4 host control let in and shown to run, and both decision-79
@@ -421,7 +445,9 @@ def on_target_rec(kind, rec):
                 rec.get("decision135Converted", {}).get("judgedTemplate") is True and
                 all(rec.get("decision137", {}).get(l, {}).get("ran") is True and
                     rec.get("decision137", {}).get(l, {}).get("refusedNotLoaded") is False
-                    for l in ("socket", "timer")))
+                    for l in ("socket", "timer")) and
+                triggers_up(rec.get("decision151", {})) and
+                held_requirer(rec.get("decision153", {})))
     if kind == "mutreceipt":
         # At receipt-before-dir-fsync the receipt on the disk is empty (the
         # rename committed, the data not); before the rename the old receipt
@@ -440,6 +466,35 @@ def on_target_rec(kind, rec):
                 any("waits for the restore (held at its seam)" in st["step"]
                     and st["ok"] for st in steps))
     return on_target(kind, steps)
+
+
+def limit_hit(state):
+    """Whether a trigger's ``systemctl show -p ActiveState -p Result`` is
+    failed by its trigger rate limit."""
+    return "ActiveState=failed" in state and "Result=trigger-limit-hit" in state
+
+
+def triggers_up(d151):
+    """§13 decision 151 in a conversion record: after the first realisation
+    and after the next generation's apply, the socket and the path unit are
+    active and their services ran."""
+    for apply in ("firstApply", "nextApply"):
+        a = d151.get(apply)
+        if not isinstance(a, dict):
+            return False
+        for l in ("socket", "path"):
+            e = a.get(l, {})
+            if e.get("triggerActive") is not True or e.get("ran") is not True:
+                return False
+    return True
+
+
+def held_requirer(d153):
+    """§13 decision 153 in a conversion record: the unit that requires a
+    refused unit stayed held, never started, and the apply said why."""
+    return (isinstance(d153, dict) and d153.get("exit", 0) != 0 and
+            d153.get("reported") is True and d153.get("heldInEtc") is True and
+            d153.get("started") is False)
 
 
 def on_target(kind, steps):
@@ -666,6 +721,16 @@ def green_incomplete(kind, rec):
                 d135.get("judgedTemplate") is not True):
             return ("decision135AddOn %r, expected the template judged and its "
                     "instances run" % d135)
+        # §13 decision 151: the triggers held through a passing switch are up
+        # after it; a refused switch leaves neither failed; the next switch
+        # brings both back.
+        d151 = rec.get("decision151AddOn")
+        if (not isinstance(d151, dict) or
+                d151.get("pass", {}).get("ok") is not True or
+                d151.get("refused", {}).get("notFailed") is not True or
+                d151.get("refused", {}).get("refusedForReason") is not True or
+                d151.get("recovered", {}).get("ok") is not True):
+            return "decision151AddOn %r, expected the triggers up after each switch" % d151
         lc = rec.get("liveCrossCheck")
         if not isinstance(lc, dict):
             return "liveCrossCheck not recorded"
