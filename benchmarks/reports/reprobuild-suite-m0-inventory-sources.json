@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 35,
-    "nimTestBinaries": 2808,
+    "nimTestBinaries": 2809,
     "pureUnitConsolidationGroups": 82,
     "pureUnitTests": 766,
     "staticallyDetectedRuntimeCompilerFlowTests": 141,
-    "testEntries": 2854
+    "testEntries": 2855
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1620,7 +1620,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 23,
-      "integration": 1548,
+      "integration": 1549,
       "platform/destructive": 179,
       "pure unit": 766,
       "unclassified": 338
@@ -1837,9 +1837,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2808,
+    "nimTestBinaryCount": 2809,
     "pythonTestFileCount": 46,
-    "testEntryCount": 2854
+    "testEntryCount": 2855
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -9890,7 +9890,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_addon/tests/t_addon_review_round8.nim",
       "sourceSuiteCount": 5,
-      "staticCaseCount": 26,
+      "staticCaseCount": 30,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -12242,7 +12242,7 @@
       "requiresReproBinary": true,
       "source": "libs/repro_build_engine/tests/t_transient_probed_with_trailing_separator.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 4,
+      "staticCaseCount": 5,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -18846,7 +18846,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_infra/tests/t_smoke_repro_infra.nim",
       "sourceSuiteCount": 30,
-      "staticCaseCount": 211,
+      "staticCaseCount": 222,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -50150,6 +50150,25 @@
       "source": "tests/integration/t_runquota_bypass_is_reported_in_build_header_and_report.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 6,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_runquota_close_refusal_names_the_leaked_lease",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_core",
+        "repro_runquota",
+        "repro_test_support"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": false,
+      "source": "tests/integration/t_runquota_close_refusal_names_the_leaked_lease.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

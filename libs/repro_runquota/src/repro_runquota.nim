@@ -2014,12 +2014,24 @@ proc recordRunQuotaExtensionRow*(session: ReproRunQuotaSession;
   except CatchableError:
     discard
 
+proc runQuotaSessionLeases*(session: ReproRunQuotaSession): seq[string]
+
 proc close*(session: ReproRunQuotaSession) =
   if session.isNil:
     return
   try:
     if session.active and session.session.active:
-      session.session.closeSession()
+      try:
+        session.session.closeSession()
+      except CatchableError as err:
+        # The refusal names no lease. Ask the daemon while the connection is
+        # still open (the ``finally`` below tears it down), and say which
+        # lease and action it is refusing over.
+        let leftover = runQuotaSessionLeases(session)
+        if leftover.len == 0:
+          raise
+        raise newException(ReproRunQuotaError,
+          err.msg & " (unreleased: " & leftover.join("; ") & ")")
   finally:
     session.client.close()
     session.active = false
@@ -2530,6 +2542,41 @@ proc runQuotaLeaseHolders*(session: ReproRunQuotaSession): seq[string] =
   try:
     result = summarizeRunQuotaLeaseHolders(
       session.client.inspectionJson("leases"))
+  except CatchableError:
+    result = @[]
+
+proc summarizeSessionLeases*(leasesJson: string; sessionId: uint64): seq[string] =
+  ## One line per lease of ``sessionId`` that is not finished, in ANY state
+  ## (queued included): exactly the set the daemon's ``CloseSession`` refuses
+  ## on ("session still owns leases"). Names the lease id, its label (the
+  ## action) and its state, so a refused close says which lease leaked and
+  ## which action held it. Pure; malformed input yields no lines.
+  try:
+    let doc = parseJson(leasesJson)
+    if doc.kind != JObject or not doc.hasKey("leases") or
+        doc["leases"].kind != JArray:
+      return
+    for lease in doc["leases"]:
+      if lease.kind != JObject or
+          uint64(lease{"session_id"}.getBiggestInt()) != sessionId:
+        continue
+      let state = lease{"state"}.getStr()
+      if state == "finished":
+        continue
+      result.add("lease " & $lease{"id"}.getBiggestInt() & " \"" &
+        lease{"label"}.getStr() & "\" state=" & state &
+        " child=" & $lease{"child_process_id"}.getBiggestInt())
+  except CatchableError:
+    result = @[]
+
+proc runQuotaSessionLeases*(session: ReproRunQuotaSession): seq[string] =
+  ## The leases the daemon still counts against ``session``'s close. Best
+  ## effort: empty on any failure, since it only enriches a failure report.
+  if session.isNil or not session.active:
+    return
+  try:
+    result = summarizeSessionLeases(session.client.inspectionJson("leases"),
+      session.session.id.value)
   except CatchableError:
     result = @[]
 

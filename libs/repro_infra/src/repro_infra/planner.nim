@@ -29,6 +29,7 @@ import ./errors
 import ./plan_envelope
 import ./profile
 import ./state_dir
+from ./start_holds import templateOf
 
 const PlannerMutation {.strdefine: "reproAddonMutation".} = ""
   ## A falsifying build (``repro_addon/mutations``); never a product build.
@@ -527,27 +528,17 @@ proc findResourceIndex(profile: SystemProfile;
       return i
   return -1
 
-proc triggeredUnitName(triggerName, content: string): string =
-  ## The unit a `.socket` / `.timer` / `.path` unit triggers: the
-  ## `Service=` (socket) or `Unit=` (timer, path) setting of its own
-  ## section, else the same-basename `.service` (systemd.socket(5),
-  ## systemd.timer(5), systemd.path(5)). "" when `triggerName` is not a
-  ## trigger unit.
-  let (section, key) =
-    if triggerName.endsWith(".socket"): ("Socket", "Service")
-    elif triggerName.endsWith(".timer"): ("Timer", "Unit")
-    elif triggerName.endsWith(".path"): ("Path", "Unit")
-    else: return ""
-  var inSection = false
-  for raw in content.splitLines:
-    let line = raw.strip
-    if line.len > 1 and line[0] == '[' and line[^1] == ']':
-      inSection = line[1 ..< line.high] == section
-    elif inSection and line.startsWith(key & "="):
-      # the last assignment wins; an empty one resets to the default
-      result = line[key.len + 1 .. ^1].strip
-  if result.len == 0:
-    result = triggerName[0 ..< triggerName.rfind('.')] & ".service"
+proc triggeredUnitIndex(profile: SystemProfile; target: string): int =
+  ## The ``systemd.systemUnit`` systemd loads for the triggered unit
+  ## ``target``: the profile's unit of that name, else -- ``target`` an
+  ## instance ``foo@x.service`` -- the profile's template ``foo@.service``
+  ## (systemd.unit(5): an instance without a file of its own is loaded from
+  ## its template). -1 when the profile defines neither.
+  result = findResourceIndex(profile, $srkSystemdSystemUnit, target)
+  if result < 0:
+    let tmpl = templateOf(target)
+    if tmpl.len > 0:
+      result = findResourceIndex(profile, $srkSystemdSystemUnit, tmpl)
 
 proc triggerContent(r: SystemResource): (string, string) =
   case r.kind
@@ -557,15 +548,18 @@ proc triggerContent(r: SystemResource): (string, string) =
 
 proc triggerTargets*(profile: SystemProfile):
     seq[tuple[trigger, target: string]] =
-  ## Every socket, timer and path unit of the profile with the unit it
-  ## triggers, read as the trigger edges read it (``triggeredUnitName``):
-  ## the full apply holds these triggers with the unit they trigger (§13
-  ## decision 151), before either is written.
+  ## Every socket, timer and path unit of the profile with each unit it
+  ## triggers, read as the trigger edges read it (``profile.triggeredUnits``
+  ## over the unit's file and the profile's drop-ins onto it): the full
+  ## apply holds these triggers with the unit they trigger (§13 decision
+  ## 151), before either is written. A target only the host can resolve
+  ## (a host specifier) is left out.
   for r in profile.resources:
     let (name, content) = triggerContent(r)
     if name.len == 0: continue
-    let target = triggeredUnitName(name, content)
-    if target.len > 0: result.add((trigger: name, target: target))
+    for target in triggeredUnits(name, @[content] &
+                                       profileDropInsOf(profile, name)):
+      if target.len > 0: result.add((trigger: name, target: target))
 
 proc buildDependencyGraph*(profile: SystemProfile): DependencyGraph =
   ## Resolve every explicit `depends_on` entry + every implicit
@@ -631,30 +625,36 @@ proc buildDependencyGraph*(profile: SystemProfile): DependencyGraph =
       break
     let (tName, tContent) = triggerContent(profile.resources[triggerIdx])
     if tName.len == 0: continue
-    let target = triggeredUnitName(tName, tContent)
-    if target.len == 0: continue
-    let targetIdx = findResourceIndex(profile,
-                                      $srkSystemdSystemUnit, target)
-    if targetIdx < 0 or targetIdx == triggerIdx: continue
-    # The profile already orders the other way, directly or through
-    # other resources (the triggered unit depends_on the trigger): honour
-    # it rather than manufacture a cycle out of a valid profile. A path
-    # trigger -> ... -> target in the edges so far means exactly that.
-    var seen = newSeq[bool](profile.resources.len)
-    var stack = @[triggerIdx]
-    seen[triggerIdx] = true
-    var reverse = false
-    while stack.len > 0 and not reverse:
-      let n = stack.pop()
-      for e in result.edges:
-        if e.fromIdx == n and not seen[e.toIdx]:
-          if e.toIdx == targetIdx:
-            reverse = true
-            break
-          seen[e.toIdx] = true
-          stack.add e.toIdx
-    if not reverse:
-      record(result, targetIdx, triggerIdx, edkImplicit)
+    # The trigger read as systemd reads it -- its file, then the profile's
+    # drop-ins onto it, with systemd's line grammar, blanks around `=`,
+    # `Accept=yes`'s template (`profile.triggeredUnits`; reprobuild-pm
+    # issue 2026-11-15-planner-trigger-edges-miss-a-spaced-service-key-
+    # accept-yes-and-a-template-instance).
+    for target in triggeredUnits(tName, @[tContent] &
+                                        profileDropInsOf(profile, tName)):
+      if target.len == 0: continue
+      let targetIdx = triggeredUnitIndex(profile, target)
+      if targetIdx < 0 or targetIdx == triggerIdx: continue
+      # The profile already orders the other way, directly or through
+      # other resources (the triggered unit depends_on the trigger):
+      # honour it rather than manufacture a cycle out of a valid profile.
+      # A path trigger -> ... -> target in the edges so far means exactly
+      # that.
+      var seen = newSeq[bool](profile.resources.len)
+      var stack = @[triggerIdx]
+      seen[triggerIdx] = true
+      var reverse = false
+      while stack.len > 0 and not reverse:
+        let n = stack.pop()
+        for e in result.edges:
+          if e.fromIdx == n and not seen[e.toIdx]:
+            if e.toIdx == targetIdx:
+              reverse = true
+              break
+            seen[e.toIdx] = true
+            stack.add e.toIdx
+      if not reverse:
+        record(result, targetIdx, triggerIdx, edkImplicit)
 
 proc topologicallyOrder*(profile: SystemProfile;
                          graph: DependencyGraph): seq[int] =

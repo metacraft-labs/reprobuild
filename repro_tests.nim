@@ -25336,6 +25336,17 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "",
     singleReason: "self-spawn marker getAppFilename"),
   TestSpec(
+    source: "tests/integration/t_runquota_close_refusal_names_the_leaked_lease.nim",
+    binary: "build/test-bin/t_runquota_close_refusal_names_the_leaked_lease",
+    defines: @[],
+    requiresReproBinary: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "",
+    singleReason: "self-spawn marker getAppFilename"),
+  TestSpec(
     source: "tests/integration/t_runquota_daemon_from_another_build_makes_way.nim",
     binary: "build/test-bin/t_runquota_daemon_from_another_build_makes_way",
     defines: @[],

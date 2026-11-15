@@ -1010,6 +1010,15 @@
 ##                                            attestation key and the state
 ##                                            when the discard's completion
 ##                                            could not be written
+## ``resume-without-marker``                  a re-run completes the newest
+##                                            uncompleted intent, marker or
+##                                            not (decision 148)
+## ``marker-not-bound-to-intent``             a discard marker is accepted
+##                                            for an intent it does not bind
+## ``marker-before-sync``                     the discard marker is written
+##                                            before the removal is synced
+## ``marker-signature-unchecked``             an unsigned or forged discard
+##                                            marker is accepted
 ## ``ledger-copy-removed-with-the-rest``      /var/lib/repro is removed in
 ##                                            one recursive removal, so a
 ##                                            part-way failure can take the
@@ -1798,6 +1807,10 @@ const
                           "ship-ok-without-sink-configuration",
                           "sink-config-removed-in-step-4",
                           "ledger-copy-removed-with-the-rest",
+                          "resume-without-marker",
+                          "marker-not-bound-to-intent",
+                          "marker-before-sync",
+                          "marker-signature-unchecked",
                           "state-removed-after-root-failure",
                           "intent-overwrites-existing",
                           "discard-completed-objects-present",
