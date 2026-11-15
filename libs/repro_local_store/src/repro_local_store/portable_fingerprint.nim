@@ -50,6 +50,7 @@ from repro_core/paths import extendedPath
 import ./pattern_scoped_enumeration
 when defined(posix):
   from std/posix import Stat, stat, S_ISREG
+  from std/posix import nil
 
 import blake3
 
@@ -409,10 +410,34 @@ proc publishedDigestHex*(purpose: PublishedDigestPurpose;
 proc fileContentHex*(path: string): string =
   ## The published content digest of a file: BLAKE3-256 of its bytes under
   ## `PublishedDigestDomain` (purpose `content`), streamed. "" when it cannot
-  ## be read.
+  ## be read, and for a FIFO: opening a FIFO for reading waits for a writer
+  ## that may never come, so the open is non-blocking and a FIFO is
+  ## identified as unreadable, the way a socket (which cannot be opened at
+  ## all) always was. The store's recovery hashes trees it did not write
+  ## (``storeTreeDigest``), where a planted FIFO must not hang it.
   var f: File
-  if not open(f, extendedPath(path), fmRead):
-    return ""
+  when defined(posix):
+    let fd = posix.open(extendedPath(path).cstring,
+      posix.O_RDONLY or posix.O_NONBLOCK or posix.O_CLOEXEC)
+    if fd < 0:
+      return ""
+    var st: Stat
+    if posix.fstat(fd, st) != 0 or posix.S_ISFIFO(st.st_mode):
+      discard posix.close(fd)
+      return ""
+    if S_ISREG(st.st_mode):
+      # ``O_NONBLOCK`` has no effect on a regular file's reads.
+      if not open(f, FileHandle(fd), fmRead):
+        discard posix.close(fd)
+        return ""
+    else:
+      # A device keeps its blocking reads, as before.
+      discard posix.close(fd)
+      if not open(f, extendedPath(path), fmRead):
+        return ""
+  else:
+    if not open(f, extendedPath(path), fmRead):
+      return ""
   defer: close(f)
   let hasher = publishedDigestHasher(pdpContent)
   defer: hasher.close()

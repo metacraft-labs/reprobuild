@@ -1661,6 +1661,10 @@ proc registerInUnifiedStore*(storeRoot, packageName, version, adapter,
     receiptText[i] = char(b)
   createDir(extendedPath(absoluteRealizedPath))
   writeFile(extendedPath(absoluteRealizedPath / ".repro-receipt"), receiptText)
+  # The adapter renamed the prefix into place itself; make its data and
+  # names durable before the row naming it commits (Local-Content-
+  # Addressed-Store §"Write Protocol" steps 4a and 5a).
+  syncPlacedPrefixDurably(absoluteRealizedPath)
 
   let row = PrefixRow(
     prefixId: prefixId,
