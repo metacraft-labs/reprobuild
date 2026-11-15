@@ -663,6 +663,7 @@ proc runAddonCli*(args: seq[string]): int =
       stdout.write(discardReport(r))
       for p in r.removed: stdout.write("removed " & p & "\n")
       for d in r.drift: stdout.write("left in place (drift): " & d & "\n")
+      for n in r.notes: stdout.write("note: " & n & "\n")
       for k in r.keptEvidence:
         stdout.write("kept with the store (store evidence left aside): " &
                      k & "\n")
