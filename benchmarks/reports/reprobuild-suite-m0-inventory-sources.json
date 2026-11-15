@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 35,
-    "nimTestBinaries": 2813,
+    "nimTestBinaries": 2814,
     "pureUnitConsolidationGroups": 82,
-    "pureUnitTests": 765,
+    "pureUnitTests": 766,
     "staticallyDetectedRuntimeCompilerFlowTests": 141,
-    "testEntries": 2860
+    "testEntries": 2861
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -22,7 +22,7 @@
       "targetOs": "soAny"
     },
     {
-      "count": 5,
+      "count": 6,
       "defines": [],
       "dependencyShape": [
         "repro_addon",
@@ -31,6 +31,7 @@
       "owner": "libs/repro_addon",
       "sources": [
         "libs/repro_addon/tests/t_addon_agent_repin.nim",
+        "libs/repro_addon/tests/t_addon_floor_boot_ordering_cycle.nim",
         "libs/repro_addon/tests/t_addon_floor_round13.nim",
         "libs/repro_addon/tests/t_addon_floor_round8.nim",
         "libs/repro_addon/tests/t_addon_retargeted_address_is_refused.nim",
@@ -1621,7 +1622,7 @@
       "graph-fixture": 23,
       "integration": 1551,
       "platform/destructive": 180,
-      "pure unit": 765,
+      "pure unit": 766,
       "unclassified": 341
     },
     "graphOwnedTestArtifacts": [
@@ -1836,9 +1837,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2813,
+    "nimTestBinaryCount": 2814,
     "pythonTestFileCount": 47,
-    "testEntryCount": 2860
+    "testEntryCount": 2861
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -9236,6 +9237,24 @@
       "source": "libs/repro_addon/tests/t_addon_fingerprint.nim",
       "sourceSuiteCount": 3,
       "staticCaseCount": 16,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_addon_floor_boot_ordering_cycle",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_addon",
+        "repro_infra"
+      ],
+      "owner": "libs/repro_addon",
+      "requiresReproBinary": false,
+      "source": "libs/repro_addon/tests/t_addon_floor_boot_ordering_cycle.nim",
+      "sourceSuiteCount": 5,
+      "staticCaseCount": 19,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

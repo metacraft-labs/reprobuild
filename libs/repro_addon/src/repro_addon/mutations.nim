@@ -1545,6 +1545,12 @@ const
                           # re-assertion, so a reboot before recovery
                           # starts it with no hold.
                           "floored-not-after-reassert",
+                          # a floored unit ordered before the boot
+                          # re-assertion (or a unit it waits for) is
+                          # accepted in both halves: an ordering cycle at
+                          # every boot (spec §10.1, "A floored unit's own
+                          # ordering").
+                          "boot-ordering-cycles-allowed",
                           # decision 141's bound counts from the main
                           # process's start (ExecMainStartTimestamp).
                           "recreated-bound-from-main-start",
