@@ -1402,6 +1402,7 @@ tests/e2e/hcr-linux-threads/t_integration_hcr_linux_on_stack_function_reported_s
 tests/e2e/hcr-linux-threads/t_integration_hcr_linux_quiescence_timeout_aborts_without_writing.nim	nim	2
 tests/e2e/hcr-linux-threads/t_integration_hcr_linux_signal_blocked_thread_refused_by_name.nim	nim	3
 tests/e2e/hcr-linux-threads/t_integration_hcr_linux_stack_mapping_changes_do_not_fault.nim	nim	1
+tests/e2e/hcr-linux-txn/t_integration_hcr_linux_commit_failure_after_repatch_keeps_previous_generation.nim	nim	4
 tests/e2e/hcr-linux-txn/t_integration_hcr_linux_commit_failure_rolls_back_published_sites.nim	nim	4
 tests/e2e/hcr-linux-txn/t_integration_hcr_linux_prepare_failure_leaves_process_byte_identical.nim	nim	3
 tests/e2e/hcr-linux-txn/t_integration_hcr_linux_repeated_patch_of_same_function.nim	nim	4
@@ -2466,6 +2467,7 @@ tests/integration/t_unavailable_package_does_not_fall_through_to_path.nim	nim	1
 tests/integration/t_unavailable_package_fails_with_platform_reason.nim	nim	1
 tests/integration/t_undeclared_role_is_a_usage_error_before_any_fetch.nim	nim	1
 tests/integration/t_unknown_project_error_names_the_verb_invoked.nim	nim	1
+tests/integration/t_unobserved_consumer_key_follows_producer_channel_content.nim	nim	1
 tests/integration/t_unpinned_manifest_is_not_plain_accepted.nim	nim	9
 tests/integration/t_unpublished_evidence_names_the_search_that_ran.nim	nim	1
 tests/integration/t_unrouted_private_repo_refuses_loudly.nim	nim	1
@@ -2663,6 +2665,7 @@ tests/unit/t_install_mirror_relocation.nim	nim	30
 tests/unit/t_install_mirror_shell_tools.nim	nim	2
 tests/unit/t_install_mirror_tool_metadata.nim	nim	8
 tests/unit/t_interrupted_fast_forward_inspection.nim	nim	16
+tests/unit/t_lease_records_are_concurrency_safe.nim	nim	6
 tests/unit/t_libclang_package.nim	nim	2
 tests/unit/t_library_stage_alias.nim	nim	4
 tests/unit/t_local_file_cannot_declare_policy.nim	nim	1
@@ -2828,7 +2831,7 @@ tests/unit/t_windows_system_hash_mode.nim	nim	2
 tests/unit/t_workspace_root_for_repo_managed_worktree.nim	nim	1
 tests/unit/t_workspace_settings_v1_decode.nim	nim	3
 tests/unit/t_workspace_sync_summary_counts_an_unknown_status.nim	nim	4
-tests/unit/test_addon_a13_classify.py	python	56
+tests/unit/test_addon_a13_classify.py	python	58
 tests/unit/test_attestation_collateral_monitor_landing.py	python	6
 tests/unit/test_bootstrap_dry_run_outputs.py	python	2
 tests/unit/test_build_report_attribution.py	python	20
