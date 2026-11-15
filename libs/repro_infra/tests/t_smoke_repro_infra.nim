@@ -2397,6 +2397,66 @@ ExecStart=/bin/true
     check (4, 0) in pairs        # late.service (drop-in "zz") -> o.socket
     check (3, 0) notin pairs     # not early.service (drop-in "aa")
 
+  test "a drop-in is masked by one of the same file name in a more specific directory":
+    # conf_files_list_strv (src/basic/conf-files.c) keeps one file per
+    # file name: web-a.socket.d/50-repro-svc.conf overrides
+    # web-.socket.d/50-repro-svc.conf (src/shared/dropin.c lists the unit's
+    # own directory before its dashed prefix's), so the generic drop-in,
+    # declared last, is not read at all.
+    let profile = parseSystemProfile("""
+systemd.systemUnit { name = "web-a.socket" content = "[Socket]
+ListenStream=/run/web-a
+" }
+systemd.systemDropIn { unit = "web-a.socket" name = "svc" content = "[Socket]
+Service=specific.service
+" }
+systemd.systemDropIn { unit = "web-.socket" name = "svc" content = "[Socket]
+Service=generic.service
+" }
+systemd.systemUnit { name = "specific.service" content = "[Service]
+ExecStart=/bin/true
+" }
+systemd.systemUnit { name = "generic.service" content = "[Service]
+ExecStart=/bin/true
+" }
+""")
+    var pairs: seq[(int, int)]
+    for e in buildDependencyGraph(profile).edges: pairs.add((e.fromIdx, e.toIdx))
+    check (3, 0) in pairs        # specific.service -> web-a.socket
+    check (4, 0) notin pairs     # the masked generic drop-in is not read
+
+  test "an instance reads the drop-ins of its dashed prefix with the instance kept":
+    # unit_file_find_dirs (src/shared/dropin.c) builds the prefix unit with
+    # the instance: for w-a@x.timer it reads w-@x.timer.d/ too.
+    let profile = parseSystemProfile("""
+systemd.systemTimer { name = "w-a@x.timer" content = "[Timer]
+OnCalendar=daily
+" }
+systemd.systemDropIn { unit = "w-@x.timer" name = "u" content = "[Timer]
+Unit=real.service
+" }
+systemd.systemUnit { name = "real.service" content = "[Service]
+ExecStart=/bin/true
+" }
+""")
+    var pairs: seq[(int, int)]
+    for e in buildDependencyGraph(profile).edges: pairs.add((e.fromIdx, e.toIdx))
+    check (2, 0) in pairs        # real.service -> w-a@x.timer
+
+  test "a trigger target behind a host-only specifier adds no edge":
+    # %H (the host name) is the host's, not the profile's: the target is
+    # unknown, so neither it nor the namesake is assumed.
+    let profile = parseSystemProfile("""
+systemd.systemUnit { name = "h.socket" content = "[Socket]
+ListenStream=/run/h
+Service=%H.service
+" }
+systemd.systemUnit { name = "h.service" content = "[Service]
+ExecStart=/bin/true
+" }
+""")
+    check buildDependencyGraph(profile).edges.len == 0
+
   test "a socket whose service depends_on it is not made cyclic":
     let profile = parseSystemProfile("""
 systemd.systemUnit { name = "x.socket" content = "[Socket]

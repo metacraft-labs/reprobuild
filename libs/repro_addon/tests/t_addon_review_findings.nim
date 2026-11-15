@@ -84,10 +84,17 @@ import repro_addon/store_custody
 import repro_addon/store_root
 import repro_addon/tick_evidence
 
+import repro_test_support/reasoned_skip
+
 import ./addon_evidence_fixture
 import ../../../tests/e2e/addon/deb_fixture_support
 
-let root = getTempDir() / ("addon-review-" & $getCurrentProcessId())
+# The scratch root is the PHYSICAL temporary directory. The add-on's no-follow
+# writer refuses a symlinked ancestor (right on a host, where ``/tmp`` is a
+# directory), and on macOS every temporary directory is reached through the
+# ``/tmp`` -> ``/private/tmp`` symlink, so the logical ``getTempDir()`` would
+# make the suite fail for a reason that is no finding's subject.
+let root = expandFilename(getTempDir()) / ("addon-review-" & $getCurrentProcessId())
 removeDir(root)
 createDir(root)
 
@@ -146,44 +153,51 @@ suite "the A11 code review's findings":
       statePath: state)
 
   test "1: an altered closure member, its union intact, is rebuilt":
-    let site = scratchSite("wedge")
-    let store = site.storeRoot
-    let cache = root / "wedge" / "cache"
-    let deb = root / "wedge.deb"
-    writeDeb(deb, @[dir("./"), dir("./usr/"), dir("./usr/share/"),
-      dir("./usr/share/wedge/"),
-      ("./usr/share/wedge/ok.txt", '0', 0o644, "wedge\n", "")])
-    let lock = fixtureLock("wedge", deb)
-    let union = aptClosurePrefixPath(store, lock)
-    let member = aptDebPrefixPath(store, lock.debs[0])
-    let staged: AptDebFetcher = proc (url, dest: string; size: int64) =
-      copyFile(deb, dest)
-    let none: AptDebFetcher = proc (url, dest: string; size: int64) =
-      raise newException(IOError, "no copy of " & url & " was staged")
-    proc pass(fetch: AptDebFetcher): CustodyResult =
-      custodyPass(site, [
-        StoreObjectRef(path: union, kind: sokAptClosure, referrer: "u"),
-        StoreObjectRef(path: member, kind: sokAptClosure, referrer: "u")],
-        proc (o: StoreObjectRef): Recovery =
-          closureRecovery(o, [lock], site, fetch, store, cache),
-        mayRecover = true)
-    let log = AptRealisationLog()
-    discard realiseAptClosure(lock, store, cache, staged, log = log)
-    for (p, d) in log.published: recordRealised(site, p, d)
-    check pass(none).refusals.len == 0
-    writeFile(member / "usr/share/wedge/planted", "x\n")
-    # No archive staged: refused, the member moved aside -- and then the
-    # fetch stages its archive, the union notwithstanding.
-    check pass(none).refusals.len == 1
-    check not dirExists(member)
-    check dirExists(union)
-    check debNeedsStaging(lock, lock.debs[0], store)
-    # With the archive staged, the next pass rebuilds the member.
-    let r = pass(staged)
-    check r.refusals.len == 0
-    check dirExists(member)
-    check not fileExists(member / "usr/share/wedge/planted")
-    check pass(none).refusals.len == 0
+    # The fixture lock is for amd64 and the add-on refuses a lock for an
+    # architecture the host cannot run (``EAptClosureHost``), in the test
+    # and in the custody recovery alike: the case needs such a host.
+    if not debianArchitectureRunsOn("amd64", hostMachineName()):
+      skip("host is " & hostMachineName() &
+           ": the add-on refuses the amd64 fixture lock here (EAptClosureHost)")
+    else:
+      let site = scratchSite("wedge")
+      let store = site.storeRoot
+      let cache = root / "wedge" / "cache"
+      let deb = root / "wedge.deb"
+      writeDeb(deb, @[dir("./"), dir("./usr/"), dir("./usr/share/"),
+        dir("./usr/share/wedge/"),
+        ("./usr/share/wedge/ok.txt", '0', 0o644, "wedge\n", "")])
+      let lock = fixtureLock("wedge", deb)
+      let union = aptClosurePrefixPath(store, lock)
+      let member = aptDebPrefixPath(store, lock.debs[0])
+      let staged: AptDebFetcher = proc (url, dest: string; size: int64) =
+        copyFile(deb, dest)
+      let none: AptDebFetcher = proc (url, dest: string; size: int64) =
+        raise newException(IOError, "no copy of " & url & " was staged")
+      proc pass(fetch: AptDebFetcher): CustodyResult =
+        custodyPass(site, [
+          StoreObjectRef(path: union, kind: sokAptClosure, referrer: "u"),
+          StoreObjectRef(path: member, kind: sokAptClosure, referrer: "u")],
+          proc (o: StoreObjectRef): Recovery =
+            closureRecovery(o, [lock], site, fetch, store, cache),
+          mayRecover = true)
+      let log = AptRealisationLog()
+      discard realiseAptClosure(lock, store, cache, staged, log = log)
+      for (p, d) in log.published: recordRealised(site, p, d)
+      check pass(none).refusals.len == 0
+      writeFile(member / "usr/share/wedge/planted", "x\n")
+      # No archive staged: refused, the member moved aside -- and then the
+      # fetch stages its archive, the union notwithstanding.
+      check pass(none).refusals.len == 1
+      check not dirExists(member)
+      check dirExists(union)
+      check debNeedsStaging(lock, lock.debs[0], store)
+      # With the archive staged, the next pass rebuilds the member.
+      let r = pass(staged)
+      check r.refusals.len == 0
+      check dirExists(member)
+      check not fileExists(member / "usr/share/wedge/planted")
+      check pass(none).refusals.len == 0
 
   test "2: every path renders the fetch unit the same":
     let exe = "/repro/store/prefixes/repro-addon/1-x/bin/repro"
@@ -419,28 +433,6 @@ suite "the A11 code review's findings":
     check evidenceRecords("store-recovery-interrupted", site.evidence.dir).len == 1
     check not dirExists(asideRoot(site)) or
       toSeq(walkDir(asideRoot(site))).len == 0
-    # Across filesystems (the evidence directory on /dev/shm, a tmpfs; the
-    # store here) the altered object is copied, at most the bound: a larger
-    # one keeps its manifest and record only.
-    var far = site
-    far.evidenceDir = "/dev/shm" / ("a11-review10-" & $getCurrentProcessId())
-    far.evidenceMaxBytes = 64
-    removeDir(far.evidenceDir)
-    defer: removeDir(far.evidenceDir)
-    check statDevice(far.evidenceDir.parentDir) != statDevice(site.storeRoot)
-    let big = site.storeRoot / "prefixes" / "x" / "3-c"
-    createDir(big)
-    writeFile(big / "f", "x".repeat(4096))
-    let bigEntry = fileEvidence(far, moveAside(far, big), big, "e", "o", "big")
-    check fileExists(bigEntry / "manifest") and fileExists(bigEntry / "record")
-    check not dirExists(bigEntry / "tree")
-    check "manifest only" in readFile(bigEntry / "record")
-    let small = site.storeRoot / "prefixes" / "x" / "4-d"
-    createDir(small)
-    writeFile(small / "f", "tiny\n")
-    let smallEntry = fileEvidence(far, moveAside(far, small), small, "e", "o",
-                                  "small")
-    check readFile(smallEntry / "tree" / "f") == "tiny\n"
     # A crash after the entry was filed and the object rebuilt, before its
     # record: the next pass records it, once.
     let obj2 = site.storeRoot / "prefixes" / "x" / "2-b"
@@ -458,6 +450,34 @@ suite "the A11 code review's findings":
     check evidenceRecords("store-recovered", site.evidence.dir).len == 1
     flushUnrecorded(site)
     check evidenceRecords("store-recovered", site.evidence.dir).len == 1
+
+  test "10b: the copy across filesystems is bounded":
+    if not dirExists("/dev/shm"):
+      skip("host has no /dev/shm: the case needs a second filesystem for the evidence directory")
+    else:
+      let site = scratchSite("far10")
+      # Across filesystems (the evidence directory on /dev/shm, a tmpfs; the
+      # store here) the altered object is copied, at most the bound: a larger
+      # one keeps its manifest and record only.
+      var far = site
+      far.evidenceDir = "/dev/shm" / ("a11-review10-" & $getCurrentProcessId())
+      far.evidenceMaxBytes = 64
+      removeDir(far.evidenceDir)
+      defer: removeDir(far.evidenceDir)
+      check statDevice(far.evidenceDir.parentDir) != statDevice(site.storeRoot)
+      let big = site.storeRoot / "prefixes" / "x" / "3-c"
+      createDir(big)
+      writeFile(big / "f", "x".repeat(4096))
+      let bigEntry = fileEvidence(far, moveAside(far, big), big, "e", "o", "big")
+      check fileExists(bigEntry / "manifest") and fileExists(bigEntry / "record")
+      check not dirExists(bigEntry / "tree")
+      check "manifest only" in readFile(bigEntry / "record")
+      let small = site.storeRoot / "prefixes" / "x" / "4-d"
+      createDir(small)
+      writeFile(small / "f", "tiny\n")
+      let smallEntry = fileEvidence(far, moveAside(far, small), small, "e", "o",
+                                    "small")
+      check readFile(smallEntry / "tree" / "f") == "tiny\n"
 
   test "11: the shipping backoff is bounded; the outbox holds only entries":
     check shipBackoffSec(0, 300) == 5
